@@ -48,15 +48,54 @@ namespace {
 [[nodiscard]] bool isZeroLike(const FormExprNode& node)
 {
     if (isScalarZero(node)) return true;
+    if (node.type() == FormExprType::TypedZero) return true;
     if (node.type() == FormExprType::Multiply) {
         const auto kids = node.childrenShared();
         if (kids.size() != 2u || !kids[0] || !kids[1]) return false;
-        return (isScalarZero(*kids[0]) || isScalarZero(*kids[1]));
+        return (isZeroLike(*kids[0]) || isZeroLike(*kids[1]));
     }
     if (node.type() == FormExprType::Negate) {
         const auto kids = node.childrenShared();
         if (kids.size() != 1u || !kids[0]) return false;
         return isZeroLike(*kids[0]);
+    }
+    // Unary shape-preserving ops on zero → zero
+    switch (node.type()) {
+        case FormExprType::Transpose:
+        case FormExprType::SymmetricPart:
+        case FormExprType::SkewPart:
+        case FormExprType::Deviator:
+        case FormExprType::TimeDerivative: {
+            const auto kids = node.childrenShared();
+            if (kids.size() == 1u && kids[0]) return isZeroLike(*kids[0]);
+            break;
+        }
+        default: break;
+    }
+    // Contraction/scalar-producing ops on zero → zero
+    switch (node.type()) {
+        case FormExprType::InnerProduct:
+        case FormExprType::DoubleContraction: {
+            const auto kids = node.childrenShared();
+            if (kids.size() == 2u && kids[0] && kids[1])
+                return isZeroLike(*kids[0]) || isZeroLike(*kids[1]);
+            break;
+        }
+        case FormExprType::Divergence:
+        case FormExprType::Trace:
+        case FormExprType::Norm:
+        case FormExprType::Determinant: {
+            const auto kids = node.childrenShared();
+            if (kids.size() == 1u && kids[0]) return isZeroLike(*kids[0]);
+            break;
+        }
+        default: break;
+    }
+    // Add/Subtract of zeros → zero
+    if (node.type() == FormExprType::Add || node.type() == FormExprType::Subtract) {
+        const auto kids = node.childrenShared();
+        if (kids.size() == 2u && kids[0] && kids[1])
+            return isZeroLike(*kids[0]) && isZeroLike(*kids[1]);
     }
     return false;
 }
@@ -259,16 +298,199 @@ SymbolicDiffResult checkSymbolicDifferentiability(const FormExpr& expr)
     return out;
 }
 
+// ---------------------------------------------------------------------------
+//  extractTermsReferencing — additive sub-term extraction
+// ---------------------------------------------------------------------------
+
+namespace {
+bool subtreeContains(const FormExprNode& node, FormExprType target, std::uint32_t slot,
+                     std::unordered_map<const FormExprNode*, bool>& memo)
+{
+    if (auto it = memo.find(&node); it != memo.end()) return it->second;
+    bool found = false;
+    if (node.type() == target) {
+        const auto s = node.slotIndex();
+        if (s && *s == slot) found = true;
+    }
+    if (!found) {
+        for (const auto* c : node.children()) {
+            if (c && subtreeContains(*c, target, slot, memo)) {
+                found = true;
+                break;
+            }
+        }
+    }
+    memo[&node] = found;
+    return found;
+}
+
+// Recursively split on Add/Subtract and keep only terms matching the target.
+FormExpr extractImpl(const FormExpr& form, FormExprType target, std::uint32_t slot,
+                     std::unordered_map<const FormExprNode*, bool>& memo)
+{
+    if (!form.isValid() || !form.node()) return {};
+    const auto& n = *form.node();
+    const auto ty = n.type();
+
+    if (ty == FormExprType::Add) {
+        const auto kids = n.childrenShared();
+        if (kids.size() == 2u && kids[0] && kids[1]) {
+            auto left  = extractImpl(FormExpr(kids[0]), target, slot, memo);
+            auto right = extractImpl(FormExpr(kids[1]), target, slot, memo);
+            if (left.isValid() && right.isValid()) return left + right;
+            if (left.isValid()) return left;
+            if (right.isValid()) return right;
+            return {};
+        }
+    }
+    if (ty == FormExprType::Subtract) {
+        const auto kids = n.childrenShared();
+        if (kids.size() == 2u && kids[0] && kids[1]) {
+            auto left  = extractImpl(FormExpr(kids[0]), target, slot, memo);
+            auto right = extractImpl(FormExpr(kids[1]), target, slot, memo);
+            if (left.isValid() && right.isValid()) return left - right;
+            if (left.isValid()) return left;
+            if (right.isValid()) return -right;
+            return {};
+        }
+    }
+
+    // Leaf/non-additive node: keep if subtree contains the target.
+    if (subtreeContains(n, target, slot, memo)) {
+        return form;
+    }
+    return {};
+}
+} // anonymous namespace
+
+FormExpr extractTermsReferencing(
+    const FormExpr& form, FormExprType target_type, std::uint32_t target_slot)
+{
+    if (!form.isValid() || !form.node()) return {};
+    std::unordered_map<const FormExprNode*, bool> memo;
+    return extractImpl(form, target_type, target_slot, memo);
+}
+
+// Bottom-up zero-collapse: mark all zero-like subtrees in a single pass,
+// then use transformNodes to replace them with constant(0.0).
+namespace {
+void markZeros(const FormExprNode& node,
+               std::unordered_map<const FormExprNode*, bool>& memo)
+{
+    if (memo.count(&node)) return;
+
+    const auto kids = node.childrenShared();
+
+    // Recurse children first (post-order).
+    for (const auto& k : kids) {
+        if (k) markZeros(*k, memo);
+    }
+
+    auto childZ = [&](std::size_t i) -> bool {
+        if (i >= kids.size() || !kids[i]) return false;
+        auto it = memo.find(kids[i].get());
+        return it != memo.end() && it->second;
+    };
+
+    bool z = false;
+    const auto ty = node.type();
+
+    // Leaf zeros.
+    if (kids.empty()) {
+        z = isScalarZero(node) || ty == FormExprType::TypedZero;
+    }
+    // Binary absorbing.
+    else if (kids.size() == 2u) {
+        const bool z0 = childZ(0), z1 = childZ(1);
+        switch (ty) {
+            case FormExprType::Multiply:
+            case FormExprType::InnerProduct:
+            case FormExprType::DoubleContraction:
+            case FormExprType::OuterProduct:
+            case FormExprType::CrossProduct:
+                z = z0 || z1;
+                break;
+            case FormExprType::Add:
+            case FormExprType::Subtract:
+                z = z0 && z1;
+                break;
+            default: break;
+        }
+    }
+    // Unary propagation.
+    if (!z && kids.size() == 1u && childZ(0)) {
+        switch (ty) {
+            case FormExprType::Negate:
+            case FormExprType::Transpose:
+            case FormExprType::SymmetricPart:
+            case FormExprType::SkewPart:
+            case FormExprType::Deviator:
+            case FormExprType::Normalize:
+            case FormExprType::TimeDerivative:
+            case FormExprType::Divergence:
+            case FormExprType::Trace:
+            case FormExprType::Norm:
+            case FormExprType::Determinant:
+            case FormExprType::AbsoluteValue:
+            case FormExprType::Sqrt:
+            case FormExprType::Gradient:
+            case FormExprType::Curl:
+            case FormExprType::Hessian:
+                z = true;
+                break;
+            default: break;
+        }
+    }
+    // Integrals of zero.
+    if (!z && kids.size() >= 1u && childZ(0)) {
+        switch (ty) {
+            case FormExprType::CellIntegral:
+            case FormExprType::BoundaryIntegral:
+            case FormExprType::InteriorFaceIntegral:
+            case FormExprType::InterfaceIntegral:
+                z = true;
+                break;
+            default: break;
+        }
+    }
+
+    memo[&node] = z;
+}
+} // anonymous namespace
+
+static FormExpr collapseZeros(const FormExpr& expr)
+{
+    if (!expr.isValid() || !expr.node()) return expr;
+
+    // Phase 1: mark all zero-like subtrees.
+    std::unordered_map<const FormExprNode*, bool> memo;
+    markZeros(*expr.node(), memo);
+
+    // Phase 2: replace zero-marked subtrees with constant(0.0).
+    // transformNodes visits pre-order: if we replace a zero subtree at
+    // the top, its children are never visited (pruned).
+    return expr.transformNodes([&](const FormExprNode& n) -> std::optional<FormExpr> {
+        auto it = memo.find(&n);
+        if (it != memo.end() && it->second) {
+            return FormExpr::constant(0.0);
+        }
+        return std::nullopt;
+    });
+}
+
 FormExpr simplify(const FormExpr& expr)
 {
     if (!expr.isValid() || expr.node() == nullptr) {
         return {};
     }
 
-    FormExpr current = expr;
+    // Phase 1: bottom-up zero collapse.  Detects zero-like subtrees and
+    // replaces them with constant(0.0) in a single post-order walk.
+    // This handles the common case where differentiating a large form
+    // w.r.t. a parameter produces 0*(complex_expression) at many branches.
+    FormExpr current = collapseZeros(expr);
 
-    // Fixed-point simplification using pre-order transforms (children are simplified
-    // within each pass; parent-level rewrites become visible on subsequent passes).
+    // Phase 2: fixed-point algebraic simplification.
     constexpr int kMaxPasses = 8;
     for (int pass = 0; pass < kMaxPasses; ++pass) {
         bool changed = false;
@@ -394,12 +616,12 @@ FormExpr simplify(const FormExpr& expr)
             if (n.type() == FormExprType::Multiply) {
                 if (kids.size() != 2u || !kids[0] || !kids[1]) return std::nullopt;
 
-                if (isScalarZero(*kids[0])) {
+                if (isZeroLike(*kids[0])) {
                     changed = true;
                     return isDefinitelyScalarNode(*kids[1]) ? FormExpr::constant(0.0)
                                                             : (FormExpr::constant(0.0) * asExpr(kids[1]));
                 }
-                if (isScalarZero(*kids[1])) {
+                if (isZeroLike(*kids[1])) {
                     changed = true;
                     return isDefinitelyScalarNode(*kids[0]) ? FormExpr::constant(0.0)
                                                             : (FormExpr::constant(0.0) * asExpr(kids[0]));
@@ -471,6 +693,47 @@ FormExpr simplify(const FormExpr& expr)
                     return FormExpr::constant(std::pow(a, b));
                 }
                 return std::nullopt;
+            }
+
+            // ---- Contraction/scalar-producing ops: zero in → zero out ----
+            if (n.type() == FormExprType::InnerProduct ||
+                n.type() == FormExprType::DoubleContraction) {
+                if (kids.size() == 2u && kids[0] && kids[1]) {
+                    if (isZeroLike(*kids[0]) || isZeroLike(*kids[1])) {
+                        changed = true;
+                        return FormExpr::constant(0.0);
+                    }
+                }
+            }
+            if (n.type() == FormExprType::Divergence ||
+                n.type() == FormExprType::Trace ||
+                n.type() == FormExprType::Norm) {
+                if (kids.size() == 1u && kids[0] && isZeroLike(*kids[0])) {
+                    changed = true;
+                    return FormExpr::constant(0.0);
+                }
+            }
+
+            // ---- Integral of zero → zero ----
+            if (n.type() == FormExprType::CellIntegral ||
+                n.type() == FormExprType::BoundaryIntegral ||
+                n.type() == FormExprType::InteriorFaceIntegral ||
+                n.type() == FormExprType::InterfaceIntegral) {
+                if (kids.size() >= 1u && kids[0] && isZeroLike(*kids[0])) {
+                    changed = true;
+                    return FormExpr::constant(0.0);
+                }
+            }
+
+            // ---- Unary shape-preserving on zero → zero ----
+            if (n.type() == FormExprType::Transpose ||
+                n.type() == FormExprType::SymmetricPart ||
+                n.type() == FormExprType::SkewPart ||
+                n.type() == FormExprType::Deviator) {
+                if (kids.size() == 1u && kids[0] && isZeroLike(*kids[0])) {
+                    changed = true;
+                    return FormExpr::constant(0.0) * asExpr(kids[0]);
+                }
             }
 
             if (n.type() == FormExprType::Conditional) {

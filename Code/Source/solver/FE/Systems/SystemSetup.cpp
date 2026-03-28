@@ -3002,6 +3002,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                                            form_chars, sys_chars, &assembler_selection_report_);
     FE_CHECK_NOT_NULL(assembler_.get(), "FESystem::setup: assembler");
     assembler_->setDofHandler(dof_handler_);
+    use_constraints_in_assembly_ = opts.use_constraints_in_assembly;
 
     if (opts.use_constraints_in_assembly) {
         assembler_->setConstraints(&affine_constraints_);

@@ -648,6 +648,47 @@ TEST(NewtonSolver, ReportContainsResidualNormsWhenNotConverged)
     EXPECT_TRUE(rep.linear.converged);
 }
 
+TEST(NewtonSolver, StagnationDoesNotOverrideRequestedTolerances)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeScalarProblem(
+        [](const svmp::FE::forms::FormExpr& u, const svmp::FE::forms::FormExpr& v) {
+            return ((u - svmp::FE::forms::FormExpr::constant(1.0)) * v).dx();
+        },
+        /*dt=*/0.1,
+        /*u0=*/{0.0});
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 3;
+    nopt.abs_tolerance = 1e-12;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.use_line_search = false;
+    nopt.stagnation_tolerance = 0.99;
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    ScalingLinearSolver damped(*problem.linear, /*scale=*/0.01);
+    const auto rep = newton.solveStep(*problem.transient,
+                                      damped,
+                                      /*solve_time=*/problem.history.dt(),
+                                      problem.history,
+                                      ws);
+
+    EXPECT_FALSE(rep.converged);
+    EXPECT_EQ(rep.iterations, nopt.max_iterations);
+    EXPECT_TRUE(std::isfinite(rep.residual_norm));
+    EXPECT_GT(rep.residual_norm, 0.9);
+    EXPECT_GT(rep.residual_norm, nopt.abs_tolerance);
+}
+
 TEST(NewtonSolver, ThrowsWhenLinearSolveFails)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN

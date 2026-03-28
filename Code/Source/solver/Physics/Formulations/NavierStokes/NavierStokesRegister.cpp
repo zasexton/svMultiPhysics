@@ -1231,6 +1231,8 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
     const bool is_unsteady = time_value_lc == "unsteady";
     const bool is_resistance = time_value_lc == "resistance";
     const bool is_rcr = (time_value_lc == "rcr" || time_value_lc == "windkessel");
+    const bool is_rcrcr =
+        (time_value_lc == "rcrcr" || time_value_lc == "windkessel2c" || time_value_lc == "windkessel_2c");
 
     const bool has_temp_spat = has_nonempty_defined(bc.params, "Temporal_and_spatial_values_file_path");
     const bool has_other_files = has_nonempty_defined(bc.params, "Temporal_values_file_path") ||
@@ -1611,9 +1613,48 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
         continue;
       }
 
+      if (is_rcrcr) {
+        if (has_temp_spat || has_other_files) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Physics] RCRCR outflow BCs do not support spatial/temporal files for the new solver "
+              "Navier-Stokes module yet. Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
+        }
+
+        const auto Rp = get_defined_double(bc.params, "RCRCR.Proximal_resistance");
+        const auto C1 = get_defined_double(bc.params, "RCRCR.Proximal_capacitance");
+        const auto Rm = get_defined_double(bc.params, "RCRCR.Intermediate_resistance");
+        const auto C2 = get_defined_double(bc.params, "RCRCR.Distal_capacitance");
+        const auto Rd = get_defined_double(bc.params, "RCRCR.Distal_resistance");
+        const auto Pd = get_defined_double(bc.params, "RCRCR.Distal_pressure");
+        const auto P10 = get_defined_double(bc.params, "RCRCR.Initial_pressure_1");
+        const auto P20 = get_defined_double(bc.params, "RCRCR.Initial_pressure_2");
+
+        if (!Rp.has_value() || !C1.has_value() || !Rm.has_value() || !C2.has_value() || !Rd.has_value()) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Physics] RCRCR outflow BC '" + bc.name +
+              "' is missing required <RCRCR_values> entries "
+              "(Proximal_resistance, Proximal_capacitance, Intermediate_resistance, Distal_capacitance, "
+              "Distal_resistance).");
+        }
+
+        IncompressibleNavierStokesVMSOptions::CoupledRCRCROutflowBC out{};
+        out.boundary_marker = bc.boundary_marker;
+        out.Rp = static_cast<svmp::FE::Real>(*Rp);
+        out.C1 = static_cast<svmp::FE::Real>(*C1);
+        out.Rm = static_cast<svmp::FE::Real>(*Rm);
+        out.C2 = static_cast<svmp::FE::Real>(*C2);
+        out.Rd = static_cast<svmp::FE::Real>(*Rd);
+        out.Pd = static_cast<svmp::FE::Real>(Pd.value_or(0.0));
+        out.P10 = static_cast<svmp::FE::Real>(P10.value_or(Pd.value_or(0.0)));
+        out.P20 = static_cast<svmp::FE::Real>(P20.value_or(Pd.value_or(0.0)));
+        out.backflow_beta = IncompressibleNavierStokesVMSOptions::ScalarValue{backflow_beta};
+        options.coupled_outflow_rcrcr.push_back(std::move(out));
+        continue;
+      }
+
       throw std::runtime_error(
           "[svMultiPhysics::Physics] Neumann BC Time_dependence='" + time_value_raw +
-          "' is not supported for the new solver Navier-Stokes module. Supported: Steady, Resistance, RCR. "
+          "' is not supported for the new solver Navier-Stokes module. Supported: Steady, Resistance, RCR, RCRCR. "
           "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
     }
 

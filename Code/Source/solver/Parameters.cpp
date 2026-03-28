@@ -436,6 +436,47 @@ void BoundaryConditionRCRParameters::print_parameters()
   }
 }
 
+const std::string BoundaryConditionRCRCRParameters::xml_element_name_ = "RCRCR_values";
+
+BoundaryConditionRCRCRParameters::BoundaryConditionRCRCRParameters()
+{
+  bool required = true;
+
+  set_parameter("Distal_capacitance", 0.0, required, distal_capacitance);
+  set_parameter("Distal_pressure", 0.0, !required, distal_pressure);
+  set_parameter("Distal_resistance", 0.0, required, distal_resistance);
+  set_parameter("Initial_pressure_1", 0.0, !required, initial_pressure_1);
+  set_parameter("Initial_pressure_2", 0.0, !required, initial_pressure_2);
+  set_parameter("Intermediate_resistance", 0.0, required, intermediate_resistance);
+  set_parameter("Proximal_capacitance", 0.0, required, proximal_capacitance);
+  set_parameter("Proximal_resistance", 0.0, required, proximal_resistance);
+}
+
+void BoundaryConditionRCRCRParameters::set_values(tinyxml2::XMLElement* xml_elem)
+{
+  std::string error_msg = "Unknown " + xml_element_name_ + " XML element '";
+  using std::placeholders::_1;
+  using std::placeholders::_2;
+  std::function<void(const std::string&, const std::string&)> ftpr =
+      std::bind(&BoundaryConditionRCRCRParameters::set_parameter_value, *this, _1, _2);
+  xml_util_set_parameters(ftpr, xml_elem, error_msg);
+
+  value_set = true;
+}
+
+void BoundaryConditionRCRCRParameters::print_parameters()
+{
+  std::cout << std::endl;
+  std::cout << "-----------------------------------" << std::endl;
+  std::cout << "Boundary Condition RCRCR Parameters" << std::endl;
+  std::cout << "-----------------------------------" << std::endl;
+
+  auto params_name_value = get_parameter_list();
+  for (auto& [ key, value ] : params_name_value) {
+    std::cout << key << ": " << value << std::endl;
+  }
+}
+
 BoundaryConditionParameters::BoundaryConditionParameters()
 {
   // A parameter that must be defined.
@@ -503,6 +544,7 @@ void BoundaryConditionParameters::print_parameters()
   }
 
   rcr.print_parameters();
+  rcrcr.print_parameters();
 }
 
 void BoundaryConditionParameters::set_values(tinyxml2::XMLElement* xml_elem)
@@ -525,6 +567,10 @@ void BoundaryConditionParameters::set_values(tinyxml2::XMLElement* xml_elem)
 
     if (name == BoundaryConditionRCRParameters::xml_element_name_) {
       rcr.set_values(item);
+    }
+
+    else if (name == BoundaryConditionRCRCRParameters::xml_element_name_) {
+      rcrcr.set_values(item);
     }
    
     else if (item->GetText() != nullptr) {

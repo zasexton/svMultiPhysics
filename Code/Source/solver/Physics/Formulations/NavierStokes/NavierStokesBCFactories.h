@@ -62,6 +62,11 @@ namespace detail {
     return markerName("ns_rcr", boundary_marker);
 }
 
+[[nodiscard]] inline std::string outletInstanceNameRCRCR(int boundary_marker)
+{
+    return markerName("ns_rcrcr", boundary_marker);
+}
+
 [[nodiscard]] inline std::shared_ptr<FE::systems::BuiltAuxiliaryModel> rcrOutflowModel()
 {
     static const auto model = FE::systems::aux::model("rcr_windkessel", [](FE::systems::ModelFacade& m) {
@@ -85,6 +90,26 @@ namespace detail {
         m.initialGuess("P", 0.0);
         m << FE::systems::alg(P) == P - (Pd + Rsum * Q);
         m << FE::systems::out("P_out") == P;
+    });
+    return model;
+}
+
+[[nodiscard]] inline std::shared_ptr<FE::systems::BuiltAuxiliaryModel> rcrcrOutflowModel()
+{
+    static const auto model = FE::systems::aux::model("rcrcr_windkessel", [](FE::systems::ModelFacade& m) {
+        auto Q = m.input("Q");
+        auto P1 = m.state("P1");
+        auto P2 = m.state("P2");
+        auto Rp = m.param("Rp");
+        auto C1 = m.param("C1");
+        auto Rm = m.param("Rm");
+        auto C2 = m.param("C2");
+        auto Rd = m.param("Rd");
+        auto Pd = m.param("Pd");
+
+        m << FE::systems::ddt(P1) == (Q - (P1 - P2) / Rm) / C1;
+        m << FE::systems::ddt(P2) == ((P1 - P2) / Rm - (P2 - Pd) / Rd) / C2;
+        m << FE::systems::out("P_out") == P1 + Rp * Q;
     });
     return model;
 }
@@ -258,15 +283,16 @@ namespace detail {
         );
         p_out = resistive.output("P_out");
     } else {
-        // Step 2: Deploy the standard RCR model through the generalized
+        // Step 2: Deploy the standard RCR model monolithically so the outlet
+        // state participates in the Newton solve through the generalized
         // AuxiliaryState infrastructure.
         auto rcr = system.deploy(
             use(detail::rcrOutflowModel())
                 .name(instance_name)
                 .boundary(marker)
-                .partitioned("BackwardEuler")
+                .monolithic()
                 .params({{"Rp", Rp}, {"C", C}, {"Rd", Rd}, {"Pd", Pd}})
-                .bind("Q", Q)
+                .bindCoupled("Q", Q)
                 .initialState({{"X", bc.X0}})
         );
 
@@ -275,6 +301,68 @@ namespace detail {
     }
 
     // Step 4: Return a standard NaturalBC.
+    const auto flux = -p_out * n - beta * rho * max_backflow * u;
+    return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
+}
+
+[[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toCoupledOutflowBC(
+    const IncompressibleNavierStokesVMSOptions::CoupledRCRCROutflowBC& bc,
+    FE::systems::FESystem& system,
+    FE::FieldId u_id,
+    const FE::spaces::FunctionSpace& velocity_space,
+    std::string_view velocity_field_name,
+    const FE::forms::FormExpr& u,
+    const FE::forms::FormExpr& rho)
+{
+    using namespace FE::forms;
+    using namespace FE::systems;
+
+    const int marker =
+        FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toCoupledOutflowBC");
+
+    if (bc.C1 == 0.0 || bc.C2 == 0.0) {
+        throw std::invalid_argument("CoupledRCRCROutflowBC: C1 and C2 must be nonzero");
+    }
+    if (bc.Rm == 0.0 || bc.Rd == 0.0) {
+        throw std::invalid_argument("CoupledRCRCROutflowBC: Rm and Rd must be nonzero");
+    }
+
+    const std::string q_name = bc.functional_name.empty()
+        ? ("ns_Q_" + std::to_string(marker))
+        : bc.functional_name;
+
+    const auto n = FormExpr::normal();
+    const auto un = inner(u, n);
+    const auto max_backflow = FormExpr::constant(0.5) * (abs(un) - un);
+    const auto beta =
+        FE::forms::bc::toScalarExpr(bc.backflow_beta, detail::markerName("ns_rcrcr_backflow_beta", marker));
+
+    const auto u_disc =
+        FormExpr::discreteField(u_id, velocity_space, std::string(velocity_field_name));
+
+    auto Q = system.boundaryIntegral(q_name, inner(u_disc, n), marker,
+        FE::forms::BoundaryFunctional::Reduction::Sum,
+        FE::systems::AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+
+    const auto instance_name = detail::outletInstanceNameRCRCR(marker);
+    auto rcrcr = system.deploy(
+        use(detail::rcrcrOutflowModel())
+            .name(instance_name)
+            .boundary(marker)
+            .monolithic()
+            .params({
+                {"Rp", bc.Rp},
+                {"C1", bc.C1},
+                {"Rm", bc.Rm},
+                {"C2", bc.C2},
+                {"Rd", bc.Rd},
+                {"Pd", bc.Pd},
+            })
+            .bindCoupled("Q", Q)
+            .initialState({{"P1", bc.P10}, {"P2", bc.P20}})
+    );
+
+    const auto p_out = rcrcr.output("P_out");
     const auto flux = -p_out * n - beta * rho * max_backflow * u;
     return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
 }

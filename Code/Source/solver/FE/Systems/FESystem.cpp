@@ -21,6 +21,7 @@
 #include "Forms/PointEvaluator.h"
 #include "Systems/AuxiliaryDerivativeProvider.h"
 #include "Systems/SystemsExceptions.h"
+ #include "Core/Logger.h"
 
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/GlobalSystemView.h"
@@ -38,9 +39,20 @@
 
 #include "Analysis/ProblemAnalysisContext.h"
 #include "Analysis/ProblemAnalyzer.h"
+#include "Analysis/FormExprScanner.h"
+#include "Math/FiniteDifference.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
+#include <numeric>
+#include <sstream>
 #include <unordered_set>
+
+#if FE_HAS_MPI
+#  include <mpi.h>
+#endif
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #include "Assembly/MeshAccess.h"
@@ -65,6 +77,567 @@ static void gatherFieldIds(const forms::FormExprNode& node, std::vector<FieldId>
     for (const auto& child : node.childrenShared()) {
         if (child) gatherFieldIds(*child, out);
     }
+}
+
+constexpr Real kDirectCouplingEntryTol = static_cast<Real>(1e-30);
+// Only collapse a direct feedthrough outer product to the symmetric
+// rank-one backend path when the PDE-output sensitivity is essentially
+// collinear with the FE input gradient. A loose tolerance is adequate for
+// early iterations but it degrades the monolithic Newton Jacobian for
+// strongly coupled outlet models such as multi-state Windkessels.
+constexpr Real kDirectCouplingRankOneTol = static_cast<Real>(1e-10);
+
+[[nodiscard]] Real effectiveAuxiliaryDt(const SystemStateView& state) noexcept
+{
+    if (std::isfinite(state.effective_dt) && state.effective_dt > 0.0) {
+        return static_cast<Real>(state.effective_dt);
+    }
+    return state.dt;
+}
+
+[[nodiscard]] bool monolithicAuxTraceEnabled() noexcept
+{
+    static const bool enabled = [] {
+        const char* env = std::getenv("SVMP_MONO_AUX_TRACE");
+        if (env == nullptr) {
+            return false;
+        }
+        std::string v(env);
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return !(v == "0" || v == "false" || v == "off" || v == "no");
+    }();
+    return enabled;
+}
+
+[[nodiscard]] bool monolithicDirectTraceEnabled() noexcept
+{
+    static const bool enabled = [] {
+        const char* env = std::getenv("SVMP_MONO_DIRECT_TRACE");
+        if (env == nullptr) {
+            return false;
+        }
+        std::string v(env);
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return !(v == "0" || v == "false" || v == "off" || v == "no");
+    }();
+    return enabled;
+}
+
+template <class SpanLike>
+[[nodiscard]] std::string formatTraceVector(const SpanLike& values)
+{
+    std::ostringstream oss;
+    oss << "[";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            oss << ", ";
+        }
+        oss << values[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
+struct AuxiliaryTemporalEvaluation {
+    std::vector<Real> xdot{};
+    std::vector<std::vector<Real>> history_storage{};
+    std::vector<std::span<const Real>> history_spans{};
+    Real dxdot_dx_coeff{0.0};
+};
+
+[[nodiscard]] std::vector<Real> gatherAuxiliaryFlatEntity(
+    const AuxiliaryBlockStorage& blk,
+    std::span<const Real> flat,
+    std::size_t entity_idx)
+{
+    std::vector<Real> out;
+    if (flat.empty()) {
+        return out;
+    }
+
+    const auto stride = static_cast<std::size_t>(blk.componentStride());
+    if (blk.layoutMode() == AuxiliaryLayoutMode::Ragged) {
+        const auto offsets = blk.entityOffsets();
+        FE_THROW_IF(entity_idx + 1 >= offsets.size(), InvalidArgumentException,
+                    "gatherAuxiliaryFlatEntity: ragged entity index out of range");
+        const auto off = offsets[entity_idx];
+        const auto len = offsets[entity_idx + 1] - off;
+        FE_THROW_IF(off + len > flat.size(), InvalidArgumentException,
+                    "gatherAuxiliaryFlatEntity: ragged buffer out of range");
+        out.assign(flat.begin() + static_cast<std::ptrdiff_t>(off),
+                   flat.begin() + static_cast<std::ptrdiff_t>(off + len));
+        return out;
+    }
+
+    out.assign(stride, Real(0.0));
+    if (blk.ordering() == AuxiliaryEntityOrdering::ByEntityThenComponent) {
+        const auto off = entity_idx * stride;
+        FE_THROW_IF(off + stride > flat.size(), InvalidArgumentException,
+                    "gatherAuxiliaryFlatEntity: entity-major buffer out of range");
+        std::copy(flat.begin() + static_cast<std::ptrdiff_t>(off),
+                  flat.begin() + static_cast<std::ptrdiff_t>(off + stride),
+                  out.begin());
+        return out;
+    }
+
+    const auto entity_count = blk.entityCount();
+    FE_THROW_IF(stride * entity_count > flat.size(), InvalidArgumentException,
+                "gatherAuxiliaryFlatEntity: component-major buffer out of range");
+    for (std::size_t c = 0; c < stride; ++c) {
+        out[c] = flat[c * entity_count + entity_idx];
+    }
+    return out;
+}
+
+void scatterAuxiliaryFlatEntity(const AuxiliaryBlockStorage& blk,
+                                std::span<Real> flat,
+                                std::size_t entity_idx,
+                                std::span<const Real> values)
+{
+    if (flat.empty() || values.empty()) {
+        return;
+    }
+
+    const auto stride = static_cast<std::size_t>(blk.componentStride());
+    if (blk.layoutMode() == AuxiliaryLayoutMode::Ragged) {
+        const auto offsets = blk.entityOffsets();
+        FE_THROW_IF(entity_idx + 1 >= offsets.size(), InvalidArgumentException,
+                    "scatterAuxiliaryFlatEntity: ragged entity index out of range");
+        const auto off = offsets[entity_idx];
+        const auto len = offsets[entity_idx + 1] - off;
+        FE_THROW_IF(values.size() != len, InvalidArgumentException,
+                    "scatterAuxiliaryFlatEntity: ragged value size mismatch");
+        FE_THROW_IF(off + len > flat.size(), InvalidArgumentException,
+                    "scatterAuxiliaryFlatEntity: ragged buffer out of range");
+        std::copy(values.begin(), values.end(), flat.begin() + static_cast<std::ptrdiff_t>(off));
+        return;
+    }
+
+    FE_THROW_IF(values.size() != stride, InvalidArgumentException,
+                "scatterAuxiliaryFlatEntity: fixed-stride value size mismatch");
+    if (blk.ordering() == AuxiliaryEntityOrdering::ByEntityThenComponent) {
+        const auto off = entity_idx * stride;
+        FE_THROW_IF(off + stride > flat.size(), InvalidArgumentException,
+                    "scatterAuxiliaryFlatEntity: entity-major buffer out of range");
+        std::copy(values.begin(), values.end(), flat.begin() + static_cast<std::ptrdiff_t>(off));
+        return;
+    }
+
+    const auto entity_count = blk.entityCount();
+    FE_THROW_IF(stride * entity_count > flat.size(), InvalidArgumentException,
+                "scatterAuxiliaryFlatEntity: component-major buffer out of range");
+    for (std::size_t c = 0; c < stride; ++c) {
+        flat[c * entity_count + entity_idx] = values[c];
+    }
+}
+
+[[nodiscard]] bool solveDenseSystemInPlace(std::vector<Real>& A,
+                                           std::vector<Real>& b,
+                                           Real pivot_tol = static_cast<Real>(1e-30))
+{
+    const auto n = b.size();
+    if (A.size() != n * n) {
+        return false;
+    }
+    if (n == 0) {
+        return true;
+    }
+
+    std::vector<std::size_t> piv(n);
+    std::iota(piv.begin(), piv.end(), std::size_t{0});
+
+    for (std::size_t col = 0; col < n; ++col) {
+        std::size_t max_row = col;
+        Real max_val = std::abs(A[piv[col] * n + col]);
+        for (std::size_t row = col + 1; row < n; ++row) {
+            const Real v = std::abs(A[piv[row] * n + col]);
+            if (v > max_val) {
+                max_val = v;
+                max_row = row;
+            }
+        }
+        if (!(max_val > pivot_tol)) {
+            return false;
+        }
+        std::swap(piv[col], piv[max_row]);
+
+        const Real pivot = A[piv[col] * n + col];
+        for (std::size_t row = col + 1; row < n; ++row) {
+            const Real factor = A[piv[row] * n + col] / pivot;
+            A[piv[row] * n + col] = Real(0.0);
+            for (std::size_t k = col + 1; k < n; ++k) {
+                A[piv[row] * n + k] -= factor * A[piv[col] * n + k];
+            }
+            b[piv[row]] -= factor * b[piv[col]];
+        }
+    }
+
+    for (int row = static_cast<int>(n) - 1; row >= 0; --row) {
+        const auto r = static_cast<std::size_t>(row);
+        Real sum = b[piv[r]];
+        for (std::size_t k = r + 1; k < n; ++k) {
+            sum -= A[piv[r] * n + k] * b[k];
+        }
+        const Real diag = A[piv[r] * n + r];
+        if (!(std::abs(diag) > pivot_tol)) {
+            return false;
+        }
+        b[r] = sum / diag;
+    }
+    return true;
+}
+
+#if FE_HAS_MPI
+MPI_Datatype mpiRealType()
+{
+    if (sizeof(Real) == sizeof(double)) {
+        return MPI_DOUBLE;
+    }
+    if (sizeof(Real) == sizeof(float)) {
+        return MPI_FLOAT;
+    }
+    return MPI_LONG_DOUBLE;
+}
+
+MPI_Datatype mpiGlobalIndexType()
+{
+    if (sizeof(GlobalIndex) == sizeof(std::int64_t)) {
+        return MPI_INT64_T;
+    }
+    if (sizeof(GlobalIndex) == sizeof(long long)) {
+        return MPI_LONG_LONG;
+    }
+    if (sizeof(GlobalIndex) == sizeof(long)) {
+        return MPI_LONG;
+    }
+    return MPI_LONG_LONG;
+}
+
+[[nodiscard]] std::vector<std::pair<GlobalIndex, Real>> allreduceSumSparsePairs(
+    std::vector<std::pair<GlobalIndex, Real>> local,
+    MPI_Comm comm)
+{
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (!mpi_initialized) {
+        return local;
+    }
+
+    int comm_size = 1;
+    MPI_Comm_size(comm, &comm_size);
+    if (comm_size <= 1) {
+        return local;
+    }
+
+    const int local_n = static_cast<int>(local.size());
+    std::vector<int> counts(static_cast<std::size_t>(comm_size), 0);
+    MPI_Allgather(&local_n, 1, MPI_INT, counts.data(), 1, MPI_INT, comm);
+
+    std::vector<int> displs(static_cast<std::size_t>(comm_size), 0);
+    int total_n = 0;
+    for (int r = 0; r < comm_size; ++r) {
+        displs[static_cast<std::size_t>(r)] = total_n;
+        total_n += counts[static_cast<std::size_t>(r)];
+    }
+
+    std::vector<GlobalIndex> idx_local(static_cast<std::size_t>(local_n), GlobalIndex(0));
+    std::vector<Real> val_local(static_cast<std::size_t>(local_n), Real(0.0));
+    for (int i = 0; i < local_n; ++i) {
+        idx_local[static_cast<std::size_t>(i)] = local[static_cast<std::size_t>(i)].first;
+        val_local[static_cast<std::size_t>(i)] = local[static_cast<std::size_t>(i)].second;
+    }
+
+    std::vector<GlobalIndex> idx_all(static_cast<std::size_t>(total_n), GlobalIndex(0));
+    std::vector<Real> val_all(static_cast<std::size_t>(total_n), Real(0.0));
+    MPI_Allgatherv(idx_local.data(), local_n, mpiGlobalIndexType(),
+                   idx_all.data(), counts.data(), displs.data(), mpiGlobalIndexType(), comm);
+    MPI_Allgatherv(val_local.data(), local_n, mpiRealType(),
+                   val_all.data(), counts.data(), displs.data(), mpiRealType(), comm);
+
+    std::vector<std::pair<GlobalIndex, Real>> merged;
+    merged.reserve(static_cast<std::size_t>(total_n));
+    for (int i = 0; i < total_n; ++i) {
+        merged.emplace_back(idx_all[static_cast<std::size_t>(i)],
+                            val_all[static_cast<std::size_t>(i)]);
+    }
+
+    std::sort(merged.begin(), merged.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    std::vector<std::pair<GlobalIndex, Real>> out;
+    out.reserve(merged.size());
+    for (const auto& kv : merged) {
+        if (out.empty() || kv.first != out.back().first) {
+            out.push_back(kv);
+        } else {
+            out.back().second += kv.second;
+        }
+    }
+    return out;
+}
+#endif
+
+[[nodiscard]] std::vector<Real> reconstructRateFromHistory(
+    std::span<const Real> committed,
+    std::span<const std::span<const Real>> history,
+    double dt_prev,
+    double dt_current,
+    std::span<const double> dt_history)
+{
+    std::vector<Real> rate(committed.size(), Real(0.0));
+    if (committed.empty() || history.empty()) {
+        return rate;
+    }
+
+    const double fallback_dt =
+        (dt_prev > 0.0 && std::isfinite(dt_prev))
+            ? dt_prev
+            : ((dt_current > 0.0 && std::isfinite(dt_current)) ? dt_current : 1.0);
+
+    auto historyDt = [&](int idx) -> double {
+        if (idx >= 0 && idx < static_cast<int>(dt_history.size())) {
+            const double v = dt_history[static_cast<std::size_t>(idx)];
+            if (v > 0.0 && std::isfinite(v)) {
+                return v;
+            }
+        }
+        return fallback_dt;
+    };
+
+    std::vector<double> nodes;
+    nodes.reserve(history.size() + 1);
+    nodes.push_back(0.0);
+    double accum = 0.0;
+    for (std::size_t j = 0; j < history.size(); ++j) {
+        accum += historyDt(static_cast<int>(j));
+        nodes.push_back(-accum);
+    }
+
+    const auto w = math::finiteDifferenceWeights(/*derivative_order=*/1, /*x0=*/0.0, nodes);
+    if (w.size() != nodes.size()) {
+        return rate;
+    }
+
+    for (std::size_t i = 0; i < committed.size(); ++i) {
+        Real val = static_cast<Real>(w[0]) * committed[i];
+        for (std::size_t j = 0; j < history.size(); ++j) {
+            if (i < history[j].size()) {
+                val += static_cast<Real>(w[j + 1]) * history[j][i];
+            }
+        }
+        rate[i] = val;
+    }
+    return rate;
+}
+
+[[nodiscard]] AuxiliaryTemporalEvaluation buildMonolithicAuxiliaryTemporalEvaluation(
+    const AuxiliaryStepperSpec& stepper_spec,
+    const AuxiliaryBlockStorage& blk,
+    std::size_t entity_idx,
+    std::span<const Real> entity_x,
+    std::span<const Real> entity_committed,
+    std::span<const Real> entity_committed_rate,
+    const SystemStateView& state)
+{
+    AuxiliaryTemporalEvaluation out;
+    out.xdot.assign(entity_x.size(), Real(0.0));
+
+    const auto history_depth = blk.history().depth();
+    out.history_storage.reserve(history_depth);
+    for (std::size_t k = 0; k < history_depth; ++k) {
+        out.history_storage.push_back(blk.gatherEntityHistory(k, entity_idx));
+    }
+    out.history_spans.reserve(out.history_storage.size());
+    for (const auto& hist : out.history_storage) {
+        out.history_spans.emplace_back(hist.data(), hist.size());
+    }
+
+    const auto* ti = state.time_integration ? state.time_integration->stencil(1) : nullptr;
+    if (ti && !ti->a.empty()) {
+        if (state.time_integration != nullptr &&
+            state.time_integration->integrator_name == "GeneralizedAlpha(1stOrder)" &&
+            ti->a.size() == 3u) {
+            if (entity_committed_rate.size() == entity_x.size()) {
+                out.dxdot_dx_coeff = ti->coeff(0);
+                for (std::size_t i = 0; i < entity_x.size(); ++i) {
+                    out.xdot[i] =
+                        ti->coeff(0) * entity_x[i] +
+                        ti->coeff(1) * entity_committed[i] +
+                        ti->coeff(2) * entity_committed_rate[i];
+                }
+                return out;
+            }
+            if (!out.history_spans.empty()) {
+                out.dxdot_dx_coeff = ti->coeff(0);
+                const auto xdot_n = reconstructRateFromHistory(
+                    entity_committed,
+                    out.history_spans,
+                    state.dt_prev,
+                    state.dt,
+                    state.dt_history);
+                for (std::size_t i = 0; i < entity_x.size(); ++i) {
+                    out.xdot[i] =
+                        ti->coeff(0) * entity_x[i] +
+                        ti->coeff(1) * entity_committed[i] +
+                        ti->coeff(2) * xdot_n[i];
+                }
+                return out;
+            }
+        } else {
+            out.dxdot_dx_coeff = ti->coeff(0);
+
+            for (std::size_t i = 0; i < entity_x.size(); ++i) {
+                Real val = ti->coeff(0) * entity_x[i];
+                if (ti->a.size() > 1u) {
+                    val += ti->coeff(1) * entity_committed[i];
+                }
+                for (std::size_t j = 2; j < ti->a.size(); ++j) {
+                    const auto hist_idx = j - 2;
+                    FE_THROW_IF(hist_idx >= out.history_spans.size() &&
+                                    std::abs(ti->coeff(static_cast<int>(j))) > Real(1e-30),
+                                InvalidStateException,
+                                "FESystem: insufficient auxiliary history for time stencil of block entity");
+                    if (hist_idx < out.history_spans.size() && i < out.history_spans[hist_idx].size()) {
+                        val += ti->coeff(static_cast<int>(j)) * out.history_spans[hist_idx][i];
+                    }
+                }
+                out.xdot[i] = val;
+            }
+            return out;
+        }
+    }
+
+    const std::string_view monolithic_method = stepper_spec.method_name;
+    if (monolithic_method == "BackwardEuler") {
+        const Real h = state.dt;
+        if (h > Real(0.0)) {
+            out.dxdot_dx_coeff = Real(1.0) / h;
+            for (std::size_t i = 0; i < entity_x.size(); ++i) {
+                out.xdot[i] = (entity_x[i] - entity_committed[i]) / h;
+            }
+        }
+        return out;
+    }
+
+    const Real aux_dt = effectiveAuxiliaryDt(state);
+    if (aux_dt > 0.0) {
+        out.dxdot_dx_coeff = Real(1.0) / aux_dt;
+        for (std::size_t i = 0; i < entity_x.size(); ++i) {
+            out.xdot[i] = (entity_x[i] - entity_committed[i]) / aux_dt;
+        }
+    }
+    return out;
+}
+
+[[nodiscard]] std::vector<std::pair<GlobalIndex, Real>> reconstructInputGradientFromCt(
+    const std::vector<Real>& ct,
+    std::size_t n_field_dofs,
+    std::size_t aux_row_offset,
+    int dim,
+    const std::vector<Real>& dF_dinputs,
+    int n_inputs,
+    int input_col)
+{
+    if (n_field_dofs == 0 || dim <= 0 || n_inputs <= 0 || input_col < 0 ||
+        dF_dinputs.size() < static_cast<std::size_t>(dim * n_inputs)) {
+        return {};
+    }
+
+    Real denom = 0.0;
+    std::vector<Real> numer(n_field_dofs, 0.0);
+
+    for (int i = 0; i < dim; ++i) {
+        const Real dF_dI = dF_dinputs[static_cast<std::size_t>(i * n_inputs + input_col)];
+        if (std::abs(dF_dI) <= kDirectCouplingEntryTol) {
+            continue;
+        }
+        denom += dF_dI * dF_dI;
+
+        const auto row = aux_row_offset + static_cast<std::size_t>(i);
+        const auto row_offset = row * n_field_dofs;
+        if (row_offset + n_field_dofs > ct.size()) {
+            return {};
+        }
+        for (std::size_t k = 0; k < n_field_dofs; ++k) {
+            numer[k] += dF_dI * ct[row_offset + k];
+        }
+    }
+
+    if (!(denom > kDirectCouplingEntryTol * kDirectCouplingEntryTol)) {
+        return {};
+    }
+
+    std::vector<std::pair<GlobalIndex, Real>> q_u;
+    q_u.reserve(n_field_dofs);
+    for (std::size_t k = 0; k < n_field_dofs; ++k) {
+        const Real val = numer[k] / denom;
+        if (std::abs(val) > kDirectCouplingEntryTol) {
+            q_u.emplace_back(static_cast<GlobalIndex>(k), val);
+        }
+    }
+    return q_u;
+}
+
+[[nodiscard]] std::optional<backends::RankOneUpdate> tryBuildDirectCouplingRankOneUpdate(
+    const std::unordered_map<GlobalIndex, Real>& dR_doutput,
+    std::span<const std::pair<GlobalIndex, Real>> input_gradient,
+    Real dOutput_dInput)
+{
+    if (std::abs(dOutput_dInput) <= kDirectCouplingEntryTol ||
+        dR_doutput.empty() || input_gradient.empty()) {
+        return std::nullopt;
+    }
+
+    std::unordered_map<GlobalIndex, Real> q_map;
+    q_map.reserve(input_gradient.size());
+    Real q_dot_q = 0.0;
+    for (const auto& [dof, val] : input_gradient) {
+        q_map[dof] = val;
+        q_dot_q += val * val;
+    }
+    if (!(q_dot_q > kDirectCouplingEntryTol * kDirectCouplingEntryTol)) {
+        return std::nullopt;
+    }
+
+    Real dR_dot_q = 0.0;
+    Real dR_norm_sq = 0.0;
+    for (const auto& [dof, val] : dR_doutput) {
+        dR_norm_sq += val * val;
+        auto it = q_map.find(dof);
+        if (it != q_map.end()) {
+            dR_dot_q += val * it->second;
+        }
+    }
+    if (!(dR_norm_sq > kDirectCouplingEntryTol * kDirectCouplingEntryTol)) {
+        return std::nullopt;
+    }
+
+    const Real alpha = dR_dot_q / q_dot_q;
+    Real rem_norm_sq = 0.0;
+    for (const auto& [dof, val] : dR_doutput) {
+        const auto it = q_map.find(dof);
+        const Real q_val = (it != q_map.end()) ? it->second : Real(0.0);
+        const Real rem = val - alpha * q_val;
+        rem_norm_sq += rem * rem;
+    }
+    for (const auto& [dof, val] : input_gradient) {
+        if (dR_doutput.find(dof) == dR_doutput.end()) {
+            const Real rem = alpha * val;
+            rem_norm_sq += rem * rem;
+        }
+    }
+
+    const Real rel_err = std::sqrt(rem_norm_sq) / std::sqrt(dR_norm_sq);
+    if (!std::isfinite(static_cast<double>(rel_err)) || rel_err >= kDirectCouplingRankOneTol) {
+        return std::nullopt;
+    }
+
+    backends::RankOneUpdate upd;
+    upd.sigma = alpha * dOutput_dInput;
+    upd.v.assign(input_gradient.begin(), input_gradient.end());
+    return upd;
 }
 
 FESystem::FESystem(std::shared_ptr<const assembly::IMeshAccess> mesh_access)
@@ -151,6 +724,8 @@ void FESystem::invalidateSetup() noexcept
     }
     assembly_plan_by_op_.clear();
     coupled_jac_cache_.clear();
+    monolithic_aux_committed_rates_.clear();
+    monolithic_aux_committed_rates_valid_.clear();
 
     // Clear setup-time auxiliary state hooks (sync, transfer) but
     // preserve block definitions and data.
@@ -1138,7 +1713,8 @@ assembly::AssemblyResult FESystem::assembleMass(
     return assemble(req, state, &mass_out, nullptr);
 }
 
-void FESystem::beginTimeStep()
+void FESystem::beginTimeStep(bool reset_auxiliary_state,
+                             bool invalidate_auxiliary_inputs)
 {
     // requireSetup() is skipped for auxiliary-only use (no mesh/fields).
     // Material/global-kernel/coupled-boundary providers are null when not set up.
@@ -1152,11 +1728,11 @@ void FESystem::beginTimeStep()
         coupled_boundary_->beginTimeStep();
     }
     // Reset generalized auxiliary state to committed values.
-    if (auxiliary_state_manager_) {
+    if (reset_auxiliary_state && auxiliary_state_manager_) {
         auxiliary_state_manager_->resetAllToCommitted();
     }
     // Invalidate all auxiliary inputs for the new time step.
-    if (auxiliary_input_registry_) {
+    if (invalidate_auxiliary_inputs && auxiliary_input_registry_) {
         auxiliary_input_registry_->invalidateAll();
     }
 }
@@ -1175,6 +1751,349 @@ void FESystem::commitTimeStep()
     // Commit generalized auxiliary state with the last-known time.
     if (auxiliary_state_manager_) {
         auxiliary_state_manager_->commitAll(last_auxiliary_advance_time_);
+    }
+}
+
+void FESystem::finalizeMonolithicAuxiliaryStageState(Real alpha_f, Real final_time)
+{
+    finalizeMonolithicAuxiliaryStageState(alpha_f, Real(-1.0), Real(-1.0), final_time);
+}
+
+void FESystem::finalizeMonolithicAuxiliaryStageState(
+    Real alpha_f,
+    Real gamma,
+    Real dt,
+    Real final_time)
+{
+    FE_THROW_IF(!(alpha_f > 0.0) || !std::isfinite(alpha_f), InvalidArgumentException,
+                "FESystem::finalizeMonolithicAuxiliaryStageState: alpha_f must be finite and > 0");
+
+    last_auxiliary_advance_time_ = final_time;
+
+    if (!auxiliary_state_manager_ || std::abs(alpha_f - Real(1.0)) <= Real(1e-14)) {
+        return;
+    }
+
+    const Real inv_alpha_f = Real(1.0) / alpha_f;
+    const Real c_prev = (alpha_f - Real(1.0)) * inv_alpha_f;
+
+    for (auto& entry : deployed_aux_entries_) {
+        if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) {
+            continue;
+        }
+        if (!auxiliary_state_manager_->hasBlock(entry.instance_name)) {
+            continue;
+        }
+
+        auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
+        const auto meta = entry.model->structuralMetadata();
+        const auto& kinds = meta.variable_kinds;
+
+        for (std::size_t e = 0; e < blk.entityCount(); ++e) {
+            auto stage_state = blk.gatherEntityWork(e);
+            const auto committed = blk.gatherEntityCommitted(e);
+            auto committed_rate = gatherMonolithicCommittedRate(entry, e);
+            bool changed = false;
+            for (std::size_t i = 0; i < stage_state.size() && i < committed.size(); ++i) {
+                const bool differential =
+                    i < kinds.size()
+                        ? (kinds[i] == AuxiliaryVariableKind::Differential)
+                        : true;
+                if (!differential) {
+                    continue;
+                }
+                stage_state[i] = inv_alpha_f * stage_state[i] + c_prev * committed[i];
+                changed = true;
+            }
+            if (changed) {
+                blk.scatterEntityWork(e, stage_state);
+            }
+
+            if (gamma > Real(0.0) && dt > Real(0.0) &&
+                std::isfinite(static_cast<double>(gamma)) &&
+                std::isfinite(static_cast<double>(dt)) &&
+                committed_rate.size() == stage_state.size()) {
+                const Real inv_gamma_dt = Real(1.0) / (gamma * dt);
+                const Real c_old = (Real(1.0) - gamma) / gamma;
+                std::vector<Real> final_rate(stage_state.size(), Real(0.0));
+                for (std::size_t i = 0; i < stage_state.size() && i < committed.size(); ++i) {
+                    const bool differential =
+                        i < kinds.size()
+                            ? (kinds[i] == AuxiliaryVariableKind::Differential)
+                            : true;
+                    if (!differential) {
+                        continue;
+                    }
+                    final_rate[i] =
+                        inv_gamma_dt * (stage_state[i] - committed[i]) -
+                        c_old * committed_rate[i];
+                }
+                scatterMonolithicCommittedRate(entry, e, final_rate);
+                monolithic_aux_committed_rates_valid_.insert(entry.instance_name);
+            }
+        }
+    }
+}
+
+void FESystem::ensureMonolithicCommittedRateBuffer(
+    const DeployedAuxEntry& entry,
+    std::size_t storage_size)
+{
+    auto& buf = monolithic_aux_committed_rates_[entry.instance_name];
+    if (buf.size() != storage_size) {
+        buf.assign(storage_size, Real(0.0));
+        monolithic_aux_committed_rates_valid_.erase(entry.instance_name);
+    }
+}
+
+std::vector<Real> FESystem::gatherMonolithicCommittedRate(
+    const DeployedAuxEntry& entry,
+    std::size_t entity_index) const
+{
+    auto it = monolithic_aux_committed_rates_.find(entry.instance_name);
+    if (it == monolithic_aux_committed_rates_.end() ||
+        monolithic_aux_committed_rates_valid_.count(entry.instance_name) == 0u ||
+        !auxiliary_state_manager_ ||
+        !auxiliary_state_manager_->hasBlock(entry.instance_name)) {
+        return {};
+    }
+    const auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
+    return gatherAuxiliaryFlatEntity(blk, it->second, entity_index);
+}
+
+void FESystem::scatterMonolithicCommittedRate(
+    const DeployedAuxEntry& entry,
+    std::size_t entity_index,
+    std::span<const Real> values)
+{
+    if (!auxiliary_state_manager_ || !auxiliary_state_manager_->hasBlock(entry.instance_name)) {
+        return;
+    }
+    auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
+    ensureMonolithicCommittedRateBuffer(entry, blk.storageSize());
+    auto it = monolithic_aux_committed_rates_.find(entry.instance_name);
+    FE_THROW_IF(it == monolithic_aux_committed_rates_.end(), InvalidStateException,
+                "FESystem::scatterMonolithicCommittedRate: missing rate buffer");
+    std::span<Real> flat{it->second.data(), it->second.size()};
+    scatterAuxiliaryFlatEntity(blk, flat, entity_index, values);
+}
+
+void FESystem::initializeMonolithicCommittedRate(
+    const DeployedAuxEntry& entry,
+    const SystemStateView& prev_state)
+{
+    if (!auxiliary_state_manager_ ||
+        !auxiliary_state_manager_->hasBlock(entry.instance_name) ||
+        !entry.deriv_provider) {
+        return;
+    }
+
+    auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
+    ensureMonolithicCommittedRateBuffer(entry, blk.storageSize());
+
+    const auto meta = entry.model->structuralMetadata();
+    const auto& kinds = meta.variable_kinds;
+    auto params = buildParamVector(entry);
+    auto bound_inputs = buildInputVector(entry);
+    const auto& emap = entry.entity_map;
+
+    bool has_entity_local_inputs = false;
+    if (auxiliary_input_registry_) {
+        for (const auto& [model_name, reg_name] : entry.input_bindings) {
+            if (auxiliary_input_registry_->hasInput(reg_name) &&
+                auxiliary_input_registry_->isEntityLocal(reg_name)) {
+                has_entity_local_inputs = true;
+                break;
+            }
+        }
+    }
+
+    for (std::size_t e = 0; e < blk.entityCount(); ++e) {
+        const auto entity_x = blk.gatherEntityCommitted(e);
+        const auto orig_e = emap.empty() ? e : emap[e];
+
+        if (has_entity_local_inputs && auxiliary_input_registry_) {
+            bound_inputs.clear();
+            if (auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get())) {
+                for (const auto& inp : built->signature().inputs) {
+                    auto bind_it = entry.input_bindings.find(inp.name);
+                    if (bind_it != entry.input_bindings.end()) {
+                        auto vals = auxiliary_input_registry_->valuesOf(bind_it->second, orig_e);
+                        bound_inputs.insert(bound_inputs.end(), vals.begin(), vals.end());
+                    } else {
+                        bound_inputs.resize(
+                            bound_inputs.size() + static_cast<std::size_t>(inp.size),
+                            Real(0.0));
+                    }
+                }
+            } else {
+                rebuildGenericInputsForEntity(entry, orig_e, bound_inputs);
+            }
+        }
+
+        std::vector<std::vector<Real>> history_storage;
+        std::vector<std::span<const Real>> history_spans;
+        history_storage.reserve(blk.history().depth());
+        history_spans.reserve(blk.history().depth());
+        for (std::size_t k = 0; k < blk.history().depth(); ++k) {
+            history_storage.push_back(blk.gatherEntityHistory(k, e));
+            history_spans.emplace_back(history_storage.back().data(), history_storage.back().size());
+        }
+
+        std::vector<FieldValueEntry> field_vals;
+        const auto& art = entry.deriv_provider->artifact();
+        if (!art.referenced_fields.empty()) {
+            field_vals.reserve(art.referenced_fields.size());
+            for (const auto fid : art.referenced_fields) {
+                const auto fidx = static_cast<std::size_t>(fid);
+                if (fidx >= field_dof_offsets_.size() ||
+                    fidx >= field_dof_handlers_.size()) {
+                    continue;
+                }
+                const auto fld_off = field_dof_offsets_[fidx];
+                const auto* femap = field_dof_handlers_[fidx].getEntityDofMap();
+                if (!femap) {
+                    continue;
+                }
+                auto vdofs = femap->getVertexDofs(static_cast<GlobalIndex>(orig_e));
+                if (vdofs.empty()) {
+                    continue;
+                }
+                FieldValueEntry fve;
+                fve.field = fid;
+                fve.n_components = static_cast<int>(vdofs.size());
+                for (int c = 0; c < fve.n_components && c < MAX_FIELD_VALUE_COMPONENTS; ++c) {
+                    const auto gidx = static_cast<std::size_t>(
+                        vdofs[static_cast<std::size_t>(c)] + fld_off);
+                    fve.components[c] = (gidx < prev_state.u.size()) ? prev_state.u[gidx] : Real(0.0);
+                }
+                field_vals.push_back(fve);
+            }
+        }
+
+        std::vector<Real> zero_xdot(entity_x.size(), Real(0.0));
+        std::vector<Real> residual(entity_x.size(), Real(0.0));
+        std::vector<Real> dF_dxdot(entity_x.size() * entity_x.size(), Real(0.0));
+
+        AuxiliaryLocalContext ctx;
+        ctx.time = static_cast<Real>(prev_state.time);
+        ctx.dt = static_cast<Real>(prev_state.dt);
+        ctx.effective_dt = effectiveAuxiliaryDt(prev_state);
+        ctx.x = entity_x;
+        ctx.xdot = zero_xdot;
+        ctx.history = history_spans;
+        ctx.inputs = bound_inputs;
+        ctx.params = params;
+        ctx.entity_index = e;
+        ctx.field_values = field_vals;
+        ctx.user_data = prev_state.user_data;
+
+        AuxiliaryResidualRequest res_req;
+        res_req.residual = residual;
+        entry.model->evaluateResidual(ctx, res_req);
+
+        AuxiliaryJacobianRequest jac_req;
+        jac_req.n = static_cast<int>(entity_x.size());
+        jac_req.want_dF_dxdot = true;
+        jac_req.dF_dxdot = dF_dxdot;
+        entry.deriv_provider->evaluateJacobian(*entry.model, ctx, jac_req);
+
+        std::vector<int> diff_idx;
+        diff_idx.reserve(entity_x.size());
+        for (std::size_t i = 0; i < entity_x.size(); ++i) {
+            const bool differential =
+                i < kinds.size()
+                    ? (kinds[i] == AuxiliaryVariableKind::Differential)
+                    : true;
+            if (differential) {
+                diff_idx.push_back(static_cast<int>(i));
+            }
+        }
+
+        std::vector<Real> entity_rate(entity_x.size(), Real(0.0));
+        if (!diff_idx.empty()) {
+            const auto n_diff = diff_idx.size();
+            std::vector<Real> M(n_diff * n_diff, Real(0.0));
+            std::vector<Real> rhs(n_diff, Real(0.0));
+            for (std::size_t ri = 0; ri < n_diff; ++ri) {
+                rhs[ri] = -residual[static_cast<std::size_t>(diff_idx[ri])];
+                for (std::size_t ci = 0; ci < n_diff; ++ci) {
+                    M[ri * n_diff + ci] =
+                        dF_dxdot[static_cast<std::size_t>(diff_idx[ri]) * entity_x.size() +
+                                 static_cast<std::size_t>(diff_idx[ci])];
+                }
+            }
+
+            if (solveDenseSystemInPlace(M, rhs)) {
+                for (std::size_t i = 0; i < n_diff; ++i) {
+                    entity_rate[static_cast<std::size_t>(diff_idx[i])] = rhs[i];
+                }
+            }
+        }
+
+        scatterMonolithicCommittedRate(entry, e, entity_rate);
+    }
+    monolithic_aux_committed_rates_valid_.insert(entry.instance_name);
+}
+
+void FESystem::ensureMonolithicCommittedRates(const SystemStateView& state)
+{
+    const auto* ti = state.time_integration ? state.time_integration->stencil(1) : nullptr;
+    if (state.time_integration == nullptr ||
+        state.time_integration->integrator_name != "GeneralizedAlpha(1stOrder)" ||
+        ti == nullptr || ti->a.size() != 3u ||
+        !auxiliary_state_manager_) {
+        return;
+    }
+
+    bool needs_seed = false;
+    for (const auto& entry : deployed_aux_entries_) {
+        if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) {
+            continue;
+        }
+        if (monolithic_aux_committed_rates_valid_.count(entry.instance_name) == 0u) {
+            needs_seed = true;
+            break;
+        }
+    }
+    if (!needs_seed) {
+        return;
+    }
+
+    FE_THROW_IF(state.u_prev.empty(), InvalidStateException,
+                "FESystem::ensureMonolithicCommittedRates: generalized-alpha requires previous FE state");
+
+    SystemStateView prev_state = state;
+    prev_state.time = state.time - effectiveAuxiliaryDt(state);
+    prev_state.effective_dt = state.dt;
+    prev_state.u = state.u_prev;
+    prev_state.u_vector = state.u_prev_vector;
+    prev_state.u_prev = state.u_prev2;
+    prev_state.u_prev_vector = state.u_prev2_vector;
+    prev_state.u_prev2 = {};
+    prev_state.u_prev2_vector = nullptr;
+    prev_state.u_history = {};
+    prev_state.dt_history = {};
+    prev_state.time_integration = nullptr;
+
+    cacheSystemState(prev_state);
+    if (auxiliary_input_registry_) {
+        auxiliary_input_registry_->evaluate(
+            static_cast<Real>(prev_state.time),
+            static_cast<Real>(prev_state.dt),
+            /*is_nonlinear_iteration=*/true);
+    }
+
+    for (const auto& entry : deployed_aux_entries_) {
+        if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic ||
+            monolithic_aux_committed_rates_valid_.count(entry.instance_name) != 0u) {
+            continue;
+        }
+        initializeMonolithicCommittedRate(entry, prev_state);
+    }
+
+    if (auxiliary_input_registry_) {
+        auxiliary_input_registry_->invalidateAll();
     }
 }
 
@@ -1206,6 +2125,8 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
     // after finalization, both vectors are empty.
     finalizeDeferredInputDeps();
 
+    ensureMonolithicCommittedRates(state);
+
     // Cache the full system state for FE-coupled input callbacks.
     cacheSystemState(state);
 
@@ -1213,6 +2134,8 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
     if (auxiliary_input_registry_) {
         auxiliary_input_registry_->evaluate(state.time, state.dt, is_nonlinear_iteration);
     }
+
+    const Real aux_dt = effectiveAuxiliaryDt(state);
 
     // Evaluate outputs for deployed models via the base-class output interface.
     for (auto& entry : deployed_aux_entries_) {
@@ -1295,14 +2218,7 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
         const auto n_entities = blk.entityCount();
         entry.output_buffer.resize(n_entities * n_outputs);
 
-        // Build xdot = 0 scratch for output evaluation.
-        const auto dim = static_cast<std::size_t>(entry.model->dimension());
-        std::vector<Real> xdot_zero(dim, 0.0);
         const auto& emap = entry.entity_map; // empty = identity mapping
-
-        // Build per-entity history spans.
-        std::vector<std::vector<Real>> hist_entity_data;
-        std::vector<std::span<const Real>> hist_spans;
 
         // Detect entity-local bindings for output eval.
         bool has_entity_local_inputs = false;
@@ -1339,13 +2255,16 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
                 }
             }
 
-            // Layout-aware history gather.
-            hist_entity_data.clear();
-            hist_spans.clear();
-            for (std::size_t k = 0; k < blk.history().depth(); ++k) {
-                hist_entity_data.push_back(blk.gatherEntityHistory(k, e));
-                hist_spans.push_back(hist_entity_data.back());
-            }
+            const auto entity_committed = blk.gatherEntityCommitted(e);
+            const auto entity_committed_rate = gatherMonolithicCommittedRate(entry, e);
+            auto temporal = buildMonolithicAuxiliaryTemporalEvaluation(
+                entry.stepper_spec,
+                blk,
+                e,
+                entity_state_vec,
+                entity_committed,
+                entity_committed_rate,
+                state);
 
             // Populate field_values for models with direct FE field references.
             std::vector<FieldValueEntry> fv_prep;
@@ -1375,14 +2294,15 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
             AuxiliaryLocalContext ctx;
             ctx.time = state.time;
             ctx.dt = state.dt;
-            ctx.effective_dt = state.dt;
+            ctx.effective_dt = aux_dt;
             ctx.x = entity_state_vec;
-            ctx.xdot = xdot_zero;
-            ctx.history = hist_spans;
+            ctx.xdot = temporal.xdot;
+            ctx.history = temporal.history_spans;
             ctx.inputs = bound_inputs;
             ctx.params = params;
             ctx.entity_index = e;
             ctx.field_values = fv_prep;
+            ctx.user_data = state.user_data;
 
             std::span<Real> out_span{
                 entry.output_buffer.data() + e * n_outputs, n_outputs};
@@ -2764,6 +3684,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
     if (!auxiliary_operator_registry_->isLayoutFinalized()) return;
 
     const auto mixed = auxiliary_operator_registry_->composeMixedLayout(n_field_dofs);
+    const Real aux_dt = effectiveAuxiliaryDt(state);
 
     // Cache the full system state for FE-coupled input callbacks.
     cacheSystemState(state);
@@ -2815,6 +3736,9 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
             auto entity_x = blk.gatherEntityWork(e);
             auto entity_committed = blk.gatherEntityCommitted(e);
             const auto orig_e = emap.empty() ? e : emap[e];
+            const auto entity_committed_rate = gatherMonolithicCommittedRate(entry, e);
+            auto temporal = buildMonolithicAuxiliaryTemporalEvaluation(
+                entry.stepper_spec, blk, e, entity_x, entity_committed, entity_committed_rate, state);
 
             // Rebuild inputs per entity when entity-local bindings exist.
             if (has_entity_local_inputs && auxiliary_input_registry_) {
@@ -2832,15 +3756,6 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 } else {
                     rebuildGenericInputsForEntity(entry, orig_e, bound_inputs);
                 }
-            }
-
-            // BDF1 xdot.
-            std::vector<Real> xdot(static_cast<std::size_t>(dim));
-            if (state.dt > 0.0) {
-                for (int i = 0; i < dim; ++i)
-                    xdot[static_cast<std::size_t>(i)] =
-                        (entity_x[static_cast<std::size_t>(i)] -
-                         entity_committed[static_cast<std::size_t>(i)]) / state.dt;
             }
 
             // Populate field_values when the model directly references FE fields.
@@ -2874,11 +3789,13 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
             }
 
             AuxiliaryLocalContext ctx;
-            ctx.time = state.time; ctx.dt = state.dt; ctx.effective_dt = state.dt;
-            ctx.x = entity_x; ctx.xdot = xdot;
+            ctx.time = state.time; ctx.dt = state.dt; ctx.effective_dt = aux_dt;
+            ctx.x = entity_x; ctx.xdot = temporal.xdot;
+            ctx.history = temporal.history_spans;
             ctx.inputs = bound_inputs; ctx.params = params;
             ctx.entity_index = e;
             ctx.field_values = field_vals;
+            ctx.user_data = state.user_data;
 
             // Build global DOF indices for this entity's auxiliary unknowns.
             std::vector<GlobalIndex> aux_dofs(static_cast<std::size_t>(dim));
@@ -2894,145 +3811,239 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 AuxiliaryResidualRequest res_req;
                 res_req.residual = entity_res;
                 entry.model->evaluateResidual(ctx, res_req);
+                if (monolithicAuxTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "FESystem: monolithic aux residual"
+                        << " block='" << entry.instance_name << "'"
+                        << " entity=" << e
+                        << " time=" << ctx.time
+                        << " dt=" << ctx.dt
+                        << " effective_dt=" << ctx.effective_dt
+                        << " x=" << formatTraceVector(ctx.x)
+                        << " xdot=" << formatTraceVector(ctx.xdot)
+                        << " inputs=" << formatTraceVector(ctx.inputs)
+                        << " residual=" << formatTraceVector(entity_res);
+                    FE_LOG_INFO(oss.str());
+                }
                 vector_out->addVectorEntries(aux_dofs, entity_res);
             }
 
             // Jacobian (aux-aux self-coupling block).
             if (want_matrix && matrix_out && entry.deriv_provider) {
-                const auto n_inp = static_cast<int>(entry.input_bindings.size());
+                const auto n_inp = static_cast<int>(bound_inputs.size());
                 std::vector<Real> entity_jac(static_cast<std::size_t>(dim * dim));
                 std::vector<Real> entity_dFdi(static_cast<std::size_t>(dim * n_inp));
+                std::vector<Real> entity_dFdxdot(static_cast<std::size_t>(dim * dim), 0.0);
 
                 AuxiliaryJacobianRequest jac_req;
                 jac_req.dF_dx = entity_jac;
                 jac_req.n = dim;
+                jac_req.want_dF_dxdot = true;
+                jac_req.dF_dxdot = entity_dFdxdot;
                 // Request dF/dinputs for chain-rule coupling.
                 if (n_inp > 0 && !entry.coupled_bindings.empty()) {
                     jac_req.dF_dinputs = entity_dFdi;
                     jac_req.n_inputs = n_inp;
                 }
                 entry.deriv_provider->evaluateJacobian(*entry.model, ctx, jac_req);
+
+                if (!entity_dFdxdot.empty() && bordered_coupling_.active &&
+                    bordered_coupling_.dF_dxdot.size() ==
+                        static_cast<std::size_t>(bordered_coupling_.n_aux * bordered_coupling_.n_aux)) {
+                    const auto na = static_cast<std::size_t>(bordered_coupling_.n_aux);
+                    for (int r = 0; r < dim; ++r) {
+                        const auto ai = static_cast<std::size_t>(
+                            aux_dofs[static_cast<std::size_t>(r)] - static_cast<GlobalIndex>(n_field_dofs));
+                        if (ai >= na) continue;
+                        for (int c = 0; c < dim; ++c) {
+                            const auto aj = static_cast<std::size_t>(
+                                aux_dofs[static_cast<std::size_t>(c)] - static_cast<GlobalIndex>(n_field_dofs));
+                            if (aj >= na) continue;
+                            bordered_coupling_.dF_dxdot[ai * na + aj] +=
+                                entity_dFdxdot[static_cast<std::size_t>(r * dim + c)];
+                        }
+                    }
+                }
+
+                // Add the current-stage time discretization contribution:
+                // J = dF/dx + (d xdot / d x_current) * dF/dxdot.
+                if (temporal.dxdot_dx_coeff != Real(0.0)) {
+                    for (std::size_t i = 0; i < entity_jac.size(); ++i) {
+                        entity_jac[i] += temporal.dxdot_dx_coeff * entity_dFdxdot[i];
+                    }
+                    // Store dF/dinputs in bordered data for B computation.
+                    if (!entity_dFdi.empty()) {
+                        bordered_coupling_.dF_dinputs.assign(entity_dFdi.begin(), entity_dFdi.end());
+                    }
+                }
                 matrix_out->addMatrixEntries(aux_dofs, aux_dofs, entity_jac);
 
                 // Chain-rule coupling: dF/du = dF/dI * dI/du.
                 // For each coupled binding, compute the field-auxiliary
                 // Jacobian block and insert it into the global matrix.
                 if (n_inp > 0 && !entity_dFdi.empty()) {
-                    int input_col = 0;
-                    for (const auto& [model_input, reg_input] : entry.input_bindings) {
-                        auto cb_it = entry.coupled_bindings.find(model_input);
-                        if (cb_it != entry.coupled_bindings.end()) {
-                            const auto& handle = cb_it->second;
-                            if (handle.hasDefinition() &&
-                                handle.supportsMonolithicLinearization()) {
-                                // For sampled fields, dI/du is identity at sampled DOFs.
-                                // For boundary integrals, dI/du comes from the
-                                // BoundaryReductionService gradient assembly.
-                                //
-                                // For now, sampled-field chain rule is implemented:
-                                // dF/du_j = dF/dI_k * delta(k, DOF_j)
-                                // = dF/dI column for the k-th input, scattered to field DOFs.
-                                if (handle.kind() == FEQuantityKind::SampledField) {
-                                    const auto& ref_fields = handle.referencedFields();
-                                    if (!ref_fields.empty()) {
-                                        const auto fid = ref_fields[0];
-                                        const auto fidx = static_cast<std::size_t>(fid);
-                                        if (fidx < field_dof_offsets_.size() &&
-                                            fidx < field_dof_handlers_.size()) {
-                                            const auto fld_off = field_dof_offsets_[fidx];
-                                            const auto* emap = field_dof_handlers_[fidx].getEntityDofMap();
-                                            if (emap) {
-                                                // dI/du for sampled field = identity at vertex DOFs.
-                                                // Use the actual DOF map for vertex e.
-                                                auto vertex_dofs = emap->getVertexDofs(
-                                                    static_cast<GlobalIndex>(e));
-                                                // Extract dF/dI column for this input.
+                    auto visitCoupledInputComponents = [&](auto&& fn) {
+                        if (auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get())) {
+                            int input_col = 0;
+                            for (const auto& inp : built->signature().inputs) {
+                                auto cb_it = entry.coupled_bindings.find(inp.name);
+                                for (int ic = 0; ic < inp.size; ++ic) {
+                                    if (cb_it != entry.coupled_bindings.end()) {
+                                        fn(inp.name, cb_it->second, input_col + ic);
+                                    }
+                                }
+                                input_col += inp.size;
+                            }
+                            return;
+                        }
+
+                        auto decl = entry.model->declaredInputNames();
+                        if (!decl.empty()) {
+                            int input_col = 0;
+                            for (const auto& raw : decl) {
+                                auto [iname, input_size] = parseDeclaredInputName(raw);
+                                auto cb_it = entry.coupled_bindings.find(iname);
+                                for (int ic = 0; ic < input_size; ++ic) {
+                                    if (cb_it != entry.coupled_bindings.end()) {
+                                        fn(iname, cb_it->second, input_col + ic);
+                                    }
+                                }
+                                input_col += input_size;
+                            }
+                            return;
+                        }
+
+                        int input_col = 0;
+                        for (const auto& [model_input, reg_input] : entry.input_bindings) {
+                            int input_size = 1;
+                            if (auxiliary_input_registry_ &&
+                                auxiliary_input_registry_->hasInput(reg_input)) {
+                                input_size = auxiliary_input_registry_->specOf(reg_input).size;
+                            }
+                            auto cb_it = entry.coupled_bindings.find(model_input);
+                            for (int ic = 0; ic < input_size; ++ic) {
+                                if (cb_it != entry.coupled_bindings.end()) {
+                                    fn(model_input, cb_it->second, input_col + ic);
+                                }
+                            }
+                            input_col += input_size;
+                        }
+                    };
+
+                    visitCoupledInputComponents([&](const std::string& /*model_input*/,
+                                                    const AuxiliaryInputHandle& handle,
+                                                    int input_col) {
+                        if (input_col < 0 || input_col >= n_inp) {
+                            return;
+                        }
+                        if (handle.hasDefinition() &&
+                            handle.supportsMonolithicLinearization()) {
+                            // For sampled fields, dI/du is identity at sampled DOFs.
+                            // For boundary integrals, dI/du comes from the
+                            // BoundaryReductionService gradient assembly.
+                            //
+                            // For now, sampled-field chain rule is implemented:
+                            // dF/du_j = dF/dI_k * delta(k, DOF_j)
+                            // = dF/dI column for the k-th input, scattered to field DOFs.
+                            if (handle.kind() == FEQuantityKind::SampledField) {
+                                const auto& ref_fields = handle.referencedFields();
+                                if (!ref_fields.empty()) {
+                                    const auto fid = ref_fields[0];
+                                    const auto fidx = static_cast<std::size_t>(fid);
+                                    if (fidx < field_dof_offsets_.size() &&
+                                        fidx < field_dof_handlers_.size()) {
+                                        const auto fld_off = field_dof_offsets_[fidx];
+                                        const auto* emap = field_dof_handlers_[fidx].getEntityDofMap();
+                                        if (emap) {
+                                            // dI/du for sampled field = identity at vertex DOFs.
+                                            // Use the actual DOF map for vertex e.
+                                            auto vertex_dofs = emap->getVertexDofs(
+                                                static_cast<GlobalIndex>(e));
+                                            // Extract dF/dI column for this input.
+                                            std::vector<Real> col(static_cast<std::size_t>(dim));
+                                            for (int r = 0; r < dim; ++r) {
+                                                col[static_cast<std::size_t>(r)] =
+                                                    entity_dFdi[static_cast<std::size_t>(
+                                                        r * n_inp + input_col)];
+                                            }
+                                            // Each vertex DOF gets a column of dF/dI.
+                                            for (const auto local_dof : vertex_dofs) {
+                                                const auto global_dof = static_cast<GlobalIndex>(
+                                                    local_dof + fld_off);
+                                                std::vector<GlobalIndex> fd = {global_dof};
+                                                matrix_out->addMatrixEntries(aux_dofs, fd, col);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            else if (handle.kind() == FEQuantityKind::BoundaryIntegral ||
+                                     handle.kind() == FEQuantityKind::BoundaryAverage ||
+                                     handle.kind() == FEQuantityKind::DomainIntegral ||
+                                     handle.kind() == FEQuantityKind::DomainAverage ||
+                                     handle.kind() == FEQuantityKind::RegionIntegral ||
+                                     handle.kind() == FEQuantityKind::RegionAverage ||
+                                     handle.kind() == FEQuantityKind::FEExpression) {
+                                // Integral dI/du via symbolic gradient assembly.
+                                // For average kinds (DomainAverage, RegionAverage,
+                                // BoundaryAverage), the public handle name is a
+                                // derived callback over __integral and __measure.
+                                // Use the __integral name for gradient lookup.
+                                // For DomainAverage/RegionAverage, the service only
+                                // knows about the __integral sub-functional.
+                                // BoundaryAverage is registered directly as a
+                                // BoundaryFunctional with Reduction::Average, so
+                                // its gradient is already correct without __integral.
+                                std::string func_name = handle.registryName();
+                                const bool is_domain_region_avg =
+                                    handle.kind() == FEQuantityKind::DomainAverage ||
+                                    handle.kind() == FEQuantityKind::RegionAverage;
+                                if (is_domain_region_avg) {
+                                    func_name = handle.registryName() + "__integral";
+                                }
+
+                                const auto& ref_fields = handle.referencedFields();
+                                if (!ref_fields.empty()) {
+                                    const auto svc_fid = ref_fields[0];
+                                    auto svc_it = boundary_reduction_services_.find(svc_fid);
+                                    if (svc_it != boundary_reduction_services_.end() && svc_it->second) {
+                                        for (const auto target_fid : ref_fields) {
+                                            auto grad = svc_it->second->evaluateFunctionalGradient(
+                                                func_name, target_fid, state);
+
+                                            // For averages, apply quotient rule:
+                                            // d(I/M)/du = (dI/du)/M  (measure M is constant w.r.t. u
+                                            // for geometry-independent integrands; for u-dependent
+                                            // measure, the full quotient rule would be needed).
+                                            if (is_domain_region_avg && auxiliary_input_registry_) {
+                                                const std::string meas_name =
+                                                    handle.registryName() + "__measure";
+                                                if (auxiliary_input_registry_->hasInput(meas_name)) {
+                                                    const Real measure =
+                                                        auxiliary_input_registry_->get(meas_name);
+                                                    if (measure > 0.0) {
+                                                        for (auto& se : grad) se.value /= measure;
+                                                    }
+                                                }
+                                            }
+
+                                            for (const auto& se : grad) {
                                                 std::vector<Real> col(static_cast<std::size_t>(dim));
                                                 for (int r = 0; r < dim; ++r) {
                                                     col[static_cast<std::size_t>(r)] =
                                                         entity_dFdi[static_cast<std::size_t>(
                                                             r * n_inp + input_col)];
                                                 }
-                                                // Each vertex DOF gets a column of dF/dI.
-                                                for (const auto local_dof : vertex_dofs) {
-                                                    const auto global_dof = static_cast<GlobalIndex>(
-                                                        local_dof + fld_off);
-                                                    std::vector<GlobalIndex> fd = {global_dof};
-                                                    matrix_out->addMatrixEntries(aux_dofs, fd, col);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                else if (handle.kind() == FEQuantityKind::BoundaryIntegral ||
-                                         handle.kind() == FEQuantityKind::BoundaryAverage ||
-                                         handle.kind() == FEQuantityKind::DomainIntegral ||
-                                         handle.kind() == FEQuantityKind::DomainAverage ||
-                                         handle.kind() == FEQuantityKind::RegionIntegral ||
-                                         handle.kind() == FEQuantityKind::RegionAverage ||
-                                         handle.kind() == FEQuantityKind::FEExpression) {
-                                    // Integral dI/du via symbolic gradient assembly.
-                                    // For average kinds (DomainAverage, RegionAverage,
-                                    // BoundaryAverage), the public handle name is a
-                                    // derived callback over __integral and __measure.
-                                    // Use the __integral name for gradient lookup.
-                                    // For DomainAverage/RegionAverage, the service only
-                                    // knows about the __integral sub-functional.
-                                    // BoundaryAverage is registered directly as a
-                                    // BoundaryFunctional with Reduction::Average, so
-                                    // its gradient is already correct without __integral.
-                                    std::string func_name = handle.registryName();
-                                    const bool is_domain_region_avg =
-                                        handle.kind() == FEQuantityKind::DomainAverage ||
-                                        handle.kind() == FEQuantityKind::RegionAverage;
-                                    if (is_domain_region_avg) {
-                                        func_name = handle.registryName() + "__integral";
-                                    }
-
-                                    const auto& ref_fields = handle.referencedFields();
-                                    if (!ref_fields.empty()) {
-                                        const auto svc_fid = ref_fields[0];
-                                        auto svc_it = boundary_reduction_services_.find(svc_fid);
-                                        if (svc_it != boundary_reduction_services_.end() && svc_it->second) {
-                                            for (const auto target_fid : ref_fields) {
-                                                auto grad = svc_it->second->evaluateFunctionalGradient(
-                                                    func_name, target_fid, state);
-
-                                                // For averages, apply quotient rule:
-                                                // d(I/M)/du = (dI/du)/M  (measure M is constant w.r.t. u
-                                                // for geometry-independent integrands; for u-dependent
-                                                // measure, the full quotient rule would be needed).
-                                                if (is_domain_region_avg && auxiliary_input_registry_) {
-                                                    const std::string meas_name =
-                                                        handle.registryName() + "__measure";
-                                                    if (auxiliary_input_registry_->hasInput(meas_name)) {
-                                                        const Real measure =
-                                                            auxiliary_input_registry_->get(meas_name);
-                                                        if (measure > 0.0) {
-                                                            for (auto& se : grad) se.value /= measure;
-                                                        }
-                                                    }
-                                                }
-
-                                                for (const auto& se : grad) {
-                                                    std::vector<Real> col(static_cast<std::size_t>(dim));
-                                                    for (int r = 0; r < dim; ++r) {
-                                                        col[static_cast<std::size_t>(r)] =
-                                                            entity_dFdi[static_cast<std::size_t>(
-                                                                r * n_inp + input_col)];
-                                                    }
-                                                    for (auto& c : col) c *= se.value;
-                                                    std::vector<GlobalIndex> field_dof = {se.dof};
-                                                    matrix_out->addMatrixEntries(aux_dofs, field_dof, col);
-                                                }
+                                                for (auto& c : col) c *= se.value;
+                                                std::vector<GlobalIndex> field_dof = {se.dof};
+                                                matrix_out->addMatrixEntries(aux_dofs, field_dof, col);
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                        ++input_col;
-                    }
+                    });
                 }
             }
         }
@@ -3098,6 +4109,9 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 auto entity_x = blk.gatherEntityWork(e);
                 auto entity_committed = blk.gatherEntityCommitted(e);
                 const auto orig_e = ent_map.empty() ? e : ent_map[e];
+                const auto entity_committed_rate = gatherMonolithicCommittedRate(entry, e);
+                auto temporal = buildMonolithicAuxiliaryTemporalEvaluation(
+                    entry.stepper_spec, blk, e, entity_x, entity_committed, entity_committed_rate, state);
 
                 // Rebuild inputs per entity when entity-local bindings exist.
                 if (has_entity_local_inputs && auxiliary_input_registry_) {
@@ -3116,15 +4130,6 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                     } else {
                         rebuildGenericInputsForEntity(entry, orig_e, bound_inputs);
                     }
-                }
-
-                // BDF1 xdot.
-                std::vector<Real> xdot(static_cast<std::size_t>(dim));
-                if (state.dt > 0.0) {
-                    for (int i = 0; i < dim; ++i)
-                        xdot[static_cast<std::size_t>(i)] =
-                            (entity_x[static_cast<std::size_t>(i)] -
-                             entity_committed[static_cast<std::size_t>(i)]) / state.dt;
                 }
 
                 // Build field_values from the global solution for this entity.
@@ -3153,11 +4158,13 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 }
 
                 AuxiliaryLocalContext ctx;
-                ctx.time = state.time; ctx.dt = state.dt; ctx.effective_dt = state.dt;
-                ctx.x = entity_x; ctx.xdot = xdot;
+                ctx.time = state.time; ctx.dt = state.dt; ctx.effective_dt = aux_dt;
+                ctx.x = entity_x; ctx.xdot = temporal.xdot;
+                ctx.history = temporal.history_spans;
                 ctx.inputs = bound_inputs; ctx.params = params;
                 ctx.entity_index = e;
                 ctx.field_values = field_vals;
+                ctx.user_data = state.user_data;
 
                 // Build global DOF indices for this entity's auxiliary unknowns.
                 std::vector<GlobalIndex> aux_dofs(static_cast<std::size_t>(dim));
@@ -3223,270 +4230,712 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
             const auto n_outputs = static_cast<int>(entry.model->outputCount());
             const int dim = entry.model->dimension();
             if (n_outputs == 0 || dim == 0) continue;
-
-            // Find this block's offset in the mixed system.
-            std::size_t block_offset = n_field_dofs;
-            for (const auto& e2 : deployed_aux_entries_) {
-                if (&e2 == &entry) break;
-                if (e2.spec.solve_mode == AuxiliarySolveMode::Monolithic) {
-                    block_offset += static_cast<std::size_t>(e2.model->dimension());
-                }
-            }
-
-            // Get current output values and auxiliary state.
             if (!auxiliary_state_manager_ ||
                 !auxiliary_state_manager_->hasBlock(entry.instance_name)) continue;
 
             auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
-            auto entity_x = blk.work();
+            const auto n_entities = blk.entityCount();
 
-            // Build context for output evaluation.
-            std::vector<Real> params = buildParamVector(entry);
-            std::vector<Real> inputs = buildInputVector(entry);
-            std::vector<Real> xdot(static_cast<std::size_t>(dim), 0.0);
-            if (state.dt > 0.0) {
-                auto committed = blk.committed();
-                for (int i = 0; i < dim; ++i)
-                    xdot[static_cast<std::size_t>(i)] =
-                        (entity_x[static_cast<std::size_t>(i)] -
-                         committed[static_cast<std::size_t>(i)]) / state.dt;
-            }
-
-            AuxiliaryLocalContext ctx;
-            ctx.time = state.time; ctx.dt = state.dt; ctx.effective_dt = state.dt;
-            ctx.x = entity_x; ctx.xdot = xdot;
-            ctx.inputs = inputs; ctx.params = params;
-
-            // Compute base outputs.
-            std::vector<Real> base_outputs(static_cast<std::size_t>(n_outputs));
-            entry.model->evaluateOutputs(ctx, base_outputs);
-
-            // Compute d(output_k)/dx_j symbolically.
-            // For BuiltAuxiliaryModel, output expressions are FormExpr trees
-            // with AuxiliaryStateRef(slot) terminals that can be differentiated
-            // using the PointEvaluator.  For custom models, fall back to FD.
-            const Real eps = 1e-7;
-            std::vector<Real> dO_dx(static_cast<std::size_t>(n_outputs * dim), 0.0);
-
-            // Use symbolic d(output)/d(state) from the derivative provider
-            // if available.  This avoids any FD on the auxiliary model.
-            if (entry.deriv_provider) {
-                const auto& art = entry.deriv_provider->artifact();
-                if (art.valid && !art.dOutput_dx_exprs.empty() &&
-                    art.n_outputs == n_outputs) {
-                    // Evaluate symbolic derivative expressions.
-                    forms::PointEvalContext pctx;
-                    pctx.time = ctx.time;
-                    pctx.dt = (ctx.effective_dt > 0.0) ? ctx.effective_dt : ctx.dt;
-                    pctx.coupled_aux = ctx.x;
-                    pctx.auxiliary_inputs = ctx.inputs;
-                    pctx.jit_constants = ctx.params;
-
-                    for (int k = 0; k < n_outputs; ++k) {
-                        for (int j = 0; j < dim; ++j) {
-                            const auto idx = static_cast<std::size_t>(k * dim + j);
-                            if (idx < art.dOutput_dx_exprs.size()) {
-                                dO_dx[idx] = forms::evaluateScalarAt(
-                                    art.dOutput_dx_exprs[idx], pctx);
-                            }
-                        }
-                    }
-                } else {
-                    // FD fallback for custom models without symbolic output derivatives.
-                    std::vector<Real> x_pert(entity_x.begin(), entity_x.end());
-                    AuxiliaryLocalContext pert_ctx = ctx;
-                    pert_ctx.x = x_pert;
-                    std::vector<Real> pert_outputs(static_cast<std::size_t>(n_outputs));
-
-                    for (int j = 0; j < dim; ++j) {
-                        const Real orig = x_pert[static_cast<std::size_t>(j)];
-                        x_pert[static_cast<std::size_t>(j)] = orig + eps;
-                        entry.model->evaluateOutputs(pert_ctx, pert_outputs);
-                        x_pert[static_cast<std::size_t>(j)] = orig;
-
-                        for (int k = 0; k < n_outputs; ++k) {
-                            dO_dx[static_cast<std::size_t>(k * dim + j)] =
-                                (pert_outputs[static_cast<std::size_t>(k)] -
-                                 base_outputs[static_cast<std::size_t>(k)]) / eps;
-                        }
-                    }
+            std::size_t block_offset = 0;
+            for (const auto& bl : mixed.aux_layout.blocks) {
+                if (bl.name == entry.instance_name) {
+                    block_offset = bl.offset + mixed.aux_layout.mixed_system_offset;
+                    break;
                 }
             }
 
-            // Compute dR_PDE/d(output_k) symbolically by differentiating
-            // the PDE form w.r.t. each AuxiliaryOutputRef(slot).
-            //
-            // Scan the formulation records for AuxiliaryOutputRef nodes
-            // matching this entry's output slots, differentiate, and
-            // assemble the derivative linear form.
-            const auto output_names = entry.model->outputNames();
+            auto params = buildParamVector(entry);
+            auto bound_inputs = buildInputVector(entry);
 
-            // Build auxiliary DOF indices.
-            std::vector<GlobalIndex> aux_dofs(static_cast<std::size_t>(dim));
-            for (int j = 0; j < dim; ++j) {
-                aux_dofs[static_cast<std::size_t>(j)] = static_cast<GlobalIndex>(
-                    block_offset + static_cast<std::size_t>(j));
-            }
-
-            for (int k = 0; k < n_outputs; ++k) {
-                // Check if any dO_dx is nonzero for this output.
-                bool has_sensitivity = false;
-                for (int j = 0; j < dim; ++j) {
-                    if (std::abs(dO_dx[static_cast<std::size_t>(k * dim + j)]) > 1e-14) {
-                        has_sensitivity = true;
+            bool has_entity_local_inputs = false;
+            if (auxiliary_input_registry_) {
+                for (const auto& [mn, rn] : entry.input_bindings) {
+                    if (auxiliary_input_registry_->hasInput(rn) &&
+                        auxiliary_input_registry_->isEntityLocal(rn)) {
+                        has_entity_local_inputs = true;
                         break;
                     }
                 }
-                if (!has_sensitivity) continue;
+            }
 
-                // Find the output slot in the auxiliary output buffer.
-                const auto qualified = entry.instance_name + "/" + output_names[static_cast<std::size_t>(k)];
-                const auto slot = auxiliaryOutputSlotOf(qualified);
-                if (slot == static_cast<std::size_t>(-1)) continue;
-                const auto slot32 = static_cast<std::uint32_t>(slot);
+            struct EntityCouplingData {
+                std::vector<GlobalIndex> aux_dofs{};
+                std::vector<Real> dO_dx{};
+                std::vector<Real> dO_dI{};
+                std::vector<Real> dF_dinputs{};
+                std::vector<std::vector<std::pair<GlobalIndex, Real>>> input_gradients{};
+                std::vector<char> input_gradient_sources{};
+                int n_inputs{0};
+            };
 
-                // For each PDE formulation record that references this output,
-                // symbolically differentiate and assemble dR/d(output_k).
-                for (const auto& frec : formulation_records_) {
-                    if (!frec.residual_expr) continue;
-                    const auto residual = forms::FormExpr(
-                        std::const_pointer_cast<forms::FormExprNode>(frec.residual_expr));
+            std::vector<EntityCouplingData> entity_data(n_entities);
+            const auto& ent_map = entry.entity_map;
 
-                    // Check if this form references the output slot.
-                    bool references_slot = false;
-                    std::function<void(const forms::FormExprNode&)> scan_refs =
-                        [&](const forms::FormExprNode& n) {
-                            if (n.type() == forms::FormExprType::AuxiliaryOutputRef) {
-                                const auto s = n.slotIndex();
-                                if (s && *s == slot32) references_slot = true;
-                            }
-                            for (const auto* c : n.children()) {
-                                if (c && !references_slot) scan_refs(*c);
-                            }
-                        };
-                    scan_refs(*frec.residual_expr);
-                    if (!references_slot) continue;
+            for (std::size_t e = 0; e < n_entities; ++e) {
+                auto entity_x = blk.gatherEntityWork(e);
+                auto entity_committed = blk.gatherEntityCommitted(e);
+                const auto orig_e = ent_map.empty() ? e : ent_map[e];
+                const auto entity_committed_rate = gatherMonolithicCommittedRate(entry, e);
+                auto temporal = buildMonolithicAuxiliaryTemporalEvaluation(
+                    entry.stepper_spec, blk, e, entity_x, entity_committed, entity_committed_rate, state);
 
-                    // Symbolically differentiate: dR/d(output_k).
-                    // The result is a linear form where AuxiliaryOutputRef(slot)
-                    // has been replaced by constant(1.0) via the Kronecker delta rule.
-                    auto dR_dOk = forms::differentiateWrtAuxiliaryOutput(residual, slot32);
-                    if (!dR_dOk.isValid()) continue;
-
-                    // Compile the derivative linear form into an assembly kernel.
-                    const auto n_total = static_cast<GlobalIndex>(dof_handler_.getNumDofs());
-                    if (n_total <= 0 || !assembler_) continue;
-
-                    try {
-                        forms::FormCompiler compiler;
-                        auto ir = compiler.compileLinear(dR_dOk);
-                        forms::FormKernel deriv_kernel(std::move(ir));
-
-                        // Assemble the derivative linear form into a vector.
-                        // The GradAccumulator collects per-DOF contributions.
-                        struct VecAccum final : public assembly::GlobalSystemView {
-                            std::unordered_map<GlobalIndex, Real> entries;
-                            GlobalIndex sz;
-                            explicit VecAccum(GlobalIndex s) : sz(s) {}
-                            void addMatrixEntries(std::span<const GlobalIndex>, std::span<const Real>, assembly::AddMode) override {}
-                            void addMatrixEntries(std::span<const GlobalIndex>, std::span<const GlobalIndex>, std::span<const Real>, assembly::AddMode) override {}
-                            void addMatrixEntry(GlobalIndex, GlobalIndex, Real, assembly::AddMode) override {}
-                            void setDiagonal(std::span<const GlobalIndex>, std::span<const Real>) override {}
-                            void setDiagonal(GlobalIndex, Real) override {}
-                            void zeroRows(std::span<const GlobalIndex>, bool) override {}
-                            void addVectorEntries(std::span<const GlobalIndex> d, std::span<const Real> v, assembly::AddMode) override {
-                                for (std::size_t i = 0; i < d.size(); ++i) {
-                                    if (d[i] >= 0 && d[i] < sz) entries[d[i]] += v[i];
-                                }
-                            }
-                            void addVectorEntry(GlobalIndex d, Real v, assembly::AddMode) override {
-                                if (d >= 0 && d < sz) entries[d] += v;
-                            }
-                            void setVectorEntries(std::span<const GlobalIndex>, std::span<const Real>) override {}
-                            void zeroVectorEntries(std::span<const GlobalIndex> d) override { for (auto x : d) entries.erase(x); }
-                            [[nodiscard]] Real getVectorEntry(GlobalIndex d) const override {
-                                auto it = entries.find(d); return it != entries.end() ? it->second : 0.0;
-                            }
-                            void beginAssemblyPhase() override {}
-                            void endAssemblyPhase() override {}
-                            void finalizeAssembly() override {}
-                            [[nodiscard]] assembly::AssemblyPhase getPhase() const noexcept override { return assembly::AssemblyPhase::Building; }
-                            [[nodiscard]] bool hasMatrix() const noexcept override { return false; }
-                            [[nodiscard]] bool hasVector() const noexcept override { return true; }
-                            [[nodiscard]] GlobalIndex numRows() const noexcept override { return sz; }
-                            [[nodiscard]] GlobalIndex numCols() const noexcept override { return sz; }
-                            [[nodiscard]] std::string backendName() const override { return "VecAccum"; }
-                            void zero() override { entries.clear(); }
-                        };
-
-                        VecAccum dR_vec(n_total);
-
-                        // Disable constraints for raw derivative assembly.
-                        assembler_->setConstraints(nullptr);
-
-                        // Set solution for state-dependent derivative forms.
-                        std::unique_ptr<assembly::GlobalSystemView> sol_view;
-                        if (state.u_vector) {
-                            auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
-                            sol_view = vec->createAssemblyView();
-                            assembler_->setCurrentSolutionView(sol_view.get());
-                        }
-
-                        // Assemble on appropriate domains.
-                        if (deriv_kernel.hasCell()) {
-                            // Use first active field's space for assembly.
-                            if (!frec.active_fields.empty()) {
-                                const auto& rec = fieldRecord(frec.active_fields[0]);
-                                if (rec.space) {
-                                    const auto foff = fieldDofOffset(frec.active_fields[0]);
-                                    const auto& fdh = fieldDofHandler(frec.active_fields[0]);
-                                    assembler_->setRowDofMap(fdh.getDofMap(), foff);
-                                    assembler_->setColDofMap(fdh.getDofMap(), foff);
-                                    assembler_->assembleVector(
-                                        meshAccess(), *rec.space, deriv_kernel, dR_vec);
-                                }
+                if (has_entity_local_inputs && auxiliary_input_registry_) {
+                    bound_inputs.clear();
+                    if (auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get())) {
+                        for (const auto& inp : built->signature().inputs) {
+                            auto bi = entry.input_bindings.find(inp.name);
+                            if (bi != entry.input_bindings.end()) {
+                                auto v = auxiliary_input_registry_->valuesOf(bi->second, orig_e);
+                                bound_inputs.insert(bound_inputs.end(), v.begin(), v.end());
+                            } else {
+                                bound_inputs.resize(bound_inputs.size() +
+                                    static_cast<std::size_t>(inp.size), 0.0);
                             }
                         }
-                        if (deriv_kernel.hasBoundaryFace()) {
-                            if (!frec.active_fields.empty()) {
-                                const auto& rec = fieldRecord(frec.active_fields[0]);
-                                if (rec.space) {
-                                    const auto foff = fieldDofOffset(frec.active_fields[0]);
-                                    const auto& fdh = fieldDofHandler(frec.active_fields[0]);
-                                    assembler_->setRowDofMap(fdh.getDofMap(), foff);
-                                    assembler_->setColDofMap(fdh.getDofMap(), foff);
-                                    // Assemble on all boundary markers used in the form.
-                                    // The kernel's computeBoundaryFace filters by marker.
-                                    const auto& mesh = meshAccess();
-                                    for (int m = 0; m < 256; ++m) {
-                                        assembler_->assembleBoundaryFaces(
-                                            mesh, m, *rec.space, deriv_kernel,
-                                            nullptr, &dR_vec);
+                    } else {
+                        rebuildGenericInputsForEntity(entry, orig_e, bound_inputs);
+                    }
+                }
+
+                std::vector<FieldValueEntry> field_vals;
+                if (entry.deriv_provider) {
+                    const auto& art = entry.deriv_provider->artifact();
+                    if (!art.referenced_fields.empty()) {
+                        field_vals.reserve(art.referenced_fields.size());
+                        for (const auto fid : art.referenced_fields) {
+                            const auto fidx = static_cast<std::size_t>(fid);
+                            if (fidx >= field_dof_offsets_.size() ||
+                                fidx >= field_dof_handlers_.size()) continue;
+                            const auto fld_off = field_dof_offsets_[fidx];
+                            const auto* femap = field_dof_handlers_[fidx].getEntityDofMap();
+                            if (!femap) continue;
+                            auto vdofs = femap->getVertexDofs(static_cast<GlobalIndex>(orig_e));
+                            if (!vdofs.empty()) {
+                                FieldValueEntry fve;
+                                fve.field = fid;
+                                fve.n_components = static_cast<int>(vdofs.size());
+                                for (int c = 0; c < fve.n_components && c < MAX_FIELD_VALUE_COMPONENTS; ++c) {
+                                    const auto gidx = static_cast<std::size_t>(
+                                        vdofs[static_cast<std::size_t>(c)] + fld_off);
+                                    fve.components[c] = (gidx < state.u.size()) ? state.u[gidx] : 0.0;
+                                }
+                                field_vals.push_back(fve);
+                            }
+                        }
+                    }
+                }
+
+                AuxiliaryLocalContext ctx;
+                ctx.time = state.time;
+                ctx.dt = state.dt;
+                ctx.effective_dt = aux_dt;
+                ctx.x = entity_x;
+                ctx.xdot = temporal.xdot;
+                ctx.history = temporal.history_spans;
+                ctx.inputs = bound_inputs;
+                ctx.params = params;
+                ctx.entity_index = e;
+                ctx.field_values = field_vals;
+                ctx.user_data = state.user_data;
+
+                auto& ed = entity_data[e];
+                ed.aux_dofs.resize(static_cast<std::size_t>(dim));
+                for (int j = 0; j < dim; ++j) {
+                    ed.aux_dofs[static_cast<std::size_t>(j)] = static_cast<GlobalIndex>(
+                        block_offset + e * static_cast<std::size_t>(dim) +
+                        static_cast<std::size_t>(j));
+                }
+
+                std::vector<Real> base_outputs(static_cast<std::size_t>(n_outputs), 0.0);
+                entry.model->evaluateOutputs(ctx, base_outputs);
+
+                ed.dO_dx.assign(static_cast<std::size_t>(n_outputs * dim), 0.0);
+                const Real eps = 1e-7;
+                if (entry.deriv_provider) {
+                    const auto& art = entry.deriv_provider->artifact();
+                    if (art.valid && !art.dOutput_dx_exprs.empty() &&
+                        art.n_outputs == n_outputs) {
+                        forms::PointEvalContext pctx;
+                        pctx.time = ctx.time;
+                        pctx.dt = (ctx.effective_dt > 0.0) ? ctx.effective_dt : ctx.dt;
+                        pctx.coupled_aux = ctx.x;
+                        pctx.auxiliary_inputs = ctx.inputs;
+                        pctx.jit_constants = ctx.params;
+                        for (int k = 0; k < n_outputs; ++k) {
+                            for (int j = 0; j < dim; ++j) {
+                                const auto idx = static_cast<std::size_t>(k * dim + j);
+                                if (idx < art.dOutput_dx_exprs.size()) {
+                                    ed.dO_dx[idx] = forms::evaluateScalarAt(
+                                        art.dOutput_dx_exprs[idx], pctx);
+                                }
+                            }
+                        }
+                    } else {
+                        std::vector<Real> x_pert(entity_x.begin(), entity_x.end());
+                        AuxiliaryLocalContext pert_ctx = ctx;
+                        pert_ctx.x = x_pert;
+                        std::vector<Real> pert_outputs(static_cast<std::size_t>(n_outputs), 0.0);
+                        for (int j = 0; j < dim; ++j) {
+                            const Real orig = x_pert[static_cast<std::size_t>(j)];
+                            x_pert[static_cast<std::size_t>(j)] = orig + eps;
+                            entry.model->evaluateOutputs(pert_ctx, pert_outputs);
+                            x_pert[static_cast<std::size_t>(j)] = orig;
+                            for (int k = 0; k < n_outputs; ++k) {
+                                ed.dO_dx[static_cast<std::size_t>(k * dim + j)] =
+                                    (pert_outputs[static_cast<std::size_t>(k)] -
+                                     base_outputs[static_cast<std::size_t>(k)]) / eps;
+                            }
+                        }
+                    }
+
+                    if (!art.dOutput_dInputs_exprs.empty()) {
+                        forms::PointEvalContext pctx2;
+                        pctx2.time = ctx.time;
+                        pctx2.dt = (ctx.effective_dt > 0.0) ? ctx.effective_dt : ctx.dt;
+                        pctx2.coupled_aux = ctx.x;
+                        pctx2.auxiliary_inputs = ctx.inputs;
+                        pctx2.jit_constants = ctx.params;
+                        ed.dO_dI.resize(art.dOutput_dInputs_exprs.size(), 0.0);
+                        for (std::size_t idx = 0; idx < art.dOutput_dInputs_exprs.size(); ++idx) {
+                            ed.dO_dI[idx] = forms::evaluateScalarAt(
+                                art.dOutput_dInputs_exprs[idx], pctx2);
+                        }
+                    }
+                }
+
+                bordered_coupling_.dO_dx = ed.dO_dx;
+                if (!ed.dO_dI.empty()) {
+                    bordered_coupling_.dO_dI = ed.dO_dI;
+                }
+
+                auto visitCoupledInputComponents = [&](auto&& fn) {
+                    if (auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get())) {
+                        int input_col = 0;
+                        for (const auto& inp : built->signature().inputs) {
+                            auto cb_it = entry.coupled_bindings.find(inp.name);
+                            for (int ic = 0; ic < inp.size; ++ic) {
+                                if (cb_it != entry.coupled_bindings.end()) {
+                                    fn(inp.name, cb_it->second, input_col + ic);
+                                }
+                            }
+                            input_col += inp.size;
+                        }
+                        return;
+                    }
+
+                    auto decl = entry.model->declaredInputNames();
+                    if (!decl.empty()) {
+                        int input_col = 0;
+                        for (const auto& raw : decl) {
+                            auto [iname, input_size] = parseDeclaredInputName(raw);
+                            auto cb_it = entry.coupled_bindings.find(iname);
+                            for (int ic = 0; ic < input_size; ++ic) {
+                                if (cb_it != entry.coupled_bindings.end()) {
+                                    fn(iname, cb_it->second, input_col + ic);
+                                }
+                            }
+                            input_col += input_size;
+                        }
+                        return;
+                    }
+
+                    int input_col = 0;
+                    for (const auto& [model_input, reg_input] : entry.input_bindings) {
+                        int input_size = 1;
+                        if (auxiliary_input_registry_ &&
+                            auxiliary_input_registry_->hasInput(reg_input)) {
+                            input_size = auxiliary_input_registry_->specOf(reg_input).size;
+                        }
+                        auto cb_it = entry.coupled_bindings.find(model_input);
+                        for (int ic = 0; ic < input_size; ++ic) {
+                            if (cb_it != entry.coupled_bindings.end()) {
+                                fn(model_input, cb_it->second, input_col + ic);
+                            }
+                        }
+                        input_col += input_size;
+                    }
+                };
+
+                auto exactInputGradient = [&](const AuxiliaryInputHandle& handle)
+                    -> std::vector<std::pair<GlobalIndex, Real>> {
+                    std::vector<std::pair<GlobalIndex, Real>> out;
+                    if (!(handle.hasDefinition() && handle.supportsMonolithicLinearization())) {
+                        return out;
+                    }
+
+                    const auto kind = handle.kind();
+                    if (kind != FEQuantityKind::BoundaryIntegral &&
+                        kind != FEQuantityKind::BoundaryAverage &&
+                        kind != FEQuantityKind::DomainIntegral &&
+                        kind != FEQuantityKind::DomainAverage &&
+                        kind != FEQuantityKind::RegionIntegral &&
+                        kind != FEQuantityKind::RegionAverage &&
+                        kind != FEQuantityKind::FEExpression) {
+                        return out;
+                    }
+
+                    const auto& ref_fields = handle.referencedFields();
+                    if (ref_fields.empty()) {
+                        return out;
+                    }
+
+                    std::string func_name = handle.registryName();
+                    const bool is_domain_region_avg =
+                        kind == FEQuantityKind::DomainAverage ||
+                        kind == FEQuantityKind::RegionAverage;
+                    if (is_domain_region_avg) {
+                        func_name += "__integral";
+                    }
+
+                    std::unordered_map<GlobalIndex, Real> accum;
+                    const auto svc_fid = ref_fields.front();
+                    auto svc_it = boundary_reduction_services_.find(svc_fid);
+                    if (svc_it == boundary_reduction_services_.end() || !svc_it->second) {
+                        return out;
+                    }
+
+                    for (const auto target_fid : ref_fields) {
+                        auto grad = svc_it->second->evaluateFunctionalGradient(
+                            func_name, target_fid, state);
+
+                        if (is_domain_region_avg && auxiliary_input_registry_) {
+                            const std::string meas_name = handle.registryName() + "__measure";
+                            if (auxiliary_input_registry_->hasInput(meas_name)) {
+                                const Real measure = auxiliary_input_registry_->get(meas_name);
+                                if (measure > Real(0.0)) {
+                                    for (auto& se : grad) {
+                                        se.value /= measure;
                                     }
                                 }
                             }
                         }
 
-                        // Compose: dR_i/dx_j = dR_i/d(output_k) * d(output_k)/dx_j.
-                        for (const auto& [dof_i, dRi_dOk] : dR_vec.entries) {
-                            if (std::abs(dRi_dOk) < 1e-14) continue;
+                        for (const auto& se : grad) {
+                            accum[se.dof] += se.value;
+                        }
+                    }
 
-                            for (int j = 0; j < dim; ++j) {
-                                const Real dOk_dxj = dO_dx[static_cast<std::size_t>(k * dim + j)];
-                                if (std::abs(dOk_dxj) < 1e-14) continue;
+#if FE_HAS_MPI
+                    {
+                        std::vector<std::pair<GlobalIndex, Real>> local_pairs;
+                        local_pairs.reserve(accum.size());
+                        for (const auto& [dof, val] : accum) {
+                            local_pairs.emplace_back(dof, val);
+                        }
+                        const auto global_pairs =
+                            allreduceSumSparsePairs(std::move(local_pairs), MPI_COMM_WORLD);
+                        out.assign(global_pairs.begin(), global_pairs.end());
+                    }
+#else
+                    out.reserve(accum.size());
+                    for (const auto& [dof, val] : accum) {
+                        out.emplace_back(dof, val);
+                    }
+#endif
 
-                                const Real val = dRi_dOk * dOk_dxj;
-                                std::vector<GlobalIndex> row = {dof_i};
-                                std::vector<GlobalIndex> col = {aux_dofs[static_cast<std::size_t>(j)]};
-                                std::vector<Real> mat = {val};
-                                matrix_out->addMatrixEntries(row, col, mat);
+                    std::sort(out.begin(), out.end(),
+                              [](const auto& a, const auto& b) { return a.first < b.first; });
+                    return out;
+                };
+
+                ed.n_inputs = static_cast<int>(ctx.inputs.size());
+                if (entry.deriv_provider && !entry.coupled_bindings.empty() && ed.n_inputs > 0 &&
+                    bordered_coupling_.Ct.size() >=
+                        static_cast<std::size_t>(bordered_coupling_.n_aux) * n_field_dofs) {
+                    std::vector<Real> direct_dF_dinputs(
+                        static_cast<std::size_t>(dim * ed.n_inputs), 0.0);
+                    AuxiliaryJacobianRequest jac_req;
+                    jac_req.n = dim;
+                    jac_req.dF_dinputs = direct_dF_dinputs;
+                    jac_req.n_inputs = ed.n_inputs;
+                    entry.deriv_provider->evaluateJacobian(*entry.model, ctx, jac_req);
+
+                    bordered_coupling_.dF_dinputs = direct_dF_dinputs;
+                    ed.dF_dinputs = direct_dF_dinputs;
+                    const auto aux_row_offset =
+                        static_cast<std::size_t>(ed.aux_dofs.front() -
+                            static_cast<GlobalIndex>(n_field_dofs));
+                    ed.input_gradients.resize(static_cast<std::size_t>(ed.n_inputs));
+                    ed.input_gradient_sources.assign(static_cast<std::size_t>(ed.n_inputs), 0);
+                    visitCoupledInputComponents([&](const std::string&,
+                                                    const AuxiliaryInputHandle& handle,
+                                                    int input_col) {
+                        if (input_col < 0 || input_col >= ed.n_inputs) {
+                            return;
+                        }
+                        auto grad = exactInputGradient(handle);
+                        if (!grad.empty()) {
+                            ed.input_gradients[static_cast<std::size_t>(input_col)] =
+                                std::move(grad);
+                            ed.input_gradient_sources[static_cast<std::size_t>(input_col)] = 1;
+                        }
+                    });
+                    for (int input_col = 0; input_col < ed.n_inputs; ++input_col) {
+                        auto& grad = ed.input_gradients[static_cast<std::size_t>(input_col)];
+                        if (!grad.empty()) {
+                            continue;
+                        }
+                        grad = reconstructInputGradientFromCt(
+                            bordered_coupling_.Ct,
+                            n_field_dofs,
+                            aux_row_offset,
+                            dim,
+                            direct_dF_dinputs,
+                            ed.n_inputs,
+                            input_col);
+                        if (!grad.empty()) {
+                            ed.input_gradient_sources[static_cast<std::size_t>(input_col)] = 2;
+                        }
+                    }
+                }
+            }
+
+            const auto output_names = entry.model->outputNames();
+            for (int k = 0; k < n_outputs; ++k) {
+                const auto& oname = output_names[static_cast<std::size_t>(k)];
+                const auto base_slot = auxiliaryOutputSlotOf(entry.instance_name, oname);
+                if (base_slot == static_cast<std::size_t>(-1)) continue;
+
+                for (std::size_t e = 0; e < n_entities; ++e) {
+                    const auto& ed = entity_data[e];
+                    bool has_state_sensitivity = false;
+                    for (int j = 0; j < dim; ++j) {
+                        if (std::abs(ed.dO_dx[static_cast<std::size_t>(k * dim + j)]) > 1e-14) {
+                            has_state_sensitivity = true;
+                            break;
+                        }
+                    }
+
+                    bool has_direct_sensitivity = false;
+                    if (!ed.dO_dI.empty() && ed.n_inputs > 0) {
+                        for (int input_col = 0; input_col < ed.n_inputs; ++input_col) {
+                            if (static_cast<std::size_t>(k * ed.n_inputs + input_col) < ed.dO_dI.size() &&
+                                std::abs(ed.dO_dI[static_cast<std::size_t>(k * ed.n_inputs + input_col)]) >
+                                    kDirectCouplingEntryTol &&
+                                input_col < static_cast<int>(ed.input_gradients.size()) &&
+                                !ed.input_gradients[static_cast<std::size_t>(input_col)].empty()) {
+                                has_direct_sensitivity = true;
+                                break;
                             }
                         }
-                    } catch (const std::exception& ex) {
-                        // If symbolic compilation fails (e.g., unsupported
-                        // expression structure), skip this contribution.
-                        // The derivative is still correct for the other terms.
-                        (void)ex;
+                    }
+
+                    if (!has_state_sensitivity && !has_direct_sensitivity) {
+                        continue;
+                    }
+
+                    const auto slot = base_slot + e * static_cast<std::size_t>(n_outputs);
+                    const auto slot32 = static_cast<std::uint32_t>(slot);
+
+                    BorderedCouplingData::DirectCouplingRecord coupling_record;
+                    coupling_record.output_slot = slot;
+                    coupling_record.entity_index = e;
+                    coupling_record.aux_local_indices.reserve(ed.aux_dofs.size());
+                    for (const auto aux_dof : ed.aux_dofs) {
+                        coupling_record.aux_local_indices.push_back(
+                            static_cast<std::size_t>(aux_dof) - n_field_dofs);
+                    }
+                    coupling_record.dF_dinputs = ed.dF_dinputs;
+                    if (static_cast<std::size_t>((k + 1) * dim) <= ed.dO_dx.size()) {
+                        const auto dx_begin = ed.dO_dx.begin() + static_cast<std::ptrdiff_t>(k * dim);
+                        coupling_record.dO_dx.assign(dx_begin, dx_begin + dim);
+                    }
+                    if (!ed.dO_dI.empty() && ed.n_inputs > 0 &&
+                        static_cast<std::size_t>((k + 1) * ed.n_inputs) <= ed.dO_dI.size()) {
+                        const auto di_begin =
+                            ed.dO_dI.begin() + static_cast<std::ptrdiff_t>(k * ed.n_inputs);
+                        coupling_record.dO_dI.assign(di_begin, di_begin + ed.n_inputs);
+                    }
+                    bordered_coupling_.direct_coupling_records.push_back(std::move(coupling_record));
+
+                    for (const auto& frec : formulation_records_) {
+                        for (const auto& [block_key, block_node] : frec.block_residual_exprs) {
+                            if (!block_node) continue;
+
+                            bool references_slot = false;
+                            std::function<void(const forms::FormExprNode&)> scan_refs =
+                                [&](const forms::FormExprNode& n) {
+                                    if (n.type() == forms::FormExprType::AuxiliaryOutputRef) {
+                                        const auto s = n.slotIndex();
+                                        if (s && *s == slot32) references_slot = true;
+                                    }
+                                    for (const auto* c : n.children()) {
+                                        if (c && !references_slot) scan_refs(*c);
+                                    }
+                                };
+                            scan_refs(*block_node);
+                            if (!references_slot) continue;
+
+                            const auto block_residual = forms::FormExpr(
+                                std::const_pointer_cast<forms::FormExprNode>(block_node));
+                            auto relevant = forms::extractTermsReferencing(
+                                block_residual, forms::FormExprType::AuxiliaryOutputRef, slot32);
+                            if (!relevant.isValid()) continue;
+
+                            auto dR_dOk = forms::differentiateWrtAuxiliaryOutput(relevant, slot32);
+                            if (!dR_dOk.isValid()) continue;
+
+                            const auto test_field = block_key.first;
+                            const auto n_total = static_cast<GlobalIndex>(dof_handler_.getNumDofs());
+                            if (n_total <= 0 || !assembler_) continue;
+
+                            try {
+                                forms::FormCompiler compiler;
+                                auto ir = compiler.compileLinear(dR_dOk);
+                                forms::FormKernel deriv_kernel(std::move(ir));
+
+                                struct VecAccum final : public assembly::GlobalSystemView {
+                                    std::unordered_map<GlobalIndex, Real> entries;
+                                    GlobalIndex sz;
+                                    explicit VecAccum(GlobalIndex s) : sz(s) {}
+                                    void addMatrixEntries(std::span<const GlobalIndex>, std::span<const Real>, assembly::AddMode) override {}
+                                    void addMatrixEntries(std::span<const GlobalIndex>, std::span<const GlobalIndex>, std::span<const Real>, assembly::AddMode) override {}
+                                    void addMatrixEntry(GlobalIndex, GlobalIndex, Real, assembly::AddMode) override {}
+                                    void setDiagonal(std::span<const GlobalIndex>, std::span<const Real>) override {}
+                                    void setDiagonal(GlobalIndex, Real) override {}
+                                    void zeroRows(std::span<const GlobalIndex>, bool) override {}
+                                    void addVectorEntries(std::span<const GlobalIndex> d, std::span<const Real> v, assembly::AddMode) override {
+                                        for (std::size_t i = 0; i < d.size(); ++i) {
+                                            if (d[i] >= 0 && d[i] < sz) entries[d[i]] += v[i];
+                                        }
+                                    }
+                                    void addVectorEntry(GlobalIndex d, Real v, assembly::AddMode) override {
+                                        if (d >= 0 && d < sz) entries[d] += v;
+                                    }
+                                    void setVectorEntries(std::span<const GlobalIndex>, std::span<const Real>) override {}
+                                    void zeroVectorEntries(std::span<const GlobalIndex> d) override { for (auto x : d) entries.erase(x); }
+                                    [[nodiscard]] Real getVectorEntry(GlobalIndex d) const override {
+                                        auto it = entries.find(d); return it != entries.end() ? it->second : 0.0;
+                                    }
+                                    void beginAssemblyPhase() override {}
+                                    void endAssemblyPhase() override {}
+                                    void finalizeAssembly() override {}
+                                    [[nodiscard]] assembly::AssemblyPhase getPhase() const noexcept override { return assembly::AssemblyPhase::Building; }
+                                    [[nodiscard]] bool hasMatrix() const noexcept override { return false; }
+                                    [[nodiscard]] bool hasVector() const noexcept override { return true; }
+                                    [[nodiscard]] GlobalIndex numRows() const noexcept override { return sz; }
+                                    [[nodiscard]] GlobalIndex numCols() const noexcept override { return sz; }
+                                    [[nodiscard]] std::string backendName() const override { return "VecAccum"; }
+                                    void zero() override { entries.clear(); }
+                                };
+
+                                VecAccum dR_vec(n_total);
+                                const auto* restore_constraints =
+                                    use_constraints_in_assembly_ ? &affine_constraints_ : nullptr;
+                                // Assemble dR/d(output) in the same constrained test space
+                                // as the PDE operator.  The legacy coupled-boundary path
+                                // does not disable constraints here, and the monolithic
+                                // operator must match that free-DOF Jacobian.
+                                assembler_->setConstraints(restore_constraints);
+
+                                std::unique_ptr<assembly::GlobalSystemView> sol_view;
+                                assembler_->setCurrentSolutionView(nullptr);
+                                if (state.u_vector) {
+                                    auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
+                                    sol_view = vec->createAssemblyView();
+                                    assembler_->setCurrentSolutionView(sol_view.get());
+                                }
+
+                                const auto& drec = fieldRecord(test_field);
+                                if (drec.space) {
+                                    const auto foff = fieldDofOffset(test_field);
+                                    const auto& fdh = fieldDofHandler(test_field);
+                                    assembler_->setRowDofMap(fdh.getDofMap(), foff);
+                                    assembler_->setColDofMap(fdh.getDofMap(), foff);
+
+                                    if (deriv_kernel.hasCell()) {
+                                        assembler_->assembleVector(
+                                            meshAccess(), *drec.space, deriv_kernel, dR_vec);
+                                    }
+                                    if (deriv_kernel.hasBoundaryFace()) {
+                                        const auto scan = analysis::scanFormExpr(*block_node);
+                                        const auto& mesh = meshAccess();
+                                        if (scan.boundary_markers.empty()) {
+                                            assembler_->assembleBoundaryFaces(
+                                                mesh, /*boundary_marker=*/-1, *drec.space,
+                                                deriv_kernel, nullptr, &dR_vec);
+                                        } else {
+                                            for (const int marker : scan.boundary_markers) {
+                                                assembler_->assembleBoundaryFaces(
+                                                    mesh, marker, *drec.space,
+                                                    deriv_kernel, nullptr, &dR_vec);
+                                            }
+                                        }
+                                    }
+                                }
+                                assembler_->setConstraints(restore_constraints);
+
+                                Real residual_output_weight = Real(1.0);
+                                if (state.time_integration) {
+                                    residual_output_weight =
+                                        state.time_integration->non_time_derivative_term_weight;
+                                }
+                                if (std::abs(residual_output_weight - Real(1.0)) > Real(1e-14)) {
+                                    for (auto& [dof, val] : dR_vec.entries) {
+                                        (void)dof;
+                                        val *= residual_output_weight;
+                                    }
+                                }
+
+                                std::unordered_map<GlobalIndex, Real> dR_rank1_entries = dR_vec.entries;
+#if FE_HAS_MPI
+                                {
+                                    std::vector<std::pair<GlobalIndex, Real>> local_pairs;
+                                    local_pairs.reserve(dR_vec.entries.size());
+                                    for (const auto& [dof, val] : dR_vec.entries) {
+                                        local_pairs.emplace_back(dof, val);
+                                    }
+                                    const auto global_pairs =
+                                        allreduceSumSparsePairs(std::move(local_pairs), MPI_COMM_WORLD);
+                                    dR_rank1_entries.clear();
+                                    dR_rank1_entries.reserve(global_pairs.size());
+                                    for (const auto& [dof, val] : global_pairs) {
+                                        dR_rank1_entries[dof] = val;
+                                    }
+                                }
+#endif
+
+                                const bool disable_direct_coupling =
+                                    std::getenv("SVMP_DISABLE_AUX_DIRECT_COUPLING") != nullptr;
+                                const Real direct_coupling_sign =
+                                    (std::getenv("SVMP_NEGATE_AUX_DIRECT_COUPLING") != nullptr)
+                                        ? Real(-1.0)
+                                        : Real(1.0);
+                                if (!disable_direct_coupling &&
+                                    !ed.input_gradients.empty() && !ed.dO_dI.empty() &&
+                                    ed.n_inputs > 0) {
+                                    for (int input_col = 0; input_col < ed.n_inputs; ++input_col) {
+                                        if (static_cast<std::size_t>(k * ed.n_inputs + input_col) >=
+                                            ed.dO_dI.size()) {
+                                            continue;
+                                        }
+                                        const Real dOk_dIm = direct_coupling_sign * ed.dO_dI[
+                                            static_cast<std::size_t>(k * ed.n_inputs + input_col)];
+                                        if (std::abs(dOk_dIm) <= kDirectCouplingEntryTol) {
+                                            continue;
+                                        }
+                                        if (input_col >= static_cast<int>(ed.input_gradients.size())) {
+                                            continue;
+                                        }
+                                        const auto& q_u =
+                                            ed.input_gradients[static_cast<std::size_t>(input_col)];
+                                        if (monolithicDirectTraceEnabled()) {
+                                            const char* grad_source = "none";
+                                            if (input_col < static_cast<int>(ed.input_gradient_sources.size())) {
+                                                const auto src = ed.input_gradient_sources[
+                                                    static_cast<std::size_t>(input_col)];
+                                                grad_source = (src == 1) ? "exact"
+                                                    : ((src == 2) ? "reconstructed" : "none");
+                                            }
+                                            Real q_norm_sq = Real(0.0);
+                                            for (const auto& [dof, qj] : q_u) {
+                                                (void)dof;
+                                                q_norm_sq += qj * qj;
+                                            }
+                                            Real dR_norm_sq = Real(0.0);
+                                            for (const auto& [dof, dRi_dOk] : dR_rank1_entries) {
+                                                (void)dof;
+                                                dR_norm_sq += dRi_dOk * dRi_dOk;
+                                            }
+                                            std::ostringstream oss;
+                                            oss << "FESystem: monolithic direct coupling"
+                                                << " block='" << entry.instance_name << "'"
+                                                << " output='" << oname << "'"
+                                                << " entity=" << e
+                                                << " input_col=" << input_col
+                                                << " dO_dI=" << dOk_dIm
+                                                << " grad_source=" << grad_source
+                                                << " grad_nnz=" << q_u.size()
+                                                << " grad_norm=" << std::sqrt(q_norm_sq)
+                                                << " dR_nnz=" << dR_rank1_entries.size()
+                                                << " dR_norm=" << std::sqrt(dR_norm_sq);
+                                            FE_LOG_INFO(oss.str());
+                                        }
+                                        auto upd = tryBuildDirectCouplingRankOneUpdate(
+                                            dR_rank1_entries, q_u, dOk_dIm);
+                                        if (upd.has_value()) {
+                                            if (monolithicDirectTraceEnabled()) {
+                                                std::ostringstream oss;
+                                                oss << "FESystem: monolithic direct coupling"
+                                                    << " block='" << entry.instance_name << "'"
+                                                    << " output='" << oname << "'"
+                                                    << " entity=" << e
+                                                    << " input_col=" << input_col
+                                                    << " path='rank_one'"
+                                                    << " sigma=" << upd->sigma
+                                                    << " nnz=" << upd->v.size();
+                                                FE_LOG_INFO(oss.str());
+                                            }
+                                            last_rank_one_updates_.push_back(std::move(*upd));
+                                            continue;
+                                        }
+
+                                        // Exact fallback for non-symmetric direct feedthrough:
+                                        // assemble (dR/dOk) * (dOk/dIm) * (dIm/du) as a sparse
+                                        // outer product directly into the PDE Jacobian block.
+                                        if (!q_u.empty()) {
+                                            if (monolithicDirectTraceEnabled()) {
+                                                std::ostringstream oss;
+                                                oss << "FESystem: monolithic direct coupling"
+                                                    << " block='" << entry.instance_name << "'"
+                                                    << " output='" << oname << "'"
+                                                    << " entity=" << e
+                                                    << " input_col=" << input_col
+                                                    << " path='exact_outer_product'";
+                                                FE_LOG_INFO(oss.str());
+                                            }
+                                            std::vector<GlobalIndex> col_dofs;
+                                            std::vector<Real> col_vals;
+                                            col_dofs.reserve(q_u.size());
+                                            col_vals.reserve(q_u.size());
+                                            for (const auto& [dof_j, qj] : q_u) {
+                                                col_dofs.push_back(dof_j);
+                                                col_vals.push_back(qj);
+                                            }
+
+                                            std::vector<Real> row_vals(col_vals.size(), 0.0);
+                                            std::array<GlobalIndex, 1> row_dof{};
+                                            for (const auto& [dof_i, dRi_dOk] : dR_vec.entries) {
+                                                const Real scale = dRi_dOk * dOk_dIm;
+                                                if (std::abs(scale) <= kDirectCouplingEntryTol) {
+                                                    continue;
+                                                }
+                                                row_dof[0] = dof_i;
+                                                for (std::size_t jj = 0; jj < col_vals.size(); ++jj) {
+                                                    row_vals[jj] = scale * col_vals[jj];
+                                                }
+                                                matrix_out->addMatrixEntries(
+                                                    std::span<const GlobalIndex>(
+                                                        row_dof.data(), row_dof.size()),
+                                                    std::span<const GlobalIndex>(
+                                                        col_dofs.data(), col_dofs.size()),
+                                                    std::span<const Real>(
+                                                        row_vals.data(), row_vals.size()),
+                                                    assembly::AddMode::Add);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                for (const auto& [dof_i, dRi_dOk] : dR_vec.entries) {
+                                    if (std::abs(dRi_dOk) < 1e-14) continue;
+                                    for (int j = 0; j < dim; ++j) {
+                                        const Real dOk_dxj =
+                                            ed.dO_dx[static_cast<std::size_t>(k * dim + j)];
+                                        if (std::abs(dOk_dxj) < 1e-14) continue;
+
+                                        const Real val = dRi_dOk * dOk_dxj;
+                                        std::vector<GlobalIndex> row = {dof_i};
+                                        std::vector<GlobalIndex> col = {
+                                            ed.aux_dofs[static_cast<std::size_t>(j)]};
+                                        std::vector<Real> mat = {val};
+                                        matrix_out->addMatrixEntries(row, col, mat);
+                                    }
+                                }
+                            } catch (const std::exception&) {
+                                // Symbolic compilation may fail for complex expressions.
+                            }
+                        }
                     }
                 }
             }
@@ -3649,6 +5098,11 @@ void FESystem::assembleMonolithicAuxiliary(
         auxiliary_input_registry_->evaluate(time, dt, is_nonlinear_iteration);
     }
 
+    SystemStateView mono_state;
+    mono_state.time = time;
+    mono_state.dt = dt;
+    mono_state.effective_dt = dt;
+
     // Assemble contributions from each monolithic deployed block.
     for (auto& entry : deployed_aux_entries_) {
         if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) continue;
@@ -3690,6 +5144,9 @@ void FESystem::assembleMonolithicAuxiliary(
             auto entity_committed = blk.gatherEntityCommitted(e);
             const auto row_base = block_offset + e * static_cast<std::size_t>(dim);
             const auto orig_e = emap.empty() ? e : emap[e];
+            const auto entity_committed_rate = gatherMonolithicCommittedRate(entry, e);
+            auto temporal = buildMonolithicAuxiliaryTemporalEvaluation(
+                entry.stepper_spec, blk, e, entity_x, entity_committed, entity_committed_rate, mono_state);
 
             // Rebuild inputs per entity when entity-local bindings exist.
             if (has_entity_local_inputs && auxiliary_input_registry_) {
@@ -3709,25 +5166,13 @@ void FESystem::assembleMonolithicAuxiliary(
                 }
             }
 
-            // Compute xdot via BDF1: xdot ≈ (x_work - x_committed) / dt.
-            // NOTE: This is a standalone BDF1 approximation, not coupled to
-            // the FE time integrator.  Full monolithic integration with the
-            // FE linear solver would use the time integrator's own xdot.
-            std::vector<Real> xdot(static_cast<std::size_t>(dim));
-            if (dt > 0.0) {
-                for (int i = 0; i < dim; ++i) {
-                    xdot[static_cast<std::size_t>(i)] =
-                        (entity_x[static_cast<std::size_t>(i)] -
-                         entity_committed[static_cast<std::size_t>(i)]) / dt;
-                }
-            }
-
             AuxiliaryLocalContext ctx;
             ctx.time = time;
             ctx.dt = dt;
             ctx.effective_dt = dt;
             ctx.x = entity_x;
-            ctx.xdot = xdot;
+            ctx.xdot = temporal.xdot;
+            ctx.history = temporal.history_spans;
             ctx.inputs = bound_inputs;
             ctx.params = params;
             ctx.entity_index = e;
@@ -3747,7 +5192,16 @@ void FESystem::assembleMonolithicAuxiliary(
                 AuxiliaryJacobianRequest jac_req;
                 jac_req.dF_dx = entity_jac;
                 jac_req.n = dim;
+                jac_req.want_dF_dxdot = true;
+                std::vector<Real> entity_dFdxdot(static_cast<std::size_t>(dim * dim), 0.0);
+                jac_req.dF_dxdot = entity_dFdxdot;
                 entry.deriv_provider->evaluateJacobian(*entry.model, ctx, jac_req);
+
+                if (temporal.dxdot_dx_coeff != Real(0.0)) {
+                    for (std::size_t i = 0; i < entity_jac.size(); ++i) {
+                        entity_jac[i] += temporal.dxdot_dx_coeff * entity_dFdxdot[i];
+                    }
+                }
 
                 for (int i = 0; i < dim; ++i) {
                     for (int j = 0; j < dim; ++j) {
@@ -3782,6 +5236,9 @@ void FESystem::rollbackAuxiliaryState()
 
 void FESystem::finalizeAuxiliaryLayout()
 {
+    monolithic_aux_committed_rates_.clear();
+    monolithic_aux_committed_rates_valid_.clear();
+
     // Materialize deployed instances into blocks, steppers, and derivative providers.
     for (auto& entry : deployed_aux_entries_) {
         auto& mgr = auxiliaryStateManager();
@@ -3827,8 +5284,10 @@ void FESystem::finalizeAuxiliaryLayout()
         // Region-to-entity expansion.
         // If the deployment region restricts to a subset, build an entity map
         // and adjust entity_count to the restricted set size.
+        // Boundary scope is exempt: its region is metadata (which boundary),
+        // not a per-entity expansion — entity_count stays 1.
         const auto& region = entry.spec.deployment_region;
-        if (region.isRestricted()) {
+        if (region.isRestricted() && entry.spec.scope != AuxiliaryStateScope::Boundary) {
             if (!region.explicit_entities.empty()) {
                 // Explicit entity set: use directly.
                 entry.entity_map = region.explicit_entities;
@@ -4385,9 +5844,12 @@ FESystem::assembleBoundaryGradient(FieldId field,
     GradAccumulator accum(n_total);
 
     // Configure the assembler for this field.
-    // Disable constraints for gradient assembly — we want the raw dI/du
-    // without constraint redistribution.
-    assembler_->setConstraints(nullptr);
+    // Assemble dI/du in the same constrained trial space used by the PDE
+    // operator so monolithic direct-feedthrough uses free-DOF sensitivities
+    // consistent with the assembled Jacobian.
+    const auto* restore_constraints =
+        use_constraints_in_assembly_ ? &affine_constraints_ : nullptr;
+    assembler_->setConstraints(restore_constraints);
     assembler_->setRowDofMap(fdh.getDofMap(), field_off);
     assembler_->setColDofMap(fdh.getDofMap(), field_off);
 
@@ -4496,6 +5958,8 @@ FESystem::assembleBoundaryGradient(FieldId field,
             result.push_back({dof, val});
         }
     }
+
+    assembler_->setConstraints(restore_constraints);
 
     return result;
 }

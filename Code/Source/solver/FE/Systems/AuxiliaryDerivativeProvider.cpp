@@ -730,9 +730,22 @@ void AuxiliaryDerivativeProvider::setup(
                     {
                         int n_inp = 0;
                         if (auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(&model)) {
-                            n_inp = static_cast<int>(built->signature().inputs.size());
+                            for (const auto& inp : built->signature().inputs) {
+                                n_inp += inp.size;
+                            }
                         } else {
-                            n_inp = static_cast<int>(model.declaredInputNames().size());
+                            for (const auto& raw : model.declaredInputNames()) {
+                                auto colon = raw.find(':');
+                                if (colon == std::string::npos) {
+                                    ++n_inp;
+                                } else {
+                                    try {
+                                        n_inp += std::stoi(raw.substr(colon + 1));
+                                    } catch (const std::exception&) {
+                                        ++n_inp;
+                                    }
+                                }
+                            }
                         }
                         if (n_inp > 0) {
                             artifact_.dF_dinputs_exprs.resize(
@@ -777,6 +790,32 @@ void AuxiliaryDerivativeProvider::setup(
                                                 DiffTarget::State,
                                                 static_cast<std::uint32_t>(j));
                                 }
+                            }
+                        }
+                    }
+
+                    // Generate d(output)/d(input) for the direct coupling term.
+                    if (auto* built_model2 = dynamic_cast<const BuiltAuxiliaryModel*>(&model)) {
+                        const auto& out_exprs2 = built_model2->outputExpressions();
+                        const int n_out2 = static_cast<int>(out_exprs2.size());
+                        const auto& sig2 = built_model2->signature();
+                        int total_inp = 0;
+                        for (const auto& inp : sig2.inputs) total_inp += inp.size;
+                        if (n_out2 > 0 && total_inp > 0) {
+                            artifact_.dOutput_dInputs_exprs.resize(
+                                static_cast<std::size_t>(n_out2 * total_inp));
+                            int inp_offset = 0;
+                            for (const auto& inp : sig2.inputs) {
+                                for (int ic = 0; ic < inp.size; ++ic) {
+                                    for (int k = 0; k < n_out2; ++k) {
+                                        artifact_.dOutput_dInputs_exprs[
+                                            static_cast<std::size_t>(k * total_inp + inp_offset + ic)] =
+                                            diffWrt(out_exprs2[static_cast<std::size_t>(k)].second,
+                                                    DiffTarget::Input,
+                                                    static_cast<std::uint32_t>(inp_offset + ic));
+                                    }
+                                }
+                                inp_offset += inp.size;
                             }
                         }
                     }

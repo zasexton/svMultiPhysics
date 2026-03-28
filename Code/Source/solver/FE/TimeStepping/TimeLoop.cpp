@@ -1375,27 +1375,28 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 rep.residual_norm0 = rep.residual_norm;
             }
 
-            const bool abs_ok = rep.residual_norm <= options_.newton.abs_tolerance;
-            const bool rel_ok = (options_.newton.rel_tolerance <= 0.0)
-                ? true
-                : (rep.residual_norm0 > 0.0
+            const bool abs_enabled = options_.newton.abs_tolerance > 0.0;
+            const bool rel_enabled = options_.newton.rel_tolerance > 0.0;
+            const bool abs_ok = !abs_enabled || rep.residual_norm <= options_.newton.abs_tolerance;
+            const bool rel_ok = !rel_enabled
+                || (rep.residual_norm0 > 0.0
                        ? (rep.residual_norm / rep.residual_norm0 <= options_.newton.rel_tolerance)
                        : abs_ok);
-            if (abs_ok || rel_ok) {
+            if (abs_ok && rel_ok) {
                 rep.converged = true;
                 rep.iterations = it;
                 break;
             }
 
-            // Stagnation detection: residual not improving AND has decreased from
-            // initial means we've converged to the best achievable precision.
-            // Requiring ||r|| < ||r0|| prevents false convergence when Newton
-            // hasn't made meaningful progress.
+            // Stagnation is diagnostic-only unless the configured nonlinear
+            // tolerances are also satisfied. This keeps the reported residual
+            // history honest for hard nonlinear solves.
             if (it > 0 && options_.newton.stagnation_tolerance > 0.0 &&
                 prev_residual_norm > 0.0 && std::isfinite(prev_residual_norm) &&
                 rep.residual_norm0 > 0.0 && rep.residual_norm < rep.residual_norm0) {
                 const double ratio = rep.residual_norm / prev_residual_norm;
-                if (ratio >= options_.newton.stagnation_tolerance) {
+                if (ratio >= options_.newton.stagnation_tolerance &&
+                    abs_ok && rel_ok) {
                     rep.converged = true;
                     rep.iterations = it;
                     break;
@@ -1602,6 +1603,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             double error_norm_high = -1.0;
             bool used_collocation = false;
             CollocationFamily collocation_family_used = CollocationFamily::Gauss;
+            std::optional<double> monolithic_aux_stage_alpha_f{};
             int collocation_stages_used = 0;
 
             bool threw = false;
@@ -1923,9 +1925,9 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         }
 
 	                        nr = newton.solveStep(transient_stage, linear, stage_time, history, workspace);
-	                        if (nr.converged) {
-	                            const double inv_af = 1.0 / ga1_params->alpha_f;
-	                            const double c_prev = (ga1_params->alpha_f - 1.0) * inv_af;
+                        if (nr.converged) {
+                            const double inv_af = 1.0 / ga1_params->alpha_f;
+                            const double c_prev = (ga1_params->alpha_f - 1.0) * inv_af;
 	                            if (!nondt_dofs.empty()) {
 	                                copyVector(*scratch_vec0, history.u());
 	                            }
@@ -1957,9 +1959,10 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 	                            if (!nondt_dofs.empty()) {
 	                                zeroVectorEntries(nondt_dofs, history.uDot());
 	                            }
-	                            if (!constraints.empty()) {
-	                                constraints.distributeHomogeneous(history.uDot());
-	                            }
+                            if (!constraints.empty()) {
+                                constraints.distributeHomogeneous(history.uDot());
+                            }
+                            monolithic_aux_stage_alpha_f = ga1_params->alpha_f;
                         }
                     } else if (temporal_order == 2) {
                         if (!ga2_params.has_value()) {
@@ -2024,6 +2027,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                             for (std::size_t i = 0; i < cur.size(); ++i) {
                                 cur[i] = static_cast<Real>(inv_af) * cur[i] + static_cast<Real>(c_prev) * u_n[i];
                             }
+                            monolithic_aux_stage_alpha_f = ga2_params->alpha_f;
                         }
                     } else {
                         FE_THROW(NotImplementedException, "TimeLoop: GeneralizedAlpha supports temporal order <= 2");
@@ -2509,6 +2513,82 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     }
                 }
 
+                if (!nr.converged && options_.scheme == SchemeKind::GeneralizedAlpha) {
+                    const int temporal_order = transient.system().temporalOrder();
+                    if (temporal_order <= 1) {
+                        FE_THROW_IF(!ga1_params.has_value(), systems::InvalidStateException,
+                                    "TimeLoop: generalized-alpha parameters not initialized");
+                        history.ensureSecondOrderState(factory);
+
+                        const auto dt_fields =
+                            transient.system().timeDerivativeFields(options_.newton.jacobian_op);
+                        std::vector<GlobalIndex> nondt_dofs;
+                        if (!dt_fields.empty()) {
+                            const auto& fmap = transient.system().fieldMap();
+                            nondt_dofs.reserve(
+                                static_cast<std::size_t>(transient.system().dofHandler().getNumDofs()));
+                            for (std::size_t fi = 0; fi < fmap.numFields(); ++fi) {
+                                const auto fid = static_cast<FieldId>(fi);
+                                const bool is_dt_field =
+                                    std::find(dt_fields.begin(), dt_fields.end(), fid) != dt_fields.end();
+                                if (is_dt_field) {
+                                    continue;
+                                }
+                                const auto range = fmap.getFieldDofRange(fi);
+                                for (GlobalIndex d = range.first; d < range.second; ++d) {
+                                    nondt_dofs.push_back(d);
+                                }
+                            }
+                        }
+
+                        const double inv_af = 1.0 / ga1_params->alpha_f;
+                        const double c_prev = (ga1_params->alpha_f - 1.0) * inv_af;
+                        if (!nondt_dofs.empty()) {
+                            copyVector(*scratch_vec0, history.u());
+                        }
+                        auto cur = history.uSpan();
+                        const auto prev = history.uPrevSpan();
+                        FE_CHECK_ARG(cur.size() == prev.size(), "TimeLoop: generalized-alpha size mismatch");
+                        for (std::size_t i = 0; i < cur.size(); ++i) {
+                            cur[i] = static_cast<Real>(inv_af) * cur[i] + static_cast<Real>(c_prev) * prev[i];
+                        }
+                        if (!nondt_dofs.empty()) {
+                            copyVectorEntries(nondt_dofs, history.u(), *scratch_vec0);
+                        }
+
+                        const double gamma = ga1_params->gamma;
+                        const double inv_gamma_dt = 1.0 / (gamma * dt);
+                        const double c_old = (1.0 - gamma) / gamma;
+                        auto v = history.uDotSpan();
+                        FE_CHECK_ARG(v.size() == cur.size(), "TimeLoop: generalized-alpha uDot size mismatch");
+                        for (std::size_t i = 0; i < cur.size(); ++i) {
+                            const Real v_n = v[i];
+                            v[i] = static_cast<Real>(inv_gamma_dt) * (cur[i] - prev[i]) -
+                                static_cast<Real>(c_old) * v_n;
+                        }
+                        if (!nondt_dofs.empty()) {
+                            zeroVectorEntries(nondt_dofs, history.uDot());
+                        }
+                        const auto& sys_constraints = transient.system().constraints();
+                        if (!sys_constraints.empty()) {
+                            sys_constraints.distributeHomogeneous(history.uDot());
+                        }
+                        monolithic_aux_stage_alpha_f = ga1_params->alpha_f;
+                    } else if (temporal_order == 2) {
+                        FE_THROW_IF(!ga2_params.has_value(), systems::InvalidStateException,
+                                    "TimeLoop: generalized-alpha parameters not initialized");
+                        const double inv_af = 1.0 / ga2_params->alpha_f;
+                        const double c_prev = (ga2_params->alpha_f - 1.0) * inv_af;
+                        auto cur = history.uSpan();
+                        const auto u_n = history.uPrevSpan();
+                        FE_CHECK_ARG(cur.size() == u_n.size(), "TimeLoop: generalized-alpha(2nd-order) size mismatch");
+                        for (std::size_t i = 0; i < cur.size(); ++i) {
+                            cur[i] = static_cast<Real>(inv_af) * cur[i] + static_cast<Real>(c_prev) * u_n[i];
+                        }
+                        monolithic_aux_stage_alpha_f = ga2_params->alpha_f;
+                    }
+                }
+
                 const int temporal_order = transient.system().temporalOrder();
                 if (temporal_order == 2 && history.hasSecondOrderState()) {
                     if (options_.scheme == SchemeKind::Newmark) {
@@ -2736,6 +2816,18 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
                 }
 
+                    if (monolithic_aux_stage_alpha_f.has_value()) {
+                        const Real alpha_f = static_cast<Real>(*monolithic_aux_stage_alpha_f);
+                        const Real gamma =
+                            (ga1_params.has_value())
+                                ? static_cast<Real>(ga1_params->gamma)
+                                : Real(-1.0);
+                        transient.system().finalizeMonolithicAuxiliaryStageState(
+                            alpha_f,
+                            gamma,
+                            static_cast<Real>(dt),
+                            static_cast<Real>(t + dt));
+                    }
 	                transient.system().commitTimeStep();
 	                history.acceptStep(dt);
 	                if (temporal_order == 2 && options_.scheme == SchemeKind::VSVO_BDF && history.hasSecondOrderState()) {

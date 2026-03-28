@@ -1501,13 +1501,13 @@ assembly::AssemblyResult assembleOperator(
 #endif
 
     // Monolithic auxiliary assembly: inject auxiliary residual/Jacobian
-    // contributions into the global matrix/vector at auxiliary DOF offsets.
+    // contributions.  For entries within PDE DOF range, forward to the
+    // FSILS matrix/vector.  For entries involving auxiliary DOFs (outside
+    // FSILS bounds), capture into bordered coupling storage for post-solve
+    // static condensation.
     if (system.auxiliaryStateManagerIfPresent() &&
         system.auxiliaryOperatorRegistryIfPresent() &&
         system.auxiliaryOperatorRegistryIfPresent()->isLayoutFinalized()) {
-        // Determine field DOF count.  Use the DOF handler's total when
-        // available (correct for distributed/MPI); fall back to state.u.size()
-        // for the serial/local case.
         std::size_t n_field_dofs = 0;
         if (system.dofHandler().getEntityDofMap()) {
             n_field_dofs = static_cast<std::size_t>(
@@ -1516,10 +1516,155 @@ assembly::AssemblyResult assembleOperator(
             n_field_dofs = state.u.size();
         }
 
-        system.assembleMixedAuxiliaryIntoGlobal(
-            state, matrix_out, vector_out,
-            request.want_matrix, request.want_vector,
-            n_field_dofs, request.is_nonlinear_iteration);
+        const auto mixed = system.auxiliaryOperatorRegistryIfPresent()
+                               ->composeMixedLayout(n_field_dofs);
+        const int n_aux = static_cast<int>(mixed.n_aux_unknowns);
+
+        if (n_aux > 0) {
+            auto& bc = system.borderedCoupling();
+
+            // Only reset bordered blocks when assembling the Jacobian.
+            // Residual-only assembly must not clear the Jacobian blocks
+            // (D, B, Ct) that were populated during the J+r assembly.
+            if (request.want_matrix) {
+                bc.resize(n_aux, n_field_dofs);
+                bc.aux_blocks.clear();
+                for (const auto& entry : system.deployed_aux_entries_) {
+                    if (entry.spec.solve_mode == AuxiliarySolveMode::Monolithic) {
+                        int block_dim = entry.spec.size;
+                        if (auto* mgr = system.auxiliaryStateManagerIfPresent();
+                            mgr && mgr->hasBlock(entry.instance_name)) {
+                            block_dim = static_cast<int>(
+                                mgr->getBlock(entry.instance_name).storageSize());
+                        }
+                        bc.aux_blocks.push_back({entry.instance_name, block_dim});
+                    }
+                }
+            } else if (!bc.active) {
+                // First call (residual-only before any J+r): initialize.
+                bc.resize(n_aux, n_field_dofs);
+                bc.aux_blocks.clear();
+                for (const auto& entry : system.deployed_aux_entries_) {
+                    if (entry.spec.solve_mode == AuxiliarySolveMode::Monolithic) {
+                        int block_dim = entry.spec.size;
+                        if (auto* mgr = system.auxiliaryStateManagerIfPresent();
+                            mgr && mgr->hasBlock(entry.instance_name)) {
+                            block_dim = static_cast<int>(
+                                mgr->getBlock(entry.instance_name).storageSize());
+                        }
+                        bc.aux_blocks.push_back({entry.instance_name, block_dim});
+                    }
+                }
+            }
+            // Always re-zero g (auxiliary residual) since it changes each assembly.
+            std::fill(bc.g.begin(), bc.g.end(), 0.0);
+
+            // Create a wrapper view that routes aux-DOF entries to bordered
+            // storage and PDE-range entries to the real FSILS views.
+            struct BorderedView final : public assembly::GlobalSystemView {
+                assembly::GlobalSystemView* inner_mat;
+                assembly::GlobalSystemView* inner_vec;
+                FESystem::BorderedCouplingData* bc;
+                GlobalIndex nf; // n_field_dofs
+
+                void addMatrixEntries(std::span<const GlobalIndex> row_dofs,
+                    std::span<const GlobalIndex> col_dofs,
+                    std::span<const Real> vals, assembly::AddMode mode) override
+                {
+                    const auto nr = row_dofs.size();
+                    const auto nc = col_dofs.size();
+                    for (std::size_t i = 0; i < nr; ++i) {
+                        const auto r = row_dofs[i];
+                        for (std::size_t j = 0; j < nc; ++j) {
+                            const auto c = col_dofs[j];
+                            const auto v = vals[i * nc + j];
+                            if (std::abs(v) < 1e-30) continue;
+
+                            if (r < nf && c < nf) {
+                                // PDE×PDE → forward to FSILS
+                                if (inner_mat) inner_mat->addMatrixEntry(r, c, v, mode);
+                            } else if (r >= nf && c >= nf) {
+                                // Aux×Aux → D block
+                                const auto ai = static_cast<std::size_t>(r - nf);
+                                const auto aj = static_cast<std::size_t>(c - nf);
+                                const auto na = static_cast<std::size_t>(bc->n_aux);
+                                if (ai < na && aj < na)
+                                    bc->D[ai * na + aj] += v;
+                            } else if (r < nf && c >= nf) {
+                                // PDE×Aux → B block (col-major: B[r + nf*aux_col])
+                                const auto aj = static_cast<std::size_t>(c - nf);
+                                if (aj < static_cast<std::size_t>(bc->n_aux))
+                                    bc->B[static_cast<std::size_t>(r) + bc->n_field_dofs * aj] += v;
+                            } else {
+                                // Aux×PDE → C^T block (row-major: Ct[aux_row * nf + col])
+                                const auto ai = static_cast<std::size_t>(r - nf);
+                                if (ai < static_cast<std::size_t>(bc->n_aux))
+                                    bc->Ct[ai * bc->n_field_dofs + static_cast<std::size_t>(c)] += v;
+                            }
+                        }
+                    }
+                }
+                void addMatrixEntries(std::span<const GlobalIndex> dofs,
+                    std::span<const Real> vals, assembly::AddMode mode) override
+                { addMatrixEntries(dofs, dofs, vals, mode); }
+                void addMatrixEntry(GlobalIndex r, GlobalIndex c, Real v, assembly::AddMode mode) override {
+                    std::array<GlobalIndex,1> rd{r}, cd{c};
+                    std::array<Real,1> vv{v};
+                    addMatrixEntries(rd, cd, vv, mode);
+                }
+                void addVectorEntries(std::span<const GlobalIndex> dofs,
+                    std::span<const Real> vals, assembly::AddMode mode) override
+                {
+                    for (std::size_t i = 0; i < dofs.size(); ++i) {
+                        if (dofs[i] < nf) {
+                            if (inner_vec) inner_vec->addVectorEntry(dofs[i], vals[i], mode);
+                        } else {
+                            const auto ai = static_cast<std::size_t>(dofs[i] - nf);
+                            if (ai < static_cast<std::size_t>(bc->n_aux))
+                                bc->g[ai] += vals[i];
+                        }
+                    }
+                }
+                void addVectorEntry(GlobalIndex d, Real v, assembly::AddMode mode) override {
+                    std::array<GlobalIndex,1> dd{d};
+                    std::array<Real,1> vv{v};
+                    addVectorEntries(dd, vv, mode);
+                }
+                // Pass-through for unused methods.
+                void setDiagonal(std::span<const GlobalIndex> d, std::span<const Real> v) override { if (inner_mat) inner_mat->setDiagonal(d, v); }
+                void setDiagonal(GlobalIndex d, Real v) override { if (inner_mat) inner_mat->setDiagonal(d, v); }
+                void zeroRows(std::span<const GlobalIndex> d, bool b) override { if (inner_mat) inner_mat->zeroRows(d, b); }
+                void setVectorEntries(std::span<const GlobalIndex> d, std::span<const Real> v) override { if (inner_vec) inner_vec->setVectorEntries(d, v); }
+                void zeroVectorEntries(std::span<const GlobalIndex> d) override { if (inner_vec) inner_vec->zeroVectorEntries(d); }
+                [[nodiscard]] Real getVectorEntry(GlobalIndex d) const override { return inner_vec ? inner_vec->getVectorEntry(d) : 0.0; }
+                void beginAssemblyPhase() override {}
+                void endAssemblyPhase() override {}
+                void finalizeAssembly() override {}
+                [[nodiscard]] assembly::AssemblyPhase getPhase() const noexcept override { return assembly::AssemblyPhase::Building; }
+                [[nodiscard]] bool hasMatrix() const noexcept override { return inner_mat != nullptr; }
+                [[nodiscard]] bool hasVector() const noexcept override { return inner_vec != nullptr; }
+                [[nodiscard]] GlobalIndex numRows() const noexcept override { return nf + bc->n_aux; }
+                [[nodiscard]] GlobalIndex numCols() const noexcept override { return nf + bc->n_aux; }
+                [[nodiscard]] std::string backendName() const override { return "BorderedView"; }
+                void zero() override {}
+            };
+
+            BorderedView bview;
+            bview.inner_mat = (request.want_matrix ? matrix_out : nullptr);
+            bview.inner_vec = (request.want_vector ? vector_out : nullptr);
+            bview.bc = &bc;
+            bview.nf = static_cast<GlobalIndex>(n_field_dofs);
+
+            system.assembleMixedAuxiliaryIntoGlobal(
+                state, &bview, &bview,
+                request.want_matrix, request.want_vector,
+                n_field_dofs, request.is_nonlinear_iteration);
+        } else {
+            system.assembleMixedAuxiliaryIntoGlobal(
+                state, matrix_out, vector_out,
+                request.want_matrix, request.want_vector,
+                n_field_dofs, request.is_nonlinear_iteration);
+        }
     }
 
     return total;

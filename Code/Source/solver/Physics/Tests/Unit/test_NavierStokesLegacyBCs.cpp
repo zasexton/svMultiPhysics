@@ -202,6 +202,7 @@ TEST(NavierStokesLegacyBCs, ParabolicFluxInflow_ResistanceOutflow_SetupSucceeds)
     auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
     ASSERT_TRUE(module);
     ASSERT_NO_THROW(system.setup());
+    system.finalizeAuxiliaryLayout();
 
     // Coupled resistance outflow uses the CoupledBoundaryManager (boundary integral Q).
     const auto* coupled = system.coupledBoundaryManager();
@@ -279,6 +280,81 @@ TEST(NavierStokesLegacyBCs, ParabolicFluxInflow_RCROutflow_SetupSucceeds)
     EXPECT_EQ(coupled->auxiliaryState().size(), 1u);
 
     expectParabolicInflowVaries(system, markers.axis);
+#  endif
+#endif
+}
+
+TEST(NavierStokesLegacyBCs, ParabolicFluxInflow_RCRCROutflow_UsesAuxiliaryStatePath)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+#  if !defined(MESH_HAS_VTK)
+    GTEST_SKIP() << "Requires Mesh built with VTK support (MESH_ENABLE_VTK=ON).";
+#  else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    auto mesh = loadBeamMesh();
+    ASSERT_TRUE(mesh);
+    EXPECT_EQ(mesh->dim(), 3);
+
+    const auto markers = labelBeamInletOutlet(*mesh);
+
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "beam";
+    input.mesh = mesh->local_mesh_ptr();
+
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+    {
+        svmp::Physics::BoundaryConditionInput bc{};
+        bc.name = "inflow";
+        bc.boundary_marker = static_cast<int>(markers.inlet);
+        bc.params["Type"] = defined("Dir");
+        bc.params["Time_dependence"] = defined("Steady");
+        bc.params["Profile"] = defined("Parabolic");
+        bc.params["Impose_flux"] = defined("true");
+        bc.params["Value"] = defined("-36.5");
+        input.boundary_conditions.push_back(std::move(bc));
+    }
+
+    {
+        svmp::Physics::BoundaryConditionInput bc{};
+        bc.name = "outlet";
+        bc.boundary_marker = static_cast<int>(markers.outlet);
+        bc.params["Type"] = defined("Neu");
+        bc.params["Time_dependence"] = defined("RCRCR");
+        bc.params["RCRCR.Proximal_resistance"] = defined("121");
+        bc.params["RCRCR.Proximal_capacitance"] = defined("5.0e-6");
+        bc.params["RCRCR.Intermediate_resistance"] = defined("300");
+        bc.params["RCRCR.Distal_capacitance"] = defined("1.0e-5");
+        bc.params["RCRCR.Distal_resistance"] = defined("912");
+        bc.params["RCRCR.Distal_pressure"] = defined("0");
+        bc.params["RCRCR.Initial_pressure_1"] = defined("0");
+        bc.params["RCRCR.Initial_pressure_2"] = defined("0");
+        input.boundary_conditions.push_back(std::move(bc));
+    }
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
+    ASSERT_TRUE(module);
+    ASSERT_NO_THROW(system.setup());
+
+    const auto* coupled = system.coupledBoundaryManager();
+    if (coupled != nullptr) {
+        EXPECT_EQ(coupled->registeredBoundaryFunctionals().size(), 0u);
+        EXPECT_EQ(coupled->auxiliaryState().size(), 0u);
+    }
+
+    const auto* aux_inputs = system.auxiliaryInputRegistryIfPresent();
+    ASSERT_NE(aux_inputs, nullptr);
+    EXPECT_TRUE(aux_inputs->hasInput("ns_Q_102"));
+
+    const auto out_slot = system.auxiliaryOutputSlotOf("ns_rcrcr_102", "P_out");
+    EXPECT_NE(out_slot, std::string::npos);
 #  endif
 #endif
 }

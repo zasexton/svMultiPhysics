@@ -119,6 +119,38 @@ struct IncompressibleNavierStokesVMSOptions {
         std::string state_name{};
     };
 
+    /**
+     * @brief Two-capacitor RCRCR outlet model for Navier-Stokes
+     *
+     * Defines a boundary flow functional Q = ∫_Γ (u·n) ds and evolves two
+     * capacitive node pressures:
+     *
+     *   C1 dP1/dt = Q - (P1 - P2) / Rm
+     *   C2 dP2/dt = (P1 - P2) / Rm - (P2 - Pd) / Rd
+     *
+     * The applied traction is σn = -p_out n with
+     *
+     *   p_out = P1 + Rp * Q
+     *
+     * This extends the standard RCR outlet with an additional capacitive
+     * storage node and intermediate resistance.
+     */
+    struct CoupledRCRCROutflowBC {
+        int boundary_marker{-1};
+        FE::Real Rp{0.0};
+        FE::Real C1{0.0};
+        FE::Real Rm{1.0};
+        FE::Real C2{0.0};
+        FE::Real Rd{1.0};
+        FE::Real Pd{0.0};
+        FE::Real P10{0.0};
+        FE::Real P20{0.0};
+
+        ScalarValue backflow_beta{0.0};
+
+        std::string functional_name{};
+    };
+
     std::string velocity_field_name{"u"};
     std::string pressure_field_name{"p"};
 
@@ -159,6 +191,7 @@ struct IncompressibleNavierStokesVMSOptions {
     std::vector<TractionRobinBC> traction_robin{};
     std::vector<PressureOutflowBC> pressure_outflow{};
     std::vector<CoupledRCROutflowBC> coupled_outflow_rcr{};
+    std::vector<CoupledRCRCROutflowBC> coupled_outflow_rcrcr{};
 
     // Weak Dirichlet (Nitsche) options for velocity.
     FE::Real nitsche_gamma{10.0};

@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include "Assembly/TimeIntegrationContext.h"
 #include "Systems/AuxiliaryModelBuilder.h"
 #include "Systems/AuxiliaryModelDSL.h"
 #include "Systems/AuxiliaryBindings.h"
@@ -15,6 +16,7 @@
 #include "Systems/AuxiliaryInputRegistry.h"
 
 #include <cmath>
+#include <array>
 #include <memory>
 
 using svmp::FE::Real;
@@ -97,6 +99,49 @@ inline void expectStateOrder(const BuiltAuxiliaryModel& model,
             << "State " << i << " should be '" << expected[i] << "'";
     }
 }
+
+inline svmp::FE::assembly::TimeIntegrationContext buildGeneralizedAlphaFirstOrderContext(double dt)
+{
+    svmp::FE::assembly::TimeIntegrationContext ctx;
+    ctx.integrator_name = "GeneralizedAlpha(1stOrder)";
+
+    svmp::FE::assembly::TimeDerivativeStencil stencil;
+    stencil.order = 1;
+    const double alpha_m = 5.0 / 6.0;
+    const double alpha_f = 2.0 / 3.0;
+    const double gamma = 2.0 / 3.0;
+    const double c = alpha_m / (gamma * dt * alpha_f);
+    const double c0 = (1.0 - alpha_m) - alpha_m * (1.0 - gamma) / gamma;
+    stencil.a = {static_cast<Real>(c), static_cast<Real>(-c), static_cast<Real>(c0)};
+    ctx.dt1 = stencil;
+    return ctx;
+}
+
+class OutputUsesXDotModel final : public AuxiliaryStateModel {
+public:
+    [[nodiscard]] std::string modelName() const override { return "OutputUsesXDot"; }
+    [[nodiscard]] int dimension() const override { return 1; }
+    [[nodiscard]] AuxiliaryStructuralMetadata structuralMetadata() const override
+    {
+        AuxiliaryStructuralMetadata meta;
+        meta.variable_kinds = {AuxiliaryVariableKind::Differential};
+        return meta;
+    }
+
+    void evaluateResidual(const AuxiliaryLocalContext& ctx,
+                          AuxiliaryResidualRequest& request) const override
+    {
+        request.residual[0] = ctx.xdot[0] + ctx.x[0];
+    }
+
+    [[nodiscard]] int outputCount() const override { return 1; }
+    [[nodiscard]] std::vector<std::string> outputNames() const override { return {"xdot"}; }
+    void evaluateOutputs(const AuxiliaryLocalContext& ctx,
+                         std::span<Real> output) const override
+    {
+        output[0] = ctx.xdot[0];
+    }
+};
 
 } // namespace aux_test
 
@@ -2114,6 +2159,139 @@ TEST(AuxiliaryModelBuilder, EndToEnd_MonolithicAssembly_WithInputs)
     // F(x=3, Q=7) = 3 - 7 = -4.  Inputs are wired by assembly.
     EXPECT_NEAR(residual[0], -4.0, 1e-12);
     EXPECT_NEAR(jacobian[0], 1.0, 1e-5);
+}
+
+TEST(AuxiliaryModelBuilder, EndToEnd_MonolithicAssembly_UsesGeneralizedAlphaStencil)
+{
+    using namespace svmp::FE;
+
+    auto model = aux_test::buildDecay(/*k_default=*/1.0);
+    systems::FESystem system(std::shared_ptr<const assembly::IMeshAccess>{});
+
+    system.deployAuxiliaryModel(
+        use(model)
+            .name("ga_decay")
+            .scope(AuxiliaryStateScope::Global)
+            .solveMode(AuxiliarySolveMode::Monolithic)
+            .param("k", 1.0)
+            .initialize({0.8}));
+
+    system.finalizeAuxiliaryLayout();
+
+    auto* mgr = system.auxiliaryStateManagerIfPresent();
+    ASSERT_NE(mgr, nullptr);
+    auto& blk = mgr->getBlock("ga_decay");
+
+    // Establish x_n = 1.0 with one committed history snapshot x_{n-1} = 0.8.
+    blk.work()[0] = 1.0;
+    system.commitTimeStep();
+
+    // Solve a stage state x_{n+alpha_f} = 1.1.
+    system.beginTimeStep();
+    blk.work()[0] = 1.1;
+
+    std::array<double, 1> dt_hist{{0.1}};
+    auto ti = aux_test::buildGeneralizedAlphaFirstOrderContext(/*dt=*/0.1);
+
+    systems::SystemStateView state;
+    state.time = 0.06666666666666667;
+    state.dt = 0.1;
+    state.effective_dt = 0.06666666666666667;
+    state.dt_prev = 0.1;
+    state.dt_history = dt_hist;
+    state.time_integration = &ti;
+
+    std::vector<Real> residual;
+    std::vector<Real> jacobian;
+    system.assembleMixedAuxiliaryDense(state, /*n_field_dofs=*/0, residual, jacobian);
+
+    ASSERT_EQ(residual.size(), 1u);
+    ASSERT_EQ(jacobian.size(), 1u);
+
+    // Generalized-alpha(1st-order) with rho_inf=0.5 gives:
+    //   xdot_stage = 18.75*x_stage - 18.75*x_n - 0.25*xdot_n
+    // Using x_n = 1.0, x_{n-1} = 0.8 => xdot_n = 2.0, so xdot_stage = 1.375.
+    // For dx/dt = -x, F = xdot + x and dF/dx = 1 + 18.75.
+    EXPECT_NEAR(residual[0], 2.475, 1e-12);
+    EXPECT_NEAR(jacobian[0], 19.75, 1e-12);
+}
+
+TEST(AuxiliaryModelBuilder, PrepareAuxiliaryForAssembly_UsesStageXDotForOutputs)
+{
+    using namespace svmp::FE;
+
+    auto model = std::make_shared<aux_test::OutputUsesXDotModel>();
+    systems::FESystem system(std::shared_ptr<const assembly::IMeshAccess>{});
+
+    system.deployAuxiliaryModel(
+        use(model)
+            .name("xdot_out")
+            .scope(AuxiliaryStateScope::Global)
+            .solveMode(AuxiliarySolveMode::Monolithic)
+            .initialize({0.8}));
+
+    system.finalizeAuxiliaryLayout();
+
+    auto* mgr = system.auxiliaryStateManagerIfPresent();
+    ASSERT_NE(mgr, nullptr);
+    auto& blk = mgr->getBlock("xdot_out");
+
+    blk.work()[0] = 1.0;
+    system.commitTimeStep();
+
+    system.beginTimeStep();
+    blk.work()[0] = 1.1;
+
+    std::array<double, 1> dt_hist{{0.1}};
+    auto ti = aux_test::buildGeneralizedAlphaFirstOrderContext(/*dt=*/0.1);
+
+    systems::SystemStateView state;
+    state.time = 0.06666666666666667;
+    state.dt = 0.1;
+    state.effective_dt = 0.06666666666666667;
+    state.dt_prev = 0.1;
+    state.dt_history = dt_hist;
+    state.time_integration = &ti;
+
+    system.prepareAuxiliaryForAssembly(state, false);
+    const auto outputs = system.auxiliaryOutputValues();
+
+    ASSERT_EQ(outputs.size(), 1u);
+    EXPECT_NEAR(outputs[0], 1.375, 1e-12);
+}
+
+TEST(AuxiliaryModelBuilder, FinalizeMonolithicAuxiliaryStageState_OnlyTransformsDifferentialRows)
+{
+    using namespace svmp::FE;
+
+    auto model = AuxiliaryModelBuilder("stage_finalize")
+        .state("x")
+        .state("z", AuxiliaryVariableKind::Algebraic)
+        .ode("x", forms::FormExpr::constant(0.0))
+        .algebraic("z", modelState("z"))
+        .build();
+
+    systems::FESystem system(std::shared_ptr<const assembly::IMeshAccess>{});
+    system.deployAuxiliaryModel(
+        use(model)
+            .name("stage_block")
+            .scope(AuxiliaryStateScope::Global)
+            .solveMode(AuxiliarySolveMode::Monolithic)
+            .initialize({1.0, 2.0}));
+    system.finalizeAuxiliaryLayout();
+
+    auto* mgr = system.auxiliaryStateManagerIfPresent();
+    ASSERT_NE(mgr, nullptr);
+    auto& blk = mgr->getBlock("stage_block");
+
+    blk.work()[0] = 1.4;
+    blk.work()[1] = 5.0;
+
+    system.finalizeMonolithicAuxiliaryStageState(static_cast<Real>(2.0 / 3.0),
+                                                 static_cast<Real>(0.1));
+
+    EXPECT_NEAR(blk.work()[0], 1.6, 1e-12);
+    EXPECT_NEAR(blk.work()[1], 5.0, 1e-12);
 }
 
 TEST(AuxiliaryModelBuilder, EndToEnd_MonolithicLayout_WithFields)

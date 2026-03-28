@@ -149,6 +149,12 @@ std::unique_ptr<svmp::Physics::PhysicsModule> EquationTranslator::createModule(
           bc_in.params["RCR." + k] = v;
         }
       }
+      if (bc->rcrcr.value_set) {
+        const auto rcrcr = snapshot_params(bc->rcrcr);
+        for (const auto& [k, v] : rcrcr) {
+          bc_in.params["RCRCR." + k] = v;
+        }
+      }
       input.boundary_conditions.push_back(std::move(bc_in));
     }
   }

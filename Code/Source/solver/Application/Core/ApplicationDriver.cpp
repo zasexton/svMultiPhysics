@@ -552,8 +552,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   opts.newton.residual_op = "equations";
   opts.newton.jacobian_op = "equations";
 
-  // Disable backtracking line search to match legacy solver behavior.  The legacy
-  // solver applies a full Newton update without line search.  Disabling it avoids
+  // Disable backtracking line search to match legacy solver behavior. The legacy
+  // solver applies a full Newton update without line search. Disabling it avoids
   // 2 extra residual assembly passes per Newton iteration.
   opts.newton.use_line_search = false;
 

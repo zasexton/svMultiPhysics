@@ -424,7 +424,8 @@ public:
         assembly::GlobalSystemView& mass_out);
 
     // ---- Time stepping lifecycle ----
-    void beginTimeStep();
+    void beginTimeStep(bool reset_auxiliary_state = true,
+                       bool invalidate_auxiliary_inputs = true);
     void commitTimeStep();
 
     // ---- Auxiliary model deployment ----
@@ -710,6 +711,29 @@ public:
      * Used after a failed nonlinear solve or rejected time step.
      */
     void rollbackAuxiliaryState();
+
+    /**
+     * @brief Convert monolithic auxiliary stage values to end-of-step values.
+     *
+     * Generalized-alpha stage solves store differential auxiliary variables at
+     * the stage state x_{n+alpha_f}. Before commit, these must be mapped back
+     * to x_{n+1}. Algebraic rows are left unchanged.
+     *
+     * @param alpha_f    Generalized-alpha stage weight.
+     * @param final_time Physical time of the accepted end-of-step state.
+     */
+    void finalizeMonolithicAuxiliaryStageState(Real alpha_f, Real final_time);
+
+    /**
+     * @brief Finalize monolithic auxiliary stage values and update stored
+     *        committed rates for first-order generalized-alpha.
+     *
+     * @param alpha_f    Generalized-alpha stage weight.
+     * @param gamma      Generalized-alpha gamma parameter.
+     * @param dt         Full time-step size.
+     * @param final_time Physical time of the accepted end-of-step state.
+     */
+    void finalizeMonolithicAuxiliaryStageState(Real alpha_f, Real gamma, Real dt, Real final_time);
 
     /**
      * @brief Finalize auxiliary layouts during setup.
@@ -1075,7 +1099,8 @@ private:
 		    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::DistributedSparsityPattern>> distributed_sparsity_by_op_{};
 		    std::shared_ptr<const backends::DofPermutation> dof_permutation_{};
 
-		    std::unique_ptr<assembly::Assembler> assembler_{};
+	    std::unique_ptr<assembly::Assembler> assembler_{};
+        bool use_constraints_in_assembly_{true};
 		    std::string assembler_selection_report_{};
 		    std::unique_ptr<assembly::IMaterialStateProvider> material_state_provider_{};
 	    std::unique_ptr<GlobalKernelStateProvider> global_kernel_state_provider_{};
@@ -1167,6 +1192,29 @@ private:
         const DeployedAuxEntry& entry, std::size_t entity_index,
         std::vector<Real>& out) const;
 
+    /// Ensure monolithic auxiliary committed-rate buffers exist and are seeded
+    /// for first-order generalized-alpha stage assembly.
+    void ensureMonolithicCommittedRates(const SystemStateView& state);
+
+    /// Seed one monolithic block's committed-rate buffer from the committed
+    /// state and previous-step FE inputs.
+    void initializeMonolithicCommittedRate(const DeployedAuxEntry& entry,
+                                           const SystemStateView& prev_state);
+
+    /// Ensure a flat committed-rate buffer exists for the given block.
+    void ensureMonolithicCommittedRateBuffer(const DeployedAuxEntry& entry,
+                                             std::size_t storage_size);
+
+    /// Gather a per-entity committed-rate vector from the flat block buffer.
+    [[nodiscard]] std::vector<Real> gatherMonolithicCommittedRate(
+        const DeployedAuxEntry& entry,
+        std::size_t entity_index) const;
+
+    /// Scatter a per-entity committed-rate vector into the flat block buffer.
+    void scatterMonolithicCommittedRate(const DeployedAuxEntry& entry,
+                                        std::size_t entity_index,
+                                        std::span<const Real> values);
+
     /// Wire FE-coupled auxiliary input providers during finalization.
     void wireFECoupledInputProviders();
 
@@ -1222,6 +1270,8 @@ private:
         }
     };
     CoupledJacobianCache coupled_jac_cache_{};
+    std::unordered_map<std::string, std::vector<Real>> monolithic_aux_committed_rates_{};
+    std::unordered_set<std::string> monolithic_aux_committed_rates_valid_{};
 
     // ---- Analysis subsystem storage ----
     std::vector<analysis::FormulationRecord> formulation_records_;
@@ -1240,6 +1290,79 @@ private:
 	    bool is_setup_{false};
 	    Real last_auxiliary_advance_time_{0.0};
 	    mutable std::vector<Real> aux_output_flat_{}; ///< Flattened output values for assembly
+
+public:
+    /// Bordered coupling data for monolithic auxiliary DOFs.
+    /// Populated by assembleMixedAuxiliaryIntoGlobal when monolithic blocks exist.
+    /// Consumed by the Newton solver to apply a bordered system correction
+    /// after the PDE linear solve.
+    struct BorderedCouplingData {
+        bool active{false};             ///< True if monolithic aux DOFs exist
+        int n_aux{0};                   ///< Number of auxiliary unknowns
+        std::size_t n_field_dofs{0};    ///< Number of PDE DOFs
+        std::vector<Real> D;            ///< Aux-aux Jacobian (n_aux × n_aux, row-major)
+        std::vector<Real> g;            ///< Auxiliary residual (n_aux)
+        std::vector<Real> B;            ///< dR_PDE/dx_aux columns (n_field_dofs × n_aux, col-major)
+        std::vector<Real> Ct;           ///< dR_aux/du rows (n_aux × n_field_dofs, row-major)
+        std::vector<Real> dF_dxdot;     ///< Raw dF/dxdot block (n_aux × n_aux, row-major)
+
+        void clear() {
+            active = false;
+            n_aux = 0;
+            n_field_dofs = 0;
+            D.clear(); g.clear(); B.clear(); Ct.clear();
+            dF_dxdot.clear();
+            aux_blocks.clear();
+            dF_dinputs.clear();
+            dO_dx.clear();
+            dO_dI.clear();
+            direct_coupling_records.clear();
+        }
+        /// Per-block info for auxiliary state update after solve.
+        struct AuxBlock { std::string name; int dim; };
+        std::vector<AuxBlock> aux_blocks;
+
+        struct DirectCouplingRecord {
+            std::size_t output_slot{static_cast<std::size_t>(-1)};
+            std::size_t entity_index{0};
+            std::vector<std::size_t> aux_local_indices{};
+            std::vector<Real> dF_dinputs{};
+            std::vector<Real> dO_dx{};
+            std::vector<Real> dO_dI{};
+        };
+
+        /// dF/d(inputs) per aux DOF (needed for B computation from Ct).
+        std::vector<Real> dF_dinputs;  ///< (n_aux × n_inputs_per_block)
+        /// d(output)/d(state) per aux DOF.
+        std::vector<Real> dO_dx;       ///< (n_outputs × n_aux)
+        std::vector<Real> dO_dI;       ///< d(output)/d(input), e.g., Rp for RCR
+        /// Per-output/entity direct-coupling metadata for debugging and
+        /// verification. Unlike the flat compatibility vectors above, these do
+        /// not collapse multiple outputs or boundary entities into one record.
+        std::vector<DirectCouplingRecord> direct_coupling_records{};
+
+        void resize(int na, std::size_t nf) {
+            n_aux = na;
+            n_field_dofs = nf;
+            D.assign(static_cast<std::size_t>(na * na), 0.0);
+            g.assign(static_cast<std::size_t>(na), 0.0);
+            B.assign(nf * static_cast<std::size_t>(na), 0.0);
+            Ct.assign(static_cast<std::size_t>(na) * nf, 0.0);
+            dF_dxdot.assign(static_cast<std::size_t>(na * na), 0.0);
+            dF_dinputs.clear();
+            dO_dx.clear();
+            dO_dI.clear();
+            direct_coupling_records.clear();
+            active = true;
+        }
+    };
+
+    /// Access bordered coupling data (populated during assembly).
+    [[nodiscard]] BorderedCouplingData& borderedCoupling() noexcept { return bordered_coupling_; }
+    [[nodiscard]] const BorderedCouplingData& borderedCoupling() const noexcept { return bordered_coupling_; }
+
+private:
+    BorderedCouplingData bordered_coupling_{};
 	};
 
 } // namespace systems

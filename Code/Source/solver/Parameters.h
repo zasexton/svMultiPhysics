@@ -764,6 +764,39 @@ class BoundaryConditionRCRParameters : public ParameterLists
     bool value_set = false;
 };
 
+/// @brief Two-capacitor RCRCR values for Neumann BC type.
+///
+/// \code {.xml}
+/// <RCRCR_values>
+///   <Proximal_resistance> 121.0 </Proximal_resistance>
+///   <Proximal_capacitance> 5.0e-6 </Proximal_capacitance>
+///   <Intermediate_resistance> 300.0 </Intermediate_resistance>
+///   <Distal_capacitance> 1.0e-5 </Distal_capacitance>
+///   <Distal_resistance> 912.0 </Distal_resistance>
+/// </RCRCR_values>
+/// \endcode
+class BoundaryConditionRCRCRParameters : public ParameterLists
+{
+  public:
+    BoundaryConditionRCRCRParameters();
+
+    static const std::string xml_element_name_;
+
+    void set_values(tinyxml2::XMLElement* xml_elem);
+    void print_parameters();
+
+    Parameter<double> distal_capacitance;
+    Parameter<double> distal_pressure;
+    Parameter<double> distal_resistance;
+    Parameter<double> initial_pressure_1;
+    Parameter<double> initial_pressure_2;
+    Parameter<double> intermediate_resistance;
+    Parameter<double> proximal_capacitance;
+    Parameter<double> proximal_resistance;
+
+    bool value_set = false;
+};
+
 /// @brief The BoundaryConditionParameters stores paramaters for various
 /// type of boundary conditions under the Add_BC XML element.
 class BoundaryConditionParameters : public ParameterLists
@@ -776,6 +809,7 @@ class BoundaryConditionParameters : public ParameterLists
 
     // RCR parameters sub-element.
     BoundaryConditionRCRParameters rcr;
+    BoundaryConditionRCRCRParameters rcrcr;
 
     // Add_BC name= attribute.
     Parameter<std::string> name;

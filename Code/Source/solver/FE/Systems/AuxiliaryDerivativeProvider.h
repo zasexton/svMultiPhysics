@@ -162,6 +162,10 @@ struct AuxiliaryDerivativeArtifact {
     /// Non-empty when source == Symbolic and model has output expressions.
     std::vector<forms::FormExpr> dOutput_dx_exprs{};
 
+    /// Symbolic d(output_k)/d(input_m) expressions (n_outputs × n_inputs, row-major).
+    /// Non-empty when source == Symbolic and model has input-dependent outputs.
+    std::vector<forms::FormExpr> dOutput_dInputs_exprs{};
+
     /// Number of outputs.
     int n_outputs{0};
 

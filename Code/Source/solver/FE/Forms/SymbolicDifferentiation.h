@@ -146,6 +146,20 @@ struct SymbolicDiffResult {
  */
 [[nodiscard]] FormExpr simplify(const FormExpr& expr);
 
+/**
+ * @brief Extract additive sub-terms that reference a specific node type + slot.
+ *
+ * Decomposes the expression into additive terms (splitting on Add/Subtract)
+ * and returns only those terms whose subtree contains a node matching the
+ * given type and slot index.  Terms that don't reference the target are
+ * dropped entirely (not replaced with zero).
+ *
+ * This is used before symbolic differentiation to avoid differentiating
+ * large sub-expressions that will produce zero.
+ */
+[[nodiscard]] FormExpr extractTermsReferencing(
+    const FormExpr& form, FormExprType target_type, std::uint32_t target_slot);
+
 } // namespace forms
 } // namespace FE
 } // namespace svmp

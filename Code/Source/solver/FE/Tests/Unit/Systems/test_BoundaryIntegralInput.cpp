@@ -11,6 +11,7 @@
 #include "Systems/AuxiliaryModelBuilder.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
+#include "Constraints/DirichletBC.h"
 #include "Forms/BoundaryFunctional.h"
 #include "Forms/FormExpr.h"
 #include "Spaces/H1Space.h"
@@ -2530,6 +2531,730 @@ TEST(MonolithicCoupling, MixedJacobianBlockFDVerification)
     // Restore.
     sys.auxiliaryInputRegistryIfPresent()->invalidateAll();
     sys.prepareAuxiliaryForAssembly(state, false);
+}
+
+TEST(MonolithicCoupling, TwoStateVectorOutletDirectCouplingMatchesFD)
+{
+    // Navier-Stokes-like outlet coupling on a vector velocity field:
+    //   Q      = \int_Gamma u . n ds
+    //   dP1/dt = (Q - (P1-P2)/Rm)/C1
+    //   dP2/dt = ((P1-P2)/Rm - P2/Rd)/C2
+    //   P_out  = P1 + Rp*Q
+    //   R(u)   = (u, v)_Omega - (P_out n, v)_Gamma
+    //
+    // The runtime Newton operator augments the assembled PDE Jacobian with the
+    // stored rank-1 direct coupling terms. Verify that the resulting field
+    // Jacobian matches finite differences DOF-by-DOF.
+    const int marker = 9;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = u_space, .components = 3});
+    sys.addOperator("op");
+
+    const auto u_disc = FormExpr::discreteField(u_field, *u_space, "u");
+    const auto n = FormExpr::normal();
+    auto Q = sys.boundaryIntegral(
+        "Q", inner(u_disc, n), marker,
+        BoundaryFunctional::Reduction::Sum,
+        AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+
+    auto model = aux::model("two_state_vector_outlet_like", [](ModelFacade& m) {
+        auto Q = m.input("Q");
+        auto P1 = m.state("P1");
+        auto P2 = m.state("P2");
+        auto Rp = m.param("Rp");
+        auto C1 = m.param("C1");
+        auto Rm = m.param("Rm");
+        auto C2 = m.param("C2");
+        auto Rd = m.param("Rd");
+
+        m << ddt(P1) == (Q - (P1 - P2) / Rm) / C1;
+        m << ddt(P2) == ((P1 - P2) / Rm - P2 / Rd) / C2;
+        m << out("P_out") == P1 + Rp * Q;
+    });
+
+    auto inst = sys.deploy(
+        use(model).name("two_state_vector_outlet_like_inst").global().monolithic()
+            .bindCoupled("Q", Q)
+            .params({
+                {"Rp", 3.0},
+                {"C1", 0.5},
+                {"Rm", 2.0},
+                {"C2", 0.75},
+                {"Rd", 4.0},
+            })
+            .initialize({0.3, -0.1}));
+
+    const auto u = FormExpr::stateField(u_field, *u_space, "u");
+    const auto v = FormExpr::testFunction(*u_space, "v");
+    const auto residual = inner(u, v).dx() - inner(inst.output("P_out") * n, v).ds(marker);
+    (void)installFormulation(sys, "op", {u_field}, residual);
+
+    SetupInputs si;
+    si.topology_override = singleTetraTopology();
+    sys.setup({}, si);
+    sys.finalizeAuxiliaryLayout();
+
+    const auto n_field = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    ASSERT_EQ(n_field, 12u);
+
+    std::vector<Real> sol(n_field, 0.0);
+    for (svmp::FE::GlobalIndex v_id = 0; v_id < 4; ++v_id) {
+        setFieldComponent(sol, sys, u_field, v_id, /*component=*/2, -1.0);
+    }
+
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = sol;
+
+    sys.beginTimeStep();
+
+    svmp::FE::assembly::DenseMatrixView lhs(static_cast<svmp::FE::GlobalIndex>(n_field));
+    svmp::FE::assembly::DenseVectorView rhs(static_cast<svmp::FE::GlobalIndex>(n_field));
+    lhs.zero();
+    rhs.zero();
+
+    AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+    req.want_vector = true;
+    req.is_nonlinear_iteration = true;
+
+    const auto ar = sys.assemble(req, state, &lhs, &rhs);
+    ASSERT_TRUE(ar.success);
+
+    std::vector<Real> base_residual(n_field, 0.0);
+    std::vector<Real> field_jacobian(n_field * n_field, 0.0);
+    for (std::size_t i = 0; i < n_field; ++i) {
+        base_residual[i] = rhs.getVectorEntry(static_cast<svmp::FE::GlobalIndex>(i));
+        for (std::size_t j = 0; j < n_field; ++j) {
+            field_jacobian[i * n_field + j] =
+                lhs.getMatrixEntry(static_cast<svmp::FE::GlobalIndex>(i),
+                                   static_cast<svmp::FE::GlobalIndex>(j));
+        }
+    }
+
+    for (const auto& upd : sys.lastRankOneUpdates()) {
+        for (const auto& [row_dof, row_val] : upd.v) {
+            const auto row = static_cast<std::size_t>(row_dof);
+            for (const auto& [col_dof, col_val] : upd.v) {
+                const auto col = static_cast<std::size_t>(col_dof);
+                field_jacobian[row * n_field + col] += upd.sigma * row_val * col_val;
+            }
+        }
+    }
+
+    const auto packed_base = sys.checkpointAuxiliaryState();
+    const Real eps = 1e-7;
+    for (std::size_t col = 0; col < n_field; ++col) {
+        std::vector<Real> sol_pert(sol);
+        sol_pert[col] += eps;
+
+        SystemStateView ps = state;
+        ps.u = sol_pert;
+
+        sys.restoreAuxiliaryState(packed_base);
+        sys.auxiliaryInputRegistryIfPresent()->invalidateAll();
+
+        svmp::FE::assembly::DenseVectorView rhs_pert(static_cast<svmp::FE::GlobalIndex>(n_field));
+        rhs_pert.zero();
+
+        AssemblyRequest req_vec = req;
+        req_vec.want_matrix = false;
+        const auto ar_pert = sys.assemble(req_vec, ps, nullptr, &rhs_pert);
+        ASSERT_TRUE(ar_pert.success);
+
+        for (std::size_t row = 0; row < n_field; ++row) {
+            const Real fd =
+                (rhs_pert.getVectorEntry(static_cast<svmp::FE::GlobalIndex>(row)) - base_residual[row]) / eps;
+            const Real analytic = field_jacobian[row * n_field + col];
+            EXPECT_NEAR(analytic, fd, std::max(1e-5, std::abs(fd) * 1e-4))
+                << "vector outlet field Jacobian mismatch at row=" << row
+                << " col=" << col;
+        }
+    }
+
+    sys.restoreAuxiliaryState(packed_base);
+    sys.auxiliaryInputRegistryIfPresent()->invalidateAll();
+    sys.prepareAuxiliaryForAssembly(state, true);
+}
+
+TEST(MonolithicCoupling, TwoStateVectorOutletBorderedReductionMatchesDenseSolve)
+{
+    const int marker = 10;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = u_space, .components = 3});
+    sys.addOperator("op");
+
+    const auto u_disc = FormExpr::discreteField(u_field, *u_space, "u");
+    const auto n = FormExpr::normal();
+    auto Q = sys.boundaryIntegral(
+        "Q", inner(u_disc, n), marker,
+        BoundaryFunctional::Reduction::Sum,
+        AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+
+    auto model = aux::model("two_state_vector_outlet_reduction", [](ModelFacade& m) {
+        auto Q = m.input("Q");
+        auto P1 = m.state("P1");
+        auto P2 = m.state("P2");
+        auto Rp = m.param("Rp");
+        auto C1 = m.param("C1");
+        auto Rm = m.param("Rm");
+        auto C2 = m.param("C2");
+        auto Rd = m.param("Rd");
+
+        m << ddt(P1) == (Q - (P1 - P2) / Rm) / C1;
+        m << ddt(P2) == ((P1 - P2) / Rm - P2 / Rd) / C2;
+        m << out("P_out") == P1 + Rp * Q;
+    });
+
+    auto inst = sys.deploy(
+        use(model).name("two_state_vector_outlet_reduction_inst").global().monolithic()
+            .bindCoupled("Q", Q)
+            .params({
+                {"Rp", 3.0},
+                {"C1", 0.5},
+                {"Rm", 2.0},
+                {"C2", 0.75},
+                {"Rd", 4.0},
+            })
+            .initialize({0.3, -0.1}));
+
+    const auto u = FormExpr::stateField(u_field, *u_space, "u");
+    const auto v = FormExpr::testFunction(*u_space, "v");
+    const auto residual = inner(u, v).dx() - inner(inst.output("P_out") * n, v).ds(marker);
+    (void)installFormulation(sys, "op", {u_field}, residual);
+
+    SetupInputs si;
+    si.topology_override = singleTetraTopology();
+    sys.setup({}, si);
+    sys.finalizeAuxiliaryLayout();
+
+    const auto n_field = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    const auto n_aux = std::size_t{2};
+    ASSERT_EQ(n_field, 12u);
+
+    std::vector<Real> sol(n_field, 0.0);
+    for (svmp::FE::GlobalIndex v_id = 0; v_id < 4; ++v_id) {
+        setFieldComponent(sol, sys, u_field, v_id, /*component=*/2, -1.0);
+    }
+
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = sol;
+
+    sys.beginTimeStep();
+
+    svmp::FE::assembly::DenseMatrixView lhs(static_cast<svmp::FE::GlobalIndex>(n_field));
+    svmp::FE::assembly::DenseVectorView rhs(static_cast<svmp::FE::GlobalIndex>(n_field));
+    lhs.zero();
+    rhs.zero();
+
+    AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+    req.want_vector = true;
+    req.is_nonlinear_iteration = true;
+
+    const auto ar = sys.assemble(req, state, &lhs, &rhs);
+    ASSERT_TRUE(ar.success);
+
+    const auto& bc = sys.borderedCoupling();
+    ASSERT_TRUE(bc.active);
+    ASSERT_EQ(static_cast<std::size_t>(bc.n_aux), n_aux);
+    ASSERT_EQ(bc.n_field_dofs, n_field);
+
+    std::vector<Real> K(n_field * n_field, 0.0);
+    std::vector<Real> r(n_field, 0.0);
+    for (std::size_t i = 0; i < n_field; ++i) {
+        r[i] = rhs.getVectorEntry(static_cast<svmp::FE::GlobalIndex>(i));
+        for (std::size_t j = 0; j < n_field; ++j) {
+            K[i * n_field + j] =
+                lhs.getMatrixEntry(static_cast<svmp::FE::GlobalIndex>(i),
+                                   static_cast<svmp::FE::GlobalIndex>(j));
+        }
+    }
+    for (const auto& upd : sys.lastRankOneUpdates()) {
+        for (const auto& [row_dof, row_val] : upd.v) {
+            const auto row = static_cast<std::size_t>(row_dof);
+            for (const auto& [col_dof, col_val] : upd.v) {
+                const auto col = static_cast<std::size_t>(col_dof);
+                K[row * n_field + col] += upd.sigma * row_val * col_val;
+            }
+        }
+    }
+
+    auto solve_dense = [](std::vector<Real> A, std::vector<Real> b) -> std::vector<Real> {
+        const auto n = b.size();
+        EXPECT_EQ(A.size(), n * n);
+        for (std::size_t k = 0; k < n; ++k) {
+            std::size_t pivot = k;
+            Real max_abs = std::abs(A[k * n + k]);
+            for (std::size_t i = k + 1; i < n; ++i) {
+                const Real cand = std::abs(A[i * n + k]);
+                if (cand > max_abs) {
+                    max_abs = cand;
+                    pivot = i;
+                }
+            }
+            EXPECT_GT(max_abs, 1e-14);
+            if (pivot != k) {
+                for (std::size_t j = 0; j < n; ++j) {
+                    std::swap(A[k * n + j], A[pivot * n + j]);
+                }
+                std::swap(b[k], b[pivot]);
+            }
+            const Real diag = A[k * n + k];
+            for (std::size_t i = k + 1; i < n; ++i) {
+                const Real factor = A[i * n + k] / diag;
+                if (std::abs(factor) <= 1e-30) {
+                    continue;
+                }
+                for (std::size_t j = k; j < n; ++j) {
+                    A[i * n + j] -= factor * A[k * n + j];
+                }
+                b[i] -= factor * b[k];
+            }
+        }
+        std::vector<Real> x(n, 0.0);
+        for (std::size_t ii = n; ii-- > 0;) {
+            Real sum = b[ii];
+            for (std::size_t j = ii + 1; j < n; ++j) {
+                sum -= A[ii * n + j] * x[j];
+            }
+            x[ii] = sum / A[ii * n + ii];
+        }
+        return x;
+    };
+
+    const auto u0 = solve_dense(K, r);
+
+    std::vector<std::vector<Real>> z_columns(n_aux, std::vector<Real>(n_field, 0.0));
+    for (std::size_t j = 0; j < n_aux; ++j) {
+        std::vector<Real> Bj(n_field, 0.0);
+        for (std::size_t i = 0; i < n_field; ++i) {
+            Bj[i] = bc.B[i + n_field * j];
+        }
+        z_columns[j] = solve_dense(K, Bj);
+    }
+
+    std::vector<Real> schur = bc.D;
+    std::vector<Real> dx_aux(n_aux, 0.0);
+    for (std::size_t i = 0; i < n_aux; ++i) {
+        Real ctu0 = 0.0;
+        for (std::size_t k = 0; k < n_field; ++k) {
+            ctu0 += bc.Ct[i * n_field + k] * u0[k];
+        }
+        dx_aux[i] = bc.g[i] - ctu0;
+
+        for (std::size_t j = 0; j < n_aux; ++j) {
+            Real ctz = 0.0;
+            for (std::size_t k = 0; k < n_field; ++k) {
+                ctz += bc.Ct[i * n_field + k] * z_columns[j][k];
+            }
+            schur[i * n_aux + j] -= ctz;
+        }
+    }
+    dx_aux = solve_dense(schur, dx_aux);
+
+    std::vector<Real> du_reduced(n_field, 0.0);
+    for (std::size_t k = 0; k < n_field; ++k) {
+        Real corrected = u0[k];
+        for (std::size_t j = 0; j < n_aux; ++j) {
+            corrected -= z_columns[j][k] * dx_aux[j];
+        }
+        du_reduced[k] = corrected;
+    }
+
+    const auto n_total = n_field + n_aux;
+    std::vector<Real> full_matrix(n_total * n_total, 0.0);
+    std::vector<Real> full_rhs(n_total, 0.0);
+    for (std::size_t i = 0; i < n_field; ++i) {
+        full_rhs[i] = r[i];
+        for (std::size_t j = 0; j < n_field; ++j) {
+            full_matrix[i * n_total + j] = K[i * n_field + j];
+        }
+        for (std::size_t j = 0; j < n_aux; ++j) {
+            full_matrix[i * n_total + (n_field + j)] = bc.B[i + n_field * j];
+        }
+    }
+    for (std::size_t i = 0; i < n_aux; ++i) {
+        full_rhs[n_field + i] = bc.g[i];
+        for (std::size_t j = 0; j < n_field; ++j) {
+            full_matrix[(n_field + i) * n_total + j] = bc.Ct[i * n_field + j];
+        }
+        for (std::size_t j = 0; j < n_aux; ++j) {
+            full_matrix[(n_field + i) * n_total + (n_field + j)] = bc.D[i * n_aux + j];
+        }
+    }
+
+    const auto dx_dense = solve_dense(full_matrix, full_rhs);
+    ASSERT_EQ(dx_dense.size(), n_total);
+
+    for (std::size_t i = 0; i < n_field; ++i) {
+        EXPECT_NEAR(du_reduced[i], dx_dense[i], std::max(1e-8, std::abs(dx_dense[i]) * 1e-7))
+            << "reduced field step mismatch at dof " << i;
+    }
+    for (std::size_t i = 0; i < n_aux; ++i) {
+        EXPECT_NEAR(dx_aux[i], dx_dense[n_field + i], std::max(1e-8, std::abs(dx_dense[n_field + i]) * 1e-7))
+            << "reduced auxiliary step mismatch at dof " << i;
+    }
+}
+
+TEST(MonolithicCoupling, TwoStateVectorOutletDirectCouplingRespectsConstrainedOutletDofs)
+{
+    // Regression for the real pipe outlet case where the outlet flux support
+    // overlaps constrained velocity DOFs on the outlet-edge intersection.
+    // The monolithic direct-coupling path must assemble dQ/du in the same
+    // constrained trial space as the PDE operator.
+    const int marker = 9;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = u_space, .components = 3});
+    sys.addOperator("op");
+
+    const auto u_disc = FormExpr::discreteField(u_field, *u_space, "u");
+    const auto n = FormExpr::normal();
+    auto Q = sys.boundaryIntegral(
+        "Q", inner(u_disc, n), marker,
+        BoundaryFunctional::Reduction::Sum,
+        AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+
+    auto model = aux::model("two_state_vector_outlet_like_constrained", [](ModelFacade& m) {
+        auto Q = m.input("Q");
+        auto P1 = m.state("P1");
+        auto P2 = m.state("P2");
+        auto Rp = m.param("Rp");
+        auto C1 = m.param("C1");
+        auto Rm = m.param("Rm");
+        auto C2 = m.param("C2");
+        auto Rd = m.param("Rd");
+
+        m << ddt(P1) == (Q - (P1 - P2) / Rm) / C1;
+        m << ddt(P2) == ((P1 - P2) / Rm - P2 / Rd) / C2;
+        m << out("P_out") == P1 + Rp * Q;
+    });
+
+    auto inst = sys.deploy(
+        use(model).name("two_state_vector_outlet_like_constrained_inst").global().monolithic()
+            .bindCoupled("Q", Q)
+            .params({
+                {"Rp", 3.0},
+                {"C1", 0.5},
+                {"Rm", 2.0},
+                {"C2", 0.75},
+                {"Rd", 4.0},
+            })
+            .initialize({0.3, -0.1}));
+
+    const auto u = FormExpr::stateField(u_field, *u_space, "u");
+    const auto v = FormExpr::testFunction(*u_space, "v");
+    const auto residual = inner(u, v).dx() - inner(inst.output("P_out") * n, v).ds(marker);
+    (void)installFormulation(sys, "op", {u_field}, residual);
+
+    SetupInputs si;
+    si.topology_override = singleTetraTopology();
+    sys.setup({}, si);
+
+    const auto* emap = sys.fieldDofHandler(u_field).getEntityDofMap();
+    ASSERT_NE(emap, nullptr);
+    auto outlet_vertex_dofs = emap->getVertexDofs(/*vertex=*/0);
+    ASSERT_EQ(outlet_vertex_dofs.size(), 3u);
+    const auto constrained_dof =
+        outlet_vertex_dofs[2] + sys.fieldDofOffset(u_field);
+
+    sys.addConstraint(std::make_unique<svmp::FE::constraints::DirichletBC>(
+        constrained_dof, 0.0));
+    sys.setup({}, si);
+    sys.finalizeAuxiliaryLayout();
+
+    const auto n_field = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    ASSERT_EQ(n_field, 12u);
+    ASSERT_TRUE(sys.constraints().isConstrained(constrained_dof));
+
+    std::vector<Real> sol(n_field, 0.0);
+    for (svmp::FE::GlobalIndex v_id = 0; v_id < 4; ++v_id) {
+        setFieldComponent(sol, sys, u_field, v_id, /*component=*/2, -1.0);
+    }
+    sys.constraints().distribute(sol);
+
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = sol;
+
+    sys.beginTimeStep();
+
+    svmp::FE::assembly::DenseMatrixView lhs(static_cast<svmp::FE::GlobalIndex>(n_field));
+    svmp::FE::assembly::DenseVectorView rhs(static_cast<svmp::FE::GlobalIndex>(n_field));
+    lhs.zero();
+    rhs.zero();
+
+    AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+    req.want_vector = true;
+    req.is_nonlinear_iteration = true;
+
+    const auto ar = sys.assemble(req, state, &lhs, &rhs);
+    ASSERT_TRUE(ar.success);
+
+    std::vector<Real> base_residual(n_field, 0.0);
+    std::vector<Real> field_jacobian(n_field * n_field, 0.0);
+    for (std::size_t i = 0; i < n_field; ++i) {
+        base_residual[i] = rhs.getVectorEntry(static_cast<svmp::FE::GlobalIndex>(i));
+        for (std::size_t j = 0; j < n_field; ++j) {
+            field_jacobian[i * n_field + j] =
+                lhs.getMatrixEntry(static_cast<svmp::FE::GlobalIndex>(i),
+                                   static_cast<svmp::FE::GlobalIndex>(j));
+        }
+    }
+
+    for (const auto& upd : sys.lastRankOneUpdates()) {
+        for (const auto& [row_dof, row_val] : upd.v) {
+            EXPECT_FALSE(sys.constraints().isConstrained(row_dof));
+            const auto row = static_cast<std::size_t>(row_dof);
+            for (const auto& [col_dof, col_val] : upd.v) {
+                EXPECT_FALSE(sys.constraints().isConstrained(col_dof));
+                const auto col = static_cast<std::size_t>(col_dof);
+                field_jacobian[row * n_field + col] += upd.sigma * row_val * col_val;
+            }
+        }
+    }
+
+    const auto packed_base = sys.checkpointAuxiliaryState();
+    const Real eps = 1e-7;
+    for (std::size_t col = 0; col < n_field; ++col) {
+        if (sys.constraints().isConstrained(static_cast<svmp::FE::GlobalIndex>(col))) {
+            continue;
+        }
+
+        std::vector<Real> sol_pert(sol);
+        sol_pert[col] += eps;
+
+        SystemStateView ps = state;
+        ps.u = sol_pert;
+
+        sys.restoreAuxiliaryState(packed_base);
+        sys.auxiliaryInputRegistryIfPresent()->invalidateAll();
+
+        svmp::FE::assembly::DenseVectorView rhs_pert(static_cast<svmp::FE::GlobalIndex>(n_field));
+        rhs_pert.zero();
+
+        AssemblyRequest req_vec = req;
+        req_vec.want_matrix = false;
+
+        const auto ar_pert = sys.assemble(req_vec, ps, nullptr, &rhs_pert);
+        ASSERT_TRUE(ar_pert.success);
+
+        for (std::size_t row = 0; row < n_field; ++row) {
+            if (sys.constraints().isConstrained(static_cast<svmp::FE::GlobalIndex>(row))) {
+                continue;
+            }
+
+            const Real fd =
+                (rhs_pert.getVectorEntry(static_cast<svmp::FE::GlobalIndex>(row)) -
+                 base_residual[row]) /
+                eps;
+            const Real analytic = field_jacobian[row * n_field + col];
+
+            EXPECT_NEAR(analytic, fd, std::max(1e-5, std::abs(fd) * 1e-4))
+                << "Constrained monolithic direct-coupling mismatch at row=" << row
+                << " col=" << col
+                << " analytic=" << analytic
+                << " fd=" << fd;
+        }
+    }
+}
+
+TEST(MonolithicCoupling, DirectCouplingRankOneUsesActualOutputSensitivity)
+{
+    // Regression for monolithic direct coupling when the outlet output depends
+    // on a non-leading state variable:
+    //   dx1/dt = -x1
+    //   dx2/dt = -x2 + Q
+    //   P_out = x2 + Rp * Q
+    //
+    // The direct PDE coupling should still recover the same dQ/du shape and
+    // emit a rank-1 update with sigma = -Rp for the residual term -(P_out*v).ds.
+    const int marker = 6;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
+    auto Q = sys.boundaryIntegral("Q", u_disc, marker);
+
+    auto model = aux::model("two_state_direct", [](ModelFacade& m) {
+        auto Q = m.input("Q");
+        auto x1 = m.state("x1");
+        auto x2 = m.state("x2");
+        auto Rp = m.param("Rp");
+        m << ddt(x1) == -x1;
+        m << ddt(x2) == -x2 + Q;
+        m << out("P_out") == x2 + Rp * Q;
+    });
+
+    auto inst = sys.deploy(
+        use(model).name("two_state_direct_inst").global().monolithic()
+            .bindCoupled("Q", Q)
+            .param("Rp", 3.0)
+            .initialize({0.0, 0.0}));
+
+    const auto u = FormExpr::stateField(u_field, *space, "u");
+    const auto v = FormExpr::testFunction(*space, "v");
+    const auto residual = inner(grad(u), grad(v)).dx() - (inst.output("P_out") * v).ds(marker);
+    (void)installFormulation(sys, "op", {u_field}, residual);
+
+    { SetupInputs si; si.topology_override = singleTetraTopology(); sys.setup({}, si); }
+    sys.finalizeAuxiliaryLayout();
+
+    const auto n_dofs = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    std::vector<Real> sol(n_dofs, 1.0);
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = sol;
+
+    sys.beginTimeStep();
+
+    svmp::FE::assembly::DenseMatrixView lhs(static_cast<svmp::FE::GlobalIndex>(n_dofs));
+    svmp::FE::assembly::DenseVectorView rhs(static_cast<svmp::FE::GlobalIndex>(n_dofs));
+    lhs.zero();
+    rhs.zero();
+
+    AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+    req.want_vector = true;
+
+    const auto result = sys.assemble(req, state, &lhs, &rhs);
+    ASSERT_TRUE(result.success);
+
+    const auto updates = sys.lastRankOneUpdates();
+    ASSERT_EQ(updates.size(), 1u);
+    EXPECT_NEAR(updates[0].sigma, -3.0, 1e-10);
+    ASSERT_FALSE(updates[0].v.empty());
+    Real sum_abs = 0.0;
+    for (const auto& [dof, value] : updates[0].v) {
+        EXPECT_GE(dof, 0);
+        EXPECT_LT(static_cast<std::size_t>(dof), n_dofs);
+        sum_abs += std::abs(value);
+    }
+    EXPECT_GT(sum_abs, 0.0);
+    EXPECT_LE(sum_abs, 0.5 + 1e-10);
+    for (const auto& [dof, value] : updates[0].v) {
+        (void)dof;
+        EXPECT_GT(std::abs(value), 0.0);
+    }
+}
+
+TEST(MonolithicCoupling, DirectCouplingFallsBackToExactOuterProductWhenNotSymmetric)
+{
+    // Regression for monolithic direct coupling when dR/d(output) is not
+    // parallel to dQ/du. In this case the symmetric rank-1 shortcut is not
+    // exact, so the coupling must be assembled as a general outer product.
+    const int marker = 7;
+
+    auto assemble_field_block = [&](Real Rp,
+                                    svmp::FE::assembly::DenseMatrixView& lhs_out,
+                                    std::vector<svmp::FE::backends::RankOneUpdate>& updates_out) {
+        auto mesh =
+            std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+        auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+        FESystem sys(mesh);
+        const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+        sys.addOperator("op");
+
+        const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
+        auto Q = sys.boundaryIntegral("Q", u_disc, marker);
+
+        auto model = aux::model("nonsymmetric_direct", [](ModelFacade& m) {
+            auto Q = m.input("Q");
+            auto x = m.state("x");
+            auto Rp = m.param("Rp");
+            m << ddt(x) == -x + Q;
+            m << out("P_out") == Rp * Q;
+        });
+
+        auto inst = sys.deploy(
+            use(model).name("nonsymmetric_direct_inst").global().monolithic()
+                .bindCoupled("Q", Q)
+                .param("Rp", Rp)
+                .initialize({0.0}));
+
+        const auto u = FormExpr::stateField(u_field, *space, "u");
+        const auto v = FormExpr::testFunction(*space, "v");
+        const auto residual = (u * v).dx() - (inst.output("P_out") * v).dx();
+        (void)installFormulation(sys, "op", {u_field}, residual);
+
+        SetupInputs si;
+        si.topology_override = singleTetraTopology();
+        sys.setup({}, si);
+        sys.finalizeAuxiliaryLayout();
+
+        const auto n_dofs = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+        ASSERT_EQ(n_dofs, 4u);
+
+        std::vector<Real> sol(n_dofs, 1.0);
+        SystemStateView state;
+        state.time = 0.0;
+        state.dt = 0.1;
+        state.u = sol;
+
+        sys.beginTimeStep();
+
+        svmp::FE::assembly::DenseVectorView rhs(static_cast<svmp::FE::GlobalIndex>(n_dofs));
+        lhs_out.zero();
+        rhs.zero();
+
+        AssemblyRequest req;
+        req.op = "op";
+        req.want_matrix = true;
+        req.want_vector = true;
+
+        const auto result = sys.assemble(req, state, &lhs_out, &rhs);
+        ASSERT_TRUE(result.success);
+
+        updates_out.assign(sys.lastRankOneUpdates().begin(), sys.lastRankOneUpdates().end());
+    };
+
+    svmp::FE::assembly::DenseMatrixView lhs_rp0(4);
+    svmp::FE::assembly::DenseMatrixView lhs_rp2(4);
+    std::vector<svmp::FE::backends::RankOneUpdate> updates_rp0;
+    std::vector<svmp::FE::backends::RankOneUpdate> updates_rp2;
+    assemble_field_block(/*Rp=*/0.0, lhs_rp0, updates_rp0);
+    assemble_field_block(/*Rp=*/2.0, lhs_rp2, updates_rp2);
+
+    EXPECT_TRUE(updates_rp0.empty());
+    EXPECT_TRUE(updates_rp2.empty())
+        << "non-symmetric direct coupling should assemble as a full outer product";
+
+    // Cell integral of each linear basis on the reference tetrahedron = volume/4 = 1/24.
+    // Boundary-face integral on the marked triangular face = area/3 = 1/6 for face nodes,
+    // and 0 for the opposite vertex.
+    const Real expected = -2.0 * (1.0 / 24.0) * (1.0 / 6.0);
+    for (svmp::FE::GlobalIndex i = 0; i < 4; ++i) {
+        for (svmp::FE::GlobalIndex j = 0; j < 4; ++j) {
+            const Real delta = lhs_rp2.getMatrixEntry(i, j) - lhs_rp0.getMatrixEntry(i, j);
+            const Real target = (j < 3) ? expected : 0.0;
+            EXPECT_NEAR(delta, target, 1e-10)
+                << "unexpected direct-coupling outer-product entry at (" << i << "," << j << ")";
+        }
+    }
 }
 
 TEST(MonolithicCoupling, DomainAverageGradientFDVerification)

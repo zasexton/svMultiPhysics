@@ -565,7 +565,8 @@ CoupledResidualKernels installCoupledResidual(
     // so that assembleCellsFused can share geometry across blocks.
     // ========================================================================
     if (options.coupled_residual_install_jacobian_blocks &&
-        options.compiler_options.jit.enable)
+        options.compiler_options.jit.enable &&
+        !options.coupled_residual_from_jacobian_block)
     {
         std::vector<forms::CoupledBlockKernel::BlockSpec> block_specs;
         for (std::size_t i = 0; i < out.jacobian_blocks.size(); ++i) {
@@ -1368,6 +1369,11 @@ CoupledResidualKernels installFormulation(
                 return std::nullopt;
             };
             resolved = resolved.transformNodes(resolve_aux);
+
+            // Update the stored residual expression with resolved refs so
+            // downstream consumers (e.g., dR_PDE/dx_aux monolithic Jacobian)
+            // can find AuxiliaryOutputRef nodes.
+            rec.residual_expr = resolved.nodeShared();
         }
 
         // Block couplings: discover actual active blocks from the per-test

@@ -221,6 +221,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         // chain needed for quadratic Newton convergence.
         return Factories::toCoupledOutflowBC(bc, u_id, *velocity_space_, options_.velocity_field_name, u, rho);
     });
+    bc_manager.install(options_.coupled_outflow_rcrcr, [&](const auto& bc) {
+        return Factories::toCoupledOutflowBC(
+            bc, system, u_id, *velocity_space_, options_.velocity_field_name, u, rho);
+    });
     bc_manager.install(options_.velocity_dirichlet,
                        [&](const auto& bc) {
         return Factories::toVelocityEssentialBC(bc, dim, options_.velocity_field_name);

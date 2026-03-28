@@ -35,6 +35,7 @@ class AuxiliaryInputRegistry;
 struct SystemStateView {
     double time{0.0};
     double dt{0.0};
+    double effective_dt{0.0};
     double dt_prev{0.0};
 
     std::span<const Real> u{};
