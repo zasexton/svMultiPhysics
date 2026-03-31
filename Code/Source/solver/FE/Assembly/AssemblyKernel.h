@@ -83,6 +83,35 @@ class AssemblyContext;
 
 namespace assembly {
 
+/**
+ * @brief High-level semantic category for a kernel
+ *
+ * This is intentionally coarse-grained. The assembler and setup pipeline use
+ * it to choose explicit execution paths instead of inferring semantics from
+ * wrapper types or registration side effects.
+ */
+enum class SemanticKernelKind : std::uint8_t {
+    SingleForm = 0u,
+    MixedBlockSet,
+    MonolithicCell,
+    Functional
+};
+
+[[nodiscard]] inline const char* semanticKernelKindName(SemanticKernelKind kind) noexcept
+{
+    switch (kind) {
+        case SemanticKernelKind::SingleForm:
+            return "SingleForm";
+        case SemanticKernelKind::MixedBlockSet:
+            return "MixedBlockSet";
+        case SemanticKernelKind::MonolithicCell:
+            return "MonolithicCell";
+        case SemanticKernelKind::Functional:
+            return "Functional";
+    }
+    return "Unknown";
+}
+
 // ============================================================================
 // Required Data Flags
 // ============================================================================
@@ -610,6 +639,16 @@ public:
      * @brief Get kernel name for debugging/logging
      */
     [[nodiscard]] virtual std::string name() const { return "GenericKernel"; }
+
+    /**
+     * @brief Report the semantic kernel category
+     *
+     * The default is a normal single-form kernel.
+     */
+    [[nodiscard]] virtual SemanticKernelKind semanticKernelKind() const noexcept
+    {
+        return SemanticKernelKind::SingleForm;
+    }
 
     /**
      * @brief Maximum time-derivative order referenced by this kernel

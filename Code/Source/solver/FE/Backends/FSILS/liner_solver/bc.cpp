@@ -103,8 +103,7 @@ void fsils_bc_create(FSILS_lhsType& lhs, int faIn, int nNo, int dof, BcType BC_t
     }
 
     int Ac;
-
-    MPI_Allreduce(&a, &Ac, 1, cm_mod::mpint, MPI_SUM, lhs.commu.comm);
+    fsils_allreduce_sum(&a, &Ac, 1, cm_mod::mpint, lhs.commu);
 
     if (Ac > 1) {
       lhs.face[faIn].sharedFlag = true;

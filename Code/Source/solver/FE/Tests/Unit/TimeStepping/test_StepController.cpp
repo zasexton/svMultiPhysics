@@ -589,6 +589,79 @@ TEST(TimeLoopCallbacks, CallsOnStepStartNonlinearDoneAndStepAccepted)
     EXPECT_EQ(step_accepted_calls, 1);
 }
 
+TEST(TimeLoopCallbacks, FixedStepDoesNotAcceptNonconvergedStep)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    const auto form = (svmp::FE::forms::dt(u) * v + (u * v) * static_cast<Real>(1.0)).dx();
+
+    svmp::FE::forms::FormCompiler compiler;
+    auto ir = compiler.compileResidual(form);
+    auto kernel = std::make_shared<svmp::FE::forms::NonlinearFormKernel>(std::move(ir), svmp::FE::forms::ADMode::Forward);
+    sys.addCellKernel("op", u_field, u_field, kernel);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = ts_test::singleTetraTopology();
+    sys.setup({}, inputs);
+
+    auto integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    svmp::FE::systems::TransientSystem transient(sys, integrator);
+
+    auto factory = ts_test::createTestFactory();
+    ASSERT_NE(factory.get(), nullptr);
+    auto linear = factory->createLinearSolver(ts_test::directSolve());
+    ASSERT_NE(linear.get(), nullptr);
+
+    auto history = svmp::FE::timestepping::TimeHistory::allocate(*factory, sys.dofHandler().getNumDofs());
+    const std::vector<Real> u0 = {1.0, -0.5, 0.25, 2.0};
+    ts_test::setVectorByDof(history.uPrev(), u0);
+    ts_test::setVectorByDof(history.uPrev2(), u0);
+    history.resetCurrentToPrevious();
+
+    svmp::FE::timestepping::TimeLoopOptions opts;
+    opts.t0 = 0.0;
+    opts.t_end = 0.2;
+    opts.dt = 0.2;
+    opts.scheme = svmp::FE::timestepping::SchemeKind::BackwardEuler;
+    opts.newton.residual_op = "op";
+    opts.newton.jacobian_op = "op";
+    opts.newton.max_iterations = 1;
+    opts.newton.abs_tolerance = 1e-12;
+    opts.newton.rel_tolerance = 0.0;
+
+    int nonlinear_done_calls = 0;
+    int step_accepted_calls = 0;
+    bool last_nonlinear_converged = true;
+
+    svmp::FE::timestepping::TimeLoopCallbacks callbacks;
+    callbacks.on_nonlinear_done = [&nonlinear_done_calls, &last_nonlinear_converged](
+                                      const svmp::FE::timestepping::TimeHistory&,
+                                      const svmp::FE::timestepping::NewtonReport& nr) {
+        nonlinear_done_calls += 1;
+        last_nonlinear_converged = nr.converged;
+    };
+    callbacks.on_step_accepted = [&step_accepted_calls](const svmp::FE::timestepping::TimeHistory&) {
+        step_accepted_calls += 1;
+    };
+
+    svmp::FE::timestepping::TimeLoop loop(opts);
+    EXPECT_THROW((void)loop.run(transient, *factory, *linear, history, callbacks), svmp::FE::FEException);
+    EXPECT_EQ(nonlinear_done_calls, 1);
+    EXPECT_FALSE(last_nonlinear_converged);
+    EXPECT_EQ(step_accepted_calls, 0);
+    EXPECT_NEAR(history.time(), 0.0, 1e-15);
+}
+
 TEST(TimeLoopCallbacks, CallsStepRejectedWithErrorTooLargeReasonWhenControllerRejectsAcceptedStep)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN

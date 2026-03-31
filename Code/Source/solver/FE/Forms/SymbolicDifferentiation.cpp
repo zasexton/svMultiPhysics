@@ -1111,7 +1111,9 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 const int j = node->componentIndex1().value_or(-1);
                 const auto a = diff1(0);
                 out.primal = a.primal.component(i, j);
-                out.deriv = a.deriv.component(i, j);
+                out.deriv = (a.deriv.isValid() && a.deriv.node() != nullptr && isZeroLike(*a.deriv.node()))
+                    ? FormExpr::typedZero()
+                    : a.deriv.component(i, j);
                 break;
             }
             case FormExprType::IndexedAccess: {
@@ -1909,7 +1911,9 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                 const int j = node->componentIndex1().value_or(-1);
                 const auto a = diff1(0);
                 out.primal = a.primal.component(i, j);
-                out.deriv = a.deriv.component(i, j);
+                out.deriv = (a.deriv.isValid() && a.deriv.node() != nullptr && isZeroLike(*a.deriv.node()))
+                    ? FormExpr::typedZero()
+                    : a.deriv.component(i, j);
                 break;
             }
             case FormExprType::IndexedAccess: {

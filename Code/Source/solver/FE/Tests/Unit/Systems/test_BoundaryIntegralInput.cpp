@@ -201,6 +201,64 @@ TEST(BoundaryIntegralInput, FESystem_WithAuxiliaryModel_EndToEnd)
     EXPECT_NEAR(sys.auxiliaryOutputValues()[out_slot], 9.95, 1e-10);
 }
 
+TEST(BoundaryIntegralInput, FirstNonlinearAssemblyAdvancesPartitionedAuxiliary)
+{
+    // The first assembly in a Newton solve usually sets
+    // is_nonlinear_iteration=true. Partitioned auxiliary blocks must still
+    // advance once for that step instead of staying at their committed state.
+    const int marker = 5;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
+    sys.registerBoundaryIntegralInput("Q", u_disc, marker);
+
+    auto model = AuxiliaryModelBuilder("q_driven_decay")
+        .input("Q").state("X").param("k")
+        .ode("X", FormExpr::constant(-1.0) * modelParam("k") * modelInput("Q"))
+        .output("Y", modelState("X"))
+        .build();
+
+    sys.deployAuxiliaryModel(
+        use(model).name("decay_inst").scope(AuxiliaryStateScope::Global)
+            .solveMode(AuxiliarySolveMode::Partitioned).stepper({"ForwardEuler"})
+            .param("k", 1.0).bind("Q", "Q").initialize({10.0}));
+
+    const auto u = FormExpr::stateField(u_field, *space, "u");
+    const auto v = FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, inner(grad(u), grad(v)).dx());
+
+    { SetupInputs si; si.topology_override = singleTetraTopology(); sys.setup({}, si); }
+    sys.finalizeAuxiliaryLayout();
+
+    std::vector<Real> sol(static_cast<std::size_t>(sys.dofHandler().getNumDofs()), 1.0);
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = sol;
+
+    AssemblyRequest req;
+    req.op = "op";
+    req.want_vector = true;
+    req.is_nonlinear_iteration = true;
+
+    svmp::FE::assembly::DenseVectorView rhs(
+        static_cast<svmp::FE::GlobalIndex>(sys.dofHandler().getNumDofs()));
+    rhs.zero();
+
+    sys.beginTimeStep();
+    const auto ar = sys.assemble(req, state, nullptr, &rhs);
+    ASSERT_TRUE(ar.success);
+
+    const auto out_slot = sys.auxiliaryOutputSlotOf("decay_inst", "Y");
+    ASSERT_NE(out_slot, std::string::npos);
+    EXPECT_NEAR(sys.auxiliaryOutputValues()[out_slot], 9.95, 1e-10);
+}
+
 // ===========================================================================
 //  Second-field integrand (exercises per-field BoundaryReductionService map)
 // ===========================================================================
@@ -1319,7 +1377,7 @@ TEST(MonolithicCoupling, SymbolicGradientMatchesFD)
 
     // Get SYMBOLIC gradient from evaluateFunctionalGradient.
     auto& svc = sys.boundaryReductionService(u_field);
-    auto symbolic_grad = svc.evaluateFunctionalGradient("Q", state);
+    auto symbolic_grad = svc.evaluateFunctionalGradient("Q", state, /*apply_constraints=*/false);
 
     // Get FD gradient for comparison.
     const Real eps = 1e-7;

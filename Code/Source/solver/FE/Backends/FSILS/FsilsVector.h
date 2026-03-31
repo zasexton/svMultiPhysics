@@ -73,9 +73,12 @@ private:
         std::vector<GlobalIndex> resolved{};
     };
 
+    void exchangeOverlap(bool owner_to_ghost_only);
+
     GlobalIndex global_size_{0};
     std::shared_ptr<const FsilsShared> shared_{};
     std::vector<Real> data_;
+    mutable std::vector<double> overlap_internal_work_{};
     mutable std::unordered_map<std::size_t, std::vector<ResolutionCacheEntry>> resolution_cache_{};
 };
 

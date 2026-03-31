@@ -491,6 +491,36 @@ backends::SolverOptions fsilsGmresDiagOptions()
     return o;
 }
 
+backends::SolverOptions fsilsBlockSchurOptions(
+    backends::FsilsBlockSchurSchurPreconditioner schur_pc =
+        backends::FsilsBlockSchurSchurPreconditioner::DiagL,
+    backends::FsilsBlockSchurMomentumApproximation momentum_hat =
+        backends::FsilsBlockSchurMomentumApproximation::DiagK)
+{
+    backends::SolverOptions o;
+    o.method = backends::SolverMethod::BlockSchur;
+    o.preconditioner = backends::PreconditionerType::Diagonal;
+    o.rel_tol = 1e-10;
+    o.abs_tol = 1e-12;
+    o.max_iter = 40;
+    o.krylov_dim = 40;
+    o.fsils_blockschur_gm_max_iter = 80;
+    o.fsils_blockschur_cg_max_iter = 80;
+    o.fsils_blockschur_gm_rel_tol = 1e-10;
+    o.fsils_blockschur_cg_rel_tol = 1e-10;
+    o.fsils_residual_check_policy = backends::FsilsResidualCheckPolicy::Always;
+    o.fsils_blockschur_schur_preconditioner = schur_pc;
+    o.fsils_blockschur_momentum_approximation = momentum_hat;
+
+    backends::BlockLayout layout;
+    layout.blocks.push_back({"u", 0, 2, backends::BlockRole::PrimaryField});
+    layout.blocks.push_back({"p", 2, 1, backends::BlockRole::ConstraintField});
+    layout.momentum_block = 0;
+    layout.constraint_block = 1;
+    o.block_layout = std::move(layout);
+    return o;
+}
+
 } // namespace
 
 TEST(TimeLoopFsilsConvergenceMPI, GeneralizedAlphaConvergesWithAlgebraicField)
@@ -505,8 +535,11 @@ TEST(TimeLoopFsilsConvergenceMPI, GeneralizedAlphaConvergesWithAlgebraicField)
         GTEST_SKIP() << "Run with 2+ MPI ranks to enable this test";
     }
 
-    auto run_case = [&](bool deterministic_mode) {
-        SCOPED_TRACE(deterministic_mode ? "deterministic_on" : "deterministic_off");
+    auto run_case = [&](bool deterministic_mode, bool overlap_communication) {
+        const std::string trace_name =
+            std::string(deterministic_mode ? "deterministic_on" : "deterministic_off") +
+            (overlap_communication ? "_overlap_on" : "_overlap_off");
+        SCOPED_TRACE(trace_name);
 
         // One owned cell per rank; all cells present as ghosts to enable OwnedRowsOnly-style assembly.
         const int n_cells = size;
@@ -549,7 +582,7 @@ TEST(TimeLoopFsilsConvergenceMPI, GeneralizedAlphaConvergesWithAlgebraicField)
         setup_opts.assembler_name = "StandardAssembler";
         setup_opts.assembly_options.ghost_policy = GhostPolicy::ReverseScatter;
         setup_opts.assembly_options.deterministic = deterministic_mode;
-        setup_opts.assembly_options.overlap_communication = false;
+        setup_opts.assembly_options.overlap_communication = overlap_communication;
 
         // FSILS distributed layout requires each rank's owned nodes to be contiguous in node space.
         // Use dense, process-count-independent global IDs (non-owner-contiguous) to force the
@@ -576,75 +609,242 @@ TEST(TimeLoopFsilsConvergenceMPI, GeneralizedAlphaConvergesWithAlgebraicField)
         auto perm = buildFsilsDofPermutation(sys, dof_per_node, setup_opts.dof_options);
         ASSERT_TRUE(perm) << "Failed to build FSILS DOF permutation for test system";
 
-        backends::FsilsFactory factory(dof_per_node, perm);
-        auto linear = factory.createLinearSolver(fsilsGmresDiagOptions());
-        ASSERT_TRUE(linear);
+        const std::array<std::pair<backends::FsilsBlockSchurSchurPreconditioner,
+                                   backends::FsilsBlockSchurMomentumApproximation>, 2> variants{{
+            {backends::FsilsBlockSchurSchurPreconditioner::DiagL,
+             backends::FsilsBlockSchurMomentumApproximation::DiagK},
+            {backends::FsilsBlockSchurSchurPreconditioner::AlgebraicSchur,
+             backends::FsilsBlockSchurMomentumApproximation::BlockDiagK},
+        }};
 
-        // Allocate history before any matrix exists: this creates local-only vectors that must be repacked.
-        auto history = timestepping::TimeHistory::allocate(factory, n_dofs, /*history_depth=*/2,
-                                                           /*allocate_second_order_state=*/false);
-        const double dt = 0.05;
-        history.setTime(0.0);
-        history.setDt(dt);
-        history.setPrevDt(dt);
-        history.setStepIndex(0);
+        for (const auto& [schur_pc, momentum_hat] : variants) {
+            SCOPED_TRACE(std::string(backends::fsilsBlockSchurPreconditionerToString(schur_pc)) + "/" +
+                         std::string(backends::fsilsBlockSchurMomentumApproximationToString(momentum_hat)));
 
-        // Initialize u^{n-1}, u^{n-2} (and current u) to a nontrivial state.
-        auto init = [&](backends::GenericVector& vec, double scale) {
-            auto s = vec.localSpan();
-            ASSERT_EQ(static_cast<GlobalIndex>(s.size()), n_dofs);
-            for (GlobalIndex i = 0; i < n_dofs; ++i) {
-                s[static_cast<std::size_t>(i)] = static_cast<Real>(scale) * static_cast<Real>(0.01) * static_cast<Real>(i + 1);
+            backends::FsilsFactory factory(dof_per_node, perm);
+            auto linear = factory.createLinearSolver(fsilsBlockSchurOptions(schur_pc, momentum_hat));
+            ASSERT_TRUE(linear);
+
+            // Allocate history before any matrix exists: this creates local-only vectors that must be repacked.
+            auto history = timestepping::TimeHistory::allocate(factory, n_dofs, /*history_depth=*/2,
+                                                               /*allocate_second_order_state=*/false);
+            const double dt = 0.05;
+            history.setTime(0.0);
+            history.setDt(dt);
+            history.setPrevDt(dt);
+            history.setStepIndex(0);
+
+            auto init = [&](backends::GenericVector& vec, double scale) {
+                auto s = vec.localSpan();
+                ASSERT_EQ(static_cast<GlobalIndex>(s.size()), n_dofs);
+                for (GlobalIndex i = 0; i < n_dofs; ++i) {
+                    s[static_cast<std::size_t>(i)] = static_cast<Real>(scale) * static_cast<Real>(0.01) * static_cast<Real>(i + 1);
+                }
+            };
+            init(history.uPrev(), /*scale=*/1.0);
+            init(history.uPrev2(), /*scale=*/1.0);
+            history.resetCurrentToPrevious();
+
+            auto base_integrator = std::make_shared<systems::BackwardDifferenceIntegrator>();
+            systems::TransientSystem transient(sys, std::move(base_integrator));
+
+            timestepping::TimeLoopOptions loop_opts;
+            loop_opts.t0 = 0.0;
+            loop_opts.t_end = 3.0 * dt;
+            loop_opts.dt = dt;
+            loop_opts.max_steps = 3;
+            loop_opts.scheme = timestepping::SchemeKind::GeneralizedAlpha;
+            loop_opts.generalized_alpha_rho_inf = 0.5;
+            loop_opts.newton.residual_op = "op";
+            loop_opts.newton.jacobian_op = "op";
+            loop_opts.newton.max_iterations = 12;
+            loop_opts.newton.abs_tolerance = 1e-12;
+            loop_opts.newton.rel_tolerance = 1e-10;
+
+            timestepping::TimeLoop loop(loop_opts);
+
+            int nonconverged_steps = 0;
+            std::vector<timestepping::NewtonReport> nonlinear_reports;
+            timestepping::TimeLoopCallbacks callbacks;
+            callbacks.on_nonlinear_done =
+                [&nonconverged_steps, &nonlinear_reports](const timestepping::TimeHistory&,
+                                                          const timestepping::NewtonReport& nr) {
+                if (!nr.converged) {
+                    ++nonconverged_steps;
+                }
+                nonlinear_reports.push_back(nr);
+            };
+
+            timestepping::TimeLoopReport rep{};
+            try {
+                rep = loop.run(transient, factory, *linear, history, callbacks);
+            } catch (const FEException& e) {
+                ADD_FAILURE() << "Rank " << rank << ": TimeLoop threw FEException: " << e.what();
+                return;
+            } catch (const std::exception& e) {
+                ADD_FAILURE() << "Rank " << rank << ": TimeLoop threw std::exception: " << e.what();
+                return;
             }
-        };
-        init(history.uPrev(), /*scale=*/1.0);
-        init(history.uPrev2(), /*scale=*/1.0);
-        history.resetCurrentToPrevious();
 
-        auto base_integrator = std::make_shared<systems::BackwardDifferenceIntegrator>();
-        systems::TransientSystem transient(sys, std::move(base_integrator));
+            EXPECT_TRUE(rep.success);
+            EXPECT_NEAR(rep.final_time, loop_opts.t_end, 1e-12);
+            EXPECT_EQ(nonconverged_steps, 0);
+            EXPECT_FALSE(nonlinear_reports.empty());
+            EXPECT_GE(nonlinear_reports.size(), 3u);
 
-        timestepping::TimeLoopOptions loop_opts;
-        loop_opts.t0 = 0.0;
-        loop_opts.t_end = 3.0 * dt;
-        loop_opts.dt = dt;
-        loop_opts.max_steps = 3;
-        loop_opts.scheme = timestepping::SchemeKind::GeneralizedAlpha;
-        loop_opts.generalized_alpha_rho_inf = 0.5;
-        loop_opts.newton.residual_op = "op";
-        loop_opts.newton.jacobian_op = "op";
-        loop_opts.newton.max_iterations = 12;
-        loop_opts.newton.abs_tolerance = 1e-12;
-        loop_opts.newton.rel_tolerance = 1e-10;
+            bool saw_collective_activity = false;
+            bool saw_blockschur_report = false;
+            bool saw_blockschur_recovery = false;
+            for (const auto& nr : nonlinear_reports) {
+                EXPECT_TRUE(nr.converged);
+                EXPECT_TRUE(nr.linear.converged);
+                EXPECT_GE(nr.linear.iterations, 0);
+                EXPECT_TRUE(std::isfinite(nr.linear.initial_residual_norm));
+                EXPECT_TRUE(std::isfinite(nr.linear.final_residual_norm));
+                EXPECT_TRUE(std::isfinite(nr.linear.relative_residual));
+                saw_collective_activity =
+                    saw_collective_activity || (nr.linear.collective_calls > 0u);
 
-        timestepping::TimeLoop loop(loop_opts);
-
-        int nonconverged_steps = 0;
-        timestepping::TimeLoopCallbacks callbacks;
-        callbacks.on_nonlinear_done = [&nonconverged_steps](const timestepping::TimeHistory&, const timestepping::NewtonReport& nr) {
-            if (!nr.converged) {
-                ++nonconverged_steps;
+                if (nr.linear.blockschur_outer_iterations > 0) {
+                    saw_blockschur_report = true;
+                    EXPECT_GT(nr.linear.blockschur_momentum_solve_calls, 0);
+                    EXPECT_GE(nr.linear.blockschur_momentum_iterations, 0);
+                    EXPECT_GT(nr.linear.blockschur_schur_solve_calls, 0);
+                    EXPECT_GE(nr.linear.blockschur_schur_iterations, 0);
+                    EXPECT_GE(nr.linear.blockschur_momentum_restart_cycles,
+                              nr.linear.blockschur_momentum_solve_calls);
+                    EXPECT_GE(nr.linear.blockschur_schur_setup_time_seconds, 0.0);
+                    EXPECT_GE(nr.linear.blockschur_schur_solve_time_seconds, 0.0);
+                    EXPECT_GE(nr.linear.blockschur_collective_calls_max_per_outer, 0u);
+                    EXPECT_GE(nr.linear.blockschur_collective_time_max_per_outer, 0.0);
+                } else if (nr.linear.message.find("fallback gmres") != std::string::npos) {
+                    EXPECT_NE(nr.linear.message.find("fallback gmres"), std::string::npos);
+                    saw_blockschur_recovery = true;
+                }
             }
-        };
-
-        timestepping::TimeLoopReport rep{};
-        try {
-            rep = loop.run(transient, factory, *linear, history, callbacks);
-        } catch (const FEException& e) {
-            ADD_FAILURE() << "Rank " << rank << ": TimeLoop threw FEException: " << e.what();
-            return;
-        } catch (const std::exception& e) {
-            ADD_FAILURE() << "Rank " << rank << ": TimeLoop threw std::exception: " << e.what();
-            return;
+            EXPECT_TRUE(saw_collective_activity);
+            EXPECT_TRUE(saw_blockschur_report || saw_blockschur_recovery);
         }
-
-        EXPECT_TRUE(rep.success);
-        EXPECT_NEAR(rep.final_time, loop_opts.t_end, 1e-12);
-        EXPECT_EQ(nonconverged_steps, 0);
     };
 
-    run_case(/*deterministic_mode=*/true);
-    run_case(/*deterministic_mode=*/false);
+    run_case(/*deterministic_mode=*/true, /*overlap_communication=*/false);
+    run_case(/*deterministic_mode=*/true, /*overlap_communication=*/true);
+#endif
+}
+
+TEST(TimeLoopFsilsConvergenceMPI, FixedStepRejectsNonconvergedNewtonStep)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size < 2) {
+        GTEST_SKIP() << "Run with 2+ MPI ranks to enable this test";
+    }
+
+    const int n_cells = size;
+    auto mesh = std::make_shared<StripQuadMeshAccess>(n_cells, rank);
+    const auto space = spaces::Space(spaces::SpaceType::H1, ElementType::Quad4, /*order=*/1, /*components=*/1);
+    ASSERT_TRUE(space);
+
+    systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::TestFunction(*space, "v");
+    const auto one = forms::FormExpr::constant(Real(1.0));
+    const auto lambda = forms::FormExpr::constant(Real(1.0));
+    const auto beta = forms::FormExpr::constant(Real(0.5));
+    const auto residual = (u.dt(1) * v + lambda * u * v + beta * (one + u * u) * u * v).dx();
+
+    (void)systems::installFormulation(sys, "op", {u_field}, residual);
+
+    systems::SetupOptions setup_opts;
+    setup_opts.assembler_name = "StandardAssembler";
+    setup_opts.assembly_options.ghost_policy = GhostPolicy::ReverseScatter;
+    setup_opts.assembly_options.deterministic = true;
+    setup_opts.assembly_options.overlap_communication = false;
+    setup_opts.dof_options.global_numbering = dofs::GlobalNumberingMode::DenseGlobalIds;
+    setup_opts.dof_options.ownership = dofs::OwnershipStrategy::LowestRank;
+    setup_opts.dof_options.my_rank = rank;
+    setup_opts.dof_options.world_size = size;
+    setup_opts.dof_options.mpi_comm = comm;
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = buildStripTopology(n_cells, rank, size);
+
+    sys.setup(setup_opts, inputs);
+    ASSERT_TRUE(sys.isSetup());
+
+    const GlobalIndex n_dofs = sys.dofHandler().getNumDofs();
+    ASSERT_TRUE(inputs.topology_override.has_value());
+    const GlobalIndex n_nodes = inputs.topology_override->n_vertices;
+    ASSERT_EQ(n_dofs, n_nodes);
+
+    constexpr int dof_per_node = 1;
+    auto perm = buildFsilsDofPermutation(sys, dof_per_node, setup_opts.dof_options);
+    ASSERT_TRUE(perm) << "Failed to build FSILS DOF permutation for scalar test system";
+
+    backends::FsilsFactory factory(dof_per_node, perm);
+    auto linear = factory.createLinearSolver(fsilsGmresDiagOptions());
+    ASSERT_TRUE(linear);
+
+    auto history = timestepping::TimeHistory::allocate(factory, n_dofs, /*history_depth=*/2,
+                                                       /*allocate_second_order_state=*/false);
+    const double dt = 0.1;
+    history.setTime(0.0);
+    history.setDt(dt);
+    history.setPrevDt(dt);
+    history.setStepIndex(0);
+
+    auto init = [&](backends::GenericVector& vec, double scale) {
+        auto s = vec.localSpan();
+        ASSERT_EQ(static_cast<GlobalIndex>(s.size()), n_dofs);
+        for (GlobalIndex node = 0; node < n_nodes; ++node) {
+            s[static_cast<std::size_t>(node)] =
+                static_cast<Real>(scale * 0.05 * static_cast<double>(node + 1));
+        }
+    };
+    init(history.uPrev(), /*scale=*/1.0);
+    init(history.uPrev2(), /*scale=*/1.0);
+    history.resetCurrentToPrevious();
+
+    auto integrator = std::make_shared<systems::BackwardDifferenceIntegrator>();
+    systems::TransientSystem transient(sys, std::move(integrator));
+
+    timestepping::TimeLoopOptions loop_opts;
+    loop_opts.t0 = 0.0;
+    loop_opts.t_end = dt;
+    loop_opts.dt = dt;
+    loop_opts.max_steps = 1;
+    loop_opts.scheme = timestepping::SchemeKind::BackwardEuler;
+    loop_opts.newton.residual_op = "op";
+    loop_opts.newton.jacobian_op = "op";
+    loop_opts.newton.max_iterations = 1;
+    loop_opts.newton.abs_tolerance = 1e-12;
+    loop_opts.newton.rel_tolerance = 0.0;
+
+    timestepping::TimeLoop loop(loop_opts);
+
+    int nonconverged_steps = 0;
+    int accepted_steps = 0;
+    timestepping::TimeLoopCallbacks callbacks;
+    callbacks.on_nonlinear_done = [&nonconverged_steps](const timestepping::TimeHistory&,
+                                                        const timestepping::NewtonReport& nr) {
+        if (!nr.converged) {
+            ++nonconverged_steps;
+        }
+    };
+    callbacks.on_step_accepted = [&accepted_steps](const timestepping::TimeHistory&) {
+        ++accepted_steps;
+    };
+
+    EXPECT_THROW((void)loop.run(transient, factory, *linear, history, callbacks), FEException);
+    EXPECT_EQ(nonconverged_steps, 1);
+    EXPECT_EQ(accepted_steps, 0);
 #endif
 }
 

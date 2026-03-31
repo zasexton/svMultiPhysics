@@ -82,9 +82,31 @@ enum LinearSolverType
   LS_TYPE_BICGS = 795
 };
 
+enum class SchurPreconditionerType : std::uint8_t
+{
+  DIAG_L = 0,
+  BLOCKDIAG_L = 1,
+  ILU_L = 2,
+  ALGEBRAIC_SHAT = 3
+};
+
+enum class SchurMomentumApproximationType : std::uint8_t
+{
+  DIAG_K = 0,
+  BLOCKDIAG_K = 1,
+  ILU_K = 2,
+  ASM_K = 3
+};
+
 class FSILS_commuType 
 {
   public:
+    struct CollectiveStats {
+      std::uint64_t allreduce_calls{0};
+      std::uint64_t allreduce_words{0};
+      double allreduce_time{0.0};
+    };
+
     /// Free of created          (USE)
     int foC;         
 
@@ -105,7 +127,107 @@ class FSILS_commuType
 
     /// MPI communicator         (IN)
     MPI_Comm comm;       
+
+    CollectiveStats collective_stats{};
 };
+
+inline void fsils_reset_collective_stats(FSILS_commuType& commu)
+{
+  commu.collective_stats = FSILS_commuType::CollectiveStats{};
+}
+
+inline void fsils_record_allreduce(FSILS_commuType& commu, int count, double duration)
+{
+  if (commu.nTasks <= 1 || count <= 0) {
+    return;
+  }
+  commu.collective_stats.allreduce_calls += 1u;
+  commu.collective_stats.allreduce_words += static_cast<std::uint64_t>(count);
+  commu.collective_stats.allreduce_time += duration;
+}
+
+inline FSILS_commuType::CollectiveStats
+fsils_collective_delta(const FSILS_commuType::CollectiveStats& before,
+                       const FSILS_commuType::CollectiveStats& after) noexcept
+{
+  FSILS_commuType::CollectiveStats delta{};
+  delta.allreduce_calls =
+      (after.allreduce_calls >= before.allreduce_calls)
+          ? (after.allreduce_calls - before.allreduce_calls)
+          : 0u;
+  delta.allreduce_words =
+      (after.allreduce_words >= before.allreduce_words)
+          ? (after.allreduce_words - before.allreduce_words)
+          : 0u;
+  delta.allreduce_time =
+      (after.allreduce_time >= before.allreduce_time)
+          ? (after.allreduce_time - before.allreduce_time)
+          : 0.0;
+  return delta;
+}
+
+inline int fsils_allreduce(const void* sendbuf,
+                           void* recvbuf,
+                           int count,
+                           MPI_Datatype datatype,
+                           MPI_Op op,
+                           FSILS_commuType& commu)
+{
+  if (commu.nTasks <= 1 || count <= 0) {
+    return MPI_SUCCESS;
+  }
+  const double tp0 = MPI_Wtime();
+  const int rc = MPI_Allreduce(sendbuf, recvbuf, count, datatype, op, commu.comm);
+  fsils_record_allreduce(commu, count, MPI_Wtime() - tp0);
+  return rc;
+}
+
+inline int fsils_allreduce_in_place(void* buffer,
+                                    int count,
+                                    MPI_Datatype datatype,
+                                    MPI_Op op,
+                                    FSILS_commuType& commu)
+{
+  if (commu.nTasks <= 1 || count <= 0) {
+    return MPI_SUCCESS;
+  }
+  const double tp0 = MPI_Wtime();
+  const int rc = MPI_Allreduce(MPI_IN_PLACE, buffer, count, datatype, op, commu.comm);
+  fsils_record_allreduce(commu, count, MPI_Wtime() - tp0);
+  return rc;
+}
+
+inline int fsils_allreduce_sum(const void* sendbuf,
+                               void* recvbuf,
+                               int count,
+                               MPI_Datatype datatype,
+                               FSILS_commuType& commu)
+{
+  return fsils_allreduce(sendbuf, recvbuf, count, datatype, MPI_SUM, commu);
+}
+
+inline int fsils_allreduce_sum_in_place(void* buffer,
+                                        int count,
+                                        MPI_Datatype datatype,
+                                        FSILS_commuType& commu)
+{
+  return fsils_allreduce_in_place(buffer, count, datatype, MPI_SUM, commu);
+}
+
+inline const char* fsils_solver_type_name(LinearSolverType type) noexcept
+{
+  switch (type) {
+    case LinearSolverType::LS_TYPE_CG:
+      return "CG";
+    case LinearSolverType::LS_TYPE_GMRES:
+      return "GMRES";
+    case LinearSolverType::LS_TYPE_NS:
+      return "BlockSchur";
+    case LinearSolverType::LS_TYPE_BICGS:
+      return "BICGS";
+  }
+  return "Unknown";
+}
 
 class FSILS_cSType
 {
@@ -226,6 +348,42 @@ class FSILS_lhsType
 class FSILS_subLsType 
 {
   public:
+    struct SolverStats {
+      int solve_calls{0};
+      int iterations_total{0};
+      int max_iterations{0};
+      int restart_cycles_total{0};
+      int max_restart_cycles{0};
+      std::uint64_t collective_calls{0};
+      std::uint64_t collective_words{0};
+      double collective_time{0.0};
+      double setup_time{0.0};
+      double solve_time{0.0};
+
+      void reset() noexcept
+      {
+        *this = SolverStats{};
+      }
+
+      void record_call(int iterations,
+                       int restart_cycles,
+                       const FSILS_commuType::CollectiveStats& collective_delta,
+                       double setup_seconds,
+                       double solve_seconds) noexcept
+      {
+        solve_calls += 1;
+        iterations_total += std::max(0, iterations);
+        max_iterations = std::max(max_iterations, std::max(0, iterations));
+        restart_cycles_total += std::max(0, restart_cycles);
+        max_restart_cycles = std::max(max_restart_cycles, std::max(0, restart_cycles));
+        collective_calls += collective_delta.allreduce_calls;
+        collective_words += collective_delta.allreduce_words;
+        collective_time += collective_delta.allreduce_time;
+        setup_time += std::max(0.0, setup_seconds);
+        solve_time += std::max(0.0, solve_seconds);
+      }
+    };
+
     /// Successful solving          (OUT)
     bool suc;       
 
@@ -269,6 +427,21 @@ class FSILS_subLsType
 
     /// Calling duration            (OUT)
     double callD;
+
+    /// When true, do not terminate GMRES early on heuristic stagnation or
+    /// adaptive-restart criteria before the requested tolerance is met.
+    bool exact_convergence{false};
+
+    /// When true, skip selective GMRES reorthogonalization for this solve.
+    /// This is used only for severe-stall recovery paths where a larger
+    /// Krylov space is more important than extra orthogonality work.
+    bool disable_reorth{false};
+
+    /// Schur-complement preconditioner selection used by the BlockSchur path.
+    SchurPreconditionerType schur_preconditioner{SchurPreconditionerType::DIAG_L};
+
+    /// Momentum-side approximation used when building algebraic Schur operators.
+    SchurMomentumApproximationType schur_momentum_approximation{SchurMomentumApproximationType::DIAG_K};
 
     /// Pre-allocated workspace arrays for iterative solvers.
     /// These are lazily resized on first use and reused on subsequent calls
@@ -405,11 +578,42 @@ class FSILS_subLsType
         cg_s_nNo = nNo_;
       }
     } ws;
+
+    SolverStats stats{};
 };
 
 class FSILS_lsType 
 {
   public:
+    struct BlockSchurStats {
+      int outer_iterations{0};
+      std::uint64_t collective_calls_total{0};
+      std::uint64_t collective_calls_max_per_outer{0};
+      std::uint64_t collective_words_total{0};
+      std::uint64_t collective_words_max_per_outer{0};
+      double collective_time_total{0.0};
+      double collective_time_max_per_outer{0.0};
+
+      void reset() noexcept
+      {
+        *this = BlockSchurStats{};
+      }
+
+      void record_outer_iteration(const FSILS_commuType::CollectiveStats& collective_delta) noexcept
+      {
+        outer_iterations += 1;
+        collective_calls_total += collective_delta.allreduce_calls;
+        collective_calls_max_per_outer =
+            std::max(collective_calls_max_per_outer, collective_delta.allreduce_calls);
+        collective_words_total += collective_delta.allreduce_words;
+        collective_words_max_per_outer =
+            std::max(collective_words_max_per_outer, collective_delta.allreduce_words);
+        collective_time_total += collective_delta.allreduce_time;
+        collective_time_max_per_outer =
+            std::max(collective_time_max_per_outer, collective_delta.allreduce_time);
+      }
+    };
+
     /// Free of created             (USE)
     int foC;                     
 
@@ -421,10 +625,36 @@ class FSILS_lsType
 
     /// Contribution of cont. res.  (OUT)
     int Resc;                    
+
+    /// When true, fsils_solve() treats the Ri array as already stored in the
+    /// internal FSILS node ordering and skips the old->internal / internal->old
+    /// permutation copies around the solver kernel.
+    bool ri_internal_order{false};
     
     FSILS_subLsType GM;
     FSILS_subLsType CG;
     FSILS_subLsType RI;
+    BlockSchurStats blockschur_stats{};
+
+    struct SolveWorkspace {
+      int dof{0};
+      fsils_int nNo{0};
+      Array<double> R;
+      Array<double> Wr;
+      Array<double> Wc;
+
+      void ensure(int dof_, fsils_int nNo_)
+      {
+        if (dof_ == dof && nNo_ == nNo) {
+          return;
+        }
+        R.resize(dof_, nNo_);
+        Wr.resize(dof_, nNo_);
+        Wc.resize(dof_, nNo_);
+        dof = dof_;
+        nNo = nNo_;
+      }
+    } solve_ws;
 
     /// Block layout for fractional-step (BlockSchur) solver.
     /// Populated by the FE backend before calling fsils_solve.

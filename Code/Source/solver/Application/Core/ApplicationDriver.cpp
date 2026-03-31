@@ -124,6 +124,24 @@ std::string trim_copy(std::string s)
   return s;
 }
 
+bool parseBoolEnv(const char* name, bool default_value)
+{
+  const char* env = std::getenv(name);
+  if (!env) {
+    return default_value;
+  }
+  std::string v(env);
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (v == "1" || v == "true" || v == "on" || v == "yes") {
+    return true;
+  }
+  if (v == "0" || v == "false" || v == "off" || v == "no") {
+    return false;
+  }
+  return default_value;
+}
+
 std::string lower_copy(std::string s)
 {
   std::transform(s.begin(), s.end(), s.begin(),
@@ -424,10 +442,10 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       if (tol > 0.0) {
         // Legacy semantics: <Add_equation><Tolerance> is a *relative* tolerance.
         newton_opts.rel_tolerance = tol;
-        // Use the same tolerance for absolute convergence so that problems
-        // with already-small residuals (e.g., linear heat at near-steady-state)
-        // can declare convergence without requiring unachievable relative reduction.
-        newton_opts.abs_tolerance = tol;
+        // The XML does not expose a separate nonlinear absolute tolerance, so
+        // keep the absolute check disabled when the legacy relative tolerance
+        // is specified explicitly.
+        newton_opts.abs_tolerance = 0.0;
       }
     }
   }
@@ -435,7 +453,9 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   // Use the unified "equations" operator tag (same as transient).
   newton_opts.residual_op = "equations";
   newton_opts.jacobian_op = "equations";
-  newton_opts.use_line_search = false;
+  newton_opts.use_line_search = parseBoolEnv("SVMP_NEWTON_LINE_SEARCH", true);
+  newton_opts.accept_inexact_linear_solutions =
+      parseBoolEnv("SVMP_NEWTON_ACCEPT_INEXACT_LINEAR", false);
 
   // Modified Newton: reuse Jacobian across multiple iterations.
   // Period 1 = full Newton (default), 2 = rebuild every 2nd iteration, etc.
@@ -533,10 +553,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       if (tol > 0.0) {
         // Legacy semantics: <Add_equation><Tolerance> is a *relative* tolerance.
         opts.newton.rel_tolerance = tol;
-        // Use the same tolerance for absolute convergence so that problems
-        // with already-small residuals (e.g., linear heat at near-steady-state)
-        // can declare convergence without requiring unachievable relative reduction.
-        opts.newton.abs_tolerance = tol;
+        // The XML does not expose a separate nonlinear absolute tolerance, so
+        // keep the absolute check disabled when the legacy relative tolerance
+        // is specified explicitly.
+        opts.newton.abs_tolerance = 0.0;
       }
     }
   }
@@ -552,10 +572,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   opts.newton.residual_op = "equations";
   opts.newton.jacobian_op = "equations";
 
-  // Disable backtracking line search to match legacy solver behavior. The legacy
-  // solver applies a full Newton update without line search. Disabling it avoids
-  // 2 extra residual assembly passes per Newton iteration.
-  opts.newton.use_line_search = false;
+  // Favor robustness by default. A caller can still disable globalization or
+  // re-enable legacy inexact-Newton behavior explicitly via environment.
+  opts.newton.use_line_search = parseBoolEnv("SVMP_NEWTON_LINE_SEARCH", true);
+  opts.newton.accept_inexact_linear_solutions =
+      parseBoolEnv("SVMP_NEWTON_ACCEPT_INEXACT_LINEAR", false);
 
   // Modified Newton: reuse Jacobian across multiple iterations.
   if (const char* jrp = std::getenv("SVMP_JACOBIAN_REBUILD_PERIOD")) {

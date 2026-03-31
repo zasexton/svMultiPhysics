@@ -14,6 +14,7 @@
 #include "Sparsity/DistributedSparsityPattern.h"
 
 #include <mpi.h>
+#include <cmath>
 #include <utility>
 #include <vector>
 

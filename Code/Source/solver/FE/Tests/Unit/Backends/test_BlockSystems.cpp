@@ -113,5 +113,31 @@ TEST(BlockSystems, BlockMatrixAssemblyAndMult)
 #endif
 }
 
-} // namespace svmp::FE::backends
+TEST(BlockSystems, BlockVectorCopyFrom)
+{
+#if !defined(FE_HAS_EIGEN)
+    GTEST_SKIP() << "FE_HAS_EIGEN not enabled";
+#else
+    EigenFactory factory;
 
+    std::vector<std::unique_ptr<GenericVector>> src_blocks;
+    src_blocks.push_back(factory.createVector(1));
+    src_blocks.push_back(factory.createVector(1));
+    BlockVector src(std::move(src_blocks));
+    src.block(0).localSpan()[0] = 2.5;
+    src.block(1).localSpan()[0] = -7.0;
+
+    std::vector<std::unique_ptr<GenericVector>> dst_blocks;
+    dst_blocks.push_back(factory.createVector(1));
+    dst_blocks.push_back(factory.createVector(1));
+    BlockVector dst(std::move(dst_blocks));
+    dst.set(0.0);
+
+    dst.copyFrom(src);
+
+    EXPECT_DOUBLE_EQ(dst.block(0).localSpan()[0], 2.5);
+    EXPECT_DOUBLE_EQ(dst.block(1).localSpan()[0], -7.0);
+#endif
+}
+
+} // namespace svmp::FE::backends

@@ -191,7 +191,9 @@ public:
     };
 
     [[nodiscard]] std::vector<SensitivityEntry> evaluateFunctionalGradient(
-        std::string_view name, const SystemStateView& state);
+        std::string_view name,
+        const SystemStateView& state,
+        bool apply_constraints = true);
 
     /**
      * @brief Gradient w.r.t. a specific field (for multi-field integrands).
@@ -200,7 +202,10 @@ public:
      * TrialFunction, leaving other fields as constants.
      */
     [[nodiscard]] std::vector<SensitivityEntry> evaluateFunctionalGradient(
-        std::string_view name, FieldId target_field, const SystemStateView& state);
+        std::string_view name,
+        FieldId target_field,
+        const SystemStateView& state,
+        bool apply_constraints = true);
 
     // -----------------------------------------------------------------
     //  Accessors

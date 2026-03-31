@@ -38,7 +38,7 @@ namespace bcast {
 void fsils_bcast(double& u, FSILS_commuType& commu)
 {
   if (commu.nTasks > 1) {
-    MPI_Allreduce(MPI_IN_PLACE, &u, 1, cm_mod::mpreal, MPI_SUM, commu.comm);
+    fsils_allreduce_sum_in_place(&u, 1, cm_mod::mpreal, commu);
   }
 }
 
@@ -46,7 +46,7 @@ void fsils_bcast(double& u, FSILS_commuType& commu)
 void fsils_bcast_v(const int n, Vector<double>& u, FSILS_commuType& commu)
 {
   if (commu.nTasks > 1) {
-    MPI_Allreduce(MPI_IN_PLACE, u.data(), n, cm_mod::mpreal, MPI_SUM, commu.comm);
+    fsils_allreduce_sum_in_place(u.data(), n, cm_mod::mpreal, commu);
   }
 }
 
@@ -54,7 +54,7 @@ void fsils_bcast_v(const int n, Vector<double>& u, FSILS_commuType& commu)
 void fsils_bcast_v(const int n, std::vector<double>& u, FSILS_commuType& commu)
 {
   if (commu.nTasks > 1) {
-    MPI_Allreduce(MPI_IN_PLACE, u.data(), n, cm_mod::mpreal, MPI_SUM, commu.comm);
+    fsils_allreduce_sum_in_place(u.data(), n, cm_mod::mpreal, commu);
   }
 }
 

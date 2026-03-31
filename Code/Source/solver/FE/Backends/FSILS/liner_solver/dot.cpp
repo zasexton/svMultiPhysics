@@ -114,8 +114,7 @@ double fsils_dot_s(const fsils_int nNo, FSILS_commuType& commu, const Vector<dou
   }
 
   double tmp{0.0};
-
-  MPI_Allreduce(&result, &tmp, 1, cm_mod::mpreal, MPI_SUM, commu.comm);
+  fsils_allreduce_sum(&result, &tmp, 1, cm_mod::mpreal, commu);
 
   return tmp;
 }
@@ -132,8 +131,7 @@ double fsils_dot_v(const int dof, const fsils_int nNo, FSILS_commuType& commu, c
   }
 
   double tmp{0.0};
-
-  MPI_Allreduce(&result, &tmp, 1, cm_mod::mpreal, MPI_SUM, commu.comm);
+  fsils_allreduce_sum(&result, &tmp, 1, cm_mod::mpreal, commu);
 
   return tmp;
 }
@@ -159,5 +157,4 @@ double fsils_nc_dot_v(const int dof, const fsils_int nNo, const Array<double>& U
 }
 
 };
-
 

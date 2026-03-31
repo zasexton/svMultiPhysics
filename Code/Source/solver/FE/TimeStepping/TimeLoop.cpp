@@ -2442,14 +2442,6 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             }
 
             bool accept_step = nr.converged;
-            if (!accept_step && !adaptive && !threw &&
-                nr.iterations >= options_.newton.max_iterations) {
-                accept_step = true;
-                if (worldRank() == 0) {
-                    FE_LOG_WARNING(
-                        "TimeLoop: nonlinear solve did not converge (max_iterations reached); accepting step to match legacy solver behavior");
-                }
-            }
 
             if (accept_step) {
                 if (adaptive) {

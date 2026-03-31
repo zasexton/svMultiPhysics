@@ -3,7 +3,7 @@
 
 /**
  * @file JITKernelWrapper.h
- * @brief AssemblyKernel adapter that can dispatch to a future LLVM JIT backend
+ * @brief AssemblyKernel adapter that dispatches to the production LLVM JIT backend
  *
  * JIT implementation:
  * - Wraps an existing interpreter kernel and (when available) dispatches to
@@ -103,6 +103,11 @@ public:
                               assembly::KernelOutput& coupling_plus_minus) override;
 
     [[nodiscard]] std::string name() const override;
+    [[nodiscard]] assembly::SemanticKernelKind semanticKernelKind() const noexcept override
+    {
+        return fallback_ ? fallback_->semanticKernelKind()
+                         : assembly::SemanticKernelKind::SingleForm;
+    }
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override;
     [[nodiscard]] bool isSymmetric() const noexcept override;
     [[nodiscard]] bool isMatrixOnly() const noexcept override;
@@ -255,8 +260,6 @@ private:
     CompiledDispatch compiled_linear_{};
 	    CompiledDispatch compiled_residual_{};
 	    CompiledDispatch compiled_tangent_{};
-	    CompiledDispatch compiled_fused_{};
-	    bool has_compiled_fused_{false};
 	    bool has_compiled_linear_{false};
 
 	    std::unordered_map<SpecializationKey, std::shared_ptr<CompiledDispatch>, SpecializationKeyHash>

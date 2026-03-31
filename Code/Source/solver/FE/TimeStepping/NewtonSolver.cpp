@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <cctype>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <optional>
 #include <sstream>
@@ -73,6 +74,11 @@ void traceLog(const std::string& msg)
 [[nodiscard]] int mpiRank() noexcept
 {
 #if FE_HAS_MPI
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (!initialized) {
+        return 0;
+    }
     int rank = 0;
     (void)MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     return rank;
@@ -83,60 +89,74 @@ void traceLog(const std::string& msg)
 
 [[nodiscard]] bool jacobianCheckEnabled() noexcept
 {
-    static const bool enabled = [] {
-        const char* env = std::getenv("SVMP_FE_JACOBIAN_CHECK");
-        if (env == nullptr) {
-            return false;
-        }
-        std::string v(env);
-        std::transform(v.begin(), v.end(), v.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return !(v == "0" || v == "false" || v == "off" || v == "no");
-    }();
-    return enabled;
+    const char* env = std::getenv("SVMP_FE_JACOBIAN_CHECK");
+    if (env == nullptr) {
+        return false;
+    }
+    std::string v(env);
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return !(v == "0" || v == "false" || v == "off" || v == "no");
 }
 
 [[nodiscard]] int jacobianCheckNewtonIteration() noexcept
 {
-    static const int iter = [] {
-        const char* env = std::getenv("SVMP_FE_JACOBIAN_CHECK_IT");
-        if (env == nullptr) {
-            return 0;
-        }
-        char* end = nullptr;
-        const long v = std::strtol(env, &end, 10);
-        if (end == env) {
-            return 0;
-        }
-        if (v < 0) {
-            return 0;
-        }
-        if (v > std::numeric_limits<int>::max()) {
-            return std::numeric_limits<int>::max();
-        }
-        return static_cast<int>(v);
-    }();
-    return iter;
+    const char* env = std::getenv("SVMP_FE_JACOBIAN_CHECK_IT");
+    if (env == nullptr) {
+        return 0;
+    }
+    char* end = nullptr;
+    const long v = std::strtol(env, &end, 10);
+    if (end == env) {
+        return 0;
+    }
+    if (v < 0) {
+        return 0;
+    }
+    if (v > std::numeric_limits<int>::max()) {
+        return std::numeric_limits<int>::max();
+    }
+    return static_cast<int>(v);
 }
 
 [[nodiscard]] double jacobianCheckRelativeStep() noexcept
 {
-    static const double step = [] {
-        const char* env = std::getenv("SVMP_FE_JACOBIAN_CHECK_STEP");
-        if (env == nullptr) {
-            return 1e-7;
+    const char* env = std::getenv("SVMP_FE_JACOBIAN_CHECK_STEP");
+    if (env == nullptr) {
+        return 1e-7;
+    }
+    char* end = nullptr;
+    const double v = std::strtod(env, &end);
+    if (end == env) {
+        return 1e-7;
+    }
+    if (!(v > 0.0) || !std::isfinite(v)) {
+        return 1e-7;
+    }
+    return v;
+}
+
+[[nodiscard]] int lineSearchIterationsNeededToReachAlphaMin(double alpha_min,
+                                                            double shrink) noexcept
+{
+    if (!(alpha_min > 0.0) || alpha_min >= 1.0 ||
+        !(shrink > 0.0) || shrink >= 1.0) {
+        return 1;
+    }
+
+    double alpha = 1.0;
+    int iterations = 1;
+    while (alpha > alpha_min && iterations < std::numeric_limits<int>::max()) {
+        alpha *= shrink;
+        if (alpha < alpha_min) {
+            alpha = alpha_min;
         }
-        char* end = nullptr;
-        const double v = std::strtod(env, &end);
-        if (end == env) {
-            return 1e-7;
+        ++iterations;
+        if (alpha <= alpha_min) {
+            break;
         }
-        if (!(v > 0.0) || !std::isfinite(v)) {
-            return 1e-7;
-        }
-        return v;
-    }();
-    return step;
+    }
+    return std::max(1, iterations);
 }
 
 void axpy(backends::GenericVector& y, Real alpha, const backends::GenericVector& x)
@@ -196,12 +216,14 @@ double auxiliaryResidualNormForConvergence(const systems::FESystem::BorderedCoup
     }
 
 #if FE_HAS_MPI
-    int mpi_initialized = 0;
-    MPI_Initialized(&mpi_initialized);
-    if (mpi_initialized) {
-        long double global_sq = 0.0L;
-        MPI_Allreduce(&local_sq, &global_sq, 1, MPI_LONG_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-        local_sq = global_sq;
+    if (!bordered.globally_reduced) {
+        int mpi_initialized = 0;
+        MPI_Initialized(&mpi_initialized);
+        if (mpi_initialized) {
+            long double global_sq = 0.0L;
+            MPI_Allreduce(&local_sq, &global_sq, 1, MPI_LONG_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+            local_sq = global_sq;
+        }
     }
 #endif
 
@@ -256,6 +278,567 @@ void accumulateOverlapIfNeeded(backends::GenericVector& vec)
 #endif
 }
 
+enum class FsilsPostSolveSyncMode {
+    Off,
+    UpdateGhosts,
+    AccumulateOverlap,
+    AccumulateThenUpdateGhosts,
+};
+
+[[nodiscard]] FsilsPostSolveSyncMode fsilsPostSolveSyncMode() noexcept
+{
+    const char* env = std::getenv("SVMP_FSILS_POST_SOLVE_SYNC");
+    if (env == nullptr) {
+        return FsilsPostSolveSyncMode::Off;
+    }
+
+    std::string value(env);
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (value == "update" || value == "ghost" || value == "updateghosts") {
+        return FsilsPostSolveSyncMode::UpdateGhosts;
+    }
+    if (value == "accumulate" || value == "sum") {
+        return FsilsPostSolveSyncMode::AccumulateOverlap;
+    }
+    if (value == "both" || value == "accumulate_then_update") {
+        return FsilsPostSolveSyncMode::AccumulateThenUpdateGhosts;
+    }
+    return FsilsPostSolveSyncMode::Off;
+}
+
+[[nodiscard]] bool newtonDirectionCheckEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_NEWTON_DIRECTION_CHECK");
+    if (env == nullptr) {
+        return false;
+    }
+    std::string value(env);
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return !(value == "0" || value == "false" || value == "off" || value == "no");
+}
+
+[[nodiscard]] bool nativeRankOneUpdatesEnabledForLinearSolver(const backends::LinearSolver& linear) noexcept
+{
+    const bool force_explicit_rank_one =
+        std::getenv("SVMP_FORCE_EXPLICIT_RANK_ONE") != nullptr;
+    return linear.supportsNativeRankOneUpdates() && !force_explicit_rank_one;
+}
+
+[[nodiscard]] std::string describeFieldComponentDof(const systems::FESystem& sys,
+                                                    GlobalIndex dof)
+{
+    const auto comp = sys.fieldMap().getComponentOfDof(dof);
+    if (!comp) {
+        return "dof=" + std::to_string(dof);
+    }
+
+    const auto field_idx = static_cast<std::size_t>(std::max(comp->first, 0));
+    if (field_idx >= sys.fieldMap().numFields()) {
+        return "dof=" + std::to_string(dof);
+    }
+
+    const auto& field = sys.fieldMap().getField(field_idx);
+    if (field.n_components <= 1) {
+        return field.name + "(dof=" + std::to_string(dof) + ")";
+    }
+
+    return field.name + "[" + std::to_string(static_cast<int>(comp->second)) +
+           "](dof=" + std::to_string(dof) + ")";
+}
+
+struct JacobianCheckComponentStats {
+    std::string label{};
+    double fd_sq{0.0};
+    double err_sq{0.0};
+    double matrix_err_sq{0.0};
+};
+
+void logJacobianCheckComponentBreakdown(const systems::FESystem& sys,
+                                       backends::GenericVector& fd,
+                                       backends::GenericVector& total_err,
+                                       backends::GenericVector& matrix_err)
+{
+    const auto& fmap = sys.fieldMap();
+    const auto owned_dofs = sys.dofHandler().getPartition().locallyOwned().toVector();
+    if (owned_dofs.empty() || fmap.numFields() == 0) {
+        return;
+    }
+
+    std::vector<JacobianCheckComponentStats> stats;
+    stats.reserve(fmap.numFields() * 3u);
+    std::vector<int> field_offsets(fmap.numFields(), -1);
+    for (std::size_t field_idx = 0; field_idx < fmap.numFields(); ++field_idx) {
+        field_offsets[field_idx] = static_cast<int>(stats.size());
+        const auto& field = fmap.getField(field_idx);
+        if (field.n_components <= 1) {
+            stats.push_back(JacobianCheckComponentStats{field.name});
+            continue;
+        }
+        for (LocalIndex comp = 0; comp < field.n_components; ++comp) {
+            stats.push_back(JacobianCheckComponentStats{
+                field.name + "[" + std::to_string(static_cast<int>(comp)) + "]"
+            });
+        }
+    }
+
+    auto fd_view = fd.createAssemblyView();
+    auto err_view = total_err.createAssemblyView();
+    auto matrix_err_view = matrix_err.createAssemblyView();
+    FE_CHECK_NOT_NULL(fd_view.get(), "NewtonSolver: jacobian check fd view");
+    FE_CHECK_NOT_NULL(err_view.get(), "NewtonSolver: jacobian check err view");
+    FE_CHECK_NOT_NULL(matrix_err_view.get(), "NewtonSolver: jacobian check matrix err view");
+
+    for (const auto dof : owned_dofs) {
+        const auto comp = fmap.getComponentOfDof(dof);
+        if (!comp) {
+            continue;
+        }
+        const auto field_idx = static_cast<std::size_t>(std::max(comp->first, 0));
+        if (field_idx >= fmap.numFields()) {
+            continue;
+        }
+        int stat_idx = field_offsets[field_idx];
+        const auto n_comp = fmap.numComponents(field_idx);
+        if (n_comp > 1) {
+            const auto comp_idx = static_cast<int>(comp->second);
+            if (comp_idx < 0 || comp_idx >= n_comp) {
+                continue;
+            }
+            stat_idx += comp_idx;
+        }
+        if (stat_idx < 0 || static_cast<std::size_t>(stat_idx) >= stats.size()) {
+            continue;
+        }
+
+        const double fd_val = static_cast<double>(fd_view->getVectorEntry(dof));
+        const double err_val = static_cast<double>(err_view->getVectorEntry(dof));
+        const double matrix_err_val = static_cast<double>(matrix_err_view->getVectorEntry(dof));
+        auto& s = stats[static_cast<std::size_t>(stat_idx)];
+        s.fd_sq += fd_val * fd_val;
+        s.err_sq += err_val * err_val;
+        s.matrix_err_sq += matrix_err_val * matrix_err_val;
+    }
+
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized && !stats.empty()) {
+        std::vector<double> packed(stats.size() * 3u, 0.0);
+        for (std::size_t i = 0; i < stats.size(); ++i) {
+            packed[3u * i + 0u] = stats[i].fd_sq;
+            packed[3u * i + 1u] = stats[i].err_sq;
+            packed[3u * i + 2u] = stats[i].matrix_err_sq;
+        }
+        std::vector<double> reduced(packed.size(), 0.0);
+        MPI_Allreduce(packed.data(),
+                      reduced.data(),
+                      static_cast<int>(packed.size()),
+                      MPI_DOUBLE,
+                      MPI_SUM,
+                      MPI_COMM_WORLD);
+        for (std::size_t i = 0; i < stats.size(); ++i) {
+            stats[i].fd_sq = reduced[3u * i + 0u];
+            stats[i].err_sq = reduced[3u * i + 1u];
+            stats[i].matrix_err_sq = reduced[3u * i + 2u];
+        }
+    }
+#endif
+
+    if (mpiRank() != 0) {
+        return;
+    }
+
+    std::ostringstream oss;
+    oss << "NewtonSolver: Jacobian check component norms";
+    for (const auto& s : stats) {
+        oss << " [" << s.label
+            << " fd=" << std::sqrt(std::max(0.0, s.fd_sq))
+            << " total_err=" << std::sqrt(std::max(0.0, s.err_sq))
+            << " matrix_err=" << std::sqrt(std::max(0.0, s.matrix_err_sq))
+            << "]";
+    }
+    FE_LOG_INFO(oss.str());
+}
+
+void logJacobianCheckTopEntries(const systems::FESystem& sys,
+                                backends::GenericVector& err,
+                                std::size_t top_k)
+{
+    const auto owned_dofs = sys.dofHandler().getPartition().locallyOwned().toVector();
+    if (owned_dofs.empty() || top_k == 0u) {
+        return;
+    }
+
+    auto err_view = err.createAssemblyView();
+    FE_CHECK_NOT_NULL(err_view.get(), "NewtonSolver: jacobian check top-entry view");
+
+    struct Entry {
+        GlobalIndex dof{INVALID_GLOBAL_INDEX};
+        double value{0.0};
+    };
+
+    std::vector<Entry> top_entries;
+    top_entries.reserve(top_k);
+    const auto maybe_insert = [&](GlobalIndex dof, double value) {
+        const double abs_value = std::abs(value);
+        if (!(abs_value > 0.0) || !std::isfinite(abs_value)) {
+            return;
+        }
+        if (top_entries.size() < top_k) {
+            top_entries.push_back(Entry{dof, value});
+        } else {
+            auto min_it = std::min_element(
+                top_entries.begin(), top_entries.end(),
+                [](const Entry& a, const Entry& b) { return std::abs(a.value) < std::abs(b.value); });
+            if (min_it != top_entries.end() && abs_value > std::abs(min_it->value)) {
+                *min_it = Entry{dof, value};
+            }
+        }
+    };
+
+    for (const auto dof : owned_dofs) {
+        maybe_insert(dof, static_cast<double>(err_view->getVectorEntry(dof)));
+    }
+
+    std::sort(top_entries.begin(), top_entries.end(),
+              [](const Entry& a, const Entry& b) { return std::abs(a.value) > std::abs(b.value); });
+
+    std::ostringstream oss;
+    oss << "NewtonSolver: Jacobian check top |Jv-FD| entries rank=" << mpiRank();
+    for (const auto& entry : top_entries) {
+        oss << " [" << describeFieldComponentDof(sys, entry.dof)
+            << " value=" << entry.value << "]";
+    }
+    FE_LOG_INFO(oss.str());
+}
+
+void logVectorComponentNorms(const systems::FESystem& sys,
+                             backends::GenericVector& vec,
+                             std::string_view label)
+{
+    const auto& fmap = sys.fieldMap();
+    const auto owned_dofs = sys.dofHandler().getPartition().locallyOwned().toVector();
+    if (owned_dofs.empty() || fmap.numFields() == 0) {
+        return;
+    }
+
+    struct ComponentNorm {
+        std::string label{};
+        double sq_norm{0.0};
+        double sum{0.0};
+        std::uint64_t count{0};
+    };
+
+    std::vector<ComponentNorm> comps;
+    comps.reserve(fmap.numFields() * 3u);
+    std::vector<int> field_offsets(fmap.numFields(), -1);
+    for (std::size_t field_idx = 0; field_idx < fmap.numFields(); ++field_idx) {
+        field_offsets[field_idx] = static_cast<int>(comps.size());
+        const auto& field = fmap.getField(field_idx);
+        if (field.n_components <= 1) {
+            comps.push_back(ComponentNorm{field.name});
+            continue;
+        }
+        for (LocalIndex comp = 0; comp < field.n_components; ++comp) {
+            comps.push_back(ComponentNorm{
+                field.name + "[" + std::to_string(static_cast<int>(comp)) + "]"
+            });
+        }
+    }
+
+    auto view = vec.createAssemblyView();
+    FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: vector component norm view");
+
+    for (const auto dof : owned_dofs) {
+        const auto fc = fmap.getComponentOfDof(dof);
+        if (!fc) {
+            continue;
+        }
+        const auto field_idx = static_cast<std::size_t>(std::max(fc->first, 0));
+        if (field_idx >= fmap.numFields()) {
+            continue;
+        }
+        int comp_idx = field_offsets[field_idx];
+        const auto n_comp = fmap.numComponents(field_idx);
+        if (n_comp > 1) {
+            comp_idx += static_cast<int>(fc->second);
+        }
+        if (comp_idx < 0 || static_cast<std::size_t>(comp_idx) >= comps.size()) {
+            continue;
+        }
+        const double v = static_cast<double>(view->getVectorEntry(dof));
+        auto& comp = comps[static_cast<std::size_t>(comp_idx)];
+        comp.sq_norm += v * v;
+        comp.sum += v;
+        comp.count += 1;
+    }
+
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized && !comps.empty()) {
+        std::vector<double> local_norm(comps.size(), 0.0);
+        std::vector<double> global_norm(comps.size(), 0.0);
+        std::vector<double> local_sum(comps.size(), 0.0);
+        std::vector<double> global_sum(comps.size(), 0.0);
+        std::vector<unsigned long long> local_count(comps.size(), 0ull);
+        std::vector<unsigned long long> global_count(comps.size(), 0ull);
+        for (std::size_t i = 0; i < comps.size(); ++i) {
+            local_norm[i] = comps[i].sq_norm;
+            local_sum[i] = comps[i].sum;
+            local_count[i] = static_cast<unsigned long long>(comps[i].count);
+        }
+        MPI_Allreduce(local_norm.data(),
+                      global_norm.data(),
+                      static_cast<int>(local_norm.size()),
+                      MPI_DOUBLE,
+                      MPI_SUM,
+                      MPI_COMM_WORLD);
+        MPI_Allreduce(local_sum.data(),
+                      global_sum.data(),
+                      static_cast<int>(local_sum.size()),
+                      MPI_DOUBLE,
+                      MPI_SUM,
+                      MPI_COMM_WORLD);
+        MPI_Allreduce(local_count.data(),
+                      global_count.data(),
+                      static_cast<int>(local_count.size()),
+                      MPI_UNSIGNED_LONG_LONG,
+                      MPI_SUM,
+                      MPI_COMM_WORLD);
+        for (std::size_t i = 0; i < comps.size(); ++i) {
+            comps[i].sq_norm = global_norm[i];
+            comps[i].sum = global_sum[i];
+            comps[i].count = static_cast<std::uint64_t>(global_count[i]);
+        }
+    }
+#endif
+
+    if (mpiRank() != 0) {
+        return;
+    }
+
+    std::ostringstream oss;
+    oss << "NewtonSolver: " << label << " component norms";
+    for (const auto& c : comps) {
+        const double mean = (c.count > 0u) ? (c.sum / static_cast<double>(c.count)) : 0.0;
+        oss << " [" << c.label
+            << " norm=" << std::sqrt(std::max(0.0, c.sq_norm))
+            << " mean=" << mean << "]";
+    }
+    FE_LOG_INFO(oss.str());
+}
+
+void logVectorTopEntries(const systems::FESystem& sys,
+                         backends::GenericVector& vec,
+                         std::string_view label,
+                         std::size_t top_k)
+{
+    const auto owned_dofs = sys.dofHandler().getPartition().locallyOwned().toVector();
+    if (owned_dofs.empty() || top_k == 0u) {
+        return;
+    }
+
+    auto view = vec.createAssemblyView();
+    FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: vector top-entry view");
+
+    struct Entry {
+        GlobalIndex dof{INVALID_GLOBAL_INDEX};
+        double value{0.0};
+    };
+
+    std::vector<Entry> top_entries;
+    top_entries.reserve(top_k);
+    const auto maybe_insert = [&](GlobalIndex dof, double value) {
+        const double abs_value = std::abs(value);
+        if (!(abs_value > 0.0) || !std::isfinite(abs_value)) {
+            return;
+        }
+        if (top_entries.size() < top_k) {
+            top_entries.push_back(Entry{dof, value});
+            return;
+        }
+        auto min_it = std::min_element(
+            top_entries.begin(), top_entries.end(),
+            [](const Entry& a, const Entry& b) { return std::abs(a.value) < std::abs(b.value); });
+        if (min_it != top_entries.end() && abs_value > std::abs(min_it->value)) {
+            *min_it = Entry{dof, value};
+        }
+    };
+
+    for (const auto dof : owned_dofs) {
+        maybe_insert(dof, static_cast<double>(view->getVectorEntry(dof)));
+    }
+
+    std::sort(top_entries.begin(), top_entries.end(),
+              [](const Entry& a, const Entry& b) { return std::abs(a.value) > std::abs(b.value); });
+
+    if (mpiRank() != 0) {
+        return;
+    }
+
+    std::ostringstream oss;
+    oss << "NewtonSolver: " << label << " top entries";
+    for (const auto& e : top_entries) {
+        oss << " [" << describeFieldComponentDof(sys, e.dof)
+            << " value=" << e.value << "]";
+    }
+    FE_LOG_INFO(oss.str());
+}
+
+void normalizeFsilsPostSolveIncrementIfNeeded(backends::GenericVector& vec)
+{
+#if defined(FE_HAS_FSILS)
+    if (vec.backendKind() != backends::BackendKind::FSILS) {
+        return;
+    }
+
+    auto* fs = dynamic_cast<backends::FsilsVector*>(&vec);
+    if (fs == nullptr) {
+        return;
+    }
+
+    const auto mode = fsilsPostSolveSyncMode();
+    if (mode == FsilsPostSolveSyncMode::Off) {
+        return;
+    }
+
+    switch (mode) {
+        case FsilsPostSolveSyncMode::Off:
+            break;
+        case FsilsPostSolveSyncMode::UpdateGhosts:
+            fs->updateGhosts();
+            break;
+        case FsilsPostSolveSyncMode::AccumulateOverlap:
+            fs->accumulateOverlap();
+            break;
+        case FsilsPostSolveSyncMode::AccumulateThenUpdateGhosts:
+            fs->accumulateOverlap();
+            fs->updateGhosts();
+            break;
+    }
+
+    if (oopTraceEnabled()) {
+        std::string mode_name = "off";
+        switch (mode) {
+            case FsilsPostSolveSyncMode::Off:
+                mode_name = "off";
+                break;
+            case FsilsPostSolveSyncMode::UpdateGhosts:
+                mode_name = "update";
+                break;
+            case FsilsPostSolveSyncMode::AccumulateOverlap:
+                mode_name = "accumulate";
+                break;
+            case FsilsPostSolveSyncMode::AccumulateThenUpdateGhosts:
+                mode_name = "both";
+                break;
+        }
+        traceLog("NewtonSolver: applied FSILS post-solve increment sync mode='" + mode_name + "'");
+    }
+#else
+    (void)vec;
+#endif
+}
+
+void addRankOneOperatorMatvec(std::span<const backends::RankOneUpdate> updates,
+                              backends::GenericVector& x,
+                              backends::GenericVector& y)
+{
+    if (updates.empty()) {
+        return;
+    }
+
+    auto x_view = x.createAssemblyView();
+    auto y_view = y.createAssemblyView();
+    FE_CHECK_NOT_NULL(x_view.get(), "NewtonSolver: rank-one x view");
+    FE_CHECK_NOT_NULL(y_view.get(), "NewtonSolver: rank-one y view");
+
+    std::vector<Real> dots(updates.size(), Real(0.0));
+    for (std::size_t u = 0; u < updates.size(); ++u) {
+        Real local_dot = Real(0.0);
+        for (const auto& [dof, val] : updates[u].v) {
+            local_dot += val * x_view->getVectorEntry(dof);
+        }
+        dots[u] = local_dot;
+    }
+
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized) {
+        std::vector<Real> global_dots(dots.size(), Real(0.0));
+        MPI_Allreduce(dots.data(),
+                      global_dots.data(),
+                      static_cast<int>(dots.size()),
+                      MPI_DOUBLE,
+                      MPI_SUM,
+                      MPI_COMM_WORLD);
+        dots.swap(global_dots);
+    }
+#endif
+
+    y_view->beginAssemblyPhase();
+    for (std::size_t u = 0; u < updates.size(); ++u) {
+        const Real scale = updates[u].sigma * dots[u];
+        if (std::abs(scale) <= Real(1e-30)) {
+            continue;
+        }
+        for (const auto& [dof, val] : updates[u].v) {
+            y_view->addVectorEntry(dof, scale * val, assembly::AddMode::Add);
+        }
+    }
+    y_view->finalizeAssembly();
+}
+
+std::vector<backends::RankOneUpdate>
+transformRankOneUpdatesForConstraints(std::span<const backends::RankOneUpdate> updates,
+                                      const constraints::AffineConstraints& constraints)
+{
+    if (updates.empty()) {
+        return {};
+    }
+
+    std::vector<backends::RankOneUpdate> transformed;
+    transformed.reserve(updates.size());
+
+    for (const auto& upd : updates) {
+        backends::RankOneUpdate out;
+        out.sigma = upd.sigma;
+        out.active_components = upd.active_components;
+
+        std::map<GlobalIndex, Real> coeffs;
+        for (const auto& [dof, value] : upd.v) {
+            if (std::abs(value) <= Real(1e-30)) {
+                continue;
+            }
+
+            const auto cv = constraints.getConstraint(dof);
+            if (!cv || cv->isDirichlet()) {
+                coeffs[dof] += value;
+                continue;
+            }
+
+            for (const auto& entry : cv->entries) {
+                coeffs[entry.master_dof] += value * static_cast<Real>(entry.weight);
+            }
+        }
+
+        out.v.reserve(coeffs.size());
+        for (const auto& [dof, value] : coeffs) {
+            if (std::abs(value) > Real(1e-30)) {
+                out.v.emplace_back(dof, value);
+            }
+        }
+
+        transformed.push_back(std::move(out));
+    }
+
+    return transformed;
+}
+
 struct FsilsMatrixSnapshot {
     std::vector<Real> values{};
 
@@ -290,11 +873,17 @@ struct SolverOptionsGuard {
             : static_cast<Real>(1e-12);
     opts.abs_tol = std::max(target_abs, static_cast<Real>(1e-16));
 
-    // Strongly coupled bordered solves are much less tolerant of loose inner
-    // solves than the legacy PDE-only path. Keep the cap finite for FSILS, but
-    // allow materially more Krylov work before declaring failure.
+    // Strongly coupled bordered / native rank-one outlet solves are much less
+    // tolerant of loose inner solves than the legacy PDE-only path. Keep a
+    // meaningful lower bound, but do not throw away a larger user-requested
+    // Krylov budget from the XML/application settings.
     opts.max_iter = std::max(base.max_iter, 200);
-    opts.max_iter = std::min(opts.max_iter, 200);
+
+    // Bordered outlet-coupled solves cannot safely accept a native BlockSchur
+    // "success" unless the wrapper also validates the original FE residual.
+    // The internal FSILS residual can look converged while the true operator
+    // residual is still too large for Newton to make progress.
+    opts.fsils_residual_check_policy = backends::FsilsResidualCheckPolicy::Always;
 
     if (base.method == backends::SolverMethod::BlockSchur) {
         const int target_inner_max_iter = std::max(base.max_iter, 200);
@@ -313,6 +902,20 @@ struct SolverOptionsGuard {
         opts.fsils_blockschur_cg_rel_tol = cg_target_rel;
     }
 
+    return opts;
+}
+
+[[nodiscard]] backends::SolverOptions
+makeValidatedNativeRankOneSolveOptions(const backends::SolverOptions& base)
+{
+    backends::SolverOptions opts = makeBorderedSolveOptions(base);
+
+    // Native FSILS rank-one outlet updates are still solved monolithically, but
+    // they are just as sensitive to inexact inner solves as the explicit bordered
+    // path. Reuse the stricter bordered tolerances so the first Newton step does
+    // not accept a pressure-dominated direction with only a loose preconditioned
+    // residual check behind it.
+    opts.fsils_residual_check_policy = backends::FsilsResidualCheckPolicy::Always;
     return opts;
 }
 
@@ -702,6 +1305,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
     std::vector<GlobalIndex> constrained_dofs;
     std::vector<GlobalIndex> dirichlet_dofs;
+    bool has_non_dirichlet_affine_constraints = false;
     if (!constraints.empty()) {
         constrained_dofs.reserve(constraints.numConstraints());
         dirichlet_dofs.reserve(constraints.numConstraints());
@@ -710,11 +1314,18 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 constrained_dofs.push_back(cv.slave_dof);
             }
         });
-        constraints.forEach([&dirichlet_dofs](const constraints::AffineConstraints::ConstraintView& cv) {
-            if (cv.slave_dof >= 0 && cv.isDirichlet()) {
-                dirichlet_dofs.push_back(cv.slave_dof);
-            }
-        });
+        constraints.forEach(
+            [&dirichlet_dofs, &has_non_dirichlet_affine_constraints](
+                const constraints::AffineConstraints::ConstraintView& cv) {
+                if (cv.slave_dof < 0) {
+                    return;
+                }
+                if (cv.isDirichlet()) {
+                    dirichlet_dofs.push_back(cv.slave_dof);
+                } else {
+                    has_non_dirichlet_affine_constraints = true;
+                }
+            });
 
         std::sort(constrained_dofs.begin(), constrained_dofs.end());
         constrained_dofs.erase(std::unique(constrained_dofs.begin(), constrained_dofs.end()),
@@ -807,6 +1418,19 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     double ptc_prev_residual_norm = std::numeric_limits<double>::quiet_NaN();
 
     systems::OperatorTag residual_op_used = options_.residual_op;
+    std::vector<backends::RankOneUpdate> assembled_rank_one_updates;
+    std::vector<backends::RankOneUpdate> effective_rank_one_updates;
+
+    auto captureRankOneUpdates = [&]() {
+        const auto updates = transient.system().lastRankOneUpdates();
+        assembled_rank_one_updates.assign(updates.begin(), updates.end());
+        if (has_non_dirichlet_affine_constraints && !assembled_rank_one_updates.empty()) {
+            effective_rank_one_updates =
+                transformRankOneUpdatesForConstraints(assembled_rank_one_updates, constraints);
+        } else {
+            effective_rank_one_updates = assembled_rank_one_updates;
+        }
+    };
 
     auto assembleResidualOnly = [&](const systems::SystemStateView& state, const char* phase) -> double {
         residual_op_used = options_.residual_op;
@@ -871,6 +1495,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         const auto aj = transient.assemble(req, state, J_view.get(), nullptr);
         FE_THROW_IF(!aj.success, FEException,
                     "NewtonSolver: jacobian assembly failed: " + aj.error_message);
+        captureRankOneUpdates();
         if (oopTraceEnabled()) {
             std::ostringstream oss;
             oss << "NewtonSolver: assemble op='" << req.op << "' want_matrix=1 want_vector=0"
@@ -906,6 +1531,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         const auto ar = transient.assemble(req, state, J_view.get(), r_view.get());
         FE_THROW_IF(!ar.success, FEException,
                     "NewtonSolver: combined (matrix+vector) assembly failed: " + ar.error_message);
+        captureRankOneUpdates();
         if (oopTraceEnabled()) {
             std::ostringstream oss;
             oss << "NewtonSolver: assemble op='" << req.op << "' want_matrix=1 want_vector=1"
@@ -948,6 +1574,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         const auto ar = transient.assemble(req, state, J_view.get(), r_view.get());
         FE_THROW_IF(!ar.success, FEException,
                     "NewtonSolver: combined (matrix+vector) assembly failed: " + ar.error_message);
+        captureRankOneUpdates();
         if (oopTraceEnabled()) {
             std::ostringstream oss;
             oss << "NewtonSolver: assemble op='" << req.op << "' want_matrix=1 want_vector=1"
@@ -973,8 +1600,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     };
 
     auto bridgeRankOneUpdates = [&]() -> bool {
-        const auto updates = transient.system().lastRankOneUpdates();
-        if (updates.empty()) {
+        const std::span<const backends::RankOneUpdate> updates(effective_rank_one_updates.data(),
+                                                               effective_rank_one_updates.size());
+        if (effective_rank_one_updates.empty()) {
             linear.setRankOneUpdates({});
             return false;
         }
@@ -982,13 +1610,18 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         const bool force_explicit_rank_one =
             std::getenv("SVMP_FORCE_EXPLICIT_RANK_ONE") != nullptr;
         const bool use_native_rank_one_updates =
-            linear.supportsNativeRankOneUpdates() && !force_explicit_rank_one;
+            linear.supportsNativeRankOneUpdates() &&
+            !force_explicit_rank_one &&
+            !has_non_dirichlet_affine_constraints;
         const bool force_explicit_matrix_assembly =
             bordered.active && bordered.n_aux > 0 && !use_native_rank_one_updates;
         if (oopTraceEnabled()) {
             traceLog("NewtonSolver: " + std::to_string(updates.size()) +
                      " rank-1 updates from assembly"
-                     + (force_explicit_matrix_assembly ? " (explicit matrix path)" : ""));
+                     + (force_explicit_matrix_assembly ? " (explicit matrix path)" : "")
+                     + (has_non_dirichlet_affine_constraints
+                            ? " (constraint-transformed)"
+                            : ""));
             for (std::size_t i = 0; i < updates.size(); ++i) {
                 double v_norm_sq = 0.0;
                 for (const auto& [dof, val] : updates[i].v) {
@@ -1167,7 +1800,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         if (ntp_other < 0.0) ntp_other = 0.0;
         int mpi_rank = 0;
 #if FE_HAS_MPI
-        MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+        int mpi_initialized = 0;
+        MPI_Initialized(&mpi_initialized);
+        if (mpi_initialized) {
+            MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+        }
 #endif
         if (mpi_rank == 0 && ntp_total > 1e-6) {
             auto pct = [&](double t) { return 100.0 * t / ntp_total; };
@@ -1488,21 +2125,50 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 zeroVectorEntries(constrained_dofs, u_backup);
                 const double r_diff_norm = residualNormForConvergence(u_backup, residual_base);
 
-                // u_backup <- J*v (FSILS matvec applies overlap communication).
+                // u_backup <- J_matrix*v (without the pending low-rank outlet correction).
                 u_backup.zero();
                 J.mult(du, u_backup);
                 zeroVectorEntries(constrained_dofs, u_backup);
+                const double matrix_jv_norm = u_backup.norm();
+
+                // residual_base keeps a copy of the matrix-only action so we can
+                // compare both the raw assembled matrix and the full effective
+                // operator (matrix + pending rank-1 updates) against FD.
+                copyVector(residual_base, u_backup);
+                axpy(u_backup, static_cast<Real>(-1.0), residual_scratch);
+                const double matrix_err_norm = u_backup.norm();
+
+                copyVector(u_backup, residual_base);
+                if (!effective_rank_one_updates.empty()) {
+                    addRankOneOperatorMatvec(
+                        std::span<const backends::RankOneUpdate>(effective_rank_one_updates.data(),
+                                                                 effective_rank_one_updates.size()),
+                        du,
+                        u_backup);
+                }
+                zeroVectorEntries(constrained_dofs, u_backup);
                 const double jv_norm = u_backup.norm();
+
+                // residual_base <- -(rank-one contribution)
+                axpy(residual_base, static_cast<Real>(-1.0), u_backup);
+                const double rank_one_jv_norm = residual_base.norm();
 
                 // The FD residual is assembled by element ownership; sum overlap contributions once for comparison.
                 accumulateOverlapIfNeeded(residual_scratch);
                 const double fd_norm = residual_scratch.norm();
 
-                // u_backup <- J*v - FD
+                // u_backup <- (J_matrix + rank1)*v - FD
                 axpy(u_backup, static_cast<Real>(-1.0), residual_scratch);
                 const double err_norm = u_backup.norm();
                 const double denom = std::max({jv_norm, fd_norm, 1e-14});
                 const double rel_err = err_norm / denom;
+
+                // Rebuild the matrix-only mismatch vector for the per-component
+                // diagnostic after using `residual_base` as a rank-one scratch.
+                residual_base.zero();
+                J.mult(du, residual_base);
+                zeroVectorEntries(constrained_dofs, residual_base);
+                axpy(residual_base, static_cast<Real>(-1.0), residual_scratch);
 
                 if (mpiRank() == 0) {
                     std::ostringstream oss;
@@ -1510,8 +2176,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         << "' residual_op='" << options_.residual_op << "'"
                         << " it=" << it
                         << " h=" << h
+                        << " ||J_matrix*v||=" << matrix_jv_norm
+                        << " ||rank1*v||=" << rank_one_jv_norm
                         << " ||Jv||=" << jv_norm
                         << " ||FD||=" << fd_norm
+                        << " ||J_matrix*v-FD||=" << matrix_err_norm
                         << " ||Jv-FD||=" << err_norm
                         << " rel=" << rel_err
                         << " ||r(residual_op)||=" << r_base_norm
@@ -1519,6 +2188,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         << " ||r_used-r_residual||=" << r_diff_norm;
                     FE_LOG_INFO(oss.str());
                 }
+                logJacobianCheckComponentBreakdown(transient.system(),
+                                                  residual_scratch,
+                                                  u_backup,
+                                                  residual_base);
+                logJacobianCheckTopEntries(transient.system(), u_backup, 8u);
             } else if (mpiRank() == 0) {
                 FE_LOG_INFO("NewtonSolver: Jacobian check skipped (invalid perturbation size).");
             }
@@ -1635,14 +2309,41 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
         const auto& bordered = transient.system().borderedCoupling();
         const bool has_bordered = bordered.active && bordered.n_aux > 0;
+        const bool has_any_rank_one_updates = !effective_rank_one_updates.empty();
+        const bool has_native_rank_one_updates =
+            has_any_rank_one_updates &&
+            nativeRankOneUpdatesEnabledForLinearSolver(linear) &&
+            !has_non_dirichlet_affine_constraints;
+        const bool needs_strict_coupled_solve_options =
+            has_bordered || (has_any_rank_one_updates && !has_native_rank_one_updates);
+        const bool needs_validated_native_rank_one_options =
+            has_native_rank_one_updates && !has_bordered;
         std::vector<Real> aux_delta;
         FsilsMatrixSnapshot fsils_matrix_snapshot;
+        const auto reportMeetsRequestedLinearTarget =
+            [](const backends::SolverReport& rep,
+               const backends::SolverOptions& requested) -> bool {
+                if (!std::isfinite(rep.initial_residual_norm) ||
+                    !std::isfinite(rep.final_residual_norm)) {
+                    return false;
+                }
+                const Real rhs_norm =
+                    std::max<Real>(static_cast<Real>(rep.initial_residual_norm), static_cast<Real>(1e-30));
+                const Real target = std::max(requested.abs_tol, requested.rel_tol * rhs_norm);
+                return std::isfinite(static_cast<double>(target)) &&
+                       rep.final_residual_norm <= static_cast<double>(target);
+            };
 
         int ptc_retries = 0;
         while (true) {
             SolverOptionsGuard bordered_solver_options_guard{linear, linear.getOptions()};
-            if (has_bordered) {
+            if (needs_strict_coupled_solve_options) {
                 linear.setOptions(makeBorderedSolveOptions(bordered_solver_options_guard.saved));
+            } else if (needs_validated_native_rank_one_options) {
+                linear.setOptions(makeValidatedNativeRankOneSolveOptions(
+                    bordered_solver_options_guard.saved));
+            }
+            if (has_bordered) {
                 fsils_matrix_snapshot = captureFsilsMatrixSnapshot(J);
             }
             if (oopTraceEnabled()) {
@@ -1652,6 +2353,73 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             report.linear = linear.solve(J, du, r);
             ntp_linear += NTP() - ntp0;
             ntp_linear_iters_total += report.linear.iterations;
+            if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: post-linear.solve du_norm=" << du.norm()
+                    << " basis_supported=" << (linear.supportsNullspace() ? 1 : 0);
+                traceLog(oss.str());
+            }
+            normalizeFsilsPostSolveIncrementIfNeeded(du);
+            if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: post-normalize du_norm=" << du.norm();
+                traceLog(oss.str());
+            }
+            if (newtonDirectionCheckEnabled()) {
+                residual_scratch.zero();
+                J.mult(du, residual_scratch);
+                copyVector(residual_base, residual_scratch);
+                if (has_native_rank_one_updates) {
+                    addRankOneOperatorMatvec(
+                        std::span<const backends::RankOneUpdate>(effective_rank_one_updates.data(),
+                                                                 effective_rank_one_updates.size()),
+                        du,
+                        residual_scratch);
+                }
+                copyVector(u_backup, residual_scratch);
+                axpy(u_backup, static_cast<Real>(-1.0), residual_base);
+                zeroVectorEntries(constrained_dofs, residual_scratch);
+                zeroVectorEntries(constrained_dofs, residual_base);
+                zeroVectorEntries(constrained_dofs, u_backup);
+                const double matrix_only_norm = residual_base.norm();
+                const double rank_one_only_norm = u_backup.norm();
+
+                copyVector(residual_base, r);
+                zeroVectorEntries(constrained_dofs, residual_base);
+                copyVector(u_backup, residual_scratch);
+                axpy(u_backup, static_cast<Real>(-1.0), residual_base);
+                const double matrix_minus_rhs_norm = u_backup.norm();
+
+                const double jdu_norm = residual_scratch.norm();
+                const double rhs_norm = residual_base.norm();
+
+                auto dotVectors = [](const backends::GenericVector& a, const backends::GenericVector& b) {
+                    return static_cast<double>(a.dot(b));
+                };
+                const double r_dot_jdu = dotVectors(residual_base, residual_scratch);
+                const double r_dot_r = dotVectors(residual_base, residual_base);
+
+                axpy(residual_scratch, static_cast<Real>(-1.0), residual_base);
+                const double diff_norm = residual_scratch.norm();
+                const double rel_diff = diff_norm / std::max(rhs_norm, 1e-30);
+
+                if (mpiRank() == 0) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: direction check"
+                        << " native_rank_one=" << (has_native_rank_one_updates ? 1 : 0)
+                        << " updates=" << effective_rank_one_updates.size()
+                        << " ||J_matrix du||=" << matrix_only_norm
+                        << " ||J_matrix du-r||=" << matrix_minus_rhs_norm
+                        << " ||rank1 du||=" << rank_one_only_norm
+                        << " ||r||=" << rhs_norm
+                        << " ||Jdu||=" << jdu_norm
+                        << " ||Jdu-r||=" << diff_norm
+                        << " rel=" << rel_diff
+                        << " r_dot_Jdu=" << r_dot_jdu
+                        << " r_dot_r=" << r_dot_r;
+                    FE_LOG_INFO(oss.str());
+                }
+            }
             if (oopTraceEnabled()) {
                 std::ostringstream oss;
                 oss << "NewtonSolver: linear solve converged=" << report.linear.converged
@@ -1666,11 +2434,39 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 break;
             }
 
+            const bool meets_original_linear_target =
+                (needs_strict_coupled_solve_options || needs_validated_native_rank_one_options) &&
+                reportMeetsRequestedLinearTarget(report.linear, bordered_solver_options_guard.saved);
+            if (meets_original_linear_target) {
+                report.linear.converged = true;
+                const Real rhs_norm =
+                    std::max<Real>(static_cast<Real>(report.linear.initial_residual_norm),
+                                   static_cast<Real>(1e-30));
+                const Real target = std::max(bordered_solver_options_guard.saved.abs_tol,
+                                             bordered_solver_options_guard.saved.rel_tol * rhs_norm);
+                if (report.linear.message.empty()) {
+                    report.linear.message = "accepted original coupled target";
+                } else if (report.linear.message.find("accepted original coupled target") ==
+                           std::string::npos) {
+                    report.linear.message += " (accepted original coupled target)";
+                }
+                if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: accepting coupled linear solution at original target"
+                        << " rn=" << report.linear.final_residual_norm
+                        << " target=" << target;
+                    traceLog(oss.str());
+                }
+                break;
+            }
+
             // Inexact Newton: accept the approximate solution even when the linear
             // solve doesn't fully converge. This matches the legacy solver behavior
             // where imprecise linear solutions still produce effective Newton steps.
             const bool allow_inexact_main_solve =
-                options_.accept_inexact_linear_solutions && !has_bordered;
+                options_.accept_inexact_linear_solutions &&
+                !needs_strict_coupled_solve_options &&
+                !needs_validated_native_rank_one_options;
             if (allow_inexact_main_solve) {
                 if (oopTraceEnabled()) {
                     traceLog("NewtonSolver: accepting inexact linear solution (rel=" +
@@ -1796,6 +2592,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     const auto z_report = linear.solve(J, du, residual_scratch);
                     ntp_linear += NTP() - ntp0;
                     ntp_linear_iters_total += z_report.iterations;
+                    normalizeFsilsPostSolveIncrementIfNeeded(du);
                     FE_THROW_IF(!z_report.converged, FEException,
                                 "NewtonSolver: bordered K^{-1}B solve did not converge: " +
                                     z_report.message);
@@ -1924,6 +2721,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
         applyDtIncrementScaling();
 
+        if (oopTraceEnabled()) {
+            logVectorComponentNorms(transient.system(), du, "du");
+            logVectorTopEntries(transient.system(), du, "du", 8u);
+        }
+
         const double du_norm = du.norm();
 
         if (!options_.use_line_search) {
@@ -1962,6 +2764,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         copyVector(u_backup, history.u());
         const auto aux_state_backup =
             aux_delta.empty() ? std::vector<Real>{} : transient.system().checkpointAuxiliaryState();
+        const auto bordered_backup = transient.system().borderedCoupling();
         const double r_norm0 = current_residual_norm;
         const double r_norm0_sq = r_norm0 * r_norm0;
 
@@ -1971,21 +2774,32 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         double best_alpha = 0.0;
         double best_trial_norm = std::numeric_limits<double>::infinity();
         bool have_best_trial = false;
+        const int line_search_iteration_budget =
+            std::max(options_.line_search_max_iterations,
+                     lineSearchIterationsNeededToReachAlphaMin(options_.line_search_alpha_min,
+                                                               options_.line_search_shrink));
 
         if (oopTraceEnabled()) {
             std::ostringstream oss;
             oss << "NewtonSolver: line search begin alpha=1"
                 << " alpha_min=" << options_.line_search_alpha_min
                 << " shrink=" << options_.line_search_shrink
-                << " c1=" << options_.line_search_c1;
+                << " c1=" << options_.line_search_c1
+                << " budget=" << line_search_iteration_budget;
             traceLog(oss.str());
         }
 
-        for (int ls = 0; ls < options_.line_search_max_iterations; ++ls) {
+        for (int ls = 0; ls < line_search_iteration_budget; ++ls) {
             copyVector(history.u(), u_backup);
             if (!aux_state_backup.empty()) {
                 transient.system().restoreAuxiliaryState(aux_state_backup);
+            }
+            transient.system().borderedCoupling() = bordered_backup;
+            if (!aux_state_backup.empty()) {
                 applyAuxiliaryDelta(transient.system(), bordered, aux_delta, static_cast<Real>(alpha));
+            }
+            if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
+                reg->invalidateAll();
             }
             axpy(history.u(), static_cast<Real>(-alpha), du);
             if (!constraints.empty()) {
@@ -2049,7 +2863,13 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 copyVector(history.u(), u_backup);
                 if (!aux_state_backup.empty()) {
                     transient.system().restoreAuxiliaryState(aux_state_backup);
+                }
+                transient.system().borderedCoupling() = bordered_backup;
+                if (!aux_state_backup.empty()) {
                     applyAuxiliaryDelta(transient.system(), bordered, aux_delta, static_cast<Real>(alpha));
+                }
+                if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
+                    reg->invalidateAll();
                 }
                 axpy(history.u(), static_cast<Real>(-alpha), du);
                 if (!constraints.empty()) {
@@ -2065,6 +2885,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 if (!aux_state_backup.empty()) {
                     transient.system().restoreAuxiliaryState(aux_state_backup);
                 }
+                transient.system().borderedCoupling() = bordered_backup;
                 if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
                     reg->invalidateAll();
                 }

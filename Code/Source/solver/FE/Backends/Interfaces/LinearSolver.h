@@ -24,6 +24,11 @@ namespace backends {
 
 /// Represents a symmetric rank-1 perturbation: J += sigma * v * v^T
 /// where v is stored as a sparse vector of (global_dof_index, value) pairs.
+///
+/// In MPI, `v` is expected to be ownership-partitioned: each global DOF
+/// appears on exactly one rank, typically the owner. Solver-side consumers
+/// perform their own overlap exchange / collective reductions and must not
+/// receive a globally replicated sparse vector.
 struct RankOneUpdate {
     Real sigma{0.0};
     std::vector<std::pair<GlobalIndex, Real>> v;

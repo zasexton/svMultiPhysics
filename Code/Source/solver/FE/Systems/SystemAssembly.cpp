@@ -20,13 +20,13 @@
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/TimeIntegrationContext.h"
 
-#include "Forms/CoupledBlockKernel.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/JIT/ExternalCalls.h"
 
 #include "Backends/Interfaces/GenericVector.h"
 #include "Backends/FSILS/FsilsMatrix.h"
+#include "Core/KernelTrace.h"
 #include "Core/Logger.h"
 #include "Core/Alignment.h"
 #include "Core/AlignedAllocator.h"
@@ -58,25 +58,12 @@ namespace {
 
 [[nodiscard]] bool oopTraceEnabled() noexcept
 {
-    static const bool enabled = [] {
-        const char* env = std::getenv("SVMP_OOP_SOLVER_TRACE");
-        if (env == nullptr) {
-            return false;
-        }
-        std::string v(env);
-        std::transform(v.begin(), v.end(), v.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return !(v == "0" || v == "false" || v == "off" || v == "no");
-    }();
-    return enabled;
+    return core::kernelTraceEnabled(core::KernelTraceChannel::Assembly);
 }
 
 void traceLog(const std::string& msg)
 {
-    if (!oopTraceEnabled()) {
-        return;
-    }
-    FE_LOG_INFO(msg);
+    core::kernelTraceLog(core::KernelTraceChannel::Assembly, msg);
 }
 
 void mergeAssemblyResult(assembly::AssemblyResult& total, const assembly::AssemblyResult& part)
@@ -192,7 +179,66 @@ std::vector<std::pair<GlobalIndex, Real>> allreduceSumSparsePairs(std::vector<st
     }
     return out;
 }
+
+void allreduceDenseEntries(std::vector<Real>& data, MPI_Comm comm)
+{
+    if (data.empty()) {
+        return;
+    }
+
+    std::vector<Real> global(data.size(), Real(0.0));
+    MPI_Allreduce(data.data(),
+                  global.data(),
+                  static_cast<int>(data.size()),
+                  mpiRealType(),
+                  MPI_SUM,
+                  comm);
+    data.swap(global);
+}
 #endif
+
+template <class OwnedPredicate>
+std::vector<std::pair<GlobalIndex, Real>>
+filterSparsePairsToOwned(std::span<const std::pair<GlobalIndex, Real>> pairs,
+                         OwnedPredicate&& is_owned)
+{
+    std::vector<std::pair<GlobalIndex, Real>> owned_pairs;
+    owned_pairs.reserve(pairs.size());
+    for (const auto& kv : pairs) {
+        if (is_owned(kv.first)) {
+            owned_pairs.push_back(kv);
+        }
+    }
+    return owned_pairs;
+}
+
+void synchronizeBorderedCouplingForReplicatedSolve(FESystem::BorderedCouplingData& bc,
+                                                   bool sync_matrix_terms,
+                                                   bool sync_vector_terms,
+                                                   MPI_Comm comm)
+{
+    if (!bc.active) {
+        return;
+    }
+
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized) {
+        if (sync_matrix_terms) {
+            allreduceDenseEntries(bc.D, comm);
+            allreduceDenseEntries(bc.B, comm);
+            allreduceDenseEntries(bc.Ct, comm);
+            allreduceDenseEntries(bc.dF_dxdot, comm);
+        }
+        if (sync_vector_terms) {
+            allreduceDenseEntries(bc.g, comm);
+        }
+    }
+#endif
+
+    bc.globally_reduced = true;
+}
 
 class SparseVectorAccumulatorView final : public assembly::GlobalSystemView {
 public:
@@ -398,15 +444,29 @@ assembly::AssemblyResult assembleOperator(
         }
     }
 
-    if (has_partitioned_auxiliary && !request.is_nonlinear_iteration) {
-        // First assembly of the time step: advance the ODE state once.
-        // Newton iterations must NOT re-step — they only re-evaluate
-        // outputs with the latest input values (e.g., Q(u)).
+    auto same_partitioned_auxiliary_step = [&](Real time, Real dt) {
+        if (!system.partitioned_auxiliary_advance_valid_) {
+            return false;
+        }
+        const auto nearly_equal = [](Real a, Real b) {
+            const auto scale = std::max<Real>(
+                Real(1.0), std::max(std::abs(a), std::abs(b)));
+            return std::abs(a - b) <= Real(1e-12) * scale;
+        };
+        return nearly_equal(system.partitioned_auxiliary_advance_time_, time) &&
+               nearly_equal(system.partitioned_auxiliary_advance_dt_, dt);
+    };
+
+    if (has_partitioned_auxiliary && !same_partitioned_auxiliary_step(state.time, state.dt)) {
+        // Advance partitioned auxiliary blocks exactly once for the current
+        // nonlinear solve state. The first assembly of a time step is often a
+        // Newton iteration, so gating on request.is_nonlinear_iteration would
+        // leave the outlet state frozen at its committed value.
         if (oopTraceEnabled()) {
             traceLog("assembleOperator: advanceAuxiliaryState() begin");
         }
         const auto t0 = std::chrono::steady_clock::now();
-        system.advanceAuxiliaryState(state, /*is_nonlinear_iteration=*/false);
+        system.advanceAuxiliaryState(state, request.is_nonlinear_iteration);
         const auto t1 = std::chrono::steady_clock::now();
         if (oopTraceEnabled()) {
             std::ostringstream oss;
@@ -903,6 +963,7 @@ assembly::AssemblyResult assembleOperator(
 
                     const auto n_dofs = system.dof_handler_.getDofMap().getNumDofs();
                     const auto& global_map = system.dof_handler_.getDofMap();
+                    const auto& global_owned = system.dofHandler().getPartition().locallyOwned();
                     const auto& opts = assembler.getOptions();
                     const bool owned_rows_only = (opts.ghost_policy == assembly::GhostPolicy::OwnedRowsOnly);
 
@@ -972,7 +1033,7 @@ assembly::AssemblyResult assembleOperator(
                             int mpi_initialized = 0;
                             MPI_Initialized(&mpi_initialized);
                             if (mpi_initialized) {
-                                g_pairs = allreduceSumSparsePairs(std::move(g_pairs), MPI_COMM_WORLD);
+                                g_pairs = allreduceSumSparsePairs(std::move(g_pairs), system.dofHandler().mpiComm());
                             }
                         }
 #endif
@@ -1280,7 +1341,7 @@ assembly::AssemblyResult assembleOperator(
 
                     if (owned_rows_only) {
                         dR_dQ.erase(std::remove_if(dR_dQ.begin(), dR_dQ.end(),
-                                                   [&](const auto& kv) { return !global_map.isOwnedDof(kv.first); }),
+                                                   [&](const auto& kv) { return !global_owned.contains(kv.first); }),
                                     dR_dQ.end());
                     }
 
@@ -1293,7 +1354,8 @@ assembly::AssemblyResult assembleOperator(
                         int mpi_initialized = 0;
                         MPI_Initialized(&mpi_initialized);
                         if (mpi_initialized) {
-                            dR_dQ_global = allreduceSumSparsePairs(std::move(dR_dQ_global), MPI_COMM_WORLD);
+                            dR_dQ_global = allreduceSumSparsePairs(std::move(dR_dQ_global),
+                                                                  system.dofHandler().mpiComm());
                         }
                     }
 #endif
@@ -1367,7 +1429,13 @@ assembly::AssemblyResult assembleOperator(
                                 // Symmetric! Store as rank-1 update.
                                 backends::RankOneUpdate update;
                                 update.sigma = sigma;
-                                update.v = g; // dQ_du
+                                // Store owner-partitioned support. The runtime solver
+                                // paths perform their own overlap propagation / dot
+                                // reductions, so a globally replicated dQ/du would
+                                // double-count shared DOFs under MPI.
+                                update.v = filterSparsePairsToOwned(
+                                    std::span<const std::pair<GlobalIndex, Real>>(g.data(), g.size()),
+                                    [&](GlobalIndex dof) { return global_owned.contains(dof); });
                                 system.last_rank_one_updates_.push_back(update);
                                 cjc.rank_one_updates.push_back(std::move(update));
                                 extracted_rank_one = true;
@@ -1478,7 +1546,7 @@ assembly::AssemblyResult assembleOperator(
 #if FE_HAS_MPI
         int mpi_init = 0;
         MPI_Initialized(&mpi_init);
-        if (mpi_init) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        if (mpi_init) MPI_Comm_rank(system.dofHandler().mpiComm(), &rank);
 #endif
         if (rank == 0) {
             const double ao_total = ao_cell_time + ao_boundary_time + ao_other_time;
@@ -1659,6 +1727,9 @@ assembly::AssemblyResult assembleOperator(
                 state, &bview, &bview,
                 request.want_matrix, request.want_vector,
                 n_field_dofs, request.is_nonlinear_iteration);
+
+            synchronizeBorderedCouplingForReplicatedSolve(
+                bc, request.want_matrix, request.want_vector, system.dofHandler().mpiComm());
         } else {
             system.assembleMixedAuxiliaryIntoGlobal(
                 state, matrix_out, vector_out,

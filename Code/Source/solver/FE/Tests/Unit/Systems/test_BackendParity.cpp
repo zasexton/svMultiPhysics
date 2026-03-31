@@ -14,6 +14,8 @@
 
 #include <gtest/gtest.h>
 
+#include "Assembly/GlobalSystemView.h"
+
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/FormsInstallerDetail.h"
@@ -26,6 +28,7 @@
 
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
+#include <algorithm>
 #include <array>
 #include <span>
 
@@ -49,6 +52,108 @@ svmp::FE::dofs::MeshTopologyInfo singleTetraTopology()
     topo.cell_owner_ranks = {0};
     return topo;
 }
+
+void applyAddMode(svmp::FE::Real& slot, svmp::FE::Real value, svmp::FE::assembly::AddMode mode)
+{
+    switch (mode) {
+        case svmp::FE::assembly::AddMode::Add:
+            slot += value;
+            break;
+        case svmp::FE::assembly::AddMode::Insert:
+            slot = value;
+            break;
+        case svmp::FE::assembly::AddMode::Max:
+            slot = std::max(slot, value);
+            break;
+        case svmp::FE::assembly::AddMode::Min:
+            slot = std::min(slot, value);
+            break;
+    }
+}
+
+class CapabilityDenseSystemView final : public svmp::FE::assembly::DenseSystemView {
+public:
+    using svmp::FE::assembly::DenseSystemView::DenseSystemView;
+
+    [[nodiscard]] svmp::FE::assembly::InsertionCapabilities insertionCapabilities() const noexcept override
+    {
+        return svmp::FE::assembly::InsertionCapabilities{
+            .resolved_matrix_entries = true,
+            .resolved_vector_entries = true,
+            .contiguous_combined_matrix_insert = false,
+            .exact_rank_one_updates = false,
+        };
+    }
+
+    [[nodiscard]] const void* matrixLayoutHandle() const noexcept override { return this; }
+    [[nodiscard]] const void* vectorLayoutHandle() const noexcept override { return this; }
+
+    void resolveMatrixEntries(std::span<const GlobalIndex> row_dofs,
+                              std::span<const GlobalIndex> col_dofs,
+                              std::span<GlobalIndex> resolved) const override
+    {
+        resolved_matrix_requested_ = true;
+        std::size_t idx = 0;
+        for (auto row : row_dofs) {
+            for (auto col : col_dofs) {
+                resolved[idx++] = row * numCols() + col;
+            }
+        }
+    }
+
+    void addMatrixEntriesResolved(std::span<const GlobalIndex> row_dofs,
+                                  std::span<const GlobalIndex> col_dofs,
+                                  std::span<const GlobalIndex> resolved,
+                                  std::span<const Real> local_matrix,
+                                  svmp::FE::assembly::AddMode mode = svmp::FE::assembly::AddMode::Add) override
+    {
+        (void)row_dofs;
+        (void)col_dofs;
+        used_resolved_matrix_ = true;
+        auto data = matrixDataMutable();
+        for (std::size_t i = 0; i < local_matrix.size(); ++i) {
+            applyAddMode(data[static_cast<std::size_t>(resolved[i])], local_matrix[i], mode);
+        }
+    }
+
+    void resolveVectorEntries(std::span<const GlobalIndex> dofs,
+                              std::span<GlobalIndex> resolved) const override
+    {
+        resolved_vector_requested_ = true;
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            resolved[i] = dofs[i];
+        }
+    }
+
+    void addVectorEntriesResolved(std::span<const GlobalIndex> dofs,
+                                  std::span<const GlobalIndex> resolved,
+                                  std::span<const Real> local_vector,
+                                  svmp::FE::assembly::AddMode mode = svmp::FE::assembly::AddMode::Add) override
+    {
+        (void)dofs;
+        used_resolved_vector_ = true;
+        auto data = vectorDataMutable();
+        for (std::size_t i = 0; i < local_vector.size(); ++i) {
+            applyAddMode(data[static_cast<std::size_t>(resolved[i])], local_vector[i], mode);
+        }
+    }
+
+    [[nodiscard]] bool usedResolvedMatrix() const noexcept
+    {
+        return resolved_matrix_requested_ && used_resolved_matrix_;
+    }
+
+    [[nodiscard]] bool usedResolvedVector() const noexcept
+    {
+        return resolved_vector_requested_ && used_resolved_vector_;
+    }
+
+private:
+    mutable bool resolved_matrix_requested_{false};
+    mutable bool resolved_vector_requested_{false};
+    bool used_resolved_matrix_{false};
+    bool used_resolved_vector_{false};
+};
 
 /// Set up a two-field system with manual block decomposition (bilinear, via MixedFormIR)
 std::unique_ptr<svmp::FE::systems::FESystem> setupManualSystem(
@@ -327,6 +432,55 @@ TEST(BackendParity, ResidualPath_DofAndSparsity)
     }
 }
 
+TEST(BackendParity, ResidualPath_JitMonolithicSparsityMatchesFallback)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    auto build = [&](bool enable_jit) {
+        auto sys = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+        const auto u_f = sys->addField({.name = "u", .space = space, .components = 1});
+        const auto p_f = sys->addField({.name = "p", .space = space, .components = 1});
+        sys->addOperator("op");
+
+        const auto u_s = svmp::FE::forms::FormExpr::stateField(u_f, *space, "u");
+        const auto p_s = svmp::FE::forms::FormExpr::stateField(p_f, *space, "p");
+        const auto v = svmp::FE::forms::FormExpr::testFunction(u_f, *space, "v");
+        const auto q = svmp::FE::forms::FormExpr::testFunction(p_f, *space, "q");
+
+        svmp::FE::systems::FormInstallOptions opts;
+        opts.compiler_options.jit.enable = enable_jit;
+        opts.compiler_options.use_symbolic_tangent = true;
+        (void)svmp::FE::systems::installFormulation(
+            *sys, "op", {u_f, p_f}, (u_s * v + p_s * v).dx() + (u_s * q).dx(), opts);
+
+        svmp::FE::systems::SetupInputs inputs;
+        inputs.topology_override = singleTetraTopology();
+        sys->setup({}, inputs);
+        return sys;
+    };
+
+    auto sys_fallback = build(/*enable_jit=*/false);
+    auto sys_monolithic = build(/*enable_jit=*/true);
+
+    const auto& sp_fallback = sys_fallback->sparsity("op");
+    const auto& sp_monolithic = sys_monolithic->sparsity("op");
+
+    EXPECT_EQ(sp_fallback.numRows(), sp_monolithic.numRows());
+    EXPECT_EQ(sp_fallback.numCols(), sp_monolithic.numCols());
+
+    for (GlobalIndex row = 0; row < sp_fallback.numRows(); ++row) {
+        const auto cols_fallback = sp_fallback.getRowIndices(row);
+        const auto cols_monolithic = sp_monolithic.getRowIndices(row);
+        ASSERT_EQ(cols_fallback.size(), cols_monolithic.size())
+            << "Row " << row << " NNZ mismatch";
+        for (std::size_t j = 0; j < cols_fallback.size(); ++j) {
+            EXPECT_EQ(cols_fallback[j], cols_monolithic[j])
+                << "Row " << row << " col[" << j << "] mismatch";
+        }
+    }
+}
+
 // ============================================================================
 // Zero-block elimination: PP block absent in sparsity
 // ============================================================================
@@ -382,6 +536,65 @@ TEST(BackendParity, ZeroBlockSparsity)
         for (GlobalIndex j = p_start; j < p_end; ++j) {
             EXPECT_NEAR(mat.getMatrixEntry(i, j), 0.0, 1e-15)
                 << "PP block entry (" << i << ", " << j << ") should be zero";
+        }
+    }
+}
+
+TEST(BackendParity, CapabilityOnOff_ResolvedInsertionParity)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_f = sys.addField({.name = "u", .space = space, .components = 1});
+    const auto p_f = sys.addField({.name = "p", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    auto u_state = svmp::FE::forms::FormExpr::stateField(u_f, *space, "u");
+    auto p_state = svmp::FE::forms::FormExpr::stateField(p_f, *space, "p");
+    auto v = svmp::FE::forms::FormExpr::testFunction(u_f, *space, "v");
+    auto q = svmp::FE::forms::FormExpr::testFunction(p_f, *space, "q");
+
+    svmp::FE::systems::FormInstallOptions opts;
+    opts.compiler_options.jit.enable = true;
+    (void)svmp::FE::systems::installFormulation(
+        sys, "op", {u_f, p_f}, (u_state * v + p_state * v).dx() + (u_state * q).dx(), opts);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    const auto n = sys.dofHandler().getNumDofs();
+    std::vector<Real> U(static_cast<std::size_t>(n), 0.0);
+    for (GlobalIndex i = 0; i < n; ++i) {
+        U[static_cast<std::size_t>(i)] = static_cast<Real>(0.1) * static_cast<Real>(i + 1);
+    }
+
+    svmp::FE::systems::SystemStateView state;
+    state.u = U;
+
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+    req.want_vector = true;
+
+    svmp::FE::assembly::DenseSystemView plain(n);
+    CapabilityDenseSystemView accelerated(n);
+    plain.zero();
+    accelerated.zero();
+
+    (void)sys.assemble(req, state, &plain, &plain);
+    (void)sys.assemble(req, state, &accelerated, &accelerated);
+
+    EXPECT_TRUE(accelerated.usedResolvedMatrix());
+    EXPECT_TRUE(accelerated.usedResolvedVector());
+
+    for (GlobalIndex i = 0; i < n; ++i) {
+        EXPECT_NEAR(plain.getVectorEntry(i), accelerated.getVectorEntry(i), 1e-12)
+            << "vector entry " << i;
+        for (GlobalIndex j = 0; j < n; ++j) {
+            EXPECT_NEAR(plain.getMatrixEntry(i, j), accelerated.getMatrixEntry(i, j), 1e-12)
+                << "matrix entry (" << i << ", " << j << ")";
         }
     }
 }

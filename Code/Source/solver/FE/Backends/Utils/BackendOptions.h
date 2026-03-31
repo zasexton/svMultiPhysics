@@ -47,6 +47,26 @@ enum class FieldSplitKind : std::uint8_t {
     Schur
 };
 
+enum class FsilsResidualCheckPolicy : std::uint8_t {
+    Always,
+    RetryOnly,
+    DebugOnly
+};
+
+enum class FsilsBlockSchurSchurPreconditioner : std::uint8_t {
+    DiagL,
+    BlockDiagL,
+    ILUL,
+    AlgebraicSchur
+};
+
+enum class FsilsBlockSchurMomentumApproximation : std::uint8_t {
+    DiagK,
+    BlockDiagK,
+    ILUK,
+    ASM
+};
+
 struct FieldSplitOptions {
     FieldSplitKind kind{FieldSplitKind::Additive};
     std::vector<std::string> split_names{}; // Optional, defaults to field0/field1/...
@@ -248,12 +268,22 @@ struct SolverOptions {
     // FSILS: best-effort row/column scaling toggle.
     bool fsils_use_rcs{false};
 
+    // FSILS: post-solve true residual validation policy.
+    // - Always: always compute a full residual with the original operator.
+    // - RetryOnly: skip the extra A*x on clean first-pass success; validate recovery paths.
+    // - DebugOnly: validate only in debug/trace mode, plus any recovery path.
+    FsilsResidualCheckPolicy fsils_residual_check_policy{FsilsResidualCheckPolicy::RetryOnly};
+
     // FSILS: BlockSchur sub-solver parameters.
     // GM: field-A (momentum) solve, CG: Schur complement (constraint) solve.
     std::optional<int> fsils_blockschur_gm_max_iter{};
     std::optional<int> fsils_blockschur_cg_max_iter{};
     std::optional<Real> fsils_blockschur_gm_rel_tol{};
     std::optional<Real> fsils_blockschur_cg_rel_tol{};
+    FsilsBlockSchurSchurPreconditioner fsils_blockschur_schur_preconditioner{
+        FsilsBlockSchurSchurPreconditioner::DiagL};
+    FsilsBlockSchurMomentumApproximation fsils_blockschur_momentum_approximation{
+        FsilsBlockSchurMomentumApproximation::DiagK};
 
     // Backend-specific pass-through key/value list (optional).
     // - PETSc: key maps to an option name (with or without '-' prefix).
@@ -267,12 +297,38 @@ struct SolverReport {
     Real initial_residual_norm{0.0};
     Real final_residual_norm{0.0};
     Real relative_residual{0.0};
+    double setup_time_seconds{0.0};
+    double validation_time_seconds{0.0};
+    double collective_time_seconds{0.0};
+    std::uint64_t collective_calls{0};
+    std::uint64_t collective_words{0};
+    int blockschur_outer_iterations{0};
+    std::uint64_t blockschur_collective_calls_max_per_outer{0};
+    double blockschur_collective_time_max_per_outer{0.0};
+    int blockschur_momentum_solve_calls{0};
+    int blockschur_momentum_iterations{0};
+    int blockschur_momentum_restart_cycles{0};
+    double blockschur_momentum_solve_time_seconds{0.0};
+    std::uint64_t blockschur_momentum_collective_calls{0};
+    std::uint64_t blockschur_momentum_collective_words{0};
+    double blockschur_momentum_collective_time_seconds{0.0};
+    int blockschur_schur_solve_calls{0};
+    int blockschur_schur_iterations{0};
+    double blockschur_schur_setup_time_seconds{0.0};
+    double blockschur_schur_solve_time_seconds{0.0};
+    std::uint64_t blockschur_schur_collective_calls{0};
+    std::uint64_t blockschur_schur_collective_words{0};
+    double blockschur_schur_collective_time_seconds{0.0};
     std::string message{};
 };
 
 [[nodiscard]] std::string_view solverMethodToString(SolverMethod m) noexcept;
 [[nodiscard]] std::string_view preconditionerToString(PreconditionerType pc) noexcept;
 [[nodiscard]] std::string_view fieldSplitKindToString(FieldSplitKind kind) noexcept;
+[[nodiscard]] std::string_view
+fsilsBlockSchurPreconditionerToString(FsilsBlockSchurSchurPreconditioner pc) noexcept;
+[[nodiscard]] std::string_view
+fsilsBlockSchurMomentumApproximationToString(FsilsBlockSchurMomentumApproximation approx) noexcept;
 
 } // namespace backends
 } // namespace FE

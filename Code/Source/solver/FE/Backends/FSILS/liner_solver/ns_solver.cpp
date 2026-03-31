@@ -103,7 +103,7 @@ void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int mom_ncomp, const
 
         double global_nS = 0.0;
         if (lhs.commu.nTasks > 1) {
-          MPI_Allreduce(&local_nS, &global_nS, 1, cm_mod::mpreal, MPI_SUM, lhs.commu.comm);
+          fsils_allreduce_sum(&local_nS, &global_nS, 1, cm_mod::mpreal, lhs.commu);
         } else {
           global_nS = local_nS;
         }
@@ -243,7 +243,48 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   ls.CG.itr   = 0;
   ls.GM.itr   = 0;
   ls.RI.suc   = false;
+  ls.CG.stats.reset();
+  ls.GM.stats.reset();
+  ls.RI.stats.reset();
+  ls.blockschur_stats.reset();
   eps = std::max(ls.RI.absTol, ls.RI.relTol*eps);
+
+  auto update_outer_residual = [&](int max_col) {
+    #pragma omp parallel for schedule(static)
+    for (fsils_int nBlock = 0; nBlock < nNo; nBlock += BLOCK_SIZE) {
+      const fsils_int nEnd = std::min(nBlock + BLOCK_SIZE, nNo);
+      for (int j = 0; j <= max_col; j++) {
+        const double xb_j = xB(j);
+        auto MU_j = MU.rslice(j);
+        auto MP_j = MPcon.rslice(j);
+        if (j == 0) {
+          for (fsils_int n = nBlock; n < nEnd; n++) {
+            for (int d = 0; d < nsd; d++) {
+              Rm(d,n) = Rmi(d,n) - xb_j * MU_j(d,n);
+            }
+            for (int k = 0; k < con_ncomp; k++) {
+              Rc(k,n) = Rci(k,n) - xb_j * MP_j(k,n);
+            }
+          }
+        } else if (xb_j != 0.0) {
+          for (fsils_int n = nBlock; n < nEnd; n++) {
+            for (int d = 0; d < nsd; d++) {
+              Rm(d,n) -= xb_j * MU_j(d,n);
+            }
+            for (int k = 0; k < con_ncomp; k++) {
+              Rc(k,n) -= xb_j * MP_j(k,n);
+            }
+          }
+        }
+      }
+    }
+  };
+
+  auto actual_outer_residual_norm_sq = [&]() {
+    const double rm_norm = norm::fsi_ls_normv(nsd, mynNo, lhs.commu, Rm);
+    const double rc_norm = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, Rc);
+    return rm_norm * rm_norm + rc_norm * rc_norm;
+  };
 
   // Extract sub-blocks with multi-component constraint
   Array<double> mK(nsd*nsd,nnz), mG(nsd*con_ncomp,nnz), mD(con_ncomp*nsd,nnz), mL(con_ncomp*con_ncomp,nnz);
@@ -255,6 +296,7 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   int i_count{0};
 
   for (int i = 0; i < ls.RI.mItr; i++) {
+    const auto collective_before_outer = lhs.commu.collective_stats;
     int iB = 2*i;
     iBB = 2*i + 1;
     ls.RI.dB = ls.RI.fNorm;
@@ -263,6 +305,9 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     // Solve U = inv(K) * Rm
     auto U_slice = U.rslice(i);
     gmres::gmres(lhs, ls.GM, nsd, mK, Rm, U_slice);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+      fsils_commuv(lhs, nsd, U_slice);
+    }
 
     // P = D*U (rect: con_ncomp output × mom_ncomp input)
     auto P_slice = Pcon.rslice(i);
@@ -277,7 +322,10 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     }
 
     // P = [L - D*H*G]^-1 * P  (multi-component Schur complement)
-    bicgs::schur_mc(lhs, ls.CG, nsd, con_ncomp, mD, mG, mL, P_slice);
+    bicgs::schur_mc(lhs, ls.CG, ls.GM, nsd, con_ncomp, mK, mD, mG, mL, P_slice);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+      fsils_commuv(lhs, con_ncomp, P_slice);
+    }
 
     // MU1 = G*P (rect: mom_ncomp output × con_ncomp input)
     P_slice = Pcon.rslice(i);
@@ -295,6 +343,9 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
 
     // U = inv(K) * [Rm - G*P]
     gmres::gmres(lhs, ls.GM, nsd, mK, MU_iBB, U_slice);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+      fsils_commuv(lhs, nsd, U_slice);
+    }
 
     // MU2 = K*U
     spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, nsd, mK, U_slice, MU_iBB);
@@ -324,7 +375,7 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     }
 
     if (lhs.commu.nTasks > 1) {
-      MPI_Allreduce(tmp.data(), tmpG.data(), c, cm_mod::mpreal, MPI_SUM, lhs.commu.comm);
+      fsils_allreduce_sum(tmp.data(), tmpG.data(), c, cm_mod::mpreal, lhs.commu);
       tmp = tmpG;
     }
 
@@ -346,6 +397,8 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     if (ge::ge(nB, iBB+1, A, xB)) {
       oldxB = xB;
     } else {
+      ls.blockschur_stats.record_outer_iteration(
+          fsils_collective_delta(collective_before_outer, lhs.commu.collective_stats));
       xB = oldxB;
       if (i > 0) {
         iB = iB - 2;
@@ -359,41 +412,16 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     for (int j = 0; j <= iBB; j++) {
       sum += xB(j) * B(j);
     }
-    ls.RI.fNorm = std::max(0.0, std::pow(ls.RI.iNorm,2.0) - sum);
+    const double projected_fNorm = std::max(0.0, std::pow(ls.RI.iNorm,2.0) - sum);
+    (void)projected_fNorm;
+    update_outer_residual(iBB);
+    ls.RI.fNorm = actual_outer_residual_norm_sq();
+    ls.blockschur_stats.record_outer_iteration(
+        fsils_collective_delta(collective_before_outer, lhs.commu.collective_stats));
 
     if (ls.RI.fNorm < eps*eps) {
       ls.RI.suc = true;
       break;
-    }
-
-    // Cache-blocked residual update
-    #pragma omp parallel for schedule(static)
-    for (fsils_int nBlock = 0; nBlock < nNo; nBlock += BLOCK_SIZE) {
-      const fsils_int nEnd = std::min(nBlock + BLOCK_SIZE, nNo);
-      for (int j = 0; j <= iBB; j++) {
-        const double xb_j = xB(j);
-        auto MU_j = MU.rslice(j);
-        auto MP_j = MPcon.rslice(j);
-        if (j == 0) {
-          for (fsils_int n = nBlock; n < nEnd; n++) {
-            for (int d = 0; d < nsd; d++) {
-              Rm(d,n) = Rmi(d,n) - xb_j * MU_j(d,n);
-            }
-            for (int k = 0; k < con_ncomp; k++) {
-              Rc(k,n) = Rci(k,n) - xb_j * MP_j(k,n);
-            }
-          }
-        } else if (xb_j != 0.0) {
-          for (fsils_int n = nBlock; n < nEnd; n++) {
-            for (int d = 0; d < nsd; d++) {
-              Rm(d,n) -= xb_j * MU_j(d,n);
-            }
-            for (int k = 0; k < con_ncomp; k++) {
-              Rc(k,n) -= xb_j * MP_j(k,n);
-            }
-          }
-        }
-      }
     }
   } // for i = 0; i < ls.RI.mItr
 
@@ -401,29 +429,6 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     ls.RI.itr = ls.RI.mItr;
   } else {
     ls.RI.itr = i_count;
-
-    // Cache-blocked constraint residual update
-    #pragma omp parallel for schedule(static)
-    for (fsils_int nBlock = 0; nBlock < nNo; nBlock += BLOCK_SIZE) {
-      const fsils_int nEnd = std::min(nBlock + BLOCK_SIZE, nNo);
-      for (int j = 0; j <= iBB; j++) {
-        const double xb_j = xB(j);
-        auto MP_j = MPcon.rslice(j);
-        if (j == 0) {
-          for (fsils_int n = nBlock; n < nEnd; n++) {
-            for (int k = 0; k < con_ncomp; k++) {
-              Rc(k,n) = Rci(k,n) - xb_j * MP_j(k,n);
-            }
-          }
-        } else if (xb_j != 0.0) {
-          for (fsils_int n = nBlock; n < nEnd; n++) {
-            for (int k = 0; k < con_ncomp; k++) {
-              Rc(k,n) -= xb_j * MP_j(k,n);
-            }
-          }
-        }
-      }
-    }
   }
 
   ls.Resc = (ls.RI.fNorm > 0.0)
@@ -581,7 +586,46 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   ls.CG.itr   = 0;
   ls.GM.itr   = 0;
   ls.RI.suc   = false;
+  ls.CG.stats.reset();
+  ls.GM.stats.reset();
+  ls.RI.stats.reset();
+  ls.blockschur_stats.reset();
   eps = std::max(ls.RI.absTol, ls.RI.relTol*eps);
+
+  auto update_outer_residual = [&](int max_col) {
+    #pragma omp parallel for schedule(static)
+    for (fsils_int nBlock = 0; nBlock < nNo; nBlock += BLOCK_SIZE) {
+      const fsils_int nEnd = std::min(nBlock + BLOCK_SIZE, nNo);
+
+      for (int j = 0; j <= max_col; j++) {
+        const double xb_j = xB(j);
+        auto MU_j = MU.rslice(j);
+        auto MP_j = MP.rcol(j);
+
+        if (j == 0) {
+          for (fsils_int n = nBlock; n < nEnd; n++) {
+            for (int d = 0; d < nsd; d++) {
+              Rm(d,n) = Rmi(d,n) - xb_j * MU_j(d,n);
+            }
+            Rc(n) = Rci(n) - xb_j * MP_j(n);
+          }
+        } else if (xb_j != 0.0) {
+          for (fsils_int n = nBlock; n < nEnd; n++) {
+            for (int d = 0; d < nsd; d++) {
+              Rm(d,n) -= xb_j * MU_j(d,n);
+            }
+            Rc(n) -= xb_j * MP_j(n);
+          }
+        }
+      }
+    }
+  };
+
+  auto actual_outer_residual_norm_sq = [&]() {
+    const double rm_norm = norm::fsi_ls_normv(nsd, mynNo, lhs.commu, Rm);
+    const double rc_norm = norm::fsi_ls_norms(mynNo, lhs.commu, Rc);
+    return rm_norm * rm_norm + rc_norm * rc_norm;
+  };
   #ifdef debug_ns_solver
   dmsg << "eps: " << eps;
   dmsg << "ls.RI.iNorm: " << ls.RI.iNorm;
@@ -615,6 +659,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   int i_count{0};
 
   for (int i = 0; i < ls.RI.mItr; i++) {
+    const auto collective_before_outer = lhs.commu.collective_stats;
     #ifdef debug_ns_solver
     auto istr = "_" + std::to_string(i+1);
     dmsg << "---------- i " << i+1 << " ----------";
@@ -633,6 +678,9 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     // Solve for U = inv(mK) * Rm
     auto U_slice = U.rslice(i);
     gmres::gmres(lhs, ls.GM, nsd, mK, Rm, U_slice);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+      fsils_commuv(lhs, nsd, U_slice);
+    }
 
     // P = D*U (using exact analytical mD)
     auto P_col = P.rcol(i);
@@ -646,7 +694,10 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
 
     // P = [L - D*H*G]^-1 * P
     // VMS FIX: Solved using asymmetric BiCGStab instead of symmetric CGRAD
-    bicgs::schur(lhs, ls.CG, nsd, mD, mG, mL, P_col);
+    bicgs::schur(lhs, ls.CG, ls.GM, nsd, mK, mD, mG, mL, P_col);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+      fsils_commus(lhs, P_col);
+    }
 
     // MU1 = G*P
     #ifdef debug_ns_solver
@@ -668,6 +719,9 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
 
     // U = inv(K) * [Rm - G*P]
     gmres::gmres(lhs, ls.GM, nsd, mK, MU_iBB, U_slice);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+      fsils_commuv(lhs, nsd, U_slice);
+    }
 
     // MU2 = K*U
     spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, nsd, mK, U_slice, MU_iBB);
@@ -700,7 +754,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     }
 
     if (lhs.commu.nTasks > 1) {
-      MPI_Allreduce(tmp.data(), tmpG.data(), c, cm_mod::mpreal, MPI_SUM, lhs.commu.comm);
+      fsils_allreduce_sum(tmp.data(), tmpG.data(), c, cm_mod::mpreal, lhs.commu);
       tmp = tmpG;
     }
 
@@ -736,6 +790,8 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
       oldxB = xB;
 
     } else {
+      ls.blockschur_stats.record_outer_iteration(
+          fsils_collective_delta(collective_before_outer, lhs.commu.collective_stats));
       xB = oldxB;
 
       if (i > 0) {
@@ -750,15 +806,19 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     for (int j = 0; j <= iBB; j++) {
       sum += xB(j) * B(j);
     }
-    ls.RI.fNorm = std::max(0.0, std::pow(ls.RI.iNorm,2.0) - sum);
+    const double projected_fNorm = std::max(0.0, std::pow(ls.RI.iNorm,2.0) - sum);
+    update_outer_residual(iBB);
+    ls.RI.fNorm = actual_outer_residual_norm_sq();
+    ls.blockschur_stats.record_outer_iteration(
+        fsils_collective_delta(collective_before_outer, lhs.commu.collective_stats));
     #ifdef debug_ns_solver
     dmsg << "sum: " << sum;
     dmsg << "ls.RI.fNorm: " << ls.RI.fNorm;
     #endif
 
     if (lhs.commu.masF && fsilsTraceEnabled()) {
-      fprintf(stderr, "[NS_SOLVER] iter=%d iNorm=%e iNorm^2=%e sum=%e fNorm=%e\n",
-              i_count, ls.RI.iNorm, std::pow(ls.RI.iNorm,2.0), sum, ls.RI.fNorm);
+      fprintf(stderr, "[NS_SOLVER] iter=%d iNorm=%e iNorm^2=%e sum=%e projected_fNorm=%e fNorm=%e\n",
+              i_count, ls.RI.iNorm, std::pow(ls.RI.iNorm,2.0), sum, projected_fNorm, ls.RI.fNorm);
       for (int ii = 0; ii <= iBB; ii++) {
         fprintf(stderr, "[NS_SOLVER]   xB(%d)=%e B(%d)=%e product=%e\n",
                 ii, xB(ii), ii, B(ii), xB(ii)*B(ii));
@@ -772,61 +832,12 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
       break;
     }
 
-    // Cache-blocked residual update: (Rm,Rc) = (Rmi,Rci) - sum_j xB(j)*(MU_j,MP_j)
-    #pragma omp parallel for schedule(static)
-    for (fsils_int nBlock = 0; nBlock < nNo; nBlock += BLOCK_SIZE) {
-      const fsils_int nEnd = std::min(nBlock + BLOCK_SIZE, nNo);
-
-      for (int j = 0; j <= iBB; j++) {
-        const double xb_j = xB(j);
-        auto MU_j = MU.rslice(j);
-        auto MP_j = MP.rcol(j);
-
-        if (j == 0) {
-          for (fsils_int n = nBlock; n < nEnd; n++) {
-            for (int d = 0; d < nsd; d++) {
-              Rm(d,n) = Rmi(d,n) - xb_j * MU_j(d,n);
-            }
-            Rc(n) = Rci(n) - xb_j * MP_j(n);
-          }
-        } else if (xb_j != 0.0) {
-          for (fsils_int n = nBlock; n < nEnd; n++) {
-            for (int d = 0; d < nsd; d++) {
-              Rm(d,n) -= xb_j * MU_j(d,n);
-            }
-            Rc(n) -= xb_j * MP_j(n);
-          }
-        }
-      }
-    }
-
   } // for i = 0; i < ls.RI.mItr
 
   if (i_count >= ls.RI.mItr) {
     ls.RI.itr = ls.RI.mItr;
   } else {
     ls.RI.itr = i_count;
-
-    // Cache-blocked pressure residual update: Rc = Rci - sum_j xB(j)*MP_j
-    #pragma omp parallel for schedule(static)
-    for (fsils_int nBlock = 0; nBlock < nNo; nBlock += BLOCK_SIZE) {
-      const fsils_int nEnd = std::min(nBlock + BLOCK_SIZE, nNo);
-
-      for (int j = 0; j <= iBB; j++) {
-        const double xb_j = xB(j);
-        auto MP_j = MP.rcol(j);
-
-        if (j == 0) {
-          for (fsils_int n = nBlock; n < nEnd; n++) {
-            Rc(n) = Rci(n) - xb_j * MP_j(n);
-          }
-        } else if (xb_j != 0.0) {
-          for (fsils_int n = nBlock; n < nEnd; n++) {
-            Rc(n) -= xb_j * MP_j(n);
-          }
-        }
-      }
-    }
   }
 
   ls.Resc = (ls.RI.fNorm > 0.0)

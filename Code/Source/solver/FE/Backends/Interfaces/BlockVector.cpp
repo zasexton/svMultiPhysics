@@ -59,6 +59,18 @@ void BlockVector::scale(Real alpha)
     }
 }
 
+void BlockVector::copyFrom(const GenericVector& other)
+{
+    const auto* o = dynamic_cast<const BlockVector*>(&other);
+    FE_THROW_IF(!o, InvalidArgumentException, "BlockVector::copyFrom: backend mismatch (expected BlockVector)");
+    FE_THROW_IF(o->numBlocks() != numBlocks(), InvalidArgumentException, "BlockVector::copyFrom: block count mismatch");
+    FE_THROW_IF(o->offsets_ != offsets_, InvalidArgumentException, "BlockVector::copyFrom: block layout mismatch");
+
+    for (std::size_t i = 0; i < blocks_.size(); ++i) {
+        blocks_[i]->copyFrom(*o->blocks_[i]);
+    }
+}
+
 Real BlockVector::dot(const GenericVector& other) const
 {
     const auto* o = dynamic_cast<const BlockVector*>(&other);

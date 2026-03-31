@@ -116,7 +116,7 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
   if (!shared_face_indices.empty()) {
     if (lhs.commu.nTasks > 1) {
       const int count = static_cast<int>(shared_face_dot.size());
-      MPI_Allreduce(MPI_IN_PLACE, shared_face_dot.data(), count, cm_mod::mpreal, MPI_SUM, lhs.commu.comm);
+      fsils_allreduce_sum_in_place(shared_face_dot.data(), count, cm_mod::mpreal, lhs.commu);
     }
 
     for (size_t idx = 0; idx < shared_face_indices.size(); ++idx) {

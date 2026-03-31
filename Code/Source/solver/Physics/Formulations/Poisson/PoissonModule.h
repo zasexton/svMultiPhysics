@@ -28,6 +28,10 @@
 #include <variant>
 #include <vector>
 
+#ifndef SVMP_FE_ENABLE_LLVM_JIT
+#define SVMP_FE_ENABLE_LLVM_JIT 0
+#endif
+
 namespace svmp {
 namespace Physics {
 namespace formulations {
@@ -82,6 +86,8 @@ struct PoissonOptions {
     std::string field_name{"u"};
     FE::Real diffusion{1.0};
     FE::Real source{0.0};
+    bool enable_jit{SVMP_FE_ENABLE_LLVM_JIT != 0};
+    bool enable_jit_specialization{true};
 
     // Boundary conditions.
     //

@@ -190,16 +190,14 @@ void ConstraintDistributor::distributeElementCoreRectangular(
                         }
                         continue;
                     }
-                    if (options_.symmetric) {
-                        for (const auto& entry : col_constraint->entries) {
-                            matrix->addValue(row_dof, entry.master_dof,
-                                             entry.weight * value);
-                        }
-                        if (rhs && options_.apply_inhomogeneities) {
-                            const double inhom = col_constraint->inhomogeneity;
-                            if (std::abs(inhom) > options_.zero_tolerance) {
-                                rhs->addValue(row_dof, -value * inhom);
-                            }
+                    for (const auto& entry : col_constraint->entries) {
+                        matrix->addValue(row_dof, entry.master_dof,
+                                         entry.weight * value);
+                    }
+                    if (rhs && options_.apply_inhomogeneities) {
+                        const double inhom = col_constraint->inhomogeneity;
+                        if (std::abs(inhom) > options_.zero_tolerance) {
+                            rhs->addValue(row_dof, -value * inhom);
                         }
                     }
                 }
@@ -345,7 +343,9 @@ void ConstraintDistributor::distributeElementCore(
                     }
                 }
                 else if (!row_constraint && col_constraint) {
-                    // Column constrained: distribute to masters (for symmetric)
+                    // Column constrained: substitute trial-space slave DOFs with
+                    // their masters. This is required for correctness regardless
+                    // of the operator's symmetry.
                     if (col_constraint->isDirichlet()) {
                         // Inhomogeneity contribution to RHS
                         if (rhs && options_.apply_inhomogeneities) {
@@ -356,17 +356,15 @@ void ConstraintDistributor::distributeElementCore(
                         }
                         continue;
                     }
-                    if (options_.symmetric) {
-                        for (const auto& entry : col_constraint->entries) {
-                            matrix->addValue(row_dof, entry.master_dof,
-                                             entry.weight * value);
-                        }
-                        // Inhomogeneity contribution
-                        if (rhs && options_.apply_inhomogeneities) {
-                            double inhom = col_constraint->inhomogeneity;
-                            if (std::abs(inhom) > options_.zero_tolerance) {
-                                rhs->addValue(row_dof, -value * inhom);
-                            }
+                    for (const auto& entry : col_constraint->entries) {
+                        matrix->addValue(row_dof, entry.master_dof,
+                                         entry.weight * value);
+                    }
+                    // Inhomogeneity contribution
+                    if (rhs && options_.apply_inhomogeneities) {
+                        double inhom = col_constraint->inhomogeneity;
+                        if (std::abs(inhom) > options_.zero_tolerance) {
+                            rhs->addValue(row_dof, -value * inhom);
                         }
                     }
                 }

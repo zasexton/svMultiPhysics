@@ -53,9 +53,9 @@ struct NewtonOptions {
     PseudoTransientContinuationOptions pseudo_transient{};
 
     // When true, the Newton solver accepts approximate linear solutions even when
-    // the linear solver doesn't converge to tolerance. This matches the legacy
-    // solver's inexact Newton behavior and avoids unnecessary PTC activation.
-    bool accept_inexact_linear_solutions{true};
+    // the linear solver doesn't converge to tolerance. Keep this off by default:
+    // the new solver should reject inexact linear steps unless a caller opts in.
+    bool accept_inexact_linear_solutions{false};
 
     int max_iterations{25};
     double abs_tolerance{1e-10};

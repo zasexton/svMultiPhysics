@@ -269,6 +269,36 @@ TEST(ConstraintDistributorTest, DistributeLocalToGlobal_Periodic) {
     EXPECT_DOUBLE_EQ(global_rhs[1], 11.0);
 }
 
+TEST(ConstraintDistributorTest, DistributeLocalToGlobal_PeriodicNonsymmetricStillDistributesColumns) {
+    AffineConstraints constraints;
+    constraints.addLine(0);
+    constraints.addEntry(0, 1, 1.0);
+    constraints.close();
+
+    DistributorOptions opts;
+    opts.symmetric = false;
+    ConstraintDistributor distributor(constraints, opts);
+
+    DenseMatrixOps global_matrix(2, 2);
+    DenseVectorOps global_rhs(2);
+
+    std::vector<double> elem_mat = makeElemMat(1.0, 2.0, 3.0, 4.0);
+    std::vector<double> elem_rhs = makeElemRhs(5.0, 6.0);
+    std::vector<GlobalIndex> dofs = {0, 1};
+
+    distributor.distributeLocalToGlobal(elem_mat, elem_rhs, dofs, global_matrix, global_rhs);
+
+    // General affine elimination must substitute constrained trial columns
+    // even for nonsymmetric operators.
+    EXPECT_DOUBLE_EQ(global_matrix(0, 0), 0.0);
+    EXPECT_DOUBLE_EQ(global_matrix(0, 1), 0.0);
+    EXPECT_DOUBLE_EQ(global_matrix(1, 0), 0.0);
+    EXPECT_DOUBLE_EQ(global_matrix(1, 1), 10.0);
+
+    EXPECT_DOUBLE_EQ(global_rhs[0], 0.0);
+    EXPECT_DOUBLE_EQ(global_rhs[1], 11.0);
+}
+
 TEST(ConstraintDistributorTest, CondenseLocal) {
     AffineConstraints constraints;
     constraints.addLine(0);

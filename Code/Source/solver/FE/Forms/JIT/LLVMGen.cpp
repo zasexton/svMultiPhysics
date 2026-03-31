@@ -495,6 +495,17 @@ struct ABIV3 {
     return s;
 }
 
+[[nodiscard]] bool isScalarZeroLikeOp(const KernelIROp& op) noexcept
+{
+    if (op.type == FormExprType::TypedZero) {
+        return true;
+    }
+    if (op.type != FormExprType::Constant) {
+        return false;
+    }
+    return std::bit_cast<double>(op.imm0) == 0.0;
+}
+
 [[nodiscard]] std::optional<Shape> shapeFromValueKind(forms::Value<Real>::Kind kind) noexcept
 {
     switch (kind) {
@@ -870,14 +881,14 @@ struct ShapeInferenceResult {
                 const auto& a = childAt(0);
                 const auto& b = childAt(1);
                 if (a.kind != b.kind || a.dims != b.dims) {
-                    // TypedZero (scalar shape) is compatible with any shape
+                    // Scalar zero is compatible with any shape.
                     const auto& op_a = ir.ops[ir.children[op.first_child]];
                     const auto& op_b = ir.ops[ir.children[op.first_child + 1]];
-                    if (op_a.type == FormExprType::TypedZero) {
+                    if (isScalarZeroLikeOp(op_a)) {
                         out.shapes[idx] = b;
                         break;
                     }
-                    if (op_b.type == FormExprType::TypedZero) {
+                    if (isScalarZeroLikeOp(op_b)) {
                         out.shapes[idx] = a;
                         break;
                     }
@@ -2263,6 +2274,258 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             llvm::Value* material_state_stride_bytes{nullptr};
         };
 
+        auto makeDefaultSideView = [&]() -> SideView {
+            SideView s;
+            auto* null_i8_ptr =
+                llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(i8_ptr));
+            auto* null_f64_ptr = llvm::ConstantPointerNull::get(f64_ptr);
+
+            s.side_ptr = null_i8_ptr;
+
+            s.dim = builder.getInt32(0);
+            s.n_qpts = builder.getInt32(0);
+            s.n_test_dofs = builder.getInt32(0);
+            s.n_trial_dofs = builder.getInt32(0);
+
+            s.test_field_type = builder.getInt32(0);
+            s.trial_field_type = builder.getInt32(0);
+            s.test_value_dim = builder.getInt32(1);
+            s.trial_value_dim = builder.getInt32(1);
+            s.test_uses_vector_basis = builder.getInt32(0);
+            s.trial_uses_vector_basis = builder.getInt32(0);
+
+            s.cell_domain_id = builder.getInt32(0);
+            s.cell_diameter = f64c(0.0);
+            s.cell_volume = f64c(0.0);
+            s.facet_area = f64c(0.0);
+
+            s.integration_weights = null_f64_ptr;
+            s.quad_points_xyz = null_f64_ptr;
+            s.physical_points_xyz = null_f64_ptr;
+            s.jacobians = null_f64_ptr;
+            s.inverse_jacobians = null_f64_ptr;
+            s.jacobian_dets = null_f64_ptr;
+            s.normals_xyz = null_f64_ptr;
+            s.interleaved_qpoint_geometry = null_f64_ptr;
+            s.interleaved_qpoint_geometry_stride_reals = builder.getInt32(0);
+            s.interleaved_qpoint_geometry_physical_offset = builder.getInt32(0);
+            s.interleaved_qpoint_geometry_jacobian_offset = builder.getInt32(0);
+            s.interleaved_qpoint_geometry_inverse_jacobian_offset = builder.getInt32(0);
+            s.interleaved_qpoint_geometry_det_offset = builder.getInt32(0);
+            s.interleaved_qpoint_geometry_normal_offset = builder.getInt32(0);
+
+            s.test_basis_values = null_f64_ptr;
+            s.trial_basis_values = null_f64_ptr;
+            s.test_phys_grads_xyz = null_f64_ptr;
+            s.trial_phys_grads_xyz = null_f64_ptr;
+            s.test_phys_hessians = null_f64_ptr;
+            s.trial_phys_hessians = null_f64_ptr;
+
+            s.test_basis_vector_values_xyz = null_f64_ptr;
+            s.test_basis_curls_xyz = null_f64_ptr;
+            s.test_basis_divs = null_f64_ptr;
+
+            s.trial_basis_vector_values_xyz = null_f64_ptr;
+            s.trial_basis_curls_xyz = null_f64_ptr;
+            s.trial_basis_divs = null_f64_ptr;
+
+            s.solution_coefficients = null_f64_ptr;
+            s.num_previous_solutions = builder.getInt32(0);
+            s.previous_solution_coefficients_base = null_i8_ptr;
+
+            s.num_history_steps = builder.getInt32(0);
+            s.history_weights = null_f64_ptr;
+            s.history_solution_coefficients_base = null_i8_ptr;
+
+            s.field_solutions = null_i8_ptr;
+            s.num_field_solutions = builder.getInt32(0);
+
+            s.jit_constants = null_f64_ptr;
+            s.coupled_integrals = null_f64_ptr;
+            s.coupled_aux = null_f64_ptr;
+            s.auxiliary_inputs = null_f64_ptr;
+            s.auxiliary_outputs = null_f64_ptr;
+
+            s.time = f64c(0.0);
+            s.dt = f64c(0.0);
+
+            s.time_derivative_term_weight = f64c(1.0);
+            s.non_time_derivative_term_weight = f64c(1.0);
+            s.dt_stencil_coeffs_base = null_f64_ptr;
+            s.dt_term_weights_base = null_f64_ptr;
+            s.max_time_derivative_order = builder.getInt32(0);
+
+            s.material_state_old_base = null_i8_ptr;
+            s.material_state_work_base = null_i8_ptr;
+            s.material_state_stride_bytes = builder.getInt64(0);
+            return s;
+        };
+
+        struct HelperSideRequirements {
+            bool need_side_ptr{false};
+            bool need_cell_domain_id{false};
+            bool need_cell_diameter{false};
+            bool need_cell_volume{false};
+            bool need_facet_area{false};
+            bool need_time{false};
+            bool need_dt{false};
+            bool need_time_derivative_term_weight{false};
+            bool need_non_time_derivative_term_weight{true};
+            bool need_integration_weights{true};
+            bool need_quad_points_xyz{false};
+            bool need_physical_points_xyz{false};
+            bool need_jacobians{false};
+            bool need_inverse_jacobians{false};
+            bool need_jacobian_dets{false};
+            bool need_normals_xyz{false};
+            bool need_interleaved_qpoint_geometry{false};
+            bool need_interleaved_qpoint_geometry_meta{false};
+            bool need_test_uses_vector_basis{false};
+            bool need_trial_uses_vector_basis{false};
+            bool need_test_basis_values{false};
+            bool need_trial_basis_values{false};
+            bool need_test_phys_grads_xyz{false};
+            bool need_trial_phys_grads_xyz{false};
+            bool need_test_phys_hessians{false};
+            bool need_trial_phys_hessians{false};
+            bool need_test_basis_vector_values_xyz{false};
+            bool need_test_basis_curls_xyz{false};
+            bool need_test_basis_divs{false};
+            bool need_trial_basis_vector_values_xyz{false};
+            bool need_trial_basis_curls_xyz{false};
+            bool need_trial_basis_divs{false};
+            bool need_solution_coefficients{false};
+            bool need_previous_solution_coefficients_base{false};
+            bool need_num_history_steps{false};
+            bool need_history_weights{false};
+            bool need_history_solution_coefficients_base{false};
+            bool need_field_solutions{false};
+            bool need_num_field_solutions{false};
+            bool need_jit_constants{false};
+            bool need_coupled_integrals{false};
+            bool need_coupled_aux{false};
+            bool need_auxiliary_inputs{false};
+            bool need_auxiliary_outputs{false};
+            bool need_dt_stencil_coeffs_base{false};
+            bool need_dt_term_weights_base{false};
+            bool need_material_state_old_base{false};
+            bool need_material_state_work_base{false};
+            bool need_material_state_stride_bytes{false};
+        };
+
+        using PackSlot = std::optional<unsigned>;
+
+        struct HelperPackLayout {
+            llvm::StructType* ty{nullptr};
+            std::vector<llvm::Type*> field_types{};
+
+            PackSlot side_ptr{};
+            PackSlot element_matrix{};
+            PackSlot element_vector{};
+            PackSlot element_matrix_lane1{};
+            PackSlot element_vector_lane1{};
+
+            PackSlot n_qpts{};
+            PackSlot n_test_dofs{};
+            PackSlot n_trial_dofs{};
+
+            PackSlot test_uses_vector_basis{};
+            PackSlot trial_uses_vector_basis{};
+            PackSlot cell_domain_id{};
+
+            PackSlot cell_diameter{};
+            PackSlot cell_volume{};
+            PackSlot facet_area{};
+            PackSlot time{};
+            PackSlot dt{};
+            PackSlot time_derivative_term_weight{};
+            PackSlot non_time_derivative_term_weight{};
+
+            PackSlot integration_weights{};
+            PackSlot integration_weights_lane1{};
+            PackSlot quad_points_xyz{};
+            PackSlot quad_points_xyz_lane1{};
+            PackSlot physical_points_xyz{};
+            PackSlot physical_points_xyz_lane1{};
+            PackSlot jacobians{};
+            PackSlot jacobians_lane1{};
+            PackSlot inverse_jacobians{};
+            PackSlot inverse_jacobians_lane1{};
+            PackSlot jacobian_dets{};
+            PackSlot jacobian_dets_lane1{};
+            PackSlot normals_xyz{};
+            PackSlot normals_xyz_lane1{};
+            PackSlot interleaved_qpoint_geometry{};
+            PackSlot interleaved_qpoint_geometry_lane1{};
+            PackSlot interleaved_qpoint_geometry_stride_reals{};
+            PackSlot interleaved_qpoint_geometry_physical_offset{};
+            PackSlot interleaved_qpoint_geometry_jacobian_offset{};
+            PackSlot interleaved_qpoint_geometry_inverse_jacobian_offset{};
+            PackSlot interleaved_qpoint_geometry_det_offset{};
+            PackSlot interleaved_qpoint_geometry_normal_offset{};
+
+            PackSlot test_basis_values{};
+            PackSlot test_basis_values_lane1{};
+            PackSlot trial_basis_values{};
+            PackSlot trial_basis_values_lane1{};
+            PackSlot test_phys_grads_xyz{};
+            PackSlot test_phys_grads_xyz_lane1{};
+            PackSlot trial_phys_grads_xyz{};
+            PackSlot trial_phys_grads_xyz_lane1{};
+            PackSlot test_phys_hessians{};
+            PackSlot test_phys_hessians_lane1{};
+            PackSlot trial_phys_hessians{};
+            PackSlot trial_phys_hessians_lane1{};
+
+            PackSlot test_basis_vector_values_xyz{};
+            PackSlot test_basis_vector_values_xyz_lane1{};
+            PackSlot test_basis_curls_xyz{};
+            PackSlot test_basis_curls_xyz_lane1{};
+            PackSlot test_basis_divs{};
+            PackSlot test_basis_divs_lane1{};
+
+            PackSlot trial_basis_vector_values_xyz{};
+            PackSlot trial_basis_vector_values_xyz_lane1{};
+            PackSlot trial_basis_curls_xyz{};
+            PackSlot trial_basis_curls_xyz_lane1{};
+            PackSlot trial_basis_divs{};
+            PackSlot trial_basis_divs_lane1{};
+
+            PackSlot solution_coefficients{};
+            PackSlot solution_coefficients_lane1{};
+            PackSlot previous_solution_coefficients_base{};
+            PackSlot previous_solution_coefficients_base_lane1{};
+
+            PackSlot num_history_steps{};
+            PackSlot history_weights{};
+            PackSlot history_weights_lane1{};
+            PackSlot history_solution_coefficients_base{};
+            PackSlot history_solution_coefficients_base_lane1{};
+
+            PackSlot field_solutions{};
+            PackSlot field_solutions_lane1{};
+            PackSlot num_field_solutions{};
+
+            PackSlot jit_constants{};
+            PackSlot coupled_integrals{};
+            PackSlot coupled_integrals_lane1{};
+            PackSlot coupled_aux{};
+            PackSlot coupled_aux_lane1{};
+            PackSlot auxiliary_inputs{};
+            PackSlot auxiliary_inputs_lane1{};
+            PackSlot auxiliary_outputs{};
+            PackSlot auxiliary_outputs_lane1{};
+
+            PackSlot dt_stencil_coeffs_base{};
+            PackSlot dt_term_weights_base{};
+
+            PackSlot material_state_old_base{};
+            PackSlot material_state_old_base_lane1{};
+            PackSlot material_state_work_base{};
+            PackSlot material_state_work_base_lane1{};
+            PackSlot material_state_stride_bytes{};
+        };
+
         auto loadSideView = [&](llvm::Value* side_ptr,
                                 const std::optional<std::uint32_t>& fixed_n_qpts,
                                 const std::optional<std::uint32_t>& fixed_n_test_dofs,
@@ -2622,25 +2885,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                    side_single.time = loadF64(elem_ptr, ABIV3::coupled_time_off);
 	                    side_single.dt = loadF64(elem_ptr, ABIV3::coupled_dt_off);
 	                    side_single.field_solutions = loadPtr(elem_ptr, ABIV3::coupled_field_solutions_off);
-	                    side_single.num_field_solutions = loadU32(elem_ptr, ABIV3::coupled_num_field_solutions_off);
-	                    // Print offset constants at IR generation time (once)
-	                    {
-	                        static bool offset_diag_done = false;
-	                        if (!offset_diag_done) {
-	                            offset_diag_done = true;
-	                            std::fprintf(stderr, "[LLVMGEN-OFFSETS] td_off=%zu non_td_off=%zu "
-	                                "cell_diam_off=%zu cell_vol_off=%zu time_off=%zu dt_off=%zu "
-	                                "field_sol_off=%zu num_fs_off=%zu\n",
-	                                ABIV3::coupled_time_derivative_term_weight_off,
-	                                ABIV3::coupled_non_time_derivative_term_weight_off,
-	                                ABIV3::coupled_cell_diameter_off,
-	                                ABIV3::coupled_cell_volume_off,
-	                                ABIV3::coupled_time_off,
-	                                ABIV3::coupled_dt_off,
-	                                ABIV3::coupled_field_solutions_off,
-	                                ABIV3::coupled_num_field_solutions_off);
-	                        }
-	                    }
+                    side_single.num_field_solutions = loadU32(elem_ptr, ABIV3::coupled_num_field_solutions_off);
 	                    side_single.time_derivative_term_weight = loadF64(elem_ptr, ABIV3::coupled_time_derivative_term_weight_off);
 	                    side_single.non_time_derivative_term_weight = loadF64(elem_ptr, ABIV3::coupled_non_time_derivative_term_weight_off);
 	                    side_single.dt_stencil_coeffs_base = builder.CreatePointerCast(
@@ -2791,6 +3036,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        // Per-element coupled integrals/aux
 	                        registerSimdPtr(side_single.coupled_integrals, ABIV3::side_coupled_integrals_off);
 	                        registerSimdPtr(side_single.coupled_aux, ABIV3::side_coupled_aux_off);
+	                        registerSimdPtr(side_single.auxiliary_inputs, ABIV3::side_auxiliary_inputs_off);
+	                        registerSimdPtr(side_single.auxiliary_outputs, ABIV3::side_auxiliary_outputs_off);
 
 	                        // Per-element material state
 	                        registerSimdPtr(side_single.material_state_old_base, ABIV3::side_material_state_old_base_off);
@@ -4562,18 +4809,19 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
         struct FieldEntryPtrs {
             int field_id{-1};
-            llvm::Value* single{nullptr};
-            llvm::Value* minus{nullptr};
-            llvm::Value* plus{nullptr};
-            // Per-lane entries for SIMD batch (lane 0 == single)
-            std::array<llvm::Value*, 8> simd_entries{};
+            llvm::Value* single_slot{nullptr};
+            llvm::Value* minus_slot{nullptr};
+            llvm::Value* plus_slot{nullptr};
+            // Per-lane entry slots for SIMD batch (lane 0 == single_slot)
+            std::array<llvm::Value*, 8> simd_entry_slots{};
         };
 
         auto emitFindFieldEntry = [&](const SideView& side,
                                       int field_id,
                                       std::string_view tag) -> llvm::Value* {
             const auto entry_bytes = static_cast<std::uint64_t>(sizeof(assembly::jit::FieldSolutionEntryV1));
-            auto* found_ptr = builder.CreateAlloca(i8_ptr, nullptr, std::string("field_entry_") + std::string(tag));
+            auto* found_ptr =
+                allocaInEntry(i8_ptr, nullptr, std::string("field_entry_") + std::string(tag));
             builder.CreateStore(llvm::ConstantPointerNull::get(i8_ptr), found_ptr);
 
             auto* fs_is_null = builder.CreateICmpEQ(side.field_solutions, llvm::ConstantPointerNull::get(i8_ptr));
@@ -4590,7 +4838,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 builder.CreateStore(neu, found_ptr);
             });
 
-            return builder.CreateLoad(i8_ptr, found_ptr);
+            return found_ptr;
         };
 
         std::vector<FieldEntryPtrs> field_entries;
@@ -4599,31 +4847,48 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             FieldEntryPtrs e;
             e.field_id = fid;
             if (!is_face_domain) {
-                e.single = emitFindFieldEntry(side_single, fid, "s" + std::to_string(fid));
-                e.simd_entries[0] = e.single;
-                // For SIMD batch: also find field entry for lane 1
+                e.single_slot = emitFindFieldEntry(side_single, fid, "s" + std::to_string(fid));
+                e.simd_entry_slots[0] = e.single_slot;
+                // For SIMD batch: also find field entry slot for lane 1.
                 if (use_simd_batch && simd_side_ptr_1 != nullptr) {
                     SideView side_1_stub{};
                     side_1_stub.field_solutions = loadPtr(simd_side_ptr_1, ABIV3::side_field_solutions_off);
                     side_1_stub.num_field_solutions = loadU32(simd_side_ptr_1, ABIV3::side_num_field_solutions_off);
-                    e.simd_entries[1] = emitFindFieldEntry(side_1_stub, fid, "s1_" + std::to_string(fid));
+                    e.simd_entry_slots[1] = emitFindFieldEntry(side_1_stub, fid, "s1_" + std::to_string(fid));
                 }
             } else {
-                e.minus = emitFindFieldEntry(side_minus, fid, "m" + std::to_string(fid));
-                e.plus = emitFindFieldEntry(side_plus, fid, "p" + std::to_string(fid));
-            }
-            // Register field entry SIMD pair so loadPtr(entry, ...) propagates automatically.
-            if (use_simd_batch && e.simd_entries[1] != nullptr) {
-                simd_ptr_map[e.simd_entries[0]] = {e.simd_entries[0], e.simd_entries[1]};
+                e.minus_slot = emitFindFieldEntry(side_minus, fid, "m" + std::to_string(fid));
+                e.plus_slot = emitFindFieldEntry(side_plus, fid, "p" + std::to_string(fid));
             }
             field_entries.push_back(e);
         }
 
+        auto loadFieldEntryFromSlot = [&](llvm::Value* slot,
+                                          llvm::Value* simd_slot,
+                                          int fid) -> llvm::Value* {
+            if (slot == nullptr) {
+                return llvm::ConstantPointerNull::get(i8_ptr);
+            }
+
+            auto* entry =
+                builder.CreateLoad(i8_ptr, slot, "field_entry_val_" + std::to_string(fid));
+            if (use_simd_batch && simd_active && simd_slot != nullptr) {
+                auto* entry1 =
+                    builder.CreateLoad(i8_ptr, simd_slot, "field_entry_val1_" + std::to_string(fid));
+                simd_ptr_map[entry] = {entry, entry1};
+            }
+            return entry;
+        };
+
         auto fieldEntryPtrFor = [&](bool plus_side, int fid) -> llvm::Value* {
             for (const auto& e : field_entries) {
                 if (e.field_id == fid) {
-                    if (!is_face_domain) return e.single;
-                    return plus_side ? e.plus : e.minus;
+                    if (!is_face_domain) {
+                        return loadFieldEntryFromSlot(e.single_slot, e.simd_entry_slots[1], fid);
+                    }
+                    return plus_side
+                        ? loadFieldEntryFromSlot(e.plus_slot, nullptr, fid)
+                        : loadFieldEntryFromSlot(e.minus_slot, nullptr, fid);
                 }
             }
             return llvm::ConstantPointerNull::get(i8_ptr);
@@ -7242,7 +7507,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         const auto child_op_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
                         const auto& kid = term.ir.ops[child_op_idx];
-                        if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
+                        if (kid.type == FormExprType::TrialFunction) {
+                            if (is_residual) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
+                                    acc = add(acc,
+                                              mul(makeScalar(loadDtCoeff(side, order, k)),
+                                                  evalPreviousSolution(side, shape, k, q_index)));
+                                }
+                            }
+                        } else if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
                             if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                 for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
@@ -7282,6 +7555,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         break;
 
 	                    case FormExprType::Add: {
+                            if (shape.kind != Shape::Kind::Scalar) {
+                                const auto& kid0 = term.ir.ops[term.ir.children[static_cast<std::size_t>(op.first_child)]];
+                                const auto& kid1 = term.ir.ops[term.ir.children[static_cast<std::size_t>(op.first_child + 1)]];
+                                if (isScalarZeroLikeOp(kid0)) {
+                                    values[op_idx] = getChild(op, 1);
+                                    break;
+                                }
+                                if (isScalarZeroLikeOp(kid1)) {
+                                    values[op_idx] = getChild(op, 0);
+                                    break;
+                                }
+                            }
 	                        if (shape.kind == Shape::Kind::Scalar) {
 	                            if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values)) {
 	                                values[op_idx] = makeScalar(fused);
@@ -7293,6 +7578,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                    }
 
 	                    case FormExprType::Subtract: {
+                            if (shape.kind != Shape::Kind::Scalar) {
+                                const auto& kid0 = term.ir.ops[term.ir.children[static_cast<std::size_t>(op.first_child)]];
+                                const auto& kid1 = term.ir.ops[term.ir.children[static_cast<std::size_t>(op.first_child + 1)]];
+                                if (isScalarZeroLikeOp(kid1)) {
+                                    values[op_idx] = getChild(op, 0);
+                                    break;
+                                }
+                                if (isScalarZeroLikeOp(kid0)) {
+                                    values[op_idx] = neg(getChild(op, 1));
+                                    break;
+                                }
+                            }
 	                        if (shape.kind == Shape::Kind::Scalar) {
 	                            if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values)) {
 	                                values[op_idx] = makeScalar(fused);
@@ -8009,6 +8306,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             return h;
         };
 
+        auto makeDep0XBlockKey = [](int trial_group, std::uint64_t op_hash) -> std::uint64_t {
+            std::uint64_t h = 0xcbf29ce484222325ULL;
+            auto mix = [&h](std::uint64_t v) { h ^= v; h *= 0x100000001b3ULL; };
+            mix(static_cast<std::uint64_t>(trial_group));
+            mix(op_hash);
+            return h;
+        };
+
         // Active cache state (captured by computeCachedSingle via [&]).
         // When qp_cache_trial_group == -1 or qp_shared_cache == nullptr,
         // the cache is disabled and computeCachedSingle behaves as before.
@@ -8017,7 +8322,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         std::unordered_map<std::uint64_t, QPCacheEntry>* qp_shared_cache_ptr = nullptr;
 
         // Cross-block CSE cache for dep_mask==0 ops shared across coupled blocks.
-        // Keyed by per-op structural hash.  Active only during coupled dispatch.
+        // Scoped by trial-group because some dep0 ops (for example PreviousSolutionRef(k))
+        // are field-local even when their structural hash is identical across blocks.
         std::unordered_map<std::uint64_t, QPCacheEntry> dep0_xblock_cache;
         bool dep0_xblock_active = false;
 
@@ -8149,7 +8455,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 // computed by a previous coupled block with the same structural hash.
                 if (dep0_xblock_active && !term.op_hashes.empty()) {
                     const auto op_hash = term.op_hashes[op_idx];
-                    auto it = dep0_xblock_cache.find(op_hash);
+                    const auto xblock_key = makeDep0XBlockKey(qp_cache_trial_group, op_hash);
+                    auto it = dep0_xblock_cache.find(xblock_key);
                     if (it != dep0_xblock_cache.end()) {
                         // In buffer mode, re-derive data pointer for current function.
                         if (active_xblock_cache_base) {
@@ -8164,6 +8471,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             static const bool jit_tel = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
                             if (jit_tel) {
                                 std::cerr << "[JIT dep0-xblock] HIT hash=0x" << std::hex << op_hash << std::dec
+                                          << " tg=" << qp_cache_trial_group
                                           << " op=" << op_idx << "\n";
                             }
                         }
@@ -8232,6 +8540,32 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             }
                         } else {
                             values[op_idx] = evalDiscreteOrStateField(/*plus_side=*/false, shape, fid, q_index);
+                        }
+                        break;
+                    }
+                    case FormExprType::TrialFunction: {
+                        if (!is_residual) {
+                            throw std::runtime_error(
+                                "LLVMGen: cached TrialFunction only supports residual (current solution)");
+                        }
+                        // Residual-side TrialFunction is semantically the current solution.
+                        // Reuse the same cache entry as StateField(CURRENT_SOLUTION_FIELD_ID).
+                        if (qp_shared_cache_ptr && qp_cache_trial_group >= 0) {
+                            const auto n_e = elemCount(shape);
+                            const auto key = makeCacheKey(qp_cache_trial_group,
+                                kCacheCurrentSolution, 0, shape.kind, shape.dims[0]);
+                            auto* entry = getOrCreateCacheEntry(key, static_cast<std::uint32_t>(n_e));
+                            if (entry && entry->populated) {
+                                values[op_idx] = loadFromCacheEntry(*entry, q_index, shape);
+                            } else if (entry) {
+                                values[op_idx] = evalCurrentSolution(side, shape, q_index);
+                                storeToCacheEntry(*entry, q_index, values[op_idx]);
+                                entry->populated = true;
+                            } else {
+                                values[op_idx] = evalCurrentSolution(side, shape, q_index);
+                            }
+                        } else {
+                            values[op_idx] = evalCurrentSolution(side, shape, q_index);
                         }
                         break;
                     }
@@ -9061,6 +9395,68 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             break;
                         }
 
+                        if (kid.type == FormExprType::TrialFunction) {
+                            if (!is_residual) {
+                                throw std::runtime_error(
+                                    "LLVMGen: cached Divergence(TrialFunction) only supports residual (current solution)");
+                            }
+
+                            auto* coeffs = side.solution_coefficients;
+                            auto* uses_vec_basis =
+                                builder.CreateICmpNE(side.trial_uses_vector_basis, builder.getInt32(0));
+                            auto* vb = llvm::BasicBlock::Create(*ctx, "div.state_u.vec_basis", fn);
+                            auto* sb = llvm::BasicBlock::Create(*ctx, "div.state_u.scalar_basis", fn);
+                            auto* merge = llvm::BasicBlock::Create(*ctx, "div.state_u.merge", fn);
+
+                            builder.CreateCondBr(uses_vec_basis, vb, sb);
+
+                            llvm::Value* div_vb = rc(0.0);
+                            builder.SetInsertPoint(vb);
+                            div_vb = emitReduceSumScalar(
+                                side.n_trial_dofs, "div_state_u_vb", [&](llvm::Value* j) -> llvm::Value* {
+                                    auto* j64 = builder.CreateZExt(j, i64);
+                                    auto* cj = loadRealPtrAt(coeffs, j64);
+                                    auto* div_phi =
+                                        loadBasisScalar(side.trial_basis_divs, side.n_trial_dofs, j, q_index);
+                                    return builder.CreateFMul(cj, div_phi);
+                                });
+                            builder.CreateBr(merge);
+                            auto* vb_block = builder.GetInsertBlock();
+
+                            llvm::Value* div_sb = rc(0.0);
+                            builder.SetInsertPoint(sb);
+                            auto* dofs_per_comp =
+                                builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+                            llvm::Value* div_sum = rc(0.0);
+                            for (std::size_t comp = 0; comp < vd; ++comp) {
+                                auto* acc = emitReduceSumScalar(
+                                    dofs_per_comp,
+                                    "div_state_u_c" + std::to_string(comp),
+                                    [&](llvm::Value* jj) -> llvm::Value* {
+                                        auto* base = builder.CreateMul(
+                                            builder.getInt32(static_cast<std::uint32_t>(comp)),
+                                            dofs_per_comp);
+                                        auto* j = builder.CreateAdd(base, jj);
+                                        auto* j64 = builder.CreateZExt(j, i64);
+                                        auto* cj = loadRealPtrAt(coeffs, j64);
+                                        const auto g = loadVec3FromTableQMajor(
+                                            side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+                                        return builder.CreateFMul(cj, g[comp]);
+                                    });
+                                div_sum = builder.CreateFAdd(div_sum, acc);
+                            }
+                            div_sb = div_sum;
+                            builder.CreateBr(merge);
+                            auto* sb_block = builder.GetInsertBlock();
+
+                            builder.SetInsertPoint(merge);
+                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "div.state_u");
+                            phi->addIncoming(div_vb, vb_block);
+                            phi->addIncoming(div_sb, sb_block);
+                            values[op_idx] = makeScalar(phi);
+                            break;
+                        }
+
 	                        if (kid.type == FormExprType::PreviousSolutionRef) {
 	                            const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
 	                            auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
@@ -9394,7 +9790,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         const auto child_op_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
                         const auto& kid = term.ir.ops[child_op_idx];
-                        if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
+                        if (kid.type == FormExprType::TrialFunction) {
+                            if (is_residual) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
+                                    acc = add(acc,
+                                              mul(makeScalar(loadDtCoeff(side, order, k)),
+                                                  evalPreviousSolution(side, shape, k, q_index)));
+                                }
+                            }
+                        } else if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
                             if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                 for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
@@ -9430,6 +9834,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         values[op_idx] = neg(getChild(op, 0));
                         break;
 	                    case FormExprType::Add: {
+                            if (shape.kind != Shape::Kind::Scalar) {
+                                const auto& kid0 = term.ir.ops[term.ir.children[static_cast<std::size_t>(op.first_child)]];
+                                const auto& kid1 = term.ir.ops[term.ir.children[static_cast<std::size_t>(op.first_child + 1)]];
+                                if (isScalarZeroLikeOp(kid0)) {
+                                    values[op_idx] = getChild(op, 1);
+                                    break;
+                                }
+                                if (isScalarZeroLikeOp(kid1)) {
+                                    values[op_idx] = getChild(op, 0);
+                                    break;
+                                }
+                            }
 	                        if (shape.kind == Shape::Kind::Scalar) {
 	                            if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values)) {
 	                                values[op_idx] = makeScalar(fused);
@@ -9440,6 +9856,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        break;
 	                    }
 	                    case FormExprType::Subtract: {
+                            if (shape.kind != Shape::Kind::Scalar) {
+                                const auto& kid0 = term.ir.ops[term.ir.children[static_cast<std::size_t>(op.first_child)]];
+                                const auto& kid1 = term.ir.ops[term.ir.children[static_cast<std::size_t>(op.first_child + 1)]];
+                                if (isScalarZeroLikeOp(kid1)) {
+                                    values[op_idx] = getChild(op, 0);
+                                    break;
+                                }
+                                if (isScalarZeroLikeOp(kid0)) {
+                                    values[op_idx] = neg(getChild(op, 1));
+                                    break;
+                                }
+                            }
 	                        if (shape.kind == Shape::Kind::Scalar) {
 	                            if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values)) {
 	                                values[op_idx] = makeScalar(fused);
@@ -9670,6 +10098,17 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         values[op_idx] = spectralDecomp(getChild(op, 0));
                         break;
 
+                    case FormExprType::SymmetricEigenvectorDirectionalDerivative: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values[op_idx] = eigSymVecDD(getChild(op, 0), getChild(op, 1), which);
+                        break;
+                    }
+
+                    case FormExprType::SpectralDecompositionDirectionalDerivative:
+                        values[op_idx] = spectralDecompDD(getChild(op, 0), getChild(op, 1));
+                        break;
+
                     case FormExprType::HistoryWeightedSum:
                     case FormExprType::HistoryConvolution: {
                         CodeValue acc = makeZero(shape);
@@ -9704,7 +10143,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     }
 
                     default:
-                        throw std::runtime_error("LLVMGen: unsupported op in cached eval");
+                        throw std::runtime_error(
+                            "LLVMGen: unsupported op in cached eval type=" +
+                            std::to_string(static_cast<int>(op.type)));
                 }
                 cached[op_idx] = values[op_idx];
 
@@ -9720,7 +10161,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     if (!costs.empty() && op_idx < costs.size() &&
                         costs[op_idx] >= xblock_cost_threshold) {
                         const auto op_hash = term.op_hashes[op_idx];
-                        if (dep0_xblock_cache.find(op_hash) == dep0_xblock_cache.end()) {
+                        const auto xblock_key = makeDep0XBlockKey(qp_cache_trial_group, op_hash);
+                        if (dep0_xblock_cache.find(xblock_key) == dep0_xblock_cache.end()) {
                             const auto n_elems = static_cast<std::uint32_t>(elemCount(values[op_idx].shape));
                             auto* xb_elem_ty = simd_active ? vf64 : f64;
                             const std::uint32_t xb_elem_bytes = simd_active ? (simd_w * 8u) : 8u;
@@ -9740,12 +10182,13 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 }
                                 QPCacheEntry entry{data_ptr, n_elems, true, buf_off};
                                 storeToCacheEntry(entry, q_index, values[op_idx]);
-                                dep0_xblock_cache[op_hash] = entry;
+                                dep0_xblock_cache[xblock_key] = entry;
                                 xblock_cache_bytes_allocated += alloc_bytes;
                                 {
                                     static const bool jit_tel = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
                                     if (jit_tel) {
                                         std::cerr << "[JIT dep0-xblock] STORE hash=0x" << std::hex << op_hash << std::dec
+                                                  << " tg=" << qp_cache_trial_group
                                                   << " op=" << op_idx << " bytes=" << alloc_bytes << "\n";
                                     }
                                 }
@@ -9921,6 +10364,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             shape);
                         break;
                     }
+
+                    case FormExprType::TrialFunction:
+                        if (!is_residual) {
+                            throw std::runtime_error(
+                                "LLVMGen: cached face TrialFunction only supports residual (current solution)");
+                        }
+                        values_minus[op_idx] = evalCurrentSolution(side_minus, shape, q_index);
+                        values_plus[op_idx] = evalCurrentSolution(side_plus, shape, q_index);
+                        break;
 
                     case FormExprType::Time:
                         values_minus[op_idx] = makeScalar(side_minus.time);
@@ -10458,7 +10910,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         const auto child_op_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
                         const auto& kid = term.ir.ops[child_op_idx];
-                        if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
+                        if (kid.type == FormExprType::TrialFunction) {
+                            if (is_residual) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
+                                    acc_minus = add(acc_minus,
+                                                    mul(makeScalar(loadDtCoeff(side_minus, order, k)),
+                                                        evalPreviousSolution(side_minus, shape, k, q_index)));
+                                    acc_plus = add(acc_plus,
+                                                   mul(makeScalar(loadDtCoeff(side_plus, order, k)),
+                                                       evalPreviousSolution(side_plus, shape, k, q_index)));
+                                }
+                            }
+                        } else if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
                             if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                 for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
@@ -10544,6 +11007,20 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         break;
 
 	                    case FormExprType::Add: {
+                            if (shape.kind != Shape::Kind::Scalar) {
+                                const auto& kid0 = term.ir.ops[term.ir.children[static_cast<std::size_t>(op.first_child)]];
+                                const auto& kid1 = term.ir.ops[term.ir.children[static_cast<std::size_t>(op.first_child + 1)]];
+                                if (isScalarZeroLikeOp(kid0)) {
+                                    values_minus[op_idx] = childMinus(op, 1);
+                                    values_plus[op_idx] = childPlus(op, 1);
+                                    break;
+                                }
+                                if (isScalarZeroLikeOp(kid1)) {
+                                    values_minus[op_idx] = childMinus(op, 0);
+                                    values_plus[op_idx] = childPlus(op, 0);
+                                    break;
+                                }
+                            }
 	                        if (shape.kind == Shape::Kind::Scalar) {
 	                            if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values_minus)) {
 	                                values_minus[op_idx] = makeScalar(fused);
@@ -10563,6 +11040,20 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                    }
 
 	                    case FormExprType::Subtract: {
+                            if (shape.kind != Shape::Kind::Scalar) {
+                                const auto& kid0 = term.ir.ops[term.ir.children[static_cast<std::size_t>(op.first_child)]];
+                                const auto& kid1 = term.ir.ops[term.ir.children[static_cast<std::size_t>(op.first_child + 1)]];
+                                if (isScalarZeroLikeOp(kid1)) {
+                                    values_minus[op_idx] = childMinus(op, 0);
+                                    values_plus[op_idx] = childPlus(op, 0);
+                                    break;
+                                }
+                                if (isScalarZeroLikeOp(kid0)) {
+                                    values_minus[op_idx] = neg(childMinus(op, 1));
+                                    values_plus[op_idx] = neg(childPlus(op, 1));
+                                    break;
+                                }
+                            }
 	                        if (shape.kind == Shape::Kind::Scalar) {
 	                            if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values_minus)) {
 	                                values_minus[op_idx] = makeScalar(fused);
@@ -11041,6 +11532,362 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 return true;
             };
 
+            auto computeNonCoupledHelperRequirements =
+                [&](std::size_t first_t, std::size_t end_t) -> HelperSideRequirements {
+                HelperSideRequirements req;
+
+                auto markInterleavedGeometryMeta = [&](HelperSideRequirements& r) {
+                    r.need_interleaved_qpoint_geometry = true;
+                    r.need_interleaved_qpoint_geometry_meta = true;
+                };
+
+                auto markTestValueAccess = [&](HelperSideRequirements& r, const Shape& shape) {
+                    if (shape.kind == Shape::Kind::Scalar) {
+                        r.need_test_basis_values = true;
+                    } else if (shape.kind == Shape::Kind::Vector) {
+                        r.need_test_uses_vector_basis = true;
+                        r.need_test_basis_values = true;
+                        r.need_test_basis_vector_values_xyz = true;
+                    }
+                };
+
+                auto markTrialValueAccess = [&](HelperSideRequirements& r, const Shape& shape) {
+                    if (shape.kind == Shape::Kind::Scalar) {
+                        r.need_trial_basis_values = true;
+                    } else if (shape.kind == Shape::Kind::Vector) {
+                        r.need_trial_uses_vector_basis = true;
+                        r.need_trial_basis_values = true;
+                        r.need_trial_basis_vector_values_xyz = true;
+                    }
+                };
+
+                auto markCurrentSolutionValueAccess = [&](HelperSideRequirements& r,
+                                                          const Shape& shape) {
+                    r.need_solution_coefficients = true;
+                    markTrialValueAccess(r, shape);
+                };
+
+                auto markPreviousSolutionValueAccess = [&](HelperSideRequirements& r,
+                                                           const Shape& shape) {
+                    r.need_previous_solution_coefficients_base = true;
+                    markTrialValueAccess(r, shape);
+                };
+
+                auto markHistorySolutionValueAccess = [&](HelperSideRequirements& r,
+                                                          const Shape& shape) {
+                    r.need_history_solution_coefficients_base = true;
+                    markTrialValueAccess(r, shape);
+                };
+
+                auto markTestGradientAccess = [&](HelperSideRequirements& r) {
+                    r.need_test_phys_grads_xyz = true;
+                };
+
+                auto markTrialGradientAccess = [&](HelperSideRequirements& r) {
+                    r.need_trial_phys_grads_xyz = true;
+                };
+
+                auto markTestDivergenceAccess = [&](HelperSideRequirements& r) {
+                    r.need_test_uses_vector_basis = true;
+                    r.need_test_basis_divs = true;
+                    r.need_test_phys_grads_xyz = true;
+                };
+
+                auto markTrialDivergenceAccess = [&](HelperSideRequirements& r) {
+                    r.need_trial_uses_vector_basis = true;
+                    r.need_trial_basis_divs = true;
+                    r.need_trial_phys_grads_xyz = true;
+                };
+
+                auto markTestCurlAccess = [&](HelperSideRequirements& r) {
+                    r.need_test_uses_vector_basis = true;
+                    r.need_test_basis_curls_xyz = true;
+                    r.need_test_phys_grads_xyz = true;
+                };
+
+                auto markTrialCurlAccess = [&](HelperSideRequirements& r) {
+                    r.need_trial_uses_vector_basis = true;
+                    r.need_trial_basis_curls_xyz = true;
+                    r.need_trial_phys_grads_xyz = true;
+                };
+
+                auto markTestHessianAccess = [&](HelperSideRequirements& r) {
+                    r.need_test_phys_hessians = true;
+                };
+
+                auto markTrialHessianAccess = [&](HelperSideRequirements& r) {
+                    r.need_trial_phys_hessians = true;
+                };
+
+                auto isCurrentSolutionState = [&](const KernelIROp& op) -> bool {
+                    return op.type == FormExprType::StateField &&
+                           unpackFieldIdImm1(op.imm1) == kCurrentSolutionFid;
+                };
+
+                auto markTimeDerivativeHistoryAccess =
+                    [&](HelperSideRequirements& r, const KernelIROp& child_op) {
+                    if (child_op.type == FormExprType::TrialFunction ||
+                        isCurrentSolutionState(child_op)) {
+                        r.need_previous_solution_coefficients_base = true;
+                    } else if (child_op.type == FormExprType::DiscreteField ||
+                               child_op.type == FormExprType::StateField) {
+                        // Field entry pointers are pre-resolved in the dispatcher.
+                    }
+                };
+
+                for (std::size_t t = first_t; t < end_t; ++t) {
+                    const auto& term = terms[t];
+                    if (term.time_derivative_order > 0) {
+                        req.need_time_derivative_term_weight = true;
+                        req.need_dt_term_weights_base = true;
+                    }
+
+                    for (std::size_t op_idx = 0; op_idx < term.ir.ops.size(); ++op_idx) {
+                        const auto& op = term.ir.ops[op_idx];
+                        const auto& shape = term.shapes[op_idx];
+
+                        switch (op.type) {
+                            case FormExprType::ParameterRef:
+                                req.need_jit_constants = true;
+                                break;
+
+                            case FormExprType::BoundaryIntegralRef:
+                                req.need_coupled_integrals = true;
+                                break;
+
+                            case FormExprType::AuxiliaryStateRef:
+                                req.need_coupled_aux = true;
+                                break;
+
+                            case FormExprType::AuxiliaryInputRef:
+                                req.need_auxiliary_inputs = true;
+                                break;
+
+                            case FormExprType::AuxiliaryOutputRef:
+                                req.need_auxiliary_outputs = true;
+                                break;
+
+                            case FormExprType::DiscreteField:
+                            case FormExprType::StateField:
+                                if (isCurrentSolutionState(op)) {
+                                    markCurrentSolutionValueAccess(req, shape);
+                                }
+                                break;
+
+                            case FormExprType::Coefficient:
+                            case FormExprType::Constitutive:
+                            case FormExprType::ConstitutiveOutput:
+                                req.need_side_ptr = true;
+                                break;
+
+                            case FormExprType::Time:
+                                req.need_time = true;
+                                break;
+
+                            case FormExprType::TimeStep:
+                                req.need_dt = true;
+                                break;
+
+                            case FormExprType::EffectiveTimeStep:
+                                req.need_dt = true;
+                                req.need_dt_stencil_coeffs_base = true;
+                                break;
+
+                            case FormExprType::CellDiameter:
+                                req.need_cell_diameter = true;
+                                break;
+
+                            case FormExprType::CellVolume:
+                                req.need_cell_volume = true;
+                                break;
+
+                            case FormExprType::FacetArea:
+                                req.need_facet_area = true;
+                                break;
+
+                            case FormExprType::CellDomainId:
+                                req.need_cell_domain_id = true;
+                                break;
+
+                            case FormExprType::Coordinate:
+                                req.need_physical_points_xyz = true;
+                                markInterleavedGeometryMeta(req);
+                                break;
+
+                            case FormExprType::ReferenceCoordinate:
+                                req.need_quad_points_xyz = true;
+                                break;
+
+                            case FormExprType::Normal:
+                                req.need_normals_xyz = true;
+                                markInterleavedGeometryMeta(req);
+                                break;
+
+                            case FormExprType::Jacobian:
+                                req.need_jacobians = true;
+                                markInterleavedGeometryMeta(req);
+                                break;
+
+                            case FormExprType::JacobianInverse:
+                                req.need_inverse_jacobians = true;
+                                markInterleavedGeometryMeta(req);
+                                break;
+
+                            case FormExprType::JacobianDeterminant:
+                                req.need_jacobian_dets = true;
+                                markInterleavedGeometryMeta(req);
+                                break;
+
+                            case FormExprType::TestFunction:
+                                markTestValueAccess(req, shape);
+                                break;
+
+                            case FormExprType::TrialFunction:
+                                if (is_residual) {
+                                    markCurrentSolutionValueAccess(req, shape);
+                                } else {
+                                    markTrialValueAccess(req, shape);
+                                }
+                                break;
+
+                            case FormExprType::PreviousSolutionRef:
+                                markPreviousSolutionValueAccess(req, shape);
+                                break;
+
+                            case FormExprType::Gradient: {
+                                const auto child_idx =
+                                    term.ir.children[static_cast<std::size_t>(op.first_child)];
+                                const auto& child_op = term.ir.ops[child_idx];
+                                if (child_op.type == FormExprType::TestFunction) {
+                                    markTestGradientAccess(req);
+                                } else if (child_op.type == FormExprType::TrialFunction ||
+                                           child_op.type == FormExprType::PreviousSolutionRef ||
+                                           isCurrentSolutionState(child_op)) {
+                                    markTrialGradientAccess(req);
+                                } else if (child_op.type == FormExprType::TimeDerivative) {
+                                    const auto dt_child_idx = term.ir.children[
+                                        static_cast<std::size_t>(child_op.first_child)];
+                                    const auto& dt_child = term.ir.ops[dt_child_idx];
+                                    if (dt_child.type == FormExprType::TrialFunction ||
+                                        dt_child.type == FormExprType::PreviousSolutionRef ||
+                                        isCurrentSolutionState(dt_child)) {
+                                        markTrialGradientAccess(req);
+                                    }
+                                }
+                                break;
+                            }
+
+                            case FormExprType::Divergence: {
+                                const auto child_idx =
+                                    term.ir.children[static_cast<std::size_t>(op.first_child)];
+                                const auto& child_op = term.ir.ops[child_idx];
+                                const auto& child_shape = term.shapes[child_idx];
+                                if (child_shape.kind == Shape::Kind::Matrix) {
+                                    req.need_trial_phys_hessians = true;
+                                    break;
+                                }
+                                if (child_op.type == FormExprType::TestFunction) {
+                                    markTestDivergenceAccess(req);
+                                } else if (child_op.type == FormExprType::TrialFunction ||
+                                           child_op.type == FormExprType::PreviousSolutionRef ||
+                                           isCurrentSolutionState(child_op)) {
+                                    markTrialDivergenceAccess(req);
+                                } else if (child_op.type == FormExprType::TimeDerivative) {
+                                    const auto dt_child_idx = term.ir.children[
+                                        static_cast<std::size_t>(child_op.first_child)];
+                                    const auto& dt_child = term.ir.ops[dt_child_idx];
+                                    if (dt_child.type == FormExprType::TrialFunction ||
+                                        dt_child.type == FormExprType::PreviousSolutionRef ||
+                                        isCurrentSolutionState(dt_child)) {
+                                        markTrialDivergenceAccess(req);
+                                    }
+                                }
+                                break;
+                            }
+
+                            case FormExprType::Curl: {
+                                const auto child_idx =
+                                    term.ir.children[static_cast<std::size_t>(op.first_child)];
+                                const auto& child_op = term.ir.ops[child_idx];
+                                if (child_op.type == FormExprType::TestFunction) {
+                                    markTestCurlAccess(req);
+                                } else if (child_op.type == FormExprType::TrialFunction ||
+                                           child_op.type == FormExprType::PreviousSolutionRef ||
+                                           isCurrentSolutionState(child_op)) {
+                                    markTrialCurlAccess(req);
+                                } else if (child_op.type == FormExprType::TimeDerivative) {
+                                    const auto dt_child_idx = term.ir.children[
+                                        static_cast<std::size_t>(child_op.first_child)];
+                                    const auto& dt_child = term.ir.ops[dt_child_idx];
+                                    if (dt_child.type == FormExprType::TrialFunction ||
+                                        dt_child.type == FormExprType::PreviousSolutionRef ||
+                                        isCurrentSolutionState(dt_child)) {
+                                        markTrialCurlAccess(req);
+                                    }
+                                }
+                                break;
+                            }
+
+                            case FormExprType::Hessian: {
+                                const auto child_idx =
+                                    term.ir.children[static_cast<std::size_t>(op.first_child)];
+                                const auto& child_op = term.ir.ops[child_idx];
+                                if (child_op.type == FormExprType::TestFunction) {
+                                    markTestHessianAccess(req);
+                                } else if (child_op.type == FormExprType::TrialFunction ||
+                                           child_op.type == FormExprType::PreviousSolutionRef ||
+                                           isCurrentSolutionState(child_op)) {
+                                    markTrialHessianAccess(req);
+                                } else if (child_op.type == FormExprType::TimeDerivative) {
+                                    const auto dt_child_idx = term.ir.children[
+                                        static_cast<std::size_t>(child_op.first_child)];
+                                    const auto& dt_child = term.ir.ops[dt_child_idx];
+                                    if (dt_child.type == FormExprType::TrialFunction ||
+                                        dt_child.type == FormExprType::PreviousSolutionRef ||
+                                        isCurrentSolutionState(dt_child)) {
+                                        markTrialHessianAccess(req);
+                                    }
+                                }
+                                break;
+                            }
+
+                            case FormExprType::TimeDerivative: {
+                                req.need_dt_stencil_coeffs_base = true;
+                                const auto child_idx =
+                                    term.ir.children[static_cast<std::size_t>(op.first_child)];
+                                const auto& child_op = term.ir.ops[child_idx];
+                                markTimeDerivativeHistoryAccess(req, child_op);
+                                break;
+                            }
+
+                            case FormExprType::MaterialStateOldRef:
+                                req.need_material_state_old_base = true;
+                                req.need_material_state_stride_bytes = true;
+                                break;
+
+                            case FormExprType::MaterialStateWorkRef:
+                                req.need_material_state_work_base = true;
+                                req.need_material_state_stride_bytes = true;
+                                break;
+
+                            case FormExprType::HistoryWeightedSum:
+                            case FormExprType::HistoryConvolution:
+                                markHistorySolutionValueAccess(req, shape);
+                                if (op.child_count == 0u) {
+                                    req.need_num_history_steps = true;
+                                    req.need_history_weights = true;
+                                }
+                                break;
+
+                            default:
+                                break;
+                        }
+                    }
+                }
+
+                return req;
+            };
+
             // Reusable lambda: emit terms [first_t, end_t) using the current
             // codegen context (side_single, element_matrix/vector by reference).
             auto emitNonCoupledTermRange = [&](std::size_t first_t, std::size_t end_t) {
@@ -11265,8 +12112,6 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             // interleaved {lane0, lane1} pairs (2 * n_fields entries).
             if (nc_plan.needs_split) {
                 auto* i8_ptr_ptr = llvm::PointerType::get(i8_ptr, 0);
-                auto* nc_helper_type = llvm::FunctionType::get(
-                    builder.getVoidTy(), {i8_ptr, i32, i8_ptr_ptr}, false);
 
                 // In the main function, pack resolved field entry pointers
                 // into a stack buffer that is passed to each helper.
@@ -11282,28 +12127,328 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     for (std::size_t fi = 0; fi < n_fields; ++fi) {
                         auto* slot0 = builder.CreateGEP(i8_ptr, field_ptr_buf,
                             builder.getInt64(static_cast<std::int64_t>(fi * ptrs_per_field)));
-                        builder.CreateStore(field_entries[fi].single, slot0);
-                        if (use_simd_batch && field_entries[fi].simd_entries[1] != nullptr) {
+                        auto* lane0_entry = builder.CreateLoad(
+                            i8_ptr, field_entries[fi].single_slot,
+                            "field_entry_buf0_" + std::to_string(fi));
+                        builder.CreateStore(lane0_entry, slot0);
+                        if (use_simd_batch && field_entries[fi].simd_entry_slots[1] != nullptr) {
                             auto* slot1 = builder.CreateGEP(i8_ptr, field_ptr_buf,
                                 builder.getInt64(static_cast<std::int64_t>(fi * ptrs_per_field + 1)));
-                            builder.CreateStore(field_entries[fi].simd_entries[1], slot1);
+                            auto* lane1_entry = builder.CreateLoad(
+                                i8_ptr, field_entries[fi].simd_entry_slots[1],
+                                "field_entry_buf1_" + std::to_string(fi));
+                            builder.CreateStore(lane1_entry, slot1);
                         } else if (use_simd_batch) {
                             // Fallback: duplicate lane-0 for lane-1
                             auto* slot1 = builder.CreateGEP(i8_ptr, field_ptr_buf,
                                 builder.getInt64(static_cast<std::int64_t>(fi * ptrs_per_field + 1)));
-                            builder.CreateStore(field_entries[fi].single, slot1);
+                            builder.CreateStore(lane0_entry, slot1);
                         }
                     }
                 } else {
                     field_ptr_buf = llvm::ConstantPointerNull::get(i8_ptr_ptr);
                 }
 
-                std::vector<llvm::Function*> nc_helpers;
-                nc_helpers.reserve(nc_plan.groups.size());
+                auto* helper_real_ty = use_simd_batch ? vf64 : f64;
+
+                auto addSlot = [&](HelperPackLayout& layout,
+                                   PackSlot& slot,
+                                   llvm::Type* ty) {
+                    slot = static_cast<unsigned>(layout.field_types.size());
+                    layout.field_types.push_back(ty);
+                };
+
+                auto addLaneAwareDoublePtrSlots = [&](HelperPackLayout& layout,
+                                                      bool needed,
+                                                      PackSlot& lane0_slot,
+                                                      PackSlot& lane1_slot) {
+                    if (!needed) return;
+                    addSlot(layout, lane0_slot, i8_ptr);
+                    if (use_simd_batch) {
+                        addSlot(layout, lane1_slot, i8_ptr);
+                    }
+                };
+
+                auto addLaneAwareBytePtrSlots = [&](HelperPackLayout& layout,
+                                                    bool needed,
+                                                    PackSlot& lane0_slot,
+                                                    PackSlot& lane1_slot) {
+                    if (!needed) return;
+                    addSlot(layout, lane0_slot, i8_ptr);
+                    if (use_simd_batch) {
+                        addSlot(layout, lane1_slot, i8_ptr);
+                    }
+                };
+
+                auto buildHelperPackLayout =
+                    [&](const std::string& pack_name,
+                        const HelperSideRequirements& req,
+                        bool need_matrix_output,
+                        bool need_vector_output) -> HelperPackLayout {
+                    HelperPackLayout layout;
+
+                    if (req.need_side_ptr) addSlot(layout, layout.side_ptr, i8_ptr);
+                    if (need_matrix_output) {
+                        addSlot(layout, layout.element_matrix, i8_ptr);
+                        if (use_simd_batch) {
+                            addSlot(layout, layout.element_matrix_lane1, i8_ptr);
+                        }
+                    }
+                    if (need_vector_output) {
+                        addSlot(layout, layout.element_vector, i8_ptr);
+                        if (use_simd_batch) {
+                            addSlot(layout, layout.element_vector_lane1, i8_ptr);
+                        }
+                    }
+
+                    addSlot(layout, layout.n_qpts, i32);
+                    addSlot(layout, layout.n_test_dofs, i32);
+                    addSlot(layout, layout.n_trial_dofs, i32);
+
+                    if (req.need_test_uses_vector_basis) {
+                        addSlot(layout, layout.test_uses_vector_basis, i32);
+                    }
+                    if (req.need_trial_uses_vector_basis) {
+                        addSlot(layout, layout.trial_uses_vector_basis, i32);
+                    }
+                    if (req.need_cell_domain_id) {
+                        addSlot(layout, layout.cell_domain_id, i32);
+                    }
+
+                    if (req.need_cell_diameter) {
+                        addSlot(layout, layout.cell_diameter, helper_real_ty);
+                    }
+                    if (req.need_cell_volume) {
+                        addSlot(layout, layout.cell_volume, helper_real_ty);
+                    }
+                    if (req.need_facet_area) {
+                        addSlot(layout, layout.facet_area, helper_real_ty);
+                    }
+                    if (req.need_time) {
+                        addSlot(layout, layout.time, helper_real_ty);
+                    }
+                    if (req.need_dt) {
+                        addSlot(layout, layout.dt, helper_real_ty);
+                    }
+                    if (req.need_time_derivative_term_weight) {
+                        addSlot(layout, layout.time_derivative_term_weight, helper_real_ty);
+                    }
+                    if (req.need_non_time_derivative_term_weight) {
+                        addSlot(layout, layout.non_time_derivative_term_weight, helper_real_ty);
+                    }
+
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_integration_weights, layout.integration_weights,
+                        layout.integration_weights_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_quad_points_xyz, layout.quad_points_xyz,
+                        layout.quad_points_xyz_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_physical_points_xyz, layout.physical_points_xyz,
+                        layout.physical_points_xyz_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_jacobians, layout.jacobians, layout.jacobians_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_inverse_jacobians, layout.inverse_jacobians,
+                        layout.inverse_jacobians_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_jacobian_dets, layout.jacobian_dets,
+                        layout.jacobian_dets_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_normals_xyz, layout.normals_xyz,
+                        layout.normals_xyz_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_interleaved_qpoint_geometry,
+                        layout.interleaved_qpoint_geometry,
+                        layout.interleaved_qpoint_geometry_lane1);
+                    if (req.need_interleaved_qpoint_geometry_meta) {
+                        addSlot(layout, layout.interleaved_qpoint_geometry_stride_reals, i32);
+                        addSlot(layout, layout.interleaved_qpoint_geometry_physical_offset, i32);
+                        addSlot(layout, layout.interleaved_qpoint_geometry_jacobian_offset, i32);
+                        addSlot(layout, layout.interleaved_qpoint_geometry_inverse_jacobian_offset, i32);
+                        addSlot(layout, layout.interleaved_qpoint_geometry_det_offset, i32);
+                        addSlot(layout, layout.interleaved_qpoint_geometry_normal_offset, i32);
+                    }
+
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_test_basis_values, layout.test_basis_values,
+                        layout.test_basis_values_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_trial_basis_values, layout.trial_basis_values,
+                        layout.trial_basis_values_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_test_phys_grads_xyz, layout.test_phys_grads_xyz,
+                        layout.test_phys_grads_xyz_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_trial_phys_grads_xyz, layout.trial_phys_grads_xyz,
+                        layout.trial_phys_grads_xyz_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_test_phys_hessians, layout.test_phys_hessians,
+                        layout.test_phys_hessians_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_trial_phys_hessians, layout.trial_phys_hessians,
+                        layout.trial_phys_hessians_lane1);
+
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_test_basis_vector_values_xyz,
+                        layout.test_basis_vector_values_xyz,
+                        layout.test_basis_vector_values_xyz_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_test_basis_curls_xyz, layout.test_basis_curls_xyz,
+                        layout.test_basis_curls_xyz_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_test_basis_divs, layout.test_basis_divs,
+                        layout.test_basis_divs_lane1);
+
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_trial_basis_vector_values_xyz,
+                        layout.trial_basis_vector_values_xyz,
+                        layout.trial_basis_vector_values_xyz_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_trial_basis_curls_xyz, layout.trial_basis_curls_xyz,
+                        layout.trial_basis_curls_xyz_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_trial_basis_divs, layout.trial_basis_divs,
+                        layout.trial_basis_divs_lane1);
+
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_solution_coefficients,
+                        layout.solution_coefficients, layout.solution_coefficients_lane1);
+                    addLaneAwareBytePtrSlots(
+                        layout, req.need_previous_solution_coefficients_base,
+                        layout.previous_solution_coefficients_base,
+                        layout.previous_solution_coefficients_base_lane1);
+
+                    if (req.need_num_history_steps) {
+                        addSlot(layout, layout.num_history_steps, i32);
+                    }
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_history_weights, layout.history_weights,
+                        layout.history_weights_lane1);
+                    addLaneAwareBytePtrSlots(
+                        layout, req.need_history_solution_coefficients_base,
+                        layout.history_solution_coefficients_base,
+                        layout.history_solution_coefficients_base_lane1);
+
+                    if (req.need_jit_constants) {
+                        addSlot(layout, layout.jit_constants, i8_ptr);
+                    }
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_coupled_integrals, layout.coupled_integrals,
+                        layout.coupled_integrals_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_coupled_aux, layout.coupled_aux,
+                        layout.coupled_aux_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_auxiliary_inputs, layout.auxiliary_inputs,
+                        layout.auxiliary_inputs_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_auxiliary_outputs, layout.auxiliary_outputs,
+                        layout.auxiliary_outputs_lane1);
+
+                    if (req.need_dt_stencil_coeffs_base) {
+                        addSlot(layout, layout.dt_stencil_coeffs_base, f64_ptr);
+                    }
+                    if (req.need_dt_term_weights_base) {
+                        addSlot(layout, layout.dt_term_weights_base, f64_ptr);
+                    }
+
+                    addLaneAwareBytePtrSlots(
+                        layout, req.need_material_state_old_base,
+                        layout.material_state_old_base,
+                        layout.material_state_old_base_lane1);
+                    addLaneAwareBytePtrSlots(
+                        layout, req.need_material_state_work_base,
+                        layout.material_state_work_base,
+                        layout.material_state_work_base_lane1);
+                    if (req.need_material_state_stride_bytes) {
+                        addSlot(layout, layout.material_state_stride_bytes, i64);
+                    }
+
+                    layout.ty = llvm::StructType::create(*ctx, layout.field_types, pack_name);
+                    return layout;
+                };
+
+                auto castForStore = [&](llvm::Value* value, llvm::Type* dst_ty) -> llvm::Value* {
+                    if (value->getType() == dst_ty) {
+                        return value;
+                    }
+                    if (value->getType()->isPointerTy() && dst_ty->isPointerTy()) {
+                        return builder.CreatePointerCast(value, dst_ty);
+                    }
+                    return builder.CreateBitCast(value, dst_ty);
+                };
+
+                auto storePackValue = [&](const HelperPackLayout& layout,
+                                          llvm::Value* pack_buf,
+                                          const PackSlot& slot,
+                                          llvm::Value* value,
+                                          const std::string& name) {
+                    if (!slot.has_value()) return;
+                    auto* gep = builder.CreateStructGEP(layout.ty, pack_buf, *slot, name + ".slot");
+                    auto* stored = castForStore(value, layout.field_types[*slot]);
+                    builder.CreateStore(stored, gep);
+                };
+
+                auto loadPackValue = [&](const HelperPackLayout& layout,
+                                         llvm::Value* pack_ptr,
+                                         const PackSlot& slot,
+                                         llvm::Type* ty,
+                                         const std::string& name) -> llvm::Value* {
+                    if (!slot.has_value()) return nullptr;
+                    auto* gep = builder.CreateStructGEP(layout.ty, pack_ptr, *slot, name + ".ptr");
+                    return builder.CreateLoad(ty, gep, name);
+                };
+
+                auto trackedLaneValue = [&](llvm::Value* lane0_ptr,
+                                            std::uint32_t lane) -> llvm::Value* {
+                    if (!use_simd_batch || lane0_ptr == nullptr) {
+                        return lane0_ptr;
+                    }
+                    auto it = simd_ptr_map.find(lane0_ptr);
+                    if (it == simd_ptr_map.end() || it->second.size() <= lane ||
+                        it->second[lane] == nullptr) {
+                        return lane0_ptr;
+                    }
+                    return it->second[lane];
+                };
 
                 for (std::size_t gi = 0; gi < nc_plan.groups.size(); ++gi) {
                     const auto& group = nc_plan.groups[gi];
+                    const auto req = computeNonCoupledHelperRequirements(
+                        group.first_term, group.first_term + group.num_terms);
+                    const bool group_needs_matrix_output = [&]() {
+                        for (std::size_t t = group.first_term;
+                             t < group.first_term + group.num_terms;
+                             ++t) {
+                            const bool emit_matrix =
+                                (terms[t].target == LoweredTerm::Target::Matrix) ||
+                                (terms[t].target == LoweredTerm::Target::Auto && want_matrix);
+                            if (emit_matrix) return true;
+                        }
+                        return false;
+                    }();
+                    const bool group_needs_vector_output = [&]() {
+                        for (std::size_t t = group.first_term;
+                             t < group.first_term + group.num_terms;
+                             ++t) {
+                            const bool emit_matrix =
+                                (terms[t].target == LoweredTerm::Target::Matrix) ||
+                                (terms[t].target == LoweredTerm::Target::Auto && want_matrix);
+                            if (!emit_matrix) return true;
+                        }
+                        return false;
+                    }();
+
                     std::string hname = std::string(symbol) + "_g" + std::to_string(gi);
+                    auto layout = buildHelperPackLayout(
+                        hname + ".pack", req, group_needs_matrix_output,
+                        group_needs_vector_output);
+                    auto* pack_buf = allocaInEntry(layout.ty, nullptr, hname + ".packbuf");
+                    auto* pack_ptr_ty = llvm::PointerType::get(layout.ty, 0);
+                    auto* nc_helper_type = llvm::FunctionType::get(
+                        builder.getVoidTy(), {pack_ptr_ty, i8_ptr_ptr}, false);
+
                     auto* hfn = llvm::Function::Create(
                         nc_helper_type, llvm::Function::InternalLinkage, hname, module);
                     hfn->addFnAttr(llvm::Attribute::NoUnwind);
@@ -11311,8 +12456,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     if (group.estimated_text_bytes > hw.noInlineThresholdBytes()) {
                         hfn->addFnAttr(llvm::Attribute::NoInline);
                     }
-                    hfn->addParamAttr(2, llvm::Attribute::NoAlias);
-                    nc_helpers.push_back(hfn);
+                    hfn->addParamAttr(0, llvm::Attribute::NoAlias);
+                    hfn->addParamAttr(1, llvm::Attribute::NoAlias);
 
                     auto* h_entry = llvm::BasicBlock::Create(*ctx, "entry", hfn);
 
@@ -11334,146 +12479,434 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     fn = hfn;
                     builder.SetInsertPoint(h_entry);
 
-                    auto* h_args = hfn->getArg(0);
-                    auto* h_bidx = hfn->getArg(1);
-                    auto* h_field_ptrs = hfn->getArg(2);
+                    auto* h_pack = hfn->getArg(0);
+                    auto* h_field_ptrs = hfn->getArg(1);
 
-                    // Re-derive side and output pointers from args.
-                    llvm::Value* h_side_ptr = nullptr;
-                    llvm::Value* h_out_ptr = nullptr;
-                    if (use_batch) {
-                        auto* h_sides_base = loadPtr(h_args, ABIV3::batch_sides_off);
-                        auto* h_outs_base = loadPtr(h_args, ABIV3::batch_outputs_off);
-                        auto* h_bidx64 = builder.CreateZExt(h_bidx, i64);
-                        h_side_ptr = builder.CreateGEP(builder.getInt8Ty(), h_sides_base,
-                            builder.CreateMul(h_bidx64,
-                                builder.getInt64(sizeof(assembly::jit::KernelSideArgsV6))));
-                        h_out_ptr = builder.CreateGEP(builder.getInt8Ty(), h_outs_base,
-                            builder.CreateMul(h_bidx64,
-                                builder.getInt64(sizeof(assembly::jit::KernelOutputViewV6))));
-                    } else {
-                        const std::size_t h_side_off = (domain == IntegralDomain::Cell)
-                            ? ABIV3::cell_side_off : ABIV3::bdry_side_off;
-                        const std::size_t h_out_off = (domain == IntegralDomain::Cell)
-                            ? ABIV3::cell_out_off : ABIV3::bdry_out_off;
-                        h_side_ptr = gepBytes(h_args, h_side_off);
-                        h_out_ptr = gepBytes(h_args, h_out_off);
+                    side_single = makeDefaultSideView();
+                    side_single.n_qpts = loadPackValue(layout, h_pack, layout.n_qpts, i32, "n_qpts");
+                    side_single.n_test_dofs =
+                        loadPackValue(layout, h_pack, layout.n_test_dofs, i32, "n_test_dofs");
+                    side_single.n_trial_dofs =
+                        loadPackValue(layout, h_pack, layout.n_trial_dofs, i32, "n_trial_dofs");
+
+                    if (layout.side_ptr) {
+                        side_single.side_ptr =
+                            loadPackValue(layout, h_pack, layout.side_ptr, i8_ptr, "side_ptr");
+                    }
+                    if (layout.test_uses_vector_basis) {
+                        side_single.test_uses_vector_basis = loadPackValue(
+                            layout, h_pack, layout.test_uses_vector_basis, i32,
+                            "test_uses_vector_basis");
+                    }
+                    if (layout.trial_uses_vector_basis) {
+                        side_single.trial_uses_vector_basis = loadPackValue(
+                            layout, h_pack, layout.trial_uses_vector_basis, i32,
+                            "trial_uses_vector_basis");
+                    }
+                    if (layout.cell_domain_id) {
+                        side_single.cell_domain_id = loadPackValue(
+                            layout, h_pack, layout.cell_domain_id, i32, "cell_domain_id");
                     }
 
-                    side_single = loadSideView(h_side_ptr, fixed_n_qpts_minus,
-                                               fixed_n_test_dofs_minus, fixed_n_trial_dofs_minus);
-                    element_matrix_single = loadPtr(h_out_ptr, ABIV3::out_element_matrix_off);
-                    element_vector_single = loadPtr(h_out_ptr, ABIV3::out_element_vector_off);
+                    if (layout.cell_diameter) {
+                        side_single.cell_diameter = loadPackValue(
+                            layout, h_pack, layout.cell_diameter, helper_real_ty,
+                            "cell_diameter");
+                    }
+                    if (layout.cell_volume) {
+                        side_single.cell_volume = loadPackValue(
+                            layout, h_pack, layout.cell_volume, helper_real_ty,
+                            "cell_volume");
+                    }
+                    if (layout.facet_area) {
+                        side_single.facet_area = loadPackValue(
+                            layout, h_pack, layout.facet_area, helper_real_ty,
+                            "facet_area");
+                    }
+                    if (layout.time) {
+                        side_single.time =
+                            loadPackValue(layout, h_pack, layout.time, helper_real_ty, "time");
+                    }
+                    if (layout.dt) {
+                        side_single.dt =
+                            loadPackValue(layout, h_pack, layout.dt, helper_real_ty, "dt");
+                    }
+                    if (layout.time_derivative_term_weight) {
+                        side_single.time_derivative_term_weight = loadPackValue(
+                            layout, h_pack, layout.time_derivative_term_weight, helper_real_ty,
+                            "time_derivative_term_weight");
+                    }
+                    if (layout.non_time_derivative_term_weight) {
+                        side_single.non_time_derivative_term_weight = loadPackValue(
+                            layout, h_pack, layout.non_time_derivative_term_weight,
+                            helper_real_ty, "non_time_derivative_term_weight");
+                    }
 
-                    // Set up SIMD batch state in the helper if active.
+                    if (layout.integration_weights) {
+                        side_single.integration_weights = loadPackValue(
+                            layout, h_pack, layout.integration_weights, i8_ptr,
+                            "integration_weights");
+                    }
+                    if (layout.quad_points_xyz) {
+                        side_single.quad_points_xyz = loadPackValue(
+                            layout, h_pack, layout.quad_points_xyz, i8_ptr,
+                            "quad_points_xyz");
+                    }
+                    if (layout.physical_points_xyz) {
+                        side_single.physical_points_xyz = loadPackValue(
+                            layout, h_pack, layout.physical_points_xyz, i8_ptr,
+                            "physical_points_xyz");
+                    }
+                    if (layout.jacobians) {
+                        side_single.jacobians = loadPackValue(
+                            layout, h_pack, layout.jacobians, i8_ptr, "jacobians");
+                    }
+                    if (layout.inverse_jacobians) {
+                        side_single.inverse_jacobians = loadPackValue(
+                            layout, h_pack, layout.inverse_jacobians, i8_ptr,
+                            "inverse_jacobians");
+                    }
+                    if (layout.jacobian_dets) {
+                        side_single.jacobian_dets = loadPackValue(
+                            layout, h_pack, layout.jacobian_dets, i8_ptr,
+                            "jacobian_dets");
+                    }
+                    if (layout.normals_xyz) {
+                        side_single.normals_xyz = loadPackValue(
+                            layout, h_pack, layout.normals_xyz, i8_ptr, "normals_xyz");
+                    }
+                    if (layout.interleaved_qpoint_geometry) {
+                        side_single.interleaved_qpoint_geometry = loadPackValue(
+                            layout, h_pack, layout.interleaved_qpoint_geometry, i8_ptr,
+                            "interleaved_qpoint_geometry");
+                    }
+                    if (layout.interleaved_qpoint_geometry_stride_reals) {
+                        side_single.interleaved_qpoint_geometry_stride_reals = loadPackValue(
+                            layout, h_pack, layout.interleaved_qpoint_geometry_stride_reals, i32,
+                            "interleaved_qpoint_geometry_stride_reals");
+                        side_single.interleaved_qpoint_geometry_physical_offset = loadPackValue(
+                            layout, h_pack, layout.interleaved_qpoint_geometry_physical_offset,
+                            i32, "interleaved_qpoint_geometry_physical_offset");
+                        side_single.interleaved_qpoint_geometry_jacobian_offset = loadPackValue(
+                            layout, h_pack, layout.interleaved_qpoint_geometry_jacobian_offset,
+                            i32, "interleaved_qpoint_geometry_jacobian_offset");
+                        side_single.interleaved_qpoint_geometry_inverse_jacobian_offset =
+                            loadPackValue(
+                                layout, h_pack,
+                                layout.interleaved_qpoint_geometry_inverse_jacobian_offset,
+                                i32,
+                                "interleaved_qpoint_geometry_inverse_jacobian_offset");
+                        side_single.interleaved_qpoint_geometry_det_offset = loadPackValue(
+                            layout, h_pack, layout.interleaved_qpoint_geometry_det_offset, i32,
+                            "interleaved_qpoint_geometry_det_offset");
+                        side_single.interleaved_qpoint_geometry_normal_offset = loadPackValue(
+                            layout, h_pack, layout.interleaved_qpoint_geometry_normal_offset, i32,
+                            "interleaved_qpoint_geometry_normal_offset");
+                    }
+
+                    if (layout.test_basis_values) {
+                        side_single.test_basis_values = loadPackValue(
+                            layout, h_pack, layout.test_basis_values, i8_ptr,
+                            "test_basis_values");
+                    }
+                    if (layout.trial_basis_values) {
+                        side_single.trial_basis_values = loadPackValue(
+                            layout, h_pack, layout.trial_basis_values, i8_ptr,
+                            "trial_basis_values");
+                    }
+                    if (layout.test_phys_grads_xyz) {
+                        side_single.test_phys_grads_xyz = loadPackValue(
+                            layout, h_pack, layout.test_phys_grads_xyz, i8_ptr,
+                            "test_phys_grads_xyz");
+                    }
+                    if (layout.trial_phys_grads_xyz) {
+                        side_single.trial_phys_grads_xyz = loadPackValue(
+                            layout, h_pack, layout.trial_phys_grads_xyz, i8_ptr,
+                            "trial_phys_grads_xyz");
+                    }
+                    if (layout.test_phys_hessians) {
+                        side_single.test_phys_hessians = loadPackValue(
+                            layout, h_pack, layout.test_phys_hessians, i8_ptr,
+                            "test_phys_hessians");
+                    }
+                    if (layout.trial_phys_hessians) {
+                        side_single.trial_phys_hessians = loadPackValue(
+                            layout, h_pack, layout.trial_phys_hessians, i8_ptr,
+                            "trial_phys_hessians");
+                    }
+
+                    if (layout.test_basis_vector_values_xyz) {
+                        side_single.test_basis_vector_values_xyz = loadPackValue(
+                            layout, h_pack, layout.test_basis_vector_values_xyz, i8_ptr,
+                            "test_basis_vector_values_xyz");
+                    }
+                    if (layout.test_basis_curls_xyz) {
+                        side_single.test_basis_curls_xyz = loadPackValue(
+                            layout, h_pack, layout.test_basis_curls_xyz, i8_ptr,
+                            "test_basis_curls_xyz");
+                    }
+                    if (layout.test_basis_divs) {
+                        side_single.test_basis_divs = loadPackValue(
+                            layout, h_pack, layout.test_basis_divs, i8_ptr,
+                            "test_basis_divs");
+                    }
+
+                    if (layout.trial_basis_vector_values_xyz) {
+                        side_single.trial_basis_vector_values_xyz = loadPackValue(
+                            layout, h_pack, layout.trial_basis_vector_values_xyz, i8_ptr,
+                            "trial_basis_vector_values_xyz");
+                    }
+                    if (layout.trial_basis_curls_xyz) {
+                        side_single.trial_basis_curls_xyz = loadPackValue(
+                            layout, h_pack, layout.trial_basis_curls_xyz, i8_ptr,
+                            "trial_basis_curls_xyz");
+                    }
+                    if (layout.trial_basis_divs) {
+                        side_single.trial_basis_divs = loadPackValue(
+                            layout, h_pack, layout.trial_basis_divs, i8_ptr,
+                            "trial_basis_divs");
+                    }
+
+                    if (layout.solution_coefficients) {
+                        side_single.solution_coefficients = loadPackValue(
+                            layout, h_pack, layout.solution_coefficients, i8_ptr,
+                            "solution_coefficients");
+                    }
+                    if (layout.previous_solution_coefficients_base) {
+                        side_single.previous_solution_coefficients_base = loadPackValue(
+                            layout, h_pack, layout.previous_solution_coefficients_base, i8_ptr,
+                            "previous_solution_coefficients_base");
+                    }
+                    if (layout.num_history_steps) {
+                        side_single.num_history_steps = loadPackValue(
+                            layout, h_pack, layout.num_history_steps, i32,
+                            "num_history_steps");
+                    }
+                    if (layout.history_weights) {
+                        side_single.history_weights = loadPackValue(
+                            layout, h_pack, layout.history_weights, i8_ptr,
+                            "history_weights");
+                    }
+                    if (layout.history_solution_coefficients_base) {
+                        side_single.history_solution_coefficients_base = loadPackValue(
+                            layout, h_pack, layout.history_solution_coefficients_base, i8_ptr,
+                            "history_solution_coefficients_base");
+                    }
+
+                    if (layout.jit_constants) {
+                        side_single.jit_constants = loadPackValue(
+                            layout, h_pack, layout.jit_constants, i8_ptr, "jit_constants");
+                    }
+                    if (layout.coupled_integrals) {
+                        side_single.coupled_integrals = loadPackValue(
+                            layout, h_pack, layout.coupled_integrals, i8_ptr,
+                            "coupled_integrals");
+                    }
+                    if (layout.coupled_aux) {
+                        side_single.coupled_aux = loadPackValue(
+                            layout, h_pack, layout.coupled_aux, i8_ptr, "coupled_aux");
+                    }
+                    if (layout.auxiliary_inputs) {
+                        side_single.auxiliary_inputs = loadPackValue(
+                            layout, h_pack, layout.auxiliary_inputs, i8_ptr,
+                            "auxiliary_inputs");
+                    }
+                    if (layout.auxiliary_outputs) {
+                        side_single.auxiliary_outputs = loadPackValue(
+                            layout, h_pack, layout.auxiliary_outputs, i8_ptr,
+                            "auxiliary_outputs");
+                    }
+
+                    if (layout.dt_stencil_coeffs_base) {
+                        side_single.dt_stencil_coeffs_base = loadPackValue(
+                            layout, h_pack, layout.dt_stencil_coeffs_base, f64_ptr,
+                            "dt_stencil_coeffs_base");
+                    }
+                    if (layout.dt_term_weights_base) {
+                        side_single.dt_term_weights_base = loadPackValue(
+                            layout, h_pack, layout.dt_term_weights_base, f64_ptr,
+                            "dt_term_weights_base");
+                    }
+                    if (layout.material_state_old_base) {
+                        side_single.material_state_old_base = loadPackValue(
+                            layout, h_pack, layout.material_state_old_base, i8_ptr,
+                            "material_state_old_base");
+                    }
+                    if (layout.material_state_work_base) {
+                        side_single.material_state_work_base = loadPackValue(
+                            layout, h_pack, layout.material_state_work_base, i8_ptr,
+                            "material_state_work_base");
+                    }
+                    if (layout.material_state_stride_bytes) {
+                        side_single.material_state_stride_bytes = loadPackValue(
+                            layout, h_pack, layout.material_state_stride_bytes, i64,
+                            "material_state_stride_bytes");
+                    }
+
+                    if (group_needs_matrix_output) {
+                        element_matrix_single = loadPackValue(
+                            layout, h_pack, layout.element_matrix, i8_ptr,
+                            "element_matrix");
+                    } else {
+                        element_matrix_single = nullptr;
+                    }
+                    if (group_needs_vector_output) {
+                        element_vector_single = loadPackValue(
+                            layout, h_pack, layout.element_vector, i8_ptr,
+                            "element_vector");
+                    } else {
+                        element_vector_single = nullptr;
+                    }
+
                     if (use_simd_batch) {
                         simd_active = true;
 
-                        auto* h_sides_base2 = loadPtr(h_args, ABIV3::batch_sides_off);
-                        auto* h_outs_base2 = loadPtr(h_args, ABIV3::batch_outputs_off);
-                        auto* h_bidx64_2 = builder.CreateZExt(h_bidx, i64);
-
-                        // Derive lane-1 side pointer
-                        auto* h_bidx_1 = builder.CreateAdd(h_bidx, builder.getInt32(1));
-                        auto* h_bidx64_1 = builder.CreateZExt(h_bidx_1, i64);
-                        auto* h_side_ptr_1 = builder.CreateGEP(builder.getInt8Ty(), h_sides_base2,
-                            builder.CreateMul(h_bidx64_1, builder.getInt64(sizeof(assembly::jit::KernelSideArgsV6))));
-
-                        // Register per-lane pointers for all per-element pointer fields.
-                        auto hRegisterSimdPtr = [&](llvm::Value* lane0_ptr, std::size_t field_offset) {
-                            auto* lane1_ptr = loadPtr(h_side_ptr_1, field_offset);
+                        auto registerHelperLanePtr = [&](llvm::Value* lane0_ptr,
+                                                         const PackSlot& lane1_slot,
+                                                         const std::string& name) {
+                            if (lane0_ptr == nullptr || !lane1_slot.has_value()) {
+                                return;
+                            }
+                            auto* lane1_ptr = loadPackValue(
+                                layout, h_pack, lane1_slot, lane0_ptr->getType(),
+                                name + ".lane1");
                             simd_ptr_map[lane0_ptr] = {lane0_ptr, lane1_ptr};
                         };
 
-                        // Geometry arrays
-                        hRegisterSimdPtr(side_single.integration_weights, ABIV3::side_integration_weights_off);
-                        hRegisterSimdPtr(side_single.quad_points_xyz, ABIV3::side_quad_points_xyz_off);
-                        hRegisterSimdPtr(side_single.physical_points_xyz, ABIV3::side_physical_points_xyz_off);
-                        hRegisterSimdPtr(side_single.jacobians, ABIV3::side_jacobians_off);
-                        hRegisterSimdPtr(side_single.inverse_jacobians, ABIV3::side_inverse_jacobians_off);
-                        hRegisterSimdPtr(side_single.jacobian_dets, ABIV3::side_jacobian_dets_off);
-                        hRegisterSimdPtr(side_single.normals_xyz, ABIV3::side_normals_xyz_off);
-                        hRegisterSimdPtr(side_single.interleaved_qpoint_geometry, ABIV3::side_interleaved_geom_off);
+                        registerHelperLanePtr(
+                            side_single.integration_weights,
+                            layout.integration_weights_lane1, "integration_weights");
+                        registerHelperLanePtr(
+                            side_single.quad_points_xyz, layout.quad_points_xyz_lane1,
+                            "quad_points_xyz");
+                        registerHelperLanePtr(
+                            side_single.physical_points_xyz, layout.physical_points_xyz_lane1,
+                            "physical_points_xyz");
+                        registerHelperLanePtr(
+                            side_single.jacobians, layout.jacobians_lane1, "jacobians");
+                        registerHelperLanePtr(
+                            side_single.inverse_jacobians,
+                            layout.inverse_jacobians_lane1, "inverse_jacobians");
+                        registerHelperLanePtr(
+                            side_single.jacobian_dets, layout.jacobian_dets_lane1,
+                            "jacobian_dets");
+                        registerHelperLanePtr(
+                            side_single.normals_xyz, layout.normals_xyz_lane1,
+                            "normals_xyz");
+                        registerHelperLanePtr(
+                            side_single.interleaved_qpoint_geometry,
+                            layout.interleaved_qpoint_geometry_lane1,
+                            "interleaved_qpoint_geometry");
 
-                        // Basis arrays
-                        hRegisterSimdPtr(side_single.test_basis_values, ABIV3::side_test_basis_values_off);
-                        hRegisterSimdPtr(side_single.trial_basis_values, ABIV3::side_trial_basis_values_off);
-                        hRegisterSimdPtr(side_single.test_phys_grads_xyz, ABIV3::side_test_phys_grads_off);
-                        hRegisterSimdPtr(side_single.trial_phys_grads_xyz, ABIV3::side_trial_phys_grads_off);
-                        hRegisterSimdPtr(side_single.test_phys_hessians, ABIV3::side_test_phys_hess_off);
-                        hRegisterSimdPtr(side_single.trial_phys_hessians, ABIV3::side_trial_phys_hess_off);
+                        registerHelperLanePtr(
+                            side_single.test_basis_values,
+                            layout.test_basis_values_lane1, "test_basis_values");
+                        registerHelperLanePtr(
+                            side_single.trial_basis_values,
+                            layout.trial_basis_values_lane1, "trial_basis_values");
+                        registerHelperLanePtr(
+                            side_single.test_phys_grads_xyz,
+                            layout.test_phys_grads_xyz_lane1, "test_phys_grads_xyz");
+                        registerHelperLanePtr(
+                            side_single.trial_phys_grads_xyz,
+                            layout.trial_phys_grads_xyz_lane1, "trial_phys_grads_xyz");
+                        registerHelperLanePtr(
+                            side_single.test_phys_hessians,
+                            layout.test_phys_hessians_lane1, "test_phys_hessians");
+                        registerHelperLanePtr(
+                            side_single.trial_phys_hessians,
+                            layout.trial_phys_hessians_lane1, "trial_phys_hessians");
 
-                        // Vector basis arrays
-                        hRegisterSimdPtr(side_single.test_basis_vector_values_xyz, ABIV3::side_test_vector_basis_values_xyz_off);
-                        hRegisterSimdPtr(side_single.test_basis_curls_xyz, ABIV3::side_test_vector_basis_curls_xyz_off);
-                        hRegisterSimdPtr(side_single.test_basis_divs, ABIV3::side_test_vector_basis_divs_off);
-                        hRegisterSimdPtr(side_single.trial_basis_vector_values_xyz, ABIV3::side_trial_vector_basis_values_xyz_off);
-                        hRegisterSimdPtr(side_single.trial_basis_curls_xyz, ABIV3::side_trial_vector_basis_curls_xyz_off);
-                        hRegisterSimdPtr(side_single.trial_basis_divs, ABIV3::side_trial_vector_basis_divs_off);
+                        registerHelperLanePtr(
+                            side_single.test_basis_vector_values_xyz,
+                            layout.test_basis_vector_values_xyz_lane1,
+                            "test_basis_vector_values_xyz");
+                        registerHelperLanePtr(
+                            side_single.test_basis_curls_xyz,
+                            layout.test_basis_curls_xyz_lane1, "test_basis_curls_xyz");
+                        registerHelperLanePtr(
+                            side_single.test_basis_divs,
+                            layout.test_basis_divs_lane1, "test_basis_divs");
+                        registerHelperLanePtr(
+                            side_single.trial_basis_vector_values_xyz,
+                            layout.trial_basis_vector_values_xyz_lane1,
+                            "trial_basis_vector_values_xyz");
+                        registerHelperLanePtr(
+                            side_single.trial_basis_curls_xyz,
+                            layout.trial_basis_curls_xyz_lane1, "trial_basis_curls_xyz");
+                        registerHelperLanePtr(
+                            side_single.trial_basis_divs,
+                            layout.trial_basis_divs_lane1, "trial_basis_divs");
 
-                        // Solution arrays
-                        hRegisterSimdPtr(side_single.solution_coefficients, ABIV3::side_solution_coefficients_off);
-                        simd_ptr_map[side_single.previous_solution_coefficients_base] = {
+                        registerHelperLanePtr(
+                            side_single.solution_coefficients,
+                            layout.solution_coefficients_lane1,
+                            "solution_coefficients");
+                        registerHelperLanePtr(
                             side_single.previous_solution_coefficients_base,
-                            gepBytes(h_side_ptr_1, ABIV3::side_previous_solution_coefficients_off)};
-                        hRegisterSimdPtr(side_single.history_weights, ABIV3::side_history_weights_off);
-                        simd_ptr_map[side_single.history_solution_coefficients_base] = {
+                            layout.previous_solution_coefficients_base_lane1,
+                            "previous_solution_coefficients_base");
+                        registerHelperLanePtr(
+                            side_single.history_weights, layout.history_weights_lane1,
+                            "history_weights");
+                        registerHelperLanePtr(
                             side_single.history_solution_coefficients_base,
-                            gepBytes(h_side_ptr_1, ABIV3::side_history_solution_coefficients_off)};
+                            layout.history_solution_coefficients_base_lane1,
+                            "history_solution_coefficients_base");
 
-                        // Field solutions, coupled, material
-                        hRegisterSimdPtr(side_single.field_solutions, ABIV3::side_field_solutions_off);
-                        hRegisterSimdPtr(side_single.coupled_integrals, ABIV3::side_coupled_integrals_off);
-                        hRegisterSimdPtr(side_single.coupled_aux, ABIV3::side_coupled_aux_off);
-                        hRegisterSimdPtr(side_single.material_state_old_base, ABIV3::side_material_state_old_base_off);
-                        hRegisterSimdPtr(side_single.material_state_work_base, ABIV3::side_material_state_work_base_off);
+                        registerHelperLanePtr(
+                            side_single.coupled_integrals,
+                            layout.coupled_integrals_lane1, "coupled_integrals");
+                        registerHelperLanePtr(
+                            side_single.coupled_aux, layout.coupled_aux_lane1,
+                            "coupled_aux");
+                        registerHelperLanePtr(
+                            side_single.auxiliary_inputs,
+                            layout.auxiliary_inputs_lane1, "auxiliary_inputs");
+                        registerHelperLanePtr(
+                            side_single.auxiliary_outputs,
+                            layout.auxiliary_outputs_lane1, "auxiliary_outputs");
+                        registerHelperLanePtr(
+                            side_single.material_state_old_base,
+                            layout.material_state_old_base_lane1,
+                            "material_state_old_base");
+                        registerHelperLanePtr(
+                            side_single.material_state_work_base,
+                            layout.material_state_work_base_lane1,
+                            "material_state_work_base");
 
-                        // Per-element scalars: gather from both lanes
-                        auto hGatherF64 = [&](llvm::Value* lane0_val, std::size_t field_offset) -> llvm::Value* {
-                            auto* lane1_val = loadF64(h_side_ptr_1, field_offset);
-                            llvm::Value* vec = llvm::UndefValue::get(vf64);
-                            vec = builder.CreateInsertElement(vec, lane0_val, static_cast<uint64_t>(0));
-                            vec = builder.CreateInsertElement(vec, lane1_val, static_cast<uint64_t>(1));
-                            return vec;
-                        };
-                        auto hSplatF64 = [&](llvm::Value* scalar) -> llvm::Value* {
-                            return builder.CreateVectorSplat(simd_w, scalar);
-                        };
-
-                        side_single.cell_diameter = hGatherF64(side_single.cell_diameter, ABIV3::side_cell_diameter_off);
-                        side_single.cell_volume = hGatherF64(side_single.cell_volume, ABIV3::side_cell_volume_off);
-                        side_single.facet_area = hGatherF64(side_single.facet_area, ABIV3::side_facet_area_off);
-                        side_single.time = hSplatF64(side_single.time);
-                        side_single.dt = hSplatF64(side_single.dt);
-                        side_single.time_derivative_term_weight = hSplatF64(side_single.time_derivative_term_weight);
-                        side_single.non_time_derivative_term_weight = hSplatF64(side_single.non_time_derivative_term_weight);
-
-                        // Per-lane output pointers
-                        auto* h_out_ptr_1 = builder.CreateGEP(builder.getInt8Ty(), h_outs_base2,
-                            builder.CreateMul(h_bidx64_1, builder.getInt64(sizeof(assembly::jit::KernelOutputViewV6))));
-                        simd_element_matrix_ptrs[0] = element_matrix_single;
-                        simd_element_matrix_ptrs[1] = loadPtr(h_out_ptr_1, ABIV3::out_element_matrix_off);
-                        simd_element_vector_ptrs[0] = element_vector_single;
-                        simd_element_vector_ptrs[1] = loadPtr(h_out_ptr_1, ABIV3::out_element_vector_off);
+                        if (group_needs_matrix_output) {
+                            simd_element_matrix_ptrs[0] = element_matrix_single;
+                            simd_element_matrix_ptrs[1] = loadPackValue(
+                                layout, h_pack, layout.element_matrix_lane1, i8_ptr,
+                                "element_matrix_lane1");
+                        }
+                        if (group_needs_vector_output) {
+                            simd_element_vector_ptrs[0] = element_vector_single;
+                            simd_element_vector_ptrs[1] = loadPackValue(
+                                layout, h_pack, layout.element_vector_lane1, i8_ptr,
+                                "element_vector_lane1");
+                        }
                     }
 
                     // Load pre-resolved field entry pointers from the main
-                    // function's stack buffer (passed as arg 2).
+                    // function's stack buffer (passed as arg 1).
                     field_entries.clear();
                     field_entries.reserve(n_fields);
                     for (std::size_t fi = 0; fi < n_fields; ++fi) {
                         FieldEntryPtrs e;
                         e.field_id = used_field_ids[fi];
-                        auto* slot0 = builder.CreateGEP(i8_ptr, h_field_ptrs,
+                        auto* slot0 = builder.CreateGEP(
+                            i8_ptr, h_field_ptrs,
                             builder.getInt64(static_cast<std::int64_t>(fi * ptrs_per_field)));
-                        e.single = builder.CreateLoad(i8_ptr, slot0, "h_field_" + std::to_string(fi));
-                        e.simd_entries[0] = e.single;
+                        e.single_slot = slot0;
+                        e.simd_entry_slots[0] = slot0;
                         if (use_simd_batch) {
-                            auto* slot1 = builder.CreateGEP(i8_ptr, h_field_ptrs,
-                                builder.getInt64(static_cast<std::int64_t>(fi * ptrs_per_field + 1)));
-                            e.simd_entries[1] = builder.CreateLoad(i8_ptr, slot1, "h_field1_" + std::to_string(fi));
-                            // Register SIMD pair for field entry
-                            simd_ptr_map[e.simd_entries[0]] = {e.simd_entries[0], e.simd_entries[1]};
+                            auto* slot1 = builder.CreateGEP(
+                                i8_ptr, h_field_ptrs,
+                                builder.getInt64(
+                                    static_cast<std::int64_t>(fi * ptrs_per_field + 1)));
+                            e.simd_entry_slots[1] = slot1;
                         }
                         field_entries.push_back(e);
                     }
@@ -11493,11 +12926,246 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     simd_ptr_map = saved_simd_ptr_map;
                     simd_element_matrix_ptrs = saved_simd_mat_ptrs;
                     simd_element_vector_ptrs = saved_simd_vec_ptrs;
-                }
 
-                // Dispatcher: call helpers sequentially.
-                for (auto* hfn : nc_helpers) {
-                    builder.CreateCall(hfn, {args_ptr, b_idx, field_ptr_buf});
+                    storePackValue(layout, pack_buf, layout.side_ptr, side_single.side_ptr, "side_ptr");
+                    storePackValue(
+                        layout, pack_buf, layout.element_matrix, element_matrix_single,
+                        "element_matrix");
+                    storePackValue(
+                        layout, pack_buf, layout.element_vector, element_vector_single,
+                        "element_vector");
+                    if (use_simd_batch) {
+                        if (group_needs_matrix_output) {
+                            auto* mat_lane1 =
+                                (simd_element_matrix_ptrs[1] != nullptr)
+                                    ? simd_element_matrix_ptrs[1]
+                                    : element_matrix_single;
+                            storePackValue(
+                                layout, pack_buf, layout.element_matrix_lane1, mat_lane1,
+                                "element_matrix_lane1");
+                        }
+                        if (group_needs_vector_output) {
+                            auto* vec_lane1 =
+                                (simd_element_vector_ptrs[1] != nullptr)
+                                    ? simd_element_vector_ptrs[1]
+                                    : element_vector_single;
+                            storePackValue(
+                                layout, pack_buf, layout.element_vector_lane1, vec_lane1,
+                                "element_vector_lane1");
+                        }
+                    }
+
+                    storePackValue(layout, pack_buf, layout.n_qpts, side_single.n_qpts, "n_qpts");
+                    storePackValue(
+                        layout, pack_buf, layout.n_test_dofs, side_single.n_test_dofs,
+                        "n_test_dofs");
+                    storePackValue(
+                        layout, pack_buf, layout.n_trial_dofs, side_single.n_trial_dofs,
+                        "n_trial_dofs");
+                    storePackValue(
+                        layout, pack_buf, layout.test_uses_vector_basis,
+                        side_single.test_uses_vector_basis, "test_uses_vector_basis");
+                    storePackValue(
+                        layout, pack_buf, layout.trial_uses_vector_basis,
+                        side_single.trial_uses_vector_basis, "trial_uses_vector_basis");
+                    storePackValue(
+                        layout, pack_buf, layout.cell_domain_id, side_single.cell_domain_id,
+                        "cell_domain_id");
+                    storePackValue(
+                        layout, pack_buf, layout.cell_diameter, side_single.cell_diameter,
+                        "cell_diameter");
+                    storePackValue(
+                        layout, pack_buf, layout.cell_volume, side_single.cell_volume,
+                        "cell_volume");
+                    storePackValue(
+                        layout, pack_buf, layout.facet_area, side_single.facet_area,
+                        "facet_area");
+                    storePackValue(layout, pack_buf, layout.time, side_single.time, "time");
+                    storePackValue(layout, pack_buf, layout.dt, side_single.dt, "dt");
+                    storePackValue(
+                        layout, pack_buf, layout.time_derivative_term_weight,
+                        side_single.time_derivative_term_weight,
+                        "time_derivative_term_weight");
+                    storePackValue(
+                        layout, pack_buf, layout.non_time_derivative_term_weight,
+                        side_single.non_time_derivative_term_weight,
+                        "non_time_derivative_term_weight");
+
+                    auto storeLaneAwareDoublePtr = [&](const PackSlot& lane0_slot,
+                                                       const PackSlot& lane1_slot,
+                                                       llvm::Value* lane0_ptr,
+                                                       const std::string& name) {
+                        storePackValue(layout, pack_buf, lane0_slot, lane0_ptr, name);
+                        if (use_simd_batch) {
+                            storePackValue(
+                                layout, pack_buf, lane1_slot,
+                                trackedLaneValue(lane0_ptr, 1), name + ".lane1");
+                        }
+                    };
+                    auto storeLaneAwareBytePtr = [&](const PackSlot& lane0_slot,
+                                                     const PackSlot& lane1_slot,
+                                                     llvm::Value* lane0_ptr,
+                                                     const std::string& name) {
+                        storePackValue(layout, pack_buf, lane0_slot, lane0_ptr, name);
+                        if (use_simd_batch) {
+                            storePackValue(
+                                layout, pack_buf, lane1_slot,
+                                trackedLaneValue(lane0_ptr, 1), name + ".lane1");
+                        }
+                    };
+
+                    storeLaneAwareDoublePtr(
+                        layout.integration_weights, layout.integration_weights_lane1,
+                        side_single.integration_weights, "integration_weights");
+                    storeLaneAwareDoublePtr(
+                        layout.quad_points_xyz, layout.quad_points_xyz_lane1,
+                        side_single.quad_points_xyz, "quad_points_xyz");
+                    storeLaneAwareDoublePtr(
+                        layout.physical_points_xyz, layout.physical_points_xyz_lane1,
+                        side_single.physical_points_xyz, "physical_points_xyz");
+                    storeLaneAwareDoublePtr(
+                        layout.jacobians, layout.jacobians_lane1, side_single.jacobians,
+                        "jacobians");
+                    storeLaneAwareDoublePtr(
+                        layout.inverse_jacobians, layout.inverse_jacobians_lane1,
+                        side_single.inverse_jacobians, "inverse_jacobians");
+                    storeLaneAwareDoublePtr(
+                        layout.jacobian_dets, layout.jacobian_dets_lane1,
+                        side_single.jacobian_dets, "jacobian_dets");
+                    storeLaneAwareDoublePtr(
+                        layout.normals_xyz, layout.normals_xyz_lane1,
+                        side_single.normals_xyz, "normals_xyz");
+                    storeLaneAwareDoublePtr(
+                        layout.interleaved_qpoint_geometry,
+                        layout.interleaved_qpoint_geometry_lane1,
+                        side_single.interleaved_qpoint_geometry,
+                        "interleaved_qpoint_geometry");
+                    storePackValue(
+                        layout, pack_buf, layout.interleaved_qpoint_geometry_stride_reals,
+                        side_single.interleaved_qpoint_geometry_stride_reals,
+                        "interleaved_qpoint_geometry_stride_reals");
+                    storePackValue(
+                        layout, pack_buf, layout.interleaved_qpoint_geometry_physical_offset,
+                        side_single.interleaved_qpoint_geometry_physical_offset,
+                        "interleaved_qpoint_geometry_physical_offset");
+                    storePackValue(
+                        layout, pack_buf, layout.interleaved_qpoint_geometry_jacobian_offset,
+                        side_single.interleaved_qpoint_geometry_jacobian_offset,
+                        "interleaved_qpoint_geometry_jacobian_offset");
+                    storePackValue(
+                        layout, pack_buf,
+                        layout.interleaved_qpoint_geometry_inverse_jacobian_offset,
+                        side_single.interleaved_qpoint_geometry_inverse_jacobian_offset,
+                        "interleaved_qpoint_geometry_inverse_jacobian_offset");
+                    storePackValue(
+                        layout, pack_buf, layout.interleaved_qpoint_geometry_det_offset,
+                        side_single.interleaved_qpoint_geometry_det_offset,
+                        "interleaved_qpoint_geometry_det_offset");
+                    storePackValue(
+                        layout, pack_buf, layout.interleaved_qpoint_geometry_normal_offset,
+                        side_single.interleaved_qpoint_geometry_normal_offset,
+                        "interleaved_qpoint_geometry_normal_offset");
+
+                    storeLaneAwareDoublePtr(
+                        layout.test_basis_values, layout.test_basis_values_lane1,
+                        side_single.test_basis_values, "test_basis_values");
+                    storeLaneAwareDoublePtr(
+                        layout.trial_basis_values, layout.trial_basis_values_lane1,
+                        side_single.trial_basis_values, "trial_basis_values");
+                    storeLaneAwareDoublePtr(
+                        layout.test_phys_grads_xyz, layout.test_phys_grads_xyz_lane1,
+                        side_single.test_phys_grads_xyz, "test_phys_grads_xyz");
+                    storeLaneAwareDoublePtr(
+                        layout.trial_phys_grads_xyz, layout.trial_phys_grads_xyz_lane1,
+                        side_single.trial_phys_grads_xyz, "trial_phys_grads_xyz");
+                    storeLaneAwareDoublePtr(
+                        layout.test_phys_hessians, layout.test_phys_hessians_lane1,
+                        side_single.test_phys_hessians, "test_phys_hessians");
+                    storeLaneAwareDoublePtr(
+                        layout.trial_phys_hessians, layout.trial_phys_hessians_lane1,
+                        side_single.trial_phys_hessians, "trial_phys_hessians");
+
+                    storeLaneAwareDoublePtr(
+                        layout.test_basis_vector_values_xyz,
+                        layout.test_basis_vector_values_xyz_lane1,
+                        side_single.test_basis_vector_values_xyz,
+                        "test_basis_vector_values_xyz");
+                    storeLaneAwareDoublePtr(
+                        layout.test_basis_curls_xyz, layout.test_basis_curls_xyz_lane1,
+                        side_single.test_basis_curls_xyz, "test_basis_curls_xyz");
+                    storeLaneAwareDoublePtr(
+                        layout.test_basis_divs, layout.test_basis_divs_lane1,
+                        side_single.test_basis_divs, "test_basis_divs");
+
+                    storeLaneAwareDoublePtr(
+                        layout.trial_basis_vector_values_xyz,
+                        layout.trial_basis_vector_values_xyz_lane1,
+                        side_single.trial_basis_vector_values_xyz,
+                        "trial_basis_vector_values_xyz");
+                    storeLaneAwareDoublePtr(
+                        layout.trial_basis_curls_xyz, layout.trial_basis_curls_xyz_lane1,
+                        side_single.trial_basis_curls_xyz, "trial_basis_curls_xyz");
+                    storeLaneAwareDoublePtr(
+                        layout.trial_basis_divs, layout.trial_basis_divs_lane1,
+                        side_single.trial_basis_divs, "trial_basis_divs");
+
+                    storeLaneAwareDoublePtr(
+                        layout.solution_coefficients, layout.solution_coefficients_lane1,
+                        side_single.solution_coefficients, "solution_coefficients");
+                    storeLaneAwareBytePtr(
+                        layout.previous_solution_coefficients_base,
+                        layout.previous_solution_coefficients_base_lane1,
+                        side_single.previous_solution_coefficients_base,
+                        "previous_solution_coefficients_base");
+
+                    storePackValue(
+                        layout, pack_buf, layout.num_history_steps,
+                        side_single.num_history_steps, "num_history_steps");
+                    storeLaneAwareDoublePtr(
+                        layout.history_weights, layout.history_weights_lane1,
+                        side_single.history_weights, "history_weights");
+                    storeLaneAwareBytePtr(
+                        layout.history_solution_coefficients_base,
+                        layout.history_solution_coefficients_base_lane1,
+                        side_single.history_solution_coefficients_base,
+                        "history_solution_coefficients_base");
+
+                    storePackValue(
+                        layout, pack_buf, layout.jit_constants,
+                        side_single.jit_constants, "jit_constants");
+                    storeLaneAwareDoublePtr(
+                        layout.coupled_integrals, layout.coupled_integrals_lane1,
+                        side_single.coupled_integrals, "coupled_integrals");
+                    storeLaneAwareDoublePtr(
+                        layout.coupled_aux, layout.coupled_aux_lane1,
+                        side_single.coupled_aux, "coupled_aux");
+                    storeLaneAwareDoublePtr(
+                        layout.auxiliary_inputs, layout.auxiliary_inputs_lane1,
+                        side_single.auxiliary_inputs, "auxiliary_inputs");
+                    storeLaneAwareDoublePtr(
+                        layout.auxiliary_outputs, layout.auxiliary_outputs_lane1,
+                        side_single.auxiliary_outputs, "auxiliary_outputs");
+
+                    storePackValue(
+                        layout, pack_buf, layout.dt_stencil_coeffs_base,
+                        side_single.dt_stencil_coeffs_base, "dt_stencil_coeffs_base");
+                    storePackValue(
+                        layout, pack_buf, layout.dt_term_weights_base,
+                        side_single.dt_term_weights_base, "dt_term_weights_base");
+                    storeLaneAwareBytePtr(
+                        layout.material_state_old_base,
+                        layout.material_state_old_base_lane1,
+                        side_single.material_state_old_base, "material_state_old_base");
+                    storeLaneAwareBytePtr(
+                        layout.material_state_work_base,
+                        layout.material_state_work_base_lane1,
+                        side_single.material_state_work_base, "material_state_work_base");
+                    storePackValue(
+                        layout, pack_buf, layout.material_state_stride_bytes,
+                        side_single.material_state_stride_bytes,
+                        "material_state_stride_bytes");
+
+                    builder.CreateCall(hfn, {pack_buf, field_ptr_buf});
                 }
             } else {
                 // No split needed: emit inline.
@@ -11552,13 +13220,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             // to helpers as arguments.
             // ================================================================
             if (coupled) {
-                // Enable the shared QP cache for this coupled dispatch.
+                // The coupled cache layers remain optional accelerations. Keep them
+                // disabled until case-level qualification proves their field-local
+                // semantics across mixed transient blocks.
                 qp_shared_cache.clear();
-                qp_shared_cache_ptr = &qp_shared_cache;
+                qp_shared_cache_ptr = nullptr;
 
-                // Enable cross-block CSE for dep_mask==0 ops.
                 dep0_xblock_cache.clear();
-                dep0_xblock_active = true;
+                dep0_xblock_active = false;
 
                 // --- Reusable lambda: load per-block CoupledBlockView fields ---
                 auto loadBlockView = [&](llvm::Value* blocks_ptr_local, std::size_t blk) {
@@ -11679,8 +13348,20 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         auto* tw_scalar = simd_active
                             ? builder.CreateExtractElement(tw, static_cast<uint64_t>(0))
                             : tw;
-                        auto* is_zero_w = builder.CreateFCmpOEQ(tw_scalar, llvm::ConstantFP::get(f64, 0.0));
-                        builder.CreateCondBr(is_zero_w, tx, tb);
+                        auto* is_zero_w =
+                            builder.CreateFCmpOEQ(tw_scalar, llvm::ConstantFP::get(f64, 0.0));
+                        const bool emit_matrix_static =
+                            (term.target == LoweredTerm::Target::Matrix) ||
+                            (term.target == LoweredTerm::Target::Auto && blk_data.want_matrix);
+                        auto* active_output_ptr =
+                            emit_matrix_static ? element_matrix_single : element_vector_single;
+                        auto* null_output_ptr = llvm::ConstantPointerNull::get(
+                            llvm::cast<llvm::PointerType>(active_output_ptr->getType()));
+                        auto* has_active_output = builder.CreateICmpNE(
+                            active_output_ptr, null_output_ptr);
+                        auto* skip_term =
+                            builder.CreateOr(is_zero_w, builder.CreateNot(has_active_output));
+                        builder.CreateCondBr(skip_term, tx, tb);
 
                         builder.SetInsertPoint(tb);
 
@@ -11863,17 +13544,24 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 split_plans.reserve(coupled->blocks.size());
                 bool any_block_needs_split = false;
 
-                for (std::size_t blk = 0; blk < coupled->blocks.size(); ++blk) {
-                    std::vector<std::size_t> op_counts;
-                    op_counts.reserve(coupled->blocks[blk].terms.size());
-                    for (const auto& t : coupled->blocks[blk].terms) {
-                        // Scale by QP unroll factor for accurate text estimation
-                        op_counts.push_back(t.ir.opCount() * qp_unroll_factor);
+                // Keep coupled helper splitting disabled until the oversized
+                // helper path is re-qualified on the full monolithic fluid
+                // matrix. The inline coupled dispatcher preserves the exact
+                // compiled semantics without introducing another helper ABI.
+                const bool enable_coupled_helper_splitting = false;
+                if (enable_coupled_helper_splitting) {
+                    for (std::size_t blk = 0; blk < coupled->blocks.size(); ++blk) {
+                        std::vector<std::size_t> op_counts;
+                        op_counts.reserve(coupled->blocks[blk].terms.size());
+                        for (const auto& t : coupled->blocks[blk].terms) {
+                            // Scale by QP unroll factor for accurate text estimation
+                            op_counts.push_back(t.ir.opCount() * qp_unroll_factor);
+                        }
+                        auto plan = planTermGroups(op_counts, helper_budget, bpo);
+                        plan.block_index = blk;
+                        any_block_needs_split = any_block_needs_split || plan.needs_split;
+                        split_plans.push_back(std::move(plan));
                     }
-                    auto plan = planTermGroups(op_counts, helper_budget, bpo);
-                    plan.block_index = blk;
-                    any_block_needs_split = any_block_needs_split || plan.needs_split;
-                    split_plans.push_back(std::move(plan));
                 }
 
                 // Telemetry: log split decisions
@@ -11907,21 +13595,63 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 // ============================================================
                 llvm::Value* split_qp_cache_buf = nullptr;
                 llvm::Value* split_xblock_cache_buf = nullptr;
+                llvm::Value* coupled_field_ptr_buf = nullptr;
 
                 // helper_fns[blk][gi] = llvm::Function* for each split group
                 std::vector<std::vector<llvm::Function*>> helper_fns(coupled->blocks.size());
 
                 if (any_block_needs_split) {
+                    auto* i8_ptr_ptr = llvm::PointerType::get(i8_ptr, 0);
+                    const auto n_fields = field_entries.size();
+                    const std::uint32_t ptrs_per_field = use_simd_batch ? 2u : 1u;
+                    const std::uint32_t total_field_slots =
+                        static_cast<std::uint32_t>(n_fields) * ptrs_per_field;
+                    if (total_field_slots > 0u) {
+                        coupled_field_ptr_buf = allocaInEntry(
+                            i8_ptr, builder.getInt32(total_field_slots), "coupled_field_ptrs");
+                        for (std::size_t fi = 0; fi < n_fields; ++fi) {
+                            auto* slot0 = builder.CreateGEP(
+                                i8_ptr,
+                                coupled_field_ptr_buf,
+                                builder.getInt64(static_cast<std::int64_t>(fi * ptrs_per_field)));
+                            auto* lane0_entry = builder.CreateLoad(
+                                i8_ptr,
+                                field_entries[fi].single_slot,
+                                "coupled_field_entry_buf0_" + std::to_string(fi));
+                            builder.CreateStore(lane0_entry, slot0);
+                            if (use_simd_batch && field_entries[fi].simd_entry_slots[1] != nullptr) {
+                                auto* slot1 = builder.CreateGEP(
+                                    i8_ptr,
+                                    coupled_field_ptr_buf,
+                                    builder.getInt64(static_cast<std::int64_t>(fi * ptrs_per_field + 1)));
+                                auto* lane1_entry = builder.CreateLoad(
+                                    i8_ptr,
+                                    field_entries[fi].simd_entry_slots[1],
+                                    "coupled_field_entry_buf1_" + std::to_string(fi));
+                                builder.CreateStore(lane1_entry, slot1);
+                            } else if (use_simd_batch) {
+                                auto* slot1 = builder.CreateGEP(
+                                    i8_ptr,
+                                    coupled_field_ptr_buf,
+                                    builder.getInt64(static_cast<std::int64_t>(fi * ptrs_per_field + 1)));
+                                builder.CreateStore(lane0_entry, slot1);
+                            }
+                        }
+                    } else {
+                        coupled_field_ptr_buf = llvm::ConstantPointerNull::get(i8_ptr_ptr);
+                    }
+
                     // Pre-allocate flat cache buffers in the dispatcher function.
                     const std::uint32_t qp_buf_doubles = qp_cache_budget_bytes / 8u;
                     const std::uint32_t xblock_buf_doubles = xblock_cache_budget_bytes / 8u;
                     split_qp_cache_buf = allocaInEntry(f64, builder.getInt32(qp_buf_doubles), "split_qp_buf");
                     split_xblock_cache_buf = allocaInEntry(f64, builder.getInt32(xblock_buf_doubles), "split_xb_buf");
 
-                    // Helper function signature: void(i8* args, i32 batch_idx, i8* blocks_ptr, f64* qp_cache, f64* xblock_cache)
+                    // Helper function signature:
+                    // void(i8* args, i32 batch_idx, i8* blocks_ptr, i8** field_ptrs, f64* qp_cache, f64* xblock_cache)
                     auto* helper_fn_type = llvm::FunctionType::get(
                         builder.getVoidTy(),
-                        {i8_ptr, i32, i8_ptr, f64_ptr, f64_ptr},
+                        {i8_ptr, i32, i8_ptr, i8_ptr_ptr, f64_ptr, f64_ptr},
                         false);
 
                     // Emit helper functions for each split block/group.
@@ -11946,6 +13676,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             }
                             hfn->addParamAttr(3, llvm::Attribute::NoAlias);
                             hfn->addParamAttr(4, llvm::Attribute::NoAlias);
+                            hfn->addParamAttr(5, llvm::Attribute::NoAlias);
                             helper_fns[blk][gi] = hfn;
 
                             auto* helper_entry = llvm::BasicBlock::Create(*ctx, "entry", hfn);
@@ -11960,14 +13691,16 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             int saved_tg = qp_cache_trial_group;
                             auto* saved_qp_base = active_qp_cache_base;
                             auto* saved_xb_base = active_xblock_cache_base;
+                            auto saved_field_entries = field_entries;
 
                             // Switch to helper function context.
                             fn = hfn;
                             builder.SetInsertPoint(helper_entry);
 
                             // Set cache redirection to helper args.
-                            active_qp_cache_base = hfn->getArg(3);
-                            active_xblock_cache_base = hfn->getArg(4);
+                            auto* h_field_ptrs = hfn->getArg(3);
+                            active_qp_cache_base = hfn->getArg(4);
+                            active_xblock_cache_base = hfn->getArg(5);
 
                             // Derive element pointer from args + batch_idx.
                             auto* h_args = hfn->getArg(0);
@@ -11983,6 +13716,27 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             // Load geometry and block view.
                             loadCoupledGeometry(h_elem_ptr);
                             loadBlockView(h_blocks, blk);
+
+                            field_entries.clear();
+                            field_entries.reserve(n_fields);
+                            for (std::size_t fi = 0; fi < n_fields; ++fi) {
+                                FieldEntryPtrs e;
+                                e.field_id = used_field_ids[fi];
+                                auto* slot0 = builder.CreateGEP(
+                                    i8_ptr,
+                                    h_field_ptrs,
+                                    builder.getInt64(static_cast<std::int64_t>(fi * ptrs_per_field)));
+                                e.single_slot = slot0;
+                                e.simd_entry_slots[0] = slot0;
+                                if (use_simd_batch) {
+                                    auto* slot1 = builder.CreateGEP(
+                                        i8_ptr,
+                                        h_field_ptrs,
+                                        builder.getInt64(static_cast<std::int64_t>(fi * ptrs_per_field + 1)));
+                                    e.simd_entry_slots[1] = slot1;
+                                }
+                                field_entries.push_back(e);
+                            }
 
                             // Set trial group for QP cache keying.
                             qp_cache_trial_group = blk_data.trial_group;
@@ -12013,6 +13767,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             qp_cache_trial_group = saved_tg;
                             active_qp_cache_base = saved_qp_base;
                             active_xblock_cache_base = saved_xb_base;
+                            field_entries = saved_field_entries;
                         }
                     }
 
@@ -12033,7 +13788,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         // Call helper functions for each term group.
                         for (std::size_t gi = 0; gi < helper_fns[blk].size(); ++gi) {
                             builder.CreateCall(helper_fns[blk][gi],
-                                {args_ptr, b_idx, coupled_blocks_ptr,
+                                {args_ptr, b_idx, coupled_blocks_ptr, coupled_field_ptr_buf,
                                  split_qp_cache_buf, split_xblock_cache_buf});
                         }
                     } else {
@@ -13730,7 +15485,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             const auto child_op_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
                             const auto& kid = term.ir.ops[child_op_idx];
-                            if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
+                            if (kid.type == FormExprType::TrialFunction) {
+                                if (is_residual) {
+                                    for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
+                                        acc_minus = add(acc_minus,
+                                                        mul(makeScalar(loadDtCoeff(side_minus, order, k)),
+                                                            evalPreviousSolution(side_minus, shape, k, q_index)));
+                                        acc_plus = add(acc_plus,
+                                                       mul(makeScalar(loadDtCoeff(side_plus, order, k)),
+                                                           evalPreviousSolution(side_plus, shape, k, q_index)));
+                                    }
+                                }
+                            } else if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                                 const int fid = unpackFieldIdImm1(kid.imm1);
                                 if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                     for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
@@ -13816,6 +15582,20 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             break;
 
 	                        case FormExprType::Add: {
+                                if (shape.kind != Shape::Kind::Scalar) {
+                                    const auto& kid0 = term.ir.ops[term.ir.children[static_cast<std::size_t>(op.first_child)]];
+                                    const auto& kid1 = term.ir.ops[term.ir.children[static_cast<std::size_t>(op.first_child + 1)]];
+                                    if (isScalarZeroLikeOp(kid0)) {
+                                        values_minus[op_idx] = childMinus(op, 1);
+                                        values_plus[op_idx] = childPlus(op, 1);
+                                        break;
+                                    }
+                                    if (isScalarZeroLikeOp(kid1)) {
+                                        values_minus[op_idx] = childMinus(op, 0);
+                                        values_plus[op_idx] = childPlus(op, 0);
+                                        break;
+                                    }
+                                }
 	                            if (shape.kind == Shape::Kind::Scalar) {
 	                                if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values_minus)) {
 	                                    values_minus[op_idx] = makeScalar(fused);
@@ -13835,6 +15615,20 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        }
 
 	                        case FormExprType::Subtract: {
+                                if (shape.kind != Shape::Kind::Scalar) {
+                                    const auto& kid0 = term.ir.ops[term.ir.children[static_cast<std::size_t>(op.first_child)]];
+                                    const auto& kid1 = term.ir.ops[term.ir.children[static_cast<std::size_t>(op.first_child + 1)]];
+                                    if (isScalarZeroLikeOp(kid1)) {
+                                        values_minus[op_idx] = childMinus(op, 0);
+                                        values_plus[op_idx] = childPlus(op, 0);
+                                        break;
+                                    }
+                                    if (isScalarZeroLikeOp(kid0)) {
+                                        values_minus[op_idx] = neg(childMinus(op, 1));
+                                        values_plus[op_idx] = neg(childPlus(op, 1));
+                                        break;
+                                    }
+                                }
 	                            if (shape.kind == Shape::Kind::Scalar) {
 	                                if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values_minus)) {
 	                                    values_minus[op_idx] = makeScalar(fused);
@@ -14863,181 +16657,6 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 #endif
 }
 
-LLVMGenResult LLVMGen::compileAndAddFusedKernel(JITEngine& engine,
-                                                const FormIR& tangent_ir,
-                                                std::span<const std::size_t> tangent_indices,
-                                                const FormIR& residual_ir,
-                                                std::span<const std::size_t> residual_indices,
-                                                IntegralDomain domain,
-                                                int boundary_marker,
-                                                int interface_marker,
-                                                std::string_view symbol,
-                                                std::uintptr_t& out_address) const
-{
-    out_address = 0;
-#if !SVMP_FE_ENABLE_LLVM_JIT
-    (void)engine; (void)tangent_ir; (void)tangent_indices;
-    (void)residual_ir; (void)residual_indices;
-    (void)domain; (void)boundary_marker; (void)interface_marker; (void)symbol;
-    return LLVMGenResult{.ok = false, .message = "LLVMGen: FE was built without LLVM JIT support"};
-#else
-    // Only fuse Cell-domain terms.
-    if (domain != IntegralDomain::Cell) {
-        return LLVMGenResult{.ok = false,
-                             .message = "LLVMGen: fused kernels only supported for Cell domain"};
-    }
-    if (!residual_ir.isCompiled()) {
-        return LLVMGenResult{.ok = false, .message = "LLVMGen: residual FormIR is not compiled"};
-    }
-
-    // Pre-lower residual terms and tag them as Vector targets.
-    const int preferred_vector_width =
-        preferredVectorWidthFromCpuFeatures(engine.cpuFeaturesString());
-
-    std::vector<LoweredTerm> residual_terms;
-    residual_terms.reserve(residual_indices.size());
-
-    for (const auto tidx : residual_indices) {
-        if (tidx >= residual_ir.terms().size()) {
-            return LLVMGenResult{.ok = false, .message = "LLVMGen: residual term index out of range"};
-        }
-        const auto& term = residual_ir.terms()[tidx];
-        if (term.domain != domain) {
-            continue; // skip non-cell residual terms
-        }
-        FormExpr effective_integrand = term.integrand;
-        std::optional<tensor::TensorIR> tensor_ir;
-
-        if (options_.tensor.mode != TensorLoweringMode::Off) {
-            try {
-                tensor::TensorIRLoweringOptions tensor_opts;
-                tensor_opts.enable_cache = false;
-                tensor_opts.force_loop_nest =
-                    (options_.tensor.mode == TensorLoweringMode::On) || options_.tensor.force_loop_nest;
-                tensor_opts.log_decisions = options_.tensor.log_decisions;
-
-                tensor_opts.loop.enable_symmetry_lowering = options_.tensor.enable_symmetry_lowering;
-                tensor_opts.loop.enable_optimal_contraction_order = options_.tensor.enable_optimal_contraction_order;
-                tensor_opts.loop.enable_vectorization_hints = options_.vectorize;
-                tensor_opts.loop.preferred_vector_width = preferred_vector_width;
-                tensor_opts.loop.enable_delta_shortcuts = options_.tensor.enable_delta_shortcuts;
-                tensor_opts.loop.scalar_expansion_term_threshold = options_.tensor.scalar_expansion_term_threshold;
-
-                tensor_opts.alloc.stack_max_entries = options_.tensor.temp_stack_max_entries;
-                tensor_opts.alloc.alignment_bytes = options_.tensor.temp_alignment_bytes;
-                tensor_opts.alloc.enable_reuse = options_.tensor.temp_enable_reuse;
-
-                const auto tl = tensor::lowerToTensorIR(term.integrand, tensor_opts);
-                if (!tl.ok) {
-                    return LLVMGenResult{
-                        .ok = false,
-                        .message = tl.message.empty() ? "LLVMGen: tensor lowering failed for residual" : tl.message,
-                    };
-                }
-                if (tl.used_loop_nest) {
-                    tensor_ir = tl.ir;
-                } else if (tl.fallback_expr.isValid()) {
-                    effective_integrand = tl.fallback_expr;
-                }
-            } catch (const std::exception& e) {
-                return LLVMGenResult{
-                    .ok = false,
-                    .message = std::string("LLVMGen: tensor lowering threw for residual: ") + e.what(),
-                };
-            }
-        }
-
-        auto lowered = lowerToKernelIR(effective_integrand);
-        if (lowered.ir.empty()) {
-            return LLVMGenResult{.ok = false, .message = "LLVMGen: failed to lower residual term to KernelIR"};
-        }
-        {
-            const auto ops_before = lowered.ir.opCount();
-            const auto eliminated = lowered.ir.optimize();
-            static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
-            if (jit_telemetry) {
-                std::cerr << "[JIT telemetry] residual term " << tidx
-                          << ": KernelIR " << ops_before << " -> " << lowered.ir.opCount()
-                          << " ops (-" << eliminated << ", ~"
-                          << (lowered.ir.opCount() * 58) << " bytes .text est)\n";
-            }
-        }
-
-        auto shapes = inferShapes(lowered.ir, residual_ir.testSpace(), residual_ir.trialSpace());
-        if (!shapes.ok) {
-            return LLVMGenResult{.ok = false, .message = shapes.message};
-        }
-
-        // Dep mask for residual: TrialFunction is rewritten to StateField,
-        // so it doesn't set the trial dependency bit (0x2).
-        std::vector<std::uint8_t> dep;
-        dep.resize(lowered.ir.ops.size(), 0u);
-        for (std::size_t op_idx = 0; op_idx < lowered.ir.ops.size(); ++op_idx) {
-            const auto& op = lowered.ir.ops[op_idx];
-            std::uint8_t d = 0u;
-            for (std::size_t k = 0; k < op.child_count; ++k) {
-                const auto c = lowered.ir.children[static_cast<std::size_t>(op.first_child) + k];
-                d = static_cast<std::uint8_t>(d | dep[c]);
-            }
-            if (op.type == FormExprType::TestFunction) {
-                d = static_cast<std::uint8_t>(d | 0x1u);
-            }
-            // Note: no 0x2 bit for residual (TrialFunction → StateField rewrite)
-            dep[op_idx] = d;
-        }
-
-        bool has_indexed_access = false;
-        std::vector<std::pair<std::uint16_t, std::uint8_t>> bound_indices;
-        {
-            struct Use { std::uint8_t extent{0}; int count{0}; };
-            std::unordered_map<std::uint16_t, Use> uses;
-            for (const auto& op : lowered.ir.ops) {
-                if (op.type != FormExprType::IndexedAccess) continue;
-                has_indexed_access = true;
-                const int rank = static_cast<int>(unpackIndexedRank(op.imm1));
-                for (int k = 0; k < rank; ++k) {
-                    auto& u = uses[unpackIndexedId(op.imm0, k)];
-                    const auto ext = unpackIndexedExtent(op.imm1, k);
-                    if (u.count == 0) u.extent = ext;
-                    u.count += 1;
-                }
-            }
-            if (has_indexed_access) {
-                for (const auto& [id, u] : uses) {
-                    bound_indices.emplace_back(id, u.extent);
-                }
-                std::sort(bound_indices.begin(), bound_indices.end(),
-                          [](const auto& a, const auto& b) { return a.first < b.first; });
-            }
-        }
-
-        residual_terms.push_back(LoweredTerm{
-            .ir = std::move(lowered.ir),
-            .shapes = std::move(shapes.shapes),
-            .dep_mask = std::move(dep),
-            .time_derivative_order = term.time_derivative_order,
-            .tensor_ir = std::move(tensor_ir),
-            .has_indexed_access = has_indexed_access,
-            .bound_indices = std::move(bound_indices),
-            .target = LoweredTerm::Target::Vector,
-        });
-    }
-
-    if (residual_terms.empty()) {
-        return LLVMGenResult{.ok = false,
-                             .message = "LLVMGen: no cell-domain residual terms to fuse"};
-    }
-
-    // Delegate to the shared codegen, passing residual terms for fusion.
-    LLVMGenFusedInfo fused;
-    fused.extra_terms = std::move(residual_terms);
-    return compileAndAddKernelImpl(engine, tangent_ir, tangent_indices, domain,
-                                   boundary_marker, interface_marker,
-                                   symbol, out_address,
-                                   /*specialization=*/nullptr, &fused);
-#endif
-}
-
 LLVMGenResult LLVMGen::compileAndAddCoupledKernel(JITEngine& engine,
                                                   std::span<const MonolithicBlockInfo> blocks,
                                                   std::string_view symbol,
@@ -15224,23 +16843,6 @@ LLVMGenResult LLVMGen::compileAndAddCoupledKernel(JITEngine& engine,
                 .message = "LLVMGen: coupled block " + std::to_string(bi) + " has no cell terms"};
         }
 
-        // Block lowered successfully — log dep_mask breakdown for diagnostics.
-        for (std::size_t ti = 0; ti < blk_terms.terms.size(); ++ti) {
-            const auto& t = blk_terms.terms[ti];
-            std::size_t n0 = 0, n1 = 0, n2 = 0, n3 = 0;
-            for (auto d : t.dep_mask) {
-                if (d == 0) ++n0;
-                else if (d == 1) ++n1;
-                else if (d == 2) ++n2;
-                else ++n3;
-            }
-            fprintf(stderr, "[LLVMGen] coupled blk=%zu term=%zu target=%s ops=%zu "
-                    "dep0=%zu dep1=%zu dep2=%zu dep3=%zu\n",
-                    bi, ti,
-                    t.target == LoweredTerm::Target::Matrix ? "mat" :
-                    t.target == LoweredTerm::Target::Vector ? "vec" : "auto",
-                    t.ir.opCount(), n0, n1, n2, n3);
-        }
     }
 
     // Assign trial-space group IDs: blocks with the same trial space share a group.

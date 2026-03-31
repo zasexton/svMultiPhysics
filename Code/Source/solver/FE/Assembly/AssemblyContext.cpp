@@ -1550,6 +1550,134 @@ void AssemblyContext::clearFieldSolutionData() noexcept
     jit_field_solution_table_.clear();
 }
 
+void AssemblyContext::copyFieldSolutionDataFrom(const AssemblyContext& other)
+{
+    if (n_qpts_ != other.n_qpts_) {
+        throw std::invalid_argument(
+            "AssemblyContext::copyFieldSolutionDataFrom: quadrature point count mismatch");
+    }
+
+    if (other.field_solution_data_used_ == 0) {
+        clearFieldSolutionData();
+        return;
+    }
+
+    if (field_solution_data_.size() < other.field_solution_data_used_) {
+        field_solution_data_.resize(other.field_solution_data_used_);
+    }
+
+    const auto copy_entry = [](auto& dst, const auto& src) {
+        dst.id = src.id;
+        dst.field_type = src.field_type;
+        dst.value_dim = src.value_dim;
+        dst.values = src.values;
+        dst.vector_values = src.vector_values;
+        dst.history_values = src.history_values;
+        dst.history_vector_values = src.history_vector_values;
+        dst.gradients = src.gradients;
+        dst.jacobians = src.jacobians;
+        dst.hessians = src.hessians;
+        dst.laplacians = src.laplacians;
+        dst.component_hessians = src.component_hessians;
+        dst.component_laplacians = src.component_laplacians;
+    };
+
+    field_solution_data_used_ = other.field_solution_data_used_;
+    for (std::size_t idx = 0; idx < field_solution_data_used_; ++idx) {
+        copy_entry(field_solution_data_[idx], other.field_solution_data_[idx]);
+    }
+
+    if (jit_field_table_suspended_) {
+        jit_field_table_dirty_ = true;
+    } else {
+        rebuildJITFieldSolutionTable();
+        jit_field_table_dirty_ = false;
+    }
+}
+
+bool AssemblyContext::copyFieldSolutionDataSubsetFrom(const AssemblyContext& other,
+                                                      std::span<const FieldId> field_ids)
+{
+    if (n_qpts_ != other.n_qpts_) {
+        throw std::invalid_argument(
+            "AssemblyContext::copyFieldSolutionDataSubsetFrom: quadrature point count mismatch");
+    }
+
+    if (field_ids.empty() || other.field_solution_data_used_ == 0) {
+        clearFieldSolutionData();
+        return field_ids.empty();
+    }
+
+    auto wants_field = [&](FieldId id) {
+        return std::find(field_ids.begin(), field_ids.end(), id) != field_ids.end();
+    };
+
+    std::size_t matched = 0;
+    for (std::size_t idx = 0; idx < other.field_solution_data_used_; ++idx) {
+        if (wants_field(other.field_solution_data_[idx].id)) {
+            ++matched;
+        }
+    }
+
+    if (matched == 0) {
+        clearFieldSolutionData();
+        return false;
+    }
+
+    if (field_solution_data_.size() < matched) {
+        field_solution_data_.resize(matched);
+    }
+
+    const auto copy_entry = [](auto& dst, const auto& src) {
+        dst.id = src.id;
+        dst.field_type = src.field_type;
+        dst.value_dim = src.value_dim;
+        dst.values = src.values;
+        dst.vector_values = src.vector_values;
+        dst.history_values = src.history_values;
+        dst.history_vector_values = src.history_vector_values;
+        dst.gradients = src.gradients;
+        dst.jacobians = src.jacobians;
+        dst.hessians = src.hessians;
+        dst.laplacians = src.laplacians;
+        dst.component_hessians = src.component_hessians;
+        dst.component_laplacians = src.component_laplacians;
+    };
+
+    std::size_t dst_idx = 0;
+    for (std::size_t src_idx = 0; src_idx < other.field_solution_data_used_; ++src_idx) {
+        const auto& src = other.field_solution_data_[src_idx];
+        if (!wants_field(src.id)) {
+            continue;
+        }
+        copy_entry(field_solution_data_[dst_idx], src);
+        ++dst_idx;
+    }
+    field_solution_data_used_ = dst_idx;
+
+    if (jit_field_table_suspended_) {
+        jit_field_table_dirty_ = true;
+    } else {
+        rebuildJITFieldSolutionTable();
+        jit_field_table_dirty_ = false;
+    }
+
+    std::size_t unique_requested = 0;
+    for (std::size_t i = 0; i < field_ids.size(); ++i) {
+        bool duplicate = false;
+        for (std::size_t j = 0; j < i; ++j) {
+            if (field_ids[j] == field_ids[i]) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            ++unique_requested;
+        }
+    }
+    return dst_idx == unique_requested;
+}
+
 void AssemblyContext::preAllocateFieldSolutionData(std::size_t max_fields, std::size_t max_qpts,
                                                    std::size_t max_value_dim)
 {
@@ -2274,6 +2402,25 @@ void AssemblyContext::setIntegrationWeights(std::span<const Real> weights)
     integration_weights_.assign(weights.begin(), weights.end());
 }
 
+void AssemblyContext::copyGeometryDataFrom(const AssemblyContext& other)
+{
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), other.n_qpts_);
+
+    n_qpts_ = other.n_qpts_;
+    quad_points_ = other.quad_points_;
+    quad_weights_ = other.quad_weights_;
+    physical_points_ = other.physical_points_;
+    jacobians_ = other.jacobians_;
+    inverse_jacobians_ = other.inverse_jacobians_;
+    jacobian_dets_ = other.jacobian_dets_;
+    integration_weights_ = other.integration_weights_;
+    normals_ = other.normals_;
+    cell_diameter_ = other.cell_diameter_;
+    cell_volume_ = other.cell_volume_;
+    facet_area_ = other.facet_area_;
+    interleaved_dirty_ = true;
+}
+
 void AssemblyContext::setTestBasisData(
     LocalIndex n_dofs,
     std::span<const Real> values,
@@ -2507,7 +2654,12 @@ void AssemblyContext::setPhysicalGradients(
 {
     const auto expected_test = static_cast<std::size_t>(n_test_dofs_) * static_cast<std::size_t>(n_qpts_);
     if (!test_gradients.empty() && test_gradients.size() != expected_test) {
-        throw std::invalid_argument("AssemblyContext::setPhysicalGradients: test gradient size mismatch");
+        throw std::invalid_argument(
+            "AssemblyContext::setPhysicalGradients: test gradient size mismatch "
+            "(actual=" + std::to_string(test_gradients.size()) +
+            ", expected=" + std::to_string(expected_test) +
+            ", n_test_dofs=" + std::to_string(n_test_dofs_) +
+            ", n_qpts=" + std::to_string(n_qpts_) + ")");
     }
     ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
     test_phys_gradients_.assign(test_gradients.begin(), test_gradients.end());
@@ -2515,7 +2667,12 @@ void AssemblyContext::setPhysicalGradients(
     if (!trial_is_test_) {
         const auto expected_trial = static_cast<std::size_t>(n_trial_dofs_) * static_cast<std::size_t>(n_qpts_);
         if (!trial_gradients.empty() && trial_gradients.size() != expected_trial) {
-            throw std::invalid_argument("AssemblyContext::setPhysicalGradients: trial gradient size mismatch");
+            throw std::invalid_argument(
+                "AssemblyContext::setPhysicalGradients: trial gradient size mismatch "
+                "(actual=" + std::to_string(trial_gradients.size()) +
+                ", expected=" + std::to_string(expected_trial) +
+                ", n_trial_dofs=" + std::to_string(n_trial_dofs_) +
+                ", n_qpts=" + std::to_string(n_qpts_) + ")");
         }
         ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
         trial_phys_gradients_.assign(trial_gradients.begin(), trial_gradients.end());

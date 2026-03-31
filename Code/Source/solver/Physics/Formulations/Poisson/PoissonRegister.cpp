@@ -1,6 +1,7 @@
 #include "Physics/Formulations/Poisson/PoissonModule.h"
 
 #include "Physics/Core/EquationModuleInput.h"
+#include "Physics/Core/JITRuntimePolicy.h"
 #include "Physics/Core/EquationModuleRegistry.h"
 
 #include "FE/Spaces/SpaceFactory.h"
@@ -272,6 +273,9 @@ create_poisson_from_input(const svmp::Physics::EquationModuleInput& input,
 
   svmp::Physics::formulations::poisson::PoissonOptions options{};
   options.field_name = "Temperature";
+  options.enable_jit = svmp::Physics::core::resolveOopJitEnable(input, options.enable_jit);
+  options.enable_jit_specialization =
+      svmp::Physics::core::resolveOopJitSpecializationEnable(input, options.enable_jit_specialization);
 
   apply_thermal_properties(input, options);
   apply_scalar_bcs(input, options);
@@ -286,4 +290,3 @@ create_poisson_from_input(const svmp::Physics::EquationModuleInput& input,
 
 SVMP_REGISTER_EQUATION("heatS", &create_poisson_from_input);
 SVMP_REGISTER_EQUATION("heatF", &create_poisson_from_input);
-

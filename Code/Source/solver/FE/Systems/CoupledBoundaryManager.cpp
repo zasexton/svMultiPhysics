@@ -453,7 +453,7 @@ Real CoupledBoundaryManager::boundaryMeasure(int boundary_marker, const SystemSt
     int mpi_initialized = 0;
     MPI_Initialized(&mpi_initialized);
     if (mpi_initialized) {
-        area = allreduceSum(area, MPI_COMM_WORLD);
+        area = allreduceSum(area, system_.dofHandler().mpiComm());
     }
 #endif
 
@@ -547,7 +547,7 @@ Real CoupledBoundaryManager::evaluateFunctional(const CompiledFunctional& entry,
     int mpi_initialized = 0;
     MPI_Initialized(&mpi_initialized);
     if (mpi_initialized) {
-        raw = allreduceSum(raw, MPI_COMM_WORLD);
+        raw = allreduceSum(raw, system_.dofHandler().mpiComm());
     }
 #endif
 

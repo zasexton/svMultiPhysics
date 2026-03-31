@@ -48,6 +48,29 @@ std::string_view fieldSplitKindToString(FieldSplitKind kind) noexcept
     }
 }
 
+std::string_view fsilsBlockSchurPreconditionerToString(FsilsBlockSchurSchurPreconditioner pc) noexcept
+{
+    switch (pc) {
+        case FsilsBlockSchurSchurPreconditioner::DiagL: return "diag-l";
+        case FsilsBlockSchurSchurPreconditioner::BlockDiagL: return "blockdiag-l";
+        case FsilsBlockSchurSchurPreconditioner::ILUL: return "ilu-l";
+        case FsilsBlockSchurSchurPreconditioner::AlgebraicSchur: return "algebraic-shat";
+        default: return "unknown";
+    }
+}
+
+std::string_view
+fsilsBlockSchurMomentumApproximationToString(FsilsBlockSchurMomentumApproximation approx) noexcept
+{
+    switch (approx) {
+        case FsilsBlockSchurMomentumApproximation::DiagK: return "diag-k";
+        case FsilsBlockSchurMomentumApproximation::BlockDiagK: return "blockdiag-k";
+        case FsilsBlockSchurMomentumApproximation::ILUK: return "ilu-k";
+        case FsilsBlockSchurMomentumApproximation::ASM: return "asm-k";
+        default: return "unknown";
+    }
+}
+
 } // namespace backends
 } // namespace FE
 } // namespace svmp

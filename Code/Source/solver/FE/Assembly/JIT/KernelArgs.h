@@ -2567,6 +2567,8 @@ namespace detail {
     bv.test_phys_gradients_xyz = detail::flattenXYZ(ctx.testPhysicalGradientsRaw());
     bv.trial_basis_values = ctx.trialBasisValuesRaw().empty() ? nullptr : ctx.trialBasisValuesRaw().data();
     bv.trial_phys_gradients_xyz = detail::flattenXYZ(ctx.trialPhysicalGradientsRaw());
+    bv.test_phys_hessians = detail::flattenMat3(ctx.testPhysicalHessiansRaw());
+    bv.trial_phys_hessians = detail::flattenMat3(ctx.trialPhysicalHessiansRaw());
     bv.n_test_dofs = static_cast<std::uint32_t>(ctx.numTestDofs());
     bv.n_trial_dofs = static_cast<std::uint32_t>(ctx.numTrialDofs());
     bv.test_value_dim = static_cast<std::uint32_t>(ctx.testValueDimension());

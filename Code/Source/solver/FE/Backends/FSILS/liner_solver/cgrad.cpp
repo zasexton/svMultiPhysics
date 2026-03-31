@@ -64,6 +64,9 @@ void schur(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array<d
   Array<double> GP(dof,nNo), unCondU(dof,nNo);
 
   double time = fe_fsi_linear_solver::fsils_cpu_t();
+  const int itr_before = ls.itr;
+  const double callD_before = ls.callD;
+  const auto collective_before = lhs.commu.collective_stats;
   ls.suc = false;
   ls.iNorm = norm::fsi_ls_norms(mynNo, lhs.commu, R);
   double eps = pow(std::max(ls.absTol,ls.relTol*ls.iNorm),2.0);
@@ -158,6 +161,11 @@ void schur(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array<d
   } else {
     ls.dB = 5.0 * log(err/errO);
   }
+  ls.stats.record_call(ls.itr - itr_before,
+                       /*restart_cycles=*/1,
+                       fe_fsi_linear_solver::fsils_collective_delta(collective_before, lhs.commu.collective_stats),
+                       /*setup_seconds=*/0.0,
+                       ls.callD - callD_before);
 }
 
 //---------
@@ -187,6 +195,9 @@ void cgrad_v(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array
   auto& X = ls.ws.cg_X;
 
   ls.callD = fe_fsi_linear_solver::fsils_cpu_t();
+  const int itr_before = ls.itr;
+  const double callD_before = ls.callD;
+  const auto collective_before = lhs.commu.collective_stats;
   ls.suc = false;
   ls.iNorm = norm::fsi_ls_normv(dof, mynNo, lhs.commu, R);
   double eps = pow(std::max(ls.absTol, ls.relTol* ls.iNorm), 2.0);
@@ -246,6 +257,11 @@ void cgrad_v(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array
   } else {
     ls.dB = 5.0 * log(err/errO);
   }
+  ls.stats.record_call(ls.itr - itr_before,
+                       /*restart_cycles=*/1,
+                       fe_fsi_linear_solver::fsils_collective_delta(collective_before, lhs.commu.collective_stats),
+                       /*setup_seconds=*/0.0,
+                       ls.callD - callD_before);
 
   #ifdef debug_cgrad_v
   double exec_time = fe_fsi_linear_solver::fsils_cpu_t() - time;
@@ -281,6 +297,9 @@ void cgrad_s(FSILS_lhsType& lhs, FSILS_subLsType& ls, const Vector<double>& K, V
   auto& X = ls.ws.cg_Xs;
 
   ls.callD = fe_fsi_linear_solver::fsils_cpu_t();
+  const int itr_before = ls.itr;
+  const double callD_before = ls.callD;
+  const auto collective_before = lhs.commu.collective_stats;
   ls.suc = false;
   ls.iNorm = norm::fsi_ls_norms(mynNo, lhs.commu, R);
   double eps = pow(std::max(ls.absTol, ls.relTol* ls.iNorm), 2.0);
@@ -339,6 +358,11 @@ void cgrad_s(FSILS_lhsType& lhs, FSILS_subLsType& ls, const Vector<double>& K, V
   } else {
     ls.dB = 5.0 * log(err/errO);
   }
+  ls.stats.record_call(ls.itr - itr_before,
+                       /*restart_cycles=*/1,
+                       fe_fsi_linear_solver::fsils_collective_delta(collective_before, lhs.commu.collective_stats),
+                       /*setup_seconds=*/0.0,
+                       ls.callD - callD_before);
 
   #ifdef debug_cgrad_s
   double exec_time = fe_fsi_linear_solver::fsils_cpu_t() - time;
@@ -348,5 +372,3 @@ void cgrad_s(FSILS_lhsType& lhs, FSILS_subLsType& ls, const Vector<double>& K, V
 }
 
 };
-
-

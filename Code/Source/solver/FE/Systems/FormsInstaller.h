@@ -21,6 +21,7 @@
 
 #include "Forms/BoundaryConditions.h"
 #include "Forms/MixedFormIR.h"
+#include "Systems/MixedKernelPlan.h"
 #include "Systems/OperatorRegistry.h"
 
 #include <initializer_list>
@@ -46,15 +47,6 @@ class FESystem;
 struct FormInstallOptions {
     forms::ADMode ad_mode{forms::ADMode::Forward};
     forms::SymbolicOptions compiler_options{};
-
-    // Coupled residual installation controls (used internally by installFormulation).
-    bool coupled_residual_install_residual_kernels{true};
-    bool coupled_residual_install_jacobian_blocks{true};
-
-    // When true, the residual vector for each test field is produced by a single
-    // Jacobian block kernel (output=Both) instead of a separate vector-only kernel.
-    // This reduces assembly passes during Newton when assembling matrix+vector together.
-    bool coupled_residual_from_jacobian_block{false};
 };
 
 using KernelPtr = std::shared_ptr<assembly::AssemblyKernel>;
@@ -66,6 +58,7 @@ void installStrongDirichlet(
 struct CoupledResidualKernels {
     std::vector<KernelPtr> residual;                      // one per test field
     std::vector<std::vector<KernelPtr>> jacobian_blocks;  // [test][trial]
+    std::shared_ptr<const MixedKernelPlan> mixed_plan{};
 };
 
 /**
@@ -86,9 +79,9 @@ struct CoupledResidualKernels {
  * Expressions with unbound TrialFunction (no StateField nodes) are also
  * supported for single-field formulations.
  *
- * For multi-field formulations, the coupled assembly strategy is set automatically:
- * diagonal Jacobian blocks produce both matrix and residual vector (Both mode),
- * off-diagonal blocks produce matrix only.
+ * For multi-field formulations, the installer builds an explicit MixedKernelPlan
+ * and selects either a semantic monolithic cell kernel or exact per-block
+ * kernels for the active domains.
  *
  * @param system   FESystem to install kernels into
  * @param op       Operator tag (e.g., "equations")

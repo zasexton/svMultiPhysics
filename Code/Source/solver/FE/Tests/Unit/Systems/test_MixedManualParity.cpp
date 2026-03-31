@@ -14,17 +14,19 @@
 #include "Systems/FormsInstaller.h"
 #include "Systems/FormsInstallerDetail.h"
 
+#include "Assembly/AssemblyKernel.h"
+
 #include "Forms/BlockForm.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/MixedBlockKernelSet.h"
 #include "Forms/MixedFormIR.h"
+#include "Forms/MonolithicCellKernel.h"
 
 #include "Spaces/H1Space.h"
 #include "Spaces/L2Space.h"
 
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
-
-#include "Forms/CoupledBlockKernel.h"
 
 #include <array>
 
@@ -35,22 +37,46 @@ using svmp::FE::Real;
 
 namespace {
 
-/// Count cell terms that are NOT CoupledBlockKernel (i.e., per-block terms only)
-std::size_t countPerBlockCellTerms(const svmp::FE::systems::OperatorDefinition& def) {
+/// Count semantic cell blocks, expanding aggregate mixed-cell kernels into their owned blocks.
+std::size_t countSemanticCellTerms(const svmp::FE::systems::OperatorDefinition& def) {
     std::size_t count = 0;
     for (const auto& ct : def.cells) {
-        if (!dynamic_cast<const svmp::FE::forms::CoupledBlockKernel*>(ct.kernel.get())) {
+        if (!ct.kernel) {
+            continue;
+        }
+        if (const auto* monolithic =
+                dynamic_cast<const svmp::FE::forms::MonolithicCellKernel*>(ct.kernel.get())) {
+            count += monolithic->numBlocks();
+        } else if (const auto* mixed_block =
+                       dynamic_cast<const svmp::FE::forms::MixedBlockKernelSet*>(ct.kernel.get())) {
+            count += mixed_block->numBlocks();
+        } else {
             ++count;
         }
     }
     return count;
 }
 
-/// Extract (test_field, trial_field) pairs for non-CoupledBlockKernel cell terms
-std::vector<std::pair<int, int>> perBlockCellPairs(const svmp::FE::systems::OperatorDefinition& def) {
+/// Extract semantic (test_field, trial_field) pairs, expanding MonolithicCellKernel blocks.
+std::vector<std::pair<int, int>> semanticCellPairs(const svmp::FE::systems::OperatorDefinition& def) {
     std::vector<std::pair<int, int>> pairs;
     for (const auto& ct : def.cells) {
-        if (!dynamic_cast<const svmp::FE::forms::CoupledBlockKernel*>(ct.kernel.get())) {
+        if (!ct.kernel) {
+            continue;
+        }
+        if (const auto* monolithic =
+                dynamic_cast<const svmp::FE::forms::MonolithicCellKernel*>(ct.kernel.get())) {
+            for (std::size_t i = 0; i < monolithic->numBlocks(); ++i) {
+                const auto& block = monolithic->blockSpec(i);
+                pairs.emplace_back(static_cast<int>(block.test_field), static_cast<int>(block.trial_field));
+            }
+        } else if (const auto* mixed_block =
+                       dynamic_cast<const svmp::FE::forms::MixedBlockKernelSet*>(ct.kernel.get())) {
+            for (std::size_t i = 0; i < mixed_block->numBlocks(); ++i) {
+                const auto& block = mixed_block->blockSpec(i);
+                pairs.emplace_back(static_cast<int>(block.test_field), static_cast<int>(block.trial_field));
+            }
+        } else {
             pairs.emplace_back(static_cast<int>(ct.test_field), static_cast<int>(ct.trial_field));
         }
     }
@@ -130,22 +156,22 @@ TEST(MixedManualParity, BilinearStructuralParity_CellTerms)
     }
 
     // --- Compare operator structure ---
-    // Note: the mixed path may add an extra CoupledBlockKernel for fused execution.
-    // We compare per-block terms only (excluding the optimization wrapper).
+    // Compare semantic block structure, not the concrete runtime wrapper count.
+    // The mixed path may use one MonolithicCellKernel instead of several per-block terms.
     const auto& def_m = sys_manual.operatorDefinition("op");
     const auto& def_x = sys_mixed.operatorDefinition("op");
 
-    // Same number of per-block cell terms
-    EXPECT_EQ(countPerBlockCellTerms(def_m), countPerBlockCellTerms(def_x));
+    // Same number of semantic cell terms
+    EXPECT_EQ(countSemanticCellTerms(def_m), countSemanticCellTerms(def_x));
 
     // Same number of boundary/interior/interface terms (all zero here)
     EXPECT_EQ(def_m.boundary.size(), def_x.boundary.size());
     EXPECT_EQ(def_m.interior.size(), def_x.interior.size());
     EXPECT_EQ(def_m.interface_faces.size(), def_x.interface_faces.size());
 
-    // Same (test_field, trial_field) pairs for per-block cell terms
-    const auto manual_pairs = perBlockCellPairs(def_m);
-    const auto mixed_pairs = perBlockCellPairs(def_x);
+    // Same (test_field, trial_field) pairs for the semantic cell blocks
+    const auto manual_pairs = semanticCellPairs(def_m);
+    const auto mixed_pairs = semanticCellPairs(def_x);
     ASSERT_EQ(manual_pairs.size(), mixed_pairs.size());
 
     for (std::size_t i = 0; i < manual_pairs.size(); ++i) {
@@ -208,7 +234,7 @@ TEST(MixedManualParity, BilinearStructuralParity_BoundaryTerms)
     const auto& def_x = sys_mixed.operatorDefinition("op");
 
     // Same per-block cell and boundary term counts
-    EXPECT_EQ(countPerBlockCellTerms(def_m), countPerBlockCellTerms(def_x));
+    EXPECT_EQ(countSemanticCellTerms(def_m), countSemanticCellTerms(def_x));
     EXPECT_EQ(def_m.boundary.size(), def_x.boundary.size());
     if (!def_m.boundary.empty() && !def_x.boundary.empty()) {
         EXPECT_EQ(def_m.boundary[0].marker, def_x.boundary[0].marker);
@@ -268,10 +294,9 @@ TEST(MixedManualParity, BilinearStructuralParity_ZeroBlockElimination)
     const auto& def_m = sys_manual.operatorDefinition("op");
     const auto& def_x = sys_mixed.operatorDefinition("op");
 
-    // Per-block cell terms: 2 each (VV and PP, no off-diagonals)
-    // Mixed path may also have a CoupledBlockKernel wrapper for fused execution
-    EXPECT_EQ(countPerBlockCellTerms(def_m), 2u);
-    EXPECT_EQ(countPerBlockCellTerms(def_x), 2u);
+    // Semantic cell blocks: 2 each (VV and PP, no off-diagonals)
+    EXPECT_EQ(countSemanticCellTerms(def_m), 2u);
+    EXPECT_EQ(countSemanticCellTerms(def_x), 2u);
 }
 
 // ============================================================================
@@ -886,9 +911,8 @@ TEST(MixedManualParity, MixedFormIR_ProducesIdenticalStructure)
     const auto& def_mir = sys_mir.operatorDefinition("op");
     const auto& def_bilinear = sys_bilinear.operatorDefinition("op");
 
-    // Both paths should have the same per-block cell terms
-    // (both also get CoupledBlockKernel when JIT is enabled)
-    EXPECT_EQ(countPerBlockCellTerms(def_mir), countPerBlockCellTerms(def_bilinear));
+    // Both paths should have the same semantic cell blocks.
+    EXPECT_EQ(countSemanticCellTerms(def_mir), countSemanticCellTerms(def_bilinear));
     EXPECT_EQ(def_mir.boundary.size(), def_bilinear.boundary.size());
 }
 

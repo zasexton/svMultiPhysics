@@ -1,6 +1,7 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 
 #include "Physics/Core/EquationModuleInput.h"
+#include "Physics/Core/JITRuntimePolicy.h"
 #include "Physics/Core/EquationModuleRegistry.h"
 #include "Physics/Materials/Fluid/CarreauYasudaViscosity.h"
 
@@ -1737,6 +1738,9 @@ create_navier_stokes_from_input(const svmp::Physics::EquationModuleInput& input,
   options.velocity_field_name = "Velocity";
   options.pressure_field_name = "Pressure";
   options.enable_convection = (input.equation_type != "stokes");
+  options.enable_jit = svmp::Physics::core::resolveOopJitEnable(input, options.enable_jit);
+  options.enable_jit_specialization =
+      svmp::Physics::core::resolveOopJitSpecializationEnable(input, options.enable_jit_specialization);
 
   apply_fluid_properties(domain, options);
   apply_fluid_bcs(input, domain, options);

@@ -38,6 +38,7 @@
 
 #include <cstdio>
 #include <chrono>
+#include <memory>
 
 namespace fe_fsi_linear_solver {
 
@@ -119,14 +120,27 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
   double tp0;
 
   tp0 = TP();
-  Array<double> R(dof,nNo), Wr(dof,nNo), Wc(dof,nNo);
+  ls.solve_ws.ensure(dof, nNo);
+  auto& Wr = ls.solve_ws.Wr;
+  auto& Wc = ls.solve_ws.Wc;
 
-  for (int a = 0; a < nNo; a++) {
-    for (int i = 0; i < dof; i++) {
-      R(i,lhs.map(a)) = Ri(i,a);
+  std::unique_ptr<Array<double>> R_internal;
+  Array<double>* R_ptr = nullptr;
+  if (ls.ri_internal_order) {
+    R_internal = std::make_unique<Array<double>>(dof, nNo, Ri.data());
+    R_ptr = R_internal.get();
+    tp_alloc_and_perm = 0.0;
+  } else {
+    auto& R_work = ls.solve_ws.R;
+    for (int a = 0; a < nNo; a++) {
+      for (int i = 0; i < dof; i++) {
+        R_work(i,lhs.map(a)) = Ri(i,a);
+      }
     }
+    R_ptr = &R_work;
+    tp_alloc_and_perm = TP() - tp0;
   }
-  tp_alloc_and_perm = TP() - tp0;
+  auto& R = *R_ptr;
 
   // Apply preconditioner.
   //
@@ -199,9 +213,11 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
     R(i) = Wc(i) * R(i);
   }
 
-  for (int a = 0; a < nNo; a++) {
-    for (int i = 0; i < R.nrows(); i++) {
-      Ri(i,a) = R(i,lhs.map(a));
+  if (!ls.ri_internal_order) {
+    for (int a = 0; a < nNo; a++) {
+      for (int i = 0; i < R.nrows(); i++) {
+        Ri(i,a) = R(i,lhs.map(a));
+      }
     }
   }
   tp_unprecond = TP() - tp0;
@@ -210,19 +226,28 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
   double tp_total = tp_alloc_and_perm + tp_precond + tp_solver + tp_unprecond;
   if (lhs.commu.task == 0 && tp_total > 0.0) {
     auto pct = [&](double t) { return 100.0 * t / tp_total; };
+    const auto& collective = lhs.commu.collective_stats;
     fprintf(stderr,
       "\n--- fsils_solve TIMING (rank 0) ---\n"
+      "  Solver:               %10s\n"
       "  Total:                %10.6f s\n"
       "  Alloc+permute in:     %10.6f s  (%5.1f%%)\n"
       "  Preconditioner:       %10.6f s  (%5.1f%%)\n"
-      "  Solver (GMRES):       %10.6f s  (%5.1f%%)\n"
+      "  Solver kernel:        %10.6f s  (%5.1f%%)\n"
       "  Unprecond+permute:    %10.6f s  (%5.1f%%)\n"
+      "  MPI_Allreduce calls:  %10llu\n"
+      "  MPI_Allreduce words:  %10llu\n"
+      "  MPI_Allreduce time:   %10.6f s\n"
       "----------------------------------\n",
+      fsils_solver_type_name(ls.LS_type),
       tp_total,
       tp_alloc_and_perm, pct(tp_alloc_and_perm),
       tp_precond, pct(tp_precond),
       tp_solver, pct(tp_solver),
-      tp_unprecond, pct(tp_unprecond));
+      tp_unprecond, pct(tp_unprecond),
+      static_cast<unsigned long long>(collective.allreduce_calls),
+      static_cast<unsigned long long>(collective.allreduce_words),
+      collective.allreduce_time);
   }
   // ====================================
 }

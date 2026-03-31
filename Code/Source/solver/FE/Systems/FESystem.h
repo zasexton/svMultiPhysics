@@ -1003,6 +1003,7 @@ private:
         const dofs::DofMap* col_dof_map{nullptr};
         GlobalIndex row_dof_offset{0};
         GlobalIndex col_dof_offset{0};
+        assembly::SemanticKernelKind semantic_kind{assembly::SemanticKernelKind::SingleForm};
         bool matrix_capable{false};
         bool vector_capable{false};
     };
@@ -1174,7 +1175,8 @@ public:
     assembleBoundaryGradient(FieldId field,
                               const forms::FormExpr& integrand_trial,
                               int boundary_marker,
-                              const SystemStateView& state);
+                              const SystemStateView& state,
+                              bool apply_constraints = true);
 
 private:
 
@@ -1289,6 +1291,9 @@ private:
 
 	    bool is_setup_{false};
 	    Real last_auxiliary_advance_time_{0.0};
+        bool partitioned_auxiliary_advance_valid_{false};
+        Real partitioned_auxiliary_advance_time_{std::numeric_limits<Real>::quiet_NaN()};
+        Real partitioned_auxiliary_advance_dt_{std::numeric_limits<Real>::quiet_NaN()};
 	    mutable std::vector<Real> aux_output_flat_{}; ///< Flattened output values for assembly
 
 public:
@@ -1298,6 +1303,7 @@ public:
     /// after the PDE linear solve.
     struct BorderedCouplingData {
         bool active{false};             ///< True if monolithic aux DOFs exist
+        bool globally_reduced{false};   ///< True once dense bordered blocks have been summed for replicated MPI use
         int n_aux{0};                   ///< Number of auxiliary unknowns
         std::size_t n_field_dofs{0};    ///< Number of PDE DOFs
         std::vector<Real> D;            ///< Aux-aux Jacobian (n_aux × n_aux, row-major)
@@ -1308,6 +1314,7 @@ public:
 
         void clear() {
             active = false;
+            globally_reduced = false;
             n_aux = 0;
             n_field_dofs = 0;
             D.clear(); g.clear(); B.clear(); Ct.clear();
@@ -1344,6 +1351,7 @@ public:
         void resize(int na, std::size_t nf) {
             n_aux = na;
             n_field_dofs = nf;
+            globally_reduced = false;
             D.assign(static_cast<std::size_t>(na * na), 0.0);
             g.assign(static_cast<std::size_t>(na), 0.0);
             B.assign(nf * static_cast<std::size_t>(na), 0.0);

@@ -370,7 +370,7 @@ Real BoundaryReductionService::evaluateFunctionalEntry(CompiledFunctional& entry
     int mpi_initialized = 0;
     MPI_Initialized(&mpi_initialized);
     if (mpi_initialized) {
-        raw = allreduceSum(raw, MPI_COMM_WORLD);
+        raw = allreduceSum(raw, system_.dofHandler().mpiComm());
     }
 #endif
 
@@ -429,7 +429,7 @@ Real BoundaryReductionService::boundaryMeasure(int boundary_marker, const System
     int mpi_initialized = 0;
     MPI_Initialized(&mpi_initialized);
     if (mpi_initialized) {
-        area = allreduceSum(area, MPI_COMM_WORLD);
+        area = allreduceSum(area, system_.dofHandler().mpiComm());
     }
 #endif
 
@@ -443,16 +443,18 @@ Real BoundaryReductionService::boundaryMeasure(int boundary_marker, const System
 
 std::vector<BoundaryReductionService::SensitivityEntry>
 BoundaryReductionService::evaluateFunctionalGradient(std::string_view name,
-                                                      const SystemStateView& state)
+                                                      const SystemStateView& state,
+                                                      bool apply_constraints)
 {
     // Default: linearize w.r.t. the primary field.
-    return evaluateFunctionalGradient(name, primary_field_, state);
+    return evaluateFunctionalGradient(name, primary_field_, state, apply_constraints);
 }
 
 std::vector<BoundaryReductionService::SensitivityEntry>
 BoundaryReductionService::evaluateFunctionalGradient(std::string_view name,
                                                       FieldId target_field,
-                                                      const SystemStateView& state)
+                                                      const SystemStateView& state,
+                                                      bool apply_constraints)
 {
     auto it = name_to_functional_.find(std::string(name));
     FE_THROW_IF(it == name_to_functional_.end(), InvalidArgumentException,
@@ -492,7 +494,7 @@ BoundaryReductionService::evaluateFunctionalGradient(std::string_view name,
 
     // Symbolic gradient via BoundaryFunctionalGradientKernel + GradAccumulator.
     auto grad_entries = system_.assembleBoundaryGradient(
-        target_field, integrand_trial, entry.def.boundary_marker, state);
+        target_field, integrand_trial, entry.def.boundary_marker, state, apply_constraints);
 
     // Apply reduction: for Average, divide by boundary measure.
     if (entry.def.reduction == forms::BoundaryFunctional::Reduction::Average) {

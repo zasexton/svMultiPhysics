@@ -1289,6 +1289,12 @@ TEST_P(LinearSolverConformance, BlockSchurSaddlePointMapping)
     SolverOptions opts;
     opts.method = SolverMethod::BlockSchur;
     opts.preconditioner = PreconditionerType::Diagonal;
+    BlockLayout layout;
+    layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
+    layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
+    layout.momentum_block = 0;
+    layout.constraint_block = 1;
+    opts.block_layout = layout;
     if (kind == BackendKind::FSILS) {
         // FSILS NS solver is an inexact saddle-point routine; validate by residual reduction.
         opts.rel_tol = 0.4;

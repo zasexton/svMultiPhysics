@@ -904,6 +904,26 @@ public:
     void clearFieldSolutionData() noexcept;
 
     /**
+     * @brief Copy all bound auxiliary field solution data from another context
+     *
+     * The source and destination contexts must already have matching quadrature
+     * sizes. This performs a deep copy of the active field data so the caller
+     * can reuse per-cell field evaluations across multiple block contexts.
+     */
+    void copyFieldSolutionDataFrom(const AssemblyContext& other);
+
+    /**
+     * @brief Copy only a requested subset of auxiliary field solution data
+     *
+     * Returns true when every requested FieldId was present in the source context.
+     * The source and destination contexts must already have matching quadrature
+     * sizes.
+     */
+    [[nodiscard]] bool copyFieldSolutionDataSubsetFrom(
+        const AssemblyContext& other,
+        std::span<const FieldId> field_ids);
+
+    /**
      * @brief Pre-allocate field solution storage to avoid heap allocations during assembly
      *
      * Reserves capacity in all internal vectors so that subsequent setFieldSolutionScalar /
@@ -1234,6 +1254,16 @@ public:
      * @brief Set integration weights (pre-multiplied by Jacobian det)
      */
     void setIntegrationWeights(std::span<const Real> weights);
+
+    /**
+     * @brief Copy quadrature and geometry state from another context
+     *
+     * This is a direct deep copy of the geometry payload used by assembly:
+     * quadrature, mapped points, Jacobians, integration weights, normals, and
+     * entity measures. It avoids repeated setter-level validation and rebuild
+     * work when cloning prepared cell geometry across block contexts.
+     */
+    void copyGeometryDataFrom(const AssemblyContext& other);
 
     /**
      * @brief Set test basis function data (dof-major input, transposed to qpt-major)

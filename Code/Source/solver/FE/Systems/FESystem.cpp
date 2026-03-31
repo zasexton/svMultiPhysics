@@ -640,6 +640,21 @@ MPI_Datatype mpiGlobalIndexType()
     return upd;
 }
 
+template <class OwnedPredicate>
+std::vector<std::pair<GlobalIndex, Real>>
+filterSparsePairsToOwned(std::span<const std::pair<GlobalIndex, Real>> pairs,
+                         OwnedPredicate&& is_owned)
+{
+    std::vector<std::pair<GlobalIndex, Real>> owned_pairs;
+    owned_pairs.reserve(pairs.size());
+    for (const auto& kv : pairs) {
+        if (is_owned(kv.first)) {
+            owned_pairs.push_back(kv);
+        }
+    }
+    return owned_pairs;
+}
+
 FESystem::FESystem(std::shared_ptr<const assembly::IMeshAccess> mesh_access)
     : mesh_access_(std::move(mesh_access))
 {
@@ -1734,6 +1749,11 @@ void FESystem::beginTimeStep(bool reset_auxiliary_state,
     // Invalidate all auxiliary inputs for the new time step.
     if (invalidate_auxiliary_inputs && auxiliary_input_registry_) {
         auxiliary_input_registry_->invalidateAll();
+    }
+    if (reset_auxiliary_state || invalidate_auxiliary_inputs) {
+        partitioned_auxiliary_advance_valid_ = false;
+        partitioned_auxiliary_advance_time_ = std::numeric_limits<Real>::quiet_NaN();
+        partitioned_auxiliary_advance_dt_ = std::numeric_limits<Real>::quiet_NaN();
     }
 }
 
@@ -3121,6 +3141,10 @@ void FESystem::advanceAuxiliaryState(Real time, Real dt)
             advanceOneEntry(entry, time, dt, entry.stepper_spec.substep_count);
         }
     }
+
+    partitioned_auxiliary_advance_valid_ = true;
+    partitioned_auxiliary_advance_time_ = time;
+    partitioned_auxiliary_advance_dt_ = dt;
 }
 
 void FESystem::advanceOneEntry(DeployedAuxEntry& entry, Real time, Real dt, int substep_count)
@@ -4009,7 +4033,8 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                     if (svc_it != boundary_reduction_services_.end() && svc_it->second) {
                                         for (const auto target_fid : ref_fields) {
                                             auto grad = svc_it->second->evaluateFunctionalGradient(
-                                                func_name, target_fid, state);
+                                                func_name, target_fid, state,
+                                                bordered_coupling_.active);
 
                                             // For averages, apply quotient rule:
                                             // d(I/M)/du = (dI/du)/M  (measure M is constant w.r.t. u
@@ -4496,7 +4521,8 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
 
                     for (const auto target_fid : ref_fields) {
                         auto grad = svc_it->second->evaluateFunctionalGradient(
-                            func_name, target_fid, state);
+                            func_name, target_fid, state,
+                            bordered_coupling_.active);
 
                         if (is_domain_region_avg && auxiliary_input_registry_) {
                             const std::string meas_name = handle.registryName() + "__measure";
@@ -4523,7 +4549,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                             local_pairs.emplace_back(dof, val);
                         }
                         const auto global_pairs =
-                            allreduceSumSparsePairs(std::move(local_pairs), MPI_COMM_WORLD);
+                            allreduceSumSparsePairs(std::move(local_pairs), dof_handler_.mpiComm());
                         out.assign(global_pairs.begin(), global_pairs.end());
                     }
 #else
@@ -4786,7 +4812,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                         local_pairs.emplace_back(dof, val);
                                     }
                                     const auto global_pairs =
-                                        allreduceSumSparsePairs(std::move(local_pairs), MPI_COMM_WORLD);
+                                        allreduceSumSparsePairs(std::move(local_pairs), dof_handler_.mpiComm());
                                     dR_rank1_entries.clear();
                                     dR_rank1_entries.reserve(global_pairs.size());
                                     for (const auto& [dof, val] : global_pairs) {
@@ -4854,6 +4880,11 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                         auto upd = tryBuildDirectCouplingRankOneUpdate(
                                             dR_rank1_entries, q_u, dOk_dIm);
                                         if (upd.has_value()) {
+                                            const auto& owned_dofs = dof_handler_.getPartition().locallyOwned();
+                                            upd->v = filterSparsePairsToOwned(
+                                                std::span<const std::pair<GlobalIndex, Real>>(upd->v.data(),
+                                                                                               upd->v.size()),
+                                                [&](GlobalIndex dof) { return owned_dofs.contains(dof); });
                                             if (monolithicDirectTraceEnabled()) {
                                                 std::ostringstream oss;
                                                 oss << "FESystem: monolithic direct coupling"
@@ -5765,7 +5796,8 @@ std::vector<BoundaryReductionService::SensitivityEntry>
 FESystem::assembleBoundaryGradient(FieldId field,
                                     const forms::FormExpr& integrand_trial,
                                     int boundary_marker,
-                                    const SystemStateView& state)
+                                    const SystemStateView& state,
+                                    bool apply_constraints)
 {
     const auto& rec = fieldRecord(field);
     FE_CHECK_NOT_NULL(rec.space.get(),
@@ -5848,7 +5880,7 @@ FESystem::assembleBoundaryGradient(FieldId field,
     // operator so monolithic direct-feedthrough uses free-DOF sensitivities
     // consistent with the assembled Jacobian.
     const auto* restore_constraints =
-        use_constraints_in_assembly_ ? &affine_constraints_ : nullptr;
+        (apply_constraints && use_constraints_in_assembly_) ? &affine_constraints_ : nullptr;
     assembler_->setConstraints(restore_constraints);
     assembler_->setRowDofMap(fdh.getDofMap(), field_off);
     assembler_->setColDofMap(fdh.getDofMap(), field_off);

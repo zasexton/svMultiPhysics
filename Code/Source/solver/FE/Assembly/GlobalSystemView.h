@@ -121,6 +121,13 @@ enum class AssemblyPhase : std::uint8_t {
     Finalized     ///< Assembly complete, ready for use
 };
 
+struct InsertionCapabilities {
+    bool resolved_matrix_entries{false};
+    bool resolved_vector_entries{false};
+    bool contiguous_combined_matrix_insert{false};
+    bool exact_rank_one_updates{false};
+};
+
 // ============================================================================
 // Global System View Interface
 // ============================================================================
@@ -159,6 +166,16 @@ enum class AssemblyPhase : std::uint8_t {
 class GlobalSystemView {
 public:
     virtual ~GlobalSystemView() = default;
+
+    [[nodiscard]] virtual InsertionCapabilities insertionCapabilities() const noexcept
+    {
+        return InsertionCapabilities{
+            .resolved_matrix_entries = matrixLayoutHandle() != nullptr,
+            .resolved_vector_entries = vectorLayoutHandle() != nullptr,
+            .contiguous_combined_matrix_insert = false,
+            .exact_rank_one_updates = false,
+        };
+    }
 
     // =========================================================================
     // Matrix Operations

@@ -18,6 +18,10 @@
 #include <span>
 #include <vector>
 
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+#include <mpi.h>
+#endif
+
 namespace svmp {
 namespace FE {
 namespace sparsity {
@@ -32,10 +36,20 @@ public:
     explicit FsilsMatrix(const sparsity::SparsityPattern& sparsity);
     FsilsMatrix(const sparsity::SparsityPattern& sparsity,
                 int dof_per_node,
-                std::shared_ptr<const DofPermutation> dof_permutation = {});
+                std::shared_ptr<const DofPermutation> dof_permutation = {}
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+                ,
+                MPI_Comm comm = MPI_COMM_WORLD
+#endif
+    );
     FsilsMatrix(const sparsity::DistributedSparsityPattern& sparsity,
                 int dof_per_node,
-                std::shared_ptr<const DofPermutation> dof_permutation = {});
+                std::shared_ptr<const DofPermutation> dof_permutation = {}
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+                ,
+                MPI_Comm comm = MPI_COMM_WORLD
+#endif
+    );
     ~FsilsMatrix() override;
 
     FsilsMatrix(FsilsMatrix&&) noexcept;
@@ -99,6 +113,9 @@ private:
     GlobalIndex global_cols_{0};
     GlobalIndex nnz_{0};
 
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+    MPI_Comm comm_{MPI_COMM_WORLD};
+#endif
     std::shared_ptr<FsilsShared> shared_{};
     std::vector<Real> values_{}; // (dof*dof) x nnz (column-major for FSILS Array wrapper)
 };

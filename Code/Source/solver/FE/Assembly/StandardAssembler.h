@@ -416,6 +416,20 @@ private:
         std::span<const GlobalIndex> col_dofs{};
     };
 
+    struct CombinedInsertBlockInfo {
+        int row_comp_start{0};
+        int col_comp_start{0};
+        int row_comps{0};
+        int col_comps{0};
+    };
+
+    struct CombinedInsertTarget {
+        GlobalSystemView* matrix_view{nullptr};
+        GlobalSystemView* vector_view{nullptr};
+        bool assemble_matrix{false};
+        bool assemble_vector{false};
+    };
+
     /**
      * @brief Per-thread mutable state for prepareGeometry in colored parallel assembly.
      *
@@ -666,6 +680,22 @@ private:
         std::span<const GlobalIndex> col_dofs,
         GlobalSystemView* matrix_view,
         GlobalSystemView* vector_view);
+    void resizeCombinedInsertScratch(std::size_t batch_size, int combined_n);
+    void zeroCombinedInsertScratch(std::size_t active, int combined_n);
+    void scatterCombinedInsertBlockOutput(
+        std::size_t slot,
+        const KernelOutput& output,
+        std::span<const GlobalIndex> row_dofs,
+        std::span<const GlobalIndex> col_dofs,
+        const CombinedInsertBlockInfo& info,
+        int total_comps,
+        int combined_n,
+        bool want_matrix,
+        bool want_vector);
+    void flushCombinedInsertBatch(
+        std::span<const GlobalIndex> batch_cell_ids,
+        int combined_n,
+        const CombinedInsertTarget& target);
 
     /**
      * @brief Get element from function space for a cell
@@ -1077,12 +1107,47 @@ private:
     void ensureFieldRecipes(const IMeshAccess& mesh,
                             const std::vector<FieldRequirement>& requirements);
 
+    struct CellCoefficientCacheEntry {
+        const dofs::DofMap* dof_map{nullptr};
+        GlobalIndex dof_offset{0};
+        const spaces::FunctionSpace* space{nullptr};
+        int history_index{0}; // 0=current, k>0 previous solution state
+        bool localized_vector_basis{false};
+        std::vector<Real> coeffs{};
+    };
+    struct CellFieldEvaluationCacheEntry {
+        FieldId field_id{INVALID_FIELD_ID};
+        GlobalIndex cell_id{-1};
+        int history_index{0}; // 0=current, k>0 previous solution state
+        FieldType field_type{FieldType::Scalar};
+        int value_dim{1};
+        bool has_values{false};
+        bool has_gradients{false};
+        std::vector<Real> scalar_values{};
+        std::vector<AssemblyContext::Vector3D> scalar_gradients{};
+        std::vector<AssemblyContext::Vector3D> vector_values{};
+        std::vector<AssemblyContext::Matrix3x3> vector_jacobians{};
+    };
+    [[nodiscard]] std::span<const Real> gatherCachedCellVectorCoefficients(
+        std::deque<CellCoefficientCacheEntry>& cache,
+        const IMeshAccess& mesh,
+        GlobalIndex cell_id,
+        const dofs::DofMap* dof_map,
+        GlobalIndex dof_offset,
+        const spaces::FunctionSpace* space,
+        std::span<const GlobalIndex> dofs,
+        int history_index,
+        bool localized_vector_basis,
+        const char* error_prefix);
+
     /// Optimized field solution population using cached recipes + flat coords.
     void populateFieldSolutionDataFast(
         AssemblyContext& context,
         const IMeshAccess& mesh,
         GlobalIndex cell_id,
-        const std::vector<FieldRequirement>& requirements);
+        const std::vector<FieldRequirement>& requirements,
+        std::deque<CellCoefficientCacheEntry>* coefficient_cache = nullptr,
+        std::deque<CellFieldEvaluationCacheEntry>* field_eval_cache = nullptr);
 };
 
 // ============================================================================

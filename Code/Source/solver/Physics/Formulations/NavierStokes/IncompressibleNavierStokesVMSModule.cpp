@@ -24,6 +24,24 @@
 #endif
 
 namespace {
+svmp::FE::forms::SymbolicOptions makeBoundaryFunctionalCompilerOptions(bool enable_jit,
+                                                                       bool enable_jit_specialization)
+{
+    svmp::FE::forms::SymbolicOptions options{};
+#if SVMP_FE_ENABLE_LLVM_JIT
+    options.jit.enable = enable_jit;
+    if (options.jit.enable) {
+        options.jit.optimization_level = 3;
+        options.jit.specialization.enable = enable_jit_specialization;
+        options.jit.specialization.specialize_n_qpts = enable_jit_specialization;
+        options.jit.specialization.specialize_dofs = enable_jit_specialization;
+    }
+#else
+    (void)enable_jit;
+    (void)enable_jit_specialization;
+#endif
+    return options;
+}
 } // namespace
 
 namespace svmp {
@@ -205,6 +223,13 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     // Boundary conditions (installer + factories)
     // ---------------------------------------------------------------------
 
+    if (!options_.coupled_outflow_rcr.empty() || !options_.coupled_outflow_rcrcr.empty()) {
+        const auto compiler_options =
+            makeBoundaryFunctionalCompilerOptions(options_.enable_jit, options_.enable_jit_specialization);
+        system.boundaryReductionService(u_id).setCompilerOptions(compiler_options);
+        system.coupledBoundaryManager(u_id).setCompilerOptions(compiler_options);
+    }
+
     FE::systems::BoundaryConditionManager bc_manager;
 
     // Weak velocity Dirichlet is applied directly to the Forms residual (affects both momentum and continuity).
@@ -238,14 +263,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     p_bc_manager.applyAll(system, p_id);
 
     Factories::applyVelocityNitscheBCs(momentum_form, continuity_form, options_, *velocity_space_, dim, u, p, v, q, mu);
-    // Pressure nullspace detection and cross-field anchoring are handled
-    // automatically by the FE analysis infrastructure:
-    //   - FormContributionLowerer detects ScalarConstant nullspace from PSPG
-    //   - SystemSetup IBP coupling analysis detects that pressure enters
-    //     algebraically in the momentum equation (ConstraintPair), and emits
-    //     anchoring evidence on markers where velocity has natural BCs
-    //
-    // No physics-specific gauge registration needed here.
 
     // Install the complete residual (momentum + continuity) via the unified
     // installFormulation() entry point.  It auto-detects the two-field mixed
@@ -255,11 +272,13 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     FE::systems::FormInstallOptions install{};
     install.compiler_options.use_symbolic_tangent = true;
 #if SVMP_FE_ENABLE_LLVM_JIT
-    install.compiler_options.jit.enable = true;
-    install.compiler_options.jit.optimization_level = 3;
-    install.compiler_options.jit.specialization.enable = true;
-    install.compiler_options.jit.specialization.specialize_n_qpts = true;
-    install.compiler_options.jit.specialization.specialize_dofs = true;
+    install.compiler_options.jit.enable = options_.enable_jit;
+    if (install.compiler_options.jit.enable) {
+        install.compiler_options.jit.optimization_level = 3;
+        install.compiler_options.jit.specialization.enable = options_.enable_jit_specialization;
+        install.compiler_options.jit.specialization.specialize_n_qpts = options_.enable_jit_specialization;
+        install.compiler_options.jit.specialization.specialize_dofs = options_.enable_jit_specialization;
+    }
 #endif
     (void)FE::systems::installFormulation(system, "equations", {u_id, p_id}, residual, install);
 }

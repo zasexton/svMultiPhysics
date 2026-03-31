@@ -27,6 +27,22 @@ namespace Physics {
 namespace formulations {
 namespace poisson {
 
+namespace {
+FE::forms::SymbolicOptions makeBoundaryFunctionalCompilerOptions(bool enable_jit,
+                                                                 bool enable_jit_specialization)
+{
+    FE::forms::SymbolicOptions options{};
+#if SVMP_FE_ENABLE_LLVM_JIT
+    options.jit.enable = enable_jit;
+    options.jit.specialization.enable = enable_jit_specialization;
+#else
+    (void)enable_jit;
+    (void)enable_jit_specialization;
+#endif
+    return options;
+}
+} // namespace
+
 PoissonModule::PoissonModule(std::shared_ptr<const FE::spaces::FunctionSpace> space,
                              PoissonOptions options)
     : space_(std::move(space))
@@ -58,6 +74,13 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
     const auto integrand = k * inner(grad(u), grad(v)) - f * v;
     auto residual = integrand.dx();
 
+    if (!options_.coupled_neumann_rcr.empty()) {
+        const auto compiler_options =
+            makeBoundaryFunctionalCompilerOptions(options_.enable_jit, options_.enable_jit_specialization);
+        system.boundaryReductionService(u_id).setCompilerOptions(compiler_options);
+        system.coupledBoundaryManager(u_id).setCompilerOptions(compiler_options);
+    }
+
     FE::systems::BoundaryConditionManager bc_manager;
     bc_manager.install(options_.neumann, Factories::toNaturalBC);
     bc_manager.install(options_.robin, Factories::toRobinBC);
@@ -77,7 +100,8 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
 
     FE::systems::FormInstallOptions install_opts{};
 #if SVMP_FE_ENABLE_LLVM_JIT
-    install_opts.compiler_options.jit.enable = true;
+    install_opts.compiler_options.jit.enable = options_.enable_jit;
+    install_opts.compiler_options.jit.specialization.enable = options_.enable_jit_specialization;
     install_opts.compiler_options.use_symbolic_tangent = true;
 #endif
 

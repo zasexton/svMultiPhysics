@@ -17,6 +17,7 @@
 
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/Vocabulary.h"
 #include "Forms/WeakForm.h"
 
@@ -89,6 +90,18 @@ svmp::FE::assembly::DenseVectorView assembleLinear(
     vec.zero();
     (void)assembler.assembleVector(mesh, test_space, kernel, vec);
     return vec;
+}
+
+const svmp::FE::forms::NonlinearFormKernel* unwrapNonlinearKernel(
+    const std::shared_ptr<svmp::FE::assembly::AssemblyKernel>& kernel)
+{
+    if (!kernel) {
+        return nullptr;
+    }
+    if (const auto* jit = dynamic_cast<const svmp::FE::forms::jit::JITKernelWrapper*>(kernel.get())) {
+        return dynamic_cast<const svmp::FE::forms::NonlinearFormKernel*>(&jit->fallbackKernel());
+    }
+    return dynamic_cast<const svmp::FE::forms::NonlinearFormKernel*>(kernel.get());
 }
 
 } // namespace
@@ -275,7 +288,7 @@ TEST(FormsInstaller, FormsInstaller_InstallResidualForm_ADModeForward)
         sys, "op", u_field, u_field, residual_form,
         svmp::FE::systems::FormInstallOptions{.ad_mode = svmp::FE::forms::ADMode::Forward});
     ASSERT_NE(installed, nullptr);
-    EXPECT_NE(dynamic_cast<svmp::FE::forms::NonlinearFormKernel*>(installed.get()), nullptr);
+    EXPECT_NE(unwrapNonlinearKernel(installed), nullptr);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -342,7 +355,7 @@ TEST(FormsInstaller, FormsInstaller_InstallResidualForm_ADModeReverse)
         sys, "op", u_field, u_field, residual_form,
         svmp::FE::systems::FormInstallOptions{.ad_mode = svmp::FE::forms::ADMode::Reverse});
     ASSERT_NE(installed, nullptr);
-    EXPECT_NE(dynamic_cast<svmp::FE::forms::NonlinearFormKernel*>(installed.get()), nullptr);
+    EXPECT_NE(unwrapNonlinearKernel(installed), nullptr);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -510,14 +523,34 @@ TEST(FormsInstaller, FormsInstaller_InstallFormulation_CoupledSeparatesVectorAnd
 
     const auto u_state = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
     const auto p_state = svmp::FE::forms::FormExpr::stateField(p_field, *space, "p");
-    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
-    const auto q = svmp::FE::forms::FormExpr::testFunction(*space, "q");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(u_field, *space, "v");
+    const auto q = svmp::FE::forms::FormExpr::testFunction(p_field, *space, "q");
 
     const auto residual =
         (u_state * v + p_state * v).dx() +  // depends on u and p
         (q * u_state).dx();                  // depends on u only
 
-    (void)svmp::FE::systems::installFormulation(sys, "op", {u_field, p_field}, residual);
+    svmp::FE::systems::FormInstallOptions opts;
+    opts.compiler_options.jit.enable = true;
+    const auto installed =
+        svmp::FE::systems::installFormulation(sys, "op", {u_field, p_field}, residual, opts);
+
+    ASSERT_NE(installed.mixed_plan, nullptr);
+    EXPECT_TRUE(installed.mixed_plan->usesMonolithicCellKernel());
+    ASSERT_EQ(installed.mixed_plan->blocks.size(), 3u);
+
+    std::size_t matrix_blocks = 0;
+    std::size_t vector_blocks = 0;
+    for (const auto& block : installed.mixed_plan->blocks) {
+        if (block.want_matrix) {
+            ++matrix_blocks;
+        }
+        if (block.want_vector) {
+            ++vector_blocks;
+        }
+    }
+    EXPECT_EQ(matrix_blocks, 3u);
+    EXPECT_EQ(vector_blocks, 2u);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -578,15 +611,18 @@ TEST(FormsInstaller, FormsInstaller_InstallCoupledResidual_StateFieldsTracked)
 
     const auto u_state = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
     const auto p_state = svmp::FE::forms::FormExpr::stateField(p_field, *space, "p");
-    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
-    const auto q = svmp::FE::forms::FormExpr::testFunction(*space, "q");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(u_field, *space, "v");
+    const auto q = svmp::FE::forms::FormExpr::testFunction(p_field, *space, "q");
 
     svmp::FE::forms::BlockLinearForm residual(/*tests=*/2);
     residual.setBlock(0, (u_state * v + p_state * v).dx()); // depends on u and p
     residual.setBlock(1, (q * u_state).dx());               // depends on u only
 
     const std::array<FieldId, 2> fields = {u_field, p_field};
-    const auto installed = svmp::FE::systems::installCoupledResidual(sys, "op", fields, fields, residual);
+    svmp::FE::systems::FormInstallOptions opts;
+    opts.compiler_options.jit.enable = true;
+    const auto installed =
+        svmp::FE::systems::installCoupledResidual(sys, "op", fields, fields, residual, opts);
 
     ASSERT_EQ(installed.jacobian_blocks.size(), 2u);
     ASSERT_EQ(installed.jacobian_blocks[0].size(), 2u);
@@ -596,6 +632,18 @@ TEST(FormsInstaller, FormsInstaller_InstallCoupledResidual_StateFieldsTracked)
     EXPECT_NE(installed.jacobian_blocks[0][1], nullptr);
     EXPECT_NE(installed.jacobian_blocks[1][0], nullptr);
     EXPECT_EQ(installed.jacobian_blocks[1][1], nullptr); // dR_p / dp == 0
+
+    ASSERT_NE(installed.mixed_plan, nullptr);
+    EXPECT_TRUE(installed.mixed_plan->usesMonolithicCellKernel());
+    ASSERT_EQ(installed.mixed_plan->blocks.size(), 3u);
+
+    std::size_t vector_blocks = 0;
+    for (const auto& block : installed.mixed_plan->blocks) {
+        if (block.want_vector) {
+            ++vector_blocks;
+        }
+    }
+    EXPECT_EQ(vector_blocks, 2u);
 }
 
 TEST(FormsInstaller, FormsInstaller_InstallFormulation_FormWithoutDx_Throws)

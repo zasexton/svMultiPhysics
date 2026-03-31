@@ -43,6 +43,16 @@ void fsils_ls_create(FSILS_lsType& ls, LinearSolverType LS_type, double relTol, 
   using namespace consts;
   ls.foC = true;
   ls.LS_type = LS_type;
+  ls.blockschur_stats.reset();
+  ls.GM.stats.reset();
+  ls.CG.stats.reset();
+  ls.RI.stats.reset();
+  ls.RI.exact_convergence = false;
+  ls.GM.exact_convergence = false;
+  ls.CG.exact_convergence = false;
+  ls.RI.disable_reorth = false;
+  ls.GM.disable_reorth = false;
+  ls.CG.disable_reorth = false;
 
   // Set default parameters for each solver type.
   //
@@ -120,4 +130,3 @@ void fsils_ls_create(FSILS_lsType& ls, LinearSolverType LS_type, double relTol, 
 }
 
 };
-

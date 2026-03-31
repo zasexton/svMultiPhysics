@@ -620,6 +620,13 @@ public:
      */
     [[nodiscard]] const DofPartition& getPartition() const noexcept { return partition_; }
 
+#if FE_HAS_MPI
+    /**
+     * @brief Get the MPI communicator associated with this DOF layout
+     */
+    [[nodiscard]] MPI_Comm mpiComm() const noexcept { return mpi_comm_; }
+#endif
+
     /**
      * @brief Get entity-DOF map (if available)
      * @return Pointer to entity DOF map, or nullptr

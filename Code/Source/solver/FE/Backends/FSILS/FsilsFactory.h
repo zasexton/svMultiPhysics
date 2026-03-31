@@ -12,6 +12,10 @@
 
 #include "Backends/FSILS/FsilsShared.h"
 
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+#include <mpi.h>
+#endif
+
 namespace svmp {
 namespace FE {
 namespace backends {
@@ -22,9 +26,17 @@ public:
     using BackendFactory::createVector;
 
     explicit FsilsFactory(int dof_per_node = 1,
-                          std::shared_ptr<const DofPermutation> dof_permutation = {})
+                          std::shared_ptr<const DofPermutation> dof_permutation = {}
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+                          ,
+                          MPI_Comm comm = MPI_COMM_WORLD
+#endif
+                          )
         : dof_per_node_(dof_per_node)
         , dof_permutation_(std::move(dof_permutation))
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+        , comm_(comm)
+#endif
     {
     }
 
@@ -47,6 +59,9 @@ public:
 private:
     int dof_per_node_{1};
     std::shared_ptr<const DofPermutation> dof_permutation_{};
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+    MPI_Comm comm_{MPI_COMM_WORLD};
+#endif
     mutable std::shared_ptr<const FsilsShared> cached_shared_{};
 };
 

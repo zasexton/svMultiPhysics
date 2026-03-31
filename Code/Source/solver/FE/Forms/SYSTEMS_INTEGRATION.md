@@ -37,6 +37,8 @@ How `FE/Forms` weak-form expressions become assembled operators in `FE/Systems`.
 3. **Install**: `FormsInstaller` wraps compiled IR in kernels and registers them into `FESystem`:
    - `installFormulation()` handles residual physics (auto-detects single vs mixed)
    - `installMixedBilinear()` / `installMixedLinear()` handle operator installation
+   - mixed installation first builds a `MixedKernelPlan`, then selects either
+     one `MixedBlockKernelSet` or one `MonolithicCellKernel` for cell-domain work
 4. **Assemble**: `FE/Assembly` iterates mesh entities, prepares `AssemblyContext` according to `RequiredData`, calls the kernel, and inserts local contributions into backend-neutral global views.
 
 ## 2. Residual Physics (the main path)
@@ -85,8 +87,15 @@ installFormulation(system, "equations", {u_field, p_field}, residual);
 `installFormulation()` automatically:
 - Decomposes the expression by test function
 - Detects which fields each test row depends on
+- Builds an explicit `MixedKernelPlan`
 - Installs Jacobian blocks and residual kernels
-- Creates `CoupledBlockKernel` for fused assembly
+- Selects either:
+  - one exact `MixedBlockKernelSet`, or
+  - one `MonolithicCellKernel` for mixed cell assembly
+
+Optional colocation/text-layout optimization now lives inside
+`MixedBlockKernelSet`; there is no separate helper kernel type in the
+production semantic path.
 
 ## 3. Mixed Operators (bilinear / linear)
 
@@ -99,6 +108,12 @@ installMixedBilinear(system, "stiffness", test_fields, trial_fields, a);
 auto L = (f * v).dx() + (g * q).dx();
 installMixedLinear(system, "load", test_fields, L);
 ```
+
+When JIT cell fusion is enabled and the mixed cell blocks are compatible,
+`installMixedBilinear()` / `installMixedFormIR()` register one
+`MonolithicCellKernel` for the cell domain. Otherwise they register one
+`MixedBlockKernelSet` for exact per-block cell work and keep boundary /
+interior-face / interface-face terms as exact per-block kernels.
 
 ## 4. Modifiers
 
@@ -173,6 +188,22 @@ system.addCellKernel("op", field, my_custom_kernel);
 - `.ds(marker)` → boundary-face loop
 - `.dS()` → interior-face loop (DG 4-block)
 - `.dI(marker)` → interface-face loop
+
+## 6.1 Tracing The Active Kernel Path
+
+Use `SVMP_FE_KERNEL_TRACE` to inspect mixed-kernel selection and execution:
+
+```bash
+SVMP_FE_KERNEL_TRACE=selection
+SVMP_FE_KERNEL_TRACE=specialization
+SVMP_FE_KERNEL_TRACE=assembly,capabilities
+SVMP_FE_KERNEL_TRACE=all
+```
+
+Legacy trace env vars are still accepted:
+
+- `SVMP_OOP_SOLVER_TRACE`
+- `SVMP_JIT_TRACE_SPECIALIZATION`
 
 ## 7. Migrating from the Old Pattern
 

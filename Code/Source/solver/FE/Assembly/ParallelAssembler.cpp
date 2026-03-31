@@ -639,11 +639,6 @@ void ParallelAssembler::finalize(GlobalSystemView* matrix_view, GlobalSystemView
             }
         }
 
-        if (options_.deterministic) {
-            std::sort(pending_received_matrix_.begin(), pending_received_matrix_.end());
-            std::sort(pending_received_vector_.begin(), pending_received_vector_.end());
-        }
-
         if (matrix_view) {
             for (const auto& entry : pending_received_matrix_) {
                 matrix_view->addMatrixEntry(entry.global_row, entry.global_col, entry.value);

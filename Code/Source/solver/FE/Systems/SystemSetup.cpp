@@ -29,6 +29,8 @@
 
 #include "Systems/SystemConstraints.h"
 
+#include "Analysis/TopologyAnalysisContext.h"
+
 #include "Sparsity/ConstraintSparsityAugmenter.h"
 #include "Sparsity/DistributedSparsityPattern.h"
 
@@ -36,16 +38,16 @@
 
 #include "Spaces/FunctionSpace.h"
 
-#include "Dofs/DofGraph.h"
 #include "Dofs/EntityDofMap.h"
-#include "Sparsity/GraphSparsity.h"
 
 #include "Elements/ReferenceElement.h"
 
 #include "Quadrature/QuadratureFactory.h"
 
 #include "Core/FEConfig.h"
-#include "Forms/CoupledBlockKernel.h"
+#include "Core/KernelTrace.h"
+#include "Forms/MixedBlockKernelSet.h"
+#include "Forms/MonolithicCellKernel.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 
 #include <algorithm>
@@ -1377,53 +1379,61 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
         // Must be built BEFORE the Dirichlet scan so that Dirichlet evidence
         // can be tagged with the correct region.
         //
-        // Limitation: this assumes vertex-based DOF spaces (H1/P1).  The graph
-        // is built from field 0's DofMap (1:1 with mesh vertices for P1 scalar
-        // fields), and the region lambda only resolves DOFs whose EntityKind is
-        // Vertex.  Edge/face/cell interior DOFs (higher-order, DG) fall through
-        // to region 0.  This is appropriate for the current H1 formulations and
-        // is the correct first-step scope; a general solution would build the
-        // graph from the cell-adjacency structure of the mesh itself.
+        // Limitation: this assumes vertex-based DOF spaces (H1/P1) when mapping
+        // a DOF back to a region.  Connectivity itself is mesh-based so mixed or
+        // vector-valued field ordering does not distort region detection.
         gauge::GaugeRegistry::RegionProvider region_provider;
+        std::shared_ptr<std::map<int, std::vector<int>>> marker_regions;
         {
-            if (!field_dof_handlers_.empty()) {
-                const auto& dmap = field_dof_handlers_[0].getDofMap();
-                dofs::DofGraph dg;
-                dg.build(dmap);
-                if (dg.numDofs() > 0) {
-                    auto offsets = dg.getAdjOffsets();
-                    auto indices = dg.getAdjIndices();
-                    sparsity::SparsityPattern sp(dg.numDofs(), dg.numDofs());
-                    for (GlobalIndex row = 0; row < dg.numDofs(); ++row) {
-                        for (auto j = offsets[static_cast<std::size_t>(row)];
-                             j < offsets[static_cast<std::size_t>(row + 1)]; ++j) {
-                            sp.addEntry(row, indices[static_cast<std::size_t>(j)]);
+            if (mesh_access_) {
+                const auto& mesh_ref = meshAccess();
+                auto topo = analysis::TopologyAnalysisContext::build(mesh_ref);
+                if (topo.numRegions() > 1) {
+                    auto vertex_region = std::make_shared<std::vector<int>>();
+                    std::vector<GlobalIndex> nodes;
+                    mesh_ref.forEachCell([&](GlobalIndex cell_id) {
+                        const int region = topo.regionForCell(cell_id);
+                        if (region < 0) {
+                            return;
                         }
-                    }
-                    sp.finalize();
-                    sparsity::GraphSparsity gs(std::move(sp));
-                    auto comp_result = gs.computeConnectedComponents();
-                    if (comp_result.num_components > 1) {
-                        auto vertex_region = std::make_shared<std::vector<GlobalIndex>>(
-                            std::move(comp_result.component_id));
-                        const auto* emap = dof_handler_.getEntityDofMap();
-                        if (emap) {
-                            region_provider = [vertex_region, emap]
-                                              (GlobalIndex dof) -> int {
-                                auto ent = emap->getDofEntity(dof);
-                                if (ent && ent->kind == dofs::EntityKind::Vertex) {
-                                    const auto vid = static_cast<std::size_t>(ent->id);
-                                    if (vid < vertex_region->size()) {
-                                        return static_cast<int>((*vertex_region)[vid]);
+                        nodes.clear();
+                        mesh_ref.getCellNodes(cell_id, nodes);
+                        for (const auto n : nodes) {
+                            if (n < 0) {
+                                continue;
+                            }
+                            const auto idx = static_cast<std::size_t>(n);
+                            if (idx >= vertex_region->size()) {
+                                vertex_region->resize(idx + 1, -1);
+                            }
+                            auto& slot = (*vertex_region)[idx];
+                            if (slot < 0) {
+                                slot = region;
+                            }
+                        }
+                    });
+
+                    const auto* emap = dof_handler_.getEntityDofMap();
+                    if (emap && !vertex_region->empty()) {
+                        region_provider = [vertex_region, emap](GlobalIndex dof) -> int {
+                            auto ent = emap->getDofEntity(dof);
+                            if (ent && ent->kind == dofs::EntityKind::Vertex) {
+                                const auto vid = static_cast<std::size_t>(ent->id);
+                                if (vid < vertex_region->size()) {
+                                    const int region = (*vertex_region)[vid];
+                                    if (region >= 0) {
+                                        return region;
                                     }
                                 }
-                                return 0;
-                            };
-                        }
+                            }
+                            return 0;
+                        };
+                        marker_regions = std::make_shared<std::map<int, std::vector<int>>>(
+                            topo.boundary_mapping.marker_to_regions);
                         std::fprintf(stderr,
                             "[GaugeRegistry] Mesh has %lld connected components — "
                             "enabling per-region gauge scoping\n",
-                            static_cast<long long>(comp_result.num_components));
+                            static_cast<long long>(topo.numRegions()));
                     }
                 }
             }
@@ -1441,37 +1451,14 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
         // per-region candidates, so those anchors require the physics module
         // to be updated to emit per-marker evidence for full region support.
         // -----------------------------------------------------------------
-        if (region_provider && mesh_access_) {
-            const auto& mesh_ref = meshAccess();
+        if (region_provider && marker_regions) {
             gauge_registry_->retagEvidenceRegions(
-                [&](int marker) -> std::vector<int> {
-                    std::vector<int> regions;
-                    mesh_ref.forEachBoundaryFace(marker,
-                        [&](GlobalIndex /*face_id*/, GlobalIndex cell_id) {
-                            // Get any vertex of this cell → region
-                            std::vector<GlobalIndex> nodes;
-                            mesh_ref.getCellNodes(cell_id, nodes);
-                            for (const auto n : nodes) {
-                                int r = region_provider(
-                                    // Map vertex to a DOF to query the region_provider.
-                                    // For P1, vertex ID maps to the first field's DOF.
-                                    // Use EntityDofMap for correctness.
-                                    [&]() -> GlobalIndex {
-                                        const auto* emap = dof_handler_.getEntityDofMap();
-                                        if (emap) {
-                                            auto vdofs = emap->getVertexDofs(n);
-                                            if (!vdofs.empty()) return vdofs[0];
-                                        }
-                                        return n;  // fallback
-                                    }());
-                                bool found = false;
-                                for (int existing : regions) {
-                                    if (existing == r) { found = true; break; }
-                                }
-                                if (!found) regions.push_back(r);
-                            }
-                        });
-                    return regions;
+                [marker_regions](int marker) -> std::vector<int> {
+                    auto it = marker_regions->find(marker);
+                    if (it == marker_regions->end()) {
+                        return {};
+                    }
+                    return it->second;
                 });
         }
 
@@ -1709,33 +1696,14 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
         // The first retagEvidenceRegions() ran before the IBP pass; this second
         // call processes only the new global evidence (existing per-region evidence
         // from the first call is left untouched since its region is already >= 0).
-        if (region_provider && mesh_access_) {
-            const auto& mesh_ref_ibp = meshAccess();
+        if (region_provider && marker_regions) {
             gauge_registry_->retagEvidenceRegions(
-                [&](int marker) -> std::vector<int> {
-                    std::vector<int> regions;
-                    mesh_ref_ibp.forEachBoundaryFace(marker,
-                        [&](GlobalIndex /*face_id*/, GlobalIndex cell_id) {
-                            std::vector<GlobalIndex> nodes;
-                            mesh_ref_ibp.getCellNodes(cell_id, nodes);
-                            for (const auto n : nodes) {
-                                int r = region_provider(
-                                    [&]() -> GlobalIndex {
-                                        const auto* emap = dof_handler_.getEntityDofMap();
-                                        if (emap) {
-                                            auto vdofs = emap->getVertexDofs(n);
-                                            if (!vdofs.empty()) return vdofs[0];
-                                        }
-                                        return n;
-                                    }());
-                                bool found = false;
-                                for (int existing : regions) {
-                                    if (existing == r) { found = true; break; }
-                                }
-                                if (!found) regions.push_back(r);
-                            }
-                        });
-                    return regions;
+                [marker_regions](int marker) -> std::vector<int> {
+                    auto it = marker_regions->find(marker);
+                    if (it == marker_regions->end()) {
+                        return {};
+                    }
+                    return it->second;
                 });
         }
 #endif // SVMP_FE_WITH_MESH
@@ -1918,7 +1886,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     MPI_Initialized(&mpi_initialized_constraints);
     std::optional<constraints::ParallelConstraints> parallel;
     if (mpi_initialized_constraints) {
-        parallel.emplace(MPI_COMM_WORLD, dof_handler_.getPartition());
+        parallel.emplace(dof_handler_.mpiComm(), dof_handler_.getPartition());
     } else {
         parallel.emplace(dof_handler_.getPartition());
     }
@@ -2012,7 +1980,39 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 
 	        auto maybe_add_cell_pair =
 	            [&](FieldId test, FieldId trial, const std::shared_ptr<assembly::AssemblyKernel>& kernel) {
-	                if (!kernel || kernel->isVectorOnly()) {
+	                if (!kernel) {
+	                    return;
+	                }
+
+                    if (kernel->semanticKernelKind() == assembly::SemanticKernelKind::MonolithicCell) {
+                        const auto* monolithic =
+                            dynamic_cast<const forms::MonolithicCellKernel*>(kernel.get());
+                        FE_CHECK_NOT_NULL(monolithic, "FESystem::setup: monolithic cell kernel in sparsity build");
+                        for (std::size_t bi = 0; bi < monolithic->numBlocks(); ++bi) {
+                            const auto& bs = monolithic->blockSpec(bi);
+                            if (!bs.want_matrix) {
+                                continue;
+                            }
+                            cell_pairs.emplace_back(bs.test_field, bs.trial_field);
+                        }
+                        return;
+                    }
+
+                    if (kernel->semanticKernelKind() == assembly::SemanticKernelKind::MixedBlockSet) {
+                        const auto* mixed_block =
+                            dynamic_cast<const forms::MixedBlockKernelSet*>(kernel.get());
+                        FE_CHECK_NOT_NULL(mixed_block, "FESystem::setup: mixed block cell kernel in sparsity build");
+                        for (std::size_t bi = 0; bi < mixed_block->numBlocks(); ++bi) {
+                            const auto& bs = mixed_block->blockSpec(bi);
+                            if (!bs.want_matrix) {
+                                continue;
+                            }
+                            cell_pairs.emplace_back(bs.test_field, bs.trial_field);
+                        }
+                        return;
+                    }
+
+	                if (kernel->isVectorOnly()) {
 	                    return;
 	                }
 	                cell_pairs.emplace_back(test, trial);
@@ -2401,15 +2401,16 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 		                            return local;
 		                        }
 
+		                        const MPI_Comm comm = dof_handler_.mpiComm();
 		                        int comm_size = 1;
-		                        MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
+		                        MPI_Comm_size(comm, &comm_size);
 		                        if (comm_size <= 1) {
 		                            return local;
 		                        }
 
 		                        const int local_n = static_cast<int>(local.size());
 		                        std::vector<int> counts(static_cast<std::size_t>(comm_size), 0);
-		                        MPI_Allgather(&local_n, 1, MPI_INT, counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+		                        MPI_Allgather(&local_n, 1, MPI_INT, counts.data(), 1, MPI_INT, comm);
 
 		                        std::vector<int> displs(static_cast<std::size_t>(comm_size), 0);
 		                        int total_n = 0;
@@ -2431,7 +2432,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 		                                       counts.data(),
 		                                       displs.data(),
 		                                       gid_type,
-		                                       MPI_COMM_WORLD);
+		                                       comm);
 
 		                        std::sort(all.begin(), all.end());
 		                        all.erase(std::unique(all.begin(), all.end()), all.end());
@@ -2714,29 +2715,70 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                                                                 std::move(interior_faces));
         bool any = false;
 
+        const auto register_cell_material_kernel =
+            [&](const assembly::AssemblyKernel& kernel, FieldId test_field_id) {
+                const auto spec = kernel.materialStateSpec();
+                FE_THROW_IF(spec.bytes_per_qpt == 0u, InvalidArgumentException,
+                            "FESystem::setup: kernel requests MaterialState but bytes_per_qpt == 0");
+
+                const auto& test_field = field_registry_.get(test_field_id);
+                FE_CHECK_NOT_NULL(test_field.space.get(), "FESystem::setup: test_field.space");
+                const auto max_qpts = maxCellQuadraturePoints(meshAccess(), *test_field.space);
+                FE_THROW_IF(max_qpts <= 0, InvalidStateException,
+                            "FESystem::setup: failed to determine max quadrature points for MaterialState allocation");
+
+                provider->addKernel(kernel, spec, max_qpts);
+                any = true;
+            };
+
         for (const auto& tag : operator_registry_.list()) {
             const auto& def = operator_registry_.get(tag);
 
             for (const auto& term : def.cells) {
                 if (!term.kernel) continue;
 
+                if (term.kernel->semanticKernelKind() == assembly::SemanticKernelKind::MonolithicCell) {
+                    const auto* monolithic =
+                        dynamic_cast<const forms::MonolithicCellKernel*>(term.kernel.get());
+                    FE_CHECK_NOT_NULL(monolithic, "FESystem::setup: monolithic cell kernel");
+                    for (std::size_t bi = 0; bi < monolithic->numBlocks(); ++bi) {
+                        const auto& bs = monolithic->blockSpec(bi);
+                        if (!bs.fallback_kernel) {
+                            continue;
+                        }
+                        const auto required = bs.fallback_kernel->getRequiredData();
+                        if (!assembly::hasFlag(required, assembly::RequiredData::MaterialState)) {
+                            continue;
+                        }
+                        register_cell_material_kernel(*bs.fallback_kernel, bs.test_field);
+                    }
+                    continue;
+                }
+
+                if (term.kernel->semanticKernelKind() == assembly::SemanticKernelKind::MixedBlockSet) {
+                    const auto* mixed =
+                        dynamic_cast<const forms::MixedBlockKernelSet*>(term.kernel.get());
+                    FE_CHECK_NOT_NULL(mixed, "FESystem::setup: mixed block cell kernel");
+                    for (std::size_t bi = 0; bi < mixed->numBlocks(); ++bi) {
+                        const auto& bs = mixed->blockSpec(bi);
+                        if (!bs.fallback_kernel) {
+                            continue;
+                        }
+                        const auto required = bs.fallback_kernel->getRequiredData();
+                        if (!assembly::hasFlag(required, assembly::RequiredData::MaterialState)) {
+                            continue;
+                        }
+                        register_cell_material_kernel(*bs.fallback_kernel, bs.test_field);
+                    }
+                    continue;
+                }
+
                 const auto required = term.kernel->getRequiredData();
                 if (!assembly::hasFlag(required, assembly::RequiredData::MaterialState)) {
                     continue;
                 }
 
-                const auto spec = term.kernel->materialStateSpec();
-                FE_THROW_IF(spec.bytes_per_qpt == 0u, InvalidArgumentException,
-                            "FESystem::setup: kernel requests MaterialState but bytes_per_qpt == 0");
-
-                const auto& test_field = field_registry_.get(term.test_field);
-                FE_CHECK_NOT_NULL(test_field.space.get(), "FESystem::setup: test_field.space");
-                const auto max_qpts = maxCellQuadraturePoints(meshAccess(), *test_field.space);
-                FE_THROW_IF(max_qpts <= 0, InvalidStateException,
-                            "FESystem::setup: failed to determine max quadrature points for MaterialState allocation");
-
-                provider->addKernel(*term.kernel, spec, max_qpts);
-                any = true;
+                register_cell_material_kernel(*term.kernel, term.test_field);
             }
 
             for (const auto& term : def.boundary) {
@@ -2993,7 +3035,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     int mpi_initialized = 0;
     MPI_Initialized(&mpi_initialized);
     if (mpi_initialized) {
-        MPI_Comm_size(MPI_COMM_WORLD, &sys_chars.mpi_world_size);
+        MPI_Comm_size(dof_handler_.mpiComm(), &sys_chars.mpi_world_size);
     }
 #endif
 
@@ -3280,18 +3322,11 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                         continue;
                     }
 
-                    if (auto* coupled = dynamic_cast<forms::CoupledBlockKernel*>(term.kernel.get())) {
-                        if (coupled->numBlocks() == 0u) {
-                            continue;
-                        }
-
-                        const auto& ref_block = coupled->blockSpec(0);
-                        const auto& qpt_field = field_registry_.get(ref_block.test_field);
-                        FE_CHECK_NOT_NULL(qpt_field.space.get(),
-                                          "FESystem::setup: coupled priming quadrature space");
-
-                        for (std::size_t bi = 0; bi < coupled->numBlocks(); ++bi) {
-                            const auto& bs = coupled->blockSpec(bi);
+                    if (term.kernel->semanticKernelKind() == assembly::SemanticKernelKind::MonolithicCell) {
+                        auto* monolithic = dynamic_cast<forms::MonolithicCellKernel*>(term.kernel.get());
+                        FE_CHECK_NOT_NULL(monolithic, "FESystem::setup: monolithic cell kernel");
+                        for (std::size_t bi = 0; bi < monolithic->numBlocks(); ++bi) {
+                            const auto& bs = monolithic->blockSpec(bi);
                             if (!bs.fallback_kernel) {
                                 continue;
                             }
@@ -3299,9 +3334,42 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                             const auto& test_field = field_registry_.get(bs.test_field);
                             const auto& trial_field = field_registry_.get(bs.trial_field);
                             FE_CHECK_NOT_NULL(test_field.space.get(),
-                                              "FESystem::setup: coupled priming test space");
+                                              "FESystem::setup: monolithic priming test space");
                             FE_CHECK_NOT_NULL(trial_field.space.get(),
-                                              "FESystem::setup: coupled priming trial space");
+                                              "FESystem::setup: monolithic priming trial space");
+
+                            prime_cell_jit_kernel(bs.fallback_kernel,
+                                                  *test_field.space,
+                                                  *test_field.space,
+                                                  *trial_field.space);
+                        }
+                        continue;
+                    }
+
+                    if (term.kernel->semanticKernelKind() == assembly::SemanticKernelKind::MixedBlockSet) {
+                        auto* mixed_block = dynamic_cast<forms::MixedBlockKernelSet*>(term.kernel.get());
+                        FE_CHECK_NOT_NULL(mixed_block, "FESystem::setup: mixed block kernel set");
+                        if (mixed_block->numBlocks() == 0u) {
+                            continue;
+                        }
+
+                        const auto& ref_block = mixed_block->blockSpec(0);
+                        const auto& qpt_field = field_registry_.get(ref_block.test_field);
+                        FE_CHECK_NOT_NULL(qpt_field.space.get(),
+                                          "FESystem::setup: mixed-block priming quadrature space");
+
+                        for (std::size_t bi = 0; bi < mixed_block->numBlocks(); ++bi) {
+                            const auto& bs = mixed_block->blockSpec(bi);
+                            if (!bs.fallback_kernel) {
+                                continue;
+                            }
+
+                            const auto& test_field = field_registry_.get(bs.test_field);
+                            const auto& trial_field = field_registry_.get(bs.trial_field);
+                            FE_CHECK_NOT_NULL(test_field.space.get(),
+                                              "FESystem::setup: mixed-block priming test space");
+                            FE_CHECK_NOT_NULL(trial_field.space.get(),
+                                              "FESystem::setup: mixed-block priming trial space");
 
                             prime_cell_jit_kernel(bs.fallback_kernel,
                                                   *qpt_field.space,
@@ -3309,10 +3377,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                                                   *trial_field.space);
                         }
 
-                        // After individual block priming, compile all block
-                        // kernels into a single LLVM module for contiguous
-                        // .text layout (reduces L1i cache thrashing).
-                        coupled->primeAllBlocksColocated();
+                        mixed_block->primeColocatedTextLayout();
 
                         continue;
                     }
@@ -3331,28 +3396,6 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                 if (!boundary_exemplars.empty()) {
                     for (const auto& term : def.boundary) {
                         if (!term.kernel) {
-                            continue;
-                        }
-
-                        if (auto* coupled = dynamic_cast<forms::CoupledBlockKernel*>(term.kernel.get())) {
-                            for (std::size_t bi = 0; bi < coupled->numBlocks(); ++bi) {
-                                const auto& bs = coupled->blockSpec(bi);
-                                if (!bs.fallback_kernel) {
-                                    continue;
-                                }
-
-                                const auto& test_field = field_registry_.get(bs.test_field);
-                                const auto& trial_field = field_registry_.get(bs.trial_field);
-                                FE_CHECK_NOT_NULL(test_field.space.get(),
-                                                  "FESystem::setup: boundary priming test space");
-                                FE_CHECK_NOT_NULL(trial_field.space.get(),
-                                                  "FESystem::setup: boundary priming trial space");
-
-                                prime_boundary_jit_kernel(bs.fallback_kernel,
-                                                          *test_field.space,
-                                                          *trial_field.space,
-                                                          term.marker);
-                            }
                             continue;
                         }
 
@@ -3385,45 +3428,32 @@ void FESystem::buildAssemblyPlans()
         const auto& def = operator_registry_.get(tag);
         auto& plan = assembly_plan_by_op_[tag];
 
-        std::unordered_set<const assembly::AssemblyKernel*> coupled_covered_kernels;
-        for (const auto& term : def.cells) {
-            if (auto* coupled = dynamic_cast<forms::CoupledBlockKernel*>(term.kernel.get())) {
-                for (std::size_t bi = 0; bi < coupled->numBlocks(); ++bi) {
-                    const auto& bs = coupled->blockSpec(bi);
-                    if (bs.fallback_kernel) {
-                        coupled_covered_kernels.insert(bs.fallback_kernel.get());
-                    }
-                }
-            }
-        }
-
         plan.cell_terms.reserve(def.cells.size());
         for (const auto& term : def.cells) {
             FE_CHECK_NOT_NULL(term.kernel.get(), "FESystem::buildAssemblyPlans: cell kernel");
 
-            if (coupled_covered_kernels.count(term.kernel.get()) > 0) {
-                continue;
-            }
+            if (term.kernel->semanticKernelKind() == assembly::SemanticKernelKind::MonolithicCell) {
+                auto* monolithic = dynamic_cast<forms::MonolithicCellKernel*>(term.kernel.get());
+                FE_CHECK_NOT_NULL(monolithic, "FESystem::buildAssemblyPlans: monolithic cell kernel");
 
-            if (auto* coupled = dynamic_cast<forms::CoupledBlockKernel*>(term.kernel.get())) {
-                if (!coupled->isResolved()) {
-                    for (std::size_t bi = 0; bi < coupled->numBlocks(); ++bi) {
-                        auto& bs = coupled->mutableBlockSpec(bi);
+                if (!monolithic->isResolved()) {
+                    for (std::size_t bi = 0; bi < monolithic->numBlocks(); ++bi) {
+                        auto& bs = monolithic->mutableBlockSpec(bi);
                         const auto& b_test_field = field_registry_.get(bs.test_field);
                         const auto& b_trial_field = field_registry_.get(bs.trial_field);
                         FE_CHECK_NOT_NULL(b_test_field.space.get(),
-                                          "FESystem::buildAssemblyPlans: coupled block test space");
+                                          "FESystem::buildAssemblyPlans: monolithic block test space");
                         FE_CHECK_NOT_NULL(b_trial_field.space.get(),
-                                          "FESystem::buildAssemblyPlans: coupled block trial space");
+                                          "FESystem::buildAssemblyPlans: monolithic block trial space");
 
                         const auto b_test_idx = static_cast<std::size_t>(b_test_field.id);
                         const auto b_trial_idx = static_cast<std::size_t>(b_trial_field.id);
                         FE_THROW_IF(b_test_field.id < 0 || b_test_idx >= field_dof_handlers_.size(),
                                     InvalidStateException,
-                                    "FESystem::buildAssemblyPlans: invalid coupled block test field");
+                                    "FESystem::buildAssemblyPlans: invalid monolithic block test field");
                         FE_THROW_IF(b_trial_field.id < 0 || b_trial_idx >= field_dof_handlers_.size(),
                                     InvalidStateException,
-                                    "FESystem::buildAssemblyPlans: invalid coupled block trial field");
+                                    "FESystem::buildAssemblyPlans: invalid monolithic block trial field");
 
                         bs.test_space = b_test_field.space.get();
                         bs.trial_space = b_trial_field.space.get();
@@ -3432,14 +3462,23 @@ void FESystem::buildAssemblyPlans()
                         bs.row_dof_offset = field_dof_offsets_[b_test_idx];
                         bs.col_dof_offset = field_dof_offsets_[b_trial_idx];
                     }
-                    coupled->setResolved();
+                    monolithic->setResolved();
+                    monolithic->ensureCompiled();
+                    if (!monolithic->hasCompiledDispatch() &&
+                        !monolithic->compileMessage().empty() &&
+                        core::kernelTraceEnabled(core::KernelTraceChannel::Selection)) {
+                        core::kernelTraceLog(
+                            core::KernelTraceChannel::Selection,
+                            "FESystem::buildAssemblyPlans: monolithic JIT fallback: " +
+                                monolithic->compileMessage());
+                    }
                 }
 
                 bool any_active = false;
                 bool matrix_capable = false;
                 bool vector_capable = false;
-                for (std::size_t bi = 0; bi < coupled->numBlocks(); ++bi) {
-                    const auto& bs = coupled->blockSpec(bi);
+                for (std::size_t bi = 0; bi < monolithic->numBlocks(); ++bi) {
+                    const auto& bs = monolithic->blockSpec(bi);
                     if (!bs.fallback_kernel || !bs.fallback_kernel->hasCell()) {
                         continue;
                     }
@@ -3451,17 +3490,83 @@ void FESystem::buildAssemblyPlans()
                     continue;
                 }
 
-                const auto& first_bs = coupled->blockSpec(0);
+                const auto& first_bs = monolithic->blockSpec(0);
                 plan.cell_terms.push_back(PlannedCellTerm{
                     term.test_field,
                     term.trial_field,
                     first_bs.test_space,
                     first_bs.trial_space,
-                    coupled,
+                    monolithic,
                     first_bs.row_dof_map,
                     first_bs.col_dof_map,
                     first_bs.row_dof_offset,
                     first_bs.col_dof_offset,
+                    assembly::SemanticKernelKind::MonolithicCell,
+                    matrix_capable,
+                    vector_capable});
+                continue;
+            }
+
+            if (term.kernel->semanticKernelKind() == assembly::SemanticKernelKind::MixedBlockSet) {
+                auto* mixed_block = dynamic_cast<forms::MixedBlockKernelSet*>(term.kernel.get());
+                FE_CHECK_NOT_NULL(mixed_block, "FESystem::buildAssemblyPlans: mixed block kernel set");
+                if (!mixed_block->isResolved()) {
+                    for (std::size_t bi = 0; bi < mixed_block->numBlocks(); ++bi) {
+                        auto& bs = mixed_block->mutableBlockSpec(bi);
+                        const auto& b_test_field = field_registry_.get(bs.test_field);
+                        const auto& b_trial_field = field_registry_.get(bs.trial_field);
+                        FE_CHECK_NOT_NULL(b_test_field.space.get(),
+                                          "FESystem::buildAssemblyPlans: mixed-block test space");
+                        FE_CHECK_NOT_NULL(b_trial_field.space.get(),
+                                          "FESystem::buildAssemblyPlans: mixed-block trial space");
+
+                        const auto b_test_idx = static_cast<std::size_t>(b_test_field.id);
+                        const auto b_trial_idx = static_cast<std::size_t>(b_trial_field.id);
+                        FE_THROW_IF(b_test_field.id < 0 || b_test_idx >= field_dof_handlers_.size(),
+                                    InvalidStateException,
+                                    "FESystem::buildAssemblyPlans: invalid mixed-block test field");
+                        FE_THROW_IF(b_trial_field.id < 0 || b_trial_idx >= field_dof_handlers_.size(),
+                                    InvalidStateException,
+                                    "FESystem::buildAssemblyPlans: invalid mixed-block trial field");
+
+                        bs.test_space = b_test_field.space.get();
+                        bs.trial_space = b_trial_field.space.get();
+                        bs.row_dof_map = &field_dof_handlers_[b_test_idx].getDofMap();
+                        bs.col_dof_map = &field_dof_handlers_[b_trial_idx].getDofMap();
+                        bs.row_dof_offset = field_dof_offsets_[b_test_idx];
+                        bs.col_dof_offset = field_dof_offsets_[b_trial_idx];
+                    }
+                    mixed_block->setResolved();
+                }
+
+                bool any_active = false;
+                bool matrix_capable = false;
+                bool vector_capable = false;
+                for (std::size_t bi = 0; bi < mixed_block->numBlocks(); ++bi) {
+                    const auto& bs = mixed_block->blockSpec(bi);
+                    if (!bs.fallback_kernel || !bs.fallback_kernel->hasCell()) {
+                        continue;
+                    }
+                    any_active = true;
+                    matrix_capable = matrix_capable || bs.want_matrix;
+                    vector_capable = vector_capable || bs.want_vector;
+                }
+                if (!any_active) {
+                    continue;
+                }
+
+                const auto& first_bs = mixed_block->blockSpec(0);
+                plan.cell_terms.push_back(PlannedCellTerm{
+                    term.test_field,
+                    term.trial_field,
+                    first_bs.test_space,
+                    first_bs.trial_space,
+                    mixed_block,
+                    first_bs.row_dof_map,
+                    first_bs.col_dof_map,
+                    first_bs.row_dof_offset,
+                    first_bs.col_dof_offset,
+                    assembly::SemanticKernelKind::MixedBlockSet,
                     matrix_capable,
                     vector_capable});
                 continue;
@@ -3491,6 +3596,7 @@ void FESystem::buildAssemblyPlans()
                 &field_dof_handlers_[trial_idx].getDofMap(),
                 field_dof_offsets_[test_idx],
                 field_dof_offsets_[trial_idx],
+                term.kernel->semanticKernelKind(),
                 !term.kernel->isVectorOnly(),
                 !term.kernel->isMatrixOnly()});
         }

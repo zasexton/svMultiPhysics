@@ -10,14 +10,17 @@
 #include <cstdlib>
 
 #include "Core/FEException.h"
+#include "Core/KernelTrace.h"
 
 #include "Systems/AuxiliaryInputRegistry.h"
 
 #include "Forms/BlockForm.h"
-#include "Forms/CoupledBlockKernel.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/MixedBlockKernelSet.h"
 #include "Forms/MixedFormIR.h"
+#include "Forms/MonolithicCellKernel.h"
+#include "Forms/SymbolicDifferentiation.h"
 #include "Forms/JIT/JITCompiler.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/WeakForm.h"
@@ -151,6 +154,35 @@ void registerKernel(
     }
 }
 
+void registerKernelDomains(
+    FESystem& system,
+    const OperatorTag& op,
+    FieldId test_field,
+    FieldId trial_field,
+    const DomainDispatch& dispatch,
+    const KernelPtr& kernel,
+    bool include_cell)
+{
+    if (include_cell && dispatch.has_cell) {
+        system.addCellKernel(op, test_field, trial_field, kernel);
+    }
+    for (int marker : dispatch.boundary_markers) {
+        system.addBoundaryKernel(op, marker, test_field, trial_field, kernel);
+    }
+    if (dispatch.has_interior) {
+        system.addInteriorFaceKernel(op, test_field, trial_field, kernel);
+    }
+    for (int marker : dispatch.interface_markers) {
+        system.addInterfaceFaceKernel(op, marker, test_field, trial_field, kernel);
+    }
+}
+
+[[nodiscard]] bool dispatchHasAnyTerm(const DomainDispatch& dispatch) noexcept
+{
+    return dispatch.has_cell || dispatch.has_interior || dispatch.has_interface ||
+           !dispatch.boundary_markers.empty() || !dispatch.interface_markers.empty();
+}
+
 KernelPtr maybeWrapForJIT(KernelPtr kernel, const FormInstallOptions& options)
 {
     if (!kernel || !options.compiler_options.jit.enable) {
@@ -223,6 +255,24 @@ forms::FormExpr lowerStateFields(
         }
         return forms::FormExpr::discreteField(*fid, *rec.space, sym);
     });
+}
+
+[[nodiscard]] std::shared_ptr<MixedKernelPlan> makeMixedKernelPlan(const FormInstallOptions& options)
+{
+    auto plan = std::make_shared<MixedKernelPlan>();
+    plan->jit_requested = options.compiler_options.jit.enable;
+    plan->monolithic_cell_requested = options.compiler_options.jit.enable;
+    return plan;
+}
+
+void traceMixedKernelPlan(const char* prefix, const MixedKernelPlan& plan)
+{
+    if (!core::kernelTraceEnabled(core::KernelTraceChannel::Selection)) {
+        return;
+    }
+    core::kernelTraceLog(
+        core::KernelTraceChannel::Selection,
+        std::string(prefix) + ": " + plan.describe());
 }
 
 
@@ -435,14 +485,16 @@ CoupledResidualKernels installCoupledResidual(
                 "installCoupledResidual: empty test field list");
     FE_THROW_IF(trial_fields.empty(), InvalidArgumentException,
                 "installCoupledResidual: empty trial field list");
-    FE_THROW_IF(options.coupled_residual_from_jacobian_block && options.coupled_residual_install_residual_kernels,
-                InvalidArgumentException,
-                "installCoupledResidual: coupled_residual_from_jacobian_block requires coupled_residual_install_residual_kernels=false");
-    FE_THROW_IF(options.coupled_residual_from_jacobian_block && !options.coupled_residual_install_jacobian_blocks,
-                InvalidArgumentException,
-                "installCoupledResidual: coupled_residual_from_jacobian_block requires coupled_residual_install_jacobian_blocks=true");
 
     forms::FormCompiler compiler(options.compiler_options);
+
+    struct PendingKernelInstall {
+        FieldId test_field{INVALID_FIELD_ID};
+        FieldId trial_field{INVALID_FIELD_ID};
+        DomainDispatch dispatch{};
+        KernelPtr kernel{};
+        bool cell_semantics_owned_by_monolithic{false};
+    };
 
     CoupledResidualKernels out;
     out.residual.resize(residual_blocks.numTestFields());
@@ -450,6 +502,13 @@ CoupledResidualKernels installCoupledResidual(
     for (auto& row : out.jacobian_blocks) {
         row.resize(trial_fields.size());
     }
+
+    auto plan = makeMixedKernelPlan(options);
+    std::vector<PendingKernelInstall> pending_installs;
+    std::vector<forms::MixedBlockKernelSet::BlockSpec> mixed_block_cell_specs;
+    std::vector<forms::MonolithicCellKernel::BlockSpec> monolithic_cell_blocks;
+    bool monolithic_cell_feasible = plan->monolithic_cell_requested;
+    std::string monolithic_disable_reason{};
 
     for (std::size_t i = 0; i < residual_blocks.numTestFields(); ++i) {
         if (!residual_blocks.hasBlock(i)) {
@@ -460,12 +519,10 @@ CoupledResidualKernels installCoupledResidual(
         FE_THROW_IF(!base_expr.hasTest(), InvalidArgumentException,
                     "installCoupledResidual: residual block has no test function");
 
-        // Determine which state fields are referenced by this residual component.
         const auto* root = base_expr.node();
         FE_CHECK_NOT_NULL(root, "installCoupledResidual: residual block root");
         const auto state_fields = gatherStateFields(*root);
 
-        // Choose an active trial field so the residual can be compiled as a Residual form.
         FieldId active_trial = INVALID_FIELD_ID;
         if (i < trial_fields.size() && state_fields.contains(trial_fields[i])) {
             active_trial = trial_fields[i];
@@ -478,124 +535,194 @@ CoupledResidualKernels installCoupledResidual(
             }
         }
 
-        // If this residual block references no StateField, it is a pure source
-        // term (e.g., f*v). It contributes only a residual vector, with no
-        // Jacobian blocks. Install it as a linear (vector-only) kernel.
         if (active_trial == INVALID_FIELD_ID) {
-            // Compile as Linear (no trial needed)
-            auto ir = compiler.compileLinear(base_expr);
-            const auto dispatch = analyzeDispatch(ir);
-            if (!dispatch.has_cell && !dispatch.has_interior && !dispatch.has_interface &&
-                dispatch.boundary_markers.empty() && dispatch.interface_markers.empty()) {
-                continue;  // empty — nothing to install
+            auto linear_ir = compiler.compileLinear(base_expr);
+            const auto dispatch = analyzeDispatch(linear_ir);
+            if (!dispatchHasAnyTerm(dispatch)) {
+                continue;
             }
-            KernelPtr kernel = std::make_shared<forms::FormKernel>(std::move(ir));
-            kernel = maybeWrapForJIT(std::move(kernel), options);
-            // Register with test_field == trial_field (self-pairing for vector-only)
-            registerKernel(system, op, test_fields[i], test_fields[i], dispatch, kernel);
+
+            auto linear_ir_for_plan = linear_ir.clone();
+            KernelPtr kernel = maybeWrapForJIT(
+                std::make_shared<forms::FormKernel>(std::move(linear_ir)),
+                options);
+
             out.residual[i] = kernel;
+            pending_installs.push_back(PendingKernelInstall{
+                .test_field = test_fields[i],
+                .trial_field = test_fields[i],
+                .dispatch = dispatch,
+                .kernel = kernel,
+                .cell_semantics_owned_by_monolithic = dispatch.has_cell,
+            });
+
+            plan->blocks.push_back(MixedKernelPlanBlock{
+                .test_field = test_fields[i],
+                .trial_field = test_fields[i],
+                .residual_owner_field = test_fields[i],
+                .has_cell = dispatch.has_cell,
+                .has_boundary = !dispatch.boundary_markers.empty(),
+                .has_interior = dispatch.has_interior,
+                .has_interface = dispatch.has_interface,
+                .want_matrix = false,
+                .want_vector = true,
+            });
+
+            if (dispatch.has_cell) {
+                mixed_block_cell_specs.push_back(forms::MixedBlockKernelSet::BlockSpec{
+                    .test_field = test_fields[i],
+                    .trial_field = test_fields[i],
+                    .want_matrix = false,
+                    .want_vector = true,
+                    .fallback_kernel = kernel,
+                });
+                monolithic_cell_blocks.push_back(forms::MonolithicCellKernel::BlockSpec{
+                    .test_field = test_fields[i],
+                    .trial_field = test_fields[i],
+                    .want_matrix = false,
+                    .want_vector = true,
+                    .fallback_kernel = kernel,
+                    .tangent_ir = std::nullopt,
+                    .residual_ir = std::optional<forms::FormIR>{std::in_place, std::move(linear_ir_for_plan)},
+                });
+            }
             continue;
         }
 
-        if (options.coupled_residual_install_residual_kernels) {
-            // Install residual kernel (vector-only).
-            const auto lowered = lowerStateFields(base_expr, active_trial, system);
-            auto ir = compiler.compileResidual(lowered);
+        for (std::size_t j = 0; j < trial_fields.size(); ++j) {
+            const FieldId trial = trial_fields[j];
+            if (!state_fields.contains(trial)) {
+                continue;
+            }
 
-            const auto dispatch = analyzeDispatch(ir);
-            FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && !dispatch.has_interface &&
-                            dispatch.boundary_markers.empty() && dispatch.interface_markers.empty(),
-                        InvalidArgumentException,
-                        "installCoupledResidual: compiled residual has no integral terms");
+            const auto lowered = lowerStateFields(base_expr, trial, system);
+            auto residual_ir = compiler.compileResidual(lowered);
+            const auto dispatch = analyzeDispatch(residual_ir);
+            FE_THROW_IF(!dispatchHasAnyTerm(dispatch), InvalidArgumentException,
+                        "installCoupledResidual: compiled Jacobian block has no integral terms");
 
+            const bool owns_row_vector = (trial == active_trial);
+            const auto output = owns_row_vector
+                ? forms::NonlinearKernelOutput::Both
+                : forms::NonlinearKernelOutput::MatrixOnly;
+
+            std::optional<forms::FormIR> tangent_ir_for_plan;
+            if (dispatch.has_cell && monolithic_cell_feasible) {
+                try {
+                    auto tangent_expr = forms::differentiateResidual(lowered);
+                    tangent_ir_for_plan = compiler.compileBilinear(tangent_expr);
+                } catch (const std::exception& e) {
+                    monolithic_cell_feasible = false;
+                    monolithic_disable_reason =
+                        "installCoupledResidual: symbolic tangent generation failed for (" +
+                        std::to_string(test_fields[i]) + "," + std::to_string(trial) + "): " + e.what();
+                }
+            }
+
+            auto residual_ir_for_plan = residual_ir.clone();
             KernelPtr kernel{};
             if (options.compiler_options.use_symbolic_tangent) {
-                kernel = maybeWrapForJIT(std::make_shared<forms::SymbolicNonlinearFormKernel>(
-                                             std::move(ir), forms::NonlinearKernelOutput::VectorOnly),
-                                         options);
+                kernel = maybeWrapForJIT(
+                    std::make_shared<forms::SymbolicNonlinearFormKernel>(std::move(residual_ir), output),
+                    options);
             } else {
-                kernel = maybeWrapForJIT(std::make_shared<forms::NonlinearFormKernel>(
-                                             std::move(ir), options.ad_mode, forms::NonlinearKernelOutput::VectorOnly),
-                                         options);
+                kernel = maybeWrapForJIT(
+                    std::make_shared<forms::NonlinearFormKernel>(std::move(residual_ir), options.ad_mode, output),
+                    options);
             }
-            registerKernel(system, op, test_fields[i], active_trial, dispatch, kernel);
-            out.residual[i] = kernel;
-        }
 
-        if (options.coupled_residual_install_jacobian_blocks) {
-            // Install Jacobian blocks (matrix-only) for every referenced trial field.
-            for (std::size_t j = 0; j < trial_fields.size(); ++j) {
-                const FieldId trial = trial_fields[j];
-                if (!state_fields.contains(trial)) {
-                    continue; // dR/d(trial) == 0
-                }
+            out.jacobian_blocks[i][j] = kernel;
+            if (owns_row_vector) {
+                out.residual[i] = kernel;
+            }
 
-                const auto lowered = lowerStateFields(base_expr, trial, system);
-                auto ir = compiler.compileResidual(lowered);
-                const auto dispatch = analyzeDispatch(ir);
-                FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && !dispatch.has_interface &&
-                                dispatch.boundary_markers.empty() && dispatch.interface_markers.empty(),
-                            InvalidArgumentException,
-                            "installCoupledResidual: compiled Jacobian block has no integral terms");
+            pending_installs.push_back(PendingKernelInstall{
+                .test_field = test_fields[i],
+                .trial_field = trial,
+                .dispatch = dispatch,
+                .kernel = kernel,
+                .cell_semantics_owned_by_monolithic = dispatch.has_cell,
+            });
 
-                const auto output = (options.coupled_residual_from_jacobian_block && trial == active_trial)
-                    ? forms::NonlinearKernelOutput::Both
-                    : forms::NonlinearKernelOutput::MatrixOnly;
+            plan->blocks.push_back(MixedKernelPlanBlock{
+                .test_field = test_fields[i],
+                .trial_field = trial,
+                .residual_owner_field = active_trial,
+                .has_cell = dispatch.has_cell,
+                .has_boundary = !dispatch.boundary_markers.empty(),
+                .has_interior = dispatch.has_interior,
+                .has_interface = dispatch.has_interface,
+                .want_matrix = true,
+                .want_vector = owns_row_vector,
+            });
 
-                KernelPtr kernel{};
-                if (options.compiler_options.use_symbolic_tangent) {
-                    kernel = maybeWrapForJIT(std::make_shared<forms::SymbolicNonlinearFormKernel>(std::move(ir), output),
-                                             options);
-                } else {
-                    kernel = maybeWrapForJIT(std::make_shared<forms::NonlinearFormKernel>(
-                                                 std::move(ir), options.ad_mode, output),
-                                             options);
-                }
-                registerKernel(system, op, test_fields[i], trial, dispatch, kernel);
-                out.jacobian_blocks[i][j] = kernel;
-                if (output == forms::NonlinearKernelOutput::Both) {
-                    out.residual[i] = kernel;
-                }
+            if (dispatch.has_cell && tangent_ir_for_plan.has_value()) {
+                monolithic_cell_blocks.push_back(forms::MonolithicCellKernel::BlockSpec{
+                    .test_field = test_fields[i],
+                    .trial_field = trial,
+                    .want_matrix = true,
+                    .want_vector = owns_row_vector,
+                    .fallback_kernel = kernel,
+                    .tangent_ir = std::move(tangent_ir_for_plan),
+                    .residual_ir = owns_row_vector ? std::optional<forms::FormIR>{std::in_place, std::move(residual_ir_for_plan)}
+                                                  : std::nullopt,
+                });
+            }
+            if (dispatch.has_cell) {
+                mixed_block_cell_specs.push_back(forms::MixedBlockKernelSet::BlockSpec{
+                    .test_field = test_fields[i],
+                    .trial_field = trial,
+                    .want_matrix = true,
+                    .want_vector = owns_row_vector,
+                    .fallback_kernel = kernel,
+                });
             }
         }
     }
 
-    // ========================================================================
-    // CoupledBlockKernel: wrap all Jacobian block kernels into a single kernel
-    // so that assembleCellsFused can share geometry across blocks.
-    // ========================================================================
-    if (options.coupled_residual_install_jacobian_blocks &&
-        options.compiler_options.jit.enable &&
-        !options.coupled_residual_from_jacobian_block)
-    {
-        std::vector<forms::CoupledBlockKernel::BlockSpec> block_specs;
-        for (std::size_t i = 0; i < out.jacobian_blocks.size(); ++i) {
-            for (std::size_t j = 0; j < out.jacobian_blocks[i].size(); ++j) {
-                const auto& kernel = out.jacobian_blocks[i][j];
-                if (!kernel) continue;
+    plan->semantic_type = MixedKernelSemanticType::MixedBlockSet;
+    plan->monolithic_cell_enabled =
+        monolithic_cell_feasible && plan->monolithic_cell_requested && monolithic_cell_blocks.size() >= 2u;
+    if (plan->monolithic_cell_enabled) {
+        plan->semantic_type = MixedKernelSemanticType::MonolithicCell;
+    }
+    const bool use_mixed_block_cell_kernel =
+        !plan->monolithic_cell_enabled && mixed_block_cell_specs.size() >= 2u;
 
-                forms::CoupledBlockKernel::BlockSpec bs;
-                bs.test_field = test_fields[i];
-                bs.trial_field = trial_fields[j];
-                bs.want_matrix = !kernel->isVectorOnly();
-                bs.want_vector = !kernel->isMatrixOnly();
-                bs.fallback_kernel = kernel;
-                block_specs.push_back(std::move(bs));
-            }
-        }
-
-        if (block_specs.size() >= 2) {
-            auto jit_compiler = forms::jit::JITCompiler::getOrCreate(options.compiler_options.jit);
-            std::shared_ptr<assembly::AssemblyKernel> coupled =
-                std::make_shared<forms::CoupledBlockKernel>(
-                    std::move(block_specs), std::move(jit_compiler), options.compiler_options.jit);
-
-            // Register as a single cell term for the first (test, trial) pair.
-            // SystemAssembly will detect this and expand into per-block fused terms.
-            system.addCellKernel(op, test_fields[0], trial_fields[0], coupled);
-        }
+    traceMixedKernelPlan("installCoupledResidual", *plan);
+    if (!monolithic_disable_reason.empty() &&
+        core::kernelTraceEnabled(core::KernelTraceChannel::Selection)) {
+        core::kernelTraceLog(core::KernelTraceChannel::Selection, monolithic_disable_reason);
     }
 
+    for (const auto& pending : pending_installs) {
+        registerKernelDomains(
+            system,
+            op,
+            pending.test_field,
+            pending.trial_field,
+            pending.dispatch,
+            pending.kernel,
+            (!plan->monolithic_cell_enabled && !use_mixed_block_cell_kernel) ||
+                !pending.cell_semantics_owned_by_monolithic);
+    }
+
+    if (plan->monolithic_cell_enabled) {
+        auto jit_compiler = forms::jit::JITCompiler::getOrCreate(options.compiler_options.jit);
+        auto monolithic_kernel = std::make_shared<forms::MonolithicCellKernel>(
+            std::move(monolithic_cell_blocks), std::move(jit_compiler), options.compiler_options.jit);
+        system.addCellKernel(op, test_fields[0], trial_fields[0], monolithic_kernel);
+    } else if (use_mixed_block_cell_kernel) {
+        std::shared_ptr<forms::jit::JITCompiler> jit_compiler{};
+        if (options.compiler_options.jit.enable) {
+            jit_compiler = forms::jit::JITCompiler::getOrCreate(options.compiler_options.jit);
+        }
+        auto mixed_block_kernel = std::make_shared<forms::MixedBlockKernelSet>(
+            std::move(mixed_block_cell_specs), std::move(jit_compiler), options.compiler_options.jit);
+        system.addCellKernel(op, test_fields[0], trial_fields[0], mixed_block_kernel);
+    }
+
+    out.mixed_plan = std::move(plan);
     return out;
 }
 
@@ -615,12 +742,6 @@ CoupledResidualKernels installCoupledResidualMixed(
                 "installCoupledResidualMixed: invalid form expression");
     FE_THROW_IF(!mixed_residual.hasTest(), InvalidArgumentException,
                 "installCoupledResidualMixed: form has no test function");
-    FE_THROW_IF(options.coupled_residual_from_jacobian_block && options.coupled_residual_install_residual_kernels,
-                InvalidArgumentException,
-                "installCoupledResidualMixed: coupled_residual_from_jacobian_block requires coupled_residual_install_residual_kernels=false");
-    FE_THROW_IF(options.coupled_residual_from_jacobian_block && !options.coupled_residual_install_jacobian_blocks,
-                InvalidArgumentException,
-                "installCoupledResidualMixed: coupled_residual_from_jacobian_block requires coupled_residual_install_jacobian_blocks=true");
 
     // =========================================================================
     // Phase 1: Decompose the mixed expression into per-test-function sub-expressions.
@@ -856,16 +977,6 @@ CoupledResidualKernels installCoupledResidualMixed(
 
     decompose(decompose, mixed_residual, +1);
 
-    // =========================================================================
-    // Phase 2: Build a BlockLinearForm and delegate to installCoupledResidual.
-    //
-    // The per-test sub-expressions are complete residual contributions for each
-    // test function. We reorder them to match the caller's test_fields ordering,
-    // then use the proven installCoupledResidual path which correctly handles
-    // per-trial lowering + compileResidual (including terms without TrialFunction
-    // in the residual vector).
-    // =========================================================================
-
     forms::BlockLinearForm residual_blocks(test_fields.size());
     for (std::size_t mi = 0; mi < test_infos.size(); ++mi) {
         const auto caller_ti = test_map[mi];
@@ -874,7 +985,244 @@ CoupledResidualKernels installCoupledResidualMixed(
         residual_blocks.setBlock(caller_ti, std::move(test_block_exprs[mi]));
     }
 
-    return installCoupledResidual(system, op, test_fields, trial_fields, residual_blocks, options);
+    struct PendingKernelInstall {
+        FieldId test_field{INVALID_FIELD_ID};
+        FieldId trial_field{INVALID_FIELD_ID};
+        DomainDispatch dispatch{};
+        KernelPtr kernel{};
+        bool cell_semantics_owned_by_monolithic{false};
+    };
+
+    CoupledResidualKernels out;
+    out.residual.resize(test_fields.size());
+    out.jacobian_blocks.resize(test_fields.size());
+    for (auto& row : out.jacobian_blocks) {
+        row.resize(trial_fields.size());
+    }
+
+    auto plan = makeMixedKernelPlan(options);
+    std::vector<PendingKernelInstall> pending_installs;
+    std::vector<forms::MixedBlockKernelSet::BlockSpec> mixed_block_cell_specs;
+    std::vector<forms::MonolithicCellKernel::BlockSpec> monolithic_cell_blocks;
+    bool monolithic_cell_feasible = plan->monolithic_cell_requested;
+    std::string monolithic_disable_reason{};
+
+    forms::FormCompiler compiler(options.compiler_options);
+
+    for (std::size_t i = 0; i < residual_blocks.numTestFields(); ++i) {
+        if (!residual_blocks.hasBlock(i)) {
+            continue;
+        }
+
+        const auto& base_expr = residual_blocks.block(i);
+        FE_THROW_IF(!base_expr.isValid(), InvalidArgumentException,
+                    "installCoupledResidualMixed: invalid residual block");
+
+        const auto* root = base_expr.node();
+        FE_CHECK_NOT_NULL(root, "installCoupledResidualMixed: residual block root");
+        const auto state_fields = gatherStateFields(*root);
+
+        FieldId active_trial = INVALID_FIELD_ID;
+        if (i < trial_fields.size() && state_fields.contains(trial_fields[i])) {
+            active_trial = trial_fields[i];
+        } else {
+            for (FieldId fid : trial_fields) {
+                if (state_fields.contains(fid)) {
+                    active_trial = fid;
+                    break;
+                }
+            }
+        }
+
+        if (active_trial == INVALID_FIELD_ID) {
+            auto linear_ir = compiler.compileLinear(base_expr);
+            const auto dispatch = analyzeDispatch(linear_ir);
+            if (!dispatchHasAnyTerm(dispatch)) {
+                continue;
+            }
+
+            auto linear_ir_for_plan = linear_ir.clone();
+            KernelPtr kernel = maybeWrapForJIT(
+                std::make_shared<forms::FormKernel>(std::move(linear_ir)),
+                options);
+
+            out.residual[i] = kernel;
+            pending_installs.push_back(PendingKernelInstall{
+                .test_field = test_fields[i],
+                .trial_field = test_fields[i],
+                .dispatch = dispatch,
+                .kernel = kernel,
+                .cell_semantics_owned_by_monolithic = dispatch.has_cell,
+            });
+
+            plan->blocks.push_back(MixedKernelPlanBlock{
+                .test_field = test_fields[i],
+                .trial_field = test_fields[i],
+                .residual_owner_field = test_fields[i],
+                .has_cell = dispatch.has_cell,
+                .has_boundary = !dispatch.boundary_markers.empty(),
+                .has_interior = dispatch.has_interior,
+                .has_interface = dispatch.has_interface,
+                .want_matrix = false,
+                .want_vector = true,
+            });
+
+            if (dispatch.has_cell) {
+                mixed_block_cell_specs.push_back(forms::MixedBlockKernelSet::BlockSpec{
+                    .test_field = test_fields[i],
+                    .trial_field = test_fields[i],
+                    .want_matrix = false,
+                    .want_vector = true,
+                    .fallback_kernel = kernel,
+                });
+                monolithic_cell_blocks.push_back(forms::MonolithicCellKernel::BlockSpec{
+                    .test_field = test_fields[i],
+                    .trial_field = test_fields[i],
+                    .want_matrix = false,
+                    .want_vector = true,
+                    .fallback_kernel = kernel,
+                    .tangent_ir = std::nullopt,
+                    .residual_ir = std::optional<forms::FormIR>{std::in_place, std::move(linear_ir_for_plan)},
+                });
+            }
+            continue;
+        }
+
+        for (std::size_t j = 0; j < trial_fields.size(); ++j) {
+            const FieldId trial = trial_fields[j];
+            if (!state_fields.contains(trial)) {
+                continue;
+            }
+
+            const auto lowered = lowerStateFields(base_expr, trial, system);
+            auto residual_ir = compiler.compileResidual(lowered);
+            const auto dispatch = analyzeDispatch(residual_ir);
+            FE_THROW_IF(!dispatchHasAnyTerm(dispatch), InvalidArgumentException,
+                        "installCoupledResidualMixed: compiled residual block has no integral terms");
+
+            const bool owns_row_vector = (trial == active_trial);
+            const auto output = owns_row_vector
+                ? forms::NonlinearKernelOutput::Both
+                : forms::NonlinearKernelOutput::MatrixOnly;
+
+            std::optional<forms::FormIR> tangent_ir_for_plan;
+            if (dispatch.has_cell && monolithic_cell_feasible) {
+                try {
+                    auto tangent_expr = forms::differentiateResidual(lowered);
+                    tangent_ir_for_plan = compiler.compileBilinear(tangent_expr);
+                } catch (const std::exception& e) {
+                    monolithic_cell_feasible = false;
+                    monolithic_disable_reason =
+                        "installCoupledResidualMixed: symbolic tangent generation failed for (" +
+                        std::to_string(test_fields[i]) + "," + std::to_string(trial) + "): " + e.what();
+                }
+            }
+
+            auto residual_ir_for_plan = residual_ir.clone();
+            KernelPtr kernel{};
+            if (options.compiler_options.use_symbolic_tangent) {
+                kernel = maybeWrapForJIT(
+                    std::make_shared<forms::SymbolicNonlinearFormKernel>(std::move(residual_ir), output),
+                    options);
+            } else {
+                kernel = maybeWrapForJIT(
+                    std::make_shared<forms::NonlinearFormKernel>(std::move(residual_ir), options.ad_mode, output),
+                    options);
+            }
+
+            out.jacobian_blocks[i][j] = kernel;
+            if (owns_row_vector) {
+                out.residual[i] = kernel;
+            }
+
+            pending_installs.push_back(PendingKernelInstall{
+                .test_field = test_fields[i],
+                .trial_field = trial,
+                .dispatch = dispatch,
+                .kernel = kernel,
+                .cell_semantics_owned_by_monolithic = dispatch.has_cell,
+            });
+
+            plan->blocks.push_back(MixedKernelPlanBlock{
+                .test_field = test_fields[i],
+                .trial_field = trial,
+                .residual_owner_field = active_trial,
+                .has_cell = dispatch.has_cell,
+                .has_boundary = !dispatch.boundary_markers.empty(),
+                .has_interior = dispatch.has_interior,
+                .has_interface = dispatch.has_interface,
+                .want_matrix = true,
+                .want_vector = owns_row_vector,
+            });
+
+            if (dispatch.has_cell && tangent_ir_for_plan.has_value()) {
+                monolithic_cell_blocks.push_back(forms::MonolithicCellKernel::BlockSpec{
+                    .test_field = test_fields[i],
+                    .trial_field = trial,
+                    .want_matrix = true,
+                    .want_vector = owns_row_vector,
+                    .fallback_kernel = kernel,
+                    .tangent_ir = std::move(tangent_ir_for_plan),
+                    .residual_ir = owns_row_vector ? std::optional<forms::FormIR>{std::in_place, std::move(residual_ir_for_plan)}
+                                                  : std::nullopt,
+                });
+            }
+            if (dispatch.has_cell) {
+                mixed_block_cell_specs.push_back(forms::MixedBlockKernelSet::BlockSpec{
+                    .test_field = test_fields[i],
+                    .trial_field = trial,
+                    .want_matrix = true,
+                    .want_vector = owns_row_vector,
+                    .fallback_kernel = kernel,
+                });
+            }
+        }
+    }
+
+    plan->semantic_type = MixedKernelSemanticType::MixedBlockSet;
+    plan->monolithic_cell_enabled =
+        monolithic_cell_feasible && plan->monolithic_cell_requested && monolithic_cell_blocks.size() >= 2u;
+    if (plan->monolithic_cell_enabled) {
+        plan->semantic_type = MixedKernelSemanticType::MonolithicCell;
+    }
+    const bool use_mixed_block_cell_kernel =
+        !plan->monolithic_cell_enabled && mixed_block_cell_specs.size() >= 2u;
+
+    traceMixedKernelPlan("installCoupledResidualMixed", *plan);
+    if (!monolithic_disable_reason.empty() &&
+        core::kernelTraceEnabled(core::KernelTraceChannel::Selection)) {
+        core::kernelTraceLog(core::KernelTraceChannel::Selection, monolithic_disable_reason);
+    }
+
+    for (const auto& pending : pending_installs) {
+        registerKernelDomains(
+            system,
+            op,
+            pending.test_field,
+            pending.trial_field,
+            pending.dispatch,
+            pending.kernel,
+            (!plan->monolithic_cell_enabled && !use_mixed_block_cell_kernel) ||
+                !pending.cell_semantics_owned_by_monolithic);
+    }
+
+    if (plan->monolithic_cell_enabled) {
+        auto jit_compiler = forms::jit::JITCompiler::getOrCreate(options.compiler_options.jit);
+        auto monolithic_kernel = std::make_shared<forms::MonolithicCellKernel>(
+            std::move(monolithic_cell_blocks), std::move(jit_compiler), options.compiler_options.jit);
+        system.addCellKernel(op, test_fields[0], trial_fields[0], monolithic_kernel);
+    } else if (use_mixed_block_cell_kernel) {
+        std::shared_ptr<forms::jit::JITCompiler> jit_compiler{};
+        if (options.compiler_options.jit.enable) {
+            jit_compiler = forms::jit::JITCompiler::getOrCreate(options.compiler_options.jit);
+        }
+        auto mixed_block_kernel = std::make_shared<forms::MixedBlockKernelSet>(
+            std::move(mixed_block_cell_specs), std::move(jit_compiler), options.compiler_options.jit);
+        system.addCellKernel(op, test_fields[0], trial_fields[0], mixed_block_kernel);
+    }
+
+    out.mixed_plan = std::move(plan);
+    return out;
 }
 
 std::vector<std::vector<KernelPtr>>
@@ -897,35 +1245,65 @@ installMixedFormIR(
     std::vector<std::vector<KernelPtr>> result(n_test);
     for (auto& row : result) row.resize(n_trial);
 
+    struct PendingKernelInstall {
+        FieldId test_field{INVALID_FIELD_ID};
+        FieldId trial_field{INVALID_FIELD_ID};
+        DomainDispatch dispatch{};
+        KernelPtr kernel{};
+        bool cell_semantics_owned_by_monolithic{false};
+    };
+
+    auto plan = makeMixedKernelPlan(options);
+    std::vector<PendingKernelInstall> pending_installs;
+    std::vector<forms::MixedBlockKernelSet::BlockSpec> mixed_block_cell_specs;
+    std::vector<forms::MonolithicCellKernel::BlockSpec> monolithic_cell_blocks;
+    bool monolithic_cell_feasible = plan->monolithic_cell_requested;
+    std::string monolithic_disable_reason{};
+
     for (std::size_t i = 0; i < n_test; ++i) {
         for (std::size_t j = 0; j < n_trial; ++j) {
-            if (!mir.hasBlock(i, j)) continue;
+            if (!mir.hasBlock(i, j)) {
+                continue;
+            }
 
-            // FormIR is move-only; clone from the const MixedFormIR block.
             auto block_ir = mir.block(i, j).clone();
-
             const auto dispatch = analyzeDispatch(block_ir);
-            FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && !dispatch.has_interface &&
-                            dispatch.boundary_markers.empty() && dispatch.interface_markers.empty(),
-                        InvalidArgumentException,
+            FE_THROW_IF(!dispatchHasAnyTerm(dispatch), InvalidArgumentException,
                         "installMixedFormIR: compiled block has no integral terms");
 
+            const auto kind = block_ir.kind();
+            auto block_ir_for_plan = block_ir.clone();
+            std::optional<forms::FormIR> tangent_ir_for_plan;
+            std::optional<forms::FormIR> residual_ir_for_plan;
+            bool want_matrix = false;
+            bool want_vector = false;
+
             KernelPtr kernel{};
-            switch (block_ir.kind()) {
+            switch (kind) {
                 case forms::FormKind::Bilinear:
-                    // Bilinear forms: direct evaluation producing matrix + vector
+                    want_matrix = true;
+                    tangent_ir_for_plan = std::move(block_ir_for_plan);
                     kernel = std::make_shared<forms::FormKernel>(std::move(block_ir));
                     break;
                 case forms::FormKind::Linear:
-                    // Linear forms: vector-only — no matrix contribution.
+                    want_vector = true;
+                    residual_ir_for_plan = std::move(block_ir_for_plan);
                     kernel = std::make_shared<forms::FormKernel>(std::move(block_ir));
                     break;
                 case forms::FormKind::Residual:
-                    // Residual forms: require AD or symbolic tangent for Jacobian
+                    want_matrix = true;
+                    want_vector = true;
+                    residual_ir_for_plan = std::move(block_ir_for_plan);
                     if (options.compiler_options.use_symbolic_tangent) {
                         kernel = std::make_shared<forms::SymbolicNonlinearFormKernel>(
                             std::move(block_ir), forms::NonlinearKernelOutput::Both);
                     } else {
+                        monolithic_cell_feasible = false;
+                        if (monolithic_disable_reason.empty()) {
+                            monolithic_disable_reason =
+                                "installMixedFormIR: residual MixedFormIR blocks require symbolic tangents "
+                                "for MonolithicCellKernel JIT";
+                        }
                         kernel = std::make_shared<forms::NonlinearFormKernel>(
                             std::move(block_ir), options.ad_mode);
                     }
@@ -933,43 +1311,90 @@ installMixedFormIR(
             }
 
             kernel = maybeWrapForJIT(std::move(kernel), options);
-            registerKernel(system, op, test_fields[i], trial_fields[j], dispatch, kernel);
-            result[i][j] = std::move(kernel);
+            result[i][j] = kernel;
+            pending_installs.push_back(PendingKernelInstall{
+                .test_field = test_fields[i],
+                .trial_field = trial_fields[j],
+                .dispatch = dispatch,
+                .kernel = kernel,
+                .cell_semantics_owned_by_monolithic = dispatch.has_cell,
+            });
+
+            plan->blocks.push_back(MixedKernelPlanBlock{
+                .test_field = test_fields[i],
+                .trial_field = trial_fields[j],
+                .residual_owner_field = test_fields[i],
+                .has_cell = dispatch.has_cell,
+                .has_boundary = !dispatch.boundary_markers.empty(),
+                .has_interior = dispatch.has_interior,
+                .has_interface = dispatch.has_interface,
+                .want_matrix = want_matrix,
+                .want_vector = want_vector,
+            });
+
+            if (dispatch.has_cell && monolithic_cell_feasible) {
+                monolithic_cell_blocks.push_back(forms::MonolithicCellKernel::BlockSpec{
+                    .test_field = test_fields[i],
+                    .trial_field = trial_fields[j],
+                    .want_matrix = want_matrix,
+                    .want_vector = want_vector,
+                    .fallback_kernel = kernel,
+                    .tangent_ir = std::move(tangent_ir_for_plan),
+                    .residual_ir = std::move(residual_ir_for_plan),
+                });
+            }
+            if (dispatch.has_cell) {
+                mixed_block_cell_specs.push_back(forms::MixedBlockKernelSet::BlockSpec{
+                    .test_field = test_fields[i],
+                    .trial_field = trial_fields[j],
+                    .want_matrix = want_matrix,
+                    .want_vector = want_vector,
+                    .fallback_kernel = kernel,
+                });
+            }
         }
     }
 
-    // ========================================================================
-    // Optional CoupledBlockKernel: wrap all cell-domain block kernels into a
-    // single kernel so assembleCellsFused can share geometry across blocks.
-    // This is the same optimization applied by installCoupledResidual() for
-    // the residual path — extended here to bilinear/linear MixedFormIR.
-    // ========================================================================
-    if (options.compiler_options.jit.enable) {
-        std::vector<forms::CoupledBlockKernel::BlockSpec> block_specs;
-        for (std::size_t i = 0; i < n_test; ++i) {
-            for (std::size_t j = 0; j < n_trial; ++j) {
-                if (!result[i][j]) continue;
-                // Only include cell-domain kernels in the coupled block.
-                if (!mir.hasBlock(i, j) || !mir.block(i, j).hasCellTerms()) continue;
+    plan->semantic_type = MixedKernelSemanticType::MixedBlockSet;
+    plan->monolithic_cell_enabled =
+        monolithic_cell_feasible && plan->monolithic_cell_requested && monolithic_cell_blocks.size() >= 2u;
+    if (plan->monolithic_cell_enabled) {
+        plan->semantic_type = MixedKernelSemanticType::MonolithicCell;
+    }
+    const bool use_mixed_block_cell_kernel =
+        !plan->monolithic_cell_enabled && mixed_block_cell_specs.size() >= 2u;
 
-                forms::CoupledBlockKernel::BlockSpec bs;
-                bs.test_field = test_fields[i];
-                bs.trial_field = trial_fields[j];
-                bs.want_matrix = !result[i][j]->isVectorOnly();
-                bs.want_vector = !result[i][j]->isMatrixOnly();
-                bs.fallback_kernel = result[i][j];
-                block_specs.push_back(std::move(bs));
-            }
+    traceMixedKernelPlan("installMixedFormIR", *plan);
+    if (!monolithic_disable_reason.empty() &&
+        core::kernelTraceEnabled(core::KernelTraceChannel::Selection)) {
+        core::kernelTraceLog(core::KernelTraceChannel::Selection, monolithic_disable_reason);
+    }
+
+    for (const auto& pending : pending_installs) {
+        registerKernelDomains(
+            system,
+            op,
+            pending.test_field,
+            pending.trial_field,
+            pending.dispatch,
+            pending.kernel,
+            (!plan->monolithic_cell_enabled && !use_mixed_block_cell_kernel) ||
+                !pending.cell_semantics_owned_by_monolithic);
+    }
+
+    if (plan->monolithic_cell_enabled) {
+        auto jit_compiler = forms::jit::JITCompiler::getOrCreate(options.compiler_options.jit);
+        auto monolithic_kernel = std::make_shared<forms::MonolithicCellKernel>(
+            std::move(monolithic_cell_blocks), std::move(jit_compiler), options.compiler_options.jit);
+        system.addCellKernel(op, test_fields[0], trial_fields[0], monolithic_kernel);
+    } else if (use_mixed_block_cell_kernel) {
+        std::shared_ptr<forms::jit::JITCompiler> jit_compiler{};
+        if (options.compiler_options.jit.enable) {
+            jit_compiler = forms::jit::JITCompiler::getOrCreate(options.compiler_options.jit);
         }
-
-        if (block_specs.size() >= 2) {
-            auto jit_compiler = forms::jit::JITCompiler::getOrCreate(options.compiler_options.jit);
-            std::shared_ptr<assembly::AssemblyKernel> coupled =
-                std::make_shared<forms::CoupledBlockKernel>(
-                    std::move(block_specs), std::move(jit_compiler), options.compiler_options.jit);
-
-            system.addCellKernel(op, test_fields[0], trial_fields[0], coupled);
-        }
+        auto mixed_block_kernel = std::make_shared<forms::MixedBlockKernelSet>(
+            std::move(mixed_block_cell_specs), std::move(jit_compiler), options.compiler_options.jit);
+        system.addCellKernel(op, test_fields[0], trial_fields[0], mixed_block_kernel);
     }
 
     return result;
@@ -1525,13 +1950,9 @@ CoupledResidualKernels installFormulation(
         return out;
     }
 
-    // Multi-field path: auto-set optimal coupled assembly options.
-    FormInstallOptions coupled_opts = options;
-    coupled_opts.coupled_residual_install_residual_kernels = false;
-    coupled_opts.coupled_residual_install_jacobian_blocks = true;
-    coupled_opts.coupled_residual_from_jacobian_block = true;
-
-    auto result = installCoupledResidualMixed(system, op, fields, fields, resolved, coupled_opts);
+    // Multi-field path: build an explicit mixed-kernel plan with either a
+    // MixedBlockKernelSet or MonolithicCellKernel for cell-domain work.
+    auto result = installCoupledResidualMixed(system, op, fields, fields, resolved, options);
 
     commitRecord();
 

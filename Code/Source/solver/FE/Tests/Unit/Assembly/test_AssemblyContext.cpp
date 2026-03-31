@@ -15,6 +15,7 @@
 #include "Assembly/AssemblyContext.h"
 #include "Spaces/H1Space.h"
 
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -152,6 +153,49 @@ TEST_F(AssemblyContextTest, SetIntegrationWeights) {
 
     EXPECT_DOUBLE_EQ(ctx_.integrationWeight(0), 0.25);
     EXPECT_DOUBLE_EQ(ctx_.integrationWeight(1), 0.125);
+}
+
+TEST_F(AssemblyContextTest, CopyGeometryDataFromClonesPreparedGeometryState) {
+    AssemblyContext src;
+    src.reserve(4, 4, 3);
+
+    const std::vector<AssemblyContext::Point3D> quad_pts = {
+        {0.0, 0.0, 0.0},
+        {0.5, 0.0, 0.0},
+    };
+    const std::vector<Real> weights = {0.25, 0.75};
+    src.setQuadratureData(quad_pts, weights);
+
+    const std::vector<AssemblyContext::Point3D> phys_pts = {
+        {1.0, 2.0, 3.0},
+        {4.0, 5.0, 6.0},
+    };
+    src.setPhysicalPoints(phys_pts);
+
+    const std::vector<AssemblyContext::Matrix3x3> jacs = {
+        {{{1.0, 0.0, 0.0}, {0.0, 2.0, 0.0}, {0.0, 0.0, 3.0}}},
+        {{{4.0, 0.0, 0.0}, {0.0, 5.0, 0.0}, {0.0, 0.0, 6.0}}},
+    };
+    const std::vector<AssemblyContext::Matrix3x3> jinvs = {
+        {{{1.0, 0.0, 0.0}, {0.0, 0.5, 0.0}, {0.0, 0.0, 1.0 / 3.0}}},
+        {{{0.25, 0.0, 0.0}, {0.0, 0.2, 0.0}, {0.0, 0.0, 1.0 / 6.0}}},
+    };
+    const std::vector<Real> dets = {6.0, 120.0};
+    src.setJacobianData(jacs, jinvs, dets);
+    src.setIntegrationWeights(std::vector<Real>{1.5, 2.5});
+    src.setEntityMeasures(7.0, 8.0, 0.0);
+
+    AssemblyContext dst;
+    dst.reserve(4, 4, 3);
+    dst.copyGeometryDataFrom(src);
+
+    EXPECT_EQ(dst.numQuadraturePoints(), 2);
+    EXPECT_DOUBLE_EQ(dst.quadratureWeight(1), 0.75);
+    EXPECT_DOUBLE_EQ(dst.physicalPoint(0)[1], 2.0);
+    EXPECT_DOUBLE_EQ(dst.jacobianDet(1), 120.0);
+    EXPECT_DOUBLE_EQ(dst.integrationWeight(0), 1.5);
+    EXPECT_DOUBLE_EQ(dst.cellDiameter(), 7.0);
+    EXPECT_DOUBLE_EQ(dst.cellVolume(), 8.0);
 }
 
 TEST_F(AssemblyContextTest, SetBasisData) {
@@ -359,6 +403,170 @@ TEST(AssemblyContextMultiField, MultipleFieldsIndependentAccess) {
     auto v0 = ctx.fieldVectorValue(velocity, 0);
     EXPECT_DOUBLE_EQ(v0[0], 1.0);
     EXPECT_DOUBLE_EQ(ctx.fieldValue(temperature, 0), 300.0);
+}
+
+TEST(AssemblyContextMultiField, CopyFieldSolutionDataFromClonesActiveFieldState) {
+    AssemblyContext src;
+    src.reserve(4, 4, 4);
+    std::vector<AssemblyContext::Point3D> quad_pts = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}};
+    std::vector<Real> weights = {0.5, 0.5};
+    src.setQuadratureData(quad_pts, weights);
+
+    const FieldId velocity = 0;
+    const FieldId pressure = 1;
+
+    const std::vector<AssemblyContext::Vector3D> vel_values = {
+        {1.0, 2.0, 3.0},
+        {4.0, 5.0, 6.0},
+    };
+    const std::vector<AssemblyContext::Matrix3x3> vel_jac = {
+        {{{1.0, 0.0, 0.0}, {0.0, 2.0, 0.0}, {0.0, 0.0, 3.0}}},
+        {{{4.0, 0.0, 0.0}, {0.0, 5.0, 0.0}, {0.0, 0.0, 6.0}}},
+    };
+    src.setFieldSolutionVector(velocity, /*value_dimension=*/3, vel_values, vel_jac,
+                               /*component_hessians=*/{}, /*component_laplacians=*/{});
+
+    const std::vector<Real> pressure_values = {100.0, 110.0};
+    const std::vector<AssemblyContext::Vector3D> pressure_grads = {
+        {1.0, 2.0, 3.0},
+        {4.0, 5.0, 6.0},
+    };
+    src.setFieldSolutionScalar(pressure, pressure_values, pressure_grads,
+                               /*hessians=*/{}, /*laplacians=*/{});
+
+    AssemblyContext dst;
+    dst.reserve(4, 4, 4);
+    dst.setQuadratureData(quad_pts, weights);
+    dst.copyFieldSolutionDataFrom(src);
+
+    EXPECT_TRUE(dst.hasFieldSolutionData(velocity));
+    EXPECT_TRUE(dst.hasFieldSolutionData(pressure));
+
+    const auto copied_velocity = dst.fieldVectorValue(velocity, 1);
+    EXPECT_DOUBLE_EQ(copied_velocity[0], 4.0);
+    EXPECT_DOUBLE_EQ(copied_velocity[1], 5.0);
+    EXPECT_DOUBLE_EQ(copied_velocity[2], 6.0);
+
+    const auto copied_pressure_grad = dst.fieldGradient(pressure, 0);
+    EXPECT_DOUBLE_EQ(copied_pressure_grad[0], 1.0);
+    EXPECT_DOUBLE_EQ(copied_pressure_grad[1], 2.0);
+    EXPECT_DOUBLE_EQ(copied_pressure_grad[2], 3.0);
+
+    const auto jit_fields = dst.jitFieldSolutionTable();
+    ASSERT_EQ(jit_fields.size(), 2u);
+    EXPECT_EQ(jit_fields[0].field_id, velocity);
+    EXPECT_EQ(jit_fields[1].field_id, pressure);
+    ASSERT_NE(jit_fields[0].vector_values_xyz, nullptr);
+    ASSERT_NE(jit_fields[1].values, nullptr);
+    EXPECT_DOUBLE_EQ(jit_fields[1].values[1], 110.0);
+}
+
+TEST(AssemblyContextMultiField, PreviousScalarAndVectorFieldHistoryAccess) {
+    AssemblyContext ctx;
+    ctx.reserve(4, 4, 4);
+    std::vector<AssemblyContext::Point3D> quad_pts = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}};
+    std::vector<Real> weights = {0.5, 0.5};
+    ctx.setQuadratureData(quad_pts, weights);
+
+    const FieldId pressure = 1;
+    const FieldId velocity = 2;
+
+    const std::vector<Real> pressure_values = {100.0, 110.0};
+    ctx.setFieldSolutionScalar(pressure, pressure_values);
+    ctx.setFieldPreviousSolutionScalarK(pressure, /*k=*/1, std::vector<Real>{95.0, 96.0});
+    ctx.setFieldPreviousSolutionScalarK(pressure, /*k=*/2, std::vector<Real>{90.0, 91.0});
+
+    const std::vector<AssemblyContext::Vector3D> velocity_values = {
+        {1.0, 2.0, 3.0},
+        {4.0, 5.0, 6.0},
+    };
+    ctx.setFieldSolutionVector(velocity, /*value_dimension=*/3, velocity_values);
+    ctx.setFieldPreviousSolutionVectorK(
+        velocity, /*k=*/1, /*value_dimension=*/3,
+        std::vector<AssemblyContext::Vector3D>{{0.5, 1.5, 2.5}, {3.5, 4.5, 5.5}});
+
+    EXPECT_DOUBLE_EQ(ctx.fieldPreviousValue(pressure, 0, 1), 95.0);
+    EXPECT_DOUBLE_EQ(ctx.fieldPreviousValue(pressure, 1, 2), 91.0);
+
+    const auto prev_velocity = ctx.fieldPreviousVectorValue(velocity, 1, 1);
+    EXPECT_DOUBLE_EQ(prev_velocity[0], 3.5);
+    EXPECT_DOUBLE_EQ(prev_velocity[1], 4.5);
+    EXPECT_DOUBLE_EQ(prev_velocity[2], 5.5);
+
+    const auto jit_fields = ctx.jitFieldSolutionTable();
+    ASSERT_EQ(jit_fields.size(), 2u);
+    ASSERT_NE(jit_fields[0].history_values, nullptr);
+    ASSERT_NE(jit_fields[1].history_vector_values_xyz, nullptr);
+}
+
+TEST(AssemblyContextMultiField, CopyFieldSolutionDataFromClonesHistoryState) {
+    AssemblyContext src;
+    src.reserve(4, 4, 4);
+    std::vector<AssemblyContext::Point3D> quad_pts = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}};
+    std::vector<Real> weights = {0.5, 0.5};
+    src.setQuadratureData(quad_pts, weights);
+
+    const FieldId pressure = 4;
+    const FieldId velocity = 5;
+
+    src.setFieldSolutionScalar(pressure, std::vector<Real>{1.0, 2.0});
+    src.setFieldPreviousSolutionScalarK(pressure, /*k=*/1, std::vector<Real>{3.0, 4.0});
+
+    src.setFieldSolutionVector(
+        velocity, /*value_dimension=*/3,
+        std::vector<AssemblyContext::Vector3D>{{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}});
+    src.setFieldPreviousSolutionVectorK(
+        velocity, /*k=*/1, /*value_dimension=*/3,
+        std::vector<AssemblyContext::Vector3D>{{5.0, 6.0, 7.0}, {8.0, 9.0, 10.0}});
+
+    AssemblyContext dst;
+    dst.reserve(4, 4, 4);
+    dst.setQuadratureData(quad_pts, weights);
+    dst.copyFieldSolutionDataFrom(src);
+
+    EXPECT_DOUBLE_EQ(dst.fieldPreviousValue(pressure, 1, 1), 4.0);
+    const auto prev_velocity = dst.fieldPreviousVectorValue(velocity, 0, 1);
+    EXPECT_DOUBLE_EQ(prev_velocity[0], 5.0);
+    EXPECT_DOUBLE_EQ(prev_velocity[1], 6.0);
+    EXPECT_DOUBLE_EQ(prev_velocity[2], 7.0);
+}
+
+TEST(AssemblyContextMultiField, CopyFieldSolutionDataSubsetFromKeepsRequestedHistoryOnly) {
+    AssemblyContext src;
+    src.reserve(4, 4, 4);
+    std::vector<AssemblyContext::Point3D> quad_pts = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}};
+    std::vector<Real> weights = {0.5, 0.5};
+    src.setQuadratureData(quad_pts, weights);
+
+    const FieldId pressure = 6;
+    const FieldId velocity = 7;
+    const FieldId temperature = 8;
+
+    src.setFieldSolutionScalar(pressure, std::vector<Real>{1.0, 2.0});
+    src.setFieldPreviousSolutionScalarK(pressure, /*k=*/1, std::vector<Real>{3.0, 4.0});
+    src.setFieldSolutionVector(
+        velocity, /*value_dimension=*/3,
+        std::vector<AssemblyContext::Vector3D>{{5.0, 6.0, 7.0}, {8.0, 9.0, 10.0}});
+    src.setFieldPreviousSolutionVectorK(
+        velocity, /*k=*/1, /*value_dimension=*/3,
+        std::vector<AssemblyContext::Vector3D>{{11.0, 12.0, 13.0}, {14.0, 15.0, 16.0}});
+    src.setFieldSolutionScalar(temperature, std::vector<Real>{17.0, 18.0});
+
+    AssemblyContext dst;
+    dst.reserve(4, 4, 4);
+    dst.setQuadratureData(quad_pts, weights);
+
+    const std::array<FieldId, 2> wanted = {pressure, velocity};
+    EXPECT_TRUE(dst.copyFieldSolutionDataSubsetFrom(src, wanted));
+
+    EXPECT_TRUE(dst.hasFieldSolutionData(pressure));
+    EXPECT_TRUE(dst.hasFieldSolutionData(velocity));
+    EXPECT_FALSE(dst.hasFieldSolutionData(temperature));
+    EXPECT_DOUBLE_EQ(dst.fieldPreviousValue(pressure, 1, 1), 4.0);
+    const auto prev_velocity = dst.fieldPreviousVectorValue(velocity, 0, 1);
+    EXPECT_DOUBLE_EQ(prev_velocity[0], 11.0);
+    EXPECT_DOUBLE_EQ(prev_velocity[1], 12.0);
+    EXPECT_DOUBLE_EQ(prev_velocity[2], 13.0);
 }
 
 TEST(AssemblyContextMultiField, FieldGradientOutOfRangeFieldThrows) {

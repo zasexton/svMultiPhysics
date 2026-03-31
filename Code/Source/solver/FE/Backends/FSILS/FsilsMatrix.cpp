@@ -836,6 +836,16 @@ public:
         return matrix_;
     }
 
+    [[nodiscard]] assembly::InsertionCapabilities insertionCapabilities() const noexcept override
+    {
+        return assembly::InsertionCapabilities{
+            .resolved_matrix_entries = matrixLayoutHandle() != nullptr,
+            .resolved_vector_entries = false,
+            .contiguous_combined_matrix_insert = true,
+            .exact_rank_one_updates = false,
+        };
+    }
+
     void resolveMatrixEntries(std::span<const GlobalIndex> row_dofs,
                               std::span<const GlobalIndex> col_dofs,
                               std::span<GlobalIndex> resolved) const override
@@ -862,22 +872,44 @@ private:
 } // namespace
 
 FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& sparsity)
-    : FsilsMatrix(sparsity, /*dof_per_node=*/1, /*dof_permutation=*/{})
+    : FsilsMatrix(sparsity,
+                  /*dof_per_node=*/1,
+                  /*dof_permutation=*/{}
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+                  ,
+                  MPI_COMM_WORLD
+#endif
+      )
 {
 }
 
 FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern,
                          int dof_per_node,
-                         std::shared_ptr<const DofPermutation> dof_permutation)
+                         std::shared_ptr<const DofPermutation> dof_permutation
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+                         ,
+                         MPI_Comm comm
+#endif
+                         )
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+    : comm_(comm)
+#endif
 {
     FE_THROW_IF(!pattern.isFinalized(), InvalidArgumentException, "FsilsMatrix: sparsity pattern must be finalized");
     FE_THROW_IF(dof_per_node <= 0, InvalidArgumentException, "FsilsMatrix: dof_per_node must be > 0");
+
+    const MPI_Comm backend_comm =
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+        comm_;
+#else
+        MPI_COMM_WORLD;
+#endif
 
     int mpi_initialized = 0;
     MPI_Initialized(&mpi_initialized);
     if (mpi_initialized) {
         int comm_size = 1;
-        MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
+        MPI_Comm_size(backend_comm, &comm_size);
         FE_THROW_IF(comm_size != 1, NotImplementedException,
                     "FsilsMatrix: sequential SparsityPattern is only supported in serial; "
                     "use DistributedSparsityPattern for MPI runs");
@@ -962,7 +994,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern,
         colPtr(i) = node_col_ptr[static_cast<std::size_t>(i)];
     }
 
-    auto commu = make_fsils_commu(MPI_COMM_WORLD);
+    auto commu = make_fsils_commu(backend_comm);
     fe_fsi_linear_solver::fsils_lhs_create(shared->lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, /*nFaces=*/0);
 
     build_old_of_internal(*shared);
@@ -986,11 +1018,26 @@ FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern,
 
 FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
                          int dof_per_node,
-                         std::shared_ptr<const DofPermutation> dof_permutation)
+                         std::shared_ptr<const DofPermutation> dof_permutation
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+                         ,
+                         MPI_Comm comm
+#endif
+                         )
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+    : comm_(comm)
+#endif
 {
     FE_THROW_IF(!pattern.isFinalized(), InvalidArgumentException, "FsilsMatrix: distributed sparsity must be finalized");
     FE_THROW_IF(dof_per_node <= 0, InvalidArgumentException, "FsilsMatrix: dof_per_node must be > 0");
     FE_THROW_IF(!pattern.isSquare(), NotImplementedException, "FsilsMatrix: rectangular systems not supported");
+
+    const MPI_Comm backend_comm =
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+        comm_;
+#else
+        MPI_COMM_WORLD;
+#endif
 
     global_rows_ = pattern.globalRows();
     global_cols_ = pattern.globalCols();
@@ -1287,7 +1334,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
         colPtr(i) = node_col_ptr[static_cast<std::size_t>(i)];
     }
 
-    auto commu = make_fsils_commu(MPI_COMM_WORLD);
+    auto commu = make_fsils_commu(backend_comm);
     fe_fsi_linear_solver::fsils_lhs_create(shared->lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, /*nFaces=*/0);
 
     build_old_of_internal(*shared);
@@ -1382,45 +1429,73 @@ void FsilsMatrix::addResolvedMatrixEntries(std::span<const GlobalIndex> row_dofs
     const auto* slots = resolved.data();
     const auto* local = local_matrix.data();
     const std::size_t n = resolved.size();
+    constexpr std::size_t kMinContiguousRun = 2u;
+
+    const auto applyContiguousRuns =
+        [&](auto&& op_scalar, auto&& op_run) {
+            std::size_t idx = 0;
+            while (idx < n) {
+                const auto slot = slots[idx];
+                if (slot < 0 || static_cast<std::size_t>(slot) >= values_size) {
+                    ++idx;
+                    continue;
+                }
+
+                std::size_t run = 1u;
+                while (idx + run < n) {
+                    const auto next_slot = slots[idx + run];
+                    if (next_slot < 0 ||
+                        static_cast<std::size_t>(next_slot) >= values_size ||
+                        next_slot != slot + static_cast<GlobalIndex>(run)) {
+                        break;
+                    }
+                    ++run;
+                }
+
+                if (run >= kMinContiguousRun) {
+                    op_run(values + static_cast<std::size_t>(slot), local + idx, run);
+                    idx += run;
+                } else {
+                    op_scalar(values[static_cast<std::size_t>(slot)], local[idx]);
+                    ++idx;
+                }
+            }
+        };
 
     switch (mode) {
         case assembly::AddMode::Add:
-            for (std::size_t idx = 0; idx < n; ++idx) {
-                const auto slot = slots[idx];
-                if (slot < 0 || static_cast<std::size_t>(slot) >= values_size) {
-                    continue;
-                }
-                values[static_cast<std::size_t>(slot)] += local[idx];
-            }
+            applyContiguousRuns(
+                [](Real& dst, Real src) { dst += src; },
+                [](Real* dst, const Real* src, std::size_t count) {
+                    for (std::size_t k = 0; k < count; ++k) {
+                        dst[k] += src[k];
+                    }
+                });
             break;
         case assembly::AddMode::Insert:
-            for (std::size_t idx = 0; idx < n; ++idx) {
-                const auto slot = slots[idx];
-                if (slot < 0 || static_cast<std::size_t>(slot) >= values_size) {
-                    continue;
-                }
-                values[static_cast<std::size_t>(slot)] = local[idx];
-            }
+            applyContiguousRuns(
+                [](Real& dst, Real src) { dst = src; },
+                [](Real* dst, const Real* src, std::size_t count) {
+                    std::copy_n(src, count, dst);
+                });
             break;
         case assembly::AddMode::Max:
-            for (std::size_t idx = 0; idx < n; ++idx) {
-                const auto slot = slots[idx];
-                if (slot < 0 || static_cast<std::size_t>(slot) >= values_size) {
-                    continue;
-                }
-                auto& dst = values[static_cast<std::size_t>(slot)];
-                dst = std::max(dst, local[idx]);
-            }
+            applyContiguousRuns(
+                [](Real& dst, Real src) { dst = std::max(dst, src); },
+                [](Real* dst, const Real* src, std::size_t count) {
+                    for (std::size_t k = 0; k < count; ++k) {
+                        dst[k] = std::max(dst[k], src[k]);
+                    }
+                });
             break;
         case assembly::AddMode::Min:
-            for (std::size_t idx = 0; idx < n; ++idx) {
-                const auto slot = slots[idx];
-                if (slot < 0 || static_cast<std::size_t>(slot) >= values_size) {
-                    continue;
-                }
-                auto& dst = values[static_cast<std::size_t>(slot)];
-                dst = std::min(dst, local[idx]);
-            }
+            applyContiguousRuns(
+                [](Real& dst, Real src) { dst = std::min(dst, src); },
+                [](Real* dst, const Real* src, std::size_t count) {
+                    for (std::size_t k = 0; k < count; ++k) {
+                        dst[k] = std::min(dst[k], src[k]);
+                    }
+                });
             break;
     }
 }

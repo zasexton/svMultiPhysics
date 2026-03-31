@@ -737,6 +737,7 @@ TEST(GhostContributionManagerMPITest, LargeMessageHandling) {
 
     EXPECT_NO_THROW(manager.exchangeContributions());
 }
+
 #endif
 
 // ============================================================================

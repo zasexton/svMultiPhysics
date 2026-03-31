@@ -65,6 +65,7 @@
 
 #include <vector>
 #include <span>
+#include <array>
 #include <unordered_map>
 #include <memory>
 #include <cstdint>
@@ -514,13 +515,15 @@ private:
 
 #if FE_HAS_MPI
     // MPI requests for non-blocking communication
-    std::vector<std::vector<char>> send_buffers_raw_;
-    std::vector<int> send_sizes_;
-    std::vector<int> recv_sizes_;
+    std::vector<std::vector<GhostContribution>> send_matrix_buffers_;
+    std::vector<std::vector<GhostVectorContribution>> send_vector_buffers_;
+    std::vector<std::vector<GhostContribution>> recv_matrix_buffers_;
+    std::vector<std::vector<GhostVectorContribution>> recv_vector_buffers_;
+    std::vector<std::array<int, 2>> send_counts_;
+    std::vector<std::array<int, 2>> recv_counts_;
     std::vector<MPI_Request> size_requests_;
     std::vector<MPI_Request> data_send_requests_;
     std::vector<MPI_Request> data_recv_requests_;
-    std::vector<std::vector<char>> recv_buffers_raw_;
 #endif
 
     std::chrono::steady_clock::time_point exchange_start_time_{};

@@ -13,7 +13,6 @@
 #include <array>
 #include <chrono>
 #include <numeric>
-#include <cstring>
 
 namespace svmp {
 namespace FE {
@@ -192,7 +191,10 @@ void GhostContributionManager::initialize()
     }
 
 #if FE_HAS_MPI
-    recv_buffers_raw_.resize(neighbor_ranks_.size());
+    send_matrix_buffers_.resize(neighbor_ranks_.size());
+    send_vector_buffers_.resize(neighbor_ranks_.size());
+    recv_matrix_buffers_.resize(neighbor_ranks_.size());
+    recv_vector_buffers_.resize(neighbor_ranks_.size());
 #endif
 
     initialized_ = true;
@@ -460,68 +462,62 @@ void GhostContributionManager::startExchange()
         return;  // Trivial/loopback exchange; waitExchange() will complete it.
     }
 
-    // Pack send buffers into byte arrays that remain alive until waitExchange().
     const std::size_t n_neighbors = neighbor_ranks_.size();
-    send_buffers_raw_.resize(n_neighbors);
-    send_sizes_.assign(n_neighbors, 0);
-    recv_sizes_.assign(n_neighbors, 0);
-    recv_buffers_raw_.resize(n_neighbors);
+    send_counts_.assign(n_neighbors, {0, 0});
+    recv_counts_.assign(n_neighbors, {0, 0});
+    send_matrix_buffers_.resize(n_neighbors);
+    send_vector_buffers_.resize(n_neighbors);
+    recv_matrix_buffers_.resize(n_neighbors);
+    recv_vector_buffers_.resize(n_neighbors);
 
     for (std::size_t i = 0; i < n_neighbors; ++i) {
-        const auto& buffer = send_buffers_[i];
+        auto& buffer = send_buffers_[i];
+        send_matrix_buffers_[i] = std::move(buffer.entries);
+        send_vector_buffers_[i] = std::move(buffer.vector_entries);
 
-        const std::size_t matrix_size = buffer.entries.size() * sizeof(GhostContribution);
-        const std::size_t vector_size = buffer.vector_entries.size() * sizeof(GhostVectorContribution);
-        const std::size_t total_size =
-            sizeof(std::size_t) + matrix_size +
-            sizeof(std::size_t) + vector_size;
-
-        send_buffers_raw_[i].resize(total_size);
-
-        // Pack: [num_matrix][matrix...][num_vector][vector...]
-        char* ptr = send_buffers_raw_[i].data();
-        const std::size_t num_entries = buffer.entries.size();
-        std::memcpy(ptr, &num_entries, sizeof(std::size_t));
-        ptr += sizeof(std::size_t);
-        if (matrix_size > 0u) {
-            std::memcpy(ptr, buffer.entries.data(), matrix_size);
-            ptr += matrix_size;
-        }
-
-        const std::size_t num_vector_entries = buffer.vector_entries.size();
-        std::memcpy(ptr, &num_vector_entries, sizeof(std::size_t));
-        ptr += sizeof(std::size_t);
-        if (vector_size > 0u) {
-            std::memcpy(ptr, buffer.vector_entries.data(), vector_size);
-        }
-
-        send_sizes_[i] = static_cast<int>(send_buffers_raw_[i].size());
-        last_stats_.bytes_sent += send_buffers_raw_[i].size();
-        last_stats_.matrix_entries_sent += buffer.entries.size();
-        last_stats_.vector_entries_sent += buffer.vector_entries.size();
+        send_counts_[i][0] = static_cast<int>(send_matrix_buffers_[i].size());
+        send_counts_[i][1] = static_cast<int>(send_vector_buffers_[i].size());
+        last_stats_.bytes_sent +=
+            send_matrix_buffers_[i].size() * sizeof(GhostContribution) +
+            send_vector_buffers_[i].size() * sizeof(GhostVectorContribution);
+        last_stats_.matrix_entries_sent += send_matrix_buffers_[i].size();
+        last_stats_.vector_entries_sent += send_vector_buffers_[i].size();
     }
 
     received_matrix_.clear();
     received_vector_.clear();
 
     size_requests_.resize(2 * n_neighbors);
-    data_send_requests_.resize(n_neighbors);
+    data_send_requests_.assign(2 * n_neighbors, MPI_REQUEST_NULL);
     for (std::size_t i = 0; i < n_neighbors; ++i) {
-        MPI_Isend(&send_sizes_[i], 1, MPI_INT, neighbor_ranks_[i], 0, comm_,
+        MPI_Isend(send_counts_[i].data(), 2, MPI_INT, neighbor_ranks_[i], 0, comm_,
                   &size_requests_[i]);
-        MPI_Irecv(&recv_sizes_[i], 1, MPI_INT, neighbor_ranks_[i], 0, comm_,
+        MPI_Irecv(recv_counts_[i].data(), 2, MPI_INT, neighbor_ranks_[i], 0, comm_,
                   &size_requests_[n_neighbors + i]);
 
-        const int count = send_sizes_[i];
-        const char* buf = send_buffers_raw_[i].empty() ? nullptr : send_buffers_raw_[i].data();
-        MPI_Isend(const_cast<char*>(buf), count, MPI_CHAR, neighbor_ranks_[i], 1, comm_,
-                  &data_send_requests_[i]);
-    }
+        const int matrix_bytes =
+            static_cast<int>(send_matrix_buffers_[i].size() * sizeof(GhostContribution));
+        if (matrix_bytes > 0) {
+            MPI_Isend(send_matrix_buffers_[i].data(),
+                      matrix_bytes,
+                      MPI_BYTE,
+                      neighbor_ranks_[i],
+                      1,
+                      comm_,
+                      &data_send_requests_[2 * i]);
+        }
 
-    // After packing, clear the user-facing send buffers so subsequent assembly
-    // can continue buffering while this exchange is in-flight.
-    for (auto& buffer : send_buffers_) {
-        buffer.clear();
+        const int vector_bytes =
+            static_cast<int>(send_vector_buffers_[i].size() * sizeof(GhostVectorContribution));
+        if (vector_bytes > 0) {
+            MPI_Isend(send_vector_buffers_[i].data(),
+                      vector_bytes,
+                      MPI_BYTE,
+                      neighbor_ranks_[i],
+                      2,
+                      comm_,
+                      &data_send_requests_[2 * i + 1]);
+        }
     }
 
     exchange_in_progress_ = true;
@@ -572,15 +568,37 @@ void GhostContributionManager::waitExchange()
     }
 
     const std::size_t n_neighbors = neighbor_ranks_.size();
-    data_recv_requests_.resize(n_neighbors);
+    data_recv_requests_.assign(2 * n_neighbors, MPI_REQUEST_NULL);
     for (std::size_t i = 0; i < n_neighbors; ++i) {
-        recv_buffers_raw_[i].resize(static_cast<std::size_t>(recv_sizes_[i]));
-        last_stats_.bytes_received += recv_buffers_raw_[i].size();
+        recv_matrix_buffers_[i].resize(static_cast<std::size_t>(std::max(recv_counts_[i][0], 0)));
+        recv_vector_buffers_[i].resize(static_cast<std::size_t>(std::max(recv_counts_[i][1], 0)));
+        last_stats_.bytes_received +=
+            recv_matrix_buffers_[i].size() * sizeof(GhostContribution) +
+            recv_vector_buffers_[i].size() * sizeof(GhostVectorContribution);
 
-        const int count = recv_sizes_[i];
-        char* buf = recv_buffers_raw_[i].empty() ? nullptr : recv_buffers_raw_[i].data();
-        MPI_Irecv(buf, count, MPI_CHAR, neighbor_ranks_[i], 1, comm_,
-                  &data_recv_requests_[i]);
+        const int matrix_bytes =
+            static_cast<int>(recv_matrix_buffers_[i].size() * sizeof(GhostContribution));
+        if (matrix_bytes > 0) {
+            MPI_Irecv(recv_matrix_buffers_[i].data(),
+                      matrix_bytes,
+                      MPI_BYTE,
+                      neighbor_ranks_[i],
+                      1,
+                      comm_,
+                      &data_recv_requests_[2 * i]);
+        }
+
+        const int vector_bytes =
+            static_cast<int>(recv_vector_buffers_[i].size() * sizeof(GhostVectorContribution));
+        if (vector_bytes > 0) {
+            MPI_Irecv(recv_vector_buffers_[i].data(),
+                      vector_bytes,
+                      MPI_BYTE,
+                      neighbor_ranks_[i],
+                      2,
+                      comm_,
+                      &data_recv_requests_[2 * i + 1]);
+        }
     }
 
     if (!data_send_requests_.empty()) {
@@ -597,33 +615,18 @@ void GhostContributionManager::waitExchange()
     received_vector_.clear();
 
     for (std::size_t i = 0; i < n_neighbors; ++i) {
-        if (recv_buffers_raw_[i].empty()) continue;
+        last_stats_.matrix_entries_received += recv_matrix_buffers_[i].size();
+        last_stats_.vector_entries_received += recv_vector_buffers_[i].size();
 
-        const char* ptr = recv_buffers_raw_[i].data();
-
-        std::size_t num_matrix_entries = 0;
-        std::memcpy(&num_matrix_entries, ptr, sizeof(std::size_t));
-        ptr += sizeof(std::size_t);
-
-        last_stats_.matrix_entries_received += num_matrix_entries;
-        const auto old_m = received_matrix_.size();
-        received_matrix_.resize(old_m + num_matrix_entries);
-        if (num_matrix_entries > 0u) {
-            std::memcpy(received_matrix_.data() + old_m, ptr,
-                        num_matrix_entries * sizeof(GhostContribution));
-            ptr += num_matrix_entries * sizeof(GhostContribution);
+        if (!recv_matrix_buffers_[i].empty()) {
+            received_matrix_.insert(received_matrix_.end(),
+                                    recv_matrix_buffers_[i].begin(),
+                                    recv_matrix_buffers_[i].end());
         }
-
-        std::size_t num_vector_entries = 0;
-        std::memcpy(&num_vector_entries, ptr, sizeof(std::size_t));
-        ptr += sizeof(std::size_t);
-
-        last_stats_.vector_entries_received += num_vector_entries;
-        const auto old_v = received_vector_.size();
-        received_vector_.resize(old_v + num_vector_entries);
-        if (num_vector_entries > 0u) {
-            std::memcpy(received_vector_.data() + old_v, ptr,
-                        num_vector_entries * sizeof(GhostVectorContribution));
+        if (!recv_vector_buffers_[i].empty()) {
+            received_vector_.insert(received_vector_.end(),
+                                    recv_vector_buffers_[i].begin(),
+                                    recv_vector_buffers_[i].end());
         }
     }
 

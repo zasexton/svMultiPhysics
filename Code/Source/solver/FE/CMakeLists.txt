@@ -259,6 +259,7 @@ set(FE_CORE_HEADERS
     Core/FEConfig.h
     Core/FEException.h
     Core/Logger.h
+    Core/KernelTrace.h
 )
 
 set(FE_CORE_SOURCES
@@ -740,6 +741,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/GlobalKernelStateProvider.h
     Systems/MaterialStateProvider.h
     Systems/MeshSearchAccess.h
+    Systems/MixedKernelPlan.h
     Systems/OperatorBackends.h
     Systems/OperatorRegistry.h
     Systems/ParameterRegistry.h
@@ -811,9 +813,11 @@ set(FE_FORMS_HEADERS
 	    Forms/CoupledBCs.h
 	    Forms/NitscheBC.h
 	    Forms/ConstraintBCs.h
-	    Forms/BoundaryFunctional.h
+    Forms/BoundaryFunctional.h
 	    Forms/AffineAnalysis.h
 	    Forms/FormExpr.h
+    Forms/MixedBlockKernelSet.h
+    Forms/MonolithicCellKernel.h
     Forms/SymbolicDifferentiation.h
     Forms/Index.h
     Forms/Einsum.h
@@ -879,8 +883,9 @@ set(FE_FORMS_SOURCES
     Forms/FormCompiler.cpp
     Forms/AffineAnalysis.cpp
 	    Forms/BoundaryFunctional.cpp
-	    Forms/CoupledBlockKernel.cpp
+    Forms/MixedBlockKernelSet.cpp
 	    Forms/FormKernels.cpp
+    Forms/MonolithicCellKernel.cpp
 	    Forms/SymbolicDifferentiation.cpp
 	    Forms/PointEvaluator.cpp
 	    Forms/JIT/ExternalCalls.cpp
@@ -2366,6 +2371,10 @@ if(FE_BUILD_TESTS)
             file(GLOB FE_ASSEMBLY_MPI_TEST_SOURCES
                 Tests/Unit/Assembly/test_*MPI*.cpp
             )
+            list(APPEND FE_ASSEMBLY_MPI_TEST_SOURCES
+                Tests/Unit/Assembly/test_GhostContributionManagerMPI.cpp
+            )
+            list(REMOVE_DUPLICATES FE_ASSEMBLY_MPI_TEST_SOURCES)
             if(FE_ASSEMBLY_MPI_TEST_SOURCES)
                 add_executable(test_fe_assembly_mpi ${FE_ASSEMBLY_MPI_TEST_SOURCES})
                 _svmp_fe_target_enable_warnings(test_fe_assembly_mpi)

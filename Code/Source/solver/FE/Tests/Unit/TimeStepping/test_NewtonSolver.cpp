@@ -17,9 +17,13 @@
 #include "Forms/FormKernels.h"
 #include "Forms/Forms.h"
 
+#include "Spaces/H1Space.h"
 #include "Spaces/L2Space.h"
 
+#include "Systems/AuxiliaryModelBuilder.h"
+#include "Systems/AuxiliaryModelDSL.h"
 #include "Systems/FESystem.h"
+#include "Systems/FormsInstaller.h"
 #include "Systems/TimeIntegrator.h"
 #include "Systems/TransientSystem.h"
 
@@ -30,9 +34,12 @@
 #include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace ts_test = svmp::FE::timestepping::test;
@@ -204,9 +211,218 @@ private:
     svmp::FE::backends::LinearSolver& inner_;
 };
 
+class RecordingRankOneSolver final : public svmp::FE::backends::LinearSolver {
+public:
+    explicit RecordingRankOneSolver(svmp::FE::backends::LinearSolver& inner)
+        : inner_(inner)
+    {
+    }
+
+    [[nodiscard]] svmp::FE::backends::BackendKind backendKind() const noexcept override
+    {
+        return inner_.backendKind();
+    }
+
+    void setOptions(const svmp::FE::backends::SolverOptions& options) override
+    {
+        inner_.setOptions(options);
+    }
+
+    [[nodiscard]] const svmp::FE::backends::SolverOptions& getOptions() const noexcept override
+    {
+        return inner_.getOptions();
+    }
+
+    [[nodiscard]] svmp::FE::backends::SolverReport solve(const svmp::FE::backends::GenericMatrix& A,
+                                                          svmp::FE::backends::GenericVector& x,
+                                                          const svmp::FE::backends::GenericVector& b) override
+    {
+        return inner_.solve(A, x, b);
+    }
+
+    void setRankOneUpdates(std::span<const svmp::FE::backends::RankOneUpdate> updates) override
+    {
+        last_updates.assign(updates.begin(), updates.end());
+    }
+
+    [[nodiscard]] bool supportsNativeRankOneUpdates() const noexcept override
+    {
+        return true;
+    }
+
+    std::vector<svmp::FE::backends::RankOneUpdate> last_updates{};
+
+private:
+    svmp::FE::backends::LinearSolver& inner_;
+};
+
+class RecordingSolveOptionsSolver final : public svmp::FE::backends::LinearSolver {
+public:
+    explicit RecordingSolveOptionsSolver(svmp::FE::backends::LinearSolver& inner,
+                                         bool native_rank_one_support = false)
+        : inner_(inner)
+        , native_rank_one_support_(native_rank_one_support)
+    {
+    }
+
+    [[nodiscard]] svmp::FE::backends::BackendKind backendKind() const noexcept override
+    {
+        return inner_.backendKind();
+    }
+
+    void setOptions(const svmp::FE::backends::SolverOptions& options) override
+    {
+        last_set_options = options;
+        inner_.setOptions(options);
+    }
+
+    [[nodiscard]] const svmp::FE::backends::SolverOptions& getOptions() const noexcept override
+    {
+        return inner_.getOptions();
+    }
+
+    [[nodiscard]] svmp::FE::backends::SolverReport solve(const svmp::FE::backends::GenericMatrix& A,
+                                                          svmp::FE::backends::GenericVector& x,
+                                                          const svmp::FE::backends::GenericVector& b) override
+    {
+        saw_solve = true;
+        options_seen_in_solve = inner_.getOptions();
+        return inner_.solve(A, x, b);
+    }
+
+    void setRankOneUpdates(std::span<const svmp::FE::backends::RankOneUpdate> updates) override
+    {
+        last_updates.assign(updates.begin(), updates.end());
+        inner_.setRankOneUpdates(updates);
+    }
+
+    [[nodiscard]] bool supportsNativeRankOneUpdates() const noexcept override
+    {
+        return native_rank_one_support_;
+    }
+
+    bool saw_solve{false};
+    std::optional<svmp::FE::backends::SolverOptions> last_set_options{};
+    std::optional<svmp::FE::backends::SolverOptions> options_seen_in_solve{};
+    std::vector<svmp::FE::backends::RankOneUpdate> last_updates{};
+
+private:
+    svmp::FE::backends::LinearSolver& inner_;
+    bool native_rank_one_support_{false};
+};
+
+class ForceResidualReportLinearSolver final : public svmp::FE::backends::LinearSolver {
+public:
+    ForceResidualReportLinearSolver(svmp::FE::backends::LinearSolver& inner,
+                                    double initial_residual_norm,
+                                    double final_residual_norm,
+                                    int forced_miss_calls = 1,
+                                    bool native_rank_one_support = false)
+        : inner_(inner)
+        , initial_residual_norm_(initial_residual_norm)
+        , final_residual_norm_(final_residual_norm)
+        , forced_miss_calls_(forced_miss_calls)
+        , native_rank_one_support_(native_rank_one_support)
+    {
+    }
+
+    [[nodiscard]] svmp::FE::backends::BackendKind backendKind() const noexcept override
+    {
+        return inner_.backendKind();
+    }
+
+    void setOptions(const svmp::FE::backends::SolverOptions& options) override
+    {
+        inner_.setOptions(options);
+    }
+
+    [[nodiscard]] const svmp::FE::backends::SolverOptions& getOptions() const noexcept override
+    {
+        return inner_.getOptions();
+    }
+
+    [[nodiscard]] svmp::FE::backends::SolverReport solve(const svmp::FE::backends::GenericMatrix& A,
+                                                          svmp::FE::backends::GenericVector& x,
+                                                          const svmp::FE::backends::GenericVector& b) override
+    {
+        auto rep = inner_.solve(A, x, b);
+        if (forced_miss_calls_ <= 0) {
+            return rep;
+        }
+        --forced_miss_calls_;
+        rep.converged = false;
+        rep.initial_residual_norm = initial_residual_norm_;
+        rep.final_residual_norm = final_residual_norm_;
+        rep.relative_residual =
+            final_residual_norm_ / std::max(initial_residual_norm_, 1e-30);
+        rep.message = "synthetic strict-coupled miss";
+        return rep;
+    }
+
+    void setRankOneUpdates(std::span<const svmp::FE::backends::RankOneUpdate> updates) override
+    {
+        inner_.setRankOneUpdates(updates);
+    }
+
+    [[nodiscard]] bool supportsNativeRankOneUpdates() const noexcept override
+    {
+        return native_rank_one_support_;
+    }
+
+private:
+    svmp::FE::backends::LinearSolver& inner_;
+    double initial_residual_norm_{1.0};
+    double final_residual_norm_{1.0};
+    int forced_miss_calls_{1};
+    bool native_rank_one_support_{false};
+};
+
+class ScopedEnvVar final {
+public:
+    ScopedEnvVar(const char* key, const char* value)
+        : key_(key)
+    {
+        const char* prior = std::getenv(key_);
+        if (prior != nullptr) {
+            had_prior_ = true;
+            prior_value_ = prior;
+        }
+        ::setenv(key_, value, 1);
+    }
+
+    ~ScopedEnvVar()
+    {
+        if (had_prior_) {
+            ::setenv(key_, prior_value_.c_str(), 1);
+        } else {
+            ::unsetenv(key_);
+        }
+    }
+
+    ScopedEnvVar(const ScopedEnvVar&) = delete;
+    ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
+
+private:
+    const char* key_{nullptr};
+    bool had_prior_{false};
+    std::string prior_value_{};
+};
+
 struct ScalarProblem {
     std::shared_ptr<svmp::FE::forms::test::SingleTetraMeshAccess> mesh{};
     std::shared_ptr<svmp::FE::spaces::L2Space> space{};
+    std::unique_ptr<svmp::FE::systems::FESystem> sys{};
+    svmp::FE::FieldId u_field{std::numeric_limits<svmp::FE::FieldId>::max()};
+    std::shared_ptr<const svmp::FE::systems::TimeIntegrator> integrator{};
+    std::unique_ptr<svmp::FE::systems::TransientSystem> transient{};
+    std::unique_ptr<svmp::FE::backends::BackendFactory> factory{};
+    std::unique_ptr<svmp::FE::backends::LinearSolver> linear{};
+    svmp::FE::timestepping::TimeHistory history{};
+};
+
+struct DirectCouplingProblem {
+    std::shared_ptr<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess> mesh{};
+    std::shared_ptr<svmp::FE::spaces::H1Space> space{};
     std::unique_ptr<svmp::FE::systems::FESystem> sys{};
     svmp::FE::FieldId u_field{std::numeric_limits<svmp::FE::FieldId>::max()};
     std::shared_ptr<const svmp::FE::systems::TimeIntegrator> integrator{};
@@ -280,6 +496,77 @@ template <typename BuildForm>
         throw std::runtime_error("Expected scalar DOF vector");
     }
     return static_cast<double>(vals[0]);
+}
+
+[[nodiscard]] DirectCouplingProblem makeDirectCouplingProblem(double dt,
+                                                              const std::vector<svmp::FE::Real>& u0)
+{
+    DirectCouplingProblem p;
+    constexpr int marker = 6;
+    p.mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    p.space = std::make_shared<svmp::FE::spaces::H1Space>(svmp::FE::ElementType::Tetra4, /*order=*/1);
+
+    p.sys = std::make_unique<svmp::FE::systems::FESystem>(p.mesh);
+    p.u_field = p.sys->addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = p.space, .components = 1});
+    p.sys->addOperator("op");
+
+    const auto u_disc = svmp::FE::forms::FormExpr::discreteField(p.u_field, *p.space, "u");
+    auto Q = p.sys->boundaryIntegral("Q", u_disc, marker);
+
+    auto model = svmp::FE::systems::aux::model("newton_rank_one_snapshot",
+        [](svmp::FE::systems::ModelFacade& m) {
+            auto Q = m.input("Q");
+            auto x1 = m.state("x1");
+            auto x2 = m.state("x2");
+            auto Rp = m.param("Rp");
+            m << svmp::FE::systems::ddt(x1) == -x1;
+            m << svmp::FE::systems::ddt(x2) == -x2 + Q;
+            m << svmp::FE::systems::out("P_out") == x2 + Rp * Q;
+        });
+
+    auto inst = p.sys->deploy(
+        svmp::FE::systems::use(model).name("newton_rank_one_snapshot_inst").global().monolithic()
+            .bindCoupled("Q", Q)
+            .param("Rp", 3.0)
+            .initialize({0.0, 0.0}));
+
+    const auto u = svmp::FE::forms::FormExpr::stateField(p.u_field, *p.space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*p.space, "v");
+    const auto residual =
+        svmp::FE::forms::inner(svmp::FE::forms::grad(u), svmp::FE::forms::grad(v)).dx() -
+        (inst.output("P_out") * v).ds(marker);
+    (void)svmp::FE::systems::installFormulation(*p.sys, "op", {p.u_field}, residual);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = ts_test::singleTetraTopology();
+    p.sys->setup({}, inputs);
+    p.sys->finalizeAuxiliaryLayout();
+
+    p.integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    p.transient = std::make_unique<svmp::FE::systems::TransientSystem>(*p.sys, p.integrator);
+
+    p.factory = ts_test::createTestFactory();
+    if (!p.factory) {
+        throw std::runtime_error("DirectCouplingProblem requires the Eigen backend (enable FE_ENABLE_EIGEN)");
+    }
+    p.linear = p.factory->createLinearSolver(ts_test::directSolve());
+    if (!p.linear) {
+        throw std::runtime_error("DirectCouplingProblem failed to create LinearSolver");
+    }
+
+    const auto n_dofs = p.sys->dofHandler().getNumDofs();
+    if (static_cast<std::size_t>(n_dofs) != u0.size()) {
+        throw std::runtime_error("DirectCouplingProblem u0 size mismatch");
+    }
+
+    p.history = svmp::FE::timestepping::TimeHistory::allocate(*p.factory, n_dofs);
+    p.history.setDt(dt);
+    p.history.setPrevDt(dt);
+    ts_test::setVectorByDof(p.history.uPrev(), u0);
+    ts_test::setVectorByDof(p.history.uPrev2(), u0);
+    p.history.resetCurrentToPrevious();
+    return p;
 }
 
 } // namespace
@@ -512,8 +799,8 @@ TEST(NewtonSolver, ExhibitsQuadraticConvergenceNearSolution)
     nopt.residual_op = "op";
     nopt.jacobian_op = "op";
     nopt.max_iterations = 1;
-    nopt.abs_tolerance = 0.0;
-    nopt.rel_tolerance = 0.0;
+    nopt.abs_tolerance = 1e-16;
+    nopt.rel_tolerance = 1e-16;
     nopt.step_tolerance = 0.0;
     nopt.use_line_search = false;
 
@@ -703,8 +990,8 @@ TEST(NewtonSolver, ThrowsWhenLinearSolveFails)
     nopt.residual_op = "op";
     nopt.jacobian_op = "op";
     nopt.max_iterations = 1;
-    nopt.abs_tolerance = 0.0;
-    nopt.rel_tolerance = 0.0;
+    nopt.abs_tolerance = 1e-16;
+    nopt.rel_tolerance = 1e-16;
     nopt.step_tolerance = 0.0;
     nopt.use_line_search = false;
 
@@ -720,4 +1007,127 @@ TEST(NewtonSolver, ThrowsWhenLinearSolveFails)
                                         problem.history,
                                         ws),
                  svmp::FE::FEException);
+}
+
+TEST(NewtonSolver, PreservesRankOneUpdatesAcrossJacobianCheckResidualAssemblies)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeDirectCouplingProblem(/*dt=*/0.1, /*u0=*/{0.2, -0.4, 0.1, 0.7});
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 1e-16;
+    nopt.rel_tolerance = 1e-16;
+    nopt.step_tolerance = 0.0;
+    nopt.use_line_search = false;
+
+    ScopedEnvVar jac_check("SVMP_FE_JACOBIAN_CHECK", "1");
+    ScopedEnvVar jac_it("SVMP_FE_JACOBIAN_CHECK_IT", "0");
+    ScopedEnvVar jac_step("SVMP_FE_JACOBIAN_CHECK_STEP", "1e-7");
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    RecordingRankOneSolver linear(*problem.linear);
+    const auto rep = newton.solveStep(*problem.transient,
+                                      linear,
+                                      /*solve_time=*/problem.history.dt(),
+                                      problem.history,
+                                      ws);
+
+    ASSERT_EQ(linear.last_updates.size(), 1u);
+    EXPECT_NEAR(linear.last_updates[0].sigma, -3.0, 1e-10);
+    EXPECT_FALSE(linear.last_updates[0].v.empty());
+    EXPECT_TRUE(rep.linear.converged);
+}
+
+TEST(NewtonSolver, ExplicitRankOneUsesCoupledSolveOptions)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeDirectCouplingProblem(/*dt=*/0.1, /*u0=*/{0.2, -0.4, 0.1, 0.7});
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 1e-16;
+    nopt.rel_tolerance = 1e-16;
+    nopt.step_tolerance = 0.0;
+    nopt.use_line_search = false;
+
+    ScopedEnvVar force_explicit("SVMP_FORCE_EXPLICIT_RANK_ONE", "1");
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+    ts_test::setVectorByDof(problem.history.u(), {0.9, -0.1, 0.35, -0.6});
+
+    RecordingSolveOptionsSolver linear(*problem.linear, /*native_rank_one_support=*/true);
+    (void)newton.solveStep(*problem.transient,
+                           linear,
+                           /*solve_time=*/problem.history.dt(),
+                           problem.history,
+                           ws);
+
+    ASSERT_TRUE(linear.saw_solve);
+    ASSERT_TRUE(linear.options_seen_in_solve.has_value());
+    EXPECT_TRUE(linear.last_updates.empty());
+    EXPECT_EQ(linear.options_seen_in_solve->fsils_residual_check_policy,
+              svmp::FE::backends::FsilsResidualCheckPolicy::Always);
+    EXPECT_GE(linear.options_seen_in_solve->max_iter, 200);
+    EXPECT_LE(linear.options_seen_in_solve->rel_tol, static_cast<svmp::FE::Real>(1e-8));
+    EXPECT_LE(linear.options_seen_in_solve->abs_tol, static_cast<svmp::FE::Real>(1e-12));
+}
+
+TEST(NewtonSolver, CoupledSolveAcceptsOriginalLinearTarget)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeDirectCouplingProblem(/*dt=*/0.1, /*u0=*/{0.2, -0.4, 0.1, 0.7});
+
+    auto base_opts = problem.linear->getOptions();
+    base_opts.rel_tol = static_cast<svmp::FE::Real>(1e-3);
+    base_opts.abs_tol = static_cast<svmp::FE::Real>(0.0);
+    base_opts.max_iter = 25;
+    problem.linear->setOptions(base_opts);
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 1e-16;
+    nopt.rel_tolerance = 1e-16;
+    nopt.step_tolerance = 0.0;
+    nopt.use_line_search = false;
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+    ts_test::setVectorByDof(problem.history.u(), {0.9, -0.1, 0.35, -0.6});
+
+    ForceResidualReportLinearSolver linear(*problem.linear,
+                                           /*initial_residual_norm=*/1.0,
+                                           /*final_residual_norm=*/5e-4,
+                                           /*forced_miss_calls=*/1,
+                                           /*native_rank_one_support=*/true);
+    const auto rep = newton.solveStep(*problem.transient,
+                                      linear,
+                                      /*solve_time=*/problem.history.dt(),
+                                      problem.history,
+                                      ws);
+
+    EXPECT_FALSE(rep.converged);
+    EXPECT_TRUE(rep.linear.converged);
+    EXPECT_NE(rep.linear.message.find("accepted original coupled target"), std::string::npos);
 }

@@ -91,6 +91,52 @@ svmp::FE::backends::PreconditionerType toPreconditioner(const std::string& legac
   return PreconditionerType::None;
 }
 
+svmp::FE::backends::FsilsBlockSchurSchurPreconditioner
+toFsilsBlockSchurPreconditioner(const std::string& value)
+{
+  using svmp::FE::backends::FsilsBlockSchurSchurPreconditioner;
+  const auto v = lower_copy(value);
+
+  if (v.empty() || v == "diag-l" || v == "diagl" || v == "diag") {
+    return FsilsBlockSchurSchurPreconditioner::DiagL;
+  }
+  if (v == "blockdiag-l" || v == "blockdiagl" || v == "blockdiag") {
+    return FsilsBlockSchurSchurPreconditioner::BlockDiagL;
+  }
+  if (v == "ilu-l" || v == "ilul") {
+    return FsilsBlockSchurSchurPreconditioner::ILUL;
+  }
+  if (v == "algebraic-shat" || v == "algebraic" || v == "shat") {
+    return FsilsBlockSchurSchurPreconditioner::AlgebraicSchur;
+  }
+
+  throw std::runtime_error("[svMultiPhysics::Application] Unsupported FSILS BlockSchur Schur preconditioner '" +
+                           value + "'.");
+}
+
+svmp::FE::backends::FsilsBlockSchurMomentumApproximation
+toFsilsBlockSchurMomentumApproximation(const std::string& value)
+{
+  using svmp::FE::backends::FsilsBlockSchurMomentumApproximation;
+  const auto v = lower_copy(value);
+
+  if (v.empty() || v == "diag-k" || v == "diagk" || v == "diag") {
+    return FsilsBlockSchurMomentumApproximation::DiagK;
+  }
+  if (v == "blockdiag-k" || v == "blockdiagk" || v == "blockdiag") {
+    return FsilsBlockSchurMomentumApproximation::BlockDiagK;
+  }
+  if (v == "ilu-k" || v == "iluk" || v == "ilu") {
+    return FsilsBlockSchurMomentumApproximation::ILUK;
+  }
+  if (v == "asm-k" || v == "asm") {
+    return FsilsBlockSchurMomentumApproximation::ASM;
+  }
+
+  throw std::runtime_error("[svMultiPhysics::Application] Unsupported FSILS BlockSchur momentum approximation '" +
+                           value + "'.");
+}
+
 svmp::FE::backends::BackendKind selectBackend(const Parameters& params)
 {
   using svmp::FE::backends::BackendKind;
@@ -205,15 +251,13 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
 
   // Explicit saddle-point block names: env vars or programmatic SolverOptions.
   // SVMP_MOMENTUM_BLOCK=<name> and SVMP_CONSTRAINT_BLOCK=<name> override the heuristic.
-  if (opts.method == svmp::FE::backends::SolverMethod::BlockSchur) {
-    if (opts.momentum_block_name.empty()) {
-      const char* env = std::getenv("SVMP_MOMENTUM_BLOCK");
-      if (env && env[0]) opts.momentum_block_name = env;
-    }
-    if (opts.constraint_block_name.empty()) {
-      const char* env = std::getenv("SVMP_CONSTRAINT_BLOCK");
-      if (env && env[0]) opts.constraint_block_name = env;
-    }
+  if (opts.momentum_block_name.empty()) {
+    const char* env = std::getenv("SVMP_MOMENTUM_BLOCK");
+    if (env && env[0]) opts.momentum_block_name = env;
+  }
+  if (opts.constraint_block_name.empty()) {
+    const char* env = std::getenv("SVMP_CONSTRAINT_BLOCK");
+    if (env && env[0]) opts.constraint_block_name = env;
   }
 
   // FSILS BlockSchur sub-solver knobs: pass GM/CG sub-solver controls through.
@@ -223,6 +267,20 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
     opts.fsils_blockschur_cg_max_iter = eq->linear_solver.ns_cg_max_iterations.value();
     opts.fsils_blockschur_gm_rel_tol = static_cast<svmp::FE::Real>(eq->linear_solver.ns_gm_tolerance.value());
     opts.fsils_blockschur_cg_rel_tol = static_cast<svmp::FE::Real>(eq->linear_solver.ns_cg_tolerance.value());
+    opts.fsils_blockschur_schur_preconditioner =
+        toFsilsBlockSchurPreconditioner(eq->linear_solver.ns_schur_preconditioner.value());
+    opts.fsils_blockschur_momentum_approximation =
+        toFsilsBlockSchurMomentumApproximation(eq->linear_solver.ns_momentum_approximation.value());
+
+    const char* schur_pc_env = std::getenv("SVMP_FSILS_BLOCKSCHUR_SCHUR_PC");
+    if (schur_pc_env && schur_pc_env[0]) {
+      opts.fsils_blockschur_schur_preconditioner = toFsilsBlockSchurPreconditioner(schur_pc_env);
+    }
+    const char* momentum_hat_env = std::getenv("SVMP_FSILS_BLOCKSCHUR_MOMENTUM_HAT");
+    if (momentum_hat_env && momentum_hat_env[0]) {
+      opts.fsils_blockschur_momentum_approximation =
+          toFsilsBlockSchurMomentumApproximation(momentum_hat_env);
+    }
   }
 
   return opts;
@@ -570,6 +628,13 @@ void SimulationBuilder::createSolvers()
   oopCout() << "[svMultiPhysics::Application] SimulationBuilder: dof_per_node=" << create_options.dof_per_node
             << std::endl;
 
+#if FE_HAS_MPI
+  {
+    const auto comm = svmp::MeshComm::world();
+    create_options.mpi_comm = comm.native();
+  }
+#endif
+
   if (backend_kind == svmp::FE::backends::BackendKind::FSILS && create_options.dof_per_node > 1) {
     oopCout() << "[svMultiPhysics::Application] SimulationBuilder: configuring FSILS DOF permutation." << std::endl;
     svmp::FE::dofs::DofDistributionOptions dof_options{};
@@ -619,8 +684,16 @@ void SimulationBuilder::createSolvers()
         offset += ncomp;
       }
 
-      // Identify saddle-point block pair for BlockSchur solver.
-      if (solver_options.method == svmp::FE::backends::SolverMethod::BlockSchur) {
+      // Identify saddle-point block pair when the solver/backend can benefit from
+      // explicit momentum/constraint roles.  For FSILS this is also required by
+      // native outlet-coupled GMRES solves, not just the BlockSchur path.
+      const bool should_identify_saddle_point =
+          solver_options.method == svmp::FE::backends::SolverMethod::BlockSchur ||
+          !solver_options.momentum_block_name.empty() ||
+          !solver_options.constraint_block_name.empty() ||
+          (backend_kind == svmp::FE::backends::BackendKind::FSILS &&
+           layout.blocks.size() == 2u);
+      if (should_identify_saddle_point) {
         // Prefer explicit block names from solver configuration.
         if (!solver_options.momentum_block_name.empty() || !solver_options.constraint_block_name.empty()) {
           for (int bi = 0; bi < static_cast<int>(layout.blocks.size()); ++bi) {

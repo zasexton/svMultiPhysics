@@ -103,7 +103,7 @@ double fsi_ls_norms(const fsils_int nNo, FSILS_commuType& commu, const Vector<do
 
   if (commu.nTasks != 1) {
     double tmp;
-    MPI_Allreduce(&result, &tmp, 1, cm_mod::mpreal, MPI_SUM, commu.comm);
+    fsils_allreduce_sum(&result, &tmp, 1, cm_mod::mpreal, commu);
     result = tmp;
   }
 
@@ -117,7 +117,7 @@ double fsi_ls_normv(const int dof, const fsils_int nNo, FSILS_commuType& commu, 
 
   if (commu.nTasks != 1) {
     double tmp;
-    MPI_Allreduce(&result, &tmp, 1, cm_mod::mpreal, MPI_SUM, commu.comm);
+    fsils_allreduce_sum(&result, &tmp, 1, cm_mod::mpreal, commu);
     result = tmp;
   }
 

@@ -755,7 +755,7 @@ double fused_update_norm_v_impl(const fsils_int nNo, const fsils_int mynNo, fe_f
   double global_sq = local_sq;
   if (commu.nTasks != 1) {
     double tmp = 0.0;
-    MPI_Allreduce(&local_sq, &tmp, 1, cm_mod::mpreal, MPI_SUM, commu.comm);
+    fsils_allreduce_sum(&local_sq, &tmp, 1, cm_mod::mpreal, commu);
     global_sq = tmp;
   }
   return std::sqrt(global_sq);
@@ -1287,7 +1287,7 @@ double fused_update_norm_s(const fsils_int nNo, const fsils_int mynNo, fe_fsi_li
   double global_sq = local_sq;
   if (commu.nTasks != 1) {
     double tmp = 0.0;
-    MPI_Allreduce(&local_sq, &tmp, 1, cm_mod::mpreal, MPI_SUM, commu.comm);
+    fsils_allreduce_sum(&local_sq, &tmp, 1, cm_mod::mpreal, commu);
     global_sq = tmp;
   }
   return std::sqrt(global_sq);
@@ -1439,7 +1439,7 @@ void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSIL
 
         double global_nS = 0.0;
         if (lhs.commu.nTasks > 1) {
-          MPI_Allreduce(&local_nS, &global_nS, 1, cm_mod::mpreal, MPI_SUM, lhs.commu.comm);
+          fsils_allreduce_sum(&local_nS, &global_nS, 1, cm_mod::mpreal, lhs.commu);
         } else {
           global_nS = local_nS;
         }
@@ -1483,7 +1483,11 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
   ls.suc = false;
   double eps = 0.0;
   int last_i = 0;
+  int restart_cycles = 0;
   X = 0.0;
+  const int itr_before = ls.itr;
+  const double callD_before = ls.callD;
+  const auto collective_before = lhs.commu.collective_stats;
 
   auto& h_col = ls.ws.h_col;
   const int thread_stride = dot_thread_stride(static_cast<int>(h_col.size()));
@@ -1496,8 +1500,14 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
   int stagnation_count = 0;
   constexpr int max_stagnation_restarts = 5;
   constexpr double stagnation_ratio = 0.95;
+  const bool allow_heuristic_early_stop = !ls.exact_convergence;
+
+  if (has_coupled_bc) {
+    bc_pre(lhs, ls, dof, mynNo, nNo);
+  }
 
   for (int l = 0; l < ls.mItr; l++) {
+    restart_cycles++;
     auto u_slice = u.rslice(0);
 
     if (l == 0) {
@@ -1565,13 +1575,6 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
         proj_sq_norm += h_col[j] * h_col[j];
       }
 
-      double tt_sq = h_col[static_cast<size_t>(i+1)] - proj_sq_norm;
-
-      const double tt_eps = std::numeric_limits<double>::epsilon();
-      if (tt_sq < 0.0 && tt_sq > -tt_eps * h_col[static_cast<size_t>(i+1)]) {
-        tt_sq = 0.0;
-      }
-
       const double old_norm_sq = h_col[static_cast<size_t>(i+1)];
 
       for (int j = 0; j <= i; j++) {
@@ -1580,14 +1583,19 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
         }
       }
 
+      double new_norm = norm::fsi_ls_normv(dof, mynNo, lhs.commu, u_slice_next);
+      const double new_norm_sq = new_norm * new_norm;
+
       // CGS2: Selective reorthogonalization (Pythagorean check)
       bool do_reorth = false;
-      if (enh.reorth_mode != GmresEnhancements::ReorthMode::off && tt_sq >= 0.0) {
+      if (!ls.disable_reorth &&
+          enh.reorth_mode != GmresEnhancements::ReorthMode::off &&
+          std::isfinite(new_norm_sq)) {
         if (enh.use_mgs_dgks) {
           const double ratio2 = enh.mgs_dgks_ratio * enh.mgs_dgks_ratio;
-          do_reorth = tt_sq < ratio2 * old_norm_sq;
+          do_reorth = new_norm_sq < ratio2 * old_norm_sq;
         } else {
-          do_reorth = tt_sq < proj_sq_norm;
+          do_reorth = new_norm_sq < proj_sq_norm;
         }
       }
 
@@ -1599,10 +1607,8 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
         h_col[static_cast<size_t>(i+1)] = zz2_local;
         bcast::fsils_bcast_v(i + 2, h_col, lhs.commu);
 
-        double corr_sq = 0.0;
         for (int j = 0; j <= i; ++j) {
           h(j,i) += h_col[j];
-          corr_sq += h_col[j] * h_col[j];
         }
 
         for (int j = 0; j <= i; j++) {
@@ -1610,16 +1616,8 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
             omp_la::omp_sum_v(dof, nNo, -h_col[j], u_slice_next, u.rslice(j));
           }
         }
-
-        tt_sq = h_col[static_cast<size_t>(i+1)] - corr_sq;
-        if (tt_sq < 0.0 && tt_sq > -tt_eps * h_col[static_cast<size_t>(i+1)]) {
-          tt_sq = 0.0;
-        }
-      } else if (tt_sq < 0.0) {
-        tt_sq = 0.0;
+        new_norm = norm::fsi_ls_normv(dof, mynNo, lhs.commu, u_slice_next);
       }
-
-      double new_norm = std::sqrt(tt_sq);
       h(i+1,i) = new_norm;
 
       // Happy Breakdown Protection & Safe Givens Rotation
@@ -1672,19 +1670,24 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
     if (ls.suc) break;
 
     // Stagnation detection (see gmres_v for rationale).
-    if (prev_fNorm > 0.0 && ls.fNorm >= stagnation_ratio * prev_fNorm) {
+    if (allow_heuristic_early_stop && prev_fNorm > 0.0 && ls.fNorm >= stagnation_ratio * prev_fNorm) {
       stagnation_count++;
     } else {
       stagnation_count = 0;
     }
     prev_fNorm = ls.fNorm;
-    if (stagnation_count >= max_stagnation_restarts) {
+    if (allow_heuristic_early_stop && stagnation_count >= max_stagnation_restarts) {
       break;
     }
   }
 
   ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - time + ls.callD;
   ls.dB  = 10.0 * std::log(ls.fNorm / ls.dB);
+  ls.stats.record_call(ls.itr - itr_before,
+                       restart_cycles,
+                       fsils_collective_delta(collective_before, lhs.commu.collective_stats),
+                       /*setup_seconds=*/0.0,
+                       ls.callD - callD_before);
 }
 
 //---------
@@ -1711,6 +1714,9 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
 
   ls.callD = fe_fsi_linear_solver::fsils_cpu_t();
   ls.suc = false;
+  const int itr_before = ls.itr;
+  const double callD_before = ls.callD;
+  const auto collective_before = lhs.commu.collective_stats;
 
   double eps = norm::fsi_ls_norms(mynNo, lhs.commu, R);
   ls.iNorm = eps;
@@ -1718,11 +1724,17 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   eps = std::max(ls.absTol, ls.relTol*eps);
   ls.itr = 0;
   int last_i = 0;
+  int restart_cycles = 0;
   X = 0.0;
 
   if (ls.iNorm <= ls.absTol) {
     ls.callD = std::numeric_limits<double>::epsilon();
     ls.dB = 0.0;
+    ls.stats.record_call(ls.itr - itr_before,
+                         restart_cycles,
+                         fsils_collective_delta(collective_before, lhs.commu.collective_stats),
+                         /*setup_seconds=*/0.0,
+                         ls.callD - callD_before);
     return;
   }
 
@@ -1737,8 +1749,10 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   int stagnation_count = 0;
   constexpr int max_stagnation_restarts = 5;
   constexpr double stagnation_ratio = 0.95;
+  const bool allow_heuristic_early_stop = !ls.exact_convergence;
 
   for (int l = 0; l < ls.mItr; l++) {
+    restart_cycles++;
     ls.dB = ls.fNorm;
     ls.itr++;
 
@@ -1774,25 +1788,21 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
         proj_sq_norm += h_col[j] * h_col[j];
       }
 
-      double tt_sq = h_col[static_cast<size_t>(i+1)] - proj_sq_norm;
-
-      const double tt_eps = std::numeric_limits<double>::epsilon();
-      if (tt_sq < 0.0 && tt_sq > -tt_eps * h_col[static_cast<size_t>(i+1)]) {
-        tt_sq = 0.0;
-      }
-
       const double old_norm_sq = h_col[static_cast<size_t>(i+1)];
 
-      fused_update_s_inplace(nNo, u, i, u_col_next, h_col);
+      double new_norm = fused_update_norm_s(nNo, mynNo, lhs.commu, u, i, u_col_next, h_col);
+      const double new_norm_sq = new_norm * new_norm;
 
       // CGS2: Selective reorthogonalization (Pythagorean check)
       bool do_reorth = false;
-      if (enh.reorth_mode != GmresEnhancements::ReorthMode::off && tt_sq >= 0.0) {
+      if (!ls.disable_reorth &&
+          enh.reorth_mode != GmresEnhancements::ReorthMode::off &&
+          std::isfinite(new_norm_sq)) {
         if (enh.use_mgs_dgks) {
           const double ratio2 = enh.mgs_dgks_ratio * enh.mgs_dgks_ratio;
-          do_reorth = tt_sq < ratio2 * old_norm_sq;
+          do_reorth = new_norm_sq < ratio2 * old_norm_sq;
         } else {
-          do_reorth = tt_sq < proj_sq_norm;
+          do_reorth = new_norm_sq < proj_sq_norm;
         }
       }
 
@@ -1802,23 +1812,12 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
         h_col[static_cast<size_t>(i+1)] = zz2_local;
         bcast::fsils_bcast_v(i + 2, h_col, lhs.commu);
 
-        double corr_sq = 0.0;
         for (int j = 0; j <= i; ++j) {
           h(j,i) += h_col[j];
-          corr_sq += h_col[j] * h_col[j];
         }
 
-        fused_update_s_inplace(nNo, u, i, u_col_next, h_col);
-
-        tt_sq = h_col[static_cast<size_t>(i+1)] - corr_sq;
-        if (tt_sq < 0.0 && tt_sq > -tt_eps * h_col[static_cast<size_t>(i+1)]) {
-          tt_sq = 0.0;
-        }
-      } else if (tt_sq < 0.0) {
-        tt_sq = 0.0;
+        new_norm = fused_update_norm_s(nNo, mynNo, lhs.commu, u, i, u_col_next, h_col);
       }
-
-      double new_norm = std::sqrt(tt_sq);
       h(i+1,i) = new_norm;
 
       // Happy Breakdown Check
@@ -1870,13 +1869,13 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
     if (ls.suc) break;
 
     // Stagnation detection (see gmres_v for rationale).
-    if (prev_fNorm > 0.0 && ls.fNorm >= stagnation_ratio * prev_fNorm) {
+    if (allow_heuristic_early_stop && prev_fNorm > 0.0 && ls.fNorm >= stagnation_ratio * prev_fNorm) {
       stagnation_count++;
     } else {
       stagnation_count = 0;
     }
     prev_fNorm = ls.fNorm;
-    if (stagnation_count >= max_stagnation_restarts) {
+    if (allow_heuristic_early_stop && stagnation_count >= max_stagnation_restarts) {
       break;
     }
   }
@@ -1884,6 +1883,11 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   R = X;
   ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - ls.callD;
   ls.dB  = 10.0 * std::log(ls.fNorm / ls.dB);
+  ls.stats.record_call(ls.itr - itr_before,
+                       restart_cycles,
+                       fsils_collective_delta(collective_before, lhs.commu.collective_stats),
+                       /*setup_seconds=*/0.0,
+                       ls.callD - callD_before);
 }
 
 //---------
@@ -1914,6 +1918,9 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
 
   ls.callD = fe_fsi_linear_solver::fsils_cpu_t();
   ls.suc = false;
+  const int itr_before = ls.itr;
+  const double callD_before = ls.callD;
+  const auto collective_before = lhs.commu.collective_stats;
 
   // ===== TIMING PROFILE =====
   double tp_spmv = 0.0, tp_bc_mul = 0.0, tp_dot_gs = 0.0;
@@ -1933,6 +1940,7 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   eps = std::max(ls.absTol, ls.relTol*eps);
   ls.itr = 0;
   int last_i = 0;
+  int restart_cycles = 0;
   X = 0.0;
 
   bc_pre(lhs, ls, dof, mynNo, nNo);
@@ -1940,6 +1948,11 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   if (ls.iNorm <= ls.absTol) {
     ls.callD = std::numeric_limits<double>::epsilon();
     ls.dB = 0.0;
+    ls.stats.record_call(ls.itr - itr_before,
+                         restart_cycles,
+                         fsils_collective_delta(collective_before, lhs.commu.collective_stats),
+                         /*setup_seconds=*/0.0,
+                         ls.callD - callD_before);
     return;
   }
 
@@ -2031,6 +2044,9 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
       auto cj = recycle_C.rslice(j);
       spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, uj, cj);
       add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, uj, cj);
+      if (has_coupled_bc) {
+        add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, cj, cj);
+      }
     }
 
     recycle_k = orthonormalize_recycle_C_inplace(recycle_k);
@@ -2311,6 +2327,7 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   int stagnation_count = 0;
   constexpr int max_stagnation_restarts = 5;
   constexpr double stagnation_ratio = 0.95;
+  const bool allow_heuristic_early_stop = !ls.exact_convergence;
 
   // Adaptive early restart: within each restart cycle, the cost of
   // iteration i is O(i) for the GS orthogonalization (fused dot products
@@ -2324,10 +2341,11 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   // Only activate adaptive restart for restart dimensions larger than this
   // (small sD doesn't benefit and can lose convergence).
   constexpr int adaptive_min_sD = 50;
-  const bool use_adaptive_restart = (ls.sD >= adaptive_min_sD) &&
+  const bool use_adaptive_restart = allow_heuristic_early_stop && (ls.sD >= adaptive_min_sD) &&
       !std::getenv("SVMP_FSILS_GMRES_NO_ADAPTIVE");
 
   for (int l = 0; l < ls.mItr; l++) {
+    restart_cycles++;
     ls.dB = ls.fNorm;
     ls.itr++;
     if (l > 0) tp_restarts++;
@@ -2346,6 +2364,12 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
     tp0 = TP();
     omp_la::omp_axpby_v(dof, nNo, u_slice, R, -1.0, u_slice);
     tp_vecops += TP() - tp0;
+
+    if (has_coupled_bc) {
+      tp0 = TP();
+      add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, u_slice, u_slice);
+      tp_bc_mul += TP() - tp0;
+    }
 
     // Deflated/recycling GMRES: project residual and apply correction.
     if (recycle_k > 0) {
@@ -2370,8 +2394,6 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
       fused_update_v_inplace(dof, nNo, recycle_C, recycle_k - 1, u_slice, h_col);
       tp_gs_update += TP() - tp0;
     }
-
-    // Note: BCOP_TYPE_PRE is NOT applied in the standard GMRESV path.
 
     tp0 = TP();
     err[0] = norm::fsi_ls_normv(dof, mynNo, lhs.commu, u.rslice(0));
@@ -2404,6 +2426,12 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
       tp0 = TP();
       add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, u_slice_prev, u_slice_next);
       tp_bc_mul += TP() - tp0;
+
+      if (has_coupled_bc) {
+        tp0 = TP();
+        add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, u_slice_next, u_slice_next);
+        tp_bc_mul += TP() - tp0;
+      }
 
       // Deflated/recycling GMRES: project the new Arnoldi vector.
       if (recycle_k > 0) {
@@ -2450,14 +2478,6 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
         proj_sq_norm += h_col[j] * h_col[j];
       }
 
-      double tt_sq = h_col[static_cast<size_t>(i+1)] - proj_sq_norm;
-
-      // Roundoff guard: small negative values from floating-point cancellation
-      const double tt_eps = std::numeric_limits<double>::epsilon();
-      if (tt_sq < 0.0 && tt_sq > -tt_eps * h_col[static_cast<size_t>(i+1)]) {
-        tt_sq = 0.0;
-      }
-
       const double old_norm_sq = h_col[static_cast<size_t>(i+1)];
 
       // Cache-blocked axpy: w -= sum_j h_col[j] * u[j] in a single L1-tiled
@@ -2466,18 +2486,23 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
       // Note: fused_update_v_inplace does vbuf[k] -= hj * u[j][k], so
       // we pass h_col directly (positive values = subtract).
       tp0 = TP();
-      fused_update_v_inplace(dof, nNo, u, i, u_slice_next, h_col);
+      const double first_norm = fused_update_norm_v(dof, nNo, mynNo, lhs.commu, u, i, u_slice_next, h_col);
       tp_gs_update += TP() - tp0;
+      tp_norm += TP() - tp0;
+      double new_norm = first_norm;
+      const double new_norm_sq = new_norm * new_norm;
 
       // CGS2: Selective reorthogonalization (Pythagorean check)
       // tt_sq < proj_sq_norm means ||v_new|| < (1/sqrt(2))||v|| — loss of orthogonality.
       bool do_reorth = false;
-      if (enh.reorth_mode != GmresEnhancements::ReorthMode::off && tt_sq >= 0.0) {
+      if (!ls.disable_reorth &&
+          enh.reorth_mode != GmresEnhancements::ReorthMode::off &&
+          std::isfinite(new_norm_sq)) {
         if (enh.use_mgs_dgks) {
           const double ratio2 = enh.mgs_dgks_ratio * enh.mgs_dgks_ratio;
-          do_reorth = tt_sq < ratio2 * old_norm_sq;
+          do_reorth = new_norm_sq < ratio2 * old_norm_sq;
         } else {
-          do_reorth = tt_sq < proj_sq_norm;
+          do_reorth = new_norm_sq < proj_sq_norm;
         }
       }
 
@@ -2493,26 +2518,15 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
         bcast::fsils_bcast_v(i + 2, h_col, lhs.commu);
         tp_allreduce += TP() - tp0;
 
-        double corr_sq = 0.0;
         for (int j = 0; j <= i; ++j) {
           h(j,i) += h_col[j];
-          corr_sq += h_col[j] * h_col[j];
         }
 
         tp0 = TP();
-        fused_update_v_inplace(dof, nNo, u, i, u_slice_next, h_col);
+        new_norm = fused_update_norm_v(dof, nNo, mynNo, lhs.commu, u, i, u_slice_next, h_col);
         tp_gs_update += TP() - tp0;
-
-        tt_sq = h_col[static_cast<size_t>(i+1)] - corr_sq;
-        if (tt_sq < 0.0 && tt_sq > -tt_eps * h_col[static_cast<size_t>(i+1)]) {
-          tt_sq = 0.0;
-        }
-      } else if (tt_sq < 0.0) {
-        // True breakdown: Pythagorean identity completely fails
-        tt_sq = 0.0;
+        tp_norm += TP() - tp0;
       }
-
-      double new_norm = std::sqrt(tt_sq);
       h(i+1,i) = new_norm;
 
       // Happy Breakdown Protection
@@ -2624,13 +2638,13 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
     // Stagnation detection: if residual hasn't improved by at least
     // (1 - stagnation_ratio) for max_stagnation_restarts consecutive
     // restarts, the preconditioner is too weak for this system.
-    if (prev_fNorm > 0.0 && ls.fNorm >= stagnation_ratio * prev_fNorm) {
+    if (allow_heuristic_early_stop && prev_fNorm > 0.0 && ls.fNorm >= stagnation_ratio * prev_fNorm) {
       stagnation_count++;
     } else {
       stagnation_count = 0;
     }
     prev_fNorm = ls.fNorm;
-    if (stagnation_count >= max_stagnation_restarts) {
+    if (allow_heuristic_early_stop && stagnation_count >= max_stagnation_restarts) {
       break;
     }
   }
@@ -2638,6 +2652,11 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   R = X;
   ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - ls.callD;
   ls.dB  = 10.0 * std::log(ls.fNorm / ls.dB);
+  ls.stats.record_call(ls.itr - itr_before,
+                       restart_cycles,
+                       fsils_collective_delta(collective_before, lhs.commu.collective_stats),
+                       /*setup_seconds=*/0.0,
+                       ls.callD - callD_before);
 
   // ===== PRINT TIMING PROFILE =====
   double tp_total = tp_spmv + tp_bc_mul + tp_dot_gs + tp_allreduce +

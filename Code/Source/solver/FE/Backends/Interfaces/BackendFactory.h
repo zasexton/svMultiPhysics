@@ -20,6 +20,10 @@
 #include <memory>
 #include <string_view>
 
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+#include <mpi.h>
+#endif
+
 namespace svmp {
 namespace FE {
 namespace sparsity {
@@ -36,6 +40,10 @@ namespace backends {
             int dof_per_node{1};
             // Optional DOF permutation (FE ordering -> backend ordering).
             std::shared_ptr<const DofPermutation> dof_permutation{};
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+            // Optional backend communicator for distributed backends such as FSILS.
+            MPI_Comm mpi_comm{MPI_COMM_WORLD};
+#endif
         };
 
     virtual ~BackendFactory() = default;

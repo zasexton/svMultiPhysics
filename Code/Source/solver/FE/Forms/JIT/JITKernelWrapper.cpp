@@ -90,18 +90,45 @@ inline void callJIT(std::uintptr_t addr, const void* args) noexcept
     reinterpret_cast<JITFn>(addr)(args);
 }
 
-/// Patch per-cell fields of a CellKernelArgsV6 that was templated from another
-/// element in the same batch. Batch-invariant data (time integration stencils,
-/// scalar metadata, interleaved QP geometry offsets) are preserved from the
-/// template, avoiding ~88 virtual function calls for the stencil loop per element.
-inline void patchCellArgsV6(assembly::jit::CellKernelArgsV6& args,
-                            const assembly::AssemblyContext& ctx,
-                            assembly::KernelOutput& output) noexcept
+[[nodiscard]] inline assembly::jit::KernelOutputViewV6 makeOutputViewV6(
+    assembly::KernelOutput& output,
+    Real* matrix_override = nullptr,
+    Real* vector_override = nullptr) noexcept
+{
+    auto view = assembly::jit::detail::packOutputViewV6(output);
+    if (matrix_override != nullptr) {
+        view.element_matrix = matrix_override;
+    }
+    if (vector_override != nullptr) {
+        view.element_vector = vector_override;
+    }
+    return view;
+}
+
+struct PreparedCellBatchTemplateV6 {
+    std::uint32_t abi_version{assembly::jit::kKernelArgsABIVersionV6};
+    assembly::jit::KernelSideArgsV6 side{};
+};
+
+[[nodiscard]] inline PreparedCellBatchTemplateV6 makePreparedCellBatchTemplateV6(
+    const assembly::AssemblyContext& ctx,
+    assembly::KernelOutput& output,
+    assembly::jit::PackingChecks checks = {}) noexcept
+{
+    const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
+    PreparedCellBatchTemplateV6 prepared;
+    prepared.abi_version = args.abi_version;
+    prepared.side = args.side;
+    return prepared;
+}
+
+/// Patch per-cell fields of a KernelSideArgsV6 that was templated from another
+/// element in the same batch.
+inline void patchCellSideArgsV6(assembly::jit::KernelSideArgsV6& s,
+                                const assembly::AssemblyContext& ctx) noexcept
 {
     using assembly::jit::detail::flattenXYZ;
     using assembly::jit::detail::flattenMat3;
-
-    auto& s = args.side;
 
     // Per-cell scalar fields
     s.cell_id = ctx.cellId();
@@ -149,17 +176,14 @@ inline void patchCellArgsV6(assembly::jit::CellKernelArgsV6& args,
     // Solution coefficient pointers
     s.solution_coefficients = ctx.solutionCoefficients().empty() ? nullptr : ctx.solutionCoefficients().data();
 
-    for (std::size_t i = 0; i < static_cast<std::size_t>(s.num_previous_solutions); ++i) {
-        const auto coeffs = ctx.previousSolutionCoefficientsRaw(static_cast<int>(i + 1));
-        s.previous_solution_coefficients[i] = coeffs.empty() ? nullptr : coeffs.data();
-    }
-
     if (s.num_history_steps > 0u) {
         s.history_weights = ctx.historyWeights().data();
     }
     for (std::size_t i = 0; i < static_cast<std::size_t>(s.num_previous_solutions); ++i) {
         const auto coeffs = ctx.previousSolutionCoefficientsRaw(static_cast<int>(i + 1));
-        s.history_solution_coefficients[i] = coeffs.empty() ? nullptr : coeffs.data();
+        const Real* coeff_ptr = coeffs.empty() ? nullptr : coeffs.data();
+        s.previous_solution_coefficients[i] = coeff_ptr;
+        s.history_solution_coefficients[i] = coeff_ptr;
     }
 
     // Field solution / parameter pointers
@@ -180,9 +204,88 @@ inline void patchCellArgsV6(assembly::jit::CellKernelArgsV6& args,
     s.material_state_old_base = ctx.materialStateOldBase();
     s.material_state_work_base = ctx.materialStateWorkBase();
     s.user_data = ctx.userData();
+}
 
-    // Output view
-    args.output = assembly::jit::detail::packOutputViewV6(output);
+inline void prepareCellBatchEntryV6(
+    const PreparedCellBatchTemplateV6& prepared,
+    const assembly::AssemblyContext& ctx,
+    assembly::KernelOutput& output,
+    assembly::jit::KernelSideArgsV6& side_out,
+    assembly::jit::KernelOutputViewV6& output_out,
+    Real* matrix_override = nullptr,
+    Real* vector_override = nullptr) noexcept
+{
+    side_out = prepared.side;
+    patchCellSideArgsV6(side_out, ctx);
+    output_out = makeOutputViewV6(output, matrix_override, vector_override);
+}
+
+inline void prepareCellArgsV6(const PreparedCellBatchTemplateV6& prepared,
+                              assembly::jit::CellKernelArgsV6& args,
+                              const assembly::AssemblyContext& ctx,
+                              assembly::KernelOutput& output,
+                              Real* matrix_override = nullptr,
+                              Real* vector_override = nullptr) noexcept
+{
+    args.abi_version = prepared.abi_version;
+    args.side = prepared.side;
+    patchCellSideArgsV6(args.side, ctx);
+    args.output = makeOutputViewV6(output, matrix_override, vector_override);
+}
+
+inline void accumulateDenseMatVecRaw(const Real* matrix_ptr,
+                                     LocalIndex n_test,
+                                     LocalIndex n_trial,
+                                     const Real* x_ptr,
+                                     Real* y_ptr) noexcept
+{
+    const auto trial_count = static_cast<std::size_t>(n_trial);
+    const auto test_count = static_cast<std::size_t>(n_test);
+
+    for (std::size_t i = 0; i < test_count; ++i) {
+        const Real* row = matrix_ptr + i * trial_count;
+        Real sum = 0.0;
+        for (std::size_t j = 0; j < trial_count; ++j) {
+            sum += row[j] * x_ptr[j];
+        }
+        y_ptr[i] += sum;
+    }
+}
+
+inline void accumulateDenseMatVec(std::span<const Real> matrix,
+                                  LocalIndex n_test,
+                                  LocalIndex n_trial,
+                                  std::span<const Real> x,
+                                  std::span<Real> y) noexcept
+{
+    accumulateDenseMatVecRaw(matrix.data(), n_test, n_trial, x.data(), y.data());
+}
+
+inline void accumulateKernelOutputMatrixTimesSolution(assembly::KernelOutput& output,
+                                                      const Real* coeffs,
+                                                      LocalIndex n_test,
+                                                      LocalIndex n_trial) noexcept
+{
+    accumulateDenseMatVecRaw(
+        output.local_matrix.data(),
+        n_test,
+        n_trial,
+        coeffs,
+        output.local_vector.data());
+}
+
+inline void accumulateKernelMatrixTimesSolution(const assembly::AssemblyContext& ctx,
+                                                std::span<const Real> matrix,
+                                                std::span<Real> vector,
+                                                LocalIndex n_test,
+                                                LocalIndex n_trial,
+                                                const char* where)
+{
+    const auto coeffs = ctx.solutionCoefficients();
+    FE_THROW_IF(coeffs.size() < static_cast<std::size_t>(n_trial),
+                InvalidArgumentException,
+                where);
+    accumulateDenseMatVec(matrix, n_test, n_trial, coeffs.first(static_cast<std::size_t>(n_trial)), vector);
 }
 
 } // namespace
@@ -381,28 +484,22 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
 
             // K*u contribution.
             if (want_matrix) {
-                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
-                    Real sum = 0.0;
-                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
-                        sum += output.matrixEntry(i, j) * coeffs[static_cast<std::size_t>(j)];
-                    }
-                    output.vectorEntry(i) += sum;
-                }
+                accumulateKernelOutputMatrixTimesSolution(
+                    output, coeffs.data(), ctx.numTestDofs(), ctx.numTrialDofs());
 	            } else {
-	                assembly::KernelOutput tmp;
-	                tmp.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/false);
-	                tmp.clear();
+		                assembly::KernelOutput tmp;
+		                tmp.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/false);
+		                tmp.clear();
 
 	                const auto args_bi = assembly::jit::packCellKernelArgsV6(ctx, tmp, checks);
 	                callJITCell(compiled_bi.cell, args_bi);
 
-                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
-                    Real sum = 0.0;
-                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
-                        sum += tmp.matrixEntry(i, j) * coeffs[static_cast<std::size_t>(j)];
-                    }
-                    output.vectorEntry(i) += sum;
-                }
+                accumulateDenseMatVecRaw(
+                    tmp.local_matrix.data(),
+                    ctx.numTestDofs(),
+                    ctx.numTrialDofs(),
+                    coeffs.data(),
+                    output.local_vector.data());
             }
         }
 
@@ -438,16 +535,10 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
             }
         }
 
-        // Fused path: single JIT call computes both matrix and vector.
-        if (has_compiled_fused_ && want_matrix && want_vector) {
-            const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
-            callJITCell(compiled_fused_.cell, args);
-            output.has_matrix = true;
-            output.has_vector = true;
-            return;
-        }
-
-        // Separate tangent + residual path (fallback).
+        // Symbolic nonlinear kernels use the exact tangent and residual
+        // kernels directly. The old fused cell-kernel experiment was removed
+        // after it regressed instruction-cache pressure and is no longer part
+        // of the production dispatch path.
         if (want_matrix) {
             if (compiled_tangent_.cell == 0) {
                 fallback_->computeCell(ctx, output);
@@ -565,8 +656,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                 // Pack template from first element (time integration stencils
                 // are batch-invariant and the most expensive part to recompute).
-                auto args_template = assembly::jit::packCellKernelArgsV6(
-                    *first_ctx, outputs[first_idx], checks);
+                const auto prepared =
+                    makePreparedCellBatchTemplateV6(*first_ctx, outputs[first_idx], checks);
 
                 // Tight per-element loop.
                 if (options_.vectorize) {
@@ -611,11 +702,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                             }
                         }
 
-                        // Start with template and patch per-cell fields.
-                        auto args = args_template;
-                        patchCellArgsV6(args, ctx, output);
-                        batch_sides[idx] = args.side;
-                        batch_outputs[idx] = args.output;
+                        prepareCellBatchEntryV6(
+                            prepared, ctx, output, batch_sides[idx], batch_outputs[idx]);
 
                         output.has_matrix = want_matrix;
                         output.has_vector = want_vector;
@@ -668,9 +756,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                             }
                         }
 
-                        // Patch per-cell fields from template.
-                        auto args = args_template;
-                        patchCellArgsV6(args, ctx, output);
+                        assembly::jit::CellKernelArgsV6 args;
+                        prepareCellArgsV6(prepared, args, ctx, output);
                         callJIT(compiled.cell, &args);
 
                         output.has_matrix = want_matrix;
@@ -717,8 +804,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                 }
 
                 // Pack template from first element (avoids stencil recomputation).
-                auto args_template = assembly::jit::packCellKernelArgsV6(
-                    *first_ctx, outputs[first_idx], checks);
+                const auto prepared =
+                    makePreparedCellBatchTemplateV6(*first_ctx, outputs[first_idx], checks);
 
                 // Tight per-element loop.
                 if (options_.vectorize) {
@@ -737,6 +824,12 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                     batch_outputs.resize(padded_n);
 
                     thread_local std::vector<Real> pad_matrix_scratch2, pad_vector_scratch2;
+                    thread_local std::vector<Real> batch_matrix_scratch2;
+                    const std::size_t matrix_stride =
+                        static_cast<std::size_t>(n_test) * static_cast<std::size_t>(n_trial);
+                    if (want_vector && !want_matrix) {
+                        batch_matrix_scratch2.assign(matrix_stride * padded_n, 0.0);
+                    }
 
                     for (std::size_t idx = 0; idx < n; ++idx) {
                         if (contexts[idx] == nullptr) continue;
@@ -752,22 +845,36 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                             }
                         }
 
-                        auto args = args_template;
-                        patchCellArgsV6(args, ctx, output);
-                        batch_sides[idx] = args.side;
-                        batch_outputs[idx] = args.output;
+                        prepareCellBatchEntryV6(
+                            prepared,
+                            ctx,
+                            output,
+                            batch_sides[idx],
+                            batch_outputs[idx],
+                            (want_vector && !want_matrix)
+                                ? (batch_matrix_scratch2.data() + idx * matrix_stride)
+                                : nullptr);
                     }
 
-                    // Pad remaining slots
-                    if (padded_n > n && n > 0) {
+                    // Fill holes and pad remaining slots for SIMD batch.
+                    if (padded_n > 0u && n > 0u) {
                         pad_matrix_scratch2.assign(
                             static_cast<std::size_t>(n_test) * static_cast<std::size_t>(n_trial), 0.0);
                         pad_vector_scratch2.assign(static_cast<std::size_t>(n_test), 0.0);
-                        for (std::size_t idx = n; idx < padded_n; ++idx) {
-                            batch_sides[idx] = batch_sides[n - 1];
-                            batch_outputs[idx] = batch_outputs[n - 1];
-                            batch_outputs[idx].element_matrix = pad_matrix_scratch2.data();
-                            batch_outputs[idx].element_vector = pad_vector_scratch2.data();
+                        std::size_t fill_src = 0;
+                        for (std::size_t idx = 0; idx < n; ++idx) {
+                            if (batch_sides[idx].integration_weights != nullptr) {
+                                fill_src = idx;
+                                break;
+                            }
+                        }
+                        for (std::size_t idx = 0; idx < padded_n; ++idx) {
+                            if (idx >= n || batch_sides[idx].integration_weights == nullptr) {
+                                batch_sides[idx] = batch_sides[fill_src];
+                                batch_outputs[idx] = batch_outputs[fill_src];
+                                batch_outputs[idx].element_matrix = pad_matrix_scratch2.data();
+                                batch_outputs[idx].element_vector = pad_vector_scratch2.data();
+                            }
                         }
                     }
 
@@ -793,29 +900,19 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                             const auto coeffs = ctx.solutionCoefficients();
 
                             if (want_matrix) {
-                                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
-                                    Real sum = 0.0;
-                                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
-                                        sum += output.matrixEntry(i, j) *
-                                               coeffs[static_cast<std::size_t>(j)];
-                                    }
-                                    output.vectorEntry(i) += sum;
-                                }
+                                accumulateKernelOutputMatrixTimesSolution(
+                                    output, coeffs.data(), ctx.numTestDofs(), ctx.numTrialDofs());
                             } else {
-                                tmp.clear();
-                                auto args = args_template;
-                                patchCellArgsV6(args, ctx, tmp);
-                                args.output = assembly::jit::detail::packOutputViewV6(tmp);
-                                callJIT(compiled_bi.cell, &args);
-
-                                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
-                                    Real sum = 0.0;
-                                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
-                                        sum += tmp.matrixEntry(i, j) *
-                                               coeffs[static_cast<std::size_t>(j)];
-                                    }
-                                    output.vectorEntry(i) += sum;
-                                }
+                                const Real* matrix_ptr =
+                                    batch_matrix_scratch2.data() + idx * matrix_stride;
+                                accumulateKernelMatrixTimesSolution(
+                                    ctx,
+                                    std::span<const Real>(matrix_ptr, matrix_stride),
+                                    std::span<Real>(output.local_vector),
+                                    ctx.numTestDofs(),
+                                    ctx.numTrialDofs(),
+                                    "JITKernelWrapper(LinearFormKernel)::computeCellBatch: "
+                                    "missing solution coefficients");
                             }
                         }
                     }
@@ -843,8 +940,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                         }
 
                         // Patch per-cell fields from template.
-                        auto args = args_template;
-                        patchCellArgsV6(args, ctx, output);
+                        assembly::jit::CellKernelArgsV6 args;
+                        prepareCellArgsV6(prepared, args, ctx, output);
 
                         // 1) Jacobian (bilinear part).
                         if (want_matrix) {
@@ -865,27 +962,19 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                             // K*u contribution.
                             if (want_matrix) {
-                                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
-                                    Real sum = 0.0;
-                                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
-                                        sum += output.matrixEntry(i, j) *
-                                               coeffs[static_cast<std::size_t>(j)];
-                                    }
-                                    output.vectorEntry(i) += sum;
-                                }
+                                accumulateKernelOutputMatrixTimesSolution(
+                                    output, coeffs.data(), ctx.numTestDofs(), ctx.numTrialDofs());
                             } else {
                                 tmp.clear();
-                                args.output = assembly::jit::detail::packOutputViewV6(tmp);
+                                args.output = makeOutputViewV6(tmp);
                                 callJIT(compiled_bi.cell, &args);
 
-                                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
-                                    Real sum = 0.0;
-                                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
-                                        sum += tmp.matrixEntry(i, j) *
-                                               coeffs[static_cast<std::size_t>(j)];
-                                    }
-                                    output.vectorEntry(i) += sum;
-                                }
+                                accumulateDenseMatVecRaw(
+                                    tmp.local_matrix.data(),
+                                    ctx.numTestDofs(),
+                                    ctx.numTrialDofs(),
+                                    coeffs.data(),
+                                    output.local_vector.data());
                             }
                         }
 
@@ -947,8 +1036,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                     }
 
                     // Pack template from first element (avoids stencil recomputation).
-                    auto args_template = assembly::jit::packCellKernelArgsV6(
-                        *first_ctx, outputs[first_idx], checks);
+                    const auto prepared =
+                        makePreparedCellBatchTemplateV6(*first_ctx, outputs[first_idx], checks);
 
                     // Tight per-element loop.
                     // When OpenMP is available and the batch is large enough,
@@ -956,8 +1045,6 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                     // sub-batches.  The JIT function is a pure function of its
                     // input/output pointers and is safe for concurrent calls.
 
-                    const auto fused_addr = (has_compiled_fused_ && want_matrix && want_vector)
-                                                ? compiled_fused_.cell : std::uintptr_t{0};
                     const auto tan_addr   = want_matrix ? compiled_tan_ptr->cell : std::uintptr_t{0};
                     const auto res_addr   = want_vector ? compiled_res_ptr->cell : std::uintptr_t{0};
 
@@ -1005,10 +1092,12 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                                             }
                                         }
 
-                                        auto args = args_template;
-                                        patchCellArgsV6(args, ctx, output);
-                                        local_sides[idx - lo]   = args.side;
-                                        local_outputs[idx - lo] = args.output;
+                                        prepareCellBatchEntryV6(
+                                            prepared,
+                                            ctx,
+                                            output,
+                                            local_sides[idx - lo],
+                                            local_outputs[idx - lo]);
 
                                         output.has_matrix = want_matrix;
                                         output.has_vector = want_vector;
@@ -1037,12 +1126,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                                     batch_args.sides   = local_sides.data();
                                     batch_args.outputs = local_outputs.data();
 
-                                    if (fused_addr != 0) {
-                                        callJIT(fused_addr, &batch_args);
-                                    } else {
-                                        if (tan_addr != 0) callJIT(tan_addr, &batch_args);
-                                        if (res_addr != 0) callJIT(res_addr, &batch_args);
-                                    }
+                                    if (tan_addr != 0) callJIT(tan_addr, &batch_args);
+                                    if (res_addr != 0) callJIT(res_addr, &batch_args);
                                 }
                             }
                         } else
@@ -1076,10 +1161,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                                     }
                                 }
 
-                                auto args = args_template;
-                                patchCellArgsV6(args, ctx, output);
-                                batch_sides[idx]   = args.side;
-                                batch_outputs[idx] = args.output;
+                                prepareCellBatchEntryV6(
+                                    prepared, ctx, output, batch_sides[idx], batch_outputs[idx]);
 
                                 output.has_matrix = want_matrix;
                                 output.has_vector = want_vector;
@@ -1119,12 +1202,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                             batch_args.sides   = batch_sides.data();
                             batch_args.outputs = batch_outputs.data();
 
-                            if (fused_addr != 0) {
-                                callJIT(fused_addr, &batch_args);
-                            } else {
-                                if (tan_addr != 0) callJIT(tan_addr, &batch_args);
-                                if (res_addr != 0) callJIT(res_addr, &batch_args);
-                            }
+                            if (tan_addr != 0) callJIT(tan_addr, &batch_args);
+                            if (res_addr != 0) callJIT(res_addr, &batch_args);
                         }
                     } else {
                         // Non-vectorize per-element path.
@@ -1145,14 +1224,10 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                                 }
                             }
 
-                            auto args = args_template;
-                            patchCellArgsV6(args, ctx, output);
-                            if (fused_addr != 0) {
-                                callJIT(fused_addr, &args);
-                            } else {
-                                if (tan_addr != 0) callJIT(tan_addr, &args);
-                                if (res_addr != 0) callJIT(res_addr, &args);
-                            }
+                            assembly::jit::CellKernelArgsV6 args;
+                            prepareCellArgsV6(prepared, args, ctx, output);
+                            if (tan_addr != 0) callJIT(tan_addr, &args);
+                            if (res_addr != 0) callJIT(res_addr, &args);
 
                             output.has_matrix = want_matrix;
                             output.has_vector = want_vector;
@@ -1315,13 +1390,8 @@ void JITKernelWrapper::computeBoundaryFace(const assembly::AssemblyContext& ctx,
 	            }
 
             if (want_matrix) {
-                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
-                    Real sum = 0.0;
-                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
-                        sum += output.matrixEntry(i, j) * coeffs[static_cast<std::size_t>(j)];
-                    }
-                    output.vectorEntry(i) += sum;
-                }
+                accumulateKernelOutputMatrixTimesSolution(
+                    output, coeffs.data(), ctx.numTestDofs(), ctx.numTrialDofs());
             } else {
                 assembly::KernelOutput tmp;
                 tmp.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/false);
@@ -1334,13 +1404,12 @@ void JITKernelWrapper::computeBoundaryFace(const assembly::AssemblyContext& ctx,
 	                    callJIT(it->second, &args_bi);
 	                }
 
-                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
-                    Real sum = 0.0;
-                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
-                        sum += tmp.matrixEntry(i, j) * coeffs[static_cast<std::size_t>(j)];
-                    }
-                    output.vectorEntry(i) += sum;
-                }
+                accumulateDenseMatVecRaw(
+                    tmp.local_matrix.data(),
+                    ctx.numTestDofs(),
+                    ctx.numTrialDofs(),
+                    coeffs.data(),
+                    output.local_vector.data());
             }
         }
 
@@ -2832,12 +2901,6 @@ void JITKernelWrapper::maybeCompile()
         const bool want_matrix = !k->isVectorOnly();
         const bool want_vector = !k->isMatrixOnly();
 
-        // Fused tangent+residual compilation (cell domain only).
-        // Disabled: fused kernel regresses due to register/icache pressure.
-        // Infrastructure kept in compileFused()/compileAndAddFusedKernel()
-        // for future experimentation with smaller form sets.
-        has_compiled_fused_ = false;
-
         if (want_vector) {
             const auto r_res = compiler_->compile(k->residualIR(), vopt);
             if (!r_res.ok) {
@@ -2865,8 +2928,7 @@ void JITKernelWrapper::maybeCompile()
             std::ostringstream detail;
             detail << "event=generic_compile kind=SymbolicNonlinearFormKernel"
                    << " residual_cell=" << compiled_residual_.cell
-                   << " tangent_cell=" << compiled_tangent_.cell
-                   << " fused=" << (has_compiled_fused_ ? 1 : 0);
+                   << " tangent_cell=" << compiled_tangent_.cell;
             traceSpecialization(this, *fallback_, compiled_revision_, detail.str());
         }
         return;

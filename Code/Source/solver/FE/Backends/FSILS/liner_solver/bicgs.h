@@ -42,16 +42,23 @@ void bicgss(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSIL
             const Vector<double>& K, Vector<double>& R);
 
 // NEW: VMS compatible Asymmetric Schur Complement Solver
-void schur(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int nsd,
-           const Array<double>& D, const Array<double>& G, const Vector<double>& L, Vector<double>& R);
+void schur(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+           fe_fsi_linear_solver::FSILS_subLsType& ls,
+           fe_fsi_linear_solver::FSILS_subLsType& momentum_ls,
+           const int nsd,
+           const Array<double>& K, const Array<double>& D, const Array<double>& G,
+           const Vector<double>& L, Vector<double>& R);
 
 /// Multi-component constraint Schur complement solver.
 /// Solves (L - D*H*G) P = R where the constraint has con_ncomp components.
 /// D(con_ncomp*mom_ncomp, nnz), G(mom_ncomp*con_ncomp, nnz), L(con_ncomp*con_ncomp, nnz).
 /// R(con_ncomp, nNo) is both the RHS input and solution output.
-void schur_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls,
+void schur_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+              fe_fsi_linear_solver::FSILS_subLsType& ls,
+              fe_fsi_linear_solver::FSILS_subLsType& momentum_ls,
               int mom_ncomp, int con_ncomp,
-              const Array<double>& D, const Array<double>& G, const Array<double>& L, Array<double>& R);
+              const Array<double>& K, const Array<double>& D, const Array<double>& G,
+              const Array<double>& L, Array<double>& R);
 
 } // namespace bicgs
 

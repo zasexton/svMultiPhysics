@@ -5,7 +5,7 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "Forms/CoupledBlockKernel.h"
+#include "Forms/MixedBlockKernelSet.h"
 
 #include "Core/Logger.h"
 #include "Forms/FormKernels.h"
@@ -20,7 +20,7 @@ namespace svmp {
 namespace FE {
 namespace forms {
 
-CoupledBlockKernel::CoupledBlockKernel(
+MixedBlockKernelSet::MixedBlockKernelSet(
     std::vector<BlockSpec> blocks,
     std::shared_ptr<jit::JITCompiler> compiler,
     JITOptions options)
@@ -30,7 +30,7 @@ CoupledBlockKernel::CoupledBlockKernel(
 {
 }
 
-assembly::RequiredData CoupledBlockKernel::getRequiredData() const
+assembly::RequiredData MixedBlockKernelSet::getRequiredData() const
 {
     // Union of all blocks' requirements
     auto result = assembly::RequiredData::None;
@@ -42,7 +42,7 @@ assembly::RequiredData CoupledBlockKernel::getRequiredData() const
     return result;
 }
 
-std::vector<assembly::FieldRequirement> CoupledBlockKernel::fieldRequirements() const
+std::vector<assembly::FieldRequirement> MixedBlockKernelSet::fieldRequirements() const
 {
     // Merge all blocks' field requirements, deduplicating by field ID
     std::vector<assembly::FieldRequirement> merged;
@@ -61,40 +61,86 @@ std::vector<assembly::FieldRequirement> CoupledBlockKernel::fieldRequirements() 
     return merged;
 }
 
-bool CoupledBlockKernel::hasCell() const noexcept
+assembly::MaterialStateSpec MixedBlockKernelSet::materialStateSpec() const noexcept
+{
+    assembly::MaterialStateSpec merged{};
+    for (const auto& b : blocks_) {
+        if (!b.fallback_kernel) {
+            continue;
+        }
+        const auto spec = b.fallback_kernel->materialStateSpec();
+        merged.bytes_per_qpt = std::max(merged.bytes_per_qpt, spec.bytes_per_qpt);
+        merged.alignment = std::max(merged.alignment, spec.alignment);
+    }
+    return merged;
+}
+
+std::vector<params::Spec> MixedBlockKernelSet::parameterSpecs() const
+{
+    std::vector<params::Spec> specs;
+    for (const auto& b : blocks_) {
+        if (!b.fallback_kernel) {
+            continue;
+        }
+        const auto block_specs = b.fallback_kernel->parameterSpecs();
+        specs.insert(specs.end(), block_specs.begin(), block_specs.end());
+    }
+    return specs;
+}
+
+void MixedBlockKernelSet::resolveParameterSlots(
+    const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param)
+{
+    for (auto& b : blocks_) {
+        if (b.fallback_kernel) {
+            b.fallback_kernel->resolveParameterSlots(slot_of_real_param);
+        }
+    }
+}
+
+void MixedBlockKernelSet::resolveInlinableConstitutives()
+{
+    for (auto& b : blocks_) {
+        if (b.fallback_kernel) {
+            b.fallback_kernel->resolveInlinableConstitutives();
+        }
+    }
+}
+
+bool MixedBlockKernelSet::hasCell() const noexcept
 {
     return std::any_of(blocks_.begin(), blocks_.end(),
                        [](const BlockSpec& b) { return b.fallback_kernel && b.fallback_kernel->hasCell(); });
 }
 
-void CoupledBlockKernel::computeCell(
+void MixedBlockKernelSet::computeCell(
     const assembly::AssemblyContext& ctx,
     assembly::KernelOutput& output)
 {
-    // Fallback: dispatch to first block's fallback kernel.
-    // The assembler's coupled path handles multi-block dispatch;
-    // this single-element path is only used as a compatibility shim.
+    // Compatibility fallback when invoked outside the explicit mixed-block
+    // assembler path. The production path dispatches block-by-block in
+    // StandardAssembler.
     if (!blocks_.empty() && blocks_[0].fallback_kernel) {
         blocks_[0].fallback_kernel->computeCell(ctx, output);
     }
 }
 
-void CoupledBlockKernel::computeCellBatch(
+void MixedBlockKernelSet::computeCellBatch(
     std::span<const assembly::AssemblyContext* const> contexts,
     std::span<assembly::KernelOutput> outputs)
 {
-    // Fallback: dispatch to first block's fallback kernel.
+    // Compatibility fallback mirroring computeCell().
     if (!blocks_.empty() && blocks_[0].fallback_kernel) {
         blocks_[0].fallback_kernel->computeCellBatch(contexts, outputs);
     }
 }
 
-std::string CoupledBlockKernel::name() const
+std::string MixedBlockKernelSet::name() const
 {
-    return "CoupledBlockKernel[" + std::to_string(blocks_.size()) + " blocks]";
+    return "MixedBlockKernelSet[" + std::to_string(blocks_.size()) + " blocks]";
 }
 
-int CoupledBlockKernel::maxTemporalDerivativeOrder() const noexcept
+int MixedBlockKernelSet::maxTemporalDerivativeOrder() const noexcept
 {
     int max_order = 0;
     for (const auto& b : blocks_) {
@@ -105,19 +151,19 @@ int CoupledBlockKernel::maxTemporalDerivativeOrder() const noexcept
     return max_order;
 }
 
-bool CoupledBlockKernel::isMatrixOnly() const noexcept
+bool MixedBlockKernelSet::isMatrixOnly() const noexcept
 {
     return std::all_of(blocks_.begin(), blocks_.end(),
                        [](const BlockSpec& b) { return b.want_matrix && !b.want_vector; });
 }
 
-bool CoupledBlockKernel::isVectorOnly() const noexcept
+bool MixedBlockKernelSet::isVectorOnly() const noexcept
 {
     return std::all_of(blocks_.begin(), blocks_.end(),
                        [](const BlockSpec& b) { return !b.want_matrix && b.want_vector; });
 }
 
-void CoupledBlockKernel::primeAllBlocksColocated()
+void MixedBlockKernelSet::primeColocatedTextLayout()
 {
     if (blocks_.empty() || !compiler_) {
         return;
@@ -287,7 +333,7 @@ void CoupledBlockKernel::primeAllBlocksColocated()
         auto compile_result = compiler_->compileColocated(group_specs, group_results);
 
         if (!compile_result.ok || group_results.size() != group_specs.size()) {
-            FE_LOG_WARNING("CoupledBlockKernel: colocated partition failed: " + compile_result.message);
+            FE_LOG_WARNING("MixedBlockKernelSet: colocated partition failed: " + compile_result.message);
             continue;
         }
 
@@ -327,7 +373,7 @@ void CoupledBlockKernel::primeAllBlocksColocated()
         ++result_idx;
     }
 
-    FE_LOG_INFO("CoupledBlockKernel: colocated " + std::to_string(infos.size()) +
+    FE_LOG_INFO("MixedBlockKernelSet: colocated " + std::to_string(infos.size()) +
                 " block kernels into " + std::to_string(modules_compiled) +
                 " module(s) (L1i budget " + std::to_string(text_budget) + " bytes)");
 }

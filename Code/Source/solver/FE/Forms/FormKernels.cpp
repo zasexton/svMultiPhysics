@@ -314,6 +314,72 @@ constexpr typename EvalValue<Scalar>::Kind addSubResultKind(typename EvalValue<S
     return a;
 }
 
+template<typename Scalar>
+EvalValue<Scalar> negateEvalValue(const EvalValue<Scalar>& value)
+{
+    EvalValue<Scalar> out;
+    out.kind = value.kind;
+    if (isScalarKind<Scalar>(value.kind)) {
+        out.s = -value.s;
+        return out;
+    }
+    if (isVectorKind<Scalar>(value.kind)) {
+        out.resizeVector(value.vectorSize());
+        for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+            out.vectorAt(d) = -value.vectorAt(d);
+        }
+        return out;
+    }
+    if (isMatrixKind<Scalar>(value.kind)) {
+        out.resizeMatrix(value.matrixRows(), value.matrixCols());
+        for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+            for (std::size_t c = 0; c < out.matrixCols(); ++c) {
+                out.matrixAt(r, c) = -value.matrixAt(r, c);
+            }
+        }
+        return out;
+    }
+    if (isTensor3Kind<Scalar>(value.kind)) {
+        out.resizeTensor3(value.tensor3Dim0(), value.tensor3Dim1(), value.tensor3Dim2());
+        for (std::size_t i = 0; i < value.tensor3Dim0(); ++i) {
+            for (std::size_t j = 0; j < value.tensor3Dim1(); ++j) {
+                for (std::size_t k = 0; k < value.tensor3Dim2(); ++k) {
+                    out.tensor3At(i, j, k) = -value.tensor3At(i, j, k);
+                }
+            }
+        }
+        return out;
+    }
+    for (std::size_t i = 0; i < value.t4.size(); ++i) {
+        out.t4[i] = -value.t4[i];
+    }
+    return out;
+}
+
+template<typename Scalar>
+std::string evalKindDescription(const EvalValue<Scalar>& value)
+{
+    using Kind = typename EvalValue<Scalar>::Kind;
+    switch (value.kind) {
+        case Kind::Scalar:
+            return "Scalar";
+        case Kind::Vector:
+            return "Vector[" + std::to_string(value.vectorSize()) + "]";
+        case Kind::Matrix:
+            return "Matrix[" + std::to_string(value.matrixRows()) + "x" + std::to_string(value.matrixCols()) + "]";
+        case Kind::SymmetricMatrix:
+            return "SymmetricMatrix[" + std::to_string(value.matrixRows()) + "x" + std::to_string(value.matrixCols()) + "]";
+        case Kind::SkewMatrix:
+            return "SkewMatrix[" + std::to_string(value.matrixRows()) + "x" + std::to_string(value.matrixCols()) + "]";
+        case Kind::Tensor3:
+            return "Tensor3[" + std::to_string(value.tensor3Dim0()) + "x" +
+                   std::to_string(value.tensor3Dim1()) + "x" + std::to_string(value.tensor3Dim2()) + "]";
+        case Kind::Tensor4:
+            return "Tensor4";
+    }
+    return "Unknown";
+}
+
 constexpr std::size_t idx4(int i, int j, int k, int l) noexcept
 {
     return static_cast<std::size_t>((((i * 3) + j) * 3 + k) * 3 + l);
@@ -7267,8 +7333,19 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
             const auto b = evalReal(*kids[1], env, side, q);
 
             if (node.type() == FormExprType::Add || node.type() == FormExprType::Subtract) {
+                const bool a_is_scalar_zero = isScalarKind<Real>(a.kind) && a.s == Real(0.0);
+                const bool b_is_scalar_zero = isScalarKind<Real>(b.kind) && b.s == Real(0.0);
+                if (a_is_scalar_zero && !isScalarKind<Real>(b.kind)) {
+                    return (node.type() == FormExprType::Add) ? b : negateEvalValue(b);
+                }
+                if (b_is_scalar_zero && !isScalarKind<Real>(a.kind)) {
+                    return a;
+                }
                 if (!sameCategory<Real>(a.kind, b.kind)) {
-                    throw FEException("Forms: add/sub kind mismatch",
+                    throw FEException(
+                        "Forms: add/sub kind mismatch in '" + node.toString() +
+                            "' with lhs=" + evalKindDescription(a) +
+                            " rhs=" + evalKindDescription(b),
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
                 if (isVectorKind<Real>(a.kind) && a.vectorSize() != b.vectorSize()) {
@@ -10797,7 +10874,10 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
 
             if (node.type() == FormExprType::Add || node.type() == FormExprType::Subtract) {
                 if (!sameCategory<Dual>(a.kind, b.kind)) {
-                    throw FEException("Forms: add/sub kind mismatch",
+                    throw FEException(
+                        "Forms: add/sub kind mismatch in '" + node.toString() +
+                            "' with lhs=" + evalKindDescription(a) +
+                            " rhs=" + evalKindDescription(b),
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
                 if (isVectorKind<Dual>(a.kind) && a.vectorSize() != b.vectorSize()) {

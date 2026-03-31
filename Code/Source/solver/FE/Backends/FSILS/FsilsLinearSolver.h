@@ -46,8 +46,9 @@ private:
     mutable fe_fsi_linear_solver::FSILS_lsType ls_{};
     // Cached matrix copy buffer to avoid re-allocating each solve.
     mutable std::vector<Real> values_work_{};
-    // Cached RHS permutation buffer to avoid re-allocating each solve.
-    mutable std::vector<double> r_internal_work_{};
+    // Solver work vector kept in FSILS internal node ordering to avoid
+    // old-order remap/copy-back through overlap communication on each solve.
+    mutable std::vector<Real> ri_internal_work_{};
 
     // Nullspace basis for post-solve projection.
     std::vector<std::vector<double>> nullspace_basis_{};

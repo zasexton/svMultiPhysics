@@ -967,6 +967,62 @@ TEST(GaugeIntegration, TwoRegions_RobinOnRegionA_RegionBGetsGauge)
         << "Region B (no Robin BC) should have an auto-gauge constraint";
 }
 
+TEST(GaugeIntegration, TwoRegions_VectorFieldFirst_RegionScopingUsesMeshTopology)
+{
+    auto mesh = std::make_shared<TwoDisconnectedTetraMeshAccess>();
+    auto scalar_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    auto vector_space = std::make_shared<spaces::ProductSpace>(scalar_space, 3);
+
+    systems::FESystem sys(mesh);
+    const auto velocity_field = sys.addField(
+        systems::FieldSpec{.name = "u", .space = vector_space, .components = 3});
+    const auto pressure_field = sys.addField(
+        systems::FieldSpec{.name = "p", .space = scalar_space, .components = 1});
+    (void)velocity_field;
+    sys.addOperator("op");
+
+    auto p = FormExpr::stateField(pressure_field, *scalar_space, "p");
+    auto q = FormExpr::testFunction(*scalar_space, "q");
+    auto residual = inner(grad(p), grad(q)).dx();
+
+    systems::installFormulation(sys, "op", {pressure_field}, residual);
+
+    // Anchor only region A of the pressure field. Region B should still be
+    // detected as an exact nullspace mode and receive gauge elimination.
+    sys.addConstraint(std::make_unique<constraints::DirichletBC>(24, 0.0));
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = twoDisconnectedTetraTopology();
+    sys.setup({}, inputs);
+
+    ASSERT_TRUE(sys.hasGaugeRegistry());
+    const auto* reg = sys.gaugeRegistryIfPresent();
+    ASSERT_TRUE(reg->isResolved());
+    ASSERT_EQ(reg->resolvedModes().size(), 2u)
+        << "Expected pressure nullspace expansion per disconnected region";
+
+    int n_anchored = 0;
+    int n_exact_nullspace = 0;
+    for (const auto& mode : reg->resolvedModes()) {
+        if (mode.status == GaugeStatus::Anchored) ++n_anchored;
+        if (mode.status == GaugeStatus::ExactNullspace) ++n_exact_nullspace;
+    }
+
+    EXPECT_EQ(n_anchored, 1);
+    EXPECT_EQ(n_exact_nullspace, 1);
+
+    const auto& ac = sys.constraints();
+    bool region_b_pressure_constrained = false;
+    for (GlobalIndex d = 28; d < 32; ++d) {
+        if (ac.isConstrained(d)) {
+            region_b_pressure_constrained = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(region_b_pressure_constrained)
+        << "Region B pressure DOFs should receive automatic gauge elimination";
+}
+
 // ============================================================================
 // Global anchor without boundary_marker on connected mesh → anchors correctly
 // ============================================================================
