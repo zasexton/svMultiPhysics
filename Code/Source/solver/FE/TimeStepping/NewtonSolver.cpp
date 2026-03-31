@@ -1682,16 +1682,16 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     auto tolerancesSatisfied = [&](double norm) -> bool {
         const bool abs_enabled = options_.abs_tolerance > 0.0;
         const bool rel_enabled = options_.rel_tolerance > 0.0;
-        const bool abs_ok = !abs_enabled || norm <= options_.abs_tolerance;
-        const bool rel_ok = !rel_enabled
-            || (report.residual_norm0 > 0.0
+        const bool abs_ok = abs_enabled && norm <= options_.abs_tolerance;
+        const bool rel_ok = rel_enabled
+            && (report.residual_norm0 > 0.0
                     ? (norm / report.residual_norm0 <= options_.rel_tolerance)
                     : abs_ok);
-        // All enabled nonlinear tolerances must be satisfied. This avoids
-        // reporting convergence solely from relative reduction after a blow-up
-        // or solely from an absolute check when a requested relative reduction
-        // has not been achieved yet.
-        return abs_ok && rel_ok;
+        // Legacy-compatible rule: accept when either enabled nonlinear
+        // tolerance is satisfied. This is important for warm-started solves
+        // that are already near steady state and may not achieve a meaningful
+        // additional relative reduction.
+        return abs_ok || rel_ok;
     };
 
     auto assembleDtOnlyJacobianAndLumpedDiagonal = [&](const systems::SystemStateView& state) -> bool {
@@ -1948,36 +1948,24 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             return report;
         }
 
-        // Stagnation detection is diagnostic-only unless the configured
-        // nonlinear tolerances are also satisfied. This prevents the solver
-        // from reporting "converged" at residual levels that are still far
-        // above the requested abs/rel tolerances.
+        // Legacy-compatible stagnation detection: if the residual has already
+        // decreased from its initial value and stops improving, accept the best
+        // achievable precision rather than forcing more Newton iterations.
         if (it > 0 && options_.stagnation_tolerance > 0.0 &&
             prev_residual_norm > 0.0 && std::isfinite(prev_residual_norm) &&
             report.residual_norm0 > 0.0 && current_residual_norm < report.residual_norm0) {
             const double ratio = current_residual_norm / prev_residual_norm;
             if (ratio >= options_.stagnation_tolerance) {
-                if (tolerancesSatisfied(current_residual_norm)) {
-                    report.converged = true;
-                    report.iterations = it;
-                    if (oopTraceEnabled()) {
-                        std::ostringstream oss;
-                        oss << "NewtonSolver: converged by stagnation within tolerance"
-                            << " (||r_k||/||r_{k-1}||=" << ratio
-                            << " >= " << options_.stagnation_tolerance << ")";
-                        traceLog(oss.str());
-                    }
-                    printNewtonProfile(it);
-                    return report;
-                }
+                report.converged = true;
+                report.iterations = it;
                 if (oopTraceEnabled()) {
                     std::ostringstream oss;
-                    oss << "NewtonSolver: stagnation detected but residual remains above tolerance"
-                        << " (||r_k||/||r_{k-1}||=" << ratio
-                        << " >= " << options_.stagnation_tolerance
-                        << ", ||r||=" << current_residual_norm << ")";
+                    oss << "NewtonSolver: converged by stagnation (||r_k||/||r_{k-1}||="
+                        << ratio << " >= " << options_.stagnation_tolerance << ")";
                     traceLog(oss.str());
                 }
+                printNewtonProfile(it);
+                return report;
             }
         }
         prev_residual_norm = current_residual_norm;

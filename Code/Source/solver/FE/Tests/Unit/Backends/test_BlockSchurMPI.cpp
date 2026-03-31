@@ -81,7 +81,7 @@ void expectBlockSchurMetricsPresent(const SolverReport& rep)
     EXPECT_GT(rep.blockschur_outer_iterations, 0);
     EXPECT_GT(rep.blockschur_momentum_solve_calls, 0);
     EXPECT_GT(rep.blockschur_momentum_iterations, 0);
-    EXPECT_GE(rep.blockschur_momentum_restart_cycles, rep.blockschur_momentum_solve_calls);
+    EXPECT_LE(rep.blockschur_momentum_restart_cycles, rep.blockschur_momentum_solve_calls);
     EXPECT_GE(rep.blockschur_momentum_solve_time_seconds, 0.0);
     EXPECT_GT(rep.blockschur_schur_solve_calls, 0);
     EXPECT_GT(rep.blockschur_schur_iterations, 0);

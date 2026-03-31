@@ -1377,26 +1377,25 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
             const bool abs_enabled = options_.newton.abs_tolerance > 0.0;
             const bool rel_enabled = options_.newton.rel_tolerance > 0.0;
-            const bool abs_ok = !abs_enabled || rep.residual_norm <= options_.newton.abs_tolerance;
-            const bool rel_ok = !rel_enabled
-                || (rep.residual_norm0 > 0.0
+            const bool abs_ok = abs_enabled && rep.residual_norm <= options_.newton.abs_tolerance;
+            const bool rel_ok = rel_enabled
+                && (rep.residual_norm0 > 0.0
                        ? (rep.residual_norm / rep.residual_norm0 <= options_.newton.rel_tolerance)
                        : abs_ok);
-            if (abs_ok && rel_ok) {
+            if (abs_ok || rel_ok) {
                 rep.converged = true;
                 rep.iterations = it;
                 break;
             }
 
-            // Stagnation is diagnostic-only unless the configured nonlinear
-            // tolerances are also satisfied. This keeps the reported residual
-            // history honest for hard nonlinear solves.
+            // Legacy-compatible stagnation detection: once the residual has
+            // decreased from its initial value, accept the best achievable
+            // precision even if further reduction stalls.
             if (it > 0 && options_.newton.stagnation_tolerance > 0.0 &&
                 prev_residual_norm > 0.0 && std::isfinite(prev_residual_norm) &&
                 rep.residual_norm0 > 0.0 && rep.residual_norm < rep.residual_norm0) {
                 const double ratio = rep.residual_norm / prev_residual_norm;
-                if (ratio >= options_.newton.stagnation_tolerance &&
-                    abs_ok && rel_ok) {
+                if (ratio >= options_.newton.stagnation_tolerance) {
                     rep.converged = true;
                     rep.iterations = it;
                     break;

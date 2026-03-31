@@ -3017,8 +3017,8 @@ LinearSolverParameters::LinearSolverParameters()
   set_parameter("NS_CG_tolerance", 1.0e-2, !required, ns_cg_tolerance);
   set_parameter("NS_GM_max_iterations", 1000, !required, ns_gm_max_iterations);
   set_parameter("NS_GM_tolerance", 1.0e-2, !required, ns_gm_tolerance);
-  set_parameter("NS_Schur_preconditioner", std::string("diag-l"), !required, ns_schur_preconditioner);
-  set_parameter("NS_Momentum_approximation", std::string("diag-k"), !required, ns_momentum_approximation);
+  set_parameter("NS_Schur_preconditioner", std::string("algebraic-shat"), !required, ns_schur_preconditioner);
+  set_parameter("NS_Momentum_approximation", std::string("ilu-k"), !required, ns_momentum_approximation);
 
   //set_parameter("Preconditioner", "", !required, preconditioner);
 

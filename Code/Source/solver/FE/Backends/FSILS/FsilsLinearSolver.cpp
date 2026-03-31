@@ -671,138 +671,13 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
     applyStageScalingToMatrix();
 
-    // Saddle-point enforcement: automatically detect whether D ≈ -G^T.
-    //
-    // On the first BlockSchur solve, numerically measure max|D + G^T| / max(|D|, |G^T|).
-    // If the relative error is below a threshold, the formulation produces a symmetric
-    // saddle-point system (e.g., unstabilized Stokes / Taylor-Hood) and we enforce
-    // D = -G^T on this and all subsequent solves. Otherwise (e.g., NS-VMS with PSPG/LSIC
-    // stabilization where D contains extra terms), enforcement is permanently skipped.
-    if (use_blockschur && has_saddle_point) {
-        const int nNo = lhs.nNo;
-        const int nnz_int = lhs.nnz;
-        const bool need_detection = (saddle_enforce_state_ == -1) && (nNo > 0) && (nnz_int > 0);
-        const bool need_enforcement = (saddle_enforce_state_ == 1) && (nNo > 0) && (nnz_int > 0);
-
-        if (need_detection || need_enforcement) {
-            auto* cols = lhs.colPtr.data();
-            const auto find_entry = [&](int row, int col) -> fe_fsi_linear_solver::fsils_int {
-                const auto start = lhs.rowPtr(0, row);
-                const auto end = lhs.rowPtr(1, row);
-                if (start < 0 || end < start) {
-                    return -1;
-                }
-                const auto len = end - start + 1;
-                auto* begin = cols + start;
-                auto* finish = begin + len;
-                const auto it = std::lower_bound(begin, finish, static_cast<fe_fsi_linear_solver::fsils_int>(col));
-                if (it == finish || *it != col) {
-                    return -1;
-                }
-                return static_cast<fe_fsi_linear_solver::fsils_int>(it - cols);
-            };
-
-            const std::size_t blk_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
-            double max_abs_diff = 0.0;
-            double max_abs_ref = 0.0;
-
-            for (fe_fsi_linear_solver::fsils_int row = 0; row < nNo; ++row) {
-                const auto start = lhs.rowPtr(0, row);
-                const auto end = lhs.rowPtr(1, row);
-                if (start < 0 || end < start) {
-                    continue;
-                }
-                for (auto idx = start; idx <= end; ++idx) {
-                    const auto col_idx = cols[idx];
-                    if (col_idx < 0 || col_idx >= nNo) {
-                        continue;
-                    }
-
-                    const auto idx_t = find_entry(col_idx, row);
-                    if (idx_t < 0 || idx_t >= nnz_int) {
-                        continue;
-                    }
-
-                    Real* blk = values_work_.data() + static_cast<std::size_t>(idx) * blk_size;
-                    Real* blk_t = values_work_.data() + static_cast<std::size_t>(idx_t) * blk_size;
-
-                    // G block: rows [mom_start..mom_start+mom_ncomp), cols [con_start..con_start+con_ncomp)
-                    // D block at transpose position: rows [con_start..con_start+con_ncomp), cols [mom_start..mom_start+mom_ncomp)
-                    for (int vc = 0; vc < mom_ncomp; ++vc) {
-                        for (int cc = 0; cc < con_ncomp; ++cc) {
-                            const Real g_val = blk[static_cast<std::size_t>((mom_start + vc) * dof + (con_start + cc))];
-                            const std::size_t d_idx = static_cast<std::size_t>((con_start + cc) * dof + (mom_start + vc));
-                            const Real d_val = blk_t[d_idx];
-                            max_abs_ref = std::max(max_abs_ref, static_cast<double>(std::abs(g_val)));
-                            max_abs_ref = std::max(max_abs_ref, static_cast<double>(std::abs(d_val)));
-                            const double diff = static_cast<double>(d_val + g_val);
-                            max_abs_diff = std::max(max_abs_diff, std::abs(diff));
-
-                            // Apply enforcement if active (detection pass doesn't modify).
-                            if (need_enforcement) {
-                                blk_t[d_idx] = -g_val;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Auto-detection: decide enforcement based on numerical symmetry.
-            if (need_detection && max_abs_ref > 0.0) {
-                const double rel_error = max_abs_diff / max_abs_ref;
-                // Threshold: relative error < 1e-8 means D = -G^T to near machine precision
-                // (accounting for finite-element integration/assembly round-off).
-                constexpr double symmetry_threshold = 1e-8;
-                if (rel_error < symmetry_threshold) {
-                    saddle_enforce_state_ = 1;
-                    // Re-run with enforcement now that we've decided.
-                    // (The detection pass did not modify the matrix.)
-                    for (fe_fsi_linear_solver::fsils_int row2 = 0; row2 < nNo; ++row2) {
-                        const auto start2 = lhs.rowPtr(0, row2);
-                        const auto end2 = lhs.rowPtr(1, row2);
-                        if (start2 < 0 || end2 < start2) continue;
-                        for (auto idx2 = start2; idx2 <= end2; ++idx2) {
-                            const auto col2 = cols[idx2];
-                            if (col2 < 0 || col2 >= nNo) continue;
-                            const auto idx_t2 = find_entry(col2, row2);
-                            if (idx_t2 < 0 || idx_t2 >= nnz_int) continue;
-                            Real* blk2 = values_work_.data() + static_cast<std::size_t>(idx2) * blk_size;
-                            Real* blk_t2 = values_work_.data() + static_cast<std::size_t>(idx_t2) * blk_size;
-                            for (int vc = 0; vc < mom_ncomp; ++vc) {
-                                for (int cc = 0; cc < con_ncomp; ++cc) {
-                                    const Real g = blk2[static_cast<std::size_t>((mom_start + vc) * dof + (con_start + cc))];
-                                    blk_t2[static_cast<std::size_t>((con_start + cc) * dof + (mom_start + vc))] = -g;
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    saddle_enforce_state_ = 0;
-                }
-                {
-                    // Always log auto-detection result — this is a one-time configuration decision.
-                    std::ostringstream oss;
-                    oss << "[FsilsLinearSolver] Saddle-point symmetry auto-detected: "
-                        << "max|D+G^T|/max(|D|,|G|)=" << (max_abs_diff / max_abs_ref)
-                        << (saddle_enforce_state_ == 1 ? " -> enforcing D=-G^T" : " -> skipping enforcement (stabilized formulation)");
-                    FE_LOG_INFO(oss.str());
-                }
-            } else if (need_detection) {
-                // Both blocks are zero — no enforcement needed.
-                saddle_enforce_state_ = 0;
-            }
-
-            if (need_enforcement && oopTraceEnabled() && max_abs_ref > 0.0) {
-                std::ostringstream oss;
-                oss << "FsilsLinearSolver: enforced D=-G^T (max|D+G^T|=" << max_abs_diff
-                    << ", rel=" << (max_abs_diff / max_abs_ref) << ")";
-                traceLog(oss.str());
-            }
-        }
-    }
+    const bool enforce_transpose_saddle_blocks =
+        use_blockschur && has_saddle_point &&
+        (std::getenv("SVMP_FSILS_ASSUME_TRANSPOSE_SADDLE") != nullptr) &&
+        (std::getenv("SVMP_FSILS_DISABLE_TRANSPOSE_SADDLE") == nullptr);
 
     auto applySaddlePointEnforcement = [&]() {
-        if (!(use_blockschur && has_saddle_point && saddle_enforce_state_ == 1)) {
+        if (!enforce_transpose_saddle_blocks) {
             return;
         }
         const int nNo = lhs.nNo;
@@ -856,6 +731,11 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             }
         }
     };
+
+    if (enforce_transpose_saddle_blocks && oopTraceEnabled()) {
+        traceLog("FsilsLinearSolver::solve: enforcing D=-G^T due to "
+                 "SVMP_FSILS_ASSUME_TRANSPOSE_SADDLE.");
+    }
 
     auto restorePreparedMatrixValues = [&](bool blockschur_preparation) {
         std::copy(A->fsilsValuesPtr(), A->fsilsValuesPtr() + value_count, values_work_.data());
@@ -2040,7 +1920,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     bool skip_strict_retry_after_severe_stall = false;
     std::vector<Real> fallback_base_solution;
     std::string fallback_reason;
-    if (any_fail != 0) {
+    const bool allow_blockschur_gmres_fallback = !use_blockschur;
+    if (any_fail != 0 && allow_blockschur_gmres_fallback) {
         fallback_reason = initial_check.detail.empty()
                               ? std::string("initial ") + std::string(solverMethodToString(options_.method)) +
                                     " solve did not satisfy the true residual tolerance"
@@ -2215,7 +2096,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     }
 
     FsilsResidualCheckResult final_check{};
-    if (skip_strict_retry_after_severe_stall) {
+    if (skip_strict_retry_after_severe_stall || (use_blockschur && any_fail != 0)) {
         final_check = initial_check;
     } else if (solve_ok) {
         undoStageScalingOnSolution(current_preparation_uses_blockschur);

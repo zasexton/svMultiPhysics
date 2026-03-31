@@ -281,9 +281,9 @@ struct SolverOptions {
     std::optional<Real> fsils_blockschur_gm_rel_tol{};
     std::optional<Real> fsils_blockschur_cg_rel_tol{};
     FsilsBlockSchurSchurPreconditioner fsils_blockschur_schur_preconditioner{
-        FsilsBlockSchurSchurPreconditioner::DiagL};
+        FsilsBlockSchurSchurPreconditioner::AlgebraicSchur};
     FsilsBlockSchurMomentumApproximation fsils_blockschur_momentum_approximation{
-        FsilsBlockSchurMomentumApproximation::DiagK};
+        FsilsBlockSchurMomentumApproximation::ILUK};
 
     // Backend-specific pass-through key/value list (optional).
     // - PETSc: key maps to an option name (with or without '-' prefix).

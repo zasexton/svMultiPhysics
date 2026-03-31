@@ -442,10 +442,10 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       if (tol > 0.0) {
         // Legacy semantics: <Add_equation><Tolerance> is a *relative* tolerance.
         newton_opts.rel_tolerance = tol;
-        // The XML does not expose a separate nonlinear absolute tolerance, so
-        // keep the absolute check disabled when the legacy relative tolerance
-        // is specified explicitly.
-        newton_opts.abs_tolerance = 0.0;
+        // Preserve legacy convergence behavior for warm-started cases by
+        // allowing the same XML tolerance to satisfy either absolute or
+        // relative convergence.
+        newton_opts.abs_tolerance = tol;
       }
     }
   }
@@ -453,7 +453,8 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   // Use the unified "equations" operator tag (same as transient).
   newton_opts.residual_op = "equations";
   newton_opts.jacobian_op = "equations";
-  newton_opts.use_line_search = parseBoolEnv("SVMP_NEWTON_LINE_SEARCH", true);
+  // Match the legacy application default unless explicitly overridden.
+  newton_opts.use_line_search = parseBoolEnv("SVMP_NEWTON_LINE_SEARCH", false);
   newton_opts.accept_inexact_linear_solutions =
       parseBoolEnv("SVMP_NEWTON_ACCEPT_INEXACT_LINEAR", false);
 
@@ -553,10 +554,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       if (tol > 0.0) {
         // Legacy semantics: <Add_equation><Tolerance> is a *relative* tolerance.
         opts.newton.rel_tolerance = tol;
-        // The XML does not expose a separate nonlinear absolute tolerance, so
-        // keep the absolute check disabled when the legacy relative tolerance
-        // is specified explicitly.
-        opts.newton.abs_tolerance = 0.0;
+        // Preserve legacy convergence behavior for warm-started cases by
+        // allowing the same XML tolerance to satisfy either absolute or
+        // relative convergence.
+        opts.newton.abs_tolerance = tol;
       }
     }
   }
@@ -572,9 +573,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   opts.newton.residual_op = "equations";
   opts.newton.jacobian_op = "equations";
 
-  // Favor robustness by default. A caller can still disable globalization or
-  // re-enable legacy inexact-Newton behavior explicitly via environment.
-  opts.newton.use_line_search = parseBoolEnv("SVMP_NEWTON_LINE_SEARCH", true);
+  // Match the legacy application default unless explicitly overridden.
+  opts.newton.use_line_search = parseBoolEnv("SVMP_NEWTON_LINE_SEARCH", false);
   opts.newton.accept_inexact_linear_solutions =
       parseBoolEnv("SVMP_NEWTON_ACCEPT_INEXACT_LINEAR", false);
 

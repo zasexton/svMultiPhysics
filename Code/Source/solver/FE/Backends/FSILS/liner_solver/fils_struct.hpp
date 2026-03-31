@@ -438,10 +438,10 @@ class FSILS_subLsType
     bool disable_reorth{false};
 
     /// Schur-complement preconditioner selection used by the BlockSchur path.
-    SchurPreconditionerType schur_preconditioner{SchurPreconditionerType::DIAG_L};
+    SchurPreconditionerType schur_preconditioner{SchurPreconditionerType::ALGEBRAIC_SHAT};
 
     /// Momentum-side approximation used when building algebraic Schur operators.
-    SchurMomentumApproximationType schur_momentum_approximation{SchurMomentumApproximationType::DIAG_K};
+    SchurMomentumApproximationType schur_momentum_approximation{SchurMomentumApproximationType::ILU_K};
 
     /// Pre-allocated workspace arrays for iterative solvers.
     /// These are lazily resized on first use and reused on subsequent calls
