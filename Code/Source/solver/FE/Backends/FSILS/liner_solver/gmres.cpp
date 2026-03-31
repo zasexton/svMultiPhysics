@@ -1455,6 +1455,8 @@ void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSIL
       }
     }
   }
+
+  add_bc_mul::compute_reduced_update_preconditioner_coupling(lhs);
 }
 
 /// @brief Solver the system Val * X = R.
@@ -2661,7 +2663,7 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   // ===== PRINT TIMING PROFILE =====
   double tp_total = tp_spmv + tp_bc_mul + tp_dot_gs + tp_allreduce +
                     tp_gs_update + tp_norm + tp_vecops + tp_givens + tp_recon;
-  if (lhs.commu.task == 0 && tp_total > 0.0) {
+  if (enh.verbose && lhs.commu.task == 0 && tp_total > 0.0) {
     auto pct = [&](double t) { return 100.0 * t / tp_total; };
     fprintf(stderr,
       "\n=== GMRES_V TIMING PROFILE (rank 0) ===\n"

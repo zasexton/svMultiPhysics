@@ -400,6 +400,7 @@ assembly::AssemblyResult assembleOperator(
 {
     system.requireSetup();
     system.last_rank_one_updates_.clear();
+    system.last_reduced_field_updates_.clear();
 
     FE_THROW_IF(request.op.empty(), InvalidArgumentException, "assembleOperator: empty operator tag");
     FE_THROW_IF(!system.operator_registry_.has(request.op), InvalidArgumentException,

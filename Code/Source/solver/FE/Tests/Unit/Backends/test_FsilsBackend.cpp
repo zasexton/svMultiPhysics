@@ -118,6 +118,46 @@ void addRankOneContributionSerial(FsilsFactory& factory,
     }
 }
 
+void addReducedFieldContributionSerial(FsilsFactory& factory,
+                                       GenericVector& y,
+                                       GenericVector& x,
+                                       std::span<const ReducedFieldUpdate> updates)
+{
+    if (updates.empty()) {
+        return;
+    }
+
+    auto corr = factory.createVector(y.size());
+    corr->zero();
+    auto view = corr->createAssemblyView();
+    ASSERT_NE(view, nullptr);
+    view->beginAssemblyPhase();
+
+    auto x_view = x.createAssemblyView();
+    ASSERT_NE(x_view, nullptr);
+    for (const auto& update : updates) {
+        Real dot = 0.0;
+        for (const auto& [dof, val] : update.right) {
+            dot += val * x_view->getVectorEntry(dof);
+        }
+        const Real scale = update.sigma * dot;
+        if (std::abs(scale) <= Real(1e-30)) {
+            continue;
+        }
+        for (const auto& [dof, val] : update.left) {
+            view->addVectorEntry(dof, scale * val, assembly::AddMode::Add);
+        }
+    }
+    view->finalizeAssembly();
+
+    auto ys = y.localSpan();
+    const auto cs = corr->localSpan();
+    ASSERT_EQ(ys.size(), cs.size());
+    for (std::size_t i = 0; i < ys.size(); ++i) {
+        ys[i] += cs[i];
+    }
+}
+
 Real fullOperatorRelativeResidualSerial(FsilsFactory& factory,
                                         const GenericMatrix& A,
                                         GenericVector& x,
@@ -127,6 +167,32 @@ Real fullOperatorRelativeResidualSerial(FsilsFactory& factory,
     auto Ax = factory.createVector(b.size());
     A.mult(x, *Ax);
     addRankOneContributionSerial(factory, *Ax, x, updates);
+
+    auto r = factory.createVector(b.size());
+    auto rs = r->localSpan();
+    const auto bs = b.localSpan();
+    const auto axs = Ax->localSpan();
+    EXPECT_EQ(rs.size(), bs.size());
+    EXPECT_EQ(rs.size(), axs.size());
+    if (rs.size() != bs.size() || rs.size() != axs.size()) {
+        return std::numeric_limits<Real>::infinity();
+    }
+    for (std::size_t i = 0; i < rs.size(); ++i) {
+        rs[i] = bs[i] - axs[i];
+    }
+
+    return r->norm() / std::max<Real>(b.norm(), 1e-30);
+}
+
+Real fullOperatorRelativeResidualSerial(FsilsFactory& factory,
+                                        const GenericMatrix& A,
+                                        GenericVector& x,
+                                        const GenericVector& b,
+                                        std::span<const ReducedFieldUpdate> updates)
+{
+    auto Ax = factory.createVector(b.size());
+    A.mult(x, *Ax);
+    addReducedFieldContributionSerial(factory, *Ax, x, updates);
 
     auto r = factory.createVector(b.size());
     auto rs = r->localSpan();
@@ -565,6 +631,94 @@ TEST(FsilsBackend, RankOneUpdateSolversConverge4DOF)
 
         const Real rel = fullOperatorRelativeResidualSerial(factory, *A, *x, *b,
                                                             std::span<const RankOneUpdate>(&upd, 1));
+        EXPECT_LE(rel, 1e-8);
+    }
+}
+
+TEST(FsilsBackend, ReducedFieldUpdateSolversConverge)
+{
+    FsilsFactory factory(/*dof_per_node=*/3);
+    const auto pattern = make_dense_pattern(3);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(3);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+    const GlobalIndex dofs[3] = {0, 1, 2};
+    const Real Ke[9] = {4.0, 1.0, 1.0,
+                        1.0, 3.0, 0.0,
+                        1.0, 0.0, 1.0};
+    viewA->addMatrixEntries(dofs, Ke, assembly::AddMode::Insert);
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    ReducedFieldUpdate upd{};
+    upd.sigma = 800.0;
+    upd.active_components = {0, 1};
+    upd.left = {
+        {0, 0.10},
+        {1, -0.07},
+    };
+    upd.right = {
+        {0, 0.05},
+        {1, 0.12},
+    };
+
+    auto x_exact = factory.createVector(3);
+    {
+        auto xs = x_exact->localSpan();
+        std::fill(xs.begin(), xs.end(), Real(1.0));
+    }
+    A->mult(*x_exact, *b);
+    addReducedFieldContributionSerial(
+        factory, *b, *x_exact, std::span<const ReducedFieldUpdate>(&upd, 1));
+
+    const std::array<SolverMethod, 2> methods{
+        SolverMethod::BlockSchur,
+        SolverMethod::GMRES,
+    };
+
+    for (const auto method : methods) {
+        SCOPED_TRACE(method == SolverMethod::BlockSchur ? "blockschur_reduced" : "gmres_reduced");
+        auto x = factory.createVector(3);
+
+        SolverOptions opts;
+        if (method == SolverMethod::BlockSchur) {
+            opts.method = SolverMethod::BlockSchur;
+            opts.preconditioner = PreconditionerType::Diagonal;
+            opts.rel_tol = 1e-8;
+            opts.abs_tol = 1e-12;
+            opts.max_iter = 20;
+            opts.krylov_dim = 40;
+            opts.fsils_blockschur_gm_max_iter = 120;
+            opts.fsils_blockschur_cg_max_iter = 120;
+            opts.fsils_blockschur_gm_rel_tol = 1e-10;
+            opts.fsils_blockschur_cg_rel_tol = 1e-10;
+            BlockLayout layout;
+            layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
+            layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
+            layout.momentum_block = 0;
+            layout.constraint_block = 1;
+            opts.block_layout = layout;
+        } else {
+            opts.method = SolverMethod::GMRES;
+            opts.preconditioner = PreconditionerType::Diagonal;
+            opts.rel_tol = 1e-8;
+            opts.abs_tol = 1e-12;
+            opts.max_iter = 200;
+            opts.krylov_dim = 80;
+            opts.fsils_residual_check_policy = FsilsResidualCheckPolicy::RetryOnly;
+        }
+
+        auto solver = factory.createLinearSolver(opts);
+        ASSERT_TRUE(solver->supportsNativeReducedFieldUpdates());
+        solver->setReducedFieldUpdates(std::span<const ReducedFieldUpdate>(&upd, 1));
+
+        const auto rep = solver->solve(*A, *x, *b);
+        EXPECT_TRUE(rep.converged);
+
+        const Real rel = fullOperatorRelativeResidualSerial(
+            factory, *A, *x, *b, std::span<const ReducedFieldUpdate>(&upd, 1));
         EXPECT_LE(rel, 1e-8);
     }
 }

@@ -38,6 +38,24 @@ struct RankOneUpdate {
     std::vector<int> active_components{};
 };
 
+/// Represents a reduced field update: J += sigma * u * v^T
+/// where the left and right factors are sparse vectors of
+/// (global_dof_index, value) pairs.
+///
+/// In MPI, both factors are expected to be ownership-partitioned: each global
+/// DOF appears on exactly one rank, typically the owner. Solver-side consumers
+/// may expand these into overlap-local support if their native operator layout
+/// requires ghost copies.
+struct ReducedFieldUpdate {
+    Real sigma{0.0};
+    std::vector<std::pair<GlobalIndex, Real>> left;
+    std::vector<std::pair<GlobalIndex, Real>> right;
+    /// Per-node component indices that participate in this reduced update.
+    /// Empty means all components (backward compat). When set, the backend
+    /// uses these instead of inferring from block layout or dof count.
+    std::vector<int> active_components{};
+};
+
 class LinearSolver {
 public:
     virtual ~LinearSolver() = default;
@@ -55,6 +73,13 @@ public:
     /// Backends that support native handling (e.g. FSILS face mechanism) will use these
     /// for both the matrix-free mat-vec and the preconditioner correction.
     virtual void setRankOneUpdates(std::span<const RankOneUpdate> /*updates*/) {}
+
+    /// Provide reduced field updates (J += sigma * u * v^T) for preconditioner
+    /// correction and matrix-free operator application.
+    ///
+    /// Backends that do not support native handling should ignore these and
+    /// let the caller assemble the updates explicitly into the matrix.
+    virtual void setReducedFieldUpdates(std::span<const ReducedFieldUpdate> /*updates*/) {}
 
     /// Provide an "effective" time step size for the current nonlinear stage (e.g. α_f*dt for
     /// generalized-α). Backends may use this to scale equation rows internally for improved
@@ -77,6 +102,10 @@ public:
 
     /// Returns true if this backend handles rank-1 updates natively (mat-vec + preconditioner).
     [[nodiscard]] virtual bool supportsNativeRankOneUpdates() const noexcept { return false; }
+
+    /// Returns true if this backend handles reduced field updates natively
+    /// (mat-vec + preconditioner) without requiring explicit sparse assembly.
+    [[nodiscard]] virtual bool supportsNativeReducedFieldUpdates() const noexcept { return false; }
 
     /// Returns true if this backend can handle nullspace basis vectors natively.
     ///

@@ -38,13 +38,17 @@
 #include "gmres.h"
 #include "norm.h"
 #include "omp_la.h"
+
+#include <unordered_map>
 #include "spar_mul.h"
 
 #include "Array3.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <algorithm>
+#include <string>
 #include <vector>
 
 namespace bicgs {
@@ -327,12 +331,143 @@ namespace {
 
 using fe_fsi_linear_solver::fsils_int;
 
+[[nodiscard]] int parse_int_env(const char* name, int default_value) noexcept
+{
+  const char* env = std::getenv(name);
+  if (!env) {
+    return default_value;
+  }
+  try {
+    return std::stoi(env);
+  } catch (...) {
+    return default_value;
+  }
+}
+
+[[nodiscard]] double parse_double_env(const char* name, double default_value) noexcept
+{
+  const char* env = std::getenv(name);
+  if (!env) {
+    return default_value;
+  }
+  try {
+    return std::stod(env);
+  } catch (...) {
+    return default_value;
+  }
+}
+
+struct SchurSparsityControl {
+  double momentum_inverse_offdiag_score_min{0.0};
+  int momentum_inverse_max_offdiag_per_row{-1};
+  double shat_row_score_min{0.0};
+  int shat_max_offdiag_per_row{-1};
+  int guaranteed_offdiag_per_row{2};
+  int operator_refinement_steps{1};
+  double operator_refinement_omega{1.0};
+};
+
+[[nodiscard]] const SchurSparsityControl& schur_sparsity_control()
+{
+  static const SchurSparsityControl cfg = []() {
+    SchurSparsityControl c{};
+    c.momentum_inverse_offdiag_score_min =
+        parse_double_env("SVMP_FSILS_BLOCKSCHUR_MOMINV_DROP_SCORE", 0.0);
+    if (!(c.momentum_inverse_offdiag_score_min >= 0.0 && std::isfinite(c.momentum_inverse_offdiag_score_min))) {
+      c.momentum_inverse_offdiag_score_min = 0.0;
+    }
+
+    c.momentum_inverse_max_offdiag_per_row =
+        parse_int_env("SVMP_FSILS_BLOCKSCHUR_MOMINV_MAX_OFFDIAG", -1);
+    if (c.momentum_inverse_max_offdiag_per_row < -1) {
+      c.momentum_inverse_max_offdiag_per_row = -1;
+    }
+
+    c.shat_row_score_min =
+        parse_double_env("SVMP_FSILS_BLOCKSCHUR_SHAT_ROW_DROP_SCORE", 0.0);
+    if (!(c.shat_row_score_min >= 0.0 && std::isfinite(c.shat_row_score_min))) {
+      c.shat_row_score_min = 0.0;
+    }
+
+    c.shat_max_offdiag_per_row =
+        parse_int_env("SVMP_FSILS_BLOCKSCHUR_SHAT_MAX_OFFDIAG", -1);
+    if (c.shat_max_offdiag_per_row < -1) {
+      c.shat_max_offdiag_per_row = -1;
+    }
+
+    c.guaranteed_offdiag_per_row =
+        std::max(0, parse_int_env("SVMP_FSILS_BLOCKSCHUR_SHAT_GUARANTEED_OFFDIAG", 2));
+    c.operator_refinement_steps =
+        std::max(0, parse_int_env("SVMP_FSILS_BLOCKSCHUR_SHAT_OPERATOR_REFINE_STEPS", 1));
+    c.operator_refinement_omega =
+        parse_double_env("SVMP_FSILS_BLOCKSCHUR_SHAT_OPERATOR_REFINE_OMEGA", 0.5);
+    if (!(c.operator_refinement_omega > 0.0 && std::isfinite(c.operator_refinement_omega))) {
+      c.operator_refinement_omega = 1.0;
+    }
+    return c;
+  }();
+  return cfg;
+}
+
+struct MomentumHatData {
+  Array<double> point_inv;
+  Array<double> ilu_factors;
+  Array<double> ilu_diag_inv;
+  Array<double> sparse_inverse;
+  bool use_ilu{false};
+};
+
 struct SchurPreconditionerData {
   Array<double> point_inv;
   Array<double> ilu_factors;
   Array<double> ilu_diag_inv;
   bool use_ilu{false};
+  MomentumHatData momentum_hat;
+  const Array<double>* operator_D{nullptr};
+  const Array<double>* operator_G{nullptr};
+  Array<double> operator_L_storage;
+  const Array<double>* operator_L{nullptr};
+  int operator_mom_ncomp{0};
+  int operator_con_ncomp{0};
+  int operator_refinement_steps{0};
+  double operator_refinement_omega{1.0};
+  std::vector<Array<double>> low_rank_right;
+  std::vector<Array<double>> low_rank_preconditioned_left;
+  std::vector<double> low_rank_inner_inv;
+  Array<double> scratch_rhs;
+  Array<double> scratch_ax;
+  Array<double> scratch_gp;
+  Array<double> scratch_hgp;
+  Array<double> scratch_sp;
+  Array<double> scratch_dgp;
+  Array<double> scratch_correction;
+  Array<double> scratch_residual;
 };
+
+struct SchurSolveCacheEntry {
+  bool valid{false};
+  int mom_ncomp{0};
+  int con_ncomp{0};
+  fsils_int nNo{0};
+  SchurPreconditionerData preconditioner;
+  Array<double> previous_solution;
+};
+
+[[nodiscard]] std::unordered_map<const fe_fsi_linear_solver::FSILS_subLsType*, SchurSolveCacheEntry>& schur_cache_registry()
+{
+  static std::unordered_map<const fe_fsi_linear_solver::FSILS_subLsType*, SchurSolveCacheEntry> cache;
+  return cache;
+}
+
+[[nodiscard]] SchurSolveCacheEntry& schur_cache_entry(fe_fsi_linear_solver::FSILS_subLsType& ls)
+{
+  return schur_cache_registry()[&ls];
+}
+
+[[nodiscard]] bool has_cached_schur_solution(const SchurSolveCacheEntry& cache, int con_ncomp, fsils_int nNo)
+{
+  return cache.previous_solution.nrows() == con_ncomp && cache.previous_solution.ncols() == nNo;
+}
 
 [[nodiscard]] inline const double* block_ptr(const Array<double>& A, int block_entries, fsils_int index)
 {
@@ -446,6 +581,19 @@ void multiply_block_vector(const double* A, int rows, int cols,
   }
 }
 
+void multiply_block_vector_transpose(const double* A, int rows, int cols,
+                                     const double* x,
+                                     double* y)
+{
+  for (int j = 0; j < cols; ++j) {
+    double sum = 0.0;
+    for (int i = 0; i < rows; ++i) {
+      sum += A[i * cols + j] * x[i];
+    }
+    y[j] = sum;
+  }
+}
+
 void subtract_block_vector_product(double* y,
                                    const double* A, int rows, int cols,
                                    const double* x)
@@ -456,6 +604,19 @@ void subtract_block_vector_product(double* y,
       sum += A[i * cols + j] * x[j];
     }
     y[i] -= sum;
+  }
+}
+
+void subtract_transpose_block_vector_product(double* y,
+                                             const double* A, int rows, int cols,
+                                             const double* x)
+{
+  for (int j = 0; j < cols; ++j) {
+    double sum = 0.0;
+    for (int i = 0; i < rows; ++i) {
+      sum += A[i * cols + j] * x[i];
+    }
+    y[j] -= sum;
   }
 }
 
@@ -574,6 +735,165 @@ void factorize_block_ilu0(const Array<fsils_int>& rowPtr,
   }
 }
 
+void build_sparse_block_diagonal_inverse(const Vector<fsils_int>& diagPtr,
+                                       int block_size,
+                                       fsils_int nNo,
+                                       fsils_int nnz,
+                                       const Array<double>& diag_inv,
+                                       Array<double>& sparse_inverse)
+{
+  const int block_entries = block_size * block_size;
+  sparse_inverse.resize(block_entries, nnz);
+  sparse_inverse = 0.0;
+  for (fsils_int row = 0; row < nNo; ++row) {
+    const fsils_int diag_nz = diagPtr(row);
+    double* out = block_ptr(sparse_inverse, block_entries, diag_nz);
+    const double* src = block_ptr(diag_inv, block_entries, row);
+    std::copy(src, src + block_entries, out);
+  }
+}
+
+void build_sparse_block_ilu_inverse(const Array<fsils_int>& rowPtr,
+                                    const Vector<fsils_int>& colPtr,
+                                    const Vector<fsils_int>& diagPtr,
+                                    fsils_int nNo,
+                                    fsils_int nnz,
+                                    int block_size,
+                                    const Array<double>& factors,
+                                    const Array<double>& diag_inv,
+                                    Array<double>& sparse_inverse)
+{
+  const int block_entries = block_size * block_size;
+  sparse_inverse.resize(block_entries, nnz);
+  sparse_inverse = 0.0;
+
+  std::vector<double> tmp_left(static_cast<size_t>(block_entries), 0.0);
+  std::vector<double> tmp_right(static_cast<size_t>(block_entries), 0.0);
+  for (fsils_int row = 0; row < nNo; ++row) {
+    const fsils_int diag_nz = diagPtr(row);
+    const double* drow_inv = block_ptr(diag_inv, block_entries, row);
+    std::copy(drow_inv, drow_inv + block_entries, block_ptr(sparse_inverse, block_entries, diag_nz));
+
+    for (fsils_int p = rowPtr(0, row); p < diag_nz; ++p) {
+      multiply_blocks(drow_inv, block_size, block_size,
+                      block_ptr(factors, block_entries, p), block_size,
+                      tmp_left.data());
+      double* out = block_ptr(sparse_inverse, block_entries, p);
+      for (int e = 0; e < block_entries; ++e) {
+        out[e] = -tmp_left[static_cast<size_t>(e)];
+      }
+    }
+
+    for (fsils_int p = diag_nz + 1; p <= rowPtr(1, row); ++p) {
+      const fsils_int col = colPtr(p);
+      multiply_blocks(drow_inv, block_size, block_size,
+                      block_ptr(factors, block_entries, p), block_size,
+                      tmp_left.data());
+      multiply_blocks(tmp_left.data(), block_size, block_size,
+                      block_ptr(diag_inv, block_entries, col), block_size,
+                      tmp_right.data());
+      double* out = block_ptr(sparse_inverse, block_entries, p);
+      for (int e = 0; e < block_entries; ++e) {
+        out[e] = -tmp_right[static_cast<size_t>(e)];
+      }
+    }
+  }
+}
+
+[[nodiscard]] bool block_is_zero(const double* block, int count)
+{
+  for (int i = 0; i < count; ++i) {
+    if (std::abs(block[i]) > 1e-30) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] double block_max_abs(const double* block, int count)
+{
+  double value = 0.0;
+  for (int i = 0; i < count; ++i) {
+    value = std::max(value, std::abs(block[i]));
+  }
+  return value;
+}
+
+void prune_sparse_momentum_hat(const Array<fsils_int>& rowPtr,
+                               const Vector<fsils_int>& colPtr,
+                               const Vector<fsils_int>& diagPtr,
+                               fsils_int nNo,
+                               int block_size,
+                               Array<double>& sparse_inverse)
+{
+  const auto& cfg = schur_sparsity_control();
+  if (cfg.momentum_inverse_max_offdiag_per_row == -1 &&
+      cfg.momentum_inverse_offdiag_score_min <= 0.0) {
+    return;
+  }
+
+  const int block_entries = block_size * block_size;
+  std::vector<double> diag_scale(static_cast<size_t>(nNo), 0.0);
+  for (fsils_int row = 0; row < nNo; ++row) {
+    diag_scale[static_cast<size_t>(row)] =
+        std::max(block_max_abs(block_ptr(sparse_inverse, block_entries, diagPtr(row)), block_entries), 1e-30);
+  }
+
+  struct Candidate {
+    fsils_int nz{-1};
+    double score{0.0};
+  };
+
+  for (fsils_int row = 0; row < nNo; ++row) {
+    std::vector<Candidate> candidates;
+    candidates.reserve(static_cast<size_t>(std::max<fsils_int>(0, rowPtr(1, row) - rowPtr(0, row))));
+
+    for (fsils_int p = rowPtr(0, row); p <= rowPtr(1, row); ++p) {
+      if (p == diagPtr(row)) {
+        continue;
+      }
+      double* block = block_ptr(sparse_inverse, block_entries, p);
+      const double norm = block_max_abs(block, block_entries);
+      if (norm <= 1e-30) {
+        set_zero(block, block_entries);
+        continue;
+      }
+
+      const fsils_int col = colPtr(p);
+      const double ref = std::sqrt(std::max(diag_scale[static_cast<size_t>(row)] *
+                                            diag_scale[static_cast<size_t>(col)],
+                                            1e-30));
+      candidates.push_back(Candidate{p, norm / ref});
+    }
+
+    if (candidates.empty()) {
+      continue;
+    }
+
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+      return a.score > b.score;
+    });
+
+    const int budget = (cfg.momentum_inverse_max_offdiag_per_row < 0)
+                           ? static_cast<int>(candidates.size())
+                           : std::min<int>(cfg.momentum_inverse_max_offdiag_per_row,
+                                           static_cast<int>(candidates.size()));
+    const int guaranteed = std::min<int>(cfg.guaranteed_offdiag_per_row, budget);
+
+    int kept = 0;
+    for (const auto& candidate : candidates) {
+      const bool keep =
+          (kept < guaranteed) ||
+          (kept < budget && candidate.score >= cfg.momentum_inverse_offdiag_score_min);
+      if (keep) {
+        kept += 1;
+        continue;
+      }
+      set_zero(block_ptr(sparse_inverse, block_entries, candidate.nz), block_entries);
+    }
+  }
+}
+
 void apply_point_block_inverse(const Array<double>& inv_blocks,
                                int block_size,
                                fsils_int nNo,
@@ -584,6 +904,22 @@ void apply_point_block_inverse(const Array<double>& inv_blocks,
     multiply_block_vector(block_ptr(inv_blocks, block_size * block_size, i), block_size, block_size,
                           x.data() + static_cast<size_t>(i) * static_cast<size_t>(block_size),
                           tmp.data());
+    for (int k = 0; k < block_size; ++k) {
+      x(k, i) = tmp[static_cast<size_t>(k)];
+    }
+  }
+}
+
+void apply_point_block_inverse_transpose(const Array<double>& inv_blocks,
+                                         int block_size,
+                                         fsils_int nNo,
+                                         Array<double>& x)
+{
+  std::vector<double> tmp(static_cast<size_t>(block_size), 0.0);
+  for (fsils_int i = 0; i < nNo; ++i) {
+    multiply_block_vector_transpose(block_ptr(inv_blocks, block_size * block_size, i), block_size, block_size,
+                                    x.data() + static_cast<size_t>(i) * static_cast<size_t>(block_size),
+                                    tmp.data());
     for (int k = 0; k < block_size; ++k) {
       x(k, i) = tmp[static_cast<size_t>(k)];
     }
@@ -632,73 +968,550 @@ void apply_block_ilu0(const Array<fsils_int>& rowPtr,
   }
 }
 
-void build_momentum_hat_blocks(const Array<fsils_int>& rowPtr,
-                               const Vector<fsils_int>& colPtr,
-                               const Vector<fsils_int>& diagPtr,
-                               fsils_int nNo,
-                               int mom_ncomp,
-                               const Array<double>& K,
-                               fe_fsi_linear_solver::SchurMomentumApproximationType approx,
-                               Array<double>& momentum_hat_blocks)
+void apply_block_ilu0_transpose(const Array<fsils_int>& rowPtr,
+                                const Vector<fsils_int>& colPtr,
+                                const Vector<fsils_int>& diagPtr,
+                                int block_size,
+                                fsils_int nNo,
+                                const Array<double>& factors,
+                                const Array<double>& diag_inv,
+                                Array<double>& x)
 {
-  using fe_fsi_linear_solver::SchurMomentumApproximationType;
+  Array<double> y(block_size, nNo);
+  y = x;
 
-  switch (approx) {
-    case SchurMomentumApproximationType::DIAG_K:
-      build_point_inverse_blocks(diagPtr, mom_ncomp, nNo, K, /*diagonal_only=*/true, momentum_hat_blocks);
-      return;
-    case SchurMomentumApproximationType::BLOCKDIAG_K:
-      build_point_inverse_blocks(diagPtr, mom_ncomp, nNo, K, /*diagonal_only=*/false, momentum_hat_blocks);
-      return;
-    case SchurMomentumApproximationType::ILU_K:
-    case SchurMomentumApproximationType::ASM_K: {
-      // Zero-overlap ASM currently shares the same rank-local ILU(0) block extraction path.
-      Array<double> factors;
-      factorize_block_ilu0(rowPtr, colPtr, diagPtr, nNo, mom_ncomp, K, factors, momentum_hat_blocks);
-      return;
+  std::vector<double> tmp(static_cast<size_t>(block_size), 0.0);
+  for (fsils_int row = 0; row < nNo; ++row) {
+    multiply_block_vector_transpose(block_ptr(diag_inv, block_size * block_size, row),
+                                    block_size, block_size,
+                                    y.data() + static_cast<size_t>(row) * static_cast<size_t>(block_size),
+                                    tmp.data());
+    for (int k = 0; k < block_size; ++k) {
+      y(k, row) = tmp[static_cast<size_t>(k)];
+    }
+    for (fsils_int p = diagPtr(row) + 1; p <= rowPtr(1, row); ++p) {
+      subtract_transpose_block_vector_product(
+          y.data() + static_cast<size_t>(colPtr(p)) * static_cast<size_t>(block_size),
+          block_ptr(factors, block_size * block_size, p), block_size, block_size,
+          tmp.data());
+    }
+  }
+
+  for (fsils_int row = nNo; row-- > 0;) {
+    for (int k = 0; k < block_size; ++k) {
+      tmp[static_cast<size_t>(k)] = y(k, row);
+    }
+    for (fsils_int p = rowPtr(0, row); p < diagPtr(row); ++p) {
+      subtract_transpose_block_vector_product(
+          y.data() + static_cast<size_t>(colPtr(p)) * static_cast<size_t>(block_size),
+          block_ptr(factors, block_size * block_size, p), block_size, block_size,
+          tmp.data());
+    }
+  }
+
+  x = y;
+}
+
+void apply_base_schur_preconditioner(const Array<fsils_int>& rowPtr,
+                                     const Vector<fsils_int>& colPtr,
+                                     const Vector<fsils_int>& diagPtr,
+                                     const SchurPreconditionerData& pc,
+                                     int con_ncomp,
+                                     fsils_int nNo,
+                                     Array<double>& x)
+{
+  if (pc.use_ilu) {
+    apply_block_ilu0(rowPtr, colPtr, diagPtr, con_ncomp, nNo, pc.ilu_factors, pc.ilu_diag_inv, x);
+    return;
+  }
+  apply_point_block_inverse(pc.point_inv, con_ncomp, nNo, x);
+}
+
+void apply_momentum_hat(const Array<fsils_int>& rowPtr,
+                        const Vector<fsils_int>& colPtr,
+                        const Vector<fsils_int>& diagPtr,
+                        int mom_ncomp,
+                        fsils_int nNo,
+                        const MomentumHatData& hat,
+                        Array<double>& x)
+{
+  if (hat.use_ilu) {
+    apply_block_ilu0(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, hat.ilu_factors, hat.ilu_diag_inv, x);
+    return;
+  }
+  apply_point_block_inverse(hat.point_inv, mom_ncomp, nNo, x);
+}
+
+void apply_momentum_hat_transpose(const Array<fsils_int>& rowPtr,
+                                  const Vector<fsils_int>& colPtr,
+                                  const Vector<fsils_int>& diagPtr,
+                                  int mom_ncomp,
+                                  fsils_int nNo,
+                                  const MomentumHatData& hat,
+                                  Array<double>& x)
+{
+  if (hat.use_ilu) {
+    apply_block_ilu0_transpose(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, hat.ilu_factors, hat.ilu_diag_inv, x);
+    return;
+  }
+  apply_point_block_inverse_transpose(hat.point_inv, mom_ncomp, nNo, x);
+}
+
+[[nodiscard]] int reduced_local_component(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                          const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update,
+                                          int full_component,
+                                          int current_dof)
+{
+  const int system_dof = (lhs.system_dof > 0) ? lhs.system_dof : current_dof;
+  return fe_fsi_linear_solver::fsils_reduced_local_component(update,
+                                                             full_component,
+                                                             current_dof,
+                                                             system_dof);
+}
+
+bool fill_projected_reduced_vector(
+    const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+    const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update,
+    const std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>& entries,
+    int current_dof,
+    Array<double>& values)
+{
+  values.resize(current_dof, lhs.nNo);
+  values = 0.0;
+
+  bool nonzero = false;
+  for (const auto& entry : entries) {
+    if (entry.node < 0 || entry.node >= lhs.nNo || std::abs(entry.value) <= 1e-30) {
+      continue;
+    }
+    const int comp = reduced_local_component(lhs, update, entry.full_component, current_dof);
+    if (comp < 0 || comp >= current_dof) {
+      continue;
+    }
+    values(comp, entry.node) += entry.value;
+    nonzero = true;
+  }
+  return nonzero;
+}
+
+double sparse_dense_owned_dot_local(
+    const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+    const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update,
+    const std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>& entries,
+    const Array<double>& x,
+    int current_dof)
+{
+  double local_dot = 0.0;
+  for (const auto& entry : entries) {
+    if (entry.node < 0 || entry.node >= lhs.mynNo || std::abs(entry.value) <= 1e-30) {
+      continue;
+    }
+    const int comp = reduced_local_component(lhs, update, entry.full_component, current_dof);
+    if (comp < 0 || comp >= current_dof) {
+      continue;
+    }
+    local_dot += entry.value * x(comp, entry.node);
+  }
+  return local_dot;
+}
+
+double dense_dense_owned_dot_local(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                   int dof,
+                                   const Array<double>& left,
+                                   const Array<double>& right)
+{
+  double local_dot = 0.0;
+  for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+    for (int comp = 0; comp < dof; ++comp) {
+      local_dot += left(comp, node) * right(comp, node);
+    }
+  }
+  return local_dot;
+}
+
+void allreduce_sum_in_place(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                            std::vector<double>& values)
+{
+  if (lhs.commu.nTasks > 1 && !values.empty()) {
+    fe_fsi_linear_solver::fsils_allreduce_sum_in_place(values.data(),
+                                                       static_cast<int>(values.size()),
+                                                       cm_mod::mpreal,
+                                                       lhs.commu);
+  }
+}
+
+void multiply_rect_transpose_local(const Array<fsils_int>& rowPtr,
+                                   const Vector<fsils_int>& colPtr,
+                                   fsils_int nNo,
+                                   int out_dof,
+                                   int in_dof,
+                                   const Array<double>& K,
+                                   const Array<double>& row_values,
+                                   Array<double>& col_values)
+{
+  col_values.resize(in_dof, nNo);
+  col_values = 0.0;
+
+  std::vector<double> contrib(static_cast<size_t>(in_dof), 0.0);
+  for (fsils_int row = 0; row < nNo; ++row) {
+    const double* row_vec = row_values.data() + static_cast<size_t>(row) * static_cast<size_t>(out_dof);
+    for (fsils_int p = rowPtr(0, row); p <= rowPtr(1, row); ++p) {
+      const fsils_int col = colPtr(p);
+      multiply_block_vector_transpose(block_ptr(K, out_dof * in_dof, p), out_dof, in_dof,
+                                      row_vec, contrib.data());
+      double* col_vec = col_values.data() + static_cast<size_t>(col) * static_cast<size_t>(in_dof);
+      for (int comp = 0; comp < in_dof; ++comp) {
+        col_vec[comp] += contrib[static_cast<size_t>(comp)];
+      }
     }
   }
 }
 
+MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
+                                        const Vector<fsils_int>& colPtr,
+                                        const Vector<fsils_int>& diagPtr,
+                                        const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                        fsils_int nNo,
+                                        int mom_ncomp,
+                                        const Array<double>& K,
+                                        fe_fsi_linear_solver::SchurMomentumApproximationType approx)
+{
+  using fe_fsi_linear_solver::SchurMomentumApproximationType;
+
+  MomentumHatData hat{};
+  Array<double> K_eff = K;
+  const int block_entries = mom_ncomp * mom_ncomp;
+  const int system_dof = (lhs.system_dof > 0) ? lhs.system_dof : mom_ncomp;
+
+  auto component_index = [&](const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update,
+                             int full_comp) -> int {
+    return fe_fsi_linear_solver::fsils_reduced_local_component(update,
+                                                               full_comp,
+                                                               mom_ncomp,
+                                                               system_dof);
+  };
+
+  auto add_local_update_entries =
+      [&](const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update) {
+    if (!update.active || std::abs(update.sigma) <= 1e-30) {
+      return;
+    }
+
+    std::unordered_map<fsils_int, std::vector<std::pair<int, double>>> left_by_node;
+    std::unordered_map<fsils_int, std::vector<std::pair<int, double>>> right_by_node;
+    const auto& left_entries =
+        !update.left_scaled_owned.empty() ? update.left_scaled_owned : update.left_owned;
+    const auto& right_entries =
+        !update.right_scaled_owned.empty() ? update.right_scaled_owned : update.right_owned;
+
+    for (const auto& entry : left_entries) {
+      if (entry.node < 0 || std::abs(entry.value) <= 1e-30) {
+        continue;
+      }
+      const fsils_int node = entry.node;
+      const int local_comp = component_index(update, entry.full_component);
+      if (node < 0 || node >= nNo || local_comp < 0 || local_comp >= mom_ncomp) {
+        continue;
+      }
+      left_by_node[node].emplace_back(local_comp, entry.value);
+    }
+    for (const auto& entry : right_entries) {
+      if (entry.node < 0 || std::abs(entry.value) <= 1e-30) {
+        continue;
+      }
+      const fsils_int node = entry.node;
+      const int local_comp = component_index(update, entry.full_component);
+      if (node < 0 || node >= nNo || local_comp < 0 || local_comp >= mom_ncomp) {
+        continue;
+      }
+      right_by_node[node].emplace_back(local_comp, entry.value);
+    }
+
+    for (const auto& [node, left_vals] : left_by_node) {
+      const auto it = right_by_node.find(node);
+      if (it == right_by_node.end()) {
+        continue;
+      }
+      const fsils_int diag_nz = diagPtr(node);
+      double* diag_block = block_ptr(K_eff, block_entries, diag_nz);
+      for (const auto& [li, lval] : left_vals) {
+        for (const auto& [rj, rval] : it->second) {
+          diag_block[li * mom_ncomp + rj] += update.sigma * lval * rval;
+        }
+      }
+    }
+  };
+
+  for (const auto& update : lhs.reduced_updates) {
+    add_local_update_entries(update);
+  }
+
+  switch (approx) {
+    case SchurMomentumApproximationType::DIAG_K:
+      build_point_inverse_blocks(diagPtr, mom_ncomp, nNo, K_eff, /*diagonal_only=*/true, hat.point_inv);
+      build_sparse_block_diagonal_inverse(diagPtr, mom_ncomp, nNo, K_eff.ncols(), hat.point_inv,
+                                          hat.sparse_inverse);
+      return hat;
+    case SchurMomentumApproximationType::BLOCKDIAG_K:
+      build_point_inverse_blocks(diagPtr, mom_ncomp, nNo, K_eff, /*diagonal_only=*/false, hat.point_inv);
+      build_sparse_block_diagonal_inverse(diagPtr, mom_ncomp, nNo, K_eff.ncols(), hat.point_inv,
+                                          hat.sparse_inverse);
+      return hat;
+    case SchurMomentumApproximationType::ILU_K:
+    case SchurMomentumApproximationType::ASM_K: {
+      factorize_block_ilu0(rowPtr, colPtr, diagPtr, nNo, mom_ncomp, K_eff,
+                           hat.ilu_factors, hat.ilu_diag_inv);
+      hat.point_inv = hat.ilu_diag_inv;
+      build_sparse_block_ilu_inverse(rowPtr, colPtr, diagPtr, nNo, K_eff.ncols(), mom_ncomp,
+                                     hat.ilu_factors, hat.ilu_diag_inv, hat.sparse_inverse);
+      prune_sparse_momentum_hat(rowPtr, colPtr, diagPtr, nNo, mom_ncomp, hat.sparse_inverse);
+      hat.use_ilu = true;
+      return hat;
+    }
+  }
+
+  return hat;
+}
+
 void assemble_algebraic_schur(const Array<fsils_int>& rowPtr,
                               const Vector<fsils_int>& colPtr,
+                              const Vector<fsils_int>& diagPtr,
                               fsils_int nNo,
                               int mom_ncomp,
                               int con_ncomp,
                               const Array<double>& D,
                               const Array<double>& G,
                               const Array<double>& L,
-                              const Array<double>& momentum_hat_blocks,
+                              const Array<double>& momentum_hat_sparse,
                               Array<double>& shat)
 {
+  const auto& cfg = schur_sparsity_control();
   const int con_block_entries = con_ncomp * con_ncomp;
   const int mixed_block_entries = con_ncomp * mom_ncomp;
+  const int mom_block_entries = mom_ncomp * mom_ncomp;
   shat = L;
+
+  struct Candidate {
+    fsils_int local_index{-1};
+    double score{0.0};
+  };
 
   std::vector<double> dh(static_cast<size_t>(mixed_block_entries), 0.0);
   std::vector<double> contrib(static_cast<size_t>(con_block_entries), 0.0);
   for (fsils_int row = 0; row < nNo; ++row) {
-    for (fsils_int p = rowPtr(0, row); p <= rowPtr(1, row); ++p) {
-      const fsils_int middle = colPtr(p);
-      multiply_blocks(block_ptr(D, mixed_block_entries, p), con_ncomp, mom_ncomp,
-                      block_ptr(momentum_hat_blocks, mom_ncomp * mom_ncomp, middle), mom_ncomp,
-                      dh.data());
+    const fsils_int row_begin = rowPtr(0, row);
+    const fsils_int row_end = rowPtr(1, row);
+    const fsils_int row_nnz = row_end - row_begin + 1;
+    std::vector<double> row_corr(static_cast<size_t>(row_nnz) * static_cast<size_t>(con_block_entries), 0.0);
 
-      for (fsils_int q = rowPtr(0, middle); q <= rowPtr(1, middle); ++q) {
-        const fsils_int col = colPtr(q);
-        const fsils_int target = find_col_in_row(rowPtr, colPtr, row, col);
-        if (target < 0) {
+    for (fsils_int p_d = row_begin; p_d <= row_end; ++p_d) {
+      const fsils_int alpha = colPtr(p_d);
+      const double* d_block = block_ptr(D, mixed_block_entries, p_d);
+      for (fsils_int p_h = rowPtr(0, alpha); p_h <= rowPtr(1, alpha); ++p_h) {
+        const double* h_block = block_ptr(momentum_hat_sparse, mom_block_entries, p_h);
+        if (block_is_zero(h_block, mom_block_entries)) {
           continue;
         }
-        multiply_blocks(dh.data(), con_ncomp, mom_ncomp,
-                        block_ptr(G, mom_ncomp * con_ncomp, q), con_ncomp,
-                        contrib.data());
-        double* target_block = block_ptr(shat, con_block_entries, target);
-        for (int e = 0; e < con_block_entries; ++e) {
-          target_block[e] -= contrib[static_cast<size_t>(e)];
+        const fsils_int beta = colPtr(p_h);
+        multiply_blocks(d_block, con_ncomp, mom_ncomp,
+                        h_block, mom_ncomp,
+                        dh.data());
+        if (block_is_zero(dh.data(), mixed_block_entries)) {
+          continue;
+        }
+
+        for (fsils_int p_g = rowPtr(0, beta); p_g <= rowPtr(1, beta); ++p_g) {
+          const fsils_int col = colPtr(p_g);
+          const fsils_int target = find_col_in_row(rowPtr, colPtr, row, col);
+          if (target < 0) {
+            continue;
+          }
+          multiply_blocks(dh.data(), con_ncomp, mom_ncomp,
+                          block_ptr(G, mom_ncomp * con_ncomp, p_g), con_ncomp,
+                          contrib.data());
+          if (block_is_zero(contrib.data(), con_block_entries)) {
+            continue;
+          }
+
+          double* target_block = row_corr.data() +
+                                 static_cast<size_t>(target - row_begin) * static_cast<size_t>(con_block_entries);
+          for (int e = 0; e < con_block_entries; ++e) {
+            target_block[e] += contrib[static_cast<size_t>(e)];
+          }
         }
       }
     }
+
+    const fsils_int diag_local = diagPtr(row) - row_begin;
+    const double diag_scale = std::max(block_max_abs(block_ptr(L, con_block_entries, diagPtr(row)),
+                                                     con_block_entries),
+                                       1e-30);
+    std::vector<Candidate> candidates;
+    candidates.reserve(static_cast<size_t>(std::max<fsils_int>(0, row_nnz - 1)));
+    for (fsils_int local = 0; local < row_nnz; ++local) {
+      if (local == diag_local) {
+        continue;
+      }
+      const double* corr_block = row_corr.data() +
+                                 static_cast<size_t>(local) * static_cast<size_t>(con_block_entries);
+      const double corr_norm = block_max_abs(corr_block, con_block_entries);
+      if (corr_norm <= 1e-30) {
+        continue;
+      }
+      const double l_scale = block_max_abs(block_ptr(L, con_block_entries, row_begin + local),
+                                           con_block_entries);
+      const double score = corr_norm / std::max({diag_scale, l_scale, 1e-30});
+      candidates.push_back(Candidate{local, score});
+    }
+
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+      return a.score > b.score;
+    });
+
+    const int budget = (cfg.shat_max_offdiag_per_row < 0)
+                           ? static_cast<int>(candidates.size())
+                           : std::min<int>(cfg.shat_max_offdiag_per_row, static_cast<int>(candidates.size()));
+    const int guaranteed = std::min<int>(cfg.guaranteed_offdiag_per_row, budget);
+
+    std::vector<unsigned char> keep(static_cast<size_t>(row_nnz), 0);
+    keep[static_cast<size_t>(diag_local)] = 1;
+    int kept = 0;
+    for (const auto& candidate : candidates) {
+      const bool retain =
+          (kept < guaranteed) ||
+          (kept < budget && candidate.score >= cfg.shat_row_score_min);
+      if (!retain) {
+        continue;
+      }
+      keep[static_cast<size_t>(candidate.local_index)] = 1;
+      kept += 1;
+    }
+
+    for (fsils_int local = 0; local < row_nnz; ++local) {
+      if (!keep[static_cast<size_t>(local)]) {
+        continue;
+      }
+      double* target_block = block_ptr(shat, con_block_entries, row_begin + local);
+      const double* corr_block = row_corr.data() +
+                                 static_cast<size_t>(local) * static_cast<size_t>(con_block_entries);
+      for (int e = 0; e < con_block_entries; ++e) {
+        target_block[e] -= corr_block[static_cast<size_t>(e)];
+      }
+    }
+  }
+}
+
+void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                    int mom_ncomp,
+                                    int con_ncomp,
+                                    const Array<double>& D,
+                                    const Array<double>& G,
+                                    const MomentumHatData& momentum_hat,
+                                    SchurPreconditionerData& pc)
+{
+  struct ReducedColumn {
+    const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType* update{nullptr};
+    Array<double> momentum_left_hat;
+    Array<double> schur_left;
+    Array<double> schur_right;
+  };
+
+  std::vector<ReducedColumn> columns;
+  columns.reserve(lhs.reduced_updates.size());
+
+  for (const auto& update : lhs.reduced_updates) {
+    if (!update.active || std::abs(update.sigma) <= 1e-30) {
+      continue;
+    }
+
+    const auto& left_entries = !update.left_scaled.empty() ? update.left_scaled : update.left;
+    const auto& right_entries = !update.right_scaled.empty() ? update.right_scaled : update.right;
+    if (left_entries.empty() || right_entries.empty()) {
+      continue;
+    }
+
+    ReducedColumn col;
+    col.update = &update;
+    if (!fill_projected_reduced_vector(lhs, update, left_entries, mom_ncomp, col.momentum_left_hat)) {
+      continue;
+    }
+
+    Array<double> momentum_right_t;
+    if (!fill_projected_reduced_vector(lhs, update, right_entries, mom_ncomp, momentum_right_t)) {
+      continue;
+    }
+
+    apply_momentum_hat(lhs.rowPtr, lhs.colPtr, lhs.diagPtr,
+                       mom_ncomp, lhs.nNo, momentum_hat, col.momentum_left_hat);
+    apply_momentum_hat_transpose(lhs.rowPtr, lhs.colPtr, lhs.diagPtr,
+                                 mom_ncomp, lhs.nNo, momentum_hat, momentum_right_t);
+
+    col.schur_left.resize(con_ncomp, lhs.nNo);
+    spar_mul::fsils_spar_mul_rect(lhs, lhs.rowPtr, lhs.colPtr,
+                                  con_ncomp, mom_ncomp, D,
+                                  col.momentum_left_hat, col.schur_left);
+    multiply_rect_transpose_local(lhs.rowPtr, lhs.colPtr, lhs.nNo,
+                                  mom_ncomp, con_ncomp, G,
+                                  momentum_right_t, col.schur_right);
+    columns.push_back(std::move(col));
+  }
+
+  const int rank = static_cast<int>(columns.size());
+  if (rank == 0) {
+    return;
+  }
+
+  std::vector<double> dense_m(static_cast<size_t>(rank) * static_cast<size_t>(rank), 0.0);
+  for (int i = 0; i < rank; ++i) {
+    dense_m[static_cast<size_t>(i) * static_cast<size_t>(rank) + static_cast<size_t>(i)] =
+        safe_inverse(columns[static_cast<size_t>(i)].update->sigma);
+  }
+
+  for (int i = 0; i < rank; ++i) {
+    const auto& update_i = *columns[static_cast<size_t>(i)].update;
+    const auto& right_owned =
+        !update_i.right_scaled_owned.empty() ? update_i.right_scaled_owned : update_i.right_owned;
+    for (int j = 0; j < rank; ++j) {
+      dense_m[static_cast<size_t>(i) * static_cast<size_t>(rank) + static_cast<size_t>(j)] +=
+          sparse_dense_owned_dot_local(lhs, update_i, right_owned,
+                                       columns[static_cast<size_t>(j)].momentum_left_hat,
+                                       mom_ncomp);
+    }
+  }
+  allreduce_sum_in_place(lhs, dense_m);
+
+  pc.low_rank_right.clear();
+  pc.low_rank_preconditioned_left.clear();
+  pc.low_rank_right.reserve(columns.size());
+  pc.low_rank_preconditioned_left.reserve(columns.size());
+  for (auto& column : columns) {
+    pc.low_rank_right.push_back(column.schur_right);
+    Array<double> z = column.schur_left;
+    apply_base_schur_preconditioner(lhs.rowPtr, lhs.colPtr, lhs.diagPtr,
+                                    pc, con_ncomp, lhs.nNo, z);
+    pc.low_rank_preconditioned_left.push_back(std::move(z));
+  }
+
+  std::vector<double> dense_ctz(static_cast<size_t>(rank) * static_cast<size_t>(rank), 0.0);
+  for (int i = 0; i < rank; ++i) {
+    for (int j = 0; j < rank; ++j) {
+      dense_ctz[static_cast<size_t>(i) * static_cast<size_t>(rank) + static_cast<size_t>(j)] =
+          dense_dense_owned_dot_local(lhs, con_ncomp,
+                                      pc.low_rank_right[static_cast<size_t>(i)],
+                                      pc.low_rank_preconditioned_left[static_cast<size_t>(j)]);
+    }
+  }
+  allreduce_sum_in_place(lhs, dense_ctz);
+
+  for (std::size_t idx = 0; idx < dense_m.size(); ++idx) {
+    dense_m[idx] += dense_ctz[idx];
+  }
+
+  pc.low_rank_inner_inv.assign(dense_m.size(), 0.0);
+  if (!invert_dense_block(rank, dense_m.data(), pc.low_rank_inner_inv.data())) {
+    pc.low_rank_right.clear();
+    pc.low_rank_preconditioned_left.clear();
+    pc.low_rank_inner_inv.clear();
   }
 }
 
@@ -726,34 +1539,158 @@ SchurPreconditionerData build_schur_preconditioner(fe_fsi_linear_solver::FSILS_l
   }
 
   if (preconditioner == SchurPreconditionerType::ALGEBRAIC_SHAT) {
-    Array<double> momentum_hat_blocks;
-    build_momentum_hat_blocks(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs.nNo, mom_ncomp, K,
-                              ls.schur_momentum_approximation, momentum_hat_blocks);
+    const auto& cfg = schur_sparsity_control();
+    const MomentumHatData momentum_hat =
+        build_momentum_hat_data(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs, lhs.nNo,
+                                mom_ncomp, K, ls.schur_momentum_approximation);
 
     Array<double> shat(L.nrows(), L.ncols());
-    assemble_algebraic_schur(lhs.rowPtr, lhs.colPtr, lhs.nNo, mom_ncomp, con_ncomp,
-                             D, G, L, momentum_hat_blocks, shat);
+    assemble_algebraic_schur(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs.nNo, mom_ncomp, con_ncomp,
+                             D, G, L, momentum_hat.sparse_inverse, shat);
     factorize_block_ilu0(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs.nNo, con_ncomp, shat,
                          pc.ilu_factors, pc.ilu_diag_inv);
     pc.use_ilu = true;
+    pc.momentum_hat = momentum_hat;
+    pc.operator_D = &D;
+    pc.operator_G = &G;
+    pc.operator_L_storage = L;
+    pc.operator_L = &pc.operator_L_storage;
+    pc.operator_mom_ncomp = mom_ncomp;
+    pc.operator_con_ncomp = con_ncomp;
+    pc.operator_refinement_steps = cfg.operator_refinement_steps;
+    pc.operator_refinement_omega = cfg.operator_refinement_omega;
+
+    if (!lhs.reduced_updates.empty()) {
+      build_reduced_schur_correction(lhs, mom_ncomp, con_ncomp, D, G, momentum_hat, pc);
+    }
   }
 
   return pc;
 }
 
+void apply_schur_low_rank_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                     const SchurPreconditionerData& pc,
+                                     int con_ncomp,
+                                     fsils_int nNo,
+                                     Array<double>& x)
+{
+  const int rank = static_cast<int>(pc.low_rank_right.size());
+  if (rank == 0 || pc.low_rank_preconditioned_left.size() != pc.low_rank_right.size() ||
+      pc.low_rank_inner_inv.size() != static_cast<std::size_t>(rank * rank)) {
+    return;
+  }
+
+  std::vector<double> gamma(static_cast<size_t>(rank), 0.0);
+  for (int i = 0; i < rank; ++i) {
+    gamma[static_cast<size_t>(i)] =
+        dense_dense_owned_dot_local(lhs, con_ncomp,
+                                    pc.low_rank_right[static_cast<size_t>(i)], x);
+  }
+  allreduce_sum_in_place(lhs, gamma);
+
+  std::vector<double> delta(static_cast<size_t>(rank), 0.0);
+  for (int i = 0; i < rank; ++i) {
+    double sum = 0.0;
+    for (int j = 0; j < rank; ++j) {
+      sum += pc.low_rank_inner_inv[static_cast<size_t>(i) * static_cast<size_t>(rank) + static_cast<size_t>(j)] *
+             gamma[static_cast<size_t>(j)];
+    }
+    delta[static_cast<size_t>(i)] = sum;
+  }
+
+  for (int i = 0; i < rank; ++i) {
+    const double scale = delta[static_cast<size_t>(i)];
+    if (std::abs(scale) <= 1e-30) {
+      continue;
+    }
+    const auto& z = pc.low_rank_preconditioned_left[static_cast<size_t>(i)];
+    for (fsils_int node = 0; node < nNo; ++node) {
+      for (int comp = 0; comp < con_ncomp; ++comp) {
+        x(comp, node) -= z(comp, node) * scale;
+      }
+    }
+  }
+}
+
+void apply_hat_schur_operator(const Array<fsils_int>& rowPtr,
+                              const Vector<fsils_int>& colPtr,
+                              const Vector<fsils_int>& diagPtr,
+                              fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                              SchurPreconditionerData& pc,
+                              const Array<double>& in_vec,
+                              Array<double>& out_vec)
+{
+  const int mom_ncomp = pc.operator_mom_ncomp;
+  const int con_ncomp = pc.operator_con_ncomp;
+  const fsils_int nNo = lhs.nNo;
+  if (pc.operator_D == nullptr || pc.operator_G == nullptr || pc.operator_L == nullptr ||
+      mom_ncomp <= 0 || con_ncomp <= 0) {
+    out_vec = in_vec;
+    return;
+  }
+
+  pc.scratch_gp.resize(mom_ncomp, nNo);
+  pc.scratch_hgp.resize(mom_ncomp, nNo);
+  pc.scratch_sp.resize(con_ncomp, nNo);
+  pc.scratch_dgp.resize(con_ncomp, nNo);
+
+  spar_mul::fsils_spar_mul_rect_vv_fused(lhs, rowPtr, colPtr,
+      mom_ncomp, con_ncomp, *pc.operator_G, *pc.operator_L, in_vec, pc.scratch_gp, pc.scratch_sp);
+
+  pc.scratch_hgp = pc.scratch_gp;
+  apply_momentum_hat(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, pc.momentum_hat, pc.scratch_hgp);
+
+  spar_mul::fsils_spar_mul_rect(lhs, rowPtr, colPtr,
+      con_ncomp, mom_ncomp, *pc.operator_D, pc.scratch_hgp, pc.scratch_dgp);
+
+  out_vec.resize(con_ncomp, nNo);
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = 0; i < nNo; ++i) {
+    for (int k = 0; k < con_ncomp; ++k) {
+      out_vec(k, i) = pc.scratch_sp(k, i) - pc.scratch_dgp(k, i);
+    }
+  }
+}
+
 void apply_schur_preconditioner(const Array<fsils_int>& rowPtr,
                                 const Vector<fsils_int>& colPtr,
                                 const Vector<fsils_int>& diagPtr,
-                                const SchurPreconditionerData& pc,
+                                fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                SchurPreconditionerData& pc,
                                 int con_ncomp,
                                 fsils_int nNo,
                                 Array<double>& x)
 {
-  if (pc.use_ilu) {
-    apply_block_ilu0(rowPtr, colPtr, diagPtr, con_ncomp, nNo, pc.ilu_factors, pc.ilu_diag_inv, x);
-    return;
+  if (pc.operator_refinement_steps > 0 && pc.operator_D != nullptr &&
+      pc.operator_G != nullptr && pc.operator_L != nullptr) {
+    pc.scratch_rhs = x;
   }
-  apply_point_block_inverse(pc.point_inv, con_ncomp, nNo, x);
+
+  apply_base_schur_preconditioner(rowPtr, colPtr, diagPtr, pc, con_ncomp, nNo, x);
+  apply_schur_low_rank_correction(lhs, pc, con_ncomp, nNo, x);
+
+  for (int step = 0; step < pc.operator_refinement_steps; ++step) {
+    apply_hat_schur_operator(rowPtr, colPtr, diagPtr, lhs, pc, x, pc.scratch_ax);
+
+    pc.scratch_correction = pc.scratch_rhs;
+    #pragma omp parallel for schedule(static)
+    for (fsils_int node = 0; node < nNo; ++node) {
+      for (int comp = 0; comp < con_ncomp; ++comp) {
+        pc.scratch_correction(comp, node) -= pc.scratch_ax(comp, node);
+      }
+    }
+
+    apply_base_schur_preconditioner(rowPtr, colPtr, diagPtr, pc, con_ncomp, nNo, pc.scratch_correction);
+    apply_schur_low_rank_correction(lhs, pc, con_ncomp, nNo, pc.scratch_correction);
+
+    const double omega = pc.operator_refinement_omega;
+    #pragma omp parallel for schedule(static)
+    for (fsils_int node = 0; node < nNo; ++node) {
+      for (int comp = 0; comp < con_ncomp; ++comp) {
+        x(comp, node) += omega * pc.scratch_correction(comp, node);
+      }
+    }
+  }
 }
 
 void copy_scalar_vector_to_array(const Vector<double>& src, Array<double>& dst)
@@ -816,27 +1753,23 @@ void schur_impl(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   const int itr_before = ls.itr;
   const double callD_before = ls.callD;
   const auto collective_before = lhs.commu.collective_stats;
-  const double setup_t0 = fe_fsi_linear_solver::fsils_cpu_t();
-  const auto pc = build_schur_preconditioner(lhs, ls, mom_ncomp, con_ncomp, K, D, G, L);
-  const double pc_setup_time = fe_fsi_linear_solver::fsils_cpu_t() - setup_t0;
-  apply_schur_preconditioner(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, pc, con_ncomp, nNo, R);
 
-  ls.callD = fe_fsi_linear_solver::fsils_cpu_t();
-  ls.suc = false;
+  auto& cache = schur_cache_entry(ls);
+  double pc_setup_time = 0.0;
+  if (!cache.valid || cache.mom_ncomp != mom_ncomp || cache.con_ncomp != con_ncomp || cache.nNo != nNo) {
+    const double setup_t0 = fe_fsi_linear_solver::fsils_cpu_t();
+    cache.preconditioner = build_schur_preconditioner(lhs, ls, mom_ncomp, con_ncomp, K, D, G, L);
+    cache.preconditioner.operator_L = &cache.preconditioner.operator_L_storage;
+    pc_setup_time = fe_fsi_linear_solver::fsils_cpu_t() - setup_t0;
+    cache.valid = true;
+    cache.mom_ncomp = mom_ncomp;
+    cache.con_ncomp = con_ncomp;
+    cache.nNo = nNo;
+    cache.previous_solution.resize(0, 0);
+  }
+  auto& pc = cache.preconditioner;
 
-  double err = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, R);
-  double errO = err;
-  ls.iNorm = err;
-  const double eps = std::max(ls.absTol, ls.relTol * err);
-  double rho = err * err;
-  double beta = rho;
-
-  X = 0.0;
-  P = R;
-  Rh = R;
-  int i_itr = 1;
-
-  auto apply_schur_operator = [&](const Array<double>& in_vec, Array<double>& out_vec) {
+  auto apply_exact_schur_operator = [&](const Array<double>& in_vec, Array<double>& out_vec) {
     spar_mul::fsils_spar_mul_rect_vv_fused(lhs, lhs.rowPtr, lhs.colPtr,
         mom_ncomp, con_ncomp, G, L, in_vec, GP, SP);
 
@@ -857,9 +1790,35 @@ void schur_impl(fe_fsi_linear_solver::FSILS_lhsType& lhs,
         out_vec(k, i) = SP(k, i) - DGP(k, i);
       }
     }
-
-    apply_schur_preconditioner(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, pc, con_ncomp, nNo, out_vec);
   };
+
+  auto apply_schur_operator = [&](const Array<double>& in_vec, Array<double>& out_vec) {
+    apply_exact_schur_operator(in_vec, out_vec);
+    apply_schur_preconditioner(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs, pc, con_ncomp, nNo, out_vec);
+  };
+
+  const Array<double> rhs = R;
+  Array<double> rhs_preconditioned = rhs;
+  apply_schur_preconditioner(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs, pc, con_ncomp, nNo, rhs_preconditioned);
+
+  ls.callD = fe_fsi_linear_solver::fsils_cpu_t();
+  ls.suc = false;
+
+  const double rhs_norm = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, rhs_preconditioned);
+  ls.iNorm = rhs_norm;
+  const double eps = std::max(ls.absTol, ls.relTol * rhs_norm);
+
+  X = 0.0;
+  R = rhs_preconditioned;
+
+  double err = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, R);
+  double errO = std::max(err, rhs_norm);
+  double rho = err * err;
+  double beta = rho;
+
+  P = R;
+  Rh = R;
+  int i_itr = 1;
 
   for (int i = 0; i < ls.mItr; ++i) {
     if (err < eps) {
@@ -937,6 +1896,11 @@ void schur_impl(fe_fsi_linear_solver::FSILS_lhsType& lhs,
 }
 
 } // namespace
+
+void reset_schur_cache(fe_fsi_linear_solver::FSILS_subLsType& ls)
+{
+  schur_cache_registry().erase(&ls);
+}
 
 //--------
 // schur

@@ -30,9 +30,127 @@
 
 #include "add_bc_mul.h"
 
+#include <cmath>
+#include <unordered_map>
 #include <vector>
 
 namespace add_bc_mul {
+
+namespace {
+
+struct ReducedEntryKey
+{
+  fsils_int node = -1;
+  int full_component = -1;
+
+  bool operator==(const ReducedEntryKey& other) const noexcept
+  {
+    return node == other.node && full_component == other.full_component;
+  }
+};
+
+struct ReducedEntryKeyHash
+{
+  std::size_t operator()(const ReducedEntryKey& key) const noexcept
+  {
+    std::size_t seed = std::hash<fsils_int>{}(key.node);
+    seed ^= std::hash<int>{}(key.full_component) + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+    return seed;
+  }
+};
+
+inline int entry_local_component(const FSILS_lhsType& lhs,
+                                 const FSILS_reducedFieldUpdateType& update,
+                                 const FSILS_reducedSparseEntry& entry,
+                                 int dof)
+{
+  if (entry.node < 0) {
+    return -1;
+  }
+  const int system_dof = (lhs.system_dof > 0) ? lhs.system_dof : dof;
+  return fe_fsi_linear_solver::fsils_reduced_local_component(update,
+                                                              entry.full_component,
+                                                              dof,
+                                                              system_dof);
+}
+
+inline double sparse_dot_owned(const FSILS_lhsType& lhs,
+                               const FSILS_reducedFieldUpdateType& update,
+                               const std::vector<FSILS_reducedSparseEntry>& entries,
+                               const Array<double>& X,
+                               int dof)
+{
+  double local_dot = 0.0;
+  for (const auto& entry : entries) {
+    const int comp = entry_local_component(lhs, update, entry, dof);
+    if (comp < 0 || comp >= dof) {
+      continue;
+    }
+    local_dot += entry.value * X(comp, entry.node);
+  }
+  return local_dot;
+}
+
+inline void sparse_axpy_full(const FSILS_lhsType& lhs,
+                             const FSILS_reducedFieldUpdateType& update,
+                             const std::vector<FSILS_reducedSparseEntry>& entries,
+                             double scale,
+                             int dof,
+                             Array<double>& Y)
+{
+  if (std::abs(scale) <= 1e-30) {
+    return;
+  }
+  for (const auto& entry : entries) {
+    const int comp = entry_local_component(lhs, update, entry, dof);
+    if (comp < 0 || comp >= dof || std::abs(entry.value) <= 1e-30) {
+      continue;
+    }
+    Y(comp, entry.node) += entry.value * scale;
+  }
+}
+
+} // namespace
+
+void compute_reduced_update_preconditioner_coupling(FSILS_lhsType& lhs)
+{
+  if (lhs.reduced_updates.empty()) {
+    return;
+  }
+
+  for (auto& update : lhs.reduced_updates) {
+    if (!update.active) {
+      update.nS = 0.0;
+      continue;
+    }
+
+    std::unordered_map<ReducedEntryKey, double, ReducedEntryKeyHash> left_values;
+    left_values.reserve(update.left_scaled_owned.size());
+    for (const auto& entry : update.left_scaled_owned) {
+      if (entry.node < 0 || entry.full_component < 0 || std::abs(entry.value) <= 1e-30) {
+        continue;
+      }
+      left_values[{entry.node, entry.full_component}] += entry.value;
+    }
+
+    double local_nS = 0.0;
+    for (const auto& entry : update.right_scaled_owned) {
+      if (entry.node < 0 || entry.full_component < 0 || std::abs(entry.value) <= 1e-30) {
+        continue;
+      }
+      const auto it = left_values.find({entry.node, entry.full_component});
+      if (it != left_values.end()) {
+        local_nS += entry.value * it->second;
+      }
+    }
+
+    double global_nS = local_nS;
+    if (lhs.commu.nTasks > 1) {
+      fsils_allreduce_sum(&local_nS, &global_nS, 1, cm_mod::mpreal, lhs.commu);
+    }
+    update.nS = global_nS;
+  }
+}
 
 /// @brief The contribution of coupled BCs is added to the matrix-vector
 /// product operation. Depending on the type of operation (adding the
@@ -139,6 +257,42 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
           Y(i,Ac) = Y(i,Ac) + face.valM(i,a) * S;
         }
       }
+    }
+  }
+
+  if (!lhs.reduced_updates.empty()) {
+    std::vector<double> reduced_dots(lhs.reduced_updates.size(), 0.0);
+    for (std::size_t idx = 0; idx < lhs.reduced_updates.size(); ++idx) {
+      const auto& update = lhs.reduced_updates[idx];
+      if (!update.active) {
+        continue;
+      }
+      const auto& right_entries =
+          update.right_scaled_owned.empty() ? update.right_owned : update.right_scaled_owned;
+      reduced_dots[idx] = sparse_dot_owned(lhs, update, right_entries, X, dof);
+    }
+
+    if (lhs.commu.nTasks > 1 && !reduced_dots.empty()) {
+      fsils_allreduce_sum_in_place(reduced_dots.data(),
+                                   static_cast<int>(reduced_dots.size()),
+                                   cm_mod::mpreal,
+                                   lhs.commu);
+    }
+
+    for (std::size_t idx = 0; idx < lhs.reduced_updates.size(); ++idx) {
+      const auto& update = lhs.reduced_updates[idx];
+      if (!update.active) {
+        continue;
+      }
+
+      double coef = update.sigma;
+      if (op_Type == BcopType::BCOP_TYPE_PRE) {
+        coef = -update.sigma / (1.0 + update.sigma * update.nS);
+      }
+
+      const auto& left_entries =
+          update.left_scaled.empty() ? update.left : update.left_scaled;
+      sparse_axpy_full(lhs, update, left_entries, coef * reduced_dots[idx], dof, Y);
     }
   }
 

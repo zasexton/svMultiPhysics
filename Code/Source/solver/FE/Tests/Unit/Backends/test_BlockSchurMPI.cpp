@@ -205,6 +205,116 @@ Real fullOperatorRelativeResidual(FsilsFactory& factory,
     return r->norm() / denom;
 }
 
+
+Real sparseReducedDot(const GenericVector& x,
+                     std::span<const std::pair<GlobalIndex, Real>> entries,
+                     MPI_Comm comm)
+{
+    const auto* x_fs = dynamic_cast<const FsilsVector*>(&x);
+    EXPECT_NE(x_fs, nullptr);
+    if (x_fs == nullptr) {
+        return 0.0;
+    }
+
+    std::vector<GlobalIndex> dofs;
+    dofs.reserve(entries.size());
+    for (const auto& [dof, _] : entries) {
+        dofs.push_back(dof);
+    }
+
+    std::vector<GlobalIndex> resolved(dofs.size(), INVALID_GLOBAL_INDEX);
+    x_fs->resolveEntriesCached(dofs, resolved);
+
+    const auto xs = x_fs->localSpan();
+    double local_dot = 0.0;
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const auto local_dof = resolved[i];
+        if (local_dof == INVALID_GLOBAL_INDEX) {
+            continue;
+        }
+        local_dot += static_cast<double>(entries[i].second) *
+                     static_cast<double>(xs[static_cast<std::size_t>(local_dof)]);
+    }
+
+    double global_dot = local_dot;
+    MPI_Allreduce(&local_dot, &global_dot, 1, MPI_DOUBLE, MPI_SUM, comm);
+    return static_cast<Real>(global_dot);
+}
+
+void addReducedFieldContribution(FsilsFactory& factory,
+                                 GenericVector& y,
+                                 const GenericVector& x,
+                                 std::span<const ReducedFieldUpdate> updates,
+                                 MPI_Comm comm)
+{
+    auto corr = factory.createVector(y.size());
+    corr->zero();
+    auto view = corr->createAssemblyView();
+    view->beginAssemblyPhase();
+    for (const auto& update : updates) {
+        const Real dot = sparseReducedDot(x,
+                                          std::span<const std::pair<GlobalIndex, Real>>(update.right.data(),
+                                                                                         update.right.size()),
+                                          comm);
+        const Real scale = update.sigma * dot;
+        if (std::abs(scale) <= Real(1e-30)) {
+            continue;
+        }
+        for (const auto& [dof, val] : update.left) {
+            view->addVectorEntry(dof, scale * val, assembly::AddMode::Add);
+        }
+    }
+    view->finalizeAssembly();
+
+    auto ys = y.localSpan();
+    const auto cs = corr->localSpan();
+    EXPECT_EQ(ys.size(), cs.size());
+    if (ys.size() != cs.size()) {
+        return;
+    }
+    for (std::size_t i = 0; i < ys.size(); ++i) {
+        ys[i] += cs[i];
+    }
+}
+
+Real fullOperatorRelativeResidual(FsilsFactory& factory,
+                                  const GenericMatrix& A,
+                                  GenericVector& x,
+                                  const GenericVector& b,
+                                  std::span<const ReducedFieldUpdate> updates,
+                                  MPI_Comm comm)
+{
+    x.updateGhosts();
+
+    auto Ax = factory.createVector(b.size());
+    A.mult(x, *Ax);
+    addReducedFieldContribution(factory, *Ax, x, updates, comm);
+
+    auto b_acc = factory.createVector(b.size());
+    b_acc->copyFrom(b);
+    auto* b_fs = dynamic_cast<FsilsVector*>(b_acc.get());
+    EXPECT_NE(b_fs, nullptr);
+    if (b_fs != nullptr) {
+        b_fs->accumulateOverlap();
+    }
+
+    auto r = factory.createVector(b.size());
+    auto rs = r->localSpan();
+    const auto bs = b_acc->localSpan();
+    const auto axs = Ax->localSpan();
+    EXPECT_EQ(rs.size(), bs.size());
+    EXPECT_EQ(rs.size(), axs.size());
+    if (rs.size() != bs.size() || rs.size() != axs.size()) {
+        return std::numeric_limits<Real>::infinity();
+    }
+    for (std::size_t i = 0; i < rs.size(); ++i) {
+        rs[i] = bs[i] - axs[i];
+    }
+
+    const Real denom = std::max<Real>(b_acc->norm(), 1e-30);
+    return r->norm() / denom;
+}
+
 } // namespace
 
 #if defined(FE_HAS_PETSC) && FE_HAS_PETSC
@@ -831,6 +941,191 @@ TEST(FsilsBackendMPI, RankOneUpdateSolversConvergeComparable)
 
         const Real rel = fullOperatorRelativeResidual(factory, *A, *x_case, *b,
                                                       std::span<const RankOneUpdate>(&upd, 1),
+                                                      MPI_COMM_WORLD);
+        EXPECT_LE(rel, 1e-8);
+    }
+}
+
+
+TEST(FsilsBackendMPI, ReducedFieldUpdateSolversConvergeComparable)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 3;
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+
+    const IndexRange owned = (rank == 0) ? IndexRange{0, 3} : IndexRange{3, 9};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+
+    if (rank == 0) {
+        const std::array<GlobalIndex, 6> edofs = {0, 1, 2, 3, 4, 5};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    } else {
+        const std::array<GlobalIndex, 6> edofs = {3, 4, 5, 6, 7, 8};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    }
+
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> ghost_rows{3, 4, 5};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 6, 12, 18};
+        std::vector<GlobalIndex> ghost_cols;
+        ghost_cols.reserve(18);
+        for (int r = 0; r < dof; ++r) {
+            for (GlobalIndex c = 0; c < static_cast<GlobalIndex>(2 * dof); ++c) {
+                ghost_cols.push_back(c);
+            }
+        }
+        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
+    }
+
+    FsilsFactory factory(dof);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(n_global);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+
+    const int edof = 2 * dof;
+    std::vector<Real> Ke(edof * edof, 0.0);
+    const auto setKe = [&](int r, int c, Real v) {
+        Ke[static_cast<std::size_t>(r * edof + c)] = v;
+    };
+
+    const Real B[3][3] = {
+        {4.0, 1.0, 1.0},
+        {1.0, 3.0, 0.0},
+        {1.0, 0.0, 1.0},
+    };
+    const Real C[3][3] = {
+        {-1.0, 0.0, 0.0},
+        { 0.0,-1.0, 0.0},
+        { 0.0, 0.0, 0.0},
+    };
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            setKe(r, c, B[r][c]);
+            setKe(r, c + 3, C[r][c]);
+            setKe(r + 3, c, C[c][r]);
+            setKe(r + 3, c + 3, B[r][c]);
+        }
+    }
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    } else {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = 3 + i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    }
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    ReducedFieldUpdate upd{};
+    upd.sigma = 1500.0;
+    upd.active_components = {0, 1};
+    if (rank == 0) {
+        upd.left = {
+            {1, 0.03},
+        };
+        upd.right = {
+            {0, 0.05},
+            {1, 0.12},
+        };
+    } else {
+        upd.left = {
+            {6, 0.10},
+            {7, -0.07},
+        };
+        upd.right = {
+            {6, -0.02},
+        };
+    }
+
+    auto x_exact = factory.createVector(n_global);
+    {
+        auto xs = x_exact->localSpan();
+        std::fill(xs.begin(), xs.end(), Real(1.0));
+    }
+    x_exact->updateGhosts();
+    A->mult(*x_exact, *b);
+    addReducedFieldContribution(factory,
+                                *b,
+                                *x_exact,
+                                std::span<const ReducedFieldUpdate>(&upd, 1),
+                                MPI_COMM_WORLD);
+
+    const std::array<SolverMethod, 2> methods{
+        SolverMethod::BlockSchur,
+        SolverMethod::GMRES,
+    };
+
+    for (const auto method : methods) {
+        SCOPED_TRACE(method == SolverMethod::BlockSchur ? "blockschur_reduced" : "gmres_reduced");
+
+        auto x_case = factory.createVector(n_global);
+        SolverOptions opts;
+        if (method == SolverMethod::BlockSchur) {
+            opts = makeFsilsBlockSchurOptions(/*dof_per_node=*/3, /*primary_components=*/2, /*constraint_components=*/1,
+                                              FsilsBlockSchurSchurPreconditioner::DiagL,
+                                              FsilsBlockSchurMomentumApproximation::DiagK);
+            opts.rel_tol = 1e-8;
+            opts.abs_tol = 1e-12;
+            opts.max_iter = 20;
+            opts.krylov_dim = 40;
+            opts.fsils_blockschur_gm_max_iter = 120;
+            opts.fsils_blockschur_cg_max_iter = 120;
+            opts.fsils_blockschur_gm_rel_tol = 1e-10;
+            opts.fsils_blockschur_cg_rel_tol = 1e-10;
+        } else {
+            opts.method = SolverMethod::GMRES;
+            opts.preconditioner = PreconditionerType::Diagonal;
+            opts.rel_tol = 1e-8;
+            opts.abs_tol = 1e-12;
+            opts.max_iter = 400;
+            opts.krylov_dim = 120;
+            opts.fsils_residual_check_policy = FsilsResidualCheckPolicy::RetryOnly;
+        }
+
+        auto solver = factory.createLinearSolver(opts);
+        ASSERT_TRUE(solver->supportsNativeReducedFieldUpdates());
+        solver->setReducedFieldUpdates(std::span<const ReducedFieldUpdate>(&upd, 1));
+        solver->setEffectiveTimeStep(1.0 / 300.0);
+
+        const auto rep = solver->solve(*A, *x_case, *b);
+        EXPECT_TRUE(rep.converged);
+        expectSolverReportSane(rep, (method == SolverMethod::GMRES) ? 400 : opts.max_iter);
+        EXPECT_EQ(rep.message.find("fallback"), std::string::npos);
+        if (method == SolverMethod::BlockSchur) {
+            EXPECT_GT(rep.blockschur_outer_iterations, 0);
+            EXPECT_GT(rep.blockschur_momentum_solve_calls, 0);
+            EXPECT_GT(rep.blockschur_momentum_iterations, 0);
+            EXPECT_GT(rep.blockschur_schur_solve_calls, 0);
+            EXPECT_GT(rep.blockschur_schur_iterations, 0);
+        }
+
+        const Real rel = fullOperatorRelativeResidual(factory,
+                                                      *A,
+                                                      *x_case,
+                                                      *b,
+                                                      std::span<const ReducedFieldUpdate>(&upd, 1),
                                                       MPI_COMM_WORLD);
         EXPECT_LE(rel, 1e-8);
     }

@@ -263,17 +263,23 @@ namespace detail {
     const std::string instance_name = detail::outletInstanceName(marker);
 
     if (C == 0.0) {
-        // Pure resistance is an exact same-step direct feedthrough
-        // p_out = Pd + (Rp + Rd) * Q. Keep this on the legacy coupled-boundary
-        // path so residuals, Jacobians, and line-search trial states all see
-        // the same outlet relation without freezing an algebraic work state.
-        const auto Qsym = FE::forms::FormExpr::boundaryIntegral(inner(u_disc, n), marker, q_name);
-        const auto p_out =
-            FE::forms::FormExpr::constant(Pd) +
-            FE::forms::FormExpr::constant(Rp + Rd) * Qsym;
+        auto Q = system.boundaryIntegral(q_name, inner(u_disc, n), marker,
+            FE::forms::BoundaryFunctional::Reduction::Sum,
+            FE::systems::AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+
+        auto resistive = system.deploy(
+            use(detail::resistiveOutflowModel())
+                .name(instance_name)
+                .boundary(marker)
+                .monolithic()
+                .params({{"Rsum", Rp + Rd}, {"Pd", Pd}})
+                .bindCoupled("Q", Q)
+                .initialState({{"P", Pd}})
+        );
+
+        const auto p_out = resistive.output("P_out");
         const auto flux = -p_out * n - beta * rho * max_backflow * u;
-        return std::make_unique<FE::forms::bc::CoupledNaturalBC>(
-            marker, flux, std::vector<FE::systems::AuxiliaryStateRegistration>{});
+        return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
     }
 
     // Step 1: Register boundary-integral input for Q via handle-returning API.

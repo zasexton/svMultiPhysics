@@ -36,6 +36,7 @@
 
 #include "mpi.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <vector>
@@ -285,6 +286,61 @@ class FSILS_faceType
     Array<double> valM;
 };
 
+struct FSILS_reducedSparseEntry
+{
+    fsils_int node = -1;
+    int full_component = -1;
+    double value = 0.0;
+};
+
+class FSILS_reducedFieldUpdateType
+{
+  public:
+    bool active = false;
+    double sigma = 0.0;
+    double nS = 0.0;
+    std::vector<int> active_components;
+    std::vector<FSILS_reducedSparseEntry> left;
+    std::vector<FSILS_reducedSparseEntry> right;
+    std::vector<FSILS_reducedSparseEntry> left_owned;
+    std::vector<FSILS_reducedSparseEntry> right_owned;
+    std::vector<FSILS_reducedSparseEntry> left_scaled;
+    std::vector<FSILS_reducedSparseEntry> right_scaled;
+    std::vector<FSILS_reducedSparseEntry> left_scaled_owned;
+    std::vector<FSILS_reducedSparseEntry> right_scaled_owned;
+};
+
+inline int fsils_reduced_local_component(const FSILS_reducedFieldUpdateType& update,
+                                         int full_component,
+                                         int current_dof,
+                                         int system_dof) noexcept
+{
+  if (full_component < 0 || current_dof <= 0) {
+    return -1;
+  }
+
+  if (system_dof <= 0) {
+    system_dof = current_dof;
+  }
+
+  if (current_dof == system_dof) {
+    return (full_component < current_dof) ? full_component : -1;
+  }
+
+  if (!update.active_components.empty()) {
+    const int active_size =
+        std::min(current_dof, static_cast<int>(update.active_components.size()));
+    for (int i = 0; i < active_size; ++i) {
+      if (update.active_components[static_cast<std::size_t>(i)] == full_component) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  return (full_component < current_dof) ? full_component : -1;
+}
+
 /// @brief Modified in:
 ///
 ///  fsils_lhs_create()
@@ -302,6 +358,9 @@ class FSILS_lhsType
 
     /// Number of nodes                     (IN)
     fsils_int nNo = 0;
+
+    /// Total degrees of freedom per node in the parent FE system.
+    int system_dof = 0;
 
     /// Number of non-zero in lhs           (IN)
     fsils_int nnz = 0;
@@ -335,6 +394,7 @@ class FSILS_lhsType
     std::vector<FSILS_cSType> cS;
 
     std::vector<FSILS_faceType> face;
+    std::vector<FSILS_reducedFieldUpdateType> reduced_updates;
 
     /// Pre-allocated communication buffers (sized once in fsils_lhs_create)
     int nmax_commu = 0;      ///< max shared nodes across all comm partners

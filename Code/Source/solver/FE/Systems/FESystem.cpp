@@ -1311,6 +1311,16 @@ void FESystem::clearRankOneUpdates() noexcept
     last_rank_one_updates_.clear();
 }
 
+std::span<const backends::ReducedFieldUpdate> FESystem::lastReducedFieldUpdates() const noexcept
+{
+    return last_reduced_field_updates_;
+}
+
+void FESystem::clearReducedFieldUpdates() noexcept
+{
+    last_reduced_field_updates_.clear();
+}
+
 const assembly::IMeshAccess& FESystem::meshAccess() const
 {
     FE_CHECK_NOT_NULL(mesh_access_.get(), "FESystem::meshAccess");
@@ -4902,8 +4912,9 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                         }
 
                                         // Exact fallback for non-symmetric direct feedthrough:
-                                        // assemble (dR/dOk) * (dOk/dIm) * (dIm/du) as a sparse
-                                        // outer product directly into the PDE Jacobian block.
+                                        // export (dR/dOk) * (dOk/dIm) * (dIm/du) as a native
+                                        // reduced field update so the backend can keep the
+                                        // true coupled tangent without forcing symmetry.
                                         if (!q_u.empty()) {
                                             if (monolithicDirectTraceEnabled()) {
                                                 std::ostringstream oss;
@@ -4912,37 +4923,36 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                                     << " output='" << oname << "'"
                                                     << " entity=" << e
                                                     << " input_col=" << input_col
-                                                    << " path='exact_outer_product'";
+                                                    << " path='reduced_unsymmetric_update'";
                                                 FE_LOG_INFO(oss.str());
                                             }
-                                            std::vector<GlobalIndex> col_dofs;
-                                            std::vector<Real> col_vals;
-                                            col_dofs.reserve(q_u.size());
-                                            col_vals.reserve(q_u.size());
-                                            for (const auto& [dof_j, qj] : q_u) {
-                                                col_dofs.push_back(dof_j);
-                                                col_vals.push_back(qj);
-                                            }
+                                            backends::ReducedFieldUpdate reduced_update;
+                                            reduced_update.sigma = dOk_dIm;
 
-                                            std::vector<Real> row_vals(col_vals.size(), 0.0);
-                                            std::array<GlobalIndex, 1> row_dof{};
-                                            for (const auto& [dof_i, dRi_dOk] : dR_vec.entries) {
-                                                const Real scale = dRi_dOk * dOk_dIm;
-                                                if (std::abs(scale) <= kDirectCouplingEntryTol) {
+                                            const auto& owned_dofs = dof_handler_.getPartition().locallyOwned();
+                                            reduced_update.left.reserve(dR_rank1_entries.size());
+                                            reduced_update.right.reserve(q_u.size());
+
+                                            for (const auto& [dof_i, dRi_dOk] : dR_rank1_entries) {
+                                                if (!owned_dofs.contains(dof_i) ||
+                                                    std::abs(dRi_dOk) <= kDirectCouplingEntryTol) {
                                                     continue;
                                                 }
-                                                row_dof[0] = dof_i;
-                                                for (std::size_t jj = 0; jj < col_vals.size(); ++jj) {
-                                                    row_vals[jj] = scale * col_vals[jj];
+                                                reduced_update.left.emplace_back(dof_i, dRi_dOk);
+                                            }
+                                            for (const auto& [dof_j, qj] : q_u) {
+                                                if (!owned_dofs.contains(dof_j) ||
+                                                    std::abs(qj) <= kDirectCouplingEntryTol) {
+                                                    continue;
                                                 }
-                                                matrix_out->addMatrixEntries(
-                                                    std::span<const GlobalIndex>(
-                                                        row_dof.data(), row_dof.size()),
-                                                    std::span<const GlobalIndex>(
-                                                        col_dofs.data(), col_dofs.size()),
-                                                    std::span<const Real>(
-                                                        row_vals.data(), row_vals.size()),
-                                                    assembly::AddMode::Add);
+                                                reduced_update.right.emplace_back(dof_j, qj);
+                                            }
+
+                                            if (!reduced_update.left.empty() &&
+                                                !reduced_update.right.empty() &&
+                                                std::abs(reduced_update.sigma) > kDirectCouplingEntryTol) {
+                                                last_reduced_field_updates_.push_back(
+                                                    std::move(reduced_update));
                                             }
                                         }
                                     }

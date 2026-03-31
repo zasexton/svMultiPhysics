@@ -35,5 +35,6 @@ namespace add_bc_mul {
 using namespace fe_fsi_linear_solver;
 
 void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const Array<double>& X, Array<double>& Y);
+void compute_reduced_update_preconditioner_coupling(FSILS_lhsType& lhs);
 
 };

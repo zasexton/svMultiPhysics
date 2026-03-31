@@ -257,6 +257,35 @@ void precond_diag(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_in
       }
     }
   }
+
+  for (auto& update : lhs.reduced_updates) {
+    update.left_scaled = update.left;
+    update.right_scaled = update.right;
+    update.left_scaled_owned = update.left_owned;
+    update.right_scaled_owned = update.right_owned;
+
+    auto scale_entries = [&](std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>& entries) {
+      const int system_dof = (lhs.system_dof > 0) ? lhs.system_dof : dof;
+      for (auto& entry : entries) {
+        if (entry.node < 0) {
+          continue;
+        }
+        const int comp = fe_fsi_linear_solver::fsils_reduced_local_component(update,
+                                                                              entry.full_component,
+                                                                              dof,
+                                                                              system_dof);
+        if (comp < 0 || comp >= dof) {
+          continue;
+        }
+        entry.value *= W(comp, entry.node);
+      }
+    };
+
+    scale_entries(update.left_scaled);
+    scale_entries(update.right_scaled);
+    scale_entries(update.left_scaled_owned);
+    scale_entries(update.right_scaled_owned);
+  }
 }
 
 //-------------

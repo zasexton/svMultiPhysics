@@ -41,6 +41,9 @@ void bicgsv(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSIL
 void bicgss(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls,
             const Vector<double>& K, Vector<double>& R);
 
+/// Clear cached Schur-preconditioner state associated with this solver instance.
+void reset_schur_cache(fe_fsi_linear_solver::FSILS_subLsType& ls);
+
 // NEW: VMS compatible Asymmetric Schur Complement Solver
 void schur(fe_fsi_linear_solver::FSILS_lhsType& lhs,
            fe_fsi_linear_solver::FSILS_subLsType& ls,

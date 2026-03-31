@@ -974,6 +974,8 @@ public:
     // ---- Rank-1 updates from coupled Jacobian assembly ----
     [[nodiscard]] std::span<const backends::RankOneUpdate> lastRankOneUpdates() const noexcept;
     void clearRankOneUpdates() noexcept;
+    [[nodiscard]] std::span<const backends::ReducedFieldUpdate> lastReducedFieldUpdates() const noexcept;
+    void clearReducedFieldUpdates() noexcept;
 
     /// @cond INTERNAL
     // Internal — used by FormsInstaller for transactional kernel registration.
@@ -1241,6 +1243,7 @@ private:
 	    ParameterRegistry parameter_registry_{};
     std::unique_ptr<gauge::GaugeRegistry> gauge_registry_{};
     std::vector<backends::RankOneUpdate> last_rank_one_updates_{};
+    std::vector<backends::ReducedFieldUpdate> last_reduced_field_updates_{};
     std::unordered_map<OperatorTag, OperatorAssemblyPlan> assembly_plan_by_op_{};
 
     // Cached coupled Jacobian results.

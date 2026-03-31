@@ -29,8 +29,10 @@ public:
                                      const GenericVector& b) override;
 
     void setRankOneUpdates(std::span<const RankOneUpdate> updates) override;
+    void setReducedFieldUpdates(std::span<const ReducedFieldUpdate> updates) override;
     void setDirichletDofs(std::span<const GlobalIndex> dofs) override;
     [[nodiscard]] bool supportsNativeRankOneUpdates() const noexcept override { return true; }
+    [[nodiscard]] bool supportsNativeReducedFieldUpdates() const noexcept override { return true; }
     void setEffectiveTimeStep(double dt_eff) override;
 
     [[nodiscard]] bool supportsNullspace() const noexcept override { return true; }
@@ -39,6 +41,7 @@ public:
 private:
     SolverOptions options_{};
     std::vector<RankOneUpdate> rank_one_updates_{};
+    std::vector<ReducedFieldUpdate> reduced_field_updates_{};
     std::vector<GlobalIndex> dirichlet_dofs_{};
     double dt_eff_{1.0};
 

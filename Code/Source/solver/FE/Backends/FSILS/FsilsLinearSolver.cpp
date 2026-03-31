@@ -147,6 +147,58 @@ void addRankOneUpdatesToProduct(std::span<const RankOneUpdate> updates,
     y_view->finalizeAssembly();
 }
 
+void addReducedFieldUpdatesToProduct(std::span<const ReducedFieldUpdate> updates,
+                                     FsilsVector& x,
+                                     FsilsVector& y,
+                                     fe_fsi_linear_solver::FSILS_commuType& commu)
+{
+    if (updates.empty()) {
+        return;
+    }
+
+    auto x_view = x.createAssemblyView();
+    auto y_view = y.createAssemblyView();
+    FE_CHECK_NOT_NULL(x_view.get(), "FsilsLinearSolver: reduced-update x view");
+    FE_CHECK_NOT_NULL(y_view.get(), "FsilsLinearSolver: reduced-update y view");
+
+    std::vector<Real> dots(updates.size(), Real(0.0));
+    for (std::size_t u = 0; u < updates.size(); ++u) {
+        Real local_dot = Real(0.0);
+        for (const auto& [dof, val] : updates[u].right) {
+            local_dot += val * x_view->getVectorEntry(dof);
+        }
+        dots[u] = local_dot;
+    }
+
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized && commu.nTasks > 1) {
+        std::vector<Real> global_dots(dots.size(), Real(0.0));
+        fe_fsi_linear_solver::fsils_allreduce_sum(dots.data(),
+                                                  global_dots.data(),
+                                                  static_cast<int>(dots.size()),
+                                                  MPI_DOUBLE,
+                                                  commu);
+        dots.swap(global_dots);
+    }
+#else
+    (void)commu;
+#endif
+
+    y_view->beginAssemblyPhase();
+    for (std::size_t u = 0; u < updates.size(); ++u) {
+        const Real scale = updates[u].sigma * dots[u];
+        if (std::abs(scale) <= Real(1e-30)) {
+            continue;
+        }
+        for (const auto& [dof, val] : updates[u].left) {
+            y_view->addVectorEntry(dof, scale * val, assembly::AddMode::Add);
+        }
+    }
+    y_view->finalizeAssembly();
+}
+
 void copyVectorOldToInternal(const FsilsVector& src, std::span<Real> dst_internal)
 {
     const auto* shared = src.shared();
@@ -270,6 +322,11 @@ void FsilsLinearSolver::setRankOneUpdates(std::span<const RankOneUpdate> updates
         return;  // No change — don't dirty face cache.
     }
     faces_dirty_ = true;
+}
+
+void FsilsLinearSolver::setReducedFieldUpdates(std::span<const ReducedFieldUpdate> updates)
+{
+    reduced_field_updates_.assign(updates.begin(), updates.end());
 }
 
 void FsilsLinearSolver::setDirichletDofs(std::span<const GlobalIndex> dofs)
@@ -540,6 +597,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
     auto& lhs = *static_cast<fe_fsi_linear_solver::FSILS_lhsType*>(const_cast<void*>(A->fsilsLhsPtr()));
     const int dof = A->fsilsDof();
+    lhs.system_dof = dof;
     FE_THROW_IF(dof <= 0, FEException, "FsilsLinearSolver::solve: invalid FSILS dof");
 
     // Derive block structure from metadata. No physics-specific fallbacks —
@@ -745,7 +803,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         }
     };
 
-    const bool has_native_rank_one_updates = !rank_one_updates_.empty();
+    const bool has_native_rank_one_updates =
+        !rank_one_updates_.empty() || !reduced_field_updates_.empty();
 
     auto& ls = ls_;
     using BlockSchurStats = std::decay_t<decltype(ls.blockschur_stats)>;
@@ -838,8 +897,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     //  - rank-1 updates (coupled BC Sherman-Morrison correction)
     const int original_nFaces = lhs.nFaces;
     const int num_dirichlet_faces = (!dirichlet_dofs_.empty() ? 1 : 0);
-    const int num_rank_one = static_cast<int>(rank_one_updates_.size());
-    const int num_added_faces = num_dirichlet_faces + num_rank_one;
+    const int num_rank_one_faces = 0;
+    const int num_added_faces = num_dirichlet_faces + num_rank_one_faces;
 
     int dirichlet_face_index = -1;
     int rank_one_face_start = -1;
@@ -909,7 +968,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
         int next_face = original_nFaces;
         if (num_dirichlet_faces > 0) dirichlet_face_index = next_face++;
-        if (num_rank_one > 0) rank_one_face_start = next_face;
+        if (num_rank_one_faces > 0) rank_one_face_start = next_face;
 
         for (int fi = 0; fi < num_added_faces; ++fi) {
             const auto& cf = cached_faces_[static_cast<std::size_t>(fi)];
@@ -1021,7 +1080,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         }
 
         rank_one_face_start = next_face;
-        for (int u = 0; u < num_rank_one; ++u) {
+        for (int u = 0; u < num_rank_one_faces; ++u) {
             const auto& upd = rank_one_updates_[static_cast<std::size_t>(u)];
             const int faIn = rank_one_face_start + u;
 
@@ -1196,6 +1255,140 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         faces_dirty_ = false;
     }
 
+    lhs.reduced_updates.clear();
+    {
+        const auto shared = A->shared();
+        FE_CHECK_NOT_NULL(shared.get(), "FsilsLinearSolver: FsilsShared for reduced updates");
+
+        auto default_active_components = [&]() {
+            std::vector<int> comps;
+            if (has_saddle_point) {
+                comps.reserve(static_cast<std::size_t>(mom_ncomp));
+                for (int c = mom_start; c < mom_start + mom_ncomp; ++c) {
+                    comps.push_back(c);
+                }
+            } else {
+                comps.reserve(static_cast<std::size_t>(dof));
+                for (int c = 0; c < dof; ++c) {
+                    comps.push_back(c);
+                }
+            }
+            return comps;
+        };
+
+        auto make_internal_entries =
+            [&](std::span<const std::pair<GlobalIndex, Real>> entries)
+                -> std::pair<std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>,
+                             std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>> {
+            Array<double> values(dof, lhs.nNo);
+            values = 0.0;
+
+            for (const auto& [dof_idx, val] : entries) {
+                GlobalIndex fsils_dof = dof_idx;
+                if (shared->dof_permutation) {
+                    const auto idx = static_cast<std::size_t>(dof_idx);
+                    if (idx < shared->dof_permutation->forward.size()) {
+                        fsils_dof = shared->dof_permutation->forward[idx];
+                    }
+                }
+                if (fsils_dof < 0) {
+                    continue;
+                }
+
+                const int node = static_cast<int>(fsils_dof / dof);
+                const int comp = static_cast<int>(fsils_dof % dof);
+                if (comp < 0 || comp >= dof) {
+                    continue;
+                }
+
+                const int old_local = shared->globalNodeToOld(node);
+                if (old_local < 0 || old_local >= lhs.nNo) {
+                    continue;
+                }
+                const int internal = lhs.map(old_local);
+                if (internal < 0 || internal >= lhs.nNo || internal >= lhs.mynNo) {
+                    continue;
+                }
+                values(comp, internal) += static_cast<double>(val);
+            }
+
+            if (lhs.commu.nTasks > 1) {
+                fe_fsi_linear_solver::fsils_commuv(lhs, dof, values);
+            }
+
+            std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry> full;
+            std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry> owned;
+            full.reserve(static_cast<std::size_t>(dof) * static_cast<std::size_t>(lhs.nNo));
+            owned.reserve(static_cast<std::size_t>(dof) * static_cast<std::size_t>(lhs.mynNo));
+            for (int internal = 0; internal < lhs.nNo; ++internal) {
+                for (int comp = 0; comp < dof; ++comp) {
+                    const double value = values(comp, internal);
+                    if (std::abs(value) <= 1e-30) {
+                        continue;
+                    }
+                    fe_fsi_linear_solver::FSILS_reducedSparseEntry entry;
+                    entry.node = static_cast<fe_fsi_linear_solver::fsils_int>(internal);
+                    entry.full_component = comp;
+                    entry.value = value;
+                    full.push_back(entry);
+                    if (internal < lhs.mynNo) {
+                        owned.push_back(entry);
+                    }
+                }
+            }
+            return {std::move(full), std::move(owned)};
+        };
+
+        auto append_reduced_update = [&](Real sigma,
+                                        std::span<const std::pair<GlobalIndex, Real>> left,
+                                        std::span<const std::pair<GlobalIndex, Real>> right,
+                                        std::span<const int> active_components) {
+            if (!(std::abs(sigma) > Real(1e-30)) || left.empty() || right.empty()) {
+                return;
+            }
+
+            auto [left_full, left_owned] = make_internal_entries(left);
+            auto [right_full, right_owned] = make_internal_entries(right);
+            if (left_full.empty() || right_full.empty()) {
+                return;
+            }
+
+            fe_fsi_linear_solver::FSILS_reducedFieldUpdateType native_update;
+            native_update.active = true;
+            native_update.sigma = static_cast<double>(use_blockschur ? sigma * stage_scale : sigma);
+            native_update.left = std::move(left_full);
+            native_update.right = std::move(right_full);
+            native_update.left_owned = std::move(left_owned);
+            native_update.right_owned = std::move(right_owned);
+            native_update.left_scaled = native_update.left;
+            native_update.right_scaled = native_update.right;
+            native_update.left_scaled_owned = native_update.left_owned;
+            native_update.right_scaled_owned = native_update.right_owned;
+            if (!active_components.empty()) {
+                native_update.active_components.assign(active_components.begin(), active_components.end());
+            } else {
+                native_update.active_components = default_active_components();
+            }
+            lhs.reduced_updates.push_back(std::move(native_update));
+        };
+
+        for (const auto& upd : rank_one_updates_) {
+            append_reduced_update(upd.sigma,
+                                  std::span<const std::pair<GlobalIndex, Real>>(upd.v.data(), upd.v.size()),
+                                  std::span<const std::pair<GlobalIndex, Real>>(upd.v.data(), upd.v.size()),
+                                  std::span<const int>(upd.active_components.data(),
+                                                       upd.active_components.size()));
+        }
+
+        for (const auto& upd : reduced_field_updates_) {
+            append_reduced_update(upd.sigma,
+                                  std::span<const std::pair<GlobalIndex, Real>>(upd.left.data(), upd.left.size()),
+                                  std::span<const std::pair<GlobalIndex, Real>>(upd.right.data(), upd.right.size()),
+                                  std::span<const int>(upd.active_components.data(),
+                                                       upd.active_components.size()));
+        }
+    }
+
     // Build incL and res vectors for face activation.
     // When no faces exist, pass empty vectors (original behavior).
     // Note: must use default constructors, not Vector(0), because Vector(0) leaves
@@ -1213,9 +1406,9 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             res_original(f) = 0.0;
             res_blockschur(f) = 0.0;
         }
-        if (num_rank_one > 0 && rank_one_face_start >= 0) {
+        if (num_rank_one_faces > 0 && rank_one_face_start >= 0) {
             // Set resistance values for rank-1 faces.
-            for (int u = 0; u < num_rank_one; ++u) {
+            for (int u = 0; u < num_rank_one_faces; ++u) {
                 const int faIn = rank_one_face_start + u;
                 const double sigma = static_cast<double>(rank_one_updates_[static_cast<std::size_t>(u)].sigma);
                 res_original(faIn) = sigma;
@@ -1296,6 +1489,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         FsilsVector ax_true(shared_layout);
         A->mult(x_true, ax_true);
         addRankOneUpdatesToProduct(rank_one_updates_, x_true, ax_true, lhs.commu);
+        addReducedFieldUpdatesToProduct(reduced_field_updates_, x_true, ax_true, lhs.commu);
 
         residual_true.copyFrom(rhs_true);
         auto r_span = residual_true.localSpan();
@@ -1525,7 +1719,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     };
 
     auto compareFaceOperatorAgainstFe = [&]() {
-        if (!fsilsCompareFaceOperatorEnabled() || rank_one_updates_.empty()) {
+        if (!fsilsCompareFaceOperatorEnabled() ||
+            (rank_one_updates_.empty() && reduced_field_updates_.empty())) {
             return;
         }
 
@@ -1547,6 +1742,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         FsilsVector fe_y(shared_layout);
         A->mult(probe_old, fe_y);
         addRankOneUpdatesToProduct(rank_one_updates_, probe_old, fe_y, lhs.commu);
+        addReducedFieldUpdatesToProduct(reduced_field_updates_, probe_old, fe_y, lhs.commu);
 
         std::vector<Real> probe_internal_data(solve_buffer.size(), Real(0.0));
         std::vector<Real> fsils_internal_data(solve_buffer.size(), Real(0.0));
@@ -1583,7 +1779,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 << " |FSILS|=" << fsils_norm
                 << " |diff|=" << diff_norm
                 << " rel=" << rel
-                << " rank_one_updates=" << rank_one_updates_.size();
+                << " reduced_updates=" << (rank_one_updates_.size() + reduced_field_updates_.size());
             traceLog(oss.str());
         }
     };
@@ -1620,6 +1816,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         FsilsVector rank_one_eval(shared_layout);
         rank_one_eval.zero();
         addRankOneUpdatesToProduct(rank_one_updates_, x_eval, rank_one_eval, lhs.commu);
+        addReducedFieldUpdatesToProduct(reduced_field_updates_, x_eval, rank_one_eval, lhs.commu);
 
         FsilsVector full_residual(shared_layout);
         full_residual.copyFrom(matrix_residual);
@@ -2149,6 +2346,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         lhs.face.resize(static_cast<std::size_t>(original_nFaces));
         lhs.nFaces = original_nFaces;
     }
+    lhs.reduced_updates.clear();
 
     if (solve_ok && oopTraceEnabled()) {
         logInternalBlockSolutionStats("returned");
@@ -2160,6 +2358,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         FsilsVector matvec_full(shared_layout);
         matvec_full.copyFrom(matvec_only);
         addRankOneUpdatesToProduct(rank_one_updates_, *x, matvec_full, lhs.commu);
+        addReducedFieldUpdatesToProduct(reduced_field_updates_, *x, matvec_full, lhs.commu);
 
         FsilsVector rhs_check(shared_layout);
         rhs_check.copyFrom(*b);
@@ -2180,6 +2379,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         FsilsVector diff_full(shared_layout);
         diff_full.copyFrom(diff_only);
         addRankOneUpdatesToProduct(rank_one_updates_, x_check, diff_full, lhs.commu);
+        addReducedFieldUpdatesToProduct(reduced_field_updates_, x_check, diff_full, lhs.commu);
         auto diff_full_span = diff_full.localSpan();
         for (std::size_t i = 0; i < diff_full_span.size(); ++i) {
             diff_full_span[i] -= rhs_span[i];
@@ -2333,6 +2533,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         FsilsVector matvec_full(shared_layout);
         A->mult(x_check, matvec_full);
         addRankOneUpdatesToProduct(rank_one_updates_, x_check, matvec_full, lhs.commu);
+        addReducedFieldUpdatesToProduct(reduced_field_updates_, x_check, matvec_full, lhs.commu);
 
         FsilsVector diff_full(shared_layout);
         diff_full.copyFrom(matvec_full);

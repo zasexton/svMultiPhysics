@@ -119,6 +119,8 @@ void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int mom_ncomp, const
       }
     }
   }
+
+  add_bc_mul::compute_reduced_update_preconditioner_coupling(lhs);
 }
 
 /// @brief Store sections of the 'Val' into separate arrays: 'mK', 'mG', 'mD', 'mL'
@@ -247,6 +249,7 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   ls.GM.stats.reset();
   ls.RI.stats.reset();
   ls.blockschur_stats.reset();
+  bicgs::reset_schur_cache(ls.CG);
   eps = std::max(ls.RI.absTol, ls.RI.relTol*eps);
 
   auto update_outer_residual = [&](int max_col) {
@@ -304,7 +307,8 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
 
     // Solve U = inv(K) * Rm
     auto U_slice = U.rslice(i);
-    gmres::gmres(lhs, ls.GM, nsd, mK, Rm, U_slice);
+    U_slice = Rm;
+    gmres::gmres_v(lhs, ls.GM, nsd, mK, U_slice);
     if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
       fsils_commuv(lhs, nsd, U_slice);
     }
@@ -342,7 +346,8 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     }
 
     // U = inv(K) * [Rm - G*P]
-    gmres::gmres(lhs, ls.GM, nsd, mK, MU_iBB, U_slice);
+    U_slice = MU_iBB;
+    gmres::gmres_v(lhs, ls.GM, nsd, mK, U_slice);
     if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
       fsils_commuv(lhs, nsd, U_slice);
     }
@@ -483,6 +488,7 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   }
 
   ls.RI.fNorm = std::sqrt(ls.RI.fNorm);
+  bicgs::reset_schur_cache(ls.CG);
 
   // Write solution back to Ri
   #pragma omp parallel for schedule(static)
@@ -590,6 +596,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   ls.GM.stats.reset();
   ls.RI.stats.reset();
   ls.blockschur_stats.reset();
+  bicgs::reset_schur_cache(ls.CG);
   eps = std::max(ls.RI.absTol, ls.RI.relTol*eps);
 
   auto update_outer_residual = [&](int max_col) {
@@ -677,7 +684,8 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
 
     // Solve for U = inv(mK) * Rm
     auto U_slice = U.rslice(i);
-    gmres::gmres(lhs, ls.GM, nsd, mK, Rm, U_slice);
+    U_slice = Rm;
+    gmres::gmres_v(lhs, ls.GM, nsd, mK, U_slice);
     if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
       fsils_commuv(lhs, nsd, U_slice);
     }
@@ -718,7 +726,8 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     }
 
     // U = inv(K) * [Rm - G*P]
-    gmres::gmres(lhs, ls.GM, nsd, mK, MU_iBB, U_slice);
+    U_slice = MU_iBB;
+    gmres::gmres_v(lhs, ls.GM, nsd, mK, U_slice);
     if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
       fsils_commuv(lhs, nsd, U_slice);
     }
@@ -899,6 +908,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   }
 
   ls.RI.fNorm = std::sqrt(ls.RI.fNorm);
+  bicgs::reset_schur_cache(ls.CG);
   #ifdef debug_ns_solver
   dmsg << "ls.RI.callD: " << ls.RI.callD;
   dmsg << "ls.RI.dB: " << ls.RI.dB;
