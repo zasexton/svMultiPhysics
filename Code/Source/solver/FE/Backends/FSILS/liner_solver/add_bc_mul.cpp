@@ -59,6 +59,12 @@ struct ReducedEntryKeyHash
   }
 };
 
+inline void clear_grouped_reduced_update_preconditioner(FSILS_lhsType& lhs)
+{
+  lhs.reduced_update_pc_active_indices.clear();
+  lhs.reduced_update_pc_inner_inv.clear();
+}
+
 inline int entry_local_component(const FSILS_lhsType& lhs,
                                  const FSILS_reducedFieldUpdateType& update,
                                  const FSILS_reducedSparseEntry& entry,
@@ -91,6 +97,123 @@ inline double sparse_dot_owned(const FSILS_lhsType& lhs,
   return local_dot;
 }
 
+inline double sparse_overlap_dot_owned(
+    const std::vector<FSILS_reducedSparseEntry>& left_entries,
+    const std::vector<FSILS_reducedSparseEntry>& right_entries)
+{
+  if (left_entries.empty() || right_entries.empty()) {
+    return 0.0;
+  }
+
+  std::unordered_map<ReducedEntryKey, double, ReducedEntryKeyHash> left_values;
+  left_values.reserve(left_entries.size());
+  for (const auto& entry : left_entries) {
+    if (entry.node < 0 || entry.full_component < 0 || std::abs(entry.value) <= 1e-30) {
+      continue;
+    }
+    left_values[{entry.node, entry.full_component}] += entry.value;
+  }
+
+  double dot = 0.0;
+  for (const auto& entry : right_entries) {
+    if (entry.node < 0 || entry.full_component < 0 || std::abs(entry.value) <= 1e-30) {
+      continue;
+    }
+    const auto it = left_values.find({entry.node, entry.full_component});
+    if (it != left_values.end()) {
+      dot += entry.value * it->second;
+    }
+  }
+  return dot;
+}
+
+bool invert_dense_matrix(int n,
+                         const std::vector<double>& matrix,
+                         std::vector<double>& inverse)
+{
+  if (n <= 0 || matrix.size() != static_cast<std::size_t>(n * n)) {
+    inverse.clear();
+    return false;
+  }
+
+  std::vector<double> a = matrix;
+  inverse.assign(static_cast<std::size_t>(n * n), 0.0);
+  for (int i = 0; i < n; ++i) {
+    inverse[static_cast<std::size_t>(i) * static_cast<std::size_t>(n) +
+            static_cast<std::size_t>(i)] = 1.0;
+  }
+
+  for (int col = 0; col < n; ++col) {
+    int pivot = col;
+    double pivot_abs = std::abs(a[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
+                                  static_cast<std::size_t>(col)]);
+    for (int row = col + 1; row < n; ++row) {
+      const double cand =
+          std::abs(a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+                     static_cast<std::size_t>(col)]);
+      if (cand > pivot_abs) {
+        pivot = row;
+        pivot_abs = cand;
+      }
+    }
+
+    if (!(pivot_abs > 1e-30)) {
+      inverse.clear();
+      return false;
+    }
+
+    if (pivot != col) {
+      for (int j = 0; j < n; ++j) {
+        std::swap(a[static_cast<std::size_t>(pivot) * static_cast<std::size_t>(n) +
+                    static_cast<std::size_t>(j)],
+                  a[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
+                    static_cast<std::size_t>(j)]);
+        std::swap(inverse[static_cast<std::size_t>(pivot) * static_cast<std::size_t>(n) +
+                          static_cast<std::size_t>(j)],
+                  inverse[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
+                          static_cast<std::size_t>(j)]);
+      }
+    }
+
+    const double diag =
+        a[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
+          static_cast<std::size_t>(col)];
+    const double inv_diag = 1.0 / diag;
+    for (int j = 0; j < n; ++j) {
+      a[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
+        static_cast<std::size_t>(j)] *= inv_diag;
+      inverse[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
+              static_cast<std::size_t>(j)] *= inv_diag;
+    }
+
+    for (int row = 0; row < n; ++row) {
+      if (row == col) {
+        continue;
+      }
+      const double factor =
+          a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+            static_cast<std::size_t>(col)];
+      if (std::abs(factor) <= 1e-30) {
+        continue;
+      }
+      for (int j = 0; j < n; ++j) {
+        a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+          static_cast<std::size_t>(j)] -=
+            factor *
+            a[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
+              static_cast<std::size_t>(j)];
+        inverse[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+                static_cast<std::size_t>(j)] -=
+            factor *
+            inverse[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
+                    static_cast<std::size_t>(j)];
+      }
+    }
+  }
+
+  return true;
+}
+
 inline void sparse_axpy_full(const FSILS_lhsType& lhs,
                              const FSILS_reducedFieldUpdateType& update,
                              const std::vector<FSILS_reducedSparseEntry>& entries,
@@ -114,9 +237,13 @@ inline void sparse_axpy_full(const FSILS_lhsType& lhs,
 
 void compute_reduced_update_preconditioner_coupling(FSILS_lhsType& lhs)
 {
+  clear_grouped_reduced_update_preconditioner(lhs);
   if (lhs.reduced_updates.empty()) {
     return;
   }
+
+  std::vector<int> active_indices;
+  active_indices.reserve(lhs.reduced_updates.size());
 
   for (auto& update : lhs.reduced_updates) {
     if (!update.active) {
@@ -124,31 +251,59 @@ void compute_reduced_update_preconditioner_coupling(FSILS_lhsType& lhs)
       continue;
     }
 
-    std::unordered_map<ReducedEntryKey, double, ReducedEntryKeyHash> left_values;
-    left_values.reserve(update.left_scaled_owned.size());
-    for (const auto& entry : update.left_scaled_owned) {
-      if (entry.node < 0 || entry.full_component < 0 || std::abs(entry.value) <= 1e-30) {
-        continue;
-      }
-      left_values[{entry.node, entry.full_component}] += entry.value;
-    }
-
-    double local_nS = 0.0;
-    for (const auto& entry : update.right_scaled_owned) {
-      if (entry.node < 0 || entry.full_component < 0 || std::abs(entry.value) <= 1e-30) {
-        continue;
-      }
-      const auto it = left_values.find({entry.node, entry.full_component});
-      if (it != left_values.end()) {
-        local_nS += entry.value * it->second;
-      }
-    }
-
+    const auto& left_entries =
+        update.left_scaled_owned.empty() ? update.left_owned : update.left_scaled_owned;
+    const auto& right_entries =
+        update.right_scaled_owned.empty() ? update.right_owned : update.right_scaled_owned;
+    double local_nS = sparse_overlap_dot_owned(left_entries, right_entries);
     double global_nS = local_nS;
     if (lhs.commu.nTasks > 1) {
       fsils_allreduce_sum(&local_nS, &global_nS, 1, cm_mod::mpreal, lhs.commu);
     }
     update.nS = global_nS;
+
+    if (std::abs(update.sigma) > 1e-30 && !left_entries.empty() && !right_entries.empty()) {
+      active_indices.push_back(static_cast<int>(&update - lhs.reduced_updates.data()));
+    }
+  }
+
+  const int rank = static_cast<int>(active_indices.size());
+  if (rank <= 0) {
+    return;
+  }
+
+  std::vector<double> dense_m(static_cast<std::size_t>(rank) * static_cast<std::size_t>(rank), 0.0);
+  for (int i = 0; i < rank; ++i) {
+    dense_m[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+            static_cast<std::size_t>(i)] = 1.0;
+  }
+
+  for (int i = 0; i < rank; ++i) {
+    const auto& update_i = lhs.reduced_updates[static_cast<std::size_t>(active_indices[static_cast<std::size_t>(i)])];
+    const auto& right_i =
+        update_i.right_scaled_owned.empty() ? update_i.right_owned : update_i.right_scaled_owned;
+    for (int j = 0; j < rank; ++j) {
+      const auto& update_j =
+          lhs.reduced_updates[static_cast<std::size_t>(active_indices[static_cast<std::size_t>(j)])];
+      const auto& left_j =
+          update_j.left_scaled_owned.empty() ? update_j.left_owned : update_j.left_scaled_owned;
+      dense_m[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+              static_cast<std::size_t>(j)] +=
+          update_j.sigma * sparse_overlap_dot_owned(left_j, right_i);
+    }
+  }
+
+  if (lhs.commu.nTasks > 1) {
+    fsils_allreduce_sum_in_place(dense_m.data(),
+                                 static_cast<int>(dense_m.size()),
+                                 cm_mod::mpreal,
+                                 lhs.commu);
+  }
+
+  std::vector<double> dense_inv;
+  if (invert_dense_matrix(rank, dense_m, dense_inv)) {
+    lhs.reduced_update_pc_active_indices = std::move(active_indices);
+    lhs.reduced_update_pc_inner_inv = std::move(dense_inv);
   }
 }
 
@@ -277,6 +432,49 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
                                    static_cast<int>(reduced_dots.size()),
                                    cm_mod::mpreal,
                                    lhs.commu);
+    }
+
+    // Apply the reduced modes as one grouped coarse correction instead of
+    // independent scalar Sherman-Morrison updates. This preserves the exact
+    // condensed low-rank coupling when multiple outlet modes interact.
+    if (op_Type == BcopType::BCOP_TYPE_PRE &&
+        !lhs.reduced_update_pc_active_indices.empty() &&
+        lhs.reduced_update_pc_inner_inv.size() ==
+            lhs.reduced_update_pc_active_indices.size() *
+                lhs.reduced_update_pc_active_indices.size()) {
+      const int rank = static_cast<int>(lhs.reduced_update_pc_active_indices.size());
+      std::vector<double> coarse_rhs(static_cast<std::size_t>(rank), 0.0);
+      std::vector<double> coarse_sol(static_cast<std::size_t>(rank), 0.0);
+      for (int i = 0; i < rank; ++i) {
+        const int update_index =
+            lhs.reduced_update_pc_active_indices[static_cast<std::size_t>(i)];
+        coarse_rhs[static_cast<std::size_t>(i)] =
+            reduced_dots[static_cast<std::size_t>(update_index)];
+      }
+      for (int i = 0; i < rank; ++i) {
+        double value = 0.0;
+        for (int j = 0; j < rank; ++j) {
+          value += lhs.reduced_update_pc_inner_inv[static_cast<std::size_t>(i) *
+                                                       static_cast<std::size_t>(rank) +
+                                                   static_cast<std::size_t>(j)] *
+                   coarse_rhs[static_cast<std::size_t>(j)];
+        }
+        coarse_sol[static_cast<std::size_t>(i)] = value;
+      }
+
+      for (int i = 0; i < rank; ++i) {
+        const auto& update = lhs.reduced_updates[static_cast<std::size_t>(
+            lhs.reduced_update_pc_active_indices[static_cast<std::size_t>(i)])];
+        const auto& left_entries =
+            update.left_scaled.empty() ? update.left : update.left_scaled;
+        sparse_axpy_full(lhs,
+                         update,
+                         left_entries,
+                         -update.sigma * coarse_sol[static_cast<std::size_t>(i)],
+                         dof,
+                         Y);
+      }
+      return;
     }
 
     for (std::size_t idx = 0; idx < lhs.reduced_updates.size(); ++idx) {

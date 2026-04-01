@@ -80,12 +80,6 @@ static void gatherFieldIds(const forms::FormExprNode& node, std::vector<FieldId>
 }
 
 constexpr Real kDirectCouplingEntryTol = static_cast<Real>(1e-30);
-// Only collapse a direct feedthrough outer product to the symmetric
-// rank-one backend path when the PDE-output sensitivity is essentially
-// collinear with the FE input gradient. A loose tolerance is adequate for
-// early iterations but it degrades the monolithic Newton Jacobian for
-// strongly coupled outlet models such as multi-state Windkessels.
-constexpr Real kDirectCouplingRankOneTol = static_cast<Real>(1e-10);
 
 [[nodiscard]] Real effectiveAuxiliaryDt(const SystemStateView& state) noexcept
 {
@@ -578,81 +572,6 @@ MPI_Datatype mpiGlobalIndexType()
         }
     }
     return q_u;
-}
-
-[[nodiscard]] std::optional<backends::RankOneUpdate> tryBuildDirectCouplingRankOneUpdate(
-    const std::unordered_map<GlobalIndex, Real>& dR_doutput,
-    std::span<const std::pair<GlobalIndex, Real>> input_gradient,
-    Real dOutput_dInput)
-{
-    if (std::abs(dOutput_dInput) <= kDirectCouplingEntryTol ||
-        dR_doutput.empty() || input_gradient.empty()) {
-        return std::nullopt;
-    }
-
-    std::unordered_map<GlobalIndex, Real> q_map;
-    q_map.reserve(input_gradient.size());
-    Real q_dot_q = 0.0;
-    for (const auto& [dof, val] : input_gradient) {
-        q_map[dof] = val;
-        q_dot_q += val * val;
-    }
-    if (!(q_dot_q > kDirectCouplingEntryTol * kDirectCouplingEntryTol)) {
-        return std::nullopt;
-    }
-
-    Real dR_dot_q = 0.0;
-    Real dR_norm_sq = 0.0;
-    for (const auto& [dof, val] : dR_doutput) {
-        dR_norm_sq += val * val;
-        auto it = q_map.find(dof);
-        if (it != q_map.end()) {
-            dR_dot_q += val * it->second;
-        }
-    }
-    if (!(dR_norm_sq > kDirectCouplingEntryTol * kDirectCouplingEntryTol)) {
-        return std::nullopt;
-    }
-
-    const Real alpha = dR_dot_q / q_dot_q;
-    Real rem_norm_sq = 0.0;
-    for (const auto& [dof, val] : dR_doutput) {
-        const auto it = q_map.find(dof);
-        const Real q_val = (it != q_map.end()) ? it->second : Real(0.0);
-        const Real rem = val - alpha * q_val;
-        rem_norm_sq += rem * rem;
-    }
-    for (const auto& [dof, val] : input_gradient) {
-        if (dR_doutput.find(dof) == dR_doutput.end()) {
-            const Real rem = alpha * val;
-            rem_norm_sq += rem * rem;
-        }
-    }
-
-    const Real rel_err = std::sqrt(rem_norm_sq) / std::sqrt(dR_norm_sq);
-    if (!std::isfinite(static_cast<double>(rel_err)) || rel_err >= kDirectCouplingRankOneTol) {
-        return std::nullopt;
-    }
-
-    backends::RankOneUpdate upd;
-    upd.sigma = alpha * dOutput_dInput;
-    upd.v.assign(input_gradient.begin(), input_gradient.end());
-    return upd;
-}
-
-template <class OwnedPredicate>
-std::vector<std::pair<GlobalIndex, Real>>
-filterSparsePairsToOwned(std::span<const std::pair<GlobalIndex, Real>> pairs,
-                         OwnedPredicate&& is_owned)
-{
-    std::vector<std::pair<GlobalIndex, Real>> owned_pairs;
-    owned_pairs.reserve(pairs.size());
-    for (const auto& kv : pairs) {
-        if (is_owned(kv.first)) {
-            owned_pairs.push_back(kv);
-        }
-    }
-    return owned_pairs;
 }
 
 FESystem::FESystem(std::shared_ptr<const assembly::IMeshAccess> mesh_access)
@@ -4887,34 +4806,13 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                                 << " dR_norm=" << std::sqrt(dR_norm_sq);
                                             FE_LOG_INFO(oss.str());
                                         }
-                                        auto upd = tryBuildDirectCouplingRankOneUpdate(
-                                            dR_rank1_entries, q_u, dOk_dIm);
-                                        if (upd.has_value()) {
-                                            const auto& owned_dofs = dof_handler_.getPartition().locallyOwned();
-                                            upd->v = filterSparsePairsToOwned(
-                                                std::span<const std::pair<GlobalIndex, Real>>(upd->v.data(),
-                                                                                               upd->v.size()),
-                                                [&](GlobalIndex dof) { return owned_dofs.contains(dof); });
-                                            if (monolithicDirectTraceEnabled()) {
-                                                std::ostringstream oss;
-                                                oss << "FESystem: monolithic direct coupling"
-                                                    << " block='" << entry.instance_name << "'"
-                                                    << " output='" << oname << "'"
-                                                    << " entity=" << e
-                                                    << " input_col=" << input_col
-                                                    << " path='rank_one'"
-                                                    << " sigma=" << upd->sigma
-                                                    << " nnz=" << upd->v.size();
-                                                FE_LOG_INFO(oss.str());
-                                            }
-                                            last_rank_one_updates_.push_back(std::move(*upd));
-                                            continue;
-                                        }
-
-                                        // Exact fallback for non-symmetric direct feedthrough:
-                                        // export (dR/dOk) * (dOk/dIm) * (dIm/du) as a native
-                                        // reduced field update so the backend can keep the
-                                        // true coupled tangent without forcing symmetry.
+                                        // Prefer the exact condensed reduced-field form for
+                                        // monolithic direct feedthrough, even when the
+                                        // outer product happens to be rank-one. This keeps
+                                        // the full condensed outlet coupling available to
+                                        // the backend as grouped low-rank modes instead of
+                                        // collapsing it back to an independent symmetric
+                                        // rank-one correction.
                                         if (!q_u.empty()) {
                                             if (monolithicDirectTraceEnabled()) {
                                                 std::ostringstream oss;
@@ -4923,7 +4821,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                                     << " output='" << oname << "'"
                                                     << " entity=" << e
                                                     << " input_col=" << input_col
-                                                    << " path='reduced_unsymmetric_update'";
+                                                    << " path='reduced_exact_update'";
                                                 FE_LOG_INFO(oss.str());
                                             }
                                             backends::ReducedFieldUpdate reduced_update;

@@ -329,6 +329,12 @@ void FsilsLinearSolver::setReducedFieldUpdates(std::span<const ReducedFieldUpdat
     reduced_field_updates_.assign(updates.begin(), updates.end());
 }
 
+void FsilsLinearSolver::setGroupedBorderedFieldCouplings(
+    std::span<const GroupedBorderedFieldCoupling> groups)
+{
+    grouped_bordered_field_couplings_.assign(groups.begin(), groups.end());
+}
+
 void FsilsLinearSolver::setDirichletDofs(std::span<const GlobalIndex> dofs)
 {
     std::vector<GlobalIndex> new_dofs(dofs.begin(), dofs.end());
@@ -1256,6 +1262,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     }
 
     lhs.reduced_updates.clear();
+    lhs.grouped_bordered_field_couplings.clear();
     {
         const auto shared = A->shared();
         FE_CHECK_NOT_NULL(shared.get(), "FsilsLinearSolver: FsilsShared for reduced updates");
@@ -1339,23 +1346,37 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             return {std::move(full), std::move(owned)};
         };
 
-        auto append_reduced_update = [&](Real sigma,
-                                        std::span<const std::pair<GlobalIndex, Real>> left,
-                                        std::span<const std::pair<GlobalIndex, Real>> right,
-                                        std::span<const int> active_components) {
+        auto make_native_reduced_update = [&](Real sigma,
+                                              std::span<const std::pair<GlobalIndex, Real>> left,
+                                              std::span<const std::pair<GlobalIndex, Real>> right,
+                                              std::span<const int> active_components,
+                                              int grouped_coupling_id,
+                                              Real left_scale,
+                                              bool scale_sigma) {
+            fe_fsi_linear_solver::FSILS_reducedFieldUpdateType native_update;
             if (!(std::abs(sigma) > Real(1e-30)) || left.empty() || right.empty()) {
-                return;
+                return native_update;
             }
 
             auto [left_full, left_owned] = make_internal_entries(left);
             auto [right_full, right_owned] = make_internal_entries(right);
             if (left_full.empty() || right_full.empty()) {
-                return;
+                return native_update;
             }
 
-            fe_fsi_linear_solver::FSILS_reducedFieldUpdateType native_update;
+            if (left_scale != Real(1.0)) {
+                for (auto& entry : left_full) {
+                    entry.value *= static_cast<double>(left_scale);
+                }
+                for (auto& entry : left_owned) {
+                    entry.value *= static_cast<double>(left_scale);
+                }
+            }
+
             native_update.active = true;
-            native_update.sigma = static_cast<double>(use_blockschur ? sigma * stage_scale : sigma);
+            native_update.sigma = static_cast<double>(
+                (scale_sigma && use_blockschur) ? sigma * stage_scale : sigma);
+            native_update.grouped_coupling_id = grouped_coupling_id;
             native_update.left = std::move(left_full);
             native_update.right = std::move(right_full);
             native_update.left_owned = std::move(left_owned);
@@ -1369,7 +1390,21 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             } else {
                 native_update.active_components = default_active_components();
             }
-            lhs.reduced_updates.push_back(std::move(native_update));
+            return native_update;
+        };
+
+        auto append_reduced_update = [&](Real sigma,
+                                        std::span<const std::pair<GlobalIndex, Real>> left,
+                                        std::span<const std::pair<GlobalIndex, Real>> right,
+                                        std::span<const int> active_components,
+                                        int grouped_coupling_id) {
+            auto native_update =
+                make_native_reduced_update(sigma, left, right, active_components,
+                                           grouped_coupling_id, Real(1.0),
+                                           /*scale_sigma=*/true);
+            if (native_update.active) {
+                lhs.reduced_updates.push_back(std::move(native_update));
+            }
         };
 
         for (const auto& upd : rank_one_updates_) {
@@ -1377,7 +1412,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                                   std::span<const std::pair<GlobalIndex, Real>>(upd.v.data(), upd.v.size()),
                                   std::span<const std::pair<GlobalIndex, Real>>(upd.v.data(), upd.v.size()),
                                   std::span<const int>(upd.active_components.data(),
-                                                       upd.active_components.size()));
+                                                       upd.active_components.size()),
+                                  /*grouped_coupling_id=*/-1);
         }
 
         for (const auto& upd : reduced_field_updates_) {
@@ -1385,7 +1421,36 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                                   std::span<const std::pair<GlobalIndex, Real>>(upd.left.data(), upd.left.size()),
                                   std::span<const std::pair<GlobalIndex, Real>>(upd.right.data(), upd.right.size()),
                                   std::span<const int>(upd.active_components.data(),
-                                                       upd.active_components.size()));
+                                                       upd.active_components.size()),
+                                  upd.grouped_coupling_id);
+        }
+
+        const Real grouped_left_scale = use_blockschur ? static_cast<Real>(stage_scale) : Real(1.0);
+        for (const auto& group : grouped_bordered_field_couplings_) {
+            fe_fsi_linear_solver::FSILS_groupedBorderedFieldCouplingType native_group;
+            native_group.active = true;
+            native_group.grouped_coupling_id = group.grouped_coupling_id;
+            native_group.aux_matrix.assign(group.aux_matrix.begin(), group.aux_matrix.end());
+            native_group.modes.reserve(group.modes.size());
+            for (const auto& mode : group.modes) {
+                auto native_mode =
+                    make_native_reduced_update(Real(1.0),
+                                               std::span<const std::pair<GlobalIndex, Real>>(
+                                                   mode.left.data(), mode.left.size()),
+                                               std::span<const std::pair<GlobalIndex, Real>>(
+                                                   mode.right.data(), mode.right.size()),
+                                               std::span<const int>(mode.active_components.data(),
+                                                                    mode.active_components.size()),
+                                               group.grouped_coupling_id,
+                                               grouped_left_scale,
+                                               /*scale_sigma=*/false);
+                if (native_mode.active) {
+                    native_group.modes.push_back(std::move(native_mode));
+                }
+            }
+            if (!native_group.aux_matrix.empty() && !native_group.modes.empty()) {
+                lhs.grouped_bordered_field_couplings.push_back(std::move(native_group));
+            }
         }
     }
 
@@ -2347,6 +2412,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         lhs.nFaces = original_nFaces;
     }
     lhs.reduced_updates.clear();
+    lhs.grouped_bordered_field_couplings.clear();
 
     if (solve_ok && oopTraceEnabled()) {
         logInternalBlockSolutionStats("returned");

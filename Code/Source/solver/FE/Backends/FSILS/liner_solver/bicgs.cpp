@@ -434,6 +434,9 @@ struct SchurPreconditionerData {
   std::vector<Array<double>> low_rank_right;
   std::vector<Array<double>> low_rank_preconditioned_left;
   std::vector<double> low_rank_inner_inv;
+  std::vector<Array<double>> coarse_basis;
+  std::vector<Array<double>> coarse_operator_basis;
+  std::vector<double> coarse_inner_inv;
   Array<double> scratch_rhs;
   Array<double> scratch_ax;
   Array<double> scratch_gp;
@@ -1296,13 +1299,13 @@ void assemble_algebraic_schur(const Array<fsils_int>& rowPtr,
     double score{0.0};
   };
 
-  std::vector<double> dh(static_cast<size_t>(mixed_block_entries), 0.0);
-  std::vector<double> contrib(static_cast<size_t>(con_block_entries), 0.0);
+  std::vector<double> dh(static_cast<std::size_t>(mixed_block_entries), 0.0);
+  std::vector<double> contrib(static_cast<std::size_t>(con_block_entries), 0.0);
   for (fsils_int row = 0; row < nNo; ++row) {
     const fsils_int row_begin = rowPtr(0, row);
     const fsils_int row_end = rowPtr(1, row);
     const fsils_int row_nnz = row_end - row_begin + 1;
-    std::vector<double> row_corr(static_cast<size_t>(row_nnz) * static_cast<size_t>(con_block_entries), 0.0);
+    std::vector<double> row_corr(static_cast<std::size_t>(row_nnz) * static_cast<std::size_t>(con_block_entries), 0.0);
 
     for (fsils_int p_d = row_begin; p_d <= row_end; ++p_d) {
       const fsils_int alpha = colPtr(p_d);
@@ -1334,9 +1337,9 @@ void assemble_algebraic_schur(const Array<fsils_int>& rowPtr,
           }
 
           double* target_block = row_corr.data() +
-                                 static_cast<size_t>(target - row_begin) * static_cast<size_t>(con_block_entries);
+                                 static_cast<std::size_t>(target - row_begin) * static_cast<std::size_t>(con_block_entries);
           for (int e = 0; e < con_block_entries; ++e) {
-            target_block[e] += contrib[static_cast<size_t>(e)];
+            target_block[e] += contrib[static_cast<std::size_t>(e)];
           }
         }
       }
@@ -1347,13 +1350,13 @@ void assemble_algebraic_schur(const Array<fsils_int>& rowPtr,
                                                      con_block_entries),
                                        1e-30);
     std::vector<Candidate> candidates;
-    candidates.reserve(static_cast<size_t>(std::max<fsils_int>(0, row_nnz - 1)));
+    candidates.reserve(static_cast<std::size_t>(std::max<fsils_int>(0, row_nnz - 1)));
     for (fsils_int local = 0; local < row_nnz; ++local) {
       if (local == diag_local) {
         continue;
       }
       const double* corr_block = row_corr.data() +
-                                 static_cast<size_t>(local) * static_cast<size_t>(con_block_entries);
+                                 static_cast<std::size_t>(local) * static_cast<std::size_t>(con_block_entries);
       const double corr_norm = block_max_abs(corr_block, con_block_entries);
       if (corr_norm <= 1e-30) {
         continue;
@@ -1373,8 +1376,8 @@ void assemble_algebraic_schur(const Array<fsils_int>& rowPtr,
                            : std::min<int>(cfg.shat_max_offdiag_per_row, static_cast<int>(candidates.size()));
     const int guaranteed = std::min<int>(cfg.guaranteed_offdiag_per_row, budget);
 
-    std::vector<unsigned char> keep(static_cast<size_t>(row_nnz), 0);
-    keep[static_cast<size_t>(diag_local)] = 1;
+    std::vector<unsigned char> keep(static_cast<std::size_t>(row_nnz), 0);
+    keep[static_cast<std::size_t>(diag_local)] = 1;
     int kept = 0;
     for (const auto& candidate : candidates) {
       const bool retain =
@@ -1383,19 +1386,19 @@ void assemble_algebraic_schur(const Array<fsils_int>& rowPtr,
       if (!retain) {
         continue;
       }
-      keep[static_cast<size_t>(candidate.local_index)] = 1;
+      keep[static_cast<std::size_t>(candidate.local_index)] = 1;
       kept += 1;
     }
 
     for (fsils_int local = 0; local < row_nnz; ++local) {
-      if (!keep[static_cast<size_t>(local)]) {
+      if (!keep[static_cast<std::size_t>(local)]) {
         continue;
       }
       double* target_block = block_ptr(shat, con_block_entries, row_begin + local);
       const double* corr_block = row_corr.data() +
-                                 static_cast<size_t>(local) * static_cast<size_t>(con_block_entries);
+                                 static_cast<std::size_t>(local) * static_cast<std::size_t>(con_block_entries);
       for (int e = 0; e < con_block_entries; ++e) {
-        target_block[e] -= corr_block[static_cast<size_t>(e)];
+        target_block[e] -= corr_block[static_cast<std::size_t>(e)];
       }
     }
   }
@@ -1417,28 +1420,52 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   };
 
   std::vector<ReducedColumn> columns;
-  columns.reserve(lhs.reduced_updates.size());
+  auto append_dense_seed_block = [](std::vector<double>& dense_seed,
+                                    int old_rank,
+                                    const std::vector<double>& block,
+                                    int block_rank) {
+    std::vector<double> expanded(static_cast<std::size_t>(old_rank + block_rank) *
+                                     static_cast<std::size_t>(old_rank + block_rank),
+                                 0.0);
+    for (int i = 0; i < old_rank; ++i) {
+      for (int j = 0; j < old_rank; ++j) {
+        expanded[static_cast<std::size_t>(i) * static_cast<std::size_t>(old_rank + block_rank) +
+                 static_cast<std::size_t>(j)] =
+            dense_seed[static_cast<std::size_t>(i) * static_cast<std::size_t>(old_rank) +
+                       static_cast<std::size_t>(j)];
+      }
+    }
+    for (int i = 0; i < block_rank; ++i) {
+      for (int j = 0; j < block_rank; ++j) {
+        expanded[static_cast<std::size_t>(old_rank + i) * static_cast<std::size_t>(old_rank + block_rank) +
+                 static_cast<std::size_t>(old_rank + j)] =
+            block[static_cast<std::size_t>(i) * static_cast<std::size_t>(block_rank) +
+                  static_cast<std::size_t>(j)];
+      }
+    }
+    dense_seed.swap(expanded);
+  };
 
-  for (const auto& update : lhs.reduced_updates) {
-    if (!update.active || std::abs(update.sigma) <= 1e-30) {
-      continue;
+  auto append_column = [&](const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update) {
+    if (!update.active) {
+      return;
     }
 
     const auto& left_entries = !update.left_scaled.empty() ? update.left_scaled : update.left;
     const auto& right_entries = !update.right_scaled.empty() ? update.right_scaled : update.right;
     if (left_entries.empty() || right_entries.empty()) {
-      continue;
+      return;
     }
 
     ReducedColumn col;
     col.update = &update;
     if (!fill_projected_reduced_vector(lhs, update, left_entries, mom_ncomp, col.momentum_left_hat)) {
-      continue;
+      return;
     }
 
     Array<double> momentum_right_t;
     if (!fill_projected_reduced_vector(lhs, update, right_entries, mom_ncomp, momentum_right_t)) {
-      continue;
+      return;
     }
 
     apply_momentum_hat(lhs.rowPtr, lhs.colPtr, lhs.diagPtr,
@@ -1454,27 +1481,69 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
                                   mom_ncomp, con_ncomp, G,
                                   momentum_right_t, col.schur_right);
     columns.push_back(std::move(col));
+  };
+
+  std::vector<double> dense_seed;
+  dense_seed.reserve(lhs.reduced_updates.size());
+
+  const bool has_grouped_bordered = !lhs.grouped_bordered_field_couplings.empty();
+  for (const auto& update : lhs.reduced_updates) {
+    if (!update.active || std::abs(update.sigma) <= 1e-30) {
+      continue;
+    }
+    if (has_grouped_bordered && update.grouped_coupling_id >= 0) {
+      continue;
+    }
+
+    const int old_rank = static_cast<int>(columns.size());
+    append_column(update);
+    if (static_cast<int>(columns.size()) != old_rank + 1) {
+      continue;
+    }
+    append_dense_seed_block(dense_seed, old_rank,
+                            std::vector<double>{safe_inverse(columns.back().update->sigma)},
+                            /*block_rank=*/1);
+  }
+
+  for (const auto& group : lhs.grouped_bordered_field_couplings) {
+    if (!group.active || group.modes.empty()) {
+      continue;
+    }
+    const int block_rank = static_cast<int>(group.modes.size());
+    if (group.aux_matrix.size() != static_cast<std::size_t>(block_rank * block_rank)) {
+      continue;
+    }
+
+    const int old_rank = static_cast<int>(columns.size());
+    for (const auto& mode : group.modes) {
+      append_column(mode);
+    }
+    if (static_cast<int>(columns.size()) != old_rank + block_rank) {
+      columns.resize(static_cast<std::size_t>(old_rank));
+      continue;
+    }
+
+    std::vector<double> seed_block(group.aux_matrix.size(), 0.0);
+    for (std::size_t idx = 0; idx < group.aux_matrix.size(); ++idx) {
+      seed_block[idx] = -group.aux_matrix[idx];
+    }
+    append_dense_seed_block(dense_seed, old_rank, seed_block, block_rank);
   }
 
   const int rank = static_cast<int>(columns.size());
-  if (rank == 0) {
+  if (rank == 0 || dense_seed.size() != static_cast<std::size_t>(rank * rank)) {
     return;
   }
 
-  std::vector<double> dense_m(static_cast<size_t>(rank) * static_cast<size_t>(rank), 0.0);
+  std::vector<double> dense_m = dense_seed;
   for (int i = 0; i < rank; ++i) {
-    dense_m[static_cast<size_t>(i) * static_cast<size_t>(rank) + static_cast<size_t>(i)] =
-        safe_inverse(columns[static_cast<size_t>(i)].update->sigma);
-  }
-
-  for (int i = 0; i < rank; ++i) {
-    const auto& update_i = *columns[static_cast<size_t>(i)].update;
+    const auto& update_i = *columns[static_cast<std::size_t>(i)].update;
     const auto& right_owned =
         !update_i.right_scaled_owned.empty() ? update_i.right_scaled_owned : update_i.right_owned;
     for (int j = 0; j < rank; ++j) {
-      dense_m[static_cast<size_t>(i) * static_cast<size_t>(rank) + static_cast<size_t>(j)] +=
+      dense_m[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) + static_cast<std::size_t>(j)] +=
           sparse_dense_owned_dot_local(lhs, update_i, right_owned,
-                                       columns[static_cast<size_t>(j)].momentum_left_hat,
+                                       columns[static_cast<std::size_t>(j)].momentum_left_hat,
                                        mom_ncomp);
     }
   }
@@ -1492,13 +1561,13 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     pc.low_rank_preconditioned_left.push_back(std::move(z));
   }
 
-  std::vector<double> dense_ctz(static_cast<size_t>(rank) * static_cast<size_t>(rank), 0.0);
+  std::vector<double> dense_ctz(static_cast<std::size_t>(rank) * static_cast<std::size_t>(rank), 0.0);
   for (int i = 0; i < rank; ++i) {
     for (int j = 0; j < rank; ++j) {
-      dense_ctz[static_cast<size_t>(i) * static_cast<size_t>(rank) + static_cast<size_t>(j)] =
+      dense_ctz[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) + static_cast<std::size_t>(j)] =
           dense_dense_owned_dot_local(lhs, con_ncomp,
-                                      pc.low_rank_right[static_cast<size_t>(i)],
-                                      pc.low_rank_preconditioned_left[static_cast<size_t>(j)]);
+                                      pc.low_rank_right[static_cast<std::size_t>(i)],
+                                      pc.low_rank_preconditioned_left[static_cast<std::size_t>(j)]);
     }
   }
   allreduce_sum_in_place(lhs, dense_ctz);

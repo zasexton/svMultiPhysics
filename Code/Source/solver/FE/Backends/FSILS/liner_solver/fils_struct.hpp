@@ -299,6 +299,7 @@ class FSILS_reducedFieldUpdateType
     bool active = false;
     double sigma = 0.0;
     double nS = 0.0;
+    int grouped_coupling_id = -1;
     std::vector<int> active_components;
     std::vector<FSILS_reducedSparseEntry> left;
     std::vector<FSILS_reducedSparseEntry> right;
@@ -308,6 +309,15 @@ class FSILS_reducedFieldUpdateType
     std::vector<FSILS_reducedSparseEntry> right_scaled;
     std::vector<FSILS_reducedSparseEntry> left_scaled_owned;
     std::vector<FSILS_reducedSparseEntry> right_scaled_owned;
+};
+
+class FSILS_groupedBorderedFieldCouplingType
+{
+  public:
+    bool active = false;
+    int grouped_coupling_id = -1;
+    std::vector<double> aux_matrix;
+    std::vector<FSILS_reducedFieldUpdateType> modes;
 };
 
 inline int fsils_reduced_local_component(const FSILS_reducedFieldUpdateType& update,
@@ -395,6 +405,9 @@ class FSILS_lhsType
 
     std::vector<FSILS_faceType> face;
     std::vector<FSILS_reducedFieldUpdateType> reduced_updates;
+    std::vector<FSILS_groupedBorderedFieldCouplingType> grouped_bordered_field_couplings;
+    std::vector<int> reduced_update_pc_active_indices;
+    std::vector<double> reduced_update_pc_inner_inv;
 
     /// Pre-allocated communication buffers (sized once in fsils_lhs_create)
     int nmax_commu = 0;      ///< max shared nodes across all comm partners

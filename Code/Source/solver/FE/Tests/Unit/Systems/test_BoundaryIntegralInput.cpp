@@ -2601,8 +2601,8 @@ TEST(MonolithicCoupling, TwoStateVectorOutletDirectCouplingMatchesFD)
     //   R(u)   = (u, v)_Omega - (P_out n, v)_Gamma
     //
     // The runtime Newton operator augments the assembled PDE Jacobian with the
-    // stored rank-1 direct coupling terms. Verify that the resulting field
-    // Jacobian matches finite differences DOF-by-DOF.
+    // stored exact reduced direct-coupling terms. Verify that the resulting
+    // field Jacobian matches finite differences DOF-by-DOF.
     const int marker = 9;
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
     auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
@@ -2699,6 +2699,15 @@ TEST(MonolithicCoupling, TwoStateVectorOutletDirectCouplingMatchesFD)
         for (const auto& [row_dof, row_val] : upd.v) {
             const auto row = static_cast<std::size_t>(row_dof);
             for (const auto& [col_dof, col_val] : upd.v) {
+                const auto col = static_cast<std::size_t>(col_dof);
+                field_jacobian[row * n_field + col] += upd.sigma * row_val * col_val;
+            }
+        }
+    }
+    for (const auto& upd : sys.lastReducedFieldUpdates()) {
+        for (const auto& [row_dof, row_val] : upd.left) {
+            const auto row = static_cast<std::size_t>(row_dof);
+            for (const auto& [col_dof, col_val] : upd.right) {
                 const auto col = static_cast<std::size_t>(col_dof);
                 field_jacobian[row * n_field + col] += upd.sigma * row_val * col_val;
             }
@@ -2843,6 +2852,15 @@ TEST(MonolithicCoupling, TwoStateVectorOutletBorderedReductionMatchesDenseSolve)
         for (const auto& [row_dof, row_val] : upd.v) {
             const auto row = static_cast<std::size_t>(row_dof);
             for (const auto& [col_dof, col_val] : upd.v) {
+                const auto col = static_cast<std::size_t>(col_dof);
+                K[row * n_field + col] += upd.sigma * row_val * col_val;
+            }
+        }
+    }
+    for (const auto& upd : sys.lastReducedFieldUpdates()) {
+        for (const auto& [row_dof, row_val] : upd.left) {
+            const auto row = static_cast<std::size_t>(row_dof);
+            for (const auto& [col_dof, col_val] : upd.right) {
                 const auto col = static_cast<std::size_t>(col_dof);
                 K[row * n_field + col] += upd.sigma * row_val * col_val;
             }
@@ -3088,6 +3106,17 @@ TEST(MonolithicCoupling, TwoStateVectorOutletDirectCouplingRespectsConstrainedOu
             }
         }
     }
+    for (const auto& upd : sys.lastReducedFieldUpdates()) {
+        for (const auto& [row_dof, row_val] : upd.left) {
+            EXPECT_FALSE(sys.constraints().isConstrained(row_dof));
+            const auto row = static_cast<std::size_t>(row_dof);
+            for (const auto& [col_dof, col_val] : upd.right) {
+                EXPECT_FALSE(sys.constraints().isConstrained(col_dof));
+                const auto col = static_cast<std::size_t>(col_dof);
+                field_jacobian[row * n_field + col] += upd.sigma * row_val * col_val;
+            }
+        }
+    }
 
     const auto packed_base = sys.checkpointAuxiliaryState();
     const Real eps = 1e-7;
@@ -3134,7 +3163,7 @@ TEST(MonolithicCoupling, TwoStateVectorOutletDirectCouplingRespectsConstrainedOu
     }
 }
 
-TEST(MonolithicCoupling, DirectCouplingRankOneUsesActualOutputSensitivity)
+TEST(MonolithicCoupling, DirectCouplingReducedUpdateUsesActualOutputSensitivity)
 {
     // Regression for monolithic direct coupling when the outlet output depends
     // on a non-leading state variable:
@@ -3143,7 +3172,8 @@ TEST(MonolithicCoupling, DirectCouplingRankOneUsesActualOutputSensitivity)
     //   P_out = x2 + Rp * Q
     //
     // The direct PDE coupling should still recover the same dQ/du shape and
-    // emit a rank-1 update with sigma = -Rp for the residual term -(P_out*v).ds.
+    // emit an exact reduced update with sigma = -Rp for the residual term
+    // -(P_out*v).ds.
     const int marker = 6;
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
     auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
@@ -3201,34 +3231,35 @@ TEST(MonolithicCoupling, DirectCouplingRankOneUsesActualOutputSensitivity)
     const auto result = sys.assemble(req, state, &lhs, &rhs);
     ASSERT_TRUE(result.success);
 
-    const auto updates = sys.lastRankOneUpdates();
+    const auto updates = sys.lastReducedFieldUpdates();
     ASSERT_EQ(updates.size(), 1u);
-    EXPECT_NEAR(updates[0].sigma, -3.0, 1e-10);
-    ASSERT_FALSE(updates[0].v.empty());
+    EXPECT_NEAR(std::abs(updates[0].sigma), 3.0, 1e-10);
+    ASSERT_FALSE(updates[0].left.empty());
+    ASSERT_FALSE(updates[0].right.empty());
     Real sum_abs = 0.0;
-    for (const auto& [dof, value] : updates[0].v) {
+    for (const auto& [dof, value] : updates[0].right) {
         EXPECT_GE(dof, 0);
         EXPECT_LT(static_cast<std::size_t>(dof), n_dofs);
         sum_abs += std::abs(value);
     }
     EXPECT_GT(sum_abs, 0.0);
     EXPECT_LE(sum_abs, 0.5 + 1e-10);
-    for (const auto& [dof, value] : updates[0].v) {
+    for (const auto& [dof, value] : updates[0].left) {
         (void)dof;
         EXPECT_GT(std::abs(value), 0.0);
     }
 }
 
-TEST(MonolithicCoupling, DirectCouplingFallsBackToExactOuterProductWhenNotSymmetric)
+TEST(MonolithicCoupling, DirectCouplingUsesExactReducedFieldUpdateWhenNotSymmetric)
 {
     // Regression for monolithic direct coupling when dR/d(output) is not
-    // parallel to dQ/du. In this case the symmetric rank-1 shortcut is not
-    // exact, so the coupling must be assembled as a general outer product.
+    // parallel to dQ/du. In this case the direct term must be exported as an
+    // exact reduced field update instead of a symmetric rank-1 shortcut.
     const int marker = 7;
 
     auto assemble_field_block = [&](Real Rp,
                                     svmp::FE::assembly::DenseMatrixView& lhs_out,
-                                    std::vector<svmp::FE::backends::RankOneUpdate>& updates_out) {
+                                    std::vector<svmp::FE::backends::ReducedFieldUpdate>& updates_out) {
         auto mesh =
             std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
         auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
@@ -3287,27 +3318,37 @@ TEST(MonolithicCoupling, DirectCouplingFallsBackToExactOuterProductWhenNotSymmet
         const auto result = sys.assemble(req, state, &lhs_out, &rhs);
         ASSERT_TRUE(result.success);
 
-        updates_out.assign(sys.lastRankOneUpdates().begin(), sys.lastRankOneUpdates().end());
+        updates_out.assign(sys.lastReducedFieldUpdates().begin(), sys.lastReducedFieldUpdates().end());
     };
 
     svmp::FE::assembly::DenseMatrixView lhs_rp0(4);
     svmp::FE::assembly::DenseMatrixView lhs_rp2(4);
-    std::vector<svmp::FE::backends::RankOneUpdate> updates_rp0;
-    std::vector<svmp::FE::backends::RankOneUpdate> updates_rp2;
+    std::vector<svmp::FE::backends::ReducedFieldUpdate> updates_rp0;
+    std::vector<svmp::FE::backends::ReducedFieldUpdate> updates_rp2;
     assemble_field_block(/*Rp=*/0.0, lhs_rp0, updates_rp0);
     assemble_field_block(/*Rp=*/2.0, lhs_rp2, updates_rp2);
 
     EXPECT_TRUE(updates_rp0.empty());
-    EXPECT_TRUE(updates_rp2.empty())
-        << "non-symmetric direct coupling should assemble as a full outer product";
+    ASSERT_EQ(updates_rp2.size(), 1u);
+    EXPECT_NEAR(std::abs(updates_rp2[0].sigma), 2.0, 1e-12);
 
     // Cell integral of each linear basis on the reference tetrahedron = volume/4 = 1/24.
     // Boundary-face integral on the marked triangular face = area/3 = 1/6 for face nodes,
     // and 0 for the opposite vertex.
     const Real expected = -2.0 * (1.0 / 24.0) * (1.0 / 6.0);
+    std::array<Real, 4> left_dense{};
+    std::array<Real, 4> right_dense{};
+    for (const auto& [dof, value] : updates_rp2[0].left) {
+        left_dense[static_cast<std::size_t>(dof)] += value;
+    }
+    for (const auto& [dof, value] : updates_rp2[0].right) {
+        right_dense[static_cast<std::size_t>(dof)] += value;
+    }
     for (svmp::FE::GlobalIndex i = 0; i < 4; ++i) {
         for (svmp::FE::GlobalIndex j = 0; j < 4; ++j) {
-            const Real delta = lhs_rp2.getMatrixEntry(i, j) - lhs_rp0.getMatrixEntry(i, j);
+            const Real delta =
+                updates_rp2[0].sigma * left_dense[static_cast<std::size_t>(i)] *
+                right_dense[static_cast<std::size_t>(j)];
             const Real target = (j < 3) ? expected : 0.0;
             EXPECT_NEAR(delta, target, 1e-10)
                 << "unexpected direct-coupling outer-product entry at (" << i << "," << j << ")";

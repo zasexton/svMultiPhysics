@@ -723,6 +723,249 @@ TEST(FsilsBackend, ReducedFieldUpdateSolversConverge)
     }
 }
 
+TEST(FsilsBackend, ReducedFieldUpdateGroupedWoodburySolversConverge)
+{
+    FsilsFactory factory(/*dof_per_node=*/3);
+    const auto pattern = make_dense_pattern(3);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(3);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+    const GlobalIndex dofs[3] = {0, 1, 2};
+    const Real Ke[9] = {4.0, 1.0, 1.0,
+                        1.0, 3.0, 0.0,
+                        1.0, 0.0, 1.0};
+    viewA->addMatrixEntries(dofs, Ke, assembly::AddMode::Insert);
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    std::array<ReducedFieldUpdate, 2> updates{};
+    updates[0].sigma = 650.0;
+    updates[0].active_components = {0, 1};
+    updates[0].left = {
+        {0, 0.08},
+        {1, -0.05},
+    };
+    updates[0].right = {
+        {0, 0.05},
+        {1, 0.11},
+    };
+
+    updates[1].sigma = -420.0;
+    updates[1].active_components = {0, 1};
+    updates[1].left = {
+        {0, -0.04},
+        {1, 0.09},
+    };
+    updates[1].right = {
+        {0, 0.07},
+        {1, -0.03},
+    };
+
+    auto x_exact = factory.createVector(3);
+    {
+        auto xs = x_exact->localSpan();
+        std::fill(xs.begin(), xs.end(), Real(1.0));
+    }
+    A->mult(*x_exact, *b);
+    addReducedFieldContributionSerial(
+        factory, *b, *x_exact, std::span<const ReducedFieldUpdate>(updates.data(), updates.size()));
+
+    const std::array<SolverMethod, 2> methods{
+        SolverMethod::BlockSchur,
+        SolverMethod::GMRES,
+    };
+
+    for (const auto method : methods) {
+        SCOPED_TRACE(method == SolverMethod::BlockSchur ? "blockschur_reduced_grouped"
+                                                        : "gmres_reduced_grouped");
+        auto x = factory.createVector(3);
+
+        SolverOptions opts;
+        if (method == SolverMethod::BlockSchur) {
+            opts.method = SolverMethod::BlockSchur;
+            opts.preconditioner = PreconditionerType::Diagonal;
+            opts.rel_tol = 1e-8;
+            opts.abs_tol = 1e-12;
+            opts.max_iter = 20;
+            opts.krylov_dim = 40;
+            opts.fsils_blockschur_gm_max_iter = 120;
+            opts.fsils_blockschur_cg_max_iter = 120;
+            opts.fsils_blockschur_gm_rel_tol = 1e-10;
+            opts.fsils_blockschur_cg_rel_tol = 1e-10;
+            BlockLayout layout;
+            layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
+            layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
+            layout.momentum_block = 0;
+            layout.constraint_block = 1;
+            opts.block_layout = layout;
+        } else {
+            opts.method = SolverMethod::GMRES;
+            opts.preconditioner = PreconditionerType::Diagonal;
+            opts.rel_tol = 1e-8;
+            opts.abs_tol = 1e-12;
+            opts.max_iter = 200;
+            opts.krylov_dim = 80;
+            opts.fsils_residual_check_policy = FsilsResidualCheckPolicy::RetryOnly;
+        }
+
+        auto solver = factory.createLinearSolver(opts);
+        ASSERT_TRUE(solver->supportsNativeReducedFieldUpdates());
+        solver->setReducedFieldUpdates(std::span<const ReducedFieldUpdate>(updates.data(), updates.size()));
+
+        const auto rep = solver->solve(*A, *x, *b);
+        EXPECT_TRUE(rep.converged);
+
+        const Real rel = fullOperatorRelativeResidualSerial(
+            factory, *A, *x, *b, std::span<const ReducedFieldUpdate>(updates.data(), updates.size()));
+        EXPECT_LE(rel, 1e-8);
+    }
+}
+
+TEST(FsilsBackend, GroupedBorderedFieldCouplingSolversConverge)
+{
+    FsilsFactory factory(/*dof_per_node=*/3);
+    const auto pattern = make_dense_pattern(3);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(3);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+    const GlobalIndex dofs[3] = {0, 1, 2};
+    const Real Ke[9] = {4.0, 1.0, 1.0,
+                        1.0, 3.0, 0.0,
+                        1.0, 0.0, 1.0};
+    viewA->addMatrixEntries(dofs, Ke, assembly::AddMode::Insert);
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    // Condensed bordered coupling:
+    //   K_eff = K - B * D^{-1} * C
+    // The grouped bordered data keeps B, C, and D separate for the Schur-side
+    // correction, while the operator itself still sees the exact condensed
+    // reduced updates.
+    constexpr Real d00 = 2.0;
+    constexpr Real d01 = -0.3;
+    constexpr Real d10 = 0.4;
+    constexpr Real d11 = 1.5;
+    const Real det = d00 * d11 - d01 * d10;
+    ASSERT_GT(std::abs(det), Real(1e-12));
+    const Real dinv00 = d11 / det;
+    const Real dinv01 = -d01 / det;
+    const Real dinv10 = -d10 / det;
+    const Real dinv11 = d00 / det;
+
+    std::array<ReducedFieldUpdate, 2> updates{};
+    updates[0].sigma = -1.0;
+    updates[0].active_components = {0, 1};
+    updates[0].grouped_coupling_id = 0;
+    updates[0].left = {
+        {0, 0.08},
+        {1, -0.05},
+    };
+    updates[0].right = {
+        {0, dinv00 * 0.05 + dinv01 * 0.07},
+        {1, dinv00 * 0.11 + dinv01 * -0.03},
+    };
+
+    updates[1].sigma = -1.0;
+    updates[1].active_components = {0, 1};
+    updates[1].grouped_coupling_id = 0;
+    updates[1].left = {
+        {0, -0.04},
+        {1, 0.09},
+    };
+    updates[1].right = {
+        {0, dinv10 * 0.05 + dinv11 * 0.07},
+        {1, dinv10 * 0.11 + dinv11 * -0.03},
+    };
+
+    GroupedBorderedFieldCoupling grouped{};
+    grouped.grouped_coupling_id = 0;
+    grouped.aux_matrix = {d00, d01,
+                          d10, d11};
+    grouped.modes.resize(2);
+    grouped.modes[0].active_components = {0, 1};
+    grouped.modes[0].left = {
+        {0, 0.08},
+        {1, -0.05},
+    };
+    grouped.modes[0].right = {
+        {0, 0.05},
+        {1, 0.11},
+    };
+    grouped.modes[1].active_components = {0, 1};
+    grouped.modes[1].left = {
+        {0, -0.04},
+        {1, 0.09},
+    };
+    grouped.modes[1].right = {
+        {0, 0.07},
+        {1, -0.03},
+    };
+
+    auto x_exact = factory.createVector(3);
+    {
+        auto xs = x_exact->localSpan();
+        std::fill(xs.begin(), xs.end(), Real(1.0));
+    }
+    A->mult(*x_exact, *b);
+    addReducedFieldContributionSerial(
+        factory, *b, *x_exact, std::span<const ReducedFieldUpdate>(updates.data(), updates.size()));
+
+    const std::array<SolverMethod, 2> methods{
+        SolverMethod::BlockSchur,
+        SolverMethod::GMRES,
+    };
+
+    for (const auto method : methods) {
+        SCOPED_TRACE(method == SolverMethod::BlockSchur ? "blockschur_grouped_bordered"
+                                                        : "gmres_grouped_bordered");
+        auto x = factory.createVector(3);
+
+        SolverOptions opts;
+        if (method == SolverMethod::BlockSchur) {
+            opts.method = SolverMethod::BlockSchur;
+            opts.preconditioner = PreconditionerType::Diagonal;
+            opts.rel_tol = 1e-8;
+            opts.abs_tol = 1e-12;
+            opts.max_iter = 20;
+            opts.krylov_dim = 40;
+            opts.fsils_blockschur_gm_max_iter = 120;
+            opts.fsils_blockschur_cg_max_iter = 120;
+            opts.fsils_blockschur_gm_rel_tol = 1e-10;
+            opts.fsils_blockschur_cg_rel_tol = 1e-10;
+            BlockLayout layout;
+            layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
+            layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
+            layout.momentum_block = 0;
+            layout.constraint_block = 1;
+            opts.block_layout = layout;
+        } else {
+            opts.method = SolverMethod::GMRES;
+            opts.preconditioner = PreconditionerType::Diagonal;
+            opts.rel_tol = 1e-8;
+            opts.abs_tol = 1e-12;
+            opts.max_iter = 200;
+            opts.krylov_dim = 80;
+            opts.fsils_residual_check_policy = FsilsResidualCheckPolicy::RetryOnly;
+        }
+
+        auto solver = factory.createLinearSolver(opts);
+        ASSERT_TRUE(solver->supportsNativeReducedFieldUpdates());
+        solver->setReducedFieldUpdates(std::span<const ReducedFieldUpdate>(updates.data(), updates.size()));
+        solver->setGroupedBorderedFieldCouplings(std::span<const GroupedBorderedFieldCoupling>(&grouped, 1));
+
+        const auto rep = solver->solve(*A, *x, *b);
+        EXPECT_TRUE(rep.converged);
+
+        const Real rel = fullOperatorRelativeResidualSerial(
+            factory, *A, *x, *b, std::span<const ReducedFieldUpdate>(updates.data(), updates.size()));
+        EXPECT_LE(rel, 1e-8);
+    }
+}
+
 TEST(FsilsBackend, SolveRestartedGmresHardMatrix)
 {
     ScopedEnvVar gmres_sd("SVMP_FSILS_GMRES_SD", "4");

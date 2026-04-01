@@ -1557,6 +1557,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     std::vector<backends::ReducedFieldUpdate> assembled_reduced_field_updates;
     std::vector<backends::ReducedFieldUpdate> effective_reduced_field_updates;
     std::vector<backends::ReducedFieldUpdate> active_reduced_field_updates;
+    std::vector<backends::GroupedBorderedFieldCoupling> grouped_bordered_field_couplings;
 
     auto captureRankOneUpdates = [&]() {
         const auto updates = transient.system().lastRankOneUpdates();
@@ -1578,6 +1579,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             effective_reduced_field_updates = assembled_reduced_field_updates;
         }
         active_reduced_field_updates = effective_reduced_field_updates;
+        grouped_bordered_field_couplings.clear();
     };
 
     auto assembleResidualOnly = [&](const systems::SystemStateView& state, const char* phase) -> double {
@@ -1752,9 +1754,12 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             effective_rank_one_updates.data(), effective_rank_one_updates.size());
         const std::span<const backends::ReducedFieldUpdate> reduced_updates(
             active_reduced_field_updates.data(), active_reduced_field_updates.size());
+        const std::span<const backends::GroupedBorderedFieldCoupling> grouped_bordered_couplings(
+            grouped_bordered_field_couplings.data(), grouped_bordered_field_couplings.size());
         if (effective_rank_one_updates.empty() && active_reduced_field_updates.empty()) {
             linear.setRankOneUpdates({});
             linear.setReducedFieldUpdates({});
+            linear.setGroupedBorderedFieldCouplings({});
             return false;
         }
         const auto& bordered = transient.system().borderedCoupling();
@@ -1811,11 +1816,13 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         if (use_native_rank_one_updates) {
             linear.setRankOneUpdates(rank_one_updates);
             linear.setReducedFieldUpdates(reduced_updates);
+            linear.setGroupedBorderedFieldCouplings(grouped_bordered_couplings);
             return false;
         }
 
         linear.setRankOneUpdates({});
         linear.setReducedFieldUpdates({});
+        linear.setGroupedBorderedFieldCouplings({});
         {
             // Assemble the direct feedthrough contribution explicitly into the
             // bordered Jacobian so the monolithic Newton operator is backend
@@ -2499,6 +2506,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         const auto& bordered = transient.system().borderedCoupling();
         const bool has_bordered = bordered.active && bordered.n_aux > 0;
         active_reduced_field_updates = effective_reduced_field_updates;
+        grouped_bordered_field_couplings.clear();
         bool condensed_bordered_active = false;
         std::vector<Real> condensed_rhs_shift;
         std::vector<Real> condensed_Dinv;
@@ -2548,16 +2556,25 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 }
 
                 const auto& owned_dofs = transient.system().dofHandler().getPartition().locallyOwned();
+                backends::GroupedBorderedFieldCoupling bordered_group;
+                bordered_group.grouped_coupling_id = 0;
+                bordered_group.aux_matrix.assign(bordered.D.begin(), bordered.D.end());
+                bordered_group.modes.reserve(na);
                 for (std::size_t j = 0; j < na; ++j) {
                     backends::ReducedFieldUpdate upd;
                     upd.sigma = Real(-1.0);
+                    upd.grouped_coupling_id = 0;
                     upd.left.reserve(nf);
                     upd.right.reserve(nf);
+                    backends::GroupedBorderedFieldCoupling::Mode mode;
+                    mode.left.reserve(nf);
+                    mode.right.reserve(nf);
                     for (std::size_t row = 0; row < nf; ++row) {
                         const Real val = bordered.B[row + nf * j];
                         if (std::abs(val) > Real(1e-30) &&
                             owned_dofs.contains(static_cast<GlobalIndex>(row))) {
                             upd.left.emplace_back(static_cast<GlobalIndex>(row), val);
+                            mode.left.emplace_back(static_cast<GlobalIndex>(row), val);
                         }
                     }
                     for (std::size_t col = 0; col < nf; ++col) {
@@ -2566,10 +2583,21 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                             owned_dofs.contains(static_cast<GlobalIndex>(col))) {
                             upd.right.emplace_back(static_cast<GlobalIndex>(col), val);
                         }
+                        const Real c_val = bordered.Ct[j * nf + col];
+                        if (std::abs(c_val) > Real(1e-30) &&
+                            owned_dofs.contains(static_cast<GlobalIndex>(col))) {
+                            mode.right.emplace_back(static_cast<GlobalIndex>(col), c_val);
+                        }
                     }
                     if (!upd.left.empty() && !upd.right.empty()) {
                         active_reduced_field_updates.push_back(std::move(upd));
                     }
+                    if (!mode.left.empty() && !mode.right.empty()) {
+                        bordered_group.modes.push_back(std::move(mode));
+                    }
+                }
+                if (!bordered_group.aux_matrix.empty() && !bordered_group.modes.empty()) {
+                    grouped_bordered_field_couplings.push_back(std::move(bordered_group));
                 }
 
                 if (oopTraceEnabled()) {
@@ -2579,7 +2607,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         << " n_field_dofs=" << nf
                         << " added_updates="
                         << (active_reduced_field_updates.size() -
-                            effective_reduced_field_updates.size());
+                            effective_reduced_field_updates.size())
+                        << " grouped_couplings="
+                        << grouped_bordered_field_couplings.size();
                     traceLog(oss.str());
                 }
             }

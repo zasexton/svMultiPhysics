@@ -30,6 +30,8 @@ public:
 
     void setRankOneUpdates(std::span<const RankOneUpdate> updates) override;
     void setReducedFieldUpdates(std::span<const ReducedFieldUpdate> updates) override;
+    void setGroupedBorderedFieldCouplings(
+        std::span<const GroupedBorderedFieldCoupling> groups) override;
     void setDirichletDofs(std::span<const GlobalIndex> dofs) override;
     [[nodiscard]] bool supportsNativeRankOneUpdates() const noexcept override { return true; }
     [[nodiscard]] bool supportsNativeReducedFieldUpdates() const noexcept override { return true; }
@@ -42,6 +44,7 @@ private:
     SolverOptions options_{};
     std::vector<RankOneUpdate> rank_one_updates_{};
     std::vector<ReducedFieldUpdate> reduced_field_updates_{};
+    std::vector<GroupedBorderedFieldCoupling> grouped_bordered_field_couplings_{};
     std::vector<GlobalIndex> dirichlet_dofs_{};
     double dt_eff_{1.0};
 

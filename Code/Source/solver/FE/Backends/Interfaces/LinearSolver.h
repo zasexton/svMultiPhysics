@@ -54,6 +54,25 @@ struct ReducedFieldUpdate {
     /// Empty means all components (backward compat). When set, the backend
     /// uses these instead of inferring from block layout or dof count.
     std::vector<int> active_components{};
+    /// Internal grouping id for coupled bordered condensation. `-1` means the
+    /// update is standalone and should be treated independently.
+    int grouped_coupling_id{-1};
+};
+
+/// Exact grouped bordered coupling data for condensed monolithic auxiliary
+/// states. This keeps the grouped auxiliary matrix `D` separate from the field
+/// factors `B`/`C`, instead of flattening everything to independent
+/// `D^{-1}C`-based updates up front.
+struct GroupedBorderedFieldCoupling {
+    struct Mode {
+        std::vector<std::pair<GlobalIndex, Real>> left;   ///< Column of B
+        std::vector<std::pair<GlobalIndex, Real>> right;  ///< Row of C
+        std::vector<int> active_components{};
+    };
+
+    int grouped_coupling_id{-1};
+    std::vector<Real> aux_matrix;  ///< Dense D block (n_aux x n_aux), row-major
+    std::vector<Mode> modes;       ///< One mode per auxiliary unknown
 };
 
 class LinearSolver {
@@ -99,6 +118,13 @@ public:
     ///
     /// Default is a no-op.
     virtual void setDirichletDofs(std::span<const GlobalIndex> /*dofs*/) {}
+
+    /// Provide grouped bordered field couplings for exact Schur-side coarse /
+    /// Woodbury treatment of condensed monolithic auxiliary states.
+    ///
+    /// Default is a no-op.
+    virtual void setGroupedBorderedFieldCouplings(
+        std::span<const GroupedBorderedFieldCoupling> /*groups*/) {}
 
     /// Returns true if this backend handles rank-1 updates natively (mat-vec + preconditioner).
     [[nodiscard]] virtual bool supportsNativeRankOneUpdates() const noexcept { return false; }
