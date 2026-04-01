@@ -415,6 +415,11 @@ struct MomentumHatData {
   Array<double> ilu_diag_inv;
   Array<double> sparse_inverse;
   bool use_ilu{false};
+  bool use_asm{false};
+  std::vector<fsils_int> asm_patch_ptr;
+  std::vector<fsils_int> asm_patch_nodes;
+  std::vector<fsils_int> asm_patch_matrix_ptr;
+  std::vector<double> asm_patch_inverse;
 };
 
 struct SchurPreconditionerData {
@@ -434,9 +439,6 @@ struct SchurPreconditionerData {
   std::vector<Array<double>> low_rank_right;
   std::vector<Array<double>> low_rank_preconditioned_left;
   std::vector<double> low_rank_inner_inv;
-  std::vector<Array<double>> coarse_basis;
-  std::vector<Array<double>> coarse_operator_basis;
-  std::vector<double> coarse_inner_inv;
   Array<double> scratch_rhs;
   Array<double> scratch_ax;
   Array<double> scratch_gp;
@@ -453,7 +455,6 @@ struct SchurSolveCacheEntry {
   int con_ncomp{0};
   fsils_int nNo{0};
   SchurPreconditionerData preconditioner;
-  Array<double> previous_solution;
 };
 
 [[nodiscard]] std::unordered_map<const fe_fsi_linear_solver::FSILS_subLsType*, SchurSolveCacheEntry>& schur_cache_registry()
@@ -465,11 +466,6 @@ struct SchurSolveCacheEntry {
 [[nodiscard]] SchurSolveCacheEntry& schur_cache_entry(fe_fsi_linear_solver::FSILS_subLsType& ls)
 {
   return schur_cache_registry()[&ls];
-}
-
-[[nodiscard]] bool has_cached_schur_solution(const SchurSolveCacheEntry& cache, int con_ncomp, fsils_int nNo)
-{
-  return cache.previous_solution.nrows() == con_ncomp && cache.previous_solution.ncols() == nNo;
 }
 
 [[nodiscard]] inline const double* block_ptr(const Array<double>& A, int block_entries, fsils_int index)
@@ -803,6 +799,210 @@ void build_sparse_block_ilu_inverse(const Array<fsils_int>& rowPtr,
   }
 }
 
+void build_zero_overlap_asm_patches(const Array<fsils_int>& rowPtr,
+                                    const Vector<fsils_int>& colPtr,
+                                    fsils_int nNo,
+                                    std::vector<fsils_int>& patch_ptr,
+                                    std::vector<fsils_int>& patch_nodes)
+{
+  patch_ptr.clear();
+  patch_nodes.clear();
+  patch_ptr.push_back(0);
+
+  std::vector<unsigned char> assigned(static_cast<std::size_t>(nNo), 0);
+  std::vector<fsils_int> patch;
+  for (fsils_int row = 0; row < nNo; ++row) {
+    if (assigned[static_cast<std::size_t>(row)]) {
+      continue;
+    }
+
+    patch.clear();
+    patch.push_back(row);
+    assigned[static_cast<std::size_t>(row)] = 1;
+
+    for (fsils_int p = rowPtr(0, row); p <= rowPtr(1, row); ++p) {
+      const fsils_int col = colPtr(p);
+      if (col < 0 || col >= nNo || assigned[static_cast<std::size_t>(col)]) {
+        continue;
+      }
+      patch.push_back(col);
+      assigned[static_cast<std::size_t>(col)] = 1;
+    }
+
+    std::sort(patch.begin(), patch.end());
+    patch_nodes.insert(patch_nodes.end(), patch.begin(), patch.end());
+    patch_ptr.push_back(static_cast<fsils_int>(patch_nodes.size()));
+  }
+}
+
+void build_zero_overlap_asm_inverse(const Array<fsils_int>& rowPtr,
+                                    const Vector<fsils_int>& colPtr,
+                                    fsils_int nNo,
+                                    fsils_int nnz,
+                                    int block_size,
+                                    const Array<double>& values,
+                                    std::vector<fsils_int>& patch_ptr,
+                                    std::vector<fsils_int>& patch_nodes,
+                                    std::vector<fsils_int>& patch_matrix_ptr,
+                                    std::vector<double>& patch_inverse,
+                                    Array<double>& sparse_inverse)
+{
+  build_zero_overlap_asm_patches(rowPtr, colPtr, nNo, patch_ptr, patch_nodes);
+
+  patch_matrix_ptr.clear();
+  patch_inverse.clear();
+  patch_matrix_ptr.push_back(0);
+  sparse_inverse.resize(block_size * block_size, nnz);
+  sparse_inverse = 0.0;
+
+  std::vector<double> dense;
+  std::vector<double> dense_inv;
+  std::vector<double> fallback_diag;
+  std::vector<double> fallback_inv;
+  for (std::size_t patch_index = 0; patch_index + 1 < patch_ptr.size(); ++patch_index) {
+    const fsils_int begin = patch_ptr[patch_index];
+    const fsils_int end = patch_ptr[patch_index + 1];
+    const int patch_size = static_cast<int>(end - begin);
+    if (patch_size <= 0) {
+      patch_matrix_ptr.push_back(static_cast<fsils_int>(patch_inverse.size()));
+      continue;
+    }
+
+    const int patch_dof = patch_size * block_size;
+    dense.assign(static_cast<std::size_t>(patch_dof) * static_cast<std::size_t>(patch_dof), 0.0);
+    dense_inv.assign(static_cast<std::size_t>(patch_dof) * static_cast<std::size_t>(patch_dof), 0.0);
+    fallback_diag.assign(static_cast<std::size_t>(block_size) * static_cast<std::size_t>(block_size), 0.0);
+    fallback_inv.assign(static_cast<std::size_t>(block_size) * static_cast<std::size_t>(block_size), 0.0);
+
+    for (int local_row = 0; local_row < patch_size; ++local_row) {
+      const fsils_int row_node = patch_nodes[static_cast<std::size_t>(begin + local_row)];
+      for (int local_col = 0; local_col < patch_size; ++local_col) {
+        const fsils_int col_node = patch_nodes[static_cast<std::size_t>(begin + local_col)];
+        const fsils_int nz = find_col_in_row(rowPtr, colPtr, row_node, col_node);
+        if (nz < 0) {
+          continue;
+        }
+
+        const double* block = block_ptr(values, block_size * block_size, nz);
+        for (int bi = 0; bi < block_size; ++bi) {
+          for (int bj = 0; bj < block_size; ++bj) {
+            dense[static_cast<std::size_t>(local_row * block_size + bi) *
+                      static_cast<std::size_t>(patch_dof) +
+                  static_cast<std::size_t>(local_col * block_size + bj)] =
+                block[bi * block_size + bj];
+          }
+        }
+      }
+    }
+
+    if (!invert_dense_block(patch_dof, dense.data(), dense_inv.data())) {
+      std::fill(dense_inv.begin(), dense_inv.end(), 0.0);
+      for (int local_row = 0; local_row < patch_size; ++local_row) {
+        const fsils_int row_node = patch_nodes[static_cast<std::size_t>(begin + local_row)];
+        const fsils_int nz = find_col_in_row(rowPtr, colPtr, row_node, row_node);
+        if (nz < 0) {
+          continue;
+        }
+        const double* block = block_ptr(values, block_size * block_size, nz);
+        std::copy(block, block + block_size * block_size, fallback_diag.begin());
+        if (!invert_dense_block(block_size, fallback_diag.data(), fallback_inv.data())) {
+          for (int d = 0; d < block_size; ++d) {
+            dense_inv[static_cast<std::size_t>(local_row * block_size + d) *
+                          static_cast<std::size_t>(patch_dof) +
+                      static_cast<std::size_t>(local_row * block_size + d)] =
+                safe_inverse(block[d * block_size + d]);
+          }
+        } else {
+          for (int bi = 0; bi < block_size; ++bi) {
+            for (int bj = 0; bj < block_size; ++bj) {
+              dense_inv[static_cast<std::size_t>(local_row * block_size + bi) *
+                            static_cast<std::size_t>(patch_dof) +
+                        static_cast<std::size_t>(local_row * block_size + bj)] =
+                  fallback_inv[static_cast<std::size_t>(bi) * static_cast<std::size_t>(block_size) +
+                               static_cast<std::size_t>(bj)];
+            }
+          }
+        }
+      }
+    }
+
+    for (int local_row = 0; local_row < patch_size; ++local_row) {
+      const fsils_int row_node = patch_nodes[static_cast<std::size_t>(begin + local_row)];
+      for (int local_col = 0; local_col < patch_size; ++local_col) {
+        const fsils_int col_node = patch_nodes[static_cast<std::size_t>(begin + local_col)];
+        const fsils_int nz = find_col_in_row(rowPtr, colPtr, row_node, col_node);
+        if (nz < 0) {
+          continue;
+        }
+
+        double* out = block_ptr(sparse_inverse, block_size * block_size, nz);
+        for (int bi = 0; bi < block_size; ++bi) {
+          for (int bj = 0; bj < block_size; ++bj) {
+            out[bi * block_size + bj] =
+                dense_inv[static_cast<std::size_t>(local_row * block_size + bi) *
+                              static_cast<std::size_t>(patch_dof) +
+                          static_cast<std::size_t>(local_col * block_size + bj)];
+          }
+        }
+      }
+    }
+
+    patch_matrix_ptr.push_back(static_cast<fsils_int>(patch_inverse.size() + dense_inv.size()));
+    patch_inverse.insert(patch_inverse.end(), dense_inv.begin(), dense_inv.end());
+  }
+}
+
+void apply_zero_overlap_asm(int block_size,
+                            const std::vector<fsils_int>& patch_ptr,
+                            const std::vector<fsils_int>& patch_nodes,
+                            const std::vector<fsils_int>& patch_matrix_ptr,
+                            const std::vector<double>& patch_inverse,
+                            Array<double>& x,
+                            bool transpose)
+{
+  const fsils_int nNo = x.ncols();
+  Array<double> y(block_size, nNo);
+  y = 0.0;
+
+  std::vector<double> patch_rhs;
+  std::vector<double> patch_sol;
+  for (std::size_t patch_index = 0; patch_index + 1 < patch_ptr.size(); ++patch_index) {
+    const fsils_int begin = patch_ptr[patch_index];
+    const fsils_int end = patch_ptr[patch_index + 1];
+    const int patch_size = static_cast<int>(end - begin);
+    if (patch_size <= 0) {
+      continue;
+    }
+    const int patch_dof = patch_size * block_size;
+    const double* inv =
+        patch_inverse.data() + static_cast<std::size_t>(patch_matrix_ptr[patch_index]);
+
+    patch_rhs.assign(static_cast<std::size_t>(patch_dof), 0.0);
+    patch_sol.assign(static_cast<std::size_t>(patch_dof), 0.0);
+    for (int local_node = 0; local_node < patch_size; ++local_node) {
+      const fsils_int node = patch_nodes[static_cast<std::size_t>(begin + local_node)];
+      for (int comp = 0; comp < block_size; ++comp) {
+        patch_rhs[static_cast<std::size_t>(local_node * block_size + comp)] = x(comp, node);
+      }
+    }
+
+    if (transpose) {
+      multiply_block_vector_transpose(inv, patch_dof, patch_dof, patch_rhs.data(), patch_sol.data());
+    } else {
+      multiply_block_vector(inv, patch_dof, patch_dof, patch_rhs.data(), patch_sol.data());
+    }
+
+    for (int local_node = 0; local_node < patch_size; ++local_node) {
+      const fsils_int node = patch_nodes[static_cast<std::size_t>(begin + local_node)];
+      for (int comp = 0; comp < block_size; ++comp) {
+        y(comp, node) = patch_sol[static_cast<std::size_t>(local_node * block_size + comp)];
+      }
+    }
+  }
+
+  x = y;
+}
+
 [[nodiscard]] bool block_is_zero(const double* block, int count)
 {
   for (int i = 0; i < count; ++i) {
@@ -1038,6 +1238,16 @@ void apply_momentum_hat(const Array<fsils_int>& rowPtr,
                         const MomentumHatData& hat,
                         Array<double>& x)
 {
+  if (hat.use_asm) {
+    apply_zero_overlap_asm(mom_ncomp,
+                           hat.asm_patch_ptr,
+                           hat.asm_patch_nodes,
+                           hat.asm_patch_matrix_ptr,
+                           hat.asm_patch_inverse,
+                           x,
+                           /*transpose=*/false);
+    return;
+  }
   if (hat.use_ilu) {
     apply_block_ilu0(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, hat.ilu_factors, hat.ilu_diag_inv, x);
     return;
@@ -1053,6 +1263,16 @@ void apply_momentum_hat_transpose(const Array<fsils_int>& rowPtr,
                                   const MomentumHatData& hat,
                                   Array<double>& x)
 {
+  if (hat.use_asm) {
+    apply_zero_overlap_asm(mom_ncomp,
+                           hat.asm_patch_ptr,
+                           hat.asm_patch_nodes,
+                           hat.asm_patch_matrix_ptr,
+                           hat.asm_patch_inverse,
+                           x,
+                           /*transpose=*/true);
+    return;
+  }
   if (hat.use_ilu) {
     apply_block_ilu0_transpose(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, hat.ilu_factors, hat.ilu_diag_inv, x);
     return;
@@ -1194,7 +1414,7 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
                                                                system_dof);
   };
 
-  auto add_local_update_entries =
+  auto add_graph_update_entries =
       [&](const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update) {
     if (!update.active || std::abs(update.sigma) <= 1e-30) {
       return;
@@ -1230,23 +1450,24 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
       right_by_node[node].emplace_back(local_comp, entry.value);
     }
 
-    for (const auto& [node, left_vals] : left_by_node) {
-      const auto it = right_by_node.find(node);
-      if (it == right_by_node.end()) {
-        continue;
-      }
-      const fsils_int diag_nz = diagPtr(node);
-      double* diag_block = block_ptr(K_eff, block_entries, diag_nz);
-      for (const auto& [li, lval] : left_vals) {
-        for (const auto& [rj, rval] : it->second) {
-          diag_block[li * mom_ncomp + rj] += update.sigma * lval * rval;
+    for (const auto& [row_node, left_vals] : left_by_node) {
+      for (const auto& [col_node, right_vals] : right_by_node) {
+        const fsils_int nz = find_col_in_row(rowPtr, colPtr, row_node, col_node);
+        if (nz < 0) {
+          continue;
+        }
+        double* block = block_ptr(K_eff, block_entries, nz);
+        for (const auto& [li, lval] : left_vals) {
+          for (const auto& [rj, rval] : right_vals) {
+            block[li * mom_ncomp + rj] += update.sigma * lval * rval;
+          }
         }
       }
     }
   };
 
   for (const auto& update : lhs.reduced_updates) {
-    add_local_update_entries(update);
+    add_graph_update_entries(update);
   }
 
   switch (approx) {
@@ -1261,7 +1482,7 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
                                           hat.sparse_inverse);
       return hat;
     case SchurMomentumApproximationType::ILU_K:
-    case SchurMomentumApproximationType::ASM_K: {
+    {
       factorize_block_ilu0(rowPtr, colPtr, diagPtr, nNo, mom_ncomp, K_eff,
                            hat.ilu_factors, hat.ilu_diag_inv);
       hat.point_inv = hat.ilu_diag_inv;
@@ -1269,6 +1490,15 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
                                      hat.ilu_factors, hat.ilu_diag_inv, hat.sparse_inverse);
       prune_sparse_momentum_hat(rowPtr, colPtr, diagPtr, nNo, mom_ncomp, hat.sparse_inverse);
       hat.use_ilu = true;
+      return hat;
+    }
+    case SchurMomentumApproximationType::ASM_K: {
+      build_zero_overlap_asm_inverse(rowPtr, colPtr, nNo, K_eff.ncols(), mom_ncomp, K_eff,
+                                     hat.asm_patch_ptr, hat.asm_patch_nodes,
+                                     hat.asm_patch_matrix_ptr, hat.asm_patch_inverse,
+                                     hat.sparse_inverse);
+      build_point_inverse_blocks(diagPtr, mom_ncomp, nNo, K_eff, /*diagonal_only=*/false, hat.point_inv);
+      hat.use_asm = true;
       return hat;
     }
   }
@@ -1553,7 +1783,8 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   pc.low_rank_preconditioned_left.clear();
   pc.low_rank_right.reserve(columns.size());
   pc.low_rank_preconditioned_left.reserve(columns.size());
-  for (auto& column : columns) {
+  for (std::size_t column_index = 0; column_index < columns.size(); ++column_index) {
+    auto& column = columns[column_index];
     pc.low_rank_right.push_back(column.schur_right);
     Array<double> z = column.schur_left;
     apply_base_schur_preconditioner(lhs.rowPtr, lhs.colPtr, lhs.diagPtr,
@@ -1834,7 +2065,6 @@ void schur_impl(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     cache.mom_ncomp = mom_ncomp;
     cache.con_ncomp = con_ncomp;
     cache.nNo = nNo;
-    cache.previous_solution.resize(0, 0);
   }
   auto& pc = cache.preconditioner;
 
