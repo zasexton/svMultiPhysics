@@ -6,7 +6,7 @@
  * @brief Unsteady incompressible Navier–Stokes formulation using FE/Forms (residual-based VMS + backflow stabilization)
  *
  * This module installs a coupled velocity/pressure system:
- *   ρ (∂u/∂t + (u·∇)u - f) + ∇p - ∇·(2 μ(γ) ε(u)) = 0  in Ω
+ *   ρ (∂u/∂t + (u·∇)u - f) + ∇p - ∇·(2 μ(γ) ε(u)) = 0      in Ω
  *   ∇·u = 0                                                in Ω
  *
  * with residual-based VMS static subscales:

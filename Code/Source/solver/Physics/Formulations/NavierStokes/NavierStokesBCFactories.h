@@ -67,6 +67,17 @@ namespace detail {
     return markerName("ns_rcrcr", boundary_marker);
 }
 
+
+    /**
+     * @brief Create an RCR outflow BC model.
+     *
+     * This is code defines the RCR windkessel model for an AuxiliaryState
+     * system defining the ODE that will be coupled to the boundary of a fluid
+     * problem.
+     *
+     * @note See also: toCoupledOutflowBC() for the registration of this
+     * AuxiliaryState model to the FESystem.
+     */
 [[nodiscard]] inline std::shared_ptr<FE::systems::BuiltAuxiliaryModel> rcrOutflowModel()
 {
     static const auto model = FE::systems::aux::model("rcr_windkessel", [](FE::systems::ModelFacade& m) {
@@ -216,13 +227,13 @@ namespace detail {
  * math-first DSL, deploys it with typed handles, and returns a standard
  * NaturalBC that reads the outlet pressure from the deployment handle.
  *
- * @param bc       RCR outflow boundary condition options.
- * @param system   The FESystem to register inputs and deploy models on.
- * @param u_id     Velocity field ID.
- * @param velocity_space Velocity function space.
+ * @param bc                  RCR outflow boundary condition options.
+ * @param system              The FESystem to register inputs and deploy models on.
+ * @param u_id                Velocity field ID.
+ * @param velocity_space      Velocity function space.
  * @param velocity_field_name Name of the velocity field (e.g., "u").
- * @param u        FormExpr for velocity (test/trial context).
- * @param rho      FormExpr for density.
+ * @param u                   FormExpr for velocity (test/trial context).
+ * @param rho                 FormExpr for density.
  */
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toCoupledOutflowBC(
     const IncompressibleNavierStokesVMSOptions::CoupledRCROutflowBC& bc,
