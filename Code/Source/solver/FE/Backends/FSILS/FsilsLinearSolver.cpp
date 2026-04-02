@@ -809,8 +809,16 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         }
     };
 
+    std::vector<std::size_t> native_face_rank_one_indices;
+    native_face_rank_one_indices.reserve(rank_one_updates_.size());
+    for (std::size_t i = 0; i < rank_one_updates_.size(); ++i) {
+        if (rank_one_updates_[i].prefer_native_face) {
+            native_face_rank_one_indices.push_back(i);
+        }
+    }
+
     const bool has_native_rank_one_updates =
-        !rank_one_updates_.empty() || !reduced_field_updates_.empty();
+        !native_face_rank_one_indices.empty() || !reduced_field_updates_.empty();
 
     auto& ls = ls_;
     using BlockSchurStats = std::decay_t<decltype(ls.blockschur_stats)>;
@@ -903,7 +911,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     //  - rank-1 updates (coupled BC Sherman-Morrison correction)
     const int original_nFaces = lhs.nFaces;
     const int num_dirichlet_faces = (!dirichlet_dofs_.empty() ? 1 : 0);
-    const int num_rank_one_faces = 0;
+    const int num_rank_one_faces = static_cast<int>(native_face_rank_one_indices.size());
     const int num_added_faces = num_dirichlet_faces + num_rank_one_faces;
 
     int dirichlet_face_index = -1;
@@ -1000,6 +1008,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         faces_from_cache = true;
     }
 
+    lhs.native_face_rank_one_count = num_rank_one_faces;
+
     if (num_added_faces > 0 && dof > 0 && !faces_from_cache) {
         const auto shared = A->shared();
         FE_CHECK_NOT_NULL(shared.get(), "FsilsLinearSolver: FsilsShared for face setup");
@@ -1087,7 +1097,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
         rank_one_face_start = next_face;
         for (int u = 0; u < num_rank_one_faces; ++u) {
-            const auto& upd = rank_one_updates_[static_cast<std::size_t>(u)];
+            const auto update_index = native_face_rank_one_indices[static_cast<std::size_t>(u)];
+            const auto& upd = rank_one_updates_[update_index];
             const int faIn = rank_one_face_start + u;
 
             // Determine which per-node components participate in this rank-1 update.
@@ -1226,7 +1237,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                     }
                 }
                 std::ostringstream oss;
-                oss << "FsilsLinearSolver: rank-1 update " << u
+                oss << "FsilsLinearSolver: rank-1 update " << update_index
                     << " -> FSILS face " << faIn
                     << " nNo=" << face_nNo
                     << " owned=" << owned_nodes
@@ -1393,6 +1404,88 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             return native_update;
         };
 
+        auto build_face_from_reduced_entries =
+            [&](const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update,
+                const std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>& entries,
+                fe_fsi_linear_solver::FSILS_faceType& face) {
+            std::vector<int> face_comps = !update.active_components.empty()
+                                              ? update.active_components
+                                              : default_active_components();
+            const int face_dof = static_cast<int>(face_comps.size());
+            if (face_dof <= 0) {
+                return;
+            }
+
+            std::vector<int> comp_to_face_idx(static_cast<std::size_t>(dof), -1);
+            for (int fi = 0; fi < face_dof; ++fi) {
+                const int comp = face_comps[static_cast<std::size_t>(fi)];
+                if (comp >= 0 && comp < dof) {
+                    comp_to_face_idx[static_cast<std::size_t>(comp)] = fi;
+                }
+            }
+
+            Array<double> face_values(face_dof, lhs.nNo);
+            face_values = 0.0;
+            for (const auto& entry : entries) {
+                if (entry.node < 0 || entry.node >= lhs.nNo || std::abs(entry.value) <= 1e-30) {
+                    continue;
+                }
+                if (entry.full_component < 0 || entry.full_component >= dof) {
+                    continue;
+                }
+                const int face_comp = comp_to_face_idx[static_cast<std::size_t>(entry.full_component)];
+                if (face_comp < 0) {
+                    continue;
+                }
+                face_values(face_comp, entry.node) += entry.value;
+            }
+
+            std::vector<int> face_nodes;
+            face_nodes.reserve(static_cast<std::size_t>(lhs.nNo));
+            for (int internal = 0; internal < lhs.nNo; ++internal) {
+                bool has_support = false;
+                for (int c = 0; c < face_dof; ++c) {
+                    if (std::abs(face_values(c, internal)) > 0.0) {
+                        has_support = true;
+                        break;
+                    }
+                }
+                if (has_support) {
+                    face_nodes.push_back(internal);
+                }
+            }
+
+            face.nNo = static_cast<int>(face_nodes.size());
+            face.dof = face_dof;
+            face.bGrp = fe_fsi_linear_solver::BcType::BC_TYPE_Neu;
+            face.foC = true;
+            face.coupledFlag = true;
+            face.incFlag = true;
+            face.sharedFlag = false;
+            face.nS = 0.0;
+            face.res = 0.0;
+            if (face.nNo <= 0) {
+                return;
+            }
+
+            face.glob.resize(face.nNo);
+            face.val.resize(face_dof, face.nNo);
+            face.valM.resize(face_dof, face.nNo);
+            face.val = 0.0;
+            face.valM = 0.0;
+            for (int a = 0; a < face.nNo; ++a) {
+                const int internal = face_nodes[static_cast<std::size_t>(a)];
+                face.glob(a) = internal;
+                for (int c = 0; c < face_dof; ++c) {
+                    face.val(c, a) = face_values(c, internal);
+                    face.valM(c, a) = face_values(c, internal);
+                }
+            }
+
+            sort_face_by_glob(face, face_dof);
+            sync_face_val_if_shared(face, face_dof);
+        };
+
         auto append_reduced_update = [&](Real sigma,
                                         std::span<const std::pair<GlobalIndex, Real>> left,
                                         std::span<const std::pair<GlobalIndex, Real>> right,
@@ -1403,11 +1496,18 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                                            grouped_coupling_id, Real(1.0),
                                            /*scale_sigma=*/true);
             if (native_update.active) {
+                build_face_from_reduced_entries(native_update, native_update.left, native_update.left_face);
+                build_face_from_reduced_entries(native_update, native_update.right, native_update.right_face);
+                native_update.has_face_cache =
+                    native_update.left_face.nNo > 0 && native_update.right_face.nNo > 0;
                 lhs.reduced_updates.push_back(std::move(native_update));
             }
         };
 
         for (const auto& upd : rank_one_updates_) {
+            if (upd.prefer_native_face) {
+                continue;
+            }
             append_reduced_update(upd.sigma,
                                   std::span<const std::pair<GlobalIndex, Real>>(upd.v.data(), upd.v.size()),
                                   std::span<const std::pair<GlobalIndex, Real>>(upd.v.data(), upd.v.size()),
@@ -1432,6 +1532,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             native_group.grouped_coupling_id = group.grouped_coupling_id;
             native_group.aux_matrix.assign(group.aux_matrix.begin(), group.aux_matrix.end());
             native_group.modes.reserve(group.modes.size());
+            native_group.left_faces.reserve(group.modes.size());
+            native_group.right_faces.reserve(group.modes.size());
             for (const auto& mode : group.modes) {
                 auto native_mode =
                     make_native_reduced_update(Real(1.0),
@@ -1445,7 +1547,13 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                                                grouped_left_scale,
                                                /*scale_sigma=*/false);
                 if (native_mode.active) {
+                    fe_fsi_linear_solver::FSILS_faceType left_face;
+                    fe_fsi_linear_solver::FSILS_faceType right_face;
+                    build_face_from_reduced_entries(native_mode, native_mode.left, left_face);
+                    build_face_from_reduced_entries(native_mode, native_mode.right, right_face);
                     native_group.modes.push_back(std::move(native_mode));
+                    native_group.left_faces.push_back(std::move(left_face));
+                    native_group.right_faces.push_back(std::move(right_face));
                 }
             }
             if (!native_group.aux_matrix.empty() && !native_group.modes.empty()) {
@@ -1475,7 +1583,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             // Set resistance values for rank-1 faces.
             for (int u = 0; u < num_rank_one_faces; ++u) {
                 const int faIn = rank_one_face_start + u;
-                const double sigma = static_cast<double>(rank_one_updates_[static_cast<std::size_t>(u)].sigma);
+                const auto update_index = native_face_rank_one_indices[static_cast<std::size_t>(u)];
+                const double sigma = static_cast<double>(rank_one_updates_[update_index].sigma);
                 res_original(faIn) = sigma;
                 res_blockschur(faIn) = sigma * stage_scale;
             }
@@ -2411,6 +2520,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         lhs.face.resize(static_cast<std::size_t>(original_nFaces));
         lhs.nFaces = original_nFaces;
     }
+    lhs.native_face_rank_one_count = 0;
     lhs.reduced_updates.clear();
     lhs.grouped_bordered_field_couplings.clear();
 

@@ -45,6 +45,7 @@
 #include "ge.h"
 #include "gmres.h"
 #include "norm.h"
+#include "omp_la.h"
 #include "spar_mul.h"
 
 #include "Array3.h"
@@ -58,6 +59,8 @@ namespace ns_solver {
 using fe_fsi_linear_solver::fsils_int;
 
 namespace {
+
+constexpr int kNativeFaceDuplicateCouplingId = -2;
 
 [[nodiscard]] bool fsilsTraceEnabled() noexcept
 {
@@ -78,6 +81,810 @@ namespace {
     return false;
   }
   return *env != '0';
+}
+
+struct ExplicitReducedBlockCorrection {
+  double sigma{0.0};
+  Array<double> left_momentum;
+  Array<double> left_constraint;
+  Array<double> right_momentum;
+  Array<double> right_constraint;
+};
+
+struct ExplicitGroupedBlockCorrection {
+  std::vector<double> dense_coeff;
+  std::vector<Array<double>> left_momentum_modes;
+  std::vector<Array<double>> left_constraint_modes;
+  std::vector<Array<double>> right_momentum_modes;
+  std::vector<Array<double>> right_constraint_modes;
+};
+
+[[nodiscard]] int reduced_local_component(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                          const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update,
+                                          int full_component,
+                                          int current_dof)
+{
+  const int system_dof = (lhs.system_dof > 0) ? lhs.system_dof : current_dof;
+  return fe_fsi_linear_solver::fsils_reduced_local_component(update,
+                                                             full_component,
+                                                             current_dof,
+                                                             system_dof);
+}
+
+bool fill_projected_reduced_vector(
+    const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+    const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update,
+    const std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>& entries,
+    int current_dof,
+    Array<double>& values)
+{
+  values.resize(current_dof, lhs.nNo);
+  values = 0.0;
+
+  bool nonzero = false;
+  for (const auto& entry : entries) {
+    if (entry.node < 0 || entry.node >= lhs.nNo || std::abs(entry.value) <= 1e-30) {
+      continue;
+    }
+    const int comp = reduced_local_component(lhs, update, entry.full_component, current_dof);
+    if (comp < 0 || comp >= current_dof) {
+      continue;
+    }
+    values(comp, entry.node) += entry.value;
+    nonzero = true;
+  }
+  return nonzero;
+}
+
+bool fill_projected_block_vector(
+    const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+    const std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>& entries,
+    int block_start,
+    int block_dof,
+    Array<double>& values)
+{
+  values.resize(block_dof, lhs.nNo);
+  values = 0.0;
+
+  bool nonzero = false;
+  for (const auto& entry : entries) {
+    if (entry.node < 0 || entry.node >= lhs.nNo || std::abs(entry.value) <= 1e-30) {
+      continue;
+    }
+    const int comp = entry.full_component - block_start;
+    if (comp < 0 || comp >= block_dof) {
+      continue;
+    }
+    values(comp, entry.node) += entry.value;
+    nonzero = true;
+  }
+  return nonzero;
+}
+
+double dense_dense_owned_dot_local(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                   int dof,
+                                   const Array<double>& left,
+                                   const Array<double>& right)
+{
+  double local_dot = 0.0;
+  for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+    for (int comp = 0; comp < dof; ++comp) {
+      local_dot += left(comp, node) * right(comp, node);
+    }
+  }
+  return local_dot;
+}
+
+void allreduce_sum_in_place(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                            std::vector<double>& values)
+{
+  if (lhs.commu.nTasks > 1 && !values.empty()) {
+    fe_fsi_linear_solver::fsils_allreduce_sum_in_place(values.data(),
+                                                       static_cast<int>(values.size()),
+                                                       cm_mod::mpreal,
+                                                       lhs.commu);
+  }
+}
+
+void dense_axpy(int dof,
+                fsils_int nNo,
+                const Array<double>& src,
+                double scale,
+                Array<double>& dst)
+{
+  if (std::abs(scale) <= 1e-30 || src.nrows() != dof || src.ncols() != nNo ||
+      dst.nrows() != dof || dst.ncols() != nNo) {
+    return;
+  }
+
+  #pragma omp parallel for schedule(static)
+  for (fsils_int node = 0; node < nNo; ++node) {
+    for (int comp = 0; comp < dof; ++comp) {
+      dst(comp, node) += scale * src(comp, node);
+    }
+  }
+}
+
+void copy_scalar_vector_to_array(const Vector<double>& src, Array<double>& dst)
+{
+  const fsils_int nNo = src.size();
+  dst.resize(1, nNo);
+  for (fsils_int i = 0; i < nNo; ++i) {
+    dst(0, i) = src(i);
+  }
+}
+
+void copy_scalar_array_to_vector(const Array<double>& src, Vector<double>& dst)
+{
+  const fsils_int nNo = src.ncols();
+  if (dst.size() != nNo) {
+    dst.resize(nNo);
+  }
+  for (fsils_int i = 0; i < nNo; ++i) {
+    dst(i) = src(0, i);
+  }
+}
+
+bool invert_dense_matrix(int n,
+                         const std::vector<double>& matrix,
+                         std::vector<double>& inverse)
+{
+  if (n <= 0 || matrix.size() != static_cast<std::size_t>(n * n)) {
+    inverse.clear();
+    return false;
+  }
+
+  std::vector<double> a = matrix;
+  inverse.assign(static_cast<std::size_t>(n * n), 0.0);
+  for (int i = 0; i < n; ++i) {
+    inverse[static_cast<std::size_t>(i) * static_cast<std::size_t>(n) +
+            static_cast<std::size_t>(i)] = 1.0;
+  }
+
+  for (int col = 0; col < n; ++col) {
+    int pivot = col;
+    double pivot_abs = std::abs(a[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
+                                  static_cast<std::size_t>(col)]);
+    for (int row = col + 1; row < n; ++row) {
+      const double cand =
+          std::abs(a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+                     static_cast<std::size_t>(col)]);
+      if (cand > pivot_abs) {
+        pivot = row;
+        pivot_abs = cand;
+      }
+    }
+
+    if (!(pivot_abs > 1e-30)) {
+      inverse.clear();
+      return false;
+    }
+
+    if (pivot != col) {
+      for (int j = 0; j < n; ++j) {
+        std::swap(a[static_cast<std::size_t>(pivot) * static_cast<std::size_t>(n) +
+                    static_cast<std::size_t>(j)],
+                  a[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
+                    static_cast<std::size_t>(j)]);
+        std::swap(inverse[static_cast<std::size_t>(pivot) * static_cast<std::size_t>(n) +
+                          static_cast<std::size_t>(j)],
+                  inverse[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
+                          static_cast<std::size_t>(j)]);
+      }
+    }
+
+    const double diag =
+        a[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
+          static_cast<std::size_t>(col)];
+    const double inv_diag = 1.0 / diag;
+    for (int j = 0; j < n; ++j) {
+      a[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
+        static_cast<std::size_t>(j)] *= inv_diag;
+      inverse[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
+              static_cast<std::size_t>(j)] *= inv_diag;
+    }
+
+    for (int row = 0; row < n; ++row) {
+      if (row == col) {
+        continue;
+      }
+      const double factor =
+          a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+            static_cast<std::size_t>(col)];
+      if (std::abs(factor) <= 1e-30) {
+        continue;
+      }
+      for (int j = 0; j < n; ++j) {
+        a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+          static_cast<std::size_t>(j)] -=
+            factor *
+            a[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
+              static_cast<std::size_t>(j)];
+        inverse[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+                static_cast<std::size_t>(j)] -=
+            factor *
+            inverse[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
+                    static_cast<std::size_t>(j)];
+      }
+    }
+  }
+
+  return true;
+}
+
+void build_explicit_block_corrections(
+    const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+    int mom_start,
+    int mom_ncomp,
+    int con_start,
+    int con_ncomp,
+    std::vector<ExplicitReducedBlockCorrection>& reduced,
+    std::vector<ExplicitGroupedBlockCorrection>& grouped)
+{
+  reduced.clear();
+  grouped.clear();
+
+  const bool has_grouped_bordered = !lhs.grouped_bordered_field_couplings.empty();
+  for (const auto& update : lhs.reduced_updates) {
+    if (!update.active || std::abs(update.sigma) <= 1e-30) {
+      continue;
+    }
+    if (update.grouped_coupling_id == kNativeFaceDuplicateCouplingId) {
+      continue;
+    }
+    if (has_grouped_bordered && update.grouped_coupling_id >= 0) {
+      continue;
+    }
+
+    ExplicitReducedBlockCorrection corr;
+    corr.sigma = update.sigma;
+    const auto& left_entries = !update.left_scaled.empty() ? update.left_scaled : update.left;
+    const auto& right_entries = !update.right_scaled.empty() ? update.right_scaled : update.right;
+    const bool left_momentum = fill_projected_block_vector(lhs, left_entries,
+                                                           mom_start, mom_ncomp, corr.left_momentum);
+    const bool left_constraint = fill_projected_block_vector(lhs, left_entries,
+                                                             con_start, con_ncomp, corr.left_constraint);
+    const bool right_momentum = fill_projected_block_vector(lhs, right_entries,
+                                                            mom_start, mom_ncomp, corr.right_momentum);
+    const bool right_constraint = fill_projected_block_vector(lhs, right_entries,
+                                                              con_start, con_ncomp, corr.right_constraint);
+    if (!(left_momentum || left_constraint || right_momentum || right_constraint)) {
+      continue;
+    }
+    reduced.push_back(std::move(corr));
+  }
+
+  for (const auto& group_data : lhs.grouped_bordered_field_couplings) {
+    if (!group_data.active || group_data.modes.empty()) {
+      continue;
+    }
+
+    const int rank = static_cast<int>(group_data.modes.size());
+    if (group_data.aux_matrix.size() != static_cast<std::size_t>(rank * rank)) {
+      continue;
+    }
+
+    ExplicitGroupedBlockCorrection corr;
+    corr.dense_coeff.assign(group_data.aux_matrix.size(), 0.0);
+    if (!invert_dense_matrix(rank, group_data.aux_matrix, corr.dense_coeff)) {
+      continue;
+    }
+    for (double& value : corr.dense_coeff) {
+      value = -value;
+    }
+
+    corr.left_momentum_modes.reserve(group_data.modes.size());
+    corr.left_constraint_modes.reserve(group_data.modes.size());
+    corr.right_momentum_modes.reserve(group_data.modes.size());
+    corr.right_constraint_modes.reserve(group_data.modes.size());
+
+    bool any_left_momentum = false;
+    bool any_left_constraint = false;
+    bool any_right_momentum = false;
+    bool any_right_constraint = false;
+    for (const auto& mode : group_data.modes) {
+      const auto& left_entries = !mode.left_scaled.empty() ? mode.left_scaled : mode.left;
+      const auto& right_entries = !mode.right_scaled.empty() ? mode.right_scaled : mode.right;
+      corr.left_momentum_modes.emplace_back();
+      corr.left_constraint_modes.emplace_back();
+      corr.right_momentum_modes.emplace_back();
+      corr.right_constraint_modes.emplace_back();
+
+      any_left_momentum |= fill_projected_block_vector(lhs, left_entries,
+                                                       mom_start, mom_ncomp,
+                                                       corr.left_momentum_modes.back());
+      any_left_constraint |= fill_projected_block_vector(lhs, left_entries,
+                                                         con_start, con_ncomp,
+                                                         corr.left_constraint_modes.back());
+      any_right_momentum |= fill_projected_block_vector(lhs, right_entries,
+                                                        mom_start, mom_ncomp,
+                                                        corr.right_momentum_modes.back());
+      any_right_constraint |= fill_projected_block_vector(lhs, right_entries,
+                                                          con_start, con_ncomp,
+                                                          corr.right_constraint_modes.back());
+    }
+
+    const bool contributes_to_gp_or_lp = any_right_constraint && (any_left_momentum || any_left_constraint);
+    const bool contributes_to_d = any_right_momentum && any_left_constraint;
+    if (contributes_to_gp_or_lp || contributes_to_d) {
+      grouped.push_back(std::move(corr));
+    }
+  }
+}
+
+void apply_constraint_block_corrections(
+    fe_fsi_linear_solver::FSILS_lhsType& lhs,
+    const std::vector<ExplicitReducedBlockCorrection>& reduced,
+    const std::vector<ExplicitGroupedBlockCorrection>& grouped,
+    const Array<double>& in_constraint,
+    Array<double>& out_momentum,
+    Array<double>& out_constraint)
+{
+  const int n_reduced = static_cast<int>(reduced.size());
+  int total_rhs = n_reduced;
+  for (const auto& group : grouped) {
+    total_rhs += static_cast<int>(group.right_constraint_modes.size());
+  }
+  if (total_rhs <= 0) {
+    return;
+  }
+
+  const int mom_ncomp = out_momentum.nrows();
+  const int con_ncomp = out_constraint.nrows();
+  const fsils_int nNo = out_momentum.ncols();
+
+  std::vector<double> rhs(static_cast<std::size_t>(total_rhs), 0.0);
+  int offset = 0;
+  for (const auto& corr : reduced) {
+    rhs[static_cast<std::size_t>(offset++)] =
+        dense_dense_owned_dot_local(lhs, con_ncomp, corr.right_constraint, in_constraint);
+  }
+  for (const auto& group : grouped) {
+    for (const auto& mode : group.right_constraint_modes) {
+      rhs[static_cast<std::size_t>(offset++)] =
+          dense_dense_owned_dot_local(lhs, con_ncomp, mode, in_constraint);
+    }
+  }
+  allreduce_sum_in_place(lhs, rhs);
+
+  offset = 0;
+  for (const auto& corr : reduced) {
+    const double alpha = corr.sigma * rhs[static_cast<std::size_t>(offset++)];
+    dense_axpy(mom_ncomp, nNo, corr.left_momentum, alpha, out_momentum);
+    dense_axpy(con_ncomp, nNo, corr.left_constraint, alpha, out_constraint);
+  }
+
+  for (const auto& group : grouped) {
+    const int rank = static_cast<int>(group.right_constraint_modes.size());
+    if (rank <= 0 || group.dense_coeff.size() != static_cast<std::size_t>(rank * rank)) {
+      offset += rank;
+      continue;
+    }
+
+    std::vector<double> alpha(static_cast<std::size_t>(rank), 0.0);
+    for (int i = 0; i < rank; ++i) {
+      double value = 0.0;
+      for (int j = 0; j < rank; ++j) {
+        value += group.dense_coeff[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+                                   static_cast<std::size_t>(j)] *
+                 rhs[static_cast<std::size_t>(offset + j)];
+      }
+      alpha[static_cast<std::size_t>(i)] = value;
+    }
+    offset += rank;
+
+    for (int i = 0; i < rank; ++i) {
+      const double coeff = alpha[static_cast<std::size_t>(i)];
+      dense_axpy(mom_ncomp, nNo, group.left_momentum_modes[static_cast<std::size_t>(i)], coeff, out_momentum);
+      dense_axpy(con_ncomp, nNo, group.left_constraint_modes[static_cast<std::size_t>(i)], coeff, out_constraint);
+    }
+  }
+}
+
+void apply_momentum_block_corrections(
+    fe_fsi_linear_solver::FSILS_lhsType& lhs,
+    const std::vector<ExplicitReducedBlockCorrection>& reduced,
+    const std::vector<ExplicitGroupedBlockCorrection>& grouped,
+    const Array<double>& in_momentum,
+    Array<double>& out_constraint)
+{
+  const int n_reduced = static_cast<int>(reduced.size());
+  int total_rhs = n_reduced;
+  for (const auto& group : grouped) {
+    total_rhs += static_cast<int>(group.right_momentum_modes.size());
+  }
+  if (total_rhs <= 0) {
+    return;
+  }
+
+  const int mom_ncomp = in_momentum.nrows();
+  const int con_ncomp = out_constraint.nrows();
+  const fsils_int nNo = out_constraint.ncols();
+
+  std::vector<double> rhs(static_cast<std::size_t>(total_rhs), 0.0);
+  int offset = 0;
+  for (const auto& corr : reduced) {
+    rhs[static_cast<std::size_t>(offset++)] =
+        dense_dense_owned_dot_local(lhs, mom_ncomp, corr.right_momentum, in_momentum);
+  }
+  for (const auto& group : grouped) {
+    for (const auto& mode : group.right_momentum_modes) {
+      rhs[static_cast<std::size_t>(offset++)] =
+          dense_dense_owned_dot_local(lhs, mom_ncomp, mode, in_momentum);
+    }
+  }
+  allreduce_sum_in_place(lhs, rhs);
+
+  offset = 0;
+  for (const auto& corr : reduced) {
+    const double alpha = corr.sigma * rhs[static_cast<std::size_t>(offset++)];
+    dense_axpy(con_ncomp, nNo, corr.left_constraint, alpha, out_constraint);
+  }
+
+  for (const auto& group : grouped) {
+    const int rank = static_cast<int>(group.right_momentum_modes.size());
+    if (rank <= 0 || group.dense_coeff.size() != static_cast<std::size_t>(rank * rank)) {
+      offset += rank;
+      continue;
+    }
+
+    std::vector<double> alpha(static_cast<std::size_t>(rank), 0.0);
+    for (int i = 0; i < rank; ++i) {
+      double value = 0.0;
+      for (int j = 0; j < rank; ++j) {
+        value += group.dense_coeff[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+                                   static_cast<std::size_t>(j)] *
+                 rhs[static_cast<std::size_t>(offset + j)];
+      }
+      alpha[static_cast<std::size_t>(i)] = value;
+    }
+    offset += rank;
+
+    for (int i = 0; i < rank; ++i) {
+      dense_axpy(con_ncomp, nNo, group.left_constraint_modes[static_cast<std::size_t>(i)],
+                 alpha[static_cast<std::size_t>(i)], out_constraint);
+    }
+  }
+}
+
+[[nodiscard]] bool has_coupled_block_corrections(const fe_fsi_linear_solver::FSILS_lhsType& lhs)
+{
+  return std::any_of(lhs.face.begin(), lhs.face.end(),
+      [](const fe_fsi_linear_solver::FSILS_faceType& face) {
+        const int min_supported_nodes = std::max(1, face.dof);
+        return face.coupledFlag && std::abs(face.res) > 1e-30 && face.nNo > min_supported_nodes;
+      });
+}
+
+void apply_full_coupled_operator(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                 int dof,
+                                 const Array<double>& Val,
+                                 const Array<double>& x,
+                                 Array<double>& y)
+{
+  spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, x, y);
+  add_bc_mul::add_bc_mul(lhs, add_bc_mul::BcopType::BCOP_TYPE_ADD, dof, x, y);
+}
+
+void apply_full_coupled_outer_operator(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                       int dof,
+                                       const Array<double>& Val,
+                                       const Array<double>& x,
+                                       Array<double>& y)
+{
+  apply_full_coupled_operator(lhs, dof, Val, x, y);
+}
+
+void apply_full_coupled_outer_residual_preconditioner(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                                      int dof,
+                                                      Array<double>& y)
+{
+  (void)lhs;
+  (void)dof;
+  (void)y;
+}
+
+void split_scalar_block_vector(const Array<double>& in,
+                               int mom_start,
+                               int mom_ncomp,
+                               int con_start,
+                               Array<double>& momentum,
+                               Vector<double>& constraint)
+{
+  const fsils_int nNo = in.ncols();
+  momentum.resize(mom_ncomp, nNo);
+  constraint.resize(nNo);
+  #pragma omp parallel for schedule(static)
+  for (fsils_int node = 0; node < nNo; ++node) {
+    for (int comp = 0; comp < mom_ncomp; ++comp) {
+      momentum(comp, node) = in(mom_start + comp, node);
+    }
+    constraint(node) = in(con_start, node);
+  }
+}
+
+void assemble_scalar_block_vector(const Array<double>& momentum,
+                                  const Vector<double>& constraint,
+                                  int dof,
+                                  int mom_start,
+                                  int mom_ncomp,
+                                  int con_start,
+                                  Array<double>& out)
+{
+  const fsils_int nNo = momentum.ncols();
+  if (out.nrows() != dof || out.ncols() != nNo) {
+    out.resize(dof, nNo);
+  }
+  out = 0.0;
+  #pragma omp parallel for schedule(static)
+  for (fsils_int node = 0; node < nNo; ++node) {
+    for (int comp = 0; comp < mom_ncomp; ++comp) {
+      out(mom_start + comp, node) = momentum(comp, node);
+    }
+    out(con_start, node) = constraint(node);
+  }
+}
+
+bool ns_solver_coupled_fgmres_scalar(
+    fe_fsi_linear_solver::FSILS_lhsType& lhs,
+    fe_fsi_linear_solver::FSILS_lsType& ls,
+    int dof,
+    int mom_start,
+    int mom_ncomp,
+    int con_start,
+    const Array<double>& Val,
+    const Array<double>& mK,
+    const Array<double>& mD,
+    const Array<double>& mG,
+    const Vector<double>& mL,
+    const std::vector<ExplicitReducedBlockCorrection>& explicit_reduced_corrections,
+    const std::vector<ExplicitGroupedBlockCorrection>& explicit_grouped_corrections,
+    Array<double>& Ri)
+{
+  using namespace fe_fsi_linear_solver;
+
+  const fsils_int nNo = lhs.nNo;
+  const fsils_int mynNo = lhs.mynNo;
+  const int pressure_ncomp = 1;
+  const int outer_krylov_dim =
+      std::max(1, std::min((ls.RI.sD > 0 ? ls.RI.sD : ls.RI.mItr),
+                           std::max(ls.RI.mItr, ls.RI.mItr * std::max(1, ls.GM.mItr))));
+
+  ls.RI.ws.ensure_gmres_v(dof, nNo, outer_krylov_dim);
+  auto& h = ls.RI.ws.h;
+  auto& v_basis = ls.RI.ws.u3;
+  auto& x = ls.RI.ws.X2;
+  auto& y_coeff = ls.RI.ws.y;
+  auto& c = ls.RI.ws.c;
+  auto& s = ls.RI.ws.s;
+  auto& err = ls.RI.ws.err;
+
+  Array3<double> z_basis(dof, nNo, outer_krylov_dim);
+  Array<double> residual(dof, nNo);
+  Array<double> ax(dof, nNo);
+  Array<double> w(dof, nNo);
+
+  Array<double> mom_rhs(mom_ncomp, nNo);
+  Array<double> mom_sol(mom_ncomp, nNo);
+  Array<double> mom_tmp(mom_ncomp, nNo);
+  Array<double> gp(mom_ncomp, nNo);
+  Array<double> dummy_constraint(pressure_ncomp, nNo);
+  Vector<double> con_rhs(nNo);
+  Vector<double> con_tmp(nNo);
+  Vector<double> con_sol(nNo);
+
+  const auto rhs = Ri;
+  const auto collective_before_total = lhs.commu.collective_stats;
+  const double callD_before = ls.RI.callD;
+
+  auto apply_blockschur_preconditioner = [&](const Array<double>& in_vec, Array<double>& out_vec) {
+    split_scalar_block_vector(in_vec, mom_start, mom_ncomp, con_start, mom_rhs, con_rhs);
+
+    mom_sol = mom_rhs;
+    gmres::gmres_v(lhs, ls.GM, mom_ncomp, mK, mom_sol);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+      fsils_commuv(lhs, mom_ncomp, mom_sol);
+    }
+
+    spar_mul::fsils_spar_mul_vs(lhs, lhs.rowPtr, lhs.colPtr, mom_ncomp, mD, mom_sol, con_tmp);
+    copy_scalar_vector_to_array(con_tmp, dummy_constraint);
+    apply_momentum_block_corrections(lhs, explicit_reduced_corrections, explicit_grouped_corrections,
+                                     mom_sol, dummy_constraint);
+    copy_scalar_array_to_vector(dummy_constraint, con_tmp);
+
+    #pragma omp parallel for schedule(static)
+    for (fsils_int node = 0; node < nNo; ++node) {
+      con_sol(node) = con_rhs(node) - con_tmp(node);
+    }
+
+    bicgs::schur_precondition(lhs, ls.CG, mom_ncomp, mK, mD, mG, mL, con_sol);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+      fsils_commus(lhs, con_sol);
+    }
+
+    spar_mul::fsils_spar_mul_sv(lhs, lhs.rowPtr, lhs.colPtr, mom_ncomp, mG, con_sol, gp);
+    copy_scalar_vector_to_array(con_sol, dummy_constraint);
+    Array<double> dummy_lp(pressure_ncomp, nNo);
+    dummy_lp = 0.0;
+    apply_constraint_block_corrections(lhs, explicit_reduced_corrections, explicit_grouped_corrections,
+                                       dummy_constraint, gp, dummy_lp);
+
+    #pragma omp parallel for schedule(static)
+    for (fsils_int node = 0; node < nNo; ++node) {
+      for (int comp = 0; comp < mom_ncomp; ++comp) {
+        mom_tmp(comp, node) = mom_rhs(comp, node) - gp(comp, node);
+      }
+    }
+
+    mom_sol = mom_tmp;
+    gmres::gmres_v(lhs, ls.GM, mom_ncomp, mK, mom_sol);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+      fsils_commuv(lhs, mom_ncomp, mom_sol);
+    }
+
+    assemble_scalar_block_vector(mom_sol, con_sol, dof, mom_start, mom_ncomp, con_start, out_vec);
+  };
+
+  auto compute_true_residual = [&](const Array<double>& trial, Array<double>& out_residual) {
+    apply_full_coupled_operator(lhs, dof, Val, trial, ax);
+    #pragma omp parallel for schedule(static)
+    for (fsils_int node = 0; node < nNo; ++node) {
+      for (int comp = 0; comp < dof; ++comp) {
+        out_residual(comp, node) = rhs(comp, node) - ax(comp, node);
+      }
+    }
+  };
+
+  x = 0.0;
+  residual = rhs;
+  const double true_initial_norm = norm::fsi_ls_normv(dof, mynNo, lhs.commu, residual);
+  apply_full_coupled_outer_residual_preconditioner(lhs, dof, residual);
+  const double outer_initial_norm = norm::fsi_ls_normv(dof, mynNo, lhs.commu, residual);
+
+  ls.RI.iNorm = true_initial_norm;
+  const double true_initial_norm_sq = true_initial_norm * true_initial_norm;
+  ls.RI.fNorm = true_initial_norm_sq;
+  ls.RI.dB = true_initial_norm_sq;
+
+  const double true_eps = std::max(ls.RI.absTol, ls.RI.relTol * true_initial_norm);
+  const double outer_eps = std::max(ls.RI.absTol, ls.RI.relTol * outer_initial_norm);
+  if (true_initial_norm <= true_eps) {
+    Ri = x;
+    ls.RI.itr = 0;
+    ls.RI.suc = true;
+    ls.RI.fNorm = true_initial_norm;
+    ls.RI.callD = fsils_cpu_t() - ls.RI.callD;
+    ls.RI.stats.record_call(0,
+                            /*restart_cycles=*/1,
+                            fsils_collective_delta(collective_before_total, lhs.commu.collective_stats),
+                            /*setup_seconds=*/0.0,
+                            ls.RI.callD - callD_before);
+    return true;
+  }
+  if (!(outer_initial_norm > std::numeric_limits<double>::epsilon())) {
+    ls.RI.callD = fsils_cpu_t() - ls.RI.callD;
+    ls.RI.suc = false;
+    return false;
+  }
+
+  h = 0.0;
+  for (int i = 0; i <= outer_krylov_dim; ++i) {
+    err(i) = 0.0;
+    if (i < outer_krylov_dim) {
+      c(i) = 0.0;
+      s(i) = 0.0;
+      y_coeff(i) = 0.0;
+    }
+  }
+  err(0) = outer_initial_norm;
+
+  auto v0 = v_basis.rslice(0);
+  v0 = residual;
+  omp_la::omp_mul_v(dof, nNo, 1.0 / outer_initial_norm, v0);
+
+  int last_i = -1;
+  for (int i = 0; i < outer_krylov_dim; ++i) {
+    const auto collective_before_outer = lhs.commu.collective_stats;
+    last_i = i;
+
+    auto vi = v_basis.rslice(i);
+    auto zi = z_basis.rslice(i);
+    auto vip1 = v_basis.rslice(i + 1);
+
+    apply_blockschur_preconditioner(vi, zi);
+    apply_full_coupled_outer_operator(lhs, dof, Val, zi, w);
+    vip1 = w;
+
+    for (int j = 0; j <= i; ++j) {
+      h(j, i) = dot::fsils_dot_v(dof, mynNo, lhs.commu, v_basis.rslice(j), vip1);
+      omp_la::omp_sum_v(dof, nNo, -h(j, i), vip1, v_basis.rslice(j));
+    }
+
+    h(i + 1, i) = norm::fsi_ls_normv(dof, mynNo, lhs.commu, vip1);
+    const bool breakdown =
+        !(h(i + 1, i) > std::numeric_limits<double>::epsilon() * std::max(ls.RI.iNorm, 1.0));
+    if (!breakdown) {
+      omp_la::omp_mul_v(dof, nNo, 1.0 / h(i + 1, i), vip1);
+    } else {
+      h(i + 1, i) = 0.0;
+    }
+
+    for (int j = 0; j < i; ++j) {
+      const double tmp_h = c(j) * h(j, i) + s(j) * h(j + 1, i);
+      h(j + 1, i) = -s(j) * h(j, i) + c(j) * h(j + 1, i);
+      h(j, i) = tmp_h;
+    }
+
+    const double hypot_h = std::hypot(h(i, i), h(i + 1, i));
+    if (hypot_h > std::numeric_limits<double>::epsilon()) {
+      c(i) = h(i, i) / hypot_h;
+      s(i) = h(i + 1, i) / hypot_h;
+    } else {
+      c(i) = 1.0;
+      s(i) = 0.0;
+    }
+    h(i, i) = hypot_h;
+    h(i + 1, i) = 0.0;
+    err(i + 1) = -s(i) * err(i);
+    err(i) = c(i) * err(i);
+    ls.RI.itr = i + 1;
+    ls.blockschur_stats.record_outer_iteration(
+        fsils_collective_delta(collective_before_outer, lhs.commu.collective_stats));
+
+    if (std::abs(err(i + 1)) < outer_eps || breakdown) {
+      break;
+    }
+  }
+
+  if (last_i < 0) {
+    return false;
+  }
+
+  for (int i = 0; i <= last_i; ++i) {
+    y_coeff(i) = err(i);
+  }
+  for (int j = last_i; j >= 0; --j) {
+    for (int k = j + 1; k <= last_i; ++k) {
+      y_coeff(j) -= h(j, k) * y_coeff(k);
+    }
+    if (std::abs(h(j, j)) > std::numeric_limits<double>::epsilon()) {
+      y_coeff(j) /= h(j, j);
+    } else {
+      y_coeff(j) = 0.0;
+    }
+  }
+
+  x = 0.0;
+  for (int j = 0; j <= last_i; ++j) {
+    if (std::abs(y_coeff(j)) > 1e-30) {
+      omp_la::omp_sum_v(dof, nNo, y_coeff(j), x, z_basis.rslice(j));
+    }
+  }
+
+  compute_true_residual(x, residual);
+  split_scalar_block_vector(residual, mom_start, mom_ncomp, con_start, mom_rhs, con_rhs);
+  const double momentum_norm = norm::fsi_ls_normv(mom_ncomp, mynNo, lhs.commu, mom_rhs);
+  const double constraint_norm = norm::fsi_ls_norms(mynNo, lhs.commu, con_rhs);
+  const double final_norm_sq = momentum_norm * momentum_norm + constraint_norm * constraint_norm;
+
+  ls.RI.fNorm = std::sqrt(final_norm_sq);
+  ls.RI.suc = (ls.RI.fNorm < true_eps);
+  ls.Resc = (final_norm_sq > 0.0) ? static_cast<int>(100.0 * (constraint_norm * constraint_norm) / final_norm_sq) : 0;
+  ls.Resm = 100 - ls.Resc;
+  ls.RI.dB = (true_initial_norm > std::numeric_limits<double>::epsilon() && ls.RI.fNorm > 0.0)
+      ? 10.0 * std::log(ls.RI.fNorm / true_initial_norm)
+      : 0.0;
+  ls.RI.callD = fsils_cpu_t() - ls.RI.callD;
+  ls.RI.stats.record_call(ls.RI.itr,
+                          /*restart_cycles=*/1,
+                          fsils_collective_delta(collective_before_total, lhs.commu.collective_stats),
+                          /*setup_seconds=*/0.0,
+                          ls.RI.callD - callD_before);
+
+  if (ls.RI.suc) {
+    Ri = x;
+  }
+  return ls.RI.suc;
 }
 
 } // namespace
@@ -295,6 +1102,13 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
 
   bc_pre(lhs, mom_ncomp, dof, nNo, mynNo);
 
+  std::vector<ExplicitReducedBlockCorrection> explicit_reduced_corrections;
+  std::vector<ExplicitGroupedBlockCorrection> explicit_grouped_corrections;
+  if (!lhs.reduced_updates.empty() || !lhs.grouped_bordered_field_couplings.empty()) {
+    build_explicit_block_corrections(lhs, mom_start, mom_ncomp, con_start, con_ncomp,
+                                     explicit_reduced_corrections, explicit_grouped_corrections);
+  }
+
   int iBB{0};
   int i_count{0};
 
@@ -316,6 +1130,8 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     // P = D*U (rect: con_ncomp output × mom_ncomp input)
     auto P_slice = Pcon.rslice(i);
     spar_mul::fsils_spar_mul_rect(lhs, lhs.rowPtr, lhs.colPtr, con_ncomp, mom_ncomp, mD, U_slice, P_slice);
+    apply_momentum_block_corrections(lhs, explicit_reduced_corrections, explicit_grouped_corrections,
+                                     U_slice, P_slice);
 
     // P = Rc - P
     #pragma omp parallel for schedule(static)
@@ -335,6 +1151,10 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     P_slice = Pcon.rslice(i);
     auto MU_iB = MU.rslice(iB);
     spar_mul::fsils_spar_mul_rect(lhs, lhs.rowPtr, lhs.colPtr, mom_ncomp, con_ncomp, mG, P_slice, MU_iB);
+    auto MP_iB = MPcon.rslice(iB);
+    spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, con_ncomp, mL, Pcon.rslice(i), MP_iB);
+    apply_constraint_block_corrections(lhs, explicit_reduced_corrections, explicit_grouped_corrections,
+                                       P_slice, MU_iB, MP_iB);
 
     // MU2 = Rm - G*P
     auto MU_iBB = MU.rslice(iBB);
@@ -356,13 +1176,11 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, nsd, mK, U_slice, MU_iBB);
     add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, nsd, U_slice, MU_iBB);
 
-    // MP1 = L*P (VV: con_ncomp × con_ncomp)
-    auto MP_iB = MPcon.rslice(iB);
-    spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, con_ncomp, mL, Pcon.rslice(i), MP_iB);
-
     // MP2 = D*U (rect: con_ncomp × mom_ncomp)
     auto MP_iBB = MPcon.rslice(iBB);
     spar_mul::fsils_spar_mul_rect(lhs, lhs.rowPtr, lhs.colPtr, con_ncomp, mom_ncomp, mD, U_slice, MP_iBB);
+    apply_momentum_block_corrections(lhs, explicit_reduced_corrections, explicit_grouped_corrections,
+                                     U_slice, MP_iBB);
 
     // GCR inner products
     int c = 0;
@@ -569,6 +1387,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
 
   double eps = std::sqrt(std::pow(norm::fsi_ls_normv(nsd,mynNo,lhs.commu,Rm),2.0) +
                          std::pow(norm::fsi_ls_norms(mynNo,lhs.commu,Rc),2.0));
+  const double initial_norm = eps;
 
   #ifdef debug_ns_solver
   dmsg << "eps (Rm/Rc): " << eps;
@@ -648,6 +1467,78 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   // Computes lhs.face[].nS for each face.
   bc_pre(lhs, mom_ncomp, dof, nNo, mynNo);
 
+  std::vector<ExplicitReducedBlockCorrection> explicit_reduced_corrections;
+  std::vector<ExplicitGroupedBlockCorrection> explicit_grouped_corrections;
+  if (!lhs.reduced_updates.empty() || !lhs.grouped_bordered_field_couplings.empty()) {
+    build_explicit_block_corrections(lhs, mom_start, mom_ncomp, con_start, /*con_ncomp=*/1,
+                                     explicit_reduced_corrections, explicit_grouped_corrections);
+  }
+
+  const bool use_coupled_fgmres_scalar = false &&
+      has_coupled_block_corrections(lhs) &&
+      explicit_reduced_corrections.empty() &&
+      explicit_grouped_corrections.empty();
+  if (use_coupled_fgmres_scalar) {
+    if (lhs.commu.masF && fsilsTraceEnabled()) {
+      std::fprintf(stderr,
+                   "[NS_SOLVER] attempting coupled outer FGMRES for native face-coupled scalar system\n");
+    }
+    Array<double> coupled_solution = Ri;
+    bool coupled_fgmres_succeeded = false;
+    bool coupled_fgmres_threw = false;
+    const char* coupled_fgmres_error = nullptr;
+    try {
+      coupled_fgmres_succeeded = ns_solver_coupled_fgmres_scalar(lhs, ls, dof, mom_start, mom_ncomp, con_start,
+                                                                 Val, mK, mD, mG, mL,
+                                                                 explicit_reduced_corrections,
+                                                                 explicit_grouped_corrections,
+                                                                 coupled_solution);
+    } catch (const std::exception& e) {
+      coupled_fgmres_threw = true;
+      coupled_fgmres_error = e.what();
+    } catch (...) {
+      coupled_fgmres_threw = true;
+    }
+
+    if (coupled_fgmres_succeeded) {
+      if (lhs.commu.masF && fsilsTraceEnabled()) {
+        std::fprintf(stderr,
+                     "[NS_SOLVER] coupled outer FGMRES converged in %d outer iterations\n",
+                     ls.RI.itr);
+      }
+      Ri = coupled_solution;
+      bicgs::reset_schur_cache(ls.CG);
+      return;
+    }
+
+    if (lhs.commu.masF && fsilsTraceEnabled()) {
+      if (coupled_fgmres_threw && coupled_fgmres_error != nullptr) {
+        std::fprintf(stderr,
+                     "[NS_SOLVER] coupled outer FGMRES threw during apply (%s); reverting to legacy BlockSchur loop\n",
+                     coupled_fgmres_error);
+      } else {
+        std::fprintf(stderr,
+                     coupled_fgmres_threw
+                         ? "[NS_SOLVER] coupled outer FGMRES threw during apply; reverting to legacy BlockSchur loop\n"
+                         : "[NS_SOLVER] coupled outer FGMRES did not converge; reverting to legacy BlockSchur loop\n");
+      }
+    }
+    ls.CG.callD = 0.0;
+    ls.GM.callD = 0.0;
+    ls.RI.callD = fe_fsi_linear_solver::fsils_cpu_t();
+    ls.CG.itr = 0;
+    ls.GM.itr = 0;
+    ls.RI.suc = false;
+    ls.CG.stats.reset();
+    ls.GM.stats.reset();
+    ls.RI.stats.reset();
+    ls.blockschur_stats.reset();
+    bicgs::reset_schur_cache(ls.CG);
+    ls.RI.iNorm = initial_norm;
+    ls.RI.fNorm = initial_norm * initial_norm;
+    ls.RI.dB = ls.RI.fNorm;
+  }
+
   for (int faIn = 0; faIn < lhs.nFaces; faIn++) {
     auto& face = lhs.face[faIn];
     #ifdef debug_ns_solver
@@ -693,6 +1584,11 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     // P = D*U (using exact analytical mD)
     auto P_col = P.rcol(i);
     spar_mul::fsils_spar_mul_vs(lhs, lhs.rowPtr, lhs.colPtr, nsd, mD, U_slice, P_col);
+    Array<double> P_block;
+    copy_scalar_vector_to_array(P_col, P_block);
+    apply_momentum_block_corrections(lhs, explicit_reduced_corrections, explicit_grouped_corrections,
+                                     U_slice, P_block);
+    copy_scalar_array_to_vector(P_block, P_col);
 
     // P = Rc - P
     #pragma omp parallel for schedule(static)
@@ -715,6 +1611,14 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     P_col = P.rcol(i);
     auto MU_iB = MU.rslice(iB);
     spar_mul::fsils_spar_mul_sv(lhs, lhs.rowPtr, lhs.colPtr, nsd, mG, P_col, MU_iB);
+    auto MP_iB = MP.rcol(iB);
+    spar_mul::fsils_spar_mul_ss(lhs, lhs.rowPtr, lhs.colPtr, mL, P.rcol(i), MP_iB);
+    copy_scalar_vector_to_array(P_col, P_block);
+    Array<double> MP_iB_block;
+    copy_scalar_vector_to_array(MP_iB, MP_iB_block);
+    apply_constraint_block_corrections(lhs, explicit_reduced_corrections, explicit_grouped_corrections,
+                                       P_block, MU_iB, MP_iB_block);
+    copy_scalar_array_to_vector(MP_iB_block, MP_iB);
 
     // MU2 = Rm - G*P
     auto MU_iBB = MU.rslice(iBB);
@@ -737,13 +1641,14 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
 
     add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, nsd, U_slice, MU_iBB);
 
-    // MP1 = L*P
-    auto MP_iB = MP.rcol(iB);
-    spar_mul::fsils_spar_mul_ss(lhs, lhs.rowPtr, lhs.colPtr, mL, P.rcol(i), MP_iB);
-
     // MP2 = D*U
     auto MP_iBB = MP.rcol(iBB);
     spar_mul::fsils_spar_mul_vs(lhs, lhs.rowPtr, lhs.colPtr, nsd, mD, U_slice, MP_iBB);
+    Array<double> MP_iBB_block;
+    copy_scalar_vector_to_array(MP_iBB, MP_iBB_block);
+    apply_momentum_block_corrections(lhs, explicit_reduced_corrections, explicit_grouped_corrections,
+                                     U_slice, MP_iBB_block);
+    copy_scalar_array_to_vector(MP_iBB_block, MP_iBB);
 
     int c = 0;
 

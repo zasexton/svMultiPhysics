@@ -196,6 +196,107 @@ private:
     std::array<svmp::FE::GlobalIndex, 4> cell_{};
 };
 
+class SingleTetraTwoOutletBoundaryFaceMeshAccess final : public svmp::FE::assembly::IMeshAccess {
+public:
+    SingleTetraTwoOutletBoundaryFaceMeshAccess(int outlet0_marker,
+                                               int outlet1_marker,
+                                               int inlet_marker,
+                                               int wall_marker)
+        : markers_{outlet0_marker, outlet1_marker, inlet_marker, wall_marker}
+    {
+        nodes_ = {
+            {0.0, 0.0, 0.0},
+            {1.0, 0.0, 0.0},
+            {0.0, 1.0, 0.0},
+            {0.0, 0.0, 1.0},
+        };
+        cell_ = {0, 1, 2, 3};
+    }
+
+    [[nodiscard]] svmp::FE::GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] svmp::FE::GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] svmp::FE::GlobalIndex numBoundaryFaces() const override { return 4; }
+    [[nodiscard]] svmp::FE::GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+    [[nodiscard]] bool isOwnedCell(svmp::FE::GlobalIndex) const override { return true; }
+    [[nodiscard]] svmp::FE::ElementType getCellType(svmp::FE::GlobalIndex) const override
+    {
+        return svmp::FE::ElementType::Tetra4;
+    }
+
+    void getCellNodes(svmp::FE::GlobalIndex,
+                      std::vector<svmp::FE::GlobalIndex>& nodes) const override
+    {
+        nodes.assign(cell_.begin(), cell_.end());
+    }
+
+    [[nodiscard]] std::array<svmp::FE::Real, 3> getNodeCoordinates(
+        svmp::FE::GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(svmp::FE::GlobalIndex,
+                            std::vector<std::array<svmp::FE::Real, 3>>& coords) const override
+    {
+        coords.resize(cell_.size());
+        for (std::size_t i = 0; i < cell_.size(); ++i) {
+            coords[i] = nodes_[i];
+        }
+    }
+
+    [[nodiscard]] svmp::FE::LocalIndex getLocalFaceIndex(svmp::FE::GlobalIndex face_id,
+                                                         svmp::FE::GlobalIndex) const override
+    {
+        return static_cast<svmp::FE::LocalIndex>(face_id);
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(svmp::FE::GlobalIndex face_id) const override
+    {
+        return markers_.at(static_cast<std::size_t>(face_id));
+    }
+
+    [[nodiscard]] std::pair<svmp::FE::GlobalIndex, svmp::FE::GlobalIndex> getInteriorFaceCells(
+        svmp::FE::GlobalIndex) const override
+    {
+        return {0, 0};
+    }
+
+    void forEachCell(std::function<void(svmp::FE::GlobalIndex)> callback) const override
+    {
+        callback(0);
+    }
+
+    void forEachOwnedCell(std::function<void(svmp::FE::GlobalIndex)> callback) const override
+    {
+        callback(0);
+    }
+
+    void forEachBoundaryFace(
+        int marker,
+        std::function<void(svmp::FE::GlobalIndex, svmp::FE::GlobalIndex)> callback) const override
+    {
+        for (svmp::FE::GlobalIndex face = 0;
+             face < static_cast<svmp::FE::GlobalIndex>(markers_.size());
+             ++face) {
+            if (marker < 0 || markers_[static_cast<std::size_t>(face)] == marker) {
+                callback(face, 0);
+            }
+        }
+    }
+
+    void forEachInteriorFace(
+        std::function<void(svmp::FE::GlobalIndex, svmp::FE::GlobalIndex, svmp::FE::GlobalIndex)>)
+        const override
+    {
+    }
+
+private:
+    std::array<int, 4> markers_{};
+    std::vector<std::array<svmp::FE::Real, 3>> nodes_{};
+    std::array<svmp::FE::GlobalIndex, 4> cell_{};
+};
+
 struct ModuleAssemblySnapshot {
     std::vector<Real> matrix;
     std::vector<Real> vector;
@@ -2573,6 +2674,164 @@ TEST(NavierStokesOutletFactory, MonolithicRCRCR_BorderedReductionMatchesDenseSol
         EXPECT_NEAR(dx_aux[i], dx_dense[n_field + i],
                     std::max(1e-8, std::abs(dx_dense[n_field + i]) * 1e-7))
             << "mixed NS reduced auxiliary step mismatch at dof " << i;
+    }
+}
+
+TEST(NavierStokesOutletFactory, TwoResistiveOutletsSystemOverloadMatchesLegacyDirectFieldOperator)
+{
+    constexpr int outlet0_marker = 821;
+    constexpr int outlet1_marker = 822;
+    constexpr int inlet_marker = 823;
+    constexpr int wall_marker = 824;
+
+    auto mesh = std::make_shared<SingleTetraTwoOutletBoundaryFaceMeshAccess>(
+        outlet0_marker, outlet1_marker, inlet_marker, wall_marker);
+    auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
+    auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
+
+    auto build_system = [&](bool use_system_overload) -> FESystem {
+        FESystem sys(mesh);
+        const auto u_field =
+            sys.addField(FieldSpec{.name = "u", .space = u_space, .components = 3});
+        const auto p_field =
+            sys.addField(FieldSpec{.name = "p", .space = p_space, .components = 1});
+        sys.addOperator("ns");
+
+        const auto u = FormExpr::stateField(u_field, *u_space, "u");
+        const auto p = FormExpr::stateField(p_field, *p_space, "p");
+        const auto rho = FormExpr::constant(1.0);
+
+        BoundaryConditionManager bc_manager;
+        auto add_outlet = [&](int marker) {
+            auto opts = makeRCROpts(marker, /*C=*/0.0);
+            std::unique_ptr<svmp::FE::forms::bc::BoundaryCondition> bc;
+            if (use_system_overload) {
+                bc = Factories::toCoupledOutflowBC(opts, sys, u_field, *u_space, "u", u, rho);
+            } else {
+                bc = Factories::toCoupledOutflowBC(opts, u_field, *u_space, "u", u, rho);
+            }
+            EXPECT_NE(bc, nullptr);
+            bc_manager.add(std::move(bc));
+        };
+        add_outlet(outlet0_marker);
+        add_outlet(outlet1_marker);
+
+        Opts::VelocityDirichletBC wall_bc{};
+        wall_bc.boundary_marker = wall_marker;
+        wall_bc.value = {Opts::ScalarValue{0.0}, Opts::ScalarValue{0.0}, Opts::ScalarValue{0.0}};
+        auto wall = Factories::toVelocityEssentialBC(wall_bc, /*dim=*/3, "u");
+        EXPECT_NE(wall, nullptr);
+        bc_manager.add(std::move(wall));
+
+        const auto v = FormExpr::testFunction(*u_space, "v");
+        const auto q = FormExpr::testFunction(*p_space, "q");
+        auto momentum = inner(grad(u), grad(v)).dx() - inner(p, div(v)).dx();
+        auto continuity = (q * div(u)).dx() + (p * q).dx();
+        bc_manager.applyAll(sys, momentum, u, v, u_field);
+
+        FormInstallOptions install{};
+        (void)installFormulation(sys, "ns", {u_field, p_field}, momentum + continuity, install);
+
+        SetupInputs si;
+        si.topology_override = singleTetraTopology();
+        sys.setup({}, si);
+        sys.finalizeAuxiliaryLayout();
+        if (use_system_overload) {
+            const auto summary = sys.auxiliaryAnalysisSummary();
+            EXPECT_EQ(summary.n_monolithic, 0u);
+            EXPECT_EQ(summary.n_partitioned, 0u);
+            EXPECT_FALSE(sys.borderedCoupling().active);
+        }
+        return sys;
+    };
+
+    auto monolithic_sys = build_system(true);
+    auto legacy_sys = build_system(false);
+
+    const auto n_field = static_cast<std::size_t>(monolithic_sys.dofHandler().getNumDofs());
+    ASSERT_EQ(n_field, static_cast<std::size_t>(legacy_sys.dofHandler().getNumDofs()));
+
+    std::vector<Real> sol(n_field, 0.0);
+    assignComponentPattern(sol, monolithic_sys, "u", 0, Real(0.04), Real(0.006));
+    assignComponentPattern(sol, monolithic_sys, "u", 1, Real(-0.03), Real(0.004));
+    assignComponentPattern(sol, monolithic_sys, "u", 2, Real(-0.80), Real(-0.02));
+    assignComponentPattern(sol, monolithic_sys, "p", 0, Real(0.12), Real(0.01));
+    if (!monolithic_sys.constraints().empty()) {
+        monolithic_sys.constraints().distribute(sol);
+    }
+
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = sol;
+
+    auto assemble_dense = [&](FESystem& sys,
+                              std::vector<Real>& K,
+                              std::vector<Real>& r) {
+        svmp::FE::assembly::DenseMatrixView lhs(static_cast<svmp::FE::GlobalIndex>(n_field));
+        svmp::FE::assembly::DenseVectorView rhs(static_cast<svmp::FE::GlobalIndex>(n_field));
+        lhs.zero();
+        rhs.zero();
+
+        AssemblyRequest req;
+        req.op = "ns";
+        req.want_matrix = true;
+        req.want_vector = true;
+        req.is_nonlinear_iteration = true;
+
+        sys.beginTimeStep(/*reset_auxiliary_state=*/false,
+                          /*invalidate_auxiliary_inputs=*/false);
+        const auto ar = sys.assemble(req, state, &lhs, &rhs);
+        ASSERT_TRUE(ar.success);
+
+        K.assign(n_field * n_field, 0.0);
+        r.assign(n_field, 0.0);
+        for (std::size_t i = 0; i < n_field; ++i) {
+            r[i] = rhs.getVectorEntry(static_cast<svmp::FE::GlobalIndex>(i));
+            for (std::size_t j = 0; j < n_field; ++j) {
+                K[i * n_field + j] =
+                    lhs.getMatrixEntry(static_cast<svmp::FE::GlobalIndex>(i),
+                                       static_cast<svmp::FE::GlobalIndex>(j));
+            }
+        }
+    };
+
+    auto apply_rank_one_updates = [&](FESystem& sys,
+                                      std::vector<Real>& K) {
+        const auto updates = sys.lastRankOneUpdates();
+        ASSERT_EQ(updates.size(), 2u);
+        for (const auto& upd : updates) {
+            EXPECT_TRUE(upd.prefer_native_face);
+            for (const auto& [row_dof, row_val] : upd.v) {
+                const auto row = static_cast<std::size_t>(row_dof);
+                for (const auto& [col_dof, col_val] : upd.v) {
+                    const auto col = static_cast<std::size_t>(col_dof);
+                    K[row * n_field + col] += upd.sigma * row_val * col_val;
+                }
+            }
+        }
+    };
+
+    std::vector<Real> K_mono;
+    std::vector<Real> r_mono;
+    assemble_dense(monolithic_sys, K_mono, r_mono);
+    apply_rank_one_updates(monolithic_sys, K_mono);
+
+    std::vector<Real> K_legacy;
+    std::vector<Real> r_legacy;
+    assemble_dense(legacy_sys, K_legacy, r_legacy);
+    apply_rank_one_updates(legacy_sys, K_legacy);
+
+    for (std::size_t i = 0; i < n_field; ++i) {
+        EXPECT_NEAR(r_mono[i], r_legacy[i], std::max(1e-10, std::abs(r_legacy[i]) * 1e-9))
+            << "two-outlet resistive residual mismatch at row=" << i;
+        for (std::size_t j = 0; j < n_field; ++j) {
+            EXPECT_NEAR(K_mono[i * n_field + j],
+                        K_legacy[i * n_field + j],
+                        std::max(1e-10, std::abs(K_legacy[i * n_field + j]) * 1e-9))
+                << "two-outlet resistive Jacobian mismatch at row=" << i
+                << " col=" << j;
+        }
     }
 }
 

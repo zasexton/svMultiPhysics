@@ -1430,6 +1430,7 @@ assembly::AssemblyResult assembleOperator(
                                 // Symmetric! Store as rank-1 update.
                                 backends::RankOneUpdate update;
                                 update.sigma = sigma;
+                                update.prefer_native_face = true;
                                 // Store owner-partitioned support. The runtime solver
                                 // paths perform their own overlap propagation / dot
                                 // reductions, so a globally replicated dQ/du would

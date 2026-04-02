@@ -309,6 +309,9 @@ class FSILS_reducedFieldUpdateType
     std::vector<FSILS_reducedSparseEntry> right_scaled;
     std::vector<FSILS_reducedSparseEntry> left_scaled_owned;
     std::vector<FSILS_reducedSparseEntry> right_scaled_owned;
+    bool has_face_cache = false;
+    FSILS_faceType left_face;
+    FSILS_faceType right_face;
 };
 
 class FSILS_groupedBorderedFieldCouplingType
@@ -318,6 +321,10 @@ class FSILS_groupedBorderedFieldCouplingType
     int grouped_coupling_id = -1;
     std::vector<double> aux_matrix;
     std::vector<FSILS_reducedFieldUpdateType> modes;
+    std::vector<FSILS_faceType> left_faces;
+    std::vector<FSILS_faceType> right_faces;
+    std::vector<double> add_dense_coeff;
+    std::vector<double> pre_dense_coeff;
 };
 
 inline int fsils_reduced_local_component(const FSILS_reducedFieldUpdateType& update,
@@ -404,10 +411,13 @@ class FSILS_lhsType
     std::vector<FSILS_cSType> cS;
 
     std::vector<FSILS_faceType> face;
+    int native_face_rank_one_count = 0;
     std::vector<FSILS_reducedFieldUpdateType> reduced_updates;
     std::vector<FSILS_groupedBorderedFieldCouplingType> grouped_bordered_field_couplings;
     std::vector<int> reduced_update_pc_active_indices;
     std::vector<double> reduced_update_pc_inner_inv;
+    bool use_exact_grouped_bordered_pre_in_add_bc_mul = false;
+    bool use_reduced_face_cache_in_add_bc_mul = false;
 
     /// Pre-allocated communication buffers (sized once in fsils_lhs_create)
     int nmax_commu = 0;      ///< max shared nodes across all comm partners

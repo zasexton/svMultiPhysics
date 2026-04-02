@@ -1068,6 +1068,148 @@ TEST(FsilsBackend, GroupedBorderedFieldCouplingAsmMomentumConverges)
     EXPECT_LE(rel, 1e-8);
 }
 
+TEST(FsilsBackend, GroupedBorderedCrossBlockCouplingConverges)
+{
+    FsilsFactory factory(/*dof_per_node=*/4);
+    const auto pattern = make_dense_pattern(4);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(4);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+    const GlobalIndex dofs[4] = {0, 1, 2, 3};
+    const Real Ke[16] = {
+        4.0, 0.6, 0.4, 0.2,
+        0.6, 3.7, 0.3, 0.5,
+        0.4, 0.3, 1.6, 0.2,
+        0.2, 0.5, 0.2, 1.4,
+    };
+    viewA->addMatrixEntries(dofs, Ke, assembly::AddMode::Insert);
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    constexpr Real d00 = 1.8;
+    constexpr Real d01 = -0.25;
+    constexpr Real d10 = 0.35;
+    constexpr Real d11 = 1.4;
+    const Real det = d00 * d11 - d01 * d10;
+    ASSERT_GT(std::abs(det), Real(1e-12));
+    const Real dinv00 = d11 / det;
+    const Real dinv01 = -d01 / det;
+    const Real dinv10 = -d10 / det;
+    const Real dinv11 = d00 / det;
+
+    const std::array<std::array<Real, 4>, 2> c_rows{{
+        {{0.03, -0.02, 0.11, 0.04}},
+        {{-0.01, 0.05, 0.02, -0.09}},
+    }};
+    const std::array<std::array<Real, 4>, 2> b_cols{{
+        {{0.07, 0.00, 0.05, 0.00}},
+        {{0.00, -0.06, 0.00, 0.08}},
+    }};
+
+    std::array<ReducedFieldUpdate, 2> updates{};
+    for (int i = 0; i < 2; ++i) {
+        updates[static_cast<std::size_t>(i)].sigma = -1.0;
+        updates[static_cast<std::size_t>(i)].grouped_coupling_id = 0;
+        for (int dof_idx = 0; dof_idx < 4; ++dof_idx) {
+            const Real left_val = b_cols[static_cast<std::size_t>(i)][static_cast<std::size_t>(dof_idx)];
+            if (std::abs(left_val) > Real(1e-30)) {
+                updates[static_cast<std::size_t>(i)].left.emplace_back(dof_idx, left_val);
+            }
+        }
+    }
+    for (int dof_idx = 0; dof_idx < 4; ++dof_idx) {
+        const Real row0 = dinv00 * c_rows[0][static_cast<std::size_t>(dof_idx)] +
+                          dinv01 * c_rows[1][static_cast<std::size_t>(dof_idx)];
+        const Real row1 = dinv10 * c_rows[0][static_cast<std::size_t>(dof_idx)] +
+                          dinv11 * c_rows[1][static_cast<std::size_t>(dof_idx)];
+        if (std::abs(row0) > Real(1e-30)) {
+            updates[0].right.emplace_back(dof_idx, row0);
+        }
+        if (std::abs(row1) > Real(1e-30)) {
+            updates[1].right.emplace_back(dof_idx, row1);
+        }
+    }
+
+    GroupedBorderedFieldCoupling grouped{};
+    grouped.grouped_coupling_id = 0;
+    grouped.aux_matrix = {d00, d01,
+                          d10, d11};
+    grouped.modes.resize(2);
+    for (int i = 0; i < 2; ++i) {
+        for (int dof_idx = 0; dof_idx < 4; ++dof_idx) {
+            const Real left_val = b_cols[static_cast<std::size_t>(i)][static_cast<std::size_t>(dof_idx)];
+            const Real right_val = c_rows[static_cast<std::size_t>(i)][static_cast<std::size_t>(dof_idx)];
+            if (std::abs(left_val) > Real(1e-30)) {
+                grouped.modes[static_cast<std::size_t>(i)].left.emplace_back(dof_idx, left_val);
+            }
+            if (std::abs(right_val) > Real(1e-30)) {
+                grouped.modes[static_cast<std::size_t>(i)].right.emplace_back(dof_idx, right_val);
+            }
+        }
+    }
+
+    auto x_exact = factory.createVector(4);
+    {
+        auto xs = x_exact->localSpan();
+        std::fill(xs.begin(), xs.end(), Real(1.0));
+    }
+    A->mult(*x_exact, *b);
+    addReducedFieldContributionSerial(
+        factory, *b, *x_exact, std::span<const ReducedFieldUpdate>(updates.data(), updates.size()));
+
+    const std::array<SolverMethod, 2> methods{
+        SolverMethod::BlockSchur,
+        SolverMethod::GMRES,
+    };
+
+    for (const auto method : methods) {
+        SCOPED_TRACE(method == SolverMethod::BlockSchur ? "blockschur_grouped_crossblock"
+                                                        : "gmres_grouped_crossblock");
+        SolverOptions opts;
+        if (method == SolverMethod::BlockSchur) {
+            opts.method = SolverMethod::BlockSchur;
+            opts.preconditioner = PreconditionerType::Diagonal;
+            opts.rel_tol = 1e-8;
+            opts.abs_tol = 1e-12;
+            opts.max_iter = 20;
+            opts.krylov_dim = 40;
+            opts.fsils_blockschur_gm_max_iter = 120;
+            opts.fsils_blockschur_cg_max_iter = 120;
+            opts.fsils_blockschur_gm_rel_tol = 1e-10;
+            opts.fsils_blockschur_cg_rel_tol = 1e-10;
+            BlockLayout layout;
+            layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
+            layout.blocks.push_back({"p", 2, 2, BlockRole::ConstraintField});
+            layout.momentum_block = 0;
+            layout.constraint_block = 1;
+            opts.block_layout = layout;
+        } else {
+            opts.method = SolverMethod::GMRES;
+            opts.preconditioner = PreconditionerType::Diagonal;
+            opts.rel_tol = 1e-8;
+            opts.abs_tol = 1e-12;
+            opts.max_iter = 200;
+            opts.krylov_dim = 80;
+            opts.fsils_residual_check_policy = FsilsResidualCheckPolicy::RetryOnly;
+        }
+
+        auto solver = factory.createLinearSolver(opts);
+        ASSERT_TRUE(solver->supportsNativeReducedFieldUpdates());
+        solver->setReducedFieldUpdates(std::span<const ReducedFieldUpdate>(updates.data(), updates.size()));
+        solver->setGroupedBorderedFieldCouplings(std::span<const GroupedBorderedFieldCoupling>(&grouped, 1));
+
+        auto x = factory.createVector(4);
+        const auto rep = solver->solve(*A, *x, *b);
+        EXPECT_TRUE(rep.converged);
+
+        const Real rel = fullOperatorRelativeResidualSerial(
+            factory, *A, *x, *b, std::span<const ReducedFieldUpdate>(updates.data(), updates.size()));
+        EXPECT_LE(rel, 1e-8);
+    }
+}
+
 TEST(FsilsBackend, SolveRestartedGmresHardMatrix)
 {
     ScopedEnvVar gmres_sd("SVMP_FSILS_GMRES_SD", "4");

@@ -262,43 +262,37 @@ namespace detail {
         FormExpr::discreteField(u_id, velocity_space, std::string(velocity_field_name));
     const std::string instance_name = detail::outletInstanceName(marker);
 
-    if (C == 0.0) {
-        auto Q = system.boundaryIntegral(q_name, inner(u_disc, n), marker,
-            FE::forms::BoundaryFunctional::Reduction::Sum,
-            FE::systems::AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
-
-        auto resistive = system.deploy(
-            use(detail::resistiveOutflowModel())
-                .name(instance_name)
-                .boundary(marker)
-                .monolithic()
-                .params({{"Rsum", Rp + Rd}, {"Pd", Pd}})
-                .bindCoupled("Q", Q)
-                .initialState({{"P", Pd}})
-        );
-
-        const auto p_out = resistive.output("P_out");
-        const auto flux = -p_out * n - beta * rho * max_backflow * u;
-        return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
-    }
-
     // Step 1: Register boundary-integral input for Q via handle-returning API.
     auto Q = system.boundaryIntegral(q_name, inner(u_disc, n), marker,
         FE::forms::BoundaryFunctional::Reduction::Sum,
         FE::systems::AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
 
-    // Step 2: Deploy the standard RCR model monolithically so the outlet
+    FE::systems::AuxiliaryInstanceHandle rcr;
+    if (C == 0.0) {
+        // Zero-storage resistance outlets are same-step algebraic feedthroughs,
+        // not true auxiliary dynamics. Lower them directly to the exact
+        // coupled-boundary path so Newton sees the outlet response without
+        // carrying a bordered auxiliary unknown.
+        const auto Q_integrand = inner(u_disc, n);
+        const auto Qsym = FormExpr::boundaryIntegral(Q_integrand, marker, q_name);
+        const auto p_out =
+            FormExpr::constant(Pd) + FormExpr::constant(Rp + Rd) * Qsym;
+        const auto flux = -p_out * n - beta * rho * max_backflow * u;
+        return std::make_unique<FE::forms::bc::CoupledNaturalBC>(marker, flux);
+    } else {
+        // Step 2: Deploy the standard RCR model monolithically so the outlet
         // state participates in the Newton solve through the generalized
         // AuxiliaryState infrastructure.
-    auto rcr = system.deploy(
-        use(detail::rcrOutflowModel())
-            .name(instance_name)
-            .boundary(marker)
-            .monolithic()
-            .params({{"Rp", Rp}, {"C", C}, {"Rd", Rd}, {"Pd", Pd}})
-            .bindCoupled("Q", Q)
-            .initialState({{"X", bc.X0}})
-    );
+        rcr = system.deploy(
+            use(detail::rcrOutflowModel())
+                .name(instance_name)
+                .boundary(marker)
+                .monolithic()
+                .params({{"Rp", Rp}, {"C", C}, {"Rd", Rd}, {"Pd", Pd}})
+                .bindCoupled("Q", Q)
+                .initialState({{"X", bc.X0}})
+        );
+    }
 
     // Step 3: Return a standard NaturalBC.
     const auto p_out = rcr.output("P_out");

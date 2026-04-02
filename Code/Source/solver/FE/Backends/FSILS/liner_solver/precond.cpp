@@ -285,10 +285,40 @@ void precond_diag(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_in
     scale_entries(update.right_scaled);
     scale_entries(update.left_scaled_owned);
     scale_entries(update.right_scaled_owned);
+
+    auto scale_face = [&](fe_fsi_linear_solver::FSILS_faceType& face) {
+      if (face.nNo <= 0 || face.dof <= 0) {
+        return;
+      }
+      if (face.valM.nrows() != face.val.nrows() || face.valM.ncols() != face.val.ncols()) {
+        face.valM.resize(face.val.nrows(), face.val.ncols());
+      }
+      for (int a = 0; a < face.nNo; ++a) {
+        const int Ac = face.glob(a);
+        for (int i = 0; i < face.dof; ++i) {
+          int global_comp = i;
+          if (!update.active_components.empty() &&
+              i < static_cast<int>(update.active_components.size())) {
+            global_comp = update.active_components[static_cast<std::size_t>(i)];
+          }
+          if (global_comp < 0 || global_comp >= dof || Ac < 0 || Ac >= lhs.nNo) {
+            face.valM(i, a) = face.val(i, a);
+            continue;
+          }
+          face.valM(i, a) = face.val(i, a) * W(global_comp, Ac);
+        }
+      }
+    };
+
+    if (update.has_face_cache) {
+      scale_face(update.left_face);
+      scale_face(update.right_face);
+    }
   }
 
   for (auto& group : lhs.grouped_bordered_field_couplings) {
-    for (auto& update : group.modes) {
+    for (std::size_t mode_idx = 0; mode_idx < group.modes.size(); ++mode_idx) {
+      auto& update = group.modes[mode_idx];
       update.left_scaled = update.left;
       update.right_scaled = update.right;
       update.left_scaled_owned = update.left_owned;
@@ -315,6 +345,37 @@ void precond_diag(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_in
       scale_entries(update.right_scaled);
       scale_entries(update.left_scaled_owned);
       scale_entries(update.right_scaled_owned);
+
+      auto scale_face = [&](fe_fsi_linear_solver::FSILS_faceType& face) {
+        if (face.nNo <= 0 || face.dof <= 0) {
+          return;
+        }
+        if (face.valM.nrows() != face.val.nrows() || face.valM.ncols() != face.val.ncols()) {
+          face.valM.resize(face.val.nrows(), face.val.ncols());
+        }
+        for (int a = 0; a < face.nNo; ++a) {
+          const int Ac = face.glob(a);
+          for (int i = 0; i < face.dof; ++i) {
+            int global_comp = i;
+            if (!update.active_components.empty() &&
+                i < static_cast<int>(update.active_components.size())) {
+              global_comp = update.active_components[static_cast<std::size_t>(i)];
+            }
+            if (global_comp < 0 || global_comp >= dof || Ac < 0 || Ac >= lhs.nNo) {
+              face.valM(i, a) = face.val(i, a);
+              continue;
+            }
+            face.valM(i, a) = face.val(i, a) * W(global_comp, Ac);
+          }
+        }
+      };
+
+      if (mode_idx < group.left_faces.size()) {
+        scale_face(group.left_faces[mode_idx]);
+      }
+      if (mode_idx < group.right_faces.size()) {
+        scale_face(group.right_faces[mode_idx]);
+      }
     }
   }
 }

@@ -36,6 +36,10 @@ struct RankOneUpdate {
     /// Empty means all components (backward compat). When set, the backend
     /// uses these instead of inferring from block layout or dof count.
     std::vector<int> active_components{};
+    /// True when this rank-1 update comes from a legacy coupled boundary
+    /// formulation that should be translated to a native FSILS face.
+    /// Generic algebraic rank-1 updates should leave this false.
+    bool prefer_native_face{false};
 };
 
 /// Represents a reduced field update: J += sigma * u * v^T

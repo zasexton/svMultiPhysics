@@ -36,6 +36,7 @@
 #include <numeric>
 #include <optional>
 #include <sstream>
+#include <unordered_map>
 #include <vector>
 
 #if FE_HAS_MPI
@@ -843,6 +844,86 @@ void addReducedFieldOperatorMatvec(std::span<const backends::ReducedFieldUpdate>
     y_view->finalizeAssembly();
 }
 
+bool tryPromoteExactReducedUpdateToNativeRankOne(
+    const backends::ReducedFieldUpdate& update,
+    backends::RankOneUpdate& promoted)
+{
+    if (update.left.empty() || update.right.empty() || std::abs(update.sigma) <= Real(1e-30)) {
+        return false;
+    }
+
+    std::unordered_map<GlobalIndex, Real> left_map;
+    std::unordered_map<GlobalIndex, Real> right_map;
+    left_map.reserve(update.left.size());
+    right_map.reserve(update.right.size());
+
+    Real left_norm_sq = Real(0.0);
+    Real right_norm_sq = Real(0.0);
+    Real cross = Real(0.0);
+
+    for (const auto& [dof, value] : update.left) {
+        if (std::abs(value) <= Real(1e-30)) {
+            continue;
+        }
+        left_map[dof] += value;
+    }
+    for (const auto& [dof, value] : update.right) {
+        if (std::abs(value) <= Real(1e-30)) {
+            continue;
+        }
+        right_map[dof] += value;
+    }
+    if (left_map.empty() || right_map.empty()) {
+        return false;
+    }
+
+    for (const auto& [dof, value] : left_map) {
+        left_norm_sq += value * value;
+        const auto it = right_map.find(dof);
+        if (it != right_map.end()) {
+            cross += value * it->second;
+        }
+    }
+    for (const auto& [dof, value] : right_map) {
+        right_norm_sq += value * value;
+    }
+
+    if (!(left_norm_sq > Real(1e-30)) || !(right_norm_sq > Real(1e-30))) {
+        return false;
+    }
+
+    const Real alpha = cross / left_norm_sq;
+    Real residual_sq = Real(0.0);
+    for (const auto& [dof, value] : right_map) {
+        const auto it = left_map.find(dof);
+        const Real left_value = (it != left_map.end()) ? it->second : Real(0.0);
+        const Real diff = value - alpha * left_value;
+        residual_sq += diff * diff;
+    }
+    for (const auto& [dof, value] : left_map) {
+        if (right_map.contains(dof)) {
+            continue;
+        }
+        const Real diff = alpha * value;
+        residual_sq += diff * diff;
+    }
+
+    const Real rel_residual_sq = residual_sq / std::max(right_norm_sq, Real(1e-30));
+    if (!(rel_residual_sq <= Real(1e-24)) || !(std::abs(alpha) > Real(1e-30))) {
+        return false;
+    }
+
+    promoted.sigma = update.sigma * alpha;
+    promoted.v.clear();
+    promoted.v.reserve(left_map.size());
+    for (const auto& [dof, value] : left_map) {
+        promoted.v.emplace_back(dof, value);
+    }
+    promoted.active_components = update.active_components;
+    promoted.prefer_native_face = true;
+    return !promoted.v.empty();
+}
+
 std::vector<backends::RankOneUpdate>
 transformRankOneUpdatesForConstraints(std::span<const backends::RankOneUpdate> updates,
                                       const constraints::AffineConstraints& constraints)
@@ -858,6 +939,7 @@ transformRankOneUpdatesForConstraints(std::span<const backends::RankOneUpdate> u
         backends::RankOneUpdate out;
         out.sigma = upd.sigma;
         out.active_components = upd.active_components;
+        out.prefer_native_face = upd.prefer_native_face;
 
         std::map<GlobalIndex, Real> coeffs;
         for (const auto& [dof, value] : upd.v) {
@@ -1012,15 +1094,32 @@ struct SolverOptionsGuard {
 }
 
 [[nodiscard]] backends::SolverOptions
-makeValidatedNativeRankOneSolveOptions(const backends::SolverOptions& base)
+makeValidatedNativeRankOneSolveOptions(const backends::SolverOptions& base,
+                                       const int native_direct_face_mode_count)
 {
-    backends::SolverOptions opts = makeBorderedSolveOptions(base);
+    backends::SolverOptions opts = base;
 
-    // Native FSILS rank-one outlet updates are still solved monolithically, but
-    // they are just as sensitive to inexact inner solves as the explicit bordered
-    // path. Reuse the stricter bordered tolerances so the first Newton step does
-    // not accept a pressure-dominated direction with only a loose preconditioned
-    // residual check behind it.
+    // Native face/reduced outlet updates do need tighter inner BlockSchur
+    // sub-solves than the XML 1e-3 defaults, but they do not need the much
+    // harsher bordered 1e-8/200 regime. A moderate tightening restores the
+    // pipe-case robustness while avoiding most of the extra Schur/momentum
+    // work seen with the explicit bordered settings.
+    if (base.method == backends::SolverMethod::BlockSchur) {
+        (void)native_direct_face_mode_count;
+        const Real rel_scale = static_cast<Real>(1e-2);
+        const Real fallback_target = static_cast<Real>(1e-5);
+        const Real target_inner_rel =
+            (base.rel_tol > Real(0.0) && std::isfinite(static_cast<double>(base.rel_tol)))
+                ? std::max(static_cast<Real>(1e-10), base.rel_tol * rel_scale)
+                : fallback_target;
+        opts.fsils_blockschur_gm_rel_tol = base.fsils_blockschur_gm_rel_tol.has_value()
+            ? std::min(*base.fsils_blockschur_gm_rel_tol, target_inner_rel)
+            : target_inner_rel;
+        opts.fsils_blockschur_cg_rel_tol = base.fsils_blockschur_cg_rel_tol.has_value()
+            ? std::min(*base.fsils_blockschur_cg_rel_tol, target_inner_rel)
+            : target_inner_rel;
+    }
+
     opts.fsils_residual_check_policy = backends::FsilsResidualCheckPolicy::Always;
     return opts;
 }
@@ -2424,18 +2523,6 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             applyPtcDiagonalShift(ptc_gamma);
         }
 
-        // Bridge rank-1 updates from coupled BC assembly to the linear solver.
-        const bool explicit_rank_one_in_matrix = bridgeRankOneUpdates();
-        if (!constrained_dofs.empty()) {
-            const auto& bordered = transient.system().borderedCoupling();
-            const bool exact_direct_coupling_in_matrix =
-                transient.system().lastRankOneUpdates().empty() &&
-                !bordered.direct_coupling_records.empty();
-            if (explicit_rank_one_in_matrix || exact_direct_coupling_in_matrix) {
-                reapplyConstrainedJacobianRows();
-            }
-        }
-
         // Bridge nullspace basis from GaugeRegistry to the linear solver.
         // Currently dormant: the resolver always uses algebraic enforcement,
         // so buildNullspaceBasis() returns empty.  This path is retained for
@@ -2560,6 +2647,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 bordered_group.grouped_coupling_id = 0;
                 bordered_group.aux_matrix.assign(bordered.D.begin(), bordered.D.end());
                 bordered_group.modes.reserve(na);
+                std::optional<backends::RankOneUpdate> promoted_condensed_rank_one;
                 for (std::size_t j = 0; j < na; ++j) {
                     backends::ReducedFieldUpdate upd;
                     upd.sigma = Real(-1.0);
@@ -2589,6 +2677,13 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                             mode.right.emplace_back(static_cast<GlobalIndex>(col), c_val);
                         }
                     }
+                    if (false && na == 1) {
+                        backends::RankOneUpdate promoted;
+                        if (tryPromoteExactReducedUpdateToNativeRankOne(upd, promoted)) {
+                            promoted_condensed_rank_one = std::move(promoted);
+                            continue;
+                        }
+                    }
                     if (!upd.left.empty() && !upd.right.empty()) {
                         active_reduced_field_updates.push_back(std::move(upd));
                     }
@@ -2596,7 +2691,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         bordered_group.modes.push_back(std::move(mode));
                     }
                 }
-                if (!bordered_group.aux_matrix.empty() && !bordered_group.modes.empty()) {
+                if (promoted_condensed_rank_one.has_value()) {
+                    effective_rank_one_updates.push_back(std::move(*promoted_condensed_rank_one));
+                } else if (na > 1 &&
+                           !bordered_group.aux_matrix.empty() &&
+                           !bordered_group.modes.empty()) {
                     grouped_bordered_field_couplings.push_back(std::move(bordered_group));
                 }
 
@@ -2615,6 +2714,20 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             }
         }
 
+        // Bridge rank-1 / reduced updates from coupled BC assembly to the linear
+        // solver only after any bordered condensation has augmented the active
+        // reduced/grouped coupling sets for this Newton solve.
+        const bool explicit_rank_one_in_matrix = bridgeRankOneUpdates();
+        if (!constrained_dofs.empty()) {
+            const auto& bordered = transient.system().borderedCoupling();
+            const bool exact_direct_coupling_in_matrix =
+                transient.system().lastRankOneUpdates().empty() &&
+                !bordered.direct_coupling_records.empty();
+            if (explicit_rank_one_in_matrix || exact_direct_coupling_in_matrix) {
+                reapplyConstrainedJacobianRows();
+            }
+        }
+
         const bool has_any_rank_one_updates =
             !effective_rank_one_updates.empty() || !active_reduced_field_updates.empty();
         const bool has_native_rank_one_updates =
@@ -2622,6 +2735,20 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             nativeRankOneUpdatesEnabledForLinearSolver(linear) &&
             linear.supportsNativeReducedFieldUpdates() &&
             !has_non_dirichlet_affine_constraints;
+        const bool has_native_direct_face_only_updates =
+            has_native_rank_one_updates &&
+            (!has_bordered || condensed_bordered_active) &&
+            grouped_bordered_field_couplings.empty() &&
+            !effective_rank_one_updates.empty() &&
+            active_reduced_field_updates.empty();
+        const int native_direct_face_mode_count =
+            has_native_direct_face_only_updates
+                ? static_cast<int>(effective_rank_one_updates.size())
+                : 0;
+        const bool has_native_condensed_coupled_updates =
+            has_native_rank_one_updates &&
+            condensed_bordered_active &&
+            !has_native_direct_face_only_updates;
         const bool needs_strict_coupled_solve_options =
             (has_bordered && !condensed_bordered_active) ||
             (has_any_rank_one_updates && !has_native_rank_one_updates);
@@ -2649,8 +2776,13 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             if (needs_strict_coupled_solve_options) {
                 linear.setOptions(makeBorderedSolveOptions(bordered_solver_options_guard.saved));
             } else if (needs_validated_native_rank_one_options) {
-                linear.setOptions(makeValidatedNativeRankOneSolveOptions(
-                    bordered_solver_options_guard.saved));
+                linear.setOptions((has_native_direct_face_only_updates ||
+                                   has_native_condensed_coupled_updates)
+                                      ? makeValidatedNativeRankOneSolveOptions(
+                                            bordered_solver_options_guard.saved,
+                                            native_direct_face_mode_count)
+                                      : makeBorderedSolveOptions(
+                                            bordered_solver_options_guard.saved));
             }
             if (has_bordered && !condensed_bordered_active) {
                 fsils_matrix_snapshot = captureFsilsMatrixSnapshot(J);
@@ -3056,6 +3188,46 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 std::ostringstream oss;
                 oss << "NewtonSolver: condensed bordered recovery ||dx_aux||=" << dx_norm;
                 traceLog(oss.str());
+
+                J.mult(du, residual_base);
+                auto kdu_view = residual_base.createAssemblyView();
+                FE_CHECK_NOT_NULL(kdu_view.get(), "NewtonSolver: condensed Kdu view");
+                std::vector<Real> rhs_dense(nf, Real(0.0));
+                auto rhs_view = r.createAssemblyView();
+                FE_CHECK_NOT_NULL(rhs_view.get(), "NewtonSolver: condensed rhs gather view");
+                for (std::size_t k = 0; k < nf; ++k) {
+                    rhs_dense[k] = rhs_view->getVectorEntry(static_cast<GlobalIndex>(k));
+                }
+
+                double pde_lin_res_sq = 0.0;
+                for (std::size_t i = 0; i < nf; ++i) {
+                    Real val = kdu_view->getVectorEntry(static_cast<GlobalIndex>(i));
+                    for (std::size_t j = 0; j < na; ++j) {
+                        val += bordered.B[i + nf * j] * aux_delta[j];
+                    }
+                    const double rem = static_cast<double>(val - rhs_dense[i]);
+                    pde_lin_res_sq += rem * rem;
+                }
+
+                double aux_lin_res_sq = 0.0;
+                for (std::size_t i = 0; i < na; ++i) {
+                    Real val = Real(0.0);
+                    for (std::size_t k = 0; k < nf; ++k) {
+                        val += bordered.Ct[i * nf + k] * dense_du[k];
+                    }
+                    for (std::size_t j = 0; j < na; ++j) {
+                        val += bordered.D[i * na + j] * aux_delta[j];
+                    }
+                    const double rem = static_cast<double>(val - bordered.g[i]);
+                    aux_lin_res_sq += rem * rem;
+                }
+
+                std::ostringstream lin_oss;
+                lin_oss << "NewtonSolver: condensed bordered linear residual"
+                        << " pde=" << std::sqrt(pde_lin_res_sq)
+                        << " aux=" << std::sqrt(aux_lin_res_sq)
+                        << " mixed=" << std::sqrt(pde_lin_res_sq + aux_lin_res_sq);
+                traceLog(lin_oss.str());
             }
         }
 
