@@ -791,6 +791,23 @@ public:
         std::string_view instance_name, std::string_view output_name) const;
 
     /**
+     * @brief Lowered algebraic output expression lookup by symbolic output name.
+     *
+     * When a monolithic AuxiliaryState instance is recognized as a pure
+     * algebraic feedthrough, setup may lower one of its outputs to a direct
+     * expression in terms of AuxiliaryInputRef slots and constants. The
+     * returned expression is suitable for assembly-time substitution in a
+     * plain NaturalBC, while the original AuxiliaryOutputRef-based metadata
+     * can still be retained for direct-coupling extraction.
+     */
+    [[nodiscard]] std::optional<forms::FormExpr>
+    loweredAuxiliaryOutputExpr(std::string_view output_name) const;
+
+    /// Slot-based lowered algebraic output lookup.
+    [[nodiscard]] std::optional<forms::FormExpr>
+    loweredAuxiliaryOutputExpr(std::size_t slot) const;
+
+    /**
      * @brief Get an analysis summary of auxiliary blocks and inputs.
      */
     struct AuxiliaryAnalysisSummary {
@@ -1148,11 +1165,18 @@ private:
         std::unique_ptr<AuxiliaryStateStepper> stepper{};
         std::unique_ptr<AuxiliaryDerivativeProvider> deriv_provider{};
         std::vector<Real> output_buffer{}; ///< Evaluated output values
+        bool lower_to_direct_only{false};  ///< Keep semantic block/output, but exclude from live monolithic solve.
         /// Entity map: indices of entities this block covers.
         /// Empty = all entities (WholeDomain / no restriction).
         std::vector<std::size_t> entity_map{};
     };
     std::vector<DeployedAuxEntry> deployed_aux_entries_{};
+    std::unordered_map<std::string, forms::FormExpr> lowered_aux_output_exprs_by_name_{};
+    std::unordered_map<std::size_t, forms::FormExpr> lowered_aux_output_exprs_by_slot_{};
+    [[nodiscard]] bool canLowerAlgebraicAuxiliaryToDirectOnly_(const DeployedAuxEntry& entry) const;
+    [[nodiscard]] std::optional<forms::FormExpr>
+    synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
+                                          std::string_view output_name) const;
     /// Deferred dependency pairs (dependent, dependency) from derivedInput().
     /// Wired by finalizeDeferredInputDeps() when all inputs are registered.
     std::vector<std::pair<std::string, std::string>> deferred_input_deps_{};
@@ -1161,6 +1185,7 @@ private:
     /// Resolve deferred derived-input expressions and wire dependency edges.
     /// Safe to call multiple times — clears the deferred lists on first run.
     void finalizeDeferredInputDeps();
+    void buildLoweredAuxiliaryOutputExpressions_();
 
     /// Bind secondary fields and set dof_per_node on a BoundaryReductionService
     /// for multi-field integrand evaluation.
@@ -1314,6 +1339,7 @@ public:
         std::vector<Real> B;            ///< dR_PDE/dx_aux columns (n_field_dofs × n_aux, col-major)
         std::vector<Real> Ct;           ///< dR_aux/du rows (n_aux × n_field_dofs, row-major)
         std::vector<Real> dF_dxdot;     ///< Raw dF/dxdot block (n_aux × n_aux, row-major)
+        std::vector<AuxiliaryVariableKind> aux_variable_kinds{}; ///< Per-aux unknown classification in mixed-storage order
 
         void clear() {
             active = false;
@@ -1322,6 +1348,7 @@ public:
             n_field_dofs = 0;
             D.clear(); g.clear(); B.clear(); Ct.clear();
             dF_dxdot.clear();
+            aux_variable_kinds.clear();
             aux_blocks.clear();
             dF_dinputs.clear();
             dO_dx.clear();
@@ -1339,6 +1366,8 @@ public:
             std::vector<Real> dF_dinputs{};
             std::vector<Real> dO_dx{};
             std::vector<Real> dO_dI{};
+            std::vector<std::vector<std::pair<GlobalIndex, Real>>> input_gradients{};
+            std::vector<std::pair<GlobalIndex, Real>> output_gradient{};
         };
 
         /// dF/d(inputs) per aux DOF (needed for B computation from Ct).
@@ -1360,6 +1389,8 @@ public:
             B.assign(nf * static_cast<std::size_t>(na), 0.0);
             Ct.assign(static_cast<std::size_t>(na) * nf, 0.0);
             dF_dxdot.assign(static_cast<std::size_t>(na * na), 0.0);
+            aux_variable_kinds.assign(static_cast<std::size_t>(na),
+                                      AuxiliaryVariableKind::Differential);
             dF_dinputs.clear();
             dO_dx.clear();
             dO_dI.clear();

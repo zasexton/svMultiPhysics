@@ -7,6 +7,7 @@
  */
 
 #include "Forms/BoundaryCondition.h"
+#include "Systems/CoupledBoundaryConditions.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/SystemConstraint.h"
@@ -162,6 +163,21 @@ public:
             }
             bc->contributeToResidual(residual, u, v);
         }
+
+        residual = residual.transformNodes(
+            [&](const forms::FormExprNode& node) -> std::optional<forms::FormExpr> {
+                if (node.type() != forms::FormExprType::AuxiliaryOutputSymbol) {
+                    return std::nullopt;
+                }
+                const auto sym = node.symbolName();
+                if (!sym) {
+                    return std::nullopt;
+                }
+                return system.loweredAuxiliaryOutputExpr(*sym);
+            });
+
+        residual = systems::bc::detail::registerAndResolveCoupledSymbols(
+            system, field_id, residual);
 
         // Persist any advanced affine constraints for setup-time lowering.
         if (!bcs_.empty()) {

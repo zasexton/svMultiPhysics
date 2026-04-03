@@ -1657,8 +1657,13 @@ CoupledResidualKernels installFormulation(
         }
     }
 
-    // Mutable copy for auxiliary symbol resolution.
+    // Mutable copies for auxiliary symbol resolution.
+    // `resolved` is compiled for assembly. `metadata_resolved` preserves the
+    // original AuxiliaryOutputRef view so the monolithic direct-coupling path
+    // can still extract dR/d(output) even when the assembled kernel was
+    // lowered to direct algebraic input expressions.
     forms::FormExpr resolved = residual;
+    forms::FormExpr metadata_resolved = residual;
 
     // Build the FormulationRecord but do NOT commit it yet. It will be added
     // to the system after installation succeeds, so failures don't leave
@@ -1774,7 +1779,7 @@ CoupledResidualKernels installFormulation(
                 }
             }
 
-            auto resolve_aux = [&](const forms::FormExprNode& node)
+            auto resolve_aux_metadata = [&](const forms::FormExprNode& node)
                 -> std::optional<forms::FormExpr> {
                 auto sym = node.symbolName();
                 if (!sym) return std::nullopt;
@@ -1786,6 +1791,9 @@ CoupledResidualKernels installFormulation(
                             static_cast<std::uint32_t>(it->second));
                 }
                 if (node.type() == forms::FormExprType::AuxiliaryOutputSymbol) {
+                    if (auto lowered_output = system.loweredAuxiliaryOutputExpr(nm)) {
+                        return *lowered_output;
+                    }
                     auto it = output_slots.find(nm);
                     if (it != output_slots.end())
                         return forms::FormExpr::auxiliaryOutputRef(
@@ -1793,12 +1801,36 @@ CoupledResidualKernels installFormulation(
                 }
                 return std::nullopt;
             };
-            resolved = resolved.transformNodes(resolve_aux);
+            auto resolve_aux_assembly = [&](const forms::FormExprNode& node)
+                -> std::optional<forms::FormExpr> {
+                auto sym = node.symbolName();
+                if (!sym) return std::nullopt;
+                const std::string nm{*sym};
+                if (node.type() == forms::FormExprType::AuxiliaryInputSymbol) {
+                    auto it = input_slots.find(nm);
+                    if (it != input_slots.end())
+                        return forms::FormExpr::auxiliaryInputRef(
+                            static_cast<std::uint32_t>(it->second));
+                }
+                if (node.type() == forms::FormExprType::AuxiliaryOutputSymbol) {
+                    if (auto lowered_output = system.loweredAuxiliaryOutputExpr(nm)) {
+                        return *lowered_output;
+                    }
+                    auto it = output_slots.find(nm);
+                    if (it != output_slots.end())
+                        return forms::FormExpr::auxiliaryOutputRef(
+                            static_cast<std::uint32_t>(it->second));
+                }
+                return std::nullopt;
+            };
+            metadata_resolved = metadata_resolved.transformNodes(resolve_aux_metadata);
+            resolved = resolved.transformNodes(resolve_aux_assembly);
 
-            // Update the stored residual expression with resolved refs so
-            // downstream consumers (e.g., dR_PDE/dx_aux monolithic Jacobian)
-            // can find AuxiliaryOutputRef nodes.
-            rec.residual_expr = resolved.nodeShared();
+            // For pure algebraic lowered outputs, metadata_resolved now uses
+            // the same lowered direct expression as assembly so the runtime
+            // does not also build a second incompatible monolithic
+            // direct-coupling path from AuxiliaryOutputRef metadata.
+            rec.residual_expr = metadata_resolved.nodeShared();
         }
 
         // Block couplings: discover actual active blocks from the per-test
@@ -1873,13 +1905,13 @@ CoupledResidualKernels installFormulation(
         if (fields.size() == 1) {
             // Single-field: the whole resolved is the single block.
             rec.block_residual_exprs.push_back(
-                {{fields[0], fields[0]}, resolved.nodeShared()});
+                {{fields[0], fields[0]}, metadata_resolved.nodeShared()});
         } else {
             // Multi-field: split by test function to get per-test sub-expressions.
             // Each sub-expression F_i(u1,...,uN; v_i) contains terms for one test field.
             // We store them keyed by (test_field, test_field) — the trial splitting
             // is done by the form compiler during Jacobian block compilation.
-            auto test_blocks = splitByTestFunction(resolved);
+            auto test_blocks = splitByTestFunction(metadata_resolved);
             if (test_blocks.size() == fields.size()) {
                 for (std::size_t i = 0; i < fields.size(); ++i) {
                     if (test_blocks[i].isValid()) {

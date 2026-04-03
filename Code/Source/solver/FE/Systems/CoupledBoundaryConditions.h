@@ -209,6 +209,42 @@ inline void collectCoupledSymbols(const forms::FormExpr& expr,
     });
 }
 
+[[nodiscard]] inline forms::FormExpr registerAndResolveCoupledSymbols(FESystem& system,
+                                                                      FieldId primary_field,
+                                                                      const forms::FormExpr& expr)
+{
+    if (!expr.isValid() || !expr.node()) {
+        return expr;
+    }
+
+    std::vector<forms::BoundaryFunctional> functionals;
+    std::vector<std::string> aux_refs;
+    collectCoupledSymbols(expr, functionals, aux_refs);
+    if (functionals.empty() && aux_refs.empty()) {
+        return expr;
+    }
+
+    auto& coupled = system.coupledBoundaryManager(primary_field);
+
+    std::unordered_map<std::string, std::size_t> integral_index;
+    integral_index.reserve(functionals.size());
+    for (auto& f : functionals) {
+        integral_index.emplace(f.name, 0u);
+        coupled.addBoundaryFunctional(std::move(f));
+    }
+    for (auto& kv : integral_index) {
+        kv.second = coupled.integrals().indexOf(kv.first);
+    }
+
+    std::unordered_map<std::string, std::size_t> aux_index;
+    aux_index.reserve(aux_refs.size());
+    for (const auto& nm : aux_refs) {
+        aux_index.emplace(nm, coupled.auxiliaryState().indexOf(nm));
+    }
+
+    return resolveCoupledSymbols(expr, integral_index, aux_index);
+}
+
 } // namespace detail
 
 /**

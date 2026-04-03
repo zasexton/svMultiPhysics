@@ -227,7 +227,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         const auto compiler_options =
             makeBoundaryFunctionalCompilerOptions(options_.enable_jit, options_.enable_jit_specialization);
         system.boundaryReductionService(u_id).setCompilerOptions(compiler_options);
-        system.coupledBoundaryManager(u_id).setCompilerOptions(compiler_options);
     }
 
     FE::systems::BoundaryConditionManager bc_manager;

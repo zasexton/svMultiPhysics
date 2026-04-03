@@ -283,6 +283,306 @@ void scatterAuxiliaryFlatEntity(const AuxiliaryBlockStorage& blk,
     return true;
 }
 
+[[nodiscard]] bool invertDenseMatrix(std::vector<Real> A,
+                                     std::size_t n,
+                                     std::vector<Real>& A_inv)
+{
+    if (A.size() != n * n) {
+        return false;
+    }
+
+    A_inv.assign(n * n, Real(0.0));
+    for (std::size_t col = 0; col < n; ++col) {
+        std::vector<Real> rhs(n, Real(0.0));
+        rhs[col] = Real(1.0);
+        auto A_work = A;
+        if (!solveDenseSystemInPlace(A_work, rhs)) {
+            return false;
+        }
+        for (std::size_t row = 0; row < n; ++row) {
+            A_inv[row * n + col] = rhs[row];
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool tryPromoteDirectReducedToNativeRankOne(
+    std::span<const std::pair<GlobalIndex, Real>> output_gradient,
+    std::span<const std::pair<GlobalIndex, Real>> input_gradient,
+    Real doutput_dinput,
+    const dofs::IndexSet& owned_dofs,
+    backends::RankOneUpdate& promoted)
+{
+    constexpr Real kTol = static_cast<Real>(1e-14);
+    if (!(std::abs(doutput_dinput) > kTol) || output_gradient.empty() || input_gradient.empty()) {
+        return false;
+    }
+
+    std::unordered_map<GlobalIndex, Real> q_map;
+    q_map.reserve(input_gradient.size());
+    Real q_norm_sq = Real(0.0);
+    for (const auto& [dof, value] : input_gradient) {
+        q_map[dof] += value;
+        q_norm_sq += value * value;
+    }
+    if (!(q_norm_sq > kTol * kTol)) {
+        return false;
+    }
+
+    Real cross = Real(0.0);
+    Real dRdQ_norm_sq = Real(0.0);
+    Real residual_sq = Real(0.0);
+    std::unordered_map<GlobalIndex, Real> dR_map;
+    dR_map.reserve(output_gradient.size());
+    for (const auto& [dof, dRi_dOk] : output_gradient) {
+        const Real dRdQ = dRi_dOk * doutput_dinput;
+        dR_map[dof] = dRdQ;
+        dRdQ_norm_sq += dRdQ * dRdQ;
+        const auto it = q_map.find(dof);
+        if (it != q_map.end()) {
+            cross += dRdQ * it->second;
+        }
+    }
+    if (!(dRdQ_norm_sq > kTol * kTol)) {
+        return false;
+    }
+
+    const Real sigma = cross / q_norm_sq;
+    if (!(std::abs(sigma) > kTol)) {
+        return false;
+    }
+
+    for (const auto& [dof, q_val] : q_map) {
+        const auto it = dR_map.find(dof);
+        const Real dRdQ = (it != dR_map.end()) ? it->second : Real(0.0);
+        const Real diff = dRdQ - sigma * q_val;
+        residual_sq += diff * diff;
+    }
+    for (const auto& [dof, dRdQ] : dR_map) {
+        if (q_map.find(dof) == q_map.end()) {
+            residual_sq += dRdQ * dRdQ;
+        }
+    }
+
+    constexpr Real kRelTolSq = static_cast<Real>(1e-4);
+    if (!(residual_sq / std::max(dRdQ_norm_sq, Real(1e-30)) <= kRelTolSq)) {
+        return false;
+    }
+
+    promoted = {};
+    promoted.sigma = sigma;
+    promoted.prefer_native_face = true;
+    promoted.v.reserve(input_gradient.size());
+    for (const auto& [dof, value] : input_gradient) {
+        if (owned_dofs.contains(dof)) {
+            promoted.v.emplace_back(dof, value);
+        }
+    }
+    return !promoted.v.empty();
+}
+
+[[nodiscard]] bool isPureAlgebraicAuxiliary(
+    const AuxiliaryStateModel& model,
+    std::size_t dim) noexcept
+{
+    if (dim == 0) {
+        return false;
+    }
+
+    const auto meta = model.structuralMetadata();
+    if (meta.variable_kinds.size() < dim) {
+        return false;
+    }
+
+    return std::all_of(
+        meta.variable_kinds.begin(),
+        meta.variable_kinds.begin() + static_cast<std::ptrdiff_t>(dim),
+        [](AuxiliaryVariableKind kind) {
+            return kind == AuxiliaryVariableKind::Algebraic;
+        });
+}
+
+[[nodiscard]] forms::FormExpr exprFromNodeShared(
+    const std::shared_ptr<const forms::FormExprNode>& node)
+{
+    return forms::FormExpr(std::const_pointer_cast<forms::FormExprNode>(node));
+}
+
+[[nodiscard]] bool nodeIsAuxiliaryStateRefSlot(
+    const forms::FormExprNode& node,
+    const std::uint32_t slot) noexcept
+{
+    if (node.type() != forms::FormExprType::AuxiliaryStateRef) {
+        return false;
+    }
+    const auto s = node.slotIndex();
+    return s.has_value() && *s == slot;
+}
+
+[[nodiscard]] bool exprContainsType(
+    const forms::FormExprNode& node,
+    const forms::FormExprType target) noexcept
+{
+    if (node.type() == target) {
+        return true;
+    }
+    for (const auto* child : node.children()) {
+        if (child && exprContainsType(*child, target)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool exprContainsAuxiliaryStateRefSlot(
+    const forms::FormExprNode& node,
+    const std::uint32_t slot) noexcept
+{
+    if (nodeIsAuxiliaryStateRefSlot(node, slot)) {
+        return true;
+    }
+    for (const auto* child : node.children()) {
+        if (child && exprContainsAuxiliaryStateRefSlot(*child, slot)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] std::optional<forms::FormExpr> negatedChildExpr(
+    const std::shared_ptr<const forms::FormExprNode>& node)
+{
+    if (!node || node->type() != forms::FormExprType::Negate) {
+        return std::nullopt;
+    }
+    const auto kids = node->childrenShared();
+    if (kids.size() != 1 || !kids[0]) {
+        return std::nullopt;
+    }
+    return exprFromNodeShared(kids[0]);
+}
+
+[[nodiscard]] std::optional<forms::FormExpr> tryExtractExplicitStateAssignment(
+    const forms::FormExpr& residual,
+    const std::uint32_t state_slot)
+{
+    if (!residual.isValid() || !residual.node()) {
+        return std::nullopt;
+    }
+
+    const auto& node = *residual.node();
+    const auto kids = node.childrenShared();
+
+    switch (node.type()) {
+        case forms::FormExprType::Subtract: {
+            if (kids.size() != 2 || !kids[0] || !kids[1]) {
+                return std::nullopt;
+            }
+            if (nodeIsAuxiliaryStateRefSlot(*kids[0], state_slot) &&
+                !exprContainsAuxiliaryStateRefSlot(*kids[1], state_slot)) {
+                return exprFromNodeShared(kids[1]);
+            }
+            if (nodeIsAuxiliaryStateRefSlot(*kids[1], state_slot) &&
+                !exprContainsAuxiliaryStateRefSlot(*kids[0], state_slot)) {
+                return exprFromNodeShared(kids[0]);
+            }
+            break;
+        }
+        case forms::FormExprType::Add: {
+            if (kids.size() != 2 || !kids[0] || !kids[1]) {
+                return std::nullopt;
+            }
+            if (nodeIsAuxiliaryStateRefSlot(*kids[0], state_slot)) {
+                auto neg_rhs = negatedChildExpr(kids[1]);
+                if (neg_rhs &&
+                    (!neg_rhs->node() || !exprContainsAuxiliaryStateRefSlot(*neg_rhs->node(), state_slot))) {
+                    return neg_rhs;
+                }
+            }
+            if (nodeIsAuxiliaryStateRefSlot(*kids[1], state_slot)) {
+                auto neg_lhs = negatedChildExpr(kids[0]);
+                if (neg_lhs &&
+                    (!neg_lhs->node() || !exprContainsAuxiliaryStateRefSlot(*neg_lhs->node(), state_slot))) {
+                    return neg_lhs;
+                }
+            }
+            break;
+        }
+        default:
+            break;
+    }
+
+    return std::nullopt;
+}
+
+[[nodiscard]] bool solvePureAlgebraicAuxiliaryState(
+    const AuxiliaryStateModel& model,
+    const AuxiliaryDerivativeProvider& deriv,
+    std::span<Real> x,
+    const AuxiliaryLocalContext& base_ctx,
+    int max_iterations = 25,
+    Real tol_abs = static_cast<Real>(1e-12),
+    Real tol_rel = static_cast<Real>(1e-10))
+{
+    const auto n = static_cast<std::size_t>(model.dimension());
+    if (x.size() != n || n == 0) {
+        return x.size() == n;
+    }
+
+    std::vector<Real> xdot(n, Real(0.0));
+    std::vector<Real> residual(n, Real(0.0));
+    std::vector<Real> dFdx(n * n, Real(0.0));
+
+    auto residual_norm = [&](std::span<const Real> r) {
+        Real norm_sq = Real(0.0);
+        for (const Real v : r) {
+            norm_sq += v * v;
+        }
+        return std::sqrt(norm_sq);
+    };
+
+    Real initial_norm = Real(-1.0);
+
+    for (int it = 0; it < max_iterations; ++it) {
+        AuxiliaryLocalContext ctx = base_ctx;
+        ctx.x = x;
+        ctx.xdot = xdot;
+
+        AuxiliaryResidualRequest res_req;
+        res_req.residual = residual;
+        model.evaluateResidual(ctx, res_req);
+
+        const Real norm = residual_norm(residual);
+        if (initial_norm < Real(0.0)) {
+            initial_norm = norm;
+        }
+        const Real scale = tol_abs + tol_rel * (Real(1.0) + initial_norm);
+        if (norm <= scale) {
+            return true;
+        }
+
+        AuxiliaryJacobianRequest jac_req;
+        jac_req.dF_dx = dFdx;
+        jac_req.n = static_cast<int>(n);
+        deriv.evaluateJacobian(model, ctx, jac_req);
+
+        std::vector<Real> delta = residual;
+        for (Real& v : delta) {
+            v = -v;
+        }
+        auto A = dFdx;
+        if (!solveDenseSystemInPlace(A, delta)) {
+            return false;
+        }
+
+        for (std::size_t i = 0; i < n; ++i) {
+            x[i] += delta[i];
+        }
+    }
+
+    return false;
+}
+
 #if FE_HAS_MPI
 MPI_Datatype mpiRealType()
 {
@@ -2086,6 +2386,180 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
 
     const Real aux_dt = effectiveAuxiliaryDt(state);
 
+    auto hasEntityLocalInputs = [&](const DeployedAuxEntry& entry) {
+        if (!auxiliary_input_registry_) {
+            return false;
+        }
+        for (const auto& [model_name, reg_name] : entry.input_bindings) {
+            (void)model_name;
+            if (auxiliary_input_registry_->hasInput(reg_name) &&
+                auxiliary_input_registry_->isEntityLocal(reg_name)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto rebuildEntityInputs = [&](const DeployedAuxEntry& entry,
+                                   std::size_t orig_e,
+                                   std::vector<Real>& bound_inputs) {
+        if (!auxiliary_input_registry_) {
+            return;
+        }
+        bound_inputs.clear();
+        if (auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get())) {
+            for (const auto& inp : built->signature().inputs) {
+                auto bind_it = entry.input_bindings.find(inp.name);
+                if (bind_it != entry.input_bindings.end()) {
+                    auto vals = auxiliary_input_registry_->valuesOf(bind_it->second, orig_e);
+                    bound_inputs.insert(bound_inputs.end(), vals.begin(), vals.end());
+                } else {
+                    bound_inputs.resize(
+                        bound_inputs.size() + static_cast<std::size_t>(inp.size),
+                        Real(0.0));
+                }
+            }
+            return;
+        }
+        rebuildGenericInputsForEntity(entry, orig_e, bound_inputs);
+    };
+
+    auto buildEntityFieldValues = [&](const DeployedAuxEntry& entry,
+                                      std::size_t orig_e) {
+        std::vector<FieldValueEntry> field_values;
+        if (!entry.deriv_provider) {
+            return field_values;
+        }
+        const auto& artifact = entry.deriv_provider->artifact();
+        if (artifact.referenced_fields.empty()) {
+            return field_values;
+        }
+        field_values.reserve(artifact.referenced_fields.size());
+        for (const auto fid : artifact.referenced_fields) {
+            const auto fidx = static_cast<std::size_t>(fid);
+            if (fidx >= field_dof_offsets_.size() ||
+                fidx >= field_dof_handlers_.size()) {
+                continue;
+            }
+            const auto fld_off = field_dof_offsets_[fidx];
+            const auto* femap = field_dof_handlers_[fidx].getEntityDofMap();
+            if (!femap) {
+                continue;
+            }
+            auto vdofs = femap->getVertexDofs(static_cast<GlobalIndex>(orig_e));
+            if (vdofs.empty()) {
+                continue;
+            }
+            FieldValueEntry fve;
+            fve.field = fid;
+            fve.n_components = static_cast<int>(vdofs.size());
+            for (int c = 0; c < fve.n_components && c < MAX_FIELD_VALUE_COMPONENTS; ++c) {
+                const auto gidx = static_cast<std::size_t>(
+                    vdofs[static_cast<std::size_t>(c)] + fld_off);
+                fve.components[c] = (gidx < state.u.size()) ? state.u[gidx] : Real(0.0);
+            }
+            field_values.push_back(fve);
+        }
+        return field_values;
+    };
+
+    // Purely algebraic monolithic blocks should be solved onto their current
+    // algebraic manifold before output evaluation and mixed assembly, so the
+    // nonlinear iteration sees the exact direct-feedthrough response instead
+    // of stale work values.
+    for (auto& entry : deployed_aux_entries_) {
+        if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic ||
+            !entry.deriv_provider ||
+            !auxiliary_state_manager_ ||
+            !auxiliary_state_manager_->hasBlock(entry.instance_name) ||
+            !isPureAlgebraicAuxiliary(*entry.model,
+                                      static_cast<std::size_t>(entry.spec.size))) {
+            continue;
+        }
+
+        auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
+        auto params = buildParamVector(entry);
+        auto bound_inputs = buildInputVector(entry);
+        const bool has_entity_local_inputs = hasEntityLocalInputs(entry);
+        const auto& emap = entry.entity_map;
+
+        for (std::size_t e = 0; e < blk.entityCount(); ++e) {
+            auto entity_state_vec = blk.gatherEntityWork(e);
+            const auto entity_state_before = entity_state_vec;
+            const auto entity_committed = blk.gatherEntityCommitted(e);
+            const auto entity_committed_rate = gatherMonolithicCommittedRate(entry, e);
+            const auto orig_e = emap.empty() ? e : emap[e];
+
+            if (has_entity_local_inputs) {
+                rebuildEntityInputs(entry, orig_e, bound_inputs);
+            }
+
+            auto temporal = buildMonolithicAuxiliaryTemporalEvaluation(
+                entry.stepper_spec,
+                blk,
+                e,
+                entity_state_vec,
+                entity_committed,
+                entity_committed_rate,
+                state);
+            std::fill(temporal.xdot.begin(), temporal.xdot.end(), Real(0.0));
+
+            auto field_values = buildEntityFieldValues(entry, orig_e);
+
+            AuxiliaryLocalContext ctx;
+            ctx.time = state.time;
+            ctx.dt = state.dt;
+            ctx.effective_dt = aux_dt;
+            ctx.x = entity_state_vec;
+            ctx.xdot = temporal.xdot;
+            ctx.history = temporal.history_spans;
+            ctx.inputs = bound_inputs;
+            ctx.params = params;
+            ctx.entity_index = e;
+            ctx.field_values = field_values;
+            ctx.user_data = state.user_data;
+
+            const bool solved = solvePureAlgebraicAuxiliaryState(
+                *entry.model,
+                *entry.deriv_provider,
+                entity_state_vec,
+                ctx);
+            if (monolithicAuxTraceEnabled()) {
+                std::vector<Real> outputs(static_cast<std::size_t>(entry.model->outputCount()), Real(0.0));
+                AuxiliaryLocalContext solved_ctx = ctx;
+                solved_ctx.x = entity_state_vec;
+                entry.model->evaluateOutputs(solved_ctx, outputs);
+
+                auto format_values = [](std::span<const Real> values) {
+                    std::ostringstream oss;
+                    oss << "[";
+                    for (std::size_t i = 0; i < values.size(); ++i) {
+                        if (i != 0) {
+                            oss << ", ";
+                        }
+                        oss << values[i];
+                    }
+                    oss << "]";
+                    return oss.str();
+                };
+
+                std::ostringstream oss;
+                oss << "prepareAuxiliaryForAssembly: algebraic block='" << entry.instance_name
+                    << "' entity=" << e
+                    << " solved=" << (solved ? 1 : 0)
+                    << " inputs=" << format_values(bound_inputs)
+                    << " x_before=" << format_values(entity_state_before)
+                    << " x_after=" << format_values(entity_state_vec)
+                    << " outputs=" << format_values(outputs);
+                FE_LOG_INFO(oss.str());
+            }
+
+            if (solved) {
+                blk.scatterEntityWork(e, entity_state_vec);
+            }
+        }
+    }
+
     // Evaluate outputs for deployed models via the base-class output interface.
     for (auto& entry : deployed_aux_entries_) {
         const auto n_outputs = static_cast<std::size_t>(entry.model->outputCount());
@@ -2170,16 +2644,7 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
         const auto& emap = entry.entity_map; // empty = identity mapping
 
         // Detect entity-local bindings for output eval.
-        bool has_entity_local_inputs = false;
-        if (auxiliary_input_registry_) {
-            for (const auto& [model_name, reg_name] : entry.input_bindings) {
-                if (auxiliary_input_registry_->hasInput(reg_name) &&
-                    auxiliary_input_registry_->isEntityLocal(reg_name)) {
-                    has_entity_local_inputs = true;
-                    break;
-                }
-            }
-        }
+        const bool has_entity_local_inputs = hasEntityLocalInputs(entry);
 
         for (std::size_t e = 0; e < n_entities; ++e) {
             // Layout-aware entity gather.
@@ -2187,21 +2652,8 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
 
             // Rebuild bound inputs per entity when entity-local bindings exist.
             const auto orig_e = emap.empty() ? e : emap[e];
-            if (has_entity_local_inputs && auxiliary_input_registry_) {
-                bound_inputs.clear();
-                if (auto* b2 = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get())) {
-                    for (const auto& inp : b2->signature().inputs) {
-                        auto bind_it = entry.input_bindings.find(inp.name);
-                        if (bind_it != entry.input_bindings.end()) {
-                            auto vals = auxiliary_input_registry_->valuesOf(bind_it->second, orig_e);
-                            bound_inputs.insert(bound_inputs.end(), vals.begin(), vals.end());
-                        } else {
-                            bound_inputs.resize(bound_inputs.size() + static_cast<std::size_t>(inp.size), 0.0);
-                        }
-                    }
-                } else {
-                    rebuildGenericInputsForEntity(entry, orig_e, bound_inputs);
-                }
+            if (has_entity_local_inputs) {
+                rebuildEntityInputs(entry, orig_e, bound_inputs);
             }
 
             const auto entity_committed = blk.gatherEntityCommitted(e);
@@ -2216,29 +2668,7 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
                 state);
 
             // Populate field_values for models with direct FE field references.
-            std::vector<FieldValueEntry> fv_prep;
-            if (entry.deriv_provider) {
-                const auto& art_prep = entry.deriv_provider->artifact();
-                for (const auto fid : art_prep.referenced_fields) {
-                    const auto fidx = static_cast<std::size_t>(fid);
-                    if (fidx >= field_dof_offsets_.size() ||
-                        fidx >= field_dof_handlers_.size()) continue;
-                    const auto fld_off = field_dof_offsets_[fidx];
-                    const auto* femap = field_dof_handlers_[fidx].getEntityDofMap();
-                    if (!femap) continue;
-                    auto vdofs = femap->getVertexDofs(static_cast<GlobalIndex>(orig_e));
-                    if (!vdofs.empty()) {
-                        FieldValueEntry fve;
-                        fve.field = fid;
-                        fve.n_components = static_cast<int>(vdofs.size());
-                        for (int c = 0; c < fve.n_components && c < MAX_FIELD_VALUE_COMPONENTS; ++c) {
-                            const auto gidx = static_cast<std::size_t>(vdofs[static_cast<std::size_t>(c)] + fld_off);
-                            fve.components[c] = (gidx < state.u.size()) ? state.u[gidx] : 0.0;
-                        }
-                        fv_prep.push_back(fve);
-                    }
-                }
-            }
+            auto fv_prep = buildEntityFieldValues(entry, orig_e);
 
             AuxiliaryLocalContext ctx;
             ctx.time = state.time;
@@ -2256,6 +2686,27 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
             std::span<Real> out_span{
                 entry.output_buffer.data() + e * n_outputs, n_outputs};
             entry.model->evaluateOutputs(ctx, out_span);
+            if (monolithicAuxTraceEnabled()) {
+                auto format_values = [](std::span<const Real> values) {
+                    std::ostringstream oss;
+                    oss << "[";
+                    for (std::size_t i = 0; i < values.size(); ++i) {
+                        if (i != 0) {
+                            oss << ", ";
+                        }
+                        oss << values[i];
+                    }
+                    oss << "]";
+                    return oss.str();
+                };
+                std::ostringstream oss;
+                oss << "prepareAuxiliaryForAssembly: output buffer block='" << entry.instance_name
+                    << "' entity=" << e
+                    << " inputs=" << format_values(bound_inputs)
+                    << " state=" << format_values(entity_state_vec)
+                    << " outputs=" << format_values(std::span<const Real>(out_span.data(), out_span.size()));
+                FE_LOG_INFO(oss.str());
+            }
         }
     }
 }
@@ -3653,6 +4104,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
     // entity-local inputs, xdot computation, and input refresh.
     for (auto& entry : deployed_aux_entries_) {
         if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) continue;
+        if (entry.lower_to_direct_only) continue;
         if (!auxiliary_state_manager_->hasBlock(entry.instance_name)) continue;
 
         auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
@@ -4019,6 +4471,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
     if (want_matrix && matrix_out) {
         for (auto& entry : deployed_aux_entries_) {
             if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) continue;
+            if (entry.lower_to_direct_only) continue;
             if (!entry.deriv_provider) continue;
 
             const auto& art = entry.deriv_provider->artifact();
@@ -4181,6 +4634,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
     if (want_matrix && matrix_out) {
         for (auto& entry : deployed_aux_entries_) {
             if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) continue;
+            if (entry.lower_to_direct_only) continue;
             const auto n_outputs = static_cast<int>(entry.model->outputCount());
             const int dim = entry.model->dimension();
             if (n_outputs == 0 || dim == 0) continue;
@@ -4581,6 +5035,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
 
                     const auto slot = base_slot + e * static_cast<std::size_t>(n_outputs);
                     const auto slot32 = static_cast<std::uint32_t>(slot);
+                    const auto& owned_dofs = dof_handler_.getPartition().locallyOwned();
 
                     BorderedCouplingData::DirectCouplingRecord coupling_record;
                     coupling_record.output_slot = slot;
@@ -4601,7 +5056,8 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                             ed.dO_dI.begin() + static_cast<std::ptrdiff_t>(k * ed.n_inputs);
                         coupling_record.dO_dI.assign(di_begin, di_begin + ed.n_inputs);
                     }
-                    bordered_coupling_.direct_coupling_records.push_back(std::move(coupling_record));
+                    coupling_record.input_gradients = ed.input_gradients;
+                    std::unordered_map<GlobalIndex, Real> direct_output_gradient_entries;
 
                     for (const auto& frec : formulation_records_) {
                         for (const auto& [block_key, block_node] : frec.block_residual_exprs) {
@@ -4750,6 +5206,13 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                 }
 #endif
 
+                                for (const auto& [dof, val] : dR_rank1_entries) {
+                                    if (std::abs(val) <= kDirectCouplingEntryTol) {
+                                        continue;
+                                    }
+                                    direct_output_gradient_entries[dof] += val;
+                                }
+
                                 const bool disable_direct_coupling =
                                     std::getenv("SVMP_DISABLE_AUX_DIRECT_COUPLING") != nullptr;
                                 const Real direct_coupling_sign =
@@ -4806,14 +5269,13 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                                 << " dR_norm=" << std::sqrt(dR_norm_sq);
                                             FE_LOG_INFO(oss.str());
                                         }
-                                        // Prefer the exact condensed reduced-field form for
-                                        // monolithic direct feedthrough, even when the
-                                        // outer product happens to be rank-one. This keeps
-                                        // the full condensed outlet coupling available to
-                                        // the backend as grouped low-rank modes instead of
-                                        // collapsing it back to an independent symmetric
-                                        // rank-one correction.
-                                        if (!q_u.empty()) {
+                                        // For live monolithic solves, prefer the exact
+                                        // reduced-field form even when the outer product is
+                                        // rank-one. Pure algebraic direct-only auxiliary
+                                        // blocks are handled after aggregation so they can
+                                        // recover the exact native face rank-one path when
+                                        // appropriate.
+                                        if (!entry.lower_to_direct_only && !q_u.empty()) {
                                             if (monolithicDirectTraceEnabled()) {
                                                 std::ostringstream oss;
                                                 oss << "FESystem: monolithic direct coupling"
@@ -4876,10 +5338,119 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                             }
                         }
                     }
+
+                    coupling_record.output_gradient.reserve(direct_output_gradient_entries.size());
+                    for (const auto& [dof, val] : direct_output_gradient_entries) {
+                        if (std::abs(val) <= kDirectCouplingEntryTol) {
+                            continue;
+                        }
+                        coupling_record.output_gradient.emplace_back(dof, val);
+                    }
+                    std::sort(coupling_record.output_gradient.begin(),
+                              coupling_record.output_gradient.end(),
+                              [](const auto& a, const auto& b) {
+                                  return a.first < b.first;
+                              });
+                    if (entry.lower_to_direct_only && !coupling_record.output_gradient.empty()) {
+                        bool promoted_direct_only = false;
+                        int active_input_col = -1;
+                        if (!coupling_record.dO_dI.empty()) {
+                            for (std::size_t input_col = 0;
+                                 input_col < coupling_record.dO_dI.size();
+                                 ++input_col) {
+                                if (std::abs(coupling_record.dO_dI[input_col]) <=
+                                    kDirectCouplingEntryTol) {
+                                    continue;
+                                }
+                                if (active_input_col >= 0) {
+                                    active_input_col = -2;
+                                    break;
+                                }
+                                active_input_col = static_cast<int>(input_col);
+                            }
+                        }
+
+                        if (active_input_col >= 0 &&
+                            static_cast<std::size_t>(active_input_col) <
+                                coupling_record.input_gradients.size()) {
+                            const auto& q_u =
+                                coupling_record.input_gradients[static_cast<std::size_t>(active_input_col)];
+                            if (!q_u.empty()) {
+                                backends::RankOneUpdate promoted;
+                                if (tryPromoteDirectReducedToNativeRankOne(
+                                        std::span<const std::pair<GlobalIndex, Real>>(
+                                            coupling_record.output_gradient.data(),
+                                            coupling_record.output_gradient.size()),
+                                        std::span<const std::pair<GlobalIndex, Real>>(
+                                            q_u.data(), q_u.size()),
+                                        coupling_record.dO_dI[static_cast<std::size_t>(active_input_col)],
+                                        owned_dofs,
+                                        promoted)) {
+                                    last_rank_one_updates_.push_back(std::move(promoted));
+                                    promoted_direct_only = true;
+                                    if (monolithicDirectTraceEnabled()) {
+                                        std::ostringstream oss;
+                                        oss << "FESystem: monolithic direct coupling"
+                                            << " block='" << entry.instance_name << "'"
+                                            << " output='" << oname << "'"
+                                            << " entity=" << e
+                                            << " path='native_rank_one'";
+                                        FE_LOG_INFO(oss.str());
+                                    }
+                                }
+                            }
+                        }
+
+                        if (!promoted_direct_only) {
+                            for (std::size_t input_col = 0;
+                                 input_col < coupling_record.dO_dI.size();
+                                 ++input_col) {
+                                const Real dOk_dIm = coupling_record.dO_dI[input_col];
+                                if (std::abs(dOk_dIm) <= kDirectCouplingEntryTol ||
+                                    input_col >= coupling_record.input_gradients.size()) {
+                                    continue;
+                                }
+                                const auto& q_u = coupling_record.input_gradients[input_col];
+                                if (q_u.empty()) {
+                                    continue;
+                                }
+                                backends::ReducedFieldUpdate reduced_update;
+                                reduced_update.sigma = dOk_dIm;
+                                reduced_update.left.reserve(coupling_record.output_gradient.size());
+                                reduced_update.right.reserve(q_u.size());
+                                for (const auto& [dof_i, dRi_dOk] : coupling_record.output_gradient) {
+                                    if (!owned_dofs.contains(dof_i) ||
+                                        std::abs(dRi_dOk) <= kDirectCouplingEntryTol) {
+                                        continue;
+                                    }
+                                    reduced_update.left.emplace_back(dof_i, dRi_dOk);
+                                }
+                                for (const auto& [dof_j, qj] : q_u) {
+                                    if (!owned_dofs.contains(dof_j) ||
+                                        std::abs(qj) <= kDirectCouplingEntryTol) {
+                                        continue;
+                                    }
+                                    reduced_update.right.emplace_back(dof_j, qj);
+                                }
+                                if (!reduced_update.left.empty() &&
+                                    !reduced_update.right.empty()) {
+                                    last_reduced_field_updates_.push_back(std::move(reduced_update));
+                                }
+                            }
+                        }
+                    }
+                    bordered_coupling_.direct_coupling_records.push_back(std::move(coupling_record));
                 }
             }
         }
     }
+
+    // Purely algebraic monolithic blocks are lowered later in NewtonSolver,
+    // after the full bordered data (B, C^T, D, g, direct-coupling metadata)
+    // has been assembled. Keeping the bordered representation intact here
+    // avoids overlapping FE-side and Newton-side lowering paths and lets the
+    // solver apply the exact reduced RHS shift r - B D^{-1} g together with
+    // the reduced Jacobian K - B D^{-1} C.
 
     // Assemble registered AuxiliaryOperator contributions.
     if (auxiliary_operator_registry_) {
@@ -5045,6 +5616,7 @@ void FESystem::assembleMonolithicAuxiliary(
     // Assemble contributions from each monolithic deployed block.
     for (auto& entry : deployed_aux_entries_) {
         if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) continue;
+        if (entry.lower_to_direct_only) continue;
         if (!auxiliary_state_manager_->hasBlock(entry.instance_name)) continue;
 
         auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
@@ -5177,6 +5749,14 @@ void FESystem::finalizeAuxiliaryLayout()
 {
     monolithic_aux_committed_rates_.clear();
     monolithic_aux_committed_rates_valid_.clear();
+    lowered_aux_output_exprs_by_name_.clear();
+    lowered_aux_output_exprs_by_slot_.clear();
+
+    // Resolve deferred input-expression wiring before deciding whether pure
+    // algebraic monolithic blocks can be lowered to direct-only coupling.
+    // That lowering synthesizes outputs through bound inputs, so it must see
+    // the finalized input-registry view rather than unresolved symbols.
+    finalizeDeferredInputDeps();
 
     // Materialize deployed instances into blocks, steppers, and derivative providers.
     for (auto& entry : deployed_aux_entries_) {
@@ -5365,15 +5945,15 @@ void FESystem::finalizeAuxiliaryLayout()
             entry.deriv_provider->setup(*entry.model, entry.spec.derivative_policy);
         }
 
-        // Register monolithic unknowns with the operator registry.
         if (entry.spec.solve_mode == AuxiliarySolveMode::Monolithic) {
-            auxiliaryOperatorRegistry().registerMonolithicUnknowns(
-                entry.instance_name, entity_count,
-                entry.spec.size, entry.spec.scope);
-
-            // Create derivative provider for monolithic blocks too.
             entry.deriv_provider = std::make_unique<AuxiliaryDerivativeProvider>();
             entry.deriv_provider->setup(*entry.model, entry.spec.derivative_policy);
+            // Defer lower_to_direct_only until after all deferred FE-coupled
+            // inputs and lowered output expressions are available. Purely
+            // algebraic monolithic outlet models can then drop out of the
+            // live bordered layout entirely instead of being reduced later
+            // inside Newton.
+            entry.lower_to_direct_only = false;
         }
 
         // Validate direct FE field references in auxiliary residual expressions.
@@ -5471,11 +6051,6 @@ void FESystem::finalizeAuxiliaryLayout()
         }
     }
 
-    if (auxiliary_operator_registry_ &&
-        !auxiliary_operator_registry_->isLayoutFinalized()) {
-        auxiliary_operator_registry_->finalizeLayout();
-    }
-
     // Wire FE-coupled auxiliary input providers (SampledStateField, etc.)
     wireFECoupledInputProviders();
 
@@ -5503,6 +6078,79 @@ void FESystem::finalizeAuxiliaryLayout()
     }
 
     finalizeDeferredInputDeps();
+    buildLoweredAuxiliaryOutputExpressions_();
+
+    for (auto& entry : deployed_aux_entries_) {
+        if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) {
+            continue;
+        }
+        entry.lower_to_direct_only = canLowerAlgebraicAuxiliaryToDirectOnly_(entry);
+        if (monolithicAuxTraceEnabled()) {
+            auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get());
+            std::ostringstream oss;
+            oss << "FESystem::finalizeAuxiliaryLayout lowerability"
+                << " instance=" << entry.instance_name
+                << " solve_mode=monolithic";
+            if (built != nullptr) {
+                const auto& names = built->stateNames();
+                const auto& kinds = entry.model->structuralMetadata().variable_kinds;
+                oss << " dim=" << names.size()
+                    << " pure_algebraic="
+                    << (isPureAlgebraicAuxiliary(*entry.model, names.size()) ? 1 : 0)
+                    << " state_kinds=[";
+                for (std::size_t i = 0; i < names.size(); ++i) {
+                    if (i != 0) {
+                        oss << ", ";
+                    }
+                    const auto kind = i < kinds.size()
+                        ? kinds[i]
+                        : AuxiliaryVariableKind::Differential;
+                    oss << names[i] << ":"
+                        << (kind == AuxiliaryVariableKind::Algebraic ? "alg" : "dyn");
+                }
+                oss << "]";
+            } else {
+                oss << " built=0";
+            }
+            if (entry.deriv_provider) {
+                const auto& artifact = entry.deriv_provider->artifact();
+                oss << " referenced_fields=" << artifact.referenced_fields.size();
+            }
+            const auto output_names = entry.model->outputNames();
+            oss << " outputs=[";
+            for (std::size_t i = 0; i < output_names.size(); ++i) {
+                if (i != 0) {
+                    oss << ", ";
+                }
+                const auto qualified_name = entry.instance_name + "/" + output_names[i];
+                const auto lowered = loweredAuxiliaryOutputExpr(qualified_name);
+                oss << output_names[i] << ":"
+                    << (lowered.has_value() ? "lowerable" : "blocked");
+            }
+            oss << "]"
+                << " lower_to_direct_only=" << (entry.lower_to_direct_only ? 1 : 0);
+            FE_LOG_INFO(oss.str());
+        }
+        if (!entry.lower_to_direct_only) {
+            std::size_t entity_count = entry.explicit_entity_count;
+            if (auxiliary_state_manager_ &&
+                auxiliary_state_manager_->hasBlock(entry.instance_name)) {
+                entity_count = auxiliary_state_manager_->getBlock(entry.instance_name).entityCount();
+            } else if (entity_count == 0 && !entry.entity_map.empty()) {
+                entity_count = entry.entity_map.size();
+            } else if (entity_count == 0) {
+                entity_count = 1;
+            }
+            auxiliaryOperatorRegistry().registerMonolithicUnknowns(
+                entry.instance_name, entity_count,
+                entry.spec.size, entry.spec.scope);
+        }
+    }
+
+    if (auxiliary_operator_registry_ &&
+        !auxiliary_operator_registry_->isLayoutFinalized()) {
+        auxiliary_operator_registry_->finalizeLayout();
+    }
 }
 
 void FESystem::assembleMixedAuxiliaryDense(
@@ -5519,6 +6167,7 @@ void FESystem::assembleMixedAuxiliaryDense(
     } else {
         for (const auto& entry : deployed_aux_entries_) {
             if (entry.spec.solve_mode == AuxiliarySolveMode::Monolithic) {
+                if (entry.lower_to_direct_only) continue;
                 n_aux += static_cast<std::size_t>(entry.model->dimension());
             }
         }
@@ -5967,6 +6616,298 @@ std::size_t FESystem::auxiliaryOutputSlotOf(
         slot += n_entities * n_outputs;
     }
     return static_cast<std::size_t>(-1);
+}
+
+bool
+FESystem::canLowerAlgebraicAuxiliaryToDirectOnly_(const DeployedAuxEntry& entry) const
+{
+    if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) {
+        return false;
+    }
+    auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get());
+    if (!built) {
+        return false;
+    }
+    const auto dim = built->stateNames().size();
+    if (dim == 0 || !isPureAlgebraicAuxiliary(*entry.model, dim)) {
+        return false;
+    }
+    if (entry.deriv_provider) {
+        const auto& artifact = entry.deriv_provider->artifact();
+        if (!artifact.referenced_fields.empty()) {
+            return false;
+        }
+    }
+    const auto output_names = entry.model->outputNames();
+    if (output_names.empty()) {
+        return false;
+    }
+    for (const auto& output_name : output_names) {
+        const auto qualified_name = entry.instance_name + "/" + output_name;
+        if (lowered_aux_output_exprs_by_name_.find(qualified_name) !=
+            lowered_aux_output_exprs_by_name_.end()) {
+            continue;
+        }
+        if (synthesizeLoweredAuxiliaryOutputExpr_(entry, output_name).has_value()) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+std::optional<forms::FormExpr>
+FESystem::synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
+                                                std::string_view output_name) const
+{
+    auto trace_block = [&](std::string_view stage) {
+        if (!monolithicAuxTraceEnabled()) {
+            return;
+        }
+        FE_LOG_INFO("FESystem::synthesizeLoweredAuxiliaryOutputExpr blocked"
+                    " instance=" + entry.instance_name +
+                    " output=" + std::string(output_name) +
+                    " stage=" + std::string(stage));
+    };
+
+    const auto* input_reg = auxiliaryInputRegistryIfPresent();
+    if (!input_reg) {
+        trace_block("no_input_registry");
+        return std::nullopt;
+    }
+
+    auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get());
+    if (!built) {
+        trace_block("not_built_model");
+        return std::nullopt;
+    }
+
+    const auto& state_names = built->stateNames();
+    const auto dim = state_names.size();
+    if (dim == 0 || !isPureAlgebraicAuxiliary(*entry.model, dim)) {
+        trace_block("not_pure_algebraic");
+        return std::nullopt;
+    }
+
+    const auto residual_exprs = built->residualExpressions();
+    if (residual_exprs.size() < dim) {
+        trace_block("residual_size_mismatch");
+        return std::nullopt;
+    }
+
+    std::vector<forms::FormExpr> explicit_state_exprs(dim);
+    for (std::size_t i = 0; i < dim; ++i) {
+        auto explicit_rhs =
+            tryExtractExplicitStateAssignment(residual_exprs[i], static_cast<std::uint32_t>(i));
+        if (!explicit_rhs) {
+            trace_block("explicit_state_assignment");
+            return std::nullopt;
+        }
+        explicit_state_exprs[i] = std::move(*explicit_rhs);
+    }
+
+    for (std::size_t pass = 0; pass < dim; ++pass) {
+        for (std::size_t i = 0; i < dim; ++i) {
+            explicit_state_exprs[i] = explicit_state_exprs[i].transformNodes(
+                [&](const forms::FormExprNode& node) -> std::optional<forms::FormExpr> {
+                    if (node.type() != forms::FormExprType::AuxiliaryStateRef) {
+                        return std::nullopt;
+                    }
+                    const auto slot = node.slotIndex();
+                    if (!slot || *slot >= explicit_state_exprs.size() || *slot == i ||
+                        !explicit_state_exprs[*slot].isValid()) {
+                        return std::nullopt;
+                    }
+                    return explicit_state_exprs[*slot];
+                });
+        }
+    }
+
+    const auto out_it =
+        std::find_if(built->outputExpressions().begin(),
+                     built->outputExpressions().end(),
+                     [&](const auto& kv) { return kv.first == output_name; });
+    if (out_it == built->outputExpressions().end()) {
+        trace_block("missing_output_expr");
+        return std::nullopt;
+    }
+
+    const auto& sig = built->signature();
+    auto instantiate = [&](const forms::FormExpr& expr) -> std::optional<forms::FormExpr> {
+        if (!expr.isValid()) {
+            trace_block("output_expr_invalid");
+            return std::nullopt;
+        }
+
+        auto replace_terminals =
+            [&](const forms::FormExprNode& node) -> std::optional<forms::FormExpr> {
+                switch (node.type()) {
+                    case forms::FormExprType::AuxiliaryStateRef: {
+                        const auto slot = node.slotIndex();
+                        if (!slot || *slot >= explicit_state_exprs.size() ||
+                            !explicit_state_exprs[*slot].isValid()) {
+                            trace_block("bad_state_slot");
+                            return std::nullopt;
+                        }
+                        return explicit_state_exprs[*slot];
+                    }
+                    case forms::FormExprType::AuxiliaryInputRef: {
+                        const auto slot = node.slotIndex();
+                        if (!slot || *slot >= sig.inputs.size()) {
+                            trace_block("bad_input_slot");
+                            return std::nullopt;
+                        }
+                        const auto& port = sig.inputs[*slot];
+
+                        std::string registry_name;
+                        const auto bind_it = entry.input_bindings.find(port.name);
+                        if (bind_it != entry.input_bindings.end()) {
+                            registry_name = bind_it->second;
+                        } else {
+                            const auto coupled_it = entry.coupled_bindings.find(port.name);
+                            if (coupled_it != entry.coupled_bindings.end()) {
+                                registry_name = coupled_it->second.registryName();
+                            }
+                        }
+
+                        if (!registry_name.empty() && input_reg->hasInput(registry_name)) {
+                            if (const auto coupled_it = entry.coupled_bindings.find(port.name);
+                                coupled_it != entry.coupled_bindings.end()) {
+                                if (const auto* def = coupled_it->second.definition();
+                                    def != nullptr &&
+                                    def->kind == FEQuantityKind::BoundaryIntegral &&
+                                    def->expression.isValid() &&
+                                    def->boundary_marker >= 0) {
+                                    return forms::FormExpr::boundaryIntegral(
+                                        def->expression, def->boundary_marker, registry_name);
+                                }
+                            }
+                            return forms::FormExpr::auxiliaryInputRef(
+                                static_cast<std::uint32_t>(input_reg->slotOf(registry_name)));
+                        }
+                        if (port.optional && port.default_value.has_value()) {
+                            return forms::FormExpr::constant(*port.default_value);
+                        }
+                        trace_block("unbound_input");
+                        return std::nullopt;
+                    }
+                    case forms::FormExprType::ParameterRef: {
+                        const auto slot = node.slotIndex();
+                        if (!slot || *slot >= sig.parameters.size()) {
+                            trace_block("bad_parameter_slot");
+                            return std::nullopt;
+                        }
+                        const auto& port = sig.parameters[*slot];
+                        const auto param_it = entry.param_values.find(port.name);
+                        if (param_it != entry.param_values.end()) {
+                            return forms::FormExpr::constant(param_it->second);
+                        }
+                        if (port.optional && port.default_value.has_value()) {
+                            return forms::FormExpr::constant(*port.default_value);
+                        }
+                        trace_block("unbound_parameter");
+                        return std::nullopt;
+                    }
+                    default:
+                        return std::nullopt;
+                }
+            };
+
+        auto lowered = expr;
+        const std::size_t max_passes =
+            std::max<std::size_t>(4, dim + sig.inputs.size() + sig.parameters.size() + 1);
+        for (std::size_t pass = 0; pass < max_passes; ++pass) {
+            lowered = lowered.transformNodes(replace_terminals);
+        }
+
+        if (!lowered.isValid() || !lowered.node()) {
+            trace_block("lowered_invalid");
+            return std::nullopt;
+        }
+        if (exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryStateRef) ||
+            exprContainsType(*lowered.node(), forms::FormExprType::ParameterRef)) {
+            trace_block("residual_terminals_remaining");
+            return std::nullopt;
+        }
+        return lowered;
+    };
+
+    return instantiate(out_it->second);
+}
+
+std::optional<forms::FormExpr>
+FESystem::loweredAuxiliaryOutputExpr(std::string_view output_name) const
+{
+    const auto it = lowered_aux_output_exprs_by_name_.find(std::string(output_name));
+    if (it != lowered_aux_output_exprs_by_name_.end()) {
+        return it->second;
+    }
+
+    const auto slash = output_name.find('/');
+    if (slash != std::string_view::npos) {
+        const std::string instance_name(output_name.substr(0, slash));
+        const std::string local_name(output_name.substr(slash + 1));
+        for (const auto& entry : deployed_aux_entries_) {
+            if (entry.instance_name != instance_name) {
+                continue;
+            }
+            return synthesizeLoweredAuxiliaryOutputExpr_(entry, local_name);
+        }
+    }
+
+    std::optional<forms::FormExpr> synthesized;
+    for (const auto& entry : deployed_aux_entries_) {
+        auto lowered = synthesizeLoweredAuxiliaryOutputExpr_(entry, output_name);
+        if (!lowered) {
+            continue;
+        }
+        FE_THROW_IF(synthesized.has_value(), InvalidArgumentException,
+                    "loweredAuxiliaryOutputExpr(\"" + std::string(output_name) +
+                        "\"): ambiguous lowered output; use qualified instance/output name");
+        synthesized = std::move(lowered);
+    }
+    if (synthesized) {
+        return synthesized;
+    }
+
+    const auto slot = auxiliaryOutputSlotOf(output_name);
+    if (slot == static_cast<std::size_t>(-1)) {
+        return std::nullopt;
+    }
+    return loweredAuxiliaryOutputExpr(slot);
+}
+
+std::optional<forms::FormExpr>
+FESystem::loweredAuxiliaryOutputExpr(std::size_t slot) const
+{
+    const auto it = lowered_aux_output_exprs_by_slot_.find(slot);
+    if (it == lowered_aux_output_exprs_by_slot_.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+void FESystem::buildLoweredAuxiliaryOutputExpressions_()
+{
+    lowered_aux_output_exprs_by_name_.clear();
+    lowered_aux_output_exprs_by_slot_.clear();
+
+    for (const auto& entry : deployed_aux_entries_) {
+        for (const auto& output_name : entry.model->outputNames()) {
+            auto lowered = synthesizeLoweredAuxiliaryOutputExpr_(entry, output_name);
+            if (!lowered) {
+                continue;
+            }
+
+            const auto qualified_name = entry.instance_name + "/" + output_name;
+            lowered_aux_output_exprs_by_name_[qualified_name] = *lowered;
+
+            const auto slot = auxiliaryOutputSlotOf(entry.instance_name, output_name);
+            if (slot != static_cast<std::size_t>(-1)) {
+                lowered_aux_output_exprs_by_slot_[slot] = *lowered;
+            }
+        }
+    }
 }
 
 std::vector<Real> FESystem::checkpointAuxiliaryState() const

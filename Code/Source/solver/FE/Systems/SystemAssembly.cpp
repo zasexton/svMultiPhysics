@@ -629,6 +629,20 @@ assembly::AssemblyResult assembleOperator(
     if (system.coupled_boundary_) {
         assembler.setCoupledValues(system.coupled_boundary_->integrals().all(),
                                    system.coupled_boundary_->auxiliaryState().values());
+        if (oopTraceEnabled()) {
+            std::ostringstream oss;
+            oss << "assembleOperator: coupled values integrals=";
+            const auto integrals = system.coupled_boundary_->integrals().all();
+            oss << "[";
+            for (std::size_t i = 0; i < integrals.size(); ++i) {
+                if (i != 0) {
+                    oss << ", ";
+                }
+                oss << integrals[i];
+            }
+            oss << "]";
+            FE_LOG_INFO(oss.str());
+        }
     } else {
         assembler.setCoupledValues({}, {});
     }
@@ -656,6 +670,18 @@ assembly::AssemblyResult assembleOperator(
         auto aux_outputs = system.auxiliaryOutputValues();
 
         if (!aux_inputs.empty() || !aux_state_flat.empty() || !aux_outputs.empty()) {
+            if (oopTraceEnabled() && !aux_outputs.empty()) {
+                std::ostringstream oss;
+                oss << "assembleOperator: auxiliary outputs=[";
+                for (std::size_t i = 0; i < aux_outputs.size(); ++i) {
+                    if (i != 0) {
+                        oss << ", ";
+                    }
+                    oss << aux_outputs[i];
+                }
+                oss << "]";
+                traceLog(oss.str());
+            }
             assembler.setAuxiliaryValues(aux_inputs, aux_state_flat, aux_outputs);
         }
     }
@@ -1599,30 +1625,106 @@ assembly::AssemblyResult assembleOperator(
             if (request.want_matrix) {
                 bc.resize(n_aux, n_field_dofs);
                 bc.aux_blocks.clear();
+                bc.aux_variable_kinds.clear();
                 for (const auto& entry : system.deployed_aux_entries_) {
                     if (entry.spec.solve_mode == AuxiliarySolveMode::Monolithic) {
+                        if (entry.lower_to_direct_only) {
+                            continue;
+                        }
+                        const AuxiliaryBlockStorage* blk_ptr = nullptr;
                         int block_dim = entry.spec.size;
                         if (auto* mgr = system.auxiliaryStateManagerIfPresent();
                             mgr && mgr->hasBlock(entry.instance_name)) {
+                            blk_ptr = &mgr->getBlock(entry.instance_name);
                             block_dim = static_cast<int>(
-                                mgr->getBlock(entry.instance_name).storageSize());
+                                blk_ptr->storageSize());
                         }
                         bc.aux_blocks.push_back({entry.instance_name, block_dim});
+                        const auto& meta = entry.model->structuralMetadata();
+                        const auto& kinds = meta.variable_kinds;
+                        const int stride = entry.spec.size;
+                        std::size_t entity_count = entry.explicit_entity_count;
+                        auto ordering = entry.spec.ordering;
+                        if (blk_ptr != nullptr) {
+                            entity_count = blk_ptr->entityCount();
+                            ordering = blk_ptr->ordering();
+                        } else if (entity_count == 0) {
+                            entity_count = 1;
+                        }
+                        auto kind_at = [&](int component) {
+                            const auto idx = static_cast<std::size_t>(component);
+                            return (idx < kinds.size())
+                                ? kinds[idx]
+                                : AuxiliaryVariableKind::Differential;
+                        };
+                        if (ordering == AuxiliaryEntityOrdering::ByComponentThenEntity) {
+                            for (int c = 0; c < stride; ++c) {
+                                for (std::size_t e = 0; e < entity_count; ++e) {
+                                    (void)e;
+                                    bc.aux_variable_kinds.push_back(kind_at(c));
+                                }
+                            }
+                        } else {
+                            for (std::size_t e = 0; e < entity_count; ++e) {
+                                (void)e;
+                                for (int c = 0; c < stride; ++c) {
+                                    bc.aux_variable_kinds.push_back(kind_at(c));
+                                }
+                            }
+                        }
                     }
                 }
             } else if (!bc.active) {
                 // First call (residual-only before any J+r): initialize.
                 bc.resize(n_aux, n_field_dofs);
                 bc.aux_blocks.clear();
+                bc.aux_variable_kinds.clear();
                 for (const auto& entry : system.deployed_aux_entries_) {
                     if (entry.spec.solve_mode == AuxiliarySolveMode::Monolithic) {
+                        if (entry.lower_to_direct_only) {
+                            continue;
+                        }
+                        const AuxiliaryBlockStorage* blk_ptr = nullptr;
                         int block_dim = entry.spec.size;
                         if (auto* mgr = system.auxiliaryStateManagerIfPresent();
                             mgr && mgr->hasBlock(entry.instance_name)) {
+                            blk_ptr = &mgr->getBlock(entry.instance_name);
                             block_dim = static_cast<int>(
-                                mgr->getBlock(entry.instance_name).storageSize());
+                                blk_ptr->storageSize());
                         }
                         bc.aux_blocks.push_back({entry.instance_name, block_dim});
+                        const auto& meta = entry.model->structuralMetadata();
+                        const auto& kinds = meta.variable_kinds;
+                        const int stride = entry.spec.size;
+                        std::size_t entity_count = entry.explicit_entity_count;
+                        auto ordering = entry.spec.ordering;
+                        if (blk_ptr != nullptr) {
+                            entity_count = blk_ptr->entityCount();
+                            ordering = blk_ptr->ordering();
+                        } else if (entity_count == 0) {
+                            entity_count = 1;
+                        }
+                        auto kind_at = [&](int component) {
+                            const auto idx = static_cast<std::size_t>(component);
+                            return (idx < kinds.size())
+                                ? kinds[idx]
+                                : AuxiliaryVariableKind::Differential;
+                        };
+                        if (ordering == AuxiliaryEntityOrdering::ByComponentThenEntity) {
+                            for (int c = 0; c < stride; ++c) {
+                                for (std::size_t e = 0; e < entity_count; ++e) {
+                                    (void)e;
+                                    bc.aux_variable_kinds.push_back(kind_at(c));
+                                }
+                            }
+                        } else {
+                            for (std::size_t e = 0; e < entity_count; ++e) {
+                                (void)e;
+                                for (int c = 0; c < stride; ++c) {
+                                    bc.aux_variable_kinds.push_back(kind_at(c));
+                                }
+                            }
+                        }
                     }
                 }
             }

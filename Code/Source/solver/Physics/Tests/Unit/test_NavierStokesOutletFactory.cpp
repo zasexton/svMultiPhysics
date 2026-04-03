@@ -107,6 +107,29 @@ Opts::CoupledRCRCROutflowBC makeRCRCROpts(int marker)
     return o;
 }
 
+bool containsExprType(const svmp::FE::forms::FormExpr& expr,
+                      svmp::FE::forms::FormExprType target)
+{
+    if (!expr.isValid() || !expr.node()) {
+        return false;
+    }
+    bool found = false;
+    std::function<void(const svmp::FE::forms::FormExprNode&)> walk =
+        [&](const svmp::FE::forms::FormExprNode& node) {
+            if (node.type() == target) {
+                found = true;
+                return;
+            }
+            for (const auto* child : node.children()) {
+                if (child && !found) {
+                    walk(*child);
+                }
+            }
+        };
+    walk(*expr.node());
+    return found;
+}
+
 class SingleTetraFourBoundaryFaceMeshAccess final : public svmp::FE::assembly::IMeshAccess {
 public:
     SingleTetraFourBoundaryFaceMeshAccess(int outlet_marker, int inlet_marker, int wall_marker)
@@ -775,8 +798,10 @@ TEST(NavierStokesOutletFactory, NewOverload_RCR_EndToEnd)
 
 TEST(NavierStokesOutletFactory, NewOverload_Resistive_EndToEnd)
 {
-    // Pure resistance now delegates to the exact coupled-boundary path so the
-    // outlet remains a same-step direct feedthrough during Newton line search.
+    // Pure resistance is authored as a monolithic algebraic AuxiliaryState,
+    // but the system lowers it fully to direct feedthrough so the factory can
+    // return a plain NaturalBC without leaving a live bordered unknown in the
+    // Newton solve.
     const int marker = 50;
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
     auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
@@ -793,7 +818,9 @@ TEST(NavierStokesOutletFactory, NewOverload_Resistive_EndToEnd)
     auto bc = Factories::toCoupledOutflowBC(
         makeRCROpts(marker, /*C=*/0.0), sys, u_field, *u_space, "u", u, rho);
     ASSERT_NE(bc, nullptr);
-    EXPECT_NE(dynamic_cast<svmp::FE::forms::bc::CoupledNaturalBC*>(bc.get()), nullptr);
+    EXPECT_EQ(dynamic_cast<svmp::FE::forms::bc::CoupledNaturalBC*>(bc.get()), nullptr);
+    EXPECT_NE(dynamic_cast<svmp::FE::forms::bc::NaturalBC*>(bc.get()), nullptr);
+    EXPECT_EQ(sys.coupledBoundaryManager(), nullptr);
 
     BoundaryConditionManager bc_manager;
     bc_manager.add(std::move(bc));
@@ -808,10 +835,17 @@ TEST(NavierStokesOutletFactory, NewOverload_Resistive_EndToEnd)
     SetupInputs si;
     si.topology_override = singleTetraTopology();
     sys.setup({}, si);
+    sys.finalizeAuxiliaryLayout();
 
     const auto summary = sys.auxiliaryAnalysisSummary();
-    EXPECT_EQ(summary.n_monolithic, 0u);
+    EXPECT_EQ(summary.n_monolithic, 1u);
     EXPECT_EQ(summary.n_partitioned, 0u);
+
+    const auto lowered = sys.loweredAuxiliaryOutputExpr("ns_rcr_50/P_out");
+    ASSERT_TRUE(lowered.has_value());
+    EXPECT_TRUE(containsExprType(*lowered, svmp::FE::forms::FormExprType::BoundaryFunctionalSymbol));
+    EXPECT_FALSE(containsExprType(*lowered, svmp::FE::forms::FormExprType::AuxiliaryOutputRef));
+    EXPECT_FALSE(containsExprType(*lowered, svmp::FE::forms::FormExprType::AuxiliaryStateRef));
 
     // Set u = (0, 0, -1) at all vertices.
     const auto n_dofs = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
@@ -825,17 +859,73 @@ TEST(NavierStokesOutletFactory, NewOverload_Resistive_EndToEnd)
     state.dt = 0.1;
     state.u = sol;
 
-    auto* cbm = sys.coupledBoundaryManager();
-    ASSERT_NE(cbm, nullptr);
-    cbm->prepareForAssembly(state);
-    ASSERT_TRUE(cbm->integrals().has("ns_Q_50"));
-    EXPECT_NEAR(cbm->integrals().get("ns_Q_50"), 0.5, 1e-10);
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "ns";
+    req.want_matrix = true;
+    req.want_vector = true;
+    req.is_nonlinear_iteration = true;
+
+    svmp::FE::assembly::DenseSystemView out(static_cast<svmp::FE::GlobalIndex>(n_dofs));
+    out.zero();
+    sys.beginTimeStep();
+    const auto result = sys.assemble(req, state, &out, &out);
+    EXPECT_TRUE(result.success);
+
+    const auto& bc_data = sys.borderedCoupling();
+    EXPECT_FALSE(bc_data.active);
+    EXPECT_EQ(bc_data.n_aux, 0);
+    const auto rank_one_updates = sys.lastRankOneUpdates();
+    EXPECT_EQ(rank_one_updates.size(), 1u);
+    EXPECT_TRUE(sys.lastReducedFieldUpdates().empty());
+}
+
+TEST(NavierStokesOutletFactory, NewOverload_Resistive_UsesAuxiliaryInputRefsNotFieldTerminals)
+{
+    const auto model = Factories::detail::resistiveOutflowModel();
+    ASSERT_NE(model, nullptr);
+
+    auto contains_type = [](const svmp::FE::forms::FormExpr& expr,
+                            svmp::FE::forms::FormExprType target) {
+        if (!expr.isValid() || !expr.node()) return false;
+        bool found = false;
+        std::function<void(const svmp::FE::forms::FormExprNode&)> walk =
+            [&](const svmp::FE::forms::FormExprNode& node) {
+                if (node.type() == target) {
+                    found = true;
+                    return;
+                }
+                for (const auto* child : node.children()) {
+                    if (child && !found) walk(*child);
+                }
+            };
+        walk(*expr.node());
+        return found;
+    };
+
+    const auto residuals = model->residualExpressions();
+    ASSERT_EQ(residuals.size(), 1u);
+    EXPECT_TRUE(contains_type(residuals[0], svmp::FE::forms::FormExprType::AuxiliaryInputRef));
+    EXPECT_TRUE(contains_type(residuals[0], svmp::FE::forms::FormExprType::AuxiliaryStateRef));
+    EXPECT_FALSE(contains_type(residuals[0], svmp::FE::forms::FormExprType::DiscreteField));
+    EXPECT_FALSE(contains_type(residuals[0], svmp::FE::forms::FormExprType::StateField));
+
+    const auto& outputs = model->outputExpressions();
+    ASSERT_EQ(outputs.size(), 1u);
+    for (const auto& [name, expr] : outputs) {
+        (void)name;
+        EXPECT_TRUE(contains_type(expr, svmp::FE::forms::FormExprType::AuxiliaryStateRef) ||
+                    contains_type(expr, svmp::FE::forms::FormExprType::AuxiliaryInputRef));
+        EXPECT_FALSE(contains_type(expr, svmp::FE::forms::FormExprType::DiscreteField));
+        EXPECT_FALSE(contains_type(expr, svmp::FE::forms::FormExprType::StateField));
+    }
 }
 
 TEST(NavierStokesOutletFactory, NewOverload_Resistive_FluxInstallation)
 {
-    // Verify the C==0 factory path installs and assembles through the exact
-    // coupled-boundary runtime and still extracts the direct rank-one update.
+    // Verify the C==0 factory path installs as a monolithic algebraic outlet
+    // through a plain NaturalBC, while the system lowers it fully to the
+    // direct-coupling path and still contributes native direct-coupling
+    // operator updates.
     const int marker = 55;
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
     auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
@@ -852,7 +942,9 @@ TEST(NavierStokesOutletFactory, NewOverload_Resistive_FluxInstallation)
     auto bc = Factories::toCoupledOutflowBC(
         makeRCROpts(marker, /*C=*/0.0), sys, u_field, *u_space, "u", u, rho);
     ASSERT_NE(bc, nullptr);
-    EXPECT_NE(dynamic_cast<svmp::FE::forms::bc::CoupledNaturalBC*>(bc.get()), nullptr);
+    EXPECT_EQ(dynamic_cast<svmp::FE::forms::bc::CoupledNaturalBC*>(bc.get()), nullptr);
+    EXPECT_NE(dynamic_cast<svmp::FE::forms::bc::NaturalBC*>(bc.get()), nullptr);
+    EXPECT_EQ(sys.coupledBoundaryManager(), nullptr);
 
     BoundaryConditionManager bc_manager;
     bc_manager.add(std::move(bc));
@@ -862,11 +954,13 @@ TEST(NavierStokesOutletFactory, NewOverload_Resistive_FluxInstallation)
     auto momentum = inner(grad(u), grad(v)).dx();
     auto continuity = (q * div(u)).dx();
     bc_manager.applyAll(sys, momentum, u, v, u_field);
+    EXPECT_NE(sys.coupledBoundaryManager(), nullptr);
     (void)installFormulation(sys, "ns", {u_field, p_field}, momentum + continuity);
 
     SetupInputs si;
     si.topology_override = singleTetraTopology();
     sys.setup({}, si);
+    sys.finalizeAuxiliaryLayout();
 
     const auto n_dofs = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
     std::vector<Real> sol(n_dofs, 0.0);
@@ -891,15 +985,13 @@ TEST(NavierStokesOutletFactory, NewOverload_Resistive_FluxInstallation)
     const auto result = sys.assemble(req, state, &out, &out);
     EXPECT_TRUE(result.success);
 
-    auto* cbm = sys.coupledBoundaryManager();
-    ASSERT_NE(cbm, nullptr);
-    ASSERT_TRUE(cbm->integrals().has("ns_Q_55"));
-    EXPECT_NEAR(cbm->integrals().get("ns_Q_55"), 0.5, 1e-10);
-
+    const auto& bc_data = sys.borderedCoupling();
+    EXPECT_FALSE(bc_data.active);
+    EXPECT_EQ(bc_data.n_aux, 0);
     const auto updates = sys.lastRankOneUpdates();
     ASSERT_EQ(updates.size(), 1u);
-    EXPECT_NEAR(updates.front().sigma, 110.0, 1e-10);
-    EXPECT_FALSE(updates.front().v.empty());
+    EXPECT_TRUE(updates[0].prefer_native_face);
+    EXPECT_FALSE(updates[0].v.empty());
 }
 
 TEST(NavierStokesOutletFactory, NewOverload_RCR_FluxInstallation)
@@ -2738,9 +2830,8 @@ TEST(NavierStokesOutletFactory, TwoResistiveOutletsSystemOverloadMatchesLegacyDi
         sys.finalizeAuxiliaryLayout();
         if (use_system_overload) {
             const auto summary = sys.auxiliaryAnalysisSummary();
-            EXPECT_EQ(summary.n_monolithic, 0u);
+            EXPECT_EQ(summary.n_monolithic, 2u);
             EXPECT_EQ(summary.n_partitioned, 0u);
-            EXPECT_FALSE(sys.borderedCoupling().active);
         }
         return sys;
     };
@@ -2811,10 +2902,10 @@ TEST(NavierStokesOutletFactory, TwoResistiveOutletsSystemOverloadMatchesLegacyDi
             }
         }
     };
-
     std::vector<Real> K_mono;
     std::vector<Real> r_mono;
     assemble_dense(monolithic_sys, K_mono, r_mono);
+    EXPECT_FALSE(monolithic_sys.borderedCoupling().active);
     apply_rank_one_updates(monolithic_sys, K_mono);
 
     std::vector<Real> K_legacy;

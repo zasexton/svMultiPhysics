@@ -277,19 +277,18 @@ namespace detail {
     auto Q = system.boundaryIntegral(q_name, inner(u_disc, n), marker,
         FE::forms::BoundaryFunctional::Reduction::Sum,
         FE::systems::AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
-
     FE::systems::AuxiliaryInstanceHandle rcr;
+
     if (C == 0.0) {
-        // Zero-storage resistance outlets are same-step algebraic feedthroughs,
-        // not true auxiliary dynamics. Lower them directly to the exact
-        // coupled-boundary path so Newton sees the outlet response without
-        // carrying a bordered auxiliary unknown.
-        const auto Q_integrand = inner(u_disc, n);
-        const auto Qsym = FormExpr::boundaryIntegral(Q_integrand, marker, q_name);
-        const auto p_out =
-            FormExpr::constant(Pd) + FormExpr::constant(Rp + Rd) * Qsym;
-        const auto flux = -p_out * n - beta * rho * max_backflow * u;
-        return std::make_unique<FE::forms::bc::CoupledNaturalBC>(marker, flux);
+        rcr = system.deploy(
+            use(detail::resistiveOutflowModel())
+                .name(instance_name)
+                .boundary(marker)
+                .monolithic()
+                .params({{"Rsum", Rp + Rd}, {"Pd", Pd}})
+                .bindCoupled("Q", Q)
+                .initialState({{"P", Pd + (Rp + Rd) * bc.X0}})
+        );
     } else {
         // Step 2: Deploy the standard RCR model monolithically so the outlet
         // state participates in the Newton solve through the generalized

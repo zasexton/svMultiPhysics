@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cctype>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -924,6 +925,471 @@ bool tryPromoteExactReducedUpdateToNativeRankOne(
     return !promoted.v.empty();
 }
 
+[[nodiscard]] std::vector<std::pair<GlobalIndex, Real>> reconstructInputGradientFromCt(
+    const std::vector<Real>& ct,
+    std::size_t n_field_dofs,
+    std::span<const std::size_t> aux_local_indices,
+    const std::vector<Real>& dF_dinputs,
+    int n_inputs,
+    int input_col)
+{
+    constexpr Real kDirectTol = static_cast<Real>(1e-14);
+    if (n_field_dofs == 0 || aux_local_indices.empty() || n_inputs <= 0 || input_col < 0 ||
+        dF_dinputs.size() <
+            aux_local_indices.size() * static_cast<std::size_t>(n_inputs)) {
+        return {};
+    }
+
+    Real denom = Real(0.0);
+    std::vector<Real> numer(n_field_dofs, Real(0.0));
+
+    for (std::size_t i = 0; i < aux_local_indices.size(); ++i) {
+        const Real dF_dI = dF_dinputs[i * static_cast<std::size_t>(n_inputs) +
+                                      static_cast<std::size_t>(input_col)];
+        if (std::abs(dF_dI) <= kDirectTol) {
+            continue;
+        }
+        denom += dF_dI * dF_dI;
+
+        const auto row = aux_local_indices[i];
+        const auto row_offset = row * n_field_dofs;
+        if (row_offset + n_field_dofs > ct.size()) {
+            return {};
+        }
+        for (std::size_t k = 0; k < n_field_dofs; ++k) {
+            numer[k] += dF_dI * ct[row_offset + k];
+        }
+    }
+
+    if (!(denom > kDirectTol * kDirectTol)) {
+        return {};
+    }
+
+    std::vector<std::pair<GlobalIndex, Real>> q_u;
+    q_u.reserve(n_field_dofs);
+    for (std::size_t k = 0; k < n_field_dofs; ++k) {
+        const Real val = numer[k] / denom;
+        if (std::abs(val) > kDirectTol) {
+            q_u.emplace_back(static_cast<GlobalIndex>(k), val);
+        }
+    }
+    return q_u;
+}
+
+[[nodiscard]] bool tryPromoteDirectCouplingRecordToNativeRankOne(
+    const systems::FESystem::BorderedCouplingData& bordered,
+    const systems::FESystem::BorderedCouplingData::DirectCouplingRecord& record,
+    std::size_t aux_local_index,
+    std::span<const Real> left_column,
+    const dofs::IndexSet& owned_dofs,
+    backends::RankOneUpdate& promoted)
+{
+    constexpr Real kDirectTol = static_cast<Real>(1e-14);
+    const auto it = std::find(record.aux_local_indices.begin(),
+                              record.aux_local_indices.end(),
+                              aux_local_index);
+    if (it == record.aux_local_indices.end() || left_column.empty()) {
+        return false;
+    }
+
+    const int n_inputs = static_cast<int>(record.dO_dI.size());
+    if (n_inputs <= 0 || record.dF_dinputs.empty()) {
+        return false;
+    }
+
+    int active_input_col = -1;
+    for (int input_col = 0; input_col < n_inputs; ++input_col) {
+        if (std::abs(record.dO_dI[static_cast<std::size_t>(input_col)]) <= kDirectTol) {
+            continue;
+        }
+        if (active_input_col >= 0) {
+            return false;
+        }
+        active_input_col = input_col;
+    }
+    if (active_input_col < 0) {
+        return false;
+    }
+
+    const Real dOk_dIm = record.dO_dI[static_cast<std::size_t>(active_input_col)];
+    constexpr Real kSymTolSq = static_cast<Real>(1e-4);
+
+    struct PromotionCandidate {
+        std::vector<std::pair<GlobalIndex, Real>> q_u{};
+        Real sigma{Real(0.0)};
+        Real rel_residual_sq{std::numeric_limits<Real>::infinity()};
+        bool valid{false};
+    };
+
+    auto evaluate_candidate =
+        [&](std::vector<std::pair<GlobalIndex, Real>> q_u) -> PromotionCandidate {
+            PromotionCandidate result;
+            if (q_u.empty()) {
+                return result;
+            }
+
+            std::unordered_map<GlobalIndex, Real> q_map;
+            q_map.reserve(q_u.size());
+            Real q_norm_sq = Real(0.0);
+            for (const auto& [dof, value] : q_u) {
+                q_map[dof] += value;
+                q_norm_sq += value * value;
+            }
+            if (!(q_norm_sq > Real(1e-30))) {
+                return result;
+            }
+
+            Real cross = Real(0.0);
+            Real dRdQ_norm_sq = Real(0.0);
+            Real residual_sq = Real(0.0);
+
+            if (!record.output_gradient.empty()) {
+                for (const auto& [dof, dRi_dOk] : record.output_gradient) {
+                    const Real dRdQ = dRi_dOk * dOk_dIm;
+                    dRdQ_norm_sq += dRdQ * dRdQ;
+                    const auto it_q = q_map.find(dof);
+                    if (it_q != q_map.end()) {
+                        cross += dRdQ * it_q->second;
+                    }
+                }
+            } else {
+                for (std::size_t k = 0; k < left_column.size(); ++k) {
+                    const Real dRdQ = left_column[k] * dOk_dIm;
+                    dRdQ_norm_sq += dRdQ * dRdQ;
+                    const auto it_q = q_map.find(static_cast<GlobalIndex>(k));
+                    if (it_q != q_map.end()) {
+                        cross += dRdQ * it_q->second;
+                    }
+                }
+            }
+            if (!(dRdQ_norm_sq > Real(1e-30))) {
+                return result;
+            }
+
+            const Real sigma = cross / q_norm_sq;
+            if (!(std::abs(sigma) > Real(1e-30))) {
+                return result;
+            }
+
+            if (!record.output_gradient.empty()) {
+                for (const auto& [dof, dRi_dOk] : record.output_gradient) {
+                    const Real dRdQ = dRi_dOk * dOk_dIm;
+                    const auto it_q = q_map.find(dof);
+                    const Real q_val = (it_q != q_map.end()) ? it_q->second : Real(0.0);
+                    const Real diff = dRdQ - sigma * q_val;
+                    residual_sq += diff * diff;
+                }
+                for (const auto& [dof, q_val] : q_map) {
+                    const auto dof_value = dof;
+                    const auto it =
+                        std::find_if(record.output_gradient.begin(),
+                                     record.output_gradient.end(),
+                                     [dof_value](const auto& entry) {
+                                         return entry.first == dof_value;
+                                     });
+                    if (it == record.output_gradient.end()) {
+                        const Real diff = sigma * q_val;
+                        residual_sq += diff * diff;
+                    }
+                }
+            } else {
+                for (std::size_t k = 0; k < left_column.size(); ++k) {
+                    const Real dRdQ = left_column[k] * dOk_dIm;
+                    const auto it_q = q_map.find(static_cast<GlobalIndex>(k));
+                    const Real q_val = (it_q != q_map.end()) ? it_q->second : Real(0.0);
+                    const Real diff = dRdQ - sigma * q_val;
+                    residual_sq += diff * diff;
+                }
+            }
+
+            result.q_u = std::move(q_u);
+            result.sigma = sigma;
+            result.rel_residual_sq = residual_sq / std::max(dRdQ_norm_sq, Real(1e-30));
+            result.valid = true;
+            return result;
+        };
+
+    PromotionCandidate best;
+    if (static_cast<std::size_t>(active_input_col) < record.input_gradients.size() &&
+        !record.input_gradients[static_cast<std::size_t>(active_input_col)].empty()) {
+        best = evaluate_candidate(
+            record.input_gradients[static_cast<std::size_t>(active_input_col)]);
+    }
+
+    auto q_u_from_ct = reconstructInputGradientFromCt(
+        bordered.Ct,
+        bordered.n_field_dofs,
+        std::span<const std::size_t>(
+            record.aux_local_indices.data(),
+            record.aux_local_indices.size()),
+        record.dF_dinputs,
+        n_inputs,
+        active_input_col);
+    if (!q_u_from_ct.empty()) {
+        auto candidate = evaluate_candidate(std::move(q_u_from_ct));
+        if (candidate.valid &&
+            (!best.valid || candidate.rel_residual_sq < best.rel_residual_sq)) {
+            best = std::move(candidate);
+        }
+    }
+
+    if (!best.valid || !(best.rel_residual_sq <= kSymTolSq)) {
+        return false;
+    }
+
+    promoted = {};
+    promoted.sigma = best.sigma;
+    promoted.prefer_native_face = true;
+    promoted.v.reserve(best.q_u.size());
+    for (const auto& [dof, value] : best.q_u) {
+        if (owned_dofs.contains(dof)) {
+            promoted.v.emplace_back(dof, value);
+        }
+    }
+    return !promoted.v.empty();
+}
+
+[[nodiscard]] bool tryPromoteAlgebraicDirectCouplingRecordToNativeRankOne(
+    const systems::FESystem::BorderedCouplingData& bordered,
+    const systems::FESystem::BorderedCouplingData::DirectCouplingRecord& record,
+    const std::unordered_map<std::size_t, std::size_t>& algebraic_position,
+    const std::vector<Real>& Daa_inv,
+    std::size_t n_alg,
+    const dofs::IndexSet& owned_dofs,
+    backends::RankOneUpdate& promoted)
+{
+    constexpr Real kDirectTol = static_cast<Real>(1e-14);
+    if (record.output_gradient.empty() || record.aux_local_indices.empty() || n_alg == 0 ||
+        Daa_inv.size() != n_alg * n_alg) {
+        return false;
+    }
+
+    const std::size_t n_local_aux = record.aux_local_indices.size();
+    int n_inputs = 0;
+    if (!record.dO_dI.empty()) {
+        n_inputs = static_cast<int>(record.dO_dI.size());
+    } else if (!record.input_gradients.empty()) {
+        n_inputs = static_cast<int>(record.input_gradients.size());
+    } else if (!record.dF_dinputs.empty() && n_local_aux > 0 &&
+               record.dF_dinputs.size() % n_local_aux == 0) {
+        n_inputs = static_cast<int>(record.dF_dinputs.size() / n_local_aux);
+    }
+    if (n_inputs <= 0 || record.dF_dinputs.size() < n_local_aux * static_cast<std::size_t>(n_inputs)) {
+        if (oopTraceEnabled()) {
+            std::ostringstream oss;
+            oss << "NewtonSolver: algebraic direct promotion skipped"
+                << " output_slot=" << record.output_slot
+                << " n_local_aux=" << n_local_aux
+                << " n_inputs=" << n_inputs
+                << " dF_dinputs=" << record.dF_dinputs.size();
+            traceLog(oss.str());
+        }
+        return false;
+    }
+
+    std::vector<Real> effective_dO_dI(static_cast<std::size_t>(n_inputs), Real(0.0));
+    if (!record.dO_dI.empty()) {
+        const auto count = std::min<std::size_t>(effective_dO_dI.size(), record.dO_dI.size());
+        std::copy_n(record.dO_dI.begin(), static_cast<std::ptrdiff_t>(count), effective_dO_dI.begin());
+    }
+
+    const bool have_output_state_sensitivity =
+        record.dO_dx.size() >= n_local_aux && !record.dF_dinputs.empty();
+    if (have_output_state_sensitivity) {
+        for (std::size_t i_local = 0; i_local < n_local_aux; ++i_local) {
+            const Real dOk_dxi = record.dO_dx[i_local];
+            if (std::abs(dOk_dxi) <= kDirectTol) {
+                continue;
+            }
+            const auto pos_i_it = algebraic_position.find(record.aux_local_indices[i_local]);
+            if (pos_i_it == algebraic_position.end()) {
+                continue;
+            }
+            const auto pos_i = pos_i_it->second;
+            for (std::size_t j_local = 0; j_local < n_local_aux; ++j_local) {
+                const auto pos_j_it = algebraic_position.find(record.aux_local_indices[j_local]);
+                if (pos_j_it == algebraic_position.end()) {
+                    continue;
+                }
+                const auto pos_j = pos_j_it->second;
+                const Real dxi_dFj = Daa_inv[pos_i * n_alg + pos_j];
+                if (std::abs(dxi_dFj) <= kDirectTol) {
+                    continue;
+                }
+                for (int input_col = 0; input_col < n_inputs; ++input_col) {
+                    const Real dFj_dIm =
+                        record.dF_dinputs[j_local * static_cast<std::size_t>(n_inputs) +
+                                          static_cast<std::size_t>(input_col)];
+                    if (std::abs(dFj_dIm) <= kDirectTol) {
+                        continue;
+                    }
+                    // Eliminate algebraic auxiliary unknowns exactly:
+                    // dO/dI_eff = dO/dI - dO/dx * D^{-1} * dF/dI.
+                    effective_dO_dI[static_cast<std::size_t>(input_col)] -=
+                        dOk_dxi * dxi_dFj * dFj_dIm;
+                }
+            }
+        }
+    }
+
+    int active_input_col = -1;
+    for (int input_col = 0; input_col < n_inputs; ++input_col) {
+        const Real dOk_dIm = effective_dO_dI[static_cast<std::size_t>(input_col)];
+        if (std::abs(dOk_dIm) <= kDirectTol) {
+            continue;
+        }
+        if (active_input_col >= 0) {
+            return false;
+        }
+        active_input_col = input_col;
+    }
+    if (active_input_col < 0) {
+        if (oopTraceEnabled()) {
+            std::ostringstream oss;
+            oss << "NewtonSolver: algebraic direct promotion no active input"
+                << " output_slot=" << record.output_slot
+                << " eff_dO_dI=[";
+            for (int i = 0; i < n_inputs; ++i) {
+                if (i != 0) {
+                    oss << ", ";
+                }
+                oss << effective_dO_dI[static_cast<std::size_t>(i)];
+            }
+            oss << "]";
+            traceLog(oss.str());
+        }
+        return false;
+    }
+
+    constexpr Real kSymTolSq = static_cast<Real>(1e-4);
+
+    struct PromotionCandidate {
+        std::vector<std::pair<GlobalIndex, Real>> q_u{};
+        Real sigma{Real(0.0)};
+        Real rel_residual_sq{std::numeric_limits<Real>::infinity()};
+        bool valid{false};
+    };
+
+    auto evaluate_candidate =
+        [&](std::vector<std::pair<GlobalIndex, Real>> q_u,
+            Real dOk_dIm) -> PromotionCandidate {
+            PromotionCandidate result;
+            if (q_u.empty() || std::abs(dOk_dIm) <= kDirectTol) {
+                return result;
+            }
+
+            std::unordered_map<GlobalIndex, Real> q_map;
+            q_map.reserve(q_u.size());
+            Real q_norm_sq = Real(0.0);
+            for (const auto& [dof, value] : q_u) {
+                q_map[dof] += value;
+                q_norm_sq += value * value;
+            }
+            if (!(q_norm_sq > Real(1e-30))) {
+                return result;
+            }
+
+            Real cross = Real(0.0);
+            Real dRdQ_norm_sq = Real(0.0);
+            Real residual_sq = Real(0.0);
+            for (const auto& [dof, dRi_dOk] : record.output_gradient) {
+                const Real dRdQ = dRi_dOk * dOk_dIm;
+                dRdQ_norm_sq += dRdQ * dRdQ;
+                const auto it_q = q_map.find(dof);
+                if (it_q != q_map.end()) {
+                    cross += dRdQ * it_q->second;
+                }
+            }
+            if (!(dRdQ_norm_sq > Real(1e-30))) {
+                return result;
+            }
+
+            const Real sigma = cross / q_norm_sq;
+            if (!(std::abs(sigma) > Real(1e-30))) {
+                return result;
+            }
+
+            for (const auto& [dof, dRi_dOk] : record.output_gradient) {
+                const Real dRdQ = dRi_dOk * dOk_dIm;
+                const auto it_q = q_map.find(dof);
+                const Real q_val = (it_q != q_map.end()) ? it_q->second : Real(0.0);
+                const Real diff = dRdQ - sigma * q_val;
+                residual_sq += diff * diff;
+            }
+            for (const auto& [dof, q_val] : q_map) {
+                const auto dof_value = dof;
+                const auto it =
+                    std::find_if(record.output_gradient.begin(),
+                                 record.output_gradient.end(),
+                                 [dof_value](const auto& entry) {
+                                     return entry.first == dof_value;
+                                 });
+                if (it == record.output_gradient.end()) {
+                    const Real diff = sigma * q_val;
+                    residual_sq += diff * diff;
+                }
+            }
+
+            result.q_u = std::move(q_u);
+            result.sigma = sigma;
+            result.rel_residual_sq = residual_sq / std::max(dRdQ_norm_sq, Real(1e-30));
+            result.valid = true;
+            return result;
+        };
+
+    PromotionCandidate best;
+    const Real dOk_dIm = effective_dO_dI[static_cast<std::size_t>(active_input_col)];
+    if (static_cast<std::size_t>(active_input_col) < record.input_gradients.size() &&
+        !record.input_gradients[static_cast<std::size_t>(active_input_col)].empty()) {
+        best = evaluate_candidate(
+            record.input_gradients[static_cast<std::size_t>(active_input_col)], dOk_dIm);
+    }
+
+    auto q_u_from_ct = reconstructInputGradientFromCt(
+        bordered.Ct,
+        bordered.n_field_dofs,
+        std::span<const std::size_t>(
+            record.aux_local_indices.data(),
+            record.aux_local_indices.size()),
+        record.dF_dinputs,
+        n_inputs,
+        active_input_col);
+    if (!q_u_from_ct.empty()) {
+        auto candidate = evaluate_candidate(std::move(q_u_from_ct), dOk_dIm);
+        if (candidate.valid &&
+            (!best.valid || candidate.rel_residual_sq < best.rel_residual_sq)) {
+            best = std::move(candidate);
+        }
+    }
+
+    if (oopTraceEnabled()) {
+        std::ostringstream oss;
+        oss << "NewtonSolver: algebraic direct promotion candidate"
+            << " output_slot=" << record.output_slot
+            << " active_input=" << active_input_col
+            << " eff_dO_dI=" << dOk_dIm
+            << " best_valid=" << best.valid
+            << " rel_residual_sq=" << best.rel_residual_sq
+            << " q_nnz=" << best.q_u.size();
+        traceLog(oss.str());
+    }
+
+    if (!best.valid || !(best.rel_residual_sq <= kSymTolSq)) {
+        return false;
+    }
+
+    promoted = {};
+    promoted.sigma = best.sigma;
+    promoted.prefer_native_face = true;
+    promoted.v.reserve(best.q_u.size());
+    for (const auto& [dof, value] : best.q_u) {
+        if (owned_dofs.contains(dof)) {
+            promoted.v.emplace_back(dof, value);
+        }
+    }
+    return !promoted.v.empty();
+}
+
 std::vector<backends::RankOneUpdate>
 transformRankOneUpdatesForConstraints(std::span<const backends::RankOneUpdate> updates,
                                       const constraints::AffineConstraints& constraints)
@@ -1263,6 +1729,462 @@ void restoreFsilsMatrixSnapshot(backends::GenericMatrix& A, const FsilsMatrixSna
     return true;
 }
 
+struct AlgebraicAuxiliaryReduction {
+    bool active{false};
+    systems::FESystem::BorderedCouplingData reduced_bordered{};
+    std::vector<std::size_t> algebraic_indices{};
+    std::vector<std::size_t> dynamic_indices{};
+    std::vector<Real> Daa_inv{};
+    std::vector<Real> Daa_inv_Ca_field{};
+    std::vector<Real> Daa_inv_Dad{};
+    std::vector<Real> Daa_inv_ga{};
+    std::vector<Real> rhs_shift{};
+    std::vector<backends::RankOneUpdate> promoted_rank_one_updates{};
+    std::vector<backends::ReducedFieldUpdate> reduced_field_updates{};
+    std::vector<backends::GroupedBorderedFieldCoupling> grouped_couplings{};
+};
+
+[[nodiscard]] bool denseMatrixIsEffectivelyDiagonal(const std::vector<Real>& A,
+                                                    std::size_t n,
+                                                    Real tol = static_cast<Real>(1e-14))
+{
+    if (A.size() != n * n) {
+        return false;
+    }
+    Real diag_scale = Real(0.0);
+    for (std::size_t i = 0; i < n; ++i) {
+        diag_scale = std::max(diag_scale, std::abs(A[i * n + i]));
+    }
+    diag_scale = std::max(diag_scale, Real(1.0));
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t j = 0; j < n; ++j) {
+            if (i == j) {
+                continue;
+            }
+            if (std::abs(A[i * n + j]) > tol * diag_scale) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] std::vector<Real> denseSubmatrixRowsCols(const std::vector<Real>& A,
+                                                       std::size_t n_rows,
+                                                       std::size_t n_cols,
+                                                       std::span<const std::size_t> rows,
+                                                       std::span<const std::size_t> cols)
+{
+    std::vector<Real> out(rows.size() * cols.size(), Real(0.0));
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        for (std::size_t j = 0; j < cols.size(); ++j) {
+            out[i * cols.size() + j] = A[rows[i] * n_cols + cols[j]];
+        }
+    }
+    return out;
+}
+
+[[nodiscard]] std::vector<Real> denseSubmatrixRows(const std::vector<Real>& A,
+                                                   std::size_t n_cols,
+                                                   std::span<const std::size_t> rows)
+{
+    std::vector<Real> out(rows.size() * n_cols, Real(0.0));
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        for (std::size_t j = 0; j < n_cols; ++j) {
+            out[i * n_cols + j] = A[rows[i] * n_cols + j];
+        }
+    }
+    return out;
+}
+
+[[nodiscard]] std::vector<Real> denseSubmatrixColumns(const std::vector<Real>& A_col_major,
+                                                      std::size_t n_rows,
+                                                      std::span<const std::size_t> cols)
+{
+    std::vector<Real> out(n_rows * cols.size(), Real(0.0));
+    for (std::size_t j = 0; j < cols.size(); ++j) {
+        const auto src_col = cols[j];
+        for (std::size_t i = 0; i < n_rows; ++i) {
+            out[i + n_rows * j] = A_col_major[i + n_rows * src_col];
+        }
+    }
+    return out;
+}
+
+[[nodiscard]] std::vector<Real> denseMatMulRowMajor(const std::vector<Real>& A,
+                                                    std::size_t m,
+                                                    std::size_t k,
+                                                    const std::vector<Real>& B,
+                                                    std::size_t n)
+{
+    FE_THROW_IF(A.size() != m * k || B.size() != k * n,
+                InvalidArgumentException,
+                "NewtonSolver: denseMatMulRowMajor dimension mismatch");
+    std::vector<Real> C(m * n, Real(0.0));
+    for (std::size_t i = 0; i < m; ++i) {
+        for (std::size_t p = 0; p < k; ++p) {
+            const Real a = A[i * k + p];
+            if (std::abs(a) <= Real(1e-30)) {
+                continue;
+            }
+            for (std::size_t j = 0; j < n; ++j) {
+                C[i * n + j] += a * B[p * n + j];
+            }
+        }
+    }
+    return C;
+}
+
+[[nodiscard]] std::vector<Real> denseColMajorTimesRowMajor(const std::vector<Real>& A_col_major,
+                                                           std::size_t n_rows,
+                                                           std::size_t k,
+                                                           const std::vector<Real>& B_row_major,
+                                                           std::size_t n_cols)
+{
+    FE_THROW_IF(A_col_major.size() != n_rows * k || B_row_major.size() != k * n_cols,
+                InvalidArgumentException,
+                "NewtonSolver: denseColMajorTimesRowMajor dimension mismatch");
+    std::vector<Real> C(n_rows * n_cols, Real(0.0));
+    for (std::size_t p = 0; p < k; ++p) {
+        for (std::size_t i = 0; i < n_rows; ++i) {
+            const Real a = A_col_major[i + n_rows * p];
+            if (std::abs(a) <= Real(1e-30)) {
+                continue;
+            }
+            for (std::size_t j = 0; j < n_cols; ++j) {
+                C[i * n_cols + j] += a * B_row_major[p * n_cols + j];
+            }
+        }
+    }
+    return C;
+}
+
+[[nodiscard]] std::vector<Real> denseRowMajorMatVec(const std::vector<Real>& A,
+                                                    std::size_t m,
+                                                    std::size_t n,
+                                                    const std::vector<Real>& x)
+{
+    FE_THROW_IF(A.size() != m * n || x.size() != n,
+                InvalidArgumentException,
+                "NewtonSolver: denseRowMajorMatVec dimension mismatch");
+    std::vector<Real> y(m, Real(0.0));
+    for (std::size_t i = 0; i < m; ++i) {
+        for (std::size_t j = 0; j < n; ++j) {
+            y[i] += A[i * n + j] * x[j];
+        }
+    }
+    return y;
+}
+
+[[nodiscard]] std::vector<Real> denseColMajorMatVec(const std::vector<Real>& A_col_major,
+                                                    std::size_t m,
+                                                    std::size_t n,
+                                                    const std::vector<Real>& x)
+{
+    FE_THROW_IF(A_col_major.size() != m * n || x.size() != n,
+                InvalidArgumentException,
+                "NewtonSolver: denseColMajorMatVec dimension mismatch");
+    std::vector<Real> y(m, Real(0.0));
+    for (std::size_t j = 0; j < n; ++j) {
+        const Real xj = x[j];
+        if (std::abs(xj) <= Real(1e-30)) {
+            continue;
+        }
+        for (std::size_t i = 0; i < m; ++i) {
+            y[i] += A_col_major[i + m * j] * xj;
+        }
+    }
+    return y;
+}
+
+void rebaseGroupedCouplingIds(std::vector<backends::ReducedFieldUpdate>& reduced_updates,
+                              std::vector<backends::GroupedBorderedFieldCoupling>& grouped_couplings,
+                              int base_group_id)
+{
+    for (auto& upd : reduced_updates) {
+        if (upd.grouped_coupling_id >= 0) {
+            upd.grouped_coupling_id += base_group_id;
+        }
+    }
+    for (auto& group : grouped_couplings) {
+        group.grouped_coupling_id += base_group_id;
+    }
+}
+
+[[nodiscard]] bool buildAlgebraicAuxiliaryReduction(
+    const systems::FESystem::BorderedCouplingData& bordered,
+    const dofs::IndexSet& owned_dofs,
+    AlgebraicAuxiliaryReduction& out)
+{
+    out = {};
+    if (!bordered.active || bordered.n_aux <= 0) {
+        return false;
+    }
+
+    const auto nf = bordered.n_field_dofs;
+    const auto na = static_cast<std::size_t>(bordered.n_aux);
+    if (bordered.D.size() != na * na ||
+        bordered.B.size() != nf * na ||
+        bordered.Ct.size() != na * nf ||
+        bordered.g.size() != na ||
+        bordered.aux_variable_kinds.size() != na) {
+        return false;
+    }
+
+    for (std::size_t i = 0; i < na; ++i) {
+        if (bordered.aux_variable_kinds[i] == systems::AuxiliaryVariableKind::Algebraic) {
+            out.algebraic_indices.push_back(i);
+        } else {
+            out.dynamic_indices.push_back(i);
+        }
+    }
+    if (out.algebraic_indices.empty()) {
+        return false;
+    }
+
+    const auto n_alg = out.algebraic_indices.size();
+    const auto n_dyn = out.dynamic_indices.size();
+    std::unordered_map<std::size_t, std::size_t> algebraic_position;
+    algebraic_position.reserve(n_alg);
+    for (std::size_t i = 0; i < n_alg; ++i) {
+        algebraic_position.emplace(out.algebraic_indices[i], i);
+    }
+    const auto Daa = denseSubmatrixRowsCols(bordered.D, na, na,
+                                            out.algebraic_indices,
+                                            out.algebraic_indices);
+    if (!invertDenseMatrix(Daa, n_alg, out.Daa_inv)) {
+        return false;
+    }
+
+    const auto Ca = denseSubmatrixRows(bordered.Ct, nf, out.algebraic_indices);
+    out.Daa_inv_Ca_field = denseMatMulRowMajor(out.Daa_inv, n_alg, n_alg, Ca, nf);
+
+    std::vector<Real> g_alg(n_alg, Real(0.0));
+    for (std::size_t i = 0; i < n_alg; ++i) {
+        g_alg[i] = bordered.g[out.algebraic_indices[i]];
+    }
+    out.Daa_inv_ga = denseRowMajorMatVec(out.Daa_inv, n_alg, n_alg, g_alg);
+
+    const auto B_alg = denseSubmatrixColumns(bordered.B, nf, out.algebraic_indices);
+    out.rhs_shift = denseColMajorMatVec(B_alg, nf, n_alg, out.Daa_inv_ga);
+
+    const bool independent_modes = denseMatrixIsEffectivelyDiagonal(Daa, n_alg);
+    if (oopTraceEnabled()) {
+        std::ostringstream oss;
+        oss << "NewtonSolver: algebraic reduction structure"
+            << " n_alg=" << n_alg
+            << " n_dyn=" << n_dyn
+            << " independent_modes=" << independent_modes
+            << " direct_records=" << bordered.direct_coupling_records.size()
+            << " Daa=[";
+        for (std::size_t i = 0; i < n_alg; ++i) {
+            if (i != 0) {
+                oss << "; ";
+            }
+            for (std::size_t j = 0; j < n_alg; ++j) {
+                if (j != 0) {
+                    oss << ", ";
+                }
+                oss << Daa[i * n_alg + j];
+            }
+        }
+        oss << "]";
+        traceLog(oss.str());
+    }
+    const bool allow_native_rank_one_promotion = independent_modes;
+    const int grouped_coupling_id = independent_modes ? -1 : 0;
+    backends::GroupedBorderedFieldCoupling grouped{};
+    grouped.grouped_coupling_id = grouped_coupling_id;
+    grouped.aux_matrix = Daa;
+    grouped.modes.reserve(n_alg);
+
+    for (std::size_t j = 0; j < n_alg; ++j) {
+        backends::ReducedFieldUpdate upd;
+        upd.sigma = Real(-1.0);
+        upd.grouped_coupling_id = grouped_coupling_id;
+        upd.left.reserve(nf);
+        upd.right.reserve(nf);
+        std::vector<Real> left_column_full(nf, Real(0.0));
+
+        backends::GroupedBorderedFieldCoupling::Mode mode;
+        mode.left.reserve(nf);
+        mode.right.reserve(nf);
+
+        for (std::size_t row = 0; row < nf; ++row) {
+            const Real left_val = B_alg[row + nf * j];
+            left_column_full[row] = left_val;
+            if (std::abs(left_val) > Real(1e-30) &&
+                owned_dofs.contains(static_cast<GlobalIndex>(row))) {
+                upd.left.emplace_back(static_cast<GlobalIndex>(row), left_val);
+                mode.left.emplace_back(static_cast<GlobalIndex>(row), left_val);
+            }
+
+            const Real right_val = out.Daa_inv_Ca_field[j * nf + row];
+            if (std::abs(right_val) > Real(1e-30) &&
+                owned_dofs.contains(static_cast<GlobalIndex>(row))) {
+                upd.right.emplace_back(static_cast<GlobalIndex>(row), right_val);
+            }
+
+            const Real ca_val = Ca[j * nf + row];
+            if (std::abs(ca_val) > Real(1e-30) &&
+                owned_dofs.contains(static_cast<GlobalIndex>(row))) {
+                mode.right.emplace_back(static_cast<GlobalIndex>(row), ca_val);
+            }
+        }
+
+        backends::RankOneUpdate promoted;
+        bool promoted_ok = false;
+        if (independent_modes) {
+            for (const auto& record : bordered.direct_coupling_records) {
+                const auto aux_it = std::find(record.aux_local_indices.begin(),
+                                              record.aux_local_indices.end(),
+                                              out.algebraic_indices[j]);
+                if (aux_it == record.aux_local_indices.end()) {
+                    continue;
+                }
+                if (tryPromoteAlgebraicDirectCouplingRecordToNativeRankOne(
+                        bordered,
+                        record,
+                        algebraic_position,
+                        out.Daa_inv,
+                        n_alg,
+                        owned_dofs,
+                        promoted)) {
+                    promoted_ok = true;
+                    break;
+                }
+            }
+        }
+        if (!promoted_ok && allow_native_rank_one_promotion) {
+            promoted_ok = tryPromoteExactReducedUpdateToNativeRankOne(upd, promoted);
+        }
+        if (!promoted_ok && !independent_modes) {
+            for (const auto& record : bordered.direct_coupling_records) {
+                if (tryPromoteDirectCouplingRecordToNativeRankOne(
+                        bordered, record, out.algebraic_indices[j], left_column_full, owned_dofs, promoted)) {
+                    promoted_ok = true;
+                    break;
+                }
+            }
+        }
+        if (promoted_ok) {
+            out.promoted_rank_one_updates.push_back(std::move(promoted));
+            continue;
+        }
+
+        if (!upd.left.empty() && !upd.right.empty()) {
+            out.reduced_field_updates.push_back(std::move(upd));
+        }
+        if (!mode.left.empty() && !mode.right.empty()) {
+            grouped.modes.push_back(std::move(mode));
+        }
+    }
+
+    if (!independent_modes &&
+        !grouped.aux_matrix.empty() &&
+        !grouped.modes.empty()) {
+        out.grouped_couplings.push_back(std::move(grouped));
+    }
+
+    if (n_dyn == 0) {
+        out.active = true;
+        return true;
+    }
+
+    const auto D_ad = denseSubmatrixRowsCols(bordered.D, na, na,
+                                             out.algebraic_indices,
+                                             out.dynamic_indices);
+    const auto D_da = denseSubmatrixRowsCols(bordered.D, na, na,
+                                             out.dynamic_indices,
+                                             out.algebraic_indices);
+    const auto D_dd = denseSubmatrixRowsCols(bordered.D, na, na,
+                                             out.dynamic_indices,
+                                             out.dynamic_indices);
+    out.Daa_inv_Dad = denseMatMulRowMajor(out.Daa_inv, n_alg, n_alg, D_ad, n_dyn);
+
+    const auto B_dyn = denseSubmatrixColumns(bordered.B, nf, out.dynamic_indices);
+    const auto B_shift = denseColMajorTimesRowMajor(B_alg, nf, n_alg, out.Daa_inv_Dad, n_dyn);
+    const auto C_dyn = denseSubmatrixRows(bordered.Ct, nf, out.dynamic_indices);
+    const auto C_shift = denseMatMulRowMajor(D_da, n_dyn, n_alg, out.Daa_inv_Ca_field, nf);
+    const auto D_shift = denseMatMulRowMajor(D_da, n_dyn, n_alg, out.Daa_inv_Dad, n_dyn);
+    const auto g_shift = denseRowMajorMatVec(D_da, n_dyn, n_alg, out.Daa_inv_ga);
+
+    out.reduced_bordered.resize(static_cast<int>(n_dyn), nf);
+    out.reduced_bordered.aux_variable_kinds.assign(
+        n_dyn, systems::AuxiliaryVariableKind::Differential);
+    out.reduced_bordered.aux_blocks.push_back({"algebraic_reduced_dynamic",
+                                               static_cast<int>(n_dyn)});
+
+    for (std::size_t j = 0; j < n_dyn; ++j) {
+        for (std::size_t row = 0; row < nf; ++row) {
+            out.reduced_bordered.B[row + nf * j] =
+                B_dyn[row + nf * j] - B_shift[row * n_dyn + j];
+        }
+    }
+    for (std::size_t i = 0; i < n_dyn; ++i) {
+        out.reduced_bordered.g[i] =
+            bordered.g[out.dynamic_indices[i]] - g_shift[i];
+        for (std::size_t col = 0; col < nf; ++col) {
+            out.reduced_bordered.Ct[i * nf + col] =
+                C_dyn[i * nf + col] - C_shift[i * nf + col];
+        }
+        for (std::size_t j = 0; j < n_dyn; ++j) {
+            out.reduced_bordered.D[i * n_dyn + j] =
+                D_dd[i * n_dyn + j] - D_shift[i * n_dyn + j];
+        }
+    }
+
+    out.active = true;
+    return true;
+}
+
+[[nodiscard]] std::vector<Real> recoverAuxiliaryDeltaFromReduction(
+    const AlgebraicAuxiliaryReduction& reduction,
+    std::span<const Real> dense_du,
+    std::span<const Real> reduced_dynamic_delta)
+{
+    if (!reduction.active) {
+        return std::vector<Real>(reduced_dynamic_delta.begin(), reduced_dynamic_delta.end());
+    }
+
+    const auto n_aux_full =
+        reduction.algebraic_indices.size() + reduction.dynamic_indices.size();
+    std::vector<Real> full_delta(n_aux_full, Real(0.0));
+
+    FE_THROW_IF(reduced_dynamic_delta.size() != reduction.dynamic_indices.size(),
+                systems::InvalidStateException,
+                "NewtonSolver: reduced dynamic auxiliary delta size mismatch");
+    for (std::size_t j = 0; j < reduction.dynamic_indices.size(); ++j) {
+        full_delta[reduction.dynamic_indices[j]] = reduced_dynamic_delta[j];
+    }
+
+    FE_THROW_IF(reduction.Daa_inv_Ca_field.size() !=
+                    reduction.algebraic_indices.size() * dense_du.size(),
+                systems::InvalidStateException,
+                "NewtonSolver: algebraic reduction field recovery size mismatch");
+    FE_THROW_IF(reduction.Daa_inv_Dad.size() !=
+                    reduction.algebraic_indices.size() * reduction.dynamic_indices.size(),
+                systems::InvalidStateException,
+                "NewtonSolver: algebraic reduction dynamic recovery size mismatch");
+    FE_THROW_IF(reduction.Daa_inv_ga.size() != reduction.algebraic_indices.size(),
+                systems::InvalidStateException,
+                "NewtonSolver: algebraic reduction rhs recovery size mismatch");
+
+    for (std::size_t i = 0; i < reduction.algebraic_indices.size(); ++i) {
+        Real value = reduction.Daa_inv_ga[i];
+        for (std::size_t k = 0; k < dense_du.size(); ++k) {
+            value -= reduction.Daa_inv_Ca_field[i * dense_du.size() + k] * dense_du[k];
+        }
+        for (std::size_t j = 0; j < reduction.dynamic_indices.size(); ++j) {
+            value -= reduction.Daa_inv_Dad[i * reduction.dynamic_indices.size() + j] *
+                     reduced_dynamic_delta[j];
+        }
+        full_delta[reduction.algebraic_indices[i]] = value;
+    }
+
+    return full_delta;
+}
+
 void applyAuxiliaryDelta(systems::FESystem& system,
                          const systems::FESystem::BorderedCouplingData& bc,
                          std::span<const Real> dx,
@@ -1469,6 +2391,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     auto& residual_base = *workspace.residual_base;
 
     NewtonReport report;
+    const auto base_linear_options = linear.getOptions();
 
     const auto& sys = transient.system();
     const auto& constraints = sys.constraints();
@@ -1657,6 +2580,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     std::vector<backends::ReducedFieldUpdate> effective_reduced_field_updates;
     std::vector<backends::ReducedFieldUpdate> active_reduced_field_updates;
     std::vector<backends::GroupedBorderedFieldCoupling> grouped_bordered_field_couplings;
+    bool linear_has_live_bordered = false;
+    const systems::FESystem::BorderedCouplingData* solve_bordered_ptr = nullptr;
+    AlgebraicAuxiliaryReduction algebraic_aux_reduction;
 
     auto captureRankOneUpdates = [&]() {
         const auto updates = transient.system().lastRankOneUpdates();
@@ -1861,7 +2787,6 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             linear.setGroupedBorderedFieldCouplings({});
             return false;
         }
-        const auto& bordered = transient.system().borderedCoupling();
         const bool force_explicit_rank_one =
             std::getenv("SVMP_FORCE_EXPLICIT_RANK_ONE") != nullptr;
         const bool use_native_rank_one_updates =
@@ -1870,7 +2795,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             !force_explicit_rank_one &&
             !has_non_dirichlet_affine_constraints;
         const bool force_explicit_matrix_assembly =
-            bordered.active && bordered.n_aux > 0 && !use_native_rank_one_updates;
+            linear_has_live_bordered && !use_native_rank_one_updates;
         if (oopTraceEnabled()) {
             traceLog("NewtonSolver: rank-1 updates=" + std::to_string(rank_one_updates.size()) +
                      " reduced updates=" + std::to_string(reduced_updates.size()) +
@@ -2590,19 +3515,76 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             traceLog("NewtonSolver: effective dt for linear backend=" + std::to_string(dt_eff));
         }
 
-        const auto& bordered = transient.system().borderedCoupling();
-        const bool has_bordered = bordered.active && bordered.n_aux > 0;
+        const auto& bordered_full = transient.system().borderedCoupling();
+        const bool has_bordered = bordered_full.active && bordered_full.n_aux > 0;
+        const auto& owned_dofs = transient.system().dofHandler().getPartition().locallyOwned();
         active_reduced_field_updates = effective_reduced_field_updates;
         grouped_bordered_field_couplings.clear();
+        algebraic_aux_reduction = {};
+        solve_bordered_ptr = has_bordered ? &bordered_full : nullptr;
+        if (has_bordered &&
+            buildAlgebraicAuxiliaryReduction(bordered_full, owned_dofs, algebraic_aux_reduction)) {
+            if (!algebraic_aux_reduction.promoted_rank_one_updates.empty()) {
+                effective_rank_one_updates.insert(effective_rank_one_updates.end(),
+                                                  algebraic_aux_reduction.promoted_rank_one_updates.begin(),
+                                                  algebraic_aux_reduction.promoted_rank_one_updates.end());
+            }
+            if (!algebraic_aux_reduction.reduced_field_updates.empty() ||
+                !algebraic_aux_reduction.grouped_couplings.empty()) {
+                auto reduced_updates = algebraic_aux_reduction.reduced_field_updates;
+                auto grouped_couplings = algebraic_aux_reduction.grouped_couplings;
+                const int base_group_id =
+                    static_cast<int>(grouped_bordered_field_couplings.size());
+                rebaseGroupedCouplingIds(reduced_updates, grouped_couplings, base_group_id);
+                active_reduced_field_updates.insert(active_reduced_field_updates.end(),
+                                                   std::make_move_iterator(reduced_updates.begin()),
+                                                   std::make_move_iterator(reduced_updates.end()));
+                grouped_bordered_field_couplings.insert(grouped_bordered_field_couplings.end(),
+                                                        std::make_move_iterator(grouped_couplings.begin()),
+                                                        std::make_move_iterator(grouped_couplings.end()));
+            }
+            if (algebraic_aux_reduction.reduced_bordered.active &&
+                algebraic_aux_reduction.reduced_bordered.n_aux > 0) {
+                solve_bordered_ptr = &algebraic_aux_reduction.reduced_bordered;
+            } else {
+                solve_bordered_ptr = nullptr;
+            }
+            if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                const double g_norm = std::sqrt(std::inner_product(
+                    bordered_full.g.begin(), bordered_full.g.end(), bordered_full.g.begin(), 0.0));
+                const double rhs_shift_norm = std::sqrt(std::inner_product(
+                    algebraic_aux_reduction.rhs_shift.begin(),
+                    algebraic_aux_reduction.rhs_shift.end(),
+                    algebraic_aux_reduction.rhs_shift.begin(),
+                    0.0));
+                oss << "NewtonSolver: algebraic auxiliary reduction"
+                    << " full_n_aux=" << bordered_full.n_aux
+                    << " alg=" << algebraic_aux_reduction.algebraic_indices.size()
+                    << " dyn=" << algebraic_aux_reduction.dynamic_indices.size()
+                    << " direct_records=" << bordered_full.direct_coupling_records.size()
+                    << " promoted_rank1=" << algebraic_aux_reduction.promoted_rank_one_updates.size()
+                    << " reduced_updates=" << algebraic_aux_reduction.reduced_field_updates.size()
+                    << " grouped_couplings=" << algebraic_aux_reduction.grouped_couplings.size()
+                    << " ||g||=" << g_norm
+                    << " ||B D^{-1} g||=" << rhs_shift_norm;
+                traceLog(oss.str());
+            }
+        }
+        const bool has_solve_bordered =
+            solve_bordered_ptr != nullptr &&
+            solve_bordered_ptr->active &&
+            solve_bordered_ptr->n_aux > 0;
         bool condensed_bordered_active = false;
         std::vector<Real> condensed_rhs_shift;
         std::vector<Real> condensed_Dinv;
         std::vector<Real> condensed_DinvC;
-        if (has_bordered &&
+        if (has_solve_bordered &&
             linear.supportsNativeReducedFieldUpdates() &&
             !has_non_dirichlet_affine_constraints) {
-            const auto nf = bordered.n_field_dofs;
-            const auto na = static_cast<std::size_t>(bordered.n_aux);
+            const auto& solve_bordered = *solve_bordered_ptr;
+            const auto nf = solve_bordered.n_field_dofs;
+            const auto na = static_cast<std::size_t>(solve_bordered.n_aux);
             int max_condensed_aux = 64;
             if (const char* env = std::getenv("SVMP_MAX_CONDENSED_AUX_SIZE")) {
                 const int parsed = std::atoi(env);
@@ -2612,11 +3594,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             }
 
             if (na > 0 && static_cast<int>(na) <= max_condensed_aux &&
-                bordered.D.size() == na * na &&
-                bordered.B.size() == nf * na &&
-                bordered.Ct.size() == na * nf &&
-                bordered.g.size() == na &&
-                invertDenseMatrix(bordered.D, na, condensed_Dinv)) {
+                solve_bordered.D.size() == na * na &&
+                solve_bordered.B.size() == nf * na &&
+                solve_bordered.Ct.size() == na * nf &&
+                solve_bordered.g.size() == na &&
+                invertDenseMatrix(solve_bordered.D, na, condensed_Dinv)) {
                 condensed_bordered_active = true;
                 condensed_rhs_shift.assign(nf, Real(0.0));
                 condensed_DinvC.assign(na * nf, Real(0.0));
@@ -2624,41 +3606,46 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 std::vector<Real> Dinv_g(na, Real(0.0));
                 for (std::size_t i = 0; i < na; ++i) {
                     for (std::size_t j = 0; j < na; ++j) {
-                        Dinv_g[i] += condensed_Dinv[i * na + j] * bordered.g[j];
+                        Dinv_g[i] += condensed_Dinv[i * na + j] * solve_bordered.g[j];
                     }
                 }
                 for (std::size_t row = 0; row < nf; ++row) {
                     for (std::size_t j = 0; j < na; ++j) {
-                        condensed_rhs_shift[row] += bordered.B[row + nf * j] * Dinv_g[j];
+                        condensed_rhs_shift[row] += solve_bordered.B[row + nf * j] * Dinv_g[j];
                     }
                 }
                 for (std::size_t i = 0; i < na; ++i) {
                     for (std::size_t col = 0; col < nf; ++col) {
                         Real value = Real(0.0);
                         for (std::size_t j = 0; j < na; ++j) {
-                            value += condensed_Dinv[i * na + j] * bordered.Ct[j * nf + col];
+                            value += condensed_Dinv[i * na + j] * solve_bordered.Ct[j * nf + col];
                         }
                         condensed_DinvC[i * nf + col] = value;
                     }
                 }
 
-                const auto& owned_dofs = transient.system().dofHandler().getPartition().locallyOwned();
                 backends::GroupedBorderedFieldCoupling bordered_group;
-                bordered_group.grouped_coupling_id = 0;
-                bordered_group.aux_matrix.assign(bordered.D.begin(), bordered.D.end());
+                bordered_group.grouped_coupling_id =
+                    static_cast<int>(grouped_bordered_field_couplings.size());
+                bordered_group.aux_matrix.assign(solve_bordered.D.begin(), solve_bordered.D.end());
                 bordered_group.modes.reserve(na);
+                const bool independent_condensed_modes =
+                    denseMatrixIsEffectivelyDiagonal(solve_bordered.D, na);
+                const bool allow_condensed_native_rank_one_promotion =
+                    independent_condensed_modes;
                 std::optional<backends::RankOneUpdate> promoted_condensed_rank_one;
                 for (std::size_t j = 0; j < na; ++j) {
                     backends::ReducedFieldUpdate upd;
                     upd.sigma = Real(-1.0);
-                    upd.grouped_coupling_id = 0;
+                    upd.grouped_coupling_id =
+                        independent_condensed_modes ? -1 : bordered_group.grouped_coupling_id;
                     upd.left.reserve(nf);
                     upd.right.reserve(nf);
                     backends::GroupedBorderedFieldCoupling::Mode mode;
                     mode.left.reserve(nf);
                     mode.right.reserve(nf);
                     for (std::size_t row = 0; row < nf; ++row) {
-                        const Real val = bordered.B[row + nf * j];
+                        const Real val = solve_bordered.B[row + nf * j];
                         if (std::abs(val) > Real(1e-30) &&
                             owned_dofs.contains(static_cast<GlobalIndex>(row))) {
                             upd.left.emplace_back(static_cast<GlobalIndex>(row), val);
@@ -2671,13 +3658,13 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                             owned_dofs.contains(static_cast<GlobalIndex>(col))) {
                             upd.right.emplace_back(static_cast<GlobalIndex>(col), val);
                         }
-                        const Real c_val = bordered.Ct[j * nf + col];
+                        const Real c_val = solve_bordered.Ct[j * nf + col];
                         if (std::abs(c_val) > Real(1e-30) &&
                             owned_dofs.contains(static_cast<GlobalIndex>(col))) {
                             mode.right.emplace_back(static_cast<GlobalIndex>(col), c_val);
                         }
                     }
-                    if (false && na == 1) {
+                    if (allow_condensed_native_rank_one_promotion) {
                         backends::RankOneUpdate promoted;
                         if (tryPromoteExactReducedUpdateToNativeRankOne(upd, promoted)) {
                             promoted_condensed_rank_one = std::move(promoted);
@@ -2693,7 +3680,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 }
                 if (promoted_condensed_rank_one.has_value()) {
                     effective_rank_one_updates.push_back(std::move(*promoted_condensed_rank_one));
-                } else if (na > 1 &&
+                } else if (!independent_condensed_modes &&
                            !bordered_group.aux_matrix.empty() &&
                            !bordered_group.modes.empty()) {
                     grouped_bordered_field_couplings.push_back(std::move(bordered_group));
@@ -2713,16 +3700,16 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 }
             }
         }
+        linear_has_live_bordered = has_solve_bordered && !condensed_bordered_active;
 
         // Bridge rank-1 / reduced updates from coupled BC assembly to the linear
         // solver only after any bordered condensation has augmented the active
         // reduced/grouped coupling sets for this Newton solve.
         const bool explicit_rank_one_in_matrix = bridgeRankOneUpdates();
         if (!constrained_dofs.empty()) {
-            const auto& bordered = transient.system().borderedCoupling();
             const bool exact_direct_coupling_in_matrix =
                 transient.system().lastRankOneUpdates().empty() &&
-                !bordered.direct_coupling_records.empty();
+                !bordered_full.direct_coupling_records.empty();
             if (explicit_rank_one_in_matrix || exact_direct_coupling_in_matrix) {
                 reapplyConstrainedJacobianRows();
             }
@@ -2737,7 +3724,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             !has_non_dirichlet_affine_constraints;
         const bool has_native_direct_face_only_updates =
             has_native_rank_one_updates &&
-            (!has_bordered || condensed_bordered_active) &&
+            (!has_solve_bordered || condensed_bordered_active) &&
             grouped_bordered_field_couplings.empty() &&
             !effective_rank_one_updates.empty() &&
             active_reduced_field_updates.empty();
@@ -2750,11 +3737,12 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             condensed_bordered_active &&
             !has_native_direct_face_only_updates;
         const bool needs_strict_coupled_solve_options =
-            (has_bordered && !condensed_bordered_active) ||
+            (has_solve_bordered && !condensed_bordered_active) ||
             (has_any_rank_one_updates && !has_native_rank_one_updates);
         const bool needs_validated_native_rank_one_options =
-            has_native_rank_one_updates && !(has_bordered && !condensed_bordered_active);
+            has_native_rank_one_updates && !(has_solve_bordered && !condensed_bordered_active);
         std::vector<Real> aux_delta;
+        std::vector<Real> solve_aux_delta;
         FsilsMatrixSnapshot fsils_matrix_snapshot;
         const auto reportMeetsRequestedLinearTarget =
             [](const backends::SolverReport& rep,
@@ -2772,29 +3760,38 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
         int ptc_retries = 0;
         while (true) {
-            SolverOptionsGuard bordered_solver_options_guard{linear, linear.getOptions()};
+            SolverOptionsGuard bordered_solver_options_guard{linear, base_linear_options};
             if (needs_strict_coupled_solve_options) {
-                linear.setOptions(makeBorderedSolveOptions(bordered_solver_options_guard.saved));
+                linear.setOptions(makeBorderedSolveOptions(base_linear_options));
             } else if (needs_validated_native_rank_one_options) {
                 linear.setOptions((has_native_direct_face_only_updates ||
                                    has_native_condensed_coupled_updates)
                                       ? makeValidatedNativeRankOneSolveOptions(
-                                            bordered_solver_options_guard.saved,
+                                            base_linear_options,
                                             native_direct_face_mode_count)
                                       : makeBorderedSolveOptions(
-                                            bordered_solver_options_guard.saved));
+                                            base_linear_options));
             }
-            if (has_bordered && !condensed_bordered_active) {
+            if (has_solve_bordered && !condensed_bordered_active) {
                 fsils_matrix_snapshot = captureFsilsMatrixSnapshot(J);
             }
-            backends::GenericVector* linear_rhs = &r;
+            const std::vector<Real>* reduced_rhs_shift = nullptr;
             if (condensed_bordered_active) {
+                reduced_rhs_shift = &condensed_rhs_shift;
+            } else if (algebraic_aux_reduction.active &&
+                       !has_solve_bordered &&
+                       !algebraic_aux_reduction.rhs_shift.empty()) {
+                reduced_rhs_shift = &algebraic_aux_reduction.rhs_shift;
+            }
+
+            backends::GenericVector* linear_rhs = &r;
+            if (reduced_rhs_shift != nullptr) {
                 copyVector(residual_scratch, r);
                 auto rhs_view = residual_scratch.createAssemblyView();
                 FE_CHECK_NOT_NULL(rhs_view.get(), "NewtonSolver: condensed rhs view");
                 rhs_view->beginAssemblyPhase();
-                for (std::size_t row = 0; row < condensed_rhs_shift.size(); ++row) {
-                    const Real shift = condensed_rhs_shift[row];
+                for (std::size_t row = 0; row < reduced_rhs_shift->size(); ++row) {
+                    const Real shift = (*reduced_rhs_shift)[row];
                     if (std::abs(shift) > Real(1e-30)) {
                         rhs_view->addVectorEntry(static_cast<GlobalIndex>(row),
                                                  -shift,
@@ -2803,6 +3800,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 }
                 rhs_view->finalizeAssembly();
                 linear_rhs = &residual_scratch;
+                if (oopTraceEnabled() && reduced_rhs_shift == &algebraic_aux_reduction.rhs_shift) {
+                    traceLog("NewtonSolver: applied pure algebraic reduced RHS shift");
+                }
             }
             if (oopTraceEnabled()) {
                 traceLog("NewtonSolver: calling linear.solve()");
@@ -2991,15 +3991,16 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             du.zero();
         }
 
-        if (has_bordered && !condensed_bordered_active) {
-            const auto nf = bordered.n_field_dofs;
-            const auto na = static_cast<std::size_t>(bordered.n_aux);
+        if (has_solve_bordered && !condensed_bordered_active) {
+            const auto& solve_bordered = *solve_bordered_ptr;
+            const auto nf = solve_bordered.n_field_dofs;
+            const auto na = static_cast<std::size_t>(solve_bordered.n_aux);
             FE_THROW_IF(nf != static_cast<std::size_t>(du.size()), systems::InvalidStateException,
                         "NewtonSolver: bordered PDE block size does not match solution size");
-            FE_THROW_IF(bordered.B.size() != nf * na ||
-                            bordered.Ct.size() != nf * na ||
-                            bordered.D.size() != na * na ||
-                            bordered.g.size() != na,
+            FE_THROW_IF(solve_bordered.B.size() != nf * na ||
+                            solve_bordered.Ct.size() != nf * na ||
+                            solve_bordered.D.size() != na * na ||
+                            solve_bordered.g.size() != na,
                         systems::InvalidStateException,
                         "NewtonSolver: bordered coupling storage size mismatch");
 
@@ -3030,8 +4031,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             std::vector<Real> z_columns(nf * na, 0.0);
 
             {
-                SolverOptionsGuard bordered_solver_options_guard{linear, linear.getOptions()};
-                linear.setOptions(makeBorderedSolveOptions(bordered_solver_options_guard.saved));
+                SolverOptionsGuard bordered_solver_options_guard{linear, base_linear_options};
+                linear.setOptions(makeBorderedSolveOptions(base_linear_options));
 
                 for (std::size_t j = 0; j < na; ++j) {
                     restoreFsilsMatrixSnapshot(J, fsils_matrix_snapshot);
@@ -3042,7 +4043,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         FE_CHECK_NOT_NULL(rhs_view.get(), "NewtonSolver: bordered rhs view");
                         rhs_view->beginAssemblyPhase();
                         for (std::size_t row = 0; row < nf; ++row) {
-                            const Real bij = bordered.B[row + nf * j];
+                            const Real bij = solve_bordered.B[row + nf * j];
                             if (std::abs(bij) > Real(1e-30)) {
                                 rhs_view->addVectorEntry(static_cast<GlobalIndex>(row),
                                                          bij,
@@ -3079,39 +4080,41 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 }
             }
 
-            std::vector<Real> schur = bordered.D;
+            std::vector<Real> schur = solve_bordered.D;
             for (std::size_t i = 0; i < na; ++i) {
                 for (std::size_t j = 0; j < na; ++j) {
                     Real ctz = 0.0;
                     for (std::size_t k = 0; k < nf; ++k) {
-                        ctz += bordered.Ct[i * nf + k] * z_columns[j * nf + k];
+                        ctz += solve_bordered.Ct[i * nf + k] * z_columns[j * nf + k];
                     }
                     schur[i * na + j] -= ctz;
                 }
             }
 
-            aux_delta = bordered.g;
+            solve_aux_delta = solve_bordered.g;
             for (std::size_t i = 0; i < na; ++i) {
                 for (std::size_t k = 0; k < nf; ++k) {
-                    aux_delta[i] -= bordered.Ct[i * nf + k] * u0[k];
+                    solve_aux_delta[i] -= solve_bordered.Ct[i * nf + k] * u0[k];
                 }
             }
 
-            FE_THROW_IF(!solveDenseLinearSystem(schur, aux_delta), systems::InvalidStateException,
+            FE_THROW_IF(!solveDenseLinearSystem(schur, solve_aux_delta), systems::InvalidStateException,
                         "NewtonSolver: bordered Schur solve failed");
 
             std::vector<Real> dense_du = u0;
             for (std::size_t j = 0; j < na; ++j) {
-                const Real dxj = aux_delta[j];
+                const Real dxj = solve_aux_delta[j];
                 for (std::size_t k = 0; k < nf; ++k) {
                     dense_du[k] -= z_columns[j * nf + k] * dxj;
                 }
             }
             scatterDenseVector(du, dense_du);
+            aux_delta = recoverAuxiliaryDeltaFromReduction(
+                algebraic_aux_reduction, dense_du, solve_aux_delta);
 
             if (oopTraceEnabled()) {
                 const auto dx_norm = std::sqrt(std::inner_product(
-                    aux_delta.begin(), aux_delta.end(), aux_delta.begin(), Real(0.0)));
+                    solve_aux_delta.begin(), solve_aux_delta.end(), solve_aux_delta.begin(), Real(0.0)));
                 std::ostringstream oss;
                 oss << "NewtonSolver: bordered correction ||dx_aux||=" << dx_norm;
                 traceLog(oss.str());
@@ -3124,7 +4127,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 for (std::size_t i = 0; i < nf; ++i) {
                     Real val = Kdu[i];
                     for (std::size_t j = 0; j < na; ++j) {
-                        val += bordered.B[i + nf * j] * aux_delta[j];
+                        val += solve_bordered.B[i + nf * j] * solve_aux_delta[j];
                     }
                     const double rem = static_cast<double>(val - rhs_dense[i]);
                     pde_lin_res_sq += rem * rem;
@@ -3134,12 +4137,12 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 for (std::size_t i = 0; i < na; ++i) {
                     Real val = Real(0.0);
                     for (std::size_t k = 0; k < nf; ++k) {
-                        val += bordered.Ct[i * nf + k] * dense_du[k];
+                        val += solve_bordered.Ct[i * nf + k] * dense_du[k];
                     }
                     for (std::size_t j = 0; j < na; ++j) {
-                        val += bordered.D[i * na + j] * aux_delta[j];
+                        val += solve_bordered.D[i * na + j] * solve_aux_delta[j];
                     }
-                    const double rem = static_cast<double>(val - bordered.g[i]);
+                    const double rem = static_cast<double>(val - solve_bordered.g[i]);
                     aux_lin_res_sq += rem * rem;
                 }
 
@@ -3151,11 +4154,12 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 traceLog(lin_oss.str());
             }
         } else if (condensed_bordered_active) {
-            const auto nf = bordered.n_field_dofs;
-            const auto na = static_cast<std::size_t>(bordered.n_aux);
+            const auto& solve_bordered = *solve_bordered_ptr;
+            const auto nf = solve_bordered.n_field_dofs;
+            const auto na = static_cast<std::size_t>(solve_bordered.n_aux);
             FE_THROW_IF(condensed_Dinv.size() != na * na ||
-                            bordered.Ct.size() != nf * na ||
-                            bordered.g.size() != na,
+                            solve_bordered.Ct.size() != nf * na ||
+                            solve_bordered.g.size() != na,
                         systems::InvalidStateException,
                         "NewtonSolver: condensed bordered storage size mismatch");
 
@@ -3168,23 +4172,25 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
             std::vector<Real> aux_rhs(na, Real(0.0));
             for (std::size_t i = 0; i < na; ++i) {
-                Real value = bordered.g[i];
+                Real value = solve_bordered.g[i];
                 for (std::size_t k = 0; k < nf; ++k) {
-                    value -= bordered.Ct[i * nf + k] * dense_du[k];
+                    value -= solve_bordered.Ct[i * nf + k] * dense_du[k];
                 }
                 aux_rhs[i] = value;
             }
 
-            aux_delta.assign(na, Real(0.0));
+            solve_aux_delta.assign(na, Real(0.0));
             for (std::size_t i = 0; i < na; ++i) {
                 for (std::size_t j = 0; j < na; ++j) {
-                    aux_delta[i] += condensed_Dinv[i * na + j] * aux_rhs[j];
+                    solve_aux_delta[i] += condensed_Dinv[i * na + j] * aux_rhs[j];
                 }
             }
+            aux_delta = recoverAuxiliaryDeltaFromReduction(
+                algebraic_aux_reduction, dense_du, solve_aux_delta);
 
             if (oopTraceEnabled()) {
                 const auto dx_norm = std::sqrt(std::inner_product(
-                    aux_delta.begin(), aux_delta.end(), aux_delta.begin(), Real(0.0)));
+                    solve_aux_delta.begin(), solve_aux_delta.end(), solve_aux_delta.begin(), Real(0.0)));
                 std::ostringstream oss;
                 oss << "NewtonSolver: condensed bordered recovery ||dx_aux||=" << dx_norm;
                 traceLog(oss.str());
@@ -3203,7 +4209,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 for (std::size_t i = 0; i < nf; ++i) {
                     Real val = kdu_view->getVectorEntry(static_cast<GlobalIndex>(i));
                     for (std::size_t j = 0; j < na; ++j) {
-                        val += bordered.B[i + nf * j] * aux_delta[j];
+                        val += solve_bordered.B[i + nf * j] * solve_aux_delta[j];
                     }
                     const double rem = static_cast<double>(val - rhs_dense[i]);
                     pde_lin_res_sq += rem * rem;
@@ -3213,12 +4219,12 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 for (std::size_t i = 0; i < na; ++i) {
                     Real val = Real(0.0);
                     for (std::size_t k = 0; k < nf; ++k) {
-                        val += bordered.Ct[i * nf + k] * dense_du[k];
+                        val += solve_bordered.Ct[i * nf + k] * dense_du[k];
                     }
                     for (std::size_t j = 0; j < na; ++j) {
-                        val += bordered.D[i * na + j] * aux_delta[j];
+                        val += solve_bordered.D[i * na + j] * solve_aux_delta[j];
                     }
-                    const double rem = static_cast<double>(val - bordered.g[i]);
+                    const double rem = static_cast<double>(val - solve_bordered.g[i]);
                     aux_lin_res_sq += rem * rem;
                 }
 
@@ -3229,6 +4235,15 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         << " mixed=" << std::sqrt(pde_lin_res_sq + aux_lin_res_sq);
                 traceLog(lin_oss.str());
             }
+        } else if (algebraic_aux_reduction.active) {
+            auto du_view = du.createAssemblyView();
+            FE_CHECK_NOT_NULL(du_view.get(), "NewtonSolver: algebraic-only du view");
+            std::vector<Real> dense_du(J.numRows(), Real(0.0));
+            for (std::size_t k = 0; k < dense_du.size(); ++k) {
+                dense_du[k] = du_view->getVectorEntry(static_cast<GlobalIndex>(k));
+            }
+            aux_delta = recoverAuxiliaryDeltaFromReduction(
+                algebraic_aux_reduction, dense_du, std::span<const Real>{});
         }
 
         auto applyDtIncrementScaling = [&]() {
@@ -3275,7 +4290,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         if (!options_.use_line_search) {
             ntp0 = NTP();
             if (!aux_delta.empty()) {
-                applyAuxiliaryDelta(transient.system(), bordered, aux_delta, static_cast<Real>(1.0));
+                applyAuxiliaryDelta(transient.system(), bordered_full, aux_delta, static_cast<Real>(1.0));
             }
             axpy(history.u(), static_cast<Real>(-1.0), du);
             if (!constraints.empty()) {
@@ -3340,7 +4355,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             }
             transient.system().borderedCoupling() = bordered_backup;
             if (!aux_state_backup.empty()) {
-                applyAuxiliaryDelta(transient.system(), bordered, aux_delta, static_cast<Real>(alpha));
+                applyAuxiliaryDelta(transient.system(), bordered_full, aux_delta, static_cast<Real>(alpha));
             }
             if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
                 reg->invalidateAll();
@@ -3410,7 +4425,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 }
                 transient.system().borderedCoupling() = bordered_backup;
                 if (!aux_state_backup.empty()) {
-                    applyAuxiliaryDelta(transient.system(), bordered, aux_delta, static_cast<Real>(alpha));
+                    applyAuxiliaryDelta(transient.system(), bordered_full, aux_delta, static_cast<Real>(alpha));
                 }
                 if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
                     reg->invalidateAll();
