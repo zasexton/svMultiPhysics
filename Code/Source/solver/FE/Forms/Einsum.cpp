@@ -115,11 +115,21 @@ FormExpr rebuildWithIndexSubstitution(const std::shared_ptr<FormExprNode>& node,
 
         const auto ids = *ids_opt;
         const auto base = rebuildWithIndexSubstitution(kids[0], assignment);
+        const auto* base_node = base.node();
+        const bool scalar_constant_like =
+            base_node != nullptr &&
+            (base_node->type() == FormExprType::Constant || base_node->type() == FormExprType::TypedZero);
 
         if (rank == 1) {
+            if (scalar_constant_like) {
+                return base;
+            }
             return base.component(assignment.valueFor(ids[0]));
         }
         if (rank == 2) {
+            if (scalar_constant_like) {
+                return base;
+            }
             return base.component(assignment.valueFor(ids[0]), assignment.valueFor(ids[1]));
         }
 

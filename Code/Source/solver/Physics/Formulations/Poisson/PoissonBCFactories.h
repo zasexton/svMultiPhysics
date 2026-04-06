@@ -15,7 +15,7 @@
 #include "FE/Forms/CoupledBCs.h"
 #include "FE/Forms/NitscheBC.h"
 #include "FE/Forms/StandardBCs.h"
-#include "FE/Systems/AuxiliaryStateBuilder.h"
+#include "FE/Auxiliary/AuxiliaryStateBuilder.h"
 
 #include <memory>
 #include <stdexcept>

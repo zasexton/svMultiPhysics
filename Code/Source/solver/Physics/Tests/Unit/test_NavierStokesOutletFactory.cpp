@@ -21,7 +21,7 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 
 #include "FE/Systems/FESystem.h"
-#include "FE/Systems/AuxiliaryInputRegistry.h"
+#include "FE/Auxiliary/AuxiliaryInputRegistry.h"
 #include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/CoupledBoundaryManager.h"
 #include "FE/Systems/FormsInstaller.h"

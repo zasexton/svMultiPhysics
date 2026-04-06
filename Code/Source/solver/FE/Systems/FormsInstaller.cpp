@@ -12,7 +12,7 @@
 #include "Core/FEException.h"
 #include "Core/KernelTrace.h"
 
-#include "Systems/AuxiliaryInputRegistry.h"
+#include "Auxiliary/AuxiliaryInputRegistry.h"
 
 #include "Forms/BlockForm.h"
 #include "Forms/FormCompiler.h"

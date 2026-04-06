@@ -10,7 +10,7 @@
 #include "Core/FEException.h"
 
 #include "Forms/PointEvaluator.h"
-#include "Systems/AuxiliaryState.h"
+#include "Auxiliary/AuxiliaryState.h"
 
 #include <cmath>
 #include <limits>

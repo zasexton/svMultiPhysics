@@ -242,6 +242,7 @@ TEST(TimeLoopAdaptiveStep, ReturnsFailureInsteadOfThrowWhenControllerStops)
     opts.newton.max_iterations = 1; // Force failure even on linear problems.
     opts.newton.abs_tolerance = 1e-12;
     opts.newton.rel_tolerance = 0.0;
+    opts.newton.use_line_search = false;
     opts.step_controller = std::make_shared<RejectImmediatelyController>();
 
     svmp::FE::timestepping::TimeLoopCallbacks callbacks;
@@ -638,6 +639,7 @@ TEST(TimeLoopCallbacks, FixedStepDoesNotAcceptNonconvergedStep)
     opts.newton.max_iterations = 1;
     opts.newton.abs_tolerance = 1e-12;
     opts.newton.rel_tolerance = 0.0;
+    opts.newton.use_line_search = false;
 
     int nonlinear_done_calls = 0;
     int step_accepted_calls = 0;

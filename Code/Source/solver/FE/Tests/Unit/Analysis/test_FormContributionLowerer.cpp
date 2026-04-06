@@ -63,6 +63,28 @@ TEST(FormContributionLowerer, ScalarPoisson) {
     EXPECT_EQ(d.nullspace_hints[0].field, FieldId{0});
 }
 
+TEST(FormContributionLowerer, RobinBoundaryTermPreservesInteriorNullspaceHint) {
+    auto space = scalarH1();
+    auto u = FormExpr::stateField(0, *space, "u");
+    auto v = FormExpr::testFunction(*space, "v");
+    auto residual =
+        inner(grad(u), grad(v)).dx() + (FormExpr::constant(2.0) * u * v).ds(5);
+
+    FormulationRecord rec;
+    rec.operator_tag = "equations";
+    rec.active_fields = {0};
+    rec.residual_expr = residual.nodeShared();
+    rec.block_residual_exprs.push_back({{0, 0}, residual.nodeShared()});
+
+    auto contributions = lowerFormulation(rec);
+
+    ASSERT_EQ(contributions.size(), 1u);
+    ASSERT_EQ(contributions[0].nullspace_hints.size(), 1u);
+    EXPECT_EQ(contributions[0].nullspace_hints[0].field, FieldId{0});
+    EXPECT_EQ(contributions[0].nullspace_hints[0].family,
+              NullspaceFamily::ScalarConstant);
+}
+
 // ============================================================================
 // Linear Elasticity → DiagonalBlock with SymmetricLike + KernelOfSymGrad hint
 // ============================================================================

@@ -8,9 +8,9 @@
  * @deprecated This class is the legacy coupled-boundary-specific path.
  * New formulations should use the generalized AuxiliaryState subsystem:
  *
- * - Define models via `AuxiliaryModelBuilder` (Systems/AuxiliaryModelBuilder.h)
- * - Deploy via `use(model)` (Systems/AuxiliaryBindings.h)
- * - Register inputs via `AuxiliaryInputRegistry` (Systems/AuxiliaryInputRegistry.h)
+ * - Define models via `AuxiliaryModelBuilder` (Auxiliary/AuxiliaryModelBuilder.h)
+ * - Deploy via `use(model)` (Auxiliary/AuxiliaryBindings.h)
+ * - Register inputs via `AuxiliaryInputRegistry` (Auxiliary/AuxiliaryInputRegistry.h)
  * - Access via `FESystem::auxiliaryStateManager()` and `auxiliaryInputRegistry()`
  *
  * ## Migration paths
@@ -47,7 +47,7 @@
 #include "Constraints/CoupledNeumannBC.h"
 #include "Constraints/CoupledRobinBC.h"
 #include "Forms/BoundaryFunctional.h"
-#include "Systems/AuxiliaryState.h"
+#include "Auxiliary/AuxiliaryState.h"
 #include "Systems/SystemState.h"
 
 #include <functional>

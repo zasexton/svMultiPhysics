@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "Forms/FormExpr.h"
-#include "Systems/AuxiliaryState.h"
+#include "Auxiliary/AuxiliaryState.h"
 #include "Systems/ODEIntegrator.h"
 
 using svmp::FE::Real;

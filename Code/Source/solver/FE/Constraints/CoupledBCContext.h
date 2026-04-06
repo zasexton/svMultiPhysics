@@ -18,7 +18,7 @@
 
 #include "Core/Types.h"
 #include "Forms/BoundaryFunctional.h"
-#include "Systems/AuxiliaryState.h"
+#include "Auxiliary/AuxiliaryState.h"
 
 #include <array>
 #include <functional>

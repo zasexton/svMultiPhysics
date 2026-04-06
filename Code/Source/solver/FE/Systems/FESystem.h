@@ -12,9 +12,9 @@
 #include "Core/FEException.h"
 
 #include "Forms/BoundaryFunctional.h"
-#include "Systems/AuxiliaryBindings.h"
-#include "Systems/AuxiliaryInputRegistry.h"
-#include "Systems/AuxiliaryStateTypes.h"
+#include "Auxiliary/AuxiliaryBindings.h"
+#include "Auxiliary/AuxiliaryInputRegistry.h"
+#include "Auxiliary/AuxiliaryStateTypes.h"
 #include "Systems/FEQuantityRegistry.h"
 #include "Systems/BoundaryReductionService.h"
 #include "Systems/FieldRegistry.h"

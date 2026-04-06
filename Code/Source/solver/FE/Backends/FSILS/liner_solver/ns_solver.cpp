@@ -340,17 +340,14 @@ void build_explicit_block_corrections(
     corr.sigma = update.sigma;
     const auto& left_entries = !update.left_scaled.empty() ? update.left_scaled : update.left;
     const auto& right_entries = !update.right_scaled.empty() ? update.right_scaled : update.right;
-    const bool left_momentum = fill_projected_block_vector(lhs, left_entries,
-                                                           mom_start, mom_ncomp, corr.left_momentum);
-    const bool left_constraint = fill_projected_block_vector(lhs, left_entries,
-                                                             con_start, con_ncomp, corr.left_constraint);
-    const bool right_momentum = fill_projected_block_vector(lhs, right_entries,
-                                                            mom_start, mom_ncomp, corr.right_momentum);
-    const bool right_constraint = fill_projected_block_vector(lhs, right_entries,
-                                                              con_start, con_ncomp, corr.right_constraint);
-    if (!(left_momentum || left_constraint || right_momentum || right_constraint)) {
-      continue;
-    }
+    fill_projected_block_vector(lhs, left_entries,
+                                mom_start, mom_ncomp, corr.left_momentum);
+    fill_projected_block_vector(lhs, left_entries,
+                                con_start, con_ncomp, corr.left_constraint);
+    fill_projected_block_vector(lhs, right_entries,
+                                mom_start, mom_ncomp, corr.right_momentum);
+    fill_projected_block_vector(lhs, right_entries,
+                                con_start, con_ncomp, corr.right_constraint);
     reduced.push_back(std::move(corr));
   }
 

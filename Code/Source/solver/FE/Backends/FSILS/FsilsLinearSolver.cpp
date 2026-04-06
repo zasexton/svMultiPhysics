@@ -1365,13 +1365,23 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                                               Real left_scale,
                                               bool scale_sigma) {
             fe_fsi_linear_solver::FSILS_reducedFieldUpdateType native_update;
-            if (!(std::abs(sigma) > Real(1e-30)) || left.empty() || right.empty()) {
+            if (!(std::abs(sigma) > Real(1e-30))) {
                 return native_update;
             }
 
             auto [left_full, left_owned] = make_internal_entries(left);
             auto [right_full, right_owned] = make_internal_entries(right);
-            if (left_full.empty() || right_full.empty()) {
+            int local_left_has = left_owned.empty() ? 0 : 1;
+            int local_right_has = right_owned.empty() ? 0 : 1;
+            int global_left_has = local_left_has;
+            int global_right_has = local_right_has;
+            if (lhs.commu.nTasks > 1) {
+                fe_fsi_linear_solver::fsils_allreduce_sum(
+                    &local_left_has, &global_left_has, 1, MPI_INT, lhs.commu);
+                fe_fsi_linear_solver::fsils_allreduce_sum(
+                    &local_right_has, &global_right_has, 1, MPI_INT, lhs.commu);
+            }
+            if (global_left_has == 0 || global_right_has == 0) {
                 return native_update;
             }
 
@@ -1464,21 +1474,19 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             face.sharedFlag = false;
             face.nS = 0.0;
             face.res = 0.0;
-            if (face.nNo <= 0) {
-                return;
-            }
-
-            face.glob.resize(face.nNo);
-            face.val.resize(face_dof, face.nNo);
-            face.valM.resize(face_dof, face.nNo);
-            face.val = 0.0;
-            face.valM = 0.0;
-            for (int a = 0; a < face.nNo; ++a) {
-                const int internal = face_nodes[static_cast<std::size_t>(a)];
-                face.glob(a) = internal;
-                for (int c = 0; c < face_dof; ++c) {
-                    face.val(c, a) = face_values(c, internal);
-                    face.valM(c, a) = face_values(c, internal);
+            if (face.nNo > 0) {
+                face.glob.resize(face.nNo);
+                face.val.resize(face_dof, face.nNo);
+                face.valM.resize(face_dof, face.nNo);
+                face.val = 0.0;
+                face.valM = 0.0;
+                for (int a = 0; a < face.nNo; ++a) {
+                    const int internal = face_nodes[static_cast<std::size_t>(a)];
+                    face.glob(a) = internal;
+                    for (int c = 0; c < face_dof; ++c) {
+                        face.val(c, a) = face_values(c, internal);
+                        face.valM(c, a) = face_values(c, internal);
+                    }
                 }
             }
 

@@ -429,7 +429,7 @@ void compute_reduced_update_preconditioner_coupling(FSILS_lhsType& lhs)
     }
     update.nS = global_nS;
 
-    if (std::abs(update.sigma) > 1e-30 && !left_entries.empty() && !right_entries.empty()) {
+    if (std::abs(update.sigma) > 1e-30) {
       active_indices.push_back(static_cast<int>(&update - lhs.reduced_updates.data()));
     }
   }

@@ -11,7 +11,7 @@ Reference: `LLVM_JIT_IMPLEMENTATION_PLAN.md` (planned OrcJIT backend, kernel ABI
 **In scope**
 - `FE/Forms` expression vocabulary (`FormExpr`), compilation (`FormCompiler` → `FormIR`), and execution (`FormKernels` interpreter) as it relates to JIT compatibility.
 - Forms-level BC helpers (`FE/Forms/BoundaryConditions.h`) and Systems-level coupled BC orchestration (`FE/Systems/CoupledBoundary*`).
-- Boundary functionals (`FE/Forms/BoundaryFunctional*`) and auxiliary state / ODE coupling (`FE/Systems/AuxiliaryState*`, `FE/Systems/ODEIntegrator*`) insofar as they feed boundary-condition evaluation.
+- Boundary functionals (`FE/Forms/BoundaryFunctional*`) and auxiliary state / ODE coupling (`FE/Auxiliary/AuxiliaryState*`, `FE/Systems/ODEIntegrator*`) insofar as they feed boundary-condition evaluation.
 
 **Out of scope**
 - Implementing the OrcJIT engine/codegen itself (this is explicitly deferred).

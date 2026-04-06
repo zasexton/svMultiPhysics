@@ -7819,26 +7819,36 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
             const auto a = evalReal(*kids[1], env, side, q);
             const auto b = evalReal(*kids[2], env, side, q);
             if (!sameCategory<Real>(a.kind, b.kind)) {
+                const auto zeroLike = [](const EvalValue<Real>& ref) {
+                    EvalValue<Real> out{};
+                    out.kind = ref.kind;
+                    if (isVectorKind<Real>(ref.kind)) {
+                        out.resizeVector(ref.vectorSize());
+                    } else if (isMatrixKind<Real>(ref.kind)) {
+                        out.resizeMatrix(ref.matrixRows(), ref.matrixCols());
+                    } else if (isTensor3Kind<Real>(ref.kind)) {
+                        out.resizeTensor3(ref.tensor3Dim0(), ref.tensor3Dim1(), ref.tensor3Dim2());
+                    }
+                    return out;
+                };
                 // TypedZero evaluates to scalar 0.0 but semantically is "zero of any shape".
                 // When one branch is scalar zero and the other is vector/matrix,
                 // select the non-zero branch or create a zero of the correct kind.
                 const bool a_is_typed_zero = kids[1]->type() == FormExprType::TypedZero;
                 const bool b_is_typed_zero = kids[2]->type() == FormExprType::TypedZero;
-                if (a_is_typed_zero || b_is_typed_zero) {
+                const bool a_is_scalar_zero = isScalarKind<Real>(a.kind) && a.s == Real(0.0);
+                const bool b_is_scalar_zero = isScalarKind<Real>(b.kind) && b.s == Real(0.0);
+                if (a_is_typed_zero || b_is_typed_zero || a_is_scalar_zero || b_is_scalar_zero) {
                     // Use the non-TypedZero branch as a shape template
-                    const auto& shape_ref = a_is_typed_zero ? b : a;
+                    const auto& shape_ref = (a_is_typed_zero || a_is_scalar_zero) ? b : a;
                     if (cond.s > 0.0) {
-                        if (a_is_typed_zero) {
-                            EvalValue<Real> out{};
-                            out.kind = shape_ref.kind;
-                            return out; // default-initialized = all zeros
+                        if (a_is_typed_zero || a_is_scalar_zero) {
+                            return zeroLike(shape_ref);
                         }
                         return a;
                     } else {
-                        if (b_is_typed_zero) {
-                            EvalValue<Real> out{};
-                            out.kind = shape_ref.kind;
-                            return out;
+                        if (b_is_typed_zero || b_is_scalar_zero) {
+                            return zeroLike(shape_ref);
                         }
                         return b;
                     }
@@ -7914,7 +7924,10 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
             const int j = node.componentIndex1().value_or(-1);
             if (isScalarKind<Real>(a.kind)) {
                 if (i != 0 || j >= 0) {
-                    throw FEException("Forms: component() invalid indices for scalar",
+                    throw FEException("Forms: component() invalid indices for scalar in '" + node.toString() +
+                                          "' with operand=" + kids[0]->toString() +
+                                          " kind=" + evalKindDescription(a) +
+                                          " indices=(" + std::to_string(i) + "," + std::to_string(j) + ")",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
                 return a;

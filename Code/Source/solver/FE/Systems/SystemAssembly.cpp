@@ -9,9 +9,9 @@
 
 #include "Systems/FESystem.h"
 #include "Systems/CoupledBoundaryManager.h"
-#include "Systems/AuxiliaryStateManager.h"
-#include "Systems/AuxiliaryInputRegistry.h"
-#include "Systems/AuxiliaryOperatorRegistry.h"
+#include "Auxiliary/AuxiliaryStateManager.h"
+#include "Auxiliary/AuxiliaryInputRegistry.h"
+#include "Auxiliary/AuxiliaryOperatorRegistry.h"
 #include "Systems/GlobalKernel.h"
 #include "Systems/SystemsExceptions.h"
 

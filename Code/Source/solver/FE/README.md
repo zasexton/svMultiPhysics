@@ -45,9 +45,9 @@ FE/
 | **Mixed linear operator** (load vector) | `installMixedLinear(system, op, test, form)` | `Systems/FormsInstaller.h` |
 | **Strong Dirichlet BCs** | `installStrongDirichlet(system, bcs)` | `Systems/FormsInstaller.h` |
 | **Compile without installing** | `FormCompiler::compile(form, kind)` | `Forms/FormCompiler.h` |
-| **Auxiliary state models** | `AuxiliaryModelBuilder("name")` | `Systems/AuxiliaryModelBuilder.h` |
-| **Deploy auxiliary models** | `use(model).name(...).scope(...)` | `Systems/AuxiliaryBindings.h` |
-| **Auxiliary inputs** | `AuxiliaryInputRegistry` | `Systems/AuxiliaryInputRegistry.h` |
+| **Auxiliary state models** | `AuxiliaryModelBuilder("name")` | `Auxiliary/AuxiliaryModelBuilder.h` |
+| **Deploy auxiliary models** | `use(model).name(...).scope(...)` | `Auxiliary/AuxiliaryBindings.h` |
+| **Auxiliary inputs** | `AuxiliaryInputRegistry` | `Auxiliary/AuxiliaryInputRegistry.h` |
 
 See `Docs/AuxiliaryState/README.md` for the full auxiliary state architecture guide.
 

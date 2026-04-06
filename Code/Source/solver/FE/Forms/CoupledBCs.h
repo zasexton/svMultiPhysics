@@ -8,7 +8,7 @@
 
 #include "Forms/StandardBCs.h"
 
-#include "Systems/AuxiliaryState.h"
+#include "Auxiliary/AuxiliaryState.h"
 #include "Systems/CoupledBoundaryConditions.h"
 
 #include <cstddef>

@@ -11,15 +11,15 @@
 #include "Systems/OperatorBackends.h"
 #include "Systems/BoundaryReductionService.h"
 #include "Systems/CoupledBoundaryManager.h"
-#include "Systems/AuxiliaryStateManager.h"
-#include "Systems/AuxiliaryOperatorRegistry.h"
-#include "Systems/AuxiliaryInputRegistry.h"
-#include "Systems/AuxiliaryBindings.h"
-#include "Systems/AuxiliaryModelBuilder.h"
-#include "Systems/AuxiliaryStateStepper.h"
-#include "Systems/AuxiliaryMultirateScheduler.h"
+#include "Auxiliary/AuxiliaryStateManager.h"
+#include "Auxiliary/AuxiliaryOperatorRegistry.h"
+#include "Auxiliary/AuxiliaryInputRegistry.h"
+#include "Auxiliary/AuxiliaryBindings.h"
+#include "Auxiliary/AuxiliaryModelBuilder.h"
+#include "Auxiliary/AuxiliaryStateStepper.h"
+#include "Auxiliary/AuxiliaryMultirateScheduler.h"
 #include "Forms/PointEvaluator.h"
-#include "Systems/AuxiliaryDerivativeProvider.h"
+#include "Auxiliary/AuxiliaryDerivativeProvider.h"
 #include "Systems/SystemsExceptions.h"
  #include "Core/Logger.h"
 
@@ -2264,6 +2264,26 @@ void FESystem::initializeMonolithicCommittedRate(
             history_spans.emplace_back(history_storage.back().data(), history_storage.back().size());
         }
 
+        if (!history_spans.empty()) {
+            auto reconstructed = reconstructRateFromHistory(
+                entity_x,
+                history_spans,
+                prev_state.dt_prev,
+                prev_state.dt,
+                prev_state.dt_history);
+            for (std::size_t i = 0; i < reconstructed.size(); ++i) {
+                const bool differential =
+                    i < kinds.size()
+                        ? (kinds[i] == AuxiliaryVariableKind::Differential)
+                        : true;
+                if (!differential) {
+                    reconstructed[i] = Real(0.0);
+                }
+            }
+            scatterMonolithicCommittedRate(entry, e, reconstructed);
+            continue;
+        }
+
         std::vector<FieldValueEntry> field_vals;
         const auto& art = entry.deriv_provider->artifact();
         if (!art.referenced_fields.empty()) {
@@ -2384,7 +2404,60 @@ void FESystem::ensureMonolithicCommittedRates(const SystemStateView& state)
         return;
     }
 
-    FE_THROW_IF(state.u_prev.empty(), InvalidStateException,
+    auto inputRequiresPreviousFeState = [&](std::string_view registry_name) {
+        if (!auxiliary_input_registry_ || !auxiliary_input_registry_->hasInput(registry_name)) {
+            return false;
+        }
+        const auto& spec = auxiliary_input_registry_->specOf(registry_name);
+        switch (spec.producer) {
+            case AuxiliaryInputProducer::SampledStateField:
+            case AuxiliaryInputProducer::CoupledField:
+            case AuxiliaryInputProducer::CellAverage:
+            case AuxiliaryInputProducer::CellSample:
+            case AuxiliaryInputProducer::DomainAverage:
+            case AuxiliaryInputProducer::DomainIntegral:
+            case AuxiliaryInputProducer::SampledBoundaryTrace:
+            case AuxiliaryInputProducer::CoupledBoundaryTrace:
+            case AuxiliaryInputProducer::SampledBoundaryReduction:
+            case AuxiliaryInputProducer::CoupledBoundaryReduction:
+                return true;
+            default:
+                return false;
+        }
+    };
+
+    bool requires_prev_fe_state = false;
+    for (const auto& entry : deployed_aux_entries_) {
+        if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic ||
+            monolithic_aux_committed_rates_valid_.count(entry.instance_name) != 0u) {
+            continue;
+        }
+
+        if (auxiliary_state_manager_ &&
+            auxiliary_state_manager_->hasBlock(entry.instance_name) &&
+            auxiliary_state_manager_->getBlock(entry.instance_name).history().depth() > 0u) {
+            continue;
+        }
+
+        if (entry.deriv_provider &&
+            !entry.deriv_provider->artifact().referenced_fields.empty()) {
+            requires_prev_fe_state = true;
+            break;
+        }
+
+        for (const auto& binding : entry.input_bindings) {
+            if (inputRequiresPreviousFeState(binding.second)) {
+                requires_prev_fe_state = true;
+                break;
+            }
+        }
+        if (requires_prev_fe_state) {
+            break;
+        }
+    }
+
+    FE_THROW_IF(requires_prev_fe_state && state.u_prev.empty(),
+                InvalidStateException,
                 "FESystem::ensureMonolithicCommittedRates: generalized-alpha requires previous FE state");
 
     SystemStateView prev_state = state;

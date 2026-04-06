@@ -1759,6 +1759,22 @@ void StandardAssembler::flushCombinedInsertBatch(
         fused_out.local_vector.resize(vec_stride);
     }
 
+    const bool use_resolved_matrix_insert =
+        target.assemble_matrix && target.matrix_view &&
+        target.matrix_view->insertionCapabilities().resolved_matrix_entries;
+    const bool use_resolved_vector_insert =
+        target.assemble_vector && target.vector_view &&
+        target.vector_view->insertionCapabilities().resolved_vector_entries;
+
+    std::vector<GlobalIndex> fallback_resolved_matrix;
+    std::vector<GlobalIndex> fallback_resolved_vector;
+    if (use_resolved_matrix_insert && scratch_fused_resolved_.empty()) {
+        fallback_resolved_matrix.resize(mat_stride);
+    }
+    if (use_resolved_vector_insert) {
+        fallback_resolved_vector.resize(vec_stride);
+    }
+
     for (std::size_t slot = 0; slot < batch_cell_ids.size(); ++slot) {
         auto dofs_span = std::span<const GlobalIndex>(
             scratch_fused_dofs_.data() + slot * vec_stride, vec_stride);
@@ -1822,7 +1838,8 @@ void StandardAssembler::flushCombinedInsertBatch(
 
         if (target.assemble_matrix && target.matrix_view) {
             const auto cell_id = batch_cell_ids[slot];
-            if (!scratch_fused_resolved_.empty() &&
+            if (use_resolved_matrix_insert &&
+                !scratch_fused_resolved_.empty() &&
                 cell_id >= 0 &&
                 static_cast<std::size_t>(cell_id) <
                     scratch_fused_resolved_offsets_.size() - 1u) {
@@ -1835,6 +1852,14 @@ void StandardAssembler::flushCombinedInsertBatch(
                 target.matrix_view->addMatrixEntriesResolved(
                     dofs_span, dofs_span, resolved_span, mat_span,
                     assembly::AddMode::Add);
+            } else if (use_resolved_matrix_insert) {
+                target.matrix_view->resolveMatrixEntries(
+                    dofs_span, dofs_span,
+                    std::span<GlobalIndex>(fallback_resolved_matrix));
+                target.matrix_view->addMatrixEntriesResolved(
+                    dofs_span, dofs_span,
+                    std::span<const GlobalIndex>(fallback_resolved_matrix),
+                    mat_span, assembly::AddMode::Add);
             } else {
                 target.matrix_view->addMatrixEntries(
                     dofs_span, dofs_span, mat_span,
@@ -1842,8 +1867,19 @@ void StandardAssembler::flushCombinedInsertBatch(
             }
         }
         if (target.assemble_vector && target.vector_view) {
-            target.vector_view->addVectorEntries(
-                dofs_span, vec_span, assembly::AddMode::Add);
+            if (use_resolved_vector_insert) {
+                target.vector_view->resolveVectorEntries(
+                    dofs_span,
+                    std::span<GlobalIndex>(fallback_resolved_vector));
+                target.vector_view->addVectorEntriesResolved(
+                    dofs_span,
+                    std::span<const GlobalIndex>(fallback_resolved_vector),
+                    vec_span,
+                    assembly::AddMode::Add);
+            } else {
+                target.vector_view->addVectorEntries(
+                    dofs_span, vec_span, assembly::AddMode::Add);
+            }
         }
     }
 }

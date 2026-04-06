@@ -146,13 +146,17 @@ public:
     void computeCell(const svmp::FE::assembly::AssemblyContext& ctx,
                      svmp::FE::assembly::KernelOutput& output) override
     {
+        const bool want_matrix = output.has_matrix;
+        const bool want_vector = output.has_vector;
         inner_->computeCell(ctx, output);
+        const bool did_matrix = want_matrix || !output.local_matrix.empty();
+        const bool did_vector = want_vector || !output.local_vector.empty();
         counts_->total += 1;
-        if (output.has_matrix && output.has_vector) {
+        if (did_matrix && did_vector) {
             counts_->matrix_and_vector += 1;
-        } else if (output.has_matrix) {
+        } else if (did_matrix) {
             counts_->matrix_only += 1;
-        } else if (output.has_vector) {
+        } else if (did_vector) {
             counts_->vector_only += 1;
         }
     }

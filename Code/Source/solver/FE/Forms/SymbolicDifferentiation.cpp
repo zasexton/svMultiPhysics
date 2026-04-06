@@ -1141,7 +1141,9 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 const auto ext = resolveAutoIndexExtents(*ext_opt, rank, auto_extent);
                 const auto a = diff1(0);
                 out.primal = FormExpr::indexedAccessRawWithMetadata(a.primal, rank, *ids_opt, ext, vars, names);
-                out.deriv = FormExpr::indexedAccessRawWithMetadata(a.deriv, rank, *ids_opt, ext, vars, names);
+                out.deriv = (a.deriv.isValid() && a.deriv.node() != nullptr && isZeroLike(*a.deriv.node()))
+                    ? FormExpr::constant(0.0)
+                    : FormExpr::indexedAccessRawWithMetadata(a.deriv, rank, *ids_opt, ext, vars, names);
                 break;
             }
 
@@ -1941,7 +1943,9 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                 const auto ext = resolveAutoIndexExtents(*ext_opt, rank, auto_extent);
                 const auto a = diff1(0);
                 out.primal = FormExpr::indexedAccessRawWithMetadata(a.primal, rank, *ids_opt, ext, vars, names);
-                out.deriv = FormExpr::indexedAccessRawWithMetadata(a.deriv, rank, *ids_opt, ext, vars, names);
+                out.deriv = (a.deriv.isValid() && a.deriv.node() != nullptr && isZeroLike(*a.deriv.node()))
+                    ? FormExpr::constant(0.0)
+                    : FormExpr::indexedAccessRawWithMetadata(a.deriv, rank, *ids_opt, ext, vars, names);
                 break;
             }
 

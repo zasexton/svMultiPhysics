@@ -8,6 +8,7 @@
 #include "Analysis/FormContributionLowerer.h"
 #include "Analysis/FormStructureAnalyzer.h"
 #include "Analysis/FormExprScanner.h"
+#include "Forms/FormCompiler.h"
 #include "Forms/FormExpr.h"
 
 #include <map>
@@ -15,6 +16,99 @@
 namespace svmp {
 namespace FE {
 namespace analysis {
+
+namespace {
+
+[[nodiscard]] bool appendNullspaceHintIfPresent(ContributionDescriptor& d,
+                                                FieldId field,
+                                                const FieldOperatorSummary& fs)
+{
+    if (!fs.only_through_annihilating_ops || fs.has_absolute_value || fs.has_time_derivative) {
+        return false;
+    }
+
+    NullspaceHint nh;
+    nh.field = field;
+    nh.confidence = fs.has_stabilization ? AnalysisConfidence::Medium
+                                         : AnalysisConfidence::High;
+    if (fs.only_through_sym_grad && !fs.has_plain_grad && fs.value_dimension > 1) {
+        nh.family = NullspaceFamily::KernelOfSymGrad;
+        nh.reason = "Vector field only through sym(grad) — rigid-body nullspace";
+    } else if (fs.value_dimension > 1) {
+        nh.family = NullspaceFamily::ComponentwiseConstant;
+        nh.reason = "Vector field only through annihilating ops — componentwise constant nullspace";
+    } else {
+        nh.family = NullspaceFamily::ScalarConstant;
+        nh.reason = "Scalar field only through annihilating ops — constant nullspace";
+    }
+    d.nullspace_hints.push_back(std::move(nh));
+    return true;
+}
+
+[[nodiscard]] forms::FormExpr extractNonBoundaryTerms(const forms::FormExpr& expr)
+{
+    if (!expr.isValid() || !expr.hasTest() || expr.hasTrial()) {
+        return {};
+    }
+
+    try {
+        forms::FormCompiler compiler;
+        const auto ir = compiler.compileLinear(expr);
+
+        forms::FormExpr filtered;
+        for (const auto& term : ir.terms()) {
+            if (term.domain == forms::IntegralDomain::Boundary) {
+                continue;
+            }
+
+            forms::FormExpr wrapped;
+            switch (term.domain) {
+                case forms::IntegralDomain::Cell:
+                    wrapped = term.integrand.dx();
+                    break;
+                case forms::IntegralDomain::InteriorFace:
+                    wrapped = term.integrand.dS();
+                    break;
+                case forms::IntegralDomain::InterfaceFace:
+                    wrapped = term.integrand.dI(term.interface_marker);
+                    break;
+                case forms::IntegralDomain::Boundary:
+                    break;
+            }
+
+            if (!wrapped.isValid()) {
+                continue;
+            }
+            filtered = filtered.isValid() ? (filtered + wrapped) : wrapped;
+        }
+
+        return filtered;
+    } catch (const std::exception&) {
+        return {};
+    }
+}
+
+void appendBoundaryInsensitiveNullspaceHint(ContributionDescriptor& d,
+                                            FieldId field,
+                                            const FieldOperatorSummary& fs,
+                                            const forms::FormExpr& expr,
+                                            bool has_boundary_terms,
+                                            FormStructureAnalyzer& fsa)
+{
+    if (appendNullspaceHintIfPresent(d, field, fs) || !has_boundary_terms || !fs.has_absolute_value) {
+        return;
+    }
+
+    const auto interior_expr = extractNonBoundaryTerms(expr);
+    if (!interior_expr.isValid() || !interior_expr.node()) {
+        return;
+    }
+
+    const auto filtered = fsa.analyzeField(*interior_expr.node(), field);
+    appendNullspaceHintIfPresent(d, field, filtered);
+}
+
+} // namespace
 
 std::vector<ContributionDescriptor>
 lowerFormulation(const FormulationRecord& rec) {
@@ -28,6 +122,9 @@ lowerFormulation(const FormulationRecord& rec) {
     // including test-side structure (self_adjoint_pattern, etc.)
     // This provides accurate trait flags for all fields.
     forms::FormExpr residual_expr(std::const_pointer_cast<forms::FormExprNode>(rec.residual_expr));
+    const bool residual_has_boundary_terms =
+        residual_expr.isValid() && residual_expr.node() &&
+        !scanFormExpr(*residual_expr.node()).boundary_markers.empty();
     std::map<FieldId, FieldOperatorSummary> field_summaries;
     if (residual_expr.isValid()) {
         auto full_summary = fsa.analyze(residual_expr, rec.active_fields);
@@ -41,6 +138,7 @@ lowerFormulation(const FormulationRecord& rec) {
             if (!block_node) continue;
             FieldId test_fid = block_key.first;
             FieldId nominal_trial_fid = block_key.second;
+            forms::FormExpr block_expr(std::const_pointer_cast<forms::FormExprNode>(block_node));
 
             // For multi-field per-test blocks stored as (test, test) pseudo-blocks,
             // analyze ALL active fields to detect cross-coupling contributions.
@@ -66,8 +164,6 @@ lowerFormulation(const FormulationRecord& rec) {
                     trial_fields_to_analyze.push_back(nominal_trial_fid);
                 } else {
                     // Fallback: check for untagged TrialFunction nodes
-                    forms::FormExpr block_expr(
-                        std::const_pointer_cast<forms::FormExprNode>(block_node));
                     if (block_expr.hasTrial()) {
                         trial_fields_to_analyze.push_back(nominal_trial_fid);
                     }
@@ -115,6 +211,7 @@ lowerFormulation(const FormulationRecord& rec) {
 
             // Scan for boundary/interface markers on the block node
             auto scan = scanFormExpr(*block_node);
+            const bool block_has_boundary_terms = !scan.boundary_markers.empty();
 
             for (FieldId trial_fid : trial_fields_to_analyze) {
 
@@ -281,23 +378,9 @@ lowerFormulation(const FormulationRecord& rec) {
             }
 
             // Emit nullspace hints for fields through annihilating ops
-            if (is_diagonal && fs.only_through_annihilating_ops &&
-                !fs.has_absolute_value && !fs.has_time_derivative) {
-                NullspaceHint nh;
-                nh.field = trial_fid;
-                nh.confidence = fs.has_stabilization ? AnalysisConfidence::Medium
-                                                     : AnalysisConfidence::High;
-                if (fs.only_through_sym_grad && !fs.has_plain_grad && fs.value_dimension > 1) {
-                    nh.family = NullspaceFamily::KernelOfSymGrad;
-                    nh.reason = "Vector field only through sym(grad) — rigid-body nullspace";
-                } else if (fs.value_dimension > 1) {
-                    nh.family = NullspaceFamily::ComponentwiseConstant;
-                    nh.reason = "Vector field only through annihilating ops — componentwise constant nullspace";
-                } else {
-                    nh.family = NullspaceFamily::ScalarConstant;
-                    nh.reason = "Scalar field only through annihilating ops — constant nullspace";
-                }
-                d.nullspace_hints.push_back(std::move(nh));
+            if (is_diagonal) {
+                appendBoundaryInsensitiveNullspaceHint(
+                    d, trial_fid, fs, block_expr, block_has_boundary_terms, fsa);
             }
 
             contributions.push_back(std::move(d));
@@ -371,28 +454,8 @@ lowerFormulation(const FormulationRecord& rec) {
             }
 
             // Nullspace hints
-            if (fs.only_through_annihilating_ops &&
-                !fs.has_absolute_value && !fs.has_time_derivative) {
-                NullspaceHint nh;
-                nh.field = fid;
-                nh.confidence = fs.has_stabilization ? AnalysisConfidence::Medium
-                                                     : AnalysisConfidence::High;
-                if (fs.only_through_sym_grad && !fs.has_plain_grad &&
-                    fs.value_dimension > 1) {
-                    nh.family = NullspaceFamily::KernelOfSymGrad;
-                    nh.reason = "Vector field only through sym(grad) — "
-                                "rigid-body nullspace";
-                } else if (fs.value_dimension > 1) {
-                    nh.family = NullspaceFamily::ComponentwiseConstant;
-                    nh.reason = "Vector field only through annihilating ops — "
-                                "componentwise constant nullspace";
-                } else {
-                    nh.family = NullspaceFamily::ScalarConstant;
-                    nh.reason = "Scalar field only through annihilating ops — "
-                                "constant nullspace";
-                }
-                d.nullspace_hints.push_back(std::move(nh));
-            }
+            appendBoundaryInsensitiveNullspaceHint(
+                d, fid, fs, residual_expr, residual_has_boundary_terms, fsa);
 
             contributions.push_back(std::move(d));
         }

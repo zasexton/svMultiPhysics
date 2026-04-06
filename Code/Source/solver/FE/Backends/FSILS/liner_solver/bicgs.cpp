@@ -1477,6 +1477,7 @@ bool reduced_updates_touch_constraint_block(
     int mom_ncomp,
     int con_ncomp)
 {
+  bool local_touch = false;
   for (const auto& update : lhs.reduced_updates) {
     if (!update.active || std::abs(update.sigma) <= 1e-30) {
       continue;
@@ -1485,10 +1486,16 @@ bool reduced_updates_touch_constraint_block(
     const auto& right_entries = !update.right_scaled.empty() ? update.right_scaled : update.right;
     if (entries_touch_constraint_block(left_entries, mom_ncomp, con_ncomp) ||
         entries_touch_constraint_block(right_entries, mom_ncomp, con_ncomp)) {
-      return true;
+      local_touch = true;
+      break;
     }
   }
-  return false;
+  int local_touch_int = local_touch ? 1 : 0;
+  int global_touch_int = local_touch_int;
+  if (lhs.commu.nTasks > 1) {
+    MPI_Allreduce(&local_touch_int, &global_touch_int, 1, cm_mod::mpint, MPI_SUM, lhs.commu.comm);
+  }
+  return global_touch_int != 0;
 }
 
 bool grouped_bordered_touch_constraint_block(
@@ -1496,6 +1503,7 @@ bool grouped_bordered_touch_constraint_block(
     int mom_ncomp,
     int con_ncomp)
 {
+  bool local_touch = false;
   for (const auto& group : lhs.grouped_bordered_field_couplings) {
     if (!group.active) {
       continue;
@@ -1505,11 +1513,20 @@ bool grouped_bordered_touch_constraint_block(
       const auto& right_entries = !mode.right_scaled.empty() ? mode.right_scaled : mode.right;
       if (entries_touch_constraint_block(left_entries, mom_ncomp, con_ncomp) ||
           entries_touch_constraint_block(right_entries, mom_ncomp, con_ncomp)) {
-        return true;
+        local_touch = true;
+        break;
       }
     }
+    if (local_touch) {
+      break;
+    }
   }
-  return false;
+  int local_touch_int = local_touch ? 1 : 0;
+  int global_touch_int = local_touch_int;
+  if (lhs.commu.nTasks > 1) {
+    MPI_Allreduce(&local_touch_int, &global_touch_int, 1, cm_mod::mpint, MPI_SUM, lhs.commu.comm);
+  }
+  return global_touch_int != 0;
 }
 
 double sparse_overlap_dot_owned_local(
@@ -2441,26 +2458,17 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
 
     const auto& left_entries = !update.left_scaled.empty() ? update.left_scaled : update.left;
     const auto& right_entries = !update.right_scaled.empty() ? update.right_scaled : update.right;
-    if (left_entries.empty() || right_entries.empty()) {
-      return;
-    }
 
     ReducedColumn col;
-    if (!fill_projected_reduced_vector(lhs, update, left_entries, mom_ncomp, col.momentum_left_hat)) {
-      return;
-    }
-
-    if (!fill_projected_reduced_vector(lhs, update,
-                                       !update.right_scaled_owned.empty() ? update.right_scaled_owned : update.right_owned,
-                                       mom_ncomp,
-                                       col.momentum_right_owned)) {
-      return;
-    }
+    fill_projected_reduced_vector(lhs, update, left_entries, mom_ncomp, col.momentum_left_hat);
+    fill_projected_reduced_vector(lhs, update,
+                                  !update.right_scaled_owned.empty() ? update.right_scaled_owned
+                                                                     : update.right_owned,
+                                  mom_ncomp,
+                                  col.momentum_right_owned);
 
     Array<double> momentum_right_t;
-    if (!fill_projected_reduced_vector(lhs, update, right_entries, mom_ncomp, momentum_right_t)) {
-      return;
-    }
+    fill_projected_reduced_vector(lhs, update, right_entries, mom_ncomp, momentum_right_t);
 
     apply_momentum_hat(lhs.rowPtr, lhs.colPtr, lhs.diagPtr,
                        mom_ncomp, lhs.nNo, momentum_hat, col.momentum_left_hat);
@@ -2993,16 +3001,26 @@ void schur_impl(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   const fsils_int nNo = lhs.nNo;
   const fsils_int mynNo = lhs.mynNo;
 
-  const int active_face_corrections = static_cast<int>(std::count_if(
+  int active_face_corrections = static_cast<int>(std::count_if(
       lhs.face.begin(), lhs.face.end(),
       [](const fe_fsi_linear_solver::FSILS_faceType& face) {
         return face.coupledFlag && std::abs(face.res) > 1e-30 && face.nNo > 0;
       }));
-  const int active_reduced_corrections = static_cast<int>(std::count_if(
+  int active_reduced_corrections = static_cast<int>(std::count_if(
       lhs.reduced_updates.begin(), lhs.reduced_updates.end(),
       [](const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update) {
         return update.active && std::abs(update.sigma) > 1e-30 && update.grouped_coupling_id < 0;
       }));
+  if (lhs.commu.nTasks > 1) {
+    int global_active_face_corrections = active_face_corrections;
+    int global_active_reduced_corrections = active_reduced_corrections;
+    fe_fsi_linear_solver::fsils_allreduce_sum(
+        &active_face_corrections, &global_active_face_corrections, 1, cm_mod::mpint, lhs.commu);
+    fe_fsi_linear_solver::fsils_allreduce_sum(
+        &active_reduced_corrections, &global_active_reduced_corrections, 1, cm_mod::mpint, lhs.commu);
+    active_face_corrections = global_active_face_corrections;
+    active_reduced_corrections = global_active_reduced_corrections;
+  }
   const bool grouped_touches_constraint =
       grouped_bordered_touch_constraint_block(lhs, mom_ncomp, con_ncomp);
   const bool reduced_touches_constraint =
@@ -3017,7 +3035,8 @@ void schur_impl(fe_fsi_linear_solver::FSILS_lhsType& lhs,
       (active_face_corrections == 0) &&
       (!lhs.reduced_updates.empty() || !lhs.grouped_bordered_field_couplings.empty()) &&
       !reduced_touches_constraint &&
-      !grouped_touches_constraint;
+      !grouped_touches_constraint &&
+      lhs.commu.nTasks <= 1;
 
   if (use_face_only_legacy || use_momentum_only_low_rank_legacy) {
     Vector<double> R_scalar;

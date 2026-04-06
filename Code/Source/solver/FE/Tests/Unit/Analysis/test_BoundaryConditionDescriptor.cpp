@@ -14,7 +14,7 @@
 #include "Forms/NitscheBC.h"
 #include "Forms/CoupledBCs.h"
 #include "Forms/FormExpr.h"
-#include "Systems/AuxiliaryState.h"
+#include "Auxiliary/AuxiliaryState.h"
 
 #include "Spaces/H1Space.h"
 

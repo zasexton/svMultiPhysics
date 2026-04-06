@@ -1,0 +1,461 @@
+/**
+ * @file test_AuxiliaryOperators.cpp
+ * @brief Unit tests for AuxiliaryCouplingGraph, AuxiliaryOperatorBuilder,
+ *        and AuxiliaryOperatorRegistry.
+ */
+
+#include <gtest/gtest.h>
+
+#include "Auxiliary/AuxiliaryCouplingGraph.h"
+#include "Auxiliary/AuxiliaryOperatorBuilder.h"
+#include "Auxiliary/AuxiliaryOperatorRegistry.h"
+
+#include <algorithm>
+#include <string>
+#include <vector>
+
+using svmp::FE::Real;
+using namespace svmp::FE::systems;
+
+// ============================================================================
+//  AuxiliaryCouplingGraph tests
+// ============================================================================
+
+TEST(AuxiliaryCouplingGraph, EmptyGraph)
+{
+    AuxiliaryCouplingGraph graph;
+    EXPECT_EQ(graph.edgeCount(), 0u);
+    EXPECT_TRUE(graph.auxiliaryVertices().empty());
+    EXPECT_TRUE(graph.fieldVertices().empty());
+}
+
+TEST(AuxiliaryCouplingGraph, SelfCoupling)
+{
+    AuxiliaryCouplingGraph graph;
+    graph.addSelfCoupling("ionic", "self_op");
+
+    EXPECT_EQ(graph.edgeCount(), 1u);
+    EXPECT_EQ(graph.edges()[0].type, AuxiliaryCouplingType::AuxSelf);
+    EXPECT_EQ(graph.edges()[0].source, "ionic");
+    EXPECT_EQ(graph.edges()[0].target, "ionic");
+}
+
+TEST(AuxiliaryCouplingGraph, AuxToAuxCoupling)
+{
+    AuxiliaryCouplingGraph graph;
+    graph.addAuxToAux("block_A", "block_B", "coupling_op");
+
+    auto incoming = graph.incomingEdges("block_B");
+    ASSERT_EQ(incoming.size(), 1u);
+    EXPECT_EQ(incoming[0].source, "block_A");
+    EXPECT_EQ(incoming[0].type, AuxiliaryCouplingType::AuxToAux);
+
+    auto outgoing = graph.outgoingEdges("block_A");
+    ASSERT_EQ(outgoing.size(), 1u);
+    EXPECT_EQ(outgoing[0].target, "block_B");
+}
+
+TEST(AuxiliaryCouplingGraph, FieldToAuxCoupling)
+{
+    AuxiliaryCouplingGraph graph;
+    graph.addFieldToAux("velocity", "ionic", "field_coupling");
+
+    EXPECT_TRUE(graph.hasCouplingToFields("ionic"));
+    EXPECT_FALSE(graph.hasCouplingToAux("ionic"));
+
+    auto fields = graph.fieldVertices();
+    ASSERT_EQ(fields.size(), 1u);
+    EXPECT_EQ(fields[0], "velocity");
+}
+
+TEST(AuxiliaryCouplingGraph, AuxToFieldCoupling)
+{
+    AuxiliaryCouplingGraph graph;
+    graph.addAuxToField("rcr", "pressure", "bc_coupling");
+
+    EXPECT_TRUE(graph.hasCouplingToFields("rcr"));
+
+    auto fields = graph.fieldVertices();
+    ASSERT_EQ(fields.size(), 1u);
+    EXPECT_EQ(fields[0], "pressure");
+}
+
+TEST(AuxiliaryCouplingGraph, AuxVertices)
+{
+    AuxiliaryCouplingGraph graph;
+    graph.addSelfCoupling("A", "op1");
+    graph.addAuxToAux("B", "C", "op2");
+
+    auto verts = graph.auxiliaryVertices();
+    EXPECT_EQ(verts.size(), 3u);
+
+    // Check all names present (order may vary due to unordered_set)
+    auto has = [&](const std::string& n) {
+        return std::find(verts.begin(), verts.end(), n) != verts.end();
+    };
+    EXPECT_TRUE(has("A"));
+    EXPECT_TRUE(has("B"));
+    EXPECT_TRUE(has("C"));
+}
+
+TEST(AuxiliaryCouplingGraph, Clear)
+{
+    AuxiliaryCouplingGraph graph;
+    graph.addSelfCoupling("A", "op");
+    graph.clear();
+    EXPECT_EQ(graph.edgeCount(), 0u);
+}
+
+// ============================================================================
+//  AuxiliaryOperatorBuilder tests
+// ============================================================================
+
+TEST(AuxiliaryOperatorBuilder, BuildSelfCoupling)
+{
+    auto desc = AuxiliaryOperatorBuilder("self_op")
+        .source("ionic")
+        .target("ionic")
+        .topology(AuxiliaryCouplingTopology::Dense)
+        .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+        .build();
+
+    EXPECT_EQ(desc.name, "self_op");
+    EXPECT_EQ(desc.coupling_type, AuxiliaryCouplingType::AuxSelf);
+    EXPECT_EQ(desc.source_name, "ionic");
+    EXPECT_EQ(desc.target_name, "ionic");
+    EXPECT_EQ(desc.topology, AuxiliaryCouplingTopology::Dense);
+    EXPECT_TRUE(desc.residual_fn);
+}
+
+TEST(AuxiliaryOperatorBuilder, BuildFieldToAux)
+{
+    auto desc = AuxiliaryOperatorBuilder("field_coupling")
+        .source("field:velocity")
+        .target("ionic")
+        .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+        .build();
+
+    EXPECT_EQ(desc.coupling_type, AuxiliaryCouplingType::FieldToAux);
+}
+
+TEST(AuxiliaryOperatorBuilder, BuildAuxToField)
+{
+    auto desc = AuxiliaryOperatorBuilder("bc_coupling")
+        .source("rcr")
+        .target("field:pressure")
+        .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+        .build();
+
+    EXPECT_EQ(desc.coupling_type, AuxiliaryCouplingType::AuxToField);
+}
+
+TEST(AuxiliaryOperatorBuilder, BuildAuxToAux)
+{
+    auto desc = AuxiliaryOperatorBuilder("cross_coupling")
+        .source("block_A")
+        .target("block_B")
+        .topology(AuxiliaryCouplingTopology::Sparse)
+        .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+        .jacobian([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+        .build();
+
+    EXPECT_EQ(desc.coupling_type, AuxiliaryCouplingType::AuxToAux);
+    EXPECT_TRUE(desc.jacobian_fn);
+}
+
+TEST(AuxiliaryOperatorBuilder, OptionalMassAndTransfer)
+{
+    auto desc = AuxiliaryOperatorBuilder("with_mass")
+        .source("A")
+        .target("A")
+        .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+        .mass([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+        .transfer([](const AuxiliaryOperatorContext&, std::span<const Real>,
+                     std::span<Real>) {})
+        .build();
+
+    EXPECT_TRUE(desc.mass_fn);
+    EXPECT_TRUE(desc.transfer_fn);
+}
+
+TEST(AuxiliaryOperatorBuilder, DerivativePolicy)
+{
+    AuxiliaryDerivativePolicy policy;
+    policy.jacobian_source = AuxiliaryDerivativeSource::FiniteDifference;
+
+    auto desc = AuxiliaryOperatorBuilder("with_deriv")
+        .source("A")
+        .target("A")
+        .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+        .derivatives(policy)
+        .build();
+
+    EXPECT_TRUE(desc.has_derivative_policy);
+    EXPECT_EQ(desc.derivative_policy.jacobian_source,
+              AuxiliaryDerivativeSource::FiniteDifference);
+}
+
+TEST(AuxiliaryOperatorBuilder, MissingSourceThrows)
+{
+    auto builder = AuxiliaryOperatorBuilder("bad")
+        .target("A")
+        .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {});
+
+    EXPECT_THROW(builder.build(), svmp::FE::InvalidArgumentException);
+}
+
+TEST(AuxiliaryOperatorBuilder, MissingResidualThrows)
+{
+    auto builder = AuxiliaryOperatorBuilder("bad")
+        .source("A")
+        .target("A");
+
+    EXPECT_THROW(builder.build(), svmp::FE::InvalidArgumentException);
+}
+
+// ============================================================================
+//  AuxiliaryOperatorRegistry tests
+// ============================================================================
+
+TEST(AuxiliaryOperatorRegistry, RegisterAndRetrieve)
+{
+    AuxiliaryOperatorRegistry reg;
+
+    auto desc = AuxiliaryOperatorBuilder("op1")
+        .source("A")
+        .target("A")
+        .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+        .build();
+
+    reg.registerOperator(desc);
+
+    EXPECT_EQ(reg.operatorCount(), 1u);
+    EXPECT_TRUE(reg.hasOperator("op1"));
+    EXPECT_EQ(reg.getOperator("op1").name, "op1");
+}
+
+TEST(AuxiliaryOperatorRegistry, DuplicateThrows)
+{
+    AuxiliaryOperatorRegistry reg;
+
+    auto desc = AuxiliaryOperatorBuilder("op1")
+        .source("A")
+        .target("A")
+        .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+        .build();
+
+    reg.registerOperator(desc);
+    EXPECT_THROW(reg.registerOperator(desc), svmp::FE::InvalidArgumentException);
+}
+
+TEST(AuxiliaryOperatorRegistry, OperatorNames)
+{
+    AuxiliaryOperatorRegistry reg;
+
+    auto mk = [](const std::string& name) {
+        return AuxiliaryOperatorBuilder(name)
+            .source("A")
+            .target("A")
+            .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+            .build();
+    };
+
+    reg.registerOperator(mk("alpha"));
+    reg.registerOperator(mk("beta"));
+
+    auto names = reg.operatorNames();
+    ASSERT_EQ(names.size(), 2u);
+    EXPECT_EQ(names[0], "alpha");
+    EXPECT_EQ(names[1], "beta");
+}
+
+TEST(AuxiliaryOperatorRegistry, CouplingGraphUpdatedOnRegister)
+{
+    AuxiliaryOperatorRegistry reg;
+
+    reg.registerOperator(
+        AuxiliaryOperatorBuilder("coupling")
+            .source("block_A")
+            .target("block_B")
+            .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+            .build());
+
+    EXPECT_EQ(reg.couplingGraph().edgeCount(), 1u);
+    auto edges = reg.couplingGraph().edges();
+    EXPECT_EQ(edges[0].source, "block_A");
+    EXPECT_EQ(edges[0].target, "block_B");
+    EXPECT_EQ(edges[0].operator_name, "coupling");
+}
+
+// ============================================================================
+//  Monolithic unknown layout tests
+// ============================================================================
+
+TEST(AuxiliaryOperatorRegistry, MonolithicUnknownRegistration)
+{
+    AuxiliaryOperatorRegistry reg;
+
+    reg.registerMonolithicUnknowns("ionic", 100, 4, AuxiliaryStateScope::Node);
+    reg.registerMonolithicUnknowns("rcr", 1, 3, AuxiliaryStateScope::Global);
+
+    reg.finalizeLayout();
+
+    EXPECT_TRUE(reg.isLayoutFinalized());
+
+    const auto& layout = reg.auxiliaryLayout();
+    ASSERT_EQ(layout.blocks.size(), 2u);
+
+    EXPECT_EQ(layout.blocks[0].name, "ionic");
+    EXPECT_EQ(layout.blocks[0].offset, 0u);
+    EXPECT_EQ(layout.blocks[0].n_unknowns, 400u);
+    EXPECT_EQ(layout.blocks[0].scope, AuxiliaryStateScope::Node);
+
+    EXPECT_EQ(layout.blocks[1].name, "rcr");
+    EXPECT_EQ(layout.blocks[1].offset, 400u);
+    EXPECT_EQ(layout.blocks[1].n_unknowns, 3u);
+
+    EXPECT_EQ(layout.total_aux_unknowns, 403u);
+}
+
+TEST(AuxiliaryOperatorRegistry, ComposeMixedLayout)
+{
+    AuxiliaryOperatorRegistry reg;
+
+    reg.registerMonolithicUnknowns("aux_A", 50, 2, AuxiliaryStateScope::Node);
+    reg.finalizeLayout();
+
+    auto mixed = reg.composeMixedLayout(/*n_field_unknowns=*/1000);
+
+    EXPECT_EQ(mixed.n_field_unknowns, 1000u);
+    EXPECT_EQ(mixed.n_aux_unknowns, 100u);
+    EXPECT_EQ(mixed.total_unknowns, 1100u);
+    EXPECT_EQ(mixed.aux_layout.mixed_system_offset, 1000u);
+}
+
+TEST(AuxiliaryOperatorRegistry, RegisterAfterFinalizeThrows)
+{
+    AuxiliaryOperatorRegistry reg;
+    reg.registerMonolithicUnknowns("A", 10, 1, AuxiliaryStateScope::Global);
+    reg.finalizeLayout();
+
+    EXPECT_THROW(
+        reg.registerMonolithicUnknowns("B", 5, 1, AuxiliaryStateScope::Global),
+        svmp::FE::systems::InvalidStateException);
+}
+
+// ============================================================================
+//  Mixed field/auxiliary coupling scenario
+// ============================================================================
+
+TEST(AuxiliaryOperatorRegistry, FullMixedCouplingScenario)
+{
+    AuxiliaryOperatorRegistry reg;
+
+    // Register operators for a mixed field/auxiliary system.
+    // Ionic model: field→aux (voltage drives gates)
+    reg.registerOperator(
+        AuxiliaryOperatorBuilder("field_to_ionic")
+            .source("field:voltage")
+            .target("ionic")
+            .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+            .build());
+
+    // Ionic model: aux→field (gates affect field equation)
+    reg.registerOperator(
+        AuxiliaryOperatorBuilder("ionic_to_field")
+            .source("ionic")
+            .target("field:voltage")
+            .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+            .build());
+
+    // Ionic self-coupling (diagonal block)
+    reg.registerOperator(
+        AuxiliaryOperatorBuilder("ionic_self")
+            .source("ionic")
+            .target("ionic")
+            .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+            .jacobian([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+            .build());
+
+    EXPECT_EQ(reg.operatorCount(), 3u);
+    EXPECT_EQ(reg.couplingGraph().edgeCount(), 3u);
+
+    // Coupling graph queries
+    EXPECT_TRUE(reg.couplingGraph().hasCouplingToFields("ionic"));
+    // Self-coupling is AuxSelf, not AuxToAux — hasCouplingToAux checks AuxToAux only.
+    EXPECT_FALSE(reg.couplingGraph().hasCouplingToAux("ionic"));
+
+    // Register monolithic unknowns and compose layout
+    reg.registerMonolithicUnknowns("ionic", 100, 4, AuxiliaryStateScope::Node);
+    reg.finalizeLayout();
+
+    auto mixed = reg.composeMixedLayout(5000);
+    EXPECT_EQ(mixed.total_unknowns, 5400u); // 5000 field + 400 auxiliary
+    EXPECT_EQ(mixed.aux_layout.mixed_system_offset, 5000u);
+}
+
+// ============================================================================
+//  Partitioned blocks stay out of layout
+// ============================================================================
+
+TEST(AuxiliaryOperatorRegistry, PartitionedBlocksNotInLayout)
+{
+    AuxiliaryOperatorRegistry reg;
+
+    // Only monolithic blocks are registered for layout.
+    // Partitioned blocks are not added here at all.
+    reg.registerMonolithicUnknowns("mono_A", 10, 2, AuxiliaryStateScope::Node);
+    reg.finalizeLayout();
+
+    EXPECT_EQ(reg.auxiliaryLayout().blocks.size(), 1u);
+    EXPECT_EQ(reg.auxiliaryLayout().total_aux_unknowns, 20u);
+}
+
+// ============================================================================
+//  Clear
+// ============================================================================
+
+TEST(AuxiliaryOperatorRegistry, Clear)
+{
+    AuxiliaryOperatorRegistry reg;
+
+    reg.registerOperator(
+        AuxiliaryOperatorBuilder("op")
+            .source("A")
+            .target("A")
+            .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+            .build());
+    reg.registerMonolithicUnknowns("A", 10, 1, AuxiliaryStateScope::Global);
+    reg.finalizeLayout();
+
+    reg.clear();
+
+    EXPECT_EQ(reg.operatorCount(), 0u);
+    EXPECT_EQ(reg.couplingGraph().edgeCount(), 0u);
+    EXPECT_FALSE(reg.isLayoutFinalized());
+}
+
+// ============================================================================
+//  Coupling topology varieties
+// ============================================================================
+
+TEST(AuxiliaryOperatorBuilder, AllTopologies)
+{
+    auto mkOp = [](AuxiliaryCouplingTopology topo) {
+        return AuxiliaryOperatorBuilder("op")
+            .source("A")
+            .target("B")
+            .topology(topo)
+            .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+            .build();
+    };
+
+    EXPECT_EQ(mkOp(AuxiliaryCouplingTopology::Dense).topology,
+              AuxiliaryCouplingTopology::Dense);
+    EXPECT_EQ(mkOp(AuxiliaryCouplingTopology::Sparse).topology,
+              AuxiliaryCouplingTopology::Sparse);
+    EXPECT_EQ(mkOp(AuxiliaryCouplingTopology::PointToPoint).topology,
+              AuxiliaryCouplingTopology::PointToPoint);
+    EXPECT_EQ(mkOp(AuxiliaryCouplingTopology::Reduction).topology,
+              AuxiliaryCouplingTopology::Reduction);
+}

@@ -15,8 +15,8 @@
 #include "Core/Logger.h"
 #include "Dofs/DofIndexSet.h"
 #include "Dofs/EntityDofMap.h"
-#include "Systems/AuxiliaryOperatorRegistry.h"
-#include "Systems/AuxiliaryStateManager.h"
+#include "Auxiliary/AuxiliaryOperatorRegistry.h"
+#include "Auxiliary/AuxiliaryStateManager.h"
 #include "Systems/SystemsExceptions.h"
 
 #if defined(FE_HAS_FSILS)
@@ -2911,11 +2911,16 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             && (report.residual_norm0 > 0.0
                     ? (norm / report.residual_norm0 <= options_.rel_tolerance)
                     : abs_ok);
-        // Legacy-compatible rule: accept when either enabled nonlinear
-        // tolerance is satisfied. This is important for warm-started solves
-        // that are already near steady state and may not achieve a meaningful
-        // additional relative reduction.
-        return abs_ok || rel_ok;
+        if (!abs_enabled && !rel_enabled) {
+            return false;
+        }
+        if (abs_enabled && !abs_ok) {
+            return false;
+        }
+        if (rel_enabled && !rel_ok) {
+            return false;
+        }
+        return true;
     };
 
     auto assembleDtOnlyJacobianAndLumpedDiagonal = [&](const systems::SystemStateView& state) -> bool {
@@ -3172,24 +3177,20 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             return report;
         }
 
-        // Legacy-compatible stagnation detection: if the residual has already
-        // decreased from its initial value and stops improving, accept the best
-        // achievable precision rather than forcing more Newton iterations.
+        // Stagnation is diagnostic only unless the configured nonlinear
+        // tolerances are already satisfied. Do not override the requested
+        // tolerances with a "best effort" convergence declaration.
         if (it > 0 && options_.stagnation_tolerance > 0.0 &&
             prev_residual_norm > 0.0 && std::isfinite(prev_residual_norm) &&
             report.residual_norm0 > 0.0 && current_residual_norm < report.residual_norm0) {
             const double ratio = current_residual_norm / prev_residual_norm;
             if (ratio >= options_.stagnation_tolerance) {
-                report.converged = true;
-                report.iterations = it;
                 if (oopTraceEnabled()) {
                     std::ostringstream oss;
-                    oss << "NewtonSolver: converged by stagnation (||r_k||/||r_{k-1}||="
+                    oss << "NewtonSolver: stagnation detected (||r_k||/||r_{k-1}||="
                         << ratio << " >= " << options_.stagnation_tolerance << ")";
                     traceLog(oss.str());
                 }
-                printNewtonProfile(it);
-                return report;
             }
         }
         prev_residual_norm = current_residual_norm;
@@ -4365,15 +4366,14 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         const double r_norm0_sq = r_norm0 * r_norm0;
 
         double alpha = 1.0;
+        double last_tried_alpha = 0.0;
         double trial_norm = std::numeric_limits<double>::infinity();
         bool accepted = false;
         double best_alpha = 0.0;
         double best_trial_norm = std::numeric_limits<double>::infinity();
         bool have_best_trial = false;
         const int line_search_iteration_budget =
-            std::max(options_.line_search_max_iterations,
-                     lineSearchIterationsNeededToReachAlphaMin(options_.line_search_alpha_min,
-                                                               options_.line_search_shrink));
+            std::max(1, options_.line_search_max_iterations);
 
         if (oopTraceEnabled()) {
             std::ostringstream oss;
@@ -4386,6 +4386,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         }
 
         for (int ls = 0; ls < line_search_iteration_budget; ++ls) {
+            last_tried_alpha = alpha;
             copyVector(history.u(), u_backup);
             if (!aux_state_backup.empty()) {
                 transient.system().restoreAuxiliaryState(aux_state_backup);
@@ -4457,57 +4458,14 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             }
         }
 
-        if (!accepted) {
-            if (have_best_trial && best_trial_norm <= r_norm0) {
-                alpha = best_alpha;
-                copyVector(history.u(), u_backup);
-                if (!aux_state_backup.empty()) {
-                    transient.system().restoreAuxiliaryState(aux_state_backup);
-                }
-                transient.system().borderedCoupling() = bordered_backup;
-                if (!aux_state_backup.empty()) {
-                    applyAuxiliaryDelta(transient.system(), bordered_full, aux_delta, static_cast<Real>(alpha));
-                    if (!dense_du_for_aux.empty()) {
-                        transient.system().applyLocalCondensedRecovery(dense_du_for_aux,
-                                                                       static_cast<Real>(alpha));
-                    }
-                }
-                if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
-                    reg->invalidateAll();
-                }
-                axpy(history.u(), static_cast<Real>(-alpha), du);
-                if (!constraints.empty()) {
-                    constraints.distribute(history.u());
-                }
-                history.u().updateGhosts();
-                auto best_state_holder = makeNewtonState(history, solve_time);
-                trial_norm = assembleResidualOnly(
-                    best_state_holder.view, /*phase=*/"line_search_best_fallback");
-            } else {
-                alpha = 0.0;
-                copyVector(history.u(), u_backup);
-                if (!aux_state_backup.empty()) {
-                    transient.system().restoreAuxiliaryState(aux_state_backup);
-                }
-                transient.system().borderedCoupling() = bordered_backup;
-                if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
-                    reg->invalidateAll();
-                }
-                if (!constraints.empty()) {
-                    constraints.distribute(history.u());
-                }
-                history.u().updateGhosts();
-                auto restored_state_holder = makeNewtonState(history, solve_time);
-                trial_norm = assembleResidualOnly(
-                    restored_state_holder.view, /*phase=*/"line_search_restore");
-            }
-        }
-
         if (!accepted && oopTraceEnabled()) {
             std::ostringstream oss;
-            oss << "NewtonSolver: line search did not satisfy decrease; fallback alpha=" << alpha
+            alpha = last_tried_alpha;
+            oss << "NewtonSolver: line search did not satisfy decrease; keeping last trial alpha=" << alpha
                 << " ||r(alpha)||=" << trial_norm;
             traceLog(oss.str());
+        } else if (!accepted) {
+            alpha = last_tried_alpha;
         }
 
         // `history.u` and `r` already correspond to the last trial (accepted or fallback).
@@ -4547,9 +4505,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
     // When line search is disabled, we do not evaluate the residual norm after applying the
     // last Newton update (we normally do it at the start of the next iteration). If we
-    // exit the loop due to reaching `max_it`, perform one final residual-only evaluation
-    // so we don't incorrectly report "not converged" when the last update actually met
-    // the requested tolerances.
+    // exit due to reaching `max_it`, capture the final residual norm for reporting, but do
+    // not override the explicit iteration limit with a late convergence declaration.
     if (!have_residual) {
         history.updateGhosts();
         if (!constraints.empty()) {
@@ -4561,16 +4518,6 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             final_state_holder.view, /*phase=*/"final_check");
         have_residual = true;
         report.residual_norm = current_residual_norm;
-
-        if (tolerancesSatisfied(current_residual_norm)) {
-            report.converged = true;
-            report.iterations = max_it;
-            if (oopTraceEnabled()) {
-                traceLog("NewtonSolver: converged after final update (tolerances satisfied).");
-            }
-            printNewtonProfile(max_it);
-            return report;
-        }
     }
 
     report.converged = false;

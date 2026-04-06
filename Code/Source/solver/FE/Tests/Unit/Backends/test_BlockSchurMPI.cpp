@@ -876,6 +876,8 @@ TEST(FsilsBackendMPI, RankOneUpdateSolversConvergeComparable)
     RankOneUpdate upd{};
     upd.sigma = 2000.0;
     upd.active_components = {0, 1};
+    // Route the distributed rank-one correction through FSILS' native face path.
+    upd.prefer_native_face = true;
     if (rank == 1) {
         upd.v = {
             {6, 0.10},
@@ -1231,6 +1233,8 @@ TEST(FsilsBackendMPI, RankOneUpdateSolversConvergeComparable4DOF)
     RankOneUpdate upd{};
     upd.sigma = 1600.0;
     upd.active_components = {0, 1, 2};
+    // Route the distributed rank-one correction through FSILS' native face path.
+    upd.prefer_native_face = true;
     if (rank == 1) {
         upd.v = {
             {8,  0.10},

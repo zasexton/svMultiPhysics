@@ -14,10 +14,10 @@
 #include "FE/Forms/BoundaryFunctional.h"
 #include "FE/Forms/CoupledBCs.h"       // retained for backward compatibility
 #include "FE/Forms/StandardBCs.h"
-#include "FE/Systems/AuxiliaryBindings.h"
-#include "FE/Systems/AuxiliaryModelBuilder.h"
-#include "FE/Systems/AuxiliaryModelDSL.h"
-#include "FE/Systems/AuxiliaryStateBuilder.h"   // retained for backward compatibility
+#include "FE/Auxiliary/AuxiliaryBindings.h"
+#include "FE/Auxiliary/AuxiliaryModelBuilder.h"
+#include "FE/Auxiliary/AuxiliaryModelDSL.h"
+#include "FE/Auxiliary/AuxiliaryStateBuilder.h"   // retained for backward compatibility
 #include "FE/Systems/FESystem.h"
 
 #include <memory>

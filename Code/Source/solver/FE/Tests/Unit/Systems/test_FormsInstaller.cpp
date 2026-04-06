@@ -7,11 +7,11 @@
 
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstallerDetail.h"
-#include "Systems/AuxiliaryModelBuilder.h"
-#include "Systems/AuxiliaryBindings.h"
-#include "Systems/AuxiliaryInputRegistry.h"
-#include "Systems/AuxiliaryOperatorBuilder.h"
-#include "Systems/AuxiliaryStateManager.h"
+#include "Auxiliary/AuxiliaryModelBuilder.h"
+#include "Auxiliary/AuxiliaryBindings.h"
+#include "Auxiliary/AuxiliaryInputRegistry.h"
+#include "Auxiliary/AuxiliaryOperatorBuilder.h"
+#include "Auxiliary/AuxiliaryStateManager.h"
 
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"

@@ -6,10 +6,10 @@
 #include <gtest/gtest.h>
 
 #include "Systems/BoundaryReductionService.h"
-#include "Systems/AuxiliaryInputRegistry.h"
-#include "Systems/AuxiliaryBindings.h"
-#include "Systems/AuxiliaryModelBuilder.h"
-#include "Systems/AuxiliaryStateManager.h"
+#include "Auxiliary/AuxiliaryInputRegistry.h"
+#include "Auxiliary/AuxiliaryBindings.h"
+#include "Auxiliary/AuxiliaryModelBuilder.h"
+#include "Auxiliary/AuxiliaryStateManager.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 #include "Constraints/DirichletBC.h"
@@ -688,7 +688,7 @@ TEST(BoundaryFunctional, AllReductionModesExist)
 //  Handle-returning API tests
 // ===========================================================================
 
-#include "Systems/AuxiliaryModelDSL.h"
+#include "Auxiliary/AuxiliaryModelDSL.h"
 
 TEST(BoundaryIntegralInput, BoundaryIntegralReturnsHandle)
 {
@@ -1069,7 +1069,7 @@ TEST(FEQuantityHandle, FEQuantityRegistryTracksDefinitions)
 //  Binding-Mode Validation Tests
 // ===========================================================================
 
-#include "Systems/AuxiliaryModelDSL.h"
+#include "Auxiliary/AuxiliaryModelDSL.h"
 
 TEST(BindingModeValidation, HandleBindingOnPartitionedAccepts)
 {

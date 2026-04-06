@@ -62,9 +62,39 @@ AffineConstraints::AffineConstraints(const AffineConstraintsOptions& options)
 
 AffineConstraints::~AffineConstraints() = default;
 
-AffineConstraints::AffineConstraints(AffineConstraints&& other) noexcept = default;
+AffineConstraints::AffineConstraints(AffineConstraints&& other) noexcept
+    : options_(other.options_),
+      is_closed_(other.is_closed_),
+      building_lines_(std::move(other.building_lines_)),
+      slave_dofs_(std::move(other.slave_dofs_)),
+      slave_to_index_(std::move(other.slave_to_index_)),
+      constrained_bitset_(std::move(other.constrained_bitset_)),
+      constrained_bitset_max_dof_(other.constrained_bitset_max_dof_),
+      entry_offsets_(std::move(other.entry_offsets_)),
+      entries_(std::move(other.entries_)),
+      inhomogeneities_(std::move(other.inhomogeneities_)) {
+    other.clear();
+}
 
-AffineConstraints& AffineConstraints::operator=(AffineConstraints&& other) noexcept = default;
+AffineConstraints& AffineConstraints::operator=(AffineConstraints&& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+
+    options_ = other.options_;
+    is_closed_ = other.is_closed_;
+    building_lines_ = std::move(other.building_lines_);
+    slave_dofs_ = std::move(other.slave_dofs_);
+    slave_to_index_ = std::move(other.slave_to_index_);
+    constrained_bitset_ = std::move(other.constrained_bitset_);
+    constrained_bitset_max_dof_ = other.constrained_bitset_max_dof_;
+    entry_offsets_ = std::move(other.entry_offsets_);
+    entries_ = std::move(other.entries_);
+    inhomogeneities_ = std::move(other.inhomogeneities_);
+
+    other.clear();
+    return *this;
+}
 
 AffineConstraints::AffineConstraints(const AffineConstraints& other) = default;
 
@@ -248,6 +278,8 @@ void AffineConstraints::clear() {
     building_lines_.clear();
     slave_dofs_.clear();
     slave_to_index_.clear();
+    constrained_bitset_.clear();
+    constrained_bitset_max_dof_ = -1;
     entry_offsets_.clear();
     entries_.clear();
     inhomogeneities_.clear();

@@ -11,7 +11,7 @@ The FE library already has the core pieces needed for 0D–3D coupling:
 - **Boundary-integrated scalars**: `FE/Forms/BoundaryFunctional.{h,cpp}`
   - `forms::BoundaryFunctional` (integrand + marker + name + reduction)
   - `forms::compileBoundaryFunctionalKernel(...)` → `assembly::FunctionalKernel` bridge
-- **Auxiliary 0D state container**: `FE/Systems/AuxiliaryState.h`
+- **Auxiliary 0D state container**: `FE/Auxiliary/AuxiliaryState.h`
   - named scalar variables + committed/work values + history
 - **Coupled-BC orchestration**: `FE/Systems/CoupledBoundaryManager.{h,cpp}`
   - computes registered boundary functionals, evolves aux state, exposes `constraints::CoupledBCContext`
@@ -88,8 +88,8 @@ public:
 Replace evolve-callback registrations with “RHS-only + integrator choice” registrations:
 
 - **Move/define** `AuxiliaryStateRegistration` in:
-  - preferred: `Code/Source/solver/FE/Systems/AuxiliaryState.h`
-  - alternative: new `Systems/AuxiliaryStateRegistration.h` to keep headers small
+  - preferred: `Code/Source/solver/FE/Auxiliary/AuxiliaryState.h`
+  - alternative: new `Auxiliary/AuxiliaryStateRegistration.h` to keep headers small
 
 Key fields:
 - `spec`, `initial_values`, `required_integrals`
@@ -147,7 +147,7 @@ The helper must:
 
 Add a convenience builder:
 
-- `Code/Source/solver/FE/Systems/AuxiliaryStateBuilder.h` (+ optional `.cpp`)
+- `Code/Source/solver/FE/Auxiliary/AuxiliaryStateBuilder.h` (+ optional `.cpp`)
 
 ```cpp
 auto X_reg = systems::auxiliaryODE("X", X0)
@@ -236,7 +236,7 @@ Each item includes: **file**, **change**, **dependencies**, **open decisions**.
     - RK4 (explicit)
     - Backward Euler (implicit): scalar Newton with finite-difference derivative
     - BDF2 (implicit): requires `AuxiliaryState::previous(1/2)`; scalar Newton
-  - Dep: `Systems/AuxiliaryState.h`, `Forms/BoundaryFunctional.h`.
+  - Dep: `Auxiliary/AuxiliaryState.h`, `Forms/BoundaryFunctional.h`.
   - Decision: constant dt only (v1) vs variable dt (use `SystemStateView::dt_prev/dt_history`).
 
 - [ ] `Code/Source/solver/FE/Tests/Unit/Systems/test_ODEIntegrator.cpp` (new)
@@ -246,7 +246,7 @@ Each item includes: **file**, **change**, **dependencies**, **open decisions**.
 
 ### 4.2 FE/Systems: Registration Refactor
 
-- [ ] `Code/Source/solver/FE/Systems/AuxiliaryState.h`
+- [ ] `Code/Source/solver/FE/Auxiliary/AuxiliaryState.h`
   - Add (or move) `AuxiliaryStateRegistration` struct with:
     - `spec`, `initial_values`, `required_integrals`
     - `rhs` and `integrator`
@@ -255,7 +255,7 @@ Each item includes: **file**, **change**, **dependencies**, **open decisions**.
 
 - [ ] `Code/Source/solver/FE/Systems/CoupledBoundaryManager.h`
   - Switch to the new `AuxiliaryStateRegistration` type (or add overloads).
-  - Dep: `Systems/AuxiliaryState.h`, `Systems/ODEIntegrator.h`.
+  - Dep: `Auxiliary/AuxiliaryState.h`, `Systems/ODEIntegrator.h`.
 
 - [ ] `Code/Source/solver/FE/Systems/CoupledBoundaryManager.cpp`
   - Replace `reg.evolve(...)` calls with `ODEIntegrator::advance(...)`.
@@ -270,7 +270,7 @@ Each item includes: **file**, **change**, **dependencies**, **open decisions**.
 
 ### 4.3 FE/Systems: Builder Pattern (Optional)
 
-- [ ] `Code/Source/solver/FE/Systems/AuxiliaryStateBuilder.h`
+- [ ] `Code/Source/solver/FE/Auxiliary/AuxiliaryStateBuilder.h`
   - Implement `AuxiliaryStateBuilder` + `auxiliaryODE(name, initial)`.
   - Dep: new `AuxiliaryStateRegistration`, `ODEIntegrator.h`.
 
@@ -346,7 +346,7 @@ Each item includes: **file**, **change**, **dependencies**, **open decisions**.
 - [ ] `Code/Source/solver/FE/CMakeLists.txt`
   - Add new headers/sources/tests:
     - `Systems/ODEIntegrator.*`
-    - `Systems/AuxiliaryStateBuilder.h` (if added)
+    - `Auxiliary/AuxiliaryStateBuilder.h` (if added)
     - new unit test files
   - Dep: file additions.
 

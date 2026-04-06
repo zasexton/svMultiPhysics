@@ -700,35 +700,60 @@ set(FE_GEOMETRY_SOURCES
     Geometry/GeometryQuadrature.cpp
 )
 
+# Auxiliary sources (auxiliary state subsystem, extracted from Systems)
+set(FE_AUXILIARY_HEADERS
+    Auxiliary/AuxiliaryState.h
+    Auxiliary/AuxiliaryStateBuilder.h
+    Auxiliary/AuxiliaryStateTypes.h
+    Auxiliary/AuxiliaryStateStorage.h
+    Auxiliary/AuxiliaryHistoryBuffer.h
+    Auxiliary/AuxiliaryStateIndexing.h
+    Auxiliary/AuxiliaryStateManager.h
+    Auxiliary/AuxiliaryStateModel.h
+    Auxiliary/AuxiliaryDerivativeProvider.h
+    Auxiliary/AuxiliaryStateStepper.h
+    Auxiliary/AuxiliaryInputRegistry.h
+    Auxiliary/AuxiliaryCouplingGraph.h
+    Auxiliary/AuxiliaryOperatorBuilder.h
+    Auxiliary/AuxiliaryOperatorRegistry.h
+    Auxiliary/AuxiliaryModelBuilder.h
+    Auxiliary/AuxiliaryModelDSL.h
+    Auxiliary/AuxiliaryBindings.h
+    Auxiliary/AuxiliaryDAEAnalyzer.h
+    Auxiliary/AuxiliaryInitializationSolver.h
+    Auxiliary/AuxiliaryEventManager.h
+    Auxiliary/AuxiliaryNonsmoothPolicy.h
+    Auxiliary/AuxiliaryHistoryService.h
+    Auxiliary/AuxiliaryTransferOperator.h
+    Auxiliary/AuxiliaryMultirateScheduler.h
+)
+
+set(FE_AUXILIARY_SOURCES
+    Auxiliary/AuxiliaryStateStorage.cpp
+    Auxiliary/AuxiliaryHistoryBuffer.cpp
+    Auxiliary/AuxiliaryStateIndexing.cpp
+    Auxiliary/AuxiliaryStateManager.cpp
+    Auxiliary/AuxiliaryDerivativeProvider.cpp
+    Auxiliary/AuxiliaryStateStepper.cpp
+    Auxiliary/AuxiliaryInputRegistry.cpp
+    Auxiliary/AuxiliaryCouplingGraph.cpp
+    Auxiliary/AuxiliaryOperatorBuilder.cpp
+    Auxiliary/AuxiliaryOperatorRegistry.cpp
+    Auxiliary/AuxiliaryModelBuilder.cpp
+    Auxiliary/AuxiliaryBindings.cpp
+    Auxiliary/AuxiliaryDAEAnalyzer.cpp
+    Auxiliary/AuxiliaryInitializationSolver.cpp
+    Auxiliary/AuxiliaryEventManager.cpp
+    Auxiliary/AuxiliaryHistoryService.cpp
+    Auxiliary/AuxiliaryTransferOperator.cpp
+    Auxiliary/AuxiliaryMultirateScheduler.cpp
+)
+
 # Systems sources (requires FE/Assembly)
 set(FE_SYSTEMS_HEADERS
     Systems/ContactPenaltyKernel.h
-    Systems/AuxiliaryState.h
-    Systems/AuxiliaryStateBuilder.h
-    Systems/AuxiliaryStateTypes.h
-    Systems/AuxiliaryStateStorage.h
-    Systems/AuxiliaryHistoryBuffer.h
-    Systems/AuxiliaryStateIndexing.h
-    Systems/AuxiliaryStateManager.h
-    Systems/AuxiliaryStateModel.h
-    Systems/AuxiliaryDerivativeProvider.h
-    Systems/AuxiliaryStateStepper.h
-    Systems/AuxiliaryInputRegistry.h
-    Systems/AuxiliaryCouplingGraph.h
-    Systems/AuxiliaryOperatorBuilder.h
-    Systems/AuxiliaryOperatorRegistry.h
-    Systems/AuxiliaryModelBuilder.h
-    Systems/AuxiliaryModelDSL.h
-    Systems/AuxiliaryBindings.h
     Systems/FEQuantityDefinition.h
     Systems/FEQuantityRegistry.h
-    Systems/AuxiliaryDAEAnalyzer.h
-    Systems/AuxiliaryInitializationSolver.h
-    Systems/AuxiliaryEventManager.h
-    Systems/AuxiliaryNonsmoothPolicy.h
-    Systems/AuxiliaryHistoryService.h
-    Systems/AuxiliaryTransferOperator.h
-    Systems/AuxiliaryMultirateScheduler.h
     Systems/BoundaryConditionManager.h
     Systems/ODEIntegrator.h
     Systems/CoupledBoundaryConditions.h
@@ -782,25 +807,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/BoundaryReductionService.cpp
     Systems/CoupledBoundaryManager.cpp
     Systems/ODEIntegrator.cpp
-    Systems/AuxiliaryStateStorage.cpp
-    Systems/AuxiliaryHistoryBuffer.cpp
-    Systems/AuxiliaryStateIndexing.cpp
-    Systems/AuxiliaryStateManager.cpp
-    Systems/AuxiliaryDerivativeProvider.cpp
-    Systems/AuxiliaryStateStepper.cpp
-    Systems/AuxiliaryInputRegistry.cpp
-    Systems/AuxiliaryCouplingGraph.cpp
-    Systems/AuxiliaryOperatorBuilder.cpp
-    Systems/AuxiliaryOperatorRegistry.cpp
-    Systems/AuxiliaryModelBuilder.cpp
-    Systems/AuxiliaryBindings.cpp
     Systems/FEQuantityRegistry.cpp
-    Systems/AuxiliaryDAEAnalyzer.cpp
-    Systems/AuxiliaryInitializationSolver.cpp
-    Systems/AuxiliaryEventManager.cpp
-    Systems/AuxiliaryHistoryService.cpp
-    Systems/AuxiliaryTransferOperator.cpp
-    Systems/AuxiliaryMultirateScheduler.cpp
     Systems/TransientSystem.cpp
 )
 
@@ -1131,6 +1138,8 @@ if(FE_ENABLE_ASSEMBLY)
     list(APPEND FE_ALL_SOURCES ${FE_BACKENDS_SOURCES})
     list(APPEND FE_ALL_HEADERS ${FE_ASSEMBLY_HEADERS})
     list(APPEND FE_ALL_SOURCES ${FE_ASSEMBLY_SOURCES})
+    list(APPEND FE_ALL_HEADERS ${FE_AUXILIARY_HEADERS})
+    list(APPEND FE_ALL_SOURCES ${FE_AUXILIARY_SOURCES})
     list(APPEND FE_ALL_HEADERS ${FE_SYSTEMS_HEADERS})
     list(APPEND FE_ALL_SOURCES ${FE_SYSTEMS_SOURCES})
     list(APPEND FE_ALL_HEADERS ${FE_FORMS_HEADERS})
@@ -2240,6 +2249,31 @@ if(FE_BUILD_TESTS)
             add_test(NAME FE_Assembly_Tests COMMAND test_fe_assembly)
         endif()
 
+        # Auxiliary module tests (auxiliary state subsystem)
+        if(FE_WITH_MESH AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Auxiliary/test_main.cpp)
+            set(FE_AUXILIARY_TEST_SOURCES
+                Tests/Unit/Auxiliary/test_AuxiliaryStateBuilder.cpp
+                Tests/Unit/Auxiliary/test_AuxiliaryStateTypes.cpp
+                Tests/Unit/Auxiliary/test_AuxiliaryStateStorage.cpp
+                Tests/Unit/Auxiliary/test_AuxiliaryHistoryBuffer.cpp
+                Tests/Unit/Auxiliary/test_AuxiliaryStateIndexing.cpp
+                Tests/Unit/Auxiliary/test_AuxiliaryStateManager.cpp
+                Tests/Unit/Auxiliary/test_AuxiliaryStateModel.cpp
+                Tests/Unit/Auxiliary/test_AuxiliaryInputRegistry.cpp
+                Tests/Unit/Auxiliary/test_AuxiliaryOperators.cpp
+                Tests/Unit/Auxiliary/test_AuxiliaryModelBuilder.cpp
+                Tests/Unit/Auxiliary/test_main.cpp
+            )
+            add_executable(test_fe_auxiliary ${FE_AUXILIARY_TEST_SOURCES})
+            _svmp_fe_target_enable_warnings(test_fe_auxiliary)
+            target_link_libraries(test_fe_auxiliary
+                PRIVATE
+                    svfe
+                    ${GTEST_LIBRARIES}
+            )
+            add_test(NAME FE_Auxiliary_Tests COMMAND test_fe_auxiliary)
+        endif()
+
         # Systems module tests (Systems depends on Assembly; tests also require Mesh)
         if(FE_WITH_MESH AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Systems/test_main.cpp)
 	            set(FE_SYSTEMS_TEST_SOURCES
@@ -2265,17 +2299,7 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Systems/test_GaugeIntegration.cpp
 	                Tests/Unit/Systems/test_CoupledBoundaryManager.cpp
                 Tests/Unit/Systems/test_CoupledBoundaryConditionHelpers.cpp
-                Tests/Unit/Systems/test_AuxiliaryStateBuilder.cpp
-                Tests/Unit/Systems/test_AuxiliaryStateTypes.cpp
-                Tests/Unit/Systems/test_AuxiliaryStateStorage.cpp
-                Tests/Unit/Systems/test_AuxiliaryHistoryBuffer.cpp
-                Tests/Unit/Systems/test_AuxiliaryStateIndexing.cpp
-                Tests/Unit/Systems/test_AuxiliaryStateManager.cpp
-                Tests/Unit/Systems/test_AuxiliaryStateModel.cpp
-                Tests/Unit/Systems/test_AuxiliaryInputRegistry.cpp
                 Tests/Unit/Systems/test_BoundaryIntegralInput.cpp
-                Tests/Unit/Systems/test_AuxiliaryOperators.cpp
-                Tests/Unit/Systems/test_AuxiliaryModelBuilder.cpp
                 Tests/Unit/Systems/test_ODEIntegrator.cpp
                 Tests/Unit/Systems/test_OperatorBackends.cpp
                 Tests/Unit/Systems/test_TransientDt.cpp

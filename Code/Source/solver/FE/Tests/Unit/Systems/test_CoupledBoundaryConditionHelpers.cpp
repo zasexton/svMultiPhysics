@@ -39,6 +39,27 @@ svmp::FE::dofs::MeshTopologyInfo singleTetraTopology()
     return topo;
 }
 
+template <typename DenseMatrixLike>
+void addDeferredCouplingUpdates(const svmp::FE::systems::FESystem& sys,
+                                DenseMatrixLike& mat)
+{
+    for (const auto& upd : sys.lastRankOneUpdates()) {
+        for (const auto& [row_dof, row_val] : upd.v) {
+            for (const auto& [col_dof, col_val] : upd.v) {
+                mat.addMatrixEntry(row_dof, col_dof, upd.sigma * row_val * col_val);
+            }
+        }
+    }
+
+    for (const auto& upd : sys.lastReducedFieldUpdates()) {
+        for (const auto& [row_dof, row_val] : upd.left) {
+            for (const auto& [col_dof, col_val] : upd.right) {
+                mat.addMatrixEntry(row_dof, col_dof, upd.sigma * row_val * col_val);
+            }
+        }
+    }
+}
+
 } // namespace
 
 TEST(CoupledBoundaryConditionHelpers, ApplyCoupledNeumann_UsesBoundaryFunctionalIntegral)
@@ -306,6 +327,7 @@ TEST(CoupledBoundaryConditionHelpers, CoupledBoundaryIntegral_JacobianIncludesCh
     req.want_vector = false;
     req.zero_outputs = true;
     (void)sys.assemble(req, state, &jac, nullptr);
+    addDeferredCouplingUpdates(sys, jac);
 
     const Real area = 0.5;
     const Real w = area / 3.0;
@@ -386,6 +408,7 @@ TEST(CoupledBoundaryConditionHelpers, CoupledAuxiliaryState_JacobianIncludesChai
     req.want_vector = false;
     req.zero_outputs = true;
     (void)sys.assemble(req, state, &jac, nullptr);
+    addDeferredCouplingUpdates(sys, jac);
 
     const Real area = 0.5;
     const Real w = area / 3.0;
@@ -462,6 +485,7 @@ TEST(CoupledBoundaryConditionHelpers, CoupledAuxiliaryState_JacobianMatchesFinit
     svmp::FE::assembly::DenseSystemView out(4);
     out.zero();
     (void)sys.assemble(req_both, state, &out, &out);
+    addDeferredCouplingUpdates(sys, out);
 
     std::array<Real, 4> r0{};
     for (int i = 0; i < 4; ++i) {

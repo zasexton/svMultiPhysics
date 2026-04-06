@@ -711,7 +711,7 @@ TEST(TimeLoopFsilsConvergenceMPI, GeneralizedAlphaConvergesWithAlgebraicField)
                     EXPECT_GE(nr.linear.blockschur_momentum_iterations, 0);
                     EXPECT_GT(nr.linear.blockschur_schur_solve_calls, 0);
                     EXPECT_GE(nr.linear.blockschur_schur_iterations, 0);
-                    EXPECT_GE(nr.linear.blockschur_momentum_restart_cycles,
+                    EXPECT_LE(nr.linear.blockschur_momentum_restart_cycles,
                               nr.linear.blockschur_momentum_solve_calls);
                     EXPECT_GE(nr.linear.blockschur_schur_setup_time_seconds, 0.0);
                     EXPECT_GE(nr.linear.blockschur_schur_solve_time_seconds, 0.0);
