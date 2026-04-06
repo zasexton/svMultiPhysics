@@ -390,3 +390,176 @@ TEST(SpectralBasis, GradientsMatchFiniteDifference3D) {
         }
     }
 }
+
+// =============================================================================
+// Simplex SpectralBasis (Warp & Blend) tests
+// =============================================================================
+
+TEST(SpectralBasis, TriangleKroneckerAndPartitionOfUnity) {
+    for (int order = 1; order <= 5; ++order) {
+        SpectralBasis basis(ElementType::Triangle3, order);
+        EXPECT_TRUE(basis.is_simplex());
+        EXPECT_EQ(basis.dimension(), 2);
+
+        const std::size_t expected_size =
+            static_cast<std::size_t>((order + 1) * (order + 2) / 2);
+        EXPECT_EQ(basis.size(), expected_size);
+
+        // Partition of unity at interior point
+        svmp::FE::math::Vector<Real, 3> xi{Real(0.2), Real(0.3), Real(0)};
+        std::vector<Real> vals;
+        basis.evaluate_values(xi, vals);
+        ASSERT_EQ(vals.size(), expected_size);
+
+        const double sum = std::accumulate(vals.begin(), vals.end(), 0.0);
+        EXPECT_NEAR(sum, 1.0, 1e-10)
+            << "Partition of unity failed for triangle order " << order;
+    }
+}
+
+TEST(SpectralBasis, TriangleNodalKronecker) {
+    // Verify partition of unity holds at each vertex (vertices are always nodes)
+    for (int order = 1; order <= 4; ++order) {
+        SpectralBasis basis(ElementType::Triangle3, order);
+        const std::size_t n = basis.size();
+
+        const svmp::FE::math::Vector<Real, 3> verts[] = {
+            {Real(0), Real(0), Real(0)},
+            {Real(1), Real(0), Real(0)},
+            {Real(0), Real(1), Real(0)},
+        };
+
+        for (const auto& v : verts) {
+            std::vector<Real> vals;
+            basis.evaluate_values(v, vals);
+            ASSERT_EQ(vals.size(), n);
+            const double sum = std::accumulate(vals.begin(), vals.end(), 0.0);
+            EXPECT_NEAR(sum, 1.0, 1e-10)
+                << "Partition of unity at vertex for order " << order;
+        }
+    }
+}
+
+TEST(SpectralBasis, TriangleGradientMatchesFiniteDifference) {
+    const int order = 3;
+    SpectralBasis basis(ElementType::Triangle3, order);
+    svmp::FE::math::Vector<Real, 3> xi{Real(0.2), Real(0.25), Real(0)};
+    const Real eps = Real(1e-6);
+
+    std::vector<Gradient> grads;
+    basis.evaluate_gradients(xi, grads);
+    ASSERT_EQ(grads.size(), basis.size());
+
+    for (int d = 0; d < 2; ++d) {
+        auto xi_p = xi, xi_m = xi;
+        xi_p[static_cast<std::size_t>(d)] += eps;
+        xi_m[static_cast<std::size_t>(d)] -= eps;
+
+        std::vector<Real> vals_p, vals_m;
+        basis.evaluate_values(xi_p, vals_p);
+        basis.evaluate_values(xi_m, vals_m);
+
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            const Real fd = (vals_p[i] - vals_m[i]) / (Real(2) * eps);
+            EXPECT_NEAR(grads[i][static_cast<std::size_t>(d)], fd, 1e-4)
+                << "Triangle order=" << order << ", basis " << i << ", dim " << d;
+        }
+    }
+}
+
+TEST(SpectralBasis, TriangleGradientsSumToZero) {
+    for (int order = 2; order <= 4; ++order) {
+        SpectralBasis basis(ElementType::Triangle3, order);
+        svmp::FE::math::Vector<Real, 3> xi{Real(0.15), Real(0.25), Real(0)};
+        std::vector<Gradient> grads;
+        basis.evaluate_gradients(xi, grads);
+
+        Gradient sum{};
+        for (const auto& g : grads) {
+            sum[0] += g[0];
+            sum[1] += g[1];
+        }
+        EXPECT_NEAR(sum[0], 0.0, 1e-8) << "Triangle order=" << order;
+        EXPECT_NEAR(sum[1], 0.0, 1e-8) << "Triangle order=" << order;
+    }
+}
+
+TEST(SpectralBasis, TetraKroneckerAndPartitionOfUnity) {
+    for (int order = 1; order <= 3; ++order) {
+        SpectralBasis basis(ElementType::Tetra4, order);
+        EXPECT_TRUE(basis.is_simplex());
+        EXPECT_EQ(basis.dimension(), 3);
+
+        const std::size_t expected_size =
+            static_cast<std::size_t>((order + 1) * (order + 2) * (order + 3) / 6);
+        EXPECT_EQ(basis.size(), expected_size);
+
+        svmp::FE::math::Vector<Real, 3> xi{Real(0.1), Real(0.2), Real(0.15)};
+        std::vector<Real> vals;
+        basis.evaluate_values(xi, vals);
+        ASSERT_EQ(vals.size(), expected_size);
+
+        const double sum = std::accumulate(vals.begin(), vals.end(), 0.0);
+        EXPECT_NEAR(sum, 1.0, 1e-10)
+            << "Partition of unity failed for tet order " << order;
+
+        const svmp::FE::math::Vector<Real, 3> verts[] = {
+            {Real(0), Real(0), Real(0)},
+            {Real(1), Real(0), Real(0)},
+            {Real(0), Real(1), Real(0)},
+            {Real(0), Real(0), Real(1)},
+        };
+        for (const auto& v : verts) {
+            basis.evaluate_values(v, vals);
+            const double vsum = std::accumulate(vals.begin(), vals.end(), 0.0);
+            EXPECT_NEAR(vsum, 1.0, 1e-10)
+                << "Partition of unity at vertex for tet order " << order;
+        }
+    }
+}
+
+TEST(SpectralBasis, TetraGradientMatchesFiniteDifference) {
+    const int order = 2;
+    SpectralBasis basis(ElementType::Tetra4, order);
+    svmp::FE::math::Vector<Real, 3> xi{Real(0.15), Real(0.2), Real(0.1)};
+    const Real eps = Real(1e-6);
+
+    std::vector<Gradient> grads;
+    basis.evaluate_gradients(xi, grads);
+    ASSERT_EQ(grads.size(), basis.size());
+
+    for (int d = 0; d < 3; ++d) {
+        auto xi_p = xi, xi_m = xi;
+        xi_p[static_cast<std::size_t>(d)] += eps;
+        xi_m[static_cast<std::size_t>(d)] -= eps;
+
+        std::vector<Real> vals_p, vals_m;
+        basis.evaluate_values(xi_p, vals_p);
+        basis.evaluate_values(xi_m, vals_m);
+
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            const Real fd = (vals_p[i] - vals_m[i]) / (Real(2) * eps);
+            EXPECT_NEAR(grads[i][static_cast<std::size_t>(d)], fd, 1e-4)
+                << "Tet order=" << order << ", basis " << i << ", dim " << d;
+        }
+    }
+}
+
+TEST(SpectralBasis, TetraGradientsSumToZero) {
+    for (int order = 1; order <= 3; ++order) {
+        SpectralBasis basis(ElementType::Tetra4, order);
+        svmp::FE::math::Vector<Real, 3> xi{Real(0.1), Real(0.15), Real(0.1)};
+        std::vector<Gradient> grads;
+        basis.evaluate_gradients(xi, grads);
+
+        Gradient sum{};
+        for (const auto& g : grads) {
+            sum[0] += g[0];
+            sum[1] += g[1];
+            sum[2] += g[2];
+        }
+        EXPECT_NEAR(sum[0], 0.0, 1e-8) << "Tet order=" << order;
+        EXPECT_NEAR(sum[1], 0.0, 1e-8) << "Tet order=" << order;
+        EXPECT_NEAR(sum[2], 0.0, 1e-8) << "Tet order=" << order;
+    }
+}

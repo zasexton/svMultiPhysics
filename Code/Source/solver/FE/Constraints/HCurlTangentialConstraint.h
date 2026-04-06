@@ -5,8 +5,8 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#ifndef SVMP_FE_SYSTEMS_HCURLTANGENTIALCONSTRAINT_H
-#define SVMP_FE_SYSTEMS_HCURLTANGENTIALCONSTRAINT_H
+#ifndef SVMP_FE_CONSTRAINTS_HCURLTANGENTIALCONSTRAINT_H
+#define SVMP_FE_CONSTRAINTS_HCURLTANGENTIALCONSTRAINT_H
 
 /**
  * @file HCurlTangentialConstraint.h
@@ -20,22 +20,22 @@
  * NOTE: This initial implementation supports homogeneous constraints only.
  */
 
-#include "Systems/SystemConstraint.h"
+#include "Constraints/SystemConstraint.h"
 
 #include <vector>
 
 namespace svmp {
 namespace FE {
-namespace systems {
+namespace constraints {
 
 class HCurlTangentialConstraint final : public ISystemConstraint {
 public:
     HCurlTangentialConstraint(FieldId field, int boundary_marker);
 
-    void apply(const FESystem& system, constraints::AffineConstraints& constraints) override;
+    void apply(const systems::FESystem& system, AffineConstraints& constraints) override;
 
-    bool updateValues(const FESystem& /*system*/,
-                      constraints::AffineConstraints& /*constraints*/,
+    bool updateValues(const systems::FESystem& /*system*/,
+                      AffineConstraints& /*constraints*/,
                       double /*time*/,
                       double /*dt*/) override
     {
@@ -51,9 +51,9 @@ private:
     std::vector<GlobalIndex> dofs_{};
 };
 
-} // namespace systems
+} // namespace constraints
 } // namespace FE
 } // namespace svmp
 
-#endif // SVMP_FE_SYSTEMS_HCURLTANGENTIALCONSTRAINT_H
+#endif // SVMP_FE_CONSTRAINTS_HCURLTANGENTIALCONSTRAINT_H
 

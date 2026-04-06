@@ -14,6 +14,7 @@
  */
 
 #include "BasisFunction.h"
+#include "Math/Vector.h"
 #include <memory>
 #include <vector>
 
@@ -38,17 +39,31 @@ public:
     void evaluate_gradients(const math::Vector<Real, 3>& xi,
                             std::vector<Gradient>& gradients) const override;
 
+    /// Whether this is a simplex spectral element (Warp & Blend nodes)
+    bool is_simplex() const noexcept { return is_simplex_; }
+
 private:
     ElementType element_type_;
     int dimension_;
     int order_;
     std::size_t size_;
+    bool is_simplex_{false};
+
+    // Tensor-product (line/quad/hex) members
     std::vector<Real> nodes_1d_;
     std::vector<Real> barycentric_weights_;
 
     void build_nodes();
     std::vector<Real> eval_1d(Real x) const;
     std::vector<Real> eval_1d_derivative(Real x) const;
+
+    // Simplex (triangle/tet) members -- Warp & Blend nodes + inverse Vandermonde
+    std::vector<math::Vector<Real, 3>> simplex_nodes_;
+    std::vector<Real> inv_vandermonde_;  // row-major [size_ x size_]
+
+    void build_simplex_nodes_triangle();
+    void build_simplex_nodes_tetrahedron();
+    void build_inverse_vandermonde();
 };
 
 } // namespace basis

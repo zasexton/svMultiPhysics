@@ -10,7 +10,7 @@
 #include "Systems/CoupledBoundaryConditions.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
-#include "Systems/SystemConstraint.h"
+#include "Constraints/SystemConstraint.h"
 
 #include <memory>
 #include <stdexcept>
@@ -25,7 +25,7 @@ namespace systems {
 
 namespace detail {
 
-class BoundaryConditionAffineConstraint final : public ISystemConstraint {
+class BoundaryConditionAffineConstraint final : public constraints::ISystemConstraint {
 public:
     BoundaryConditionAffineConstraint(FieldId field_id,
                                       std::vector<std::unique_ptr<forms::bc::BoundaryCondition>> bcs)

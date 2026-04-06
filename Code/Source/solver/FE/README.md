@@ -1981,7 +1981,7 @@ public:
     // Definition phase
     FieldId addField(FieldSpec spec);
     void addConstraint(std::unique_ptr<constraints::Constraint> c);
-    void addSystemConstraint(std::unique_ptr<ISystemConstraint> c);
+    void addSystemConstraint(std::unique_ptr<constraints::ISystemConstraint> c);
 
     void addOperator(OperatorTag name);
 
@@ -2093,7 +2093,6 @@ public:
 | `FieldRegistry.h` | Field metadata storage |
 | `OperatorRegistry.h` | Operator (Jacobian, Mass, etc.) registration |
 | `ParameterRegistry.h` | Runtime parameter requirements |
-| `SystemConstraint.h` | System-level constraint interface |
 | `BoundaryConditionManager.h` | BC registration and application |
 | `CoupledBoundaryManager.h` | Coupled BC orchestration (0D models) |
 | `MaterialStateProvider.h` | Per-qpt state allocation |

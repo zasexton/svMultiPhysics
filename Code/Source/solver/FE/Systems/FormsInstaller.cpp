@@ -31,7 +31,7 @@
 #include "Analysis/FormContributionLowerer.h"
 
 #include "Systems/FESystem.h"
-#include "Systems/StrongDirichletConstraint.h"
+#include "Constraints/StrongDirichletConstraint.h"
 #include "Spaces/FunctionSpace.h"
 
 #include <algorithm>
@@ -357,7 +357,7 @@ void installStrongDirichlet(FESystem& system, std::span<const forms::bc::StrongD
         FE_THROW_IF(bc.value.hasTest() || bc.value.hasTrial(), InvalidArgumentException,
                     "installStrongDirichlet: StrongDirichlet value must not contain test/trial functions");
         system.addSystemConstraint(
-            std::make_unique<StrongDirichletConstraint>(bc.field, bc.boundary_marker, bc.value, bc.component));
+            std::make_unique<constraints::StrongDirichletConstraint>(bc.field, bc.boundary_marker, bc.value, bc.component));
     }
 }
 

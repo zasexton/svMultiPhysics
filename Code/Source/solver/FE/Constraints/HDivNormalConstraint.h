@@ -5,8 +5,8 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#ifndef SVMP_FE_SYSTEMS_HDIVNORMALCONSTRAINT_H
-#define SVMP_FE_SYSTEMS_HDIVNORMALCONSTRAINT_H
+#ifndef SVMP_FE_CONSTRAINTS_HDIVNORMALCONSTRAINT_H
+#define SVMP_FE_CONSTRAINTS_HDIVNORMALCONSTRAINT_H
 
 /**
  * @file HDivNormalConstraint.h
@@ -19,22 +19,22 @@
  * NOTE: This initial implementation supports homogeneous constraints only.
  */
 
-#include "Systems/SystemConstraint.h"
+#include "Constraints/SystemConstraint.h"
 
 #include <vector>
 
 namespace svmp {
 namespace FE {
-namespace systems {
+namespace constraints {
 
 class HDivNormalConstraint final : public ISystemConstraint {
 public:
     HDivNormalConstraint(FieldId field, int boundary_marker);
 
-    void apply(const FESystem& system, constraints::AffineConstraints& constraints) override;
+    void apply(const systems::FESystem& system, AffineConstraints& constraints) override;
 
-    bool updateValues(const FESystem& /*system*/,
-                      constraints::AffineConstraints& /*constraints*/,
+    bool updateValues(const systems::FESystem& /*system*/,
+                      AffineConstraints& /*constraints*/,
                       double /*time*/,
                       double /*dt*/) override
     {
@@ -50,9 +50,9 @@ private:
     std::vector<GlobalIndex> dofs_{};
 };
 
-} // namespace systems
+} // namespace constraints
 } // namespace FE
 } // namespace svmp
 
-#endif // SVMP_FE_SYSTEMS_HDIVNORMALCONSTRAINT_H
+#endif // SVMP_FE_CONSTRAINTS_HDIVNORMALCONSTRAINT_H
 

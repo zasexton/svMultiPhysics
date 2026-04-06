@@ -23,7 +23,7 @@
 #include "Systems/OperatorRegistry.h"
 #include "Systems/ParameterRegistry.h"
 #include "Systems/SearchAccess.h"
-#include "Systems/SystemConstraint.h"
+#include "Constraints/SystemConstraint.h"
 #include "Systems/SystemState.h"
 #include "Systems/SystemSetup.h"
 
@@ -168,7 +168,7 @@ public:
     // ---- Definition phase ----
     FieldId addField(FieldSpec spec);
     void addConstraint(std::unique_ptr<constraints::Constraint> c);
-    void addSystemConstraint(std::unique_ptr<ISystemConstraint> c);
+    void addSystemConstraint(std::unique_ptr<constraints::ISystemConstraint> c);
 
     void addOperator(OperatorTag name);
 
@@ -1165,7 +1165,7 @@ private:
     FieldRegistry field_registry_;
     OperatorRegistry operator_registry_;
     std::vector<std::unique_ptr<constraints::Constraint>> constraint_defs_;
-    std::vector<std::unique_ptr<ISystemConstraint>> system_constraint_defs_;
+    std::vector<std::unique_ptr<constraints::ISystemConstraint>> system_constraint_defs_;
 
     dofs::DofHandler dof_handler_{};
     std::vector<dofs::DofHandler> field_dof_handlers_{};

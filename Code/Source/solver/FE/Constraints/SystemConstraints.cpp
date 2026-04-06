@@ -23,6 +23,8 @@ namespace svmp {
 namespace FE {
 namespace constraints {
 
+using systems::InvalidStateException;
+
 namespace {
 
 struct EdgeKey {

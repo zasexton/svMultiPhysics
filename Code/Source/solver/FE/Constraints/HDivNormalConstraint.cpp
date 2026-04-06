@@ -5,7 +5,7 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "Systems/HDivNormalConstraint.h"
+#include "Constraints/HDivNormalConstraint.h"
 
 #include "Basis/VectorBasis.h"
 #include "Elements/ReferenceElement.h"
@@ -18,7 +18,10 @@
 
 namespace svmp {
 namespace FE {
-namespace systems {
+namespace constraints {
+
+using systems::FESystem;
+using systems::InvalidStateException;
 
 HDivNormalConstraint::HDivNormalConstraint(FieldId field, int boundary_marker)
     : field_(field)
@@ -103,6 +106,6 @@ void HDivNormalConstraint::apply(const FESystem& system, constraints::AffineCons
     }
 }
 
-} // namespace systems
+} // namespace constraints
 } // namespace FE
 } // namespace svmp

@@ -2903,7 +2903,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         return true;
     };
 
-    auto tolerancesSatisfied = [&](double norm) -> bool {
+    auto tolerancesSatisfied = [&](double norm, bool pre_first_update) -> bool {
         const bool abs_enabled = options_.abs_tolerance > 0.0;
         const bool rel_enabled = options_.rel_tolerance > 0.0;
         const bool abs_ok = abs_enabled && norm <= options_.abs_tolerance;
@@ -2914,13 +2914,17 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         if (!abs_enabled && !rel_enabled) {
             return false;
         }
-        if (abs_enabled && !abs_ok) {
+
+        // Match the time-loop convergence semantics: once Newton has taken at
+        // least one update, either the absolute or relative residual criterion
+        // may terminate the solve.  Still avoid short-circuiting before the
+        // first update when a very loose abs_tol is combined with a meaningful
+        // relative tolerance, since callers use that combination to force at
+        // least one Newton correction.
+        if (pre_first_update && rel_enabled && !rel_ok) {
             return false;
         }
-        if (rel_enabled && !rel_ok) {
-            return false;
-        }
-        return true;
+        return abs_ok || rel_ok;
     };
 
     auto assembleDtOnlyJacobianAndLumpedDiagonal = [&](const systems::SystemStateView& state) -> bool {
@@ -3167,7 +3171,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             }
         }
 
-        if (tolerancesSatisfied(current_residual_norm)) {
+        if (tolerancesSatisfied(current_residual_norm, /*pre_first_update=*/it == 0)) {
             report.converged = true;
             report.iterations = it;
             if (oopTraceEnabled()) {
@@ -4491,7 +4495,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             }
         }
 
-        if (tolerancesSatisfied(current_residual_norm)) {
+        if (tolerancesSatisfied(current_residual_norm, /*pre_first_update=*/false)) {
             report.converged = true;
             report.iterations = it + 1;
             report.residual_norm = current_residual_norm;

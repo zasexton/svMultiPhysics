@@ -1,12 +1,12 @@
-#ifndef SVMP_FE_SYSTEMS_STRONGDIRICHLETCONSTRAINT_H
-#define SVMP_FE_SYSTEMS_STRONGDIRICHLETCONSTRAINT_H
+#ifndef SVMP_FE_CONSTRAINTS_STRONGDIRICHLETCONSTRAINT_H
+#define SVMP_FE_CONSTRAINTS_STRONGDIRICHLETCONSTRAINT_H
 
 /**
  * @file StrongDirichletConstraint.h
- * @brief Systems-side lowering for Forms strong Dirichlet declarations
+ * @brief Mesh-aware lowering for Forms strong Dirichlet declarations
  */
 
-#include "Systems/SystemConstraint.h"
+#include "Constraints/SystemConstraint.h"
 
 #include "Forms/FormExpr.h"
 
@@ -15,16 +15,16 @@
 
 namespace svmp {
 namespace FE {
-namespace systems {
+namespace constraints {
 
 class StrongDirichletConstraint final : public ISystemConstraint {
 public:
     StrongDirichletConstraint(FieldId field, int boundary_marker, forms::FormExpr value, int component = -1);
 
-    void apply(const FESystem& system, constraints::AffineConstraints& constraints) override;
+    void apply(const systems::FESystem& system, AffineConstraints& constraints) override;
 
-    bool updateValues(const FESystem& system,
-                      constraints::AffineConstraints& constraints,
+    bool updateValues(const systems::FESystem& system,
+                      AffineConstraints& constraints,
                       double time,
                       double dt) override;
 
@@ -41,8 +41,8 @@ private:
     std::vector<std::array<Real, 3>> coords_{};
 };
 
-} // namespace systems
+} // namespace constraints
 } // namespace FE
 } // namespace svmp
 
-#endif // SVMP_FE_SYSTEMS_STRONGDIRICHLETCONSTRAINT_H
+#endif // SVMP_FE_CONSTRAINTS_STRONGDIRICHLETCONSTRAINT_H

@@ -5,7 +5,7 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "Systems/HCurlTangentialConstraint.h"
+#include "Constraints/HCurlTangentialConstraint.h"
 
 #include "Basis/VectorBasis.h"
 #include "Elements/ReferenceElement.h"
@@ -18,7 +18,10 @@
 
 namespace svmp {
 namespace FE {
-namespace systems {
+namespace constraints {
+
+using systems::FESystem;
+using systems::InvalidStateException;
 
 namespace {
 
@@ -142,6 +145,6 @@ void HCurlTangentialConstraint::apply(const FESystem& system, constraints::Affin
     }
 }
 
-} // namespace systems
+} // namespace constraints
 } // namespace FE
 } // namespace svmp

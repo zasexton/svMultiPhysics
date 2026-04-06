@@ -8,8 +8,8 @@
 #include "Basis/VectorBasis.h"
 #include "Elements/ReferenceElement.h"
 #include "Systems/FESystem.h"
-#include "Systems/HCurlTangentialConstraint.h"
-#include "Systems/HDivNormalConstraint.h"
+#include "Constraints/HCurlTangentialConstraint.h"
+#include "Constraints/HDivNormalConstraint.h"
 #include "Spaces/HCurlSpace.h"
 #include "Spaces/HDivSpace.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
@@ -126,7 +126,7 @@ TEST(VectorBasisConstraints, HCurlTangentialConstrainsBoundaryFacetDofs)
 
     FESystem sys(mesh);
     const auto E = sys.addField(FieldSpec{.name = "E", .space = space, .components = space->value_dimension()});
-    sys.addSystemConstraint(std::make_unique<HCurlTangentialConstraint>(E, marker));
+    sys.addSystemConstraint(std::make_unique<constraints::HCurlTangentialConstraint>(E, marker));
 
     SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -149,7 +149,7 @@ TEST(VectorBasisConstraints, HDivNormalConstrainsBoundaryFacetDofs)
 
     FESystem sys(mesh);
     const auto B = sys.addField(FieldSpec{.name = "B", .space = space, .components = space->value_dimension()});
-    sys.addSystemConstraint(std::make_unique<HDivNormalConstraint>(B, marker));
+    sys.addSystemConstraint(std::make_unique<constraints::HDivNormalConstraint>(B, marker));
 
     SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();

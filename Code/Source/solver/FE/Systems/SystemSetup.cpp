@@ -27,7 +27,7 @@
 #include "Constraints/GaugeDiagnostics.h"
 #include "Constraints/ParallelConstraints.h"
 
-#include "Systems/SystemConstraints.h"
+#include "Constraints/SystemConstraints.h"
 
 #include "Analysis/TopologyAnalysisContext.h"
 
@@ -1657,7 +1657,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 
                         for (const int marker : all_markers) {
                             // Get all DOFs on this marker (combined DOF numbering).
-                            auto marker_dofs = boundaryDofsByMarker(*mesh_, dof_handler_, marker);
+                            auto marker_dofs = constraints::boundaryDofsByMarker(*mesh_, dof_handler_, marker);
 
                             // Filter to DOFs belonging to field V.
                             bool has_unconstrained_v_dof = false;

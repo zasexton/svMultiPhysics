@@ -5,7 +5,7 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "Systems/StrongDirichletConstraint.h"
+#include "Constraints/StrongDirichletConstraint.h"
 
 #include "Systems/FESystem.h"
 #include "Systems/SystemsExceptions.h"
@@ -21,7 +21,10 @@
 
 namespace svmp {
 namespace FE {
-namespace systems {
+namespace constraints {
+
+using systems::FESystem;
+using systems::InvalidStateException;
 
 namespace {
 
@@ -238,6 +241,6 @@ bool StrongDirichletConstraint::updateValues(const FESystem& /*system*/,
     return true;
 }
 
-} // namespace systems
+} // namespace constraints
 } // namespace FE
 } // namespace svmp

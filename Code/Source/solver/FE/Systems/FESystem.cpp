@@ -1348,7 +1348,7 @@ void FESystem::addConstraint(std::unique_ptr<constraints::Constraint> c)
     constraint_defs_.push_back(std::move(c));
 }
 
-void FESystem::addSystemConstraint(std::unique_ptr<ISystemConstraint> c)
+void FESystem::addSystemConstraint(std::unique_ptr<constraints::ISystemConstraint> c)
 {
     invalidateSetup();
     FE_CHECK_NOT_NULL(c.get(), "FESystem::addSystemConstraint: constraint");

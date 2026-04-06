@@ -517,6 +517,11 @@ set(FE_CONSTRAINTS_HEADERS
     Constraints/ConstraintsIO.h
     Constraints/GaugeDiagnostics.h
     Constraints/GaugeRegistry.h
+    Constraints/SystemConstraint.h
+    Constraints/SystemConstraints.h
+    Constraints/StrongDirichletConstraint.h
+    Constraints/HCurlTangentialConstraint.h
+    Constraints/HDivNormalConstraint.h
 )
 
 set(FE_CONSTRAINTS_SOURCES
@@ -537,6 +542,10 @@ set(FE_CONSTRAINTS_SOURCES
     Constraints/ConstraintsIO.cpp
     Constraints/GaugeDiagnostics.cpp
     Constraints/GaugeRegistry.cpp
+    Constraints/SystemConstraints.cpp
+    Constraints/StrongDirichletConstraint.cpp
+    Constraints/HCurlTangentialConstraint.cpp
+    Constraints/HDivNormalConstraint.cpp
 )
 
 # Analysis sources (problem property inference)
@@ -775,13 +784,8 @@ set(FE_SYSTEMS_HEADERS
     Systems/SearchAccess.h
     Systems/SurfaceContactKernel.h
     Systems/SystemAssembly.h
-    Systems/SystemConstraint.h
-    Systems/SystemConstraints.h
     Systems/SystemSetup.h
     Systems/SystemState.h
-    Systems/HCurlTangentialConstraint.h
-    Systems/HDivNormalConstraint.h
-    Systems/StrongDirichletConstraint.h
     Systems/TimeIntegrator.h
     Systems/TransientSystem.h
     Systems/SystemsExceptions.h
@@ -800,11 +804,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/ParameterRegistry.cpp
     Systems/SurfaceContactKernel.cpp
     Systems/SystemAssembly.cpp
-    Systems/SystemConstraints.cpp
     Systems/SystemSetup.cpp
-    Systems/HCurlTangentialConstraint.cpp
-    Systems/HDivNormalConstraint.cpp
-    Systems/StrongDirichletConstraint.cpp
     Systems/TimeIntegrator.cpp
     Systems/BoundaryReductionService.cpp
     Systems/CoupledBoundaryManager.cpp

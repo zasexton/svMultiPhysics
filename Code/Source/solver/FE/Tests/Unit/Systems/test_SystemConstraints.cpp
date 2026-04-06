@@ -6,7 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "Systems/FESystem.h"
-#include "Systems/SystemConstraints.h"
+#include "Constraints/SystemConstraints.h"
 
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/GlobalSystemView.h"
@@ -96,8 +96,8 @@ TEST(SystemConstraints, MarkerAndFaceSetExtractionAgree)
     sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
     sys.setup();
 
-    auto by_marker = svmp::FE::systems::boundaryDofsByMarker(*mesh, sys.dofHandler(), marker);
-    auto by_set = svmp::FE::systems::boundaryDofsByFaceSet(*mesh, sys.dofHandler(), set_name);
+    auto by_marker = svmp::FE::constraints::boundaryDofsByMarker(*mesh, sys.dofHandler(), marker);
+    auto by_set = svmp::FE::constraints::boundaryDofsByFaceSet(*mesh, sys.dofHandler(), set_name);
 
     EXPECT_EQ(by_marker, by_set);
     EXPECT_EQ(by_marker.size(), 2u);  // vertices 0 and 3 for Q1
@@ -118,7 +118,7 @@ TEST(SystemConstraints, DirichletBCViaFaceSetAffectsAssembly)
 
     sys.setup();
 
-    sys.addConstraint(svmp::FE::systems::makeDirichletConstantByFaceSet(*mesh, sys.dofHandler(),
+    sys.addConstraint(svmp::FE::constraints::makeDirichletConstantByFaceSet(*mesh, sys.dofHandler(),
                                                                        set_name, /*value=*/0.0));
     sys.setup();
 
@@ -127,7 +127,7 @@ TEST(SystemConstraints, DirichletBCViaFaceSetAffectsAssembly)
     sys.assembleMass(state, mass);
 
     // Constrained rows should be identity-like (diag=1, off-diagonals=0).
-    const auto constrained = svmp::FE::systems::boundaryDofsByFaceSet(*mesh, sys.dofHandler(), set_name);
+    const auto constrained = svmp::FE::constraints::boundaryDofsByFaceSet(*mesh, sys.dofHandler(), set_name);
     ASSERT_EQ(constrained.size(), 2u);
     for (auto dof : constrained) {
         EXPECT_NEAR(mass.getMatrixEntry(dof, dof), 1.0, 1e-12);
@@ -150,6 +150,6 @@ TEST(SystemConstraints, ReturnsEmptyForNonExistentFaceSet)
     auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
     sys.setup();
 
-    auto result = svmp::FE::systems::boundaryDofsByFaceSet(*mesh, sys.dofHandler(), "non_existent_set");
+    auto result = svmp::FE::constraints::boundaryDofsByFaceSet(*mesh, sys.dofHandler(), "non_existent_set");
     EXPECT_TRUE(result.empty());
 }

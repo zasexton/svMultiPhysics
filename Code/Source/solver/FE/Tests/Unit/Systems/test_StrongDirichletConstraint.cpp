@@ -7,7 +7,7 @@
 
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
-#include "Systems/SystemConstraints.h"
+#include "Constraints/SystemConstraints.h"
 
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/GlobalSystemView.h"
@@ -110,7 +110,7 @@ TEST(StrongDirichletConstraint, InstalledBeforeSetupAffectsAssembly)
     SystemStateView state;
     sys.assembleMass(state, mass);
 
-    const auto constrained = svmp::FE::systems::boundaryDofsByMarker(*mesh, sys.dofHandler(), marker);
+    const auto constrained = svmp::FE::constraints::boundaryDofsByMarker(*mesh, sys.dofHandler(), marker);
     ASSERT_EQ(constrained.size(), 2u);
     for (auto dof : constrained) {
         EXPECT_TRUE(sys.constraints().isConstrained(dof));
@@ -138,7 +138,7 @@ TEST(StrongDirichletConstraint, UpdateConstraintsRefreshesTimeDependentValues)
 
     sys.setup();
 
-    const auto constrained = svmp::FE::systems::boundaryDofsByMarker(*mesh, sys.dofHandler(), marker);
+    const auto constrained = svmp::FE::constraints::boundaryDofsByMarker(*mesh, sys.dofHandler(), marker);
     ASSERT_EQ(constrained.size(), 2u);
 
     for (auto dof : constrained) {

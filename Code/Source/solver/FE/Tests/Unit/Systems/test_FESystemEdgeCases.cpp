@@ -6,7 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "Systems/FESystem.h"
-#include "Systems/SystemConstraints.h"
+#include "Constraints/SystemConstraints.h"
 #include "Systems/SystemsExceptions.h"
 
 #include "Assembly/AssemblyContext.h"
@@ -245,7 +245,7 @@ TEST(FESystemEdgeCases, FESystem_SetupWithDifferentOptions_AppliesNewOptions)
     sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
 
     sys.setup();
-    sys.addConstraint(svmp::FE::systems::makeDirichletConstantByFaceSet(*mesh, sys.dofHandler(), set_name, /*value=*/0.0));
+    sys.addConstraint(svmp::FE::constraints::makeDirichletConstantByFaceSet(*mesh, sys.dofHandler(), set_name, /*value=*/0.0));
 
     // With constraints disabled in assembly, constrained rows are not modified.
     SetupOptions opts_no_constraints;
@@ -257,7 +257,7 @@ TEST(FESystemEdgeCases, FESystem_SetupWithDifferentOptions_AppliesNewOptions)
     SystemStateView state;
     (void)sys.assembleMass(state, mass_no);
 
-    const auto constrained = svmp::FE::systems::boundaryDofsByFaceSet(*mesh, sys.dofHandler(), set_name);
+    const auto constrained = svmp::FE::constraints::boundaryDofsByFaceSet(*mesh, sys.dofHandler(), set_name);
     ASSERT_EQ(constrained.size(), 2u);
     for (auto dof : constrained) {
         EXPECT_NE(mass_no.getMatrixEntry(dof, dof), 1.0);
