@@ -1283,7 +1283,8 @@ public:
                               const forms::FormExpr& integrand_trial,
                               int boundary_marker,
                               const SystemStateView& state,
-                              bool apply_constraints = true);
+                              bool apply_constraints = true,
+                              int region_marker = -1);
 
 private:
 

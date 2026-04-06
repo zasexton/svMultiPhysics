@@ -493,8 +493,15 @@ BoundaryReductionService::evaluateFunctionalGradient(std::string_view name,
         });
 
     // Symbolic gradient via BoundaryFunctionalGradientKernel + GradAccumulator.
+    const int region_marker =
+        entry.def.is_domain_functional ? entry.def.region_marker : -1;
     auto grad_entries = system_.assembleBoundaryGradient(
-        target_field, integrand_trial, entry.def.boundary_marker, state, apply_constraints);
+        target_field,
+        integrand_trial,
+        entry.def.boundary_marker,
+        state,
+        apply_constraints,
+        region_marker);
 
     // Apply reduction: for Average, divide by boundary measure.
     if (entry.def.reduction == forms::BoundaryFunctional::Reduction::Average) {

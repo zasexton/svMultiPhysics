@@ -68,6 +68,103 @@ svmp::FE::dofs::MeshTopologyInfo singleTetraTopology()
     return topo;
 }
 
+std::vector<Real> solveDenseLinearSystem_(std::vector<Real> A, std::vector<Real> b)
+{
+    const auto n = b.size();
+    EXPECT_EQ(A.size(), n * n);
+    for (std::size_t k = 0; k < n; ++k) {
+        std::size_t pivot = k;
+        Real max_abs = std::abs(A[k * n + k]);
+        for (std::size_t i = k + 1; i < n; ++i) {
+            const Real cand = std::abs(A[i * n + k]);
+            if (cand > max_abs) {
+                max_abs = cand;
+                pivot = i;
+            }
+        }
+        EXPECT_GT(max_abs, 1e-14);
+        if (pivot != k) {
+            for (std::size_t j = 0; j < n; ++j) {
+                std::swap(A[k * n + j], A[pivot * n + j]);
+            }
+            std::swap(b[k], b[pivot]);
+        }
+        const Real diag = A[k * n + k];
+        for (std::size_t i = k + 1; i < n; ++i) {
+            const Real factor = A[i * n + k] / diag;
+            if (std::abs(factor) <= 1e-30) {
+                continue;
+            }
+            for (std::size_t j = k; j < n; ++j) {
+                A[i * n + j] -= factor * A[k * n + j];
+            }
+            b[i] -= factor * b[k];
+        }
+    }
+    std::vector<Real> x(n, 0.0);
+    for (std::size_t ii = n; ii-- > 0;) {
+        Real sum = b[ii];
+        for (std::size_t j = ii + 1; j < n; ++j) {
+            sum -= A[ii * n + j] * x[j];
+        }
+        x[ii] = sum / A[ii * n + ii];
+    }
+    return x;
+}
+
+void assembleFieldSystemWithReductions_(FESystem& sys,
+                                        const SystemStateView& state,
+                                        std::size_t n_field,
+                                        std::vector<Real>& K_out,
+                                        std::vector<Real>& r_out)
+{
+    svmp::FE::assembly::DenseMatrixView lhs(
+        static_cast<svmp::FE::GlobalIndex>(n_field));
+    svmp::FE::assembly::DenseVectorView rhs(
+        static_cast<svmp::FE::GlobalIndex>(n_field));
+    lhs.zero();
+    rhs.zero();
+
+    AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+    req.want_vector = true;
+    req.is_nonlinear_iteration = true;
+
+    const auto result = sys.assemble(req, state, &lhs, &rhs);
+    ASSERT_TRUE(result.success);
+
+    K_out.assign(n_field * n_field, Real(0.0));
+    r_out.assign(n_field, Real(0.0));
+    for (std::size_t i = 0; i < n_field; ++i) {
+        r_out[i] = rhs.getVectorEntry(static_cast<svmp::FE::GlobalIndex>(i));
+        for (std::size_t j = 0; j < n_field; ++j) {
+            K_out[i * n_field + j] =
+                lhs.getMatrixEntry(static_cast<svmp::FE::GlobalIndex>(i),
+                                   static_cast<svmp::FE::GlobalIndex>(j));
+        }
+    }
+
+    for (const auto& upd : sys.lastRankOneUpdates()) {
+        for (const auto& [row_dof, row_val] : upd.v) {
+            const auto row = static_cast<std::size_t>(row_dof);
+            for (const auto& [col_dof, col_val] : upd.v) {
+                const auto col = static_cast<std::size_t>(col_dof);
+                K_out[row * n_field + col] += upd.sigma * row_val * col_val;
+            }
+        }
+    }
+    for (const auto& upd : sys.lastReducedFieldUpdates()) {
+        for (const auto& [row_dof, row_val] : upd.left) {
+            const auto row = static_cast<std::size_t>(row_dof);
+            for (const auto& [col_dof, col_val] : upd.right) {
+                const auto col = static_cast<std::size_t>(col_dof);
+                K_out[row * n_field + col] += upd.sigma * row_val * col_val;
+            }
+        }
+    }
+}
+
 } // namespace
 
 // ===========================================================================
@@ -4012,6 +4109,305 @@ TEST(MonolithicCoupling, CellScopedLocalCondensationMatchesGlobalBorderedReferen
     ASSERT_EQ(x_before.size(), 1u);
     cell_case.sys->applyLocalCondensedRecovery(du_reduced, Real(1.0));
     const auto x_after = cell_block.gatherEntityWork(0);
+    ASSERT_EQ(x_after.size(), 1u);
+    const Real dx_local = x_before[0] - x_after[0];
+    EXPECT_NEAR(dx_local,
+                dense_step[global_case.n_field],
+                std::max(1e-8, std::abs(dense_step[global_case.n_field]) * 1e-7));
+}
+
+TEST(MonolithicCoupling, FacetScopedLocalCondensationMatchesGlobalBorderedReference)
+{
+    const int marker = 13;
+
+    struct MonolithicCase {
+        std::unique_ptr<FESystem> sys{};
+        FieldId u_field{svmp::FE::INVALID_FIELD_ID};
+        std::string instance_name{};
+        std::vector<Real> sol{};
+        SystemStateView state{};
+        std::size_t n_field{0};
+    };
+
+    auto buildCase = [&](AuxiliaryStateScope scope,
+                         std::string instance_name) -> MonolithicCase {
+        auto mesh =
+            std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+        auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+        MonolithicCase c;
+        c.sys = std::make_unique<FESystem>(mesh);
+        c.u_field = c.sys->addField(FieldSpec{.name = "u", .space = space, .components = 1});
+        c.sys->addOperator("op");
+
+        const auto u_disc = FormExpr::discreteField(c.u_field, *space, "u");
+        auto Q = c.sys->boundaryIntegral(u_disc, marker);
+
+        auto model = aux::model("facet_condensed_compare", [](ModelFacade& m) {
+            auto Q = m.input("Q");
+            auto x = m.state("x");
+            m << ddt(x) == -x + Q;
+            m << out("P_out") == x;
+        });
+
+        auto deployment =
+            use(model).name(instance_name).monolithic().bind("Q", Q).initialize({0.25});
+        if (scope == AuxiliaryStateScope::Facet) {
+            deployment.scope(AuxiliaryStateScope::Facet);
+        } else {
+            deployment.global();
+        }
+        auto inst = c.sys->deploy(deployment);
+
+        const auto u = FormExpr::stateField(c.u_field, *space, "u");
+        const auto v = FormExpr::testFunction(*space, "v");
+        const auto residual = (u * v).dx() - (inst.output("P_out") * v).ds(marker);
+        (void)installFormulation(*c.sys, "op", {c.u_field}, residual);
+
+        SetupInputs si;
+        si.topology_override = singleTetraTopology();
+        c.sys->setup({}, si);
+        c.sys->finalizeAuxiliaryLayout();
+        c.sys->beginTimeStep();
+
+        c.n_field = static_cast<std::size_t>(c.sys->dofHandler().getNumDofs());
+        c.sol.assign(c.n_field, 1.0);
+        c.state.time = 0.0;
+        c.state.dt = 0.1;
+        c.state.u = c.sol;
+        c.instance_name = std::move(instance_name);
+        return c;
+    };
+
+    auto global_case = buildCase(AuxiliaryStateScope::Global, "global_ref");
+    auto facet_case = buildCase(AuxiliaryStateScope::Facet, "facet_condensed");
+
+    std::vector<Real> K_global;
+    std::vector<Real> r_global;
+    assembleFieldSystemWithReductions_(*global_case.sys, global_case.state, global_case.n_field,
+                                       K_global, r_global);
+    const auto& global_bc = global_case.sys->borderedCoupling();
+    ASSERT_TRUE(global_bc.active);
+    ASSERT_EQ(global_bc.n_aux, 1);
+
+    std::vector<Real> K_facet;
+    std::vector<Real> r_facet;
+    assembleFieldSystemWithReductions_(*facet_case.sys, facet_case.state, facet_case.n_field,
+                                       K_facet, r_facet);
+    EXPECT_FALSE(facet_case.sys->borderedCoupling().active);
+    EXPECT_TRUE(facet_case.sys->hasLocalCondensedRecovery());
+    EXPECT_FALSE(facet_case.sys->lastReducedFieldUpdates().empty());
+    ASSERT_EQ(facet_case.sys->lastLocalCondensedRhsShift().size(), facet_case.n_field);
+
+    const Real D_inv = Real(1.0) / global_bc.D[0];
+    std::vector<Real> K_ref = K_global;
+    std::vector<Real> r_ref = r_global;
+    for (std::size_t i = 0; i < global_case.n_field; ++i) {
+        r_ref[i] -= global_bc.B[i] * D_inv * global_bc.g[0];
+        for (std::size_t j = 0; j < global_case.n_field; ++j) {
+            K_ref[i * global_case.n_field + j] -=
+                global_bc.B[i] * D_inv * global_bc.Ct[j];
+        }
+    }
+
+    std::vector<Real> r_facet_reduced = r_facet;
+    const auto local_shift = facet_case.sys->lastLocalCondensedRhsShift();
+    for (std::size_t i = 0; i < r_facet_reduced.size(); ++i) {
+        r_facet_reduced[i] -= local_shift[i];
+    }
+
+    ASSERT_EQ(K_ref.size(), K_facet.size());
+    ASSERT_EQ(r_ref.size(), r_facet_reduced.size());
+    for (std::size_t i = 0; i < K_ref.size(); ++i) {
+        EXPECT_NEAR(K_facet[i], K_ref[i], std::max(1e-8, std::abs(K_ref[i]) * 1e-7))
+            << "reduced field Jacobian mismatch at flat index " << i;
+    }
+    for (std::size_t i = 0; i < r_ref.size(); ++i) {
+        EXPECT_NEAR(r_facet_reduced[i], r_ref[i], std::max(1e-8, std::abs(r_ref[i]) * 1e-7))
+            << "reduced field residual mismatch at row " << i;
+    }
+
+    const auto du_reduced = solveDenseLinearSystem_(K_facet, r_facet_reduced);
+
+    std::vector<Real> full_matrix((global_case.n_field + 1) * (global_case.n_field + 1), Real(0.0));
+    std::vector<Real> full_rhs(global_case.n_field + 1, Real(0.0));
+    for (std::size_t i = 0; i < global_case.n_field; ++i) {
+        full_rhs[i] = r_global[i];
+        for (std::size_t j = 0; j < global_case.n_field; ++j) {
+            full_matrix[i * (global_case.n_field + 1) + j] =
+                K_global[i * global_case.n_field + j];
+        }
+        full_matrix[i * (global_case.n_field + 1) + global_case.n_field] = global_bc.B[i];
+    }
+    full_rhs[global_case.n_field] = global_bc.g[0];
+    for (std::size_t j = 0; j < global_case.n_field; ++j) {
+        full_matrix[global_case.n_field * (global_case.n_field + 1) + j] = global_bc.Ct[j];
+    }
+    full_matrix.back() = global_bc.D[0];
+
+    const auto dense_step = solveDenseLinearSystem_(full_matrix, full_rhs);
+    ASSERT_EQ(dense_step.size(), global_case.n_field + 1);
+    for (std::size_t i = 0; i < global_case.n_field; ++i) {
+        EXPECT_NEAR(du_reduced[i],
+                    dense_step[i],
+                    std::max(1e-8, std::abs(dense_step[i]) * 1e-7))
+            << "reduced field step mismatch at dof " << i;
+    }
+
+    auto& facet_block = facet_case.sys->auxiliaryStateManager().getBlock(facet_case.instance_name);
+    const auto x_before = facet_block.gatherEntityWork(0);
+    ASSERT_EQ(x_before.size(), 1u);
+    facet_case.sys->applyLocalCondensedRecovery(du_reduced, Real(1.0));
+    const auto x_after = facet_block.gatherEntityWork(0);
+    ASSERT_EQ(x_after.size(), 1u);
+    const Real dx_local = x_before[0] - x_after[0];
+    EXPECT_NEAR(dx_local,
+                dense_step[global_case.n_field],
+                std::max(1e-8, std::abs(dense_step[global_case.n_field]) * 1e-7));
+}
+
+TEST(MonolithicCoupling, QuadraturePointScopedLocalCondensationMatchesGlobalBorderedReference)
+{
+    struct MonolithicCase {
+        std::unique_ptr<FESystem> sys{};
+        FieldId u_field{svmp::FE::INVALID_FIELD_ID};
+        std::string instance_name{};
+        std::vector<Real> sol{};
+        SystemStateView state{};
+        std::size_t n_field{0};
+    };
+
+    auto buildCase = [&](AuxiliaryStateScope scope,
+                         std::string instance_name) -> MonolithicCase {
+        auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+        auto space = std::make_shared<svmp::FE::spaces::L2Space>(ElementType::Tetra4, 0);
+
+        MonolithicCase c;
+        c.sys = std::make_unique<FESystem>(mesh);
+        c.u_field = c.sys->addField(FieldSpec{.name = "u", .space = space, .components = 1});
+        c.sys->addOperator("op");
+
+        const auto u_disc = FormExpr::discreteField(c.u_field, *space, "u");
+        auto M_avg = c.sys->domainAverage("M_avg", u_disc);
+
+        auto model = aux::model("qp_condensed_compare", [](ModelFacade& m) {
+            auto M_avg = m.input("M_avg");
+            auto x = m.state("x");
+            m << ddt(x) == -x + M_avg;
+            m << out("P_out") == x;
+        });
+
+        auto deployment =
+            use(model).name(instance_name).monolithic().bind("M_avg", M_avg).initialize({0.25});
+        if (scope == AuxiliaryStateScope::QuadraturePoint) {
+            deployment.scope(AuxiliaryStateScope::QuadraturePoint)
+                .entityCount(1)
+                .qpOffsets({0, 1});
+        } else {
+            deployment.global();
+        }
+        auto inst = c.sys->deploy(deployment);
+
+        const auto u = FormExpr::stateField(c.u_field, *space, "u");
+        const auto v = FormExpr::testFunction(*space, "v");
+        const auto residual = (u * v).dx() - (inst.output("P_out") * v).dx();
+        (void)installFormulation(*c.sys, "op", {c.u_field}, residual);
+
+        SetupInputs si;
+        si.topology_override = singleTetraTopology();
+        c.sys->setup({}, si);
+        c.sys->finalizeAuxiliaryLayout();
+        c.sys->beginTimeStep();
+
+        c.n_field = static_cast<std::size_t>(c.sys->dofHandler().getNumDofs());
+        c.sol.assign(c.n_field, 1.0);
+        c.state.time = 0.0;
+        c.state.dt = 0.1;
+        c.state.u = c.sol;
+        c.instance_name = std::move(instance_name);
+        return c;
+    };
+
+    auto global_case = buildCase(AuxiliaryStateScope::Global, "global_ref");
+    auto qp_case = buildCase(AuxiliaryStateScope::QuadraturePoint, "qp_condensed");
+
+    std::vector<Real> K_global;
+    std::vector<Real> r_global;
+    assembleFieldSystemWithReductions_(*global_case.sys, global_case.state, global_case.n_field,
+                                       K_global, r_global);
+    const auto& global_bc = global_case.sys->borderedCoupling();
+    ASSERT_TRUE(global_bc.active);
+    ASSERT_EQ(global_bc.n_aux, 1);
+
+    std::vector<Real> K_qp;
+    std::vector<Real> r_qp;
+    assembleFieldSystemWithReductions_(*qp_case.sys, qp_case.state, qp_case.n_field,
+                                       K_qp, r_qp);
+    EXPECT_FALSE(qp_case.sys->borderedCoupling().active);
+    EXPECT_TRUE(qp_case.sys->hasLocalCondensedRecovery());
+    EXPECT_FALSE(qp_case.sys->lastReducedFieldUpdates().empty());
+    ASSERT_EQ(qp_case.sys->lastLocalCondensedRhsShift().size(), qp_case.n_field);
+
+    const Real D_inv = Real(1.0) / global_bc.D[0];
+    std::vector<Real> K_ref = K_global;
+    std::vector<Real> r_ref = r_global;
+    for (std::size_t i = 0; i < global_case.n_field; ++i) {
+        r_ref[i] -= global_bc.B[i] * D_inv * global_bc.g[0];
+        for (std::size_t j = 0; j < global_case.n_field; ++j) {
+            K_ref[i * global_case.n_field + j] -=
+                global_bc.B[i] * D_inv * global_bc.Ct[j];
+        }
+    }
+
+    std::vector<Real> r_qp_reduced = r_qp;
+    const auto local_shift = qp_case.sys->lastLocalCondensedRhsShift();
+    for (std::size_t i = 0; i < r_qp_reduced.size(); ++i) {
+        r_qp_reduced[i] -= local_shift[i];
+    }
+
+    ASSERT_EQ(K_ref.size(), K_qp.size());
+    ASSERT_EQ(r_ref.size(), r_qp_reduced.size());
+    for (std::size_t i = 0; i < K_ref.size(); ++i) {
+        EXPECT_NEAR(K_qp[i], K_ref[i], std::max(1e-8, std::abs(K_ref[i]) * 1e-7))
+            << "reduced field Jacobian mismatch at flat index " << i;
+    }
+    for (std::size_t i = 0; i < r_ref.size(); ++i) {
+        EXPECT_NEAR(r_qp_reduced[i], r_ref[i], std::max(1e-8, std::abs(r_ref[i]) * 1e-7))
+            << "reduced field residual mismatch at row " << i;
+    }
+
+    const auto du_reduced = solveDenseLinearSystem_(K_qp, r_qp_reduced);
+
+    std::vector<Real> full_matrix((global_case.n_field + 1) * (global_case.n_field + 1), Real(0.0));
+    std::vector<Real> full_rhs(global_case.n_field + 1, Real(0.0));
+    for (std::size_t i = 0; i < global_case.n_field; ++i) {
+        full_rhs[i] = r_global[i];
+        for (std::size_t j = 0; j < global_case.n_field; ++j) {
+            full_matrix[i * (global_case.n_field + 1) + j] =
+                K_global[i * global_case.n_field + j];
+        }
+        full_matrix[i * (global_case.n_field + 1) + global_case.n_field] = global_bc.B[i];
+    }
+    full_rhs[global_case.n_field] = global_bc.g[0];
+    for (std::size_t j = 0; j < global_case.n_field; ++j) {
+        full_matrix[global_case.n_field * (global_case.n_field + 1) + j] = global_bc.Ct[j];
+    }
+    full_matrix.back() = global_bc.D[0];
+
+    const auto dense_step = solveDenseLinearSystem_(full_matrix, full_rhs);
+    ASSERT_EQ(dense_step.size(), global_case.n_field + 1);
+    for (std::size_t i = 0; i < global_case.n_field; ++i) {
+        EXPECT_NEAR(du_reduced[i],
+                    dense_step[i],
+                    std::max(1e-8, std::abs(dense_step[i]) * 1e-7))
+            << "reduced field step mismatch at dof " << i;
+    }
+
+    auto& qp_block = qp_case.sys->auxiliaryStateManager().getBlock(qp_case.instance_name);
+    const auto x_before = qp_block.gatherEntityWork(0);
+    ASSERT_EQ(x_before.size(), 1u);
+    qp_case.sys->applyLocalCondensedRecovery(du_reduced, Real(1.0));
+    const auto x_after = qp_block.gatherEntityWork(0);
     ASSERT_EQ(x_after.size(), 1u);
     const Real dx_local = x_before[0] - x_after[0];
     EXPECT_NEAR(dx_local,

@@ -7016,7 +7016,8 @@ FESystem::assembleBoundaryGradient(FieldId field,
                                     const forms::FormExpr& integrand_trial,
                                     int boundary_marker,
                                     const SystemStateView& state,
-                                    bool apply_constraints)
+                                    bool apply_constraints,
+                                    int region_marker)
 {
     const auto& rec = fieldRecord(field);
     FE_CHECK_NOT_NULL(rec.space.get(),
@@ -7166,14 +7167,20 @@ FESystem::assembleBoundaryGradient(FieldId field,
             /*matrix_view=*/nullptr,
             /*vector_view=*/&accum);
     } else {
-        // Domain (all-cells) gradient assembly.
+        // Domain (all-cells or region-filtered) gradient assembly.
         // BoundaryFunctionalGradientKernel has hasCell()=false, so we wrap
         // it in a cell-capable adapter that reuses its Dual-arithmetic
         // evaluation for cell QPs instead of boundary face QPs.
         struct CellGradKernelAdapter final : public assembly::AssemblyKernel {
             forms::BoundaryFunctionalGradientKernel& inner;
-            explicit CellGradKernelAdapter(forms::BoundaryFunctionalGradientKernel& k)
-                : inner(k) {}
+            const FESystem& system;
+            int region_marker;
+            explicit CellGradKernelAdapter(forms::BoundaryFunctionalGradientKernel& k,
+                                           const FESystem& s,
+                                           int marker)
+                : inner(k)
+                , system(s)
+                , region_marker(marker) {}
             [[nodiscard]] bool hasCell() const noexcept override { return true; }
             [[nodiscard]] bool hasBoundaryFace() const noexcept override { return false; }
             [[nodiscard]] bool hasInteriorFace() const noexcept override { return false; }
@@ -7187,6 +7194,16 @@ FESystem::assembleBoundaryGradient(FieldId field,
             }
             void computeCell(const assembly::AssemblyContext& ctx,
                              assembly::KernelOutput& output) override {
+                if (region_marker >= 0) {
+                    const auto cell_id = ctx.cellId();
+                    if (cell_id < 0 ||
+                        system.meshAccess().getCellDomainId(cell_id) != region_marker) {
+                        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(),
+                                       /*need_matrix=*/false, /*need_vector=*/true);
+                        std::fill(output.local_vector.begin(), output.local_vector.end(), 0.0);
+                        return;
+                    }
+                }
                 // Reuse the boundary face computation logic (which uses
                 // Dual arithmetic for per-DOF derivatives) but call it
                 // for a cell context.  The gradient kernel's computeBoundaryFace
@@ -7196,7 +7213,7 @@ FESystem::assembleBoundaryGradient(FieldId field,
             }
         };
 
-        CellGradKernelAdapter cell_adapter(grad_kernel);
+        CellGradKernelAdapter cell_adapter(grad_kernel, *this, region_marker);
         assembler_->assembleVector(
             meshAccess(), *rec.space, cell_adapter, accum);
     }

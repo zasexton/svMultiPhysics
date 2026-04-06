@@ -15876,8 +15876,8 @@ BoundaryFunctionalGradientKernel::BoundaryFunctionalGradientKernel(FormExpr inte
 {
     FE_THROW_IF(!integrand_.isValid(), InvalidArgumentException,
                 "Forms::BoundaryFunctionalGradientKernel: invalid integrand");
-    FE_THROW_IF(boundary_marker_ < 0, InvalidArgumentException,
-                "Forms::BoundaryFunctionalGradientKernel: boundary_marker must be >= 0");
+    FE_THROW_IF(boundary_marker_ < -1, InvalidArgumentException,
+                "Forms::BoundaryFunctionalGradientKernel: boundary_marker must be >= -1");
     FE_CHECK_NOT_NULL(integrand_.node(), "Forms::BoundaryFunctionalGradientKernel: integrand node");
     FE_THROW_IF(containsTestFunction(*integrand_.node()), InvalidArgumentException,
                 "Forms::BoundaryFunctionalGradientKernel: integrand must not contain TestFunction");
@@ -15887,7 +15887,9 @@ BoundaryFunctionalGradientKernel::BoundaryFunctionalGradientKernel(FormExpr inte
     for (const auto& fr : field_requirements_) {
         required_data_ |= fr.required;
     }
-    required_data_ |= assembly::RequiredData::Normals;
+    if (boundary_marker_ >= 0) {
+        required_data_ |= assembly::RequiredData::Normals;
+    }
 }
 
 void BoundaryFunctionalGradientKernel::computeBoundaryFace(const assembly::AssemblyContext& ctx,
