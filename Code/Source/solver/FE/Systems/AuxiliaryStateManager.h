@@ -135,6 +135,13 @@ public:
                               std::span<const Real> initial_values = {});
 
     /**
+     * @brief Register a QuadraturePoint-scoped block with explicit per-cell QP offsets.
+     */
+    std::size_t registerBlockWithQPOffsets(const AuxiliaryStateSpec& spec,
+                                           std::span<const std::size_t> qp_offsets,
+                                           std::span<const Real> initial_values = {});
+
+    /**
      * @brief Register a block with ragged layout.
      */
     std::size_t registerBlockRagged(const AuxiliaryStateSpec& spec,

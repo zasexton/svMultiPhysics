@@ -173,7 +173,7 @@ public:
                 if (!sym) {
                     return std::nullopt;
                 }
-                return system.loweredAuxiliaryOutputExpr(*sym);
+                return system.coupledBoundaryCompatibleAuxiliaryOutputExpr(*sym);
             });
 
         residual = systems::bc::detail::registerAndResolveCoupledSymbols(

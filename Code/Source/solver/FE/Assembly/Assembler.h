@@ -111,6 +111,7 @@ namespace assembly {
 class GlobalSystemView;
 class AssemblyKernel;
 class AssemblyContext;
+struct AuxiliaryOutputBinding;
 
 /**
  * @brief View of per-integration-point state storage for a single cell
@@ -714,6 +715,12 @@ public:
                                      std::span<const Real> /*outputs*/ = {}) noexcept
     {
         setCoupledValues(inputs, state);
+    }
+
+    /// Bind runtime metadata for resolving local-scoped auxiliary outputs.
+    virtual void setAuxiliaryOutputBindings(
+        std::span<const AuxiliaryOutputBinding> /*bindings*/) noexcept
+    {
     }
 
     /**

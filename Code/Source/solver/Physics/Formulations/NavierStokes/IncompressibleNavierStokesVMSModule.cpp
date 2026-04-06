@@ -239,12 +239,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     bc_manager.install(options_.traction_robin, [&](const auto& bc) { return Factories::toTractionRobinBC(bc, dim); });
     bc_manager.install(options_.pressure_outflow, [&](const auto& bc) { return Factories::toOutflowBC(bc, u, rho); });
     bc_manager.install(options_.coupled_outflow_rcr, [&](const auto& bc) {
-        return Factories::toCoupledOutflowBC(
-            bc, system, u_id, *velocity_space_, options_.velocity_field_name, u, rho);
+        return Factories::toCoupledOutflowBC(bc, system, u, rho);
     });
     bc_manager.install(options_.coupled_outflow_rcrcr, [&](const auto& bc) {
-        return Factories::toCoupledOutflowBC(
-            bc, system, u_id, *velocity_space_, options_.velocity_field_name, u, rho);
+        return Factories::toCoupledOutflowBC(bc, system, u, rho);
     });
     bc_manager.install(options_.velocity_dirichlet,
                        [&](const auto& bc) {

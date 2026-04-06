@@ -458,9 +458,10 @@ public:
      * @brief Register a boundary integral as an auxiliary input and return a handle.
      *
      * ```cpp
-     * auto Q = system.boundaryIntegral("Q", inner(u_disc, n), marker);
+     * auto Q = system.boundaryIntegral(inner(u, n), marker);
      * ```
      */
+    [[deprecated("boundaryIntegral(name, ...) is deprecated; use boundaryIntegral(...) without an explicit name")]]
     AuxiliaryInputHandle boundaryIntegral(
         const std::string& input_name,
         forms::FormExpr integrand,
@@ -469,10 +470,27 @@ public:
         AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
 
     /**
-     * @brief Register a boundary integral (full functional) and return a handle.
+     * @brief Register a boundary integral with an auto-generated internal name.
      */
     AuxiliaryInputHandle boundaryIntegral(
+        forms::FormExpr integrand,
+        int boundary_marker,
+        forms::BoundaryFunctional::Reduction reduction = forms::BoundaryFunctional::Reduction::Sum,
+        AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
+
+    /**
+     * @brief Register a boundary integral (full functional) and return a handle.
+     */
+    [[deprecated("boundaryIntegral(name, functional, ...) is deprecated; use boundaryIntegral(functional, ...) without an explicit name")]]
+    AuxiliaryInputHandle boundaryIntegral(
         const std::string& input_name,
+        forms::BoundaryFunctional functional,
+        AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
+
+    /**
+     * @brief Register a boundary integral functional with an auto-generated internal name.
+     */
+    AuxiliaryInputHandle boundaryIntegral(
         forms::BoundaryFunctional functional,
         AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
 
@@ -793,12 +811,15 @@ public:
     /**
      * @brief Lowered algebraic output expression lookup by symbolic output name.
      *
-     * When a monolithic AuxiliaryState instance is recognized as a pure
-     * algebraic feedthrough, setup may lower one of its outputs to a direct
-     * expression in terms of AuxiliaryInputRef slots and constants. The
-     * returned expression is suitable for assembly-time substitution in a
-     * plain NaturalBC, while the original AuxiliaryOutputRef-based metadata
-     * can still be retained for direct-coupling extraction.
+     * When a deployed AuxiliaryState output can be expressed directly in terms
+     * of runtime-available terminals (for example AuxiliaryStateRef,
+     * AuxiliaryInputRef, and constants), setup may lower that output to a
+     * direct expression for assembly-time substitution in a plain NaturalBC.
+     *
+     * For live monolithic blocks, formulation metadata may still preserve the
+     * original AuxiliaryOutputRef so the bordered direct-coupling path can
+     * extract dR/d(output). Fully lowered direct-only blocks instead lower the
+     * metadata as well because there is no live auxiliary unknown to couple.
      */
     [[nodiscard]] std::optional<forms::FormExpr>
     loweredAuxiliaryOutputExpr(std::string_view output_name) const;
@@ -806,6 +827,28 @@ public:
     /// Slot-based lowered algebraic output lookup.
     [[nodiscard]] std::optional<forms::FormExpr>
     loweredAuxiliaryOutputExpr(std::size_t slot) const;
+
+    /**
+     * @brief Boundary-BC lowering for algebraic outputs that can be rewritten
+     *        entirely in terms of coupled boundary functionals.
+     *
+     * This is used by `BoundaryConditionManager` so a simplified `NaturalBC`
+     * authored against an algebraic AuxiliaryState output can still route
+     * through the native coupled-boundary Jacobian path when the output is
+     * exactly expressible using `boundaryIntegral(...)` placeholders.
+     */
+    [[nodiscard]] std::optional<forms::FormExpr>
+    coupledBoundaryCompatibleAuxiliaryOutputExpr(std::string_view output_name) const;
+
+    /**
+     * @brief Return true when formulation metadata should keep AuxiliaryOutputRef.
+     *
+     * Live monolithic blocks preserve the output reference in metadata so the
+     * bordered direct-coupling path can still assemble dR/d(output). Direct-only
+     * lowered blocks return false because their metadata should use the same
+     * lowered expression as assembly.
+     */
+    [[nodiscard]] bool auxiliaryOutputMetadataUsesRef(std::string_view output_name) const;
 
     /**
      * @brief Get an analysis summary of auxiliary blocks and inputs.
@@ -993,6 +1036,13 @@ public:
     void clearRankOneUpdates() noexcept;
     [[nodiscard]] std::span<const backends::ReducedFieldUpdate> lastReducedFieldUpdates() const noexcept;
     void clearReducedFieldUpdates() noexcept;
+    [[nodiscard]] std::span<const Real> lastLocalCondensedRhsShift() const noexcept;
+    [[nodiscard]] bool hasLocalCondensedRecovery() const noexcept
+    {
+        return !last_local_condensed_records_.empty();
+    }
+    void applyLocalCondensedRecovery(std::span<const Real> dense_du, Real alpha = Real(1.0));
+    void clearLocalCondensedRecovery() noexcept;
 
     /// @cond INTERNAL
     // Internal — used by FormsInstaller for transactional kernel registration.
@@ -1025,6 +1075,15 @@ private:
         assembly::SemanticKernelKind semantic_kind{assembly::SemanticKernelKind::SingleForm};
         bool matrix_capable{false};
         bool vector_capable{false};
+    };
+
+    struct LocalCondensedEntityRecord {
+        std::string block_name{};
+        std::size_t entity_index{0};
+        std::vector<std::vector<std::pair<GlobalIndex, Real>>> B_columns{};
+        std::vector<std::vector<std::pair<GlobalIndex, Real>>> Ct_rows{};
+        std::vector<Real> D_inv{};
+        std::vector<Real> g{};
     };
 
     struct PlannedBoundaryTerm {
@@ -1166,9 +1225,11 @@ private:
         std::unique_ptr<AuxiliaryDerivativeProvider> deriv_provider{};
         std::vector<Real> output_buffer{}; ///< Evaluated output values
         bool lower_to_direct_only{false};  ///< Keep semantic block/output, but exclude from live monolithic solve.
+        bool local_condensed{false};       ///< Eliminate locally into reduced field updates instead of dense bordered layout.
         /// Entity map: indices of entities this block covers.
         /// Empty = all entities (WholeDomain / no restriction).
         std::vector<std::size_t> entity_map{};
+        std::vector<std::size_t> qp_offsets{};
     };
     std::vector<DeployedAuxEntry> deployed_aux_entries_{};
     std::unordered_map<std::string, forms::FormExpr> lowered_aux_output_exprs_by_name_{};
@@ -1177,6 +1238,10 @@ private:
     [[nodiscard]] std::optional<forms::FormExpr>
     synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
                                           std::string_view output_name) const;
+    [[nodiscard]] std::optional<forms::FormExpr>
+    synthesizeCoupledBoundaryAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
+                                                  std::string_view output_name) const;
+    void buildAuxiliaryOutputBindings_();
     /// Deferred dependency pairs (dependent, dependency) from derivedInput().
     /// Wired by finalizeDeferredInputDeps() when all inputs are registered.
     std::vector<std::pair<std::string, std::string>> deferred_input_deps_{};
@@ -1186,6 +1251,21 @@ private:
     /// Safe to call multiple times — clears the deferred lists on first run.
     void finalizeDeferredInputDeps();
     void buildLoweredAuxiliaryOutputExpressions_();
+    AuxiliaryInputHandle registerBoundaryIntegralHandle_(
+        const std::string& input_name,
+        forms::FormExpr integrand,
+        int boundary_marker,
+        forms::BoundaryFunctional::Reduction reduction,
+        AuxiliaryInputUpdateSchedule schedule);
+    AuxiliaryInputHandle registerBoundaryIntegralHandle_(
+        const std::string& input_name,
+        forms::BoundaryFunctional functional,
+        AuxiliaryInputUpdateSchedule schedule);
+    [[nodiscard]] std::string generateUniqueAuxiliaryInputName_(std::string_view prefix);
+    [[nodiscard]] std::string makeScopeAwareInstanceBaseName_(const AuxiliaryDeployedInstance& instance) const;
+    [[nodiscard]] std::string resolveDeploymentInstanceName_(const AuxiliaryDeployedInstance& instance) const;
+    [[nodiscard]] bool hasDeployedInstanceName_(std::string_view instance_name) const;
+    std::size_t generated_boundary_input_counter_{0};
 
     /// Bind secondary fields and set dof_per_node on a BoundaryReductionService
     /// for multi-field integrand evaluation.
@@ -1269,6 +1349,8 @@ private:
     std::unique_ptr<gauge::GaugeRegistry> gauge_registry_{};
     std::vector<backends::RankOneUpdate> last_rank_one_updates_{};
     std::vector<backends::ReducedFieldUpdate> last_reduced_field_updates_{};
+    std::vector<LocalCondensedEntityRecord> last_local_condensed_records_{};
+    std::vector<Real> last_local_condensed_rhs_shift_{};
     std::unordered_map<OperatorTag, OperatorAssemblyPlan> assembly_plan_by_op_{};
 
     // Cached coupled Jacobian results.
@@ -1322,7 +1404,8 @@ private:
         bool partitioned_auxiliary_advance_valid_{false};
         Real partitioned_auxiliary_advance_time_{std::numeric_limits<Real>::quiet_NaN()};
         Real partitioned_auxiliary_advance_dt_{std::numeric_limits<Real>::quiet_NaN()};
-	    mutable std::vector<Real> aux_output_flat_{}; ///< Flattened output values for assembly
+    mutable std::vector<Real> aux_output_flat_{}; ///< Flattened output values for assembly
+    std::vector<assembly::AuxiliaryOutputBinding> auxiliary_output_bindings_{};
 
 public:
     /// Bordered coupling data for monolithic auxiliary DOFs.
@@ -1402,6 +1485,11 @@ public:
     /// Access bordered coupling data (populated during assembly).
     [[nodiscard]] BorderedCouplingData& borderedCoupling() noexcept { return bordered_coupling_; }
     [[nodiscard]] const BorderedCouplingData& borderedCoupling() const noexcept { return bordered_coupling_; }
+    [[nodiscard]] std::span<const assembly::AuxiliaryOutputBinding>
+    auxiliaryOutputBindings() const noexcept
+    {
+        return auxiliary_output_bindings_;
+    }
 
 private:
     BorderedCouplingData bordered_coupling_{};

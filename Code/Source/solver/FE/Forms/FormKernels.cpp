@@ -1630,7 +1630,7 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
 	            FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
 	                        "Forms: AuxiliaryOutputRef slot out of range (jet)");
 	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
-	            out.value.s = makeScalarConstant<Scalar>(vals[slot], env);
+	            out.value.s = makeScalarConstant<Scalar>(ctx.auxiliaryOutputValue(slot, q), env);
 	            if (out.has_grad) out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
 	            if (out.has_hess) out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
 	            return out;
@@ -4945,7 +4945,8 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                         "Forms: AuxiliaryOutputRef requires auxiliary outputs in AssemblyContext");
             FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
                         "Forms: AuxiliaryOutputRef slot out of range");
-            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, vals[slot]};
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar,
+                                   ctx.auxiliaryOutputValue(slot, q)};
         }
         case FormExprType::MaterialStateOldRef: {
             const auto off = node.stateOffsetBytes();
@@ -8955,7 +8956,7 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                         "Forms: AuxiliaryOutputRef slot out of range (dual)");
             EvalValue<Dual> out;
             out.kind = EvalValue<Dual>::Kind::Scalar;
-            out.s = makeDualConstant(vals[slot], env.ws->alloc());
+            out.s = makeDualConstant(ctx.auxiliaryOutputValue(slot, q), env.ws->alloc());
             return out;
         }
         case FormExprType::MaterialStateOldRef: {

@@ -699,6 +699,8 @@ public:
     void setAuxiliaryValues(std::span<const Real> inputs,
                             std::span<const Real> state,
                             std::span<const Real> outputs = {}) noexcept;
+    void setAuxiliaryOutputBindings(
+        std::span<const AuxiliaryOutputBinding> bindings) noexcept;
 
     /**
      * @brief Bind history/convolution weights for history operators
@@ -909,6 +911,7 @@ private:
     std::span<const Real> auxiliary_inputs_{};
     std::span<const Real> auxiliary_state_{};
     std::span<const Real> auxiliary_outputs_{};
+    std::span<const AuxiliaryOutputBinding> auxiliary_output_bindings_{};
     std::span<const Real> history_weights_{};
 
     // Working storage

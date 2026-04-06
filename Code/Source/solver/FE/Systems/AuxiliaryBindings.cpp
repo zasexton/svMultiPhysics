@@ -22,6 +22,7 @@ AuxiliaryDeployedInstance::AuxiliaryDeployedInstance(
 AuxiliaryDeployedInstance& AuxiliaryDeployedInstance::name(std::string n)
 {
     instance_name_ = std::move(n);
+    has_explicit_name_ = true;
     return *this;
 }
 
@@ -62,14 +63,18 @@ AuxiliaryDeployedInstance& AuxiliaryDeployedInstance::bind(
     return *this;
 }
 
+AuxiliaryDeployedInstance& AuxiliaryDeployedInstance::bind(
+    const std::string& model_input, const AuxiliaryInputHandle& handle)
+{
+    input_bindings_[model_input] = handle.registryName();
+    coupled_bindings_[model_input] = handle;
+    return *this;
+}
+
 AuxiliaryDeployedInstance& AuxiliaryDeployedInstance::bindCoupled(
     const std::string& model_input, const AuxiliaryInputHandle& handle)
 {
-    // Also register as a normal binding (for input-vector population).
-    input_bindings_[model_input] = handle.registryName();
-    // Track the coupled binding separately for monolithic chain-rule assembly.
-    coupled_bindings_[model_input] = handle;
-    return *this;
+    return bind(model_input, handle);
 }
 
 AuxiliaryDeployedInstance& AuxiliaryDeployedInstance::param(
@@ -88,6 +93,13 @@ AuxiliaryDeployedInstance& AuxiliaryDeployedInstance::initialize(std::vector<Rea
 AuxiliaryDeployedInstance& AuxiliaryDeployedInstance::entityCount(std::size_t count)
 {
     entity_count_ = count;
+    return *this;
+}
+
+AuxiliaryDeployedInstance& AuxiliaryDeployedInstance::qpOffsets(
+    std::vector<std::size_t> offsets)
+{
+    qp_offsets_ = std::move(offsets);
     return *this;
 }
 
@@ -270,19 +282,42 @@ std::string AuxiliaryDeployedInstance::validate() const
         // in initialState(), but check size consistency).
     }
 
-    // Validate coupled bindings.
-    if (!coupled_bindings_.empty()) {
-        if (solve_mode_ != AuxiliarySolveMode::Monolithic) {
-            return "instance '" + instance_name_ + "' has bindCoupled() bindings "
-                   "but is not Monolithic — coupled bindings require "
-                   ".monolithic() or .solveMode(Monolithic)";
+    if (!qp_offsets_.empty()) {
+        if (scope_ != AuxiliaryStateScope::QuadraturePoint) {
+            return "instance '" + instance_name_ +
+                   "' provides qpOffsets() but is not QuadraturePoint scoped";
         }
-        for (const auto& [model_input, handle] : coupled_bindings_) {
-            if (handle.hasDefinition() && !handle.supportsMonolithicLinearization()) {
-                return "instance '" + instance_name_ + "': coupled binding '" +
-                       model_input + "' references FE quantity '" +
-                       handle.registryName() + "' which does not support "
-                       "monolithic linearization (dI/du)";
+        if (qp_offsets_.size() < 2u) {
+            return "instance '" + instance_name_ +
+                   "' has qpOffsets() with fewer than 2 entries";
+        }
+        if (qp_offsets_.front() != 0u) {
+            return "instance '" + instance_name_ +
+                   "' has qpOffsets() whose first entry is not 0";
+        }
+        for (std::size_t i = 1; i < qp_offsets_.size(); ++i) {
+            if (qp_offsets_[i] < qp_offsets_[i - 1]) {
+                return "instance '" + instance_name_ +
+                       "' has non-monotone qpOffsets()";
+            }
+        }
+        if (entity_count_ != 0 && entity_count_ != qp_offsets_.back()) {
+            return "instance '" + instance_name_ +
+                   "' has entityCount()=" + std::to_string(entity_count_) +
+                   " but qpOffsets().back()=" + std::to_string(qp_offsets_.back());
+        }
+    }
+
+    // Validate FE-backed handle bindings.
+    if (!coupled_bindings_.empty()) {
+        if (solve_mode_ == AuxiliarySolveMode::Monolithic) {
+            for (const auto& [model_input, handle] : coupled_bindings_) {
+                if (handle.hasDefinition() && !handle.supportsMonolithicLinearization()) {
+                    return "instance '" + instance_name_ + "': handle binding '" +
+                           model_input + "' references FE quantity '" +
+                           handle.registryName() + "' which does not support "
+                           "monolithic linearization (dI/du)";
+                }
             }
         }
     }
@@ -303,7 +338,7 @@ std::string AuxiliaryDeployedInstance::validate() const
                 }
             }
 
-            // Check coupled bindings for shape mismatch.
+            // Check FE-backed handle bindings for shape mismatch.
             auto cb_it = coupled_bindings_.find(model_input);
             if (cb_it != coupled_bindings_.end() && cb_it->second.hasDefinition()) {
                 const auto actual_size = cb_it->second.shape().components;

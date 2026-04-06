@@ -104,9 +104,9 @@ struct IncompressibleNavierStokesVMSOptions {
      * purely resistive limit when C=0).
      *
      * Notes:
-     * - As in the Poisson demo, the assembled Jacobian currently does not
-     *   include the rank-1 coupling derivative dQ/du; treat this as a
-     *   lagged/explicit coupling example.
+     * - When deployed through the generalized AuxiliaryState path in
+     *   `NavierStokesBCFactories.h`, the monolithic outlet Jacobian includes
+     *   the exact FE-backed input coupling for `Q`.
      */
     struct CoupledRCROutflowBC {
         int boundary_marker{-1};

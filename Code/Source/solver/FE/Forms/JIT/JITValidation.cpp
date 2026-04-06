@@ -640,6 +640,13 @@ ValidationResult canCompileImpl(const FormExpr& integrand,
                 out.ok = false;
                 out.first_issue = issue(n, "JIT: coupled placeholder must be resolved to slot-based refs");
                 return;
+            case FormExprType::AuxiliaryOutputRef:
+            case FormExprType::AuxiliaryOutputSymbol:
+                out.ok = false;
+                out.first_issue = issue(
+                    n,
+                    "JIT: AuxiliaryOutputRef requires runtime entity-aware lookup; use interpreter fallback");
+                return;
 
             // Measure wrappers are handled by FormCompiler -> FormIR decomposition, not by kernel lowering.
             case FormExprType::CellIntegral:

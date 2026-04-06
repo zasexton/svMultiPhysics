@@ -79,6 +79,25 @@ static void gatherFieldIds(const forms::FormExprNode& node, std::vector<FieldId>
     }
 }
 
+[[nodiscard]] const char* scopeAutoNameToken(AuxiliaryStateScope scope) noexcept
+{
+    switch (scope) {
+        case AuxiliaryStateScope::Global:
+            return "g";
+        case AuxiliaryStateScope::Node:
+            return "node";
+        case AuxiliaryStateScope::Cell:
+            return "cell";
+        case AuxiliaryStateScope::QuadraturePoint:
+            return "qp";
+        case AuxiliaryStateScope::Boundary:
+            return "b";
+        case AuxiliaryStateScope::Facet:
+            return "facet";
+    }
+    return "aux";
+}
+
 constexpr Real kDirectCouplingEntryTol = static_cast<Real>(1e-30);
 
 [[nodiscard]] Real effectiveAuxiliaryDt(const SystemStateView& state) noexcept
@@ -1540,6 +1559,62 @@ void FESystem::clearReducedFieldUpdates() noexcept
     last_reduced_field_updates_.clear();
 }
 
+std::span<const Real> FESystem::lastLocalCondensedRhsShift() const noexcept
+{
+    return last_local_condensed_rhs_shift_;
+}
+
+void FESystem::applyLocalCondensedRecovery(std::span<const Real> dense_du, Real alpha)
+{
+    if (last_local_condensed_records_.empty() ||
+        dense_du.empty() ||
+        std::abs(alpha) <= Real(0.0) ||
+        !auxiliary_state_manager_) {
+        return;
+    }
+
+    for (const auto& rec : last_local_condensed_records_) {
+        if (!auxiliary_state_manager_->hasBlock(rec.block_name)) {
+            continue;
+        }
+        auto& blk = auxiliary_state_manager_->getBlock(rec.block_name);
+        auto entity_state = blk.gatherEntityWork(rec.entity_index);
+        const auto dim = entity_state.size();
+        if (rec.D_inv.size() != dim * dim || rec.g.size() != dim ||
+            rec.Ct_rows.size() != dim) {
+            continue;
+        }
+
+        std::vector<Real> rhs = rec.g;
+        for (std::size_t row = 0; row < dim; ++row) {
+            for (const auto& [dof, val] : rec.Ct_rows[row]) {
+                const auto dof_idx = static_cast<std::size_t>(dof);
+                if (dof_idx < dense_du.size()) {
+                    rhs[row] -= val * dense_du[dof_idx];
+                }
+            }
+        }
+
+        std::vector<Real> delta(dim, Real(0.0));
+        for (std::size_t i = 0; i < dim; ++i) {
+            for (std::size_t j = 0; j < dim; ++j) {
+                delta[i] += rec.D_inv[i * dim + j] * rhs[j];
+            }
+        }
+
+        for (std::size_t i = 0; i < dim; ++i) {
+            entity_state[i] -= alpha * delta[i];
+        }
+        blk.scatterEntityWork(rec.entity_index, entity_state);
+    }
+}
+
+void FESystem::clearLocalCondensedRecovery() noexcept
+{
+    last_local_condensed_records_.clear();
+    last_local_condensed_rhs_shift_.clear();
+}
+
 const assembly::IMeshAccess& FESystem::meshAccess() const
 {
     FE_CHECK_NOT_NULL(mesh_access_.get(), "FESystem::meshAccess");
@@ -2713,6 +2788,10 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
 
 void FESystem::deployAuxiliaryModel(AuxiliaryDeployedInstance instance)
 {
+    if (!instance.hasExplicitName()) {
+        instance.setResolvedInstanceName(resolveDeploymentInstanceName_(instance));
+    }
+
     auto diag = instance.validate();
     FE_THROW_IF(!diag.empty(), InvalidArgumentException,
                 "FESystem::deployAuxiliaryModel: " + diag);
@@ -2747,18 +2826,45 @@ void FESystem::deployAuxiliaryModel(AuxiliaryDeployedInstance instance)
         entry.coupled_bindings[k] = v;
     entry.param_values = instance.paramValues();
     entry.explicit_entity_count = instance.getEntityCount();
+    entry.qp_offsets.assign(instance.qpOffsets().begin(), instance.qpOffsets().end());
 
     deployed_aux_entries_.push_back(std::move(entry));
 }
 
 AuxiliaryInstanceHandle FESystem::deploy(AuxiliaryDeployedInstance instance)
 {
+    if (!instance.hasExplicitName()) {
+        instance.setResolvedInstanceName(resolveDeploymentInstanceName_(instance));
+    }
     const std::string inst_name = instance.instanceName();
     deployAuxiliaryModel(std::move(instance));
     return AuxiliaryInstanceHandle(inst_name);
 }
 
 AuxiliaryInputHandle FESystem::boundaryIntegral(
+    const std::string& input_name,
+    forms::FormExpr integrand,
+    int boundary_marker,
+    forms::BoundaryFunctional::Reduction reduction,
+    AuxiliaryInputUpdateSchedule schedule)
+{
+    return registerBoundaryIntegralHandle_(
+        input_name, std::move(integrand), boundary_marker, reduction, schedule);
+}
+
+AuxiliaryInputHandle FESystem::boundaryIntegral(
+    forms::FormExpr integrand,
+    int boundary_marker,
+    forms::BoundaryFunctional::Reduction reduction,
+    AuxiliaryInputUpdateSchedule schedule)
+{
+    const auto input_name = generateUniqueAuxiliaryInputName_(
+        "_boundary_integral_b" + std::to_string(boundary_marker));
+    return registerBoundaryIntegralHandle_(
+        input_name, std::move(integrand), boundary_marker, reduction, schedule);
+}
+
+AuxiliaryInputHandle FESystem::registerBoundaryIntegralHandle_(
     const std::string& input_name,
     forms::FormExpr integrand,
     int boundary_marker,
@@ -2798,6 +2904,25 @@ AuxiliaryInputHandle FESystem::boundaryIntegral(
     forms::BoundaryFunctional functional,
     AuxiliaryInputUpdateSchedule schedule)
 {
+    return registerBoundaryIntegralHandle_(
+        input_name, std::move(functional), schedule);
+}
+
+AuxiliaryInputHandle FESystem::boundaryIntegral(
+    forms::BoundaryFunctional functional,
+    AuxiliaryInputUpdateSchedule schedule)
+{
+    const auto input_name = generateUniqueAuxiliaryInputName_(
+        "_boundary_integral_b" + std::to_string(functional.boundary_marker));
+    return registerBoundaryIntegralHandle_(
+        input_name, std::move(functional), schedule);
+}
+
+AuxiliaryInputHandle FESystem::registerBoundaryIntegralHandle_(
+    const std::string& input_name,
+    forms::BoundaryFunctional functional,
+    AuxiliaryInputUpdateSchedule schedule)
+{
     std::vector<FieldId> refs;
     if (const auto* root = functional.integrand.node()) {
         gatherFieldIds(*root, refs);
@@ -2816,6 +2941,71 @@ AuxiliaryInputHandle FESystem::boundaryIntegral(
     registerBoundaryIntegralInput(input_name, std::move(functional), schedule);
     feQuantityRegistry().registerDefinition(*def);
     return AuxiliaryInputHandle(input_name, std::move(def));
+}
+
+std::string FESystem::generateUniqueAuxiliaryInputName_(std::string_view prefix)
+{
+    std::string candidate;
+    auto& input_reg = auxiliaryInputRegistry();
+    auto& quantity_reg = feQuantityRegistry();
+    do {
+        candidate = std::string(prefix) + "_" +
+                    std::to_string(generated_boundary_input_counter_++);
+    } while (input_reg.hasInput(candidate) || quantity_reg.hasDefinition(candidate));
+    return candidate;
+}
+
+bool FESystem::hasDeployedInstanceName_(std::string_view instance_name) const
+{
+    return std::any_of(
+        deployed_aux_entries_.begin(), deployed_aux_entries_.end(),
+        [&](const DeployedAuxEntry& entry) { return entry.instance_name == instance_name; });
+}
+
+std::string FESystem::makeScopeAwareInstanceBaseName_(
+    const AuxiliaryDeployedInstance& instance) const
+{
+    const std::string model_name =
+        (instance.model() && !instance.model()->modelName().empty())
+            ? instance.model()->modelName()
+            : std::string("aux");
+    const auto scope = instance.getScope();
+    if (scope == AuxiliaryStateScope::Boundary) {
+        const auto& region = instance.getRegion();
+        if (region.kind == AuxiliaryRegionKind::BoundarySet && !region.identity.empty()) {
+            return model_name + "_b" + region.identity;
+        }
+        return model_name + "_b";
+    }
+    return model_name + "_" + scopeAutoNameToken(scope);
+}
+
+std::string FESystem::resolveDeploymentInstanceName_(
+    const AuxiliaryDeployedInstance& instance) const
+{
+    if (instance.hasExplicitName()) {
+        return instance.instanceName();
+    }
+
+    const std::string base = makeScopeAwareInstanceBaseName_(instance);
+    if (instance.getScope() == AuxiliaryStateScope::Boundary) {
+        if (!hasDeployedInstanceName_(base)) {
+            return base;
+        }
+        for (std::size_t suffix = 1;; ++suffix) {
+            const auto candidate = base + "_" + std::to_string(suffix);
+            if (!hasDeployedInstanceName_(candidate)) {
+                return candidate;
+            }
+        }
+    }
+
+    for (std::size_t counter = 0;; ++counter) {
+        const auto candidate = base + std::to_string(counter);
+        if (!hasDeployedInstanceName_(candidate)) {
+            return candidate;
+        }
+    }
 }
 
 AuxiliaryInputHandle FESystem::derivedInput(
@@ -3945,6 +4135,26 @@ BoundaryReductionService& FESystem::boundaryReductionService(FieldId primary_fie
 
 namespace {
 
+[[nodiscard]] assembly::AuxiliaryOutputScope toAssemblyAuxiliaryOutputScope(
+    AuxiliaryStateScope scope) noexcept
+{
+    switch (scope) {
+        case AuxiliaryStateScope::Global:
+            return assembly::AuxiliaryOutputScope::Global;
+        case AuxiliaryStateScope::Boundary:
+            return assembly::AuxiliaryOutputScope::Boundary;
+        case AuxiliaryStateScope::Cell:
+            return assembly::AuxiliaryOutputScope::Cell;
+        case AuxiliaryStateScope::QuadraturePoint:
+            return assembly::AuxiliaryOutputScope::QuadraturePoint;
+        case AuxiliaryStateScope::Facet:
+            return assembly::AuxiliaryOutputScope::Facet;
+        case AuxiliaryStateScope::Node:
+            return assembly::AuxiliaryOutputScope::Node;
+    }
+    return assembly::AuxiliaryOutputScope::Global;
+}
+
 
 } // namespace
 
@@ -4098,6 +4308,119 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
         auxiliary_input_registry_->evaluate(state.time, state.dt, is_nonlinear_iteration);
     }
 
+    std::vector<Real> dense_solution_storage;
+    std::span<const Real> dense_solution = state.u;
+    if (dense_solution.empty() && state.u_vector && n_field_dofs > 0) {
+        auto view = const_cast<backends::GenericVector*>(state.u_vector)->createAssemblyView();
+        if (view) {
+            dense_solution_storage.resize(n_field_dofs, Real(0.0));
+            for (std::size_t i = 0; i < n_field_dofs; ++i) {
+                dense_solution_storage[i] =
+                    view->getVectorEntry(static_cast<GlobalIndex>(i));
+            }
+            dense_solution = dense_solution_storage;
+        }
+    }
+
+    if (want_matrix) {
+        clearReducedFieldUpdates();
+        clearLocalCondensedRecovery();
+    } else if (want_vector) {
+        if (!last_local_condensed_records_.empty()) {
+            last_local_condensed_rhs_shift_.assign(n_field_dofs, Real(0.0));
+            for (auto& rec : last_local_condensed_records_) {
+                std::fill(rec.g.begin(), rec.g.end(), Real(0.0));
+            }
+        } else {
+            last_local_condensed_rhs_shift_.clear();
+        }
+    }
+
+    auto addSparseEntry = [](std::vector<std::pair<GlobalIndex, Real>>& entries,
+                             GlobalIndex dof,
+                             Real value) {
+        if (std::abs(value) <= Real(1e-30)) {
+            return;
+        }
+        for (auto& [existing_dof, existing_value] : entries) {
+            if (existing_dof == dof) {
+                existing_value += value;
+                return;
+            }
+        }
+        entries.emplace_back(dof, value);
+    };
+
+    auto findLocalCondensedRecord =
+        [&](std::string_view block_name,
+            std::size_t entity_index) -> LocalCondensedEntityRecord* {
+            for (auto& rec : last_local_condensed_records_) {
+                if (rec.block_name == block_name && rec.entity_index == entity_index) {
+                    return &rec;
+                }
+            }
+            return nullptr;
+        };
+
+    auto ensureLocalCondensedRecord =
+        [&](std::string_view block_name,
+            std::size_t entity_index,
+            int dim) -> LocalCondensedEntityRecord& {
+            if (auto* existing = findLocalCondensedRecord(block_name, entity_index)) {
+                return *existing;
+            }
+            last_local_condensed_records_.push_back(LocalCondensedEntityRecord{});
+            auto& rec = last_local_condensed_records_.back();
+            rec.block_name = std::string(block_name);
+            rec.entity_index = entity_index;
+            rec.B_columns.resize(static_cast<std::size_t>(dim));
+            rec.Ct_rows.resize(static_cast<std::size_t>(dim));
+            rec.g.assign(static_cast<std::size_t>(dim), Real(0.0));
+            return rec;
+        };
+
+    auto buildEntityFieldValues =
+        [&](const DeployedAuxEntry& entry,
+            std::size_t orig_e,
+            std::span<const Real> solution) {
+            std::vector<FieldValueEntry> field_values;
+            if (!entry.deriv_provider) {
+                return field_values;
+            }
+            const auto& artifact = entry.deriv_provider->artifact();
+            if (artifact.referenced_fields.empty()) {
+                return field_values;
+            }
+            field_values.reserve(artifact.referenced_fields.size());
+            for (const auto fid : artifact.referenced_fields) {
+                const auto fidx = static_cast<std::size_t>(fid);
+                if (fidx >= field_dof_offsets_.size() ||
+                    fidx >= field_dof_handlers_.size()) {
+                    continue;
+                }
+                const auto fld_off = field_dof_offsets_[fidx];
+                const auto* femap = field_dof_handlers_[fidx].getEntityDofMap();
+                if (!femap) {
+                    continue;
+                }
+                auto vdofs = femap->getVertexDofs(static_cast<GlobalIndex>(orig_e));
+                if (vdofs.empty()) {
+                    continue;
+                }
+                FieldValueEntry fve;
+                fve.field = fid;
+                fve.n_components = static_cast<int>(vdofs.size());
+                for (int c = 0; c < fve.n_components && c < MAX_FIELD_VALUE_COMPONENTS; ++c) {
+                    const auto gidx = static_cast<std::size_t>(
+                        vdofs[static_cast<std::size_t>(c)] + fld_off);
+                    fve.components[c] =
+                        (gidx < solution.size()) ? solution[gidx] : Real(0.0);
+                }
+                field_values.push_back(fve);
+            }
+            return field_values;
+        };
+
     // For each monolithic auxiliary block, assemble its per-entity
     // contributions into the global matrix/vector at the auxiliary DOF offsets.
     // This matches the standalone assembleMonolithicAuxiliary() logic for
@@ -4110,13 +4433,16 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
         auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
         const int dim = entry.spec.size;
         const auto n_entities = blk.entityCount();
+        const bool local_condensed = entry.local_condensed;
 
         // Find this block's offset in the mixed layout.
         std::size_t block_offset = 0;
-        for (const auto& bl : mixed.aux_layout.blocks) {
-            if (bl.name == entry.instance_name) {
-                block_offset = bl.offset + mixed.aux_layout.mixed_system_offset;
-                break;
+        if (!local_condensed) {
+            for (const auto& bl : mixed.aux_layout.blocks) {
+                if (bl.name == entry.instance_name) {
+                    block_offset = bl.offset + mixed.aux_layout.mixed_system_offset;
+                    break;
+                }
             }
         }
 
@@ -4204,15 +4530,21 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
 
             // Build global DOF indices for this entity's auxiliary unknowns.
             std::vector<GlobalIndex> aux_dofs(static_cast<std::size_t>(dim));
-            for (int i = 0; i < dim; ++i) {
-                aux_dofs[static_cast<std::size_t>(i)] = static_cast<GlobalIndex>(
-                    block_offset + e * static_cast<std::size_t>(dim) +
-                    static_cast<std::size_t>(i));
+            if (!local_condensed) {
+                for (int i = 0; i < dim; ++i) {
+                    aux_dofs[static_cast<std::size_t>(i)] = static_cast<GlobalIndex>(
+                        block_offset + e * static_cast<std::size_t>(dim) +
+                        static_cast<std::size_t>(i));
+                }
             }
 
+            std::vector<Real> entity_res;
+            const bool need_entity_residual =
+                want_vector || (local_condensed && want_matrix && !dense_solution.empty());
+
             // Residual.
-            if (want_vector && vector_out) {
-                std::vector<Real> entity_res(static_cast<std::size_t>(dim));
+            if (need_entity_residual) {
+                entity_res.resize(static_cast<std::size_t>(dim));
                 AuxiliaryResidualRequest res_req;
                 res_req.residual = entity_res;
                 entry.model->evaluateResidual(ctx, res_req);
@@ -4230,11 +4562,18 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                         << " residual=" << formatTraceVector(entity_res);
                     FE_LOG_INFO(oss.str());
                 }
-                vector_out->addVectorEntries(aux_dofs, entity_res);
+                if (want_vector) {
+                    if (local_condensed) {
+                        auto& rec = ensureLocalCondensedRecord(entry.instance_name, e, dim);
+                        rec.g = entity_res;
+                    } else if (vector_out) {
+                        vector_out->addVectorEntries(aux_dofs, entity_res);
+                    }
+                }
             }
 
             // Jacobian (aux-aux self-coupling block).
-            if (want_matrix && matrix_out && entry.deriv_provider) {
+            if (want_matrix && entry.deriv_provider) {
                 const auto n_inp = static_cast<int>(bound_inputs.size());
                 std::vector<Real> entity_jac(static_cast<std::size_t>(dim * dim));
                 std::vector<Real> entity_dFdi(static_cast<std::size_t>(dim * n_inp));
@@ -4276,12 +4615,24 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                     for (std::size_t i = 0; i < entity_jac.size(); ++i) {
                         entity_jac[i] += temporal.dxdot_dx_coeff * entity_dFdxdot[i];
                     }
+                }
+                if (!local_condensed && matrix_out) {
                     // Store dF/dinputs in bordered data for B computation.
                     if (!entity_dFdi.empty()) {
                         bordered_coupling_.dF_dinputs.assign(entity_dFdi.begin(), entity_dFdi.end());
                     }
+                    matrix_out->addMatrixEntries(aux_dofs, aux_dofs, entity_jac);
+                } else if (local_condensed) {
+                    auto& rec = ensureLocalCondensedRecord(entry.instance_name, e, dim);
+                    rec.D_inv.clear();
+                    if (!invertDenseMatrix(entity_jac, static_cast<std::size_t>(dim), rec.D_inv)) {
+                        FE_THROW(InvalidStateException,
+                                 "FESystem::assembleMixedAuxiliaryIntoGlobal: failed to invert local condensed block '" +
+                                     entry.instance_name + "' for entity " + std::to_string(e));
+                    }
+                    rec.Ct_rows.assign(static_cast<std::size_t>(dim), {});
+                    rec.B_columns.assign(static_cast<std::size_t>(dim), {});
                 }
-                matrix_out->addMatrixEntries(aux_dofs, aux_dofs, entity_jac);
 
                 // Chain-rule coupling: dF/du = dF/dI * dI/du.
                 // For each coupled binding, compute the field-auxiliary
@@ -4375,8 +4726,19 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                             for (const auto local_dof : vertex_dofs) {
                                                 const auto global_dof = static_cast<GlobalIndex>(
                                                     local_dof + fld_off);
-                                                std::vector<GlobalIndex> fd = {global_dof};
-                                                matrix_out->addMatrixEntries(aux_dofs, fd, col);
+                                                if (local_condensed) {
+                                                    auto& rec = ensureLocalCondensedRecord(
+                                                        entry.instance_name, e, dim);
+                                                    for (int r = 0; r < dim; ++r) {
+                                                        addSparseEntry(
+                                                            rec.Ct_rows[static_cast<std::size_t>(r)],
+                                                            global_dof,
+                                                            col[static_cast<std::size_t>(r)]);
+                                                    }
+                                                } else if (matrix_out) {
+                                                    std::vector<GlobalIndex> fd = {global_dof};
+                                                    matrix_out->addMatrixEntries(aux_dofs, fd, col);
+                                                }
                                             }
                                         }
                                     }
@@ -4441,8 +4803,19 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                                             r * n_inp + input_col)];
                                                 }
                                                 for (auto& c : col) c *= se.value;
-                                                std::vector<GlobalIndex> field_dof = {se.dof};
-                                                matrix_out->addMatrixEntries(aux_dofs, field_dof, col);
+                                                if (local_condensed) {
+                                                    auto& rec = ensureLocalCondensedRecord(
+                                                        entry.instance_name, e, dim);
+                                                    for (int r = 0; r < dim; ++r) {
+                                                        addSparseEntry(
+                                                            rec.Ct_rows[static_cast<std::size_t>(r)],
+                                                            se.dof,
+                                                            col[static_cast<std::size_t>(r)]);
+                                                    }
+                                                } else if (matrix_out) {
+                                                    std::vector<GlobalIndex> field_dof = {se.dof};
+                                                    matrix_out->addMatrixEntries(aux_dofs, field_dof, col);
+                                                }
                                             }
                                         }
                                     }
@@ -4450,6 +4823,75 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                             }
                         }
                     });
+
+                    if (local_condensed && want_matrix && !dense_solution.empty()) {
+                        auto& rec = ensureLocalCondensedRecord(entry.instance_name, e, dim);
+                        const bool needs_ct_rows = std::all_of(
+                            rec.Ct_rows.begin(),
+                            rec.Ct_rows.end(),
+                            [](const auto& row) { return row.empty(); });
+                        if (needs_ct_rows) {
+                            constexpr Real kLocalCtFdEps = Real(1e-7);
+                            std::vector<Real> base_solution(
+                                dense_solution.begin(),
+                                dense_solution.end());
+                            for (std::size_t col = 0; col < n_field_dofs; ++col) {
+                                std::vector<Real> pert_solution(base_solution);
+                                pert_solution[col] += kLocalCtFdEps;
+
+                                SystemStateView pert_state = state;
+                                pert_state.u = pert_solution;
+                                pert_state.u_vector = nullptr;
+                                cacheSystemState(pert_state);
+                                if (auxiliary_input_registry_) {
+                                    auxiliary_input_registry_->invalidateAll();
+                                    auxiliary_input_registry_->evaluate(
+                                        pert_state.time,
+                                        pert_state.dt,
+                                        is_nonlinear_iteration);
+                                }
+
+                                auto pert_inputs = buildInputVector(entry);
+                                if (has_entity_local_inputs) {
+                                    rebuildGenericInputsForEntity(entry, orig_e, pert_inputs);
+                                }
+
+                                auto pert_fv =
+                                    buildEntityFieldValues(entry, orig_e, pert_solution);
+                                AuxiliaryLocalContext pert_ctx = ctx;
+                                pert_ctx.inputs = pert_inputs;
+                                pert_ctx.field_values = pert_fv;
+                                pert_ctx.user_data = state.user_data;
+
+                                std::vector<Real> pert_res(static_cast<std::size_t>(dim), Real(0.0));
+                                AuxiliaryResidualRequest pert_req;
+                                pert_req.residual = pert_res;
+                                entry.model->evaluateResidual(pert_ctx, pert_req);
+                                for (int r = 0; r < dim; ++r) {
+                                    const Real coeff =
+                                        (pert_res[static_cast<std::size_t>(r)] -
+                                         entity_res[static_cast<std::size_t>(r)]) /
+                                        kLocalCtFdEps;
+                                    if (std::abs(coeff) <= kDirectCouplingEntryTol) {
+                                        continue;
+                                    }
+                                    addSparseEntry(
+                                        rec.Ct_rows[static_cast<std::size_t>(r)],
+                                        static_cast<GlobalIndex>(col),
+                                        coeff);
+                                }
+                            }
+
+                            cacheSystemState(state);
+                            if (auxiliary_input_registry_) {
+                                auxiliary_input_registry_->invalidateAll();
+                                auxiliary_input_registry_->evaluate(
+                                    state.time,
+                                    state.dt,
+                                    is_nonlinear_iteration);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -4635,6 +5077,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
         for (auto& entry : deployed_aux_entries_) {
             if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) continue;
             if (entry.lower_to_direct_only) continue;
+            const bool local_condensed = entry.local_condensed;
             const auto n_outputs = static_cast<int>(entry.model->outputCount());
             const int dim = entry.model->dimension();
             if (n_outputs == 0 || dim == 0) continue;
@@ -4645,10 +5088,12 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
             const auto n_entities = blk.entityCount();
 
             std::size_t block_offset = 0;
-            for (const auto& bl : mixed.aux_layout.blocks) {
-                if (bl.name == entry.instance_name) {
-                    block_offset = bl.offset + mixed.aux_layout.mixed_system_offset;
-                    break;
+            if (!local_condensed) {
+                for (const auto& bl : mixed.aux_layout.blocks) {
+                    if (bl.name == entry.instance_name) {
+                        block_offset = bl.offset + mixed.aux_layout.mixed_system_offset;
+                        break;
+                    }
                 }
             }
 
@@ -4747,11 +5192,13 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 ctx.user_data = state.user_data;
 
                 auto& ed = entity_data[e];
-                ed.aux_dofs.resize(static_cast<std::size_t>(dim));
-                for (int j = 0; j < dim; ++j) {
-                    ed.aux_dofs[static_cast<std::size_t>(j)] = static_cast<GlobalIndex>(
-                        block_offset + e * static_cast<std::size_t>(dim) +
-                        static_cast<std::size_t>(j));
+                if (!local_condensed) {
+                    ed.aux_dofs.resize(static_cast<std::size_t>(dim));
+                    for (int j = 0; j < dim; ++j) {
+                        ed.aux_dofs[static_cast<std::size_t>(j)] = static_cast<GlobalIndex>(
+                            block_offset + e * static_cast<std::size_t>(dim) +
+                            static_cast<std::size_t>(j));
+                    }
                 }
 
                 std::vector<Real> base_outputs(static_cast<std::size_t>(n_outputs), 0.0);
@@ -4948,9 +5395,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 };
 
                 ed.n_inputs = static_cast<int>(ctx.inputs.size());
-                if (entry.deriv_provider && !entry.coupled_bindings.empty() && ed.n_inputs > 0 &&
-                    bordered_coupling_.Ct.size() >=
-                        static_cast<std::size_t>(bordered_coupling_.n_aux) * n_field_dofs) {
+                if (entry.deriv_provider && !entry.coupled_bindings.empty() && ed.n_inputs > 0) {
                     std::vector<Real> direct_dF_dinputs(
                         static_cast<std::size_t>(dim * ed.n_inputs), 0.0);
                     AuxiliaryJacobianRequest jac_req;
@@ -4959,11 +5404,10 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                     jac_req.n_inputs = ed.n_inputs;
                     entry.deriv_provider->evaluateJacobian(*entry.model, ctx, jac_req);
 
-                    bordered_coupling_.dF_dinputs = direct_dF_dinputs;
+                    if (!local_condensed) {
+                        bordered_coupling_.dF_dinputs = direct_dF_dinputs;
+                    }
                     ed.dF_dinputs = direct_dF_dinputs;
-                    const auto aux_row_offset =
-                        static_cast<std::size_t>(ed.aux_dofs.front() -
-                            static_cast<GlobalIndex>(n_field_dofs));
                     ed.input_gradients.resize(static_cast<std::size_t>(ed.n_inputs));
                     ed.input_gradient_sources.assign(static_cast<std::size_t>(ed.n_inputs), 0);
                     visitCoupledInputComponents([&](const std::string&,
@@ -4981,9 +5425,14 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                     });
                     for (int input_col = 0; input_col < ed.n_inputs; ++input_col) {
                         auto& grad = ed.input_gradients[static_cast<std::size_t>(input_col)];
-                        if (!grad.empty()) {
+                        if (!grad.empty() || local_condensed ||
+                            bordered_coupling_.Ct.size() <
+                                static_cast<std::size_t>(bordered_coupling_.n_aux) * n_field_dofs) {
                             continue;
                         }
+                        const auto aux_row_offset =
+                            static_cast<std::size_t>(ed.aux_dofs.front() -
+                                static_cast<GlobalIndex>(n_field_dofs));
                         grad = reconstructInputGradientFromCt(
                             bordered_coupling_.Ct,
                             n_field_dofs,
@@ -4996,8 +5445,89 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                             ed.input_gradient_sources[static_cast<std::size_t>(input_col)] = 2;
                         }
                     }
+
+                    if (local_condensed && !ed.dF_dinputs.empty() &&
+                        !ed.input_gradients.empty()) {
+                        auto& rec = ensureLocalCondensedRecord(entry.instance_name, e, dim);
+                        const bool needs_ct_rows = std::all_of(
+                            rec.Ct_rows.begin(),
+                            rec.Ct_rows.end(),
+                            [](const auto& row) { return row.empty(); });
+                        if (needs_ct_rows) {
+                            for (int input_col = 0; input_col < ed.n_inputs; ++input_col) {
+                                if (input_col >= static_cast<int>(ed.input_gradients.size())) {
+                                    continue;
+                                }
+                                const auto& grad =
+                                    ed.input_gradients[static_cast<std::size_t>(input_col)];
+                                if (grad.empty()) {
+                                    continue;
+                                }
+                                for (const auto& [dof, value] : grad) {
+                                    for (int r = 0; r < dim; ++r) {
+                                        const auto coeff = ed.dF_dinputs[static_cast<std::size_t>(
+                                                               r * ed.n_inputs + input_col)] *
+                                            value;
+                                        if (std::abs(coeff) <= kDirectCouplingEntryTol) {
+                                            continue;
+                                        }
+                                        addSparseEntry(
+                                            rec.Ct_rows[static_cast<std::size_t>(r)],
+                                            dof,
+                                            coeff);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
+
+            struct VecAccum final : public assembly::GlobalSystemView {
+                std::unordered_map<GlobalIndex, Real> entries;
+                GlobalIndex sz;
+                explicit VecAccum(GlobalIndex s) : sz(s) {}
+                void addMatrixEntries(std::span<const GlobalIndex>, std::span<const Real>, assembly::AddMode) override {}
+                void addMatrixEntries(std::span<const GlobalIndex>, std::span<const GlobalIndex>, std::span<const Real>, assembly::AddMode) override {}
+                void addMatrixEntry(GlobalIndex, GlobalIndex, Real, assembly::AddMode) override {}
+                void setDiagonal(std::span<const GlobalIndex>, std::span<const Real>) override {}
+                void setDiagonal(GlobalIndex, Real) override {}
+                void zeroRows(std::span<const GlobalIndex>, bool) override {}
+                void addVectorEntries(std::span<const GlobalIndex> d, std::span<const Real> v, assembly::AddMode) override {
+                    for (std::size_t i = 0; i < d.size(); ++i) {
+                        if (d[i] >= 0 && d[i] < sz) {
+                            entries[d[i]] += v[i];
+                        }
+                    }
+                }
+                void addVectorEntry(GlobalIndex d, Real v, assembly::AddMode) override {
+                    if (d >= 0 && d < sz) {
+                        entries[d] += v;
+                    }
+                }
+                void setVectorEntries(std::span<const GlobalIndex>, std::span<const Real>) override {}
+                void zeroVectorEntries(std::span<const GlobalIndex> d) override {
+                    for (auto x : d) {
+                        entries.erase(x);
+                    }
+                }
+                [[nodiscard]] Real getVectorEntry(GlobalIndex d) const override {
+                    auto it = entries.find(d);
+                    return it != entries.end() ? it->second : Real(0.0);
+                }
+                void beginAssemblyPhase() override {}
+                void endAssemblyPhase() override {}
+                void finalizeAssembly() override {}
+                [[nodiscard]] assembly::AssemblyPhase getPhase() const noexcept override {
+                    return assembly::AssemblyPhase::Building;
+                }
+                [[nodiscard]] bool hasMatrix() const noexcept override { return false; }
+                [[nodiscard]] bool hasVector() const noexcept override { return true; }
+                [[nodiscard]] GlobalIndex numRows() const noexcept override { return sz; }
+                [[nodiscard]] GlobalIndex numCols() const noexcept override { return sz; }
+                [[nodiscard]] std::string backendName() const override { return "VecAccum"; }
+                void zero() override { entries.clear(); }
+            };
 
             const auto output_names = entry.model->outputNames();
             for (int k = 0; k < n_outputs; ++k) {
@@ -5034,6 +5564,8 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                     }
 
                     const auto slot = base_slot + e * static_cast<std::size_t>(n_outputs);
+                    const auto reference_slot32 = static_cast<std::uint32_t>(
+                        local_condensed ? base_slot : slot);
                     const auto slot32 = static_cast<std::uint32_t>(slot);
                     const auto& owned_dofs = dof_handler_.getPartition().locallyOwned();
 
@@ -5068,7 +5600,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                 [&](const forms::FormExprNode& n) {
                                     if (n.type() == forms::FormExprType::AuxiliaryOutputRef) {
                                         const auto s = n.slotIndex();
-                                        if (s && *s == slot32) references_slot = true;
+                                        if (s && *s == reference_slot32) references_slot = true;
                                     }
                                     for (const auto* c : n.children()) {
                                         if (c && !references_slot) scan_refs(*c);
@@ -5079,16 +5611,18 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
 
                             const auto block_residual = forms::FormExpr(
                                 std::const_pointer_cast<forms::FormExprNode>(block_node));
-                            auto relevant = forms::extractTermsReferencing(
-                                block_residual, forms::FormExprType::AuxiliaryOutputRef, slot32);
-                            if (!relevant.isValid()) continue;
-
-                            auto dR_dOk = forms::differentiateWrtAuxiliaryOutput(relevant, slot32);
-                            if (!dR_dOk.isValid()) continue;
-
                             const auto test_field = block_key.first;
                             const auto n_total = static_cast<GlobalIndex>(dof_handler_.getNumDofs());
                             if (n_total <= 0 || !assembler_) continue;
+
+                            auto relevant = forms::extractTermsReferencing(
+                                block_residual, forms::FormExprType::AuxiliaryOutputRef,
+                                local_condensed ? reference_slot32 : slot32);
+                            if (!relevant.isValid()) continue;
+
+                            auto dR_dOk = forms::differentiateWrtAuxiliaryOutput(
+                                relevant, local_condensed ? reference_slot32 : slot32);
+                            if (!dR_dOk.isValid()) continue;
 
                             try {
                                 forms::FormCompiler compiler;
@@ -5326,11 +5860,13 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                         if (std::abs(dOk_dxj) < 1e-14) continue;
 
                                         const Real val = dRi_dOk * dOk_dxj;
-                                        std::vector<GlobalIndex> row = {dof_i};
-                                        std::vector<GlobalIndex> col = {
-                                            ed.aux_dofs[static_cast<std::size_t>(j)]};
-                                        std::vector<Real> mat = {val};
-                                        matrix_out->addMatrixEntries(row, col, mat);
+                                        if (!local_condensed) {
+                                            std::vector<GlobalIndex> row = {dof_i};
+                                            std::vector<GlobalIndex> col = {
+                                                ed.aux_dofs[static_cast<std::size_t>(j)]};
+                                            std::vector<Real> mat = {val};
+                                            matrix_out->addMatrixEntries(row, col, mat);
+                                        }
                                     }
                                 }
                             } catch (const std::exception&) {
@@ -5351,6 +5887,22 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                               [](const auto& a, const auto& b) {
                                   return a.first < b.first;
                               });
+                    if (local_condensed) {
+                        auto& rec = ensureLocalCondensedRecord(entry.instance_name, e, dim);
+                        for (const auto& [dof_i, dRi_dOk] : coupling_record.output_gradient) {
+                            for (int j = 0; j < dim; ++j) {
+                                const Real dOk_dxj =
+                                    ed.dO_dx[static_cast<std::size_t>(k * dim + j)];
+                                if (std::abs(dOk_dxj) <= kDirectCouplingEntryTol) {
+                                    continue;
+                                }
+                                addSparseEntry(
+                                    rec.B_columns[static_cast<std::size_t>(j)],
+                                    dof_i,
+                                    dRi_dOk * dOk_dxj);
+                            }
+                        }
+                    }
                     if (entry.lower_to_direct_only && !coupling_record.output_gradient.empty()) {
                         bool promoted_direct_only = false;
                         int active_input_col = -1;
@@ -5439,7 +5991,88 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                             }
                         }
                     }
-                    bordered_coupling_.direct_coupling_records.push_back(std::move(coupling_record));
+                    if (!local_condensed) {
+                        bordered_coupling_.direct_coupling_records.push_back(
+                            std::move(coupling_record));
+                    }
+                }
+            }
+        }
+    }
+
+    if (!last_local_condensed_records_.empty()) {
+        const auto& owned_dofs = dof_handler_.getPartition().locallyOwned();
+
+        if (want_matrix) {
+            for (const auto& rec : last_local_condensed_records_) {
+                const auto dim = rec.g.size();
+                if (dim == 0 || rec.D_inv.size() != dim * dim ||
+                    rec.Ct_rows.size() != dim || rec.B_columns.size() != dim) {
+                    continue;
+                }
+
+                for (std::size_t j = 0; j < dim; ++j) {
+                    std::unordered_map<GlobalIndex, Real> right_dense;
+                    for (std::size_t row = 0; row < dim; ++row) {
+                        const Real coeff = rec.D_inv[j * dim + row];
+                        if (std::abs(coeff) <= Real(1e-30)) {
+                            continue;
+                        }
+                        for (const auto& [dof, val] : rec.Ct_rows[row]) {
+                            right_dense[dof] += coeff * val;
+                        }
+                    }
+
+                    backends::ReducedFieldUpdate reduced_update;
+                    reduced_update.sigma = Real(-1.0);
+                    for (const auto& [dof, val] : rec.B_columns[j]) {
+                        if (owned_dofs.contains(dof) &&
+                            std::abs(val) > kDirectCouplingEntryTol) {
+                            reduced_update.left.emplace_back(dof, val);
+                        }
+                    }
+                    for (const auto& [dof, val] : right_dense) {
+                        if (owned_dofs.contains(dof) &&
+                            std::abs(val) > kDirectCouplingEntryTol) {
+                            reduced_update.right.emplace_back(dof, val);
+                        }
+                    }
+
+                    if (!reduced_update.left.empty() &&
+                        !reduced_update.right.empty()) {
+                        last_reduced_field_updates_.push_back(std::move(reduced_update));
+                    }
+                }
+            }
+        }
+
+        if (want_vector) {
+            last_local_condensed_rhs_shift_.assign(n_field_dofs, Real(0.0));
+            for (const auto& rec : last_local_condensed_records_) {
+                const auto dim = rec.g.size();
+                if (dim == 0 || rec.D_inv.size() != dim * dim ||
+                    rec.B_columns.size() != dim) {
+                    continue;
+                }
+
+                std::vector<Real> dinv_g(dim, Real(0.0));
+                for (std::size_t i = 0; i < dim; ++i) {
+                    for (std::size_t j = 0; j < dim; ++j) {
+                        dinv_g[i] += rec.D_inv[i * dim + j] * rec.g[j];
+                    }
+                }
+
+                for (std::size_t j = 0; j < dim; ++j) {
+                    const Real coeff = dinv_g[j];
+                    if (std::abs(coeff) <= Real(1e-30)) {
+                        continue;
+                    }
+                    for (const auto& [dof, val] : rec.B_columns[j]) {
+                        const auto dof_idx = static_cast<std::size_t>(dof);
+                        if (dof_idx < last_local_condensed_rhs_shift_.size()) {
+                            last_local_condensed_rhs_shift_[dof_idx] += val * coeff;
+                        }
+                    }
                 }
             }
         }
@@ -5793,9 +6426,13 @@ void FESystem::finalizeAuxiliaryLayout()
                     }
                     break;
                 case AuxiliaryStateScope::QuadraturePoint:
-                    FE_THROW(InvalidStateException,
-                             "FESystem::finalizeAuxiliaryLayout: QuadraturePoint scope "
-                             "requires explicit .entityCount()");
+                    if (!entry.qp_offsets.empty()) {
+                        entity_count = entry.qp_offsets.back();
+                    } else {
+                        FE_THROW(InvalidStateException,
+                                 "FESystem::finalizeAuxiliaryLayout: QuadraturePoint scope "
+                                 "requires explicit .entityCount() or qpOffsets()");
+                    }
                     break;
             }
         }
@@ -5930,10 +6567,15 @@ void FESystem::finalizeAuxiliaryLayout()
                      "paths assume fixed per-entity dimension.  Use "
                      "AuxiliaryStateManager::registerBlockRagged() directly.");
         } else {
-            mgr.registerBlock(entry.spec, entity_count,
-                              full_init.empty()
-                                  ? std::span<const Real>{}
-                                  : std::span<const Real>(full_init));
+            const auto init_span = full_init.empty()
+                ? std::span<const Real>{}
+                : std::span<const Real>(full_init);
+            if (entry.spec.scope == AuxiliaryStateScope::QuadraturePoint &&
+                !entry.qp_offsets.empty()) {
+                mgr.registerBlockWithQPOffsets(entry.spec, entry.qp_offsets, init_span);
+            } else {
+                mgr.registerBlock(entry.spec, entity_count, init_span);
+            }
         }
 
         // Create stepper and derivative provider for partitioned blocks.
@@ -5954,6 +6596,7 @@ void FESystem::finalizeAuxiliaryLayout()
             // live bordered layout entirely instead of being reduced later
             // inside Newton.
             entry.lower_to_direct_only = false;
+            entry.local_condensed = false;
         }
 
         // Validate direct FE field references in auxiliary residual expressions.
@@ -5980,7 +6623,7 @@ void FESystem::finalizeAuxiliaryLayout()
                         "nodes.  Direct field references are only supported for Node-scoped "
                         "models (Lagrange Kronecker delta).  Use sampledField(), "
                         "boundaryIntegral(), domainAverage(), or feExpression() to mediate "
-                        "field access, then bind via bindCoupled().");
+                        "field access, then bind via bind().");
                 }
 
                 // Validate that referenced fields have vertex DOFs with Lagrange
@@ -6079,12 +6722,18 @@ void FESystem::finalizeAuxiliaryLayout()
 
     finalizeDeferredInputDeps();
     buildLoweredAuxiliaryOutputExpressions_();
+    buildAuxiliaryOutputBindings_();
 
     for (auto& entry : deployed_aux_entries_) {
         if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) {
             continue;
         }
         entry.lower_to_direct_only = canLowerAlgebraicAuxiliaryToDirectOnly_(entry);
+        entry.local_condensed =
+            !entry.lower_to_direct_only &&
+            (entry.spec.scope == AuxiliaryStateScope::Cell ||
+             entry.spec.scope == AuxiliaryStateScope::QuadraturePoint ||
+             entry.spec.scope == AuxiliaryStateScope::Facet);
         if (monolithicAuxTraceEnabled()) {
             auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get());
             std::ostringstream oss;
@@ -6128,10 +6777,11 @@ void FESystem::finalizeAuxiliaryLayout()
                     << (lowered.has_value() ? "lowerable" : "blocked");
             }
             oss << "]"
-                << " lower_to_direct_only=" << (entry.lower_to_direct_only ? 1 : 0);
+                << " lower_to_direct_only=" << (entry.lower_to_direct_only ? 1 : 0)
+                << " local_condensed=" << (entry.local_condensed ? 1 : 0);
             FE_LOG_INFO(oss.str());
         }
-        if (!entry.lower_to_direct_only) {
+        if (!entry.lower_to_direct_only && !entry.local_condensed) {
             std::size_t entity_count = entry.explicit_entity_count;
             if (auxiliary_state_manager_ &&
                 auxiliary_state_manager_->hasBlock(entry.instance_name)) {
@@ -6144,6 +6794,18 @@ void FESystem::finalizeAuxiliaryLayout()
             auxiliaryOperatorRegistry().registerMonolithicUnknowns(
                 entry.instance_name, entity_count,
                 entry.spec.size, entry.spec.scope);
+        }
+    }
+
+    if (!auxiliary_operator_registry_) {
+        const bool has_monolithic_aux =
+            std::any_of(deployed_aux_entries_.begin(),
+                        deployed_aux_entries_.end(),
+                        [](const auto& entry) {
+                            return entry.spec.solve_mode == AuxiliarySolveMode::Monolithic;
+                        });
+        if (has_monolithic_aux) {
+            (void)auxiliaryOperatorRegistry();
         }
     }
 
@@ -6684,42 +7346,43 @@ FESystem::synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
 
     const auto& state_names = built->stateNames();
     const auto dim = state_names.size();
-    if (dim == 0 || !isPureAlgebraicAuxiliary(*entry.model, dim)) {
-        trace_block("not_pure_algebraic");
-        return std::nullopt;
-    }
+    const bool can_inline_state_assignments =
+        (dim > 0) && isPureAlgebraicAuxiliary(*entry.model, dim);
 
-    const auto residual_exprs = built->residualExpressions();
-    if (residual_exprs.size() < dim) {
-        trace_block("residual_size_mismatch");
-        return std::nullopt;
-    }
-
-    std::vector<forms::FormExpr> explicit_state_exprs(dim);
-    for (std::size_t i = 0; i < dim; ++i) {
-        auto explicit_rhs =
-            tryExtractExplicitStateAssignment(residual_exprs[i], static_cast<std::uint32_t>(i));
-        if (!explicit_rhs) {
-            trace_block("explicit_state_assignment");
+    std::vector<forms::FormExpr> explicit_state_exprs;
+    if (can_inline_state_assignments) {
+        const auto residual_exprs = built->residualExpressions();
+        if (residual_exprs.size() < dim) {
+            trace_block("residual_size_mismatch");
             return std::nullopt;
         }
-        explicit_state_exprs[i] = std::move(*explicit_rhs);
-    }
 
-    for (std::size_t pass = 0; pass < dim; ++pass) {
+        explicit_state_exprs.resize(dim);
         for (std::size_t i = 0; i < dim; ++i) {
-            explicit_state_exprs[i] = explicit_state_exprs[i].transformNodes(
-                [&](const forms::FormExprNode& node) -> std::optional<forms::FormExpr> {
-                    if (node.type() != forms::FormExprType::AuxiliaryStateRef) {
-                        return std::nullopt;
-                    }
-                    const auto slot = node.slotIndex();
-                    if (!slot || *slot >= explicit_state_exprs.size() || *slot == i ||
-                        !explicit_state_exprs[*slot].isValid()) {
-                        return std::nullopt;
-                    }
-                    return explicit_state_exprs[*slot];
-                });
+            auto explicit_rhs =
+                tryExtractExplicitStateAssignment(residual_exprs[i], static_cast<std::uint32_t>(i));
+            if (!explicit_rhs) {
+                trace_block("explicit_state_assignment");
+                return std::nullopt;
+            }
+            explicit_state_exprs[i] = std::move(*explicit_rhs);
+        }
+
+        for (std::size_t pass = 0; pass < dim; ++pass) {
+            for (std::size_t i = 0; i < dim; ++i) {
+                explicit_state_exprs[i] = explicit_state_exprs[i].transformNodes(
+                    [&](const forms::FormExprNode& node) -> std::optional<forms::FormExpr> {
+                        if (node.type() != forms::FormExprType::AuxiliaryStateRef) {
+                            return std::nullopt;
+                        }
+                        const auto slot = node.slotIndex();
+                        if (!slot || *slot >= explicit_state_exprs.size() || *slot == i ||
+                            !explicit_state_exprs[*slot].isValid()) {
+                            return std::nullopt;
+                        }
+                        return explicit_state_exprs[*slot];
+                    });
+            }
         }
     }
 
@@ -6743,6 +7406,9 @@ FESystem::synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
             [&](const forms::FormExprNode& node) -> std::optional<forms::FormExpr> {
                 switch (node.type()) {
                     case forms::FormExprType::AuxiliaryStateRef: {
+                        if (!can_inline_state_assignments) {
+                            return std::nullopt;
+                        }
                         const auto slot = node.slotIndex();
                         if (!slot || *slot >= explicit_state_exprs.size() ||
                             !explicit_state_exprs[*slot].isValid()) {
@@ -6771,15 +7437,17 @@ FESystem::synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
                         }
 
                         if (!registry_name.empty() && input_reg->hasInput(registry_name)) {
-                            if (const auto coupled_it = entry.coupled_bindings.find(port.name);
-                                coupled_it != entry.coupled_bindings.end()) {
-                                if (const auto* def = coupled_it->second.definition();
-                                    def != nullptr &&
-                                    def->kind == FEQuantityKind::BoundaryIntegral &&
-                                    def->expression.isValid() &&
-                                    def->boundary_marker >= 0) {
-                                    return forms::FormExpr::boundaryIntegral(
-                                        def->expression, def->boundary_marker, registry_name);
+                            if (entry.lower_to_direct_only) {
+                                if (const auto coupled_it = entry.coupled_bindings.find(port.name);
+                                    coupled_it != entry.coupled_bindings.end()) {
+                                    if (const auto* def = coupled_it->second.definition();
+                                        def != nullptr &&
+                                        def->kind == FEQuantityKind::BoundaryIntegral &&
+                                        def->expression.isValid() &&
+                                        def->boundary_marker >= 0) {
+                                        return forms::FormExpr::boundaryIntegral(
+                                            def->expression, def->boundary_marker, registry_name);
+                                    }
                                 }
                             }
                             return forms::FormExpr::auxiliaryInputRef(
@@ -6824,9 +7492,198 @@ FESystem::synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
             trace_block("lowered_invalid");
             return std::nullopt;
         }
-        if (exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryStateRef) ||
-            exprContainsType(*lowered.node(), forms::FormExprType::ParameterRef)) {
-            trace_block("residual_terminals_remaining");
+        if (exprContainsType(*lowered.node(), forms::FormExprType::ParameterRef) ||
+            exprContainsType(*lowered.node(), forms::FormExprType::ParameterSymbol) ||
+            exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryOutputRef) ||
+            exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryOutputSymbol) ||
+            exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryInputSymbol)) {
+            trace_block("unsupported_terminals_remaining");
+            return std::nullopt;
+        }
+        if (entry.lower_to_direct_only &&
+            exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryStateRef)) {
+            trace_block("state_refs_remaining");
+            return std::nullopt;
+        }
+        return lowered;
+    };
+
+    return instantiate(out_it->second);
+}
+
+std::optional<forms::FormExpr>
+FESystem::synthesizeCoupledBoundaryAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
+                                                        std::string_view output_name) const
+{
+    auto trace_block = [&](std::string_view stage) {
+        if (!monolithicAuxTraceEnabled()) {
+            return;
+        }
+        FE_LOG_INFO("FESystem::synthesizeCoupledBoundaryAuxiliaryOutputExpr blocked"
+                    " instance=" + entry.instance_name +
+                    " output=" + std::string(output_name) +
+                    " stage=" + std::string(stage));
+    };
+
+    auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get());
+    if (!built) {
+        trace_block("not_built_model");
+        return std::nullopt;
+    }
+
+    const auto& state_names = built->stateNames();
+    const auto dim = state_names.size();
+    const bool can_inline_state_assignments =
+        (dim > 0) && isPureAlgebraicAuxiliary(*entry.model, dim);
+
+    std::vector<forms::FormExpr> explicit_state_exprs;
+    if (can_inline_state_assignments) {
+        const auto residual_exprs = built->residualExpressions();
+        if (residual_exprs.size() < dim) {
+            trace_block("residual_size_mismatch");
+            return std::nullopt;
+        }
+
+        explicit_state_exprs.resize(dim);
+        for (std::size_t i = 0; i < dim; ++i) {
+            auto explicit_rhs =
+                tryExtractExplicitStateAssignment(residual_exprs[i], static_cast<std::uint32_t>(i));
+            if (!explicit_rhs) {
+                trace_block("explicit_state_assignment");
+                return std::nullopt;
+            }
+            explicit_state_exprs[i] = std::move(*explicit_rhs);
+        }
+
+        for (std::size_t pass = 0; pass < dim; ++pass) {
+            for (std::size_t i = 0; i < dim; ++i) {
+                explicit_state_exprs[i] = explicit_state_exprs[i].transformNodes(
+                    [&](const forms::FormExprNode& node) -> std::optional<forms::FormExpr> {
+                        if (node.type() != forms::FormExprType::AuxiliaryStateRef) {
+                            return std::nullopt;
+                        }
+                        const auto slot = node.slotIndex();
+                        if (!slot || *slot >= explicit_state_exprs.size() || *slot == i ||
+                            !explicit_state_exprs[*slot].isValid()) {
+                            return std::nullopt;
+                        }
+                        return explicit_state_exprs[*slot];
+                    });
+            }
+        }
+    }
+
+    const auto out_it =
+        std::find_if(built->outputExpressions().begin(),
+                     built->outputExpressions().end(),
+                     [&](const auto& kv) { return kv.first == output_name; });
+    if (out_it == built->outputExpressions().end()) {
+        trace_block("missing_output_expr");
+        return std::nullopt;
+    }
+
+    const auto& sig = built->signature();
+    auto instantiate = [&](const forms::FormExpr& expr) -> std::optional<forms::FormExpr> {
+        if (!expr.isValid()) {
+            trace_block("output_expr_invalid");
+            return std::nullopt;
+        }
+
+        auto replace_terminals =
+            [&](const forms::FormExprNode& node) -> std::optional<forms::FormExpr> {
+                switch (node.type()) {
+                    case forms::FormExprType::AuxiliaryStateRef: {
+                        if (!can_inline_state_assignments) {
+                            trace_block("state_assignment_required");
+                            return std::nullopt;
+                        }
+                        const auto slot = node.slotIndex();
+                        if (!slot || *slot >= explicit_state_exprs.size() ||
+                            !explicit_state_exprs[*slot].isValid()) {
+                            trace_block("bad_state_slot");
+                            return std::nullopt;
+                        }
+                        return explicit_state_exprs[*slot];
+                    }
+                    case forms::FormExprType::AuxiliaryInputRef: {
+                        const auto slot = node.slotIndex();
+                        if (!slot || *slot >= sig.inputs.size()) {
+                            trace_block("bad_input_slot");
+                            return std::nullopt;
+                        }
+                        const auto& port = sig.inputs[*slot];
+
+                        std::string registry_name;
+                        const FEQuantityDefinition* def = nullptr;
+                        const auto bind_it = entry.input_bindings.find(port.name);
+                        if (bind_it != entry.input_bindings.end()) {
+                            registry_name = bind_it->second;
+                        } else {
+                            const auto coupled_it = entry.coupled_bindings.find(port.name);
+                            if (coupled_it != entry.coupled_bindings.end()) {
+                                registry_name = coupled_it->second.registryName();
+                                def = coupled_it->second.definition();
+                            }
+                        }
+                        if (def == nullptr && !registry_name.empty() && fe_quantity_registry_ &&
+                            fe_quantity_registry_->hasDefinition(registry_name)) {
+                            def = &fe_quantity_registry_->get(registry_name);
+                        }
+
+                        if (def != nullptr &&
+                            def->kind == FEQuantityKind::BoundaryIntegral &&
+                            def->expression.isValid() &&
+                            def->boundary_marker >= 0) {
+                            return forms::FormExpr::boundaryIntegral(
+                                def->expression, def->boundary_marker, registry_name);
+                        }
+                        if (port.optional && port.default_value.has_value()) {
+                            return forms::FormExpr::constant(*port.default_value);
+                        }
+                        trace_block("unsupported_coupled_boundary_input");
+                        return std::nullopt;
+                    }
+                    case forms::FormExprType::ParameterRef: {
+                        const auto slot = node.slotIndex();
+                        if (!slot || *slot >= sig.parameters.size()) {
+                            trace_block("bad_parameter_slot");
+                            return std::nullopt;
+                        }
+                        const auto& port = sig.parameters[*slot];
+                        const auto param_it = entry.param_values.find(port.name);
+                        if (param_it != entry.param_values.end()) {
+                            return forms::FormExpr::constant(param_it->second);
+                        }
+                        if (port.optional && port.default_value.has_value()) {
+                            return forms::FormExpr::constant(*port.default_value);
+                        }
+                        trace_block("unbound_parameter");
+                        return std::nullopt;
+                    }
+                    default:
+                        return std::nullopt;
+                }
+            };
+
+        auto lowered = expr;
+        const std::size_t max_passes =
+            std::max<std::size_t>(4, dim + sig.inputs.size() + sig.parameters.size() + 1);
+        for (std::size_t pass = 0; pass < max_passes; ++pass) {
+            lowered = lowered.transformNodes(replace_terminals);
+        }
+
+        if (!lowered.isValid() || !lowered.node()) {
+            trace_block("lowered_invalid");
+            return std::nullopt;
+        }
+        if (exprContainsType(*lowered.node(), forms::FormExprType::ParameterRef) ||
+            exprContainsType(*lowered.node(), forms::FormExprType::ParameterSymbol) ||
+            exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryOutputRef) ||
+            exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryOutputSymbol) ||
+            exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryInputRef) ||
+            exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryInputSymbol) ||
+            exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryStateRef)) {
+            trace_block("unsupported_terminals_remaining");
             return std::nullopt;
         }
         return lowered;
@@ -6887,6 +7744,74 @@ FESystem::loweredAuxiliaryOutputExpr(std::size_t slot) const
     return it->second;
 }
 
+std::optional<forms::FormExpr>
+FESystem::coupledBoundaryCompatibleAuxiliaryOutputExpr(std::string_view output_name) const
+{
+    const auto slash = output_name.find('/');
+    if (slash != std::string_view::npos) {
+        const std::string instance_name(output_name.substr(0, slash));
+        const std::string local_name(output_name.substr(slash + 1));
+        for (const auto& entry : deployed_aux_entries_) {
+            if (entry.instance_name != instance_name) {
+                continue;
+            }
+            return synthesizeCoupledBoundaryAuxiliaryOutputExpr_(entry, local_name);
+        }
+        return std::nullopt;
+    }
+
+    std::optional<forms::FormExpr> synthesized;
+    for (const auto& entry : deployed_aux_entries_) {
+        auto lowered = synthesizeCoupledBoundaryAuxiliaryOutputExpr_(entry, output_name);
+        if (!lowered) {
+            continue;
+        }
+        FE_THROW_IF(synthesized.has_value(), InvalidArgumentException,
+                    "coupledBoundaryCompatibleAuxiliaryOutputExpr(\"" +
+                        std::string(output_name) +
+                        "\"): ambiguous output; use qualified instance/output name");
+        synthesized = std::move(lowered);
+    }
+    return synthesized;
+}
+
+bool FESystem::auxiliaryOutputMetadataUsesRef(std::string_view output_name) const
+{
+    const auto slash = output_name.find('/');
+    if (slash != std::string_view::npos) {
+        const std::string instance_name(output_name.substr(0, slash));
+        const std::string local_name(output_name.substr(slash + 1));
+        for (const auto& entry : deployed_aux_entries_) {
+            if (entry.instance_name != instance_name) {
+                continue;
+            }
+            const auto output_names = entry.model->outputNames();
+            const bool found = std::find(output_names.begin(), output_names.end(), local_name) !=
+                output_names.end();
+            return found && !entry.lower_to_direct_only;
+        }
+        return false;
+    }
+
+    const DeployedAuxEntry* match = nullptr;
+    for (const auto& entry : deployed_aux_entries_) {
+        const auto output_names = entry.model->outputNames();
+        const bool found = std::find(
+            output_names.begin(), output_names.end(), std::string(output_name)) != output_names.end();
+        if (!found) {
+            continue;
+        }
+        FE_THROW_IF(
+            match != nullptr,
+            InvalidArgumentException,
+            "auxiliaryOutputMetadataUsesRef(\"" + std::string(output_name) +
+                "\"): ambiguous output; use qualified instance/output name");
+        match = &entry;
+    }
+
+    return match != nullptr && !match->lower_to_direct_only;
+}
+
 void FESystem::buildLoweredAuxiliaryOutputExpressions_()
 {
     lowered_aux_output_exprs_by_name_.clear();
@@ -6906,6 +7831,40 @@ void FESystem::buildLoweredAuxiliaryOutputExpressions_()
             if (slot != static_cast<std::size_t>(-1)) {
                 lowered_aux_output_exprs_by_slot_[slot] = *lowered;
             }
+        }
+    }
+}
+
+void FESystem::buildAuxiliaryOutputBindings_()
+{
+    auxiliary_output_bindings_.clear();
+
+    for (const auto& entry : deployed_aux_entries_) {
+        const auto output_names = entry.model->outputNames();
+        if (output_names.empty()) {
+            continue;
+        }
+
+        for (const auto& output_name : output_names) {
+            const auto base_slot = auxiliaryOutputSlotOf(entry.instance_name, output_name);
+            if (base_slot == static_cast<std::size_t>(-1)) {
+                continue;
+            }
+
+            assembly::AuxiliaryOutputBinding binding;
+            binding.base_slot = static_cast<std::uint32_t>(base_slot);
+            binding.scope = toAssemblyAuxiliaryOutputScope(entry.spec.scope);
+            binding.outputs_per_entity =
+                static_cast<std::uint32_t>(std::max<std::size_t>(1u, output_names.size()));
+            binding.entity_map_data = entry.entity_map.empty()
+                ? nullptr
+                : entry.entity_map.data();
+            binding.entity_map_size = entry.entity_map.size();
+            binding.qp_offsets_data = entry.qp_offsets.empty()
+                ? nullptr
+                : entry.qp_offsets.data();
+            binding.qp_offsets_size = entry.qp_offsets.size();
+            auxiliary_output_bindings_.push_back(binding);
         }
     }
 }

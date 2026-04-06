@@ -878,6 +878,12 @@ void FunctionalAssembler::setAuxiliaryValues(std::span<const Real> inputs,
     coupled_aux_state_ = state;
 }
 
+void FunctionalAssembler::setAuxiliaryOutputBindings(
+    std::span<const AuxiliaryOutputBinding> bindings) noexcept
+{
+    auxiliary_output_bindings_ = bindings;
+}
+
 void FunctionalAssembler::setHistoryWeights(std::span<const Real> weights) noexcept
 {
     history_weights_ = weights;
@@ -1538,6 +1544,7 @@ Real FunctionalAssembler::assembleCellsCore(
 	                thread_context.setUserData(user_data_);
 	                thread_context.setJITConstants(jit_constants_);
 	                thread_context.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+	                thread_context.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
 		                thread_context.setHistoryWeights(history_weights_);
 		                const auto dofs = dof_map_->getCellDofs(cell_id);
 		                if (need_solution) {
@@ -1812,6 +1819,7 @@ Real FunctionalAssembler::assembleBoundaryCore(
             context_.setUserData(user_data_);
             context_.setJITConstants(jit_constants_);
 	            context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+	            context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
 	            context_.setHistoryWeights(history_weights_);
 	            context_.setBoundaryMarker(boundary_marker);
 
@@ -1904,6 +1912,7 @@ void FunctionalAssembler::prepareContext(
     context_.setUserData(user_data_);
     context_.setJITConstants(jit_constants_);
     context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+    context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
     context_.setHistoryWeights(history_weights_);
 }
 

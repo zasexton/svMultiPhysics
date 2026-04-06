@@ -295,7 +295,7 @@ class AuxiliaryDeployedInstance {
 public:
     explicit AuxiliaryDeployedInstance(std::shared_ptr<AuxiliaryStateModel> model);
 
-    /// Set the instance name (defaults to model name).
+    /// Set the instance name (defaults to the model name until deployment finalization).
     AuxiliaryDeployedInstance& name(std::string instance_name);
 
     /// Set the storage scope.
@@ -337,6 +337,12 @@ public:
     AuxiliaryDeployedInstance& cell()
     {
         return scope(AuxiliaryStateScope::Cell);
+    }
+
+    /// Shorthand for `.scope(AuxiliaryStateScope::QuadraturePoint)`.
+    AuxiliaryDeployedInstance& quadraturePoint()
+    {
+        return scope(AuxiliaryStateScope::QuadraturePoint);
     }
 
     /// Shorthand for `.scope(AuxiliaryStateScope::Boundary)` with a boundary
@@ -404,42 +410,39 @@ public:
 
     /// Bind a model input to an AuxiliaryInputHandle.
     AuxiliaryDeployedInstance& bind(const std::string& model_input,
-                                     const AuxiliaryInputHandle& handle)
-    {
-        return bind(model_input, handle.registryName());
-    }
+                                     const AuxiliaryInputHandle& handle);
 
     /**
      * @brief Auto-bind an input handle by matching its registry name to a
      *        model input with the same name.
      *
      * ```cpp
-     * auto Q = system.boundaryIntegral("Q", ...);
+     * auto Q = system.boundaryIntegral(...);
      * .bind(Q)  // binds model input "Q" to registry input "Q"
      * ```
      */
     AuxiliaryDeployedInstance& bind(const AuxiliaryInputHandle& handle)
     {
-        return bind(handle.registryName(), handle.registryName());
+        return bind(handle.registryName(), handle);
     }
 
     /**
-     * @brief Bind a model input for exact monolithic coupling.
+     * @brief Deprecated compatibility shim for exact monolithic FE coupling.
      *
-     * The FE-backed input handle must support monolithic linearization.
-     * At assembly time, the chain rule `dF/du = dF/dI * dI/du` will be
-     * composed automatically for this binding.
-     *
-     * Only valid for monolithic deployments.
+     * FE-backed input handles now preserve their metadata through
+     * `bind(model_input, handle)`. In monolithic solve mode the chain rule
+     * `dF/du = dF/dI * dI/du` is assembled automatically for those bindings.
      *
      * ```cpp
-     * use(model).monolithic().bindCoupled("Q", Q_handle);
+     * use(model).monolithic().bind("Q", Q_handle);
      * ```
      */
+    [[deprecated("bindCoupled() is deprecated; use bind(model_input, handle) instead")]]
     AuxiliaryDeployedInstance& bindCoupled(const std::string& model_input,
                                             const AuxiliaryInputHandle& handle);
 
     /// Auto-bind coupled by name match.
+    [[deprecated("bindCoupled() is deprecated; use bind(handle) instead")]]
     AuxiliaryDeployedInstance& bindCoupled(const AuxiliaryInputHandle& handle)
     {
         return bindCoupled(handle.registryName(), handle);
@@ -482,6 +485,9 @@ public:
 
     /// Explicit entity count override.
     AuxiliaryDeployedInstance& entityCount(std::size_t count);
+
+    /// Optional CSR-style QP offsets for QuadraturePoint scope.
+    AuxiliaryDeployedInstance& qpOffsets(std::vector<std::size_t> offsets);
 
     // ---- Derivative policy ----
 
@@ -531,6 +537,19 @@ public:
     {
         return entity_count_;
     }
+    [[nodiscard]] bool hasExplicitName() const noexcept
+    {
+        return has_explicit_name_;
+    }
+    [[nodiscard]] std::span<const std::size_t> qpOffsets() const noexcept
+    {
+        return qp_offsets_;
+    }
+    void setResolvedInstanceName(std::string instance_name)
+    {
+        instance_name_ = std::move(instance_name);
+        has_explicit_name_ = true;
+    }
     [[nodiscard]] const AuxiliaryDerivativePolicy& getDerivativePolicy() const noexcept
     {
         return derivative_policy_;
@@ -570,17 +589,19 @@ public:
 private:
     std::shared_ptr<AuxiliaryStateModel> model_{};
     std::string instance_name_{};
+    bool has_explicit_name_{false};
     AuxiliaryStateScope scope_{AuxiliaryStateScope::Global};
     AuxiliaryDeploymentRegion region_{};
     AuxiliarySolveMode solve_mode_{AuxiliarySolveMode::Partitioned};
     AuxiliaryScheduleMode schedule_{AuxiliaryScheduleMode::SingleRate};
     AuxiliaryStepperSpec stepper_spec_{};
     std::unordered_map<std::string, std::string> input_bindings_{};
-    /// Inputs bound with bindCoupled() — keyed by model input name.
+    /// FE-backed handle bindings keyed by model input name.
     std::unordered_map<std::string, AuxiliaryInputHandle> coupled_bindings_{};
     std::unordered_map<std::string, Real> param_values_{};
     std::vector<Real> initial_values_{};
     std::size_t entity_count_{0}; ///< 0 = auto-detect from scope/mesh
+    std::vector<std::size_t> qp_offsets_{};
     AuxiliaryDerivativePolicy derivative_policy_{};
     bool has_explicit_derivative_policy_{false};
     AuxiliaryLayoutMode layout_mode_{AuxiliaryLayoutMode::FixedStride};

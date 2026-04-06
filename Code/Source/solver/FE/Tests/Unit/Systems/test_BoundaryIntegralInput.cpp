@@ -9,6 +9,7 @@
 #include "Systems/AuxiliaryInputRegistry.h"
 #include "Systems/AuxiliaryBindings.h"
 #include "Systems/AuxiliaryModelBuilder.h"
+#include "Systems/AuxiliaryStateManager.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 #include "Constraints/DirichletBC.h"
@@ -603,13 +604,30 @@ TEST(BoundaryIntegralInput, BoundaryIntegralReturnsHandle)
     sys.addOperator("op");
 
     const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
-    auto Q = sys.boundaryIntegral("Q", inner(u_disc, FormExpr::normal()), marker);
-
-    EXPECT_EQ(Q.registryName(), "Q");
+    auto Q = sys.boundaryIntegral(inner(u_disc, FormExpr::normal()), marker);
+    EXPECT_EQ(Q.registryName().find("_boundary_integral_b5_"), 0u);
 
     // Handle should be convertible to FormExpr.
     FormExpr q_expr = Q;
     EXPECT_TRUE(q_expr.isValid());
+}
+
+TEST(BoundaryIntegralInput, BoundaryIntegralAutoNamesHandles)
+{
+    const int marker = 5;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+
+    const auto u_state = FormExpr::stateField(u_field, *space, "u");
+    auto Q0 = sys.boundaryIntegral(inner(u_state, FormExpr::normal()), marker);
+    auto Q1 = sys.boundaryIntegral(inner(u_state, FormExpr::normal()), marker);
+
+    EXPECT_NE(Q0.registryName(), Q1.registryName());
+    EXPECT_EQ(Q0.registryName().find("_boundary_integral_b5_"), 0u);
+    EXPECT_EQ(Q1.registryName().find("_boundary_integral_b5_"), 0u);
 }
 
 TEST(BoundaryIntegralInput, DerivedInputEvaluatesCorrectly)
@@ -626,7 +644,7 @@ TEST(BoundaryIntegralInput, DerivedInputEvaluatesCorrectly)
 
     // Scalar integrand: discrete field value (not inner with normal).
     const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
-    auto Q = sys.boundaryIntegral("Q", u_disc, marker);
+    auto Q = sys.boundaryIntegral(u_disc, marker);
 
     // derivedInput references Q via handle — resolved at finalization.
     auto P_out = sys.derivedInput("P_out",
@@ -646,7 +664,7 @@ TEST(BoundaryIntegralInput, DerivedInputEvaluatesCorrectly)
 
     const auto* reg = sys.auxiliaryInputRegistryIfPresent();
     ASSERT_NE(reg, nullptr);
-    EXPECT_NEAR(reg->get("Q"), 0.5, 1e-10);
+    EXPECT_NEAR(reg->get(Q.registryName()), 0.5, 1e-10);
     EXPECT_NEAR(reg->get("P_out"), 5.0 + 200.0 * 0.5, 1e-10);
 }
 
@@ -668,7 +686,7 @@ TEST(BoundaryIntegralInput, DerivedInputForwardReference)
 
     // Then register the boundary integral.
     const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
-    sys.boundaryIntegral("Q", u_disc, marker);
+    sys.registerBoundaryIntegralInput("Q", u_disc, marker);
 
     const auto u = FormExpr::stateField(u_field, *space, "u");
     const auto v = FormExpr::testFunction(*space, "v");
@@ -821,7 +839,7 @@ TEST(FEQuantityHandle, BoundaryIntegralCarriesDefinition)
     const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
     const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
 
-    auto Q = sys.boundaryIntegral("Q", u_disc, marker);
+    auto Q = sys.boundaryIntegral(u_disc, marker);
 
     ASSERT_TRUE(Q.hasDefinition());
     EXPECT_EQ(Q.kind(), svmp::FE::systems::FEQuantityKind::BoundaryIntegral);
@@ -831,6 +849,39 @@ TEST(FEQuantityHandle, BoundaryIntegralCarriesDefinition)
     EXPECT_TRUE(Q.supportsMonolithicLinearization());
     ASSERT_EQ(Q.referencedFields().size(), 1u);
     EXPECT_EQ(Q.referencedFields()[0], u_field);
+}
+
+TEST(FEQuantityHandle, BoundaryIntegralAcceptsStateFieldIntegrand)
+{
+    const int marker = 5;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u_state = FormExpr::stateField(u_field, *space, "u");
+    auto Q = sys.boundaryIntegral(u_state, marker);
+
+    ASSERT_TRUE(Q.hasDefinition());
+    ASSERT_EQ(Q.referencedFields().size(), 1u);
+    EXPECT_EQ(Q.referencedFields()[0], u_field);
+
+    const auto v = FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, inner(grad(u_state), grad(v)).dx());
+    { SetupInputs si; si.topology_override = singleTetraTopology(); sys.setup({}, si); }
+
+    std::vector<Real> sol(static_cast<std::size_t>(sys.dofHandler().getNumDofs()), 1.0);
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = sol;
+    sys.prepareAuxiliaryForAssembly(state, false);
+
+    const auto* reg = sys.auxiliaryInputRegistryIfPresent();
+    ASSERT_NE(reg, nullptr);
+    EXPECT_NEAR(reg->get(Q.registryName()), 0.5, 1e-10);
 }
 
 TEST(FEQuantityHandle, SampledFieldCarriesDefinition)
@@ -899,14 +950,14 @@ TEST(FEQuantityHandle, FEQuantityRegistryTracksDefinitions)
     const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
     const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
 
-    sys.boundaryIntegral("Q1", u_disc, marker);
+    const auto Q1 = sys.boundaryIntegral(u_disc, marker);
     sys.boundaryAverage("Q2", u_disc, marker);
     sys.derivedInput("P", FormExpr::constant(1.0));
 
     const auto* reg = sys.feQuantityRegistryIfPresent();
     ASSERT_NE(reg, nullptr);
     EXPECT_EQ(reg->count(), 3u);
-    EXPECT_TRUE(reg->hasDefinition("Q1"));
+    EXPECT_TRUE(reg->hasDefinition(Q1.registryName()));
     EXPECT_TRUE(reg->hasDefinition("Q2"));
     EXPECT_TRUE(reg->hasDefinition("P"));
 
@@ -914,7 +965,7 @@ TEST(FEQuantityHandle, FEQuantityRegistryTracksDefinitions)
     EXPECT_EQ(boundary_defs.size(), 1u);
 
     auto field_defs = reg->byField(u_field);
-    EXPECT_EQ(field_defs.size(), 2u);  // Q1 and Q2 reference u_field
+    EXPECT_EQ(field_defs.size(), 2u);  // boundary integral and Q2 reference u_field
 }
 
 // ===========================================================================
@@ -923,7 +974,7 @@ TEST(FEQuantityHandle, FEQuantityRegistryTracksDefinitions)
 
 #include "Systems/AuxiliaryModelDSL.h"
 
-TEST(BindingModeValidation, CoupledBindingOnPartitionedRejects)
+TEST(BindingModeValidation, HandleBindingOnPartitionedAccepts)
 {
     using namespace svmp::FE::systems;
 
@@ -937,14 +988,13 @@ TEST(BindingModeValidation, CoupledBindingOnPartitionedRejects)
 
     auto inst = use(model)
         .name("inst")
-        .partitioned("BackwardEuler")  // NOT monolithic
-        .bindCoupled("Q", Q_handle)
+        .partitioned("BackwardEuler")
+        .bind("Q", Q_handle)
         .initialize({0.0});
 
     auto err = inst.validate();
-    EXPECT_FALSE(err.empty());
-    EXPECT_NE(err.find("Monolithic"), std::string::npos)
-        << "Should reject coupled bindings on non-monolithic deployments: " << err;
+    EXPECT_TRUE(err.empty()) << "Partitioned handle-backed bindings remain valid inputs: " << err;
+    ASSERT_EQ(inst.coupledBindings().count("Q"), 1u);
 }
 
 TEST(BindingModeValidation, CoupledBindingOnMonolithicAccepts)
@@ -967,7 +1017,7 @@ TEST(BindingModeValidation, CoupledBindingOnMonolithicAccepts)
     auto inst = use(model)
         .name("inst")
         .monolithic()
-        .bindCoupled("Q", Q_handle)
+        .bind("Q", Q_handle)
         .initialize({0.0});
 
     auto err = inst.validate();
@@ -1018,7 +1068,7 @@ TEST(FEQuantityExplicit, GeometryOnlyConstantIntegral)
     sys.addOperator("op");
 
     // Geometry-only: integrand has no field dependence.
-    auto area = sys.boundaryIntegral("face_area", FormExpr::constant(1.0), marker);
+    auto area = sys.boundaryIntegral(FormExpr::constant(1.0), marker);
     EXPECT_TRUE(area.supportsExplicitEvaluation());
     // No field references → no monolithic linearization.
     EXPECT_FALSE(area.supportsMonolithicLinearization());
@@ -1033,7 +1083,7 @@ TEST(FEQuantityExplicit, GeometryOnlyConstantIntegral)
     SystemStateView state; state.time = 0.0; state.dt = 0.1; state.u = sol;
     sys.prepareAuxiliaryForAssembly(state, false);
 
-    EXPECT_NEAR(sys.auxiliaryInputRegistryIfPresent()->get("face_area"), 0.5, 1e-10);
+    EXPECT_NEAR(sys.auxiliaryInputRegistryIfPresent()->get(area.registryName()), 0.5, 1e-10);
 }
 
 // ===========================================================================
@@ -1101,7 +1151,7 @@ TEST(BindingModeDiagnostics, ShapeMismatchRejected)
     AuxiliaryInputHandle Q_handle("Q_vec", def);
 
     auto inst = use(model).name("inst").monolithic()
-        .bindCoupled("Q", Q_handle).initialize({0.0});
+        .bind("Q", Q_handle).initialize({0.0});
 
     auto err = inst.validate();
     EXPECT_FALSE(err.empty());
@@ -1128,7 +1178,7 @@ TEST(BindingModeDiagnostics, UnsupportedLinearizationRejected)
     AuxiliaryInputHandle Q_handle("Q_callback", def);
 
     auto inst = use(model).name("inst").monolithic()
-        .bindCoupled("Q", Q_handle).initialize({0.0});
+        .bind("Q", Q_handle).initialize({0.0});
 
     auto err = inst.validate();
     EXPECT_FALSE(err.empty());
@@ -1284,7 +1334,7 @@ TEST(FEQuantityRegression, MultiFieldBoundaryIntegral)
     const auto p_disc = FormExpr::discreteField(p_field, *p_space, "p");
 
     // Multi-field integrand: p * inner(u, n).
-    auto Q = sys.boundaryIntegral("Q_multi",
+    auto Q = sys.boundaryIntegral(
         p_disc * inner(u_disc, FormExpr::normal()), marker);
 
     ASSERT_TRUE(Q.hasDefinition());
@@ -1326,8 +1376,8 @@ TEST(FEQuantityRegression, MonolithicCoupledBindingStructure)
     AuxiliaryInputHandle Q2("Q2_reg", def2);
 
     auto inst = use(model).name("coupled_inst").monolithic()
-        .bindCoupled("Q1", Q1)
-        .bindCoupled("Q2", Q2)
+        .bind("Q1", Q1)
+        .bind("Q2", Q2)
         .param("k", 1.0)
         .initialize({0.0, 0.0});
 
@@ -1840,7 +1890,7 @@ TEST(FEQuantityExplicit, MultiFieldBoundaryIntegralEvaluates)
 
     const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
     // u * u is a single-field "multi-reference" integrand.
-    auto Q = sys.boundaryIntegral("Q_uu", u_disc * u_disc, marker);
+    auto Q = sys.boundaryIntegral(u_disc * u_disc, marker);
 
     const auto u = FormExpr::stateField(u_field, *space, "u");
     const auto v = FormExpr::testFunction(*space, "v");
@@ -1853,7 +1903,7 @@ TEST(FEQuantityExplicit, MultiFieldBoundaryIntegralEvaluates)
     sys.prepareAuxiliaryForAssembly(state, false);
 
     // ∫ u² ds with u=2 on face area 0.5 → 4 * 0.5 = 2.0.
-    EXPECT_NEAR(sys.auxiliaryInputRegistryIfPresent()->get("Q_uu"), 2.0, 1e-10);
+    EXPECT_NEAR(sys.auxiliaryInputRegistryIfPresent()->get(Q.registryName()), 2.0, 1e-10);
 }
 
 // ===========================================================================
@@ -2509,7 +2559,7 @@ TEST(MonolithicCoupling, MixedJacobianBlockFDVerification)
 
     // Register boundary integral Q and deploy monolithic model.
     const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
-    auto Q = sys.boundaryIntegral("Q", u_disc, marker);
+    auto Q = sys.boundaryIntegral(u_disc, marker);
 
     auto model = aux::model("driven", [](ModelFacade& m) {
         auto Q = m.input("Q");
@@ -2520,7 +2570,7 @@ TEST(MonolithicCoupling, MixedJacobianBlockFDVerification)
 
     sys.deploy(
         use(model).name("driven_inst").monolithic()
-            .bindCoupled("Q", Q)
+            .bind("Q", Q)
             .param("k", 1.0)
             .initialize({0.0}));
 
@@ -2635,7 +2685,7 @@ TEST(MonolithicCoupling, TwoStateVectorOutletDirectCouplingMatchesFD)
 
     auto inst = sys.deploy(
         use(model).name("two_state_vector_outlet_like_inst").global().monolithic()
-            .bindCoupled("Q", Q)
+            .bind("Q", Q)
             .params({
                 {"Rp", 3.0},
                 {"C1", 0.5},
@@ -2783,7 +2833,7 @@ TEST(MonolithicCoupling, TwoStateVectorOutletBorderedReductionMatchesDenseSolve)
 
     auto inst = sys.deploy(
         use(model).name("two_state_vector_outlet_reduction_inst").global().monolithic()
-            .bindCoupled("Q", Q)
+            .bind("Q", Q)
             .params({
                 {"Rp", 3.0},
                 {"C1", 0.5},
@@ -3022,7 +3072,7 @@ TEST(MonolithicCoupling, TwoStateVectorOutletDirectCouplingRespectsConstrainedOu
 
     auto inst = sys.deploy(
         use(model).name("two_state_vector_outlet_like_constrained_inst").global().monolithic()
-            .bindCoupled("Q", Q)
+            .bind("Q", Q)
             .params({
                 {"Rp", 3.0},
                 {"C1", 0.5},
@@ -3183,7 +3233,7 @@ TEST(MonolithicCoupling, DirectCouplingReducedUpdateUsesActualOutputSensitivity)
     sys.addOperator("op");
 
     const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
-    auto Q = sys.boundaryIntegral("Q", u_disc, marker);
+    auto Q = sys.boundaryIntegral(u_disc, marker);
 
     auto model = aux::model("two_state_direct", [](ModelFacade& m) {
         auto Q = m.input("Q");
@@ -3197,7 +3247,7 @@ TEST(MonolithicCoupling, DirectCouplingReducedUpdateUsesActualOutputSensitivity)
 
     auto inst = sys.deploy(
         use(model).name("two_state_direct_inst").global().monolithic()
-            .bindCoupled("Q", Q)
+            .bind("Q", Q)
             .param("Rp", 3.0)
             .initialize({0.0, 0.0}));
 
@@ -3269,7 +3319,7 @@ TEST(MonolithicCoupling, DirectCouplingUsesExactReducedFieldUpdateWhenNotSymmetr
         sys.addOperator("op");
 
         const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
-        auto Q = sys.boundaryIntegral("Q", u_disc, marker);
+        auto Q = sys.boundaryIntegral(u_disc, marker);
 
         auto model = aux::model("nonsymmetric_direct", [](ModelFacade& m) {
             auto Q = m.input("Q");
@@ -3281,7 +3331,7 @@ TEST(MonolithicCoupling, DirectCouplingUsesExactReducedFieldUpdateWhenNotSymmetr
 
         auto inst = sys.deploy(
             use(model).name("nonsymmetric_direct_inst").global().monolithic()
-                .bindCoupled("Q", Q)
+                .bind("Q", Q)
                 .param("Rp", Rp)
                 .initialize({0.0}));
 
@@ -3725,6 +3775,248 @@ TEST(MonolithicCoupling, DirectFieldCellScopeRejected)
     { SetupInputs si; si.topology_override = singleTetraTopology(); sys.setup({}, si); }
 
     EXPECT_THROW(sys.finalizeAuxiliaryLayout(), svmp::FE::InvalidArgumentException);
+}
+
+TEST(MonolithicCoupling, CellScopedLocalCondensationMatchesGlobalBorderedReference)
+{
+    const int marker = 11;
+
+    struct MonolithicCase {
+        std::unique_ptr<FESystem> sys{};
+        FieldId u_field{svmp::FE::INVALID_FIELD_ID};
+        std::string instance_name{};
+        std::vector<Real> sol{};
+        SystemStateView state{};
+        std::size_t n_field{0};
+    };
+
+    auto buildCase = [&](AuxiliaryStateScope scope,
+                         std::string instance_name) -> MonolithicCase {
+        auto mesh =
+            std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+        auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+        MonolithicCase c;
+        c.sys = std::make_unique<FESystem>(mesh);
+        c.u_field = c.sys->addField(FieldSpec{.name = "u", .space = space, .components = 1});
+        c.sys->addOperator("op");
+
+        const auto u_disc = FormExpr::discreteField(c.u_field, *space, "u");
+        auto Q = c.sys->boundaryIntegral(u_disc, marker);
+
+        auto model = aux::model("cell_condensed_compare", [](ModelFacade& m) {
+            auto Q = m.input("Q");
+            auto x = m.state("x");
+            m << ddt(x) == -x + Q;
+            m << out("P_out") == x;
+        });
+
+        auto deployment =
+            use(model).name(instance_name).monolithic().bind("Q", Q).initialize({0.25});
+        if (scope == AuxiliaryStateScope::Cell) {
+            deployment.scope(AuxiliaryStateScope::Cell).entityCount(1);
+        } else {
+            deployment.global();
+        }
+        auto inst = c.sys->deploy(deployment);
+
+        const auto u = FormExpr::stateField(c.u_field, *space, "u");
+        const auto v = FormExpr::testFunction(*space, "v");
+        const auto residual = (u * v).dx() - (inst.output("P_out") * v).dx();
+        (void)installFormulation(*c.sys, "op", {c.u_field}, residual);
+
+        SetupInputs si;
+        si.topology_override = singleTetraTopology();
+        c.sys->setup({}, si);
+        c.sys->finalizeAuxiliaryLayout();
+        c.sys->beginTimeStep();
+
+        c.n_field = static_cast<std::size_t>(c.sys->dofHandler().getNumDofs());
+        c.sol.assign(c.n_field, 1.0);
+        c.state.time = 0.0;
+        c.state.dt = 0.1;
+        c.state.u = c.sol;
+        c.instance_name = std::move(instance_name);
+        return c;
+    };
+
+    auto solveDense = [](std::vector<Real> A, std::vector<Real> b) -> std::vector<Real> {
+        const auto n = b.size();
+        EXPECT_EQ(A.size(), n * n);
+        for (std::size_t k = 0; k < n; ++k) {
+            std::size_t pivot = k;
+            Real max_abs = std::abs(A[k * n + k]);
+            for (std::size_t i = k + 1; i < n; ++i) {
+                const Real cand = std::abs(A[i * n + k]);
+                if (cand > max_abs) {
+                    max_abs = cand;
+                    pivot = i;
+                }
+            }
+            EXPECT_GT(max_abs, 1e-14);
+            if (pivot != k) {
+                for (std::size_t j = 0; j < n; ++j) {
+                    std::swap(A[k * n + j], A[pivot * n + j]);
+                }
+                std::swap(b[k], b[pivot]);
+            }
+            const Real diag = A[k * n + k];
+            for (std::size_t i = k + 1; i < n; ++i) {
+                const Real factor = A[i * n + k] / diag;
+                if (std::abs(factor) <= 1e-30) {
+                    continue;
+                }
+                for (std::size_t j = k; j < n; ++j) {
+                    A[i * n + j] -= factor * A[k * n + j];
+                }
+                b[i] -= factor * b[k];
+            }
+        }
+        std::vector<Real> x(n, 0.0);
+        for (std::size_t ii = n; ii-- > 0;) {
+            Real sum = b[ii];
+            for (std::size_t j = ii + 1; j < n; ++j) {
+                sum -= A[ii * n + j] * x[j];
+            }
+            x[ii] = sum / A[ii * n + ii];
+        }
+        return x;
+    };
+
+    auto assembleFieldSystem =
+        [&](MonolithicCase& c,
+            std::vector<Real>& K_out,
+            std::vector<Real>& r_out) {
+            svmp::FE::assembly::DenseMatrixView lhs(
+                static_cast<svmp::FE::GlobalIndex>(c.n_field));
+            svmp::FE::assembly::DenseVectorView rhs(
+                static_cast<svmp::FE::GlobalIndex>(c.n_field));
+            lhs.zero();
+            rhs.zero();
+
+            AssemblyRequest req;
+            req.op = "op";
+            req.want_matrix = true;
+            req.want_vector = true;
+            req.is_nonlinear_iteration = true;
+
+            const auto result = c.sys->assemble(req, c.state, &lhs, &rhs);
+            ASSERT_TRUE(result.success);
+
+            K_out.assign(c.n_field * c.n_field, Real(0.0));
+            r_out.assign(c.n_field, Real(0.0));
+            for (std::size_t i = 0; i < c.n_field; ++i) {
+                r_out[i] = rhs.getVectorEntry(static_cast<svmp::FE::GlobalIndex>(i));
+                for (std::size_t j = 0; j < c.n_field; ++j) {
+                    K_out[i * c.n_field + j] =
+                        lhs.getMatrixEntry(static_cast<svmp::FE::GlobalIndex>(i),
+                                           static_cast<svmp::FE::GlobalIndex>(j));
+                }
+            }
+
+            for (const auto& upd : c.sys->lastRankOneUpdates()) {
+                for (const auto& [row_dof, row_val] : upd.v) {
+                    const auto row = static_cast<std::size_t>(row_dof);
+                    for (const auto& [col_dof, col_val] : upd.v) {
+                        const auto col = static_cast<std::size_t>(col_dof);
+                        K_out[row * c.n_field + col] += upd.sigma * row_val * col_val;
+                    }
+                }
+            }
+            for (const auto& upd : c.sys->lastReducedFieldUpdates()) {
+                for (const auto& [row_dof, row_val] : upd.left) {
+                    const auto row = static_cast<std::size_t>(row_dof);
+                    for (const auto& [col_dof, col_val] : upd.right) {
+                        const auto col = static_cast<std::size_t>(col_dof);
+                        K_out[row * c.n_field + col] += upd.sigma * row_val * col_val;
+                    }
+                }
+            }
+        };
+
+    auto global_case = buildCase(AuxiliaryStateScope::Global, "global_ref");
+    auto cell_case = buildCase(AuxiliaryStateScope::Cell, "cell_condensed");
+
+    std::vector<Real> K_global;
+    std::vector<Real> r_global;
+    assembleFieldSystem(global_case, K_global, r_global);
+    const auto& global_bc = global_case.sys->borderedCoupling();
+    ASSERT_TRUE(global_bc.active);
+    ASSERT_EQ(global_bc.n_aux, 1);
+
+    std::vector<Real> K_cell;
+    std::vector<Real> r_cell;
+    assembleFieldSystem(cell_case, K_cell, r_cell);
+    EXPECT_FALSE(cell_case.sys->borderedCoupling().active);
+    EXPECT_TRUE(cell_case.sys->hasLocalCondensedRecovery());
+    EXPECT_FALSE(cell_case.sys->lastReducedFieldUpdates().empty());
+    ASSERT_EQ(cell_case.sys->lastLocalCondensedRhsShift().size(), cell_case.n_field);
+
+    const Real D_inv = Real(1.0) / global_bc.D[0];
+    std::vector<Real> K_ref = K_global;
+    std::vector<Real> r_ref = r_global;
+    for (std::size_t i = 0; i < global_case.n_field; ++i) {
+        r_ref[i] -= global_bc.B[i] * D_inv * global_bc.g[0];
+        for (std::size_t j = 0; j < global_case.n_field; ++j) {
+            K_ref[i * global_case.n_field + j] -=
+                global_bc.B[i] * D_inv * global_bc.Ct[j];
+        }
+    }
+
+    std::vector<Real> r_cell_reduced = r_cell;
+    const auto local_shift = cell_case.sys->lastLocalCondensedRhsShift();
+    for (std::size_t i = 0; i < r_cell_reduced.size(); ++i) {
+        r_cell_reduced[i] -= local_shift[i];
+    }
+
+    ASSERT_EQ(K_ref.size(), K_cell.size());
+    ASSERT_EQ(r_ref.size(), r_cell_reduced.size());
+    for (std::size_t i = 0; i < K_ref.size(); ++i) {
+        EXPECT_NEAR(K_cell[i], K_ref[i], std::max(1e-8, std::abs(K_ref[i]) * 1e-7))
+            << "reduced field Jacobian mismatch at flat index " << i;
+    }
+    for (std::size_t i = 0; i < r_ref.size(); ++i) {
+        EXPECT_NEAR(r_cell_reduced[i], r_ref[i], std::max(1e-8, std::abs(r_ref[i]) * 1e-7))
+            << "reduced field residual mismatch at row " << i;
+    }
+
+    const auto du_reduced = solveDense(K_cell, r_cell_reduced);
+
+    std::vector<Real> full_matrix((global_case.n_field + 1) * (global_case.n_field + 1), Real(0.0));
+    std::vector<Real> full_rhs(global_case.n_field + 1, Real(0.0));
+    for (std::size_t i = 0; i < global_case.n_field; ++i) {
+        full_rhs[i] = r_global[i];
+        for (std::size_t j = 0; j < global_case.n_field; ++j) {
+            full_matrix[i * (global_case.n_field + 1) + j] =
+                K_global[i * global_case.n_field + j];
+        }
+        full_matrix[i * (global_case.n_field + 1) + global_case.n_field] = global_bc.B[i];
+    }
+    full_rhs[global_case.n_field] = global_bc.g[0];
+    for (std::size_t j = 0; j < global_case.n_field; ++j) {
+        full_matrix[global_case.n_field * (global_case.n_field + 1) + j] = global_bc.Ct[j];
+    }
+    full_matrix.back() = global_bc.D[0];
+
+    const auto dense_step = solveDense(full_matrix, full_rhs);
+    ASSERT_EQ(dense_step.size(), global_case.n_field + 1);
+    for (std::size_t i = 0; i < global_case.n_field; ++i) {
+        EXPECT_NEAR(du_reduced[i],
+                    dense_step[i],
+                    std::max(1e-8, std::abs(dense_step[i]) * 1e-7))
+            << "reduced field step mismatch at dof " << i;
+    }
+
+    auto& cell_block = cell_case.sys->auxiliaryStateManager().getBlock(cell_case.instance_name);
+    const auto x_before = cell_block.gatherEntityWork(0);
+    ASSERT_EQ(x_before.size(), 1u);
+    cell_case.sys->applyLocalCondensedRecovery(du_reduced, Real(1.0));
+    const auto x_after = cell_block.gatherEntityWork(0);
+    ASSERT_EQ(x_after.size(), 1u);
+    const Real dx_local = x_before[0] - x_after[0];
+    EXPECT_NEAR(dx_local,
+                dense_step[global_case.n_field],
+                std::max(1e-8, std::abs(dense_step[global_case.n_field]) * 1e-7));
 }
 
 TEST(MonolithicCoupling, DirectFieldNonH1SpaceRejected)

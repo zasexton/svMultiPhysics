@@ -668,6 +668,7 @@ assembly::AssemblyResult assembleOperator(
         }
 
         auto aux_outputs = system.auxiliaryOutputValues();
+        assembler.setAuxiliaryOutputBindings(system.auxiliaryOutputBindings());
 
         if (!aux_inputs.empty() || !aux_state_flat.empty() || !aux_outputs.empty()) {
             if (oopTraceEnabled() && !aux_outputs.empty()) {
@@ -1602,8 +1603,19 @@ assembly::AssemblyResult assembleOperator(
     // FSILS bounds), capture into bordered coupling storage for post-solve
     // static condensation.
     if (system.auxiliaryStateManagerIfPresent() &&
-        system.auxiliaryOperatorRegistryIfPresent() &&
-        system.auxiliaryOperatorRegistryIfPresent()->isLayoutFinalized()) {
+        system.auxiliaryOperatorRegistryIfPresent()) {
+        auto* aux_registry = system.auxiliaryOperatorRegistryIfPresent();
+        const bool has_monolithic_deployments =
+            std::any_of(system.deployed_aux_entries_.begin(),
+                        system.deployed_aux_entries_.end(),
+                        [](const auto& entry) {
+                            return entry.spec.solve_mode == AuxiliarySolveMode::Monolithic;
+                        });
+        const bool has_auxiliary_operators = !aux_registry->operatorNames().empty();
+        if (!has_monolithic_deployments && !has_auxiliary_operators) {
+            return total;
+        }
+
         std::size_t n_field_dofs = 0;
         if (system.dofHandler().getEntityDofMap()) {
             n_field_dofs = static_cast<std::size_t>(
@@ -1612,9 +1624,11 @@ assembly::AssemblyResult assembleOperator(
             n_field_dofs = state.u.size();
         }
 
-        const auto mixed = system.auxiliaryOperatorRegistryIfPresent()
-                               ->composeMixedLayout(n_field_dofs);
-        const int n_aux = static_cast<int>(mixed.n_aux_unknowns);
+        int n_aux = 0;
+        if (aux_registry->isLayoutFinalized()) {
+            const auto mixed = aux_registry->composeMixedLayout(n_field_dofs);
+            n_aux = static_cast<int>(mixed.n_aux_unknowns);
+        }
 
         if (n_aux > 0) {
             auto& bc = system.borderedCoupling();
@@ -1835,6 +1849,9 @@ assembly::AssemblyResult assembleOperator(
             synchronizeBorderedCouplingForReplicatedSolve(
                 bc, request.want_matrix, request.want_vector, system.dofHandler().mpiComm());
         } else {
+            if (request.want_matrix) {
+                system.borderedCoupling().clear();
+            }
             system.assembleMixedAuxiliaryIntoGlobal(
                 state, matrix_out, vector_out,
                 request.want_matrix, request.want_vector,

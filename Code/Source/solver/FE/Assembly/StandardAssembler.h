@@ -206,7 +206,9 @@ public:
                           std::span<const Real> aux_state) noexcept override;
     void setAuxiliaryValues(std::span<const Real> inputs,
                             std::span<const Real> state,
-                            std::span<const Real> outputs = {}) noexcept;
+                            std::span<const Real> outputs = {}) noexcept override;
+    void setAuxiliaryOutputBindings(
+        std::span<const AuxiliaryOutputBinding> bindings) noexcept override;
     void setMaterialStateProvider(IMaterialStateProvider* provider) noexcept override;
     [[nodiscard]] const AssemblyOptions& getOptions() const noexcept override;
 
@@ -850,6 +852,7 @@ private:
     std::span<const Real> auxiliary_inputs_{};
     std::span<const Real> auxiliary_state_{};
     std::span<const Real> auxiliary_outputs_{};
+    std::span<const AuxiliaryOutputBinding> auxiliary_output_bindings_{};
     const TimeIntegrationContext* time_integration_{nullptr};
     IMaterialStateProvider* material_state_provider_{nullptr};
     bool initialized_{false};

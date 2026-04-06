@@ -74,6 +74,36 @@ std::size_t AuxiliaryStateManager::registerBlock(
     return block_idx;
 }
 
+std::size_t AuxiliaryStateManager::registerBlockWithQPOffsets(
+    const AuxiliaryStateSpec& spec,
+    std::span<const std::size_t> qp_offsets,
+    std::span<const Real> initial_values)
+{
+    FE_THROW_IF(spec.name.empty(), InvalidArgumentException,
+                "AuxiliaryStateManager::registerBlockWithQPOffsets: empty block name");
+    FE_THROW_IF(meta_name_to_index_.count(spec.name) != 0u, InvalidArgumentException,
+                "AuxiliaryStateManager::registerBlockWithQPOffsets: duplicate block '"
+                    + spec.name + "'");
+    FE_THROW_IF(spec.scope != AuxiliaryStateScope::QuadraturePoint, InvalidArgumentException,
+                "AuxiliaryStateManager::registerBlockWithQPOffsets: scope must be QuadraturePoint");
+    FE_THROW_IF(qp_offsets.size() < 2u, InvalidArgumentException,
+                "AuxiliaryStateManager::registerBlockWithQPOffsets: qp_offsets must have >= 2 entries");
+
+    const auto total_qps = qp_offsets.back();
+    const auto block_idx = state_.registerBlock(spec, total_qps, initial_values);
+
+    const auto meta_idx = block_meta_.size();
+    block_meta_.push_back(BlockMeta{
+        spec,
+        AuxiliaryBlockIndexing::createQuadraturePoint(qp_offsets, spec.size),
+        {},
+        {},
+    });
+    meta_name_to_index_.emplace(spec.name, meta_idx);
+
+    return block_idx;
+}
+
 std::size_t AuxiliaryStateManager::registerBlockRagged(
     const AuxiliaryStateSpec& spec,
     std::span<const std::size_t> offsets,

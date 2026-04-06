@@ -3743,6 +3743,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             has_native_rank_one_updates && !(has_solve_bordered && !condensed_bordered_active);
         std::vector<Real> aux_delta;
         std::vector<Real> solve_aux_delta;
+        std::vector<Real> combined_reduced_rhs_shift;
         FsilsMatrixSnapshot fsils_matrix_snapshot;
         const auto reportMeetsRequestedLinearTarget =
             [](const backends::SolverReport& rep,
@@ -3782,6 +3783,23 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                        !has_solve_bordered &&
                        !algebraic_aux_reduction.rhs_shift.empty()) {
                 reduced_rhs_shift = &algebraic_aux_reduction.rhs_shift;
+            }
+            const auto local_condensed_rhs_shift =
+                transient.system().lastLocalCondensedRhsShift();
+            if (!local_condensed_rhs_shift.empty()) {
+                if (reduced_rhs_shift != nullptr) {
+                    combined_reduced_rhs_shift = *reduced_rhs_shift;
+                } else {
+                    combined_reduced_rhs_shift.assign(local_condensed_rhs_shift.begin(),
+                                                      local_condensed_rhs_shift.end());
+                }
+                if (combined_reduced_rhs_shift.size() < local_condensed_rhs_shift.size()) {
+                    combined_reduced_rhs_shift.resize(local_condensed_rhs_shift.size(), Real(0.0));
+                }
+                for (std::size_t row = 0; row < local_condensed_rhs_shift.size(); ++row) {
+                    combined_reduced_rhs_shift[row] += local_condensed_rhs_shift[row];
+                }
+                reduced_rhs_shift = &combined_reduced_rhs_shift;
             }
 
             backends::GenericVector* linear_rhs = &r;
@@ -4286,11 +4304,24 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         }
 
         const double du_norm = du.norm();
+        auto gatherDenseFieldDelta = [&]() {
+            auto du_view = du.createAssemblyView();
+            FE_CHECK_NOT_NULL(du_view.get(), "NewtonSolver: dense du gather view");
+            std::vector<Real> dense_du(static_cast<std::size_t>(du.size()), Real(0.0));
+            for (std::size_t k = 0; k < dense_du.size(); ++k) {
+                dense_du[k] = du_view->getVectorEntry(static_cast<GlobalIndex>(k));
+            }
+            return dense_du;
+        };
 
         if (!options_.use_line_search) {
             ntp0 = NTP();
             if (!aux_delta.empty()) {
                 applyAuxiliaryDelta(transient.system(), bordered_full, aux_delta, static_cast<Real>(1.0));
+            }
+            if (transient.system().hasLocalCondensedRecovery()) {
+                const auto dense_du = gatherDenseFieldDelta();
+                transient.system().applyLocalCondensedRecovery(dense_du, static_cast<Real>(1.0));
             }
             axpy(history.u(), static_cast<Real>(-1.0), du);
             if (!constraints.empty()) {
@@ -4322,7 +4353,13 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         // Backtracking line search: choose alpha in (0,1] so the residual norm decreases.
         copyVector(u_backup, history.u());
         const auto aux_state_backup =
-            aux_delta.empty() ? std::vector<Real>{} : transient.system().checkpointAuxiliaryState();
+            (aux_delta.empty() && !transient.system().hasLocalCondensedRecovery())
+                ? std::vector<Real>{}
+                : transient.system().checkpointAuxiliaryState();
+        const auto dense_du_for_aux =
+            transient.system().hasLocalCondensedRecovery()
+                ? gatherDenseFieldDelta()
+                : std::vector<Real>{};
         const auto bordered_backup = transient.system().borderedCoupling();
         const double r_norm0 = current_residual_norm;
         const double r_norm0_sq = r_norm0 * r_norm0;
@@ -4356,6 +4393,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             transient.system().borderedCoupling() = bordered_backup;
             if (!aux_state_backup.empty()) {
                 applyAuxiliaryDelta(transient.system(), bordered_full, aux_delta, static_cast<Real>(alpha));
+                if (!dense_du_for_aux.empty()) {
+                    transient.system().applyLocalCondensedRecovery(dense_du_for_aux,
+                                                                   static_cast<Real>(alpha));
+                }
             }
             if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
                 reg->invalidateAll();
@@ -4426,6 +4467,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 transient.system().borderedCoupling() = bordered_backup;
                 if (!aux_state_backup.empty()) {
                     applyAuxiliaryDelta(transient.system(), bordered_full, aux_delta, static_cast<Real>(alpha));
+                    if (!dense_du_for_aux.empty()) {
+                        transient.system().applyLocalCondensedRecovery(dense_du_for_aux,
+                                                                       static_cast<Real>(alpha));
+                    }
                 }
                 if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
                     reg->invalidateAll();

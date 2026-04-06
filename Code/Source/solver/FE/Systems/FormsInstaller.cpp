@@ -1791,13 +1791,19 @@ CoupledResidualKernels installFormulation(
                             static_cast<std::uint32_t>(it->second));
                 }
                 if (node.type() == forms::FormExprType::AuxiliaryOutputSymbol) {
+                    auto it = output_slots.find(nm);
+                    if (it != output_slots.end() &&
+                        system.auxiliaryOutputMetadataUsesRef(nm)) {
+                        return forms::FormExpr::auxiliaryOutputRef(
+                            static_cast<std::uint32_t>(it->second));
+                    }
                     if (auto lowered_output = system.loweredAuxiliaryOutputExpr(nm)) {
                         return *lowered_output;
                     }
-                    auto it = output_slots.find(nm);
-                    if (it != output_slots.end())
+                    if (it != output_slots.end()) {
                         return forms::FormExpr::auxiliaryOutputRef(
                             static_cast<std::uint32_t>(it->second));
+                    }
                 }
                 return std::nullopt;
             };

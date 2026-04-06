@@ -106,6 +106,38 @@ enum class ContextType : std::uint8_t {
     InteriorFace    ///< Interior face integration context (DG)
 };
 
+/**
+ * @brief Scope classification for auxiliary-output lookup during assembly.
+ *
+ * This stays in the assembly layer so kernels can resolve local-scoped
+ * auxiliary outputs without depending directly on Systems headers.
+ */
+enum class AuxiliaryOutputScope : std::uint8_t {
+    Global,
+    Boundary,
+    Cell,
+    QuadraturePoint,
+    Facet,
+    Node
+};
+
+/**
+ * @brief Runtime descriptor for one auxiliary output symbol in FE forms.
+ *
+ * `base_slot` is the slot returned by `FESystem::auxiliaryOutputSlotOf(instance, output)`
+ * for entity 0. For local scopes, kernels resolve that base slot to the current
+ * cell/face/QP entity before reading `auxiliary_outputs`.
+ */
+struct AuxiliaryOutputBinding {
+    std::uint32_t base_slot{0u};
+    AuxiliaryOutputScope scope{AuxiliaryOutputScope::Global};
+    std::uint32_t outputs_per_entity{1u};
+    const std::size_t* entity_map_data{nullptr};
+    std::size_t entity_map_size{0};
+    const std::size_t* qp_offsets_data{nullptr};
+    std::size_t qp_offsets_size{0};
+};
+
 // ============================================================================
 // Assembly Context
 // ============================================================================
@@ -1193,6 +1225,13 @@ public:
         coupled_aux_state_ = state;
     }
 
+    /// Bind runtime metadata for resolving local-scoped auxiliary outputs.
+    void setAuxiliaryOutputBindings(
+        std::span<const AuxiliaryOutputBinding> bindings) noexcept
+    {
+        auxiliary_output_bindings_ = bindings;
+    }
+
     // Legacy accessors (still used by existing JIT codegen for BoundaryIntegralRef/AuxiliaryStateRef).
     [[nodiscard]] std::span<const Real> coupledIntegrals() const noexcept { return coupled_integrals_; }
     [[nodiscard]] std::span<const Real> coupledAuxState() const noexcept { return coupled_aux_state_; }
@@ -1201,6 +1240,92 @@ public:
     [[nodiscard]] std::span<const Real> auxiliaryInputs() const noexcept { return auxiliary_inputs_; }
     [[nodiscard]] std::span<const Real> auxiliaryState() const noexcept { return auxiliary_state_; }
     [[nodiscard]] std::span<const Real> auxiliaryOutputs() const noexcept { return auxiliary_outputs_; }
+    [[nodiscard]] std::span<const AuxiliaryOutputBinding> auxiliaryOutputBindings() const noexcept
+    {
+        return auxiliary_output_bindings_;
+    }
+    [[nodiscard]] Real auxiliaryOutputValue(std::size_t slot, LocalIndex q) const noexcept
+    {
+        if (slot >= auxiliary_outputs_.size()) {
+            return Real(0.0);
+        }
+
+        auto localEntityIndex = [](std::span<const std::size_t> entity_map,
+                                   std::size_t global_entity) -> std::optional<std::size_t> {
+            if (entity_map.empty()) {
+                return global_entity;
+            }
+            for (std::size_t local = 0; local < entity_map.size(); ++local) {
+                if (entity_map[local] == global_entity) {
+                    return local;
+                }
+            }
+            return std::nullopt;
+        };
+
+        for (const auto& binding : auxiliary_output_bindings_) {
+            if (binding.base_slot != slot) {
+                continue;
+            }
+
+            const auto outputs_per_entity =
+                std::max<std::size_t>(1u, binding.outputs_per_entity);
+            const std::span<const std::size_t> entity_map(
+                binding.entity_map_data, binding.entity_map_size);
+            const std::span<const std::size_t> qp_offsets(
+                binding.qp_offsets_data, binding.qp_offsets_size);
+
+            auto valueAtEntity = [&](std::size_t entity_index) -> Real {
+                const auto resolved_slot = slot + entity_index * outputs_per_entity;
+                return resolved_slot < auxiliary_outputs_.size()
+                    ? auxiliary_outputs_[resolved_slot]
+                    : Real(0.0);
+            };
+
+            switch (binding.scope) {
+                case AuxiliaryOutputScope::Global:
+                case AuxiliaryOutputScope::Boundary:
+                case AuxiliaryOutputScope::Node:
+                    return auxiliary_outputs_[slot];
+                case AuxiliaryOutputScope::Cell: {
+                    if (cell_id_ < 0) {
+                        return Real(0.0);
+                    }
+                    const auto entity = localEntityIndex(
+                        entity_map, static_cast<std::size_t>(cell_id_));
+                    return entity.has_value() ? valueAtEntity(*entity) : Real(0.0);
+                }
+                case AuxiliaryOutputScope::Facet: {
+                    if (face_id_ < 0) {
+                        return Real(0.0);
+                    }
+                    const auto entity = localEntityIndex(
+                        entity_map, static_cast<std::size_t>(face_id_));
+                    return entity.has_value() ? valueAtEntity(*entity) : Real(0.0);
+                }
+                case AuxiliaryOutputScope::QuadraturePoint: {
+                    if (cell_id_ < 0 || qp_offsets.size() < 2u) {
+                        return Real(0.0);
+                    }
+                    const auto cell_entity = localEntityIndex(
+                        entity_map, static_cast<std::size_t>(cell_id_));
+                    if (!cell_entity.has_value() ||
+                        *cell_entity + 1u >= qp_offsets.size()) {
+                        return Real(0.0);
+                    }
+                    const auto q_begin = qp_offsets[*cell_entity];
+                    const auto q_end = qp_offsets[*cell_entity + 1u];
+                    const auto q_local = static_cast<std::size_t>(q);
+                    if (q_begin + q_local >= q_end) {
+                        return Real(0.0);
+                    }
+                    return valueAtEntity(q_begin + q_local);
+                }
+            }
+        }
+
+        return auxiliary_outputs_[slot];
+    }
 
     // =========================================================================
     // Face-Specific Data
@@ -1757,6 +1882,7 @@ private:
     std::span<const Real> auxiliary_inputs_{};
     std::span<const Real> auxiliary_state_{};
     std::span<const Real> auxiliary_outputs_{};
+    std::span<const AuxiliaryOutputBinding> auxiliary_output_bindings_{};
     std::span<const Real> history_weights_{};
 
     // Optional transient time integration context (owned by Systems/TimeStepping)

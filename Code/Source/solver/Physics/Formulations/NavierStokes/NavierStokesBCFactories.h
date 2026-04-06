@@ -57,16 +57,24 @@ namespace detail {
     return out;
 }
 
-[[nodiscard]] inline std::string outletInstanceName(int boundary_marker)
+[[nodiscard]] inline FE::forms::FormExpr discreteFieldLike(const FE::forms::FormExpr& expr)
 {
-    return markerName("ns_rcr", boundary_marker);
-}
+    if (!expr.isValid() || !expr.node()) {
+        return expr;
+    }
 
-[[nodiscard]] inline std::string outletInstanceNameRCRCR(int boundary_marker)
-{
-    return markerName("ns_rcrcr", boundary_marker);
-}
+    const auto* node = expr.node();
+    const auto fid = node->fieldId();
+    const auto* sig = node->spaceSignature();
+    if (!fid.has_value() || !sig) {
+        return expr;
+    }
 
+    const auto name = node->symbolName().has_value()
+        ? std::string(*node->symbolName())
+        : node->toString();
+    return FE::forms::FormExpr::discreteField(*fid, *sig, name);
+}
 
     /**
      * @brief Create an RCR outflow BC model.
@@ -229,18 +237,12 @@ namespace detail {
  *
  * @param bc                  RCR outflow boundary condition options.
  * @param system              The FESystem to register inputs and deploy models on.
- * @param u_id                Velocity field ID.
- * @param velocity_space      Velocity function space.
- * @param velocity_field_name Name of the velocity field (e.g., "u").
  * @param u                   FormExpr for velocity (test/trial context).
  * @param rho                 FormExpr for density.
  */
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toCoupledOutflowBC(
     const IncompressibleNavierStokesVMSOptions::CoupledRCROutflowBC& bc,
     FE::systems::FESystem& system,
-    FE::FieldId u_id,
-    const FE::spaces::FunctionSpace& velocity_space,
-    std::string_view velocity_field_name,
     const FE::forms::FormExpr& u,
     const FE::forms::FormExpr& rho)
 {
@@ -249,10 +251,6 @@ namespace detail {
 
     const int marker =
         FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toCoupledOutflowBC");
-
-    const std::string q_name = bc.functional_name.empty()
-        ? ("ns_Q_" + std::to_string(marker))
-        : bc.functional_name;
 
     const FE::Real Rp = bc.Rp;
     const FE::Real C  = bc.C;
@@ -269,53 +267,59 @@ namespace detail {
     const auto beta =
         FE::forms::bc::toScalarExpr(bc.backflow_beta, detail::markerName("ns_rcr_backflow_beta", marker));
 
-    const auto u_disc =
-        FormExpr::discreteField(u_id, velocity_space, std::string(velocity_field_name));
-    const std::string instance_name = detail::outletInstanceName(marker);
-
-    // Step 1: Register boundary-integral input for Q via handle-returning API.
-    auto Q = system.boundaryIntegral(q_name, inner(u_disc, n), marker,
-        FE::forms::BoundaryFunctional::Reduction::Sum,
-        FE::systems::AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
-    FE::systems::AuxiliaryInstanceHandle rcr;
-
     if (C == 0.0) {
-        rcr = system.deploy(
+        FE::forms::BoundaryFunctional flow_rate;
+        flow_rate.integrand = inner(u, n);
+        flow_rate.boundary_marker = marker;
+        flow_rate.reduction = FE::forms::BoundaryFunctional::Reduction::Sum;
+        flow_rate.name = bc.functional_name;
+        auto Q = system.boundaryIntegral(
+            std::move(flow_rate),
+            FE::systems::AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+
+        auto resistive = system.deploy(
             use(detail::resistiveOutflowModel())
-                .name(instance_name)
                 .boundary(marker)
                 .monolithic()
                 .params({{"Rsum", Rp + Rd}, {"Pd", Pd}})
-                .bindCoupled("Q", Q)
-                .initialState({{"P", Pd + (Rp + Rd) * bc.X0}})
+                .bind("Q", Q)
+                .initialState({{"P", Pd}})
         );
+        const auto p_out = resistive.output("P_out");
+        const auto flux = -p_out * n - beta * rho * max_backflow * u;
+        return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
     } else {
+        // Step 1: Register boundary-integral input for Q via handle-returning API.
+        FE::forms::BoundaryFunctional flow_rate;
+        flow_rate.integrand = inner(u, n);
+        flow_rate.boundary_marker = marker;
+        flow_rate.reduction = FE::forms::BoundaryFunctional::Reduction::Sum;
+        flow_rate.name = bc.functional_name;
+        auto Q = system.boundaryIntegral(
+            std::move(flow_rate),
+            FE::systems::AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+
         // Step 2: Deploy the standard RCR model monolithically so the outlet
         // state participates in the Newton solve through the generalized
         // AuxiliaryState infrastructure.
-        rcr = system.deploy(
+        auto rcr = system.deploy(
             use(detail::rcrOutflowModel())
-                .name(instance_name)
                 .boundary(marker)
                 .monolithic()
                 .params({{"Rp", Rp}, {"C", C}, {"Rd", Rd}, {"Pd", Pd}})
-                .bindCoupled("Q", Q)
+                .bind("Q", Q)
                 .initialState({{"X", bc.X0}})
         );
+        // Step 3: Return a standard NaturalBC.
+        const auto p_out = rcr.output("P_out");
+        const auto flux = -p_out * n - beta * rho * max_backflow * u;
+        return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
     }
-
-    // Step 3: Return a standard NaturalBC.
-    const auto p_out = rcr.output("P_out");
-    const auto flux = -p_out * n - beta * rho * max_backflow * u;
-    return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
 }
 
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toCoupledOutflowBC(
     const IncompressibleNavierStokesVMSOptions::CoupledRCRCROutflowBC& bc,
     FE::systems::FESystem& system,
-    FE::FieldId u_id,
-    const FE::spaces::FunctionSpace& velocity_space,
-    std::string_view velocity_field_name,
     const FE::forms::FormExpr& u,
     const FE::forms::FormExpr& rho)
 {
@@ -332,27 +336,23 @@ namespace detail {
         throw std::invalid_argument("CoupledRCRCROutflowBC: Rm and Rd must be nonzero");
     }
 
-    const std::string q_name = bc.functional_name.empty()
-        ? ("ns_Q_" + std::to_string(marker))
-        : bc.functional_name;
-
     const auto n = FormExpr::normal();
     const auto un = inner(u, n);
     const auto max_backflow = FormExpr::constant(0.5) * (abs(un) - un);
     const auto beta =
         FE::forms::bc::toScalarExpr(bc.backflow_beta, detail::markerName("ns_rcrcr_backflow_beta", marker));
 
-    const auto u_disc =
-        FormExpr::discreteField(u_id, velocity_space, std::string(velocity_field_name));
-
-    auto Q = system.boundaryIntegral(q_name, inner(u_disc, n), marker,
-        FE::forms::BoundaryFunctional::Reduction::Sum,
+    FE::forms::BoundaryFunctional flow_rate;
+    flow_rate.integrand = inner(u, n);
+    flow_rate.boundary_marker = marker;
+    flow_rate.reduction = FE::forms::BoundaryFunctional::Reduction::Sum;
+    flow_rate.name = bc.functional_name;
+    auto Q = system.boundaryIntegral(
+        std::move(flow_rate),
         FE::systems::AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
 
-    const auto instance_name = detail::outletInstanceNameRCRCR(marker);
     auto rcrcr = system.deploy(
         use(detail::rcrcrOutflowModel())
-            .name(instance_name)
             .boundary(marker)
             .monolithic()
             .params({
@@ -363,7 +363,7 @@ namespace detail {
                 {"Rd", bc.Rd},
                 {"Pd", bc.Pd},
             })
-            .bindCoupled("Q", Q)
+            .bind("Q", Q)
             .initialState({{"P1", bc.P10}, {"P2", bc.P20}})
     );
 

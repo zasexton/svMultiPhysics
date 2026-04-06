@@ -468,6 +468,23 @@ TEST(AuxiliaryStateManager, AllSixScopesRegistered)
     EXPECT_NO_THROW(mgr.validate());
 }
 
+TEST(AuxiliaryStateManager, RegisterQuadraturePointBlockWithOffsetsPreservesIndexing)
+{
+    AuxiliaryStateManager mgr;
+
+    const std::vector<std::size_t> qp_offsets{0, 4, 7, 9};
+    mgr.registerBlockWithQPOffsets(
+        makeSpec("qp", 2, AuxiliaryStateScope::QuadraturePoint), qp_offsets);
+
+    const auto& idx = mgr.getIndexing("qp");
+    EXPECT_EQ(idx.scope(), AuxiliaryStateScope::QuadraturePoint);
+    EXPECT_EQ(idx.totalEntityCount(), 9u);
+    EXPECT_EQ(idx.qpOffsets().size(), qp_offsets.size());
+    EXPECT_EQ(idx.qpOffsets()[1], 4u);
+    EXPECT_EQ(idx.qpsForCell(1), 3u);
+    EXPECT_EQ(idx.qpFlatIndex(1, 2, 1), (4u + 2u) * 2u + 1u);
+}
+
 // ---------------------------------------------------------------------------
 //  Ownership rules for Monolithic blocks
 // ---------------------------------------------------------------------------

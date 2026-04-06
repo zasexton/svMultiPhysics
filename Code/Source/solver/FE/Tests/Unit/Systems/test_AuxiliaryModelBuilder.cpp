@@ -2788,6 +2788,8 @@ TEST(AuxiliaryBindingsDSL, HandleBasedBind)
     auto inst = use(model).name("inst")
         .bind("Q", Q_handle).initialize({0.0});
     EXPECT_EQ(inst.inputBindings().at("Q"), "Q_registry");
+    ASSERT_EQ(inst.coupledBindings().count("Q"), 1u);
+    EXPECT_EQ(inst.coupledBindings().at("Q").registryName(), "Q_registry");
 }
 
 TEST(AuxiliaryBindingsDSL, AutoBindByName)
@@ -2800,6 +2802,38 @@ TEST(AuxiliaryBindingsDSL, AutoBindByName)
     auto inst = use(model).name("inst")
         .bind(Q_handle).initialize({0.0});
     EXPECT_EQ(inst.inputBindings().at("Q"), "Q");
+    ASSERT_EQ(inst.coupledBindings().count("Q"), 1u);
+}
+
+TEST(AuxiliaryBindingsDSL, DeployAutoGeneratesGlobalInstanceName)
+{
+    FESystem system(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+    auto model = AuxiliaryModelBuilder("decay")
+        .state("x")
+        .ode("x", -modelState("x"))
+        .build();
+
+    const auto handle = system.deploy(
+        use(model).global().partitioned("BackwardEuler").initialize({0.0}));
+
+    EXPECT_EQ(handle.instanceName(), "decay_g0");
+}
+
+TEST(AuxiliaryBindingsDSL, DeployAutoGeneratesBoundaryNamesAndDisambiguatesCollisions)
+{
+    FESystem system(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+    auto model = AuxiliaryModelBuilder("rcr")
+        .state("x")
+        .ode("x", -modelState("x"))
+        .build();
+
+    const auto first = system.deploy(
+        use(model).boundary(7).partitioned("BackwardEuler").initialize({0.0}));
+    const auto second = system.deploy(
+        use(model).boundary(7).partitioned("BackwardEuler").initialize({0.0}));
+
+    EXPECT_EQ(first.instanceName(), "rcr_b7");
+    EXPECT_EQ(second.instanceName(), "rcr_b7_1");
 }
 
 // --- Large system regression ---
