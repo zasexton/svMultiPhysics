@@ -5,8 +5,8 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#ifndef SVMP_FE_SYSTEMS_SYSTEMCONSTRAINTS_H
-#define SVMP_FE_SYSTEMS_SYSTEMCONSTRAINTS_H
+#ifndef SVMP_FE_CONSTRAINTS_SYSTEMCONSTRAINTS_H
+#define SVMP_FE_CONSTRAINTS_SYSTEMCONSTRAINTS_H
 
 #include "Core/Types.h"
 
@@ -25,7 +25,7 @@
 
 namespace svmp {
 namespace FE {
-namespace systems {
+namespace constraints {
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 
@@ -53,8 +53,8 @@ makeDirichletConstantByFaceSet(const svmp::Mesh& mesh,
 
 #endif // SVMP_FE_WITH_MESH
 
-} // namespace systems
+} // namespace constraints
 } // namespace FE
 } // namespace svmp
 
-#endif // SVMP_FE_SYSTEMS_SYSTEMCONSTRAINTS_H
+#endif // SVMP_FE_CONSTRAINTS_SYSTEMCONSTRAINTS_H

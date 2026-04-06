@@ -54,7 +54,7 @@ public:
     HermiteBasis(ElementType element_type,
                  int order);
 
-    BasisType basis_type() const noexcept override { return BasisType::Custom; }
+    BasisType basis_type() const noexcept override { return BasisType::Hermite; }
     ElementType element_type() const noexcept override { return element_type_; }
     int dimension() const noexcept override { return dimension_; }
     int order() const noexcept override { return order_; }

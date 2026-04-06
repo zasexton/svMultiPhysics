@@ -214,3 +214,23 @@ TEST(BasisFactory, UnsupportedCombinationThrows) {
     BasisRequest req{ElementType::Tetra4, BasisType::Serendipity, 1, Continuity::C0, FieldType::Scalar};
     EXPECT_THROW(auto b = BasisFactory::create(req), svmp::FE::FEException);
 }
+
+TEST(BasisFactory, L2ReturnsExpectedBasis) {
+    // L2 (discontinuous) should return the same basis as C0 -- DOF ownership
+    // is handled at the Space/Element level, not in the basis shape functions.
+    {
+        BasisRequest req{ElementType::Triangle3, BasisType::Lagrange, 2, Continuity::L2, FieldType::Scalar};
+        auto basis = BasisFactory::create(req);
+        EXPECT_EQ(basis->basis_type(), BasisType::Lagrange);
+        EXPECT_EQ(basis->element_type(), ElementType::Triangle3);
+        EXPECT_EQ(basis->order(), 2);
+        EXPECT_EQ(basis->size(), 6u);
+    }
+    {
+        BasisRequest req{ElementType::Quad4, BasisType::Hierarchical, 3, Continuity::L2, FieldType::Scalar};
+        auto basis = BasisFactory::create(req);
+        EXPECT_EQ(basis->basis_type(), BasisType::Hierarchical);
+        EXPECT_EQ(basis->element_type(), ElementType::Quad4);
+        EXPECT_EQ(basis->order(), 3);
+    }
+}

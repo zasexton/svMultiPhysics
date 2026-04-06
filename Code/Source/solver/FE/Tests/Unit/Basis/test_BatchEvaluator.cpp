@@ -8,6 +8,8 @@
 #include "FE/Basis/BatchEvaluator.h"
 #include "FE/Basis/LagrangeBasis.h"
 #include "FE/Basis/VectorBasis.h"
+#include "FE/Quadrature/GaussQuadrature.h"
+#include "FE/Quadrature/HexahedronQuadrature.h"
 #include "FE/Quadrature/QuadrilateralQuadrature.h"
 
 #include <cmath>
@@ -153,6 +155,90 @@ TEST(BatchEvaluator, AssembleStiffnessMatchesPointwise) {
                 kij += contribution * weights[q];
             }
             K_ref[i * n + j] = kij;
+        }
+    }
+
+    for (std::size_t idx = 0; idx < n * n; ++idx) {
+        EXPECT_NEAR(K_batch[idx], K_ref[idx], 1e-12);
+    }
+}
+
+TEST(BatchEvaluator, AssembleStiffnessMatchesPointwise_1D) {
+    basis::LagrangeBasis basis(ElementType::Line2, 3);
+    quadrature::GaussQuadrature1D quad(5);
+
+    basis::BatchEvaluator batch(basis, quad, true, false);
+
+    const std::size_t n = basis.size();
+    const std::size_t nq = quad.num_points();
+
+    const Real D[1] = {Real(3.5)};
+
+    std::vector<Real> weights(nq);
+    for (std::size_t q = 0; q < nq; ++q) {
+        weights[q] = quad.weight(q);
+    }
+
+    std::vector<Real> K_batch(n * n, Real(0));
+    batch.assemble_stiffness_contribution(D, weights.data(), K_batch.data());
+
+    std::vector<Real> K_ref(n * n, Real(0));
+    for (std::size_t q = 0; q < nq; ++q) {
+        std::vector<basis::Gradient> grads;
+        basis.evaluate_gradients(quad.point(q), grads);
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t j = 0; j < n; ++j) {
+                K_ref[i * n + j] += grads[i][0] * D[0] * grads[j][0] * weights[q];
+            }
+        }
+    }
+
+    for (std::size_t idx = 0; idx < n * n; ++idx) {
+        EXPECT_NEAR(K_batch[idx], K_ref[idx], 1e-12);
+    }
+}
+
+TEST(BatchEvaluator, AssembleStiffnessMatchesPointwise_3D) {
+    basis::LagrangeBasis basis(ElementType::Hex8, 1);
+    quadrature::HexahedronQuadrature quad(2);
+
+    basis::BatchEvaluator batch(basis, quad, true, false);
+
+    const std::size_t n = basis.size();
+    const std::size_t nq = quad.num_points();
+    const int dim = 3;
+
+    // Non-diagonal SPD material tensor
+    const Real D[9] = {
+        Real(2.0), Real(0.3), Real(0.1),
+        Real(0.3), Real(1.5), Real(0.2),
+        Real(0.1), Real(0.2), Real(1.8)
+    };
+
+    std::vector<Real> weights(nq);
+    for (std::size_t q = 0; q < nq; ++q) {
+        weights[q] = quad.weight(q);
+    }
+
+    std::vector<Real> K_batch(n * n, Real(0));
+    batch.assemble_stiffness_contribution(D, weights.data(), K_batch.data());
+
+    std::vector<Real> K_ref(n * n, Real(0));
+    for (std::size_t q = 0; q < nq; ++q) {
+        std::vector<basis::Gradient> grads;
+        basis.evaluate_gradients(quad.point(q), grads);
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t j = 0; j < n; ++j) {
+                Real kij = Real(0);
+                for (int d1 = 0; d1 < dim; ++d1) {
+                    for (int d2 = 0; d2 < dim; ++d2) {
+                        kij += grads[i][static_cast<std::size_t>(d1)] *
+                               D[static_cast<std::size_t>(d1 * dim + d2)] *
+                               grads[j][static_cast<std::size_t>(d2)];
+                    }
+                }
+                K_ref[i * n + j] += kij * weights[q];
+            }
         }
     }
 

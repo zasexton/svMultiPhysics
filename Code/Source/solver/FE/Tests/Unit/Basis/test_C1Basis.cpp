@@ -21,7 +21,7 @@ TEST(C1Basis, LineMetadataAndSize) {
     EXPECT_EQ(basis.dimension(), 1);
     EXPECT_EQ(basis.order(), 3);
     EXPECT_EQ(basis.size(), 4u);
-    EXPECT_EQ(basis.basis_type(), BasisType::Custom);
+    EXPECT_EQ(basis.basis_type(), BasisType::Hermite);
 }
 
 TEST(C1Basis, LineNodalAndDerivativeConditionsAtEndpoints) {
@@ -92,7 +92,7 @@ TEST(C1Basis, LineGradientsMatchFiniteDifference) {
 TEST(C1Basis, BasisFactoryCreatesHermiteForC1Line2) {
     BasisRequest req{
         ElementType::Line2,
-        BasisType::Custom,
+        BasisType::Hermite,
         3,
         Continuity::C1,
         FieldType::Scalar
@@ -104,7 +104,7 @@ TEST(C1Basis, BasisFactoryCreatesHermiteForC1Line2) {
     EXPECT_EQ(basis_ptr->dimension(), 1);
     EXPECT_EQ(basis_ptr->order(), 3);
     EXPECT_EQ(basis_ptr->size(), 4u);
-    EXPECT_EQ(basis_ptr->basis_type(), BasisType::Custom);
+    EXPECT_EQ(basis_ptr->basis_type(), BasisType::Hermite);
 
     // Dynamic type should be HermiteBasis
     auto* hermite = dynamic_cast<HermiteBasis*>(basis_ptr.get());
@@ -118,7 +118,7 @@ TEST(C1Basis, QuadMetadataAndSize) {
     EXPECT_EQ(basis.dimension(), 2);
     EXPECT_EQ(basis.order(), 3);
     EXPECT_EQ(basis.size(), 16u);
-    EXPECT_EQ(basis.basis_type(), BasisType::Custom);
+    EXPECT_EQ(basis.basis_type(), BasisType::Hermite);
 }
 
 TEST(C1Basis, QuadValueModesKroneckerAtCorners) {
@@ -241,5 +241,94 @@ TEST(C1Basis, QuadInterpolatesBicubicPolynomial) {
 
         const Real u_exact = poly(xi[0], xi[1]);
         EXPECT_NEAR(u_interp, u_exact, 1e-10);
+    }
+}
+
+// =============================================================================
+// Hex8 (3D tricubic Hermite) tests
+// =============================================================================
+
+TEST(C1Basis, HexMetadataAndSize) {
+    HermiteBasis basis(ElementType::Hex8, 3);
+    EXPECT_EQ(basis.element_type(), ElementType::Hex8);
+    EXPECT_EQ(basis.dimension(), 3);
+    EXPECT_EQ(basis.order(), 3);
+    EXPECT_EQ(basis.size(), 64u);
+    EXPECT_EQ(basis.basis_type(), BasisType::Hermite);
+}
+
+TEST(C1Basis, HexValueModesKroneckerAtCorners) {
+    HermiteBasis basis(ElementType::Hex8, 3);
+
+    for (std::size_t c = 0; c < 8; ++c) {
+        auto xi = NodeOrdering::get_node_coords(ElementType::Hex8, c);
+        std::vector<Real> vals;
+        basis.evaluate_values(xi, vals);
+        ASSERT_EQ(vals.size(), 64u);
+
+        // Value DOF at this corner (index 8*c) should be 1
+        for (std::size_t corner = 0; corner < 8; ++corner) {
+            const std::size_t val_index = 8 * corner;
+            const Real expected = (corner == c) ? Real(1) : Real(0);
+            EXPECT_NEAR(vals[val_index], expected, 1e-14)
+                << "Corner " << c << ", checking value DOF at corner " << corner;
+        }
+
+        // All derivative DOFs at this corner should be 0
+        const std::size_t base = 8 * c;
+        for (std::size_t i = 0; i < 64; ++i) {
+            if (i == base) continue; // skip the value DOF
+            EXPECT_NEAR(vals[i], 0.0, 1e-14)
+                << "Corner " << c << ", DOF " << i;
+        }
+    }
+}
+
+TEST(C1Basis, HexValueModesPartitionOfUnity) {
+    HermiteBasis basis(ElementType::Hex8, 3);
+
+    const math::Vector<Real, 3> test_pts[] = {
+        {Real(0), Real(0), Real(0)},
+        {Real(0.3), Real(-0.2), Real(0.5)},
+        {Real(-0.7), Real(0.4), Real(-0.3)},
+    };
+
+    for (const auto& xi : test_pts) {
+        std::vector<Real> vals;
+        basis.evaluate_values(xi, vals);
+        ASSERT_EQ(vals.size(), 64u);
+
+        // Sum of value modes at all 8 corners should be 1
+        Real sum = Real(0);
+        for (std::size_t c = 0; c < 8; ++c) {
+            sum += vals[8 * c];
+        }
+        EXPECT_NEAR(sum, 1.0, 1e-12);
+    }
+}
+
+TEST(C1Basis, HexGradientMatchesFiniteDifference) {
+    HermiteBasis basis(ElementType::Hex8, 3);
+    math::Vector<Real, 3> xi{Real(0.2), Real(-0.3), Real(0.15)};
+    const Real eps = Real(1e-6);
+
+    std::vector<Gradient> grads;
+    basis.evaluate_gradients(xi, grads);
+    ASSERT_EQ(grads.size(), 64u);
+
+    for (int d = 0; d < 3; ++d) {
+        auto xi_p = xi, xi_m = xi;
+        xi_p[static_cast<std::size_t>(d)] += eps;
+        xi_m[static_cast<std::size_t>(d)] -= eps;
+
+        std::vector<Real> vp, vm;
+        basis.evaluate_values(xi_p, vp);
+        basis.evaluate_values(xi_m, vm);
+
+        for (std::size_t i = 0; i < 64; ++i) {
+            const Real fd = (vp[i] - vm[i]) / (Real(2) * eps);
+            EXPECT_NEAR(grads[i][static_cast<std::size_t>(d)], fd, 1e-5)
+                << "DOF " << i << ", dim " << d;
+        }
     }
 }

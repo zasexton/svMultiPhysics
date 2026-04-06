@@ -243,12 +243,14 @@ enum class BasisType : std::uint8_t {
     Hierarchical,      // Hierarchical/modal basis
     Bernstein,         // Bernstein polynomials
     NURBS,             // Non-uniform rational B-splines
+    BSpline,           // Non-rational B-spline basis
     Spectral,          // Spectral element basis
-    DG,                // Discontinuous Galerkin basis
     Serendipity,       // Serendipity elements
+    Hermite,           // Hermite C1 continuity basis
     RaviartThomas,     // H(div) Raviart-Thomas family
     Nedelec,           // H(curl) Nedelec edge elements
     BDM,               // H(div) Brezzi-Douglas-Marini family
+    Bubble,            // Interior bubble functions for enrichment
     Custom             // User-defined basis
 };
 

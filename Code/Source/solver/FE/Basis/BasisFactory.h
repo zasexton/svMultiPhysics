@@ -22,6 +22,7 @@
 #include "SpectralBasis.h"
 #include "SerendipityBasis.h"
 #include "HermiteBasis.h"
+#include "BubbleBasis.h"
 #include <memory>
 
 namespace svmp {

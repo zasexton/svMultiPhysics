@@ -8,6 +8,7 @@
 #include "FE/Basis/BernsteinBasis.h"
 #include "FE/Basis/HierarchicalBasis.h"
 #include "FE/Basis/SerendipityBasis.h"
+#include "FE/Basis/TensorBasis.h"
 
 using namespace svmp::FE;
 using namespace svmp::FE::basis;
@@ -522,6 +523,80 @@ TEST(BasisGradients, GradientsSumToZeroForPartitionOfUnity) {
             EXPECT_NEAR(sum[sd], 0.0, 1e-10)
                 << "BernsteinBasis element " << static_cast<int>(etype)
                 << ", order " << order << ", dim " << d;
+        }
+    }
+}
+
+// ============================================================================
+// TensorProductBasis Hessian tests
+// ============================================================================
+
+TEST(BasisHessians, TensorProductQuadHessianMatchesNumerical) {
+    LagrangeBasis basis_1d(ElementType::Line2, 2);
+    TensorProductBasis<LagrangeBasis> basis(basis_1d, 2);
+    math::Vector<Real, 3> xi{Real(0.3), Real(-0.2), Real(0)};
+
+    std::vector<Hessian> analytical, numerical;
+    basis.evaluate_hessians(xi, analytical);
+    numerical_hessian_helper(basis, xi, numerical);
+
+    ASSERT_EQ(analytical.size(), numerical.size());
+    for (std::size_t n = 0; n < analytical.size(); ++n) {
+        for (int i = 0; i < 2; ++i) {
+            for (int j = 0; j < 2; ++j) {
+                const std::size_t si = static_cast<std::size_t>(i);
+                const std::size_t sj = static_cast<std::size_t>(j);
+                EXPECT_NEAR(analytical[n](si, sj), numerical[n](si, sj), 1e-6)
+                    << "TensorProduct Quad, basis " << n << ", (" << i << "," << j << ")";
+            }
+        }
+    }
+}
+
+TEST(BasisHessians, TensorProductHexHessianMatchesNumerical) {
+    LagrangeBasis basis_1d(ElementType::Line2, 2);
+    TensorProductBasis<LagrangeBasis> basis(basis_1d, 3);
+    math::Vector<Real, 3> xi{Real(0.1), Real(-0.2), Real(0.3)};
+
+    std::vector<Hessian> analytical, numerical;
+    basis.evaluate_hessians(xi, analytical);
+    numerical_hessian_helper(basis, xi, numerical);
+
+    ASSERT_EQ(analytical.size(), numerical.size());
+    for (std::size_t n = 0; n < analytical.size(); ++n) {
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                const std::size_t si = static_cast<std::size_t>(i);
+                const std::size_t sj = static_cast<std::size_t>(j);
+                EXPECT_NEAR(analytical[n](si, sj), numerical[n](si, sj), 1e-6)
+                    << "TensorProduct Hex, basis " << n << ", (" << i << "," << j << ")";
+            }
+        }
+    }
+}
+
+TEST(BasisHessians, TensorProductHessiansSumToZero) {
+    // TensorProductBasis of Lagrange bases satisfies partition of unity,
+    // so sum of Hessians must be zero.
+    LagrangeBasis basis_1d(ElementType::Line2, 3);
+    TensorProductBasis<LagrangeBasis> basis(basis_1d, 2);
+    math::Vector<Real, 3> xi{Real(0.15), Real(-0.25), Real(0)};
+
+    std::vector<Hessian> hess;
+    basis.evaluate_hessians(xi, hess);
+
+    Hessian sum{};
+    for (const auto& H : hess) {
+        for (int i = 0; i < 2; ++i) {
+            for (int j = 0; j < 2; ++j) {
+                sum(static_cast<std::size_t>(i), static_cast<std::size_t>(j)) +=
+                    H(static_cast<std::size_t>(i), static_cast<std::size_t>(j));
+            }
+        }
+    }
+    for (int i = 0; i < 2; ++i) {
+        for (int j = 0; j < 2; ++j) {
+            EXPECT_NEAR(sum(static_cast<std::size_t>(i), static_cast<std::size_t>(j)), 0.0, 1e-10);
         }
     }
 }

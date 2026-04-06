@@ -306,6 +306,7 @@ set(FE_MATH_HEADERS
 	    Basis/BatchEvaluator.h
 	    Basis/BasisFactory.h
 	    Basis/HermiteBasis.h
+	    Basis/BubbleBasis.h
 	    Basis/ModalTransform.h
 	    Basis/NodeOrderingConventions.h
 	)
@@ -325,6 +326,7 @@ set(FE_MATH_HEADERS
 	    Basis/BatchEvaluator.cpp
 	    Basis/BasisFactory.cpp
 	    Basis/HermiteBasis.cpp
+	    Basis/BubbleBasis.cpp
 	    Basis/ModalTransform.cpp
 	    Basis/NodeOrderingConventions.cpp
 	)
@@ -1823,6 +1825,8 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Basis/test_BasisHessians.cpp
         Tests/Unit/Basis/test_C1Basis.cpp
         Tests/Unit/Basis/test_HigherOrderWedgePyramid.cpp
+        Tests/Unit/Basis/test_BasisErrorPaths.cpp
+        Tests/Unit/Basis/test_BubbleBasis.cpp
         Tests/Unit/Basis/test_main.cpp
     )
     add_executable(test_fe_basis ${FE_BASIS_TEST_SOURCES})

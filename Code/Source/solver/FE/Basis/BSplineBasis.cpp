@@ -99,6 +99,13 @@ BSplineBasis::BSplineBasis(int degree, std::vector<Real> knots)
     FE_CHECK_ARG(u_max_ > u_min_, "BSplineBasis: invalid parametric domain from knots");
 }
 
+BSplineBasis::BSplineBasis(int degree, std::vector<Real> knots, std::vector<Real> weights)
+    : BSplineBasis(degree, std::move(knots)) {
+    FE_CHECK_ARG(weights.size() == num_basis_,
+                 "BSplineBasis: weights size must equal number of basis functions");
+    weights_ = std::move(weights);
+}
+
 void BSplineBasis::evaluate_values(const math::Vector<Real, 3>& xi,
                                   std::vector<Real>& values) const {
     values.assign(num_basis_, Real(0));
@@ -120,6 +127,21 @@ void BSplineBasis::evaluate_values(const math::Vector<Real, 3>& xi,
         const int i = first + r;
         if (i >= 0 && i < static_cast<int>(num_basis_)) {
             values[static_cast<std::size_t>(i)] = N[static_cast<std::size_t>(r)];
+        }
+    }
+
+    // Apply NURBS rational weighting: R_i = N_i * w_i / W, where W = sum(N_j * w_j)
+    if (!weights_.empty()) {
+        Real W = Real(0);
+        for (std::size_t i = 0; i < num_basis_; ++i) {
+            values[i] *= weights_[i];
+            W += values[i];
+        }
+        if (std::abs(W) > Real(0)) {
+            const Real inv_W = Real(1) / W;
+            for (std::size_t i = 0; i < num_basis_; ++i) {
+                values[i] *= inv_W;
+            }
         }
     }
 }
@@ -164,6 +186,40 @@ void BSplineBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
         const Real term2 = (std::abs(den2) > Real(0)) ? (Real(p) * n_ip1 / den2) : Real(0);
 
         gradients[static_cast<std::size_t>(i)][0] = (term1 - term2) * du_dxi;
+    }
+
+    // NURBS quotient rule: dR_i/dxi = (dN_i*w_i*W - N_i*w_i*dW) / W^2
+    // where W = sum(N_j*w_j), dW = sum(dN_j*w_j)
+    if (!weights_.empty()) {
+        // Evaluate B-spline values for the weight function
+        std::vector<Real> N_vals(num_basis_, Real(0));
+        {
+            std::vector<Real> Np;
+            basis_funs(knots_, degree_, span, u, Np);
+            const int first_v = span - p;
+            for (int r = 0; r <= p; ++r) {
+                const int i = first_v + r;
+                if (i >= 0 && i < static_cast<int>(num_basis_)) {
+                    N_vals[static_cast<std::size_t>(i)] = Np[static_cast<std::size_t>(r)];
+                }
+            }
+        }
+
+        Real W = Real(0);
+        Real dW = Real(0);
+        for (std::size_t i = 0; i < num_basis_; ++i) {
+            W += N_vals[i] * weights_[i];
+            dW += gradients[i][0] * weights_[i];
+        }
+
+        if (std::abs(W) > Real(0)) {
+            const Real inv_W2 = Real(1) / (W * W);
+            for (std::size_t i = 0; i < num_basis_; ++i) {
+                const Real dNw = gradients[i][0] * weights_[i];
+                const Real Nw = N_vals[i] * weights_[i];
+                gradients[i][0] = (dNw * W - Nw * dW) * inv_W2;
+            }
+        }
     }
 }
 

@@ -351,6 +351,101 @@ TEST(ModalTransform, ThrowsOnMismatchedSizes) {
     EXPECT_THROW(ModalTransform bad(modal, nodal), svmp::FE::FEException);
 }
 
+TEST(ModalTransform, RoundTripOnTriangle) {
+    const int order = 3;
+    HierarchicalBasis modal(ElementType::Triangle3, order);
+    LagrangeBasis nodal(ElementType::Triangle3, order);
+    ModalTransform transform(modal, nodal);
+
+    const std::size_t n = modal.size();
+    std::vector<Real> modal_coeffs(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        modal_coeffs[i] = static_cast<Real>(0.1 * (static_cast<double>(i) + 1.0));
+    }
+    auto recovered = transform.nodal_to_modal(transform.modal_to_nodal(modal_coeffs));
+    ASSERT_EQ(modal_coeffs.size(), recovered.size());
+    for (std::size_t i = 0; i < recovered.size(); ++i) {
+        EXPECT_NEAR(modal_coeffs[i], recovered[i], 1e-9)
+            << "Triangle order=" << order << ", i=" << i;
+    }
+}
+
+TEST(ModalTransform, RoundTripOnTetra) {
+    const int order = 2;
+    HierarchicalBasis modal(ElementType::Tetra4, order);
+    LagrangeBasis nodal(ElementType::Tetra4, order);
+    ModalTransform transform(modal, nodal);
+
+    const std::size_t n = modal.size();
+    std::vector<Real> modal_coeffs(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        modal_coeffs[i] = static_cast<Real>(0.05 * (static_cast<double>(i) + 1.0));
+    }
+    auto recovered = transform.nodal_to_modal(transform.modal_to_nodal(modal_coeffs));
+    ASSERT_EQ(modal_coeffs.size(), recovered.size());
+    for (std::size_t i = 0; i < recovered.size(); ++i) {
+        EXPECT_NEAR(modal_coeffs[i], recovered[i], 1e-8)
+            << "Tetra order=" << order << ", i=" << i;
+    }
+}
+
+TEST(ModalTransform, RoundTripOnHex) {
+    const int order = 2;
+    HierarchicalBasis modal(ElementType::Hex8, order);
+    LagrangeBasis nodal(ElementType::Hex8, order);
+    ModalTransform transform(modal, nodal);
+
+    const std::size_t n = modal.size();
+    std::vector<Real> modal_coeffs(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        modal_coeffs[i] = static_cast<Real>(0.05 * (static_cast<double>(i) + 1.0));
+    }
+    auto recovered = transform.nodal_to_modal(transform.modal_to_nodal(modal_coeffs));
+    ASSERT_EQ(modal_coeffs.size(), recovered.size());
+    for (std::size_t i = 0; i < recovered.size(); ++i) {
+        EXPECT_NEAR(modal_coeffs[i], recovered[i], 1e-9)
+            << "Hex order=" << order << ", i=" << i;
+    }
+}
+
+TEST(ModalTransform, RoundTripOnWedge) {
+    const int order = 2;
+    HierarchicalBasis modal(ElementType::Wedge6, order);
+    LagrangeBasis nodal(ElementType::Wedge6, order);
+    ModalTransform transform(modal, nodal);
+
+    const std::size_t n = modal.size();
+    std::vector<Real> modal_coeffs(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        modal_coeffs[i] = static_cast<Real>(0.1 * (static_cast<double>(i) + 1.0));
+    }
+    auto recovered = transform.nodal_to_modal(transform.modal_to_nodal(modal_coeffs));
+    ASSERT_EQ(modal_coeffs.size(), recovered.size());
+    for (std::size_t i = 0; i < recovered.size(); ++i) {
+        EXPECT_NEAR(modal_coeffs[i], recovered[i], 1e-8)
+            << "Wedge order=" << order << ", i=" << i;
+    }
+}
+
+TEST(ModalTransform, ConditionNumberGrowsWithOrder) {
+    // Condition number should increase with polynomial order but remain bounded
+    Real prev_cond = Real(1);
+    for (int order = 2; order <= 6; ++order) {
+        HierarchicalBasis modal(ElementType::Line2, order);
+        LagrangeBasis nodal(ElementType::Line2, order);
+        ModalTransform transform(modal, nodal);
+        const Real cond = transform.condition_number();
+        EXPECT_GE(cond, Real(1));
+        EXPECT_LT(cond, Real(1e8))
+            << "Condition number too large at order " << order;
+        if (order > 2) {
+            EXPECT_GE(cond, prev_cond * Real(0.5))
+                << "Unexpected conditioning decrease at order " << order;
+        }
+        prev_cond = cond;
+    }
+}
+
 // =============================================================================
 // Serendipity Gradient Tests
 // =============================================================================

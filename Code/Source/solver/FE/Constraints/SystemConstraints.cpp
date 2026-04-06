@@ -5,7 +5,7 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "Systems/SystemConstraints.h"
+#include "Constraints/SystemConstraints.h"
 
 #include "Core/FEException.h"
 #include "Dofs/DofTools.h"
@@ -21,7 +21,7 @@
 
 namespace svmp {
 namespace FE {
-namespace systems {
+namespace constraints {
 
 namespace {
 
@@ -208,7 +208,7 @@ makeDirichletConstantByFaceSet(const svmp::Mesh& mesh,
     return std::make_unique<constraints::DirichletBC>(std::move(dofs), value, opts);
 }
 
-} // namespace systems
+} // namespace constraints
 } // namespace FE
 } // namespace svmp
 

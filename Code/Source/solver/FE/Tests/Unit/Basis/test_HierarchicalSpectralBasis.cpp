@@ -304,3 +304,89 @@ TEST(SpectralBasis, WedgeAndPyramidThrowNotImplemented) {
     EXPECT_THROW(SpectralBasis(ElementType::Wedge6, order), svmp::FE::FEException);
     EXPECT_THROW(SpectralBasis(ElementType::Pyramid5, order), svmp::FE::FEException);
 }
+
+TEST(SpectralBasis, GLLNodeAccuracy) {
+    // Compare 1D GLL nodes against known reference values for low orders.
+    // GLL nodes are roots of (1-x^2)*P'_n(x) = 0 plus endpoints.
+    {
+        SpectralBasis basis(ElementType::Line2, 2);
+        const auto& nodes = basis.nodes_1d();
+        ASSERT_EQ(nodes.size(), 3u);
+        EXPECT_NEAR(nodes[0], -1.0, 1e-14);
+        EXPECT_NEAR(nodes[1], 0.0, 1e-14);
+        EXPECT_NEAR(nodes[2], 1.0, 1e-14);
+    }
+    {
+        SpectralBasis basis(ElementType::Line2, 3);
+        const auto& nodes = basis.nodes_1d();
+        ASSERT_EQ(nodes.size(), 4u);
+        EXPECT_NEAR(nodes[0], -1.0, 1e-14);
+        EXPECT_NEAR(nodes[1], -std::sqrt(1.0 / 5.0), 1e-12);
+        EXPECT_NEAR(nodes[2], std::sqrt(1.0 / 5.0), 1e-12);
+        EXPECT_NEAR(nodes[3], 1.0, 1e-14);
+    }
+    {
+        SpectralBasis basis(ElementType::Line2, 4);
+        const auto& nodes = basis.nodes_1d();
+        ASSERT_EQ(nodes.size(), 5u);
+        EXPECT_NEAR(nodes[0], -1.0, 1e-14);
+        EXPECT_NEAR(nodes[1], -std::sqrt(3.0 / 7.0), 1e-12);
+        EXPECT_NEAR(nodes[2], 0.0, 1e-12);
+        EXPECT_NEAR(nodes[3], std::sqrt(3.0 / 7.0), 1e-12);
+        EXPECT_NEAR(nodes[4], 1.0, 1e-14);
+    }
+}
+
+TEST(SpectralBasis, GradientsMatchFiniteDifference2D) {
+    const int order = 3;
+    SpectralBasis basis(ElementType::Quad4, order);
+    svmp::FE::math::Vector<Real, 3> xi{Real(0.3), Real(-0.2), Real(0)};
+    const Real eps = Real(1e-6);
+
+    std::vector<Gradient> grads;
+    basis.evaluate_gradients(xi, grads);
+    ASSERT_EQ(grads.size(), basis.size());
+
+    for (int d = 0; d < 2; ++d) {
+        auto xi_p = xi, xi_m = xi;
+        xi_p[static_cast<std::size_t>(d)] += eps;
+        xi_m[static_cast<std::size_t>(d)] -= eps;
+
+        std::vector<Real> vals_p, vals_m;
+        basis.evaluate_values(xi_p, vals_p);
+        basis.evaluate_values(xi_m, vals_m);
+
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            const Real fd = (vals_p[i] - vals_m[i]) / (Real(2) * eps);
+            EXPECT_NEAR(grads[i][static_cast<std::size_t>(d)], fd, 1e-5)
+                << "Basis " << i << ", dim " << d;
+        }
+    }
+}
+
+TEST(SpectralBasis, GradientsMatchFiniteDifference3D) {
+    const int order = 2;
+    SpectralBasis basis(ElementType::Hex8, order);
+    svmp::FE::math::Vector<Real, 3> xi{Real(0.2), Real(-0.3), Real(0.15)};
+    const Real eps = Real(1e-6);
+
+    std::vector<Gradient> grads;
+    basis.evaluate_gradients(xi, grads);
+    ASSERT_EQ(grads.size(), basis.size());
+
+    for (int d = 0; d < 3; ++d) {
+        auto xi_p = xi, xi_m = xi;
+        xi_p[static_cast<std::size_t>(d)] += eps;
+        xi_m[static_cast<std::size_t>(d)] -= eps;
+
+        std::vector<Real> vals_p, vals_m;
+        basis.evaluate_values(xi_p, vals_p);
+        basis.evaluate_values(xi_m, vals_m);
+
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            const Real fd = (vals_p[i] - vals_m[i]) / (Real(2) * eps);
+            EXPECT_NEAR(grads[i][static_cast<std::size_t>(d)], fd, 1e-5)
+                << "Basis " << i << ", dim " << d;
+        }
+    }
+}

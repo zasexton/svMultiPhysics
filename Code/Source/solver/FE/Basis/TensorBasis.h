@@ -155,6 +155,61 @@ public:
         }
     }
 
+    void evaluate_hessians(const math::Vector<Real, 3>& xi,
+                           std::vector<Hessian>& hessians) const override {
+        hessians.assign(size(), Hessian{});
+
+        std::vector<Real> vx, vy, vz;
+        std::vector<Gradient> gx, gy, gz;
+        std::vector<Hessian> hx, hy, hz;
+        bases_[0].evaluate_values(math::Vector<Real,3>{xi[0], Real(0), Real(0)}, vx);
+        bases_[0].evaluate_gradients(math::Vector<Real,3>{xi[0], Real(0), Real(0)}, gx);
+        bases_[0].evaluate_hessians(math::Vector<Real,3>{xi[0], Real(0), Real(0)}, hx);
+        if (dimension_ >= 2) {
+            bases_[1].evaluate_values(math::Vector<Real,3>{xi[1], Real(0), Real(0)}, vy);
+            bases_[1].evaluate_gradients(math::Vector<Real,3>{xi[1], Real(0), Real(0)}, gy);
+            bases_[1].evaluate_hessians(math::Vector<Real,3>{xi[1], Real(0), Real(0)}, hy);
+        }
+        if (dimension_ == 3) {
+            bases_[2].evaluate_values(math::Vector<Real,3>{xi[2], Real(0), Real(0)}, vz);
+            bases_[2].evaluate_gradients(math::Vector<Real,3>{xi[2], Real(0), Real(0)}, gz);
+            bases_[2].evaluate_hessians(math::Vector<Real,3>{xi[2], Real(0), Real(0)}, hz);
+        }
+
+        for (std::size_t idx = 0; idx < indices_.size(); ++idx) {
+            const auto& id = indices_[idx];
+            const auto ix = static_cast<std::size_t>(id[0]);
+            Hessian H{};
+            if (dimension_ == 1) {
+                H(0, 0) = hx[ix](0, 0);
+            } else if (dimension_ == 2) {
+                const auto iy = static_cast<std::size_t>(id[1]);
+                const Real dx = gx[ix][0];
+                const Real dy = gy[iy][0];
+                H(0, 0) = hx[ix](0, 0) * vy[iy];
+                H(1, 1) = vx[ix] * hy[iy](0, 0);
+                H(0, 1) = dx * dy;
+                H(1, 0) = H(0, 1);
+            } else {
+                const auto iy = static_cast<std::size_t>(id[1]);
+                const auto iz = static_cast<std::size_t>(id[2]);
+                const Real dx = gx[ix][0];
+                const Real dy = gy[iy][0];
+                const Real dz = gz[iz][0];
+                H(0, 0) = hx[ix](0, 0) * vy[iy] * vz[iz];
+                H(1, 1) = vx[ix] * hy[iy](0, 0) * vz[iz];
+                H(2, 2) = vx[ix] * vy[iy] * hz[iz](0, 0);
+                H(0, 1) = dx * dy * vz[iz];
+                H(1, 0) = H(0, 1);
+                H(0, 2) = dx * vy[iy] * dz;
+                H(2, 0) = H(0, 2);
+                H(1, 2) = vx[ix] * dy * dz;
+                H(2, 1) = H(1, 2);
+            }
+            hessians[idx] = H;
+        }
+    }
+
 private:
     std::array<Basis1D, 3> bases_;
     int dimension_;

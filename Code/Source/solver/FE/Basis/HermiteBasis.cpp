@@ -73,8 +73,11 @@ HermiteBasis::HermiteBasis(ElementType element_type,
     } else if (element_type_ == ElementType::Quad4) {
         dimension_ = 2;
         size_ = 16;
+    } else if (element_type_ == ElementType::Hex8) {
+        dimension_ = 3;
+        size_ = 64;
     } else {
-        throw FEException("HermiteBasis currently supports Line2 and Quad4 only",
+        throw FEException("HermiteBasis currently supports Line2, Quad4, and Hex8 only",
                           __FILE__, __LINE__, __func__, FEStatus::InvalidElement);
     }
 }
@@ -122,6 +125,41 @@ void HermiteBasis::evaluate_values(const math::Vector<Real, 3>& xi,
         set_corner(2, H3x, H4x, H3y, H4y);
         // Corner 3: (-1, +1)  -> left/top
         set_corner(3, H1x, H2x, H3y, H4y);
+        return;
+    }
+
+    if (dimension_ == 3) {
+        Real Hx[4], dHx[4];
+        Real Hy[4], dHy[4];
+        Real Hz[4], dHz[4];
+        hermite_1d(xi[0], Hx[0], Hx[1], Hx[2], Hx[3], dHx[0], dHx[1], dHx[2], dHx[3]);
+        hermite_1d(xi[1], Hy[0], Hy[1], Hy[2], Hy[3], dHy[0], dHy[1], dHy[2], dHy[3]);
+        hermite_1d(xi[2], Hz[0], Hz[1], Hz[2], Hz[3], dHz[0], dHz[1], dHz[2], dHz[3]);
+
+        // Hex8 corner ordering (VTK): 0(-,-,-), 1(+,-,-), 2(+,+,-), 3(-,+,-),
+        //                             4(-,-,+), 5(+,-,+), 6(+,+,+), 7(-,+,+)
+        // For each corner: (Vx, Sx) = (H1, H2) for left, (H3, H4) for right
+        const int cx[] = {0, 2, 2, 0, 0, 2, 2, 0}; // index into Hx: 0=H1(left), 2=H3(right)
+        const int cy[] = {0, 0, 2, 2, 0, 0, 2, 2};
+        const int cz[] = {0, 0, 0, 0, 2, 2, 2, 2};
+
+        for (int c = 0; c < 8; ++c) {
+            const std::size_t base = static_cast<std::size_t>(8 * c);
+            const int ix = cx[c], iy = cy[c], iz = cz[c];
+            // Value (Vx), slope (Sx=Vx+1) indices into Hx/Hy/Hz arrays
+            const Real Vx = Hx[ix], Sx = Hx[ix + 1];
+            const Real Vy = Hy[iy], Sy = Hy[iy + 1];
+            const Real Vz = Hz[iz], Sz = Hz[iz + 1];
+
+            values[base + 0] = Vx * Vy * Vz;  // value
+            values[base + 1] = Sx * Vy * Vz;  // d/dx
+            values[base + 2] = Vx * Sy * Vz;  // d/dy
+            values[base + 3] = Vx * Vy * Sz;  // d/dz
+            values[base + 4] = Sx * Sy * Vz;  // d2/(dx dy)
+            values[base + 5] = Sx * Vy * Sz;  // d2/(dx dz)
+            values[base + 6] = Vx * Sy * Sz;  // d2/(dy dz)
+            values[base + 7] = Sx * Sy * Sz;  // d3/(dx dy dz)
+        }
         return;
     }
 
@@ -211,6 +249,80 @@ void HermiteBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
                    H2x, dH2x,
                    H3y, dH3y,
                    H4y, dH4y);
+        return;
+    }
+
+    if (dimension_ == 3) {
+        Real Hx[4], dHx[4];
+        Real Hy[4], dHy[4];
+        Real Hz[4], dHz[4];
+        hermite_1d(xi[0], Hx[0], Hx[1], Hx[2], Hx[3], dHx[0], dHx[1], dHx[2], dHx[3]);
+        hermite_1d(xi[1], Hy[0], Hy[1], Hy[2], Hy[3], dHy[0], dHy[1], dHy[2], dHy[3]);
+        hermite_1d(xi[2], Hz[0], Hz[1], Hz[2], Hz[3], dHz[0], dHz[1], dHz[2], dHz[3]);
+
+        const int cx[] = {0, 2, 2, 0, 0, 2, 2, 0};
+        const int cy[] = {0, 0, 2, 2, 0, 0, 2, 2};
+        const int cz[] = {0, 0, 0, 0, 2, 2, 2, 2};
+
+        for (int c = 0; c < 8; ++c) {
+            const std::size_t base = static_cast<std::size_t>(8 * c);
+            const int ix = cx[c], iy = cy[c], iz = cz[c];
+            const Real Vx = Hx[ix], Sx = Hx[ix + 1];
+            const Real Vy = Hy[iy], Sy = Hy[iy + 1];
+            const Real Vz = Hz[iz], Sz = Hz[iz + 1];
+            const Real dVx = dHx[ix], dSx = dHx[ix + 1];
+            const Real dVy = dHy[iy], dSy = dHy[iy + 1];
+            const Real dVz = dHz[iz], dSz = dHz[iz + 1];
+
+            // 8 DOFs per corner, 3 gradient components each
+            // DOF 0: Vx*Vy*Vz
+            gradients[base + 0] = Gradient{};
+            gradients[base + 0][0] = dVx * Vy * Vz;
+            gradients[base + 0][1] = Vx * dVy * Vz;
+            gradients[base + 0][2] = Vx * Vy * dVz;
+
+            // DOF 1: Sx*Vy*Vz
+            gradients[base + 1] = Gradient{};
+            gradients[base + 1][0] = dSx * Vy * Vz;
+            gradients[base + 1][1] = Sx * dVy * Vz;
+            gradients[base + 1][2] = Sx * Vy * dVz;
+
+            // DOF 2: Vx*Sy*Vz
+            gradients[base + 2] = Gradient{};
+            gradients[base + 2][0] = dVx * Sy * Vz;
+            gradients[base + 2][1] = Vx * dSy * Vz;
+            gradients[base + 2][2] = Vx * Sy * dVz;
+
+            // DOF 3: Vx*Vy*Sz
+            gradients[base + 3] = Gradient{};
+            gradients[base + 3][0] = dVx * Vy * Sz;
+            gradients[base + 3][1] = Vx * dVy * Sz;
+            gradients[base + 3][2] = Vx * Vy * dSz;
+
+            // DOF 4: Sx*Sy*Vz
+            gradients[base + 4] = Gradient{};
+            gradients[base + 4][0] = dSx * Sy * Vz;
+            gradients[base + 4][1] = Sx * dSy * Vz;
+            gradients[base + 4][2] = Sx * Sy * dVz;
+
+            // DOF 5: Sx*Vy*Sz
+            gradients[base + 5] = Gradient{};
+            gradients[base + 5][0] = dSx * Vy * Sz;
+            gradients[base + 5][1] = Sx * dVy * Sz;
+            gradients[base + 5][2] = Sx * Vy * dSz;
+
+            // DOF 6: Vx*Sy*Sz
+            gradients[base + 6] = Gradient{};
+            gradients[base + 6][0] = dVx * Sy * Sz;
+            gradients[base + 6][1] = Vx * dSy * Sz;
+            gradients[base + 6][2] = Vx * Sy * dSz;
+
+            // DOF 7: Sx*Sy*Sz
+            gradients[base + 7] = Gradient{};
+            gradients[base + 7][0] = dSx * Sy * Sz;
+            gradients[base + 7][1] = Sx * dSy * Sz;
+            gradients[base + 7][2] = Sx * Sy * dSz;
+        }
         return;
     }
 

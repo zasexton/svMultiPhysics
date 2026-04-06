@@ -6,6 +6,8 @@
 #include <gtest/gtest.h>
 #include "FE/Basis/OrthogonalPolynomials.h"
 #include "FE/Quadrature/GaussQuadrature.h"
+#include "FE/Quadrature/TriangleQuadrature.h"
+#include "FE/Quadrature/TetrahedronQuadrature.h"
 #include <cmath>
 
 using namespace svmp::FE;
@@ -129,4 +131,84 @@ TEST(OrthogonalPolynomials, ProriolDerivativesMatchFiniteDifference) {
     EXPECT_NEAR(deta, fd_eta, Real(1e-6) * scale_eta);
     EXPECT_NEAR(dzeta, fd_zeta, Real(1e-6) * scale_zeta);
     (void)val;
+}
+
+TEST(OrthogonalPolynomials, DubinerOrthogonality) {
+    // Dubiner polynomials should be orthogonal on the reference triangle
+    // under the unit weight: integral of D(p1,q1) * D(p2,q2) dA = 0 for (p1,q1) != (p2,q2)
+    const int max_order = 3;
+    TriangleQuadrature quad(2 * max_order + 2);
+
+    // Collect all (p,q) multi-indices up to total order max_order
+    struct PQ { int p; int q; };
+    std::vector<PQ> indices;
+    for (int total = 0; total <= max_order; ++total) {
+        for (int p = 0; p <= total; ++p) {
+            indices.push_back({p, total - p});
+        }
+    }
+
+    const std::size_t n = indices.size();
+    for (std::size_t a = 0; a < n; ++a) {
+        for (std::size_t b = a; b < n; ++b) {
+            double inner = 0.0;
+            for (std::size_t q = 0; q < quad.num_points(); ++q) {
+                const Real xi = quad.point(q)[0];
+                const Real eta = quad.point(q)[1];
+                inner += quad.weight(q) *
+                         dubiner(indices[a].p, indices[a].q, xi, eta) *
+                         dubiner(indices[b].p, indices[b].q, xi, eta);
+            }
+            if (a == b) {
+                // Diagonal: should be positive
+                EXPECT_GT(inner, 0.0)
+                    << "D(" << indices[a].p << "," << indices[a].q << ") self-inner-product";
+            } else {
+                // Off-diagonal: should be zero
+                EXPECT_NEAR(inner, 0.0, 1e-10)
+                    << "D(" << indices[a].p << "," << indices[a].q
+                    << ") x D(" << indices[b].p << "," << indices[b].q << ")";
+            }
+        }
+    }
+}
+
+TEST(OrthogonalPolynomials, ProriolOrthogonality) {
+    // Proriol polynomials should be orthogonal on the reference tetrahedron
+    const int max_order = 2;
+    TetrahedronQuadrature quad(2 * max_order + 2);
+
+    struct PQR { int p; int q; int r; };
+    std::vector<PQR> indices;
+    for (int total = 0; total <= max_order; ++total) {
+        for (int p = 0; p <= total; ++p) {
+            for (int q = 0; q <= total - p; ++q) {
+                indices.push_back({p, q, total - p - q});
+            }
+        }
+    }
+
+    const std::size_t n = indices.size();
+    for (std::size_t a = 0; a < n; ++a) {
+        for (std::size_t b = a; b < n; ++b) {
+            double inner = 0.0;
+            for (std::size_t q = 0; q < quad.num_points(); ++q) {
+                const Real xi = quad.point(q)[0];
+                const Real eta = quad.point(q)[1];
+                const Real zeta = quad.point(q)[2];
+                inner += quad.weight(q) *
+                         proriol(indices[a].p, indices[a].q, indices[a].r, xi, eta, zeta) *
+                         proriol(indices[b].p, indices[b].q, indices[b].r, xi, eta, zeta);
+            }
+            if (a == b) {
+                EXPECT_GT(inner, 0.0)
+                    << "P(" << indices[a].p << "," << indices[a].q << "," << indices[a].r
+                    << ") self-inner-product";
+            } else {
+                EXPECT_NEAR(inner, 0.0, 1e-10)
+                    << "P(" << indices[a].p << "," << indices[a].q << "," << indices[a].r
+                    << ") x P(" << indices[b].p << "," << indices[b].q << "," << indices[b].r << ")";
+            }
+        }
+    }
 }

@@ -39,8 +39,15 @@ std::shared_ptr<BasisFunction> BasisFactory::create(const BasisRequest& req) {
         return std::make_shared<NedelecBasis>(req.element_type, req.order);
     }
 
+    // L² (discontinuous) uses the same reference-space shape functions as C0.
+    // DOF ownership (element-local vs shared) is managed at the Space/Element level.
+    // Fall through to the BasisType switch intentionally.
+    if (req.continuity == Continuity::L2) {
+        // Intentional fall-through to BasisType dispatch below
+    }
+
     // C¹ scalar bases (currently 1D Hermite on Line2)
-    if (req.continuity == Continuity::C1) {
+    else if (req.continuity == Continuity::C1) {
         if (req.field_type == FieldType::Scalar) {
             return std::make_shared<HermiteBasis>(req.element_type, req.order);
         }
@@ -59,6 +66,10 @@ std::shared_ptr<BasisFunction> BasisFactory::create(const BasisRequest& req) {
             return std::make_shared<SpectralBasis>(req.element_type, req.order);
         case BasisType::Serendipity:
             return std::make_shared<SerendipityBasis>(req.element_type, req.order);
+        case BasisType::Hermite:
+            return std::make_shared<HermiteBasis>(req.element_type, req.order);
+        case BasisType::Bubble:
+            return std::make_shared<BubbleBasis>(req.element_type);
         default:
             throw FEException("Unsupported basis type in BasisFactory",
                               __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
