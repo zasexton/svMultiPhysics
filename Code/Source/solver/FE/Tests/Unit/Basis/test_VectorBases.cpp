@@ -44,6 +44,46 @@ static double integrate_triangle_edge_normal_moment(const RaviartThomasBasis& ba
                                                     int order,
                                                     int quad_order = 8);
 
+static Real evaluate_quad_bdm_edge_normal_flux(const BDMBasis& basis,
+                                               int edge_id,
+                                               int func_id,
+                                               Real s);
+
+static Real evaluate_triangle_bdm_edge_scaled_normal_flux(const BDMBasis& basis,
+                                                          int edge_id,
+                                                          int func_id,
+                                                          Real s);
+
+static double integrate_quad_bdm_edge_flux(const BDMBasis& basis,
+                                           int edge_id,
+                                           int func_id,
+                                           int quad_order = 8);
+
+static double integrate_quad_bdm_edge_moment(const BDMBasis& basis,
+                                             int edge_id,
+                                             int mode_id,
+                                             int func_id,
+                                             int quad_order = 8);
+
+static double integrate_triangle_bdm_edge_flux(const BDMBasis& basis,
+                                               int edge_id,
+                                               int func_id,
+                                               int quad_order = 8);
+
+static double integrate_triangle_bdm_edge_moment(const BDMBasis& basis,
+                                                 int edge_id,
+                                                 int mode_id,
+                                                 int func_id,
+                                                 int quad_order = 8);
+
+static double integrate_quad_bdm_divergence(const BDMBasis& basis,
+                                            int func_id,
+                                            int quad_order = 8);
+
+static double integrate_triangle_bdm_divergence(const BDMBasis& basis,
+                                                int func_id,
+                                                int quad_order = 8);
+
 static double integrate_tetra_edge_tangential_moment(const NedelecBasis& basis,
                                                      int edge_id,
                                                      int mode_id,
@@ -123,6 +163,126 @@ TEST(BDMBasis, TriangleDivergenceLinear) {
     EXPECT_NEAR(div[3], 0.0, 1e-12);
     EXPECT_NEAR(div[4], 2.0, 1e-12);
     EXPECT_NEAR(div[5], 0.0, 1e-12);
+}
+
+TEST(BDMBasis, QuadEdgeNormalTracesMatchConstruction) {
+    BDMBasis basis(ElementType::Quad4, 1);
+    const Real samples[] = {Real(-0.75), Real(0), Real(0.6)};
+
+    for (int edge = 0; edge < 4; ++edge) {
+        const int constant_func = 2 * edge;
+        const int linear_func = constant_func + 1;
+
+        for (Real s : samples) {
+            for (int func = 0; func < static_cast<int>(basis.size()); ++func) {
+                const Real flux = evaluate_quad_bdm_edge_normal_flux(basis, edge, func, s);
+                if (func == constant_func) {
+                    EXPECT_NEAR(flux, Real(1), 1e-12)
+                        << "edge=" << edge << ", s=" << s;
+                } else if (func == linear_func) {
+                    EXPECT_NEAR(flux, s, 1e-12)
+                        << "edge=" << edge << ", s=" << s;
+                } else {
+                    EXPECT_NEAR(flux, Real(0), 1e-12)
+                        << "edge=" << edge << ", s=" << s << ", func=" << func;
+                }
+            }
+        }
+    }
+}
+
+TEST(BDMBasis, TriangleEdgeNormalTracesMatchConstruction) {
+    BDMBasis basis(ElementType::Triangle3, 1);
+    const Real samples[] = {Real(-0.7), Real(0), Real(0.4)};
+
+    for (int edge = 0; edge < 3; ++edge) {
+        const int constant_func = 2 * edge;
+        const int linear_func = constant_func + 1;
+
+        for (Real s : samples) {
+            for (int func = 0; func < static_cast<int>(basis.size()); ++func) {
+                const Real flux = evaluate_triangle_bdm_edge_scaled_normal_flux(basis, edge, func, s);
+                if (func == constant_func) {
+                    EXPECT_NEAR(flux, Real(1), 1e-12)
+                        << "edge=" << edge << ", s=" << s;
+                } else if (func == linear_func) {
+                    EXPECT_NEAR(flux, Real(3) * s, 1e-12)
+                        << "edge=" << edge << ", s=" << s;
+                } else {
+                    EXPECT_NEAR(flux, Real(0), 1e-12)
+                        << "edge=" << edge << ", s=" << s << ", func=" << func;
+                }
+            }
+        }
+    }
+}
+
+TEST(BDMBasis, QuadDivergenceMatchesBoundaryFlux) {
+    BDMBasis basis(ElementType::Quad4, 1);
+    ASSERT_EQ(basis.size(), 8u);
+
+    for (int func = 0; func < static_cast<int>(basis.size()); ++func) {
+        const double volume = integrate_quad_bdm_divergence(basis, func);
+        double boundary = 0.0;
+        for (int edge = 0; edge < 4; ++edge) {
+            boundary += integrate_quad_bdm_edge_flux(basis, edge, func);
+        }
+        EXPECT_NEAR(volume, boundary, 1e-11) << "func=" << func;
+    }
+}
+
+TEST(BDMBasis, TriangleDivergenceMatchesBoundaryFlux) {
+    BDMBasis basis(ElementType::Triangle3, 1);
+    ASSERT_EQ(basis.size(), 6u);
+
+    for (int func = 0; func < static_cast<int>(basis.size()); ++func) {
+        const double volume = integrate_triangle_bdm_divergence(basis, func);
+        double boundary = 0.0;
+        for (int edge = 0; edge < 3; ++edge) {
+            boundary += integrate_triangle_bdm_edge_flux(basis, edge, func);
+        }
+        EXPECT_NEAR(volume, boundary, 1e-11) << "func=" << func;
+    }
+}
+
+TEST(BDMBasis, QuadEdgeMomentsAreKroneckerWithDofAssociations) {
+    BDMBasis basis(ElementType::Quad4, 1);
+    const auto assoc = basis.dof_associations();
+    ASSERT_EQ(assoc.size(), basis.size());
+
+    for (std::size_t func = 0; func < basis.size(); ++func) {
+        ASSERT_EQ(assoc[func].entity_type, DofEntity::Edge);
+        for (int edge = 0; edge < 4; ++edge) {
+            for (int mode = 0; mode < 2; ++mode) {
+                const double moment =
+                    integrate_quad_bdm_edge_moment(basis, edge, mode, static_cast<int>(func));
+                const double expected =
+                    (assoc[func].entity_id == edge && assoc[func].moment_index == mode) ? 1.0 : 0.0;
+                EXPECT_NEAR(moment, expected, 1e-11)
+                    << "func=" << func << ", edge=" << edge << ", mode=" << mode;
+            }
+        }
+    }
+}
+
+TEST(BDMBasis, TriangleEdgeMomentsAreKroneckerWithDofAssociations) {
+    BDMBasis basis(ElementType::Triangle3, 1);
+    const auto assoc = basis.dof_associations();
+    ASSERT_EQ(assoc.size(), basis.size());
+
+    for (std::size_t func = 0; func < basis.size(); ++func) {
+        ASSERT_EQ(assoc[func].entity_type, DofEntity::Edge);
+        for (int edge = 0; edge < 3; ++edge) {
+            for (int mode = 0; mode < 2; ++mode) {
+                const double moment =
+                    integrate_triangle_bdm_edge_moment(basis, edge, mode, static_cast<int>(func));
+                const double expected =
+                    (assoc[func].entity_id == edge && assoc[func].moment_index == mode) ? 1.0 : 0.0;
+                EXPECT_NEAR(moment, expected, 1e-11)
+                    << "func=" << func << ", edge=" << edge << ", mode=" << mode;
+            }
+        }
+    }
 }
 
 TEST(VectorBasis, ScalarEvaluateThrows) {
@@ -509,6 +669,195 @@ static double integrate_edge_normal_flux_quad4(const RaviartThomasBasis& basis,
         flux += static_cast<double>(quad.weight(q) * (J * v.dot(nrm)));
     }
     return flux;
+}
+
+static Real evaluate_quad_bdm_edge_normal_flux(const BDMBasis& basis,
+                                               int edge_id,
+                                               int func_id,
+                                               Real s) {
+    using svmp::FE::math::Vector;
+
+    Vector<Real, 3> xi{};
+    Vector<Real, 3> normal{};
+    switch (edge_id) {
+        case 0:
+            xi = Vector<Real, 3>{s, Real(-1), Real(0)};
+            normal = Vector<Real, 3>{Real(0), Real(-1), Real(0)};
+            break;
+        case 1:
+            xi = Vector<Real, 3>{Real(1), s, Real(0)};
+            normal = Vector<Real, 3>{Real(1), Real(0), Real(0)};
+            break;
+        case 2:
+            xi = Vector<Real, 3>{s, Real(1), Real(0)};
+            normal = Vector<Real, 3>{Real(0), Real(1), Real(0)};
+            break;
+        default:
+            xi = Vector<Real, 3>{Real(-1), s, Real(0)};
+            normal = Vector<Real, 3>{Real(-1), Real(0), Real(0)};
+            break;
+    }
+
+    std::vector<Vector<Real, 3>> values;
+    basis.evaluate_vector_values(xi, values);
+    return values[static_cast<std::size_t>(func_id)].dot(normal);
+}
+
+static Real evaluate_triangle_bdm_edge_scaled_normal_flux(const BDMBasis& basis,
+                                                          int edge_id,
+                                                          int func_id,
+                                                          Real s) {
+    using svmp::FE::math::Vector;
+
+    Vector<Real, 3> xi{};
+    Vector<Real, 3> normal{};
+    switch (edge_id) {
+        case 0:
+            xi = Vector<Real, 3>{(s + Real(1)) * Real(0.5), Real(0), Real(0)};
+            normal = Vector<Real, 3>{Real(0), Real(-1), Real(0)};
+            break;
+        case 1:
+            xi = Vector<Real, 3>{(Real(1) - s) * Real(0.5), (Real(1) + s) * Real(0.5), Real(0)};
+            normal = Vector<Real, 3>{Real(1), Real(1), Real(0)};
+            break;
+        default:
+            xi = Vector<Real, 3>{Real(0), (s + Real(1)) * Real(0.5), Real(0)};
+            normal = Vector<Real, 3>{Real(-1), Real(0), Real(0)};
+            break;
+    }
+
+    std::vector<Vector<Real, 3>> values;
+    basis.evaluate_vector_values(xi, values);
+    return values[static_cast<std::size_t>(func_id)].dot(normal);
+}
+
+static double integrate_quad_bdm_edge_flux(const BDMBasis& basis,
+                                           int edge_id,
+                                           int func_id,
+                                           int quad_order) {
+    using svmp::FE::quadrature::GaussQuadrature1D;
+
+    GaussQuadrature1D quad(quad_order);
+    double flux = 0.0;
+    for (std::size_t q = 0; q < quad.num_points(); ++q) {
+        const Real s = quad.point(q)[0];
+        flux += static_cast<double>(quad.weight(q) *
+                                    evaluate_quad_bdm_edge_normal_flux(basis, edge_id, func_id, s));
+    }
+    return flux;
+}
+
+static double integrate_quad_bdm_edge_moment(const BDMBasis& basis,
+                                             int edge_id,
+                                             int mode_id,
+                                             int func_id,
+                                             int quad_order) {
+    using svmp::FE::quadrature::GaussQuadrature1D;
+
+    GaussQuadrature1D quad(quad_order);
+    double moment = 0.0;
+    for (std::size_t q = 0; q < quad.num_points(); ++q) {
+        const Real s = quad.point(q)[0];
+        const Real flux = evaluate_quad_bdm_edge_normal_flux(basis, edge_id, func_id, s);
+        const Real basis_mode = (mode_id == 0) ? Real(1) : s;
+        moment += static_cast<double>(quad.weight(q) * flux * basis_mode);
+    }
+    const double scale = (mode_id == 0) ? 0.5 : 1.5;
+    return scale * moment;
+}
+
+static double integrate_triangle_bdm_edge_flux(const BDMBasis& basis,
+                                               int edge_id,
+                                               int func_id,
+                                               int quad_order) {
+    using svmp::FE::math::Vector;
+    using svmp::FE::quadrature::GaussQuadrature1D;
+
+    struct Edge {
+        Vector<Real, 3> a;
+        Vector<Real, 3> b;
+        Vector<Real, 3> normal;
+    };
+
+    const Edge edges[3] = {
+        {Vector<Real, 3>{Real(0), Real(0), Real(0)},
+         Vector<Real, 3>{Real(1), Real(0), Real(0)},
+         Vector<Real, 3>{Real(0), Real(-1), Real(0)}},
+        {Vector<Real, 3>{Real(1), Real(0), Real(0)},
+         Vector<Real, 3>{Real(0), Real(1), Real(0)},
+         Vector<Real, 3>{Real(1), Real(1), Real(0)}},
+        {Vector<Real, 3>{Real(0), Real(0), Real(0)},
+         Vector<Real, 3>{Real(0), Real(1), Real(0)},
+         Vector<Real, 3>{Real(-1), Real(0), Real(0)}},
+    };
+
+    const Edge& edge = edges[static_cast<std::size_t>(edge_id)];
+    const Vector<Real, 3> tvec = edge.b - edge.a;
+    const Real length = tvec.norm();
+
+    GaussQuadrature1D quad(quad_order);
+    double flux = 0.0;
+    for (std::size_t q = 0; q < quad.num_points(); ++q) {
+        const Real s = quad.point(q)[0];
+        const Real t = (s + Real(1)) * Real(0.5);
+        const Vector<Real, 3> xi = edge.a * (Real(1) - t) + edge.b * t;
+
+        std::vector<Vector<Real, 3>> values;
+        basis.evaluate_vector_values(xi, values);
+        const Real normal_flux =
+            values[static_cast<std::size_t>(func_id)].dot(edge.normal) / length;
+
+        flux += static_cast<double>(quad.weight(q) * (Real(0.5) * length * normal_flux));
+    }
+    return flux;
+}
+
+static double integrate_triangle_bdm_edge_moment(const BDMBasis& basis,
+                                                 int edge_id,
+                                                 int mode_id,
+                                                 int func_id,
+                                                 int quad_order) {
+    using svmp::FE::quadrature::GaussQuadrature1D;
+
+    GaussQuadrature1D quad(quad_order);
+    double moment = 0.0;
+    for (std::size_t q = 0; q < quad.num_points(); ++q) {
+        const Real s = quad.point(q)[0];
+        const Real flux = evaluate_triangle_bdm_edge_scaled_normal_flux(basis, edge_id, func_id, s);
+        const Real basis_mode = (mode_id == 0) ? Real(1) : s;
+        moment += static_cast<double>(quad.weight(q) * flux * basis_mode);
+    }
+    return 0.5 * moment;
+}
+
+static double integrate_quad_bdm_divergence(const BDMBasis& basis,
+                                            int func_id,
+                                            int quad_order) {
+    using svmp::FE::quadrature::QuadrilateralQuadrature;
+
+    QuadrilateralQuadrature quad(quad_order, quad_order);
+    double volume = 0.0;
+    for (std::size_t q = 0; q < quad.num_points(); ++q) {
+        std::vector<Real> divergence;
+        basis.evaluate_divergence(quad.point(q), divergence);
+        volume += static_cast<double>(quad.weight(q) * divergence[static_cast<std::size_t>(func_id)]);
+    }
+    return volume;
+}
+
+static double integrate_triangle_bdm_divergence(const BDMBasis& basis,
+                                                int func_id,
+                                                int quad_order) {
+    using svmp::FE::quadrature::TriangleQuadrature;
+
+    TriangleQuadrature quad(quad_order);
+    double volume = 0.0;
+    for (std::size_t q = 0; q < quad.num_points(); ++q) {
+        std::vector<Real> divergence;
+        basis.evaluate_divergence(quad.point(q), divergence);
+        volume += static_cast<double>(quad.weight(q) * divergence[static_cast<std::size_t>(func_id)]);
+    }
+    return volume;
 }
 
 TEST(RaviartThomasBasis, QuadEdgeFluxes) {
@@ -1167,12 +1516,12 @@ TEST(NedelecBasis, PyramidHigherOrderConstruction) {
         EXPECT_EQ(basis.size(), 8u);  // 8 edges
     });
 
-    // k=1 construction works but evaluation throws NotImplemented
+    // k=1 construction and evaluation are both implemented
     EXPECT_NO_THROW({
         NedelecBasis basis(ElementType::Pyramid5, 1);
         EXPECT_EQ(basis.dimension(), 3);
         EXPECT_EQ(basis.order(), 1);
-        // Note: evaluation will throw NotImplemented for now
+        // Evaluation coverage is exercised in the dedicated higher-order tests.
     });
 }
 
@@ -1193,7 +1542,7 @@ TEST(NedelecBasis, PyramidND1Size) {
     NedelecBasis nd0(ElementType::Pyramid5, 0);
     EXPECT_EQ(nd0.size(), 8u);
 
-    // ND(1) construction works (evaluation throws NotImplemented)
+    // ND(1) construction and evaluation are both implemented
     NedelecBasis nd1(ElementType::Pyramid5, 1);
     EXPECT_EQ(nd1.size(), 28u);  // 16 edge + 12 face
 }
@@ -1242,12 +1591,12 @@ TEST(RaviartThomasBasis, WedgeDimensionFormulas) {
     // Face DOFs: 2*(k+1)(k+2)/2 + 3*(k+1)^2 = (k+1)(k+2) + 3(k+1)^2
     // Interior DOFs: 3*k*(k+1)^2/2 for k >= 1
     // RT(0): 5 (5 faces, no interior)
-    // RT(1): 18 face + 6 interior = 24 (construction still fails)
-    // RT(2): 39 face + 24 interior = 63 (construction still fails)
+    // RT(1): 18 face + 6 interior = 24
+    // RT(2): 39 face + 24 interior = 63
 
     RaviartThomasBasis rt0(ElementType::Wedge6, 0);
     EXPECT_EQ(rt0.size(), 5u);
-    // Higher-order tests disabled until singular matrix issue is fixed
+    // Higher-order construction/evaluation coverage lives in test_HigherOrderWedgePyramid.cpp.
 }
 
 TEST(RaviartThomasBasis, PyramidDimensionFormulas) {
@@ -1255,12 +1604,12 @@ TEST(RaviartThomasBasis, PyramidDimensionFormulas) {
     // Face DOFs: (k+1)^2 + 4*(k+1)(k+2)/2 = (k+1)^2 + 2(k+1)(k+2)
     // Interior DOFs: 3*k^3 for k >= 1
     // RT(0): 5 (5 faces, no interior)
-    // RT(1): 16 face + 3 interior = 19 (construction still fails)
-    // RT(2): 33 face + 24 interior = 57 (construction still fails)
+    // RT(1): 16 face + 3 interior = 19
+    // RT(2): 33 face + 24 interior = 57
 
     RaviartThomasBasis rt0(ElementType::Pyramid5, 0);
     EXPECT_EQ(rt0.size(), 5u);
-    // Higher-order tests disabled until singular matrix issue is fixed
+    // Higher-order construction/evaluation coverage lives in test_HigherOrderWedgePyramid.cpp.
 }
 
 TEST(NedelecBasis, WedgeDimensionFormulas) {
@@ -1269,12 +1618,12 @@ TEST(NedelecBasis, WedgeDimensionFormulas) {
     // Face DOFs: 2*k(k+1) + 3*2k(k+1) = 8k(k+1) for k >= 1
     // Interior DOFs: 3*k*(k-1)*(k+1)/2 for k >= 2
     // ND(0): 9 edges
-    // ND(1): 18 edge + 16 face + 0 interior = 34 (construction still fails)
-    // ND(2): 27 edge + 48 face + 9 interior = 84 (construction still fails)
+    // ND(1): 18 edge + 16 face + 0 interior = 34
+    // ND(2): 27 edge + 48 face + 9 interior = 84
 
     NedelecBasis nd0(ElementType::Wedge6, 0);
     EXPECT_EQ(nd0.size(), 9u);
-    // Higher-order tests disabled until singular matrix issue is fixed
+    // Higher-order construction/evaluation coverage lives in test_HigherOrderWedgePyramid.cpp.
 }
 
 TEST(NedelecBasis, PyramidDimensionFormulas) {
@@ -1283,12 +1632,12 @@ TEST(NedelecBasis, PyramidDimensionFormulas) {
     // Face DOFs: 2k(k+1) + 4*k(k+1) = 6k(k+1) for k >= 1
     // Interior DOFs: 3*k*(k-1)*(k+1)/6 for k >= 2
     // ND(0): 8 edges
-    // ND(1): 16 edge + 12 face + 0 interior = 28 (construction still fails)
-    // ND(2): 24 edge + 36 face + 3 interior = 63 (construction still fails)
+    // ND(1): 16 edge + 12 face + 0 interior = 28
+    // ND(2): 24 edge + 36 face + 3 interior = 63
 
     NedelecBasis nd0(ElementType::Pyramid5, 0);
     EXPECT_EQ(nd0.size(), 8u);
-    // Higher-order tests disabled until singular matrix issue is fixed
+    // Higher-order construction/evaluation coverage lives in test_HigherOrderWedgePyramid.cpp.
 }
 
 // =============================================================================

@@ -647,7 +647,6 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
         continue;
       }
       if (lhs.use_reduced_face_cache_in_add_bc_mul &&
-          op_Type == BcopType::BCOP_TYPE_PRE &&
           update.has_face_cache) {
         reduced_dots[idx] = face_dot_owned(lhs, update.right_face, X);
       } else {
@@ -695,14 +694,21 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
       for (int i = 0; i < rank; ++i) {
         const auto& update = lhs.reduced_updates[static_cast<std::size_t>(
             lhs.reduced_update_pc_active_indices[static_cast<std::size_t>(i)])];
-        const auto& left_entries =
-            update.left_scaled.empty() ? update.left : update.left_scaled;
-        sparse_axpy_full(lhs,
-                         update,
-                         left_entries,
+        if (lhs.use_reduced_face_cache_in_add_bc_mul &&
+            update.has_face_cache) {
+          face_axpy_full(update.left_face,
                          -update.sigma * coarse_sol[static_cast<std::size_t>(i)],
-                         dof,
                          Y);
+        } else {
+          const auto& left_entries =
+              update.left_scaled.empty() ? update.left : update.left_scaled;
+          sparse_axpy_full(lhs,
+                           update,
+                           left_entries,
+                           -update.sigma * coarse_sol[static_cast<std::size_t>(i)],
+                           dof,
+                           Y);
+        }
       }
       return;
     }
@@ -720,7 +726,6 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
       }
 
       if (lhs.use_reduced_face_cache_in_add_bc_mul &&
-          op_Type == BcopType::BCOP_TYPE_PRE &&
           update.has_face_cache) {
         face_axpy_full(update.left_face, coef * reduced_dots[idx], Y);
       } else {

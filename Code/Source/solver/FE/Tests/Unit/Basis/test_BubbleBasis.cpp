@@ -188,9 +188,9 @@ TEST(BubbleBasis, GradientZeroAtSymmetricCentroid) {
 }
 
 TEST(BubbleBasis, UnsupportedElementThrows) {
-    EXPECT_THROW(BubbleBasis(ElementType::Wedge6), FEException);
-    EXPECT_THROW(BubbleBasis(ElementType::Pyramid5), FEException);
-    EXPECT_THROW(BubbleBasis(ElementType::Unknown), FEException);
+    EXPECT_THROW({ BubbleBasis basis(ElementType::Wedge6); }, FEException);
+    EXPECT_THROW({ BubbleBasis basis(ElementType::Pyramid5); }, FEException);
+    EXPECT_THROW({ BubbleBasis basis(ElementType::Unknown); }, FEException);
 }
 
 TEST(BubbleBasis, FactoryCreatesBubble) {

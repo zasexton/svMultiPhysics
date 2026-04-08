@@ -9,7 +9,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <limits>
+#include <sstream>
 
 namespace svmp {
 namespace FE {
@@ -103,7 +105,25 @@ BSplineBasis::BSplineBasis(int degree, std::vector<Real> knots, std::vector<Real
     : BSplineBasis(degree, std::move(knots)) {
     FE_CHECK_ARG(weights.size() == num_basis_,
                  "BSplineBasis: weights size must equal number of basis functions");
+    semantic_type_ = BasisType::NURBS;
     weights_ = std::move(weights);
+}
+
+std::string BSplineBasis::cache_identity() const {
+    std::ostringstream oss;
+    oss << BasisFunction::cache_identity()
+        << "|degree=" << degree_
+        << "|knots=" << knots_.size()
+        << "|weights=" << weights_.size();
+
+    oss << std::setprecision(std::numeric_limits<Real>::max_digits10);
+    for (Real knot : knots_) {
+        oss << "|k=" << knot;
+    }
+    for (Real weight : weights_) {
+        oss << "|w=" << weight;
+    }
+    return oss.str();
 }
 
 void BSplineBasis::evaluate_values(const math::Vector<Real, 3>& xi,

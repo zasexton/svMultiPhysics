@@ -1416,6 +1416,7 @@ public:
     struct BorderedCouplingData {
         bool active{false};             ///< True if monolithic aux DOFs exist
         bool globally_reduced{false};   ///< True once dense bordered blocks have been summed for replicated MPI use
+        bool aux_self_terms_replicated{false}; ///< True when D/g/dF_dxdot are already identical on every rank
         int n_aux{0};                   ///< Number of auxiliary unknowns
         std::size_t n_field_dofs{0};    ///< Number of PDE DOFs
         std::vector<Real> D;            ///< Aux-aux Jacobian (n_aux × n_aux, row-major)
@@ -1428,6 +1429,7 @@ public:
         void clear() {
             active = false;
             globally_reduced = false;
+            aux_self_terms_replicated = false;
             n_aux = 0;
             n_field_dofs = 0;
             D.clear(); g.clear(); B.clear(); Ct.clear();
@@ -1468,6 +1470,7 @@ public:
             n_aux = na;
             n_field_dofs = nf;
             globally_reduced = false;
+            aux_self_terms_replicated = false;
             D.assign(static_cast<std::size_t>(na * na), 0.0);
             g.assign(static_cast<std::size_t>(na), 0.0);
             B.assign(nf * static_cast<std::size_t>(na), 0.0);

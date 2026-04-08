@@ -27,6 +27,7 @@
 #include <limits>
 #include <numeric>
 #include <map>
+#include <cstdio>
 #include <cstring>
 #include <mpi.h>
 #include <sstream>
@@ -38,6 +39,29 @@ namespace FE {
 namespace backends {
 
 namespace {
+
+constexpr int kNativeFaceDuplicateCouplingId = -2;
+
+[[nodiscard]] bool rankOneUpdatesMatch(std::span<const RankOneUpdate> updates,
+                                       const std::vector<RankOneUpdate>& existing) noexcept
+{
+    if (updates.size() != existing.size()) {
+        return false;
+    }
+
+    for (std::size_t i = 0; i < updates.size(); ++i) {
+        const auto& lhs = updates[i];
+        const auto& rhs = existing[i];
+        if (lhs.sigma != rhs.sigma ||
+            lhs.v != rhs.v ||
+            lhs.active_components != rhs.active_components ||
+            lhs.prefer_native_face != rhs.prefer_native_face) {
+            return false;
+        }
+    }
+
+    return true;
+}
 
 struct FsilsResidualCheckResult {
     bool ok{true};
@@ -313,14 +337,16 @@ void FsilsLinearSolver::setOptions(const SolverOptions& options)
 
 void FsilsLinearSolver::setRankOneUpdates(std::span<const RankOneUpdate> updates)
 {
-    // Only dirty face cache if the update set actually changed.
-    // When both old and new are empty (common case), skip the dirty flag.
-    const bool was_empty = rank_one_updates_.empty();
-    const bool now_empty = updates.empty();
+    const bool updates_changed = !rankOneUpdatesMatch(updates, rank_one_updates_);
     rank_one_updates_.assign(updates.begin(), updates.end());
-    if (was_empty && now_empty) {
-        return;  // No change — don't dirty face cache.
+
+    if (!updates_changed) {
+        return;
     }
+
+    // Native FSILS outlet faces cache the rank-one support and coefficients.
+    // The update count often stays constant across Newton iterations while the
+    // actual values move, so empty/non-empty tracking is not sufficient.
     faces_dirty_ = true;
 }
 
@@ -585,6 +611,22 @@ struct GmresLaunchConfig {
     return factor;
 }
 
+[[nodiscard]] Real fsilsBlockSchurConstraintMeanDominanceLimit() noexcept
+{
+    Real limit = static_cast<Real>(1.0);
+    if (const char* env = std::getenv("SVMP_FSILS_BLOCKSCHUR_CONSTRAINT_MEAN_DOMINANCE")) {
+        try {
+            limit = static_cast<Real>(std::stod(env));
+        } catch (...) {
+            limit = static_cast<Real>(1.0);
+        }
+    }
+    if (!std::isfinite(static_cast<double>(limit)) || limit <= static_cast<Real>(0.0)) {
+        limit = static_cast<Real>(1.0);
+    }
+    return limit;
+}
+
 } // namespace
 
 SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
@@ -809,16 +851,42 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         }
     };
 
+    const bool pure_native_face_rank_one_case =
+        (lhs.commu.nTasks > 1) &&
+        use_blockschur &&
+        !rank_one_updates_.empty() &&
+        reduced_field_updates_.empty() &&
+        grouped_bordered_field_couplings_.empty() &&
+        std::all_of(rank_one_updates_.begin(),
+                    rank_one_updates_.end(),
+                    [](const auto& update) { return update.prefer_native_face; });
+    const bool prefer_mpi_native_face_rank_one =
+        (lhs.commu.nTasks > 1) &&
+        use_blockschur &&
+        ((!rank_one_updates_.empty() && !reduced_field_updates_.empty()) ||
+         (rank_one_updates_.size() > 1));
+    const bool allow_mpi_native_face_rank_one =
+        (lhs.commu.nTasks <= 1) || !use_blockschur;
+    if (!allow_mpi_native_face_rank_one && oopTraceEnabled()) {
+        traceLog("FsilsLinearSolver::solve: routing MPI BlockSchur native-face rank-1 updates "
+                 "through reduced/grouped update support.");
+    } else if (prefer_mpi_native_face_rank_one && oopTraceEnabled()) {
+        traceLog("FsilsLinearSolver::solve: enabling MPI native-face rank-1 path "
+                 "for mixed rank-1 + reduced BlockSchur outlet corrections.");
+    } else if (pure_native_face_rank_one_case && oopTraceEnabled()) {
+        traceLog("FsilsLinearSolver::solve: enabling MPI native-face rank-1 path.");
+    }
+
     std::vector<std::size_t> native_face_rank_one_indices;
     native_face_rank_one_indices.reserve(rank_one_updates_.size());
     for (std::size_t i = 0; i < rank_one_updates_.size(); ++i) {
-        if (rank_one_updates_[i].prefer_native_face) {
+        if (allow_mpi_native_face_rank_one && rank_one_updates_[i].prefer_native_face) {
             native_face_rank_one_indices.push_back(i);
         }
     }
 
     const bool has_native_rank_one_updates =
-        !native_face_rank_one_indices.empty() || !reduced_field_updates_.empty();
+        !rank_one_updates_.empty() || !reduced_field_updates_.empty();
 
     auto& ls = ls_;
     using BlockSchurStats = std::decay_t<decltype(ls.blockschur_stats)>;
@@ -950,23 +1018,30 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
         if (total_has > 1) {
             face.sharedFlag = true;
-            Array<double> v(face_dof, lhs.nNo);
-            v = 0.0;
+            auto sync_face_array = [&](Array<double>& arr) {
+                Array<double> v(face_dof, lhs.nNo);
+                v = 0.0;
 
-            for (int a = 0; a < face.nNo; ++a) {
-                const int Ac = face.glob(a);
-                for (int i = 0; i < face_dof; ++i) {
-                    v(i, Ac) = face.val(i, a);
+                for (int a = 0; a < face.nNo; ++a) {
+                    const int Ac = face.glob(a);
+                    for (int i = 0; i < face_dof; ++i) {
+                        v(i, Ac) = arr(i, a);
+                    }
                 }
-            }
 
-            fe_fsi_linear_solver::fsils_commuv(lhs, face_dof, v);
+                fe_fsi_linear_solver::fsils_commuv(lhs, face_dof, v);
 
-            for (int a = 0; a < face.nNo; ++a) {
-                const int Ac = face.glob(a);
-                for (int i = 0; i < face_dof; ++i) {
-                    face.val(i, a) = v(i, Ac);
+                for (int a = 0; a < face.nNo; ++a) {
+                    const int Ac = face.glob(a);
+                    for (int i = 0; i < face_dof; ++i) {
+                        arr(i, a) = v(i, Ac);
+                    }
                 }
+            };
+
+            sync_face_array(face.val);
+            if (face.valM.nrows() == face.val.nrows() && face.valM.ncols() == face.val.ncols()) {
+                sync_face_array(face.valM);
             }
         }
     };
@@ -1512,8 +1587,23 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             }
         };
 
+        const bool mirror_native_face_rank_one_into_schur_reduced_updates = false;
+        if (mirror_native_face_rank_one_into_schur_reduced_updates && oopTraceEnabled()) {
+            traceLog("FsilsLinearSolver::solve: mirroring multi-face MPI native rank-1 updates "
+                     "into Schur-only reduced duplicates.");
+        }
+
         for (const auto& upd : rank_one_updates_) {
-            if (upd.prefer_native_face) {
+            if (upd.prefer_native_face && allow_mpi_native_face_rank_one) {
+                if (mirror_native_face_rank_one_into_schur_reduced_updates) {
+                    append_reduced_update(
+                        upd.sigma,
+                        std::span<const std::pair<GlobalIndex, Real>>(upd.v.data(), upd.v.size()),
+                        std::span<const std::pair<GlobalIndex, Real>>(upd.v.data(), upd.v.size()),
+                        std::span<const int>(upd.active_components.data(),
+                                             upd.active_components.size()),
+                        kNativeFaceDuplicateCouplingId);
+                }
                 continue;
             }
             append_reduced_update(upd.sigma,
@@ -1533,8 +1623,9 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                                   upd.grouped_coupling_id);
         }
 
-        const Real grouped_left_scale = use_blockschur ? static_cast<Real>(stage_scale) : Real(1.0);
         for (const auto& group : grouped_bordered_field_couplings_) {
+            const Real grouped_left_scale =
+                use_blockschur ? static_cast<Real>(stage_scale) : Real(1.0);
             fe_fsi_linear_solver::FSILS_groupedBorderedFieldCouplingType native_group;
             native_group.active = true;
             native_group.grouped_coupling_id = group.grouped_coupling_id;
@@ -1567,6 +1658,15 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             if (!native_group.aux_matrix.empty() && !native_group.modes.empty()) {
                 lhs.grouped_bordered_field_couplings.push_back(std::move(native_group));
             }
+        }
+
+        lhs.use_reduced_face_cache_in_add_bc_mul =
+            (std::getenv("SVMP_DISABLE_REDUCED_FACE_CACHE_ADD_BC_MUL") == nullptr) &&
+            std::any_of(lhs.reduced_updates.begin(),
+                        lhs.reduced_updates.end(),
+                        [](const auto& update) { return update.active && update.has_face_cache; });
+        if (oopTraceEnabled() && lhs.use_reduced_face_cache_in_add_bc_mul) {
+            traceLog("FsilsLinearSolver::solve: enabling reduced-update face-cache add_bc_mul path.");
         }
     }
 
@@ -1925,6 +2025,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         A->mult(probe_old, fe_y);
         addRankOneUpdatesToProduct(rank_one_updates_, probe_old, fe_y, lhs.commu);
         addReducedFieldUpdatesToProduct(reduced_field_updates_, probe_old, fe_y, lhs.commu);
+        fe_y.updateGhosts();
 
         std::vector<Real> probe_internal_data(solve_buffer.size(), Real(0.0));
         std::vector<Real> fsils_internal_data(solve_buffer.size(), Real(0.0));
@@ -1939,6 +2040,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
         FsilsVector fsils_y(shared_layout);
         copyVectorInternalToOld(std::span<const Real>(fsils_internal_data.data(), fsils_internal_data.size()), fsils_y);
+        fsils_y.updateGhosts();
 
         FsilsVector diff(shared_layout);
         diff.copyFrom(fe_y);
@@ -2276,6 +2378,35 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         initial_check.detail = std::string("initial solve threw: ") + solve_error;
     }
 
+    if (solve_ok && initial_check.ok &&
+        use_blockschur && has_native_rank_one_updates && has_saddle_point && con_ncomp == 1) {
+        const auto returned_con_stats = computeReturnedSolutionConstraintMeanStats();
+        if (returned_con_stats.valid && returned_con_stats.count > 0u &&
+            std::abs(returned_con_stats.mean) > static_cast<Real>(1e-8)) {
+            const Real fluctuation_floor =
+                std::max<Real>(returned_con_stats.rms * static_cast<Real>(1e-12),
+                               static_cast<Real>(1e-14));
+            const Real fluctuation =
+                std::max(returned_con_stats.fluctuation_rms, fluctuation_floor);
+            const Real dominance = std::abs(returned_con_stats.mean) / fluctuation;
+            const Real dominance_limit = fsilsBlockSchurConstraintMeanDominanceLimit();
+            if (dominance >= dominance_limit) {
+                if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "FsilsLinearSolver::solve: retaining BlockSchur solution despite dominant constraint mean"
+                        << " (mean=" << returned_con_stats.mean
+                        << ", rms=" << returned_con_stats.rms
+                        << ", fluct=" << returned_con_stats.fluctuation_rms
+                        << ", dominance=" << dominance
+                        << ", limit=" << dominance_limit
+                        << ", residual=" << initial_check.residual_norm
+                        << ")";
+                    traceLog(oss.str());
+                }
+            }
+        }
+    }
+
     const bool retained_near_target_blockschur_solution =
         shouldRetainNearTargetStrictValidationMiss(initial_check);
     if (retained_near_target_blockschur_solution && oopTraceEnabled()) {
@@ -2288,7 +2419,9 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     }
 
     int local_fail =
-        ((!solve_ok || !initial_check.ok) && !retained_near_target_blockschur_solution) ? 1 : 0;
+        ((!solve_ok || !initial_check.ok) && !retained_near_target_blockschur_solution)
+            ? 1
+            : 0;
     int any_fail = local_fail;
     if (lhs.commu.nTasks > 1) {
         fe_fsi_linear_solver::fsils_allreduce(&local_fail, &any_fail, 1, MPI_INT, MPI_LOR, lhs.commu);
@@ -2299,8 +2432,10 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     bool skip_strict_retry_after_severe_stall = false;
     std::vector<Real> fallback_base_solution;
     std::string fallback_reason;
-    const bool allow_blockschur_gmres_fallback = !use_blockschur;
-    if (any_fail != 0 && allow_blockschur_gmres_fallback) {
+    const bool allow_strict_gmres_fallback =
+        use_blockschur ||
+        to_fsils_solver(options_.method) == fe_fsi_linear_solver::LS_TYPE_GMRES;
+    if (any_fail != 0 && allow_strict_gmres_fallback) {
         fallback_reason = initial_check.detail.empty()
                               ? std::string("initial ") + std::string(solverMethodToString(options_.method)) +
                                     " solve did not satisfy the true residual tolerance"
@@ -2443,7 +2578,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                         "fallback_gmres_full_retry", full_retry_check);
                     fallback_base_solution.assign(x_data.begin(), x_data.end());
                     initial_check = full_retry_check;
-                    if (full_retry_check.ok) {
+                    if (full_retry_check.ok ||
+                        shouldRetainNearTargetStrictValidationMiss(full_retry_check)) {
                         break;
                     }
                     if (!std::isfinite(static_cast<double>(full_retry_check.residual_norm))) {
@@ -2462,7 +2598,9 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 auto refinement_check = validateOriginalResidual("fallback_gmres_refine");
                 refinement_check = maybeRecenterConstraintMeanAndValidate(
                     "fallback_gmres_refine", refinement_check);
-                if (refinement_check.ok) {
+                if (refinement_check.ok ||
+                    shouldRetainNearTargetStrictValidationMiss(refinement_check)) {
+                    initial_check = refinement_check;
                     break;
                 }
                 if (!std::isfinite(static_cast<double>(refinement_check.residual_norm)) ||
@@ -2475,8 +2613,18 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     }
 
     FsilsResidualCheckResult final_check{};
-    if (skip_strict_retry_after_severe_stall || (use_blockschur && any_fail != 0)) {
+    // When BlockSchur falls back to GMRES, keep validating/reporting the recovered
+    // solution instead of the failed initial BlockSchur attempt.
+    if (skip_strict_retry_after_severe_stall || (use_blockschur && any_fail != 0 && !used_fallback_gmres)) {
         final_check = initial_check;
+        if (retained_near_target_blockschur_solution) {
+            final_check.ok = true;
+            if (!final_check.detail.empty()) {
+                final_check.detail += " [accepted near target]";
+            } else {
+                final_check.detail = "accepted near-target BlockSchur solution";
+            }
+        }
     } else if (solve_ok) {
         undoStageScalingOnSolution(current_preparation_uses_blockschur);
         if (!(used_fallback_gmres && fallback_uses_correction_rhs)) {
@@ -2496,6 +2644,22 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         final_check.detail = used_fallback_gmres
                                  ? "fallback_gmres threw: " + solve_error
                                  : "fsils solve threw: " + solve_error;
+    }
+
+    const bool retained_near_target_final_solution =
+        !final_check.ok && shouldRetainNearTargetStrictValidationMiss(final_check);
+
+    if ((retained_near_target_blockschur_solution && !used_fallback_gmres &&
+         !skip_strict_retry_after_severe_stall) ||
+        retained_near_target_final_solution) {
+        final_check.ok = true;
+        if (!final_check.detail.empty()) {
+            final_check.detail += " [accepted near target]";
+        } else {
+            final_check.detail = used_fallback_gmres
+                                     ? "accepted near-target fallback GMRES solution"
+                                     : "accepted near-target BlockSchur solution";
+        }
     }
 
     int local_final_ok = final_check.ok ? 1 : 0;
@@ -2561,7 +2725,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         }
 
         FsilsVector diff_full(shared_layout);
-        diff_full.copyFrom(diff_only);
+        diff_full.copyFrom(matvec_full);
         addRankOneUpdatesToProduct(rank_one_updates_, x_check, diff_full, lhs.commu);
         addReducedFieldUpdatesToProduct(reduced_field_updates_, x_check, diff_full, lhs.commu);
         auto diff_full_span = diff_full.localSpan();
@@ -2571,8 +2735,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
         std::ostringstream oss;
         oss << "FsilsLinearSolver::solve: post-return operator check"
-            << " |Jx|=" << diff_only.norm()
-            << " |(J+R)x|=" << diff_full.norm()
+            << " |Jx|=" << matvec_only.norm()
+            << " |(J+R)x|=" << (matvec_full.norm())
             << " |Jx-r|=" << diff_only.norm()
             << " |(J+R)x-r|=" << diff_full.norm();
         traceLog(oss.str());

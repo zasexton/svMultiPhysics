@@ -53,6 +53,8 @@
 
 namespace bicgs {
 
+constexpr int kNativeFaceDuplicateCouplingId = -2;
+
 /// @brief Biconjugate-gradient stabilized algorithm for vector systems.
 void bicgsv(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
     const Array<double>& K, Array<double>& R)
@@ -355,6 +357,21 @@ using fe_fsi_linear_solver::fsils_int;
   } catch (...) {
     return default_value;
   }
+}
+
+[[nodiscard]] bool skip_post_solve_overlap_sum() noexcept
+{
+  const char* env = std::getenv("SVMP_FSILS_SKIP_POST_SOLVE_COMM");
+  if (!env) {
+    return false;
+  }
+  while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+    ++env;
+  }
+  if (*env == '\0') {
+    return false;
+  }
+  return *env != '0';
 }
 
 struct SchurSparsityControl {
@@ -1262,6 +1279,15 @@ void apply_base_schur_preconditioner(const Array<fsils_int>& rowPtr,
   apply_point_block_inverse(pc.point_inv, con_ncomp, nNo, x);
 }
 
+void sync_schur_overlap(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                        int con_ncomp,
+                        Array<double>& x)
+{
+  if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skip_post_solve_overlap_sum()) {
+    fsils_syncv(lhs, con_ncomp, x);
+  }
+}
+
 void apply_momentum_hat_low_rank_correction(int mom_ncomp,
                                             const MomentumHatData& hat,
                                             bool transpose,
@@ -1576,6 +1602,41 @@ double sparse_overlap_dot_owned_local(
   return dot;
 }
 
+bool sparse_entry_sets_match(
+    const std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>& left_entries,
+    const std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>& right_entries,
+    double tol = 1e-30)
+{
+  if (left_entries.size() != right_entries.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < left_entries.size(); ++i) {
+    const auto& left = left_entries[i];
+    const auto& right = right_entries[i];
+    if (left.node != right.node || left.full_component != right.full_component ||
+        std::abs(left.value - right.value) > tol) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool reduced_update_has_distinct_left_right(
+    const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update)
+{
+  const auto& left_entries =
+      !update.left_scaled_owned.empty() ? update.left_scaled_owned
+      : !update.left_owned.empty()      ? update.left_owned
+      : !update.left_scaled.empty()     ? update.left_scaled
+                                        : update.left;
+  const auto& right_entries =
+      !update.right_scaled_owned.empty() ? update.right_scaled_owned
+      : !update.right_owned.empty()      ? update.right_owned
+      : !update.right_scaled.empty()     ? update.right_scaled
+                                         : update.right;
+  return !sparse_entry_sets_match(left_entries, right_entries);
+}
+
 double sparse_dense_owned_dot_local(
     const fe_fsi_linear_solver::FSILS_lhsType& lhs,
     const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update,
@@ -1689,19 +1750,24 @@ void build_explicit_schur_corrections(const fe_fsi_linear_solver::FSILS_lhsType&
 
     ExplicitReducedSchurCorrection corr;
     corr.sigma = update.sigma;
-    const auto& left_entries = !update.left_scaled.empty() ? update.left_scaled : update.left;
-    const auto& right_entries = !update.right_scaled.empty() ? update.right_scaled : update.right;
-    const bool left_momentum = fill_projected_block_vector(lhs, left_entries,
-                                                           mom_start, mom_ncomp, corr.left_momentum);
-    const bool left_constraint = fill_projected_block_vector(lhs, left_entries,
-                                                             con_start, con_ncomp, corr.left_constraint);
-    const bool right_momentum = fill_projected_block_vector(lhs, right_entries,
-                                                            mom_start, mom_ncomp, corr.right_momentum);
-    const bool right_constraint = fill_projected_block_vector(lhs, right_entries,
-                                                              con_start, con_ncomp, corr.right_constraint);
-    if (!(left_momentum || left_constraint || right_momentum || right_constraint)) {
-      continue;
-    }
+    const auto& left_entries =
+        !update.left_scaled_owned.empty() ? update.left_scaled_owned
+        : !update.left_owned.empty()      ? update.left_owned
+        : !update.left_scaled.empty()     ? update.left_scaled
+                                          : update.left;
+    const auto& right_entries =
+        !update.right_scaled_owned.empty() ? update.right_scaled_owned
+        : !update.right_owned.empty()      ? update.right_owned
+        : !update.right_scaled.empty()     ? update.right_scaled
+                                           : update.right;
+    fill_projected_block_vector(lhs, left_entries,
+                                mom_start, mom_ncomp, corr.left_momentum);
+    fill_projected_block_vector(lhs, left_entries,
+                                con_start, con_ncomp, corr.left_constraint);
+    fill_projected_block_vector(lhs, right_entries,
+                                mom_start, mom_ncomp, corr.right_momentum);
+    fill_projected_block_vector(lhs, right_entries,
+                                con_start, con_ncomp, corr.right_constraint);
     pc.explicit_reduced_corrections.push_back(std::move(corr));
   }
 
@@ -1729,38 +1795,37 @@ void build_explicit_schur_corrections(const fe_fsi_linear_solver::FSILS_lhsType&
     corr.right_momentum_modes.reserve(group.modes.size());
     corr.right_constraint_modes.reserve(group.modes.size());
 
-    bool any_left_momentum = false;
-    bool any_left_constraint = false;
-    bool any_right_momentum = false;
-    bool any_right_constraint = false;
     for (const auto& mode : group.modes) {
-      const auto& left_entries = !mode.left_scaled.empty() ? mode.left_scaled : mode.left;
-      const auto& right_entries = !mode.right_scaled.empty() ? mode.right_scaled : mode.right;
+      const auto& left_entries =
+          !mode.left_scaled_owned.empty() ? mode.left_scaled_owned
+          : !mode.left_owned.empty()      ? mode.left_owned
+          : !mode.left_scaled.empty()     ? mode.left_scaled
+                                          : mode.left;
+      const auto& right_entries =
+          !mode.right_scaled_owned.empty() ? mode.right_scaled_owned
+          : !mode.right_owned.empty()      ? mode.right_owned
+          : !mode.right_scaled.empty()     ? mode.right_scaled
+                                           : mode.right;
 
       corr.left_momentum_modes.emplace_back();
       corr.left_constraint_modes.emplace_back();
       corr.right_momentum_modes.emplace_back();
       corr.right_constraint_modes.emplace_back();
 
-      any_left_momentum |= fill_projected_block_vector(lhs, left_entries,
-                                                       mom_start, mom_ncomp,
-                                                       corr.left_momentum_modes.back());
-      any_left_constraint |= fill_projected_block_vector(lhs, left_entries,
-                                                         con_start, con_ncomp,
-                                                         corr.left_constraint_modes.back());
-      any_right_momentum |= fill_projected_block_vector(lhs, right_entries,
-                                                        mom_start, mom_ncomp,
-                                                        corr.right_momentum_modes.back());
-      any_right_constraint |= fill_projected_block_vector(lhs, right_entries,
-                                                          con_start, con_ncomp,
-                                                          corr.right_constraint_modes.back());
+      fill_projected_block_vector(lhs, left_entries,
+                                  mom_start, mom_ncomp,
+                                  corr.left_momentum_modes.back());
+      fill_projected_block_vector(lhs, left_entries,
+                                  con_start, con_ncomp,
+                                  corr.left_constraint_modes.back());
+      fill_projected_block_vector(lhs, right_entries,
+                                  mom_start, mom_ncomp,
+                                  corr.right_momentum_modes.back());
+      fill_projected_block_vector(lhs, right_entries,
+                                  con_start, con_ncomp,
+                                  corr.right_constraint_modes.back());
     }
-
-    const bool contributes_to_gp_or_sp = any_right_constraint && (any_left_momentum || any_left_constraint);
-    const bool contributes_to_d = any_right_momentum && any_left_constraint;
-    if (contributes_to_gp_or_sp || contributes_to_d) {
-      pc.explicit_grouped_corrections.push_back(std::move(corr));
-    }
+    pc.explicit_grouped_corrections.push_back(std::move(corr));
   }
 }
 
@@ -1909,7 +1974,6 @@ void build_grouped_momentum_hat_low_rank_correction(
 
   struct GroupModes {
     const fe_fsi_linear_solver::FSILS_groupedBorderedFieldCouplingType* group{nullptr};
-    std::vector<int> kept_indices;
     std::vector<Array<double>> left_modes;
     std::vector<Array<double>> right_modes;
   };
@@ -1925,34 +1989,32 @@ void build_grouped_momentum_hat_low_rank_correction(
 
     GroupModes kept;
     kept.group = &group;
-    kept.kept_indices.reserve(group.modes.size());
     kept.left_modes.reserve(group.modes.size());
     kept.right_modes.reserve(group.modes.size());
 
-    for (int mode_index = 0; mode_index < static_cast<int>(group.modes.size()); ++mode_index) {
-      const auto& mode = group.modes[static_cast<std::size_t>(mode_index)];
+    for (const auto& mode : group.modes) {
       const auto& left_entries =
-          !mode.left_scaled.empty() ? mode.left_scaled : mode.left;
+          !mode.left_scaled_owned.empty() ? mode.left_scaled_owned
+          : !mode.left_owned.empty()      ? mode.left_owned
+          : !mode.left_scaled.empty()     ? mode.left_scaled
+                                          : mode.left;
       const auto& right_entries =
-          !mode.right_scaled.empty() ? mode.right_scaled : mode.right;
+          !mode.right_scaled_owned.empty() ? mode.right_scaled_owned
+          : !mode.right_owned.empty()      ? mode.right_owned
+          : !mode.right_scaled.empty()     ? mode.right_scaled
+                                           : mode.right;
 
       Array<double> left_mode;
       Array<double> right_mode;
-      const bool has_left =
-          fill_projected_reduced_vector(lhs, mode, left_entries, mom_ncomp, left_mode);
-      const bool has_right =
-          fill_projected_reduced_vector(lhs, mode, right_entries, mom_ncomp, right_mode);
-      if (!has_left || !has_right) {
-        continue;
-      }
+      fill_projected_reduced_vector(lhs, mode, left_entries, mom_ncomp, left_mode);
+      fill_projected_reduced_vector(lhs, mode, right_entries, mom_ncomp, right_mode);
 
-      kept.kept_indices.push_back(mode_index);
       kept.left_modes.push_back(std::move(left_mode));
       kept.right_modes.push_back(std::move(right_mode));
     }
 
-    if (!kept.kept_indices.empty()) {
-      total_rank += static_cast<int>(kept.kept_indices.size());
+    if (!kept.left_modes.empty()) {
+      total_rank += static_cast<int>(kept.left_modes.size());
       groups.push_back(std::move(kept));
     }
   }
@@ -1970,17 +2032,15 @@ void build_grouped_momentum_hat_low_rank_correction(
   int offset = 0;
   for (const auto& kept : groups) {
     const auto& group = *kept.group;
-    const int rank = static_cast<int>(kept.kept_indices.size());
-    const int group_rank = static_cast<int>(group.modes.size());
+    const int rank = static_cast<int>(kept.left_modes.size());
     for (int i = 0; i < rank; ++i) {
       hat.low_rank_left.push_back(kept.left_modes[static_cast<std::size_t>(i)]);
       hat.low_rank_right.push_back(kept.right_modes[static_cast<std::size_t>(i)]);
       for (int j = 0; j < rank; ++j) {
         dense_c_inv[static_cast<std::size_t>(offset + i) * static_cast<std::size_t>(total_rank) +
                     static_cast<std::size_t>(offset + j)] =
-            -group.aux_matrix[static_cast<std::size_t>(kept.kept_indices[static_cast<std::size_t>(i)]) *
-                                  static_cast<std::size_t>(group_rank) +
-                              static_cast<std::size_t>(kept.kept_indices[static_cast<std::size_t>(j)])];
+            -group.aux_matrix[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+                              static_cast<std::size_t>(j)];
       }
     }
     offset += rank;
@@ -1990,9 +2050,15 @@ void build_grouped_momentum_hat_low_rank_correction(
   hat.low_rank_preconditioned_right_t = hat.low_rank_right;
   for (auto& vec : hat.low_rank_preconditioned_left) {
     apply_momentum_hat(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, hat, vec);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skip_post_solve_overlap_sum()) {
+      fsils_syncv(lhs, mom_ncomp, vec);
+    }
   }
   for (auto& vec : hat.low_rank_preconditioned_right_t) {
     apply_momentum_hat_transpose(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, hat, vec);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skip_post_solve_overlap_sum()) {
+      fsils_syncv(lhs, mom_ncomp, vec);
+    }
   }
 
   std::vector<double> dense_m = dense_c_inv;
@@ -2115,6 +2181,9 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
     if (!update.active || std::abs(update.sigma) <= 1e-30) {
       return;
     }
+    if (update.grouped_coupling_id == kNativeFaceDuplicateCouplingId) {
+      return;
+    }
     if (has_grouped_bordered && update.grouped_coupling_id >= 0) {
       return;
     }
@@ -2223,41 +2292,51 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
       }
       for (const auto& mode : group.modes) {
         const auto& left_entries =
-            !mode.left_scaled.empty() ? mode.left_scaled : mode.left;
-        if (fill_projected_reduced_vector(lhs, mode, left_entries, mom_ncomp, probe)) {
-          approx_apply = probe;
-          apply_momentum_hat(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, candidate, approx_apply);
-          spar_mul::fsils_spar_mul_vv(const_cast<fe_fsi_linear_solver::FSILS_lhsType&>(lhs),
-                                      rowPtr, colPtr, mom_ncomp, K_eff, approx_apply, residual);
-          omp_la::omp_axpby_v(mom_ncomp, nNo, residual, residual, -1.0, probe);
-          const double den = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
-                                              const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
-                                              probe, probe);
-          const double num = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
-                                              const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
-                                              residual, residual);
-          denominator += static_cast<long double>(den);
-          numerator += static_cast<long double>(num);
+            !mode.left_scaled_owned.empty() ? mode.left_scaled_owned
+            : !mode.left_owned.empty()      ? mode.left_owned
+            : !mode.left_scaled.empty()     ? mode.left_scaled
+                                            : mode.left;
+        fill_projected_reduced_vector(lhs, mode, left_entries, mom_ncomp, probe);
+        approx_apply = probe;
+        apply_momentum_hat(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, candidate, approx_apply);
+        if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skip_post_solve_overlap_sum()) {
+          fsils_syncv(lhs, mom_ncomp, approx_apply);
         }
+        spar_mul::fsils_spar_mul_vv(const_cast<fe_fsi_linear_solver::FSILS_lhsType&>(lhs),
+                                    rowPtr, colPtr, mom_ncomp, K_eff, approx_apply, residual);
+        omp_la::omp_axpby_v(mom_ncomp, nNo, residual, residual, -1.0, probe);
+        const double den = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
+                                            const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
+                                            probe, probe);
+        const double num = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
+                                            const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
+                                            residual, residual);
+        denominator += static_cast<long double>(den);
+        numerator += static_cast<long double>(num);
 
         const auto& right_entries =
-            !mode.right_scaled.empty() ? mode.right_scaled : mode.right;
-        if (fill_projected_reduced_vector(lhs, mode, right_entries, mom_ncomp, probe_t)) {
-          approx_apply_t = probe_t;
-          apply_momentum_hat_transpose(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, candidate, approx_apply_t);
-          multiply_rect_transpose_local(rowPtr, colPtr, nNo,
-                                        mom_ncomp, mom_ncomp, K_eff,
-                                        approx_apply_t, residual_t);
-          omp_la::omp_axpby_v(mom_ncomp, nNo, residual_t, residual_t, -1.0, probe_t);
-          const double den = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
+            !mode.right_scaled_owned.empty() ? mode.right_scaled_owned
+            : !mode.right_owned.empty()      ? mode.right_owned
+            : !mode.right_scaled.empty()     ? mode.right_scaled
+                                             : mode.right;
+        fill_projected_reduced_vector(lhs, mode, right_entries, mom_ncomp, probe_t);
+        approx_apply_t = probe_t;
+        apply_momentum_hat_transpose(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, candidate, approx_apply_t);
+        if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skip_post_solve_overlap_sum()) {
+          fsils_syncv(lhs, mom_ncomp, approx_apply_t);
+        }
+        multiply_rect_transpose_local(rowPtr, colPtr, nNo,
+                                      mom_ncomp, mom_ncomp, K_eff,
+                                      approx_apply_t, residual_t);
+        omp_la::omp_axpby_v(mom_ncomp, nNo, residual_t, residual_t, -1.0, probe_t);
+        const double den_t = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
                                               const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
                                               probe_t, probe_t);
-          const double num = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
+        const double num_t = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
                                               const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
                                               residual_t, residual_t);
-          denominator += static_cast<long double>(den);
-          numerator += static_cast<long double>(num);
-        }
+        denominator += static_cast<long double>(den_t);
+        numerator += static_cast<long double>(num_t);
       }
     }
 
@@ -2456,16 +2535,20 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
       return;
     }
 
-    const auto& left_entries = !update.left_scaled.empty() ? update.left_scaled : update.left;
-    const auto& right_entries = !update.right_scaled.empty() ? update.right_scaled : update.right;
+    const auto& left_entries =
+        !update.left_scaled_owned.empty() ? update.left_scaled_owned
+        : !update.left_owned.empty()      ? update.left_owned
+        : !update.left_scaled.empty()     ? update.left_scaled
+                                          : update.left;
+    const auto& right_entries =
+        !update.right_scaled_owned.empty() ? update.right_scaled_owned
+        : !update.right_owned.empty()      ? update.right_owned
+        : !update.right_scaled.empty()     ? update.right_scaled
+                                           : update.right;
 
     ReducedColumn col;
     fill_projected_reduced_vector(lhs, update, left_entries, mom_ncomp, col.momentum_left_hat);
-    fill_projected_reduced_vector(lhs, update,
-                                  !update.right_scaled_owned.empty() ? update.right_scaled_owned
-                                                                     : update.right_owned,
-                                  mom_ncomp,
-                                  col.momentum_right_owned);
+    fill_projected_reduced_vector(lhs, update, right_entries, mom_ncomp, col.momentum_right_owned);
 
     Array<double> momentum_right_t;
     fill_projected_reduced_vector(lhs, update, right_entries, mom_ncomp, momentum_right_t);
@@ -2474,6 +2557,10 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
                        mom_ncomp, lhs.nNo, momentum_hat, col.momentum_left_hat);
     apply_momentum_hat_transpose(lhs.rowPtr, lhs.colPtr, lhs.diagPtr,
                                  mom_ncomp, lhs.nNo, momentum_hat, momentum_right_t);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skip_post_solve_overlap_sum()) {
+      fsils_syncv(lhs, mom_ncomp, col.momentum_left_hat);
+      fsils_syncv(lhs, mom_ncomp, momentum_right_t);
+    }
 
     col.schur_left.resize(con_ncomp, lhs.nNo);
     spar_mul::fsils_spar_mul_rect(lhs, lhs.rowPtr, lhs.colPtr,
@@ -2486,14 +2573,12 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   };
 
   auto append_face_column = [&](const fe_fsi_linear_solver::FSILS_faceType& face) {
-    if (!face.coupledFlag || std::abs(face.res) <= 1e-30 || face.nNo <= 0) {
+    if (!face.coupledFlag || std::abs(face.res) <= 1e-30) {
       return;
     }
 
     ReducedColumn col;
-    if (!fill_projected_face_vector(lhs, face, mom_ncomp, col.momentum_left_hat)) {
-      return;
-    }
+    fill_projected_face_vector(lhs, face, mom_ncomp, col.momentum_left_hat);
     col.momentum_right_owned = col.momentum_left_hat;
     Array<double> momentum_right_t = col.momentum_left_hat;
 
@@ -2501,6 +2586,10 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
                        mom_ncomp, lhs.nNo, momentum_hat, col.momentum_left_hat);
     apply_momentum_hat_transpose(lhs.rowPtr, lhs.colPtr, lhs.diagPtr,
                                  mom_ncomp, lhs.nNo, momentum_hat, momentum_right_t);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skip_post_solve_overlap_sum()) {
+      fsils_syncv(lhs, mom_ncomp, col.momentum_left_hat);
+      fsils_syncv(lhs, mom_ncomp, momentum_right_t);
+    }
 
     col.schur_left.resize(con_ncomp, lhs.nNo);
     spar_mul::fsils_spar_mul_rect(lhs, lhs.rowPtr, lhs.colPtr,
@@ -2518,6 +2607,9 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   const bool has_grouped_bordered = !lhs.grouped_bordered_field_couplings.empty();
   for (const auto& update : lhs.reduced_updates) {
     if (!update.active || std::abs(update.sigma) <= 1e-30) {
+      continue;
+    }
+    if (update.grouped_coupling_id == kNativeFaceDuplicateCouplingId) {
       continue;
     }
     if (has_grouped_bordered && update.grouped_coupling_id >= 0) {
@@ -2596,6 +2688,7 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     Array<double> z = column.schur_left;
     apply_base_schur_preconditioner(lhs.rowPtr, lhs.colPtr, lhs.diagPtr,
                                     pc, con_ncomp, lhs.nNo, z);
+    sync_schur_overlap(lhs, con_ncomp, z);
     pc.low_rank_preconditioned_left.push_back(std::move(z));
   }
 
@@ -2636,6 +2729,17 @@ SchurPreconditionerData build_schur_preconditioner(fe_fsi_linear_solver::FSILS_l
   SchurPreconditionerData pc{};
   const auto preconditioner = ls.schur_preconditioner;
   const bool diagonal_only = (preconditioner == SchurPreconditionerType::DIAG_L);
+  const bool has_face_corrections = std::any_of(lhs.face.begin(), lhs.face.end(),
+      [](const fe_fsi_linear_solver::FSILS_faceType& face) {
+        return face.coupledFlag && std::abs(face.res) > 1e-30;
+      });
+  const bool has_exact_schur_corrections =
+      !lhs.reduced_updates.empty() ||
+      !lhs.grouped_bordered_field_couplings.empty() ||
+      has_face_corrections;
+  const bool need_momentum_hat =
+      has_exact_schur_corrections ||
+      (preconditioner == SchurPreconditionerType::ALGEBRAIC_SHAT);
   build_point_inverse_blocks(lhs.diagPtr, con_ncomp, lhs.nNo, L, diagonal_only, pc.point_inv);
   if (!lhs.reduced_updates.empty() || !lhs.grouped_bordered_field_couplings.empty()) {
     // The OOP BlockSchur path permutes the per-node ordering to the explicit
@@ -2646,26 +2750,30 @@ SchurPreconditionerData build_schur_preconditioner(fe_fsi_linear_solver::FSILS_l
                                      /*con_start=*/mom_ncomp, con_ncomp, pc);
   }
 
+  if (need_momentum_hat) {
+    pc.momentum_hat =
+        build_momentum_hat_data(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs, lhs.nNo,
+                                mom_ncomp, K, ls.schur_momentum_approximation);
+  }
+
   if (preconditioner == SchurPreconditionerType::ILU_L) {
     factorize_block_ilu0(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs.nNo, con_ncomp, L,
                          pc.ilu_factors, pc.ilu_diag_inv);
     pc.use_ilu = true;
+    if (has_exact_schur_corrections) {
+      build_reduced_schur_correction(lhs, mom_ncomp, con_ncomp, D, G, pc.momentum_hat, pc);
+    }
     return pc;
   }
 
   if (preconditioner == SchurPreconditionerType::ALGEBRAIC_SHAT) {
     const auto& cfg = schur_sparsity_control();
-    const MomentumHatData momentum_hat =
-        build_momentum_hat_data(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs, lhs.nNo,
-                                mom_ncomp, K, ls.schur_momentum_approximation);
-
     Array<double> shat(L.nrows(), L.ncols());
     assemble_algebraic_schur(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs.nNo, mom_ncomp, con_ncomp,
-                             D, G, L, momentum_hat.sparse_inverse, shat);
+                             D, G, L, pc.momentum_hat.sparse_inverse, shat);
     factorize_block_ilu0(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs.nNo, con_ncomp, shat,
                          pc.ilu_factors, pc.ilu_diag_inv);
     pc.use_ilu = true;
-    pc.momentum_hat = momentum_hat;
     pc.operator_D = &D;
     pc.operator_G = &G;
     pc.operator_L_storage = L;
@@ -2674,15 +2782,10 @@ SchurPreconditionerData build_schur_preconditioner(fe_fsi_linear_solver::FSILS_l
     pc.operator_con_ncomp = con_ncomp;
     pc.operator_refinement_steps = cfg.operator_refinement_steps;
     pc.operator_refinement_omega = cfg.operator_refinement_omega;
+  }
 
-    const bool has_face_corrections = std::any_of(lhs.face.begin(), lhs.face.end(),
-        [](const fe_fsi_linear_solver::FSILS_faceType& face) {
-          return face.coupledFlag && std::abs(face.res) > 1e-30 && face.nNo > 0;
-        });
-    if (!lhs.reduced_updates.empty() || !lhs.grouped_bordered_field_couplings.empty() ||
-        has_face_corrections) {
-      build_reduced_schur_correction(lhs, mom_ncomp, con_ncomp, D, G, momentum_hat, pc);
-    }
+  if (has_exact_schur_corrections) {
+    build_reduced_schur_correction(lhs, mom_ncomp, con_ncomp, D, G, pc.momentum_hat, pc);
   }
 
   return pc;
@@ -2760,6 +2863,9 @@ void apply_hat_schur_operator(const Array<fsils_int>& rowPtr,
 
   pc.scratch_hgp = pc.scratch_gp;
   apply_momentum_hat(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, pc.momentum_hat, pc.scratch_hgp);
+  if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skip_post_solve_overlap_sum()) {
+    fsils_syncv(lhs, mom_ncomp, pc.scratch_hgp);
+  }
 
   spar_mul::fsils_spar_mul_rect(lhs, rowPtr, colPtr,
       con_ncomp, mom_ncomp, *pc.operator_D, pc.scratch_hgp, pc.scratch_dgp);
@@ -2789,6 +2895,7 @@ void apply_schur_preconditioner(const Array<fsils_int>& rowPtr,
   }
 
   apply_base_schur_preconditioner(rowPtr, colPtr, diagPtr, pc, con_ncomp, nNo, x);
+  sync_schur_overlap(lhs, con_ncomp, x);
   apply_schur_low_rank_correction(lhs, pc, con_ncomp, nNo, x);
 
   for (int step = 0; step < pc.operator_refinement_steps; ++step) {
@@ -2803,6 +2910,7 @@ void apply_schur_preconditioner(const Array<fsils_int>& rowPtr,
     }
 
     apply_base_schur_preconditioner(rowPtr, colPtr, diagPtr, pc, con_ncomp, nNo, pc.scratch_correction);
+    sync_schur_overlap(lhs, con_ncomp, pc.scratch_correction);
     apply_schur_low_rank_correction(lhs, pc, con_ncomp, nNo, pc.scratch_correction);
 
     const double omega = pc.operator_refinement_omega;
@@ -2871,6 +2979,7 @@ void schur_face_only_legacy(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   Array<double> GP(nsd, nNo);
   Vector<double> SP(nNo), DGP(nNo);
   Vector<double> M_inv(nNo);
+  Vector<double> in_sync(nNo);
   for (fsils_int i = 0; i < nNo; ++i) {
     const double diag_val = L(lhs.diagPtr(i));
     M_inv(i) = (std::abs(diag_val) > 1e-12) ? 1.0 / diag_val : 1.0;
@@ -2898,15 +3007,221 @@ void schur_face_only_legacy(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   int i_itr = 1;
 
   auto apply_schur_operator = [&](const Vector<double>& in_vec, Vector<double>& out_vec) {
-    spar_mul::fsils_spar_mul_sv_ss_fused(lhs, lhs.rowPtr, lhs.colPtr, nsd, G, L, in_vec, GP, SP);
+    const Vector<double>* op_in = &in_vec;
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skip_post_solve_overlap_sum()) {
+      // BiCGStab updates overlap vectors locally; synchronize before reuse in the
+      // next Schur matvec so owned values drive ghost entries consistently.
+      in_sync = in_vec;
+      fsils_syncs(lhs, in_sync);
+      op_in = &in_sync;
+    }
+
+    spar_mul::fsils_spar_mul_sv_ss_fused(lhs, lhs.rowPtr, lhs.colPtr, nsd, G, L, *op_in, GP, SP);
     add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, nsd, GP, GP);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skip_post_solve_overlap_sum()) {
+      // The coupled-face correction modifies a momentum overlap field in place.
+      // Synchronize before reusing it in D*(...) on neighboring owned rows.
+      fsils_syncv(lhs, nsd, GP);
+    }
     spar_mul::fsils_spar_mul_vs(lhs, lhs.rowPtr, lhs.colPtr, nsd, D, GP, DGP);
 
     #pragma omp parallel for schedule(static)
     for (fsils_int i = 0; i < nNo; ++i) {
       out_vec(i) = M_inv(i) * (SP(i) - DGP(i));
     }
+
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skip_post_solve_overlap_sum()) {
+      fsils_syncs(lhs, out_vec);
+    }
   };
+
+  int active_coupled_faces = static_cast<int>(std::count_if(
+      lhs.face.begin(), lhs.face.end(),
+      [](const auto& face) {
+        return face.coupledFlag && std::abs(face.res) > 1e-30 && face.nNo > 0;
+      }));
+  if (lhs.commu.nTasks > 1) {
+    int global_active_coupled_faces = active_coupled_faces;
+    fsils_allreduce_sum(&active_coupled_faces, &global_active_coupled_faces, 1,
+                        cm_mod::mpint, lhs.commu);
+    active_coupled_faces = global_active_coupled_faces;
+  }
+  const bool use_multi_face_gmres =
+      lhs.commu.nTasks > 1 &&
+      active_coupled_faces > 1 &&
+      (std::getenv("SVMP_FSILS_DISABLE_MULTI_FACE_LEGACY_GMRES") == nullptr);
+
+  if (use_multi_face_gmres) {
+    const int restart_dim =
+        std::max(1, std::min((ls.sD > 0 ? ls.sD : ls.mItr), ls.mItr));
+    ls.ws.ensure_gmres_s(nNo, restart_dim);
+    auto& h = ls.ws.h;
+    auto& u = ls.ws.u2;
+    auto& Xg = ls.ws.Xs;
+    auto& y = ls.ws.y;
+    auto& c = ls.ws.c;
+    auto& s = ls.ws.s;
+    auto& errv = ls.ws.err;
+
+    Vector<double> residual(nNo), ax(nNo);
+    ls.callD = fsils_cpu_t();
+    ls.suc = false;
+    ls.itr = 0;
+    Xg = 0.0;
+
+    const double rhs_norm = norm::fsi_ls_norms(mynNo, lhs.commu, R);
+    ls.iNorm = rhs_norm;
+    const double gmres_eps = std::max(ls.absTol, ls.relTol * rhs_norm);
+    int restart_cycles = 0;
+    int total_itr = 0;
+
+    if (rhs_norm <= ls.absTol) {
+      R = Xg;
+      ls.fNorm = rhs_norm;
+      ls.callD = fsils_cpu_t() - ls.callD;
+      ls.dB = 0.0;
+      ls.suc = true;
+      ls.stats.record_call(ls.itr - itr_before,
+                           restart_cycles,
+                           fsils_collective_delta(collective_before, lhs.commu.collective_stats),
+                           /*setup_seconds=*/0.0,
+                           ls.callD - callD_before);
+      return;
+    }
+
+    while (total_itr < ls.mItr) {
+      ++restart_cycles;
+
+      apply_schur_operator(Xg, ax);
+      omp_la::omp_axpby_s(nNo, residual, R, -1.0, ax);
+      const double beta_gmres = norm::fsi_ls_norms(mynNo, lhs.commu, residual);
+      if (beta_gmres < gmres_eps) {
+        ls.suc = true;
+        ls.fNorm = beta_gmres;
+        break;
+      }
+
+      h = 0.0;
+      for (int i = 0; i <= restart_dim; ++i) {
+        errv(i) = 0.0;
+        if (i < restart_dim) {
+          c(i) = 0.0;
+          s(i) = 0.0;
+          y(i) = 0.0;
+        }
+      }
+      errv(0) = beta_gmres;
+
+      auto u0 = u.rcol(0);
+      u0 = residual;
+      omp_la::omp_mul_s(nNo, 1.0 / beta_gmres, u0);
+
+      int last_i = -1;
+      bool terminated_inner = false;
+      for (int i = 0; i < restart_dim && total_itr < ls.mItr; ++i) {
+        last_i = i;
+        auto ui = u.rcol(i);
+        auto uip1 = u.rcol(i + 1);
+        apply_schur_operator(ui, uip1);
+
+        for (int j = 0; j <= i; ++j) {
+          h(j, i) = dot::fsils_dot_s(mynNo, lhs.commu, u.rcol(j), uip1);
+          omp_la::omp_sum_s(nNo, -h(j, i), uip1, u.rcol(j));
+        }
+
+        h(i + 1, i) = norm::fsi_ls_norms(mynNo, lhs.commu, uip1);
+        const bool breakdown =
+            !(h(i + 1, i) >
+              std::numeric_limits<double>::epsilon() * std::max(ls.iNorm, 1.0));
+        if (!breakdown) {
+          omp_la::omp_mul_s(nNo, 1.0 / h(i + 1, i), uip1);
+        } else {
+          h(i + 1, i) = 0.0;
+        }
+
+        for (int j = 0; j < i; ++j) {
+          const double tmp_h = c(j) * h(j, i) + s(j) * h(j + 1, i);
+          h(j + 1, i) = -s(j) * h(j, i) + c(j) * h(j + 1, i);
+          h(j, i) = tmp_h;
+        }
+
+        const double hypot_h = std::hypot(h(i, i), h(i + 1, i));
+        if (hypot_h > std::numeric_limits<double>::epsilon()) {
+          c(i) = h(i, i) / hypot_h;
+          s(i) = h(i + 1, i) / hypot_h;
+        } else {
+          c(i) = 1.0;
+          s(i) = 0.0;
+        }
+
+        h(i, i) = hypot_h;
+        h(i + 1, i) = 0.0;
+        errv(i + 1) = -s(i) * errv(i);
+        errv(i) = c(i) * errv(i);
+
+        ++total_itr;
+        ls.itr = total_itr;
+
+        if (std::abs(errv(i + 1)) < gmres_eps || breakdown) {
+          terminated_inner = true;
+          break;
+        }
+      }
+
+      if (last_i < 0) {
+        break;
+      }
+
+      for (int i = 0; i <= last_i; ++i) {
+        y(i) = errv(i);
+      }
+      for (int j = last_i; j >= 0; --j) {
+        for (int k = j + 1; k <= last_i; ++k) {
+          y(j) -= h(j, k) * y(k);
+        }
+        if (std::abs(h(j, j)) > std::numeric_limits<double>::epsilon()) {
+          y(j) /= h(j, j);
+        } else {
+          y(j) = 0.0;
+        }
+      }
+
+      for (int j = 0; j <= last_i; ++j) {
+        if (std::abs(y(j)) > 1e-30) {
+          omp_la::omp_sum_s(nNo, y(j), Xg, u.rcol(j));
+        }
+      }
+
+      ls.fNorm = std::abs(errv(last_i + 1));
+      if (ls.fNorm < gmres_eps) {
+        ls.suc = true;
+        break;
+      }
+
+      if (!terminated_inner) {
+        continue;
+      }
+    }
+
+    if (!ls.suc) {
+      apply_schur_operator(Xg, ax);
+      omp_la::omp_axpby_s(nNo, residual, R, -1.0, ax);
+      ls.fNorm = norm::fsi_ls_norms(mynNo, lhs.commu, residual);
+      ls.suc = (ls.fNorm < gmres_eps);
+    }
+
+    R = Xg;
+    ls.callD = fsils_cpu_t() - ls.callD;
+    ls.dB = (rhs_norm < std::numeric_limits<double>::epsilon() || ls.fNorm <= 0.0)
+                ? 0.0
+                : 10.0 * std::log(ls.fNorm / rhs_norm);
+    ls.stats.record_call(ls.itr - itr_before,
+                         restart_cycles,
+                         fsils_collective_delta(collective_before, lhs.commu.collective_stats),
+                         /*setup_seconds=*/0.0,
+                         ls.callD - callD_before);
+    return;
+  }
 
   for (int i = 0; i < ls.mItr; ++i) {
     if (err < eps) {
@@ -3011,32 +3326,71 @@ void schur_impl(fe_fsi_linear_solver::FSILS_lhsType& lhs,
       [](const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update) {
         return update.active && std::abs(update.sigma) > 1e-30 && update.grouped_coupling_id < 0;
       }));
+  int active_duplicate_reduced_corrections = static_cast<int>(std::count_if(
+      lhs.reduced_updates.begin(), lhs.reduced_updates.end(),
+      [](const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update) {
+        return update.active && std::abs(update.sigma) > 1e-30 &&
+               update.grouped_coupling_id == kNativeFaceDuplicateCouplingId;
+      }));
   if (lhs.commu.nTasks > 1) {
     int global_active_face_corrections = active_face_corrections;
     int global_active_reduced_corrections = active_reduced_corrections;
+    int global_active_duplicate_reduced_corrections = active_duplicate_reduced_corrections;
     fe_fsi_linear_solver::fsils_allreduce_sum(
         &active_face_corrections, &global_active_face_corrections, 1, cm_mod::mpint, lhs.commu);
     fe_fsi_linear_solver::fsils_allreduce_sum(
         &active_reduced_corrections, &global_active_reduced_corrections, 1, cm_mod::mpint, lhs.commu);
+    fe_fsi_linear_solver::fsils_allreduce_sum(
+        &active_duplicate_reduced_corrections, &global_active_duplicate_reduced_corrections,
+        1, cm_mod::mpint, lhs.commu);
     active_face_corrections = global_active_face_corrections;
     active_reduced_corrections = global_active_reduced_corrections;
+    active_duplicate_reduced_corrections = global_active_duplicate_reduced_corrections;
   }
+  const int active_nonduplicate_reduced_corrections =
+      std::max(0, active_reduced_corrections - active_duplicate_reduced_corrections);
   const bool grouped_touches_constraint =
       grouped_bordered_touch_constraint_block(lhs, mom_ncomp, con_ncomp);
   const bool reduced_touches_constraint =
       reduced_updates_touch_constraint_block(lhs, mom_ncomp, con_ncomp);
+  const bool disable_face_only_legacy =
+      std::getenv("SVMP_FSILS_BLOCKSCHUR_DISABLE_FACE_ONLY_LEGACY") != nullptr;
   const bool use_face_only_legacy =
       (con_ncomp == 1) &&
       (active_face_corrections > 0) &&
       (active_reduced_corrections == 0) &&
-      lhs.grouped_bordered_field_couplings.empty();
+      lhs.grouped_bordered_field_couplings.empty() &&
+      !disable_face_only_legacy;
+  const bool has_distinct_multi_reduced_corrections = std::any_of(
+      lhs.reduced_updates.begin(),
+      lhs.reduced_updates.end(),
+      [](const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update) {
+        return update.active &&
+               std::abs(update.sigma) > 1e-30 &&
+               update.grouped_coupling_id != kNativeFaceDuplicateCouplingId &&
+               reduced_update_has_distinct_left_right(update);
+      });
+  // The legacy scalar Schur shortcut is not algebraically equivalent for MPI
+  // grouped or genuinely bordered multi-mode corrections. Keep the cheaper
+  // legacy path for symmetric native-face rank-one reductions that lower to
+  // left==right reduced updates under MPI.
+  const bool require_exact_momentum_low_rank_path =
+      (lhs.commu.nTasks > 1) &&
+      (!lhs.grouped_bordered_field_couplings.empty() ||
+       (active_nonduplicate_reduced_corrections > 1 &&
+        has_distinct_multi_reduced_corrections));
   const bool use_momentum_only_low_rank_legacy =
       (con_ncomp == 1) &&
       (active_face_corrections == 0) &&
       (!lhs.reduced_updates.empty() || !lhs.grouped_bordered_field_couplings.empty()) &&
       !reduced_touches_constraint &&
       !grouped_touches_constraint &&
-      lhs.commu.nTasks <= 1;
+      !require_exact_momentum_low_rank_path;
+  const bool native_face_duplicates_only =
+      (active_face_corrections > 0) &&
+      (active_duplicate_reduced_corrections > 0) &&
+      (active_nonduplicate_reduced_corrections == 0) &&
+      lhs.grouped_bordered_field_couplings.empty();
 
   if (use_face_only_legacy || use_momentum_only_low_rank_legacy) {
     Vector<double> R_scalar;
@@ -3087,10 +3441,10 @@ void schur_impl(fe_fsi_linear_solver::FSILS_lhsType& lhs,
 
     HGP = GP;
     gmres::gmres_v(lhs, momentum_ls, mom_ncomp, K, HGP);
-    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-      // The nested momentum solve returns a distributed overlap vector.
-      // Synchronize shared nodes before reusing it as the input to D*(K^-1*G).
-      fsils_commuv(lhs, mom_ncomp, HGP);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skip_post_solve_overlap_sum()) {
+      // The nested momentum solve returns a solution-like overlap vector.
+      // Push owner values back to ghosts before reusing it in D*(K^-1*G).
+      fsils_syncv(lhs, mom_ncomp, HGP);
     }
 
     spar_mul::fsils_spar_mul_rect(lhs, lhs.rowPtr, lhs.colPtr,
@@ -3116,8 +3470,8 @@ void schur_impl(fe_fsi_linear_solver::FSILS_lhsType& lhs,
 
   const bool prefer_schur_gmres =
       !lhs.grouped_bordered_field_couplings.empty() ||
-      active_face_corrections > 0 ||
-      active_reduced_corrections > 1;
+      ((!native_face_duplicates_only) && active_face_corrections > 0) ||
+      active_nonduplicate_reduced_corrections > 1;
 
   if (prefer_schur_gmres) {
     const int restart_dim =

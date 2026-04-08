@@ -11,6 +11,16 @@
 /**
  * @file SpectralBasis.h
  * @brief Gauss-Lobatto-Legendre spectral bases for high-order elements
+ *
+ * Supported reference element families:
+ * - Line
+ * - Quadrilateral
+ * - Hexahedron
+ * - Triangle
+ * - Tetrahedron
+ *
+ * Wedge and pyramid spectral bases are intentionally not implemented in the
+ * current module.
  */
 
 #include "BasisFunction.h"

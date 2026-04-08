@@ -7,10 +7,26 @@
 
 #include "BasisFunction.h"
 #include <algorithm>
+#include <iomanip>
+#include <limits>
+#include <sstream>
+#include <typeinfo>
 
 namespace svmp {
 namespace FE {
 namespace basis {
+
+std::string BasisFunction::cache_identity() const {
+    std::ostringstream oss;
+    oss << typeid(*this).name()
+        << "|basis=" << static_cast<int>(basis_type())
+        << "|elem=" << static_cast<int>(element_type())
+        << "|dim=" << dimension()
+        << "|order=" << order()
+        << "|size=" << size()
+        << "|vector=" << is_vector_valued();
+    return oss.str();
+}
 
 void BasisFunction::numerical_gradient(const math::Vector<Real, 3>& xi,
                                        std::vector<Gradient>& gradients,

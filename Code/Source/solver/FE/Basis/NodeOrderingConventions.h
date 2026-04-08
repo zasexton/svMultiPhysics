@@ -11,6 +11,7 @@
 #include "Core/Types.h"
 #include "Math/Vector.h"
 #include <cstddef>
+#include <vector>
 
 /**
  * @file NodeOrderingConventions.h
@@ -388,9 +389,9 @@
  * Pyramid14 (Quadratic Rational Pyramid)
  * --------------------------------------
  *
- * This 14-node layout matches MFEM's H1_BergotPyramidElement (p=2) node
- * positions, mapped to the FE library's reference pyramid with base
- * (-1,-1,0)..(1,1,0) and apex at (0,0,1). Nodes 0-12 coincide with the
+ * This retained low-order compatibility layout matches the generated
+ * complete-family quadratic Lagrange ordering for the reference pyramid with
+ * base (-1,-1,0)..(1,1,0) and apex at (0,0,1). Nodes 0-12 coincide with the
  * Pyramid13 layout; node 13 is the base center.
  *
  *   Base corners (same as Pyramid5):
@@ -476,14 +477,35 @@ public:
      * @brief Get reference coordinates for a node
      * @param elem_type Element type
      * @param local_node Local node index (0-based)
+     *
+     * Complete-family low-order Lagrange aliases (`Line2/3`, `Triangle3/6`,
+     * `Quad4/9`, `Tetra4/10`, `Hex8/27`, `Wedge6/18`, `Pyramid5/14`) are
+     * served by the generated arbitrary-order Lagrange ordering path. Explicit
+     * hard-coded tables remain only for serendipity-only enums such as
+     * `Quad8`, `Hex20`, `Wedge15`, and `Pyramid13`.
+     *
      * @return Reference coordinates (xi, eta, zeta)
      */
     static math::Vector<Real, 3> get_node_coords(ElementType elem_type, std::size_t local_node);
 
     /**
      * @brief Get number of nodes for an element type
+     *
+     * The low-order complete-family Lagrange aliases share the same generated
+     * ordering path used by `get_node_coords`.
      */
     static std::size_t num_nodes(ElementType elem_type);
+
+    /**
+     * @brief Generate complete-family Lagrange node coordinates for a canonical topology and order
+     *
+     * This covers arbitrary-order complete nodal Lagrange spaces on the
+     * canonical topologies `Line2`, `Triangle3`, `Quad4`, `Tetra4`, `Hex8`,
+     * `Wedge6`, and `Pyramid5`. Serendipity variants are intentionally
+     * excluded.
+     */
+    static std::vector<math::Vector<Real, 3>>
+    get_lagrange_node_coords(ElementType canonical_type, int order);
 
     /**
      * @brief Check if element is a simplex (triangle, tetrahedron)

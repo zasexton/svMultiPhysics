@@ -83,6 +83,21 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
   return *env != '0';
 }
 
+[[nodiscard]] bool skipPostSolveOverlapSum() noexcept
+{
+  const char* env = std::getenv("SVMP_FSILS_SKIP_POST_SOLVE_COMM");
+  if (env == nullptr) {
+    return false;
+  }
+  while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+    ++env;
+  }
+  if (*env == '\0') {
+    return false;
+  }
+  return *env != '0';
+}
+
 struct ExplicitReducedBlockCorrection {
   double sigma{0.0};
   Array<double> left_momentum;
@@ -338,8 +353,16 @@ void build_explicit_block_corrections(
 
     ExplicitReducedBlockCorrection corr;
     corr.sigma = update.sigma;
-    const auto& left_entries = !update.left_scaled.empty() ? update.left_scaled : update.left;
-    const auto& right_entries = !update.right_scaled.empty() ? update.right_scaled : update.right;
+    const auto& left_entries =
+        !update.left_scaled_owned.empty() ? update.left_scaled_owned
+        : !update.left_owned.empty()      ? update.left_owned
+        : !update.left_scaled.empty()     ? update.left_scaled
+                                          : update.left;
+    const auto& right_entries =
+        !update.right_scaled_owned.empty() ? update.right_scaled_owned
+        : !update.right_owned.empty()      ? update.right_owned
+        : !update.right_scaled.empty()     ? update.right_scaled
+                                           : update.right;
     fill_projected_block_vector(lhs, left_entries,
                                 mom_start, mom_ncomp, corr.left_momentum);
     fill_projected_block_vector(lhs, left_entries,
@@ -375,37 +398,36 @@ void build_explicit_block_corrections(
     corr.right_momentum_modes.reserve(group_data.modes.size());
     corr.right_constraint_modes.reserve(group_data.modes.size());
 
-    bool any_left_momentum = false;
-    bool any_left_constraint = false;
-    bool any_right_momentum = false;
-    bool any_right_constraint = false;
     for (const auto& mode : group_data.modes) {
-      const auto& left_entries = !mode.left_scaled.empty() ? mode.left_scaled : mode.left;
-      const auto& right_entries = !mode.right_scaled.empty() ? mode.right_scaled : mode.right;
+      const auto& left_entries =
+          !mode.left_scaled_owned.empty() ? mode.left_scaled_owned
+          : !mode.left_owned.empty()      ? mode.left_owned
+          : !mode.left_scaled.empty()     ? mode.left_scaled
+                                          : mode.left;
+      const auto& right_entries =
+          !mode.right_scaled_owned.empty() ? mode.right_scaled_owned
+          : !mode.right_owned.empty()      ? mode.right_owned
+          : !mode.right_scaled.empty()     ? mode.right_scaled
+                                           : mode.right;
       corr.left_momentum_modes.emplace_back();
       corr.left_constraint_modes.emplace_back();
       corr.right_momentum_modes.emplace_back();
       corr.right_constraint_modes.emplace_back();
 
-      any_left_momentum |= fill_projected_block_vector(lhs, left_entries,
-                                                       mom_start, mom_ncomp,
-                                                       corr.left_momentum_modes.back());
-      any_left_constraint |= fill_projected_block_vector(lhs, left_entries,
-                                                         con_start, con_ncomp,
-                                                         corr.left_constraint_modes.back());
-      any_right_momentum |= fill_projected_block_vector(lhs, right_entries,
-                                                        mom_start, mom_ncomp,
-                                                        corr.right_momentum_modes.back());
-      any_right_constraint |= fill_projected_block_vector(lhs, right_entries,
-                                                          con_start, con_ncomp,
-                                                          corr.right_constraint_modes.back());
+      fill_projected_block_vector(lhs, left_entries,
+                                  mom_start, mom_ncomp,
+                                  corr.left_momentum_modes.back());
+      fill_projected_block_vector(lhs, left_entries,
+                                  con_start, con_ncomp,
+                                  corr.left_constraint_modes.back());
+      fill_projected_block_vector(lhs, right_entries,
+                                  mom_start, mom_ncomp,
+                                  corr.right_momentum_modes.back());
+      fill_projected_block_vector(lhs, right_entries,
+                                  con_start, con_ncomp,
+                                  corr.right_constraint_modes.back());
     }
-
-    const bool contributes_to_gp_or_lp = any_right_constraint && (any_left_momentum || any_left_constraint);
-    const bool contributes_to_d = any_right_momentum && any_left_constraint;
-    if (contributes_to_gp_or_lp || contributes_to_d) {
-      grouped.push_back(std::move(corr));
-    }
+    grouped.push_back(std::move(corr));
   }
 }
 
@@ -548,8 +570,7 @@ void apply_momentum_block_corrections(
 {
   return std::any_of(lhs.face.begin(), lhs.face.end(),
       [](const fe_fsi_linear_solver::FSILS_faceType& face) {
-        const int min_supported_nodes = std::max(1, face.dof);
-        return face.coupledFlag && std::abs(face.res) > 1e-30 && face.nNo > min_supported_nodes;
+        return face.coupledFlag && std::abs(face.res) > 1e-30;
       });
 }
 
@@ -600,6 +621,73 @@ void split_scalar_block_vector(const Array<double>& in,
   }
 }
 
+void trace_compare_scalar_block_column(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                       int dof,
+                                       const Array<double>& Val,
+                                       int mom_start,
+                                       int mom_ncomp,
+                                       int con_start,
+                                       const Array<double>& trial_momentum,
+                                       const Vector<double>& trial_constraint,
+                                       const Array<double>& expected_momentum,
+                                       const Vector<double>& expected_constraint,
+                                       const char* label)
+{
+  if (!lhs.commu.masF || !fsilsTraceEnabled()) {
+    return;
+  }
+
+  const fsils_int nNo = lhs.nNo;
+  const fsils_int mynNo = lhs.mynNo;
+
+  Array<double> trial(dof, nNo);
+  trial = 0.0;
+  #pragma omp parallel for schedule(static)
+  for (fsils_int node = 0; node < nNo; ++node) {
+    for (int comp = 0; comp < mom_ncomp; ++comp) {
+      trial(mom_start + comp, node) = trial_momentum(comp, node);
+    }
+    trial(con_start, node) = trial_constraint(node);
+  }
+
+  Array<double> full_applied(dof, nNo);
+  apply_full_coupled_operator(lhs, dof, Val, trial, full_applied);
+
+  Array<double> full_momentum;
+  Vector<double> full_constraint;
+  split_scalar_block_vector(full_applied, mom_start, mom_ncomp, con_start,
+                            full_momentum, full_constraint);
+
+  Array<double> diff_momentum = full_momentum;
+  Vector<double> diff_constraint = full_constraint;
+  #pragma omp parallel for schedule(static)
+  for (fsils_int node = 0; node < nNo; ++node) {
+    for (int comp = 0; comp < mom_ncomp; ++comp) {
+      diff_momentum(comp, node) -= expected_momentum(comp, node);
+    }
+    diff_constraint(node) -= expected_constraint(node);
+  }
+
+  const double expected_norm =
+      std::hypot(norm::fsi_ls_normv(mom_ncomp, mynNo, lhs.commu, expected_momentum),
+                 norm::fsi_ls_norms(mynNo, lhs.commu, expected_constraint));
+  const double full_norm =
+      std::hypot(norm::fsi_ls_normv(mom_ncomp, mynNo, lhs.commu, full_momentum),
+                 norm::fsi_ls_norms(mynNo, lhs.commu, full_constraint));
+  const double diff_norm =
+      std::hypot(norm::fsi_ls_normv(mom_ncomp, mynNo, lhs.commu, diff_momentum),
+                 norm::fsi_ls_norms(mynNo, lhs.commu, diff_constraint));
+  const double rel = (expected_norm > 0.0) ? diff_norm / expected_norm : diff_norm;
+
+  fprintf(stderr,
+          "[NS_SOLVER] full-column compare %s |expected|=%e |full|=%e |diff|=%e rel=%e\n",
+          label,
+          expected_norm,
+          full_norm,
+          diff_norm,
+          rel);
+}
+
 void assemble_scalar_block_vector(const Array<double>& momentum,
                                   const Vector<double>& constraint,
                                   int dof,
@@ -643,9 +731,10 @@ bool ns_solver_coupled_fgmres_scalar(
   const fsils_int nNo = lhs.nNo;
   const fsils_int mynNo = lhs.mynNo;
   const int pressure_ncomp = 1;
+  const int default_outer_krylov_dim =
+      std::max(ls.RI.mItr, ls.RI.mItr * std::max(1, ls.GM.mItr));
   const int outer_krylov_dim =
-      std::max(1, std::min((ls.RI.sD > 0 ? ls.RI.sD : ls.RI.mItr),
-                           std::max(ls.RI.mItr, ls.RI.mItr * std::max(1, ls.GM.mItr))));
+      std::max(1, (ls.RI.sD > 0) ? ls.RI.sD : default_outer_krylov_dim);
 
   ls.RI.ws.ensure_gmres_v(dof, nNo, outer_krylov_dim);
   auto& h = ls.RI.ws.h;
@@ -679,8 +768,8 @@ bool ns_solver_coupled_fgmres_scalar(
 
     mom_sol = mom_rhs;
     gmres::gmres_v(lhs, ls.GM, mom_ncomp, mK, mom_sol);
-    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-      fsils_commuv(lhs, mom_ncomp, mom_sol);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncv(lhs, mom_ncomp, mom_sol);
     }
 
     spar_mul::fsils_spar_mul_vs(lhs, lhs.rowPtr, lhs.colPtr, mom_ncomp, mD, mom_sol, con_tmp);
@@ -695,9 +784,6 @@ bool ns_solver_coupled_fgmres_scalar(
     }
 
     bicgs::schur_precondition(lhs, ls.CG, mom_ncomp, mK, mD, mG, mL, con_sol);
-    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-      fsils_commus(lhs, con_sol);
-    }
 
     spar_mul::fsils_spar_mul_sv(lhs, lhs.rowPtr, lhs.colPtr, mom_ncomp, mG, con_sol, gp);
     copy_scalar_vector_to_array(con_sol, dummy_constraint);
@@ -715,8 +801,8 @@ bool ns_solver_coupled_fgmres_scalar(
 
     mom_sol = mom_tmp;
     gmres::gmres_v(lhs, ls.GM, mom_ncomp, mK, mom_sol);
-    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-      fsils_commuv(lhs, mom_ncomp, mom_sol);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncv(lhs, mom_ncomp, mom_sol);
     }
 
     assemble_scalar_block_vector(mom_sol, con_sol, dof, mom_start, mom_ncomp, con_start, out_vec);
@@ -877,6 +963,19 @@ bool ns_solver_coupled_fgmres_scalar(
                           fsils_collective_delta(collective_before_total, lhs.commu.collective_stats),
                           /*setup_seconds=*/0.0,
                           ls.RI.callD - callD_before);
+  if (lhs.commu.masF && fsilsTraceEnabled()) {
+    const double outer_residual_est =
+        (last_i + 1 < err.size()) ? std::abs(err(last_i + 1)) : 0.0;
+    std::fprintf(stderr,
+                 "[NS_SOLVER] coupled outer FGMRES final: converged=%d outer_iters=%d krylov_dim=%d true_norm=%e true_target=%e outer_est=%e outer_target=%e\n",
+                 ls.RI.suc ? 1 : 0,
+                 ls.RI.itr,
+                 outer_krylov_dim,
+                 ls.RI.fNorm,
+                 true_eps,
+                 outer_residual_est,
+                 outer_eps);
+  }
 
   if (ls.RI.suc) {
     Ri = x;
@@ -1085,6 +1184,11 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
         }
       }
     }
+
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncv(lhs, nsd, Rm);
+      fsils_syncv(lhs, con_ncomp, Rc);
+    }
   };
 
   auto actual_outer_residual_norm_sq = [&]() {
@@ -1120,8 +1224,8 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     auto U_slice = U.rslice(i);
     U_slice = Rm;
     gmres::gmres_v(lhs, ls.GM, nsd, mK, U_slice);
-    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-      fsils_commuv(lhs, nsd, U_slice);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncv(lhs, nsd, U_slice);
     }
 
     // P = D*U (rect: con_ncomp output × mom_ncomp input)
@@ -1137,11 +1241,14 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
         P_slice(k,n) = Rc(k,n) - P_slice(k,n);
       }
     }
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncv(lhs, con_ncomp, P_slice);
+    }
 
     // P = [L - D*H*G]^-1 * P  (multi-component Schur complement)
     bicgs::schur_mc(lhs, ls.CG, ls.GM, nsd, con_ncomp, mK, mD, mG, mL, P_slice);
-    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-      fsils_commuv(lhs, con_ncomp, P_slice);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncv(lhs, con_ncomp, P_slice);
     }
 
     // MU1 = G*P (rect: mom_ncomp output × con_ncomp input)
@@ -1152,6 +1259,10 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, con_ncomp, mL, Pcon.rslice(i), MP_iB);
     apply_constraint_block_corrections(lhs, explicit_reduced_corrections, explicit_grouped_corrections,
                                        P_slice, MU_iB, MP_iB);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncv(lhs, nsd, MU_iB);
+      fsils_syncv(lhs, con_ncomp, MP_iB);
+    }
 
     // MU2 = Rm - G*P
     auto MU_iBB = MU.rslice(iBB);
@@ -1161,12 +1272,15 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
         MU_iBB(d,n) = Rm(d,n) - MU_iB(d,n);
       }
     }
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncv(lhs, nsd, MU_iBB);
+    }
 
     // U = inv(K) * [Rm - G*P]
     U_slice = MU_iBB;
     gmres::gmres_v(lhs, ls.GM, nsd, mK, U_slice);
-    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-      fsils_commuv(lhs, nsd, U_slice);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncv(lhs, nsd, U_slice);
     }
 
     // MU2 = K*U
@@ -1178,6 +1292,10 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     spar_mul::fsils_spar_mul_rect(lhs, lhs.rowPtr, lhs.colPtr, con_ncomp, mom_ncomp, mD, U_slice, MP_iBB);
     apply_momentum_block_corrections(lhs, explicit_reduced_corrections, explicit_grouped_corrections,
                                      U_slice, MP_iBB);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncv(lhs, nsd, MU_iBB);
+      fsils_syncv(lhs, con_ncomp, MP_iBB);
+    }
 
     // GCR inner products
     int c = 0;
@@ -1442,6 +1560,11 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
         }
       }
     }
+
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncv(lhs, nsd, Rm);
+      fsils_syncs(lhs, Rc);
+    }
   };
 
   auto actual_outer_residual_norm_sq = [&]() {
@@ -1471,14 +1594,65 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
                                      explicit_reduced_corrections, explicit_grouped_corrections);
   }
 
-  const bool use_coupled_fgmres_scalar = false &&
-      has_coupled_block_corrections(lhs) &&
-      explicit_reduced_corrections.empty() &&
-      explicit_grouped_corrections.empty();
+  std::size_t explicit_block_correction_modes = explicit_reduced_corrections.size();
+  for (const auto& group_corr : explicit_grouped_corrections) {
+    explicit_block_correction_modes += group_corr.right_momentum_modes.size();
+  }
+  std::size_t coupled_face_modes = 0;
+  for (const auto& face : lhs.face) {
+    if (face.coupledFlag && std::abs(face.res) > 1e-30) {
+      ++coupled_face_modes;
+    }
+  }
+  std::size_t active_native_face_duplicate_modes = 0;
+  std::size_t active_nonduplicate_reduced_modes = 0;
+  for (const auto& update : lhs.reduced_updates) {
+    if (!update.active || std::abs(update.sigma) <= 1e-30) {
+      continue;
+    }
+    if (update.grouped_coupling_id == kNativeFaceDuplicateCouplingId) {
+      ++active_native_face_duplicate_modes;
+    } else if (update.grouped_coupling_id < 0) {
+      ++active_nonduplicate_reduced_modes;
+    }
+  }
+  const bool has_explicit_block_corrections = explicit_block_correction_modes > 0;
+  const bool native_face_duplicates_only =
+      lhs.grouped_bordered_field_couplings.empty() &&
+      coupled_face_modes > 0 &&
+      active_native_face_duplicate_modes > 0 &&
+      active_nonduplicate_reduced_modes == 0 &&
+      !has_explicit_block_corrections;
+  // The coupled outer-FGMRES path is useful for targeted experiments, but in
+  // production MPI runs it can replace the healthier exact BlockSchur outer
+  // iteration with a much larger Krylov loop and severe fallback cost. Keep it
+  // opt-in so the default path remains the legacy BlockSchur solve.
+  const bool auto_enable_coupled_outer_fgmres =
+      lhs.commu.nTasks > 1 &&
+      !native_face_duplicates_only &&
+      (explicit_block_correction_modes > 1 || coupled_face_modes > 1) &&
+      (std::getenv("SVMP_FSILS_AUTO_COUPLED_OUTER_FGMRES") != nullptr) &&
+      (std::getenv("SVMP_FSILS_DISABLE_COUPLED_OUTER_FGMRES") == nullptr);
+  const bool force_enable_coupled_outer_fgmres =
+      (std::getenv("SVMP_FSILS_ENABLE_COUPLED_OUTER_FGMRES") != nullptr);
+  const bool use_coupled_fgmres_scalar =
+      auto_enable_coupled_outer_fgmres ||
+      (force_enable_coupled_outer_fgmres &&
+       (has_coupled_block_corrections(lhs) || has_explicit_block_corrections));
+  if (lhs.commu.masF && fsilsTraceEnabled()) {
+    std::fprintf(stderr,
+                 "[NS_SOLVER] explicit_block_modes=%zu coupled_face_modes=%zu native_face_rank_one_count=%d native_face_duplicate_modes=%zu auto_outer_fgmres=%d force_outer_fgmres=%d\n",
+                 explicit_block_correction_modes,
+                 coupled_face_modes,
+                 lhs.native_face_rank_one_count,
+                 active_native_face_duplicate_modes,
+                 auto_enable_coupled_outer_fgmres ? 1 : 0,
+                 force_enable_coupled_outer_fgmres ? 1 : 0);
+  }
   if (use_coupled_fgmres_scalar) {
     if (lhs.commu.masF && fsilsTraceEnabled()) {
       std::fprintf(stderr,
-                   "[NS_SOLVER] attempting coupled outer FGMRES for native face-coupled scalar system\n");
+                   "[NS_SOLVER] attempting coupled outer FGMRES for block-corrected scalar system\n");
     }
     Array<double> coupled_solution = Ri;
     bool coupled_fgmres_succeeded = false;
@@ -1574,8 +1748,8 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     auto U_slice = U.rslice(i);
     U_slice = Rm;
     gmres::gmres_v(lhs, ls.GM, nsd, mK, U_slice);
-    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-      fsils_commuv(lhs, nsd, U_slice);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncv(lhs, nsd, U_slice);
     }
 
     // P = D*U (using exact analytical mD)
@@ -1592,12 +1766,15 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     for (fsils_int n = 0; n < nNo; n++) {
       P_col(n) = Rc(n) - P_col(n);
     }
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncs(lhs, P_col);
+    }
 
     // P = [L - D*H*G]^-1 * P
     // VMS FIX: Solved using asymmetric BiCGStab instead of symmetric CGRAD
     bicgs::schur(lhs, ls.CG, ls.GM, nsd, mK, mD, mG, mL, P_col);
-    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-      fsils_commus(lhs, P_col);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncs(lhs, P_col);
     }
 
     // MU1 = G*P
@@ -1616,6 +1793,16 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     apply_constraint_block_corrections(lhs, explicit_reduced_corrections, explicit_grouped_corrections,
                                        P_block, MU_iB, MP_iB_block);
     copy_scalar_array_to_vector(MP_iB_block, MP_iB);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncv(lhs, nsd, MU_iB);
+      fsils_syncs(lhs, MP_iB);
+    }
+    if (i == 0 && lhs.commu.masF && fsilsTraceEnabled()) {
+      Array<double> zero_momentum(nsd, nNo);
+      zero_momentum = 0.0;
+      trace_compare_scalar_block_column(lhs, dof, Val, mom_start, mom_ncomp, con_start,
+                                        zero_momentum, P_col, MU_iB, MP_iB, "pressure_basis_iter0");
+    }
 
     // MU2 = Rm - G*P
     auto MU_iBB = MU.rslice(iBB);
@@ -1625,12 +1812,15 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
         MU_iBB(d,n) = Rm(d,n) - MU_iB(d,n);
       }
     }
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncv(lhs, nsd, MU_iBB);
+    }
 
     // U = inv(K) * [Rm - G*P]
     U_slice = MU_iBB;
     gmres::gmres_v(lhs, ls.GM, nsd, mK, U_slice);
-    if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-      fsils_commuv(lhs, nsd, U_slice);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncv(lhs, nsd, U_slice);
     }
 
     // MU2 = K*U
@@ -1646,6 +1836,16 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     apply_momentum_block_corrections(lhs, explicit_reduced_corrections, explicit_grouped_corrections,
                                      U_slice, MP_iBB_block);
     copy_scalar_array_to_vector(MP_iBB_block, MP_iBB);
+    if (lhs.commu.nTasks > 1 && lhs.nReq > 0 && !skipPostSolveOverlapSum()) {
+      fsils_syncv(lhs, nsd, MU_iBB);
+      fsils_syncs(lhs, MP_iBB);
+    }
+    if (i == 0 && lhs.commu.masF && fsilsTraceEnabled()) {
+      Vector<double> zero_constraint(nNo);
+      zero_constraint = 0.0;
+      trace_compare_scalar_block_column(lhs, dof, Val, mom_start, mom_ncomp, con_start,
+                                        U_slice, zero_constraint, MU_iBB, MP_iBB, "momentum_basis_iter0");
+    }
 
     int c = 0;
 

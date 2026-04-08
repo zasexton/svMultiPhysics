@@ -6,15 +6,345 @@
 #include <gtest/gtest.h>
 #include "FE/Basis/LagrangeBasis.h"
 #include "FE/Basis/NodeOrderingConventions.h"
+#include <array>
+#include <cmath>
+#include <functional>
 #include <numeric>
 
 using svmp::FE::basis::LagrangeBasis;
 using svmp::FE::ElementType;
 using svmp::FE::Real;
 using svmp::FE::basis::Gradient;
+using svmp::FE::basis::Hessian;
 using svmp::FE::basis::NodeOrdering;
 
 namespace {
+
+using Point = svmp::FE::math::Vector<Real, 3>;
+
+enum class PyramidFace {
+    Base,
+    South,
+    East,
+    North,
+    West
+};
+
+enum class PyramidEdge {
+    BaseSouth,
+    BaseEast,
+    BaseNorth,
+    BaseWest,
+    VerticalSW,
+    VerticalSE,
+    VerticalNE,
+    VerticalNW
+};
+
+struct LagrangeAccuracyCase {
+    ElementType type;
+    int order;
+    std::vector<Point> points;
+};
+
+std::size_t expected_lagrange_size(ElementType type, int order) {
+    switch (type) {
+        case ElementType::Point1:
+            return 1u;
+        case ElementType::Line2:
+        case ElementType::Line3:
+            return static_cast<std::size_t>(order + 1);
+        case ElementType::Triangle3:
+        case ElementType::Triangle6:
+            return static_cast<std::size_t>(order + 1) * static_cast<std::size_t>(order + 2) / 2;
+        case ElementType::Quad4:
+        case ElementType::Quad9:
+            return static_cast<std::size_t>(order + 1) * static_cast<std::size_t>(order + 1);
+        case ElementType::Tetra4:
+        case ElementType::Tetra10:
+            return static_cast<std::size_t>(order + 1) *
+                   static_cast<std::size_t>(order + 2) *
+                   static_cast<std::size_t>(order + 3) / 6;
+        case ElementType::Hex8:
+        case ElementType::Hex27:
+            return static_cast<std::size_t>(order + 1) *
+                   static_cast<std::size_t>(order + 1) *
+                   static_cast<std::size_t>(order + 1);
+        case ElementType::Wedge6:
+        case ElementType::Wedge18:
+            return static_cast<std::size_t>(order + 1) *
+                   static_cast<std::size_t>(order + 1) *
+                   static_cast<std::size_t>(order + 2) / 2;
+        case ElementType::Pyramid5:
+        case ElementType::Pyramid14:
+            return static_cast<std::size_t>(order + 1) *
+                   static_cast<std::size_t>(order + 2) *
+                   static_cast<std::size_t>(2 * order + 3) / 6;
+        default:
+            return 0u;
+    }
+}
+
+int expected_dimension(ElementType type) {
+    switch (type) {
+        case ElementType::Point1:
+            return 0;
+        case ElementType::Line2:
+        case ElementType::Line3:
+            return 1;
+        case ElementType::Triangle3:
+        case ElementType::Triangle6:
+        case ElementType::Quad4:
+        case ElementType::Quad9:
+            return 2;
+        default:
+            return 3;
+    }
+}
+
+bool points_close(const Point& a,
+                  const Point& b,
+                  Real tol = Real(1e-12)) {
+    return std::abs(a[0] - b[0]) <= tol &&
+           std::abs(a[1] - b[1]) <= tol &&
+           std::abs(a[2] - b[2]) <= tol;
+}
+
+std::vector<Point> reference_node_coords(ElementType type) {
+    switch (type) {
+        case ElementType::Line2:
+            return {
+                Point{Real(-1), Real(0), Real(0)},
+                Point{Real(1), Real(0), Real(0)},
+            };
+        case ElementType::Line3:
+            return {
+                Point{Real(-1), Real(0), Real(0)},
+                Point{Real(1), Real(0), Real(0)},
+                Point{Real(0), Real(0), Real(0)},
+            };
+        case ElementType::Triangle3:
+            return {
+                Point{Real(0), Real(0), Real(0)},
+                Point{Real(1), Real(0), Real(0)},
+                Point{Real(0), Real(1), Real(0)},
+            };
+        case ElementType::Triangle6:
+            return {
+                Point{Real(0), Real(0), Real(0)},
+                Point{Real(1), Real(0), Real(0)},
+                Point{Real(0), Real(1), Real(0)},
+                Point{Real(0.5), Real(0), Real(0)},
+                Point{Real(0.5), Real(0.5), Real(0)},
+                Point{Real(0), Real(0.5), Real(0)},
+            };
+        case ElementType::Quad4:
+            return {
+                Point{Real(-1), Real(-1), Real(0)},
+                Point{Real(1), Real(-1), Real(0)},
+                Point{Real(1), Real(1), Real(0)},
+                Point{Real(-1), Real(1), Real(0)},
+            };
+        case ElementType::Quad8:
+            return {
+                Point{Real(-1), Real(-1), Real(0)},
+                Point{Real(1), Real(-1), Real(0)},
+                Point{Real(1), Real(1), Real(0)},
+                Point{Real(-1), Real(1), Real(0)},
+                Point{Real(0), Real(-1), Real(0)},
+                Point{Real(1), Real(0), Real(0)},
+                Point{Real(0), Real(1), Real(0)},
+                Point{Real(-1), Real(0), Real(0)},
+            };
+        case ElementType::Quad9:
+            return {
+                Point{Real(-1), Real(-1), Real(0)},
+                Point{Real(1), Real(-1), Real(0)},
+                Point{Real(1), Real(1), Real(0)},
+                Point{Real(-1), Real(1), Real(0)},
+                Point{Real(0), Real(-1), Real(0)},
+                Point{Real(1), Real(0), Real(0)},
+                Point{Real(0), Real(1), Real(0)},
+                Point{Real(-1), Real(0), Real(0)},
+                Point{Real(0), Real(0), Real(0)},
+            };
+        case ElementType::Tetra4:
+            return {
+                Point{Real(0), Real(0), Real(0)},
+                Point{Real(1), Real(0), Real(0)},
+                Point{Real(0), Real(1), Real(0)},
+                Point{Real(0), Real(0), Real(1)},
+            };
+        case ElementType::Tetra10:
+            return {
+                Point{Real(0), Real(0), Real(0)},
+                Point{Real(1), Real(0), Real(0)},
+                Point{Real(0), Real(1), Real(0)},
+                Point{Real(0), Real(0), Real(1)},
+                Point{Real(0.5), Real(0), Real(0)},
+                Point{Real(0.5), Real(0.5), Real(0)},
+                Point{Real(0), Real(0.5), Real(0)},
+                Point{Real(0), Real(0), Real(0.5)},
+                Point{Real(0.5), Real(0), Real(0.5)},
+                Point{Real(0), Real(0.5), Real(0.5)},
+            };
+        case ElementType::Hex8:
+            return {
+                Point{Real(-1), Real(-1), Real(-1)},
+                Point{Real(1), Real(-1), Real(-1)},
+                Point{Real(1), Real(1), Real(-1)},
+                Point{Real(-1), Real(1), Real(-1)},
+                Point{Real(-1), Real(-1), Real(1)},
+                Point{Real(1), Real(-1), Real(1)},
+                Point{Real(1), Real(1), Real(1)},
+                Point{Real(-1), Real(1), Real(1)},
+            };
+        case ElementType::Hex20:
+            return {
+                Point{Real(-1), Real(-1), Real(-1)},
+                Point{Real(1), Real(-1), Real(-1)},
+                Point{Real(1), Real(1), Real(-1)},
+                Point{Real(-1), Real(1), Real(-1)},
+                Point{Real(-1), Real(-1), Real(1)},
+                Point{Real(1), Real(-1), Real(1)},
+                Point{Real(1), Real(1), Real(1)},
+                Point{Real(-1), Real(1), Real(1)},
+                Point{Real(0), Real(-1), Real(-1)},
+                Point{Real(1), Real(0), Real(-1)},
+                Point{Real(0), Real(1), Real(-1)},
+                Point{Real(-1), Real(0), Real(-1)},
+                Point{Real(0), Real(-1), Real(1)},
+                Point{Real(1), Real(0), Real(1)},
+                Point{Real(0), Real(1), Real(1)},
+                Point{Real(-1), Real(0), Real(1)},
+                Point{Real(-1), Real(-1), Real(0)},
+                Point{Real(1), Real(-1), Real(0)},
+                Point{Real(1), Real(1), Real(0)},
+                Point{Real(-1), Real(1), Real(0)},
+            };
+        case ElementType::Hex27:
+            return {
+                Point{Real(-1), Real(-1), Real(-1)},
+                Point{Real(1), Real(-1), Real(-1)},
+                Point{Real(1), Real(1), Real(-1)},
+                Point{Real(-1), Real(1), Real(-1)},
+                Point{Real(-1), Real(-1), Real(1)},
+                Point{Real(1), Real(-1), Real(1)},
+                Point{Real(1), Real(1), Real(1)},
+                Point{Real(-1), Real(1), Real(1)},
+                Point{Real(0), Real(-1), Real(-1)},
+                Point{Real(1), Real(0), Real(-1)},
+                Point{Real(0), Real(1), Real(-1)},
+                Point{Real(-1), Real(0), Real(-1)},
+                Point{Real(0), Real(-1), Real(1)},
+                Point{Real(1), Real(0), Real(1)},
+                Point{Real(0), Real(1), Real(1)},
+                Point{Real(-1), Real(0), Real(1)},
+                Point{Real(-1), Real(-1), Real(0)},
+                Point{Real(1), Real(-1), Real(0)},
+                Point{Real(1), Real(1), Real(0)},
+                Point{Real(-1), Real(1), Real(0)},
+                Point{Real(0), Real(0), Real(-1)},
+                Point{Real(0), Real(0), Real(1)},
+                Point{Real(0), Real(-1), Real(0)},
+                Point{Real(1), Real(0), Real(0)},
+                Point{Real(0), Real(1), Real(0)},
+                Point{Real(-1), Real(0), Real(0)},
+                Point{Real(0), Real(0), Real(0)},
+            };
+        case ElementType::Wedge6:
+            return {
+                Point{Real(0), Real(0), Real(-1)},
+                Point{Real(1), Real(0), Real(-1)},
+                Point{Real(0), Real(1), Real(-1)},
+                Point{Real(0), Real(0), Real(1)},
+                Point{Real(1), Real(0), Real(1)},
+                Point{Real(0), Real(1), Real(1)},
+            };
+        case ElementType::Wedge15:
+            return {
+                Point{Real(0), Real(0), Real(-1)},
+                Point{Real(1), Real(0), Real(-1)},
+                Point{Real(0), Real(1), Real(-1)},
+                Point{Real(0), Real(0), Real(1)},
+                Point{Real(1), Real(0), Real(1)},
+                Point{Real(0), Real(1), Real(1)},
+                Point{Real(0.5), Real(0), Real(-1)},
+                Point{Real(0.5), Real(0.5), Real(-1)},
+                Point{Real(0), Real(0.5), Real(-1)},
+                Point{Real(0.5), Real(0), Real(1)},
+                Point{Real(0.5), Real(0.5), Real(1)},
+                Point{Real(0), Real(0.5), Real(1)},
+                Point{Real(0), Real(0), Real(0)},
+                Point{Real(1), Real(0), Real(0)},
+                Point{Real(0), Real(1), Real(0)},
+            };
+        case ElementType::Wedge18:
+            return {
+                Point{Real(0), Real(0), Real(-1)},
+                Point{Real(1), Real(0), Real(-1)},
+                Point{Real(0), Real(1), Real(-1)},
+                Point{Real(0), Real(0), Real(1)},
+                Point{Real(1), Real(0), Real(1)},
+                Point{Real(0), Real(1), Real(1)},
+                Point{Real(0.5), Real(0), Real(-1)},
+                Point{Real(0.5), Real(0.5), Real(-1)},
+                Point{Real(0), Real(0.5), Real(-1)},
+                Point{Real(0.5), Real(0), Real(1)},
+                Point{Real(0.5), Real(0.5), Real(1)},
+                Point{Real(0), Real(0.5), Real(1)},
+                Point{Real(0), Real(0), Real(0)},
+                Point{Real(1), Real(0), Real(0)},
+                Point{Real(0), Real(1), Real(0)},
+                Point{Real(0.5), Real(0), Real(0)},
+                Point{Real(0.5), Real(0.5), Real(0)},
+                Point{Real(0), Real(0.5), Real(0)},
+            };
+        case ElementType::Pyramid5:
+            return {
+                Point{Real(-1), Real(-1), Real(0)},
+                Point{Real(1), Real(-1), Real(0)},
+                Point{Real(1), Real(1), Real(0)},
+                Point{Real(-1), Real(1), Real(0)},
+                Point{Real(0), Real(0), Real(1)},
+            };
+        case ElementType::Pyramid13:
+            return {
+                Point{Real(-1), Real(-1), Real(0)},
+                Point{Real(1), Real(-1), Real(0)},
+                Point{Real(1), Real(1), Real(0)},
+                Point{Real(-1), Real(1), Real(0)},
+                Point{Real(0), Real(0), Real(1)},
+                Point{Real(0), Real(-1), Real(0)},
+                Point{Real(1), Real(0), Real(0)},
+                Point{Real(0), Real(1), Real(0)},
+                Point{Real(-1), Real(0), Real(0)},
+                Point{Real(-0.5), Real(-0.5), Real(0.5)},
+                Point{Real(0.5), Real(-0.5), Real(0.5)},
+                Point{Real(0.5), Real(0.5), Real(0.5)},
+                Point{Real(-0.5), Real(0.5), Real(0.5)},
+            };
+        case ElementType::Pyramid14:
+            return {
+                Point{Real(-1), Real(-1), Real(0)},
+                Point{Real(1), Real(-1), Real(0)},
+                Point{Real(1), Real(1), Real(0)},
+                Point{Real(-1), Real(1), Real(0)},
+                Point{Real(0), Real(0), Real(1)},
+                Point{Real(0), Real(-1), Real(0)},
+                Point{Real(1), Real(0), Real(0)},
+                Point{Real(0), Real(1), Real(0)},
+                Point{Real(-1), Real(0), Real(0)},
+                Point{Real(-0.5), Real(-0.5), Real(0.5)},
+                Point{Real(0.5), Real(-0.5), Real(0.5)},
+                Point{Real(0.5), Real(0.5), Real(0.5)},
+                Point{Real(-0.5), Real(0.5), Real(0.5)},
+                Point{Real(0), Real(0), Real(0)},
+            };
+        default:
+            return {};
+    }
+}
 
 void expect_nodes_match_node_ordering(ElementType canonical_type,
                                       int order,
@@ -37,6 +367,588 @@ void expect_nodes_match_node_ordering(ElementType canonical_type,
         for (std::size_t j = 0; j < vals.size(); ++j) {
             const double expected_delta = (i == j) ? 1.0 : 0.0;
             EXPECT_NEAR(vals[j], expected_delta, 1e-12);
+        }
+    }
+}
+
+void expect_alias_matches_canonical(ElementType alias_type,
+                                    ElementType canonical_type,
+                                    int canonical_order,
+                                    const std::vector<Point>& points,
+                                    Real tol = Real(1e-12)) {
+    LagrangeBasis alias(alias_type, canonical_order);
+    LagrangeBasis canonical(canonical_type, canonical_order);
+
+    ASSERT_EQ(alias.element_type(), canonical.element_type());
+    ASSERT_EQ(alias.order(), canonical.order());
+    ASSERT_EQ(alias.size(), canonical.size());
+    ASSERT_EQ(alias.nodes().size(), canonical.nodes().size());
+
+    for (std::size_t i = 0; i < alias.nodes().size(); ++i) {
+        EXPECT_NEAR(alias.nodes()[i][0], canonical.nodes()[i][0], tol);
+        EXPECT_NEAR(alias.nodes()[i][1], canonical.nodes()[i][1], tol);
+        EXPECT_NEAR(alias.nodes()[i][2], canonical.nodes()[i][2], tol);
+    }
+
+    for (const auto& xi : points) {
+        std::vector<Real> alias_values;
+        std::vector<Real> canonical_values;
+        std::vector<Gradient> alias_gradients;
+        std::vector<Gradient> canonical_gradients;
+        std::vector<Hessian> alias_hessians;
+        std::vector<Hessian> canonical_hessians;
+
+        alias.evaluate_values(xi, alias_values);
+        canonical.evaluate_values(xi, canonical_values);
+        alias.evaluate_gradients(xi, alias_gradients);
+        canonical.evaluate_gradients(xi, canonical_gradients);
+        alias.evaluate_hessians(xi, alias_hessians);
+        canonical.evaluate_hessians(xi, canonical_hessians);
+
+        ASSERT_EQ(alias_values.size(), canonical_values.size());
+        ASSERT_EQ(alias_gradients.size(), canonical_gradients.size());
+        ASSERT_EQ(alias_hessians.size(), canonical_hessians.size());
+
+        for (std::size_t i = 0; i < alias_values.size(); ++i) {
+            EXPECT_NEAR(alias_values[i], canonical_values[i], tol);
+            for (int d = 0; d < canonical.dimension(); ++d) {
+                const std::size_t sd = static_cast<std::size_t>(d);
+                EXPECT_NEAR(alias_gradients[i][sd], canonical_gradients[i][sd], tol);
+                for (int e = 0; e < canonical.dimension(); ++e) {
+                    const std::size_t se = static_cast<std::size_t>(e);
+                    EXPECT_NEAR(alias_hessians[i](sd, se), canonical_hessians[i](sd, se), Real(5) * tol);
+                }
+            }
+        }
+    }
+}
+
+std::vector<Point> sample_points_for(ElementType type) {
+    switch (type) {
+        case ElementType::Line2:
+        case ElementType::Line3:
+            return {
+                Point{Real(-0.7), Real(0), Real(0)},
+                Point{Real(0.1), Real(0), Real(0)},
+                Point{Real(0.65), Real(0), Real(0)}
+            };
+        case ElementType::Triangle3:
+        case ElementType::Triangle6:
+            return {
+                Point{Real(0.15), Real(0.2), Real(0)},
+                Point{Real(0.25), Real(0.1), Real(0)},
+                Point{Real(0.2), Real(0.3), Real(0)}
+            };
+        case ElementType::Quad4:
+        case ElementType::Quad9:
+            return {
+                Point{Real(0.2), Real(-0.35), Real(0)},
+                Point{Real(-0.4), Real(0.25), Real(0)},
+                Point{Real(0.55), Real(0.1), Real(0)}
+            };
+        case ElementType::Tetra4:
+        case ElementType::Tetra10:
+            return {
+                Point{Real(0.1), Real(0.2), Real(0.15)},
+                Point{Real(0.2), Real(0.1), Real(0.25)},
+                Point{Real(0.15), Real(0.15), Real(0.2)}
+            };
+        case ElementType::Hex8:
+        case ElementType::Hex27:
+            return {
+                Point{Real(0.2), Real(-0.3), Real(0.25)},
+                Point{Real(-0.5), Real(0.4), Real(-0.2)},
+                Point{Real(0.1), Real(0.15), Real(0.6)}
+            };
+        case ElementType::Wedge6:
+        case ElementType::Wedge18:
+            return {
+                Point{Real(0.2), Real(0.25), Real(0.0)},
+                Point{Real(0.1), Real(0.2), Real(-0.45)},
+                Point{Real(0.3), Real(0.15), Real(0.5)}
+            };
+        case ElementType::Pyramid5:
+        case ElementType::Pyramid14:
+            return {
+                Point{Real(0.0), Real(0.0), Real(0.25)},
+                Point{Real(0.15), Real(-0.1), Real(0.3)},
+                Point{Real(-0.1), Real(0.2), Real(0.4)}
+            };
+        default:
+            return {Point{Real(0), Real(0), Real(0)}};
+    }
+}
+
+std::vector<Point> boundary_stress_points_for(ElementType type);
+
+std::vector<Point> dense_sample_points_for(ElementType type) {
+    const auto interior = sample_points_for(type);
+    const auto boundary = boundary_stress_points_for(type);
+
+    std::vector<Point> points;
+    points.reserve(interior.size() + boundary.size());
+    points.insert(points.end(), interior.begin(), interior.end());
+    points.insert(points.end(), boundary.begin(), boundary.end());
+
+    if (type == ElementType::Pyramid5 || type == ElementType::Pyramid14) {
+        points.push_back(Point{Real(0.0), Real(0.0), Real(0.85)});
+        points.push_back(Point{Real(0.02), Real(-0.015), Real(0.95)});
+    }
+    return points;
+}
+
+std::vector<Point> boundary_stress_points_for(ElementType type) {
+    switch (type) {
+        case ElementType::Line2:
+        case ElementType::Line3:
+            return {
+                Point{Real(-0.999), Real(0), Real(0)},
+                Point{Real(-0.75), Real(0), Real(0)},
+                Point{Real(0.0), Real(0), Real(0)},
+                Point{Real(0.8), Real(0), Real(0)},
+                Point{Real(0.999), Real(0), Real(0)}
+            };
+        case ElementType::Triangle3:
+        case ElementType::Triangle6:
+            return {
+                Point{Real(1e-6), Real(1e-6), Real(0)},
+                Point{Real(0.98), Real(0.01), Real(0)},
+                Point{Real(0.01), Real(0.98), Real(0)},
+                Point{Real(0.25), Real(1e-4), Real(0)},
+                Point{Real(0.49), Real(0.49), Real(0)}
+            };
+        case ElementType::Quad4:
+        case ElementType::Quad9:
+            return {
+                Point{Real(-0.99), Real(-0.99), Real(0)},
+                Point{Real(0.99), Real(-0.99), Real(0)},
+                Point{Real(0.99), Real(0.99), Real(0)},
+                Point{Real(-0.99), Real(0.99), Real(0)},
+                Point{Real(0.0), Real(0.95), Real(0)}
+            };
+        case ElementType::Tetra4:
+        case ElementType::Tetra10:
+            return {
+                Point{Real(1e-6), Real(1e-6), Real(1e-6)},
+                Point{Real(0.97), Real(0.01), Real(0.01)},
+                Point{Real(0.01), Real(0.97), Real(0.01)},
+                Point{Real(0.01), Real(0.01), Real(0.97)},
+                Point{Real(0.32), Real(0.33), Real(0.01)}
+            };
+        case ElementType::Hex8:
+        case ElementType::Hex27:
+            return {
+                Point{Real(-0.99), Real(-0.99), Real(-0.99)},
+                Point{Real(0.99), Real(-0.99), Real(0.99)},
+                Point{Real(0.99), Real(0.99), Real(-0.99)},
+                Point{Real(-0.99), Real(0.99), Real(0.99)},
+                Point{Real(0.0), Real(0.0), Real(0.95)}
+            };
+        case ElementType::Wedge6:
+        case ElementType::Wedge18:
+            return {
+                Point{Real(1e-6), Real(1e-6), Real(-0.99)},
+                Point{Real(0.98), Real(0.01), Real(-0.99)},
+                Point{Real(0.01), Real(0.98), Real(0.99)},
+                Point{Real(0.49), Real(0.49), Real(0.0)},
+                Point{Real(0.25), Real(1e-4), Real(0.95)}
+            };
+        case ElementType::Pyramid5:
+        case ElementType::Pyramid14:
+            return {
+                Point{Real(0.0), Real(0.0), Real(0.95)},
+                Point{Real(0.01), Real(-0.01), Real(0.98)},
+                Point{Real(0.6), Real(-0.6), Real(0.2)},
+                Point{Real(0.79), Real(0.0), Real(0.2)},
+                Point{Real(0.0), Real(0.79), Real(0.2)}
+            };
+        default:
+            return {Point{Real(0), Real(0), Real(0)}};
+    }
+}
+
+Real monomial_value(const Point& xi, int px, int py, int pz) {
+    return std::pow(xi[0], px) * std::pow(xi[1], py) * std::pow(xi[2], pz);
+}
+
+void expect_gradients_match_finite_difference(const LagrangeAccuracyCase& c,
+                                              Real eps,
+                                              Real tol) {
+    LagrangeBasis basis(c.type, c.order);
+
+    for (const auto& xi : c.points) {
+        std::vector<Gradient> gradients;
+        basis.evaluate_gradients(xi, gradients);
+        ASSERT_EQ(gradients.size(), basis.size());
+
+        for (int d = 0; d < basis.dimension(); ++d) {
+            Point xp = xi;
+            Point xm = xi;
+            xp[d] += eps;
+            xm[d] -= eps;
+
+            std::vector<Real> values_p;
+            std::vector<Real> values_m;
+            basis.evaluate_values(xp, values_p);
+            basis.evaluate_values(xm, values_m);
+
+            ASSERT_EQ(values_p.size(), basis.size());
+            ASSERT_EQ(values_m.size(), basis.size());
+            for (std::size_t i = 0; i < basis.size(); ++i) {
+                const Real fd = (values_p[i] - values_m[i]) / (Real(2) * eps);
+                EXPECT_NEAR(gradients[i][d], fd, tol)
+                    << "type=" << static_cast<int>(c.type)
+                    << ", order=" << c.order
+                    << ", dim=" << d
+                    << ", basis_i=" << i
+                    << ", xi=(" << xi[0] << "," << xi[1] << "," << xi[2] << ")";
+            }
+        }
+    }
+}
+
+void expect_polynomial_reproduction(const LagrangeAccuracyCase& c,
+                                    const std::vector<std::array<int, 3>>& exponents,
+                                    Real tol) {
+    LagrangeBasis basis(c.type, c.order);
+    const auto& nodes = basis.nodes();
+    ASSERT_EQ(nodes.size(), basis.size());
+
+    for (const auto& exp : exponents) {
+        std::vector<Real> coeffs(basis.size(), Real(0));
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            coeffs[i] = monomial_value(nodes[i], exp[0], exp[1], exp[2]);
+        }
+
+        for (const auto& xi : c.points) {
+            std::vector<Real> values;
+            basis.evaluate_values(xi, values);
+            ASSERT_EQ(values.size(), basis.size());
+
+            Real interpolated = Real(0);
+            for (std::size_t i = 0; i < basis.size(); ++i) {
+                interpolated += coeffs[i] * values[i];
+            }
+
+            const Real exact = monomial_value(xi, exp[0], exp[1], exp[2]);
+            EXPECT_NEAR(interpolated, exact, tol)
+                << "type=" << static_cast<int>(c.type)
+                << ", order=" << c.order
+                << ", monomial=(" << exp[0] << "," << exp[1] << "," << exp[2] << ")"
+                << ", xi=(" << xi[0] << "," << xi[1] << "," << xi[2] << ")";
+        }
+    }
+}
+
+template<typename Container>
+void expect_all_finite(const Container& values) {
+    for (const auto& value : values) {
+        for (std::size_t d = 0; d < 3; ++d) {
+            EXPECT_TRUE(std::isfinite(value[d]));
+        }
+    }
+}
+
+void expect_hessians_finite(const std::vector<Hessian>& hessians,
+                            int dimension) {
+    for (const auto& H : hessians) {
+        for (int i = 0; i < dimension; ++i) {
+            for (int j = 0; j < dimension; ++j) {
+                EXPECT_TRUE(std::isfinite(H(static_cast<std::size_t>(i),
+                                            static_cast<std::size_t>(j))));
+            }
+        }
+    }
+}
+
+void expect_partition_gradient_hessian_sums(const LagrangeBasis& basis,
+                                            const std::vector<Point>& points,
+                                            Real value_tol,
+                                            Real derivative_tol) {
+    for (const auto& xi : points) {
+        std::vector<Real> values;
+        std::vector<Gradient> gradients;
+        std::vector<Hessian> hessians;
+        basis.evaluate_values(xi, values);
+        basis.evaluate_gradients(xi, gradients);
+        basis.evaluate_hessians(xi, hessians);
+
+        ASSERT_EQ(values.size(), basis.size());
+        ASSERT_EQ(gradients.size(), basis.size());
+        ASSERT_EQ(hessians.size(), basis.size());
+
+        Real value_sum = Real(0);
+        Gradient gradient_sum{};
+        Hessian hessian_sum{};
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            value_sum += values[i];
+            for (int d = 0; d < basis.dimension(); ++d) {
+                const std::size_t sd = static_cast<std::size_t>(d);
+                gradient_sum[sd] += gradients[i][sd];
+                for (int e = 0; e < basis.dimension(); ++e) {
+                    const std::size_t se = static_cast<std::size_t>(e);
+                    hessian_sum(sd, se) += hessians[i](sd, se);
+                }
+            }
+        }
+
+        EXPECT_NEAR(value_sum, Real(1), value_tol)
+            << "Element type " << static_cast<int>(basis.element_type())
+            << ", order " << basis.order()
+            << ", xi=(" << xi[0] << "," << xi[1] << "," << xi[2] << ")";
+
+        for (int d = 0; d < basis.dimension(); ++d) {
+            const std::size_t sd = static_cast<std::size_t>(d);
+            EXPECT_NEAR(gradient_sum[sd], Real(0), derivative_tol)
+                << "Gradient sum mismatch for element type " << static_cast<int>(basis.element_type())
+                << ", order " << basis.order()
+                << ", dim " << d;
+            for (int e = 0; e < basis.dimension(); ++e) {
+                const std::size_t se = static_cast<std::size_t>(e);
+                EXPECT_NEAR(hessian_sum(sd, se), Real(0), derivative_tol)
+                    << "Hessian sum mismatch for element type " << static_cast<int>(basis.element_type())
+                    << ", order " << basis.order()
+                    << ", component (" << d << "," << e << ")";
+            }
+        }
+    }
+}
+
+bool is_on_pyramid_face(const Point& point,
+                        PyramidFace face,
+                        Real tol = Real(1e-12)) {
+    const Real scale = Real(1) - point[2];
+    switch (face) {
+        case PyramidFace::Base:
+            return std::abs(point[2]) <= tol;
+        case PyramidFace::South:
+            return std::abs(point[1] + scale) <= tol;
+        case PyramidFace::East:
+            return std::abs(point[0] - scale) <= tol;
+        case PyramidFace::North:
+            return std::abs(point[1] - scale) <= tol;
+        case PyramidFace::West:
+            return std::abs(point[0] + scale) <= tol;
+    }
+    return false;
+}
+
+Point map_pyramid_face_to_reference(PyramidFace face,
+                                    const Point& point) {
+    const Real scale = Real(1) - point[2];
+    switch (face) {
+        case PyramidFace::Base:
+            return Point{point[0], point[1], Real(0)};
+        case PyramidFace::South:
+            return Point{(scale - point[0]) / Real(2), point[2], Real(0)};
+        case PyramidFace::East:
+            return Point{(scale + point[1]) / Real(2), point[2], Real(0)};
+        case PyramidFace::North:
+            return Point{(scale + point[0]) / Real(2), point[2], Real(0)};
+        case PyramidFace::West:
+            return Point{(scale - point[1]) / Real(2), point[2], Real(0)};
+    }
+    return Point{};
+}
+
+std::vector<Point> sample_points_for_pyramid_face(PyramidFace face) {
+    switch (face) {
+        case PyramidFace::Base:
+            return {
+                Point{Real(0.15), Real(-0.2), Real(0)},
+                Point{Real(-0.55), Real(0.35), Real(0)}
+            };
+        case PyramidFace::South:
+            return {
+                Point{Real(-0.2), Real(-0.8), Real(0.2)},
+                Point{Real(0.05), Real(-0.35), Real(0.65)}
+            };
+        case PyramidFace::East:
+            return {
+                Point{Real(0.8), Real(-0.25), Real(0.2)},
+                Point{Real(0.3), Real(0.08), Real(0.7)}
+            };
+        case PyramidFace::North:
+            return {
+                Point{Real(0.25), Real(0.8), Real(0.2)},
+                Point{Real(-0.08), Real(0.35), Real(0.65)}
+            };
+        case PyramidFace::West:
+            return {
+                Point{Real(-0.8), Real(0.2), Real(0.2)},
+                Point{Real(-0.3), Real(-0.05), Real(0.7)}
+            };
+    }
+    return {};
+}
+
+bool is_on_pyramid_edge(const Point& point,
+                        PyramidEdge edge,
+                        Real tol = Real(1e-12)) {
+    const Real scale = Real(1) - point[2];
+    switch (edge) {
+        case PyramidEdge::BaseSouth:
+            return std::abs(point[2]) <= tol && std::abs(point[1] + Real(1)) <= tol;
+        case PyramidEdge::BaseEast:
+            return std::abs(point[2]) <= tol && std::abs(point[0] - Real(1)) <= tol;
+        case PyramidEdge::BaseNorth:
+            return std::abs(point[2]) <= tol && std::abs(point[1] - Real(1)) <= tol;
+        case PyramidEdge::BaseWest:
+            return std::abs(point[2]) <= tol && std::abs(point[0] + Real(1)) <= tol;
+        case PyramidEdge::VerticalSW:
+            return std::abs(point[0] + scale) <= tol && std::abs(point[1] + scale) <= tol;
+        case PyramidEdge::VerticalSE:
+            return std::abs(point[0] - scale) <= tol && std::abs(point[1] + scale) <= tol;
+        case PyramidEdge::VerticalNE:
+            return std::abs(point[0] - scale) <= tol && std::abs(point[1] - scale) <= tol;
+        case PyramidEdge::VerticalNW:
+            return std::abs(point[0] + scale) <= tol && std::abs(point[1] - scale) <= tol;
+    }
+    return false;
+}
+
+Point map_pyramid_edge_to_reference(PyramidEdge edge,
+                                    const Point& point) {
+    switch (edge) {
+        case PyramidEdge::BaseSouth:
+        case PyramidEdge::BaseNorth:
+            return Point{point[0], Real(0), Real(0)};
+        case PyramidEdge::BaseEast:
+        case PyramidEdge::BaseWest:
+            return Point{point[1], Real(0), Real(0)};
+        case PyramidEdge::VerticalSW:
+        case PyramidEdge::VerticalSE:
+        case PyramidEdge::VerticalNE:
+        case PyramidEdge::VerticalNW:
+            return Point{Real(2) * point[2] - Real(1), Real(0), Real(0)};
+    }
+    return Point{};
+}
+
+std::vector<Point> sample_points_for_pyramid_edge(PyramidEdge edge) {
+    switch (edge) {
+        case PyramidEdge::BaseSouth:
+            return {Point{Real(-0.65), Real(-1), Real(0)}, Point{Real(0.35), Real(-1), Real(0)}};
+        case PyramidEdge::BaseEast:
+            return {Point{Real(1), Real(-0.45), Real(0)}, Point{Real(1), Real(0.55), Real(0)}};
+        case PyramidEdge::BaseNorth:
+            return {Point{Real(-0.55), Real(1), Real(0)}, Point{Real(0.45), Real(1), Real(0)}};
+        case PyramidEdge::BaseWest:
+            return {Point{Real(-1), Real(-0.55), Real(0)}, Point{Real(-1), Real(0.45), Real(0)}};
+        case PyramidEdge::VerticalSW:
+            return {Point{Real(-0.75), Real(-0.75), Real(0.25)}, Point{Real(-0.3), Real(-0.3), Real(0.7)}};
+        case PyramidEdge::VerticalSE:
+            return {Point{Real(0.75), Real(-0.75), Real(0.25)}, Point{Real(0.3), Real(-0.3), Real(0.7)}};
+        case PyramidEdge::VerticalNE:
+            return {Point{Real(0.75), Real(0.75), Real(0.25)}, Point{Real(0.3), Real(0.3), Real(0.7)}};
+        case PyramidEdge::VerticalNW:
+            return {Point{Real(-0.75), Real(0.75), Real(0.25)}, Point{Real(-0.3), Real(0.3), Real(0.7)}};
+    }
+    return {};
+}
+
+std::vector<int> map_pyramid_nodes_to_lower_basis_nodes(
+    const std::vector<Point>& pyramid_nodes,
+    const std::vector<Point>& lower_basis_nodes,
+    const std::function<bool(const Point&)>& selector,
+    const std::function<Point(const Point&)>& mapper) {
+    std::vector<int> mapping(pyramid_nodes.size(), -1);
+    std::size_t face_count = 0;
+    for (std::size_t i = 0; i < pyramid_nodes.size(); ++i) {
+        if (!selector(pyramid_nodes[i])) {
+            continue;
+        }
+
+        ++face_count;
+        const Point mapped = mapper(pyramid_nodes[i]);
+        bool found = false;
+        for (std::size_t j = 0; j < lower_basis_nodes.size(); ++j) {
+            if (points_close(mapped, lower_basis_nodes[j])) {
+                mapping[i] = static_cast<int>(j);
+                found = true;
+                break;
+            }
+        }
+        EXPECT_TRUE(found)
+            << "Failed to match pyramid trace node at (" << pyramid_nodes[i][0] << ","
+            << pyramid_nodes[i][1] << "," << pyramid_nodes[i][2] << ")";
+    }
+
+    EXPECT_EQ(face_count, lower_basis_nodes.size());
+    return mapping;
+}
+
+void expect_pyramid_face_trace_matches_lower_basis(int order,
+                                                   PyramidFace face,
+                                                   Real tol = Real(2e-10)) {
+    LagrangeBasis pyramid(ElementType::Pyramid5, order);
+    const bool base_face = face == PyramidFace::Base;
+    LagrangeBasis lower(base_face ? ElementType::Quad4 : ElementType::Triangle3, order);
+
+    const auto mapping = map_pyramid_nodes_to_lower_basis_nodes(
+        pyramid.nodes(),
+        lower.nodes(),
+        [&](const Point& point) { return is_on_pyramid_face(point, face); },
+        [&](const Point& point) { return map_pyramid_face_to_reference(face, point); });
+
+    for (const auto& face_point : sample_points_for_pyramid_face(face)) {
+        std::vector<Real> pyramid_values;
+        std::vector<Real> lower_values;
+        pyramid.evaluate_values(face_point, pyramid_values);
+        lower.evaluate_values(map_pyramid_face_to_reference(face, face_point), lower_values);
+
+        ASSERT_EQ(pyramid_values.size(), pyramid.size());
+        ASSERT_EQ(lower_values.size(), lower.size());
+
+        for (std::size_t i = 0; i < pyramid.size(); ++i) {
+            if (mapping[i] >= 0) {
+                EXPECT_NEAR(pyramid_values[i], lower_values[static_cast<std::size_t>(mapping[i])], tol)
+                    << "Face trace mismatch for order " << order
+                    << ", face " << static_cast<int>(face)
+                    << ", basis " << i;
+            } else {
+                EXPECT_NEAR(pyramid_values[i], Real(0), tol)
+                    << "Off-face pyramid basis should vanish on face for order " << order
+                    << ", face " << static_cast<int>(face)
+                    << ", basis " << i;
+            }
+        }
+    }
+}
+
+void expect_pyramid_edge_trace_matches_line_basis(int order,
+                                                  PyramidEdge edge,
+                                                  Real tol = Real(2e-10)) {
+    LagrangeBasis pyramid(ElementType::Pyramid5, order);
+    LagrangeBasis line(ElementType::Line2, order);
+
+    const auto mapping = map_pyramid_nodes_to_lower_basis_nodes(
+        pyramid.nodes(),
+        line.nodes(),
+        [&](const Point& point) { return is_on_pyramid_edge(point, edge); },
+        [&](const Point& point) { return map_pyramid_edge_to_reference(edge, point); });
+
+    for (const auto& edge_point : sample_points_for_pyramid_edge(edge)) {
+        std::vector<Real> pyramid_values;
+        std::vector<Real> line_values;
+        pyramid.evaluate_values(edge_point, pyramid_values);
+        line.evaluate_values(map_pyramid_edge_to_reference(edge, edge_point), line_values);
+
+        ASSERT_EQ(pyramid_values.size(), pyramid.size());
+        ASSERT_EQ(line_values.size(), line.size());
+
+        for (std::size_t i = 0; i < pyramid.size(); ++i) {
+            if (mapping[i] >= 0) {
+                EXPECT_NEAR(pyramid_values[i], line_values[static_cast<std::size_t>(mapping[i])], tol)
+                    << "Edge trace mismatch for order " << order
+                    << ", edge " << static_cast<int>(edge)
+                    << ", basis " << i;
+            } else {
+                EXPECT_NEAR(pyramid_values[i], Real(0), tol)
+                    << "Off-edge pyramid basis should vanish on edge for order " << order
+                    << ", edge " << static_cast<int>(edge)
+                    << ", basis " << i;
+            }
         }
     }
 }
@@ -209,6 +1121,234 @@ TEST(LagrangeBasis, WedgeAndPyramidPartitionOfUnity) {
         pyr.evaluate_values(xi, vals);
         const double sum = std::accumulate(vals.begin(), vals.end(), 0.0);
         EXPECT_NEAR(sum, 1.0, 1e-12);
+    }
+}
+
+TEST(LagrangeBasis, CanonicalConstructorsSupportArbitraryOrders) {
+    const struct Case {
+        ElementType type;
+        int max_order;
+    } cases[] = {
+        {ElementType::Line2, 8},
+        {ElementType::Triangle3, 6},
+        {ElementType::Quad4, 6},
+        {ElementType::Tetra4, 5},
+        {ElementType::Hex8, 5},
+        {ElementType::Wedge6, 5},
+        {ElementType::Pyramid5, 5},
+    };
+
+    for (const auto& c : cases) {
+        for (int order = 0; order <= c.max_order; ++order) {
+            LagrangeBasis basis(c.type, order);
+            EXPECT_EQ(basis.element_type(), c.type);
+            EXPECT_EQ(basis.order(), order);
+            EXPECT_EQ(basis.dimension(), expected_dimension(c.type));
+            EXPECT_EQ(basis.size(), expected_lagrange_size(c.type, order));
+            EXPECT_EQ(basis.nodes().size(), basis.size());
+        }
+    }
+}
+
+TEST(LagrangeBasis, AliasVariantsNormalizeToCanonicalPaths) {
+    expect_alias_matches_canonical(
+        ElementType::Line3, ElementType::Line2, 2, sample_points_for(ElementType::Line2));
+    expect_alias_matches_canonical(
+        ElementType::Triangle6, ElementType::Triangle3, 2, sample_points_for(ElementType::Triangle3));
+    expect_alias_matches_canonical(
+        ElementType::Quad9, ElementType::Quad4, 2, sample_points_for(ElementType::Quad4));
+    expect_alias_matches_canonical(
+        ElementType::Tetra10, ElementType::Tetra4, 2, sample_points_for(ElementType::Tetra4));
+    expect_alias_matches_canonical(
+        ElementType::Hex27, ElementType::Hex8, 2, sample_points_for(ElementType::Hex8));
+    expect_alias_matches_canonical(
+        ElementType::Wedge18, ElementType::Wedge6, 2, sample_points_for(ElementType::Wedge6));
+    expect_alias_matches_canonical(
+        ElementType::Pyramid14, ElementType::Pyramid5, 2, sample_points_for(ElementType::Pyramid5),
+        Real(2e-10));
+}
+
+TEST(LagrangeBasis, SerendipityVariantsRemainRejected) {
+    EXPECT_THROW((void)LagrangeBasis(ElementType::Quad8, 2), svmp::FE::FEException);
+    EXPECT_THROW((void)LagrangeBasis(ElementType::Hex20, 2), svmp::FE::FEException);
+    EXPECT_THROW((void)LagrangeBasis(ElementType::Wedge15, 2), svmp::FE::FEException);
+    EXPECT_THROW((void)LagrangeBasis(ElementType::Pyramid13, 2), svmp::FE::FEException);
+}
+
+TEST(LagrangeBasis, GeneratedNodeOrderingIsDeterministicAcrossOrders) {
+    const struct Case {
+        ElementType type;
+        int max_order;
+    } cases[] = {
+        {ElementType::Line2, 8},
+        {ElementType::Triangle3, 6},
+        {ElementType::Quad4, 6},
+        {ElementType::Tetra4, 5},
+        {ElementType::Hex8, 5},
+        {ElementType::Wedge6, 5},
+        {ElementType::Pyramid5, 5},
+    };
+
+    for (const auto& c : cases) {
+        for (int order = 0; order <= c.max_order; ++order) {
+            const auto generated_a = NodeOrdering::get_lagrange_node_coords(c.type, order);
+            const auto generated_b = NodeOrdering::get_lagrange_node_coords(c.type, order);
+            ASSERT_EQ(generated_a.size(), expected_lagrange_size(c.type, order));
+            ASSERT_EQ(generated_a.size(), generated_b.size());
+            for (std::size_t i = 0; i < generated_a.size(); ++i) {
+                EXPECT_TRUE(points_close(generated_a[i], generated_b[i]));
+            }
+        }
+    }
+}
+
+TEST(LagrangeBasis, NodeOrderingMatchesReferenceCoordinateOracles) {
+    const std::array<ElementType, 18> cases = {
+        ElementType::Line2, ElementType::Line3,
+        ElementType::Triangle3, ElementType::Triangle6,
+        ElementType::Quad4, ElementType::Quad8, ElementType::Quad9,
+        ElementType::Tetra4, ElementType::Tetra10,
+        ElementType::Hex8, ElementType::Hex20, ElementType::Hex27,
+        ElementType::Wedge6, ElementType::Wedge15, ElementType::Wedge18,
+        ElementType::Pyramid5, ElementType::Pyramid13, ElementType::Pyramid14,
+    };
+
+    for (ElementType type : cases) {
+        const auto expected = reference_node_coords(type);
+        ASSERT_FALSE(expected.empty());
+        ASSERT_EQ(NodeOrdering::num_nodes(type), expected.size());
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            const auto actual = NodeOrdering::get_node_coords(type, i);
+            EXPECT_TRUE(points_close(actual, expected[i]))
+                << "Element type " << static_cast<int>(type)
+                << ", node " << i;
+        }
+    }
+}
+
+TEST(LagrangeBasis, GeneratedLowOrderOrderingMatchesPublicAliasPaths) {
+    const struct Case {
+        ElementType type;
+        int order;
+        ElementType public_alias;
+    } cases[] = {
+        {ElementType::Line2, 1, ElementType::Line2},
+        {ElementType::Line2, 2, ElementType::Line3},
+        {ElementType::Triangle3, 1, ElementType::Triangle3},
+        {ElementType::Triangle3, 2, ElementType::Triangle6},
+        {ElementType::Quad4, 1, ElementType::Quad4},
+        {ElementType::Quad4, 2, ElementType::Quad9},
+        {ElementType::Tetra4, 1, ElementType::Tetra4},
+        {ElementType::Tetra4, 2, ElementType::Tetra10},
+        {ElementType::Hex8, 1, ElementType::Hex8},
+        {ElementType::Hex8, 2, ElementType::Hex27},
+        {ElementType::Wedge6, 1, ElementType::Wedge6},
+        {ElementType::Wedge6, 2, ElementType::Wedge18},
+        {ElementType::Pyramid5, 1, ElementType::Pyramid5},
+        {ElementType::Pyramid5, 2, ElementType::Pyramid14},
+    };
+
+    for (const auto& c : cases) {
+        const auto generated = NodeOrdering::get_lagrange_node_coords(c.type, c.order);
+        ASSERT_EQ(generated.size(), NodeOrdering::num_nodes(c.public_alias));
+        for (std::size_t i = 0; i < generated.size(); ++i) {
+            const auto public_alias = NodeOrdering::get_node_coords(c.public_alias, i);
+            EXPECT_TRUE(points_close(generated[i], public_alias));
+        }
+    }
+}
+
+TEST(LagrangeBasis, KroneckerDeltaAcrossCanonicalTopologiesAndOrders) {
+    const struct Case {
+        ElementType type;
+        int max_order;
+    } cases[] = {
+        {ElementType::Line2, 8},
+        {ElementType::Triangle3, 6},
+        {ElementType::Quad4, 6},
+        {ElementType::Tetra4, 5},
+        {ElementType::Hex8, 5},
+        {ElementType::Wedge6, 5},
+        {ElementType::Pyramid5, 5},
+    };
+
+    for (const auto& c : cases) {
+        for (int order = 0; order <= c.max_order; ++order) {
+            LagrangeBasis basis(c.type, order);
+            ASSERT_EQ(basis.size(), expected_lagrange_size(c.type, order));
+
+            std::vector<Real> values;
+            for (std::size_t node_i = 0; node_i < basis.size(); ++node_i) {
+                basis.evaluate_values(basis.nodes()[node_i], values);
+                ASSERT_EQ(values.size(), basis.size());
+                for (std::size_t basis_i = 0; basis_i < basis.size(); ++basis_i) {
+                    EXPECT_NEAR(values[basis_i], basis_i == node_i ? Real(1) : Real(0), Real(2e-10))
+                        << "Element type " << static_cast<int>(c.type)
+                        << ", order " << order
+                        << ", node " << node_i
+                        << ", basis " << basis_i;
+                }
+            }
+        }
+    }
+}
+
+TEST(LagrangeBasis, PartitionGradientAndHessianSumsAcrossCanonicalTopologiesAndOrders) {
+    const struct Case {
+        ElementType type;
+        int max_order;
+        Real tol;
+    } cases[] = {
+        {ElementType::Line2, 8, Real(1e-11)},
+        {ElementType::Triangle3, 6, Real(1e-10)},
+        {ElementType::Quad4, 6, Real(1e-10)},
+        {ElementType::Tetra4, 5, Real(2e-10)},
+        {ElementType::Hex8, 5, Real(2e-10)},
+        {ElementType::Wedge6, 5, Real(5e-10)},
+        {ElementType::Pyramid5, 5, Real(5e-7)},
+    };
+
+    for (const auto& c : cases) {
+        for (int order = 0; order <= c.max_order; ++order) {
+            LagrangeBasis basis(c.type, order);
+            expect_partition_gradient_hessian_sums(basis, dense_sample_points_for(c.type), c.tol, c.tol);
+        }
+    }
+}
+
+TEST(LagrangeBasis, PyramidFaceTracesMatchLowerDimensionalLagrangeBases) {
+    const PyramidFace faces[] = {
+        PyramidFace::Base,
+        PyramidFace::South,
+        PyramidFace::East,
+        PyramidFace::North,
+        PyramidFace::West,
+    };
+
+    for (int order = 1; order <= 5; ++order) {
+        for (const auto face : faces) {
+            expect_pyramid_face_trace_matches_lower_basis(
+                order, face, face == PyramidFace::Base ? Real(2e-10) : Real(5e-10));
+        }
+    }
+}
+
+TEST(LagrangeBasis, PyramidEdgeTracesMatchLineLagrangeBasis) {
+    const PyramidEdge edges[] = {
+        PyramidEdge::BaseSouth,
+        PyramidEdge::BaseEast,
+        PyramidEdge::BaseNorth,
+        PyramidEdge::BaseWest,
+        PyramidEdge::VerticalSW,
+        PyramidEdge::VerticalSE,
+        PyramidEdge::VerticalNE,
+        PyramidEdge::VerticalNW,
+    };
+
+    for (int order = 1; order <= 5; ++order) {
+        for (const auto edge : edges) {
+            expect_pyramid_edge_trace_matches_line_basis(order, edge, Real(5e-10));
+        }
     }
 }
 
@@ -430,4 +1570,290 @@ TEST(LagrangeBasis, HexPartitionAndGradientSumZeroOrderThree) {
     EXPECT_NEAR(gsum[0], 0.0, 1e-10);
     EXPECT_NEAR(gsum[1], 0.0, 1e-10);
     EXPECT_NEAR(gsum[2], 0.0, 1e-10);
+}
+
+TEST(LagrangeBasis, OracleLine3ValuesGradientsAndHessians) {
+    LagrangeBasis basis(ElementType::Line3, 2);
+    const Point xi{Real(0.2), Real(0), Real(0)};
+
+    std::vector<Real> values;
+    std::vector<Gradient> gradients;
+    std::vector<Hessian> hessians;
+    basis.evaluate_values(xi, values);
+    basis.evaluate_gradients(xi, gradients);
+    basis.evaluate_hessians(xi, hessians);
+
+    ASSERT_EQ(values.size(), 3u);
+    ASSERT_EQ(gradients.size(), 3u);
+    ASSERT_EQ(hessians.size(), 3u);
+
+    const Real expected_values[] = {Real(-2) / Real(25), Real(3) / Real(25), Real(24) / Real(25)};
+    const Real expected_gradients[] = {Real(-3) / Real(10), Real(7) / Real(10), Real(-2) / Real(5)};
+    const Real expected_hessians[] = {Real(1), Real(1), Real(-2)};
+
+    for (std::size_t i = 0; i < 3; ++i) {
+        EXPECT_NEAR(values[i], expected_values[i], 1e-14);
+        EXPECT_NEAR(gradients[i][0], expected_gradients[i], 1e-14);
+        EXPECT_NEAR(hessians[i](0, 0), expected_hessians[i], 1e-14);
+    }
+}
+
+TEST(LagrangeBasis, OracleTriangle3ValuesGradientsAndHessians) {
+    LagrangeBasis basis(ElementType::Triangle3, 1);
+    const Point xi{Real(0.2), Real(0.3), Real(0)};
+
+    std::vector<Real> values;
+    std::vector<Gradient> gradients;
+    std::vector<Hessian> hessians;
+    basis.evaluate_values(xi, values);
+    basis.evaluate_gradients(xi, gradients);
+    basis.evaluate_hessians(xi, hessians);
+
+    ASSERT_EQ(values.size(), 3u);
+    const Point expected_gradients[] = {
+        Point{Real(-1), Real(-1), Real(0)},
+        Point{Real(1), Real(0), Real(0)},
+        Point{Real(0), Real(1), Real(0)}
+    };
+    const Real expected_values[] = {Real(0.5), Real(0.2), Real(0.3)};
+
+    for (std::size_t i = 0; i < 3; ++i) {
+        EXPECT_NEAR(values[i], expected_values[i], 1e-14);
+        EXPECT_NEAR(gradients[i][0], expected_gradients[i][0], 1e-14);
+        EXPECT_NEAR(gradients[i][1], expected_gradients[i][1], 1e-14);
+        for (int a = 0; a < 2; ++a) {
+            for (int b = 0; b < 2; ++b) {
+                EXPECT_NEAR(hessians[i](static_cast<std::size_t>(a), static_cast<std::size_t>(b)),
+                            Real(0), 1e-14);
+            }
+        }
+    }
+}
+
+TEST(LagrangeBasis, OracleQuad4ValuesGradientsAndHessians) {
+    LagrangeBasis basis(ElementType::Quad4, 1);
+    const Point xi{Real(0.2), Real(-0.4), Real(0)};
+
+    std::vector<Real> values;
+    std::vector<Gradient> gradients;
+    std::vector<Hessian> hessians;
+    basis.evaluate_values(xi, values);
+    basis.evaluate_gradients(xi, gradients);
+    basis.evaluate_hessians(xi, hessians);
+
+    ASSERT_EQ(values.size(), 4u);
+    const Real expected_values[] = {Real(7) / Real(25), Real(21) / Real(50),
+                                    Real(9) / Real(50), Real(3) / Real(25)};
+    const Point expected_gradients[] = {
+        Point{Real(-7) / Real(20), Real(-1) / Real(5), Real(0)},
+        Point{Real(7) / Real(20), Real(-3) / Real(10), Real(0)},
+        Point{Real(3) / Real(20), Real(3) / Real(10), Real(0)},
+        Point{Real(-3) / Real(20), Real(1) / Real(5), Real(0)}
+    };
+    const Real expected_hxy[] = {Real(1) / Real(4), Real(-1) / Real(4),
+                                 Real(1) / Real(4), Real(-1) / Real(4)};
+
+    for (std::size_t i = 0; i < 4; ++i) {
+        EXPECT_NEAR(values[i], expected_values[i], 1e-14);
+        EXPECT_NEAR(gradients[i][0], expected_gradients[i][0], 1e-14);
+        EXPECT_NEAR(gradients[i][1], expected_gradients[i][1], 1e-14);
+        EXPECT_NEAR(hessians[i](0, 0), Real(0), 1e-14);
+        EXPECT_NEAR(hessians[i](1, 1), Real(0), 1e-14);
+        EXPECT_NEAR(hessians[i](0, 1), expected_hxy[i], 1e-14);
+        EXPECT_NEAR(hessians[i](1, 0), expected_hxy[i], 1e-14);
+    }
+}
+
+TEST(LagrangeBasis, OracleWedge6ValuesGradientsAndHessians) {
+    LagrangeBasis basis(ElementType::Wedge6, 1);
+    const Point xi{Real(0.2), Real(0.25), Real(-0.3)};
+
+    std::vector<Real> values;
+    std::vector<Gradient> gradients;
+    std::vector<Hessian> hessians;
+    basis.evaluate_values(xi, values);
+    basis.evaluate_gradients(xi, gradients);
+    basis.evaluate_hessians(xi, hessians);
+
+    ASSERT_EQ(values.size(), 6u);
+    const Real expected_values[] = {
+        Real(143) / Real(400), Real(13) / Real(100), Real(13) / Real(80),
+        Real(77) / Real(400), Real(7) / Real(100), Real(7) / Real(80)
+    };
+    const Point expected_gradients[] = {
+        Point{Real(-13) / Real(20), Real(-13) / Real(20), Real(-11) / Real(40)},
+        Point{Real(13) / Real(20), Real(0), Real(-1) / Real(10)},
+        Point{Real(0), Real(13) / Real(20), Real(-1) / Real(8)},
+        Point{Real(-7) / Real(20), Real(-7) / Real(20), Real(11) / Real(40)},
+        Point{Real(7) / Real(20), Real(0), Real(1) / Real(10)},
+        Point{Real(0), Real(7) / Real(20), Real(1) / Real(8)}
+    };
+    const Point expected_hxz[] = {
+        Point{Real(1) / Real(2), Real(1) / Real(2), Real(0)},
+        Point{Real(-1) / Real(2), Real(0), Real(0)},
+        Point{Real(0), Real(-1) / Real(2), Real(0)},
+        Point{Real(-1) / Real(2), Real(-1) / Real(2), Real(0)},
+        Point{Real(1) / Real(2), Real(0), Real(0)},
+        Point{Real(0), Real(1) / Real(2), Real(0)}
+    };
+
+    for (std::size_t i = 0; i < 6; ++i) {
+        EXPECT_NEAR(values[i], expected_values[i], 1e-14);
+        EXPECT_NEAR(gradients[i][0], expected_gradients[i][0], 1e-14);
+        EXPECT_NEAR(gradients[i][1], expected_gradients[i][1], 1e-14);
+        EXPECT_NEAR(gradients[i][2], expected_gradients[i][2], 1e-14);
+        EXPECT_NEAR(hessians[i](0, 0), Real(0), 1e-14);
+        EXPECT_NEAR(hessians[i](1, 1), Real(0), 1e-14);
+        EXPECT_NEAR(hessians[i](2, 2), Real(0), 1e-14);
+        EXPECT_NEAR(hessians[i](0, 1), Real(0), 1e-14);
+        EXPECT_NEAR(hessians[i](1, 0), Real(0), 1e-14);
+        EXPECT_NEAR(hessians[i](0, 2), expected_hxz[i][0], 1e-14);
+        EXPECT_NEAR(hessians[i](2, 0), expected_hxz[i][0], 1e-14);
+        EXPECT_NEAR(hessians[i](1, 2), expected_hxz[i][1], 1e-14);
+        EXPECT_NEAR(hessians[i](2, 1), expected_hxz[i][1], 1e-14);
+    }
+}
+
+TEST(LagrangeBasis, DeterministicBoundarySweepMaintainsPartitionAndFiniteDerivatives) {
+    const std::vector<std::pair<ElementType, int>> cases = {
+        {ElementType::Line2, 1},
+        {ElementType::Line3, 2},
+        {ElementType::Triangle3, 1},
+        {ElementType::Triangle6, 2},
+        {ElementType::Quad4, 1},
+        {ElementType::Quad9, 2},
+        {ElementType::Tetra4, 1},
+        {ElementType::Tetra10, 2},
+        {ElementType::Hex8, 1},
+        {ElementType::Hex27, 2},
+        {ElementType::Wedge6, 1},
+        {ElementType::Wedge18, 2},
+        {ElementType::Pyramid5, 1},
+        {ElementType::Pyramid14, 2},
+    };
+
+    for (const auto& [type, order] : cases) {
+        LagrangeBasis basis(type, order);
+        for (const auto& xi : boundary_stress_points_for(type)) {
+            std::vector<Real> values;
+            std::vector<Gradient> gradients;
+            std::vector<Hessian> hessians;
+            basis.evaluate_values(xi, values);
+            basis.evaluate_gradients(xi, gradients);
+            basis.evaluate_hessians(xi, hessians);
+
+            ASSERT_EQ(values.size(), basis.size());
+            ASSERT_EQ(gradients.size(), basis.size());
+            ASSERT_EQ(hessians.size(), basis.size());
+
+            Real sum = Real(0);
+            for (Real value : values) {
+                EXPECT_TRUE(std::isfinite(value));
+                sum += value;
+            }
+            expect_all_finite(gradients);
+            expect_hessians_finite(hessians, basis.dimension());
+            EXPECT_NEAR(sum, Real(1), type == ElementType::Pyramid5 || type == ElementType::Pyramid14
+                                       ? Real(1e-8)
+                                       : Real(1e-12))
+                << "type=" << static_cast<int>(type)
+                << ", order=" << order
+                << ", xi=(" << xi[0] << "," << xi[1] << "," << xi[2] << ")";
+        }
+    }
+}
+
+TEST(LagrangeBasis, FiniteDifferenceGradientsAcrossSupportedLinearShapes) {
+    const std::vector<LagrangeAccuracyCase> cases = {
+        {ElementType::Line2, 1, sample_points_for(ElementType::Line2)},
+        {ElementType::Triangle3, 1, sample_points_for(ElementType::Triangle3)},
+        {ElementType::Quad4, 1, sample_points_for(ElementType::Quad4)},
+        {ElementType::Tetra4, 1, sample_points_for(ElementType::Tetra4)},
+        {ElementType::Hex8, 1, sample_points_for(ElementType::Hex8)},
+        {ElementType::Wedge6, 1, sample_points_for(ElementType::Wedge6)},
+        {ElementType::Pyramid5, 1, sample_points_for(ElementType::Pyramid5)},
+    };
+
+    for (const auto& c : cases) {
+        expect_gradients_match_finite_difference(c, Real(1e-6), Real(1e-6));
+    }
+}
+
+TEST(LagrangeBasis, FiniteDifferenceGradientsAcrossSupportedQuadraticShapes) {
+    const std::vector<LagrangeAccuracyCase> cases = {
+        {ElementType::Line3, 2, sample_points_for(ElementType::Line3)},
+        {ElementType::Triangle6, 2, sample_points_for(ElementType::Triangle6)},
+        {ElementType::Quad9, 2, sample_points_for(ElementType::Quad9)},
+        {ElementType::Tetra10, 2, sample_points_for(ElementType::Tetra10)},
+        {ElementType::Hex27, 2, sample_points_for(ElementType::Hex27)},
+        {ElementType::Wedge18, 2, sample_points_for(ElementType::Wedge18)},
+        {ElementType::Pyramid14, 2, sample_points_for(ElementType::Pyramid14)},
+    };
+
+    for (const auto& c : cases) {
+        expect_gradients_match_finite_difference(c, Real(1e-6), Real(2e-6));
+    }
+}
+
+TEST(LagrangeBasis, LinearPolynomialReproductionAcrossSupportedLinearShapes) {
+    const std::vector<LagrangeAccuracyCase> cases = {
+        {ElementType::Line2, 1, sample_points_for(ElementType::Line2)},
+        {ElementType::Triangle3, 1, sample_points_for(ElementType::Triangle3)},
+        {ElementType::Quad4, 1, sample_points_for(ElementType::Quad4)},
+        {ElementType::Tetra4, 1, sample_points_for(ElementType::Tetra4)},
+        {ElementType::Hex8, 1, sample_points_for(ElementType::Hex8)},
+        {ElementType::Wedge6, 1, sample_points_for(ElementType::Wedge6)},
+        {ElementType::Pyramid5, 1, sample_points_for(ElementType::Pyramid5)},
+    };
+
+    const std::vector<std::array<int, 3>> exponents = {
+        {0, 0, 0},
+        {1, 0, 0},
+        {0, 1, 0},
+        {0, 0, 1},
+    };
+
+    for (const auto& c : cases) {
+        const std::vector<std::array<int, 3>> relevant(
+            exponents.begin(),
+            exponents.begin() + static_cast<std::ptrdiff_t>(c.type == ElementType::Line2 ? 2 :
+                                                            (c.type == ElementType::Triangle3 ||
+                                                             c.type == ElementType::Quad4) ? 3 : 4));
+        expect_polynomial_reproduction(c, relevant, Real(1e-12));
+    }
+}
+
+TEST(LagrangeBasis, QuadraticPolynomialReproductionAcrossSupportedQuadraticShapes) {
+    const std::vector<LagrangeAccuracyCase> cases = {
+        {ElementType::Line3, 2, sample_points_for(ElementType::Line3)},
+        {ElementType::Triangle6, 2, sample_points_for(ElementType::Triangle6)},
+        {ElementType::Quad9, 2, sample_points_for(ElementType::Quad9)},
+        {ElementType::Tetra10, 2, sample_points_for(ElementType::Tetra10)},
+        {ElementType::Hex27, 2, sample_points_for(ElementType::Hex27)},
+        {ElementType::Wedge18, 2, sample_points_for(ElementType::Wedge18)},
+        {ElementType::Pyramid14, 2, sample_points_for(ElementType::Pyramid14)},
+    };
+
+    const std::vector<std::array<int, 3>> line_exponents = {
+        {0, 0, 0}, {1, 0, 0}, {2, 0, 0}
+    };
+    const std::vector<std::array<int, 3>> surface_exponents = {
+        {0, 0, 0}, {1, 0, 0}, {0, 1, 0},
+        {2, 0, 0}, {1, 1, 0}, {0, 2, 0}
+    };
+    const std::vector<std::array<int, 3>> volume_exponents = {
+        {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1},
+        {2, 0, 0}, {1, 1, 0}, {0, 2, 0},
+        {1, 0, 1}, {0, 1, 1}, {0, 0, 2}
+    };
+
+    for (const auto& c : cases) {
+        if (c.type == ElementType::Line3) {
+            expect_polynomial_reproduction(c, line_exponents, Real(1e-12));
+        } else if (c.type == ElementType::Triangle6 || c.type == ElementType::Quad9) {
+            expect_polynomial_reproduction(c, surface_exponents, Real(1e-11));
+        } else {
+            expect_polynomial_reproduction(c, volume_exponents, Real(2e-10));
+        }
+    }
 }

@@ -51,6 +51,10 @@ void fsils_commus(const FSILS_lhsType& lhs, Vector<double>& R);
 
 void fsils_commuv(const FSILS_lhsType& lhs, int dof, Array<double>& R);
 
+void fsils_syncs(const FSILS_lhsType& lhs, Vector<double>& R);
+
+void fsils_syncv(const FSILS_lhsType& lhs, int dof, Array<double>& R);
+
 void fsils_commus_begin(const FSILS_lhsType& lhs, Vector<double>& R);
 void fsils_commus_end(const FSILS_lhsType& lhs, Vector<double>& R);
 
@@ -69,5 +73,4 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
 };
 
 #endif
-
 

@@ -111,6 +111,24 @@ TEST(C1Basis, BasisFactoryCreatesHermiteForC1Line2) {
     EXPECT_NE(hermite, nullptr);
 }
 
+TEST(C1Basis, BasisFactoryCreatesHermiteForC1Quad4) {
+    BasisRequest req{
+        ElementType::Quad4,
+        BasisType::Hermite,
+        3,
+        Continuity::C1,
+        FieldType::Scalar
+    };
+
+    auto basis_ptr = BasisFactory::create(req);
+    ASSERT_TRUE(basis_ptr);
+    EXPECT_EQ(basis_ptr->element_type(), ElementType::Quad4);
+    EXPECT_EQ(basis_ptr->dimension(), 2);
+    EXPECT_EQ(basis_ptr->order(), 3);
+    EXPECT_EQ(basis_ptr->size(), 16u);
+    EXPECT_EQ(basis_ptr->basis_type(), BasisType::Hermite);
+}
+
 TEST(C1Basis, QuadMetadataAndSize) {
     HermiteBasis basis(ElementType::Quad4, 3);
 
@@ -242,6 +260,24 @@ TEST(C1Basis, QuadInterpolatesBicubicPolynomial) {
         const Real u_exact = poly(xi[0], xi[1]);
         EXPECT_NEAR(u_interp, u_exact, 1e-10);
     }
+}
+
+TEST(C1Basis, BasisFactoryCreatesHermiteForC1Hex8) {
+    BasisRequest req{
+        ElementType::Hex8,
+        BasisType::Hermite,
+        3,
+        Continuity::C1,
+        FieldType::Scalar
+    };
+
+    auto basis_ptr = BasisFactory::create(req);
+    ASSERT_TRUE(basis_ptr);
+    EXPECT_EQ(basis_ptr->element_type(), ElementType::Hex8);
+    EXPECT_EQ(basis_ptr->dimension(), 3);
+    EXPECT_EQ(basis_ptr->order(), 3);
+    EXPECT_EQ(basis_ptr->size(), 64u);
+    EXPECT_EQ(basis_ptr->basis_type(), BasisType::Hermite);
 }
 
 // =============================================================================

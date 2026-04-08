@@ -37,6 +37,7 @@
 #include <numeric>
 #include <optional>
 #include <sstream>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -87,6 +88,101 @@ void traceLog(const std::string& msg)
 #else
     return 0;
 #endif
+}
+
+[[nodiscard]] bool mpiMultiTaskActive() noexcept
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (!initialized) {
+        return false;
+    }
+
+    int size = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    return size > 1;
+#else
+    return false;
+#endif
+}
+
+[[nodiscard]] bool nativeFaceRankOnePromotionEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_DISABLE_MPI_NATIVE_RANK1_PROMOTION");
+    if (env == nullptr) {
+        return true;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    if (*env == '\0') {
+        return true;
+    }
+    return *env == '0';
+}
+
+template <typename T>
+[[nodiscard]] T mpiAllreduceSumIfActive(T value) noexcept
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (!initialized) {
+        return value;
+    }
+
+    int size = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size <= 1) {
+        return value;
+    }
+
+    T global = value;
+    if constexpr (std::is_same_v<T, int>) {
+        MPI_Allreduce(&value, &global, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    } else {
+        MPI_Allreduce(&value, &global, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    }
+    return global;
+#else
+    return value;
+#endif
+}
+
+[[nodiscard]] std::vector<Real> gatherGlobalDenseVectorFromOwnedEntries(
+    backends::GenericVector& vec,
+    std::size_t n,
+    const dofs::IndexSet& owned_dofs)
+{
+    auto view = vec.createAssemblyView();
+    FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: global dense gather view");
+
+    std::vector<Real> local(n, Real(0.0));
+    for (const auto dof : owned_dofs) {
+        const auto idx = static_cast<std::size_t>(dof);
+        if (idx >= n) {
+            continue;
+        }
+        local[idx] = view->getVectorEntry(dof);
+    }
+
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized && !local.empty()) {
+        std::vector<Real> global(local.size(), Real(0.0));
+        MPI_Allreduce(local.data(),
+                      global.data(),
+                      static_cast<int>(local.size()),
+                      MPI_DOUBLE,
+                      MPI_SUM,
+                      MPI_COMM_WORLD);
+        return global;
+    }
+#endif
+
+    return local;
 }
 
 [[nodiscard]] bool jacobianCheckEnabled() noexcept
@@ -849,7 +945,11 @@ bool tryPromoteExactReducedUpdateToNativeRankOne(
     const backends::ReducedFieldUpdate& update,
     backends::RankOneUpdate& promoted)
 {
-    if (update.left.empty() || update.right.empty() || std::abs(update.sigma) <= Real(1e-30)) {
+    if (!nativeFaceRankOnePromotionEnabled()) {
+        return false;
+    }
+
+    if (std::abs(update.sigma) <= Real(1e-30)) {
         return false;
     }
 
@@ -874,7 +974,9 @@ bool tryPromoteExactReducedUpdateToNativeRankOne(
         }
         right_map[dof] += value;
     }
-    if (left_map.empty() || right_map.empty()) {
+    const int global_left_has = mpiAllreduceSumIfActive(left_map.empty() ? 0 : 1);
+    const int global_right_has = mpiAllreduceSumIfActive(right_map.empty() ? 0 : 1);
+    if (global_left_has == 0 || global_right_has == 0) {
         return false;
     }
 
@@ -889,27 +991,32 @@ bool tryPromoteExactReducedUpdateToNativeRankOne(
         right_norm_sq += value * value;
     }
 
-    if (!(left_norm_sq > Real(1e-30)) || !(right_norm_sq > Real(1e-30))) {
+    const Real global_left_norm_sq = mpiAllreduceSumIfActive(left_norm_sq);
+    const Real global_right_norm_sq = mpiAllreduceSumIfActive(right_norm_sq);
+    const Real global_cross = mpiAllreduceSumIfActive(cross);
+
+    if (!(global_left_norm_sq > Real(1e-30)) || !(global_right_norm_sq > Real(1e-30))) {
         return false;
     }
 
-    const Real alpha = cross / left_norm_sq;
-    Real residual_sq = Real(0.0);
+    const Real alpha = global_cross / global_left_norm_sq;
+    Real local_residual_sq = Real(0.0);
     for (const auto& [dof, value] : right_map) {
         const auto it = left_map.find(dof);
         const Real left_value = (it != left_map.end()) ? it->second : Real(0.0);
         const Real diff = value - alpha * left_value;
-        residual_sq += diff * diff;
+        local_residual_sq += diff * diff;
     }
     for (const auto& [dof, value] : left_map) {
         if (right_map.contains(dof)) {
             continue;
         }
         const Real diff = alpha * value;
-        residual_sq += diff * diff;
+        local_residual_sq += diff * diff;
     }
 
-    const Real rel_residual_sq = residual_sq / std::max(right_norm_sq, Real(1e-30));
+    const Real residual_sq = mpiAllreduceSumIfActive(local_residual_sq);
+    const Real rel_residual_sq = residual_sq / std::max(global_right_norm_sq, Real(1e-30));
     if (!(rel_residual_sq <= Real(1e-24)) || !(std::abs(alpha) > Real(1e-30))) {
         return false;
     }
@@ -922,7 +1029,7 @@ bool tryPromoteExactReducedUpdateToNativeRankOne(
     }
     promoted.active_components = update.active_components;
     promoted.prefer_native_face = true;
-    return !promoted.v.empty();
+    return true;
 }
 
 [[nodiscard]] std::vector<std::pair<GlobalIndex, Real>> reconstructInputGradientFromCt(
@@ -976,6 +1083,231 @@ bool tryPromoteExactReducedUpdateToNativeRankOne(
     return q_u;
 }
 
+struct DirectCoupledCtProjection {
+    std::vector<Real> values{};
+    std::vector<bool> row_covered{};
+};
+
+struct DirectCoupledCtRows {
+    std::vector<std::vector<std::pair<GlobalIndex, Real>>> rows{};
+    std::vector<bool> row_covered{};
+};
+
+[[nodiscard]] int inferDirectCouplingRecordInputCount(
+    const systems::FESystem::BorderedCouplingData::DirectCouplingRecord& record)
+{
+    if (!record.input_gradients.empty()) {
+        return static_cast<int>(record.input_gradients.size());
+    }
+    if (!record.dO_dI.empty()) {
+        return static_cast<int>(record.dO_dI.size());
+    }
+    if (!record.aux_local_indices.empty() &&
+        !record.dF_dinputs.empty() &&
+        record.dF_dinputs.size() % record.aux_local_indices.size() == 0) {
+        return static_cast<int>(record.dF_dinputs.size() / record.aux_local_indices.size());
+    }
+    return 0;
+}
+
+[[nodiscard]] DirectCoupledCtRows buildDirectCouplingCtRows(
+    const systems::FESystem::BorderedCouplingData& bordered,
+    const dofs::IndexSet* owned_dofs = nullptr)
+{
+    constexpr Real kDirectTol = static_cast<Real>(1e-14);
+
+    DirectCoupledCtRows out;
+    const auto na = static_cast<std::size_t>(bordered.n_aux);
+    out.rows.resize(na);
+    out.row_covered.assign(na, false);
+
+    if (!bordered.active || bordered.direct_coupling_records.empty()) {
+        return out;
+    }
+
+    std::vector<std::unordered_map<GlobalIndex, Real>> row_accum(na);
+    std::vector<bool> row_has_exact_contribution(na, false);
+    std::vector<bool> row_has_incomplete_contribution(na, false);
+
+    for (const auto& record : bordered.direct_coupling_records) {
+        if (record.aux_local_indices.empty() || record.dF_dinputs.empty()) {
+            continue;
+        }
+
+        const int n_inputs = inferDirectCouplingRecordInputCount(record);
+        if (n_inputs <= 0 ||
+            record.dF_dinputs.size() <
+                record.aux_local_indices.size() * static_cast<std::size_t>(n_inputs)) {
+            continue;
+        }
+
+        for (std::size_t local_row = 0; local_row < record.aux_local_indices.size(); ++local_row) {
+            const auto row = record.aux_local_indices[local_row];
+            if (row >= na) {
+                continue;
+            }
+
+            std::unordered_map<GlobalIndex, Real> local_row_entries;
+            bool row_fully_covered = true;
+            bool row_has_nonzero_input_sensitivity = false;
+            for (int input_col = 0; input_col < n_inputs; ++input_col) {
+                const Real dF_dI =
+                    record.dF_dinputs[local_row * static_cast<std::size_t>(n_inputs) +
+                                      static_cast<std::size_t>(input_col)];
+                if (std::abs(dF_dI) <= kDirectTol) {
+                    continue;
+                }
+
+                row_has_nonzero_input_sensitivity = true;
+                if (static_cast<std::size_t>(input_col) >= record.input_gradients.size() ||
+                    record.input_gradients[static_cast<std::size_t>(input_col)].empty()) {
+                    row_fully_covered = false;
+                    break;
+                }
+
+                for (const auto& [dof, qj] :
+                     record.input_gradients[static_cast<std::size_t>(input_col)]) {
+                    if (dof < 0) {
+                        continue;
+                    }
+                    if (owned_dofs != nullptr && !owned_dofs->contains(dof)) {
+                        continue;
+                    }
+                    const Real value = dF_dI * qj;
+                    if (std::abs(value) <= kDirectTol) {
+                        continue;
+                    }
+                    local_row_entries[dof] += value;
+                }
+            }
+
+            if (!row_has_nonzero_input_sensitivity) {
+                continue;
+            }
+            if (!row_fully_covered) {
+                row_has_incomplete_contribution[row] = true;
+                continue;
+            }
+
+            row_has_exact_contribution[row] = true;
+            auto& accum = row_accum[row];
+            for (const auto& [dof, value] : local_row_entries) {
+                accum[dof] += value;
+            }
+        }
+    }
+
+    for (std::size_t row = 0; row < na; ++row) {
+        if (!row_has_exact_contribution[row] || row_has_incomplete_contribution[row]) {
+            continue;
+        }
+
+        auto& dense_row = out.rows[row];
+        dense_row.reserve(row_accum[row].size());
+        for (const auto& [dof, value] : row_accum[row]) {
+            if (std::abs(value) > kDirectTol) {
+                dense_row.emplace_back(dof, value);
+            }
+        }
+        std::sort(dense_row.begin(), dense_row.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        out.row_covered[row] = true;
+    }
+
+    return out;
+}
+
+[[nodiscard]] DirectCoupledCtProjection projectCtDuFromDirectCouplingRecords(
+    const systems::FESystem::BorderedCouplingData& bordered,
+    std::span<const Real> dense_du)
+{
+    constexpr Real kDirectTol = static_cast<Real>(1e-14);
+
+    DirectCoupledCtProjection out;
+    const auto na = static_cast<std::size_t>(bordered.n_aux);
+    out.values.assign(na, Real(0.0));
+    out.row_covered.assign(na, false);
+
+    if (!bordered.active ||
+        dense_du.empty() ||
+        bordered.direct_coupling_records.empty()) {
+        return out;
+    }
+
+    for (const auto& record : bordered.direct_coupling_records) {
+        if (record.aux_local_indices.empty() || record.dF_dinputs.empty()) {
+            continue;
+        }
+
+        const int n_inputs = inferDirectCouplingRecordInputCount(record);
+        if (n_inputs <= 0 ||
+            record.dF_dinputs.size() <
+                record.aux_local_indices.size() * static_cast<std::size_t>(n_inputs)) {
+            continue;
+        }
+
+        std::vector<Real> input_projections(static_cast<std::size_t>(n_inputs), Real(0.0));
+        std::vector<bool> have_exact_input_projection(static_cast<std::size_t>(n_inputs), false);
+        for (int input_col = 0; input_col < n_inputs; ++input_col) {
+            if (static_cast<std::size_t>(input_col) >= record.input_gradients.size()) {
+                continue;
+            }
+            const auto& q_u = record.input_gradients[static_cast<std::size_t>(input_col)];
+            if (q_u.empty()) {
+                continue;
+            }
+
+            Real proj = Real(0.0);
+            for (const auto& [dof, qj] : q_u) {
+                if (dof < 0) {
+                    continue;
+                }
+                const auto dof_idx = static_cast<std::size_t>(dof);
+                if (dof_idx >= dense_du.size()) {
+                    continue;
+                }
+                proj += qj * dense_du[dof_idx];
+            }
+            input_projections[static_cast<std::size_t>(input_col)] = proj;
+            have_exact_input_projection[static_cast<std::size_t>(input_col)] = true;
+        }
+
+        for (std::size_t local_row = 0; local_row < record.aux_local_indices.size(); ++local_row) {
+            const auto row = record.aux_local_indices[local_row];
+            if (row >= na) {
+                continue;
+            }
+
+            Real row_value = Real(0.0);
+            bool row_fully_covered = true;
+            bool row_has_nonzero_input_sensitivity = false;
+            for (int input_col = 0; input_col < n_inputs; ++input_col) {
+                const Real dF_dI =
+                    record.dF_dinputs[local_row * static_cast<std::size_t>(n_inputs) +
+                                      static_cast<std::size_t>(input_col)];
+                if (std::abs(dF_dI) <= kDirectTol) {
+                    continue;
+                }
+                row_has_nonzero_input_sensitivity = true;
+                if (!have_exact_input_projection[static_cast<std::size_t>(input_col)]) {
+                    row_fully_covered = false;
+                    break;
+                }
+                row_value += dF_dI * input_projections[static_cast<std::size_t>(input_col)];
+            }
+
+            if (!row_has_nonzero_input_sensitivity || !row_fully_covered) {
+                continue;
+            }
+
+            out.values[row] += row_value;
+            out.row_covered[row] = true;
+        }
+    }
+
+    return out;
+}
+
 [[nodiscard]] bool tryPromoteDirectCouplingRecordToNativeRankOne(
     const systems::FESystem::BorderedCouplingData& bordered,
     const systems::FESystem::BorderedCouplingData::DirectCouplingRecord& record,
@@ -984,6 +1316,10 @@ bool tryPromoteExactReducedUpdateToNativeRankOne(
     const dofs::IndexSet& owned_dofs,
     backends::RankOneUpdate& promoted)
 {
+    if (!nativeFaceRankOnePromotionEnabled()) {
+        return false;
+    }
+
     constexpr Real kDirectTol = static_cast<Real>(1e-14);
     const auto it = std::find(record.aux_local_indices.begin(),
                               record.aux_local_indices.end(),
@@ -1146,7 +1482,7 @@ bool tryPromoteExactReducedUpdateToNativeRankOne(
             promoted.v.emplace_back(dof, value);
         }
     }
-    return !promoted.v.empty();
+    return true;
 }
 
 [[nodiscard]] bool tryPromoteAlgebraicDirectCouplingRecordToNativeRankOne(
@@ -1158,6 +1494,10 @@ bool tryPromoteExactReducedUpdateToNativeRankOne(
     const dofs::IndexSet& owned_dofs,
     backends::RankOneUpdate& promoted)
 {
+    if (!nativeFaceRankOnePromotionEnabled()) {
+        return false;
+    }
+
     constexpr Real kDirectTol = static_cast<Real>(1e-14);
     if (record.output_gradient.empty() || record.aux_local_indices.empty() || n_alg == 0 ||
         Daa_inv.size() != n_alg * n_alg) {
@@ -1387,7 +1727,7 @@ bool tryPromoteExactReducedUpdateToNativeRankOne(
             promoted.v.emplace_back(dof, value);
         }
     }
-    return !promoted.v.empty();
+    return true;
 }
 
 std::vector<backends::RankOneUpdate>
@@ -1414,8 +1754,15 @@ transformRankOneUpdatesForConstraints(std::span<const backends::RankOneUpdate> u
             }
 
             const auto cv = constraints.getConstraint(dof);
-            if (!cv || cv->isDirichlet()) {
+            if (!cv) {
                 coeffs[dof] += value;
+                continue;
+            }
+            if (cv->isDirichlet()) {
+                // Eliminate constrained slave DOFs from the native low-rank
+                // factor. Keeping them would let the outlet correction
+                // re-populate rows/columns that the constrained linear space
+                // has already removed.
                 continue;
             }
 
@@ -1456,8 +1803,11 @@ transformReducedFieldUpdatesForConstraints(
             }
 
             const auto cv = constraints.getConstraint(dof);
-            if (!cv || cv->isDirichlet()) {
+            if (!cv) {
                 coeffs[dof] += value;
+                continue;
+            }
+            if (cv->isDirichlet()) {
                 continue;
             }
 
@@ -1486,9 +1836,11 @@ transformReducedFieldUpdatesForConstraints(
             std::span<const std::pair<GlobalIndex, Real>>(upd.left.data(), upd.left.size()));
         out.right = transform_factor(
             std::span<const std::pair<GlobalIndex, Real>>(upd.right.data(), upd.right.size()));
-        if (!out.left.empty() && !out.right.empty()) {
-            transformed.push_back(std::move(out));
-        }
+        // Preserve globally active reduced-update slots even when this rank's
+        // constrained projection has no owned entries for one side. The FSILS
+        // backend now handles empty local factors and needs identical update
+        // counts on every rank to keep overlap exchanges ordered.
+        transformed.push_back(std::move(out));
     }
     return transformed;
 }
@@ -1573,11 +1925,16 @@ makeValidatedNativeRankOneSolveOptions(const backends::SolverOptions& base,
     if (base.method == backends::SolverMethod::BlockSchur) {
         (void)native_direct_face_mode_count;
         const Real rel_scale = static_cast<Real>(1e-2);
-        const Real fallback_target = static_cast<Real>(1e-5);
+        const Real fallback_target = static_cast<Real>(1e-6);
         const Real target_inner_rel =
             (base.rel_tol > Real(0.0) && std::isfinite(static_cast<double>(base.rel_tol)))
                 ? std::max(static_cast<Real>(1e-10), base.rel_tol * rel_scale)
                 : fallback_target;
+        const int target_inner_max_iter = std::max(base.max_iter, 120);
+        opts.fsils_blockschur_gm_max_iter =
+            std::max(base.fsils_blockschur_gm_max_iter.value_or(0), target_inner_max_iter);
+        opts.fsils_blockschur_cg_max_iter =
+            std::max(base.fsils_blockschur_cg_max_iter.value_or(0), target_inner_max_iter);
         opts.fsils_blockschur_gm_rel_tol = base.fsils_blockschur_gm_rel_tol.has_value()
             ? std::min(*base.fsils_blockschur_gm_rel_tol, target_inner_rel)
             : target_inner_rel;
@@ -2072,12 +2429,8 @@ void rebaseGroupedCouplingIds(std::vector<backends::ReducedFieldUpdate>& reduced
             continue;
         }
 
-        if (!upd.left.empty() && !upd.right.empty()) {
-            out.reduced_field_updates.push_back(std::move(upd));
-        }
-        if (!mode.left.empty() && !mode.right.empty()) {
-            grouped.modes.push_back(std::move(mode));
-        }
+        out.reduced_field_updates.push_back(std::move(upd));
+        grouped.modes.push_back(std::move(mode));
     }
 
     if (!independent_modes &&
@@ -2587,7 +2940,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     auto captureRankOneUpdates = [&]() {
         const auto updates = transient.system().lastRankOneUpdates();
         assembled_rank_one_updates.assign(updates.begin(), updates.end());
-        if (has_non_dirichlet_affine_constraints && !assembled_rank_one_updates.empty()) {
+        if (!constraints.empty() && !assembled_rank_one_updates.empty()) {
             effective_rank_one_updates =
                 transformRankOneUpdatesForConstraints(assembled_rank_one_updates, constraints);
         } else {
@@ -2596,7 +2949,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
         const auto reduced_updates = transient.system().lastReducedFieldUpdates();
         assembled_reduced_field_updates.assign(reduced_updates.begin(), reduced_updates.end());
-        if (has_non_dirichlet_affine_constraints && !assembled_reduced_field_updates.empty()) {
+        if (!constraints.empty() && !assembled_reduced_field_updates.empty()) {
             effective_reduced_field_updates =
                 transformReducedFieldUpdatesForConstraints(assembled_reduced_field_updates,
                                                            constraints);
@@ -3593,7 +3946,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             int max_condensed_aux = 64;
             if (const char* env = std::getenv("SVMP_MAX_CONDENSED_AUX_SIZE")) {
                 const int parsed = std::atoi(env);
-                if (parsed > 0) {
+                if (parsed >= 0) {
                     max_condensed_aux = parsed;
                 }
             }
@@ -3607,6 +3960,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 condensed_bordered_active = true;
                 condensed_rhs_shift.assign(nf, Real(0.0));
                 condensed_DinvC.assign(na * nf, Real(0.0));
+                const auto direct_ct_rows =
+                    buildDirectCouplingCtRows(solve_bordered, &owned_dofs);
 
                 std::vector<Real> Dinv_g(na, Real(0.0));
                 for (std::size_t i = 0; i < na; ++i) {
@@ -3634,21 +3989,15 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     static_cast<int>(grouped_bordered_field_couplings.size());
                 bordered_group.aux_matrix.assign(solve_bordered.D.begin(), solve_bordered.D.end());
                 bordered_group.modes.reserve(na);
-                const bool independent_condensed_modes =
-                    denseMatrixIsEffectivelyDiagonal(solve_bordered.D, na);
-                const bool allow_condensed_native_rank_one_promotion =
-                    independent_condensed_modes;
-                std::optional<backends::RankOneUpdate> promoted_condensed_rank_one;
                 for (std::size_t j = 0; j < na; ++j) {
                     backends::ReducedFieldUpdate upd;
                     upd.sigma = Real(-1.0);
-                    upd.grouped_coupling_id =
-                        independent_condensed_modes ? -1 : bordered_group.grouped_coupling_id;
+                    upd.grouped_coupling_id = bordered_group.grouped_coupling_id;
                     upd.left.reserve(nf);
-                    upd.right.reserve(nf);
+                    upd.right.reserve(owned_dofs.size());
                     backends::GroupedBorderedFieldCoupling::Mode mode;
                     mode.left.reserve(nf);
-                    mode.right.reserve(nf);
+                    mode.right.reserve(owned_dofs.size());
                     for (std::size_t row = 0; row < nf; ++row) {
                         const Real val = solve_bordered.B[row + nf * j];
                         if (std::abs(val) > Real(1e-30) &&
@@ -3657,45 +4006,83 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                             mode.left.emplace_back(static_cast<GlobalIndex>(row), val);
                         }
                     }
-                    for (std::size_t col = 0; col < nf; ++col) {
-                        const Real val = condensed_DinvC[j * nf + col];
-                        if (std::abs(val) > Real(1e-30) &&
-                            owned_dofs.contains(static_cast<GlobalIndex>(col))) {
-                            upd.right.emplace_back(static_cast<GlobalIndex>(col), val);
-                        }
-                        const Real c_val = solve_bordered.Ct[j * nf + col];
-                        if (std::abs(c_val) > Real(1e-30) &&
-                            owned_dofs.contains(static_cast<GlobalIndex>(col))) {
-                            mode.right.emplace_back(static_cast<GlobalIndex>(col), c_val);
-                        }
-                    }
-                    if (allow_condensed_native_rank_one_promotion) {
-                        backends::RankOneUpdate promoted;
-                        if (tryPromoteExactReducedUpdateToNativeRankOne(upd, promoted)) {
-                            promoted_condensed_rank_one = std::move(promoted);
+
+                    std::unordered_map<GlobalIndex, Real> upd_right_accum;
+                    upd_right_accum.reserve(owned_dofs.size());
+                    for (std::size_t i = 0; i < na; ++i) {
+                        const Real coeff = condensed_Dinv[j * na + i];
+                        if (std::abs(coeff) <= Real(1e-30)) {
                             continue;
                         }
+
+                        if (direct_ct_rows.row_covered[i]) {
+                            for (const auto& [dof, value] : direct_ct_rows.rows[i]) {
+                                upd_right_accum[dof] += coeff * value;
+                            }
+                            continue;
+                        }
+
+                        const auto row_offset = i * nf;
+                        for (const auto dof : owned_dofs) {
+                            const auto dof_idx = static_cast<std::size_t>(dof);
+                            if (dof_idx >= nf) {
+                                continue;
+                            }
+                            const Real c_val = solve_bordered.Ct[row_offset + dof_idx];
+                            if (std::abs(c_val) > Real(1e-30)) {
+                                upd_right_accum[dof] += coeff * c_val;
+                            }
+                        }
                     }
-                    if (!upd.left.empty() && !upd.right.empty()) {
-                        active_reduced_field_updates.push_back(std::move(upd));
+
+                    if (direct_ct_rows.row_covered[j]) {
+                        mode.right.insert(mode.right.end(),
+                                          direct_ct_rows.rows[j].begin(),
+                                          direct_ct_rows.rows[j].end());
+                    } else {
+                        for (const auto dof : owned_dofs) {
+                            const auto dof_idx = static_cast<std::size_t>(dof);
+                            if (dof_idx >= nf) {
+                                continue;
+                            }
+                            const Real c_val = solve_bordered.Ct[j * nf + dof_idx];
+                            if (std::abs(c_val) > Real(1e-30)) {
+                                mode.right.emplace_back(dof, c_val);
+                            }
+                        }
                     }
-                    if (!mode.left.empty() && !mode.right.empty()) {
-                        bordered_group.modes.push_back(std::move(mode));
+
+                    for (const auto& [dof, value] : upd_right_accum) {
+                        if (std::abs(value) > Real(1e-30)) {
+                            upd.right.emplace_back(dof, value);
+                        }
                     }
+                    std::sort(upd.right.begin(), upd.right.end(),
+                              [](const auto& a, const auto& b) { return a.first < b.first; });
+                    // Keep condensed bordered modes in reduced/grouped form so
+                    // the MPI path preserves the exact left/right factors.
+                    active_reduced_field_updates.push_back(std::move(upd));
+                    bordered_group.modes.push_back(std::move(mode));
                 }
-                if (promoted_condensed_rank_one.has_value()) {
-                    effective_rank_one_updates.push_back(std::move(*promoted_condensed_rank_one));
-                } else if (!independent_condensed_modes &&
-                           !bordered_group.aux_matrix.empty() &&
-                           !bordered_group.modes.empty()) {
+                if (!bordered_group.aux_matrix.empty() &&
+                    !bordered_group.modes.empty()) {
+                    // Preserve the condensed auxiliary block explicitly, even
+                    // for rank-1/diagonal cases. The grouped bordered path
+                    // lets BlockSchur apply the exact D block instead of only
+                    // the pre-collapsed D^{-1}C factor.
                     grouped_bordered_field_couplings.push_back(std::move(bordered_group));
                 }
 
                 if (oopTraceEnabled()) {
                     std::ostringstream oss;
+                    const auto covered_rows =
+                        static_cast<std::size_t>(std::count(direct_ct_rows.row_covered.begin(),
+                                                            direct_ct_rows.row_covered.end(),
+                                                            true));
                     oss << "NewtonSolver: condensed bordered coupling"
                         << " n_aux=" << na
                         << " n_field_dofs=" << nf
+                        << " direct_ct_rows=" << covered_rows
                         << " added_updates="
                         << (active_reduced_field_updates.size() -
                             effective_reduced_field_updates.size())
@@ -3706,6 +4093,22 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             }
         }
         linear_has_live_bordered = has_solve_bordered && !condensed_bordered_active;
+        const bool disable_local_condensed_recovery =
+            std::getenv("SVMP_DISABLE_LOCAL_CONDENSED_RECOVERY") != nullptr;
+        const bool use_local_condensed_recovery =
+            !disable_local_condensed_recovery &&
+            transient.system().hasLocalCondensedRecovery() &&
+            !(has_solve_bordered && condensed_bordered_active);
+        if (oopTraceEnabled() && transient.system().hasLocalCondensedRecovery()) {
+            std::ostringstream oss;
+            oss << "NewtonSolver: local condensed recovery"
+                << " enabled=" << (use_local_condensed_recovery ? 1 : 0)
+                << " disabled_by_env=" << (disable_local_condensed_recovery ? 1 : 0)
+                << " condensed_bordered_active=" << (condensed_bordered_active ? 1 : 0)
+                << " has_solve_bordered=" << (has_solve_bordered ? 1 : 0)
+                << " rhs_shift_size=" << transient.system().lastLocalCondensedRhsShift().size();
+            traceLog(oss.str());
+        }
 
         // Bridge rank-1 / reduced updates from coupled BC assembly to the linear
         // solver only after any bordered condensation has augmented the active
@@ -3742,10 +4145,12 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             condensed_bordered_active &&
             !has_native_direct_face_only_updates;
         const bool needs_strict_coupled_solve_options =
-            (has_solve_bordered && !condensed_bordered_active) ||
+            has_native_condensed_coupled_updates ||
+            ((has_solve_bordered && !condensed_bordered_active) &&
+             !has_native_rank_one_updates) ||
             (has_any_rank_one_updates && !has_native_rank_one_updates);
         const bool needs_validated_native_rank_one_options =
-            has_native_rank_one_updates && !(has_solve_bordered && !condensed_bordered_active);
+            has_native_rank_one_updates && !has_native_condensed_coupled_updates;
         std::vector<Real> aux_delta;
         std::vector<Real> solve_aux_delta;
         std::vector<Real> combined_reduced_rhs_shift;
@@ -3763,6 +4168,43 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 return std::isfinite(static_cast<double>(target)) &&
                        rep.final_residual_norm <= static_cast<double>(target);
             };
+        const auto reportMeetsRequestedLinearTargetWithinFactor =
+            [](const backends::SolverReport& rep,
+               const backends::SolverOptions& requested,
+               const Real factor) -> bool {
+                if (!(factor >= static_cast<Real>(1.0)) ||
+                    !std::isfinite(rep.initial_residual_norm) ||
+                    !std::isfinite(rep.final_residual_norm)) {
+                    return false;
+                }
+                const Real rhs_norm =
+                    std::max<Real>(static_cast<Real>(rep.initial_residual_norm), static_cast<Real>(1e-30));
+                const Real target = std::max(requested.abs_tol, requested.rel_tol * rhs_norm);
+                return std::isfinite(static_cast<double>(target)) &&
+                       rep.final_residual_norm <= static_cast<double>(factor * target);
+            };
+        const auto reportMeetsNonlinearAbsoluteLinearFloor =
+            [&](const backends::SolverReport& rep,
+                const Real residual_fraction,
+                const Real max_relative_residual) -> bool {
+                const bool strict_coupled_validation_active =
+                    mpiMultiTaskActive() &&
+                    (needs_strict_coupled_solve_options ||
+                     needs_validated_native_rank_one_options);
+                if (!strict_coupled_validation_active ||
+                    !(options_.abs_tolerance > 0.0) ||
+                    !(residual_fraction > static_cast<Real>(0.0)) ||
+                    !(max_relative_residual > static_cast<Real>(0.0)) ||
+                    !std::isfinite(rep.final_residual_norm) ||
+                    !std::isfinite(rep.relative_residual)) {
+                    return false;
+                }
+
+                const Real nonlinear_floor =
+                    static_cast<Real>(options_.abs_tolerance) * residual_fraction;
+                return rep.final_residual_norm <= static_cast<double>(nonlinear_floor) &&
+                       rep.relative_residual <= static_cast<double>(max_relative_residual);
+            };
 
         int ptc_retries = 0;
         while (true) {
@@ -3770,13 +4212,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             if (needs_strict_coupled_solve_options) {
                 linear.setOptions(makeBorderedSolveOptions(base_linear_options));
             } else if (needs_validated_native_rank_one_options) {
-                linear.setOptions((has_native_direct_face_only_updates ||
-                                   has_native_condensed_coupled_updates)
-                                      ? makeValidatedNativeRankOneSolveOptions(
-                                            base_linear_options,
-                                            native_direct_face_mode_count)
-                                      : makeBorderedSolveOptions(
-                                            base_linear_options));
+                linear.setOptions(makeValidatedNativeRankOneSolveOptions(
+                    base_linear_options,
+                    native_direct_face_mode_count));
             }
             if (has_solve_bordered && !condensed_bordered_active) {
                 fsils_matrix_snapshot = captureFsilsMatrixSnapshot(J);
@@ -3790,7 +4228,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 reduced_rhs_shift = &algebraic_aux_reduction.rhs_shift;
             }
             const auto local_condensed_rhs_shift =
-                transient.system().lastLocalCondensedRhsShift();
+                use_local_condensed_recovery
+                    ? transient.system().lastLocalCondensedRhsShift()
+                    : std::span<const Real>{};
             if (!local_condensed_rhs_shift.empty()) {
                 if (reduced_rhs_shift != nullptr) {
                     combined_reduced_rhs_shift = *reduced_rhs_shift;
@@ -3925,23 +4365,41 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             const bool meets_original_linear_target =
                 (needs_strict_coupled_solve_options || needs_validated_native_rank_one_options) &&
                 reportMeetsRequestedLinearTarget(report.linear, bordered_solver_options_guard.saved);
-            if (meets_original_linear_target) {
+            const bool meets_nonlinear_linear_floor =
+                reportMeetsNonlinearAbsoluteLinearFloor(report.linear,
+                                                        static_cast<Real>(0.1),
+                                                        static_cast<Real>(0.1));
+            if (meets_original_linear_target || meets_nonlinear_linear_floor) {
                 report.linear.converged = true;
                 const Real rhs_norm =
                     std::max<Real>(static_cast<Real>(report.linear.initial_residual_norm),
                                    static_cast<Real>(1e-30));
                 const Real target = std::max(bordered_solver_options_guard.saved.abs_tol,
                                              bordered_solver_options_guard.saved.rel_tol * rhs_norm);
+                const char* acceptance_note =
+                    meets_original_linear_target
+                        ? "accepted original coupled target"
+                        : "accepted nonlinear absolute floor";
                 if (report.linear.message.empty()) {
-                    report.linear.message = "accepted original coupled target";
-                } else if (report.linear.message.find("accepted original coupled target") ==
-                           std::string::npos) {
-                    report.linear.message += " (accepted original coupled target)";
+                    report.linear.message = acceptance_note;
+                } else if (report.linear.message.find(acceptance_note) == std::string::npos) {
+                    report.linear.message += " (";
+                    report.linear.message += acceptance_note;
+                    report.linear.message += ")";
                 }
                 if (oopTraceEnabled()) {
                     std::ostringstream oss;
-                    oss << "NewtonSolver: accepting coupled linear solution at original target"
-                        << " rn=" << report.linear.final_residual_norm
+                    oss << "NewtonSolver: accepting coupled linear solution";
+                    if (meets_original_linear_target) {
+                        oss << " at original target";
+                    } else {
+                        oss << " at nonlinear absolute floor"
+                            << " floor="
+                            << static_cast<Real>(options_.abs_tolerance) *
+                                   static_cast<Real>(0.1)
+                            << " rel_limit=0.1";
+                    }
+                    oss << " rn=" << report.linear.final_residual_norm
                         << " target=" << target;
                     traceLog(oss.str());
                 }
@@ -4027,14 +4485,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         systems::InvalidStateException,
                         "NewtonSolver: bordered coupling storage size mismatch");
 
-            auto gatherDenseVector = [](backends::GenericVector& vec, std::size_t n) {
-                auto view = vec.createAssemblyView();
-                FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: bordered dense gather view");
-                std::vector<Real> dense(n, 0.0);
-                for (std::size_t k = 0; k < n; ++k) {
-                    dense[k] = view->getVectorEntry(static_cast<GlobalIndex>(k));
-                }
-                return dense;
+            auto gatherDenseVector = [&](backends::GenericVector& vec, std::size_t n) {
+                return gatherGlobalDenseVectorFromOwnedEntries(vec, n, owned_dofs);
             };
 
             auto scatterDenseVector = [](backends::GenericVector& vec, std::span<const Real> dense) {
@@ -4050,88 +4502,212 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             };
 
             copyVector(residual_base, du);
-            const auto u0 = gatherDenseVector(residual_base, nf);
-            std::vector<Real> z_columns(nf * na, 0.0);
+            auto dense_du = gatherDenseVector(residual_base, nf);
 
-            {
-                SolverOptionsGuard bordered_solver_options_guard{linear, base_linear_options};
-                linear.setOptions(makeBorderedSolveOptions(base_linear_options));
+            // In this branch the dynamic bordered block has not been condensed into
+            // the main PDE operator. Native reduced/rank-one updates may still be
+            // active for direct outlet coupling and algebraic auxiliary elimination,
+            // but they do not include the dynamic -B D^{-1} C^T correction.
+            // Recover the bordered Schur step explicitly from K_eff^{-1} B.
+            const bool solve_already_includes_bordered_reduction = false;
 
-                for (std::size_t j = 0; j < na; ++j) {
-                    restoreFsilsMatrixSnapshot(J, fsils_matrix_snapshot);
+            if (solve_already_includes_bordered_reduction) {
+                std::vector<Real> dense_Dinv;
+                FE_THROW_IF(!invertDenseMatrix(solve_bordered.D, na, dense_Dinv),
+                            systems::InvalidStateException,
+                            "NewtonSolver: bordered auxiliary recovery D inversion failed");
 
-                    residual_scratch.zero();
-                    {
-                        auto rhs_view = residual_scratch.createAssemblyView();
-                        FE_CHECK_NOT_NULL(rhs_view.get(), "NewtonSolver: bordered rhs view");
-                        rhs_view->beginAssemblyPhase();
-                        for (std::size_t row = 0; row < nf; ++row) {
-                            const Real bij = solve_bordered.B[row + nf * j];
-                            if (std::abs(bij) > Real(1e-30)) {
-                                rhs_view->addVectorEntry(static_cast<GlobalIndex>(row),
-                                                         bij,
-                                                         assembly::AddMode::Add);
-                            }
+                const auto direct_ct_du =
+                    projectCtDuFromDirectCouplingRecords(solve_bordered, dense_du);
+
+                if (oopTraceEnabled()) {
+                    std::size_t covered_rows = 0;
+                    Real max_abs_diff = Real(0.0);
+                    for (std::size_t i = 0; i < na; ++i) {
+                        if (!direct_ct_du.row_covered[i]) {
+                            continue;
                         }
-                        rhs_view->finalizeAssembly();
+                        ++covered_rows;
+                        Real dense_row_value = Real(0.0);
+                        for (std::size_t k = 0; k < nf; ++k) {
+                            dense_row_value += solve_bordered.Ct[i * nf + k] * dense_du[k];
+                        }
+                        max_abs_diff = std::max(
+                            max_abs_diff,
+                            std::abs(direct_ct_du.values[i] - dense_row_value));
                     }
-
-                    du.zero();
-                    ntp0 = NTP();
-                    const auto z_report = linear.solve(J, du, residual_scratch);
-                    ntp_linear += NTP() - ntp0;
-                    ntp_linear_iters_total += z_report.iterations;
-                    normalizeFsilsPostSolveIncrementIfNeeded(du);
-                    FE_THROW_IF(!z_report.converged, FEException,
-                                "NewtonSolver: bordered K^{-1}B solve did not converge: " +
-                                    z_report.message);
-
-                    const auto z_col = gatherDenseVector(du, nf);
-                    for (std::size_t row = 0; row < nf; ++row) {
-                        z_columns[j * nf + row] = z_col[row];
-                    }
-
-                    if (oopTraceEnabled()) {
-                        const auto z_norm = std::sqrt(std::inner_product(
-                            z_col.begin(), z_col.end(), z_col.begin(), Real(0.0)));
+                    if (covered_rows > 0) {
                         std::ostringstream oss;
-                        oss << "NewtonSolver: bordered column " << j
-                            << " ||K^{-1}B_j||=" << z_norm
-                            << " iters=" << z_report.iterations;
+                        oss << "NewtonSolver: direct-record Ct projection"
+                            << " covered_rows=" << covered_rows
+                            << " max_abs_diff_vs_dense=" << max_abs_diff;
                         traceLog(oss.str());
                     }
                 }
-            }
 
-            std::vector<Real> schur = solve_bordered.D;
-            for (std::size_t i = 0; i < na; ++i) {
-                for (std::size_t j = 0; j < na; ++j) {
-                    Real ctz = 0.0;
-                    for (std::size_t k = 0; k < nf; ++k) {
-                        ctz += solve_bordered.Ct[i * nf + k] * z_columns[j * nf + k];
+                std::vector<Real> aux_rhs(na, Real(0.0));
+                for (std::size_t i = 0; i < na; ++i) {
+                    Real value = solve_bordered.g[i];
+                    if (direct_ct_du.row_covered[i]) {
+                        value -= direct_ct_du.values[i];
+                    } else {
+                        for (std::size_t k = 0; k < nf; ++k) {
+                            value -= solve_bordered.Ct[i * nf + k] * dense_du[k];
+                        }
                     }
-                    schur[i * na + j] -= ctz;
+                    aux_rhs[i] = value;
                 }
+
+                solve_aux_delta.assign(na, Real(0.0));
+                for (std::size_t i = 0; i < na; ++i) {
+                    for (std::size_t j = 0; j < na; ++j) {
+                        solve_aux_delta[i] += dense_Dinv[i * na + j] * aux_rhs[j];
+                    }
+                }
+            } else {
+                const auto u0 = dense_du;
+                std::vector<Real> z_columns(nf * na, 0.0);
+
+                {
+                    SolverOptionsGuard bordered_solver_options_guard{linear, base_linear_options};
+                    const auto bordered_recovery_options =
+                        makeBorderedSolveOptions(base_linear_options);
+                    linear.setOptions(bordered_recovery_options);
+
+                    for (std::size_t j = 0; j < na; ++j) {
+                        restoreFsilsMatrixSnapshot(J, fsils_matrix_snapshot);
+
+                        residual_scratch.zero();
+                        {
+                            auto rhs_view = residual_scratch.createAssemblyView();
+                            FE_CHECK_NOT_NULL(rhs_view.get(), "NewtonSolver: bordered rhs view");
+                            rhs_view->beginAssemblyPhase();
+                            for (std::size_t row = 0; row < nf; ++row) {
+                                const Real bij = solve_bordered.B[row + nf * j];
+                                if (std::abs(bij) > Real(1e-30)) {
+                                    rhs_view->addVectorEntry(static_cast<GlobalIndex>(row),
+                                                             bij,
+                                                             assembly::AddMode::Add);
+                                }
+                            }
+                            rhs_view->finalizeAssembly();
+                        }
+
+                        du.zero();
+                        ntp0 = NTP();
+                        const auto z_report = linear.solve(J, du, residual_scratch);
+                        ntp_linear += NTP() - ntp0;
+                        ntp_linear_iters_total += z_report.iterations;
+                        normalizeFsilsPostSolveIncrementIfNeeded(du);
+                        bool z_converged = z_report.converged;
+                        if (!z_converged &&
+                            has_native_rank_one_updates &&
+                            reportMeetsRequestedLinearTarget(z_report, base_linear_options)) {
+                            z_converged = true;
+                            if (oopTraceEnabled()) {
+                                const Real rhs_norm =
+                                    std::max<Real>(static_cast<Real>(z_report.initial_residual_norm),
+                                                   static_cast<Real>(1e-30));
+                                const Real target =
+                                    std::max(base_linear_options.abs_tol,
+                                             base_linear_options.rel_tol * rhs_norm);
+                                std::ostringstream oss;
+                                oss << "NewtonSolver: accepting bordered K^{-1}B recovery at original target"
+                                    << " rn=" << z_report.final_residual_norm
+                                    << " target=" << target
+                                    << " iters=" << z_report.iterations;
+                                traceLog(oss.str());
+                            }
+                        } else if (!z_converged &&
+                                   has_native_rank_one_updates &&
+                                   mpiMultiTaskActive() &&
+                                   reportMeetsRequestedLinearTargetWithinFactor(
+                                       z_report, base_linear_options, static_cast<Real>(4.0))) {
+                            z_converged = true;
+                            if (oopTraceEnabled()) {
+                                const Real rhs_norm =
+                                    std::max<Real>(static_cast<Real>(z_report.initial_residual_norm),
+                                                   static_cast<Real>(1e-30));
+                                const Real target =
+                                    std::max(base_linear_options.abs_tol,
+                                             base_linear_options.rel_tol * rhs_norm);
+                                std::ostringstream oss;
+                                oss << "NewtonSolver: accepting bordered K^{-1}B recovery near target"
+                                    << " rn=" << z_report.final_residual_norm
+                                    << " target=" << target
+                                    << " factor=4"
+                                    << " iters=" << z_report.iterations;
+                                traceLog(oss.str());
+                            }
+                        }
+                        FE_THROW_IF(!z_converged, FEException,
+                                    "NewtonSolver: bordered K^{-1}B solve did not converge: " +
+                                        z_report.message);
+
+                        const auto z_col = gatherDenseVector(du, nf);
+                        for (std::size_t row = 0; row < nf; ++row) {
+                            z_columns[j * nf + row] = z_col[row];
+                        }
+
+                        if (oopTraceEnabled()) {
+                            const auto z_norm = std::sqrt(std::inner_product(
+                                z_col.begin(), z_col.end(), z_col.begin(), Real(0.0)));
+                            std::ostringstream oss;
+                            oss << "NewtonSolver: bordered column " << j
+                                << " ||K^{-1}B_j||=" << z_norm
+                                << " iters=" << z_report.iterations;
+                            traceLog(oss.str());
+                        }
+                    }
+                }
+
+                std::vector<Real> schur = solve_bordered.D;
+                const auto direct_ct_u0 =
+                    projectCtDuFromDirectCouplingRecords(solve_bordered, u0);
+                for (std::size_t j = 0; j < na; ++j) {
+                    const auto z_col =
+                        std::span<const Real>(z_columns.data() +
+                                                  static_cast<std::ptrdiff_t>(j * nf),
+                                              nf);
+                    const auto direct_ct_z =
+                        projectCtDuFromDirectCouplingRecords(solve_bordered, z_col);
+                    for (std::size_t i = 0; i < na; ++i) {
+                        Real ctz = Real(0.0);
+                        if (direct_ct_z.row_covered[i]) {
+                            ctz = direct_ct_z.values[i];
+                        } else {
+                            for (std::size_t k = 0; k < nf; ++k) {
+                                ctz += solve_bordered.Ct[i * nf + k] * z_columns[j * nf + k];
+                            }
+                        }
+                        schur[i * na + j] -= ctz;
+                    }
+                }
+
+                solve_aux_delta = solve_bordered.g;
+                for (std::size_t i = 0; i < na; ++i) {
+                    if (direct_ct_u0.row_covered[i]) {
+                        solve_aux_delta[i] -= direct_ct_u0.values[i];
+                    } else {
+                        for (std::size_t k = 0; k < nf; ++k) {
+                            solve_aux_delta[i] -= solve_bordered.Ct[i * nf + k] * u0[k];
+                        }
+                    }
+                }
+
+                FE_THROW_IF(!solveDenseLinearSystem(schur, solve_aux_delta),
+                            systems::InvalidStateException,
+                            "NewtonSolver: bordered Schur solve failed");
+
+                for (std::size_t j = 0; j < na; ++j) {
+                    const Real dxj = solve_aux_delta[j];
+                    for (std::size_t k = 0; k < nf; ++k) {
+                        dense_du[k] -= z_columns[j * nf + k] * dxj;
+                    }
+                }
+                scatterDenseVector(du, dense_du);
             }
 
-            solve_aux_delta = solve_bordered.g;
-            for (std::size_t i = 0; i < na; ++i) {
-                for (std::size_t k = 0; k < nf; ++k) {
-                    solve_aux_delta[i] -= solve_bordered.Ct[i * nf + k] * u0[k];
-                }
-            }
-
-            FE_THROW_IF(!solveDenseLinearSystem(schur, solve_aux_delta), systems::InvalidStateException,
-                        "NewtonSolver: bordered Schur solve failed");
-
-            std::vector<Real> dense_du = u0;
-            for (std::size_t j = 0; j < na; ++j) {
-                const Real dxj = solve_aux_delta[j];
-                for (std::size_t k = 0; k < nf; ++k) {
-                    dense_du[k] -= z_columns[j * nf + k] * dxj;
-                }
-            }
-            scatterDenseVector(du, dense_du);
             aux_delta = recoverAuxiliaryDeltaFromReduction(
                 algebraic_aux_reduction, dense_du, solve_aux_delta);
 
@@ -4186,18 +4762,19 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         systems::InvalidStateException,
                         "NewtonSolver: condensed bordered storage size mismatch");
 
-            auto du_view = du.createAssemblyView();
-            FE_CHECK_NOT_NULL(du_view.get(), "NewtonSolver: condensed du view");
-            std::vector<Real> dense_du(nf, Real(0.0));
-            for (std::size_t k = 0; k < nf; ++k) {
-                dense_du[k] = du_view->getVectorEntry(static_cast<GlobalIndex>(k));
-            }
+            const auto dense_du = gatherGlobalDenseVectorFromOwnedEntries(du, nf, owned_dofs);
+            const auto direct_ct_du =
+                projectCtDuFromDirectCouplingRecords(solve_bordered, dense_du);
 
             std::vector<Real> aux_rhs(na, Real(0.0));
             for (std::size_t i = 0; i < na; ++i) {
                 Real value = solve_bordered.g[i];
-                for (std::size_t k = 0; k < nf; ++k) {
-                    value -= solve_bordered.Ct[i * nf + k] * dense_du[k];
+                if (direct_ct_du.row_covered[i]) {
+                    value -= direct_ct_du.values[i];
+                } else {
+                    for (std::size_t k = 0; k < nf; ++k) {
+                        value -= solve_bordered.Ct[i * nf + k] * dense_du[k];
+                    }
                 }
                 aux_rhs[i] = value;
             }
@@ -4259,12 +4836,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 traceLog(lin_oss.str());
             }
         } else if (algebraic_aux_reduction.active) {
-            auto du_view = du.createAssemblyView();
-            FE_CHECK_NOT_NULL(du_view.get(), "NewtonSolver: algebraic-only du view");
-            std::vector<Real> dense_du(J.numRows(), Real(0.0));
-            for (std::size_t k = 0; k < dense_du.size(); ++k) {
-                dense_du[k] = du_view->getVectorEntry(static_cast<GlobalIndex>(k));
-            }
+            const auto dense_du =
+                gatherGlobalDenseVectorFromOwnedEntries(du, static_cast<std::size_t>(J.numRows()), owned_dofs);
             aux_delta = recoverAuxiliaryDeltaFromReduction(
                 algebraic_aux_reduction, dense_du, std::span<const Real>{});
         }
@@ -4324,7 +4897,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             if (!aux_delta.empty()) {
                 applyAuxiliaryDelta(transient.system(), bordered_full, aux_delta, static_cast<Real>(1.0));
             }
-            if (transient.system().hasLocalCondensedRecovery()) {
+            if (use_local_condensed_recovery) {
                 const auto dense_du = gatherDenseFieldDelta();
                 transient.system().applyLocalCondensedRecovery(dense_du, static_cast<Real>(1.0));
             }
@@ -4358,16 +4931,42 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         // Backtracking line search: choose alpha in (0,1] so the residual norm decreases.
         copyVector(u_backup, history.u());
         const auto aux_state_backup =
-            (aux_delta.empty() && !transient.system().hasLocalCondensedRecovery())
+            (aux_delta.empty() && !use_local_condensed_recovery)
                 ? std::vector<Real>{}
                 : transient.system().checkpointAuxiliaryState();
         const auto dense_du_for_aux =
-            transient.system().hasLocalCondensedRecovery()
+            use_local_condensed_recovery
                 ? gatherDenseFieldDelta()
                 : std::vector<Real>{};
         const auto bordered_backup = transient.system().borderedCoupling();
         const double r_norm0 = current_residual_norm;
         const double r_norm0_sq = r_norm0 * r_norm0;
+        auto evaluateLineSearchTrial = [&](double trial_alpha, const char* phase) -> double {
+            copyVector(history.u(), u_backup);
+            if (!aux_state_backup.empty()) {
+                transient.system().restoreAuxiliaryState(aux_state_backup);
+            }
+            transient.system().borderedCoupling() = bordered_backup;
+            if (!aux_state_backup.empty()) {
+                applyAuxiliaryDelta(
+                    transient.system(), bordered_full, aux_delta, static_cast<Real>(trial_alpha));
+                if (!dense_du_for_aux.empty()) {
+                    transient.system().applyLocalCondensedRecovery(
+                        dense_du_for_aux, static_cast<Real>(trial_alpha));
+                }
+            }
+            if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
+                reg->invalidateAll();
+            }
+            axpy(history.u(), static_cast<Real>(-trial_alpha), du);
+            if (!constraints.empty()) {
+                constraints.distribute(history.u());
+            }
+            history.u().updateGhosts();
+
+            auto trial_state_holder = makeNewtonState(history, solve_time);
+            return assembleResidualOnly(trial_state_holder.view, phase);
+        };
 
         double alpha = 1.0;
         double last_tried_alpha = 0.0;
@@ -4391,29 +4990,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
         for (int ls = 0; ls < line_search_iteration_budget; ++ls) {
             last_tried_alpha = alpha;
-            copyVector(history.u(), u_backup);
-            if (!aux_state_backup.empty()) {
-                transient.system().restoreAuxiliaryState(aux_state_backup);
-            }
-            transient.system().borderedCoupling() = bordered_backup;
-            if (!aux_state_backup.empty()) {
-                applyAuxiliaryDelta(transient.system(), bordered_full, aux_delta, static_cast<Real>(alpha));
-                if (!dense_du_for_aux.empty()) {
-                    transient.system().applyLocalCondensedRecovery(dense_du_for_aux,
-                                                                   static_cast<Real>(alpha));
-                }
-            }
-            if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
-                reg->invalidateAll();
-            }
-            axpy(history.u(), static_cast<Real>(-alpha), du);
-            if (!constraints.empty()) {
-                constraints.distribute(history.u());
-            }
-            history.u().updateGhosts();
-
-            auto trial_state_holder = makeNewtonState(history, solve_time);
-            trial_norm = assembleResidualOnly(trial_state_holder.view, /*phase=*/"line_search");
+            trial_norm = evaluateLineSearchTrial(alpha, /*phase=*/"line_search");
 
             bool ok = false;
             if (std::isfinite(trial_norm) && std::isfinite(r_norm0)) {
@@ -4462,21 +5039,40 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             }
         }
 
-        if (!accepted && oopTraceEnabled()) {
-            std::ostringstream oss;
-            alpha = last_tried_alpha;
-            oss << "NewtonSolver: line search did not satisfy decrease; keeping last trial alpha=" << alpha
-                << " ||r(alpha)||=" << trial_norm;
-            traceLog(oss.str());
-        } else if (!accepted) {
-            alpha = last_tried_alpha;
+        bool reverted_to_original = false;
+        if (!accepted) {
+            if (have_best_trial && std::isfinite(best_trial_norm) && best_trial_norm < r_norm0) {
+                alpha = best_alpha;
+                if (best_alpha != last_tried_alpha) {
+                    trial_norm = evaluateLineSearchTrial(alpha, /*phase=*/"line_search_best");
+                } else {
+                    trial_norm = best_trial_norm;
+                }
+                if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: line search did not satisfy Armijo; keeping best trial alpha="
+                        << alpha << " ||r(alpha)||=" << trial_norm;
+                    traceLog(oss.str());
+                }
+            } else {
+                alpha = 0.0;
+                trial_norm = evaluateLineSearchTrial(alpha, /*phase=*/"line_search_reject");
+                reverted_to_original = true;
+                if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: line search did not reduce residual; reverting to original iterate"
+                        << " ||r||=" << trial_norm;
+                    traceLog(oss.str());
+                }
+            }
         }
 
-        // `history.u` and `r` already correspond to the last trial (accepted or fallback).
+        // `history.u` and `r` now correspond to the accepted trial, the best fallback
+        // trial, or the restored original iterate.
         current_residual_norm = trial_norm;
         have_residual = std::isfinite(current_residual_norm);
 
-        if (options_.step_tolerance > 0.0) {
+        if (!reverted_to_original && options_.step_tolerance > 0.0) {
             const double step_norm = alpha * du_norm;
             if (oopTraceEnabled()) {
                 std::ostringstream oss;
@@ -4495,7 +5091,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             }
         }
 
-        if (tolerancesSatisfied(current_residual_norm, /*pre_first_update=*/false)) {
+        if (!reverted_to_original &&
+            tolerancesSatisfied(current_residual_norm, /*pre_first_update=*/false)) {
             report.converged = true;
             report.iterations = it + 1;
             report.residual_norm = current_residual_norm;

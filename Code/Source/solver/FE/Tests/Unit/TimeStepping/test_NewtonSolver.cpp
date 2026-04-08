@@ -698,7 +698,7 @@ TEST(NewtonSolverLineSearch, StepToleranceUsesLastTriedAlphaWhenMaxIterationsRea
     problem.history.repack(*problem.factory);
 
     // Flip the Newton direction so the Armijo condition can never be satisfied. When the
-    // line search hits its max iterations, step_tolerance must use the last tried alpha.
+    // line search cannot find a decreasing trial, the solver must reject the update.
     ScalingLinearSolver linear(*problem.linear, /*scale=*/-1.0);
     const auto rep = newton.solveStep(*problem.transient, linear, /*solve_time=*/problem.history.dt(), problem.history, ws);
 

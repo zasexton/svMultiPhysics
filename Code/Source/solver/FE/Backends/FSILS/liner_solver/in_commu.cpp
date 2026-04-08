@@ -46,6 +46,18 @@
 
 namespace fe_fsi_linear_solver {
 
+namespace {
+
+constexpr int kFsilsScalarCommTag = 1101;
+constexpr int kFsilsVectorCommTagBase = 1200;
+
+[[nodiscard]] inline int fsils_vector_comm_tag(int dof) noexcept
+{
+  return kFsilsVectorCommTagBase + ((dof > 0) ? dof : 0);
+}
+
+} // namespace
+
 void fsils_commus(const FSILS_lhsType& lhs, Vector<double>& R)
 {
   if (lhs.commu.nTasks == 1) {
@@ -74,7 +86,7 @@ void fsils_commus(const FSILS_lhsType& lhs, Vector<double>& R)
     }
   }
 
-  int mpi_tag = 1;
+  const int mpi_tag = kFsilsScalarCommTag;
 
   for (int i = 0; i < nReq; i++) {
     MPI_Irecv(&rB[i*nmax], lhs.cS[i].n, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &rReq[i]);
@@ -91,6 +103,22 @@ void fsils_commus(const FSILS_lhsType& lhs, Vector<double>& R)
   }
 
   MPI_Waitall(nReq, sReq.data(), MPI_STATUSES_IGNORE);
+}
+
+void fsils_syncs(const FSILS_lhsType& lhs, Vector<double>& R)
+{
+  if (lhs.commu.nTasks == 1) {
+    return;
+  }
+
+  if (lhs.cS.size() == 0 || lhs.nReq == 0) {
+    return;
+  }
+
+  for (fsils_int k = lhs.mynNo; k < lhs.nNo; ++k) {
+    R(k) = 0.0;
+  }
+  fsils_commus(lhs, R);
 }
 
 /// @brief This a both way communication with three main part:
@@ -131,7 +159,7 @@ void fsils_commuv(const FSILS_lhsType& lhs, int dof, Array<double>& R)
     }
   }
 
-  int mpi_tag = 1;
+  const int mpi_tag = fsils_vector_comm_tag(dof);
 
   for (int i = 0; i < nReq; i++) {
     MPI_Irecv(&rB[i*slice_sz], lhs.cS[i].n*dof, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &rReq[i]);
@@ -150,6 +178,24 @@ void fsils_commuv(const FSILS_lhsType& lhs, int dof, Array<double>& R)
   }
 
   MPI_Waitall(nReq, sReq.data(), MPI_STATUSES_IGNORE);
+}
+
+void fsils_syncv(const FSILS_lhsType& lhs, int dof, Array<double>& R)
+{
+  if (lhs.commu.nTasks == 1) {
+    return;
+  }
+
+  if (lhs.cS.size() == 0 || lhs.nReq == 0) {
+    return;
+  }
+
+  for (fsils_int k = lhs.mynNo; k < lhs.nNo; ++k) {
+    for (int l = 0; l < dof; ++l) {
+      R(l, k) = 0.0;
+    }
+  }
+  fsils_commuv(lhs, dof, R);
 }
 
 /// @brief Begin async scalar communication: pack + post Isend/Irecv.
@@ -175,7 +221,7 @@ void fsils_commus_begin(const FSILS_lhsType& lhs, Vector<double>& R)
     }
   }
 
-  int mpi_tag = 1;
+  const int mpi_tag = kFsilsScalarCommTag;
   for (int i = 0; i < nReq; i++) {
     MPI_Irecv(&rB[i*nmax], lhs.cS[i].n, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &rReq[i]);
     MPI_Isend(&sB[i*nmax], lhs.cS[i].n, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &sReq[i]);
@@ -232,7 +278,7 @@ void fsils_commuv_begin(const FSILS_lhsType& lhs, int dof, Array<double>& R)
     }
   }
 
-  int mpi_tag = 1;
+  const int mpi_tag = fsils_vector_comm_tag(dof);
   for (int i = 0; i < nReq; i++) {
     MPI_Irecv(&rB[i*slice_sz], lhs.cS[i].n*dof, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &rReq[i]);
     MPI_Isend(&sB[i*slice_sz], lhs.cS[i].n*dof, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &sReq[i]);
@@ -267,5 +313,3 @@ void fsils_commuv_end(const FSILS_lhsType& lhs, int dof, Array<double>& R)
 }
 
 };
-
-

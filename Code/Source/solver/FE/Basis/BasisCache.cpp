@@ -6,8 +6,6 @@
  */
 
 #include "BasisCache.h"
-#include <numeric>
-
 namespace svmp {
 namespace FE {
 namespace basis {
@@ -23,14 +21,10 @@ const BasisCacheEntry& BasisCache::get_or_compute(
     bool gradients,
     bool hessians) {
     BasisCacheKey key{
-        std::type_index(typeid(basis)),
-        basis.basis_type(),
-        basis.element_type(),
-        basis.order(),
-        quadrature_hash(quad),
+        basis.cache_identity(),
+        quad.cache_identity(),
         gradients,
-        hessians,
-        basis.is_vector_valued()
+        hessians
     };
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -102,19 +96,6 @@ BasisCacheEntry BasisCache::compute(const BasisFunction& basis,
 
     return entry;
 }
-
-std::size_t BasisCache::quadrature_hash(const quadrature::QuadratureRule& quad) const {
-    std::size_t h = quad.num_points();
-    h ^= static_cast<std::size_t>(quad.dimension()) << 8;
-    h ^= static_cast<std::size_t>(quad.order()) << 16;
-    const auto& pts = quad.points();
-    for (std::size_t i = 0; i < std::min<std::size_t>(pts.size(), 4); ++i) {
-        h ^= std::hash<Real>()(pts[i][0]) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-        h ^= std::hash<Real>()(pts[i][1]) + 0x9e3779b97f4a7c15ULL + (h << 5) + (h >> 3);
-    }
-    return h;
-}
-
 } // namespace basis
 } // namespace FE
 } // namespace svmp

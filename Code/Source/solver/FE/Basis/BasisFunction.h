@@ -21,8 +21,9 @@
 #include "Core/FEException.h"
 #include "Math/Vector.h"
 #include "Math/Matrix.h"
-#include <vector>
 #include <functional>
+#include <string>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -59,6 +60,14 @@ public:
 
     /// Whether the basis is vector-valued (H(div)/H(curl))
     virtual bool is_vector_valued() const noexcept { return false; }
+
+    /**
+     * @brief Stable semantic identity used by BasisCache
+     *
+     * Derived classes should override this when evaluation depends on
+     * additional state beyond basis family / element / order metadata.
+     */
+    virtual std::string cache_identity() const;
 
     /**
      * @brief Evaluate scalar basis values at a reference point

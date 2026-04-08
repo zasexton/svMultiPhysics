@@ -1203,326 +1203,7 @@ inline void eval_pyramid_nd2_direct(const Vec3& xi, std::vector<Vec3>& values) {
     values[idx++] = Vec3{Real(0), Real(0), bubble * Real(120)};
 }
 
-// Flag to indicate direct construction is used (bypass modal approach)
-constexpr bool USE_DIRECT_WEDGE_PYRAMID_CONSTRUCTION = true;
-
-inline Real integral_monomial_1d(int p) {
-    FE_CHECK_ARG(p >= 0, "integral_monomial_1d: negative power");
-    if (p % 2 != 0) {
-        return Real(0);
-    }
-    return Real(2) / static_cast<Real>(p + 1);
-}
-
-inline Real factorial_int(int n) {
-    FE_CHECK_ARG(n >= 0, "factorial_int: negative argument");
-    return std::tgamma(static_cast<Real>(n) + Real(1));
-}
-
-inline Real integral_triangle_monomial(int px, int py) {
-    // Reference triangle: (0,0), (1,0), (0,1)
-    FE_CHECK_ARG(px >= 0 && py >= 0, "integral_triangle_monomial: negative power");
-    return factorial_int(px) * factorial_int(py) / factorial_int(px + py + 2);
-}
-
-inline Real integral_tetra_monomial(int px, int py, int pz) {
-    // Reference tetrahedron: (0,0,0), (1,0,0), (0,1,0), (0,0,1)
-    FE_CHECK_ARG(px >= 0 && py >= 0 && pz >= 0, "integral_tetra_monomial: negative power");
-    return factorial_int(px) * factorial_int(py) * factorial_int(pz) / factorial_int(px + py + pz + 3);
-}
-
-inline Vec3 lerp(const Vec3& a, const Vec3& b, Real s) {
-    // s in [-1,1], map to t in [0,1]
-    const Real t = (s + Real(1)) * Real(0.5);
-    return a * (Real(1) - t) + b * t;
-}
-
-inline Vec3 bilinear(const std::array<Vec3, 4>& v, Real u, Real w) {
-    const Real N0 = Real(0.25) * (Real(1) - u) * (Real(1) - w);
-    const Real N1 = Real(0.25) * (Real(1) + u) * (Real(1) - w);
-    const Real N2 = Real(0.25) * (Real(1) + u) * (Real(1) + w);
-    const Real N3 = Real(0.25) * (Real(1) - u) * (Real(1) + w);
-    return v[0] * N0 + v[1] * N1 + v[2] * N2 + v[3] * N3;
-}
-
-inline Vec3 bilinear_du(const std::array<Vec3, 4>& v, Real u, Real w) {
-    (void)u;
-    const Real dN0 = -Real(0.25) * (Real(1) - w);
-    const Real dN1 =  Real(0.25) * (Real(1) - w);
-    const Real dN2 =  Real(0.25) * (Real(1) + w);
-    const Real dN3 = -Real(0.25) * (Real(1) + w);
-    return v[0] * dN0 + v[1] * dN1 + v[2] * dN2 + v[3] * dN3;
-}
-
-inline Vec3 bilinear_dw(const std::array<Vec3, 4>& v, Real u, Real w) {
-    (void)w;
-    const Real dN0 = -Real(0.25) * (Real(1) - u);
-    const Real dN1 = -Real(0.25) * (Real(1) + u);
-    const Real dN2 =  Real(0.25) * (Real(1) + u);
-    const Real dN3 =  Real(0.25) * (Real(1) - u);
-    return v[0] * dN0 + v[1] * dN1 + v[2] * dN2 + v[3] * dN3;
-}
-
-inline Vec3 cross3(const Vec3& a, const Vec3& b) {
-    return Vec3{a[1] * b[2] - a[2] * b[1],
-                a[2] * b[0] - a[0] * b[2],
-                a[0] * b[1] - a[1] * b[0]};
-}
-
-inline Vec3 normalize3(const Vec3& v) {
-    const Real n = v.norm();
-    FE_CHECK_ARG(n > std::numeric_limits<Real>::epsilon(), "normalize3: zero-length vector");
-    return v / n;
-}
-
-inline std::vector<Real> invert_dense_matrix(std::vector<Real> A, std::size_t n) {
-    FE_CHECK_ARG(A.size() == n * n, "invert_dense_matrix: size mismatch");
-
-    std::vector<Real> inv(n * n, Real(0));
-    for (std::size_t i = 0; i < n; ++i) {
-        inv[i * n + i] = Real(1);
-    }
-
-    const Real eps = std::numeric_limits<Real>::epsilon();
-
-    for (std::size_t k = 0; k < n; ++k) {
-        std::size_t piv = k;
-        Real piv_val = std::abs(A[k * n + k]);
-        for (std::size_t r = k + 1; r < n; ++r) {
-            const Real v = std::abs(A[r * n + k]);
-            if (v > piv_val) {
-                piv_val = v;
-                piv = r;
-            }
-        }
-        FE_CHECK_ARG(piv_val > eps, "invert_dense_matrix: singular matrix");
-
-        if (piv != k) {
-            for (std::size_t c = 0; c < n; ++c) {
-                std::swap(A[k * n + c], A[piv * n + c]);
-                std::swap(inv[k * n + c], inv[piv * n + c]);
-            }
-        }
-
-        const Real diag = A[k * n + k];
-        FE_CHECK_ARG(std::abs(diag) > eps, "invert_dense_matrix: zero pivot");
-        const Real inv_diag = Real(1) / diag;
-
-        for (std::size_t c = 0; c < n; ++c) {
-            A[k * n + c] *= inv_diag;
-            inv[k * n + c] *= inv_diag;
-        }
-
-        for (std::size_t r = 0; r < n; ++r) {
-            if (r == k) {
-                continue;
-            }
-            const Real factor = A[r * n + k];
-            if (std::abs(factor) <= eps) {
-                continue;
-            }
-            A[r * n + k] = Real(0);
-            for (std::size_t c = 0; c < n; ++c) {
-                A[r * n + c] -= factor * A[k * n + c];
-                inv[r * n + c] -= factor * inv[k * n + c];
-            }
-        }
-    }
-
-    return inv;
-}
-
-inline std::vector<Real> powers(Real x, int max_p) {
-    FE_CHECK_ARG(max_p >= 0, "powers: negative max_p");
-    std::vector<Real> out(static_cast<std::size_t>(max_p + 1), Real(1));
-    for (int i = 1; i <= max_p; ++i) {
-        out[static_cast<std::size_t>(i)] = out[static_cast<std::size_t>(i - 1)] * x;
-    }
-    return out;
-}
-
-// Compute rank of matrix A (n x n) via pivoted Gaussian elimination
-inline int compute_rank(std::vector<Real> A, std::size_t n) {
-    const Real eps = Real(1e-12);
-    int rank = 0;
-    std::size_t row = 0;
-    for (std::size_t col = 0; col < n && row < n; ++col) {
-        // Find pivot
-        std::size_t piv = row;
-        Real piv_val = std::abs(A[row * n + col]);
-        for (std::size_t r = row + 1; r < n; ++r) {
-            const Real v = std::abs(A[r * n + col]);
-            if (v > piv_val) {
-                piv_val = v;
-                piv = r;
-            }
-        }
-        if (piv_val < eps) {
-            continue; // This column is zero (in remaining rows)
-        }
-        // Swap rows
-        if (piv != row) {
-            for (std::size_t c = col; c < n; ++c) {
-                std::swap(A[row * n + c], A[piv * n + c]);
-            }
-        }
-        // Eliminate below
-        for (std::size_t r = row + 1; r < n; ++r) {
-            const Real factor = A[r * n + col] / A[row * n + col];
-            for (std::size_t c = col; c < n; ++c) {
-                A[r * n + c] -= factor * A[row * n + c];
-            }
-        }
-        ++rank;
-        ++row;
-    }
-    return rank;
-}
-
-// QR decomposition via modified Gram-Schmidt, returns orthogonalized columns
-// and the R matrix for diagnostics. Used to orthogonalize the moment matrix rows.
-inline void gram_schmidt_columns(std::vector<Real>& A, std::size_t n, std::vector<Real>& norms) {
-    norms.resize(n);
-    const Real eps = std::numeric_limits<Real>::epsilon() * Real(100);
-
-    for (std::size_t j = 0; j < n; ++j) {
-        // Orthogonalize column j against columns 0..j-1
-        for (std::size_t i = 0; i < j; ++i) {
-            if (norms[i] < eps) continue;
-            // Compute dot product of column j with column i
-            Real dot = Real(0);
-            for (std::size_t r = 0; r < n; ++r) {
-                dot += A[r * n + j] * A[r * n + i];
-            }
-            // Subtract projection
-            for (std::size_t r = 0; r < n; ++r) {
-                A[r * n + j] -= dot * A[r * n + i];
-            }
-        }
-        // Normalize column j
-        Real norm = Real(0);
-        for (std::size_t r = 0; r < n; ++r) {
-            norm += A[r * n + j] * A[r * n + j];
-        }
-        norm = std::sqrt(norm);
-        norms[j] = norm;
-        if (norm > eps) {
-            for (std::size_t r = 0; r < n; ++r) {
-                A[r * n + j] /= norm;
-            }
-        }
-    }
-}
-
-// SVD-based pseudo-inverse for singular or near-singular matrices
-// Uses a simple iterative power method approach for small matrices
-inline std::vector<Real> pseudo_inverse_dense_matrix(const std::vector<Real>& A, std::size_t n) {
-    FE_CHECK_ARG(A.size() == n * n, "pseudo_inverse: size mismatch");
-
-    const Real eps = std::numeric_limits<Real>::epsilon() * Real(1000);
-
-    // First try regular inversion
-    std::vector<Real> Acopy = A;
-    std::vector<Real> inv(n * n, Real(0));
-    for (std::size_t i = 0; i < n; ++i) {
-        inv[i * n + i] = Real(1);
-    }
-
-    bool singular = false;
-    for (std::size_t k = 0; k < n; ++k) {
-        std::size_t piv = k;
-        Real piv_val = std::abs(Acopy[k * n + k]);
-        for (std::size_t r = k + 1; r < n; ++r) {
-            const Real v = std::abs(Acopy[r * n + k]);
-            if (v > piv_val) {
-                piv_val = v;
-                piv = r;
-            }
-        }
-
-        if (piv_val < eps) {
-            singular = true;
-            break;
-        }
-
-        if (piv != k) {
-            for (std::size_t c = 0; c < n; ++c) {
-                std::swap(Acopy[k * n + c], Acopy[piv * n + c]);
-                std::swap(inv[k * n + c], inv[piv * n + c]);
-            }
-        }
-
-        const Real diag = Acopy[k * n + k];
-        const Real inv_diag = Real(1) / diag;
-
-        for (std::size_t c = 0; c < n; ++c) {
-            Acopy[k * n + c] *= inv_diag;
-            inv[k * n + c] *= inv_diag;
-        }
-
-        for (std::size_t r = 0; r < n; ++r) {
-            if (r == k) continue;
-            const Real factor = Acopy[r * n + k];
-            if (std::abs(factor) <= eps) continue;
-            Acopy[r * n + k] = Real(0);
-            for (std::size_t c = 0; c < n; ++c) {
-                Acopy[r * n + c] -= factor * Acopy[k * n + c];
-                inv[r * n + c] -= factor * inv[k * n + c];
-            }
-        }
-    }
-
-    if (!singular) {
-        return inv;
-    }
-
-    // For singular matrices, use Moore-Penrose pseudo-inverse via A^+ = (A^T A)^{-1} A^T
-    // with Tikhonov regularization: A^+ = (A^T A + lambda*I)^{-1} A^T
-    const Real lambda = eps * Real(n);
-
-    // Compute A^T * A + lambda * I
-    std::vector<Real> ATA(n * n, Real(0));
-    for (std::size_t i = 0; i < n; ++i) {
-        for (std::size_t j = 0; j < n; ++j) {
-            Real sum = Real(0);
-            for (std::size_t k = 0; k < n; ++k) {
-                sum += A[k * n + i] * A[k * n + j]; // A^T * A
-            }
-            ATA[i * n + j] = sum;
-        }
-        ATA[i * n + i] += lambda; // Tikhonov regularization
-    }
-
-    // Invert (A^T A + lambda*I)
-    std::vector<Real> ATA_inv = invert_dense_matrix(std::move(ATA), n);
-
-    // Compute (A^T A + lambda*I)^{-1} * A^T
-    std::vector<Real> result(n * n, Real(0));
-    for (std::size_t i = 0; i < n; ++i) {
-        for (std::size_t j = 0; j < n; ++j) {
-            Real sum = Real(0);
-            for (std::size_t k = 0; k < n; ++k) {
-                sum += ATA_inv[i * n + k] * A[j * n + k]; // * A^T
-            }
-            result[i * n + j] = sum;
-        }
-    }
-
-    return result;
-}
-
-inline Real integral_pyramid_z(int power) {
-    // Integral of z^power over [0,1] (pyramid apex direction)
-    // For pyramid with apex at z=1, the z-integral factor is 1/(power+1)
-    FE_CHECK_ARG(power >= 0, "integral_pyramid_z: negative power");
-    return Real(1) / static_cast<Real>(power + 1);
-}
-
-inline Real integral_wedge_monomial(int px, int py, int pz) {
-    // Integral of x^px * y^py * z^pz over wedge: triangle(x,y) x [-1,1](z)
-    // = integral_triangle(px,py) * integral_1d(pz)
-    return integral_triangle_monomial(px, py) * integral_monomial_1d(pz);
-}
+#include "detail/VectorBasisRtDetail.inc"
 
 } // namespace
 
@@ -1663,11 +1344,17 @@ RaviartThomasBasis::RaviartThomasBasis(ElementType type, int order)
                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
     }
 
+    // Wedge/pyramid RT(1) uses the explicit seed formulas transformed into a nodal
+    // basis with the actual face/interior DOF functionals. RT(2+) continues to use
+    // the existing direct-evaluation path.
+    if (order_ == 1 && (is_wedge(type) || is_pyramid(type))) {
+        coeffs_ = build_rt1_direct_transform(type, size_);
+        use_transformed_direct_rt1_ = true;
+        return;
+    }
+
     // Build nodal (moment-based) RT(k) basis for elements where higher-order is supported.
-    // SPECIAL CASE: For wedge and pyramid elements with order >= 1, use DIRECT DOF-based
-    // construction instead of the modal+inversion approach. The modal approach fails
-    // because the naive polynomial space creates a singular Vandermonde matrix.
-    if (order_ >= 1 && (is_wedge(type) || is_pyramid(type))) {
+    if (order_ >= 2 && (is_wedge(type) || is_pyramid(type))) {
         use_direct_construction_ = true;
         // Size is already computed correctly above. Just mark that we're done.
         // The actual evaluation will use eval_wedge_rt1_direct() or eval_pyramid_rt1_direct()
@@ -1677,7 +1364,8 @@ RaviartThomasBasis::RaviartThomasBasis(ElementType type, int order)
     // Generate nodal (moment-based) basis functions via DOF matrix inversion.
     // This is used for all supported orders, including k=0, to ensure consistent
     // entity ordering and orientation behavior across mesh permutations.
-    if (is_quadrilateral(type) || is_hexahedron(type) || is_triangle(type) || is_tetrahedron(type)) {
+    if (is_quadrilateral(type) || is_hexahedron(type) || is_triangle(type) ||
+        is_tetrahedron(type) || ((is_wedge(type) || is_pyramid(type)) && order_ > 0)) {
         const std::size_t n = size_;
 
         // ------------------------------------------------------------------
@@ -2653,13 +2341,38 @@ RaviartThomasBasis::RaviartThomasBasis(ElementType type, int order)
 
         FE_CHECK_ARG(row == n, "RaviartThomasBasis: DOF assembly did not fill matrix");
 
-        coeffs_ = invert_dense_matrix(std::move(A), n);
+        if (order_ == 1 && (is_wedge(type) || is_pyramid(type))) {
+            coeffs_ = pseudo_inverse_dense_matrix(A, n);
+        } else {
+            coeffs_ = invert_dense_matrix(std::move(A), n);
+        }
         nodal_generated_ = true;
     }
 }
 
 void RaviartThomasBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
                                                 std::vector<math::Vector<Real, 3>>& values) const {
+    if (use_transformed_direct_rt1_) {
+        const std::size_t n = size_;
+        values.assign(n, Vec3{});
+
+        std::vector<Vec3> seed_values;
+        eval_rt1_seed_values(element_type_, xi, seed_values);
+        FE_CHECK_ARG(seed_values.size() == n,
+                     "RaviartThomasBasis::evaluate_vector_values: RT(1) seed basis size mismatch");
+
+        for (std::size_t p = 0; p < n; ++p) {
+            const Vec3& seed = seed_values[p];
+            for (std::size_t j = 0; j < n; ++j) {
+                const Real c = coeffs_[p * n + j];
+                values[j][0] += c * seed[0];
+                values[j][1] += c * seed[1];
+                values[j][2] += c * seed[2];
+            }
+        }
+        return;
+    }
+
     // Use direct construction for wedge/pyramid RT(k>=1)
     if (use_direct_construction_) {
         if (is_wedge(element_type_)) {
@@ -2805,6 +2518,27 @@ void RaviartThomasBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
 
 void RaviartThomasBasis::evaluate_divergence(const math::Vector<Real, 3>& xi,
                                              std::vector<Real>& divergence) const {
+    if (use_transformed_direct_rt1_) {
+        const std::size_t n = size_;
+        divergence.assign(n, Real(0));
+
+        std::vector<Real> seed_divergence;
+        eval_rt1_seed_divergence(element_type_, xi, seed_divergence);
+        FE_CHECK_ARG(seed_divergence.size() == n,
+                     "RaviartThomasBasis::evaluate_divergence: RT(1) seed divergence size mismatch");
+
+        for (std::size_t p = 0; p < n; ++p) {
+            const Real seed = seed_divergence[p];
+            if (seed == Real(0)) {
+                continue;
+            }
+            for (std::size_t j = 0; j < n; ++j) {
+                divergence[j] += coeffs_[p * n + j] * seed;
+            }
+        }
+        return;
+    }
+
     // Use direct construction for wedge/pyramid RT(k>=1)
     if (use_direct_construction_) {
         if (is_wedge(element_type_)) {

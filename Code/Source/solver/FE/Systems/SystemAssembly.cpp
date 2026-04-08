@@ -56,6 +56,45 @@ namespace systems {
 
 namespace {
 
+std::string summarizeSparsePairsForTrace(std::span<const std::pair<GlobalIndex, Real>> entries,
+                                         std::size_t max_items = 8)
+{
+    long double sq_norm = 0.0L;
+    Real max_abs = Real(0.0);
+    GlobalIndex max_dof = INVALID_GLOBAL_INDEX;
+    for (const auto& [dof, value] : entries) {
+        const Real abs_value = std::abs(value);
+        sq_norm += static_cast<long double>(value) * static_cast<long double>(value);
+        if (abs_value > max_abs) {
+            max_abs = abs_value;
+            max_dof = dof;
+        }
+    }
+
+    std::ostringstream oss;
+    oss << "nnz=" << entries.size()
+        << " l2=" << std::sqrt(static_cast<double>(sq_norm))
+        << " max_abs=" << max_abs
+        << " max_dof=" << max_dof;
+
+    const auto n_show = std::min(max_items, entries.size());
+    if (n_show > 0) {
+        oss << " entries=[";
+        for (std::size_t i = 0; i < n_show; ++i) {
+            if (i > 0) {
+                oss << ", ";
+            }
+            oss << entries[i].first << ":" << entries[i].second;
+        }
+        if (entries.size() > n_show) {
+            oss << ", ...";
+        }
+        oss << "]";
+    }
+
+    return oss.str();
+}
+
 [[nodiscard]] bool oopTraceEnabled() noexcept
 {
     return core::kernelTraceEnabled(core::KernelTraceChannel::Assembly);
@@ -226,13 +265,17 @@ void synchronizeBorderedCouplingForReplicatedSolve(FESystem::BorderedCouplingDat
     MPI_Initialized(&mpi_initialized);
     if (mpi_initialized) {
         if (sync_matrix_terms) {
-            allreduceDenseEntries(bc.D, comm);
             allreduceDenseEntries(bc.B, comm);
             allreduceDenseEntries(bc.Ct, comm);
-            allreduceDenseEntries(bc.dF_dxdot, comm);
+            if (!bc.aux_self_terms_replicated) {
+                allreduceDenseEntries(bc.D, comm);
+                allreduceDenseEntries(bc.dF_dxdot, comm);
+            }
         }
         if (sync_vector_terms) {
-            allreduceDenseEntries(bc.g, comm);
+            if (!bc.aux_self_terms_replicated) {
+                allreduceDenseEntries(bc.g, comm);
+            }
         }
     }
 #endif
@@ -1388,27 +1431,30 @@ assembly::AssemblyResult assembleOperator(
                     }
 #endif
 
-                    const auto& g = dQ_du_by_slot[k];
+                    // dQ/du is already globally reduced when each slot is assembled
+                    // above. Reducing it again here scales the coupled BC tangent by
+                    // the MPI task count and corrupts the distributed Jacobian.
+                    const auto& g_global = dQ_du_by_slot[k];
 
                     traceLog("  slot " + std::to_string(k) +
                              " dR/dQ: " + std::to_string(dR_dQ.size()) +
                              " (local) " + std::to_string(dR_dQ_global.size()) +
-                             " (global) entries, dQ/du: " + std::to_string(g.size()) +
+                             " (global) entries, dQ/du: " + std::to_string(g_global.size()) +
                              " -> rank-1 writes " + std::to_string(dR_dQ.size()) + " x " +
-                             std::to_string(g.size()) + " = " +
-                             std::to_string(dR_dQ.size() * g.size()) + " matrix entries");
+                             std::to_string(g_global.size()) + " = " +
+                             std::to_string(dR_dQ.size() * g_global.size()) + " matrix entries");
 
                     // Detect symmetric rank-1 structure: dR_dQ = sigma * dQ_du
                     // If so, store as RankOneUpdate{sigma, dQ_du} for preconditioner correction.
                     // Use globally-reduced dR_dQ so all MPI ranks make the same decision.
                     bool extracted_rank_one = false;
                     Real sym_rel_err = -1.0;
-                    if (!g.empty() && !dR_dQ_global.empty()) {
+                    if (!g_global.empty() && !dR_dQ_global.empty()) {
                         // Build index maps for dQ_du (g) to enable lookup by DOF index.
                         std::unordered_map<GlobalIndex, Real> g_map;
-                        g_map.reserve(g.size());
+                        g_map.reserve(g_global.size());
                         Real g_dot_g = 0.0;
-                        for (const auto& kv : g) {
+                        for (const auto& kv : g_global) {
                             g_map[kv.first] = kv.second;
                             g_dot_g += kv.second * kv.second;
                         }
@@ -1441,7 +1487,7 @@ assembly::AssemblyResult assembleOperator(
                             for (const auto& kv : dR_dQ_global) {
                                 dR_map[kv.first] = kv.second;
                             }
-                            for (const auto& kv : g) {
+                            for (const auto& kv : g_global) {
                                 if (dR_map.find(kv.first) == dR_map.end()) {
                                     const Real rem = -sigma * kv.second;
                                     rem_norm_sq += rem * rem;
@@ -1463,7 +1509,8 @@ assembly::AssemblyResult assembleOperator(
                                 // reductions, so a globally replicated dQ/du would
                                 // double-count shared DOFs under MPI.
                                 update.v = filterSparsePairsToOwned(
-                                    std::span<const std::pair<GlobalIndex, Real>>(g.data(), g.size()),
+                                    std::span<const std::pair<GlobalIndex, Real>>(g_global.data(),
+                                                                                  g_global.size()),
                                     [&](GlobalIndex dof) { return global_owned.contains(dof); });
                                 system.last_rank_one_updates_.push_back(update);
                                 cjc.rank_one_updates.push_back(std::move(update));
@@ -1472,6 +1519,19 @@ assembly::AssemblyResult assembleOperator(
                                 traceLog("  slot " + std::to_string(k) +
                                          " -> symmetric rank-1 update: sigma=" + std::to_string(static_cast<double>(sigma)) +
                                          " |rem|/|dR|=" + std::to_string(static_cast<double>(rem_norm / dR_norm)));
+                                traceLog("    dQ/du global summary: " +
+                                         summarizeSparsePairsForTrace(
+                                             std::span<const std::pair<GlobalIndex, Real>>(g_global.data(),
+                                                                                           g_global.size())));
+                                traceLog("    dR/dQ global summary: " +
+                                         summarizeSparsePairsForTrace(
+                                             std::span<const std::pair<GlobalIndex, Real>>(dR_dQ_global.data(),
+                                                                                           dR_dQ_global.size())));
+                                traceLog("    owned rank-1 support summary: " +
+                                         summarizeSparsePairsForTrace(
+                                             std::span<const std::pair<GlobalIndex, Real>>(
+                                                 system.last_rank_one_updates_.back().v.data(),
+                                                 system.last_rank_one_updates_.back().v.size())));
                             } else {
                                 traceLog("  slot " + std::to_string(k) +
                                          " -> NOT symmetric: sigma=" + std::to_string(static_cast<double>(sigma)) +
@@ -1484,7 +1544,7 @@ assembly::AssemblyResult assembleOperator(
 
                     // Fallback: assemble full outer product into sparse matrix.
                     if (!extracted_rank_one) {
-                        if (g.empty() || dR_dQ.empty()) {
+                        if (g_global.empty() || dR_dQ.empty()) {
                             // Nothing to assemble (e.g., dt-only Jacobian or inactive coupling).
                             continue;
                         }
@@ -1496,11 +1556,11 @@ assembly::AssemblyResult assembleOperator(
                                        " failed symmetry check" + extra +
                                        ". Falling back to sparse assembly, which may drop entries in FSILS.");
 
-                        col_dofs.resize(g.size());
-                        col_vals.resize(g.size());
-                        for (std::size_t j = 0; j < g.size(); ++j) {
-                            col_dofs[j] = g[j].first;
-                            col_vals[j] = g[j].second;
+                        col_dofs.resize(g_global.size());
+                        col_vals.resize(g_global.size());
+                        for (std::size_t j = 0; j < g_global.size(); ++j) {
+                            col_dofs[j] = g_global[j].first;
+                            col_vals[j] = g_global[j].second;
                         }
 
                         std::vector<Real> row_vals(col_dofs.size());
@@ -1640,10 +1700,14 @@ assembly::AssemblyResult assembleOperator(
                 bc.resize(n_aux, n_field_dofs);
                 bc.aux_blocks.clear();
                 bc.aux_variable_kinds.clear();
+                bc.aux_self_terms_replicated = true;
                 for (const auto& entry : system.deployed_aux_entries_) {
                     if (entry.spec.solve_mode == AuxiliarySolveMode::Monolithic) {
                         if (entry.lower_to_direct_only) {
                             continue;
+                        }
+                        if (entry.spec.scope == AuxiliaryStateScope::Node) {
+                            bc.aux_self_terms_replicated = false;
                         }
                         const AuxiliaryBlockStorage* blk_ptr = nullptr;
                         int block_dim = entry.spec.size;
@@ -1693,10 +1757,14 @@ assembly::AssemblyResult assembleOperator(
                 bc.resize(n_aux, n_field_dofs);
                 bc.aux_blocks.clear();
                 bc.aux_variable_kinds.clear();
+                bc.aux_self_terms_replicated = true;
                 for (const auto& entry : system.deployed_aux_entries_) {
                     if (entry.spec.solve_mode == AuxiliarySolveMode::Monolithic) {
                         if (entry.lower_to_direct_only) {
                             continue;
+                        }
+                        if (entry.spec.scope == AuxiliaryStateScope::Node) {
+                            bc.aux_self_terms_replicated = false;
                         }
                         const AuxiliaryBlockStorage* blk_ptr = nullptr;
                         int block_dim = entry.spec.size;

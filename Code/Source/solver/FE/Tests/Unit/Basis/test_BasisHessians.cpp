@@ -9,6 +9,7 @@
 #include "FE/Basis/HierarchicalBasis.h"
 #include "FE/Basis/SerendipityBasis.h"
 #include "FE/Basis/TensorBasis.h"
+#include <vector>
 
 using namespace svmp::FE;
 using namespace svmp::FE::basis;
@@ -94,6 +95,126 @@ void numerical_hessian_helper(const BasisFunction& basis,
                 const std::size_t si = static_cast<std::size_t>(i);
                 const std::size_t sj2 = static_cast<std::size_t>(j);
                 hess[n](si, sj2) = (g_p[n][si] - g_m[n][si]) / (2 * eps);
+            }
+        }
+    }
+}
+
+void numerical_gradient_helper(const BasisFunction& basis,
+                               const math::Vector<Real, 3>& xi,
+                               std::vector<Gradient>& grads,
+                               Real eps);
+
+void expect_gradients_match_numerical(const BasisFunction& basis,
+                                      const math::Vector<Real, 3>& xi,
+                                      Real tol) {
+    std::vector<Gradient> analytical, numerical;
+    basis.evaluate_gradients(xi, analytical);
+    numerical_gradient_helper(basis, xi, numerical, Real(1e-6));
+
+    ASSERT_EQ(analytical.size(), numerical.size());
+    for (std::size_t n = 0; n < analytical.size(); ++n) {
+        for (int d = 0; d < basis.dimension(); ++d) {
+            const std::size_t sd = static_cast<std::size_t>(d);
+            EXPECT_NEAR(analytical[n][sd], numerical[n][sd], tol)
+                << "Mismatch at basis " << n << ", dim " << d;
+        }
+    }
+}
+
+std::vector<math::Vector<Real, 3>> sample_points_for(ElementType type) {
+    switch (type) {
+        case ElementType::Line2:
+            return {
+                {Real(-0.65), Real(0), Real(0)},
+                {Real(0.1), Real(0), Real(0)},
+                {Real(0.7), Real(0), Real(0)}
+            };
+        case ElementType::Triangle3:
+            return {
+                {Real(0.15), Real(0.2), Real(0)},
+                {Real(0.25), Real(0.1), Real(0)},
+                {Real(0.2), Real(0.3), Real(0)}
+            };
+        case ElementType::Quad4:
+            return {
+                {Real(0.2), Real(-0.3), Real(0)},
+                {Real(-0.45), Real(0.25), Real(0)},
+                {Real(0.55), Real(0.15), Real(0)}
+            };
+        case ElementType::Tetra4:
+            return {
+                {Real(0.12), Real(0.18), Real(0.16)},
+                {Real(0.2), Real(0.1), Real(0.18)},
+                {Real(0.15), Real(0.2), Real(0.1)}
+            };
+        case ElementType::Hex8:
+            return {
+                {Real(0.1), Real(-0.2), Real(0.3)},
+                {Real(-0.35), Real(0.25), Real(-0.15)},
+                {Real(0.45), Real(0.1), Real(0.55)}
+            };
+        case ElementType::Wedge6:
+            return {
+                {Real(0.18), Real(0.22), Real(-0.2)},
+                {Real(0.12), Real(0.16), Real(0.1)},
+                {Real(0.25), Real(0.15), Real(0.45)}
+            };
+        case ElementType::Pyramid5:
+            return {
+                {Real(0.0), Real(0.0), Real(0.2)},
+                {Real(0.12), Real(-0.08), Real(0.24)},
+                {Real(-0.1), Real(0.15), Real(0.35)}
+            };
+        default:
+            return {{Real(0), Real(0), Real(0)}};
+    }
+}
+
+void expect_hessians_symmetric(const BasisFunction& basis,
+                               const math::Vector<Real, 3>& xi,
+                               Real tol) {
+    std::vector<Hessian> hessians;
+    basis.evaluate_hessians(xi, hessians);
+
+    ASSERT_EQ(hessians.size(), basis.size());
+    for (std::size_t n = 0; n < hessians.size(); ++n) {
+        for (int i = 0; i < basis.dimension(); ++i) {
+            for (int j = i + 1; j < basis.dimension(); ++j) {
+                const std::size_t si = static_cast<std::size_t>(i);
+                const std::size_t sj = static_cast<std::size_t>(j);
+                EXPECT_NEAR(hessians[n](si, sj), hessians[n](sj, si), tol)
+                    << "Mismatch at basis " << n << ", components (" << i << "," << j
+                    << "), element " << static_cast<int>(basis.element_type())
+                    << ", order " << basis.order();
+            }
+        }
+    }
+}
+
+void expect_hessians_match_numerical(const BasisFunction& basis,
+                                     const std::vector<math::Vector<Real, 3>>& points,
+                                     Real tol,
+                                     Real eps = Real(1e-5)) {
+    for (const auto& xi : points) {
+        std::vector<Hessian> analytical;
+        std::vector<Hessian> numerical;
+        basis.evaluate_hessians(xi, analytical);
+        numerical_hessian_helper(basis, xi, numerical, eps);
+
+        ASSERT_EQ(analytical.size(), numerical.size());
+        for (std::size_t n = 0; n < analytical.size(); ++n) {
+            for (int i = 0; i < basis.dimension(); ++i) {
+                for (int j = 0; j < basis.dimension(); ++j) {
+                    const std::size_t si = static_cast<std::size_t>(i);
+                    const std::size_t sj = static_cast<std::size_t>(j);
+                    EXPECT_NEAR(analytical[n](si, sj), numerical[n](si, sj), tol)
+                        << "Mismatch at basis " << n
+                        << ", component (" << i << "," << j << ")"
+                        << ", element " << static_cast<int>(basis.element_type())
+                        << ", order " << basis.order()
+                        << ", xi=(" << xi[0] << "," << xi[1] << "," << xi[2] << ")";
+                }
             }
         }
     }
@@ -268,6 +389,64 @@ TEST(BasisHessians, LagrangeHessiansSumToZero) {
     }
 }
 
+TEST(BasisHessians, LagrangeHessiansAreExplicitlySymmetric) {
+    const struct Case {
+        ElementType type;
+        int order;
+        math::Vector<Real, 3> xi;
+        Real tol;
+    } cases[] = {
+        {ElementType::Line2, 3, {Real(0.15), Real(0), Real(0)}, Real(1e-12)},
+        {ElementType::Triangle3, 3, {Real(0.2), Real(0.25), Real(0)}, Real(1e-10)},
+        {ElementType::Quad4, 3, {Real(0.3), Real(-0.2), Real(0)}, Real(1e-12)},
+        {ElementType::Tetra4, 2, {Real(0.15), Real(0.2), Real(0.1)}, Real(1e-10)},
+        {ElementType::Hex8, 2, {Real(0.1), Real(-0.2), Real(0.3)}, Real(1e-12)},
+        {ElementType::Wedge6, 2, {Real(0.2), Real(0.15), Real(-0.3)}, Real(1e-10)},
+        {ElementType::Pyramid5, 1, {Real(0.1), Real(-0.2), Real(0.3)}, Real(1e-8)},
+    };
+
+    for (const auto& c : cases) {
+        LagrangeBasis basis(c.type, c.order);
+        expect_hessians_symmetric(basis, c.xi, c.tol);
+    }
+}
+
+TEST(BasisHessians, LagrangeHigherOrderCanonicalPathsMatchNumericalAtMultiplePoints) {
+    const struct Case {
+        ElementType type;
+        int order;
+        Real tol;
+        Real eps;
+    } cases[] = {
+        {ElementType::Line2, 5, Real(1e-6), Real(1e-5)},
+        {ElementType::Triangle3, 4, Real(2e-6), Real(1e-5)},
+        {ElementType::Quad4, 4, Real(1e-6), Real(1e-5)},
+        {ElementType::Tetra4, 3, Real(3e-6), Real(1e-5)},
+        {ElementType::Hex8, 3, Real(2e-6), Real(1e-5)},
+        {ElementType::Wedge6, 3, Real(2e-5), Real(1e-5)},
+        {ElementType::Pyramid5, 3, Real(3e-4), Real(2e-5)},
+    };
+
+    for (const auto& c : cases) {
+        LagrangeBasis basis(c.type, c.order);
+        expect_hessians_match_numerical(basis, sample_points_for(c.type), c.tol, c.eps);
+    }
+}
+
+TEST(BasisHessians, LagrangeHigherOrderPyramidNearApexMatchesNumericalAndIsSymmetric) {
+    LagrangeBasis basis(ElementType::Pyramid5, 4);
+    const std::vector<math::Vector<Real, 3>> points = {
+        {Real(0.0), Real(0.0), Real(0.82)},
+        {Real(0.015), Real(-0.01), Real(0.9)},
+        {Real(0.01), Real(0.005), Real(0.95)},
+    };
+
+    expect_hessians_match_numerical(basis, points, Real(8e-4), Real(2e-5));
+    for (const auto& xi : points) {
+        expect_hessians_symmetric(basis, xi, Real(5e-8));
+    }
+}
+
 TEST(BasisHessians, SerendipityHessiansSumToZero) {
     const struct Case {
         ElementType type;
@@ -306,6 +485,24 @@ TEST(BasisHessians, SerendipityHessiansSumToZero) {
                     << ", component (" << i << "," << j << ")";
             }
         }
+    }
+}
+
+TEST(BasisHessians, SerendipityHessiansAreExplicitlySymmetric) {
+    const struct Case {
+        ElementType type;
+        int order;
+        math::Vector<Real, 3> xi;
+    } cases[] = {
+        {ElementType::Quad8, 2, {Real(0.2), Real(-0.15), Real(0)}},
+        {ElementType::Hex20, 2, {Real(0.2), Real(-0.1), Real(0.3)}},
+        {ElementType::Wedge15, 2, {Real(0.2), Real(0.3), Real(0.1)}},
+        {ElementType::Pyramid13, 2, {Real(0.1), Real(-0.2), Real(0.4)}},
+    };
+
+    for (const auto& c : cases) {
+        SerendipityBasis basis(c.type, c.order);
+        expect_hessians_symmetric(basis, c.xi, Real(5e-6));
     }
 }
 
@@ -357,45 +554,66 @@ TEST(BasisGradients, HierarchicalQuadAnalyticalMatchesNumerical) {
     HierarchicalBasis basis(ElementType::Quad4, 3);
     math::Vector<Real, 3> xi{Real(0.2), Real(-0.3), Real(0)};
 
-    std::vector<Gradient> analytical, numerical;
-    basis.evaluate_gradients(xi, analytical);
-    numerical_gradient_helper(basis, xi, numerical);
-
-    ASSERT_EQ(analytical.size(), numerical.size());
-    for (std::size_t n = 0; n < analytical.size(); ++n) {
-        for (int d = 0; d < 2; ++d) {
-            const std::size_t sd = static_cast<std::size_t>(d);
-            EXPECT_NEAR(analytical[n][sd], numerical[n][sd], 1e-5)
-                << "Mismatch at basis " << n << ", dim " << d;
-        }
-    }
+    expect_gradients_match_numerical(basis, xi, Real(1e-5));
 }
 
-// Note: HierarchicalBasis uses orthogonal polynomial bases (Legendre, Dubiner, Proriol)
-// which do NOT satisfy partition of unity. Tests for simplex gradient correctness
-// would require careful validation of the orthogonal polynomial derivative formulas.
-// The tensor product tests (Line, Quad, Hex) above verify the Legendre derivative
-// implementation is correct.
+TEST(BasisGradients, HierarchicalTriangleAnalyticalMatchesNumerical) {
+    HierarchicalBasis basis(ElementType::Triangle3, 4);
+    math::Vector<Real, 3> xi{Real(0.21), Real(0.27), Real(0)};
+
+    expect_gradients_match_numerical(basis, xi, Real(1e-5));
+}
 
 TEST(BasisGradients, HierarchicalHexAnalyticalMatchesNumerical) {
     HierarchicalBasis basis(ElementType::Hex8, 2);
     math::Vector<Real, 3> xi{Real(0.1), Real(-0.2), Real(0.3)};
 
-    std::vector<Gradient> analytical, numerical;
-    basis.evaluate_gradients(xi, analytical);
-    numerical_gradient_helper(basis, xi, numerical);
+    expect_gradients_match_numerical(basis, xi, Real(1e-5));
+}
 
-    ASSERT_EQ(analytical.size(), numerical.size());
-    for (std::size_t n = 0; n < analytical.size(); ++n) {
-        for (int d = 0; d < 3; ++d) {
-            const std::size_t sd = static_cast<std::size_t>(d);
-            EXPECT_NEAR(analytical[n][sd], numerical[n][sd], 1e-5)
-                << "Mismatch at basis " << n << ", dim " << d;
+TEST(BasisGradients, HierarchicalWedgeAnalyticalMatchesNumerical) {
+    HierarchicalBasis basis(ElementType::Wedge6, 3);
+    math::Vector<Real, 3> xi{Real(0.18), Real(0.22), Real(0.15)};
+
+    expect_gradients_match_numerical(basis, xi, Real(2e-5));
+}
+
+TEST(BasisGradients, HierarchicalTetraAnalyticalMatchesNumerical) {
+    HierarchicalBasis basis(ElementType::Tetra4, 3);
+    math::Vector<Real, 3> xi{Real(0.16), Real(0.19), Real(0.12)};
+
+    expect_gradients_match_numerical(basis, xi, Real(2e-5));
+}
+
+TEST(BasisGradients, HierarchicalPyramidAnalyticalMatchesNumerical) {
+    HierarchicalBasis basis(ElementType::Pyramid5, 3);
+    math::Vector<Real, 3> xi{Real(0.12), Real(-0.08), Real(0.24)};
+
+    expect_gradients_match_numerical(basis, xi, Real(2e-5));
+}
+
+TEST(BasisGradients, HierarchicalMultipleInteriorPointsMatchNumerical) {
+    const struct Case {
+        ElementType type;
+        int order;
+        Real tol;
+    } cases[] = {
+        {ElementType::Line2, 4, Real(1e-5)},
+        {ElementType::Triangle3, 4, Real(1e-5)},
+        {ElementType::Quad4, 3, Real(1e-5)},
+        {ElementType::Tetra4, 3, Real(2e-5)},
+        {ElementType::Hex8, 2, Real(1e-5)},
+        {ElementType::Wedge6, 3, Real(2e-5)},
+        {ElementType::Pyramid5, 3, Real(2e-5)},
+    };
+
+    for (const auto& c : cases) {
+        HierarchicalBasis basis(c.type, c.order);
+        for (const auto& xi : sample_points_for(c.type)) {
+            expect_gradients_match_numerical(basis, xi, c.tol);
         }
     }
 }
-
-// Wedge tests omitted - HierarchicalBasis wedge uses Dubiner which doesn't satisfy partition of unity
 
 // ============================================================================
 // BernsteinBasis gradient tests - verify analytical vs numerical
@@ -488,6 +706,27 @@ TEST(BasisGradients, BernsteinWedgeGradientsSumToZero) {
     EXPECT_NEAR(sum[0], 0.0, 1e-10);
     EXPECT_NEAR(sum[1], 0.0, 1e-10);
     EXPECT_NEAR(sum[2], 0.0, 1e-10);
+}
+
+TEST(BasisGradients, BernsteinTriangleAnalyticalMatchesNumericalAtMultiplePoints) {
+    BernsteinBasis basis(ElementType::Triangle3, 3);
+    for (const auto& xi : sample_points_for(ElementType::Triangle3)) {
+        expect_gradients_match_numerical(basis, xi, Real(1e-5));
+    }
+}
+
+TEST(BasisGradients, BernsteinWedgeAnalyticalMatchesNumericalAtMultiplePoints) {
+    BernsteinBasis basis(ElementType::Wedge6, 2);
+    for (const auto& xi : sample_points_for(ElementType::Wedge6)) {
+        expect_gradients_match_numerical(basis, xi, Real(2e-5));
+    }
+}
+
+TEST(BasisGradients, BernsteinPyramidAnalyticalMatchesNumericalAtMultiplePoints) {
+    BernsteinBasis basis(ElementType::Pyramid5, 2);
+    for (const auto& xi : sample_points_for(ElementType::Pyramid5)) {
+        expect_gradients_match_numerical(basis, xi, Real(2e-5));
+    }
 }
 
 TEST(BasisGradients, GradientsSumToZeroForPartitionOfUnity) {
@@ -598,5 +837,21 @@ TEST(BasisHessians, TensorProductHessiansSumToZero) {
         for (int j = 0; j < 2; ++j) {
             EXPECT_NEAR(sum(static_cast<std::size_t>(i), static_cast<std::size_t>(j)), 0.0, 1e-10);
         }
+    }
+}
+
+TEST(BasisHessians, TensorProductHessiansAreExplicitlySymmetric) {
+    LagrangeBasis basis_1d(ElementType::Line2, 2);
+
+    {
+        TensorProductBasis<LagrangeBasis> basis(basis_1d, 2);
+        expect_hessians_symmetric(
+            basis, math::Vector<Real, 3>{Real(0.3), Real(-0.2), Real(0)}, Real(1e-12));
+    }
+
+    {
+        TensorProductBasis<LagrangeBasis> basis(basis_1d, 3);
+        expect_hessians_symmetric(
+            basis, math::Vector<Real, 3>{Real(0.1), Real(-0.2), Real(0.3)}, Real(1e-12));
     }
 }

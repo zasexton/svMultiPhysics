@@ -19,11 +19,13 @@
 #include "VectorBasis.h"
 #include "TensorBasis.h"
 #include "BernsteinBasis.h"
+#include "BSplineBasis.h"
 #include "SpectralBasis.h"
 #include "SerendipityBasis.h"
 #include "HermiteBasis.h"
 #include "BubbleBasis.h"
 #include <memory>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -35,6 +37,11 @@ struct BasisRequest {
     int order;
     Continuity continuity{Continuity::C0};
     FieldType field_type{FieldType::Scalar};
+    std::vector<Real> knot_vector{};
+    std::vector<Real> weights{};
+    std::vector<int> axis_orders{};
+    std::vector<std::vector<Real>> axis_knot_vectors{};
+    std::vector<std::vector<Real>> axis_weights{};
 };
 
 class BasisFactory {

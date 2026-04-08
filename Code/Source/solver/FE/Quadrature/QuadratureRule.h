@@ -27,6 +27,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <iomanip>
+#include <limits>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -69,6 +72,9 @@ public:
     /// Bulk accessors
     const std::vector<QuadPoint>& points() const noexcept { return points_; }
     const std::vector<Real>& weights() const noexcept { return weights_; }
+
+    /// Stable semantic identity used by BasisCache
+    virtual std::string cache_identity() const;
 
     /**
      * @brief Validate rule data for basic consistency
@@ -136,6 +142,18 @@ inline bool QuadratureRule::is_valid(Real tol) const {
     const Real ref = reference_measure();
     const Real denom = std::max(Real(1), std::abs(ref));
     return std::abs(sum_w - ref) <= tol * denom;
+}
+
+inline std::string QuadratureRule::cache_identity() const {
+    std::ostringstream oss;
+    oss << "dim=" << dimension_
+        << "|npts=" << points_.size();
+
+    oss << std::setprecision(std::numeric_limits<Real>::max_digits10);
+    for (const auto& pt : points_) {
+        oss << "|pt=" << pt[0] << ',' << pt[1] << ',' << pt[2];
+    }
+    return oss.str();
 }
 
 inline Real QuadratureRule::reference_measure() const noexcept {

@@ -213,6 +213,13 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
     R(i) = Wc(i) * R(i);
   }
 
+  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+    // Krylov/block solves operate on the overlapped FSILS layout. Before the
+    // correction leaves FSILS, synchronize owner values back onto ghost nodes
+    // so downstream nonlinear updates see a single consistent field.
+    fsils_syncv(lhs, dof, R);
+  }
+
   if (!ls.ri_internal_order) {
     for (int a = 0; a < nNo; a++) {
       for (int i = 0; i < R.nrows(); i++) {

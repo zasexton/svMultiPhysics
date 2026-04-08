@@ -6,16 +6,95 @@
 #include <gtest/gtest.h>
 #include "FE/Basis/BasisCache.h"
 #include "FE/Basis/BasisFactory.h"
+#include "FE/Basis/BSplineBasis.h"
 #include "FE/Basis/LagrangeBasis.h"
+#include "FE/Basis/TensorBasis.h"
 #include "FE/Quadrature/GaussQuadrature.h"
 #include "FE/Quadrature/QuadrilateralQuadrature.h"
+#include "FE/Quadrature/QuadratureRule.h"
 #include <array>
+#include <numeric>
 #include <thread>
 #include <vector>
 
 using namespace svmp::FE;
 using namespace svmp::FE::basis;
 using namespace svmp::FE::quadrature;
+
+namespace {
+
+std::vector<Real> make_open_uniform_knots(int degree,
+                                          int num_basis,
+                                          Real u0 = Real(0),
+                                          Real u1 = Real(1)) {
+    std::vector<Real> knots;
+    knots.reserve(static_cast<std::size_t>(num_basis + degree + 1));
+
+    for (int i = 0; i < degree + 1; ++i) {
+        knots.push_back(u0);
+    }
+
+    const int interior = num_basis - degree - 1;
+    for (int j = 1; j <= interior; ++j) {
+        knots.push_back(u0 + (u1 - u0) * Real(j) / Real(num_basis - degree));
+    }
+
+    for (int i = 0; i < degree + 1; ++i) {
+        knots.push_back(u1);
+    }
+
+    return knots;
+}
+
+class CustomQuadratureRule final : public QuadratureRule {
+public:
+    CustomQuadratureRule(svmp::CellFamily family,
+                         int dimension,
+                         int order,
+                         std::vector<QuadPoint> points,
+                         std::vector<Real> weights)
+        : QuadratureRule(family, dimension, order) {
+        set_data(std::move(points), std::move(weights));
+    }
+};
+
+std::size_t expected_lagrange_size(ElementType type, int order) {
+    switch (type) {
+        case ElementType::Line2:
+        case ElementType::Line3:
+            return static_cast<std::size_t>(order + 1);
+        case ElementType::Triangle3:
+        case ElementType::Triangle6:
+            return static_cast<std::size_t>(order + 1) * static_cast<std::size_t>(order + 2) / 2;
+        case ElementType::Quad4:
+        case ElementType::Quad9:
+            return static_cast<std::size_t>(order + 1) * static_cast<std::size_t>(order + 1);
+        case ElementType::Tetra4:
+        case ElementType::Tetra10:
+            return static_cast<std::size_t>(order + 1) *
+                   static_cast<std::size_t>(order + 2) *
+                   static_cast<std::size_t>(order + 3) / 6;
+        case ElementType::Hex8:
+        case ElementType::Hex27:
+            return static_cast<std::size_t>(order + 1) *
+                   static_cast<std::size_t>(order + 1) *
+                   static_cast<std::size_t>(order + 1);
+        case ElementType::Wedge6:
+        case ElementType::Wedge18:
+            return static_cast<std::size_t>(order + 1) *
+                   static_cast<std::size_t>(order + 1) *
+                   static_cast<std::size_t>(order + 2) / 2;
+        case ElementType::Pyramid5:
+        case ElementType::Pyramid14:
+            return static_cast<std::size_t>(order + 1) *
+                   static_cast<std::size_t>(order + 2) *
+                   static_cast<std::size_t>(2 * order + 3) / 6;
+        default:
+            return 0u;
+    }
+}
+
+} // namespace
 
 TEST(BasisCache, ReusesEntries) {
     LagrangeBasis basis(ElementType::Line2, 2);
@@ -91,6 +170,196 @@ TEST(BasisCache, DifferentQuadratureYieldsDifferentEntries) {
     EXPECT_EQ(entry3.num_qpts, quad3.num_points());
 }
 
+TEST(BasisCache, EquivalentSplineInstancesReuseEntries) {
+    BSplineBasis basis_a(2, make_open_uniform_knots(2, 6));
+    BSplineBasis basis_b(2, make_open_uniform_knots(2, 6));
+    GaussQuadrature1D quad(4);
+
+    auto& cache = BasisCache::instance();
+    cache.clear();
+    const auto& entry_a = cache.get_or_compute(basis_a, quad, true, false);
+    const auto& entry_b = cache.get_or_compute(basis_b, quad, true, false);
+
+    EXPECT_EQ(&entry_a, &entry_b);
+    EXPECT_EQ(cache.size(), 1u);
+}
+
+TEST(BasisCache, BSplineDifferentKnotsProduceDifferentEntries) {
+    BSplineBasis basis_a(2, {Real(0), Real(0), Real(0), Real(0.25), Real(1), Real(1), Real(1)});
+    BSplineBasis basis_b(2, {Real(0), Real(0), Real(0), Real(0.75), Real(1), Real(1), Real(1)});
+    GaussQuadrature1D quad(4);
+
+    auto& cache = BasisCache::instance();
+    cache.clear();
+    const auto& entry_a = cache.get_or_compute(basis_a, quad, true, false);
+    const auto& entry_b = cache.get_or_compute(basis_b, quad, true, false);
+
+    EXPECT_NE(&entry_a, &entry_b);
+    EXPECT_EQ(cache.size(), 2u);
+}
+
+TEST(BasisCache, BSplineDifferentWeightsProduceDifferentEntries) {
+    const auto knots = make_open_uniform_knots(2, 5);
+    BSplineBasis basis_a(2, knots, {Real(1), Real(0.5), Real(2), Real(0.7), Real(1)});
+    BSplineBasis basis_b(2, knots, {Real(1), Real(0.8), Real(2), Real(0.7), Real(1)});
+    GaussQuadrature1D quad(4);
+
+    auto& cache = BasisCache::instance();
+    cache.clear();
+    const auto& entry_a = cache.get_or_compute(basis_a, quad, true, false);
+    const auto& entry_b = cache.get_or_compute(basis_b, quad, true, false);
+
+    EXPECT_NE(&entry_a, &entry_b);
+    EXPECT_EQ(cache.size(), 2u);
+}
+
+TEST(BasisCache, RationalAndNonRationalSplineProduceDifferentEntries) {
+    const auto knots = make_open_uniform_knots(2, 5);
+    BSplineBasis bspline(2, knots);
+    BSplineBasis nurbs(2, knots, {Real(1), Real(0.5), Real(2), Real(0.7), Real(1)});
+    GaussQuadrature1D quad(4);
+
+    auto& cache = BasisCache::instance();
+    cache.clear();
+    const auto& entry_bspline = cache.get_or_compute(bspline, quad, true, false);
+    const auto& entry_nurbs = cache.get_or_compute(nurbs, quad, true, false);
+
+    EXPECT_NE(&entry_bspline, &entry_nurbs);
+    EXPECT_EQ(cache.size(), 2u);
+}
+
+TEST(BasisCache, AnisotropicTensorSplineBasesDoNotAlias) {
+    BSplineBasis bx_a(1, make_open_uniform_knots(1, 4));
+    BSplineBasis bx_b(1, {Real(0), Real(0), Real(0.2), Real(0.8), Real(1), Real(1)});
+    BSplineBasis by(2, make_open_uniform_knots(2, 5));
+    TensorProductBasis<BSplineBasis> basis_a(bx_a, by);
+    TensorProductBasis<BSplineBasis> basis_b(bx_b, by);
+    QuadrilateralQuadrature quad(3);
+
+    auto& cache = BasisCache::instance();
+    cache.clear();
+    const auto& entry_a = cache.get_or_compute(basis_a, quad, true, false);
+    const auto& entry_b = cache.get_or_compute(basis_b, quad, true, false);
+
+    EXPECT_NE(&entry_a, &entry_b);
+    EXPECT_EQ(cache.size(), 2u);
+}
+
+TEST(BasisCache, CachedSplineValuesMatchDirectEvaluation) {
+    BSplineBasis basis(2, make_open_uniform_knots(2, 6));
+    GaussQuadrature1D quad(5);
+
+    auto& cache = BasisCache::instance();
+    cache.clear();
+    const auto& entry = cache.get_or_compute(basis, quad, true, false);
+
+    for (std::size_t qp = 0; qp < quad.num_points(); ++qp) {
+        std::vector<Real> values;
+        std::vector<Gradient> gradients;
+        basis.evaluate_values(quad.point(qp), values);
+        basis.evaluate_gradients(quad.point(qp), gradients);
+
+        ASSERT_EQ(values.size(), basis.size());
+        ASSERT_EQ(gradients.size(), basis.size());
+        for (std::size_t dof = 0; dof < basis.size(); ++dof) {
+            EXPECT_NEAR(entry.scalarValue(dof, qp), values[dof], 1e-14);
+            EXPECT_NEAR(entry.gradients[qp][dof][0], gradients[dof][0], 1e-12);
+        }
+    }
+}
+
+TEST(BasisCache, CachedTensorSplineValuesMatchDirectEvaluation) {
+    BSplineBasis bx(1, make_open_uniform_knots(1, 4));
+    BSplineBasis by(2, make_open_uniform_knots(2, 5));
+    TensorProductBasis<BSplineBasis> basis(bx, by);
+    QuadrilateralQuadrature quad(3);
+
+    auto& cache = BasisCache::instance();
+    cache.clear();
+    const auto& entry = cache.get_or_compute(basis, quad, true, false);
+
+    for (std::size_t qp = 0; qp < quad.num_points(); ++qp) {
+        std::vector<Real> values;
+        basis.evaluate_values(quad.point(qp), values);
+
+        ASSERT_EQ(values.size(), basis.size());
+        for (std::size_t dof = 0; dof < basis.size(); ++dof) {
+            EXPECT_NEAR(entry.scalarValue(dof, qp), values[dof], 1e-14);
+        }
+    }
+}
+
+TEST(BasisCache, EquivalentQuadraturePointSetsReuseEntriesEvenIfWeightsDiffer) {
+    LagrangeBasis basis(ElementType::Line2, 2);
+    const std::vector<QuadPoint> points = {
+        QuadPoint{Real(-0.5), Real(0), Real(0)},
+        QuadPoint{Real(0.5), Real(0), Real(0)}
+    };
+    CustomQuadratureRule quad_a(svmp::CellFamily::Line, 1, 1, points, {Real(1), Real(1)});
+    CustomQuadratureRule quad_b(svmp::CellFamily::Line, 1, 99, points, {Real(0.25), Real(1.75)});
+
+    auto& cache = BasisCache::instance();
+    cache.clear();
+    const auto& entry_a = cache.get_or_compute(basis, quad_a, true, false);
+    const auto& entry_b = cache.get_or_compute(basis, quad_b, true, false);
+
+    EXPECT_EQ(&entry_a, &entry_b);
+    EXPECT_EQ(cache.size(), 1u);
+}
+
+TEST(BasisCache, QuadratureDifferentZCoordinatesProduceDifferentEntries) {
+    LagrangeBasis basis(ElementType::Hex8, 1);
+    CustomQuadratureRule quad_a(
+        svmp::CellFamily::Hex, 3, 1,
+        {QuadPoint{Real(0), Real(0), Real(0)}},
+        {Real(8)});
+    CustomQuadratureRule quad_b(
+        svmp::CellFamily::Hex, 3, 1,
+        {QuadPoint{Real(0), Real(0), Real(0.25)}},
+        {Real(8)});
+
+    auto& cache = BasisCache::instance();
+    cache.clear();
+    const auto& entry_a = cache.get_or_compute(basis, quad_a, true, false);
+    const auto& entry_b = cache.get_or_compute(basis, quad_b, true, false);
+
+    EXPECT_NE(&entry_a, &entry_b);
+    EXPECT_EQ(cache.size(), 2u);
+}
+
+TEST(BasisCache, QuadratureDifferentTailPointsProduceDifferentEntries) {
+    LagrangeBasis basis(ElementType::Line2, 2);
+    const std::vector<Real> weights(5, Real(0.4));
+    CustomQuadratureRule quad_a(
+        svmp::CellFamily::Line, 1, 5,
+        {
+            QuadPoint{Real(-0.8), Real(0), Real(0)},
+            QuadPoint{Real(-0.4), Real(0), Real(0)},
+            QuadPoint{Real(0.0), Real(0), Real(0)},
+            QuadPoint{Real(0.4), Real(0), Real(0)},
+            QuadPoint{Real(0.8), Real(0), Real(0)}
+        },
+        weights);
+    CustomQuadratureRule quad_b(
+        svmp::CellFamily::Line, 1, 5,
+        {
+            QuadPoint{Real(-0.8), Real(0), Real(0)},
+            QuadPoint{Real(-0.4), Real(0), Real(0)},
+            QuadPoint{Real(0.0), Real(0), Real(0)},
+            QuadPoint{Real(0.4), Real(0), Real(0)},
+            QuadPoint{Real(0.9), Real(0), Real(0)}
+        },
+        weights);
+
+    auto& cache = BasisCache::instance();
+    cache.clear();
+    const auto& entry_a = cache.get_or_compute(basis, quad_a, true, false);
+    const auto& entry_b = cache.get_or_compute(basis, quad_b, true, false);
+
+    EXPECT_NE(&entry_a, &entry_b);
+    EXPECT_EQ(cache.size(), 2u);
+}
+
 TEST(BasisCache, ThreadSafetySingleEntryUnderConcurrency) {
     LagrangeBasis basis(ElementType::Line2, 2);
     GaussQuadrature1D quad(3);
@@ -120,6 +389,70 @@ TEST(BasisCache, ThreadSafetySingleEntryUnderConcurrency) {
     EXPECT_EQ(cache.size(), 1u);
     ASSERT_EQ(ref->num_qpts, quad.num_points());
 }
+
+TEST(BasisCache, CanonicalAndAliasLagrangePathsReuseEntries) {
+    LagrangeBasis alias(ElementType::Pyramid14, 2);
+    LagrangeBasis canonical(ElementType::Pyramid5, 2);
+    CustomQuadratureRule quad(
+        svmp::CellFamily::Pyramid, 3, 4,
+        {
+            QuadPoint{Real(0.0), Real(0.0), Real(0.2)},
+            QuadPoint{Real(0.1), Real(-0.08), Real(0.35)},
+            QuadPoint{Real(-0.12), Real(0.1), Real(0.5)}
+        },
+        {Real(0.5), Real(0.4), Real(0.4333333333333333)});
+
+    auto& cache = BasisCache::instance();
+    cache.clear();
+    const auto& entry_alias = cache.get_or_compute(alias, quad, true, false);
+    const auto& entry_canonical = cache.get_or_compute(canonical, quad, true, false);
+
+    EXPECT_EQ(&entry_alias, &entry_canonical);
+    EXPECT_EQ(cache.size(), 1u);
+}
+
+TEST(BasisCache, CachedHighOrderLagrangeEvaluationsMatchDirectEvaluation) {
+    LagrangeBasis basis(ElementType::Pyramid5, 4);
+    CustomQuadratureRule quad(
+        svmp::CellFamily::Pyramid, 3, 6,
+        {
+            QuadPoint{Real(0.0), Real(0.0), Real(0.15)},
+            QuadPoint{Real(0.18), Real(-0.12), Real(0.3)},
+            QuadPoint{Real(-0.2), Real(0.1), Real(0.42)},
+            QuadPoint{Real(0.04), Real(-0.03), Real(0.78)}
+        },
+        {Real(0.2), Real(0.3), Real(0.4), Real(0.4333333333333333)});
+
+    auto& cache = BasisCache::instance();
+    cache.clear();
+    const auto& entry_grad = cache.get_or_compute(basis, quad, true, false);
+    const auto& entry_hess = cache.get_or_compute(basis, quad, false, true);
+
+    for (std::size_t qp = 0; qp < quad.num_points(); ++qp) {
+        std::vector<Real> values;
+        std::vector<Gradient> gradients;
+        std::vector<Hessian> hessians;
+        basis.evaluate_values(quad.point(qp), values);
+        basis.evaluate_gradients(quad.point(qp), gradients);
+        basis.evaluate_hessians(quad.point(qp), hessians);
+
+        ASSERT_EQ(values.size(), basis.size());
+        ASSERT_EQ(gradients.size(), basis.size());
+        ASSERT_EQ(hessians.size(), basis.size());
+        for (std::size_t dof = 0; dof < basis.size(); ++dof) {
+            EXPECT_NEAR(entry_grad.scalarValue(dof, qp), values[dof], 1e-12);
+            for (int d = 0; d < basis.dimension(); ++d) {
+                const std::size_t sd = static_cast<std::size_t>(d);
+                EXPECT_NEAR(entry_grad.gradients[qp][dof][sd], gradients[dof][sd], 1e-10);
+                for (int e = 0; e < basis.dimension(); ++e) {
+                    const std::size_t se = static_cast<std::size_t>(e);
+                    EXPECT_NEAR(entry_hess.hessians[qp][dof](sd, se), hessians[dof](sd, se), 1e-8);
+                }
+            }
+        }
+    }
+}
+
 TEST(BasisFactory, CreatesVectorConformingBasis) {
     BasisRequest req{ElementType::Quad4, BasisType::Lagrange, 0, Continuity::H_div, FieldType::Vector};
     auto basis = BasisFactory::create(req);
@@ -208,6 +541,88 @@ TEST(BasisFactory, CreatesScalarBasesByType) {
         EXPECT_EQ(basis->basis_type(), BasisType::Serendipity);
         EXPECT_EQ(basis->size(), 8u);
     }
+    {
+        BasisRequest req{ElementType::Line2, BasisType::BSpline, 2, Continuity::C0, FieldType::Scalar};
+        req.knot_vector = make_open_uniform_knots(2, 6);
+        auto basis = BasisFactory::create(req);
+        EXPECT_EQ(basis->basis_type(), BasisType::BSpline);
+        EXPECT_EQ(basis->size(), 6u);
+    }
+    {
+        BasisRequest req{ElementType::Line2, BasisType::NURBS, 2, Continuity::C0, FieldType::Scalar};
+        req.knot_vector = make_open_uniform_knots(2, 5);
+        req.weights = {Real(1), Real(0.5), Real(2), Real(0.7), Real(1)};
+        auto basis = BasisFactory::create(req);
+        EXPECT_EQ(basis->basis_type(), BasisType::NURBS);
+        auto* spline = dynamic_cast<BSplineBasis*>(basis.get());
+        ASSERT_NE(spline, nullptr);
+        EXPECT_TRUE(spline->is_rational());
+    }
+}
+
+TEST(BasisFactory, CreatesHighOrderCanonicalLagrangeBases) {
+    const struct Case {
+        ElementType type;
+        int order;
+    } cases[] = {
+        {ElementType::Line2, 5},
+        {ElementType::Triangle3, 4},
+        {ElementType::Quad4, 5},
+        {ElementType::Tetra4, 3},
+        {ElementType::Hex8, 4},
+        {ElementType::Wedge6, 4},
+        {ElementType::Pyramid5, 4},
+    };
+
+    for (const auto& c : cases) {
+        BasisRequest req{c.type, BasisType::Lagrange, c.order, Continuity::C0, FieldType::Scalar};
+        auto basis = BasisFactory::create(req);
+        ASSERT_NE(basis, nullptr);
+        EXPECT_EQ(basis->basis_type(), BasisType::Lagrange);
+        EXPECT_EQ(basis->element_type(), c.type);
+        EXPECT_EQ(basis->order(), c.order);
+        EXPECT_EQ(basis->size(), expected_lagrange_size(c.type, c.order));
+    }
+}
+
+TEST(BasisFactory, LowOrderAliasLagrangeDescriptorsMatchCanonicalPaths) {
+    const struct Case {
+        ElementType alias_type;
+        ElementType canonical_type;
+        int order;
+        math::Vector<Real, 3> xi;
+    } cases[] = {
+        {ElementType::Line3, ElementType::Line2, 2, {Real(0.2), Real(0), Real(0)}},
+        {ElementType::Triangle6, ElementType::Triangle3, 2, {Real(0.2), Real(0.25), Real(0)}},
+        {ElementType::Quad9, ElementType::Quad4, 2, {Real(0.15), Real(-0.2), Real(0)}},
+        {ElementType::Tetra10, ElementType::Tetra4, 2, {Real(0.15), Real(0.2), Real(0.1)}},
+        {ElementType::Hex27, ElementType::Hex8, 2, {Real(0.2), Real(-0.2), Real(0.25)}},
+        {ElementType::Wedge18, ElementType::Wedge6, 2, {Real(0.2), Real(0.15), Real(0.1)}},
+        {ElementType::Pyramid14, ElementType::Pyramid5, 2, {Real(0.08), Real(-0.06), Real(0.35)}},
+    };
+
+    for (const auto& c : cases) {
+        BasisRequest alias_req{c.alias_type, BasisType::Lagrange, c.order, Continuity::C0, FieldType::Scalar};
+        BasisRequest canonical_req{c.canonical_type, BasisType::Lagrange, c.order, Continuity::C0, FieldType::Scalar};
+        auto alias_basis = BasisFactory::create(alias_req);
+        auto canonical_basis = BasisFactory::create(canonical_req);
+
+        ASSERT_NE(alias_basis, nullptr);
+        ASSERT_NE(canonical_basis, nullptr);
+        EXPECT_EQ(alias_basis->element_type(), canonical_basis->element_type());
+        EXPECT_EQ(alias_basis->order(), canonical_basis->order());
+        EXPECT_EQ(alias_basis->size(), canonical_basis->size());
+
+        std::vector<Real> alias_values;
+        std::vector<Real> canonical_values;
+        alias_basis->evaluate_values(c.xi, alias_values);
+        canonical_basis->evaluate_values(c.xi, canonical_values);
+
+        ASSERT_EQ(alias_values.size(), canonical_values.size());
+        for (std::size_t i = 0; i < alias_values.size(); ++i) {
+            EXPECT_NEAR(alias_values[i], canonical_values[i], 1e-12);
+        }
+    }
 }
 
 TEST(BasisFactory, UnsupportedCombinationThrows) {
@@ -233,4 +648,95 @@ TEST(BasisFactory, L2ReturnsExpectedBasis) {
         EXPECT_EQ(basis->element_type(), ElementType::Quad4);
         EXPECT_EQ(basis->order(), 3);
     }
+}
+
+TEST(BasisFactory, CreatesTensorBSplineFromDescriptor) {
+    BasisRequest req{ElementType::Quad4, BasisType::BSpline, 2, Continuity::C0, FieldType::Scalar};
+    req.knot_vector = make_open_uniform_knots(2, 5);
+
+    auto basis = BasisFactory::create(req);
+
+    EXPECT_EQ(basis->basis_type(), BasisType::BSpline);
+    EXPECT_EQ(basis->element_type(), ElementType::Quad4);
+    EXPECT_EQ(basis->size(), 25u);
+}
+
+TEST(BasisFactory, CreatesAnisotropicTensorBSplineFromDescriptor) {
+    BasisRequest req{ElementType::Quad4, BasisType::BSpline, 1, Continuity::C0, FieldType::Scalar};
+    req.axis_orders = {1, 2};
+    req.axis_knot_vectors = {
+        make_open_uniform_knots(1, 4),
+        make_open_uniform_knots(2, 5)
+    };
+
+    auto basis = BasisFactory::create(req);
+
+    EXPECT_EQ(basis->basis_type(), BasisType::BSpline);
+    EXPECT_EQ(basis->element_type(), ElementType::Quad4);
+    EXPECT_EQ(basis->size(), 20u);
+}
+
+TEST(BasisFactory, MissingSplineParametersThrows) {
+    BasisRequest req{ElementType::Line2, BasisType::BSpline, 2, Continuity::C0, FieldType::Scalar};
+    EXPECT_THROW(BasisFactory::create(req), svmp::FE::FEException);
+}
+
+TEST(BasisFactory, InvalidSplineWeightsThrow) {
+    BasisRequest req{ElementType::Line2, BasisType::BSpline, 2, Continuity::C0, FieldType::Scalar};
+    req.knot_vector = make_open_uniform_knots(2, 5);
+    req.weights = {Real(1), Real(1), Real(1), Real(1), Real(1)};
+    EXPECT_THROW(BasisFactory::create(req), svmp::FE::FEException);
+}
+
+TEST(BasisFactory, InvalidNURBSWithoutWeightsThrows) {
+    BasisRequest req{ElementType::Line2, BasisType::NURBS, 2, Continuity::C0, FieldType::Scalar};
+    req.knot_vector = make_open_uniform_knots(2, 5);
+    EXPECT_THROW(BasisFactory::create(req), svmp::FE::FEException);
+}
+
+TEST(BasisFactory, MultiDimensionalNURBSThrowsUntilControlPointWeightsAreSupported) {
+    BasisRequest req{ElementType::Quad4, BasisType::NURBS, 2, Continuity::C0, FieldType::Scalar};
+    req.knot_vector = make_open_uniform_knots(2, 5);
+    req.weights = {Real(1), Real(0.5), Real(2), Real(0.7), Real(1)};
+
+    try {
+        (void)BasisFactory::create(req);
+        FAIL() << "Expected FEException";
+    } catch (const FEException& e) {
+        EXPECT_EQ(e.status(), FEStatus::NotImplemented);
+    }
+}
+
+TEST(BasisFactory, FactoryAndDirectSplineConstructionAgree) {
+    BasisRequest req{ElementType::Line2, BasisType::BSpline, 2, Continuity::C0, FieldType::Scalar};
+    req.knot_vector = make_open_uniform_knots(2, 6);
+    auto from_factory = BasisFactory::create(req);
+    BSplineBasis direct(2, make_open_uniform_knots(2, 6));
+
+    const math::Vector<Real, 3> xi{Real(0.2), Real(0), Real(0)};
+    std::vector<Real> factory_values;
+    std::vector<Real> direct_values;
+    from_factory->evaluate_values(xi, factory_values);
+    direct.evaluate_values(xi, direct_values);
+
+    ASSERT_EQ(factory_values.size(), direct_values.size());
+    for (std::size_t i = 0; i < factory_values.size(); ++i) {
+        EXPECT_NEAR(factory_values[i], direct_values[i], 1e-14);
+    }
+}
+
+TEST(BasisFactory, FactoryCreatedSplineCacheIdentityMatchesDirectConstruction) {
+    BasisRequest req{ElementType::Line2, BasisType::BSpline, 2, Continuity::C0, FieldType::Scalar};
+    req.knot_vector = make_open_uniform_knots(2, 6);
+    auto from_factory = BasisFactory::create(req);
+    BSplineBasis direct(2, make_open_uniform_knots(2, 6));
+    GaussQuadrature1D quad(4);
+
+    auto& cache = BasisCache::instance();
+    cache.clear();
+    const auto& entry_factory = cache.get_or_compute(*from_factory, quad, true, false);
+    const auto& entry_direct = cache.get_or_compute(direct, quad, true, false);
+
+    EXPECT_EQ(&entry_factory, &entry_direct);
+    EXPECT_EQ(cache.size(), 1u);
 }

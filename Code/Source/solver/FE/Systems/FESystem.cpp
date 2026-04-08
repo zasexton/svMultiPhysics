@@ -48,6 +48,7 @@
 #include <cstdlib>
 #include <numeric>
 #include <sstream>
+#include <type_traits>
 #include <unordered_set>
 
 #if FE_HAS_MPI
@@ -63,6 +64,53 @@
 namespace svmp {
 namespace FE {
 namespace systems {
+
+namespace {
+
+[[nodiscard]] bool nativeFaceRankOnePromotionEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_DISABLE_MPI_NATIVE_RANK1_PROMOTION");
+    if (env == nullptr) {
+        return true;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    if (*env == '\0') {
+        return true;
+    }
+    return *env == '0';
+}
+
+template <typename T>
+[[nodiscard]] T mpiAllreduceSumIfActive(T value) noexcept
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (!initialized) {
+        return value;
+    }
+
+    int size = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size <= 1) {
+        return value;
+    }
+
+    T global = value;
+    if constexpr (std::is_same_v<T, int>) {
+        MPI_Allreduce(&value, &global, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    } else {
+        MPI_Allreduce(&value, &global, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    }
+    return global;
+#else
+    return value;
+#endif
+}
+
+} // namespace
 
 /// Walk an expression tree and collect all FieldIds referenced by
 /// DiscreteField or StateField nodes.
@@ -332,6 +380,10 @@ void scatterAuxiliaryFlatEntity(const AuxiliaryBlockStorage& blk,
     const dofs::IndexSet& owned_dofs,
     backends::RankOneUpdate& promoted)
 {
+    if (!nativeFaceRankOnePromotionEnabled()) {
+        return false;
+    }
+
     constexpr Real kTol = static_cast<Real>(1e-14);
     if (!(std::abs(doutput_dinput) > kTol) || output_gradient.empty() || input_gradient.empty()) {
         return false;
@@ -344,13 +396,10 @@ void scatterAuxiliaryFlatEntity(const AuxiliaryBlockStorage& blk,
         q_map[dof] += value;
         q_norm_sq += value * value;
     }
-    if (!(q_norm_sq > kTol * kTol)) {
-        return false;
-    }
 
     Real cross = Real(0.0);
     Real dRdQ_norm_sq = Real(0.0);
-    Real residual_sq = Real(0.0);
+    Real local_residual_sq = Real(0.0);
     std::unordered_map<GlobalIndex, Real> dR_map;
     dR_map.reserve(output_gradient.size());
     for (const auto& [dof, dRi_dOk] : output_gradient) {
@@ -362,11 +411,18 @@ void scatterAuxiliaryFlatEntity(const AuxiliaryBlockStorage& blk,
             cross += dRdQ * it->second;
         }
     }
-    if (!(dRdQ_norm_sq > kTol * kTol)) {
+    const int global_q_has = mpiAllreduceSumIfActive(q_map.empty() ? 0 : 1);
+    const int global_dR_has = mpiAllreduceSumIfActive(dR_map.empty() ? 0 : 1);
+    const Real global_q_norm_sq = mpiAllreduceSumIfActive(q_norm_sq);
+    const Real global_dRdQ_norm_sq = mpiAllreduceSumIfActive(dRdQ_norm_sq);
+    const Real global_cross = mpiAllreduceSumIfActive(cross);
+    if (global_q_has == 0 || global_dR_has == 0 ||
+        !(global_q_norm_sq > kTol * kTol) ||
+        !(global_dRdQ_norm_sq > kTol * kTol)) {
         return false;
     }
 
-    const Real sigma = cross / q_norm_sq;
+    const Real sigma = global_cross / global_q_norm_sq;
     if (!(std::abs(sigma) > kTol)) {
         return false;
     }
@@ -375,16 +431,17 @@ void scatterAuxiliaryFlatEntity(const AuxiliaryBlockStorage& blk,
         const auto it = dR_map.find(dof);
         const Real dRdQ = (it != dR_map.end()) ? it->second : Real(0.0);
         const Real diff = dRdQ - sigma * q_val;
-        residual_sq += diff * diff;
+        local_residual_sq += diff * diff;
     }
     for (const auto& [dof, dRdQ] : dR_map) {
         if (q_map.find(dof) == q_map.end()) {
-            residual_sq += dRdQ * dRdQ;
+            local_residual_sq += dRdQ * dRdQ;
         }
     }
 
     constexpr Real kRelTolSq = static_cast<Real>(1e-4);
-    if (!(residual_sq / std::max(dRdQ_norm_sq, Real(1e-30)) <= kRelTolSq)) {
+    const Real residual_sq = mpiAllreduceSumIfActive(local_residual_sq);
+    if (!(residual_sq / std::max(global_dRdQ_norm_sq, Real(1e-30)) <= kRelTolSq)) {
         return false;
     }
 
@@ -397,7 +454,7 @@ void scatterAuxiliaryFlatEntity(const AuxiliaryBlockStorage& blk,
             promoted.v.emplace_back(dof, value);
         }
     }
-    return !promoted.v.empty();
+    return true;
 }
 
 [[nodiscard]] bool isPureAlgebraicAuxiliary(
@@ -5915,9 +5972,12 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                                 reduced_update.right.emplace_back(dof_j, qj);
                                             }
 
-                                            if (!reduced_update.left.empty() &&
-                                                !reduced_update.right.empty() &&
-                                                std::abs(reduced_update.sigma) > kDirectCouplingEntryTol) {
+                                            if (std::abs(reduced_update.sigma) > kDirectCouplingEntryTol) {
+                                                // Preserve globally active reduced-update slots even
+                                                // when this rank owns no entries on one side. The
+                                                // distributed FSILS backend requires identical update
+                                                // counts across ranks to keep overlap exchanges
+                                                // ordered.
                                                 last_reduced_field_updates_.push_back(
                                                     std::move(reduced_update));
                                             }
@@ -6057,8 +6117,9 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                     }
                                     reduced_update.right.emplace_back(dof_j, qj);
                                 }
-                                if (!reduced_update.left.empty() &&
-                                    !reduced_update.right.empty()) {
+                                // Preserve globally active reduced-update slots even when the
+                                // ownership partition leaves one side empty on this rank.
+                                if (std::abs(reduced_update.sigma) > kDirectCouplingEntryTol) {
                                     last_reduced_field_updates_.push_back(std::move(reduced_update));
                                 }
                             }
@@ -6111,8 +6172,9 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                         }
                     }
 
-                    if (!reduced_update.left.empty() &&
-                        !reduced_update.right.empty()) {
+                    // Preserve globally active reduced-update slots even when this rank owns no
+                    // local entries for the condensed field factor on one side.
+                    if (std::abs(reduced_update.sigma) > kDirectCouplingEntryTol) {
                         last_reduced_field_updates_.push_back(std::move(reduced_update));
                     }
                 }

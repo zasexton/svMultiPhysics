@@ -109,7 +109,8 @@ private:
     std::size_t size_{0};
 
     bool nodal_generated_{false};
-    bool use_direct_construction_{false};  ///< True for wedge/pyramid k>=1 (uses explicit formulas)
+    bool use_direct_construction_{false};  ///< True for wedge/pyramid RT(k>=2) direct formulas
+    bool use_transformed_direct_rt1_{false};  ///< True for wedge/pyramid RT(1) transformed from direct seed functions
     std::vector<ModalPolynomial> monomials_;
     // Coefficients for nodal basis in modal monomial basis:
     //   phi_j = sum_p coeffs_[p * size_ + j] * modal_p

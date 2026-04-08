@@ -17,9 +17,7 @@
  * The current implementation supports:
  *   - 1D cubic Hermite on Line2 (4 DOFs: values + first derivatives at endpoints)
  *   - 2D bicubic Hermite on Quad4 (16 DOFs: values, ∂/∂x, ∂/∂y, ∂²/(∂x∂y) at corners)
- *
- * Additional element types (e.g., tensor-product Hermite on hexes) can be
- * added in the future following the same family interface.
+ *   - 3D tricubic Hermite on Hex8 (64 DOFs carried as tensor-product corner modes)
  */
 
 #include "BasisFunction.h"
@@ -44,10 +42,10 @@ namespace basis {
  *  - H3(t) = 3t² - 2t³       (value at right node)
  *  - H4(t) = -t² + t³        (slope at right node)
  *
- * Currently only ElementType::Line2 and ElementType::Quad4 with cubic order (3)
- * are supported. The constructor validates the requested element configuration
- * and throws for unsupported combinations, so the Hermite family can be
- * extended safely.
+ * Currently only ElementType::Line2, ElementType::Quad4, and ElementType::Hex8
+ * with cubic order (3) are supported. The constructor validates the requested
+ * element configuration and throws for unsupported combinations, so the Hermite
+ * family can be extended safely.
  */
 class HermiteBasis : public BasisFunction {
 public:

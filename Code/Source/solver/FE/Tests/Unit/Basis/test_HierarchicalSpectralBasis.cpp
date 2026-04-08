@@ -19,6 +19,80 @@ using namespace svmp::FE;
 using namespace svmp::FE::basis;
 using namespace svmp::FE::quadrature;
 
+namespace {
+
+using Point = svmp::FE::math::Vector<Real, 3>;
+
+std::vector<Point> boundary_stress_points_for(ElementType type) {
+    switch (type) {
+        case ElementType::Line2:
+            return {
+                Point{Real(-0.98), Real(0), Real(0)},
+                Point{Real(-0.15), Real(0), Real(0)},
+                Point{Real(0.95), Real(0), Real(0)}
+            };
+        case ElementType::Triangle3:
+            return {
+                Point{Real(0.01), Real(0.01), Real(0)},
+                Point{Real(0.97), Real(0.01), Real(0)},
+                Point{Real(0.02), Real(0.95), Real(0)},
+                Point{Real(0.45), Real(0.5), Real(0)}
+            };
+        case ElementType::Quad4:
+            return {
+                Point{Real(-0.96), Real(-0.94), Real(0)},
+                Point{Real(0.95), Real(-0.91), Real(0)},
+                Point{Real(-0.93), Real(0.92), Real(0)},
+                Point{Real(0.9), Real(0.94), Real(0)}
+            };
+        case ElementType::Tetra4:
+            return {
+                Point{Real(0.01), Real(0.01), Real(0.01)},
+                Point{Real(0.96), Real(0.01), Real(0.01)},
+                Point{Real(0.02), Real(0.94), Real(0.01)},
+                Point{Real(0.03), Real(0.04), Real(0.9)}
+            };
+        case ElementType::Hex8:
+            return {
+                Point{Real(-0.95), Real(-0.94), Real(-0.92)},
+                Point{Real(0.93), Real(-0.9), Real(0.88)},
+                Point{Real(-0.89), Real(0.91), Real(0.86)},
+                Point{Real(0.9), Real(0.89), Real(-0.87)}
+            };
+        case ElementType::Wedge6:
+            return {
+                Point{Real(0.01), Real(0.01), Real(-0.95)},
+                Point{Real(0.97), Real(0.01), Real(0.88)},
+                Point{Real(0.02), Real(0.95), Real(-0.82)},
+                Point{Real(0.46), Real(0.48), Real(0.9)}
+            };
+        case ElementType::Pyramid5:
+            return {
+                Point{Real(0.0), Real(0.0), Real(0.98)},
+                Point{Real(0.02), Real(-0.015), Real(0.95)},
+                Point{Real(0.94), Real(-0.9), Real(-0.92)},
+                Point{Real(-0.86), Real(0.88), Real(-0.85)}
+            };
+        default:
+            return {Point{Real(0), Real(0), Real(0)}};
+    }
+}
+
+void expect_values_and_gradients_finite(const std::vector<Real>& values,
+                                        const std::vector<Gradient>& grads,
+                                        int dimension) {
+    for (Real value : values) {
+        EXPECT_TRUE(std::isfinite(value));
+    }
+    for (const auto& grad : grads) {
+        for (int d = 0; d < dimension; ++d) {
+            EXPECT_TRUE(std::isfinite(grad[static_cast<std::size_t>(d)]));
+        }
+    }
+}
+
+} // namespace
+
 TEST(HierarchicalBasis, LegendreOrthogonalityOnLine) {
     const int order = 3;
     HierarchicalBasis basis(ElementType::Line2, order);
@@ -263,6 +337,35 @@ TEST(HierarchicalBasis, PyramidModalGramPositiveDefinite) {
     }
 }
 
+TEST(HierarchicalBasis, BoundarySweepValuesAndGradientsRemainFinite) {
+    const struct Case {
+        ElementType type;
+        int order;
+    } cases[] = {
+        {ElementType::Line2, 5},
+        {ElementType::Triangle3, 4},
+        {ElementType::Quad4, 4},
+        {ElementType::Tetra4, 3},
+        {ElementType::Hex8, 3},
+        {ElementType::Wedge6, 3},
+        {ElementType::Pyramid5, 3},
+    };
+
+    for (const auto& c : cases) {
+        HierarchicalBasis basis(c.type, c.order);
+        for (const auto& xi : boundary_stress_points_for(c.type)) {
+            std::vector<Real> values;
+            std::vector<Gradient> grads;
+            basis.evaluate_values(xi, values);
+            basis.evaluate_gradients(xi, grads);
+
+            ASSERT_EQ(values.size(), basis.size());
+            ASSERT_EQ(grads.size(), basis.size());
+            expect_values_and_gradients_finite(values, grads, basis.dimension());
+        }
+    }
+}
+
 TEST(SpectralBasis, HexKroneckerAndPartitionOfUnity) {
     const int order = 3;
     SpectralBasis basis(ElementType::Hex8, order);
@@ -299,10 +402,65 @@ TEST(SpectralBasis, HexKroneckerAndPartitionOfUnity) {
     EXPECT_NEAR(sum, 1.0, 1e-12);
 }
 
-TEST(SpectralBasis, WedgeAndPyramidThrowNotImplemented) {
+TEST(SpectralBasis, WedgeAndPyramidSupportContractIsExplicit) {
     const int order = 2;
-    EXPECT_THROW(SpectralBasis(ElementType::Wedge6, order), svmp::FE::FEException);
-    EXPECT_THROW(SpectralBasis(ElementType::Pyramid5, order), svmp::FE::FEException);
+    try {
+        (void)SpectralBasis(ElementType::Wedge6, order);
+        FAIL() << "Expected FEException";
+    } catch (const svmp::FE::FEException& e) {
+        EXPECT_EQ(e.status(), svmp::FE::FEStatus::NotImplemented);
+    }
+
+    try {
+        (void)SpectralBasis(ElementType::Pyramid5, order);
+        FAIL() << "Expected FEException";
+    } catch (const svmp::FE::FEException& e) {
+        EXPECT_EQ(e.status(), svmp::FE::FEStatus::NotImplemented);
+    }
+}
+
+TEST(SpectralBasis, BoundarySweepMaintainsPartitionAndFiniteGradients) {
+    const struct Case {
+        ElementType type;
+        int order;
+    } cases[] = {
+        {ElementType::Line2, 5},
+        {ElementType::Triangle3, 4},
+        {ElementType::Quad4, 4},
+        {ElementType::Tetra4, 3},
+        {ElementType::Hex8, 3},
+    };
+
+    for (const auto& c : cases) {
+        SpectralBasis basis(c.type, c.order);
+        for (const auto& xi : boundary_stress_points_for(c.type)) {
+            std::vector<Real> values;
+            std::vector<Gradient> grads;
+            basis.evaluate_values(xi, values);
+            basis.evaluate_gradients(xi, grads);
+
+            ASSERT_EQ(values.size(), basis.size());
+            ASSERT_EQ(grads.size(), basis.size());
+            expect_values_and_gradients_finite(values, grads, basis.dimension());
+
+            Real sum = Real(0);
+            Gradient grad_sum{};
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                sum += values[i];
+                for (int d = 0; d < basis.dimension(); ++d) {
+                    grad_sum[static_cast<std::size_t>(d)] += grads[i][static_cast<std::size_t>(d)];
+                }
+            }
+
+            EXPECT_NEAR(sum, Real(1), Real(1e-10))
+                << "type=" << static_cast<int>(c.type) << ", order=" << c.order;
+            for (int d = 0; d < basis.dimension(); ++d) {
+                EXPECT_NEAR(grad_sum[static_cast<std::size_t>(d)], Real(0), Real(1e-8))
+                    << "type=" << static_cast<int>(c.type)
+                    << ", order=" << c.order << ", dim=" << d;
+            }
+        }
+    }
 }
 
 TEST(SpectralBasis, GLLNodeAccuracy) {

@@ -17,8 +17,9 @@
  * as a building block for tensor-product spline bases via TensorProductBasis.
  *
  * Notes:
- * - The basis is reported as BasisType::BSpline (non-rational). For rational
- *   NURBS evaluation, use the weights-based constructor (when available).
+ * - The weights-based constructor reports BasisType::NURBS because it changes
+ *   the semantic basis family, even though the implementation shares the same
+ *   storage/evaluation class.
  * - Evaluation is performed in reference coordinates xi ∈ [-1,1] by mapping to
  *   the parametric coordinate u ∈ [u_min, u_max] implied by the knot vector.
  */
@@ -53,11 +54,13 @@ public:
      */
     BSplineBasis(int degree, std::vector<Real> knots, std::vector<Real> weights);
 
-    BasisType basis_type() const noexcept override { return BasisType::BSpline; }
+    BasisType basis_type() const noexcept override { return semantic_type_; }
     ElementType element_type() const noexcept override { return ElementType::Line2; }
     int dimension() const noexcept override { return 1; }
     int order() const noexcept override { return degree_; }
     std::size_t size() const noexcept override { return num_basis_; }
+
+    std::string cache_identity() const override;
 
     void evaluate_values(const math::Vector<Real, 3>& xi,
                          std::vector<Real>& values) const override;
@@ -66,11 +69,13 @@ public:
                             std::vector<Gradient>& gradients) const override;
 
     const std::vector<Real>& knots() const noexcept { return knots_; }
+    const std::vector<Real>& weights() const noexcept { return weights_; }
 
     /// Whether this basis uses rational (NURBS) weights
     bool is_rational() const noexcept { return !weights_.empty(); }
 
 private:
+    BasisType semantic_type_{BasisType::BSpline};
     int degree_{0};
     std::vector<Real> knots_;
     std::size_t num_basis_{0};
@@ -84,4 +89,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_BASIS_BSPLINEBASIS_H
-

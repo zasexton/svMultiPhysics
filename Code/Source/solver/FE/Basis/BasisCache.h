@@ -20,7 +20,7 @@
 #include <memory>
 #include <mutex>
 #include <span>
-#include <typeindex>
+#include <string>
 #include <unordered_map>
 
 namespace svmp {
@@ -28,38 +28,26 @@ namespace FE {
 namespace basis {
 
 struct BasisCacheKey {
-    std::type_index dynamic_type;
-    BasisType basis;
-    ElementType elem;
-    int order;
-    std::size_t quad_hash;
+    std::string basis_identity;
+    std::string quadrature_identity;
     bool with_gradients;
     bool with_hessians;
-    bool vector;
 
     bool operator==(const BasisCacheKey& other) const noexcept {
-        return dynamic_type == other.dynamic_type &&
-               basis == other.basis &&
-               elem == other.elem &&
-               order == other.order &&
-               quad_hash == other.quad_hash &&
+        return basis_identity == other.basis_identity &&
+               quadrature_identity == other.quadrature_identity &&
                with_gradients == other.with_gradients &&
-               with_hessians == other.with_hessians &&
-               vector == other.vector;
+               with_hessians == other.with_hessians;
     }
 };
 
 struct BasisCacheKeyHash {
     std::size_t operator()(const BasisCacheKey& key) const noexcept {
-        std::size_t h0 = std::hash<std::type_index>()(key.dynamic_type);
-        std::size_t h1 = std::hash<int>()(static_cast<int>(key.basis));
-        std::size_t h2 = std::hash<int>()(static_cast<int>(key.elem));
-        std::size_t h3 = std::hash<int>()(key.order);
-        std::size_t h4 = std::hash<std::size_t>()(key.quad_hash);
-        std::size_t h5 = std::hash<bool>()(key.with_gradients);
-        std::size_t h6 = std::hash<bool>()(key.with_hessians);
-        std::size_t h7 = std::hash<bool>()(key.vector);
-        return (((((h0 ^ (h1 << 1)) ^ (h2 << 2)) ^ (h3 << 3)) ^ (h4 << 4)) ^ (h5 << 5)) ^ (h6 << 6) ^ (h7 << 7);
+        std::size_t h0 = std::hash<std::string>()(key.basis_identity);
+        std::size_t h1 = std::hash<std::string>()(key.quadrature_identity);
+        std::size_t h2 = std::hash<bool>()(key.with_gradients);
+        std::size_t h3 = std::hash<bool>()(key.with_hessians);
+        return (((h0 ^ (h1 << 1)) ^ (h2 << 2)) ^ (h3 << 3));
     }
 };
 
@@ -104,8 +92,6 @@ private:
                             const quadrature::QuadratureRule& quad,
                             bool gradients,
                             bool hessians) const;
-
-    std::size_t quadrature_hash(const quadrature::QuadratureRule& quad) const;
 
     mutable std::mutex mutex_;
     std::unordered_map<BasisCacheKey, std::shared_ptr<BasisCacheEntry>, BasisCacheKeyHash> cache_;
