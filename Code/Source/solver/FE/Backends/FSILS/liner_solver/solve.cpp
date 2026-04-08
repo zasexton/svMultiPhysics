@@ -169,11 +169,13 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
       if (dof == 1) {
         auto Valv = Val.row(0);
         auto Rv = R.row(0);
-        gmres::gmres_s(lhs, ls.RI, dof, Valv, Rv);
+        gmres::gmres_s(fe_fsi_linear_solver::distributed_solver_bundles::make_scalar_linear_system(lhs, Valv),
+                       ls.RI, Rv);
         Val.set_row(0,Valv);
         R.set_row(0,Rv);
       } else {
-        gmres::gmres_v(lhs, ls.RI, dof, Val, R);
+        gmres::gmres_v(fe_fsi_linear_solver::distributed_solver_bundles::make_vector_linear_system(lhs, dof, Val),
+                       ls.RI, R);
       }
     break;
 
@@ -181,11 +183,13 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
       if (dof == 1) {
         auto Valv = Val.row(0);
         auto Rv = R.row(0);
-        cgrad::cgrad_s(lhs, ls.RI, Valv, Rv);
+        cgrad::cgrad_s(fe_fsi_linear_solver::distributed_solver_bundles::make_scalar_linear_system(lhs, Valv),
+                       ls.RI, Rv);
         Val.set_row(0,Valv);
         R.set_row(0,Rv);
       } else {
-        cgrad::cgrad_v(lhs, ls.RI, dof, Val, R);
+        cgrad::cgrad_v(fe_fsi_linear_solver::distributed_solver_bundles::make_vector_linear_system(lhs, dof, Val),
+                       ls.RI, R);
       }
     break;
 
@@ -193,11 +197,13 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
       if (dof == 1) {
         auto Valv = Val.row(0);
         auto Rv = R.row(0);
-        bicgs::bicgss(lhs, ls.RI, Valv, Rv);
+        bicgs::bicgss(fe_fsi_linear_solver::distributed_solver_bundles::make_scalar_linear_system(lhs, Valv),
+                      ls.RI, Rv);
         Val.set_row(0,Valv);
         R.set_row(0,Rv);
       } else {
-        bicgs::bicgsv(lhs, ls.RI, dof, Val, R);
+        bicgs::bicgsv(fe_fsi_linear_solver::distributed_solver_bundles::make_vector_linear_system(lhs, dof, Val),
+                      ls.RI, R);
       }
     break;
 

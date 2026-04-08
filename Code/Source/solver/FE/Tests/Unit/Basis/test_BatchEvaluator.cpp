@@ -250,7 +250,7 @@ TEST(BatchEvaluator, AssembleStiffnessMatchesPointwise_3D) {
 TEST(BatchEvaluator, ThrowsForVectorBases) {
     basis::RaviartThomasBasis rt(ElementType::Quad4, 0);
     quadrature::QuadrilateralQuadrature quad(2);
-    EXPECT_THROW(basis::BatchEvaluator(rt, quad, true, false), FEException);
+    EXPECT_THROW(basis::BatchEvaluator(rt, quad, true, false), basis::BasisConfigurationException);
 }
 
 TEST(BatchEvaluator, ThrowsWhenGradientsNotComputed) {
@@ -269,7 +269,6 @@ TEST(BatchEvaluator, ThrowsWhenGradientsNotComputed) {
 
     const Real D[4] = {Real(1), Real(0), Real(0), Real(1)};
 
-    EXPECT_THROW(batch.weighted_gradient_sum(coeffs.data(), weights.data(), grad_result.data()), FEException);
-    EXPECT_THROW(batch.assemble_stiffness_contribution(D, weights.data(), K.data()), FEException);
+    EXPECT_THROW(batch.weighted_gradient_sum(coeffs.data(), weights.data(), grad_result.data()), basis::BasisEvaluationException);
+    EXPECT_THROW(batch.assemble_stiffness_contribution(D, weights.data(), K.data()), basis::BasisEvaluationException);
 }
-

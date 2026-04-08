@@ -18,8 +18,8 @@ BatchEvaluator::BatchEvaluator(const BasisFunction& basis,
                                bool compute_hessians)
     : dimension_(basis.dimension()) {
     if (basis.is_vector_valued()) {
-        throw FEException("BatchEvaluator supports scalar bases only",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisConfigurationException("BatchEvaluator supports scalar bases only",
+                                          __FILE__, __LINE__, __func__);
     }
 
     const std::size_t num_basis = basis.size();
@@ -154,8 +154,8 @@ void BatchEvaluator::weighted_gradient_sum(const Real* coeffs,
                                            const Real* weights,
                                            Real* result) const {
     if (!data_.has_gradients) {
-        throw FEException("BatchEvaluator: gradients not available (constructed with compute_gradients=false)",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisEvaluationException("BatchEvaluator: gradients not available (constructed with compute_gradients=false)",
+                                       __FILE__, __LINE__, __func__);
     }
 
     const std::size_t num_quad = data_.num_quad_points;
@@ -212,8 +212,8 @@ void BatchEvaluator::assemble_stiffness_contribution(const Real* D,
                                                      const Real* weights,
                                                      Real* K) const {
     if (!data_.has_gradients) {
-        throw FEException("BatchEvaluator: gradients not available (constructed with compute_gradients=false)",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisEvaluationException("BatchEvaluator: gradients not available (constructed with compute_gradients=false)",
+                                       __FILE__, __LINE__, __func__);
     }
 
     const std::size_t num_quad = data_.num_quad_points;

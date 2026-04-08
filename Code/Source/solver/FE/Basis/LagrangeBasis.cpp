@@ -69,14 +69,14 @@ LagrangeTopologyTraits lagrange_topology_traits(ElementType type) {
             return {LagrangeTopology::Pyramid, 3};
     }
 
-    throw FEException("Unsupported element type for LagrangeBasis",
-                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    throw BasisElementCompatibilityException("Unsupported element type for LagrangeBasis",
+                                             __FILE__, __LINE__, __func__);
 }
 
 std::size_t lattice_index_pm_one(Real coord, int order, const char* context) {
     if (order <= 0) {
         if (std::abs(coord) > kNodeCoordTolerance) {
-            throw FEException(context, __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw BasisNodeOrderingException(context, __FILE__, __LINE__, __func__);
         }
         return 0;
     }
@@ -85,7 +85,7 @@ std::size_t lattice_index_pm_one(Real coord, int order, const char* context) {
     const long idx = std::lround(scaled);
     if (idx < 0 || idx > order ||
         std::abs(coord - detail::equispaced_pm_one_coord(static_cast<int>(idx), order)) > kNodeCoordTolerance) {
-        throw FEException(context, __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisNodeOrderingException(context, __FILE__, __LINE__, __func__);
     }
     return static_cast<std::size_t>(idx);
 }
@@ -95,7 +95,7 @@ int simplex_lattice_index(Real coord, int order, const char* context) {
         if (std::abs(coord - Real(0)) > kNodeCoordTolerance &&
             std::abs(coord - Real(0.25)) > kNodeCoordTolerance &&
             std::abs(coord - Real(1) / Real(3)) > kNodeCoordTolerance) {
-            throw FEException(context, __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw BasisNodeOrderingException(context, __FILE__, __LINE__, __func__);
         }
         return 0;
     }
@@ -104,7 +104,7 @@ int simplex_lattice_index(Real coord, int order, const char* context) {
     const long idx = std::lround(scaled);
     const Real reconstructed = static_cast<Real>(idx) / static_cast<Real>(order);
     if (idx < 0 || idx > order || std::abs(coord - reconstructed) > kNodeCoordTolerance) {
-        throw FEException(context, __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisNodeOrderingException(context, __FILE__, __LINE__, __func__);
     }
     return static_cast<int>(idx);
 }
@@ -121,8 +121,8 @@ std::array<int, 4> triangle_exponents_from_public_node(const math::Vector<Real, 
                                         "LagrangeBasis: invalid triangle node coordinate for public ordering");
     const int i = order - j - k;
     if (i < 0) {
-        throw FEException("LagrangeBasis: invalid triangle barycentric coordinates for public ordering",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisNodeOrderingException("LagrangeBasis: invalid triangle barycentric coordinates for public ordering",
+                                         __FILE__, __LINE__, __func__);
     }
     return {i, j, k, 0};
 }
@@ -141,8 +141,8 @@ std::array<int, 4> tetrahedron_exponents_from_public_node(const math::Vector<Rea
                                         "LagrangeBasis: invalid tetrahedron node z-coordinate for public ordering");
     const int i = order - j - k - l;
     if (i < 0) {
-        throw FEException("LagrangeBasis: invalid tetrahedron barycentric coordinates for public ordering",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisNodeOrderingException("LagrangeBasis: invalid tetrahedron barycentric coordinates for public ordering",
+                                         __FILE__, __LINE__, __func__);
     }
     return {i, j, k, l};
 }
@@ -296,24 +296,24 @@ NormalizedLagrangeRequest normalize_lagrange_request(ElementType element_type, i
         case ElementType::Quad9:
             return {ElementType::Quad4, std::max(order, 2)};
         case ElementType::Quad8:
-            throw FEException("Quad8 serendipity Lagrange basis not implemented",
-                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            throw NotImplementedException("Quad8 serendipity Lagrange basis not implemented",
+                                          __FILE__, __LINE__, __func__);
         case ElementType::Tetra10:
             return {ElementType::Tetra4, std::max(order, 2)};
         case ElementType::Hex27:
             return {ElementType::Hex8, std::max(order, 2)};
         case ElementType::Hex20:
-            throw FEException("Hex20 serendipity Lagrange basis not implemented",
-                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            throw NotImplementedException("Hex20 serendipity Lagrange basis not implemented",
+                                          __FILE__, __LINE__, __func__);
         case ElementType::Wedge18:
             return {ElementType::Wedge6, std::max(order, 2)};
         case ElementType::Wedge15:
-            throw FEException("Wedge15 serendipity Lagrange basis not implemented",
-                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            throw NotImplementedException("Wedge15 serendipity Lagrange basis not implemented",
+                                          __FILE__, __LINE__, __func__);
         case ElementType::Pyramid13:
-            throw FEException(
+            throw NotImplementedException(
                 "Pyramid13 is a serendipity variant; use SerendipityBasis (Pyramid13) or the complete-family Lagrange path via LagrangeBasis (Pyramid5, order >= 2)",
-                __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+                __FILE__, __LINE__, __func__);
         case ElementType::Pyramid14:
             return {ElementType::Pyramid5, std::max(order, 2)};
         default:
@@ -330,8 +330,8 @@ LagrangeBasis::LagrangeBasis(ElementType type, int order)
     order_ = normalized.order;
 
     if (order_ < 0) {
-        throw FEException("LagrangeBasis requires non-negative polynomial order",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisConfigurationException("LagrangeBasis requires non-negative polynomial order",
+                                          __FILE__, __LINE__, __func__);
     }
 
     dimension_ = lagrange_topology_traits(element_type_).dimension;
@@ -371,8 +371,8 @@ void LagrangeBasis::init_nodes() {
             return;
     }
 
-    throw FEException("Unsupported element type in LagrangeBasis::init_nodes",
-                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    throw BasisElementCompatibilityException("Unsupported element type in LagrangeBasis::init_nodes",
+                                             __FILE__, __LINE__, __func__);
 }
 
 void LagrangeBasis::build_point_nodes() {
@@ -390,8 +390,8 @@ void LagrangeBasis::build_tensor_product_nodes(int dimensions) {
     init_equispaced_1d_nodes();
 
     if (dimensions < 1 || dimensions > 3) {
-        throw FEException("LagrangeBasis::build_tensor_product_nodes requires dimension 1, 2, or 3",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisConfigurationException("LagrangeBasis::build_tensor_product_nodes requires dimension 1, 2, or 3",
+                                          __FILE__, __LINE__, __func__);
     }
 
     nodes_ = NodeOrdering::get_lagrange_node_coords(element_type_, order_);
@@ -427,8 +427,8 @@ void LagrangeBasis::build_simplex_nodes() {
                 simplex_exponents_.push_back(tetrahedron_exponents_from_public_node(node, order_));
                 break;
             default:
-                throw FEException("LagrangeBasis::build_simplex_nodes requires simplex topology",
-                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                throw BasisElementCompatibilityException("LagrangeBasis::build_simplex_nodes requires simplex topology",
+                                                         __FILE__, __LINE__, __func__);
         }
     }
 }
@@ -452,8 +452,8 @@ void LagrangeBasis::build_wedge_nodes() {
         const auto exponents = triangle_exponents_from_public_node(node, order_);
         const auto found = triangle_descriptor_to_index.find(exponents);
         if (found == triangle_descriptor_to_index.end()) {
-            throw FEException("LagrangeBasis: failed to resolve wedge triangle descriptor in public ordering",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw BasisNodeOrderingException("LagrangeBasis: failed to resolve wedge triangle descriptor in public ordering",
+                                             __FILE__, __LINE__, __func__);
         }
         wedge_indices_.push_back(WedgeNodeIndex{
             found->second,
@@ -516,8 +516,8 @@ void LagrangeBasis::evaluate_values(const math::Vector<Real, 3>& xi,
             return;
     }
 
-    throw FEException("Unsupported element in evaluate_values",
-                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    throw BasisEvaluationException("Unsupported element in evaluate_values",
+                                   __FILE__, __LINE__, __func__);
 }
 
 void LagrangeBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
@@ -572,8 +572,8 @@ void LagrangeBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
             return;
     }
 
-    throw FEException("Unsupported element in evaluate_gradients",
-                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    throw BasisEvaluationException("Unsupported element in evaluate_gradients",
+                                   __FILE__, __LINE__, __func__);
 }
 
 void LagrangeBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
@@ -640,8 +640,8 @@ void LagrangeBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
         }
     }
 
-    throw FEException("Unsupported element in evaluate_hessians",
-                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    throw BasisEvaluationException("Unsupported element in evaluate_hessians",
+                                   __FILE__, __LINE__, __func__);
 }
 
 } // namespace basis

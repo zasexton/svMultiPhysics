@@ -87,24 +87,39 @@ void basis_funs(const std::vector<Real>& knots,
 BSplineBasis::BSplineBasis(int degree, std::vector<Real> knots)
     : degree_(degree),
       knots_(std::move(knots)) {
-    FE_CHECK_ARG(degree_ >= 0, "BSplineBasis requires non-negative degree");
-    FE_CHECK_ARG(knots_.size() >= static_cast<std::size_t>(degree_) + 2,
-                 "BSplineBasis: knot vector too short for degree");
-    FE_CHECK_ARG(std::is_sorted(knots_.begin(), knots_.end()),
-                 "BSplineBasis: knot vector must be non-decreasing");
+    if (degree_ < 0) {
+        throw BasisConfigurationException("BSplineBasis requires non-negative degree",
+                                          __FILE__, __LINE__, __func__);
+    }
+    if (knots_.size() < static_cast<std::size_t>(degree_) + 2) {
+        throw BasisConfigurationException("BSplineBasis: knot vector too short for degree",
+                                          __FILE__, __LINE__, __func__);
+    }
+    if (!std::is_sorted(knots_.begin(), knots_.end())) {
+        throw BasisConfigurationException("BSplineBasis: knot vector must be non-decreasing",
+                                          __FILE__, __LINE__, __func__);
+    }
 
     num_basis_ = knots_.size() - static_cast<std::size_t>(degree_) - 1;
-    FE_CHECK_ARG(num_basis_ > 0, "BSplineBasis: invalid number of basis functions");
+    if (num_basis_ == 0u) {
+        throw BasisConfigurationException("BSplineBasis: invalid number of basis functions",
+                                          __FILE__, __LINE__, __func__);
+    }
 
     u_min_ = knots_[static_cast<std::size_t>(degree_)];
     u_max_ = knots_[num_basis_];
-    FE_CHECK_ARG(u_max_ > u_min_, "BSplineBasis: invalid parametric domain from knots");
+    if (!(u_max_ > u_min_)) {
+        throw BasisConfigurationException("BSplineBasis: invalid parametric domain from knots",
+                                          __FILE__, __LINE__, __func__);
+    }
 }
 
 BSplineBasis::BSplineBasis(int degree, std::vector<Real> knots, std::vector<Real> weights)
     : BSplineBasis(degree, std::move(knots)) {
-    FE_CHECK_ARG(weights.size() == num_basis_,
-                 "BSplineBasis: weights size must equal number of basis functions");
+    if (weights.size() != num_basis_) {
+        throw BasisConfigurationException("BSplineBasis: weights size must equal number of basis functions",
+                                          __FILE__, __LINE__, __func__);
+    }
     semantic_type_ = BasisType::NURBS;
     weights_ = std::move(weights);
 }

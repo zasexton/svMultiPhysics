@@ -289,7 +289,7 @@ TEST(VectorBasis, ScalarEvaluateThrows) {
     RaviartThomasBasis basis(ElementType::Quad4, 0);
     svmp::FE::math::Vector<Real, 3> xi{0.0, 0.0, 0.0};
     std::vector<Real> vals;
-    EXPECT_THROW(basis.evaluate_values(xi, vals), svmp::FE::FEException);
+    EXPECT_THROW(basis.evaluate_values(xi, vals), svmp::FE::basis::BasisEvaluationException);
 }
 
 TEST(VectorBasis, HexahedronInstantiationAndSize) {

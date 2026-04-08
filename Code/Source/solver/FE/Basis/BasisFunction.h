@@ -18,7 +18,7 @@
  */
 
 #include "Core/Types.h"
-#include "Core/FEException.h"
+#include "BasisExceptions.h"
 #include "Math/Vector.h"
 #include "Math/Matrix.h"
 #include <functional>
@@ -139,20 +139,20 @@ inline void BasisFunction::evaluate_hessians(const math::Vector<Real, 3>& xi,
 
 inline void BasisFunction::evaluate_vector_values(const math::Vector<Real, 3>&,
                                                   std::vector<math::Vector<Real, 3>>&) const {
-    throw FEException("Vector-valued evaluation requested on scalar basis",
-                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    throw BasisEvaluationException("Vector-valued evaluation requested on scalar basis",
+                                   __FILE__, __LINE__, __func__);
 }
 
 inline void BasisFunction::evaluate_divergence(const math::Vector<Real, 3>&,
                                                std::vector<Real>&) const {
-    throw FEException("Divergence requested on scalar basis",
-                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    throw BasisEvaluationException("Divergence requested on scalar basis",
+                                   __FILE__, __LINE__, __func__);
 }
 
 inline void BasisFunction::evaluate_curl(const math::Vector<Real, 3>&,
                                          std::vector<math::Vector<Real, 3>>&) const {
-    throw FEException("Curl requested on scalar basis",
-                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    throw BasisEvaluationException("Curl requested on scalar basis",
+                                   __FILE__, __LINE__, __func__);
 }
 
 } // namespace basis

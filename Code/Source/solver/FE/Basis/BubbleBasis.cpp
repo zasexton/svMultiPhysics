@@ -45,8 +45,8 @@ BubbleBasis::BubbleBasis(ElementType type) : element_type_(type) {
         dimension_ = 3;
         order_ = 2;
     } else {
-        throw FEException("BubbleBasis: unsupported element type",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisElementCompatibilityException("BubbleBasis: unsupported element type",
+                                                 __FILE__, __LINE__, __func__);
     }
 }
 

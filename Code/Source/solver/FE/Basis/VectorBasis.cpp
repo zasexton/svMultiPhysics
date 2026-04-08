@@ -14,6 +14,11 @@
 #include <cmath>
 #include <limits>
 
+#ifdef FE_CHECK_ARG
+#undef FE_CHECK_ARG
+#endif
+#define FE_CHECK_ARG(condition, message) BASIS_CHECK_CONSTRUCTION((condition), (message))
+
 namespace svmp {
 namespace FE {
 namespace basis {
@@ -1339,9 +1344,9 @@ RaviartThomasBasis::RaviartThomasBasis(ElementType type, int order)
         }
         size_ = face_dofs + interior_dofs;
     } else {
-        throw FEException("RaviartThomasBasis supports triangles/quadrilaterals (2D) and "
-                          "tetrahedra/hexahedra/wedges/pyramids (3D)",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisElementCompatibilityException("RaviartThomasBasis supports triangles/quadrilaterals (2D) and "
+                                                 "tetrahedra/hexahedra/wedges/pyramids (3D)",
+                                                 __FILE__, __LINE__, __func__);
     }
 
     // Wedge/pyramid RT(1) uses the explicit seed formulas transformed into a nodal
@@ -2718,9 +2723,9 @@ NedelecBasis::NedelecBasis(ElementType type, int order)
         }
         size_ = edge_dofs + face_dofs + interior_dofs;
     } else {
-        throw FEException("NedelecBasis supports triangles/quadrilaterals (2D) and "
-                          "tetrahedra/hexahedra/wedges/pyramids (3D)",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisElementCompatibilityException("NedelecBasis supports triangles/quadrilaterals (2D) and "
+                                                 "tetrahedra/hexahedra/wedges/pyramids (3D)",
+                                                 __FILE__, __LINE__, __func__);
     }
 
     // Build nodal (moment-based) ND(k) basis for elements where higher-order is supported.
@@ -4213,16 +4218,16 @@ void NedelecBasis::evaluate_curl(const math::Vector<Real, 3>& xi,
 BDMBasis::BDMBasis(ElementType type, int order)
     : element_type_(type), dimension_(0), order_(order), size_(0) {
     if (order_ != 1) {
-        throw FEException("BDMBasis currently supports only order 1",
-                          __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        throw NotImplementedException("BDMBasis currently supports only order 1",
+                                      __FILE__, __LINE__, __func__);
     }
     if (type == ElementType::Quad4 || type == ElementType::Quad8 || type == ElementType::Quad9 ||
         type == ElementType::Triangle3) {
         dimension_ = 2;
         size_ = (type == ElementType::Triangle3) ? std::size_t(6) : std::size_t(8);
     } else {
-        throw FEException("BDMBasis currently supports 2D elements (Triangle3, Quad4/8/9)",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisElementCompatibilityException("BDMBasis currently supports 2D elements (Triangle3, Quad4/8/9)",
+                                                 __FILE__, __LINE__, __func__);
     }
 }
 

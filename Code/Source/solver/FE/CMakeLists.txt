@@ -292,6 +292,7 @@ set(FE_MATH_HEADERS
 
 # Basis function sources
 	set(FE_BASIS_HEADERS
+	    Basis/BasisExceptions.h
 	    Basis/BasisFunction.h
 	    Basis/LagrangeBasis.h
 	    Basis/HierarchicalBasis.h
@@ -1024,9 +1025,14 @@ set(FE_BACKENDS_HEADERS
     Backends/FSILS/liner_solver/add_bc_mul.h
     Backends/FSILS/liner_solver/bcast.h
     Backends/FSILS/liner_solver/bicgs.h
+    Backends/FSILS/liner_solver/block_schur_strategy_selector.h
     Backends/FSILS/liner_solver/cgrad.h
     Backends/FSILS/liner_solver/commu.h
     Backends/FSILS/liner_solver/dot.h
+    Backends/FSILS/liner_solver/distributed_mpi_ops.h
+    Backends/FSILS/liner_solver/distributed_low_rank_correction.h
+    Backends/FSILS/liner_solver/distributed_solver_bundles.h
+    Backends/FSILS/liner_solver/distributed_sparse_operator.h
     Backends/FSILS/liner_solver/fils_struct.hpp
     Backends/FSILS/liner_solver/fsils.hpp
     Backends/FSILS/liner_solver/fsils_api.hpp
@@ -1078,10 +1084,13 @@ set(FE_BACKENDS_SOURCES
     Backends/FSILS/liner_solver/bcast.cpp
     Backends/FSILS/liner_solver/bc.cpp
     Backends/FSILS/liner_solver/bicgs.cpp
+    Backends/FSILS/liner_solver/block_schur_strategy_selector.cpp
     Backends/FSILS/liner_solver/cgrad.cpp
     Backends/FSILS/liner_solver/commu.cpp
     Backends/FSILS/liner_solver/cput.cpp
     Backends/FSILS/liner_solver/dot.cpp
+    Backends/FSILS/liner_solver/distributed_mpi_ops.cpp
+    Backends/FSILS/liner_solver/distributed_low_rank_correction.cpp
     Backends/FSILS/liner_solver/fils_struct.cpp
     Backends/FSILS/liner_solver/ge.cpp
     Backends/FSILS/liner_solver/gmres.cpp
@@ -1218,6 +1227,7 @@ _svmp_fe_target_enable_warnings(svfe)
 set(FE_DOFS_MINIMAL_HEADERS
     ${FE_CORE_HEADERS}
     ${FE_MATH_HEADERS}
+    Basis/BasisExceptions.h
     Basis/BasisFunction.h
     Basis/LagrangeBasis.h
     Basis/OrthogonalPolynomials.h

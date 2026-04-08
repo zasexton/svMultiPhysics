@@ -50,8 +50,8 @@ inline Real pow_int(Real base, int exp) {
 BernsteinBasis::BernsteinBasis(ElementType type, int order)
     : element_type_(type), dimension_(0), order_(order), size_(0) {
     if (order_ < 0) {
-        throw FEException("BernsteinBasis requires non-negative order",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisConfigurationException("BernsteinBasis requires non-negative order",
+                                          __FILE__, __LINE__, __func__);
     }
 
     if (is_line(element_type_)) {
@@ -96,8 +96,8 @@ BernsteinBasis::BernsteinBasis(ElementType type, int order)
         dimension_ = 0;
         size_ = 1;
     } else {
-        throw FEException("Unsupported element type for BernsteinBasis",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisElementCompatibilityException("Unsupported element type for BernsteinBasis",
+                                                 __FILE__, __LINE__, __func__);
     }
 }
 
@@ -279,8 +279,8 @@ void BernsteinBasis::evaluate_values(const math::Vector<Real, 3>& xi,
         return;
     }
 
-    throw FEException("Unsupported element in BernsteinBasis::evaluate_values",
-                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    throw BasisEvaluationException("Unsupported element in BernsteinBasis::evaluate_values",
+                                   __FILE__, __LINE__, __func__);
 }
 
 void BernsteinBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
@@ -670,8 +670,8 @@ void BernsteinBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
         return;
     }
 
-    throw FEException("Unsupported element in BernsteinBasis::evaluate_gradients",
-                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    throw BasisEvaluationException("Unsupported element in BernsteinBasis::evaluate_gradients",
+                                   __FILE__, __LINE__, __func__);
 }
 
 } // namespace basis

@@ -33,24 +33,31 @@
 
 #include "fsils_api.hpp"
 #include "add_bc_mul.h"
+#include "distributed_sparse_operator.h"
 #include "dot.h"
 #include "omp_la.h"
 #include "norm.h"
-#include "spar_mul.h"
 
 #include <math.h>
 #include <limits>
 
 namespace cgrad {
 
+namespace dso = fe_fsi_linear_solver::distributed_sparse_operator;
+
 /// @brief Conjugate-gradient algorithm for scaler, vector and Schur
 /// complement cases.
 ///
 /// Reproduces 'SUBROUTINE CGRAD_SCHUR(lhs, ls, dof, D, G, L, R)'
 //
-void schur(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array<double>& D, 
-    const Array<double>& G, const Vector<double>& L, Vector<double>& R)
+void schur(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarConstraintSchurSystem& system,
+    FSILS_subLsType& ls, Vector<double>& R)
 {
+  auto& lhs = *system.lhs;
+  const int dof = system.momentum_components;
+  const auto& D = system.D;
+  const auto& G = system.G;
+  const auto& L = system.L;
   #define n_debug_schur
   #ifdef debug_schur
   DebugMsg dmsg(__func__,  lhs.commu.task);
@@ -102,7 +109,9 @@ void schur(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array<d
     errO = err;
 
     // GP = G * P
-    spar_mul::fsils_spar_mul_sv(lhs, lhs.rowPtr, lhs.colPtr, dof, G, P, GP);
+    G.apply(
+        dso::ghost_synced_input(P),
+        dso::ghost_synced_output(dof, GP));
 
     for (auto& face : lhs.face) {
       if (face.coupledFlag) {
@@ -113,10 +122,14 @@ void schur(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array<d
     }
 
     // DGP = K * GP
-    spar_mul::fsils_spar_mul_vs(lhs, lhs.rowPtr, lhs.colPtr, dof, D, GP, DGP);
+    D.apply(
+        dso::ghost_synced_input(dof, GP),
+        dso::ghost_synced_output(DGP));
 
     // SP = L * P
-    spar_mul::fsils_spar_mul_ss(lhs, lhs.rowPtr, lhs.colPtr, L, P, SP);
+    L.apply(
+        dso::ghost_synced_input(P),
+        dso::ghost_synced_output(SP));
 
     // SP = SP - DGP
     omp_la::omp_sum_s(nNo, -1.0, SP, DGP);
@@ -168,19 +181,31 @@ void schur(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array<d
                        ls.callD - callD_before);
 }
 
+void schur(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array<double>& D,
+    const Array<double>& G, const Vector<double>& L, Vector<double>& R)
+{
+  schur(fe_fsi_linear_solver::distributed_solver_bundles::make_scalar_constraint_schur_system(
+            lhs, dof, D, G, L),
+        ls, R);
+}
+
 //---------
 // cgrad_v
 //---------
 //
-void cgrad_v(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array<double>& K, Array<double>& R)
+void cgrad_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearSystem& system,
+    FSILS_subLsType& ls, Array<double>& R)
 {
   #define n_debug_cgrad_v 
   #ifdef debug_cgrad_v
-  DebugMsg dmsg(__func__,  lhs.commu.task);
+  DebugMsg dmsg(__func__,  system.lhs->commu.task);
   dmsg.banner();
   double time = fe_fsi_linear_solver::fsils_cpu_t();
   #endif
 
+  auto& lhs = *system.lhs;
+  const int dof = system.components;
+  const auto& A = system.A;
   fsils_int nNo = lhs.nNo;
   fsils_int mynNo = lhs.mynNo;
   #ifdef debug_cgrad_v
@@ -229,7 +254,9 @@ void cgrad_v(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array
 
     errO = err;
 
-    spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, K, P, KP);
+    A.apply(
+        dso::ghost_synced_input(dof, P),
+        dso::ghost_synced_output(dof, KP));
 
     double alpha = errO / dot::fsils_dot_v(dof, mynNo, lhs.commu, P, KP);
     omp_la::omp_sum_v(dof, nNo, alpha, X, P);
@@ -270,19 +297,27 @@ void cgrad_v(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array
   #endif
 }
 
+void cgrad_v(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array<double>& K, Array<double>& R)
+{
+  cgrad_v(fe_fsi_linear_solver::distributed_solver_bundles::make_vector_linear_system(lhs, dof, K), ls, R);
+}
+
 //---------
 // cgrad_s
 //---------
 //
-void cgrad_s(FSILS_lhsType& lhs, FSILS_subLsType& ls, const Vector<double>& K, Vector<double>& R)
+void cgrad_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinearSystem& system,
+    FSILS_subLsType& ls, Vector<double>& R)
 {
   #define n_debug_cgrad_s 
   #ifdef debug_cgrad_s
-  DebugMsg dmsg(__func__,  lhs.commu.task);
+  DebugMsg dmsg(__func__,  system.lhs->commu.task);
   dmsg.banner();
   double time = fe_fsi_linear_solver::fsils_cpu_t();
   #endif
 
+  auto& lhs = *system.lhs;
+  const auto& A = system.A;
   fsils_int nNo = lhs.nNo;
   fsils_int mynNo = lhs.mynNo;
   #ifdef debug_cgrad_s
@@ -330,7 +365,9 @@ void cgrad_s(FSILS_lhsType& lhs, FSILS_subLsType& ls, const Vector<double>& K, V
 
     errO = err;
 
-    spar_mul::fsils_spar_mul_ss(lhs, lhs.rowPtr, lhs.colPtr, K, P, KP);
+    A.apply(
+        dso::ghost_synced_input(P),
+        dso::ghost_synced_output(KP));
 
     double alpha = errO / dot::fsils_dot_s(mynNo, lhs.commu, P, KP);
     omp_la::omp_sum_s(nNo, alpha, X, P);
@@ -369,6 +406,11 @@ void cgrad_s(FSILS_lhsType& lhs, FSILS_subLsType& ls, const Vector<double>& K, V
   dmsg << "Execution time: " << exec_time;
   dmsg << "Done";
   #endif
+}
+
+void cgrad_s(FSILS_lhsType& lhs, FSILS_subLsType& ls, const Vector<double>& K, Vector<double>& R)
+{
+  cgrad_s(fe_fsi_linear_solver::distributed_solver_bundles::make_scalar_linear_system(lhs, K), ls, R);
 }
 
 };

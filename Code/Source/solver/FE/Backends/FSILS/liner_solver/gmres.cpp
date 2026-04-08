@@ -40,10 +40,11 @@
 
 #include "add_bc_mul.h"
 #include "bcast.h"
+#include "distributed_mpi_ops.h"
+#include "distributed_sparse_operator.h"
 #include "dot.h"
 #include "norm.h"
 #include "omp_la.h"
-#include "spar_mul.h"
 
 #include "Array3.h"
 
@@ -64,6 +65,8 @@
 #endif
 
 namespace gmres {
+
+namespace dso = fe_fsi_linear_solver::distributed_sparse_operator;
 
 namespace {
 
@@ -753,11 +756,8 @@ double fused_update_norm_v_impl(const fsils_int nNo, const fsils_int mynNo, fe_f
   }
 
   double global_sq = local_sq;
-  if (commu.nTasks != 1) {
-    double tmp = 0.0;
-    fsils_allreduce_sum(&local_sq, &tmp, 1, cm_mod::mpreal, commu);
-    global_sq = tmp;
-  }
+  const fe_fsi_linear_solver::CollectiveOps collectives(commu);
+  collectives.allreduce_sum(local_sq, global_sq);
   return std::sqrt(global_sq);
 }
 
@@ -1285,11 +1285,8 @@ double fused_update_norm_s(const fsils_int nNo, const fsils_int mynNo, fe_fsi_li
   }
 
   double global_sq = local_sq;
-  if (commu.nTasks != 1) {
-    double tmp = 0.0;
-    fsils_allreduce_sum(&local_sq, &tmp, 1, cm_mod::mpreal, commu);
-    global_sq = tmp;
-  }
+  const fe_fsi_linear_solver::CollectiveOps collectives(commu);
+  collectives.allreduce_sum(local_sq, global_sq);
   return std::sqrt(global_sq);
 }
 
@@ -1438,11 +1435,8 @@ void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSIL
         }
 
         double global_nS = 0.0;
-        if (lhs.commu.nTasks > 1) {
-          fsils_allreduce_sum(&local_nS, &global_nS, 1, cm_mod::mpreal, lhs.commu);
-        } else {
-          global_nS = local_nS;
-        }
+        const fe_fsi_linear_solver::CollectiveOps collectives(lhs.commu);
+        collectives.allreduce_sum(local_nS, global_nS);
         face.nS = global_nS;
 
       } else {
@@ -1462,10 +1456,13 @@ void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSIL
 /// @brief Solver the system Val * X = R.
 ///
 /// Reproduces the Fortran 'GMRES' subroutine.
-void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
-           const Array<double>& Val, const Array<double>& R, Array<double>& X)
+void gmres(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearSystem& system,
+           fe_fsi_linear_solver::FSILS_subLsType& ls, const Array<double>& R, Array<double>& X)
 {
   using namespace fe_fsi_linear_solver;
+  auto& lhs = *system.lhs;
+  const int dof = system.components;
+  const auto& A = system.A;
   const auto& enh = gmres_enhancements();
   fsils_int nNo = lhs.nNo;
   fsils_int mynNo = lhs.mynNo;
@@ -1515,7 +1512,9 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
     if (l == 0) {
       u.set_slice(0, R);
     } else {
-      spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, X, u_slice);
+      A.apply(
+          dso::ghost_synced_input(dof, X),
+          dso::ghost_synced_output(dof, u_slice));
       add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, X, u_slice);
       ls.itr = ls.itr + 1;
 
@@ -1551,7 +1550,9 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
       auto u_slice_prev = u.rslice(i);
       auto u_slice_next = u.rslice(i+1);
 
-      spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, u_slice_prev, u_slice_next);
+      A.apply(
+          dso::ghost_synced_input(dof, u_slice_prev),
+          dso::ghost_synced_output(dof, u_slice_next));
       add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, u_slice_prev, u_slice_next);
       ls.itr = ls.itr + 1;
 
@@ -1692,15 +1693,23 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
                        ls.callD - callD_before);
 }
 
+void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
+           const Array<double>& Val, const Array<double>& R, Array<double>& X)
+{
+  gmres(fe_fsi_linear_solver::distributed_solver_bundles::make_vector_linear_system(lhs, dof, Val), ls, R, X);
+}
+
 //---------
 // gmres_s
 //---------
 // Reproduces the Fortran 'GMRESS' subroutine.
 //
-void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
-             const Vector<double>& Val, Vector<double>& R)
+void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinearSystem& system,
+             fe_fsi_linear_solver::FSILS_subLsType& ls, Vector<double>& R)
 {
   using namespace fe_fsi_linear_solver;
+  auto& lhs = *system.lhs;
+  const auto& A = system.A;
   const auto& enh = gmres_enhancements();
   fsils_int nNo = lhs.nNo;
   fsils_int mynNo = lhs.mynNo;
@@ -1760,7 +1769,9 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
 
     auto u_col_curr = u.rcol(0);
 
-    spar_mul::fsils_spar_mul_ss(lhs, lhs.rowPtr, lhs.colPtr, Val, X, u_col_curr);
+    A.apply(
+        dso::ghost_synced_input(X),
+        dso::ghost_synced_output(u_col_curr));
     omp_la::omp_axpby_s(nNo, u_col_curr, R, -1.0, u_col_curr);
 
     err[0] = norm::fsi_ls_norms(mynNo, lhs.commu, u_col_curr);
@@ -1776,7 +1787,9 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
 
       auto u_col_prev = u.rcol(i);
       auto u_col_next = u.rcol(i+1);
-      spar_mul::fsils_spar_mul_ss(lhs, lhs.rowPtr, lhs.colPtr, Val, u_col_prev, u_col_next);
+      A.apply(
+          dso::ghost_synced_input(u_col_prev),
+          dso::ghost_synced_output(u_col_next));
 
       // --- CGS Step 1 with Pythagorean trick ---
       const double zz_local = fused_dot_zz_s(mynNo, u, i, u_col_next, h_col,
@@ -1892,6 +1905,13 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
                        ls.callD - callD_before);
 }
 
+void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
+             const Vector<double>& Val, Vector<double>& R)
+{
+  (void)dof;
+  gmres_s(fe_fsi_linear_solver::distributed_solver_bundles::make_scalar_linear_system(lhs, Val), ls, R);
+}
+
 //---------
 // gmres_v
 //---------
@@ -1899,10 +1919,13 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
 //
 // Reproduces the Fortran 'GMRESV' subroutine.
 //
-void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
-             const Array<double>& Val, Array<double>& R)
+void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearSystem& system,
+             fe_fsi_linear_solver::FSILS_subLsType& ls, Array<double>& R)
 {
   using namespace fe_fsi_linear_solver;
+  auto& lhs = *system.lhs;
+  const int dof = system.components;
+  const auto& A = system.A;
   fsils_int nNo = lhs.nNo;
   fsils_int mynNo = lhs.mynNo;
   const bool has_coupled_bc = std::any_of(lhs.face.begin(), lhs.face.end(),
@@ -2044,7 +2067,9 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
     for (int j = 0; j < recycle_k; ++j) {
       const auto uj = recycle_U.rslice(j);
       auto cj = recycle_C.rslice(j);
-      spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, uj, cj);
+      A.apply(
+          dso::ghost_synced_input(dof, uj),
+          dso::ghost_synced_output(dof, cj));
       add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, uj, cj);
       if (has_coupled_bc) {
         add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, cj, cj);
@@ -2356,7 +2381,9 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
     apply_recycle_keep_drop();
 
     tp0 = TP();
-    spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, X, u_slice);
+    A.apply(
+        dso::ghost_synced_input(dof, X),
+        dso::ghost_synced_output(dof, u_slice));
     tp_spmv += TP() - tp0;
 
     tp0 = TP();
@@ -2422,7 +2449,9 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
       auto u_slice_next = u.rslice(i+1);
 
       tp0 = TP();
-      spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, u_slice_prev, u_slice_next);
+      A.apply(
+          dso::ghost_synced_input(dof, u_slice_prev),
+          dso::ghost_synced_output(dof, u_slice_next));
       tp_spmv += TP() - tp0;
 
       tp0 = TP();
@@ -2692,6 +2721,12 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
       dof, (long long)nNo, (long long)mynNo, (long long)lhs.nnz, ls.sD);
   }
   // ==================================
+}
+
+void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
+             const Array<double>& Val, Array<double>& R)
+{
+  gmres_v(fe_fsi_linear_solver::distributed_solver_bundles::make_vector_linear_system(lhs, dof, Val), ls, R);
 }
 
 }; // namespace gmres

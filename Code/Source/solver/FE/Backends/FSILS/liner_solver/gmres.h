@@ -29,14 +29,24 @@
  */
 
 #include "fils_struct.hpp"
+#include "distributed_solver_bundles.h"
 
 namespace gmres {
+
+void gmres(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearSystem& system,
+    fe_fsi_linear_solver::FSILS_subLsType& ls, const Array<double>& R, Array<double>& X);
 
 void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
     const Array<double>& Val, const Array<double>& R, Array<double>& X);
 
+void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinearSystem& system,
+    fe_fsi_linear_solver::FSILS_subLsType& ls, Vector<double>& R);
+
 void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
     const Vector<double>& Val, Vector<double>& R);
+
+void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearSystem& system,
+    fe_fsi_linear_solver::FSILS_subLsType& ls, Array<double>& R);
 
 void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
     const Array<double>& Val, Array<double>& R);

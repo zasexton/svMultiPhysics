@@ -56,8 +56,8 @@ public:
     explicit TensorProductBasis(const Basis1D& basis_1d, int dimension = 2)
         : bases_{basis_1d, basis_1d, basis_1d}, dimension_(dimension) {
         if (dimension_ != 1 && dimension_ != 2 && dimension_ != 3) {
-            throw FEException("TensorProductBasis dimension must be 1, 2, or 3",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw BasisConfigurationException("TensorProductBasis dimension must be 1, 2, or 3",
+                                              __FILE__, __LINE__, __func__);
         }
         normalize_orders();
         build_indices();
@@ -339,8 +339,8 @@ private:
                     }
                 }
                 if (!found) {
-                    throw FEException("TensorProductBasis: failed to align tensor-product nodes with NodeOrderingConventions",
-                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    throw BasisNodeOrderingException("TensorProductBasis: failed to align tensor-product nodes with NodeOrderingConventions",
+                                                     __FILE__, __LINE__, __func__);
                 }
             }
 

@@ -6,7 +6,7 @@
  */
 
 #include "NodeOrderingConventions.h"
-#include "Core/FEException.h"
+#include "Basis/BasisExceptions.h"
 
 #include <algorithm>
 #include <array>
@@ -527,8 +527,8 @@ const std::vector<Point>& complete_lagrange_alias_coords(ElementType elem_type) 
             return nodes;
         }
         default:
-            throw FEException("NodeOrdering complete-family alias query only supports generated Lagrange aliases",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw BasisNodeOrderingException("NodeOrdering complete-family alias query only supports generated Lagrange aliases",
+                                             __FILE__, __LINE__, __func__);
     }
 }
 
@@ -541,8 +541,8 @@ math::Vector<Real, 3> NodeOrdering::get_node_coords(ElementType elem_type, std::
             return nodes[local_node];
         }
 
-        throw FEException("Invalid element type or node index in NodeOrdering::get_node_coords",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisNodeOrderingException("Invalid element type or node index in NodeOrdering::get_node_coords",
+                                         __FILE__, __LINE__, __func__);
     }
 
     switch (elem_type) {
@@ -643,8 +643,8 @@ math::Vector<Real, 3> NodeOrdering::get_node_coords(ElementType elem_type, std::
             break;
     }
 
-    throw FEException("Invalid element type or node index in NodeOrdering::get_node_coords",
-                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    throw BasisNodeOrderingException("Invalid element type or node index in NodeOrdering::get_node_coords",
+                                     __FILE__, __LINE__, __func__);
 }
 
 std::size_t NodeOrdering::num_nodes(ElementType elem_type) {
@@ -658,16 +658,16 @@ std::size_t NodeOrdering::num_nodes(ElementType elem_type) {
         case ElementType::Wedge15:    return 15;
         case ElementType::Pyramid13:  return 13;
         default:
-            throw FEException("Unknown element type in NodeOrdering::num_nodes",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw BasisNodeOrderingException("Unknown element type in NodeOrdering::num_nodes",
+                                             __FILE__, __LINE__, __func__);
     }
 }
 
 std::vector<math::Vector<Real, 3>>
 NodeOrdering::get_lagrange_node_coords(ElementType canonical_type, int order) {
     if (order < 0) {
-        throw FEException("NodeOrdering::get_lagrange_node_coords requires non-negative order",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisNodeOrderingException("NodeOrdering::get_lagrange_node_coords requires non-negative order",
+                                         __FILE__, __LINE__, __func__);
     }
 
     switch (canonical_lagrange_type(canonical_type)) {
@@ -691,11 +691,11 @@ NodeOrdering::get_lagrange_node_coords(ElementType canonical_type, int order) {
         case ElementType::Hex20:
         case ElementType::Wedge15:
         case ElementType::Pyramid13:
-            throw FEException("NodeOrdering::get_lagrange_node_coords does not support serendipity topologies",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw BasisNodeOrderingException("NodeOrdering::get_lagrange_node_coords does not support serendipity topologies",
+                                             __FILE__, __LINE__, __func__);
         default:
-            throw FEException("NodeOrdering::get_lagrange_node_coords: unsupported topology",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw BasisNodeOrderingException("NodeOrdering::get_lagrange_node_coords: unsupported topology",
+                                             __FILE__, __LINE__, __func__);
     }
 }
 

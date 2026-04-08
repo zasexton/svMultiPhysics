@@ -29,14 +29,24 @@
  */
 
 #include "fils_struct.hpp"
+#include "distributed_solver_bundles.h"
 
 namespace cgrad {
 
 using namespace fe_fsi_linear_solver;
 
+void cgrad_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearSystem& system,
+    FSILS_subLsType& ls, Array<double>& R);
+
 void cgrad_v(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array<double>& K, Array<double>& R);
 
+void cgrad_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinearSystem& system,
+    FSILS_subLsType& ls, Vector<double>& R);
+
 void cgrad_s(FSILS_lhsType& lhs, FSILS_subLsType& ls, const Vector<double>& K, Vector<double>& R);
+
+void schur(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarConstraintSchurSystem& system,
+    FSILS_subLsType& ls, Vector<double>& R);
 
 void schur(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array<double>& D,
     const Array<double>& G, const Vector<double>& L, Vector<double>& R);

@@ -28,16 +28,16 @@ int spline_tensor_dimension(ElementType element_type) {
 
 void validate_scalar_spline_request(const BasisRequest& req) {
     if (req.field_type != FieldType::Scalar) {
-        throw FEException("BasisFactory: spline bases currently support scalar fields only",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisConfigurationException("BasisFactory: spline bases currently support scalar fields only",
+                                          __FILE__, __LINE__, __func__);
     }
     if (req.continuity == Continuity::H_div || req.continuity == Continuity::H_curl) {
-        throw FEException("BasisFactory: spline bases do not support H(div)/H(curl) continuity",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisConfigurationException("BasisFactory: spline bases do not support H(div)/H(curl) continuity",
+                                          __FILE__, __LINE__, __func__);
     }
     if (req.continuity == Continuity::C1) {
-        throw FEException("BasisFactory: spline bases are not exposed through the C1 continuity path",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisConfigurationException("BasisFactory: spline bases are not exposed through the C1 continuity path",
+                                          __FILE__, __LINE__, __func__);
     }
 }
 
@@ -54,8 +54,8 @@ BSplineBasis make_bspline_axis(const BasisRequest& req,
         : req.knot_vector;
 
     if (knots.empty()) {
-        throw FEException("BasisFactory: spline knot vectors are required for BSpline creation",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisConfigurationException("BasisFactory: spline knot vectors are required for BSpline creation",
+                                          __FILE__, __LINE__, __func__);
     }
     return BSplineBasis(degree, knots);
 }
@@ -64,33 +64,33 @@ std::shared_ptr<BasisFunction> create_bspline_basis(const BasisRequest& req) {
     validate_scalar_spline_request(req);
 
     if (!req.weights.empty()) {
-        throw FEException("BasisFactory: non-rational BSpline request must not provide weights",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisConfigurationException("BasisFactory: non-rational BSpline request must not provide weights",
+                                          __FILE__, __LINE__, __func__);
     }
     if (!req.axis_weights.empty()) {
-        throw FEException("BasisFactory: non-rational BSpline request must not provide axis weights",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisConfigurationException("BasisFactory: non-rational BSpline request must not provide axis weights",
+                                          __FILE__, __LINE__, __func__);
     }
 
     const int dim = spline_tensor_dimension(req.element_type);
     if (dim == 0) {
-        throw FEException("BasisFactory: BSpline currently supports Line2, Quad4, and Hex8 only",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidElement);
+        throw BasisElementCompatibilityException("BasisFactory: BSpline currently supports Line2, Quad4, and Hex8 only",
+                                                 __FILE__, __LINE__, __func__);
     }
 
     const bool use_axis_data = !req.axis_orders.empty() || !req.axis_knot_vectors.empty();
     if (use_axis_data) {
         if (!req.axis_orders.empty() && req.axis_orders.size() != static_cast<std::size_t>(dim)) {
-            throw FEException("BasisFactory: axis_orders size must match spline tensor dimension",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw BasisConfigurationException("BasisFactory: axis_orders size must match spline tensor dimension",
+                                              __FILE__, __LINE__, __func__);
         }
         if (!req.axis_knot_vectors.empty() && req.axis_knot_vectors.size() != static_cast<std::size_t>(dim)) {
-            throw FEException("BasisFactory: axis_knot_vectors size must match spline tensor dimension",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw BasisConfigurationException("BasisFactory: axis_knot_vectors size must match spline tensor dimension",
+                                              __FILE__, __LINE__, __func__);
         }
     } else if (req.knot_vector.empty()) {
-        throw FEException("BasisFactory: spline knot vectors are required for BSpline creation",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisConfigurationException("BasisFactory: spline knot vectors are required for BSpline creation",
+                                          __FILE__, __LINE__, __func__);
     }
 
     if (dim == 1) {
@@ -123,21 +123,21 @@ std::shared_ptr<BasisFunction> create_nurbs_basis(const BasisRequest& req) {
     validate_scalar_spline_request(req);
 
     if (req.element_type != ElementType::Line2) {
-        throw FEException(
+        throw NotImplementedException(
             "BasisFactory: NURBS currently supports Line2 only; multi-dimensional rational tensor-product support requires control-point weights beyond the current separable basis API",
-            __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            __FILE__, __LINE__, __func__);
     }
     if (req.knot_vector.empty()) {
-        throw FEException("BasisFactory: NURBS creation requires a knot vector",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisConfigurationException("BasisFactory: NURBS creation requires a knot vector",
+                                          __FILE__, __LINE__, __func__);
     }
     if (req.weights.empty()) {
-        throw FEException("BasisFactory: NURBS creation requires weights",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisConfigurationException("BasisFactory: NURBS creation requires weights",
+                                          __FILE__, __LINE__, __func__);
     }
     if (!req.axis_orders.empty() || !req.axis_knot_vectors.empty() || !req.axis_weights.empty()) {
-        throw FEException("BasisFactory: Line2 NURBS does not accept per-axis spline descriptors",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisConfigurationException("BasisFactory: Line2 NURBS does not accept per-axis spline descriptors",
+                                          __FILE__, __LINE__, __func__);
     }
     return std::make_shared<BSplineBasis>(req.order, req.knot_vector, req.weights);
 }
@@ -166,8 +166,8 @@ std::shared_ptr<BasisFunction> BasisFactory::create(const BasisRequest& req) {
 
     if (req.continuity == Continuity::H_curl) {
         if (req.basis_type != BasisType::Lagrange && req.basis_type != BasisType::Nedelec) {
-            throw FEException("BasisFactory: H(curl) bases require BasisType::Lagrange or BasisType::Nedelec",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw BasisConfigurationException("BasisFactory: H(curl) bases require BasisType::Lagrange or BasisType::Nedelec",
+                                              __FILE__, __LINE__, __func__);
         }
         return std::make_shared<NedelecBasis>(req.element_type, req.order);
     }
@@ -184,8 +184,8 @@ std::shared_ptr<BasisFunction> BasisFactory::create(const BasisRequest& req) {
         if (req.field_type == FieldType::Scalar) {
             return std::make_shared<HermiteBasis>(req.element_type, req.order);
         }
-        throw FEException("BasisFactory: C1 continuity currently supports scalar fields only",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisConfigurationException("BasisFactory: C1 continuity currently supports scalar fields only",
+                                          __FILE__, __LINE__, __func__);
     }
 
     switch (req.basis_type) {
@@ -208,8 +208,8 @@ std::shared_ptr<BasisFunction> BasisFactory::create(const BasisRequest& req) {
         case BasisType::Bubble:
             return std::make_shared<BubbleBasis>(req.element_type);
         default:
-            throw FEException("Unsupported basis type in BasisFactory",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw BasisConfigurationException("Unsupported basis type in BasisFactory",
+                                              __FILE__, __LINE__, __func__);
     }
 }
 

@@ -44,8 +44,8 @@ public:
     bool is_vector_valued() const noexcept override { return true; }
     void evaluate_values(const math::Vector<Real, 3>&,
                          std::vector<Real>&) const override {
-        throw FEException("Vector basis uses evaluate_vector_values",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisEvaluationException("Vector basis uses evaluate_vector_values",
+                                       __FILE__, __LINE__, __func__);
     }
 
     /**

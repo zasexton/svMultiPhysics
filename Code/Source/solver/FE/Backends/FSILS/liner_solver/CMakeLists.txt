@@ -27,6 +27,10 @@ set(CSRCS
   bc.cpp
   bicgs.h bicgs.cpp
   commu.h commu.cpp
+  distributed_mpi_ops.h distributed_mpi_ops.cpp
+  distributed_solver_bundles.h
+  distributed_sparse_operator.h
+  distributed_low_rank_correction.h distributed_low_rank_correction.cpp
   cgrad.h cgrad.cpp
   cput.cpp
   dot.h dot.cpp
@@ -38,6 +42,7 @@ set(CSRCS
   in_commu.cpp
   ls.cpp
   lhs.h lhs.cpp
+  block_schur_strategy_selector.h block_schur_strategy_selector.cpp
   norm.h norm.cpp
   ns_solver.h ns_solver.cpp
   omp_la.h omp_la.cpp

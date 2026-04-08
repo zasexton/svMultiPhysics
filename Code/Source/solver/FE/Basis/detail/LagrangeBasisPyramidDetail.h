@@ -6,6 +6,7 @@
 #include <map>
 #include <mutex>
 #include <vector>
+#include "Basis/BasisExceptions.h"
 #include "LagrangeBasisUtilityDetail.h"
 
 namespace svmp {
@@ -200,8 +201,8 @@ public:
 
         const std::size_t n = data.nodes.size();
         if (data.modal_terms.size() != n) {
-            throw FEException("LagrangeBasis pyramid modal basis size mismatch",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw BasisConstructionException("LagrangeBasis pyramid modal basis size mismatch",
+                                             __FILE__, __LINE__, __func__);
         }
 
         std::vector<std::vector<Real>> vandermonde(n, std::vector<Real>(n, Real(0)));
@@ -427,8 +428,8 @@ private:
                 }
             }
             if (pivot_abs <= Real(1e-14)) {
-                throw FEException("LagrangeBasis pyramid Vandermonde is singular",
-                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                throw BasisConstructionException("LagrangeBasis pyramid Vandermonde is singular",
+                                                 __FILE__, __LINE__, __func__);
             }
 
             if (pivot_row != col) {

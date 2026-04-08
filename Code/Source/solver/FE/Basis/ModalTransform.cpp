@@ -16,8 +16,8 @@ ModalTransform::ModalTransform(const BasisFunction& modal_basis,
                                const LagrangeBasis& nodal_basis)
     : modal_(modal_basis), nodal_(nodal_basis) {
     if (modal_.size() != nodal_.size()) {
-        throw FEException("ModalTransform requires modal/nodal bases of equal size",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisConfigurationException("ModalTransform requires modal/nodal bases of equal size",
+                                          __FILE__, __LINE__, __func__);
     }
     compute_vandermonde();
     invert_vandermonde();
@@ -32,8 +32,8 @@ void ModalTransform::compute_vandermonde() {
         std::vector<Real> row;
         modal_.evaluate_values(nodes[i], row);
         if (row.size() != n) {
-            throw FEException("Modal basis returned unexpected size during Vandermonde assembly",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw BasisConstructionException("Modal basis returned unexpected size during Vandermonde assembly",
+                                             __FILE__, __LINE__, __func__);
         }
         vandermonde_[i] = row;
     }
@@ -62,8 +62,8 @@ void ModalTransform::invert_vandermonde() {
         }
 
         if (max_abs < Real(1e-14)) {
-            throw FEException("Singular Vandermonde encountered in ModalTransform",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw BasisConstructionException("Singular Vandermonde encountered in ModalTransform",
+                                             __FILE__, __LINE__, __func__);
         }
         if (pivot_row != col) {
             std::swap(mat[pivot_row], mat[col]);
@@ -91,8 +91,8 @@ void ModalTransform::invert_vandermonde() {
 std::vector<Real> ModalTransform::modal_to_nodal(const std::vector<Real>& modal_coeffs) const {
     const std::size_t n = vandermonde_.size();
     if (modal_coeffs.size() != n) {
-        throw FEException("modal_to_nodal: size mismatch",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisEvaluationException("modal_to_nodal: size mismatch",
+                                       __FILE__, __LINE__, __func__);
     }
     std::vector<Real> nodal(n, Real(0));
     for (std::size_t i = 0; i < n; ++i) {
@@ -106,8 +106,8 @@ std::vector<Real> ModalTransform::modal_to_nodal(const std::vector<Real>& modal_
 std::vector<Real> ModalTransform::nodal_to_modal(const std::vector<Real>& nodal_values) const {
     const std::size_t n = vandermonde_inv_.size();
     if (nodal_values.size() != n) {
-        throw FEException("nodal_to_modal: size mismatch",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisEvaluationException("nodal_to_modal: size mismatch",
+                                       __FILE__, __LINE__, __func__);
     }
     std::vector<Real> modal(n, Real(0));
     for (std::size_t i = 0; i < n; ++i) {

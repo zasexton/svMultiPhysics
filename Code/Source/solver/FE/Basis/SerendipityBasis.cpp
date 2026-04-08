@@ -123,8 +123,8 @@ SerendipityBasis::SerendipityBasis(ElementType type, int order, bool geometry_mo
         } else if (order_ == 2) {
             size_ = 8;
         } else {
-            throw FEException("SerendipityBasis currently supports order 1 or 2 on quadrilaterals",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw NotImplementedException("SerendipityBasis currently supports order 1 or 2 on quadrilaterals",
+                                          __FILE__, __LINE__, __func__);
         }
     } else if (type == ElementType::Hex8 || type == ElementType::Hex20) {
         dimension_ = 3;
@@ -134,8 +134,8 @@ SerendipityBasis::SerendipityBasis(ElementType type, int order, bool geometry_mo
         } else if (order_ == 2) {
             size_ = 20;
         } else {
-            throw FEException("SerendipityBasis supports up to quadratic on hexahedra",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw NotImplementedException("SerendipityBasis supports up to quadratic on hexahedra",
+                                          __FILE__, __LINE__, __func__);
         }
     } else if (type == ElementType::Wedge15) {
         dimension_ = 3;
@@ -145,8 +145,8 @@ SerendipityBasis::SerendipityBasis(ElementType type, int order, bool geometry_mo
         if (order_ == 2) {
             size_ = 15;
         } else {
-            throw FEException("SerendipityBasis supports up to quadratic on wedge15",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw NotImplementedException("SerendipityBasis supports up to quadratic on wedge15",
+                                          __FILE__, __LINE__, __func__);
         }
     } else if (type == ElementType::Pyramid13) {
         dimension_ = 3;
@@ -156,12 +156,12 @@ SerendipityBasis::SerendipityBasis(ElementType type, int order, bool geometry_mo
         if (order_ == 2) {
             size_ = 13;
         } else {
-            throw FEException("SerendipityBasis supports up to quadratic on pyramid13",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw NotImplementedException("SerendipityBasis supports up to quadratic on pyramid13",
+                                          __FILE__, __LINE__, __func__);
         }
     } else {
-        throw FEException("SerendipityBasis supports Quad4/Quad8, Hex8/Hex20, Wedge15, and Pyramid13 elements",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisElementCompatibilityException("SerendipityBasis supports Quad4/Quad8, Hex8/Hex20, Wedge15, and Pyramid13 elements",
+                                                 __FILE__, __LINE__, __func__);
     }
 }
 

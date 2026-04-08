@@ -8,7 +8,7 @@
 
 #include "HermiteBasis.h"
 
-#include "Core/FEException.h"
+#include "Basis/BasisExceptions.h"
 
 namespace svmp {
 namespace FE {
@@ -60,8 +60,8 @@ HermiteBasis::HermiteBasis(ElementType element_type,
       order_(order),
       size_(0) {
     if (order_ != 3) {
-        throw FEException("HermiteBasis currently supports cubic order (3) only",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw NotImplementedException("HermiteBasis currently supports cubic order (3) only",
+                                      __FILE__, __LINE__, __func__);
     }
 
     // Supported Hermite configurations:
@@ -77,8 +77,8 @@ HermiteBasis::HermiteBasis(ElementType element_type,
         dimension_ = 3;
         size_ = 64;
     } else {
-        throw FEException("HermiteBasis currently supports Line2, Quad4, and Hex8 only",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidElement);
+        throw BasisElementCompatibilityException("HermiteBasis currently supports Line2, Quad4, and Hex8 only",
+                                                 __FILE__, __LINE__, __func__);
     }
 }
 
@@ -163,8 +163,8 @@ void HermiteBasis::evaluate_values(const math::Vector<Real, 3>& xi,
         return;
     }
 
-    throw FEException("HermiteBasis::evaluate_values: unsupported dimension",
-                      __FILE__, __LINE__, __func__, FEStatus::InvalidElement);
+    throw BasisEvaluationException("HermiteBasis::evaluate_values: unsupported dimension",
+                                   __FILE__, __LINE__, __func__);
 }
 
 void HermiteBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
@@ -326,8 +326,8 @@ void HermiteBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
         return;
     }
 
-    throw FEException("HermiteBasis::evaluate_gradients: unsupported dimension",
-                      __FILE__, __LINE__, __func__, FEStatus::InvalidElement);
+    throw BasisEvaluationException("HermiteBasis::evaluate_gradients: unsupported dimension",
+                                   __FILE__, __LINE__, __func__);
 }
 
 } // namespace basis

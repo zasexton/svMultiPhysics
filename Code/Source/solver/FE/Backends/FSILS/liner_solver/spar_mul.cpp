@@ -37,9 +37,13 @@
 
 #include "spar_mul.h"
 
+#include "distributed_mpi_ops.h"
+#include "distributed_sparse_operator.h"
 #include "fsils_api.hpp"
 
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #ifdef _OPENMP
@@ -333,118 +337,7 @@ static void fsils_spar_mul_vv_dyn(fsils_int iStart, fsils_int iEnd, int dof,
 }
 
 //====================================================================
-// Public API — overlaps SpMV with MPI communication when possible.
-//
-// Node ordering from fsils_lhs_create:
-//   [0, shnNo)       shared with lower-rank procs
-//   [shnNo, mynNo)   interior (no communication needed)
-//   [mynNo, nNo)      shared with higher-rank procs
-//
-// Overlap pattern: compute boundary rows -> start async comm ->
-//   compute interior rows -> finish comm.
-//====================================================================
-
-void fsils_spar_mul_ss(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
-    const Vector<fsils_int>& colPtr, const Vector<double>& K,
-    const Vector<double>& U, Vector<double>& KU)
-{
-  fsils_int nNo = lhs.nNo;
-
-  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-    fsils_spar_mul_ss_range(0, lhs.shnNo, rowPtr, colPtr, K, U, KU);
-    fsils_spar_mul_ss_range(lhs.mynNo, nNo, rowPtr, colPtr, K, U, KU);
-    fsils_commus_begin(lhs, KU);
-    fsils_spar_mul_ss_range(lhs.shnNo, lhs.mynNo, rowPtr, colPtr, K, U, KU);
-    fsils_commus_end(lhs, KU);
-  } else {
-    fsils_spar_mul_ss_range(0, nNo, rowPtr, colPtr, K, U, KU);
-  }
-}
-
-void fsils_spar_mul_sv(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
-    const Vector<fsils_int>& colPtr, const int dof, const Array<double>& K,
-    const Vector<double>& U, Array<double>& KU)
-{
-  fsils_int nNo = lhs.nNo;
-
-  auto compute_range = [&](fsils_int iStart, fsils_int iEnd) {
-    switch (dof) {
-      case 1: fsils_spar_mul_sv_impl<1>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
-      case 2: fsils_spar_mul_sv_impl<2>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
-      case 3: fsils_spar_mul_sv_impl<3>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
-      case 4: fsils_spar_mul_sv_impl<4>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
-      default: fsils_spar_mul_sv_dyn(iStart, iEnd, dof, rowPtr, colPtr, K, U, KU); break;
-    }
-  };
-
-  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-    compute_range(0, lhs.shnNo);
-    compute_range(lhs.mynNo, nNo);
-    fsils_commuv_begin(lhs, dof, KU);
-    compute_range(lhs.shnNo, lhs.mynNo);
-    fsils_commuv_end(lhs, dof, KU);
-  } else {
-    compute_range(0, nNo);
-  }
-}
-
-void fsils_spar_mul_vs(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
-    const Vector<fsils_int>& colPtr, const int dof, const Array<double>& K,
-    const Array<double>& U, Vector<double>& KU)
-{
-  fsils_int nNo = lhs.nNo;
-
-  auto compute_range = [&](fsils_int iStart, fsils_int iEnd) {
-    switch (dof) {
-      case 1: fsils_spar_mul_vs_impl<1>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
-      case 2: fsils_spar_mul_vs_impl<2>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
-      case 3: fsils_spar_mul_vs_impl<3>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
-      case 4: fsils_spar_mul_vs_impl<4>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
-      default: fsils_spar_mul_vs_dyn(iStart, iEnd, dof, rowPtr, colPtr, K, U, KU); break;
-    }
-  };
-
-  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-    compute_range(0, lhs.shnNo);
-    compute_range(lhs.mynNo, nNo);
-    fsils_commus_begin(lhs, KU);
-    compute_range(lhs.shnNo, lhs.mynNo);
-    fsils_commus_end(lhs, KU);
-  } else {
-    compute_range(0, nNo);
-  }
-}
-
-void fsils_spar_mul_vv(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
-    const Vector<fsils_int>& colPtr, const int dof, const Array<double>& K,
-    const Array<double>& U, Array<double>& KU)
-{
-  fsils_int nNo = lhs.nNo;
-
-  auto compute_range = [&](fsils_int iStart, fsils_int iEnd) {
-    switch (dof) {
-      case 1: fsils_spar_mul_vv_impl<1>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
-      case 2: fsils_spar_mul_vv_impl<2>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
-      case 3: fsils_spar_mul_vv_impl<3>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
-      case 4: fsils_spar_mul_vv_impl<4>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
-      default: fsils_spar_mul_vv_dyn(iStart, iEnd, dof, rowPtr, colPtr, K, U, KU); break;
-    }
-  };
-
-  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-    compute_range(0, lhs.shnNo);
-    compute_range(lhs.mynNo, nNo);
-    fsils_commuv_begin(lhs, dof, KU);
-    compute_range(lhs.shnNo, lhs.mynNo);
-    fsils_commuv_end(lhs, dof, KU);
-  } else {
-    compute_range(0, nNo);
-  }
-}
-
-//====================================================================
-// Fused SV+SS: G(nsd,nnz)*in_vec -> GP(nsd,nNo) AND L(nnz)*in_vec -> SP(nNo)
-// in a single row loop. Saves one full traversal of colPtr + in_vec.
+// Fused local kernels used by the distributed sparse-operator layer.
 //====================================================================
 
 template <int DOF>
@@ -523,40 +416,8 @@ static void fsils_spar_mul_sv_ss_fused_dyn(fsils_int iStart, fsils_int iEnd, int
   }
 }
 
-void fsils_spar_mul_sv_ss_fused(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
-    const Vector<fsils_int>& colPtr, const int nsd, const Array<double>& G,
-    const Vector<double>& L, const Vector<double>& in_vec,
-    Array<double>& GP, Vector<double>& SP)
-{
-  fsils_int nNo = lhs.nNo;
-
-  auto compute_range = [&](fsils_int iStart, fsils_int iEnd) {
-    switch (nsd) {
-      case 2: fsils_spar_mul_sv_ss_fused_impl<2>(iStart, iEnd, rowPtr, colPtr, G, L, in_vec, GP, SP); break;
-      case 3: fsils_spar_mul_sv_ss_fused_impl<3>(iStart, iEnd, rowPtr, colPtr, G, L, in_vec, GP, SP); break;
-      default: fsils_spar_mul_sv_ss_fused_dyn(iStart, iEnd, nsd, rowPtr, colPtr, G, L, in_vec, GP, SP); break;
-    }
-  };
-
-  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-    // Compute boundary rows first
-    compute_range(0, lhs.shnNo);
-    compute_range(lhs.mynNo, nNo);
-    // Overlap GP (vector) comm with interior computation
-    fsils_commuv_begin(lhs, nsd, GP);
-    compute_range(lhs.shnNo, lhs.mynNo);
-    fsils_commuv_end(lhs, nsd, GP);
-    // SP (scalar) comm — boundary rows already computed
-    fsils_commus_begin(lhs, SP);
-    fsils_commus_end(lhs, SP);
-  } else {
-    compute_range(0, nNo);
-  }
-}
-
 //====================================================================
-// Rectangular block SpMV: K(out_dof * in_dof, nnz) × U(in_dof, nNo) → KU(out_dof, nNo)
-// Generalizes SV (in_dof=1), VS (out_dof=1), VV (out_dof=in_dof).
+// Rectangular block local SpMV kernels.
 //====================================================================
 
 static void fsils_spar_mul_rect_range(fsils_int iStart, fsils_int iEnd,
@@ -597,42 +458,6 @@ static void fsils_spar_mul_rect_range(fsils_int iStart, fsils_int iEnd,
         kui[l] = sums[static_cast<size_t>(l)];
       }
     }
-  }
-}
-
-void fsils_spar_mul_rect(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
-    const Vector<fsils_int>& colPtr, int out_dof, int in_dof,
-    const Array<double>& K, const Array<double>& U, Array<double>& KU)
-{
-  // Dispatch to specialized routines for common degenerate cases.
-  if (in_dof == 1 && out_dof == 1) {
-    // SS: treat K and U as vectors.  Layout is compatible since K(1*1, nnz)
-    // is column-major contiguous like Vector<double>(nnz).
-    // Wrap as Vectors via const_cast-free copies.
-    Vector<double> Kv(K.ncols());
-    for (fsils_int n = 0; n < K.ncols(); n++) Kv(n) = K(0, n);
-    Vector<double> Uv(U.ncols());
-    for (fsils_int n = 0; n < U.ncols(); n++) Uv(n) = U(0, n);
-    Vector<double> KUv(KU.ncols());
-    fsils_spar_mul_ss(lhs, rowPtr, colPtr, Kv, Uv, KUv);
-    for (fsils_int n = 0; n < KU.ncols(); n++) KU(0, n) = KUv(n);
-    return;
-  }
-  if (out_dof == in_dof) {
-    fsils_spar_mul_vv(lhs, rowPtr, colPtr, out_dof, K, U, KU);
-    return;
-  }
-
-  fsils_int nNo = lhs.nNo;
-
-  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-    fsils_spar_mul_rect_range(0, lhs.shnNo, out_dof, in_dof, rowPtr, colPtr, K, U, KU);
-    fsils_spar_mul_rect_range(lhs.mynNo, nNo, out_dof, in_dof, rowPtr, colPtr, K, U, KU);
-    fsils_commuv_begin(lhs, out_dof, KU);
-    fsils_spar_mul_rect_range(lhs.shnNo, lhs.mynNo, out_dof, in_dof, rowPtr, colPtr, K, U, KU);
-    fsils_commuv_end(lhs, out_dof, KU);
-  } else {
-    fsils_spar_mul_rect_range(0, nNo, out_dof, in_dof, rowPtr, colPtr, K, U, KU);
   }
 }
 
@@ -699,43 +524,588 @@ static void fsils_spar_mul_rect_vv_fused_range(fsils_int iStart, fsils_int iEnd,
   }
 }
 
-void fsils_spar_mul_rect_vv_fused(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
-    const Vector<fsils_int>& colPtr, int mom_ncomp, int con_ncomp,
-    const Array<double>& G, const Array<double>& L,
-    const Array<double>& P, Array<double>& GP, Array<double>& SP)
+}  // namespace spar_mul
+
+namespace fe_fsi_linear_solver::distributed_sparse_operator {
+
+namespace {
+
+[[nodiscard]] bool has_overlap(const FSILS_lhsType& lhs) noexcept
 {
-  // For con_ncomp == 1, delegate to the optimized fused SV+SS path.
-  if (con_ncomp == 1) {
-    Vector<double> Lv(L.ncols());
-    for (fsils_int n = 0; n < L.ncols(); n++) Lv(n) = L(0, n);
-    Vector<double> Pv(P.ncols());
-    for (fsils_int n = 0; n < P.ncols(); n++) Pv(n) = P(0, n);
-    Vector<double> SPv(SP.ncols());
-    fsils_spar_mul_sv_ss_fused(lhs, rowPtr, colPtr, mom_ncomp, G, Lv, Pv, GP, SPv);
-    for (fsils_int n = 0; n < SP.ncols(); n++) SP(0, n) = SPv(n);
-    return;
+  return lhs.commu.nTasks > 1 && lhs.nReq > 0;
+}
+
+[[nodiscard]] std::string state_mismatch_message(const char* op_name,
+                                                 const char* role,
+                                                 VectorState expected,
+                                                 VectorState actual)
+{
+  return std::string(op_name) + " requires " + role + " state `" +
+      to_string(expected) + "` but received `" + to_string(actual) + "`";
+}
+
+void require_state(const char* op_name,
+                   const char* role,
+                   VectorState expected,
+                   VectorState actual)
+{
+  if (actual != expected) {
+    throw std::logic_error(state_mismatch_message(op_name, role, expected, actual));
   }
+}
 
-  fsils_int nNo = lhs.nNo;
+void require_components(const char* op_name,
+                        const char* role,
+                        int expected,
+                        int actual)
+{
+  if (actual != expected) {
+    throw std::logic_error(std::string(op_name) + " requires " + role + " components=" +
+        std::to_string(expected) + " but received " + std::to_string(actual));
+  }
+}
 
-  auto compute_range = [&](fsils_int iStart, fsils_int iEnd) {
-    fsils_spar_mul_rect_vv_fused_range(iStart, iEnd, mom_ncomp, con_ncomp,
-        rowPtr, colPtr, G, L, P, GP, SP);
-  };
-
-  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+template <typename ComputeRange>
+void apply_scalar_output(const FSILS_lhsType& lhs,
+                         ComputeRange&& compute_range,
+                         Vector<double>& output)
+{
+  const fsils_int nNo = lhs.nNo;
+  if (has_overlap(lhs)) {
     compute_range(0, lhs.shnNo);
     compute_range(lhs.mynNo, nNo);
-    // Overlap GP comm with interior
-    fsils_commuv_begin(lhs, mom_ncomp, GP);
+    const HaloExchange halo(lhs);
+    halo.begin_scalar(output);
     compute_range(lhs.shnNo, lhs.mynNo);
-    fsils_commuv_end(lhs, mom_ncomp, GP);
-    // SP comm
-    fsils_commuv_begin(lhs, con_ncomp, SP);
-    fsils_commuv_end(lhs, con_ncomp, SP);
+    halo.end_scalar(output);
   } else {
     compute_range(0, nNo);
   }
 }
 
-};
+template <typename ComputeRange>
+void apply_vector_output(const FSILS_lhsType& lhs,
+                         int components,
+                         ComputeRange&& compute_range,
+                         Array<double>& output)
+{
+  const fsils_int nNo = lhs.nNo;
+  if (has_overlap(lhs)) {
+    compute_range(0, lhs.shnNo);
+    compute_range(lhs.mynNo, nNo);
+    const HaloExchange halo(lhs);
+    halo.begin_vector(components, output);
+    compute_range(lhs.shnNo, lhs.mynNo);
+    halo.end_vector(components, output);
+  } else {
+    compute_range(0, nNo);
+  }
+}
+
+void apply_sv_range(fsils_int i_start,
+                    fsils_int i_end,
+                    int dof,
+                    const Array<fsils_int>& row_ptr,
+                    const Vector<fsils_int>& col_ptr,
+                    const Array<double>& values,
+                    const Vector<double>& input,
+                    Array<double>& output)
+{
+  switch (dof) {
+    case 1: spar_mul::fsils_spar_mul_sv_impl<1>(i_start, i_end, row_ptr, col_ptr, values, input, output); break;
+    case 2: spar_mul::fsils_spar_mul_sv_impl<2>(i_start, i_end, row_ptr, col_ptr, values, input, output); break;
+    case 3: spar_mul::fsils_spar_mul_sv_impl<3>(i_start, i_end, row_ptr, col_ptr, values, input, output); break;
+    case 4: spar_mul::fsils_spar_mul_sv_impl<4>(i_start, i_end, row_ptr, col_ptr, values, input, output); break;
+    default: spar_mul::fsils_spar_mul_sv_dyn(i_start, i_end, dof, row_ptr, col_ptr, values, input, output); break;
+  }
+}
+
+void apply_vs_range(fsils_int i_start,
+                    fsils_int i_end,
+                    int dof,
+                    const Array<fsils_int>& row_ptr,
+                    const Vector<fsils_int>& col_ptr,
+                    const Array<double>& values,
+                    const Array<double>& input,
+                    Vector<double>& output)
+{
+  switch (dof) {
+    case 1: spar_mul::fsils_spar_mul_vs_impl<1>(i_start, i_end, row_ptr, col_ptr, values, input, output); break;
+    case 2: spar_mul::fsils_spar_mul_vs_impl<2>(i_start, i_end, row_ptr, col_ptr, values, input, output); break;
+    case 3: spar_mul::fsils_spar_mul_vs_impl<3>(i_start, i_end, row_ptr, col_ptr, values, input, output); break;
+    case 4: spar_mul::fsils_spar_mul_vs_impl<4>(i_start, i_end, row_ptr, col_ptr, values, input, output); break;
+    default: spar_mul::fsils_spar_mul_vs_dyn(i_start, i_end, dof, row_ptr, col_ptr, values, input, output); break;
+  }
+}
+
+void apply_vv_range(fsils_int i_start,
+                    fsils_int i_end,
+                    int dof,
+                    const Array<fsils_int>& row_ptr,
+                    const Vector<fsils_int>& col_ptr,
+                    const Array<double>& values,
+                    const Array<double>& input,
+                    Array<double>& output)
+{
+  switch (dof) {
+    case 1: spar_mul::fsils_spar_mul_vv_impl<1>(i_start, i_end, row_ptr, col_ptr, values, input, output); break;
+    case 2: spar_mul::fsils_spar_mul_vv_impl<2>(i_start, i_end, row_ptr, col_ptr, values, input, output); break;
+    case 3: spar_mul::fsils_spar_mul_vv_impl<3>(i_start, i_end, row_ptr, col_ptr, values, input, output); break;
+    case 4: spar_mul::fsils_spar_mul_vv_impl<4>(i_start, i_end, row_ptr, col_ptr, values, input, output); break;
+    default: spar_mul::fsils_spar_mul_vv_dyn(i_start, i_end, dof, row_ptr, col_ptr, values, input, output); break;
+  }
+}
+
+void apply_fused_sv_ss_range(fsils_int i_start,
+                             fsils_int i_end,
+                             int components,
+                             const Array<fsils_int>& row_ptr,
+                             const Vector<fsils_int>& col_ptr,
+                             const Array<double>& momentum_values,
+                             const Vector<double>& constraint_values,
+                             const Vector<double>& input,
+                             Array<double>& momentum_output,
+                             Vector<double>& constraint_output)
+{
+  switch (components) {
+    case 2: spar_mul::fsils_spar_mul_sv_ss_fused_impl<2>(i_start, i_end, row_ptr, col_ptr,
+            momentum_values, constraint_values, input, momentum_output, constraint_output); break;
+    case 3: spar_mul::fsils_spar_mul_sv_ss_fused_impl<3>(i_start, i_end, row_ptr, col_ptr,
+            momentum_values, constraint_values, input, momentum_output, constraint_output); break;
+    default: spar_mul::fsils_spar_mul_sv_ss_fused_dyn(i_start, i_end, components, row_ptr, col_ptr,
+            momentum_values, constraint_values, input, momentum_output, constraint_output); break;
+  }
+}
+
+}  // namespace
+
+const char* to_string(VectorState state) noexcept
+{
+  switch (state) {
+    case VectorState::owned_only: return "owned_only";
+    case VectorState::ghost_zeroed: return "ghost_zeroed";
+    case VectorState::ghost_synced: return "ghost_synced";
+  }
+  return "unknown";
+}
+
+ScalarToScalarOperator::ScalarToScalarOperator(const FSILS_lhsType& lhs,
+                                               const Array<fsils_int>& row_ptr,
+                                               const Vector<fsils_int>& col_ptr,
+                                               const Vector<double>& values) noexcept
+    : lhs_(&lhs),
+      row_ptr_(&row_ptr),
+      col_ptr_(&col_ptr),
+      values_(&values)
+{
+}
+
+UnaryOperatorContract ScalarToScalarOperator::contract() const noexcept
+{
+  return {};
+}
+
+void ScalarToScalarOperator::apply(ScalarInput input, ScalarOutput output) const
+{
+  static constexpr const char* kOperatorName = "ScalarToScalarOperator";
+  const auto op_contract = contract();
+  require_state(kOperatorName, "input", op_contract.input_state, input.state);
+  require_state(kOperatorName, "output", op_contract.output_state, output.state);
+
+  auto compute_range = [&](fsils_int i_start, fsils_int i_end) {
+    spar_mul::fsils_spar_mul_ss_range(i_start, i_end, *row_ptr_, *col_ptr_,
+                                      *values_, input.values, output.values);
+  };
+  apply_scalar_output(*lhs_, compute_range, output.values);
+}
+
+ScalarToVectorOperator::ScalarToVectorOperator(const FSILS_lhsType& lhs,
+                                               const Array<fsils_int>& row_ptr,
+                                               const Vector<fsils_int>& col_ptr,
+                                               int components,
+                                               const Array<double>& values) noexcept
+    : lhs_(&lhs),
+      row_ptr_(&row_ptr),
+      col_ptr_(&col_ptr),
+      components_(components),
+      values_(&values)
+{
+}
+
+UnaryOperatorContract ScalarToVectorOperator::contract() const noexcept
+{
+  return {};
+}
+
+void ScalarToVectorOperator::apply(ScalarInput input, BlockOutput output) const
+{
+  static constexpr const char* kOperatorName = "ScalarToVectorOperator";
+  const auto op_contract = contract();
+  require_state(kOperatorName, "input", op_contract.input_state, input.state);
+  require_state(kOperatorName, "output", op_contract.output_state, output.state);
+  require_components(kOperatorName, "output", components_, output.components);
+
+  auto compute_range = [&](fsils_int i_start, fsils_int i_end) {
+    apply_sv_range(i_start, i_end, components_, *row_ptr_, *col_ptr_,
+                   *values_, input.values, output.values);
+  };
+  apply_vector_output(*lhs_, components_, compute_range, output.values);
+}
+
+VectorToScalarOperator::VectorToScalarOperator(const FSILS_lhsType& lhs,
+                                               const Array<fsils_int>& row_ptr,
+                                               const Vector<fsils_int>& col_ptr,
+                                               int components,
+                                               const Array<double>& values) noexcept
+    : lhs_(&lhs),
+      row_ptr_(&row_ptr),
+      col_ptr_(&col_ptr),
+      components_(components),
+      values_(&values)
+{
+}
+
+UnaryOperatorContract VectorToScalarOperator::contract() const noexcept
+{
+  return {};
+}
+
+void VectorToScalarOperator::apply(BlockInput input, ScalarOutput output) const
+{
+  static constexpr const char* kOperatorName = "VectorToScalarOperator";
+  const auto op_contract = contract();
+  require_state(kOperatorName, "input", op_contract.input_state, input.state);
+  require_state(kOperatorName, "output", op_contract.output_state, output.state);
+  require_components(kOperatorName, "input", components_, input.components);
+
+  auto compute_range = [&](fsils_int i_start, fsils_int i_end) {
+    apply_vs_range(i_start, i_end, components_, *row_ptr_, *col_ptr_,
+                   *values_, input.values, output.values);
+  };
+  apply_scalar_output(*lhs_, compute_range, output.values);
+}
+
+VectorToVectorOperator::VectorToVectorOperator(const FSILS_lhsType& lhs,
+                                               const Array<fsils_int>& row_ptr,
+                                               const Vector<fsils_int>& col_ptr,
+                                               int components,
+                                               const Array<double>& values) noexcept
+    : lhs_(&lhs),
+      row_ptr_(&row_ptr),
+      col_ptr_(&col_ptr),
+      components_(components),
+      values_(&values)
+{
+}
+
+UnaryOperatorContract VectorToVectorOperator::contract() const noexcept
+{
+  return {};
+}
+
+void VectorToVectorOperator::apply(BlockInput input, BlockOutput output) const
+{
+  static constexpr const char* kOperatorName = "VectorToVectorOperator";
+  const auto op_contract = contract();
+  require_state(kOperatorName, "input", op_contract.input_state, input.state);
+  require_state(kOperatorName, "output", op_contract.output_state, output.state);
+  require_components(kOperatorName, "input", components_, input.components);
+  require_components(kOperatorName, "output", components_, output.components);
+
+  auto compute_range = [&](fsils_int i_start, fsils_int i_end) {
+    apply_vv_range(i_start, i_end, components_, *row_ptr_, *col_ptr_,
+                   *values_, input.values, output.values);
+  };
+  apply_vector_output(*lhs_, components_, compute_range, output.values);
+}
+
+RectangularOperator::RectangularOperator(const FSILS_lhsType& lhs,
+                                         const Array<fsils_int>& row_ptr,
+                                         const Vector<fsils_int>& col_ptr,
+                                         int out_components,
+                                         int in_components,
+                                         const Array<double>& values) noexcept
+    : lhs_(&lhs),
+      row_ptr_(&row_ptr),
+      col_ptr_(&col_ptr),
+      out_components_(out_components),
+      in_components_(in_components),
+      values_(&values)
+{
+}
+
+UnaryOperatorContract RectangularOperator::contract() const noexcept
+{
+  return {};
+}
+
+void RectangularOperator::apply(BlockInput input, BlockOutput output) const
+{
+  static constexpr const char* kOperatorName = "RectangularOperator";
+  const auto op_contract = contract();
+  require_state(kOperatorName, "input", op_contract.input_state, input.state);
+  require_state(kOperatorName, "output", op_contract.output_state, output.state);
+  require_components(kOperatorName, "input", in_components_, input.components);
+  require_components(kOperatorName, "output", out_components_, output.components);
+
+  auto compute_range = [&](fsils_int i_start, fsils_int i_end) {
+    if (out_components_ == in_components_) {
+      apply_vv_range(i_start, i_end, out_components_, *row_ptr_, *col_ptr_,
+                     *values_, input.values, output.values);
+      return;
+    }
+    spar_mul::fsils_spar_mul_rect_range(i_start, i_end, out_components_, in_components_,
+                                        *row_ptr_, *col_ptr_, *values_,
+                                        input.values, output.values);
+  };
+  apply_vector_output(*lhs_, out_components_, compute_range, output.values);
+}
+
+FusedScalarConstraintOperator::FusedScalarConstraintOperator(
+    const FSILS_lhsType& lhs,
+    const Array<fsils_int>& row_ptr,
+    const Vector<fsils_int>& col_ptr,
+    int momentum_components,
+    const Array<double>& momentum_values,
+    const Vector<double>& constraint_values) noexcept
+    : lhs_(&lhs),
+      row_ptr_(&row_ptr),
+      col_ptr_(&col_ptr),
+      momentum_components_(momentum_components),
+      momentum_values_(&momentum_values),
+      constraint_values_(&constraint_values)
+{
+}
+
+FusedOperatorContract FusedScalarConstraintOperator::contract() const noexcept
+{
+  return {};
+}
+
+void FusedScalarConstraintOperator::apply(ScalarInput input,
+                                          BlockOutput momentum_output,
+                                          ScalarOutput constraint_output) const
+{
+  static constexpr const char* kOperatorName = "FusedScalarConstraintOperator";
+  const auto op_contract = contract();
+  require_state(kOperatorName, "input", op_contract.input_state, input.state);
+  require_state(kOperatorName, "momentum output", op_contract.first_output_state, momentum_output.state);
+  require_state(kOperatorName, "constraint output", op_contract.second_output_state, constraint_output.state);
+  require_components(kOperatorName, "momentum output", momentum_components_, momentum_output.components);
+
+  auto compute_range = [&](fsils_int i_start, fsils_int i_end) {
+    apply_fused_sv_ss_range(i_start, i_end, momentum_components_, *row_ptr_, *col_ptr_,
+                            *momentum_values_, *constraint_values_,
+                            input.values, momentum_output.values, constraint_output.values);
+  };
+
+  const fsils_int nNo = lhs_->nNo;
+  if (has_overlap(*lhs_)) {
+    compute_range(0, lhs_->shnNo);
+    compute_range(lhs_->mynNo, nNo);
+    const HaloExchange halo(*lhs_);
+    halo.begin_vector(momentum_components_, momentum_output.values);
+    compute_range(lhs_->shnNo, lhs_->mynNo);
+    halo.end_vector(momentum_components_, momentum_output.values);
+    halo.begin_scalar(constraint_output.values);
+    halo.end_scalar(constraint_output.values);
+  } else {
+    compute_range(0, nNo);
+  }
+}
+
+FusedRectangularConstraintOperator::FusedRectangularConstraintOperator(
+    const FSILS_lhsType& lhs,
+    const Array<fsils_int>& row_ptr,
+    const Vector<fsils_int>& col_ptr,
+    int momentum_components,
+    int constraint_components,
+    const Array<double>& momentum_values,
+    const Array<double>& constraint_values) noexcept
+    : lhs_(&lhs),
+      row_ptr_(&row_ptr),
+      col_ptr_(&col_ptr),
+      momentum_components_(momentum_components),
+      constraint_components_(constraint_components),
+      momentum_values_(&momentum_values),
+      constraint_values_(&constraint_values)
+{
+}
+
+FusedOperatorContract FusedRectangularConstraintOperator::contract() const noexcept
+{
+  return {};
+}
+
+void FusedRectangularConstraintOperator::apply(BlockInput input,
+                                               BlockOutput momentum_output,
+                                               BlockOutput constraint_output) const
+{
+  static constexpr const char* kOperatorName = "FusedRectangularConstraintOperator";
+  const auto op_contract = contract();
+  require_state(kOperatorName, "input", op_contract.input_state, input.state);
+  require_state(kOperatorName, "momentum output", op_contract.first_output_state, momentum_output.state);
+  require_state(kOperatorName, "constraint output", op_contract.second_output_state, constraint_output.state);
+  require_components(kOperatorName, "input", constraint_components_, input.components);
+  require_components(kOperatorName, "momentum output", momentum_components_, momentum_output.components);
+  require_components(kOperatorName, "constraint output", constraint_components_, constraint_output.components);
+
+  auto compute_range = [&](fsils_int i_start, fsils_int i_end) {
+    spar_mul::fsils_spar_mul_rect_vv_fused_range(i_start, i_end,
+        momentum_components_, constraint_components_, *row_ptr_, *col_ptr_,
+        *momentum_values_, *constraint_values_, input.values,
+        momentum_output.values, constraint_output.values);
+  };
+
+  const fsils_int nNo = lhs_->nNo;
+  if (has_overlap(*lhs_)) {
+    compute_range(0, lhs_->shnNo);
+    compute_range(lhs_->mynNo, nNo);
+    const HaloExchange halo(*lhs_);
+    halo.begin_vector(momentum_components_, momentum_output.values);
+    compute_range(lhs_->shnNo, lhs_->mynNo);
+    halo.end_vector(momentum_components_, momentum_output.values);
+    halo.begin_vector(constraint_components_, constraint_output.values);
+    halo.end_vector(constraint_components_, constraint_output.values);
+  } else {
+    compute_range(0, nNo);
+  }
+}
+
+SparseOperatorBundle::SparseOperatorBundle(const FSILS_lhsType& lhs,
+                                           const Array<fsils_int>& row_ptr,
+                                           const Vector<fsils_int>& col_ptr) noexcept
+    : lhs_(&lhs),
+      row_ptr_(&row_ptr),
+      col_ptr_(&col_ptr)
+{
+}
+
+ScalarToScalarOperator SparseOperatorBundle::scalar(const Vector<double>& values) const noexcept
+{
+  return ScalarToScalarOperator(*lhs_, *row_ptr_, *col_ptr_, values);
+}
+
+ScalarToVectorOperator SparseOperatorBundle::scalar_to_vector(int components,
+                                                              const Array<double>& values) const noexcept
+{
+  return ScalarToVectorOperator(*lhs_, *row_ptr_, *col_ptr_, components, values);
+}
+
+VectorToScalarOperator SparseOperatorBundle::vector_to_scalar(int components,
+                                                              const Array<double>& values) const noexcept
+{
+  return VectorToScalarOperator(*lhs_, *row_ptr_, *col_ptr_, components, values);
+}
+
+VectorToVectorOperator SparseOperatorBundle::vector(int components,
+                                                    const Array<double>& values) const noexcept
+{
+  return VectorToVectorOperator(*lhs_, *row_ptr_, *col_ptr_, components, values);
+}
+
+RectangularOperator SparseOperatorBundle::rectangular(int out_components,
+                                                      int in_components,
+                                                      const Array<double>& values) const noexcept
+{
+  return RectangularOperator(*lhs_, *row_ptr_, *col_ptr_, out_components, in_components, values);
+}
+
+FusedScalarConstraintOperator SparseOperatorBundle::fused_scalar_constraint(
+    int momentum_components,
+    const Array<double>& momentum_values,
+    const Vector<double>& constraint_values) const noexcept
+{
+  return FusedScalarConstraintOperator(*lhs_, *row_ptr_, *col_ptr_, momentum_components,
+                                       momentum_values, constraint_values);
+}
+
+FusedRectangularConstraintOperator SparseOperatorBundle::fused_rectangular_constraint(
+    int momentum_components,
+    int constraint_components,
+    const Array<double>& momentum_values,
+    const Array<double>& constraint_values) const noexcept
+{
+  return FusedRectangularConstraintOperator(*lhs_, *row_ptr_, *col_ptr_,
+                                            momentum_components, constraint_components,
+                                            momentum_values, constraint_values);
+}
+
+}  // namespace fe_fsi_linear_solver::distributed_sparse_operator
+
+namespace spar_mul {
+
+void fsils_spar_mul_ss(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, const Vector<double>& K,
+    const Vector<double>& U, Vector<double>& KU)
+{
+  const auto ops = fe_fsi_linear_solver::distributed_sparse_operator::SparseOperatorBundle(lhs, rowPtr, colPtr);
+  ops.scalar(K).apply(fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_input(U),
+                      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(KU));
+}
+
+void fsils_spar_mul_sv(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, const int dof, const Array<double>& K,
+    const Vector<double>& U, Array<double>& KU)
+{
+  const auto ops = fe_fsi_linear_solver::distributed_sparse_operator::SparseOperatorBundle(lhs, rowPtr, colPtr);
+  ops.scalar_to_vector(dof, K).apply(
+      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_input(U),
+      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(dof, KU));
+}
+
+void fsils_spar_mul_vs(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, const int dof, const Array<double>& K,
+    const Array<double>& U, Vector<double>& KU)
+{
+  const auto ops = fe_fsi_linear_solver::distributed_sparse_operator::SparseOperatorBundle(lhs, rowPtr, colPtr);
+  ops.vector_to_scalar(dof, K).apply(
+      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_input(dof, U),
+      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(KU));
+}
+
+void fsils_spar_mul_vv(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, const int dof, const Array<double>& K,
+    const Array<double>& U, Array<double>& KU)
+{
+  const auto ops = fe_fsi_linear_solver::distributed_sparse_operator::SparseOperatorBundle(lhs, rowPtr, colPtr);
+  ops.vector(dof, K).apply(
+      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_input(dof, U),
+      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(dof, KU));
+}
+
+void fsils_spar_mul_sv_ss_fused(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, const int nsd, const Array<double>& G,
+    const Vector<double>& L, const Vector<double>& in_vec,
+    Array<double>& GP, Vector<double>& SP)
+{
+  const auto ops = fe_fsi_linear_solver::distributed_sparse_operator::SparseOperatorBundle(lhs, rowPtr, colPtr);
+  ops.fused_scalar_constraint(nsd, G, L).apply(
+      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_input(in_vec),
+      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(nsd, GP),
+      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(SP));
+}
+
+void fsils_spar_mul_rect(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, int out_dof, int in_dof,
+    const Array<double>& K, const Array<double>& U, Array<double>& KU)
+{
+  const auto ops = fe_fsi_linear_solver::distributed_sparse_operator::SparseOperatorBundle(lhs, rowPtr, colPtr);
+  ops.rectangular(out_dof, in_dof, K).apply(
+      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_input(in_dof, U),
+      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(out_dof, KU));
+}
+
+void fsils_spar_mul_rect_vv_fused(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, int mom_ncomp, int con_ncomp,
+    const Array<double>& G, const Array<double>& L,
+    const Array<double>& P, Array<double>& GP, Array<double>& SP)
+{
+  const auto ops = fe_fsi_linear_solver::distributed_sparse_operator::SparseOperatorBundle(lhs, rowPtr, colPtr);
+  ops.fused_rectangular_constraint(mom_ncomp, con_ncomp, G, L).apply(
+      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_input(con_ncomp, P),
+      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(mom_ncomp, GP),
+      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(con_ncomp, SP));
+}
+
+}  // namespace spar_mul

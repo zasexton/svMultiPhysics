@@ -650,7 +650,7 @@ TEST(BSplineBasis, NURBSWeightsSizeMismatchThrows) {
     const int degree = 2;
     auto knots = make_open_uniform_knots(degree, /*num_basis=*/5);
     std::vector<Real> bad_weights = {Real(1), Real(1)}; // wrong size
-    EXPECT_THROW(BSplineBasis(degree, knots, bad_weights), svmp::FE::FEException);
+    EXPECT_THROW(BSplineBasis(degree, knots, bad_weights), svmp::FE::basis::BasisConfigurationException);
 }
 
 TEST(BSplineBasis, DegreeZeroBehavior) {

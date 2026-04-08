@@ -161,11 +161,11 @@ SpectralBasis::SpectralBasis(ElementType type, int order)
         build_simplex_nodes_tetrahedron();
         build_inverse_vandermonde();
     } else if (is_wedge(element_type_) || is_pyramid(element_type_)) {
-        throw FEException("SpectralBasis currently supports only line/quad/hex/triangle/tet elements",
-                          __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        throw NotImplementedException("SpectralBasis currently supports only line/quad/hex/triangle/tet elements",
+                                      __FILE__, __LINE__, __func__);
     } else {
-        throw FEException("SpectralBasis: unsupported element type",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisElementCompatibilityException("SpectralBasis: unsupported element type",
+                                                 __FILE__, __LINE__, __func__);
     }
 }
 
@@ -495,8 +495,8 @@ void SpectralBasis::build_inverse_vandermonde() {
 
         // Invert
         if (!invert_matrix(V, n)) {
-            throw FEException("SpectralBasis: Vandermonde matrix is singular for triangle",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw BasisConstructionException("SpectralBasis: Vandermonde matrix is singular for triangle",
+                                             __FILE__, __LINE__, __func__);
         }
         inv_vandermonde_ = std::move(V);
 
@@ -525,8 +525,8 @@ void SpectralBasis::build_inverse_vandermonde() {
         }
 
         if (!invert_matrix(V, n)) {
-            throw FEException("SpectralBasis: Vandermonde matrix is singular for tetrahedron",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            throw BasisConstructionException("SpectralBasis: Vandermonde matrix is singular for tetrahedron",
+                                             __FILE__, __LINE__, __func__);
         }
         inv_vandermonde_ = std::move(V);
     }

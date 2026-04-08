@@ -32,11 +32,18 @@
 #define FSI_LINEAR_SOLVER_BICGS_H
 
 #include "fils_struct.hpp"
+#include "distributed_solver_bundles.h"
 
 namespace bicgs {
 
+void bicgsv(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearSystem& system,
+            fe_fsi_linear_solver::FSILS_subLsType& ls, Array<double>& R);
+
 void bicgsv(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
             const Array<double>& K, Array<double>& R);
+
+void bicgss(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinearSystem& system,
+            fe_fsi_linear_solver::FSILS_subLsType& ls, Vector<double>& R);
 
 void bicgss(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls,
             const Vector<double>& K, Vector<double>& R);
@@ -45,6 +52,11 @@ void bicgss(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSIL
 void reset_schur_cache(fe_fsi_linear_solver::FSILS_subLsType& ls);
 
 // NEW: VMS compatible Asymmetric Schur Complement Solver
+void schur(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarBlockSchurSystem& system,
+           fe_fsi_linear_solver::FSILS_subLsType& ls,
+           fe_fsi_linear_solver::FSILS_subLsType& momentum_ls,
+           Vector<double>& R);
+
 void schur(fe_fsi_linear_solver::FSILS_lhsType& lhs,
            fe_fsi_linear_solver::FSILS_subLsType& ls,
            fe_fsi_linear_solver::FSILS_subLsType& momentum_ls,
@@ -56,6 +68,10 @@ void schur(fe_fsi_linear_solver::FSILS_lhsType& lhs,
 /// BlockSchur configuration. This exposes the algebraic Schur model for use in
 /// higher-level full-system Krylov methods while keeping the exact Schur solve
 /// logic in schur()/schur_mc().
+void schur_precondition(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarBlockSchurSystem& system,
+                        fe_fsi_linear_solver::FSILS_subLsType& ls,
+                        Vector<double>& R);
+
 void schur_precondition(fe_fsi_linear_solver::FSILS_lhsType& lhs,
                         fe_fsi_linear_solver::FSILS_subLsType& ls,
                         const int nsd,
@@ -66,12 +82,21 @@ void schur_precondition(fe_fsi_linear_solver::FSILS_lhsType& lhs,
 /// Solves (L - D*H*G) P = R where the constraint has con_ncomp components.
 /// D(con_ncomp*mom_ncomp, nnz), G(mom_ncomp*con_ncomp, nnz), L(con_ncomp*con_ncomp, nnz).
 /// R(con_ncomp, nNo) is both the RHS input and solution output.
+void schur_mc(const fe_fsi_linear_solver::distributed_solver_bundles::MultiConstraintBlockSchurSystem& system,
+              fe_fsi_linear_solver::FSILS_subLsType& ls,
+              fe_fsi_linear_solver::FSILS_subLsType& momentum_ls,
+              Array<double>& R);
+
 void schur_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
               fe_fsi_linear_solver::FSILS_subLsType& ls,
               fe_fsi_linear_solver::FSILS_subLsType& momentum_ls,
               int mom_ncomp, int con_ncomp,
               const Array<double>& K, const Array<double>& D, const Array<double>& G,
               const Array<double>& L, Array<double>& R);
+
+void schur_precondition_mc(const fe_fsi_linear_solver::distributed_solver_bundles::MultiConstraintBlockSchurSystem& system,
+                           fe_fsi_linear_solver::FSILS_subLsType& ls,
+                           Array<double>& R);
 
 void schur_precondition_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
                            fe_fsi_linear_solver::FSILS_subLsType& ls,
