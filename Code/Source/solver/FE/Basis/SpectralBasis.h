@@ -18,9 +18,9 @@
  * - Hexahedron
  * - Triangle
  * - Tetrahedron
- *
- * Wedge and pyramid spectral bases are intentionally not implemented in the
- * current module.
+ * - Wedge (triangle spectral face tensorized with 1D GLL)
+ * - Pyramid (spectral face-compatible nodal set over the standard rational
+ *   pyramid modal space)
  */
 
 #include "BasisFunction.h"
@@ -43,6 +43,7 @@ public:
     std::size_t size() const noexcept override { return size_; }
 
     const std::vector<Real>& nodes_1d() const noexcept { return nodes_1d_; }
+    const std::vector<math::Vector<Real, 3>>& interpolation_nodes() const noexcept { return simplex_nodes_; }
 
     void evaluate_values(const math::Vector<Real, 3>& xi,
                          std::vector<Real>& values) const override;
@@ -53,15 +54,26 @@ public:
     bool is_simplex() const noexcept { return is_simplex_; }
 
 private:
+    struct PyramidModalTerm {
+        int px{0};
+        int py{0};
+        int pz{0};
+        int denom_power{0};
+    };
+
     ElementType element_type_;
     int dimension_;
     int order_;
     std::size_t size_;
     bool is_simplex_{false};
+    bool is_wedge_tensor_product_{false};
+    bool is_pyramid_modal_{false};
 
     // Tensor-product (line/quad/hex) members
     std::vector<Real> nodes_1d_;
     std::vector<Real> barycentric_weights_;
+    std::shared_ptr<SpectralBasis> face_basis_;
+    std::shared_ptr<SpectralBasis> axis_basis_;
 
     void build_nodes();
     std::vector<Real> eval_1d(Real x) const;
@@ -70,9 +82,11 @@ private:
     // Simplex (triangle/tet) members -- Warp & Blend nodes + inverse Vandermonde
     std::vector<math::Vector<Real, 3>> simplex_nodes_;
     std::vector<Real> inv_vandermonde_;  // row-major [size_ x size_]
+    std::vector<PyramidModalTerm> pyramid_modal_terms_;
 
     void build_simplex_nodes_triangle();
     void build_simplex_nodes_tetrahedron();
+    void build_pyramid_nodes();
     void build_inverse_vandermonde();
 };
 

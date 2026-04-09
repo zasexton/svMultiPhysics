@@ -715,6 +715,13 @@ TEST(BasisGradients, BernsteinTriangleAnalyticalMatchesNumericalAtMultiplePoints
     }
 }
 
+TEST(BasisGradients, BernsteinTetraAnalyticalMatchesNumericalAtMultiplePoints) {
+    BernsteinBasis basis(ElementType::Tetra4, 3);
+    for (const auto& xi : sample_points_for(ElementType::Tetra4)) {
+        expect_gradients_match_numerical(basis, xi, Real(2e-5));
+    }
+}
+
 TEST(BasisGradients, BernsteinWedgeAnalyticalMatchesNumericalAtMultiplePoints) {
     BernsteinBasis basis(ElementType::Wedge6, 2);
     for (const auto& xi : sample_points_for(ElementType::Wedge6)) {
@@ -733,12 +740,12 @@ TEST(BasisGradients, GradientsSumToZeroForPartitionOfUnity) {
     // Test that analytical gradients sum to zero (partition of unity property)
     // Note: HierarchicalBasis uses orthogonal polynomials (Legendre, Dubiner, Proriol)
     // which do NOT satisfy partition of unity, so we only test BernsteinBasis here.
-    // BernsteinBasis does not support tetrahedra, so we exclude Tetra4.
     const std::vector<std::pair<ElementType, int>> cases = {
         {ElementType::Line2, 3},
         {ElementType::Quad4, 2},
         {ElementType::Hex8, 2},
         {ElementType::Triangle3, 3},
+        {ElementType::Tetra4, 3},
         {ElementType::Wedge6, 2}
     };
 

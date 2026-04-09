@@ -594,7 +594,7 @@ public:
 | `LagrangeElement` | Standard Lagrange finite elements |
 | `SpectralElement` | Spectral elements with GLL nodes |
 | `DiscontinuousElement` | DG elements (no inter-element continuity) |
-| `IsogeometricElement` | NURBS-based isogeometric elements |
+| `GeneralBasisElement` | Generic externally supplied basis-backed element |
 | `ReferenceElement` | Generic reference element wrapper |
 
 #### ElementFactory (`Elements/ElementFactory.h`)
@@ -602,18 +602,30 @@ public:
 ```cpp
 namespace svmp::FE::elements {
 
+struct ElementRequest {
+    ElementType element_type{ElementType::Unknown};
+    BasisType basis_type{BasisType::Lagrange};
+    FieldType field_type{FieldType::Scalar};
+    Continuity continuity{Continuity::C0};
+    std::optional<int> order{};
+    std::vector<Real> knot_vector{};
+    std::vector<Real> weights{};
+    std::vector<int> axis_orders{};
+    std::vector<std::vector<Real>> axis_knot_vectors{};
+    std::vector<std::vector<Real>> axis_weights{};
+    std::vector<int> tensor_extents{};
+    std::string custom_id{};
+};
+
 class ElementFactory {
 public:
-    static std::shared_ptr<Element> create(ElementType type,
-                                            BasisType basis,
-                                            int order,
-                                            int quadrature_order = -1);
-    static std::shared_ptr<Element> createLagrange(ElementType type, int order);
-    static std::shared_ptr<Element> createDG(ElementType type, int order);
-    static std::shared_ptr<Element> createSpectral(ElementType type, int order);
+    static std::shared_ptr<Element> create(const ElementRequest& req);
 };
 }
 ```
+
+Order-bearing request paths provide `order`; intrinsic-order families such as
+`BasisType::Bubble` omit it and let the topology define the basis degree.
 
 ---
 
@@ -691,7 +703,7 @@ enum class SpaceType : std::uint8_t {
     Composite,    // Composite of arbitrary spaces
     Enriched,     // XFEM-style enriched
     Adaptive,     // p-adaptive refinement
-    Isogeometric  // NURBS-based
+    GenericBasis  // Generic basis-backed wrapper
 };
 
 class FunctionSpace {
@@ -739,7 +751,12 @@ public:
 | `MortarSpace` | Lagrange multiplier space for mortar methods |
 | `EnrichedSpace` | Enriched with bubble functions, partition of unity |
 | `AdaptiveSpace` | p-adaptive (variable polynomial order) |
-| `IsogeometricSpace` | NURBS/IGA space |
+| `GenericBasisSpace` | Generic basis-backed space wrapper |
+
+`SpaceFactory` supports the core named spaces through
+`create(SpaceType, ElementType, int)` and request-driven generic-basis
+wrappers through `create(const SpaceRequest&)`, where `SpaceRequest` embeds an
+`elements::ElementRequest`.
 
 #### Supporting Classes
 

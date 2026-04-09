@@ -25,8 +25,9 @@
 #include "Spaces/HCurlSpace.h"
 #include "Spaces/HDivSpace.h"
 #include "Spaces/ProductSpace.h"
-#include "Spaces/IsogeometricSpace.h"
+#include "Spaces/GenericBasisSpace.h"
 #include "Spaces/C1Space.h"
+#include "Elements/ElementFactory.h"
 #include <memory>
 
 namespace svmp {
@@ -36,12 +37,20 @@ class IMeshAccess;
 } // namespace assembly
 namespace spaces {
 
+struct SpaceRequest {
+    SpaceType space_type{SpaceType::H1};
+    elements::ElementRequest element{};
+};
+
 class SpaceFactory {
 public:
     /// Generic factory for core scalar/vector spaces
     static std::shared_ptr<FunctionSpace> create(SpaceType type,
                                                  ElementType element_type,
                                                  int order);
+
+    /// Request-driven factory path parallel to ElementFactory::create(...)
+    static std::shared_ptr<FunctionSpace> create(const SpaceRequest& req);
 
     static std::shared_ptr<H1Space> create_h1(ElementType element_type,
                                               int order) {
@@ -73,13 +82,13 @@ public:
                                                           int order,
                                                           int components);
 
-    /// Factory for isogeometric spaces from external basis/quadrature
-    static std::shared_ptr<IsogeometricSpace> create_isogeometric(
+    /// Factory for generic basis-backed spaces from external basis/quadrature
+    static std::shared_ptr<GenericBasisSpace> create_generic_basis(
         std::shared_ptr<basis::BasisFunction> basis,
         std::shared_ptr<const quadrature::QuadratureRule> quadrature,
         FieldType field_type = FieldType::Scalar,
         Continuity continuity = Continuity::C0) {
-        return std::make_shared<IsogeometricSpace>(
+        return std::make_shared<GenericBasisSpace>(
             std::move(basis), std::move(quadrature), field_type, continuity);
     }
 };
@@ -128,6 +137,11 @@ inline std::shared_ptr<FunctionSpace> Space(SpaceType type,
                  "Space(SpaceType,...): components does not match intrinsic value dimension");
     }
     return base;
+}
+
+inline std::shared_ptr<FunctionSpace> Space(const SpaceRequest& req)
+{
+    return SpaceFactory::create(req);
 }
 
 /**

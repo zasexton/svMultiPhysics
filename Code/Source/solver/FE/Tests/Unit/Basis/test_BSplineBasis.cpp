@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "FE/Basis/BSplineBasis.h"
+#include "FE/Basis/NURBSTensorBasis.h"
 #include "FE/Basis/TensorBasis.h"
 
 #include <cmath>
@@ -611,6 +612,102 @@ TEST(BSplineBasis, NURBSUniformWeightScalingLeavesValuesAndGradientsInvariant) {
     }
 }
 
+TEST(BSplineBasis, NURBSTensorQuadPartitionOfUnityAndScalingInvariance) {
+    const BSplineBasis bx(2, {Real(0), Real(0), Real(0), Real(0.45), Real(1), Real(1), Real(1)});
+    const BSplineBasis by(1, {Real(0), Real(0), Real(0.25), Real(0.75), Real(1), Real(1)});
+    const std::vector<Real> weights = {
+        Real(1.0), Real(0.9), Real(1.2), Real(1.1),
+        Real(0.8), Real(1.3), Real(1.6), Real(0.95),
+        Real(1.4), Real(0.7), Real(1.05), Real(1.2),
+        Real(0.85), Real(1.1), Real(0.92), Real(1.5),
+    };
+    std::vector<Real> scaled_weights = weights;
+    for (Real& weight : scaled_weights) {
+        weight *= Real(4.25);
+    }
+
+    const NURBSTensorBasis basis(bx, by, weights, {4, 4});
+    const NURBSTensorBasis scaled(bx, by, scaled_weights, {4, 4});
+
+    const math::Vector<Real, 3> points[] = {
+        {Real(-0.8), Real(-0.6), Real(0)},
+        {Real(-0.2), Real(0.1), Real(0)},
+        {Real(0.65), Real(0.75), Real(0)},
+    };
+
+    for (const auto& xi : points) {
+        expect_partition_of_unity_and_finite(basis, xi);
+
+        std::vector<Real> values, scaled_values;
+        std::vector<Gradient> grads, scaled_grads;
+        basis.evaluate_values(xi, values);
+        scaled.evaluate_values(xi, scaled_values);
+        basis.evaluate_gradients(xi, grads);
+        scaled.evaluate_gradients(xi, scaled_grads);
+
+        ASSERT_EQ(values.size(), scaled_values.size());
+        ASSERT_EQ(grads.size(), scaled_grads.size());
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            EXPECT_NEAR(values[i], scaled_values[i], 1e-13);
+            EXPECT_NEAR(grads[i][0], scaled_grads[i][0], 1e-11);
+            EXPECT_NEAR(grads[i][1], scaled_grads[i][1], 1e-11);
+        }
+    }
+}
+
+TEST(BSplineBasis, NURBSTensorQuadGradientsMatchFiniteDifference) {
+    const BSplineBasis bx(2, {Real(0), Real(0), Real(0), Real(0.45), Real(1), Real(1), Real(1)});
+    const BSplineBasis by(1, {Real(0), Real(0), Real(0.25), Real(0.75), Real(1), Real(1)});
+    const NURBSTensorBasis basis(
+        bx,
+        by,
+        {
+            Real(1.0), Real(0.9), Real(1.2), Real(1.1),
+            Real(0.8), Real(1.3), Real(1.6), Real(0.95),
+            Real(1.4), Real(0.7), Real(1.05), Real(1.2),
+            Real(0.85), Real(1.1), Real(0.92), Real(1.5),
+        },
+        {4, 4});
+
+    const math::Vector<Real, 3> points[] = {
+        {Real(-0.75), Real(-0.55), Real(0)},
+        {Real(-0.1), Real(0.2), Real(0)},
+        {Real(0.72), Real(0.68), Real(0)},
+    };
+
+    for (const auto& xi : points) {
+        expect_partition_of_unity_and_finite(basis, xi, Real(2e-12));
+        expect_gradients_match_numerical(basis, xi, Real(7e-5));
+    }
+}
+
+TEST(BSplineBasis, NURBSTensorHexGradientsMatchFiniteDifference) {
+    const BSplineBasis bx(1, {Real(0), Real(0), Real(0.2), Real(0.8), Real(1), Real(1)});
+    const BSplineBasis by(2, {Real(0), Real(0), Real(0), Real(0.4), Real(1), Real(1), Real(1)});
+    const BSplineBasis bz(1, {Real(0), Real(0), Real(0.35), Real(0.7), Real(1), Real(1)});
+    std::vector<Real> weights;
+    weights.reserve(64);
+    for (int k = 0; k < 4; ++k) {
+        for (int j = 0; j < 4; ++j) {
+            for (int i = 0; i < 4; ++i) {
+                weights.push_back(Real(0.8) + Real(0.1) * Real((i + 2 * j + 3 * k) % 7));
+            }
+        }
+    }
+
+    const NURBSTensorBasis basis(bx, by, bz, weights, {4, 4, 4});
+    const math::Vector<Real, 3> points[] = {
+        {Real(-0.8), Real(-0.55), Real(-0.35)},
+        {Real(-0.1), Real(0.2), Real(0.15)},
+        {Real(0.72), Real(0.68), Real(0.55)},
+    };
+
+    for (const auto& xi : points) {
+        expect_partition_of_unity_and_finite(basis, xi, Real(2e-12));
+        expect_gradients_match_numerical(basis, xi, Real(9e-5));
+    }
+}
+
 TEST(BSplineBasis, AnisotropicTensorQuadGradientsMatchFiniteDifference) {
     const BSplineBasis bx(2, {Real(0), Real(0), Real(0), Real(0.35), Real(1), Real(1), Real(1)});
     const BSplineBasis by(1, {Real(0), Real(0), Real(0.2), Real(0.8), Real(1), Real(1)});
@@ -651,6 +748,13 @@ TEST(BSplineBasis, NURBSWeightsSizeMismatchThrows) {
     auto knots = make_open_uniform_knots(degree, /*num_basis=*/5);
     std::vector<Real> bad_weights = {Real(1), Real(1)}; // wrong size
     EXPECT_THROW(BSplineBasis(degree, knots, bad_weights), svmp::FE::basis::BasisConfigurationException);
+}
+
+TEST(BSplineBasis, NURBSTensorWeightsSizeMismatchThrows) {
+    const BSplineBasis bx(1, {Real(0), Real(0), Real(0.25), Real(0.75), Real(1), Real(1)});
+    const BSplineBasis by(1, {Real(0), Real(0), Real(0.25), Real(0.75), Real(1), Real(1)});
+    EXPECT_THROW(NURBSTensorBasis(bx, by, {Real(1), Real(2)}),
+                 svmp::FE::basis::BasisConfigurationException);
 }
 
 TEST(BSplineBasis, DegreeZeroBehavior) {

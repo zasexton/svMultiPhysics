@@ -91,6 +91,18 @@ void expect_values_and_gradients_finite(const std::vector<Real>& values,
     }
 }
 
+bool same_point(const Point& a, const Point& b, Real tol = Real(1e-10)) {
+    return std::abs(a[0] - b[0]) <= tol &&
+           std::abs(a[1] - b[1]) <= tol &&
+           std::abs(a[2] - b[2]) <= tol;
+}
+
+Point map_triangle_to_pyramid_front(const Point& tri_node) {
+    return {tri_node[1] - tri_node[0],
+            -tri_node[0] - tri_node[1],
+            Real(1) - tri_node[0] - tri_node[1]};
+}
+
 } // namespace
 
 TEST(HierarchicalBasis, LegendreOrthogonalityOnLine) {
@@ -402,21 +414,111 @@ TEST(SpectralBasis, HexKroneckerAndPartitionOfUnity) {
     EXPECT_NEAR(sum, 1.0, 1e-12);
 }
 
-TEST(SpectralBasis, WedgeAndPyramidSupportContractIsExplicit) {
-    const int order = 2;
-    try {
-        (void)SpectralBasis(ElementType::Wedge6, order);
-        FAIL() << "Expected FEException";
-    } catch (const svmp::FE::FEException& e) {
-        EXPECT_EQ(e.status(), svmp::FE::FEStatus::NotImplemented);
+TEST(SpectralBasis, WedgeKroneckerAndPartitionOfUnity) {
+    const int order = 3;
+    SpectralBasis basis(ElementType::Wedge6, order);
+    const auto& nodes = basis.interpolation_nodes();
+    ASSERT_EQ(nodes.size(), basis.size());
+
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        std::vector<Real> vals;
+        basis.evaluate_values(nodes[i], vals);
+        ASSERT_EQ(vals.size(), basis.size());
+        for (std::size_t j = 0; j < vals.size(); ++j) {
+            EXPECT_NEAR(vals[j], (i == j) ? Real(1) : Real(0), 1e-10)
+                << "i=" << i << ", j=" << j;
+        }
     }
 
-    try {
-        (void)SpectralBasis(ElementType::Pyramid5, order);
-        FAIL() << "Expected FEException";
-    } catch (const svmp::FE::FEException& e) {
-        EXPECT_EQ(e.status(), svmp::FE::FEStatus::NotImplemented);
+    std::vector<Real> vals;
+    basis.evaluate_values({Real(0.2), Real(0.25), Real(0.3)}, vals);
+    EXPECT_NEAR(std::accumulate(vals.begin(), vals.end(), Real(0)), Real(1), 1e-10);
+}
+
+TEST(SpectralBasis, PyramidKroneckerAndPartitionOfUnity) {
+    const int order = 3;
+    SpectralBasis basis(ElementType::Pyramid5, order);
+    const auto& nodes = basis.interpolation_nodes();
+    ASSERT_EQ(nodes.size(), basis.size());
+
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        std::vector<Real> vals;
+        basis.evaluate_values(nodes[i], vals);
+        ASSERT_EQ(vals.size(), basis.size());
+        for (std::size_t j = 0; j < vals.size(); ++j) {
+            EXPECT_NEAR(vals[j], (i == j) ? Real(1) : Real(0), 5e-8)
+                << "i=" << i << ", j=" << j;
+        }
     }
+
+    std::vector<Real> vals;
+    basis.evaluate_values({Real(0.12), Real(-0.08), Real(0.3)}, vals);
+    EXPECT_NEAR(std::accumulate(vals.begin(), vals.end(), Real(0)), Real(1), 1e-9);
+}
+
+TEST(SpectralBasis, WedgeAndPyramidTraceNodesMatchFaceFamilies) {
+    const int order = 3;
+
+    SpectralBasis wedge(ElementType::Wedge6, order);
+    SpectralBasis tri(ElementType::Triangle3, order);
+    std::size_t bottom_count = 0;
+    std::size_t top_count = 0;
+    for (const auto& node : wedge.interpolation_nodes()) {
+        if (std::abs(node[2] + Real(1)) <= Real(1e-12)) {
+            ++bottom_count;
+            const bool found = std::any_of(
+                tri.interpolation_nodes().begin(), tri.interpolation_nodes().end(),
+                [&](const Point& tri_node) {
+                    return same_point(node, {tri_node[0], tri_node[1], Real(-1)});
+                });
+            EXPECT_TRUE(found);
+        }
+        if (std::abs(node[2] - Real(1)) <= Real(1e-12)) {
+            ++top_count;
+        }
+    }
+    EXPECT_EQ(bottom_count, tri.size());
+    EXPECT_EQ(top_count, tri.size());
+
+    SpectralBasis pyramid(ElementType::Pyramid5, order);
+    const auto& gll = pyramid.nodes_1d();
+    std::size_t base_count = 0;
+    for (const auto& node : pyramid.interpolation_nodes()) {
+        if (std::abs(node[2]) <= Real(1e-12)) {
+            ++base_count;
+            const bool x_match = std::any_of(gll.begin(), gll.end(),
+                                             [&](Real gx) { return std::abs(node[0] - gx) <= Real(1e-12); });
+            const bool y_match = std::any_of(gll.begin(), gll.end(),
+                                             [&](Real gy) { return std::abs(node[1] - gy) <= Real(1e-12); });
+            EXPECT_TRUE(x_match);
+            EXPECT_TRUE(y_match);
+        }
+    }
+    EXPECT_EQ(base_count, static_cast<std::size_t>((order + 1) * (order + 1)));
+
+    std::size_t front_count = 0;
+    for (const auto& node : pyramid.interpolation_nodes()) {
+        if (std::abs(node[1] - (node[2] - Real(1))) <= Real(1e-10)) {
+            ++front_count;
+        }
+    }
+    EXPECT_EQ(front_count, tri.size());
+
+    std::size_t front_interior_count = 0;
+    for (const auto& tri_node : tri.interpolation_nodes()) {
+        if (tri_node[0] <= Real(1e-10) ||
+            tri_node[1] <= Real(1e-10) ||
+            tri_node[0] + tri_node[1] >= Real(1) - Real(1e-10)) {
+            continue;
+        }
+        const Point mapped = map_triangle_to_pyramid_front(tri_node);
+        const bool found = std::any_of(
+            pyramid.interpolation_nodes().begin(), pyramid.interpolation_nodes().end(),
+            [&](const Point& node) { return same_point(node, mapped, Real(1e-10)); });
+        EXPECT_TRUE(found);
+        ++front_interior_count;
+    }
+    EXPECT_GT(front_interior_count, 0u);
 }
 
 TEST(SpectralBasis, BoundarySweepMaintainsPartitionAndFiniteGradients) {
@@ -429,6 +531,8 @@ TEST(SpectralBasis, BoundarySweepMaintainsPartitionAndFiniteGradients) {
         {ElementType::Quad4, 4},
         {ElementType::Tetra4, 3},
         {ElementType::Hex8, 3},
+        {ElementType::Wedge6, 3},
+        {ElementType::Pyramid5, 3},
     };
 
     for (const auto& c : cases) {
@@ -544,6 +648,60 @@ TEST(SpectralBasis, GradientsMatchFiniteDifference3D) {
         for (std::size_t i = 0; i < basis.size(); ++i) {
             const Real fd = (vals_p[i] - vals_m[i]) / (Real(2) * eps);
             EXPECT_NEAR(grads[i][static_cast<std::size_t>(d)], fd, 1e-5)
+                << "Basis " << i << ", dim " << d;
+        }
+    }
+}
+
+TEST(SpectralBasis, WedgeGradientMatchesFiniteDifference) {
+    const int order = 3;
+    SpectralBasis basis(ElementType::Wedge6, order);
+    svmp::FE::math::Vector<Real, 3> xi{Real(0.2), Real(0.25), Real(0.2)};
+    const Real eps = Real(1e-6);
+
+    std::vector<Gradient> grads;
+    basis.evaluate_gradients(xi, grads);
+    ASSERT_EQ(grads.size(), basis.size());
+
+    for (int d = 0; d < 3; ++d) {
+        auto xi_p = xi, xi_m = xi;
+        xi_p[static_cast<std::size_t>(d)] += eps;
+        xi_m[static_cast<std::size_t>(d)] -= eps;
+
+        std::vector<Real> vals_p, vals_m;
+        basis.evaluate_values(xi_p, vals_p);
+        basis.evaluate_values(xi_m, vals_m);
+
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            const Real fd = (vals_p[i] - vals_m[i]) / (Real(2) * eps);
+            EXPECT_NEAR(grads[i][static_cast<std::size_t>(d)], fd, 1e-5)
+                << "Basis " << i << ", dim " << d;
+        }
+    }
+}
+
+TEST(SpectralBasis, PyramidGradientMatchesFiniteDifference) {
+    const int order = 2;
+    SpectralBasis basis(ElementType::Pyramid5, order);
+    svmp::FE::math::Vector<Real, 3> xi{Real(0.12), Real(-0.08), Real(0.28)};
+    const Real eps = Real(1e-6);
+
+    std::vector<Gradient> grads;
+    basis.evaluate_gradients(xi, grads);
+    ASSERT_EQ(grads.size(), basis.size());
+
+    for (int d = 0; d < 3; ++d) {
+        auto xi_p = xi, xi_m = xi;
+        xi_p[static_cast<std::size_t>(d)] += eps;
+        xi_m[static_cast<std::size_t>(d)] -= eps;
+
+        std::vector<Real> vals_p, vals_m;
+        basis.evaluate_values(xi_p, vals_p);
+        basis.evaluate_values(xi_m, vals_m);
+
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            const Real fd = (vals_p[i] - vals_m[i]) / (Real(2) * eps);
+            EXPECT_NEAR(grads[i][static_cast<std::size_t>(d)], fd, 2e-4)
                 << "Basis " << i << ", dim " << d;
         }
     }

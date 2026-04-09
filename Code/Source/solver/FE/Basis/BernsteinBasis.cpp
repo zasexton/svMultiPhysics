@@ -22,6 +22,10 @@ bool is_triangle(ElementType t) {
     return t == ElementType::Triangle3 || t == ElementType::Triangle6;
 }
 
+bool is_tetrahedron(ElementType t) {
+    return t == ElementType::Tetra4 || t == ElementType::Tetra10;
+}
+
 bool is_quadrilateral(ElementType t) {
     return t == ElementType::Quad4 || t == ElementType::Quad8 || t == ElementType::Quad9;
 }
@@ -69,6 +73,20 @@ BernsteinBasis::BernsteinBasis(ElementType type, int order)
                 simplex_indices_.push_back({i, j, k, 0});
                 coefficients_.push_back(binomial(order_, i) *
                                         binomial(order_ - i, j));
+            }
+        }
+    } else if (is_tetrahedron(element_type_)) {
+        dimension_ = 3;
+        size_ = static_cast<std::size_t>((order_ + 1) * (order_ + 2) * (order_ + 3) / 6);
+        for (int i = 0; i <= order_; ++i) {
+            for (int j = 0; j <= order_ - i; ++j) {
+                for (int k = 0; k <= order_ - i - j; ++k) {
+                    const int l = order_ - i - j - k;
+                    simplex_indices_.push_back({i, j, k, l});
+                    coefficients_.push_back(binomial(order_, i) *
+                                            binomial(order_ - i, j) *
+                                            binomial(order_ - i - j, k));
+                }
             }
         }
     } else if (is_hexahedron(element_type_)) {
@@ -232,6 +250,24 @@ void BernsteinBasis::evaluate_values(const math::Vector<Real, 3>& xi,
             Real coeff = coefficients_[idx];
             values[idx] = coeff *
                           pow_int(l0, e[0]) * pow_int(l1, e[1]) * pow_int(l2, e[2]);
+        }
+        return;
+    }
+
+    if (is_tetrahedron(element_type_)) {
+        const Real l1 = xi[0];
+        const Real l2 = xi[1];
+        const Real l3 = xi[2];
+        const Real l0 = Real(1) - l1 - l2 - l3;
+
+        for (std::size_t idx = 0; idx < simplex_indices_.size(); ++idx) {
+            const auto& e = simplex_indices_[idx];
+            const Real coeff = coefficients_[idx];
+            values[idx] = coeff *
+                          pow_int(l0, e[0]) *
+                          pow_int(l1, e[1]) *
+                          pow_int(l2, e[2]) *
+                          pow_int(l3, e[3]);
         }
         return;
     }
@@ -487,6 +523,52 @@ void BernsteinBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
             gradients[idx][0] = dB_dl1;
             gradients[idx][1] = dB_dl2;
             gradients[idx][2] = Real(0);
+        }
+        return;
+    }
+
+    if (is_tetrahedron(element_type_)) {
+        const Real l1 = xi[0];
+        const Real l2 = xi[1];
+        const Real l3 = xi[2];
+        const Real l0 = Real(1) - l1 - l2 - l3;
+
+        for (std::size_t idx = 0; idx < simplex_indices_.size(); ++idx) {
+            const auto& e = simplex_indices_[idx];
+            const int ei = e[0];
+            const int ej = e[1];
+            const int ek = e[2];
+            const int el = e[3];
+            const Real coeff = coefficients_[idx];
+
+            const Real l0_pow = pow_int(l0, ei);
+            const Real l1_pow = pow_int(l1, ej);
+            const Real l2_pow = pow_int(l2, ek);
+            const Real l3_pow = pow_int(l3, el);
+
+            Real dB_dx = Real(0);
+            Real dB_dy = Real(0);
+            Real dB_dz = Real(0);
+
+            if (ei > 0) {
+                const Real common = coeff * Real(-ei) * pow_int(l0, ei - 1) * l1_pow * l2_pow * l3_pow;
+                dB_dx += common;
+                dB_dy += common;
+                dB_dz += common;
+            }
+            if (ej > 0) {
+                dB_dx += coeff * l0_pow * Real(ej) * pow_int(l1, ej - 1) * l2_pow * l3_pow;
+            }
+            if (ek > 0) {
+                dB_dy += coeff * l0_pow * l1_pow * Real(ek) * pow_int(l2, ek - 1) * l3_pow;
+            }
+            if (el > 0) {
+                dB_dz += coeff * l0_pow * l1_pow * l2_pow * Real(el) * pow_int(l3, el - 1);
+            }
+
+            gradients[idx][0] = dB_dx;
+            gradients[idx][1] = dB_dy;
+            gradients[idx][2] = dB_dz;
         }
         return;
     }

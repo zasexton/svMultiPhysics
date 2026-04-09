@@ -44,6 +44,13 @@ std::vector<Point> boundary_stress_points_for(ElementType type) {
                 Point{Real(-0.9), Real(0.89), Real(0.86)},
                 Point{Real(0.88), Real(0.9), Real(-0.87)}
             };
+        case ElementType::Tetra4:
+            return {
+                Point{Real(0.02), Real(0.03), Real(0.01)},
+                Point{Real(0.9), Real(0.03), Real(0.02)},
+                Point{Real(0.05), Real(0.82), Real(0.03)},
+                Point{Real(0.08), Real(0.1), Real(0.74)}
+            };
         case ElementType::Wedge6:
             return {
                 Point{Real(0.01), Real(0.01), Real(-0.95)},
@@ -91,6 +98,15 @@ TEST(BernsteinBasis, TrianglePartitionOfUnity) {
     EXPECT_NEAR(sum, 1.0, 1e-12);
 }
 
+TEST(BernsteinBasis, TetraPartitionOfUnity) {
+    BernsteinBasis basis(ElementType::Tetra4, 2);
+    svmp::FE::math::Vector<Real, 3> xi{Real(0.15), Real(0.2), Real(0.25)};
+    std::vector<Real> vals;
+    basis.evaluate_values(xi, vals);
+    double sum = std::accumulate(vals.begin(), vals.end(), 0.0);
+    EXPECT_NEAR(sum, 1.0, 1e-12);
+}
+
 TEST(BernsteinBasis, HexPartitionOfUnity) {
     BernsteinBasis basis(ElementType::Hex8, 2);
     svmp::FE::math::Vector<Real, 3> xi{Real(0.1), Real(-0.2), Real(0.3)};
@@ -126,6 +142,7 @@ TEST(BernsteinBasis, DeterministicBoundarySweepMaintainsPartitionNonnegativeAndF
     } cases[] = {
         {ElementType::Line2, 4},
         {ElementType::Triangle3, 3},
+        {ElementType::Tetra4, 3},
         {ElementType::Quad4, 3},
         {ElementType::Hex8, 2},
         {ElementType::Wedge6, 2},

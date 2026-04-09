@@ -5,12 +5,14 @@
 #include "Physics/Core/EquationModuleRegistry.h"
 #include "Physics/Materials/Fluid/CarreauYasudaViscosity.h"
 
+#include "FE/Core/Logger.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "Mesh/Core/MeshBase.h"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdint>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -56,6 +58,19 @@ bool parse_bool_relaxed(std::string_view raw)
     return false;
   }
   return false;
+}
+
+[[nodiscard]] bool navierStokesTraceEnabled() noexcept
+{
+  const char* env = std::getenv("SVMP_OOP_SOLVER_TRACE");
+  return env != nullptr && env[0] != '\0';
+}
+
+void navierStokesTraceLog(const std::string& message)
+{
+  if (navierStokesTraceEnabled()) {
+    FE_LOG_INFO(message);
+  }
 }
 
 double parse_double(std::string_view raw, std::string_view context)
@@ -756,38 +771,7 @@ MarkerGeometry local_marker_geometry(const svmp::MeshBase& mesh, int boundary_ma
   return out;
 }
 
-MarkerGeometry global_marker_geometry(const svmp::MeshBase& mesh, int boundary_marker)
-{
-  // Use a simple sum + reduction that does not depend on face GIDs.
-  //
-  // Some meshes populate face_gids() with local indices (not globally unique across ranks),
-  // so de-duplicating by face_gid can silently drop unrelated faces and corrupt marker
-  // geometry. A plain reduction is robust; it may double-count ghost faces, but the
-  // centroid/normal are typically unaffected when ghosts mirror owned entities.
-  auto out = local_marker_geometry(mesh, boundary_marker);
-#if FE_HAS_MPI
-  int mpi_initialized = 0;
-  MPI_Initialized(&mpi_initialized);
-  if (mpi_initialized) {
-    double local_area = out.area;
-    double global_area = 0.0;
-    MPI_Allreduce(&local_area, &global_area, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    out.area = global_area;
-
-    const std::array<double, 3> local_center = {out.center_sum.x, out.center_sum.y, out.center_sum.z};
-    const std::array<double, 3> local_normal = {out.normal_sum.x, out.normal_sum.y, out.normal_sum.z};
-    std::array<double, 3> global_center{0.0, 0.0, 0.0};
-    std::array<double, 3> global_normal{0.0, 0.0, 0.0};
-
-    MPI_Allreduce(local_center.data(), global_center.data(), 3, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Allreduce(local_normal.data(), global_normal.data(), 3, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-
-    out.center_sum = Vec3d{global_center[0], global_center[1], global_center[2]};
-    out.normal_sum = Vec3d{global_normal[0], global_normal[1], global_normal[2]};
-  }
-#endif
-  return out;
-}
+MarkerGeometry global_marker_geometry(const svmp::MeshBase& mesh, int boundary_marker);
 
 struct ParabolicProfileData {
   Vec3d center{};
@@ -804,6 +788,246 @@ struct GidPairHash {
   }
 };
 
+struct GidSequenceHash {
+  std::size_t operator()(const std::vector<svmp::gid_t>& values) const noexcept
+  {
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const auto value : values) {
+      const auto mixed = static_cast<std::uint64_t>(std::hash<svmp::gid_t>{}(value));
+      hash ^= mixed + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+    }
+    hash ^= static_cast<std::uint64_t>(values.size()) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+    return static_cast<std::size_t>(hash);
+  }
+};
+
+[[nodiscard]] bool mpiMultiRankActive() noexcept
+{
+#if FE_HAS_MPI
+  int mpi_initialized = 0;
+  MPI_Initialized(&mpi_initialized);
+  if (!mpi_initialized) {
+    return false;
+  }
+
+  int world_size = 1;
+  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  return world_size > 1;
+#else
+  return false;
+#endif
+}
+
+template <std::size_t N>
+struct MarkerFacePayload {
+  std::vector<svmp::gid_t> ordered_vertex_gids{};
+  std::array<double, N> values{};
+};
+
+template <std::size_t N, class PayloadBuilder>
+std::vector<MarkerFacePayload<N>> gather_unique_marker_face_payloads(
+    const svmp::MeshBase& mesh,
+    int boundary_marker,
+    PayloadBuilder&& payload_builder)
+{
+  const bool mpi_active = mpiMultiRankActive();
+  const auto& vgids = mesh.vertex_gids();
+  if (mpi_active && vgids.size() != mesh.n_vertices()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] MPI boundary-face normalization for marker " +
+        std::to_string(boundary_marker) + " requires stable vertex GIDs.");
+  }
+
+  std::vector<MarkerFacePayload<N>> local_payloads;
+  const auto faces = mesh.faces_with_label(static_cast<svmp::label_t>(boundary_marker));
+  local_payloads.reserve(faces.size());
+
+  for (const auto f : faces) {
+    MarkerFacePayload<N> payload;
+    const auto verts = mesh.face_vertices(f);
+    payload.ordered_vertex_gids.reserve(verts.size());
+    for (const auto v : verts) {
+      if (v == svmp::INVALID_INDEX) {
+        continue;
+      }
+      const auto idx = static_cast<std::size_t>(v);
+      if (idx >= mesh.n_vertices()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Physics] Boundary face references an out-of-range vertex while processing marker " +
+            std::to_string(boundary_marker) + ".");
+      }
+      const auto gid = (vgids.size() == mesh.n_vertices())
+                           ? vgids[idx]
+                           : static_cast<svmp::gid_t>(v);
+      payload.ordered_vertex_gids.push_back(gid);
+    }
+    if (payload.ordered_vertex_gids.size() < 2u) {
+      continue;
+    }
+    payload_builder(f, payload.values);
+    local_payloads.push_back(std::move(payload));
+  }
+
+  auto deduplicate = [](std::vector<MarkerFacePayload<N>> payloads) {
+    std::unordered_set<std::vector<svmp::gid_t>, GidSequenceHash> seen;
+    std::vector<MarkerFacePayload<N>> unique;
+    unique.reserve(payloads.size());
+    for (auto& payload : payloads) {
+      auto key = payload.ordered_vertex_gids;
+      std::sort(key.begin(), key.end());
+      key.erase(std::unique(key.begin(), key.end()), key.end());
+      if (key.size() < 2u) {
+        continue;
+      }
+      if (!seen.emplace(std::move(key)).second) {
+        continue;
+      }
+      unique.push_back(std::move(payload));
+    }
+    return unique;
+  };
+
+  if (!mpi_active) {
+    return deduplicate(std::move(local_payloads));
+  }
+
+#if FE_HAS_MPI
+  int world_size = 1;
+  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+
+  const int local_face_count = static_cast<int>(local_payloads.size());
+  std::vector<int> face_counts(static_cast<std::size_t>(world_size), 0);
+  MPI_Allgather(&local_face_count, 1, MPI_INT, face_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+
+  std::vector<int> face_displs(static_cast<std::size_t>(world_size), 0);
+  int total_faces = 0;
+  for (int r = 0; r < world_size; ++r) {
+    face_displs[static_cast<std::size_t>(r)] = total_faces;
+    total_faces += face_counts[static_cast<std::size_t>(r)];
+  }
+
+  std::vector<int> local_gid_sizes;
+  local_gid_sizes.reserve(local_payloads.size());
+  std::vector<svmp::gid_t> local_gid_data;
+  for (const auto& payload : local_payloads) {
+    local_gid_sizes.push_back(static_cast<int>(payload.ordered_vertex_gids.size()));
+    local_gid_data.insert(local_gid_data.end(),
+                          payload.ordered_vertex_gids.begin(),
+                          payload.ordered_vertex_gids.end());
+  }
+
+  const int local_gid_count = static_cast<int>(local_gid_data.size());
+  std::vector<int> gid_counts(static_cast<std::size_t>(world_size), 0);
+  MPI_Allgather(&local_gid_count, 1, MPI_INT, gid_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+
+  std::vector<int> gid_displs(static_cast<std::size_t>(world_size), 0);
+  int total_gid_count = 0;
+  for (int r = 0; r < world_size; ++r) {
+    gid_displs[static_cast<std::size_t>(r)] = total_gid_count;
+    total_gid_count += gid_counts[static_cast<std::size_t>(r)];
+  }
+
+  std::vector<int> all_gid_sizes(static_cast<std::size_t>(total_faces), 0);
+  MPI_Allgatherv(local_gid_sizes.data(),
+                 local_face_count,
+                 MPI_INT,
+                 all_gid_sizes.data(),
+                 face_counts.data(),
+                 face_displs.data(),
+                 MPI_INT,
+                 MPI_COMM_WORLD);
+
+  std::vector<svmp::gid_t> all_gid_data(static_cast<std::size_t>(total_gid_count), svmp::gid_t{0});
+  MPI_Allgatherv(local_gid_data.data(),
+                 local_gid_count,
+                 MPI_INT64_T,
+                 all_gid_data.data(),
+                 gid_counts.data(),
+                 gid_displs.data(),
+                 MPI_INT64_T,
+                 MPI_COMM_WORLD);
+
+  std::vector<double> local_values;
+  local_values.reserve(local_payloads.size() * N);
+  for (const auto& payload : local_payloads) {
+    local_values.insert(local_values.end(), payload.values.begin(), payload.values.end());
+  }
+
+  std::vector<int> value_counts(static_cast<std::size_t>(world_size), 0);
+  std::vector<int> value_displs(static_cast<std::size_t>(world_size), 0);
+  int total_value_count = 0;
+  for (int r = 0; r < world_size; ++r) {
+    value_displs[static_cast<std::size_t>(r)] = total_value_count;
+    value_counts[static_cast<std::size_t>(r)] = face_counts[static_cast<std::size_t>(r)] * static_cast<int>(N);
+    total_value_count += value_counts[static_cast<std::size_t>(r)];
+  }
+
+  std::vector<double> all_values(static_cast<std::size_t>(total_value_count), 0.0);
+  MPI_Allgatherv(local_values.data(),
+                 static_cast<int>(local_values.size()),
+                 MPI_DOUBLE,
+                 all_values.data(),
+                 value_counts.data(),
+                 value_displs.data(),
+                 MPI_DOUBLE,
+                 MPI_COMM_WORLD);
+
+  std::vector<MarkerFacePayload<N>> gathered;
+  gathered.reserve(static_cast<std::size_t>(total_faces));
+  std::size_t gid_offset = 0u;
+  for (int i = 0; i < total_faces; ++i) {
+    const auto count = static_cast<std::size_t>(all_gid_sizes[static_cast<std::size_t>(i)]);
+    if (gid_offset + count > all_gid_data.size()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Corrupt MPI face-GID gather while processing marker " +
+          std::to_string(boundary_marker) + ".");
+    }
+    MarkerFacePayload<N> payload;
+    payload.ordered_vertex_gids.assign(all_gid_data.begin() + static_cast<std::ptrdiff_t>(gid_offset),
+                                       all_gid_data.begin() + static_cast<std::ptrdiff_t>(gid_offset + count));
+    gid_offset += count;
+
+    const std::size_t value_offset = static_cast<std::size_t>(i) * N;
+    if (value_offset + N > all_values.size()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Corrupt MPI face-payload gather while processing marker " +
+          std::to_string(boundary_marker) + ".");
+    }
+    std::copy_n(all_values.begin() + static_cast<std::ptrdiff_t>(value_offset), N, payload.values.begin());
+    gathered.push_back(std::move(payload));
+  }
+
+  return deduplicate(std::move(gathered));
+#else
+  return deduplicate(std::move(local_payloads));
+#endif
+}
+
+MarkerGeometry global_marker_geometry(const svmp::MeshBase& mesh, int boundary_marker)
+{
+  MarkerGeometry out{};
+  const auto payloads = gather_unique_marker_face_payloads<7>(
+      mesh, boundary_marker,
+      [&](svmp::index_t f, std::array<double, 7>& values) {
+        const double a = static_cast<double>(mesh.face_area(f));
+        const auto c = to_vec3(mesh.face_center(f));
+        const auto n = to_vec3(mesh.face_normal(f));
+        values[0] = a;
+        values[1] = a * c.x;
+        values[2] = a * c.y;
+        values[3] = a * c.z;
+        values[4] = a * n.x;
+        values[5] = a * n.y;
+        values[6] = a * n.z;
+      });
+  for (const auto& payload : payloads) {
+    out.area += payload.values[0];
+    out.center_sum = out.center_sum + Vec3d{payload.values[1], payload.values[2], payload.values[3]};
+    out.normal_sum = out.normal_sum + Vec3d{payload.values[4], payload.values[5], payload.values[6]};
+  }
+  return out;
+}
+
 std::vector<std::pair<svmp::gid_t, Vec3d>> gather_perimeter_vertex_coords(const svmp::MeshBase& mesh,
                                                                           int boundary_marker)
 {
@@ -813,36 +1037,18 @@ std::vector<std::pair<svmp::gid_t, Vec3d>> gather_perimeter_vertex_coords(const 
   }
 
   // Determine the perimeter of the marker surface as the set of boundary edges of the
-  // marker patch itself (edges that appear only once among marker faces).
-  //
-  // This is robust in MPI even when boundary labels are not synchronized to ghost faces.
-  const auto marker_faces = mesh.faces_with_label(static_cast<svmp::label_t>(boundary_marker));
+  // marker patch itself (edges that appear only once among unique marker faces).
+  const auto marker_faces = gather_unique_marker_face_payloads<1>(
+      mesh, boundary_marker,
+      [](svmp::index_t /*face*/, std::array<double, 1>& values) {
+        values[0] = 0.0;
+      });
 
   std::vector<svmp::gid_t> local_edge_gids;
   local_edge_gids.reserve(marker_faces.size() * 6u);
 
-  for (const auto f : marker_faces) {
-    const auto verts = mesh.face_vertices(f);
-    if (verts.size() < 2u) {
-      continue;
-    }
-
-    std::vector<svmp::gid_t> face_vgids;
-    face_vgids.reserve(verts.size());
-    for (const auto v : verts) {
-      if (v == svmp::INVALID_INDEX) {
-        continue;
-      }
-      const auto idx = static_cast<std::size_t>(v);
-      if (idx >= vgids.size()) {
-        continue;
-      }
-      face_vgids.push_back(vgids[idx]);
-    }
-    if (face_vgids.size() < 2u) {
-      continue;
-    }
-
+  for (const auto& face : marker_faces) {
+    const auto& face_vgids = face.ordered_vertex_gids;
     for (std::size_t i = 0; i < face_vgids.size(); ++i) {
       svmp::gid_t a = face_vgids[i];
       svmp::gid_t b = face_vgids[(i + 1u) % face_vgids.size()];
@@ -857,39 +1063,7 @@ std::vector<std::pair<svmp::gid_t, Vec3d>> gather_perimeter_vertex_coords(const 
     }
   }
 
-  std::vector<svmp::gid_t> all_edge_gids = local_edge_gids;
-  bool mpi_active = false;
-
-#if FE_HAS_MPI
-  int mpi_initialized = 0;
-  MPI_Initialized(&mpi_initialized);
-  mpi_active = (mpi_initialized != 0);
-  if (mpi_active) {
-    int comm_size = 1;
-    MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
-
-    const int local_n = static_cast<int>(local_edge_gids.size());
-    std::vector<int> counts(comm_size, 0);
-    MPI_Allgather(&local_n, 1, MPI_INT, counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
-
-    std::vector<int> displs(comm_size, 0);
-    int total = 0;
-    for (int i = 0; i < comm_size; ++i) {
-      displs[i] = total;
-      total += counts[i];
-    }
-
-    all_edge_gids.assign(static_cast<std::size_t>(total), svmp::gid_t{0});
-    MPI_Allgatherv(local_edge_gids.data(),
-                   local_n,
-                   MPI_INT64_T,
-                   all_edge_gids.data(),
-                   counts.data(),
-                   displs.data(),
-                   MPI_INT64_T,
-                   MPI_COMM_WORLD);
-  }
-#endif
+  const auto& all_edge_gids = local_edge_gids;
 
   std::unordered_map<std::pair<svmp::gid_t, svmp::gid_t>, int, GidPairHash> edge_counts;
   edge_counts.reserve(all_edge_gids.size() / 2u);
@@ -932,46 +1106,47 @@ std::vector<std::pair<svmp::gid_t, Vec3d>> gather_perimeter_vertex_coords(const 
   std::vector<double> all_xyz = local_xyz;
 
 #if FE_HAS_MPI
-  if (mpi_active) {
-    int comm_size = 1;
-    MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
+  if (mpiMultiRankActive()) {
+    int world_size = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    const int local_n = static_cast<int>(local_gids.size());
-    std::vector<int> counts(comm_size, 0);
-    MPI_Allgather(&local_n, 1, MPI_INT, counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    const int local_gid_count = static_cast<int>(local_gids.size());
+    std::vector<int> gid_counts(static_cast<std::size_t>(world_size), 0);
+    MPI_Allgather(&local_gid_count, 1, MPI_INT, gid_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
 
-    std::vector<int> displs(comm_size, 0);
-    int total = 0;
-    for (int i = 0; i < comm_size; ++i) {
-      displs[i] = total;
-      total += counts[i];
+    std::vector<int> gid_displs(static_cast<std::size_t>(world_size), 0);
+    int total_gid_count = 0;
+    for (int r = 0; r < world_size; ++r) {
+      gid_displs[static_cast<std::size_t>(r)] = total_gid_count;
+      total_gid_count += gid_counts[static_cast<std::size_t>(r)];
     }
 
-    all_gids.assign(static_cast<std::size_t>(total), svmp::gid_t{0});
+    all_gids.assign(static_cast<std::size_t>(total_gid_count), svmp::gid_t{0});
     MPI_Allgatherv(local_gids.data(),
-                   local_n,
+                   local_gid_count,
                    MPI_INT64_T,
                    all_gids.data(),
-                   counts.data(),
-                   displs.data(),
+                   gid_counts.data(),
+                   gid_displs.data(),
                    MPI_INT64_T,
                    MPI_COMM_WORLD);
 
-    std::vector<int> counts3(comm_size, 0);
-    std::vector<int> displs3(comm_size, 0);
-    int total3 = 0;
-    for (int i = 0; i < comm_size; ++i) {
-      counts3[i] = counts[i] * 3;
-      displs3[i] = total3;
-      total3 += counts3[i];
+    std::vector<int> xyz_counts(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> xyz_displs(static_cast<std::size_t>(world_size), 0);
+    int total_xyz_count = 0;
+    for (int r = 0; r < world_size; ++r) {
+      xyz_displs[static_cast<std::size_t>(r)] = total_xyz_count;
+      xyz_counts[static_cast<std::size_t>(r)] = gid_counts[static_cast<std::size_t>(r)] * 3;
+      total_xyz_count += xyz_counts[static_cast<std::size_t>(r)];
     }
-    all_xyz.assign(static_cast<std::size_t>(total3), 0.0);
+
+    all_xyz.assign(static_cast<std::size_t>(total_xyz_count), 0.0);
     MPI_Allgatherv(local_xyz.data(),
-                   local_n * 3,
+                   static_cast<int>(local_xyz.size()),
                    MPI_DOUBLE,
                    all_xyz.data(),
-                   counts3.data(),
-                   displs3.data(),
+                   xyz_counts.data(),
+                   xyz_displs.data(),
                    MPI_DOUBLE,
                    MPI_COMM_WORLD);
   }
@@ -1066,7 +1241,6 @@ double integrate_parabolic_weight_over_marker(const svmp::MeshBase& mesh,
                                               int boundary_marker,
                                               const ParabolicProfileData& data)
 {
-  const auto faces = mesh.faces_with_label(static_cast<svmp::label_t>(boundary_marker));
   auto tri_area = [](const Vec3d& a, const Vec3d& b, const Vec3d& c) {
     const Vec3d ab = b - a;
     const Vec3d ac = c - a;
@@ -1114,19 +1288,15 @@ double integrate_parabolic_weight_over_marker(const svmp::MeshBase& mesh,
     return val;
   };
 
-  double local_sum = 0.0;
-  for (const auto f : faces) {
-    local_sum += face_integral(mesh.face_vertices(f));
+  double sum = 0.0;
+  const auto payloads = gather_unique_marker_face_payloads<1>(
+      mesh, boundary_marker,
+      [&](svmp::index_t f, std::array<double, 1>& values) {
+        values[0] = face_integral(mesh.face_vertices(f));
+      });
+  for (const auto& payload : payloads) {
+    sum += payload.values[0];
   }
-
-  double sum = local_sum;
-#if FE_HAS_MPI
-  int mpi_initialized = 0;
-  MPI_Initialized(&mpi_initialized);
-  if (mpi_initialized) {
-    MPI_Allreduce(&local_sum, &sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-  }
-#endif
   return sum;
 }
 
@@ -1389,22 +1559,43 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
           ctx_u->parabolic = build_parabolic_profile_data(*input.mesh, bc.boundary_marker);
         }
 
-        double normalization_u = 1.0;
-        if (impose_flux_u) {
-          if (profile_u == InletProfileType::Flat) {
-            normalization_u = g_u.area;
-          } else {
+      double normalization_u = 1.0;
+      if (impose_flux_u) {
+        if (profile_u == InletProfileType::Flat) {
+          normalization_u = g_u.area;
+        } else {
             normalization_u = integrate_parabolic_weight_over_marker(*input.mesh, bc.boundary_marker, *ctx_u->parabolic);
           }
           if (!(normalization_u > 0.0)) {
             throw std::runtime_error(
                 "[svMultiPhysics::Physics] Failed to compute positive normalization for <Impose_flux> on Unsteady "
                 "Dirichlet BC '" + bc.name + "'.");
-          }
         }
+      }
 
         // Set scale=1/normalization; the time-dependent flow rate is multiplied in the callback.
         ctx_u->scale = 1.0 / normalization_u;
+
+        if (navierStokesTraceEnabled()) {
+          const auto local_g = local_marker_geometry(*input.mesh, bc.boundary_marker);
+          const auto local_faces = input.mesh->faces_with_label(static_cast<svmp::label_t>(bc.boundary_marker));
+          std::ostringstream oss;
+          oss << "NavierStokes BC setup: unsteady Dirichlet marker=" << bc.boundary_marker
+              << " name='" << bc.name << "'"
+              << " profile=" << ((profile_u == InletProfileType::Parabolic) ? "Parabolic" : "Flat")
+              << " impose_flux=" << (impose_flux_u ? 1 : 0)
+              << " local_faces=" << local_faces.size()
+              << " local_area=" << local_g.area
+              << " global_area=" << g_u.area
+              << " normalization=" << normalization_u
+              << " scale=" << ctx_u->scale
+              << " center=(" << ((g_u.area > 0.0) ? g_u.center_sum.x / g_u.area : 0.0)
+              << "," << ((g_u.area > 0.0) ? g_u.center_sum.y / g_u.area : 0.0)
+              << "," << ((g_u.area > 0.0) ? g_u.center_sum.z / g_u.area : 0.0) << ")"
+              << " normal=(" << ctx_u->normal.x << "," << ctx_u->normal.y << "," << ctx_u->normal.z << ")"
+              << " perim_points=" << (ctx_u->parabolic.has_value() ? ctx_u->parabolic->perimeter_unit_dirs.size() : 0u);
+          navierStokesTraceLog(oss.str());
+        }
 
         IncompressibleNavierStokesVMSOptions::VelocityDirichletBC dir_u{};
         dir_u.boundary_marker = bc.boundary_marker;
@@ -1528,6 +1719,28 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
       }
 
       ctx->scale = static_cast<double>(magnitude) / normalization;
+
+      if (navierStokesTraceEnabled()) {
+        const auto local_g = local_marker_geometry(*input.mesh, bc.boundary_marker);
+        const auto local_faces = input.mesh->faces_with_label(static_cast<svmp::label_t>(bc.boundary_marker));
+        std::ostringstream oss;
+        oss << "NavierStokes BC setup: steady Dirichlet marker=" << bc.boundary_marker
+            << " name='" << bc.name << "'"
+            << " profile=" << ((profile == InletProfileType::Parabolic) ? "Parabolic" : "Flat")
+            << " impose_flux=" << (impose_flux ? 1 : 0)
+            << " magnitude=" << magnitude
+            << " local_faces=" << local_faces.size()
+            << " local_area=" << local_g.area
+            << " global_area=" << g.area
+            << " normalization=" << normalization
+            << " scale=" << ctx->scale
+            << " center=(" << ((g.area > 0.0) ? g.center_sum.x / g.area : 0.0)
+            << "," << ((g.area > 0.0) ? g.center_sum.y / g.area : 0.0)
+            << "," << ((g.area > 0.0) ? g.center_sum.z / g.area : 0.0) << ")"
+            << " normal=(" << ctx->normal.x << "," << ctx->normal.y << "," << ctx->normal.z << ")"
+            << " perim_points=" << (ctx->parabolic.has_value() ? ctx->parabolic->perimeter_unit_dirs.size() : 0u);
+        navierStokesTraceLog(oss.str());
+      }
 
       for (int d = 0; d < dim; ++d) {
         const int comp = d;

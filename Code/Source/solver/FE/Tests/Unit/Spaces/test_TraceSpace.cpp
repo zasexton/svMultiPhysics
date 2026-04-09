@@ -9,7 +9,7 @@
 #include "FE/Basis/SerendipityBasis.h"
 #include "FE/Quadrature/QuadratureFactory.h"
 #include "FE/Spaces/H1Space.h"
-#include "FE/Spaces/IsogeometricSpace.h"
+#include "FE/Spaces/GenericBasisSpace.h"
 #include "FE/Spaces/TraceSpace.h"
 
 using namespace svmp::FE;
@@ -254,7 +254,7 @@ TEST(TraceSpace, SerendipityQuadFaceInterpolationRecoversCoefficients) {
     auto vol_basis = std::make_shared<basis::SerendipityBasis>(ElementType::Hex20, 2, false);
     const int qord = quadrature::QuadratureFactory::recommended_order(2, false);
     auto vol_quad = quadrature::QuadratureFactory::create(ElementType::Hex20, qord);
-    auto volume = std::make_shared<IsogeometricSpace>(vol_basis, vol_quad, FieldType::Scalar, Continuity::C0);
+    auto volume = std::make_shared<GenericBasisSpace>(vol_basis, vol_quad, FieldType::Scalar, Continuity::C0);
 
     TraceSpace trace(volume, /*face_id=*/0);
     EXPECT_EQ(trace.element_type(), ElementType::Quad8);

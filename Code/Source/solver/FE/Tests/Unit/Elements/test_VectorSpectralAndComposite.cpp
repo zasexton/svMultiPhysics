@@ -1,13 +1,13 @@
 /**
  * @file test_VectorSpectralAndComposite.cpp
- * @brief Tests for VectorElement, SpectralElement, IsogeometricElement, CompositeElement
+ * @brief Tests for VectorElement, SpectralElement, GeneralBasisElement, CompositeElement
  */
 
 #include <gtest/gtest.h>
 
 #include "FE/Elements/VectorElement.h"
 #include "FE/Elements/SpectralElement.h"
-#include "FE/Elements/IsogeometricElement.h"
+#include "FE/Elements/GeneralBasisElement.h"
 #include "FE/Elements/CompositeElement.h"
 #include "FE/Elements/MixedElement.h"
 #include "FE/Elements/LagrangeElement.h"
@@ -68,13 +68,13 @@ TEST(SpectralElement, Line2Metadata) {
     EXPECT_GT(quad->num_points(), 0u);
 }
 
-TEST(IsogeometricElement, WrapsExternalBasisAndQuadrature) {
+TEST(GeneralBasisElement, WrapsExternalBasisAndQuadrature) {
     // Use a simple Lagrange basis as a stand-in for a NURBS basis
     auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Quad4, 1);
     svmp::FE::quadrature::GaussQuadrature1D quad_1d(2);
     auto quad = std::make_shared<svmp::FE::quadrature::QuadrilateralQuadrature>(2);
 
-    IsogeometricElement elem(basis, quad, FieldType::Scalar, Continuity::C0);
+    GeneralBasisElement elem(basis, quad, FieldType::Scalar, Continuity::C0);
 
     EXPECT_EQ(elem.element_type(), ElementType::Quad4);
     EXPECT_EQ(elem.dimension(), 2);

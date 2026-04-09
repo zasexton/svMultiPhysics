@@ -23,7 +23,7 @@
 #include "Forms/Vocabulary.h"
 #include "Quadrature/QuadratureFactory.h"
 #include "Spaces/H1Space.h"
-#include "Spaces/IsogeometricSpace.h"
+#include "Spaces/GenericBasisSpace.h"
 #include "Spaces/SpaceFactory.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
@@ -676,7 +676,7 @@ TEST(NonlinearFormKernelElementCoverageTest, PoissonJacobian_Hex20_MatchesCentra
     auto basis = std::make_shared<basis::SerendipityBasis>(ElementType::Hex20, /*order=*/2, /*geometry_mode=*/false);
     const int qord = quadrature::QuadratureFactory::recommended_order(/*basis_order=*/2, /*is_mass_matrix=*/false);
     auto quad = quadrature::QuadratureFactory::create(ElementType::Hex20, qord);
-    spaces::IsogeometricSpace space(std::move(basis), std::move(quad));
+    spaces::GenericBasisSpace space(std::move(basis), std::move(quad));
 
     const auto u = FormExpr::trialFunction(space, "u");
     const auto v = FormExpr::testFunction(space, "v");
@@ -696,7 +696,7 @@ TEST(NonlinearFormKernelElementCoverageTest, PoissonJacobian_Quad8_MatchesCentra
     auto basis = std::make_shared<basis::SerendipityBasis>(ElementType::Quad8, /*order=*/2, /*geometry_mode=*/false);
     const int qord = quadrature::QuadratureFactory::recommended_order(/*basis_order=*/2, /*is_mass_matrix=*/false);
     auto quad = quadrature::QuadratureFactory::create(ElementType::Quad8, qord);
-    spaces::IsogeometricSpace space(std::move(basis), std::move(quad));
+    spaces::GenericBasisSpace space(std::move(basis), std::move(quad));
 
     const auto u = FormExpr::trialFunction(space, "u");
     const auto v = FormExpr::testFunction(space, "v");
@@ -750,7 +750,7 @@ TEST(NonlinearFormKernelElementCoverageTest, PoissonJacobian_Wedge15_MatchesCent
     auto basis = std::make_shared<basis::SerendipityBasis>(ElementType::Wedge15, /*order=*/2, /*geometry_mode=*/false);
     const int qord = quadrature::QuadratureFactory::recommended_order(/*basis_order=*/2, /*is_mass_matrix=*/false);
     auto quad = quadrature::QuadratureFactory::create(ElementType::Wedge15, qord);
-    spaces::IsogeometricSpace space(std::move(basis), std::move(quad));
+    spaces::GenericBasisSpace space(std::move(basis), std::move(quad));
 
     const auto u = FormExpr::trialFunction(space, "u");
     const auto v = FormExpr::testFunction(space, "v");

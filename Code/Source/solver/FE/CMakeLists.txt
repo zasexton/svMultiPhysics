@@ -301,6 +301,7 @@ set(FE_MATH_HEADERS
 	    Basis/TensorBasis.h
 	    Basis/BernsteinBasis.h
 	    Basis/BSplineBasis.h
+	    Basis/NURBSTensorBasis.h
 	    Basis/SpectralBasis.h
 	    Basis/SerendipityBasis.h
 	    Basis/BasisCache.h
@@ -321,6 +322,7 @@ set(FE_MATH_HEADERS
 	    Basis/TensorBasis.cpp
 	    Basis/BernsteinBasis.cpp
 	    Basis/BSplineBasis.cpp
+	    Basis/NURBSTensorBasis.cpp
 	    Basis/SpectralBasis.cpp
 	    Basis/SerendipityBasis.cpp
 	    Basis/BasisCache.cpp
@@ -385,7 +387,7 @@ set(FE_ELEMENTS_HEADERS
     Elements/DiscontinuousElement.h
     Elements/VectorElement.h
     Elements/SpectralElement.h
-    Elements/IsogeometricElement.h
+    Elements/GeneralBasisElement.h
     Elements/MixedElement.h
     Elements/CompositeElement.h
     Elements/ElementTransform.h
@@ -399,7 +401,7 @@ set(FE_ELEMENTS_SOURCES
     Elements/LagrangeElement.cpp
     Elements/VectorElement.cpp
     Elements/SpectralElement.cpp
-    Elements/IsogeometricElement.cpp
+    Elements/GeneralBasisElement.cpp
     Elements/MixedElement.cpp
     Elements/CompositeElement.cpp
     Elements/ElementTransform.cpp
@@ -431,7 +433,7 @@ set(FE_SPACES_HEADERS
     Spaces/OrientationManager.h
     Spaces/SpaceCache.h
     Spaces/SpaceWorkspace.h
-    Spaces/IsogeometricSpace.h
+    Spaces/GenericBasisSpace.h
 )
 
 set(FE_SPACES_SOURCES
@@ -457,7 +459,7 @@ set(FE_SPACES_SOURCES
     Spaces/OrientationManager.cpp
     Spaces/SpaceCache.cpp
     Spaces/SpaceWorkspace.cpp
-    Spaces/IsogeometricSpace.cpp
+    Spaces/GenericBasisSpace.cpp
 )
 
 # DOF management sources

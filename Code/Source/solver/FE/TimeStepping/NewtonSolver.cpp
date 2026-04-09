@@ -5041,7 +5041,16 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
         bool reverted_to_original = false;
         if (!accepted) {
-            if (have_best_trial && std::isfinite(best_trial_norm) && best_trial_norm < r_norm0) {
+            const bool reached_alpha_min = last_tried_alpha <= options_.line_search_alpha_min;
+            if (reached_alpha_min) {
+                alpha = last_tried_alpha;
+                if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: line search reached alpha_min; keeping clamped trial alpha="
+                        << alpha << " ||r(alpha)||=" << trial_norm;
+                    traceLog(oss.str());
+                }
+            } else if (have_best_trial && std::isfinite(best_trial_norm) && best_trial_norm < r_norm0) {
                 alpha = best_alpha;
                 if (best_alpha != last_tried_alpha) {
                     trial_norm = evaluateLineSearchTrial(alpha, /*phase=*/"line_search_best");
@@ -5072,11 +5081,14 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         current_residual_norm = trial_norm;
         have_residual = std::isfinite(current_residual_norm);
 
-        if (!reverted_to_original && options_.step_tolerance > 0.0) {
-            const double step_norm = alpha * du_norm;
+        if (options_.step_tolerance > 0.0) {
+            const double step_norm = reverted_to_original ? du_norm : (alpha * du_norm);
             if (oopTraceEnabled()) {
                 std::ostringstream oss;
-                oss << "NewtonSolver: step ||alpha*du||=" << step_norm << " step_tol=" << options_.step_tolerance;
+                oss << "NewtonSolver: step ||"
+                    << (reverted_to_original ? "du" : "alpha*du")
+                    << "||=" << step_norm
+                    << " step_tol=" << options_.step_tolerance;
                 traceLog(oss.str());
             }
             if (step_norm <= options_.step_tolerance) {

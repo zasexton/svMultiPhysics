@@ -7,6 +7,7 @@
 #include "FE/Basis/BasisCache.h"
 #include "FE/Basis/BasisFactory.h"
 #include "FE/Basis/BSplineBasis.h"
+#include "FE/Basis/NURBSTensorBasis.h"
 #include "FE/Basis/LagrangeBasis.h"
 #include "FE/Basis/TensorBasis.h"
 #include "FE/Quadrature/GaussQuadrature.h"
@@ -56,6 +57,39 @@ public:
         : QuadratureRule(family, dimension, order) {
         set_data(std::move(points), std::move(weights));
     }
+};
+
+class TestCustomScalarBasis final : public BasisFunction {
+public:
+    explicit TestCustomScalarBasis(int order)
+        : order_(order) {}
+
+    BasisType basis_type() const noexcept override { return BasisType::Custom; }
+    ElementType element_type() const noexcept override { return ElementType::Line2; }
+    int dimension() const noexcept override { return 1; }
+    int order() const noexcept override { return order_; }
+    std::size_t size() const noexcept override { return 2u; }
+
+    std::string cache_identity() const override {
+        return BasisFunction::cache_identity() + "|test-custom-order=" + std::to_string(order_);
+    }
+
+    void evaluate_values(const math::Vector<Real, 3>& xi,
+                         std::vector<Real>& values) const override {
+        values.resize(2u);
+        values[0] = Real(0.5) * (Real(1) - xi[0]);
+        values[1] = Real(0.5) * (Real(1) + xi[0]);
+    }
+
+    void evaluate_gradients(const math::Vector<Real, 3>&,
+                            std::vector<Gradient>& gradients) const override {
+        gradients.assign(2u, Gradient{});
+        gradients[0][0] = Real(-0.5);
+        gradients[1][0] = Real(0.5);
+    }
+
+private:
+    int order_{1};
 };
 
 std::size_t expected_lagrange_size(ElementType type, int order) {
@@ -460,6 +494,16 @@ TEST(BasisFactory, CreatesVectorConformingBasis) {
     EXPECT_EQ(basis->element_type(), ElementType::Quad4);
 }
 
+TEST(BasisFactory, DefaultHDivOrderOneOnTwoDimensionalCellsUsesBDM) {
+    BasisRequest quad_req{ElementType::Quad4, BasisType::Lagrange, 1, Continuity::H_div, FieldType::Vector};
+    auto quad_basis = BasisFactory::create(quad_req);
+    EXPECT_EQ(quad_basis->basis_type(), BasisType::BDM);
+
+    BasisRequest tri_req{ElementType::Triangle3, BasisType::Lagrange, 1, Continuity::H_div, FieldType::Vector};
+    auto tri_basis = BasisFactory::create(tri_req);
+    EXPECT_EQ(tri_basis->basis_type(), BasisType::BDM);
+}
+
 TEST(BasisFactory, CreatesHDivHigherOrderOnQuad) {
     BasisRequest req{ElementType::Quad4, BasisType::Lagrange, 2, Continuity::H_div, FieldType::Vector};
     auto basis = BasisFactory::create(req);
@@ -508,6 +552,28 @@ TEST(BasisFactory, CreatesHCurlHigherOrderOnTetra) {
     EXPECT_EQ(basis->element_type(), ElementType::Tetra4);
     EXPECT_EQ(basis->order(), 1);
     EXPECT_EQ(basis->size(), 20u); // (k+1)*(k+3)*(k+4)/2 with k=1
+}
+
+TEST(BasisFactory, NegativeHDivOrderThrowsInvalidArgumentBeforeConstruction) {
+    BasisRequest req{ElementType::Quad4, BasisType::Lagrange, -1, Continuity::H_div, FieldType::Vector};
+
+    try {
+        (void)BasisFactory::create(req);
+        FAIL() << "Expected FEException";
+    } catch (const FEException& e) {
+        EXPECT_EQ(e.status(), FEStatus::InvalidArgument);
+    }
+}
+
+TEST(BasisFactory, NegativeHCurlOrderThrowsInvalidArgumentBeforeConstruction) {
+    BasisRequest req{ElementType::Quad4, BasisType::Lagrange, -1, Continuity::H_curl, FieldType::Vector};
+
+    try {
+        (void)BasisFactory::create(req);
+        FAIL() << "Expected FEException";
+    } catch (const FEException& e) {
+        EXPECT_EQ(e.status(), FEStatus::InvalidArgument);
+    }
 }
 
 TEST(BasisFactory, CreatesScalarBasesByType) {
@@ -630,6 +696,36 @@ TEST(BasisFactory, UnsupportedCombinationThrows) {
     EXPECT_THROW(auto b = BasisFactory::create(req), svmp::FE::FEException);
 }
 
+TEST(BasisFactory, HigherOrderSerendipityRequestsRemainUnsupported) {
+    for (const ElementType type : {ElementType::Quad4, ElementType::Hex8, ElementType::Wedge15, ElementType::Pyramid13}) {
+        BasisRequest req{type, BasisType::Serendipity, 3, Continuity::C0, FieldType::Scalar};
+        EXPECT_THROW((void)BasisFactory::create(req), svmp::FE::FEException);
+    }
+}
+
+TEST(BasisFactory, ExplicitBDMRequestsHonorNarrowedScope) {
+    {
+        BasisRequest req{ElementType::Triangle3, BasisType::BDM, 1, Continuity::H_div, FieldType::Vector};
+        auto basis = BasisFactory::create(req);
+        EXPECT_EQ(basis->basis_type(), BasisType::BDM);
+        EXPECT_EQ(basis->element_type(), ElementType::Triangle3);
+    }
+    {
+        BasisRequest req{ElementType::Quad4, BasisType::BDM, 1, Continuity::H_div, FieldType::Vector};
+        auto basis = BasisFactory::create(req);
+        EXPECT_EQ(basis->basis_type(), BasisType::BDM);
+        EXPECT_EQ(basis->element_type(), ElementType::Quad4);
+    }
+    {
+        BasisRequest req{ElementType::Quad4, BasisType::BDM, 2, Continuity::H_div, FieldType::Vector};
+        EXPECT_THROW((void)BasisFactory::create(req), svmp::FE::FEException);
+    }
+    {
+        BasisRequest req{ElementType::Tetra4, BasisType::BDM, 1, Continuity::H_div, FieldType::Vector};
+        EXPECT_THROW((void)BasisFactory::create(req), svmp::FE::FEException);
+    }
+}
+
 TEST(BasisFactory, L2ReturnsExpectedBasis) {
     // L2 (discontinuous) should return the same basis as C0 -- DOF ownership
     // is handled at the Space/Element level, not in the basis shape functions.
@@ -694,16 +790,67 @@ TEST(BasisFactory, InvalidNURBSWithoutWeightsThrows) {
     EXPECT_THROW(BasisFactory::create(req), svmp::FE::FEException);
 }
 
-TEST(BasisFactory, MultiDimensionalNURBSThrowsUntilControlPointWeightsAreSupported) {
+TEST(BasisFactory, CreatesMultiDimensionalNURBSFromDescriptor) {
     BasisRequest req{ElementType::Quad4, BasisType::NURBS, 2, Continuity::C0, FieldType::Scalar};
-    req.knot_vector = make_open_uniform_knots(2, 5);
-    req.weights = {Real(1), Real(0.5), Real(2), Real(0.7), Real(1)};
+    req.axis_orders = {2, 1};
+    req.axis_knot_vectors = {
+        make_open_uniform_knots(2, 5),
+        make_open_uniform_knots(1, 4)
+    };
+    req.tensor_extents = {5, 4};
+    req.weights.resize(20u, Real(1));
+    req.weights[6] = Real(0.75);
+    req.weights[13] = Real(1.5);
 
-    try {
-        (void)BasisFactory::create(req);
-        FAIL() << "Expected FEException";
-    } catch (const FEException& e) {
-        EXPECT_EQ(e.status(), FEStatus::NotImplemented);
+    auto basis = BasisFactory::create(req);
+
+    ASSERT_NE(basis, nullptr);
+    EXPECT_EQ(basis->basis_type(), BasisType::NURBS);
+    EXPECT_EQ(basis->element_type(), ElementType::Quad4);
+    EXPECT_EQ(basis->size(), 20u);
+
+    std::vector<Real> values;
+    basis->evaluate_values({Real(0.23), Real(0.61), Real(0)}, values);
+    ASSERT_EQ(values.size(), basis->size());
+    EXPECT_NEAR(std::accumulate(values.begin(), values.end(), Real(0)), Real(1), 1e-12);
+}
+
+TEST(BasisFactory, FactoryAndDirectTensorNURBSConstructionAgree) {
+    BasisRequest req{ElementType::Quad4, BasisType::NURBS, 2, Continuity::C0, FieldType::Scalar};
+    req.axis_orders = {2, 1};
+    req.axis_knot_vectors = {
+        make_open_uniform_knots(2, 5),
+        make_open_uniform_knots(1, 4)
+    };
+    req.tensor_extents = {5, 4};
+    req.weights.resize(20u, Real(1));
+    req.weights[5] = Real(0.6);
+    req.weights[9] = Real(1.4);
+    req.weights[17] = Real(0.8);
+
+    auto from_factory = BasisFactory::create(req);
+    NURBSTensorBasis direct(
+        BSplineBasis(2, req.axis_knot_vectors[0]),
+        BSplineBasis(1, req.axis_knot_vectors[1]),
+        req.weights,
+        req.tensor_extents);
+
+    const math::Vector<Real, 3> xi{Real(0.31), Real(0.42), Real(0)};
+    std::vector<Real> factory_values;
+    std::vector<Real> direct_values;
+    std::vector<Gradient> factory_gradients;
+    std::vector<Gradient> direct_gradients;
+    from_factory->evaluate_values(xi, factory_values);
+    from_factory->evaluate_gradients(xi, factory_gradients);
+    direct.evaluate_values(xi, direct_values);
+    direct.evaluate_gradients(xi, direct_gradients);
+
+    ASSERT_EQ(factory_values.size(), direct_values.size());
+    ASSERT_EQ(factory_gradients.size(), direct_gradients.size());
+    for (std::size_t i = 0; i < factory_values.size(); ++i) {
+        EXPECT_NEAR(factory_values[i], direct_values[i], 1e-14);
+        EXPECT_NEAR(factory_gradients[i][0], direct_gradients[i][0], 1e-12);
+        EXPECT_NEAR(factory_gradients[i][1], direct_gradients[i][1], 1e-12);
     }
 }
 
@@ -739,4 +886,58 @@ TEST(BasisFactory, FactoryCreatedSplineCacheIdentityMatchesDirectConstruction) {
 
     EXPECT_EQ(&entry_factory, &entry_direct);
     EXPECT_EQ(cache.size(), 1u);
+}
+
+TEST(BasisFactory, CreatesRegisteredCustomBasis) {
+    BasisFactory::clear_custom_registry_for_tests();
+
+    BasisFactory::register_custom(
+        "test-linear",
+        [](const BasisRequest& req) -> std::shared_ptr<BasisFunction> {
+            return std::make_shared<TestCustomScalarBasis>(req.order.value_or(1));
+        });
+
+    BasisRequest req{ElementType::Line2, BasisType::Custom, 3, Continuity::C0, FieldType::Scalar};
+    req.custom_id = "test-linear";
+
+    auto basis = BasisFactory::create(req);
+    ASSERT_NE(basis, nullptr);
+    EXPECT_EQ(basis->basis_type(), BasisType::Custom);
+    EXPECT_EQ(basis->element_type(), ElementType::Line2);
+    EXPECT_EQ(basis->order(), 3);
+
+    std::vector<Real> values;
+    basis->evaluate_values({Real(0.25), Real(0), Real(0)}, values);
+    ASSERT_EQ(values.size(), 2u);
+    EXPECT_NEAR(values[0] + values[1], Real(1), 1e-12);
+
+    BasisFactory::unregister_custom("test-linear");
+    BasisFactory::clear_custom_registry_for_tests();
+}
+
+TEST(BasisFactory, DuplicateCustomRegistrationThrows) {
+    BasisFactory::clear_custom_registry_for_tests();
+    BasisFactory::register_custom(
+        "duplicate",
+        [](const BasisRequest& req) -> std::shared_ptr<BasisFunction> {
+            return std::make_shared<TestCustomScalarBasis>(req.order.value_or(1));
+        });
+
+    EXPECT_THROW(
+        BasisFactory::register_custom(
+            "duplicate",
+            [](const BasisRequest& req) -> std::shared_ptr<BasisFunction> {
+                return std::make_shared<TestCustomScalarBasis>(req.order.value_or(1));
+            }),
+        svmp::FE::FEException);
+
+    BasisFactory::clear_custom_registry_for_tests();
+}
+
+TEST(BasisFactory, UnknownCustomBasisThrows) {
+    BasisFactory::clear_custom_registry_for_tests();
+
+    BasisRequest req{ElementType::Line2, BasisType::Custom, 1, Continuity::C0, FieldType::Scalar};
+    req.custom_id = "missing";
+    EXPECT_THROW(BasisFactory::create(req), svmp::FE::FEException);
 }

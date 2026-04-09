@@ -6,6 +6,7 @@
  */
 
 #include "SpectralBasis.h"
+#include "NodeOrderingConventions.h"
 #include "OrthogonalPolynomials.h"
 #include "Quadrature/GaussLobattoQuadrature.h"
 #include <algorithm>
@@ -44,6 +45,113 @@ bool is_wedge(ElementType t) {
 
 bool is_pyramid(ElementType t) {
     return t == ElementType::Pyramid5 || t == ElementType::Pyramid13 || t == ElementType::Pyramid14;
+}
+
+bool points_close(const math::Vector<Real, 3>& a,
+                  const math::Vector<Real, 3>& b,
+                  Real tol = Real(1e-8)) {
+    return std::abs(a[0] - b[0]) <= tol &&
+           std::abs(a[1] - b[1]) <= tol &&
+           std::abs(a[2] - b[2]) <= tol;
+}
+
+bool is_on_pyramid_boundary(const math::Vector<Real, 3>& xi,
+                            Real tol = Real(1e-12)) {
+    if (std::abs(xi[2]) <= tol || std::abs(xi[2] - Real(1)) <= tol) {
+        return true;
+    }
+    const Real scale = Real(1) - xi[2];
+    return std::abs(std::abs(xi[0]) - scale) <= tol ||
+           std::abs(std::abs(xi[1]) - scale) <= tol;
+}
+
+math::Vector<Real, 3> map_triangle_to_pyramid_front(Real a, Real b) {
+    return {b - a, -a - b, Real(1) - a - b};
+}
+
+math::Vector<Real, 3> map_triangle_to_pyramid_right(Real a, Real b) {
+    return {a + b, b - a, Real(1) - a - b};
+}
+
+math::Vector<Real, 3> map_triangle_to_pyramid_back(Real a, Real b) {
+    return {a - b, a + b, Real(1) - a - b};
+}
+
+math::Vector<Real, 3> map_triangle_to_pyramid_left(Real a, Real b) {
+    return {-a - b, a - b, Real(1) - a - b};
+}
+
+void append_unique_point(std::vector<math::Vector<Real, 3>>& points,
+                         const math::Vector<Real, 3>& candidate,
+                         Real tol = Real(1e-8)) {
+    const auto it = std::find_if(points.begin(), points.end(),
+                                 [&](const math::Vector<Real, 3>& existing) {
+                                     return points_close(existing, candidate, tol);
+                                 });
+    if (it == points.end()) {
+        points.push_back(candidate);
+    }
+}
+
+template<typename ModalTerm>
+void evaluate_pyramid_modal_term(const ModalTerm& term,
+                                 const math::Vector<Real, 3>& xi,
+                                 Real& value,
+                                 Gradient* gradient = nullptr) {
+    const Real x = xi[0];
+    const Real y = xi[1];
+    const Real z = xi[2];
+    const Real t = Real(1) - z;
+    const Real eps = Real(1e-14);
+
+    if (std::abs(t) <= eps) {
+        if (term.px == 0 && term.py == 0) {
+            value = std::pow(z, term.pz);
+        } else {
+            value = Real(0);
+        }
+        if (gradient != nullptr) {
+            *gradient = Gradient{};
+            if (term.px == 0 && term.py == 0 && term.pz > 0) {
+                (*gradient)[2] = static_cast<Real>(term.pz) * std::pow(z, term.pz - 1);
+            }
+        }
+        return;
+    }
+
+    const auto pow_nonneg = [](Real base, int p) -> Real {
+        return (p <= 0) ? Real(1) : std::pow(base, p);
+    };
+
+    const Real base = pow_nonneg(x, term.px) *
+                      pow_nonneg(y, term.py) *
+                      pow_nonneg(z, term.pz);
+    const Real denom = pow_nonneg(t, term.denom_power);
+    value = base / denom;
+
+    if (gradient != nullptr) {
+        *gradient = Gradient{};
+        if (term.px > 0) {
+            (*gradient)[0] =
+                static_cast<Real>(term.px) * pow_nonneg(x, term.px - 1) *
+                pow_nonneg(y, term.py) * pow_nonneg(z, term.pz) / denom;
+        }
+        if (term.py > 0) {
+            (*gradient)[1] =
+                static_cast<Real>(term.py) * pow_nonneg(x, term.px) *
+                pow_nonneg(y, term.py - 1) * pow_nonneg(z, term.pz) / denom;
+        }
+
+        Real gz = Real(0);
+        if (term.pz > 0) {
+            gz += static_cast<Real>(term.pz) * pow_nonneg(x, term.px) *
+                  pow_nonneg(y, term.py) * pow_nonneg(z, term.pz - 1) / denom;
+        }
+        if (term.denom_power > 0) {
+            gz += static_cast<Real>(term.denom_power) * base / (denom * t);
+        }
+        (*gradient)[2] = gz;
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -160,9 +268,25 @@ SpectralBasis::SpectralBasis(ElementType type, int order)
         size_ = static_cast<std::size_t>((order_ + 1) * (order_ + 2) * (order_ + 3) / 6);
         build_simplex_nodes_tetrahedron();
         build_inverse_vandermonde();
-    } else if (is_wedge(element_type_) || is_pyramid(element_type_)) {
-        throw NotImplementedException("SpectralBasis currently supports only line/quad/hex/triangle/tet elements",
-                                      __FILE__, __LINE__, __func__);
+    } else if (is_wedge(element_type_)) {
+        dimension_ = 3;
+        is_wedge_tensor_product_ = true;
+        face_basis_ = std::make_shared<SpectralBasis>(ElementType::Triangle3, order_);
+        axis_basis_ = std::make_shared<SpectralBasis>(ElementType::Line2, order_);
+        nodes_1d_ = axis_basis_->nodes_1d();
+        size_ = face_basis_->size() * axis_basis_->size();
+        simplex_nodes_.reserve(size_);
+        for (Real z : nodes_1d_) {
+            for (const auto& face_node : face_basis_->simplex_nodes_) {
+                simplex_nodes_.push_back({face_node[0], face_node[1], z});
+            }
+        }
+    } else if (is_pyramid(element_type_)) {
+        dimension_ = 3;
+        is_pyramid_modal_ = true;
+        size_ = static_cast<std::size_t>((order_ + 1) * (order_ + 2) * (2 * order_ + 3) / 6);
+        build_pyramid_nodes();
+        build_inverse_vandermonde();
     } else {
         throw BasisElementCompatibilityException("SpectralBasis: unsupported element type",
                                                  __FILE__, __LINE__, __func__);
@@ -463,6 +587,82 @@ void SpectralBasis::build_simplex_nodes_tetrahedron() {
     }
 }
 
+void SpectralBasis::build_pyramid_nodes() {
+    simplex_nodes_.clear();
+    simplex_nodes_.reserve(size_);
+    pyramid_modal_terms_.clear();
+    pyramid_modal_terms_.reserve(size_);
+
+    // Base face: tensor-product GLL nodes.
+    SpectralBasis line_basis(ElementType::Line2, order_);
+    nodes_1d_ = line_basis.nodes_1d_;
+    for (Real y : nodes_1d_) {
+        for (Real x : nodes_1d_) {
+            append_unique_point(simplex_nodes_, {x, y, Real(0)});
+        }
+    }
+
+    append_unique_point(simplex_nodes_, {Real(0), Real(0), Real(1)});
+
+    // Rising edges: use the same 1D GLL parameter along each apex edge.
+    for (std::size_t i = 1; i + 1 < nodes_1d_.size(); ++i) {
+        const Real z = Real(0.5) * (nodes_1d_[i] + Real(1));
+        const Real scale = Real(1) - z;
+        append_unique_point(simplex_nodes_, {-scale, -scale, z});
+        append_unique_point(simplex_nodes_, {scale, -scale, z});
+        append_unique_point(simplex_nodes_, {scale, scale, z});
+        append_unique_point(simplex_nodes_, {-scale, scale, z});
+    }
+
+    // Triangular side-face interiors: reuse the existing triangle spectral
+    // nodal set, but only add strictly interior face nodes here. Edge nodes are
+    // already represented explicitly above so shared-entity ownership is
+    // deterministic.
+    SpectralBasis triangle_basis(ElementType::Triangle3, order_);
+    for (const auto& node : triangle_basis.simplex_nodes_) {
+        const Real a = node[0];
+        const Real b = node[1];
+        if (a <= Real(1e-10) || b <= Real(1e-10) || a + b >= Real(1) - Real(1e-10)) {
+            continue;
+        }
+        append_unique_point(simplex_nodes_, map_triangle_to_pyramid_front(node[0], node[1]));
+        append_unique_point(simplex_nodes_, map_triangle_to_pyramid_right(node[0], node[1]));
+        append_unique_point(simplex_nodes_, map_triangle_to_pyramid_back(node[0], node[1]));
+        append_unique_point(simplex_nodes_, map_triangle_to_pyramid_left(node[0], node[1]));
+    }
+
+    // Interior nodes: retain the standard complete-family pyramid interior
+    // locations so the rational modal space remains well-conditioned away from
+    // the boundary while the traces stay spectral-face compatible.
+    const auto lagrange_nodes = NodeOrdering::get_lagrange_node_coords(ElementType::Pyramid5, order_);
+    for (const auto& node : lagrange_nodes) {
+        if (!is_on_pyramid_boundary(node)) {
+            append_unique_point(simplex_nodes_, node);
+        }
+    }
+
+    if (simplex_nodes_.size() != size_) {
+        throw BasisConstructionException("SpectralBasis: pyramid nodal set size mismatch (got " +
+                                             std::to_string(simplex_nodes_.size()) +
+                                             ", expected " + std::to_string(size_) + ")",
+                                         __FILE__, __LINE__, __func__);
+    }
+
+    for (int pz = 0; pz <= order_; ++pz) {
+        const int n = order_ - pz;
+        for (int py = 0; py <= n; ++py) {
+            for (int px = 0; px <= n; ++px) {
+                pyramid_modal_terms_.push_back(PyramidModalTerm{px, py, pz, std::min(px, py)});
+            }
+        }
+    }
+
+    if (pyramid_modal_terms_.size() != size_) {
+        throw BasisConstructionException("SpectralBasis: pyramid modal-space size mismatch",
+                                         __FILE__, __LINE__, __func__);
+    }
+}
+
 // -----------------------------------------------------------------------
 // Build inverse Vandermonde for simplex evaluation
 // V_{ij} = phi_j(node_i), where phi_j is the j-th modal basis function
@@ -471,6 +671,24 @@ void SpectralBasis::build_simplex_nodes_tetrahedron() {
 void SpectralBasis::build_inverse_vandermonde() {
     const std::size_t n = size_;
     inv_vandermonde_.resize(n * n);
+
+    if (is_pyramid_modal_) {
+        std::vector<Real> V(n * n);
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t j = 0; j < n; ++j) {
+                Real value = Real(0);
+                evaluate_pyramid_modal_term(pyramid_modal_terms_[j], simplex_nodes_[i], value);
+                V[i * n + j] = value;
+            }
+        }
+
+        if (!invert_matrix(V, n)) {
+            throw BasisConstructionException("SpectralBasis: Vandermonde matrix is singular for pyramid",
+                                             __FILE__, __LINE__, __func__);
+        }
+        inv_vandermonde_ = std::move(V);
+        return;
+    }
 
     if (dimension_ == 2) {
         // Enumerate modal indices (p,q) with p+q <= order_
@@ -534,6 +752,39 @@ void SpectralBasis::build_inverse_vandermonde() {
 
 void SpectralBasis::evaluate_values(const math::Vector<Real, 3>& xi,
                                     std::vector<Real>& values) const {
+    if (is_wedge_tensor_product_) {
+        std::vector<Real> face_values;
+        std::vector<Real> axis_values;
+        face_basis_->evaluate_values({xi[0], xi[1], Real(0)}, face_values);
+        axis_basis_->evaluate_values({xi[2], Real(0), Real(0)}, axis_values);
+
+        values.assign(size_, Real(0));
+        std::size_t idx = 0;
+        for (std::size_t k = 0; k < axis_values.size(); ++k) {
+            for (std::size_t j = 0; j < face_values.size(); ++j) {
+                values[idx++] = face_values[j] * axis_values[k];
+            }
+        }
+        return;
+    }
+
+    if (is_pyramid_modal_) {
+        values.assign(size_, Real(0));
+        std::vector<Real> modal(size_);
+        for (std::size_t i = 0; i < size_; ++i) {
+            evaluate_pyramid_modal_term(pyramid_modal_terms_[i], xi, modal[i]);
+        }
+
+        for (std::size_t i = 0; i < size_; ++i) {
+            Real sum = Real(0);
+            for (std::size_t j = 0; j < size_; ++j) {
+                sum += inv_vandermonde_[j * size_ + i] * modal[j];
+            }
+            values[i] = sum;
+        }
+        return;
+    }
+
     if (!is_simplex_) {
         // Original tensor-product path
         values.assign(size_, Real(0));
@@ -609,6 +860,50 @@ void SpectralBasis::evaluate_values(const math::Vector<Real, 3>& xi,
 
 void SpectralBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
                                        std::vector<Gradient>& gradients) const {
+    if (is_wedge_tensor_product_) {
+        std::vector<Real> face_values;
+        std::vector<Gradient> face_gradients;
+        std::vector<Real> axis_values;
+        std::vector<Gradient> axis_gradients;
+        face_basis_->evaluate_values({xi[0], xi[1], Real(0)}, face_values);
+        face_basis_->evaluate_gradients({xi[0], xi[1], Real(0)}, face_gradients);
+        axis_basis_->evaluate_values({xi[2], Real(0), Real(0)}, axis_values);
+        axis_basis_->evaluate_gradients({xi[2], Real(0), Real(0)}, axis_gradients);
+
+        gradients.assign(size_, Gradient{});
+        std::size_t idx = 0;
+        for (std::size_t k = 0; k < axis_values.size(); ++k) {
+            for (std::size_t j = 0; j < face_values.size(); ++j) {
+                gradients[idx][0] = face_gradients[j][0] * axis_values[k];
+                gradients[idx][1] = face_gradients[j][1] * axis_values[k];
+                gradients[idx][2] = face_values[j] * axis_gradients[k][0];
+                ++idx;
+            }
+        }
+        return;
+    }
+
+    if (is_pyramid_modal_) {
+        gradients.assign(size_, Gradient{});
+        std::vector<Gradient> modal_gradients(size_);
+        for (std::size_t i = 0; i < size_; ++i) {
+            Real value = Real(0);
+            evaluate_pyramid_modal_term(pyramid_modal_terms_[i], xi, value, &modal_gradients[i]);
+        }
+
+        for (std::size_t i = 0; i < size_; ++i) {
+            Gradient sum{};
+            for (std::size_t j = 0; j < size_; ++j) {
+                const Real coeff = inv_vandermonde_[j * size_ + i];
+                sum[0] += coeff * modal_gradients[j][0];
+                sum[1] += coeff * modal_gradients[j][1];
+                sum[2] += coeff * modal_gradients[j][2];
+            }
+            gradients[i] = sum;
+        }
+        return;
+    }
+
     if (!is_simplex_) {
         // Original tensor-product path
         gradients.assign(size_, Gradient{});

@@ -25,6 +25,7 @@
 #endif
 
 #include "Constraints/GaugeDiagnostics.h"
+#include "Constraints/GlobalConstraint.h"
 #include "Constraints/ParallelConstraints.h"
 
 #include "Constraints/SystemConstraints.h"
@@ -51,10 +52,13 @@
 #include "Forms/JIT/JITKernelWrapper.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <iterator>
 #include <limits>
 #include <optional>
+#include <numeric>
 #include <thread>
+#include <type_traits>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -68,6 +72,213 @@ namespace FE {
 namespace systems {
 
 namespace {
+
+#if FE_HAS_MPI
+constexpr std::uint64_t kConsistencyHashSeed = 1469598103934665603ULL;
+
+[[nodiscard]] std::uint64_t mixConsistencyHash(std::uint64_t hash,
+                                               std::uint64_t value) noexcept
+{
+    hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6U) + (hash >> 2U);
+    return hash;
+}
+
+template <class T>
+void hashConsistencyBytes(std::uint64_t& hash, const T& value)
+{
+    static_assert(std::is_trivially_copyable_v<T>);
+    const auto* bytes = reinterpret_cast<const unsigned char*>(&value);
+    for (std::size_t i = 0; i < sizeof(T); ++i) {
+        hash = mixConsistencyHash(hash, static_cast<std::uint64_t>(bytes[i]));
+    }
+}
+
+template <class T>
+void hashConsistencySpan(std::uint64_t& hash, std::span<const T> values)
+{
+    hashConsistencyBytes(hash, values.size());
+    for (const auto& value : values) {
+        hashConsistencyBytes(hash, value);
+    }
+}
+
+[[nodiscard]] std::vector<int> gatherGlobalBoundaryMarkers(std::span<const int> local_markers,
+                                                           MPI_Comm comm)
+{
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (!mpi_initialized) {
+        std::vector<int> markers(local_markers.begin(), local_markers.end());
+        std::sort(markers.begin(), markers.end());
+        markers.erase(std::unique(markers.begin(), markers.end()), markers.end());
+        return markers;
+    }
+
+    int world_size = 1;
+    MPI_Comm_size(comm, &world_size);
+    if (world_size <= 1) {
+        std::vector<int> markers(local_markers.begin(), local_markers.end());
+        std::sort(markers.begin(), markers.end());
+        markers.erase(std::unique(markers.begin(), markers.end()), markers.end());
+        return markers;
+    }
+
+    const int local_n = static_cast<int>(local_markers.size());
+    std::vector<int> counts(static_cast<std::size_t>(world_size), 0);
+    MPI_Allgather(&local_n, 1, MPI_INT, counts.data(), 1, MPI_INT, comm);
+
+    std::vector<int> displs(static_cast<std::size_t>(world_size), 0);
+    for (int r = 1; r < world_size; ++r) {
+        displs[static_cast<std::size_t>(r)] =
+            displs[static_cast<std::size_t>(r - 1)] +
+            counts[static_cast<std::size_t>(r - 1)];
+    }
+
+    const int total_n = std::accumulate(counts.begin(), counts.end(), 0);
+    std::vector<int> gathered(static_cast<std::size_t>(total_n), 0);
+    MPI_Allgatherv(local_markers.empty() ? nullptr : local_markers.data(),
+                   local_n,
+                   MPI_INT,
+                   gathered.empty() ? nullptr : gathered.data(),
+                   counts.data(),
+                   displs.data(),
+                   MPI_INT,
+                   comm);
+
+    std::sort(gathered.begin(), gathered.end());
+    gathered.erase(std::unique(gathered.begin(), gathered.end()), gathered.end());
+    return gathered;
+}
+
+[[nodiscard]] bool gaugeResolutionConsistentAcrossRanks(const gauge::GaugeRegistry& registry,
+                                                        MPI_Comm comm)
+{
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (!mpi_initialized) {
+        return true;
+    }
+
+    int world_size = 1;
+    MPI_Comm_size(comm, &world_size);
+    if (world_size <= 1) {
+        return true;
+    }
+
+    struct ResolvedModeKey {
+        int field{0};
+        int component{0};
+        int region{0};
+        int family{0};
+        int status{0};
+        int policy{0};
+
+        [[nodiscard]] bool operator<(const ResolvedModeKey& other) const noexcept
+        {
+            return std::tie(field, component, region, family, status, policy) <
+                   std::tie(other.field, other.component, other.region,
+                            other.family, other.status, other.policy);
+        }
+    };
+
+    std::vector<ResolvedModeKey> keys;
+    keys.reserve(registry.resolvedModes().size());
+    for (const auto& mode : registry.resolvedModes()) {
+        keys.push_back(ResolvedModeKey{
+            static_cast<int>(mode.candidate.field),
+            mode.candidate.component,
+            mode.candidate.region,
+            static_cast<int>(mode.candidate.family),
+            static_cast<int>(mode.status),
+            static_cast<int>(mode.policy)});
+    }
+    std::sort(keys.begin(), keys.end());
+
+    unsigned long long local_hash = kConsistencyHashSeed;
+    local_hash = mixConsistencyHash(local_hash, static_cast<unsigned long long>(keys.size()));
+    for (const auto& key : keys) {
+        local_hash = mixConsistencyHash(local_hash, static_cast<unsigned long long>(key.field));
+        local_hash = mixConsistencyHash(local_hash, static_cast<unsigned long long>(key.component + 4096));
+        local_hash = mixConsistencyHash(local_hash, static_cast<unsigned long long>(key.region + 4096));
+        local_hash = mixConsistencyHash(local_hash, static_cast<unsigned long long>(key.family));
+        local_hash = mixConsistencyHash(local_hash, static_cast<unsigned long long>(key.status));
+        local_hash = mixConsistencyHash(local_hash, static_cast<unsigned long long>(key.policy));
+    }
+
+    int local_count = static_cast<int>(keys.size());
+    int min_count = 0;
+    int max_count = 0;
+    MPI_Allreduce(&local_count, &min_count, 1, MPI_INT, MPI_MIN, comm);
+    MPI_Allreduce(&local_count, &max_count, 1, MPI_INT, MPI_MAX, comm);
+
+    unsigned long long min_hash = 0ULL;
+    unsigned long long max_hash = 0ULL;
+    MPI_Allreduce(&local_hash, &min_hash, 1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, comm);
+    MPI_Allreduce(&local_hash, &max_hash, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
+
+    return min_count == max_count && min_hash == max_hash;
+}
+
+[[nodiscard]] bool globalConstraintDefinitionsConsistentAcrossRanks(
+    std::span<const std::unique_ptr<constraints::Constraint>> constraint_defs,
+    MPI_Comm comm)
+{
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (!mpi_initialized) {
+        return true;
+    }
+
+    int world_size = 1;
+    MPI_Comm_size(comm, &world_size);
+    if (world_size <= 1) {
+        return true;
+    }
+
+    std::vector<std::uint64_t> constraint_hashes;
+    constraint_hashes.reserve(constraint_defs.size());
+
+    for (const auto& constraint : constraint_defs) {
+        if (!constraint || constraint->getType() != constraints::ConstraintType::Global) {
+            continue;
+        }
+
+        const auto* global =
+            dynamic_cast<const constraints::GlobalConstraint*>(constraint.get());
+        if (global == nullptr) {
+            return false;
+        }
+
+        std::uint64_t hash = kConsistencyHashSeed;
+        hashConsistencyBytes(hash, static_cast<std::uint8_t>(global->getType()));
+        hashConsistencyBytes(hash, static_cast<std::uint8_t>(global->getGlobalType()));
+        hashConsistencyBytes(hash, static_cast<std::uint8_t>(global->getStrategy()));
+        hashConsistencyBytes(hash, global->getPinnedDof());
+        hashConsistencyBytes(hash, global->getTargetValue());
+        hashConsistencySpan(hash, std::span<const GlobalIndex>(global->getDofs()));
+        hashConsistencySpan(hash, std::span<const double>(global->getWeights()));
+        constraint_hashes.push_back(hash);
+    }
+
+    std::sort(constraint_hashes.begin(), constraint_hashes.end());
+
+    std::uint64_t local_hash = kConsistencyHashSeed;
+    hashConsistencySpan(local_hash, std::span<const std::uint64_t>(constraint_hashes));
+
+    const int local_count = static_cast<int>(constraint_hashes.size());
+    int min_count = 0;
+    int max_count = 0;
+    MPI_Allreduce(&local_count, &min_count, 1, MPI_INT, MPI_MIN, comm);
+    MPI_Allreduce(&local_count, &max_count, 1, MPI_INT, MPI_MAX, comm);
+
+    std::uint64_t min_hash = 0ULL;
+    std::uint64_t max_hash = 0ULL;
+    MPI_Allreduce(&local_hash, &min_hash, 1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, comm);
+    MPI_Allreduce(&local_hash, &max_hash, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
+
+    return min_count == max_count && min_hash == max_hash;
+}
+#endif
 
 class AffineConstraintsQuery final : public sparsity::IConstraintQuery {
 public:
@@ -1266,6 +1477,21 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
         c->apply(affine_constraints_);
     }
 
+#if FE_HAS_MPI
+    {
+        int mpi_initialized = 0;
+        MPI_Initialized(&mpi_initialized);
+        if (mpi_initialized &&
+            !globalConstraintDefinitionsConsistentAcrossRanks(constraint_defs_,
+                                                              dof_handler_.mpiComm())) {
+            FE_THROW(FEException,
+                     "FESystem::setup: explicit GlobalConstraint definitions differ across "
+                     "MPI ranks. Global algebraic constraints must be defined identically on "
+                     "every rank.");
+        }
+    }
+#endif
+
     // -----------------------------------------------------------------
     // Gauge / nullspace auto-detection and enforcement
     // -----------------------------------------------------------------
@@ -1630,8 +1856,12 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                 // Step 3: For each coupling, find markers where the coupled field V
                 // has natural (non-Dirichlet) BCs, and emit anchoring evidence for P.
                 if (!couplings.empty()) {
-                    // Enumerate all unique boundary markers from the mesh.
-                    std::unordered_set<int> all_markers;
+                    // Enumerate boundary markers globally across MPI ranks.
+                    // Whether a coupled field has a natural boundary on marker m
+                    // is a global property of the problem. Resolving this per-rank
+                    // leads to inconsistent pressure-gauge decisions when only a
+                    // subset of ranks owns the outlet/inlet faces.
+                    std::unordered_set<int> local_markers;
                     meshAccess().forEachBoundaryFace(/*marker=*/-1,
                         [&](GlobalIndex /*face_id*/, GlobalIndex /*cell_id*/) {});
                     // Use face_boundary_ids to collect markers efficiently.
@@ -1643,10 +1873,22 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                             const bool c1 = (f2c[f][1] != svmp::INVALID_INDEX);
                             if (c0 != c1 && f < face_labels.size()) {
                                 const int m = static_cast<int>(face_labels[f]);
-                                if (m >= 0) all_markers.insert(m);
+                                if (m >= 0) local_markers.insert(m);
                             }
                         }
                     }
+
+                    std::vector<int> all_markers(local_markers.begin(), local_markers.end());
+#if FE_HAS_MPI
+                    {
+                        int mpi_initialized = 0;
+                        MPI_Initialized(&mpi_initialized);
+                        if (mpi_initialized) {
+                            all_markers =
+                                gatherGlobalBoundaryMarkers(all_markers, dof_handler_.mpiComm());
+                        }
+                    }
+#endif
 
                     for (const auto& cp : couplings) {
                         const auto v_idx = static_cast<std::size_t>(cp.coupled_field);
@@ -1671,6 +1913,27 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                                     }
                                 }
                             }
+
+#if FE_HAS_MPI
+                            {
+                                int mpi_initialized = 0;
+                                MPI_Initialized(&mpi_initialized);
+                                if (mpi_initialized) {
+                                    const int local_flags[2] = {
+                                        has_any_v_dof ? 1 : 0,
+                                        has_unconstrained_v_dof ? 1 : 0};
+                                    int global_flags[2] = {0, 0};
+                                    MPI_Allreduce(local_flags,
+                                                  global_flags,
+                                                  2,
+                                                  MPI_INT,
+                                                  MPI_MAX,
+                                                  dof_handler_.mpiComm());
+                                    has_any_v_dof = (global_flags[0] != 0);
+                                    has_unconstrained_v_dof = (global_flags[1] != 0);
+                                }
+                            }
+#endif
 
                             if (has_any_v_dof && has_unconstrained_v_dof) {
                                 gauge_registry_->addAnchoring(gauge::AnchoringEvidence{
@@ -1858,6 +2121,19 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 
         gauge_registry_->resolve(get_field_dofs, region_provider, coord_provider);
 
+#if FE_HAS_MPI
+        {
+            int mpi_initialized = 0;
+            MPI_Initialized(&mpi_initialized);
+            if (mpi_initialized &&
+                !gaugeResolutionConsistentAcrossRanks(*gauge_registry_, dof_handler_.mpiComm())) {
+                FE_THROW(FEException,
+                         "FESystem::setup: GaugeRegistry resolved modes differ across MPI ranks. "
+                         "This would create inconsistent replicated algebraic constraints.");
+            }
+        }
+#endif
+
         // Apply enforcement: auto-create GlobalConstraint objects for
         // resolved exact-nullspace modes.
         const int n_gauge_constraints =
@@ -1896,6 +2172,11 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 #endif
     if (parallel && parallel->isParallel()) {
         parallel->synchronize(affine_constraints_);
+        if (!parallel->validateConsistency(affine_constraints_)) {
+            FE_THROW(FEException,
+                     "FESystem::setup: algebraic constraints are inconsistent across MPI ranks "
+                     "after synchronization.");
+        }
     }
 
     affine_constraints_.close();

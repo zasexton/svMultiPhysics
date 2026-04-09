@@ -64,21 +64,20 @@ TEST(BasisErrorPaths, HierarchicalUnknownElementThrows) {
 // BernsteinBasis error paths
 // =============================================================================
 
-TEST(BasisErrorPaths, BernsteinUnsupportedElementThrows) {
-    // Bernstein on Tetra4 is not supported
-    EXPECT_THROW(BernsteinBasis(ElementType::Tetra4, 2), BasisElementCompatibilityException);
+TEST(BasisErrorPaths, BernsteinUnknownElementThrows) {
+    EXPECT_THROW(BernsteinBasis(ElementType::Unknown, 2), BasisElementCompatibilityException);
 }
 
 // =============================================================================
 // SpectralBasis error paths
 // =============================================================================
 
-TEST(BasisErrorPaths, SpectralOnWedgeThrows) {
-    EXPECT_THROW(SpectralBasis(ElementType::Wedge6, 2), NotImplementedException);
+TEST(BasisErrorPaths, SpectralOnWedgeConstructs) {
+    EXPECT_NO_THROW(SpectralBasis(ElementType::Wedge6, 2));
 }
 
-TEST(BasisErrorPaths, SpectralOnPyramidThrows) {
-    EXPECT_THROW(SpectralBasis(ElementType::Pyramid5, 2), NotImplementedException);
+TEST(BasisErrorPaths, SpectralOnPyramidConstructs) {
+    EXPECT_NO_THROW(SpectralBasis(ElementType::Pyramid5, 2));
 }
 
 // =============================================================================
@@ -88,6 +87,13 @@ TEST(BasisErrorPaths, SpectralOnPyramidThrows) {
 TEST(BasisErrorPaths, SerendipityUnsupportedElementThrows) {
     // Serendipity on tetrahedra is not supported
     EXPECT_THROW(SerendipityBasis(ElementType::Tetra4, 2), BasisElementCompatibilityException);
+}
+
+TEST(BasisErrorPaths, SerendipityHigherOrderRequestsThrow) {
+    EXPECT_THROW(SerendipityBasis(ElementType::Quad4, 3), NotImplementedException);
+    EXPECT_THROW(SerendipityBasis(ElementType::Hex8, 3), NotImplementedException);
+    EXPECT_THROW(SerendipityBasis(ElementType::Wedge15, 3), NotImplementedException);
+    EXPECT_THROW(SerendipityBasis(ElementType::Pyramid13, 3), NotImplementedException);
 }
 
 // =============================================================================
@@ -126,6 +132,7 @@ TEST(BasisErrorPaths, BSplineTooFewKnotsThrows) {
 
 TEST(BasisErrorPaths, FactoryUnsupportedBasisTypeThrows) {
     BasisRequest req{ElementType::Line2, BasisType::Custom, 1, Continuity::C0, FieldType::Scalar};
+    req.custom_id = "missing";
     EXPECT_THROW(BasisFactory::create(req), BasisConfigurationException);
 }
 
@@ -148,6 +155,34 @@ TEST(BasisErrorPaths, VectorBasisScalarEvaluationThrows) {
     const math::Vector<Real, 3> xi{Real(0.2), Real(0.3), Real(0.0)};
     std::vector<Real> values;
     EXPECT_THROW(basis.evaluate_values(xi, values), BasisEvaluationException);
+}
+
+TEST(BasisErrorPaths, RaviartThomasNegativeOrderThrowsInvalidArgument) {
+    try {
+        (void)RaviartThomasBasis(ElementType::Triangle3, -1);
+        FAIL() << "Expected FEException";
+    } catch (const FEException& e) {
+        EXPECT_EQ(e.status(), FEStatus::InvalidArgument);
+    }
+}
+
+TEST(BasisErrorPaths, NedelecNegativeOrderThrowsInvalidArgument) {
+    try {
+        (void)NedelecBasis(ElementType::Triangle3, -1);
+        FAIL() << "Expected FEException";
+    } catch (const FEException& e) {
+        EXPECT_EQ(e.status(), FEStatus::InvalidArgument);
+    }
+}
+
+TEST(BasisErrorPaths, BDMHigherOrderThrowsNotImplemented) {
+    EXPECT_THROW(BDMBasis(ElementType::Triangle3, 2), NotImplementedException);
+    EXPECT_THROW(BDMBasis(ElementType::Quad4, 2), NotImplementedException);
+}
+
+TEST(BasisErrorPaths, BDMUnsupportedTopologyThrows) {
+    EXPECT_THROW(BDMBasis(ElementType::Tetra4, 1), BasisElementCompatibilityException);
+    EXPECT_THROW(BDMBasis(ElementType::Hex8, 1), BasisElementCompatibilityException);
 }
 
 TEST(BasisErrorPaths, ModalTransformMalformedModalBasisThrowsConstructionException) {

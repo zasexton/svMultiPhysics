@@ -16,6 +16,10 @@
 
 #include "Elements/Element.h"
 
+#include <optional>
+#include <string>
+#include <vector>
+
 namespace svmp {
 namespace FE {
 namespace elements {
@@ -28,15 +32,22 @@ struct ElementRequest {
     BasisType   basis_type{BasisType::Lagrange};
     FieldType   field_type{FieldType::Scalar};
     Continuity  continuity{Continuity::C0};
-    int         order{1};
+    std::optional<int> order{};
+    std::vector<Real> knot_vector{};
+    std::vector<Real> weights{};
+    std::vector<int> axis_orders{};
+    std::vector<std::vector<Real>> axis_knot_vectors{};
+    std::vector<std::vector<Real>> axis_weights{};
+    std::vector<int> tensor_extents{};
+    std::string custom_id{};
 };
 
 /**
  * @brief Factory for creating concrete Element instances
  *
  * The factory encapsulates the selection of concrete element classes
- * (Lagrange, DG, vector, spectral, etc.) based on a simple request
- * structure. More specialized elements (e.g., mixed, isogeometric,
+ * (Lagrange, DG, vector, spectral, generic basis-backed, etc.) based on a
+ * simple request structure. More specialized elements (e.g., mixed,
  * composite) are typically constructed directly by higher-level code.
  */
 class ElementFactory {
@@ -49,4 +60,3 @@ public:
 } // namespace svmp
 
 #endif // SVMP_FE_ELEMENTS_ELEMENTFACTORY_H
-

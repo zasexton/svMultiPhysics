@@ -1252,6 +1252,11 @@ inline void eval_pyramid_rational_rt0_divergence(std::vector<Real>& divergence) 
 
 RaviartThomasBasis::RaviartThomasBasis(ElementType type, int order)
     : element_type_(type), dimension_(0), order_(order) {
+    if (order_ < 0) {
+        throw BasisConfigurationException("RaviartThomasBasis requires non-negative order",
+                                          __FILE__, __LINE__, __func__);
+    }
+
     if (is_triangle(type) || is_quadrilateral(type)) {
         dimension_ = 2;
         if (is_triangle(type)) {
@@ -2659,6 +2664,11 @@ void RaviartThomasBasis::evaluate_divergence(const math::Vector<Real, 3>& xi,
 
 NedelecBasis::NedelecBasis(ElementType type, int order)
     : element_type_(type), dimension_(0), order_(order) {
+    if (order_ < 0) {
+        throw BasisConfigurationException("NedelecBasis requires non-negative order",
+                                          __FILE__, __LINE__, __func__);
+    }
+
     if (is_triangle(type) || is_quadrilateral(type)) {
         dimension_ = 2;
         if (is_triangle(type)) {
@@ -4217,6 +4227,10 @@ void NedelecBasis::evaluate_curl(const math::Vector<Real, 3>& xi,
 
 BDMBasis::BDMBasis(ElementType type, int order)
     : element_type_(type), dimension_(0), order_(order), size_(0) {
+    if (order_ < 0) {
+        throw BasisConfigurationException("BDMBasis requires non-negative order",
+                                          __FILE__, __LINE__, __func__);
+    }
     if (order_ != 1) {
         throw NotImplementedException("BDMBasis currently supports only order 1",
                                       __FILE__, __LINE__, __func__);

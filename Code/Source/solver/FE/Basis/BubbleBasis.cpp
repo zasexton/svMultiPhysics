@@ -13,6 +13,10 @@ namespace basis {
 
 namespace {
 
+bool is_line(ElementType t) {
+    return t == ElementType::Line2 || t == ElementType::Line3;
+}
+
 bool is_tri(ElementType t) {
     return t == ElementType::Triangle3 || t == ElementType::Triangle6;
 }
@@ -29,10 +33,21 @@ bool is_hex(ElementType t) {
     return t == ElementType::Hex8 || t == ElementType::Hex20 || t == ElementType::Hex27;
 }
 
+bool is_wedge(ElementType t) {
+    return t == ElementType::Wedge6 || t == ElementType::Wedge15 || t == ElementType::Wedge18;
+}
+
+bool is_pyramid(ElementType t) {
+    return t == ElementType::Pyramid5 || t == ElementType::Pyramid13 || t == ElementType::Pyramid14;
+}
+
 } // namespace
 
 BubbleBasis::BubbleBasis(ElementType type) : element_type_(type) {
-    if (is_tri(type)) {
+    if (is_line(type)) {
+        dimension_ = 1;
+        order_ = 2;
+    } else if (is_tri(type)) {
         dimension_ = 2;
         order_ = 3;
     } else if (is_tet(type)) {
@@ -44,6 +59,12 @@ BubbleBasis::BubbleBasis(ElementType type) : element_type_(type) {
     } else if (is_hex(type)) {
         dimension_ = 3;
         order_ = 2;
+    } else if (is_wedge(type)) {
+        dimension_ = 3;
+        order_ = 5;
+    } else if (is_pyramid(type)) {
+        dimension_ = 3;
+        order_ = 5;
     } else {
         throw BasisElementCompatibilityException("BubbleBasis: unsupported element type",
                                                  __FILE__, __LINE__, __func__);
@@ -54,7 +75,10 @@ void BubbleBasis::evaluate_values(const math::Vector<Real, 3>& xi,
                                   std::vector<Real>& values) const {
     values.resize(1);
 
-    if (is_tri(element_type_)) {
+    if (is_line(element_type_)) {
+        const Real x = xi[0];
+        values[0] = Real(1) - x * x;
+    } else if (is_tri(element_type_)) {
         // Barycentric: L0 = 1 - xi - eta, L1 = xi, L2 = eta
         const Real L0 = Real(1) - xi[0] - xi[1];
         const Real L1 = xi[0];
@@ -68,6 +92,20 @@ void BubbleBasis::evaluate_values(const math::Vector<Real, 3>& xi,
         values[0] = Real(256) * L0 * L1 * L2 * L3;
     } else if (is_quad(element_type_)) {
         values[0] = (Real(1) - xi[0] * xi[0]) * (Real(1) - xi[1] * xi[1]);
+    } else if (is_wedge(element_type_)) {
+        const Real L0 = Real(1) - xi[0] - xi[1];
+        const Real L1 = xi[0];
+        const Real L2 = xi[1];
+        const Real z = xi[2];
+        values[0] = Real(27) * L0 * L1 * L2 * (Real(1) - z * z);
+    } else if (is_pyramid(element_type_)) {
+        const Real x = xi[0];
+        const Real y = xi[1];
+        const Real z = xi[2];
+        const Real one_minus_z = Real(1) - z;
+        const Real ax = one_minus_z * one_minus_z - x * x;
+        const Real ay = one_minus_z * one_minus_z - y * y;
+        values[0] = (Real(3125) / Real(256)) * z * ax * ay;
     } else {
         // Hex
         values[0] = (Real(1) - xi[0] * xi[0]) *
@@ -81,7 +119,9 @@ void BubbleBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
     gradients.resize(1);
     Gradient g{};
 
-    if (is_tri(element_type_)) {
+    if (is_line(element_type_)) {
+        g[0] = -Real(2) * xi[0];
+    } else if (is_tri(element_type_)) {
         const Real L0 = Real(1) - xi[0] - xi[1];
         const Real L1 = xi[0];
         const Real L2 = xi[1];
@@ -103,6 +143,32 @@ void BubbleBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
         const Real x = xi[0], y = xi[1];
         g[0] = -Real(2) * x * (Real(1) - y * y);
         g[1] = (Real(1) - x * x) * (-Real(2) * y);
+    } else if (is_wedge(element_type_)) {
+        const Real L0 = Real(1) - xi[0] - xi[1];
+        const Real L1 = xi[0];
+        const Real L2 = xi[1];
+        const Real z = xi[2];
+        const Real tri = Real(27) * L0 * L1 * L2;
+        const Real z_factor = Real(1) - z * z;
+
+        const Real dtri_dxi = Real(27) * (-L1 * L2 + L0 * L2);
+        const Real dtri_deta = Real(27) * (-L1 * L2 + L0 * L1);
+
+        g[0] = dtri_dxi * z_factor;
+        g[1] = dtri_deta * z_factor;
+        g[2] = tri * (Real(-2) * z);
+    } else if (is_pyramid(element_type_)) {
+        const Real x = xi[0];
+        const Real y = xi[1];
+        const Real z = xi[2];
+        const Real s = Real(1) - z;
+        const Real ax = s * s - x * x;
+        const Real ay = s * s - y * y;
+        const Real scale = Real(3125) / Real(256);
+
+        g[0] = scale * z * (Real(-2) * x) * ay;
+        g[1] = scale * z * ax * (Real(-2) * y);
+        g[2] = scale * (ax * ay - Real(2) * z * s * (ax + ay));
     } else {
         // Hex
         const Real x = xi[0], y = xi[1], z = xi[2];

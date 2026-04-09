@@ -56,7 +56,7 @@ enum class SpaceType : std::uint8_t {
     Composite,
     Enriched,
     Adaptive,
-    Isogeometric
+    GenericBasis
 };
 
 /**

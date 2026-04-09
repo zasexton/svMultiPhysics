@@ -11,19 +11,20 @@
 
 /**
  * @file C1Space.h
- * @brief C¹-continuous scalar function space on 1D line elements
+ * @brief C¹-continuous scalar function space on Hermite-supported cells
  *
- * This space provides a minimal C¹ function space built from a cubic Hermite
- * basis on 2-node line elements. It is intended as a building block for
- * higher-continuity formulations (e.g., beams or shells) along 1D directions.
+ * This space provides a C¹ function space built from the cubic Hermite basis
+ * on every topology currently supported by `HermiteBasis`: line, quadrilateral,
+ * and hexahedral tensor-product cells.
  *
  * The implementation is mesh-agnostic and relies only on the Elements, Basis,
- * and Quadrature modules. It uses elements::IsogeometricElement internally
- * with HermiteC1LineBasis and Gauss-Legendre quadrature.
+ * and Quadrature modules. It uses elements::GeneralBasisElement internally as
+ * a generic basis-backed element host with Hermite basis and Gauss-Legendre
+ * quadrature.
  */
 
 #include "Spaces/FunctionSpace.h"
-#include "Elements/IsogeometricElement.h"
+#include "Elements/GeneralBasisElement.h"
 #include "Basis/HermiteBasis.h"
 #include "Quadrature/QuadratureFactory.h"
 
@@ -32,11 +33,11 @@ namespace FE {
 namespace spaces {
 
 /**
- * @brief C¹-continuous scalar space on Line2 elements using cubic Hermite basis
+ * @brief C¹-continuous scalar space on Hermite-supported elements
  */
 class C1Space : public FunctionSpace {
 public:
-    /// Construct C¹ space on a given 1D element type (currently Line2 only)
+    /// Construct C¹ space on Line2, Quad4, or Hex8 using cubic Hermite basis
     C1Space(ElementType element_type,
             int order = 3);
 

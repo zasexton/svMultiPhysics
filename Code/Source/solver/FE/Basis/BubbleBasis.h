@@ -16,11 +16,21 @@
  * boundary faces/edges. Used in MINI elements (P1+bubble for Stokes),
  * stabilized methods, and enrichment via EnrichedSpace.
  *
- * Supported elements:
- *   - Triangle3:  b = 27 * L0 * L1 * L2          (cubic, 1 DOF)
- *   - Tetra4:     b = 256 * L0 * L1 * L2 * L3    (quartic, 1 DOF)
- *   - Quad4:      b = (1 - xi^2)(1 - eta^2)       (biquadratic, 1 DOF)
- *   - Hex8:       b = (1-xi^2)(1-eta^2)(1-zeta^2) (triquadratic, 1 DOF)
+ * Supported topologies (including the listed node-count aliases):
+ *   - Line2 / Line3:
+ *       b = 1 - xi^2                                           (quadratic, 1 DOF)
+ *   - Triangle3 / Triangle6:
+ *       b = 27 * L0 * L1 * L2                                  (cubic, 1 DOF)
+ *   - Tetra4 / Tetra10:
+ *       b = 256 * L0 * L1 * L2 * L3                            (quartic, 1 DOF)
+ *   - Quad4 / Quad8 / Quad9:
+ *       b = (1 - xi^2)(1 - eta^2)                              (biquadratic, 1 DOF)
+ *   - Hex8 / Hex20 / Hex27:
+ *       b = (1-xi^2)(1-eta^2)(1-zeta^2)                        (triquadratic, 1 DOF)
+ *   - Wedge6 / Wedge15 / Wedge18:
+ *       b = 27 * L0 * L1 * L2 * (1-z^2)                        (quintic, 1 DOF)
+ *   - Pyramid5 / Pyramid13 / Pyramid14:
+ *       b = (3125/256) z[(1-z)^2-x^2][(1-z)^2-y^2]             (quintic, 1 DOF)
  */
 
 #include "BasisFunction.h"

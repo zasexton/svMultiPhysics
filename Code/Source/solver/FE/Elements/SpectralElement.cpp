@@ -59,10 +59,23 @@ SpectralElement::SpectralElement(ElementType element_type,
 
     num_dofs_ = basis_->size();
 
-    // For collocation (diagonal mass matrix), use Gauss-Lobatto quadrature with
-    // (p+1) points per coordinate, i.e. polynomial exactness 2p-1.
     const int quad_order = 2 * info_.order - 1;
-    quad_ = QuadratureFactory::create(element_type, quad_order, QuadratureType::GaussLobatto);
+    QuadratureType quad_type = QuadratureType::GaussLobatto;
+
+    // Collocated Gauss-Lobatto quadrature is the natural default for tensor
+    // product spectral cells. Wedge and pyramid spectral bases use compatible
+    // nodal traces but not a fully tensor-product collocation rule, so fall
+    // back to standard Gauss-Legendre integration there.
+    if (element_type == ElementType::Wedge6 ||
+        element_type == ElementType::Wedge15 ||
+        element_type == ElementType::Wedge18 ||
+        element_type == ElementType::Pyramid5 ||
+        element_type == ElementType::Pyramid13 ||
+        element_type == ElementType::Pyramid14) {
+        quad_type = QuadratureType::GaussLegendre;
+    }
+
+    quad_ = QuadratureFactory::create(element_type, quad_order, quad_type);
     if (!quad_) {
         throw FEException("SpectralElement: QuadratureFactory returned null rule",
                           __FILE__, __LINE__, __func__, FEStatus::QuadratureError);

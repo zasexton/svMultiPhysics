@@ -7,13 +7,42 @@
 
 #include "FE/Elements/ElementFactory.h"
 #include "FE/Elements/ElementCache.h"
+#include "FE/Elements/GeneralBasisElement.h"
 #include "FE/Elements/ElementValidator.h"
 #include "FE/Elements/LagrangeElement.h"
+#include "FE/Basis/BasisFactory.h"
 #include "FE/Geometry/IsoparametricMapping.h"
 #include "FE/Basis/LagrangeBasis.h"
+#include <optional>
 
 using namespace svmp::FE;
 using namespace svmp::FE::elements;
+
+namespace {
+
+class TestCustomElementBasis final : public basis::BasisFunction {
+public:
+    explicit TestCustomElementBasis(int order)
+        : order_(order) {}
+
+    BasisType basis_type() const noexcept override { return BasisType::Custom; }
+    ElementType element_type() const noexcept override { return ElementType::Line2; }
+    int dimension() const noexcept override { return 1; }
+    int order() const noexcept override { return order_; }
+    std::size_t size() const noexcept override { return 2u; }
+
+    void evaluate_values(const math::Vector<Real, 3>& xi,
+                         std::vector<Real>& values) const override {
+        values.resize(2u);
+        values[0] = Real(0.5) * (Real(1) - xi[0]);
+        values[1] = Real(0.5) * (Real(1) + xi[0]);
+    }
+
+private:
+    int order_{1};
+};
+
+} // namespace
 
 TEST(ElementFactory, CreatesLagrangeAndDGAndVector) {
     ElementRequest req;
@@ -77,6 +106,117 @@ TEST(ElementFactory, CreatesVectorElementsFromExplicitVectorBasisTypes) {
     req.order      = 0;
     req.continuity = Continuity::H_div;
     EXPECT_THROW(ElementFactory::create(req), svmp::FE::FEException);
+}
+
+TEST(ElementFactory, CreatesGenericScalarBasisBackedElements) {
+    struct Case {
+        ElementType element_type;
+        BasisType basis_type;
+        std::optional<int> order;
+        Continuity requested_continuity;
+        Continuity expected_continuity;
+    };
+
+    const std::vector<Case> cases = {
+        {ElementType::Line2, BasisType::Hierarchical, 3, Continuity::C0, Continuity::C0},
+        {ElementType::Triangle3, BasisType::Bernstein, 2, Continuity::C0, Continuity::C0},
+        {ElementType::Quad4, BasisType::Serendipity, 2, Continuity::C0, Continuity::C0},
+        {ElementType::Quad4, BasisType::Hermite, 3, Continuity::C0, Continuity::C1},
+        {ElementType::Triangle3, BasisType::Bubble, std::nullopt, Continuity::L2, Continuity::L2},
+        {ElementType::Quad4, BasisType::BSpline, 2, Continuity::C0, Continuity::C0},
+        {ElementType::Line2, BasisType::NURBS, 2, Continuity::C0, Continuity::C0},
+        {ElementType::Quad4, BasisType::NURBS, 2, Continuity::C0, Continuity::C0},
+        {ElementType::Hex8, BasisType::NURBS, 2, Continuity::C0, Continuity::C0},
+    };
+
+    for (const auto& c : cases) {
+        ElementRequest req;
+        req.element_type = c.element_type;
+        req.basis_type = c.basis_type;
+        req.field_type = FieldType::Scalar;
+        req.continuity = c.requested_continuity;
+        req.order = c.order;
+        if (c.basis_type == BasisType::BSpline) {
+            req.axis_orders = {2, 1};
+            req.axis_knot_vectors = {
+                {Real(0), Real(0), Real(0), Real(0.5), Real(1), Real(1), Real(1)},
+                {Real(0), Real(0), Real(0.3), Real(0.7), Real(1), Real(1)}
+            };
+        } else if (c.basis_type == BasisType::NURBS) {
+            if (c.element_type == ElementType::Line2) {
+                req.knot_vector = {Real(0), Real(0), Real(0), Real(0.5), Real(1), Real(1), Real(1)};
+                req.weights = {Real(1), Real(0.75), Real(1.5), Real(1)};
+            } else if (c.element_type == ElementType::Quad4) {
+                req.axis_orders = {2, 1};
+                req.axis_knot_vectors = {
+                    {Real(0), Real(0), Real(0), Real(0.5), Real(1), Real(1), Real(1)},
+                    {Real(0), Real(0), Real(0.35), Real(0.7), Real(1), Real(1)}
+                };
+                req.tensor_extents = {4, 4};
+                req.weights.assign(16u, Real(1));
+                req.weights[5] = Real(0.8);
+                req.weights[10] = Real(1.4);
+            } else {
+                req.axis_orders = {2, 1, 1};
+                req.axis_knot_vectors = {
+                    {Real(0), Real(0), Real(0), Real(0.5), Real(1), Real(1), Real(1)},
+                    {Real(0), Real(0), Real(0.4), Real(1), Real(1)},
+                    {Real(0), Real(0), Real(0.6), Real(1), Real(1)}
+                };
+                req.tensor_extents = {4, 3, 3};
+                req.weights.assign(36u, Real(1));
+                req.weights[4] = Real(0.65);
+                req.weights[18] = Real(1.35);
+                req.weights[31] = Real(0.9);
+            }
+        }
+
+        auto elem = ElementFactory::create(req);
+        ASSERT_TRUE(elem);
+        EXPECT_EQ(elem->element_type(), c.element_type);
+        EXPECT_EQ(elem->field_type(), FieldType::Scalar);
+        EXPECT_EQ(elem->continuity(), c.expected_continuity);
+
+        auto generic = std::dynamic_pointer_cast<GeneralBasisElement>(elem);
+        ASSERT_TRUE(generic);
+
+        auto basis = elem->basis_ptr();
+        ASSERT_TRUE(basis);
+        EXPECT_EQ(basis->basis_type(), c.basis_type);
+        EXPECT_EQ(basis->element_type(), c.element_type);
+        EXPECT_GT(elem->quadrature()->num_points(), 0u);
+    }
+}
+
+TEST(ElementFactory, CreatesRegisteredCustomScalarElement) {
+    basis::BasisFactory::clear_custom_registry_for_tests();
+    basis::BasisFactory::register_custom(
+        "test-element-custom",
+        [](const basis::BasisRequest& req) -> std::shared_ptr<basis::BasisFunction> {
+            return std::make_shared<TestCustomElementBasis>(req.order.value_or(1));
+        });
+
+    ElementRequest req;
+    req.element_type = ElementType::Line2;
+    req.basis_type = BasisType::Custom;
+    req.field_type = FieldType::Scalar;
+    req.continuity = Continuity::C0;
+    req.order = 2;
+    req.custom_id = "test-element-custom";
+
+    auto elem = ElementFactory::create(req);
+    ASSERT_TRUE(elem);
+    EXPECT_EQ(elem->element_type(), ElementType::Line2);
+    EXPECT_EQ(elem->field_type(), FieldType::Scalar);
+    EXPECT_EQ(elem->continuity(), Continuity::C0);
+
+    auto generic = std::dynamic_pointer_cast<GeneralBasisElement>(elem);
+    ASSERT_TRUE(generic);
+    ASSERT_TRUE(elem->basis_ptr());
+    EXPECT_EQ(elem->basis_ptr()->basis_type(), BasisType::Custom);
+    EXPECT_EQ(elem->basis_ptr()->order(), 2);
+
+    basis::BasisFactory::clear_custom_registry_for_tests();
 }
 
 TEST(ElementCache, AggregatesBasisAndJacobianCaches) {

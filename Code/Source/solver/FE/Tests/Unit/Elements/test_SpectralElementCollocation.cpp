@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <vector>
 
 using namespace svmp::FE;
@@ -182,3 +183,31 @@ TEST(SpectralElement, CollocationAndDiagonalMassHex) {
     expect_mass_matrix_diagonal(M, basis_ptr->size(), 1e-12);
 }
 
+TEST(SpectralElement, WedgeAndPyramidConstructWithValidQuadrature) {
+    const struct Case {
+        ElementType type;
+        int order;
+        math::Vector<Real, 3> xi;
+    } cases[] = {
+        {ElementType::Wedge6, 3, {Real(0.2), Real(0.25), Real(0.15)}},
+        {ElementType::Pyramid5, 2, {Real(0.1), Real(-0.08), Real(0.25)}},
+    };
+
+    for (const auto& c : cases) {
+        SpectralElement elem(c.type, c.order);
+
+        auto basis_ptr = elem.basis_ptr();
+        auto quad = elem.quadrature();
+        ASSERT_TRUE(basis_ptr);
+        ASSERT_TRUE(quad);
+        EXPECT_EQ(basis_ptr->basis_type(), BasisType::Spectral);
+        EXPECT_EQ(basis_ptr->element_type(), c.type);
+        EXPECT_EQ(quad->order(), 2 * c.order - 1);
+        EXPECT_GT(quad->num_points(), 0u);
+
+        std::vector<Real> values;
+        basis_ptr->evaluate_values(c.xi, values);
+        ASSERT_EQ(values.size(), basis_ptr->size());
+        EXPECT_NEAR(std::accumulate(values.begin(), values.end(), Real(0)), Real(1), 1e-9);
+    }
+}

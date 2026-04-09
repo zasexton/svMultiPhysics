@@ -36,9 +36,11 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <type_traits>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -55,6 +57,174 @@ namespace FE {
 namespace systems {
 
 namespace {
+
+#if FE_HAS_MPI
+constexpr std::uint64_t kBorderedConsistencyHashSeed = 1469598103934665603ULL;
+
+[[nodiscard]] std::uint64_t mixBorderedConsistencyHash(std::uint64_t hash,
+                                                       std::uint64_t value) noexcept
+{
+    hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6U) + (hash >> 2U);
+    return hash;
+}
+
+template <class T>
+void hashBorderedConsistencyBytes(std::uint64_t& hash, const T& value)
+{
+    static_assert(std::is_trivially_copyable_v<T>);
+    const auto* bytes = reinterpret_cast<const unsigned char*>(&value);
+    for (std::size_t i = 0; i < sizeof(T); ++i) {
+        hash = mixBorderedConsistencyHash(hash, static_cast<std::uint64_t>(bytes[i]));
+    }
+}
+
+template <class T>
+void hashBorderedConsistencySpan(std::uint64_t& hash, std::span<const T> values)
+{
+    hashBorderedConsistencyBytes(hash, values.size());
+    for (const auto& value : values) {
+        hashBorderedConsistencyBytes(hash, value);
+    }
+}
+
+void hashBorderedConsistencyString(std::uint64_t& hash, const std::string& value)
+{
+    hashBorderedConsistencyBytes(hash, value.size());
+    for (const char ch : value) {
+        hashBorderedConsistencyBytes(hash, ch);
+    }
+}
+
+[[nodiscard]] bool borderedCouplingShapeConsistentAcrossRanks(
+    const FESystem::BorderedCouplingData& bc,
+    bool sync_matrix_terms,
+    bool sync_vector_terms,
+    MPI_Comm comm)
+{
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (!mpi_initialized) {
+        return true;
+    }
+
+    int world_size = 1;
+    MPI_Comm_size(comm, &world_size);
+    if (world_size <= 1) {
+        return true;
+    }
+
+    std::uint64_t local_hash = kBorderedConsistencyHashSeed;
+    hashBorderedConsistencyBytes(local_hash, bc.active);
+    hashBorderedConsistencyBytes(local_hash, sync_matrix_terms);
+    hashBorderedConsistencyBytes(local_hash, sync_vector_terms);
+    hashBorderedConsistencyBytes(local_hash, bc.globally_reduced);
+    hashBorderedConsistencyBytes(local_hash, bc.aux_self_terms_replicated);
+    hashBorderedConsistencyBytes(local_hash, bc.n_aux);
+    hashBorderedConsistencyBytes(local_hash, bc.n_field_dofs);
+    hashBorderedConsistencyBytes(local_hash, bc.D.size());
+    hashBorderedConsistencyBytes(local_hash, bc.g.size());
+    hashBorderedConsistencyBytes(local_hash, bc.B.size());
+    hashBorderedConsistencyBytes(local_hash, bc.Ct.size());
+    hashBorderedConsistencyBytes(local_hash, bc.dF_dxdot.size());
+    hashBorderedConsistencyBytes(local_hash, bc.aux_variable_kinds.size());
+    for (const auto kind : bc.aux_variable_kinds) {
+        hashBorderedConsistencyBytes(local_hash, static_cast<std::uint8_t>(kind));
+    }
+    hashBorderedConsistencyBytes(local_hash, bc.aux_blocks.size());
+    for (const auto& block : bc.aux_blocks) {
+        hashBorderedConsistencyString(local_hash, block.name);
+        hashBorderedConsistencyBytes(local_hash, block.dim);
+    }
+
+    int local_count = 0;
+    local_count += 1;
+    local_count += 5;
+    local_count += 2 * static_cast<int>(bc.aux_variable_kinds.size());
+    local_count += 2 * static_cast<int>(bc.aux_blocks.size());
+
+    int min_count = 0;
+    int max_count = 0;
+    MPI_Allreduce(&local_count, &min_count, 1, MPI_INT, MPI_MIN, comm);
+    MPI_Allreduce(&local_count, &max_count, 1, MPI_INT, MPI_MAX, comm);
+
+    std::uint64_t min_hash = 0ULL;
+    std::uint64_t max_hash = 0ULL;
+    MPI_Allreduce(&local_hash, &min_hash, 1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, comm);
+    MPI_Allreduce(&local_hash, &max_hash, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
+
+    return min_count == max_count && min_hash == max_hash;
+}
+
+[[nodiscard]] bool replicatedBorderedCouplingConsistentAcrossRanks(
+    const FESystem::BorderedCouplingData& bc,
+    bool sync_matrix_terms,
+    bool sync_vector_terms,
+    MPI_Comm comm)
+{
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (!mpi_initialized) {
+        return true;
+    }
+
+    int world_size = 1;
+    MPI_Comm_size(comm, &world_size);
+    if (world_size <= 1) {
+        return true;
+    }
+
+    std::uint64_t local_hash = kBorderedConsistencyHashSeed;
+    hashBorderedConsistencyBytes(local_hash, bc.active);
+    hashBorderedConsistencyBytes(local_hash, bc.globally_reduced);
+    hashBorderedConsistencyBytes(local_hash, bc.aux_self_terms_replicated);
+    hashBorderedConsistencyBytes(local_hash, bc.n_aux);
+    hashBorderedConsistencyBytes(local_hash, bc.n_field_dofs);
+
+    hashBorderedConsistencyBytes(local_hash, bc.aux_variable_kinds.size());
+    for (const auto kind : bc.aux_variable_kinds) {
+        hashBorderedConsistencyBytes(local_hash, static_cast<std::uint8_t>(kind));
+    }
+
+    hashBorderedConsistencyBytes(local_hash, bc.aux_blocks.size());
+    for (const auto& block : bc.aux_blocks) {
+        hashBorderedConsistencyString(local_hash, block.name);
+        hashBorderedConsistencyBytes(local_hash, block.dim);
+    }
+
+    int local_count = 0;
+    local_count += 5;
+    local_count += 2 * static_cast<int>(bc.aux_variable_kinds.size());
+    local_count += 2 * static_cast<int>(bc.aux_blocks.size());
+
+    if (sync_matrix_terms) {
+        hashBorderedConsistencySpan(local_hash, std::span<const Real>(bc.B));
+        hashBorderedConsistencySpan(local_hash, std::span<const Real>(bc.Ct));
+        local_count += static_cast<int>(bc.B.size() + bc.Ct.size());
+        if (bc.aux_self_terms_replicated || !bc.D.empty() || !bc.dF_dxdot.empty()) {
+            hashBorderedConsistencySpan(local_hash, std::span<const Real>(bc.D));
+            hashBorderedConsistencySpan(local_hash, std::span<const Real>(bc.dF_dxdot));
+            local_count += static_cast<int>(bc.D.size() + bc.dF_dxdot.size());
+        }
+    }
+
+    if (sync_vector_terms) {
+        hashBorderedConsistencySpan(local_hash, std::span<const Real>(bc.g));
+        local_count += static_cast<int>(bc.g.size());
+    }
+
+    int min_count = 0;
+    int max_count = 0;
+    MPI_Allreduce(&local_count, &min_count, 1, MPI_INT, MPI_MIN, comm);
+    MPI_Allreduce(&local_count, &max_count, 1, MPI_INT, MPI_MAX, comm);
+
+    std::uint64_t min_hash = 0ULL;
+    std::uint64_t max_hash = 0ULL;
+    MPI_Allreduce(&local_hash, &min_hash, 1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, comm);
+    MPI_Allreduce(&local_hash, &max_hash, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
+
+    return min_count == max_count && min_hash == max_hash;
+}
+#endif
 
 std::string summarizeSparsePairsForTrace(std::span<const std::pair<GlobalIndex, Real>> entries,
                                          std::size_t max_items = 8)
@@ -264,6 +434,12 @@ void synchronizeBorderedCouplingForReplicatedSolve(FESystem::BorderedCouplingDat
     int mpi_initialized = 0;
     MPI_Initialized(&mpi_initialized);
     if (mpi_initialized) {
+        if (!borderedCouplingShapeConsistentAcrossRanks(
+                bc, sync_matrix_terms, sync_vector_terms, comm)) {
+            FE_THROW(FEException,
+                     "assembleOperator: bordered coupling structure differs across MPI ranks "
+                     "before replicated dense reduction.");
+        }
         if (sync_matrix_terms) {
             allreduceDenseEntries(bc.B, comm);
             allreduceDenseEntries(bc.Ct, comm);
@@ -277,6 +453,15 @@ void synchronizeBorderedCouplingForReplicatedSolve(FESystem::BorderedCouplingDat
                 allreduceDenseEntries(bc.g, comm);
             }
         }
+
+        bc.globally_reduced = true;
+        if (!replicatedBorderedCouplingConsistentAcrossRanks(
+                bc, sync_matrix_terms, sync_vector_terms, comm)) {
+            FE_THROW(FEException,
+                     "assembleOperator: replicated bordered coupling data differs across MPI "
+                     "ranks after synchronization.");
+        }
+        return;
     }
 #endif
 

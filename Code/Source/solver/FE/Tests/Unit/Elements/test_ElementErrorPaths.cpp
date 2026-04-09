@@ -20,7 +20,7 @@
 #include "FE/Elements/DiscontinuousElement.h"
 #include "FE/Elements/VectorElement.h"
 #include "FE/Elements/SpectralElement.h"
-#include "FE/Elements/IsogeometricElement.h"
+#include "FE/Elements/GeneralBasisElement.h"
 #include "FE/Elements/MixedElement.h"
 #include "FE/Elements/CompositeElement.h"
 #include "FE/Elements/ReferenceElement.h"
@@ -104,13 +104,64 @@ TEST(ElementFactoryErrors, ThrowsOnSpectralWithVectorField) {
     EXPECT_THROW(ElementFactory::create(req), FEException);
 }
 
-TEST(ElementFactoryErrors, ThrowsOnUnsupportedBasisType) {
+TEST(ElementFactoryErrors, ThrowsOnUnknownCustomBasisType) {
     ElementRequest req;
     req.element_type = ElementType::Quad4;
-    req.basis_type   = BasisType::Hierarchical;  // Not supported by factory
+    req.basis_type   = BasisType::Custom;
     req.field_type   = FieldType::Scalar;
     req.order        = 1;
+    req.custom_id    = "missing";
 
+    EXPECT_THROW(ElementFactory::create(req), FEException);
+}
+
+TEST(ElementFactoryErrors, ThrowsOnMissingOrderForOrderBearingRequest) {
+    ElementRequest req;
+    req.element_type = ElementType::Quad4;
+    req.basis_type   = BasisType::Lagrange;
+    req.field_type   = FieldType::Scalar;
+    req.continuity   = Continuity::C0;
+
+    EXPECT_THROW(ElementFactory::create(req), FEException);
+}
+
+TEST(ElementFactoryErrors, ThrowsOnExplicitOrderForBubbleRequest) {
+    ElementRequest req;
+    req.element_type = ElementType::Triangle3;
+    req.basis_type   = BasisType::Bubble;
+    req.field_type   = FieldType::Scalar;
+    req.continuity   = Continuity::L2;
+    req.order        = 3;
+
+    EXPECT_THROW(ElementFactory::create(req), FEException);
+}
+
+TEST(ElementFactoryErrors, ThrowsOnHigherOrderSerendipityRequestsOutsideContract) {
+    ElementRequest req;
+    req.element_type = ElementType::Quad4;
+    req.basis_type   = BasisType::Serendipity;
+    req.field_type   = FieldType::Scalar;
+    req.continuity   = Continuity::C0;
+    req.order        = 3;
+
+    EXPECT_THROW(ElementFactory::create(req), FEException);
+
+    req.element_type = ElementType::Hex8;
+    EXPECT_THROW(ElementFactory::create(req), FEException);
+}
+
+TEST(ElementFactoryErrors, ThrowsOnUnsupportedBDMRequests) {
+    ElementRequest req;
+    req.element_type = ElementType::Quad4;
+    req.basis_type   = BasisType::BDM;
+    req.field_type   = FieldType::Vector;
+    req.continuity   = Continuity::C0;
+    req.order        = 2;
+
+    EXPECT_THROW(ElementFactory::create(req), FEException);
+
+    req.element_type = ElementType::Tetra4;
+    req.order        = 1;
     EXPECT_THROW(ElementFactory::create(req), FEException);
 }
 
@@ -196,62 +247,62 @@ TEST(VectorElementErrors, AcceptsHcurl) {
 }
 
 //------------------------------------------------------------------------------
-// IsogeometricElement Error Path Tests
+// GeneralBasisElement Error Path Tests
 //------------------------------------------------------------------------------
 
-TEST(IsogeometricElementErrors, ThrowsOnNullBasis) {
+TEST(GeneralBasisElementErrors, ThrowsOnNullBasis) {
     auto quad = std::make_shared<quadrature::QuadrilateralQuadrature>(2);
 
     EXPECT_THROW(
-        IsogeometricElement(nullptr, quad, FieldType::Scalar, Continuity::C0),
+        GeneralBasisElement(nullptr, quad, FieldType::Scalar, Continuity::C0),
         FEException
     );
 }
 
-TEST(IsogeometricElementErrors, ThrowsOnNullQuadrature) {
+TEST(GeneralBasisElementErrors, ThrowsOnNullQuadrature) {
     auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Quad4, 1);
 
     EXPECT_THROW(
-        IsogeometricElement(basis, nullptr, FieldType::Scalar, Continuity::C0),
+        GeneralBasisElement(basis, nullptr, FieldType::Scalar, Continuity::C0),
         FEException
     );
 }
 
-TEST(IsogeometricElementErrors, AcceptsValidInputs) {
+TEST(GeneralBasisElementErrors, AcceptsValidInputs) {
     auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Quad4, 1);
     auto quad = std::make_shared<quadrature::QuadrilateralQuadrature>(2);
 
     EXPECT_NO_THROW(
-        IsogeometricElement(basis, quad, FieldType::Scalar, Continuity::C0)
+        GeneralBasisElement(basis, quad, FieldType::Scalar, Continuity::C0)
     );
 }
 
-TEST(IsogeometricElementErrors, ThrowsOnVectorFieldWithScalarBasis) {
+TEST(GeneralBasisElementErrors, ThrowsOnVectorFieldWithScalarBasis) {
     auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Quad4, 1);
     auto quad = std::make_shared<quadrature::QuadrilateralQuadrature>(2);
 
     EXPECT_THROW(
-        IsogeometricElement(basis, quad, FieldType::Vector, Continuity::C0),
+        GeneralBasisElement(basis, quad, FieldType::Vector, Continuity::C0),
         FEException
     );
 }
 
-TEST(IsogeometricElementErrors, ThrowsOnScalarFieldWithVectorBasis) {
+TEST(GeneralBasisElementErrors, ThrowsOnScalarFieldWithVectorBasis) {
     auto basis = std::make_shared<basis::RaviartThomasBasis>(ElementType::Quad4, 0);
     auto quad = std::make_shared<quadrature::QuadrilateralQuadrature>(2);
 
     EXPECT_THROW(
-        IsogeometricElement(basis, quad, FieldType::Scalar, Continuity::H_div),
+        GeneralBasisElement(basis, quad, FieldType::Scalar, Continuity::H_div),
         FEException
     );
 }
 
-TEST(IsogeometricElementErrors, AcceptsVectorBasisWithMatchingMetadata) {
+TEST(GeneralBasisElementErrors, AcceptsVectorBasisWithMatchingMetadata) {
     auto basis = std::make_shared<basis::RaviartThomasBasis>(ElementType::Quad4, 0);
     auto quad = std::make_shared<quadrature::QuadrilateralQuadrature>(2);
 
     EXPECT_NO_THROW(
-        IsogeometricElement(basis, quad, FieldType::Vector, Continuity::H_div)
+        GeneralBasisElement(basis, quad, FieldType::Vector, Continuity::H_div)
     );
 }
 
@@ -591,37 +642,37 @@ TEST(FactoryConsistencyTests, OrderZeroLagrangeCreatesSuccessfully) {
 }
 
 //------------------------------------------------------------------------------
-// IsogeometricElement Compatibility Tests
+// GeneralBasisElement Compatibility Tests
 //------------------------------------------------------------------------------
 
-TEST(IsogeometricElementErrors, ThrowsOnDimensionMismatch) {
+TEST(GeneralBasisElementErrors, ThrowsOnDimensionMismatch) {
     // 2D basis (Quad4) with 1D quadrature (Line)
     auto basis_2d = std::make_shared<basis::LagrangeBasis>(ElementType::Quad4, 1);
     auto quad_1d = std::make_shared<quadrature::GaussQuadrature1D>(2);  // 1D Gauss
 
     EXPECT_THROW(
-        IsogeometricElement(basis_2d, quad_1d, FieldType::Scalar, Continuity::C0),
+        GeneralBasisElement(basis_2d, quad_1d, FieldType::Scalar, Continuity::C0),
         FEException
     );
 }
 
-TEST(IsogeometricElementErrors, ThrowsOnCellFamilyMismatch) {
+TEST(GeneralBasisElementErrors, ThrowsOnCellFamilyMismatch) {
     // Triangle basis with Quad quadrature (same dimension, different family)
     auto basis_tri = std::make_shared<basis::LagrangeBasis>(ElementType::Triangle3, 1);
     auto quad_quad = std::make_shared<quadrature::QuadrilateralQuadrature>(2);
 
     EXPECT_THROW(
-        IsogeometricElement(basis_tri, quad_quad, FieldType::Scalar, Continuity::C0),
+        GeneralBasisElement(basis_tri, quad_quad, FieldType::Scalar, Continuity::C0),
         FEException
     );
 }
 
-TEST(IsogeometricElementErrors, AcceptsMatchingBasisAndQuadrature) {
+TEST(GeneralBasisElementErrors, AcceptsMatchingBasisAndQuadrature) {
     auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Quad4, 1);
     auto quad = std::make_shared<quadrature::QuadrilateralQuadrature>(2);
 
     EXPECT_NO_THROW(
-        IsogeometricElement(basis, quad, FieldType::Scalar, Continuity::C0)
+        GeneralBasisElement(basis, quad, FieldType::Scalar, Continuity::C0)
     );
 }
 

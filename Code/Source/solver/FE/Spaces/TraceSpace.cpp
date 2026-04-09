@@ -12,7 +12,7 @@
 #include "Basis/SerendipityBasis.h"
 #include "Basis/NodeOrderingConventions.h"
 #include "Core/FEException.h"
-#include "Elements/IsogeometricElement.h"
+#include "Elements/GeneralBasisElement.h"
 #include "Elements/LagrangeElement.h"
 #include "Geometry/IsoparametricMapping.h"
 #include "Quadrature/QuadratureFactory.h"
@@ -183,7 +183,7 @@ TraceSpace::TraceSpace(std::shared_ptr<FunctionSpace> volume_space,
         auto face_basis = std::make_shared<basis::SerendipityBasis>(spec.element_type, spec.order, false);
         const int qord = quadrature::QuadratureFactory::recommended_order(spec.order, /*is_mass_matrix=*/true);
         auto face_quad = quadrature::QuadratureFactory::create(spec.element_type, qord, QuadratureType::GaussLegendre, true);
-        face_element_ = std::make_shared<elements::IsogeometricElement>(
+        face_element_ = std::make_shared<elements::GeneralBasisElement>(
             std::move(face_basis), std::move(face_quad), FieldType::Scalar, volume_space_->continuity());
     } else {
         face_element_ = std::make_shared<elements::LagrangeElement>(
