@@ -16,16 +16,21 @@
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
 
+#include "Elements/Element.h"
+
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/Vocabulary.h"
 #include "Forms/WeakForm.h"
 
+#include "Quadrature/QuadratureFactory.h"
+
 #include "Spaces/H1Space.h"
 #include "Spaces/HCurlSpace.h"
 #include "Spaces/L2Space.h"
 
+#include "Systems/AuxiliaryQuadratureLayout.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <array>
@@ -68,6 +73,140 @@ bool exprContainsType(const svmp::FE::forms::FormExprNode& node,
     }
     return false;
 }
+
+std::optional<std::uint32_t> firstAuxiliaryOutputRefIndex(
+    const svmp::FE::forms::FormExprNode& node)
+{
+    if (node.type() == svmp::FE::forms::FormExprType::AuxiliaryOutputRef) {
+        return node.slotIndex();
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (!child) {
+            continue;
+        }
+        if (const auto found = firstAuxiliaryOutputRefIndex(*child)) {
+            return found;
+        }
+    }
+    return std::nullopt;
+}
+
+std::shared_ptr<svmp::FE::systems::AuxiliaryStateModel> makeScalarOutputModel(
+    const std::string& name)
+{
+    return svmp::FE::systems::AuxiliaryModelBuilder(name)
+        .state("x")
+        .ode("x", svmp::FE::forms::FormExpr::constant(0.0))
+        .output("P_out", svmp::FE::systems::modelState("x"))
+        .build();
+}
+
+class QuadratureOverrideElement final : public svmp::FE::elements::Element {
+public:
+    QuadratureOverrideElement(
+        std::shared_ptr<const svmp::FE::elements::Element> prototype,
+        std::shared_ptr<const svmp::FE::quadrature::QuadratureRule> quadrature)
+        : prototype_(std::move(prototype))
+        , quadrature_(std::move(quadrature))
+    {
+    }
+
+    [[nodiscard]] svmp::FE::elements::ElementInfo info() const noexcept override
+    {
+        return prototype_->info();
+    }
+
+    [[nodiscard]] int dimension() const noexcept override
+    {
+        return prototype_->dimension();
+    }
+
+    [[nodiscard]] std::size_t num_dofs() const noexcept override
+    {
+        return prototype_->num_dofs();
+    }
+
+    [[nodiscard]] std::size_t num_nodes() const noexcept override
+    {
+        return prototype_->num_nodes();
+    }
+
+    [[nodiscard]] const svmp::FE::basis::BasisFunction& basis() const noexcept override
+    {
+        return prototype_->basis();
+    }
+
+    [[nodiscard]] std::shared_ptr<const svmp::FE::basis::BasisFunction> basis_ptr() const noexcept override
+    {
+        return prototype_->basis_ptr();
+    }
+
+    [[nodiscard]] std::shared_ptr<const svmp::FE::quadrature::QuadratureRule> quadrature() const noexcept override
+    {
+        return quadrature_;
+    }
+
+private:
+    std::shared_ptr<const svmp::FE::elements::Element> prototype_{};
+    std::shared_ptr<const svmp::FE::quadrature::QuadratureRule> quadrature_{};
+};
+
+class VariableQuadratureTetraSpace final : public svmp::FE::spaces::FunctionSpace {
+public:
+    VariableQuadratureTetraSpace()
+        : base_(std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/2))
+        , default_element_(base_->element_ptr())
+        , reduced_element_(std::make_shared<QuadratureOverrideElement>(
+              default_element_,
+              svmp::FE::quadrature::QuadratureFactory::create(ElementType::Tetra4, /*order=*/1)))
+    {
+    }
+
+    [[nodiscard]] svmp::FE::spaces::SpaceType space_type() const noexcept override
+    {
+        return base_->space_type();
+    }
+    [[nodiscard]] svmp::FE::FieldType field_type() const noexcept override
+    {
+        return base_->field_type();
+    }
+    [[nodiscard]] svmp::FE::Continuity continuity() const noexcept override
+    {
+        return base_->continuity();
+    }
+    [[nodiscard]] int value_dimension() const noexcept override { return base_->value_dimension(); }
+    [[nodiscard]] int topological_dimension() const noexcept override
+    {
+        return base_->topological_dimension();
+    }
+    [[nodiscard]] int polynomial_order() const noexcept override
+    {
+        return base_->polynomial_order();
+    }
+    [[nodiscard]] ElementType element_type() const noexcept override
+    {
+        return base_->element_type();
+    }
+    [[nodiscard]] const svmp::FE::elements::Element& element() const noexcept override
+    {
+        return *default_element_;
+    }
+    [[nodiscard]] const svmp::FE::elements::Element& getElement(
+        ElementType /*cell_type*/,
+        GlobalIndex cell_id) const noexcept override
+    {
+        return (cell_id == 1) ? *reduced_element_ : *default_element_;
+    }
+    [[nodiscard]] std::shared_ptr<const svmp::FE::elements::Element> element_ptr() const noexcept override
+    {
+        return default_element_;
+    }
+
+private:
+    std::shared_ptr<svmp::FE::spaces::H1Space> base_{};
+    std::shared_ptr<const svmp::FE::elements::Element> default_element_{};
+    std::shared_ptr<const svmp::FE::elements::Element> reduced_element_{};
+};
 
 class TwoCellTetraMeshAccess final : public svmp::FE::assembly::IMeshAccess {
 public:
@@ -143,6 +282,108 @@ public:
     void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override
     {
         forEachCell(std::move(callback));
+    }
+
+    void forEachBoundaryFace(
+        int /*marker*/,
+        std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> callback) const override
+    {
+        callback(/*face_id=*/0, /*cell_minus=*/0, /*cell_plus=*/1);
+    }
+
+private:
+    std::vector<std::array<Real, 3>> nodes_{};
+    std::vector<std::array<GlobalIndex, 4>> cells_{};
+};
+
+class TwoCellOwnedSubsetTetraMeshAccess final : public svmp::FE::assembly::IMeshAccess {
+public:
+    TwoCellOwnedSubsetTetraMeshAccess()
+    {
+        nodes_ = {
+            {0.0, 0.0, 0.0},
+            {1.0, 0.0, 0.0},
+            {0.0, 1.0, 0.0},
+            {0.0, 0.0, 1.0},
+            {1.0, 1.0, 1.0},
+        };
+        cells_ = {
+            {0, 1, 2, 3},
+            {1, 2, 3, 4},
+        };
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 2; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 1; }
+    [[nodiscard]] int dimension() const override { return 3; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex cell_id) const override
+    {
+        return cell_id == 0;
+    }
+
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override
+    {
+        return ElementType::Tetra4;
+    }
+
+    [[nodiscard]] int getCellDomainId(GlobalIndex cell_id) const override
+    {
+        return static_cast<int>(cell_id);
+    }
+
+    void getCellNodes(GlobalIndex cell_id, std::vector<GlobalIndex>& nodes) const override
+    {
+        const auto& cell = cells_.at(static_cast<std::size_t>(cell_id));
+        nodes.assign(cell.begin(), cell.end());
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(GlobalIndex cell_id,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        coords.resize(4);
+        const auto& cell = cells_.at(static_cast<std::size_t>(cell_id));
+        for (std::size_t i = 0; i < cell.size(); ++i) {
+            coords[i] = nodes_.at(static_cast<std::size_t>(cell[i]));
+        }
+    }
+
+    [[nodiscard]] svmp::FE::LocalIndex getLocalFaceIndex(
+        GlobalIndex /*face_id*/,
+        GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return 0; }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(
+        GlobalIndex /*face_id*/) const override
+    {
+        return {0, 1};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        callback(0);
+        callback(1);
+    }
+
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        callback(0);
     }
 
     void forEachBoundaryFace(
@@ -947,7 +1188,7 @@ TEST(FormsInstaller, RegisterSampledFieldInput_ReadsFromSolution)
 
     sys.deployAuxiliaryModel(
         use(model).name("samp_inst")
-            .scope(AuxiliaryStateScope::Global)
+            .scope(AuxiliaryStateScope::Node)
             .entityCount(4)
             .bind("Q", "u_sampled")
             .initialize({0.0}));
@@ -1081,6 +1322,55 @@ TEST(FormsInstaller, DynamicAuxiliaryOutputLoweringPreservesMetadataOutputRef)
     EXPECT_TRUE(exprContainsType(
         *recs[0].block_residual_exprs[0].second,
         forms::FormExprType::AuxiliaryOutputRef));
+
+    const auto output_id = sys.auxiliaryOutputIdOf("rcr_inst", "P_out");
+    ASSERT_NE(output_id, static_cast<std::size_t>(-1));
+
+    const auto ref_id = firstAuxiliaryOutputRefIndex(*recs[0].block_residual_exprs[0].second);
+    ASSERT_TRUE(ref_id.has_value());
+    EXPECT_EQ(*ref_id, output_id);
+
+    const auto consumers = sys.consumersOfAuxiliaryOutput(output_id);
+    ASSERT_EQ(consumers.size(), 1u);
+    EXPECT_EQ(consumers[0].qualified_output_name, "rcr_inst/P_out");
+    EXPECT_EQ(consumers[0].operator_tag, "op");
+}
+
+TEST(FormsInstaller, QualifiedAuxiliaryOutputIdAndConsumersExistBeforeLayoutFinalization)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<spaces::L2Space>(ElementType::Tetra4, /*order=*/0);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    auto inst = sys.deploy(
+        use(makeScalarOutputModel("qp_identity"))
+            .name("qp_identity_inst")
+            .quadraturePoint()
+            .monolithic()
+            .initialize({0.25}));
+
+    const auto output_id = sys.auxiliaryOutputIdOf("qp_identity_inst", "P_out");
+    ASSERT_NE(output_id, static_cast<std::size_t>(-1));
+    const auto* desc = sys.auxiliaryOutputDescriptor(output_id);
+    ASSERT_NE(desc, nullptr);
+    EXPECT_EQ(desc->instance_name, "qp_identity_inst");
+    EXPECT_EQ(desc->output_name, "P_out");
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, (u * v).dx() - (inst.output("P_out") * v).dx());
+
+    const auto consumers = sys.consumersOfAuxiliaryOutput(output_id);
+    ASSERT_EQ(consumers.size(), 1u);
+    EXPECT_EQ(consumers[0].qualified_output_name, "qp_identity_inst/P_out");
+    EXPECT_EQ(consumers[0].operator_tag, "op");
+    EXPECT_EQ(consumers[0].reference_field, u_field);
 }
 
 TEST(FormsInstaller, CellScopedAuxiliaryOutputResolvesPerCurrentCell)
@@ -1158,6 +1448,529 @@ TEST(FormsInstaller, CellScopedAuxiliaryOutputResolvesPerCurrentCell)
     ASSERT_EQ(cell1_only.size(), 2u);
     EXPECT_NEAR(cell1_only[0], 0.0, 1e-12);
     EXPECT_GT(std::abs(cell1_only[1]), 1e-12);
+}
+
+TEST(FormsInstaller, QuadraturePointAutoLayoutSingleConsumerDerivesCount)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<spaces::L2Space>(ElementType::Tetra4, /*order=*/0);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    auto inst = sys.deploy(
+        use(makeScalarOutputModel("qp_auto"))
+            .name("qp_auto_inst")
+            .quadraturePoint()
+            .monolithic()
+            .initialize({0.25}));
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, (u * v).dx() - (inst.output("P_out") * v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+    sys.finalizeAuxiliaryLayout();
+
+    ASSERT_TRUE(sys.auxiliaryStateManager().hasBlock("qp_auto_inst"));
+    auto& block = sys.auxiliaryStateManager().getBlock("qp_auto_inst");
+    EXPECT_EQ(block.entityCount(), 4u);
+}
+
+TEST(FormsInstaller, QuadraturePointRegionRestrictedAutoLayoutUsesCoveredCellsOnly)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<TwoCellTetraMeshAccess>();
+    auto space = std::make_shared<spaces::L2Space>(ElementType::Tetra4, /*order=*/0);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    AuxiliaryDeploymentRegion region;
+    region.explicit_entities = {1};
+
+    auto inst = sys.deploy(
+        use(makeScalarOutputModel("qp_region"))
+            .name("qp_region_inst")
+            .quadraturePoint()
+            .region(region)
+            .monolithic()
+            .initialize({0.25}));
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, (u * v).dx() - (inst.output("P_out") * v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = twoCellTetraTopology();
+    sys.setup({}, inputs);
+    sys.finalizeAuxiliaryLayout();
+
+    ASSERT_TRUE(sys.auxiliaryStateManager().hasBlock("qp_region_inst"));
+    auto& block = sys.auxiliaryStateManager().getBlock("qp_region_inst");
+    EXPECT_EQ(block.entityCount(), 4u);
+}
+
+TEST(FormsInstaller, DormantUnusedQuadraturePointDeploymentDoesNotMaterialize)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<spaces::L2Space>(ElementType::Tetra4, /*order=*/0);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    sys.deploy(
+        use(makeScalarOutputModel("qp_dormant"))
+            .name("qp_dormant_inst")
+            .quadraturePoint()
+            .monolithic()
+            .initialize({0.25}));
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, (u * v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+    sys.finalizeAuxiliaryLayout();
+
+    EXPECT_FALSE(sys.auxiliaryStateManager().hasBlock("qp_dormant_inst"));
+}
+
+TEST(FormsInstaller, ForcedActiveQuadraturePointWithoutConsumerThrows)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<spaces::L2Space>(ElementType::Tetra4, /*order=*/0);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    sys.deploy(
+        use(makeScalarOutputModel("qp_forced"))
+            .name("qp_forced_inst")
+            .quadraturePoint()
+            .monolithic()
+            .alwaysActive()
+            .initialize({0.25}));
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, (u * v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    EXPECT_THROW(sys.finalizeAuxiliaryLayout(), svmp::FE::systems::InvalidStateException);
+}
+
+TEST(FormsInstaller, UnselectedQuadraturePointVariantStaysDormant)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<spaces::L2Space>(ElementType::Tetra4, /*order=*/0);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    auto active = sys.deploy(
+        use(makeScalarOutputModel("qp_variant_active"))
+            .name("qp_variant_a")
+            .quadraturePoint()
+            .variant("ep_model", "a")
+            .monolithic()
+            .initialize({0.25}));
+    (void)sys.deploy(
+        use(makeScalarOutputModel("qp_variant_inactive"))
+            .name("qp_variant_b")
+            .quadraturePoint()
+            .variant("ep_model", "b")
+            .monolithic()
+            .initialize({0.5}));
+    sys.selectAuxiliaryVariant("ep_model", "a");
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, (u * v).dx() - (active.output("P_out") * v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+    sys.finalizeAuxiliaryLayout();
+
+    EXPECT_TRUE(sys.auxiliaryStateManager().hasBlock("qp_variant_a"));
+    EXPECT_FALSE(sys.auxiliaryStateManager().hasBlock("qp_variant_b"));
+}
+
+TEST(FormsInstaller, ReferencingUnselectedQuadraturePointVariantThrows)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<spaces::L2Space>(ElementType::Tetra4, /*order=*/0);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    (void)sys.deploy(
+        use(makeScalarOutputModel("qp_variant_selected"))
+            .name("qp_variant_selected")
+            .quadraturePoint()
+            .variant("ep_model", "a")
+            .monolithic()
+            .initialize({0.25}));
+    auto inactive = sys.deploy(
+        use(makeScalarOutputModel("qp_variant_unselected"))
+            .name("qp_variant_unselected")
+            .quadraturePoint()
+            .variant("ep_model", "b")
+            .monolithic()
+            .initialize({0.5}));
+    sys.selectAuxiliaryVariant("ep_model", "a");
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, (u * v).dx() - (inactive.output("P_out") * v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    EXPECT_THROW(sys.finalizeAuxiliaryLayout(), svmp::FE::systems::InvalidStateException);
+}
+
+TEST(FormsInstaller, VariantSelectionIsFrozenAfterSetup)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<spaces::L2Space>(ElementType::Tetra4, /*order=*/0);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    (void)sys.deploy(
+        use(makeScalarOutputModel("qp_variant_freeze"))
+            .name("qp_variant_freeze_a")
+            .quadraturePoint()
+            .variant("ep_model", "a")
+            .monolithic()
+            .initialize({0.25}));
+    sys.selectAuxiliaryVariant("ep_model", "a");
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, (u * v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    EXPECT_THROW(sys.selectAuxiliaryVariant("ep_model", "b"),
+                 svmp::FE::systems::InvalidStateException);
+}
+
+TEST(FormsInstaller, QuadraturePointBoundaryConsumerIsRejected)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    const int marker = 42;
+    auto mesh = std::make_shared<forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    auto inst = sys.deploy(
+        use(makeScalarOutputModel("qp_boundary"))
+            .name("qp_boundary_inst")
+            .quadraturePoint()
+            .monolithic()
+            .initialize({0.25}));
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, (u * v).dx() - (inst.output("P_out") * v).ds(marker));
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    EXPECT_THROW(sys.finalizeAuxiliaryLayout(), svmp::FE::InvalidArgumentException);
+}
+
+TEST(FormsInstaller, QuadraturePointQuadratureFromOperatorSupportsForcedExternalLayout)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<spaces::L2Space>(ElementType::Tetra4, /*order=*/0);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    (void)sys.deploy(
+        use(makeScalarOutputModel("qp_hint_operator"))
+            .name("qp_hint_operator_inst")
+            .quadraturePoint()
+            .quadratureFromOperator("op")
+            .monolithic()
+            .alwaysActive()
+            .initialize({0.25}));
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, (u * v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+    sys.finalizeAuxiliaryLayout();
+
+    const auto expected_qp =
+        numAuxiliaryCellQuadraturePoints(*mesh, *space, /*cell_id=*/0);
+    ASSERT_TRUE(sys.auxiliaryStateManager().hasBlock("qp_hint_operator_inst"));
+    EXPECT_EQ(sys.auxiliaryStateManager().getBlock("qp_hint_operator_inst").entityCount(),
+              expected_qp);
+}
+
+TEST(FormsInstaller, QuadraturePointQuadratureLikeFieldSupportsConstraintOnlyActivation)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    const int marker = 42;
+    auto mesh = std::make_shared<forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    (void)sys.deploy(
+        use(makeScalarOutputModel("qp_hint_constraint"))
+            .name("qp_hint_constraint_inst")
+            .quadraturePoint()
+            .quadratureLike(u_field)
+            .monolithic()
+            .initialize({0.25})
+            .drivesStrongDirichlet(u_field, marker, "P_out"));
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, (u * v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+    sys.finalizeAuxiliaryLayout();
+
+    const auto expected_qp =
+        numAuxiliaryCellQuadraturePoints(*mesh, *space, /*cell_id=*/0);
+    ASSERT_TRUE(sys.auxiliaryStateManager().hasBlock("qp_hint_constraint_inst"));
+    EXPECT_EQ(sys.auxiliaryStateManager().getBlock("qp_hint_constraint_inst").entityCount(),
+              expected_qp);
+}
+
+TEST(FormsInstaller, QuadraturePointExplicitOffsetsMatchingConsumerAreAccepted)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<spaces::L2Space>(ElementType::Tetra4, /*order=*/0);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    auto inst = sys.deploy(
+        use(makeScalarOutputModel("qp_offsets_ok"))
+            .name("qp_offsets_ok_inst")
+            .quadraturePoint()
+            .monolithic()
+            .qpOffsets({0, 4})
+            .initialize({0.25}));
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, (u * v).dx() - (inst.output("P_out") * v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+    sys.finalizeAuxiliaryLayout();
+
+    ASSERT_TRUE(sys.auxiliaryStateManager().hasBlock("qp_offsets_ok_inst"));
+    EXPECT_EQ(sys.auxiliaryStateManager().getBlock("qp_offsets_ok_inst").entityCount(), 4u);
+}
+
+TEST(FormsInstaller, QuadraturePointExplicitOffsetsMismatchConsumerRejected)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<spaces::L2Space>(ElementType::Tetra4, /*order=*/0);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    auto inst = sys.deploy(
+        use(makeScalarOutputModel("qp_offsets_bad"))
+            .name("qp_offsets_bad_inst")
+            .quadraturePoint()
+            .monolithic()
+            .qpOffsets({0, 2})
+            .initialize({0.25}));
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, (u * v).dx() - (inst.output("P_out") * v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    EXPECT_THROW(sys.finalizeAuxiliaryLayout(), svmp::FE::InvalidArgumentException);
+}
+
+TEST(FormsInstaller, QuadraturePointOwnedCellInferenceUsesOwnedSubset)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<TwoCellOwnedSubsetTetraMeshAccess>();
+    auto space = std::make_shared<spaces::L2Space>(ElementType::Tetra4, /*order=*/0);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    auto inst = sys.deploy(
+        use(makeScalarOutputModel("qp_owned_subset"))
+            .name("qp_owned_subset_inst")
+            .quadraturePoint()
+            .monolithic()
+            .initialize({0.25}));
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, (u * v).dx() - (inst.output("P_out") * v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = twoCellTetraTopology();
+    sys.setup({}, inputs);
+    sys.finalizeAuxiliaryLayout();
+
+    ASSERT_TRUE(sys.auxiliaryStateManager().hasBlock("qp_owned_subset_inst"));
+    EXPECT_EQ(sys.auxiliaryStateManager().getBlock("qp_owned_subset_inst").entityCount(), 4u);
+}
+
+TEST(FormsInstaller, QuadraturePointAutoLayoutSupportsVariablePerCellQuadratureCounts)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<TwoCellTetraMeshAccess>();
+    auto space = std::make_shared<VariableQuadratureTetraSpace>();
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    auto inst = sys.deploy(
+        use(makeScalarOutputModel("qp_variable_q"))
+            .name("qp_variable_q_inst")
+            .quadraturePoint()
+            .monolithic()
+            .initialize({0.25}));
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, (u * v).dx() - (inst.output("P_out") * v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = twoCellTetraTopology();
+    sys.setup({}, inputs);
+    sys.finalizeAuxiliaryLayout();
+
+    const auto expected_cell0 =
+        numAuxiliaryCellQuadraturePoints(*mesh, *space, /*cell_id=*/0);
+    const auto expected_cell1 =
+        numAuxiliaryCellQuadraturePoints(*mesh, *space, /*cell_id=*/1);
+
+    ASSERT_TRUE(sys.auxiliaryStateManager().hasBlock("qp_variable_q_inst"));
+    EXPECT_EQ(sys.auxiliaryStateManager().getBlock("qp_variable_q_inst").entityCount(),
+              expected_cell0 + expected_cell1);
+    EXPECT_NE(expected_cell0, expected_cell1);
+}
+
+TEST(FormsInstaller, QuadraturePointConflictingConsumerSpacesAreRejected)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto low_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    auto high_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/2);
+
+    FESystem sys(mesh);
+    const auto u_low = sys.addField(FieldSpec{.name = "u_low", .space = low_space, .components = 1});
+    const auto u_high = sys.addField(FieldSpec{.name = "u_high", .space = high_space, .components = 1});
+    sys.addOperator("op_low");
+    sys.addOperator("op_high");
+
+    auto inst = sys.deploy(
+        use(makeScalarOutputModel("qp_conflict"))
+            .name("qp_conflict_inst")
+            .quadraturePoint()
+            .monolithic()
+            .initialize({0.25}));
+
+    const auto ul = forms::FormExpr::stateField(u_low, *low_space, "u_low");
+    const auto vl = forms::FormExpr::testFunction(*low_space, "v_low");
+    (void)installFormulation(sys, "op_low", {u_low}, (ul * vl).dx() - (inst.output("P_out") * vl).dx());
+
+    const auto uh = forms::FormExpr::stateField(u_high, *high_space, "u_high");
+    const auto vh = forms::FormExpr::testFunction(*high_space, "v_high");
+    (void)installFormulation(sys, "op_high", {u_high}, (uh * vh).dx() - (inst.output("P_out") * vh).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    EXPECT_THROW(sys.finalizeAuxiliaryLayout(), svmp::FE::InvalidArgumentException);
 }
 
 // ---------------------------------------------------------------------------

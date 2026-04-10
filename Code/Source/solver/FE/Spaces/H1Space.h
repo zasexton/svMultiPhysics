@@ -15,23 +15,30 @@
  */
 
 #include "Spaces/FunctionSpace.h"
-#include "Elements/LagrangeElement.h"
+#include "Elements/ElementFactory.h"
 
 namespace svmp {
 namespace FE {
 namespace spaces {
 
 /**
- * @brief H¹-conforming scalar function space built from Lagrange elements
+ * @brief H¹-conforming scalar function space
  *
  * This space represents standard C0 continuous finite element spaces used for
- * scalar fields such as pressure or temperature. It uses @ref elements::LagrangeElement
- * as the underlying prototype element.
+ * scalar fields such as pressure or temperature. It wraps any scalar element
+ * compatible with C0 continuity, including nodal Lagrange and alternative
+ * high-order scalar basis families exposed through ElementFactory.
  */
 class H1Space : public FunctionSpace {
 public:
     H1Space(ElementType element_type,
             int order);
+
+    H1Space(ElementType element_type,
+            int order,
+            BasisType basis_type);
+
+    explicit H1Space(const elements::ElementRequest& request);
 
     SpaceType space_type() const noexcept override { return SpaceType::H1; }
     FieldType field_type() const noexcept override { return FieldType::Scalar; }
@@ -57,4 +64,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_SPACES_H1SPACE_H
-

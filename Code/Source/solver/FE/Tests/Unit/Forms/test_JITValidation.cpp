@@ -35,15 +35,15 @@ TEST(JITValidation, RejectsParameterSymbolInStrictMode)
     EXPECT_EQ(r.first_issue->type, FormExprType::ParameterSymbol);
 }
 
-TEST(JITValidation, RejectsCoupledPlaceholderSymbols)
+TEST(JITValidation, RejectsAuxiliaryStateSymbolInStrictMode)
 {
     using namespace svmp::FE::forms;
 
-    const auto expr = FormExpr::boundaryIntegralValue("Q");
+    const auto expr = FormExpr::auxiliaryState("x");
     const auto r = jit::canCompile(expr, jit::ValidationOptions{.strictness = jit::Strictness::Strict});
     EXPECT_FALSE(r.ok);
     ASSERT_TRUE(r.first_issue.has_value());
-    EXPECT_EQ(r.first_issue->type, FormExprType::BoundaryIntegralSymbol);
+    EXPECT_EQ(r.first_issue->type, FormExprType::AuxiliaryStateSymbol);
 }
 
 TEST(JITValidation, RejectsStdFunctionCoefficientInStrictMode)

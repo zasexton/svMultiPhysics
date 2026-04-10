@@ -17,6 +17,7 @@
 #include "LagrangeBasis.h"
 #include "HierarchicalBasis.h"
 #include "VectorBasis.h"
+#include "CompatibleTensorVectorBasis.h"
 #include "TensorBasis.h"
 #include "BernsteinBasis.h"
 #include "BSplineBasis.h"

@@ -22,6 +22,7 @@
 #include "Spaces/VectorComponentExtractor.h"
 #include "Spaces/OrientationManager.h"
 #include "Elements/VectorElement.h"
+#include "Elements/ElementFactory.h"
 
 namespace svmp {
 namespace FE {
@@ -45,6 +46,12 @@ public:
 
     HCurlSpace(ElementType element_type,
                int order);
+
+    HCurlSpace(ElementType element_type,
+               int order,
+               BasisType basis_type);
+
+    explicit HCurlSpace(const elements::ElementRequest& request);
 
     SpaceType space_type() const noexcept override { return SpaceType::HCurl; }
     FieldType field_type() const noexcept override { return FieldType::Vector; }

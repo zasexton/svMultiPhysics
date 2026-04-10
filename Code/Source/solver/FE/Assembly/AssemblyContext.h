@@ -124,12 +124,15 @@ enum class AuxiliaryOutputScope : std::uint8_t {
 /**
  * @brief Runtime descriptor for one auxiliary output symbol in FE forms.
  *
- * `base_slot` is the slot returned by `FESystem::auxiliaryOutputSlotOf(instance, output)`
- * for entity 0. For local scopes, kernels resolve that base slot to the current
- * cell/face/QP entity before reading `auxiliary_outputs`.
+ * `output_id` is the stable logical id assigned at deploy time.
+ * `storage_offset` is the finalized entity-0 flat offset inside
+ * `AssemblyContext::auxiliaryOutputs()`. For local scopes, kernels resolve
+ * the logical output id to the current cell/face/QP entity before reading the
+ * flat auxiliary-output buffer.
  */
 struct AuxiliaryOutputBinding {
-    std::uint32_t base_slot{0u};
+    std::uint32_t output_id{0u};
+    std::uint32_t storage_offset{0u};
     AuxiliaryOutputScope scope{AuxiliaryOutputScope::Global};
     std::uint32_t outputs_per_entity{1u};
     const std::size_t* entity_map_data{nullptr};
@@ -1220,9 +1223,23 @@ public:
         auxiliary_inputs_ = inputs;
         auxiliary_state_ = state;
         auxiliary_outputs_ = outputs;
-        // Keep legacy aliases in sync.
-        coupled_integrals_ = inputs;
-        coupled_aux_state_ = state;
+        // Keep legacy aliases in sync without clobbering explicitly bound
+        // coupled-boundary values that may already be installed.
+        if (coupled_integrals_.empty()) {
+            coupled_integrals_ = inputs;
+        }
+        if (coupled_aux_state_.empty()) {
+            coupled_aux_state_ = state;
+        }
+    }
+
+    /// Preserve legacy coupled-boundary aliases without disturbing the
+    /// generalized auxiliary buffers already installed on the context.
+    void setLegacyCoupledValues(std::span<const Real> integrals,
+                                std::span<const Real> aux_state) noexcept
+    {
+        coupled_integrals_ = integrals;
+        coupled_aux_state_ = aux_state;
     }
 
     /// Bind runtime metadata for resolving local-scoped auxiliary outputs.
@@ -1244,12 +1261,8 @@ public:
     {
         return auxiliary_output_bindings_;
     }
-    [[nodiscard]] Real auxiliaryOutputValue(std::size_t slot, LocalIndex q) const noexcept
+    [[nodiscard]] Real auxiliaryOutputValue(std::size_t output_id, LocalIndex q) const noexcept
     {
-        if (slot >= auxiliary_outputs_.size()) {
-            return Real(0.0);
-        }
-
         auto localEntityIndex = [](std::span<const std::size_t> entity_map,
                                    std::size_t global_entity) -> std::optional<std::size_t> {
             if (entity_map.empty()) {
@@ -1264,7 +1277,7 @@ public:
         };
 
         for (const auto& binding : auxiliary_output_bindings_) {
-            if (binding.base_slot != slot) {
+            if (binding.output_id != output_id) {
                 continue;
             }
 
@@ -1276,7 +1289,9 @@ public:
                 binding.qp_offsets_data, binding.qp_offsets_size);
 
             auto valueAtEntity = [&](std::size_t entity_index) -> Real {
-                const auto resolved_slot = slot + entity_index * outputs_per_entity;
+                const auto resolved_slot =
+                    static_cast<std::size_t>(binding.storage_offset) +
+                    entity_index * outputs_per_entity;
                 return resolved_slot < auxiliary_outputs_.size()
                     ? auxiliary_outputs_[resolved_slot]
                     : Real(0.0);
@@ -1286,7 +1301,7 @@ public:
                 case AuxiliaryOutputScope::Global:
                 case AuxiliaryOutputScope::Boundary:
                 case AuxiliaryOutputScope::Node:
-                    return auxiliary_outputs_[slot];
+                    return valueAtEntity(0u);
                 case AuxiliaryOutputScope::Cell: {
                     if (cell_id_ < 0) {
                         return Real(0.0);
@@ -1324,7 +1339,9 @@ public:
             }
         }
 
-        return auxiliary_outputs_[slot];
+        return output_id < auxiliary_outputs_.size()
+            ? auxiliary_outputs_[output_id]
+            : Real(0.0);
     }
 
     // =========================================================================

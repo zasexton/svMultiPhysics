@@ -89,6 +89,17 @@ int scalar_basis_quadrature_order(const basis::BasisFunction& basis) {
     }
 }
 
+int vector_basis_quadrature_order(const basis::BasisFunction& basis) {
+    switch (basis.basis_type()) {
+        case BasisType::BSpline:
+            return std::max(2, 2 * basis.order() + 1);
+        case BasisType::NURBS:
+            return std::max(2, 2 * basis.order() + 3);
+        default:
+            return quadrature::QuadratureFactory::recommended_order(basis.order(), false);
+    }
+}
+
 std::shared_ptr<Element> create_generic_scalar_element(const ElementRequest& req) {
     if (req.field_type != FieldType::Scalar) {
         throw FEException("ElementFactory: generic scalar basis elements require FieldType::Scalar",
@@ -123,6 +134,41 @@ std::shared_ptr<Element> create_generic_scalar_element(const ElementRequest& req
 
     return std::make_shared<GeneralBasisElement>(
         std::move(basis), std::move(quad), FieldType::Scalar, continuity);
+}
+
+std::shared_ptr<Element> create_generic_vector_element(const ElementRequest& req,
+                                                       Continuity continuity) {
+    FE_CHECK_ARG(req.field_type == FieldType::Vector,
+                 "ElementFactory: generic vector basis elements require FieldType::Vector");
+    FE_CHECK_ARG(continuity == Continuity::H_div || continuity == Continuity::H_curl,
+                 "ElementFactory: generic vector basis elements require H(div) or H(curl) continuity");
+
+    basis::BasisRequest basis_req;
+    basis_req.element_type = req.element_type;
+    basis_req.basis_type = req.basis_type;
+    basis_req.order = req.order;
+    basis_req.continuity = continuity;
+    basis_req.field_type = FieldType::Vector;
+    basis_req.knot_vector = req.knot_vector;
+    basis_req.weights = req.weights;
+    basis_req.axis_orders = req.axis_orders;
+    basis_req.axis_knot_vectors = req.axis_knot_vectors;
+    basis_req.axis_weights = req.axis_weights;
+    basis_req.tensor_extents = req.tensor_extents;
+    basis_req.custom_id = req.custom_id;
+
+    auto basis = basis::BasisFactory::create(basis_req);
+    if (!basis || !basis->is_vector_valued()) {
+        throw FEException("ElementFactory: BasisFactory did not return a vector basis",
+                          __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
+    }
+
+    const int quad_order = vector_basis_quadrature_order(*basis);
+    auto quad = quadrature::QuadratureFactory::create(
+        req.element_type, quad_order, QuadratureType::GaussLegendre, true);
+
+    return std::make_shared<GeneralBasisElement>(
+        std::move(basis), std::move(quad), FieldType::Vector, continuity);
 }
 
 } // namespace
@@ -189,19 +235,27 @@ std::shared_ptr<Element> ElementFactory::create(const ElementRequest& req) {
             const bool ok_basis =
                 (req.basis_type == BasisType::Lagrange) ||
                 (req.basis_type == BasisType::RaviartThomas) ||
-                (req.basis_type == BasisType::BDM);
+                (req.basis_type == BasisType::BDM) ||
+                (req.basis_type == BasisType::BSpline) ||
+                (req.basis_type == BasisType::NURBS);
             if (!ok_basis) {
-                throw FEException("ElementFactory: H(div) elements require BasisType::Lagrange/::RaviartThomas/::BDM",
+                throw FEException("ElementFactory: H(div) elements require BasisType::Lagrange/::RaviartThomas/::BDM/::BSpline/::NURBS",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
         } else {
             const bool ok_basis =
                 (req.basis_type == BasisType::Lagrange) ||
-                (req.basis_type == BasisType::Nedelec);
+                (req.basis_type == BasisType::Nedelec) ||
+                (req.basis_type == BasisType::BSpline) ||
+                (req.basis_type == BasisType::NURBS);
             if (!ok_basis) {
-                throw FEException("ElementFactory: H(curl) elements require BasisType::Lagrange/::Nedelec",
+                throw FEException("ElementFactory: H(curl) elements require BasisType::Lagrange/::Nedelec/::BSpline/::NURBS",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
+        }
+
+        if (req.basis_type == BasisType::BSpline || req.basis_type == BasisType::NURBS) {
+            return create_generic_vector_element(req, effective_continuity);
         }
 
         return std::make_shared<VectorElement>(req.element_type, order, effective_continuity, req.basis_type);
@@ -238,7 +292,12 @@ std::shared_ptr<Element> ElementFactory::create(const ElementRequest& req) {
             throw FEException("ElementFactory: SpectralElement currently supports scalar fields only",
                               __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
         }
-        return std::make_shared<SpectralElement>(req.element_type, order, req.field_type);
+        if (req.continuity != Continuity::C0 && req.continuity != Continuity::L2) {
+            throw FEException("ElementFactory: Spectral elements require Continuity::C0 or Continuity::L2",
+                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        }
+        return std::make_shared<SpectralElement>(
+            req.element_type, order, req.field_type, req.continuity);
     }
 
     throw FEException("ElementFactory: requested basis type not supported by factory",

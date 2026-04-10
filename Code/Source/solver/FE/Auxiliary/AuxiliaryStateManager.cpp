@@ -28,44 +28,71 @@ std::size_t AuxiliaryStateManager::registerBlock(
     std::size_t entity_count,
     std::span<const Real> initial_values)
 {
+    return registerBlock(spec, entity_count, entity_count, initial_values);
+}
+
+std::size_t AuxiliaryStateManager::registerBlock(
+    const AuxiliaryStateSpec& spec,
+    std::size_t entity_count,
+    std::size_t owned_entity_count,
+    std::span<const Real> initial_values)
+{
     FE_THROW_IF(spec.name.empty(), InvalidArgumentException,
                 "AuxiliaryStateManager::registerBlock: empty block name");
     FE_THROW_IF(meta_name_to_index_.count(spec.name) != 0u, InvalidArgumentException,
                 "AuxiliaryStateManager::registerBlock: duplicate block '" + spec.name + "'");
+    FE_THROW_IF(owned_entity_count > entity_count, InvalidArgumentException,
+                "AuxiliaryStateManager::registerBlock: owned_entity_count " +
+                    std::to_string(owned_entity_count) +
+                    " exceeds entity_count " + std::to_string(entity_count));
 
     // Create indexing descriptor for the scope.
     AuxiliaryBlockIndexing indexing;
     switch (spec.scope) {
         case AuxiliaryStateScope::Global:
+            FE_THROW_IF(entity_count != 1u, InvalidArgumentException,
+                        "AuxiliaryStateManager::registerBlock: Global scope requires entity_count == 1");
+            FE_THROW_IF(owned_entity_count != entity_count, InvalidArgumentException,
+                        "AuxiliaryStateManager::registerBlock: Global scope does not support ghosts");
             indexing = AuxiliaryBlockIndexing::createGlobal(spec.size);
             break;
         case AuxiliaryStateScope::Node:
-            // For Node scope, entity_count is total (owned + ghost).
-            // In serial, owned == total.  Distributed setup can re-register
-            // with proper owned/ghost split via setGhostSyncHook.
             indexing = AuxiliaryBlockIndexing::createNode(
-                entity_count, 0, spec.size);
+                owned_entity_count,
+                entity_count - owned_entity_count,
+                spec.size);
             break;
         case AuxiliaryStateScope::Cell:
+            FE_THROW_IF(owned_entity_count != entity_count, InvalidArgumentException,
+                        "AuxiliaryStateManager::registerBlock: Cell scope does not support ghosts");
             indexing = AuxiliaryBlockIndexing::createCell(
                 entity_count, spec.size);
             break;
         case AuxiliaryStateScope::QuadraturePoint:
+            FE_THROW_IF(owned_entity_count != entity_count, InvalidArgumentException,
+                        "AuxiliaryStateManager::registerBlock: QuadraturePoint scope does not support ghosts");
             // QP scope with uniform QP count not known here; use flat entity.
             // Caller should use registerBlockWithQPOffsets for proper indexing.
             indexing = AuxiliaryBlockIndexing::createCell(
                 entity_count, spec.size);
             break;
         case AuxiliaryStateScope::Boundary:
+            FE_THROW_IF(entity_count != 1u, InvalidArgumentException,
+                        "AuxiliaryStateManager::registerBlock: Boundary scope requires entity_count == 1");
+            FE_THROW_IF(owned_entity_count != entity_count, InvalidArgumentException,
+                        "AuxiliaryStateManager::registerBlock: Boundary scope does not support ghosts");
             indexing = AuxiliaryBlockIndexing::createBoundary(spec.size);
             break;
         case AuxiliaryStateScope::Facet:
+            FE_THROW_IF(owned_entity_count != entity_count, InvalidArgumentException,
+                        "AuxiliaryStateManager::registerBlock: Facet scope does not support ghosts");
             indexing = AuxiliaryBlockIndexing::createFacet(
                 entity_count, spec.size);
             break;
     }
 
     const auto block_idx = state_.registerBlock(spec, entity_count, initial_values);
+    state_.block(block_idx).setOwnedEntityCount(indexing.ownedEntityCount());
 
     const auto meta_idx = block_meta_.size();
     block_meta_.push_back(BlockMeta{spec, indexing, {}, {}});
@@ -191,17 +218,47 @@ void AuxiliaryStateManager::syncGhosts(std::string_view block_name)
 
 void AuxiliaryStateManager::resetAllToCommitted()
 {
-    state_.resetAllBlocks();
+    for (auto& meta : block_meta_) {
+        auto& blk = state_.getBlock(meta.spec.name);
+        if (meta.spec.sync_policy == AuxiliarySyncPolicy::OwnedAndGhost &&
+            meta.ghost_sync_hook) {
+            blk.resetToCommitted([&meta](std::span<Real> values) {
+                meta.ghost_sync_hook(meta.spec.name, values);
+            });
+        } else {
+            blk.resetToCommitted();
+        }
+    }
 }
 
 void AuxiliaryStateManager::commitAll(Real time)
 {
-    state_.commitAllBlocks(time);
+    for (auto& meta : block_meta_) {
+        auto& blk = state_.getBlock(meta.spec.name);
+        if (meta.spec.sync_policy == AuxiliarySyncPolicy::OwnedAndGhost &&
+            meta.ghost_sync_hook) {
+            blk.commitTimeStep(time, [&meta](std::span<Real> values) {
+                meta.ghost_sync_hook(meta.spec.name, values);
+            });
+        } else {
+            blk.commitTimeStep(time);
+        }
+    }
 }
 
 void AuxiliaryStateManager::rollbackAll()
 {
-    state_.rollbackAllBlocks();
+    for (auto& meta : block_meta_) {
+        auto& blk = state_.getBlock(meta.spec.name);
+        if (meta.spec.sync_policy == AuxiliarySyncPolicy::OwnedAndGhost &&
+            meta.ghost_sync_hook) {
+            blk.rollback([&meta](std::span<Real> values) {
+                meta.ghost_sync_hook(meta.spec.name, values);
+            });
+        } else {
+            blk.rollback();
+        }
+    }
 }
 
 void AuxiliaryStateManager::clear()
@@ -244,6 +301,8 @@ void AuxiliaryStateManager::unpackBlock(
     std::string_view block_name,
     std::span<const Real> packed_data)
 {
+    const auto meta_idx = metaIndex(block_name);
+    auto& meta = block_meta_[meta_idx];
     auto& blk = state_.getBlock(block_name);
     const auto sz = blk.storageSize();
 
@@ -258,6 +317,12 @@ void AuxiliaryStateManager::unpackBlock(
     auto work = blk.work();
     std::copy(packed_data.begin() + static_cast<std::ptrdiff_t>(sz),
               packed_data.end(), work.begin());
+
+    if (meta.spec.sync_policy == AuxiliarySyncPolicy::OwnedAndGhost &&
+        meta.ghost_sync_hook) {
+        meta.ghost_sync_hook(block_name, blk.committedMutable());
+        meta.ghost_sync_hook(block_name, work);
+    }
 }
 
 std::vector<Real> AuxiliaryStateManager::packAll() const
@@ -316,6 +381,14 @@ void AuxiliaryStateManager::unpackAll(std::span<const Real> packed_data)
                   packed_data.begin() + static_cast<std::ptrdiff_t>(offset + sz),
                   work.begin());
         offset += sz;
+
+        const auto& meta = block_meta_[i];
+        if (meta.spec.sync_policy == AuxiliarySyncPolicy::OwnedAndGhost &&
+            meta.ghost_sync_hook) {
+            const auto name = blk.name();
+            meta.ghost_sync_hook(name, blk.committedMutable());
+            meta.ghost_sync_hook(name, work);
+        }
     }
 }
 
@@ -389,12 +462,21 @@ void AuxiliaryStateManager::validate() const
         FE_THROW_IF(blk.work().size() != blk.committed().size(), InvalidStateException,
                     "AuxiliaryStateManager::validate: work/committed size mismatch "
                     "for block '" + blk.name() + "'");
+        FE_THROW_IF(blk.entityCount() != meta.indexing.totalEntityCount(), InvalidStateException,
+                    "AuxiliaryStateManager::validate: entity count mismatch for block '" +
+                        blk.name() + "'");
+        FE_THROW_IF(blk.ownedEntityCount() != meta.indexing.ownedEntityCount(), InvalidStateException,
+                    "AuxiliaryStateManager::validate: owned entity count mismatch for block '" +
+                        blk.name() + "'");
 
         if (blk.layoutMode() == AuxiliaryLayoutMode::FixedStride) {
             const auto expected = blk.entityCount() *
                                   static_cast<std::size_t>(blk.componentStride());
             FE_THROW_IF(blk.storageSize() != expected, InvalidStateException,
                         "AuxiliaryStateManager::validate: storage size mismatch "
+                        "for block '" + blk.name() + "'");
+            FE_THROW_IF(blk.storageSize() != meta.indexing.totalStorageSize(), InvalidStateException,
+                        "AuxiliaryStateManager::validate: indexing storage mismatch "
                         "for block '" + blk.name() + "'");
         }
     }

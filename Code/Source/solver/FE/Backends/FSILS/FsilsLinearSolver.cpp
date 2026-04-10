@@ -16,6 +16,7 @@
 #include "Vector.h"
 #include "consts.h"
 #include "Backends/FSILS/liner_solver/add_bc_mul.h"
+#include "Backends/FSILS/liner_solver/bicgs.h"
 #include "Backends/FSILS/liner_solver/fsils_api.hpp"
 #include "Backends/FSILS/liner_solver/fils_struct.hpp"
 #include "Backends/FSILS/liner_solver/spar_mul.h"
@@ -309,6 +310,18 @@ FsilsLinearSolver::FsilsLinearSolver(const SolverOptions& options)
     setOptions(options);
 }
 
+FsilsLinearSolver::~FsilsLinearSolver()
+{
+    invalidateReusableBlockSchurState();
+}
+
+void FsilsLinearSolver::invalidateReusableBlockSchurState() const
+{
+    bicgs::reset_schur_cache(ls_.CG);
+    ls_.GM.ws.recycle_k = 0;
+    ls_.RI.ws.recycle_k = 0;
+}
+
 void FsilsLinearSolver::setOptions(const SolverOptions& options)
 {
     FE_THROW_IF(options.max_iter <= 0, InvalidArgumentException, "FsilsLinearSolver: max_iter must be > 0");
@@ -332,7 +345,8 @@ void FsilsLinearSolver::setOptions(const SolverOptions& options)
         FE_THROW_IF(*options.fsils_blockschur_cg_rel_tol < 0.0, InvalidArgumentException,
                     "FsilsLinearSolver: fsils_blockschur_cg_rel_tol must be >= 0");
     }
-    options_ = options;
+    options_ = normalizeSolverOptionsForBackend(options, BackendKind::FSILS);
+    invalidateReusableBlockSchurState();
 }
 
 void FsilsLinearSolver::setRankOneUpdates(std::span<const RankOneUpdate> updates)
@@ -369,6 +383,7 @@ void FsilsLinearSolver::setDirichletDofs(std::span<const GlobalIndex> dofs)
     if (new_dofs != dirichlet_dofs_) {
         dirichlet_dofs_ = std::move(new_dofs);
         faces_dirty_ = true;
+        invalidateReusableBlockSchurState();
     }
 }
 
@@ -447,6 +462,7 @@ to_fsils_blockschur_preconditioner(FsilsBlockSchurSchurPreconditioner pc)
 {
     using fe_fsi_linear_solver::SchurPreconditionerType;
     switch (pc) {
+        case FsilsBlockSchurSchurPreconditioner::Auto: return SchurPreconditionerType::ALGEBRAIC_SHAT;
         case FsilsBlockSchurSchurPreconditioner::DiagL: return SchurPreconditionerType::DIAG_L;
         case FsilsBlockSchurSchurPreconditioner::BlockDiagL: return SchurPreconditionerType::BLOCKDIAG_L;
         case FsilsBlockSchurSchurPreconditioner::ILUL: return SchurPreconditionerType::ILU_L;
@@ -460,6 +476,7 @@ to_fsils_blockschur_momentum_approximation(FsilsBlockSchurMomentumApproximation 
 {
     using fe_fsi_linear_solver::SchurMomentumApproximationType;
     switch (approx) {
+        case FsilsBlockSchurMomentumApproximation::Auto: return SchurMomentumApproximationType::ILU_K;
         case FsilsBlockSchurMomentumApproximation::DiagK: return SchurMomentumApproximationType::DIAG_K;
         case FsilsBlockSchurMomentumApproximation::BlockDiagK: return SchurMomentumApproximationType::BLOCKDIAG_K;
         case FsilsBlockSchurMomentumApproximation::ILUK: return SchurMomentumApproximationType::ILU_K;
@@ -627,6 +644,44 @@ struct GmresLaunchConfig {
     return limit;
 }
 
+struct ResolvedSaddlePointBlocks {
+    const BlockDescriptor* primary{nullptr};
+    const BlockDescriptor* constraint{nullptr};
+};
+
+[[nodiscard]] ResolvedSaddlePointBlocks resolveSaddlePointBlocks(
+    const SolverOptions& options) noexcept
+{
+    if (!options.block_layout.has_value()) {
+        return {};
+    }
+
+    const auto& layout = *options.block_layout;
+    const auto resolve_named_block =
+        [&](BlockRole role) -> const BlockDescriptor* {
+            const auto name = options.resolveBlockNameForRole(role);
+            if (!name.empty()) {
+                if (const auto* block = layout.findBlock(name)) {
+                    return block;
+                }
+            }
+            return nullptr;
+        };
+
+    ResolvedSaddlePointBlocks resolved;
+    resolved.primary = resolve_named_block(BlockRole::PrimaryField);
+    resolved.constraint = resolve_named_block(BlockRole::ConstraintField);
+
+    if (resolved.primary == nullptr) {
+        resolved.primary = layout.primaryFieldBlock();
+    }
+    if (resolved.constraint == nullptr) {
+        resolved.constraint = layout.constraintFieldBlock();
+    }
+
+    return resolved;
+}
+
 } // namespace
 
 SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
@@ -651,15 +706,18 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     // Derive block structure from metadata. No physics-specific fallbacks —
     // all saddle-point operations require explicit block_layout with saddle-point annotation.
     const bool has_block_layout = options_.block_layout.has_value();
-    const bool has_saddle_point = has_block_layout && options_.block_layout->hasSaddlePoint();
+    const auto saddle_point_blocks = resolveSaddlePointBlocks(options_);
+    const bool has_saddle_point =
+        has_block_layout &&
+        saddle_point_blocks.primary != nullptr &&
+        saddle_point_blocks.constraint != nullptr;
 
     // Saddle-point block indices (only meaningful when has_saddle_point is true).
     int mom_start = 0, mom_ncomp = 0;
     int con_start = 0, con_ncomp = 0;
     if (has_saddle_point) {
-        const auto& layout = *options_.block_layout;
-        const auto& mb = layout.blocks[static_cast<std::size_t>(*layout.momentum_block)];
-        const auto& cb = layout.blocks[static_cast<std::size_t>(*layout.constraint_block)];
+        const auto& mb = *saddle_point_blocks.primary;
+        const auto& cb = *saddle_point_blocks.constraint;
         mom_start = mb.start_component;
         mom_ncomp = mb.n_components;
         con_start = cb.start_component;
@@ -686,15 +744,22 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             << " max_iter=" << options_.max_iter
             << " krylov_dim=" << options_.krylov_dim
             << " fsils_use_rcs=" << (options_.fsils_use_rcs ? 1 : 0);
+        if (requested_blockschur) {
+            oss << " schur_pc="
+                << fsilsBlockSchurPreconditionerToString(options_.fsils_blockschur_schur_preconditioner)
+                << " momentum_hat="
+                << fsilsBlockSchurMomentumApproximationToString(
+                       options_.fsils_blockschur_momentum_approximation);
+        }
         traceLog(oss.str());
     }
 
     if (requested_blockschur) {
         FE_THROW_IF(!has_saddle_point, NotImplementedException,
-                    "FsilsLinearSolver::solve: BlockSchur requires block_layout with saddle-point annotation");
-        const auto& layout = *options_.block_layout;
-        const auto& mb = layout.blocks[static_cast<std::size_t>(*layout.momentum_block)];
-        const auto& cb = layout.blocks[static_cast<std::size_t>(*layout.constraint_block)];
+                    "FsilsLinearSolver::solve: BlockSchur requires block_layout with "
+                    "resolvable saddle-point metadata");
+        const auto& mb = *saddle_point_blocks.primary;
+        const auto& cb = *saddle_point_blocks.constraint;
         FE_THROW_IF(mb.n_components < 1 || cb.n_components < 1,
                     NotImplementedException,
                     "FsilsLinearSolver::solve: BlockSchur requires valid saddle-point layout");

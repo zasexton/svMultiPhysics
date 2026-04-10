@@ -89,6 +89,17 @@ public:
     int dimension() const noexcept override { return dimension_; }
     int order() const noexcept override { return order_; }
     std::size_t size() const noexcept override { return indices_.size(); }
+    const Basis1D& axis_basis(int axis) const noexcept {
+        return bases_[static_cast<std::size_t>(axis)];
+    }
+    std::vector<int> tensor_extents() const {
+        std::vector<int> extents(static_cast<std::size_t>(dimension_));
+        for (int axis = 0; axis < dimension_; ++axis) {
+            extents[static_cast<std::size_t>(axis)] =
+                static_cast<int>(bases_[static_cast<std::size_t>(axis)].size());
+        }
+        return extents;
+    }
     std::string cache_identity() const override {
         std::ostringstream oss;
         oss << BasisFunction::cache_identity() << "|axes=" << dimension_;

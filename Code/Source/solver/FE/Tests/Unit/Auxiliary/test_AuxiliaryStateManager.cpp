@@ -139,6 +139,42 @@ TEST(AuxiliaryStateManager, GetSpecByName)
     EXPECT_EQ(retrieved.history_depth, 3);
 }
 
+TEST(AuxiliaryStateManager, RegisterNodeBlockWithOwnedGhostSplit)
+{
+    AuxiliaryStateManager mgr;
+
+    auto spec = makeSpec("ionic", 2, AuxiliaryStateScope::Node);
+    spec.sync_policy = AuxiliarySyncPolicy::OwnedAndGhost;
+
+    mgr.registerBlock(spec, 8, 5);
+
+    const auto& indexing = mgr.getIndexing("ionic");
+    EXPECT_EQ(indexing.totalEntityCount(), 8u);
+    EXPECT_EQ(indexing.ownedEntityCount(), 5u);
+    EXPECT_EQ(indexing.ghostEntityCount(), 3u);
+    EXPECT_EQ(indexing.totalStorageSize(), 16u);
+    EXPECT_EQ(indexing.ownedStorageSize(), 10u);
+
+    const auto& blk = mgr.getBlock("ionic");
+    EXPECT_EQ(blk.entityCount(), 8u);
+    EXPECT_EQ(blk.ownedEntityCount(), 5u);
+
+    const auto layout = blk.blockLayout();
+    EXPECT_EQ(layout.entity_count, 8u);
+    EXPECT_EQ(layout.local_storage_size, 16u);
+    EXPECT_EQ(layout.owned_entity_count, 5u);
+    EXPECT_EQ(layout.owned_storage_size, 10u);
+
+    EXPECT_NO_THROW(mgr.validate());
+}
+
+TEST(AuxiliaryStateManager, GhostSplitRejectedForNonNodeScope)
+{
+    AuxiliaryStateManager mgr;
+    auto spec = makeSpec("cell_data", 1, AuxiliaryStateScope::Cell);
+    EXPECT_THROW(mgr.registerBlock(spec, 6, 4), svmp::FE::InvalidArgumentException);
+}
+
 // ---------------------------------------------------------------------------
 //  Ghost synchronization
 // ---------------------------------------------------------------------------
@@ -238,6 +274,57 @@ TEST(AuxiliaryStateManager, ResetAllToCommitted)
     EXPECT_DOUBLE_EQ(mgr.getBlock("X").work()[0], 5.0);
 }
 
+TEST(AuxiliaryStateManager, ResetAndRollbackRefreshGhostWorkValues)
+{
+    AuxiliaryStateManager mgr;
+
+    AuxiliaryStateSpec spec;
+    spec.name = "ghosted";
+    spec.size = 1;
+    spec.scope = AuxiliaryStateScope::Node;
+    spec.sync_policy = AuxiliarySyncPolicy::OwnedAndGhost;
+    mgr.registerBlock(spec, 5, 3, std::vector<Real>{1.0, 2.0, 3.0, 90.0, 91.0});
+
+    mgr.setGhostSyncHook("ghosted", [&](std::string_view, std::span<Real> values) {
+        values[3] = values[0] + 100.0;
+        values[4] = values[1] + 100.0;
+    });
+
+    auto& blk = mgr.getBlock("ghosted");
+    blk.work()[0] = -1.0;
+    blk.work()[1] = -2.0;
+    blk.work()[2] = -3.0;
+    blk.work()[3] = -4.0;
+    blk.work()[4] = -5.0;
+
+    mgr.resetAllToCommitted();
+    EXPECT_DOUBLE_EQ(blk.work()[0], 1.0);
+    EXPECT_DOUBLE_EQ(blk.work()[1], 2.0);
+    EXPECT_DOUBLE_EQ(blk.work()[2], 3.0);
+    EXPECT_DOUBLE_EQ(blk.work()[3], 101.0);
+    EXPECT_DOUBLE_EQ(blk.work()[4], 102.0);
+
+    blk.work()[0] = 7.0;
+    blk.work()[1] = 8.0;
+    blk.work()[2] = 9.0;
+    blk.work()[3] = -40.0;
+    blk.work()[4] = -50.0;
+    mgr.commitAll(0.25);
+
+    blk.work()[0] = -7.0;
+    blk.work()[1] = -8.0;
+    blk.work()[2] = -9.0;
+    blk.work()[3] = -60.0;
+    blk.work()[4] = -70.0;
+    mgr.rollbackAll();
+
+    EXPECT_DOUBLE_EQ(blk.work()[0], 7.0);
+    EXPECT_DOUBLE_EQ(blk.work()[1], 8.0);
+    EXPECT_DOUBLE_EQ(blk.work()[2], 9.0);
+    EXPECT_DOUBLE_EQ(blk.work()[3], 107.0);
+    EXPECT_DOUBLE_EQ(blk.work()[4], 108.0);
+}
+
 TEST(AuxiliaryStateManager, ClearRemovesEverything)
 {
     AuxiliaryStateManager mgr;
@@ -304,6 +391,42 @@ TEST(AuxiliaryStateManager, PackUnpackSingleBlock)
     EXPECT_DOUBLE_EQ(mgr2.getBlock("X").committed()[1], 2.0);
     EXPECT_DOUBLE_EQ(mgr2.getBlock("X").work()[0], 3.0);
     EXPECT_DOUBLE_EQ(mgr2.getBlock("X").work()[1], 4.0);
+}
+
+TEST(AuxiliaryStateManager, UnpackRestoresGhostedCommittedAndWorkViaSyncHook)
+{
+    AuxiliaryStateManager mgr;
+    AuxiliaryStateSpec spec;
+    spec.name = "ghosted";
+    spec.size = 1;
+    spec.scope = AuxiliaryStateScope::Node;
+    spec.sync_policy = AuxiliarySyncPolicy::OwnedAndGhost;
+    mgr.registerBlock(spec, 5, 3, std::vector<Real>{1.0, 2.0, 3.0, 90.0, 91.0});
+    mgr.setGhostSyncHook("ghosted", [&](std::string_view, std::span<Real> values) {
+        values[3] = values[0] + 10.0;
+        values[4] = values[1] + 10.0;
+    });
+
+    auto packed = mgr.packAll();
+
+    AuxiliaryStateManager restored;
+    restored.registerBlock(spec, 5, 3, std::vector<Real>{0.0, 0.0, 0.0, -1.0, -1.0});
+    restored.setGhostSyncHook("ghosted", [&](std::string_view, std::span<Real> values) {
+        values[3] = values[0] + 10.0;
+        values[4] = values[1] + 10.0;
+    });
+
+    restored.unpackAll(packed);
+
+    const auto committed = restored.getBlock("ghosted").committed();
+    const auto work = restored.getBlock("ghosted").work();
+    EXPECT_DOUBLE_EQ(committed[0], 1.0);
+    EXPECT_DOUBLE_EQ(committed[1], 2.0);
+    EXPECT_DOUBLE_EQ(committed[2], 3.0);
+    EXPECT_DOUBLE_EQ(committed[3], 11.0);
+    EXPECT_DOUBLE_EQ(committed[4], 12.0);
+    EXPECT_DOUBLE_EQ(work[3], 11.0);
+    EXPECT_DOUBLE_EQ(work[4], 12.0);
 }
 
 TEST(AuxiliaryStateManager, PackUnpackAllBlocks)

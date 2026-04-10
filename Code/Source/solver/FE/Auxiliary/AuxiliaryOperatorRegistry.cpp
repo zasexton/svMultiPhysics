@@ -1,8 +1,34 @@
 #include "Auxiliary/AuxiliaryOperatorRegistry.h"
 
+#include <algorithm>
+
 namespace svmp {
 namespace FE {
 namespace systems {
+
+namespace {
+
+[[nodiscard]] backends::BlockRole backendRoleForAuxiliary(
+    const AuxiliaryBlockSolverMetadata& meta) noexcept
+{
+    if (meta.role == AuxiliaryBlockRole::Constraint) {
+        return backends::BlockRole::ConstraintField;
+    }
+    return backends::BlockRole::AuxiliaryField;
+}
+
+void applySolverMetadata(AuxiliaryBlockUnknownLayout& blk,
+                         const AuxiliaryBlockSolverMetadata& meta)
+{
+    blk.role = meta.role;
+    blk.backend_role = backendRoleForAuxiliary(meta);
+    blk.block_diagonal_suitable = meta.block_diagonal_suitable;
+    blk.schur_eliminable = meta.schur_eliminable ||
+        (meta.role == AuxiliaryBlockRole::SchurEliminable);
+    blk.schur_complement_partner = meta.schur_complement_partner;
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 //  Operator registration
@@ -63,7 +89,9 @@ void AuxiliaryOperatorRegistry::registerMonolithicUnknowns(
     std::string_view name,
     std::size_t entity_count,
     int stride,
-    AuxiliaryStateScope scope)
+    AuxiliaryStateScope scope,
+    const AuxiliaryBlockSolverMetadata* solver_meta,
+    std::vector<std::vector<int>> constraint_groups)
 {
     FE_THROW_IF(layout_finalized_, InvalidStateException,
                 "AuxiliaryOperatorRegistry::registerMonolithicUnknowns: "
@@ -75,6 +103,13 @@ void AuxiliaryOperatorRegistry::registerMonolithicUnknowns(
     blk.stride = stride;
     blk.n_unknowns = entity_count * static_cast<std::size_t>(stride);
     blk.scope = scope;
+    blk.constraint_groups = std::move(constraint_groups);
+    if (solver_meta != nullptr) {
+        applySolverMetadata(blk, *solver_meta);
+        block_solver_meta_[blk.name] = *solver_meta;
+    } else if (const auto* stored = getBlockSolverMetadata(name)) {
+        applySolverMetadata(blk, *stored);
+    }
     // Offset will be computed during finalizeLayout().
     aux_layout_.blocks.push_back(std::move(blk));
 }
@@ -115,7 +150,16 @@ MixedSystemLayout AuxiliaryOperatorRegistry::composeMixedLayout(
 void AuxiliaryOperatorRegistry::setBlockSolverMetadata(
     std::string_view block_name, AuxiliaryBlockSolverMetadata meta)
 {
-    block_solver_meta_[std::string(block_name)] = std::move(meta);
+    if (meta.block_name.empty()) {
+        meta.block_name = std::string(block_name);
+    }
+    auto key = std::string(block_name);
+    block_solver_meta_[key] = meta;
+    for (auto& blk : aux_layout_.blocks) {
+        if (blk.name == key) {
+            applySolverMetadata(blk, meta);
+        }
+    }
 }
 
 const AuxiliaryBlockSolverMetadata* AuxiliaryOperatorRegistry::getBlockSolverMetadata(
@@ -123,6 +167,50 @@ const AuxiliaryBlockSolverMetadata* AuxiliaryOperatorRegistry::getBlockSolverMet
 {
     auto it = block_solver_meta_.find(std::string(block_name));
     return (it != block_solver_meta_.end()) ? &it->second : nullptr;
+}
+
+const AuxiliaryBlockUnknownLayout* AuxiliaryOperatorRegistry::findLayoutBlock(
+    std::string_view block_name) const noexcept
+{
+    const auto it = std::find_if(aux_layout_.blocks.begin(),
+                                 aux_layout_.blocks.end(),
+                                 [&](const AuxiliaryBlockUnknownLayout& blk) {
+                                     return blk.name == block_name;
+                                 });
+    return it != aux_layout_.blocks.end() ? &*it : nullptr;
+}
+
+std::vector<std::string> AuxiliaryOperatorRegistry::constraintLikeBlocks() const
+{
+    std::vector<std::string> out;
+    for (const auto& blk : aux_layout_.blocks) {
+        if (blk.role == AuxiliaryBlockRole::Constraint) {
+            out.push_back(blk.name);
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> AuxiliaryOperatorRegistry::schurEliminableBlocks() const
+{
+    std::vector<std::string> out;
+    for (const auto& blk : aux_layout_.blocks) {
+        if (blk.schur_eliminable || blk.role == AuxiliaryBlockRole::SchurEliminable) {
+            out.push_back(blk.name);
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> AuxiliaryOperatorRegistry::specialPreconditionBlocks() const
+{
+    std::vector<std::string> out;
+    for (const auto& blk : aux_layout_.blocks) {
+        if (blk.role == AuxiliaryBlockRole::SpecialPrecondition) {
+            out.push_back(blk.name);
+        }
+    }
+    return out;
 }
 
 AuxiliaryCouplingDiagnostics AuxiliaryOperatorRegistry::computeCouplingDiagnostics() const

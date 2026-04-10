@@ -11,8 +11,13 @@
 #include "DofNumbering.h"
 #include "MeshTopologyBuilder.h"
 #include "Elements/ReferenceElement.h"
+#include "Constraints/AffineConstraints.h"
 #include "Spaces/FunctionSpace.h"
+#include "Spaces/AdaptiveSpace.h"
 #include "Spaces/OrientationManager.h"
+#include "Spaces/SpaceInterpolation.h"
+#include "Spaces/TraceSpace.h"
+#include "Basis/LagrangeBasis.h"
 #include "Basis/VectorBasis.h"
 
 // Mesh convenience overloads require the Mesh library to be linked, not just headers present.
@@ -2589,7 +2594,7 @@ static void assign_global_ordinals_with_neighbors(
 	                               tag_base + 4,
 	                               tag_base + 5);
 
-	    for (std::size_t n = 0; n < neighbors.size(); ++n) {
+		for (std::size_t n = 0; n < neighbors.size(); ++n) {
 	        if (assignments[n].empty()) continue; // no mismatch detected for this neighbor
 
 	        for (const auto& rec : incoming_assignments[n]) {
@@ -2602,6 +2607,144 @@ static void assign_global_ordinals_with_neighbors(
 	                                  " assignments between ranks " + std::to_string(my_rank) + " and " +
 	                                  std::to_string(neighbors[n]));
 	            }
+	        }
+	    }
+	}
+
+	template <typename Key>
+	struct OrdinalKey {
+	    Key key{};
+	    std::int32_t ordinal{0};
+
+	    bool operator==(const OrdinalKey& other) const noexcept {
+	        return key == other.key && ordinal == other.ordinal;
+	    }
+
+	    bool operator<(const OrdinalKey& other) const noexcept {
+	        if (key < other.key) return true;
+	        if (other.key < key) return false;
+	        return ordinal < other.ordinal;
+	    }
+	};
+
+	template <typename Key, typename KeyHash>
+	struct OrdinalKeyHash {
+	    std::size_t operator()(const OrdinalKey<Key>& k) const noexcept {
+	        const std::size_t base = KeyHash{}(k.key);
+	        const std::uint64_t mixed =
+	            mix_u64(static_cast<std::uint64_t>(base) ^
+	                    (static_cast<std::uint64_t>(static_cast<std::uint32_t>(k.ordinal)) + kHashSalt));
+	        return static_cast<std::size_t>(mixed);
+	    }
+	};
+
+	struct CellPrivateKey {
+	    gid_t cell_gid{gid_t{-1}};
+	    std::int32_t ordinal{0};
+
+	    bool operator==(const CellPrivateKey& other) const noexcept {
+	        return cell_gid == other.cell_gid && ordinal == other.ordinal;
+	    }
+
+	    bool operator<(const CellPrivateKey& other) const noexcept {
+	        if (cell_gid != other.cell_gid) return cell_gid < other.cell_gid;
+	        return ordinal < other.ordinal;
+	    }
+	};
+
+	struct CellPrivateKeyHash {
+	    std::size_t operator()(const CellPrivateKey& k) const noexcept {
+	        std::uint64_t h = mix_u64(static_cast<std::uint64_t>(k.cell_gid));
+	        h ^= mix_u64(static_cast<std::uint64_t>(static_cast<std::uint32_t>(k.ordinal)) + kHashSalt);
+	        return static_cast<std::size_t>(h);
+	    }
+	};
+
+	template <typename Key>
+	struct CountRecord {
+	    Key key{};
+	    std::int32_t count{0};
+	};
+
+	template <typename Key, typename Hash>
+	static void reduce_min_counts_with_neighbors(
+	    MPI_Comm comm,
+	    std::span<const int> neighbors,
+	    std::span<const Key> local_keys,
+	    std::span<const LocalIndex> local_counts,
+	    std::vector<LocalIndex>& out_counts,
+	    int tag_base) {
+	    static_assert(std::is_trivially_copyable_v<Key>,
+	                  "reduce_min_counts_with_neighbors requires trivially copyable keys");
+	    static_assert(std::is_trivially_copyable_v<CountRecord<Key>>,
+	                  "reduce_min_counts_with_neighbors requires trivially copyable records");
+
+	    if (local_keys.size() != local_counts.size()) {
+	        throw FEException("reduce_min_counts_with_neighbors: key/count size mismatch");
+	    }
+
+	    out_counts.assign(local_counts.begin(), local_counts.end());
+	    if (neighbors.empty() || local_keys.empty()) {
+	        return;
+	    }
+
+	    std::unordered_map<Key, std::size_t, Hash> local_index;
+	    local_index.reserve(local_keys.size());
+	    for (std::size_t i = 0; i < local_keys.size(); ++i) {
+	        local_index.emplace(local_keys[i], i);
+	    }
+
+	    std::vector<CountRecord<Key>> send_records;
+	    send_records.reserve(local_keys.size());
+	    for (std::size_t i = 0; i < local_keys.size(); ++i) {
+	        send_records.push_back(CountRecord<Key>{
+	            local_keys[i],
+	            static_cast<std::int32_t>(std::max<LocalIndex>(0, local_counts[i]))});
+	    }
+
+	    for (std::size_t n = 0; n < neighbors.size(); ++n) {
+	        const int nbr = neighbors[n];
+	        int send_n = static_cast<int>(send_records.size());
+	        int recv_n = 0;
+	        fe_mpi_check(MPI_Sendrecv(&send_n,
+	                                  1,
+	                                  MPI_INT,
+	                                  nbr,
+	                                  tag_base,
+	                                  &recv_n,
+	                                  1,
+	                                  MPI_INT,
+	                                  nbr,
+	                                  tag_base,
+	                                  comm,
+	                                  MPI_STATUS_IGNORE),
+	                     "MPI_Sendrecv count in reduce_min_counts_with_neighbors");
+
+	        std::vector<CountRecord<Key>> recv_records(static_cast<std::size_t>(std::max(0, recv_n)));
+	        const int send_bytes = static_cast<int>(send_records.size() * sizeof(CountRecord<Key>));
+	        const int recv_bytes = static_cast<int>(recv_records.size() * sizeof(CountRecord<Key>));
+	        fe_mpi_check(MPI_Sendrecv(send_records.empty() ? nullptr : send_records.data(),
+	                                  send_bytes,
+	                                  MPI_BYTE,
+	                                  nbr,
+	                                  tag_base + 1,
+	                                  recv_records.empty() ? nullptr : recv_records.data(),
+	                                  recv_bytes,
+	                                  MPI_BYTE,
+	                                  nbr,
+	                                  tag_base + 1,
+	                                  comm,
+	                                  MPI_STATUS_IGNORE),
+	                     "MPI_Sendrecv payload in reduce_min_counts_with_neighbors");
+
+	        for (const auto& rec : recv_records) {
+	            const auto it = local_index.find(rec.key);
+	            if (it == local_index.end()) {
+	                continue;
+	            }
+	            out_counts[it->second] =
+	                std::min(out_counts[it->second],
+	                         static_cast<LocalIndex>(std::max<std::int32_t>(0, rec.count)));
 	        }
 	    }
 	}
@@ -2620,6 +2763,214 @@ ElementType infer_element_type_from_cell(int dim, std::size_t n_verts) {
     if (dim == 3 && n_verts == 6) return ElementType::Wedge6;
     if (dim == 3 && n_verts == 5) return ElementType::Pyramid5;
     return ElementType::Unknown;
+}
+
+LocalIndex checked_local_index_from_size(std::size_t value, const char* context) {
+    const auto max_local = static_cast<std::size_t>(std::numeric_limits<LocalIndex>::max());
+    if (value > max_local) {
+        throw FEException(std::string(context) + ": local index overflow");
+    }
+    return static_cast<LocalIndex>(value);
+}
+
+LocalIndex simplex_interior_dofs(int order, int simplex_dim) {
+    if (order <= simplex_dim) {
+        return 0;
+    }
+
+    std::size_t numer = 1u;
+    for (int i = 1; i <= simplex_dim; ++i) {
+        numer *= static_cast<std::size_t>(order - i);
+    }
+
+    std::size_t denom = 1u;
+    for (int i = 2; i <= simplex_dim; ++i) {
+        denom *= static_cast<std::size_t>(i);
+    }
+
+    return checked_local_index_from_size(numer / denom, "simplex_interior_dofs");
+}
+
+LocalIndex lagrange_total_dofs(ElementType element_type, int order) {
+    const basis::LagrangeBasis basis_fn(element_type, order);
+    return checked_local_index_from_size(basis_fn.size(), "lagrange_total_dofs");
+}
+
+std::pair<int, int> count_reference_faces_by_vertices(ElementType cell_type) {
+    const auto ref = elements::ReferenceElement::create(cell_type);
+    int n_tri_faces = 0;
+    int n_quad_faces = 0;
+    for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+        const auto nverts = ref.face_nodes(f).size();
+        if (nverts == 3u) {
+            ++n_tri_faces;
+        } else if (nverts == 4u) {
+            ++n_quad_faces;
+        }
+    }
+    return {n_tri_faces, n_quad_faces};
+}
+
+bool is_scalar_face_interior_node(ElementType face_type,
+                                  const math::Vector<Real, 3>& xi) {
+    constexpr Real tol = Real(1e-12);
+
+    switch (face_type) {
+        case ElementType::Triangle3:
+            return xi[0] > tol && xi[1] > tol && (xi[0] + xi[1]) < (Real(1) - tol);
+        case ElementType::Quad4:
+            return std::abs(xi[0]) < (Real(1) - tol) && std::abs(xi[1]) < (Real(1) - tol);
+        default:
+            return false;
+    }
+}
+
+struct FaceAffine2 {
+    Real a00{Real(1)};
+    Real a01{Real(0)};
+    Real a10{Real(0)};
+    Real a11{Real(1)};
+    Real b0{Real(0)};
+    Real b1{Real(0)};
+
+    [[nodiscard]] math::Vector<Real, 3> apply(const math::Vector<Real, 3>& p) const noexcept {
+        math::Vector<Real, 3> out = p;
+        out[0] = a00 * p[0] + a01 * p[1] + b0;
+        out[1] = a10 * p[0] + a11 * p[1] + b1;
+        return out;
+    }
+};
+
+std::vector<math::Vector<Real, 3>> canonical_face_vertices(ElementType face_type) {
+    using Vec3 = math::Vector<Real, 3>;
+    switch (face_type) {
+        case ElementType::Triangle3:
+            return {Vec3{Real(0), Real(0), Real(0)},
+                    Vec3{Real(1), Real(0), Real(0)},
+                    Vec3{Real(0), Real(1), Real(0)}};
+        case ElementType::Quad4:
+            return {Vec3{Real(-1), Real(-1), Real(0)},
+                    Vec3{Real(1),  Real(-1), Real(0)},
+                    Vec3{Real(1),  Real(1),  Real(0)},
+                    Vec3{Real(-1), Real(1),  Real(0)}};
+        default:
+            return {};
+    }
+}
+
+FaceAffine2 compute_face_affine_from_vertex_map(
+    const std::vector<math::Vector<Real, 3>>& verts,
+    const std::vector<int>& local_to_global) {
+
+    FE_CHECK_ARG(verts.size() == local_to_global.size(),
+                 "compute_face_affine_from_vertex_map: vertex map size mismatch");
+    FE_CHECK_ARG(verts.size() == 3u || verts.size() == 4u,
+                 "compute_face_affine_from_vertex_map: supported for triangle/quad faces only");
+
+    const auto S0 = verts[0];
+    const auto S1 = verts[1];
+    const auto S2 = verts[2];
+    const auto T0 = verts[static_cast<std::size_t>(local_to_global[0])];
+    const auto T1 = verts[static_cast<std::size_t>(local_to_global[1])];
+    const auto T2 = verts[static_cast<std::size_t>(local_to_global[2])];
+
+    const Real b00 = S1[0] - S0[0];
+    const Real b01 = S2[0] - S0[0];
+    const Real b10 = S1[1] - S0[1];
+    const Real b11 = S2[1] - S0[1];
+
+    const Real c00 = T1[0] - T0[0];
+    const Real c01 = T2[0] - T0[0];
+    const Real c10 = T1[1] - T0[1];
+    const Real c11 = T2[1] - T0[1];
+
+    const Real detB = b00 * b11 - b01 * b10;
+    FE_CHECK_ARG(std::abs(detB) > Real(0),
+                 "compute_face_affine_from_vertex_map: degenerate face map");
+    const Real inv_detB = Real(1) / detB;
+
+    FaceAffine2 map;
+    map.a00 = ( c00 * b11 - c01 * b10) * inv_detB;
+    map.a01 = (-c00 * b01 + c01 * b00) * inv_detB;
+    map.a10 = ( c10 * b11 - c11 * b10) * inv_detB;
+    map.a11 = (-c10 * b01 + c11 * b00) * inv_detB;
+    map.b0 = T0[0] - (map.a00 * S0[0] + map.a01 * S0[1]);
+    map.b1 = T0[1] - (map.a10 * S0[0] + map.a11 * S0[1]);
+    return map;
+}
+
+std::vector<int> compute_scalar_face_interior_local_to_global(
+    ElementType face_type,
+    int poly_order,
+    const std::vector<int>& vertex_perm) {
+
+    FE_CHECK_ARG(poly_order >= 0, "compute_scalar_face_interior_local_to_global: negative poly_order");
+
+    basis::LagrangeBasis face_basis(face_type, poly_order);
+    const auto& nodes = face_basis.nodes();
+    const std::size_t n_nodes = nodes.size();
+
+    std::vector<int> interior_full_indices;
+    interior_full_indices.reserve(n_nodes);
+    std::vector<int> interior_slot_of_full(n_nodes, -1);
+    for (std::size_t i = 0; i < n_nodes; ++i) {
+        if (!is_scalar_face_interior_node(face_type, nodes[i])) {
+            continue;
+        }
+        interior_slot_of_full[i] = static_cast<int>(interior_full_indices.size());
+        interior_full_indices.push_back(static_cast<int>(i));
+    }
+
+    if (interior_full_indices.empty()) {
+        return {};
+    }
+
+    const auto verts = canonical_face_vertices(face_type);
+    FE_CHECK_ARG(!verts.empty(), "compute_scalar_face_interior_local_to_global: unsupported face type");
+    FE_CHECK_ARG(vertex_perm.size() == verts.size(),
+                 "compute_scalar_face_interior_local_to_global: vertex permutation size mismatch");
+
+    const auto local_to_global = spaces::OrientationManager::invert_permutation(vertex_perm);
+    const auto map = compute_face_affine_from_vertex_map(verts, local_to_global);
+
+    std::vector<int> full_perm(n_nodes, -1); // global full node -> local full node
+    std::vector<bool> used(n_nodes, false);
+    for (std::size_t i_local = 0; i_local < n_nodes; ++i_local) {
+        const auto x_global = map.apply(nodes[i_local]);
+        int matched = -1;
+        for (std::size_t j = 0; j < n_nodes; ++j) {
+            if (used[j]) {
+                continue;
+            }
+            if (nodes[j].approx_equal(x_global, Real(1e-12))) {
+                matched = static_cast<int>(j);
+                break;
+            }
+        }
+        FE_CHECK_ARG(matched >= 0,
+                     "compute_scalar_face_interior_local_to_global: face node match failed");
+        used[static_cast<std::size_t>(matched)] = true;
+        full_perm[static_cast<std::size_t>(matched)] = static_cast<int>(i_local);
+    }
+
+    std::vector<int> local_to_global_interior(interior_full_indices.size(), -1);
+    for (std::size_t global_int = 0; global_int < interior_full_indices.size(); ++global_int) {
+        const int global_full = interior_full_indices[global_int];
+        const int local_full = full_perm[static_cast<std::size_t>(global_full)];
+        FE_CHECK_ARG(local_full >= 0,
+                     "compute_scalar_face_interior_local_to_global: full permutation incomplete");
+        const int local_int = interior_slot_of_full[static_cast<std::size_t>(local_full)];
+        FE_CHECK_ARG(local_int >= 0,
+                     "compute_scalar_face_interior_local_to_global: boundary node mapped into interior set");
+        local_to_global_interior[static_cast<std::size_t>(local_int)] =
+            static_cast<int>(global_int);
+    }
+
+    for (const int idx : local_to_global_interior) {
+        FE_CHECK_ARG(idx >= 0,
+                     "compute_scalar_face_interior_local_to_global: interior permutation incomplete");
+    }
+    return local_to_global_interior;
 }
 
 struct LocalEdgeKey {
@@ -2863,97 +3214,84 @@ DofLayoutInfo DofLayoutInfo::Lagrange(int order, int dim, int num_verts_per_cell
     DofLayoutInfo info;
     info.is_continuous = true;
     info.num_components = std::max(1, num_components);
+    FE_CHECK_ARG(order >= 1, "DofLayoutInfo::Lagrange requires polynomial order >= 1");
 
-    if (order == 1) {
-        // P1: DOFs only at vertices
-        info.dofs_per_vertex = 1;
-        info.dofs_per_edge = 0;
-        info.dofs_per_face = 0;
-        info.dofs_per_cell = 0;
-        info.total_dofs_per_element = static_cast<LocalIndex>(num_verts_per_cell);
-    } else if (order == 2) {
-        // P2: DOFs at vertices + 1 per edge
-        info.dofs_per_vertex = 1;
-        info.dofs_per_edge = 1;
-        info.dofs_per_face = 0;
-        info.dofs_per_cell = 0;
-        // Total depends on element type (tri: 6, quad: 9, tet: 10, hex: 27)
-        // For simplicial elements: n_verts + n_edges
-        if (dim == 1) {
-            // 1D segment: 2 vertices + 1 interior node = 3
-            info.dofs_per_edge = 0;
-            info.dofs_per_cell = 1;
-            info.total_dofs_per_element = 3;
-        } else if (dim == 2) {
-            if (num_verts_per_cell == 3) {
-                info.total_dofs_per_element = 6;  // Triangle
-            } else if (num_verts_per_cell == 4) {
-                // Quad Q2: 4 vertices + 4 edge midpoints + 1 cell interior = 9
-                info.dofs_per_cell = 1;
-                info.total_dofs_per_element = 9;
-            } else {
-                throw FEException("DofLayoutInfo::Lagrange: unsupported 2D element for order 2");
-            }
-        } else if (dim == 3) {
-            if (num_verts_per_cell == 4) {
-                info.total_dofs_per_element = 10;  // Tet
-            } else if (num_verts_per_cell == 8) {
-                // Hex Q2: 8 vertices + 12 edge midpoints + 6 face centers + 1 cell center = 27
-                info.dofs_per_face = 1;
-                info.dofs_per_cell = 1;
-                info.total_dofs_per_element = 27;
-            } else {
-                throw FEException("DofLayoutInfo::Lagrange: unsupported 3D element for order 2");
-            }
+    const auto cell_type = infer_element_type_from_cell(dim, static_cast<std::size_t>(num_verts_per_cell));
+    FE_CHECK_ARG(cell_type != ElementType::Unknown,
+                 "DofLayoutInfo::Lagrange: unsupported cell topology");
+
+    info.dofs_per_vertex = 1;
+    info.dofs_per_edge = 0;
+    info.dofs_per_face = 0;
+    info.dofs_per_tri_face = 0;
+    info.dofs_per_quad_face = 0;
+    info.dofs_per_cell = 0;
+    info.total_dofs_per_element = lagrange_total_dofs(cell_type, order);
+
+    if (dim == 1) {
+        info.dofs_per_cell = checked_local_index_from_size(static_cast<std::size_t>(order - 1),
+                                                           "DofLayoutInfo::Lagrange line interior");
+    } else if (dim == 2) {
+        info.dofs_per_edge = checked_local_index_from_size(static_cast<std::size_t>(order - 1),
+                                                           "DofLayoutInfo::Lagrange edge interior");
+        if (cell_type == ElementType::Triangle3) {
+            info.dofs_per_cell = simplex_interior_dofs(order, /*simplex_dim=*/2);
+        } else if (cell_type == ElementType::Quad4) {
+            info.dofs_per_cell = checked_local_index_from_size(
+                static_cast<std::size_t>(order - 1) * static_cast<std::size_t>(order - 1),
+                "DofLayoutInfo::Lagrange quad interior");
         } else {
-            throw FEException("DofLayoutInfo::Lagrange: unsupported dimension for order 2");
+            throw FEException("DofLayoutInfo::Lagrange: unsupported 2D element topology");
         }
-    } else if (order == 3) {
-        // P3: vertices + 2 per edge + (optional) face/cell interior DOFs.
-        //
-        // NOTE: In 2D, "face interior" DOFs are cell-interior (bubble) DOFs
-        // and should be counted in dofs_per_cell (there is no separate face entity).
-        info.dofs_per_vertex = 1;
-        info.dofs_per_edge = 2;
-        info.dofs_per_face = 0;
-        info.dofs_per_cell = 0;
+    } else if (dim == 3) {
+        info.dofs_per_edge = checked_local_index_from_size(static_cast<std::size_t>(order - 1),
+                                                           "DofLayoutInfo::Lagrange edge interior");
+        switch (cell_type) {
+            case ElementType::Tetra4:
+                info.dofs_per_face = simplex_interior_dofs(order, /*simplex_dim=*/2);
+                info.dofs_per_cell = simplex_interior_dofs(order, /*simplex_dim=*/3);
+                break;
+            case ElementType::Hex8:
+                info.dofs_per_face = checked_local_index_from_size(
+                    static_cast<std::size_t>(order - 1) * static_cast<std::size_t>(order - 1),
+                    "DofLayoutInfo::Lagrange hex face interior");
+                info.dofs_per_cell = checked_local_index_from_size(
+                    static_cast<std::size_t>(order - 1) *
+                    static_cast<std::size_t>(order - 1) *
+                    static_cast<std::size_t>(order - 1),
+                    "DofLayoutInfo::Lagrange hex cell interior");
+                break;
+            case ElementType::Wedge6:
+            case ElementType::Pyramid5: {
+                const auto [n_tri_faces, n_quad_faces] = count_reference_faces_by_vertices(cell_type);
+                const auto ref = elements::ReferenceElement::create(cell_type);
 
-        if (dim == 1) {
-            // 1D segment: (p+1) nodes, with (p-1) interior nodes
-            info.dofs_per_edge = 0;
-            info.dofs_per_cell = 2;
-            info.total_dofs_per_element = 4;
-        } else if (dim == 2) {
-            if (num_verts_per_cell == 3) {
-                // Triangle P3: 3 vertices + 3 edges*2 + 1 cell interior = 10
-                info.dofs_per_cell = 1;
-                info.total_dofs_per_element = 10;
-            } else if (num_verts_per_cell == 4) {
-                // Quad Q3: 4 vertices + 4 edges*2 + 4 cell interior = 16
-                info.dofs_per_cell = 4;
-                info.total_dofs_per_element = 16;
-            } else {
-                throw FEException("DofLayoutInfo::Lagrange: unsupported 2D element for order 3");
+                info.dofs_per_tri_face = simplex_interior_dofs(order, /*simplex_dim=*/2);
+                info.dofs_per_quad_face = checked_local_index_from_size(
+                    static_cast<std::size_t>(order - 1) * static_cast<std::size_t>(order - 1),
+                    "DofLayoutInfo::Lagrange mixed quad face interior");
+
+                const auto face_total = static_cast<std::size_t>(n_tri_faces) *
+                                            static_cast<std::size_t>(info.dofs_per_tri_face) +
+                                        static_cast<std::size_t>(n_quad_faces) *
+                                            static_cast<std::size_t>(info.dofs_per_quad_face);
+                const auto edge_total = ref.num_edges() * static_cast<std::size_t>(info.dofs_per_edge);
+                const auto vertex_total = static_cast<std::size_t>(num_verts_per_cell) *
+                                          static_cast<std::size_t>(info.dofs_per_vertex);
+                const auto total = static_cast<std::size_t>(info.total_dofs_per_element);
+                FE_THROW_IF(total < vertex_total + edge_total + face_total, FEException,
+                            "DofLayoutInfo::Lagrange: mixed-face wedge/pyramid layout exceeds total basis size");
+
+                info.dofs_per_cell = checked_local_index_from_size(
+                    total - vertex_total - edge_total - face_total,
+                    "DofLayoutInfo::Lagrange mixed wedge/pyramid cell interior");
+                break;
             }
-        } else if (dim == 3) {
-            if (num_verts_per_cell == 4) {
-                // Tetra P3: 4 vertices + 6 edges*2 + 4 faces*1 = 20
-                info.dofs_per_face = 1;
-                info.dofs_per_cell = 0;
-                info.total_dofs_per_element = 20;
-            } else if (num_verts_per_cell == 8) {
-                // Hex Q3: 8 vertices + 12 edges*2 + 6 faces*4 + 1 cell*8 = 64
-                info.dofs_per_face = 4;
-                info.dofs_per_cell = 8;
-                info.total_dofs_per_element = 64;
-            } else {
-                throw FEException("DofLayoutInfo::Lagrange: unsupported 3D element for order 3");
-            }
-        } else {
-            throw FEException("DofLayoutInfo::Lagrange: unsupported dimension for order 3");
+            default:
+                throw FEException("DofLayoutInfo::Lagrange: unsupported 3D element topology");
         }
     } else {
-        throw FEException("DofLayoutInfo::Lagrange: order > 3 not implemented");
+        throw FEException("DofLayoutInfo::Lagrange: unsupported dimension");
     }
 
     // total_dofs_per_element describes the full field (all components).
@@ -2963,10 +3301,16 @@ DofLayoutInfo DofLayoutInfo::Lagrange(int order, int dim, int num_verts_per_cell
             static_cast<GlobalIndex>(info.num_components));
     }
 
-    // Tensor-product face-interior ordering is currently only implemented for
-    // quad faces of hex elements (used for permutation under rotations/reflections).
+    // DofHandler can currently permute scalar face-interior DOFs canonically for
+    // tetrahedral and hexahedral complete Lagrange spaces.
     info.tensor_face_dof_layout =
-        (dim == 3 && num_verts_per_cell == 8 && info.dofs_per_face > 1);
+        (dim == 3 &&
+         ((cell_type == ElementType::Tetra4 && info.dofs_per_face > 1) ||
+          (cell_type == ElementType::Hex8 && info.dofs_per_face > 1) ||
+          (cell_type == ElementType::Wedge6 &&
+           (info.dofs_per_tri_face > 1 || info.dofs_per_quad_face > 1)) ||
+          (cell_type == ElementType::Pyramid5 &&
+           (info.dofs_per_tri_face > 1 || info.dofs_per_quad_face > 1))));
 
     return info;
 }
@@ -2974,31 +3318,241 @@ DofLayoutInfo DofLayoutInfo::Lagrange(int order, int dim, int num_verts_per_cell
 DofLayoutInfo DofLayoutInfo::DG(int order, int num_verts_per_cell, int num_components) {
     DofLayoutInfo info;
     info.is_continuous = false;
-    info.num_components = num_components;
+    info.num_components = std::max(1, num_components);
     info.tensor_face_dof_layout = false;
 
     // For DG, all DOFs are cell-interior (no sharing)
     info.dofs_per_vertex = 0;
     info.dofs_per_edge = 0;
     info.dofs_per_face = 0;
+    info.dofs_per_tri_face = 0;
+    info.dofs_per_quad_face = 0;
+    FE_CHECK_ARG(order >= 0, "DofLayoutInfo::DG requires polynomial order >= 0");
 
-    // Total DOFs based on polynomial order and element type
-    // For simplicial elements in 2D: (p+1)(p+2)/2
-    // For simplicial elements in 3D: (p+1)(p+2)(p+3)/6
-    if (num_verts_per_cell == 3) {
-        info.dofs_per_cell = static_cast<LocalIndex>((order + 1) * (order + 2) / 2);
-    } else if (num_verts_per_cell == 4 && order <= 1) {
-        // Could be quad or tet
-        info.dofs_per_cell = static_cast<LocalIndex>(num_verts_per_cell);
-    } else {
-        // Fallback
-        info.dofs_per_cell = static_cast<LocalIndex>(num_verts_per_cell);
+    ElementType cell_type = ElementType::Unknown;
+    switch (num_verts_per_cell) {
+        case 2: cell_type = ElementType::Line2; break;
+        case 3: cell_type = ElementType::Triangle3; break;
+        case 4:
+            // DG layout does not receive dimension, so only unambiguous complete-family
+            // aliases are handled here. Callers using 3D tetrahedra should construct the
+            // total from the space directly rather than relying on this convenience path.
+            cell_type = ElementType::Quad4;
+            break;
+        case 5: cell_type = ElementType::Pyramid5; break;
+        case 6: cell_type = ElementType::Wedge6; break;
+        case 8: cell_type = ElementType::Hex8; break;
+        default:
+            throw FEException("DofLayoutInfo::DG: unsupported cell topology");
     }
 
+    info.dofs_per_cell = lagrange_total_dofs(cell_type, order);
     info.total_dofs_per_element = static_cast<LocalIndex>(
-        static_cast<GlobalIndex>(info.dofs_per_cell) * static_cast<GlobalIndex>(std::max(1, num_components)));
+        static_cast<GlobalIndex>(info.dofs_per_cell) * static_cast<GlobalIndex>(info.num_components));
 
     return info;
+}
+
+enum class VariableLocalDofKind : std::uint8_t {
+    Vertex,
+    Edge,
+    Face,
+    Cell
+};
+
+struct VariableLocalDofTag {
+    VariableLocalDofKind kind{VariableLocalDofKind::Cell};
+    int local_entity_id{-1};
+    LocalIndex ordinal{0};
+};
+
+struct VariableCellLayout {
+    ElementType cell_type{ElementType::Unknown};
+    int polynomial_order{0};
+    FieldType field_type{FieldType::Scalar};
+    Continuity continuity{Continuity::Custom};
+    BasisType basis_type{BasisType::Custom};
+    LocalIndex scalar_dofs_per_element{0};
+    LocalIndex cell_interior_dofs{0};
+    std::vector<LocalIndex> vertex_counts;
+    std::vector<LocalIndex> edge_counts;
+    std::vector<LocalIndex> face_counts;
+    std::vector<VariableLocalDofTag> dof_tags;
+};
+
+static bool variable_order_scalar_basis_supported(BasisType basis_type) noexcept {
+    switch (basis_type) {
+        case BasisType::Lagrange:
+        case BasisType::Hierarchical:
+        case BasisType::Bernstein:
+        case BasisType::Spectral:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static VariableCellLayout build_variable_cell_layout(const spaces::FunctionSpace& space,
+                                                     const MeshTopologyView& topology,
+                                                     GlobalIndex cell_id) {
+    const auto cell_verts = topology.getCellVertices(cell_id);
+    const ElementType cell_type =
+        infer_element_type_from_cell(topology.dim, cell_verts.size());
+    FE_CHECK_ARG(cell_type != ElementType::Unknown,
+                 "DofHandler::distributeVariableOrderDofs: unsupported cell topology");
+
+    const auto& elem = space.getElement(cell_type, cell_id);
+    const auto& cell_basis = elem.basis();
+
+    VariableCellLayout layout;
+    layout.cell_type = cell_type;
+    layout.polynomial_order = space.polynomial_order(cell_id);
+    layout.field_type = space.field_type();
+    layout.continuity = space.continuity();
+    layout.basis_type = cell_basis.basis_type();
+
+    const auto ref = elements::ReferenceElement::create(cell_type);
+    layout.vertex_counts.assign(cell_verts.size(), 0);
+    layout.edge_counts.assign(ref.num_edges(), 0);
+    layout.face_counts.assign(topology.dim >= 3 ? ref.num_faces() : 0u, 0);
+
+    if (layout.continuity == Continuity::C0 || layout.continuity == Continuity::C1) {
+        FE_CHECK_ARG(variable_order_scalar_basis_supported(layout.basis_type),
+                     "DofHandler::distributeVariableOrderDofs: mixed-order scalar numbering currently supports only Lagrange-like scalar bases");
+
+        const auto scalar_layout = DofLayoutInfo::Lagrange(layout.polynomial_order,
+                                                           topology.dim,
+                                                           static_cast<int>(cell_verts.size()));
+
+        std::fill(layout.vertex_counts.begin(), layout.vertex_counts.end(), scalar_layout.dofs_per_vertex);
+        std::fill(layout.edge_counts.begin(), layout.edge_counts.end(), scalar_layout.dofs_per_edge);
+        if (topology.dim >= 3) {
+            for (std::size_t lf = 0; lf < ref.num_faces(); ++lf) {
+                layout.face_counts[lf] =
+                    scalar_layout.face_dofs_for_vertex_count(ref.face_nodes(lf).size());
+            }
+        }
+        layout.cell_interior_dofs = scalar_layout.dofs_per_cell;
+
+        layout.dof_tags.reserve(static_cast<std::size_t>(elem.num_dofs()));
+        for (std::size_t lv = 0; lv < layout.vertex_counts.size(); ++lv) {
+            for (LocalIndex d = 0; d < layout.vertex_counts[lv]; ++d) {
+                layout.dof_tags.push_back(
+                    VariableLocalDofTag{VariableLocalDofKind::Vertex, static_cast<int>(lv), d});
+            }
+        }
+        for (std::size_t le = 0; le < layout.edge_counts.size(); ++le) {
+            for (LocalIndex d = 0; d < layout.edge_counts[le]; ++d) {
+                layout.dof_tags.push_back(
+                    VariableLocalDofTag{VariableLocalDofKind::Edge, static_cast<int>(le), d});
+            }
+        }
+        for (std::size_t lf = 0; lf < layout.face_counts.size(); ++lf) {
+            for (LocalIndex d = 0; d < layout.face_counts[lf]; ++d) {
+                layout.dof_tags.push_back(
+                    VariableLocalDofTag{VariableLocalDofKind::Face, static_cast<int>(lf), d});
+            }
+        }
+        for (LocalIndex d = 0; d < layout.cell_interior_dofs; ++d) {
+            layout.dof_tags.push_back(VariableLocalDofTag{VariableLocalDofKind::Cell, -1, d});
+        }
+
+        layout.scalar_dofs_per_element =
+            static_cast<LocalIndex>(layout.dof_tags.size());
+        FE_CHECK_ARG(layout.scalar_dofs_per_element == static_cast<LocalIndex>(elem.num_dofs()),
+                     "DofHandler::distributeVariableOrderDofs: scalar cell layout does not match element DOF count");
+        return layout;
+    }
+
+    if (layout.continuity == Continuity::H_curl || layout.continuity == Continuity::H_div) {
+        FE_CHECK_ARG(cell_basis.is_vector_valued(),
+                     "DofHandler::distributeVariableOrderDofs: vector continuity requires a vector-valued basis");
+        const auto* vb = dynamic_cast<const basis::VectorBasisFunction*>(&cell_basis);
+        FE_CHECK_ARG(vb != nullptr,
+                     "DofHandler::distributeVariableOrderDofs: vector basis is not a VectorBasisFunction");
+
+        std::vector<LocalIndex> vertex_ord(layout.vertex_counts.size(), 0);
+        std::vector<LocalIndex> edge_ord(layout.edge_counts.size(), 0);
+        std::vector<LocalIndex> face_ord(layout.face_counts.size(), 0);
+        LocalIndex cell_ord = 0;
+
+        const auto associations = vb->dof_associations();
+        layout.dof_tags.reserve(associations.size());
+        for (const auto& assoc : associations) {
+            switch (assoc.entity_type) {
+                case basis::DofEntity::Vertex:
+                    FE_CHECK_ARG(assoc.entity_id >= 0 &&
+                                     static_cast<std::size_t>(assoc.entity_id) < layout.vertex_counts.size(),
+                                 "DofHandler::distributeVariableOrderDofs: vector vertex association out of range");
+                    layout.dof_tags.push_back(VariableLocalDofTag{
+                        VariableLocalDofKind::Vertex,
+                        assoc.entity_id,
+                        vertex_ord[static_cast<std::size_t>(assoc.entity_id)]++});
+                    layout.vertex_counts[static_cast<std::size_t>(assoc.entity_id)] += 1;
+                    break;
+                case basis::DofEntity::Edge:
+                    FE_CHECK_ARG(assoc.entity_id >= 0 &&
+                                     static_cast<std::size_t>(assoc.entity_id) < layout.edge_counts.size(),
+                                 "DofHandler::distributeVariableOrderDofs: vector edge association out of range");
+                    layout.dof_tags.push_back(VariableLocalDofTag{
+                        VariableLocalDofKind::Edge,
+                        assoc.entity_id,
+                        edge_ord[static_cast<std::size_t>(assoc.entity_id)]++});
+                    layout.edge_counts[static_cast<std::size_t>(assoc.entity_id)] += 1;
+                    break;
+                case basis::DofEntity::Face:
+                    if (topology.dim >= 3) {
+                        FE_CHECK_ARG(assoc.entity_id >= 0 &&
+                                         static_cast<std::size_t>(assoc.entity_id) < layout.face_counts.size(),
+                                     "DofHandler::distributeVariableOrderDofs: vector face association out of range");
+                        layout.dof_tags.push_back(VariableLocalDofTag{
+                            VariableLocalDofKind::Face,
+                            assoc.entity_id,
+                            face_ord[static_cast<std::size_t>(assoc.entity_id)]++});
+                        layout.face_counts[static_cast<std::size_t>(assoc.entity_id)] += 1;
+                    } else {
+                        layout.dof_tags.push_back(
+                            VariableLocalDofTag{VariableLocalDofKind::Cell, -1, cell_ord++});
+                        layout.cell_interior_dofs += 1;
+                    }
+                    break;
+                case basis::DofEntity::Interior:
+                default:
+                    layout.dof_tags.push_back(
+                        VariableLocalDofTag{VariableLocalDofKind::Cell, -1, cell_ord++});
+                    layout.cell_interior_dofs += 1;
+                    break;
+            }
+        }
+
+        layout.scalar_dofs_per_element =
+            static_cast<LocalIndex>(layout.dof_tags.size());
+        FE_CHECK_ARG(layout.scalar_dofs_per_element == static_cast<LocalIndex>(elem.num_dofs()),
+                     "DofHandler::distributeVariableOrderDofs: vector cell layout does not match element DOF count");
+        return layout;
+    }
+
+    layout.scalar_dofs_per_element =
+        static_cast<LocalIndex>(elem.num_dofs() / std::max(1, space.value_dimension()));
+    if (space.value_dimension() <= 1 ||
+        static_cast<std::size_t>(layout.scalar_dofs_per_element) != elem.num_dofs()) {
+        layout.scalar_dofs_per_element = static_cast<LocalIndex>(elem.num_dofs());
+    }
+    layout.cell_interior_dofs = layout.scalar_dofs_per_element;
+    layout.dof_tags.reserve(static_cast<std::size_t>(layout.scalar_dofs_per_element));
+    for (LocalIndex d = 0; d < layout.scalar_dofs_per_element; ++d) {
+        layout.dof_tags.push_back(VariableLocalDofTag{VariableLocalDofKind::Cell, -1, d});
+    }
+    return layout;
+}
+
+static void reduce_variable_entity_count(LocalIndex count,
+                                         GlobalIndex& shared_count) noexcept {
+    if (shared_count < 0) {
+        shared_count = count;
+    } else {
+        shared_count = std::min(shared_count, static_cast<GlobalIndex>(count));
+    }
 }
 
 // =============================================================================
@@ -3075,6 +3629,8 @@ struct DofHandler::MeshCacheState : MeshObserver {
             return a.dofs_per_vertex == b.dofs_per_vertex &&
                    a.dofs_per_edge == b.dofs_per_edge &&
                    a.dofs_per_face == b.dofs_per_face &&
+                   a.dofs_per_tri_face == b.dofs_per_tri_face &&
+                   a.dofs_per_quad_face == b.dofs_per_quad_face &&
                    a.dofs_per_cell == b.dofs_per_cell &&
                    a.num_components == b.num_components &&
                    a.is_continuous == b.is_continuous &&
@@ -3314,6 +3870,26 @@ void DofHandler::distributeDofs(const MeshTopologyInfo& topology,
     FE_THROW_IF(topology.n_cells <= 0, FEException,
                 "DofHandler::distributeDofs(MeshTopologyInfo, FunctionSpace): topology has no cells");
 
+    if (space.is_variable_order()) {
+        my_rank_ = options.my_rank;
+        world_size_ = options.world_size;
+        global_numbering_ = options.global_numbering;
+        no_global_collectives_ = options.no_global_collectives;
+#if FE_HAS_MPI
+        mpi_comm_ = options.mpi_comm;
+#endif
+        n_cells_ = topology.n_cells;
+        spatial_dim_ = topology.dim;
+        num_components_ = static_cast<LocalIndex>(
+            std::max(1, (space.continuity() == Continuity::H_curl || space.continuity() == Continuity::H_div)
+                            ? 1
+                            : space.value_dimension()));
+        dof_map_.setMyRank(my_rank_);
+        ++dof_state_revision_;
+        const auto view = MeshTopologyView::from(topology);
+        return distributeVariableOrderDofs(view, space, options);
+    }
+
     // Infer cell vertex count from cell 0.
     const auto cell0 = topology.getCellVertices(0);
     FE_THROW_IF(cell0.empty(), FEException,
@@ -3423,6 +3999,8 @@ void DofHandler::distributeDofs(const MeshTopologyInfo& topology,
     layout.dofs_per_vertex = 0;
     layout.dofs_per_edge = 0;
     layout.dofs_per_face = 0;
+    layout.dofs_per_tri_face = 0;
+    layout.dofs_per_quad_face = 0;
     layout.tensor_face_dof_layout = false;
 
     const auto nc = static_cast<LocalIndex>(std::max(1, space.value_dimension()));
@@ -3468,7 +4046,7 @@ void DofHandler::distributeDofsCore(const MeshTopologyView& topology,
     MeshTopologyView derived_view;
 
     const bool need_edges = layout.is_continuous && layout.dofs_per_edge > 0;
-    const bool need_faces = layout.is_continuous && layout.dofs_per_face > 0;
+    const bool need_faces = layout.is_continuous && layout.has_face_dofs();
     const bool missing_edges = need_edges && (topology.n_edges <= 0 ||
                                               topology.cell2edge_offsets.empty() ||
                                               topology.cell2edge_data.empty());
@@ -3538,7 +4116,7 @@ void DofHandler::distributeDofsCore(const MeshTopologyView& topology,
     // canonical vertex ordering + reference element topology.
     if (layout.is_continuous &&
         options.use_canonical_ordering &&
-        (layout.dofs_per_edge > 0 || layout.dofs_per_face > 0)) {
+        (layout.dofs_per_edge > 0 || layout.has_face_dofs())) {
         const auto n_cells = static_cast<std::size_t>(std::max<GlobalIndex>(topo->n_cells, 0));
 
         cell_edge_orient_offsets_.assign(n_cells + 1u, MeshOffset{0});
@@ -3594,7 +4172,7 @@ void DofHandler::distributeDofsCore(const MeshTopologyView& topology,
             // Face orientations in reference-face order.
             cell_face_orient_offsets_[static_cast<std::size_t>(c)] =
                 static_cast<MeshOffset>(cell_face_orient_data_.size());
-            if (layout.dofs_per_face > 0 &&
+            if (layout.has_face_dofs() &&
                 !topo->cell2face_offsets.empty() &&
                 !topo->face2vertex_offsets.empty() &&
                 !topo->face2vertex_data.empty()) {
@@ -3744,6 +4322,1610 @@ void DofHandler::copyCellOrientationsFrom(const DofHandler& other)
     }
 }
 
+void DofHandler::cacheCellOrientations(const MeshTopologyView& topology,
+                                       bool need_edge_orientations,
+                                       bool need_face_orientations)
+{
+    cell_edge_orient_offsets_.clear();
+    cell_edge_orient_data_.clear();
+    cell_face_orient_offsets_.clear();
+    cell_face_orient_data_.clear();
+
+    if (!need_edge_orientations && !need_face_orientations) {
+        return;
+    }
+
+    const auto n_cells = static_cast<std::size_t>(std::max<GlobalIndex>(topology.n_cells, 0));
+    cell_edge_orient_offsets_.assign(n_cells + 1u, MeshOffset{0});
+    cell_face_orient_offsets_.assign(n_cells + 1u, MeshOffset{0});
+
+    auto vertex_gid = [&](GlobalIndex v) -> gid_t {
+        const auto sv = static_cast<std::size_t>(v);
+        if (sv < topology.vertex_gids.size()) {
+            return topology.vertex_gids[sv];
+        }
+        return static_cast<gid_t>(v);
+    };
+
+    for (GlobalIndex c = 0; c < topology.n_cells; ++c) {
+        const auto sc = static_cast<std::size_t>(c);
+        const auto cell_verts = topology.getCellVertices(c);
+        const auto base_type = infer_element_type_from_cell(topology.dim, cell_verts.size());
+        if (base_type == ElementType::Unknown) {
+            cell_edge_orient_offsets_[sc + 1u] = static_cast<MeshOffset>(cell_edge_orient_data_.size());
+            cell_face_orient_offsets_[sc + 1u] = static_cast<MeshOffset>(cell_face_orient_data_.size());
+            continue;
+        }
+
+        const auto ref = elements::ReferenceElement::create(base_type);
+
+        cell_edge_orient_offsets_[sc] = static_cast<MeshOffset>(cell_edge_orient_data_.size());
+        if (need_edge_orientations) {
+            for (std::size_t le = 0; le < ref.num_edges(); ++le) {
+                const auto& en = ref.edge_nodes(le);
+                if (en.size() != 2u) {
+                    cell_edge_orient_data_.push_back(+1);
+                    continue;
+                }
+
+                const auto lv0 = static_cast<std::size_t>(en[0]);
+                const auto lv1 = static_cast<std::size_t>(en[1]);
+                if (lv0 >= cell_verts.size() || lv1 >= cell_verts.size()) {
+                    cell_edge_orient_data_.push_back(+1);
+                    continue;
+                }
+
+                const auto gv0 = cell_verts[lv0];
+                const auto gv1 = cell_verts[lv1];
+                cell_edge_orient_data_.push_back(vertex_gid(gv0) <= vertex_gid(gv1) ? +1 : -1);
+            }
+        }
+        cell_edge_orient_offsets_[sc + 1u] = static_cast<MeshOffset>(cell_edge_orient_data_.size());
+
+        cell_face_orient_offsets_[sc] = static_cast<MeshOffset>(cell_face_orient_data_.size());
+        if (need_face_orientations &&
+            !topology.cell2face_offsets.empty() &&
+            !topology.face2vertex_offsets.empty() &&
+            !topology.face2vertex_data.empty()) {
+            const auto cell_faces = topology.getCellFaces(c);
+            for (std::size_t lf = 0; lf < ref.num_faces() && lf < cell_faces.size(); ++lf) {
+                const auto face_vertices = topology.getFaceVertices(cell_faces[lf]);
+                const auto& fn = ref.face_nodes(lf);
+
+                spaces::OrientationManager::FaceOrientation orient{};
+                if (fn.size() == 3u && face_vertices.size() == 3u) {
+                    std::array<int, 3> local_v{};
+                    std::array<int, 3> global_v{};
+                    for (std::size_t i = 0; i < 3u; ++i) {
+                        const auto lv = static_cast<std::size_t>(fn[i]);
+                        local_v[i] = (lv < cell_verts.size()) ? static_cast<int>(cell_verts[lv]) : -1;
+                        global_v[i] = static_cast<int>(face_vertices[i]);
+                    }
+                    orient = spaces::OrientationManager::triangle_face_orientation(local_v, global_v);
+                } else if (fn.size() == 4u && face_vertices.size() == 4u) {
+                    std::array<int, 4> local_v{};
+                    std::array<int, 4> global_v{};
+                    for (std::size_t i = 0; i < 4u; ++i) {
+                        const auto lv = static_cast<std::size_t>(fn[i]);
+                        local_v[i] = (lv < cell_verts.size()) ? static_cast<int>(cell_verts[lv]) : -1;
+                        global_v[i] = static_cast<int>(face_vertices[i]);
+                    }
+                    orient = spaces::OrientationManager::quad_face_orientation(local_v, global_v);
+                } else {
+                    orient.sign = +1;
+                }
+                cell_face_orient_data_.push_back(std::move(orient));
+            }
+        }
+        cell_face_orient_offsets_[sc + 1u] = static_cast<MeshOffset>(cell_face_orient_data_.size());
+    }
+}
+
+void DofHandler::distributeVariableOrderDofs(const MeshTopologyView& topology,
+                                             const spaces::FunctionSpace& space,
+                                             const DofDistributionOptions& options) {
+    if (world_size_ > 1) {
+        return distributeVariableOrderDofsParallel(topology, space, options);
+    }
+    FE_CHECK_ARG(options.numbering == DofNumberingStrategy::Sequential,
+                 "DofHandler::distributeVariableOrderDofs currently supports sequential numbering only");
+
+    ghost_manager_.reset();
+    ghost_dofs_cache_.clear();
+    ghost_cache_valid_ = false;
+    clearSpatialDofCoordinates();
+    cell_edge_orient_offsets_.clear();
+    cell_edge_orient_data_.clear();
+    cell_face_orient_offsets_.clear();
+    cell_face_orient_data_.clear();
+
+    const MeshTopologyView* topo = &topology;
+    MeshTopologyInfo derived_topology;
+    MeshTopologyView derived_view;
+
+    std::vector<VariableCellLayout> cell_layouts;
+    cell_layouts.reserve(static_cast<std::size_t>(std::max<GlobalIndex>(topology.n_cells, 0)));
+
+    bool need_edges = false;
+    bool need_faces = false;
+    bool need_edge_orientations = false;
+    bool need_face_orientations = false;
+    std::size_t max_cell_total_dofs = 0;
+
+    for (GlobalIndex c = 0; c < topology.n_cells; ++c) {
+        cell_layouts.push_back(build_variable_cell_layout(space, topology, c));
+        const auto& layout = cell_layouts.back();
+        need_edges = need_edges || std::any_of(layout.edge_counts.begin(),
+                                               layout.edge_counts.end(),
+                                               [](LocalIndex n) { return n > 0; });
+        need_faces = need_faces || std::any_of(layout.face_counts.begin(),
+                                               layout.face_counts.end(),
+                                               [](LocalIndex n) { return n > 0; });
+        if (layout.continuity == Continuity::H_curl || layout.continuity == Continuity::H_div) {
+            need_edge_orientations = need_edge_orientations ||
+                                     std::any_of(layout.edge_counts.begin(),
+                                                 layout.edge_counts.end(),
+                                                 [](LocalIndex n) { return n > 0; });
+            need_face_orientations = need_face_orientations ||
+                                     std::any_of(layout.face_counts.begin(),
+                                                 layout.face_counts.end(),
+                                                 [](LocalIndex n) { return n > 0; });
+        }
+        max_cell_total_dofs = std::max(max_cell_total_dofs, space.dofs_per_element(c));
+    }
+
+    const bool missing_edges = need_edges &&
+                               (topology.n_edges <= 0 ||
+                                topology.cell2edge_offsets.empty() ||
+                                topology.cell2edge_data.empty());
+    const bool missing_faces = need_faces &&
+                               (topology.n_faces <= 0 ||
+                                topology.cell2face_offsets.empty() ||
+                                topology.cell2face_data.empty());
+
+    if (missing_edges || missing_faces) {
+        if (options.topology_completion == TopologyCompletion::RequireComplete) {
+            if (missing_edges) {
+                throw FEException("DofHandler::distributeVariableOrderDofs: edge DOFs require mesh-provided edge connectivity");
+            }
+            if (missing_faces) {
+                throw FEException("DofHandler::distributeVariableOrderDofs: face DOFs require mesh-provided face connectivity");
+            }
+        }
+
+        derived_topology = topology.materialize();
+        if (missing_edges) {
+            derive_edge_connectivity(derived_topology);
+        }
+        if (missing_faces) {
+            derive_face_connectivity(derived_topology);
+        }
+        derived_view = MeshTopologyView::from(derived_topology);
+        topo = &derived_view;
+
+        cell_layouts.clear();
+        cell_layouts.reserve(static_cast<std::size_t>(std::max<GlobalIndex>(topo->n_cells, 0)));
+        for (GlobalIndex c = 0; c < topo->n_cells; ++c) {
+            cell_layouts.push_back(build_variable_cell_layout(space, *topo, c));
+        }
+    }
+
+    const auto n_vertices = static_cast<std::size_t>(std::max<GlobalIndex>(topo->n_vertices, 0));
+    const auto n_edges = static_cast<std::size_t>(std::max<GlobalIndex>(topo->n_edges, 0));
+    const auto n_faces = static_cast<std::size_t>(std::max<GlobalIndex>(topo->n_faces, 0));
+    const auto n_cells = static_cast<std::size_t>(std::max<GlobalIndex>(topo->n_cells, 0));
+
+    std::vector<GlobalIndex> shared_vertex_count(n_vertices, GlobalIndex{-1});
+    std::vector<GlobalIndex> shared_edge_count(n_edges, GlobalIndex{-1});
+    std::vector<GlobalIndex> shared_face_count(n_faces, GlobalIndex{-1});
+
+    for (GlobalIndex c = 0; c < topo->n_cells; ++c) {
+        const auto sc = static_cast<std::size_t>(c);
+        const auto& layout = cell_layouts[sc];
+        const auto cell_verts = topo->getCellVertices(c);
+
+        for (std::size_t lv = 0; lv < layout.vertex_counts.size(); ++lv) {
+            FE_CHECK_ARG(lv < cell_verts.size(),
+                         "DofHandler::distributeVariableOrderDofs: local vertex index out of range");
+            reduce_variable_entity_count(layout.vertex_counts[lv],
+                                         shared_vertex_count[static_cast<std::size_t>(cell_verts[lv])]);
+        }
+
+        if (!layout.edge_counts.empty()) {
+            const auto cell_edges = topo->getCellEdges(c);
+            FE_CHECK_ARG(cell_edges.size() >= layout.edge_counts.size(),
+                         "DofHandler::distributeVariableOrderDofs: cell edge connectivity does not match reference edge count");
+            for (std::size_t le = 0; le < layout.edge_counts.size(); ++le) {
+                reduce_variable_entity_count(layout.edge_counts[le],
+                                             shared_edge_count[static_cast<std::size_t>(cell_edges[le])]);
+            }
+        }
+
+        if (!layout.face_counts.empty()) {
+            const auto cell_faces = topo->getCellFaces(c);
+            FE_CHECK_ARG(cell_faces.size() >= layout.face_counts.size(),
+                         "DofHandler::distributeVariableOrderDofs: cell face connectivity does not match reference face count");
+            for (std::size_t lf = 0; lf < layout.face_counts.size(); ++lf) {
+                reduce_variable_entity_count(layout.face_counts[lf],
+                                             shared_face_count[static_cast<std::size_t>(cell_faces[lf])]);
+            }
+        }
+    }
+
+    for (auto& n : shared_vertex_count) {
+        if (n < 0) n = 0;
+    }
+    for (auto& n : shared_edge_count) {
+        if (n < 0) n = 0;
+    }
+    for (auto& n : shared_face_count) {
+        if (n < 0) n = 0;
+    }
+
+    const auto nc = static_cast<GlobalIndex>(std::max<LocalIndex>(1, num_components_));
+
+    std::vector<GlobalIndex> vertex_first_dof(n_vertices, -1);
+    std::vector<GlobalIndex> edge_first_dof(n_edges, -1);
+    std::vector<GlobalIndex> face_first_dof(n_faces, -1);
+    std::vector<GlobalIndex> cell_private_first_dof(n_cells, -1);
+    std::vector<LocalIndex> cell_private_count(n_cells, 0);
+
+    entity_dof_map_ = std::make_unique<EntityDofMap>();
+    entity_dof_map_->reserve(topo->n_vertices, topo->n_edges, topo->n_faces, topo->n_cells);
+
+    GlobalIndex next_dof = 0;
+
+    for (GlobalIndex v = 0; v < topo->n_vertices; ++v) {
+        const auto count = static_cast<LocalIndex>(shared_vertex_count[static_cast<std::size_t>(v)]);
+        if (count <= 0) continue;
+        vertex_first_dof[static_cast<std::size_t>(v)] = next_dof;
+        std::vector<GlobalIndex> dofs;
+        dofs.reserve(static_cast<std::size_t>(count));
+        for (LocalIndex d = 0; d < count; ++d) {
+            dofs.push_back(next_dof++);
+        }
+        entity_dof_map_->setVertexDofs(v, dofs);
+    }
+
+    for (GlobalIndex e = 0; e < topo->n_edges; ++e) {
+        const auto count = static_cast<LocalIndex>(shared_edge_count[static_cast<std::size_t>(e)]);
+        if (count <= 0) continue;
+        edge_first_dof[static_cast<std::size_t>(e)] = next_dof;
+        std::vector<GlobalIndex> dofs;
+        dofs.reserve(static_cast<std::size_t>(count));
+        for (LocalIndex d = 0; d < count; ++d) {
+            dofs.push_back(next_dof++);
+        }
+        entity_dof_map_->setEdgeDofs(e, dofs);
+    }
+
+    for (GlobalIndex f = 0; f < topo->n_faces; ++f) {
+        const auto count = static_cast<LocalIndex>(shared_face_count[static_cast<std::size_t>(f)]);
+        if (count <= 0) continue;
+        face_first_dof[static_cast<std::size_t>(f)] = next_dof;
+        std::vector<GlobalIndex> dofs;
+        dofs.reserve(static_cast<std::size_t>(count));
+        for (LocalIndex d = 0; d < count; ++d) {
+            dofs.push_back(next_dof++);
+        }
+        entity_dof_map_->setFaceDofs(f, dofs);
+    }
+
+    for (GlobalIndex c = 0; c < topo->n_cells; ++c) {
+        const auto sc = static_cast<std::size_t>(c);
+        const auto& layout = cell_layouts[sc];
+        const auto cell_verts = topo->getCellVertices(c);
+        const auto cell_edges = layout.edge_counts.empty() ? std::span<const MeshIndex>{} : topo->getCellEdges(c);
+        const auto cell_faces = layout.face_counts.empty() ? std::span<const MeshIndex>{} : topo->getCellFaces(c);
+
+        LocalIndex private_count = layout.cell_interior_dofs;
+        for (std::size_t lv = 0; lv < layout.vertex_counts.size(); ++lv) {
+            const auto gv = static_cast<std::size_t>(cell_verts[lv]);
+            private_count += std::max<LocalIndex>(
+                0, layout.vertex_counts[lv] - static_cast<LocalIndex>(shared_vertex_count[gv]));
+        }
+        for (std::size_t le = 0; le < layout.edge_counts.size(); ++le) {
+            const auto ge = static_cast<std::size_t>(cell_edges[le]);
+            private_count += std::max<LocalIndex>(
+                0, layout.edge_counts[le] - static_cast<LocalIndex>(shared_edge_count[ge]));
+        }
+        for (std::size_t lf = 0; lf < layout.face_counts.size(); ++lf) {
+            const auto gf = static_cast<std::size_t>(cell_faces[lf]);
+            private_count += std::max<LocalIndex>(
+                0, layout.face_counts[lf] - static_cast<LocalIndex>(shared_face_count[gf]));
+        }
+
+        cell_private_count[sc] = private_count;
+        if (private_count > 0) {
+            cell_private_first_dof[sc] = next_dof;
+            std::vector<GlobalIndex> dofs;
+            dofs.reserve(static_cast<std::size_t>(private_count));
+            for (LocalIndex d = 0; d < private_count; ++d) {
+                dofs.push_back(next_dof++);
+            }
+            entity_dof_map_->setCellInteriorDofs(c, dofs);
+        }
+    }
+
+    const GlobalIndex scalar_total_dofs = next_dof;
+    const GlobalIndex total_dofs = scalar_total_dofs * nc;
+
+    dof_map_.reserve(topo->n_cells, static_cast<LocalIndex>(max_cell_total_dofs));
+    for (GlobalIndex c = 0; c < topo->n_cells; ++c) {
+        const auto sc = static_cast<std::size_t>(c);
+        const auto& layout = cell_layouts[sc];
+        const auto cell_verts = topo->getCellVertices(c);
+        const auto cell_edges = layout.edge_counts.empty() ? std::span<const MeshIndex>{} : topo->getCellEdges(c);
+        const auto cell_faces = layout.face_counts.empty() ? std::span<const MeshIndex>{} : topo->getCellFaces(c);
+
+        std::vector<GlobalIndex> scalar_cell_dofs;
+        scalar_cell_dofs.reserve(static_cast<std::size_t>(layout.scalar_dofs_per_element));
+        const GlobalIndex private_base = cell_private_first_dof[sc];
+        LocalIndex private_cursor = 0;
+
+        for (const auto& tag : layout.dof_tags) {
+            GlobalIndex dof = -1;
+            switch (tag.kind) {
+                case VariableLocalDofKind::Vertex: {
+                    const auto gv = static_cast<std::size_t>(cell_verts[static_cast<std::size_t>(tag.local_entity_id)]);
+                    const auto shared = static_cast<LocalIndex>(shared_vertex_count[gv]);
+                    if (tag.ordinal < shared) {
+                        dof = vertex_first_dof[gv] + static_cast<GlobalIndex>(tag.ordinal);
+                    }
+                    break;
+                }
+                case VariableLocalDofKind::Edge: {
+                    const auto ge = static_cast<std::size_t>(cell_edges[static_cast<std::size_t>(tag.local_entity_id)]);
+                    const auto shared = static_cast<LocalIndex>(shared_edge_count[ge]);
+                    if (tag.ordinal < shared) {
+                        dof = edge_first_dof[ge] + static_cast<GlobalIndex>(tag.ordinal);
+                    }
+                    break;
+                }
+                case VariableLocalDofKind::Face: {
+                    const auto gf = static_cast<std::size_t>(cell_faces[static_cast<std::size_t>(tag.local_entity_id)]);
+                    const auto shared = static_cast<LocalIndex>(shared_face_count[gf]);
+                    if (tag.ordinal < shared) {
+                        dof = face_first_dof[gf] + static_cast<GlobalIndex>(tag.ordinal);
+                    }
+                    break;
+                }
+                case VariableLocalDofKind::Cell:
+                default:
+                    break;
+            }
+
+            if (dof < 0) {
+                FE_CHECK_ARG(private_base >= 0,
+                             "DofHandler::distributeVariableOrderDofs: missing cell-private DOF block");
+                dof = private_base + static_cast<GlobalIndex>(private_cursor++);
+            }
+            scalar_cell_dofs.push_back(dof);
+        }
+
+        FE_CHECK_ARG(private_cursor == cell_private_count[sc],
+                     "DofHandler::distributeVariableOrderDofs: cell-private DOF count mismatch");
+
+        std::vector<GlobalIndex> cell_dofs;
+        if (nc > 1) {
+            cell_dofs.reserve(scalar_cell_dofs.size() * static_cast<std::size_t>(nc));
+            for (GlobalIndex comp = 0; comp < nc; ++comp) {
+                const GlobalIndex offset = comp * scalar_total_dofs;
+                for (const auto dof : scalar_cell_dofs) {
+                    cell_dofs.push_back(dof + offset);
+                }
+            }
+        } else {
+            cell_dofs = std::move(scalar_cell_dofs);
+        }
+
+        FE_CHECK_ARG(cell_dofs.size() == space.dofs_per_element(c),
+                     "DofHandler::distributeVariableOrderDofs: cell DOF count does not match the selected element");
+        dof_map_.setCellDofs(c, cell_dofs);
+    }
+
+    dof_map_.setNumDofs(total_dofs);
+    dof_map_.setNumLocalDofs(total_dofs);
+    partition_ = DofPartition(0, total_dofs, {});
+    partition_.setGlobalSize(total_dofs);
+
+    if (nc > 1) {
+        auto expanded_entity = std::make_unique<EntityDofMap>();
+        expanded_entity->reserve(topo->n_vertices, topo->n_edges, topo->n_faces, topo->n_cells);
+
+        auto expand_range = [&](GlobalIndex base, LocalIndex count) -> std::vector<GlobalIndex> {
+            std::vector<GlobalIndex> out;
+            if (count <= 0 || base < 0) {
+                return out;
+            }
+            out.reserve(static_cast<std::size_t>(count) * static_cast<std::size_t>(nc));
+            for (GlobalIndex comp = 0; comp < nc; ++comp) {
+                const GlobalIndex offset = comp * scalar_total_dofs;
+                for (LocalIndex d = 0; d < count; ++d) {
+                    out.push_back(base + static_cast<GlobalIndex>(d) + offset);
+                }
+            }
+            return out;
+        };
+
+        for (GlobalIndex v = 0; v < topo->n_vertices; ++v) {
+            const auto sv = static_cast<std::size_t>(v);
+            if (shared_vertex_count[sv] <= 0 || vertex_first_dof[sv] < 0) continue;
+            expanded_entity->setVertexDofs(v, expand_range(vertex_first_dof[sv], static_cast<LocalIndex>(shared_vertex_count[sv])));
+        }
+        for (GlobalIndex e = 0; e < topo->n_edges; ++e) {
+            const auto se = static_cast<std::size_t>(e);
+            if (shared_edge_count[se] <= 0 || edge_first_dof[se] < 0) continue;
+            expanded_entity->setEdgeDofs(e, expand_range(edge_first_dof[se], static_cast<LocalIndex>(shared_edge_count[se])));
+        }
+        for (GlobalIndex f = 0; f < topo->n_faces; ++f) {
+            const auto sf = static_cast<std::size_t>(f);
+            if (shared_face_count[sf] <= 0 || face_first_dof[sf] < 0) continue;
+            expanded_entity->setFaceDofs(f, expand_range(face_first_dof[sf], static_cast<LocalIndex>(shared_face_count[sf])));
+        }
+        for (GlobalIndex c = 0; c < topo->n_cells; ++c) {
+            const auto sc = static_cast<std::size_t>(c);
+            if (cell_private_count[sc] <= 0 || cell_private_first_dof[sc] < 0) continue;
+            expanded_entity->setCellInteriorDofs(c, expand_range(cell_private_first_dof[sc], cell_private_count[sc]));
+        }
+
+        entity_dof_map_ = std::move(expanded_entity);
+    }
+
+    entity_dof_map_->buildReverseMapping();
+    entity_dof_map_->finalize();
+    cacheCellOrientations(*topo, need_edge_orientations, need_face_orientations);
+}
+
+void DofHandler::buildVariableOrderConstraints(const MeshTopologyInfo& topology_info,
+                                               const spaces::FunctionSpace& space,
+                                               constraints::AffineConstraints& constraints) const {
+    FE_CHECK_ARG(space.is_variable_order(),
+                 "DofHandler::buildVariableOrderConstraints requires a variable-order space");
+
+    const auto* adaptive = dynamic_cast<const spaces::AdaptiveSpace*>(&space);
+    FE_CHECK_ARG(adaptive != nullptr,
+                 "DofHandler::buildVariableOrderConstraints currently requires AdaptiveSpace");
+
+    FE_CHECK_NOT_NULL(getEntityDofMap(),
+                      "DofHandler::buildVariableOrderConstraints entity_dof_map");
+
+    MeshTopologyView topo = MeshTopologyView::from(topology_info);
+    MeshTopologyInfo derived_topology;
+
+    if (topo.dim == 2 && (topo.n_edges <= 0 || topo.cell2edge_offsets.empty() || topo.cell2edge_data.empty())) {
+        derived_topology = topology_info;
+        derive_edge_connectivity(derived_topology);
+        topo = MeshTopologyView::from(derived_topology);
+    }
+    if (topo.dim == 3 && (topo.n_faces <= 0 || topo.cell2face_offsets.empty() || topo.cell2face_data.empty())) {
+        if (derived_topology.n_cells == 0) {
+            derived_topology = topology_info;
+        }
+        derive_face_connectivity(derived_topology);
+        topo = MeshTopologyView::from(derived_topology);
+    }
+
+    auto vertex_id = [&](MeshIndex local_vertex) -> gid_t {
+        const auto sv = static_cast<std::size_t>(local_vertex);
+        if (!topo.vertex_gids.empty() && sv < topo.vertex_gids.size()) {
+            return topo.vertex_gids[sv];
+        }
+        return static_cast<gid_t>(local_vertex);
+    };
+
+    auto interface_vertices = [&](GlobalIndex cell_id, int local_face_id) {
+        const auto cell_verts = topo.getCellVertices(cell_id);
+        const ElementType cell_type = infer_element_type_from_cell(topo.dim, cell_verts.size());
+        FE_CHECK_ARG(cell_type != ElementType::Unknown,
+                     "DofHandler::buildVariableOrderConstraints: unsupported cell topology");
+        const auto ref = elements::ReferenceElement::create(cell_type);
+        FE_CHECK_ARG(local_face_id >= 0 && static_cast<std::size_t>(local_face_id) < ref.num_faces(),
+                     "DofHandler::buildVariableOrderConstraints: local face index out of range");
+        const auto& face_nodes = ref.face_nodes(static_cast<std::size_t>(local_face_id));
+        std::vector<gid_t> ids;
+        ids.reserve(face_nodes.size());
+        for (auto lv : face_nodes) {
+            FE_CHECK_ARG(static_cast<std::size_t>(lv) < cell_verts.size(),
+                         "DofHandler::buildVariableOrderConstraints: face vertex index out of range");
+            ids.push_back(vertex_id(cell_verts[static_cast<std::size_t>(lv)]));
+        }
+        return ids;
+    };
+
+    auto trace_global_dofs = [&](GlobalIndex cell_id, const spaces::TraceSpace& trace_space) {
+        std::vector<GlobalIndex> dofs;
+        const auto cell_dofs = getCellDofs(cell_id);
+        const auto local = trace_space.face_dof_indices();
+        dofs.reserve(local.size());
+        for (int lid : local) {
+            FE_CHECK_ARG(lid >= 0 && static_cast<std::size_t>(lid) < cell_dofs.size(),
+                         "DofHandler::buildVariableOrderConstraints: trace local DOF out of range");
+            dofs.push_back(cell_dofs[static_cast<std::size_t>(lid)]);
+        }
+        return dofs;
+    };
+
+    auto make_point_map = [](ElementType face_type,
+                             const std::vector<gid_t>& src_vertices,
+                             const std::vector<gid_t>& dst_vertices) -> spaces::SpaceInterpolation::ReferencePointMap {
+        FE_CHECK_ARG(src_vertices.size() == dst_vertices.size(),
+                     "DofHandler::buildVariableOrderConstraints: interface vertex size mismatch");
+
+        if (face_type == ElementType::Line2) {
+            FE_CHECK_ARG(src_vertices.size() == 2u,
+                         "DofHandler::buildVariableOrderConstraints: line interface expects 2 vertices");
+            if (src_vertices == dst_vertices) {
+                return {};
+            }
+            FE_CHECK_ARG(src_vertices[0] == dst_vertices[1] && src_vertices[1] == dst_vertices[0],
+                         "DofHandler::buildVariableOrderConstraints: unsupported edge orientation");
+            return [](const spaces::FunctionSpace::Value& xi_dst) {
+                spaces::FunctionSpace::Value xi_src = xi_dst;
+                xi_src[0] = -xi_src[0];
+                return xi_src;
+            };
+        }
+
+        const auto verts = canonical_face_vertices(face_type);
+        FE_CHECK_ARG(!verts.empty(),
+                     "DofHandler::buildVariableOrderConstraints: unsupported face shape");
+
+        std::vector<int> dst_to_src(dst_vertices.size(), -1);
+        for (std::size_t j = 0; j < dst_vertices.size(); ++j) {
+            auto it = std::find(src_vertices.begin(), src_vertices.end(), dst_vertices[j]);
+            FE_CHECK_ARG(it != src_vertices.end(),
+                         "DofHandler::buildVariableOrderConstraints: interface vertex sets do not match");
+            dst_to_src[j] = static_cast<int>(std::distance(src_vertices.begin(), it));
+        }
+
+        const auto map = compute_face_affine_from_vertex_map(verts, dst_to_src);
+        return [map](const spaces::FunctionSpace::Value& xi_dst) {
+            return map.apply(xi_dst);
+        };
+    };
+
+    auto make_value_transform = [](const spaces::TraceSpace& src_trace,
+                                   const spaces::TraceSpace& dst_trace) -> spaces::SpaceInterpolation::ValueTransform {
+        if (src_trace.field_type() != FieldType::Scalar ||
+            dst_trace.field_type() != FieldType::Scalar ||
+            src_trace.trace_kind() == spaces::TraceKind::Value ||
+            dst_trace.trace_kind() == spaces::TraceKind::Value) {
+            return {};
+        }
+
+        Real sign = Real(1);
+        if (src_trace.trace_kind() == spaces::TraceKind::Normal &&
+            dst_trace.trace_kind() == spaces::TraceKind::Normal) {
+            sign = src_trace.face_normal().dot(dst_trace.face_normal());
+        } else if (src_trace.trace_kind() == spaces::TraceKind::Tangential &&
+                   dst_trace.trace_kind() == spaces::TraceKind::Tangential) {
+            sign = src_trace.face_tangent().dot(dst_trace.face_tangent());
+        }
+        const Real scale = (sign >= Real(0)) ? Real(1) : Real(-1);
+        if (std::abs(scale - Real(1)) < Real(1e-12)) {
+            return {};
+        }
+
+        return [scale](const spaces::FunctionSpace::Value& value) {
+            spaces::FunctionSpace::Value out = value;
+            out[0] *= scale;
+            return out;
+        };
+    };
+
+    struct InterfacePair {
+        GlobalIndex entity_id{-1};
+        std::array<GlobalIndex, 2> cells{{-1, -1}};
+        std::array<int, 2> local_faces{{-1, -1}};
+        ElementType face_type{ElementType::Unknown};
+    };
+
+    std::vector<InterfacePair> interfaces;
+    if (topo.dim == 2) {
+        std::vector<std::vector<std::pair<GlobalIndex, int>>> edge_cells(
+            static_cast<std::size_t>(std::max<GlobalIndex>(0, topo.n_edges)));
+        for (GlobalIndex c = 0; c < topo.n_cells; ++c) {
+            const auto cell_edges = topo.getCellEdges(c);
+            for (std::size_t le = 0; le < cell_edges.size(); ++le) {
+                const auto se = static_cast<std::size_t>(cell_edges[le]);
+                FE_CHECK_ARG(se < edge_cells.size(),
+                             "DofHandler::buildVariableOrderConstraints: cell edge index out of range");
+                edge_cells[se].push_back({c, static_cast<int>(le)});
+            }
+        }
+        for (std::size_t e = 0; e < edge_cells.size(); ++e) {
+            if (edge_cells[e].size() != 2u) {
+                continue;
+            }
+            interfaces.push_back(InterfacePair{
+                static_cast<GlobalIndex>(e),
+                {edge_cells[e][0].first, edge_cells[e][1].first},
+                {edge_cells[e][0].second, edge_cells[e][1].second},
+                ElementType::Line2});
+        }
+    } else if (topo.dim == 3) {
+        std::vector<std::vector<std::pair<GlobalIndex, int>>> face_cells(
+            static_cast<std::size_t>(std::max<GlobalIndex>(0, topo.n_faces)));
+        for (GlobalIndex c = 0; c < topo.n_cells; ++c) {
+            const auto cell_faces = topo.getCellFaces(c);
+            const auto cell_verts = topo.getCellVertices(c);
+            const auto cell_type = infer_element_type_from_cell(topo.dim, cell_verts.size());
+            const auto ref = elements::ReferenceElement::create(cell_type);
+            for (std::size_t lf = 0; lf < cell_faces.size(); ++lf) {
+                const auto sf = static_cast<std::size_t>(cell_faces[lf]);
+                FE_CHECK_ARG(sf < face_cells.size(),
+                             "DofHandler::buildVariableOrderConstraints: cell face index out of range");
+                face_cells[sf].push_back({c, static_cast<int>(lf)});
+            }
+        }
+        for (GlobalIndex f = 0; f < topo.n_faces; ++f) {
+            const auto sf = static_cast<std::size_t>(f);
+            if (sf >= face_cells.size() || face_cells[sf].size() != 2u) {
+                continue;
+            }
+            const auto fv = topo.getFaceVertices(f);
+            ElementType face_type = ElementType::Unknown;
+            if (fv.size() == 3u) face_type = ElementType::Triangle3;
+            else if (fv.size() == 4u) face_type = ElementType::Quad4;
+            interfaces.push_back(InterfacePair{
+                f,
+                {face_cells[sf][0].first, face_cells[sf][1].first},
+                {face_cells[sf][0].second, face_cells[sf][1].second},
+                face_type});
+        }
+    }
+
+    for (const auto& interface : interfaces) {
+        GlobalIndex coarse_cell = interface.cells[0];
+        GlobalIndex fine_cell = interface.cells[1];
+        int coarse_face = interface.local_faces[0];
+        int fine_face = interface.local_faces[1];
+
+        const int order0 = space.polynomial_order(interface.cells[0]);
+        const int order1 = space.polynomial_order(interface.cells[1]);
+        if (order0 == order1) {
+            continue;
+        }
+        if (order0 > order1) {
+            coarse_cell = interface.cells[1];
+            fine_cell = interface.cells[0];
+            coarse_face = interface.local_faces[1];
+            fine_face = interface.local_faces[0];
+        }
+
+        auto coarse_space = adaptive->element_space_ptr(coarse_cell);
+        auto fine_space = adaptive->element_space_ptr(fine_cell);
+        FE_CHECK_NOT_NULL(coarse_space.get(),
+                          "DofHandler::buildVariableOrderConstraints coarse_space");
+        FE_CHECK_NOT_NULL(fine_space.get(),
+                          "DofHandler::buildVariableOrderConstraints fine_space");
+
+        spaces::TraceSpace coarse_trace(coarse_space, coarse_face);
+        spaces::TraceSpace fine_trace(fine_space, fine_face);
+
+        const auto coarse_dofs = trace_global_dofs(coarse_cell, coarse_trace);
+        const auto fine_dofs = trace_global_dofs(fine_cell, fine_trace);
+        if (coarse_dofs.empty() || fine_dofs.empty()) {
+            continue;
+        }
+
+        const bool vector_hierarchical_trace =
+            (coarse_space->continuity() == Continuity::H_curl ||
+             coarse_space->continuity() == Continuity::H_div) &&
+            coarse_space->continuity() == fine_space->continuity();
+
+        if (vector_hierarchical_trace) {
+            std::unordered_set<GlobalIndex> coarse_dof_set(coarse_dofs.begin(), coarse_dofs.end());
+            for (const GlobalIndex slave : fine_dofs) {
+                if (coarse_dof_set.count(slave) > 0 || constraints.isConstrained(slave)) {
+                    continue;
+                }
+                constraints.addLine(slave);
+            }
+            continue;
+        }
+
+        const auto coarse_vertices = interface_vertices(coarse_cell, coarse_face);
+        const auto fine_vertices = interface_vertices(fine_cell, fine_face);
+        const auto point_map = make_point_map(interface.face_type, coarse_vertices, fine_vertices);
+        const auto value_transform = make_value_transform(coarse_trace, fine_trace);
+
+        const auto transfer =
+            spaces::SpaceInterpolation::build_transfer_operator(coarse_trace,
+                                                                fine_trace,
+                                                                point_map,
+                                                                value_transform);
+
+        std::unordered_set<GlobalIndex> coarse_dof_set(coarse_dofs.begin(), coarse_dofs.end());
+        for (std::size_t row = 0; row < fine_dofs.size(); ++row) {
+            const GlobalIndex slave = fine_dofs[row];
+            if (coarse_dof_set.count(slave) > 0 || constraints.isConstrained(slave)) {
+                continue;
+            }
+
+            bool has_master = false;
+            constraints.addLine(slave);
+            for (std::size_t col = 0; col < coarse_dofs.size(); ++col) {
+                const Real weight = transfer(row, col);
+                if (std::abs(weight) <= Real(1e-12)) {
+                    continue;
+                }
+                constraints.addEntry(slave, coarse_dofs[col], weight);
+                has_master = true;
+            }
+
+            FE_CHECK_ARG(has_master,
+                         "DofHandler::buildVariableOrderConstraints: generated an empty constraint row");
+        }
+    }
+}
+
+void DofHandler::distributeVariableOrderDofsParallel(const MeshTopologyView& topology,
+                                                     const spaces::FunctionSpace& space,
+                                                     const DofDistributionOptions& options) {
+#if !FE_HAS_MPI
+    (void)topology;
+    (void)space;
+    (void)options;
+    throw FEException("DofHandler::distributeVariableOrderDofsParallel: FE built without MPI support");
+#else
+    FE_CHECK_ARG(world_size_ > 1,
+                 "DofHandler::distributeVariableOrderDofsParallel requires MPI execution");
+    FE_CHECK_ARG(options.numbering == DofNumberingStrategy::Sequential,
+                 "DofHandler::distributeVariableOrderDofsParallel currently supports sequential numbering only");
+    FE_CHECK_ARG(global_numbering_ == GlobalNumberingMode::OwnerContiguous,
+                 "DofHandler::distributeVariableOrderDofsParallel currently supports OwnerContiguous global numbering only");
+    FE_CHECK_ARG(!topology.vertex_gids.empty() &&
+                     topology.vertex_gids.size() == static_cast<std::size_t>(topology.n_vertices),
+                 "DofHandler::distributeVariableOrderDofsParallel requires vertex_gids");
+
+    ghost_manager_.reset();
+    ghost_dofs_cache_.clear();
+    ghost_cache_valid_ = false;
+    clearSpatialDofCoordinates();
+    cell_edge_orient_offsets_.clear();
+    cell_edge_orient_data_.clear();
+    cell_face_orient_offsets_.clear();
+    cell_face_orient_data_.clear();
+
+    const MeshTopologyView* topo = &topology;
+    MeshTopologyInfo derived_topology;
+    MeshTopologyView derived_view;
+
+    std::vector<VariableCellLayout> cell_layouts;
+    cell_layouts.reserve(static_cast<std::size_t>(std::max<GlobalIndex>(topology.n_cells, 0)));
+
+    bool need_edges = false;
+    bool need_faces = false;
+    bool has_edge_entities = false;
+    bool has_face_entities = false;
+    bool need_edge_orientations = false;
+    bool need_face_orientations = false;
+    std::size_t max_cell_total_dofs = 0;
+    for (GlobalIndex c = 0; c < topology.n_cells; ++c) {
+        cell_layouts.push_back(build_variable_cell_layout(space, topology, c));
+        const auto& layout = cell_layouts.back();
+        has_edge_entities = has_edge_entities || !layout.edge_counts.empty();
+        has_face_entities = has_face_entities || !layout.face_counts.empty();
+        need_edges = need_edges || std::any_of(layout.edge_counts.begin(),
+                                               layout.edge_counts.end(),
+                                               [](LocalIndex n) { return n > 0; });
+        need_faces = need_faces || std::any_of(layout.face_counts.begin(),
+                                               layout.face_counts.end(),
+                                               [](LocalIndex n) { return n > 0; });
+        if (layout.continuity == Continuity::H_curl || layout.continuity == Continuity::H_div) {
+            need_edge_orientations = need_edge_orientations ||
+                                     std::any_of(layout.edge_counts.begin(),
+                                                 layout.edge_counts.end(),
+                                                 [](LocalIndex n) { return n > 0; });
+            need_face_orientations = need_face_orientations ||
+                                     std::any_of(layout.face_counts.begin(),
+                                                 layout.face_counts.end(),
+                                                 [](LocalIndex n) { return n > 0; });
+        }
+        max_cell_total_dofs = std::max(max_cell_total_dofs, space.dofs_per_element(c));
+    }
+
+    const bool missing_edges = has_edge_entities &&
+                               (topology.n_edges <= 0 ||
+                                topology.cell2edge_offsets.empty() ||
+                                topology.cell2edge_data.empty() ||
+                                topology.edge2vertex_data.size() <
+                                    static_cast<std::size_t>(2) * static_cast<std::size_t>(std::max<GlobalIndex>(0, topology.n_edges)));
+    const bool missing_faces = has_face_entities &&
+                               (topology.n_faces <= 0 ||
+                                topology.cell2face_offsets.empty() ||
+                                topology.cell2face_data.empty() ||
+                                topology.face2vertex_offsets.empty() ||
+                                topology.face2vertex_data.empty());
+
+    if (missing_edges || missing_faces) {
+        if (options.topology_completion == TopologyCompletion::RequireComplete) {
+            if (missing_edges) {
+                throw FEException("DofHandler::distributeVariableOrderDofsParallel: edge DOFs require mesh-provided edge connectivity");
+            }
+            if (missing_faces) {
+                throw FEException("DofHandler::distributeVariableOrderDofsParallel: face DOFs require mesh-provided face connectivity");
+            }
+        }
+
+        derived_topology = topology.materialize();
+        if (missing_edges) {
+            derive_edge_connectivity(derived_topology);
+        }
+        if (missing_faces) {
+            derive_face_connectivity(derived_topology);
+        }
+        derived_view = MeshTopologyView::from(derived_topology);
+        topo = &derived_view;
+
+        cell_layouts.clear();
+        cell_layouts.reserve(static_cast<std::size_t>(std::max<GlobalIndex>(topo->n_cells, 0)));
+        for (GlobalIndex c = 0; c < topo->n_cells; ++c) {
+            cell_layouts.push_back(build_variable_cell_layout(space, *topo, c));
+        }
+    }
+
+    struct GidHash {
+        std::size_t operator()(gid_t gid) const noexcept {
+            return static_cast<std::size_t>(mix_u64(static_cast<std::uint64_t>(gid)));
+        }
+    };
+
+    const auto n_vertices = static_cast<std::size_t>(std::max<GlobalIndex>(0, topo->n_vertices));
+    const auto n_edges = static_cast<std::size_t>(std::max<GlobalIndex>(0, topo->n_edges));
+    const auto n_faces = static_cast<std::size_t>(std::max<GlobalIndex>(0, topo->n_faces));
+    const auto n_cells = static_cast<std::size_t>(std::max<GlobalIndex>(0, topo->n_cells));
+
+    std::vector<gid_t> vertex_keys = std::vector<gid_t>(topo->vertex_gids.begin(), topo->vertex_gids.end());
+    std::vector<int> vertex_touch(n_vertices, -1);
+    std::vector<gid_t> vertex_cell_gid_candidate(n_vertices, std::numeric_limits<gid_t>::max());
+    std::vector<int> vertex_cell_owner_candidate(n_vertices, -1);
+    std::vector<LocalIndex> vertex_local_count(n_vertices, std::numeric_limits<LocalIndex>::max());
+
+    std::vector<EdgeKey> edge_keys;
+    std::vector<int> edge_touch;
+    std::vector<gid_t> edge_cell_gid_candidate;
+    std::vector<int> edge_cell_owner_candidate;
+    std::vector<LocalIndex> edge_local_count;
+    if (has_edge_entities && topo->n_edges > 0) {
+        edge_keys.resize(n_edges);
+        edge_touch.assign(n_edges, -1);
+        edge_cell_gid_candidate.assign(n_edges, std::numeric_limits<gid_t>::max());
+        edge_cell_owner_candidate.assign(n_edges, -1);
+        edge_local_count.assign(n_edges, std::numeric_limits<LocalIndex>::max());
+        for (GlobalIndex e = 0; e < topo->n_edges; ++e) {
+            const auto [v0, v1] = topo->getEdgeVertices(e);
+            FE_CHECK_ARG(v0 >= 0 && v1 >= 0,
+                         "DofHandler::distributeVariableOrderDofsParallel: invalid edge2vertex entry");
+            const gid_t gid0 = topo->vertex_gids[static_cast<std::size_t>(v0)];
+            const gid_t gid1 = topo->vertex_gids[static_cast<std::size_t>(v1)];
+            edge_keys[static_cast<std::size_t>(e)] = EdgeKey{std::min(gid0, gid1), std::max(gid0, gid1)};
+        }
+    }
+
+    std::vector<std::uint8_t> face_vertex_count(n_faces, 0);
+    std::vector<GlobalIndex> tri_face_slot(n_faces, -1);
+    std::vector<GlobalIndex> quad_face_slot(n_faces, -1);
+    std::vector<FaceKey> tri_face_keys;
+    std::vector<int> tri_face_touch;
+    std::vector<gid_t> tri_face_cell_gid_candidate;
+    std::vector<int> tri_face_cell_owner_candidate;
+    std::vector<LocalIndex> tri_face_local_count;
+    std::vector<FaceKey> quad_face_keys;
+    std::vector<int> quad_face_touch;
+    std::vector<gid_t> quad_face_cell_gid_candidate;
+    std::vector<int> quad_face_cell_owner_candidate;
+    std::vector<LocalIndex> quad_face_local_count;
+
+    if (has_face_entities && topo->n_faces > 0) {
+        for (GlobalIndex f = 0; f < topo->n_faces; ++f) {
+            const auto verts = topo->getFaceVertices(f);
+            FE_CHECK_ARG(verts.size() == 3u || verts.size() == 4u,
+                         "DofHandler::distributeVariableOrderDofsParallel: unsupported face vertex count");
+            face_vertex_count[static_cast<std::size_t>(f)] = static_cast<std::uint8_t>(verts.size());
+
+            FaceKey key{};
+            key.n = static_cast<std::uint8_t>(verts.size());
+            for (std::size_t i = 0; i < verts.size(); ++i) {
+                key.gids[i] = topo->vertex_gids[static_cast<std::size_t>(verts[i])];
+            }
+            std::sort(key.gids.begin(), key.gids.begin() + key.n);
+            for (std::size_t i = static_cast<std::size_t>(key.n); i < key.gids.size(); ++i) {
+                key.gids[i] = gid_t{0};
+            }
+
+            const auto sf = static_cast<std::size_t>(f);
+            if (verts.size() == 3u) {
+                tri_face_slot[sf] = static_cast<GlobalIndex>(tri_face_keys.size());
+                tri_face_keys.push_back(key);
+                tri_face_touch.push_back(-1);
+                tri_face_cell_gid_candidate.push_back(std::numeric_limits<gid_t>::max());
+                tri_face_cell_owner_candidate.push_back(-1);
+                tri_face_local_count.push_back(std::numeric_limits<LocalIndex>::max());
+            } else {
+                quad_face_slot[sf] = static_cast<GlobalIndex>(quad_face_keys.size());
+                quad_face_keys.push_back(key);
+                quad_face_touch.push_back(-1);
+                quad_face_cell_gid_candidate.push_back(std::numeric_limits<gid_t>::max());
+                quad_face_cell_owner_candidate.push_back(-1);
+                quad_face_local_count.push_back(std::numeric_limits<LocalIndex>::max());
+            }
+        }
+    }
+
+    auto reduce_local_count = [](LocalIndex count, LocalIndex& target) {
+        target = std::min(target, count);
+    };
+
+    for (GlobalIndex c = 0; c < topo->n_cells; ++c) {
+        const auto sc = static_cast<std::size_t>(c);
+        const auto cgid = topo->getCellGid(c);
+        const int cell_owner = topo->getCellOwnerRank(c, my_rank_);
+        const bool owned_cell = (cell_owner == my_rank_);
+        const auto& layout = cell_layouts[sc];
+        const auto cell_verts = topo->getCellVertices(c);
+
+        for (std::size_t lv = 0; lv < layout.vertex_counts.size(); ++lv) {
+            const auto gv = static_cast<std::size_t>(cell_verts[lv]);
+            if (cgid < vertex_cell_gid_candidate[gv] ||
+                (cgid == vertex_cell_gid_candidate[gv] && cell_owner < vertex_cell_owner_candidate[gv])) {
+                vertex_cell_gid_candidate[gv] = cgid;
+                vertex_cell_owner_candidate[gv] = cell_owner;
+            }
+            reduce_local_count(layout.vertex_counts[lv], vertex_local_count[gv]);
+            if (owned_cell) {
+                vertex_touch[gv] = my_rank_;
+            }
+        }
+
+        if (!layout.edge_counts.empty()) {
+            const auto cell_edges = topo->getCellEdges(c);
+            FE_CHECK_ARG(cell_edges.size() >= layout.edge_counts.size(),
+                         "DofHandler::distributeVariableOrderDofsParallel: cell edge connectivity mismatch");
+            for (std::size_t le = 0; le < layout.edge_counts.size(); ++le) {
+                const auto ge = static_cast<std::size_t>(cell_edges[le]);
+                if (cgid < edge_cell_gid_candidate[ge] ||
+                    (cgid == edge_cell_gid_candidate[ge] && cell_owner < edge_cell_owner_candidate[ge])) {
+                    edge_cell_gid_candidate[ge] = cgid;
+                    edge_cell_owner_candidate[ge] = cell_owner;
+                }
+                reduce_local_count(layout.edge_counts[le], edge_local_count[ge]);
+                if (owned_cell) {
+                    edge_touch[ge] = my_rank_;
+                }
+            }
+        }
+
+        if (!layout.face_counts.empty()) {
+            const auto cell_faces = topo->getCellFaces(c);
+            FE_CHECK_ARG(cell_faces.size() >= layout.face_counts.size(),
+                         "DofHandler::distributeVariableOrderDofsParallel: cell face connectivity mismatch");
+            for (std::size_t lf = 0; lf < layout.face_counts.size(); ++lf) {
+                const auto sf = static_cast<std::size_t>(cell_faces[lf]);
+                if (tri_face_slot[sf] >= 0) {
+                    const auto slot = static_cast<std::size_t>(tri_face_slot[sf]);
+                    if (cgid < tri_face_cell_gid_candidate[slot] ||
+                        (cgid == tri_face_cell_gid_candidate[slot] &&
+                         cell_owner < tri_face_cell_owner_candidate[slot])) {
+                        tri_face_cell_gid_candidate[slot] = cgid;
+                        tri_face_cell_owner_candidate[slot] = cell_owner;
+                    }
+                    reduce_local_count(layout.face_counts[lf], tri_face_local_count[slot]);
+                    if (owned_cell) {
+                        tri_face_touch[slot] = my_rank_;
+                    }
+                } else if (quad_face_slot[sf] >= 0) {
+                    const auto slot = static_cast<std::size_t>(quad_face_slot[sf]);
+                    if (cgid < quad_face_cell_gid_candidate[slot] ||
+                        (cgid == quad_face_cell_gid_candidate[slot] &&
+                         cell_owner < quad_face_cell_owner_candidate[slot])) {
+                        quad_face_cell_gid_candidate[slot] = cgid;
+                        quad_face_cell_owner_candidate[slot] = cell_owner;
+                    }
+                    reduce_local_count(layout.face_counts[lf], quad_face_local_count[slot]);
+                    if (owned_cell) {
+                        quad_face_touch[slot] = my_rank_;
+                    }
+                }
+            }
+        }
+    }
+
+    auto finalize_local_counts = [](std::vector<LocalIndex>& counts) {
+        for (auto& c : counts) {
+            if (c == std::numeric_limits<LocalIndex>::max()) {
+                c = 0;
+            }
+        }
+    };
+    finalize_local_counts(vertex_local_count);
+    finalize_local_counts(edge_local_count);
+    finalize_local_counts(tri_face_local_count);
+    finalize_local_counts(quad_face_local_count);
+
+    for (std::size_t v = 0; v < n_vertices; ++v) {
+        if (vertex_cell_gid_candidate[v] == std::numeric_limits<gid_t>::max()) {
+            vertex_cell_gid_candidate[v] = gid_t{-1};
+            vertex_cell_owner_candidate[v] = -1;
+        }
+    }
+    for (std::size_t e = 0; e < edge_cell_gid_candidate.size(); ++e) {
+        if (edge_cell_gid_candidate[e] == std::numeric_limits<gid_t>::max()) {
+            edge_cell_gid_candidate[e] = gid_t{-1};
+            edge_cell_owner_candidate[e] = -1;
+        }
+    }
+    for (std::size_t f = 0; f < tri_face_cell_gid_candidate.size(); ++f) {
+        if (tri_face_cell_gid_candidate[f] == std::numeric_limits<gid_t>::max()) {
+            tri_face_cell_gid_candidate[f] = gid_t{-1};
+            tri_face_cell_owner_candidate[f] = -1;
+        }
+    }
+    for (std::size_t f = 0; f < quad_face_cell_gid_candidate.size(); ++f) {
+        if (quad_face_cell_gid_candidate[f] == std::numeric_limits<gid_t>::max()) {
+            quad_face_cell_gid_candidate[f] = gid_t{-1};
+            quad_face_cell_owner_candidate[f] = -1;
+        }
+    }
+
+    std::vector<int> neighbors = neighbor_ranks_;
+    if (!topo->cell_owner_ranks.empty()) {
+        for (int r : topo->cell_owner_ranks) {
+            if (r >= 0 && r != my_rank_) {
+                neighbors.push_back(r);
+            }
+        }
+    }
+    std::sort(neighbors.begin(), neighbors.end());
+    neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
+    if (neighbors.empty()) {
+        neighbors.reserve(static_cast<std::size_t>(std::max(0, world_size_ - 1)));
+        for (int r = 0; r < world_size_; ++r) {
+            if (r != my_rank_) neighbors.push_back(r);
+        }
+    }
+
+    std::vector<int> rank_to_order_storage;
+    std::span<const int> rank_to_order;
+    if (options.reproducible_across_communicators) {
+        rank_to_order_storage = compute_stable_rank_order(mpi_comm_,
+                                                         my_rank_,
+                                                         world_size_,
+                                                         topo->cell_gids,
+                                                         topo->cell_owner_ranks,
+                                                         no_global_collectives_,
+                                                         /*tag_base=*/43100);
+        rank_to_order = rank_to_order_storage;
+    }
+
+    std::vector<LocalIndex> vertex_shared_count;
+    std::vector<LocalIndex> edge_shared_count;
+    std::vector<LocalIndex> tri_face_shared_count;
+    std::vector<LocalIndex> quad_face_shared_count;
+    reduce_min_counts_with_neighbors<gid_t, GidHash>(mpi_comm_,
+                                                     neighbors,
+                                                     vertex_keys,
+                                                     vertex_local_count,
+                                                     vertex_shared_count,
+                                                     /*tag_base=*/43110);
+    if (!edge_keys.empty()) {
+        reduce_min_counts_with_neighbors<EdgeKey, EdgeKeyHash>(mpi_comm_,
+                                                               neighbors,
+                                                               edge_keys,
+                                                               edge_local_count,
+                                                               edge_shared_count,
+                                                               /*tag_base=*/43120);
+    }
+    if (!tri_face_keys.empty()) {
+        reduce_min_counts_with_neighbors<FaceKey, FaceKeyHash>(mpi_comm_,
+                                                               neighbors,
+                                                               tri_face_keys,
+                                                               tri_face_local_count,
+                                                               tri_face_shared_count,
+                                                               /*tag_base=*/43130);
+    }
+    if (!quad_face_keys.empty()) {
+        reduce_min_counts_with_neighbors<FaceKey, FaceKeyHash>(mpi_comm_,
+                                                               neighbors,
+                                                               quad_face_keys,
+                                                               quad_face_local_count,
+                                                               quad_face_shared_count,
+                                                               /*tag_base=*/43140);
+    }
+
+    std::vector<LocalIndex> face_shared_count(n_faces, 0);
+    for (std::size_t sf = 0; sf < n_faces; ++sf) {
+        if (tri_face_slot[sf] >= 0) {
+            face_shared_count[sf] = tri_face_shared_count[static_cast<std::size_t>(tri_face_slot[sf])];
+        } else if (quad_face_slot[sf] >= 0) {
+            face_shared_count[sf] = quad_face_shared_count[static_cast<std::size_t>(quad_face_slot[sf])];
+        }
+    }
+
+    auto build_ordinal_offsets = [](std::span<const LocalIndex> counts) {
+        std::vector<std::size_t> offsets(counts.size() + 1u, 0);
+        for (std::size_t i = 0; i < counts.size(); ++i) {
+            offsets[i + 1u] = offsets[i] + static_cast<std::size_t>(std::max<LocalIndex>(0, counts[i]));
+        }
+        return offsets;
+    };
+
+    const auto vertex_dof_offsets = build_ordinal_offsets(vertex_shared_count);
+    const auto edge_dof_offsets = build_ordinal_offsets(edge_shared_count);
+    const auto tri_face_dof_offsets = build_ordinal_offsets(tri_face_shared_count);
+    const auto quad_face_dof_offsets = build_ordinal_offsets(quad_face_shared_count);
+
+    std::vector<OrdinalKey<gid_t>> vertex_dof_keys;
+    std::vector<int> vertex_dof_touch;
+    std::vector<gid_t> vertex_dof_candidate_gid;
+    std::vector<int> vertex_dof_candidate_owner;
+    vertex_dof_keys.reserve(vertex_dof_offsets.back());
+    vertex_dof_touch.reserve(vertex_dof_offsets.back());
+    vertex_dof_candidate_gid.reserve(vertex_dof_offsets.back());
+    vertex_dof_candidate_owner.reserve(vertex_dof_offsets.back());
+    for (std::size_t v = 0; v < n_vertices; ++v) {
+        for (LocalIndex ord = 0; ord < vertex_shared_count[v]; ++ord) {
+            vertex_dof_keys.push_back(OrdinalKey<gid_t>{vertex_keys[v], static_cast<std::int32_t>(ord)});
+            vertex_dof_touch.push_back(vertex_touch[v]);
+            vertex_dof_candidate_gid.push_back(vertex_cell_gid_candidate[v]);
+            vertex_dof_candidate_owner.push_back(vertex_cell_owner_candidate[v]);
+        }
+    }
+
+    std::vector<OrdinalKey<EdgeKey>> edge_dof_keys;
+    std::vector<int> edge_dof_touch;
+    std::vector<gid_t> edge_dof_candidate_gid;
+    std::vector<int> edge_dof_candidate_owner;
+    edge_dof_keys.reserve(edge_dof_offsets.back());
+    edge_dof_touch.reserve(edge_dof_offsets.back());
+    edge_dof_candidate_gid.reserve(edge_dof_offsets.back());
+    edge_dof_candidate_owner.reserve(edge_dof_offsets.back());
+    for (std::size_t e = 0; e < n_edges; ++e) {
+        for (LocalIndex ord = 0; ord < edge_shared_count[e]; ++ord) {
+            edge_dof_keys.push_back(OrdinalKey<EdgeKey>{edge_keys[e], static_cast<std::int32_t>(ord)});
+            edge_dof_touch.push_back(edge_touch[e]);
+            edge_dof_candidate_gid.push_back(edge_cell_gid_candidate[e]);
+            edge_dof_candidate_owner.push_back(edge_cell_owner_candidate[e]);
+        }
+    }
+
+    std::vector<OrdinalKey<FaceKey>> tri_face_dof_keys;
+    std::vector<int> tri_face_dof_touch;
+    std::vector<gid_t> tri_face_dof_candidate_gid;
+    std::vector<int> tri_face_dof_candidate_owner;
+    tri_face_dof_keys.reserve(tri_face_dof_offsets.back());
+    tri_face_dof_touch.reserve(tri_face_dof_offsets.back());
+    tri_face_dof_candidate_gid.reserve(tri_face_dof_offsets.back());
+    tri_face_dof_candidate_owner.reserve(tri_face_dof_offsets.back());
+    for (std::size_t f = 0; f < tri_face_keys.size(); ++f) {
+        for (LocalIndex ord = 0; ord < tri_face_shared_count[f]; ++ord) {
+            tri_face_dof_keys.push_back(OrdinalKey<FaceKey>{tri_face_keys[f], static_cast<std::int32_t>(ord)});
+            tri_face_dof_touch.push_back(tri_face_touch[f]);
+            tri_face_dof_candidate_gid.push_back(tri_face_cell_gid_candidate[f]);
+            tri_face_dof_candidate_owner.push_back(tri_face_cell_owner_candidate[f]);
+        }
+    }
+
+    std::vector<OrdinalKey<FaceKey>> quad_face_dof_keys;
+    std::vector<int> quad_face_dof_touch;
+    std::vector<gid_t> quad_face_dof_candidate_gid;
+    std::vector<int> quad_face_dof_candidate_owner;
+    quad_face_dof_keys.reserve(quad_face_dof_offsets.back());
+    quad_face_dof_touch.reserve(quad_face_dof_offsets.back());
+    quad_face_dof_candidate_gid.reserve(quad_face_dof_offsets.back());
+    quad_face_dof_candidate_owner.reserve(quad_face_dof_offsets.back());
+    for (std::size_t f = 0; f < quad_face_keys.size(); ++f) {
+        for (LocalIndex ord = 0; ord < quad_face_shared_count[f]; ++ord) {
+            quad_face_dof_keys.push_back(OrdinalKey<FaceKey>{quad_face_keys[f], static_cast<std::int32_t>(ord)});
+            quad_face_dof_touch.push_back(quad_face_touch[f]);
+            quad_face_dof_candidate_gid.push_back(quad_face_cell_gid_candidate[f]);
+            quad_face_dof_candidate_owner.push_back(quad_face_cell_owner_candidate[f]);
+        }
+    }
+
+    std::vector<LocalIndex> cell_private_count(n_cells, 0);
+    for (GlobalIndex c = 0; c < topo->n_cells; ++c) {
+        const auto sc = static_cast<std::size_t>(c);
+        const auto& layout = cell_layouts[sc];
+        const auto cell_verts = topo->getCellVertices(c);
+        const auto cell_edges = layout.edge_counts.empty() ? std::span<const MeshIndex>{} : topo->getCellEdges(c);
+        const auto cell_faces = layout.face_counts.empty() ? std::span<const MeshIndex>{} : topo->getCellFaces(c);
+
+        LocalIndex private_count = layout.cell_interior_dofs;
+        for (std::size_t lv = 0; lv < layout.vertex_counts.size(); ++lv) {
+            private_count += std::max<LocalIndex>(
+                0, layout.vertex_counts[lv] - vertex_shared_count[static_cast<std::size_t>(cell_verts[lv])]);
+        }
+        for (std::size_t le = 0; le < layout.edge_counts.size(); ++le) {
+            private_count += std::max<LocalIndex>(
+                0, layout.edge_counts[le] - edge_shared_count[static_cast<std::size_t>(cell_edges[le])]);
+        }
+        for (std::size_t lf = 0; lf < layout.face_counts.size(); ++lf) {
+            private_count += std::max<LocalIndex>(
+                0, layout.face_counts[lf] - face_shared_count[static_cast<std::size_t>(cell_faces[lf])]);
+        }
+        cell_private_count[sc] = private_count;
+    }
+
+    const auto cell_private_offsets = build_ordinal_offsets(cell_private_count);
+    std::vector<CellPrivateKey> cell_private_keys;
+    std::vector<int> cell_private_owner_input;
+    cell_private_keys.reserve(cell_private_offsets.back());
+    cell_private_owner_input.reserve(cell_private_offsets.back());
+    for (GlobalIndex c = 0; c < topo->n_cells; ++c) {
+        const auto sc = static_cast<std::size_t>(c);
+        const gid_t cgid = topo->getCellGid(c);
+        const int owner = topo->getCellOwnerRank(c, my_rank_);
+        for (LocalIndex ord = 0; ord < cell_private_count[sc]; ++ord) {
+            cell_private_keys.push_back(CellPrivateKey{cgid, static_cast<std::int32_t>(ord)});
+            cell_private_owner_input.push_back(owner);
+        }
+    }
+
+    gid_t n_global_vertex_dofs = 0;
+    gid_t n_global_edge_dofs = 0;
+    gid_t n_global_tri_face_dofs = 0;
+    gid_t n_global_quad_face_dofs = 0;
+    gid_t n_global_cell_private_dofs = 0;
+    std::vector<gid_t> vertex_dof_global_id;
+    std::vector<int> vertex_dof_owner_rank;
+    std::vector<gid_t> edge_dof_global_id;
+    std::vector<int> edge_dof_owner_rank;
+    std::vector<gid_t> tri_face_dof_global_id;
+    std::vector<int> tri_face_dof_owner_rank;
+    std::vector<gid_t> quad_face_dof_global_id;
+    std::vector<int> quad_face_dof_owner_rank;
+    std::vector<gid_t> cell_private_global_id;
+
+    assign_contiguous_ids_and_owners_with_neighbors<OrdinalKey<gid_t>,
+                                                    OrdinalKeyHash<gid_t, GidHash>,
+                                                    std::less<OrdinalKey<gid_t>>>(
+        mpi_comm_,
+        my_rank_,
+        world_size_,
+        neighbors,
+        options.ownership,
+        vertex_dof_keys,
+        vertex_dof_touch,
+        vertex_dof_candidate_gid,
+        vertex_dof_candidate_owner,
+        rank_to_order,
+        no_global_collectives_,
+        vertex_dof_global_id,
+        vertex_dof_owner_rank,
+        n_global_vertex_dofs,
+        /*tag_base=*/43150);
+    assign_contiguous_ids_and_owners_with_neighbors<OrdinalKey<EdgeKey>,
+                                                    OrdinalKeyHash<EdgeKey, EdgeKeyHash>,
+                                                    std::less<OrdinalKey<EdgeKey>>>(
+        mpi_comm_,
+        my_rank_,
+        world_size_,
+        neighbors,
+        options.ownership,
+        edge_dof_keys,
+        edge_dof_touch,
+        edge_dof_candidate_gid,
+        edge_dof_candidate_owner,
+        rank_to_order,
+        no_global_collectives_,
+        edge_dof_global_id,
+        edge_dof_owner_rank,
+        n_global_edge_dofs,
+        /*tag_base=*/43160);
+    assign_contiguous_ids_and_owners_with_neighbors<OrdinalKey<FaceKey>,
+                                                    OrdinalKeyHash<FaceKey, FaceKeyHash>,
+                                                    std::less<OrdinalKey<FaceKey>>>(
+        mpi_comm_,
+        my_rank_,
+        world_size_,
+        neighbors,
+        options.ownership,
+        tri_face_dof_keys,
+        tri_face_dof_touch,
+        tri_face_dof_candidate_gid,
+        tri_face_dof_candidate_owner,
+        rank_to_order,
+        no_global_collectives_,
+        tri_face_dof_global_id,
+        tri_face_dof_owner_rank,
+        n_global_tri_face_dofs,
+        /*tag_base=*/43170);
+    assign_contiguous_ids_and_owners_with_neighbors<OrdinalKey<FaceKey>,
+                                                    OrdinalKeyHash<FaceKey, FaceKeyHash>,
+                                                    std::less<OrdinalKey<FaceKey>>>(
+        mpi_comm_,
+        my_rank_,
+        world_size_,
+        neighbors,
+        options.ownership,
+        quad_face_dof_keys,
+        quad_face_dof_touch,
+        quad_face_dof_candidate_gid,
+        quad_face_dof_candidate_owner,
+        rank_to_order,
+        no_global_collectives_,
+        quad_face_dof_global_id,
+        quad_face_dof_owner_rank,
+        n_global_quad_face_dofs,
+        /*tag_base=*/43180);
+    assign_global_ordinals_with_neighbors<CellPrivateKey,
+                                          CellPrivateKeyHash,
+                                          std::less<CellPrivateKey>>(
+        mpi_comm_,
+        my_rank_,
+        world_size_,
+        neighbors,
+        cell_private_keys,
+        cell_private_owner_input,
+        rank_to_order,
+        no_global_collectives_,
+        cell_private_global_id,
+        n_global_cell_private_dofs,
+        /*tag_base=*/43190);
+
+    const gid_t vertex_offset = 0;
+    const gid_t edge_offset = n_global_vertex_dofs;
+    const gid_t tri_face_offset = checked_nonneg_add(edge_offset, n_global_edge_dofs, "variable-order tri-face offset");
+    const gid_t quad_face_offset = checked_nonneg_add(tri_face_offset, n_global_tri_face_dofs, "variable-order quad-face offset");
+    const gid_t cell_private_offset = checked_nonneg_add(quad_face_offset, n_global_quad_face_dofs, "variable-order cell-private offset");
+    const gid_t scalar_total_dofs = checked_nonneg_add(cell_private_offset,
+                                                       n_global_cell_private_dofs,
+                                                       "variable-order scalar total dofs");
+
+    const gid_t nc = static_cast<gid_t>(std::max<LocalIndex>(1, num_components_));
+    const gid_t global_total_dofs = checked_nonneg_mul(scalar_total_dofs,
+                                                       nc,
+                                                       "variable-order total dofs with components");
+    std::vector<gid_t> component_offsets(static_cast<std::size_t>(nc), gid_t{0});
+    for (gid_t comp = 0; comp < nc; ++comp) {
+        component_offsets[static_cast<std::size_t>(comp)] =
+            checked_nonneg_mul(scalar_total_dofs, comp, "variable-order component offset");
+    }
+
+    entity_dof_map_ = std::make_unique<EntityDofMap>();
+    entity_dof_map_->reserve(topo->n_vertices, topo->n_edges, topo->n_faces, topo->n_cells);
+
+    auto expand_scalar_ids = [&](std::span<const GlobalIndex> scalar_ids) {
+        std::vector<GlobalIndex> expanded;
+        expanded.reserve(scalar_ids.size() * static_cast<std::size_t>(nc));
+        for (gid_t comp = 0; comp < nc; ++comp) {
+            const gid_t offset = component_offsets[static_cast<std::size_t>(comp)];
+            for (auto dof : scalar_ids) {
+                expanded.push_back(dof + static_cast<GlobalIndex>(offset));
+            }
+        }
+        return expanded;
+    };
+
+    auto make_scalar_span = [](const std::vector<GlobalIndex>& values) -> std::span<const GlobalIndex> {
+        return std::span<const GlobalIndex>(values.data(), values.size());
+    };
+
+    std::vector<std::vector<GlobalIndex>> vertex_scalar_dofs(n_vertices);
+    for (std::size_t v = 0; v < n_vertices; ++v) {
+        auto& list = vertex_scalar_dofs[v];
+        list.reserve(static_cast<std::size_t>(vertex_shared_count[v]));
+        for (LocalIndex ord = 0; ord < vertex_shared_count[v]; ++ord) {
+            const auto idx = vertex_dof_offsets[v] + static_cast<std::size_t>(ord);
+            list.push_back(static_cast<GlobalIndex>(vertex_offset + vertex_dof_global_id[idx]));
+        }
+        if (!list.empty()) {
+            entity_dof_map_->setVertexDofs(static_cast<GlobalIndex>(v), expand_scalar_ids(make_scalar_span(list)));
+        }
+    }
+
+    std::vector<std::vector<GlobalIndex>> edge_scalar_dofs(n_edges);
+    for (std::size_t e = 0; e < n_edges; ++e) {
+        auto& list = edge_scalar_dofs[e];
+        list.reserve(static_cast<std::size_t>(edge_shared_count[e]));
+        for (LocalIndex ord = 0; ord < edge_shared_count[e]; ++ord) {
+            const auto idx = edge_dof_offsets[e] + static_cast<std::size_t>(ord);
+            list.push_back(static_cast<GlobalIndex>(edge_offset + edge_dof_global_id[idx]));
+        }
+        if (!list.empty()) {
+            entity_dof_map_->setEdgeDofs(static_cast<GlobalIndex>(e), expand_scalar_ids(make_scalar_span(list)));
+        }
+    }
+
+    std::vector<std::vector<GlobalIndex>> face_scalar_dofs(n_faces);
+    for (std::size_t sf = 0; sf < n_faces; ++sf) {
+        auto& list = face_scalar_dofs[sf];
+        if (tri_face_slot[sf] >= 0) {
+            const auto slot = static_cast<std::size_t>(tri_face_slot[sf]);
+            list.reserve(static_cast<std::size_t>(tri_face_shared_count[slot]));
+            for (LocalIndex ord = 0; ord < tri_face_shared_count[slot]; ++ord) {
+                const auto idx = tri_face_dof_offsets[slot] + static_cast<std::size_t>(ord);
+                list.push_back(static_cast<GlobalIndex>(tri_face_offset + tri_face_dof_global_id[idx]));
+            }
+        } else if (quad_face_slot[sf] >= 0) {
+            const auto slot = static_cast<std::size_t>(quad_face_slot[sf]);
+            list.reserve(static_cast<std::size_t>(quad_face_shared_count[slot]));
+            for (LocalIndex ord = 0; ord < quad_face_shared_count[slot]; ++ord) {
+                const auto idx = quad_face_dof_offsets[slot] + static_cast<std::size_t>(ord);
+                list.push_back(static_cast<GlobalIndex>(quad_face_offset + quad_face_dof_global_id[idx]));
+            }
+        }
+        if (!list.empty()) {
+            entity_dof_map_->setFaceDofs(static_cast<GlobalIndex>(sf), expand_scalar_ids(make_scalar_span(list)));
+        }
+    }
+
+    std::vector<std::vector<GlobalIndex>> cell_private_scalar_dofs(n_cells);
+    for (std::size_t c = 0; c < n_cells; ++c) {
+        auto& list = cell_private_scalar_dofs[c];
+        list.reserve(static_cast<std::size_t>(cell_private_count[c]));
+        for (LocalIndex ord = 0; ord < cell_private_count[c]; ++ord) {
+            const auto idx = cell_private_offsets[c] + static_cast<std::size_t>(ord);
+            list.push_back(static_cast<GlobalIndex>(cell_private_offset + cell_private_global_id[idx]));
+        }
+        if (!list.empty()) {
+            entity_dof_map_->setCellInteriorDofs(static_cast<GlobalIndex>(c), expand_scalar_ids(make_scalar_span(list)));
+        }
+    }
+
+    std::unordered_map<GlobalIndex, int> owner_by_scalar_dof;
+    owner_by_scalar_dof.reserve(static_cast<std::size_t>(std::max<gid_t>(scalar_total_dofs / 2, gid_t{32})));
+    auto record_scalar_owner = [&owner_by_scalar_dof](GlobalIndex dof, int owner) {
+        const auto [it, inserted] = owner_by_scalar_dof.emplace(dof, owner);
+        if (!inserted && it->second != owner) {
+            throw FEException("DofHandler::distributeVariableOrderDofsParallel: inconsistent owner assignment");
+        }
+    };
+
+    dof_map_.reserve(topo->n_cells, static_cast<LocalIndex>(max_cell_total_dofs));
+    for (GlobalIndex c = 0; c < topo->n_cells; ++c) {
+        const auto sc = static_cast<std::size_t>(c);
+        const auto& layout = cell_layouts[sc];
+        const auto cell_verts = topo->getCellVertices(c);
+        const auto cell_edges = layout.edge_counts.empty() ? std::span<const MeshIndex>{} : topo->getCellEdges(c);
+        const auto cell_faces = layout.face_counts.empty() ? std::span<const MeshIndex>{} : topo->getCellFaces(c);
+
+        std::vector<GlobalIndex> scalar_cell_dofs;
+        scalar_cell_dofs.reserve(static_cast<std::size_t>(layout.scalar_dofs_per_element));
+        LocalIndex private_cursor = 0;
+
+        for (const auto& tag : layout.dof_tags) {
+            GlobalIndex scalar_dof = -1;
+            switch (tag.kind) {
+                case VariableLocalDofKind::Vertex: {
+                    const auto gv = static_cast<std::size_t>(cell_verts[static_cast<std::size_t>(tag.local_entity_id)]);
+                    if (tag.ordinal < vertex_shared_count[gv]) {
+                        const auto idx = vertex_dof_offsets[gv] + static_cast<std::size_t>(tag.ordinal);
+                        scalar_dof = static_cast<GlobalIndex>(vertex_offset + vertex_dof_global_id[idx]);
+                        record_scalar_owner(scalar_dof, vertex_dof_owner_rank[idx]);
+                    }
+                    break;
+                }
+                case VariableLocalDofKind::Edge: {
+                    const auto ge = static_cast<std::size_t>(cell_edges[static_cast<std::size_t>(tag.local_entity_id)]);
+                    if (tag.ordinal < edge_shared_count[ge]) {
+                        const auto idx = edge_dof_offsets[ge] + static_cast<std::size_t>(tag.ordinal);
+                        scalar_dof = static_cast<GlobalIndex>(edge_offset + edge_dof_global_id[idx]);
+                        record_scalar_owner(scalar_dof, edge_dof_owner_rank[idx]);
+                    }
+                    break;
+                }
+                case VariableLocalDofKind::Face: {
+                    const auto gf = static_cast<std::size_t>(cell_faces[static_cast<std::size_t>(tag.local_entity_id)]);
+                    if (tag.ordinal < face_shared_count[gf]) {
+                        if (tri_face_slot[gf] >= 0) {
+                            const auto slot = static_cast<std::size_t>(tri_face_slot[gf]);
+                            const auto idx = tri_face_dof_offsets[slot] + static_cast<std::size_t>(tag.ordinal);
+                            scalar_dof = static_cast<GlobalIndex>(tri_face_offset + tri_face_dof_global_id[idx]);
+                            record_scalar_owner(scalar_dof, tri_face_dof_owner_rank[idx]);
+                        } else if (quad_face_slot[gf] >= 0) {
+                            const auto slot = static_cast<std::size_t>(quad_face_slot[gf]);
+                            const auto idx = quad_face_dof_offsets[slot] + static_cast<std::size_t>(tag.ordinal);
+                            scalar_dof = static_cast<GlobalIndex>(quad_face_offset + quad_face_dof_global_id[idx]);
+                            record_scalar_owner(scalar_dof, quad_face_dof_owner_rank[idx]);
+                        }
+                    }
+                    break;
+                }
+                case VariableLocalDofKind::Cell:
+                default:
+                    break;
+            }
+
+            if (scalar_dof < 0) {
+                FE_CHECK_ARG(private_cursor < cell_private_count[sc],
+                             "DofHandler::distributeVariableOrderDofsParallel: cell-private DOF count mismatch");
+                const auto idx = cell_private_offsets[sc] + static_cast<std::size_t>(private_cursor++);
+                scalar_dof = static_cast<GlobalIndex>(cell_private_offset + cell_private_global_id[idx]);
+                record_scalar_owner(scalar_dof, cell_private_owner_input[idx]);
+            }
+            scalar_cell_dofs.push_back(scalar_dof);
+        }
+
+        FE_CHECK_ARG(private_cursor == cell_private_count[sc],
+                     "DofHandler::distributeVariableOrderDofsParallel: cell-private cursor mismatch");
+
+        std::vector<GlobalIndex> cell_dofs;
+        if (nc > 1) {
+            cell_dofs.reserve(scalar_cell_dofs.size() * static_cast<std::size_t>(nc));
+            for (gid_t comp = 0; comp < nc; ++comp) {
+                const gid_t offset = component_offsets[static_cast<std::size_t>(comp)];
+                for (auto dof : scalar_cell_dofs) {
+                    cell_dofs.push_back(dof + static_cast<GlobalIndex>(offset));
+                }
+            }
+        } else {
+            cell_dofs = std::move(scalar_cell_dofs);
+        }
+
+        FE_CHECK_ARG(cell_dofs.size() == space.dofs_per_element(c),
+                     "DofHandler::distributeVariableOrderDofsParallel: cell DOF count mismatch");
+        dof_map_.setCellDofs(c, cell_dofs);
+    }
+
+    std::shared_ptr<std::unordered_map<GlobalIndex, int>> owner_map_ptr =
+        std::make_shared<std::unordered_map<GlobalIndex, int>>();
+    owner_map_ptr->reserve(owner_by_scalar_dof.size() * static_cast<std::size_t>(std::max<gid_t>(1, nc)));
+    for (const auto& [scalar_dof, owner] : owner_by_scalar_dof) {
+        for (gid_t comp = 0; comp < nc; ++comp) {
+            const GlobalIndex dof = scalar_dof + static_cast<GlobalIndex>(component_offsets[static_cast<std::size_t>(comp)]);
+            owner_map_ptr->emplace(dof, owner);
+        }
+    }
+
+    dof_map_.setNumDofs(global_total_dofs);
+    dof_map_.setDofOwnership([owner_map_ptr](GlobalIndex dof) -> int {
+        const auto it = owner_map_ptr->find(dof);
+        return (it != owner_map_ptr->end()) ? it->second : -1;
+    });
+
+    std::vector<GlobalIndex> owned_dofs;
+    std::unordered_map<GlobalIndex, int> ghost_owner_map;
+    owned_dofs.reserve(owner_map_ptr->size());
+    ghost_owner_map.reserve(owner_map_ptr->size());
+    for (const auto& [dof, owner] : *owner_map_ptr) {
+        if (owner == my_rank_) {
+            owned_dofs.push_back(dof);
+        } else if (owner >= 0) {
+            ghost_owner_map.emplace(dof, owner);
+        }
+    }
+    std::sort(owned_dofs.begin(), owned_dofs.end());
+    owned_dofs.erase(std::unique(owned_dofs.begin(), owned_dofs.end()), owned_dofs.end());
+
+    std::vector<GlobalIndex> ghost_dofs;
+    std::vector<int> ghost_owners;
+    ghost_dofs.reserve(ghost_owner_map.size());
+    ghost_owners.reserve(ghost_owner_map.size());
+    for (const auto& [dof, owner] : ghost_owner_map) {
+        ghost_dofs.push_back(dof);
+        ghost_owners.push_back(owner);
+    }
+    std::vector<std::size_t> ghost_perm(ghost_dofs.size());
+    std::iota(ghost_perm.begin(), ghost_perm.end(), std::size_t{0});
+    std::sort(ghost_perm.begin(), ghost_perm.end(), [&](std::size_t a, std::size_t b) {
+        return ghost_dofs[a] < ghost_dofs[b];
+    });
+    std::vector<GlobalIndex> ghost_sorted;
+    std::vector<int> owners_sorted;
+    ghost_sorted.reserve(ghost_dofs.size());
+    owners_sorted.reserve(ghost_owners.size());
+    for (auto idx : ghost_perm) {
+        ghost_sorted.push_back(ghost_dofs[idx]);
+        owners_sorted.push_back(ghost_owners[idx]);
+    }
+
+    dof_map_.setNumLocalDofs(static_cast<GlobalIndex>(owned_dofs.size()));
+    partition_ = DofPartition(IndexSet(std::move(owned_dofs)), IndexSet(ghost_sorted));
+    partition_.setGlobalSize(global_total_dofs);
+
+    ghost_manager_ = std::make_unique<GhostDofManager>();
+    ghost_manager_->setGhostDofs(ghost_sorted, owners_sorted);
+
+    entity_dof_map_->buildReverseMapping();
+    entity_dof_map_->finalize();
+    cacheCellOrientations(*topo, need_edge_orientations, need_face_orientations);
+#endif
+}
+
 void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
                                    const DofLayoutInfo& layout,
                                    const DofDistributionOptions& options) {
@@ -3769,7 +5951,7 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
             throw FEException("DofHandler::distributeDofs: edge-interior DOFs require cell2edge connectivity (and n_edges > 0)");
         }
     }
-    if (layout.dofs_per_face > 0) {
+    if (layout.has_face_dofs()) {
         if (topology.n_faces <= 0 || topology.cell2face_offsets.empty() || topology.cell2face_data.empty()) {
             throw FEException("DofHandler::distributeDofs: face-interior DOFs require cell2face connectivity (and n_faces > 0)");
         }
@@ -3818,12 +6000,19 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
     // Phase 3: Face DOFs (shared using canonical ordering by min vertex GID)
     // -------------------------------------------------------------------------
     std::vector<GlobalIndex> face_first_dof(n_faces, -1);
+    std::vector<LocalIndex> face_dof_count(n_faces, 0);
 
-    if (layout.dofs_per_face > 0 && topology.n_faces > 0) {
+    if (layout.has_face_dofs() && topology.n_faces > 0) {
         for (GlobalIndex f = 0; f < topology.n_faces; ++f) {
+            const auto fv = topology.getFaceVertices(f);
+            const LocalIndex dofs_on_face = layout.face_dofs_for_vertex_count(fv.size());
+            face_dof_count[static_cast<std::size_t>(f)] = dofs_on_face;
+            if (dofs_on_face <= 0) {
+                continue;
+            }
             face_first_dof[static_cast<std::size_t>(f)] = next_dof;
             std::vector<GlobalIndex> f_dofs;
-            for (LocalIndex d = 0; d < layout.dofs_per_face; ++d) {
+            for (LocalIndex d = 0; d < dofs_on_face; ++d) {
                 f_dofs.push_back(next_dof++);
             }
             entity_dof_map_->setFaceDofs(f, f_dofs);
@@ -3987,8 +6176,8 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
             }
         }
 
-        // Add face DOFs (requires cell2face connectivity when dofs_per_face > 0).
-        if (layout.dofs_per_face > 0 && !topology.cell2face_offsets.empty()) {
+        // Add face DOFs (requires cell2face connectivity when face-interior DOFs exist).
+        if (layout.has_face_dofs() && !topology.cell2face_offsets.empty()) {
             auto cell_faces = topology.getCellFaces(c);
 
             auto infer_base_type = [&](std::size_t n_verts) -> ElementType {
@@ -4005,113 +6194,14 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
             const bool can_orient_faces =
                 options.use_canonical_ordering &&
                 layout.tensor_face_dof_layout &&
-                (layout.dofs_per_face > 1) &&
                 (base_type != ElementType::Unknown) &&
                 !topology.face2vertex_offsets.empty() &&
                 !topology.face2vertex_data.empty();
 
             const int poly_order = can_orient_faces ? (static_cast<int>(layout.dofs_per_edge) + 1) : 0;
-            const int face_grid = can_orient_faces ? (poly_order - 1) : 0; // interior nodes per axis for tensor faces
 
             auto get_face_vertices = [&](GlobalIndex face_id) {
                 return topology.getFaceVertices(face_id);
-            };
-
-            auto quad_interior_permutation_local_to_global = [&](const std::vector<int>& vertex_perm) -> std::vector<int> {
-                // vertex_perm maps canonical corner index -> local corner index.
-                // We find the corresponding dihedral transform on a (p+1)x(p+1) grid
-                // and restrict it to the (p-1)x(p-1) interior.
-                if (poly_order < 2 || face_grid <= 0) {
-                    return {};
-                }
-                const int p = poly_order;
-                const int m = face_grid;
-
-                struct Transform { bool swap; bool flip_u; bool flip_v; };
-                auto apply_transform = [&](int i, int j, const Transform& t) -> std::pair<int, int> {
-                    int u = i;
-                    int v = j;
-                    if (t.swap) {
-                        std::swap(u, v);
-                    }
-                    if (t.flip_u) {
-                        u = p - u;
-                    }
-                    if (t.flip_v) {
-                        v = p - v;
-                    }
-                    return {u, v};
-                };
-
-                auto corner_index = [&](int i, int j) -> int {
-                    if (i == 0 && j == 0) return 0;
-                    if (i == p && j == 0) return 1;
-                    if (i == p && j == p) return 2;
-                    if (i == 0 && j == p) return 3;
-                    return -1;
-                };
-
-                Transform matched{false, false, false};
-                bool found = false;
-                for (int swap = 0; swap <= 1 && !found; ++swap) {
-                    for (int fu = 0; fu <= 1 && !found; ++fu) {
-                        for (int fv = 0; fv <= 1 && !found; ++fv) {
-                            const Transform t{swap != 0, fu != 0, fv != 0};
-                            bool ok = true;
-                            for (int cidx = 0; cidx < 4; ++cidx) {
-                                int ci = 0, cj = 0;
-                                switch (cidx) {
-                                    case 0: ci = 0; cj = 0; break;
-                                    case 1: ci = p; cj = 0; break;
-                                    case 2: ci = p; cj = p; break;
-                                    case 3: ci = 0; cj = p; break;
-                                }
-                                const auto [ti, tj] = apply_transform(ci, cj, t);
-                                const int mapped = corner_index(ti, tj);
-                                if (mapped < 0 || static_cast<std::size_t>(cidx) >= vertex_perm.size() ||
-                                    mapped != vertex_perm[static_cast<std::size_t>(cidx)]) {
-                                    ok = false;
-                                    break;
-                                }
-                            }
-                            if (ok) {
-                                matched = t;
-                                found = true;
-                            }
-                        }
-                    }
-                }
-
-                if (!found) {
-                    throw FEException("DofHandler::distributeDofs: failed to match quad face orientation to a canonical dihedral transform");
-                }
-
-                std::vector<int> local_to_global(static_cast<std::size_t>(m * m), -1);
-                for (int gj = 0; gj < m; ++gj) {
-                    for (int gi = 0; gi < m; ++gi) {
-                        const int g = gj * m + gi;        // canonical interior index (v-major)
-                        const int ci = gi + 1;            // canonical grid index in [1,p-1]
-                        const int cj = gj + 1;
-                        const auto [li, lj] = apply_transform(ci, cj, matched);
-                        if (li <= 0 || li >= p || lj <= 0 || lj >= p) {
-                            throw FEException("DofHandler::distributeDofs: quad face interior map produced boundary index");
-                        }
-                        const int lgi = li - 1;
-                        const int lgj = lj - 1;
-                        const int l = lgj * m + lgi;
-                        if (l < 0 || l >= m * m) {
-                            throw FEException("DofHandler::distributeDofs: quad face interior permutation out of range");
-                        }
-                        local_to_global[static_cast<std::size_t>(l)] = g;
-                    }
-                }
-
-                for (std::size_t i = 0; i < local_to_global.size(); ++i) {
-                    if (local_to_global[i] < 0) {
-                        throw FEException("DofHandler::distributeDofs: quad face interior permutation incomplete");
-                    }
-                }
-                return local_to_global;
             };
 
             const auto ref = (base_type != ElementType::Unknown)
@@ -4120,10 +6210,18 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
 
             for (std::size_t lf = 0; lf < cell_faces.size(); ++lf) {
                 const GlobalIndex f = cell_faces[lf];
+                const auto sf = static_cast<std::size_t>(f);
+                if (sf >= face_dof_count.size()) {
+                    throw FEException("DofHandler::distributeDofs: face id out of range while assembling face DOFs");
+                }
+                const LocalIndex dofs_on_face = face_dof_count[sf];
+                if (dofs_on_face <= 0) {
+                    continue;
+                }
 
-                if (!can_orient_faces || layout.dofs_per_face == 1) {
-                    for (LocalIndex d = 0; d < layout.dofs_per_face; ++d) {
-                        cell_dofs.push_back(face_first_dof[static_cast<std::size_t>(f)] + d);
+                if (!can_orient_faces || dofs_on_face == 1) {
+                    for (LocalIndex d = 0; d < dofs_on_face; ++d) {
+                        cell_dofs.push_back(face_first_dof[sf] + d);
                     }
                     continue;
                 }
@@ -4133,16 +6231,32 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
                     throw FEException("DofHandler::distributeDofs: missing face2vertex connectivity for face orientation");
                 }
 
-                if (face_vertices.size() == 4u) {
-                    if (face_grid <= 0 ||
-                        static_cast<LocalIndex>(face_grid * face_grid) != layout.dofs_per_face) {
-                        throw FEException("DofHandler::distributeDofs: quad face dofs_per_face does not match (p-1)^2 for tensor Lagrange");
+                if (lf >= ref.num_faces()) {
+                    throw FEException("DofHandler::distributeDofs: cell2face ordering does not match reference element face count");
+                }
+
+                const auto& fn = ref.face_nodes(lf);
+                std::vector<int> local_to_global;
+                if (face_vertices.size() == 3u) {
+                    if (fn.size() != 3u) {
+                        throw FEException("DofHandler::distributeDofs: expected triangle face in reference element");
                     }
 
-                    if (lf >= ref.num_faces()) {
-                        throw FEException("DofHandler::distributeDofs: cell2face ordering does not match reference element face count");
+                    std::array<int, 3> local{};
+                    std::array<int, 3> global{};
+                    for (std::size_t i = 0; i < 3u; ++i) {
+                        const auto lv = static_cast<std::size_t>(fn[i]);
+                        if (lv >= cell_verts.size()) {
+                            throw FEException("DofHandler::distributeDofs: triangle face vertex index out of range");
+                        }
+                        local[i] = static_cast<int>(cell_verts[lv]);
+                        global[i] = static_cast<int>(face_vertices[i]);
                     }
-                    const auto& fn = ref.face_nodes(lf);
+
+                    const auto orient = spaces::OrientationManager::triangle_face_orientation(local, global);
+                    local_to_global = compute_scalar_face_interior_local_to_global(
+                        ElementType::Triangle3, poly_order, orient.vertex_perm);
+                } else if (face_vertices.size() == 4u) {
                     if (fn.size() != 4u) {
                         throw FEException("DofHandler::distributeDofs: expected quad face in reference element");
                     }
@@ -4152,27 +6266,26 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
                     for (std::size_t i = 0; i < 4u; ++i) {
                         const auto lv = static_cast<std::size_t>(fn[i]);
                         if (lv >= cell_verts.size()) {
-                            throw FEException("DofHandler::distributeDofs: face vertex index out of range while orienting face DOFs");
+                            throw FEException("DofHandler::distributeDofs: quad face vertex index out of range");
                         }
                         local[i] = static_cast<int>(cell_verts[lv]);
                         global[i] = static_cast<int>(face_vertices[i]);
                     }
 
                     const auto orient = spaces::OrientationManager::quad_face_orientation(local, global);
-                    const auto local_to_global = quad_interior_permutation_local_to_global(orient.vertex_perm);
-                    if (static_cast<LocalIndex>(local_to_global.size()) != layout.dofs_per_face) {
-                        throw FEException("DofHandler::distributeDofs: quad face interior permutation size mismatch");
-                    }
-
-                    for (LocalIndex l = 0; l < layout.dofs_per_face; ++l) {
-                        const int g = local_to_global[static_cast<std::size_t>(l)];
-                        cell_dofs.push_back(face_first_dof[static_cast<std::size_t>(f)] + static_cast<GlobalIndex>(g));
-                    }
+                    local_to_global = compute_scalar_face_interior_local_to_global(
+                        ElementType::Quad4, poly_order, orient.vertex_perm);
                 } else {
-                    // Simplex faces currently only have 0/1 interior DOFs in the supported layouts.
-                    for (LocalIndex d = 0; d < layout.dofs_per_face; ++d) {
-                        cell_dofs.push_back(face_first_dof[static_cast<std::size_t>(f)] + d);
-                    }
+                    throw FEException("DofHandler::distributeDofs: unsupported face shape for face-orientation handling");
+                }
+
+                if (static_cast<LocalIndex>(local_to_global.size()) != dofs_on_face) {
+                    throw FEException("DofHandler::distributeDofs: face interior permutation size mismatch");
+                }
+
+                for (LocalIndex l = 0; l < dofs_on_face; ++l) {
+                    const int g = local_to_global[static_cast<std::size_t>(l)];
+                    cell_dofs.push_back(face_first_dof[sf] + static_cast<GlobalIndex>(g));
                 }
             }
         }
@@ -4233,8 +6346,9 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
             expanded_entity->setEdgeDofs(e, expand_entity_range(edge_first_dof[static_cast<std::size_t>(e)], layout.dofs_per_edge));
         }
         for (GlobalIndex f = 0; f < topology.n_faces; ++f) {
-            if (layout.dofs_per_face <= 0 || face_first_dof[static_cast<std::size_t>(f)] < 0) continue;
-            expanded_entity->setFaceDofs(f, expand_entity_range(face_first_dof[static_cast<std::size_t>(f)], layout.dofs_per_face));
+            const auto sf = static_cast<std::size_t>(f);
+            if (sf >= face_dof_count.size() || face_dof_count[sf] <= 0 || face_first_dof[sf] < 0) continue;
+            expanded_entity->setFaceDofs(f, expand_entity_range(face_first_dof[sf], face_dof_count[sf]));
         }
         for (GlobalIndex c = 0; c < topology.n_cells; ++c) {
             if (layout.dofs_per_cell <= 0 || cell_first_interior_dof[static_cast<std::size_t>(c)] < 0) continue;
@@ -4330,7 +6444,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
             throw FEException("DofHandler::distributeCGDofsParallel: edge-interior DOFs require edge2vertex_data for distributed CG numbering");
         }
     }
-    if (layout.dofs_per_face > 0) {
+    if (layout.has_face_dofs()) {
         if (topology.n_faces <= 0 || topology.cell2face_offsets.empty() || topology.cell2face_data.empty()) {
             throw FEException("DofHandler::distributeCGDofsParallel: face-interior DOFs require cell2face connectivity (and n_faces > 0)");
         }
@@ -4385,21 +6499,26 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
     }
 
     const auto n_faces = static_cast<std::size_t>(topology.n_faces);
-    std::vector<FaceKey> face_keys;
-    std::vector<int> face_touch;
-    std::vector<gid_t> face_cell_gid_candidate;
-    std::vector<int> face_cell_owner_candidate;
+    std::vector<LocalIndex> face_dof_count(n_faces, 0);
+    std::vector<std::uint8_t> face_vertex_count(n_faces, 0);
+    std::vector<GlobalIndex> tri_face_slot(n_faces, -1);
+    std::vector<GlobalIndex> quad_face_slot(n_faces, -1);
+
+    std::vector<FaceKey> tri_face_keys;
+    std::vector<int> tri_face_touch;
+    std::vector<gid_t> tri_face_cell_gid_candidate;
+    std::vector<int> tri_face_cell_owner_candidate;
+
+    std::vector<FaceKey> quad_face_keys;
+    std::vector<int> quad_face_touch;
+    std::vector<gid_t> quad_face_cell_gid_candidate;
+    std::vector<int> quad_face_cell_owner_candidate;
 
     auto get_face_vertices = [&](GlobalIndex face_id) {
         return topology.getFaceVertices(face_id);
     };
 
-    if (layout.dofs_per_face > 0 && topology.n_faces > 0) {
-        face_keys.resize(n_faces);
-        face_touch.assign(n_faces, -1);
-        face_cell_gid_candidate.assign(n_faces, std::numeric_limits<gid_t>::max());
-        face_cell_owner_candidate.assign(n_faces, -1);
-
+    if (layout.has_face_dofs() && topology.n_faces > 0) {
         for (GlobalIndex f = 0; f < topology.n_faces; ++f) {
             const auto verts = get_face_vertices(f);
             if (verts.empty()) {
@@ -4407,6 +6526,13 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
             }
             if (verts.size() != 3u && verts.size() != 4u) {
                 throw FEException("DofHandler::distributeCGDofsParallel: unsupported face vertex count");
+            }
+
+            const LocalIndex dofs_on_face = layout.face_dofs_for_vertex_count(verts.size());
+            face_dof_count[static_cast<std::size_t>(f)] = dofs_on_face;
+            face_vertex_count[static_cast<std::size_t>(f)] = static_cast<std::uint8_t>(verts.size());
+            if (dofs_on_face <= 0) {
+                continue;
             }
 
             FaceKey key{};
@@ -4426,7 +6552,20 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
             for (std::size_t i = static_cast<std::size_t>(key.n); i < key.gids.size(); ++i) {
                 key.gids[i] = gid_t{0};
             }
-            face_keys[static_cast<std::size_t>(f)] = key;
+            const auto sf = static_cast<std::size_t>(f);
+            if (verts.size() == 3u) {
+                tri_face_slot[sf] = static_cast<GlobalIndex>(tri_face_keys.size());
+                tri_face_keys.push_back(key);
+                tri_face_touch.push_back(-1);
+                tri_face_cell_gid_candidate.push_back(std::numeric_limits<gid_t>::max());
+                tri_face_cell_owner_candidate.push_back(-1);
+            } else {
+                quad_face_slot[sf] = static_cast<GlobalIndex>(quad_face_keys.size());
+                quad_face_keys.push_back(key);
+                quad_face_touch.push_back(-1);
+                quad_face_cell_gid_candidate.push_back(std::numeric_limits<gid_t>::max());
+                quad_face_cell_owner_candidate.push_back(-1);
+            }
         }
     }
 
@@ -4468,19 +6607,40 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
             }
         }
 
-        if (!face_keys.empty()) {
+        if (!tri_face_keys.empty() || !quad_face_keys.empty()) {
             for (auto f : topology.getCellFaces(c)) {
                 const auto sf = static_cast<std::size_t>(f);
                 if (sf >= n_faces) {
                     throw FEException("DofHandler::distributeCGDofsParallel: cell face index out of range");
                 }
-                if (cgid < face_cell_gid_candidate[sf] ||
-                    (cgid == face_cell_gid_candidate[sf] && cell_owner < face_cell_owner_candidate[sf])) {
-                    face_cell_gid_candidate[sf] = cgid;
-                    face_cell_owner_candidate[sf] = cell_owner;
+                if (face_dof_count[sf] <= 0) {
+                    continue;
                 }
-                if (owned_cell) {
-                    face_touch[sf] = my_rank_;
+
+                if (tri_face_slot[sf] >= 0) {
+                    const auto slot = static_cast<std::size_t>(tri_face_slot[sf]);
+                    if (cgid < tri_face_cell_gid_candidate[slot] ||
+                        (cgid == tri_face_cell_gid_candidate[slot] &&
+                         cell_owner < tri_face_cell_owner_candidate[slot])) {
+                        tri_face_cell_gid_candidate[slot] = cgid;
+                        tri_face_cell_owner_candidate[slot] = cell_owner;
+                    }
+                    if (owned_cell) {
+                        tri_face_touch[slot] = my_rank_;
+                    }
+                } else if (quad_face_slot[sf] >= 0) {
+                    const auto slot = static_cast<std::size_t>(quad_face_slot[sf]);
+                    if (cgid < quad_face_cell_gid_candidate[slot] ||
+                        (cgid == quad_face_cell_gid_candidate[slot] &&
+                         cell_owner < quad_face_cell_owner_candidate[slot])) {
+                        quad_face_cell_gid_candidate[slot] = cgid;
+                        quad_face_cell_owner_candidate[slot] = cell_owner;
+                    }
+                    if (owned_cell) {
+                        quad_face_touch[slot] = my_rank_;
+                    }
+                } else {
+                    throw FEException("DofHandler::distributeCGDofsParallel: missing shape-specific face slot");
                 }
             }
         }
@@ -4499,10 +6659,16 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
             edge_cell_owner_candidate[e] = -1;
         }
     }
-    for (std::size_t f = 0; f < face_cell_gid_candidate.size(); ++f) {
-        if (face_cell_gid_candidate[f] == std::numeric_limits<gid_t>::max()) {
-            face_cell_gid_candidate[f] = gid_t{-1};
-            face_cell_owner_candidate[f] = -1;
+    for (std::size_t f = 0; f < tri_face_cell_gid_candidate.size(); ++f) {
+        if (tri_face_cell_gid_candidate[f] == std::numeric_limits<gid_t>::max()) {
+            tri_face_cell_gid_candidate[f] = gid_t{-1};
+            tri_face_cell_owner_candidate[f] = -1;
+        }
+    }
+    for (std::size_t f = 0; f < quad_face_cell_gid_candidate.size(); ++f) {
+        if (quad_face_cell_gid_candidate[f] == std::numeric_limits<gid_t>::max()) {
+            quad_face_cell_gid_candidate[f] = gid_t{-1};
+            quad_face_cell_owner_candidate[f] = -1;
         }
     }
 
@@ -4557,9 +6723,13 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	    std::vector<int> edge_owner_rank;
 	    gid_t n_global_edges = 0;
 
-	    std::vector<gid_t> face_global_id;
-	    std::vector<int> face_owner_rank;
-	    gid_t n_global_faces = 0;
+	    std::vector<gid_t> tri_face_global_id;
+	    std::vector<int> tri_face_owner_rank;
+	    gid_t n_global_tri_faces = 0;
+
+	    std::vector<gid_t> quad_face_global_id;
+	    std::vector<int> quad_face_owner_rank;
+	    gid_t n_global_quad_faces = 0;
 
 	    std::vector<gid_t> cell_global_id;
 	    std::vector<int> cell_owner_rank_out;
@@ -4602,23 +6772,42 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	                /*tag_base=*/42010);
 	        }
 
-	        if (!face_keys.empty()) {
+	        if (!tri_face_keys.empty()) {
 	            assign_contiguous_ids_and_owners_with_neighbors<FaceKey, FaceKeyHash, std::less<FaceKey>>(
 	                mpi_comm_,
 	                my_rank_,
 	                world_size_,
 	                neighbors,
 	                options.ownership,
-	                face_keys,
-	                face_touch,
-	                face_cell_gid_candidate,
-	                face_cell_owner_candidate,
+	                tri_face_keys,
+	                tri_face_touch,
+	                tri_face_cell_gid_candidate,
+	                tri_face_cell_owner_candidate,
 	                rank_to_order,
 	                no_global_collectives_,
-	                face_global_id,
-	                face_owner_rank,
-	                n_global_faces,
+	                tri_face_global_id,
+	                tri_face_owner_rank,
+	                n_global_tri_faces,
 	                /*tag_base=*/42020);
+	        }
+
+	        if (!quad_face_keys.empty()) {
+	            assign_contiguous_ids_and_owners_with_neighbors<FaceKey, FaceKeyHash, std::less<FaceKey>>(
+	                mpi_comm_,
+	                my_rank_,
+	                world_size_,
+	                neighbors,
+	                options.ownership,
+	                quad_face_keys,
+	                quad_face_touch,
+	                quad_face_cell_gid_candidate,
+	                quad_face_cell_owner_candidate,
+	                rank_to_order,
+	                no_global_collectives_,
+	                quad_face_global_id,
+	                quad_face_owner_rank,
+	                n_global_quad_faces,
+	                /*tag_base=*/42025);
 	        }
 
 	        if (layout.dofs_per_cell > 0) {
@@ -4682,23 +6871,52 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	                                                              /*tag_base=*/42010);
 	        }
 
-	        if (!face_keys.empty()) {
+	        if (!tri_face_keys.empty() || !quad_face_keys.empty()) {
 	            if (topology.face_gids.size() != static_cast<std::size_t>(topology.n_faces)) {
 	                throw FEException("DofHandler::distributeCGDofsParallel: global_numbering=GlobalIds requires face_gids (size must equal n_faces)");
 	            }
-	            face_global_id.assign(topology.face_gids.begin(), topology.face_gids.end());
+	        }
+
+	        if (!tri_face_keys.empty()) {
+	            tri_face_global_id.assign(tri_face_keys.size(), gid_t{-1});
+	            for (std::size_t sf = 0; sf < n_faces; ++sf) {
+	                if (tri_face_slot[sf] >= 0) {
+	                    tri_face_global_id[static_cast<std::size_t>(tri_face_slot[sf])] = topology.face_gids[sf];
+	                }
+	            }
 	            assign_owners_with_neighbors<FaceKey, FaceKeyHash>(mpi_comm_,
 	                                                              my_rank_,
 	                                                              world_size_,
 	                                                              neighbors,
 	                                                              options.ownership,
-	                                                              face_keys,
-	                                                              face_touch,
-	                                                              face_cell_gid_candidate,
-	                                                              face_cell_owner_candidate,
+	                                                              tri_face_keys,
+	                                                              tri_face_touch,
+	                                                              tri_face_cell_gid_candidate,
+	                                                              tri_face_cell_owner_candidate,
 	                                                              rank_to_order,
-	                                                              face_owner_rank,
+	                                                              tri_face_owner_rank,
 	                                                              /*tag_base=*/42020);
+	        }
+
+	        if (!quad_face_keys.empty()) {
+	            quad_face_global_id.assign(quad_face_keys.size(), gid_t{-1});
+	            for (std::size_t sf = 0; sf < n_faces; ++sf) {
+	                if (quad_face_slot[sf] >= 0) {
+	                    quad_face_global_id[static_cast<std::size_t>(quad_face_slot[sf])] = topology.face_gids[sf];
+	                }
+	            }
+	            assign_owners_with_neighbors<FaceKey, FaceKeyHash>(mpi_comm_,
+	                                                              my_rank_,
+	                                                              world_size_,
+	                                                              neighbors,
+	                                                              options.ownership,
+	                                                              quad_face_keys,
+	                                                              quad_face_touch,
+	                                                              quad_face_cell_gid_candidate,
+	                                                              quad_face_cell_owner_candidate,
+	                                                              rank_to_order,
+	                                                              quad_face_owner_rank,
+	                                                              /*tag_base=*/42025);
 	        }
 
 		        if (layout.dofs_per_cell > 0) {
@@ -4738,9 +6956,16 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	            n_global_edges = (max_e_gid >= 0) ? checked_nonneg_add(max_e_gid, gid_t{1}, "edge gid range") : gid_t{0};
 	        }
 
-	        if (layout.dofs_per_face > 0) {
-	            const gid_t max_f_gid = global_max_gid(face_global_id, /*tag_base=*/41720, "face_gids");
-	            n_global_faces = (max_f_gid >= 0) ? checked_nonneg_add(max_f_gid, gid_t{1}, "face gid range") : gid_t{0};
+	        if (!tri_face_keys.empty()) {
+	            const gid_t max_f_gid = global_max_gid(tri_face_global_id, /*tag_base=*/41720, "triangle face_gids");
+	            n_global_tri_faces =
+	                (max_f_gid >= 0) ? checked_nonneg_add(max_f_gid, gid_t{1}, "triangle face gid range") : gid_t{0};
+	        }
+
+	        if (!quad_face_keys.empty()) {
+	            const gid_t max_f_gid = global_max_gid(quad_face_global_id, /*tag_base=*/41725, "quadrilateral face_gids");
+	            n_global_quad_faces =
+	                (max_f_gid >= 0) ? checked_nonneg_add(max_f_gid, gid_t{1}, "quadrilateral face gid range") : gid_t{0};
 	        }
 
 		        if (layout.dofs_per_cell > 0) {
@@ -4777,19 +7002,34 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 		                                                              /*tag_base=*/42010);
 		        }
 
-		        if (!face_keys.empty()) {
+		        if (!tri_face_keys.empty()) {
 		            assign_owners_with_neighbors<FaceKey, FaceKeyHash>(mpi_comm_,
 		                                                              my_rank_,
 		                                                              world_size_,
 		                                                              neighbors,
 		                                                              options.ownership,
-		                                                              face_keys,
-		                                                              face_touch,
-		                                                              face_cell_gid_candidate,
-		                                                              face_cell_owner_candidate,
+		                                                              tri_face_keys,
+		                                                              tri_face_touch,
+		                                                              tri_face_cell_gid_candidate,
+		                                                              tri_face_cell_owner_candidate,
 		                                                              rank_to_order,
-		                                                              face_owner_rank,
+		                                                              tri_face_owner_rank,
 		                                                              /*tag_base=*/42020);
+		        }
+
+		        if (!quad_face_keys.empty()) {
+		            assign_owners_with_neighbors<FaceKey, FaceKeyHash>(mpi_comm_,
+		                                                              my_rank_,
+		                                                              world_size_,
+		                                                              neighbors,
+		                                                              options.ownership,
+		                                                              quad_face_keys,
+		                                                              quad_face_touch,
+		                                                              quad_face_cell_gid_candidate,
+		                                                              quad_face_cell_owner_candidate,
+		                                                              rank_to_order,
+		                                                              quad_face_owner_rank,
+		                                                              /*tag_base=*/42025);
 		        }
 
 		        if (layout.dofs_per_cell > 0) {
@@ -4840,27 +7080,60 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 			                /*tag_base=*/42800);
 		        }
 
-		        if (!face_keys.empty()) {
-		            face_global_id.clear();
+		        if (!tri_face_keys.empty()) {
+		            tri_face_global_id.clear();
 			            assign_dense_global_ordinals_compact_auto<FaceKey, FaceKeyHash, std::less<FaceKey>>(
 			                mpi_comm_,
 			                my_rank_,
 			                world_size_,
 			                rank_to_order,
-			                face_keys,
+			                tri_face_keys,
 			                no_global_collectives_,
-			                face_global_id,
-			                n_global_faces,
+			                tri_face_global_id,
+			                n_global_tri_faces,
 			                /*tag_base=*/42900);
 		        }
+
+		        if (!quad_face_keys.empty()) {
+		            quad_face_global_id.clear();
+			            assign_dense_global_ordinals_compact_auto<FaceKey, FaceKeyHash, std::less<FaceKey>>(
+			                mpi_comm_,
+			                my_rank_,
+			                world_size_,
+			                rank_to_order,
+			                quad_face_keys,
+			                no_global_collectives_,
+			                quad_face_global_id,
+			                n_global_quad_faces,
+			                /*tag_base=*/42905);
+		        }
 		    }
+
+	    std::vector<int> face_owner_rank(n_faces, -1);
+	    for (std::size_t sf = 0; sf < n_faces; ++sf) {
+	        if (tri_face_slot[sf] >= 0) {
+	            const auto slot = static_cast<std::size_t>(tri_face_slot[sf]);
+	            face_owner_rank[sf] = tri_face_owner_rank[slot];
+	        } else if (quad_face_slot[sf] >= 0) {
+	            const auto slot = static_cast<std::size_t>(quad_face_slot[sf]);
+	            face_owner_rank[sf] = quad_face_owner_rank[slot];
+	        }
+	    }
 
 	    const gid_t vertex_dofs_total =
 	        checked_nonneg_mul(n_global_vertices, static_cast<gid_t>(layout.dofs_per_vertex), "vertex dof block");
 	    const gid_t edge_dofs_total =
 	        checked_nonneg_mul(n_global_edges, static_cast<gid_t>(layout.dofs_per_edge), "edge dof block");
+	    const gid_t tri_face_dofs_total =
+	        checked_nonneg_mul(n_global_tri_faces,
+	                           static_cast<gid_t>(layout.face_dofs_for_vertex_count(3u)),
+	                           "triangle face dof block");
+	    const gid_t quad_face_dofs_total =
+	        checked_nonneg_mul(n_global_quad_faces,
+	                           static_cast<gid_t>(layout.face_dofs_for_vertex_count(4u)),
+	                           "quadrilateral face dof block");
 	    const gid_t face_dofs_total =
-	        checked_nonneg_mul(n_global_faces, static_cast<gid_t>(layout.dofs_per_face), "face dof block");
+	        checked_nonneg_add(tri_face_dofs_total, quad_face_dofs_total, "face dof block");
 	    const gid_t cell_dofs_total =
 	        checked_nonneg_mul(n_global_cells, static_cast<gid_t>(layout.dofs_per_cell), "cell dof block");
 
@@ -4904,17 +7177,30 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	                "edge");
 	        }
 
-	        if (!face_keys.empty()) {
+	        if (!tri_face_keys.empty()) {
 	            validate_entity_assignments_with_neighbors<FaceKey, FaceKeyHash, std::less<FaceKey>>(
 	                mpi_comm_,
 	                my_rank_,
 	                neighbors,
-	                face_keys,
-	                face_touch,
-	                face_global_id,
-	                face_owner_rank,
+	                tri_face_keys,
+	                tri_face_touch,
+	                tri_face_global_id,
+	                tri_face_owner_rank,
 	                /*tag_base=*/42520,
-	                "face");
+	                "triangle face");
+	        }
+
+	        if (!quad_face_keys.empty()) {
+	            validate_entity_assignments_with_neighbors<FaceKey, FaceKeyHash, std::less<FaceKey>>(
+	                mpi_comm_,
+	                my_rank_,
+	                neighbors,
+	                quad_face_keys,
+	                quad_face_touch,
+	                quad_face_global_id,
+	                quad_face_owner_rank,
+	                /*tag_base=*/42525,
+	                "quadrilateral face");
 	        }
 	    }
 
@@ -4958,22 +7244,41 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	        }
 	    }
 
+	    const gid_t tri_face_dof_offset = vertex_dofs_total + edge_dofs_total;
+	    const gid_t quad_face_dof_offset = tri_face_dof_offset + tri_face_dofs_total;
+
 	    std::vector<GlobalIndex> face_first_dof(n_faces, -1);
-	    if (layout.dofs_per_face > 0 && n_faces > 0) {
+	    if (layout.has_face_dofs() && n_faces > 0) {
 	        for (std::size_t sf = 0; sf < n_faces; ++sf) {
+	            const LocalIndex dofs_on_face = face_dof_count[sf];
+	            if (dofs_on_face <= 0) {
+	                continue;
+	            }
+
 	            const auto f = static_cast<GlobalIndex>(sf);
-	            const gid_t base = vertex_dofs_total + edge_dofs_total +
-	                               face_global_id[sf] * static_cast<gid_t>(layout.dofs_per_face);
+	            gid_t base = gid_t{-1};
+	            if (face_vertex_count[sf] == 3u && tri_face_slot[sf] >= 0) {
+	                base = tri_face_dof_offset +
+	                       tri_face_global_id[static_cast<std::size_t>(tri_face_slot[sf])] *
+	                           static_cast<gid_t>(dofs_on_face);
+	            } else if (face_vertex_count[sf] == 4u && quad_face_slot[sf] >= 0) {
+	                base = quad_face_dof_offset +
+	                       quad_face_global_id[static_cast<std::size_t>(quad_face_slot[sf])] *
+	                           static_cast<gid_t>(dofs_on_face);
+	            } else {
+	                throw FEException("DofHandler::distributeCGDofsParallel: missing face ordinal while assigning face DOFs");
+	            }
+
 	            face_first_dof[sf] = static_cast<GlobalIndex>(base);
 	            std::vector<GlobalIndex> f_dofs;
-	            f_dofs.reserve(static_cast<std::size_t>(layout.dofs_per_face) * static_cast<std::size_t>(nc));
+	            f_dofs.reserve(static_cast<std::size_t>(dofs_on_face) * static_cast<std::size_t>(nc));
 	            for (gid_t comp = 0; comp < nc; ++comp) {
 	                const gid_t offset = component_offsets[static_cast<std::size_t>(comp)];
-	                for (LocalIndex d = 0; d < layout.dofs_per_face; ++d) {
-                    f_dofs.push_back(static_cast<GlobalIndex>(base + static_cast<gid_t>(d) + offset));
-                }
-            }
-            entity_dof_map_->setFaceDofs(f, f_dofs);
+	                for (LocalIndex d = 0; d < dofs_on_face; ++d) {
+	                    f_dofs.push_back(static_cast<GlobalIndex>(base + static_cast<gid_t>(d) + offset));
+	                }
+	            }
+	            entity_dof_map_->setFaceDofs(f, f_dofs);
 	        }
 	    }
 
@@ -4981,7 +7286,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	    if (layout.dofs_per_cell > 0) {
 	        for (std::size_t sc = 0; sc < n_cells; ++sc) {
 	            const auto c = static_cast<GlobalIndex>(sc);
-	            const gid_t base = vertex_dofs_total + edge_dofs_total + face_dofs_total +
+	            const gid_t base = quad_face_dof_offset + quad_face_dofs_total +
 	                               cell_global_id[sc] * static_cast<gid_t>(layout.dofs_per_cell);
 	            cell_first_interior_dof[sc] = static_cast<GlobalIndex>(base);
 	            std::vector<GlobalIndex> c_dofs;
@@ -5136,8 +7441,8 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	            }
 	        }
 
-        // Add face DOFs (requires cell2face connectivity when dofs_per_face > 0).
-        if (layout.dofs_per_face > 0 && !topology.cell2face_offsets.empty()) {
+        // Add face DOFs (requires cell2face connectivity when face interiors are present).
+        if (layout.has_face_dofs() && !topology.cell2face_offsets.empty()) {
             auto cell_faces = topology.getCellFaces(c);
 
             auto infer_base_type = [&](std::size_t n_verts) -> ElementType {
@@ -5154,111 +7459,31 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
             const bool can_orient_faces =
                 options.use_canonical_ordering &&
                 layout.tensor_face_dof_layout &&
-                (layout.dofs_per_face > 1) &&
+                (layout.dofs_per_face > 1 || layout.dofs_per_tri_face > 1 || layout.dofs_per_quad_face > 1) &&
                 (base_type != ElementType::Unknown) &&
                 !topology.face2vertex_offsets.empty() &&
                 !topology.face2vertex_data.empty();
 
             const int poly_order = can_orient_faces ? (static_cast<int>(layout.dofs_per_edge) + 1) : 0;
-            const int face_grid = can_orient_faces ? (poly_order - 1) : 0;
-
-            auto quad_interior_permutation_local_to_global = [&](const std::vector<int>& vertex_perm) -> std::vector<int> {
-                if (poly_order < 2 || face_grid <= 0) {
-                    return {};
-                }
-                const int p = poly_order;
-                const int m = face_grid;
-
-                struct Transform { bool swap; bool flip_u; bool flip_v; };
-                auto apply_transform = [&](int i, int j, const Transform& t) -> std::pair<int, int> {
-                    int u = i;
-                    int v = j;
-                    if (t.swap) {
-                        std::swap(u, v);
-                    }
-                    if (t.flip_u) {
-                        u = p - u;
-                    }
-                    if (t.flip_v) {
-                        v = p - v;
-                    }
-                    return {u, v};
-                };
-
-                auto corner_index = [&](int i, int j) -> int {
-                    if (i == 0 && j == 0) return 0;
-                    if (i == p && j == 0) return 1;
-                    if (i == p && j == p) return 2;
-                    if (i == 0 && j == p) return 3;
-                    return -1;
-                };
-
-                const std::array<std::pair<int, int>, 4> corners = {
-                    std::make_pair(0, 0), std::make_pair(p, 0),
-                    std::make_pair(p, p), std::make_pair(0, p)
-                };
-
-                Transform best{false, false, false};
-                bool found = false;
-                for (int swap = 0; swap <= 1; ++swap) {
-                    for (int fu = 0; fu <= 1; ++fu) {
-                        for (int fv = 0; fv <= 1; ++fv) {
-	                            Transform t{swap != 0, fu != 0, fv != 0};
-	                            std::array<int, 4> mapped{};
-	                            for (std::size_t cidx = 0; cidx < corners.size(); ++cidx) {
-	                                const auto [ii, jj] = apply_transform(corners[cidx].first, corners[cidx].second, t);
-	                                mapped[cidx] = corner_index(ii, jj);
-	                            }
-	                            bool ok = true;
-	                            for (std::size_t cidx = 0; cidx < corners.size(); ++cidx) {
-	                                if (mapped[cidx] < 0 || mapped[cidx] >= 4) {
-	                                    ok = false;
-	                                    break;
-	                                }
-	                                if (vertex_perm[cidx] != mapped[cidx]) {
-	                                    ok = false;
-	                                    break;
-	                                }
-	                            }
-                            if (ok) {
-                                best = t;
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (found) break;
-                    }
-                    if (found) break;
-                }
-                if (!found) {
-                    throw FEException("DofHandler::distributeCGDofsParallel: unable to match quad face vertex permutation");
-                }
-
-                std::vector<int> perm;
-                perm.reserve(static_cast<std::size_t>(m * m));
-
-                auto interior_index = [&](int i, int j) -> int {
-                    return (j - 1) * m + (i - 1);
-                };
-
-                for (int j = 1; j <= p - 1; ++j) {
-                    for (int i = 1; i <= p - 1; ++i) {
-                        const auto [u, v] = apply_transform(i, j, best);
-                        perm.push_back(interior_index(u, v));
-                    }
-                }
-                return perm;
+            auto get_face_vertices = [&](GlobalIndex face_id) {
+                return topology.getFaceVertices(face_id);
             };
 
 	            for (std::size_t lf = 0; lf < static_cast<std::size_t>(cell_faces.size()); ++lf) {
-	                const GlobalIndex f = cell_faces[lf];
-	                const auto sf = static_cast<std::size_t>(f);
+		                const GlobalIndex f = cell_faces[lf];
+		                const auto sf = static_cast<std::size_t>(f);
 	                if (sf >= face_first_dof.size()) {
 	                    throw FEException("DofHandler::distributeCGDofsParallel: face id out of range while assembling face DOFs");
 	                }
 
-	                if (!can_orient_faces) {
-	                    for (LocalIndex d = 0; d < layout.dofs_per_face; ++d) {
+	                const LocalIndex dofs_on_face =
+	                    (sf < face_dof_count.size()) ? face_dof_count[sf] : LocalIndex{0};
+	                if (dofs_on_face <= 0 || face_first_dof[sf] < 0) {
+	                    continue;
+	                }
+
+	                if (!can_orient_faces || dofs_on_face <= 1) {
+	                    for (LocalIndex d = 0; d < dofs_on_face; ++d) {
 	                        cell_dofs.push_back(face_first_dof[sf] + d);
 	                    }
 	                    continue;
@@ -5269,17 +7494,33 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
                     throw FEException("DofHandler::distributeCGDofsParallel: face vertex list missing while orienting face DOFs");
                 }
 
-                if (face_vertices.size() == 4u) {
-                    if (poly_order < 2 || face_grid <= 0 ||
-                        static_cast<LocalIndex>(face_grid * face_grid) != layout.dofs_per_face) {
-                        throw FEException("DofHandler::distributeCGDofsParallel: quad face dofs_per_face does not match (p-1)^2 for tensor Lagrange");
+                const auto ref = elements::ReferenceElement::create(base_type);
+                if (lf >= ref.num_faces()) {
+                    throw FEException("DofHandler::distributeCGDofsParallel: cell2face ordering does not match reference element face count");
+                }
+
+                const auto& fn = ref.face_nodes(lf);
+                std::vector<int> local_to_global;
+                if (face_vertices.size() == 3u) {
+                    if (fn.size() != 3u) {
+                        throw FEException("DofHandler::distributeCGDofsParallel: expected triangle face in reference element");
                     }
 
-                    const auto ref = elements::ReferenceElement::create(base_type);
-                    if (lf >= ref.num_faces()) {
-                        throw FEException("DofHandler::distributeCGDofsParallel: cell2face ordering does not match reference element face count");
+                    std::array<int, 3> local{};
+                    std::array<int, 3> global{};
+                    for (std::size_t i = 0; i < 3u; ++i) {
+                        const auto lv = static_cast<std::size_t>(fn[i]);
+                        if (lv >= cell_verts.size()) {
+                            throw FEException("DofHandler::distributeCGDofsParallel: triangle face vertex index out of range");
+                        }
+                        local[i] = static_cast<int>(cell_verts[lv]);
+                        global[i] = static_cast<int>(face_vertices[i]);
                     }
-                    const auto& fn = ref.face_nodes(lf);
+
+                    const auto orient = spaces::OrientationManager::triangle_face_orientation(local, global);
+                    local_to_global = compute_scalar_face_interior_local_to_global(
+                        ElementType::Triangle3, poly_order, orient.vertex_perm);
+                } else if (face_vertices.size() == 4u) {
                     if (fn.size() != 4u) {
                         throw FEException("DofHandler::distributeCGDofsParallel: expected quad face in reference element");
                     }
@@ -5289,27 +7530,27 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
                     for (std::size_t i = 0; i < 4u; ++i) {
                         const auto lv = static_cast<std::size_t>(fn[i]);
                         if (lv >= cell_verts.size()) {
-                            throw FEException("DofHandler::distributeCGDofsParallel: face vertex index out of range while orienting face DOFs");
+                            throw FEException("DofHandler::distributeCGDofsParallel: quad face vertex index out of range");
                         }
                         local[i] = static_cast<int>(cell_verts[lv]);
                         global[i] = static_cast<int>(face_vertices[i]);
                     }
 
                     const auto orient = spaces::OrientationManager::quad_face_orientation(local, global);
-                    const auto local_to_global = quad_interior_permutation_local_to_global(orient.vertex_perm);
-                    if (static_cast<LocalIndex>(local_to_global.size()) != layout.dofs_per_face) {
-                        throw FEException("DofHandler::distributeCGDofsParallel: quad face interior permutation size mismatch");
-                    }
+                    local_to_global = compute_scalar_face_interior_local_to_global(
+                        ElementType::Quad4, poly_order, orient.vertex_perm);
+                } else {
+                    throw FEException("DofHandler::distributeCGDofsParallel: unsupported face shape for face-orientation handling");
+                }
 
-	                    for (LocalIndex l = 0; l < layout.dofs_per_face; ++l) {
-	                        const int g = local_to_global[static_cast<std::size_t>(l)];
-	                        cell_dofs.push_back(face_first_dof[sf] + static_cast<GlobalIndex>(g));
-	                    }
-	                } else {
-	                    for (LocalIndex d = 0; d < layout.dofs_per_face; ++d) {
-	                        cell_dofs.push_back(face_first_dof[sf] + d);
-	                    }
-	                }
+                if (static_cast<LocalIndex>(local_to_global.size()) != dofs_on_face) {
+                    throw FEException("DofHandler::distributeCGDofsParallel: face interior permutation size mismatch");
+                }
+
+                for (LocalIndex l = 0; l < dofs_on_face; ++l) {
+                    const int g = local_to_global[static_cast<std::size_t>(l)];
+                    cell_dofs.push_back(face_first_dof[sf] + static_cast<GlobalIndex>(g));
+                }
 	            }
 	        }
 
@@ -5354,10 +7595,16 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
         edge_owner_by_ordinal->emplace(edge_global_id[i], edge_owner_rank[i]);
     }
 
-    auto face_owner_by_ordinal = std::make_shared<std::unordered_map<gid_t, int>>();
-    face_owner_by_ordinal->reserve(face_global_id.size());
-    for (std::size_t i = 0; i < face_global_id.size(); ++i) {
-        face_owner_by_ordinal->emplace(face_global_id[i], face_owner_rank[i]);
+    auto tri_face_owner_by_ordinal = std::make_shared<std::unordered_map<gid_t, int>>();
+    tri_face_owner_by_ordinal->reserve(tri_face_global_id.size());
+    for (std::size_t i = 0; i < tri_face_global_id.size(); ++i) {
+        tri_face_owner_by_ordinal->emplace(tri_face_global_id[i], tri_face_owner_rank[i]);
+    }
+
+    auto quad_face_owner_by_ordinal = std::make_shared<std::unordered_map<gid_t, int>>();
+    quad_face_owner_by_ordinal->reserve(quad_face_global_id.size());
+    for (std::size_t i = 0; i < quad_face_global_id.size(); ++i) {
+        quad_face_owner_by_ordinal->emplace(quad_face_global_id[i], quad_face_owner_rank[i]);
     }
 
     auto cell_owner_by_ordinal = std::make_shared<std::unordered_map<gid_t, int>>();
@@ -5368,7 +7615,8 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 
     const auto dofs_per_vertex = static_cast<gid_t>(layout.dofs_per_vertex);
     const auto dofs_per_edge = static_cast<gid_t>(layout.dofs_per_edge);
-    const auto dofs_per_face = static_cast<gid_t>(layout.dofs_per_face);
+    const auto tri_dofs_per_face = static_cast<gid_t>(layout.face_dofs_for_vertex_count(3u));
+    const auto quad_dofs_per_face = static_cast<gid_t>(layout.face_dofs_for_vertex_count(4u));
     const auto dofs_per_cell = static_cast<gid_t>(layout.dofs_per_cell);
 
     dof_map_.setDofOwnership([=](GlobalIndex global_dof) -> int {
@@ -5399,12 +7647,19 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
         }
         offset += edge_dofs_total;
 
-        if (dofs_per_face > 0 && dof < offset + face_dofs_total) {
-            const gid_t ord = (dof - offset) / dofs_per_face;
-            const auto it = face_owner_by_ordinal->find(ord);
-            return (it != face_owner_by_ordinal->end()) ? it->second : -1;
+        if (tri_dofs_per_face > 0 && dof < offset + tri_face_dofs_total) {
+            const gid_t ord = (dof - offset) / tri_dofs_per_face;
+            const auto it = tri_face_owner_by_ordinal->find(ord);
+            return (it != tri_face_owner_by_ordinal->end()) ? it->second : -1;
         }
-        offset += face_dofs_total;
+        offset += tri_face_dofs_total;
+
+        if (quad_dofs_per_face > 0 && dof < offset + quad_face_dofs_total) {
+            const gid_t ord = (dof - offset) / quad_dofs_per_face;
+            const auto it = quad_face_owner_by_ordinal->find(ord);
+            return (it != quad_face_owner_by_ordinal->end()) ? it->second : -1;
+        }
+        offset += quad_face_dofs_total;
 
         if (dofs_per_cell > 0 && dof < offset + cell_dofs_total) {
             const gid_t ord = (dof - offset) / dofs_per_cell;
@@ -5418,7 +7673,12 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
     const std::size_t approx_local_dofs_scalar =
         static_cast<std::size_t>(std::max<GlobalIndex>(0, topology.n_vertices)) * static_cast<std::size_t>(layout.dofs_per_vertex) +
         static_cast<std::size_t>(std::max<GlobalIndex>(0, topology.n_edges)) * static_cast<std::size_t>(layout.dofs_per_edge) +
-        static_cast<std::size_t>(std::max<GlobalIndex>(0, topology.n_faces)) * static_cast<std::size_t>(layout.dofs_per_face) +
+        std::accumulate(face_dof_count.begin(),
+                        face_dof_count.end(),
+                        std::size_t{0},
+                        [](std::size_t sum, LocalIndex count) {
+                            return sum + static_cast<std::size_t>(std::max<LocalIndex>(0, count));
+                        }) +
         static_cast<std::size_t>(std::max<GlobalIndex>(0, topology.n_cells)) * static_cast<std::size_t>(layout.dofs_per_cell);
     const std::size_t approx_local_dofs =
         approx_local_dofs_scalar * static_cast<std::size_t>(std::max<gid_t>(1, nc));
@@ -5443,9 +7703,26 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
         }
     };
 
+    auto add_entity_dofs_variable = [&](const std::vector<GlobalIndex>& first_dof,
+                                        std::span<const int> owner_rank,
+                                        std::span<const LocalIndex> dof_count) {
+        for (std::size_t i = 0; i < first_dof.size(); ++i) {
+            const LocalIndex dofs_per_entity = dof_count[i];
+            if (dofs_per_entity <= 0 || owner_rank[i] != my_rank_ || first_dof[i] < 0) continue;
+            const auto base = first_dof[i];
+            for (gid_t comp = 0; comp < nc; ++comp) {
+                const GlobalIndex offset = static_cast<GlobalIndex>(
+                    component_offsets[static_cast<std::size_t>(comp)]);
+                for (LocalIndex d = 0; d < dofs_per_entity; ++d) {
+                    owned_dofs.push_back(base + static_cast<GlobalIndex>(d) + offset);
+                }
+            }
+        }
+    };
+
     add_entity_dofs(vertex_first_dof, vertex_owner_rank, layout.dofs_per_vertex);
     add_entity_dofs(edge_first_dof, edge_owner_rank, layout.dofs_per_edge);
-    add_entity_dofs(face_first_dof, face_owner_rank, layout.dofs_per_face);
+    add_entity_dofs_variable(face_first_dof, face_owner_rank, face_dof_count);
 
     if (layout.dofs_per_cell > 0) {
         std::vector<int> cell_owner_local(static_cast<std::size_t>(topology.n_cells), -1);
@@ -5483,9 +7760,31 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
         }
     };
 
+    auto add_entity_ghosts_variable = [&](const std::vector<GlobalIndex>& first_dof,
+                                          std::span<const int> owner_rank,
+                                          std::span<const LocalIndex> dof_count) {
+        for (std::size_t i = 0; i < first_dof.size(); ++i) {
+            const LocalIndex dofs_per_entity = dof_count[i];
+            const int owner = owner_rank[i];
+            if (dofs_per_entity <= 0 || owner == my_rank_ || first_dof[i] < 0) continue;
+            const auto base = first_dof[i];
+            for (gid_t comp = 0; comp < nc; ++comp) {
+                const GlobalIndex offset = static_cast<GlobalIndex>(
+                    component_offsets[static_cast<std::size_t>(comp)]);
+                for (LocalIndex d = 0; d < dofs_per_entity; ++d) {
+                    const GlobalIndex dof = base + static_cast<GlobalIndex>(d) + offset;
+                    const auto [it, inserted] = ghost_owner_map.emplace(dof, owner);
+                    if (!inserted && it->second != owner) {
+                        throw FEException("DofHandler::distributeCGDofsParallel: inconsistent ghost owner assignment");
+                    }
+                }
+            }
+        }
+    };
+
     add_entity_ghosts(vertex_first_dof, vertex_owner_rank, layout.dofs_per_vertex);
     add_entity_ghosts(edge_first_dof, edge_owner_rank, layout.dofs_per_edge);
-    add_entity_ghosts(face_first_dof, face_owner_rank, layout.dofs_per_face);
+    add_entity_ghosts_variable(face_first_dof, face_owner_rank, face_dof_count);
 
     if (layout.dofs_per_cell > 0) {
         std::vector<int> cell_owner_local(static_cast<std::size_t>(topology.n_cells), -1);
@@ -5850,6 +8149,8 @@ struct DofHandler::MeshCacheState : MeshObserver {
             return a.dofs_per_vertex == b.dofs_per_vertex &&
                    a.dofs_per_edge == b.dofs_per_edge &&
                    a.dofs_per_face == b.dofs_per_face &&
+                   a.dofs_per_tri_face == b.dofs_per_tri_face &&
+                   a.dofs_per_quad_face == b.dofs_per_quad_face &&
                    a.dofs_per_cell == b.dofs_per_cell &&
                    a.num_components == b.num_components &&
                    a.is_continuous == b.is_continuous &&
@@ -5974,6 +8275,10 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
                                 const DofDistributionOptions& options) {
     checkNotFinalized();
 
+    if (space.is_variable_order()) {
+        throw FEException("DofHandler::distributeDofs(MeshBase): variable-order spaces are currently supported through the mesh-topology API only");
+    }
+
     if (mesh.n_cells() == 0) {
         throw FEException("DofHandler::distributeDofs(MeshBase): mesh has no cells");
     }
@@ -6083,6 +8388,8 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
         layout.dofs_per_vertex = 0;
         layout.dofs_per_edge = 0;
         layout.dofs_per_face = 0;
+        layout.dofs_per_tri_face = 0;
+        layout.dofs_per_quad_face = 0;
         const auto nc = static_cast<LocalIndex>(std::max(1, space.value_dimension()));
         layout.num_components = nc;
         if (nc > 1 && (total_dofs % nc) == 0) {
@@ -6116,7 +8423,7 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
     topo.cell_gids = mesh.cell_gids();
 
     const bool need_edges = layout.is_continuous && layout.dofs_per_edge > 0;
-    const bool need_faces = layout.is_continuous && layout.dofs_per_face > 0;
+    const bool need_faces = layout.is_continuous && layout.has_face_dofs();
 
     CellToEntityCSR cell2edge;
     CellToEntityCSR cell2face;
@@ -6234,6 +8541,10 @@ void DofHandler::distributeDofs(const Mesh& mesh,
                                 const DofDistributionOptions& options) {
     checkNotFinalized();
 
+    if (space.is_variable_order()) {
+        throw FEException("DofHandler::distributeDofs(Mesh): variable-order spaces are currently supported through the mesh-topology API only");
+    }
+
     const auto& local_mesh = mesh.local_mesh();
     if (local_mesh.n_cells() == 0) {
         throw FEException("DofHandler::distributeDofs(Mesh): local mesh has no cells");
@@ -6344,6 +8655,8 @@ void DofHandler::distributeDofs(const Mesh& mesh,
         layout.dofs_per_vertex = 0;
         layout.dofs_per_edge = 0;
         layout.dofs_per_face = 0;
+        layout.dofs_per_tri_face = 0;
+        layout.dofs_per_quad_face = 0;
         const auto nc = static_cast<LocalIndex>(std::max(1, space.value_dimension()));
         layout.num_components = nc;
         if (nc > 1 && (total_dofs % nc) == 0) {
@@ -6396,7 +8709,7 @@ void DofHandler::distributeDofs(const Mesh& mesh,
     topo.neighbor_ranks = neighbor_ranks;
 
     const bool need_edges = layout.is_continuous && layout.dofs_per_edge > 0;
-    const bool need_faces = layout.is_continuous && layout.dofs_per_face > 0;
+    const bool need_faces = layout.is_continuous && layout.has_face_dofs();
 
     CellToEntityCSR cell2edge;
     CellToEntityCSR cell2face;
@@ -6596,6 +8909,8 @@ void DofHandler::distributeDofs(const Mesh& mesh,
         layout.dofs_per_vertex = 0;
         layout.dofs_per_edge = 0;
         layout.dofs_per_face = 0;
+        layout.dofs_per_tri_face = 0;
+        layout.dofs_per_quad_face = 0;
         const auto nc = static_cast<LocalIndex>(std::max(1, layout.num_components));
         if (nc > 1 && (total_dofs % nc) == 0) {
             layout.dofs_per_cell = total_dofs / nc; // per component
@@ -6608,7 +8923,7 @@ void DofHandler::distributeDofs(const Mesh& mesh,
 
     // Derive edge/face topology for higher-order CG when needed.
     const bool need_edges = layout.is_continuous && layout.dofs_per_edge > 0;
-    const bool need_faces = layout.is_continuous && layout.dofs_per_face > 0;
+    const bool need_faces = layout.is_continuous && layout.has_face_dofs();
 
     if (need_edges || need_faces) {
         auto infer_base_type = [&](std::size_t n_verts) -> ElementType {
@@ -6987,7 +9302,7 @@ void DofHandler::cacheSpatialDofCoordinates(const MeshTopologyView& topology,
             }
         }
 
-        if (layout.dofs_per_face > 0 &&
+        if (layout.has_face_dofs() &&
             !topology.face2vertex_offsets.empty() &&
             !topology.face2vertex_data.empty()) {
             const GlobalIndex n_faces = std::min<GlobalIndex>(entity_dof_map_->numFaces(), topology.n_faces);

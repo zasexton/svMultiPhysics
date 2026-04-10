@@ -82,7 +82,7 @@ void PetscLinearSolver::setOptions(const SolverOptions& options)
     FE_THROW_IF(options.max_iter <= 0, InvalidArgumentException, "PetscLinearSolver: max_iter must be > 0");
     FE_THROW_IF(options.rel_tol < 0.0, InvalidArgumentException, "PetscLinearSolver: rel_tol must be >= 0");
     FE_THROW_IF(options.abs_tol < 0.0, InvalidArgumentException, "PetscLinearSolver: abs_tol must be >= 0");
-    options_ = options;
+    options_ = normalizeSolverOptionsForBackend(options, BackendKind::PETSc);
 }
 
 void PetscLinearSolver::ensureKspCreated()
@@ -160,58 +160,60 @@ PCType toPetscPcType(PreconditionerType pc)
 
 } // namespace
 
-void PetscLinearSolver::applyBaseOptionsToKsp()
+void PetscLinearSolver::applyBaseOptionsToKsp(const SolverOptions& options)
 {
     FE_CHECK_NOT_NULL(ksp_, "PetscLinearSolver::ksp");
 
-    FE_PETSC_CALL(KSPSetType(ksp_, toPetscKspType(options_.method)));
+    FE_PETSC_CALL(KSPSetType(ksp_, toPetscKspType(options.method)));
     FE_PETSC_CALL(KSPSetTolerances(ksp_,
-                                   static_cast<PetscReal>(options_.rel_tol),
-                                   static_cast<PetscReal>(options_.abs_tol),
+                                   static_cast<PetscReal>(options.rel_tol),
+                                   static_cast<PetscReal>(options.abs_tol),
                                    PETSC_DEFAULT,
-                                   static_cast<PetscInt>(options_.max_iter)));
-    FE_PETSC_CALL(KSPSetInitialGuessNonzero(ksp_, options_.use_initial_guess ? PETSC_TRUE : PETSC_FALSE));
+                                   static_cast<PetscInt>(options.max_iter)));
+    FE_PETSC_CALL(KSPSetInitialGuessNonzero(ksp_, options.use_initial_guess ? PETSC_TRUE : PETSC_FALSE));
 
     PC pc = nullptr;
     FE_PETSC_CALL(KSPGetPC(ksp_, &pc));
     FE_CHECK_NOT_NULL(pc, "PetscLinearSolver::pc");
 
     const bool wants_fieldsplit =
-        (options_.preconditioner == PreconditionerType::FieldSplit) || (options_.method == SolverMethod::BlockSchur);
+        (options.preconditioner == PreconditionerType::FieldSplit) ||
+        (options.method == SolverMethod::BlockSchur);
 
     if (wants_fieldsplit) {
-        FE_THROW_IF(options_.method == SolverMethod::Direct, InvalidArgumentException,
+        FE_THROW_IF(options.method == SolverMethod::Direct, InvalidArgumentException,
                     "PetscLinearSolver: field-split preconditioning requires an iterative method");
         FE_PETSC_CALL(PCSetType(pc, PCFIELDSPLIT));
 
         PCCompositeType split_type = PC_COMPOSITE_ADDITIVE;
-        if (options_.method == SolverMethod::BlockSchur) {
+        if (options.method == SolverMethod::BlockSchur) {
             split_type = PC_COMPOSITE_SCHUR;
         } else {
-            switch (options_.fieldsplit.kind) {
+            switch (options.fieldsplit.kind) {
+                case FieldSplitKind::Auto: split_type = PC_COMPOSITE_ADDITIVE; break;
                 case FieldSplitKind::Additive: split_type = PC_COMPOSITE_ADDITIVE; break;
                 case FieldSplitKind::Multiplicative: split_type = PC_COMPOSITE_MULTIPLICATIVE; break;
                 case FieldSplitKind::Schur: split_type = PC_COMPOSITE_SCHUR; break;
             }
         }
         FE_PETSC_CALL(PCFieldSplitSetType(pc, split_type));
-    } else if (options_.method == SolverMethod::Direct) {
+    } else if (options.method == SolverMethod::Direct) {
         FE_PETSC_CALL(PCSetType(pc, PCLU));
     } else {
-        FE_PETSC_CALL(PCSetType(pc, toPetscPcType(options_.preconditioner)));
+        FE_PETSC_CALL(PCSetType(pc, toPetscPcType(options.preconditioner)));
 
-        if (options_.preconditioner == PreconditionerType::RowColumnScaling) {
+        if (options.preconditioner == PreconditionerType::RowColumnScaling) {
             // Best-effort analogue to FSILS row/column scaling: enable diagonal scaling.
             FE_PETSC_CALL(KSPSetDiagonalScale(ksp_, PETSC_TRUE));
         }
     }
 
-    const auto prefix = normalizedPetscPrefix(options_.petsc_options_prefix);
+    const auto prefix = normalizedPetscPrefix(options.petsc_options_prefix);
     if (!prefix.empty()) {
         FE_PETSC_CALL(KSPSetOptionsPrefix(ksp_, prefix.c_str()));
     }
 
-    for (const auto& [key_raw, val] : options_.passthrough) {
+    for (const auto& [key_raw, val] : options.passthrough) {
         if (key_raw.empty()) continue;
         std::string key = key_raw;
         if (key.front() != '-') {
@@ -232,6 +234,28 @@ namespace {
 [[nodiscard]] std::string defaultFieldName(std::size_t i)
 {
     return "field" + std::to_string(i);
+}
+
+[[nodiscard]] std::vector<std::string> resolveFieldSplitNames(const SolverOptions& options,
+                                                              const BlockMatrix& matrix)
+{
+    if (!options.fieldsplit.split_names.empty()) {
+        return options.fieldsplit.split_names;
+    }
+
+    std::vector<std::string> names;
+    names.reserve(matrix.numColBlocks());
+    for (std::size_t i = 0; i < matrix.numColBlocks(); ++i) {
+        std::string name = defaultFieldName(i);
+        if (options.mixed_block_layout.has_value()) {
+            if (const auto* block = options.mixed_block_layout->findBlockByExtent(
+                    matrix.colBlockOffset(i), matrix.colBlockSize(i))) {
+                name = block->name;
+            }
+        }
+        names.push_back(std::move(name));
+    }
+    return names;
 }
 
 } // namespace
@@ -258,7 +282,7 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
 
         ensureKspCreated();
         FE_PETSC_CALL(KSPSetOperators(ksp_, A->petsc(), A->petsc()));
-        applyBaseOptionsToKsp();
+        applyBaseOptionsToKsp(options_);
         applyKspFromOptions();
 
         if (!options_.use_initial_guess) {
@@ -348,6 +372,9 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
                     "PetscLinearSolver::solve: block vector layout mismatch");
         FE_THROW_IF(m == 0 || n == 0, InvalidArgumentException, "PetscLinearSolver::solve: empty BlockMatrix");
 
+        const auto solve_options =
+            normalizeSolverOptionsForBackend(options_, BackendKind::PETSc, /*block_operator_available=*/true);
+
         std::vector<Mat> submats(m * n, nullptr);
         for (std::size_t i = 0; i < m; ++i) {
             for (std::size_t j = 0; j < n; ++j) {
@@ -393,14 +420,15 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
 
         ensureKspCreated();
         FE_PETSC_CALL(KSPSetOperators(ksp_, A_nest, A_nest));
-        applyBaseOptionsToKsp();
+        applyBaseOptionsToKsp(solve_options);
 
         const bool wants_fieldsplit =
-            (options_.preconditioner == PreconditionerType::FieldSplit) || (options_.method == SolverMethod::BlockSchur);
+            (solve_options.preconditioner == PreconditionerType::FieldSplit) ||
+            (solve_options.method == SolverMethod::BlockSchur);
         if (wants_fieldsplit) {
             FE_THROW_IF(m != n, InvalidArgumentException,
                         "PetscLinearSolver: field-split requires a square block structure");
-            if (options_.method == SolverMethod::BlockSchur) {
+            if (solve_options.method == SolverMethod::BlockSchur) {
                 FE_THROW_IF(m != 2, InvalidArgumentException,
                             "PetscLinearSolver: BlockSchur currently requires a 2x2 BlockMatrix");
             }
@@ -409,8 +437,8 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
             FE_PETSC_CALL(KSPGetPC(ksp_, &pc));
             FE_CHECK_NOT_NULL(pc, "PetscLinearSolver::pc");
 
-            const auto& names = options_.fieldsplit.split_names;
-            FE_THROW_IF(!names.empty() && names.size() != m, InvalidArgumentException,
+            const auto names = resolveFieldSplitNames(solve_options, *A_block);
+            FE_THROW_IF(names.size() != m, InvalidArgumentException,
                         "PetscLinearSolver: fieldsplit.split_names size mismatch");
 
             for (std::size_t i = 0; i < m; ++i) {
@@ -434,13 +462,14 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
             std::ostringstream oss;
             oss << "PETScLinearSolver::solve(block): blocks=" << m << "x" << n
                 << " n_total=" << A_block->numRows()
-                << " method=" << solverMethodToString(options_.method)
-                << " pc=" << preconditionerToString(options_.preconditioner)
-                << " rel_tol=" << options_.rel_tol
-                << " abs_tol=" << options_.abs_tol
-                << " max_iter=" << options_.max_iter
-                << " use_initial_guess=" << (options_.use_initial_guess ? 1 : 0)
-                << " prefix='" << normalizedPetscPrefix(options_.petsc_options_prefix) << "'";
+                << " method=" << solverMethodToString(solve_options.method)
+                << " pc=" << preconditionerToString(solve_options.preconditioner)
+                << " split_kind=" << fieldSplitKindToString(solve_options.fieldsplit.kind)
+                << " rel_tol=" << solve_options.rel_tol
+                << " abs_tol=" << solve_options.abs_tol
+                << " max_iter=" << solve_options.max_iter
+                << " use_initial_guess=" << (solve_options.use_initial_guess ? 1 : 0)
+                << " prefix='" << normalizedPetscPrefix(solve_options.petsc_options_prefix) << "'";
             traceLog(oss.str());
         }
 

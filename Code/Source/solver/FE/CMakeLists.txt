@@ -298,6 +298,7 @@ set(FE_MATH_HEADERS
 	    Basis/HierarchicalBasis.h
 	    Basis/OrthogonalPolynomials.h
 	    Basis/VectorBasis.h
+	    Basis/CompatibleTensorVectorBasis.h
 	    Basis/TensorBasis.h
 	    Basis/BernsteinBasis.h
 	    Basis/BSplineBasis.h
@@ -319,6 +320,7 @@ set(FE_MATH_HEADERS
 	    Basis/HierarchicalBasis.cpp
 	    Basis/OrthogonalPolynomials.cpp
 	    Basis/VectorBasis.cpp
+	    Basis/CompatibleTensorVectorBasis.cpp
 	    Basis/TensorBasis.cpp
 	    Basis/BernsteinBasis.cpp
 	    Basis/BSplineBasis.cpp
@@ -501,9 +503,6 @@ set(FE_DOFS_SOURCES
 set(FE_CONSTRAINTS_HEADERS
     Constraints/AffineConstraints.h
     Constraints/Constraint.h
-    Constraints/CoupledBCContext.h
-    Constraints/CoupledNeumannBC.h
-    Constraints/CoupledRobinBC.h
     Constraints/DirichletBC.h
     Constraints/NeumannBC.h
     Constraints/PeriodicBC.h
@@ -523,6 +522,7 @@ set(FE_CONSTRAINTS_HEADERS
     Constraints/SystemConstraint.h
     Constraints/SystemConstraints.h
     Constraints/StrongDirichletConstraint.h
+    Constraints/AuxiliaryDrivenDirichletConstraint.h
     Constraints/HCurlTangentialConstraint.h
     Constraints/HDivNormalConstraint.h
 )
@@ -547,6 +547,7 @@ set(FE_CONSTRAINTS_SOURCES
     Constraints/GaugeRegistry.cpp
     Constraints/SystemConstraints.cpp
     Constraints/StrongDirichletConstraint.cpp
+    Constraints/AuxiliaryDrivenDirichletConstraint.cpp
     Constraints/HCurlTangentialConstraint.cpp
     Constraints/HDivNormalConstraint.cpp
 )
@@ -717,7 +718,6 @@ set(FE_GEOMETRY_SOURCES
 # Auxiliary sources (auxiliary state subsystem, extracted from Systems)
 set(FE_AUXILIARY_HEADERS
     Auxiliary/AuxiliaryState.h
-    Auxiliary/AuxiliaryStateBuilder.h
     Auxiliary/AuxiliaryStateTypes.h
     Auxiliary/AuxiliaryStateStorage.h
     Auxiliary/AuxiliaryHistoryBuffer.h
@@ -769,10 +769,8 @@ set(FE_SYSTEMS_HEADERS
     Systems/FEQuantityDefinition.h
     Systems/FEQuantityRegistry.h
     Systems/BoundaryConditionManager.h
-    Systems/ODEIntegrator.h
-    Systems/CoupledBoundaryConditions.h
     Systems/BoundaryReductionService.h
-    Systems/CoupledBoundaryManager.h
+    Systems/AuxiliaryQuadratureLayout.h
     Systems/FESystem.h
     Systems/FormsInstaller.h
     Systems/FieldRegistry.h
@@ -810,8 +808,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/SystemSetup.cpp
     Systems/TimeIntegrator.cpp
     Systems/BoundaryReductionService.cpp
-    Systems/CoupledBoundaryManager.cpp
-    Systems/ODEIntegrator.cpp
+    Systems/AuxiliaryQuadratureLayout.cpp
     Systems/FEQuantityRegistry.cpp
     Systems/TransientSystem.cpp
 )
@@ -822,7 +819,6 @@ set(FE_FORMS_HEADERS
 	    Forms/BoundaryConditions.h
 	    Forms/BoundaryCondition.h
 	    Forms/StandardBCs.h
-	    Forms/CoupledBCs.h
 	    Forms/NitscheBC.h
 	    Forms/ConstraintBCs.h
     Forms/BoundaryFunctional.h
@@ -2268,7 +2264,6 @@ if(FE_BUILD_TESTS)
         # Auxiliary module tests (auxiliary state subsystem)
         if(FE_WITH_MESH AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Auxiliary/test_main.cpp)
             set(FE_AUXILIARY_TEST_SOURCES
-                Tests/Unit/Auxiliary/test_AuxiliaryStateBuilder.cpp
                 Tests/Unit/Auxiliary/test_AuxiliaryStateTypes.cpp
                 Tests/Unit/Auxiliary/test_AuxiliaryStateStorage.cpp
                 Tests/Unit/Auxiliary/test_AuxiliaryHistoryBuffer.cpp
@@ -2310,14 +2305,11 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Systems/test_FormsInstaller.cpp
                 Tests/Unit/Systems/test_MixedManualParity.cpp
                 Tests/Unit/Systems/test_MixedFormPerformance.cpp
-                Tests/Unit/Systems/test_BackendParity.cpp
-                Tests/Unit/Systems/test_CanonicalWorkflow.cpp
-                Tests/Unit/Systems/test_GaugeIntegration.cpp
-	                Tests/Unit/Systems/test_CoupledBoundaryManager.cpp
-                Tests/Unit/Systems/test_CoupledBoundaryConditionHelpers.cpp
-                Tests/Unit/Systems/test_BoundaryIntegralInput.cpp
-                Tests/Unit/Systems/test_ODEIntegrator.cpp
-                Tests/Unit/Systems/test_OperatorBackends.cpp
+	                Tests/Unit/Systems/test_BackendParity.cpp
+	                Tests/Unit/Systems/test_CanonicalWorkflow.cpp
+	                Tests/Unit/Systems/test_GaugeIntegration.cpp
+	                Tests/Unit/Systems/test_BoundaryIntegralInput.cpp
+	                Tests/Unit/Systems/test_OperatorBackends.cpp
                 Tests/Unit/Systems/test_TransientDt.cpp
                 Tests/Unit/Systems/test_main.cpp
 	            )
@@ -2371,11 +2363,11 @@ if(FE_BUILD_TESTS)
 	            # MPI tests provide their own main() to call MPI_Init/MPI_Finalize,
 	            # so do not link gtest_main here.
 	            if(TARGET GTest::gtest)
-                target_link_libraries(test_fe_mpi PRIVATE svfe_dofs GTest::gtest)
+                target_link_libraries(test_fe_mpi PRIVATE svfe GTest::gtest)
             else()
                 set(_fe_mpi_gtest_libs ${GTEST_LIBRARIES})
                 list(REMOVE_ITEM _fe_mpi_gtest_libs gtest_main GTest::gtest_main)
-                target_link_libraries(test_fe_mpi PRIVATE svfe_dofs ${_fe_mpi_gtest_libs})
+                target_link_libraries(test_fe_mpi PRIVATE svfe ${_fe_mpi_gtest_libs})
             endif()
             # Add MPI test with different processor counts
             add_fe_mpi_test(test_fe_mpi 2)

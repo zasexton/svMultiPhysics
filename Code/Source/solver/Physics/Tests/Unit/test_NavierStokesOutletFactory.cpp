@@ -23,13 +23,11 @@
 #include "FE/Systems/FESystem.h"
 #include "FE/Auxiliary/AuxiliaryInputRegistry.h"
 #include "FE/Systems/BoundaryConditionManager.h"
-#include "FE/Systems/CoupledBoundaryManager.h"
 #include "FE/Systems/FormsInstaller.h"
 #include "FE/Systems/TransientSystem.h"
 #include "FE/TimeStepping/GeneralizedAlpha.h"
 #include "FE/TimeStepping/TimeSteppingUtils.h"
 #include "FE/Forms/FormExpr.h"
-#include "FE/Forms/CoupledBCs.h"
 #include "FE/Forms/StandardBCs.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Dofs/DofHandler.h"
@@ -585,128 +583,7 @@ void expectAdaptiveNear(const std::vector<Real>& actual,
 } // namespace
 
 // ===========================================================================
-//  Legacy overload (without FESystem&): the currently working path.
-//  Returns CoupledNaturalBC, evaluates through CoupledBoundaryManager.
-// ===========================================================================
-
-TEST(NavierStokesOutletFactory, LegacyOverload_RCR_ReturnsCoupledNaturalBC)
-{
-    const int marker = 10;
-    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
-    auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
-
-    FESystem sys(mesh);
-    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = u_space, .components = 3});
-
-    const auto u = FormExpr::stateField(u_field, *u_space, "u");
-    auto bc = Factories::toCoupledOutflowBC(
-        makeRCROpts(marker), u_field, *u_space, "u", u, FormExpr::constant(1.0));
-    ASSERT_NE(bc, nullptr);
-    EXPECT_NE(dynamic_cast<svmp::FE::forms::bc::CoupledNaturalBC*>(bc.get()), nullptr);
-}
-
-TEST(NavierStokesOutletFactory, LegacyOverload_Resistive_ReturnsCoupledNaturalBC)
-{
-    const int marker = 20;
-    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
-    auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
-
-    FESystem sys(mesh);
-    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = u_space, .components = 3});
-
-    const auto u = FormExpr::stateField(u_field, *u_space, "u");
-    auto bc = Factories::toCoupledOutflowBC(
-        makeRCROpts(marker, 0.0), u_field, *u_space, "u", u, FormExpr::constant(1.0));
-    ASSERT_NE(bc, nullptr);
-    EXPECT_NE(dynamic_cast<svmp::FE::forms::bc::CoupledNaturalBC*>(bc.get()), nullptr);
-}
-
-TEST(NavierStokesOutletFactory, LegacyOverload_RuntimeEvaluation)
-{
-    // End-to-end: legacy overload -> install BC -> setup -> evaluate
-    // with a NONZERO velocity that produces a nontrivial boundary integral.
-    //
-    // Geometry: SingleTetraOneBoundaryFaceMeshAccess, face 0 = triangle
-    // (0,0,0)-(1,0,0)-(0,1,0), area = 0.5, outward normal = (0,0,-1).
-    //
-    // Velocity: u = (0, 0, -1) at all nodes.
-    // inner(u, n) = (-1)*(-1) = 1.  Q = integral(1) * 0.5 = 0.5.
-    //
-    // RCR params: Rp=10, C=0.001, Rd=100, Pd=50, X0=50, dt=0.1.
-    // dX/dt = (Q - (X-Pd)/Rd) / C = (0.5 - 0) / 0.001 = 500.
-    // BackwardEuler: X - 50 = 0.1*(0.5 - (X-50)/100)/0.001
-    //              = 100*(0.5 - (X-50)/100) = 50 - (X-50)
-    // => 2X = 150 => X = 75.
-
-    const int marker = 30;
-    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
-    auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
-    auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
-
-    FESystem sys(mesh);
-    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = u_space, .components = 3});
-    const auto p_field = sys.addField(FieldSpec{.name = "p", .space = p_space, .components = 1});
-    sys.addOperator("ns");
-
-    const auto u = FormExpr::stateField(u_field, *u_space, "u");
-    const auto rho = FormExpr::constant(1.0);
-
-    auto bc = Factories::toCoupledOutflowBC(
-        makeRCROpts(marker), u_field, *u_space, "u", u, rho);
-    ASSERT_NE(bc, nullptr);
-
-    BoundaryConditionManager bc_manager;
-    bc_manager.add(std::move(bc));
-
-    const auto v = FormExpr::testFunction(*u_space, "v");
-    const auto q = FormExpr::testFunction(*p_space, "q");
-    auto momentum = inner(grad(u), grad(v)).dx();
-    auto continuity = (q * div(u)).dx();
-    bc_manager.applyAll(sys, momentum, u, v, u_field);
-
-    FormInstallOptions install{};
-    (void)installFormulation(sys, "ns", {u_field, p_field},
-        momentum + continuity, install);
-
-    SetupInputs si;
-    si.topology_override = singleTetraTopology();
-    sys.setup({}, si);
-
-    // Set u = (0, 0, -1) at all 4 vertices via field DOF metadata.
-    const auto n_dofs = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
-    ASSERT_EQ(n_dofs, 16u);
-    std::vector<Real> sol(n_dofs, 0.0);
-    for (svmp::FE::GlobalIndex v = 0; v < 4; ++v) {
-        setFieldComponent(sol, sys, u_field, v, /*component=*/2, -1.0);
-    }
-
-    SystemStateView state;
-    state.time = 0.0;
-    state.dt = 0.1;
-    state.u = sol;
-
-    const auto* cbm = sys.coupledBoundaryManager();
-    ASSERT_NE(cbm, nullptr);
-    const_cast<CoupledBoundaryManager*>(cbm)->prepareForAssembly(state);
-
-    // Verify Q = 0.5 from the vector-field boundary integral.
-    // inner(u, n) = (0,0,-1) . (0,0,-1) = 1.  Integral = 1 * area(0.5) = 0.5.
-    const auto& integrals = cbm->integrals();
-    ASSERT_TRUE(integrals.has("ns_Q_30"));
-    EXPECT_NEAR(integrals.get("ns_Q_30"), 0.5, 1e-10);
-
-    // Verify auxiliary state X after BackwardEuler step.
-    // dX/dt = (Q - (X-Pd)/Rd) / C = (0.5 - 0) / 0.001 = 500.
-    // BackwardEuler: X - 50 = 0.1*(0.5 - (X-50)/100)/0.001
-    //   => X - 50 = 50 - (X-50) => 2X = 150 => X = 75.
-    const auto& aux = cbm->auxiliaryState();
-    ASSERT_GT(aux.size(), 0u);
-    EXPECT_NEAR(aux.values()[0], 75.0, 1e-8);
-}
-
-// ===========================================================================
-//  New overload (with FESystem&): the preferred path.
-//  Returns NaturalBC, uses registerBoundaryIntegralInput + AuxiliaryModelBuilder.
+//  Modern overload (with FESystem&): deployed auxiliary model path.
 // ===========================================================================
 
 TEST(NavierStokesOutletFactory, NewOverload_RCR_EndToEnd)
@@ -737,9 +614,7 @@ TEST(NavierStokesOutletFactory, NewOverload_RCR_EndToEnd)
     // Call the real new factory overload.
     auto bc = Factories::toCoupledOutflowBC(makeRCROpts(marker), sys, u, rho);
     ASSERT_NE(bc, nullptr);
-    EXPECT_EQ(dynamic_cast<svmp::FE::forms::bc::CoupledNaturalBC*>(bc.get()), nullptr);
     EXPECT_NE(dynamic_cast<svmp::FE::forms::bc::NaturalBC*>(bc.get()), nullptr);
-    EXPECT_EQ(sys.coupledBoundaryManager(), nullptr);
 
     // Install a plain residual (without the BC flux) so setup succeeds.
     const auto v = FormExpr::testFunction(*u_space, "v");
@@ -829,8 +704,6 @@ TEST(NavierStokesOutletFactory, NewOverload_Resistive_EndToEnd)
     auto bc = Factories::toCoupledOutflowBC(makeRCROpts(marker, /*C=*/0.0), sys, u, rho);
     ASSERT_NE(bc, nullptr);
     EXPECT_NE(dynamic_cast<svmp::FE::forms::bc::NaturalBC*>(bc.get()), nullptr);
-    EXPECT_EQ(dynamic_cast<svmp::FE::forms::bc::CoupledNaturalBC*>(bc.get()), nullptr);
-    EXPECT_EQ(sys.coupledBoundaryManager(), nullptr);
 
     BoundaryConditionManager bc_manager;
     bc_manager.add(std::move(bc));
@@ -850,7 +723,6 @@ TEST(NavierStokesOutletFactory, NewOverload_Resistive_EndToEnd)
     const auto summary = sys.auxiliaryAnalysisSummary();
     EXPECT_EQ(summary.n_monolithic, 1u);
     EXPECT_EQ(summary.n_partitioned, 0u);
-    ASSERT_NE(sys.coupledBoundaryManager(), nullptr);
 
     // Set u = (0, 0, -1) at all vertices.
     const auto n_dofs = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
@@ -946,8 +818,6 @@ TEST(NavierStokesOutletFactory, NewOverload_Resistive_FluxInstallation)
     auto bc = Factories::toCoupledOutflowBC(makeRCROpts(marker, /*C=*/0.0), sys, u, rho);
     ASSERT_NE(bc, nullptr);
     EXPECT_NE(dynamic_cast<svmp::FE::forms::bc::NaturalBC*>(bc.get()), nullptr);
-    EXPECT_EQ(dynamic_cast<svmp::FE::forms::bc::CoupledNaturalBC*>(bc.get()), nullptr);
-    EXPECT_EQ(sys.coupledBoundaryManager(), nullptr);
 
     BoundaryConditionManager bc_manager;
     bc_manager.add(std::move(bc));
@@ -957,7 +827,6 @@ TEST(NavierStokesOutletFactory, NewOverload_Resistive_FluxInstallation)
     auto momentum = inner(grad(u), grad(v)).dx();
     auto continuity = (q * div(u)).dx();
     bc_manager.applyAll(sys, momentum, u, v, u_field);
-    EXPECT_NE(sys.coupledBoundaryManager(), nullptr);
     (void)installFormulation(sys, "ns", {u_field, p_field}, momentum + continuity);
 
     SetupInputs si;
@@ -1015,7 +884,6 @@ TEST(NavierStokesOutletFactory, NewOverload_RCR_FluxInstallation)
 
     auto bc = Factories::toCoupledOutflowBC(makeRCROpts(marker), sys, u, rho);
     ASSERT_NE(bc, nullptr);
-    EXPECT_EQ(sys.coupledBoundaryManager(), nullptr);
 
     // Install the BC flux into the residual via BoundaryConditionManager.
     BoundaryConditionManager bc_manager;
@@ -1668,7 +1536,7 @@ TEST(NavierStokesOutletFactory, DISABLED_LegacyResistiveOutflowBoundaryMeshJacob
     }
 }
 
-TEST(NavierStokesOutletFactory, LegacyResistiveOutflowBoundaryFunctionalIgnoresPressureDofs)
+TEST(NavierStokesOutletFactory, ResistiveOutflowBoundaryReductionIgnoresPressureDofs)
 {
     constexpr int outlet_marker = 311;
     constexpr int inlet_marker = 312;
@@ -1743,13 +1611,15 @@ TEST(NavierStokesOutletFactory, LegacyResistiveOutflowBoundaryFunctionalIgnoresP
     state.u_history = u_hist;
     state.dt_history = dt_hist;
 
-    auto* cbm = sys.coupledBoundaryManager();
-    ASSERT_NE(cbm, nullptr);
-    cbm->prepareForAssembly(state);
+    sys.beginTimeStep(/*reset_auxiliary_state=*/false,
+                      /*invalidate_auxiliary_inputs=*/false);
+    sys.prepareAuxiliaryForAssembly(state, /*is_nonlinear_iteration=*/true);
 
-    const std::string q_name = "ns_Q_" + std::to_string(outlet_marker);
-    ASSERT_TRUE(cbm->integrals().has(q_name));
-    const Real q_base = cbm->integrals().get(q_name);
+    const auto* reg = sys.auxiliaryInputRegistryIfPresent();
+    ASSERT_NE(reg, nullptr);
+    const std::string q_name = autoBoundaryIntegralName(outlet_marker);
+    ASSERT_TRUE(reg->hasInput(q_name));
+    const Real q_base = reg->get(q_name);
 
     const auto pressure_dofs =
         sys.fieldMap().getComponentDofs("Pressure", static_cast<svmp::FE::LocalIndex>(0)).toVector();
@@ -1761,11 +1631,14 @@ TEST(NavierStokesOutletFactory, LegacyResistiveOutflowBoundaryFunctionalIgnoresP
 
         SystemStateView pert_state = state;
         pert_state.u = perturbed;
-        cbm->prepareForAssembly(pert_state);
+        auto* mutable_reg = sys.auxiliaryInputRegistryIfPresent();
+        ASSERT_NE(mutable_reg, nullptr);
+        mutable_reg->invalidateAll();
+        sys.prepareAuxiliaryForAssembly(pert_state, /*is_nonlinear_iteration=*/true);
 
-        const Real q_pert = cbm->integrals().get(q_name);
+        const Real q_pert = mutable_reg->get(q_name);
         EXPECT_NEAR(q_pert, q_base, 1e-12)
-            << "legacy outlet flow functional changed under pressure DOF perturbation at dof=" << dof;
+            << "outlet boundary reduction changed under pressure DOF perturbation at dof=" << dof;
     }
 }
 

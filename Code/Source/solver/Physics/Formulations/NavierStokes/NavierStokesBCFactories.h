@@ -12,12 +12,10 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 
 #include "FE/Forms/BoundaryFunctional.h"
-#include "FE/Forms/CoupledBCs.h"       // retained for backward compatibility
 #include "FE/Forms/StandardBCs.h"
 #include "FE/Auxiliary/AuxiliaryBindings.h"
 #include "FE/Auxiliary/AuxiliaryModelBuilder.h"
 #include "FE/Auxiliary/AuxiliaryModelDSL.h"
-#include "FE/Auxiliary/AuxiliaryStateBuilder.h"   // retained for backward compatibility
 #include "FE/Systems/FESystem.h"
 
 #include <memory>
@@ -370,81 +368,6 @@ namespace detail {
     const auto p_out = rcrcr.output("P_out");
     const auto flux = -p_out * n - beta * rho * max_backflow * u;
     return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
-}
-
-/// @deprecated Use the overload that takes FESystem& instead.
-///
-/// This legacy overload uses CoupledNaturalBC + AuxiliaryStateBuilder.
-/// It remains functional for backward compatibility but the FESystem&
-/// overload is preferred for new code because it uses the generalized
-/// AuxiliaryState infrastructure.
-[[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toCoupledOutflowBC(
-    const IncompressibleNavierStokesVMSOptions::CoupledRCROutflowBC& bc,
-    FE::FieldId u_id,
-    const FE::spaces::FunctionSpace& velocity_space,
-    std::string_view velocity_field_name,
-    const FE::forms::FormExpr& u,
-    const FE::forms::FormExpr& rho)
-{
-    const int marker =
-        FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toCoupledOutflowBC");
-
-    const std::string q_name = bc.functional_name.empty() ? ("ns_Q_" + std::to_string(marker)) : bc.functional_name;
-    const std::string x_name = bc.state_name.empty() ? ("ns_X_" + std::to_string(marker)) : bc.state_name;
-
-    const FE::Real Rp = bc.Rp;
-    const FE::Real C = bc.C;
-    const FE::Real Rd = bc.Rd;
-    const FE::Real Pd = bc.Pd;
-
-    if (Rd == 0.0) {
-        throw std::invalid_argument("CoupledRCROutflowBC: Rd must be nonzero");
-    }
-
-    const auto n = FE::forms::FormExpr::normal();
-    const auto un = FE::forms::inner(u, n);
-    const auto max_backflow =
-        FE::forms::FormExpr::constant(0.5) * (FE::forms::abs(un) - un);
-    const auto beta =
-        FE::forms::bc::toScalarExpr(bc.backflow_beta, detail::markerName("ns_rcr_backflow_beta", marker));
-
-    const auto u_disc =
-        FE::forms::FormExpr::discreteField(u_id, velocity_space, std::string(velocity_field_name));
-    const auto Q_integrand = FE::forms::inner(u_disc, n);
-    const auto Qsym = FE::forms::FormExpr::boundaryIntegral(Q_integrand, marker, q_name);
-
-    std::vector<FE::systems::AuxiliaryStateRegistration> regs;
-
-    FE::forms::FormExpr p_out;
-    if (C == 0.0) {
-        const FE::Real Rsum = Rd + Rp;
-        p_out = FE::forms::FormExpr::constant(Pd) + FE::forms::FormExpr::constant(Rsum) * Qsym;
-    } else {
-        FE::forms::BoundaryFunctional Q;
-        Q.integrand = Q_integrand;
-        Q.boundary_marker = marker;
-        Q.name = q_name;
-        Q.reduction = FE::forms::BoundaryFunctional::Reduction::Sum;
-
-        const auto Xsym = FE::forms::FormExpr::auxiliaryState(x_name);
-        const auto rhs =
-            (Qsym - (Xsym - FE::forms::FormExpr::constant(Pd)) / FE::forms::FormExpr::constant(Rd)) /
-            FE::forms::FormExpr::constant(C);
-        const auto d_rhs_dX = FE::forms::FormExpr::constant(-1.0 / (Rd * C));
-
-        auto reg = FE::systems::auxiliaryODE(x_name, bc.X0)
-                       .requiresIntegral(Q)
-                       .withRHS(rhs)
-                       .withJacobian(d_rhs_dX)
-                       .withIntegrator(FE::systems::ODEMethod::BackwardEuler)
-                       .build();
-        regs.push_back(std::move(reg));
-
-        p_out = Xsym + FE::forms::FormExpr::constant(Rp) * Qsym;
-    }
-
-    const auto flux = -p_out * n - beta * rho * max_backflow * u;
-    return std::make_unique<FE::forms::bc::CoupledNaturalBC>(marker, flux, std::move(regs));
 }
 
 inline void applyVelocityNitscheBCs(

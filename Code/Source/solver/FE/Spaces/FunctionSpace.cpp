@@ -223,29 +223,69 @@ FunctionSpace::Gradient FunctionSpace::evaluate_gradient(
     const auto elem_ptr = element_ptr();
     FE_CHECK_NOT_NULL(elem_ptr.get(), "FunctionSpace::element_ptr");
 
+    if (elem_ptr->basis().is_vector_valued()) {
+        FE_THROW(NotImplementedException,
+                 "FunctionSpace::evaluate_gradient is only defined for scalar-valued bases; "
+                 "use evaluate_jacobian for vector-valued spaces");
+    }
+
+    const auto J = evaluate_jacobian(xi, coefficients);
+    Gradient result{};
+    for (int d = 0; d < 3; ++d) {
+        result[static_cast<std::size_t>(d)] = J(0, static_cast<std::size_t>(d));
+    }
+    return result;
+}
+
+FunctionSpace::Jacobian FunctionSpace::evaluate_jacobian(
+    const Value& xi,
+    const std::vector<Real>& coefficients) const {
+    const auto elem_ptr = element_ptr();
+    FE_CHECK_NOT_NULL(elem_ptr.get(), "FunctionSpace::element_ptr");
+
     const auto& elem = *elem_ptr;
     const auto& basis = elem.basis();
 
-    if (basis.is_vector_valued()) {
-        FE_THROW(NotImplementedException,
-                 "FunctionSpace::evaluate_gradient is not implemented for vector-valued bases");
-    }
-
     const std::size_t ndofs = elem.num_dofs();
     FE_CHECK_ARG(coefficients.size() == ndofs,
-                 "FunctionSpace::evaluate_gradient: coefficient size mismatch");
+                 "FunctionSpace::evaluate_jacobian: coefficient size mismatch");
 
-    Gradient result{};
+    Jacobian result{};
     if (ndofs == 0) {
         return result;
     }
 
-    std::vector<basis::Gradient> gradients;
-    gradients.resize(ndofs);
-    basis.evaluate_gradients(xi, gradients);
+    if (!basis.is_vector_valued()) {
+        std::vector<basis::Gradient> gradients;
+        gradients.resize(ndofs);
+        basis.evaluate_gradients(xi, gradients);
 
-    for (std::size_t i = 0; i < ndofs; ++i) {
-        result += gradients[i] * coefficients[i];
+        for (std::size_t i = 0; i < ndofs; ++i) {
+            for (int d = 0; d < 3; ++d) {
+                result(0, static_cast<std::size_t>(d)) +=
+                    gradients[i][static_cast<std::size_t>(d)] * coefficients[i];
+            }
+        }
+        return result;
+    }
+
+    // Vector-valued bases do not currently expose analytic basis Jacobians, so
+    // differentiate the public field evaluation numerically in reference space.
+    const Real eps = Real(1e-6);
+    const int dim = std::max(0, topological_dimension());
+    for (int d = 0; d < dim && d < 3; ++d) {
+        Value forward = xi;
+        Value backward = xi;
+        forward[static_cast<std::size_t>(d)] += eps;
+        backward[static_cast<std::size_t>(d)] -= eps;
+
+        const Value vf = evaluate(forward, coefficients);
+        const Value vb = evaluate(backward, coefficients);
+        const Value diff = (vf - vb) / (Real(2) * eps);
+        for (int comp = 0; comp < 3; ++comp) {
+            result(static_cast<std::size_t>(comp), static_cast<std::size_t>(d)) =
+                diff[static_cast<std::size_t>(comp)];
+        }
     }
 
     return result;

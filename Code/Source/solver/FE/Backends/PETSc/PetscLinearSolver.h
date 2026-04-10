@@ -45,7 +45,7 @@ public:
 
 private:
     void ensureKspCreated();
-    void applyBaseOptionsToKsp();
+    void applyBaseOptionsToKsp(const SolverOptions& options);
     void applyKspFromOptions();
 
     SolverOptions options_{};

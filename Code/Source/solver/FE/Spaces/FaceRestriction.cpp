@@ -9,7 +9,10 @@
 #include "Spaces/FaceRestriction.h"
 #include "Core/FEException.h"
 #include "Basis/LagrangeBasis.h"
+#include "Basis/NURBSTensorBasis.h"
 #include "Basis/NodeOrderingConventions.h"
+#include "Basis/SerendipityBasis.h"
+#include "Basis/TensorBasis.h"
 #include "Elements/ReferenceElement.h"
 #include <algorithm>
 
@@ -35,17 +38,84 @@ bool is_serendipity_element(ElementType type) {
     }
 }
 
-std::vector<Vec3> build_dof_nodes(ElementType elem_type, int order) {
-    if (is_serendipity_element(elem_type)) {
-        FE_CHECK_ARG(order == 2,
-                     "FaceRestriction currently supports serendipity elements only at quadratic order 2");
-        const std::size_t nn = basis::NodeOrdering::num_nodes(elem_type);
-        std::vector<Vec3> nodes;
-        nodes.reserve(nn);
-        for (std::size_t i = 0; i < nn; ++i) {
-            nodes.push_back(basis::NodeOrdering::get_node_coords(elem_type, i));
+bool uses_serendipity_nodes(ElementType elem_type, BasisType basis_type) {
+    return basis_type == BasisType::Serendipity || is_serendipity_element(elem_type);
+}
+
+bool is_tensor_spline_basis_type(BasisType basis_type) {
+    return basis_type == BasisType::BSpline || basis_type == BasisType::NURBS;
+}
+
+Real synthetic_axis_coord(int index, int extent) {
+    if (extent <= 1) {
+        return Real(0);
+    }
+    return Real(-1) + Real(2 * index) / Real(extent - 1);
+}
+
+bool extract_tensor_spline_extents(const basis::BasisFunction& basis,
+                                   std::vector<int>& extents) {
+    if (const auto* spline =
+            dynamic_cast<const basis::TensorProductBasis<basis::BSplineBasis>*>(&basis)) {
+        extents = spline->tensor_extents();
+        return true;
+    }
+    if (const auto* nurbs = dynamic_cast<const basis::NURBSTensorBasis*>(&basis)) {
+        extents = nurbs->tensor_extents();
+        return true;
+    }
+    return false;
+}
+
+std::vector<Vec3> build_tensor_spline_nodes(const std::vector<int>& extents) {
+    FE_CHECK_ARG(!extents.empty() && extents.size() <= 3,
+                 "FaceRestriction: tensor spline extents must describe a 1D, 2D, or 3D tensor product");
+
+    std::vector<Vec3> nodes;
+    if (extents.size() == 1u) {
+        nodes.reserve(static_cast<std::size_t>(extents[0]));
+        for (int i = 0; i < extents[0]; ++i) {
+            nodes.push_back(Vec3{synthetic_axis_coord(i, extents[0]), Real(0), Real(0)});
         }
         return nodes;
+    }
+
+    if (extents.size() == 2u) {
+        nodes.reserve(static_cast<std::size_t>(extents[0] * extents[1]));
+        for (int j = 0; j < extents[1]; ++j) {
+            for (int i = 0; i < extents[0]; ++i) {
+                nodes.push_back(
+                    Vec3{synthetic_axis_coord(i, extents[0]),
+                         synthetic_axis_coord(j, extents[1]),
+                         Real(0)});
+            }
+        }
+        return nodes;
+    }
+
+    nodes.reserve(static_cast<std::size_t>(extents[0] * extents[1] * extents[2]));
+    for (int k = 0; k < extents[2]; ++k) {
+        for (int j = 0; j < extents[1]; ++j) {
+            for (int i = 0; i < extents[0]; ++i) {
+                nodes.push_back(
+                    Vec3{synthetic_axis_coord(i, extents[0]),
+                         synthetic_axis_coord(j, extents[1]),
+                         synthetic_axis_coord(k, extents[2])});
+            }
+        }
+    }
+    return nodes;
+}
+
+std::vector<Vec3> build_dof_nodes(ElementType elem_type,
+                                  int order,
+                                  BasisType basis_type) {
+    FE_CHECK_ARG(!is_tensor_spline_basis_type(basis_type),
+                 "FaceRestriction: spline/NURBS restriction requires construction from a concrete FunctionSpace");
+    if (uses_serendipity_nodes(elem_type, basis_type)) {
+        basis::SerendipityBasis basis(elem_type, order, false);
+        const auto& bnodes = basis.nodes();
+        return std::vector<Vec3>(bnodes.begin(), bnodes.end());
     }
 
     basis::LagrangeBasis basis(elem_type, order);
@@ -120,13 +190,35 @@ std::map<FaceRestrictionFactory::CacheKey, std::shared_ptr<const FaceRestriction
 // =============================================================================
 
 FaceRestriction::FaceRestriction(const FunctionSpace& space)
-    : FaceRestriction(space.element_type(), space.polynomial_order(), space.continuity()) {
+    : elem_type_(space.element_type())
+    , order_(space.polynomial_order())
+    , continuity_(space.continuity())
+    , basis_type_(space.element().basis().basis_type())
+    , num_dofs_(0) {
+    FE_CHECK_ARG(is_supported(elem_type_),
+        "Unsupported element type for FaceRestriction");
+    FE_CHECK_ARG(order_ >= 0,
+        "Polynomial order must be non-negative");
+
+    initialize_topology();
+
+    std::vector<int> tensor_extents;
+    if (extract_tensor_spline_extents(space.element().basis(), tensor_extents)) {
+        compute_dof_maps_from_nodes(build_tensor_spline_nodes(tensor_extents));
+        return;
+    }
+
+    compute_dof_maps();
 }
 
-FaceRestriction::FaceRestriction(ElementType elem_type, int polynomial_order, Continuity continuity)
+FaceRestriction::FaceRestriction(ElementType elem_type,
+                                 int polynomial_order,
+                                 Continuity continuity,
+                                 BasisType basis_type)
     : elem_type_(elem_type)
     , order_(polynomial_order)
     , continuity_(continuity)
+    , basis_type_(basis_type)
     , num_dofs_(0) {
 
     FE_CHECK_ARG(is_supported(elem_type),
@@ -200,7 +292,11 @@ void FaceRestriction::initialize_topology() {
 }
 
 void FaceRestriction::compute_dof_maps() {
-    const auto nodes = build_dof_nodes(elem_type_, order_);
+    const auto nodes = build_dof_nodes(elem_type_, order_, basis_type_);
+    compute_dof_maps_from_nodes(nodes);
+}
+
+void FaceRestriction::compute_dof_maps_from_nodes(const std::vector<Vec3>& nodes) {
     dof_nodes_ = nodes;
     num_dofs_ = nodes.size();
 
@@ -378,28 +474,50 @@ std::size_t FaceRestriction::num_edge_dofs(int edge_id) const {
 bool FaceRestrictionFactory::CacheKey::operator<(const CacheKey& other) const {
     if (elem_type != other.elem_type) return elem_type < other.elem_type;
     if (order != other.order) return order < other.order;
-    return continuity < other.continuity;
+    if (continuity != other.continuity) return continuity < other.continuity;
+    if (basis_type != other.basis_type) return basis_type < other.basis_type;
+    return basis_signature < other.basis_signature;
 }
 
 std::shared_ptr<const FaceRestriction> FaceRestrictionFactory::get(
     ElementType elem_type,
     int order,
-    Continuity continuity) {
+    Continuity continuity,
+    BasisType basis_type) {
 
-    CacheKey key{elem_type, order, continuity};
+    CacheKey key{elem_type, order, continuity, basis_type, {}};
 
     auto it = cache_.find(key);
     if (it != cache_.end()) {
         return it->second;
     }
 
-    auto restriction = std::make_shared<FaceRestriction>(elem_type, order, continuity);
+    auto restriction = std::make_shared<FaceRestriction>(elem_type, order, continuity, basis_type);
     cache_[key] = restriction;
     return restriction;
 }
 
 std::shared_ptr<const FaceRestriction> FaceRestrictionFactory::get(const FunctionSpace& space) {
-    return get(space.element_type(), space.polynomial_order(), space.continuity());
+    const auto basis_type = space.element().basis().basis_type();
+    const std::string signature =
+        is_tensor_spline_basis_type(basis_type) ? space.element().basis().cache_identity() : std::string{};
+
+    CacheKey key{
+        space.element_type(),
+        space.polynomial_order(),
+        space.continuity(),
+        basis_type,
+        signature
+    };
+
+    auto it = cache_.find(key);
+    if (it != cache_.end()) {
+        return it->second;
+    }
+
+    auto restriction = std::make_shared<FaceRestriction>(space);
+    cache_[key] = restriction;
+    return restriction;
 }
 
 void FaceRestrictionFactory::clear_cache() {

@@ -95,6 +95,8 @@ private:
 
         [[nodiscard]] GlobalIndex numCells() const override { return base_.numCells(); }
         [[nodiscard]] GlobalIndex numOwnedCells() const override { return base_.numOwnedCells(); }
+        [[nodiscard]] GlobalIndex numVertices() const override { return base_.numVertices(); }
+        [[nodiscard]] GlobalIndex numOwnedVertices() const override { return base_.numOwnedVertices(); }
         [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return base_.numBoundaryFaces(); }
         [[nodiscard]] GlobalIndex numInteriorFaces() const override { return base_.numInteriorFaces(); }
         [[nodiscard]] int dimension() const override { return base_.dimension(); }
@@ -210,4 +212,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_ASSEMBLY_SCHEDULED_ASSEMBLER_H
-

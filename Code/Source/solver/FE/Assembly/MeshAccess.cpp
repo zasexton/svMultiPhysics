@@ -127,6 +127,14 @@ GlobalIndex MeshAccess::numOwnedCells() const {
     return static_cast<GlobalIndex>(mesh_.n_owned_cells());
 }
 
+GlobalIndex MeshAccess::numVertices() const {
+    return static_cast<GlobalIndex>(mesh_.n_vertices());
+}
+
+GlobalIndex MeshAccess::numOwnedVertices() const {
+    return static_cast<GlobalIndex>(mesh_.n_owned_vertices());
+}
+
 GlobalIndex MeshAccess::numBoundaryFaces() const {
     const auto& f2c = mesh_.base().face2cell();
     GlobalIndex count = 0;

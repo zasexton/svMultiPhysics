@@ -332,6 +332,82 @@ TEST(AuxiliaryOperatorRegistry, ComposeMixedLayout)
     EXPECT_EQ(mixed.aux_layout.mixed_system_offset, 1000u);
 }
 
+TEST(AuxiliaryOperatorRegistry, SolverMetadataRoundTrip)
+{
+    AuxiliaryOperatorRegistry reg;
+
+    AuxiliaryBlockSolverMetadata meta;
+    meta.block_name = "lambda";
+    meta.role = AuxiliaryBlockRole::Constraint;
+    meta.block_diagonal_suitable = false;
+    meta.schur_eliminable = false;
+
+    reg.setBlockSolverMetadata("lambda", meta);
+
+    const auto* stored = reg.getBlockSolverMetadata("lambda");
+    ASSERT_NE(stored, nullptr);
+    EXPECT_EQ(stored->block_name, "lambda");
+    EXPECT_EQ(stored->role, AuxiliaryBlockRole::Constraint);
+    EXPECT_FALSE(stored->block_diagonal_suitable);
+}
+
+TEST(AuxiliaryOperatorRegistry, MonolithicUnknownRegistrationCarriesSolverMetadata)
+{
+    AuxiliaryOperatorRegistry reg;
+
+    AuxiliaryBlockSolverMetadata meta;
+    meta.block_name = "lambda";
+    meta.role = AuxiliaryBlockRole::Constraint;
+    meta.block_diagonal_suitable = false;
+    meta.schur_complement_partner = "velocity";
+
+    reg.registerMonolithicUnknowns("lambda",
+                                   2,
+                                   1,
+                                   AuxiliaryStateScope::Global,
+                                   &meta,
+                                   {{0}, {1}});
+    reg.finalizeLayout();
+
+    const auto* blk = reg.findLayoutBlock("lambda");
+    ASSERT_NE(blk, nullptr);
+    EXPECT_EQ(blk->role, AuxiliaryBlockRole::Constraint);
+    EXPECT_EQ(blk->backend_role, svmp::FE::backends::BlockRole::ConstraintField);
+    EXPECT_FALSE(blk->block_diagonal_suitable);
+    EXPECT_EQ(blk->schur_complement_partner, "velocity");
+    ASSERT_EQ(blk->constraint_groups.size(), 2u);
+    EXPECT_EQ(blk->constraint_groups[0][0], 0);
+    EXPECT_EQ(blk->constraint_groups[1][0], 1);
+}
+
+TEST(AuxiliaryOperatorRegistry, RoleQueriesUseMixedLayoutMetadata)
+{
+    AuxiliaryOperatorRegistry reg;
+
+    AuxiliaryBlockSolverMetadata lambda;
+    lambda.block_name = "lambda";
+    lambda.role = AuxiliaryBlockRole::Constraint;
+
+    AuxiliaryBlockSolverMetadata condensed;
+    condensed.block_name = "condensed";
+    condensed.role = AuxiliaryBlockRole::SchurEliminable;
+    condensed.schur_eliminable = true;
+    condensed.schur_complement_partner = "u";
+
+    AuxiliaryBlockSolverMetadata stiff;
+    stiff.block_name = "stiff";
+    stiff.role = AuxiliaryBlockRole::SpecialPrecondition;
+
+    reg.registerMonolithicUnknowns("lambda", 1, 1, AuxiliaryStateScope::Global, &lambda);
+    reg.registerMonolithicUnknowns("condensed", 4, 2, AuxiliaryStateScope::Cell, &condensed);
+    reg.registerMonolithicUnknowns("stiff", 3, 1, AuxiliaryStateScope::Node, &stiff);
+    reg.finalizeLayout();
+
+    EXPECT_EQ(reg.constraintLikeBlocks(), std::vector<std::string>({"lambda"}));
+    EXPECT_EQ(reg.schurEliminableBlocks(), std::vector<std::string>({"condensed"}));
+    EXPECT_EQ(reg.specialPreconditionBlocks(), std::vector<std::string>({"stiff"}));
+}
+
 TEST(AuxiliaryOperatorRegistry, RegisterAfterFinalizeThrows)
 {
     AuxiliaryOperatorRegistry reg;

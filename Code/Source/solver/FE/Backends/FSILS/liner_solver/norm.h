@@ -34,6 +34,10 @@ namespace norm {
 
 using namespace fe_fsi_linear_solver;
 
+double fsi_ls_norm_sq_local_s(const fsils_int nNo, const Vector<double>& U);
+
+double fsi_ls_norm_sq_local_v(const int dof, const fsils_int nNo, const Array<double>& U);
+
 double fsi_ls_norms(const fsils_int nNo, FSILS_commuType& commu, const Vector<double>& U);
 
 double fsi_ls_normv(const int dof, const fsils_int nNo, FSILS_commuType& commu, const Array<double>& U);

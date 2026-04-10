@@ -94,7 +94,6 @@ using BoundaryId = int;
 using InterfaceId = int;
 class OperatorBackends;
 class BoundaryReductionService;
-class CoupledBoundaryManager;
 class AuxiliaryStateManager;
 class AuxiliaryOperatorRegistry;
 class AuxiliaryInputRegistry;
@@ -105,6 +104,7 @@ class AuxiliaryStateModel;
 class AuxiliaryMultirateScheduler;
 class AuxiliaryStateStepper;
 class AuxiliaryDerivativeProvider;
+class AuxiliaryBlockStorage;
 struct MixedSystemLayout;
 
 struct SetupOptions {
@@ -224,22 +224,11 @@ public:
                                                   const SystemStateView& state) const;
 
     /**
-     * @brief Enable coupled boundary-condition infrastructure for a primary field
-     *
-     * This creates (or returns) a CoupledBoundaryManager used to orchestrate
-     * boundary functionals and auxiliary (0D) state updates. The primary field
-     * is used as the discrete solution source for BoundaryFunctional evaluation.
-     */
-    CoupledBoundaryManager& coupledBoundaryManager(FieldId primary_field);
-    [[nodiscard]] CoupledBoundaryManager* coupledBoundaryManager() noexcept { return coupled_boundary_.get(); }
-    [[nodiscard]] const CoupledBoundaryManager* coupledBoundaryManager() const noexcept { return coupled_boundary_.get(); }
-
-    /**
      * @brief Access the boundary reduction service for a given primary field.
      *
      * Lazily creates the service on first access.  The service provides
      * physics-agnostic boundary-integral evaluation and is shared with
-     * the CoupledBoundaryManager (if present) and AuxiliaryInputRegistry.
+     * the AuxiliaryInputRegistry-backed FE input pipeline.
      */
     BoundaryReductionService& boundaryReductionService(FieldId primary_field);
     [[nodiscard]] BoundaryReductionService* boundaryReductionServiceIfPresent(FieldId primary_field) noexcept
@@ -451,6 +440,12 @@ public:
      * ```
      */
     AuxiliaryInstanceHandle deploy(AuxiliaryDeployedInstance instance);
+
+    /// Select the active key for an auxiliary variant group.
+    void selectAuxiliaryVariant(std::string group, std::string key);
+
+    /// Clear a previously selected auxiliary variant group.
+    void clearAuxiliaryVariantSelection(std::string_view group);
 
     // ---- Handle-returning auxiliary input registration ----
 
@@ -724,6 +719,26 @@ public:
         std::size_t n_field_unknowns = 0) const;
 
     /**
+     * @brief Copy solver options and enrich them with mixed field/auxiliary block metadata.
+     *
+     * The returned options keep the caller's solver/preconditioner settings and add:
+     * - an absolute-offset mixed block layout
+     * - unambiguous backend-facing role-to-name mappings
+     *
+     * @param base              Existing solver options to augment.
+     * @param n_field_unknowns  FE-field unknown count for the active operator.
+     */
+    [[nodiscard]] backends::SolverOptions augmentSolverOptions(
+        const backends::SolverOptions& base,
+        std::size_t n_field_unknowns) const;
+
+    /**
+     * @brief Convenience overload that uses the configured FE DOF count when available.
+     */
+    [[nodiscard]] backends::SolverOptions augmentSolverOptions(
+        const backends::SolverOptions& base) const;
+
+    /**
      * @brief Rollback all auxiliary blocks to their committed state.
      *
      * Used after a failed nonlinear solve or rejected time step.
@@ -773,12 +788,38 @@ public:
     void restoreAuxiliaryState(std::span<const Real> data);
 
     /**
+     * @brief Stable logical descriptor for one deployed auxiliary output.
+     */
+    struct AuxiliaryOutputDescriptor {
+        std::uint32_t id{0u};
+        std::string instance_name{};
+        std::string output_name{};
+        std::size_t output_index{0u};
+    };
+
+    /**
      * @brief Get the flattened evaluated auxiliary output values.
      *
      * Updated by `prepareAuxiliaryForAssembly()`.  Empty if no
      * deployed models have output expressions.
      */
     [[nodiscard]] std::span<const Real> auxiliaryOutputValues() const noexcept;
+
+    /**
+     * @brief Get the stable logical id of a named auxiliary output.
+     *
+     * Unlike `auxiliaryOutputSlotOf(...)`, this identity is assigned at deploy
+     * time and does not depend on entity counts or finalized flattened layout.
+     */
+    [[nodiscard]] std::size_t auxiliaryOutputIdOf(std::string_view output_name) const;
+
+    /// Instance-qualified stable logical output id lookup.
+    [[nodiscard]] std::size_t auxiliaryOutputIdOf(
+        std::string_view instance_name, std::string_view output_name) const;
+
+    /// Lookup the deploy-time descriptor for a stable logical output id.
+    [[nodiscard]] const AuxiliaryOutputDescriptor* auxiliaryOutputDescriptor(
+        std::size_t output_id) const noexcept;
 
     /**
      * @brief Get the flattened slot index of a named auxiliary output.
@@ -829,16 +870,15 @@ public:
     loweredAuxiliaryOutputExpr(std::size_t slot) const;
 
     /**
-     * @brief Boundary-BC lowering for algebraic outputs that can be rewritten
-     *        entirely in terms of coupled boundary functionals.
+     * @brief Evaluate a scalar auxiliary-backed value for lowered system constraints.
      *
-     * This is used by `BoundaryConditionManager` so a simplified `NaturalBC`
-     * authored against an algebraic AuxiliaryState output can still route
-     * through the native coupled-boundary Jacobian path when the output is
-     * exactly expressible using `boundaryIntegral(...)` placeholders.
+     * The binding may reference either a named auxiliary state or a named
+     * auxiliary output on the deployed instance.
      */
-    [[nodiscard]] std::optional<forms::FormExpr>
-    coupledBoundaryCompatibleAuxiliaryOutputExpr(std::string_view output_name) const;
+    [[nodiscard]] Real auxiliaryConstraintValue(std::string_view instance_name,
+                                                const AuxiliaryConstraintBinding& binding,
+                                                Real time,
+                                                Real dt) const;
 
     /**
      * @brief Return true when formulation metadata should keep AuxiliaryOutputRef.
@@ -850,6 +890,12 @@ public:
      */
     [[nodiscard]] bool auxiliaryOutputMetadataUsesRef(std::string_view output_name) const;
 
+    [[nodiscard]] std::vector<analysis::AuxiliaryOutputConsumerRecord>
+    consumersOfAuxiliaryOutput(std::size_t output_id) const;
+
+    [[nodiscard]] std::vector<analysis::AuxiliaryOutputConsumerRecord>
+    consumersOfInstance(std::string_view instance_name) const;
+
     /**
      * @brief Get an analysis summary of auxiliary blocks and inputs.
      */
@@ -859,8 +905,14 @@ public:
         std::size_t n_monolithic{0};
         std::size_t n_inputs{0};
         std::size_t total_aux_unknowns{0};
+        std::size_t n_constraint_like_blocks{0};
+        std::size_t n_schur_eliminable_blocks{0};
+        std::size_t n_special_precondition_blocks{0};
         std::vector<std::string> block_names{};
         std::vector<std::string> input_names{};
+        std::vector<std::string> constraint_like_block_names{};
+        std::vector<std::string> schur_eliminable_block_names{};
+        std::vector<std::string> special_precondition_block_names{};
     };
     [[nodiscard]] AuxiliaryAnalysisSummary auxiliaryAnalysisSummary() const;
 
@@ -1184,7 +1236,6 @@ private:
 		    std::unique_ptr<assembly::IMaterialStateProvider> material_state_provider_{};
 	    std::unique_ptr<GlobalKernelStateProvider> global_kernel_state_provider_{};
     std::unique_ptr<OperatorBackends> operator_backends_{};
-    std::unique_ptr<CoupledBoundaryManager> coupled_boundary_{};
     std::unordered_map<FieldId, std::unique_ptr<BoundaryReductionService>> boundary_reduction_services_{};
     std::unique_ptr<AuxiliaryStateManager> auxiliary_state_manager_{};
     std::unique_ptr<AuxiliaryOperatorRegistry> auxiliary_operator_registry_{};
@@ -1220,12 +1271,22 @@ private:
         std::map<std::string, std::string> input_bindings{}; ///< Ordered for deterministic iteration
         std::unordered_map<std::string, AuxiliaryInputHandle> coupled_bindings{}; ///< For chain-rule coupling
         std::unordered_map<std::string, Real> param_values{};
+        std::vector<AuxiliaryConstraintBinding> constraint_bindings{};
+        std::optional<AuxiliaryBlockSolverMetadata> solver_metadata{};
         std::size_t explicit_entity_count{0}; ///< 0 = auto from scope/mesh
+        std::vector<std::uint32_t> output_ids{};
+        FieldId quadrature_reference_field{INVALID_FIELD_ID};
+        std::string quadrature_reference_operator{};
+        std::string variant_group{};
+        std::string variant_key{};
+        AuxiliaryActivationMode activation_mode{AuxiliaryActivationMode::Auto};
         std::unique_ptr<AuxiliaryStateStepper> stepper{};
         std::unique_ptr<AuxiliaryDerivativeProvider> deriv_provider{};
         std::vector<Real> output_buffer{}; ///< Evaluated output values
         bool lower_to_direct_only{false};  ///< Keep semantic block/output, but exclude from live monolithic solve.
         bool local_condensed{false};       ///< Eliminate locally into reduced field updates instead of dense bordered layout.
+        bool selected{true};
+        bool materialized{false};
         /// Entity map: indices of entities this block covers.
         /// Empty = all entities (WholeDomain / no restriction).
         std::vector<std::size_t> entity_map{};
@@ -1233,14 +1294,17 @@ private:
     };
     std::vector<DeployedAuxEntry> deployed_aux_entries_{};
     std::unordered_map<std::string, forms::FormExpr> lowered_aux_output_exprs_by_name_{};
-    std::unordered_map<std::size_t, forms::FormExpr> lowered_aux_output_exprs_by_slot_{};
+    std::unordered_map<std::size_t, forms::FormExpr> lowered_aux_output_exprs_by_id_{};
+    std::vector<AuxiliaryOutputDescriptor> auxiliary_output_descriptors_{};
+    std::unordered_map<std::string, std::uint32_t> auxiliary_output_id_by_qualified_name_{};
+    std::unordered_map<std::string, std::string> auxiliary_variant_selection_{};
+    std::vector<analysis::AuxiliaryOutputConsumerRecord> auxiliary_output_consumers_{};
+    std::size_t lowered_auxiliary_constraint_offset_{
+        std::numeric_limits<std::size_t>::max()};
     [[nodiscard]] bool canLowerAlgebraicAuxiliaryToDirectOnly_(const DeployedAuxEntry& entry) const;
     [[nodiscard]] std::optional<forms::FormExpr>
     synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
                                           std::string_view output_name) const;
-    [[nodiscard]] std::optional<forms::FormExpr>
-    synthesizeCoupledBoundaryAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
-                                                  std::string_view output_name) const;
     void buildAuxiliaryOutputBindings_();
     /// Deferred dependency pairs (dependent, dependency) from derivedInput().
     /// Wired by finalizeDeferredInputDeps() when all inputs are registered.
@@ -1251,6 +1315,19 @@ private:
     /// Safe to call multiple times — clears the deferred lists on first run.
     void finalizeDeferredInputDeps();
     void buildLoweredAuxiliaryOutputExpressions_();
+    [[nodiscard]] bool isAuxiliaryDeploymentSelected_(const DeployedAuxEntry& entry) const;
+    [[nodiscard]] bool isAuxiliaryDeploymentVisibleForBareLookup_(
+        const DeployedAuxEntry& entry) const;
+    [[nodiscard]] bool hasAuxiliaryConsumers_(
+        const DeployedAuxEntry& entry) const;
+    [[nodiscard]] bool hasCellVolumeAuxiliaryConsumers_(
+        const DeployedAuxEntry& entry) const;
+    [[nodiscard]] std::vector<analysis::AuxiliaryOutputConsumerRecord>
+    consumersOfEntry_(const DeployedAuxEntry& entry) const;
+    [[nodiscard]] std::vector<std::size_t> collectCoveredCells_(
+        const DeployedAuxEntry& entry) const;
+    void inferQuadraturePointLayout_(DeployedAuxEntry& entry);
+    void assignAuxiliaryOutputIds_(DeployedAuxEntry& entry);
     AuxiliaryInputHandle registerBoundaryIntegralHandle_(
         const std::string& input_name,
         forms::FormExpr integrand,
@@ -1295,6 +1372,13 @@ private:
 
     /// Build ordered input vector for a deployed entry (non-entity-local).
     [[nodiscard]] std::vector<Real> buildInputVector(const DeployedAuxEntry& entry) const;
+    void lowerAuxiliaryConstraintBindings_();
+    [[nodiscard]] const DeployedAuxEntry& findDeployedAuxEntry_(
+        std::string_view instance_name) const;
+    [[nodiscard]] std::vector<std::span<const Real>> buildHistorySpans_(
+        const AuxiliaryBlockStorage& blk,
+        std::size_t entity_index,
+        std::vector<std::vector<Real>>& storage) const;
 
     /// Rebuild input vector for a generic (non-built) model at a specific entity,
     /// using declared input names with name:size parsing.

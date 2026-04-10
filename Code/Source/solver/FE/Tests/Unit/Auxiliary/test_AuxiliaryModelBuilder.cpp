@@ -145,6 +145,44 @@ public:
 
 } // namespace aux_test
 
+TEST(AuxiliaryStateIntegration, AdvanceAuxiliaryStateSyncsGhostedBlocks)
+{
+    svmp::FE::systems::FESystem system(
+        std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+    auto& mgr = system.auxiliaryStateManager();
+
+    auto spec = AuxiliaryStateSpec::nodeField("ghosted", 1);
+    mgr.registerBlock(spec, 4, 2);
+
+    bool hook_called = false;
+    mgr.setGhostSyncHook("ghosted", [&](std::string_view name, std::span<Real> values) {
+        hook_called = true;
+        EXPECT_EQ(name, "ghosted");
+        EXPECT_EQ(values.size(), 4u);
+    });
+
+    system.advanceAuxiliaryState(0.0, 0.1);
+    EXPECT_TRUE(hook_called);
+}
+
+TEST(AuxiliaryStateIntegration, FinalizeMonolithicStageSyncsGhostedBlocks)
+{
+    svmp::FE::systems::FESystem system(
+        std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+    auto& mgr = system.auxiliaryStateManager();
+
+    auto spec = AuxiliaryStateSpec::nodeField("ghosted", 1);
+    mgr.registerBlock(spec, 3, 1);
+
+    bool hook_called = false;
+    mgr.setGhostSyncHook("ghosted", [&](std::string_view, std::span<Real>) {
+        hook_called = true;
+    });
+
+    system.finalizeMonolithicAuxiliaryStageState(0.5, 0.1);
+    EXPECT_TRUE(hook_called);
+}
+
 // ============================================================================
 //  Builder basics
 // ============================================================================
@@ -758,12 +796,12 @@ TEST(AuxiliaryModelBuilder, EndToEnd_MultiEntity_OutputSlots)
             .initialize({1.0, 2.0}));
 
     // Deploy second model with explicit entityCount(3)
-    // (simulates Node/Cell scope without a real mesh)
+    // (simulates a local Cell-scoped block without a real mesh)
     // Initial values are per-model-dimension (2), not total storage.
     // All entities start at zero.
     system.deployAuxiliaryModel(
         use(model).name("multi_entity_block")
-            .scope(AuxiliaryStateScope::Global) // Global with explicit 3 entities
+            .scope(AuxiliaryStateScope::Cell)
             .entityCount(3)
             .stepper({"ForwardEuler"}));
 
@@ -1074,11 +1112,11 @@ TEST(AuxiliaryModelBuilder, EndToEnd_EntityLocalInputs)
             out[0] = static_cast<Real>(e + 1) * 10.0; // 10, 20, 30
         });
 
-    // Deploy with 3 entities and bind to entity-local input.
+    // Deploy with 3 Node-scoped entities and bind to entity-local input.
     system.deployAuxiliaryModel(
         use(model)
             .name("node_model")
-            .scope(AuxiliaryStateScope::Global) // Scope for storage; entityCount overrides
+            .scope(AuxiliaryStateScope::Node)
             .entityCount(3)
             .solveMode(AuxiliarySolveMode::Partitioned)
             .stepper({"ForwardEuler"})
@@ -1134,7 +1172,7 @@ TEST(AuxiliaryModelBuilder, EndToEnd_DeploymentRegion_ExplicitEntities)
     system.deployAuxiliaryModel(
         use(model)
             .name("region_model")
-            .scope(AuxiliaryStateScope::Global)
+            .scope(AuxiliaryStateScope::Cell)
             .entityCount(5)  // full entity space
             .region(region)
             .solveMode(AuxiliarySolveMode::Partitioned)
@@ -1507,7 +1545,7 @@ TEST(AuxiliaryModelBuilder, EndToEnd_ByComponentThenEntity_Deployment)
 
     system.deployAuxiliaryModel(
         use(model).name("bce_inst")
-            .scope(AuxiliaryStateScope::Global)
+            .scope(AuxiliaryStateScope::Cell)
             .entityCount(2)
             .entityOrdering(AuxiliaryEntityOrdering::ByComponentThenEntity)
             .stepper({"ForwardEuler"})
@@ -1611,7 +1649,7 @@ TEST(AuxiliaryModelBuilder, EndToEnd_MultiComponentInput_EntityLocal)
 
     system.deployAuxiliaryModel(
         use(model).name("el_inst")
-            .scope(AuxiliaryStateScope::Global)
+            .scope(AuxiliaryStateScope::Cell)
             .entityCount(2)
             .bind("velocity", "vel_src")
             .initialize({0.0}));
@@ -1682,7 +1720,7 @@ TEST(AuxiliaryModelBuilder, EndToEnd_MultiComponentInput_Monolithic_EntityLocal)
 
     system.deployAuxiliaryModel(
         use(model).name("mono_el")
-            .scope(AuxiliaryStateScope::Global)
+            .scope(AuxiliaryStateScope::Node)
             .entityCount(2)
             .solveMode(AuxiliarySolveMode::Monolithic)
             .bind("velocity", "vel_src")
@@ -1948,7 +1986,7 @@ TEST(AuxiliaryModelBuilder, EndToEnd_Multirate_EntityLocalInputs)
 
     system.deployAuxiliaryModel(
         use(model).name("mr_el")
-            .scope(AuxiliaryStateScope::Global)
+            .scope(AuxiliaryStateScope::Cell)
             .entityCount(2)
             .schedule(AuxiliaryScheduleMode::Multirate)
             .stepper(spec)
@@ -2320,6 +2358,80 @@ TEST(AuxiliaryModelBuilder, EndToEnd_MonolithicLayout_WithFields)
     EXPECT_EQ(layout.n_aux_unknowns, 1u);
     EXPECT_EQ(layout.total_unknowns, 101u);
     EXPECT_EQ(layout.aux_layout.mixed_system_offset, 100u);
+}
+
+TEST(AuxiliaryModelBuilder, MonolithicSolverMetadataPropagatesIntoMixedLayoutAndSummary)
+{
+    using namespace svmp::FE;
+
+    auto model = AuxiliaryModelBuilder("lambda_model")
+        .state("lambda", AuxiliaryVariableKind::Algebraic)
+        .algebraic("lambda", modelState("lambda"))
+        .build();
+
+    systems::FESystem system(std::shared_ptr<const assembly::IMeshAccess>{});
+
+    system.deployAuxiliaryModel(
+        use(model)
+            .name("lambda_block")
+            .scope(AuxiliaryStateScope::Global)
+            .solveMode(AuxiliarySolveMode::Monolithic)
+            .solverRole(systems::AuxiliaryBlockRole::Constraint)
+            .initialize({1.0}));
+
+    system.finalizeAuxiliaryLayout();
+
+    const auto layout = system.composeMixedSystemLayout(8);
+    ASSERT_EQ(layout.aux_layout.blocks.size(), 1u);
+    EXPECT_EQ(layout.aux_layout.blocks[0].name, "lambda_block");
+    EXPECT_EQ(layout.aux_layout.blocks[0].role, systems::AuxiliaryBlockRole::Constraint);
+    EXPECT_EQ(layout.aux_layout.blocks[0].backend_role,
+              backends::BlockRole::ConstraintField);
+
+    const auto summary = system.auxiliaryAnalysisSummary();
+    EXPECT_EQ(summary.n_constraint_like_blocks, 1u);
+    EXPECT_EQ(summary.constraint_like_block_names,
+              std::vector<std::string>({"lambda_block"}));
+}
+
+TEST(AuxiliaryModelBuilder, AugmentSolverOptionsExportsMixedBlockLayoutAndRoleNames)
+{
+    using namespace svmp::FE;
+
+    auto model = AuxiliaryModelBuilder("lambda_model")
+        .state("lambda", AuxiliaryVariableKind::Algebraic)
+        .algebraic("lambda", modelState("lambda"))
+        .build();
+
+    systems::FESystem system(std::shared_ptr<const assembly::IMeshAccess>{});
+    system.deployAuxiliaryModel(
+        use(model)
+            .name("lambda_block")
+            .scope(AuxiliaryStateScope::Global)
+            .solveMode(AuxiliarySolveMode::Monolithic)
+            .solverRole(systems::AuxiliaryBlockRole::Constraint)
+            .initialize({1.0}));
+
+    system.finalizeAuxiliaryLayout();
+
+    backends::SolverOptions base_opts{};
+    const auto opts = system.augmentSolverOptions(base_opts, /*n_field_unknowns=*/8);
+
+    ASSERT_TRUE(opts.mixed_block_layout.has_value());
+    EXPECT_EQ(opts.mixed_block_layout->field_unknowns, 8);
+    EXPECT_EQ(opts.mixed_block_layout->auxiliary_unknowns, 1);
+    EXPECT_EQ(opts.mixed_block_layout->total_unknowns, 9);
+
+    const auto* lambda = opts.mixed_block_layout->findBlock("lambda_block");
+    ASSERT_NE(lambda, nullptr);
+    EXPECT_EQ(lambda->offset, 8);
+    EXPECT_EQ(lambda->size, 1);
+    EXPECT_EQ(lambda->role, backends::BlockRole::ConstraintField);
+    EXPECT_EQ(lambda->kind, backends::MixedBlockKind::Auxiliary);
+
+    ASSERT_EQ(opts.block_role_names.size(), 1u);
+    EXPECT_EQ(opts.block_role_names[0].first, backends::BlockRole::ConstraintField);
+    EXPECT_EQ(opts.block_role_names[0].second, "lambda_block");
 }
 
 // ============================================================================
@@ -2805,6 +2917,139 @@ TEST(AuxiliaryBindingsDSL, AutoBindByName)
     ASSERT_EQ(inst.coupledBindings().count("Q"), 1u);
 }
 
+TEST(AuxiliaryBindingsDSL, ExplicitBindByNameMatchesConveniencePath)
+{
+    auto model = AuxiliaryModelBuilder("test")
+        .input("Q").state("x")
+        .ode("x", -modelState("x")).build();
+
+    AuxiliaryInputHandle Q_handle("Q");
+    auto inst = use(model).name("inst")
+        .bindByName(Q_handle).initialize({0.0});
+    EXPECT_EQ(inst.inputBindings().at("Q"), "Q");
+    ASSERT_EQ(inst.coupledBindings().count("Q"), 1u);
+}
+
+TEST(AuxiliaryBindingsDSL, AutoNamedBoundaryIntegralHandleBindsExplicitly)
+{
+    auto model = AuxiliaryModelBuilder("test")
+        .input("Q").state("x")
+        .ode("x", -modelState("x") + modelInput("Q")).build();
+
+    FESystem system(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+    const auto Q_handle = system.boundaryIntegral(forms::FormExpr::constant(1.0), 7);
+
+    EXPECT_TRUE(Q_handle.hasDefinition());
+    ASSERT_NE(Q_handle.definition(), nullptr);
+    EXPECT_EQ(Q_handle.kind(), FEQuantityKind::BoundaryIntegral);
+    EXPECT_EQ(Q_handle.definition()->boundary_marker, 7);
+    EXPECT_EQ(Q_handle.registryName().find("_boundary_integral_b7_"), 0u);
+
+    auto inst = use(model).name("inst")
+        .boundary(7)
+        .partitioned("BackwardEuler")
+        .bindBoundaryReduction("Q", Q_handle)
+        .initialize({0.0});
+
+    EXPECT_EQ(inst.inputBindings().at("Q"), Q_handle.registryName());
+    ASSERT_EQ(inst.coupledBindings().count("Q"), 1u);
+    EXPECT_EQ(inst.coupledBindings().at("Q").registryName(), Q_handle.registryName());
+    EXPECT_NO_THROW(system.deployAuxiliaryModel(inst));
+}
+
+TEST(AuxiliaryBindingsDSL, BoundaryReductionBindingChecksMarkerConsistency)
+{
+    auto model = AuxiliaryModelBuilder("rcr")
+        .input("Q")
+        .state("p")
+        .ode("p", -modelState("p") + modelInput("Q"))
+        .build();
+
+    auto def = std::make_shared<FEQuantityDefinition>();
+    def->name = "Q";
+    def->kind = FEQuantityKind::BoundaryIntegral;
+    def->shape = FEQuantityShape::scalar();
+    def->boundary_marker = 7;
+    AuxiliaryInputHandle Q_handle("Q", def);
+
+    FESystem system(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+
+    EXPECT_NO_THROW(system.deployAuxiliaryModel(
+        use(model)
+            .name("rcr_ok")
+            .boundary(7)
+            .partitioned("BackwardEuler")
+            .bindBoundaryReduction(Q_handle)
+            .initialize({0.0})));
+
+    EXPECT_THROW(
+        system.deployAuxiliaryModel(
+            use(model)
+                .name("rcr_bad")
+                .boundary(8)
+                .partitioned("BackwardEuler")
+                .bindBoundaryReduction(Q_handle)
+                .initialize({0.0})),
+        svmp::FE::InvalidArgumentException);
+}
+
+TEST(AuxiliaryBindingsDSL, BoundaryReductionBindingsRemainInstanceLocalAcrossOutlets)
+{
+    auto model = AuxiliaryModelBuilder("rcr")
+        .input("Q")
+        .state("p")
+        .ode("p", -modelState("p") + modelInput("Q"))
+        .build();
+
+    auto make_handle = [](std::string name, int marker) {
+        auto def = std::make_shared<FEQuantityDefinition>();
+        def->name = name;
+        def->kind = FEQuantityKind::BoundaryIntegral;
+        def->shape = FEQuantityShape::scalar();
+        def->boundary_marker = marker;
+        return AuxiliaryInputHandle(name, def);
+    };
+
+    const auto Q_left = make_handle("Q_left", 7);
+    const auto Q_right = make_handle("Q_right", 9);
+
+    FESystem system(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+    EXPECT_NO_THROW(system.deployAuxiliaryModel(
+        use(model)
+            .name("left_outlet")
+            .boundary(7)
+            .partitioned("BackwardEuler")
+            .bindBoundaryReduction("Q", Q_left)
+            .initialize({0.0})));
+    EXPECT_NO_THROW(system.deployAuxiliaryModel(
+        use(model)
+            .name("right_outlet")
+            .boundary(9)
+            .partitioned("BackwardEuler")
+            .bindBoundaryReduction("Q", Q_right)
+            .initialize({0.0})));
+
+    auto left = use(model)
+        .name("left_outlet")
+        .boundary(7)
+        .partitioned("BackwardEuler")
+        .bindBoundaryReduction("Q", Q_left)
+        .initialize({0.0});
+    auto right = use(model)
+        .name("right_outlet")
+        .boundary(9)
+        .partitioned("BackwardEuler")
+        .bindBoundaryReduction("Q", Q_right)
+        .initialize({0.0});
+
+    ASSERT_EQ(left.inputBindings().count("Q"), 1u);
+    ASSERT_EQ(right.inputBindings().count("Q"), 1u);
+    EXPECT_EQ(left.inputBindings().at("Q"), "Q_left");
+    EXPECT_EQ(right.inputBindings().at("Q"), "Q_right");
+    EXPECT_EQ(left.coupledBindings().at("Q").definition()->boundary_marker, 7);
+    EXPECT_EQ(right.coupledBindings().at("Q").definition()->boundary_marker, 9);
+}
+
 TEST(AuxiliaryBindingsDSL, DeployAutoGeneratesGlobalInstanceName)
 {
     FESystem system(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
@@ -2834,6 +3079,40 @@ TEST(AuxiliaryBindingsDSL, DeployAutoGeneratesBoundaryNamesAndDisambiguatesColli
 
     EXPECT_EQ(first.instanceName(), "rcr_b7");
     EXPECT_EQ(second.instanceName(), "rcr_b7_1");
+}
+
+TEST(AuxiliaryBindingsDSL, MonolithicRejectsExplicitDefaultStepperConfiguration)
+{
+    auto model = AuxiliaryModelBuilder("test")
+        .state("x")
+        .ode("x", -modelState("x")).build();
+
+    auto inst = use(model).name("inst")
+        .monolithic()
+        .stepper(AuxiliaryStepperSpec{"BackwardEuler"})
+        .initialize({0.0});
+
+    auto err = inst.validate();
+    EXPECT_FALSE(err.empty());
+    EXPECT_NE(err.find("explicit stepper"), std::string::npos);
+    EXPECT_NE(err.find("Monolithic"), std::string::npos);
+}
+
+TEST(AuxiliaryBindingsDSL, MonolithicRejectsNonDefaultSchedule)
+{
+    auto model = AuxiliaryModelBuilder("test")
+        .state("x")
+        .ode("x", -modelState("x")).build();
+
+    auto inst = use(model).name("inst")
+        .monolithic()
+        .schedule(AuxiliaryScheduleMode::Multirate)
+        .initialize({0.0});
+
+    auto err = inst.validate();
+    EXPECT_FALSE(err.empty());
+    EXPECT_NE(err.find("schedule mode"), std::string::npos);
+    EXPECT_NE(err.find("Monolithic"), std::string::npos);
 }
 
 // --- Large system regression ---

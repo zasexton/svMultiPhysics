@@ -15,6 +15,8 @@
 
 #include "BasisFunction.h"
 
+#include <array>
+
 namespace svmp {
 namespace FE {
 namespace basis {
@@ -28,6 +30,7 @@ public:
     int dimension() const noexcept override { return dimension_; }
     int order() const noexcept override { return order_; }
     std::size_t size() const noexcept override { return size_; }
+    const std::vector<math::Vector<Real, 3>>& nodes() const noexcept { return nodes_; }
 
     void evaluate_values(const math::Vector<Real, 3>& xi,
                          std::vector<Real>& values) const override;
@@ -40,6 +43,9 @@ private:
     int dimension_;
     int order_;
     std::size_t size_;
+    std::vector<math::Vector<Real, 3>> nodes_;
+    std::vector<std::array<int, 2>> quad_monomial_exponents_;
+    std::vector<Real> quad_inv_vandermonde_;
 
     // When true, this basis is used purely for geometry mapping and may use
     // reduced polynomial order (e.g., Hex20 geometry as Hex8).

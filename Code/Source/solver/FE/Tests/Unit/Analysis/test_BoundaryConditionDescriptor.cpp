@@ -12,9 +12,7 @@
 #include "Forms/StandardBCs.h"
 #include "Forms/ConstraintBCs.h"
 #include "Forms/NitscheBC.h"
-#include "Forms/CoupledBCs.h"
 #include "Forms/FormExpr.h"
-#include "Auxiliary/AuxiliaryState.h"
 
 #include "Spaces/H1Space.h"
 
@@ -291,71 +289,6 @@ TEST(BoundaryConditionDescriptor, PeriodicBC_DescriptorToVerdict) {
               AnchoringVerdict::Preserved);
     EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::KernelOfSymGrad),
               AnchoringVerdict::Preserved);
-}
-
-// ============================================================================
-// Coupled BC descriptors: related_variables include aux state
-// ============================================================================
-
-TEST(BoundaryConditionDescriptor, CoupledNaturalBC_HasRelatedVariables) {
-    // CoupledNaturalBC with one auxiliary state registration
-    systems::AuxiliaryStateRegistration reg;
-    reg.spec.size = 1;
-    reg.spec.name = "P_distal";
-    reg.initial_values = {0.0};
-    reg.rhs = FormExpr::constant(0.0);
-
-    bc::CoupledNaturalBC bc(5, FormExpr::constant(1.0), {reg});
-    auto descs = bc.analysisMetadata(/*field_id=*/0, nullptr);
-
-    ASSERT_EQ(descs.size(), 1u);
-    const auto& d = descs[0];
-
-    EXPECT_EQ(d.primary_variable.kind, VariableKind::FieldComponent);
-    EXPECT_EQ(d.primary_variable.field_id, FieldId{0});
-    EXPECT_EQ(d.domain, DomainKind::CoupledBoundary);
-    EXPECT_EQ(d.trace_kind, TraceKind::Flux);
-    EXPECT_EQ(d.enforcement_kind, EnforcementKind::WeakConsistent);
-    EXPECT_TRUE(d.introduces_global_coupling);
-    EXPECT_FALSE(d.anchors_constant_mode);
-
-    // Related variables should include the auxiliary state
-    ASSERT_EQ(d.related_variables.size(), 1u);
-    EXPECT_EQ(d.related_variables[0].kind, VariableKind::AuxiliaryState);
-    EXPECT_EQ(d.related_variables[0].name, "P_distal");
-}
-
-TEST(BoundaryConditionDescriptor, CoupledRobinBC_HasRelatedVariables) {
-    systems::AuxiliaryStateRegistration reg;
-    reg.spec.size = 1;
-    reg.spec.name = "rcr_P";
-    reg.initial_values = {0.0};
-    reg.rhs = FormExpr::constant(0.0);
-
-    bc::CoupledRobinBC bc(3, FormExpr::constant(10.0), FormExpr::constant(0.0), {reg});
-    auto descs = bc.analysisMetadata(/*field_id=*/0, nullptr);
-
-    ASSERT_EQ(descs.size(), 1u);
-    const auto& d = descs[0];
-
-    EXPECT_EQ(d.domain, DomainKind::CoupledBoundary);
-    EXPECT_EQ(d.trace_kind, TraceKind::Mixed);
-    EXPECT_EQ(d.enforcement_kind, EnforcementKind::WeakPenalty);
-    EXPECT_TRUE(d.introduces_global_coupling);
-    EXPECT_TRUE(d.anchors_constant_mode);
-
-    ASSERT_EQ(d.related_variables.size(), 1u);
-    EXPECT_EQ(d.related_variables[0].kind, VariableKind::AuxiliaryState);
-    EXPECT_EQ(d.related_variables[0].name, "rcr_P");
-}
-
-TEST(BoundaryConditionDescriptor, CoupledNaturalBC_NoAuxRegistrations_EmptyRelated) {
-    bc::CoupledNaturalBC bc(5, FormExpr::constant(1.0));
-    auto descs = bc.analysisMetadata(/*field_id=*/0, nullptr);
-
-    ASSERT_EQ(descs.size(), 1u);
-    EXPECT_TRUE(descs[0].related_variables.empty());
-    EXPECT_TRUE(descs[0].introduces_global_coupling);
 }
 
 // ============================================================================

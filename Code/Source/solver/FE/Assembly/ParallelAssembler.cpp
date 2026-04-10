@@ -279,6 +279,8 @@ public:
 
     [[nodiscard]] GlobalIndex numCells() const override { return static_cast<GlobalIndex>(cell_ids_.size()); }
     [[nodiscard]] GlobalIndex numOwnedCells() const override { return static_cast<GlobalIndex>(cell_ids_.size()); }
+    [[nodiscard]] GlobalIndex numVertices() const override { return base_->numVertices(); }
+    [[nodiscard]] GlobalIndex numOwnedVertices() const override { return base_->numOwnedVertices(); }
     [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return base_->numBoundaryFaces(); }
     [[nodiscard]] GlobalIndex numInteriorFaces() const override { return base_->numInteriorFaces(); }
     [[nodiscard]] int dimension() const override { return base_->dimension(); }

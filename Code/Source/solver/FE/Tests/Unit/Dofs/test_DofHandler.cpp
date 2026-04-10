@@ -5,10 +5,17 @@
 
 #include <gtest/gtest.h>
 
+#include "FE/Basis/LagrangeBasis.h"
+#include "FE/Basis/VectorBasis.h"
 #include "FE/Dofs/DofHandler.h"
 #include "FE/Dofs/EntityDofMap.h"
+#include "FE/Constraints/AffineConstraints.h"
 #include "FE/Core/FEException.h"
 #include "FE/Elements/ReferenceElement.h"
+#include "FE/Spaces/AdaptiveSpace.h"
+#include "FE/Spaces/H1Space.h"
+#include "FE/Spaces/HCurlSpace.h"
+#include "FE/Spaces/TraceSpace.h"
 
 #include <numeric>
 #include <algorithm>
@@ -21,11 +28,16 @@ using svmp::FE::ElementType;
 using svmp::FE::GlobalIndex;
 using svmp::FE::LocalIndex;
 using svmp::FE::MeshIndex;
+using svmp::FE::Real;
 using svmp::FE::dofs::DofDistributionOptions;
 using svmp::FE::dofs::DofHandler;
 using svmp::FE::dofs::DofLayoutInfo;
 using svmp::FE::dofs::MeshTopologyInfo;
 using svmp::FE::dofs::TopologyCompletion;
+using svmp::FE::spaces::AdaptiveSpace;
+using svmp::FE::spaces::FunctionSpace;
+using svmp::FE::spaces::H1Space;
+using svmp::FE::spaces::HCurlSpace;
 
 namespace {
 
@@ -131,6 +143,37 @@ MeshTopologyInfo makeSingleQuadVerticesOnly() {
     return topo;
 }
 
+MeshTopologyInfo makeTwoQuadMeshWithEdges() {
+    MeshTopologyInfo topo;
+    topo.n_cells = 2;
+    topo.n_vertices = 6;
+    topo.n_edges = 7;
+    topo.dim = 2;
+
+    topo.cell2vertex_offsets = {0, 4, 8};
+    topo.cell2vertex_data = {
+        0, 1, 4, 3,
+        1, 2, 5, 4
+    };
+    topo.vertex_gids = {0, 1, 2, 3, 4, 5};
+
+    topo.cell2edge_offsets = {0, 4, 8};
+    topo.cell2edge_data = {
+        0, 1, 2, 3,
+        4, 5, 6, 1
+    };
+    topo.edge2vertex_data = {
+        0, 1,
+        1, 4,
+        4, 3,
+        3, 0,
+        1, 2,
+        2, 5,
+        5, 4
+    };
+    return topo;
+}
+
 MeshTopologyInfo makeSingleHexWithEdgesAndFaces() {
     MeshTopologyInfo topo;
     topo.n_cells = 1;
@@ -197,6 +240,42 @@ MeshTopologyInfo makeSingleHexVerticesOnly() {
     topo.cell2vertex_offsets = {0, 8};
     topo.cell2vertex_data = {0, 1, 2, 3, 4, 5, 6, 7};
     topo.vertex_gids = {0, 1, 2, 3, 4, 5, 6, 7};
+    return topo;
+}
+
+MeshTopologyInfo makeSingleTetraVerticesOnly() {
+    MeshTopologyInfo topo;
+    topo.n_cells = 1;
+    topo.n_vertices = 4;
+    topo.dim = 3;
+
+    topo.cell2vertex_offsets = {0, 4};
+    topo.cell2vertex_data = {0, 1, 2, 3};
+    topo.vertex_gids = {0, 1, 2, 3};
+    return topo;
+}
+
+MeshTopologyInfo makeSingleWedgeVerticesOnly() {
+    MeshTopologyInfo topo;
+    topo.n_cells = 1;
+    topo.n_vertices = 6;
+    topo.dim = 3;
+
+    topo.cell2vertex_offsets = {0, 6};
+    topo.cell2vertex_data = {0, 1, 2, 3, 4, 5};
+    topo.vertex_gids = {0, 1, 2, 3, 4, 5};
+    return topo;
+}
+
+MeshTopologyInfo makeSinglePyramidVerticesOnly() {
+    MeshTopologyInfo topo;
+    topo.n_cells = 1;
+    topo.n_vertices = 5;
+    topo.dim = 3;
+
+    topo.cell2vertex_offsets = {0, 5};
+    topo.cell2vertex_data = {0, 1, 2, 3, 4};
+    topo.vertex_gids = {0, 1, 2, 3, 4};
     return topo;
 }
 
@@ -367,6 +446,15 @@ MeshTopologyInfo makeTwoHexMeshWithSharedFaceFlipped() {
     }
 
     return topo;
+}
+
+std::vector<Real> gather_trace_coefficients(const std::vector<double>& global_values,
+                                            const std::vector<GlobalIndex>& trace_dofs) {
+    std::vector<Real> coeffs(trace_dofs.size(), Real(0));
+    for (std::size_t i = 0; i < trace_dofs.size(); ++i) {
+        coeffs[i] = global_values[static_cast<std::size_t>(trace_dofs[i])];
+    }
+    return coeffs;
 }
 
 } // namespace
@@ -637,6 +725,210 @@ TEST(DofHandler, CGDistributionSingleHexQ2DerivesEdgesAndFacesFromCell2Vertex) {
     EXPECT_EQ(std::vector<GlobalIndex>(dofs.begin(), dofs.end()), expected);
 }
 
+TEST(DofHandler, LagrangeHigherOrderLayoutsMatchCompleteBasisCounts) {
+    struct Case {
+        ElementType type;
+        int dim;
+        int nverts;
+        int order;
+        LocalIndex expected_edge;
+        LocalIndex expected_face;
+        LocalIndex expected_cell;
+    };
+
+    const std::vector<Case> cases = {
+        {ElementType::Line2,     1, 2, 5, 0, 0, 4},
+        {ElementType::Triangle3, 2, 3, 4, 3, 0, 3},
+        {ElementType::Quad4,     2, 4, 4, 3, 0, 9},
+        {ElementType::Tetra4,    3, 4, 4, 3, 3, 1},
+        {ElementType::Hex8,      3, 8, 4, 3, 9, 27}
+    };
+
+    for (const auto& tc : cases) {
+        const auto layout = DofLayoutInfo::Lagrange(tc.order, tc.dim, tc.nverts);
+        const svmp::FE::basis::LagrangeBasis basis_fn(tc.type, tc.order);
+
+        EXPECT_EQ(layout.dofs_per_vertex, 1);
+        EXPECT_EQ(layout.dofs_per_edge, tc.expected_edge);
+        EXPECT_EQ(layout.dofs_per_face, tc.expected_face);
+        EXPECT_EQ(layout.dofs_per_cell, tc.expected_cell);
+        EXPECT_EQ(layout.total_dofs_per_element, static_cast<LocalIndex>(basis_fn.size()));
+    }
+}
+
+TEST(DofHandler, LagrangeHigherOrderMixedFaceLayoutsMatchCompleteBasisCounts) {
+    struct Case {
+        ElementType type;
+        int nverts;
+        int order;
+        LocalIndex expected_edge;
+        LocalIndex expected_tri_face;
+        LocalIndex expected_quad_face;
+    };
+
+    const std::vector<Case> cases = {
+        {ElementType::Pyramid5, 5, 4, 3, 3, 9},
+        {ElementType::Wedge6,   6, 4, 3, 3, 9}
+    };
+
+    for (const auto& tc : cases) {
+        const auto layout = DofLayoutInfo::Lagrange(tc.order, /*dim=*/3, tc.nverts);
+        const svmp::FE::basis::LagrangeBasis basis_fn(tc.type, tc.order);
+        const auto ref = svmp::FE::elements::ReferenceElement::create(tc.type);
+
+        int n_tri_faces = 0;
+        int n_quad_faces = 0;
+        for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+            const auto n_face_vertices = ref.face_nodes(f).size();
+            if (n_face_vertices == 3u) {
+                ++n_tri_faces;
+            } else if (n_face_vertices == 4u) {
+                ++n_quad_faces;
+            }
+        }
+
+        const auto expected_cell =
+            static_cast<LocalIndex>(basis_fn.size() -
+                                    static_cast<std::size_t>(tc.nverts) -
+                                    static_cast<std::size_t>(ref.num_edges()) * static_cast<std::size_t>(tc.expected_edge) -
+                                    static_cast<std::size_t>(n_tri_faces) * static_cast<std::size_t>(tc.expected_tri_face) -
+                                    static_cast<std::size_t>(n_quad_faces) * static_cast<std::size_t>(tc.expected_quad_face));
+
+        EXPECT_EQ(layout.dofs_per_vertex, 1);
+        EXPECT_EQ(layout.dofs_per_edge, tc.expected_edge);
+        EXPECT_EQ(layout.dofs_per_face, 0);
+        EXPECT_EQ(layout.dofs_per_tri_face, tc.expected_tri_face);
+        EXPECT_EQ(layout.dofs_per_quad_face, tc.expected_quad_face);
+        EXPECT_EQ(layout.dofs_per_cell, expected_cell);
+        EXPECT_EQ(layout.total_dofs_per_element, static_cast<LocalIndex>(basis_fn.size()));
+    }
+}
+
+TEST(DofHandler, DGHigherOrderLayoutsMatchCompleteBasisCounts) {
+    struct Case {
+        ElementType type;
+        int nverts;
+        int order;
+    };
+
+    const std::vector<Case> cases = {
+        {ElementType::Line2,    2, 5},
+        {ElementType::Triangle3,3, 4},
+        {ElementType::Quad4,    4, 4},
+        {ElementType::Pyramid5, 5, 4},
+        {ElementType::Wedge6,   6, 4},
+        {ElementType::Hex8,     8, 4}
+    };
+
+    for (const auto& tc : cases) {
+        const auto layout = DofLayoutInfo::DG(tc.order, tc.nverts);
+        const svmp::FE::basis::LagrangeBasis basis_fn(tc.type, tc.order);
+        EXPECT_EQ(layout.dofs_per_vertex, 0);
+        EXPECT_EQ(layout.dofs_per_edge, 0);
+        EXPECT_EQ(layout.dofs_per_face, 0);
+        EXPECT_EQ(layout.dofs_per_cell, static_cast<LocalIndex>(basis_fn.size()));
+        EXPECT_EQ(layout.total_dofs_per_element, static_cast<LocalIndex>(basis_fn.size()));
+    }
+}
+
+TEST(DofHandler, CGDistributionSingleTetraP4DerivesEdgesAndFacesFromCell2Vertex) {
+    DofHandler handler;
+    auto topo = makeSingleTetraVerticesOnly();
+    auto layout = DofLayoutInfo::Lagrange(/*order=*/4, /*dim=*/3, /*num_verts_per_cell=*/4);
+
+    handler.distributeDofs(topo, layout);
+    handler.finalize();
+
+    EXPECT_EQ(handler.getNumDofs(), 35);
+    const auto dofs = handler.getCellDofs(0);
+    ASSERT_EQ(dofs.size(), 35u);
+
+    std::vector<GlobalIndex> expected;
+    expected.reserve(35);
+    for (GlobalIndex i = 0; i < 35; ++i) {
+        expected.push_back(i);
+    }
+
+    std::vector<GlobalIndex> actual(dofs.begin(), dofs.end());
+    auto sorted_actual = actual;
+    std::sort(sorted_actual.begin(), sorted_actual.end());
+    EXPECT_EQ(sorted_actual, expected);
+}
+
+TEST(DofHandler, CGDistributionSingleWedgeP4DerivesEdgesAndFacesFromCell2Vertex) {
+    DofHandler handler;
+    auto topo = makeSingleWedgeVerticesOnly();
+    auto layout = DofLayoutInfo::Lagrange(/*order=*/4, /*dim=*/3, /*num_verts_per_cell=*/6);
+    const svmp::FE::basis::LagrangeBasis basis_fn(ElementType::Wedge6, 4);
+
+    handler.distributeDofs(topo, layout);
+    handler.finalize();
+
+    EXPECT_EQ(handler.getNumDofs(), static_cast<GlobalIndex>(basis_fn.size()));
+    const auto dofs = handler.getCellDofs(0);
+    ASSERT_EQ(dofs.size(), basis_fn.size());
+
+    std::vector<GlobalIndex> expected;
+    expected.reserve(basis_fn.size());
+    for (GlobalIndex i = 0; i < static_cast<GlobalIndex>(basis_fn.size()); ++i) {
+        expected.push_back(i);
+    }
+
+    std::vector<GlobalIndex> actual(dofs.begin(), dofs.end());
+    auto sorted_actual = actual;
+    std::sort(sorted_actual.begin(), sorted_actual.end());
+    EXPECT_EQ(sorted_actual, expected);
+}
+
+TEST(DofHandler, CGDistributionSinglePyramidP4DerivesEdgesAndFacesFromCell2Vertex) {
+    DofHandler handler;
+    auto topo = makeSinglePyramidVerticesOnly();
+    auto layout = DofLayoutInfo::Lagrange(/*order=*/4, /*dim=*/3, /*num_verts_per_cell=*/5);
+    const svmp::FE::basis::LagrangeBasis basis_fn(ElementType::Pyramid5, 4);
+
+    handler.distributeDofs(topo, layout);
+    handler.finalize();
+
+    EXPECT_EQ(handler.getNumDofs(), static_cast<GlobalIndex>(basis_fn.size()));
+    const auto dofs = handler.getCellDofs(0);
+    ASSERT_EQ(dofs.size(), basis_fn.size());
+
+    std::vector<GlobalIndex> expected;
+    expected.reserve(basis_fn.size());
+    for (GlobalIndex i = 0; i < static_cast<GlobalIndex>(basis_fn.size()); ++i) {
+        expected.push_back(i);
+    }
+
+    std::vector<GlobalIndex> actual(dofs.begin(), dofs.end());
+    auto sorted_actual = actual;
+    std::sort(sorted_actual.begin(), sorted_actual.end());
+    EXPECT_EQ(sorted_actual, expected);
+}
+
+TEST(DofHandler, CGDistributionSingleHexQ4DerivesEdgesAndFacesFromCell2Vertex) {
+    DofHandler handler;
+    auto topo = makeSingleHexVerticesOnly();
+    auto layout = DofLayoutInfo::Lagrange(/*order=*/4, /*dim=*/3, /*num_verts_per_cell=*/8);
+
+    handler.distributeDofs(topo, layout);
+    handler.finalize();
+
+    EXPECT_EQ(handler.getNumDofs(), 125);
+    const auto dofs = handler.getCellDofs(0);
+    ASSERT_EQ(dofs.size(), 125u);
+
+    std::vector<GlobalIndex> expected;
+    expected.reserve(125);
+    for (GlobalIndex i = 0; i < 125; ++i) {
+        expected.push_back(i);
+    }
+
+    std::vector<GlobalIndex> actual(dofs.begin(), dofs.end());
+    auto sorted_actual = actual;
+    std::sort(sorted_actual.begin(), sorted_actual.end());
+    EXPECT_EQ(sorted_actual, expected);
+}
+
 TEST(DofHandler, LagrangeQ3HexSharedFacePermutesFaceInteriorDofs) {
     DofHandler handler;
     auto topo = makeTwoHexMeshWithSharedFaceFlipped();
@@ -695,6 +987,70 @@ TEST(DofHandler, LagrangeQ3HexSharedFacePermutesFaceInteriorDofs) {
 
     // Cell 1 sees a reflected face ordering on the shared face -> swap interior nodes (1 <-> 2).
     EXPECT_EQ(face1, (std::vector<GlobalIndex>{canon[0], canon[2], canon[1], canon[3]}));
+}
+
+TEST(DofHandler, LagrangeQ4HexSharedFacePermutesFaceInteriorDofs) {
+    DofHandler handler;
+    auto topo = makeTwoHexMeshWithSharedFaceFlipped();
+    auto layout = DofLayoutInfo::Lagrange(/*order=*/4, /*dim=*/3, /*num_verts_per_cell=*/8);
+
+    handler.distributeDofs(topo, layout);
+    handler.finalize();
+
+    const auto* edm = handler.getEntityDofMap();
+    ASSERT_NE(edm, nullptr);
+
+    const auto cell0_faces = topo.getCellFaces(0);
+    const auto cell1_faces = topo.getCellFaces(1);
+    MeshIndex shared_face = -1;
+    for (auto f0 : cell0_faces) {
+        if (std::find(cell1_faces.begin(), cell1_faces.end(), f0) != cell1_faces.end()) {
+            shared_face = f0;
+            break;
+        }
+    }
+    ASSERT_GE(shared_face, 0);
+
+    const auto canon = edm->getFaceDofs(shared_face);
+    ASSERT_EQ(canon.size(), 9u);
+    const std::vector<GlobalIndex> canon_vec(canon.begin(), canon.end());
+
+    auto find_face_slot = [](std::span<const MeshIndex> faces, MeshIndex face_id) -> int {
+        for (std::size_t i = 0; i < faces.size(); ++i) {
+            if (faces[i] == face_id) return static_cast<int>(i);
+        }
+        return -1;
+    };
+
+    const int lf0 = find_face_slot(cell0_faces, shared_face);
+    const int lf1 = find_face_slot(cell1_faces, shared_face);
+    ASSERT_GE(lf0, 0);
+    ASSERT_GE(lf1, 0);
+
+    const auto c0 = handler.getCellDofs(0);
+    const auto c1 = handler.getCellDofs(1);
+    ASSERT_EQ(c0.size(), 125u);
+    ASSERT_EQ(c1.size(), 125u);
+
+    const std::size_t vertex_dofs = 8u;
+    const std::size_t edge_dofs = 12u * 3u;
+    const std::size_t face_base = vertex_dofs + edge_dofs;
+
+    std::vector<GlobalIndex> face0;
+    std::vector<GlobalIndex> face1;
+    for (std::size_t i = 0; i < 9u; ++i) {
+        face0.push_back(c0[face_base + static_cast<std::size_t>(lf0) * 9u + i]);
+        face1.push_back(c1[face_base + static_cast<std::size_t>(lf1) * 9u + i]);
+    }
+
+    EXPECT_EQ(face0, canon_vec);
+
+    auto sorted_face1 = face1;
+    auto sorted_canon = canon_vec;
+    std::sort(sorted_face1.begin(), sorted_face1.end());
+    std::sort(sorted_canon.begin(), sorted_canon.end());
+    EXPECT_EQ(sorted_face1, sorted_canon);
+    EXPECT_NE(face1, canon_vec);
 }
 
 TEST(DofHandler, DGDistributionInterleavedRenumberingUsesOptions) {
@@ -758,6 +1114,243 @@ TEST(DofHandler, CGDistributionVectorComponentsInterleavedRenumbering) {
               (std::vector<GlobalIndex>{0, 1}));
     EXPECT_EQ(std::vector<GlobalIndex>(entity->getVertexDofs(1).begin(), entity->getVertexDofs(1).end()),
               (std::vector<GlobalIndex>{2, 3}));
+}
+
+TEST(DofHandler, MixedOrderScalarAdaptiveSpaceUsesPerCellOrders) {
+    auto topo = makeTwoQuadMeshWithEdges();
+
+    AdaptiveSpace adaptive;
+    auto p1 = std::make_shared<H1Space>(ElementType::Quad4, 1, svmp::FE::BasisType::Hierarchical);
+    auto p3 = std::make_shared<H1Space>(ElementType::Quad4, 3, svmp::FE::BasisType::Hierarchical);
+    adaptive.add_level(1, p1);
+    adaptive.add_level(3, p3);
+    adaptive.resize_element_orders(2, 1);
+    adaptive.set_element_order(1, 3);
+
+    DofHandler handler;
+    handler.distributeDofs(topo, adaptive);
+    handler.finalize();
+
+    const auto dofs0 = handler.getCellDofs(0);
+    const auto dofs1 = handler.getCellDofs(1);
+    EXPECT_EQ(dofs0.size(), p1->dofs_per_element());
+    EXPECT_EQ(dofs1.size(), p3->dofs_per_element());
+
+    std::vector<GlobalIndex> dofs0_sorted(dofs0.begin(), dofs0.end());
+    std::vector<GlobalIndex> dofs1_sorted(dofs1.begin(), dofs1.end());
+    std::sort(dofs0_sorted.begin(), dofs0_sorted.end());
+    std::sort(dofs1_sorted.begin(), dofs1_sorted.end());
+
+    std::vector<GlobalIndex> shared;
+    std::set_intersection(dofs0_sorted.begin(), dofs0_sorted.end(),
+                          dofs1_sorted.begin(), dofs1_sorted.end(),
+                          std::back_inserter(shared));
+    EXPECT_EQ(shared.size(), 2u);
+
+    const auto* entity = handler.getEntityDofMap();
+    ASSERT_NE(entity, nullptr);
+    EXPECT_EQ(entity->getCellInteriorDofs(0).size(), 0u);
+    EXPECT_GT(entity->getCellInteriorDofs(1).size(), 0u);
+}
+
+TEST(DofHandler, MixedOrderVectorAdaptiveSpaceUsesPerCellOrders) {
+    auto topo = makeTwoQuadMeshWithEdges();
+
+    AdaptiveSpace adaptive;
+    auto p1 = std::make_shared<HCurlSpace>(ElementType::Quad4, 1);
+    auto p2 = std::make_shared<HCurlSpace>(ElementType::Quad4, 2);
+    adaptive.add_level(1, p1);
+    adaptive.add_level(2, p2);
+    adaptive.resize_element_orders(2, 1);
+    adaptive.set_element_order(1, 2);
+
+    DofHandler handler;
+    handler.distributeDofs(topo, adaptive);
+    handler.finalize();
+
+    const auto dofs0 = handler.getCellDofs(0);
+    const auto dofs1 = handler.getCellDofs(1);
+    EXPECT_EQ(dofs0.size(), p1->dofs_per_element());
+    EXPECT_EQ(dofs1.size(), p2->dofs_per_element());
+
+    const auto* vb1 = dynamic_cast<const svmp::FE::basis::VectorBasisFunction*>(&p1->element().basis());
+    const auto* vb2 = dynamic_cast<const svmp::FE::basis::VectorBasisFunction*>(&p2->element().basis());
+    ASSERT_NE(vb1, nullptr);
+    ASSERT_NE(vb2, nullptr);
+
+    auto edge_count = [](const svmp::FE::basis::VectorBasisFunction& basis, int edge_id) {
+        LocalIndex count = 0;
+        for (const auto& assoc : basis.dof_associations()) {
+            if (assoc.entity_type == svmp::FE::basis::DofEntity::Edge &&
+                assoc.entity_id == edge_id) {
+                ++count;
+            }
+        }
+        return count;
+    };
+
+    const auto expected_shared = std::min(edge_count(*vb1, 1), edge_count(*vb2, 3));
+
+    std::vector<GlobalIndex> dofs0_sorted(dofs0.begin(), dofs0.end());
+    std::vector<GlobalIndex> dofs1_sorted(dofs1.begin(), dofs1.end());
+    std::sort(dofs0_sorted.begin(), dofs0_sorted.end());
+    std::sort(dofs1_sorted.begin(), dofs1_sorted.end());
+
+    std::vector<GlobalIndex> shared;
+    std::set_intersection(dofs0_sorted.begin(), dofs0_sorted.end(),
+                          dofs1_sorted.begin(), dofs1_sorted.end(),
+                          std::back_inserter(shared));
+    EXPECT_EQ(shared.size(), static_cast<std::size_t>(expected_shared));
+
+    const auto* entity = handler.getEntityDofMap();
+    ASSERT_NE(entity, nullptr);
+    EXPECT_GT(entity->getCellInteriorDofs(1).size(), 0u);
+    EXPECT_TRUE(handler.hasCellOrientations());
+    EXPECT_FALSE(handler.cellEdgeOrientations(0).empty());
+    EXPECT_FALSE(handler.cellEdgeOrientations(1).empty());
+}
+
+TEST(DofHandler, MixedOrderScalarConstraintsMatchLowerOrderEdgeTrace) {
+    auto topo = makeTwoQuadMeshWithEdges();
+
+    AdaptiveSpace adaptive;
+    auto p1 = std::make_shared<H1Space>(ElementType::Quad4, 1, svmp::FE::BasisType::Hierarchical);
+    auto p3 = std::make_shared<H1Space>(ElementType::Quad4, 3, svmp::FE::BasisType::Hierarchical);
+    adaptive.add_level(1, p1);
+    adaptive.add_level(3, p3);
+    adaptive.resize_element_orders(2, 1);
+    adaptive.set_element_order(1, 3);
+
+    DofHandler handler;
+    handler.distributeDofs(topo, adaptive);
+
+    svmp::FE::constraints::AffineConstraints constraints;
+    handler.buildVariableOrderConstraints(topo, adaptive, constraints);
+    constraints.close();
+
+    const auto coarse_space = adaptive.element_space_ptr(0);
+    const auto fine_space = adaptive.element_space_ptr(1);
+    ASSERT_NE(coarse_space, nullptr);
+    ASSERT_NE(fine_space, nullptr);
+
+    svmp::FE::spaces::TraceSpace coarse_trace(coarse_space, 1);
+    svmp::FE::spaces::TraceSpace fine_trace(fine_space, 3);
+
+    const auto coarse_cell_dofs = handler.getCellDofs(0);
+    const auto fine_cell_dofs = handler.getCellDofs(1);
+    const auto coarse_local = coarse_trace.face_dof_indices();
+    const auto fine_local = fine_trace.face_dof_indices();
+
+    std::vector<GlobalIndex> coarse_trace_dofs;
+    std::vector<GlobalIndex> fine_trace_dofs;
+    coarse_trace_dofs.reserve(coarse_local.size());
+    fine_trace_dofs.reserve(fine_local.size());
+    for (int lid : coarse_local) coarse_trace_dofs.push_back(coarse_cell_dofs[static_cast<std::size_t>(lid)]);
+    for (int lid : fine_local) fine_trace_dofs.push_back(fine_cell_dofs[static_cast<std::size_t>(lid)]);
+
+    std::vector<double> values(static_cast<std::size_t>(handler.getNumDofs()), 0.0);
+    ASSERT_EQ(coarse_trace_dofs.size(), 2u);
+    values[static_cast<std::size_t>(coarse_trace_dofs[0])] = 1.0;
+    values[static_cast<std::size_t>(coarse_trace_dofs[1])] = -0.5;
+
+    constraints.distribute(values);
+
+    const auto coarse_coeffs = gather_trace_coefficients(values, coarse_trace_dofs);
+    const auto fine_coeffs = gather_trace_coefficients(values, fine_trace_dofs);
+
+    const std::vector<Real> sample_points = {Real(-1), Real(-0.4), Real(0.3), Real(1)};
+    for (Real x : sample_points) {
+        FunctionSpace::Value xi{};
+        xi[0] = x;
+        FunctionSpace::Value xi_coarse{};
+        xi_coarse[0] = -x;
+        EXPECT_NEAR(fine_trace.evaluate_scalar(xi, fine_coeffs),
+                    coarse_trace.evaluate_scalar(xi_coarse, coarse_coeffs),
+                    1e-12);
+    }
+}
+
+TEST(DofHandler, MixedOrderHCurlConstraintsPreserveSharedMomentsAndZeroHigherOrderModes) {
+    auto topo = makeTwoQuadMeshWithEdges();
+
+    AdaptiveSpace adaptive;
+    auto p1 = std::make_shared<HCurlSpace>(ElementType::Quad4, 1);
+    auto p2 = std::make_shared<HCurlSpace>(ElementType::Quad4, 2);
+    adaptive.add_level(1, p1);
+    adaptive.add_level(2, p2);
+    adaptive.resize_element_orders(2, 1);
+    adaptive.set_element_order(1, 2);
+
+    DofHandler handler;
+    handler.distributeDofs(topo, adaptive);
+
+    svmp::FE::constraints::AffineConstraints constraints;
+    handler.buildVariableOrderConstraints(topo, adaptive, constraints);
+    constraints.close();
+
+    const auto coarse_space = adaptive.element_space_ptr(0);
+    const auto fine_space = adaptive.element_space_ptr(1);
+    ASSERT_NE(coarse_space, nullptr);
+    ASSERT_NE(fine_space, nullptr);
+
+    svmp::FE::spaces::TraceSpace coarse_trace(coarse_space, 1);
+    svmp::FE::spaces::TraceSpace fine_trace(fine_space, 3);
+
+    const auto coarse_cell_dofs = handler.getCellDofs(0);
+    const auto fine_cell_dofs = handler.getCellDofs(1);
+    const auto coarse_local = coarse_trace.face_dof_indices();
+    const auto fine_local = fine_trace.face_dof_indices();
+
+    std::vector<GlobalIndex> coarse_trace_dofs;
+    std::vector<GlobalIndex> fine_trace_dofs;
+    coarse_trace_dofs.reserve(coarse_local.size());
+    fine_trace_dofs.reserve(fine_local.size());
+    for (int lid : coarse_local) coarse_trace_dofs.push_back(coarse_cell_dofs[static_cast<std::size_t>(lid)]);
+    for (int lid : fine_local) fine_trace_dofs.push_back(fine_cell_dofs[static_cast<std::size_t>(lid)]);
+
+    std::vector<double> values(static_cast<std::size_t>(handler.getNumDofs()), 0.0);
+    ASSERT_FALSE(coarse_trace_dofs.empty());
+    for (std::size_t i = 0; i < coarse_trace_dofs.size(); ++i) {
+        values[static_cast<std::size_t>(coarse_trace_dofs[i])] = 0.5 + static_cast<double>(i);
+    }
+
+    constraints.distribute(values);
+
+    std::unordered_map<GlobalIndex, std::size_t> coarse_positions;
+    for (std::size_t i = 0; i < coarse_trace_dofs.size(); ++i) {
+        coarse_positions.emplace(coarse_trace_dofs[i], i);
+    }
+
+    std::size_t shared_count = 0;
+    for (std::size_t i = 0; i < fine_trace_dofs.size(); ++i) {
+        const auto it = coarse_positions.find(fine_trace_dofs[i]);
+        if (it != coarse_positions.end()) {
+            ++shared_count;
+            EXPECT_NEAR(values[static_cast<std::size_t>(fine_trace_dofs[i])],
+                        values[static_cast<std::size_t>(coarse_trace_dofs[it->second])],
+                        1e-12);
+        } else {
+            EXPECT_NEAR(values[static_cast<std::size_t>(fine_trace_dofs[i])], 0.0, 1e-12);
+        }
+    }
+
+    const auto* vb1 = dynamic_cast<const svmp::FE::basis::VectorBasisFunction*>(&p1->element().basis());
+    const auto* vb2 = dynamic_cast<const svmp::FE::basis::VectorBasisFunction*>(&p2->element().basis());
+    ASSERT_NE(vb1, nullptr);
+    ASSERT_NE(vb2, nullptr);
+
+    auto edge_count = [](const svmp::FE::basis::VectorBasisFunction& basis, int edge_id) {
+        std::size_t count = 0;
+        for (const auto& assoc : basis.dof_associations()) {
+            if (assoc.entity_type == svmp::FE::basis::DofEntity::Edge &&
+                assoc.entity_id == edge_id) {
+                ++count;
+            }
+        }
+        return count;
+    };
+
+    EXPECT_EQ(shared_count, std::min(edge_count(*vb1, 1), edge_count(*vb2, 3)));
 }
 
 TEST(DofHandler, CannotDistributeAfterFinalize) {

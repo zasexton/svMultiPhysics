@@ -13,6 +13,7 @@
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <memory>
 #include <vector>
@@ -57,7 +58,44 @@ TEST(PoissonModule, AssembledJacobianMatchesFiniteDifference)
     expectJacobianMatchesCentralFD(system, state, /*eps=*/1e-6, /*rtol=*/1e-6, /*atol=*/1e-10);
 }
 
+TEST(PoissonModule, CoupledNeumannRCRUsesModernAuxiliaryPath)
+{
+    constexpr int marker = 7;
+    auto mesh = std::make_shared<FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    FE::systems::FESystem system(mesh);
+
+    auto space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Tetra4, /*order=*/1);
+    formulations::poisson::PoissonOptions opts;
+    opts.field_name = "u";
+    opts.diffusion = 1.0;
+    opts.source = 0.0;
+    opts.coupled_neumann_rcr.push_back(formulations::poisson::PoissonOptions::CoupledRCRNeumannBC{
+        .boundary_marker = marker,
+        .Rp = 10.0,
+        .C = 0.001,
+        .Rd = 100.0,
+        .Pd = 50.0,
+        .X0 = 50.0,
+    });
+
+    formulations::poisson::PoissonModule module(space, opts);
+    module.registerOn(system);
+
+    system.setup({}, makeSingleTetraSetupInputs());
+    system.finalizeAuxiliaryLayout();
+
+    const auto* aux_inputs = system.auxiliaryInputRegistryIfPresent();
+    ASSERT_NE(aux_inputs, nullptr);
+    EXPECT_EQ(aux_inputs->totalSize(), 1u);
+
+    const auto summary = system.auxiliaryAnalysisSummary();
+    EXPECT_EQ(summary.n_monolithic, 1u);
+    EXPECT_EQ(summary.n_partitioned, 0u);
+
+    const auto out_slot = system.auxiliaryOutputSlotOf("poisson_rcr_7", "flux");
+    EXPECT_NE(out_slot, std::string::npos);
+}
+
 } // namespace test
 } // namespace Physics
 } // namespace svmp
-

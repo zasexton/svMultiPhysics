@@ -1081,8 +1081,12 @@ void StandardAssembler::setAuxiliaryValues(std::span<const Real> inputs,
     auxiliary_inputs_ = inputs;
     auxiliary_state_ = state;
     auxiliary_outputs_ = outputs;
-    coupled_integrals_ = inputs;
-    coupled_aux_state_ = state;
+    if (coupled_integrals_.empty()) {
+        coupled_integrals_ = inputs;
+    }
+    if (coupled_aux_state_.empty()) {
+        coupled_aux_state_ = state;
+    }
 }
 
 void StandardAssembler::setAuxiliaryOutputBindings(
@@ -2059,6 +2063,7 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
                 context_.setUserData(user_data_);
                 context_.setJITConstants(jit_constants_);
                 context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+                context_.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
                 context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
                 context_.clearAllPreviousSolutionData();
                 context_.setBoundaryMarker(boundary_marker);
@@ -2291,6 +2296,7 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             context_.setUserData(user_data_);
             context_.setJITConstants(jit_constants_);
             context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+            context_.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
             context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
             context_.clearAllPreviousSolutionData();
 
@@ -2347,6 +2353,7 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             context_plus.setUserData(user_data_);
             context_plus.setJITConstants(jit_constants_);
             context_plus.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+            context_plus.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
             context_plus.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
             context_plus.clearAllPreviousSolutionData();
 
@@ -2649,6 +2656,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         context_.setUserData(user_data_);
         context_.setJITConstants(jit_constants_);
         context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+        context_.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
         context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
         context_.clearAllPreviousSolutionData();
 
@@ -2705,6 +2713,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         context_plus.setUserData(user_data_);
         context_plus.setJITConstants(jit_constants_);
         context_plus.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+        context_plus.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
         context_plus.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
         context_plus.clearAllPreviousSolutionData();
 
@@ -3018,6 +3027,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         ctx.setUserData(user_data_);
         ctx.setJITConstants(jit_constants_);
         ctx.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+        ctx.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
         ctx.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
         ctx.clearAllPreviousSolutionData();
         tp_sub_setters += TP_SUB() - tp_s0;
@@ -5321,6 +5331,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             ctx.setUserData(user_data_);
             ctx.setJITConstants(jit_constants_);
             ctx.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+            ctx.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
             ctx.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
             ctx.clearAllPreviousSolutionData();
         };
@@ -7751,6 +7762,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         thread_ctx.setJITConstants(jit_constants_);
                         thread_ctx.setAuxiliaryValues(auxiliary_inputs_,
                                                     auxiliary_state_, auxiliary_outputs_);
+                        thread_ctx.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
                         thread_ctx.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
                         thread_ctx.clearAllPreviousSolutionData();
 
@@ -8151,6 +8163,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 ctx.setUserData(user_data_);
                 ctx.setJITConstants(jit_constants_);
                 ctx.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+                ctx.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
                 ctx.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
                 ctx.clearAllPreviousSolutionData();
                 tp_fb_setters += TP() - tp0;
@@ -8877,6 +8890,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         context_.setUserData(user_data_);
         context_.setJITConstants(jit_constants_);
         context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+        context_.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
         context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
         context_.clearAllPreviousSolutionData();
 
@@ -10024,18 +10038,40 @@ void StandardAssembler::applyVectorBasisGlobalToLocal(
                     "StandardAssembler::applyVectorBasisGlobalToLocal: missing cell face orientations");
     }
 
-    // Edge DOFs: apply sign based on edge orientation. (Any needed reordering of edge modes is
-    // already handled by DofMap canonical edge ordering.)
+    // Edge DOFs: apply orientation blockwise so higher-order edge modes follow
+    // the oriented edge basis rather than assuming sign-only behavior.
     if (needs_edges) {
+        std::vector<std::vector<std::pair<int, LocalIndex>>> edge_pairs(edge_orients.size());
         for (LocalIndex i = 0; i < static_cast<LocalIndex>(associations.size()); ++i) {
             const auto& a = associations[static_cast<std::size_t>(i)];
             if (a.entity_type != basis::DofEntity::Edge) continue;
             const int e = a.entity_id;
             FE_THROW_IF(e < 0 || static_cast<std::size_t>(e) >= edge_orients.size(), FEException,
                         "StandardAssembler::applyVectorBasisGlobalToLocal: edge id out of range in DOF associations");
-            const int sign = edge_orients[static_cast<std::size_t>(e)];
-            if (sign < 0) {
-                coeffs[static_cast<std::size_t>(i)] = -coeffs[static_cast<std::size_t>(i)];
+            edge_pairs[static_cast<std::size_t>(e)].push_back({a.moment_index, i});
+        }
+
+        for (std::size_t e = 0; e < edge_pairs.size(); ++e) {
+            auto& pairs = edge_pairs[e];
+            if (pairs.empty()) continue;
+            std::sort(pairs.begin(), pairs.end(),
+                      [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+
+            scratch_orient_in_.assign(pairs.size(), 0.0);
+            for (std::size_t k = 0; k < pairs.size(); ++k) {
+                scratch_orient_in_[k] = coeffs[static_cast<std::size_t>(pairs[k].second)];
+            }
+
+            scratch_orient_out_ =
+                spaces::OrientationManager::orient_hcurl_edge_dofs(
+                    scratch_orient_in_,
+                    edge_orients[e]);
+
+            FE_THROW_IF(scratch_orient_out_.size() != pairs.size(), FEException,
+                        "StandardAssembler::applyVectorBasisGlobalToLocal: edge orientation size mismatch");
+
+            for (std::size_t k = 0; k < pairs.size(); ++k) {
+                coeffs[static_cast<std::size_t>(pairs[k].second)] = scratch_orient_out_[k];
             }
         }
     }
@@ -10130,11 +10166,15 @@ void StandardAssembler::applyVectorBasisOutputOrientation(
     }
 
     struct Blocks {
-        std::vector<std::pair<LocalIndex, int>> edge_dofs; // (dof_index, sign)
+        struct EdgeBlock {
+            std::vector<LocalIndex> dofs; // in moment-index order
+            int sign{+1};
+        };
         struct FaceBlock {
             std::vector<LocalIndex> dofs; // in moment-index order
             const FaceTransform* tf{nullptr};
         };
+        std::vector<EdgeBlock> edges;
         std::vector<FaceBlock> faces;
     };
 
@@ -10183,13 +10223,30 @@ void StandardAssembler::applyVectorBasisOutputOrientation(
         }
 
         if (needs_edges) {
+            std::vector<std::vector<std::pair<int, LocalIndex>>> edge_pairs(edge_orients.size());
             for (LocalIndex i = 0; i < expected_dofs; ++i) {
                 const auto& a = associations[static_cast<std::size_t>(i)];
                 if (a.entity_type != basis::DofEntity::Edge) continue;
                 const int e = a.entity_id;
                 FE_THROW_IF(e < 0 || static_cast<std::size_t>(e) >= edge_orients.size(), FEException,
                             "StandardAssembler::applyVectorBasisOutputOrientation: edge id out of range in DOF associations");
-                blocks.edge_dofs.push_back({i, edge_orients[static_cast<std::size_t>(e)]});
+                edge_pairs[static_cast<std::size_t>(e)].push_back({a.moment_index, i});
+            }
+
+            blocks.edges.reserve(edge_pairs.size());
+            for (std::size_t e = 0; e < edge_pairs.size(); ++e) {
+                auto& pairs = edge_pairs[e];
+                if (pairs.empty()) continue;
+                std::sort(pairs.begin(), pairs.end(),
+                          [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+
+                Blocks::EdgeBlock blk;
+                blk.sign = edge_orients[e];
+                blk.dofs.reserve(pairs.size());
+                for (const auto& pr : pairs) {
+                    blk.dofs.push_back(pr.second);
+                }
+                blocks.edges.push_back(std::move(blk));
             }
         }
 
@@ -10254,9 +10311,17 @@ void StandardAssembler::applyVectorBasisOutputOrientation(
     if (output.has_vector && test_blocks) {
         auto vec = std::span<Real>(output.local_vector);
 
-        for (const auto& [idx, sign] : test_blocks->edge_dofs) {
-            if (sign < 0) {
-                vec[static_cast<std::size_t>(idx)] = -vec[static_cast<std::size_t>(idx)];
+        for (const auto& edge : test_blocks->edges) {
+            scratch_orient_in_.assign(edge.dofs.size(), 0.0);
+            for (std::size_t i = 0; i < edge.dofs.size(); ++i) {
+                scratch_orient_in_[i] = vec[static_cast<std::size_t>(edge.dofs[i])];
+            }
+            scratch_orient_out_ =
+                spaces::OrientationManager::orient_hcurl_edge_dofs(scratch_orient_in_, edge.sign);
+            FE_THROW_IF(scratch_orient_out_.size() != edge.dofs.size(), FEException,
+                        "StandardAssembler::applyVectorBasisOutputOrientation: edge block size mismatch (vector)");
+            for (std::size_t i = 0; i < edge.dofs.size(); ++i) {
+                vec[static_cast<std::size_t>(edge.dofs[i])] = scratch_orient_out_[i];
             }
         }
 
@@ -10300,12 +10365,22 @@ void StandardAssembler::applyVectorBasisOutputOrientation(
 
     // Right multiply: A <- A * P_trial
     if (trial_blocks) {
-        // Edge scaling (diagonal)
-        for (const auto& [idx, sign] : trial_blocks->edge_dofs) {
-            if (sign >= 0) continue;
-            const std::size_t j = static_cast<std::size_t>(idx);
+        for (const auto& edge : trial_blocks->edges) {
+            scratch_orient_in_.assign(edge.dofs.size(), 0.0);
+            scratch_orient_out_.assign(edge.dofs.size(), 0.0);
             for (std::size_t i = 0; i < n_test; ++i) {
-                output.local_matrix[i * n_trial + j] = -output.local_matrix[i * n_trial + j];
+                for (std::size_t l = 0; l < edge.dofs.size(); ++l) {
+                    scratch_orient_in_[l] =
+                        output.local_matrix[i * n_trial + static_cast<std::size_t>(edge.dofs[l])];
+                }
+                scratch_orient_out_ =
+                    spaces::OrientationManager::orient_hcurl_edge_dofs(scratch_orient_in_, edge.sign);
+                FE_THROW_IF(scratch_orient_out_.size() != edge.dofs.size(), FEException,
+                            "StandardAssembler::applyVectorBasisOutputOrientation: edge block size mismatch (trial)");
+                for (std::size_t l = 0; l < edge.dofs.size(); ++l) {
+                    output.local_matrix[i * n_trial + static_cast<std::size_t>(edge.dofs[l])] =
+                        scratch_orient_out_[l];
+                }
             }
         }
 
@@ -10339,13 +10414,22 @@ void StandardAssembler::applyVectorBasisOutputOrientation(
 
     // Left multiply: A <- P_test^T * A
     if (test_blocks) {
-        // Edge scaling (diagonal)
-        for (const auto& [idx, sign] : test_blocks->edge_dofs) {
-            if (sign >= 0) continue;
-            const std::size_t i = static_cast<std::size_t>(idx);
-            const std::size_t base = i * n_trial;
+        for (const auto& edge : test_blocks->edges) {
+            scratch_orient_in_.assign(edge.dofs.size(), 0.0);
+            scratch_orient_out_.assign(edge.dofs.size(), 0.0);
             for (std::size_t j = 0; j < n_trial; ++j) {
-                output.local_matrix[base + j] = -output.local_matrix[base + j];
+                for (std::size_t l = 0; l < edge.dofs.size(); ++l) {
+                    scratch_orient_in_[l] =
+                        output.local_matrix[static_cast<std::size_t>(edge.dofs[l]) * n_trial + j];
+                }
+                scratch_orient_out_ =
+                    spaces::OrientationManager::orient_hcurl_edge_dofs(scratch_orient_in_, edge.sign);
+                FE_THROW_IF(scratch_orient_out_.size() != edge.dofs.size(), FEException,
+                            "StandardAssembler::applyVectorBasisOutputOrientation: edge block size mismatch (test)");
+                for (std::size_t l = 0; l < edge.dofs.size(); ++l) {
+                    output.local_matrix[static_cast<std::size_t>(edge.dofs[l]) * n_trial + j] =
+                        scratch_orient_out_[l];
+                }
             }
         }
 

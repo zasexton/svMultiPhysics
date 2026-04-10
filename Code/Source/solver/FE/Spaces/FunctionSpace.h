@@ -33,6 +33,7 @@
 #include "Core/Types.h"
 #include "Core/FEException.h"
 #include "Elements/Element.h"
+#include "Math/Matrix.h"
 #include "Math/Vector.h"
 #include <functional>
 #include <memory>
@@ -77,6 +78,7 @@ class FunctionSpace {
 public:
     using Value      = math::Vector<Real, 3>;  ///< Field value (scalar in first component for scalar spaces)
     using Gradient   = math::Vector<Real, 3>;  ///< Gradient in reference coordinates
+    using Jacobian   = math::Matrix<Real, 3, 3>; ///< Jacobian of a vector-valued FE field in reference coordinates
     using ValueFunction = std::function<Value(const Value&)>; ///< f(x) callback in reference coordinates
 
     virtual ~FunctionSpace() = default;
@@ -98,6 +100,14 @@ public:
 
     /// Polynomial order in the sense of the underlying basis
     virtual int polynomial_order() const noexcept = 0;
+
+    /// Cell-specific polynomial order for variable-order spaces
+    virtual int polynomial_order(GlobalIndex /*cell_id*/) const noexcept {
+        return polynomial_order();
+    }
+
+    /// Whether this space exposes cell-dependent polynomial orders/elements
+    virtual bool is_variable_order() const noexcept { return false; }
 
     /// Underlying reference element type
     virtual ElementType element_type() const noexcept = 0;
@@ -123,6 +133,11 @@ public:
     /// Number of local DOFs per element (one scalar DOF per basis function)
     virtual std::size_t dofs_per_element() const noexcept {
         return element().num_dofs();
+    }
+
+    /// Cell-specific number of local DOFs for variable-order spaces
+    virtual std::size_t dofs_per_element(GlobalIndex /*cell_id*/) const noexcept {
+        return dofs_per_element();
     }
 
     /**
@@ -180,6 +195,18 @@ public:
      * @return Gradient vector in reference coordinates
      */
     virtual Gradient evaluate_gradient(const Value& xi,
+                                       const std::vector<Real>& coefficients) const;
+
+    /**
+     * @brief Evaluate the reference-space Jacobian of the FE field
+     *
+     * Returns the matrix J with entries J(i,j) = d value_i / d xi_j. For
+     * scalar-valued spaces only the first row is populated; this row matches
+     * @ref evaluate_gradient. For vector-valued spaces this provides the
+     * missing public derivative surface without changing the scalar-gradient
+     * semantics of @ref evaluate_gradient.
+     */
+    virtual Jacobian evaluate_jacobian(const Value& xi,
                                        const std::vector<Real>& coefficients) const;
 
     /**

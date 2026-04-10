@@ -40,6 +40,8 @@ public:
 
     [[nodiscard]] GlobalIndex numCells() const override;
     [[nodiscard]] GlobalIndex numOwnedCells() const override;
+    [[nodiscard]] GlobalIndex numVertices() const override;
+    [[nodiscard]] GlobalIndex numOwnedVertices() const override;
     [[nodiscard]] GlobalIndex numBoundaryFaces() const override;
     [[nodiscard]] GlobalIndex numInteriorFaces() const override;
     [[nodiscard]] int dimension() const override;

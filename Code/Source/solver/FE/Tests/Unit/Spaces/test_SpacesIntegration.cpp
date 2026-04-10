@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include "FE/Basis/LagrangeBasis.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Geometry/IsoparametricMapping.h"
 

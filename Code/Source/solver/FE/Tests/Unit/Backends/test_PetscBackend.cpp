@@ -222,4 +222,32 @@ TEST(PetscBackend, SolveFieldSplit2x2AsBlocks)
 #endif
 }
 
+TEST(PetscBackend, CreateLinearSolverNormalizesAutoFieldSplitKindFromSaddlePointMetadata)
+{
+#if !defined(FE_HAS_PETSC)
+    GTEST_SKIP() << "FE_HAS_PETSC not enabled";
+#else
+    PetscFactory factory;
+
+    SolverOptions opts{};
+    opts.method = SolverMethod::GMRES;
+    opts.preconditioner = PreconditionerType::FieldSplit;
+
+    MixedBlockLayout mixed{};
+    mixed.field_unknowns = 6;
+    mixed.total_unknowns = 6;
+    mixed.blocks.push_back({"velocity", 0, 4, BlockRole::PrimaryField, MixedBlockKind::Field});
+    mixed.blocks.push_back({"pressure", 4, 2, BlockRole::ConstraintField, MixedBlockKind::Field});
+    mixed.primary_block = 0;
+    mixed.constraint_block = 1;
+    opts.mixed_block_layout = mixed;
+
+    auto solver = factory.createLinearSolver(opts);
+    const auto& stored = solver->getOptions();
+    EXPECT_EQ(stored.fieldsplit.kind, FieldSplitKind::Schur);
+    EXPECT_EQ(stored.momentum_block_name, "velocity");
+    EXPECT_EQ(stored.constraint_block_name, "pressure");
+#endif
+}
+
 } // namespace svmp::FE::backends

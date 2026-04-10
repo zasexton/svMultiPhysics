@@ -78,7 +78,6 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
         const auto compiler_options =
             makeBoundaryFunctionalCompilerOptions(options_.enable_jit, options_.enable_jit_specialization);
         system.boundaryReductionService(u_id).setCompilerOptions(compiler_options);
-        system.coupledBoundaryManager(u_id).setCompilerOptions(compiler_options);
     }
 
     FE::systems::BoundaryConditionManager bc_manager;
@@ -93,7 +92,7 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
                                       options_.nitsche_scale_with_p);
     });
     bc_manager.install(options_.coupled_neumann_rcr, [&](const auto& bc) {
-        return Factories::toWindkesselBC(bc, u_id, *space_, options_.field_name);
+        return Factories::toWindkesselBC(bc, system, u);
     });
 
     bc_manager.applyAll(system, residual, u, v, u_id);

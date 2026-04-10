@@ -63,30 +63,18 @@ std::shared_ptr<FunctionSpace> SpaceFactory::create(SpaceType type,
 std::shared_ptr<FunctionSpace> SpaceFactory::create(const SpaceRequest& req) {
     switch (req.space_type) {
         case SpaceType::H1:
-            return create_h1(
-                req.element.element_type,
-                require_space_request_order(req.element,
-                                            "SpaceFactory::create(SpaceRequest): H1 requests require an explicit order"));
+            return std::make_shared<H1Space>(req.element);
         case SpaceType::C1:
             return create_c1(
                 req.element.element_type,
                 require_space_request_order(req.element,
                                             "SpaceFactory::create(SpaceRequest): C1 requests require an explicit order"));
         case SpaceType::L2:
-            return create_l2(
-                req.element.element_type,
-                require_space_request_order(req.element,
-                                            "SpaceFactory::create(SpaceRequest): L2 requests require an explicit order"));
+            return std::make_shared<L2Space>(req.element);
         case SpaceType::HCurl:
-            return create_hcurl(
-                req.element.element_type,
-                require_space_request_order(req.element,
-                                            "SpaceFactory::create(SpaceRequest): HCurl requests require an explicit order"));
+            return std::make_shared<HCurlSpace>(req.element);
         case SpaceType::HDiv:
-            return create_hdiv(
-                req.element.element_type,
-                require_space_request_order(req.element,
-                                            "SpaceFactory::create(SpaceRequest): HDiv requests require an explicit order"));
+            return std::make_shared<HDivSpace>(req.element);
         case SpaceType::GenericBasis: {
             auto element = elements::ElementFactory::create(req.element);
             return std::make_shared<GenericBasisSpace>(std::move(element));

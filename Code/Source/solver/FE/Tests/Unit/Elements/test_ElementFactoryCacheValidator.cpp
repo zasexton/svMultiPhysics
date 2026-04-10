@@ -108,6 +108,40 @@ TEST(ElementFactory, CreatesVectorElementsFromExplicitVectorBasisTypes) {
     EXPECT_THROW(ElementFactory::create(req), svmp::FE::FEException);
 }
 
+TEST(ElementFactory, CreatesCompatibleVectorSplineAndNurbsElements) {
+    ElementRequest req;
+    req.element_type = ElementType::Quad4;
+    req.field_type = FieldType::Vector;
+    req.order = 2;
+    req.axis_orders = {2, 2};
+    req.axis_knot_vectors = {
+        {Real(0), Real(0), Real(0), Real(0.5), Real(1), Real(1), Real(1)},
+        {Real(0), Real(0), Real(0), Real(0.5), Real(1), Real(1), Real(1)}
+    };
+
+    req.basis_type = BasisType::BSpline;
+    req.continuity = Continuity::H_curl;
+    auto hcurl = ElementFactory::create(req);
+    ASSERT_TRUE(hcurl);
+    EXPECT_EQ(hcurl->field_type(), FieldType::Vector);
+    EXPECT_EQ(hcurl->continuity(), Continuity::H_curl);
+    EXPECT_EQ(hcurl->basis().basis_type(), BasisType::BSpline);
+    EXPECT_TRUE(std::dynamic_pointer_cast<GeneralBasisElement>(hcurl));
+
+    req.basis_type = BasisType::NURBS;
+    req.continuity = Continuity::H_div;
+    req.tensor_extents = {4, 4};
+    req.weights.assign(16u, Real(1));
+    req.weights[6] = Real(0.7);
+    req.weights[9] = Real(1.3);
+    auto hdiv = ElementFactory::create(req);
+    ASSERT_TRUE(hdiv);
+    EXPECT_EQ(hdiv->field_type(), FieldType::Vector);
+    EXPECT_EQ(hdiv->continuity(), Continuity::H_div);
+    EXPECT_EQ(hdiv->basis().basis_type(), BasisType::NURBS);
+    EXPECT_TRUE(std::dynamic_pointer_cast<GeneralBasisElement>(hdiv));
+}
+
 TEST(ElementFactory, CreatesGenericScalarBasisBackedElements) {
     struct Case {
         ElementType element_type;

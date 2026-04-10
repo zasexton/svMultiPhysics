@@ -175,6 +175,38 @@ TEST(AuxiliaryStateTypes, SpecCanBeConfigured)
     EXPECT_EQ(spec.sync_policy, AuxiliarySyncPolicy::OwnedAndGhost);
 }
 
+TEST(AuxiliaryStateTypes, SpecConvenienceFactoriesSetCommonDefaults)
+{
+    const auto global = AuxiliaryStateSpec::globalScalar("lumped_pressure");
+    EXPECT_EQ(global.name, "lumped_pressure");
+    EXPECT_EQ(global.size, 1);
+    EXPECT_EQ(global.scope, AuxiliaryStateScope::Global);
+    EXPECT_EQ(global.sync_policy, AuxiliarySyncPolicy::None);
+    EXPECT_EQ(global.solve_mode, AuxiliarySolveMode::Partitioned);
+
+    const auto node = AuxiliaryStateSpec::nodeField("ionic", 4);
+    EXPECT_EQ(node.name, "ionic");
+    EXPECT_EQ(node.size, 4);
+    EXPECT_EQ(node.scope, AuxiliaryStateScope::Node);
+    EXPECT_EQ(node.sync_policy, AuxiliarySyncPolicy::OwnedAndGhost);
+
+    const auto cell = AuxiliaryStateSpec::cellField("damage", 1);
+    EXPECT_EQ(cell.scope, AuxiliaryStateScope::Cell);
+    EXPECT_EQ(cell.sync_policy, AuxiliarySyncPolicy::OwnedOnly);
+
+    const auto qp = AuxiliaryStateSpec::quadratureField("chemistry", 3);
+    EXPECT_EQ(qp.scope, AuxiliaryStateScope::QuadraturePoint);
+    EXPECT_EQ(qp.sync_policy, AuxiliarySyncPolicy::OwnedOnly);
+
+    const auto facet = AuxiliaryStateSpec::facetField("traction", 2);
+    EXPECT_EQ(facet.scope, AuxiliaryStateScope::Facet);
+    EXPECT_EQ(facet.sync_policy, AuxiliarySyncPolicy::OwnedOnly);
+
+    const auto boundary = AuxiliaryStateSpec::boundaryScalar("outlet_state");
+    EXPECT_EQ(boundary.scope, AuxiliaryStateScope::Boundary);
+    EXPECT_EQ(boundary.sync_policy, AuxiliarySyncPolicy::None);
+}
+
 TEST(AuxiliaryStateTypes, SpecScopeIsOrthogonalToSolveMode)
 {
     // Global scope with Partitioned solve
@@ -317,8 +349,8 @@ TEST(AuxiliaryStateTypes, RegistrationOptionsDefaults)
 
 TEST(AuxiliaryStateTypes, NewSpecWorksWithAuxiliaryStateContainer)
 {
-    // The generalized AuxiliaryStateSpec should be usable with the existing
-    // AuxiliaryState container for registration.
+    // The generalized AuxiliaryStateSpec should be usable with the block-based
+    // AuxiliaryState container.
     AuxiliaryState state;
 
     AuxiliaryStateSpec spec;
@@ -328,11 +360,14 @@ TEST(AuxiliaryStateTypes, NewSpecWorksWithAuxiliaryStateContainer)
     spec.solve_mode = AuxiliarySolveMode::Partitioned;
 
     const svmp::FE::Real v0 = -80.0;
-    state.registerState(spec, std::span<const svmp::FE::Real>(&v0, 1));
+    state.registerBlock(spec, /*entity_count=*/1,
+                        std::span<const svmp::FE::Real>(&v0, 1));
 
-    EXPECT_EQ(state.size(), 1u);
-    EXPECT_TRUE(state.has("voltage"));
-    EXPECT_DOUBLE_EQ(state["voltage"], -80.0);
+    EXPECT_EQ(state.blockCount(), 1u);
+    EXPECT_TRUE(state.hasBlock("voltage"));
+    const auto& block = state.getBlock("voltage");
+    ASSERT_EQ(block.work().size(), 1u);
+    EXPECT_DOUBLE_EQ(block.work()[0], -80.0);
 }
 
 TEST(AuxiliaryStateTypes, NewSpecMultiComponentWorksWithContainer)
@@ -351,15 +386,15 @@ TEST(AuxiliaryStateTypes, NewSpecMultiComponentWorksWithContainer)
     spec.scope = AuxiliaryStateScope::Node;
 
     const std::array<svmp::FE::Real, 3> init = {0.05, 0.6, 0.3};
-    state.registerState(spec, init);
+    state.registerBlock(spec, /*entity_count=*/1, init);
 
-    EXPECT_EQ(state.size(), 3u);
-    EXPECT_TRUE(state.has("m"));
-    EXPECT_TRUE(state.has("h"));
-    EXPECT_TRUE(state.has("j"));
-    EXPECT_DOUBLE_EQ(state["m"], 0.05);
-    EXPECT_DOUBLE_EQ(state["h"], 0.6);
-    EXPECT_DOUBLE_EQ(state["j"], 0.3);
+    EXPECT_EQ(state.blockCount(), 1u);
+    EXPECT_TRUE(state.hasBlock("gates"));
+    const auto& block = state.getBlock("gates");
+    ASSERT_EQ(block.work().size(), 3u);
+    EXPECT_DOUBLE_EQ(block.work()[0], 0.05);
+    EXPECT_DOUBLE_EQ(block.work()[1], 0.6);
+    EXPECT_DOUBLE_EQ(block.work()[2], 0.3);
 }
 
 TEST(AuxiliaryStateTypes, SpecMetadataIsPreserved)
@@ -373,21 +408,4 @@ TEST(AuxiliaryStateTypes, SpecMetadataIsPreserved)
     EXPECT_EQ(spec.metadata.size(), 2u);
     EXPECT_EQ(spec.metadata.at("author"), "test");
     EXPECT_EQ(spec.metadata.at("version"), "1.0");
-}
-
-// ---------------------------------------------------------------------------
-//  AuxiliaryStateRegistration backward compatibility
-// ---------------------------------------------------------------------------
-
-TEST(AuxiliaryStateTypes, RegistrationHasAssociatedMarkers)
-{
-    // associated_markers moved from spec to registration directly
-    AuxiliaryStateRegistration reg;
-    reg.spec.name = "X";
-    reg.spec.size = 1;
-    reg.associated_markers = {2, 5};
-
-    EXPECT_EQ(reg.associated_markers.size(), 2u);
-    EXPECT_EQ(reg.associated_markers[0], 2);
-    EXPECT_EQ(reg.associated_markers[1], 5);
 }

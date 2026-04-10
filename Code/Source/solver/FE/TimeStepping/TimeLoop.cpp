@@ -310,6 +310,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     // For backends like FSILS, vectors created before any matrix exists may not share
     // the matrix's internal ordering, which would corrupt updates like u <- u - du.
     history.repack(factory);
+    linear.setOptions(transient.system().augmentSolverOptions(linear.getOptions()));
 
     if (options_.scheme == SchemeKind::VSVO_BDF && history.stepIndex() > 0) {
         // Restart sanity check: variable-step schemes require dtHistory() to match the provided

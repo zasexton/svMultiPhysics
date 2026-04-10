@@ -68,6 +68,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -132,6 +133,19 @@ public:
      */
     std::size_t registerBlock(const AuxiliaryStateSpec& spec,
                               std::size_t entity_count,
+                              std::span<const Real> initial_values = {});
+
+    /**
+     * @brief Register a block with an explicit owned/ghost split.
+     *
+     * For `Node` scope, `entity_count = owned + ghost` and
+     * `owned_entity_count` identifies the authoritative prefix used for
+     * layout reporting and ghost synchronization.  Other scopes currently
+     * require `owned_entity_count == entity_count`.
+     */
+    std::size_t registerBlock(const AuxiliaryStateSpec& spec,
+                              std::size_t entity_count,
+                              std::size_t owned_entity_count,
                               std::span<const Real> initial_values = {});
 
     /**

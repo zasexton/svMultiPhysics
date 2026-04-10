@@ -407,8 +407,9 @@ std::vector<EntityRef> getDofSupportEntities(
  * @param predicate Function returning true for points in region
  * @return Vector of DOFs in the region
  *
- * @note This works for vertex DOFs. For higher-order DOFs, the DOF location
- *       is approximated based on the supporting entity centroid.
+ * @note This helper is intentionally limited to vertex-supported DOFs. When
+ *       the map contains higher-order edge/face/cell DOFs it throws instead
+ *       of silently applying a low-order approximation.
  */
 std::vector<GlobalIndex> extractDofsInRegion(
     const DofMap& dof_map,

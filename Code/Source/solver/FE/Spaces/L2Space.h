@@ -15,23 +15,30 @@
  */
 
 #include "Spaces/FunctionSpace.h"
-#include "Elements/DiscontinuousElement.h"
+#include "Elements/ElementFactory.h"
 
 namespace svmp {
 namespace FE {
 namespace spaces {
 
 /**
- * @brief L²-discontinuous space based on scalar DG elements
+ * @brief L²-discontinuous scalar function space
  *
  * This space represents cell-wise discontinuous scalar fields typically used
- * in DG formulations. Continuity is classified as L2, and each element owns
- * its own set of DOFs.
+ * in DG formulations. It wraps scalar elements compatible with L2 continuity,
+ * including nodal DG elements and alternative scalar basis families exposed
+ * through ElementFactory.
  */
 class L2Space : public FunctionSpace {
 public:
     L2Space(ElementType element_type,
             int order);
+
+    L2Space(ElementType element_type,
+            int order,
+            BasisType basis_type);
+
+    explicit L2Space(const elements::ElementRequest& request);
 
     SpaceType space_type() const noexcept override { return SpaceType::L2; }
     FieldType field_type() const noexcept override { return FieldType::Scalar; }
@@ -57,4 +64,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_SPACES_L2SPACE_H
-

@@ -409,7 +409,7 @@ public:
      * @brief Number of named outputs this model provides.
      *
      * Override to expose outputs for assembly/JIT consumption via
-     * `AuxiliaryOutputRef(slot)`.
+     * `AuxiliaryOutputRef(output_id)`.
      */
     [[nodiscard]] virtual int outputCount() const { return 0; }
 

@@ -8,9 +8,9 @@
 #include "Systems/FESystem.h"
 
 #include "Systems/SystemAssembly.h"
+#include "Systems/AuxiliaryQuadratureLayout.h"
 #include "Systems/OperatorBackends.h"
 #include "Systems/BoundaryReductionService.h"
-#include "Systems/CoupledBoundaryManager.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
 #include "Auxiliary/AuxiliaryOperatorRegistry.h"
 #include "Auxiliary/AuxiliaryInputRegistry.h"
@@ -18,6 +18,7 @@
 #include "Auxiliary/AuxiliaryModelBuilder.h"
 #include "Auxiliary/AuxiliaryStateStepper.h"
 #include "Auxiliary/AuxiliaryMultirateScheduler.h"
+#include "Constraints/AuxiliaryDrivenDirichletConstraint.h"
 #include "Forms/PointEvaluator.h"
 #include "Auxiliary/AuxiliaryDerivativeProvider.h"
 #include "Systems/SystemsExceptions.h"
@@ -108,6 +109,79 @@ template <typename T>
 #else
     return value;
 #endif
+}
+
+[[nodiscard]] bool hasExplicitRoleName(const backends::SolverOptions& options,
+                                       backends::BlockRole role) noexcept
+{
+    return std::any_of(options.block_role_names.begin(),
+                       options.block_role_names.end(),
+                       [&](const auto& entry) {
+                           return entry.first == role && !entry.second.empty();
+                       });
+}
+
+[[nodiscard]] backends::BlockRole inferFieldBlockRole(
+    std::string_view field_name,
+    const backends::SolverOptions& options) noexcept
+{
+    for (const auto& [role, name] : options.block_role_names) {
+        if (!name.empty() && name == field_name) {
+            return role;
+        }
+    }
+
+    if (!options.momentum_block_name.empty() && options.momentum_block_name == field_name) {
+        return backends::BlockRole::PrimaryField;
+    }
+    if (!options.constraint_block_name.empty() && options.constraint_block_name == field_name) {
+        return backends::BlockRole::ConstraintField;
+    }
+
+    if (options.block_layout.has_value()) {
+        if (const auto* desc = options.block_layout->findBlock(field_name)) {
+            return desc->role;
+        }
+    }
+
+    return backends::BlockRole::Generic;
+}
+
+[[nodiscard]] std::optional<int> uniqueMixedBlockIndexForRole(
+    const backends::MixedBlockLayout& layout,
+    backends::BlockRole role) noexcept
+{
+    std::optional<int> match{};
+    for (std::size_t i = 0; i < layout.blocks.size(); ++i) {
+        if (layout.blocks[i].role != role) {
+            continue;
+        }
+        if (match.has_value()) {
+            return std::nullopt;
+        }
+        match = static_cast<int>(i);
+    }
+    return match;
+}
+
+void addUnambiguousRoleMappings(backends::SolverOptions& options,
+                                const backends::MixedBlockLayout& layout)
+{
+    for (const auto role : {backends::BlockRole::PrimaryField,
+                            backends::BlockRole::ConstraintField,
+                            backends::BlockRole::AuxiliaryField}) {
+        if (hasExplicitRoleName(options, role)) {
+            continue;
+        }
+        const auto block_index = uniqueMixedBlockIndexForRole(layout, role);
+        if (!block_index.has_value()) {
+            continue;
+        }
+        const auto idx = static_cast<std::size_t>(*block_index);
+        if (!layout.blocks[idx].name.empty()) {
+            options.block_role_names.emplace_back(role, layout.blocks[idx].name);
+        }
+    }
 }
 
 } // namespace
@@ -1049,7 +1123,7 @@ void FESystem::invalidateSetup() noexcept
 
     // Clear setup-time analysis data that is rebuilt during setup().
     // Formulation records, BC descriptors, and definition-time contributions
-    // (from CoupledBoundaryManager) are NOT cleared.
+    // are not cleared.
     // Only setup-time contributions (from kernel analysisContributions()) are
     // removed by truncating back to the definition-time watermark.
     contributions_.resize(contributions_def_count_);
@@ -1084,6 +1158,10 @@ gauge::GaugeRegistry& FESystem::gaugeRegistry()
 // ============================================================================
 
 void FESystem::addFormulationRecord(analysis::FormulationRecord record) {
+    auxiliary_output_consumers_.insert(
+        auxiliary_output_consumers_.end(),
+        record.auxiliary_output_consumers.begin(),
+        record.auxiliary_output_consumers.end());
     formulation_records_.push_back(std::move(record));
     invalidateAnalysisCache();
 }
@@ -1553,17 +1631,6 @@ Real FESystem::evaluateBoundaryFunctional(const std::string& tag,
     return operator_backends_->evaluateBoundaryFunctional(*this, tag, boundary_marker, state);
 }
 
-CoupledBoundaryManager& FESystem::coupledBoundaryManager(FieldId primary_field)
-{
-    if (!coupled_boundary_) {
-        coupled_boundary_ = std::make_unique<CoupledBoundaryManager>(*this, primary_field);
-        return *coupled_boundary_;
-    }
-    FE_THROW_IF(coupled_boundary_->primaryField() != primary_field, InvalidArgumentException,
-                "FESystem::coupledBoundaryManager: manager already initialized with a different primary field");
-    return *coupled_boundary_;
-}
-
 AuxiliaryStateManager& FESystem::auxiliaryStateManager()
 {
     if (!auxiliary_state_manager_) {
@@ -1664,6 +1731,8 @@ void FESystem::applyLocalCondensedRecovery(std::span<const Real> dense_du, Real 
         }
         blk.scatterEntityWork(rec.entity_index, entity_state);
     }
+
+    auxiliary_state_manager_->syncGhosts();
 }
 
 void FESystem::clearLocalCondensedRecovery() noexcept
@@ -2093,15 +2162,12 @@ void FESystem::beginTimeStep(bool reset_auxiliary_state,
                              bool invalidate_auxiliary_inputs)
 {
     // requireSetup() is skipped for auxiliary-only use (no mesh/fields).
-    // Material/global-kernel/coupled-boundary providers are null when not set up.
+    // Material/global-kernel providers are null when not set up.
     if (material_state_provider_) {
         material_state_provider_->beginTimeStep();
     }
     if (global_kernel_state_provider_) {
         global_kernel_state_provider_->beginTimeStep();
-    }
-    if (coupled_boundary_) {
-        coupled_boundary_->beginTimeStep();
     }
     // Reset generalized auxiliary state to committed values.
     if (reset_auxiliary_state && auxiliary_state_manager_) {
@@ -2125,9 +2191,6 @@ void FESystem::commitTimeStep()
     }
     if (global_kernel_state_provider_) {
         global_kernel_state_provider_->commitTimeStep();
-    }
-    if (coupled_boundary_) {
-        coupled_boundary_->commitTimeStep();
     }
     // Commit generalized auxiliary state with the last-known time.
     if (auxiliary_state_manager_) {
@@ -2159,6 +2222,9 @@ void FESystem::finalizeMonolithicAuxiliaryStageState(
     const Real c_prev = (alpha_f - Real(1.0)) * inv_alpha_f;
 
     for (auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized) {
+            continue;
+        }
         if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) {
             continue;
         }
@@ -2214,6 +2280,8 @@ void FESystem::finalizeMonolithicAuxiliaryStageState(
             }
         }
     }
+
+    auxiliary_state_manager_->syncGhosts();
 }
 
 void FESystem::ensureMonolithicCommittedRateBuffer(
@@ -2449,6 +2517,9 @@ void FESystem::ensureMonolithicCommittedRates(const SystemStateView& state)
 
     bool needs_seed = false;
     for (const auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized) {
+            continue;
+        }
         if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) {
             continue;
         }
@@ -2485,6 +2556,9 @@ void FESystem::ensureMonolithicCommittedRates(const SystemStateView& state)
 
     bool requires_prev_fe_state = false;
     for (const auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized) {
+            continue;
+        }
         if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic ||
             monolithic_aux_committed_rates_valid_.count(entry.instance_name) != 0u) {
             continue;
@@ -2673,6 +2747,9 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
     // nonlinear iteration sees the exact direct-feedthrough response instead
     // of stale work values.
     for (auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized) {
+            continue;
+        }
         if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic ||
             !entry.deriv_provider ||
             !auxiliary_state_manager_ ||
@@ -2767,6 +2844,9 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
 
     // Evaluate outputs for deployed models via the base-class output interface.
     for (auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized) {
+            continue;
+        }
         const auto n_outputs = static_cast<std::size_t>(entry.model->outputCount());
         if (n_outputs == 0) continue;
         if (!auxiliary_state_manager_ || !auxiliary_state_manager_->hasBlock(entry.instance_name))
@@ -2955,8 +3035,19 @@ void FESystem::deployAuxiliaryModel(AuxiliaryDeployedInstance instance)
     for (const auto& [k, v] : instance.coupledBindings())
         entry.coupled_bindings[k] = v;
     entry.param_values = instance.paramValues();
+    entry.constraint_bindings = instance.constraintBindings();
+    entry.solver_metadata = instance.solverMetadata();
+    if (entry.solver_metadata.has_value()) {
+        entry.solver_metadata->block_name = entry.instance_name;
+    }
     entry.explicit_entity_count = instance.getEntityCount();
     entry.qp_offsets.assign(instance.qpOffsets().begin(), instance.qpOffsets().end());
+    entry.quadrature_reference_field = instance.quadratureReferenceField();
+    entry.quadrature_reference_operator = instance.quadratureReferenceOperator();
+    entry.variant_group = instance.variantGroup();
+    entry.variant_key = instance.variantKey();
+    entry.activation_mode = instance.getActivationMode();
+    assignAuxiliaryOutputIds_(entry);
 
     deployed_aux_entries_.push_back(std::move(entry));
 }
@@ -2969,6 +3060,26 @@ AuxiliaryInstanceHandle FESystem::deploy(AuxiliaryDeployedInstance instance)
     const std::string inst_name = instance.instanceName();
     deployAuxiliaryModel(std::move(instance));
     return AuxiliaryInstanceHandle(inst_name);
+}
+
+void FESystem::selectAuxiliaryVariant(std::string group, std::string key)
+{
+    FE_THROW_IF(group.empty(), InvalidArgumentException,
+                "FESystem::selectAuxiliaryVariant: empty group");
+    FE_THROW_IF(key.empty(), InvalidArgumentException,
+                "FESystem::selectAuxiliaryVariant: empty key");
+    FE_THROW_IF(is_setup_, InvalidStateException,
+                "FESystem::selectAuxiliaryVariant: selection is frozen after setup()");
+    auxiliary_variant_selection_[std::move(group)] = std::move(key);
+}
+
+void FESystem::clearAuxiliaryVariantSelection(std::string_view group)
+{
+    FE_THROW_IF(group.empty(), InvalidArgumentException,
+                "FESystem::clearAuxiliaryVariantSelection: empty group");
+    FE_THROW_IF(is_setup_, InvalidStateException,
+                "FESystem::clearAuxiliaryVariantSelection: selection is frozen after setup()");
+    auxiliary_variant_selection_.erase(std::string(group));
 }
 
 AuxiliaryInputHandle FESystem::boundaryIntegral(
@@ -3734,6 +3845,9 @@ void FESystem::advanceAuxiliaryState(Real time, Real dt)
     // Check if any block uses Multirate scheduling (interleaved time ordering).
     bool has_multirate = false;
     for (const auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized) {
+            continue;
+        }
         if (entry.spec.solve_mode == AuxiliarySolveMode::Partitioned &&
             entry.spec.schedule_mode == AuxiliaryScheduleMode::Multirate) {
             has_multirate = true;
@@ -3755,6 +3869,9 @@ void FESystem::advanceAuxiliaryState(Real time, Real dt)
             // Find the entry for this block.
             DeployedAuxEntry* ep = nullptr;
             for (auto& entry : deployed_aux_entries_) {
+                if (!entry.materialized) {
+                    continue;
+                }
                 if (entry.instance_name == ss.block_name &&
                     entry.spec.solve_mode == AuxiliarySolveMode::Partitioned &&
                     entry.stepper && entry.deriv_provider) {
@@ -3836,11 +3953,18 @@ void FESystem::advanceAuxiliaryState(Real time, Real dt)
         // Standard dispatch: each partitioned block advances once for the
         // full dt.  The stepper's substep_count handles Subcycled scheduling.
         for (auto& entry : deployed_aux_entries_) {
+            if (!entry.materialized) {
+                continue;
+            }
             if (entry.spec.solve_mode != AuxiliarySolveMode::Partitioned) continue;
             if (!entry.stepper || !entry.deriv_provider) continue;
             advanceOneEntry(entry, time, dt, entry.stepper_spec.substep_count);
         }
     }
+
+    // Partitioned blocks update their local work buffers directly.  Refresh
+    // ghost copies before any downstream assembly reads node-scoped data.
+    auxiliary_state_manager_->syncGhosts();
 
     partitioned_auxiliary_advance_valid_ = true;
     partitioned_auxiliary_advance_time_ = time;
@@ -3971,6 +4095,61 @@ std::vector<Real> FESystem::buildInputVector(const DeployedAuxEntry& entry) cons
         }
     }
     return bound_inputs;
+}
+
+void FESystem::lowerAuxiliaryConstraintBindings_()
+{
+    if (lowered_auxiliary_constraint_offset_ != std::numeric_limits<std::size_t>::max() &&
+        lowered_auxiliary_constraint_offset_ <= system_constraint_defs_.size()) {
+        system_constraint_defs_.resize(lowered_auxiliary_constraint_offset_);
+    }
+    lowered_auxiliary_constraint_offset_ = system_constraint_defs_.size();
+
+    for (const auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized) {
+            continue;
+        }
+        for (const auto& binding : entry.constraint_bindings) {
+            if (binding.kind != AuxiliaryConstraintKind::StrongDirichlet) {
+                FE_THROW(NotImplementedException,
+                         "FESystem::lowerAuxiliaryConstraintBindings_: unsupported auxiliary "
+                         "constraint kind on instance '" + entry.instance_name + "'");
+            }
+            system_constraint_defs_.push_back(
+                std::make_unique<constraints::AuxiliaryDrivenDirichletConstraint>(
+                    entry.instance_name,
+                    binding));
+        }
+    }
+}
+
+const FESystem::DeployedAuxEntry& FESystem::findDeployedAuxEntry_(
+    std::string_view instance_name) const
+{
+    auto it = std::find_if(
+        deployed_aux_entries_.begin(),
+        deployed_aux_entries_.end(),
+        [&](const auto& entry) { return entry.instance_name == instance_name; });
+    FE_THROW_IF(it == deployed_aux_entries_.end(), InvalidArgumentException,
+                "FESystem: unknown auxiliary instance '" + std::string(instance_name) + "'");
+    return *it;
+}
+
+std::vector<std::span<const Real>> FESystem::buildHistorySpans_(
+    const AuxiliaryBlockStorage& blk,
+    std::size_t entity_index,
+    std::vector<std::vector<Real>>& storage) const
+{
+    storage.clear();
+    storage.reserve(blk.history().depth());
+
+    std::vector<std::span<const Real>> spans;
+    spans.reserve(blk.history().depth());
+    for (std::size_t k = 0; k < blk.history().depth(); ++k) {
+        storage.push_back(blk.gatherEntityHistory(k, entity_index));
+        spans.push_back(storage.back());
+    }
+    return spans;
 }
 
 std::pair<std::string, int> FESystem::parseDeclaredInputName(const std::string& raw)
@@ -4556,6 +4735,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
     // This matches the standalone assembleMonolithicAuxiliary() logic for
     // entity-local inputs, xdot computation, and input refresh.
     for (auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized) continue;
         if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) continue;
         if (entry.lower_to_direct_only) continue;
         if (!auxiliary_state_manager_->hasBlock(entry.instance_name)) continue;
@@ -5042,6 +5222,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
     // ----------------------------------------------------------------
     if (want_matrix && matrix_out) {
         for (auto& entry : deployed_aux_entries_) {
+            if (!entry.materialized) continue;
             if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) continue;
             if (entry.lower_to_direct_only) continue;
             if (!entry.deriv_provider) continue;
@@ -5205,6 +5386,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
     // ----------------------------------------------------------------
     if (want_matrix && matrix_out) {
         for (auto& entry : deployed_aux_entries_) {
+            if (!entry.materialized) continue;
             if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) continue;
             if (entry.lower_to_direct_only) continue;
             const bool local_condensed = entry.local_condensed;
@@ -5663,7 +5845,9 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
             for (int k = 0; k < n_outputs; ++k) {
                 const auto& oname = output_names[static_cast<std::size_t>(k)];
                 const auto base_slot = auxiliaryOutputSlotOf(entry.instance_name, oname);
-                if (base_slot == static_cast<std::size_t>(-1)) continue;
+                const auto output_id = auxiliaryOutputIdOf(entry.instance_name, oname);
+                if (base_slot == static_cast<std::size_t>(-1) ||
+                    output_id == static_cast<std::size_t>(-1)) continue;
 
                 for (std::size_t e = 0; e < n_entities; ++e) {
                     const auto& ed = entity_data[e];
@@ -5694,9 +5878,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                     }
 
                     const auto slot = base_slot + e * static_cast<std::size_t>(n_outputs);
-                    const auto reference_slot32 = static_cast<std::uint32_t>(
-                        local_condensed ? base_slot : slot);
-                    const auto slot32 = static_cast<std::uint32_t>(slot);
+                    const auto output_id32 = static_cast<std::uint32_t>(output_id);
                     const auto& owned_dofs = dof_handler_.getPartition().locallyOwned();
 
                     BorderedCouplingData::DirectCouplingRecord coupling_record;
@@ -5730,7 +5912,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                 [&](const forms::FormExprNode& n) {
                                     if (n.type() == forms::FormExprType::AuxiliaryOutputRef) {
                                         const auto s = n.slotIndex();
-                                        if (s && *s == reference_slot32) references_slot = true;
+                                        if (s && *s == output_id32) references_slot = true;
                                     }
                                     for (const auto* c : n.children()) {
                                         if (c && !references_slot) scan_refs(*c);
@@ -5747,11 +5929,11 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
 
                             auto relevant = forms::extractTermsReferencing(
                                 block_residual, forms::FormExprType::AuxiliaryOutputRef,
-                                local_condensed ? reference_slot32 : slot32);
+                                output_id32);
                             if (!relevant.isValid()) continue;
 
                             auto dR_dOk = forms::differentiateWrtAuxiliaryOutput(
-                                relevant, local_condensed ? reference_slot32 : slot32);
+                                relevant, output_id32);
                             if (!dR_dOk.isValid()) continue;
 
                             try {
@@ -6383,6 +6565,7 @@ void FESystem::assembleMonolithicAuxiliary(
 
     // Assemble contributions from each monolithic deployed block.
     for (auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized) continue;
         if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) continue;
         if (entry.lower_to_direct_only) continue;
         if (!auxiliary_state_manager_->hasBlock(entry.instance_name)) continue;
@@ -6506,6 +6689,80 @@ MixedSystemLayout FESystem::composeMixedSystemLayout(std::size_t n_field_unknown
     return layout;
 }
 
+backends::SolverOptions FESystem::augmentSolverOptions(const backends::SolverOptions& base,
+                                                       std::size_t n_field_unknowns) const
+{
+    backends::SolverOptions options = base;
+    std::size_t effective_field_unknowns = n_field_unknowns;
+    if (effective_field_unknowns == 0 && field_map_.isFinalized() && field_map_.totalDofs() > 0) {
+        effective_field_unknowns = static_cast<std::size_t>(field_map_.totalDofs());
+    }
+
+    backends::MixedBlockLayout mixed_layout;
+    mixed_layout.field_unknowns = static_cast<GlobalIndex>(effective_field_unknowns);
+
+    if (field_map_.isFinalized()) {
+        for (std::size_t field_idx = 0; field_idx < field_map_.numFields(); ++field_idx) {
+            const auto& field = field_map_.getField(field_idx);
+            const auto [begin, end] = field_map_.getFieldDofRange(field_idx);
+            FE_THROW_IF(begin < 0 || end < begin, InvalidStateException,
+                        "FESystem::augmentSolverOptions: invalid field DOF range for '"
+                        + field.name + "'");
+            if (effective_field_unknowns > 0) {
+                FE_THROW_IF(static_cast<std::size_t>(end) > effective_field_unknowns,
+                            InvalidArgumentException,
+                            "FESystem::augmentSolverOptions: requested field unknown count "
+                            + std::to_string(effective_field_unknowns)
+                            + " is smaller than finalized field range for '" + field.name + "'");
+            }
+
+            backends::MixedBlockDescriptor block;
+            block.name = field.name;
+            block.offset = begin;
+            block.size = end - begin;
+            block.role = inferFieldBlockRole(field.name, base);
+            block.kind = backends::MixedBlockKind::Field;
+            mixed_layout.blocks.push_back(std::move(block));
+        }
+    }
+
+    const auto mixed_system = composeMixedSystemLayout(effective_field_unknowns);
+    mixed_layout.auxiliary_unknowns = static_cast<GlobalIndex>(mixed_system.n_aux_unknowns);
+    mixed_layout.total_unknowns = static_cast<GlobalIndex>(mixed_system.total_unknowns);
+
+    for (const auto& aux_block : mixed_system.aux_layout.blocks) {
+        backends::MixedBlockDescriptor block;
+        block.name = aux_block.name;
+        block.offset = static_cast<GlobalIndex>(
+            mixed_system.aux_layout.mixed_system_offset + aux_block.offset);
+        block.size = static_cast<GlobalIndex>(aux_block.n_unknowns);
+        block.role = aux_block.backend_role;
+        block.kind = backends::MixedBlockKind::Auxiliary;
+        block.block_diagonal_suitable = aux_block.block_diagonal_suitable;
+        block.special_precondition =
+            (aux_block.role == AuxiliaryBlockRole::SpecialPrecondition);
+        block.schur_eliminable = aux_block.schur_eliminable;
+        block.schur_complement_partner = aux_block.schur_complement_partner;
+        mixed_layout.blocks.push_back(std::move(block));
+    }
+
+    mixed_layout.primary_block =
+        uniqueMixedBlockIndexForRole(mixed_layout, backends::BlockRole::PrimaryField);
+    mixed_layout.constraint_block =
+        uniqueMixedBlockIndexForRole(mixed_layout, backends::BlockRole::ConstraintField);
+
+    options.mixed_block_layout = mixed_layout;
+    addUnambiguousRoleMappings(options, *options.mixed_block_layout);
+    return options;
+}
+
+backends::SolverOptions FESystem::augmentSolverOptions(const backends::SolverOptions& base) const
+{
+    const auto n_field_unknowns =
+        is_setup_ ? static_cast<std::size_t>(dof_handler_.getNumDofs()) : std::size_t{0};
+    return augmentSolverOptions(base, n_field_unknowns);
+}
+
 void FESystem::rollbackAuxiliaryState()
 {
     if (auxiliary_state_manager_) {
@@ -6518,7 +6775,7 @@ void FESystem::finalizeAuxiliaryLayout()
     monolithic_aux_committed_rates_.clear();
     monolithic_aux_committed_rates_valid_.clear();
     lowered_aux_output_exprs_by_name_.clear();
-    lowered_aux_output_exprs_by_slot_.clear();
+    lowered_aux_output_exprs_by_id_.clear();
 
     // Resolve deferred input-expression wiring before deciding whether pure
     // algebraic monolithic blocks can be lowered to direct-only coupling.
@@ -6528,20 +6785,47 @@ void FESystem::finalizeAuxiliaryLayout()
 
     // Materialize deployed instances into blocks, steppers, and derivative providers.
     for (auto& entry : deployed_aux_entries_) {
+        entry.selected = isAuxiliaryDeploymentSelected_(entry);
+        entry.materialized = false;
+        entry.entity_map.clear();
+
+        if (entry.activation_mode == AuxiliaryActivationMode::Disabled ||
+            !entry.selected) {
+            FE_THROW_IF(hasAuxiliaryConsumers_(entry), InvalidStateException,
+                        "FESystem::finalizeAuxiliaryLayout: auxiliary instance '" +
+                            entry.instance_name +
+                            "' is not active for this run but is still referenced by an installed consumer");
+            continue;
+        }
+
         auto& mgr = auxiliaryStateManager();
 
         // Determine entity count: prefer explicit, then mesh-derived, then 1.
+        // Node scope also carries an owned/ghost split when the mesh exposes
+        // vertex ownership metadata.
         std::size_t entity_count = entry.explicit_entity_count;
+        std::size_t owned_entity_count = entity_count;
         if (entity_count == 0) {
             switch (entry.spec.scope) {
                 case AuxiliaryStateScope::Global:
                     entity_count = 1;
+                    owned_entity_count = entity_count;
                     break;
                 case AuxiliaryStateScope::Node:
-                    FE_THROW(InvalidStateException,
-                             "FESystem::finalizeAuxiliaryLayout: Node scope requires "
-                             "explicit .entityCount() — IMeshAccess does not expose "
-                             "vertex count");
+                    if (mesh_access_) {
+                        entity_count =
+                            static_cast<std::size_t>(std::max<GlobalIndex>(0, mesh_access_->numVertices()));
+                        owned_entity_count =
+                            static_cast<std::size_t>(std::max<GlobalIndex>(0, mesh_access_->numOwnedVertices()));
+                        FE_THROW_IF(owned_entity_count > entity_count, InvalidStateException,
+                                    "FESystem::finalizeAuxiliaryLayout: mesh reports "
+                                    "numOwnedVertices() > numVertices() for Node scope");
+                    } else {
+                        FE_THROW(InvalidStateException,
+                                 "FESystem::finalizeAuxiliaryLayout: Node scope requires "
+                                 "mesh vertex count via IMeshAccess::numVertices() or "
+                                 "an explicit .entityCount()");
+                    }
                     break;
                 case AuxiliaryStateScope::Cell:
                     if (mesh_access_) {
@@ -6549,9 +6833,11 @@ void FESystem::finalizeAuxiliaryLayout()
                     } else {
                         entity_count = 1;
                     }
+                    owned_entity_count = entity_count;
                     break;
                 case AuxiliaryStateScope::Boundary:
                     entity_count = 1;
+                    owned_entity_count = entity_count;
                     break;
                 case AuxiliaryStateScope::Facet:
                     if (mesh_access_) {
@@ -6559,17 +6845,33 @@ void FESystem::finalizeAuxiliaryLayout()
                     } else {
                         entity_count = 1;
                     }
+                    owned_entity_count = entity_count;
                     break;
                 case AuxiliaryStateScope::QuadraturePoint:
                     if (!entry.qp_offsets.empty()) {
                         entity_count = entry.qp_offsets.back();
+                        owned_entity_count = entity_count;
                     } else {
-                        FE_THROW(InvalidStateException,
-                                 "FESystem::finalizeAuxiliaryLayout: QuadraturePoint scope "
-                                 "requires explicit .entityCount() or qpOffsets()");
+                        entity_count = 0;
+                        owned_entity_count = 0;
                     }
                     break;
             }
+        } else if (entry.spec.scope == AuxiliaryStateScope::Node && mesh_access_) {
+            const auto mesh_entity_count =
+                static_cast<std::size_t>(std::max<GlobalIndex>(0, mesh_access_->numVertices()));
+            const auto mesh_owned_entity_count =
+                static_cast<std::size_t>(std::max<GlobalIndex>(0, mesh_access_->numOwnedVertices()));
+            FE_THROW_IF(mesh_owned_entity_count > mesh_entity_count, InvalidStateException,
+                        "FESystem::finalizeAuxiliaryLayout: mesh reports "
+                        "numOwnedVertices() > numVertices() for Node scope");
+            FE_THROW_IF(entity_count != mesh_entity_count, InvalidArgumentException,
+                        "FESystem::finalizeAuxiliaryLayout: Node scope instance '" +
+                        entry.instance_name + "' requested entityCount()=" +
+                        std::to_string(entity_count) + " but the mesh exposes " +
+                        std::to_string(mesh_entity_count) +
+                        " vertices. Omit entityCount() and let the backend derive it.");
+            owned_entity_count = mesh_owned_entity_count;
         }
 
         // Region-to-entity expansion.
@@ -6657,9 +6959,25 @@ void FESystem::finalizeAuxiliaryLayout()
                          "provided to FESystem");
             }
             if (!entry.entity_map.empty()) {
-                // The block storage size is the restricted entity count.
-                entity_count = entry.entity_map.size();
+                if (entry.spec.scope == AuxiliaryStateScope::QuadraturePoint) {
+                    owned_entity_count = entry.entity_map.size();
+                } else {
+                    // The block storage size is the restricted entity count.
+                    entity_count = entry.entity_map.size();
+                    owned_entity_count = entity_count;
+                }
             }
+        }
+
+        if (entry.spec.scope == AuxiliaryStateScope::QuadraturePoint) {
+            inferQuadraturePointLayout_(entry);
+            if (!entry.materialized) {
+                continue;
+            }
+            entity_count = entry.qp_offsets.back();
+            owned_entity_count = entity_count;
+        } else {
+            entry.materialized = true;
         }
 
         // Register the block.
@@ -6709,7 +7027,7 @@ void FESystem::finalizeAuxiliaryLayout()
                 !entry.qp_offsets.empty()) {
                 mgr.registerBlockWithQPOffsets(entry.spec, entry.qp_offsets, init_span);
             } else {
-                mgr.registerBlock(entry.spec, entity_count, init_span);
+                mgr.registerBlock(entry.spec, entity_count, owned_entity_count, init_span);
             }
         }
 
@@ -6835,6 +7153,7 @@ void FESystem::finalizeAuxiliaryLayout()
     // Build multirate scheduler from deployed block schedule modes.
     aux_scheduler_ = std::make_unique<AuxiliaryMultirateScheduler>();
     for (const auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized) continue;
         if (entry.spec.solve_mode != AuxiliarySolveMode::Partitioned) continue;
 
         MultirateBlockSchedule sched;
@@ -6858,8 +7177,12 @@ void FESystem::finalizeAuxiliaryLayout()
     finalizeDeferredInputDeps();
     buildLoweredAuxiliaryOutputExpressions_();
     buildAuxiliaryOutputBindings_();
+    lowerAuxiliaryConstraintBindings_();
 
     for (auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized) {
+            continue;
+        }
         if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) {
             continue;
         }
@@ -6926,9 +7249,27 @@ void FESystem::finalizeAuxiliaryLayout()
             } else if (entity_count == 0) {
                 entity_count = 1;
             }
+            auto solver_metadata = entry.solver_metadata;
+            const auto structural = entry.model->structuralMetadata();
+            if (!solver_metadata.has_value() && !structural.constraint_groups.empty()) {
+                AuxiliaryBlockSolverMetadata inferred;
+                inferred.block_name = entry.instance_name;
+                inferred.role = AuxiliaryBlockRole::Constraint;
+                inferred.block_diagonal_suitable = false;
+                solver_metadata = std::move(inferred);
+            }
+            if (solver_metadata.has_value()) {
+                if (solver_metadata->block_name.empty()) {
+                    solver_metadata->block_name = entry.instance_name;
+                }
+                auxiliaryOperatorRegistry().setBlockSolverMetadata(
+                    entry.instance_name, *solver_metadata);
+            }
             auxiliaryOperatorRegistry().registerMonolithicUnknowns(
                 entry.instance_name, entity_count,
-                entry.spec.size, entry.spec.scope);
+                entry.spec.size, entry.spec.scope,
+                solver_metadata ? &*solver_metadata : nullptr,
+                structural.constraint_groups);
         }
     }
 
@@ -6963,6 +7304,9 @@ void FESystem::assembleMixedAuxiliaryDense(
         n_aux = auxiliary_operator_registry_->auxiliaryLayout().total_aux_unknowns;
     } else {
         for (const auto& entry : deployed_aux_entries_) {
+            if (!entry.materialized) {
+                continue;
+            }
             if (entry.spec.solve_mode == AuxiliarySolveMode::Monolithic) {
                 if (entry.lower_to_direct_only) continue;
                 n_aux += static_cast<std::size_t>(entry.model->dimension());
@@ -7379,12 +7723,107 @@ std::span<const Real> FESystem::auxiliaryOutputValues() const noexcept
     return aux_output_flat_;
 }
 
+Real FESystem::auxiliaryConstraintValue(std::string_view instance_name,
+                                        const AuxiliaryConstraintBinding& binding,
+                                        Real time,
+                                        Real dt) const
+{
+    const auto& entry = findDeployedAuxEntry_(instance_name);
+    FE_THROW_IF(!auxiliary_state_manager_ ||
+                    !auxiliary_state_manager_->hasBlock(entry.instance_name),
+                InvalidStateException,
+                "FESystem::auxiliaryConstraintValue: auxiliary block '" +
+                    entry.instance_name + "' is not finalized");
+
+    const auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
+    FE_THROW_IF(blk.entityCount() != 1u, NotImplementedException,
+                "FESystem::auxiliaryConstraintValue: only single-entity auxiliary "
+                "constraint sources are supported for instance '" + entry.instance_name + "'");
+
+    auto state_vec =
+        (binding.state_view == AuxiliaryOutputStateView::Committed)
+            ? blk.gatherEntityCommitted(/*entity_index=*/0)
+            : blk.gatherEntityWork(/*entity_index=*/0);
+
+    if (binding.value_source == AuxiliaryConstraintValueSource::State) {
+        auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get());
+        FE_THROW_IF(!built, InvalidArgumentException,
+                    "FESystem::auxiliaryConstraintValue: state-driven auxiliary "
+                    "constraints require a BuiltAuxiliaryModel for instance '" +
+                        entry.instance_name + "'");
+        const auto& state_names = built->stateNames();
+        auto it = std::find(state_names.begin(), state_names.end(), binding.value_name);
+        FE_THROW_IF(it == state_names.end(), InvalidArgumentException,
+                    "FESystem::auxiliaryConstraintValue: unknown state '" +
+                        binding.value_name + "' on instance '" + entry.instance_name + "'");
+        const auto idx = static_cast<std::size_t>(std::distance(state_names.begin(), it));
+        FE_THROW_IF(idx >= state_vec.size(), InvalidStateException,
+                    "FESystem::auxiliaryConstraintValue: state index out of range for '" +
+                        binding.value_name + "'");
+        return state_vec[idx];
+    }
+
+    FE_THROW_IF(entry.model->outputCount() <= 0, InvalidArgumentException,
+                "FESystem::auxiliaryConstraintValue: instance '" + entry.instance_name +
+                    "' has no outputs");
+    FE_THROW_IF(entry.deriv_provider &&
+                    !entry.deriv_provider->artifact().referenced_fields.empty(),
+                NotImplementedException,
+                "FESystem::auxiliaryConstraintValue: auxiliary-driven strong Dirichlet "
+                "constraints do not yet support outputs that directly reference FE fields");
+
+    auto params = buildParamVector(entry);
+    auto inputs = buildInputVector(entry);
+
+    std::vector<Real> xdot(state_vec.size(), Real{0.0});
+    std::vector<std::vector<Real>> history_storage;
+    auto history_spans = buildHistorySpans_(blk, /*entity_index=*/0, history_storage);
+
+    AuxiliaryLocalContext ctx;
+    ctx.time = time;
+    ctx.dt = dt;
+    ctx.effective_dt = dt;
+    ctx.x = state_vec;
+    ctx.xdot = xdot;
+    ctx.history = history_spans;
+    ctx.inputs = inputs;
+    ctx.params = params;
+    ctx.entity_index = 0;
+    ctx.field_values = {};
+    ctx.user_data = nullptr;
+
+    std::vector<Real> outputs(static_cast<std::size_t>(entry.model->outputCount()), 0.0);
+    entry.model->evaluateOutputs(ctx, outputs);
+
+    const auto output_names = entry.model->outputNames();
+    auto out_it = std::find(output_names.begin(), output_names.end(), binding.value_name);
+    FE_THROW_IF(out_it == output_names.end(), InvalidArgumentException,
+                "FESystem::auxiliaryConstraintValue: unknown output '" +
+                    binding.value_name + "' on instance '" + entry.instance_name + "'");
+    const auto out_idx = static_cast<std::size_t>(std::distance(output_names.begin(), out_it));
+    FE_THROW_IF(out_idx >= outputs.size(), InvalidStateException,
+                "FESystem::auxiliaryConstraintValue: output index out of range for '" +
+                    binding.value_name + "'");
+    return outputs[out_idx];
+}
+
 std::size_t FESystem::auxiliaryOutputSlotOf(std::string_view output_name) const
 {
-    // Two-pass: first check for ambiguity, then return the slot.
+    const bool use_materialized_filter = std::any_of(
+        deployed_aux_entries_.begin(),
+        deployed_aux_entries_.end(),
+        [](const auto& entry) { return entry.materialized; });
+
     int match_count = 0;
     std::string first_instance;
     for (const auto& entry : deployed_aux_entries_) {
+        if (use_materialized_filter) {
+            if (!entry.materialized) {
+                continue;
+            }
+        } else if (!isAuxiliaryDeploymentVisibleForBareLookup_(entry)) {
+            continue;
+        }
         for (const auto& oname : entry.model->outputNames()) {
             if (oname == output_name) {
                 ++match_count;
@@ -7405,8 +7844,16 @@ std::size_t FESystem::auxiliaryOutputSlotOf(std::string_view output_name) const
 std::size_t FESystem::auxiliaryOutputSlotOf(
     std::string_view instance_name, std::string_view output_name) const
 {
+    const bool use_materialized_filter = std::any_of(
+        deployed_aux_entries_.begin(),
+        deployed_aux_entries_.end(),
+        [](const auto& entry) { return entry.materialized; });
+
     std::size_t slot = 0;
     for (const auto& entry : deployed_aux_entries_) {
+        if (use_materialized_filter && !entry.materialized) {
+            continue;
+        }
         auto out_names = entry.model->outputNames();
         const auto n_outputs = out_names.size();
         if (n_outputs == 0) continue;
@@ -7430,6 +7877,59 @@ std::size_t FESystem::auxiliaryOutputSlotOf(
         slot += n_entities * n_outputs;
     }
     return static_cast<std::size_t>(-1);
+}
+
+std::size_t FESystem::auxiliaryOutputIdOf(std::string_view output_name) const
+{
+    const auto slash = output_name.find('/');
+    if (slash != std::string_view::npos) {
+        return auxiliaryOutputIdOf(output_name.substr(0, slash),
+                                   output_name.substr(slash + 1));
+    }
+
+    int match_count = 0;
+    std::size_t match_id = static_cast<std::size_t>(-1);
+    for (const auto& entry : deployed_aux_entries_) {
+        if (!isAuxiliaryDeploymentVisibleForBareLookup_(entry)) {
+            continue;
+        }
+        const auto output_names = entry.model->outputNames();
+        for (std::size_t i = 0; i < output_names.size(); ++i) {
+            if (output_names[i] != output_name) {
+                continue;
+            }
+            ++match_count;
+            if (i < entry.output_ids.size()) {
+                match_id = static_cast<std::size_t>(entry.output_ids[i]);
+            }
+        }
+    }
+
+    FE_THROW_IF(match_count > 1, InvalidArgumentException,
+                "auxiliaryOutputIdOf(\"" + std::string(output_name) +
+                    "\"): ambiguous — " + std::to_string(match_count) +
+                    " deployed models have this output name. "
+                    "Use auxiliaryOutputIdOf(instance_name, output_name) instead.");
+    return match_id;
+}
+
+std::size_t FESystem::auxiliaryOutputIdOf(
+    std::string_view instance_name, std::string_view output_name) const
+{
+    const auto qualified = std::string(instance_name) + "/" + std::string(output_name);
+    const auto it = auxiliary_output_id_by_qualified_name_.find(qualified);
+    if (it == auxiliary_output_id_by_qualified_name_.end()) {
+        return static_cast<std::size_t>(-1);
+    }
+    return static_cast<std::size_t>(it->second);
+}
+
+const FESystem::AuxiliaryOutputDescriptor* FESystem::auxiliaryOutputDescriptor(
+    std::size_t output_id) const noexcept
+{
+    return output_id < auxiliary_output_descriptors_.size()
+        ? &auxiliary_output_descriptors_[output_id]
+        : nullptr;
 }
 
 bool
@@ -7664,187 +8164,6 @@ FESystem::synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
 }
 
 std::optional<forms::FormExpr>
-FESystem::synthesizeCoupledBoundaryAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
-                                                        std::string_view output_name) const
-{
-    auto trace_block = [&](std::string_view stage) {
-        if (!monolithicAuxTraceEnabled()) {
-            return;
-        }
-        FE_LOG_INFO("FESystem::synthesizeCoupledBoundaryAuxiliaryOutputExpr blocked"
-                    " instance=" + entry.instance_name +
-                    " output=" + std::string(output_name) +
-                    " stage=" + std::string(stage));
-    };
-
-    auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get());
-    if (!built) {
-        trace_block("not_built_model");
-        return std::nullopt;
-    }
-
-    const auto& state_names = built->stateNames();
-    const auto dim = state_names.size();
-    const bool can_inline_state_assignments =
-        (dim > 0) && isPureAlgebraicAuxiliary(*entry.model, dim);
-
-    std::vector<forms::FormExpr> explicit_state_exprs;
-    if (can_inline_state_assignments) {
-        const auto residual_exprs = built->residualExpressions();
-        if (residual_exprs.size() < dim) {
-            trace_block("residual_size_mismatch");
-            return std::nullopt;
-        }
-
-        explicit_state_exprs.resize(dim);
-        for (std::size_t i = 0; i < dim; ++i) {
-            auto explicit_rhs =
-                tryExtractExplicitStateAssignment(residual_exprs[i], static_cast<std::uint32_t>(i));
-            if (!explicit_rhs) {
-                trace_block("explicit_state_assignment");
-                return std::nullopt;
-            }
-            explicit_state_exprs[i] = std::move(*explicit_rhs);
-        }
-
-        for (std::size_t pass = 0; pass < dim; ++pass) {
-            for (std::size_t i = 0; i < dim; ++i) {
-                explicit_state_exprs[i] = explicit_state_exprs[i].transformNodes(
-                    [&](const forms::FormExprNode& node) -> std::optional<forms::FormExpr> {
-                        if (node.type() != forms::FormExprType::AuxiliaryStateRef) {
-                            return std::nullopt;
-                        }
-                        const auto slot = node.slotIndex();
-                        if (!slot || *slot >= explicit_state_exprs.size() || *slot == i ||
-                            !explicit_state_exprs[*slot].isValid()) {
-                            return std::nullopt;
-                        }
-                        return explicit_state_exprs[*slot];
-                    });
-            }
-        }
-    }
-
-    const auto out_it =
-        std::find_if(built->outputExpressions().begin(),
-                     built->outputExpressions().end(),
-                     [&](const auto& kv) { return kv.first == output_name; });
-    if (out_it == built->outputExpressions().end()) {
-        trace_block("missing_output_expr");
-        return std::nullopt;
-    }
-
-    const auto& sig = built->signature();
-    auto instantiate = [&](const forms::FormExpr& expr) -> std::optional<forms::FormExpr> {
-        if (!expr.isValid()) {
-            trace_block("output_expr_invalid");
-            return std::nullopt;
-        }
-
-        auto replace_terminals =
-            [&](const forms::FormExprNode& node) -> std::optional<forms::FormExpr> {
-                switch (node.type()) {
-                    case forms::FormExprType::AuxiliaryStateRef: {
-                        if (!can_inline_state_assignments) {
-                            trace_block("state_assignment_required");
-                            return std::nullopt;
-                        }
-                        const auto slot = node.slotIndex();
-                        if (!slot || *slot >= explicit_state_exprs.size() ||
-                            !explicit_state_exprs[*slot].isValid()) {
-                            trace_block("bad_state_slot");
-                            return std::nullopt;
-                        }
-                        return explicit_state_exprs[*slot];
-                    }
-                    case forms::FormExprType::AuxiliaryInputRef: {
-                        const auto slot = node.slotIndex();
-                        if (!slot || *slot >= sig.inputs.size()) {
-                            trace_block("bad_input_slot");
-                            return std::nullopt;
-                        }
-                        const auto& port = sig.inputs[*slot];
-
-                        std::string registry_name;
-                        const FEQuantityDefinition* def = nullptr;
-                        const auto bind_it = entry.input_bindings.find(port.name);
-                        if (bind_it != entry.input_bindings.end()) {
-                            registry_name = bind_it->second;
-                        } else {
-                            const auto coupled_it = entry.coupled_bindings.find(port.name);
-                            if (coupled_it != entry.coupled_bindings.end()) {
-                                registry_name = coupled_it->second.registryName();
-                                def = coupled_it->second.definition();
-                            }
-                        }
-                        if (def == nullptr && !registry_name.empty() && fe_quantity_registry_ &&
-                            fe_quantity_registry_->hasDefinition(registry_name)) {
-                            def = &fe_quantity_registry_->get(registry_name);
-                        }
-
-                        if (def != nullptr &&
-                            def->kind == FEQuantityKind::BoundaryIntegral &&
-                            def->expression.isValid() &&
-                            def->boundary_marker >= 0) {
-                            return forms::FormExpr::boundaryIntegral(
-                                def->expression, def->boundary_marker, registry_name);
-                        }
-                        if (port.optional && port.default_value.has_value()) {
-                            return forms::FormExpr::constant(*port.default_value);
-                        }
-                        trace_block("unsupported_coupled_boundary_input");
-                        return std::nullopt;
-                    }
-                    case forms::FormExprType::ParameterRef: {
-                        const auto slot = node.slotIndex();
-                        if (!slot || *slot >= sig.parameters.size()) {
-                            trace_block("bad_parameter_slot");
-                            return std::nullopt;
-                        }
-                        const auto& port = sig.parameters[*slot];
-                        const auto param_it = entry.param_values.find(port.name);
-                        if (param_it != entry.param_values.end()) {
-                            return forms::FormExpr::constant(param_it->second);
-                        }
-                        if (port.optional && port.default_value.has_value()) {
-                            return forms::FormExpr::constant(*port.default_value);
-                        }
-                        trace_block("unbound_parameter");
-                        return std::nullopt;
-                    }
-                    default:
-                        return std::nullopt;
-                }
-            };
-
-        auto lowered = expr;
-        const std::size_t max_passes =
-            std::max<std::size_t>(4, dim + sig.inputs.size() + sig.parameters.size() + 1);
-        for (std::size_t pass = 0; pass < max_passes; ++pass) {
-            lowered = lowered.transformNodes(replace_terminals);
-        }
-
-        if (!lowered.isValid() || !lowered.node()) {
-            trace_block("lowered_invalid");
-            return std::nullopt;
-        }
-        if (exprContainsType(*lowered.node(), forms::FormExprType::ParameterRef) ||
-            exprContainsType(*lowered.node(), forms::FormExprType::ParameterSymbol) ||
-            exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryOutputRef) ||
-            exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryOutputSymbol) ||
-            exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryInputRef) ||
-            exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryInputSymbol) ||
-            exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryStateRef)) {
-            trace_block("unsupported_terminals_remaining");
-            return std::nullopt;
-        }
-        return lowered;
-    };
-
-    return instantiate(out_it->second);
-}
-
-std::optional<forms::FormExpr>
 FESystem::loweredAuxiliaryOutputExpr(std::string_view output_name) const
 {
     const auto it = lowered_aux_output_exprs_by_name_.find(std::string(output_name));
@@ -7866,6 +8185,9 @@ FESystem::loweredAuxiliaryOutputExpr(std::string_view output_name) const
 
     std::optional<forms::FormExpr> synthesized;
     for (const auto& entry : deployed_aux_entries_) {
+        if (!isAuxiliaryDeploymentVisibleForBareLookup_(entry)) {
+            continue;
+        }
         auto lowered = synthesizeLoweredAuxiliaryOutputExpr_(entry, output_name);
         if (!lowered) {
             continue;
@@ -7879,52 +8201,21 @@ FESystem::loweredAuxiliaryOutputExpr(std::string_view output_name) const
         return synthesized;
     }
 
-    const auto slot = auxiliaryOutputSlotOf(output_name);
-    if (slot == static_cast<std::size_t>(-1)) {
+    const auto output_id = auxiliaryOutputIdOf(output_name);
+    if (output_id == static_cast<std::size_t>(-1)) {
         return std::nullopt;
     }
-    return loweredAuxiliaryOutputExpr(slot);
+    return loweredAuxiliaryOutputExpr(output_id);
 }
 
 std::optional<forms::FormExpr>
-FESystem::loweredAuxiliaryOutputExpr(std::size_t slot) const
+FESystem::loweredAuxiliaryOutputExpr(std::size_t output_id) const
 {
-    const auto it = lowered_aux_output_exprs_by_slot_.find(slot);
-    if (it == lowered_aux_output_exprs_by_slot_.end()) {
+    const auto it = lowered_aux_output_exprs_by_id_.find(output_id);
+    if (it == lowered_aux_output_exprs_by_id_.end()) {
         return std::nullopt;
     }
     return it->second;
-}
-
-std::optional<forms::FormExpr>
-FESystem::coupledBoundaryCompatibleAuxiliaryOutputExpr(std::string_view output_name) const
-{
-    const auto slash = output_name.find('/');
-    if (slash != std::string_view::npos) {
-        const std::string instance_name(output_name.substr(0, slash));
-        const std::string local_name(output_name.substr(slash + 1));
-        for (const auto& entry : deployed_aux_entries_) {
-            if (entry.instance_name != instance_name) {
-                continue;
-            }
-            return synthesizeCoupledBoundaryAuxiliaryOutputExpr_(entry, local_name);
-        }
-        return std::nullopt;
-    }
-
-    std::optional<forms::FormExpr> synthesized;
-    for (const auto& entry : deployed_aux_entries_) {
-        auto lowered = synthesizeCoupledBoundaryAuxiliaryOutputExpr_(entry, output_name);
-        if (!lowered) {
-            continue;
-        }
-        FE_THROW_IF(synthesized.has_value(), InvalidArgumentException,
-                    "coupledBoundaryCompatibleAuxiliaryOutputExpr(\"" +
-                        std::string(output_name) +
-                        "\"): ambiguous output; use qualified instance/output name");
-        synthesized = std::move(lowered);
-    }
-    return synthesized;
 }
 
 bool FESystem::auxiliaryOutputMetadataUsesRef(std::string_view output_name) const
@@ -7947,6 +8238,9 @@ bool FESystem::auxiliaryOutputMetadataUsesRef(std::string_view output_name) cons
 
     const DeployedAuxEntry* match = nullptr;
     for (const auto& entry : deployed_aux_entries_) {
+        if (!isAuxiliaryDeploymentVisibleForBareLookup_(entry)) {
+            continue;
+        }
         const auto output_names = entry.model->outputNames();
         const bool found = std::find(
             output_names.begin(), output_names.end(), std::string(output_name)) != output_names.end();
@@ -7964,12 +8258,40 @@ bool FESystem::auxiliaryOutputMetadataUsesRef(std::string_view output_name) cons
     return match != nullptr && !match->lower_to_direct_only;
 }
 
+std::vector<analysis::AuxiliaryOutputConsumerRecord>
+FESystem::consumersOfAuxiliaryOutput(std::size_t output_id) const
+{
+    std::vector<analysis::AuxiliaryOutputConsumerRecord> consumers;
+    for (const auto& consumer : auxiliary_output_consumers_) {
+        if (consumer.output_id == output_id) {
+            consumers.push_back(consumer);
+        }
+    }
+    return consumers;
+}
+
+std::vector<analysis::AuxiliaryOutputConsumerRecord>
+FESystem::consumersOfInstance(std::string_view instance_name) const
+{
+    std::vector<analysis::AuxiliaryOutputConsumerRecord> consumers;
+    for (const auto& consumer : auxiliary_output_consumers_) {
+        const auto* desc = auxiliaryOutputDescriptor(consumer.output_id);
+        if (desc && desc->instance_name == instance_name) {
+            consumers.push_back(consumer);
+        }
+    }
+    return consumers;
+}
+
 void FESystem::buildLoweredAuxiliaryOutputExpressions_()
 {
     lowered_aux_output_exprs_by_name_.clear();
-    lowered_aux_output_exprs_by_slot_.clear();
+    lowered_aux_output_exprs_by_id_.clear();
 
     for (const auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized && entry.activation_mode != AuxiliaryActivationMode::Always) {
+            continue;
+        }
         for (const auto& output_name : entry.model->outputNames()) {
             auto lowered = synthesizeLoweredAuxiliaryOutputExpr_(entry, output_name);
             if (!lowered) {
@@ -7979,9 +8301,9 @@ void FESystem::buildLoweredAuxiliaryOutputExpressions_()
             const auto qualified_name = entry.instance_name + "/" + output_name;
             lowered_aux_output_exprs_by_name_[qualified_name] = *lowered;
 
-            const auto slot = auxiliaryOutputSlotOf(entry.instance_name, output_name);
-            if (slot != static_cast<std::size_t>(-1)) {
-                lowered_aux_output_exprs_by_slot_[slot] = *lowered;
+            const auto output_id = auxiliaryOutputIdOf(entry.instance_name, output_name);
+            if (output_id != static_cast<std::size_t>(-1)) {
+                lowered_aux_output_exprs_by_id_[output_id] = *lowered;
             }
         }
     }
@@ -7992,19 +8314,27 @@ void FESystem::buildAuxiliaryOutputBindings_()
     auxiliary_output_bindings_.clear();
 
     for (const auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized) {
+            continue;
+        }
         const auto output_names = entry.model->outputNames();
         if (output_names.empty()) {
             continue;
         }
 
-        for (const auto& output_name : output_names) {
+        for (std::size_t output_index = 0; output_index < output_names.size(); ++output_index) {
+            const auto& output_name = output_names[output_index];
             const auto base_slot = auxiliaryOutputSlotOf(entry.instance_name, output_name);
             if (base_slot == static_cast<std::size_t>(-1)) {
                 continue;
             }
+            if (output_index >= entry.output_ids.size()) {
+                continue;
+            }
 
             assembly::AuxiliaryOutputBinding binding;
-            binding.base_slot = static_cast<std::uint32_t>(base_slot);
+            binding.output_id = entry.output_ids[output_index];
+            binding.storage_offset = static_cast<std::uint32_t>(base_slot);
             binding.scope = toAssemblyAuxiliaryOutputScope(entry.spec.scope);
             binding.outputs_per_entity =
                 static_cast<std::uint32_t>(std::max<std::size_t>(1u, output_names.size()));
@@ -8019,6 +8349,273 @@ void FESystem::buildAuxiliaryOutputBindings_()
             auxiliary_output_bindings_.push_back(binding);
         }
     }
+}
+
+bool FESystem::isAuxiliaryDeploymentSelected_(const DeployedAuxEntry& entry) const
+{
+    if (entry.variant_group.empty()) {
+        return true;
+    }
+    const auto it = auxiliary_variant_selection_.find(entry.variant_group);
+    if (it == auxiliary_variant_selection_.end()) {
+        return true;
+    }
+    return entry.variant_key == it->second;
+}
+
+bool FESystem::isAuxiliaryDeploymentVisibleForBareLookup_(
+    const DeployedAuxEntry& entry) const
+{
+    return isAuxiliaryDeploymentSelected_(entry);
+}
+
+std::vector<analysis::AuxiliaryOutputConsumerRecord>
+FESystem::consumersOfEntry_(const DeployedAuxEntry& entry) const
+{
+    std::vector<analysis::AuxiliaryOutputConsumerRecord> consumers;
+    for (const auto output_id : entry.output_ids) {
+        for (const auto& consumer : auxiliary_output_consumers_) {
+            if (consumer.output_id == output_id) {
+                consumers.push_back(consumer);
+            }
+        }
+    }
+    return consumers;
+}
+
+bool FESystem::hasAuxiliaryConsumers_(const DeployedAuxEntry& entry) const
+{
+    for (const auto output_id : entry.output_ids) {
+        for (const auto& consumer : auxiliary_output_consumers_) {
+            if (consumer.output_id == output_id) {
+                return true;
+            }
+        }
+    }
+    if (!entry.constraint_bindings.empty()) {
+        return true;
+    }
+    return false;
+}
+
+bool FESystem::hasCellVolumeAuxiliaryConsumers_(const DeployedAuxEntry& entry) const
+{
+    for (const auto output_id : entry.output_ids) {
+        for (const auto& consumer : auxiliary_output_consumers_) {
+            if (consumer.output_id == output_id &&
+                consumer.domain_kind == analysis::DomainKind::Cell) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+std::vector<std::size_t> FESystem::collectCoveredCells_(
+    const DeployedAuxEntry& entry) const
+{
+    std::vector<std::size_t> cells;
+    if (!entry.entity_map.empty()) {
+        cells = entry.entity_map;
+        return cells;
+    }
+    if (!mesh_access_) {
+        return cells;
+    }
+    mesh_access_->forEachOwnedCell([&](GlobalIndex cell_id) {
+        cells.push_back(static_cast<std::size_t>(cell_id));
+    });
+    return cells;
+}
+
+void FESystem::assignAuxiliaryOutputIds_(DeployedAuxEntry& entry)
+{
+    entry.output_ids.clear();
+    const auto output_names = entry.model->outputNames();
+    entry.output_ids.reserve(output_names.size());
+    for (std::size_t output_index = 0; output_index < output_names.size(); ++output_index) {
+        AuxiliaryOutputDescriptor descriptor;
+        descriptor.id = static_cast<std::uint32_t>(auxiliary_output_descriptors_.size());
+        descriptor.instance_name = entry.instance_name;
+        descriptor.output_name = output_names[output_index];
+        descriptor.output_index = output_index;
+
+        const auto qualified_name =
+            descriptor.instance_name + "/" + descriptor.output_name;
+        FE_THROW_IF(auxiliary_output_id_by_qualified_name_.count(qualified_name) != 0u,
+                    InvalidArgumentException,
+                    "FESystem::deployAuxiliaryModel: duplicate auxiliary output '" +
+                        qualified_name + "'");
+
+        auxiliary_output_id_by_qualified_name_[qualified_name] = descriptor.id;
+        entry.output_ids.push_back(descriptor.id);
+        auxiliary_output_descriptors_.push_back(std::move(descriptor));
+    }
+}
+
+void FESystem::inferQuadraturePointLayout_(DeployedAuxEntry& entry)
+{
+    FE_THROW_IF(entry.spec.scope != AuxiliaryStateScope::QuadraturePoint,
+                InvalidArgumentException,
+                "FESystem::inferQuadraturePointLayout_: instance '" +
+                    entry.instance_name + "' is not QuadraturePoint scoped");
+
+    const auto covered_cells = collectCoveredCells_(entry);
+    entry.entity_map = covered_cells;
+
+    const auto consumers = consumersOfEntry_(entry);
+    std::vector<analysis::AuxiliaryOutputConsumerRecord> cell_consumers;
+    std::vector<analysis::AuxiliaryOutputConsumerRecord> unsupported_consumers;
+    for (const auto& consumer : consumers) {
+        if (consumer.domain_kind == analysis::DomainKind::Cell) {
+            cell_consumers.push_back(consumer);
+        } else {
+            unsupported_consumers.push_back(consumer);
+        }
+    }
+
+    if (!unsupported_consumers.empty()) {
+        std::ostringstream oss;
+        oss << "FESystem::finalizeAuxiliaryLayout: QuadraturePoint instance '"
+            << entry.instance_name
+            << "' is consumed on unsupported non-cell domain(s): ";
+        for (std::size_t i = 0; i < unsupported_consumers.size(); ++i) {
+            if (i != 0) {
+                oss << ", ";
+            }
+            oss << unsupported_consumers[i].operator_tag;
+        }
+        FE_THROW(InvalidArgumentException, oss.str());
+    }
+
+    const bool has_explicit_qp_layout_hint =
+        entry.quadrature_reference_field != INVALID_FIELD_ID ||
+        !entry.quadrature_reference_operator.empty();
+    const bool has_any_consumers = hasAuxiliaryConsumers_(entry);
+
+    auto append_unique_field = [](std::vector<FieldId>& fields, FieldId field) {
+        if (field == INVALID_FIELD_ID) {
+            return;
+        }
+        if (std::find(fields.begin(), fields.end(), field) == fields.end()) {
+            fields.push_back(field);
+        }
+    };
+
+    std::vector<FieldId> reference_fields;
+    append_unique_field(reference_fields, entry.quadrature_reference_field);
+    if (!entry.quadrature_reference_operator.empty()) {
+        bool found_operator_layout = false;
+        for (const auto& record : formulation_records_) {
+            if (record.operator_tag != entry.quadrature_reference_operator ||
+                std::find(record.active_domains.begin(),
+                          record.active_domains.end(),
+                          analysis::DomainKind::Cell) == record.active_domains.end()) {
+                continue;
+            }
+            found_operator_layout = true;
+            for (const auto field : record.active_fields) {
+                append_unique_field(reference_fields, field);
+            }
+        }
+        FE_THROW_IF(!found_operator_layout, InvalidArgumentException,
+                    "FESystem::finalizeAuxiliaryLayout: QuadraturePoint instance '" +
+                        entry.instance_name +
+                        "' quadratureFromOperator('" +
+                        entry.quadrature_reference_operator +
+                        "') did not resolve to any cell-volume formulation");
+    }
+    for (const auto& consumer : cell_consumers) {
+        append_unique_field(reference_fields, consumer.reference_field);
+    }
+
+    if (cell_consumers.empty() && entry.qp_offsets.empty()) {
+        if (!has_explicit_qp_layout_hint) {
+            FE_THROW_IF(has_any_consumers ||
+                            entry.activation_mode == AuxiliaryActivationMode::Always,
+                        InvalidStateException,
+                        "FESystem::finalizeAuxiliaryLayout: QuadraturePoint instance '" +
+                            entry.instance_name +
+                            "' is active but has no cell-volume consumers, explicit qpOffsets(), "
+                            "or quadratureLike()/quadratureFromOperator() hint");
+            entry.materialized = false;
+            return;
+        }
+        FE_THROW_IF(!has_any_consumers &&
+                        entry.activation_mode != AuxiliaryActivationMode::Always,
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: QuadraturePoint instance '" +
+                        entry.instance_name +
+                        "' specifies quadratureLike()/quadratureFromOperator() but has no "
+                        "active consumers; either reference the output in this run or mark the "
+                        "deployment alwaysActive()");
+        FE_THROW_IF(reference_fields.empty(), InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: QuadraturePoint instance '" +
+                        entry.instance_name +
+                        "' has no usable quadrature reference field metadata");
+    }
+
+    FE_THROW_IF(entry.entity_map.empty(),
+                InvalidStateException,
+                "FESystem::finalizeAuxiliaryLayout: QuadraturePoint instance '" +
+                    entry.instance_name +
+                    "' expanded to zero covered cells");
+
+    if (entry.qp_offsets.empty()) {
+        FE_THROW_IF(!mesh_access_, InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: QuadraturePoint instance '" +
+                        entry.instance_name +
+                        "' requires mesh access to infer quadrature layout");
+        FE_THROW_IF(reference_fields.empty(), InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: QuadraturePoint instance '" +
+                        entry.instance_name +
+                        "' has no cell-volume consumers or quadrature hint capable of "
+                        "supplying reference field metadata");
+
+        const auto* first_space = fieldRecord(reference_fields.front()).space.get();
+        FE_CHECK_NOT_NULL(first_space,
+                          "FESystem::inferQuadraturePointLayout_: reference space");
+        auto inferred_offsets = buildAuxiliaryCellQuadratureOffsets(
+            *mesh_access_, *first_space, entry.entity_map);
+
+        for (std::size_t i = 1; i < reference_fields.size(); ++i) {
+            const auto* other_space = fieldRecord(reference_fields[i]).space.get();
+            FE_CHECK_NOT_NULL(other_space,
+                              "FESystem::inferQuadraturePointLayout_: comparison space");
+            const auto other_offsets = buildAuxiliaryCellQuadratureOffsets(
+                *mesh_access_, *other_space, entry.entity_map);
+            FE_THROW_IF(other_offsets != inferred_offsets,
+                        InvalidArgumentException,
+                        "FESystem::finalizeAuxiliaryLayout: QuadraturePoint instance '" +
+                            entry.instance_name +
+                            "' has active consumers with incompatible quadrature layouts");
+        }
+
+        entry.qp_offsets = std::move(inferred_offsets);
+    } else {
+        FE_THROW_IF(entry.qp_offsets.size() != entry.entity_map.size() + 1u,
+                    InvalidArgumentException,
+                    "FESystem::finalizeAuxiliaryLayout: QuadraturePoint instance '" +
+                        entry.instance_name +
+                        "' has qpOffsets().size()=" +
+                        std::to_string(entry.qp_offsets.size()) +
+                        " but covers " + std::to_string(entry.entity_map.size()) +
+                        " cells");
+        if (!reference_fields.empty() && mesh_access_) {
+            const auto* first_space = fieldRecord(reference_fields.front()).space.get();
+            FE_CHECK_NOT_NULL(first_space,
+                              "FESystem::inferQuadraturePointLayout_: explicit comparison space");
+            const auto inferred_offsets = buildAuxiliaryCellQuadratureOffsets(
+                *mesh_access_, *first_space, entry.entity_map);
+            FE_THROW_IF(inferred_offsets != entry.qp_offsets,
+                        InvalidArgumentException,
+                        "FESystem::finalizeAuxiliaryLayout: QuadraturePoint instance '" +
+                            entry.instance_name +
+                            "' explicit qpOffsets() do not match inferred consumer/hint layout");
+        }
+    }
+
+    entry.materialized = true;
 }
 
 std::vector<Real> FESystem::checkpointAuxiliaryState() const
@@ -8056,6 +8653,12 @@ FESystem::AuxiliaryAnalysisSummary FESystem::auxiliaryAnalysisSummary() const
 
     if (auxiliary_operator_registry_ && auxiliary_operator_registry_->isLayoutFinalized()) {
         summary.total_aux_unknowns = auxiliary_operator_registry_->auxiliaryLayout().total_aux_unknowns;
+        summary.constraint_like_block_names = auxiliary_operator_registry_->constraintLikeBlocks();
+        summary.schur_eliminable_block_names = auxiliary_operator_registry_->schurEliminableBlocks();
+        summary.special_precondition_block_names = auxiliary_operator_registry_->specialPreconditionBlocks();
+        summary.n_constraint_like_blocks = summary.constraint_like_block_names.size();
+        summary.n_schur_eliminable_blocks = summary.schur_eliminable_block_names.size();
+        summary.n_special_precondition_blocks = summary.special_precondition_block_names.size();
     }
 
     if (auxiliary_input_registry_) {

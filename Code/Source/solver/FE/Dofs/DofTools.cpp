@@ -953,16 +953,20 @@ std::vector<EntityRef> getDofSupportEntities(
 // =========================================================================
 
 std::vector<GlobalIndex> extractDofsInRegion(
-    const DofMap& /*dof_map*/,
+    const DofMap& dof_map,
     const EntityDofMap& vertex_dof_map,
     std::span<const double> vertex_coords,
     int dim,
     GeometricPredicate predicate) {
 
     std::vector<GlobalIndex> result;
+    std::unordered_set<GlobalIndex> vertex_supported_dofs;
 
     auto n_vertices = vertex_dof_map.numVertices();
     for (GlobalIndex v = 0; v < n_vertices; ++v) {
+        const auto vertex_dofs = vertex_dof_map.getVertexDofs(v);
+        vertex_supported_dofs.insert(vertex_dofs.begin(), vertex_dofs.end());
+
         const auto idx = static_cast<std::size_t>(v);
         const auto dim_u = static_cast<std::size_t>(std::max(dim, 0));
         const auto base = idx * dim_u;
@@ -975,10 +979,12 @@ std::vector<GlobalIndex> extractDofsInRegion(
         if (dim >= 3 && base + 2 < vertex_coords.size()) z = vertex_coords[base + 2];
 
         if (predicate(x, y, z)) {
-            auto dofs = vertex_dof_map.getVertexDofs(v);
-            result.insert(result.end(), dofs.begin(), dofs.end());
+            result.insert(result.end(), vertex_dofs.begin(), vertex_dofs.end());
         }
     }
+
+    FE_CHECK_ARG(static_cast<GlobalIndex>(vertex_supported_dofs.size()) == dof_map.getNumDofs(),
+                 "DofTools::extractDofsInRegion currently supports vertex-supported DOFs only");
 
     sortAndUnique(result);
     return result;

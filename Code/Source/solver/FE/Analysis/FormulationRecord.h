@@ -40,6 +40,16 @@ class FormExprNode;
 
 namespace analysis {
 
+struct AuxiliaryOutputConsumerRecord {
+    std::uint32_t output_id{0u};
+    std::string qualified_output_name{};
+    std::string operator_tag{};
+    DomainKind domain_kind{DomainKind::Cell};
+    FieldId reference_field{INVALID_FIELD_ID};
+    FieldId test_field{INVALID_FIELD_ID};
+    FieldId trial_field{INVALID_FIELD_ID};
+};
+
 /**
  * @brief Structured metadata for an installed variational formulation
  *
@@ -96,6 +106,9 @@ struct FormulationRecord {
 
     /// Auxiliary output dependencies (from AuxiliaryOutputSymbol terminals)
     std::vector<VariableKey> auxiliary_output_dependencies;
+
+    /// Resolved auxiliary-output consumers keyed by stable output id.
+    std::vector<AuxiliaryOutputConsumerRecord> auxiliary_output_consumers;
 
     /// Per-block residual FormExprNode handles.
     /// Key: (test_field, trial_field). For single-field formulations, contains

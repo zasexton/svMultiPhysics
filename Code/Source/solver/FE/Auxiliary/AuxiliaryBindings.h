@@ -40,6 +40,7 @@
 
 #include "Forms/FormExpr.h"
 
+#include "Auxiliary/AuxiliaryOperatorRegistry.h"
 #include "Auxiliary/AuxiliaryStateTypes.h"
 #include "Auxiliary/AuxiliaryModelBuilder.h"
 #include "Systems/FEQuantityDefinition.h"
@@ -282,6 +283,29 @@ private:
 };
 
 // ============================================================================
+//  Auxiliary-driven FE constraint bindings
+// ============================================================================
+
+enum class AuxiliaryConstraintKind : std::uint8_t {
+    StrongDirichlet,
+};
+
+enum class AuxiliaryConstraintValueSource : std::uint8_t {
+    State,
+    Output,
+};
+
+struct AuxiliaryConstraintBinding {
+    AuxiliaryConstraintKind kind{AuxiliaryConstraintKind::StrongDirichlet};
+    FieldId target_field{INVALID_FIELD_ID};
+    int target_component{-1};
+    AuxiliaryDeploymentRegion target_region{};
+    AuxiliaryConstraintValueSource value_source{AuxiliaryConstraintValueSource::Output};
+    std::string value_name{};
+    AuxiliaryOutputStateView state_view{AuxiliaryOutputStateView::Work};
+};
+
+// ============================================================================
 //  AuxiliaryDeployedInstance
 // ============================================================================
 
@@ -427,25 +451,27 @@ public:
     }
 
     /**
-     * @brief Deprecated compatibility shim for exact monolithic FE coupling.
+     * @brief Explicit by-name binding helper.
      *
-     * FE-backed input handles now preserve their metadata through
-     * `bind(model_input, handle)`. In monolithic solve mode the chain rule
-     * `dF/du = dF/dI * dI/du` is assembled automatically for those bindings.
-     *
-     * ```cpp
-     * use(model).monolithic().bind("Q", Q_handle);
-     * ```
+     * Equivalent to `.bind(handle)`, but makes the convenience choice explicit.
      */
-    [[deprecated("bindCoupled() is deprecated; use bind(model_input, handle) instead")]]
-    AuxiliaryDeployedInstance& bindCoupled(const std::string& model_input,
-                                            const AuxiliaryInputHandle& handle);
-
-    /// Auto-bind coupled by name match.
-    [[deprecated("bindCoupled() is deprecated; use bind(handle) instead")]]
-    AuxiliaryDeployedInstance& bindCoupled(const AuxiliaryInputHandle& handle)
+    AuxiliaryDeployedInstance& bindByName(const AuxiliaryInputHandle& handle)
     {
-        return bindCoupled(handle.registryName(), handle);
+        return bind(handle);
+    }
+
+    /**
+     * @brief Bind a boundary-reduction handle with boundary/region consistency checks.
+     */
+    AuxiliaryDeployedInstance& bindBoundaryReduction(const std::string& model_input,
+                                                     const AuxiliaryInputHandle& handle);
+
+    /**
+     * @brief Auto-bind a boundary-reduction handle by matching its registry name.
+     */
+    AuxiliaryDeployedInstance& bindBoundaryReduction(const AuxiliaryInputHandle& handle)
+    {
+        return bindBoundaryReduction(handle.registryName(), handle);
     }
 
     // ---- Parameter setting ----
@@ -489,10 +515,74 @@ public:
     /// Optional CSR-style QP offsets for QuadraturePoint scope.
     AuxiliaryDeployedInstance& qpOffsets(std::vector<std::size_t> offsets);
 
+    /// Use the quadrature layout associated with a reference FE field.
+    AuxiliaryDeployedInstance& quadratureLike(FieldId field);
+
+    /// Use the quadrature layout associated with an installed operator.
+    AuxiliaryDeployedInstance& quadratureFromOperator(std::string operator_tag);
+
+    /// Group this deployment into a named variant family.
+    AuxiliaryDeployedInstance& variant(std::string group, std::string key);
+
+    /// Override activation/materialization behavior.
+    AuxiliaryDeployedInstance& activationMode(AuxiliaryActivationMode mode);
+
+    AuxiliaryDeployedInstance& alwaysActive()
+    {
+        return activationMode(AuxiliaryActivationMode::Always);
+    }
+
+    AuxiliaryDeployedInstance& disabled()
+    {
+        return activationMode(AuxiliaryActivationMode::Disabled);
+    }
+
     // ---- Derivative policy ----
 
     /// Set the derivative policy explicitly.
     AuxiliaryDeployedInstance& derivatives(AuxiliaryDerivativePolicy policy);
+
+    /**
+     * @brief Attach solver-facing metadata for monolithic mixed-layout diagnostics.
+     */
+    AuxiliaryDeployedInstance& solverMetadata(AuxiliaryBlockSolverMetadata metadata);
+
+    AuxiliaryDeployedInstance& solverRole(AuxiliaryBlockRole role)
+    {
+        AuxiliaryBlockSolverMetadata metadata = solver_metadata_.value_or(AuxiliaryBlockSolverMetadata{});
+        metadata.role = role;
+        return solverMetadata(std::move(metadata));
+    }
+
+    AuxiliaryDeployedInstance& schurEliminable(std::string partner = {})
+    {
+        AuxiliaryBlockSolverMetadata metadata = solver_metadata_.value_or(AuxiliaryBlockSolverMetadata{});
+        metadata.role = AuxiliaryBlockRole::SchurEliminable;
+        metadata.schur_eliminable = true;
+        metadata.schur_complement_partner = std::move(partner);
+        return solverMetadata(std::move(metadata));
+    }
+
+    /**
+     * @brief Drive a strong Dirichlet boundary condition from auxiliary state or output.
+     *
+     * This lowers to an `ISystemConstraint` during auxiliary finalization/setup.
+     *
+     * @param field          Target FE field.
+     * @param boundary_marker Boundary marker to constrain.
+     * @param value_name     State or output name within this instance.
+     * @param component      Target component (-1 = all components).
+     * @param source         Whether `value_name` refers to a state or an output.
+     * @param state_view     Which auxiliary state view to evaluate against.
+     */
+    AuxiliaryDeployedInstance& drivesStrongDirichlet(FieldId field,
+                                                     int boundary_marker,
+                                                     std::string value_name,
+                                                     int component = -1,
+                                                     AuxiliaryConstraintValueSource source =
+                                                         AuxiliaryConstraintValueSource::Output,
+                                                     AuxiliaryOutputStateView state_view =
+                                                         AuxiliaryOutputStateView::Work);
 
     // -----------------------------------------------------------------
     //  Accessors (read after configuration)
@@ -518,6 +608,10 @@ public:
     [[nodiscard]] const AuxiliaryStepperSpec& getStepperSpec() const noexcept
     {
         return stepper_spec_;
+    }
+    [[nodiscard]] bool hasExplicitStepper() const noexcept
+    {
+        return has_explicit_stepper_;
     }
     [[nodiscard]] const AuxiliaryDeploymentRegion& getRegion() const noexcept
     {
@@ -545,6 +639,26 @@ public:
     {
         return qp_offsets_;
     }
+    [[nodiscard]] FieldId quadratureReferenceField() const noexcept
+    {
+        return quadrature_reference_field_;
+    }
+    [[nodiscard]] const std::string& quadratureReferenceOperator() const noexcept
+    {
+        return quadrature_reference_operator_;
+    }
+    [[nodiscard]] const std::string& variantGroup() const noexcept
+    {
+        return variant_group_;
+    }
+    [[nodiscard]] const std::string& variantKey() const noexcept
+    {
+        return variant_key_;
+    }
+    [[nodiscard]] AuxiliaryActivationMode getActivationMode() const noexcept
+    {
+        return activation_mode_;
+    }
     void setResolvedInstanceName(std::string instance_name)
     {
         instance_name_ = std::move(instance_name);
@@ -557,6 +671,20 @@ public:
     [[nodiscard]] bool hasExplicitDerivativePolicy() const noexcept
     {
         return has_explicit_derivative_policy_;
+    }
+    [[nodiscard]] bool hasExplicitSchedule() const noexcept
+    {
+        return has_explicit_schedule_;
+    }
+    [[nodiscard]] const std::vector<AuxiliaryConstraintBinding>&
+    constraintBindings() const noexcept
+    {
+        return constraint_bindings_;
+    }
+    [[nodiscard]] const std::optional<AuxiliaryBlockSolverMetadata>&
+    solverMetadata() const noexcept
+    {
+        return solver_metadata_;
     }
 
     [[nodiscard]] AuxiliaryLayoutMode getLayoutMode() const noexcept
@@ -594,7 +722,9 @@ private:
     AuxiliaryDeploymentRegion region_{};
     AuxiliarySolveMode solve_mode_{AuxiliarySolveMode::Partitioned};
     AuxiliaryScheduleMode schedule_{AuxiliaryScheduleMode::SingleRate};
+    bool has_explicit_schedule_{false};
     AuxiliaryStepperSpec stepper_spec_{};
+    bool has_explicit_stepper_{false};
     std::unordered_map<std::string, std::string> input_bindings_{};
     /// FE-backed handle bindings keyed by model input name.
     std::unordered_map<std::string, AuxiliaryInputHandle> coupled_bindings_{};
@@ -602,10 +732,17 @@ private:
     std::vector<Real> initial_values_{};
     std::size_t entity_count_{0}; ///< 0 = auto-detect from scope/mesh
     std::vector<std::size_t> qp_offsets_{};
+    FieldId quadrature_reference_field_{INVALID_FIELD_ID};
+    std::string quadrature_reference_operator_{};
+    std::string variant_group_{};
+    std::string variant_key_{};
+    AuxiliaryActivationMode activation_mode_{AuxiliaryActivationMode::Auto};
     AuxiliaryDerivativePolicy derivative_policy_{};
     bool has_explicit_derivative_policy_{false};
     AuxiliaryLayoutMode layout_mode_{AuxiliaryLayoutMode::FixedStride};
     AuxiliaryEntityOrdering entity_ordering_{AuxiliaryEntityOrdering::ByEntityThenComponent};
+    std::vector<AuxiliaryConstraintBinding> constraint_bindings_{};
+    std::optional<AuxiliaryBlockSolverMetadata> solver_metadata_{};
 };
 
 /**

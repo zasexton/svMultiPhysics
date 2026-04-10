@@ -31,6 +31,8 @@
 #include "Core/Types.h"
 #include "Core/FEException.h"
 
+#include "Backends/Utils/BackendOptions.h"
+
 #include "Auxiliary/AuxiliaryStateTypes.h"
 #include "Auxiliary/AuxiliaryOperatorBuilder.h"
 #include "Auxiliary/AuxiliaryCouplingGraph.h"
@@ -46,6 +48,23 @@
 namespace svmp {
 namespace FE {
 namespace systems {
+
+/**
+ * @brief Block classification for solver/preconditioner strategies.
+ */
+enum class AuxiliaryBlockRole : std::uint8_t {
+    /// Standard block (no special solver treatment).
+    Standard,
+
+    /// Block suitable for Schur complement elimination.
+    SchurEliminable,
+
+    /// Block that should be treated as a constraint (Lagrange multiplier-like).
+    Constraint,
+
+    /// Block that needs special preconditioning (e.g., ill-conditioned).
+    SpecialPrecondition
+};
 
 // ---------------------------------------------------------------------------
 //  Auxiliary unknown layout for monolithic blocks
@@ -75,6 +94,14 @@ struct AuxiliaryBlockUnknownLayout {
 
     /// The scope of this block.
     AuxiliaryStateScope scope{AuxiliaryStateScope::Global};
+
+    /// Solver-oriented block metadata carried into the mixed layout.
+    AuxiliaryBlockRole role{AuxiliaryBlockRole::Standard};
+    backends::BlockRole backend_role{backends::BlockRole::AuxiliaryField};
+    bool block_diagonal_suitable{true};
+    bool schur_eliminable{false};
+    std::string schur_complement_partner{};
+    std::vector<std::vector<int>> constraint_groups{};
 };
 
 /**
@@ -115,23 +142,6 @@ struct MixedSystemLayout {
 // ---------------------------------------------------------------------------
 //  Solver-facing block metadata
 // ---------------------------------------------------------------------------
-
-/**
- * @brief Block classification for solver/preconditioner strategies.
- */
-enum class AuxiliaryBlockRole : std::uint8_t {
-    /// Standard block (no special solver treatment).
-    Standard,
-
-    /// Block suitable for Schur complement elimination.
-    SchurEliminable,
-
-    /// Block that should be treated as a constraint (Lagrange multiplier-like).
-    Constraint,
-
-    /// Block that needs special preconditioning (e.g., ill-conditioned).
-    SpecialPrecondition
-};
 
 /**
  * @brief Solver-facing metadata for one monolithic auxiliary block.
@@ -244,9 +254,11 @@ public:
      * @param scope         Block scope.
      */
     void registerMonolithicUnknowns(std::string_view name,
-                                     std::size_t entity_count,
-                                     int stride,
-                                     AuxiliaryStateScope scope);
+                                    std::size_t entity_count,
+                                    int stride,
+                                    AuxiliaryStateScope scope,
+                                    const AuxiliaryBlockSolverMetadata* solver_meta = nullptr,
+                                    std::vector<std::vector<int>> constraint_groups = {});
 
     // -----------------------------------------------------------------
     //  Layout composition
@@ -296,6 +308,14 @@ public:
      */
     [[nodiscard]] const AuxiliaryBlockSolverMetadata* getBlockSolverMetadata(
         std::string_view block_name) const;
+
+    /// Get layout block metadata by name after registration.
+    [[nodiscard]] const AuxiliaryBlockUnknownLayout* findLayoutBlock(
+        std::string_view block_name) const noexcept;
+
+    [[nodiscard]] std::vector<std::string> constraintLikeBlocks() const;
+    [[nodiscard]] std::vector<std::string> schurEliminableBlocks() const;
+    [[nodiscard]] std::vector<std::string> specialPreconditionBlocks() const;
 
     /**
      * @brief Compute coupling diagnostics from the current graph.

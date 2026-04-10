@@ -6,8 +6,8 @@
  * @brief Systems-side manager for physics-agnostic boundary conditions
  */
 
+#include "Analysis/FormExprScanner.h"
 #include "Forms/BoundaryCondition.h"
-#include "Systems/CoupledBoundaryConditions.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 #include "Constraints/SystemConstraint.h"
@@ -173,11 +173,22 @@ public:
                 if (!sym) {
                     return std::nullopt;
                 }
-                return system.coupledBoundaryCompatibleAuxiliaryOutputExpr(*sym);
+                if (auto lowered = system.loweredAuxiliaryOutputExpr(*sym)) {
+                    return *lowered;
+                }
+                return std::nullopt;
             });
 
-        residual = systems::bc::detail::registerAndResolveCoupledSymbols(
-            system, field_id, residual);
+        if (residual.isValid() && residual.node()) {
+            const auto scan = analysis::scanFormExpr(*residual.node());
+            if (!scan.boundary_functional_names.empty() ||
+                !scan.auxiliary_state_names.empty()) {
+                throw std::invalid_argument(
+                    "BoundaryConditionManager::apply: legacy coupled-boundary placeholders are no longer supported. "
+                    "Register FE-backed inputs with boundaryIntegral(...) and couple boundary terms through deployed "
+                    "AuxiliaryOutput(...) expressions instead.");
+            }
+        }
 
         // Persist any advanced affine constraints for setup-time lowering.
         if (!bcs_.empty()) {

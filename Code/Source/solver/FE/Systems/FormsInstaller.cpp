@@ -1760,22 +1760,36 @@ CoupledResidualKernels installFormulation(
                 }
             }
 
-            // Build output name→slot map from deployed models.
-            std::unordered_map<std::string, std::size_t> output_slots;
+            // Build output name→stable-id map from deployed models.
+            std::unordered_map<std::string, std::size_t> output_ids;
             for (const auto& name : scan.auxiliary_output_names) {
-                // Try bare lookup first (throws on ambiguity).
-                // Support "instance/name" syntax for instance-qualified outputs.
-                std::size_t slot;
+                std::size_t output_id;
                 auto slash = name.find('/');
                 if (slash != std::string::npos) {
                     auto inst = name.substr(0, slash);
                     auto oname = name.substr(slash + 1);
-                    slot = system.auxiliaryOutputSlotOf(inst, oname);
+                    output_id = system.auxiliaryOutputIdOf(inst, oname);
                 } else {
-                    slot = system.auxiliaryOutputSlotOf(name);
+                    output_id = system.auxiliaryOutputIdOf(name);
                 }
-                if (slot != static_cast<std::size_t>(-1)) {
-                    output_slots[name] = slot;
+                if (output_id != static_cast<std::size_t>(-1)) {
+                    output_ids[name] = output_id;
+                }
+            }
+
+            const auto default_field =
+                fields.empty() ? INVALID_FIELD_ID : fields.front();
+            for (const auto& [qualified_name, output_id] : output_ids) {
+                for (const auto domain : rec.active_domains) {
+                    analysis::AuxiliaryOutputConsumerRecord consumer;
+                    consumer.output_id = static_cast<std::uint32_t>(output_id);
+                    consumer.qualified_output_name = qualified_name;
+                    consumer.operator_tag = op;
+                    consumer.domain_kind = domain;
+                    consumer.reference_field = default_field;
+                    consumer.test_field = default_field;
+                    consumer.trial_field = default_field;
+                    rec.auxiliary_output_consumers.push_back(std::move(consumer));
                 }
             }
 
@@ -1791,8 +1805,8 @@ CoupledResidualKernels installFormulation(
                             static_cast<std::uint32_t>(it->second));
                 }
                 if (node.type() == forms::FormExprType::AuxiliaryOutputSymbol) {
-                    auto it = output_slots.find(nm);
-                    if (it != output_slots.end() &&
+                    auto it = output_ids.find(nm);
+                    if (it != output_ids.end() &&
                         system.auxiliaryOutputMetadataUsesRef(nm)) {
                         return forms::FormExpr::auxiliaryOutputRef(
                             static_cast<std::uint32_t>(it->second));
@@ -1800,7 +1814,7 @@ CoupledResidualKernels installFormulation(
                     if (auto lowered_output = system.loweredAuxiliaryOutputExpr(nm)) {
                         return *lowered_output;
                     }
-                    if (it != output_slots.end()) {
+                    if (it != output_ids.end()) {
                         return forms::FormExpr::auxiliaryOutputRef(
                             static_cast<std::uint32_t>(it->second));
                     }
@@ -1822,8 +1836,8 @@ CoupledResidualKernels installFormulation(
                     if (auto lowered_output = system.loweredAuxiliaryOutputExpr(nm)) {
                         return *lowered_output;
                     }
-                    auto it = output_slots.find(nm);
-                    if (it != output_slots.end())
+                    auto it = output_ids.find(nm);
+                    if (it != output_ids.end())
                         return forms::FormExpr::auxiliaryOutputRef(
                             static_cast<std::uint32_t>(it->second));
                 }

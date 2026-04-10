@@ -18,6 +18,7 @@
 #include "Forms/ConstitutiveModel.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/PointEvaluator.h"
 #include "Forms/SymbolicDifferentiation.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/JIT/InlinableConstitutiveModel.h"
@@ -27,6 +28,7 @@
 #include "Spaces/ProductSpace.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
+#include <array>
 #include <ctime>
 #include <iostream>
 #include <memory>
@@ -39,6 +41,20 @@ namespace forms {
 namespace test {
 
 namespace {
+
+TEST(SymbolicDifferentiationAuxiliaryOutputRef, DifferentiateWrtStableAuxiliaryOutputId)
+{
+    const auto expr =
+        FormExpr::auxiliaryOutputRef(3) * FormExpr::auxiliaryOutputRef(3);
+    const auto deriv = differentiateWrtAuxiliaryOutput(expr, 3);
+
+    ASSERT_TRUE(deriv.isValid());
+
+    PointEvalContext ctx;
+    const std::array<Real, 4> outputs = {0.0, 0.0, 0.0, 4.0};
+    ctx.auxiliary_outputs = std::span<const Real>(outputs.data(), outputs.size());
+    EXPECT_DOUBLE_EQ(evaluateScalarAt(deriv, ctx), 8.0);
+}
 
 void expectDenseNear(const assembly::DenseMatrixView& A,
                      const assembly::DenseMatrixView& B,

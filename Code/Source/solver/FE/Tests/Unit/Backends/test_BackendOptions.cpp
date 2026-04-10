@@ -28,9 +28,15 @@ TEST(BackendOptions, ToString)
     EXPECT_EQ(preconditionerToString(PreconditionerType::RowColumnScaling), "row-column-scaling");
     EXPECT_EQ(preconditionerToString(PreconditionerType::FieldSplit), "field-split");
 
+    EXPECT_EQ(fieldSplitKindToString(FieldSplitKind::Auto), "auto");
     EXPECT_EQ(fieldSplitKindToString(FieldSplitKind::Additive), "additive");
     EXPECT_EQ(fieldSplitKindToString(FieldSplitKind::Multiplicative), "multiplicative");
     EXPECT_EQ(fieldSplitKindToString(FieldSplitKind::Schur), "schur");
+
+    EXPECT_EQ(fsilsBlockSchurPreconditionerToString(FsilsBlockSchurSchurPreconditioner::Auto), "auto");
+    EXPECT_EQ(fsilsBlockSchurMomentumApproximationToString(
+                  FsilsBlockSchurMomentumApproximation::Auto),
+              "auto");
 }
 
 // --- BlockLayout tests ---
@@ -265,6 +271,33 @@ TEST(BlockLayout, RoleAnnotationBackwardCompatible)
     EXPECT_EQ(layout.blocks[0].role, BlockRole::Generic);
 }
 
+TEST(MixedBlockLayout, FindByExtentAndRole)
+{
+    MixedBlockLayout layout{};
+    layout.field_unknowns = 8;
+    layout.auxiliary_unknowns = 2;
+    layout.total_unknowns = 10;
+    layout.blocks.push_back({"velocity", 0, 6, BlockRole::PrimaryField, MixedBlockKind::Field});
+    layout.blocks.push_back({"pressure", 6, 2, BlockRole::ConstraintField, MixedBlockKind::Field});
+    layout.blocks.push_back({"lambda", 8, 2, BlockRole::ConstraintField, MixedBlockKind::Auxiliary});
+    layout.primary_block = 0;
+
+    const auto* vel = layout.findBlockByExtent(0, 6);
+    ASSERT_NE(vel, nullptr);
+    EXPECT_EQ(vel->name, "velocity");
+
+    const auto* primary = layout.primaryFieldBlock();
+    ASSERT_NE(primary, nullptr);
+    EXPECT_EQ(primary->name, "velocity");
+
+    const auto* aux = layout.findBlock("lambda");
+    ASSERT_NE(aux, nullptr);
+    EXPECT_EQ(aux->kind, MixedBlockKind::Auxiliary);
+
+    EXPECT_TRUE(layout.matchesTotalUnknowns(10));
+    EXPECT_FALSE(layout.matchesTotalUnknowns(8));
+}
+
 // --- TimeIntegrationDescriptor tests ---
 
 TEST(TimeIntegrationDescriptor, DefaultConstruction)
@@ -333,6 +366,7 @@ TEST(SolverOptions, BlockRoleNamesDefaultEmpty)
 {
     SolverOptions opts{};
     EXPECT_TRUE(opts.block_role_names.empty());
+    EXPECT_FALSE(opts.mixed_block_layout.has_value());
     EXPECT_FALSE(opts.time_integration.has_value());
 }
 
@@ -362,6 +396,118 @@ TEST(SolverOptions, TimeIntegrationOptional)
     ASSERT_TRUE(opts.time_integration.has_value());
     EXPECT_EQ(opts.time_integration->global_scheme, "GenAlpha");
     EXPECT_EQ(opts.time_integration->maxDerivativeOrder(), 1);
+}
+
+TEST(SolverOptions, ResolveBlockNameForRoleUsesExplicitMappingFirst)
+{
+    SolverOptions opts{};
+    opts.momentum_block_name = "u_from_legacy_name";
+    opts.block_role_names.emplace_back(BlockRole::PrimaryField, "u_from_role_map");
+
+    EXPECT_EQ(opts.resolveBlockNameForRole(BlockRole::PrimaryField), "u_from_role_map");
+}
+
+TEST(SolverOptions, ResolveBlockNameForRoleFallsBackToMixedLayout)
+{
+    SolverOptions opts{};
+    MixedBlockLayout layout{};
+    layout.blocks.push_back({"lambda", 8, 1, BlockRole::ConstraintField, MixedBlockKind::Auxiliary});
+    opts.mixed_block_layout = layout;
+
+    EXPECT_EQ(opts.resolveBlockNameForRole(BlockRole::ConstraintField), "lambda");
+}
+
+TEST(SolverOptions, NormalizeFsilsBlockSchurPolicyFromAuxiliaryMetadata)
+{
+    SolverOptions opts{};
+    opts.method = SolverMethod::BlockSchur;
+
+    BlockLayout field_layout{};
+    field_layout.blocks.push_back({"velocity", 0, 2, BlockRole::PrimaryField});
+    field_layout.blocks.push_back({"pressure", 2, 1, BlockRole::ConstraintField});
+    field_layout.momentum_block = 0;
+    field_layout.constraint_block = 1;
+    opts.block_layout = field_layout;
+
+    MixedBlockLayout mixed{};
+    mixed.field_unknowns = 9;
+    mixed.auxiliary_unknowns = 2;
+    mixed.total_unknowns = 11;
+    mixed.blocks.push_back({"velocity", 0, 8, BlockRole::PrimaryField, MixedBlockKind::Field});
+    mixed.blocks.push_back({"pressure", 8, 1, BlockRole::ConstraintField, MixedBlockKind::Field});
+    mixed.blocks.push_back({"stiff_aux",
+                            9,
+                            2,
+                            BlockRole::AuxiliaryField,
+                            MixedBlockKind::Auxiliary,
+                            /*block_diagonal_suitable=*/false,
+                            /*special_precondition=*/true,
+                            /*schur_eliminable=*/true,
+                            "velocity"});
+    mixed.primary_block = 0;
+    mixed.constraint_block = 1;
+    opts.mixed_block_layout = mixed;
+
+    const auto normalized = normalizeSolverOptionsForBackend(opts, BackendKind::FSILS);
+    EXPECT_TRUE(normalized.fsils_use_rcs);
+    EXPECT_EQ(normalized.fsils_blockschur_schur_preconditioner,
+              FsilsBlockSchurSchurPreconditioner::AlgebraicSchur);
+    EXPECT_EQ(normalized.fsils_blockschur_momentum_approximation,
+              FsilsBlockSchurMomentumApproximation::ASM);
+    EXPECT_EQ(normalized.resolveBlockNameForRole(BlockRole::PrimaryField), "velocity");
+    EXPECT_EQ(normalized.resolveBlockNameForRole(BlockRole::ConstraintField), "pressure");
+}
+
+TEST(SolverOptions, NormalizePetscBlockPreconditionerFromAuxiliaryMetadata)
+{
+    SolverOptions opts{};
+    opts.method = SolverMethod::GMRES;
+    opts.preconditioner = PreconditionerType::Diagonal;
+
+    MixedBlockLayout mixed{};
+    mixed.field_unknowns = 4;
+    mixed.auxiliary_unknowns = 2;
+    mixed.total_unknowns = 6;
+    mixed.blocks.push_back({"velocity", 0, 4, BlockRole::PrimaryField, MixedBlockKind::Field});
+    mixed.blocks.push_back({"stiff_aux",
+                            4,
+                            2,
+                            BlockRole::AuxiliaryField,
+                            MixedBlockKind::Auxiliary,
+                            /*block_diagonal_suitable=*/false,
+                            /*special_precondition=*/true});
+    opts.mixed_block_layout = mixed;
+
+    const auto normalized = normalizeSolverOptionsForBackend(
+        opts, BackendKind::PETSc, /*block_operator_available=*/true);
+
+    EXPECT_EQ(normalized.preconditioner, PreconditionerType::FieldSplit);
+    EXPECT_EQ(normalized.fieldsplit.kind, FieldSplitKind::Multiplicative);
+    EXPECT_EQ(normalized.resolveBlockNameForRole(BlockRole::PrimaryField), "velocity");
+    EXPECT_EQ(normalized.resolveBlockNameForRole(BlockRole::AuxiliaryField), "stiff_aux");
+}
+
+TEST(SolverOptions, NormalizePetscFieldSplitKindUsesSchurForSaddlePointMetadata)
+{
+    SolverOptions opts{};
+    opts.method = SolverMethod::GMRES;
+    opts.preconditioner = PreconditionerType::FieldSplit;
+
+    MixedBlockLayout mixed{};
+    mixed.field_unknowns = 6;
+    mixed.total_unknowns = 6;
+    mixed.blocks.push_back({"velocity", 0, 4, BlockRole::PrimaryField, MixedBlockKind::Field});
+    mixed.blocks.push_back({"pressure", 4, 2, BlockRole::ConstraintField, MixedBlockKind::Field});
+    mixed.primary_block = 0;
+    mixed.constraint_block = 1;
+    opts.mixed_block_layout = mixed;
+
+    const auto normalized = normalizeSolverOptionsForBackend(
+        opts, BackendKind::PETSc, /*block_operator_available=*/true);
+
+    EXPECT_EQ(normalized.fieldsplit.kind, FieldSplitKind::Schur);
+    EXPECT_EQ(normalized.momentum_block_name, "velocity");
+    EXPECT_EQ(normalized.constraint_block_name, "pressure");
 }
 
 } // namespace svmp::FE::backends

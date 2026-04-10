@@ -13,8 +13,6 @@
 #include <gtest/gtest.h>
 
 #include "Constraints/RobinBC.h"
-#include "Constraints/CoupledRobinBC.h"
-
 #include <array>
 #include <vector>
 
@@ -123,32 +121,6 @@ TEST(RobinBCTest, ConvectiveFactory) {
     EXPECT_DOUBLE_EQ(data.alpha, 10.0);
     EXPECT_DOUBLE_EQ(data.beta, 1.0);
     EXPECT_DOUBLE_EQ(data.g, 30.0);
-}
-
-TEST(CoupledRobinBCTest, BasicEvaluation) {
-    forms::BoundaryFunctionalResults integrals;
-    integrals.set("Q", 3.0);
-
-    systems::AuxiliaryState aux;
-    systems::AuxiliaryStateSpec spec;
-    spec.size = 1;
-    spec.name = "R";
-    std::array<Real, 1> initial{{2.0}};
-    aux.registerState(spec, initial);
-
-    CoupledBCContext ctx{integrals, aux, /*t=*/0.0, /*dt=*/0.0};
-
-    CoupledRobinBC bc(
-        /*boundary_marker=*/4,
-        /*required_integrals=*/{},
-        /*alpha=*/[](const CoupledBCContext& c, Real /*x*/, Real /*y*/, Real /*z*/) { return c.integrals.get("Q"); },
-        /*beta=*/[](const CoupledBCContext& c, Real /*x*/, Real /*y*/, Real /*z*/) { return c.aux_state["R"]; },
-        /*g=*/[](const CoupledBCContext& c, Real x, Real /*y*/, Real /*z*/) { return c.integrals.get("Q") + c.aux_state["R"] + x; });
-
-    EXPECT_EQ(bc.boundaryMarker(), 4);
-    EXPECT_DOUBLE_EQ(bc.alpha(ctx, 0.0, 0.0, 0.0), 3.0);
-    EXPECT_DOUBLE_EQ(bc.beta(ctx, 0.0, 0.0, 0.0), 2.0);
-    EXPECT_DOUBLE_EQ(bc.g(ctx, 1.0, 0.0, 0.0), 6.0);
 }
 
 } // namespace test

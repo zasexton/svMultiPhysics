@@ -46,7 +46,11 @@ public:
     void evaluate_gradients(const math::Vector<Real, 3>& xi,
                             std::vector<Gradient>& gradients) const override;
 
+    const BSplineBasis& axis_basis(int axis) const noexcept {
+        return axes_[static_cast<std::size_t>(axis)];
+    }
     const std::vector<int>& tensor_extents() const noexcept { return tensor_extents_; }
+    const std::vector<std::size_t>& axis_sizes() const noexcept { return axis_sizes_; }
     const std::vector<Real>& weights() const noexcept { return weights_; }
 
 private:

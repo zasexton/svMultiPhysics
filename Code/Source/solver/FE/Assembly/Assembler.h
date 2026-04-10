@@ -325,6 +325,35 @@ public:
     /// Number of locally owned cells
     [[nodiscard]] virtual GlobalIndex numOwnedCells() const = 0;
 
+    /// Number of locally stored vertices (owned + ghost).
+    ///
+    /// The default implementation derives a contiguous vertex count from cell
+    /// connectivity. Mesh adapters with explicit vertex ownership/topology
+    /// metadata should override this for exact counts.
+    [[nodiscard]] virtual GlobalIndex numVertices() const
+    {
+        GlobalIndex max_vertex = -1;
+        std::vector<GlobalIndex> nodes;
+        for (GlobalIndex cell_id = 0; cell_id < numCells(); ++cell_id) {
+            getCellNodes(cell_id, nodes);
+            for (const auto node_id : nodes) {
+                if (node_id > max_vertex) {
+                    max_vertex = node_id;
+                }
+            }
+        }
+        return max_vertex + 1;
+    }
+
+    /// Number of locally owned vertices.
+    ///
+    /// Mesh adapters without explicit vertex ownership metadata default to all
+    /// visible vertices being owned.
+    [[nodiscard]] virtual GlobalIndex numOwnedVertices() const
+    {
+        return numVertices();
+    }
+
     /// Number of boundary faces
     [[nodiscard]] virtual GlobalIndex numBoundaryFaces() const = 0;
 

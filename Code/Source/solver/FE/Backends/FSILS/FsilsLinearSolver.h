@@ -18,6 +18,7 @@ namespace backends {
 class FsilsLinearSolver final : public LinearSolver {
 public:
     explicit FsilsLinearSolver(const SolverOptions& options);
+    ~FsilsLinearSolver() override;
 
     [[nodiscard]] BackendKind backendKind() const noexcept override { return BackendKind::FSILS; }
 
@@ -77,6 +78,8 @@ private:
     };
     mutable bool faces_dirty_ = true;
     mutable std::vector<CachedFace> cached_faces_;
+
+    void invalidateReusableBlockSchurState() const;
 };
 
 } // namespace backends

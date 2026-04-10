@@ -6,15 +6,208 @@
  */
 
 #include "SerendipityBasis.h"
-#include "Math/LU.h"
+#include "Core/FEException.h"
+#include "NodeOrderingConventions.h"
+
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <span>
+#include <string>
 
 namespace svmp {
 namespace FE {
 namespace basis {
 
 namespace {
+using Vec3 = math::Vector<Real, 3>;
+
+Real powi(Real x, int exponent) {
+    Real value = Real(1);
+    for (int i = 0; i < exponent; ++i) {
+        value *= x;
+    }
+    return value;
+}
+
+int quad_serendipity_superlinear_degree(int ax, int ay) {
+    return (ax > 1 ? ax : 0) + (ay > 1 ? ay : 0);
+}
+
+std::vector<std::array<int, 2>> quad_serendipity_exponents(int order) {
+    std::vector<std::array<int, 2>> exponents;
+    for (int ay = 0; ay <= order; ++ay) {
+        for (int ax = 0; ax <= order; ++ax) {
+            if (quad_serendipity_superlinear_degree(ax, ay) <= order) {
+                exponents.push_back({ax, ay});
+            }
+        }
+    }
+    return exponents;
+}
+
+std::vector<Vec3> quad_serendipity_nodes(int order, std::size_t total_size) {
+    std::vector<Vec3> nodes;
+    if (order <= 0) {
+        return nodes;
+    }
+
+    const Real inv_order = Real(1) / Real(order);
+
+    nodes.push_back(Vec3{Real(-1), Real(-1), Real(0)});
+    nodes.push_back(Vec3{Real(1),  Real(-1), Real(0)});
+    nodes.push_back(Vec3{Real(1),  Real(1),  Real(0)});
+    nodes.push_back(Vec3{Real(-1), Real(1),  Real(0)});
+
+    for (int i = 1; i < order; ++i) {
+        nodes.push_back(Vec3{Real(-1) + Real(2 * i) * inv_order, Real(-1), Real(0)});
+    }
+    for (int i = 1; i < order; ++i) {
+        nodes.push_back(Vec3{Real(1), Real(-1) + Real(2 * i) * inv_order, Real(0)});
+    }
+    for (int i = 1; i < order; ++i) {
+        nodes.push_back(Vec3{Real(1) - Real(2 * i) * inv_order, Real(1), Real(0)});
+    }
+    for (int i = 1; i < order; ++i) {
+        nodes.push_back(Vec3{Real(-1), Real(1) - Real(2 * i) * inv_order, Real(0)});
+    }
+
+    if (nodes.size() > total_size) {
+        throw FEException("SerendipityBasis: quadrilateral serendipity boundary nodes exceed requested size",
+                          __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
+    }
+
+    const std::size_t interior_count = total_size - nodes.size();
+    if (interior_count == 0u) {
+        return nodes;
+    }
+
+    std::vector<Vec3> interior_candidates;
+    interior_candidates.reserve(static_cast<std::size_t>((order - 1) * (order - 1)));
+    for (int j = 1; j < order; ++j) {
+        for (int i = 1; i < order; ++i) {
+            interior_candidates.push_back(
+                Vec3{Real(-1) + Real(2 * i) * inv_order,
+                     Real(-1) + Real(2 * j) * inv_order,
+                     Real(0)});
+        }
+    }
+
+    std::sort(interior_candidates.begin(), interior_candidates.end(),
+              [](const Vec3& a, const Vec3& b) {
+                  const Real a_linf = std::max(std::abs(a[0]), std::abs(a[1]));
+                  const Real b_linf = std::max(std::abs(b[0]), std::abs(b[1]));
+                  if (a_linf != b_linf) {
+                      return a_linf < b_linf;
+                  }
+
+                  const Real a_l1 = std::abs(a[0]) + std::abs(a[1]);
+                  const Real b_l1 = std::abs(b[0]) + std::abs(b[1]);
+                  if (a_l1 != b_l1) {
+                      return a_l1 < b_l1;
+                  }
+
+                  if (a[1] != b[1]) {
+                      return a[1] < b[1];
+                  }
+                  return a[0] < b[0];
+              });
+
+    if (interior_count > interior_candidates.size()) {
+        throw FEException("SerendipityBasis: insufficient quadrilateral interior nodes for requested serendipity order",
+                          __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
+    }
+
+    nodes.insert(nodes.end(),
+                 interior_candidates.begin(),
+                 interior_candidates.begin() + static_cast<std::ptrdiff_t>(interior_count));
+    return nodes;
+}
+
+std::vector<Real> invert_dense_matrix(std::vector<Real> matrix, int n, const char* label) {
+    std::vector<Real> inverse(static_cast<std::size_t>(n * n), Real(0));
+    for (int i = 0; i < n; ++i) {
+        inverse[static_cast<std::size_t>(i * n + i)] = Real(1);
+    }
+
+    auto idx = [n](int row, int col) -> std::size_t {
+        return static_cast<std::size_t>(row * n + col);
+    };
+
+    for (int col = 0; col < n; ++col) {
+        int pivot_row = col;
+        Real pivot_abs = std::abs(matrix[idx(col, col)]);
+        for (int row = col + 1; row < n; ++row) {
+            const Real cand_abs = std::abs(matrix[idx(row, col)]);
+            if (cand_abs > pivot_abs) {
+                pivot_abs = cand_abs;
+                pivot_row = row;
+            }
+        }
+
+        if (pivot_abs <= Real(1e-14)) {
+            throw FEException(std::string("SerendipityBasis: singular interpolation matrix for ") + label,
+                              __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
+        }
+
+        if (pivot_row != col) {
+            for (int j = 0; j < n; ++j) {
+                std::swap(matrix[idx(col, j)], matrix[idx(pivot_row, j)]);
+                std::swap(inverse[idx(col, j)], inverse[idx(pivot_row, j)]);
+            }
+        }
+
+        const Real pivot = matrix[idx(col, col)];
+        for (int j = 0; j < n; ++j) {
+            matrix[idx(col, j)] /= pivot;
+            inverse[idx(col, j)] /= pivot;
+        }
+
+        for (int row = 0; row < n; ++row) {
+            if (row == col) {
+                continue;
+            }
+            const Real factor = matrix[idx(row, col)];
+            if (std::abs(factor) <= Real(0)) {
+                continue;
+            }
+            for (int j = 0; j < n; ++j) {
+                matrix[idx(row, j)] -= factor * matrix[idx(col, j)];
+                inverse[idx(row, j)] -= factor * inverse[idx(col, j)];
+            }
+        }
+    }
+
+    return inverse;
+}
+
+std::vector<Real> quad_serendipity_inverse_vandermonde(
+    std::span<const Vec3> nodes,
+    std::span<const std::array<int, 2>> exponents,
+    int order) {
+    const int n = static_cast<int>(nodes.size());
+    if (n == 0 || exponents.size() != nodes.size()) {
+        throw FEException("SerendipityBasis: invalid quadrilateral serendipity interpolation setup",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+
+    std::vector<Real> vandermonde(static_cast<std::size_t>(n * n), Real(0));
+    auto idx = [n](int row, int col) -> std::size_t {
+        return static_cast<std::size_t>(row * n + col);
+    };
+
+    for (int row = 0; row < n; ++row) {
+        const Real x = nodes[static_cast<std::size_t>(row)][0];
+        const Real y = nodes[static_cast<std::size_t>(row)][1];
+        for (int col = 0; col < n; ++col) {
+            const auto [ax, ay] = exponents[static_cast<std::size_t>(col)];
+            vandermonde[idx(row, col)] = powi(x, ax) * powi(y, ay);
+        }
+    }
+
+    const std::string label = "Quad order " + std::to_string(order);
+    return invert_dense_matrix(std::move(vandermonde), n, label.c_str());
+}
 // Mesh use a conventional Hex20 node ordering: corners first, then edge
 // midpoints in the order {bottom, top, vertical}. The original polynomial
 // generator for the Hex20 field basis used an axis-grouped edge ordering.
@@ -118,14 +311,18 @@ SerendipityBasis::SerendipityBasis(ElementType type, int order, bool geometry_mo
         if (order_ < 1) {
             order_ = 1;
         }
-        if (order_ == 1) {
-            size_ = 4;
-        } else if (order_ == 2) {
-            size_ = 8;
-        } else {
-            throw NotImplementedException("SerendipityBasis currently supports order 1 or 2 on quadrilaterals",
+        if (type == ElementType::Quad8 && order_ != 2) {
+            throw NotImplementedException("SerendipityBasis: Quad8 is only valid for quadratic order 2; use Quad4 for higher-order quadrilateral serendipity",
                                           __FILE__, __LINE__, __func__);
         }
+        quad_monomial_exponents_ = quad_serendipity_exponents(order_);
+        size_ = quad_monomial_exponents_.size();
+        nodes_ = quad_serendipity_nodes(order_, size_);
+        if (nodes_.size() != size_) {
+            throw FEException("SerendipityBasis: quadrilateral serendipity setup produced inconsistent sizes",
+                              __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
+        }
+        quad_inv_vandermonde_ = quad_serendipity_inverse_vandermonde(nodes_, quad_monomial_exponents_, order_);
     } else if (type == ElementType::Hex8 || type == ElementType::Hex20) {
         dimension_ = 3;
         if (order_ < 1) order_ = 1;
@@ -163,6 +360,13 @@ SerendipityBasis::SerendipityBasis(ElementType type, int order, bool geometry_mo
         throw BasisElementCompatibilityException("SerendipityBasis supports Quad4/Quad8, Hex8/Hex20, Wedge15, and Pyramid13 elements",
                                                  __FILE__, __LINE__, __func__);
     }
+
+    if (nodes_.empty()) {
+        nodes_.reserve(size_);
+        for (std::size_t i = 0; i < size_; ++i) {
+            nodes_.push_back(NodeOrdering::get_node_coords(element_type_, i));
+        }
+    }
 }
 
 void SerendipityBasis::evaluate_values(const math::Vector<Real, 3>& xi,
@@ -171,6 +375,29 @@ void SerendipityBasis::evaluate_values(const math::Vector<Real, 3>& xi,
     const Real x = xi[0];
     const Real y = xi[1];
     const Real z = xi[2];
+
+    if (dimension_ == 2) {
+        if (quad_monomial_exponents_.size() != size_ ||
+            quad_inv_vandermonde_.size() != size_ * size_) {
+            throw FEException("SerendipityBasis: quadrilateral interpolation tables are not initialized",
+                              __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
+        }
+
+        std::vector<Real> monomials(size_, Real(0));
+        for (std::size_t j = 0; j < size_; ++j) {
+            const auto [ax, ay] = quad_monomial_exponents_[j];
+            monomials[j] = powi(x, ax) * powi(y, ay);
+        }
+
+        for (std::size_t i = 0; i < size_; ++i) {
+            Real value = Real(0);
+            for (std::size_t j = 0; j < size_; ++j) {
+                value += monomials[j] * quad_inv_vandermonde_[j * size_ + i];
+            }
+            values[i] = value;
+        }
+        return;
+    }
 
     if (dimension_ == 2 && order_ == 1) {
         values[0] = Real(0.25) * (Real(1) - x) * (Real(1) - y); // bottom-left
@@ -374,6 +601,35 @@ void SerendipityBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
     const Real x = xi[0];
     const Real y = xi[1];
     const Real z = xi[2];
+
+    if (dimension_ == 2) {
+        if (quad_monomial_exponents_.size() != size_ ||
+            quad_inv_vandermonde_.size() != size_ * size_) {
+            throw FEException("SerendipityBasis: quadrilateral interpolation tables are not initialized",
+                              __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
+        }
+
+        std::vector<Real> dmon_dx(size_, Real(0));
+        std::vector<Real> dmon_dy(size_, Real(0));
+        for (std::size_t j = 0; j < size_; ++j) {
+            const auto [ax, ay] = quad_monomial_exponents_[j];
+            dmon_dx[j] = (ax > 0) ? Real(ax) * powi(x, ax - 1) * powi(y, ay) : Real(0);
+            dmon_dy[j] = (ay > 0) ? powi(x, ax) * Real(ay) * powi(y, ay - 1) : Real(0);
+        }
+
+        for (std::size_t i = 0; i < size_; ++i) {
+            Real gx = Real(0);
+            Real gy = Real(0);
+            for (std::size_t j = 0; j < size_; ++j) {
+                const Real coeff = quad_inv_vandermonde_[j * size_ + i];
+                gx += dmon_dx[j] * coeff;
+                gy += dmon_dy[j] * coeff;
+            }
+            gradients[i][0] = gx;
+            gradients[i][1] = gy;
+        }
+        return;
+    }
 
     // 2D linear quad (Quad4)
     if (dimension_ == 2 && order_ == 1) {

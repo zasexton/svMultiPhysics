@@ -127,9 +127,9 @@ struct SymbolicDiffResult {
                                                          FieldId trial_state_field = INVALID_FIELD_ID);
 
 /**
- * @brief Differentiate a form w.r.t. a specific AuxiliaryOutputRef slot.
+ * @brief Differentiate a form w.r.t. a specific AuxiliaryOutputRef id.
  *
- * This treats the AuxiliaryOutputRef(slot) terminal as the active variable
+ * This treats the AuxiliaryOutputRef(id) terminal as the active variable
  * (derivative = 1) and all other terminals as constants.  The result is a
  * scalar-valued expression suitable for evaluating dR/d(output_k) at each
  * quadrature point.

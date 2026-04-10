@@ -241,6 +241,65 @@ TEST(AuxiliaryBlockStorage, CommitPushesHistory)
     EXPECT_DOUBLE_EQ(storage.history().snapshot(1)[0], 0.0);  // pushed at t=0.1
 }
 
+TEST(AuxiliaryBlockStorage, GhostedCommitOnlyCopiesOwnedPrefix)
+{
+    AuxiliaryBlockStorage storage;
+    auto spec = makeSpec("ghosted", 1, AuxiliaryStateScope::Node);
+    spec.history_mode = AuxiliaryHistoryMode::SingleStep;
+    storage.setupFixedStride(spec, 5);
+    storage.setOwnedEntityCount(3);
+    storage.initialize(std::vector<Real>{1.0, 2.0, 3.0, 90.0, 91.0});
+
+    auto work = storage.work();
+    work[0] = 10.0;
+    work[1] = 20.0;
+    work[2] = 30.0;
+    work[3] = 40.0;
+    work[4] = 50.0;
+
+    storage.commitTimeStep(0.25);
+
+    const auto committed = storage.committed();
+    EXPECT_EQ(storage.ownedEntityCount(), 3u);
+    EXPECT_DOUBLE_EQ(committed[0], 10.0);
+    EXPECT_DOUBLE_EQ(committed[1], 20.0);
+    EXPECT_DOUBLE_EQ(committed[2], 30.0);
+    EXPECT_DOUBLE_EQ(committed[3], 90.0);
+    EXPECT_DOUBLE_EQ(committed[4], 91.0);
+
+    ASSERT_EQ(storage.history().depth(), 1u);
+    const auto hist = storage.history().snapshot(0);
+    EXPECT_DOUBLE_EQ(hist[0], 1.0);
+    EXPECT_DOUBLE_EQ(hist[1], 2.0);
+    EXPECT_DOUBLE_EQ(hist[2], 3.0);
+    EXPECT_DOUBLE_EQ(hist[3], 90.0);
+    EXPECT_DOUBLE_EQ(hist[4], 91.0);
+}
+
+TEST(AuxiliaryBlockStorage, GhostedResetOnlyRestoresOwnedPrefix)
+{
+    AuxiliaryBlockStorage storage;
+    auto spec = makeSpec("ghosted", 1, AuxiliaryStateScope::Node);
+    storage.setupFixedStride(spec, 5);
+    storage.setOwnedEntityCount(3);
+    storage.initialize(std::vector<Real>{1.0, 2.0, 3.0, 90.0, 91.0});
+
+    auto work = storage.work();
+    work[0] = -1.0;
+    work[1] = -2.0;
+    work[2] = -3.0;
+    work[3] = -4.0;
+    work[4] = -5.0;
+
+    storage.resetToCommitted();
+
+    EXPECT_DOUBLE_EQ(storage.work()[0], 1.0);
+    EXPECT_DOUBLE_EQ(storage.work()[1], 2.0);
+    EXPECT_DOUBLE_EQ(storage.work()[2], 3.0);
+    EXPECT_DOUBLE_EQ(storage.work()[3], -4.0);
+    EXPECT_DOUBLE_EQ(storage.work()[4], -5.0);
+}
+
 // ---------------------------------------------------------------------------
 //  Ragged layout
 // ---------------------------------------------------------------------------
@@ -541,36 +600,6 @@ TEST(AuxiliaryStateMultiBlock, StorageSummary)
 }
 
 // ---------------------------------------------------------------------------
-//  Legacy + block coexistence
-// ---------------------------------------------------------------------------
-
-TEST(AuxiliaryStateMultiBlock, LegacyAndBlockCoexist)
-{
-    AuxiliaryState state;
-
-    // Register legacy flat variable
-    AuxiliaryStateSpec legacy;
-    legacy.name = "X";
-    legacy.size = 1;
-    state.registerState(legacy, std::vector<Real>{5.0});
-
-    // Register block
-    AuxiliaryStateSpec block_spec;
-    block_spec.name = "ionic";
-    block_spec.size = 3;
-    block_spec.scope = AuxiliaryStateScope::Node;
-    state.registerBlock(block_spec, 10);
-
-    // Legacy API works
-    EXPECT_EQ(state.size(), 1u);
-    EXPECT_DOUBLE_EQ(state["X"], 5.0);
-
-    // Block API works independently
-    EXPECT_EQ(state.blockCount(), 1u);
-    EXPECT_EQ(state.getBlock("ionic").storageSize(), 30u);
-}
-
-// ---------------------------------------------------------------------------
 //  History queries through blocks
 // ---------------------------------------------------------------------------
 
@@ -608,21 +637,16 @@ TEST(AuxiliaryStateMultiBlock, BlockHistoryQuery)
     EXPECT_DOUBLE_EQ(blk.history().snapshotTime(1), 0.1);
 }
 
-TEST(AuxiliaryStateMultiBlock, ClearRemovesBothLegacyAndBlocks)
+TEST(AuxiliaryStateMultiBlock, ClearRemovesBlocks)
 {
     AuxiliaryState state;
-
-    AuxiliaryStateSpec legacy; legacy.name = "X"; legacy.size = 1;
-    state.registerState(legacy, std::vector<Real>{1.0});
 
     AuxiliaryStateSpec blk; blk.name = "Y"; blk.size = 1;
     state.registerBlock(blk, 1);
 
     state.clear();
 
-    EXPECT_EQ(state.size(), 0u);
     EXPECT_EQ(state.blockCount(), 0u);
-    EXPECT_FALSE(state.has("X"));
     EXPECT_FALSE(state.hasBlock("Y"));
 }
 

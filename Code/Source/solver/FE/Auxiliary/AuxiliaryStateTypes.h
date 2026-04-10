@@ -79,6 +79,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -153,6 +154,8 @@ enum class AuxiliaryVariableKind : std::uint8_t {
  */
 enum class AuxiliarySolveMode : std::uint8_t {
     /// Advanced independently via a local stepper between PDE steps.
+    /// Callers are responsible for invoking the auxiliary advancement hook
+    /// (`FESystem::advanceAuxiliaryState(...)` in the generalized path).
     /// Supports local time-advancement method selection, substepping,
     /// and related staggered-advance policies.
     Partitioned,
@@ -160,7 +163,8 @@ enum class AuxiliarySolveMode : std::uint8_t {
     /// Participates as first-class unknowns in assembled residual/Jacobian
     /// systems.  Uses auxiliary-specific unknown layouts composed into a
     /// mixed system layout.  Does NOT use an independent local stepper;
-    /// time discretization is owned by the global assembled solve.
+    /// time discretization and nonlinear updates are owned by the global
+    /// assembled solve / Jacobian assembly path.
     Monolithic
 };
 
@@ -267,6 +271,19 @@ enum class AuxiliaryScheduleMode : std::uint8_t {
 
     /// Participates in a multirate scheme with independent rate selection.
     Multirate
+};
+
+/**
+ * @brief Whether a deployed auxiliary instance should be materialized for a run.
+ *
+ * `Auto` lets the backend decide from variant selection and reachability.
+ * `Always` forces setup-time validation/materialization. `Disabled` keeps the
+ * deployment dormant even if it would otherwise be selected.
+ */
+enum class AuxiliaryActivationMode : std::uint8_t {
+    Auto,
+    Always,
+    Disabled
 };
 
 // ---------------------------------------------------------------------------
@@ -573,6 +590,9 @@ struct AuxiliaryStateSpec {
     AuxiliaryStateScope scope{AuxiliaryStateScope::Global};
 
     /// Solve mode (Partitioned or Monolithic).
+    /// Partitioned blocks advance through the auxiliary-stepper path.
+    /// Monolithic blocks contribute unknowns to the mixed FE system and
+    /// are updated by the global assembled solve instead.
     AuxiliarySolveMode solve_mode{AuxiliarySolveMode::Partitioned};
 
     /// Memory layout mode.
@@ -615,6 +635,70 @@ struct AuxiliaryStateSpec {
 
     /// Optional formulation-owned metadata (key-value pairs).
     std::unordered_map<std::string, std::string> metadata{};
+
+    // -----------------------------------------------------------------
+    //  Convenience factories for common registrations
+    // -----------------------------------------------------------------
+
+    [[nodiscard]] static AuxiliaryStateSpec globalScalar(std::string name)
+    {
+        AuxiliaryStateSpec spec;
+        spec.name = std::move(name);
+        spec.size = 1;
+        spec.scope = AuxiliaryStateScope::Global;
+        spec.sync_policy = AuxiliarySyncPolicy::None;
+        return spec;
+    }
+
+    [[nodiscard]] static AuxiliaryStateSpec boundaryScalar(std::string name)
+    {
+        AuxiliaryStateSpec spec;
+        spec.name = std::move(name);
+        spec.size = 1;
+        spec.scope = AuxiliaryStateScope::Boundary;
+        spec.sync_policy = AuxiliarySyncPolicy::None;
+        return spec;
+    }
+
+    [[nodiscard]] static AuxiliaryStateSpec nodeField(std::string name, int ncomp)
+    {
+        AuxiliaryStateSpec spec;
+        spec.name = std::move(name);
+        spec.size = ncomp;
+        spec.scope = AuxiliaryStateScope::Node;
+        spec.sync_policy = AuxiliarySyncPolicy::OwnedAndGhost;
+        return spec;
+    }
+
+    [[nodiscard]] static AuxiliaryStateSpec cellField(std::string name, int ncomp)
+    {
+        AuxiliaryStateSpec spec;
+        spec.name = std::move(name);
+        spec.size = ncomp;
+        spec.scope = AuxiliaryStateScope::Cell;
+        spec.sync_policy = AuxiliarySyncPolicy::OwnedOnly;
+        return spec;
+    }
+
+    [[nodiscard]] static AuxiliaryStateSpec quadratureField(std::string name, int ncomp)
+    {
+        AuxiliaryStateSpec spec;
+        spec.name = std::move(name);
+        spec.size = ncomp;
+        spec.scope = AuxiliaryStateScope::QuadraturePoint;
+        spec.sync_policy = AuxiliarySyncPolicy::OwnedOnly;
+        return spec;
+    }
+
+    [[nodiscard]] static AuxiliaryStateSpec facetField(std::string name, int ncomp)
+    {
+        AuxiliaryStateSpec spec;
+        spec.name = std::move(name);
+        spec.size = ncomp;
+        spec.scope = AuxiliaryStateScope::Facet;
+        spec.sync_policy = AuxiliarySyncPolicy::OwnedOnly;
+        return spec;
+    }
 };
 
 /**

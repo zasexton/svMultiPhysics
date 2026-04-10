@@ -5,9 +5,13 @@
 
 #include <gtest/gtest.h>
 
+#include "FE/Basis/LagrangeBasis.h"
 #include "FE/Dofs/DofHandler.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Dofs/GhostDofManager.h"
+#include "FE/Spaces/AdaptiveSpace.h"
+#include "FE/Spaces/H1Space.h"
+#include "FE/Spaces/HCurlSpace.h"
 
 #include <mpi.h>
 
@@ -24,12 +28,16 @@
 
 using svmp::FE::GlobalIndex;
 using svmp::FE::LocalIndex;
+using svmp::FE::ElementType;
 using svmp::FE::dofs::DofDistributionOptions;
 using svmp::FE::dofs::DofHandler;
 using svmp::FE::dofs::DofLayoutInfo;
 using svmp::FE::dofs::GlobalNumberingMode;
 using svmp::FE::dofs::MeshTopologyInfo;
 using svmp::FE::dofs::OwnershipStrategy;
+using svmp::FE::spaces::AdaptiveSpace;
+using svmp::FE::spaces::H1Space;
+using svmp::FE::spaces::HCurlSpace;
 
 namespace {
 
@@ -157,6 +165,48 @@ MeshTopologyInfo makeTwoRankDisjointTrianglesP1(int rank, GlobalIndex n_cells, s
     return topo;
 }
 
+MeshTopologyInfo makeTwoRankDisjointWedgeP4(int rank, svmp::FE::dofs::gid_t gid_cell)
+{
+    MeshTopologyInfo topo;
+    topo.n_cells = 1;
+    topo.n_vertices = 6;
+    topo.dim = 3;
+
+    topo.cell2vertex_offsets = {0, 6};
+    topo.cell2vertex_data = {0, 1, 2, 3, 4, 5};
+    topo.vertex_gids.resize(6);
+    for (std::size_t i = 0; i < topo.vertex_gids.size(); ++i) {
+        topo.vertex_gids[i] = static_cast<svmp::FE::dofs::gid_t>(rank) * 6 +
+                              static_cast<svmp::FE::dofs::gid_t>(i);
+    }
+
+    topo.cell_gids = {gid_cell};
+    topo.cell_owner_ranks = {rank};
+    topo.neighbor_ranks = {1 - rank};
+    return topo;
+}
+
+MeshTopologyInfo makeTwoRankDisjointPyramidP4(int rank, svmp::FE::dofs::gid_t gid_cell)
+{
+    MeshTopologyInfo topo;
+    topo.n_cells = 1;
+    topo.n_vertices = 5;
+    topo.dim = 3;
+
+    topo.cell2vertex_offsets = {0, 5};
+    topo.cell2vertex_data = {0, 1, 2, 3, 4};
+    topo.vertex_gids.resize(5);
+    for (std::size_t i = 0; i < topo.vertex_gids.size(); ++i) {
+        topo.vertex_gids[i] = static_cast<svmp::FE::dofs::gid_t>(rank) * 5 +
+                              static_cast<svmp::FE::dofs::gid_t>(i);
+    }
+
+    topo.cell_gids = {gid_cell};
+    topo.cell_owner_ranks = {rank};
+    topo.neighbor_ranks = {1 - rank};
+    return topo;
+}
+
 MeshTopologyInfo makeTwoRankTriangleP2(int rank, GlobalIndex gid_cell) {
     MeshTopologyInfo topo = makeTwoRankTriangleP1(rank, gid_cell);
 
@@ -175,6 +225,36 @@ MeshTopologyInfo makeTwoRankTriangleP2(int rank, GlobalIndex gid_cell) {
 MeshTopologyInfo makeTwoRankTriangleP2Sparse(int rank, GlobalIndex gid_cell) {
     auto topo = makeTwoRankTriangleP2(rank, gid_cell);
     remapVertexGidsSparse(topo);
+    return topo;
+}
+
+MeshTopologyInfo makeTwoRankQuadWithSharedEdge(int rank, svmp::FE::dofs::gid_t gid_cell) {
+    MeshTopologyInfo topo;
+    topo.n_cells = 1;
+    topo.n_vertices = 4;
+    topo.n_edges = 4;
+    topo.dim = 2;
+
+    topo.cell2vertex_offsets = {0, 4};
+    topo.cell2edge_offsets = {0, 4};
+    topo.cell2edge_data = {0, 1, 2, 3};
+
+    if (rank == 0) {
+        topo.vertex_gids = {0, 1, 4, 3};
+    } else {
+        topo.vertex_gids = {1, 2, 5, 4};
+    }
+    topo.cell2vertex_data = {0, 1, 2, 3};
+    topo.edge2vertex_data = {
+        0, 1,
+        1, 2,
+        2, 3,
+        3, 0
+    };
+
+    topo.cell_gids = {gid_cell};
+    topo.cell_owner_ranks = {rank};
+    topo.neighbor_ranks = {1 - rank};
     return topo;
 }
 
@@ -1829,4 +1909,221 @@ TEST(DofHandlerMPI, ReproducibleAcrossCommunicators_NoGlobalCollectives_Reversed
     EXPECT_EQ(v1_world[0], v1_rev[0]);
 
     MPI_Comm_free(&rev_comm);
+}
+
+TEST(DofHandlerMPI, DistributedVariableOrderH1_TwoRank_SharedVerticesAndGhostOwnership) {
+    const MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "Requires 2 MPI ranks";
+    }
+
+    MeshTopologyInfo topo = makeTwoRankQuadWithSharedEdge(rank, /*gid_cell=*/500 + rank);
+
+    AdaptiveSpace adaptive;
+    auto p1 = std::make_shared<H1Space>(ElementType::Quad4, 1, svmp::FE::BasisType::Hierarchical);
+    auto p3 = std::make_shared<H1Space>(ElementType::Quad4, 3, svmp::FE::BasisType::Hierarchical);
+    adaptive.add_level(1, p1);
+    adaptive.add_level(3, p3);
+    adaptive.resize_element_orders(1, rank == 0 ? 1 : 3);
+
+    DofDistributionOptions opts;
+    opts.my_rank = rank;
+    opts.world_size = size;
+    opts.mpi_comm = comm;
+    opts.ownership = OwnershipStrategy::LowestRank;
+    opts.global_numbering = GlobalNumberingMode::OwnerContiguous;
+
+    DofHandler dh;
+    dh.distributeDofs(topo, adaptive, opts);
+    dh.finalize();
+
+    const auto* entity = dh.getEntityDofMap();
+    ASSERT_NE(entity, nullptr);
+
+    const GlobalIndex shared_v0 = (rank == 0) ? 1 : 0;
+    const GlobalIndex shared_v1 = (rank == 0) ? 2 : 3;
+    const auto v0 = entity->getVertexDofs(shared_v0);
+    const auto v1 = entity->getVertexDofs(shared_v1);
+    EXPECT_EQ(v0.size(), 1u);
+    EXPECT_EQ(v1.size(), 1u);
+
+    std::array<GlobalIndex, 2> local_shared{{GlobalIndex(-1), GlobalIndex(-1)}};
+    if (!v0.empty()) {
+        local_shared[0] = v0[0];
+    }
+    if (!v1.empty()) {
+        local_shared[1] = v1[0];
+    }
+    const auto gathered = allgatherGlobalIndices(local_shared, comm);
+    ASSERT_EQ(gathered.size(), 4u);
+    EXPECT_EQ(gathered[0], gathered[2]);
+    EXPECT_EQ(gathered[1], gathered[3]);
+    EXPECT_EQ(dh.getDofMap().getDofOwner(local_shared[0]), 0);
+    EXPECT_EQ(dh.getDofMap().getDofOwner(local_shared[1]), 0);
+
+    const auto edge_dofs = entity->getEdgeDofs(rank == 0 ? 1 : 3);
+    EXPECT_TRUE(edge_dofs.empty());
+
+    const auto ghost_dofs = dh.getGhostDofs();
+    if (rank == 0) {
+        EXPECT_TRUE(ghost_dofs.empty());
+    } else {
+        ASSERT_EQ(ghost_dofs.size(), 2u);
+        EXPECT_EQ(ghost_dofs[0], local_shared[0]);
+        EXPECT_EQ(ghost_dofs[1], local_shared[1]);
+    }
+}
+
+TEST(DofHandlerMPI, DistributedVariableOrderHCurl_TwoRank_SharedEdgeAndOrientations) {
+    const MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "Requires 2 MPI ranks";
+    }
+
+    MeshTopologyInfo topo = makeTwoRankQuadWithSharedEdge(rank, /*gid_cell=*/550 + rank);
+
+    AdaptiveSpace adaptive;
+    auto p1 = std::make_shared<HCurlSpace>(ElementType::Quad4, 1);
+    auto p2 = std::make_shared<HCurlSpace>(ElementType::Quad4, 2);
+    adaptive.add_level(1, p1);
+    adaptive.add_level(2, p2);
+    adaptive.resize_element_orders(1, rank == 0 ? 1 : 2);
+
+    DofDistributionOptions opts;
+    opts.my_rank = rank;
+    opts.world_size = size;
+    opts.mpi_comm = comm;
+    opts.ownership = OwnershipStrategy::LowestRank;
+    opts.global_numbering = GlobalNumberingMode::OwnerContiguous;
+
+    DofHandler dh;
+    dh.distributeDofs(topo, adaptive, opts);
+    dh.finalize();
+
+    EXPECT_TRUE(dh.hasCellOrientations());
+    const auto edge_orients = dh.cellEdgeOrientations(0);
+    ASSERT_EQ(edge_orients.size(), 4u);
+    EXPECT_EQ(edge_orients[rank == 0 ? 1u : 3u], rank == 0 ? +1 : -1);
+
+    const auto* entity = dh.getEntityDofMap();
+    ASSERT_NE(entity, nullptr);
+    const auto edge_dofs = entity->getEdgeDofs(rank == 0 ? 1 : 3);
+    const auto* vb1 = dynamic_cast<const svmp::FE::basis::VectorBasisFunction*>(&p1->element().basis());
+    const auto* vb2 = dynamic_cast<const svmp::FE::basis::VectorBasisFunction*>(&p2->element().basis());
+    ASSERT_NE(vb1, nullptr);
+    ASSERT_NE(vb2, nullptr);
+
+    auto edge_count = [](const svmp::FE::basis::VectorBasisFunction& basis, int edge_id) {
+        std::size_t count = 0;
+        for (const auto& assoc : basis.dof_associations()) {
+            if (assoc.entity_type == svmp::FE::basis::DofEntity::Edge &&
+                assoc.entity_id == edge_id) {
+                ++count;
+            }
+        }
+        return count;
+    };
+
+    const auto expected_shared = std::min(edge_count(*vb1, 1), edge_count(*vb2, 3));
+    EXPECT_EQ(edge_dofs.size(), expected_shared);
+
+    std::vector<GlobalIndex> local_shared(edge_dofs.begin(), edge_dofs.end());
+    const auto gathered = allgathervInt64<GlobalIndex>(local_shared, comm);
+    ASSERT_EQ(gathered.size(), expected_shared * static_cast<std::size_t>(size));
+    for (std::size_t i = 0; i < expected_shared; ++i) {
+        EXPECT_EQ(gathered[i], gathered[i + expected_shared]);
+        EXPECT_EQ(dh.getDofMap().getDofOwner(edge_dofs[i]), 0);
+    }
+
+    const auto ghost_dofs = dh.getGhostDofs();
+    if (rank == 0) {
+        EXPECT_TRUE(ghost_dofs.empty());
+    } else {
+        EXPECT_EQ(ghost_dofs.size(), expected_shared);
+        for (std::size_t i = 0; i < std::min(ghost_dofs.size(), edge_dofs.size()); ++i) {
+            EXPECT_EQ(ghost_dofs[i], edge_dofs[i]);
+        }
+    }
+}
+
+TEST(DofHandlerMPI, DistributedCG_P4_TwoRank_DisjointWedges_BuildsMixedFaceBlocks) {
+    const MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "Requires 2 MPI ranks";
+    }
+
+    MeshTopologyInfo topo = makeTwoRankDisjointWedgeP4(rank, /*gid_cell=*/600 + rank);
+    const auto layout = DofLayoutInfo::Lagrange(/*order=*/4, /*dim=*/3, /*num_verts_per_cell=*/6);
+    const svmp::FE::basis::LagrangeBasis basis_fn(svmp::FE::ElementType::Wedge6, 4);
+
+    DofDistributionOptions opts;
+    opts.my_rank = rank;
+    opts.world_size = size;
+    opts.mpi_comm = comm;
+    opts.ownership = OwnershipStrategy::LowestRank;
+    opts.global_numbering = GlobalNumberingMode::OwnerContiguous;
+    opts.validate_parallel = true;
+
+    DofHandler dh;
+    dh.distributeDofs(topo, layout, opts);
+    dh.finalize();
+
+    EXPECT_EQ(dh.getNumDofs(), static_cast<GlobalIndex>(2 * basis_fn.size()));
+    EXPECT_EQ(dh.getNumLocalDofs(), static_cast<GlobalIndex>(basis_fn.size()));
+    EXPECT_TRUE(dh.getGhostDofs().empty());
+
+    const auto dofs = dh.getCellDofs(0);
+    ASSERT_EQ(dofs.size(), basis_fn.size());
+    for (auto dof : dofs) {
+        EXPECT_TRUE(dh.getPartition().isOwned(dof));
+    }
+
+    const auto owned_range = dh.getLocalDofRange();
+    ASSERT_TRUE(owned_range.has_value());
+    EXPECT_EQ(owned_range->second - owned_range->first, static_cast<GlobalIndex>(basis_fn.size()));
+}
+
+TEST(DofHandlerMPI, DistributedCG_P4_TwoRank_DisjointPyramids_BuildsMixedFaceBlocks) {
+    const MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "Requires 2 MPI ranks";
+    }
+
+    MeshTopologyInfo topo = makeTwoRankDisjointPyramidP4(rank, /*gid_cell=*/700 + rank);
+    const auto layout = DofLayoutInfo::Lagrange(/*order=*/4, /*dim=*/3, /*num_verts_per_cell=*/5);
+    const svmp::FE::basis::LagrangeBasis basis_fn(svmp::FE::ElementType::Pyramid5, 4);
+
+    DofDistributionOptions opts;
+    opts.my_rank = rank;
+    opts.world_size = size;
+    opts.mpi_comm = comm;
+    opts.ownership = OwnershipStrategy::LowestRank;
+    opts.global_numbering = GlobalNumberingMode::OwnerContiguous;
+    opts.validate_parallel = true;
+
+    DofHandler dh;
+    dh.distributeDofs(topo, layout, opts);
+    dh.finalize();
+
+    EXPECT_EQ(dh.getNumDofs(), static_cast<GlobalIndex>(2 * basis_fn.size()));
+    EXPECT_EQ(dh.getNumLocalDofs(), static_cast<GlobalIndex>(basis_fn.size()));
+    EXPECT_TRUE(dh.getGhostDofs().empty());
+
+    const auto dofs = dh.getCellDofs(0);
+    ASSERT_EQ(dofs.size(), basis_fn.size());
+    for (auto dof : dofs) {
+        EXPECT_TRUE(dh.getPartition().isOwned(dof));
+    }
+
+    const auto owned_range = dh.getLocalDofRange();
+    ASSERT_TRUE(owned_range.has_value());
+    EXPECT_EQ(owned_range->second - owned_range->first, static_cast<GlobalIndex>(basis_fn.size()));
 }

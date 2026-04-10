@@ -2076,14 +2076,6 @@ FormExpr FormExpr::boundaryIntegral(FormExpr integrand, int boundary_marker, std
                                                                    std::move(name)));
 }
 
-FormExpr FormExpr::boundaryIntegralValue(std::string name)
-{
-    if (name.empty()) {
-        throw std::invalid_argument("FormExpr::boundaryIntegralValue: empty name");
-    }
-    return FormExpr(std::make_shared<BoundaryIntegralSymbolNode>(std::move(name)));
-}
-
 FormExpr FormExpr::boundaryIntegralRef(std::uint32_t slot)
 {
     return FormExpr(std::make_shared<BoundaryIntegralRefNode>(slot));

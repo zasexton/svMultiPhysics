@@ -15,6 +15,54 @@
 using namespace svmp::FE;
 using namespace svmp::FE::basis;
 
+namespace {
+
+std::size_t expected_quad_serendipity_size(int order) {
+    return static_cast<std::size_t>((order * order + 3 * order + 6) / 2);
+}
+
+void expect_quad_serendipity_nodal(int order) {
+    SerendipityBasis basis(ElementType::Quad4, order);
+    ASSERT_EQ(basis.size(), expected_quad_serendipity_size(order));
+
+    const auto& nodes = basis.nodes();
+    ASSERT_EQ(nodes.size(), basis.size());
+
+    for (std::size_t j = 0; j < nodes.size(); ++j) {
+        std::vector<Real> vals;
+        basis.evaluate_values(nodes[j], vals);
+        ASSERT_EQ(vals.size(), basis.size());
+        for (std::size_t i = 0; i < vals.size(); ++i) {
+            if (i == j) {
+                EXPECT_NEAR(vals[i], 1.0, 1e-10);
+            } else {
+                EXPECT_NEAR(vals[i], 0.0, 1e-10);
+            }
+        }
+    }
+
+    const svmp::FE::math::Vector<Real, 3> xi{Real(0.17), Real(-0.31), Real(0)};
+    std::vector<Real> vals;
+    std::vector<Gradient> grads;
+    basis.evaluate_values(xi, vals);
+    basis.evaluate_gradients(xi, grads);
+
+    Real sum = Real(0);
+    Gradient grad_sum{};
+    for (std::size_t i = 0; i < vals.size(); ++i) {
+        sum += vals[i];
+        grad_sum[0] += grads[i][0];
+        grad_sum[1] += grads[i][1];
+        grad_sum[2] += grads[i][2];
+    }
+
+    EXPECT_NEAR(sum, 1.0, 1e-10);
+    EXPECT_NEAR(grad_sum[0], 0.0, 1e-10);
+    EXPECT_NEAR(grad_sum[1], 0.0, 1e-10);
+}
+
+} // namespace
+
 TEST(SerendipityBasis, QuadraticHasEightFunctions) {
     SerendipityBasis basis(ElementType::Quad4, 2);
     EXPECT_EQ(basis.size(), 8u);
@@ -35,6 +83,12 @@ TEST(SerendipityBasis, LinearHasFourFunctions) {
     double sum = 0.0;
     for (double v : vals) sum += v;
     EXPECT_NEAR(sum, 1.0, 1e-12);
+}
+
+TEST(SerendipityBasis, HigherOrderQuadrilateralIsNodalAndPartitionsUnity) {
+    for (int order : {3, 4, 5}) {
+        expect_quad_serendipity_nodal(order);
+    }
 }
 
 TEST(SerendipityBasis, Hex20FieldBasisNodalAndPartition) {

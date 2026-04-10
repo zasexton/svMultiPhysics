@@ -2569,6 +2569,8 @@ void applyAuxiliaryDelta(systems::FESystem& system,
 
     FE_THROW_IF(offset != dx.size(), systems::InvalidStateException,
                 "NewtonSolver: auxiliary bordered update did not consume all dx entries");
+
+    mgr->syncGhosts();
 }
 
 } // namespace
@@ -2744,9 +2746,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     auto& residual_base = *workspace.residual_base;
 
     NewtonReport report;
-    const auto base_linear_options = linear.getOptions();
 
     const auto& sys = transient.system();
+    const auto base_linear_options = sys.augmentSolverOptions(linear.getOptions());
+    linear.setOptions(base_linear_options);
     const auto& constraints = sys.constraints();
     const int temporal_order = transient.system().temporalOrder();
 

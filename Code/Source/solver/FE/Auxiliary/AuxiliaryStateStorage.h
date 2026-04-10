@@ -30,6 +30,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <string>
 #include <vector>
@@ -95,6 +96,15 @@ public:
      */
     void resize(std::size_t new_entity_count);
 
+    /**
+     * @brief Override the owned-entity prefix count for distributed layouts.
+     *
+     * Storage keeps owned entities first and ghosts afterward.  Serial blocks
+     * leave this equal to `entityCount()`.  Distributed node blocks can lower
+     * it so `blockLayout()` reports the real owned/ghost split.
+     */
+    void setOwnedEntityCount(std::size_t owned_entity_count);
+
     // -----------------------------------------------------------------
     //  Properties
     // -----------------------------------------------------------------
@@ -106,6 +116,7 @@ public:
     [[nodiscard]] AuxiliaryEntityOrdering ordering() const noexcept { return ordering_; }
     [[nodiscard]] int componentStride() const noexcept { return component_stride_; }
     [[nodiscard]] std::size_t entityCount() const noexcept { return entity_count_; }
+    [[nodiscard]] std::size_t ownedEntityCount() const noexcept { return owned_entity_count_; }
     [[nodiscard]] std::size_t storageSize() const noexcept { return storage_size_; }
 
     /// Entity offsets for ragged layout (size = entity_count + 1).
@@ -146,6 +157,9 @@ public:
 
     /// Full read-only view of the committed buffer.
     [[nodiscard]] std::span<const Real> committed() const noexcept { return committed_; }
+
+    /// Writable committed buffer access for manager-level synchronization and restore paths.
+    [[nodiscard]] std::span<Real> committedMutable() noexcept { return committed_; }
 
     /// View of entity `i` in the committed buffer.
     [[nodiscard]] std::span<const Real> committedEntity(std::size_t entity_idx) const noexcept
@@ -197,6 +211,14 @@ public:
     void resetToCommitted();
 
     /**
+     * @brief Reset work buffer to committed state and optionally refresh ghosts.
+     *
+     * For ghosted layouts, only the owned prefix is restored authoritatively.
+     * If `sync_ghosts` is provided, it is called afterward to repopulate ghost entries.
+     */
+    void resetToCommitted(const std::function<void(std::span<Real>)>& sync_ghosts);
+
+    /**
      * @brief Commit work buffer as new state at the given time.
      *
      * Pushes the current committed buffer into history (with timestamp),
@@ -205,12 +227,26 @@ public:
     void commitTimeStep(Real time);
 
     /**
+     * @brief Commit work buffer as new state at the given time and optionally refresh ghosts.
+     *
+     * For ghosted layouts, only the owned prefix is authoritative. When `sync_ghosts`
+     * is provided, ghost entries in committed/history snapshots are refreshed from the
+     * owned prefix after the local copy.
+     */
+    void commitTimeStep(Real time, const std::function<void(std::span<Real>)>& sync_ghosts);
+
+    /**
      * @brief Rollback: restore work buffer from committed state.
      *
      * Equivalent to resetToCommitted(); included for semantic clarity
      * in rollback workflows.
      */
     void rollback();
+
+    /**
+     * @brief Rollback with optional ghost refresh.
+     */
+    void rollback(const std::function<void(std::span<Real>)>& sync_ghosts);
 
     /**
      * @brief Initialize both work and committed buffers with the given values.
@@ -259,6 +295,7 @@ private:
     AuxiliaryEntityOrdering ordering_{AuxiliaryEntityOrdering::ByEntityThenComponent};
     int component_stride_{0};
     std::size_t entity_count_{0};
+    std::size_t owned_entity_count_{0};
     std::size_t storage_size_{0};
 
     /// Per-entity offsets for ragged layout (size = entity_count_ + 1).

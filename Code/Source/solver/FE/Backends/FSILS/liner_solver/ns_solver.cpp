@@ -188,6 +188,31 @@ void allreduce_sum_in_place(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   collectives.allreduce_sum(values);
 }
 
+[[nodiscard]] double combined_block_norm_sq(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                            int mom_ncomp,
+                                            const Array<double>& momentum,
+                                            bool scalar_constraint,
+                                            int con_ncomp,
+                                            const Array<double>* constraint_array,
+                                            const Vector<double>* constraint_vector) noexcept
+{
+  double local_values[2] = {0.0, 0.0};
+  if (mom_ncomp > 0) {
+    local_values[0] = norm::fsi_ls_norm_sq_local_v(mom_ncomp, lhs.mynNo, momentum);
+  }
+  if (scalar_constraint) {
+    if (constraint_vector != nullptr) {
+      local_values[1] = norm::fsi_ls_norm_sq_local_s(lhs.mynNo, *constraint_vector);
+    }
+  } else if (constraint_array != nullptr) {
+    local_values[1] = norm::fsi_ls_norm_sq_local_v(con_ncomp, lhs.mynNo, *constraint_array);
+  }
+  double global_values[2] = {local_values[0], local_values[1]};
+  const fe_fsi_linear_solver::CollectiveOps collectives(lhs.commu);
+  collectives.allreduce_sum(local_values, global_values, 2);
+  return global_values[0] + global_values[1];
+}
+
 void dense_axpy(int dof,
                 fsils_int nNo,
                 const Array<double>& src,
@@ -757,9 +782,18 @@ bool ns_solver_coupled_fgmres_scalar(
 
   compute_true_residual(x, residual);
   split_scalar_block_vector(residual, mom_start, mom_ncomp, con_start, mom_rhs, con_rhs);
-  const double momentum_norm = norm::fsi_ls_normv(mom_ncomp, mynNo, lhs.commu, mom_rhs);
-  const double constraint_norm = norm::fsi_ls_norms(mynNo, lhs.commu, con_rhs);
-  const double final_norm_sq = momentum_norm * momentum_norm + constraint_norm * constraint_norm;
+  double final_norm_locals[2] = {
+      norm::fsi_ls_norm_sq_local_v(mom_ncomp, lhs.mynNo, mom_rhs),
+      norm::fsi_ls_norm_sq_local_s(lhs.mynNo, con_rhs),
+  };
+  double final_norm_globals[2] = {final_norm_locals[0], final_norm_locals[1]};
+  {
+    const fe_fsi_linear_solver::CollectiveOps collectives(lhs.commu);
+    collectives.allreduce_sum(final_norm_locals, final_norm_globals, 2);
+  }
+  const double momentum_norm = std::sqrt(std::max(0.0, final_norm_globals[0]));
+  const double constraint_norm = std::sqrt(std::max(0.0, final_norm_globals[1]));
+  const double final_norm_sq = final_norm_globals[0] + final_norm_globals[1];
 
   ls.RI.fNorm = std::sqrt(final_norm_sq);
   ls.RI.suc = (ls.RI.fNorm < true_eps);
@@ -800,6 +834,8 @@ bool ns_solver_coupled_fgmres_scalar(
 /// Accumulates boundary coupling norms for the field-A (momentum) components.
 void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int mom_ncomp, const int dof, const fsils_int nNo, const fsils_int mynNo)
 {
+  std::vector<int> shared_face_indices;
+  std::vector<double> shared_face_local_norms;
   for (int faIn = 0; faIn < lhs.nFaces; faIn++) {
     auto& face = lhs.face[faIn];
 
@@ -813,12 +849,9 @@ void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int mom_ncomp, const
               local_nS += face.valM(i,a) * face.valM(i,a);
             }
           }
-	        }
-
-	        double global_nS = 0.0;
-	        const fe_fsi_linear_solver::CollectiveOps collectives(lhs.commu);
-	        collectives.allreduce_sum(local_nS, global_nS);
-	        face.nS = global_nS;
+        }
+        shared_face_indices.push_back(faIn);
+        shared_face_local_norms.push_back(local_nS);
 
       } else {
         face.nS = 0.0;
@@ -828,6 +861,17 @@ void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int mom_ncomp, const
           }
         }
       }
+    }
+  }
+
+  if (!shared_face_local_norms.empty()) {
+    const fe_fsi_linear_solver::CollectiveOps collectives(lhs.commu);
+    std::vector<double> shared_face_global_norms = shared_face_local_norms;
+    collectives.allreduce_sum(shared_face_local_norms.data(),
+                              shared_face_global_norms.data(),
+                              static_cast<int>(shared_face_local_norms.size()));
+    for (std::size_t i = 0; i < shared_face_indices.size(); ++i) {
+      lhs.face[static_cast<std::size_t>(shared_face_indices[i])].nS = shared_face_global_norms[i];
     }
   }
 
@@ -941,8 +985,9 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   Rm = Rmi;
   Rc = Rci;
 
-  double eps = std::sqrt(std::pow(norm::fsi_ls_normv(nsd,mynNo,lhs.commu,Rm),2.0) +
-                         std::pow(norm::fsi_ls_normv(con_ncomp,mynNo,lhs.commu,Rc),2.0));
+  double eps = std::sqrt(std::max(
+      0.0,
+      combined_block_norm_sq(lhs, nsd, Rm, /*scalar_constraint=*/false, con_ncomp, &Rc, nullptr)));
 
   ls.RI.iNorm = eps;
   ls.RI.fNorm = eps*eps;
@@ -962,7 +1007,6 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   ls.GM.stats.reset();
   ls.RI.stats.reset();
   ls.blockschur_stats.reset();
-  bicgs::reset_schur_cache(ls.CG);
   eps = std::max(ls.RI.absTol, ls.RI.relTol*eps);
 
   auto update_outer_residual = [&](int max_col) {
@@ -1000,9 +1044,7 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   };
 
   auto actual_outer_residual_norm_sq = [&]() {
-    const double rm_norm = norm::fsi_ls_normv(nsd, mynNo, lhs.commu, Rm);
-    const double rc_norm = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, Rc);
-    return rm_norm * rm_norm + rc_norm * rc_norm;
+    return combined_block_norm_sq(lhs, nsd, Rm, /*scalar_constraint=*/false, con_ncomp, &Rc, nullptr);
   };
 
   // Extract sub-blocks with multi-component constraint
@@ -1226,8 +1268,6 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   }
 
   ls.RI.fNorm = std::sqrt(ls.RI.fNorm);
-  bicgs::reset_schur_cache(ls.CG);
-
   // Write solution back to Ri
   #pragma omp parallel for schedule(static)
   for (fsils_int j = 0; j < nNo; j++) {
@@ -1307,8 +1347,10 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   Rm = Rmi;
   Rc = Rci;
 
-  double eps = std::sqrt(std::pow(norm::fsi_ls_normv(nsd,mynNo,lhs.commu,Rm),2.0) +
-                         std::pow(norm::fsi_ls_norms(mynNo,lhs.commu,Rc),2.0));
+  double eps = std::sqrt(std::max(
+      0.0,
+      combined_block_norm_sq(lhs, nsd, Rm, /*scalar_constraint=*/true,
+                             /*con_ncomp=*/1, /*constraint_array=*/nullptr, &Rc)));
   const double initial_norm = eps;
 
   #ifdef debug_ns_solver
@@ -1337,7 +1379,6 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   ls.GM.stats.reset();
   ls.RI.stats.reset();
   ls.blockschur_stats.reset();
-  bicgs::reset_schur_cache(ls.CG);
   eps = std::max(ls.RI.absTol, ls.RI.relTol*eps);
 
   auto update_outer_residual = [&](int max_col) {
@@ -1373,9 +1414,8 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   };
 
   auto actual_outer_residual_norm_sq = [&]() {
-    const double rm_norm = norm::fsi_ls_normv(nsd, mynNo, lhs.commu, Rm);
-    const double rc_norm = norm::fsi_ls_norms(mynNo, lhs.commu, Rc);
-    return rm_norm * rm_norm + rc_norm * rc_norm;
+    return combined_block_norm_sq(lhs, nsd, Rm, /*scalar_constraint=*/true,
+                                  /*con_ncomp=*/1, /*constraint_array=*/nullptr, &Rc);
   };
   #ifdef debug_ns_solver
   dmsg << "eps: " << eps;
@@ -1444,7 +1484,6 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
                      ls.RI.itr);
       }
       Ri = coupled_solution;
-      bicgs::reset_schur_cache(ls.CG);
       return;
     }
 
@@ -1769,7 +1808,6 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   }
 
   ls.RI.fNorm = std::sqrt(ls.RI.fNorm);
-  bicgs::reset_schur_cache(ls.CG);
   #ifdef debug_ns_solver
   dmsg << "ls.RI.callD: " << ls.RI.callD;
   dmsg << "ls.RI.dB: " << ls.RI.dB;

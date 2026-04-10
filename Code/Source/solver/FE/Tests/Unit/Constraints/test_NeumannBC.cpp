@@ -13,8 +13,6 @@
 #include <gtest/gtest.h>
 
 #include "Constraints/NeumannBC.h"
-#include "Constraints/CoupledNeumannBC.h"
-
 #include <array>
 #include <cmath>
 
@@ -148,74 +146,6 @@ TEST(NeumannBCTest, CollectionLookup) {
     const auto* bc = bcs.find(2);
     ASSERT_NE(bc, nullptr);
     EXPECT_TRUE(bc->isVectorValued());
-}
-
-TEST(CoupledBCTest, ContextPropagation) {
-    forms::BoundaryFunctionalResults integrals;
-    integrals.set("Q", 3.0);
-
-    systems::AuxiliaryState aux;
-    systems::AuxiliaryStateSpec spec;
-    spec.size = 1;
-    spec.name = "R";
-    std::array<Real, 1> initial{{2.0}};
-    aux.registerState(spec, initial);
-
-    CoupledBCContext ctx{integrals, aux, /*t=*/1.0, /*dt=*/0.1};
-    EXPECT_EQ(ctx.integralsValues().size(), 1u);
-    EXPECT_EQ(ctx.auxValues().size(), 1u);
-    EXPECT_DOUBLE_EQ(ctx.integrals.get("Q"), 3.0);
-    EXPECT_DOUBLE_EQ(ctx.aux_state["R"], 2.0);
-    EXPECT_DOUBLE_EQ(ctx.t, 1.0);
-    EXPECT_DOUBLE_EQ(ctx.dt, 0.1);
-}
-
-TEST(CoupledNeumannBCTest, ScalarEvaluator) {
-    forms::BoundaryFunctionalResults integrals;
-    integrals.set("Q", 3.0);
-
-    systems::AuxiliaryState aux;
-    systems::AuxiliaryStateSpec spec;
-    spec.size = 1;
-    spec.name = "R";
-    std::array<Real, 1> initial{{2.0}};
-    aux.registerState(spec, initial);
-
-    CoupledBCContext ctx{integrals, aux, /*t=*/0.0, /*dt=*/0.0};
-
-    CoupledNeumannBC bc(
-        /*boundary_marker=*/7,
-        /*required_integrals=*/{},
-        [](const CoupledBCContext& c, Real x, Real /*y*/, Real /*z*/) {
-            return c.integrals.get("Q") + c.aux_state["R"] + x;
-        });
-
-    EXPECT_EQ(bc.boundaryMarker(), 7);
-    EXPECT_DOUBLE_EQ(bc.evaluate(ctx, 1.0, 0.0, 0.0), 6.0);
-    auto v = bc.evaluateVector(ctx, 1.0, 0.0, 0.0, {{1.0, 0.0, 0.0}});
-    EXPECT_DOUBLE_EQ(v[0], 6.0);
-    EXPECT_DOUBLE_EQ(v[1], 0.0);
-    EXPECT_DOUBLE_EQ(v[2], 0.0);
-}
-
-TEST(CoupledNeumannBCTest, VectorEvaluator) {
-    forms::BoundaryFunctionalResults integrals;
-    systems::AuxiliaryState aux;
-    CoupledBCContext ctx{integrals, aux, /*t=*/0.0, /*dt=*/0.0};
-
-    CoupledNeumannBC bc(
-        /*boundary_marker=*/1,
-        /*required_integrals=*/{},
-        [](const CoupledBCContext& /*c*/, Real /*x*/, Real /*y*/, Real /*z*/, const std::array<Real, 3>& normal) {
-            return std::array<Real, 3>{{2.0 * normal[0], 2.0 * normal[1], 2.0 * normal[2]}};
-        });
-
-    EXPECT_THROW((void)bc.evaluate(ctx, 0.0, 0.0, 0.0), NotImplementedException);
-
-    const auto traction = bc.evaluateVector(ctx, 0.0, 0.0, 0.0, {{0.0, -1.0, 0.5}});
-    EXPECT_DOUBLE_EQ(traction[0], 0.0);
-    EXPECT_DOUBLE_EQ(traction[1], -2.0);
-    EXPECT_DOUBLE_EQ(traction[2], 1.0);
 }
 
 } // namespace test

@@ -16,6 +16,7 @@
 #include "FE/Spaces/CompositeSpace.h"
 #include "FE/Spaces/EnrichedSpace.h"
 #include "FE/Spaces/AdaptiveSpace.h"
+#include "FE/Spaces/GenericBasisSpace.h"
 #include "FE/Spaces/SpaceFactory.h"
 
 using namespace svmp::FE;
@@ -64,6 +65,41 @@ TEST(FunctionSpaces, L2SpaceMetadata) {
     EXPECT_EQ(space.topological_dimension(), 2);
     EXPECT_EQ(space.element_type(), ElementType::Triangle3);
     EXPECT_GT(space.dofs_per_element(), 0u);
+}
+
+TEST(FunctionSpaces, H1SpaceSupportsAlternativeScalarBasisFamilies) {
+    H1Space space(ElementType::Line2, 4, BasisType::Hierarchical);
+
+    EXPECT_EQ(space.space_type(), SpaceType::H1);
+    EXPECT_EQ(space.field_type(), FieldType::Scalar);
+    EXPECT_EQ(space.continuity(), Continuity::C0);
+    EXPECT_EQ(space.element_type(), ElementType::Line2);
+    ASSERT_TRUE(space.element().basis_ptr());
+    EXPECT_EQ(space.element().basis().basis_type(), BasisType::Hierarchical);
+    EXPECT_EQ(space.dofs_per_element(), space.element().basis().size());
+
+    std::vector<Real> coeffs;
+    space.interpolate_scalar([](const FunctionSpace::Value&) { return Real(2.5); }, coeffs);
+    auto quad = space.element().quadrature();
+    ASSERT_TRUE(quad);
+    for (std::size_t q = 0; q < quad->num_points(); ++q) {
+        EXPECT_NEAR(space.evaluate_scalar(quad->point(q), coeffs), 2.5, 1e-10);
+    }
+}
+
+TEST(FunctionSpaces, L2SpaceSupportsAlternativeScalarBasisFamilies) {
+    L2Space space(ElementType::Line2, 3, BasisType::Bernstein);
+
+    EXPECT_EQ(space.space_type(), SpaceType::L2);
+    EXPECT_EQ(space.field_type(), FieldType::Scalar);
+    EXPECT_EQ(space.continuity(), Continuity::L2);
+    EXPECT_EQ(space.element_type(), ElementType::Line2);
+    ASSERT_TRUE(space.element().basis_ptr());
+    EXPECT_EQ(space.element().basis().basis_type(), BasisType::Bernstein);
+    EXPECT_EQ(space.dofs_per_element(), space.element().basis().size());
+    auto quad = space.element().quadrature();
+    ASSERT_TRUE(quad);
+    EXPECT_GT(quad->num_points(), 0u);
 }
 
 TEST(FunctionSpaces, VectorSpacesMetadata) {
@@ -303,6 +339,36 @@ TEST(FunctionSpaces, AdaptiveSpaceSelectsActiveLevel) {
     EXPECT_NEAR(val1[0], 1.0, 1e-14);
 }
 
+TEST(FunctionSpaces, AdaptiveSpaceStoresPerElementOrdersAndElements) {
+    AdaptiveSpace adaptive;
+    auto p1 = std::make_shared<H1Space>(ElementType::Quad4, 1, BasisType::Hierarchical);
+    auto p3 = std::make_shared<H1Space>(ElementType::Quad4, 3, BasisType::Hierarchical);
+
+    adaptive.add_level(1, p1);
+    adaptive.add_level(3, p3);
+    adaptive.resize_element_orders(3, 1);
+    adaptive.set_element_order(1, 3);
+
+    EXPECT_TRUE(adaptive.is_variable_order());
+    EXPECT_TRUE(adaptive.has_element_order(0));
+    EXPECT_TRUE(adaptive.has_element_order(1));
+    EXPECT_EQ(adaptive.num_element_orders(), 3u);
+
+    EXPECT_EQ(adaptive.element_order(0), 1);
+    EXPECT_EQ(adaptive.element_order(1), 3);
+    EXPECT_EQ(adaptive.polynomial_order(0), 1);
+    EXPECT_EQ(adaptive.polynomial_order(1), 3);
+    EXPECT_EQ(adaptive.dofs_per_element(0), p1->dofs_per_element());
+    EXPECT_EQ(adaptive.dofs_per_element(1), p3->dofs_per_element());
+    EXPECT_EQ(adaptive.getElement(ElementType::Quad4, 0).polynomial_order(), 1);
+    EXPECT_EQ(adaptive.getElement(ElementType::Quad4, 1).polynomial_order(), 3);
+    EXPECT_EQ(adaptive.element_space(1).polynomial_order(), 3);
+
+    adaptive.clear_element_orders();
+    EXPECT_FALSE(adaptive.is_variable_order());
+    EXPECT_EQ(adaptive.polynomial_order(1), adaptive.polynomial_order());
+}
+
 TEST(FunctionSpaces, SpaceFactoryCreatesCoreSpaces) {
     auto h1 = SpaceFactory::create(SpaceType::H1, ElementType::Triangle3, 1);
     auto l2 = SpaceFactory::create(SpaceType::L2, ElementType::Triangle3, 1);
@@ -318,6 +384,143 @@ TEST(FunctionSpaces, SpaceFactoryCreatesCoreSpaces) {
                  svmp::FE::FEException);
     EXPECT_THROW(SpaceFactory::create(SpaceType::Mortar, ElementType::Triangle3, 1),
                  svmp::FE::FEException);
+}
+
+TEST(FunctionSpaces, SpaceFactoryRequestCreatesFirstClassScalarBasisSpaces) {
+    SpaceRequest h1_req;
+    h1_req.space_type = SpaceType::H1;
+    h1_req.element.element_type = ElementType::Line2;
+    h1_req.element.basis_type = BasisType::Spectral;
+    h1_req.element.field_type = FieldType::Scalar;
+    h1_req.element.continuity = Continuity::C0;
+    h1_req.element.order = 3;
+
+    auto h1 = SpaceFactory::create(h1_req);
+    ASSERT_TRUE(h1);
+    EXPECT_EQ(h1->space_type(), SpaceType::H1);
+    EXPECT_EQ(h1->continuity(), Continuity::C0);
+    EXPECT_EQ(h1->element().basis().basis_type(), BasisType::Spectral);
+    EXPECT_FALSE(std::dynamic_pointer_cast<GenericBasisSpace>(h1));
+
+    SpaceRequest l2_req;
+    l2_req.space_type = SpaceType::L2;
+    l2_req.element.element_type = ElementType::Line2;
+    l2_req.element.basis_type = BasisType::Spectral;
+    l2_req.element.field_type = FieldType::Scalar;
+    l2_req.element.continuity = Continuity::L2;
+    l2_req.element.order = 3;
+
+    auto l2 = SpaceFactory::create(l2_req);
+    ASSERT_TRUE(l2);
+    EXPECT_EQ(l2->space_type(), SpaceType::L2);
+    EXPECT_EQ(l2->continuity(), Continuity::L2);
+    EXPECT_EQ(l2->element().basis().basis_type(), BasisType::Spectral);
+    EXPECT_FALSE(std::dynamic_pointer_cast<GenericBasisSpace>(l2));
+}
+
+TEST(FunctionSpaces, SpaceFactoryRequestCreatesFirstClassSplineAndNurbsSpaces) {
+    SpaceRequest spline_req;
+    spline_req.space_type = SpaceType::H1;
+    spline_req.element.element_type = ElementType::Quad4;
+    spline_req.element.basis_type = BasisType::BSpline;
+    spline_req.element.field_type = FieldType::Scalar;
+    spline_req.element.continuity = Continuity::C0;
+    spline_req.element.order = 2;
+    spline_req.element.axis_orders = {2, 1};
+    spline_req.element.axis_knot_vectors = {
+        {Real(0), Real(0), Real(0), Real(0.5), Real(1), Real(1), Real(1)},
+        {Real(0), Real(0), Real(0.3), Real(0.7), Real(1), Real(1)}
+    };
+
+    auto spline = SpaceFactory::create(spline_req);
+    ASSERT_TRUE(spline);
+    EXPECT_EQ(spline->space_type(), SpaceType::H1);
+    EXPECT_EQ(spline->continuity(), Continuity::C0);
+    EXPECT_EQ(spline->element().basis().basis_type(), BasisType::BSpline);
+    EXPECT_FALSE(std::dynamic_pointer_cast<GenericBasisSpace>(spline));
+
+    SpaceRequest nurbs_req;
+    nurbs_req.space_type = SpaceType::L2;
+    nurbs_req.element.element_type = ElementType::Quad4;
+    nurbs_req.element.basis_type = BasisType::NURBS;
+    nurbs_req.element.field_type = FieldType::Scalar;
+    nurbs_req.element.continuity = Continuity::L2;
+    nurbs_req.element.order = 2;
+    nurbs_req.element.axis_orders = {2, 1};
+    nurbs_req.element.axis_knot_vectors = {
+        {Real(0), Real(0), Real(0), Real(0.5), Real(1), Real(1), Real(1)},
+        {Real(0), Real(0), Real(0.35), Real(1), Real(1)}
+    };
+    nurbs_req.element.weights = {
+        Real(1), Real(1), Real(0.8), Real(1),
+        Real(1), Real(1.2), Real(1), Real(1),
+        Real(1), Real(1), Real(1), Real(1)
+    };
+    nurbs_req.element.tensor_extents = {4, 3};
+
+    auto nurbs = SpaceFactory::create(nurbs_req);
+    ASSERT_TRUE(nurbs);
+    EXPECT_EQ(nurbs->space_type(), SpaceType::L2);
+    EXPECT_EQ(nurbs->continuity(), Continuity::L2);
+    EXPECT_EQ(nurbs->element().basis().basis_type(), BasisType::NURBS);
+    EXPECT_FALSE(std::dynamic_pointer_cast<GenericBasisSpace>(nurbs));
+}
+
+TEST(FunctionSpaces, SpaceFactoryRequestCreatesFirstClassVectorNurbsSpaces) {
+    SpaceRequest hcurl_req;
+    hcurl_req.space_type = SpaceType::HCurl;
+    hcurl_req.element.element_type = ElementType::Quad4;
+    hcurl_req.element.basis_type = BasisType::BSpline;
+    hcurl_req.element.field_type = FieldType::Vector;
+    hcurl_req.element.continuity = Continuity::H_curl;
+    hcurl_req.element.order = 2;
+    hcurl_req.element.axis_orders = {2, 2};
+    hcurl_req.element.axis_knot_vectors = {
+        {Real(0), Real(0), Real(0), Real(0.5), Real(1), Real(1), Real(1)},
+        {Real(0), Real(0), Real(0), Real(0.5), Real(1), Real(1), Real(1)}
+    };
+
+    auto hcurl = SpaceFactory::create(hcurl_req);
+    ASSERT_TRUE(hcurl);
+    EXPECT_EQ(hcurl->space_type(), SpaceType::HCurl);
+    EXPECT_EQ(hcurl->field_type(), FieldType::Vector);
+    EXPECT_EQ(hcurl->continuity(), Continuity::H_curl);
+    EXPECT_EQ(hcurl->element().basis().basis_type(), BasisType::BSpline);
+    EXPECT_FALSE(std::dynamic_pointer_cast<GenericBasisSpace>(hcurl));
+
+    SpaceRequest hdiv_req;
+    hdiv_req.space_type = SpaceType::HDiv;
+    hdiv_req.element.element_type = ElementType::Quad4;
+    hdiv_req.element.basis_type = BasisType::NURBS;
+    hdiv_req.element.field_type = FieldType::Vector;
+    hdiv_req.element.continuity = Continuity::H_div;
+    hdiv_req.element.order = 2;
+    hdiv_req.element.axis_orders = {2, 2};
+    hdiv_req.element.axis_knot_vectors = hcurl_req.element.axis_knot_vectors;
+    hdiv_req.element.tensor_extents = {4, 4};
+    hdiv_req.element.weights.assign(16u, Real(1));
+    hdiv_req.element.weights[5] = Real(0.85);
+    hdiv_req.element.weights[10] = Real(1.15);
+
+    auto hdiv = SpaceFactory::create(hdiv_req);
+    ASSERT_TRUE(hdiv);
+    EXPECT_EQ(hdiv->space_type(), SpaceType::HDiv);
+    EXPECT_EQ(hdiv->field_type(), FieldType::Vector);
+    EXPECT_EQ(hdiv->continuity(), Continuity::H_div);
+    EXPECT_EQ(hdiv->element().basis().basis_type(), BasisType::NURBS);
+    EXPECT_FALSE(std::dynamic_pointer_cast<GenericBasisSpace>(hdiv));
+}
+
+TEST(FunctionSpaces, SpaceFactoryCreateHelpersAcceptScalarBasisFamily) {
+    auto h1 = SpaceFactory::create_h1(ElementType::Line2, 3, BasisType::Bernstein);
+    auto l2 = SpaceFactory::create_l2(ElementType::Line2, 4, BasisType::Hierarchical);
+
+    ASSERT_TRUE(h1);
+    ASSERT_TRUE(l2);
+    EXPECT_EQ(h1->space_type(), SpaceType::H1);
+    EXPECT_EQ(h1->element().basis().basis_type(), BasisType::Bernstein);
+    EXPECT_EQ(l2->space_type(), SpaceType::L2);
+    EXPECT_EQ(l2->element().basis().basis_type(), BasisType::Hierarchical);
 }
 
 TEST(FunctionSpaces, FunctionSpaceAndVectorSpaceHelpersCreateExpectedSpaces) {

@@ -184,6 +184,8 @@ TEST(MeshAccess, TwoTrianglesBoundaryAndInteriorFaces) {
     EXPECT_EQ(access.dimension(), 2);
     EXPECT_EQ(access.numCells(), 2);
     EXPECT_EQ(access.numOwnedCells(), 2);
+    EXPECT_EQ(access.numVertices(), 4);
+    EXPECT_EQ(access.numOwnedVertices(), 4);
     EXPECT_EQ(access.numBoundaryFaces(), 4);
     EXPECT_EQ(access.numInteriorFaces(), 1);
 
@@ -377,10 +379,13 @@ TEST(MeshAccess, CurrentActiveConfigurationWithoutCurrentCoordsFallsBackToRefere
 TEST(MeshAccess, OwnedCellIterationRespectsGhosts) {
     auto mesh = build_two_triangles_mesh();
     mesh.set_ownership(/*id=*/1, EntityKind::Volume, Ownership::Ghost, /*owner_rank=*/1);
+    mesh.set_ownership(/*id=*/3, EntityKind::Vertex, Ownership::Ghost, /*owner_rank=*/1);
 
     MeshAccess access(mesh);
     EXPECT_EQ(access.numCells(), 2);
     EXPECT_EQ(access.numOwnedCells(), 1);
+    EXPECT_EQ(access.numVertices(), 4);
+    EXPECT_EQ(access.numOwnedVertices(), 3);
     EXPECT_TRUE(access.isOwnedCell(0));
     EXPECT_FALSE(access.isOwnedCell(1));
 

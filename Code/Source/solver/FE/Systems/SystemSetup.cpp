@@ -6,7 +6,6 @@
  */
 
 #include "Systems/FESystem.h"
-#include "Systems/CoupledBoundaryManager.h"
 #include "Systems/GlobalKernelStateProvider.h"
 #include "Systems/MaterialStateProvider.h"
 #include "Systems/OperatorBackends.h"
@@ -2627,158 +2626,6 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 	            }
         }
 
-	        // Coupled boundary-condition Jacobian: low-rank outer products introduce dense
-	        // couplings between boundary-local DOFs on the BC marker and the DOFs that
-	        // influence the referenced BoundaryFunctionals. Conservatively preallocate
-	        // these couplings so strict backends (e.g., Trilinos) can accept insertions.
-	        if (coupled_boundary_) {
-	            const auto coupled_markers = coupled_boundary_->coupledBoundaryMarkers();
-	            if (!coupled_markers.empty()) {
-	                const std::unordered_set<int> coupled_marker_set(coupled_markers.begin(), coupled_markers.end());
-	                const auto regs = coupled_boundary_->registeredBoundaryFunctionals();
-	                if (!regs.empty() && !def.boundary.empty()) {
-	                    const auto primary_field = coupled_boundary_->primaryField();
-	                    const auto primary_idx = static_cast<std::size_t>(primary_field);
-	                    if (primary_field >= 0 && primary_idx < field_dof_handlers_.size()) {
-	                        const auto& primary_map = field_dof_handlers_[primary_idx].getDofMap();
-	                        const auto primary_offset = field_dof_offsets_[primary_idx];
-
-		                    std::unordered_map<int, std::vector<GlobalIndex>> dofs_by_marker_primary;
-		                    dofs_by_marker_primary.reserve(regs.size());
-
-		                    auto collect_marker_dofs = [&](int marker,
-		                                                  const dofs::DofMap& map,
-		                                                  GlobalIndex offset,
-		                                                  std::vector<GlobalIndex>& out) {
-		                        out.clear();
-		                        mesh_access_->forEachBoundaryFace(marker, [&](GlobalIndex /*face_id*/, GlobalIndex cell_id) {
-		                            const auto cell_dofs = map.getCellDofs(cell_id);
-		                            out.insert(out.end(), cell_dofs.begin(), cell_dofs.end());
-		                        });
-		                        for (auto& v : out) v += offset;
-		                        std::sort(out.begin(), out.end());
-		                        out.erase(std::unique(out.begin(), out.end()), out.end());
-		                    };
-
-#if FE_HAS_MPI
-		                    auto mpi_global_index_type = []() -> MPI_Datatype {
-		                        if (sizeof(GlobalIndex) == sizeof(std::int64_t)) {
-		                            return MPI_INT64_T;
-		                        }
-		                        if (sizeof(GlobalIndex) == sizeof(long long)) {
-		                            return MPI_LONG_LONG;
-		                        }
-		                        if (sizeof(GlobalIndex) == sizeof(long)) {
-		                            return MPI_LONG;
-		                        }
-		                        return MPI_LONG_LONG;
-		                    };
-
-		                    auto allgather_unique_global_dofs =
-		                        [&](std::vector<GlobalIndex> local) -> std::vector<GlobalIndex> {
-		                        int mpi_initialized = 0;
-		                        MPI_Initialized(&mpi_initialized);
-		                        if (!mpi_initialized) {
-		                            return local;
-		                        }
-
-		                        const MPI_Comm comm = dof_handler_.mpiComm();
-		                        int comm_size = 1;
-		                        MPI_Comm_size(comm, &comm_size);
-		                        if (comm_size <= 1) {
-		                            return local;
-		                        }
-
-		                        const int local_n = static_cast<int>(local.size());
-		                        std::vector<int> counts(static_cast<std::size_t>(comm_size), 0);
-		                        MPI_Allgather(&local_n, 1, MPI_INT, counts.data(), 1, MPI_INT, comm);
-
-		                        std::vector<int> displs(static_cast<std::size_t>(comm_size), 0);
-		                        int total_n = 0;
-		                        for (int r = 0; r < comm_size; ++r) {
-		                            displs[static_cast<std::size_t>(r)] = total_n;
-		                            total_n += counts[static_cast<std::size_t>(r)];
-		                        }
-
-		                        if (total_n <= 0) {
-		                            return {};
-		                        }
-
-		                        std::vector<GlobalIndex> all(static_cast<std::size_t>(total_n), GlobalIndex(0));
-		                        const MPI_Datatype gid_type = mpi_global_index_type();
-		                        MPI_Allgatherv(local.data(),
-		                                       local_n,
-		                                       gid_type,
-		                                       all.data(),
-		                                       counts.data(),
-		                                       displs.data(),
-		                                       gid_type,
-		                                       comm);
-
-		                        std::sort(all.begin(), all.end());
-		                        all.erase(std::unique(all.begin(), all.end()), all.end());
-		                        return all;
-		                    };
-#endif
-
-		                    for (const auto& bf : regs) {
-		                        const int marker = bf.def.boundary_marker;
-		                        if (marker < 0) continue;
-		                        if (dofs_by_marker_primary.count(marker) != 0u) continue;
-		                        std::vector<GlobalIndex> tmp;
-		                        collect_marker_dofs(marker, primary_map, primary_offset, tmp);
-#if FE_HAS_MPI
-		                        tmp = allgather_unique_global_dofs(std::move(tmp));
-#endif
-		                        dofs_by_marker_primary.emplace(marker, std::move(tmp));
-		                    }
-
-	                    std::unordered_map<std::uint64_t, std::vector<GlobalIndex>> row_dofs_cache;
-	                    row_dofs_cache.reserve(def.boundary.size());
-
-	                    auto key_of = [](int marker, FieldId test_field) -> std::uint64_t {
-	                        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(marker)) << 32) |
-	                               static_cast<std::uint32_t>(test_field);
-	                    };
-
-		                    for (const auto& term : def.boundary) {
-		                        const int marker = term.marker;
-		                        if (marker < 0) continue;
-		                        if (coupled_marker_set.find(marker) == coupled_marker_set.end()) {
-		                            // Only boundary terms on markers with coupled BCs can generate low-rank outer products.
-		                            continue;
-		                        }
-
-	                        const auto k = key_of(marker, term.test_field);
-	                        if (row_dofs_cache.count(k) == 0u) {
-	                            const auto test_idx = static_cast<std::size_t>(term.test_field);
-	                            if (term.test_field < 0 || test_idx >= field_dof_handlers_.size()) {
-	                                continue;
-	                            }
-	                            const auto& row_map = field_dof_handlers_[test_idx].getDofMap();
-	                            const auto row_offset = field_dof_offsets_[test_idx];
-	                            std::vector<GlobalIndex> tmp;
-	                            collect_marker_dofs(marker, row_map, row_offset, tmp);
-	                            row_dofs_cache.emplace(k, std::move(tmp));
-	                        }
-
-	                        const auto& row_dofs = row_dofs_cache.at(k);
-	                        if (row_dofs.empty()) continue;
-
-	                        for (const auto& bf : regs) {
-	                            const int q_marker = bf.def.boundary_marker;
-	                            auto it = dofs_by_marker_primary.find(q_marker);
-	                            if (it == dofs_by_marker_primary.end()) continue;
-	                            const auto& col_dofs = it->second;
-	                            if (col_dofs.empty()) continue;
-	                            add_element_couplings(row_dofs, col_dofs);
-	                        }
-		                    }
-	                    }
-	                }
-	            }
-	        }
-
 		        if (opts.sparsity_options.ensure_diagonal) {
 		            pattern->ensureDiagonal();
 		        }
@@ -3182,10 +3029,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
             }
         }
 
-        if (coupled_boundary_) {
-            parameter_registry_.addAll(coupled_boundary_->parameterSpecs(), "CoupledBoundaryManager");
-        }
-    }
+	    }
 
     // ---------------------------------------------------------------------
     // Resolve FE/Forms constitutive calls for JIT-fast mode (setup-time)
@@ -3245,10 +3089,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
             }
         }
 
-        if (coupled_boundary_) {
-            coupled_boundary_->resolveParameterSlots(slot_of_real_param);
-        }
-    }
+	    }
 
     // ---------------------------------------------------------------------
     // Assembler configuration

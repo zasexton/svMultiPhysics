@@ -98,6 +98,7 @@ void bicgsv(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinear
   const double callD_before = ls.callD;
   const auto collective_before = lhs.commu.collective_stats;
   ls.suc = false;
+  const CollectiveOps collectives(lhs.commu);
   double err = norm::fsi_ls_normv(dof, mynNo, lhs.commu, R);
   double errO = err;
   ls.iNorm = err;
@@ -137,7 +138,14 @@ void bicgsv(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinear
     A.apply(
         dso::ghost_synced_input(dof, S),
         dso::ghost_synced_output(dof, T));
-    double s_sq = dot::fsils_dot_v(dof, mynNo, lhs.commu, S, S);
+    double schur_locals[3] = {
+        norm::fsi_ls_norm_sq_local_v(dof, mynNo, S),
+        dot::fsils_nc_dot_v(dof, mynNo, T, T),
+        dot::fsils_nc_dot_v(dof, mynNo, T, S),
+    };
+    double schur_globals[3] = {schur_locals[0], schur_locals[1], schur_locals[2]};
+    collectives.allreduce_sum(schur_locals, schur_globals, 3);
+    double s_sq = schur_globals[0];
     if (std::sqrt(s_sq) < std::numeric_limits<double>::epsilon() * ls.iNorm) {
       omp_la::omp_axpby_v(dof, nNo, X, X, alpha, P);
       R = S;
@@ -148,7 +156,7 @@ void bicgsv(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinear
       break;
     }
 
-    double t_sq = dot::fsils_dot_v(dof, mynNo, lhs.commu, T, T);
+    double t_sq = schur_globals[1];
     if (std::sqrt(t_sq) < std::numeric_limits<double>::epsilon() * ls.iNorm) {
       omp_la::omp_axpbypgz_v(dof, nNo, X, X, alpha, P, 0.0, S);
       R = S;
@@ -158,15 +166,21 @@ void bicgsv(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinear
       ++i_itr;
       break;
     }
-    double omega = dot::fsils_dot_v(dof, mynNo, lhs.commu, T, S) / t_sq;
+    double omega = schur_globals[2] / t_sq;
 
     omp_la::omp_axpbypgz_v(dof, nNo, X, X, alpha, P, omega, S);
     omp_la::omp_axpby_v(dof, nNo, R, S, -omega, T);
 
     errO = err;
-    err =  norm::fsi_ls_normv(dof, mynNo, lhs.commu, R);
+    double update_locals[2] = {
+        norm::fsi_ls_norm_sq_local_v(dof, mynNo, R),
+        dot::fsils_nc_dot_v(dof, mynNo, R, Rh),
+    };
+    double update_globals[2] = {update_locals[0], update_locals[1]};
+    collectives.allreduce_sum(update_locals, update_globals, 2);
+    err = std::sqrt(std::max(0.0, update_globals[0]));
     double rhoO  = rho;
-    rho = dot::fsils_dot_v(dof, mynNo, lhs.commu, R, Rh);
+    rho = update_globals[1];
     double denom_beta = rhoO * omega;
     if (std::abs(denom_beta) < std::numeric_limits<double>::epsilon() * (std::abs(rho) + std::numeric_limits<double>::epsilon())) break;
     beta = rho*alpha / denom_beta;
@@ -249,6 +263,7 @@ void bicgss(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinear
   const double callD_before = ls.callD;
   const auto collective_before = lhs.commu.collective_stats;
   ls.suc = false;
+  const CollectiveOps collectives(lhs.commu);
   double err = norm::fsi_ls_norms(mynNo, lhs.commu, R);
   double errO = err;
   ls.iNorm = err;
@@ -288,7 +303,14 @@ void bicgss(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinear
     A.apply(
         dso::ghost_synced_input(S),
         dso::ghost_synced_output(T));
-    double s_sq = dot::fsils_dot_s(mynNo, lhs.commu, S, S);
+    double schur_locals[3] = {
+        norm::fsi_ls_norm_sq_local_s(mynNo, S),
+        dot::fsils_nc_dot_s(mynNo, T, T),
+        dot::fsils_nc_dot_s(mynNo, T, S),
+    };
+    double schur_globals[3] = {schur_locals[0], schur_locals[1], schur_locals[2]};
+    collectives.allreduce_sum(schur_locals, schur_globals, 3);
+    double s_sq = schur_globals[0];
     if (std::sqrt(s_sq) < std::numeric_limits<double>::epsilon() * ls.iNorm) {
       omp_la::omp_axpby_s(nNo, X, X, alpha, P);
       R = S;
@@ -299,7 +321,7 @@ void bicgss(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinear
       break;
     }
 
-    double t_sq = dot::fsils_dot_s(mynNo, lhs.commu, T, T);
+    double t_sq = schur_globals[1];
     if (std::sqrt(t_sq) < std::numeric_limits<double>::epsilon() * ls.iNorm) {
       omp_la::omp_axpbypgz_s(nNo, X, X, alpha, P, 0.0, S);
       R = S;
@@ -309,15 +331,21 @@ void bicgss(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinear
       ++i_itr;
       break;
     }
-    double omega = dot::fsils_dot_s(mynNo, lhs.commu, T, S) / t_sq;
+    double omega = schur_globals[2] / t_sq;
 
     omp_la::omp_axpbypgz_s(nNo, X, X, alpha, P, omega, S);
     omp_la::omp_axpby_s(nNo, R, S, -omega, T);
 
     errO = err;
-    err =  norm::fsi_ls_norms(mynNo, lhs.commu, R);
+    double update_locals[2] = {
+        norm::fsi_ls_norm_sq_local_s(mynNo, R),
+        dot::fsils_nc_dot_s(mynNo, R, Rh),
+    };
+    double update_globals[2] = {update_locals[0], update_locals[1]};
+    collectives.allreduce_sum(update_locals, update_globals, 2);
+    err = std::sqrt(std::max(0.0, update_globals[0]));
     double rhoO  = rho;
-    rho = dot::fsils_dot_s(mynNo, lhs.commu, R, Rh);
+    rho = update_globals[1];
     double denom_beta = rhoO * omega;
     if (std::abs(denom_beta) < std::numeric_limits<double>::epsilon() * (std::abs(rho) + std::numeric_limits<double>::epsilon())) break;
     beta = rho*alpha / denom_beta;
@@ -389,6 +417,83 @@ using fe_fsi_linear_solver::fsils_int;
   } catch (...) {
     return default_value;
   }
+}
+
+[[nodiscard]] int schur_preconditioner_reuse_solve_limit() noexcept
+{
+  static const int limit = [] {
+    const int requested = parse_int_env("SVMP_FSILS_BLOCKSCHUR_SCHUR_PC_REUSE_SOLVES", 1);
+    return std::max(-1, requested);
+  }();
+  return limit;
+}
+
+[[nodiscard]] std::uint64_t hash_mix(std::uint64_t seed, std::uint64_t value) noexcept
+{
+  seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
+  return seed;
+}
+
+[[nodiscard]] std::uint64_t schur_cache_topology_signature(const fe_fsi_linear_solver::FSILS_lhsType& lhs) noexcept
+{
+  std::uint64_t signature = 0xcbf29ce484222325ULL;
+  signature = hash_mix(signature, static_cast<std::uint64_t>(lhs.nFaces));
+  signature = hash_mix(signature, static_cast<std::uint64_t>(lhs.reduced_updates.size()));
+  signature = hash_mix(signature, static_cast<std::uint64_t>(lhs.grouped_bordered_field_couplings.size()));
+  signature = hash_mix(signature, static_cast<std::uint64_t>(lhs.native_face_rank_one_count));
+
+  for (const auto& face : lhs.face) {
+    if (!face.coupledFlag || face.nNo <= 0) {
+      continue;
+    }
+    signature = hash_mix(signature, static_cast<std::uint64_t>(face.dof));
+    signature = hash_mix(signature, static_cast<std::uint64_t>(face.nNo));
+    signature = hash_mix(signature, static_cast<std::uint64_t>(face.sharedFlag ? 1 : 0));
+    for (int i = 0; i < face.nNo; ++i) {
+      signature = hash_mix(signature, static_cast<std::uint64_t>(face.glob(i) + 1));
+    }
+  }
+
+  for (const auto& update : lhs.reduced_updates) {
+    signature = hash_mix(signature, static_cast<std::uint64_t>(update.grouped_coupling_id + 7));
+    signature = hash_mix(signature, static_cast<std::uint64_t>(update.active_components.size()));
+    for (const int comp : update.active_components) {
+      signature = hash_mix(signature, static_cast<std::uint64_t>(comp + 11));
+    }
+    signature = hash_mix(signature, static_cast<std::uint64_t>(update.left.size()));
+    for (const auto& entry : update.left) {
+      signature = hash_mix(signature, static_cast<std::uint64_t>(entry.node + 13));
+      signature = hash_mix(signature, static_cast<std::uint64_t>(entry.full_component + 17));
+    }
+    signature = hash_mix(signature, static_cast<std::uint64_t>(update.right.size()));
+    for (const auto& entry : update.right) {
+      signature = hash_mix(signature, static_cast<std::uint64_t>(entry.node + 19));
+      signature = hash_mix(signature, static_cast<std::uint64_t>(entry.full_component + 23));
+    }
+  }
+
+  for (const auto& group : lhs.grouped_bordered_field_couplings) {
+    signature = hash_mix(signature, static_cast<std::uint64_t>(group.grouped_coupling_id + 29));
+    signature = hash_mix(signature, static_cast<std::uint64_t>(group.modes.size()));
+    for (const auto& mode : group.modes) {
+      signature = hash_mix(signature, static_cast<std::uint64_t>(mode.active_components.size()));
+      for (const int comp : mode.active_components) {
+        signature = hash_mix(signature, static_cast<std::uint64_t>(comp + 31));
+      }
+      signature = hash_mix(signature, static_cast<std::uint64_t>(mode.left.size()));
+      for (const auto& entry : mode.left) {
+        signature = hash_mix(signature, static_cast<std::uint64_t>(entry.node + 37));
+        signature = hash_mix(signature, static_cast<std::uint64_t>(entry.full_component + 41));
+      }
+      signature = hash_mix(signature, static_cast<std::uint64_t>(mode.right.size()));
+      for (const auto& entry : mode.right) {
+        signature = hash_mix(signature, static_cast<std::uint64_t>(entry.node + 43));
+        signature = hash_mix(signature, static_cast<std::uint64_t>(entry.full_component + 47));
+      }
+    }
+  }
+
+  return signature;
 }
 
 [[nodiscard]] bool skip_post_solve_overlap_sum() noexcept
@@ -513,8 +618,35 @@ struct SchurSolveCacheEntry {
   int mom_ncomp{0};
   int con_ncomp{0};
   fsils_int nNo{0};
+  fsils_int nnz{0};
+  std::uint64_t topology_signature{0};
+  fe_fsi_linear_solver::SchurPreconditionerType schur_preconditioner{
+      fe_fsi_linear_solver::SchurPreconditionerType::ALGEBRAIC_SHAT};
+  fe_fsi_linear_solver::SchurMomentumApproximationType momentum_approximation{
+      fe_fsi_linear_solver::SchurMomentumApproximationType::ILU_K};
+  int solves_since_build{0};
   SchurPreconditionerData preconditioner;
 };
+
+[[nodiscard]] bool should_rebuild_schur_cache(const SchurSolveCacheEntry& cache,
+                                              const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                              const fe_fsi_linear_solver::FSILS_subLsType& ls,
+                                              int mom_ncomp,
+                                              int con_ncomp,
+                                              std::uint64_t topology_signature) noexcept
+{
+  if (!cache.valid || cache.mom_ncomp != mom_ncomp || cache.con_ncomp != con_ncomp ||
+      cache.nNo != lhs.nNo || cache.nnz != lhs.nnz) {
+    return true;
+  }
+  if (cache.topology_signature != topology_signature ||
+      cache.schur_preconditioner != ls.schur_preconditioner ||
+      cache.momentum_approximation != ls.schur_momentum_approximation) {
+    return true;
+  }
+  const int reuse_limit = schur_preconditioner_reuse_solve_limit();
+  return reuse_limit >= 0 && cache.solves_since_build > reuse_limit;
+}
 
 [[nodiscard]] std::unordered_map<const fe_fsi_linear_solver::FSILS_subLsType*, SchurSolveCacheEntry>& schur_cache_registry()
 {
@@ -3062,7 +3194,14 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
     omp_la::omp_axpby_s(nNo, S, R, -alpha, V);
     apply_schur_operator(S, T);
 
-    const double s_sq = dot::fsils_dot_s(mynNo, lhs.commu, S, S);
+    double schur_locals[3] = {
+        norm::fsi_ls_norm_sq_local_s(mynNo, S),
+        dot::fsils_nc_dot_s(mynNo, T, T),
+        dot::fsils_nc_dot_s(mynNo, T, S),
+    };
+    double schur_globals[3] = {schur_locals[0], schur_locals[1], schur_locals[2]};
+    collectives.allreduce_sum(schur_locals, schur_globals, 3);
+    const double s_sq = schur_globals[0];
     if (std::sqrt(s_sq) < std::numeric_limits<double>::epsilon() * ls.iNorm) {
       omp_la::omp_axpby_s(nNo, X, X, alpha, P);
       R = S;
@@ -3073,7 +3212,7 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
       break;
     }
 
-    const double t_sq = dot::fsils_dot_s(mynNo, lhs.commu, T, T);
+    const double t_sq = schur_globals[1];
     if (std::sqrt(t_sq) < std::numeric_limits<double>::epsilon() * ls.iNorm) {
       omp_la::omp_axpbypgz_s(nNo, X, X, alpha, P, 0.0, S);
       R = S;
@@ -3083,15 +3222,21 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
       ++i_itr;
       break;
     }
-    const double omega = dot::fsils_dot_s(mynNo, lhs.commu, T, S) / t_sq;
+    const double omega = schur_globals[2] / t_sq;
 
     omp_la::omp_axpbypgz_s(nNo, X, X, alpha, P, omega, S);
     omp_la::omp_axpby_s(nNo, R, S, -omega, T);
 
     errO = err;
-    err = norm::fsi_ls_norms(mynNo, lhs.commu, R);
+    double update_locals[2] = {
+        norm::fsi_ls_norm_sq_local_s(mynNo, R),
+        dot::fsils_nc_dot_s(mynNo, R, Rh),
+    };
+    double update_globals[2] = {update_locals[0], update_locals[1]};
+    collectives.allreduce_sum(update_locals, update_globals, 2);
+    err = std::sqrt(std::max(0.0, update_globals[0]));
     const double rhoO = rho;
-    rho = dot::fsils_dot_s(mynNo, lhs.commu, R, Rh);
+    rho = update_globals[1];
     const double denom_beta = rhoO * omega;
     if (std::abs(denom_beta) <
         std::numeric_limits<double>::epsilon() * (std::abs(rho) + std::numeric_limits<double>::epsilon())) {
@@ -3174,10 +3319,12 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
   const int itr_before = ls.itr;
   const double callD_before = ls.callD;
   const auto collective_before = lhs.commu.collective_stats;
+  const CollectiveOps collectives(lhs.commu);
 
   auto& cache = schur_cache_entry(ls);
   double pc_setup_time = 0.0;
-  if (!cache.valid || cache.mom_ncomp != mom_ncomp || cache.con_ncomp != con_ncomp || cache.nNo != nNo) {
+  const std::uint64_t topology_signature = schur_cache_topology_signature(lhs);
+  if (should_rebuild_schur_cache(cache, lhs, ls, mom_ncomp, con_ncomp, topology_signature)) {
     const double setup_t0 = fe_fsi_linear_solver::fsils_cpu_t();
     cache.preconditioner = build_schur_preconditioner(lhs, ls, mom_ncomp, con_ncomp, K, D, G, L);
     cache.preconditioner.operator_L = &cache.preconditioner.operator_L_storage;
@@ -3186,7 +3333,13 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
     cache.mom_ncomp = mom_ncomp;
     cache.con_ncomp = con_ncomp;
     cache.nNo = nNo;
+    cache.nnz = lhs.nnz;
+    cache.topology_signature = topology_signature;
+    cache.schur_preconditioner = ls.schur_preconditioner;
+    cache.momentum_approximation = ls.schur_momentum_approximation;
+    cache.solves_since_build = 0;
   }
+  cache.solves_since_build += 1;
   auto& pc = cache.preconditioner;
 
   auto apply_exact_schur_operator = [&](const Array<double>& in_vec, Array<double>& out_vec) {
@@ -3438,7 +3591,14 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
     omp_la::omp_axpby_v(con_ncomp, nNo, S, R, -alpha, V);
     apply_schur_operator(S, T);
 
-    const double s_sq = dot::fsils_dot_v(con_ncomp, mynNo, lhs.commu, S, S);
+    double schur_locals[3] = {
+        norm::fsi_ls_norm_sq_local_v(con_ncomp, mynNo, S),
+        dot::fsils_nc_dot_v(con_ncomp, mynNo, T, T),
+        dot::fsils_nc_dot_v(con_ncomp, mynNo, T, S),
+    };
+    double schur_globals[3] = {schur_locals[0], schur_locals[1], schur_locals[2]};
+    collectives.allreduce_sum(schur_locals, schur_globals, 3);
+    const double s_sq = schur_globals[0];
     if (std::sqrt(s_sq) < std::numeric_limits<double>::epsilon() * ls.iNorm) {
       omp_la::omp_axpby_v(con_ncomp, nNo, X, X, alpha, P);
       R = S;
@@ -3449,7 +3609,7 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
       break;
     }
 
-    const double t_sq = dot::fsils_dot_v(con_ncomp, mynNo, lhs.commu, T, T);
+    const double t_sq = schur_globals[1];
     if (std::sqrt(t_sq) < std::numeric_limits<double>::epsilon() * ls.iNorm) {
       omp_la::omp_axpbypgz_v(con_ncomp, nNo, X, X, alpha, P, 0.0, S);
       R = S;
@@ -3459,16 +3619,22 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
       ++i_itr;
       break;
     }
-    const double omega = dot::fsils_dot_v(con_ncomp, mynNo, lhs.commu, T, S) / t_sq;
+    const double omega = schur_globals[2] / t_sq;
 
     omp_la::omp_axpbypgz_v(con_ncomp, nNo, X, X, alpha, P, omega, S);
     omp_la::omp_axpby_v(con_ncomp, nNo, R, S, -omega, T);
 
     errO = err;
-    err = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, R);
+    double update_locals[2] = {
+        norm::fsi_ls_norm_sq_local_v(con_ncomp, mynNo, R),
+        dot::fsils_nc_dot_v(con_ncomp, mynNo, R, Rh),
+    };
+    double update_globals[2] = {update_locals[0], update_locals[1]};
+    collectives.allreduce_sum(update_locals, update_globals, 2);
+    err = std::sqrt(std::max(0.0, update_globals[0]));
 
     const double rhoO = rho;
-    rho = dot::fsils_dot_v(con_ncomp, mynNo, lhs.commu, R, Rh);
+    rho = update_globals[1];
 
     const double denom_beta = rhoO * omega;
     if (std::abs(denom_beta) <
@@ -3611,8 +3777,13 @@ void schur_precondition_mc(const fe_fsi_linear_solver::distributed_solver_bundle
   auto& lhs = *system.lhs;
   const fsils_int nNo = lhs.nNo;
   auto& cache = schur_cache_entry(ls);
-  if (!cache.valid || cache.mom_ncomp != system.momentum_components ||
-      cache.con_ncomp != system.constraint_components || cache.nNo != nNo) {
+  const std::uint64_t topology_signature = schur_cache_topology_signature(lhs);
+  if (should_rebuild_schur_cache(cache,
+                                 lhs,
+                                 ls,
+                                 system.momentum_components,
+                                 system.constraint_components,
+                                 topology_signature)) {
     cache.preconditioner = build_schur_preconditioner(
         lhs, ls, system.momentum_components, system.constraint_components,
         *system.momentum_values, *system.D_values, *system.G_values, *system.L_values);
@@ -3621,7 +3792,13 @@ void schur_precondition_mc(const fe_fsi_linear_solver::distributed_solver_bundle
     cache.mom_ncomp = system.momentum_components;
     cache.con_ncomp = system.constraint_components;
     cache.nNo = nNo;
+    cache.nnz = lhs.nnz;
+    cache.topology_signature = topology_signature;
+    cache.schur_preconditioner = ls.schur_preconditioner;
+    cache.momentum_approximation = ls.schur_momentum_approximation;
+    cache.solves_since_build = 0;
   }
+  cache.solves_since_build += 1;
 
   apply_schur_preconditioner(
       lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs, cache.preconditioner,

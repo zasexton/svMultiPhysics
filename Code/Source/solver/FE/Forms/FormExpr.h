@@ -456,7 +456,6 @@ public:
     static FormExpr constant(Real value);
     static FormExpr typedZero();
     static FormExpr boundaryIntegral(FormExpr integrand, int boundary_marker, std::string name);
-    static FormExpr boundaryIntegralValue(std::string name);
     static FormExpr boundaryIntegralRef(std::uint32_t slot);
     static FormExpr auxiliaryState(std::string name);
     static FormExpr auxiliaryStateRef(std::uint32_t slot);

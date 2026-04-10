@@ -54,7 +54,7 @@ void TrilinosLinearSolver::setOptions(const SolverOptions& options)
     FE_THROW_IF(options.max_iter <= 0, InvalidArgumentException, "TrilinosLinearSolver: max_iter must be > 0");
     FE_THROW_IF(options.rel_tol < 0.0, InvalidArgumentException, "TrilinosLinearSolver: rel_tol must be >= 0");
     FE_THROW_IF(options.abs_tol < 0.0, InvalidArgumentException, "TrilinosLinearSolver: abs_tol must be >= 0");
-    options_ = options;
+    options_ = normalizeSolverOptionsForBackend(options, BackendKind::Trilinos);
 }
 
 namespace {

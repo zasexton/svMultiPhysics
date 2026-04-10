@@ -59,6 +59,10 @@ namespace spaces {
     class FunctionSpace;
 }
 
+namespace constraints {
+    class AffineConstraints;
+}
+
 namespace dofs {
 
 // Forward declarations
@@ -421,13 +425,31 @@ struct DofLayoutInfo {
     LocalIndex dofs_per_vertex{0};     ///< DOFs at each vertex
     LocalIndex dofs_per_edge{0};       ///< Interior DOFs per edge (not counting vertices)
     LocalIndex dofs_per_face{0};       ///< Interior DOFs per face (not counting edges/vertices)
+    LocalIndex dofs_per_tri_face{0};   ///< Interior DOFs per triangular face when face counts are mixed
+    LocalIndex dofs_per_quad_face{0};  ///< Interior DOFs per quadrilateral face when face counts are mixed
     LocalIndex dofs_per_cell{0};       ///< Interior DOFs per cell (bubble functions)
     int num_components{1};             ///< Number of field components (1=scalar, 3=vector)
     bool is_continuous{true};          ///< CG (true) vs DG (false)
-    bool tensor_face_dof_layout{false};///< True when face DOFs follow tensor Lagrange interior ordering (quads/hex)
+    bool tensor_face_dof_layout{false};///< True when DofHandler can canonically permute scalar face-interior DOFs
 
     // Total DOFs per element (convenience, computed from other fields and element type)
     LocalIndex total_dofs_per_element{0};
+
+    [[nodiscard]] bool has_face_dofs() const noexcept {
+        return dofs_per_face > 0 || dofs_per_tri_face > 0 || dofs_per_quad_face > 0;
+    }
+
+    [[nodiscard]] LocalIndex face_dofs_for_vertex_count(std::size_t n_face_vertices) const noexcept {
+        if (dofs_per_tri_face > 0 || dofs_per_quad_face > 0) {
+            if (n_face_vertices == 3u) return dofs_per_tri_face;
+            if (n_face_vertices == 4u) return dofs_per_quad_face;
+            return 0;
+        }
+        if (n_face_vertices == 3u || n_face_vertices == 4u) {
+            return dofs_per_face;
+        }
+        return 0;
+    }
 
     // Factory for common Lagrange spaces
     static DofLayoutInfo Lagrange(int order, int dim, int num_verts_per_cell, int num_components = 1);
@@ -723,6 +745,21 @@ public:
      */
     [[nodiscard]] std::span<const GlobalIndex> getGhostDofs() const;
 
+    /**
+     * @brief Build affine constraints for mixed-order conforming interfaces
+     *
+     * For variable-order spaces, the current numbering shares only the
+     * minimum trace order on each interface. This helper constrains the
+     * higher-order excess trace DOFs on the richer side back to the lower-order
+     * trace space so the final discrete field is conforming.
+     *
+     * The handler must already contain the DOF numbering for the supplied
+     * topology/space pair.
+     */
+    void buildVariableOrderConstraints(const MeshTopologyInfo& topology,
+                                       const spaces::FunctionSpace& space,
+                                       constraints::AffineConstraints& constraints) const;
+
     // =========================================================================
     // Statistics
     // =========================================================================
@@ -808,12 +845,25 @@ private:
                             const DofDistributionOptions& options);
     void cacheSpatialDofCoordinates(const MeshTopologyView& topology,
                                     const DofLayoutInfo& layout);
+    void cacheCellOrientations(const MeshTopologyView& topology,
+                               bool need_edge_orientations,
+                               bool need_face_orientations);
     void clearSpatialDofCoordinates() noexcept;
 
     // Helper for CG distribution with shared DOFs
     void distributeCGDofs(const MeshTopologyView& topology,
                           const DofLayoutInfo& layout,
                           const DofDistributionOptions& options);
+
+    // Helper for serial variable-order spaces
+    void distributeVariableOrderDofs(const MeshTopologyView& topology,
+                                     const spaces::FunctionSpace& space,
+                                     const DofDistributionOptions& options);
+
+    // Helper for distributed (MPI) variable-order spaces
+    void distributeVariableOrderDofsParallel(const MeshTopologyView& topology,
+                                             const spaces::FunctionSpace& space,
+                                             const DofDistributionOptions& options);
 
     // Helper for DG distribution (no sharing)
     void distributeDGDofs(const MeshTopologyView& topology,

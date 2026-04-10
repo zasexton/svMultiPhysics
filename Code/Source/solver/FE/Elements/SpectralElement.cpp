@@ -21,15 +21,20 @@ using svmp::FE::QuadratureType;
 
 SpectralElement::SpectralElement(ElementType element_type,
                                  int order,
-                                 FieldType field_type) {
+                                 FieldType field_type,
+                                 Continuity continuity) {
     if (field_type != FieldType::Scalar) {
         throw FEException("SpectralElement currently supports scalar fields only",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+    if (continuity != Continuity::C0 && continuity != Continuity::L2) {
+        throw FEException("SpectralElement supports Continuity::C0 or Continuity::L2",
                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
     }
 
     info_.element_type = element_type;
     info_.field_type   = field_type;
-    info_.continuity   = Continuity::C0;
+    info_.continuity   = continuity;
     info_.order        = order;
 
     // Spectral elements require at least order 1 for well-defined Gauss-Lobatto nodes
@@ -48,7 +53,7 @@ SpectralElement::SpectralElement(ElementType element_type,
     req.element_type = element_type;
     req.basis_type   = BasisType::Spectral;
     req.order        = info_.order;
-    req.continuity   = Continuity::C0;
+    req.continuity   = continuity;
     req.field_type   = FieldType::Scalar;
 
     basis_ = BasisFactory::create(req);

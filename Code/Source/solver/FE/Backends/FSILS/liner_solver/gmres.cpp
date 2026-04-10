@@ -1414,6 +1414,8 @@ void fused_recon_s(const fsils_int nNo, Array<double>& u, const int last_i, Vect
 void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
             const int mynNo, const int nNo)
 {
+  std::vector<int> shared_face_indices;
+  std::vector<double> shared_face_local_norms;
   for (int faIn = 0; faIn < lhs.nFaces; faIn++) {
     auto &face = lhs.face[faIn];
 
@@ -1433,11 +1435,8 @@ void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSIL
             }
           }
         }
-
-        double global_nS = 0.0;
-        const fe_fsi_linear_solver::CollectiveOps collectives(lhs.commu);
-        collectives.allreduce_sum(local_nS, global_nS);
-        face.nS = global_nS;
+        shared_face_indices.push_back(faIn);
+        shared_face_local_norms.push_back(local_nS);
 
       } else {
         face.nS = 0.0;
@@ -1447,6 +1446,17 @@ void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSIL
           }
         }
       }
+    }
+  }
+
+  if (!shared_face_local_norms.empty()) {
+    const fe_fsi_linear_solver::CollectiveOps collectives(lhs.commu);
+    std::vector<double> shared_face_global_norms = shared_face_local_norms;
+    collectives.allreduce_sum(shared_face_local_norms.data(),
+                              shared_face_global_norms.data(),
+                              static_cast<int>(shared_face_local_norms.size()));
+    for (std::size_t i = 0; i < shared_face_indices.size(); ++i) {
+      lhs.face[static_cast<std::size_t>(shared_face_indices[i])].nS = shared_face_global_norms[i];
     }
   }
 

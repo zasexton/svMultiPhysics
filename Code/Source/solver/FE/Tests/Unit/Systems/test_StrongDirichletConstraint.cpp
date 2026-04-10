@@ -8,6 +8,9 @@
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 #include "Constraints/SystemConstraints.h"
+#include "Auxiliary/AuxiliaryBindings.h"
+#include "Auxiliary/AuxiliaryModelBuilder.h"
+#include "Auxiliary/AuxiliaryStateManager.h"
 
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/GlobalSystemView.h"
@@ -41,6 +44,9 @@ using svmp::FE::forms::FormExpr;
 using svmp::FE::forms::deltat;
 using svmp::FE::forms::t;
 using svmp::FE::forms::bc::strongDirichlet;
+using svmp::FE::systems::AuxiliaryConstraintValueSource;
+using svmp::FE::systems::AuxiliaryModelBuilder;
+using svmp::FE::systems::use;
 
 using svmp::FE::spaces::H1Space;
 
@@ -149,4 +155,105 @@ TEST(StrongDirichletConstraint, UpdateConstraintsRefreshesTimeDependentValues)
     for (auto dof : constrained) {
         EXPECT_NEAR(sys.constraints().getInhomogeneity(dof), 2.5, 1e-15);
     }
+}
+
+TEST(StrongDirichletConstraint, AuxiliaryStateBindingDrivesStrongDirichlet)
+{
+    const int marker = 7;
+    auto mesh = build_single_quad_mesh_with_left_edge_marker(marker);
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+
+    FESystem sys(mesh);
+    auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+
+    auto model = AuxiliaryModelBuilder("state_bc")
+        .state("x")
+        .ode("x", FormExpr::constant(0.0))
+        .build();
+
+    sys.deployAuxiliaryModel(
+        use(model).name("state_bc_inst").global().partitioned("ForwardEuler")
+            .initialize({1.25})
+            .drivesStrongDirichlet(u, marker, "x", -1, AuxiliaryConstraintValueSource::State));
+    sys.finalizeAuxiliaryLayout();
+    sys.setup();
+
+    const auto constrained = svmp::FE::constraints::boundaryDofsByMarker(*mesh, sys.dofHandler(), marker);
+    ASSERT_EQ(constrained.size(), 2u);
+    for (const auto dof : constrained) {
+        EXPECT_TRUE(sys.constraints().isConstrained(dof));
+        EXPECT_NEAR(sys.constraints().getInhomogeneity(dof), 1.25, 1e-12);
+    }
+
+    auto& blk = sys.auxiliaryStateManager().getBlock("state_bc_inst");
+    auto work = blk.work();
+    ASSERT_EQ(work.size(), 1u);
+    work[0] = 2.5;
+
+    sys.updateConstraints(/*time=*/0.0, /*dt=*/0.0);
+    for (const auto dof : constrained) {
+        EXPECT_NEAR(sys.constraints().getInhomogeneity(dof), 2.5, 1e-12);
+    }
+}
+
+TEST(StrongDirichletConstraint, AuxiliaryOutputBindingDrivesStrongDirichlet)
+{
+    const int marker = 7;
+    auto mesh = build_single_quad_mesh_with_left_edge_marker(marker);
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+
+    FESystem sys(mesh);
+    auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+
+    auto model = AuxiliaryModelBuilder("output_bc")
+        .state("x")
+        .ode("x", FormExpr::constant(0.0))
+        .output("y", svmp::FE::systems::modelState("x") * FormExpr::constant(2.0))
+        .build();
+
+    sys.deployAuxiliaryModel(
+        use(model).name("output_bc_inst").global().partitioned("ForwardEuler")
+            .initialize({1.0})
+            .drivesStrongDirichlet(u, marker, "y"));
+    sys.finalizeAuxiliaryLayout();
+    sys.setup();
+
+    const auto constrained = svmp::FE::constraints::boundaryDofsByMarker(*mesh, sys.dofHandler(), marker);
+    ASSERT_EQ(constrained.size(), 2u);
+    for (const auto dof : constrained) {
+        EXPECT_NEAR(sys.constraints().getInhomogeneity(dof), 2.0, 1e-12);
+    }
+
+    auto& blk = sys.auxiliaryStateManager().getBlock("output_bc_inst");
+    auto work = blk.work();
+    ASSERT_EQ(work.size(), 1u);
+    work[0] = 1.75;
+
+    sys.updateConstraints(/*time=*/0.0, /*dt=*/0.0);
+    for (const auto dof : constrained) {
+        EXPECT_NEAR(sys.constraints().getInhomogeneity(dof), 3.5, 1e-12);
+    }
+}
+
+TEST(StrongDirichletConstraint, AuxiliaryDrivenBindingRejectsUnknownOutput)
+{
+    const int marker = 7;
+    auto mesh = build_single_quad_mesh_with_left_edge_marker(marker);
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+
+    FESystem sys(mesh);
+    auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+
+    auto model = AuxiliaryModelBuilder("bad_output_bc")
+        .state("x")
+        .ode("x", FormExpr::constant(0.0))
+        .output("y", svmp::FE::systems::modelState("x"))
+        .build();
+
+    EXPECT_THROW(
+        sys.deployAuxiliaryModel(
+            use(model).name("bad_output_bc_inst").global().partitioned("ForwardEuler")
+                .initialize({1.0})
+                .drivesStrongDirichlet(u, marker, "missing_output")),
+        svmp::FE::InvalidArgumentException);
 }

@@ -90,7 +90,7 @@ TEST(BasisErrorPaths, SerendipityUnsupportedElementThrows) {
 }
 
 TEST(BasisErrorPaths, SerendipityHigherOrderRequestsThrow) {
-    EXPECT_THROW(SerendipityBasis(ElementType::Quad4, 3), NotImplementedException);
+    EXPECT_NO_THROW(SerendipityBasis(ElementType::Quad4, 3));
     EXPECT_THROW(SerendipityBasis(ElementType::Hex8, 3), NotImplementedException);
     EXPECT_THROW(SerendipityBasis(ElementType::Wedge15, 3), NotImplementedException);
     EXPECT_THROW(SerendipityBasis(ElementType::Pyramid13, 3), NotImplementedException);

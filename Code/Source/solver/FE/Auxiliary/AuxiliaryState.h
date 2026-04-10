@@ -18,36 +18,25 @@
  * - `AuxiliaryStateStorage.h`: Per-block storage with committed/work/history.
  * - `AuxiliaryHistoryBuffer.h`: Time-stamped history snapshots.
  * - `AuxiliaryStateIndexing.h`: Scope-specific entity indexing.
- * - `AuxiliaryState`: Mutable runtime container with both a legacy flat
- *   API (for backward compatibility) and a block-based API supporting
- *   multiple blocks with distinct scopes.
- * - `AuxiliaryStateRegistration`: Legacy registration record for ODE-based
- *   auxiliary state used by the coupled-boundary path.
+ * - `AuxiliaryState`: Mutable runtime container with a block-based API
+ *   supporting multiple blocks with distinct scopes.
+ *
+ * The block-based `AuxiliaryStateManager` path is the authoritative API.
  *
  * See `AuxiliaryStateTypes.h` for the full vocabulary of scopes, solve
  * modes, derivative policies, and layout options.
  */
 
 #include "Core/Types.h"
-#include "Core/Alignment.h"
-#include "Core/AlignedAllocator.h"
 #include "Core/FEException.h"
 
 #include "Auxiliary/AuxiliaryStateTypes.h"
 #include "Auxiliary/AuxiliaryStateStorage.h"
-#include "Auxiliary/AuxiliaryStateIndexing.h"
-#include "Systems/ODEIntegrator.h"
 
-#include "Forms/BoundaryFunctional.h"
-
-#include <cstdint>
-#include <limits>
-#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -56,17 +45,6 @@ namespace systems {
 
 /**
  * @brief Mutable runtime container for named auxiliary state variables.
- *
- * Provides two complementary access modes:
- *
- * ## Legacy flat API (backward-compatible)
- *
- * - `values()` — flattened work buffer across all legacy-registered vars.
- * - `previous()` / `previous(k)` — committed / history access.
- * - `operator[]` — named scalar access.
- * - `registerState()` — register into the flat buffer.
- *
- * ## Block-based API (generalized)
  *
  * - `registerBlock()` — register a typed block with a specific scope.
  * - `getBlock()` / `hasBlock()` — block lookup by name.
@@ -81,170 +59,10 @@ class AuxiliaryState {
 public:
     AuxiliaryState() = default;
 
-    // =================================================================
-    //  Legacy flat API (backward-compatible)
-    // =================================================================
-
-    [[nodiscard]] std::size_t size() const noexcept { return values_.size(); }
-
-    [[nodiscard]] std::span<Real> values() noexcept { return values_; }
-    [[nodiscard]] std::span<const Real> values() const noexcept { return values_; }
-
-    [[nodiscard]] std::span<const Real> previous() const noexcept { return committed_; }
-
-    [[nodiscard]] std::span<const Real> previous(int steps_back) const
-    {
-        FE_THROW_IF(steps_back <= 0, InvalidArgumentException,
-                    "AuxiliaryState::previous(k): k must be >= 1");
-        if (steps_back == 1) {
-            return committed_;
-        }
-        const auto idx = static_cast<std::size_t>(steps_back - 2);
-        FE_THROW_IF(idx >= flat_history_.size(), InvalidArgumentException,
-                    "AuxiliaryState::previous(k): insufficient history");
-        return flat_history_[idx];
-    }
-
-    [[nodiscard]] bool has(std::string_view name) const noexcept
-    {
-        return name_to_index_.find(std::string(name)) != name_to_index_.end();
-    }
-
-    [[nodiscard]] std::optional<std::size_t> tryIndexOf(std::string_view name) const noexcept
-    {
-        auto it = name_to_index_.find(std::string(name));
-        if (it == name_to_index_.end()) {
-            return std::nullopt;
-        }
-        return it->second;
-    }
-
-    [[nodiscard]] std::size_t indexOf(std::string_view name) const
-    {
-        auto it = name_to_index_.find(std::string(name));
-        FE_THROW_IF(it == name_to_index_.end(), InvalidArgumentException,
-                    "AuxiliaryState: unknown variable '" + std::string(name) + "'");
-        return it->second;
-    }
-
-    [[nodiscard]] bool hasHistory(int steps_back) const noexcept
-    {
-        if (steps_back <= 1) {
-            return true;
-        }
-        const auto idx = static_cast<std::size_t>(steps_back - 2);
-        return idx < flat_history_.size();
-    }
-
-    [[nodiscard]] Real previousValue(std::string_view name, int steps_back) const
-    {
-        auto it = name_to_index_.find(std::string(name));
-        FE_THROW_IF(it == name_to_index_.end(), InvalidArgumentException,
-                    "AuxiliaryState: unknown variable '" + std::string(name) + "'");
-        const auto vec = previous(steps_back);
-        FE_THROW_IF(it->second >= vec.size(), InvalidArgumentException,
-                    "AuxiliaryState::previousValue: internal index out of range");
-        return vec[it->second];
-    }
-
-    [[nodiscard]] Real& operator[](std::string_view name)
-    {
-        auto it = name_to_index_.find(std::string(name));
-        FE_THROW_IF(it == name_to_index_.end(), InvalidArgumentException,
-                    "AuxiliaryState: unknown variable '" + std::string(name) + "'");
-        return values_.at(it->second);
-    }
-
-    [[nodiscard]] Real operator[](std::string_view name) const
-    {
-        auto it = name_to_index_.find(std::string(name));
-        FE_THROW_IF(it == name_to_index_.end(), InvalidArgumentException,
-                    "AuxiliaryState: unknown variable '" + std::string(name) + "'");
-        return values_.at(it->second);
-    }
-
     void clear()
     {
-        committed_.clear();
-        values_.clear();
-        flat_history_.clear();
-        name_to_index_.clear();
         blocks_.clear();
         block_name_to_index_.clear();
-    }
-
-    /**
-     * @brief Register into the legacy flat buffer.
-     *
-     * For `size==1`, the variable name is `spec.name` unless
-     * `component_names` is provided.  For `size>1`, `component_names`
-     * (if provided) must have `size` entries; otherwise names are
-     * generated as `name[i]`.
-     */
-    void registerState(const AuxiliaryStateSpec& spec, std::span<const Real> initial_values = {})
-    {
-        FE_THROW_IF(spec.size <= 0, InvalidArgumentException,
-                    "AuxiliaryState::registerState: spec.size must be > 0");
-        FE_THROW_IF(spec.name.empty(), InvalidArgumentException,
-                    "AuxiliaryState::registerState: spec.name is empty");
-        if (!spec.component_names.empty()) {
-            FE_THROW_IF(static_cast<int>(spec.component_names.size()) != spec.size, InvalidArgumentException,
-                        "AuxiliaryState::registerState: component_names.size() must equal spec.size");
-        }
-        if (!initial_values.empty()) {
-            FE_THROW_IF(initial_values.size() != static_cast<std::size_t>(spec.size), InvalidArgumentException,
-                        "AuxiliaryState::registerState: initial_values size mismatch");
-        }
-
-        std::vector<std::string> names;
-        names.reserve(static_cast<std::size_t>(spec.size));
-        if (!spec.component_names.empty()) {
-            for (const auto& nm : spec.component_names) {
-                FE_THROW_IF(nm.empty(), InvalidArgumentException,
-                            "AuxiliaryState::registerState: empty component name");
-                names.push_back(nm);
-            }
-        } else if (spec.size == 1) {
-            names.push_back(spec.name);
-        } else {
-            for (int i = 0; i < spec.size; ++i) {
-                names.push_back(spec.name + "[" + std::to_string(i) + "]");
-            }
-        }
-
-        for (const auto& nm : names) {
-            FE_THROW_IF(name_to_index_.count(nm) != 0u, InvalidArgumentException,
-                        "AuxiliaryState::registerState: duplicate variable '" + nm + "'");
-        }
-
-        const auto offset = values_.size();
-        values_.resize(offset + static_cast<std::size_t>(spec.size), 0.0);
-        committed_.resize(values_.size(), 0.0);
-
-        for (int i = 0; i < spec.size; ++i) {
-            const auto idx = offset + static_cast<std::size_t>(i);
-            const Real v0 = initial_values.empty() ? Real{0.0} : initial_values[static_cast<std::size_t>(i)];
-            values_[idx] = v0;
-            committed_[idx] = v0;
-            name_to_index_.emplace(names[static_cast<std::size_t>(i)], idx);
-        }
-    }
-
-    void resetToCommitted()
-    {
-        values_ = committed_;
-    }
-
-    void commitTimeStep(std::size_t max_history = 8)
-    {
-        if (values_.empty()) return;
-        if (!committed_.empty()) {
-            flat_history_.insert(flat_history_.begin(), committed_);
-            if (flat_history_.size() > max_history) {
-                flat_history_.resize(max_history);
-            }
-        }
-        committed_ = values_;
     }
 
     // =================================================================
@@ -331,6 +149,7 @@ public:
     }
 
     /// Get block index by name (throws if not found).
+    /// Setup-stable internal handle; prefer `getBlock(name)` in user-facing code.
     [[nodiscard]] std::size_t blockIndex(std::string_view name) const
     {
         auto it = block_name_to_index_.find(std::string(name));
@@ -340,6 +159,7 @@ public:
     }
 
     /// Get block by index.
+    /// Setup-stable internal access path; prefer `getBlock(name)` in user-facing code.
     [[nodiscard]] AuxiliaryBlockStorage& block(std::size_t idx)
     {
         FE_THROW_IF(idx >= blocks_.size(), InvalidArgumentException,
@@ -354,6 +174,7 @@ public:
     }
 
     /// Get block by name.
+    /// This is the preferred public access path for auxiliary blocks.
     [[nodiscard]] AuxiliaryBlockStorage& getBlock(std::string_view name)
     {
         return blocks_[blockIndex(name)];
@@ -420,53 +241,8 @@ public:
     }
 
 private:
-    // --- Legacy flat storage ---
-    std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> committed_{};
-    std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> values_{};
-    std::vector<std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>>> flat_history_{};
-    std::unordered_map<std::string, std::size_t> name_to_index_{};
-
-    // --- Block-based storage ---
     std::vector<AuxiliaryBlockStorage> blocks_{};
     std::unordered_map<std::string, std::size_t> block_name_to_index_{};
-};
-
-/**
- * @brief Registration record for an auxiliary state variable with ODE/DAE
- *        time integration.
- *
- * This struct captures an auxiliary model's specification, initial values,
- * boundary functional dependencies, time integration method, and optional
- * analytic derivatives.  It is used by the coupled-boundary path and will
- * be superseded by the declarative `AuxiliaryModel` deployment API in a
- * future phase.
- *
- * The RHS expression must be a pure auxiliary expression: it must not
- * contain `TestFunction`, `TrialFunction`, `DiscreteField`, or
- * `StateField`, and must not contain measures (`dx`/`ds`/`dS`).
- * Coupled placeholders must be resolved to slot references before use.
- */
-struct AuxiliaryStateRegistration {
-    AuxiliaryStateSpec spec{};
-    std::vector<Real> initial_values{};
-    std::vector<forms::BoundaryFunctional> required_integrals{};
-
-    /// Boundary markers where this auxiliary state is used.
-    /// This is registration metadata — not part of the auxiliary block
-    /// identity or storage specification.
-    std::vector<int> associated_markers{};
-
-    /// Setup-resolved slot for this variable in AuxiliaryState::values().
-    static constexpr std::uint32_t kInvalidSlot = std::numeric_limits<std::uint32_t>::max();
-    std::uint32_t slot{kInvalidSlot};
-
-    /// RHS expression: dX/dt = rhs(aux, integrals, t, dt, params)
-    forms::FormExpr rhs{};
-
-    /// Optional analytic derivative drhs/dX for implicit methods.
-    std::optional<forms::FormExpr> d_rhs_dX{};
-
-    ODEMethod integrator{ODEMethod::BackwardEuler};
 };
 
 } // namespace systems

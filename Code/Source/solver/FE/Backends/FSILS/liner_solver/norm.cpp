@@ -97,9 +97,20 @@ inline double deterministic_norm_sq(const double* __restrict__ u, fsils_int n)
 
 } // namespace
 
+double fsi_ls_norm_sq_local_s(const fsils_int nNo, const Vector<double>& U)
+{
+  return deterministic_norm_sq(U.data(), nNo);
+}
+
+double fsi_ls_norm_sq_local_v(const int dof, const fsils_int nNo, const Array<double>& U)
+{
+  const fsils_int n = static_cast<fsils_int>(dof) * nNo;
+  return deterministic_norm_sq(U.data(), n);
+}
+
 double fsi_ls_norms(const fsils_int nNo, FSILS_commuType& commu, const Vector<double>& U)
 {
-  double result = deterministic_norm_sq(U.data(), nNo);
+  double result = fsi_ls_norm_sq_local_s(nNo, U);
 
   if (commu.nTasks != 1) {
     double tmp;
@@ -112,8 +123,7 @@ double fsi_ls_norms(const fsils_int nNo, FSILS_commuType& commu, const Vector<do
 
 double fsi_ls_normv(const int dof, const fsils_int nNo, FSILS_commuType& commu, const Array<double>& U)
 {
-  const fsils_int n = static_cast<fsils_int>(dof) * nNo;
-  double result = deterministic_norm_sq(U.data(), n);
+  double result = fsi_ls_norm_sq_local_v(dof, nNo, U);
 
   if (commu.nTasks != 1) {
     double tmp;

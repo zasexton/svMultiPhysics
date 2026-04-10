@@ -9,6 +9,7 @@
 #define SVMP_FE_BACKENDS_BACKEND_OPTIONS_H
 
 #include "Core/Types.h"
+#include "Backends/Interfaces/BackendKind.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -42,6 +43,7 @@ enum class PreconditionerType : std::uint8_t {
 };
 
 enum class FieldSplitKind : std::uint8_t {
+    Auto,
     Additive,
     Multiplicative,
     Schur
@@ -54,6 +56,7 @@ enum class FsilsResidualCheckPolicy : std::uint8_t {
 };
 
 enum class FsilsBlockSchurSchurPreconditioner : std::uint8_t {
+    Auto,
     DiagL,
     BlockDiagL,
     ILUL,
@@ -61,6 +64,7 @@ enum class FsilsBlockSchurSchurPreconditioner : std::uint8_t {
 };
 
 enum class FsilsBlockSchurMomentumApproximation : std::uint8_t {
+    Auto,
     DiagK,
     BlockDiagK,
     ILUK,
@@ -68,7 +72,9 @@ enum class FsilsBlockSchurMomentumApproximation : std::uint8_t {
 };
 
 struct FieldSplitOptions {
-    FieldSplitKind kind{FieldSplitKind::Additive};
+    /// `Auto` lets the backend choose additive / multiplicative / Schur mode
+    /// from mixed-layout metadata when available.
+    FieldSplitKind kind{FieldSplitKind::Auto};
     std::vector<std::string> split_names{}; // Optional, defaults to field0/field1/...
 };
 
@@ -144,6 +150,16 @@ struct BlockLayout {
         return nullptr;
     }
 
+    /// Look up block index by name (returns nullopt if not found).
+    [[nodiscard]] std::optional<int> findBlockIndex(std::string_view name) const noexcept {
+        for (std::size_t i = 0; i < blocks.size(); ++i) {
+            if (blocks[i].name == name) {
+                return static_cast<int>(i);
+            }
+        }
+        return std::nullopt;
+    }
+
     /// Look up the first block with a given role (returns nullptr if not found).
     [[nodiscard]] const BlockDescriptor* findBlockByRole(BlockRole role) const noexcept {
         for (const auto& b : blocks) {
@@ -173,6 +189,122 @@ struct BlockLayout {
         return momentum_block.has_value() && constraint_block.has_value()
             && *momentum_block >= 0 && *momentum_block < static_cast<int>(blocks.size())
             && *constraint_block >= 0 && *constraint_block < static_cast<int>(blocks.size());
+    }
+};
+
+enum class MixedBlockKind : std::uint8_t {
+    Field = 0,
+    Auxiliary
+};
+
+/// Describes one absolute-offset block in a mixed field + auxiliary system.
+struct MixedBlockDescriptor {
+    std::string name{};
+    GlobalIndex offset{0};
+    GlobalIndex size{0};
+    BlockRole role{BlockRole::Generic};
+    MixedBlockKind kind{MixedBlockKind::Field};
+    bool block_diagonal_suitable{true};
+    bool special_precondition{false};
+    bool schur_eliminable{false};
+    std::string schur_complement_partner{};
+};
+
+/// Describes a mixed global block layout using absolute offsets and sizes.
+struct MixedBlockLayout {
+    GlobalIndex field_unknowns{0};
+    GlobalIndex auxiliary_unknowns{0};
+    GlobalIndex total_unknowns{0};
+    std::vector<MixedBlockDescriptor> blocks{};
+
+    /// Optional indices identifying a saddle-point pair in blocks[].
+    std::optional<int> primary_block{};
+    std::optional<int> constraint_block{};
+
+    [[nodiscard]] const MixedBlockDescriptor* findBlock(std::string_view name) const noexcept {
+        for (const auto& b : blocks) {
+            if (b.name == name) {
+                return &b;
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] std::optional<int> findBlockIndex(std::string_view name) const noexcept {
+        for (std::size_t i = 0; i < blocks.size(); ++i) {
+            if (blocks[i].name == name) {
+                return static_cast<int>(i);
+            }
+        }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] const MixedBlockDescriptor* findBlockByRole(BlockRole role) const noexcept {
+        for (const auto& b : blocks) {
+            if (b.role == role) {
+                return &b;
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] const MixedBlockDescriptor* findBlockByExtent(GlobalIndex offset,
+                                                                GlobalIndex size) const noexcept {
+        for (const auto& b : blocks) {
+            if (b.offset == offset && b.size == size) {
+                return &b;
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] const MixedBlockDescriptor* primaryFieldBlock() const noexcept {
+        if (auto* p = findBlockByRole(BlockRole::PrimaryField)) return p;
+        if (primary_block && *primary_block >= 0 && *primary_block < static_cast<int>(blocks.size())) {
+            return &blocks[static_cast<std::size_t>(*primary_block)];
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] const MixedBlockDescriptor* constraintFieldBlock() const noexcept {
+        if (auto* p = findBlockByRole(BlockRole::ConstraintField)) return p;
+        if (constraint_block && *constraint_block >= 0 &&
+            *constraint_block < static_cast<int>(blocks.size())) {
+            return &blocks[static_cast<std::size_t>(*constraint_block)];
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] bool hasSaddlePoint() const noexcept {
+        return primary_block.has_value() && constraint_block.has_value()
+            && *primary_block >= 0 && *primary_block < static_cast<int>(blocks.size())
+            && *constraint_block >= 0 && *constraint_block < static_cast<int>(blocks.size());
+    }
+
+    [[nodiscard]] bool matchesTotalUnknowns(GlobalIndex n) const noexcept {
+        return total_unknowns == n;
+    }
+
+    [[nodiscard]] std::size_t countBlocksByRole(BlockRole role) const noexcept {
+        std::size_t count = 0;
+        for (const auto& b : blocks) {
+            if (b.role == role) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    [[nodiscard]] bool hasSpecialPreconditionBlocks() const noexcept {
+        return std::any_of(blocks.begin(), blocks.end(), [](const auto& block) {
+            return block.special_precondition;
+        });
+    }
+
+    [[nodiscard]] bool hasSchurEliminableBlocks() const noexcept {
+        return std::any_of(blocks.begin(), blocks.end(), [](const auto& block) {
+            return block.schur_eliminable;
+        });
     }
 };
 
@@ -243,6 +375,10 @@ struct SolverOptions {
     /// Populated from FieldDofMap metadata; used by block-aware solvers (BlockSchur, FieldSplit).
     std::optional<BlockLayout> block_layout{};
 
+    /// Optional absolute-offset mixed layout for field + auxiliary systems.
+    /// This can describe blocks that are not representable as per-node components.
+    std::optional<MixedBlockLayout> mixed_block_layout{};
+
     /// Explicit saddle-point block names (optional). If set, used to identify momentum/constraint
     /// blocks by name instead of the auto-detection heuristic (first multi-component = momentum,
     /// first single-component = constraint). Set from solver XML configuration.
@@ -252,6 +388,53 @@ struct SolverOptions {
     /// Generic role-to-name mapping (takes precedence over momentum/constraint names when set).
     /// Maps BlockRole -> block name. Used by backend adapters to resolve role-based queries.
     std::vector<std::pair<BlockRole, std::string>> block_role_names{};
+
+    [[nodiscard]] std::string_view resolveBlockNameForRole(BlockRole role) const noexcept {
+        for (const auto& [mapped_role, name] : block_role_names) {
+            if (mapped_role == role && !name.empty()) {
+                return name;
+            }
+        }
+
+        if (role == BlockRole::PrimaryField && !momentum_block_name.empty()) {
+            return momentum_block_name;
+        }
+        if (role == BlockRole::ConstraintField && !constraint_block_name.empty()) {
+            return constraint_block_name;
+        }
+
+        if (mixed_block_layout.has_value()) {
+            if (const auto* blk = mixed_block_layout->findBlockByRole(role)) {
+                return blk->name;
+            }
+            if (role == BlockRole::PrimaryField) {
+                if (const auto* blk = mixed_block_layout->primaryFieldBlock()) {
+                    return blk->name;
+                }
+            } else if (role == BlockRole::ConstraintField) {
+                if (const auto* blk = mixed_block_layout->constraintFieldBlock()) {
+                    return blk->name;
+                }
+            }
+        }
+
+        if (block_layout.has_value()) {
+            if (const auto* blk = block_layout->findBlockByRole(role)) {
+                return blk->name;
+            }
+            if (role == BlockRole::PrimaryField) {
+                if (const auto* blk = block_layout->primaryFieldBlock()) {
+                    return blk->name;
+                }
+            } else if (role == BlockRole::ConstraintField) {
+                if (const auto* blk = block_layout->constraintFieldBlock()) {
+                    return blk->name;
+                }
+            }
+        }
+
+        return {};
+    }
 
     /// Optional time integration descriptor for multi-field systems.
     std::optional<TimeIntegrationDescriptor> time_integration{};
@@ -280,10 +463,14 @@ struct SolverOptions {
     std::optional<int> fsils_blockschur_cg_max_iter{};
     std::optional<Real> fsils_blockschur_gm_rel_tol{};
     std::optional<Real> fsils_blockschur_cg_rel_tol{};
+    /// `Auto` resolves to a concrete Schur-side preconditioner from auxiliary
+    /// mixed-layout metadata when available.
     FsilsBlockSchurSchurPreconditioner fsils_blockschur_schur_preconditioner{
-        FsilsBlockSchurSchurPreconditioner::AlgebraicSchur};
+        FsilsBlockSchurSchurPreconditioner::Auto};
+    /// `Auto` resolves to a concrete momentum approximation from auxiliary
+    /// mixed-layout metadata when available.
     FsilsBlockSchurMomentumApproximation fsils_blockschur_momentum_approximation{
-        FsilsBlockSchurMomentumApproximation::ILUK};
+        FsilsBlockSchurMomentumApproximation::Auto};
 
     // Backend-specific pass-through key/value list (optional).
     // - PETSc: key maps to an option name (with or without '-' prefix).
@@ -329,6 +516,20 @@ struct SolverReport {
 fsilsBlockSchurPreconditionerToString(FsilsBlockSchurSchurPreconditioner pc) noexcept;
 [[nodiscard]] std::string_view
 fsilsBlockSchurMomentumApproximationToString(FsilsBlockSchurMomentumApproximation approx) noexcept;
+
+/**
+ * @brief Apply backend-specific policy defaults derived from block metadata.
+ *
+ * This uses propagated field/auxiliary mixed-layout metadata to:
+ * - materialize stable role-to-name mappings,
+ * - choose concrete block-preconditioner variants from `Auto` settings,
+ * - optionally upgrade PETSc block solves to `FieldSplit` when a block operator
+ *   is available and auxiliary metadata marks a block for special treatment.
+ */
+[[nodiscard]] SolverOptions normalizeSolverOptionsForBackend(
+    const SolverOptions& options,
+    BackendKind backend,
+    bool block_operator_available = false);
 
 } // namespace backends
 } // namespace FE

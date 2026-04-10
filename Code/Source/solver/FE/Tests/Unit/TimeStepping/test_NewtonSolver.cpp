@@ -523,7 +523,9 @@ template <typename BuildForm>
 }
 
 [[nodiscard]] DirectCouplingProblem makeDirectCouplingProblem(double dt,
-                                                              const std::vector<svmp::FE::Real>& u0)
+                                                              const std::vector<svmp::FE::Real>& u0,
+                                                              std::optional<svmp::FE::systems::AuxiliaryBlockRole>
+                                                                  solver_role = std::nullopt)
 {
     DirectCouplingProblem p;
     constexpr int marker = 6;
@@ -549,11 +551,17 @@ template <typename BuildForm>
             m << svmp::FE::systems::out("P_out") == x2 + Rp * Q;
         });
 
-    auto inst = p.sys->deploy(
-        svmp::FE::systems::use(model).name("newton_rank_one_snapshot_inst").global().monolithic()
-            .bind("Q", Q)
-            .param("Rp", 3.0)
-            .initialize({0.0, 0.0}));
+    auto deployment = svmp::FE::systems::use(model)
+        .name("newton_rank_one_snapshot_inst")
+        .global()
+        .monolithic()
+        .bind("Q", Q)
+        .param("Rp", 3.0)
+        .initialize({0.0, 0.0});
+    if (solver_role.has_value()) {
+        deployment.solverRole(*solver_role);
+    }
+    auto inst = p.sys->deploy(std::move(deployment));
 
     const auto u = svmp::FE::forms::FormExpr::stateField(p.u_field, *p.space, "u");
     const auto v = svmp::FE::forms::FormExpr::testFunction(*p.space, "v");
@@ -1145,6 +1153,52 @@ TEST(NewtonSolver, ExplicitRankOneUsesCoupledSolveOptions)
     EXPECT_GE(linear.options_seen_in_solve->max_iter, 200);
     EXPECT_LE(linear.options_seen_in_solve->rel_tol, static_cast<svmp::FE::Real>(1e-8));
     EXPECT_LE(linear.options_seen_in_solve->abs_tol, static_cast<svmp::FE::Real>(1e-12));
+}
+
+TEST(NewtonSolver, ExportsMixedAuxiliaryLayoutIntoLinearSolverOptions)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeDirectCouplingProblem(
+        /*dt=*/0.1,
+        /*u0=*/{0.2, -0.4, 0.1, 0.7},
+        svmp::FE::systems::AuxiliaryBlockRole::Constraint);
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 1e-16;
+    nopt.rel_tolerance = 1e-16;
+    nopt.step_tolerance = 0.0;
+    nopt.use_line_search = false;
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    RecordingSolveOptionsSolver linear(*problem.linear);
+    (void)newton.solveStep(*problem.transient,
+                           linear,
+                           /*solve_time=*/problem.history.dt(),
+                           problem.history,
+                           ws);
+
+    ASSERT_TRUE(linear.options_seen_in_solve.has_value());
+    ASSERT_TRUE(linear.options_seen_in_solve->mixed_block_layout.has_value());
+
+    const auto& mixed = *linear.options_seen_in_solve->mixed_block_layout;
+    const auto* aux = mixed.findBlock("newton_rank_one_snapshot_inst");
+    ASSERT_NE(aux, nullptr);
+    EXPECT_EQ(aux->kind, svmp::FE::backends::MixedBlockKind::Auxiliary);
+    EXPECT_EQ(aux->role, svmp::FE::backends::BlockRole::ConstraintField);
+    EXPECT_EQ(aux->offset, 4);
+    EXPECT_EQ(aux->size, 2);
+    EXPECT_EQ(linear.options_seen_in_solve->resolveBlockNameForRole(
+                  svmp::FE::backends::BlockRole::ConstraintField),
+              "newton_rank_one_snapshot_inst");
 }
 
 TEST(NewtonSolver, CoupledSolveAcceptsOriginalLinearTarget)

@@ -32,7 +32,8 @@ class SpectralElement : public Element {
 public:
     SpectralElement(ElementType element_type,
                     int order,
-                    FieldType field_type = FieldType::Scalar);
+                    FieldType field_type = FieldType::Scalar,
+                    Continuity continuity = Continuity::C0);
 
     ElementInfo info() const noexcept override { return info_; }
     int dimension() const noexcept override { return dimension_; }
@@ -58,4 +59,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_ELEMENTS_SPECTRALELEMENT_H
-

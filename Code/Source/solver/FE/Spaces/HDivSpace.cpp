@@ -15,6 +15,11 @@ namespace spaces {
 
 HDivSpace::HDivSpace(ElementType element_type,
                      int order)
+    : HDivSpace(element_type, order, BasisType::Lagrange) {}
+
+HDivSpace::HDivSpace(ElementType element_type,
+                     int order,
+                     BasisType basis_type)
     : element_type_(element_type),
       order_(order) {
     FE_CHECK_ARG(order_ >= 0, "HDivSpace requires non-negative polynomial order");
@@ -22,8 +27,39 @@ HDivSpace::HDivSpace(ElementType element_type,
     dimension_ = element_dimension(element_type_);
     FE_CHECK_ARG(dimension_ > 0, "HDivSpace: invalid element dimension");
 
-    element_ = std::make_shared<elements::VectorElement>(
-        element_type_, order_, Continuity::H_div);
+    if (basis_type == BasisType::Lagrange ||
+        basis_type == BasisType::RaviartThomas ||
+        basis_type == BasisType::BDM) {
+        element_ = std::make_shared<elements::VectorElement>(
+            element_type_, order_, Continuity::H_div, basis_type);
+    } else {
+        elements::ElementRequest req;
+        req.element_type = element_type_;
+        req.basis_type = basis_type;
+        req.field_type = FieldType::Vector;
+        req.continuity = Continuity::H_div;
+        req.order = order_;
+        element_ = elements::ElementFactory::create(req);
+    }
+}
+
+HDivSpace::HDivSpace(const elements::ElementRequest& request) {
+    FE_CHECK_ARG(request.field_type == FieldType::Vector,
+                 "HDivSpace request requires FieldType::Vector");
+    FE_CHECK_ARG(request.continuity == Continuity::H_div || request.continuity == Continuity::C0,
+                 "HDivSpace request requires Continuity::H_div or inference-compatible C0");
+
+    element_ = elements::ElementFactory::create(request);
+    FE_CHECK_NOT_NULL(element_.get(), "HDivSpace request element");
+    FE_CHECK_ARG(element_->field_type() == FieldType::Vector,
+                 "HDivSpace request did not create a vector element");
+    FE_CHECK_ARG(element_->continuity() == Continuity::H_div,
+                 "HDivSpace request did not create an H(div) element");
+
+    element_type_ = element_->element_type();
+    order_ = element_->polynomial_order();
+    dimension_ = element_dimension(element_type_);
+    FE_CHECK_ARG(dimension_ > 0, "HDivSpace: invalid request element dimension");
 }
 
 std::vector<Real> HDivSpace::normal_trace(

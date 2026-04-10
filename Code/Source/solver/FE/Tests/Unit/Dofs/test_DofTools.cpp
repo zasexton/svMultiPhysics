@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "FE/Dofs/DofTools.h"
+#include "FE/Dofs/DofMap.h"
 #include "FE/Dofs/DofHandler.h"
 #include "FE/Dofs/EntityDofMap.h"
 
@@ -15,6 +16,7 @@
 using svmp::FE::GlobalIndex;
 using svmp::FE::dofs::ComponentMask;
 using svmp::FE::dofs::DofExtractionOptions;
+using svmp::FE::dofs::DofMap;
 using svmp::FE::dofs::EntityDofMap;
 using svmp::FE::dofs::EntityKind;
 using svmp::FE::dofs::FieldMask;
@@ -222,4 +224,51 @@ TEST(DofTools, GetDofSupportEntitiesVertexIncludesEdgesAndCell) {
     EXPECT_TRUE(has(EntityKind::Edge, 0));
     EXPECT_TRUE(has(EntityKind::Edge, 3));
     EXPECT_TRUE(has(EntityKind::Cell, 0));
+}
+
+TEST(DofTools, ExtractDofsInRegionSupportsVertexOnlyMaps) {
+    DofMap dof_map;
+    dof_map.reserve(1, 2);
+    dof_map.setCellDofs(0, std::vector<GlobalIndex>{0, 1});
+    dof_map.setNumDofs(2);
+    dof_map.finalize();
+
+    EntityDofMap entity;
+    entity.reserve(/*v=*/2, /*e=*/0, /*f=*/0, /*c=*/0);
+    entity.setVertexDofs(0, std::vector<GlobalIndex>{0});
+    entity.setVertexDofs(1, std::vector<GlobalIndex>{1});
+    entity.finalize();
+
+    const std::vector<double> coords = {0.0, 0.0, 1.0, 0.0};
+    const auto dofs = extractDofsInBox(dof_map,
+                                       entity,
+                                       coords,
+                                       /*dim=*/2,
+                                       std::array<double, 2>{-0.1, -0.1},
+                                       std::array<double, 2>{0.1, 0.1});
+    EXPECT_EQ(dofs, (std::vector<GlobalIndex>{0}));
+}
+
+TEST(DofTools, ExtractDofsInRegionRejectsHigherOrderApproximations) {
+    DofMap dof_map;
+    dof_map.reserve(1, 3);
+    dof_map.setCellDofs(0, std::vector<GlobalIndex>{0, 1, 2});
+    dof_map.setNumDofs(3);
+    dof_map.finalize();
+
+    EntityDofMap entity;
+    entity.reserve(/*v=*/2, /*e=*/1, /*f=*/0, /*c=*/0);
+    entity.setVertexDofs(0, std::vector<GlobalIndex>{0});
+    entity.setVertexDofs(1, std::vector<GlobalIndex>{1});
+    entity.setEdgeDofs(0, std::vector<GlobalIndex>{2});
+    entity.finalize();
+
+    const std::vector<double> coords = {0.0, 0.0, 1.0, 0.0};
+    EXPECT_THROW((void)extractDofsInSphere(dof_map,
+                                           entity,
+                                           coords,
+                                           /*dim=*/2,
+                                           std::array<double, 2>{0.5, 0.0},
+                                           /*radius=*/1.0),
+                 svmp::FE::FEException);
 }

@@ -53,8 +53,9 @@ public:
     static std::shared_ptr<FunctionSpace> create(const SpaceRequest& req);
 
     static std::shared_ptr<H1Space> create_h1(ElementType element_type,
-                                              int order) {
-        return std::make_shared<H1Space>(element_type, order);
+                                              int order,
+                                              BasisType basis_type = BasisType::Lagrange) {
+        return std::make_shared<H1Space>(element_type, order, basis_type);
     }
 
     static std::shared_ptr<C1Space> create_c1(ElementType element_type,
@@ -63,18 +64,21 @@ public:
     }
 
     static std::shared_ptr<L2Space> create_l2(ElementType element_type,
-                                              int order) {
-        return std::make_shared<L2Space>(element_type, order);
+                                              int order,
+                                              BasisType basis_type = BasisType::Lagrange) {
+        return std::make_shared<L2Space>(element_type, order, basis_type);
     }
 
     static std::shared_ptr<HCurlSpace> create_hcurl(ElementType element_type,
-                                                    int order) {
-        return std::make_shared<HCurlSpace>(element_type, order);
+                                                    int order,
+                                                    BasisType basis_type = BasisType::Lagrange) {
+        return std::make_shared<HCurlSpace>(element_type, order, basis_type);
     }
 
     static std::shared_ptr<HDivSpace> create_hdiv(ElementType element_type,
-                                                  int order) {
-        return std::make_shared<HDivSpace>(element_type, order);
+                                                  int order,
+                                                  BasisType basis_type = BasisType::Lagrange) {
+        return std::make_shared<HDivSpace>(element_type, order, basis_type);
     }
 
     /// Convenience: vector-valued H¹ space as product of scalar H¹

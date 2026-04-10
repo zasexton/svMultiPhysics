@@ -15,6 +15,11 @@ namespace spaces {
 
 HCurlSpace::HCurlSpace(ElementType element_type,
                        int order)
+    : HCurlSpace(element_type, order, BasisType::Lagrange) {}
+
+HCurlSpace::HCurlSpace(ElementType element_type,
+                       int order,
+                       BasisType basis_type)
     : element_type_(element_type),
       order_(order) {
     FE_CHECK_ARG(order_ >= 0, "HCurlSpace requires non-negative polynomial order");
@@ -22,8 +27,37 @@ HCurlSpace::HCurlSpace(ElementType element_type,
     dimension_ = element_dimension(element_type_);
     FE_CHECK_ARG(dimension_ > 0, "HCurlSpace: invalid element dimension");
 
-    element_ = std::make_shared<elements::VectorElement>(
-        element_type_, order_, Continuity::H_curl);
+    if (basis_type == BasisType::Lagrange || basis_type == BasisType::Nedelec) {
+        element_ = std::make_shared<elements::VectorElement>(
+            element_type_, order_, Continuity::H_curl, basis_type);
+    } else {
+        elements::ElementRequest req;
+        req.element_type = element_type_;
+        req.basis_type = basis_type;
+        req.field_type = FieldType::Vector;
+        req.continuity = Continuity::H_curl;
+        req.order = order_;
+        element_ = elements::ElementFactory::create(req);
+    }
+}
+
+HCurlSpace::HCurlSpace(const elements::ElementRequest& request) {
+    FE_CHECK_ARG(request.field_type == FieldType::Vector,
+                 "HCurlSpace request requires FieldType::Vector");
+    FE_CHECK_ARG(request.continuity == Continuity::H_curl || request.continuity == Continuity::C0,
+                 "HCurlSpace request requires Continuity::H_curl or inference-compatible C0");
+
+    element_ = elements::ElementFactory::create(request);
+    FE_CHECK_NOT_NULL(element_.get(), "HCurlSpace request element");
+    FE_CHECK_ARG(element_->field_type() == FieldType::Vector,
+                 "HCurlSpace request did not create a vector element");
+    FE_CHECK_ARG(element_->continuity() == Continuity::H_curl,
+                 "HCurlSpace request did not create an H(curl) element");
+
+    element_type_ = element_->element_type();
+    order_ = element_->polynomial_order();
+    dimension_ = element_dimension(element_type_);
+    FE_CHECK_ARG(dimension_ > 0, "HCurlSpace: invalid request element dimension");
 }
 
 std::vector<HCurlSpace::Vec3> HCurlSpace::tangential_trace(

@@ -112,3 +112,69 @@ TEST(SpaceInterpolation, ConservativeInterpolationMatchesL2Projection) {
         EXPECT_NEAR(cons_coeffs[i], proj_coeffs[i], 1e-12);
     }
 }
+
+TEST(SpaceInterpolation, ProlongationOperatorMatchesDirectTransfer) {
+    H1Space coarse(ElementType::Line2, 1);
+    H1Space fine(ElementType::Line2, 3);
+
+    std::vector<Real> coarse_coeffs = {Real(-1), Real(2)};
+
+    const auto op = SpaceInterpolation::prolongation_operator(coarse, fine);
+
+    std::vector<Real> fine_coeffs;
+    SpaceInterpolation::apply_transfer(op, coarse_coeffs, fine_coeffs);
+
+    std::vector<Real> direct_coeffs;
+    SpaceInterpolation::prolongate(coarse, coarse_coeffs, fine, direct_coeffs);
+
+    ASSERT_EQ(fine_coeffs.size(), fine.dofs_per_element());
+    ASSERT_EQ(direct_coeffs.size(), fine_coeffs.size());
+    for (std::size_t i = 0; i < fine_coeffs.size(); ++i) {
+        EXPECT_NEAR(fine_coeffs[i], direct_coeffs[i], 1e-12);
+    }
+}
+
+TEST(SpaceInterpolation, RestrictionOperatorMatchesDirectTransfer) {
+    H1Space fine(ElementType::Line2, 3);
+    H1Space coarse(ElementType::Line2, 1);
+
+    std::vector<Real> fine_coeffs = {Real(-1), Real(0.25), Real(1.0), Real(2.0)};
+
+    const auto op = SpaceInterpolation::restriction_operator(fine, coarse);
+
+    std::vector<Real> coarse_coeffs;
+    SpaceInterpolation::apply_transfer(op, fine_coeffs, coarse_coeffs);
+
+    std::vector<Real> direct_coeffs;
+    SpaceInterpolation::restrict_coefficients(fine, fine_coeffs, coarse, direct_coeffs);
+
+    ASSERT_EQ(coarse_coeffs.size(), coarse.dofs_per_element());
+    ASSERT_EQ(direct_coeffs.size(), coarse_coeffs.size());
+    for (std::size_t i = 0; i < coarse_coeffs.size(); ++i) {
+        EXPECT_NEAR(coarse_coeffs[i], direct_coeffs[i], 1e-12);
+    }
+}
+
+TEST(SpaceInterpolation, PointMapSupportsReversedReferenceOrientation) {
+    H1Space src(ElementType::Line2, 1);
+    H1Space dst(ElementType::Line2, 1);
+
+    std::vector<Real> src_coeffs = {Real(2), Real(-1)};
+
+    auto reverse = [](const FunctionSpace::Value& xi) {
+        FunctionSpace::Value mapped = xi;
+        mapped[0] = -mapped[0];
+        return mapped;
+    };
+
+    std::vector<Real> dst_coeffs;
+    SpaceInterpolation::prolongate(src, src_coeffs, dst, dst_coeffs, reverse);
+
+    FunctionSpace::Value left{};
+    left[0] = Real(-1);
+    FunctionSpace::Value right{};
+    right[0] = Real(1);
+
+    EXPECT_NEAR(dst.evaluate_scalar(left, dst_coeffs), src.evaluate_scalar(right, src_coeffs), 1e-12);
+    EXPECT_NEAR(dst.evaluate_scalar(right, dst_coeffs), src.evaluate_scalar(left, src_coeffs), 1e-12);
+}

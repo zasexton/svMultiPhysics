@@ -547,6 +547,61 @@ TEST(BoundaryIntegralInput, RCROutlet_CPositive_ModelDeployed)
     EXPECT_NEAR(sys.auxiliaryOutputValues()[out_slot], 50.0, 1e-10);
 }
 
+TEST(BoundaryIntegralInput, PartitionedBoundaryReductionConveniencePath)
+{
+    const int marker = 5;
+    auto mesh =
+        std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("ns");
+
+    const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
+    auto Q = sys.boundaryIntegral("Q", u_disc, marker);
+
+    auto model = AuxiliaryModelBuilder("convenience_partitioned")
+        .input("Q")
+        .state("X")
+        .ode("X", modelInput("Q"))
+        .output("P_out", modelState("X") + FormExpr::constant(10.0) * modelInput("Q"))
+        .build();
+
+    sys.deployAuxiliaryModel(
+        use(model).name("conv_inst").global().partitioned("ForwardEuler")
+            .bindBoundaryReduction(Q)
+            .initialize({50.0}));
+
+    const auto u = FormExpr::stateField(u_field, *space, "u");
+    const auto v = FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "ns", {u_field}, inner(grad(u), grad(v)).dx());
+
+    {
+        SetupInputs si;
+        si.topology_override = singleTetraTopology();
+        sys.setup({}, si);
+    }
+    sys.finalizeAuxiliaryLayout();
+
+    std::vector<Real> sol(static_cast<std::size_t>(sys.dofHandler().getNumDofs()), 1.0);
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = sol;
+
+    sys.prepareAuxiliaryForAssembly(state, false);
+    EXPECT_NEAR(sys.auxiliaryInputRegistryIfPresent()->get("Q"), 0.5, 1e-10);
+
+    const auto out_slot = sys.auxiliaryOutputSlotOf("conv_inst", "P_out");
+    ASSERT_NE(out_slot, std::string::npos);
+    EXPECT_NEAR(sys.auxiliaryOutputValues()[out_slot], 55.0, 1e-10);
+
+    sys.advanceAuxiliaryState(state);
+    sys.prepareAuxiliaryForAssembly(state, false);
+    EXPECT_NEAR(sys.auxiliaryOutputValues()[out_slot], 55.05, 1e-10);
+}
+
 // ===========================================================================
 //  AuxiliaryInputRegistry callback-driven tests (no mesh)
 // ===========================================================================
@@ -3633,7 +3688,6 @@ TEST(MonolithicCoupling, DirectFieldJacobianFDVerification)
 
     sys.deploy(
         use(model).name("df_inst").node().monolithic()
-            .entityCount(4)  // 4 vertices
             .param("k", 2.0)
             .initialize({0.5}));
 
@@ -3644,6 +3698,9 @@ TEST(MonolithicCoupling, DirectFieldJacobianFDVerification)
 
     { SetupInputs si; si.topology_override = singleTetraTopology(); sys.setup({}, si); }
     sys.finalizeAuxiliaryLayout();
+
+    auto& aux_block = sys.auxiliaryStateManager().getBlock("df_inst");
+    ASSERT_EQ(aux_block.entityCount(), 4u);
 
     const auto n_field = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
     ASSERT_EQ(n_field, 4u);  // 4 vertices, 1 DOF each
@@ -3714,6 +3771,35 @@ TEST(MonolithicCoupling, DirectFieldJacobianFDVerification)
     if (sys.auxiliaryInputRegistryIfPresent())
         sys.auxiliaryInputRegistryIfPresent()->invalidateAll();
     sys.prepareAuxiliaryForAssembly(state, false);
+}
+
+TEST(MonolithicCoupling, NodeScopeEntityCountMismatchRejected)
+{
+    const int marker = 5;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    auto model = aux::model("node_count_guard", [&](ModelFacade& m) {
+        auto x = m.state("x");
+        m << ddt(x) == FormExpr::constant(0.0);
+    });
+
+    sys.deploy(
+        use(model).name("node_count_inst").node().monolithic()
+            .entityCount(5)
+            .initialize({0.0}));
+
+    const auto u = FormExpr::stateField(u_field, *space, "u");
+    const auto v = FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, inner(grad(u), grad(v)).dx());
+
+    { SetupInputs si; si.topology_override = singleTetraTopology(); sys.setup({}, si); }
+
+    EXPECT_THROW(sys.finalizeAuxiliaryLayout(), svmp::FE::InvalidArgumentException);
 }
 
 TEST(MonolithicCoupling, DirectFieldGlobalScopeRejected)
@@ -4266,7 +4352,7 @@ TEST(MonolithicCoupling, FacetScopedLocalCondensationMatchesGlobalBorderedRefere
                 std::max(1e-8, std::abs(dense_step[global_case.n_field]) * 1e-7));
 }
 
-TEST(MonolithicCoupling, QuadraturePointScopedLocalCondensationMatchesGlobalBorderedReference)
+TEST(MonolithicCoupling, QuadraturePointScopedLocalCondensationAutoLayoutMatchesExplicitOffsetsReference)
 {
     struct MonolithicCase {
         std::unique_ptr<FESystem> sys{};
@@ -4277,8 +4363,8 @@ TEST(MonolithicCoupling, QuadraturePointScopedLocalCondensationMatchesGlobalBord
         std::size_t n_field{0};
     };
 
-    auto buildCase = [&](AuxiliaryStateScope scope,
-                         std::string instance_name) -> MonolithicCase {
+    auto buildCase = [&](std::string instance_name,
+                         bool use_explicit_qp_offsets) -> MonolithicCase {
         auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
         auto space = std::make_shared<svmp::FE::spaces::L2Space>(ElementType::Tetra4, 0);
 
@@ -4299,12 +4385,9 @@ TEST(MonolithicCoupling, QuadraturePointScopedLocalCondensationMatchesGlobalBord
 
         auto deployment =
             use(model).name(instance_name).monolithic().bind("M_avg", M_avg).initialize({0.25});
-        if (scope == AuxiliaryStateScope::QuadraturePoint) {
-            deployment.scope(AuxiliaryStateScope::QuadraturePoint)
-                .entityCount(1)
-                .qpOffsets({0, 1});
-        } else {
-            deployment.global();
+        deployment.scope(AuxiliaryStateScope::QuadraturePoint);
+        if (use_explicit_qp_offsets) {
+            deployment.qpOffsets({0u, 4u});
         }
         auto inst = c.sys->deploy(deployment);
 
@@ -4328,91 +4411,78 @@ TEST(MonolithicCoupling, QuadraturePointScopedLocalCondensationMatchesGlobalBord
         return c;
     };
 
-    auto global_case = buildCase(AuxiliaryStateScope::Global, "global_ref");
-    auto qp_case = buildCase(AuxiliaryStateScope::QuadraturePoint, "qp_condensed");
+    auto qp_auto = buildCase("qp_auto", false);
+    auto qp_explicit = buildCase("qp_explicit", true);
 
-    std::vector<Real> K_global;
-    std::vector<Real> r_global;
-    assembleFieldSystemWithReductions_(*global_case.sys, global_case.state, global_case.n_field,
-                                       K_global, r_global);
-    const auto& global_bc = global_case.sys->borderedCoupling();
-    ASSERT_TRUE(global_bc.active);
-    ASSERT_EQ(global_bc.n_aux, 1);
+    std::vector<Real> K_auto;
+    std::vector<Real> r_auto;
+    assembleFieldSystemWithReductions_(*qp_auto.sys, qp_auto.state, qp_auto.n_field, K_auto, r_auto);
+    EXPECT_FALSE(qp_auto.sys->borderedCoupling().active);
+    EXPECT_TRUE(qp_auto.sys->hasLocalCondensedRecovery());
+    EXPECT_FALSE(qp_auto.sys->lastReducedFieldUpdates().empty());
+    ASSERT_EQ(qp_auto.sys->lastLocalCondensedRhsShift().size(), qp_auto.n_field);
 
-    std::vector<Real> K_qp;
-    std::vector<Real> r_qp;
-    assembleFieldSystemWithReductions_(*qp_case.sys, qp_case.state, qp_case.n_field,
-                                       K_qp, r_qp);
-    EXPECT_FALSE(qp_case.sys->borderedCoupling().active);
-    EXPECT_TRUE(qp_case.sys->hasLocalCondensedRecovery());
-    EXPECT_FALSE(qp_case.sys->lastReducedFieldUpdates().empty());
-    ASSERT_EQ(qp_case.sys->lastLocalCondensedRhsShift().size(), qp_case.n_field);
+    std::vector<Real> K_explicit;
+    std::vector<Real> r_explicit;
+    assembleFieldSystemWithReductions_(
+        *qp_explicit.sys, qp_explicit.state, qp_explicit.n_field, K_explicit, r_explicit);
+    EXPECT_FALSE(qp_explicit.sys->borderedCoupling().active);
+    EXPECT_TRUE(qp_explicit.sys->hasLocalCondensedRecovery());
+    EXPECT_FALSE(qp_explicit.sys->lastReducedFieldUpdates().empty());
+    ASSERT_EQ(qp_explicit.sys->lastLocalCondensedRhsShift().size(), qp_explicit.n_field);
 
-    const Real D_inv = Real(1.0) / global_bc.D[0];
-    std::vector<Real> K_ref = K_global;
-    std::vector<Real> r_ref = r_global;
-    for (std::size_t i = 0; i < global_case.n_field; ++i) {
-        r_ref[i] -= global_bc.B[i] * D_inv * global_bc.g[0];
-        for (std::size_t j = 0; j < global_case.n_field; ++j) {
-            K_ref[i * global_case.n_field + j] -=
-                global_bc.B[i] * D_inv * global_bc.Ct[j];
-        }
+    std::vector<Real> r_auto_reduced = r_auto;
+    const auto auto_shift = qp_auto.sys->lastLocalCondensedRhsShift();
+    for (std::size_t i = 0; i < r_auto_reduced.size(); ++i) {
+        r_auto_reduced[i] -= auto_shift[i];
     }
 
-    std::vector<Real> r_qp_reduced = r_qp;
-    const auto local_shift = qp_case.sys->lastLocalCondensedRhsShift();
-    for (std::size_t i = 0; i < r_qp_reduced.size(); ++i) {
-        r_qp_reduced[i] -= local_shift[i];
+    std::vector<Real> r_explicit_reduced = r_explicit;
+    const auto explicit_shift = qp_explicit.sys->lastLocalCondensedRhsShift();
+    for (std::size_t i = 0; i < r_explicit_reduced.size(); ++i) {
+        r_explicit_reduced[i] -= explicit_shift[i];
     }
 
-    ASSERT_EQ(K_ref.size(), K_qp.size());
-    ASSERT_EQ(r_ref.size(), r_qp_reduced.size());
-    for (std::size_t i = 0; i < K_ref.size(); ++i) {
-        EXPECT_NEAR(K_qp[i], K_ref[i], std::max(1e-8, std::abs(K_ref[i]) * 1e-7))
+    ASSERT_EQ(K_auto.size(), K_explicit.size());
+    ASSERT_EQ(r_auto_reduced.size(), r_explicit_reduced.size());
+    for (std::size_t i = 0; i < K_auto.size(); ++i) {
+        EXPECT_NEAR(K_auto[i], K_explicit[i], std::max(1e-8, std::abs(K_explicit[i]) * 1e-7))
             << "reduced field Jacobian mismatch at flat index " << i;
     }
-    for (std::size_t i = 0; i < r_ref.size(); ++i) {
-        EXPECT_NEAR(r_qp_reduced[i], r_ref[i], std::max(1e-8, std::abs(r_ref[i]) * 1e-7))
+    for (std::size_t i = 0; i < r_auto_reduced.size(); ++i) {
+        EXPECT_NEAR(
+            r_auto_reduced[i], r_explicit_reduced[i],
+            std::max(1e-8, std::abs(r_explicit_reduced[i]) * 1e-7))
             << "reduced field residual mismatch at row " << i;
     }
 
-    const auto du_reduced = solveDenseLinearSystem_(K_qp, r_qp_reduced);
-
-    std::vector<Real> full_matrix((global_case.n_field + 1) * (global_case.n_field + 1), Real(0.0));
-    std::vector<Real> full_rhs(global_case.n_field + 1, Real(0.0));
-    for (std::size_t i = 0; i < global_case.n_field; ++i) {
-        full_rhs[i] = r_global[i];
-        for (std::size_t j = 0; j < global_case.n_field; ++j) {
-            full_matrix[i * (global_case.n_field + 1) + j] =
-                K_global[i * global_case.n_field + j];
-        }
-        full_matrix[i * (global_case.n_field + 1) + global_case.n_field] = global_bc.B[i];
-    }
-    full_rhs[global_case.n_field] = global_bc.g[0];
-    for (std::size_t j = 0; j < global_case.n_field; ++j) {
-        full_matrix[global_case.n_field * (global_case.n_field + 1) + j] = global_bc.Ct[j];
-    }
-    full_matrix.back() = global_bc.D[0];
-
-    const auto dense_step = solveDenseLinearSystem_(full_matrix, full_rhs);
-    ASSERT_EQ(dense_step.size(), global_case.n_field + 1);
-    for (std::size_t i = 0; i < global_case.n_field; ++i) {
-        EXPECT_NEAR(du_reduced[i],
-                    dense_step[i],
-                    std::max(1e-8, std::abs(dense_step[i]) * 1e-7))
+    const auto du_auto = solveDenseLinearSystem_(K_auto, r_auto_reduced);
+    const auto du_explicit = solveDenseLinearSystem_(K_explicit, r_explicit_reduced);
+    ASSERT_EQ(du_auto.size(), du_explicit.size());
+    for (std::size_t i = 0; i < du_auto.size(); ++i) {
+        EXPECT_NEAR(
+            du_auto[i], du_explicit[i],
+            std::max(1e-8, std::abs(du_explicit[i]) * 1e-7))
             << "reduced field step mismatch at dof " << i;
     }
 
-    auto& qp_block = qp_case.sys->auxiliaryStateManager().getBlock(qp_case.instance_name);
-    const auto x_before = qp_block.gatherEntityWork(0);
-    ASSERT_EQ(x_before.size(), 1u);
-    qp_case.sys->applyLocalCondensedRecovery(du_reduced, Real(1.0));
-    const auto x_after = qp_block.gatherEntityWork(0);
-    ASSERT_EQ(x_after.size(), 1u);
-    const Real dx_local = x_before[0] - x_after[0];
-    EXPECT_NEAR(dx_local,
-                dense_step[global_case.n_field],
-                std::max(1e-8, std::abs(dense_step[global_case.n_field]) * 1e-7));
+    auto& auto_block = qp_auto.sys->auxiliaryStateManager().getBlock(qp_auto.instance_name);
+    auto& explicit_block = qp_explicit.sys->auxiliaryStateManager().getBlock(qp_explicit.instance_name);
+    const auto x_auto_before = auto_block.gatherEntityWork(0);
+    const auto x_explicit_before = explicit_block.gatherEntityWork(0);
+    ASSERT_EQ(x_auto_before.size(), 1u);
+    ASSERT_EQ(x_explicit_before.size(), 1u);
+
+    qp_auto.sys->applyLocalCondensedRecovery(du_auto, Real(1.0));
+    qp_explicit.sys->applyLocalCondensedRecovery(du_explicit, Real(1.0));
+
+    const auto x_auto_after = auto_block.gatherEntityWork(0);
+    const auto x_explicit_after = explicit_block.gatherEntityWork(0);
+    ASSERT_EQ(x_auto_after.size(), 1u);
+    ASSERT_EQ(x_explicit_after.size(), 1u);
+    EXPECT_NEAR(x_auto_before[0] - x_auto_after[0],
+                x_explicit_before[0] - x_explicit_after[0],
+                std::max(1e-8, std::abs(x_explicit_before[0] - x_explicit_after[0]) * 1e-7));
 }
 
 TEST(MonolithicCoupling, DirectFieldNonH1SpaceRejected)

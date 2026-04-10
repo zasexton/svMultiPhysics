@@ -12,10 +12,11 @@
 #include "Physics/Formulations/Poisson/PoissonModule.h"
 
 #include "FE/Forms/BoundaryFunctional.h"
-#include "FE/Forms/CoupledBCs.h"
 #include "FE/Forms/NitscheBC.h"
 #include "FE/Forms/StandardBCs.h"
-#include "FE/Auxiliary/AuxiliaryStateBuilder.h"
+#include "FE/Auxiliary/AuxiliaryBindings.h"
+#include "FE/Auxiliary/AuxiliaryModelDSL.h"
+#include "FE/Systems/FESystem.h"
 
 #include <memory>
 #include <stdexcept>
@@ -40,6 +41,33 @@ namespace detail {
     out.push_back('_');
     out.append(std::to_string(boundary_marker));
     return out;
+}
+
+[[nodiscard]] inline std::shared_ptr<FE::systems::BuiltAuxiliaryModel> rcrNeumannModel()
+{
+    static const auto model = FE::systems::aux::model("poisson_rcr_neumann", [](FE::systems::ModelFacade& m) {
+        auto Q = m.input("Q");
+        auto X = m.state("X");
+        auto [Rp, C, Rd, Pd] = m.params("Rp", "C", "Rd", "Pd");
+
+        m << FE::systems::ddt(X) == (Q - (X - Pd) / Rd) / C;
+        m << FE::systems::out("flux") == X + Rp * Q;
+    });
+    return model;
+}
+
+[[nodiscard]] inline std::shared_ptr<FE::systems::BuiltAuxiliaryModel> resistiveNeumannModel()
+{
+    static const auto model = FE::systems::aux::model("poisson_resistive_neumann", [](FE::systems::ModelFacade& m) {
+        auto Q = m.input("Q");
+        auto P = m.state("P", FE::systems::AuxiliaryVariableKind::Algebraic);
+        auto [Rsum, Pd] = m.params("Rsum", "Pd");
+
+        m.initialGuess("P", 0.0);
+        m << FE::systems::alg(P) == P - (Pd + Rsum * Q);
+        m << FE::systems::out("flux") == P;
+    });
+    return model;
 }
 
 } // namespace detail
@@ -87,23 +115,18 @@ namespace detail {
 }
 
 /**
- * @brief Coupled Neumann RCR (Windkessel) demo BC factory
- *
- * Registers an auxiliary scalar state X and a boundary functional Q, then applies:
- *   flux = X + Rp * Q  (or the resistive limit when C=0).
+ * @brief Coupled Neumann RCR (Windkessel) BC via deployed auxiliary models
  */
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toWindkesselBC(
     const PoissonOptions::CoupledRCRNeumannBC& bc,
-    FE::FieldId u_id,
-    const FE::spaces::FunctionSpace& space,
-    std::string_view field_name)
+    FE::systems::FESystem& system,
+    const FE::forms::FormExpr& u)
 {
+    using namespace FE::forms;
+    using namespace FE::systems;
+
     const int marker =
         FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "poisson::Factories::toWindkesselBC");
-
-    const std::string q_name =
-        bc.functional_name.empty() ? ("poisson_Q_" + std::to_string(marker)) : bc.functional_name;
-    const std::string x_name = bc.state_name.empty() ? ("poisson_X_" + std::to_string(marker)) : bc.state_name;
 
     const FE::Real Rp = bc.Rp;
     const FE::Real C = bc.C;
@@ -114,40 +137,41 @@ namespace detail {
         throw std::invalid_argument("CoupledRCRNeumannBC: Rd must be nonzero");
     }
 
-    const auto u_state = FE::forms::FormExpr::discreteField(u_id, space, std::string(field_name));
-    const auto Qsym = FE::forms::FormExpr::boundaryIntegral(u_state, marker, q_name);
+    FE::forms::BoundaryFunctional flow_rate;
+    flow_rate.integrand = u;
+    flow_rate.boundary_marker = marker;
+    flow_rate.reduction = FE::forms::BoundaryFunctional::Reduction::Sum;
+    flow_rate.name = bc.functional_name;
+    auto Q = system.boundaryIntegral(
+        std::move(flow_rate),
+        FE::systems::AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+
+    const auto instance_name =
+        bc.state_name.empty() ? ("poisson_rcr_" + std::to_string(marker)) : bc.state_name;
 
     if (C == 0.0) {
-        // Purely resistive limit: X = Pd + Rd*Q, so flux = X + Rp*Q = Pd + (Rd+Rp)*Q.
-        const FE::Real Rsum = Rd + Rp;
-        const auto flux = FE::forms::FormExpr::constant(Pd) + FE::forms::FormExpr::constant(Rsum) * Qsym;
-        return std::make_unique<FE::forms::bc::CoupledNaturalBC>(marker, flux);
+        auto resistive = system.deploy(
+            use(detail::resistiveNeumannModel())
+                .name(instance_name)
+                .boundary(marker)
+                .monolithic()
+                .params({{"Rsum", Rp + Rd}, {"Pd", Pd}})
+                .bind("Q", Q)
+                .initialState({{"P", Pd}})
+        );
+        return std::make_unique<FE::forms::bc::NaturalBC>(marker, resistive.output("flux"));
     }
 
-    FE::forms::BoundaryFunctional Q;
-    Q.integrand = u_state;
-    Q.boundary_marker = marker;
-    Q.name = q_name;
-    Q.reduction = FE::forms::BoundaryFunctional::Reduction::Sum;
-
-    // ODE: dX/dt = (Q - (X - Pd)/Rd) / C
-    const auto Xsym = FE::forms::FormExpr::auxiliaryState(x_name);
-    const auto rhs = (Qsym - (Xsym - FE::forms::FormExpr::constant(Pd)) / FE::forms::FormExpr::constant(Rd)) /
-                     FE::forms::FormExpr::constant(C);
-    const auto d_rhs_dX = FE::forms::FormExpr::constant(-1.0 / (Rd * C));
-
-    auto reg = FE::systems::auxiliaryODE(x_name, bc.X0)
-                   .requiresIntegral(Q)
-                   .withRHS(rhs)
-                   .withJacobian(d_rhs_dX)
-                   .withIntegrator(FE::systems::ODEMethod::BackwardEuler)
-                   .build();
-
-    const auto flux = Xsym + FE::forms::FormExpr::constant(Rp) * Qsym;
-
-    std::vector<FE::systems::AuxiliaryStateRegistration> regs;
-    regs.push_back(std::move(reg));
-    return std::make_unique<FE::forms::bc::CoupledNaturalBC>(marker, flux, std::move(regs));
+    auto rcr = system.deploy(
+        use(detail::rcrNeumannModel())
+            .name(instance_name)
+            .boundary(marker)
+            .monolithic()
+            .params({{"Rp", Rp}, {"C", C}, {"Rd", Rd}, {"Pd", Pd}})
+            .bind("Q", Q)
+            .initialState({{"X", bc.X0}})
+    );
+    return std::make_unique<FE::forms::bc::NaturalBC>(marker, rcr.output("flux"));
 }
 
 } // namespace Factories
@@ -157,4 +181,3 @@ namespace detail {
 } // namespace svmp
 
 #endif // SVMP_PHYSICS_FORMULATIONS_POISSON_BC_FACTORIES_H
-

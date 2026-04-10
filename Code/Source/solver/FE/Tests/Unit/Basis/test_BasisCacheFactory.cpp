@@ -494,6 +494,44 @@ TEST(BasisFactory, CreatesVectorConformingBasis) {
     EXPECT_EQ(basis->element_type(), ElementType::Quad4);
 }
 
+TEST(BasisFactory, CreatesCompatibleQuadVectorSplineAndNurbsBases) {
+    BasisRequest spline_req{ElementType::Quad4, BasisType::BSpline, 2, Continuity::H_curl, FieldType::Vector};
+    spline_req.axis_orders = {2, 2};
+    spline_req.axis_knot_vectors = {
+        make_open_uniform_knots(2, 4),
+        make_open_uniform_knots(2, 4)
+    };
+
+    auto spline_basis = BasisFactory::create(spline_req);
+    ASSERT_TRUE(spline_basis);
+    EXPECT_TRUE(spline_basis->is_vector_valued());
+    EXPECT_EQ(spline_basis->basis_type(), BasisType::BSpline);
+    EXPECT_EQ(spline_basis->element_type(), ElementType::Quad4);
+    EXPECT_EQ(spline_basis->size(), 24u);
+
+    BasisRequest nurbs_req{ElementType::Quad4, BasisType::NURBS, 2, Continuity::H_div, FieldType::Vector};
+    nurbs_req.axis_orders = {2, 2};
+    nurbs_req.axis_knot_vectors = spline_req.axis_knot_vectors;
+    nurbs_req.tensor_extents = {4, 4};
+    nurbs_req.weights.assign(16u, Real(1));
+    nurbs_req.weights[5] = Real(0.8);
+    nurbs_req.weights[10] = Real(1.25);
+
+    auto nurbs_basis = BasisFactory::create(nurbs_req);
+    ASSERT_TRUE(nurbs_basis);
+    EXPECT_TRUE(nurbs_basis->is_vector_valued());
+    EXPECT_EQ(nurbs_basis->basis_type(), BasisType::NURBS);
+    EXPECT_EQ(nurbs_basis->element_type(), ElementType::Quad4);
+    EXPECT_EQ(nurbs_basis->size(), 24u);
+
+    std::vector<math::Vector<Real, 3>> values;
+    std::vector<Real> divergence;
+    nurbs_basis->evaluate_vector_values({Real(0.15), Real(-0.35), Real(0)}, values);
+    nurbs_basis->evaluate_divergence({Real(0.15), Real(-0.35), Real(0)}, divergence);
+    ASSERT_EQ(values.size(), nurbs_basis->size());
+    ASSERT_EQ(divergence.size(), nurbs_basis->size());
+}
+
 TEST(BasisFactory, DefaultHDivOrderOneOnTwoDimensionalCellsUsesBDM) {
     BasisRequest quad_req{ElementType::Quad4, BasisType::Lagrange, 1, Continuity::H_div, FieldType::Vector};
     auto quad_basis = BasisFactory::create(quad_req);
@@ -697,7 +735,17 @@ TEST(BasisFactory, UnsupportedCombinationThrows) {
 }
 
 TEST(BasisFactory, HigherOrderSerendipityRequestsRemainUnsupported) {
-    for (const ElementType type : {ElementType::Quad4, ElementType::Hex8, ElementType::Wedge15, ElementType::Pyramid13}) {
+    {
+        BasisRequest req{ElementType::Quad4, BasisType::Serendipity, 4, Continuity::C0, FieldType::Scalar};
+        auto basis = BasisFactory::create(req);
+        ASSERT_NE(basis, nullptr);
+        EXPECT_EQ(basis->basis_type(), BasisType::Serendipity);
+        EXPECT_EQ(basis->element_type(), ElementType::Quad4);
+        EXPECT_EQ(basis->order(), 4);
+        EXPECT_EQ(basis->size(), 17u);
+    }
+
+    for (const ElementType type : {ElementType::Hex8, ElementType::Wedge15, ElementType::Pyramid13}) {
         BasisRequest req{type, BasisType::Serendipity, 3, Continuity::C0, FieldType::Scalar};
         EXPECT_THROW((void)BasisFactory::create(req), svmp::FE::FEException);
     }

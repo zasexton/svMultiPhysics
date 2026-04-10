@@ -894,14 +894,18 @@ void FunctionalAssembler::setCoupledValues(std::span<const Real> integrals,
 }
 
 void FunctionalAssembler::setAuxiliaryValues(std::span<const Real> inputs,
-                                              std::span<const Real> state,
-                                              std::span<const Real> outputs) noexcept
+                                             std::span<const Real> state,
+                                             std::span<const Real> outputs) noexcept
 {
     auxiliary_inputs_ = inputs;
     auxiliary_state_ = state;
     auxiliary_outputs_ = outputs;
-    coupled_integrals_ = inputs;
-    coupled_aux_state_ = state;
+    if (coupled_integrals_.empty()) {
+        coupled_integrals_ = inputs;
+    }
+    if (coupled_aux_state_.empty()) {
+        coupled_aux_state_ = state;
+    }
 }
 
 void FunctionalAssembler::setAuxiliaryOutputBindings(
@@ -1550,6 +1554,7 @@ Real FunctionalAssembler::assembleCellsCore(
 	                thread_context.setUserData(user_data_);
 	                thread_context.setJITConstants(jit_constants_);
 	                thread_context.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+	                thread_context.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
 	                thread_context.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
 		                thread_context.setHistoryWeights(history_weights_);
 		                const auto dofs = dof_map_->getCellDofs(cell_id);
@@ -1738,6 +1743,7 @@ Real FunctionalAssembler::assembleBoundaryCore(
             context_.setUserData(user_data_);
             context_.setJITConstants(jit_constants_);
 	            context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+	            context_.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
 	            context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
 	            context_.setHistoryWeights(history_weights_);
 	            context_.setBoundaryMarker(boundary_marker);
@@ -1802,6 +1808,7 @@ void FunctionalAssembler::prepareContext(
     context_.setUserData(user_data_);
     context_.setJITConstants(jit_constants_);
     context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+    context_.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
     context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
     context_.setHistoryWeights(history_weights_);
 }

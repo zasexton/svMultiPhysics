@@ -7,7 +7,11 @@
 
 #include "FE/Basis/NodeOrderingConventions.h"
 #include "FE/Basis/SerendipityBasis.h"
+#include "FE/Elements/ElementTransform.h"
+#include "FE/Spaces/HCurlSpace.h"
+#include "FE/Spaces/HDivSpace.h"
 #include "FE/Quadrature/QuadratureFactory.h"
+#include "FE/Spaces/SpaceFactory.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/GenericBasisSpace.h"
 #include "FE/Spaces/TraceSpace.h"
@@ -23,6 +27,12 @@ FunctionSpace::Value xi2(Real x, Real y) {
     xi[1] = y;
     xi[2] = Real(0);
     return xi;
+}
+
+FunctionSpace::Value normalized_direction(const FunctionSpace::Value& v) {
+    FunctionSpace::Value out = v;
+    out.normalize();
+    return out;
 }
 
 } // namespace
@@ -87,6 +97,358 @@ TEST(TraceSpace, FaceRestrictionAccessorMatchesVolumeConfig) {
     EXPECT_EQ(fr.element_type(), h1->element_type());
     EXPECT_EQ(fr.polynomial_order(), h1->polynomial_order());
     EXPECT_EQ(fr.continuity(), h1->continuity());
+}
+
+TEST(TraceSpace, HigherOrderSerendipityQuadEdgeTraceMatchesVolume) {
+    auto h1 = std::make_shared<H1Space>(ElementType::Quad4, 4, BasisType::Serendipity);
+    TraceSpace trace(h1, /*face_id=*/0);
+
+    EXPECT_EQ(trace.topological_dimension(), 1);
+    EXPECT_EQ(trace.element_type(), ElementType::Line2);
+    EXPECT_EQ(trace.dofs_per_element(), 5u);
+
+    const auto face_dofs = trace.face_dof_indices();
+    ASSERT_EQ(face_dofs.size(), 5u);
+    EXPECT_EQ(face_dofs[0], 0);
+    EXPECT_EQ(face_dofs[1], 1);
+    EXPECT_EQ(face_dofs[2], 4);
+    EXPECT_EQ(face_dofs[3], 5);
+    EXPECT_EQ(face_dofs[4], 6);
+
+    std::vector<Real> element_coeffs(h1->dofs_per_element(), Real(0));
+    for (std::size_t i = 0; i < element_coeffs.size(); ++i) {
+        element_coeffs[i] = Real(0.05) * Real(i + 1);
+    }
+
+    const auto face_coeffs = trace.restrict(element_coeffs);
+    ASSERT_EQ(face_coeffs.size(), face_dofs.size());
+
+    for (std::size_t i = 0; i < face_dofs.size(); ++i) {
+        EXPECT_NEAR(face_coeffs[i], element_coeffs[static_cast<std::size_t>(face_dofs[i])], 1e-14);
+    }
+
+    for (Real x : {Real(-0.8), Real(-0.25), Real(0.1), Real(0.7)}) {
+        FunctionSpace::Value xi_face{};
+        xi_face[0] = x;
+        const auto xi_vol = trace.embed_face_point(xi_face);
+        const Real v_trace = trace.evaluate_scalar(xi_face, face_coeffs);
+        const Real v_volume = h1->evaluate_scalar(xi_vol, element_coeffs);
+        EXPECT_NEAR(v_trace, v_volume, 1e-12);
+    }
+}
+
+TEST(TraceSpace, BsplineQuadEdgeTraceRespectsFaceOrientationAndMatchesVolume) {
+    SpaceRequest req;
+    req.space_type = SpaceType::H1;
+    req.element.element_type = ElementType::Quad4;
+    req.element.basis_type = BasisType::BSpline;
+    req.element.field_type = FieldType::Scalar;
+    req.element.continuity = Continuity::C0;
+    req.element.order = 2;
+    req.element.axis_orders = {2, 1};
+    req.element.axis_knot_vectors = {
+        {Real(0), Real(0), Real(0), Real(0.5), Real(1), Real(1), Real(1)},
+        {Real(0), Real(0), Real(0.35), Real(1), Real(1)}
+    };
+
+    auto h1 = SpaceFactory::create(req);
+    ASSERT_TRUE(h1);
+
+    TraceSpace trace(h1, /*face_id=*/2);
+    EXPECT_EQ(trace.topological_dimension(), 1);
+    EXPECT_EQ(trace.element_type(), ElementType::Line2);
+    EXPECT_EQ(trace.dofs_per_element(), 4u);
+
+    const std::vector<int> expected_face_dofs{11, 10, 9, 8};
+    EXPECT_EQ(trace.face_dof_indices(), expected_face_dofs);
+
+    std::vector<Real> element_coeffs(h1->dofs_per_element(), Real(0));
+    for (std::size_t i = 0; i < element_coeffs.size(); ++i) {
+        element_coeffs[i] = Real(0.125) * Real(i + 1);
+    }
+
+    const auto face_coeffs = trace.restrict(element_coeffs);
+    ASSERT_EQ(face_coeffs.size(), expected_face_dofs.size());
+    for (std::size_t i = 0; i < face_coeffs.size(); ++i) {
+        EXPECT_NEAR(face_coeffs[i],
+                    element_coeffs[static_cast<std::size_t>(expected_face_dofs[i])],
+                    1e-14);
+    }
+
+    for (Real x : {Real(-0.8), Real(-0.2), Real(0.25), Real(0.75)}) {
+        FunctionSpace::Value xi_face{};
+        xi_face[0] = x;
+        const auto xi_volume = trace.embed_face_point(xi_face);
+        const Real face_value = trace.evaluate_scalar(xi_face, face_coeffs);
+        const Real volume_value = h1->evaluate_scalar(xi_volume, element_coeffs);
+        EXPECT_NEAR(face_value, volume_value, 1e-12);
+    }
+}
+
+TEST(TraceSpace, NurbsHexFaceTraceMatchesVolume) {
+    SpaceRequest req;
+    req.space_type = SpaceType::H1;
+    req.element.element_type = ElementType::Hex8;
+    req.element.basis_type = BasisType::NURBS;
+    req.element.field_type = FieldType::Scalar;
+    req.element.continuity = Continuity::C0;
+    req.element.order = 2;
+    req.element.axis_orders = {2, 1, 1};
+    req.element.axis_knot_vectors = {
+        {Real(0), Real(0), Real(0), Real(0.5), Real(1), Real(1), Real(1)},
+        {Real(0), Real(0), Real(0.4), Real(1), Real(1)},
+        {Real(0), Real(0), Real(1), Real(1)}
+    };
+    req.element.weights = {
+        Real(1.0), Real(1.1), Real(0.9), Real(1.0),
+        Real(1.0), Real(0.95), Real(1.05), Real(1.0),
+        Real(1.0), Real(1.0), Real(1.15), Real(0.85),
+        Real(1.0), Real(0.9), Real(1.0), Real(1.0),
+        Real(1.0), Real(1.2), Real(0.8), Real(1.0),
+        Real(1.0), Real(1.0), Real(1.1), Real(0.9)
+    };
+    req.element.tensor_extents = {4, 3, 2};
+
+    auto h1 = SpaceFactory::create(req);
+    ASSERT_TRUE(h1);
+
+    TraceSpace trace(h1, /*face_id=*/3);
+    EXPECT_EQ(trace.topological_dimension(), 2);
+    EXPECT_EQ(trace.element_type(), ElementType::Quad4);
+    EXPECT_EQ(trace.dofs_per_element(), 6u);
+
+    const std::vector<int> expected_face_dofs{3, 7, 11, 15, 19, 23};
+    EXPECT_EQ(trace.face_dof_indices(), expected_face_dofs);
+
+    std::vector<Real> element_coeffs(h1->dofs_per_element(), Real(0));
+    for (std::size_t i = 0; i < element_coeffs.size(); ++i) {
+        element_coeffs[i] = Real(0.05) * Real(i + 1);
+    }
+
+    const auto face_coeffs = trace.restrict(element_coeffs);
+    ASSERT_EQ(face_coeffs.size(), expected_face_dofs.size());
+    for (std::size_t i = 0; i < face_coeffs.size(); ++i) {
+        EXPECT_NEAR(face_coeffs[i],
+                    element_coeffs[static_cast<std::size_t>(expected_face_dofs[i])],
+                    1e-14);
+    }
+
+    const std::array<FunctionSpace::Value, 4> sample_points = {
+        xi2(Real(-0.7), Real(-0.6)),
+        xi2(Real(-0.1), Real(0.4)),
+        xi2(Real(0.3), Real(-0.2)),
+        xi2(Real(0.8), Real(0.7))
+    };
+
+    for (const auto& xi_face : sample_points) {
+        const auto xi_volume = trace.embed_face_point(xi_face);
+        const Real face_value = trace.evaluate_scalar(xi_face, face_coeffs);
+        const Real volume_value = h1->evaluate_scalar(xi_volume, element_coeffs);
+        EXPECT_NEAR(face_value, volume_value, 1e-12);
+    }
+
+    const auto xi_corner0 = trace.embed_face_point(xi2(Real(-1), Real(-1)));
+    EXPECT_NEAR(xi_corner0[0], Real(1), 1e-14);
+    EXPECT_NEAR(xi_corner0[1], Real(-1), 1e-14);
+    EXPECT_NEAR(xi_corner0[2], Real(-1), 1e-14);
+
+    const auto xi_corner1 = trace.embed_face_point(xi2(Real(1), Real(1)));
+    EXPECT_NEAR(xi_corner1[0], Real(1), 1e-14);
+    EXPECT_NEAR(xi_corner1[1], Real(1), 1e-14);
+    EXPECT_NEAR(xi_corner1[2], Real(1), 1e-14);
+}
+
+TEST(TraceSpace, HigherOrderHCurlQuadEdgeTangentialTraceMatchesVolume) {
+    auto hcurl = std::make_shared<HCurlSpace>(ElementType::Quad4, 2);
+    TraceSpace trace(hcurl, /*face_id=*/2);
+
+    EXPECT_EQ(trace.trace_kind(), TraceKind::Tangential);
+    EXPECT_EQ(trace.field_type(), FieldType::Scalar);
+    EXPECT_EQ(trace.value_dimension(), 1);
+    EXPECT_EQ(trace.topological_dimension(), 1);
+    EXPECT_EQ(trace.element_type(), ElementType::Line2);
+    EXPECT_EQ(trace.dofs_per_element(), 3u);
+
+    const std::vector<int> expected_face_dofs{6, 7, 8};
+    EXPECT_EQ(trace.face_dof_indices(), expected_face_dofs);
+
+    std::vector<Real> element_coeffs(hcurl->dofs_per_element(), Real(0));
+    for (std::size_t i = 0; i < element_coeffs.size(); ++i) {
+        element_coeffs[i] = Real(0.08) * Real(i + 1);
+    }
+
+    const auto face_coeffs = trace.restrict(element_coeffs);
+    ASSERT_EQ(face_coeffs.size(), expected_face_dofs.size());
+    for (std::size_t i = 0; i < face_coeffs.size(); ++i) {
+        EXPECT_NEAR(face_coeffs[i],
+                    element_coeffs[static_cast<std::size_t>(expected_face_dofs[i])],
+                    1e-14);
+    }
+
+    const auto tangent = normalized_direction(
+        trace.embed_face_point(FunctionSpace::Value{Real(1), Real(0), Real(0)}) -
+        trace.embed_face_point(FunctionSpace::Value{Real(-1), Real(0), Real(0)}));
+
+    for (Real x : {Real(-0.8), Real(-0.35), Real(0.1), Real(0.7)}) {
+        FunctionSpace::Value xi_face{};
+        xi_face[0] = x;
+        const auto xi_volume = trace.embed_face_point(xi_face);
+        const auto volume_value = hcurl->evaluate(xi_volume, element_coeffs);
+        const Real expected = volume_value.dot(tangent);
+        const Real face_value = trace.evaluate_scalar(xi_face, face_coeffs);
+        const Real from_volume = trace.evaluate_from_face(xi_volume, face_coeffs)[0];
+        EXPECT_NEAR(face_value, expected, 1e-12);
+        EXPECT_NEAR(from_volume, expected, 1e-12);
+    }
+}
+
+TEST(TraceSpace, CompatibleVectorNurbsQuadEdgeTraceMatchesVolume) {
+    SpaceRequest req;
+    req.space_type = SpaceType::HDiv;
+    req.element.element_type = ElementType::Quad4;
+    req.element.basis_type = BasisType::NURBS;
+    req.element.field_type = FieldType::Vector;
+    req.element.continuity = Continuity::H_div;
+    req.element.order = 2;
+    req.element.axis_orders = {2, 2};
+    req.element.axis_knot_vectors = {
+        {Real(0), Real(0), Real(0), Real(0.5), Real(1), Real(1), Real(1)},
+        {Real(0), Real(0), Real(0), Real(0.5), Real(1), Real(1), Real(1)}
+    };
+    req.element.tensor_extents = {4, 4};
+    req.element.weights.assign(16u, Real(1));
+    req.element.weights[5] = Real(0.85);
+    req.element.weights[10] = Real(1.2);
+
+    auto hdiv = std::dynamic_pointer_cast<FunctionSpace>(SpaceFactory::create(req));
+    ASSERT_TRUE(hdiv);
+
+    TraceSpace trace(hdiv, /*face_id=*/0);
+    EXPECT_EQ(trace.trace_kind(), TraceKind::Normal);
+    EXPECT_EQ(trace.field_type(), FieldType::Scalar);
+    EXPECT_EQ(trace.topological_dimension(), 1);
+    EXPECT_EQ(trace.element_type(), ElementType::Line2);
+    EXPECT_EQ(trace.dofs_per_element(), 3u);
+
+    std::vector<Real> element_coeffs(hdiv->dofs_per_element(), Real(0));
+    for (std::size_t i = 0; i < element_coeffs.size(); ++i) {
+        element_coeffs[i] = Real(0.03) * Real(i + 1);
+    }
+
+    const auto face_coeffs = trace.restrict(element_coeffs);
+    ASSERT_EQ(face_coeffs.size(), trace.dofs_per_element());
+
+    auto normal = elements::ElementTransform::reference_facet_normal(ElementType::Quad4, 0);
+    normal.normalize();
+
+    for (Real x : {Real(-0.8), Real(-0.25), Real(0.15), Real(0.7)}) {
+        FunctionSpace::Value xi_face{};
+        xi_face[0] = x;
+        const auto xi_volume = trace.embed_face_point(xi_face);
+        const auto volume_value = hdiv->evaluate(xi_volume, element_coeffs);
+        const Real expected = volume_value.dot(normal);
+        const Real face_value = trace.evaluate_scalar(xi_face, face_coeffs);
+        const Real from_volume = trace.evaluate_from_face(xi_volume, face_coeffs)[0];
+        EXPECT_NEAR(face_value, expected, 1e-10);
+        EXPECT_NEAR(from_volume, expected, 1e-10);
+    }
+}
+
+TEST(TraceSpace, HigherOrderHDivHexFaceNormalTraceMatchesVolume) {
+    auto hdiv = std::make_shared<HDivSpace>(ElementType::Hex8, 2);
+    TraceSpace trace(hdiv, /*face_id=*/3);
+
+    EXPECT_EQ(trace.trace_kind(), TraceKind::Normal);
+    EXPECT_EQ(trace.field_type(), FieldType::Scalar);
+    EXPECT_EQ(trace.value_dimension(), 1);
+    EXPECT_EQ(trace.topological_dimension(), 2);
+    EXPECT_EQ(trace.element_type(), ElementType::Quad4);
+    EXPECT_EQ(trace.dofs_per_element(), 9u);
+
+    const std::vector<int> expected_face_dofs{27, 28, 29, 30, 31, 32, 33, 34, 35};
+    EXPECT_EQ(trace.face_dof_indices(), expected_face_dofs);
+
+    std::vector<Real> element_coeffs(hdiv->dofs_per_element(), Real(0));
+    for (std::size_t i = 0; i < element_coeffs.size(); ++i) {
+        element_coeffs[i] = Real(-0.2) + Real(0.03) * Real(i);
+    }
+
+    const auto face_coeffs = trace.restrict(element_coeffs);
+    ASSERT_EQ(face_coeffs.size(), expected_face_dofs.size());
+    for (std::size_t i = 0; i < face_coeffs.size(); ++i) {
+        EXPECT_NEAR(face_coeffs[i],
+                    element_coeffs[static_cast<std::size_t>(expected_face_dofs[i])],
+                    1e-14);
+    }
+
+    auto normal = elements::ElementTransform::reference_facet_normal(ElementType::Hex8, 3);
+    normal.normalize();
+
+    const std::array<FunctionSpace::Value, 4> sample_points = {
+        xi2(Real(-0.7), Real(-0.6)),
+        xi2(Real(-0.1), Real(0.4)),
+        xi2(Real(0.3), Real(-0.2)),
+        xi2(Real(0.85), Real(0.65))
+    };
+
+    for (const auto& xi_face : sample_points) {
+        const auto xi_volume = trace.embed_face_point(xi_face);
+        const auto volume_value = hdiv->evaluate(xi_volume, element_coeffs);
+        const Real expected = volume_value.dot(normal);
+        const Real face_value = trace.evaluate_scalar(xi_face, face_coeffs);
+        const Real from_volume = trace.evaluate_from_face(xi_volume, face_coeffs)[0];
+        EXPECT_NEAR(face_value, expected, 1e-12);
+        EXPECT_NEAR(from_volume, expected, 1e-12);
+    }
+}
+
+TEST(TraceSpace, HigherOrderHCurlTetraFaceTangentialTraceMatchesVolume) {
+    auto hcurl = std::make_shared<HCurlSpace>(ElementType::Tetra4, 1);
+    TraceSpace trace(hcurl, /*face_id=*/2);
+
+    EXPECT_EQ(trace.trace_kind(), TraceKind::Tangential);
+    EXPECT_EQ(trace.field_type(), FieldType::Vector);
+    EXPECT_EQ(trace.value_dimension(), 3);
+    EXPECT_EQ(trace.topological_dimension(), 2);
+    EXPECT_EQ(trace.element_type(), ElementType::Triangle3);
+    EXPECT_EQ(trace.dofs_per_element(), 8u);
+
+    const std::vector<int> expected_face_dofs{2, 3, 8, 9, 10, 11, 16, 17};
+    EXPECT_EQ(trace.face_dof_indices(), expected_face_dofs);
+
+    std::vector<Real> element_coeffs(hcurl->dofs_per_element(), Real(0));
+    for (std::size_t i = 0; i < element_coeffs.size(); ++i) {
+        element_coeffs[i] = Real(0.04) * Real(i + 1);
+    }
+
+    const auto face_coeffs = trace.restrict(element_coeffs);
+    ASSERT_EQ(face_coeffs.size(), trace.dofs_per_element());
+
+    auto normal = elements::ElementTransform::reference_facet_normal(ElementType::Tetra4, 2);
+    normal.normalize();
+
+    const std::array<FunctionSpace::Value, 4> sample_points = {
+        xi2(Real(0.1), Real(0.1)),
+        xi2(Real(0.2), Real(0.3)),
+        xi2(Real(0.45), Real(0.15)),
+        xi2(Real(0.15), Real(0.55))
+    };
+
+    for (const auto& xi_face : sample_points) {
+        const auto xi_volume = trace.embed_face_point(xi_face);
+        const auto volume_value = hcurl->evaluate(xi_volume, element_coeffs);
+        const auto face_value = trace.evaluate(xi_face, face_coeffs);
+        const auto from_volume = trace.evaluate_from_face(xi_volume, face_coeffs);
+        const auto expected = volume_value - normal * volume_value.dot(normal);
+
+        EXPECT_NEAR(face_value[0], expected[0], 1e-12);
+        EXPECT_NEAR(face_value[1], expected[1], 1e-12);
+        EXPECT_NEAR(face_value[2], expected[2], 1e-12);
+        EXPECT_NEAR(from_volume[0], expected[0], 1e-12);
+        EXPECT_NEAR(from_volume[1], expected[1], 1e-12);
+        EXPECT_NEAR(from_volume[2], expected[2], 1e-12);
+        EXPECT_NEAR(face_value.dot(normal), Real(0), 1e-12);
+    }
 }
 
 TEST(TraceSpace, PrototypeElementTypeAndDofsMatchFace) {

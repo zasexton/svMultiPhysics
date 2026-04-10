@@ -40,6 +40,12 @@ class GeometryMapping;
 }
 namespace spaces {
 
+enum class TraceKind : std::uint8_t {
+    Value,
+    Normal,
+    Tangential
+};
+
 class TraceSpace : public FunctionSpace {
 public:
     /// Construct trace space from a volume space and local face id
@@ -47,10 +53,10 @@ public:
                int face_id);
 
     SpaceType space_type() const noexcept override { return SpaceType::Trace; }
-    FieldType field_type() const noexcept override { return volume_space_->field_type(); }
-    Continuity continuity() const noexcept override { return volume_space_->continuity(); }
+    FieldType field_type() const noexcept override { return trace_field_type_; }
+    Continuity continuity() const noexcept override { return trace_continuity_; }
 
-    int value_dimension() const noexcept override { return volume_space_->value_dimension(); }
+    int value_dimension() const noexcept override { return trace_value_dimension_; }
 
     /// Trace lives on a (dim-1)-dimensional manifold
     int topological_dimension() const noexcept override {
@@ -68,6 +74,15 @@ public:
 
     /// Local face identifier on the reference element
     int face_id() const noexcept { return face_id_; }
+
+    /// Semantic trace type induced by the volume space
+    TraceKind trace_kind() const noexcept { return trace_kind_; }
+
+    /// Reference-space normal used for normal-trace projections
+    const Value& face_normal() const noexcept { return face_normal_; }
+
+    /// Reference-space tangent used for scalar tangential traces
+    const Value& face_tangent() const noexcept { return face_tangent1_; }
 
     /// Access the underlying volume space
     const FunctionSpace& volume_space() const noexcept { return *volume_space_; }
@@ -167,11 +182,17 @@ private:
     std::shared_ptr<FunctionSpace> volume_space_;
     int face_id_;
     std::shared_ptr<const FaceRestriction> restriction_;
+    TraceKind trace_kind_{TraceKind::Value};
+    FieldType trace_field_type_{FieldType::Scalar};
+    Continuity trace_continuity_{Continuity::C0};
+    int trace_value_dimension_{1};
 
     ElementType face_element_type_{ElementType::Unknown};
     std::shared_ptr<elements::Element> face_element_;
     std::shared_ptr<const geometry::GeometryMapping> face_embedding_;
     std::vector<int> face_to_volume_dof_;
+    Value face_normal_{};
+    Value face_tangent1_{};
 };
 
 } // namespace spaces

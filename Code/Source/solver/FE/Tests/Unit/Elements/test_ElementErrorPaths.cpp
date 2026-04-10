@@ -144,7 +144,12 @@ TEST(ElementFactoryErrors, ThrowsOnHigherOrderSerendipityRequestsOutsideContract
     req.continuity   = Continuity::C0;
     req.order        = 3;
 
-    EXPECT_THROW(ElementFactory::create(req), FEException);
+    std::shared_ptr<Element> element;
+    EXPECT_NO_THROW(element = ElementFactory::create(req));
+    ASSERT_NE(element, nullptr);
+    EXPECT_EQ(element->element_type(), ElementType::Quad4);
+    EXPECT_EQ(element->polynomial_order(), 3);
+    EXPECT_EQ(element->num_dofs(), 12u);
 
     req.element_type = ElementType::Hex8;
     EXPECT_THROW(ElementFactory::create(req), FEException);

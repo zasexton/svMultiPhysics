@@ -16,6 +16,8 @@
 #include "Forms/PointEvaluator.h"
 #include "Analysis/FormExprScanner.h"
 
+#include <array>
+
 using svmp::FE::Real;
 using namespace svmp::FE::forms;
 
@@ -146,6 +148,18 @@ TEST(AuxiliaryVocabulary, EvalAuxiliaryOutputRef)
 
     Real result = evaluateScalarAt(expr, ctx);
     EXPECT_DOUBLE_EQ(result, 10.0);
+}
+
+TEST(AuxiliaryVocabulary, EvalAuxiliaryOutputRefHighIndex)
+{
+    auto expr = FormExpr::auxiliaryOutputRef(3) + FormExpr::constant(1.5);
+
+    PointEvalContext ctx;
+    const std::array<Real, 4> outputs = {0.0, 0.0, 0.0, 4.5};
+    ctx.auxiliary_outputs = std::span<const Real>(outputs.data(), outputs.size());
+
+    const Real result = evaluateScalarAt(expr, ctx);
+    EXPECT_DOUBLE_EQ(result, 6.0);
 }
 
 TEST(AuxiliaryVocabulary, EvalMixedInputOutputState)

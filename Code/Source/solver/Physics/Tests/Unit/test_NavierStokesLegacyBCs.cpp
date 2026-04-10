@@ -12,7 +12,6 @@
 
 #include "Assembly/GlobalSystemView.h"
 #include "FE/Systems/FESystem.h"
-#include "FE/Systems/CoupledBoundaryManager.h"
 #include "FE/Systems/TransientSystem.h"
 #include "FE/TimeStepping/GeneralizedAlpha.h"
 #include "FE/TimeStepping/TimeSteppingUtils.h"
@@ -362,11 +361,13 @@ TEST(NavierStokesLegacyBCs, ParabolicFluxInflow_ResistanceOutflow_SetupSucceeds)
     ASSERT_NO_THROW(system.setup());
     system.finalizeAuxiliaryLayout();
 
-    // Coupled resistance outflow uses the CoupledBoundaryManager (boundary integral Q).
-    const auto* coupled = system.coupledBoundaryManager();
-    ASSERT_NE(coupled, nullptr);
-    EXPECT_EQ(coupled->registeredBoundaryFunctionals().size(), 1u);
-    EXPECT_EQ(coupled->auxiliaryState().size(), 0u);
+    const auto* aux_inputs = system.auxiliaryInputRegistryIfPresent();
+    ASSERT_NE(aux_inputs, nullptr);
+    EXPECT_FALSE(aux_inputs->inputNames().empty());
+    EXPECT_EQ(system.auxiliaryAnalysisSummary().n_monolithic, 1u);
+
+    const auto out_slot = system.auxiliaryOutputSlotOf("resistive_outflow_b102", "P_out");
+    EXPECT_NE(out_slot, std::string::npos);
 
     // Parabolic inflow should produce a non-uniform velocity component along the beam axis.
     expectParabolicInflowVaries(system, markers.axis);
@@ -431,11 +432,15 @@ TEST(NavierStokesLegacyBCs, ParabolicFluxInflow_RCROutflow_SetupSucceeds)
     auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
     ASSERT_TRUE(module);
     ASSERT_NO_THROW(system.setup());
+    system.finalizeAuxiliaryLayout();
 
-    const auto* coupled = system.coupledBoundaryManager();
-    ASSERT_NE(coupled, nullptr);
-    EXPECT_EQ(coupled->registeredBoundaryFunctionals().size(), 1u);
-    EXPECT_EQ(coupled->auxiliaryState().size(), 1u);
+    const auto* aux_inputs = system.auxiliaryInputRegistryIfPresent();
+    ASSERT_NE(aux_inputs, nullptr);
+    EXPECT_FALSE(aux_inputs->inputNames().empty());
+    EXPECT_EQ(system.auxiliaryAnalysisSummary().n_monolithic, 1u);
+
+    const auto out_slot = system.auxiliaryOutputSlotOf("rcr_windkessel_b102", "P_out");
+    EXPECT_NE(out_slot, std::string::npos);
 
     expectParabolicInflowVaries(system, markers.axis);
 #  endif
@@ -500,12 +505,7 @@ TEST(NavierStokesLegacyBCs, ParabolicFluxInflow_RCRCROutflow_UsesAuxiliaryStateP
     auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
     ASSERT_TRUE(module);
     ASSERT_NO_THROW(system.setup());
-
-    const auto* coupled = system.coupledBoundaryManager();
-    if (coupled != nullptr) {
-        EXPECT_EQ(coupled->registeredBoundaryFunctionals().size(), 0u);
-        EXPECT_EQ(coupled->auxiliaryState().size(), 0u);
-    }
+    system.finalizeAuxiliaryLayout();
 
     const auto* aux_inputs = system.auxiliaryInputRegistryIfPresent();
     ASSERT_NE(aux_inputs, nullptr);

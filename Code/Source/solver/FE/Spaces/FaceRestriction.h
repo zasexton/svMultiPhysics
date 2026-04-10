@@ -28,6 +28,7 @@
 
 #include "Core/Types.h"
 #include "Spaces/FunctionSpace.h"
+#include <string>
 #include <vector>
 #include <map>
 #include <memory>
@@ -81,9 +82,11 @@ public:
      * @param elem_type Element type
      * @param polynomial_order Polynomial order
      * @param continuity Continuity classification (stored for bookkeeping)
+     * @param basis_type Scalar basis family used to place DOF nodes
      */
     FaceRestriction(ElementType elem_type, int polynomial_order,
-                    Continuity continuity = Continuity::C0);
+                    Continuity continuity = Continuity::C0,
+                    BasisType basis_type = BasisType::Lagrange);
 
     /**
      * @brief Get local DOF indices that live on a face
@@ -229,10 +232,12 @@ public:
 private:
     void initialize_topology();
     void compute_dof_maps();
+    void compute_dof_maps_from_nodes(const std::vector<math::Vector<Real, 3>>& nodes);
 
     ElementType elem_type_;
     int order_;
     Continuity continuity_;
+    BasisType basis_type_;
     std::size_t num_dofs_;
 
     ElementTopology topology_;
@@ -271,7 +276,8 @@ public:
     static std::shared_ptr<const FaceRestriction> get(
         ElementType elem_type,
         int order,
-        Continuity continuity = Continuity::C0);
+        Continuity continuity = Continuity::C0,
+        BasisType basis_type = BasisType::Lagrange);
 
     /**
      * @brief Get or create a FaceRestriction for a function space
@@ -291,6 +297,8 @@ private:
         ElementType elem_type;
         int order;
         Continuity continuity;
+        BasisType basis_type;
+        std::string basis_signature;
 
         bool operator<(const CacheKey& other) const;
     };

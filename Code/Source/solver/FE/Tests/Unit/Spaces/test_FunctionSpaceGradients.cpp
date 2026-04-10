@@ -39,9 +39,42 @@ TEST(FunctionSpaceGradients, H1LineP1LinearGradientIsConstant) {
     }
 }
 
-TEST(FunctionSpaceGradients, VectorValuedSpacesThrow) {
+TEST(FunctionSpaceGradients, ScalarJacobianMatchesGradient) {
+    H1Space space(ElementType::Line2, 1);
+    std::vector<Real> coeffs = {Real(0), Real(2)};
+
+    const auto xi = xi1(Real(0.2));
+    const auto g = space.evaluate_gradient(xi, coeffs);
+    const auto J = space.evaluate_jacobian(xi, coeffs);
+
+    EXPECT_NEAR(J(0, 0), g[0], 1e-12);
+    EXPECT_NEAR(J(0, 1), g[1], 1e-12);
+    EXPECT_NEAR(J(0, 2), g[2], 1e-12);
+    EXPECT_NEAR(J(1, 0), 0.0, 1e-12);
+    EXPECT_NEAR(J(2, 0), 0.0, 1e-12);
+}
+
+TEST(FunctionSpaceGradients, VectorValuedSpacesExposeJacobianWithoutChangingGradientSemantics) {
     HCurlSpace space(ElementType::Quad4, 0);
     std::vector<Real> coeffs(space.dofs_per_element(), Real(1));
     EXPECT_THROW(space.evaluate_gradient(FunctionSpace::Value{}, coeffs), svmp::FE::FEException);
-}
 
+    const FunctionSpace::Value xi{Real(0.1), Real(-0.2), Real(0)};
+    const auto J = space.evaluate_jacobian(xi, coeffs);
+
+    const Real eps = Real(1e-6);
+    for (int d = 0; d < 2; ++d) {
+        FunctionSpace::Value xf = xi;
+        FunctionSpace::Value xb = xi;
+        xf[static_cast<std::size_t>(d)] += eps;
+        xb[static_cast<std::size_t>(d)] -= eps;
+        const auto vf = space.evaluate(xf, coeffs);
+        const auto vb = space.evaluate(xb, coeffs);
+        const auto fd = (vf - vb) / (Real(2) * eps);
+        for (int comp = 0; comp < 3; ++comp) {
+            EXPECT_NEAR(J(static_cast<std::size_t>(comp), static_cast<std::size_t>(d)),
+                        fd[static_cast<std::size_t>(comp)],
+                        1e-8);
+        }
+    }
+}

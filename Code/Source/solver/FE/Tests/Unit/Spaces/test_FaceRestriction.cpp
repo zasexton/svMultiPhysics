@@ -7,6 +7,7 @@
 #include "FE/Spaces/FaceRestriction.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/L2Space.h"
+#include "FE/Spaces/SpaceFactory.h"
 #include "FE/Basis/LagrangeBasis.h"
 #include <algorithm>
 #include <numeric>
@@ -123,6 +124,22 @@ TEST_F(FaceRestrictionTest, QuadP1FaceDofs) {
     }
 }
 
+TEST_F(FaceRestrictionTest, QuadSerendipityP4FaceDofs) {
+    FaceRestriction fr(ElementType::Quad4, 4, Continuity::C0, BasisType::Serendipity);
+
+    EXPECT_EQ(fr.num_element_dofs(), 17u);
+    EXPECT_EQ(fr.interior_dofs().size(), 1u);
+
+    for (int f = 0; f < 4; ++f) {
+        EXPECT_EQ(fr.num_face_dofs(f), 5u);
+    }
+
+    const auto face0 = fr.face_dofs(0);
+    ASSERT_EQ(face0.size(), 5u);
+    EXPECT_EQ(face0.front(), 0);
+    EXPECT_EQ(face0.back(), 6);
+}
+
 TEST_F(FaceRestrictionTest, TetraP1FaceDofs) {
     FaceRestriction fr(ElementType::Tetra4, 1, Continuity::C0);
 
@@ -236,12 +253,47 @@ TEST_F(FaceRestrictionTest, FactoryDifferentConfigs) {
     EXPECT_NE(fr1.get(), fr2.get());
 }
 
+TEST_F(FaceRestrictionTest, FactoryDistinguishesBasisFamily) {
+    auto lag = FaceRestrictionFactory::get(ElementType::Quad4, 4, Continuity::C0, BasisType::Lagrange);
+    auto ser = FaceRestrictionFactory::get(ElementType::Quad4, 4, Continuity::C0, BasisType::Serendipity);
+
+    EXPECT_NE(lag.get(), ser.get());
+    EXPECT_EQ(lag->num_element_dofs(), 25u);
+    EXPECT_EQ(ser->num_element_dofs(), 17u);
+}
+
 TEST_F(FaceRestrictionTest, FactoryFromSpace) {
     H1Space space(ElementType::Quad4, 2);
     auto fr = FaceRestrictionFactory::get(space);
 
     EXPECT_EQ(fr->element_type(), ElementType::Quad4);
     EXPECT_EQ(fr->polynomial_order(), 2);
+}
+
+TEST_F(FaceRestrictionTest, FactoryFromSplineSpaceUsesTensorProductFaceMaps) {
+    SpaceRequest spline_req;
+    spline_req.space_type = SpaceType::H1;
+    spline_req.element.element_type = ElementType::Quad4;
+    spline_req.element.basis_type = BasisType::BSpline;
+    spline_req.element.field_type = FieldType::Scalar;
+    spline_req.element.continuity = Continuity::C0;
+    spline_req.element.order = 2;
+    spline_req.element.axis_orders = {2, 1};
+    spline_req.element.axis_knot_vectors = {
+        {Real(0), Real(0), Real(0), Real(0.5), Real(1), Real(1), Real(1)},
+        {Real(0), Real(0), Real(0.35), Real(1), Real(1)}
+    };
+
+    auto space = SpaceFactory::create(spline_req);
+    ASSERT_TRUE(space);
+
+    auto fr = FaceRestrictionFactory::get(*space);
+    ASSERT_TRUE(fr);
+    EXPECT_EQ(fr->num_element_dofs(), 12u);
+    EXPECT_EQ(fr->num_face_dofs(0), 4u);
+    EXPECT_EQ(fr->num_face_dofs(1), 3u);
+    EXPECT_EQ(fr->num_face_dofs(2), 4u);
+    EXPECT_EQ(fr->num_face_dofs(3), 3u);
 }
 
 // =============================================================================
