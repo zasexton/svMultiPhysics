@@ -49,6 +49,8 @@ public:
                          std::vector<Real>& values) const override;
     void evaluate_gradients(const math::Vector<Real, 3>& xi,
                             std::vector<Gradient>& gradients) const override;
+    void evaluate_hessians(const math::Vector<Real, 3>& xi,
+                           std::vector<Hessian>& hessians) const override;
 
     /// Whether this is a simplex spectral element (Warp & Blend nodes)
     bool is_simplex() const noexcept { return is_simplex_; }
@@ -78,6 +80,7 @@ private:
     void build_nodes();
     std::vector<Real> eval_1d(Real x) const;
     std::vector<Real> eval_1d_derivative(Real x) const;
+    std::vector<Real> eval_1d_second_derivative(Real x) const;
 
     // Simplex (triangle/tet) members -- Warp & Blend nodes + inverse Vandermonde
     std::vector<math::Vector<Real, 3>> simplex_nodes_;

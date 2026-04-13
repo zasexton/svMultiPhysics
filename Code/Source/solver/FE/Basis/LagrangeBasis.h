@@ -33,6 +33,11 @@ namespace basis {
  * equispaced coordinates on tensor-product elements, barycentric grids on
  * simplices, tensorized triangle-line grids on wedges, and a rational nodal
  * pyramid construction on `Pyramid5`.
+ *
+ * For the rational pyramid family, basis values remain exact at the apex.
+ * Gradients and Hessians are analytic on the supported interior reference
+ * domain, but the exact-apex nodal derivative limit is not unique and those
+ * derivative queries throw at the exact apex.
  */
 class LagrangeBasis : public BasisFunction {
 public:

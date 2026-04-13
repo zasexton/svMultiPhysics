@@ -7,15 +7,74 @@
 
 #include "FE/Basis/BatchEvaluator.h"
 #include "FE/Basis/LagrangeBasis.h"
+#include "FE/Basis/SerendipityBasis.h"
 #include "FE/Basis/VectorBasis.h"
 #include "FE/Quadrature/GaussQuadrature.h"
 #include "FE/Quadrature/HexahedronQuadrature.h"
 #include "FE/Quadrature/QuadrilateralQuadrature.h"
+#include "FE/Quadrature/QuadratureRule.h"
 
 #include <cmath>
 #include <vector>
 
 using namespace svmp::FE;
+
+namespace {
+
+class CustomQuadratureRule final : public quadrature::QuadratureRule {
+public:
+    CustomQuadratureRule(svmp::CellFamily family,
+                         int dimension,
+                         int order,
+                         std::vector<quadrature::QuadPoint> points,
+                         std::vector<Real> weights)
+        : QuadratureRule(family, dimension, order) {
+        set_data(std::move(points), std::move(weights));
+    }
+};
+
+CustomQuadratureRule make_pyramid_quadrature_with_apex() {
+    return CustomQuadratureRule(
+        svmp::CellFamily::Pyramid, 3, 4,
+        {
+            quadrature::QuadPoint{Real(0), Real(0), Real(1)},
+            quadrature::QuadPoint{Real(0.08), Real(-0.06), Real(0.35)},
+            quadrature::QuadPoint{Real(-0.12), Real(0.1), Real(0.5)}
+        },
+        {Real(0.2), Real(0.5), Real(0.6333333333333333)});
+}
+
+CustomQuadratureRule make_pyramid_interior_quadrature() {
+    return CustomQuadratureRule(
+        svmp::CellFamily::Pyramid, 3, 4,
+        {
+            quadrature::QuadPoint{Real(0.0), Real(0.0), Real(0.15)},
+            quadrature::QuadPoint{Real(0.18), Real(-0.12), Real(0.3)},
+            quadrature::QuadPoint{Real(-0.2), Real(0.1), Real(0.42)},
+            quadrature::QuadPoint{Real(0.04), Real(-0.03), Real(0.78)}
+        },
+        {Real(0.2), Real(0.3), Real(0.4), Real(0.4333333333333333)});
+}
+
+template <typename ScalarBasis>
+void expect_pyramid_value_only_batch_succeeds(const ScalarBasis& basis,
+                                              const quadrature::QuadratureRule& quad) {
+    basis::BatchEvaluator batch(basis, quad, /*compute_gradients=*/false, /*compute_hessians=*/false);
+    const auto& data = batch.data();
+    ASSERT_FALSE(data.has_gradients);
+    ASSERT_FALSE(data.has_hessians);
+
+    for (std::size_t q = 0; q < quad.num_points(); ++q) {
+        std::vector<Real> values;
+        basis.evaluate_values(quad.point(q), values);
+        ASSERT_EQ(values.size(), basis.size());
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            EXPECT_NEAR(data.value(i, q), values[i], 1e-12);
+        }
+    }
+}
+
+} // namespace
 
 TEST(BatchEvaluator, WeightedSumMatchesPointwise) {
     basis::LagrangeBasis basis(ElementType::Quad4, 2);
@@ -247,10 +306,139 @@ TEST(BatchEvaluator, AssembleStiffnessMatchesPointwise_3D) {
     }
 }
 
+TEST(BatchEvaluator, HessiansMatchPointwiseOnQuadrilateralLagrange) {
+    basis::LagrangeBasis basis(ElementType::Quad4, 2);
+    quadrature::QuadrilateralQuadrature quad(4);
+
+    basis::BatchEvaluator batch(basis, quad, /*compute_gradients=*/true, /*compute_hessians=*/true);
+    const auto& data = batch.data();
+
+    ASSERT_TRUE(data.has_gradients);
+    ASSERT_TRUE(data.has_hessians);
+    ASSERT_EQ(data.num_basis, basis.size());
+    ASSERT_EQ(data.num_quad_points, quad.num_points());
+
+    for (std::size_t q = 0; q < quad.num_points(); ++q) {
+        std::vector<basis::Hessian> hessians;
+        basis.evaluate_hessians(quad.point(q), hessians);
+        ASSERT_EQ(hessians.size(), basis.size());
+
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            for (std::size_t d1 = 0; d1 < 3; ++d1) {
+                for (std::size_t d2 = 0; d2 < 3; ++d2) {
+                    EXPECT_NEAR(data.hessian(i, d1, d2, q), hessians[i](d1, d2), 1e-12)
+                        << "i=" << i << ", q=" << q << ", d1=" << d1 << ", d2=" << d2;
+                }
+            }
+        }
+    }
+}
+
+TEST(BatchEvaluator, HessiansMatchPointwiseOnPyramidLagrange) {
+    basis::LagrangeBasis basis(ElementType::Pyramid5, 4);
+    const auto quad = make_pyramid_interior_quadrature();
+
+    basis::BatchEvaluator batch(basis, quad, /*compute_gradients=*/false, /*compute_hessians=*/true);
+    const auto& data = batch.data();
+
+    ASSERT_FALSE(data.has_gradients);
+    ASSERT_TRUE(data.has_hessians);
+    ASSERT_EQ(data.num_basis, basis.size());
+    ASSERT_EQ(data.num_quad_points, quad.num_points());
+
+    for (std::size_t q = 0; q < quad.num_points(); ++q) {
+        std::vector<basis::Hessian> hessians;
+        basis.evaluate_hessians(quad.point(q), hessians);
+        ASSERT_EQ(hessians.size(), basis.size());
+
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            for (std::size_t d1 = 0; d1 < 3; ++d1) {
+                for (std::size_t d2 = 0; d2 < 3; ++d2) {
+                    EXPECT_NEAR(data.hessian(i, d1, d2, q), hessians[i](d1, d2), 1e-10)
+                        << "i=" << i << ", q=" << q << ", d1=" << d1 << ", d2=" << d2;
+                }
+            }
+        }
+    }
+}
+
+TEST(BatchEvaluator, UnusedDimensionsRemainZeroForLineHessians) {
+    basis::LagrangeBasis basis(ElementType::Line2, 3);
+    quadrature::GaussQuadrature1D quad(5);
+
+    basis::BatchEvaluator batch(basis, quad, /*compute_gradients=*/false, /*compute_hessians=*/true);
+    const auto& data = batch.data();
+
+    ASSERT_TRUE(data.has_hessians);
+    for (std::size_t i = 0; i < basis.size(); ++i) {
+        for (std::size_t q = 0; q < quad.num_points(); ++q) {
+            EXPECT_NEAR(data.hessian(i, 0, 1, q), 0.0, 1e-14);
+            EXPECT_NEAR(data.hessian(i, 1, 0, q), 0.0, 1e-14);
+            EXPECT_NEAR(data.hessian(i, 0, 2, q), 0.0, 1e-14);
+            EXPECT_NEAR(data.hessian(i, 2, 0, q), 0.0, 1e-14);
+            EXPECT_NEAR(data.hessian(i, 1, 1, q), 0.0, 1e-14);
+            EXPECT_NEAR(data.hessian(i, 1, 2, q), 0.0, 1e-14);
+            EXPECT_NEAR(data.hessian(i, 2, 1, q), 0.0, 1e-14);
+            EXPECT_NEAR(data.hessian(i, 2, 2, q), 0.0, 1e-14);
+        }
+    }
+}
+
+TEST(BatchEvaluator, PyramidApexValueOnlyConstructionSucceeds) {
+    const auto quad = make_pyramid_quadrature_with_apex();
+
+    basis::LagrangeBasis pyramid5(ElementType::Pyramid5, 2);
+    expect_pyramid_value_only_batch_succeeds(pyramid5, quad);
+
+    basis::LagrangeBasis pyramid14(ElementType::Pyramid14, 2);
+    expect_pyramid_value_only_batch_succeeds(pyramid14, quad);
+
+    basis::SerendipityBasis pyramid13(ElementType::Pyramid13, 2);
+    expect_pyramid_value_only_batch_succeeds(pyramid13, quad);
+}
+
+TEST(BatchEvaluator, PyramidApexGradientConstructionThrows) {
+    const auto quad = make_pyramid_quadrature_with_apex();
+
+    basis::LagrangeBasis pyramid5(ElementType::Pyramid5, 2);
+    EXPECT_THROW((void)basis::BatchEvaluator(pyramid5, quad, /*compute_gradients=*/true, /*compute_hessians=*/false),
+                 basis::BasisEvaluationException);
+
+    basis::LagrangeBasis pyramid14(ElementType::Pyramid14, 2);
+    EXPECT_THROW((void)basis::BatchEvaluator(pyramid14, quad, /*compute_gradients=*/true, /*compute_hessians=*/false),
+                 basis::BasisEvaluationException);
+
+    basis::SerendipityBasis pyramid13(ElementType::Pyramid13, 2);
+    EXPECT_THROW((void)basis::BatchEvaluator(pyramid13, quad, /*compute_gradients=*/true, /*compute_hessians=*/false),
+                 basis::BasisEvaluationException);
+}
+
+TEST(BatchEvaluator, PyramidApexHessianConstructionThrows) {
+    const auto quad = make_pyramid_quadrature_with_apex();
+
+    basis::LagrangeBasis pyramid5(ElementType::Pyramid5, 2);
+    EXPECT_THROW((void)basis::BatchEvaluator(pyramid5, quad, /*compute_gradients=*/false, /*compute_hessians=*/true),
+                 basis::BasisEvaluationException);
+
+    basis::LagrangeBasis pyramid14(ElementType::Pyramid14, 2);
+    EXPECT_THROW((void)basis::BatchEvaluator(pyramid14, quad, /*compute_gradients=*/false, /*compute_hessians=*/true),
+                 basis::BasisEvaluationException);
+
+    basis::SerendipityBasis pyramid13(ElementType::Pyramid13, 2);
+    EXPECT_THROW((void)basis::BatchEvaluator(pyramid13, quad, /*compute_gradients=*/false, /*compute_hessians=*/true),
+                 basis::BasisEvaluationException);
+}
+
 TEST(BatchEvaluator, ThrowsForVectorBases) {
     basis::RaviartThomasBasis rt(ElementType::Quad4, 0);
     quadrature::QuadrilateralQuadrature quad(2);
     EXPECT_THROW(basis::BatchEvaluator(rt, quad, true, false), basis::BasisConfigurationException);
+}
+
+TEST(BatchEvaluator, ThrowsForVectorBasesWhenHessiansRequested) {
+    basis::RaviartThomasBasis rt(ElementType::Quad4, 0);
+    quadrature::QuadrilateralQuadrature quad(2);
+    EXPECT_THROW((void)basis::BatchEvaluator(rt, quad, false, true), basis::BasisConfigurationException);
 }
 
 TEST(BatchEvaluator, ThrowsWhenGradientsNotComputed) {

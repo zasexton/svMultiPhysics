@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "Systems/FESystem.h"
+#include "Systems/BoundaryConditionManager.h"
 #include "Systems/FormsInstallerDetail.h"
 #include "Auxiliary/AuxiliaryModelBuilder.h"
 #include "Auxiliary/AuxiliaryBindings.h"
@@ -21,6 +22,7 @@
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
+#include "Forms/StandardBCs.h"
 #include "Forms/Vocabulary.h"
 #include "Forms/WeakForm.h"
 
@@ -1333,6 +1335,67 @@ TEST(FormsInstaller, DynamicAuxiliaryOutputLoweringPreservesMetadataOutputRef)
     const auto consumers = sys.consumersOfAuxiliaryOutput(output_id);
     ASSERT_EQ(consumers.size(), 1u);
     EXPECT_EQ(consumers[0].qualified_output_name, "rcr_inst/P_out");
+    EXPECT_EQ(consumers[0].operator_tag, "op");
+}
+
+TEST(FormsInstaller, BoundaryConditionManagerPreservesAuxiliaryOutputMetadataUntilInstall)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    const int marker = 55;
+    auto mesh = std::make_shared<forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    const auto Q = sys.boundaryIntegral(u, marker);
+
+    auto model = AuxiliaryModelBuilder("resistive_bc")
+                     .input("Q")
+                     .state("P", AuxiliaryVariableKind::Algebraic)
+                     .param("Rp")
+                     .algebraic("P", modelState("P") - modelParam("Rp") * modelInput("Q"))
+                     .output("P_out", modelState("P"))
+                     .build();
+
+    auto inst = sys.deploy(
+        use(model).name("resistive_bc_inst")
+            .boundary(marker)
+            .monolithic()
+            .param("Rp", 110.0)
+            .bind("Q", Q)
+            .initialState({{"P", 0.0}}));
+
+    BoundaryConditionManager bc_manager;
+    bc_manager.add(std::make_unique<forms::bc::NaturalBC>(marker, inst.output("P_out")));
+
+    auto residual = inner(grad(u), grad(v)).dx();
+    bc_manager.applyAll(sys, residual, u, v, u_field);
+    (void)installFormulation(sys, "op", {u_field}, residual);
+
+    const auto output_id = sys.auxiliaryOutputIdOf("resistive_bc_inst", "P_out");
+    ASSERT_NE(output_id, static_cast<std::size_t>(-1));
+
+    const auto& recs = sys.formulationRecords();
+    ASSERT_EQ(recs.size(), 1u);
+    ASSERT_EQ(recs[0].block_residual_exprs.size(), 1u);
+    ASSERT_NE(recs[0].block_residual_exprs[0].second, nullptr);
+    EXPECT_TRUE(exprContainsType(
+        *recs[0].block_residual_exprs[0].second,
+        forms::FormExprType::AuxiliaryOutputRef));
+
+    const auto ref_id = firstAuxiliaryOutputRefIndex(*recs[0].block_residual_exprs[0].second);
+    ASSERT_TRUE(ref_id.has_value());
+    EXPECT_EQ(*ref_id, output_id);
+
+    const auto consumers = sys.consumersOfAuxiliaryOutput(output_id);
+    ASSERT_EQ(consumers.size(), 1u);
+    EXPECT_EQ(consumers[0].qualified_output_name, "resistive_bc_inst/P_out");
     EXPECT_EQ(consumers[0].operator_tag, "op");
 }
 

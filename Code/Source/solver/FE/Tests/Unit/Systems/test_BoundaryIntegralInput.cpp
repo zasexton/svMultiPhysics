@@ -3558,6 +3558,83 @@ TEST(MonolithicCoupling, DirectCouplingUsesExactReducedFieldUpdateWhenNotSymmetr
     }
 }
 
+TEST(MonolithicCoupling, PureAlgebraicResistanceOutletEmitsDirectCouplingUpdate)
+{
+    const int marker = 7;
+    auto mesh =
+        std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
+    auto Q = sys.boundaryIntegral(u_disc, marker);
+
+    auto model = aux::model("resistive_direct_only", [](ModelFacade& m) {
+        auto Q = m.input("Q");
+        auto P = m.state("P", AuxiliaryVariableKind::Algebraic);
+        auto Rsum = m.param("Rsum");
+        auto Pd = m.param("Pd");
+
+        m.initialGuess("P", 0.0);
+        m << alg(P) == P - (Pd + Rsum * Q);
+        m << out("P_out") == P;
+    });
+
+    auto inst = sys.deploy(
+        use(model).name("resistive_direct_only_inst").boundary(marker).monolithic()
+            .bind("Q", Q)
+            .param("Rsum", 110.0)
+            .param("Pd", 50.0)
+            .initialState({{"P", 50.0}}));
+
+    const auto u = FormExpr::stateField(u_field, *space, "u");
+    const auto v = FormExpr::testFunction(*space, "v");
+    const auto residual = inner(grad(u), grad(v)).dx() - (inst.output("P_out") * v).ds(marker);
+    (void)installFormulation(sys, "op", {u_field}, residual);
+
+    SetupInputs si;
+    si.topology_override = singleTetraTopology();
+    sys.setup({}, si);
+    sys.finalizeAuxiliaryLayout();
+
+    const auto n_dofs = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    std::vector<Real> sol(n_dofs, 1.0);
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = sol;
+
+    sys.beginTimeStep();
+
+    svmp::FE::assembly::DenseMatrixView lhs(static_cast<svmp::FE::GlobalIndex>(n_dofs));
+    svmp::FE::assembly::DenseVectorView rhs(static_cast<svmp::FE::GlobalIndex>(n_dofs));
+    lhs.zero();
+    rhs.zero();
+
+    AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+    req.want_vector = true;
+
+    const auto result = sys.assemble(req, state, &lhs, &rhs);
+    ASSERT_TRUE(result.success);
+
+    const auto rank_one_updates = sys.lastRankOneUpdates();
+    const auto reduced_updates = sys.lastReducedFieldUpdates();
+    ASSERT_TRUE(!rank_one_updates.empty() || !reduced_updates.empty());
+    const auto native_rank_one_it =
+        std::find_if(rank_one_updates.begin(),
+                     rank_one_updates.end(),
+                     [](const auto& upd) { return upd.prefer_native_face; });
+    ASSERT_NE(native_rank_one_it, rank_one_updates.end());
+    EXPECT_NEAR(native_rank_one_it->sigma, -110.0, 1e-12);
+    EXPECT_FALSE(native_rank_one_it->v.empty());
+    EXPECT_TRUE(reduced_updates.empty());
+}
+
 TEST(MonolithicCoupling, DomainAverageGradientFDVerification)
 {
     // Verify dI/du for domain average: avg = ∫u dx / ∫1 dx.

@@ -9,10 +9,12 @@
 #include "FE/Basis/BSplineBasis.h"
 #include "FE/Basis/NURBSTensorBasis.h"
 #include "FE/Basis/LagrangeBasis.h"
+#include "FE/Basis/SerendipityBasis.h"
 #include "FE/Basis/TensorBasis.h"
 #include "FE/Quadrature/GaussQuadrature.h"
 #include "FE/Quadrature/QuadrilateralQuadrature.h"
 #include "FE/Quadrature/QuadratureRule.h"
+#include <algorithm>
 #include <array>
 #include <numeric>
 #include <thread>
@@ -58,6 +60,17 @@ public:
         set_data(std::move(points), std::move(weights));
     }
 };
+
+CustomQuadratureRule make_pyramid_quadrature_with_apex() {
+    return CustomQuadratureRule(
+        svmp::CellFamily::Pyramid, 3, 4,
+        {
+            QuadPoint{Real(0), Real(0), Real(1)},
+            QuadPoint{Real(0.08), Real(-0.06), Real(0.35)},
+            QuadPoint{Real(-0.12), Real(0.1), Real(0.5)}
+        },
+        {Real(0.2), Real(0.5), Real(0.6333333333333333)});
+}
 
 class TestCustomScalarBasis final : public BasisFunction {
 public:
@@ -487,6 +500,125 @@ TEST(BasisCache, CachedHighOrderLagrangeEvaluationsMatchDirectEvaluation) {
     }
 }
 
+TEST(BasisCache, PyramidApexValueOnlyCacheMatchesDirectEvaluation) {
+    const auto quad = make_pyramid_quadrature_with_apex();
+
+    LagrangeBasis canonical(ElementType::Pyramid5, 2);
+    LagrangeBasis alias(ElementType::Pyramid14, 2);
+    SerendipityBasis pyramid13(ElementType::Pyramid13, 2);
+
+    auto& cache = BasisCache::instance();
+    cache.clear();
+
+    const auto& entry_canonical = cache.get_or_compute(canonical, quad, false, false);
+    const auto& entry_alias = cache.get_or_compute(alias, quad, false, false);
+    const auto& entry_serendipity = cache.get_or_compute(pyramid13, quad, false, false);
+
+    EXPECT_EQ(&entry_canonical, &entry_alias);
+    EXPECT_EQ(cache.size(), 2u);
+
+    for (std::size_t qp = 0; qp < quad.num_points(); ++qp) {
+        std::vector<Real> canonical_values;
+        std::vector<Real> alias_values;
+        std::vector<Real> ser_values;
+        canonical.evaluate_values(quad.point(qp), canonical_values);
+        alias.evaluate_values(quad.point(qp), alias_values);
+        pyramid13.evaluate_values(quad.point(qp), ser_values);
+
+        ASSERT_EQ(canonical_values.size(), canonical.size());
+        ASSERT_EQ(alias_values.size(), alias.size());
+        ASSERT_EQ(ser_values.size(), pyramid13.size());
+
+        for (std::size_t i = 0; i < canonical.size(); ++i) {
+            EXPECT_NEAR(entry_canonical.scalarValue(i, qp), canonical_values[i], 1e-12);
+            EXPECT_NEAR(entry_alias.scalarValue(i, qp), alias_values[i], 1e-12);
+        }
+        for (std::size_t i = 0; i < pyramid13.size(); ++i) {
+            EXPECT_NEAR(entry_serendipity.scalarValue(i, qp), ser_values[i], 1e-12);
+        }
+    }
+}
+
+TEST(BasisCache, PyramidApexGradientConstructionThrowsAndDoesNotPoisonCache) {
+    const auto quad = make_pyramid_quadrature_with_apex();
+    auto& cache = BasisCache::instance();
+
+    {
+        LagrangeBasis basis(ElementType::Pyramid5, 2);
+        cache.clear();
+        EXPECT_THROW((void)cache.get_or_compute(basis, quad, true, false), BasisEvaluationException);
+        EXPECT_EQ(cache.size(), 0u);
+
+        const auto& values = cache.get_or_compute(basis, quad, false, false);
+        EXPECT_EQ(cache.size(), 1u);
+        EXPECT_EQ(values.num_qpts, quad.num_points());
+
+        EXPECT_THROW((void)cache.get_or_compute(basis, quad, true, false), BasisEvaluationException);
+        EXPECT_EQ(cache.size(), 1u);
+    }
+
+    {
+        LagrangeBasis basis(ElementType::Pyramid14, 2);
+        cache.clear();
+        EXPECT_THROW((void)cache.get_or_compute(basis, quad, true, false), BasisEvaluationException);
+        EXPECT_EQ(cache.size(), 0u);
+    }
+
+    {
+        SerendipityBasis basis(ElementType::Pyramid13, 2);
+        cache.clear();
+        EXPECT_THROW((void)cache.get_or_compute(basis, quad, true, false), BasisEvaluationException);
+        EXPECT_EQ(cache.size(), 0u);
+
+        const auto& values = cache.get_or_compute(basis, quad, false, false);
+        EXPECT_EQ(cache.size(), 1u);
+        EXPECT_EQ(values.num_qpts, quad.num_points());
+
+        EXPECT_THROW((void)cache.get_or_compute(basis, quad, true, false), BasisEvaluationException);
+        EXPECT_EQ(cache.size(), 1u);
+    }
+}
+
+TEST(BasisCache, PyramidApexHessianConstructionThrowsAndDoesNotPoisonCache) {
+    const auto quad = make_pyramid_quadrature_with_apex();
+    auto& cache = BasisCache::instance();
+
+    {
+        LagrangeBasis basis(ElementType::Pyramid5, 2);
+        cache.clear();
+        EXPECT_THROW((void)cache.get_or_compute(basis, quad, false, true), BasisEvaluationException);
+        EXPECT_EQ(cache.size(), 0u);
+
+        const auto& values = cache.get_or_compute(basis, quad, false, false);
+        EXPECT_EQ(cache.size(), 1u);
+        EXPECT_EQ(values.num_qpts, quad.num_points());
+
+        EXPECT_THROW((void)cache.get_or_compute(basis, quad, false, true), BasisEvaluationException);
+        EXPECT_EQ(cache.size(), 1u);
+    }
+
+    {
+        LagrangeBasis basis(ElementType::Pyramid14, 2);
+        cache.clear();
+        EXPECT_THROW((void)cache.get_or_compute(basis, quad, false, true), BasisEvaluationException);
+        EXPECT_EQ(cache.size(), 0u);
+    }
+
+    {
+        SerendipityBasis basis(ElementType::Pyramid13, 2);
+        cache.clear();
+        EXPECT_THROW((void)cache.get_or_compute(basis, quad, false, true), BasisEvaluationException);
+        EXPECT_EQ(cache.size(), 0u);
+
+        const auto& values = cache.get_or_compute(basis, quad, false, false);
+        EXPECT_EQ(cache.size(), 1u);
+        EXPECT_EQ(values.num_qpts, quad.num_points());
+
+        EXPECT_THROW((void)cache.get_or_compute(basis, quad, false, true), BasisEvaluationException);
+        EXPECT_EQ(cache.size(), 1u);
+    }
+}
+
 TEST(BasisFactory, CreatesVectorConformingBasis) {
     BasisRequest req{ElementType::Quad4, BasisType::Lagrange, 0, Continuity::H_div, FieldType::Vector};
     auto basis = BasisFactory::create(req);
@@ -532,14 +664,85 @@ TEST(BasisFactory, CreatesCompatibleQuadVectorSplineAndNurbsBases) {
     ASSERT_EQ(divergence.size(), nurbs_basis->size());
 }
 
-TEST(BasisFactory, DefaultHDivOrderOneOnTwoDimensionalCellsUsesBDM) {
+TEST(BasisFactory, CreatesCompatibleHexVectorSplineAndNurbsBases) {
+    BasisRequest spline_req{ElementType::Hex8, BasisType::BSpline, 2, Continuity::H_curl, FieldType::Vector};
+    spline_req.axis_orders = {2, 2, 2};
+    spline_req.axis_knot_vectors = {
+        make_open_uniform_knots(2, 4),
+        make_open_uniform_knots(2, 4),
+        make_open_uniform_knots(2, 4)
+    };
+
+    auto spline_basis = BasisFactory::create(spline_req);
+    ASSERT_TRUE(spline_basis);
+    EXPECT_TRUE(spline_basis->is_vector_valued());
+    EXPECT_EQ(spline_basis->basis_type(), BasisType::BSpline);
+    EXPECT_EQ(spline_basis->element_type(), ElementType::Hex8);
+    EXPECT_EQ(spline_basis->dimension(), 3);
+    EXPECT_EQ(spline_basis->size(), 144u);
+
+    std::vector<math::Vector<Real, 3>> curl;
+    spline_basis->evaluate_curl({Real(0.15), Real(-0.35), Real(0.2)}, curl);
+    ASSERT_EQ(curl.size(), spline_basis->size());
+
+    auto* spline_vector_basis = dynamic_cast<VectorBasisFunction*>(spline_basis.get());
+    ASSERT_NE(spline_vector_basis, nullptr);
+    const auto spline_assoc = spline_vector_basis->dof_associations();
+    ASSERT_EQ(spline_assoc.size(), spline_basis->size());
+    EXPECT_EQ(std::count_if(spline_assoc.begin(), spline_assoc.end(), [](const DofAssociation& assoc) {
+        return assoc.entity_type == DofEntity::Edge;
+    }), 36);
+    EXPECT_EQ(std::count_if(spline_assoc.begin(), spline_assoc.end(), [](const DofAssociation& assoc) {
+        return assoc.entity_type == DofEntity::Face;
+    }), 72);
+    EXPECT_EQ(std::count_if(spline_assoc.begin(), spline_assoc.end(), [](const DofAssociation& assoc) {
+        return assoc.entity_type == DofEntity::Interior;
+    }), 36);
+
+    BasisRequest nurbs_req{ElementType::Hex8, BasisType::NURBS, 2, Continuity::H_div, FieldType::Vector};
+    nurbs_req.axis_orders = {2, 2, 2};
+    nurbs_req.axis_knot_vectors = spline_req.axis_knot_vectors;
+    nurbs_req.tensor_extents = {4, 4, 4};
+    nurbs_req.weights.assign(64u, Real(1));
+    nurbs_req.weights[5] = Real(0.8);
+    nurbs_req.weights[21] = Real(1.25);
+    nurbs_req.weights[42] = Real(1.1);
+
+    auto nurbs_basis = BasisFactory::create(nurbs_req);
+    ASSERT_TRUE(nurbs_basis);
+    EXPECT_TRUE(nurbs_basis->is_vector_valued());
+    EXPECT_EQ(nurbs_basis->basis_type(), BasisType::NURBS);
+    EXPECT_EQ(nurbs_basis->element_type(), ElementType::Hex8);
+    EXPECT_EQ(nurbs_basis->dimension(), 3);
+    EXPECT_EQ(nurbs_basis->size(), 108u);
+
+    std::vector<math::Vector<Real, 3>> values;
+    std::vector<Real> divergence;
+    nurbs_basis->evaluate_vector_values({Real(0.15), Real(-0.35), Real(0.2)}, values);
+    nurbs_basis->evaluate_divergence({Real(0.15), Real(-0.35), Real(0.2)}, divergence);
+    ASSERT_EQ(values.size(), nurbs_basis->size());
+    ASSERT_EQ(divergence.size(), nurbs_basis->size());
+
+    auto* nurbs_vector_basis = dynamic_cast<VectorBasisFunction*>(nurbs_basis.get());
+    ASSERT_NE(nurbs_vector_basis, nullptr);
+    const auto nurbs_assoc = nurbs_vector_basis->dof_associations();
+    ASSERT_EQ(nurbs_assoc.size(), nurbs_basis->size());
+    EXPECT_EQ(std::count_if(nurbs_assoc.begin(), nurbs_assoc.end(), [](const DofAssociation& assoc) {
+        return assoc.entity_type == DofEntity::Face;
+    }), 54);
+    EXPECT_EQ(std::count_if(nurbs_assoc.begin(), nurbs_assoc.end(), [](const DofAssociation& assoc) {
+        return assoc.entity_type == DofEntity::Interior;
+    }), 54);
+}
+
+TEST(BasisFactory, DefaultHDivOrderOneOnTwoDimensionalCellsUsesRaviartThomas) {
     BasisRequest quad_req{ElementType::Quad4, BasisType::Lagrange, 1, Continuity::H_div, FieldType::Vector};
     auto quad_basis = BasisFactory::create(quad_req);
-    EXPECT_EQ(quad_basis->basis_type(), BasisType::BDM);
+    EXPECT_EQ(quad_basis->basis_type(), BasisType::RaviartThomas);
 
     BasisRequest tri_req{ElementType::Triangle3, BasisType::Lagrange, 1, Continuity::H_div, FieldType::Vector};
     auto tri_basis = BasisFactory::create(tri_req);
-    EXPECT_EQ(tri_basis->basis_type(), BasisType::BDM);
+    EXPECT_EQ(tri_basis->basis_type(), BasisType::RaviartThomas);
 }
 
 TEST(BasisFactory, CreatesHDivHigherOrderOnQuad) {
@@ -751,12 +954,72 @@ TEST(BasisFactory, HigherOrderSerendipityRequestsRemainUnsupported) {
     }
 }
 
-TEST(BasisFactory, ExplicitBDMRequestsHonorNarrowedScope) {
+TEST(BasisFactory, ScalarSplineAndNurbsRemainTensorProductOnly) {
+    for (const ElementType type : {ElementType::Triangle3,
+                                   ElementType::Tetra4,
+                                   ElementType::Wedge6,
+                                   ElementType::Pyramid5}) {
+        BasisRequest spline_req{type, BasisType::BSpline, 2, Continuity::C0, FieldType::Scalar};
+        EXPECT_THROW((void)BasisFactory::create(spline_req), svmp::FE::FEException);
+
+        BasisRequest nurbs_req{type, BasisType::NURBS, 2, Continuity::C0, FieldType::Scalar};
+        nurbs_req.weights = {Real(1)};
+        EXPECT_THROW((void)BasisFactory::create(nurbs_req), svmp::FE::FEException);
+    }
+}
+
+TEST(BasisFactory, CompatibleVectorSplineAndNurbsRemainQuadHexOnly) {
+    for (const ElementType type : {ElementType::Line2,
+                                   ElementType::Triangle3,
+                                   ElementType::Tetra4,
+                                   ElementType::Wedge6,
+                                   ElementType::Pyramid5}) {
+        BasisRequest hcurl_spline{type, BasisType::BSpline, 2, Continuity::H_curl, FieldType::Vector};
+        EXPECT_THROW((void)BasisFactory::create(hcurl_spline), svmp::FE::FEException);
+
+        BasisRequest hdiv_nurbs{type, BasisType::NURBS, 2, Continuity::H_div, FieldType::Vector};
+        EXPECT_THROW((void)BasisFactory::create(hdiv_nurbs), svmp::FE::FEException);
+    }
+}
+
+TEST(BasisFactory, C1ContinuityRemainsCubicTensorProductHermiteOnly) {
+    for (const ElementType type : {ElementType::Line2, ElementType::Quad4, ElementType::Hex8}) {
+        BasisRequest req{type, BasisType::Lagrange, 3, Continuity::C1, FieldType::Scalar};
+        auto basis = BasisFactory::create(req);
+        ASSERT_NE(basis, nullptr);
+        EXPECT_EQ(basis->basis_type(), BasisType::Hermite);
+        EXPECT_EQ(basis->element_type(), type);
+        EXPECT_EQ(basis->order(), 3);
+    }
+
+    {
+        BasisRequest req{ElementType::Triangle3, BasisType::Lagrange, 3, Continuity::C1, FieldType::Scalar};
+        EXPECT_THROW((void)BasisFactory::create(req), svmp::FE::FEException);
+    }
+    {
+        BasisRequest req{ElementType::Wedge6, BasisType::Lagrange, 3, Continuity::C1, FieldType::Scalar};
+        EXPECT_THROW((void)BasisFactory::create(req), svmp::FE::FEException);
+    }
+    {
+        BasisRequest req{ElementType::Hex8, BasisType::Lagrange, 5, Continuity::C1, FieldType::Scalar};
+        EXPECT_THROW((void)BasisFactory::create(req), svmp::FE::FEException);
+    }
+}
+
+TEST(BasisFactory, ExplicitBDMRequestsHonorExpandedSimplexScope) {
     {
         BasisRequest req{ElementType::Triangle3, BasisType::BDM, 1, Continuity::H_div, FieldType::Vector};
         auto basis = BasisFactory::create(req);
         EXPECT_EQ(basis->basis_type(), BasisType::BDM);
         EXPECT_EQ(basis->element_type(), ElementType::Triangle3);
+        EXPECT_EQ(basis->size(), 6u);
+    }
+    {
+        BasisRequest req{ElementType::Triangle3, BasisType::BDM, 2, Continuity::H_div, FieldType::Vector};
+        auto basis = BasisFactory::create(req);
+        EXPECT_EQ(basis->basis_type(), BasisType::BDM);
+        EXPECT_EQ(basis->element_type(), ElementType::Triangle3);
+        EXPECT_EQ(basis->size(), 12u);
     }
     {
         BasisRequest req{ElementType::Quad4, BasisType::BDM, 1, Continuity::H_div, FieldType::Vector};
@@ -765,11 +1028,26 @@ TEST(BasisFactory, ExplicitBDMRequestsHonorNarrowedScope) {
         EXPECT_EQ(basis->element_type(), ElementType::Quad4);
     }
     {
+        BasisRequest req{ElementType::Tetra4, BasisType::BDM, 1, Continuity::H_div, FieldType::Vector};
+        auto basis = BasisFactory::create(req);
+        EXPECT_EQ(basis->basis_type(), BasisType::BDM);
+        EXPECT_EQ(basis->element_type(), ElementType::Tetra4);
+        EXPECT_EQ(basis->size(), 12u);
+    }
+    {
         BasisRequest req{ElementType::Quad4, BasisType::BDM, 2, Continuity::H_div, FieldType::Vector};
         EXPECT_THROW((void)BasisFactory::create(req), svmp::FE::FEException);
     }
     {
-        BasisRequest req{ElementType::Tetra4, BasisType::BDM, 1, Continuity::H_div, FieldType::Vector};
+        BasisRequest req{ElementType::Hex8, BasisType::BDM, 1, Continuity::H_div, FieldType::Vector};
+        EXPECT_THROW((void)BasisFactory::create(req), svmp::FE::FEException);
+    }
+    {
+        BasisRequest req{ElementType::Wedge6, BasisType::BDM, 1, Continuity::H_div, FieldType::Vector};
+        EXPECT_THROW((void)BasisFactory::create(req), svmp::FE::FEException);
+    }
+    {
+        BasisRequest req{ElementType::Pyramid5, BasisType::BDM, 1, Continuity::H_div, FieldType::Vector};
         EXPECT_THROW((void)BasisFactory::create(req), svmp::FE::FEException);
     }
 }

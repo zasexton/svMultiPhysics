@@ -65,7 +65,6 @@ option(FE_WITH_MESH "Enable Mesh integration convenience APIs (requires linking 
 option(FE_ENABLE_METIS "Enable METIS reorderings (internal ThirdParty)" ON)
 option(FE_ENABLE_PARMETIS "Enable ParMETIS reorderings (internal ThirdParty, requires MPI)" ON)
 option(FE_ENABLE_PYTHON "Build Python bindings (pybind11)" OFF)
-option(FE_ENABLE_SYMENGINE "Enable SymEngine for symbolic FE spaces (pyramid H(div), wedge/pyramid H(curl))" ${FE_STANDALONE_BUILD})
 
 # Testing options
 option(FE_ENABLE_COVERAGE "Enable code coverage analysis" OFF)
@@ -142,7 +141,7 @@ endif()
 # Warning flags
 #
 # NOTE: Keep warnings scoped to FE targets only. This CMakeLists can bring in
-# optional dependencies (Mesh, METIS/GKlib, SymEngine, GTest, etc.) via
+# optional dependencies (Mesh, METIS/GKlib, GTest, etc.) via
 # add_subdirectory(). Using directory-scope add_compile_options() would apply
 # these flags to dependency targets and cause a flood of warnings from external
 # code and system headers.
@@ -1175,10 +1174,6 @@ if(FE_ENABLE_EIGEN)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EnableEigen.cmake)
 endif()
 
-# Configure SymEngine if enabled
-if(FE_ENABLE_SYMENGINE)
-    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EnableSymEngine.cmake)
-endif()
 
 # Configure LLVM for the Forms OrcJIT backend if enabled.
 #

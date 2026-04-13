@@ -6,6 +6,7 @@
  */
 
 #include "OrthogonalPolynomials.h"
+#include "detail/ReferenceDerivativeJet.h"
 #include <cmath>
 #include <limits>
 
@@ -13,6 +14,19 @@ namespace svmp {
 namespace FE {
 namespace basis {
 namespace orthopoly {
+
+namespace {
+
+using detail::Jet3;
+
+Jet3 lift_jacobi(int n, Real alpha, Real beta, const Jet3& arg) {
+    return detail::compose_univariate(arg,
+                                      jacobi(n, alpha, beta, arg.value),
+                                      jacobi_derivative(n, alpha, beta, arg.value),
+                                      jacobi_second_derivative(n, alpha, beta, arg.value));
+}
+
+} // namespace
 
 Real legendre(int n, Real x) {
     if (n == 0) {
@@ -104,6 +118,16 @@ Real jacobi_derivative(int n, Real alpha, Real beta, Real x) {
     return factor * jacobi(n - 1, alpha + Real(1), beta + Real(1), x);
 }
 
+Real jacobi_second_derivative(int n, Real alpha, Real beta, Real x) {
+    if (n <= 1) {
+        return Real(0);
+    }
+    const Real factor = Real(0.25) *
+                        (alpha + beta + Real(n) + Real(1)) *
+                        (alpha + beta + Real(n) + Real(2));
+    return factor * jacobi(n - 2, alpha + Real(2), beta + Real(2), x);
+}
+
 Real dubiner(int p, int q, Real xi, Real eta) {
     // Map to collapsed coordinates on reference triangle (xi>=0, eta>=0, xi+eta<=1)
     const Real one_minus_eta = Real(1) - eta;
@@ -183,6 +207,34 @@ std::pair<std::vector<Real>, std::vector<Real>> legendre_sequence_with_derivativ
     return {vals, derivs};
 }
 
+std::tuple<std::vector<Real>, std::vector<Real>, std::vector<Real>>
+legendre_sequence_with_second_derivatives(int n, Real x) {
+    std::vector<Real> vals(static_cast<std::size_t>(n + 1), Real(0));
+    std::vector<Real> derivs(static_cast<std::size_t>(n + 1), Real(0));
+    std::vector<Real> second_derivs(static_cast<std::size_t>(n + 1), Real(0));
+
+    vals[0] = Real(1);
+    if (n == 0) {
+        return {vals, derivs, second_derivs};
+    }
+
+    vals[1] = x;
+    derivs[1] = Real(1);
+
+    for (int k = 2; k <= n; ++k) {
+        const std::size_t ku = static_cast<std::size_t>(k);
+        const Real c1 = Real(2 * k - 1);
+        const Real c2 = Real(k - 1);
+        const Real c3 = Real(k);
+
+        vals[ku] = (c1 * x * vals[ku - 1] - c2 * vals[ku - 2]) / c3;
+        derivs[ku] = (c1 * (vals[ku - 1] + x * derivs[ku - 1]) - c2 * derivs[ku - 2]) / c3;
+        second_derivs[ku] = jacobi_second_derivative(k, Real(0), Real(0), x);
+    }
+
+    return {vals, derivs, second_derivs};
+}
+
 std::tuple<Real, Real, Real> dubiner_with_derivatives(int p, int q, Real xi, Real eta) {
     // Dubiner basis on reference triangle: (xi>=0, eta>=0, xi+eta<=1)
     // psi_{p,q}(xi,eta) = (1-eta)^p * P_p^{0,0}(a) * P_q^{2p+1,0}(b)
@@ -229,6 +281,39 @@ std::tuple<Real, Real, Real> dubiner_with_derivatives(int p, int q, Real xi, Rea
               + factor * Pa * Qb_deriv * db_deta;
 
     return {value, dxi, deta};
+}
+
+BivariateDerivatives dubiner_with_second_derivatives(int p, int q, Real xi, Real eta) {
+    const Real eps = std::numeric_limits<Real>::epsilon() * Real(10);
+    const Real one_minus_eta = Real(1) - eta;
+
+    if (std::abs(one_minus_eta) <= eps) {
+        const auto [value, dxi, deta] = dubiner_with_derivatives(p, q, xi, eta);
+        BivariateDerivatives out;
+        out.value = value;
+        out.dxi = dxi;
+        out.deta = deta;
+        return out;
+    }
+
+    const Jet3 xi_jet = detail::variable_jet(0, xi);
+    const Jet3 eta_jet = detail::variable_jet(1, eta);
+    const Jet3 one_minus_eta_jet = detail::constant_jet(Real(1)) - eta_jet;
+    const Jet3 a = detail::constant_jet(Real(2)) * xi_jet / one_minus_eta_jet - Real(1);
+    const Jet3 b = detail::constant_jet(Real(2)) * eta_jet - Real(1);
+    const Jet3 factor = detail::pow_int(one_minus_eta_jet, p);
+    const Jet3 pa = lift_jacobi(p, Real(0), Real(0), a);
+    const Jet3 qb = lift_jacobi(q, Real(2 * p + 1), Real(0), b);
+    const Jet3 psi = factor * pa * qb;
+
+    BivariateDerivatives out;
+    out.value = psi.value;
+    out.dxi = psi.gradient[0];
+    out.deta = psi.gradient[1];
+    out.dxx = psi.hessian(0, 0);
+    out.dxy = psi.hessian(0, 1);
+    out.dyy = psi.hessian(1, 1);
+    return out;
 }
 
 std::tuple<Real, Real, Real, Real> proriol_with_derivatives(int p, int q, int r,
@@ -309,6 +394,46 @@ std::tuple<Real, Real, Real, Real> proriol_with_derivatives(int p, int q, int r,
                + factor1 * factor2 * Pa * Qb * Rc_deriv * dc_dzeta;
 
     return {value, dxi, deta, dzeta};
+}
+
+TrivariateDerivatives proriol_with_second_derivatives(int p, int q, int r,
+                                                      Real xi, Real eta, Real zeta) {
+    const Real eps = std::numeric_limits<Real>::epsilon() * Real(10);
+    const Real one_minus_eta_zeta = Real(1) - eta - zeta;
+    const Real one_minus_zeta = Real(1) - zeta;
+
+    if (std::abs(one_minus_eta_zeta) <= eps || std::abs(one_minus_zeta) <= eps) {
+        const auto [value, dxi, deta, dzeta] =
+            proriol_with_derivatives(p, q, r, xi, eta, zeta);
+        TrivariateDerivatives out;
+        out.value = value;
+        out.gradient[0] = dxi;
+        out.gradient[1] = deta;
+        out.gradient[2] = dzeta;
+        return out;
+    }
+
+    const Jet3 xi_jet = detail::variable_jet(0, xi);
+    const Jet3 eta_jet = detail::variable_jet(1, eta);
+    const Jet3 zeta_jet = detail::variable_jet(2, zeta);
+    const Jet3 s1 = detail::constant_jet(Real(1)) - eta_jet - zeta_jet;
+    const Jet3 s2 = detail::constant_jet(Real(1)) - zeta_jet;
+    const Jet3 a = detail::constant_jet(Real(2)) * xi_jet / s1 - Real(1);
+    const Jet3 b = detail::constant_jet(Real(2)) * eta_jet / s2 - Real(1);
+    const Jet3 c = detail::constant_jet(Real(2)) * zeta_jet - Real(1);
+
+    const Jet3 factor1 = detail::pow_int(s1, p);
+    const Jet3 factor2 = detail::pow_int(s2, q);
+    const Jet3 pa = lift_jacobi(p, Real(0), Real(0), a);
+    const Jet3 qb = lift_jacobi(q, Real(2 * p + 1), Real(0), b);
+    const Jet3 rc = lift_jacobi(r, Real(2 * p + 2 * q + 2), Real(0), c);
+    const Jet3 psi = factor1 * factor2 * pa * qb * rc;
+
+    TrivariateDerivatives out;
+    out.value = psi.value;
+    out.gradient = psi.gradient;
+    out.hessian = psi.hessian;
+    return out;
 }
 
 } // namespace orthopoly

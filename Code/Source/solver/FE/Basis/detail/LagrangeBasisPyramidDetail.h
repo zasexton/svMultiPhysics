@@ -2,10 +2,15 @@
 // This header is only intended to be included from LagrangeBasis.cpp after
 // the FE basis type aliases are already available.
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <map>
 #include <mutex>
+#include <string>
+#include <utility>
 #include <vector>
+
 #include "Basis/BasisExceptions.h"
 #include "LagrangeBasisUtilityDetail.h"
 
@@ -23,18 +28,141 @@ public:
         int denom_power{0};
     };
 
+    struct UvPolynomial {
+        std::map<std::pair<int, int>, Real> coeffs;
+
+        void add_term(int pu, int pv, Real coeff, Real tol = Real(1e-14)) {
+            if (std::abs(coeff) <= tol) {
+                return;
+            }
+            const auto key = std::make_pair(pu, pv);
+            coeffs[key] += coeff;
+            if (std::abs(coeffs[key]) <= tol) {
+                coeffs.erase(key);
+            }
+        }
+
+        void add_scaled(const UvPolynomial& other, Real scale, Real tol = Real(1e-14)) {
+            if (std::abs(scale) <= tol) {
+                return;
+            }
+            for (const auto& [powers, coeff] : other.coeffs) {
+                add_term(powers.first, powers.second, scale * coeff, tol);
+            }
+        }
+
+        bool empty(Real tol = Real(1e-12)) const {
+            for (const auto& [powers, coeff] : coeffs) {
+                (void)powers;
+                if (std::abs(coeff) > tol) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        bool is_constant(Real tol = Real(1e-12)) const {
+            for (const auto& [powers, coeff] : coeffs) {
+                if (std::abs(coeff) <= tol) {
+                    continue;
+                }
+                if (powers.first != 0 || powers.second != 0) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        Real constant_value(Real tol = Real(1e-12)) const {
+            Real value = Real(0);
+            for (const auto& [powers, coeff] : coeffs) {
+                if (std::abs(coeff) <= tol) {
+                    continue;
+                }
+                if (powers.first == 0 && powers.second == 0) {
+                    value += coeff;
+                }
+            }
+            return value;
+        }
+    };
+
+    struct ApexSeries {
+        std::map<int, UvPolynomial> by_power;
+
+        void add_term(int beta, int pu, int pv, Real coeff, Real tol = Real(1e-14)) {
+            by_power[beta].add_term(pu, pv, coeff, tol);
+            if (by_power[beta].empty(tol)) {
+                by_power.erase(beta);
+            }
+        }
+
+        void add_scaled(const ApexSeries& other, Real scale, Real tol = Real(1e-14)) {
+            if (std::abs(scale) <= tol) {
+                return;
+            }
+            for (const auto& [beta, poly] : other.by_power) {
+                by_power[beta].add_scaled(poly, scale, tol);
+                if (by_power[beta].empty(tol)) {
+                    by_power.erase(beta);
+                }
+            }
+        }
+    };
+
+    using GradientSeries = std::array<ApexSeries, 3>;
+    using HessianSeries = std::array<std::array<ApexSeries, 3>, 3>;
+
+    enum class ApexLimitKind {
+        Constant,
+        DirectionDependent,
+        Singular,
+    };
+
+    enum class ApexRankStatus {
+        Exact,
+        DirectionDependent,
+        Singular,
+    };
+
+    struct ApexClassification {
+        ApexLimitKind kind{ApexLimitKind::Constant};
+        Real constant_value{0};
+        int leading_power{1};
+    };
+
+    struct ApexData {
+        std::vector<Real> values;
+        std::vector<Gradient> gradients;
+        std::vector<Hessian> hessians;
+        ApexRankStatus gradient_status{ApexRankStatus::Exact};
+        ApexRankStatus hessian_status{ApexRankStatus::Exact};
+    };
+
     struct OrderData {
         int order{0};
         std::vector<math::Vector<Real, 3>> nodes;
         std::vector<ModalTerm> modal_terms;
         std::vector<std::vector<Real>> modal_to_nodal;
+        ApexData apex;
     };
 
-    static math::Vector<Real, 3>
-    regularize_eval_point(const math::Vector<Real, 3>& xi) {
-        return std::abs(Real(1) - xi[2]) <= Real(1e-12)
-                   ? math::Vector<Real, 3>{Real(0), Real(0), Real(1) - Real(1e-8)}
-                   : xi;
+    static bool is_apex_point(const math::Vector<Real, 3>& xi) {
+        return std::abs(xi[0]) <= kApexCoordTolerance &&
+               std::abs(xi[1]) <= kApexCoordTolerance &&
+               std::abs(Real(1) - xi[2]) <= kApexCoordTolerance;
+    }
+
+    static bool on_degenerate_top_plane(const math::Vector<Real, 3>& xi) {
+        return std::abs(Real(1) - xi[2]) <= kApexCoordTolerance;
+    }
+
+    static void validate_top_plane_query(const math::Vector<Real, 3>& xi) {
+        if (on_degenerate_top_plane(xi) && !is_apex_point(xi)) {
+            throw BasisEvaluationException(
+                "Pyramid reference evaluation on the degenerate z=1 plane is only defined at the apex",
+                __FILE__, __LINE__, __func__);
+        }
     }
 
     static void evaluate_modal_term(const ModalTerm& term,
@@ -46,9 +174,8 @@ public:
         const Real y = xi[1];
         const Real z = xi[2];
         const Real t = Real(1) - z;
-        const Real eps = Real(1e-14);
 
-        if (std::abs(t) <= eps) {
+        if (is_apex_point(xi)) {
             if (term.px == 0 && term.py == 0) {
                 value = std::pow(z, term.pz);
             } else {
@@ -224,6 +351,8 @@ public:
             }
         }
 
+        data.apex = build_apex_data(data);
+
         const auto [it, inserted] = cache.emplace(order, std::move(data));
         (void)inserted;
         return it->second;
@@ -232,6 +361,12 @@ public:
     static void evaluate_values(const OrderData& data,
                                 const math::Vector<Real, 3>& xi,
                                 std::vector<Real>& values) {
+        validate_top_plane_query(xi);
+        if (is_apex_point(xi)) {
+            values = data.apex.values;
+            return;
+        }
+
         std::vector<Real> modal(data.modal_terms.size(), Real(0));
         for (std::size_t m = 0; m < data.modal_terms.size(); ++m) {
             evaluate_modal_term(data.modal_terms[m], xi, modal[m]);
@@ -242,11 +377,21 @@ public:
     static void evaluate_gradients(const OrderData& data,
                                    const math::Vector<Real, 3>& xi,
                                    std::vector<Gradient>& gradients) {
-        const math::Vector<Real, 3> eval_xi = regularize_eval_point(xi);
+        validate_top_plane_query(xi);
+        if (is_apex_point(xi)) {
+            if (data.apex.gradient_status != ApexRankStatus::Exact) {
+                throw BasisEvaluationException(
+                    apex_status_message("gradient", data.apex.gradient_status),
+                    __FILE__, __LINE__, __func__);
+            }
+            gradients = data.apex.gradients;
+            return;
+        }
+
         std::vector<Gradient> modal_gradients(data.modal_terms.size(), Gradient{});
         for (std::size_t m = 0; m < data.modal_terms.size(); ++m) {
             Real value = Real(0);
-            evaluate_modal_term(data.modal_terms[m], eval_xi, value, &modal_gradients[m]);
+            evaluate_modal_term(data.modal_terms[m], xi, value, &modal_gradients[m]);
         }
         apply_modal_to_nodal(data.modal_to_nodal, modal_gradients, gradients);
     }
@@ -254,16 +399,335 @@ public:
     static void evaluate_hessians(const OrderData& data,
                                   const math::Vector<Real, 3>& xi,
                                   std::vector<Hessian>& hessians) {
-        const math::Vector<Real, 3> eval_xi = regularize_eval_point(xi);
+        validate_top_plane_query(xi);
+        if (is_apex_point(xi)) {
+            if (data.apex.hessian_status != ApexRankStatus::Exact) {
+                throw BasisEvaluationException(
+                    apex_status_message("Hessian", data.apex.hessian_status),
+                    __FILE__, __LINE__, __func__);
+            }
+            hessians = data.apex.hessians;
+            return;
+        }
+
         std::vector<Hessian> modal_hessians(data.modal_terms.size(), Hessian{});
         for (std::size_t m = 0; m < data.modal_terms.size(); ++m) {
             Real value = Real(0);
-            evaluate_modal_term(data.modal_terms[m], eval_xi, value, nullptr, &modal_hessians[m]);
+            evaluate_modal_term(data.modal_terms[m], xi, value, nullptr, &modal_hessians[m]);
         }
         apply_modal_to_nodal(data.modal_to_nodal, modal_hessians, hessians);
     }
 
 private:
+    static constexpr Real kApexCoordTolerance = Real(1e-12);
+    static constexpr Real kSeriesTolerance = Real(1e-12);
+
+    static Real binomial_coeff(int n, int k) {
+        if (k < 0 || k > n) {
+            return Real(0);
+        }
+        if (k == 0 || k == n) {
+            return Real(1);
+        }
+        k = std::min(k, n - k);
+        Real coeff = Real(1);
+        for (int i = 1; i <= k; ++i) {
+            coeff *= static_cast<Real>(n - (k - i));
+            coeff /= static_cast<Real>(i);
+        }
+        return coeff;
+    }
+
+    static void add_z_expansion(ApexSeries& series,
+                                int z_power,
+                                int beta0,
+                                int pu,
+                                int pv,
+                                Real coeff) {
+        for (int q = 0; q <= z_power; ++q) {
+            const Real z_coeff = coeff * binomial_coeff(z_power, q) *
+                                 ((q % 2 == 0) ? Real(1) : Real(-1));
+            series.add_term(beta0 + q, pu, pv, z_coeff, kSeriesTolerance);
+        }
+    }
+
+    static ApexSeries modal_value_asymptotic(const ModalTerm& term) {
+        ApexSeries series;
+        add_z_expansion(series,
+                        term.pz,
+                        term.px + term.py - term.denom_power,
+                        term.px,
+                        term.py,
+                        Real(1));
+        return series;
+    }
+
+    static GradientSeries modal_gradient_asymptotic(const ModalTerm& term) {
+        GradientSeries gradient_series{};
+
+        if (term.px > 0) {
+            add_z_expansion(gradient_series[0],
+                            term.pz,
+                            term.px - 1 + term.py - term.denom_power,
+                            term.px - 1,
+                            term.py,
+                            static_cast<Real>(term.px));
+        }
+
+        if (term.py > 0) {
+            add_z_expansion(gradient_series[1],
+                            term.pz,
+                            term.px + term.py - 1 - term.denom_power,
+                            term.px,
+                            term.py - 1,
+                            static_cast<Real>(term.py));
+        }
+
+        if (term.pz > 0) {
+            add_z_expansion(gradient_series[2],
+                            term.pz - 1,
+                            term.px + term.py - term.denom_power,
+                            term.px,
+                            term.py,
+                            static_cast<Real>(term.pz));
+        }
+        if (term.denom_power > 0) {
+            add_z_expansion(gradient_series[2],
+                            term.pz,
+                            term.px + term.py - term.denom_power - 1,
+                            term.px,
+                            term.py,
+                            static_cast<Real>(term.denom_power));
+        }
+
+        return gradient_series;
+    }
+
+    static HessianSeries modal_hessian_asymptotic(const ModalTerm& term) {
+        HessianSeries hessian_series{};
+
+        if (term.px > 1) {
+            add_z_expansion(hessian_series[0][0],
+                            term.pz,
+                            term.px - 2 + term.py - term.denom_power,
+                            term.px - 2,
+                            term.py,
+                            static_cast<Real>(term.px * (term.px - 1)));
+        }
+
+        if (term.py > 1) {
+            add_z_expansion(hessian_series[1][1],
+                            term.pz,
+                            term.px + term.py - 2 - term.denom_power,
+                            term.px,
+                            term.py - 2,
+                            static_cast<Real>(term.py * (term.py - 1)));
+        }
+
+        if (term.px > 0 && term.py > 0) {
+            add_z_expansion(hessian_series[0][1],
+                            term.pz,
+                            term.px + term.py - 2 - term.denom_power,
+                            term.px - 1,
+                            term.py - 1,
+                            static_cast<Real>(term.px * term.py));
+            hessian_series[1][0] = hessian_series[0][1];
+        }
+
+        if (term.px > 0 && term.pz > 0) {
+            add_z_expansion(hessian_series[0][2],
+                            term.pz - 1,
+                            term.px - 1 + term.py - term.denom_power,
+                            term.px - 1,
+                            term.py,
+                            static_cast<Real>(term.px * term.pz));
+        }
+        if (term.px > 0 && term.denom_power > 0) {
+            add_z_expansion(hessian_series[0][2],
+                            term.pz,
+                            term.px - 1 + term.py - term.denom_power - 1,
+                            term.px - 1,
+                            term.py,
+                            static_cast<Real>(term.px * term.denom_power));
+        }
+        hessian_series[2][0] = hessian_series[0][2];
+
+        if (term.py > 0 && term.pz > 0) {
+            add_z_expansion(hessian_series[1][2],
+                            term.pz - 1,
+                            term.px + term.py - 1 - term.denom_power,
+                            term.px,
+                            term.py - 1,
+                            static_cast<Real>(term.py * term.pz));
+        }
+        if (term.py > 0 && term.denom_power > 0) {
+            add_z_expansion(hessian_series[1][2],
+                            term.pz,
+                            term.px + term.py - 1 - term.denom_power - 1,
+                            term.px,
+                            term.py - 1,
+                            static_cast<Real>(term.py * term.denom_power));
+        }
+        hessian_series[2][1] = hessian_series[1][2];
+
+        if (term.pz > 1) {
+            add_z_expansion(hessian_series[2][2],
+                            term.pz - 2,
+                            term.px + term.py - term.denom_power,
+                            term.px,
+                            term.py,
+                            static_cast<Real>(term.pz * (term.pz - 1)));
+        }
+        if (term.pz > 0 && term.denom_power > 0) {
+            add_z_expansion(hessian_series[2][2],
+                            term.pz - 1,
+                            term.px + term.py - term.denom_power - 1,
+                            term.px,
+                            term.py,
+                            static_cast<Real>(2 * term.pz * term.denom_power));
+        }
+        if (term.denom_power > 0) {
+            add_z_expansion(hessian_series[2][2],
+                            term.pz,
+                            term.px + term.py - term.denom_power - 2,
+                            term.px,
+                            term.py,
+                            static_cast<Real>(term.denom_power * (term.denom_power + 1)));
+        }
+
+        return hessian_series;
+    }
+
+    static ApexClassification classify_series(const ApexSeries& series) {
+        for (const auto& [beta, poly] : series.by_power) {
+            if (poly.empty(kSeriesTolerance)) {
+                continue;
+            }
+            if (beta < 0) {
+                return {ApexLimitKind::Singular, Real(0), beta};
+            }
+            if (beta > 0) {
+                return {ApexLimitKind::Constant, Real(0), beta};
+            }
+            if (poly.is_constant(kSeriesTolerance)) {
+                return {ApexLimitKind::Constant, poly.constant_value(kSeriesTolerance), beta};
+            }
+            return {ApexLimitKind::DirectionDependent, Real(0), beta};
+        }
+        return {ApexLimitKind::Constant, Real(0), 1};
+    }
+
+    static void accumulate_rank_status(ApexRankStatus& status,
+                                       const ApexClassification& classification) {
+        if (classification.kind == ApexLimitKind::Singular) {
+            status = ApexRankStatus::Singular;
+            return;
+        }
+        if (classification.kind == ApexLimitKind::DirectionDependent &&
+            status != ApexRankStatus::Singular) {
+            status = ApexRankStatus::DirectionDependent;
+        }
+    }
+
+    static std::string apex_status_message(const char* rank,
+                                           ApexRankStatus status) {
+        switch (status) {
+            case ApexRankStatus::DirectionDependent:
+                return std::string("Pyramid rational nodal ") + rank +
+                       " at the exact apex is not uniquely defined under admissible interior approaches";
+            case ApexRankStatus::Singular:
+                return std::string("Pyramid rational nodal ") + rank +
+                       " at the exact apex is singular for this basis family";
+            case ApexRankStatus::Exact:
+                return std::string("Pyramid rational nodal ") + rank +
+                       " apex evaluation unexpectedly reported non-exact status";
+        }
+        return std::string("Pyramid rational nodal ") + rank +
+               " apex evaluation is not available";
+    }
+
+    static ApexData build_apex_data(const OrderData& data) {
+        const std::size_t n = data.modal_terms.size();
+
+        std::vector<ApexSeries> modal_values(n);
+        std::vector<GradientSeries> modal_gradients(n);
+        std::vector<HessianSeries> modal_hessians(n);
+        for (std::size_t m = 0; m < n; ++m) {
+            modal_values[m] = modal_value_asymptotic(data.modal_terms[m]);
+            modal_gradients[m] = modal_gradient_asymptotic(data.modal_terms[m]);
+            modal_hessians[m] = modal_hessian_asymptotic(data.modal_terms[m]);
+        }
+
+        std::vector<ApexSeries> nodal_values(n);
+        std::vector<GradientSeries> nodal_gradients(n);
+        std::vector<HessianSeries> nodal_hessians(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t m = 0; m < n; ++m) {
+                const Real coeff = data.modal_to_nodal[i][m];
+                nodal_values[i].add_scaled(modal_values[m], coeff, kSeriesTolerance);
+                for (int d = 0; d < 3; ++d) {
+                    nodal_gradients[i][static_cast<std::size_t>(d)].add_scaled(
+                        modal_gradients[m][static_cast<std::size_t>(d)], coeff, kSeriesTolerance);
+                }
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        nodal_hessians[i][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)]
+                            .add_scaled(
+                                modal_hessians[m][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)],
+                                coeff,
+                                kSeriesTolerance);
+                    }
+                }
+            }
+        }
+
+        ApexData apex;
+        apex.values.assign(n, Real(0));
+        apex.gradients.assign(n, Gradient{});
+        apex.hessians.assign(n, Hessian{});
+
+        for (std::size_t i = 0; i < n; ++i) {
+            const ApexClassification value_class = classify_series(nodal_values[i]);
+            if (value_class.kind != ApexLimitKind::Constant) {
+                throw BasisConstructionException(
+                    "Pyramid nodal value at apex is not uniquely defined for basis index " +
+                    std::to_string(i),
+                    __FILE__, __LINE__, __func__);
+            }
+            apex.values[i] = value_class.constant_value;
+
+            for (int d = 0; d < 3; ++d) {
+                const ApexClassification grad_class = classify_series(
+                    nodal_gradients[i][static_cast<std::size_t>(d)]);
+                accumulate_rank_status(apex.gradient_status, grad_class);
+                if (grad_class.kind == ApexLimitKind::Constant) {
+                    apex.gradients[i][static_cast<std::size_t>(d)] = grad_class.constant_value;
+                }
+            }
+
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    const ApexClassification hess_class = classify_series(
+                        nodal_hessians[i][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)]);
+                    accumulate_rank_status(apex.hessian_status, hess_class);
+                    if (hess_class.kind == ApexLimitKind::Constant) {
+                        apex.hessians[i](static_cast<std::size_t>(r),
+                                         static_cast<std::size_t>(c)) = hess_class.constant_value;
+                    }
+                }
+            }
+        }
+
+        if (apex.gradient_status != ApexRankStatus::Exact) {
+            apex.gradients.clear();
+        }
+        if (apex.hessian_status != ApexRankStatus::Exact) {
+            apex.hessians.clear();
+        }
+
+        return apex;
+    }
+
     static std::vector<math::Vector<Real, 3>> build_public_nodes(int order) {
         if (order == 0) {
             return {math::Vector<Real, 3>{Real(0), Real(0), Real(0.25)}};

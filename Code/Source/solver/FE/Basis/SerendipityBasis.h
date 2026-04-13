@@ -11,6 +11,11 @@
 /**
  * @file SerendipityBasis.h
  * @brief Reduced-degree-of-freedom serendipity bases
+ *
+ * `Pyramid13` inherits its apex contract from the complete-family rational
+ * pyramid basis: values remain exact at the apex, while exact-apex gradient
+ * and Hessian queries throw because the inherited nodal derivative limit is
+ * not unique.
  */
 
 #include "BasisFunction.h"
@@ -37,6 +42,9 @@ public:
 
     void evaluate_gradients(const math::Vector<Real, 3>& xi,
                             std::vector<Gradient>& gradients) const override;
+
+    void evaluate_hessians(const math::Vector<Real, 3>& xi,
+                           std::vector<Hessian>& hessians) const override;
 
 private:
     ElementType element_type_;

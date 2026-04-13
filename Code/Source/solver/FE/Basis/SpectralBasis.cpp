@@ -9,6 +9,7 @@
 #include "NodeOrderingConventions.h"
 #include "OrthogonalPolynomials.h"
 #include "Quadrature/GaussLobattoQuadrature.h"
+#include "detail/ReferenceDerivativeJet.h"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -97,7 +98,7 @@ template<typename ModalTerm>
 void evaluate_pyramid_modal_term(const ModalTerm& term,
                                  const math::Vector<Real, 3>& xi,
                                  Real& value,
-                                 Gradient* gradient = nullptr) {
+                                  Gradient* gradient = nullptr) {
     const Real x = xi[0];
     const Real y = xi[1];
     const Real z = xi[2];
@@ -151,6 +152,42 @@ void evaluate_pyramid_modal_term(const ModalTerm& term,
             gz += static_cast<Real>(term.denom_power) * base / (denom * t);
         }
         (*gradient)[2] = gz;
+    }
+}
+
+template<typename ModalTerm>
+void evaluate_pyramid_modal_term_with_hessian(const ModalTerm& term,
+                                              const math::Vector<Real, 3>& xi,
+                                              Real& value,
+                                              Gradient* gradient,
+                                              Hessian* hessian) {
+    const Real t = Real(1) - xi[2];
+    const Real eps = Real(1e-14);
+    if (std::abs(t) <= eps) {
+        evaluate_pyramid_modal_term(term, xi, value, gradient);
+        if (hessian != nullptr) {
+            *hessian = Hessian{};
+        }
+        return;
+    }
+
+    const auto x = detail::variable_jet(0, xi[0]);
+    const auto y = detail::variable_jet(1, xi[1]);
+    const auto z = detail::variable_jet(2, xi[2]);
+    const auto one_minus_z = detail::constant_jet(Real(1)) - z;
+    auto jet = detail::pow_int(x, term.px) *
+               detail::pow_int(y, term.py) *
+               detail::pow_int(z, term.pz);
+    if (term.denom_power > 0) {
+        jet = jet / detail::pow_int(one_minus_z, term.denom_power);
+    }
+
+    value = jet.value;
+    if (gradient != nullptr) {
+        *gradient = jet.gradient;
+    }
+    if (hessian != nullptr) {
+        *hessian = jet.hessian;
     }
 }
 
@@ -339,6 +376,35 @@ std::vector<Real> SpectralBasis::eval_1d_derivative(Real x) const {
         ders[i] = sum;
     }
     return ders;
+}
+
+std::vector<Real> SpectralBasis::eval_1d_second_derivative(Real x) const {
+    std::vector<Real> second(nodes_1d_.size(), Real(0));
+    const std::size_t n = nodes_1d_.size();
+    for (std::size_t i = 0; i < n; ++i) {
+        Real sum = Real(0);
+        for (std::size_t m = 0; m < n; ++m) {
+            if (m == i) {
+                continue;
+            }
+            for (std::size_t l = 0; l < n; ++l) {
+                if (l == i || l == m) {
+                    continue;
+                }
+                Real prod = Real(1);
+                for (std::size_t j = 0; j < n; ++j) {
+                    if (j == i || j == m || j == l) {
+                        continue;
+                    }
+                    prod *= (x - nodes_1d_[j]) / (nodes_1d_[i] - nodes_1d_[j]);
+                }
+                prod /= (nodes_1d_[i] - nodes_1d_[m]) * (nodes_1d_[i] - nodes_1d_[l]);
+                sum += prod;
+            }
+        }
+        second[i] = sum;
+    }
+    return second;
 }
 
 // -----------------------------------------------------------------------
@@ -998,6 +1064,177 @@ void SpectralBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
             }
         }
         gradients[i] = g;
+    }
+}
+
+void SpectralBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
+                                      std::vector<Hessian>& hessians) const {
+    if (is_wedge_tensor_product_) {
+        std::vector<Real> face_values;
+        std::vector<Gradient> face_gradients;
+        std::vector<Hessian> face_hessians;
+        std::vector<Real> axis_values;
+        std::vector<Gradient> axis_gradients;
+        std::vector<Hessian> axis_hessians;
+        face_basis_->evaluate_values({xi[0], xi[1], Real(0)}, face_values);
+        face_basis_->evaluate_gradients({xi[0], xi[1], Real(0)}, face_gradients);
+        face_basis_->evaluate_hessians({xi[0], xi[1], Real(0)}, face_hessians);
+        axis_basis_->evaluate_values({xi[2], Real(0), Real(0)}, axis_values);
+        axis_basis_->evaluate_gradients({xi[2], Real(0), Real(0)}, axis_gradients);
+        axis_basis_->evaluate_hessians({xi[2], Real(0), Real(0)}, axis_hessians);
+
+        hessians.assign(size_, Hessian{});
+        std::size_t idx = 0;
+        for (std::size_t k = 0; k < axis_values.size(); ++k) {
+            for (std::size_t j = 0; j < face_values.size(); ++j) {
+                Hessian H{};
+                H(0, 0) = face_hessians[j](0, 0) * axis_values[k];
+                H(0, 1) = face_hessians[j](0, 1) * axis_values[k];
+                H(1, 0) = H(0, 1);
+                H(1, 1) = face_hessians[j](1, 1) * axis_values[k];
+                H(0, 2) = face_gradients[j][0] * axis_gradients[k][0];
+                H(2, 0) = H(0, 2);
+                H(1, 2) = face_gradients[j][1] * axis_gradients[k][0];
+                H(2, 1) = H(1, 2);
+                H(2, 2) = face_values[j] * axis_hessians[k](0, 0);
+                hessians[idx++] = H;
+            }
+        }
+        return;
+    }
+
+    if (is_pyramid_modal_) {
+        hessians.assign(size_, Hessian{});
+        std::vector<Hessian> modal_hessians(size_);
+        for (std::size_t i = 0; i < size_; ++i) {
+            Real value = Real(0);
+            Gradient grad{};
+            evaluate_pyramid_modal_term_with_hessian(
+                pyramid_modal_terms_[i], xi, value, &grad, &modal_hessians[i]);
+        }
+
+        for (std::size_t i = 0; i < size_; ++i) {
+            Hessian H{};
+            for (std::size_t j = 0; j < size_; ++j) {
+                const Real coeff = inv_vandermonde_[j * size_ + i];
+                for (int a = 0; a < 3; ++a) {
+                    for (int b = 0; b < 3; ++b) {
+                        const std::size_t sa = static_cast<std::size_t>(a);
+                        const std::size_t sb = static_cast<std::size_t>(b);
+                        H(sa, sb) += coeff * modal_hessians[j](sa, sb);
+                    }
+                }
+            }
+            hessians[i] = H;
+        }
+        return;
+    }
+
+    if (!is_simplex_) {
+        hessians.assign(size_, Hessian{});
+
+        if (dimension_ == 1) {
+            const auto second = eval_1d_second_derivative(xi[0]);
+            for (std::size_t i = 0; i < second.size(); ++i) {
+                hessians[i](0, 0) = second[i];
+            }
+            return;
+        }
+
+        if (dimension_ == 2) {
+            const auto lx = eval_1d(xi[0]);
+            const auto ly = eval_1d(xi[1]);
+            const auto dx = eval_1d_derivative(xi[0]);
+            const auto dy = eval_1d_derivative(xi[1]);
+            const auto ddx = eval_1d_second_derivative(xi[0]);
+            const auto ddy = eval_1d_second_derivative(xi[1]);
+            std::size_t idx = 0;
+            for (std::size_t j = 0; j < ly.size(); ++j) {
+                for (std::size_t i = 0; i < lx.size(); ++i) {
+                    Hessian H{};
+                    H(0, 0) = ddx[i] * ly[j];
+                    H(1, 1) = lx[i] * ddy[j];
+                    H(0, 1) = dx[i] * dy[j];
+                    H(1, 0) = H(0, 1);
+                    hessians[idx++] = H;
+                }
+            }
+            return;
+        }
+
+        const auto lx = eval_1d(xi[0]);
+        const auto ly = eval_1d(xi[1]);
+        const auto lz = eval_1d(xi[2]);
+        const auto dx = eval_1d_derivative(xi[0]);
+        const auto dy = eval_1d_derivative(xi[1]);
+        const auto dz = eval_1d_derivative(xi[2]);
+        const auto ddx = eval_1d_second_derivative(xi[0]);
+        const auto ddy = eval_1d_second_derivative(xi[1]);
+        const auto ddz = eval_1d_second_derivative(xi[2]);
+        std::size_t idx = 0;
+        for (std::size_t k = 0; k < lz.size(); ++k) {
+            for (std::size_t j = 0; j < ly.size(); ++j) {
+                for (std::size_t i = 0; i < lx.size(); ++i) {
+                    Hessian H{};
+                    H(0, 0) = ddx[i] * ly[j] * lz[k];
+                    H(1, 1) = lx[i] * ddy[j] * lz[k];
+                    H(2, 2) = lx[i] * ly[j] * ddz[k];
+                    H(0, 1) = dx[i] * dy[j] * lz[k];
+                    H(1, 0) = H(0, 1);
+                    H(0, 2) = dx[i] * ly[j] * dz[k];
+                    H(2, 0) = H(0, 2);
+                    H(1, 2) = lx[i] * dy[j] * dz[k];
+                    H(2, 1) = H(1, 2);
+                    hessians[idx++] = H;
+                }
+            }
+        }
+        return;
+    }
+
+    hessians.assign(size_, Hessian{});
+    const std::size_t n = size_;
+    std::vector<Hessian> modal_hessians(n);
+    if (dimension_ == 2) {
+        std::size_t idx = 0;
+        for (int total = 0; total <= order_; ++total) {
+            for (int p = 0; p <= total; ++p) {
+                const int q = total - p;
+                const auto modal = orthopoly::dubiner_with_second_derivatives(p, q, xi[0], xi[1]);
+                Hessian H{};
+                H(0, 0) = modal.dxx;
+                H(0, 1) = modal.dxy;
+                H(1, 0) = modal.dxy;
+                H(1, 1) = modal.dyy;
+                modal_hessians[idx++] = H;
+            }
+        }
+    } else {
+        std::size_t idx = 0;
+        for (int total = 0; total <= order_; ++total) {
+            for (int p = 0; p <= total; ++p) {
+                for (int q = 0; q <= total - p; ++q) {
+                    const int r = total - p - q;
+                    modal_hessians[idx++] =
+                        orthopoly::proriol_with_second_derivatives(p, q, r, xi[0], xi[1], xi[2]).hessian;
+                }
+            }
+        }
+    }
+
+    for (std::size_t i = 0; i < n; ++i) {
+        Hessian H{};
+        for (std::size_t j = 0; j < n; ++j) {
+            const Real coeff = inv_vandermonde_[j * n + i];
+            for (int a = 0; a < dimension_; ++a) {
+                for (int b = 0; b < dimension_; ++b) {
+                    const std::size_t sa = static_cast<std::size_t>(a);
+                    const std::size_t sb = static_cast<std::size_t>(b);
+                    H(sa, sb) += coeff * modal_hessians[j](sa, sb);
+                }
+            }
+        }
+        hessians[i] = H;
     }
 }
 

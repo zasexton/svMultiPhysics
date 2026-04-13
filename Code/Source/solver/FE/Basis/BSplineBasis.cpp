@@ -82,6 +82,101 @@ void basis_funs(const std::vector<Real>& knots,
     }
 }
 
+void basis_funs_and_derivatives(const std::vector<Real>& knots,
+                                int degree,
+                                int span,
+                                Real u,
+                                int max_derivative,
+                                std::vector<std::vector<Real>>& ders) {
+    const int p = degree;
+    const int ndu_size = p + 1;
+    std::vector<std::vector<Real>> ndu(static_cast<std::size_t>(ndu_size),
+                                       std::vector<Real>(static_cast<std::size_t>(ndu_size), Real(0)));
+    std::vector<Real> left(static_cast<std::size_t>(ndu_size), Real(0));
+    std::vector<Real> right(static_cast<std::size_t>(ndu_size), Real(0));
+
+    ndu[0][0] = Real(1);
+    for (int j = 1; j <= p; ++j) {
+        left[static_cast<std::size_t>(j)] =
+            u - knots[static_cast<std::size_t>(span + 1 - j)];
+        right[static_cast<std::size_t>(j)] =
+            knots[static_cast<std::size_t>(span + j)] - u;
+
+        Real saved = Real(0);
+        for (int r = 0; r < j; ++r) {
+            ndu[static_cast<std::size_t>(j)][static_cast<std::size_t>(r)] =
+                right[static_cast<std::size_t>(r) + 1] + left[static_cast<std::size_t>(j - r)];
+            const Real temp =
+                (std::abs(ndu[static_cast<std::size_t>(j)][static_cast<std::size_t>(r)]) > Real(0))
+                    ? ndu[static_cast<std::size_t>(r)][static_cast<std::size_t>(j - 1)] /
+                          ndu[static_cast<std::size_t>(j)][static_cast<std::size_t>(r)]
+                    : Real(0);
+            ndu[static_cast<std::size_t>(r)][static_cast<std::size_t>(j)] =
+                saved + right[static_cast<std::size_t>(r) + 1] * temp;
+            saved = left[static_cast<std::size_t>(j - r)] * temp;
+        }
+        ndu[static_cast<std::size_t>(j)][static_cast<std::size_t>(j)] = saved;
+    }
+
+    ders.assign(static_cast<std::size_t>(max_derivative + 1),
+                std::vector<Real>(static_cast<std::size_t>(ndu_size), Real(0)));
+    for (int j = 0; j <= p; ++j) {
+        ders[0][static_cast<std::size_t>(j)] = ndu[static_cast<std::size_t>(j)][static_cast<std::size_t>(p)];
+    }
+
+    std::vector<std::vector<Real>> a(2u, std::vector<Real>(static_cast<std::size_t>(ndu_size), Real(0)));
+    for (int r = 0; r <= p; ++r) {
+        int s1 = 0;
+        int s2 = 1;
+        a[0][0] = Real(1);
+
+        for (int k = 1; k <= max_derivative; ++k) {
+            Real d = Real(0);
+            const int rk = r - k;
+            const int pk = p - k;
+
+            if (r >= k) {
+                a[static_cast<std::size_t>(s2)][0] =
+                    a[static_cast<std::size_t>(s1)][0] /
+                    ndu[static_cast<std::size_t>(pk + 1)][static_cast<std::size_t>(rk)];
+                d = a[static_cast<std::size_t>(s2)][0] *
+                    ndu[static_cast<std::size_t>(rk)][static_cast<std::size_t>(pk)];
+            }
+
+            int j1 = (rk >= -1) ? 1 : -rk;
+            int j2 = (r - 1 <= pk) ? k - 1 : p - r;
+
+            for (int j = j1; j <= j2; ++j) {
+                a[static_cast<std::size_t>(s2)][static_cast<std::size_t>(j)] =
+                    (a[static_cast<std::size_t>(s1)][static_cast<std::size_t>(j)] -
+                     a[static_cast<std::size_t>(s1)][static_cast<std::size_t>(j - 1)]) /
+                    ndu[static_cast<std::size_t>(pk + 1)][static_cast<std::size_t>(rk + j)];
+                d += a[static_cast<std::size_t>(s2)][static_cast<std::size_t>(j)] *
+                     ndu[static_cast<std::size_t>(rk + j)][static_cast<std::size_t>(pk)];
+            }
+
+            if (r <= pk) {
+                a[static_cast<std::size_t>(s2)][static_cast<std::size_t>(k)] =
+                    -a[static_cast<std::size_t>(s1)][static_cast<std::size_t>(k - 1)] /
+                    ndu[static_cast<std::size_t>(pk + 1)][static_cast<std::size_t>(r)];
+                d += a[static_cast<std::size_t>(s2)][static_cast<std::size_t>(k)] *
+                     ndu[static_cast<std::size_t>(r)][static_cast<std::size_t>(pk)];
+            }
+
+            ders[static_cast<std::size_t>(k)][static_cast<std::size_t>(r)] = d;
+            std::swap(s1, s2);
+        }
+    }
+
+    int scale = p;
+    for (int k = 1; k <= max_derivative; ++k) {
+        for (int j = 0; j <= p; ++j) {
+            ders[static_cast<std::size_t>(k)][static_cast<std::size_t>(j)] *= Real(scale);
+        }
+        scale *= (p - k);
+    }
+}
+
 } // namespace
 
 BSplineBasis::BSplineBasis(int degree, std::vector<Real> knots)
@@ -255,6 +350,71 @@ void BSplineBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
                 gradients[i][0] = (dNw * W - Nw * dW) * inv_W2;
             }
         }
+    }
+}
+
+void BSplineBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
+                                     std::vector<Hessian>& hessians) const {
+    hessians.assign(num_basis_, Hessian{});
+    if (num_basis_ == 0 || degree_ == 0) {
+        return;
+    }
+
+    const Real xi0 = std::clamp(xi[0], Real(-1), Real(1));
+    const Real du_dxi = (u_max_ - u_min_) * Real(0.5);
+    const Real du_dxi_sq = du_dxi * du_dxi;
+    const Real u = u_min_ + (xi0 + Real(1)) * Real(0.5) * (u_max_ - u_min_);
+
+    const int span = find_span_index(knots_, degree_, num_basis_, u);
+    std::vector<std::vector<Real>> ders;
+    basis_funs_and_derivatives(knots_, degree_, span, u, 2, ders);
+
+    std::vector<Real> values(num_basis_, Real(0));
+    std::vector<Real> first(num_basis_, Real(0));
+    std::vector<Real> second(num_basis_, Real(0));
+    const int p = degree_;
+    const int first_index = span - p;
+    for (int r = 0; r <= p; ++r) {
+        const int i = first_index + r;
+        if (i < 0 || i >= static_cast<int>(num_basis_)) {
+            continue;
+        }
+        const std::size_t si = static_cast<std::size_t>(i);
+        values[si] = ders[0][static_cast<std::size_t>(r)];
+        first[si] = ders[1][static_cast<std::size_t>(r)] * du_dxi;
+        second[si] = ders[2][static_cast<std::size_t>(r)] * du_dxi_sq;
+    }
+
+    if (weights_.empty()) {
+        for (std::size_t i = 0; i < num_basis_; ++i) {
+            hessians[i](0, 0) = second[i];
+        }
+        return;
+    }
+
+    Real W = Real(0);
+    Real dW = Real(0);
+    Real ddW = Real(0);
+    for (std::size_t i = 0; i < num_basis_; ++i) {
+        const Real wi = weights_[i];
+        W += values[i] * wi;
+        dW += first[i] * wi;
+        ddW += second[i] * wi;
+    }
+
+    if (std::abs(W) <= Real(0)) {
+        return;
+    }
+
+    const Real inv_W3 = Real(1) / (W * W * W);
+    for (std::size_t i = 0; i < num_basis_; ++i) {
+        const Real wi = weights_[i];
+        const Real A = values[i] * wi;
+        const Real dA = first[i] * wi;
+        const Real ddA = second[i] * wi;
+        hessians[i](0, 0) =
+            (ddA * W * W - A * ddW * W - Real(2) * dA * W * dW + Real(2) * A * dW * dW) *
+            inv_W3;
     }
 }
 

@@ -116,20 +116,29 @@ std::string NURBSTensorBasis::cache_identity() const {
 
 void NURBSTensorBasis::evaluate_nonrational(const math::Vector<Real, 3>& xi,
                                             std::vector<Real>& values,
-                                            std::vector<Gradient>* gradients) const {
+                                            std::vector<Gradient>* gradients,
+                                            std::vector<Hessian>* hessians) const {
     values.assign(size_, Real(0));
     if (gradients != nullptr) {
         gradients->assign(size_, Gradient{});
     }
+    if (hessians != nullptr) {
+        hessians->assign(size_, Hessian{});
+    }
 
     std::vector<std::vector<Real>> axis_values(static_cast<std::size_t>(dimension_));
     std::vector<std::vector<Gradient>> axis_gradients(static_cast<std::size_t>(dimension_));
+    std::vector<std::vector<Hessian>> axis_hessians(static_cast<std::size_t>(dimension_));
     for (int axis = 0; axis < dimension_; ++axis) {
         axes_[static_cast<std::size_t>(axis)].evaluate_values(axis_coordinate(xi, axis),
                                                               axis_values[static_cast<std::size_t>(axis)]);
-        if (gradients != nullptr) {
+        if (gradients != nullptr || hessians != nullptr) {
             axes_[static_cast<std::size_t>(axis)].evaluate_gradients(axis_coordinate(xi, axis),
                                                                      axis_gradients[static_cast<std::size_t>(axis)]);
+        }
+        if (hessians != nullptr) {
+            axes_[static_cast<std::size_t>(axis)].evaluate_hessians(axis_coordinate(xi, axis),
+                                                                    axis_hessians[static_cast<std::size_t>(axis)]);
         }
     }
 
@@ -143,6 +152,13 @@ void NURBSTensorBasis::evaluate_nonrational(const math::Vector<Real, 3>& xi,
                 if (gradients != nullptr) {
                     (*gradients)[idx][0] = axis_gradients[0][i][0] * axis_values[1][j];
                     (*gradients)[idx][1] = axis_values[0][i] * axis_gradients[1][j][0];
+                }
+                if (hessians != nullptr) {
+                    (*hessians)[idx](0, 0) = axis_hessians[0][i](0, 0) * axis_values[1][j];
+                    (*hessians)[idx](1, 1) = axis_values[0][i] * axis_hessians[1][j](0, 0);
+                    const Real cross = axis_gradients[0][i][0] * axis_gradients[1][j][0];
+                    (*hessians)[idx](0, 1) = cross;
+                    (*hessians)[idx](1, 0) = cross;
                 }
             }
         }
@@ -165,6 +181,26 @@ void NURBSTensorBasis::evaluate_nonrational(const math::Vector<Real, 3>& xi,
                     (*gradients)[idx][2] =
                         axis_values[0][i] * axis_values[1][j] * axis_gradients[2][k][0];
                 }
+                if (hessians != nullptr) {
+                    (*hessians)[idx](0, 0) =
+                        axis_hessians[0][i](0, 0) * axis_values[1][j] * axis_values[2][k];
+                    (*hessians)[idx](1, 1) =
+                        axis_values[0][i] * axis_hessians[1][j](0, 0) * axis_values[2][k];
+                    (*hessians)[idx](2, 2) =
+                        axis_values[0][i] * axis_values[1][j] * axis_hessians[2][k](0, 0);
+                    const Real dxy =
+                        axis_gradients[0][i][0] * axis_gradients[1][j][0] * axis_values[2][k];
+                    const Real dxz =
+                        axis_gradients[0][i][0] * axis_values[1][j] * axis_gradients[2][k][0];
+                    const Real dyz =
+                        axis_values[0][i] * axis_gradients[1][j][0] * axis_gradients[2][k][0];
+                    (*hessians)[idx](0, 1) = dxy;
+                    (*hessians)[idx](1, 0) = dxy;
+                    (*hessians)[idx](0, 2) = dxz;
+                    (*hessians)[idx](2, 0) = dxz;
+                    (*hessians)[idx](1, 2) = dyz;
+                    (*hessians)[idx](2, 1) = dyz;
+                }
             }
         }
     }
@@ -173,7 +209,7 @@ void NURBSTensorBasis::evaluate_nonrational(const math::Vector<Real, 3>& xi,
 void NURBSTensorBasis::evaluate_values(const math::Vector<Real, 3>& xi,
                                        std::vector<Real>& values) const {
     std::vector<Real> nonrational;
-    evaluate_nonrational(xi, nonrational, nullptr);
+    evaluate_nonrational(xi, nonrational, nullptr, nullptr);
 
     Real denom = Real(0);
     values.assign(size_, Real(0));
@@ -198,7 +234,7 @@ void NURBSTensorBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
                                           std::vector<Gradient>& gradients) const {
     std::vector<Real> nonrational;
     std::vector<Gradient> nonrational_gradients;
-    evaluate_nonrational(xi, nonrational, &nonrational_gradients);
+    evaluate_nonrational(xi, nonrational, &nonrational_gradients, nullptr);
 
     Real denom = Real(0);
     Gradient denom_gradient{};
@@ -225,6 +261,61 @@ void NURBSTensorBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
             const Real weighted_grad = nonrational_gradients[i][sd] * weights_[i];
             gradients[i][sd] =
                 (weighted_grad * denom - weighted_value * denom_gradient[sd]) * inv_denom_sq;
+        }
+    }
+}
+
+void NURBSTensorBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
+                                         std::vector<Hessian>& hessians) const {
+    std::vector<Real> nonrational;
+    std::vector<Gradient> nonrational_gradients;
+    std::vector<Hessian> nonrational_hessians;
+    evaluate_nonrational(xi, nonrational, &nonrational_gradients, &nonrational_hessians);
+
+    Real denom = Real(0);
+    Gradient denom_gradient{};
+    Hessian denom_hessian{};
+    for (std::size_t i = 0; i < size_; ++i) {
+        const Real weight = weights_[i];
+        denom += nonrational[i] * weight;
+        for (int a = 0; a < dimension_; ++a) {
+            const std::size_t sa = static_cast<std::size_t>(a);
+            denom_gradient[sa] += nonrational_gradients[i][sa] * weight;
+            for (int b = 0; b < dimension_; ++b) {
+                const std::size_t sb = static_cast<std::size_t>(b);
+                denom_hessian(sa, sb) += nonrational_hessians[i](sa, sb) * weight;
+            }
+        }
+    }
+
+    const Real eps = std::numeric_limits<Real>::epsilon() * Real(64);
+    if (std::abs(denom) <= eps) {
+        throw BasisEvaluationException("NURBSTensorBasis: rational denominator is zero",
+                                       __FILE__, __LINE__, __func__);
+    }
+
+    hessians.assign(size_, Hessian{});
+    const Real inv_denom = Real(1) / denom;
+    const Real inv_denom_sq = inv_denom * inv_denom;
+    const Real inv_denom_cu = inv_denom_sq * inv_denom;
+    for (std::size_t i = 0; i < size_; ++i) {
+        const Real weight = weights_[i];
+        const Real A = nonrational[i] * weight;
+        for (int a = 0; a < dimension_; ++a) {
+            const std::size_t sa = static_cast<std::size_t>(a);
+            const Real dA_a = nonrational_gradients[i][sa] * weight;
+            for (int b = 0; b < dimension_; ++b) {
+                const std::size_t sb = static_cast<std::size_t>(b);
+                const Real dA_b = nonrational_gradients[i][sb] * weight;
+                const Real ddA = nonrational_hessians[i](sa, sb) * weight;
+                hessians[i](sa, sb) =
+                    (ddA * denom * denom
+                     - A * denom_hessian(sa, sb) * denom
+                     - dA_a * denom * denom_gradient[sb]
+                     - dA_b * denom * denom_gradient[sa]
+                     + Real(2) * A * denom_gradient[sa] * denom_gradient[sb]) *
+                    inv_denom_cu;
+            }
         }
     }
 }

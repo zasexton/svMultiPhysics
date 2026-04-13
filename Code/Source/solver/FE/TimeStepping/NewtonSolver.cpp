@@ -122,6 +122,103 @@ void traceLog(const std::string& msg)
     return *env == '0';
 }
 
+[[nodiscard]] std::optional<double> explicitRankOneAfterRelativeResidualThreshold() noexcept
+{
+    const char* env = std::getenv("SVMP_FORCE_EXPLICIT_RANK_ONE_AFTER_REL_RES");
+    if (env == nullptr) {
+        return std::nullopt;
+    }
+
+    char* end = nullptr;
+    const double value = std::strtod(env, &end);
+    if (end == env || !std::isfinite(value) || value <= 0.0) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+[[nodiscard]] bool firstDirectOnlyReducedLineSearchEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_NEWTON_LINE_SEARCH_FIRST_DIRECT_ONLY_REDUCED");
+    if (env == nullptr) {
+        return false;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    return *env != '\0' && *env != '0';
+}
+
+[[nodiscard]] std::optional<double> lateDirectOnlyReducedTighteningThreshold() noexcept
+{
+    const char* env = std::getenv("SVMP_FSILS_TIGHTEN_DIRECT_ONLY_AFTER_REL_RES");
+    if (env == nullptr) {
+        return std::nullopt;
+    }
+
+    char* end = nullptr;
+    const double value = std::strtod(env, &end);
+    if (end == env || !std::isfinite(value) || value <= 0.0) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+[[nodiscard]] Real directOnlyOutletJacobianScale(const std::size_t update_count) noexcept
+{
+    const char* env = std::getenv("SVMP_DIRECT_ONLY_OUTLET_JACOBIAN_SCALE");
+    if (env != nullptr) {
+        char* end = nullptr;
+        const double value = std::strtod(env, &end);
+        if (end != env && std::isfinite(value) && value > 0.0) {
+            return static_cast<Real>(value);
+        }
+    }
+
+    if (update_count <= 1u) {
+        return static_cast<Real>(1.0);
+    }
+    // With boundary AuxiliaryInputRef kernels forced onto the interpreter path,
+    // the direct-only outlet updates recover full-Newton behavior in both serial
+    // and MPI, so do not damp the built-in Jacobian by default.
+    return static_cast<Real>(1.0);
+}
+
+[[nodiscard]] int directOnlyOutletJacobianRebuildPeriod(const std::size_t update_count) noexcept
+{
+    const char* env = std::getenv("SVMP_DIRECT_ONLY_OUTLET_JACOBIAN_REBUILD_PERIOD");
+    if (env != nullptr) {
+        char* end = nullptr;
+        const long value = std::strtol(env, &end, 10);
+        if (end != env && value > 0) {
+            return static_cast<int>(value);
+        }
+    }
+
+    if (update_count <= 1u) {
+        return 1;
+    }
+
+    // Keep the direct-only outlet Jacobian current every Newton step now that
+    // the boundary auxiliary-input path is corrected.
+    return 1;
+}
+
+[[nodiscard]] Real lateDirectOnlyReducedInnerRelTol() noexcept
+{
+    const char* env = std::getenv("SVMP_FSILS_TIGHTEN_DIRECT_ONLY_INNER_REL_TOL");
+    if (env == nullptr) {
+        return static_cast<Real>(1e-6);
+    }
+
+    char* end = nullptr;
+    const double value = std::strtod(env, &end);
+    if (end == env || !std::isfinite(value) || value <= 0.0) {
+        return static_cast<Real>(1e-6);
+    }
+    return static_cast<Real>(value);
+}
+
 template <typename T>
 [[nodiscard]] T mpiAllreduceSumIfActive(T value) noexcept
 {
@@ -415,13 +512,6 @@ enum class FsilsPostSolveSyncMode {
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return !(value == "0" || value == "false" || value == "off" || value == "no");
-}
-
-[[nodiscard]] bool nativeRankOneUpdatesEnabledForLinearSolver(const backends::LinearSolver& linear) noexcept
-{
-    const bool force_explicit_rank_one =
-        std::getenv("SVMP_FORCE_EXPLICIT_RANK_ONE") != nullptr;
-    return linear.supportsNativeRankOneUpdates() && !force_explicit_rank_one;
 }
 
 [[nodiscard]] std::string describeFieldComponentDof(const systems::FESystem& sys,
@@ -943,7 +1033,8 @@ void addReducedFieldOperatorMatvec(std::span<const backends::ReducedFieldUpdate>
 
 bool tryPromoteExactReducedUpdateToNativeRankOne(
     const backends::ReducedFieldUpdate& update,
-    backends::RankOneUpdate& promoted)
+    backends::RankOneUpdate& promoted,
+    Real rel_residual_sq_limit = Real(1e-24))
 {
     if (!nativeFaceRankOnePromotionEnabled()) {
         return false;
@@ -1017,7 +1108,7 @@ bool tryPromoteExactReducedUpdateToNativeRankOne(
 
     const Real residual_sq = mpiAllreduceSumIfActive(local_residual_sq);
     const Real rel_residual_sq = residual_sq / std::max(global_right_norm_sq, Real(1e-30));
-    if (!(rel_residual_sq <= Real(1e-24)) || !(std::abs(alpha) > Real(1e-30))) {
+    if (!(rel_residual_sq <= rel_residual_sq_limit) || !(std::abs(alpha) > Real(1e-30))) {
         return false;
     }
 
@@ -1913,7 +2004,8 @@ struct SolverOptionsGuard {
 
 [[nodiscard]] backends::SolverOptions
 makeValidatedNativeRankOneSolveOptions(const backends::SolverOptions& base,
-                                       const int native_direct_face_mode_count)
+                                       const int native_direct_face_mode_count,
+                                       std::optional<Real> inner_rel_override = std::nullopt)
 {
     backends::SolverOptions opts = base;
 
@@ -1930,17 +2022,23 @@ makeValidatedNativeRankOneSolveOptions(const backends::SolverOptions& base,
             (base.rel_tol > Real(0.0) && std::isfinite(static_cast<double>(base.rel_tol)))
                 ? std::max(static_cast<Real>(1e-10), base.rel_tol * rel_scale)
                 : fallback_target;
-        const int target_inner_max_iter = std::max(base.max_iter, 120);
+        const Real effective_inner_rel = inner_rel_override.has_value()
+            ? std::min(target_inner_rel, *inner_rel_override)
+            : target_inner_rel;
+        const int target_inner_max_iter =
+            inner_rel_override.has_value()
+                ? std::max(base.max_iter, 200)
+                : std::max(base.max_iter, 120);
         opts.fsils_blockschur_gm_max_iter =
             std::max(base.fsils_blockschur_gm_max_iter.value_or(0), target_inner_max_iter);
         opts.fsils_blockschur_cg_max_iter =
             std::max(base.fsils_blockschur_cg_max_iter.value_or(0), target_inner_max_iter);
         opts.fsils_blockschur_gm_rel_tol = base.fsils_blockschur_gm_rel_tol.has_value()
-            ? std::min(*base.fsils_blockschur_gm_rel_tol, target_inner_rel)
-            : target_inner_rel;
+            ? std::min(*base.fsils_blockschur_gm_rel_tol, effective_inner_rel)
+            : effective_inner_rel;
         opts.fsils_blockschur_cg_rel_tol = base.fsils_blockschur_cg_rel_tol.has_value()
-            ? std::min(*base.fsils_blockschur_cg_rel_tol, target_inner_rel)
-            : target_inner_rel;
+            ? std::min(*base.fsils_blockschur_cg_rel_tol, effective_inner_rel)
+            : effective_inner_rel;
     }
 
     opts.fsils_residual_check_policy = backends::FsilsResidualCheckPolicy::Always;
@@ -3130,6 +3228,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         return computeResidualNorm();
     };
 
+    bool force_explicit_rank_one_updates =
+        std::getenv("SVMP_FORCE_EXPLICIT_RANK_ONE") != nullptr;
+
     auto bridgeRankOneUpdates = [&]() -> bool {
         const std::span<const backends::RankOneUpdate> rank_one_updates(
             effective_rank_one_updates.data(), effective_rank_one_updates.size());
@@ -3143,12 +3244,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             linear.setGroupedBorderedFieldCouplings({});
             return false;
         }
-        const bool force_explicit_rank_one =
-            std::getenv("SVMP_FORCE_EXPLICIT_RANK_ONE") != nullptr;
         const bool use_native_rank_one_updates =
             linear.supportsNativeRankOneUpdates() &&
             linear.supportsNativeReducedFieldUpdates() &&
-            !force_explicit_rank_one &&
+            !force_explicit_rank_one_updates &&
             !has_non_dirichlet_affine_constraints;
         const bool force_explicit_matrix_assembly =
             linear_has_live_bordered && !use_native_rank_one_updates;
@@ -3367,7 +3466,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     double current_residual_norm = std::numeric_limits<double>::quiet_NaN();
     bool have_jacobian = false;
     int last_jacobian_it = -1;
-    const int jacobian_period = std::max(1, options_.jacobian_rebuild_period);
+    const int base_jacobian_period = std::max(1, options_.jacobian_rebuild_period);
+    int direct_only_outlet_jacobian_period = 1;
 
     // ===== NEWTON TIMING PROFILE =====
 #ifdef SVMP_FE_ASSEMBLY_TIMING
@@ -3440,7 +3540,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             have_residual = false;
         }
 
-        const bool need_jacobian = !have_jacobian || (jacobian_period == 1) || ((it - last_jacobian_it) >= jacobian_period);
+        const int jacobian_period = std::max(base_jacobian_period, direct_only_outlet_jacobian_period);
+        const bool need_jacobian =
+            !have_jacobian || (jacobian_period == 1) || ((it - last_jacobian_it) >= jacobian_period);
         bool jacobian_ready = have_jacobian && !need_jacobian;
         if (!have_residual) {
             ntp0 = NTP();
@@ -4113,6 +4215,70 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             traceLog(oss.str());
         }
 
+        const bool direct_only_outlet_updates_available =
+            !force_explicit_rank_one_updates &&
+            linear.supportsNativeRankOneUpdates() &&
+            linear.supportsNativeReducedFieldUpdates() &&
+            !has_non_dirichlet_affine_constraints &&
+            !has_solve_bordered &&
+            grouped_bordered_field_couplings.empty() &&
+            (!effective_rank_one_updates.empty() || !active_reduced_field_updates.empty());
+        if (direct_only_outlet_updates_available) {
+            direct_only_outlet_jacobian_period =
+                (base_jacobian_period > 1)
+                    ? base_jacobian_period
+                    : directOnlyOutletJacobianRebuildPeriod(
+                          effective_rank_one_updates.size() + active_reduced_field_updates.size());
+            const auto sigma_scale = directOnlyOutletJacobianScale(
+                effective_rank_one_updates.size() + active_reduced_field_updates.size());
+            if (std::abs(sigma_scale - static_cast<Real>(1.0)) > static_cast<Real>(1e-12)) {
+                for (auto& update : effective_rank_one_updates) {
+                    update.sigma *= sigma_scale;
+                }
+                for (auto& update : active_reduced_field_updates) {
+                    update.sigma *= sigma_scale;
+                }
+                if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: scaled direct-only outlet Jacobian updates"
+                        << " factor=" << sigma_scale
+                        << " rank_one=" << effective_rank_one_updates.size()
+                        << " reduced=" << active_reduced_field_updates.size();
+                    traceLog(oss.str());
+                }
+            }
+            if (oopTraceEnabled() && direct_only_outlet_jacobian_period > 1) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: using direct-only outlet Jacobian rebuild period="
+                    << direct_only_outlet_jacobian_period;
+                traceLog(oss.str());
+            }
+        } else {
+            direct_only_outlet_jacobian_period = 1;
+        }
+        if (direct_only_outlet_updates_available) {
+            if (const auto rel_trigger = explicitRankOneAfterRelativeResidualThreshold()) {
+                const double r0 =
+                    (report.residual_norm0 > 0.0 && std::isfinite(report.residual_norm0))
+                        ? report.residual_norm0
+                        : 0.0;
+                const double rel_res =
+                    (r0 > 0.0 && std::isfinite(current_residual_norm))
+                        ? (current_residual_norm / r0)
+                        : std::numeric_limits<double>::infinity();
+                if (rel_res <= *rel_trigger) {
+                    force_explicit_rank_one_updates = true;
+                    if (oopTraceEnabled()) {
+                        std::ostringstream oss;
+                        oss << "NewtonSolver: forcing explicit matrix path for direct-only outlet updates"
+                            << " after relative residual reached " << rel_res
+                            << " (trigger=" << *rel_trigger << ")";
+                        traceLog(oss.str());
+                    }
+                }
+            }
+        }
+
         // Bridge rank-1 / reduced updates from coupled BC assembly to the linear
         // solver only after any bordered condensation has augmented the active
         // reduced/grouped coupling sets for this Newton solve.
@@ -4128,10 +4294,13 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
         const bool has_any_rank_one_updates =
             !effective_rank_one_updates.empty() || !active_reduced_field_updates.empty();
+        const bool rank_one_corrections_assembled_in_matrix =
+            force_explicit_rank_one_updates && has_any_rank_one_updates;
         const bool has_native_rank_one_updates =
             has_any_rank_one_updates &&
-            nativeRankOneUpdatesEnabledForLinearSolver(linear) &&
             linear.supportsNativeReducedFieldUpdates() &&
+            linear.supportsNativeRankOneUpdates() &&
+            !force_explicit_rank_one_updates &&
             !has_non_dirichlet_affine_constraints;
         const bool has_native_direct_face_only_updates =
             has_native_rank_one_updates &&
@@ -4139,6 +4308,12 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             grouped_bordered_field_couplings.empty() &&
             !effective_rank_one_updates.empty() &&
             active_reduced_field_updates.empty();
+        const bool has_native_direct_only_reduced_updates =
+            has_native_rank_one_updates &&
+            !has_solve_bordered &&
+            grouped_bordered_field_couplings.empty() &&
+            effective_rank_one_updates.empty() &&
+            !active_reduced_field_updates.empty();
         const int native_direct_face_mode_count =
             has_native_direct_face_only_updates
                 ? static_cast<int>(effective_rank_one_updates.size())
@@ -4151,7 +4326,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             has_native_condensed_coupled_updates ||
             ((has_solve_bordered && !condensed_bordered_active) &&
              !has_native_rank_one_updates) ||
-            (has_any_rank_one_updates && !has_native_rank_one_updates);
+            (has_any_rank_one_updates &&
+             !has_native_rank_one_updates &&
+             !rank_one_corrections_assembled_in_matrix);
         const bool needs_validated_native_rank_one_options =
             has_native_rank_one_updates && !has_native_condensed_coupled_updates;
         std::vector<Real> aux_delta;
@@ -4215,9 +4392,35 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             if (needs_strict_coupled_solve_options) {
                 linear.setOptions(makeBorderedSolveOptions(base_linear_options));
             } else if (needs_validated_native_rank_one_options) {
+                std::optional<Real> direct_only_inner_rel_override;
+                if (has_native_direct_only_reduced_updates) {
+                    if (const auto rel_trigger = lateDirectOnlyReducedTighteningThreshold()) {
+                        const double r0 =
+                            (report.residual_norm0 > 0.0 && std::isfinite(report.residual_norm0))
+                                ? report.residual_norm0
+                                : 0.0;
+                        const double rel_res =
+                            (r0 > 0.0 && std::isfinite(current_residual_norm))
+                                ? (current_residual_norm / r0)
+                                : std::numeric_limits<double>::infinity();
+                        if (rel_res <= *rel_trigger) {
+                            direct_only_inner_rel_override =
+                                lateDirectOnlyReducedInnerRelTol();
+                            if (oopTraceEnabled()) {
+                                std::ostringstream oss;
+                                oss << "NewtonSolver: tightening late direct-only reduced inner solve"
+                                    << " rel_res=" << rel_res
+                                    << " trigger=" << *rel_trigger
+                                    << " inner_rel=" << *direct_only_inner_rel_override;
+                                traceLog(oss.str());
+                            }
+                        }
+                    }
+                }
                 linear.setOptions(makeValidatedNativeRankOneSolveOptions(
                     base_linear_options,
-                    native_direct_face_mode_count));
+                    native_direct_face_mode_count,
+                    direct_only_inner_rel_override));
             }
             if (has_solve_bordered && !condensed_bordered_active) {
                 fsils_matrix_snapshot = captureFsilsMatrixSnapshot(J);
@@ -4895,7 +5098,16 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             return dense_du;
         };
 
-        if (!options_.use_line_search) {
+        const bool use_line_search_this_iteration =
+            options_.use_line_search ||
+            (it == 0 &&
+             has_native_direct_only_reduced_updates &&
+             firstDirectOnlyReducedLineSearchEnabled());
+        if (!options_.use_line_search && use_line_search_this_iteration && oopTraceEnabled()) {
+            traceLog("NewtonSolver: enabling first-iteration line search for native direct-only reduced updates");
+        }
+
+        if (!use_line_search_this_iteration) {
             ntp0 = NTP();
             if (!aux_delta.empty()) {
                 applyAuxiliaryDelta(transient.system(), bordered_full, aux_delta, static_cast<Real>(1.0));

@@ -83,6 +83,33 @@ namespace {
     return *env == '0';
 }
 
+[[nodiscard]] Real auxiliaryDirectCouplingSign(bool direct_only) noexcept
+{
+    const char* force_positive = std::getenv("SVMP_POSITIVE_AUX_DIRECT_COUPLING");
+    if (force_positive != nullptr) {
+        while (*force_positive == ' ' || *force_positive == '\t' || *force_positive == '\n' ||
+               *force_positive == '\r') {
+            ++force_positive;
+        }
+        if (*force_positive != '\0' && *force_positive != '0') {
+            return Real(1.0);
+        }
+    }
+
+    const char* force_negative = std::getenv("SVMP_NEGATE_AUX_DIRECT_COUPLING");
+    if (force_negative != nullptr) {
+        while (*force_negative == ' ' || *force_negative == '\t' || *force_negative == '\n' ||
+               *force_negative == '\r') {
+            ++force_negative;
+        }
+        if (*force_negative != '\0' && *force_negative != '0') {
+            return Real(-1.0);
+        }
+    }
+
+    return Real(1.0);
+}
+
 template <typename T>
 [[nodiscard]] T mpiAllreduceSumIfActive(T value) noexcept
 {
@@ -5388,8 +5415,8 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
         for (auto& entry : deployed_aux_entries_) {
             if (!entry.materialized) continue;
             if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) continue;
-            if (entry.lower_to_direct_only) continue;
             const bool local_condensed = entry.local_condensed;
+            const bool direct_only = entry.lower_to_direct_only;
             const auto n_outputs = static_cast<int>(entry.model->outputCount());
             const int dim = entry.model->dimension();
             if (n_outputs == 0 || dim == 0) continue;
@@ -5400,7 +5427,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
             const auto n_entities = blk.entityCount();
 
             std::size_t block_offset = 0;
-            if (!local_condensed) {
+            if (!local_condensed && !direct_only) {
                 for (const auto& bl : mixed.aux_layout.blocks) {
                     if (bl.name == entry.instance_name) {
                         block_offset = bl.offset + mixed.aux_layout.mixed_system_offset;
@@ -5427,6 +5454,8 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 std::vector<GlobalIndex> aux_dofs{};
                 std::vector<Real> dO_dx{};
                 std::vector<Real> dO_dI{};
+                std::vector<Real> dO_dI_effective{};
+                std::vector<Real> dF_dx{};
                 std::vector<Real> dF_dinputs{};
                 std::vector<std::vector<std::pair<GlobalIndex, Real>>> input_gradients{};
                 std::vector<char> input_gradient_sources{};
@@ -5504,7 +5533,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 ctx.user_data = state.user_data;
 
                 auto& ed = entity_data[e];
-                if (!local_condensed) {
+                if (!local_condensed && !direct_only) {
                     ed.aux_dofs.resize(static_cast<std::size_t>(dim));
                     for (int j = 0; j < dim; ++j) {
                         ed.aux_dofs[static_cast<std::size_t>(j)] = static_cast<GlobalIndex>(
@@ -5708,10 +5737,13 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
 
                 ed.n_inputs = static_cast<int>(ctx.inputs.size());
                 if (entry.deriv_provider && !entry.coupled_bindings.empty() && ed.n_inputs > 0) {
+                    std::vector<Real> direct_dF_dx(
+                        static_cast<std::size_t>(dim * dim), 0.0);
                     std::vector<Real> direct_dF_dinputs(
                         static_cast<std::size_t>(dim * ed.n_inputs), 0.0);
                     AuxiliaryJacobianRequest jac_req;
                     jac_req.n = dim;
+                    jac_req.dF_dx = direct_dF_dx;
                     jac_req.dF_dinputs = direct_dF_dinputs;
                     jac_req.n_inputs = ed.n_inputs;
                     entry.deriv_provider->evaluateJacobian(*entry.model, ctx, jac_req);
@@ -5719,6 +5751,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                     if (!local_condensed) {
                         bordered_coupling_.dF_dinputs = direct_dF_dinputs;
                     }
+                    ed.dF_dx = direct_dF_dx;
                     ed.dF_dinputs = direct_dF_dinputs;
                     ed.input_gradients.resize(static_cast<std::size_t>(ed.n_inputs));
                     ed.input_gradient_sources.assign(static_cast<std::size_t>(ed.n_inputs), 0);
@@ -5755,6 +5788,90 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                             input_col);
                         if (!grad.empty()) {
                             ed.input_gradient_sources[static_cast<std::size_t>(input_col)] = 2;
+                        }
+                    }
+
+                    if (monolithicDirectTraceEnabled()) {
+                        std::size_t total_input_grad_nnz = 0;
+                        for (const auto& grad : ed.input_gradients) {
+                            total_input_grad_nnz += grad.size();
+                        }
+                        std::ostringstream oss;
+                        oss << "FESystem: monolithic direct-only precheck"
+                            << " block='" << entry.instance_name << "'"
+                            << " entity=" << e
+                            << " lower_to_direct_only=" << (entry.lower_to_direct_only ? 1 : 0)
+                            << " n_inputs=" << ed.n_inputs
+                            << " dF_dx_size=" << ed.dF_dx.size()
+                            << " dF_dinputs_size=" << ed.dF_dinputs.size()
+                            << " dO_dx_size=" << ed.dO_dx.size()
+                            << " dO_dI_size=" << ed.dO_dI.size()
+                            << " coupled_bindings=" << entry.coupled_bindings.size()
+                            << " input_grad_nnz=" << total_input_grad_nnz;
+                        FE_LOG_INFO(oss.str());
+                    }
+
+                    if (entry.lower_to_direct_only &&
+                        ed.dF_dx.size() == static_cast<std::size_t>(dim * dim) &&
+                        ed.dF_dinputs.size() == static_cast<std::size_t>(dim * ed.n_inputs) &&
+                        ed.dO_dx.size() == static_cast<std::size_t>(n_outputs * dim)) {
+                        ed.dO_dI_effective.assign(
+                            static_cast<std::size_t>(n_outputs * ed.n_inputs), Real(0.0));
+                        if (!ed.dO_dI.empty()) {
+                            const auto copy_count = std::min(ed.dO_dI_effective.size(), ed.dO_dI.size());
+                            std::copy_n(ed.dO_dI.begin(),
+                                        static_cast<std::ptrdiff_t>(copy_count),
+                                        ed.dO_dI_effective.begin());
+                        }
+
+                        for (int input_col = 0; input_col < ed.n_inputs; ++input_col) {
+                            std::vector<Real> rhs(static_cast<std::size_t>(dim), Real(0.0));
+                            for (int row = 0; row < dim; ++row) {
+                                rhs[static_cast<std::size_t>(row)] =
+                                    ed.dF_dinputs[static_cast<std::size_t>(row * ed.n_inputs + input_col)];
+                            }
+                            auto A_work = ed.dF_dx;
+                            if (!solveDenseSystemInPlace(A_work, rhs)) {
+                                if (monolithicDirectTraceEnabled()) {
+                                    FE_LOG_INFO("FESystem: monolithic direct-only effective dO_dI solve failed"
+                                                " block='" + entry.instance_name + "'"
+                                                " entity=" + std::to_string(e) +
+                                                " input_col=" + std::to_string(input_col));
+                                }
+                                continue;
+                            }
+                            for (int output_idx = 0; output_idx < n_outputs; ++output_idx) {
+                                Real effective = Real(0.0);
+                                if (!ed.dO_dI.empty() &&
+                                    static_cast<std::size_t>(output_idx * ed.n_inputs + input_col) <
+                                        ed.dO_dI.size()) {
+                                    effective =
+                                        ed.dO_dI[static_cast<std::size_t>(output_idx * ed.n_inputs + input_col)];
+                                }
+                                for (int state_idx = 0; state_idx < dim; ++state_idx) {
+                                    effective -=
+                                        ed.dO_dx[static_cast<std::size_t>(output_idx * dim + state_idx)] *
+                                        rhs[static_cast<std::size_t>(state_idx)];
+                                }
+                                ed.dO_dI_effective[static_cast<std::size_t>(
+                                    output_idx * ed.n_inputs + input_col)] = effective;
+                            }
+                        }
+
+                        if (monolithicDirectTraceEnabled()) {
+                            std::ostringstream oss;
+                            oss << "FESystem: monolithic direct-only effective dO_dI"
+                                << " block='" << entry.instance_name << "'"
+                                << " entity=" << e
+                                << " values=[";
+                            for (std::size_t idx = 0; idx < ed.dO_dI_effective.size(); ++idx) {
+                                if (idx != 0) {
+                                    oss << ", ";
+                                }
+                                oss << ed.dO_dI_effective[idx];
+                            }
+                            oss << "]";
+                            FE_LOG_INFO(oss.str());
                         }
                     }
 
@@ -5852,18 +5969,25 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 for (std::size_t e = 0; e < n_entities; ++e) {
                     const auto& ed = entity_data[e];
                     bool has_state_sensitivity = false;
-                    for (int j = 0; j < dim; ++j) {
-                        if (std::abs(ed.dO_dx[static_cast<std::size_t>(k * dim + j)]) > 1e-14) {
-                            has_state_sensitivity = true;
-                            break;
+                    if (!direct_only) {
+                        for (int j = 0; j < dim; ++j) {
+                            if (std::abs(ed.dO_dx[static_cast<std::size_t>(k * dim + j)]) > 1e-14) {
+                                has_state_sensitivity = true;
+                                break;
+                            }
                         }
                     }
 
+                    const auto& dO_dI_active =
+                        entry.lower_to_direct_only && !ed.dO_dI_effective.empty()
+                            ? ed.dO_dI_effective
+                            : ed.dO_dI;
+
                     bool has_direct_sensitivity = false;
-                    if (!ed.dO_dI.empty() && ed.n_inputs > 0) {
+                    if (!dO_dI_active.empty() && ed.n_inputs > 0) {
                         for (int input_col = 0; input_col < ed.n_inputs; ++input_col) {
-                            if (static_cast<std::size_t>(k * ed.n_inputs + input_col) < ed.dO_dI.size() &&
-                                std::abs(ed.dO_dI[static_cast<std::size_t>(k * ed.n_inputs + input_col)]) >
+                            if (static_cast<std::size_t>(k * ed.n_inputs + input_col) < dO_dI_active.size() &&
+                                std::abs(dO_dI_active[static_cast<std::size_t>(k * ed.n_inputs + input_col)]) >
                                     kDirectCouplingEntryTol &&
                                 input_col < static_cast<int>(ed.input_gradients.size()) &&
                                 !ed.input_gradients[static_cast<std::size_t>(input_col)].empty()) {
@@ -5880,25 +6004,32 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                     const auto slot = base_slot + e * static_cast<std::size_t>(n_outputs);
                     const auto output_id32 = static_cast<std::uint32_t>(output_id);
                     const auto& owned_dofs = dof_handler_.getPartition().locallyOwned();
+                    const Real direct_coupling_sign = auxiliaryDirectCouplingSign(direct_only);
 
                     BorderedCouplingData::DirectCouplingRecord coupling_record;
                     coupling_record.output_slot = slot;
                     coupling_record.entity_index = e;
-                    coupling_record.aux_local_indices.reserve(ed.aux_dofs.size());
-                    for (const auto aux_dof : ed.aux_dofs) {
-                        coupling_record.aux_local_indices.push_back(
-                            static_cast<std::size_t>(aux_dof) - n_field_dofs);
+                    if (!direct_only) {
+                        coupling_record.aux_local_indices.reserve(ed.aux_dofs.size());
+                        for (const auto aux_dof : ed.aux_dofs) {
+                            coupling_record.aux_local_indices.push_back(
+                                static_cast<std::size_t>(aux_dof) - n_field_dofs);
+                        }
                     }
                     coupling_record.dF_dinputs = ed.dF_dinputs;
-                    if (static_cast<std::size_t>((k + 1) * dim) <= ed.dO_dx.size()) {
+                    if (!direct_only &&
+                        static_cast<std::size_t>((k + 1) * dim) <= ed.dO_dx.size()) {
                         const auto dx_begin = ed.dO_dx.begin() + static_cast<std::ptrdiff_t>(k * dim);
                         coupling_record.dO_dx.assign(dx_begin, dx_begin + dim);
                     }
-                    if (!ed.dO_dI.empty() && ed.n_inputs > 0 &&
-                        static_cast<std::size_t>((k + 1) * ed.n_inputs) <= ed.dO_dI.size()) {
+                    if (!dO_dI_active.empty() && ed.n_inputs > 0 &&
+                        static_cast<std::size_t>((k + 1) * ed.n_inputs) <= dO_dI_active.size()) {
                         const auto di_begin =
-                            ed.dO_dI.begin() + static_cast<std::ptrdiff_t>(k * ed.n_inputs);
+                            dO_dI_active.begin() + static_cast<std::ptrdiff_t>(k * ed.n_inputs);
                         coupling_record.dO_dI.assign(di_begin, di_begin + ed.n_inputs);
+                        for (auto& value : coupling_record.dO_dI) {
+                            value *= direct_coupling_sign;
+                        }
                     }
                     coupling_record.input_gradients = ed.input_gradients;
                     std::unordered_map<GlobalIndex, Real> direct_output_gradient_entries;
@@ -6061,19 +6192,15 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
 
                                 const bool disable_direct_coupling =
                                     std::getenv("SVMP_DISABLE_AUX_DIRECT_COUPLING") != nullptr;
-                                const Real direct_coupling_sign =
-                                    (std::getenv("SVMP_NEGATE_AUX_DIRECT_COUPLING") != nullptr)
-                                        ? Real(-1.0)
-                                        : Real(1.0);
                                 if (!disable_direct_coupling &&
-                                    !ed.input_gradients.empty() && !ed.dO_dI.empty() &&
+                                    !ed.input_gradients.empty() && !dO_dI_active.empty() &&
                                     ed.n_inputs > 0) {
                                     for (int input_col = 0; input_col < ed.n_inputs; ++input_col) {
                                         if (static_cast<std::size_t>(k * ed.n_inputs + input_col) >=
-                                            ed.dO_dI.size()) {
+                                            dO_dI_active.size()) {
                                             continue;
                                         }
-                                        const Real dOk_dIm = direct_coupling_sign * ed.dO_dI[
+                                        const Real dOk_dIm = direct_coupling_sign * dO_dI_active[
                                             static_cast<std::size_t>(k * ed.n_inputs + input_col)];
                                         if (std::abs(dOk_dIm) <= kDirectCouplingEntryTol) {
                                             continue;
@@ -6175,7 +6302,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                         if (std::abs(dOk_dxj) < 1e-14) continue;
 
                                         const Real val = dRi_dOk * dOk_dxj;
-                                        if (!local_condensed) {
+                                        if (!direct_only && !local_condensed) {
                                             std::vector<GlobalIndex> row = {dof_i};
                                             std::vector<GlobalIndex> col = {
                                                 ed.aux_dofs[static_cast<std::size_t>(j)]};
@@ -6307,7 +6434,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                             }
                         }
                     }
-                    if (!local_condensed) {
+                    if (!local_condensed && !direct_only) {
                         bordered_coupling_.direct_coupling_records.push_back(
                             std::move(coupling_record));
                     }
@@ -7235,6 +7362,8 @@ void FESystem::finalizeAuxiliaryLayout()
                     << (lowered.has_value() ? "lowerable" : "blocked");
             }
             oss << "]"
+                << " input_bindings=" << entry.input_bindings.size()
+                << " coupled_bindings=" << entry.coupled_bindings.size()
                 << " lower_to_direct_only=" << (entry.lower_to_direct_only ? 1 : 0)
                 << " local_condensed=" << (entry.local_condensed ? 1 : 0);
             FE_LOG_INFO(oss.str());

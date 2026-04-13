@@ -10,6 +10,7 @@
 #include "Dofs/DofHandler.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Spaces/HCurlSpace.h"
 #include "Spaces/HDivSpace.h"
 
 #include <array>
@@ -115,6 +116,7 @@ dofs::MeshTopologyInfo buildTwoTetraTopology(bool flipped)
     topo.dim = 3;
     topo.n_cells = 2;
     topo.n_vertices = 5;
+    topo.n_edges = 9;
     topo.n_faces = 7;
 
     topo.vertex_gids = {0, 1, 2, 3, 4};
@@ -125,6 +127,32 @@ dofs::MeshTopologyInfo buildTwoTetraTopology(bool flipped)
     topo.cell2vertex_data = {
         0, 1, 2, 3,
         (flipped ? 2 : 1), (flipped ? 3 : 2), (flipped ? 1 : 3), 4
+    };
+
+    // Canonical global edges for the two-tetra configuration. Reference-edge
+    // order on Tetra4 is {(0,1), (1,2), (2,0), (0,3), (1,3), (2,3)}.
+    topo.edge2vertex_data = {
+        0, 1,
+        1, 2,
+        2, 0,
+        0, 3,
+        1, 3,
+        2, 3,
+        1, 4,
+        2, 4,
+        3, 4
+    };
+    topo.cell2edge_offsets = {0, 6, 12};
+    topo.cell2edge_data = {
+        // cell 0: {0,1,2,3}
+        0, 1, 2, 3, 4, 5,
+        // cell 1: baseline {1,2,3,4} or flipped {2,3,1,4}
+        (flipped ? 5 : 1),
+        (flipped ? 4 : 5),
+        (flipped ? 1 : 4),
+        (flipped ? 7 : 6),
+        (flipped ? 8 : 7),
+        (flipped ? 6 : 8)
     };
 
     // Canonical global faces (triangles) for the two-tetra configuration.
@@ -230,6 +258,49 @@ TEST(VectorBasisOrientationAssembly, HDivMassMatrixInvariantToCellVertexPermutat
 
     SCOPED_TRACE(make_trace(false));
     SCOPED_TRACE(make_trace(true));
+
+    ASSERT_EQ(mat_ref.numRows(), mat_flip.numRows());
+    ASSERT_EQ(mat_ref.numCols(), mat_flip.numCols());
+
+    for (GlobalIndex i = 0; i < mat_ref.numRows(); ++i) {
+        for (GlobalIndex j = 0; j < mat_ref.numCols(); ++j) {
+            EXPECT_NEAR(mat_ref.getMatrixEntry(i, j), mat_flip.getMatrixEntry(i, j), 1e-12)
+                << "i=" << i << " j=" << j;
+        }
+    }
+}
+
+TEST(VectorBasisOrientationAssembly, HCurlMassMatrixInvariantToCellVertexPermutation)
+{
+    spaces::HCurlSpace space(ElementType::Tetra4, /*order=*/0);
+
+    forms::FormCompiler compiler;
+    const auto u = forms::FormExpr::trialFunction(space, "u");
+    const auto v = forms::FormExpr::testFunction(space, "v");
+    auto ir = compiler.compileBilinear(inner(u, v).dx());
+    forms::FormKernel kernel(std::move(ir));
+
+    const auto assemble = [&](bool flipped) {
+        dofs::DofHandler dh;
+        dofs::DofDistributionOptions opts;
+        opts.topology_completion = dofs::TopologyCompletion::RequireComplete;
+        dh.distributeDofs(buildTwoTetraTopology(flipped), space, opts);
+        dh.finalize();
+
+        assembly::StandardAssembler assembler;
+        assembler.setDofHandler(dh);
+
+        const auto n = dh.getNumDofs();
+        assembly::DenseMatrixView mat(n);
+        mat.zero();
+
+        TwoTetraMeshAccess mesh(flipped);
+        (void)assembler.assembleMatrix(mesh, space, space, kernel, mat);
+        return mat;
+    };
+
+    const auto mat_ref = assemble(/*flipped=*/false);
+    const auto mat_flip = assemble(/*flipped=*/true);
 
     ASSERT_EQ(mat_ref.numRows(), mat_flip.numRows());
     ASSERT_EQ(mat_ref.numCols(), mat_flip.numCols());

@@ -166,7 +166,14 @@ TEST(ElementFactoryErrors, ThrowsOnUnsupportedBDMRequests) {
     EXPECT_THROW(ElementFactory::create(req), FEException);
 
     req.element_type = ElementType::Tetra4;
+    req.continuity   = Continuity::H_div;
     req.order        = 1;
+    std::shared_ptr<Element> element;
+    EXPECT_NO_THROW(element = ElementFactory::create(req));
+    ASSERT_NE(element, nullptr);
+    EXPECT_EQ(element->element_type(), ElementType::Tetra4);
+
+    req.element_type = ElementType::Hex8;
     EXPECT_THROW(ElementFactory::create(req), FEException);
 }
 

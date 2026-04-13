@@ -398,3 +398,91 @@ TEST_F(OrientationManagerTest, OrientHCurlQuadFaceDofsReflectionIsInvertible) {
         EXPECT_NEAR(back[i], face_dofs[i], tol);
     }
 }
+
+TEST_F(OrientationManagerTest, OrientHDivTriangleFaceDofsOrder3ReflectionIsInvertible) {
+    constexpr int k = 3;
+    const std::size_t ndofs =
+        static_cast<std::size_t>((k + 1) * (k + 2) / 2);
+    std::vector<Real> face_dofs(ndofs);
+    for (std::size_t i = 0; i < ndofs; ++i) {
+        face_dofs[i] = Real(0.2) + Real(0.03) * Real(i);
+    }
+
+    const std::array<int, 3> global = {10, 20, 30};
+    const std::array<int, 3> local = {10, 30, 20}; // reflected
+    const auto orient = OrientationManager::triangle_face_orientation(local, global);
+    const auto inv = OrientationManager::triangle_face_orientation(global, local);
+
+    const auto mapped = OrientationManager::orient_triangle_face_dofs(face_dofs, orient, k);
+    const auto back = OrientationManager::orient_triangle_face_dofs(mapped, inv, k);
+    ASSERT_EQ(back.size(), ndofs);
+    for (std::size_t i = 0; i < ndofs; ++i) {
+        EXPECT_NEAR(back[i], face_dofs[i], tol);
+    }
+}
+
+TEST_F(OrientationManagerTest, OrientHDivQuadFaceDofsOrder3RotationIsInvertible) {
+    constexpr int k = 3;
+    const std::size_t ndofs =
+        static_cast<std::size_t>((k + 1) * (k + 1));
+    std::vector<Real> face_dofs(ndofs);
+    for (std::size_t i = 0; i < ndofs; ++i) {
+        face_dofs[i] = Real(-0.15) + Real(0.04) * Real(i);
+    }
+
+    const std::array<int, 4> global = {10, 20, 30, 40};
+    const std::array<int, 4> local = {20, 30, 40, 10}; // rotated
+    const auto orient = OrientationManager::quad_face_orientation(local, global);
+    const auto inv = OrientationManager::quad_face_orientation(global, local);
+
+    const auto mapped = OrientationManager::orient_quad_face_dofs(face_dofs, orient, k);
+    const auto back = OrientationManager::orient_quad_face_dofs(mapped, inv, k);
+    ASSERT_EQ(back.size(), ndofs);
+    for (std::size_t i = 0; i < ndofs; ++i) {
+        EXPECT_NEAR(back[i], face_dofs[i], tol);
+    }
+}
+
+TEST_F(OrientationManagerTest, OrientHCurlTriangleFaceDofsOrder3RotationIsInvertible) {
+    constexpr int k = 3;
+    const std::size_t block = static_cast<std::size_t>(k) * static_cast<std::size_t>(k + 1) / 2u;
+    const std::size_t ndofs = 2u * block;
+    std::vector<Real> face_dofs(ndofs);
+    for (std::size_t i = 0; i < ndofs; ++i) {
+        face_dofs[i] = Real(0.4) + Real(0.02) * Real(i);
+    }
+
+    const std::array<int, 3> global = {10, 20, 30};
+    const std::array<int, 3> local = {20, 30, 10}; // rotated
+    const auto orient = OrientationManager::triangle_face_orientation(local, global);
+    const auto inv = OrientationManager::triangle_face_orientation(global, local);
+
+    const auto mapped = OrientationManager::orient_hcurl_triangle_face_dofs(face_dofs, orient, k);
+    const auto back = OrientationManager::orient_hcurl_triangle_face_dofs(mapped, inv, k);
+    ASSERT_EQ(back.size(), ndofs);
+    for (std::size_t i = 0; i < ndofs; ++i) {
+        EXPECT_NEAR(back[i], face_dofs[i], tol);
+    }
+}
+
+TEST_F(OrientationManagerTest, OrientHCurlQuadFaceDofsOrder3ReflectionIsInvertible) {
+    constexpr int k = 3;
+    const std::size_t block = static_cast<std::size_t>(k) * static_cast<std::size_t>(k + 1);
+    const std::size_t ndofs = 2u * block;
+    std::vector<Real> face_dofs(ndofs);
+    for (std::size_t i = 0; i < ndofs; ++i) {
+        face_dofs[i] = Real(-0.25) + Real(0.05) * Real(i);
+    }
+
+    const std::array<int, 4> global = {10, 20, 30, 40};
+    const std::array<int, 4> local = {10, 40, 30, 20}; // reflected
+    const auto orient = OrientationManager::quad_face_orientation(local, global);
+    const auto inv = OrientationManager::quad_face_orientation(global, local);
+
+    const auto mapped = OrientationManager::orient_hcurl_quad_face_dofs(face_dofs, orient, k);
+    const auto back = OrientationManager::orient_hcurl_quad_face_dofs(mapped, inv, k);
+    ASSERT_EQ(back.size(), ndofs);
+    for (std::size_t i = 0; i < ndofs; ++i) {
+        EXPECT_NEAR(back[i], face_dofs[i], tol);
+    }
+}

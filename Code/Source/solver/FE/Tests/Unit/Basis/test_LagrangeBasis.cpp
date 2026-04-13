@@ -9,6 +9,7 @@
 #include <array>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <numeric>
 
 using svmp::FE::basis::LagrangeBasis;
@@ -1524,6 +1525,166 @@ TEST(LagrangeBasis, Pyramid14GradientMatchesLinearFunctionGradient) {
     EXPECT_NEAR(g_interp[0], a, 1e-6);
     EXPECT_NEAR(g_interp[1], b, 1e-6);
     EXPECT_NEAR(g_interp[2], c, 1e-6);
+}
+
+TEST(LagrangeBasis, PyramidApexValuesRemainExactAcrossRepresentativeOrders) {
+    const struct Case {
+        ElementType type;
+        int order;
+    } cases[] = {
+        {ElementType::Pyramid5, 1},
+        {ElementType::Pyramid14, 2},
+        {ElementType::Pyramid5, 4},
+    };
+
+    const svmp::FE::math::Vector<Real, 3> apex{Real(0), Real(0), Real(1)};
+    for (const auto& c : cases) {
+        LagrangeBasis basis(c.type, c.order);
+        std::vector<Real> values;
+        basis.evaluate_values(apex, values);
+        ASSERT_EQ(values.size(), basis.size());
+
+        const auto& nodes = basis.nodes();
+        auto apex_it = std::find_if(
+            nodes.begin(), nodes.end(),
+            [](const auto& node) {
+                return std::abs(node[0]) <= Real(1e-14) &&
+                       std::abs(node[1]) <= Real(1e-14) &&
+                       std::abs(node[2] - Real(1)) <= Real(1e-14);
+            });
+        ASSERT_NE(apex_it, nodes.end());
+        const std::size_t apex_index = static_cast<std::size_t>(
+            std::distance(nodes.begin(), apex_it));
+
+        Real sum = Real(0);
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            EXPECT_TRUE(std::isfinite(static_cast<double>(values[i])));
+            sum += values[i];
+            const Real expected = (i == apex_index) ? Real(1) : Real(0);
+            EXPECT_NEAR(values[i], expected, 1e-12)
+                << "order " << c.order << ", basis " << i;
+        }
+        EXPECT_NEAR(sum, Real(1), 1e-12);
+    }
+}
+
+TEST(LagrangeBasis, PyramidGradientAtExactApexThrowsWhenLimitIsNotUnique) {
+    const struct Case {
+        ElementType type;
+        int order;
+    } cases[] = {
+        {ElementType::Pyramid5, 1},
+        {ElementType::Pyramid14, 2},
+        {ElementType::Pyramid5, 4},
+    };
+
+    const svmp::FE::math::Vector<Real, 3> apex{Real(0), Real(0), Real(1)};
+    for (const auto& c : cases) {
+        LagrangeBasis basis(c.type, c.order);
+        std::vector<Gradient> gradients;
+        EXPECT_THROW(basis.evaluate_gradients(apex, gradients), svmp::FE::basis::BasisEvaluationException)
+            << "order " << c.order;
+    }
+}
+
+TEST(LagrangeBasis, PyramidApexValuesMatchDirectionalNearApexLimits) {
+    const struct Case {
+        ElementType type;
+        int order;
+        Real tol;
+    } cases[] = {
+        {ElementType::Pyramid5, 1, Real(3e-6)},
+        {ElementType::Pyramid14, 2, Real(4e-6)},
+        {ElementType::Pyramid5, 4, Real(1e-5)},
+    };
+
+    const std::array<std::array<Real, 2>, 4> directions = {{
+        {Real(0), Real(0)},
+        {Real(0.35), Real(-0.25)},
+        {Real(-0.50), Real(0.45)},
+        {Real(0.20), Real(0.60)},
+    }};
+    const Real t = Real(1e-6);
+    const svmp::FE::math::Vector<Real, 3> apex{Real(0), Real(0), Real(1)};
+
+    for (const auto& c : cases) {
+        LagrangeBasis basis(c.type, c.order);
+        std::vector<Real> apex_values;
+        basis.evaluate_values(apex, apex_values);
+
+        for (const auto& direction : directions) {
+            const svmp::FE::math::Vector<Real, 3> xi{
+                t * direction[0],
+                t * direction[1],
+                Real(1) - t
+            };
+
+            std::vector<Real> values;
+            basis.evaluate_values(xi, values);
+            ASSERT_EQ(values.size(), apex_values.size());
+
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                EXPECT_NEAR(values[i], apex_values[i], c.tol)
+                    << "order " << c.order
+                    << ", basis " << i
+                    << ", direction (" << direction[0] << ", " << direction[1] << ")";
+            }
+        }
+    }
+}
+
+TEST(LagrangeBasis, PyramidNearApexGradientShowsDirectionalSpread) {
+    const struct Case {
+        ElementType type;
+        int order;
+        Real min_spread;
+    } cases[] = {
+        {ElementType::Pyramid5, 1, Real(5e-2)},
+        {ElementType::Pyramid14, 2, Real(5e-2)},
+    };
+
+    const std::array<std::array<Real, 2>, 4> directions = {{
+        {Real(0), Real(0)},
+        {Real(0.45), Real(-0.30)},
+        {Real(-0.35), Real(0.40)},
+        {Real(0.25), Real(0.55)},
+    }};
+    const Real t = Real(1e-6);
+
+    for (const auto& c : cases) {
+        LagrangeBasis basis(c.type, c.order);
+        double max_spread = 0.0;
+
+        std::vector<std::vector<Gradient>> directional_gradients;
+        directional_gradients.reserve(directions.size());
+        for (const auto& direction : directions) {
+            const svmp::FE::math::Vector<Real, 3> xi{
+                t * direction[0],
+                t * direction[1],
+                Real(1) - t
+            };
+
+            std::vector<Gradient> gradients;
+            basis.evaluate_gradients(xi, gradients);
+            directional_gradients.push_back(std::move(gradients));
+        }
+
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            for (int d = 0; d < 3; ++d) {
+                double min_value = std::numeric_limits<double>::infinity();
+                double max_value = -std::numeric_limits<double>::infinity();
+                for (const auto& gradients : directional_gradients) {
+                    const double value = static_cast<double>(gradients[i][static_cast<std::size_t>(d)]);
+                    min_value = std::min(min_value, value);
+                    max_value = std::max(max_value, value);
+                }
+                max_spread = std::max(max_spread, max_value - min_value);
+            }
+        }
+
+        EXPECT_GT(max_spread, static_cast<double>(c.min_spread))
+            << "order " << c.order;
+    }
 }
 
 TEST(LagrangeBasis, GradientSumZeroQuadAndTet) {

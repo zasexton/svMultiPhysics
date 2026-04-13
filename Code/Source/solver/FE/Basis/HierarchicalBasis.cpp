@@ -6,6 +6,7 @@
  */
 
 #include "HierarchicalBasis.h"
+#include "detail/ReferenceDerivativeJet.h"
 #include <cmath>
 
 namespace svmp {
@@ -40,6 +41,13 @@ bool is_wedge(ElementType type) {
 
 bool is_pyramid(ElementType type) {
     return type == ElementType::Pyramid5 || type == ElementType::Pyramid13 || type == ElementType::Pyramid14;
+}
+
+detail::Jet3 lift_legendre_jet(int order, const detail::Jet3& arg) {
+    return detail::compose_univariate(arg,
+                                      orthopoly::legendre(order, arg.value),
+                                      orthopoly::legendre_with_derivative(order, arg.value).second,
+                                      orthopoly::jacobi_second_derivative(order, Real(0), Real(0), arg.value));
 }
 
 } // namespace
@@ -413,6 +421,162 @@ void HierarchicalBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
     }
 
     throw BasisEvaluationException("Unsupported element in HierarchicalBasis::evaluate_gradients",
+                                   __FILE__, __LINE__, __func__);
+}
+
+void HierarchicalBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
+                                          std::vector<Hessian>& hessians) const {
+    hessians.assign(size_, Hessian{});
+
+    if (element_type_ == ElementType::Point1) {
+        return;
+    }
+
+    if (is_line(element_type_)) {
+        const auto [vals, derivs, second] =
+            orthopoly::legendre_sequence_with_second_derivatives(order_, xi[0]);
+        (void)vals;
+        for (std::size_t i = 0; i < size_; ++i) {
+            (void)derivs;
+            hessians[i](0, 0) = second[i];
+        }
+        return;
+    }
+
+    if (is_quadrilateral(element_type_)) {
+        const auto [vals_x, derivs_x, second_x] =
+            orthopoly::legendre_sequence_with_second_derivatives(order_, xi[0]);
+        const auto [vals_y, derivs_y, second_y] =
+            orthopoly::legendre_sequence_with_second_derivatives(order_, xi[1]);
+        std::size_t idx = 0;
+        for (int j = 0; j <= order_; ++j) {
+            for (int i = 0; i <= order_; ++i) {
+                Hessian H{};
+                H(0, 0) = second_x[static_cast<std::size_t>(i)] * vals_y[static_cast<std::size_t>(j)];
+                H(1, 1) = vals_x[static_cast<std::size_t>(i)] * second_y[static_cast<std::size_t>(j)];
+                H(0, 1) = derivs_x[static_cast<std::size_t>(i)] * derivs_y[static_cast<std::size_t>(j)];
+                H(1, 0) = H(0, 1);
+                hessians[idx++] = H;
+            }
+        }
+        return;
+    }
+
+    if (is_hexahedron(element_type_)) {
+        const auto [vals_x, derivs_x, second_x] =
+            orthopoly::legendre_sequence_with_second_derivatives(order_, xi[0]);
+        const auto [vals_y, derivs_y, second_y] =
+            orthopoly::legendre_sequence_with_second_derivatives(order_, xi[1]);
+        const auto [vals_z, derivs_z, second_z] =
+            orthopoly::legendre_sequence_with_second_derivatives(order_, xi[2]);
+        std::size_t idx = 0;
+        for (int k = 0; k <= order_; ++k) {
+            for (int j = 0; j <= order_; ++j) {
+                for (int i = 0; i <= order_; ++i) {
+                    Hessian H{};
+                    H(0, 0) = second_x[static_cast<std::size_t>(i)] *
+                              vals_y[static_cast<std::size_t>(j)] *
+                              vals_z[static_cast<std::size_t>(k)];
+                    H(1, 1) = vals_x[static_cast<std::size_t>(i)] *
+                              second_y[static_cast<std::size_t>(j)] *
+                              vals_z[static_cast<std::size_t>(k)];
+                    H(2, 2) = vals_x[static_cast<std::size_t>(i)] *
+                              vals_y[static_cast<std::size_t>(j)] *
+                              second_z[static_cast<std::size_t>(k)];
+                    H(0, 1) = derivs_x[static_cast<std::size_t>(i)] *
+                              derivs_y[static_cast<std::size_t>(j)] *
+                              vals_z[static_cast<std::size_t>(k)];
+                    H(1, 0) = H(0, 1);
+                    H(0, 2) = derivs_x[static_cast<std::size_t>(i)] *
+                              vals_y[static_cast<std::size_t>(j)] *
+                              derivs_z[static_cast<std::size_t>(k)];
+                    H(2, 0) = H(0, 2);
+                    H(1, 2) = vals_x[static_cast<std::size_t>(i)] *
+                              derivs_y[static_cast<std::size_t>(j)] *
+                              derivs_z[static_cast<std::size_t>(k)];
+                    H(2, 1) = H(1, 2);
+                    hessians[idx++] = H;
+                }
+            }
+        }
+        return;
+    }
+
+    if (is_triangle(element_type_)) {
+        std::size_t idx = 0;
+        for (const auto& pq : simplex_indices_) {
+            const auto jet = orthopoly::dubiner_with_second_derivatives(pq[0], pq[1], xi[0], xi[1]);
+            Hessian H{};
+            H(0, 0) = jet.dxx;
+            H(0, 1) = jet.dxy;
+            H(1, 0) = jet.dxy;
+            H(1, 1) = jet.dyy;
+            hessians[idx++] = H;
+        }
+        return;
+    }
+
+    if (is_wedge(element_type_)) {
+        const auto [vals_z, derivs_z, second_z] =
+            orthopoly::legendre_sequence_with_second_derivatives(order_, xi[2]);
+        std::size_t idx = 0;
+        for (const auto& pq : simplex_indices_) {
+            const auto tri = orthopoly::dubiner_with_second_derivatives(pq[0], pq[1], xi[0], xi[1]);
+            for (int k = 0; k <= order_; ++k) {
+                Hessian H{};
+                const Real vz = vals_z[static_cast<std::size_t>(k)];
+                const Real dz = derivs_z[static_cast<std::size_t>(k)];
+                const Real d2z = second_z[static_cast<std::size_t>(k)];
+                H(0, 0) = tri.dxx * vz;
+                H(1, 1) = tri.dyy * vz;
+                H(0, 1) = tri.dxy * vz;
+                H(1, 0) = H(0, 1);
+                H(0, 2) = tri.dxi * dz;
+                H(2, 0) = H(0, 2);
+                H(1, 2) = tri.deta * dz;
+                H(2, 1) = H(1, 2);
+                H(2, 2) = tri.value * d2z;
+                hessians[idx++] = H;
+            }
+        }
+        return;
+    }
+
+    if (is_tetrahedron(element_type_)) {
+        std::size_t idx = 0;
+        for (const auto& pqr : simplex_indices_) {
+            const auto jet = orthopoly::proriol_with_second_derivatives(
+                pqr[0], pqr[1], pqr[2], xi[0], xi[1], xi[2]);
+            hessians[idx++] = jet.hessian;
+        }
+        return;
+    }
+
+    if (is_pyramid(element_type_)) {
+        const detail::Jet3 zeta = detail::variable_jet(2, xi[2]);
+        const detail::Jet3 one_minus_z = detail::constant_jet(Real(1)) - zeta;
+        detail::Jet3 u = detail::constant_jet(Real(0));
+        detail::Jet3 v = detail::constant_jet(Real(0));
+        if (std::abs(Real(1) - xi[2]) > Real(1e-12)) {
+            u = detail::variable_jet(0, xi[0]) / one_minus_z;
+            v = detail::variable_jet(1, xi[1]) / one_minus_z;
+        }
+
+        std::size_t idx = 0;
+        for (int k = 0; k <= order_; ++k) {
+            const auto pw = lift_legendre_jet(k, zeta);
+            for (int j = 0; j <= order_; ++j) {
+                const auto pv = lift_legendre_jet(j, v);
+                for (int i = 0; i <= order_; ++i) {
+                    const auto pu = lift_legendre_jet(i, u);
+                    hessians[idx++] = (pu * pv * pw).hessian;
+                }
+            }
+        }
+        return;
+    }
+
+    throw BasisEvaluationException("Unsupported element in HierarchicalBasis::evaluate_hessians",
                                    __FILE__, __LINE__, __func__);
 }
 

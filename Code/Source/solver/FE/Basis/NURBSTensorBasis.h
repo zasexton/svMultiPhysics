@@ -46,6 +46,9 @@ public:
     void evaluate_gradients(const math::Vector<Real, 3>& xi,
                             std::vector<Gradient>& gradients) const override;
 
+    void evaluate_hessians(const math::Vector<Real, 3>& xi,
+                           std::vector<Hessian>& hessians) const override;
+
     const BSplineBasis& axis_basis(int axis) const noexcept {
         return axes_[static_cast<std::size_t>(axis)];
     }
@@ -69,7 +72,8 @@ private:
 
     void evaluate_nonrational(const math::Vector<Real, 3>& xi,
                               std::vector<Real>& values,
-                              std::vector<Gradient>* gradients) const;
+                              std::vector<Gradient>* gradients,
+                              std::vector<Hessian>* hessians = nullptr) const;
 };
 
 } // namespace basis

@@ -96,6 +96,12 @@ TEST(BasisErrorPaths, SerendipityHigherOrderRequestsThrow) {
     EXPECT_THROW(SerendipityBasis(ElementType::Pyramid13, 3), NotImplementedException);
 }
 
+TEST(BasisErrorPaths, SerendipityGeometryModeDoesNotUnlockHigherOrderHybridFamilies) {
+    EXPECT_THROW(SerendipityBasis(ElementType::Hex20, 3, true), NotImplementedException);
+    EXPECT_THROW(SerendipityBasis(ElementType::Wedge15, 3, true), NotImplementedException);
+    EXPECT_THROW(SerendipityBasis(ElementType::Pyramid13, 3, true), NotImplementedException);
+}
+
 // =============================================================================
 // HermiteBasis error paths
 // =============================================================================
@@ -111,6 +117,11 @@ TEST(BasisErrorPaths, HermiteOnTetraThrows) {
 TEST(BasisErrorPaths, HermiteWrongOrderThrows) {
     // Hermite currently only supports cubic (order 3)
     EXPECT_THROW(HermiteBasis(ElementType::Line2, 2), NotImplementedException);
+}
+
+TEST(BasisErrorPaths, HermiteHigherOddOrderStillThrows) {
+    EXPECT_THROW(HermiteBasis(ElementType::Quad4, 5), NotImplementedException);
+    EXPECT_THROW(HermiteBasis(ElementType::Hex8, 5), NotImplementedException);
 }
 
 // =============================================================================
@@ -175,14 +186,26 @@ TEST(BasisErrorPaths, NedelecNegativeOrderThrowsInvalidArgument) {
     }
 }
 
-TEST(BasisErrorPaths, BDMHigherOrderThrowsNotImplemented) {
-    EXPECT_THROW(BDMBasis(ElementType::Triangle3, 2), NotImplementedException);
+TEST(BasisErrorPaths, HybridVectorHigherOrdersConstruct) {
+    EXPECT_NO_THROW((void)RaviartThomasBasis(ElementType::Wedge6, 3));
+    EXPECT_NO_THROW((void)RaviartThomasBasis(ElementType::Pyramid5, 3));
+    EXPECT_NO_THROW((void)NedelecBasis(ElementType::Wedge6, 3));
+    EXPECT_NO_THROW((void)NedelecBasis(ElementType::Pyramid5, 3));
+}
+
+TEST(BasisErrorPaths, BDMOrderZeroThrowsInvalidArgument) {
+    EXPECT_THROW(BDMBasis(ElementType::Triangle3, 0), BasisConfigurationException);
+    EXPECT_THROW(BDMBasis(ElementType::Tetra4, 0), BasisConfigurationException);
+}
+
+TEST(BasisErrorPaths, BDMQuadHigherOrderStillThrows) {
     EXPECT_THROW(BDMBasis(ElementType::Quad4, 2), NotImplementedException);
 }
 
 TEST(BasisErrorPaths, BDMUnsupportedTopologyThrows) {
-    EXPECT_THROW(BDMBasis(ElementType::Tetra4, 1), BasisElementCompatibilityException);
     EXPECT_THROW(BDMBasis(ElementType::Hex8, 1), BasisElementCompatibilityException);
+    EXPECT_THROW(BDMBasis(ElementType::Wedge6, 1), BasisElementCompatibilityException);
+    EXPECT_THROW(BDMBasis(ElementType::Pyramid5, 1), BasisElementCompatibilityException);
 }
 
 TEST(BasisErrorPaths, ModalTransformMalformedModalBasisThrowsConstructionException) {

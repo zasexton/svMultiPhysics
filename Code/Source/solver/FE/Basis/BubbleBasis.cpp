@@ -183,6 +183,105 @@ void BubbleBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
     gradients[0] = g;
 }
 
+void BubbleBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
+                                    std::vector<Hessian>& hessians) const {
+    hessians.resize(1);
+    Hessian H{};
+
+    if (is_line(element_type_)) {
+        H(0, 0) = -Real(2);
+    } else if (is_tri(element_type_)) {
+        const Real L0 = Real(1) - xi[0] - xi[1];
+        const Real L1 = xi[0];
+        const Real L2 = xi[1];
+        (void)L0;
+        H(0, 0) = Real(-54) * L2;
+        H(1, 1) = Real(-54) * L1;
+        H(0, 1) = Real(27) * (Real(1) - Real(2) * L1 - Real(2) * L2);
+        H(1, 0) = H(0, 1);
+    } else if (is_tet(element_type_)) {
+        const Real L0 = Real(1) - xi[0] - xi[1] - xi[2];
+        const Real L1 = xi[0];
+        const Real L2 = xi[1];
+        const Real L3 = xi[2];
+        (void)L0;
+        H(0, 0) = Real(-512) * L2 * L3;
+        H(1, 1) = Real(-512) * L1 * L3;
+        H(2, 2) = Real(-512) * L1 * L2;
+        H(0, 1) = Real(256) * L3 * (Real(1) - Real(2) * L1 - Real(2) * L2 - L3);
+        H(1, 0) = H(0, 1);
+        H(0, 2) = Real(256) * L2 * (Real(1) - Real(2) * L1 - L2 - Real(2) * L3);
+        H(2, 0) = H(0, 2);
+        H(1, 2) = Real(256) * L1 * (Real(1) - L1 - Real(2) * L2 - Real(2) * L3);
+        H(2, 1) = H(1, 2);
+    } else if (is_quad(element_type_)) {
+        const Real x = xi[0];
+        const Real y = xi[1];
+        H(0, 0) = -Real(2) * (Real(1) - y * y);
+        H(1, 1) = -Real(2) * (Real(1) - x * x);
+        H(0, 1) = Real(4) * x * y;
+        H(1, 0) = H(0, 1);
+    } else if (is_wedge(element_type_)) {
+        const Real L0 = Real(1) - xi[0] - xi[1];
+        const Real L1 = xi[0];
+        const Real L2 = xi[1];
+        const Real z = xi[2];
+        const Real tri = Real(27) * L0 * L1 * L2;
+        const Real z_factor = Real(1) - z * z;
+        const Real dtri_dxi = Real(27) * (-L1 * L2 + L0 * L2);
+        const Real dtri_deta = Real(27) * (-L1 * L2 + L0 * L1);
+        const Real ddtri_dxx = Real(-54) * L2;
+        const Real ddtri_dyy = Real(-54) * L1;
+        const Real ddtri_dxy = Real(27) * (Real(1) - Real(2) * L1 - Real(2) * L2);
+
+        H(0, 0) = ddtri_dxx * z_factor;
+        H(1, 1) = ddtri_dyy * z_factor;
+        H(0, 1) = ddtri_dxy * z_factor;
+        H(1, 0) = H(0, 1);
+        H(0, 2) = dtri_dxi * (Real(-2) * z);
+        H(2, 0) = H(0, 2);
+        H(1, 2) = dtri_deta * (Real(-2) * z);
+        H(2, 1) = H(1, 2);
+        H(2, 2) = tri * Real(-2);
+    } else if (is_pyramid(element_type_)) {
+        const Real x = xi[0];
+        const Real y = xi[1];
+        const Real z = xi[2];
+        const Real s = Real(1) - z;
+        const Real ax = s * s - x * x;
+        const Real ay = s * s - y * y;
+        const Real scale = Real(3125) / Real(256);
+
+        H(0, 0) = scale * z * Real(-2) * ay;
+        H(1, 1) = scale * z * ax * Real(-2);
+        H(0, 1) = scale * z * Real(4) * x * y;
+        H(1, 0) = H(0, 1);
+        H(0, 2) = scale * Real(-2) * x * (ay - Real(2) * z * s);
+        H(2, 0) = H(0, 2);
+        H(1, 2) = scale * Real(-2) * y * (ax - Real(2) * z * s);
+        H(2, 1) = H(1, 2);
+        H(2, 2) = scale * Real(2) * ((Real(2) * z - Real(2)) * (ax + ay) + Real(4) * z * s * s);
+    } else {
+        const Real x = xi[0];
+        const Real y = xi[1];
+        const Real z = xi[2];
+        const Real mx = Real(1) - x * x;
+        const Real my = Real(1) - y * y;
+        const Real mz = Real(1) - z * z;
+        H(0, 0) = -Real(2) * my * mz;
+        H(1, 1) = -Real(2) * mx * mz;
+        H(2, 2) = -Real(2) * mx * my;
+        H(0, 1) = Real(4) * x * y * mz;
+        H(1, 0) = H(0, 1);
+        H(0, 2) = Real(4) * x * z * my;
+        H(2, 0) = H(0, 2);
+        H(1, 2) = Real(4) * y * z * mx;
+        H(2, 1) = H(1, 2);
+    }
+
+    hessians[0] = H;
+}
+
 } // namespace basis
 } // namespace FE
 } // namespace svmp

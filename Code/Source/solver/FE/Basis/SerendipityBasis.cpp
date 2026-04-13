@@ -6,6 +6,7 @@
  */
 
 #include "SerendipityBasis.h"
+#include "LagrangeBasis.h"
 #include "Core/FEException.h"
 #include "NodeOrderingConventions.h"
 
@@ -221,6 +222,13 @@ constexpr std::array<std::size_t, 20> kHex20NodeOrderingToInternal = {
     16, 17, 19, 18
 };
 
+constexpr std::array<Real, 13> kPyramid13CenterRedistribution = {
+    Real(-0.25), Real(-0.25), Real(-0.25), Real(-0.25),
+    Real(0),
+    Real(0.5), Real(0.5), Real(0.5), Real(0.5),
+    Real(0), Real(0), Real(0), Real(0)
+};
+
 static const int hex20_monomial_exponents[20][3] = {
     {0, 0, 0}, {0, 0, 1}, {0, 0, 2}, {0, 1, 0}, {0, 1, 1},
     {0, 1, 2}, {0, 2, 0}, {0, 2, 1}, {1, 0, 0}, {1, 0, 1},
@@ -299,6 +307,46 @@ void eval_hex20_grad_internal(Real r, Real s, Real t, Gradient* internal_grads) 
         internal_grads[i][0] = gr;
         internal_grads[i][1] = gs;
         internal_grads[i][2] = gt;
+    }
+}
+
+void eval_hex20_hess_internal(Real r, Real s, Real t, Hessian* internal_hessians) {
+    Real d2phi_drr[20], d2phi_dss[20], d2phi_dtt[20];
+    Real d2phi_drs[20], d2phi_drt[20], d2phi_dst[20];
+    for (int j = 0; j < 20; ++j) {
+        const int a = hex20_monomial_exponents[j][0];
+        const int b = hex20_monomial_exponents[j][1];
+        const int c = hex20_monomial_exponents[j][2];
+
+        const Real ra = (a > 0) ? std::pow(r, static_cast<Real>(a)) : Real(1);
+        const Real sb = (b > 0) ? std::pow(s, static_cast<Real>(b)) : Real(1);
+        const Real tc = (c > 0) ? std::pow(t, static_cast<Real>(c)) : Real(1);
+
+        d2phi_drr[j] = (a > 1) ? Real(a * (a - 1)) * std::pow(r, static_cast<Real>(a - 2)) * sb * tc : Real(0);
+        d2phi_dss[j] = (b > 1) ? ra * Real(b * (b - 1)) * std::pow(s, static_cast<Real>(b - 2)) * tc : Real(0);
+        d2phi_dtt[j] = (c > 1) ? ra * sb * Real(c * (c - 1)) * std::pow(t, static_cast<Real>(c - 2)) : Real(0);
+        d2phi_drs[j] = (a > 0 && b > 0) ? Real(a * b) *
+            std::pow(r, static_cast<Real>(a - 1)) * std::pow(s, static_cast<Real>(b - 1)) * tc : Real(0);
+        d2phi_drt[j] = (a > 0 && c > 0) ? Real(a * c) *
+            std::pow(r, static_cast<Real>(a - 1)) * sb * std::pow(t, static_cast<Real>(c - 1)) : Real(0);
+        d2phi_dst[j] = (b > 0 && c > 0) ? ra * Real(b * c) *
+            std::pow(s, static_cast<Real>(b - 1)) * std::pow(t, static_cast<Real>(c - 1)) : Real(0);
+    }
+
+    for (int i = 0; i < 20; ++i) {
+        Hessian H{};
+        for (int j = 0; j < 20; ++j) {
+            H(0, 0) += hex20_coeffs[j][i] * d2phi_drr[j];
+            H(1, 1) += hex20_coeffs[j][i] * d2phi_dss[j];
+            H(2, 2) += hex20_coeffs[j][i] * d2phi_dtt[j];
+            H(0, 1) += hex20_coeffs[j][i] * d2phi_drs[j];
+            H(0, 2) += hex20_coeffs[j][i] * d2phi_drt[j];
+            H(1, 2) += hex20_coeffs[j][i] * d2phi_dst[j];
+        }
+        H(1, 0) = H(0, 1);
+        H(2, 0) = H(0, 2);
+        H(2, 1) = H(1, 2);
+        internal_hessians[i] = H;
     }
 }
 
@@ -526,70 +574,16 @@ void SerendipityBasis::evaluate_values(const math::Vector<Real, 3>& xi,
     }
 
     if (element_type_ == ElementType::Pyramid13) {
-        // Collapsed-coordinate serendipity basis (conforming).
-        // Treats Pyramid13 as a Hex20 with the top face collapsed to the apex.
-        // Map pyramid (x,y,z) in [-1,1]x[-1,1]x[0,1] to hex (u,v,w) in [-1,1]^3.
-        const Real eps = Real(1e-12);
-        const Real one_minus_z = Real(1) - z;
-
-        if (std::abs(one_minus_z) < eps) {
-            // Apex node (4) is 1, all others 0
-            for (std::size_t i = 0; i < 13; ++i) values[i] = Real(0);
-            values[4] = Real(1);
-            return;
+        static const LagrangeBasis parent(ElementType::Pyramid14, 2);
+        std::vector<Real> parent_values;
+        parent.evaluate_values(xi, parent_values);
+        if (parent_values.size() != 14u) {
+            throw FEException("SerendipityBasis: Pyramid14 parent evaluation size mismatch",
+                              __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
         }
-
-        // Coordinate transformation
-        const Real w = Real(2) * z - Real(1);
-        const Real inv_omz = Real(1) / one_minus_z;
-        const Real u = x * inv_omz;
-        const Real v = y * inv_omz;
-
-        Real internal_vals[20];
-        eval_hex20_internal(u, v, w, internal_vals);
-
-        // Get Hex20 values in NodeOrdering
-        Real hex_vals[20];
-        for (std::size_t i = 0; i < 20; ++i) {
-            hex_vals[i] = internal_vals[kHex20NodeOrderingToInternal[i]];
+        for (std::size_t i = 0; i < 13; ++i) {
+            values[i] = parent_values[i] + kPyramid13CenterRedistribution[i] * parent_values[13];
         }
-
-        // Map Hex20 nodes to Pyramid13 nodes (using collapsed Hex20 is an appropriate and deliberate choice)
-        // Hex20 NodeOrdering:
-        // 0-3: Bottom corners
-        // 4-7: Top corners -> Apex
-        // 8-11: Bottom edges
-        // 12-15: Top edges -> Apex
-        // 16-19: Vertical edges
-
-        // Pyramid13 NodeOrdering:
-        // 0-3: Base corners
-        // 4: Apex
-        // 5-8: Base edges
-        // 9-12: Rising edges
-
-        // Base corners
-        values[0] = hex_vals[0];
-        values[1] = hex_vals[1];
-        values[2] = hex_vals[2];
-        values[3] = hex_vals[3];
-
-        // Apex: sum of all top face nodes
-        values[4] = hex_vals[4] + hex_vals[5] + hex_vals[6] + hex_vals[7] +
-                    hex_vals[12] + hex_vals[13] + hex_vals[14] + hex_vals[15];
-
-        // Base edges
-        values[5] = hex_vals[8];
-        values[6] = hex_vals[9];
-        values[7] = hex_vals[10];
-        values[8] = hex_vals[11];
-
-        // Rising edges
-        values[9]  = hex_vals[16];
-        values[10] = hex_vals[17];
-        values[11] = hex_vals[18];
-        values[12] = hex_vals[19];
-
         return;
     }
 }
@@ -828,83 +822,170 @@ void SerendipityBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
     }
 
     if (element_type_ == ElementType::Pyramid13) {
-        // Collapsed-coordinate serendipity basis (conforming).
-        // Treats Pyramid13 as a Hex20 with the top face collapsed to the apex.
-        // Map pyramid (x,y,z) in [-1,1]x[-1,1]x[0,1] to hex (u,v,w) in [-1,1]^3.
-        const Real eps = Real(1e-12);
-        const Real one_minus_z = Real(1) - z;
-
-        if (std::abs(one_minus_z) < eps) {
-            // Apex node has undefined gradient via this map, use numerical fallback
-            BasisFunction::numerical_gradient(xi, gradients);
-            return;
+        static const LagrangeBasis parent(ElementType::Pyramid14, 2);
+        std::vector<Gradient> parent_gradients;
+        // Pyramid13 inherits the complete-family pyramid apex contract from the
+        // parent basis rather than introducing a separate regularized path.
+        parent.evaluate_gradients(xi, parent_gradients);
+        if (parent_gradients.size() != 14u) {
+            throw FEException("SerendipityBasis: Pyramid14 parent gradient size mismatch",
+                              __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
         }
-
-        // Coordinate transformation
-        const Real w = Real(2) * z - Real(1);
-        const Real inv_omz = Real(1) / one_minus_z;
-        const Real u = x * inv_omz;
-        const Real v = y * inv_omz;
-
-        Gradient internal_grads[20];
-        eval_hex20_grad_internal(u, v, w, internal_grads);
-
-        // Chain rule
-        // du/dx = inv_omz
-        // du/dz = x * inv_omz^2 = u * inv_omz
-        // dv/dy = inv_omz
-        // dv/dz = y * inv_omz^2 = v * inv_omz
-        // dw/dz = 2
-
-        Gradient hex_physical_grads[20];
-        for(int i = 0; i < 20; ++i) {
-            Real dN_du = internal_grads[i][0];
-            Real dN_dv = internal_grads[i][1];
-            Real dN_dw = internal_grads[i][2];
-
-            hex_physical_grads[i][0] = dN_du * inv_omz;
-            hex_physical_grads[i][1] = dN_dv * inv_omz;
-            hex_physical_grads[i][2] = dN_du * u * inv_omz + dN_dv * v * inv_omz + dN_dw * Real(2);
+        for (std::size_t i = 0; i < 13; ++i) {
+            gradients[i] = parent_gradients[i];
+            gradients[i][0] += kPyramid13CenterRedistribution[i] * parent_gradients[13][0];
+            gradients[i][1] += kPyramid13CenterRedistribution[i] * parent_gradients[13][1];
+            gradients[i][2] += kPyramid13CenterRedistribution[i] * parent_gradients[13][2];
         }
-
-        // Reorder Hex20 internal to NodeOrdering
-        Gradient hex_vtk[20];
-        for (std::size_t i = 0; i < 20; ++i) {
-            hex_vtk[i] = hex_physical_grads[kHex20NodeOrderingToInternal[i]];
-        }
-
-        // Map to Pyramid13 nodes (using collapsed Hex20 is an appropriate and deliberate choice)
-        // Base corners
-        gradients[0] = hex_vtk[0];
-        gradients[1] = hex_vtk[1];
-        gradients[2] = hex_vtk[2];
-        gradients[3] = hex_vtk[3];
-
-        // Apex (sum of top nodes)
-        gradients[4][0] = hex_vtk[4][0] + hex_vtk[5][0] + hex_vtk[6][0] + hex_vtk[7][0] +
-                          hex_vtk[12][0] + hex_vtk[13][0] + hex_vtk[14][0] + hex_vtk[15][0];
-        gradients[4][1] = hex_vtk[4][1] + hex_vtk[5][1] + hex_vtk[6][1] + hex_vtk[7][1] +
-                          hex_vtk[12][1] + hex_vtk[13][1] + hex_vtk[14][1] + hex_vtk[15][1];
-        gradients[4][2] = hex_vtk[4][2] + hex_vtk[5][2] + hex_vtk[6][2] + hex_vtk[7][2] +
-                          hex_vtk[12][2] + hex_vtk[13][2] + hex_vtk[14][2] + hex_vtk[15][2];
-
-        // Base edges
-        gradients[5] = hex_vtk[8];
-        gradients[6] = hex_vtk[9];
-        gradients[7] = hex_vtk[10];
-        gradients[8] = hex_vtk[11];
-
-        // Rising edges
-        gradients[9]  = hex_vtk[16];
-        gradients[10] = hex_vtk[17];
-        gradients[11] = hex_vtk[18];
-        gradients[12] = hex_vtk[19];
-
         return;
     }
 
-    // Fall back to numerical gradients for other cases
-    BasisFunction::numerical_gradient(xi, gradients);
+    throw BasisEvaluationException("SerendipityBasis::evaluate_gradients: unsupported serendipity configuration",
+                                   __FILE__, __LINE__, __func__);
+}
+
+void SerendipityBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
+                                         std::vector<Hessian>& hessians) const {
+    hessians.assign(size_, Hessian{});
+    const Real x = xi[0];
+    const Real y = xi[1];
+    const Real z = xi[2];
+
+    if (dimension_ == 2) {
+        if (quad_monomial_exponents_.size() != size_ ||
+            quad_inv_vandermonde_.size() != size_ * size_) {
+            throw FEException("SerendipityBasis: quadrilateral interpolation tables are not initialized",
+                              __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
+        }
+
+        std::vector<Real> dxx(size_, Real(0));
+        std::vector<Real> dxy(size_, Real(0));
+        std::vector<Real> dyy(size_, Real(0));
+        for (std::size_t j = 0; j < size_; ++j) {
+            const auto [ax, ay] = quad_monomial_exponents_[j];
+            dxx[j] = (ax > 1) ? Real(ax * (ax - 1)) * powi(x, ax - 2) * powi(y, ay) : Real(0);
+            dxy[j] = (ax > 0 && ay > 0) ? Real(ax * ay) * powi(x, ax - 1) * powi(y, ay - 1) : Real(0);
+            dyy[j] = (ay > 1) ? Real(ay * (ay - 1)) * powi(x, ax) * powi(y, ay - 2) : Real(0);
+        }
+
+        for (std::size_t i = 0; i < size_; ++i) {
+            for (std::size_t j = 0; j < size_; ++j) {
+                const Real coeff = quad_inv_vandermonde_[j * size_ + i];
+                hessians[i](0, 0) += dxx[j] * coeff;
+                hessians[i](0, 1) += dxy[j] * coeff;
+                hessians[i](1, 1) += dyy[j] * coeff;
+            }
+            hessians[i](1, 0) = hessians[i](0, 1);
+        }
+        return;
+    }
+
+    if (element_type_ == ElementType::Hex8 && order_ == 1) {
+        static const LagrangeBasis parent(ElementType::Hex8, 1);
+        parent.evaluate_hessians(xi, hessians);
+        return;
+    }
+
+    if (geometry_mode_ && element_type_ == ElementType::Hex20) {
+        static const LagrangeBasis parent(ElementType::Hex8, 1);
+        std::vector<Hessian> parent_hessians;
+        parent.evaluate_hessians(xi, parent_hessians);
+        for (std::size_t i = 0; i < 8; ++i) {
+            hessians[i] = parent_hessians[i];
+        }
+        return;
+    }
+
+    if (element_type_ == ElementType::Hex20 && order_ == 2) {
+        Hessian internal_hessians[20];
+        eval_hex20_hess_internal(x, y, z, internal_hessians);
+        for (std::size_t i = 0; i < 20; ++i) {
+            hessians[i] = internal_hessians[kHex20NodeOrderingToInternal[i]];
+        }
+        return;
+    }
+
+    if (element_type_ == ElementType::Wedge15 && order_ == 2) {
+        static const int wedge15_monomial_exponents[15][3] = {
+            {0, 0, 0}, {0, 0, 1}, {0, 0, 2}, {0, 1, 0}, {0, 1, 1},
+            {0, 1, 2}, {0, 2, 0}, {0, 2, 1}, {1, 0, 0}, {1, 0, 1},
+            {1, 0, 2}, {1, 1, 0}, {1, 1, 1}, {2, 0, 0}, {2, 0, 1}
+        };
+        static const Real wedge15_coeffs[15][15] = {
+            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0},
+            {-0.5, 0, 0, 0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+            {0.5, -0, -0, 0.5, -0, -0, -0, -0, -0, -0, -0, -0, -1, -0, -0},
+            {-1, 0, -1, -1, 0, -1, 0, 0, 2, 0, 0, 2, -1, 0, 1},
+            {1.5, 0, 0.5, -1.5, 0, -0.5, 0, 0, -2, 0, 0, 2, 0, 0, 0},
+            {-0.5, -0, 0.5, -0.5, -0, 0.5, -0, -0, -0, -0, -0, -0, 1, -0, -1},
+            {1, 0, 1, 1, 0, 1, 0, 0, -2, 0, 0, -2, 0, 0, 0},
+            {-1, 0, -1, 1, 0, 1, 0, 0, 2, 0, 0, -2, 0, 0, 0},
+            {-1, -1, 0, -1, -1, 0, 2, 0, 0, 2, 0, 0, -1, 1, 0},
+            {1.5, 0.5, 0, -1.5, -0.5, 0, -2, 0, 0, 2, 0, 0, 0, 0, 0},
+            {-0.5, 0.5, -0, -0.5, 0.5, -0, -0, -0, -0, -0, -0, -0, 1, -1, -0},
+            {2, 0, -0, 2, 0, -0, -2, 2, -2, -2, 2, -2, -0, -0, -0},
+            {-2, 0, 0, 2, 0, 0, 2, -2, 2, -2, 2, -2, 0, 0, 0},
+            {1, 1, -0, 1, 1, -0, -2, -0, -0, -2, -0, -0, -0, -0, -0},
+            {-1, -1, -0, 1, 1, -0, 2, -0, -0, -2, -0, -0, -0, -0, -0}
+        };
+
+        Real drr[15], dss[15], dtt[15], drs[15], drt[15], dst[15];
+        for (int j = 0; j < 15; ++j) {
+            const int a = wedge15_monomial_exponents[j][0];
+            const int b = wedge15_monomial_exponents[j][1];
+            const int c = wedge15_monomial_exponents[j][2];
+            drr[j] = (a > 1) ? Real(a * (a - 1)) * std::pow(x, static_cast<Real>(a - 2)) * std::pow(y, static_cast<Real>(b)) * std::pow(z, static_cast<Real>(c)) : Real(0);
+            dss[j] = (b > 1) ? std::pow(x, static_cast<Real>(a)) * Real(b * (b - 1)) * std::pow(y, static_cast<Real>(b - 2)) * std::pow(z, static_cast<Real>(c)) : Real(0);
+            dtt[j] = (c > 1) ? std::pow(x, static_cast<Real>(a)) * std::pow(y, static_cast<Real>(b)) * Real(c * (c - 1)) * std::pow(z, static_cast<Real>(c - 2)) : Real(0);
+            drs[j] = (a > 0 && b > 0) ? Real(a * b) * std::pow(x, static_cast<Real>(a - 1)) * std::pow(y, static_cast<Real>(b - 1)) * std::pow(z, static_cast<Real>(c)) : Real(0);
+            drt[j] = (a > 0 && c > 0) ? Real(a * c) * std::pow(x, static_cast<Real>(a - 1)) * std::pow(y, static_cast<Real>(b)) * std::pow(z, static_cast<Real>(c - 1)) : Real(0);
+            dst[j] = (b > 0 && c > 0) ? std::pow(x, static_cast<Real>(a)) * Real(b * c) * std::pow(y, static_cast<Real>(b - 1)) * std::pow(z, static_cast<Real>(c - 1)) : Real(0);
+        }
+
+        for (int i = 0; i < 15; ++i) {
+            Hessian H{};
+            for (int j = 0; j < 15; ++j) {
+                H(0, 0) += wedge15_coeffs[j][i] * drr[j];
+                H(1, 1) += wedge15_coeffs[j][i] * dss[j];
+                H(2, 2) += wedge15_coeffs[j][i] * dtt[j];
+                H(0, 1) += wedge15_coeffs[j][i] * drs[j];
+                H(0, 2) += wedge15_coeffs[j][i] * drt[j];
+                H(1, 2) += wedge15_coeffs[j][i] * dst[j];
+            }
+            H(1, 0) = H(0, 1);
+            H(2, 0) = H(0, 2);
+            H(2, 1) = H(1, 2);
+            hessians[static_cast<std::size_t>(i)] = H;
+        }
+        return;
+    }
+
+    if (element_type_ == ElementType::Pyramid13) {
+        static const LagrangeBasis parent(ElementType::Pyramid14, 2);
+        std::vector<Hessian> parent_hessians;
+        // Pyramid13 inherits the complete-family pyramid apex contract from the
+        // parent basis rather than introducing a separate regularized path.
+        parent.evaluate_hessians(xi, parent_hessians);
+        if (parent_hessians.size() != 14u) {
+            throw FEException("SerendipityBasis: Pyramid14 parent Hessian size mismatch",
+                              __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
+        }
+        for (std::size_t i = 0; i < 13; ++i) {
+            hessians[i] = parent_hessians[i];
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    const std::size_t sr = static_cast<std::size_t>(r);
+                    const std::size_t sc = static_cast<std::size_t>(c);
+                    hessians[i](sr, sc) +=
+                        kPyramid13CenterRedistribution[i] * parent_hessians[13](sr, sc);
+                }
+            }
+        }
+        return;
+    }
+
+    throw BasisEvaluationException("SerendipityBasis::evaluate_hessians: unsupported serendipity configuration",
+                                   __FILE__, __LINE__, __func__);
 }
 
 } // namespace basis

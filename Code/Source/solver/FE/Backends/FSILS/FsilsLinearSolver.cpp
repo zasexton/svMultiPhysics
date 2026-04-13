@@ -628,6 +628,22 @@ struct GmresLaunchConfig {
     return factor;
 }
 
+[[nodiscard]] Real fsilsNativeDirectTrueResidualRelativeLimit() noexcept
+{
+    Real limit = static_cast<Real>(5e-3);
+    if (const char* env = std::getenv("SVMP_FSILS_NATIVE_DIRECT_TRUE_RES_REL_LIMIT")) {
+        try {
+            limit = static_cast<Real>(std::stod(env));
+        } catch (...) {
+            limit = static_cast<Real>(5e-3);
+        }
+    }
+    if (!std::isfinite(static_cast<double>(limit)) || limit <= static_cast<Real>(0.0)) {
+        limit = static_cast<Real>(5e-3);
+    }
+    return limit;
+}
+
 [[nodiscard]] Real fsilsBlockSchurConstraintMeanDominanceLimit() noexcept
 {
     Real limit = static_cast<Real>(1.0);
@@ -952,6 +968,10 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
     const bool has_native_rank_one_updates =
         !rank_one_updates_.empty() || !reduced_field_updates_.empty();
+    const bool has_native_direct_only_aux_updates =
+        use_blockschur &&
+        (!rank_one_updates_.empty() || !reduced_field_updates_.empty()) &&
+        grouped_bordered_field_couplings_.empty();
 
     auto& ls = ls_;
     using BlockSchurStats = std::decay_t<decltype(ls.blockschur_stats)>;
@@ -2405,7 +2425,16 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             }
 
             const Real factor = fsilsStrictValidationNearTargetFactor();
-            return check.residual_norm <= factor * target;
+            if (check.residual_norm <= factor * target) {
+                return true;
+            }
+
+            if (has_native_direct_only_aux_updates) {
+                const Real rel_limit = fsilsNativeDirectTrueResidualRelativeLimit();
+                return check.relative_residual <= rel_limit;
+            }
+
+            return false;
         };
 
     auto runFsilsSolve = [&](bool blockschur_preparation, std::string& error_out) -> bool {

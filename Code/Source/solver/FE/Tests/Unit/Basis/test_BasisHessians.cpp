@@ -9,6 +9,8 @@
 #include "FE/Basis/HierarchicalBasis.h"
 #include "FE/Basis/SerendipityBasis.h"
 #include "FE/Basis/TensorBasis.h"
+#include <array>
+#include <limits>
 #include <vector>
 
 using namespace svmp::FE;
@@ -447,6 +449,83 @@ TEST(BasisHessians, LagrangeHigherOrderPyramidNearApexMatchesNumericalAndIsSymme
     }
 }
 
+TEST(BasisHessians, LagrangePyramidHessianAtExactApexThrowsWhenLimitIsNotUnique) {
+    const struct Case {
+        ElementType type;
+        int order;
+    } cases[] = {
+        {ElementType::Pyramid5, 1},
+        {ElementType::Pyramid14, 2},
+        {ElementType::Pyramid5, 4},
+    };
+
+    const math::Vector<Real, 3> apex{Real(0), Real(0), Real(1)};
+    for (const auto& c : cases) {
+        LagrangeBasis basis(c.type, c.order);
+        std::vector<Hessian> hessians;
+        EXPECT_THROW(basis.evaluate_hessians(apex, hessians), BasisEvaluationException)
+            << "order " << c.order;
+    }
+}
+
+TEST(BasisHessians, PyramidNearApexHessianShowsDirectionalSpread) {
+    const struct Case {
+        ElementType type;
+        int order;
+        Real min_spread;
+    } cases[] = {
+        {ElementType::Pyramid5, 1, Real(1e2)},
+        {ElementType::Pyramid14, 2, Real(1e2)},
+    };
+
+    const std::array<std::array<Real, 2>, 4> directions = {{
+        {Real(0), Real(0)},
+        {Real(0.45), Real(-0.30)},
+        {Real(-0.35), Real(0.40)},
+        {Real(0.25), Real(0.55)},
+    }};
+    const Real t = Real(1e-4);
+
+    for (const auto& c : cases) {
+        LagrangeBasis basis(c.type, c.order);
+        double max_spread = 0.0;
+
+        std::vector<std::vector<Hessian>> directional_hessians;
+        directional_hessians.reserve(directions.size());
+        for (const auto& direction : directions) {
+            const math::Vector<Real, 3> xi{
+                t * direction[0],
+                t * direction[1],
+                Real(1) - t
+            };
+
+            std::vector<Hessian> hessians;
+            basis.evaluate_hessians(xi, hessians);
+            directional_hessians.push_back(std::move(hessians));
+        }
+
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            for (int r = 0; r < 3; ++r) {
+                for (int cidx = 0; cidx < 3; ++cidx) {
+                    double min_value = std::numeric_limits<double>::infinity();
+                    double max_value = -std::numeric_limits<double>::infinity();
+                    for (const auto& hessians : directional_hessians) {
+                        const double value =
+                            static_cast<double>(hessians[i](static_cast<std::size_t>(r),
+                                                            static_cast<std::size_t>(cidx)));
+                        min_value = std::min(min_value, value);
+                        max_value = std::max(max_value, value);
+                    }
+                    max_spread = std::max(max_spread, max_value - min_value);
+                }
+            }
+        }
+
+        EXPECT_GT(max_spread, static_cast<double>(c.min_spread))
+            << "order " << c.order;
+    }
+}
+
 TEST(BasisHessians, SerendipityHessiansSumToZero) {
     const struct Case {
         ElementType type;
@@ -504,6 +583,14 @@ TEST(BasisHessians, SerendipityHessiansAreExplicitlySymmetric) {
         SerendipityBasis basis(c.type, c.order);
         expect_hessians_symmetric(basis, c.xi, Real(5e-6));
     }
+}
+
+TEST(BasisHessians, Pyramid13SerendipityHessianAtExactApexThrowsBecauseParentLimitIsNotUnique) {
+    SerendipityBasis basis(ElementType::Pyramid13, 2);
+    const math::Vector<Real, 3> apex{Real(0), Real(0), Real(1)};
+
+    std::vector<Hessian> hessians;
+    EXPECT_THROW(basis.evaluate_hessians(apex, hessians), BasisEvaluationException);
 }
 
 // ============================================================================

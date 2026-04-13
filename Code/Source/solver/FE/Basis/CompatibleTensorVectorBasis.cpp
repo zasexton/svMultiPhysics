@@ -23,28 +23,47 @@ CompatibleTensorVectorBasis::CompatibleTensorVectorBasis(
     std::vector<DofAssociation> associations,
     int order,
     ElementType element_type)
+    : CompatibleTensorVectorBasis(family,
+                                  semantic_basis_type,
+                                  std::vector<std::shared_ptr<BasisFunction>>{
+                                      std::move(first_component_basis),
+                                      std::move(second_component_basis)},
+                                  std::move(associations),
+                                  order,
+                                  element_type) {}
+
+CompatibleTensorVectorBasis::CompatibleTensorVectorBasis(
+    Family family,
+    BasisType semantic_basis_type,
+    std::vector<std::shared_ptr<BasisFunction>> component_bases,
+    std::vector<DofAssociation> associations,
+    int order,
+    ElementType element_type)
     : family_(family)
     , semantic_basis_type_(semantic_basis_type)
     , element_type_(element_type)
     , order_(order)
-    , first_component_basis_(std::move(first_component_basis))
-    , second_component_basis_(std::move(second_component_basis))
+    , component_bases_(std::move(component_bases))
     , associations_(std::move(associations)) {
-    FE_CHECK_NOT_NULL(first_component_basis_.get(),
-                      "CompatibleTensorVectorBasis: first component basis");
-    FE_CHECK_NOT_NULL(second_component_basis_.get(),
-                      "CompatibleTensorVectorBasis: second component basis");
-    FE_CHECK_ARG(!first_component_basis_->is_vector_valued() &&
-                     !second_component_basis_->is_vector_valued(),
-                 "CompatibleTensorVectorBasis: component bases must be scalar");
-    FE_CHECK_ARG(first_component_basis_->dimension() == 2 &&
-                     second_component_basis_->dimension() == 2,
-                 "CompatibleTensorVectorBasis: component bases must be two-dimensional");
-    FE_CHECK_ARG(first_component_basis_->element_type() == ElementType::Quad4 &&
-                     second_component_basis_->element_type() == ElementType::Quad4,
-                 "CompatibleTensorVectorBasis: component bases must be quadrilateral tensor-product bases");
+    FE_CHECK_ARG(element_type_ == ElementType::Quad4 || element_type_ == ElementType::Hex8,
+                 "CompatibleTensorVectorBasis: only Quad4 and Hex8 tensor-product cells are supported");
 
-    size_ = first_component_basis_->size() + second_component_basis_->size();
+    dimension_ = (element_type_ == ElementType::Quad4) ? 2 : 3;
+    FE_CHECK_ARG(component_bases_.size() == static_cast<std::size_t>(dimension_),
+                 "CompatibleTensorVectorBasis: component count must match tensor dimension");
+
+    size_ = 0;
+    for (const auto& basis : component_bases_) {
+        FE_CHECK_NOT_NULL(basis.get(), "CompatibleTensorVectorBasis: null component basis");
+        FE_CHECK_ARG(!basis->is_vector_valued(),
+                     "CompatibleTensorVectorBasis: component bases must be scalar");
+        FE_CHECK_ARG(basis->dimension() == dimension_,
+                     "CompatibleTensorVectorBasis: component basis dimension mismatch");
+        FE_CHECK_ARG(basis->element_type() == element_type_,
+                     "CompatibleTensorVectorBasis: component basis element mismatch");
+        size_ += basis->size();
+    }
+
     FE_CHECK_ARG(associations_.size() == size_,
                  "CompatibleTensorVectorBasis: DOF association size mismatch");
 }
@@ -55,27 +74,25 @@ std::string CompatibleTensorVectorBasis::cache_identity() const {
         << "|family=" << static_cast<int>(family_)
         << "|semantic=" << static_cast<int>(semantic_basis_type_)
         << "|elem=" << static_cast<int>(element_type_)
-        << "|order=" << order_
-        << "|first=" << first_component_basis_->cache_identity()
-        << "|second=" << second_component_basis_->cache_identity();
+        << "|order=" << order_;
+    for (std::size_t c = 0; c < component_bases_.size(); ++c) {
+        oss << "|component" << c << '=' << component_bases_[c]->cache_identity();
+    }
     return oss.str();
 }
 
 void CompatibleTensorVectorBasis::evaluate_vector_values(
     const math::Vector<Real, 3>& xi,
     std::vector<math::Vector<Real, 3>>& values) const {
-    std::vector<Real> first_values;
-    std::vector<Real> second_values;
-    first_component_basis_->evaluate_values(xi, first_values);
-    second_component_basis_->evaluate_values(xi, second_values);
-
     values.assign(size_, math::Vector<Real, 3>{});
-    for (std::size_t i = 0; i < first_values.size(); ++i) {
-        values[i][0] = first_values[i];
-    }
-    const std::size_t offset = first_values.size();
-    for (std::size_t i = 0; i < second_values.size(); ++i) {
-        values[offset + i][1] = second_values[i];
+    std::size_t offset = 0;
+    for (std::size_t component = 0; component < component_bases_.size(); ++component) {
+        std::vector<Real> scalar_values;
+        component_bases_[component]->evaluate_values(xi, scalar_values);
+        for (std::size_t i = 0; i < scalar_values.size(); ++i) {
+            values[offset + i][component] = scalar_values[i];
+        }
+        offset += scalar_values.size();
     }
 }
 
@@ -85,18 +102,15 @@ void CompatibleTensorVectorBasis::evaluate_divergence(
     FE_CHECK_ARG(family_ == Family::HDiv,
                  "CompatibleTensorVectorBasis::evaluate_divergence is only valid for H(div)");
 
-    std::vector<Gradient> first_gradients;
-    std::vector<Gradient> second_gradients;
-    first_component_basis_->evaluate_gradients(xi, first_gradients);
-    second_component_basis_->evaluate_gradients(xi, second_gradients);
-
     divergence.assign(size_, Real(0));
-    for (std::size_t i = 0; i < first_gradients.size(); ++i) {
-        divergence[i] = first_gradients[i][0];
-    }
-    const std::size_t offset = first_gradients.size();
-    for (std::size_t i = 0; i < second_gradients.size(); ++i) {
-        divergence[offset + i] = second_gradients[i][1];
+    std::size_t offset = 0;
+    for (std::size_t component = 0; component < component_bases_.size(); ++component) {
+        std::vector<Gradient> gradients;
+        component_bases_[component]->evaluate_gradients(xi, gradients);
+        for (std::size_t i = 0; i < gradients.size(); ++i) {
+            divergence[offset + i] = gradients[i][component];
+        }
+        offset += gradients.size();
     }
 }
 
@@ -106,18 +120,33 @@ void CompatibleTensorVectorBasis::evaluate_curl(
     FE_CHECK_ARG(family_ == Family::HCurl,
                  "CompatibleTensorVectorBasis::evaluate_curl is only valid for H(curl)");
 
-    std::vector<Gradient> first_gradients;
-    std::vector<Gradient> second_gradients;
-    first_component_basis_->evaluate_gradients(xi, first_gradients);
-    second_component_basis_->evaluate_gradients(xi, second_gradients);
-
     curl.assign(size_, math::Vector<Real, 3>{});
-    for (std::size_t i = 0; i < first_gradients.size(); ++i) {
-        curl[i][2] = -first_gradients[i][1];
-    }
-    const std::size_t offset = first_gradients.size();
-    for (std::size_t i = 0; i < second_gradients.size(); ++i) {
-        curl[offset + i][2] = second_gradients[i][0];
+    std::size_t offset = 0;
+    for (std::size_t component = 0; component < component_bases_.size(); ++component) {
+        std::vector<Gradient> gradients;
+        component_bases_[component]->evaluate_gradients(xi, gradients);
+        for (std::size_t i = 0; i < gradients.size(); ++i) {
+            auto& value = curl[offset + i];
+            if (dimension_ == 2) {
+                if (component == 0u) {
+                    value[2] = -gradients[i][1];
+                } else {
+                    value[2] = gradients[i][0];
+                }
+            } else {
+                if (component == 0u) {
+                    value[1] = gradients[i][2];
+                    value[2] = -gradients[i][1];
+                } else if (component == 1u) {
+                    value[0] = -gradients[i][2];
+                    value[2] = gradients[i][0];
+                } else {
+                    value[0] = gradients[i][1];
+                    value[1] = -gradients[i][0];
+                }
+            }
+        }
+        offset += gradients.size();
     }
 }
 

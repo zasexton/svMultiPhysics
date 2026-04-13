@@ -556,26 +556,31 @@ static void expect_curl_is_divergence_free(const NedelecBasis& basis,
             return c[i];
         };
 
-        math::Vector<Real, 3> pxp{xc[0] + h, xc[1], xc[2]};
-        math::Vector<Real, 3> pxm{xc[0] - h, xc[1], xc[2]};
-        math::Vector<Real, 3> pyp{xc[0], xc[1] + h, xc[2]};
-        math::Vector<Real, 3> pym{xc[0], xc[1] - h, xc[2]};
-        math::Vector<Real, 3> pzp{xc[0], xc[1], xc[2] + h};
-        math::Vector<Real, 3> pzm{xc[0], xc[1], xc[2] - h};
+        auto derivative_4th = [&](int axis, int component) {
+            math::Vector<Real, 3> pmm = xc;
+            math::Vector<Real, 3> pm = xc;
+            math::Vector<Real, 3> pp = xc;
+            math::Vector<Real, 3> ppp = xc;
+            pmm[static_cast<std::size_t>(axis)] -= Real(2) * h;
+            pm[static_cast<std::size_t>(axis)] -= h;
+            pp[static_cast<std::size_t>(axis)] += h;
+            ppp[static_cast<std::size_t>(axis)] += Real(2) * h;
 
-        const auto cxp = eval_curl(pxp);
-        const auto cxm = eval_curl(pxm);
-        const auto cyp = eval_curl(pyp);
-        const auto cym = eval_curl(pym);
-        const auto czp = eval_curl(pzp);
-        const auto czm = eval_curl(pzm);
+            const auto cmm = eval_curl(pmm);
+            const auto cm = eval_curl(pm);
+            const auto cp = eval_curl(pp);
+            const auto cpp = eval_curl(ppp);
 
-        const double dCx_dx = static_cast<double>(cxp[0] - cxm[0]) /
-                              (2.0 * static_cast<double>(h));
-        const double dCy_dy = static_cast<double>(cyp[1] - cym[1]) /
-                              (2.0 * static_cast<double>(h));
-        const double dCz_dz = static_cast<double>(czp[2] - czm[2]) /
-                              (2.0 * static_cast<double>(h));
+            return (-static_cast<double>(cpp[static_cast<std::size_t>(component)]) +
+                    8.0 * static_cast<double>(cp[static_cast<std::size_t>(component)]) -
+                    8.0 * static_cast<double>(cm[static_cast<std::size_t>(component)]) +
+                    static_cast<double>(cmm[static_cast<std::size_t>(component)])) /
+                   (12.0 * static_cast<double>(h));
+        };
+
+        const double dCx_dx = derivative_4th(/*axis=*/0, /*component=*/0);
+        const double dCy_dy = derivative_4th(/*axis=*/1, /*component=*/1);
+        const double dCz_dz = derivative_4th(/*axis=*/2, /*component=*/2);
 
         const double div_curl = dCx_dx + dCy_dy + dCz_dz;
         EXPECT_NEAR(div_curl, 0.0, static_cast<double>(tol))
@@ -666,6 +671,246 @@ static double integrate_pyramid_edge_tangent(const NedelecBasis& basis,
         dof += 0.5 * quad.weight(q) * integrand;
     }
     return dof;
+}
+
+static double integrate_nd_edge_tangential_moment(const NedelecBasis& basis,
+                                                  ElementType elem_type,
+                                                  int edge_id,
+                                                  int mode_id,
+                                                  int func_id,
+                                                  int quad_order = 8) {
+    using svmp::FE::basis::LagrangeBasis;
+    using svmp::FE::math::Vector;
+
+    const auto ref = elements::ReferenceElement::create(elem_type);
+    const auto& edge_nodes = ref.edge_nodes(static_cast<std::size_t>(edge_id));
+    EXPECT_EQ(edge_nodes.size(), 2u);
+    if (edge_nodes.size() != 2u) {
+        return 0.0;
+    }
+
+    const Vector<Real,3> a =
+        NodeOrdering::get_node_coords(elem_type, static_cast<std::size_t>(edge_nodes[0]));
+    const Vector<Real,3> b =
+        NodeOrdering::get_node_coords(elem_type, static_cast<std::size_t>(edge_nodes[1]));
+    const Vector<Real,3> tvec = b - a;
+    const Real len = tvec.norm();
+    EXPECT_GT(len, Real(0));
+    if (len <= Real(0)) {
+        return 0.0;
+    }
+
+    const Vector<Real,3> t = tvec / len;
+    const Real J = len * Real(0.5);
+    LagrangeBasis line(ElementType::Line2, basis.order());
+    auto quad = quadrature::QuadratureFactory::create(
+        ElementType::Line2,
+        std::max(quad_order, 2 * basis.order() + 4),
+        QuadratureType::GaussLegendre,
+        /*use_cache=*/false);
+
+    double moment = 0.0;
+    for (std::size_t q = 0; q < quad->num_points(); ++q) {
+        const Real s = quad->point(q)[0];
+        std::vector<Real> lvals;
+        line.evaluate_values(Vector<Real,3>{s, Real(0), Real(0)}, lvals);
+        const Real phi = lvals[static_cast<std::size_t>(mode_id)];
+
+        const Real tpar = (s + Real(1)) * Real(0.5);
+        const Vector<Real,3> xi = a * (Real(1) - tpar) + b * tpar;
+
+        std::vector<Vector<Real,3>> vals;
+        basis.evaluate_vector_values(xi, vals);
+        const auto& w = vals[static_cast<std::size_t>(func_id)];
+
+        moment += static_cast<double>(quad->weight(q) * (J * phi * w.dot(t)));
+    }
+    return moment;
+}
+
+static double integrate_nd_face_tangential_moment(const NedelecBasis& basis,
+                                                  ElementType elem_type,
+                                                  int face_id,
+                                                  int moment_index,
+                                                  int func_id,
+                                                  int quad_order = 8) {
+    using svmp::FE::basis::LagrangeBasis;
+    using svmp::FE::math::Vector;
+
+    const int k = basis.order();
+    const auto ref = elements::ReferenceElement::create(elem_type);
+    const auto& face_nodes = ref.face_nodes(static_cast<std::size_t>(face_id));
+
+    if (face_nodes.size() == 3u) {
+        const Vector<Real,3> v0 =
+            NodeOrdering::get_node_coords(elem_type, static_cast<std::size_t>(face_nodes[0]));
+        const Vector<Real,3> v1 =
+            NodeOrdering::get_node_coords(elem_type, static_cast<std::size_t>(face_nodes[1]));
+        const Vector<Real,3> v2 =
+            NodeOrdering::get_node_coords(elem_type, static_cast<std::size_t>(face_nodes[2]));
+        const Vector<Real,3> tu = v1 - v0;
+        const Vector<Real,3> tv = v2 - v0;
+        const Real scale = tu.cross(tv).norm();
+
+        const LagrangeBasis tri_basis(ElementType::Triangle3, k - 1);
+        const std::size_t n_face = tri_basis.size();
+        const int dir_id = (moment_index < static_cast<int>(n_face)) ? 0 : 1;
+        const int mode_id = (dir_id == 0) ? moment_index : moment_index - static_cast<int>(n_face);
+        auto quad = quadrature::QuadratureFactory::create(
+            ElementType::Triangle3,
+            std::max(quad_order, 2 * k + 4),
+            QuadratureType::GaussLegendre,
+            /*use_cache=*/false);
+
+        double moment = 0.0;
+        for (std::size_t q = 0; q < quad->num_points(); ++q) {
+            const auto pt = quad->point(q);
+            const Real u = pt[0];
+            const Real v = pt[1];
+
+            std::vector<Real> bvals;
+            tri_basis.evaluate_values(Vector<Real,3>{u, v, Real(0)}, bvals);
+            const Real phi = bvals[static_cast<std::size_t>(mode_id)];
+
+            const Vector<Real,3> xi = v0 + tu * u + tv * v;
+            std::vector<Vector<Real,3>> vals;
+            basis.evaluate_vector_values(xi, vals);
+            const auto& w = vals[static_cast<std::size_t>(func_id)];
+            const Vector<Real,3>& tangent = (dir_id == 0) ? tu : tv;
+
+            moment += static_cast<double>(quad->weight(q) * (scale * phi * w.dot(tangent)));
+        }
+        return moment;
+    }
+
+    const std::array<Vector<Real,3>, 4> fv{
+        NodeOrdering::get_node_coords(elem_type, static_cast<std::size_t>(face_nodes[0])),
+        NodeOrdering::get_node_coords(elem_type, static_cast<std::size_t>(face_nodes[1])),
+        NodeOrdering::get_node_coords(elem_type, static_cast<std::size_t>(face_nodes[2])),
+        NodeOrdering::get_node_coords(elem_type, static_cast<std::size_t>(face_nodes[3]))
+    };
+    const Vector<Real,3> tu_raw = fv[1] - fv[0];
+    const Vector<Real,3> tw_raw = fv[3] - fv[0];
+    const Vector<Real,3> tu = tu_raw / tu_raw.norm();
+    const Vector<Real,3> tw = tw_raw / tw_raw.norm();
+
+    const LagrangeBasis u_low(ElementType::Line2, k - 1);
+    const LagrangeBasis u_full(ElementType::Line2, k);
+    const LagrangeBasis w_low(ElementType::Line2, k - 1);
+    const LagrangeBasis w_full(ElementType::Line2, k);
+    const int n_u = k * (k + 1);
+
+    auto quad = quadrature::QuadratureFactory::create(
+        ElementType::Quad4,
+        std::max(quad_order, 2 * k + 4),
+        QuadratureType::GaussLegendre,
+        /*use_cache=*/false);
+
+    double moment = 0.0;
+    for (std::size_t q = 0; q < quad->num_points(); ++q) {
+        const auto pt = quad->point(q);
+        const Real u = pt[0];
+        const Real v = pt[1];
+        const Vector<Real,3> xi = bilinear_face_point(fv, u, v);
+        const Vector<Real,3> du = bilinear_face_du(fv, u, v);
+        const Vector<Real,3> dv = bilinear_face_dv(fv, u, v);
+        const Real scale = du.cross(dv).norm();
+
+        std::vector<Real> u_low_vals, u_full_vals, w_low_vals, w_full_vals;
+        u_low.evaluate_values(Vector<Real,3>{u, Real(0), Real(0)}, u_low_vals);
+        u_full.evaluate_values(Vector<Real,3>{u, Real(0), Real(0)}, u_full_vals);
+        w_low.evaluate_values(Vector<Real,3>{v, Real(0), Real(0)}, w_low_vals);
+        w_full.evaluate_values(Vector<Real,3>{v, Real(0), Real(0)}, w_full_vals);
+
+        Real phi = Real(0);
+        Vector<Real,3> tangent{};
+        if (moment_index < n_u) {
+            const int iu = moment_index % k;
+            const int jw = moment_index / k;
+            phi = u_low_vals[static_cast<std::size_t>(iu)] *
+                  w_full_vals[static_cast<std::size_t>(jw)];
+            tangent = tu;
+        } else {
+            const int local = moment_index - n_u;
+            const int iu = local % (k + 1);
+            const int jw = local / (k + 1);
+            phi = u_full_vals[static_cast<std::size_t>(iu)] *
+                  w_low_vals[static_cast<std::size_t>(jw)];
+            tangent = tw;
+        }
+
+        std::vector<Vector<Real,3>> vals;
+        basis.evaluate_vector_values(xi, vals);
+        const auto& w = vals[static_cast<std::size_t>(func_id)];
+        moment += static_cast<double>(quad->weight(q) * (scale * phi * w.dot(tangent)));
+    }
+
+    return moment;
+}
+
+static void expect_nd_edge_kronecker(const NedelecBasis& basis,
+                                     ElementType elem_type,
+                                     double tol) {
+    const auto assoc = basis.dof_associations();
+    ASSERT_EQ(assoc.size(), basis.size());
+
+    const auto ref = elements::ReferenceElement::create(elem_type);
+    for (std::size_t i = 0; i < basis.size(); ++i) {
+        for (std::size_t e = 0; e < ref.num_edges(); ++e) {
+            for (int m = 0; m <= basis.order(); ++m) {
+                const double functional = integrate_nd_edge_tangential_moment(
+                    basis,
+                    elem_type,
+                    static_cast<int>(e),
+                    m,
+                    static_cast<int>(i),
+                    10);
+                const bool is_own_dof =
+                    assoc[i].entity_type == DofEntity::Edge &&
+                    assoc[i].entity_id == static_cast<int>(e) &&
+                    assoc[i].moment_index == m;
+                EXPECT_NEAR(functional, is_own_dof ? 1.0 : 0.0, tol)
+                    << "ND edge functional (" << e << ", " << m
+                    << ") applied to basis function " << i
+                    << " should be " << (is_own_dof ? 1.0 : 0.0);
+            }
+        }
+    }
+}
+
+static void expect_nd_face_kronecker(const NedelecBasis& basis,
+                                     ElementType elem_type,
+                                     double tol) {
+    const auto assoc = basis.dof_associations();
+    ASSERT_EQ(assoc.size(), basis.size());
+
+    const auto ref = elements::ReferenceElement::create(elem_type);
+    for (std::size_t i = 0; i < basis.size(); ++i) {
+        for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+            const auto& face_nodes = ref.face_nodes(f);
+            const int dofs_per_face = (face_nodes.size() == 3u)
+                ? basis.order() * (basis.order() + 1)
+                : 2 * basis.order() * (basis.order() + 1);
+
+            for (int m = 0; m < dofs_per_face; ++m) {
+                const double functional = integrate_nd_face_tangential_moment(
+                    basis,
+                    elem_type,
+                    static_cast<int>(f),
+                    m,
+                    static_cast<int>(i),
+                    10);
+                const bool is_own_dof =
+                    assoc[i].entity_type == DofEntity::Face &&
+                    assoc[i].entity_id == static_cast<int>(f) &&
+                    assoc[i].moment_index == m;
+                EXPECT_NEAR(functional, is_own_dof ? 1.0 : 0.0, tol)
+                    << "ND face functional (" << f << ", " << m
+                    << ") applied to basis function " << i
+                    << " should be " << (is_own_dof ? 1.0 : 0.0);
+            }
+        }
+    }
 }
 
 // =============================================================================
@@ -1076,6 +1321,34 @@ TEST(HigherOrderWedgePyramid, PyramidND2Construction) {
     });
 }
 
+TEST(HigherOrderWedgePyramid, WedgeRT3Construction) {
+    EXPECT_NO_THROW({
+        RaviartThomasBasis basis(ElementType::Wedge6, 3);
+        EXPECT_EQ(basis.size(), 140u);
+    });
+}
+
+TEST(HigherOrderWedgePyramid, PyramidRT3Construction) {
+    EXPECT_NO_THROW({
+        RaviartThomasBasis basis(ElementType::Pyramid5, 3);
+        EXPECT_EQ(basis.size(), 137u);
+    });
+}
+
+TEST(HigherOrderWedgePyramid, WedgeND3Construction) {
+    EXPECT_NO_THROW({
+        NedelecBasis basis(ElementType::Wedge6, 3);
+        EXPECT_EQ(basis.size(), 168u);
+    });
+}
+
+TEST(HigherOrderWedgePyramid, PyramidND3Construction) {
+    EXPECT_NO_THROW({
+        NedelecBasis basis(ElementType::Pyramid5, 3);
+        EXPECT_EQ(basis.size(), 116u);
+    });
+}
+
 TEST(HigherOrderWedgePyramid, WedgeRT2Evaluation) {
     RaviartThomasBasis basis(ElementType::Wedge6, 2);
 
@@ -1132,6 +1405,70 @@ TEST(HigherOrderWedgePyramid, PyramidND2Evaluation) {
     std::vector<math::Vector<Real, 3>> values;
     EXPECT_NO_THROW(basis.evaluate_vector_values(xi, values));
     EXPECT_EQ(values.size(), 63u);
+
+    for (const auto& v : values) {
+        EXPECT_TRUE(std::isfinite(v[0]));
+        EXPECT_TRUE(std::isfinite(v[1]));
+        EXPECT_TRUE(std::isfinite(v[2]));
+    }
+}
+
+TEST(HigherOrderWedgePyramid, WedgeRT3Evaluation) {
+    RaviartThomasBasis basis(ElementType::Wedge6, 3);
+
+    math::Vector<Real, 3> xi{Real(0.2), Real(0.3), Real(-0.1)};
+
+    std::vector<math::Vector<Real, 3>> values;
+    EXPECT_NO_THROW(basis.evaluate_vector_values(xi, values));
+    EXPECT_EQ(values.size(), 140u);
+
+    for (const auto& v : values) {
+        EXPECT_TRUE(std::isfinite(v[0]));
+        EXPECT_TRUE(std::isfinite(v[1]));
+        EXPECT_TRUE(std::isfinite(v[2]));
+    }
+}
+
+TEST(HigherOrderWedgePyramid, PyramidRT3Evaluation) {
+    RaviartThomasBasis basis(ElementType::Pyramid5, 3);
+
+    math::Vector<Real, 3> xi{Real(0.1), Real(-0.15), Real(0.35)};
+
+    std::vector<math::Vector<Real, 3>> values;
+    EXPECT_NO_THROW(basis.evaluate_vector_values(xi, values));
+    EXPECT_EQ(values.size(), 137u);
+
+    for (const auto& v : values) {
+        EXPECT_TRUE(std::isfinite(v[0]));
+        EXPECT_TRUE(std::isfinite(v[1]));
+        EXPECT_TRUE(std::isfinite(v[2]));
+    }
+}
+
+TEST(HigherOrderWedgePyramid, WedgeND3Evaluation) {
+    NedelecBasis basis(ElementType::Wedge6, 3);
+
+    math::Vector<Real, 3> xi{Real(0.2), Real(0.3), Real(-0.1)};
+
+    std::vector<math::Vector<Real, 3>> values;
+    EXPECT_NO_THROW(basis.evaluate_vector_values(xi, values));
+    EXPECT_EQ(values.size(), 168u);
+
+    for (const auto& v : values) {
+        EXPECT_TRUE(std::isfinite(v[0]));
+        EXPECT_TRUE(std::isfinite(v[1]));
+        EXPECT_TRUE(std::isfinite(v[2]));
+    }
+}
+
+TEST(HigherOrderWedgePyramid, PyramidND3Evaluation) {
+    NedelecBasis basis(ElementType::Pyramid5, 3);
+
+    math::Vector<Real, 3> xi{Real(0.1), Real(-0.15), Real(0.35)};
+
+    std::vector<math::Vector<Real, 3>> values;
+    EXPECT_NO_THROW(basis.evaluate_vector_values(xi, values));
+    EXPECT_EQ(values.size(), 116u);
 
     for (const auto& v : values) {
         EXPECT_TRUE(std::isfinite(v[0]));
@@ -1200,6 +1537,34 @@ TEST(HigherOrderWedgePyramid, PyramidRT2DivergenceFinite) {
     }
 }
 
+TEST(HigherOrderWedgePyramid, WedgeRT3DivergenceFinite) {
+    RaviartThomasBasis basis(ElementType::Wedge6, 3);
+
+    math::Vector<Real, 3> xi{Real(0.2), Real(0.3), Real(-0.1)};
+
+    std::vector<Real> div;
+    EXPECT_NO_THROW(basis.evaluate_divergence(xi, div));
+    EXPECT_EQ(div.size(), 140u);
+
+    for (const auto& d : div) {
+        EXPECT_TRUE(std::isfinite(d));
+    }
+}
+
+TEST(HigherOrderWedgePyramid, PyramidRT3DivergenceFinite) {
+    RaviartThomasBasis basis(ElementType::Pyramid5, 3);
+
+    math::Vector<Real, 3> xi{Real(0.1), Real(-0.15), Real(0.35)};
+
+    std::vector<Real> div;
+    EXPECT_NO_THROW(basis.evaluate_divergence(xi, div));
+    EXPECT_EQ(div.size(), 137u);
+
+    for (const auto& d : div) {
+        EXPECT_TRUE(std::isfinite(d));
+    }
+}
+
 // =============================================================================
 // Nedelec(k) Curl Tests for k=1,2
 // =============================================================================
@@ -1244,6 +1609,38 @@ TEST(HigherOrderWedgePyramid, PyramidND2CurlFinite) {
     std::vector<math::Vector<Real, 3>> curl;
     EXPECT_NO_THROW(basis.evaluate_curl(xi, curl));
     EXPECT_EQ(curl.size(), 63u);
+
+    for (const auto& c : curl) {
+        EXPECT_TRUE(std::isfinite(c[0]));
+        EXPECT_TRUE(std::isfinite(c[1]));
+        EXPECT_TRUE(std::isfinite(c[2]));
+    }
+}
+
+TEST(HigherOrderWedgePyramid, WedgeND3CurlFinite) {
+    NedelecBasis basis(ElementType::Wedge6, 3);
+
+    math::Vector<Real, 3> xi{Real(0.2), Real(0.3), Real(-0.1)};
+
+    std::vector<math::Vector<Real, 3>> curl;
+    EXPECT_NO_THROW(basis.evaluate_curl(xi, curl));
+    EXPECT_EQ(curl.size(), 168u);
+
+    for (const auto& c : curl) {
+        EXPECT_TRUE(std::isfinite(c[0]));
+        EXPECT_TRUE(std::isfinite(c[1]));
+        EXPECT_TRUE(std::isfinite(c[2]));
+    }
+}
+
+TEST(HigherOrderWedgePyramid, PyramidND3CurlFinite) {
+    NedelecBasis basis(ElementType::Pyramid5, 3);
+
+    math::Vector<Real, 3> xi{Real(0.1), Real(-0.15), Real(0.35)};
+
+    std::vector<math::Vector<Real, 3>> curl;
+    EXPECT_NO_THROW(basis.evaluate_curl(xi, curl));
+    EXPECT_EQ(curl.size(), 116u);
 
     for (const auto& c : curl) {
         EXPECT_TRUE(std::isfinite(c[0]));
@@ -1393,6 +1790,78 @@ TEST(HigherOrderWedgePyramid, PyramidND0EdgeTangentMoment) {
     }
 }
 
+TEST(HigherOrderWedgePyramid, WedgeND1EdgeTangentialMomentKronecker) {
+    NedelecBasis basis(ElementType::Wedge6, 1);
+    ASSERT_EQ(basis.size(), 34u);
+    expect_nd_edge_kronecker(basis, ElementType::Wedge6, 5e-8);
+}
+
+TEST(HigherOrderWedgePyramid, PyramidND1EdgeTangentialMomentKronecker) {
+    NedelecBasis basis(ElementType::Pyramid5, 1);
+    ASSERT_EQ(basis.size(), 28u);
+    expect_nd_edge_kronecker(basis, ElementType::Pyramid5, 5e-8);
+}
+
+TEST(HigherOrderWedgePyramid, WedgeND2EdgeTangentialMomentKronecker) {
+    NedelecBasis basis(ElementType::Wedge6, 2);
+    ASSERT_EQ(basis.size(), 84u);
+    expect_nd_edge_kronecker(basis, ElementType::Wedge6, 2e-7);
+}
+
+TEST(HigherOrderWedgePyramid, PyramidND2EdgeTangentialMomentKronecker) {
+    NedelecBasis basis(ElementType::Pyramid5, 2);
+    ASSERT_EQ(basis.size(), 63u);
+    expect_nd_edge_kronecker(basis, ElementType::Pyramid5, 2e-7);
+}
+
+TEST(HigherOrderWedgePyramid, WedgeND1FaceTangentialMomentKronecker) {
+    NedelecBasis basis(ElementType::Wedge6, 1);
+    ASSERT_EQ(basis.size(), 34u);
+    expect_nd_face_kronecker(basis, ElementType::Wedge6, 5e-8);
+}
+
+TEST(HigherOrderWedgePyramid, PyramidND1FaceTangentialMomentKronecker) {
+    NedelecBasis basis(ElementType::Pyramid5, 1);
+    ASSERT_EQ(basis.size(), 28u);
+    expect_nd_face_kronecker(basis, ElementType::Pyramid5, 5e-8);
+}
+
+TEST(HigherOrderWedgePyramid, WedgeND2FaceTangentialMomentKronecker) {
+    NedelecBasis basis(ElementType::Wedge6, 2);
+    ASSERT_EQ(basis.size(), 84u);
+    expect_nd_face_kronecker(basis, ElementType::Wedge6, 2e-7);
+}
+
+TEST(HigherOrderWedgePyramid, PyramidND2FaceTangentialMomentKronecker) {
+    NedelecBasis basis(ElementType::Pyramid5, 2);
+    ASSERT_EQ(basis.size(), 63u);
+    expect_nd_face_kronecker(basis, ElementType::Pyramid5, 2e-7);
+}
+
+TEST(HigherOrderWedgePyramid, WedgeND3EdgeTangentialMomentKronecker) {
+    NedelecBasis basis(ElementType::Wedge6, 3);
+    ASSERT_EQ(basis.size(), 168u);
+    expect_nd_edge_kronecker(basis, ElementType::Wedge6, 5e-7);
+}
+
+TEST(HigherOrderWedgePyramid, PyramidND3EdgeTangentialMomentKronecker) {
+    NedelecBasis basis(ElementType::Pyramid5, 3);
+    ASSERT_EQ(basis.size(), 116u);
+    expect_nd_edge_kronecker(basis, ElementType::Pyramid5, 5e-7);
+}
+
+TEST(HigherOrderWedgePyramid, WedgeND3FaceTangentialMomentKronecker) {
+    NedelecBasis basis(ElementType::Wedge6, 3);
+    ASSERT_EQ(basis.size(), 168u);
+    expect_nd_face_kronecker(basis, ElementType::Wedge6, 8e-7);
+}
+
+TEST(HigherOrderWedgePyramid, PyramidND3FaceTangentialMomentKronecker) {
+    NedelecBasis basis(ElementType::Pyramid5, 3);
+    ASSERT_EQ(basis.size(), 116u);
+    expect_nd_face_kronecker(basis, ElementType::Pyramid5, 8e-7);
+}
+
 // =============================================================================
 // RT(1) Divergence Consistency With Outward Face Flux
 // =============================================================================
@@ -1435,6 +1904,146 @@ TEST(HigherOrderWedgePyramid, PyramidRT1FaceNormalMoment) {
     }
 }
 
+TEST(HigherOrderWedgePyramid, WedgeRT2FaceNormalMoment) {
+    RaviartThomasBasis basis(ElementType::Wedge6, 2);
+    ASSERT_EQ(basis.size(), 66u);
+
+    auto assoc = basis.dof_associations();
+    ASSERT_EQ(assoc.size(), 66u);
+    const auto ref = elements::ReferenceElement::create(ElementType::Wedge6);
+    for (std::size_t i = 0; i < assoc.size(); ++i) {
+        for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+            const auto& face_nodes = ref.face_nodes(f);
+            const std::size_t nface = (face_nodes.size() == 3u)
+                ? static_cast<std::size_t>((basis.order() + 1) * (basis.order() + 2) / 2)
+                : static_cast<std::size_t>((basis.order() + 1) * (basis.order() + 1));
+
+            for (std::size_t m = 0; m < nface; ++m) {
+                const double functional = integrate_rt_face_functional(
+                    basis,
+                    ElementType::Wedge6,
+                    static_cast<int>(f),
+                    static_cast<int>(m),
+                    static_cast<int>(i),
+                    10);
+                const bool is_own_face_dof =
+                    assoc[i].entity_type == DofEntity::Face &&
+                    assoc[i].entity_id == static_cast<int>(f) &&
+                    assoc[i].moment_index == static_cast<int>(m);
+                EXPECT_NEAR(functional, is_own_face_dof ? 1.0 : 0.0, 5e-8)
+                    << "Wedge RT(2): face functional (" << f << ", " << m
+                    << ") applied to basis function " << i
+                    << " should be " << (is_own_face_dof ? 1.0 : 0.0);
+            }
+        }
+    }
+}
+
+TEST(HigherOrderWedgePyramid, PyramidRT2FaceNormalMoment) {
+    RaviartThomasBasis basis(ElementType::Pyramid5, 2);
+    ASSERT_EQ(basis.size(), 57u);
+
+    auto assoc = basis.dof_associations();
+    ASSERT_EQ(assoc.size(), 57u);
+    const auto ref = elements::ReferenceElement::create(ElementType::Pyramid5);
+    for (std::size_t i = 0; i < assoc.size(); ++i) {
+        for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+            const auto& face_nodes = ref.face_nodes(f);
+            const std::size_t nface = (face_nodes.size() == 3u)
+                ? static_cast<std::size_t>((basis.order() + 1) * (basis.order() + 2) / 2)
+                : static_cast<std::size_t>((basis.order() + 1) * (basis.order() + 1));
+
+            for (std::size_t m = 0; m < nface; ++m) {
+                const double functional = integrate_rt_face_functional(
+                    basis,
+                    ElementType::Pyramid5,
+                    static_cast<int>(f),
+                    static_cast<int>(m),
+                    static_cast<int>(i),
+                    10);
+                const bool is_own_face_dof =
+                    assoc[i].entity_type == DofEntity::Face &&
+                    assoc[i].entity_id == static_cast<int>(f) &&
+                    assoc[i].moment_index == static_cast<int>(m);
+                EXPECT_NEAR(functional, is_own_face_dof ? 1.0 : 0.0, 1e-7)
+                    << "Pyramid RT(2): face functional (" << f << ", " << m
+                    << ") applied to basis function " << i
+                    << " should be " << (is_own_face_dof ? 1.0 : 0.0);
+            }
+        }
+    }
+}
+
+TEST(HigherOrderWedgePyramid, WedgeRT3FaceNormalMoment) {
+    RaviartThomasBasis basis(ElementType::Wedge6, 3);
+    ASSERT_EQ(basis.size(), 140u);
+
+    auto assoc = basis.dof_associations();
+    ASSERT_EQ(assoc.size(), 140u);
+    const auto ref = elements::ReferenceElement::create(ElementType::Wedge6);
+    for (std::size_t i = 0; i < assoc.size(); ++i) {
+        for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+            const auto& face_nodes = ref.face_nodes(f);
+            const std::size_t nface = (face_nodes.size() == 3u)
+                ? static_cast<std::size_t>((basis.order() + 1) * (basis.order() + 2) / 2)
+                : static_cast<std::size_t>((basis.order() + 1) * (basis.order() + 1));
+
+            for (std::size_t m = 0; m < nface; ++m) {
+                const double functional = integrate_rt_face_functional(
+                    basis,
+                    ElementType::Wedge6,
+                    static_cast<int>(f),
+                    static_cast<int>(m),
+                    static_cast<int>(i),
+                    12);
+                const bool is_own_face_dof =
+                    assoc[i].entity_type == DofEntity::Face &&
+                    assoc[i].entity_id == static_cast<int>(f) &&
+                    assoc[i].moment_index == static_cast<int>(m);
+                EXPECT_NEAR(functional, is_own_face_dof ? 1.0 : 0.0, 5e-7)
+                    << "Wedge RT(3): face functional (" << f << ", " << m
+                    << ") applied to basis function " << i
+                    << " should be " << (is_own_face_dof ? 1.0 : 0.0);
+            }
+        }
+    }
+}
+
+TEST(HigherOrderWedgePyramid, PyramidRT3FaceNormalMoment) {
+    RaviartThomasBasis basis(ElementType::Pyramid5, 3);
+    ASSERT_EQ(basis.size(), 137u);
+
+    auto assoc = basis.dof_associations();
+    ASSERT_EQ(assoc.size(), 137u);
+    const auto ref = elements::ReferenceElement::create(ElementType::Pyramid5);
+    for (std::size_t i = 0; i < assoc.size(); ++i) {
+        for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+            const auto& face_nodes = ref.face_nodes(f);
+            const std::size_t nface = (face_nodes.size() == 3u)
+                ? static_cast<std::size_t>((basis.order() + 1) * (basis.order() + 2) / 2)
+                : static_cast<std::size_t>((basis.order() + 1) * (basis.order() + 1));
+
+            for (std::size_t m = 0; m < nface; ++m) {
+                const double functional = integrate_rt_face_functional(
+                    basis,
+                    ElementType::Pyramid5,
+                    static_cast<int>(f),
+                    static_cast<int>(m),
+                    static_cast<int>(i),
+                    12);
+                const bool is_own_face_dof =
+                    assoc[i].entity_type == DofEntity::Face &&
+                    assoc[i].entity_id == static_cast<int>(f) &&
+                    assoc[i].moment_index == static_cast<int>(m);
+                EXPECT_NEAR(functional, is_own_face_dof ? 1.0 : 0.0, 2e-6)
+                    << "Pyramid RT(3): face functional (" << f << ", " << m
+                    << ") applied to basis function " << i
+                    << " should be " << (is_own_face_dof ? 1.0 : 0.0);
+            }
+        }
+    }
+}
+
 TEST(HigherOrderWedgePyramid, WedgeRT1DivergenceFluxConsistency) {
     RaviartThomasBasis basis(ElementType::Wedge6, 1);
     ASSERT_EQ(basis.size(), 24u);
@@ -1455,6 +2064,30 @@ TEST(HigherOrderWedgePyramid, WedgeRT1DivergenceFluxConsistency) {
     }
 }
 
+TEST(HigherOrderWedgePyramid, WedgeRT0LinearCombinationSatisfiesDivergenceTheorem) {
+    RaviartThomasBasis basis(ElementType::Wedge6, 0);
+    ASSERT_EQ(basis.size(), 5u);
+
+    const std::vector<Real> coeffs = {
+        Real(0.18), Real(-0.04), Real(0.09), Real(0.07), Real(-0.13)
+    };
+
+    double vol_div = 0.0;
+    double face_sum = 0.0;
+    for (std::size_t i = 0; i < basis.size(); ++i) {
+        vol_div += static_cast<double>(coeffs[i]) *
+                   integrate_rt_volume_divergence(
+                       basis, ElementType::Wedge6, static_cast<int>(i), 8);
+        for (int f = 0; f < 5; ++f) {
+            face_sum += static_cast<double>(coeffs[i]) *
+                        integrate_rt_face_flux_outward(
+                            basis, ElementType::Wedge6, f, static_cast<int>(i), 8);
+        }
+    }
+
+    EXPECT_NEAR(vol_div, face_sum, 1e-10);
+}
+
 TEST(HigherOrderWedgePyramid, PyramidRT1DivergenceFluxConsistency) {
     RaviartThomasBasis basis(ElementType::Pyramid5, 1);
     ASSERT_EQ(basis.size(), 19u);
@@ -1473,6 +2106,30 @@ TEST(HigherOrderWedgePyramid, PyramidRT1DivergenceFluxConsistency) {
         EXPECT_NEAR(vol_div, face_sum, 1e-6)
             << "Pyramid RT(1): divergence theorem mismatch for DOF " << i;
     }
+}
+
+TEST(HigherOrderWedgePyramid, PyramidRT0LinearCombinationSatisfiesDivergenceTheorem) {
+    RaviartThomasBasis basis(ElementType::Pyramid5, 0);
+    ASSERT_EQ(basis.size(), 5u);
+
+    const std::vector<Real> coeffs = {
+        Real(0.11), Real(-0.05), Real(0.14), Real(-0.02), Real(0.08)
+    };
+
+    double vol_div = 0.0;
+    double face_sum = 0.0;
+    for (std::size_t i = 0; i < basis.size(); ++i) {
+        vol_div += static_cast<double>(coeffs[i]) *
+                   integrate_rt_volume_divergence(
+                       basis, ElementType::Pyramid5, static_cast<int>(i), 10);
+        for (int f = 0; f < 5; ++f) {
+            face_sum += static_cast<double>(coeffs[i]) *
+                        integrate_rt_face_flux_outward(
+                            basis, ElementType::Pyramid5, f, static_cast<int>(i), 10);
+        }
+    }
+
+    EXPECT_NEAR(vol_div, face_sum, 1e-10);
 }
 
 TEST(HigherOrderWedgePyramid, WedgeRT2DivergenceFluxConsistency) {
@@ -1515,6 +2172,46 @@ TEST(HigherOrderWedgePyramid, PyramidRT2DivergenceFluxConsistency) {
     }
 }
 
+TEST(HigherOrderWedgePyramid, WedgeRT3DivergenceFluxConsistency) {
+    RaviartThomasBasis basis(ElementType::Wedge6, 3);
+    ASSERT_EQ(basis.size(), 140u);
+
+    constexpr int n_faces = 5;
+    for (std::size_t i = 0; i < basis.size(); ++i) {
+        const double vol_div = integrate_rt_volume_divergence(
+            basis, ElementType::Wedge6, static_cast<int>(i), 12);
+
+        double face_sum = 0.0;
+        for (int f = 0; f < n_faces; ++f) {
+            face_sum += integrate_rt_face_flux_outward(
+                basis, ElementType::Wedge6, f, static_cast<int>(i), 12);
+        }
+
+        EXPECT_NEAR(vol_div, face_sum, 1e-6)
+            << "Wedge RT(3): divergence theorem mismatch for DOF " << i;
+    }
+}
+
+TEST(HigherOrderWedgePyramid, PyramidRT3DivergenceFluxConsistency) {
+    RaviartThomasBasis basis(ElementType::Pyramid5, 3);
+    ASSERT_EQ(basis.size(), 137u);
+
+    constexpr int n_faces = 5;
+    for (std::size_t i = 0; i < basis.size(); ++i) {
+        const double vol_div = integrate_rt_volume_divergence(
+            basis, ElementType::Pyramid5, static_cast<int>(i), 14);
+
+        double face_sum = 0.0;
+        for (int f = 0; f < n_faces; ++f) {
+            face_sum += integrate_rt_face_flux_outward(
+                basis, ElementType::Pyramid5, f, static_cast<int>(i), 14);
+        }
+
+        EXPECT_NEAR(vol_div, face_sum, 2e-6)
+            << "Pyramid RT(3): divergence theorem mismatch for DOF " << i;
+    }
+}
+
 TEST(HigherOrderWedgePyramid, WedgeND1StokesTheoremOnAllFaces) {
     NedelecBasis basis(ElementType::Wedge6, 1);
     const auto ref = elements::ReferenceElement::create(ElementType::Wedge6);
@@ -1533,6 +2230,31 @@ TEST(HigherOrderWedgePyramid, WedgeND1StokesTheoremOnAllFaces) {
     }
 }
 
+TEST(HigherOrderWedgePyramid, WedgeND0LinearCombinationSatisfiesStokesTheoremOnAllFaces) {
+    NedelecBasis basis(ElementType::Wedge6, 0);
+    const auto ref = elements::ReferenceElement::create(ElementType::Wedge6);
+    const std::vector<Real> coeffs = {
+        Real(0.10), Real(-0.15), Real(0.20), Real(0.05), Real(-0.08),
+        Real(0.12), Real(-0.03), Real(0.09), Real(-0.11)
+    };
+
+    for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+        double curl_flux = 0.0;
+        double boundary = 0.0;
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            curl_flux += static_cast<double>(coeffs[i]) *
+                         integrate_nd_face_curl_flux(
+                             basis, ElementType::Wedge6, static_cast<int>(f), static_cast<int>(i), 8);
+            boundary += static_cast<double>(coeffs[i]) *
+                        integrate_nd_face_boundary_circulation(
+                            basis, ElementType::Wedge6, static_cast<int>(f), static_cast<int>(i), 8);
+        }
+
+        EXPECT_NEAR(curl_flux, boundary, 1e-10)
+            << "Wedge ND(0): Stokes mismatch on face " << f;
+    }
+}
+
 TEST(HigherOrderWedgePyramid, PyramidND1StokesTheoremOnAllFaces) {
     NedelecBasis basis(ElementType::Pyramid5, 1);
     const auto ref = elements::ReferenceElement::create(ElementType::Pyramid5);
@@ -1548,6 +2270,31 @@ TEST(HigherOrderWedgePyramid, PyramidND1StokesTheoremOnAllFaces) {
                 << "Pyramid ND(1): Stokes mismatch on face " << f
                 << " for basis function " << i;
         }
+    }
+}
+
+TEST(HigherOrderWedgePyramid, PyramidND0LinearCombinationSatisfiesStokesTheoremOnAllFaces) {
+    NedelecBasis basis(ElementType::Pyramid5, 0);
+    const auto ref = elements::ReferenceElement::create(ElementType::Pyramid5);
+    const std::vector<Real> coeffs = {
+        Real(0.14), Real(-0.07), Real(0.09), Real(0.05),
+        Real(-0.11), Real(0.06), Real(-0.04), Real(0.12)
+    };
+
+    for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+        double curl_flux = 0.0;
+        double boundary = 0.0;
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            curl_flux += static_cast<double>(coeffs[i]) *
+                         integrate_nd_face_curl_flux(
+                             basis, ElementType::Pyramid5, static_cast<int>(f), static_cast<int>(i), 8);
+            boundary += static_cast<double>(coeffs[i]) *
+                        integrate_nd_face_boundary_circulation(
+                            basis, ElementType::Pyramid5, static_cast<int>(f), static_cast<int>(i), 8);
+        }
+
+        EXPECT_NEAR(curl_flux, boundary, 1e-10)
+            << "Pyramid ND(0): Stokes mismatch on face " << f;
     }
 }
 
@@ -1582,6 +2329,42 @@ TEST(HigherOrderWedgePyramid, PyramidND2StokesTheoremOnAllFaces) {
 
             EXPECT_NEAR(curl_flux, boundary, 5e-4)
                 << "Pyramid ND(2): Stokes mismatch on face " << f
+                << " for basis function " << i;
+        }
+    }
+}
+
+TEST(HigherOrderWedgePyramid, WedgeND3StokesTheoremOnAllFaces) {
+    NedelecBasis basis(ElementType::Wedge6, 3);
+    const auto ref = elements::ReferenceElement::create(ElementType::Wedge6);
+
+    for (std::size_t i = 0; i < basis.size(); ++i) {
+        for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+            const double curl_flux = integrate_nd_face_curl_flux(
+                basis, ElementType::Wedge6, static_cast<int>(f), static_cast<int>(i), 12);
+            const double boundary = integrate_nd_face_boundary_circulation(
+                basis, ElementType::Wedge6, static_cast<int>(f), static_cast<int>(i), 12);
+
+            EXPECT_NEAR(curl_flux, boundary, 2e-3)
+                << "Wedge ND(3): Stokes mismatch on face " << f
+                << " for basis function " << i;
+        }
+    }
+}
+
+TEST(HigherOrderWedgePyramid, PyramidND3StokesTheoremOnAllFaces) {
+    NedelecBasis basis(ElementType::Pyramid5, 3);
+    const auto ref = elements::ReferenceElement::create(ElementType::Pyramid5);
+
+    for (std::size_t i = 0; i < basis.size(); ++i) {
+        for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+            const double curl_flux = integrate_nd_face_curl_flux(
+                basis, ElementType::Pyramid5, static_cast<int>(f), static_cast<int>(i), 12);
+            const double boundary = integrate_nd_face_boundary_circulation(
+                basis, ElementType::Pyramid5, static_cast<int>(f), static_cast<int>(i), 12);
+
+            EXPECT_NEAR(curl_flux, boundary, 2e-3)
+                << "Pyramid ND(3): Stokes mismatch on face " << f
                 << " for basis function " << i;
         }
     }
@@ -1623,10 +2406,28 @@ TEST(HigherOrderWedgePyramid, PyramidND2CurlIsDivergenceFree) {
         Real(5e-5));
 }
 
+TEST(HigherOrderWedgePyramid, WedgeND3CurlIsDivergenceFree) {
+    NedelecBasis basis(ElementType::Wedge6, 3);
+    expect_curl_is_divergence_free(
+        basis,
+        math::Vector<Real, 3>{Real(0.2), Real(0.3), Real(-0.1)},
+        Real(1e-3),
+        Real(1e-4));
+}
+
+TEST(HigherOrderWedgePyramid, PyramidND3CurlIsDivergenceFree) {
+    NedelecBasis basis(ElementType::Pyramid5, 3);
+    expect_curl_is_divergence_free(
+        basis,
+        math::Vector<Real, 3>{Real(0.1), Real(-0.15), Real(0.35)},
+        Real(1e-3),
+        Real(1e-4));
+}
+
 // =============================================================================
 // Summary of supported orders
 // =============================================================================
-// RT on Wedge:   k=0 (5 DOFs), k=1 (24 DOFs), k=2 (66 DOFs)
-// RT on Pyramid: k=0 (5 DOFs), k=1 (19 DOFs), k=2 (57 DOFs)
-// ND on Wedge:   k=0 (9 DOFs), k=1 (34 DOFs), k=2 (84 DOFs)
-// ND on Pyramid: k=0 (8 DOFs), k=1 (28 DOFs), k=2 (63 DOFs)
+// RT on Wedge:   k=0 (5 DOFs), k=1 (24 DOFs), k=2 (66 DOFs), k=3 (140 DOFs)
+// RT on Pyramid: k=0 (5 DOFs), k=1 (19 DOFs), k=2 (57 DOFs), k=3 (137 DOFs)
+// ND on Wedge:   k=0 (9 DOFs), k=1 (34 DOFs), k=2 (84 DOFs), k=3 (168 DOFs)
+// ND on Pyramid: k=0 (8 DOFs), k=1 (28 DOFs), k=2 (63 DOFs), k=3 (116 DOFs)

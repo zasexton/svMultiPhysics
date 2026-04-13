@@ -68,6 +68,9 @@ public:
     void evaluate_gradients(const math::Vector<Real, 3>& xi,
                             std::vector<Gradient>& gradients) const override;
 
+    void evaluate_hessians(const math::Vector<Real, 3>& xi,
+                           std::vector<Hessian>& hessians) const override;
+
     const std::vector<Real>& knots() const noexcept { return knots_; }
     const std::vector<Real>& weights() const noexcept { return weights_; }
 

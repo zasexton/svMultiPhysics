@@ -164,21 +164,6 @@ public:
             bc->contributeToResidual(residual, u, v);
         }
 
-        residual = residual.transformNodes(
-            [&](const forms::FormExprNode& node) -> std::optional<forms::FormExpr> {
-                if (node.type() != forms::FormExprType::AuxiliaryOutputSymbol) {
-                    return std::nullopt;
-                }
-                const auto sym = node.symbolName();
-                if (!sym) {
-                    return std::nullopt;
-                }
-                if (auto lowered = system.loweredAuxiliaryOutputExpr(*sym)) {
-                    return *lowered;
-                }
-                return std::nullopt;
-            });
-
         if (residual.isValid() && residual.node()) {
             const auto scan = analysis::scanFormExpr(*residual.node());
             if (!scan.boundary_functional_names.empty() ||
@@ -186,7 +171,9 @@ public:
                 throw std::invalid_argument(
                     "BoundaryConditionManager::apply: legacy coupled-boundary placeholders are no longer supported. "
                     "Register FE-backed inputs with boundaryIntegral(...) and couple boundary terms through deployed "
-                    "AuxiliaryOutput(...) expressions instead.");
+                    "AuxiliaryOutput(...) expressions instead. Auxiliary outputs remain symbolic here and are "
+                    "resolved by installFormulation() so metadata can retain stable output references for "
+                    "monolithic coupling.");
             }
         }
 

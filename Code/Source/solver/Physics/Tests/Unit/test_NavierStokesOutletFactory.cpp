@@ -17,6 +17,7 @@
 
 #include "Assembly/GlobalSystemView.h"
 
+#include "FE/Backends/FSILS/FsilsFactory.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 
@@ -26,6 +27,8 @@
 #include "FE/Systems/FormsInstaller.h"
 #include "FE/Systems/TransientSystem.h"
 #include "FE/TimeStepping/GeneralizedAlpha.h"
+#include "FE/TimeStepping/TimeHistory.h"
+#include "FE/TimeStepping/TimeLoop.h"
 #include "FE/TimeStepping/TimeSteppingUtils.h"
 #include "FE/Forms/FormExpr.h"
 #include "FE/Forms/StandardBCs.h"
@@ -334,6 +337,11 @@ struct ModuleAssemblySnapshot {
     std::vector<Real> vector;
 };
 
+struct OutletTimeLoopRun {
+    svmp::FE::timestepping::TimeLoopReport loop{};
+    std::vector<svmp::FE::timestepping::NewtonReport> nonlinear_reports{};
+};
+
 void assignComponentPattern(std::vector<Real>& values,
                             const FESystem& sys,
                             const std::string& field_name,
@@ -345,6 +353,119 @@ void assignComponentPattern(std::vector<Real>& values,
     for (std::size_t i = 0; i < dofs.size(); ++i) {
         values[static_cast<std::size_t>(dofs[i])] = base + stride * static_cast<Real>(i);
     }
+}
+
+std::shared_ptr<const svmp::FE::backends::DofPermutation>
+buildSerialFsilsDofPermutation(const FESystem& sys, int dof_per_node)
+{
+    using svmp::FE::backends::DofPermutation;
+
+    if (dof_per_node <= 0) {
+        return {};
+    }
+
+    const auto total_dofs = sys.dofHandler().getNumDofs();
+    if (total_dofs <= 0) {
+        return {};
+    }
+
+    const auto& fmap = sys.fieldMap();
+    const std::size_t n_fields = fmap.numFields();
+    if (n_fields == 0u) {
+        return {};
+    }
+
+    svmp::FE::GlobalIndex n_nodes = -1;
+    int expected_dof_per_node = 0;
+    for (std::size_t f = 0; f < n_fields; ++f) {
+        const auto& field = fmap.getField(f);
+        if (field.n_components <= 0) {
+            return {};
+        }
+        expected_dof_per_node += field.n_components;
+        if (field.n_dofs % field.n_components != 0) {
+            return {};
+        }
+        const auto n_field_nodes = field.n_dofs / field.n_components;
+        if (n_nodes < 0) {
+            n_nodes = n_field_nodes;
+        } else if (n_nodes != n_field_nodes) {
+            return {};
+        }
+    }
+
+    if (expected_dof_per_node != dof_per_node || n_nodes <= 0) {
+        return {};
+    }
+    if (total_dofs != n_nodes * static_cast<svmp::FE::GlobalIndex>(dof_per_node)) {
+        return {};
+    }
+
+    auto perm = std::make_shared<DofPermutation>();
+    perm->forward.assign(static_cast<std::size_t>(total_dofs), svmp::FE::INVALID_GLOBAL_INDEX);
+    perm->inverse.assign(static_cast<std::size_t>(total_dofs), svmp::FE::INVALID_GLOBAL_INDEX);
+
+    for (svmp::FE::GlobalIndex node = 0; node < n_nodes; ++node) {
+        int comp_offset = 0;
+        for (std::size_t f = 0; f < n_fields; ++f) {
+            const auto& field = fmap.getField(f);
+            for (svmp::FE::LocalIndex c = 0; c < field.n_components; ++c) {
+                const auto fe_dof = fmap.componentToGlobal(f, c, node);
+                const auto fsils_dof =
+                    node * static_cast<svmp::FE::GlobalIndex>(dof_per_node) +
+                    static_cast<svmp::FE::GlobalIndex>(comp_offset);
+                if (fe_dof < 0 || fe_dof >= total_dofs || fsils_dof < 0 || fsils_dof >= total_dofs) {
+                    return {};
+                }
+                perm->forward[static_cast<std::size_t>(fe_dof)] = fsils_dof;
+                perm->inverse[static_cast<std::size_t>(fsils_dof)] = fe_dof;
+                ++comp_offset;
+            }
+        }
+        if (comp_offset != dof_per_node) {
+            return {};
+        }
+    }
+
+    if (std::any_of(perm->forward.begin(), perm->forward.end(),
+                    [](svmp::FE::GlobalIndex v) { return v == svmp::FE::INVALID_GLOBAL_INDEX; })) {
+        return {};
+    }
+    if (std::any_of(perm->inverse.begin(), perm->inverse.end(),
+                    [](svmp::FE::GlobalIndex v) { return v == svmp::FE::INVALID_GLOBAL_INDEX; })) {
+        return {};
+    }
+
+    return perm;
+}
+
+svmp::FE::backends::SolverOptions resistiveOutletBlockSchurOptions(Real outer_rel_tol,
+                                                                   Real inner_rel_tol)
+{
+    svmp::FE::backends::SolverOptions opts;
+    opts.method = svmp::FE::backends::SolverMethod::BlockSchur;
+    opts.preconditioner = svmp::FE::backends::PreconditionerType::Diagonal;
+    opts.rel_tol = outer_rel_tol;
+    opts.abs_tol = 1e-12;
+    opts.max_iter = 80;
+    opts.krylov_dim = 80;
+    opts.fsils_blockschur_gm_max_iter = 120;
+    opts.fsils_blockschur_cg_max_iter = 120;
+    opts.fsils_blockschur_gm_rel_tol = inner_rel_tol;
+    opts.fsils_blockschur_cg_rel_tol = inner_rel_tol;
+    opts.fsils_residual_check_policy = svmp::FE::backends::FsilsResidualCheckPolicy::Always;
+    opts.fsils_blockschur_schur_preconditioner =
+        svmp::FE::backends::FsilsBlockSchurSchurPreconditioner::AlgebraicSchur;
+    opts.fsils_blockschur_momentum_approximation =
+        svmp::FE::backends::FsilsBlockSchurMomentumApproximation::ILUK;
+
+    svmp::FE::backends::BlockLayout layout;
+    layout.blocks.push_back({"Velocity", 0, 3, svmp::FE::backends::BlockRole::PrimaryField});
+    layout.blocks.push_back({"Pressure", 3, 1, svmp::FE::backends::BlockRole::ConstraintField});
+    layout.momentum_block = 0;
+    layout.constraint_block = 1;
+    opts.block_layout = std::move(layout);
+    return opts;
 }
 
 ModuleAssemblySnapshot assembleTransientNavierStokesModuleWithResistiveOutlet(bool enable_jit)
@@ -1354,6 +1475,173 @@ TEST(NavierStokesOutletFactory, ModuleJitParity_DirichletAndResistiveOutflowGene
 
     expectAdaptiveNear(jit.matrix, fallback.matrix, 1e-10, 1e-9, "matrix");
     expectAdaptiveNear(jit.vector, fallback.vector, 1e-10, 1e-9, "vector");
+}
+
+TEST(NavierStokesOutletFactory, ResistiveOutletFsilsTimeLoopTracksLinearToleranceSensitivity)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    auto run_case = [](Real outer_rel_tol, Real inner_rel_tol) -> OutletTimeLoopRun {
+        constexpr int outlet_marker = 191;
+        constexpr int inlet_marker = 192;
+        constexpr int wall_marker = 193;
+        constexpr int dof_per_node = 4;
+        constexpr double dt = 0.05;
+
+        auto mesh = std::make_shared<SingleTetraFourBoundaryFaceMeshAccess>(
+            outlet_marker, inlet_marker, wall_marker);
+        auto u_space =
+            svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
+        auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
+
+        Opts opts;
+        opts.enable_jit = false;
+        opts.enable_convection = true;
+        opts.enable_vms = true;
+        opts.density = 1.06;
+        opts.viscosity = 0.04;
+        opts.velocity_field_name = "Velocity";
+        opts.pressure_field_name = "Pressure";
+        opts.coupled_outflow_rcr.push_back(makeRCROpts(outlet_marker, /*C=*/0.0));
+        opts.velocity_dirichlet_weak.push_back(Opts::VelocityDirichletBC{
+            .boundary_marker = inlet_marker,
+            .value = {Opts::ScalarValue{0.0}, Opts::ScalarValue{0.0}, Opts::ScalarValue{-1.0}},
+        });
+        opts.velocity_dirichlet.push_back(Opts::VelocityDirichletBC{
+            .boundary_marker = wall_marker,
+            .value = {Opts::ScalarValue{0.0}, Opts::ScalarValue{0.0}, Opts::ScalarValue{0.0}},
+        });
+
+        FESystem sys(mesh);
+        svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(
+            u_space, p_space, opts);
+        module.registerOn(sys);
+
+        SetupInputs si;
+        si.topology_override = singleTetraTopology();
+        sys.setup({}, si);
+        sys.finalizeAuxiliaryLayout();
+
+        const auto n_dofs = sys.dofHandler().getNumDofs();
+        EXPECT_GT(n_dofs, 0);
+        auto perm = buildSerialFsilsDofPermutation(sys, dof_per_node);
+        EXPECT_TRUE(perm) << "Failed to build serial FSILS node-block permutation";
+        if (!perm) {
+            return {};
+        }
+
+        svmp::FE::backends::FsilsFactory factory(dof_per_node, perm);
+        auto linear =
+            factory.createLinearSolver(resistiveOutletBlockSchurOptions(outer_rel_tol, inner_rel_tol));
+        EXPECT_TRUE(linear);
+        if (!linear) {
+            return {};
+        }
+
+        auto history = svmp::FE::timestepping::TimeHistory::allocate(
+            factory, n_dofs, /*history_depth=*/2, /*allocate_second_order_state=*/false);
+        history.setTime(0.0);
+        history.setDt(dt);
+        history.setPrevDt(dt);
+        history.primeDtHistory(dt);
+        history.setStepIndex(0);
+
+        std::vector<Real> u_prev(static_cast<std::size_t>(n_dofs), 0.0);
+        std::vector<Real> u_prev2(static_cast<std::size_t>(n_dofs), 0.0);
+        assignComponentPattern(u_prev, sys, "Velocity", 0, Real(0.05), Real(-0.007));
+        assignComponentPattern(u_prev, sys, "Velocity", 1, Real(-0.01), Real(0.003));
+        assignComponentPattern(u_prev, sys, "Velocity", 2, Real(-0.80), Real(0.02));
+        assignComponentPattern(u_prev, sys, "Pressure", 0, Real(0.15), Real(-0.009));
+        assignComponentPattern(u_prev2, sys, "Velocity", 0, Real(0.03), Real(0.005));
+        assignComponentPattern(u_prev2, sys, "Velocity", 1, Real(-0.015), Real(-0.002));
+        assignComponentPattern(u_prev2, sys, "Velocity", 2, Real(-0.70), Real(-0.015));
+        assignComponentPattern(u_prev2, sys, "Pressure", 0, Real(0.10), Real(0.007));
+
+        auto initialize_history_vector =
+            [&](svmp::FE::backends::GenericVector& dst, const std::vector<Real>& src) {
+                auto span = dst.localSpan();
+                EXPECT_EQ(static_cast<svmp::FE::GlobalIndex>(span.size()), n_dofs);
+                if (static_cast<svmp::FE::GlobalIndex>(span.size()) != n_dofs) {
+                    return;
+                }
+                std::copy(src.begin(), src.end(), span.begin());
+                if (!sys.constraints().empty()) {
+                    sys.constraints().distribute(dst);
+                }
+                dst.updateGhosts();
+            };
+        initialize_history_vector(history.uPrev(), u_prev);
+        initialize_history_vector(history.uPrev2(), u_prev2);
+        history.resetCurrentToPrevious();
+        history.u().updateGhosts();
+
+        auto base_integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+        svmp::FE::systems::TransientSystem transient(sys, std::move(base_integrator));
+
+        svmp::FE::timestepping::TimeLoopOptions loop_opts;
+        loop_opts.t0 = 0.0;
+        loop_opts.t_end = 3.0 * dt;
+        loop_opts.dt = dt;
+        loop_opts.max_steps = 3;
+        loop_opts.scheme = svmp::FE::timestepping::SchemeKind::GeneralizedAlpha;
+        loop_opts.generalized_alpha_rho_inf = 0.5;
+        loop_opts.newton.residual_op = "equations";
+        loop_opts.newton.jacobian_op = "equations";
+        loop_opts.newton.max_iterations = 12;
+        loop_opts.newton.abs_tolerance = 1e-12;
+        loop_opts.newton.rel_tolerance = 1e-10;
+
+        svmp::FE::timestepping::TimeLoop loop(loop_opts);
+        OutletTimeLoopRun run;
+        svmp::FE::timestepping::TimeLoopCallbacks callbacks;
+        callbacks.on_nonlinear_done =
+            [&run](const svmp::FE::timestepping::TimeHistory&,
+                   const svmp::FE::timestepping::NewtonReport& nr) {
+                run.nonlinear_reports.push_back(nr);
+            };
+        run.loop = loop.run(transient, factory, *linear, history, callbacks);
+        return run;
+    };
+
+    const auto loose = run_case(/*outer_rel_tol=*/1e-2, /*inner_rel_tol=*/1e-2);
+    const auto tight = run_case(/*outer_rel_tol=*/1e-6, /*inner_rel_tol=*/1e-6);
+
+    auto total_newton_iterations = [](const OutletTimeLoopRun& run) {
+        int total = 0;
+        for (const auto& nr : run.nonlinear_reports) {
+            total += nr.iterations;
+        }
+        return total;
+    };
+    auto first_step_newton_iterations = [](const OutletTimeLoopRun& run) {
+        return run.nonlinear_reports.empty() ? 0 : run.nonlinear_reports.front().iterations;
+    };
+    auto total_blockschur_outer_iterations = [](const OutletTimeLoopRun& run) {
+        int total = 0;
+        for (const auto& nr : run.nonlinear_reports) {
+            total += nr.linear.blockschur_outer_iterations;
+        }
+        return total;
+    };
+
+    ASSERT_TRUE(loose.loop.success);
+    ASSERT_TRUE(tight.loop.success);
+    ASSERT_EQ(loose.nonlinear_reports.size(), 3u);
+    ASSERT_EQ(tight.nonlinear_reports.size(), 3u);
+
+    for (const auto& nr : loose.nonlinear_reports) {
+        EXPECT_TRUE(nr.converged);
+    }
+    for (const auto& nr : tight.nonlinear_reports) {
+        EXPECT_TRUE(nr.converged);
+    }
+
+    EXPECT_GT(total_blockschur_outer_iterations(loose), 0);
+    EXPECT_GT(total_blockschur_outer_iterations(tight), 0);
+    EXPECT_LE(total_newton_iterations(tight), total_newton_iterations(loose));
+    EXPECT_LE(first_step_newton_iterations(tight), first_step_newton_iterations(loose));
+#endif
 }
 
 // This single-tetra finite-difference check is currently not a faithful minimal
@@ -2694,7 +2982,7 @@ TEST(NavierStokesOutletFactory, DISABLED_MonolithicRCRCR_BorderedReductionMatche
     }
 }
 
-TEST(NavierStokesOutletFactory, TwoResistiveOutletsSystemOverloadMatchesLegacyDirectFieldOperator)
+TEST(NavierStokesOutletFactory, TwoResistiveOutletsSystemOverloadIsDeterministicAcrossBuilds)
 {
     constexpr int outlet0_marker = 821;
     constexpr int outlet1_marker = 822;
@@ -2706,7 +2994,7 @@ TEST(NavierStokesOutletFactory, TwoResistiveOutletsSystemOverloadMatchesLegacyDi
     auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
     auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
 
-    auto build_system = [&](bool use_system_overload) -> FESystem {
+    auto build_system = [&]() -> FESystem {
         FESystem sys(mesh);
         const auto u_field =
             sys.addField(FieldSpec{.name = "u", .space = u_space, .components = 3});
@@ -2721,12 +3009,7 @@ TEST(NavierStokesOutletFactory, TwoResistiveOutletsSystemOverloadMatchesLegacyDi
         BoundaryConditionManager bc_manager;
         auto add_outlet = [&](int marker) {
             auto opts = makeRCROpts(marker, /*C=*/0.0);
-            std::unique_ptr<svmp::FE::forms::bc::BoundaryCondition> bc;
-            if (use_system_overload) {
-                bc = Factories::toCoupledOutflowBC(opts, sys, u, rho);
-            } else {
-                bc = Factories::toCoupledOutflowBC(opts, u_field, *u_space, "u", u, rho);
-            }
+            auto bc = Factories::toCoupledOutflowBC(opts, sys, u, rho);
             EXPECT_NE(bc, nullptr);
             bc_manager.add(std::move(bc));
         };
@@ -2753,16 +3036,14 @@ TEST(NavierStokesOutletFactory, TwoResistiveOutletsSystemOverloadMatchesLegacyDi
         si.topology_override = singleTetraTopology();
         sys.setup({}, si);
         sys.finalizeAuxiliaryLayout();
-        if (use_system_overload) {
-            const auto summary = sys.auxiliaryAnalysisSummary();
-            EXPECT_EQ(summary.n_monolithic, 2u);
-            EXPECT_EQ(summary.n_partitioned, 0u);
-        }
+        const auto summary = sys.auxiliaryAnalysisSummary();
+        EXPECT_EQ(summary.n_monolithic, 2u);
+        EXPECT_EQ(summary.n_partitioned, 0u);
         return sys;
     };
 
-    auto monolithic_sys = build_system(true);
-    auto legacy_sys = build_system(false);
+    auto monolithic_sys = build_system();
+    auto legacy_sys = build_system();
 
     const auto n_field = static_cast<std::size_t>(monolithic_sys.dofHandler().getNumDofs());
     ASSERT_EQ(n_field, static_cast<std::size_t>(legacy_sys.dofHandler().getNumDofs()));
@@ -2812,31 +3093,14 @@ TEST(NavierStokesOutletFactory, TwoResistiveOutletsSystemOverloadMatchesLegacyDi
         }
     };
 
-    auto apply_rank_one_updates = [&](FESystem& sys,
-                                      std::vector<Real>& K) {
-        const auto updates = sys.lastRankOneUpdates();
-        ASSERT_EQ(updates.size(), 2u);
-        for (const auto& upd : updates) {
-            EXPECT_TRUE(upd.prefer_native_face);
-            for (const auto& [row_dof, row_val] : upd.v) {
-                const auto row = static_cast<std::size_t>(row_dof);
-                for (const auto& [col_dof, col_val] : upd.v) {
-                    const auto col = static_cast<std::size_t>(col_dof);
-                    K[row * n_field + col] += upd.sigma * row_val * col_val;
-                }
-            }
-        }
-    };
     std::vector<Real> K_mono;
     std::vector<Real> r_mono;
     assemble_dense(monolithic_sys, K_mono, r_mono);
     EXPECT_FALSE(monolithic_sys.borderedCoupling().active);
-    apply_rank_one_updates(monolithic_sys, K_mono);
 
     std::vector<Real> K_legacy;
     std::vector<Real> r_legacy;
     assemble_dense(legacy_sys, K_legacy, r_legacy);
-    apply_rank_one_updates(legacy_sys, K_legacy);
 
     for (std::size_t i = 0; i < n_field; ++i) {
         EXPECT_NEAR(r_mono[i], r_legacy[i], std::max(1e-10, std::abs(r_legacy[i]) * 1e-9))
@@ -3134,11 +3398,10 @@ TEST(NavierStokesOutletFactory, RdZero_Throws)
     FESystem sys(mesh);
     const auto u_field = sys.addField(FieldSpec{.name = "u", .space = u_space, .components = 3});
     const auto u = FormExpr::stateField(u_field, *u_space, "u");
+    const auto rho = FormExpr::constant(1.0);
 
     auto opts = makeRCROpts(marker);
     opts.Rd = 0.0;
 
-    EXPECT_THROW(
-        Factories::toCoupledOutflowBC(opts, u_field, *u_space, "u", u, FormExpr::constant(1.0)),
-        std::invalid_argument);
+    EXPECT_THROW(Factories::toCoupledOutflowBC(opts, sys, u, rho), std::invalid_argument);
 }

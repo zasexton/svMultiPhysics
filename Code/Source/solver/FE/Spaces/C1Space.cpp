@@ -19,9 +19,9 @@ C1Space::C1Space(ElementType element_type,
     FE_CHECK_ARG(element_type_ == ElementType::Line2 ||
                  element_type_ == ElementType::Quad4 ||
                  element_type_ == ElementType::Hex8,
-                 "C1Space currently supports ElementType::Line2, ElementType::Quad4, and ElementType::Hex8");
+                 "C1Space is intentionally limited to ElementType::Line2, ElementType::Quad4, and ElementType::Hex8");
     FE_CHECK_ARG(polynomial_order_ == 3,
-                 "C1Space currently supports cubic Hermite order (3) only");
+                 "C1Space is intentionally limited to cubic Hermite order (3)");
 
     element_dimension_ = element_dimension(element_type_);
     FE_CHECK_ARG(element_dimension_ >= 1 && element_dimension_ <= 3,

@@ -8,6 +8,7 @@
 #include "BasisFactory.h"
 #include "Core/FEException.h"
 
+#include <algorithm>
 #include <array>
 #include <mutex>
 #include <unordered_map>
@@ -166,7 +167,7 @@ std::shared_ptr<BasisFunction> create_bspline_basis(const BasisRequest& req) {
 
     const int dim = spline_tensor_dimension(req.element_type);
     if (dim == 0) {
-        throw BasisElementCompatibilityException("BasisFactory: BSpline currently supports Line2, Quad4, and Hex8 only",
+        throw BasisElementCompatibilityException("BasisFactory: scalar BSpline is tensor-product only and currently supports Line2, Quad4, and Hex8",
                                                  __FILE__, __LINE__, __func__);
     }
 
@@ -231,7 +232,7 @@ std::shared_ptr<BasisFunction> create_nurbs_basis(const BasisRequest& req) {
 
     const int dim = spline_tensor_dimension(req.element_type);
     if (dim == 0) {
-        throw BasisElementCompatibilityException("BasisFactory: NURBS currently supports Line2, Quad4, and Hex8 only",
+        throw BasisElementCompatibilityException("BasisFactory: scalar NURBS is tensor-product only and currently supports Line2, Quad4, and Hex8",
                                                  __FILE__, __LINE__, __func__);
     }
 
@@ -292,9 +293,6 @@ std::shared_ptr<BasisFunction> create_nurbs_basis(const BasisRequest& req) {
 
 std::vector<BSplineBasis> make_tensor_axes(const BasisRequest& req,
                                            int dim) {
-    FE_CHECK_ARG(dim == 2,
-                 "BasisFactory: compatible spline/NURBS vector bases currently support quadrilateral elements only");
-
     const bool use_axis_data = !req.axis_orders.empty() || !req.axis_knot_vectors.empty();
     if (use_axis_data) {
         FE_CHECK_ARG(req.axis_orders.empty() || req.axis_orders.size() == static_cast<std::size_t>(dim),
@@ -314,6 +312,44 @@ std::vector<BSplineBasis> make_tensor_axes(const BasisRequest& req,
     return axes;
 }
 
+std::size_t tensor_product_size(const std::vector<int>& extents) {
+    std::size_t size = 1u;
+    for (int extent : extents) {
+        FE_CHECK_ARG(extent > 0, "BasisFactory: tensor extents must be positive");
+        size *= static_cast<std::size_t>(extent);
+    }
+    return size;
+}
+
+std::size_t flatten_tensor_index(const std::vector<int>& extents,
+                                 const std::vector<int>& index) {
+    FE_CHECK_ARG(extents.size() == index.size(),
+                 "BasisFactory: tensor index dimension mismatch");
+    std::size_t linear = 0u;
+    std::size_t stride = 1u;
+    for (std::size_t axis = 0; axis < extents.size(); ++axis) {
+        FE_CHECK_ARG(index[axis] >= 0 && index[axis] < extents[axis],
+                     "BasisFactory: tensor index out of bounds");
+        linear += stride * static_cast<std::size_t>(index[axis]);
+        stride *= static_cast<std::size_t>(extents[axis]);
+    }
+    return linear;
+}
+
+bool advance_tensor_index(std::vector<int>& index,
+                          const std::vector<int>& extents) {
+    FE_CHECK_ARG(index.size() == extents.size(),
+                 "BasisFactory: tensor index dimension mismatch");
+    for (std::size_t axis = 0; axis < index.size(); ++axis) {
+        ++index[axis];
+        if (index[axis] < extents[axis]) {
+            return true;
+        }
+        index[axis] = 0;
+    }
+    return false;
+}
+
 BSplineBasis make_reduced_bspline_axis(const BSplineBasis& axis) {
     FE_CHECK_ARG(axis.order() >= 1,
                  "BasisFactory: compatible spline/NURBS vector bases require axis order >= 1");
@@ -326,86 +362,95 @@ BSplineBasis make_reduced_bspline_axis(const BSplineBasis& axis) {
     return BSplineBasis(axis.order() - 1, std::move(knots));
 }
 
-std::array<int, 2> infer_quad_tensor_extents(const std::vector<BSplineBasis>& axes) {
-    FE_CHECK_ARG(axes.size() == 2u,
-                 "BasisFactory: compatible tensor extents require two axes");
-    return {static_cast<int>(axes[0].size()), static_cast<int>(axes[1].size())};
+std::vector<int> infer_tensor_extents(const std::vector<BSplineBasis>& axes) {
+    FE_CHECK_ARG(axes.size() == 2u || axes.size() == 3u,
+                 "BasisFactory: compatible tensor extents require two or three axes");
+    std::vector<int> extents;
+    extents.reserve(axes.size());
+    for (const auto& axis : axes) {
+        extents.push_back(static_cast<int>(axis.size()));
+    }
+    return extents;
 }
 
-std::vector<Real> reduce_quad_weights(const std::vector<Real>& weights,
-                                      const std::array<int, 2>& extents,
+std::vector<Real> reduce_tensor_weights(const std::vector<Real>& weights,
+                                      const std::vector<int>& extents,
                                       int axis) {
-    FE_CHECK_ARG(extents[0] > 1 && extents[1] > 1,
-                 "BasisFactory: compatible spline/NURBS vector bases require at least two control points per axis");
-    FE_CHECK_ARG(axis == 0 || axis == 1,
+    FE_CHECK_ARG(axis >= 0 && axis < static_cast<int>(extents.size()),
                  "BasisFactory: invalid reduced tensor axis");
-
-    const int nx = extents[0];
-    const int ny = extents[1];
-    FE_CHECK_ARG(weights.size() == static_cast<std::size_t>(nx * ny),
+    FE_CHECK_ARG(weights.size() == tensor_product_size(extents),
                  "BasisFactory: NURBS weights size does not match tensor extents");
+    FE_CHECK_ARG(extents[static_cast<std::size_t>(axis)] > 1,
+                 "BasisFactory: compatible spline/NURBS vector bases require at least two control points per axis");
 
-    if (axis == 0) {
-        std::vector<Real> reduced(static_cast<std::size_t>((nx - 1) * ny), Real(0));
-        for (int j = 0; j < ny; ++j) {
-            for (int i = 0; i < nx - 1; ++i) {
-                const std::size_t dst = static_cast<std::size_t>(j * (nx - 1) + i);
-                const std::size_t src0 = static_cast<std::size_t>(j * nx + i);
-                const std::size_t src1 = static_cast<std::size_t>(j * nx + (i + 1));
-                reduced[dst] = Real(0.5) * (weights[src0] + weights[src1]);
-            }
-        }
-        return reduced;
-    }
+    std::vector<int> reduced_extents = extents;
+    --reduced_extents[static_cast<std::size_t>(axis)];
+    std::vector<Real> reduced(tensor_product_size(reduced_extents), Real(0));
 
-    std::vector<Real> reduced(static_cast<std::size_t>(nx * (ny - 1)), Real(0));
-    for (int j = 0; j < ny - 1; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            const std::size_t dst = static_cast<std::size_t>(j * nx + i);
-            const std::size_t src0 = static_cast<std::size_t>(j * nx + i);
-            const std::size_t src1 = static_cast<std::size_t>((j + 1) * nx + i);
-            reduced[dst] = Real(0.5) * (weights[src0] + weights[src1]);
-        }
-    }
+    std::vector<int> reduced_index(reduced_extents.size(), 0);
+    do {
+        std::vector<int> src0 = reduced_index;
+        std::vector<int> src1 = reduced_index;
+        ++src1[static_cast<std::size_t>(axis)];
+        reduced[flatten_tensor_index(reduced_extents, reduced_index)] =
+            Real(0.5) * (weights[flatten_tensor_index(extents, src0)] +
+                         weights[flatten_tensor_index(extents, src1)]);
+    } while (advance_tensor_index(reduced_index, reduced_extents));
+
     return reduced;
 }
 
-std::shared_ptr<BasisFunction> make_compatible_quad_component_basis(
+std::shared_ptr<BasisFunction> make_compatible_component_basis(
     BasisType semantic_basis_type,
     const std::vector<BSplineBasis>& base_axes,
-    const std::array<int, 2>& base_extents,
+    const std::vector<int>& base_extents,
     const std::vector<Real>& weights,
-    bool reduce_x,
-    bool reduce_y) {
-    FE_CHECK_ARG(base_axes.size() == 2u,
-                 "BasisFactory: compatible quad component basis requires two axes");
+    const std::vector<bool>& reduce_axes) {
+    FE_CHECK_ARG(base_axes.size() == base_extents.size(),
+                 "BasisFactory: compatible component basis extent mismatch");
+    FE_CHECK_ARG(base_axes.size() == reduce_axes.size(),
+                 "BasisFactory: compatible component basis axis mask mismatch");
 
-    const BSplineBasis ax = reduce_x ? make_reduced_bspline_axis(base_axes[0]) : base_axes[0];
-    const BSplineBasis ay = reduce_y ? make_reduced_bspline_axis(base_axes[1]) : base_axes[1];
+    std::vector<BSplineBasis> axes;
+    axes.reserve(base_axes.size());
+    for (std::size_t axis = 0; axis < base_axes.size(); ++axis) {
+        axes.push_back(reduce_axes[axis] ? make_reduced_bspline_axis(base_axes[axis]) : base_axes[axis]);
+    }
 
     if (semantic_basis_type == BasisType::BSpline) {
-        return std::make_shared<TensorProductBasis<BSplineBasis>>(ax, ay);
+        if (axes.size() == 2u) {
+            return std::make_shared<TensorProductBasis<BSplineBasis>>(axes[0], axes[1]);
+        }
+        return std::make_shared<TensorProductBasis<BSplineBasis>>(axes[0], axes[1], axes[2]);
     }
 
     FE_CHECK_ARG(semantic_basis_type == BasisType::NURBS,
-                 "BasisFactory: compatible quad component basis requires BSpline or NURBS semantics");
+                 "BasisFactory: compatible component basis requires BSpline or NURBS semantics");
 
     std::vector<Real> component_weights = weights;
-    std::array<int, 2> extents = base_extents;
-    if (reduce_x) {
-        component_weights = reduce_quad_weights(component_weights, extents, 0);
-        extents[0] -= 1;
+    std::vector<int> extents = base_extents;
+    for (std::size_t axis = 0; axis < reduce_axes.size(); ++axis) {
+        if (!reduce_axes[axis]) {
+            continue;
+        }
+        component_weights = reduce_tensor_weights(component_weights, extents, static_cast<int>(axis));
+        --extents[axis];
     }
-    if (reduce_y) {
-        component_weights = reduce_quad_weights(component_weights, extents, 1);
-        extents[1] -= 1;
+
+    if (axes.size() == 2u) {
+        return std::make_shared<NURBSTensorBasis>(
+            axes[0],
+            axes[1],
+            std::move(component_weights),
+            extents);
     }
 
     return std::make_shared<NURBSTensorBasis>(
-        ax,
-        ay,
+        axes[0],
+        axes[1],
+        axes[2],
         std::move(component_weights),
-        std::vector<int>{extents[0], extents[1]});
+        extents);
 }
 
 std::vector<DofAssociation> build_quad_compatible_vector_associations(
@@ -515,15 +560,208 @@ std::vector<DofAssociation> build_quad_compatible_vector_associations(
     return associations;
 }
 
+std::vector<DofAssociation> build_hex_compatible_vector_associations(
+    CompatibleTensorVectorBasis::Family family,
+    const std::array<std::array<int, 3>, 3>& component_extents) {
+    auto component_size = [](const std::array<int, 3>& extents) {
+        return static_cast<std::size_t>(extents[0]) *
+               static_cast<std::size_t>(extents[1]) *
+               static_cast<std::size_t>(extents[2]);
+    };
+
+    std::vector<DofAssociation> associations;
+    associations.reserve(component_size(component_extents[0]) +
+                         component_size(component_extents[1]) +
+                         component_size(component_extents[2]));
+
+    std::array<int, 12> edge_moment{};
+    std::array<int, 6> face_moment{};
+    int cell_moment = 0;
+
+    auto push_face = [&](int face_id) {
+        DofAssociation assoc{};
+        assoc.entity_type = DofEntity::Face;
+        assoc.entity_id = face_id;
+        assoc.moment_index = face_moment[static_cast<std::size_t>(face_id)]++;
+        associations.push_back(assoc);
+    };
+    auto push_edge = [&](int edge_id, int moment_index) {
+        DofAssociation assoc{};
+        assoc.entity_type = DofEntity::Edge;
+        assoc.entity_id = edge_id;
+        assoc.moment_index = moment_index;
+        edge_moment[static_cast<std::size_t>(edge_id)] =
+            std::max(edge_moment[static_cast<std::size_t>(edge_id)], moment_index + 1);
+        associations.push_back(assoc);
+    };
+    auto push_interior = [&]() {
+        DofAssociation assoc{};
+        assoc.entity_type = DofEntity::Interior;
+        assoc.entity_id = 0;
+        assoc.moment_index = cell_moment++;
+        associations.push_back(assoc);
+    };
+
+    if (family == CompatibleTensorVectorBasis::Family::HDiv) {
+        const auto& ex = component_extents[0];
+        for (int k = 0; k < ex[2]; ++k) {
+            for (int j = 0; j < ex[1]; ++j) {
+                for (int i = 0; i < ex[0]; ++i) {
+                    if (i == 0) {
+                        push_face(5);
+                    } else if (i == ex[0] - 1) {
+                        push_face(3);
+                    } else {
+                        push_interior();
+                    }
+                }
+            }
+        }
+
+        const auto& ey = component_extents[1];
+        for (int k = 0; k < ey[2]; ++k) {
+            for (int j = 0; j < ey[1]; ++j) {
+                for (int i = 0; i < ey[0]; ++i) {
+                    if (j == 0) {
+                        push_face(2);
+                    } else if (j == ey[1] - 1) {
+                        push_face(4);
+                    } else {
+                        push_interior();
+                    }
+                }
+            }
+        }
+
+        const auto& ez = component_extents[2];
+        for (int k = 0; k < ez[2]; ++k) {
+            for (int j = 0; j < ez[1]; ++j) {
+                for (int i = 0; i < ez[0]; ++i) {
+                    if (k == 0) {
+                        push_face(0);
+                    } else if (k == ez[2] - 1) {
+                        push_face(1);
+                    } else {
+                        push_interior();
+                    }
+                }
+            }
+        }
+
+        return associations;
+    }
+
+    FE_CHECK_ARG(family == CompatibleTensorVectorBasis::Family::HCurl,
+                 "BasisFactory: unsupported compatible vector family");
+
+    const auto& ex = component_extents[0];
+    for (int k = 0; k < ex[2]; ++k) {
+        for (int j = 0; j < ex[1]; ++j) {
+            for (int i = 0; i < ex[0]; ++i) {
+                const bool on_y = (j == 0 || j == ex[1] - 1);
+                const bool on_z = (k == 0 || k == ex[2] - 1);
+                if (on_y && on_z) {
+                    int edge_id = 0;
+                    int moment_index = i;
+                    if (j == 0 && k == 0) {
+                        edge_id = 0;
+                    } else if (j == ex[1] - 1 && k == 0) {
+                        edge_id = 2;
+                        moment_index = (ex[0] - 1) - i;
+                    } else if (j == 0 && k == ex[2] - 1) {
+                        edge_id = 4;
+                    } else {
+                        edge_id = 6;
+                        moment_index = (ex[0] - 1) - i;
+                    }
+                    push_edge(edge_id, moment_index);
+                } else if (on_y) {
+                    push_face(j == 0 ? 2 : 4);
+                } else if (on_z) {
+                    push_face(k == 0 ? 0 : 1);
+                } else {
+                    push_interior();
+                }
+            }
+        }
+    }
+
+    const auto& ey = component_extents[1];
+    for (int k = 0; k < ey[2]; ++k) {
+        for (int j = 0; j < ey[1]; ++j) {
+            for (int i = 0; i < ey[0]; ++i) {
+                const bool on_x = (i == 0 || i == ey[0] - 1);
+                const bool on_z = (k == 0 || k == ey[2] - 1);
+                if (on_x && on_z) {
+                    int edge_id = 0;
+                    int moment_index = j;
+                    if (i == ey[0] - 1 && k == 0) {
+                        edge_id = 1;
+                    } else if (i == 0 && k == 0) {
+                        edge_id = 3;
+                        moment_index = (ey[1] - 1) - j;
+                    } else if (i == ey[0] - 1 && k == ey[2] - 1) {
+                        edge_id = 5;
+                    } else {
+                        edge_id = 7;
+                        moment_index = (ey[1] - 1) - j;
+                    }
+                    push_edge(edge_id, moment_index);
+                } else if (on_x) {
+                    push_face(i == ey[0] - 1 ? 3 : 5);
+                } else if (on_z) {
+                    push_face(k == 0 ? 0 : 1);
+                } else {
+                    push_interior();
+                }
+            }
+        }
+    }
+
+    const auto& ez = component_extents[2];
+    for (int k = 0; k < ez[2]; ++k) {
+        for (int j = 0; j < ez[1]; ++j) {
+            for (int i = 0; i < ez[0]; ++i) {
+                const bool on_x = (i == 0 || i == ez[0] - 1);
+                const bool on_y = (j == 0 || j == ez[1] - 1);
+                if (on_x && on_y) {
+                    int edge_id = 0;
+                    if (i == 0 && j == 0) {
+                        edge_id = 8;
+                    } else if (i == ez[0] - 1 && j == 0) {
+                        edge_id = 9;
+                    } else if (i == ez[0] - 1 && j == ez[1] - 1) {
+                        edge_id = 10;
+                    } else {
+                        edge_id = 11;
+                    }
+                    push_edge(edge_id, k);
+                } else if (on_x) {
+                    push_face(i == ez[0] - 1 ? 3 : 5);
+                } else if (on_y) {
+                    push_face(j == 0 ? 2 : 4);
+                } else {
+                    push_interior();
+                }
+            }
+        }
+    }
+
+    return associations;
+}
+
 std::shared_ptr<BasisFunction> create_compatible_tensor_vector_basis(
     const BasisRequest& req,
     Continuity continuity) {
-    FE_CHECK_ARG(req.element_type == ElementType::Quad4,
-                 "BasisFactory: compatible spline/NURBS H(div)/H(curl) bases currently support Quad4 only");
+    const int dim = spline_tensor_dimension(req.element_type);
+    FE_CHECK_ARG(req.element_type == ElementType::Quad4 || req.element_type == ElementType::Hex8,
+                 "BasisFactory: compatible spline/NURBS H(div)/H(curl) bases are intentionally limited to Quad4 and Hex8");
 
-    const auto axes = make_tensor_axes(req, /*dim=*/2);
-    const auto base_extents = infer_quad_tensor_extents(axes);
-    FE_CHECK_ARG(base_extents[0] >= 2 && base_extents[1] >= 2,
+    const auto axes = make_tensor_axes(req, dim);
+    const auto base_extents = infer_tensor_extents(axes);
+    FE_CHECK_ARG(std::all_of(base_extents.begin(),
+                             base_extents.end(),
+                             [](int extent) { return extent >= 2; }),
                  "BasisFactory: compatible spline/NURBS vector bases require at least two basis functions per axis");
 
     if (req.basis_type == BasisType::NURBS && req.weights.empty()) {
@@ -535,41 +773,80 @@ std::shared_ptr<BasisFunction> create_compatible_tensor_vector_basis(
         ? CompatibleTensorVectorBasis::Family::HCurl
         : CompatibleTensorVectorBasis::Family::HDiv;
 
-    const bool first_reduce_x =
-        (family == CompatibleTensorVectorBasis::Family::HCurl);
-    const bool first_reduce_y =
-        (family == CompatibleTensorVectorBasis::Family::HDiv);
-    const bool second_reduce_x =
-        (family == CompatibleTensorVectorBasis::Family::HDiv);
-    const bool second_reduce_y =
-        (family == CompatibleTensorVectorBasis::Family::HCurl);
+    const int order = std::max_element(
+        axes.begin(),
+        axes.end(),
+        [](const BSplineBasis& a, const BSplineBasis& b) {
+            return a.order() < b.order();
+        })->order();
 
-    auto first_basis = make_compatible_quad_component_basis(
-        req.basis_type, axes, base_extents, req.weights, first_reduce_x, first_reduce_y);
-    auto second_basis = make_compatible_quad_component_basis(
-        req.basis_type, axes, base_extents, req.weights, second_reduce_x, second_reduce_y);
+    if (dim == 2) {
+        const std::vector<bool> first_reduce = {
+            family == CompatibleTensorVectorBasis::Family::HCurl,
+            family == CompatibleTensorVectorBasis::Family::HDiv
+        };
+        const std::vector<bool> second_reduce = {
+            family == CompatibleTensorVectorBasis::Family::HDiv,
+            family == CompatibleTensorVectorBasis::Family::HCurl
+        };
 
-    const std::array<int, 2> first_extents = {
-        base_extents[0] - (first_reduce_x ? 1 : 0),
-        base_extents[1] - (first_reduce_y ? 1 : 0)
-    };
-    const std::array<int, 2> second_extents = {
-        base_extents[0] - (second_reduce_x ? 1 : 0),
-        base_extents[1] - (second_reduce_y ? 1 : 0)
-    };
+        auto first_basis = make_compatible_component_basis(
+            req.basis_type, axes, base_extents, req.weights, first_reduce);
+        auto second_basis = make_compatible_component_basis(
+            req.basis_type, axes, base_extents, req.weights, second_reduce);
 
-    auto associations = build_quad_compatible_vector_associations(family,
-                                                                  first_extents,
-                                                                  second_extents);
+        const std::array<int, 2> first_extents = {
+            base_extents[0] - (first_reduce[0] ? 1 : 0),
+            base_extents[1] - (first_reduce[1] ? 1 : 0)
+        };
+        const std::array<int, 2> second_extents = {
+            base_extents[0] - (second_reduce[0] ? 1 : 0),
+            base_extents[1] - (second_reduce[1] ? 1 : 0)
+        };
 
-    const int order = std::max(axes[0].order(), axes[1].order());
+        auto associations = build_quad_compatible_vector_associations(family,
+                                                                      first_extents,
+                                                                      second_extents);
+
+        return std::make_shared<CompatibleTensorVectorBasis>(family,
+                                                             req.basis_type,
+                                                             std::move(first_basis),
+                                                             std::move(second_basis),
+                                                             std::move(associations),
+                                                             order,
+                                                             ElementType::Quad4);
+    }
+
+    std::array<std::vector<bool>, 3> reduce_masks{};
+    if (family == CompatibleTensorVectorBasis::Family::HCurl) {
+        reduce_masks = {std::vector<bool>{true, false, false},
+                        std::vector<bool>{false, true, false},
+                        std::vector<bool>{false, false, true}};
+    } else {
+        reduce_masks = {std::vector<bool>{false, true, true},
+                        std::vector<bool>{true, false, true},
+                        std::vector<bool>{true, true, false}};
+    }
+
+    std::vector<std::shared_ptr<BasisFunction>> component_bases;
+    component_bases.reserve(3u);
+    std::array<std::array<int, 3>, 3> component_extents{};
+    for (std::size_t c = 0; c < 3u; ++c) {
+        component_bases.push_back(make_compatible_component_basis(
+            req.basis_type, axes, base_extents, req.weights, reduce_masks[c]));
+        for (std::size_t axis = 0; axis < 3u; ++axis) {
+            component_extents[c][axis] =
+                base_extents[axis] - (reduce_masks[c][axis] ? 1 : 0);
+        }
+    }
+
+    auto associations = build_hex_compatible_vector_associations(family, component_extents);
     return std::make_shared<CompatibleTensorVectorBasis>(family,
                                                          req.basis_type,
-                                                         std::move(first_basis),
-                                                         std::move(second_basis),
+                                                         std::move(component_bases),
                                                          std::move(associations),
                                                          order,
-                                                         ElementType::Quad4);
+                                                         ElementType::Hex8);
 }
 
 } // namespace
@@ -593,12 +870,8 @@ std::shared_ptr<BasisFunction> BasisFactory::create(const BasisRequest& req) {
             return std::make_shared<BDMBasis>(req.element_type, order);
         }
 
-        // Default selection (BasisType::Lagrange): keep the historical choice of BDM(1) on 2D elements,
-        // but fall back to Raviart-Thomas when BDM is not applicable (e.g., 3D tensor-product RT(1)+).
-        const int dim = element_dimension(req.element_type);
-        if (dim == 2 && order == 1) {
-            return std::make_shared<BDMBasis>(req.element_type, 1);
-        }
+        // Default selection (BasisType::Lagrange): use Raviart-Thomas unless the
+        // caller explicitly requests BDM.
         return std::make_shared<RaviartThomasBasis>(req.element_type, order);
     }
 
@@ -617,7 +890,8 @@ std::shared_ptr<BasisFunction> BasisFactory::create(const BasisRequest& req) {
         // Intentional fall-through to BasisType dispatch below
     }
 
-    // C¹ scalar bases currently use the Hermite family.
+    // Intentional narrow contract: C¹ scalar bases route only through the
+    // cubic Hermite family on Line2/Quad4/Hex8.
     else if (req.continuity == Continuity::C1) {
         if (req.field_type == FieldType::Scalar) {
             return std::make_shared<HermiteBasis>(

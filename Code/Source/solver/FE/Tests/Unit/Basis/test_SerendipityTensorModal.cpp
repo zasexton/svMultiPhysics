@@ -12,6 +12,9 @@
 #include "FE/Basis/NodeOrderingConventions.h"
 #include "FE/Core/FEException.h"
 
+#include <array>
+#include <cmath>
+
 using namespace svmp::FE;
 using namespace svmp::FE::basis;
 
@@ -560,6 +563,57 @@ TEST(SerendipityBasis, Pyramid13GradientMatchesNumerical) {
             EXPECT_NEAR(grads[i][static_cast<std::size_t>(d)], numerical, 1e-6)
                 << "Basis " << i << ", direction " << d;
         }
+    }
+}
+
+TEST(SerendipityBasis, Pyramid13GradientAtApexThrowsBecauseLimitIsNotUnique) {
+    SerendipityBasis basis(ElementType::Pyramid13, 2);
+
+    const svmp::FE::math::Vector<Real, 3> apex{Real(0), Real(0), Real(1)};
+    std::vector<Gradient> grads;
+    EXPECT_THROW(basis.evaluate_gradients(apex, grads), BasisEvaluationException);
+}
+
+TEST(SerendipityBasis, Pyramid13GradientRemainsFiniteNearApexAcrossDirections) {
+    SerendipityBasis basis(ElementType::Pyramid13, 2);
+
+    const Real eps = Real(1e-5);
+    const std::array<svmp::FE::math::Vector<Real, 3>, 4> near_points = {{
+        {Real(0),           Real(0),           Real(1) - eps},
+        {Real(0.45) * eps,  Real(-0.25) * eps, Real(1) - eps},
+        {Real(-0.30) * eps, Real(0.35) * eps,  Real(1) - eps},
+        {Real(0.20) * eps,  Real(0.40) * eps,  Real(1) - eps},
+    }};
+
+    for (const auto& xi : near_points) {
+        std::vector<Real> vals;
+        basis.evaluate_values(xi, vals);
+        ASSERT_EQ(vals.size(), 13u);
+
+        Real value_sum = Real(0);
+        for (const Real v : vals) {
+            EXPECT_TRUE(std::isfinite(static_cast<double>(v)));
+            value_sum += v;
+        }
+        EXPECT_NEAR(value_sum, 1.0, 1e-10);
+
+        std::vector<Gradient> grads;
+        basis.evaluate_gradients(xi, grads);
+        ASSERT_EQ(grads.size(), 13u);
+
+        Gradient grad_sum{};
+        for (const auto& g : grads) {
+            EXPECT_TRUE(std::isfinite(static_cast<double>(g[0])));
+            EXPECT_TRUE(std::isfinite(static_cast<double>(g[1])));
+            EXPECT_TRUE(std::isfinite(static_cast<double>(g[2])));
+            grad_sum[0] += g[0];
+            grad_sum[1] += g[1];
+            grad_sum[2] += g[2];
+        }
+
+        EXPECT_NEAR(grad_sum[0], 0.0, 1e-10);
+        EXPECT_NEAR(grad_sum[1], 0.0, 1e-10);
+        EXPECT_NEAR(grad_sum[2], 0.0, 1e-10);
     }
 }
 

@@ -77,6 +77,20 @@ using JITFn = void (*)(const void*);
     return false;
 }
 
+[[nodiscard]] bool exprContainsType(const FormExprNode& node,
+                                    FormExprType target) noexcept
+{
+    if (node.type() == target) {
+        return true;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && exprContainsType(*child, target)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 [[nodiscard]] bool domainUsesRuntimeCoefficient(const FormIR& ir,
                                                 IntegralDomain domain,
                                                 int marker = -1) noexcept
@@ -93,6 +107,29 @@ using JITFn = void (*)(const void*);
         }
         const auto* root = term.integrand.node();
         if (root && exprContainsRuntimeCoefficient(*root)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool domainUsesExprType(const FormIR& ir,
+                                      IntegralDomain domain,
+                                      FormExprType target,
+                                      int marker = -1) noexcept
+{
+    for (const auto& term : ir.terms()) {
+        if (term.domain != domain) {
+            continue;
+        }
+        if (domain == IntegralDomain::Boundary &&
+            marker >= 0 &&
+            term.boundary_marker >= 0 &&
+            term.boundary_marker != marker) {
+            continue;
+        }
+        const auto* root = term.integrand.node();
+        if (root && exprContainsType(*root, target)) {
             return true;
         }
     }
@@ -1311,6 +1348,11 @@ void JITKernelWrapper::computeBoundaryFace(const assembly::AssemblyContext& ctx,
             fallback_->computeBoundaryFace(ctx, boundary_marker, output);
             return;
         }
+        if (domainUsesExprType(k->ir(), IntegralDomain::Boundary,
+                               FormExprType::AuxiliaryInputRef, boundary_marker)) {
+            fallback_->computeBoundaryFace(ctx, boundary_marker, output);
+            return;
+        }
 
         const bool want_matrix = (k->ir().kind() == FormKind::Bilinear);
         const bool want_vector = (k->ir().kind() == FormKind::Linear);
@@ -1366,6 +1408,14 @@ void JITKernelWrapper::computeBoundaryFace(const assembly::AssemblyContext& ctx,
         if (domainUsesRuntimeCoefficient(k->bilinearIR(), IntegralDomain::Boundary, boundary_marker) ||
             (k->linearIR().has_value() &&
              domainUsesRuntimeCoefficient(*k->linearIR(), IntegralDomain::Boundary, boundary_marker))) {
+            fallback_->computeBoundaryFace(ctx, boundary_marker, output);
+            return;
+        }
+        if (domainUsesExprType(k->bilinearIR(), IntegralDomain::Boundary,
+                               FormExprType::AuxiliaryInputRef, boundary_marker) ||
+            (k->linearIR().has_value() &&
+             domainUsesExprType(*k->linearIR(), IntegralDomain::Boundary,
+                                FormExprType::AuxiliaryInputRef, boundary_marker))) {
             fallback_->computeBoundaryFace(ctx, boundary_marker, output);
             return;
         }
@@ -1471,6 +1521,13 @@ void JITKernelWrapper::computeBoundaryFace(const assembly::AssemblyContext& ctx,
         }
         if (domainUsesRuntimeCoefficient(k->residualIR(), IntegralDomain::Boundary, boundary_marker) ||
             domainUsesRuntimeCoefficient(k->tangentIR(), IntegralDomain::Boundary, boundary_marker)) {
+            fallback_->computeBoundaryFace(ctx, boundary_marker, output);
+            return;
+        }
+        if (domainUsesExprType(k->residualIR(), IntegralDomain::Boundary,
+                               FormExprType::AuxiliaryInputRef, boundary_marker) ||
+            domainUsesExprType(k->tangentIR(), IntegralDomain::Boundary,
+                               FormExprType::AuxiliaryInputRef, boundary_marker)) {
             fallback_->computeBoundaryFace(ctx, boundary_marker, output);
             return;
         }

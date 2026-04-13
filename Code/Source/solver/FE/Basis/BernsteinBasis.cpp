@@ -6,6 +6,7 @@
  */
 
 #include "BernsteinBasis.h"
+#include "detail/ReferenceDerivativeJet.h"
 #include <cmath>
 
 namespace svmp {
@@ -47,6 +48,12 @@ inline Real pow_int(Real base, int exp) {
         return Real(1);
     }
     return std::pow(base, static_cast<Real>(exp));
+}
+
+detail::Jet3 bernstein_1d_jet(int order, int i, const detail::Jet3& t, Real coeff) {
+    return coeff *
+           detail::pow_int(t, i) *
+           detail::pow_int(detail::constant_jet(Real(1)) - t, order - i);
 }
 
 } // namespace
@@ -753,6 +760,154 @@ void BernsteinBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
     }
 
     throw BasisEvaluationException("Unsupported element in BernsteinBasis::evaluate_gradients",
+                                   __FILE__, __LINE__, __func__);
+}
+
+void BernsteinBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
+                                       std::vector<Hessian>& hessians) const {
+    hessians.assign(size_, Hessian{});
+
+    if (element_type_ == ElementType::Point1) {
+        return;
+    }
+
+    if (is_line(element_type_)) {
+        const detail::Jet3 t = detail::constant_jet(Real(0.5)) *
+                               (detail::variable_jet(0, xi[0]) + Real(1));
+        for (int i = 0; i <= order_; ++i) {
+            const auto jet = bernstein_1d_jet(order_, i, t, binomial(order_, i));
+            hessians[static_cast<std::size_t>(i)] = jet.hessian;
+        }
+        return;
+    }
+
+    if (is_quadrilateral(element_type_)) {
+        const detail::Jet3 tx = detail::constant_jet(Real(0.5)) *
+                                (detail::variable_jet(0, xi[0]) + Real(1));
+        const detail::Jet3 ty = detail::constant_jet(Real(0.5)) *
+                                (detail::variable_jet(1, xi[1]) + Real(1));
+        std::size_t idx = 0;
+        for (int j = 0; j <= order_; ++j) {
+            const auto by = bernstein_1d_jet(order_, j, ty, binomial(order_, j));
+            for (int i = 0; i <= order_; ++i) {
+                const auto bx = bernstein_1d_jet(order_, i, tx, binomial(order_, i));
+                hessians[idx++] = (bx * by).hessian;
+            }
+        }
+        return;
+    }
+
+    if (is_hexahedron(element_type_)) {
+        const detail::Jet3 tx = detail::constant_jet(Real(0.5)) *
+                                (detail::variable_jet(0, xi[0]) + Real(1));
+        const detail::Jet3 ty = detail::constant_jet(Real(0.5)) *
+                                (detail::variable_jet(1, xi[1]) + Real(1));
+        const detail::Jet3 tz = detail::constant_jet(Real(0.5)) *
+                                (detail::variable_jet(2, xi[2]) + Real(1));
+        std::size_t idx = 0;
+        for (int k = 0; k <= order_; ++k) {
+            const auto bz = bernstein_1d_jet(order_, k, tz, binomial(order_, k));
+            for (int j = 0; j <= order_; ++j) {
+                const auto by = bernstein_1d_jet(order_, j, ty, binomial(order_, j));
+                for (int i = 0; i <= order_; ++i) {
+                    const auto bx = bernstein_1d_jet(order_, i, tx, binomial(order_, i));
+                    hessians[idx++] = (bx * by * bz).hessian;
+                }
+            }
+        }
+        return;
+    }
+
+    if (is_triangle(element_type_)) {
+        const detail::Jet3 l1 = detail::variable_jet(0, xi[0]);
+        const detail::Jet3 l2 = detail::variable_jet(1, xi[1]);
+        const detail::Jet3 l0 = detail::constant_jet(Real(1)) - l1 - l2;
+        for (std::size_t idx = 0; idx < simplex_indices_.size(); ++idx) {
+            const auto& e = simplex_indices_[idx];
+            const Real coeff = coefficients_[idx];
+            const auto jet = coeff *
+                             detail::pow_int(l0, e[0]) *
+                             detail::pow_int(l1, e[1]) *
+                             detail::pow_int(l2, e[2]);
+            hessians[idx] = jet.hessian;
+        }
+        return;
+    }
+
+    if (is_tetrahedron(element_type_)) {
+        const detail::Jet3 l1 = detail::variable_jet(0, xi[0]);
+        const detail::Jet3 l2 = detail::variable_jet(1, xi[1]);
+        const detail::Jet3 l3 = detail::variable_jet(2, xi[2]);
+        const detail::Jet3 l0 = detail::constant_jet(Real(1)) - l1 - l2 - l3;
+        for (std::size_t idx = 0; idx < simplex_indices_.size(); ++idx) {
+            const auto& e = simplex_indices_[idx];
+            const Real coeff = coefficients_[idx];
+            const auto jet = coeff *
+                             detail::pow_int(l0, e[0]) *
+                             detail::pow_int(l1, e[1]) *
+                             detail::pow_int(l2, e[2]) *
+                             detail::pow_int(l3, e[3]);
+            hessians[idx] = jet.hessian;
+        }
+        return;
+    }
+
+    if (is_wedge(element_type_)) {
+        const detail::Jet3 l1 = detail::variable_jet(0, xi[0]);
+        const detail::Jet3 l2 = detail::variable_jet(1, xi[1]);
+        const detail::Jet3 l0 = detail::constant_jet(Real(1)) - l1 - l2;
+        const detail::Jet3 tz = detail::constant_jet(Real(0.5)) *
+                                (detail::variable_jet(2, xi[2]) + Real(1));
+        const std::size_t n1d = static_cast<std::size_t>(order_ + 1);
+
+        std::vector<detail::Jet3> tri_jets(simplex_indices_.size());
+        for (std::size_t idx = 0; idx < simplex_indices_.size(); ++idx) {
+            const auto& e = simplex_indices_[idx];
+            tri_jets[idx] = coefficients_[idx] *
+                            detail::pow_int(l0, e[0]) *
+                            detail::pow_int(l1, e[1]) *
+                            detail::pow_int(l2, e[2]);
+        }
+
+        std::size_t out_idx = 0;
+        for (std::size_t k = 0; k < n1d; ++k) {
+            const auto bz = bernstein_1d_jet(order_, static_cast<int>(k), tz,
+                                             binomial(order_, static_cast<int>(k)));
+            for (const auto& tri_jet : tri_jets) {
+                hessians[out_idx++] = (tri_jet * bz).hessian;
+            }
+        }
+        return;
+    }
+
+    if (is_pyramid(element_type_)) {
+        const detail::Jet3 zeta = detail::variable_jet(2, xi[2]);
+        const detail::Jet3 one_minus_z = detail::constant_jet(Real(1)) - zeta;
+        detail::Jet3 tx = detail::constant_jet(Real(0.5));
+        detail::Jet3 ty = detail::constant_jet(Real(0.5));
+        if (std::abs(Real(1) - xi[2]) > Real(1e-12)) {
+            tx = detail::constant_jet(Real(0.5)) *
+                 (detail::variable_jet(0, xi[0]) / one_minus_z + Real(1));
+            ty = detail::constant_jet(Real(0.5)) *
+                 (detail::variable_jet(1, xi[1]) / one_minus_z + Real(1));
+        }
+        const detail::Jet3 tz = detail::constant_jet(Real(0.5)) * (zeta + Real(1));
+
+        std::size_t idx = 0;
+        for (int k = 0; k <= order_; ++k) {
+            const auto bz = bernstein_1d_jet(order_, k, tz, binomial(order_, k));
+            for (int j = 0; j <= order_; ++j) {
+                const auto by = bernstein_1d_jet(order_, j, ty, binomial(order_, j));
+                for (int i = 0; i <= order_; ++i) {
+                    const auto bx = bernstein_1d_jet(order_, i, tx, binomial(order_, i));
+                    hessians[idx++] = (bx * by * bz).hessian;
+                }
+            }
+        }
+        return;
+    }
+
+    throw BasisEvaluationException("Unsupported element in BernsteinBasis::evaluate_hessians",
                                    __FILE__, __LINE__, __func__);
 }
 

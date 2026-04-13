@@ -1806,17 +1806,12 @@ CoupledResidualKernels installFormulation(
                 }
                 if (node.type() == forms::FormExprType::AuxiliaryOutputSymbol) {
                     auto it = output_ids.find(nm);
-                    if (it != output_ids.end() &&
-                        system.auxiliaryOutputMetadataUsesRef(nm)) {
+                    if (it != output_ids.end()) {
                         return forms::FormExpr::auxiliaryOutputRef(
                             static_cast<std::uint32_t>(it->second));
                     }
                     if (auto lowered_output = system.loweredAuxiliaryOutputExpr(nm)) {
                         return *lowered_output;
-                    }
-                    if (it != output_ids.end()) {
-                        return forms::FormExpr::auxiliaryOutputRef(
-                            static_cast<std::uint32_t>(it->second));
                     }
                 }
                 return std::nullopt;
@@ -1846,10 +1841,11 @@ CoupledResidualKernels installFormulation(
             metadata_resolved = metadata_resolved.transformNodes(resolve_aux_metadata);
             resolved = resolved.transformNodes(resolve_aux_assembly);
 
-            // For pure algebraic lowered outputs, metadata_resolved now uses
-            // the same lowered direct expression as assembly so the runtime
-            // does not also build a second incompatible monolithic
-            // direct-coupling path from AuxiliaryOutputRef metadata.
+            // Preserve AuxiliaryOutputRef in metadata_resolved whenever an
+            // output id exists. The assembly expression may still be lowered
+            // to a direct form, but the stored metadata expression needs the
+            // stable output reference so monolithic dR/d(output) coupling can
+            // be recovered exactly during operator assembly.
             rec.residual_expr = metadata_resolved.nodeShared();
         }
 

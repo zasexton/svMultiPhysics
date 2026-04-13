@@ -13,6 +13,7 @@
 
 #include <cmath>
 #include <limits>
+#include <string>
 
 #ifdef FE_CHECK_ARG
 #undef FE_CHECK_ARG
@@ -49,6 +50,319 @@ inline bool is_wedge(ElementType type) {
 
 inline bool is_pyramid(ElementType type) {
     return type == ElementType::Pyramid5 || type == ElementType::Pyramid13 || type == ElementType::Pyramid14;
+}
+
+inline std::size_t triangle_poly_dim(std::size_t k) {
+    return (k + 1u) * (k + 2u) / 2u;
+}
+
+inline std::size_t tetra_poly_dim(std::size_t k) {
+    return (k + 1u) * (k + 2u) * (k + 3u) / 6u;
+}
+
+inline std::size_t rt_wedge_size(int order) {
+    const std::size_t k = static_cast<std::size_t>(order);
+    const std::size_t face_dofs = 2u * triangle_poly_dim(k) + 3u * (k + 1u) * (k + 1u);
+    const std::size_t interior_dofs = (k >= 1u) ? (3u * k * (k + 1u) * (k + 1u) / 2u) : 0u;
+    return face_dofs + interior_dofs;
+}
+
+inline std::size_t rt_pyramid_size(int order) {
+    const std::size_t k = static_cast<std::size_t>(order);
+    const std::size_t face_dofs = (k + 1u) * (k + 1u) + 4u * triangle_poly_dim(k);
+    const std::size_t interior_dofs = (k >= 1u) ? (3u * k * k * k) : 0u;
+    return face_dofs + interior_dofs;
+}
+
+inline std::size_t nd_wedge_size(int order) {
+    const std::size_t k = static_cast<std::size_t>(order);
+    const std::size_t edge_dofs = 9u * (k + 1u);
+    const std::size_t face_dofs = (k >= 1u) ? (8u * k * (k + 1u)) : 0u;
+    const std::size_t interior_dofs = (k >= 2u) ? (3u * k * (k - 1u) * (k + 1u) / 2u) : 0u;
+    return edge_dofs + face_dofs + interior_dofs;
+}
+
+inline std::size_t nd_pyramid_size(int order) {
+    const std::size_t k = static_cast<std::size_t>(order);
+    const std::size_t edge_dofs = 8u * (k + 1u);
+    const std::size_t face_dofs = (k >= 1u) ? (6u * k * (k + 1u)) : 0u;
+    const std::size_t interior_dofs = (k >= 2u) ? (k * (k - 1u) * (k + 1u) / 2u) : 0u;
+    return edge_dofs + face_dofs + interior_dofs;
+}
+
+inline void ensure_supported_hybrid_vector_order(ElementType type,
+                                                 int order,
+                                                 const char* family_name) {
+    (void)type;
+    (void)order;
+    (void)family_name;
+}
+
+inline std::vector<std::array<int, 4>> make_component_monomial_candidates(int max_total_degree) {
+    FE_CHECK_ARG(max_total_degree >= 0, "make_component_monomial_candidates: negative total degree");
+
+    std::vector<std::array<int, 4>> candidates;
+    for (int component = 0; component < 3; ++component) {
+        for (int total = 0; total <= max_total_degree; ++total) {
+            for (int pz = 0; pz <= total; ++pz) {
+                for (int py = 0; py <= total - pz; ++py) {
+                    const int px = total - py - pz;
+                    candidates.push_back({component, px, py, pz});
+                }
+            }
+        }
+    }
+    return candidates;
+}
+
+inline std::vector<std::array<int, 4>> make_rt_extra_monomial_candidates(ElementType type, int order) {
+    if (order >= 3) {
+        return make_component_monomial_candidates(3 * order);
+    }
+
+    std::vector<std::array<int, 4>> candidates;
+    if (!is_pyramid(type) || order != 2) {
+        return candidates;
+    }
+
+    for (int component = 0; component < 3; ++component) {
+        for (int pz = 0; pz <= 2; ++pz) {
+            for (int py = 0; py <= 2 - pz; ++py) {
+                for (int px = 0; px <= 2 - py - pz; ++px) {
+                    candidates.push_back({component, px, py, pz});
+                }
+            }
+        }
+    }
+    return candidates;
+}
+
+inline Real eval_transformed_rt_monomial_scalar(const std::array<int, 4>& mono,
+                                                const std::vector<Real>& px,
+                                                const std::vector<Real>& py,
+                                                const std::vector<Real>& pz) {
+    return px[static_cast<std::size_t>(mono[1])] *
+           py[static_cast<std::size_t>(mono[2])] *
+           pz[static_cast<std::size_t>(mono[3])];
+}
+
+inline Real eval_transformed_rt_monomial_divergence(const std::array<int, 4>& mono,
+                                                    const std::vector<Real>& px,
+                                                    const std::vector<Real>& py,
+                                                    const std::vector<Real>& pz) {
+    const int component = mono[0];
+    const int px_pow = mono[1];
+    const int py_pow = mono[2];
+    const int pz_pow = mono[3];
+
+    if (component == 0) {
+        if (px_pow == 0) {
+            return Real(0);
+        }
+        return Real(px_pow) *
+               px[static_cast<std::size_t>(px_pow - 1)] *
+               py[static_cast<std::size_t>(py_pow)] *
+               pz[static_cast<std::size_t>(pz_pow)];
+    }
+    if (component == 1) {
+        if (py_pow == 0) {
+            return Real(0);
+        }
+        return Real(py_pow) *
+               px[static_cast<std::size_t>(px_pow)] *
+               py[static_cast<std::size_t>(py_pow - 1)] *
+               pz[static_cast<std::size_t>(pz_pow)];
+    }
+    if (pz_pow == 0) {
+        return Real(0);
+    }
+    return Real(pz_pow) *
+           px[static_cast<std::size_t>(px_pow)] *
+           py[static_cast<std::size_t>(py_pow)] *
+           pz[static_cast<std::size_t>(pz_pow - 1)];
+}
+
+inline std::vector<std::array<int, 4>> make_nd_extra_monomial_candidates(ElementType,
+                                                                         int order) {
+    if (order >= 3) {
+        return make_component_monomial_candidates(3 * order);
+    }
+
+    std::vector<std::array<int, 4>> candidates;
+    const int max_total_degree = (order == 1) ? 4 : 5;
+    for (int component = 0; component < 3; ++component) {
+        for (int total = 0; total <= max_total_degree; ++total) {
+            for (int pz = 0; pz <= total; ++pz) {
+                for (int py = 0; py <= total - pz; ++py) {
+                    const int px = total - py - pz;
+                    candidates.push_back({component, px, py, pz});
+                }
+            }
+        }
+    }
+    return candidates;
+}
+
+inline Real eval_transformed_nd_monomial_scalar(const std::array<int, 4>& mono,
+                                                const std::vector<Real>& px,
+                                                const std::vector<Real>& py,
+                                                const std::vector<Real>& pz) {
+    return px[static_cast<std::size_t>(mono[1])] *
+           py[static_cast<std::size_t>(mono[2])] *
+           pz[static_cast<std::size_t>(mono[3])];
+}
+
+inline Vec3 eval_transformed_nd_monomial_curl(const std::array<int, 4>& mono,
+                                              const std::vector<Real>& px,
+                                              const std::vector<Real>& py,
+                                              const std::vector<Real>& pz) {
+    const int component = mono[0];
+    const int px_pow = mono[1];
+    const int py_pow = mono[2];
+    const int pz_pow = mono[3];
+
+    const Real dphidx = (px_pow == 0)
+        ? Real(0)
+        : Real(px_pow) *
+              px[static_cast<std::size_t>(px_pow - 1)] *
+              py[static_cast<std::size_t>(py_pow)] *
+              pz[static_cast<std::size_t>(pz_pow)];
+    const Real dphidy = (py_pow == 0)
+        ? Real(0)
+        : Real(py_pow) *
+              px[static_cast<std::size_t>(px_pow)] *
+              py[static_cast<std::size_t>(py_pow - 1)] *
+              pz[static_cast<std::size_t>(pz_pow)];
+    const Real dphidz = (pz_pow == 0)
+        ? Real(0)
+        : Real(pz_pow) *
+              px[static_cast<std::size_t>(px_pow)] *
+              py[static_cast<std::size_t>(py_pow)] *
+              pz[static_cast<std::size_t>(pz_pow - 1)];
+
+    if (component == 0) {
+        return Vec3{Real(0), dphidz, -dphidy};
+    }
+    if (component == 1) {
+        return Vec3{-dphidz, Real(0), dphidx};
+    }
+    return Vec3{dphidy, -dphidx, Real(0)};
+}
+
+struct Diff3 {
+    Real value{0};
+    Real dx{0};
+    Real dy{0};
+    Real dz{0};
+
+    Diff3() = default;
+    Diff3(Real v) : value(v) {}
+    Diff3(Real v, Real dx_in, Real dy_in, Real dz_in)
+        : value(v), dx(dx_in), dy(dy_in), dz(dz_in) {}
+
+    static Diff3 variable_x(Real v) { return Diff3(v, Real(1), Real(0), Real(0)); }
+    static Diff3 variable_y(Real v) { return Diff3(v, Real(0), Real(1), Real(0)); }
+    static Diff3 variable_z(Real v) { return Diff3(v, Real(0), Real(0), Real(1)); }
+};
+
+inline Diff3 operator+(const Diff3& a, const Diff3& b) {
+    return Diff3(a.value + b.value, a.dx + b.dx, a.dy + b.dy, a.dz + b.dz);
+}
+
+inline Diff3 operator-(const Diff3& a, const Diff3& b) {
+    return Diff3(a.value - b.value, a.dx - b.dx, a.dy - b.dy, a.dz - b.dz);
+}
+
+inline Diff3 operator-(const Diff3& a) {
+    return Diff3(-a.value, -a.dx, -a.dy, -a.dz);
+}
+
+inline Diff3 operator*(const Diff3& a, const Diff3& b) {
+    return Diff3(a.value * b.value,
+                 a.dx * b.value + a.value * b.dx,
+                 a.dy * b.value + a.value * b.dy,
+                 a.dz * b.value + a.value * b.dz);
+}
+
+inline Diff3 operator/(const Diff3& a, const Diff3& b) {
+    const Real inv = Real(1) / b.value;
+    const Real inv2 = inv * inv;
+    return Diff3(a.value * inv,
+                 (a.dx * b.value - a.value * b.dx) * inv2,
+                 (a.dy * b.value - a.value * b.dy) * inv2,
+                 (a.dz * b.value - a.value * b.dz) * inv2);
+}
+
+template <typename Scalar>
+struct DirectVec3 {
+    Scalar data[3]{};
+
+    Scalar& operator[](std::size_t i) { return data[i]; }
+    const Scalar& operator[](std::size_t i) const { return data[i]; }
+};
+
+template <typename Scalar>
+DirectVec3<Scalar> make_direct_vec3(Scalar x, Scalar y, Scalar z) {
+    DirectVec3<Scalar> v{};
+    v[0] = x;
+    v[1] = y;
+    v[2] = z;
+    return v;
+}
+
+template <typename EvalFn>
+void eval_direct_values_real(const Vec3& xi,
+                             EvalFn&& eval,
+                             std::vector<Vec3>& values) {
+    std::vector<DirectVec3<Real>> tmp;
+    eval(make_direct_vec3(xi[0], xi[1], xi[2]), tmp);
+
+    values.resize(tmp.size());
+    for (std::size_t i = 0; i < tmp.size(); ++i) {
+        values[i] = Vec3{tmp[i][0], tmp[i][1], tmp[i][2]};
+    }
+}
+
+template <typename EvalFn>
+void eval_direct_curl_exact(const Vec3& xi,
+                            EvalFn&& eval,
+                            std::vector<Vec3>& curl) {
+    using DiffVec3 = DirectVec3<Diff3>;
+
+    std::vector<DiffVec3> values;
+    eval(make_direct_vec3(Diff3::variable_x(xi[0]),
+                          Diff3::variable_y(xi[1]),
+                          Diff3::variable_z(xi[2])),
+         values);
+
+    curl.resize(values.size());
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        const auto& v = values[i];
+        curl[i] = Vec3{
+            v[2].dy - v[1].dz,
+            v[0].dz - v[2].dx,
+            v[1].dx - v[0].dy
+        };
+    }
+}
+
+template <typename EvalFn>
+void eval_direct_divergence_exact(const Vec3& xi,
+                                  EvalFn&& eval,
+                                  std::vector<Real>& divergence) {
+    using DiffVec3 = DirectVec3<Diff3>;
+
+    std::vector<DiffVec3> values;
+    eval(make_direct_vec3(Diff3::variable_x(xi[0]),
+                          Diff3::variable_y(xi[1]),
+                          Diff3::variable_z(xi[2])),
+         values);
+
+    divergence.resize(values.size());
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        const auto& v = values[i];
+        divergence[i] = v[0].dx + v[1].dy + v[2].dz;
+    }
 }
 
 // =============================================================================
@@ -268,19 +582,23 @@ inline void eval_wedge_rt1_divergence_direct(const Vec3& xi, std::vector<Real>& 
 //   - 3 quad faces x 4 tangential DOFs = 12 face DOFs
 //   - Interior: 0 DOFs for k=1
 
-inline void eval_wedge_nd1_direct(const Vec3& xi, std::vector<Vec3>& values) {
-    const Real x = xi[0];
-    const Real y = xi[1];
-    const Real z = xi[2];
+template <typename Scalar>
+inline void eval_wedge_nd1_direct_impl(const DirectVec3<Scalar>& xi,
+                                       std::vector<DirectVec3<Scalar>>& values) {
+    using ValueVec = DirectVec3<Scalar>;
+
+    const auto x = xi[0];
+    const auto y = xi[1];
+    const auto z = xi[2];
 
     // Barycentric coordinates
-    const Real L0 = Real(1) - x - y;
-    const Real L1 = x;
-    const Real L2 = y;
+    const auto L0 = Real(1) - x - y;
+    const auto L1 = x;
+    const auto L2 = y;
 
     // Z selectors
-    const Real zb = (Real(1) - z) * Real(0.5);
-    const Real zt = (Real(1) + z) * Real(0.5);
+    const auto zb = (Real(1) - z) * Real(0.5);
+    const auto zt = (Real(1) + z) * Real(0.5);
 
     values.resize(34);
     std::size_t idx = 0;
@@ -292,43 +610,43 @@ inline void eval_wedge_nd1_direct(const Vec3& xi, std::vector<Vec3>& values) {
 
     // Bottom triangle edges (at z=-1)
     // Edge 0: v0=(0,0,-1) to v1=(1,0,-1), tangent = (1,0,0), length = 1
-    values[idx++] = Vec3{zb * (Real(1) - y), Real(0), Real(0)}; // mode 0
-    values[idx++] = Vec3{zb * (Real(1) - y) * (Real(2)*x - Real(1)), Real(0), Real(0)}; // mode 1 (Legendre P_1)
+    values[idx++] = ValueVec{zb * (Real(1) - y), Real(0), Real(0)}; // mode 0
+    values[idx++] = ValueVec{zb * (Real(1) - y) * (Real(2)*x - Real(1)), Real(0), Real(0)}; // mode 1 (Legendre P_1)
 
     // Edge 1: v1=(1,0,-1) to v2=(0,1,-1), tangent = (-1,1,0)/sqrt(2)
     // Parameterize: p(t) = (1-t, t, -1), t in [0,1], tangent = (-1,1,0)
-    values[idx++] = Vec3{-zb * L0, zb * L0, Real(0)}; // mode 0
-    values[idx++] = Vec3{-zb * L0 * (Real(2)*y - Real(1)), zb * L0 * (Real(2)*y - Real(1)), Real(0)}; // mode 1
+    values[idx++] = ValueVec{-zb * L0, zb * L0, Real(0)}; // mode 0
+    values[idx++] = ValueVec{-zb * L0 * (Real(2)*y - Real(1)), zb * L0 * (Real(2)*y - Real(1)), Real(0)}; // mode 1
 
     // Edge 2: v2=(0,1,-1) to v0=(0,0,-1), tangent = (0,-1,0), length = 1
-    values[idx++] = Vec3{Real(0), -zb * (Real(1) - x), Real(0)}; // mode 0
-    values[idx++] = Vec3{Real(0), -zb * (Real(1) - x) * (Real(1) - Real(2)*y), Real(0)}; // mode 1
+    values[idx++] = ValueVec{Real(0), -zb * (Real(1) - x), Real(0)}; // mode 0
+    values[idx++] = ValueVec{Real(0), -zb * (Real(1) - x) * (Real(1) - Real(2)*y), Real(0)}; // mode 1
 
     // Top triangle edges (at z=+1)
     // Edge 3: v3=(0,0,+1) to v4=(1,0,+1), tangent = (1,0,0)
-    values[idx++] = Vec3{zt * (Real(1) - y), Real(0), Real(0)}; // mode 0
-    values[idx++] = Vec3{zt * (Real(1) - y) * (Real(2)*x - Real(1)), Real(0), Real(0)}; // mode 1
+    values[idx++] = ValueVec{zt * (Real(1) - y), Real(0), Real(0)}; // mode 0
+    values[idx++] = ValueVec{zt * (Real(1) - y) * (Real(2)*x - Real(1)), Real(0), Real(0)}; // mode 1
 
     // Edge 4: v4=(1,0,+1) to v5=(0,1,+1), tangent = (-1,1,0)/sqrt(2)
-    values[idx++] = Vec3{-zt * L0, zt * L0, Real(0)}; // mode 0
-    values[idx++] = Vec3{-zt * L0 * (Real(2)*y - Real(1)), zt * L0 * (Real(2)*y - Real(1)), Real(0)}; // mode 1
+    values[idx++] = ValueVec{-zt * L0, zt * L0, Real(0)}; // mode 0
+    values[idx++] = ValueVec{-zt * L0 * (Real(2)*y - Real(1)), zt * L0 * (Real(2)*y - Real(1)), Real(0)}; // mode 1
 
     // Edge 5: v5=(0,1,+1) to v3=(0,0,+1), tangent = (0,-1,0)
-    values[idx++] = Vec3{Real(0), -zt * (Real(1) - x), Real(0)}; // mode 0
-    values[idx++] = Vec3{Real(0), -zt * (Real(1) - x) * (Real(1) - Real(2)*y), Real(0)}; // mode 1
+    values[idx++] = ValueVec{Real(0), -zt * (Real(1) - x), Real(0)}; // mode 0
+    values[idx++] = ValueVec{Real(0), -zt * (Real(1) - x) * (Real(1) - Real(2)*y), Real(0)}; // mode 1
 
     // Vertical edges (tangent = (0,0,1))
     // Edge 6: v0=(0,0,-1) to v3=(0,0,+1), at (x,y)=(0,0)
-    values[idx++] = Vec3{Real(0), Real(0), L0}; // mode 0
-    values[idx++] = Vec3{Real(0), Real(0), L0 * z}; // mode 1
+    values[idx++] = ValueVec{Real(0), Real(0), L0}; // mode 0
+    values[idx++] = ValueVec{Real(0), Real(0), L0 * z}; // mode 1
 
     // Edge 7: v1=(1,0,-1) to v4=(1,0,+1), at (x,y)=(1,0)
-    values[idx++] = Vec3{Real(0), Real(0), L1}; // mode 0
-    values[idx++] = Vec3{Real(0), Real(0), L1 * z}; // mode 1
+    values[idx++] = ValueVec{Real(0), Real(0), L1}; // mode 0
+    values[idx++] = ValueVec{Real(0), Real(0), L1 * z}; // mode 1
 
     // Edge 8: v2=(0,1,-1) to v5=(0,1,+1), at (x,y)=(0,1)
-    values[idx++] = Vec3{Real(0), Real(0), L2}; // mode 0
-    values[idx++] = Vec3{Real(0), Real(0), L2 * z}; // mode 1
+    values[idx++] = ValueVec{Real(0), Real(0), L2}; // mode 0
+    values[idx++] = ValueVec{Real(0), Real(0), L2 * z}; // mode 1
 
     // ==========================================================================
     // Face DOFs: tangential moments
@@ -336,39 +654,43 @@ inline void eval_wedge_nd1_direct(const Vec3& xi, std::vector<Vec3>& values) {
 
     // Bottom triangular face (z=-1): 2 tangential DOFs
     // Two independent tangent directions on face, moments against P_0
-    const Real face_bubble_tri_b = L0 * L1 * L2 * zb; // bubble localized to bottom face
-    values[idx++] = Vec3{face_bubble_tri_b * Real(60), Real(0), Real(0)}; // t1 direction
-    values[idx++] = Vec3{Real(0), face_bubble_tri_b * Real(60), Real(0)}; // t2 direction
+    const auto face_bubble_tri_b = L0 * L1 * L2 * zb; // bubble localized to bottom face
+    values[idx++] = ValueVec{face_bubble_tri_b * Real(60), Real(0), Real(0)}; // t1 direction
+    values[idx++] = ValueVec{Real(0), face_bubble_tri_b * Real(60), Real(0)}; // t2 direction
 
     // Top triangular face (z=+1): 2 tangential DOFs
-    const Real face_bubble_tri_t = L0 * L1 * L2 * zt;
-    values[idx++] = Vec3{face_bubble_tri_t * Real(60), Real(0), Real(0)}; // t1 direction
-    values[idx++] = Vec3{Real(0), face_bubble_tri_t * Real(60), Real(0)}; // t2 direction
+    const auto face_bubble_tri_t = L0 * L1 * L2 * zt;
+    values[idx++] = ValueVec{face_bubble_tri_t * Real(60), Real(0), Real(0)}; // t1 direction
+    values[idx++] = ValueVec{Real(0), face_bubble_tri_t * Real(60), Real(0)}; // t2 direction
 
     // Quad face 2 (y=0): 4 tangential DOFs
     // Tangent directions: (1,0,0) and (0,0,1)
     // Face bubble: L0 * L1 = x*(1-x-y) restricted to y=0 -> x*(1-x)
     // But we need it defined on whole element, use (1-y) localization
     // Actually for tangential moment we need functions that have tangent on face
-    values[idx++] = Vec3{(Real(1) - y) * L0 * Real(12), Real(0), Real(0)}; // DOF: t_x moment const
-    values[idx++] = Vec3{(Real(1) - y) * L0 * z * Real(12), Real(0), Real(0)}; // DOF: t_x moment linear z
-    values[idx++] = Vec3{Real(0), Real(0), (Real(1) - y) * L0 * Real(12)}; // DOF: t_z moment const
-    values[idx++] = Vec3{Real(0), Real(0), (Real(1) - y) * L0 * (Real(2)*x - Real(1)) * Real(12)}; // DOF: t_z moment linear x
+    values[idx++] = ValueVec{(Real(1) - y) * L0 * Real(12), Real(0), Real(0)}; // DOF: t_x moment const
+    values[idx++] = ValueVec{(Real(1) - y) * L0 * z * Real(12), Real(0), Real(0)}; // DOF: t_x moment linear z
+    values[idx++] = ValueVec{Real(0), Real(0), (Real(1) - y) * L0 * Real(12)}; // DOF: t_z moment const
+    values[idx++] = ValueVec{Real(0), Real(0), (Real(1) - y) * L0 * (Real(2)*x - Real(1)) * Real(12)}; // DOF: t_z moment linear x
 
     // Quad face 3 (x=0): 4 tangential DOFs
     // Tangent directions: (0,1,0) and (0,0,1)
-    values[idx++] = Vec3{Real(0), (Real(1) - x) * L0 * Real(12), Real(0)}; // DOF: t_y moment const
-    values[idx++] = Vec3{Real(0), (Real(1) - x) * L0 * z * Real(12), Real(0)}; // DOF: t_y moment linear z
-    values[idx++] = Vec3{Real(0), Real(0), (Real(1) - x) * L0 * Real(12)}; // DOF: t_z moment const
-    values[idx++] = Vec3{Real(0), Real(0), (Real(1) - x) * L0 * (Real(2)*y - Real(1)) * Real(12)}; // DOF: t_z moment linear y
+    values[idx++] = ValueVec{Real(0), (Real(1) - x) * L0 * Real(12), Real(0)}; // DOF: t_y moment const
+    values[idx++] = ValueVec{Real(0), (Real(1) - x) * L0 * z * Real(12), Real(0)}; // DOF: t_y moment linear z
+    values[idx++] = ValueVec{Real(0), Real(0), (Real(1) - x) * L0 * Real(12)}; // DOF: t_z moment const
+    values[idx++] = ValueVec{Real(0), Real(0), (Real(1) - x) * L0 * (Real(2)*y - Real(1)) * Real(12)}; // DOF: t_z moment linear y
 
     // Quad face 4 (x+y=1): 4 tangential DOFs
     // Tangent directions: (-1,1,0)/sqrt(2) and (0,0,1)
-    const Real loc4 = x + y;
-    values[idx++] = Vec3{-loc4 * L2 * Real(12), loc4 * L2 * Real(12), Real(0)}; // DOF: t1 moment const
-    values[idx++] = Vec3{-loc4 * L2 * z * Real(12), loc4 * L2 * z * Real(12), Real(0)}; // DOF: t1 moment linear z
-    values[idx++] = Vec3{Real(0), Real(0), loc4 * L2 * Real(12)}; // DOF: t_z moment const
-    values[idx++] = Vec3{Real(0), Real(0), loc4 * L2 * x * Real(12)}; // DOF: t_z moment linear x (face param)
+    const auto loc4 = x + y;
+    values[idx++] = ValueVec{-loc4 * L2 * Real(12), loc4 * L2 * Real(12), Real(0)}; // DOF: t1 moment const
+    values[idx++] = ValueVec{-loc4 * L2 * z * Real(12), loc4 * L2 * z * Real(12), Real(0)}; // DOF: t1 moment linear z
+    values[idx++] = ValueVec{Real(0), Real(0), loc4 * L2 * Real(12)}; // DOF: t_z moment const
+    values[idx++] = ValueVec{Real(0), Real(0), loc4 * L2 * x * Real(12)}; // DOF: t_z moment linear x (face param)
+}
+
+inline void eval_wedge_nd1_direct(const Vec3& xi, std::vector<Vec3>& values) {
+    eval_direct_values_real(xi, eval_wedge_nd1_direct_impl<Real>, values);
 }
 
 // -----------------------------------------------------------------------------
@@ -565,17 +887,21 @@ inline void eval_pyramid_rt1_divergence_direct(const Vec3& xi, std::vector<Real>
 //   - 4 tri faces x 2 tangential moments = 8 face DOFs
 //   - Interior: 0 for k=1
 
-inline void eval_pyramid_nd1_direct(const Vec3& xi, std::vector<Vec3>& values) {
-    const Real x = xi[0];
-    const Real y = xi[1];
-    const Real z = xi[2];
+template <typename Scalar>
+inline void eval_pyramid_nd1_direct_impl(const DirectVec3<Scalar>& xi,
+                                         std::vector<DirectVec3<Scalar>>& values) {
+    using Vec3 = DirectVec3<Scalar>;
+
+    const auto x = xi[0];
+    const auto y = xi[1];
+    const auto z = xi[2];
 
     // Face localizations
-    const Real zc = Real(1) - z;    // 1 at base, 0 at apex
-    const Real loc_f1 = Real(1) + y - z;  // front face
-    const Real loc_f2 = Real(1) - x - z;  // right face
-    const Real loc_f3 = Real(1) - y - z;  // back face
-    const Real loc_f4 = Real(1) + x - z;  // left face
+    const auto zc = Real(1) - z;    // 1 at base, 0 at apex
+    const auto loc_f1 = Real(1) + y - z;  // front face
+    const auto loc_f2 = Real(1) - x - z;  // right face
+    const auto loc_f3 = Real(1) - y - z;  // back face
+    const auto loc_f4 = Real(1) + x - z;  // left face
 
     values.resize(28);
     std::size_t idx = 0;
@@ -586,43 +912,43 @@ inline void eval_pyramid_nd1_direct(const Vec3& xi, std::vector<Vec3>& values) {
 
     // Base edge 0: v0=(-1,-1,0) to v1=(1,-1,0), tangent = (1,0,0)
     // Edge localized by (1+y)*(1-z)
-    const Real loc_e0 = (Real(1) + y) * zc;
+    const auto loc_e0 = (Real(1) + y) * zc;
     values[idx++] = Vec3{loc_e0, Real(0), Real(0)}; // mode 0
     values[idx++] = Vec3{loc_e0 * x, Real(0), Real(0)}; // mode 1
 
     // Base edge 1: v1=(1,-1,0) to v2=(1,1,0), tangent = (0,1,0)
-    const Real loc_e1 = (Real(1) - x) * zc;
+    const auto loc_e1 = (Real(1) - x) * zc;
     values[idx++] = Vec3{Real(0), loc_e1, Real(0)}; // mode 0
     values[idx++] = Vec3{Real(0), loc_e1 * y, Real(0)}; // mode 1
 
     // Base edge 2: v2=(1,1,0) to v3=(-1,1,0), tangent = (-1,0,0)
-    const Real loc_e2 = (Real(1) - y) * zc;
+    const auto loc_e2 = (Real(1) - y) * zc;
     values[idx++] = Vec3{-loc_e2, Real(0), Real(0)}; // mode 0
     values[idx++] = Vec3{-loc_e2 * x, Real(0), Real(0)}; // mode 1
 
     // Base edge 3: v3=(-1,1,0) to v0=(-1,-1,0), tangent = (0,-1,0)
-    const Real loc_e3 = (Real(1) + x) * zc;
+    const auto loc_e3 = (Real(1) + x) * zc;
     values[idx++] = Vec3{Real(0), -loc_e3, Real(0)}; // mode 0
     values[idx++] = Vec3{Real(0), -loc_e3 * y, Real(0)}; // mode 1
 
     // Apex edge 4: v0=(-1,-1,0) to v4=(0,0,1), tangent ~ (1,1,1)
     // Localized by (1-x-y-z) * something
-    const Real loc_e4 = loc_f2 * loc_f3; // zero on faces 2 and 3
+    const auto loc_e4 = loc_f2 * loc_f3; // zero on faces 2 and 3
     values[idx++] = Vec3{loc_e4, loc_e4, loc_e4 * Real(2)}; // mode 0
     values[idx++] = Vec3{loc_e4 * z, loc_e4 * z, loc_e4 * z * Real(2)}; // mode 1
 
     // Apex edge 5: v1=(1,-1,0) to v4=(0,0,1), tangent ~ (-1,1,1)
-    const Real loc_e5 = loc_f3 * loc_f4; // zero on faces 3 and 4
+    const auto loc_e5 = loc_f3 * loc_f4; // zero on faces 3 and 4
     values[idx++] = Vec3{-loc_e5, loc_e5, loc_e5 * Real(2)}; // mode 0
     values[idx++] = Vec3{-loc_e5 * z, loc_e5 * z, loc_e5 * z * Real(2)}; // mode 1
 
     // Apex edge 6: v2=(1,1,0) to v4=(0,0,1), tangent ~ (-1,-1,1)
-    const Real loc_e6 = loc_f4 * loc_f1; // zero on faces 4 and 1
+    const auto loc_e6 = loc_f4 * loc_f1; // zero on faces 4 and 1
     values[idx++] = Vec3{-loc_e6, -loc_e6, loc_e6 * Real(2)}; // mode 0
     values[idx++] = Vec3{-loc_e6 * z, -loc_e6 * z, loc_e6 * z * Real(2)}; // mode 1
 
     // Apex edge 7: v3=(-1,1,0) to v4=(0,0,1), tangent ~ (1,-1,1)
-    const Real loc_e7 = loc_f1 * loc_f2; // zero on faces 1 and 2
+    const auto loc_e7 = loc_f1 * loc_f2; // zero on faces 1 and 2
     values[idx++] = Vec3{loc_e7, -loc_e7, loc_e7 * Real(2)}; // mode 0
     values[idx++] = Vec3{loc_e7 * z, -loc_e7 * z, loc_e7 * z * Real(2)}; // mode 1
 
@@ -633,7 +959,7 @@ inline void eval_pyramid_nd1_direct(const Vec3& xi, std::vector<Vec3>& values) {
     // Quad base face (z=0): 4 tangential DOFs
     // Two tangent directions: (1,0,0) and (0,1,0)
     // Face bubble in xy-plane localized by (1-z)
-    const Real base_bubble = (Real(1) - x*x) * (Real(1) - y*y) * zc;
+    const auto base_bubble = (Real(1) - x*x) * (Real(1) - y*y) * zc;
     values[idx++] = Vec3{base_bubble * Real(4), Real(0), Real(0)}; // t_x const
     values[idx++] = Vec3{base_bubble * y * Real(4), Real(0), Real(0)}; // t_x linear y
     values[idx++] = Vec3{Real(0), base_bubble * Real(4), Real(0)}; // t_y const
@@ -641,50 +967,32 @@ inline void eval_pyramid_nd1_direct(const Vec3& xi, std::vector<Vec3>& values) {
 
     // Tri face 1 (front, y=-1+z): 2 tangential DOFs
     // Tangent in x-direction and tangent up the slope
-    const Real f1_bubble = loc_f1 * (Real(1) - x*x); // bubble on face 1
+    const auto f1_bubble = loc_f1 * (Real(1) - x*x); // bubble on face 1
     values[idx++] = Vec3{f1_bubble * Real(4), Real(0), Real(0)}; // t_x
     values[idx++] = Vec3{f1_bubble * z * Real(4), Real(0), f1_bubble * Real(4)}; // t along slope
 
     // Tri face 2 (right, x=1-z): 2 tangential DOFs
-    const Real f2_bubble = loc_f2 * (Real(1) - y*y);
+    const auto f2_bubble = loc_f2 * (Real(1) - y*y);
     values[idx++] = Vec3{Real(0), f2_bubble * Real(4), Real(0)}; // t_y
     values[idx++] = Vec3{-f2_bubble * Real(4), Real(0), f2_bubble * z * Real(4)}; // t along slope
 
     // Tri face 3 (back, y=1-z): 2 tangential DOFs
-    const Real f3_bubble = loc_f3 * (Real(1) - x*x);
+    const auto f3_bubble = loc_f3 * (Real(1) - x*x);
     values[idx++] = Vec3{f3_bubble * Real(4), Real(0), Real(0)}; // t_x
     values[idx++] = Vec3{f3_bubble * z * Real(4), Real(0), -f3_bubble * Real(4)}; // t along slope
 
     // Tri face 4 (left, x=-1+z): 2 tangential DOFs
-    const Real f4_bubble = loc_f4 * (Real(1) - y*y);
+    const auto f4_bubble = loc_f4 * (Real(1) - y*y);
     values[idx++] = Vec3{Real(0), f4_bubble * Real(4), Real(0)}; // t_y
     values[idx++] = Vec3{f4_bubble * Real(4), Real(0), f4_bubble * z * Real(4)}; // t along slope
 }
 
+inline void eval_pyramid_nd1_direct(const Vec3& xi, std::vector<Vec3>& values) {
+    eval_direct_values_real(xi, eval_pyramid_nd1_direct_impl<Real>, values);
+}
+
 inline void eval_pyramid_nd1_curl_direct(const Vec3& xi, std::vector<Vec3>& curl) {
-    // Compute curl via finite differences for now
-    // A full analytical derivation would be lengthy but more efficient
-    const Real h = Real(1e-6);
-    std::vector<Vec3> vxp, vxm, vyp, vym, vzp, vzm;
-
-    eval_pyramid_nd1_direct(Vec3{xi[0]+h, xi[1], xi[2]}, vxp);
-    eval_pyramid_nd1_direct(Vec3{xi[0]-h, xi[1], xi[2]}, vxm);
-    eval_pyramid_nd1_direct(Vec3{xi[0], xi[1]+h, xi[2]}, vyp);
-    eval_pyramid_nd1_direct(Vec3{xi[0], xi[1]-h, xi[2]}, vym);
-    eval_pyramid_nd1_direct(Vec3{xi[0], xi[1], xi[2]+h}, vzp);
-    eval_pyramid_nd1_direct(Vec3{xi[0], xi[1], xi[2]-h}, vzm);
-
-    curl.resize(vxp.size());
-    const Real inv2h = Real(1) / (Real(2) * h);
-    for (std::size_t i = 0; i < vxp.size(); ++i) {
-        const Real dFx_dy = (vyp[i][0] - vym[i][0]) * inv2h;
-        const Real dFx_dz = (vzp[i][0] - vzm[i][0]) * inv2h;
-        const Real dFy_dx = (vxp[i][1] - vxm[i][1]) * inv2h;
-        const Real dFy_dz = (vzp[i][1] - vzm[i][1]) * inv2h;
-        const Real dFz_dx = (vxp[i][2] - vxm[i][2]) * inv2h;
-        const Real dFz_dy = (vyp[i][2] - vym[i][2]) * inv2h;
-        curl[i] = Vec3{dFz_dy - dFy_dz, dFx_dz - dFz_dx, dFy_dx - dFx_dy};
-    }
+    eval_direct_curl_exact(xi, eval_pyramid_nd1_direct_impl<Diff3>, curl);
 }
 
 // -----------------------------------------------------------------------------
@@ -714,17 +1022,21 @@ inline void eval_pyramid_nd1_curl_direct(const Vec3& xi, std::vector<Vec3>& curl
 //   - 4 tri faces x 6 tangential = 24
 //   - Interior: 3
 
-inline void eval_wedge_rt2_direct(const Vec3& xi, std::vector<Vec3>& values) {
-    const Real x = xi[0];
-    const Real y = xi[1];
-    const Real z = xi[2];
+template <typename Scalar>
+inline void eval_wedge_rt2_direct_impl(const DirectVec3<Scalar>& xi,
+                                       std::vector<DirectVec3<Scalar>>& values) {
+    using Vec3 = DirectVec3<Scalar>;
+
+    const auto x = xi[0];
+    const auto y = xi[1];
+    const auto z = xi[2];
 
     // Barycentric and z-selectors
-    const Real L0 = Real(1) - x - y;
-    const Real L1 = x;
-    const Real L2 = y;
-    const Real zb = (Real(1) - z) * Real(0.5);
-    const Real zt = (Real(1) + z) * Real(0.5);
+    const auto L0 = Real(1) - x - y;
+    const auto L1 = x;
+    const auto L2 = y;
+    const auto zb = (Real(1) - z) * Real(0.5);
+    const auto zt = (Real(1) + z) * Real(0.5);
 
     values.resize(66);
     std::size_t idx = 0;
@@ -754,7 +1066,7 @@ inline void eval_wedge_rt2_direct(const Vec3& xi, std::vector<Vec3>& values) {
     // Quad face 2 (y=0): 9 DOFs - Q_2 normal flux moments
     // Test: {1, x, z, x^2, xz, z^2, x^2z, xz^2, x^2z^2} (Q_2 tensor)
     // ==========================================================================
-    const Real ly = (y - Real(1));
+    const auto ly = (y - Real(1));
     values[idx++] = Vec3{Real(0), ly, Real(0)};
     values[idx++] = Vec3{Real(0), ly * (Real(3)*x - Real(1)), Real(0)};
     values[idx++] = Vec3{Real(0), ly * z, Real(0)};
@@ -768,7 +1080,7 @@ inline void eval_wedge_rt2_direct(const Vec3& xi, std::vector<Vec3>& values) {
     // ==========================================================================
     // Quad face 3 (x=0): 9 DOFs - Q_2 normal flux moments
     // ==========================================================================
-    const Real lx = (x - Real(1));
+    const auto lx = (x - Real(1));
     values[idx++] = Vec3{lx, Real(0), Real(0)};
     values[idx++] = Vec3{lx * (Real(3)*y - Real(1)), Real(0), Real(0)};
     values[idx++] = Vec3{lx * z, Real(0), Real(0)};
@@ -782,7 +1094,7 @@ inline void eval_wedge_rt2_direct(const Vec3& xi, std::vector<Vec3>& values) {
     // ==========================================================================
     // Quad face 4 (x+y=1): 9 DOFs - Q_2 normal flux moments
     // ==========================================================================
-    const Real loc4 = x + y;
+    const auto loc4 = x + y;
     values[idx++] = Vec3{loc4, loc4, Real(0)};
     values[idx++] = Vec3{loc4 * (Real(3)*x - Real(1)), loc4 * (Real(3)*x - Real(1)), Real(0)};
     values[idx++] = Vec3{loc4 * z, loc4 * z, Real(0)};
@@ -797,9 +1109,9 @@ inline void eval_wedge_rt2_direct(const Vec3& xi, std::vector<Vec3>& values) {
     // Interior DOFs: 27 DOFs (3 * k(k+1)^2/2 = 3*2*9/2 = 27 for k=2)
     // Bubble function for interior
     // ==========================================================================
-    const Real bubble_xy = L0 * L1 * L2;
-    const Real bubble_z = (Real(1) - z*z);
-    const Real bubble = bubble_xy * bubble_z;
+    const auto bubble_xy = L0 * L1 * L2;
+    const auto bubble_z = (Real(1) - z*z);
+    const auto bubble = bubble_xy * bubble_z;
 
     // P_1(x,y) x P_2(z) test space for each component: 3 * 3 * 3 = 27
     // Use: {1, x, y} x {1, z, z^2} x {e_x, e_y, e_z}
@@ -833,37 +1145,28 @@ inline void eval_wedge_rt2_direct(const Vec3& xi, std::vector<Vec3>& values) {
     values[idx++] = Vec3{Real(0), Real(0), bubble * y * z*z * scale};
 }
 
-inline void eval_wedge_rt2_divergence_direct(const Vec3& xi, std::vector<Real>& divergence) {
-    // Compute divergence via finite differences
-    const Real h = Real(1e-6);
-    std::vector<Vec3> vxp, vxm, vyp, vym, vzp, vzm;
-
-    eval_wedge_rt2_direct(Vec3{xi[0]+h, xi[1], xi[2]}, vxp);
-    eval_wedge_rt2_direct(Vec3{xi[0]-h, xi[1], xi[2]}, vxm);
-    eval_wedge_rt2_direct(Vec3{xi[0], xi[1]+h, xi[2]}, vyp);
-    eval_wedge_rt2_direct(Vec3{xi[0], xi[1]-h, xi[2]}, vym);
-    eval_wedge_rt2_direct(Vec3{xi[0], xi[1], xi[2]+h}, vzp);
-    eval_wedge_rt2_direct(Vec3{xi[0], xi[1], xi[2]-h}, vzm);
-
-    divergence.resize(vxp.size());
-    const Real inv2h = Real(1) / (Real(2) * h);
-    for (std::size_t i = 0; i < vxp.size(); ++i) {
-        divergence[i] = (vxp[i][0] - vxm[i][0]) * inv2h +
-                        (vyp[i][1] - vym[i][1]) * inv2h +
-                        (vzp[i][2] - vzm[i][2]) * inv2h;
-    }
+inline void eval_wedge_rt2_direct(const Vec3& xi, std::vector<Vec3>& values) {
+    eval_direct_values_real(xi, eval_wedge_rt2_direct_impl<Real>, values);
 }
 
-inline void eval_pyramid_rt2_direct(const Vec3& xi, std::vector<Vec3>& values) {
-    const Real x = xi[0];
-    const Real y = xi[1];
-    const Real z = xi[2];
+inline void eval_wedge_rt2_divergence_direct(const Vec3& xi, std::vector<Real>& divergence) {
+    eval_direct_divergence_exact(xi, eval_wedge_rt2_direct_impl<Diff3>, divergence);
+}
 
-    const Real zc = Real(1) - z;
-    const Real loc_f1 = Real(1) + y - z;
-    const Real loc_f2 = Real(1) - x - z;
-    const Real loc_f3 = Real(1) - y - z;
-    const Real loc_f4 = Real(1) + x - z;
+template <typename Scalar>
+inline void eval_pyramid_rt2_direct_impl(const DirectVec3<Scalar>& xi,
+                                         std::vector<DirectVec3<Scalar>>& values) {
+    using Vec3 = DirectVec3<Scalar>;
+
+    const auto x = xi[0];
+    const auto y = xi[1];
+    const auto z = xi[2];
+
+    const auto zc = Real(1) - z;
+    const auto loc_f1 = Real(1) + y - z;
+    const auto loc_f2 = Real(1) - x - z;
+    const auto loc_f3 = Real(1) - y - z;
+    const auto loc_f4 = Real(1) + x - z;
 
     values.resize(57);
     std::size_t idx = 0;
@@ -919,7 +1222,7 @@ inline void eval_pyramid_rt2_direct(const Vec3& xi, std::vector<Vec3>& values) {
     // ==========================================================================
     // Interior: 24 DOFs
     // ==========================================================================
-    const Real bubble = zc * loc_f1 * loc_f2 * loc_f3 * loc_f4;
+    const auto bubble = zc * loc_f1 * loc_f2 * loc_f3 * loc_f4;
     const Real scale = Real(120);
     values[idx++] = Vec3{bubble * scale, Real(0), Real(0)};
     values[idx++] = Vec3{Real(0), bubble * scale, Real(0)};
@@ -947,36 +1250,28 @@ inline void eval_pyramid_rt2_direct(const Vec3& xi, std::vector<Vec3>& values) {
     values[idx++] = Vec3{Real(0), Real(0), bubble * z * z * scale};
 }
 
-inline void eval_pyramid_rt2_divergence_direct(const Vec3& xi, std::vector<Real>& divergence) {
-    const Real h = Real(1e-6);
-    std::vector<Vec3> vxp, vxm, vyp, vym, vzp, vzm;
-
-    eval_pyramid_rt2_direct(Vec3{xi[0]+h, xi[1], xi[2]}, vxp);
-    eval_pyramid_rt2_direct(Vec3{xi[0]-h, xi[1], xi[2]}, vxm);
-    eval_pyramid_rt2_direct(Vec3{xi[0], xi[1]+h, xi[2]}, vyp);
-    eval_pyramid_rt2_direct(Vec3{xi[0], xi[1]-h, xi[2]}, vym);
-    eval_pyramid_rt2_direct(Vec3{xi[0], xi[1], xi[2]+h}, vzp);
-    eval_pyramid_rt2_direct(Vec3{xi[0], xi[1], xi[2]-h}, vzm);
-
-    divergence.resize(vxp.size());
-    const Real inv2h = Real(1) / (Real(2) * h);
-    for (std::size_t i = 0; i < vxp.size(); ++i) {
-        divergence[i] = (vxp[i][0] - vxm[i][0]) * inv2h +
-                        (vyp[i][1] - vym[i][1]) * inv2h +
-                        (vzp[i][2] - vzm[i][2]) * inv2h;
-    }
+inline void eval_pyramid_rt2_direct(const Vec3& xi, std::vector<Vec3>& values) {
+    eval_direct_values_real(xi, eval_pyramid_rt2_direct_impl<Real>, values);
 }
 
-inline void eval_wedge_nd2_direct(const Vec3& xi, std::vector<Vec3>& values) {
-    const Real x = xi[0];
-    const Real y = xi[1];
-    const Real z = xi[2];
+inline void eval_pyramid_rt2_divergence_direct(const Vec3& xi, std::vector<Real>& divergence) {
+    eval_direct_divergence_exact(xi, eval_pyramid_rt2_direct_impl<Diff3>, divergence);
+}
 
-    const Real L0 = Real(1) - x - y;
-    const Real L1 = x;
-    const Real L2 = y;
-    const Real zb = (Real(1) - z) * Real(0.5);
-    const Real zt = (Real(1) + z) * Real(0.5);
+template <typename Scalar>
+inline void eval_wedge_nd2_direct_impl(const DirectVec3<Scalar>& xi,
+                                       std::vector<DirectVec3<Scalar>>& values) {
+    using Vec3 = DirectVec3<Scalar>;
+
+    const auto x = xi[0];
+    const auto y = xi[1];
+    const auto z = xi[2];
+
+    const auto L0 = Real(1) - x - y;
+    const auto L1 = x;
+    const auto L2 = y;
+    const auto zb = (Real(1) - z) * Real(0.5);
+    const auto zt = (Real(1) + z) * Real(0.5);
 
     values.resize(84);
     std::size_t idx = 0;
@@ -986,47 +1281,47 @@ inline void eval_wedge_nd2_direct(const Vec3& xi, std::vector<Vec3>& values) {
     // ==========================================================================
     // Bottom triangle edges
     for (int mode = 0; mode <= 2; ++mode) {
-        const Real leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*x - Real(1)) : (Real(6)*x*x - Real(6)*x + Real(1)));
+        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*x - Real(1)) : (Real(6)*x*x - Real(6)*x + Real(1)));
         values[idx++] = Vec3{zb * (Real(1) - y) * leg, zb * x * leg * Real(0), Real(0)};
     }
     for (int mode = 0; mode <= 2; ++mode) {
-        const Real s = y; // parameter along edge
-        const Real leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*s - Real(1)) : (Real(6)*s*s - Real(6)*s + Real(1)));
+        const auto s = y; // parameter along edge
+        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*s - Real(1)) : (Real(6)*s*s - Real(6)*s + Real(1)));
         values[idx++] = Vec3{-zb * L0 * leg, zb * L0 * leg, Real(0)};
     }
     for (int mode = 0; mode <= 2; ++mode) {
-        const Real s = Real(1) - y;
-        const Real leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*s - Real(1)) : (Real(6)*s*s - Real(6)*s + Real(1)));
+        const auto s = Real(1) - y;
+        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*s - Real(1)) : (Real(6)*s*s - Real(6)*s + Real(1)));
         values[idx++] = Vec3{Real(0), -zb * (Real(1) - x) * leg, Real(0)};
     }
 
     // Top triangle edges
     for (int mode = 0; mode <= 2; ++mode) {
-        const Real leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*x - Real(1)) : (Real(6)*x*x - Real(6)*x + Real(1)));
+        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*x - Real(1)) : (Real(6)*x*x - Real(6)*x + Real(1)));
         values[idx++] = Vec3{zt * (Real(1) - y) * leg, Real(0), Real(0)};
     }
     for (int mode = 0; mode <= 2; ++mode) {
-        const Real s = y;
-        const Real leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*s - Real(1)) : (Real(6)*s*s - Real(6)*s + Real(1)));
+        const auto s = y;
+        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*s - Real(1)) : (Real(6)*s*s - Real(6)*s + Real(1)));
         values[idx++] = Vec3{-zt * L0 * leg, zt * L0 * leg, Real(0)};
     }
     for (int mode = 0; mode <= 2; ++mode) {
-        const Real s = Real(1) - y;
-        const Real leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*s - Real(1)) : (Real(6)*s*s - Real(6)*s + Real(1)));
+        const auto s = Real(1) - y;
+        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*s - Real(1)) : (Real(6)*s*s - Real(6)*s + Real(1)));
         values[idx++] = Vec3{Real(0), -zt * (Real(1) - x) * leg, Real(0)};
     }
 
     // Vertical edges
     for (int mode = 0; mode <= 2; ++mode) {
-        const Real leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : (Real(3)*z*z - Real(1)) / Real(2));
+        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : (Real(3)*z*z - Real(1)) / Real(2));
         values[idx++] = Vec3{Real(0), Real(0), L0 * leg};
     }
     for (int mode = 0; mode <= 2; ++mode) {
-        const Real leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : (Real(3)*z*z - Real(1)) / Real(2));
+        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : (Real(3)*z*z - Real(1)) / Real(2));
         values[idx++] = Vec3{Real(0), Real(0), L1 * leg};
     }
     for (int mode = 0; mode <= 2; ++mode) {
-        const Real leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : (Real(3)*z*z - Real(1)) / Real(2));
+        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : (Real(3)*z*z - Real(1)) / Real(2));
         values[idx++] = Vec3{Real(0), Real(0), L2 * leg};
     }
 
@@ -1034,7 +1329,7 @@ inline void eval_wedge_nd2_direct(const Vec3& xi, std::vector<Vec3>& values) {
     // Face DOFs: 48 total
     // ==========================================================================
     // Bottom tri: 6 tangential
-    const Real tb = L0 * L1 * L2 * zb;
+    const auto tb = L0 * L1 * L2 * zb;
     values[idx++] = Vec3{tb * Real(60), Real(0), Real(0)};
     values[idx++] = Vec3{Real(0), tb * Real(60), Real(0)};
     values[idx++] = Vec3{tb * x * Real(60), Real(0), Real(0)};
@@ -1043,7 +1338,7 @@ inline void eval_wedge_nd2_direct(const Vec3& xi, std::vector<Vec3>& values) {
     values[idx++] = Vec3{Real(0), tb * x * Real(60), Real(0)};
 
     // Top tri: 6 tangential
-    const Real tt = L0 * L1 * L2 * zt;
+    const auto tt = L0 * L1 * L2 * zt;
     values[idx++] = Vec3{tt * Real(60), Real(0), Real(0)};
     values[idx++] = Vec3{Real(0), tt * Real(60), Real(0)};
     values[idx++] = Vec3{tt * x * Real(60), Real(0), Real(0)};
@@ -1053,44 +1348,44 @@ inline void eval_wedge_nd2_direct(const Vec3& xi, std::vector<Vec3>& values) {
 
     // Quad faces: 3 faces x 12 tangential = 36
     // Face y=0
-    const Real qf2 = (Real(1) - y) * L0;
+    const auto qf2 = (Real(1) - y) * L0;
     for (int i = 0; i < 6; ++i) {
-        const Real poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
+        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
         values[idx++] = Vec3{qf2 * poly * Real(12), Real(0), Real(0)};
     }
     for (int i = 0; i < 6; ++i) {
-        const Real poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
+        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
         values[idx++] = Vec3{Real(0), Real(0), qf2 * poly * Real(12)};
     }
 
     // Face x=0
-    const Real qf3 = (Real(1) - x) * L0;
+    const auto qf3 = (Real(1) - x) * L0;
     for (int i = 0; i < 6; ++i) {
-        const Real poly = (i == 0) ? Real(1) : ((i == 1) ? y : ((i == 2) ? z : ((i == 3) ? y*z : ((i == 4) ? y*y : z*z))));
+        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? y : ((i == 2) ? z : ((i == 3) ? y*z : ((i == 4) ? y*y : z*z))));
         values[idx++] = Vec3{Real(0), qf3 * poly * Real(12), Real(0)};
     }
     for (int i = 0; i < 6; ++i) {
-        const Real poly = (i == 0) ? Real(1) : ((i == 1) ? y : ((i == 2) ? z : ((i == 3) ? y*z : ((i == 4) ? y*y : z*z))));
+        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? y : ((i == 2) ? z : ((i == 3) ? y*z : ((i == 4) ? y*y : z*z))));
         values[idx++] = Vec3{Real(0), Real(0), qf3 * poly * Real(12)};
     }
 
     // Face x+y=1
-    const Real loc4 = x + y;
-    const Real qf4 = loc4 * L2;
+    const auto loc4 = x + y;
+    const auto qf4 = loc4 * L2;
     for (int i = 0; i < 6; ++i) {
-        const Real poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
+        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
         values[idx++] = Vec3{-qf4 * poly * Real(12), qf4 * poly * Real(12), Real(0)};
     }
     for (int i = 0; i < 6; ++i) {
-        const Real poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
+        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
         values[idx++] = Vec3{Real(0), Real(0), qf4 * poly * Real(12)};
     }
 
     // ==========================================================================
     // Interior DOFs: 9 DOFs
     // ==========================================================================
-    const Real bubble = L0 * L1 * L2 * (Real(1) - z*z);
-    const Real scale = Real(180);
+    const auto bubble = L0 * L1 * L2 * (Real(1) - z*z);
+    const auto scale = Real(180);
     values[idx++] = Vec3{bubble * scale, Real(0), Real(0)};
     values[idx++] = Vec3{Real(0), bubble * scale, Real(0)};
     values[idx++] = Vec3{Real(0), Real(0), bubble * scale};
@@ -1102,16 +1397,24 @@ inline void eval_wedge_nd2_direct(const Vec3& xi, std::vector<Vec3>& values) {
     values[idx++] = Vec3{Real(0), Real(0), bubble * (x+y) * scale};
 }
 
-inline void eval_pyramid_nd2_direct(const Vec3& xi, std::vector<Vec3>& values) {
-    const Real x = xi[0];
-    const Real y = xi[1];
-    const Real z = xi[2];
+inline void eval_wedge_nd2_direct(const Vec3& xi, std::vector<Vec3>& values) {
+    eval_direct_values_real(xi, eval_wedge_nd2_direct_impl<Real>, values);
+}
 
-    const Real zc = Real(1) - z;
-    const Real loc_f1 = Real(1) + y - z;
-    const Real loc_f2 = Real(1) - x - z;
-    const Real loc_f3 = Real(1) - y - z;
-    const Real loc_f4 = Real(1) + x - z;
+template <typename Scalar>
+inline void eval_pyramid_nd2_direct_impl(const DirectVec3<Scalar>& xi,
+                                         std::vector<DirectVec3<Scalar>>& values) {
+    using Vec3 = DirectVec3<Scalar>;
+
+    const auto x = xi[0];
+    const auto y = xi[1];
+    const auto z = xi[2];
+
+    const auto zc = Real(1) - z;
+    const auto loc_f1 = Real(1) + y - z;
+    const auto loc_f2 = Real(1) - x - z;
+    const auto loc_f3 = Real(1) - y - z;
+    const auto loc_f4 = Real(1) + x - z;
 
     values.resize(63);
     std::size_t idx = 0;
@@ -1120,46 +1423,46 @@ inline void eval_pyramid_nd2_direct(const Vec3& xi, std::vector<Vec3>& values) {
     // Edge DOFs: 8 edges x 3 moments = 24 DOFs
     // ==========================================================================
     // Base edges
-    const Real le0 = (Real(1) + y) * zc;
+    const auto le0 = (Real(1) + y) * zc;
     for (int mode = 0; mode <= 2; ++mode) {
-        const Real leg = (mode == 0) ? Real(1) : ((mode == 1) ? x : x*x);
+        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? x : x*x);
         values[idx++] = Vec3{le0 * leg, Real(0), Real(0)};
     }
-    const Real le1 = (Real(1) - x) * zc;
+    const auto le1 = (Real(1) - x) * zc;
     for (int mode = 0; mode <= 2; ++mode) {
-        const Real leg = (mode == 0) ? Real(1) : ((mode == 1) ? y : y*y);
+        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? y : y*y);
         values[idx++] = Vec3{Real(0), le1 * leg, Real(0)};
     }
-    const Real le2 = (Real(1) - y) * zc;
+    const auto le2 = (Real(1) - y) * zc;
     for (int mode = 0; mode <= 2; ++mode) {
-        const Real leg = (mode == 0) ? Real(1) : ((mode == 1) ? x : x*x);
+        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? x : x*x);
         values[idx++] = Vec3{-le2 * leg, Real(0), Real(0)};
     }
-    const Real le3 = (Real(1) + x) * zc;
+    const auto le3 = (Real(1) + x) * zc;
     for (int mode = 0; mode <= 2; ++mode) {
-        const Real leg = (mode == 0) ? Real(1) : ((mode == 1) ? y : y*y);
+        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? y : y*y);
         values[idx++] = Vec3{Real(0), -le3 * leg, Real(0)};
     }
 
     // Apex edges
-    const Real le4 = loc_f2 * loc_f3;
+    const auto le4 = loc_f2 * loc_f3;
     for (int mode = 0; mode <= 2; ++mode) {
-        const Real leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : z*z);
+        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : z*z);
         values[idx++] = Vec3{le4 * leg, le4 * leg, le4 * leg * Real(2)};
     }
-    const Real le5 = loc_f3 * loc_f4;
+    const auto le5 = loc_f3 * loc_f4;
     for (int mode = 0; mode <= 2; ++mode) {
-        const Real leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : z*z);
+        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : z*z);
         values[idx++] = Vec3{-le5 * leg, le5 * leg, le5 * leg * Real(2)};
     }
-    const Real le6 = loc_f4 * loc_f1;
+    const auto le6 = loc_f4 * loc_f1;
     for (int mode = 0; mode <= 2; ++mode) {
-        const Real leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : z*z);
+        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : z*z);
         values[idx++] = Vec3{-le6 * leg, -le6 * leg, le6 * leg * Real(2)};
     }
-    const Real le7 = loc_f1 * loc_f2;
+    const auto le7 = loc_f1 * loc_f2;
     for (int mode = 0; mode <= 2; ++mode) {
-        const Real leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : z*z);
+        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : z*z);
         values[idx++] = Vec3{le7 * leg, -le7 * leg, le7 * leg * Real(2)};
     }
 
@@ -1167,45 +1470,49 @@ inline void eval_pyramid_nd2_direct(const Vec3& xi, std::vector<Vec3>& values) {
     // Face DOFs: 36 total (12 quad + 24 tri)
     // ==========================================================================
     // Quad base: 12 tangential
-    const Real qbase = (Real(1) - x*x) * (Real(1) - y*y) * zc;
+    const auto qbase = (Real(1) - x*x) * (Real(1) - y*y) * zc;
     for (int i = 0; i < 6; ++i) {
-        const Real poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? y : ((i == 3) ? x*y : ((i == 4) ? x*x : y*y))));
+        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? y : ((i == 3) ? x*y : ((i == 4) ? x*x : y*y))));
         values[idx++] = Vec3{qbase * poly * Real(4), Real(0), Real(0)};
     }
     for (int i = 0; i < 6; ++i) {
-        const Real poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? y : ((i == 3) ? x*y : ((i == 4) ? x*x : y*y))));
+        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? y : ((i == 3) ? x*y : ((i == 4) ? x*x : y*y))));
         values[idx++] = Vec3{Real(0), qbase * poly * Real(4), Real(0)};
     }
 
     // 4 tri faces: 6 tangential each = 24
-    const Real tf1 = loc_f1 * (Real(1) - x*x);
+    const auto tf1 = loc_f1 * (Real(1) - x*x);
     for (int i = 0; i < 6; ++i) {
-        const Real poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
+        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
         values[idx++] = Vec3{tf1 * poly * Real(4), Real(0), tf1 * poly * z * Real(2)};
     }
-    const Real tf2 = loc_f2 * (Real(1) - y*y);
+    const auto tf2 = loc_f2 * (Real(1) - y*y);
     for (int i = 0; i < 6; ++i) {
-        const Real poly = (i == 0) ? Real(1) : ((i == 1) ? y : ((i == 2) ? z : ((i == 3) ? y*z : ((i == 4) ? y*y : z*z))));
+        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? y : ((i == 2) ? z : ((i == 3) ? y*z : ((i == 4) ? y*y : z*z))));
         values[idx++] = Vec3{-tf2 * poly * z * Real(2), tf2 * poly * Real(4), Real(0)};
     }
-    const Real tf3 = loc_f3 * (Real(1) - x*x);
+    const auto tf3 = loc_f3 * (Real(1) - x*x);
     for (int i = 0; i < 6; ++i) {
-        const Real poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
+        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
         values[idx++] = Vec3{tf3 * poly * Real(4), Real(0), -tf3 * poly * z * Real(2)};
     }
-    const Real tf4 = loc_f4 * (Real(1) - y*y);
+    const auto tf4 = loc_f4 * (Real(1) - y*y);
     for (int i = 0; i < 6; ++i) {
-        const Real poly = (i == 0) ? Real(1) : ((i == 1) ? y : ((i == 2) ? z : ((i == 3) ? y*z : ((i == 4) ? y*y : z*z))));
+        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? y : ((i == 2) ? z : ((i == 3) ? y*z : ((i == 4) ? y*y : z*z))));
         values[idx++] = Vec3{tf4 * poly * z * Real(2), tf4 * poly * Real(4), Real(0)};
     }
 
     // ==========================================================================
     // Interior DOFs: 3 DOFs
     // ==========================================================================
-    const Real bubble = zc * loc_f1 * loc_f2 * loc_f3 * loc_f4;
+    const auto bubble = zc * loc_f1 * loc_f2 * loc_f3 * loc_f4;
     values[idx++] = Vec3{bubble * Real(120), Real(0), Real(0)};
     values[idx++] = Vec3{Real(0), bubble * Real(120), Real(0)};
     values[idx++] = Vec3{Real(0), Real(0), bubble * Real(120)};
+}
+
+inline void eval_pyramid_nd2_direct(const Vec3& xi, std::vector<Vec3>& values) {
+    eval_direct_values_real(xi, eval_pyramid_nd2_direct_impl<Real>, values);
 }
 
 #include "detail/VectorBasisRtDetail.inc"
@@ -1257,6 +1564,8 @@ RaviartThomasBasis::RaviartThomasBasis(ElementType type, int order)
                                           __FILE__, __LINE__, __func__);
     }
 
+    ensure_supported_hybrid_vector_order(type, order_, "RaviartThomasBasis");
+
     if (is_triangle(type) || is_quadrilateral(type)) {
         dimension_ = 2;
         if (is_triangle(type)) {
@@ -1275,48 +1584,7 @@ RaviartThomasBasis::RaviartThomasBasis(ElementType type, int order)
         size_ = (k + 1u) * (k + 2u) * (k + 4u) / 2u;
     } else if (is_wedge(type)) {
         dimension_ = 3;
-        // Wedge RT(k): prismatic H(div) element following Bergot-Duruffle (2013) construction.
-        // The wedge has 2 triangular faces (bottom z=-1, top z=+1) and 3 quad lateral faces.
-        //
-        // Reference: Bergot & Duruffle, "Approximation of H(div) with high-order optimal
-        // finite elements for pyramids, prisms and hexahedra," Commun. Comput. Phys. 2013.
-        //
-        // The RT_k space on a prism is constructed as a tensor product:
-        //   V = {v : v_h in RT_k(tri) x P_k(z), v_z in P_k(tri) x Q_{k,k+1}(z)}
-        //
-        // where the DOFs are:
-        //   - Triangular faces (top/bottom): P_k(tri) normal flux moments = (k+1)(k+2)/2 each
-        //   - Quadrilateral faces (3 sides): Q_k(quad) normal flux moments = (k+1)^2 each
-        //   - Interior: (k-1 >= 0) moments against P_{k-1}(tri) x P_{k-1}(z) for div-compatibility
-        //
-        // CORRECTED dimension formula following DefElement/Basix convention:
-        // Face DOFs: 2*(k+1)(k+2)/2 + 3*(k+1)^2 = (k+1)(k+2) + 3(k+1)^2
-        // Interior DOFs for k>=1: 3 * k(k+1)/2 * k = 3k^2(k+1)/2
-        //
-        // For k=0: 5 (no interior)
-        // For k=1: face = 6 + 12 = 18, interior = 3*1*1*2/2 = 3, total = 21
-        //   BUT standard prismatic RT(1) has 24 DOFs. The issue is interior DOF count.
-        //
-        // CORRECT formula (matching MFEM/NGSolve):
-        // Interior DOFs = 3 * dim(P_{k-1}(tri)) * (k+1) for k>=1
-        //               = 3 * k(k+1)/2 * (k+1) = 3k(k+1)^2/2
-        // For k=1: 3*1*2/2 * 2 = 6
-        // Total k=1: 18 + 6 = 24 [MATCHES]
-        //
-        const std::size_t k = static_cast<std::size_t>(order_);
-        const std::size_t tri_face_dofs = (k + 1u) * (k + 2u) / 2u;  // P_k on triangle
-        const std::size_t quad_face_dofs = (k + 1u) * (k + 1u);       // Q_k on quad
-        const std::size_t face_dofs = 2u * tri_face_dofs + 3u * quad_face_dofs;
-
-        // Interior DOFs: test against P_{k-1}(x,y) x P_k(z) for div-compatibility
-        // dim(P_{k-1}(tri)) = k(k+1)/2 for k>=1, 0 for k=0
-        // dim(P_k(z)) = k+1
-        // Interior = 3 * k(k+1)/2 * (k+1) = 3k(k+1)^2/2 for k>=1
-        std::size_t interior_dofs = 0u;
-        if (k >= 1u) {
-            interior_dofs = 3u * k * (k + 1u) * (k + 1u) / 2u;
-        }
-        size_ = face_dofs + interior_dofs;
+        size_ = rt_wedge_size(order_);
     } else if (is_hexahedron(type)) {
         dimension_ = 3;
         // Tensor-product RT(k): Q_{k+1,k,k} × Q_{k,k+1,k} × Q_{k,k,k+1}
@@ -1324,50 +1592,29 @@ RaviartThomasBasis::RaviartThomasBasis(ElementType type, int order)
         size_ = 3u * (k + 1u) * (k + 1u) * (k + 2u);
     } else if (is_pyramid(type)) {
         dimension_ = 3;
-        // Pyramid RT(k): H(div) element on pyramid following Nigam-Phillips / Falk-Gatto-Monk.
-        // The pyramid has 1 quad face (base at z=0) and 4 triangular faces.
-        //
-        // Face DOFs:
-        //   - Quad face (base): (k+1)^2 DOFs (Q_k normal flux moments)
-        //   - Triangular faces: (k+1)(k+2)/2 DOFs each (P_k normal flux moments)
-        //
-        // Interior DOFs for RT(k) on pyramid:
-        //   Following the composite/rational element approach, interior moments test
-        //   against P_{k-1}(x,y) x P_{k-1}(z) for each component.
-        //   Interior = 3 * k^2 * k = 3k^3 (simplified) for k>=1
-        //   More precisely: 3 * k * k * k (tensor-like on collapsed coords)
-        //   For k=1: 3 * 1 * 1 * 1 = 3
-        const std::size_t k = static_cast<std::size_t>(order_);
-        const std::size_t quad_face_dofs = (k + 1u) * (k + 1u);
-        const std::size_t tri_face_dofs = (k + 1u) * (k + 2u) / 2u;
-        const std::size_t face_dofs = quad_face_dofs + 4u * tri_face_dofs;
-
-        // Interior DOFs: 3 * k^2 * k = 3k^3 for k>=1, 0 for k=0
-        std::size_t interior_dofs = 0u;
-        if (k >= 1u) {
-            interior_dofs = 3u * k * k * k;
-        }
-        size_ = face_dofs + interior_dofs;
+        size_ = rt_pyramid_size(order_);
     } else {
         throw BasisElementCompatibilityException("RaviartThomasBasis supports triangles/quadrilaterals (2D) and "
                                                  "tetrahedra/hexahedra/wedges/pyramids (3D)",
                                                  __FILE__, __LINE__, __func__);
     }
 
-    // Wedge/pyramid RT(1) uses the explicit seed formulas transformed into a nodal
-    // basis with the actual face/interior DOF functionals. RT(2+) continues to use
-    // the existing direct-evaluation path.
-    if (order_ == 1 && (is_wedge(type) || is_pyramid(type))) {
-        coeffs_ = build_rt1_direct_transform(type, size_);
-        use_transformed_direct_rt1_ = true;
-        return;
-    }
-
-    // Build nodal (moment-based) RT(k) basis for elements where higher-order is supported.
-    if (order_ >= 2 && (is_wedge(type) || is_pyramid(type))) {
-        use_direct_construction_ = true;
-        // Size is already computed correctly above. Just mark that we're done.
-        // The actual evaluation will use eval_wedge_rt1_direct() or eval_pyramid_rt1_direct()
+    // Wedge/pyramid RT(1-2) uses the explicit seed formulas transformed into a
+    // nodal basis with the actual face/interior DOF functionals. For k>=3 we
+    // switch to an overcomplete polynomial candidate space and solve the same
+    // moment-fitting system against the full hybrid-cell DOF set.
+    if (order_ >= 1 && (is_wedge(type) || is_pyramid(type))) {
+        transformed_seed_indices_.resize(size_);
+        if (order_ <= 2) {
+            for (std::size_t i = 0; i < size_; ++i) {
+                transformed_seed_indices_[i] = static_cast<int>(i);
+            }
+        } else {
+            transformed_seed_indices_.clear();
+        }
+        transformed_monomial_candidates_ = make_rt_extra_monomial_candidates(type, order_);
+        coeffs_ = build_rt_direct_transform(type, order_, size_, transformed_monomial_candidates_);
+        use_transformed_direct_seed_ = true;
         return;
     }
 
@@ -2341,14 +2588,6 @@ RaviartThomasBasis::RaviartThomasBasis(ElementType type, int order)
             }
         }
 
-        // For wedge/pyramid with richer modal space, we may not fill all rows.
-        // In that case, use least-squares or pseudo-inverse approach.
-        if (row != n && (is_wedge(type) || is_pyramid(type))) {
-            // Truncate modal basis to match DOF count for proper inversion
-            // This is a simplification; full implementation would use SVD or QR
-            row = n; // Force completion for now
-        }
-
         FE_CHECK_ARG(row == n, "RaviartThomasBasis: DOF assembly did not fill matrix");
 
         if (order_ == 1 && (is_wedge(type) || is_pyramid(type))) {
@@ -2362,22 +2601,61 @@ RaviartThomasBasis::RaviartThomasBasis(ElementType type, int order)
 
 void RaviartThomasBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
                                                 std::vector<math::Vector<Real, 3>>& values) const {
-    if (use_transformed_direct_rt1_) {
+    if (use_transformed_direct_seed_) {
         const std::size_t n = size_;
+        const std::size_t num_seed = transformed_seed_indices_.size();
+        const std::size_t num_extra = transformed_monomial_candidates_.size();
+        const std::size_t candidate_count = num_seed + num_extra;
         values.assign(n, Vec3{});
+        FE_CHECK_ARG(coeffs_.size() == candidate_count * n,
+                     "RaviartThomasBasis::evaluate_vector_values: transformed RT coefficient size mismatch");
 
-        std::vector<Vec3> seed_values;
-        eval_rt1_seed_values(element_type_, xi, seed_values);
-        FE_CHECK_ARG(seed_values.size() == n,
-                     "RaviartThomasBasis::evaluate_vector_values: RT(1) seed basis size mismatch");
+        std::size_t candidate = 0;
+        if (num_seed > 0) {
+            std::vector<Vec3> seed_values;
+            eval_rt_seed_values(element_type_, order_, xi, seed_values);
+            FE_CHECK_ARG(seed_values.size() >= num_seed,
+                         "RaviartThomasBasis::evaluate_vector_values: RT seed basis size mismatch");
 
-        for (std::size_t p = 0; p < n; ++p) {
-            const Vec3& seed = seed_values[p];
-            for (std::size_t j = 0; j < n; ++j) {
-                const Real c = coeffs_[p * n + j];
-                values[j][0] += c * seed[0];
-                values[j][1] += c * seed[1];
-                values[j][2] += c * seed[2];
+            for (int seed_idx : transformed_seed_indices_) {
+                FE_CHECK_ARG(seed_idx >= 0 &&
+                                 static_cast<std::size_t>(seed_idx) < seed_values.size(),
+                             "RaviartThomasBasis::evaluate_vector_values: transformed RT seed index out of range");
+                const Vec3& seed = seed_values[static_cast<std::size_t>(seed_idx)];
+                for (std::size_t j = 0; j < n; ++j) {
+                    const Real c = coeffs_[candidate * n + j];
+                    values[j][0] += c * seed[0];
+                    values[j][1] += c * seed[1];
+                    values[j][2] += c * seed[2];
+                }
+                ++candidate;
+            }
+        }
+
+        if (num_extra > 0) {
+            int max_px = 0;
+            int max_py = 0;
+            int max_pz = 0;
+            for (const auto& mono : transformed_monomial_candidates_) {
+                max_px = std::max(max_px, mono[1]);
+                max_py = std::max(max_py, mono[2]);
+                max_pz = std::max(max_pz, mono[3]);
+            }
+            const auto px = powers(xi[0], max_px);
+            const auto py = powers(xi[1], max_py);
+            const auto pz = powers(xi[2], max_pz);
+
+            for (const auto& mono : transformed_monomial_candidates_) {
+                const Real scalar = eval_transformed_rt_monomial_scalar(mono, px, py, pz);
+                Vec3 value{};
+                value[static_cast<std::size_t>(mono[0])] = scalar;
+                for (std::size_t j = 0; j < n; ++j) {
+                    const Real c = coeffs_[candidate * n + j];
+                    values[j][0] += c * value[0];
+                    values[j][1] += c * value[1];
+                    values[j][2] += c * value[2];
+                }
+                ++candidate;
             }
         }
         return;
@@ -2390,12 +2668,18 @@ void RaviartThomasBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
                 eval_wedge_rt1_direct(xi, values);
             } else if (order_ == 2) {
                 eval_wedge_rt2_direct(xi, values);
+            } else {
+                throw NotImplementedException("RaviartThomasBasis direct wedge evaluation currently supports orders 1-2",
+                                              __FILE__, __LINE__, __func__);
             }
         } else if (is_pyramid(element_type_)) {
             if (order_ == 1) {
                 eval_pyramid_rt1_direct(xi, values);
             } else if (order_ == 2) {
                 eval_pyramid_rt2_direct(xi, values);
+            } else {
+                throw NotImplementedException("RaviartThomasBasis direct pyramid evaluation currently supports orders 1-2",
+                                              __FILE__, __LINE__, __func__);
             }
         }
         return;
@@ -2528,22 +2812,61 @@ void RaviartThomasBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
 
 void RaviartThomasBasis::evaluate_divergence(const math::Vector<Real, 3>& xi,
                                              std::vector<Real>& divergence) const {
-    if (use_transformed_direct_rt1_) {
+    if (use_transformed_direct_seed_) {
         const std::size_t n = size_;
+        const std::size_t num_seed = transformed_seed_indices_.size();
+        const std::size_t num_extra = transformed_monomial_candidates_.size();
+        const std::size_t candidate_count = num_seed + num_extra;
         divergence.assign(n, Real(0));
+        FE_CHECK_ARG(coeffs_.size() == candidate_count * n,
+                     "RaviartThomasBasis::evaluate_divergence: transformed RT coefficient size mismatch");
 
-        std::vector<Real> seed_divergence;
-        eval_rt1_seed_divergence(element_type_, xi, seed_divergence);
-        FE_CHECK_ARG(seed_divergence.size() == n,
-                     "RaviartThomasBasis::evaluate_divergence: RT(1) seed divergence size mismatch");
+        std::size_t candidate = 0;
+        if (num_seed > 0) {
+            std::vector<Real> seed_divergence;
+            eval_rt_seed_divergence(element_type_, order_, xi, seed_divergence);
+            FE_CHECK_ARG(seed_divergence.size() >= num_seed,
+                         "RaviartThomasBasis::evaluate_divergence: RT seed divergence size mismatch");
 
-        for (std::size_t p = 0; p < n; ++p) {
-            const Real seed = seed_divergence[p];
-            if (seed == Real(0)) {
-                continue;
+            for (int seed_idx : transformed_seed_indices_) {
+                FE_CHECK_ARG(seed_idx >= 0 &&
+                                 static_cast<std::size_t>(seed_idx) < seed_divergence.size(),
+                             "RaviartThomasBasis::evaluate_divergence: transformed RT seed index out of range");
+                const Real seed = seed_divergence[static_cast<std::size_t>(seed_idx)];
+                if (seed == Real(0)) {
+                    ++candidate;
+                    continue;
+                }
+                for (std::size_t j = 0; j < n; ++j) {
+                    divergence[j] += coeffs_[candidate * n + j] * seed;
+                }
+                ++candidate;
             }
-            for (std::size_t j = 0; j < n; ++j) {
-                divergence[j] += coeffs_[p * n + j] * seed;
+        }
+
+        if (num_extra > 0) {
+            int max_px = 0;
+            int max_py = 0;
+            int max_pz = 0;
+            for (const auto& mono : transformed_monomial_candidates_) {
+                max_px = std::max(max_px, mono[1]);
+                max_py = std::max(max_py, mono[2]);
+                max_pz = std::max(max_pz, mono[3]);
+            }
+            const auto px = powers(xi[0], max_px);
+            const auto py = powers(xi[1], max_py);
+            const auto pz = powers(xi[2], max_pz);
+
+            for (const auto& mono : transformed_monomial_candidates_) {
+                const Real div = eval_transformed_rt_monomial_divergence(mono, px, py, pz);
+                if (div == Real(0)) {
+                    ++candidate;
+                    continue;
+                }
+                for (std::size_t j = 0; j < n; ++j) {
+                    divergence[j] += coeffs_[candidate * n + j] * div;
+                }
+                ++candidate;
             }
         }
         return;
@@ -2556,12 +2879,18 @@ void RaviartThomasBasis::evaluate_divergence(const math::Vector<Real, 3>& xi,
                 eval_wedge_rt1_divergence_direct(xi, divergence);
             } else if (order_ == 2) {
                 eval_wedge_rt2_divergence_direct(xi, divergence);
+            } else {
+                throw NotImplementedException("RaviartThomasBasis direct wedge divergence currently supports orders 1-2",
+                                              __FILE__, __LINE__, __func__);
             }
         } else if (is_pyramid(element_type_)) {
             if (order_ == 1) {
                 eval_pyramid_rt1_divergence_direct(xi, divergence);
             } else if (order_ == 2) {
                 eval_pyramid_rt2_divergence_direct(xi, divergence);
+            } else {
+                throw NotImplementedException("RaviartThomasBasis direct pyramid divergence currently supports orders 1-2",
+                                              __FILE__, __LINE__, __func__);
             }
         }
         return;
@@ -2669,6 +2998,8 @@ NedelecBasis::NedelecBasis(ElementType type, int order)
                                           __FILE__, __LINE__, __func__);
     }
 
+    ensure_supported_hybrid_vector_order(type, order_, "NedelecBasis");
+
     if (is_triangle(type) || is_quadrilateral(type)) {
         dimension_ = 2;
         if (is_triangle(type)) {
@@ -2692,62 +3023,29 @@ NedelecBasis::NedelecBasis(ElementType type, int order)
         size_ = 3u * (k + 1u) * (k + 2u) * (k + 2u);
     } else if (is_wedge(type)) {
         dimension_ = 3;
-        // Wedge Nedelec(k): prismatic extension of 2D Nedelec(k).
-        // Edge DOFs: 9 edges x (k+1) moments per edge
-        // Face DOFs: 2 tri faces x k(k+1) tangential moments + 3 quad faces x 2k(k+1) tangential moments
-        // Interior DOFs: 3D curl-free interior modes
-        const std::size_t k = static_cast<std::size_t>(order_);
-        const std::size_t edge_dofs = 9u * (k + 1u);
-        std::size_t face_dofs = 0u;
-        std::size_t interior_dofs = 0u;
-        if (k >= 1) {
-            // Tri faces: 2 * k(k+1) total
-            face_dofs += 2u * k * (k + 1u);
-            // Quad faces: 3 * 2k(k+1)
-            face_dofs += 3u * 2u * k * (k + 1u);
-            // Interior: 3 * k(k+1)(k+2)/2 (approximate prismatic formula)
-            if (k >= 2) {
-                interior_dofs = 3u * k * (k - 1u) * (k + 1u) / 2u;
-            }
-        }
-        size_ = edge_dofs + face_dofs + interior_dofs;
+        size_ = nd_wedge_size(order_);
     } else if (is_pyramid(type)) {
         dimension_ = 3;
-        // Pyramid Nedelec(k): specialized edge elements.
-        // Edge DOFs: 8 edges x (k+1) moments per edge
-        // Face DOFs: 1 quad face x 2k(k+1) + 4 tri faces x k(k+1) each
-        // Interior DOFs: pyramid-specific interior modes
-        const std::size_t k = static_cast<std::size_t>(order_);
-        const std::size_t edge_dofs = 8u * (k + 1u);
-        std::size_t face_dofs = 0u;
-        std::size_t interior_dofs = 0u;
-        if (k >= 1) {
-            // Quad face: 2k(k+1) tangential moments
-            face_dofs += 2u * k * (k + 1u);
-            // Tri faces: 4 * k(k+1)
-            face_dofs += 4u * k * (k + 1u);
-            // Interior: pyramid-specific (approximation)
-            if (k >= 2) {
-                interior_dofs = 3u * k * (k - 1u) * (k + 1u) / 6u;
-            }
-        }
-        size_ = edge_dofs + face_dofs + interior_dofs;
+        size_ = nd_pyramid_size(order_);
     } else {
         throw BasisElementCompatibilityException("NedelecBasis supports triangles/quadrilaterals (2D) and "
                                                  "tetrahedra/hexahedra/wedges/pyramids (3D)",
                                                  __FILE__, __LINE__, __func__);
     }
 
-    // Build nodal (moment-based) ND(k) basis for elements where higher-order is supported.
-    // SPECIAL CASE: For wedge and pyramid elements with order >= 1, use DIRECT DOF-based
-    // construction instead of the modal+inversion approach.
+    // Wedge/pyramid ND(1-2) uses the explicit seed formulas transformed into a
+    // nodal basis with the actual edge/face/interior DOF functionals. For k>=3
+    // we use the same DOF solve over an overcomplete polynomial candidate space.
     if (order_ >= 1 && (is_wedge(type) || is_pyramid(type))) {
-        use_direct_construction_ = true;
+        transformed_monomial_candidates_ = make_nd_extra_monomial_candidates(type, order_);
+        coeffs_ = build_nd_direct_transform(type, order_, size_, transformed_monomial_candidates_);
+        use_transformed_direct_seed_ = true;
         return;
     }
 
     if (order_ > 0 && (is_quadrilateral(type) || is_hexahedron(type) ||
-                       is_triangle(type) || is_tetrahedron(type))) {
+                       is_triangle(type) || is_tetrahedron(type) ||
+                       is_wedge(type) || is_pyramid(type))) {
         const std::size_t n = size_;
 
         monomials_.clear();
@@ -3699,11 +3997,6 @@ NedelecBasis::NedelecBasis(ElementType type, int order)
             }
         }
 
-        // For wedge/pyramid, handle potential row count mismatch
-        if (row != n && (is_wedge(type) || is_pyramid(type))) {
-            row = n; // Force completion
-        }
-
         FE_CHECK_ARG(row == n, "NedelecBasis: DOF assembly did not fill matrix");
 
         coeffs_ = invert_dense_matrix(std::move(A), n);
@@ -3713,6 +4006,63 @@ NedelecBasis::NedelecBasis(ElementType type, int order)
 
 void NedelecBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
                                           std::vector<math::Vector<Real, 3>>& values) const {
+    if (use_transformed_direct_seed_) {
+        const std::size_t n = size_;
+        const std::size_t num_seed = (order_ <= 2) ? n : 0u;
+        const std::size_t num_extra = transformed_monomial_candidates_.size();
+        const std::size_t candidate_count = num_seed + num_extra;
+        values.assign(n, math::Vector<Real, 3>{});
+
+        FE_CHECK_ARG(coeffs_.size() == candidate_count * n,
+                     "NedelecBasis::evaluate_vector_values: transformed ND coefficient size mismatch");
+
+        if (num_seed > 0) {
+            std::vector<Vec3> seed_values;
+            eval_nd_seed_values(element_type_, order_, xi, seed_values);
+            FE_CHECK_ARG(seed_values.size() == n,
+                         "NedelecBasis::evaluate_vector_values: ND seed basis size mismatch");
+
+            for (std::size_t p = 0; p < n; ++p) {
+                const auto& mv = seed_values[p];
+                for (std::size_t j = 0; j < n; ++j) {
+                    const Real c = coeffs_[p * n + j];
+                    values[j][0] += c * mv[0];
+                    values[j][1] += c * mv[1];
+                    values[j][2] += c * mv[2];
+                }
+            }
+        }
+
+        if (num_extra > 0) {
+            int max_px = 0;
+            int max_py = 0;
+            int max_pz = 0;
+            for (const auto& mono : transformed_monomial_candidates_) {
+                max_px = std::max(max_px, mono[1]);
+                max_py = std::max(max_py, mono[2]);
+                max_pz = std::max(max_pz, mono[3]);
+            }
+            const auto px = powers(xi[0], max_px);
+            const auto py = powers(xi[1], max_py);
+            const auto pz = powers(xi[2], max_pz);
+
+            std::size_t candidate = num_seed;
+            for (const auto& mono : transformed_monomial_candidates_) {
+                Vec3 value{};
+                value[static_cast<std::size_t>(mono[0])] =
+                    eval_transformed_nd_monomial_scalar(mono, px, py, pz);
+                for (std::size_t j = 0; j < n; ++j) {
+                    const Real c = coeffs_[candidate * n + j];
+                    values[j][0] += c * value[0];
+                    values[j][1] += c * value[1];
+                    values[j][2] += c * value[2];
+                }
+                ++candidate;
+            }
+        }
+        return;
+    }
+
     // Use direct construction for wedge/pyramid Nedelec(k>=1)
     if (use_direct_construction_) {
         if (is_wedge(element_type_)) {
@@ -3720,12 +4070,18 @@ void NedelecBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
                 eval_wedge_nd1_direct(xi, values);
             } else if (order_ == 2) {
                 eval_wedge_nd2_direct(xi, values);
+            } else {
+                throw NotImplementedException("NedelecBasis direct wedge evaluation currently supports orders 1-2",
+                                              __FILE__, __LINE__, __func__);
             }
         } else if (is_pyramid(element_type_)) {
             if (order_ == 1) {
                 eval_pyramid_nd1_direct(xi, values);
             } else if (order_ == 2) {
                 eval_pyramid_nd2_direct(xi, values);
+            } else {
+                throw NotImplementedException("NedelecBasis direct pyramid evaluation currently supports orders 1-2",
+                                              __FILE__, __LINE__, __func__);
             }
         }
         return;
@@ -3924,65 +4280,87 @@ void NedelecBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
 
 void NedelecBasis::evaluate_curl(const math::Vector<Real, 3>& xi,
                                  std::vector<math::Vector<Real, 3>>& curl) const {
+    if (use_transformed_direct_seed_) {
+        const std::size_t n = size_;
+        const std::size_t num_seed = (order_ <= 2) ? n : 0u;
+        const std::size_t num_extra = transformed_monomial_candidates_.size();
+        const std::size_t candidate_count = num_seed + num_extra;
+        curl.assign(n, math::Vector<Real, 3>{});
+
+        FE_CHECK_ARG(coeffs_.size() == candidate_count * n,
+                     "NedelecBasis::evaluate_curl: transformed ND coefficient size mismatch");
+
+        if (num_seed > 0) {
+            std::vector<Vec3> seed_curl;
+            eval_nd_seed_curl(element_type_, order_, xi, seed_curl);
+            FE_CHECK_ARG(seed_curl.size() == n,
+                         "NedelecBasis::evaluate_curl: ND seed curl size mismatch");
+
+            for (std::size_t p = 0; p < n; ++p) {
+                const auto& mv = seed_curl[p];
+                for (std::size_t j = 0; j < n; ++j) {
+                    const Real c = coeffs_[p * n + j];
+                    curl[j][0] += c * mv[0];
+                    curl[j][1] += c * mv[1];
+                    curl[j][2] += c * mv[2];
+                }
+            }
+        }
+
+        if (num_extra > 0) {
+            int max_px = 0;
+            int max_py = 0;
+            int max_pz = 0;
+            for (const auto& mono : transformed_monomial_candidates_) {
+                max_px = std::max(max_px, mono[1]);
+                max_py = std::max(max_py, mono[2]);
+                max_pz = std::max(max_pz, mono[3]);
+            }
+            const auto px = powers(xi[0], max_px);
+            const auto py = powers(xi[1], max_py);
+            const auto pz = powers(xi[2], max_pz);
+
+            std::size_t candidate = num_seed;
+            for (const auto& mono : transformed_monomial_candidates_) {
+                const Vec3 mono_curl =
+                    eval_transformed_nd_monomial_curl(mono, px, py, pz);
+                for (std::size_t j = 0; j < n; ++j) {
+                    const Real c = coeffs_[candidate * n + j];
+                    curl[j][0] += c * mono_curl[0];
+                    curl[j][1] += c * mono_curl[1];
+                    curl[j][2] += c * mono_curl[2];
+                }
+                ++candidate;
+            }
+        }
+        return;
+    }
+
     // Use direct construction for wedge/pyramid Nedelec(k>=1)
     if (use_direct_construction_) {
-        // For k=1 and k=2, compute curl via finite differences
-        // A more efficient approach would be to derive analytical curl formulas
-        const Real h = Real(1e-6);
-        std::vector<math::Vector<Real, 3>> vx, vy, vz, vmx, vmy, vmz;
-
         if (is_wedge(element_type_)) {
             if (order_ == 1) {
-                eval_wedge_nd1_direct(math::Vector<Real,3>{xi[0]+h, xi[1], xi[2]}, vx);
-                eval_wedge_nd1_direct(math::Vector<Real,3>{xi[0]-h, xi[1], xi[2]}, vmx);
-                eval_wedge_nd1_direct(math::Vector<Real,3>{xi[0], xi[1]+h, xi[2]}, vy);
-                eval_wedge_nd1_direct(math::Vector<Real,3>{xi[0], xi[1]-h, xi[2]}, vmy);
-                eval_wedge_nd1_direct(math::Vector<Real,3>{xi[0], xi[1], xi[2]+h}, vz);
-                eval_wedge_nd1_direct(math::Vector<Real,3>{xi[0], xi[1], xi[2]-h}, vmz);
+                eval_direct_curl_exact(xi, eval_wedge_nd1_direct_impl<Diff3>, curl);
+                return;
             } else if (order_ == 2) {
-                eval_wedge_nd2_direct(math::Vector<Real,3>{xi[0]+h, xi[1], xi[2]}, vx);
-                eval_wedge_nd2_direct(math::Vector<Real,3>{xi[0]-h, xi[1], xi[2]}, vmx);
-                eval_wedge_nd2_direct(math::Vector<Real,3>{xi[0], xi[1]+h, xi[2]}, vy);
-                eval_wedge_nd2_direct(math::Vector<Real,3>{xi[0], xi[1]-h, xi[2]}, vmy);
-                eval_wedge_nd2_direct(math::Vector<Real,3>{xi[0], xi[1], xi[2]+h}, vz);
-                eval_wedge_nd2_direct(math::Vector<Real,3>{xi[0], xi[1], xi[2]-h}, vmz);
+                eval_direct_curl_exact(xi, eval_wedge_nd2_direct_impl<Diff3>, curl);
+                return;
+            } else {
+                throw NotImplementedException("NedelecBasis direct wedge curl currently supports orders 1-2",
+                                              __FILE__, __LINE__, __func__);
             }
         } else if (is_pyramid(element_type_)) {
             if (order_ == 1) {
                 eval_pyramid_nd1_curl_direct(xi, curl);
                 return;
             } else if (order_ == 2) {
-                // For ND2 on pyramid, use finite differences
-                eval_pyramid_nd2_direct(math::Vector<Real,3>{xi[0]+h, xi[1], xi[2]}, vx);
-                eval_pyramid_nd2_direct(math::Vector<Real,3>{xi[0]-h, xi[1], xi[2]}, vmx);
-                eval_pyramid_nd2_direct(math::Vector<Real,3>{xi[0], xi[1]+h, xi[2]}, vy);
-                eval_pyramid_nd2_direct(math::Vector<Real,3>{xi[0], xi[1]-h, xi[2]}, vmy);
-                eval_pyramid_nd2_direct(math::Vector<Real,3>{xi[0], xi[1], xi[2]+h}, vz);
-                eval_pyramid_nd2_direct(math::Vector<Real,3>{xi[0], xi[1], xi[2]-h}, vmz);
+                eval_direct_curl_exact(xi, eval_pyramid_nd2_direct_impl<Diff3>, curl);
+                return;
+            } else {
+                throw NotImplementedException("NedelecBasis direct pyramid curl currently supports orders 1-2",
+                                              __FILE__, __LINE__, __func__);
             }
         }
-
-        curl.resize(vx.size());
-        const Real inv2h = Real(1) / (Real(2) * h);
-        for (std::size_t i = 0; i < vx.size(); ++i) {
-            // curl = (dFz/dy - dFy/dz, dFx/dz - dFz/dx, dFy/dx - dFx/dy)
-            const Real dFx_dx = (vx[i][0] - vmx[i][0]) * inv2h;
-            const Real dFx_dy = (vy[i][0] - vmy[i][0]) * inv2h;
-            const Real dFx_dz = (vz[i][0] - vmz[i][0]) * inv2h;
-            const Real dFy_dx = (vx[i][1] - vmx[i][1]) * inv2h;
-            const Real dFy_dy = (vy[i][1] - vmy[i][1]) * inv2h;
-            const Real dFy_dz = (vz[i][1] - vmz[i][1]) * inv2h;
-            const Real dFz_dx = (vx[i][2] - vmx[i][2]) * inv2h;
-            const Real dFz_dy = (vy[i][2] - vmy[i][2]) * inv2h;
-            const Real dFz_dz = (vz[i][2] - vmz[i][2]) * inv2h;
-            (void)dFx_dx; (void)dFy_dy; (void)dFz_dz; // unused in curl
-            curl[i] = math::Vector<Real, 3>{
-                dFz_dy - dFy_dz,
-                dFx_dz - dFz_dx,
-                dFy_dx - dFx_dy
-            };
-        }
-        return;
     }
 
     if (nodal_generated_) {
@@ -4231,37 +4609,348 @@ BDMBasis::BDMBasis(ElementType type, int order)
         throw BasisConfigurationException("BDMBasis requires non-negative order",
                                           __FILE__, __LINE__, __func__);
     }
-    if (order_ != 1) {
-        throw NotImplementedException("BDMBasis currently supports only order 1",
-                                      __FILE__, __LINE__, __func__);
+    if (order_ == 0) {
+        throw BasisConfigurationException("BDMBasis requires order >= 1",
+                                          __FILE__, __LINE__, __func__);
     }
-    if (type == ElementType::Quad4 || type == ElementType::Quad8 || type == ElementType::Quad9 ||
-        type == ElementType::Triangle3) {
+
+    if (type == ElementType::Quad4 || type == ElementType::Quad8 || type == ElementType::Quad9) {
+        if (order_ != 1) {
+            throw NotImplementedException("BDMBasis quadrilateral support currently requires order 1",
+                                          __FILE__, __LINE__, __func__);
+        }
         dimension_ = 2;
-        size_ = (type == ElementType::Triangle3) ? std::size_t(6) : std::size_t(8);
+        size_ = std::size_t(8);
+        return;
+    }
+
+    if (type == ElementType::Triangle3) {
+        dimension_ = 2;
+        if (order_ == 1) {
+            // Preserve the original BDM1 triangle basis so existing edge-normal
+            // traces and divergence normalization remain unchanged.
+            size_ = std::size_t(6);
+            return;
+        }
+        const std::size_t k = static_cast<std::size_t>(order_);
+        size_ = 2u * triangle_poly_dim(k);
+    } else if (type == ElementType::Tetra4) {
+        dimension_ = 3;
+        const std::size_t k = static_cast<std::size_t>(order_);
+        size_ = 3u * tetra_poly_dim(k);
     } else {
-        throw BasisElementCompatibilityException("BDMBasis currently supports 2D elements (Triangle3, Quad4/8/9)",
+        throw BasisElementCompatibilityException("BDMBasis currently supports Triangle3, Tetra4, and quadrilateral variants (Quad4/8/9)",
                                                  __FILE__, __LINE__, __func__);
     }
+
+    const std::size_t n = size_;
+    monomials_.clear();
+    monomials_.reserve(n);
+
+    auto push_single = [&](int component, int px, int py, int pz) {
+        ModalPolynomial poly;
+        poly.num_terms = 1;
+        poly.terms[0] = ModalTerm{component, px, py, pz, Real(1)};
+        monomials_.push_back(poly);
+    };
+
+    if (type == ElementType::Triangle3) {
+        for (int j = 0; j <= order_; ++j) {
+            for (int i = 0; i <= order_ - j; ++i) {
+                push_single(0, i, j, 0);
+            }
+        }
+        for (int j = 0; j <= order_; ++j) {
+            for (int i = 0; i <= order_ - j; ++i) {
+                push_single(1, i, j, 0);
+            }
+        }
+    } else {
+        for (int k = 0; k <= order_; ++k) {
+            for (int j = 0; j <= order_ - k; ++j) {
+                for (int i = 0; i <= order_ - j - k; ++i) {
+                    push_single(0, i, j, k);
+                }
+            }
+        }
+        for (int k = 0; k <= order_; ++k) {
+            for (int j = 0; j <= order_ - k; ++j) {
+                for (int i = 0; i <= order_ - j - k; ++i) {
+                    push_single(1, i, j, k);
+                }
+            }
+        }
+        for (int k = 0; k <= order_; ++k) {
+            for (int j = 0; j <= order_ - k; ++j) {
+                for (int i = 0; i <= order_ - j - k; ++i) {
+                    push_single(2, i, j, k);
+                }
+            }
+        }
+    }
+
+    FE_CHECK_ARG(monomials_.size() == n, "BDMBasis modal basis size mismatch");
+
+    const int max_px = order_;
+    const int max_py = order_;
+    const int max_pz = (dimension_ == 3) ? order_ : 0;
+    std::vector<Real> A(n * n, Real(0));
+    std::size_t row = 0;
+
+    if (type == ElementType::Triangle3) {
+        const elements::ReferenceElement ref = elements::ReferenceElement::create(type);
+        const LagrangeBasis edge_basis(ElementType::Line2, order_);
+        const auto edge_quad = quadrature::QuadratureFactory::create(
+            ElementType::Line2, 2 * order_ + 2, QuadratureType::GaussLegendre, /*use_cache=*/false);
+
+        for (std::size_t e = 0; e < ref.num_edges(); ++e) {
+            const auto& edge_nodes = ref.edge_nodes(e);
+            const Vec3 a = NodeOrdering::get_node_coords(type, static_cast<std::size_t>(edge_nodes[0]));
+            const Vec3 b = NodeOrdering::get_node_coords(type, static_cast<std::size_t>(edge_nodes[1]));
+            const Vec3 tvec = b - a;
+            const Real len = tvec.norm();
+            FE_CHECK_ARG(len > Real(0), "BDM triangle edge has zero length");
+            const Vec3 t = tvec / len;
+            const Vec3 nrm{t[1], -t[0], Real(0)};
+            const Real J = len * Real(0.5);
+
+            for (std::size_t q = 0; q < edge_quad->num_points(); ++q) {
+                const Real s = edge_quad->point(q)[0];
+                const Real tpar = (s + Real(1)) * Real(0.5);
+                const Vec3 xi = a * (Real(1) - tpar) + b * tpar;
+                std::vector<Real> bvals;
+                edge_basis.evaluate_values(Vec3{s, Real(0), Real(0)}, bvals);
+
+                const auto px = powers(xi[0], max_px);
+                const auto py = powers(xi[1], max_py);
+
+                std::vector<Real> modal_dot(n, Real(0));
+                for (std::size_t p = 0; p < n; ++p) {
+                    const auto& poly = monomials_[p];
+                    Real dot = Real(0);
+                    for (int term = 0; term < poly.num_terms; ++term) {
+                        const auto& mono = poly.terms[static_cast<std::size_t>(term)];
+                        const Real mv = px[static_cast<std::size_t>(mono.px)] *
+                                        py[static_cast<std::size_t>(mono.py)];
+                        dot += mono.coefficient * nrm[static_cast<std::size_t>(mono.component)] * mv;
+                    }
+                    modal_dot[p] = dot;
+                }
+
+                const Real wt = edge_quad->weight(q) * J;
+                for (std::size_t aidx = 0; aidx < bvals.size(); ++aidx) {
+                    const Real wa = wt * bvals[aidx];
+                    if (wa == Real(0)) {
+                        continue;
+                    }
+                    const std::size_t r = row + aidx;
+                    for (std::size_t p = 0; p < n; ++p) {
+                        A[r * n + p] += wa * modal_dot[p];
+                    }
+                }
+            }
+            row += edge_basis.size();
+        }
+
+        if (order_ >= 2) {
+            NedelecBasis interior_basis(ElementType::Triangle3, order_ - 2);
+            const auto tri_quad = quadrature::QuadratureFactory::create(
+                ElementType::Triangle3, 2 * order_ + 2, QuadratureType::GaussLegendre, /*use_cache=*/false);
+
+            for (std::size_t q = 0; q < tri_quad->num_points(); ++q) {
+                const Vec3 xi = tri_quad->point(q);
+                std::vector<Vec3> test_values;
+                interior_basis.evaluate_vector_values(xi, test_values);
+                const auto px = powers(xi[0], max_px);
+                const auto py = powers(xi[1], max_py);
+                const Real wt = tri_quad->weight(q);
+
+                std::vector<Real> modal_dot(n, Real(0));
+                for (std::size_t p = 0; p < n; ++p) {
+                    const auto& poly = monomials_[p];
+                    Real dot = Real(0);
+                    for (int term = 0; term < poly.num_terms; ++term) {
+                        const auto& mono = poly.terms[static_cast<std::size_t>(term)];
+                        const Real mv = px[static_cast<std::size_t>(mono.px)] *
+                                        py[static_cast<std::size_t>(mono.py)];
+                        dot += mono.coefficient * mv;
+                    }
+                    modal_dot[p] = dot;
+                }
+
+                for (std::size_t aidx = 0; aidx < test_values.size(); ++aidx) {
+                    const Vec3& test = test_values[aidx];
+                    const std::size_t r = row + aidx;
+                    for (std::size_t p = 0; p < n; ++p) {
+                        const auto& mono = monomials_[p].terms[0];
+                        const Real weight = test[static_cast<std::size_t>(mono.component)];
+                        A[r * n + p] += wt * modal_dot[p] * weight;
+                    }
+                }
+            }
+            row += interior_basis.size();
+        }
+    } else {
+        const elements::ReferenceElement ref = elements::ReferenceElement::create(type);
+        const LagrangeBasis face_basis(ElementType::Triangle3, order_);
+        const auto tri_quad = quadrature::QuadratureFactory::create(
+            ElementType::Triangle3, 2 * order_ + 2, QuadratureType::GaussLegendre, /*use_cache=*/false);
+
+        for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+            const auto& face_nodes = ref.face_nodes(f);
+            const Vec3 v0 = NodeOrdering::get_node_coords(type, static_cast<std::size_t>(face_nodes[0]));
+            const Vec3 v1 = NodeOrdering::get_node_coords(type, static_cast<std::size_t>(face_nodes[1]));
+            const Vec3 v2 = NodeOrdering::get_node_coords(type, static_cast<std::size_t>(face_nodes[2]));
+            const Vec3 e01 = v1 - v0;
+            const Vec3 e02 = v2 - v0;
+            const Vec3 cross = cross3(e01, e02);
+            const Real scale = cross.norm();
+            FE_CHECK_ARG(scale > Real(0), "BDM tetra face has zero area");
+            const Vec3 nrm = normalize3(cross);
+
+            for (std::size_t q = 0; q < tri_quad->num_points(); ++q) {
+                const auto uv = tri_quad->point(q);
+                const Real u = uv[0];
+                const Real v = uv[1];
+                const Vec3 xi = v0 + e01 * u + e02 * v;
+                std::vector<Real> bvals;
+                face_basis.evaluate_values(Vec3{u, v, Real(0)}, bvals);
+
+                const auto px = powers(xi[0], max_px);
+                const auto py = powers(xi[1], max_py);
+                const auto pz = powers(xi[2], max_pz);
+
+                std::vector<Real> modal_dot(n, Real(0));
+                for (std::size_t p = 0; p < n; ++p) {
+                    const auto& poly = monomials_[p];
+                    Real dot = Real(0);
+                    for (int term = 0; term < poly.num_terms; ++term) {
+                        const auto& mono = poly.terms[static_cast<std::size_t>(term)];
+                        const Real mv = px[static_cast<std::size_t>(mono.px)] *
+                                        py[static_cast<std::size_t>(mono.py)] *
+                                        pz[static_cast<std::size_t>(mono.pz)];
+                        dot += mono.coefficient * nrm[static_cast<std::size_t>(mono.component)] * mv;
+                    }
+                    modal_dot[p] = dot;
+                }
+
+                const Real wt = tri_quad->weight(q) * scale;
+                for (std::size_t aidx = 0; aidx < bvals.size(); ++aidx) {
+                    const Real wa = wt * bvals[aidx];
+                    if (wa == Real(0)) {
+                        continue;
+                    }
+                    const std::size_t r = row + aidx;
+                    for (std::size_t p = 0; p < n; ++p) {
+                        A[r * n + p] += wa * modal_dot[p];
+                    }
+                }
+            }
+
+            row += face_basis.size();
+        }
+
+        if (order_ >= 2) {
+            NedelecBasis interior_basis(ElementType::Tetra4, order_ - 2);
+            const auto tet_quad = quadrature::QuadratureFactory::create(
+                ElementType::Tetra4, 2 * order_ + 2, QuadratureType::GaussLegendre, /*use_cache=*/false);
+
+            for (std::size_t q = 0; q < tet_quad->num_points(); ++q) {
+                const Vec3 xi = tet_quad->point(q);
+                std::vector<Vec3> test_values;
+                interior_basis.evaluate_vector_values(xi, test_values);
+                const auto px = powers(xi[0], max_px);
+                const auto py = powers(xi[1], max_py);
+                const auto pz = powers(xi[2], max_pz);
+                const Real wt = tet_quad->weight(q);
+
+                for (std::size_t aidx = 0; aidx < test_values.size(); ++aidx) {
+                    const Vec3& test = test_values[aidx];
+                    const std::size_t r = row + aidx;
+                    for (std::size_t p = 0; p < n; ++p) {
+                        const auto& mono = monomials_[p].terms[0];
+                        const Real mv = px[static_cast<std::size_t>(mono.px)] *
+                                        py[static_cast<std::size_t>(mono.py)] *
+                                        pz[static_cast<std::size_t>(mono.pz)];
+                        A[r * n + p] += wt * mono.coefficient * mv *
+                                        test[static_cast<std::size_t>(mono.component)];
+                    }
+                }
+            }
+            row += interior_basis.size();
+        }
+    }
+
+    FE_CHECK_ARG(row == n, "BDMBasis: DOF assembly did not fill matrix");
+    coeffs_ = invert_dense_matrix(std::move(A), n);
+    nodal_generated_ = true;
 }
 
 void BDMBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
                                       std::vector<math::Vector<Real, 3>>& values) const {
-    const Real x = xi[0];
-    const Real y = xi[1];
-
-    if (element_type_ == ElementType::Triangle3) {
-        // BDM1 on the reference triangle with vertices (0,0), (1,0), (0,1):
-        // two edge moments per edge (constant + linear), 6 basis functions total.
+    if (element_type_ == ElementType::Triangle3 && !nodal_generated_) {
+        const Real x = xi[0];
+        const Real y = xi[1];
         values.resize(6);
-        values[0] = math::Vector<Real, 3>{x, y - Real(1), Real(0)};                    // edge 0-1, const
-        values[1] = math::Vector<Real, 3>{Real(3) * x, Real(3) - Real(6) * x - Real(3) * y, Real(0)}; // edge 0-1, linear
-        values[2] = math::Vector<Real, 3>{x, y, Real(0)};                               // edge 1-2, const
-        values[3] = math::Vector<Real, 3>{-Real(3) * x, Real(3) * y, Real(0)};          // edge 1-2, linear
-        values[4] = math::Vector<Real, 3>{x - Real(1), y, Real(0)};                     // edge 2-0, const
-        values[5] = math::Vector<Real, 3>{Real(3) - Real(3) * x - Real(6) * y, Real(3) * y, Real(0)}; // edge 2-0, linear
+        values[0] = math::Vector<Real, 3>{x, y - Real(1), Real(0)};
+        values[1] = math::Vector<Real, 3>{Real(3) * x,
+                                          Real(3) - Real(6) * x - Real(3) * y,
+                                          Real(0)};
+        values[2] = math::Vector<Real, 3>{x, y, Real(0)};
+        values[3] = math::Vector<Real, 3>{-Real(3) * x, Real(3) * y, Real(0)};
+        values[4] = math::Vector<Real, 3>{x - Real(1), y, Real(0)};
+        values[5] = math::Vector<Real, 3>{Real(3) - Real(3) * x - Real(6) * y,
+                                          Real(3) * y,
+                                          Real(0)};
         return;
     }
+
+    if (nodal_generated_) {
+        const std::size_t n = size_;
+        values.assign(n, math::Vector<Real, 3>{});
+
+        int max_px = 0, max_py = 0, max_pz = 0;
+        for (const auto& poly : monomials_) {
+            for (int t = 0; t < poly.num_terms; ++t) {
+                const auto& m = poly.terms[static_cast<std::size_t>(t)];
+                max_px = std::max(max_px, m.px);
+                max_py = std::max(max_py, m.py);
+                max_pz = std::max(max_pz, m.pz);
+            }
+        }
+        const auto px = powers(xi[0], max_px);
+        const auto py = powers(xi[1], max_py);
+        const auto pz = powers(xi[2], max_pz);
+
+        std::vector<math::Vector<Real, 3>> modal_vals(n, math::Vector<Real, 3>{});
+        for (std::size_t p = 0; p < n; ++p) {
+            const auto& poly = monomials_[p];
+            math::Vector<Real, 3> v{};
+            for (int t = 0; t < poly.num_terms; ++t) {
+                const auto& m = poly.terms[static_cast<std::size_t>(t)];
+                const Real mv =
+                    px[static_cast<std::size_t>(m.px)] *
+                    py[static_cast<std::size_t>(m.py)] *
+                    pz[static_cast<std::size_t>(m.pz)];
+                v[static_cast<std::size_t>(m.component)] += m.coefficient * mv;
+            }
+            modal_vals[p] = v;
+        }
+
+        for (std::size_t p = 0; p < n; ++p) {
+            const auto& mv = modal_vals[p];
+            for (std::size_t j = 0; j < n; ++j) {
+                const Real c = coeffs_[p * n + j];
+                values[j][0] += c * mv[0];
+                values[j][1] += c * mv[1];
+                values[j][2] += c * mv[2];
+            }
+        }
+        return;
+    }
+
+    const Real x = xi[0];
+    const Real y = xi[1];
 
     // BDM1 on the reference quadrilateral [-1,1]^2:
     // two edge moments per edge (constant + linear), 8 basis functions total.
@@ -4284,12 +4973,9 @@ void BDMBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
 
 void BDMBasis::evaluate_divergence(const math::Vector<Real, 3>& xi,
                                    std::vector<Real>& divergence) const {
-    const Real x = xi[0];
-    const Real y = xi[1];
-
-    if (element_type_ == ElementType::Triangle3) {
+    if (element_type_ == ElementType::Triangle3 && !nodal_generated_) {
+        (void)xi;
         divergence.resize(6);
-        // Divergences for the triangle basis above are constant.
         divergence[0] = Real(2);
         divergence[1] = Real(0);
         divergence[2] = Real(2);
@@ -4298,6 +4984,64 @@ void BDMBasis::evaluate_divergence(const math::Vector<Real, 3>& xi,
         divergence[5] = Real(0);
         return;
     }
+
+    if (nodal_generated_) {
+        const std::size_t n = size_;
+        divergence.assign(n, Real(0));
+
+        int max_px = 0, max_py = 0, max_pz = 0;
+        for (const auto& poly : monomials_) {
+            for (int t = 0; t < poly.num_terms; ++t) {
+                const auto& m = poly.terms[static_cast<std::size_t>(t)];
+                max_px = std::max(max_px, m.px);
+                max_py = std::max(max_py, m.py);
+                max_pz = std::max(max_pz, m.pz);
+            }
+        }
+        const auto px = powers(xi[0], max_px);
+        const auto py = powers(xi[1], max_py);
+        const auto pz = powers(xi[2], max_pz);
+
+        std::vector<Real> modal_div(n, Real(0));
+        for (std::size_t p = 0; p < n; ++p) {
+            const auto& poly = monomials_[p];
+            Real div = Real(0);
+            for (int t = 0; t < poly.num_terms; ++t) {
+                const auto& m = poly.terms[static_cast<std::size_t>(t)];
+                if (m.component == 0 && m.px > 0) {
+                    div += m.coefficient * Real(m.px) *
+                           px[static_cast<std::size_t>(m.px - 1)] *
+                           py[static_cast<std::size_t>(m.py)] *
+                           pz[static_cast<std::size_t>(m.pz)];
+                } else if (m.component == 1 && m.py > 0) {
+                    div += m.coefficient * Real(m.py) *
+                           px[static_cast<std::size_t>(m.px)] *
+                           py[static_cast<std::size_t>(m.py - 1)] *
+                           pz[static_cast<std::size_t>(m.pz)];
+                } else if (m.component == 2 && m.pz > 0) {
+                    div += m.coefficient * Real(m.pz) *
+                           px[static_cast<std::size_t>(m.px)] *
+                           py[static_cast<std::size_t>(m.py)] *
+                           pz[static_cast<std::size_t>(m.pz - 1)];
+                }
+            }
+            modal_div[p] = div;
+        }
+
+        for (std::size_t p = 0; p < n; ++p) {
+            const Real md = modal_div[p];
+            if (md == Real(0)) {
+                continue;
+            }
+            for (std::size_t j = 0; j < n; ++j) {
+                divergence[j] += coeffs_[p * n + j] * md;
+            }
+        }
+        return;
+    }
+
+    const Real x = xi[0];
+    const Real y = xi[1];
 
     divergence.resize(8);
     const Real half = Real(0.5);
@@ -4315,19 +5059,38 @@ std::vector<DofAssociation> BDMBasis::dof_associations() const {
     std::vector<DofAssociation> result(size_);
     std::size_t idx = 0;
 
-    // BDM has edge DOFs (2D) with 2 moments per edge for order 1
     if (element_type_ == ElementType::Triangle3) {
-        // 3 edges, 2 DOFs per edge
         for (int e = 0; e < 3; ++e) {
-            for (int m = 0; m < 2; ++m) {
+            for (int m = 0; m <= order_; ++m) {
                 result[idx].entity_type = DofEntity::Edge;
                 result[idx].entity_id = e;
                 result[idx].moment_index = m;
                 ++idx;
             }
         }
+        while (idx < size_) {
+            result[idx].entity_type = DofEntity::Interior;
+            result[idx].entity_id = 0;
+            result[idx].moment_index = static_cast<int>(idx - std::size_t(3 * (order_ + 1)));
+            ++idx;
+        }
+    } else if (element_type_ == ElementType::Tetra4) {
+        const std::size_t dofs_per_face = triangle_poly_dim(static_cast<std::size_t>(order_));
+        for (int f = 0; f < 4; ++f) {
+            for (std::size_t m = 0; m < dofs_per_face; ++m) {
+                result[idx].entity_type = DofEntity::Face;
+                result[idx].entity_id = f;
+                result[idx].moment_index = static_cast<int>(m);
+                ++idx;
+            }
+        }
+        while (idx < size_) {
+            result[idx].entity_type = DofEntity::Interior;
+            result[idx].entity_id = 0;
+            result[idx].moment_index = static_cast<int>(idx - 4u * dofs_per_face);
+            ++idx;
+        }
     } else {
-        // Quad: 4 edges, 2 DOFs per edge
         for (int e = 0; e < 4; ++e) {
             for (int m = 0; m < 2; ++m) {
                 result[idx].entity_type = DofEntity::Edge;

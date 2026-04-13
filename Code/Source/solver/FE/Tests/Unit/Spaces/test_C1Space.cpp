@@ -85,6 +85,8 @@ TEST(C1Space, SpaceFactoryCreatesC1Space) {
 TEST(C1Space, UnsupportedElementTypesAndOrdersThrow) {
     EXPECT_THROW(C1Space(ElementType::Triangle3, 3), svmp::FE::FEException);
     EXPECT_THROW(C1Space(ElementType::Tetra4, 3), svmp::FE::FEException);
+    EXPECT_THROW(C1Space(ElementType::Wedge6, 3), svmp::FE::FEException);
     EXPECT_THROW(C1Space(ElementType::Line2, 2), svmp::FE::FEException);
     EXPECT_THROW(C1Space(ElementType::Quad4, 4), svmp::FE::FEException);
+    EXPECT_THROW(C1Space(ElementType::Hex8, 5), svmp::FE::FEException);
 }

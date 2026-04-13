@@ -10,7 +10,7 @@
 
 /**
  * @file CompatibleTensorVectorBasis.h
- * @brief Tensor-product compatible vector bases for quad spline/NURBS spaces
+ * @brief Tensor-product compatible vector bases for spline/NURBS tensor-product cells
  */
 
 #include "Basis/VectorBasis.h"
@@ -21,18 +21,20 @@ namespace FE {
 namespace basis {
 
 /**
- * @brief Tensor-product compatible H(div)/H(curl) basis on Quad4
+ * @brief Tensor-product compatible H(div)/H(curl) basis on Quad4/Hex8
  *
  * This basis provides first-class vector-valued spline/NURBS spaces on a
- * single quadrilateral reference patch. Each vector component is represented
- * by a compatible tensor-product scalar basis:
+ * single tensor-product reference patch/cell. Each vector component is
+ * represented by a compatible tensor-product scalar basis:
  *
- * - H(curl): S_{p_x-1,p_y} e_x  ⊕  S_{p_x,p_y-1} e_y
- * - H(div):  S_{p_x,p_y-1} e_x  ⊕  S_{p_x-1,p_y} e_y
- *
- * The current implementation targets the 2D quadrilateral surface needed by
- * the parity roadmap. Higher-dimensional compatible spline spaces can be
- * added later without changing this public contract.
+ * - 2D H(curl): S_{p_x-1,p_y} e_x  ⊕  S_{p_x,p_y-1} e_y
+ * - 2D H(div):  S_{p_x,p_y-1} e_x  ⊕  S_{p_x-1,p_y} e_y
+ * - 3D H(curl): S_{p_x-1,p_y,p_z} e_x
+ *             ⊕ S_{p_x,p_y-1,p_z} e_y
+ *             ⊕ S_{p_x,p_y,p_z-1} e_z
+ * - 3D H(div):  S_{p_x,p_y-1,p_z-1} e_x
+ *             ⊕ S_{p_x-1,p_y,p_z-1} e_y
+ *             ⊕ S_{p_x-1,p_y-1,p_z} e_z
  */
 class CompatibleTensorVectorBasis : public VectorBasisFunction {
 public:
@@ -48,6 +50,13 @@ public:
                                 std::vector<DofAssociation> associations,
                                 int order,
                                 ElementType element_type = ElementType::Quad4);
+
+    CompatibleTensorVectorBasis(Family family,
+                                BasisType semantic_basis_type,
+                                std::vector<std::shared_ptr<BasisFunction>> component_bases,
+                                std::vector<DofAssociation> associations,
+                                int order,
+                                ElementType element_type);
 
     BasisType basis_type() const noexcept override { return semantic_basis_type_; }
     ElementType element_type() const noexcept override { return element_type_; }
@@ -75,8 +84,7 @@ private:
     int dimension_{2};
     int order_{0};
     std::size_t size_{0};
-    std::shared_ptr<BasisFunction> first_component_basis_;
-    std::shared_ptr<BasisFunction> second_component_basis_;
+    std::vector<std::shared_ptr<BasisFunction>> component_bases_;
     std::vector<DofAssociation> associations_;
 };
 

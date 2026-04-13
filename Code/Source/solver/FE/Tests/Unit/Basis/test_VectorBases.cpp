@@ -14,6 +14,7 @@
 #include "FE/Quadrature/TriangleQuadrature.h"
 #include "FE/Quadrature/QuadrilateralQuadrature.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 using namespace svmp::FE;
@@ -83,6 +84,45 @@ static double integrate_quad_bdm_divergence(const BDMBasis& basis,
 static double integrate_triangle_bdm_divergence(const BDMBasis& basis,
                                                 int func_id,
                                                 int quad_order = 8);
+
+static double integrate_triangle_bdm_edge_moment_exact(const BDMBasis& basis,
+                                                       int edge_id,
+                                                       int mode_id,
+                                                       int func_id,
+                                                       int order,
+                                                       int quad_order = 8);
+
+static double integrate_triangle_bdm_interior_moment(const BDMBasis& basis,
+                                                     int mode_id,
+                                                     int func_id,
+                                                     int order,
+                                                     int quad_order = 8);
+
+static double integrate_tetra_bdm_face_moment(const BDMBasis& basis,
+                                              int face_id,
+                                              int mode_id,
+                                              int func_id,
+                                              int order,
+                                              int quad_order = 8);
+
+static double integrate_tetra_bdm_face_moment_with_vertex_permutation(
+    const BDMBasis& basis,
+    int face_id,
+    const std::array<int, 3>& vertex_permutation,
+    int mode_id,
+    int func_id,
+    int order,
+    int quad_order = 8);
+
+static double integrate_tetra_bdm_interior_moment(const BDMBasis& basis,
+                                                  int mode_id,
+                                                  int func_id,
+                                                  int order,
+                                                  int quad_order = 8);
+
+static double integrate_tetra_bdm_divergence(const BDMBasis& basis,
+                                             int func_id,
+                                             int quad_order = 8);
 
 static double integrate_tetra_edge_tangential_moment(const NedelecBasis& basis,
                                                      int edge_id,
@@ -280,6 +320,271 @@ TEST(BDMBasis, TriangleEdgeMomentsAreKroneckerWithDofAssociations) {
                     (assoc[func].entity_id == edge && assoc[func].moment_index == mode) ? 1.0 : 0.0;
                 EXPECT_NEAR(moment, expected, 1e-11)
                     << "func=" << func << ", edge=" << edge << ", mode=" << mode;
+            }
+        }
+    }
+}
+
+TEST(BDMBasis, TriangleHigherOrderEdgeAndInteriorMomentsAreKronecker) {
+    for (const int order : {2, 3}) {
+        BDMBasis basis(ElementType::Triangle3, order);
+        const auto assoc = basis.dof_associations();
+        ASSERT_EQ(assoc.size(), basis.size());
+
+        const std::size_t edge_dofs = static_cast<std::size_t>(3 * (order + 1));
+        for (std::size_t dof = 0; dof < basis.size(); ++dof) {
+            for (std::size_t func = 0; func < basis.size(); ++func) {
+                double moment = 0.0;
+                if (assoc[dof].entity_type == DofEntity::Edge) {
+                    moment = integrate_triangle_bdm_edge_moment_exact(
+                        basis,
+                        assoc[dof].entity_id,
+                        assoc[dof].moment_index,
+                        static_cast<int>(func),
+                        order);
+                } else {
+                    ASSERT_EQ(assoc[dof].entity_type, DofEntity::Interior);
+                    moment = integrate_triangle_bdm_interior_moment(
+                        basis,
+                        assoc[dof].moment_index,
+                        static_cast<int>(func),
+                        order);
+                }
+
+                const double expected = (dof == func) ? 1.0 : 0.0;
+                const double tol = (dof < edge_dofs && func < edge_dofs) ? 2e-10 : 2e-9;
+                EXPECT_NEAR(moment, expected, tol)
+                    << "order=" << order << ", dof=" << dof << ", func=" << func;
+            }
+        }
+    }
+}
+
+TEST(BDMBasis, TetraHigherOrderFaceAndInteriorMomentsAreKronecker) {
+    for (const int order : {1, 2, 3}) {
+        BDMBasis basis(ElementType::Tetra4, order);
+        const auto assoc = basis.dof_associations();
+        ASSERT_EQ(assoc.size(), basis.size());
+
+        const std::size_t face_dofs =
+            4u * static_cast<std::size_t>((order + 1) * (order + 2) / 2);
+        for (std::size_t dof = 0; dof < basis.size(); ++dof) {
+            for (std::size_t func = 0; func < basis.size(); ++func) {
+                double moment = 0.0;
+                if (assoc[dof].entity_type == DofEntity::Face) {
+                    moment = integrate_tetra_bdm_face_moment(
+                        basis,
+                        assoc[dof].entity_id,
+                        assoc[dof].moment_index,
+                        static_cast<int>(func),
+                        order);
+                } else {
+                    ASSERT_EQ(assoc[dof].entity_type, DofEntity::Interior);
+                    moment = integrate_tetra_bdm_interior_moment(
+                        basis,
+                        assoc[dof].moment_index,
+                        static_cast<int>(func),
+                        order);
+                }
+
+                const double expected = (dof == func) ? 1.0 : 0.0;
+                const double tol = (dof < face_dofs && func < face_dofs) ? 5e-9 : 1e-8;
+                EXPECT_NEAR(moment, expected, tol)
+                    << "order=" << order << ", dof=" << dof << ", func=" << func;
+            }
+        }
+    }
+}
+
+TEST(BDMBasis, TriangleDivergenceLiesInPkMinusOne) {
+    using svmp::FE::math::Vector;
+
+    const std::array<Vector<Real, 3>, 3> sample_points = {
+        Vector<Real, 3>{Real(0.17), Real(0.21), Real(0)},
+        Vector<Real, 3>{Real(0.32), Real(0.18), Real(0)},
+        Vector<Real, 3>{Real(0.14), Real(0.41), Real(0)}
+    };
+
+    for (const int order : {1, 2, 3}) {
+        BDMBasis basis(ElementType::Triangle3, order);
+
+        if (order == 1) {
+            for (std::size_t func = 0; func < basis.size(); ++func) {
+                std::vector<Real> div_ref;
+                basis.evaluate_divergence(sample_points[0], div_ref);
+                for (std::size_t p = 1; p < sample_points.size(); ++p) {
+                    std::vector<Real> div;
+                    basis.evaluate_divergence(sample_points[p], div);
+                    EXPECT_NEAR(div[func], div_ref[func], 1e-12)
+                        << "order=" << order << ", func=" << func;
+                }
+            }
+            continue;
+        }
+
+        LagrangeBasis scalar_basis(ElementType::Triangle3, order - 1);
+        const auto nodes = NodeOrdering::get_lagrange_node_coords(ElementType::Triangle3, order - 1);
+        ASSERT_EQ(nodes.size(), scalar_basis.size());
+
+        for (std::size_t func = 0; func < basis.size(); ++func) {
+            std::vector<Real> nodal_values(nodes.size(), Real(0));
+            for (std::size_t i = 0; i < nodes.size(); ++i) {
+                std::vector<Real> div;
+                basis.evaluate_divergence(nodes[i], div);
+                nodal_values[i] = div[func];
+            }
+
+            for (const auto& xi : sample_points) {
+                std::vector<Real> phi;
+                scalar_basis.evaluate_values(xi, phi);
+                Real interpolated = Real(0);
+                for (std::size_t i = 0; i < phi.size(); ++i) {
+                    interpolated += phi[i] * nodal_values[i];
+                }
+
+                std::vector<Real> div;
+                basis.evaluate_divergence(xi, div);
+                EXPECT_NEAR(div[func], interpolated, 1e-10)
+                    << "order=" << order << ", func=" << func;
+            }
+        }
+    }
+}
+
+TEST(BDMBasis, TetraDivergenceLiesInPkMinusOne) {
+    using svmp::FE::math::Vector;
+
+    const std::array<Vector<Real, 3>, 4> sample_points = {
+        Vector<Real, 3>{Real(0.12), Real(0.17), Real(0.18)},
+        Vector<Real, 3>{Real(0.24), Real(0.11), Real(0.16)},
+        Vector<Real, 3>{Real(0.18), Real(0.22), Real(0.09)},
+        Vector<Real, 3>{Real(0.09), Real(0.16), Real(0.14)}
+    };
+
+    for (const int order : {1, 2, 3}) {
+        BDMBasis basis(ElementType::Tetra4, order);
+
+        if (order == 1) {
+            for (std::size_t func = 0; func < basis.size(); ++func) {
+                std::vector<Real> div_ref;
+                basis.evaluate_divergence(sample_points[0], div_ref);
+                for (std::size_t p = 1; p < sample_points.size(); ++p) {
+                    std::vector<Real> div;
+                    basis.evaluate_divergence(sample_points[p], div);
+                    EXPECT_NEAR(div[func], div_ref[func], 1e-12)
+                        << "order=" << order << ", func=" << func;
+                }
+            }
+            continue;
+        }
+
+        LagrangeBasis scalar_basis(ElementType::Tetra4, order - 1);
+        const auto nodes = NodeOrdering::get_lagrange_node_coords(ElementType::Tetra4, order - 1);
+        ASSERT_EQ(nodes.size(), scalar_basis.size());
+
+        for (std::size_t func = 0; func < basis.size(); ++func) {
+            std::vector<Real> nodal_values(nodes.size(), Real(0));
+            for (std::size_t i = 0; i < nodes.size(); ++i) {
+                std::vector<Real> div;
+                basis.evaluate_divergence(nodes[i], div);
+                nodal_values[i] = div[func];
+            }
+
+            for (const auto& xi : sample_points) {
+                std::vector<Real> phi;
+                scalar_basis.evaluate_values(xi, phi);
+                Real interpolated = Real(0);
+                for (std::size_t i = 0; i < phi.size(); ++i) {
+                    interpolated += phi[i] * nodal_values[i];
+                }
+
+                std::vector<Real> div;
+                basis.evaluate_divergence(xi, div);
+                EXPECT_NEAR(div[func], interpolated, 1e-10)
+                    << "order=" << order << ", func=" << func;
+            }
+        }
+    }
+}
+
+TEST(BDMBasis, HigherOrderDofAssociationsMatchExpectedBoundaryInteriorSplit) {
+    {
+        const int order = 2;
+        BDMBasis basis(ElementType::Triangle3, order);
+        const auto assoc = basis.dof_associations();
+        const int edge_dofs = std::count_if(assoc.begin(), assoc.end(), [](const DofAssociation& a) {
+            return a.entity_type == DofEntity::Edge;
+        });
+        const int interior_dofs = std::count_if(assoc.begin(), assoc.end(), [](const DofAssociation& a) {
+            return a.entity_type == DofEntity::Interior;
+        });
+        EXPECT_EQ(edge_dofs, 3 * (order + 1));
+        EXPECT_EQ(interior_dofs, static_cast<int>(basis.size()) - edge_dofs);
+        EXPECT_TRUE(std::all_of(assoc.begin() + edge_dofs, assoc.end(), [](const DofAssociation& a) {
+            return a.entity_type == DofEntity::Interior;
+        }));
+    }
+
+    {
+        const int order = 3;
+        BDMBasis basis(ElementType::Tetra4, order);
+        const auto assoc = basis.dof_associations();
+        const int face_dofs = std::count_if(assoc.begin(), assoc.end(), [](const DofAssociation& a) {
+            return a.entity_type == DofEntity::Face;
+        });
+        const int interior_dofs = std::count_if(assoc.begin(), assoc.end(), [](const DofAssociation& a) {
+            return a.entity_type == DofEntity::Interior;
+        });
+        const int expected_face_dofs = 4 * ((order + 1) * (order + 2) / 2);
+        EXPECT_EQ(face_dofs, expected_face_dofs);
+        EXPECT_EQ(interior_dofs, static_cast<int>(basis.size()) - face_dofs);
+        EXPECT_TRUE(std::all_of(assoc.begin() + face_dofs, assoc.end(), [](const DofAssociation& a) {
+            return a.entity_type == DofEntity::Interior;
+        }));
+    }
+}
+
+TEST(BDMBasis, TetraFaceMomentOrderingIsInvariantUnderCyclicFaceParameterization) {
+    using svmp::FE::math::Vector;
+
+    const int order = 2;
+    const std::array<int, 3> cyclic_perm = {1, 2, 0};
+    const auto face_nodes = NodeOrdering::get_lagrange_node_coords(ElementType::Triangle3, order);
+    BDMBasis basis(ElementType::Tetra4, order);
+
+    auto map_mode_under_permutation = [&](std::size_t mode) -> std::size_t {
+        const Vector<Real, 3>& xi = face_nodes[mode];
+        const Real l0 = Real(1) - xi[0] - xi[1];
+        const std::array<Real, 3> bary = {l0, xi[0], xi[1]};
+        const Vector<Real, 3> permuted_xi{bary[static_cast<std::size_t>(cyclic_perm[1])],
+                                          bary[static_cast<std::size_t>(cyclic_perm[2])],
+                                          Real(0)};
+        for (std::size_t i = 0; i < face_nodes.size(); ++i) {
+            if (std::abs(face_nodes[i][0] - permuted_xi[0]) < 1e-12 &&
+                std::abs(face_nodes[i][1] - permuted_xi[1]) < 1e-12) {
+                return i;
+            }
+        }
+        ADD_FAILURE() << "Failed to map face mode under cyclic permutation";
+        return std::size_t(0);
+    };
+
+    for (int face = 0; face < 4; ++face) {
+        for (std::size_t mode = 0; mode < face_nodes.size(); ++mode) {
+            const std::size_t permuted_mode = map_mode_under_permutation(mode);
+            for (std::size_t func = 0; func < basis.size(); ++func) {
+                const double ref_moment =
+                    integrate_tetra_bdm_face_moment(basis, face, static_cast<int>(mode), static_cast<int>(func), order);
+                const double permuted_moment =
+                    integrate_tetra_bdm_face_moment_with_vertex_permutation(
+                        basis,
+                        face,
+                        cyclic_perm,
+                        static_cast<int>(permuted_mode),
+                        static_cast<int>(func),
+                        order);
+                EXPECT_NEAR(permuted_moment, ref_moment, 5e-10)
+                    << "face=" << face << ", mode=" << mode << ", func=" << func;
             }
         }
     }
@@ -856,6 +1161,233 @@ static double integrate_triangle_bdm_divergence(const BDMBasis& basis,
         std::vector<Real> divergence;
         basis.evaluate_divergence(quad.point(q), divergence);
         volume += static_cast<double>(quad.weight(q) * divergence[static_cast<std::size_t>(func_id)]);
+    }
+    return volume;
+}
+
+static double integrate_triangle_bdm_edge_moment_exact(const BDMBasis& basis,
+                                                       int edge_id,
+                                                       int mode_id,
+                                                       int func_id,
+                                                       int order,
+                                                       int quad_order) {
+    using svmp::FE::basis::LagrangeBasis;
+    using svmp::FE::elements::ReferenceElement;
+    using svmp::FE::math::Vector;
+    using svmp::FE::quadrature::QuadratureFactory;
+
+    const ReferenceElement ref = ReferenceElement::create(ElementType::Triangle3);
+    const auto& edge_nodes = ref.edge_nodes(static_cast<std::size_t>(edge_id));
+    const Vector<Real, 3> a = NodeOrdering::get_node_coords(ElementType::Triangle3, static_cast<std::size_t>(edge_nodes[0]));
+    const Vector<Real, 3> b = NodeOrdering::get_node_coords(ElementType::Triangle3, static_cast<std::size_t>(edge_nodes[1]));
+
+    const Vector<Real, 3> tvec = b - a;
+    const Real len = tvec.norm();
+    if (len <= Real(0)) {
+        return 0.0;
+    }
+    const Vector<Real, 3> t = tvec / len;
+    const Vector<Real, 3> nrm{t[1], -t[0], Real(0)};
+    const Real J = len * Real(0.5);
+
+    LagrangeBasis line(ElementType::Line2, order);
+    const auto quad = QuadratureFactory::create(
+        ElementType::Line2, std::max(2 * order + 2, quad_order), QuadratureType::GaussLegendre, /*use_cache=*/false);
+
+    double moment = 0.0;
+    for (std::size_t q = 0; q < quad->num_points(); ++q) {
+        const Real s = quad->point(q)[0];
+        const Real tpar = (s + Real(1)) * Real(0.5);
+        const Vector<Real, 3> xi = a * (Real(1) - tpar) + b * tpar;
+
+        std::vector<Real> line_values;
+        line.evaluate_values(Vector<Real, 3>{s, Real(0), Real(0)}, line_values);
+
+        std::vector<Vector<Real, 3>> values;
+        basis.evaluate_vector_values(xi, values);
+        moment += static_cast<double>(quad->weight(q) *
+                                      (J * line_values[static_cast<std::size_t>(mode_id)] *
+                                       values[static_cast<std::size_t>(func_id)].dot(nrm)));
+    }
+    return moment;
+}
+
+static double integrate_triangle_bdm_interior_moment(const BDMBasis& basis,
+                                                     int mode_id,
+                                                     int func_id,
+                                                     int order,
+                                                     int quad_order) {
+    using svmp::FE::math::Vector;
+    using svmp::FE::quadrature::QuadratureFactory;
+
+    if (order < 2) {
+        return 0.0;
+    }
+
+    NedelecBasis interior_basis(ElementType::Triangle3, order - 2);
+    const auto quad = QuadratureFactory::create(
+        ElementType::Triangle3, std::max(2 * order + 2, quad_order), QuadratureType::GaussLegendre, /*use_cache=*/false);
+
+    double moment = 0.0;
+    for (std::size_t q = 0; q < quad->num_points(); ++q) {
+        const Vector<Real, 3> xi = quad->point(q);
+        std::vector<Vector<Real, 3>> values;
+        std::vector<Vector<Real, 3>> test_values;
+        basis.evaluate_vector_values(xi, values);
+        interior_basis.evaluate_vector_values(xi, test_values);
+        moment += static_cast<double>(quad->weight(q) *
+                                      values[static_cast<std::size_t>(func_id)].dot(
+                                          test_values[static_cast<std::size_t>(mode_id)]));
+    }
+    return moment;
+}
+
+static double integrate_tetra_bdm_face_moment(const BDMBasis& basis,
+                                              int face_id,
+                                              int mode_id,
+                                              int func_id,
+                                              int order,
+                                              int quad_order) {
+    using svmp::FE::basis::LagrangeBasis;
+    using svmp::FE::elements::ReferenceElement;
+    using svmp::FE::math::Vector;
+    using svmp::FE::quadrature::QuadratureFactory;
+
+    const ReferenceElement ref = ReferenceElement::create(ElementType::Tetra4);
+    const auto& face_nodes = ref.face_nodes(static_cast<std::size_t>(face_id));
+    const Vector<Real, 3> a = NodeOrdering::get_node_coords(ElementType::Tetra4, static_cast<std::size_t>(face_nodes[0]));
+    const Vector<Real, 3> b = NodeOrdering::get_node_coords(ElementType::Tetra4, static_cast<std::size_t>(face_nodes[1]));
+    const Vector<Real, 3> c = NodeOrdering::get_node_coords(ElementType::Tetra4, static_cast<std::size_t>(face_nodes[2]));
+
+    const Vector<Real, 3> e01 = b - a;
+    const Vector<Real, 3> e02 = c - a;
+    const Vector<Real, 3> cross = e01.cross(e02);
+    const Real scale = cross.norm();
+    if (scale <= Real(0)) {
+        return 0.0;
+    }
+    const Vector<Real, 3> nrm = cross / scale;
+
+    LagrangeBasis face_basis(ElementType::Triangle3, order);
+    const auto quad = QuadratureFactory::create(
+        ElementType::Triangle3, std::max(2 * order + 2, quad_order), QuadratureType::GaussLegendre, /*use_cache=*/false);
+
+    double moment = 0.0;
+    for (std::size_t q = 0; q < quad->num_points(); ++q) {
+        const auto uv = quad->point(q);
+        const Real u = uv[0];
+        const Real v = uv[1];
+        const Vector<Real, 3> xi = a + e01 * u + e02 * v;
+
+        std::vector<Real> basis_values;
+        face_basis.evaluate_values(Vector<Real, 3>{u, v, Real(0)}, basis_values);
+
+        std::vector<Vector<Real, 3>> values;
+        basis.evaluate_vector_values(xi, values);
+        moment += static_cast<double>(quad->weight(q) *
+                                      (scale * basis_values[static_cast<std::size_t>(mode_id)] *
+                                       values[static_cast<std::size_t>(func_id)].dot(nrm)));
+    }
+    return moment;
+}
+
+static double integrate_tetra_bdm_face_moment_with_vertex_permutation(
+    const BDMBasis& basis,
+    int face_id,
+    const std::array<int, 3>& vertex_permutation,
+    int mode_id,
+    int func_id,
+    int order,
+    int quad_order) {
+    using svmp::FE::basis::LagrangeBasis;
+    using svmp::FE::elements::ReferenceElement;
+    using svmp::FE::math::Vector;
+    using svmp::FE::quadrature::QuadratureFactory;
+
+    const ReferenceElement ref = ReferenceElement::create(ElementType::Tetra4);
+    const auto& face_nodes = ref.face_nodes(static_cast<std::size_t>(face_id));
+    const Vector<Real, 3> a = NodeOrdering::get_node_coords(
+        ElementType::Tetra4, static_cast<std::size_t>(face_nodes[static_cast<std::size_t>(vertex_permutation[0])]));
+    const Vector<Real, 3> b = NodeOrdering::get_node_coords(
+        ElementType::Tetra4, static_cast<std::size_t>(face_nodes[static_cast<std::size_t>(vertex_permutation[1])]));
+    const Vector<Real, 3> c = NodeOrdering::get_node_coords(
+        ElementType::Tetra4, static_cast<std::size_t>(face_nodes[static_cast<std::size_t>(vertex_permutation[2])]));
+
+    const Vector<Real, 3> e01 = b - a;
+    const Vector<Real, 3> e02 = c - a;
+    const Vector<Real, 3> cross = e01.cross(e02);
+    const Real scale = cross.norm();
+    if (scale <= Real(0)) {
+        return 0.0;
+    }
+    const Vector<Real, 3> nrm = cross / scale;
+
+    LagrangeBasis face_basis(ElementType::Triangle3, order);
+    const auto quad = QuadratureFactory::create(
+        ElementType::Triangle3, std::max(2 * order + 2, quad_order), QuadratureType::GaussLegendre, /*use_cache=*/false);
+
+    double moment = 0.0;
+    for (std::size_t q = 0; q < quad->num_points(); ++q) {
+        const auto uv = quad->point(q);
+        const Real u = uv[0];
+        const Real v = uv[1];
+        const Vector<Real, 3> xi = a + e01 * u + e02 * v;
+
+        std::vector<Real> basis_values;
+        face_basis.evaluate_values(Vector<Real, 3>{u, v, Real(0)}, basis_values);
+
+        std::vector<Vector<Real, 3>> values;
+        basis.evaluate_vector_values(xi, values);
+        moment += static_cast<double>(quad->weight(q) *
+                                      (scale * basis_values[static_cast<std::size_t>(mode_id)] *
+                                       values[static_cast<std::size_t>(func_id)].dot(nrm)));
+    }
+    return moment;
+}
+
+static double integrate_tetra_bdm_interior_moment(const BDMBasis& basis,
+                                                  int mode_id,
+                                                  int func_id,
+                                                  int order,
+                                                  int quad_order) {
+    using svmp::FE::math::Vector;
+    using svmp::FE::quadrature::QuadratureFactory;
+
+    if (order < 2) {
+        return 0.0;
+    }
+
+    NedelecBasis interior_basis(ElementType::Tetra4, order - 2);
+    const auto quad = QuadratureFactory::create(
+        ElementType::Tetra4, std::max(2 * order + 2, quad_order), QuadratureType::GaussLegendre, /*use_cache=*/false);
+
+    double moment = 0.0;
+    for (std::size_t q = 0; q < quad->num_points(); ++q) {
+        const Vector<Real, 3> xi = quad->point(q);
+        std::vector<Vector<Real, 3>> values;
+        std::vector<Vector<Real, 3>> test_values;
+        basis.evaluate_vector_values(xi, values);
+        interior_basis.evaluate_vector_values(xi, test_values);
+        moment += static_cast<double>(quad->weight(q) *
+                                      values[static_cast<std::size_t>(func_id)].dot(
+                                          test_values[static_cast<std::size_t>(mode_id)]));
+    }
+    return moment;
+}
+
+static double integrate_tetra_bdm_divergence(const BDMBasis& basis,
+                                             int func_id,
+                                             int quad_order) {
+    using svmp::FE::quadrature::QuadratureFactory;
+
+    const auto quad = QuadratureFactory::create(
+        ElementType::Tetra4, quad_order, QuadratureType::GaussLegendre, /*use_cache=*/false);
+
+    double volume = 0.0;
+    for (std::size_t q = 0; q < quad->num_points(); ++q) {
+        std::vector<Real> divergence;
+        basis.evaluate_divergence(quad->point(q), divergence);
+        volume += static_cast<double>(quad->weight(q) * divergence[static_cast<std::size_t>(func_id)]);
     }
     return volume;
 }
@@ -1725,11 +2257,10 @@ TEST(BDMBasis, DofAssociationsTriangle) {
 }
 
 TEST(RaviartThomasBasis, DofAssociationsWedge) {
-    // Test RT(0) on wedge instead of RT(1) due to known singular matrix issue
-    RaviartThomasBasis basis(ElementType::Wedge6, 0);
+    RaviartThomasBasis basis(ElementType::Wedge6, 1);
     auto assoc = basis.dof_associations();
     EXPECT_EQ(assoc.size(), basis.size());
-    EXPECT_EQ(assoc.size(), 5u); // RT(0) on wedge has 5 face DOFs
+    EXPECT_EQ(assoc.size(), 24u);
 
     int face_dofs = 0;
     int interior_dofs = 0;
@@ -1737,16 +2268,63 @@ TEST(RaviartThomasBasis, DofAssociationsWedge) {
         if (a.entity_type == DofEntity::Face) face_dofs++;
         else if (a.entity_type == DofEntity::Interior) interior_dofs++;
     }
-    EXPECT_EQ(face_dofs, 5);
-    EXPECT_EQ(interior_dofs, 0);
+    EXPECT_EQ(face_dofs, 18);
+    EXPECT_EQ(interior_dofs, 6);
+}
+
+TEST(RaviartThomasBasis, DofAssociationsWedgeOrderTwo) {
+    RaviartThomasBasis basis(ElementType::Wedge6, 2);
+    auto assoc = basis.dof_associations();
+    EXPECT_EQ(assoc.size(), basis.size());
+    EXPECT_EQ(assoc.size(), 66u);
+
+    int face_dofs = 0;
+    int interior_dofs = 0;
+    for (const auto& a : assoc) {
+        if (a.entity_type == DofEntity::Face) face_dofs++;
+        else if (a.entity_type == DofEntity::Interior) interior_dofs++;
+    }
+    EXPECT_EQ(face_dofs, 39);
+    EXPECT_EQ(interior_dofs, 27);
+}
+
+TEST(RaviartThomasBasis, DofAssociationsPyramid) {
+    RaviartThomasBasis basis(ElementType::Pyramid5, 1);
+    auto assoc = basis.dof_associations();
+    EXPECT_EQ(assoc.size(), basis.size());
+    EXPECT_EQ(assoc.size(), 19u);
+
+    int face_dofs = 0;
+    int interior_dofs = 0;
+    for (const auto& a : assoc) {
+        if (a.entity_type == DofEntity::Face) face_dofs++;
+        else if (a.entity_type == DofEntity::Interior) interior_dofs++;
+    }
+    EXPECT_EQ(face_dofs, 16);
+    EXPECT_EQ(interior_dofs, 3);
+}
+
+TEST(RaviartThomasBasis, DofAssociationsPyramidOrderTwo) {
+    RaviartThomasBasis basis(ElementType::Pyramid5, 2);
+    auto assoc = basis.dof_associations();
+    EXPECT_EQ(assoc.size(), basis.size());
+    EXPECT_EQ(assoc.size(), 57u);
+
+    int face_dofs = 0;
+    int interior_dofs = 0;
+    for (const auto& a : assoc) {
+        if (a.entity_type == DofEntity::Face) face_dofs++;
+        else if (a.entity_type == DofEntity::Interior) interior_dofs++;
+    }
+    EXPECT_EQ(face_dofs, 33);
+    EXPECT_EQ(interior_dofs, 24);
 }
 
 TEST(NedelecBasis, DofAssociationsPyramid) {
-    // Test ND(0) on pyramid instead of ND(1) due to known singular matrix issue
-    NedelecBasis basis(ElementType::Pyramid5, 0);
+    NedelecBasis basis(ElementType::Pyramid5, 1);
     auto assoc = basis.dof_associations();
     EXPECT_EQ(assoc.size(), basis.size());
-    EXPECT_EQ(assoc.size(), 8u); // ND(0) on pyramid has 8 edge DOFs
+    EXPECT_EQ(assoc.size(), 28u);
 
     int edge_dofs = 0;
     int face_dofs = 0;
@@ -1756,7 +2334,26 @@ TEST(NedelecBasis, DofAssociationsPyramid) {
         else if (a.entity_type == DofEntity::Face) face_dofs++;
         else if (a.entity_type == DofEntity::Interior) interior_dofs++;
     }
-    EXPECT_EQ(edge_dofs, 8); // 8 edges * 1 DOF each
-    EXPECT_EQ(face_dofs, 0);
+    EXPECT_EQ(edge_dofs, 16);
+    EXPECT_EQ(face_dofs, 12);
     EXPECT_EQ(interior_dofs, 0);
+}
+
+TEST(NedelecBasis, DofAssociationsPyramidOrderTwo) {
+    NedelecBasis basis(ElementType::Pyramid5, 2);
+    auto assoc = basis.dof_associations();
+    EXPECT_EQ(assoc.size(), basis.size());
+    EXPECT_EQ(assoc.size(), 63u);
+
+    int edge_dofs = 0;
+    int face_dofs = 0;
+    int interior_dofs = 0;
+    for (const auto& a : assoc) {
+        if (a.entity_type == DofEntity::Edge) edge_dofs++;
+        else if (a.entity_type == DofEntity::Face) face_dofs++;
+        else if (a.entity_type == DofEntity::Interior) interior_dofs++;
+    }
+    EXPECT_EQ(edge_dofs, 24);
+    EXPECT_EQ(face_dofs, 36);
+    EXPECT_EQ(interior_dofs, 3);
 }

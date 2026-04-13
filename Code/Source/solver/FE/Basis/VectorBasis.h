@@ -110,7 +110,9 @@ private:
 
     bool nodal_generated_{false};
     bool use_direct_construction_{false};  ///< True for wedge/pyramid RT(k>=2) direct formulas
-    bool use_transformed_direct_rt1_{false};  ///< True for wedge/pyramid RT(1) transformed from direct seed functions
+    bool use_transformed_direct_seed_{false};  ///< True for wedge/pyramid RT(k=1,2) transformed from direct seed functions
+    std::vector<int> transformed_seed_indices_;
+    std::vector<std::array<int, 4>> transformed_monomial_candidates_; ///< {component, px, py, pz}
     std::vector<ModalPolynomial> monomials_;
     // Coefficients for nodal basis in modal monomial basis:
     //   phi_j = sum_p coeffs_[p * size_ + j] * modal_p
@@ -159,7 +161,9 @@ private:
     std::size_t size_{0};
 
     bool nodal_generated_{false};
+    bool use_transformed_direct_seed_{false};  ///< True for wedge/pyramid ND(k=1,2) transformed from direct seed/candidate functions
     bool use_direct_construction_{false};  ///< True for wedge/pyramid k>=1 (uses explicit formulas)
+    std::vector<std::array<int, 4>> transformed_monomial_candidates_; ///< {component, px, py, pz}
     std::vector<ModalPolynomial> monomials_;
     std::vector<Real> coeffs_;
 };
@@ -186,10 +190,26 @@ public:
     std::vector<DofAssociation> dof_associations() const override;
 
 private:
+    struct ModalTerm {
+        int component{0}; // 0=x, 1=y, 2=z
+        int px{0};
+        int py{0};
+        int pz{0};
+        Real coefficient{Real(1)};
+    };
+
+    struct ModalPolynomial {
+        std::array<ModalTerm, 4> terms{};
+        int num_terms{0};
+    };
+
     ElementType element_type_;
     int dimension_;
     int order_;
     std::size_t size_{0};
+    bool nodal_generated_{false};
+    std::vector<ModalPolynomial> monomials_;
+    std::vector<Real> coeffs_;
 };
 
 } // namespace basis
