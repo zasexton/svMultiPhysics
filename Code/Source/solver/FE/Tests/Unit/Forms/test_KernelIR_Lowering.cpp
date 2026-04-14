@@ -58,6 +58,28 @@ TEST(KernelIRLowering, LoweringContainsExpectedOps)
     EXPECT_TRUE(saw_mul);
 }
 
+TEST(KernelIRLowering, AuxiliaryInputRefPreservesSlotIndex)
+{
+    const std::uint32_t slot = 7;
+    const auto r = jit::lowerToKernelIR(FormExpr::auxiliaryInputRef(slot));
+    ASSERT_FALSE(r.ir.ops.empty());
+
+    const auto& op = r.ir.ops.at(static_cast<std::size_t>(r.ir.root));
+    EXPECT_EQ(op.type, FormExprType::AuxiliaryInputRef);
+    EXPECT_EQ(op.imm0, static_cast<std::uint64_t>(slot));
+}
+
+TEST(KernelIRLowering, AuxiliaryOutputRefPreservesSlotIndex)
+{
+    const std::uint32_t slot = 11;
+    const auto r = jit::lowerToKernelIR(FormExpr::auxiliaryOutputRef(slot));
+    ASSERT_FALSE(r.ir.ops.empty());
+
+    const auto& op = r.ir.ops.at(static_cast<std::size_t>(r.ir.root));
+    EXPECT_EQ(op.type, FormExprType::AuxiliaryOutputRef);
+    EXPECT_EQ(op.imm0, static_cast<std::uint64_t>(slot));
+}
+
 TEST(KernelIRLowering, CSEDeduplicatesCommonSubexpressions)
 {
     const auto a = FormExpr::parameterRef(0);

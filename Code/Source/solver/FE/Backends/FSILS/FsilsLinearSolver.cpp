@@ -120,6 +120,18 @@ enum class FsilsResidualValidationSyncMode : std::uint8_t {
     return *env != '\0' && *env != '0';
 }
 
+[[nodiscard]] bool fsilsEnableMpiNativeFaceRankOne() noexcept
+{
+    if (const char* env = std::getenv("SVMP_FSILS_ENABLE_MPI_NATIVE_FACE_RANK_ONE")) {
+        std::string value = env;
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        return value == "1" || value == "true" || value == "on" || value == "yes";
+    }
+    return false;
+}
+
 void addRankOneUpdatesToProduct(std::span<const RankOneUpdate> updates,
                                 FsilsVector& x,
                                 FsilsVector& y,
@@ -947,7 +959,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         ((!rank_one_updates_.empty() && !reduced_field_updates_.empty()) ||
          (rank_one_updates_.size() > 1));
     const bool allow_mpi_native_face_rank_one =
-        (lhs.commu.nTasks <= 1) || !use_blockschur;
+        (lhs.commu.nTasks <= 1) || !use_blockschur ||
+        (pure_native_face_rank_one_case && fsilsEnableMpiNativeFaceRankOne());
     if (!allow_mpi_native_face_rank_one && oopTraceEnabled()) {
         traceLog("FsilsLinearSolver::solve: routing MPI BlockSchur native-face rank-1 updates "
                  "through reduced/grouped update support.");

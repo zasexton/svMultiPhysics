@@ -229,7 +229,9 @@ struct ImmPayload {
 
         case FormExprType::ParameterRef:
         case FormExprType::BoundaryIntegralRef:
-        case FormExprType::AuxiliaryStateRef: {
+        case FormExprType::AuxiliaryStateRef:
+        case FormExprType::AuxiliaryInputRef:
+        case FormExprType::AuxiliaryOutputRef: {
             const auto slot = node.slotIndex();
             if (!slot) {
                 throw std::invalid_argument("KernelIR: slot-ref node missing slot index");

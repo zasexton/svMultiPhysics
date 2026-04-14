@@ -204,6 +204,18 @@ void traceLog(const std::string& msg)
     return 1;
 }
 
+[[nodiscard]] bool directOnlyReducedRankOnePromotionEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_DISABLE_DIRECT_ONLY_REDUCED_RANK1_PROMOTION");
+    if (env == nullptr) {
+        return true;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    return *env == '\0' || *env == '0';
+}
+
 [[nodiscard]] Real lateDirectOnlyReducedInnerRelTol() noexcept
 {
     const char* env = std::getenv("SVMP_FSILS_TIGHTEN_DIRECT_ONLY_INNER_REL_TOL");
@@ -245,6 +257,94 @@ template <typename T>
 #else
     return value;
 #endif
+}
+
+[[nodiscard]] bool tryPromoteReducedFieldUpdateToNativeRankOne(
+    const backends::ReducedFieldUpdate& update,
+    backends::RankOneUpdate& promoted)
+{
+    if (!directOnlyReducedRankOnePromotionEnabled() || update.grouped_coupling_id >= 0) {
+        return false;
+    }
+
+    constexpr Real kTol = static_cast<Real>(1e-14);
+    constexpr Real kRelTolSq = static_cast<Real>(1e-4);
+    if (!(std::abs(update.sigma) > kTol)) {
+        return false;
+    }
+
+    std::unordered_map<GlobalIndex, Real> q_map;
+    q_map.reserve(update.right.size());
+    Real q_norm_sq = Real(0.0);
+    for (const auto& [dof, value] : update.right) {
+        if (!(std::abs(value) > kTol)) {
+            continue;
+        }
+        q_map[dof] += value;
+    }
+    for (const auto& [dof, value] : q_map) {
+        (void)dof;
+        q_norm_sq += value * value;
+    }
+
+    Real cross = Real(0.0);
+    Real u_norm_sq = Real(0.0);
+    Real local_residual_sq = Real(0.0);
+    std::unordered_map<GlobalIndex, Real> u_map;
+    u_map.reserve(update.left.size());
+    for (const auto& [dof, value] : update.left) {
+        if (!(std::abs(value) > kTol)) {
+            continue;
+        }
+        u_map[dof] += value;
+    }
+    for (const auto& [dof, value] : u_map) {
+        (void)dof;
+        u_norm_sq += value * value;
+        const auto it = q_map.find(dof);
+        if (it != q_map.end()) {
+            cross += value * it->second;
+        }
+    }
+
+    const int global_q_has = mpiAllreduceSumIfActive(q_map.empty() ? 0 : 1);
+    const int global_u_has = mpiAllreduceSumIfActive(u_map.empty() ? 0 : 1);
+    const Real global_q_norm_sq = mpiAllreduceSumIfActive(q_norm_sq);
+    const Real global_u_norm_sq = mpiAllreduceSumIfActive(u_norm_sq);
+    const Real global_cross = mpiAllreduceSumIfActive(cross);
+    if (global_q_has == 0 || global_u_has == 0 ||
+        !(global_q_norm_sq > kTol * kTol) ||
+        !(global_u_norm_sq > kTol * kTol)) {
+        return false;
+    }
+
+    const Real proportionality = global_cross / global_q_norm_sq;
+    if (!(std::abs(proportionality) > kTol)) {
+        return false;
+    }
+
+    for (const auto& [dof, q_val] : q_map) {
+        const auto it = u_map.find(dof);
+        const Real u_val = (it != u_map.end()) ? it->second : Real(0.0);
+        const Real diff = u_val - proportionality * q_val;
+        local_residual_sq += diff * diff;
+    }
+    for (const auto& [dof, u_val] : u_map) {
+        if (q_map.find(dof) == q_map.end()) {
+            local_residual_sq += u_val * u_val;
+        }
+    }
+
+    const Real residual_sq = mpiAllreduceSumIfActive(local_residual_sq);
+    if (!(residual_sq / std::max(global_u_norm_sq, Real(1e-30)) <= kRelTolSq)) {
+        return false;
+    }
+
+    promoted = {};
+    promoted.sigma = update.sigma * proportionality;
+    promoted.prefer_native_face = true;
+    promoted.v = update.right;
+    return true;
 }
 
 [[nodiscard]] std::vector<Real> gatherGlobalDenseVectorFromOwnedEntries(
@@ -4244,6 +4344,28 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         << " factor=" << sigma_scale
                         << " rank_one=" << effective_rank_one_updates.size()
                         << " reduced=" << active_reduced_field_updates.size();
+                    traceLog(oss.str());
+                }
+            }
+            std::vector<backends::ReducedFieldUpdate> promoted_remaining_reduced_updates;
+            promoted_remaining_reduced_updates.reserve(active_reduced_field_updates.size());
+            std::size_t promoted_count = 0;
+            for (const auto& update : active_reduced_field_updates) {
+                backends::RankOneUpdate promoted_rank_one;
+                if (tryPromoteReducedFieldUpdateToNativeRankOne(update, promoted_rank_one)) {
+                    effective_rank_one_updates.push_back(std::move(promoted_rank_one));
+                    ++promoted_count;
+                } else {
+                    promoted_remaining_reduced_updates.push_back(update);
+                }
+            }
+            if (promoted_count > 0) {
+                active_reduced_field_updates = std::move(promoted_remaining_reduced_updates);
+                if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: promoted direct-only reduced updates to native rank-1"
+                        << " count=" << promoted_count
+                        << " remaining_reduced=" << active_reduced_field_updates.size();
                     traceLog(oss.str());
                 }
             }
