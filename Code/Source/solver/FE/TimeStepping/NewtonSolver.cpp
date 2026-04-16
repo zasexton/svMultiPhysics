@@ -4672,7 +4672,15 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 }
             }
 
+            const bool has_direct_coupling_records =
+                !solve_bordered.direct_coupling_records.empty();
+
             if (na > 0 && static_cast<int>(na) <= max_condensed_aux &&
+                // Direct-coupled bordered rows are assembled through auxiliary
+                // input/output sensitivities rather than explicit dense Ct rows.
+                // The explicit bordered recovery path is numerically safer here
+                // than the condensed surrogate.
+                !has_direct_coupling_records &&
                 solve_bordered.D.size() == na * na &&
                 solve_bordered.B.size() == nf * na &&
                 solve_bordered.Ct.size() == na * nf &&
@@ -5006,7 +5014,6 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 const Real residual_fraction,
                 const Real max_relative_residual) -> bool {
                 const bool strict_coupled_validation_active =
-                    mpiMultiTaskActive() &&
                     (needs_strict_coupled_solve_options ||
                      needs_validated_native_rank_one_options);
                 if (!strict_coupled_validation_active ||
@@ -5059,12 +5066,14 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         }
                     }
                 }
-                if (mpiMultiTaskActive() &&
-                    (has_native_direct_face_only_updates || has_native_direct_only_reduced_updates)) {
-                    // The distributed direct-only outlet path is too loose at the
-                    // XML 1e-3 defaults on the multi-step iliac harness. Clamp the
-                    // requested outer linear tolerance to the empirically stable
-                    // 1e-5 regime without touching grouped/bordered MPI cases.
+                const std::size_t direct_only_update_count =
+                    effective_rank_one_updates.size() + active_reduced_field_updates.size();
+                if ((has_native_direct_face_only_updates || has_native_direct_only_reduced_updates) &&
+                    direct_only_update_count > 1u) {
+                    // Only the multi-mode direct-only outlet path needs the moderate
+                    // 1e-5 outer floor. Keep it rank-agnostic so serial and MPI use
+                    // the same target, but avoid retuning single-mode cases such as
+                    // pipe_RCR_3d that are already stable at the looser XML setting.
                     direct_only_outer_rel_floor = static_cast<Real>(1e-5);
                 }
                 linear.setOptions(makeValidatedNativeRankOneSolveOptions(
@@ -5684,7 +5693,6 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                 }
                             } else if (!z_converged &&
                                        has_native_rank_one_updates &&
-                                       mpiMultiTaskActive() &&
                                        reportMeetsRequestedLinearTargetWithinFactor(
                                            z_report, base_linear_options, static_cast<Real>(4.0))) {
                                 z_converged = true;
