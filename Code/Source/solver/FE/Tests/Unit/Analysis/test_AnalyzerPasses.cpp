@@ -211,6 +211,22 @@ TEST(MixedOperatorAnalyzer, SingleField_NoSaddlePoint) {
     EXPECT_EQ(report.countByKind(PropertyKind::MixedSaddlePoint), 0u);
 }
 
+TEST(MixedOperatorAnalyzer, StokesFallbackEmitsStructuredPressureNullspace) {
+    MixedOperatorAnalyzer pass;
+    ProblemAnalysisContext ctx;
+    ctx.addFormulationRecord(makeStokesRecord());
+
+    ProblemAnalysisReport report;
+    pass.run(ctx, report);
+
+    auto nullspace = report.claimsOfKind(PropertyKind::Nullspace);
+    ASSERT_EQ(nullspace.size(), 1u);
+    EXPECT_EQ(nullspace[0]->field, FieldId{0});
+    ASSERT_TRUE(nullspace[0]->nullspace_family.has_value());
+    EXPECT_EQ(*nullspace[0]->nullspace_family, NullspaceFamily::ScalarConstant);
+    EXPECT_EQ(nullspace[0]->claim_origin, "MixedOperatorAnalyzer");
+}
+
 // ============================================================================
 // OperatorClassAnalyzer
 // ============================================================================

@@ -406,6 +406,9 @@ class FSILS_lhsType
     /// Mapping of nodes                    (USE)
     Vector<int> map;
 
+    /// Global node id for each old/local node index (old ordering).
+    Vector<int> gNodes;
+
     FSILS_commuType commu;
 
     std::vector<FSILS_cSType> cS;
@@ -414,6 +417,8 @@ class FSILS_lhsType
     int native_face_rank_one_count = 0;
     std::vector<FSILS_reducedFieldUpdateType> reduced_updates;
     std::vector<FSILS_groupedBorderedFieldCouplingType> grouped_bordered_field_couplings;
+    std::vector<int> native_face_pc_active_indices;
+    std::vector<double> native_face_pc_dense_coeff;
     std::vector<int> reduced_update_pc_active_indices;
     std::vector<double> reduced_update_pc_inner_inv;
     bool use_exact_grouped_bordered_pre_in_add_bc_mul = false;

@@ -58,6 +58,13 @@ BlockSchurStrategySelection BlockSchurStrategySelector::select(
        low_rank_profile.active_face_corrections > 0) ||
       low_rank_profile.active_nonduplicate_reduced_corrections > 1;
 
+  if (env_enabled("SVMP_FSILS_BLOCKSCHUR_FORCE_SCHUR_GMRES")) {
+    selection.prefer_schur_gmres = true;
+  }
+  if (env_enabled("SVMP_FSILS_BLOCKSCHUR_FORCE_SCHUR_BICGSTAB")) {
+    selection.prefer_schur_gmres = false;
+  }
+
   const bool disable_auto_coupled_outer_fgmres =
       env_enabled("SVMP_FSILS_DISABLE_COUPLED_OUTER_FGMRES");
   selection.auto_enable_coupled_outer_fgmres_scalar =

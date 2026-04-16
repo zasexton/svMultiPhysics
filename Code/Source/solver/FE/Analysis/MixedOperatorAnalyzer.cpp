@@ -335,6 +335,7 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                 claim.confidence = AnalysisConfidence::High;
                 claim.domain = DomainKind::Cell;
                 claim.variables.push_back(VariableKey::field(cfid));
+                claim.claim_origin = "MixedOperatorAnalyzer";
 
                 claim.description =
                     "Formulation '" + rec.operator_tag +
@@ -363,6 +364,9 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                         "Constraint field " + std::to_string(cfid) +
                         " in saddle-point system has constant nullspace"
                         " (pressure gauge)";
+                    ns_claim.nullspace_family =
+                        NullspaceFamily::ScalarConstant;
+                    ns_claim.claim_origin = "MixedOperatorAnalyzer";
                     ns_claim.addEvidence("MixedOperatorAnalyzer",
                         "Field has no diagonal elliptic block — constant"
                         " shift is in the operator nullspace");

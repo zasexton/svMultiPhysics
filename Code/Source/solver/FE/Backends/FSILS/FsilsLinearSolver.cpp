@@ -25,6 +25,7 @@
 #include <exception>
 #include <cstdlib>
 #include <cmath>
+#include <fstream>
 #include <limits>
 #include <numeric>
 #include <map>
@@ -80,6 +81,14 @@ struct FsilsConstraintMeanStats {
     Real fluctuation_rms{0.0};
 };
 
+struct FsilsLocalConstraintMeanStats {
+    bool valid{false};
+    std::uint64_t count{0};
+    Real mean{0.0};
+    Real rms{0.0};
+    Real fluctuation_rms{0.0};
+};
+
 enum class FsilsResidualValidationSyncMode : std::uint8_t {
     UpdateGhosts,
     AccumulateOverlap,
@@ -120,6 +129,110 @@ enum class FsilsResidualValidationSyncMode : std::uint8_t {
     return *env != '\0' && *env != '0';
 }
 
+[[nodiscard]] const char* fsilsCompareFaceOperatorOracleFile() noexcept
+{
+    const char* path = std::getenv("SVMP_FSILS_COMPARE_FACE_OPERATOR_ORACLE_FILE");
+    if (path == nullptr || *path == '\0') {
+        return nullptr;
+    }
+    return path;
+}
+
+[[nodiscard]] const char* fsilsCompareFaceOperatorDumpPrefix() noexcept
+{
+    const char* path = std::getenv("SVMP_FSILS_COMPARE_FACE_OPERATOR_DUMP_PREFIX");
+    if (path == nullptr || *path == '\0') {
+        return nullptr;
+    }
+    return path;
+}
+
+[[nodiscard]] const char* fsilsCompareFaceOperatorDumpProbe() noexcept
+{
+    const char* label = std::getenv("SVMP_FSILS_COMPARE_FACE_OPERATOR_DUMP_PROBE");
+    if (label == nullptr || *label == '\0') {
+        return nullptr;
+    }
+    return label;
+}
+
+[[nodiscard]] int fsilsDumpPreparedRowGlobalNode() noexcept
+{
+    const char* env = std::getenv("SVMP_FSILS_DUMP_PREPARED_ROW_GLOBAL_NODE");
+    if (env == nullptr || *env == '\0') {
+        return -1;
+    }
+    try {
+        return std::stoi(env);
+    } catch (...) {
+        return -1;
+    }
+}
+
+[[nodiscard]] int fsilsDumpPreparedRowComponent() noexcept
+{
+    const char* env = std::getenv("SVMP_FSILS_DUMP_PREPARED_ROW_COMPONENT");
+    if (env == nullptr || *env == '\0') {
+        return -1;
+    }
+    try {
+        return std::stoi(env);
+    } catch (...) {
+        return -1;
+    }
+}
+
+[[nodiscard]] int fsilsDumpPreparedColComponent() noexcept
+{
+    const char* env = std::getenv("SVMP_FSILS_DUMP_PREPARED_COL_COMPONENT");
+    if (env == nullptr || *env == '\0') {
+        return -1;
+    }
+    try {
+        return std::stoi(env);
+    } catch (...) {
+        return -1;
+    }
+}
+
+[[nodiscard]] const char* fsilsDumpPreparedRowPrefix() noexcept
+{
+    const char* path = std::getenv("SVMP_FSILS_DUMP_PREPARED_ROW_PREFIX");
+    if (path == nullptr || *path == '\0') {
+        return nullptr;
+    }
+    return path;
+}
+
+[[nodiscard]] bool fsilsProbeLowRankModesEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_FSILS_PROBE_LOW_RANK_MODES");
+    if (env == nullptr) {
+        return false;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    return *env != '\0' && *env != '0';
+}
+
+[[nodiscard]] bool fsilsLowRankResidualPolishEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_FSILS_DISABLE_LOW_RANK_RESIDUAL_POLISH");
+    if (env == nullptr) {
+        return true;
+    }
+
+    std::string value(env);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isspace(ch) != 0;
+    }), value.end());
+    return !(value == "1" || value == "true" || value == "on" || value == "yes");
+}
+
 [[nodiscard]] bool fsilsEnableMpiNativeFaceRankOne() noexcept
 {
     if (const char* env = std::getenv("SVMP_FSILS_ENABLE_MPI_NATIVE_FACE_RANK_ONE")) {
@@ -142,9 +255,7 @@ void addRankOneUpdatesToProduct(std::span<const RankOneUpdate> updates,
     }
 
     auto x_view = x.createAssemblyView();
-    auto y_view = y.createAssemblyView();
     FE_CHECK_NOT_NULL(x_view.get(), "FsilsLinearSolver: rank-one x view");
-    FE_CHECK_NOT_NULL(y_view.get(), "FsilsLinearSolver: rank-one y view");
 
     std::vector<Real> dots(updates.size(), Real(0.0));
     for (std::size_t u = 0; u < updates.size(); ++u) {
@@ -171,17 +282,30 @@ void addRankOneUpdatesToProduct(std::span<const RankOneUpdate> updates,
     (void)commu;
 #endif
 
-    y_view->beginAssemblyPhase();
+    FsilsVector correction(y);
+    correction.zero();
+    auto correction_view = correction.createAssemblyView();
+    FE_CHECK_NOT_NULL(correction_view.get(), "FsilsLinearSolver: rank-one correction view");
+    correction_view->beginAssemblyPhase();
     for (std::size_t u = 0; u < updates.size(); ++u) {
         const Real scale = updates[u].sigma * dots[u];
         if (std::abs(scale) <= Real(1e-30)) {
             continue;
         }
         for (const auto& [dof, val] : updates[u].v) {
-            y_view->addVectorEntry(dof, scale * val, assembly::AddMode::Add);
+            correction_view->addVectorEntry(dof, scale * val, assembly::AddMode::Add);
         }
     }
-    y_view->finalizeAssembly();
+    correction_view->finalizeAssembly();
+    correction.accumulateOverlap();
+
+    auto y_span = y.localSpan();
+    const auto correction_span = correction.localSpan();
+    FE_THROW_IF(y_span.size() != correction_span.size(), FEException,
+                "FsilsLinearSolver: rank-one correction size mismatch");
+    for (std::size_t i = 0; i < y_span.size(); ++i) {
+        y_span[i] += correction_span[i];
+    }
 }
 
 void addReducedFieldUpdatesToProduct(std::span<const ReducedFieldUpdate> updates,
@@ -194,9 +318,7 @@ void addReducedFieldUpdatesToProduct(std::span<const ReducedFieldUpdate> updates
     }
 
     auto x_view = x.createAssemblyView();
-    auto y_view = y.createAssemblyView();
     FE_CHECK_NOT_NULL(x_view.get(), "FsilsLinearSolver: reduced-update x view");
-    FE_CHECK_NOT_NULL(y_view.get(), "FsilsLinearSolver: reduced-update y view");
 
     std::vector<Real> dots(updates.size(), Real(0.0));
     for (std::size_t u = 0; u < updates.size(); ++u) {
@@ -223,17 +345,116 @@ void addReducedFieldUpdatesToProduct(std::span<const ReducedFieldUpdate> updates
     (void)commu;
 #endif
 
-    y_view->beginAssemblyPhase();
+    FsilsVector correction(y);
+    correction.zero();
+    auto correction_view = correction.createAssemblyView();
+    FE_CHECK_NOT_NULL(correction_view.get(), "FsilsLinearSolver: reduced-update correction view");
+    correction_view->beginAssemblyPhase();
     for (std::size_t u = 0; u < updates.size(); ++u) {
         const Real scale = updates[u].sigma * dots[u];
         if (std::abs(scale) <= Real(1e-30)) {
             continue;
         }
         for (const auto& [dof, val] : updates[u].left) {
-            y_view->addVectorEntry(dof, scale * val, assembly::AddMode::Add);
+            correction_view->addVectorEntry(dof, scale * val, assembly::AddMode::Add);
         }
     }
-    y_view->finalizeAssembly();
+    correction_view->finalizeAssembly();
+    correction.accumulateOverlap();
+
+    auto y_span = y.localSpan();
+    const auto correction_span = correction.localSpan();
+    FE_THROW_IF(y_span.size() != correction_span.size(), FEException,
+                "FsilsLinearSolver: reduced-update correction size mismatch");
+    for (std::size_t i = 0; i < y_span.size(); ++i) {
+        y_span[i] += correction_span[i];
+    }
+}
+
+[[nodiscard]] bool solveDenseSystemInPlace(std::vector<Real>& a,
+                                           std::vector<Real>& b,
+                                           int n) noexcept
+{
+    if (n <= 0 ||
+        a.size() != static_cast<std::size_t>(n * n) ||
+        b.size() != static_cast<std::size_t>(n)) {
+        return false;
+    }
+
+    Real max_diag = Real(0.0);
+    for (int i = 0; i < n; ++i) {
+        max_diag = std::max(max_diag, std::abs(a[static_cast<std::size_t>(i) * static_cast<std::size_t>(n) +
+                                                 static_cast<std::size_t>(i)]));
+    }
+    const Real pivot_floor = std::max<Real>(max_diag * static_cast<Real>(1e-14),
+                                            static_cast<Real>(1e-30));
+
+    for (int k = 0; k < n; ++k) {
+        int pivot_row = k;
+        Real pivot_abs = std::abs(a[static_cast<std::size_t>(k) * static_cast<std::size_t>(n) +
+                                   static_cast<std::size_t>(k)]);
+        for (int row = k + 1; row < n; ++row) {
+            const Real candidate_abs =
+                std::abs(a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+                           static_cast<std::size_t>(k)]);
+            if (candidate_abs > pivot_abs) {
+                pivot_abs = candidate_abs;
+                pivot_row = row;
+            }
+        }
+
+        if (!(pivot_abs > pivot_floor)) {
+            return false;
+        }
+
+        if (pivot_row != k) {
+            for (int col = k; col < n; ++col) {
+                std::swap(a[static_cast<std::size_t>(k) * static_cast<std::size_t>(n) +
+                            static_cast<std::size_t>(col)],
+                          a[static_cast<std::size_t>(pivot_row) * static_cast<std::size_t>(n) +
+                            static_cast<std::size_t>(col)]);
+            }
+            std::swap(b[static_cast<std::size_t>(k)], b[static_cast<std::size_t>(pivot_row)]);
+        }
+
+        const Real pivot = a[static_cast<std::size_t>(k) * static_cast<std::size_t>(n) +
+                             static_cast<std::size_t>(k)];
+        for (int row = k + 1; row < n; ++row) {
+            const std::size_t rowk =
+                static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+                static_cast<std::size_t>(k);
+            const Real factor = a[rowk] / pivot;
+            if (std::abs(factor) <= Real(1e-30)) {
+                continue;
+            }
+            a[rowk] = Real(0.0);
+            for (int col = k + 1; col < n; ++col) {
+                a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+                  static_cast<std::size_t>(col)] -=
+                    factor *
+                    a[static_cast<std::size_t>(k) * static_cast<std::size_t>(n) +
+                      static_cast<std::size_t>(col)];
+            }
+            b[static_cast<std::size_t>(row)] -= factor * b[static_cast<std::size_t>(k)];
+        }
+    }
+
+    for (int row = n - 1; row >= 0; --row) {
+        Real sum = b[static_cast<std::size_t>(row)];
+        for (int col = row + 1; col < n; ++col) {
+            sum -= a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+                     static_cast<std::size_t>(col)] *
+                   b[static_cast<std::size_t>(col)];
+        }
+        const Real diag = a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+                            static_cast<std::size_t>(row)];
+        if (!(std::abs(diag) > pivot_floor)) {
+            return false;
+        }
+        b[static_cast<std::size_t>(row)] = sum / diag;
+    }
+
+    return true;
 }
 
 void copyVectorOldToInternal(const FsilsVector& src, std::span<Real> dst_internal)
@@ -571,91 +792,6 @@ struct GmresLaunchConfig {
     return cfg;
 }
 
-[[nodiscard]] int gmres_recovery_restart_dim(const GmresLaunchConfig& base_cfg,
-                                             int requested_total_iterations)
-{
-    int recovery_sD = 0;
-    if (const char* env = std::getenv("SVMP_FSILS_GMRES_RECOVERY_SD")) {
-        try {
-            recovery_sD = std::stoi(env);
-        } catch (...) {
-            recovery_sD = 0;
-        }
-    }
-    if (recovery_sD <= 0) {
-        recovery_sD = std::max(base_cfg.sD, 250);
-    }
-    const int sD_max = std::max(0, requested_total_iterations - 1);
-    return std::clamp(recovery_sD, 0, sD_max);
-}
-
-[[nodiscard]] bool gmres_should_promote_restart(const SolverOptions& options,
-                                                const FsilsResidualCheckResult& check,
-                                                const GmresLaunchConfig& base_cfg,
-                                                int actual_iterations)
-{
-    if (check.ok) {
-        return false;
-    }
-
-    const Real rhs_norm = std::max<Real>(check.rhs_norm, Real(1e-30));
-    const Real target = std::max<Real>(options.abs_tol, options.rel_tol * rhs_norm);
-    if (!(target > Real(0.0)) || !std::isfinite(static_cast<double>(check.residual_norm))) {
-        return true;
-    }
-
-    const Real miss_ratio = check.residual_norm / target;
-    const int expected_iterations = gmres_expected_total_iterations(base_cfg);
-    const int near_exhaustion = std::max(1, expected_iterations - std::max(1, base_cfg.sD + 1));
-    const bool exhausted_budget = actual_iterations >= near_exhaustion;
-    const bool severe_miss = miss_ratio > Real(25.0);
-    return severe_miss && (exhausted_budget || miss_ratio > Real(100.0));
-}
-
-[[nodiscard]] bool gmres_retry_severe_stalls() noexcept
-{
-    if (const char* env = std::getenv("SVMP_FSILS_GMRES_RETRY_SEVERE_STALLS")) {
-        const std::string value = env;
-        if (value == "1" || value == "true" || value == "TRUE" ||
-            value == "on" || value == "ON" || value == "yes" || value == "YES") {
-            return true;
-        }
-    }
-    return false;
-}
-
-[[nodiscard]] Real fsilsStrictValidationNearTargetFactor() noexcept
-{
-    Real factor = static_cast<Real>(4.0);
-    if (const char* env = std::getenv("SVMP_FSILS_STRICT_VALIDATION_NEAR_TARGET_FACTOR")) {
-        try {
-            factor = static_cast<Real>(std::stod(env));
-        } catch (...) {
-            factor = static_cast<Real>(4.0);
-        }
-    }
-    if (!std::isfinite(static_cast<double>(factor)) || factor < static_cast<Real>(1.0)) {
-        factor = static_cast<Real>(4.0);
-    }
-    return factor;
-}
-
-[[nodiscard]] Real fsilsNativeDirectTrueResidualRelativeLimit() noexcept
-{
-    Real limit = static_cast<Real>(5e-3);
-    if (const char* env = std::getenv("SVMP_FSILS_NATIVE_DIRECT_TRUE_RES_REL_LIMIT")) {
-        try {
-            limit = static_cast<Real>(std::stod(env));
-        } catch (...) {
-            limit = static_cast<Real>(5e-3);
-        }
-    }
-    if (!std::isfinite(static_cast<double>(limit)) || limit <= static_cast<Real>(0.0)) {
-        limit = static_cast<Real>(5e-3);
-    }
-    return limit;
-}
-
 [[nodiscard]] Real fsilsBlockSchurConstraintMeanDominanceLimit() noexcept
 {
     Real limit = static_cast<Real>(1.0);
@@ -765,6 +901,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         std::ostringstream oss;
         oss << "FsilsLinearSolver::solve: n=" << A->numRows()
             << " dof=" << dof << " nNo=" << lhs.nNo
+            << " dropped_entries=" << FsilsMatrix::droppedEntryCount()
             << " method=" << solverMethodToString(options_.method)
             << " prec=" << preconditionerToString(options_.preconditioner)
             << " rel_tol=" << options_.rel_tol
@@ -944,9 +1081,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         }
     };
 
-    const bool pure_native_face_rank_one_case =
+    const bool pure_mpi_native_face_rank_one_case =
         (lhs.commu.nTasks > 1) &&
-        use_blockschur &&
         !rank_one_updates_.empty() &&
         reduced_field_updates_.empty() &&
         grouped_bordered_field_couplings_.empty() &&
@@ -959,15 +1095,33 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         ((!rank_one_updates_.empty() && !reduced_field_updates_.empty()) ||
          (rank_one_updates_.size() > 1));
     const bool allow_mpi_native_face_rank_one =
-        (lhs.commu.nTasks <= 1) || !use_blockschur ||
-        (pure_native_face_rank_one_case && fsilsEnableMpiNativeFaceRankOne());
+        (lhs.commu.nTasks <= 1) ||
+        pure_mpi_native_face_rank_one_case ||
+        ((lhs.commu.nTasks > 1) &&
+         !rank_one_updates_.empty() &&
+         fsilsEnableMpiNativeFaceRankOne());
+    if (lhs.commu.nTasks > 1 && !rank_one_updates_.empty() && oopTraceEnabled()) {
+        const int prefer_count = static_cast<int>(std::count_if(
+            rank_one_updates_.begin(), rank_one_updates_.end(),
+            [](const auto& update) { return update.prefer_native_face; }));
+        std::ostringstream oss;
+        oss << "FsilsLinearSolver::solve: mpi native-face routing state"
+            << " rank_one=" << rank_one_updates_.size()
+            << " prefer_native_face=" << prefer_count
+            << " reduced=" << reduced_field_updates_.size()
+            << " grouped=" << grouped_bordered_field_couplings_.size()
+            << " pure_case=" << (pure_mpi_native_face_rank_one_case ? 1 : 0)
+            << " prefer_case=" << (prefer_mpi_native_face_rank_one ? 1 : 0)
+            << " allow=" << (allow_mpi_native_face_rank_one ? 1 : 0);
+        traceLog(oss.str());
+    }
     if (!allow_mpi_native_face_rank_one && oopTraceEnabled()) {
-        traceLog("FsilsLinearSolver::solve: routing MPI BlockSchur native-face rank-1 updates "
+        traceLog("FsilsLinearSolver::solve: routing MPI native-face rank-1 updates "
                  "through reduced/grouped update support.");
     } else if (prefer_mpi_native_face_rank_one && oopTraceEnabled()) {
         traceLog("FsilsLinearSolver::solve: enabling MPI native-face rank-1 path "
                  "for mixed rank-1 + reduced BlockSchur outlet corrections.");
-    } else if (pure_native_face_rank_one_case && oopTraceEnabled()) {
+    } else if (pure_mpi_native_face_rank_one_case && oopTraceEnabled()) {
         traceLog("FsilsLinearSolver::solve: enabling MPI native-face rank-1 path.");
     }
 
@@ -987,16 +1141,10 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         grouped_bordered_field_couplings_.empty();
 
     auto& ls = ls_;
-    using BlockSchurStats = std::decay_t<decltype(ls.blockschur_stats)>;
-    using SubSolverStats = std::decay_t<decltype(ls.GM.stats)>;
-    BlockSchurStats preserved_blockschur_stats{};
-    SubSolverStats preserved_blockschur_momentum_stats{};
-    SubSolverStats preserved_blockschur_schur_stats{};
-    bool preserved_blockschur_attempt = false;
     if (use_blockschur) {
         // FSILS BlockSchur uses RI.mItr as an outer basis dimension and allocates
         // O(nNo * mItr) workspace. Keep the legacy-safe cap for the fractional-step
-        // path, then validate the true residual and retry with strict GMRES if needed.
+        // path, then return the primary BlockSchur result for Newton-side handling.
         const int safe_max_iter = (options_.max_iter > 50) ? 10 : options_.max_iter;
         if (options_.krylov_dim > 0) {
             fe_fsi_linear_solver::fsils_ls_create(ls,
@@ -1094,15 +1242,27 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
         Vector<int> sorted_glob(face_nNo);
         Array<double> sorted_val(face_dof, face_nNo);
+        const bool has_matching_valm =
+            face.valM.nrows() == face.val.nrows() && face.valM.ncols() == face.val.ncols();
+        Array<double> sorted_valM;
+        if (has_matching_valm) {
+            sorted_valM.resize(face_dof, face_nNo);
+        }
         for (int i = 0; i < face_nNo; ++i) {
             const int src = perm[static_cast<std::size_t>(i)];
             sorted_glob(i) = face.glob(src);
             for (int c = 0; c < face_dof; ++c) {
                 sorted_val(c, i) = face.val(c, src);
+                if (has_matching_valm) {
+                    sorted_valM(c, i) = face.valM(c, src);
+                }
             }
         }
         face.glob = sorted_glob;
         face.val = sorted_val;
+        if (has_matching_valm) {
+            face.valM = sorted_valM;
+        }
     };
 
     auto sync_face_val_if_shared = [&](fe_fsi_linear_solver::FSILS_faceType& face, int face_dof) {
@@ -1300,11 +1460,9 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 }
             }
 
-            // Seed the overlap buffer from owned copies only, then synchronize
-            // across shared nodes before materializing the face support. The
-            // stored rank-1 update vector may come from a globally reduced
-            // dQ/du, so seeding ghost copies here would double-count shared
-            // outlet nodes under MPI.
+            // Seed the overlap buffer from the local view and then synchronize
+            // so the native-face representation carries the same full local
+            // support as the reduced-update path.
             Array<double> face_values(face_dof, lhs.nNo);
             face_values = 0.0;
             for (const auto& [dof_idx, val] : upd.v) {
@@ -1335,9 +1493,6 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 }
                 const int internal = lhs.map(old_local);
                 if (internal < 0 || internal >= lhs.nNo) {
-                    continue;
-                }
-                if (internal >= lhs.mynNo) {
                     continue;
                 }
                 face_values(comp_to_face_idx[static_cast<std::size_t>(comp)], internal) +=
@@ -1382,7 +1537,9 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                         const int internal = face_nodes[static_cast<std::size_t>(a)];
                         face.glob(a) = internal;
                         for (int c = 0; c < face_dof; ++c) {
-                            face.val(c, a) = face_values(c, internal);
+                            const double value = face_values(c, internal);
+                            face.val(c, a) = value;
+                            face.valM(c, a) = value;
                         }
                     }
                 }
@@ -1888,6 +2045,158 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         return rhs_true.norm();
     };
 
+    auto applyLowRankResidualPolish = [&]() -> bool {
+        if (!fsilsLowRankResidualPolishEnabled() ||
+            lhs.commu.nTasks <= 1 ||
+            !use_blockschur) {
+            return false;
+        }
+
+        const std::size_t total_modes =
+            rank_one_updates_.size() + reduced_field_updates_.size();
+        if (total_modes == 0u || total_modes > 8u) {
+            return false;
+        }
+
+        std::vector<FsilsVector> basis_q;
+        basis_q.reserve(total_modes);
+        auto appendBasisVector = [&](std::span<const std::pair<GlobalIndex, Real>> entries) {
+            FsilsVector q(shared_layout);
+            q.zero();
+            auto q_view = q.createAssemblyView();
+            FE_CHECK_NOT_NULL(q_view.get(), "FsilsLinearSolver: low-rank polish basis view");
+            q_view->beginAssemblyPhase();
+            for (const auto& [dof_idx, value] : entries) {
+                q_view->addVectorEntry(dof_idx, value, assembly::AddMode::Insert);
+            }
+            q_view->finalizeAssembly();
+            if (!(q.norm() > Real(0.0))) {
+                return;
+            }
+            basis_q.push_back(std::move(q));
+        };
+
+        for (const auto& update : rank_one_updates_) {
+            appendBasisVector(std::span<const std::pair<GlobalIndex, Real>>(update.v.data(),
+                                                                            update.v.size()));
+        }
+        for (const auto& update : reduced_field_updates_) {
+            appendBasisVector(std::span<const std::pair<GlobalIndex, Real>>(update.right.data(),
+                                                                            update.right.size()));
+        }
+        if (basis_q.empty()) {
+            return false;
+        }
+
+        FsilsVector residual_before(shared_layout);
+        Real rhs_norm_before = Real(0.0);
+        computeTrueResidualVector(residual_before, rhs_norm_before);
+        const Real residual_norm_before = residual_before.norm();
+        if (!(std::isfinite(static_cast<double>(residual_norm_before)) &&
+              residual_norm_before > Real(0.0))) {
+            return false;
+        }
+
+        std::vector<FsilsVector> basis_y;
+        basis_y.reserve(basis_q.size());
+        for (const auto& q : basis_q) {
+            FsilsVector q_eval(shared_layout);
+            q_eval.copyFrom(q);
+            q_eval.updateGhosts();
+
+            FsilsVector y(shared_layout);
+            A->mult(q_eval, y);
+            addRankOneUpdatesToProduct(rank_one_updates_, q_eval, y, lhs.commu);
+            addReducedFieldUpdatesToProduct(reduced_field_updates_, q_eval, y, lhs.commu);
+            basis_y.push_back(std::move(y));
+        }
+
+        const int rank = static_cast<int>(basis_q.size());
+        std::vector<Real> normal(static_cast<std::size_t>(rank) * static_cast<std::size_t>(rank),
+                                 Real(0.0));
+        std::vector<Real> rhs_dense(static_cast<std::size_t>(rank), Real(0.0));
+        Real trace = Real(0.0);
+        for (int i = 0; i < rank; ++i) {
+            rhs_dense[static_cast<std::size_t>(i)] = basis_y[static_cast<std::size_t>(i)].dot(residual_before);
+            for (int j = i; j < rank; ++j) {
+                const Real value =
+                    basis_y[static_cast<std::size_t>(i)].dot(basis_y[static_cast<std::size_t>(j)]);
+                normal[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+                       static_cast<std::size_t>(j)] = value;
+                normal[static_cast<std::size_t>(j) * static_cast<std::size_t>(rank) +
+                       static_cast<std::size_t>(i)] = value;
+                if (i == j) {
+                    trace += std::abs(value);
+                }
+            }
+        }
+
+        const Real regularization =
+            std::max<Real>(trace * static_cast<Real>(1e-12), static_cast<Real>(1e-24));
+        for (int i = 0; i < rank; ++i) {
+            normal[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+                   static_cast<std::size_t>(i)] += regularization;
+        }
+
+        std::vector<Real> alpha = rhs_dense;
+        if (!solveDenseSystemInPlace(normal, alpha, rank)) {
+            return false;
+        }
+
+        const Real alpha_norm = std::sqrt(std::inner_product(alpha.begin(), alpha.end(),
+                                                             alpha.begin(), Real(0.0)));
+        if (!(std::isfinite(static_cast<double>(alpha_norm)) && alpha_norm > Real(1e-20))) {
+            return false;
+        }
+
+        const std::vector<Real> backup = x_data;
+        for (int i = 0; i < rank; ++i) {
+            const Real scale = alpha[static_cast<std::size_t>(i)];
+            if (std::abs(scale) <= Real(1e-30)) {
+                continue;
+            }
+            const auto q_span = basis_q[static_cast<std::size_t>(i)].localSpan();
+            FE_THROW_IF(q_span.size() != x_data.size(), FEException,
+                        "FsilsLinearSolver: low-rank polish size mismatch");
+            for (std::size_t idx = 0; idx < x_data.size(); ++idx) {
+                x_data[idx] += scale * q_span[idx];
+            }
+        }
+
+        FsilsVector residual_after(shared_layout);
+        Real rhs_norm_after = Real(0.0);
+        computeTrueResidualVector(residual_after, rhs_norm_after);
+        const Real residual_norm_after = residual_after.norm();
+        const Real improvement_floor =
+            std::max<Real>(residual_norm_before * static_cast<Real>(1e-8),
+                           std::max<Real>(options_.abs_tol, Real(1e-30)));
+        const bool accept =
+            std::isfinite(static_cast<double>(residual_norm_after)) &&
+            residual_norm_after + improvement_floor < residual_norm_before;
+
+        if (oopTraceEnabled()) {
+            std::ostringstream oss;
+            oss << "FsilsLinearSolver::solve: low-rank residual polish"
+                << " rank=" << rank
+                << " residual_before=" << residual_norm_before
+                << " residual_after=" << residual_norm_after
+                << " rhs_before=" << rhs_norm_before
+                << " rhs_after=" << rhs_norm_after
+                << " alpha_norm=" << alpha_norm
+                << " accept=" << (accept ? 1 : 0);
+            for (int i = 0; i < rank; ++i) {
+                oss << " alpha[" << i << "]=" << alpha[static_cast<std::size_t>(i)];
+            }
+            traceLog(oss.str());
+        }
+
+        if (!accept) {
+            x_data = backup;
+            return false;
+        }
+        return true;
+    };
+
     auto computeConstraintMeanStats = [&]() -> FsilsConstraintMeanStats {
         FsilsConstraintMeanStats stats;
         if (!has_saddle_point || con_ncomp != 1 || con_start < 0 || con_start >= dof) {
@@ -2000,11 +2309,70 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         return stats;
     };
 
+    auto computeReturnedSolutionLocalConstraintMeanStats = [&]() -> FsilsLocalConstraintMeanStats {
+        FsilsLocalConstraintMeanStats stats;
+        if (!has_saddle_point || con_ncomp != 1 || con_start < 0 || con_start >= dof) {
+            return stats;
+        }
+
+        long double local_sum = 0.0L;
+        long double local_sq = 0.0L;
+        unsigned long long local_count = 0ull;
+        for (int old = 0; old < lhs.nNo; ++old) {
+            const int internal = lhs.map(old);
+            if (internal < 0 || internal >= lhs.mynNo) {
+                continue;
+            }
+            const std::size_t idx =
+                static_cast<std::size_t>(old) * static_cast<std::size_t>(dof) +
+                static_cast<std::size_t>(con_start);
+            const Real value = x_data[idx];
+            local_sum += static_cast<long double>(value);
+            local_sq += static_cast<long double>(value) * static_cast<long double>(value);
+            ++local_count;
+        }
+
+        if (local_count == 0ull) {
+            return stats;
+        }
+
+        const long double inv_count = 1.0L / static_cast<long double>(local_count);
+        const long double mean = local_sum * inv_count;
+        const long double mean_sq = mean * mean;
+        const long double rms_sq = std::max<long double>(0.0L, local_sq * inv_count);
+        const long double fluct_sq = std::max<long double>(0.0L, rms_sq - mean_sq);
+
+        stats.valid = std::isfinite(static_cast<double>(mean)) &&
+                      std::isfinite(static_cast<double>(rms_sq)) &&
+                      std::isfinite(static_cast<double>(fluct_sq));
+        stats.count = static_cast<std::uint64_t>(local_count);
+        stats.mean = static_cast<Real>(mean);
+        stats.rms = static_cast<Real>(std::sqrt(rms_sq));
+        stats.fluctuation_rms = static_cast<Real>(std::sqrt(fluct_sq));
+        return stats;
+    };
+
     auto subtractConstraintMeanFromReturnedSolution = [&](Real mean_shift) {
         if (mean_shift == Real(0.0)) {
             return;
         }
         for (int old = 0; old < lhs.nNo; ++old) {
+            const std::size_t idx =
+                static_cast<std::size_t>(old) * static_cast<std::size_t>(dof) +
+                static_cast<std::size_t>(con_start);
+            x_data[idx] -= mean_shift;
+        }
+    };
+
+    auto subtractLocalConstraintMeanFromReturnedSolution = [&](Real mean_shift) {
+        if (mean_shift == Real(0.0)) {
+            return;
+        }
+        for (int old = 0; old < lhs.nNo; ++old) {
+            const int internal = lhs.map(old);
+            if (internal < 0 || internal >= lhs.mynNo) {
+                continue;
+            }
             const std::size_t idx =
                 static_cast<std::size_t>(old) * static_cast<std::size_t>(dof) +
                 static_cast<std::size_t>(con_start);
@@ -2098,11 +2466,552 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         traceLog(oss.str());
     };
 
+    auto logConstraintMeanModeProbe = [&](std::string_view phase) {
+        if (!oopTraceEnabled() || !has_saddle_point || con_ncomp != 1 || x == nullptr) {
+            return;
+        }
+
+        FsilsVector residual_true(shared_layout);
+        Real rhs_norm = Real(0.0);
+        computeTrueResidualVector(residual_true, rhs_norm);
+
+        FsilsVector mean_mode(shared_layout);
+        mean_mode.zero();
+        auto& mean_mode_data = mean_mode.data();
+        for (int old = 0; old < lhs.nNo; ++old) {
+            const std::size_t idx =
+                static_cast<std::size_t>(old) * static_cast<std::size_t>(dof) +
+                static_cast<std::size_t>(con_start);
+            mean_mode_data[idx] = Real(1.0);
+        }
+
+        FsilsVector az_matrix(shared_layout);
+        A->mult(mean_mode, az_matrix);
+
+        FsilsVector az(shared_layout);
+        az.copyFrom(az_matrix);
+        addRankOneUpdatesToProduct(rank_one_updates_, mean_mode, az, lhs.commu);
+        addReducedFieldUpdatesToProduct(reduced_field_updates_, mean_mode, az, lhs.commu);
+
+        const auto internal_size =
+            static_cast<std::size_t>(dof) * static_cast<std::size_t>(lhs.nNo);
+        std::vector<Real> residual_internal(internal_size, Real(0.0));
+        std::vector<Real> az_matrix_internal(internal_size, Real(0.0));
+        std::vector<Real> az_internal(internal_size, Real(0.0));
+        copyVectorOldToInternal(residual_true, residual_internal);
+        copyVectorOldToInternal(az_matrix, az_matrix_internal);
+        copyVectorOldToInternal(az, az_internal);
+
+        long double local_rr = 0.0L;
+        long double local_jj = 0.0L;
+        long double local_jj_mom = 0.0L;
+        long double local_jj_con = 0.0L;
+        long double local_hh = 0.0L;
+        long double local_hh_mom = 0.0L;
+        long double local_hh_con = 0.0L;
+        long double local_raz = 0.0L;
+        long double local_aa = 0.0L;
+        for (int node = 0; node < lhs.mynNo; ++node) {
+            const std::size_t base =
+                static_cast<std::size_t>(node) * static_cast<std::size_t>(dof);
+            for (int c = 0; c < dof; ++c) {
+                const long double rv =
+                    static_cast<long double>(residual_internal[base + static_cast<std::size_t>(c)]);
+                const long double jv =
+                    static_cast<long double>(az_matrix_internal[base + static_cast<std::size_t>(c)]);
+                const long double av =
+                    static_cast<long double>(az_internal[base + static_cast<std::size_t>(c)]);
+                const long double hv = av - jv;
+                local_rr += rv * rv;
+                local_jj += jv * jv;
+                local_hh += hv * hv;
+                local_raz += rv * av;
+                local_aa += av * av;
+                if (c >= con_start && c < con_start + con_ncomp) {
+                    local_jj_con += jv * jv;
+                    local_hh_con += hv * hv;
+                } else {
+                    local_jj_mom += jv * jv;
+                    local_hh_mom += hv * hv;
+                }
+            }
+        }
+
+        long double global_rr = local_rr;
+        long double global_jj = local_jj;
+        long double global_jj_mom = local_jj_mom;
+        long double global_jj_con = local_jj_con;
+        long double global_hh = local_hh;
+        long double global_hh_mom = local_hh_mom;
+        long double global_hh_con = local_hh_con;
+        long double global_raz = local_raz;
+        long double global_aa = local_aa;
+        if (lhs.commu.nTasks > 1) {
+            fe_fsi_linear_solver::fsils_allreduce_sum(
+                &local_rr, &global_rr, 1, MPI_LONG_DOUBLE, lhs.commu);
+            fe_fsi_linear_solver::fsils_allreduce_sum(
+                &local_jj, &global_jj, 1, MPI_LONG_DOUBLE, lhs.commu);
+            fe_fsi_linear_solver::fsils_allreduce_sum(
+                &local_jj_mom, &global_jj_mom, 1, MPI_LONG_DOUBLE, lhs.commu);
+            fe_fsi_linear_solver::fsils_allreduce_sum(
+                &local_jj_con, &global_jj_con, 1, MPI_LONG_DOUBLE, lhs.commu);
+            fe_fsi_linear_solver::fsils_allreduce_sum(
+                &local_hh, &global_hh, 1, MPI_LONG_DOUBLE, lhs.commu);
+            fe_fsi_linear_solver::fsils_allreduce_sum(
+                &local_hh_mom, &global_hh_mom, 1, MPI_LONG_DOUBLE, lhs.commu);
+            fe_fsi_linear_solver::fsils_allreduce_sum(
+                &local_hh_con, &global_hh_con, 1, MPI_LONG_DOUBLE, lhs.commu);
+            fe_fsi_linear_solver::fsils_allreduce_sum(
+                &local_raz, &global_raz, 1, MPI_LONG_DOUBLE, lhs.commu);
+            fe_fsi_linear_solver::fsils_allreduce_sum(
+                &local_aa, &global_aa, 1, MPI_LONG_DOUBLE, lhs.commu);
+        }
+
+        const auto mean_stats = computeReturnedSolutionConstraintMeanStats();
+        const long double az_norm = std::sqrt(std::max<long double>(0.0L, global_aa));
+        long double delta_opt = 0.0L;
+        long double residual_opt = std::sqrt(std::max<long double>(0.0L, global_rr));
+        if (global_aa > 1e-30L) {
+            delta_opt = -global_raz / global_aa;
+            const long double reduced_sq =
+                std::max<long double>(0.0L,
+                                      global_rr - (global_raz * global_raz) / global_aa);
+            residual_opt = std::sqrt(reduced_sq);
+        }
+
+        std::ostringstream oss;
+        oss << "FsilsLinearSolver::solve: constraint mean-mode probe"
+            << " phase='" << phase << "'"
+            << " mean=" << (mean_stats.valid ? mean_stats.mean : Real(0.0))
+            << " rhs=" << rhs_norm
+            << " |r|=" << std::sqrt(std::max<long double>(0.0L, global_rr))
+            << " |Jz|=" << std::sqrt(std::max<long double>(0.0L, global_jj))
+            << " |Jz_mom|=" << std::sqrt(std::max<long double>(0.0L, global_jj_mom))
+            << " |Jz_con|=" << std::sqrt(std::max<long double>(0.0L, global_jj_con))
+            << " |Rz|=" << std::sqrt(std::max<long double>(0.0L, global_hh))
+            << " |Rz_mom|=" << std::sqrt(std::max<long double>(0.0L, global_hh_mom))
+            << " |Rz_con|=" << std::sqrt(std::max<long double>(0.0L, global_hh_con))
+            << " |Az|=" << az_norm
+            << " r.Az=" << global_raz
+            << " delta_opt=" << delta_opt
+            << " |r+delta Az|=" << residual_opt;
+        traceLog(oss.str());
+
+        const auto local_mean_stats = computeReturnedSolutionLocalConstraintMeanStats();
+        if (local_mean_stats.valid && local_mean_stats.count > 0u) {
+            std::ostringstream loss;
+            loss << "FsilsLinearSolver::solve: local constraint stats"
+                 << " phase='" << phase << "'"
+                 << " rank=" << lhs.commu.task
+                 << " count=" << local_mean_stats.count
+                 << " mean=" << local_mean_stats.mean
+                 << " rms=" << local_mean_stats.rms
+                 << " fluct=" << local_mean_stats.fluctuation_rms;
+            traceLog(loss.str());
+
+            std::vector<Real> backup = x_data;
+            subtractLocalConstraintMeanFromReturnedSolution(local_mean_stats.mean);
+            FsilsVector local_residual_true(shared_layout);
+            Real local_rhs_norm = Real(0.0);
+            computeTrueResidualVector(local_residual_true, local_rhs_norm);
+            const Real local_residual_norm = local_residual_true.norm();
+            const Real local_rel =
+                local_residual_norm / std::max<Real>(local_rhs_norm, static_cast<Real>(1e-30));
+            const Real local_target = std::max<Real>(
+                options_.abs_tol, options_.rel_tol * std::max<Real>(local_rhs_norm, static_cast<Real>(1e-30)));
+            const bool local_ok =
+                std::isfinite(static_cast<double>(local_residual_norm)) &&
+                std::isfinite(static_cast<double>(local_rel)) &&
+                local_residual_norm <= local_target;
+            const auto local_after = computeReturnedSolutionLocalConstraintMeanStats();
+            x_data = std::move(backup);
+
+            std::ostringstream lross;
+            lross << "FsilsLinearSolver::solve: local constraint recenter probe"
+                  << " phase='" << phase << "'"
+                  << " rank=" << lhs.commu.task
+                  << " mean_before=" << local_mean_stats.mean
+                  << " mean_after=" << local_after.mean
+                  << " residual_after=" << local_residual_norm
+                  << " rel_after=" << local_rel
+                  << " ok_after=" << (local_ok ? 1 : 0);
+            traceLog(lross.str());
+        }
+    };
+
     auto compareFaceOperatorAgainstFe = [&]() {
         if (!fsilsCompareFaceOperatorEnabled() ||
             (rank_one_updates_.empty() && reduced_field_updates_.empty())) {
             return;
         }
+
+        if (lhs.nFaces > 0 && incL.size() == lhs.nFaces) {
+            const auto& active_res =
+                current_preparation_uses_blockschur ? res_blockschur : res_original;
+            if (active_res.size() == lhs.nFaces) {
+                for (int f = 0; f < lhs.nFaces; ++f) {
+                    lhs.face[static_cast<std::size_t>(f)].incFlag = (incL(f) != 0);
+                    lhs.face[static_cast<std::size_t>(f)].res = active_res(f);
+                }
+            }
+        }
+
+        const bool compare_in_prepared_blockschur_coordinates =
+            current_preparation_uses_blockschur && stage_scale != 1.0;
+        const Real s = static_cast<Real>(stage_scale);
+        const Real inv_s = static_cast<Real>(1.0 / stage_scale);
+        auto dumpOwnerAlignedVector = [&](std::string_view probe_label,
+                                         std::string_view suffix,
+                                         const FsilsVector& vec) {
+            const char* dump_prefix = fsilsCompareFaceOperatorDumpPrefix();
+            if (dump_prefix == nullptr) {
+                return;
+            }
+            if (const char* dump_probe = fsilsCompareFaceOperatorDumpProbe();
+                dump_probe != nullptr && probe_label != dump_probe) {
+                return;
+            }
+
+            std::ostringstream path;
+            path << dump_prefix
+                 << "." << probe_label
+                 << "." << suffix
+                 << ".rank" << lhs.commu.task
+                 << ".txt";
+            std::ofstream out(path.str());
+            if (!out) {
+                return;
+            }
+
+            out << "# task " << lhs.commu.task
+                << " probe " << probe_label
+                << " suffix " << suffix << "\n";
+            out << "# global_node component value\n";
+            const int owned_node_count = shared_layout->owned_node_count;
+            const auto span = vec.localSpan();
+            for (int old = 0; old < owned_node_count; ++old) {
+                const int global_node = shared_layout->oldToGlobalNode(old);
+                if (global_node < 0) {
+                    continue;
+                }
+                const std::size_t base =
+                    static_cast<std::size_t>(old) * static_cast<std::size_t>(dof);
+                for (int c = 0; c < dof; ++c) {
+                    out << global_node
+                        << ' ' << c
+                        << ' ' << span[base + static_cast<std::size_t>(c)]
+                        << '\n';
+                }
+            }
+        };
+        auto dumpPreparedRowIfRequested = [&]() {
+            const int target_global_node = fsilsDumpPreparedRowGlobalNode();
+            const int row_comp = fsilsDumpPreparedRowComponent();
+            const char* dump_prefix = fsilsDumpPreparedRowPrefix();
+            if (target_global_node < 0 || row_comp < 0 || row_comp >= dof || dump_prefix == nullptr) {
+                return;
+            }
+
+            int target_old = -1;
+            for (int old = 0; old < shared_layout->owned_node_count; ++old) {
+                if (shared_layout->oldToGlobalNode(old) == target_global_node) {
+                    target_old = old;
+                    break;
+                }
+            }
+            if (target_old < 0) {
+                return;
+            }
+
+            std::vector<int> internal_to_old(lhs.nNo, -1);
+            for (int old = 0; old < lhs.nNo; ++old) {
+                const int internal = lhs.map(old);
+                if (internal >= 0 && internal < lhs.nNo) {
+                    internal_to_old[internal] = old;
+                }
+            }
+
+            const int row_internal = lhs.map(target_old);
+            FE_THROW_IF(row_internal < 0 || row_internal >= lhs.nNo,
+                        FEException,
+                        "FsilsLinearSolver::solve: invalid internal row while dumping prepared row");
+
+            std::ostringstream path;
+            path << dump_prefix
+                 << ".g" << target_global_node
+                 << ".r" << row_comp
+                 << ".rank" << lhs.commu.task
+                 << ".txt";
+            std::ofstream out(path.str());
+            if (!out) {
+                return;
+            }
+
+            const int col_comp_filter = fsilsDumpPreparedColComponent();
+            out << "# task " << lhs.commu.task
+                << " global_row_node " << target_global_node
+                << " old_row " << target_old
+                << " internal_row " << row_internal
+                << " row_component " << row_comp
+                << " col_component_filter " << col_comp_filter << "\n";
+            out << "# col_global_node col_component value col_old col_kind\n";
+            for (int nz = lhs.rowPtr(0, row_internal); nz <= lhs.rowPtr(1, row_internal); ++nz) {
+                const int col_internal = lhs.colPtr(nz);
+                FE_THROW_IF(col_internal < 0 || col_internal >= lhs.nNo,
+                            FEException,
+                            "FsilsLinearSolver::solve: invalid internal column while dumping prepared row");
+                const int col_old = internal_to_old[col_internal];
+                FE_THROW_IF(col_old < 0 || col_old >= lhs.nNo,
+                            FEException,
+                            "FsilsLinearSolver::solve: missing old column while dumping prepared row");
+                const int col_global_node = shared_layout->oldToGlobalNode(col_old);
+                const char* col_kind =
+                    (col_old < shared_layout->owned_node_count) ? "owned" : "ghost";
+                for (int col_comp = 0; col_comp < dof; ++col_comp) {
+                    if (col_comp_filter >= 0 && col_comp != col_comp_filter) {
+                        continue;
+                    }
+                    out << col_global_node
+                        << ' ' << col_comp
+                        << ' ' << Val(row_comp * dof + col_comp, nz)
+                        << ' ' << col_old
+                        << ' ' << col_kind
+                        << '\n';
+                }
+            }
+        };
+
+        auto runProbeComparison = [&](std::string_view probe_label, FsilsVector& probe_old) {
+            probe_old.updateGhosts();
+
+            FsilsVector probe_fe(shared_layout);
+            probe_fe.copyFrom(probe_old);
+            if (compare_in_prepared_blockschur_coordinates) {
+                auto probe_span = probe_fe.localSpan();
+                for (int old = 0; old < lhs.nNo; ++old) {
+                    const std::size_t base =
+                        static_cast<std::size_t>(old) * static_cast<std::size_t>(dof);
+                    for (int c = con_start; c < con_start + con_ncomp; ++c) {
+                        probe_span[base + static_cast<std::size_t>(c)] *= inv_s;
+                    }
+                }
+                probe_fe.updateGhosts();
+            }
+
+            FsilsVector fe_matrix(shared_layout);
+            A->mult(probe_fe, fe_matrix);
+
+            FsilsVector fe_y(shared_layout);
+            fe_y.copyFrom(fe_matrix);
+            addRankOneUpdatesToProduct(rank_one_updates_, probe_fe, fe_y, lhs.commu);
+            addReducedFieldUpdatesToProduct(reduced_field_updates_, probe_fe, fe_y, lhs.commu);
+            fe_matrix.updateGhosts();
+            fe_y.updateGhosts();
+            if (compare_in_prepared_blockschur_coordinates) {
+                auto fe_matrix_span = fe_matrix.localSpan();
+                auto fe_span = fe_y.localSpan();
+                for (int old = 0; old < lhs.nNo; ++old) {
+                    const std::size_t base =
+                        static_cast<std::size_t>(old) * static_cast<std::size_t>(dof);
+                    for (int c = mom_start; c < mom_start + mom_ncomp; ++c) {
+                        fe_matrix_span[base + static_cast<std::size_t>(c)] *= s;
+                        fe_span[base + static_cast<std::size_t>(c)] *= s;
+                    }
+                }
+            }
+
+            FsilsVector fe_correction(shared_layout);
+            fe_correction.copyFrom(fe_y);
+            {
+                auto corr_span = fe_correction.localSpan();
+                const auto matrix_span = fe_matrix.localSpan();
+                FE_THROW_IF(corr_span.size() != matrix_span.size(), FEException,
+                            "FsilsLinearSolver::solve: FE correction compare size mismatch");
+                for (std::size_t i = 0; i < corr_span.size(); ++i) {
+                    corr_span[i] -= matrix_span[i];
+                }
+            }
+
+            std::vector<Real> probe_internal_data(solve_buffer.size(), Real(0.0));
+            std::vector<Real> fsils_internal_data(solve_buffer.size(), Real(0.0));
+            copyVectorOldToInternal(
+                probe_old, std::span<Real>(probe_internal_data.data(), probe_internal_data.size()));
+            Array<double> probe_internal(dof, lhs.nNo, probe_internal_data.data());
+            Array<double> fsils_internal(dof, lhs.nNo, fsils_internal_data.data());
+            fe_fsi_linear_solver::fsils_syncv(lhs, dof, probe_internal);
+
+            std::vector<Real> fsils_matrix_data(solve_buffer.size(), Real(0.0));
+            Array<double> fsils_matrix_internal(dof, lhs.nNo, fsils_matrix_data.data());
+            spar_mul::fsils_spar_mul_vv(
+                lhs, lhs.rowPtr, lhs.colPtr, dof, Val, probe_internal, fsils_matrix_internal);
+            fsils_internal = fsils_matrix_internal;
+            add_bc_mul::add_bc_mul(lhs, fe_fsi_linear_solver::BcopType::BCOP_TYPE_ADD,
+                                   dof, probe_internal, fsils_internal);
+
+            FsilsVector fsils_matrix(shared_layout);
+            copyVectorInternalToOld(
+                std::span<const Real>(fsils_matrix_data.data(), fsils_matrix_data.size()),
+                fsils_matrix);
+            fsils_matrix.updateGhosts();
+
+            FsilsVector fsils_y(shared_layout);
+            copyVectorInternalToOld(
+                std::span<const Real>(fsils_internal_data.data(), fsils_internal_data.size()),
+                fsils_y);
+            fsils_y.updateGhosts();
+
+            FsilsVector fsils_correction(shared_layout);
+            fsils_correction.copyFrom(fsils_y);
+            {
+                auto corr_span = fsils_correction.localSpan();
+                const auto matrix_span = fsils_matrix.localSpan();
+                FE_THROW_IF(corr_span.size() != matrix_span.size(), FEException,
+                            "FsilsLinearSolver::solve: FSILS correction compare size mismatch");
+                for (std::size_t i = 0; i < corr_span.size(); ++i) {
+                    corr_span[i] -= matrix_span[i];
+                }
+            }
+
+            FsilsVector diff(shared_layout);
+            diff.copyFrom(fe_y);
+            auto diff_span = diff.localSpan();
+            const auto fsils_span = fsils_y.localSpan();
+            FE_THROW_IF(diff_span.size() != fsils_span.size(), FEException,
+                        "FsilsLinearSolver::solve: operator compare size mismatch");
+            for (std::size_t i = 0; i < diff_span.size(); ++i) {
+                diff_span[i] -= fsils_span[i];
+            }
+
+            FsilsVector matrix_diff(shared_layout);
+            matrix_diff.copyFrom(fe_matrix);
+            {
+                auto diff_matrix_span = matrix_diff.localSpan();
+                const auto fsils_matrix_span = fsils_matrix.localSpan();
+                FE_THROW_IF(diff_matrix_span.size() != fsils_matrix_span.size(),
+                            FEException,
+                            "FsilsLinearSolver::solve: matrix compare size mismatch");
+                for (std::size_t i = 0; i < diff_matrix_span.size(); ++i) {
+                    diff_matrix_span[i] -= fsils_matrix_span[i];
+                }
+            }
+
+            FsilsVector correction_diff(shared_layout);
+            correction_diff.copyFrom(fe_correction);
+            {
+                auto diff_corr_span = correction_diff.localSpan();
+                const auto fsils_corr_span = fsils_correction.localSpan();
+                FE_THROW_IF(diff_corr_span.size() != fsils_corr_span.size(),
+                            FEException,
+                            "FsilsLinearSolver::solve: correction compare size mismatch");
+                for (std::size_t i = 0; i < diff_corr_span.size(); ++i) {
+                    diff_corr_span[i] -= fsils_corr_span[i];
+                }
+            }
+
+            if (fsilsProbeLowRankModesEnabled() &&
+                !rank_one_updates_.empty() &&
+                lhs.reduced_updates.size() == rank_one_updates_.size()) {
+                std::vector<GlobalIndex> resolved_dofs;
+                resolved_dofs.reserve(rank_one_updates_.size() * 8);
+                for (const auto& update : rank_one_updates_) {
+                    for (const auto& [probe_dof, _] : update.v) {
+                        resolved_dofs.push_back(probe_dof);
+                    }
+                }
+                std::vector<GlobalIndex> resolved_local(resolved_dofs.size(), INVALID_GLOBAL_INDEX);
+                probe_fe.resolveEntriesCached(resolved_dofs, resolved_local);
+                const auto probe_span = probe_fe.localSpan();
+                std::ostringstream dots_oss;
+                dots_oss << "FsilsLinearSolver::solve: low-rank probe dots"
+                         << " probe='" << probe_label << "'";
+                std::size_t resolved_offset = 0;
+                for (std::size_t u = 0; u < rank_one_updates_.size(); ++u) {
+                    Real exact_dot = Real(0.0);
+                    for (const auto& [probe_dof, probe_val] : rank_one_updates_[u].v) {
+                        (void)probe_dof;
+                        const auto local_dof = resolved_local[resolved_offset++];
+                        if (local_dof == INVALID_GLOBAL_INDEX) {
+                            continue;
+                        }
+                        exact_dot += probe_val *
+                                     probe_span[static_cast<std::size_t>(local_dof)];
+                    }
+#if FE_HAS_MPI
+                    int mpi_initialized = 0;
+                    MPI_Initialized(&mpi_initialized);
+                    if (mpi_initialized && lhs.commu.nTasks > 1) {
+                        Real global_dot = Real(0.0);
+                        fe_fsi_linear_solver::fsils_allreduce_sum(
+                            &exact_dot, &global_dot, 1, MPI_DOUBLE, lhs.commu);
+                        exact_dot = global_dot;
+                    }
+#endif
+
+                    const auto& update = lhs.reduced_updates[u];
+                    const auto& right_entries =
+                        update.right_scaled_owned.empty() ? update.right_owned
+                                                          : update.right_scaled_owned;
+                    Real reduced_dot = Real(0.0);
+                    for (const auto& entry : right_entries) {
+                        if (entry.node < 0 || entry.node >= lhs.mynNo ||
+                            std::abs(entry.value) <= 1e-30) {
+                            continue;
+                        }
+                        const int comp = fe_fsi_linear_solver::fsils_reduced_local_component(
+                            update,
+                            entry.full_component,
+                            dof,
+                            (lhs.system_dof > 0) ? lhs.system_dof : dof);
+                        if (comp < 0 || comp >= dof) {
+                            continue;
+                        }
+                        reduced_dot += static_cast<Real>(entry.value) *
+                                       static_cast<Real>(probe_internal(comp, entry.node));
+                    }
+#if FE_HAS_MPI
+                    if (lhs.commu.nTasks > 1) {
+                        Real global_dot = Real(0.0);
+                        fe_fsi_linear_solver::fsils_allreduce_sum(
+                            &reduced_dot, &global_dot, 1, MPI_DOUBLE, lhs.commu);
+                        reduced_dot = global_dot;
+                    }
+#endif
+                    dots_oss << " exact_dot[" << u << "]=" << exact_dot
+                             << " reduced_dot[" << u << "]=" << reduced_dot;
+                }
+                traceLog(dots_oss.str());
+            }
+
+            const Real fe_norm = fe_y.norm();
+            const Real fsils_norm = fsils_y.norm();
+            const Real diff_norm = diff.norm();
+            const Real rel = diff_norm / std::max<Real>(fe_norm, Real(1e-30));
+            if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << "FsilsLinearSolver::solve: face operator compare"
+                    << " probe='" << probe_label << "'"
+                    << " |probe|=" << probe_old.norm()
+                    << " |FE|=" << fe_norm
+                    << " |FSILS|=" << fsils_norm
+                    << " |diff|=" << diff_norm
+                    << " rel=" << rel
+                    << " |FE_J|=" << fe_matrix.norm()
+                    << " |FSILS_J|=" << fsils_matrix.norm()
+                    << " |diff_J|=" << matrix_diff.norm()
+                    << " |FE_R|=" << fe_correction.norm()
+                    << " |FSILS_R|=" << fsils_correction.norm()
+                    << " |diff_R|=" << correction_diff.norm()
+                    << " reduced_updates=" << (rank_one_updates_.size() + reduced_field_updates_.size());
+                traceLog(oss.str());
+            }
+
+            dumpOwnerAlignedVector(probe_label, "probe", probe_old);
+            dumpOwnerAlignedVector(probe_label, "fe_matrix", fe_matrix);
+            dumpOwnerAlignedVector(probe_label, "fe_correction", fe_correction);
+            dumpOwnerAlignedVector(probe_label, "fe_full", fe_y);
+        };
+
+        dumpPreparedRowIfRequested();
 
         FsilsVector probe_old(shared_layout);
         {
@@ -2117,52 +3026,135 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 }
             }
         }
-        probe_old.updateGhosts();
+        runProbeComparison("generic", probe_old);
 
-        FsilsVector fe_y(shared_layout);
-        A->mult(probe_old, fe_y);
-        addRankOneUpdatesToProduct(rank_one_updates_, probe_old, fe_y, lhs.commu);
-        addReducedFieldUpdatesToProduct(reduced_field_updates_, probe_old, fe_y, lhs.commu);
-        fe_y.updateGhosts();
+        if (const char* oracle_path = fsilsCompareFaceOperatorOracleFile();
+            oracle_path != nullptr && con_ncomp == 1) {
+            std::ifstream oracle_in(oracle_path);
+            if (oracle_in) {
+                std::map<int, Real> oracle_by_global_node;
+                std::string line;
+                while (std::getline(oracle_in, line)) {
+                    if (line.empty() || line[0] == '#') {
+                        continue;
+                    }
+                    std::istringstream iss(line);
+                    int global_node = -1;
+                    Real value = Real(0.0);
+                    if (!(iss >> global_node >> value)) {
+                        continue;
+                    }
+                    oracle_by_global_node[global_node] = value;
+                }
 
-        std::vector<Real> probe_internal_data(solve_buffer.size(), Real(0.0));
-        std::vector<Real> fsils_internal_data(solve_buffer.size(), Real(0.0));
-        copyVectorOldToInternal(probe_old, std::span<Real>(probe_internal_data.data(), probe_internal_data.size()));
-        Array<double> probe_internal(dof, lhs.nNo, probe_internal_data.data());
-        Array<double> fsils_internal(dof, lhs.nNo, fsils_internal_data.data());
-        fe_fsi_linear_solver::fsils_commuv(lhs, dof, probe_internal);
-
-        spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, probe_internal, fsils_internal);
-        add_bc_mul::add_bc_mul(lhs, fe_fsi_linear_solver::BcopType::BCOP_TYPE_ADD,
-                               dof, probe_internal, fsils_internal);
-
-        FsilsVector fsils_y(shared_layout);
-        copyVectorInternalToOld(std::span<const Real>(fsils_internal_data.data(), fsils_internal_data.size()), fsils_y);
-        fsils_y.updateGhosts();
-
-        FsilsVector diff(shared_layout);
-        diff.copyFrom(fe_y);
-        auto diff_span = diff.localSpan();
-        const auto fsils_span = fsils_y.localSpan();
-        FE_THROW_IF(diff_span.size() != fsils_span.size(), FEException,
-                    "FsilsLinearSolver::solve: operator compare size mismatch");
-        for (std::size_t i = 0; i < diff_span.size(); ++i) {
-            diff_span[i] -= fsils_span[i];
+                if (!oracle_by_global_node.empty()) {
+                    FsilsVector oracle_probe(shared_layout);
+                    auto oracle_span = oracle_probe.localSpan();
+                    std::fill(oracle_span.begin(), oracle_span.end(), Real(0.0));
+                    for (int old = 0; old < lhs.nNo; ++old) {
+                        const int global_node = shared_layout->oldToGlobalNode(old);
+                        const auto it = oracle_by_global_node.find(global_node);
+                        if (it == oracle_by_global_node.end()) {
+                            continue;
+                        }
+                        const std::size_t base =
+                            static_cast<std::size_t>(old) * static_cast<std::size_t>(dof);
+                        oracle_span[base + static_cast<std::size_t>(con_start)] = it->second;
+                    }
+                    runProbeComparison("oracle_scalar_probe", oracle_probe);
+                }
+            }
         }
 
-        const Real fe_norm = fe_y.norm();
-        const Real fsils_norm = fsils_y.norm();
-        const Real diff_norm = diff.norm();
-        const Real rel = diff_norm / std::max<Real>(fe_norm, Real(1e-30));
-        if (oopTraceEnabled()) {
-            std::ostringstream oss;
-            oss << "FsilsLinearSolver::solve: face operator compare"
-                << " |FE|=" << fe_norm
-                << " |FSILS|=" << fsils_norm
-                << " |diff|=" << diff_norm
-                << " rel=" << rel
-                << " reduced_updates=" << (rank_one_updates_.size() + reduced_field_updates_.size());
-            traceLog(oss.str());
+        if (!fsilsProbeLowRankModesEnabled()) {
+            return;
+        }
+
+        for (std::size_t u = 0; u < rank_one_updates_.size(); ++u) {
+            FsilsVector low_rank_probe(shared_layout);
+            auto low_rank_view = low_rank_probe.createAssemblyView();
+            FE_CHECK_NOT_NULL(low_rank_view.get(), "FsilsLinearSolver: low-rank probe view");
+            low_rank_view->beginAssemblyPhase();
+            for (const auto& [probe_dof, probe_val] : rank_one_updates_[u].v) {
+                low_rank_view->addVectorEntry(probe_dof, probe_val, assembly::AddMode::Insert);
+            }
+            low_rank_view->finalizeAssembly();
+            runProbeComparison("rank1_" + std::to_string(u), low_rank_probe);
+        }
+
+        for (std::size_t u = 0; u < reduced_field_updates_.size(); ++u) {
+            FsilsVector low_rank_probe(shared_layout);
+            auto low_rank_view = low_rank_probe.createAssemblyView();
+            FE_CHECK_NOT_NULL(low_rank_view.get(), "FsilsLinearSolver: reduced probe view");
+            low_rank_view->beginAssemblyPhase();
+            for (const auto& [probe_dof, probe_val] : reduced_field_updates_[u].right) {
+                low_rank_view->addVectorEntry(probe_dof, probe_val, assembly::AddMode::Insert);
+            }
+            low_rank_view->finalizeAssembly();
+            runProbeComparison("reduced_" + std::to_string(u), low_rank_probe);
+        }
+
+        if (lhs.commu.nTasks > 1 && con_ncomp == 1) {
+            std::vector<double> owned_counts(static_cast<std::size_t>(lhs.commu.nTasks), 0.0);
+            const double local_owned = static_cast<double>(lhs.mynNo);
+            MPI_Allgather(&local_owned,
+                          1,
+                          cm_mod::mpreal,
+                          owned_counts.data(),
+                          1,
+                          cm_mod::mpreal,
+                          lhs.commu.comm);
+
+            std::vector<int> active_ranks;
+            active_ranks.reserve(static_cast<std::size_t>(lhs.commu.nTasks));
+            for (int rank = 0; rank < lhs.commu.nTasks; ++rank) {
+                if (owned_counts[static_cast<std::size_t>(rank)] > 0.5) {
+                    active_ranks.push_back(rank);
+                }
+            }
+            if (active_ranks.size() >= 2u) {
+                const int reference_rank = active_ranks.back();
+                const int probe_rank = active_ranks.front();
+                const double reference_count =
+                    owned_counts[static_cast<std::size_t>(reference_rank)];
+                if (reference_count > 0.5 && probe_rank != reference_rank) {
+                    FsilsVector partition_probe(shared_layout);
+                    auto partition_span = partition_probe.localSpan();
+                    std::fill(partition_span.begin(), partition_span.end(), Real(0.0));
+                    const Real reference_weight =
+                        static_cast<Real>(-owned_counts[static_cast<std::size_t>(probe_rank)] /
+                                          reference_count);
+                    for (int old = 0; old < lhs.nNo; ++old) {
+                        const int internal = lhs.map(old);
+                        if (internal < 0 || internal >= lhs.mynNo) {
+                            continue;
+                        }
+                        const std::size_t base =
+                            static_cast<std::size_t>(old) * static_cast<std::size_t>(dof);
+                        if (lhs.commu.task == probe_rank) {
+                            partition_span[base + static_cast<std::size_t>(con_start)] = Real(1.0);
+                        } else if (lhs.commu.task == reference_rank) {
+                            partition_span[base + static_cast<std::size_t>(con_start)] =
+                                reference_weight;
+                        }
+                    }
+                    runProbeComparison("constraint_partition_probe", partition_probe);
+                }
+            }
+        }
+
+        if (std::getenv("SVMP_FSILS_COMPARE_FACE_OPERATOR_BASIS") != nullptr &&
+            x->size() > 0 && x->size() <= 64) {
+            for (GlobalIndex dof_idx = 0; dof_idx < x->size(); ++dof_idx) {
+                FsilsVector basis_probe(shared_layout);
+                auto basis_view = basis_probe.createAssemblyView();
+                FE_CHECK_NOT_NULL(basis_view.get(),
+                                  "FsilsLinearSolver::solve: basis probe view");
+                basis_view->beginAssemblyPhase();
+                basis_view->addVectorEntry(dof_idx, Real(1.0), assembly::AddMode::Insert);
+                basis_view->finalizeAssembly();
+                runProbeComparison("basis_" + std::to_string(dof_idx), basis_probe);
+            }
         }
     };
 
@@ -2366,8 +3358,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     };
 
     fe_fsi_linear_solver::fsils_reset_collective_stats(lhs.commu);
-    compareFaceOperatorAgainstFe();
     rebuildPreparedSystem(use_blockschur);
+    compareFaceOperatorAgainstFe();
     report.initial_residual_norm = computeOriginalRhsNorm();
 
     const auto validation_policy = options_.fsils_residual_check_policy;
@@ -2413,43 +3405,6 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         return result;
     };
 
-    auto residualTargetForCheck = [&](const FsilsResidualCheckResult& check) -> Real {
-        const Real rhs_norm = std::max<Real>(check.rhs_norm, static_cast<Real>(1e-30));
-        return std::max<Real>(options_.abs_tol, options_.rel_tol * rhs_norm);
-    };
-
-    auto shouldRetainNearTargetStrictValidationMiss =
-        [&](const FsilsResidualCheckResult& check) -> bool {
-            if (!(use_blockschur && require_true_residual_validation)) {
-                return false;
-            }
-            if (check.ok) {
-                return false;
-            }
-            if (!std::isfinite(static_cast<double>(check.residual_norm)) ||
-                !std::isfinite(static_cast<double>(check.relative_residual))) {
-                return false;
-            }
-
-            const Real target = residualTargetForCheck(check);
-            if (!(target > static_cast<Real>(0.0)) ||
-                !std::isfinite(static_cast<double>(target))) {
-                return false;
-            }
-
-            const Real factor = fsilsStrictValidationNearTargetFactor();
-            if (check.residual_norm <= factor * target) {
-                return true;
-            }
-
-            if (has_native_direct_only_aux_updates) {
-                const Real rel_limit = fsilsNativeDirectTrueResidualRelativeLimit();
-                return check.relative_residual <= rel_limit;
-            }
-
-            return false;
-        };
-
     auto runFsilsSolve = [&](bool blockschur_preparation, std::string& error_out) -> bool {
         error_out.clear();
         try {
@@ -2471,6 +3426,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     if (solve_ok) {
         undoStageScalingOnSolution(use_blockschur);
         storeSolveBufferToSolution();
+        applyLowRankResidualPolish();
         const std::string phase =
             use_blockschur ? "blockschur" : std::string(solverMethodToString(options_.method));
         initial_check = validateInternalResidual(phase);
@@ -2514,232 +3470,21 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         }
     }
 
-    const bool retained_near_target_blockschur_solution =
-        shouldRetainNearTargetStrictValidationMiss(initial_check);
-    if (retained_near_target_blockschur_solution && oopTraceEnabled()) {
-        std::ostringstream oss;
-        oss << "FsilsLinearSolver::solve: retaining near-target BlockSchur solution"
-            << " residual=" << initial_check.residual_norm
-            << " target=" << residualTargetForCheck(initial_check)
-            << " factor=" << fsilsStrictValidationNearTargetFactor();
-        traceLog(oss.str());
-    }
-
-    int local_fail =
-        ((!solve_ok || !initial_check.ok) && !retained_near_target_blockschur_solution)
-            ? 1
-            : 0;
+    int local_fail = (!solve_ok || !initial_check.ok) ? 1 : 0;
     int any_fail = local_fail;
     if (lhs.commu.nTasks > 1) {
         fe_fsi_linear_solver::fsils_allreduce(&local_fail, &any_fail, 1, MPI_INT, MPI_LOR, lhs.commu);
     }
 
-    bool used_fallback_gmres = false;
-    bool fallback_uses_correction_rhs = false;
-    bool skip_strict_retry_after_severe_stall = false;
-    std::vector<Real> fallback_base_solution;
-    std::string fallback_reason;
-    const bool allow_strict_gmres_fallback =
-        use_blockschur ||
-        to_fsils_solver(options_.method) == fe_fsi_linear_solver::LS_TYPE_GMRES;
-    if (any_fail != 0 && allow_strict_gmres_fallback) {
-        fallback_reason = initial_check.detail.empty()
-                              ? std::string("initial ") + std::string(solverMethodToString(options_.method)) +
-                                    " solve did not satisfy the true residual tolerance"
-                              : initial_check.detail;
-
-        if (use_blockschur) {
-            preserved_blockschur_stats = ls.blockschur_stats;
-            preserved_blockschur_momentum_stats = ls.GM.stats;
-            preserved_blockschur_schur_stats = ls.CG.stats;
-            preserved_blockschur_attempt =
-                preserved_blockschur_stats.outer_iterations > 0 ||
-                preserved_blockschur_momentum_stats.solve_calls > 0 ||
-                preserved_blockschur_schur_stats.solve_calls > 0;
-        }
-
-        if (oopTraceEnabled()) {
-            traceLog("FsilsLinearSolver::solve: " + fallback_reason + "; falling back to strict GMRES.");
-        }
-
-        int strict_total_iterations =
-            std::max(base_gmres_total_iterations, 4 * std::max(1, base_gmres_cfg.sD + 1));
-        if (require_true_residual_validation) {
-            strict_total_iterations =
-                std::max(strict_total_iterations, 40 * std::max(1, base_gmres_cfg.sD + 1));
-        }
-        const bool promote_restart =
-            use_blockschur ||
-            gmres_should_promote_restart(options_, initial_check, base_gmres_cfg, ls.RI.itr);
-        if (!use_blockschur && !require_true_residual_validation &&
-            promote_restart && !gmres_retry_severe_stalls()) {
-            skip_strict_retry_after_severe_stall = true;
-            if (oopTraceEnabled()) {
-                traceLog("FsilsLinearSolver::solve: severe GMRES stall detected; "
-                         "skipping strict retry and returning control to caller recovery.");
-            }
-        }
-        used_fallback_gmres = !skip_strict_retry_after_severe_stall;
-        const int recovery_sD = promote_restart
-                                    ? gmres_recovery_restart_dim(base_gmres_cfg, strict_total_iterations)
-                                    : base_gmres_cfg.sD;
-        const auto strict_gmres_cfg = make_gmres_launch_config(options_,
-                                                               strict_total_iterations,
-                                                               recovery_sD);
-        const Real original_rhs_norm = std::max<Real>(initial_check.rhs_norm, 1e-30);
-        const Real original_target =
-            std::max<Real>(options_.abs_tol, options_.rel_tol * original_rhs_norm);
-        Real strict_rel_tol =
-            (options_.rel_tol > 0.0) ? std::max<Real>(options_.rel_tol * static_cast<Real>(0.1), 1e-14) : 0.0;
-        Real strict_abs_tol =
-            (options_.abs_tol > 0.0) ? std::max<Real>(options_.abs_tol * static_cast<Real>(0.1), 1e-20) : 0.0;
-        if (solve_ok && !skip_strict_retry_after_severe_stall &&
-            std::isfinite(static_cast<double>(initial_check.residual_norm)) &&
-            std::isfinite(static_cast<double>(initial_check.relative_residual)) &&
-            initial_check.residual_norm > 0.0 &&
-            original_target > 0.0) {
-            const Real correction_rhs_norm = std::max<Real>(initial_check.residual_norm, 1e-30);
-            strict_rel_tol = std::clamp<Real>(
-                static_cast<Real>(0.5) * original_target / correction_rhs_norm,
-                static_cast<Real>(1e-12),
-                static_cast<Real>(0.5));
-            strict_abs_tol = std::max<Real>(static_cast<Real>(0.5) * original_target, 1e-20);
-        }
-
-        if (!skip_strict_retry_after_severe_stall &&
-            promote_restart &&
-            strict_gmres_cfg.sD > base_gmres_cfg.sD) {
-            fallback_reason += "; promoted Krylov dimension from " +
-                               std::to_string(base_gmres_cfg.sD) + " to " +
-                               std::to_string(strict_gmres_cfg.sD);
-            if (oopTraceEnabled()) {
-                traceLog("FsilsLinearSolver::solve: severe GMRES stall detected; retrying with krylov_dim=" +
-                         std::to_string(strict_gmres_cfg.sD) + ".");
-            }
-        }
-
-        if (!skip_strict_retry_after_severe_stall) {
-            const bool can_use_correction_rhs =
-                solve_ok &&
-                std::isfinite(static_cast<double>(initial_check.residual_norm)) &&
-                std::isfinite(static_cast<double>(initial_check.relative_residual));
-            const bool prefer_full_rhs_retry =
-                can_use_correction_rhs && has_native_rank_one_updates && has_saddle_point;
-            constexpr int max_correction_rounds = 3;
-            const int fallback_rounds =
-                can_use_correction_rhs
-                    ? (max_correction_rounds + (prefer_full_rhs_retry ? 1 : 0))
-                    : 1;
-
-            if (can_use_correction_rhs) {
-                fallback_base_solution.assign(x_data.begin(), x_data.end());
-                fallback_uses_correction_rhs = true;
-            }
-
-            for (int round = 0; round < fallback_rounds; ++round) {
-                fe_fsi_linear_solver::fsils_ls_create(ls,
-                                                      fe_fsi_linear_solver::LS_TYPE_GMRES,
-                                                      strict_rel_tol,
-                                                      strict_abs_tol,
-                                                      strict_gmres_cfg.mItr,
-                                                      strict_gmres_cfg.sD);
-                ls.RI.exact_convergence = true;
-                ls.RI.disable_reorth = false;
-
-                const bool use_full_rhs_retry = prefer_full_rhs_retry && round == 0;
-                const bool use_correction_rhs_round =
-                    fallback_uses_correction_rhs && !use_full_rhs_retry;
-
-                if (use_correction_rhs_round) {
-                    FsilsVector residual_true(shared_layout);
-                    Real rhs_norm_unused = 0.0;
-                    computeTrueResidualVector(residual_true, rhs_norm_unused);
-                    restorePreparedMatrixValues(/*blockschur_preparation=*/false);
-                    loadSolveBufferFromVector(residual_true, /*blockschur_preparation=*/false);
-                    solution_stage_scaling_undone = false;
-                    current_preparation_uses_blockschur = false;
-                } else if (round == 0) {
-                    rebuildPreparedSystem(/*blockschur_preparation=*/false);
-                }
-
-                solve_ok = runFsilsSolve(/*blockschur_preparation=*/false, solve_error);
-                if (!fallback_uses_correction_rhs) {
-                    break;
-                }
-
-                if (!solve_ok) {
-                    if (x_data.size() == fallback_base_solution.size()) {
-                        std::copy(fallback_base_solution.begin(),
-                                  fallback_base_solution.end(),
-                                  x_data.begin());
-                        solution_stage_scaling_undone = true;
-                    }
-                    break;
-                }
-
-                undoStageScalingOnSolution(/*blockschur_preparation=*/false);
-                storeSolveBufferToSolution();
-                if (use_full_rhs_retry) {
-                    auto full_retry_check = validateOriginalResidual("fallback_gmres_full_retry");
-                    full_retry_check = maybeRecenterConstraintMeanAndValidate(
-                        "fallback_gmres_full_retry", full_retry_check);
-                    fallback_base_solution.assign(x_data.begin(), x_data.end());
-                    initial_check = full_retry_check;
-                    if (full_retry_check.ok ||
-                        shouldRetainNearTargetStrictValidationMiss(full_retry_check)) {
-                        break;
-                    }
-                    if (!std::isfinite(static_cast<double>(full_retry_check.residual_norm))) {
-                        break;
-                    }
-                    continue;
-                }
-                FE_THROW_IF(x_data.size() != fallback_base_solution.size(), FEException,
-                            "FsilsLinearSolver::solve: fallback correction size mismatch");
-                for (std::size_t i = 0; i < x_data.size(); ++i) {
-                    x_data[i] += fallback_base_solution[i];
-                }
-                fallback_base_solution.assign(x_data.begin(), x_data.end());
-                solution_stage_scaling_undone = true;
-
-                auto refinement_check = validateOriginalResidual("fallback_gmres_refine");
-                refinement_check = maybeRecenterConstraintMeanAndValidate(
-                    "fallback_gmres_refine", refinement_check);
-                if (refinement_check.ok ||
-                    shouldRetainNearTargetStrictValidationMiss(refinement_check)) {
-                    initial_check = refinement_check;
-                    break;
-                }
-                if (!std::isfinite(static_cast<double>(refinement_check.residual_norm)) ||
-                    refinement_check.residual_norm >= initial_check.residual_norm * static_cast<Real>(0.95)) {
-                    break;
-                }
-                initial_check = refinement_check;
-            }
-        }
-    }
-
     FsilsResidualCheckResult final_check{};
-    // When BlockSchur falls back to GMRES, keep validating/reporting the recovered
-    // solution instead of the failed initial BlockSchur attempt.
-    if (skip_strict_retry_after_severe_stall || (use_blockschur && any_fail != 0 && !used_fallback_gmres)) {
+    if (any_fail != 0) {
         final_check = initial_check;
-        if (retained_near_target_blockschur_solution) {
-            final_check.ok = true;
-            if (!final_check.detail.empty()) {
-                final_check.detail += " [accepted near target]";
-            } else {
-                final_check.detail = "accepted near-target BlockSchur solution";
-            }
-        }
     } else if (solve_ok) {
         undoStageScalingOnSolution(current_preparation_uses_blockschur);
-        if (!(used_fallback_gmres && fallback_uses_correction_rhs)) {
-            storeSolveBufferToSolution();
-        }
-        final_check = validateInternalResidual(used_fallback_gmres ? "fallback_gmres" : "fsils_final");
-        if (shouldValidateResidual(final_check.ok, /*recovery_phase=*/used_fallback_gmres)) {
-            const std::string phase = used_fallback_gmres ? "fallback_gmres" : "fsils_final";
+        storeSolveBufferToSolution();
+        final_check = validateInternalResidual("fsils_final");
+        if (shouldValidateResidual(final_check.ok, /*recovery_phase=*/false)) {
+            const std::string phase = "fsils_final";
             final_check = validateOriginalResidual(phase);
             final_check = maybeRecenterConstraintMeanAndValidate(phase, final_check);
         }
@@ -2748,25 +3493,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         final_check.rhs_norm = std::max<Real>(report.initial_residual_norm, 0.0);
         final_check.residual_norm = std::numeric_limits<Real>::infinity();
         final_check.relative_residual = std::numeric_limits<Real>::infinity();
-        final_check.detail = used_fallback_gmres
-                                 ? "fallback_gmres threw: " + solve_error
-                                 : "fsils solve threw: " + solve_error;
-    }
-
-    const bool retained_near_target_final_solution =
-        !final_check.ok && shouldRetainNearTargetStrictValidationMiss(final_check);
-
-    if ((retained_near_target_blockschur_solution && !used_fallback_gmres &&
-         !skip_strict_retry_after_severe_stall) ||
-        retained_near_target_final_solution) {
-        final_check.ok = true;
-        if (!final_check.detail.empty()) {
-            final_check.detail += " [accepted near target]";
-        } else {
-            final_check.detail = used_fallback_gmres
-                                     ? "accepted near-target fallback GMRES solution"
-                                     : "accepted near-target BlockSchur solution";
-        }
+        final_check.detail = "fsils solve threw: " + solve_error;
     }
 
     int local_final_ok = final_check.ok ? 1 : 0;
@@ -2819,9 +3546,52 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         rhs_check.copyFrom(*b);
         rhs_check.accumulateOverlap();
 
+        FsilsVector x_raw(shared_layout);
+        x_raw.copyFrom(*x);
         FsilsVector x_check(shared_layout);
         x_check.copyFrom(*x);
         x_check.updateGhosts();
+
+        FsilsVector x_delta(shared_layout);
+        x_delta.copyFrom(x_check);
+        {
+            auto delta_span = x_delta.localSpan();
+            const auto raw_span = x_raw.localSpan();
+            FE_THROW_IF(delta_span.size() != raw_span.size(), FEException,
+                        "FsilsLinearSolver::solve: returned x delta size mismatch");
+            for (std::size_t i = 0; i < delta_span.size(); ++i) {
+                delta_span[i] -= raw_span[i];
+            }
+        }
+
+        auto compute_rank_one_dots = [&](FsilsVector& vec) {
+            std::vector<Real> dots(rank_one_updates_.size(), Real(0.0));
+            if (rank_one_updates_.empty()) {
+                return dots;
+            }
+            auto vec_view = vec.createAssemblyView();
+            FE_CHECK_NOT_NULL(vec_view.get(), "FsilsLinearSolver::solve: returned x dot view");
+            for (std::size_t u = 0; u < rank_one_updates_.size(); ++u) {
+                Real dot = Real(0.0);
+                for (const auto& [dof, val] : rank_one_updates_[u].v) {
+                    dot += val * vec_view->getVectorEntry(dof);
+                }
+#if FE_HAS_MPI
+                int mpi_initialized = 0;
+                MPI_Initialized(&mpi_initialized);
+                if (mpi_initialized && lhs.commu.nTasks > 1) {
+                    Real global_dot = Real(0.0);
+                    fe_fsi_linear_solver::fsils_allreduce_sum(
+                        &dot, &global_dot, 1, MPI_DOUBLE, lhs.commu);
+                    dot = global_dot;
+                }
+#endif
+                dots[u] = dot;
+            }
+            return dots;
+        };
+        const auto raw_rank_one_dots = compute_rank_one_dots(x_raw);
+        const auto synced_rank_one_dots = compute_rank_one_dots(x_check);
 
         FsilsVector diff_only(shared_layout);
         A->mult(x_check, diff_only);
@@ -2833,8 +3603,6 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
         FsilsVector diff_full(shared_layout);
         diff_full.copyFrom(matvec_full);
-        addRankOneUpdatesToProduct(rank_one_updates_, x_check, diff_full, lhs.commu);
-        addReducedFieldUpdatesToProduct(reduced_field_updates_, x_check, diff_full, lhs.commu);
         auto diff_full_span = diff_full.localSpan();
         for (std::size_t i = 0; i < diff_full_span.size(); ++i) {
             diff_full_span[i] -= rhs_span[i];
@@ -2842,10 +3610,17 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
         std::ostringstream oss;
         oss << "FsilsLinearSolver::solve: post-return operator check"
+            << " |x_raw|=" << x_raw.norm()
+            << " |x_sync|=" << x_check.norm()
+            << " |x_sync-x_raw|=" << x_delta.norm()
             << " |Jx|=" << matvec_only.norm()
             << " |(J+R)x|=" << (matvec_full.norm())
             << " |Jx-r|=" << diff_only.norm()
             << " |(J+R)x-r|=" << diff_full.norm();
+        for (std::size_t u = 0; u < raw_rank_one_dots.size(); ++u) {
+            oss << " raw_dot[" << u << "]=" << raw_rank_one_dots[u]
+                << " synced_dot[" << u << "]=" << synced_rank_one_dots[u];
+        }
         traceLog(oss.str());
     }
 
@@ -2853,12 +3628,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     report.final_residual_norm = final_check.residual_norm;
     report.relative_residual = final_check.relative_residual;
     report.converged = final_check.ok;
-    report.message = used_fallback_gmres
-                         ? "fsils (fallback gmres)"
-                         : (use_blockschur ? "fsils (blockschur)" : "fsils");
-    if (used_fallback_gmres && !fallback_reason.empty()) {
-        report.message = "fsils (fallback gmres: " + fallback_reason + ")";
-    } else if (!final_check.ok && !final_check.detail.empty()) {
+    report.message = use_blockschur ? "fsils (blockschur)" : "fsils";
+    if (!final_check.ok && !final_check.detail.empty()) {
         report.message = "fsils (" + final_check.detail + ")";
     }
 
@@ -2915,25 +3686,13 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         report.relative_residual = std::numeric_limits<Real>::infinity();
         report.message = "fsils (breakdown:" + reason + ")";
     } else {
-        const Real rel_tol = std::max<Real>(options_.rel_tol, 0.0);
-        const Real abs_tol = std::max<Real>(options_.abs_tol, 0.0);
-        const Real target = std::max(abs_tol, rel_tol * report.initial_residual_norm);
-        const bool meets_target = report.final_residual_norm <= target;
-        if (!report.converged && meets_target) {
-            report.converged = true;
-            report.message = used_fallback_gmres
-                                 ? "fsils (fallback gmres)"
-                                 : (use_blockschur ? "fsils (blockschur)" : "fsils");
-        } else if (!report.converged) {
+        if (!report.converged) {
             const std::string rel_msg = "fsils (not converged; itr=" + std::to_string(report.iterations) +
                                         ", rel=" + std::to_string(report.relative_residual) + ")";
             if (!final_check.ok && !final_check.detail.empty()) {
                 report.message = "fsils (" + final_check.detail + ")";
             } else {
-                report.message = used_fallback_gmres
-                    ? "fsils (fallback gmres; not converged; itr=" + std::to_string(report.iterations) +
-                          ", rel=" + std::to_string(report.relative_residual) + ")"
-                    : rel_msg;
+                report.message = rel_msg;
             }
         }
     }
@@ -2975,6 +3734,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     }
 
     if (solve_ok && oopTraceEnabled()) {
+        logConstraintMeanModeProbe("final");
         logReturnedOperatorBreakdown("final", *x);
 
         FsilsVector rhs_check(shared_layout);
@@ -3013,37 +3773,25 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     report.collective_time_seconds = lhs.commu.collective_stats.allreduce_time;
     report.collective_calls = lhs.commu.collective_stats.allreduce_calls;
     report.collective_words = lhs.commu.collective_stats.allreduce_words;
-    const auto& blockschur_stats_for_report =
-        (used_fallback_gmres && preserved_blockschur_attempt) ? preserved_blockschur_stats
-                                                              : ls.blockschur_stats;
-    const auto& blockschur_momentum_stats_for_report =
-        (used_fallback_gmres && preserved_blockschur_attempt) ? preserved_blockschur_momentum_stats
-                                                              : ls.GM.stats;
-    const auto& blockschur_schur_stats_for_report =
-        (used_fallback_gmres && preserved_blockschur_attempt) ? preserved_blockschur_schur_stats
-                                                              : ls.CG.stats;
-
-    report.blockschur_outer_iterations = blockschur_stats_for_report.outer_iterations;
+    report.blockschur_outer_iterations = ls.blockschur_stats.outer_iterations;
     report.blockschur_collective_calls_max_per_outer =
-        blockschur_stats_for_report.collective_calls_max_per_outer;
+        ls.blockschur_stats.collective_calls_max_per_outer;
     report.blockschur_collective_time_max_per_outer =
-        blockschur_stats_for_report.collective_time_max_per_outer;
-    report.blockschur_momentum_solve_calls = blockschur_momentum_stats_for_report.solve_calls;
-    report.blockschur_momentum_iterations = blockschur_momentum_stats_for_report.iterations_total;
-    report.blockschur_momentum_restart_cycles =
-        blockschur_momentum_stats_for_report.restart_cycles_total;
-    report.blockschur_momentum_solve_time_seconds = blockschur_momentum_stats_for_report.solve_time;
-    report.blockschur_momentum_collective_calls = blockschur_momentum_stats_for_report.collective_calls;
-    report.blockschur_momentum_collective_words = blockschur_momentum_stats_for_report.collective_words;
-    report.blockschur_momentum_collective_time_seconds =
-        blockschur_momentum_stats_for_report.collective_time;
-    report.blockschur_schur_solve_calls = blockschur_schur_stats_for_report.solve_calls;
-    report.blockschur_schur_iterations = blockschur_schur_stats_for_report.iterations_total;
-    report.blockschur_schur_setup_time_seconds = blockschur_schur_stats_for_report.setup_time;
-    report.blockschur_schur_solve_time_seconds = blockschur_schur_stats_for_report.solve_time;
-    report.blockschur_schur_collective_calls = blockschur_schur_stats_for_report.collective_calls;
-    report.blockschur_schur_collective_words = blockschur_schur_stats_for_report.collective_words;
-    report.blockschur_schur_collective_time_seconds = blockschur_schur_stats_for_report.collective_time;
+        ls.blockschur_stats.collective_time_max_per_outer;
+    report.blockschur_momentum_solve_calls = ls.GM.stats.solve_calls;
+    report.blockschur_momentum_iterations = ls.GM.stats.iterations_total;
+    report.blockschur_momentum_restart_cycles = ls.GM.stats.restart_cycles_total;
+    report.blockschur_momentum_solve_time_seconds = ls.GM.stats.solve_time;
+    report.blockschur_momentum_collective_calls = ls.GM.stats.collective_calls;
+    report.blockschur_momentum_collective_words = ls.GM.stats.collective_words;
+    report.blockschur_momentum_collective_time_seconds = ls.GM.stats.collective_time;
+    report.blockschur_schur_solve_calls = ls.CG.stats.solve_calls;
+    report.blockschur_schur_iterations = ls.CG.stats.iterations_total;
+    report.blockschur_schur_setup_time_seconds = ls.CG.stats.setup_time;
+    report.blockschur_schur_solve_time_seconds = ls.CG.stats.solve_time;
+    report.blockschur_schur_collective_calls = ls.CG.stats.collective_calls;
+    report.blockschur_schur_collective_words = ls.CG.stats.collective_words;
+    report.blockschur_schur_collective_time_seconds = ls.CG.stats.collective_time;
 
     if (lhs.commu.task == 0) {
         std::fprintf(stderr,

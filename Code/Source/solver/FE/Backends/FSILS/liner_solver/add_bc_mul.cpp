@@ -41,6 +41,30 @@ namespace {
 
 constexpr int kNativeFaceDuplicateCouplingId = -2;
 
+[[nodiscard]] bool native_face_exact_pre_enabled() noexcept
+{
+  const char* env = std::getenv("SVMP_FSILS_NATIVE_FACE_EXACT_PRE");
+  if (env == nullptr) {
+    return false;
+  }
+  while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+    ++env;
+  }
+  return *env != '\0' && *env != '0';
+}
+
+[[nodiscard]] bool trace_native_face_exact_pre_enabled() noexcept
+{
+  const char* env = std::getenv("SVMP_FSILS_TRACE_NATIVE_FACE_EXACT_PRE");
+  if (env == nullptr) {
+    return false;
+  }
+  while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+    ++env;
+  }
+  return *env != '\0' && *env != '0';
+}
+
 struct ReducedEntryKey
 {
   fsils_int node = -1;
@@ -64,6 +88,8 @@ struct ReducedEntryKeyHash
 
 inline void clear_grouped_reduced_update_preconditioner(FSILS_lhsType& lhs)
 {
+  lhs.native_face_pc_active_indices.clear();
+  lhs.native_face_pc_dense_coeff.clear();
   lhs.reduced_update_pc_active_indices.clear();
   lhs.reduced_update_pc_inner_inv.clear();
   for (auto& group : lhs.grouped_bordered_field_couplings) {
@@ -357,6 +383,83 @@ inline void dense_apply(const std::vector<double>& mat,
 void compute_reduced_update_preconditioner_coupling(FSILS_lhsType& lhs)
 {
   clear_grouped_reduced_update_preconditioner(lhs);
+
+  if (native_face_exact_pre_enabled()) {
+    std::vector<int> active_face_indices;
+    active_face_indices.reserve(lhs.face.size());
+    for (std::size_t idx = 0; idx < lhs.face.size(); ++idx) {
+      const auto& face = lhs.face[idx];
+      if (!face.coupledFlag || std::abs(face.res) <= 1e-30) {
+        continue;
+      }
+      active_face_indices.push_back(static_cast<int>(idx));
+    }
+
+    const int rank = static_cast<int>(active_face_indices.size());
+    if (rank > 1) {
+      std::vector<double> dense_m(static_cast<std::size_t>(rank) *
+                                      static_cast<std::size_t>(rank),
+                                  0.0);
+      bool valid = true;
+      for (int i = 0; i < rank; ++i) {
+        const auto& face_i =
+            lhs.face[static_cast<std::size_t>(active_face_indices[static_cast<std::size_t>(i)])];
+        if (!(std::abs(face_i.res) > 1e-30)) {
+          valid = false;
+          break;
+        }
+        for (int j = 0; j < rank; ++j) {
+          const auto& face_j = lhs.face[static_cast<std::size_t>(
+              active_face_indices[static_cast<std::size_t>(j)])];
+          dense_m[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+                  static_cast<std::size_t>(j)] =
+              face_overlap_owned(lhs, face_j, face_i);
+        }
+        dense_m[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+                static_cast<std::size_t>(i)] +=
+            1.0 / face_i.res;
+      }
+
+      if (valid) {
+        if (lhs.commu.nTasks > 1) {
+          fsils_allreduce_sum_in_place(dense_m.data(),
+                                       static_cast<int>(dense_m.size()),
+                                       cm_mod::mpreal,
+                                       lhs.commu);
+        }
+
+        std::vector<double> dense_inv;
+        if (invert_dense_matrix(rank, dense_m, dense_inv)) {
+          if (lhs.commu.masF && trace_native_face_exact_pre_enabled()) {
+            std::fprintf(stderr, "[NATIVE_FACE_EXACT_PRE] rank=%d\n", rank);
+            for (int i = 0; i < rank; ++i) {
+              std::fprintf(stderr, "[NATIVE_FACE_EXACT_PRE] row=%d", i);
+              for (int j = 0; j < rank; ++j) {
+                std::fprintf(stderr,
+                             " dense_m[%d,%d]=%.17e dense_inv[%d,%d]=%.17e",
+                             i,
+                             j,
+                             dense_m[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+                                     static_cast<std::size_t>(j)],
+                             i,
+                             j,
+                             dense_inv[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+                                       static_cast<std::size_t>(j)]);
+              }
+              std::fprintf(stderr, "\n");
+            }
+            std::fflush(stderr);
+          }
+          for (double& value : dense_inv) {
+            value = -value;
+          }
+          lhs.native_face_pc_active_indices = std::move(active_face_indices);
+          lhs.native_face_pc_dense_coeff = std::move(dense_inv);
+        }
+      }
+    }
+  }
+
   for (auto& group : lhs.grouped_bordered_field_couplings) {
     if (!group_has_exact_face_modes(group)) {
       continue;
@@ -495,6 +598,8 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
   thread_local std::vector<int> shared_face_indices;
   thread_local std::vector<double> shared_face_dot;
   thread_local std::vector<int> exact_group_ids;
+  thread_local std::vector<double> native_face_rhs;
+  thread_local std::vector<double> native_face_alpha;
 
   shared_face_indices.clear();
   shared_face_dot.clear();
@@ -502,10 +607,24 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
   shared_face_dot.reserve(static_cast<size_t>(lhs.nFaces));
   exact_group_ids.clear();
   exact_group_ids.reserve(lhs.grouped_bordered_field_couplings.size());
+  native_face_rhs.clear();
+  native_face_alpha.clear();
 
   auto grouped_update_handled_exactly = [&](int grouped_coupling_id) {
     return std::find(exact_group_ids.begin(), exact_group_ids.end(), grouped_coupling_id) !=
            exact_group_ids.end();
+  };
+
+  const bool use_exact_native_face_pre =
+      op_Type == BcopType::BCOP_TYPE_PRE &&
+      lhs.native_face_pc_active_indices.size() > 1 &&
+      lhs.native_face_pc_dense_coeff.size() ==
+          lhs.native_face_pc_active_indices.size() *
+              lhs.native_face_pc_active_indices.size();
+  auto native_face_handled_exactly = [&](int face_index) {
+    return std::find(lhs.native_face_pc_active_indices.begin(),
+                     lhs.native_face_pc_active_indices.end(),
+                     face_index) != lhs.native_face_pc_active_indices.end();
   };
 
   for (int faIn = 0; faIn < lhs.nFaces; faIn++) {
@@ -513,6 +632,10 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
     const int face_dof = std::min(face.dof, dof);
 
     if (face.coupledFlag) {
+      if (use_exact_native_face_pre && native_face_handled_exactly(faIn)) {
+        continue;
+      }
+
       double coef;
       if (op_Type == BcopType::BCOP_TYPE_ADD) {
         coef = face.res;
@@ -558,6 +681,33 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
           }
         }
       }
+    }
+  }
+
+  if (use_exact_native_face_pre) {
+    const int rank = static_cast<int>(lhs.native_face_pc_active_indices.size());
+    native_face_rhs.assign(static_cast<std::size_t>(rank), 0.0);
+    native_face_alpha.assign(static_cast<std::size_t>(rank), 0.0);
+
+    for (int i = 0; i < rank; ++i) {
+      const auto& face = lhs.face[static_cast<std::size_t>(
+          lhs.native_face_pc_active_indices[static_cast<std::size_t>(i)])];
+      native_face_rhs[static_cast<std::size_t>(i)] = face_dot_owned(lhs, face, X);
+    }
+
+    if (lhs.commu.nTasks > 1) {
+      fsils_allreduce_sum_in_place(native_face_rhs.data(),
+                                   rank,
+                                   cm_mod::mpreal,
+                                   lhs.commu);
+    }
+
+    dense_apply(lhs.native_face_pc_dense_coeff, rank, native_face_rhs, native_face_alpha);
+
+    for (int i = 0; i < rank; ++i) {
+      const auto& face = lhs.face[static_cast<std::size_t>(
+          lhs.native_face_pc_active_indices[static_cast<std::size_t>(i)])];
+      face_axpy_full(face, native_face_alpha[static_cast<std::size_t>(i)], Y);
     }
   }
 

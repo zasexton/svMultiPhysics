@@ -97,12 +97,7 @@ void expectBlockSchurMetricsPresent(const SolverReport& rep)
 
 void expectBlockSchurOrExplicitRecovery(const SolverReport& rep)
 {
-    if (rep.blockschur_outer_iterations > 0) {
-        expectBlockSchurMetricsPresent(rep);
-        return;
-    }
-
-    EXPECT_NE(rep.message.find("fallback gmres"), std::string::npos);
+    expectBlockSchurMetricsPresent(rep);
 }
 
 Real sparseRankOneDot(const GenericVector& x, const RankOneUpdate& update, MPI_Comm comm)
@@ -159,6 +154,11 @@ void addRankOneContribution(FsilsFactory& factory,
         }
     }
     view->finalizeAssembly();
+    auto* corr_fs = dynamic_cast<FsilsVector*>(corr.get());
+    EXPECT_NE(corr_fs, nullptr);
+    if (corr_fs != nullptr) {
+        corr_fs->accumulateOverlap();
+    }
 
     auto ys = y.localSpan();
     const auto cs = corr->localSpan();
@@ -207,6 +207,304 @@ Real fullOperatorRelativeResidual(FsilsFactory& factory,
 
     const Real denom = std::max<Real>(b_acc->norm(), 1e-30);
     return r->norm() / denom;
+}
+
+std::vector<Real> collectRankOneDots(const GenericVector& x,
+                                     std::span<const RankOneUpdate> updates,
+                                     MPI_Comm comm)
+{
+    std::vector<Real> dots;
+    dots.reserve(updates.size());
+    for (const auto& update : updates) {
+        dots.push_back(sparseRankOneDot(x, update, comm));
+    }
+    return dots;
+}
+
+std::vector<Real> gatherOwnedGlobalVector(const GenericVector& x,
+                                          GlobalIndex n_global,
+                                          MPI_Comm comm)
+{
+    const auto* x_fs = dynamic_cast<const FsilsVector*>(&x);
+    EXPECT_NE(x_fs, nullptr);
+
+    std::vector<Real> gathered(static_cast<std::size_t>(n_global), Real(0.0));
+    if (x_fs == nullptr) {
+        return gathered;
+    }
+
+    std::vector<GlobalIndex> dofs(static_cast<std::size_t>(n_global));
+    for (GlobalIndex i = 0; i < n_global; ++i) {
+        dofs[static_cast<std::size_t>(i)] = i;
+    }
+
+    std::vector<GlobalIndex> resolved(static_cast<std::size_t>(n_global), INVALID_GLOBAL_INDEX);
+    x_fs->resolveEntriesCached(dofs, resolved);
+
+    const auto xs = x_fs->localSpan();
+    const auto* shared = x_fs->shared();
+    const int dof = (shared != nullptr) ? shared->dof : 1;
+    const int owned_node_count = (shared != nullptr) ? shared->owned_node_count
+                                                     : static_cast<int>(n_global);
+
+    std::vector<Real> local(static_cast<std::size_t>(n_global), Real(0.0));
+    for (std::size_t i = 0; i < resolved.size(); ++i) {
+        const auto local_dof = resolved[i];
+        if (local_dof == INVALID_GLOBAL_INDEX ||
+            local_dof < 0 ||
+            local_dof >= static_cast<GlobalIndex>(xs.size())) {
+            continue;
+        }
+        if (shared != nullptr) {
+            const int old_node = static_cast<int>(local_dof / dof);
+            if (old_node < 0 || old_node >= owned_node_count) {
+                continue;
+            }
+        }
+        local[i] = xs[static_cast<std::size_t>(local_dof)];
+    }
+
+    MPI_Allreduce(local.data(),
+                  gathered.data(),
+                  static_cast<int>(n_global),
+                  MPI_DOUBLE,
+                  MPI_SUM,
+                  comm);
+    return gathered;
+}
+
+std::vector<Real> gatherOwnedGlobalVectorByOldNode(const GenericVector& x,
+                                                   GlobalIndex n_global,
+                                                   MPI_Comm comm)
+{
+    const auto* x_fs = dynamic_cast<const FsilsVector*>(&x);
+    EXPECT_NE(x_fs, nullptr);
+
+    std::vector<Real> gathered(static_cast<std::size_t>(n_global), Real(0.0));
+    if (x_fs == nullptr) {
+        return gathered;
+    }
+
+    const auto* shared = x_fs->shared();
+    EXPECT_NE(shared, nullptr);
+    if (shared == nullptr) {
+        return gathered;
+    }
+
+    const int dof = shared->dof;
+    const int owned_node_count = shared->owned_node_count;
+    const auto xs = x_fs->localSpan();
+
+    std::vector<Real> local(static_cast<std::size_t>(n_global), Real(0.0));
+    for (int old = 0; old < owned_node_count; ++old) {
+        const int global_node = shared->oldToGlobalNode(old);
+        if (global_node < 0) {
+            continue;
+        }
+        const std::size_t local_base =
+            static_cast<std::size_t>(old) * static_cast<std::size_t>(dof);
+        const std::size_t global_base =
+            static_cast<std::size_t>(global_node) * static_cast<std::size_t>(dof);
+        for (int c = 0; c < dof; ++c) {
+            local[global_base + static_cast<std::size_t>(c)] =
+                xs[local_base + static_cast<std::size_t>(c)];
+        }
+    }
+
+    MPI_Allreduce(local.data(),
+                  gathered.data(),
+                  static_cast<int>(n_global),
+                  MPI_DOUBLE,
+                  MPI_SUM,
+                  comm);
+    return gathered;
+}
+
+[[nodiscard]] bool solveDenseSystemInPlace(std::vector<Real>& a,
+                                           std::vector<Real>& rhs,
+                                           int n)
+{
+    if (static_cast<int>(a.size()) != n * n || static_cast<int>(rhs.size()) != n) {
+        return false;
+    }
+
+    for (int pivot = 0; pivot < n; ++pivot) {
+        int best = pivot;
+        Real best_abs = std::abs(a[static_cast<std::size_t>(pivot) * static_cast<std::size_t>(n) +
+                                   static_cast<std::size_t>(pivot)]);
+        for (int row = pivot + 1; row < n; ++row) {
+            const Real candidate =
+                std::abs(a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+                           static_cast<std::size_t>(pivot)]);
+            if (candidate > best_abs) {
+                best_abs = candidate;
+                best = row;
+            }
+        }
+
+        if (!(best_abs > Real(1e-30))) {
+            return false;
+        }
+
+        if (best != pivot) {
+            for (int col = pivot; col < n; ++col) {
+                std::swap(a[static_cast<std::size_t>(pivot) * static_cast<std::size_t>(n) +
+                            static_cast<std::size_t>(col)],
+                          a[static_cast<std::size_t>(best) * static_cast<std::size_t>(n) +
+                            static_cast<std::size_t>(col)]);
+            }
+            std::swap(rhs[static_cast<std::size_t>(pivot)],
+                      rhs[static_cast<std::size_t>(best)]);
+        }
+
+        const Real pivot_value =
+            a[static_cast<std::size_t>(pivot) * static_cast<std::size_t>(n) +
+              static_cast<std::size_t>(pivot)];
+        for (int row = pivot + 1; row < n; ++row) {
+            const Real factor =
+                a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+                  static_cast<std::size_t>(pivot)] / pivot_value;
+            if (std::abs(factor) <= Real(0.0)) {
+                continue;
+            }
+            a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+              static_cast<std::size_t>(pivot)] = Real(0.0);
+            for (int col = pivot + 1; col < n; ++col) {
+                a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+                  static_cast<std::size_t>(col)] -=
+                    factor * a[static_cast<std::size_t>(pivot) * static_cast<std::size_t>(n) +
+                               static_cast<std::size_t>(col)];
+            }
+            rhs[static_cast<std::size_t>(row)] -= factor * rhs[static_cast<std::size_t>(pivot)];
+        }
+    }
+
+    for (int row = n - 1; row >= 0; --row) {
+        Real accum = rhs[static_cast<std::size_t>(row)];
+        for (int col = row + 1; col < n; ++col) {
+            accum -= a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+                       static_cast<std::size_t>(col)] *
+                     rhs[static_cast<std::size_t>(col)];
+        }
+        const Real diag =
+            a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+              static_cast<std::size_t>(row)];
+        if (!(std::abs(diag) > Real(1e-30))) {
+            return false;
+        }
+        rhs[static_cast<std::size_t>(row)] = accum / diag;
+    }
+
+    return true;
+}
+
+Real denseRelativeResidual(std::span<const Real> a,
+                           int n,
+                           std::span<const Real> x,
+                           std::span<const Real> b)
+{
+    EXPECT_EQ(static_cast<int>(a.size()), n * n);
+    EXPECT_EQ(static_cast<int>(x.size()), n);
+    EXPECT_EQ(static_cast<int>(b.size()), n);
+    if (static_cast<int>(a.size()) != n * n ||
+        static_cast<int>(x.size()) != n ||
+        static_cast<int>(b.size()) != n) {
+        return std::numeric_limits<Real>::infinity();
+    }
+
+    double num_sq = 0.0;
+    double den_sq = 0.0;
+    for (int row = 0; row < n; ++row) {
+        double ax = 0.0;
+        for (int col = 0; col < n; ++col) {
+            ax += static_cast<double>(a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+                                        static_cast<std::size_t>(col)]) *
+                  static_cast<double>(x[static_cast<std::size_t>(col)]);
+        }
+        const double diff = static_cast<double>(b[static_cast<std::size_t>(row)]) - ax;
+        num_sq += diff * diff;
+        den_sq += static_cast<double>(b[static_cast<std::size_t>(row)]) *
+                  static_cast<double>(b[static_cast<std::size_t>(row)]);
+    }
+    return static_cast<Real>(std::sqrt(num_sq / std::max(den_sq, 1e-60)));
+}
+
+std::vector<Real> denseMatVec(std::span<const Real> a,
+                              int n,
+                              std::span<const Real> x)
+{
+    std::vector<Real> y(static_cast<std::size_t>(n), Real(0.0));
+    EXPECT_EQ(static_cast<int>(a.size()), n * n);
+    EXPECT_EQ(static_cast<int>(x.size()), n);
+    if (static_cast<int>(a.size()) != n * n || static_cast<int>(x.size()) != n) {
+        return y;
+    }
+
+    for (int row = 0; row < n; ++row) {
+        double ax = 0.0;
+        for (int col = 0; col < n; ++col) {
+            ax += static_cast<double>(a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
+                                        static_cast<std::size_t>(col)]) *
+                  static_cast<double>(x[static_cast<std::size_t>(col)]);
+        }
+        y[static_cast<std::size_t>(row)] = static_cast<Real>(ax);
+    }
+    return y;
+}
+
+std::vector<Real> denseRankOneDots(std::span<const Real> x,
+                                   std::span<const std::vector<Real>> dense_modes)
+{
+    std::vector<Real> dots(dense_modes.size(), Real(0.0));
+    for (std::size_t mode = 0; mode < dense_modes.size(); ++mode) {
+        double dot = 0.0;
+        const auto& dense_mode = dense_modes[mode];
+        EXPECT_EQ(dense_mode.size(), x.size());
+        const std::size_t limit = std::min(dense_mode.size(), x.size());
+        for (std::size_t i = 0; i < limit; ++i) {
+            dot += static_cast<double>(dense_mode[i]) *
+                   static_cast<double>(x[i]);
+        }
+        dots[mode] = static_cast<Real>(dot);
+    }
+    return dots;
+}
+
+std::vector<Real> sampleDenseOperatorFromBackend(FsilsFactory& factory,
+                                                 const GenericMatrix& A,
+                                                 GlobalIndex n_global,
+                                                 std::span<const RankOneUpdate> updates,
+                                                 MPI_Comm comm,
+                                                 bool accumulate_output = false)
+{
+    std::vector<Real> dense_operator(static_cast<std::size_t>(n_global * n_global), Real(0.0));
+    for (GlobalIndex col = 0; col < n_global; ++col) {
+        auto basis = factory.createVector(n_global);
+        auto basis_view = basis->createAssemblyView();
+        basis_view->beginAssemblyPhase();
+        basis_view->addVectorEntry(col, Real(1.0), assembly::AddMode::Insert);
+        basis_view->finalizeAssembly();
+        basis->updateGhosts();
+
+        auto y = factory.createVector(n_global);
+        A.mult(*basis, *y);
+        addRankOneContribution(factory, *y, *basis, updates, comm);
+        if (accumulate_output) {
+            auto* y_fs = dynamic_cast<FsilsVector*>(y.get());
+            EXPECT_NE(y_fs, nullptr);
+            if (y_fs != nullptr) {
+                y_fs->accumulateOverlap();
+            }
+        }
+
+        const auto y_global = gatherOwnedGlobalVector(*y, n_global, comm);
+        for (GlobalIndex row = 0; row < n_global; ++row) {
+            dense_operator[static_cast<std::size_t>(row) * static_cast<std::size_t>(n_global) +
+                           static_cast<std::size_t>(col)] =
+                y_global[static_cast<std::size_t>(row)];
+        }
+    }
+    return dense_operator;
 }
 
 
@@ -269,6 +567,11 @@ void addReducedFieldContribution(FsilsFactory& factory,
         }
     }
     view->finalizeAssembly();
+    auto* corr_fs = dynamic_cast<FsilsVector*>(corr.get());
+    EXPECT_NE(corr_fs, nullptr);
+    if (corr_fs != nullptr) {
+        corr_fs->accumulateOverlap();
+    }
 
     auto ys = y.localSpan();
     const auto cs = corr->localSpan();
@@ -1755,6 +2058,1151 @@ TEST(FsilsBackendMPI, RankOneUpdateSolversConvergeComparable4DOF)
                                                       std::span<const RankOneUpdate>(&upd, 1),
                                                       MPI_COMM_WORLD);
         EXPECT_LE(rel, 1e-8);
+    }
+}
+
+TEST(FsilsBackendMPI, MultiModeNativeRankOneSolversTrackManufacturedModeResponse)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 4;
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+
+    const IndexRange owned = (rank == 0) ? IndexRange{0, 4} : IndexRange{4, 12};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+
+    if (rank == 0) {
+        const std::array<GlobalIndex, 8> edofs = {0, 1, 2, 3, 4, 5, 6, 7};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    } else {
+        const std::array<GlobalIndex, 8> edofs = {4, 5, 6, 7, 8, 9, 10, 11};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    }
+
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> ghost_rows{4, 5, 6, 7};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 8, 16, 24, 32};
+        std::vector<GlobalIndex> ghost_cols;
+        ghost_cols.reserve(32);
+        for (int r = 0; r < dof; ++r) {
+            for (GlobalIndex c = 0; c < static_cast<GlobalIndex>(2 * dof); ++c) {
+                ghost_cols.push_back(c);
+            }
+        }
+        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
+    }
+
+    FsilsFactory factory(dof);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(n_global);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+
+    const int edof = 2 * dof;
+    std::vector<Real> Ke(edof * edof, 0.0);
+    const auto setKe = [&](int r, int c, Real v) {
+        Ke[static_cast<std::size_t>(r * edof + c)] = v;
+    };
+
+    const Real B[4][4] = {
+        {6.0, 0.7, 0.2,  1.1},
+        {0.7, 5.4, 0.4, -0.3},
+        {0.2, 0.4, 4.7,  0.5},
+        {1.1,-0.3, 0.5,  1.4},
+    };
+    const Real C[4][4] = {
+        {-1.4, 0.1,  0.0, -0.2},
+        { 0.1,-1.1,  0.0,  0.2},
+        { 0.0, 0.0, -1.0, -0.1},
+        {-0.2, 0.2, -0.1,  0.3},
+    };
+
+    for (int r = 0; r < dof; ++r) {
+        for (int c = 0; c < dof; ++c) {
+            setKe(r, c, B[r][c]);
+            setKe(r, c + dof, C[r][c]);
+            setKe(r + dof, c, C[c][r]);
+            setKe(r + dof, c + dof, B[r][c]);
+        }
+    }
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) {
+            idx[static_cast<std::size_t>(i)] = i;
+        }
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    } else {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) {
+            idx[static_cast<std::size_t>(i)] = 4 + i;
+        }
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    }
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    std::array<RankOneUpdate, 2> updates{};
+    for (auto& update : updates) {
+        update.active_components = {0, 1, 2};
+        update.prefer_native_face = true;
+    }
+    updates[0].sigma = 320.0;
+    updates[1].sigma = 240.0;
+
+    if (rank == 0) {
+        updates[0].v = {
+            {0,  0.06},
+            {1, -0.02},
+            {2,  0.04},
+        };
+        updates[1].v = {
+            {0, -0.03},
+            {1,  0.07},
+            {2,  0.02},
+        };
+    } else {
+        updates[0].v = {
+            {8,  0.11},
+            {9,  0.04},
+            {10,-0.06},
+        };
+        updates[1].v = {
+            {8, -0.05},
+            {9,  0.09},
+            {10, 0.08},
+        };
+    }
+
+    const std::array<Real, n_global> x_exact_values{
+         1.2, -0.7,  0.8, 40.0,
+         0.6,  0.5, -1.0, 39.8,
+        -1.4,  0.9,  0.7, 40.3,
+    };
+
+    auto x_exact = factory.createVector(n_global);
+    auto exact_view = x_exact->createAssemblyView();
+    exact_view->beginAssemblyPhase();
+    for (GlobalIndex dof_idx = owned.first; dof_idx < owned.last; ++dof_idx) {
+        exact_view->addVectorEntry(dof_idx,
+                                   x_exact_values[static_cast<std::size_t>(dof_idx)],
+                                   assembly::AddMode::Insert);
+    }
+    exact_view->finalizeAssembly();
+    x_exact->updateGhosts();
+
+    A->mult(*x_exact, *b);
+    addRankOneContribution(factory,
+                           *b,
+                           *x_exact,
+                           std::span<const RankOneUpdate>(updates.data(), updates.size()),
+                           MPI_COMM_WORLD);
+
+    auto x_ref = factory.createVector(n_global);
+    SolverOptions ref_opts;
+    ref_opts.method = SolverMethod::GMRES;
+    ref_opts.preconditioner = PreconditionerType::Diagonal;
+    ref_opts.rel_tol = 1e-10;
+    ref_opts.abs_tol = 1e-14;
+    ref_opts.max_iter = 400;
+    ref_opts.krylov_dim = 120;
+    ref_opts.fsils_residual_check_policy = FsilsResidualCheckPolicy::RetryOnly;
+
+    auto ref_solver = factory.createLinearSolver(ref_opts);
+    ASSERT_TRUE(ref_solver->supportsNativeRankOneUpdates());
+    ref_solver->setRankOneUpdates(std::span<const RankOneUpdate>(updates.data(), updates.size()));
+    ref_solver->setEffectiveTimeStep(1.0 / 300.0);
+
+    const auto ref_rep = ref_solver->solve(*A, *x_ref, *b);
+    EXPECT_TRUE(ref_rep.converged);
+    expectSolverReportSane(ref_rep, ref_opts.max_iter);
+    EXPECT_EQ(ref_rep.message.find("fallback"), std::string::npos);
+
+    const Real ref_rel =
+        fullOperatorRelativeResidual(factory,
+                                     *A,
+                                     *x_ref,
+                                     *b,
+                                     std::span<const RankOneUpdate>(updates.data(), updates.size()),
+                                     MPI_COMM_WORLD);
+    EXPECT_LE(ref_rel, 1e-10);
+
+    auto x_bs = factory.createVector(n_global);
+    auto bs_opts = makeFsilsBlockSchurOptions(/*dof_per_node=*/4,
+                                              /*primary_components=*/3,
+                                              /*constraint_components=*/1,
+                                              FsilsBlockSchurSchurPreconditioner::DiagL,
+                                              FsilsBlockSchurMomentumApproximation::DiagK);
+    bs_opts.rel_tol = 1e-8;
+    bs_opts.abs_tol = 1e-12;
+    bs_opts.max_iter = 30;
+    bs_opts.krylov_dim = 40;
+    bs_opts.fsils_blockschur_gm_max_iter = 160;
+    bs_opts.fsils_blockschur_cg_max_iter = 160;
+    bs_opts.fsils_blockschur_gm_rel_tol = 1e-10;
+    bs_opts.fsils_blockschur_cg_rel_tol = 1e-10;
+
+    auto bs_solver = factory.createLinearSolver(bs_opts);
+    ASSERT_TRUE(bs_solver->supportsNativeRankOneUpdates());
+    bs_solver->setRankOneUpdates(std::span<const RankOneUpdate>(updates.data(), updates.size()));
+    bs_solver->setEffectiveTimeStep(1.0 / 300.0);
+
+    const auto bs_rep = bs_solver->solve(*A, *x_bs, *b);
+    EXPECT_TRUE(bs_rep.converged);
+    expectSolverReportSane(bs_rep, bs_opts.max_iter);
+    EXPECT_EQ(bs_rep.message.find("fallback"), std::string::npos);
+    expectBlockSchurMetricsPresent(bs_rep);
+
+    const Real bs_rel =
+        fullOperatorRelativeResidual(factory,
+                                     *A,
+                                     *x_bs,
+                                     *b,
+                                     std::span<const RankOneUpdate>(updates.data(), updates.size()),
+                                     MPI_COMM_WORLD);
+    EXPECT_LE(bs_rel, 1e-6);
+
+    const auto ref_dots =
+        collectRankOneDots(*x_ref, std::span<const RankOneUpdate>(updates.data(), updates.size()), MPI_COMM_WORLD);
+    const auto bs_dots =
+        collectRankOneDots(*x_bs, std::span<const RankOneUpdate>(updates.data(), updates.size()), MPI_COMM_WORLD);
+
+    ASSERT_EQ(ref_dots.size(), bs_dots.size());
+    for (std::size_t i = 0; i < ref_dots.size(); ++i) {
+        EXPECT_GT(std::abs(ref_dots[i]), 1e-3);
+        const Real bs_tol = std::max<Real>(1e-6, std::abs(ref_dots[i]) * 2e-3);
+        EXPECT_NEAR(bs_dots[i], ref_dots[i], bs_tol);
+    }
+}
+
+// Targeted parity repro for the shared distributed low-rank / coarse-space path.
+// Keep this disabled until BlockSchur recovers near-reference mode response on
+// the near-dependent two-mode outlet system.
+TEST(FsilsBackendMPI, DISABLED_NearDependentNativeRankOneBlockSchurMatchesReferenceModeResponse)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 4;
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+
+    const IndexRange owned = (rank == 0) ? IndexRange{0, 4} : IndexRange{4, 12};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+
+    if (rank == 0) {
+        const std::array<GlobalIndex, 8> edofs = {0, 1, 2, 3, 4, 5, 6, 7};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    } else {
+        const std::array<GlobalIndex, 8> edofs = {4, 5, 6, 7, 8, 9, 10, 11};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    }
+
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> ghost_rows{4, 5, 6, 7};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 8, 16, 24, 32};
+        std::vector<GlobalIndex> ghost_cols;
+        ghost_cols.reserve(32);
+        for (int r = 0; r < dof; ++r) {
+            for (GlobalIndex c = 0; c < static_cast<GlobalIndex>(2 * dof); ++c) {
+                ghost_cols.push_back(c);
+            }
+        }
+        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
+    }
+
+    FsilsFactory factory(dof);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(n_global);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+
+    const int edof = 2 * dof;
+    std::vector<Real> Ke(edof * edof, 0.0);
+    const auto setKe = [&](int r, int c, Real v) {
+        Ke[static_cast<std::size_t>(r * edof + c)] = v;
+    };
+
+    const Real B[4][4] = {
+        {6.0, 0.5, 0.2,  1.0},
+        {0.5, 5.0, 0.1, -0.8},
+        {0.2, 0.1, 4.5,  0.6},
+        {1.0,-0.8, 0.6,  1.0e-3},
+    };
+    const Real C[4][4] = {
+        {-1.4, 0.0,  0.0, -0.15},
+        { 0.0,-1.1,  0.0,  0.10},
+        { 0.0, 0.0, -1.2, -0.08},
+        {-0.15, 0.10,-0.08, 0.0},
+    };
+
+    for (int r = 0; r < dof; ++r) {
+        for (int c = 0; c < dof; ++c) {
+            setKe(r, c, B[r][c]);
+            setKe(r, c + dof, C[r][c]);
+            setKe(r + dof, c, C[c][r]);
+            setKe(r + dof, c + dof, B[r][c]);
+        }
+    }
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) {
+            idx[static_cast<std::size_t>(i)] = i;
+        }
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    } else {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) {
+            idx[static_cast<std::size_t>(i)] = 4 + i;
+        }
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    }
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    std::array<RankOneUpdate, 2> updates{};
+    for (auto& update : updates) {
+        update.active_components = {0, 1, 2};
+        update.prefer_native_face = true;
+    }
+    updates[0].sigma = 400.0;
+    updates[1].sigma = 350.0;
+
+    if (rank == 0) {
+        updates[0].v = {
+            {0, 0.08},
+            {1,-0.03},
+            {2, 0.02},
+        };
+        updates[1].v = {
+            {0, 0.07},
+            {1, 0.04},
+            {2,-0.01},
+        };
+    } else {
+        updates[0].v = {
+            {8,  0.12},
+            {9,  0.05},
+            {10,-0.07},
+        };
+        updates[1].v = {
+            {8,  0.11},
+            {9,  0.045},
+            {10,-0.065},
+        };
+    }
+
+    const std::array<Real, n_global> x_exact_values{
+         1.3, -0.8,  0.9, 150.0,
+         0.7,  0.4, -1.2, 149.7,
+        -1.6,  1.1,  0.8, 150.4,
+    };
+
+    auto x_exact = factory.createVector(n_global);
+    auto exact_view = x_exact->createAssemblyView();
+    exact_view->beginAssemblyPhase();
+    for (GlobalIndex dof_idx = owned.first; dof_idx < owned.last; ++dof_idx) {
+        exact_view->addVectorEntry(dof_idx,
+                                   x_exact_values[static_cast<std::size_t>(dof_idx)],
+                                   assembly::AddMode::Insert);
+    }
+    exact_view->finalizeAssembly();
+    x_exact->updateGhosts();
+
+    A->mult(*x_exact, *b);
+    addRankOneContribution(factory,
+                           *b,
+                           *x_exact,
+                           std::span<const RankOneUpdate>(updates.data(), updates.size()),
+                           MPI_COMM_WORLD);
+
+    auto x_ref = factory.createVector(n_global);
+    SolverOptions ref_opts;
+    ref_opts.method = SolverMethod::GMRES;
+    ref_opts.preconditioner = PreconditionerType::Diagonal;
+    ref_opts.rel_tol = 1e-10;
+    ref_opts.abs_tol = 1e-14;
+    ref_opts.max_iter = 400;
+    ref_opts.krylov_dim = 120;
+    ref_opts.fsils_residual_check_policy = FsilsResidualCheckPolicy::RetryOnly;
+
+    auto ref_solver = factory.createLinearSolver(ref_opts);
+    ASSERT_TRUE(ref_solver->supportsNativeRankOneUpdates());
+    ref_solver->setRankOneUpdates(std::span<const RankOneUpdate>(updates.data(), updates.size()));
+    ref_solver->setEffectiveTimeStep(1.0 / 300.0);
+
+    const auto ref_rep = ref_solver->solve(*A, *x_ref, *b);
+    EXPECT_TRUE(ref_rep.converged);
+    expectSolverReportSane(ref_rep, ref_opts.max_iter);
+    EXPECT_EQ(ref_rep.message.find("fallback"), std::string::npos);
+
+    const Real ref_rel =
+        fullOperatorRelativeResidual(factory,
+                                     *A,
+                                     *x_ref,
+                                     *b,
+                                     std::span<const RankOneUpdate>(updates.data(), updates.size()),
+                                     MPI_COMM_WORLD);
+    EXPECT_LE(ref_rel, 1e-10);
+
+    auto x_bs = factory.createVector(n_global);
+    auto bs_opts = makeFsilsBlockSchurOptions(/*dof_per_node=*/4,
+                                              /*primary_components=*/3,
+                                              /*constraint_components=*/1,
+                                              FsilsBlockSchurSchurPreconditioner::DiagL,
+                                              FsilsBlockSchurMomentumApproximation::DiagK);
+    bs_opts.rel_tol = 1e-8;
+    bs_opts.abs_tol = 1e-14;
+    bs_opts.max_iter = 20;
+    bs_opts.krylov_dim = 40;
+    bs_opts.fsils_blockschur_gm_max_iter = 120;
+    bs_opts.fsils_blockschur_cg_max_iter = 120;
+    bs_opts.fsils_blockschur_gm_rel_tol = 1e-10;
+    bs_opts.fsils_blockschur_cg_rel_tol = 1e-10;
+
+    auto bs_solver = factory.createLinearSolver(bs_opts);
+    ASSERT_TRUE(bs_solver->supportsNativeRankOneUpdates());
+    bs_solver->setRankOneUpdates(std::span<const RankOneUpdate>(updates.data(), updates.size()));
+    bs_solver->setEffectiveTimeStep(1.0 / 300.0);
+
+    const auto bs_rep = bs_solver->solve(*A, *x_bs, *b);
+    EXPECT_TRUE(bs_rep.converged);
+    expectSolverReportSane(bs_rep, bs_opts.max_iter);
+    EXPECT_EQ(bs_rep.message.find("fallback"), std::string::npos);
+    expectBlockSchurMetricsPresent(bs_rep);
+
+    const Real bs_rel =
+        fullOperatorRelativeResidual(factory,
+                                     *A,
+                                     *x_bs,
+                                     *b,
+                                     std::span<const RankOneUpdate>(updates.data(), updates.size()),
+                                     MPI_COMM_WORLD);
+    EXPECT_LE(bs_rel, std::max<Real>(5e-10, ref_rel * 20.0));
+
+    const auto ref_dots =
+        collectRankOneDots(*x_ref, std::span<const RankOneUpdate>(updates.data(), updates.size()), MPI_COMM_WORLD);
+    const auto bs_dots =
+        collectRankOneDots(*x_bs, std::span<const RankOneUpdate>(updates.data(), updates.size()), MPI_COMM_WORLD);
+
+    ASSERT_EQ(ref_dots.size(), bs_dots.size());
+    for (std::size_t i = 0; i < ref_dots.size(); ++i) {
+        EXPECT_GT(std::abs(ref_dots[i]), 1e-3);
+        const Real bs_tol = std::max<Real>(1e-8, std::abs(ref_dots[i]) * 5e-4);
+        EXPECT_NEAR(bs_dots[i], ref_dots[i], bs_tol);
+    }
+}
+
+// Dense-collapse debug harness for the distributed multi-mode low-rank outlet path.
+// This is useful for manual backend exploration, but it is not treated as the
+// authoritative unit oracle for overlapped distributed semantics.
+TEST(FsilsBackendMPI, DISABLED_DistributedRankOneLooseBlockSchurTracksReferenceModeResponse)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 4;
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+
+    const IndexRange owned = (rank == 0) ? IndexRange{0, 4} : IndexRange{4, 12};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+
+    if (rank == 0) {
+        const std::array<GlobalIndex, 8> edofs = {0, 1, 2, 3, 4, 5, 6, 7};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    } else {
+        const std::array<GlobalIndex, 8> edofs = {4, 5, 6, 7, 8, 9, 10, 11};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    }
+
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> ghost_rows{4, 5, 6, 7};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 8, 16, 24, 32};
+        std::vector<GlobalIndex> ghost_cols;
+        ghost_cols.reserve(32);
+        for (int r = 0; r < dof; ++r) {
+            for (GlobalIndex c = 0; c < static_cast<GlobalIndex>(2 * dof); ++c) {
+                ghost_cols.push_back(c);
+            }
+        }
+        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
+    }
+
+    FsilsFactory factory(dof);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(n_global);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+
+    const int edof = 2 * dof;
+    std::vector<Real> Ke(edof * edof, 0.0);
+    const auto setKe = [&](int r, int c, Real v) {
+        Ke[static_cast<std::size_t>(r * edof + c)] = v;
+    };
+
+    const Real B[4][4] = {
+        {6.0, 0.5, 0.2,  1.0},
+        {0.5, 5.0, 0.1, -0.8},
+        {0.2, 0.1, 4.5,  0.6},
+        {1.0,-0.8, 0.6,  1.0e-3},
+    };
+    const Real C[4][4] = {
+        {-1.4, 0.0,  0.0, -0.15},
+        { 0.0,-1.1,  0.0,  0.10},
+        { 0.0, 0.0, -1.2, -0.08},
+        {-0.15, 0.10,-0.08, 0.0},
+    };
+
+    for (int r = 0; r < dof; ++r) {
+        for (int c = 0; c < dof; ++c) {
+            setKe(r, c, B[r][c]);
+            setKe(r, c + dof, C[r][c]);
+            setKe(r + dof, c, C[c][r]);
+            setKe(r + dof, c + dof, B[r][c]);
+        }
+    }
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) {
+            idx[static_cast<std::size_t>(i)] = i;
+        }
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    } else {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) {
+            idx[static_cast<std::size_t>(i)] = 4 + i;
+        }
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    }
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    std::array<RankOneUpdate, 2> updates{};
+    for (auto& update : updates) {
+        update.active_components = {0, 1, 2};
+        update.prefer_native_face = true;
+    }
+    updates[0].sigma = 400.0;
+    updates[1].sigma = 350.0;
+
+    if (rank == 0) {
+        updates[0].v = {
+            {0, 0.08},
+            {1,-0.03},
+            {2, 0.02},
+        };
+        updates[1].v = {
+            {0, 0.07},
+            {1, 0.04},
+            {2,-0.01},
+        };
+    } else {
+        updates[0].v = {
+            {8,  0.12},
+            {9,  0.05},
+            {10,-0.07},
+        };
+        updates[1].v = {
+            {8,  0.11},
+            {9,  0.045},
+            {10,-0.065},
+        };
+    }
+
+    const std::array<Real, n_global> x_exact_values{
+        1.3, -0.8,  0.9, 150.0,
+        0.7,  0.4, -1.2, 149.7,
+       -1.6,  1.1,  0.8, 150.4,
+    };
+
+    auto x_exact = factory.createVector(n_global);
+    auto exact_view = x_exact->createAssemblyView();
+    exact_view->beginAssemblyPhase();
+    for (GlobalIndex dof_idx = owned.first; dof_idx < owned.last; ++dof_idx) {
+        exact_view->addVectorEntry(dof_idx,
+                                   x_exact_values[static_cast<std::size_t>(dof_idx)],
+                                   assembly::AddMode::Insert);
+    }
+    exact_view->finalizeAssembly();
+    x_exact->updateGhosts();
+
+    A->mult(*x_exact, *b);
+    addRankOneContribution(factory,
+                           *b,
+                           *x_exact,
+                           std::span<const RankOneUpdate>(updates.data(), updates.size()),
+                           MPI_COMM_WORLD);
+
+    auto x_ref = factory.createVector(n_global);
+    SolverOptions ref_opts;
+    ref_opts.method = SolverMethod::GMRES;
+    ref_opts.preconditioner = PreconditionerType::Diagonal;
+    ref_opts.rel_tol = 1e-10;
+    ref_opts.abs_tol = 1e-14;
+    ref_opts.max_iter = 400;
+    ref_opts.krylov_dim = 120;
+    ref_opts.fsils_residual_check_policy = FsilsResidualCheckPolicy::RetryOnly;
+
+    auto ref_solver = factory.createLinearSolver(ref_opts);
+    ASSERT_TRUE(ref_solver->supportsNativeRankOneUpdates());
+    ref_solver->setRankOneUpdates(std::span<const RankOneUpdate>(updates.data(), updates.size()));
+    ref_solver->setEffectiveTimeStep(1.0 / 300.0);
+
+    const auto ref_rep = ref_solver->solve(*A, *x_ref, *b);
+    EXPECT_TRUE(ref_rep.converged);
+    expectSolverReportSane(ref_rep, ref_opts.max_iter);
+
+    const Real ref_rel =
+        fullOperatorRelativeResidual(factory,
+                                     *A,
+                                     *x_ref,
+                                     *b,
+                                     std::span<const RankOneUpdate>(updates.data(), updates.size()),
+                                     MPI_COMM_WORLD);
+    EXPECT_LE(ref_rel, 1e-10);
+
+    auto x_bs = factory.createVector(n_global);
+    auto bs_opts = makeFsilsBlockSchurOptions(/*dof_per_node=*/4,
+                                              /*primary_components=*/3,
+                                              /*constraint_components=*/1,
+                                              FsilsBlockSchurSchurPreconditioner::DiagL,
+                                              FsilsBlockSchurMomentumApproximation::DiagK);
+    bs_opts.rel_tol = 1e-3;
+    bs_opts.abs_tol = 1e-14;
+    bs_opts.max_iter = 15;
+    bs_opts.krylov_dim = 40;
+    bs_opts.fsils_blockschur_gm_max_iter = 120;
+    bs_opts.fsils_blockschur_cg_max_iter = 120;
+    bs_opts.fsils_blockschur_gm_rel_tol = 1e-10;
+    bs_opts.fsils_blockschur_cg_rel_tol = 1e-10;
+
+    auto bs_solver = factory.createLinearSolver(bs_opts);
+    ASSERT_TRUE(bs_solver->supportsNativeRankOneUpdates());
+    bs_solver->setRankOneUpdates(std::span<const RankOneUpdate>(updates.data(), updates.size()));
+    bs_solver->setEffectiveTimeStep(1.0 / 300.0);
+
+    const auto bs_rep = bs_solver->solve(*A, *x_bs, *b);
+    EXPECT_TRUE(bs_rep.converged);
+    expectSolverReportSane(bs_rep, bs_opts.max_iter);
+    EXPECT_EQ(bs_rep.message.find("fallback"), std::string::npos);
+    expectBlockSchurMetricsPresent(bs_rep);
+
+    const Real bs_rel =
+        fullOperatorRelativeResidual(factory,
+                                     *A,
+                                     *x_bs,
+                                     *b,
+                                     std::span<const RankOneUpdate>(updates.data(), updates.size()),
+                                     MPI_COMM_WORLD);
+    EXPECT_LE(bs_rel, 2e-3);
+
+    std::vector<std::vector<Real>> dense_modes(updates.size(),
+                                               std::vector<Real>(static_cast<std::size_t>(n_global),
+                                                                 Real(0.0)));
+    for (std::size_t mode = 0; mode < updates.size(); ++mode) {
+        std::vector<Real> local_mode(static_cast<std::size_t>(n_global), Real(0.0));
+        for (const auto& [dof_idx, value] : updates[mode].v) {
+            local_mode[static_cast<std::size_t>(dof_idx)] = value;
+        }
+        MPI_Allreduce(local_mode.data(),
+                      dense_modes[mode].data(),
+                      static_cast<int>(n_global),
+                      MPI_DOUBLE,
+                      MPI_SUM,
+                      MPI_COMM_WORLD);
+    }
+
+    std::vector<Real> dense_operator(static_cast<std::size_t>(n_global * n_global), Real(0.0));
+    auto addDenseElement = [&](GlobalIndex offset) {
+        for (int r = 0; r < edof; ++r) {
+            for (int c = 0; c < edof; ++c) {
+                dense_operator[static_cast<std::size_t>(offset + r) * static_cast<std::size_t>(n_global) +
+                               static_cast<std::size_t>(offset + c)] +=
+                    Ke[static_cast<std::size_t>(r * edof + c)];
+            }
+        }
+    };
+    addDenseElement(0);
+    addDenseElement(dof);
+    for (std::size_t mode = 0; mode < updates.size(); ++mode) {
+        for (int row = 0; row < n_global; ++row) {
+            for (int col = 0; col < n_global; ++col) {
+                dense_operator[static_cast<std::size_t>(row) * static_cast<std::size_t>(n_global) +
+                               static_cast<std::size_t>(col)] +=
+                    updates[mode].sigma *
+                    dense_modes[mode][static_cast<std::size_t>(row)] *
+                    dense_modes[mode][static_cast<std::size_t>(col)];
+            }
+        }
+    }
+
+    const auto backend_dense_operator =
+        sampleDenseOperatorFromBackend(factory,
+                                       *A,
+                                       n_global,
+                                       std::span<const RankOneUpdate>(updates.data(), updates.size()),
+                                       MPI_COMM_WORLD);
+    const auto backend_dense_operator_acc =
+        sampleDenseOperatorFromBackend(factory,
+                                       *A,
+                                       n_global,
+                                       std::span<const RankOneUpdate>(updates.data(), updates.size()),
+                                       MPI_COMM_WORLD,
+                                       /*accumulate_output=*/true);
+
+    Real dense_operator_max_abs_diff = Real(0.0);
+    GlobalIndex dense_operator_worst_row = 0;
+    GlobalIndex dense_operator_worst_col = 0;
+    Real dense_operator_acc_max_abs_diff = Real(0.0);
+    GlobalIndex dense_operator_acc_worst_row = 0;
+    GlobalIndex dense_operator_acc_worst_col = 0;
+    for (GlobalIndex row = 0; row < n_global; ++row) {
+        for (GlobalIndex col = 0; col < n_global; ++col) {
+            const auto idx = static_cast<std::size_t>(row) * static_cast<std::size_t>(n_global) +
+                             static_cast<std::size_t>(col);
+            const Real diff = std::abs(dense_operator[idx] - backend_dense_operator[idx]);
+            if (diff > dense_operator_max_abs_diff) {
+                dense_operator_max_abs_diff = diff;
+                dense_operator_worst_row = row;
+                dense_operator_worst_col = col;
+            }
+            const Real acc_diff =
+                std::abs(backend_dense_operator_acc[idx] - backend_dense_operator[idx]);
+            if (acc_diff > dense_operator_acc_max_abs_diff) {
+                dense_operator_acc_max_abs_diff = acc_diff;
+                dense_operator_acc_worst_row = row;
+                dense_operator_acc_worst_col = col;
+            }
+        }
+    }
+
+    std::vector<Real> dense_exact(x_exact_values.begin(), x_exact_values.end());
+    std::vector<Real> dense_rhs(static_cast<std::size_t>(n_global), Real(0.0));
+    std::vector<Real> backend_dense_rhs(static_cast<std::size_t>(n_global), Real(0.0));
+    std::vector<Real> backend_dense_rhs_acc(static_cast<std::size_t>(n_global), Real(0.0));
+    for (int row = 0; row < n_global; ++row) {
+        for (int col = 0; col < n_global; ++col) {
+            dense_rhs[static_cast<std::size_t>(row)] +=
+                dense_operator[static_cast<std::size_t>(row) * static_cast<std::size_t>(n_global) +
+                               static_cast<std::size_t>(col)] *
+                dense_exact[static_cast<std::size_t>(col)];
+            backend_dense_rhs[static_cast<std::size_t>(row)] +=
+                backend_dense_operator[static_cast<std::size_t>(row) * static_cast<std::size_t>(n_global) +
+                                       static_cast<std::size_t>(col)] *
+                dense_exact[static_cast<std::size_t>(col)];
+            backend_dense_rhs_acc[static_cast<std::size_t>(row)] +=
+                backend_dense_operator_acc[static_cast<std::size_t>(row) * static_cast<std::size_t>(n_global) +
+                                           static_cast<std::size_t>(col)] *
+                dense_exact[static_cast<std::size_t>(col)];
+        }
+    }
+
+    auto dense_work = dense_operator;
+    auto dense_solution = dense_rhs;
+    ASSERT_TRUE(solveDenseSystemInPlace(dense_work, dense_solution, static_cast<int>(n_global)));
+    for (int i = 0; i < n_global; ++i) {
+        EXPECT_NEAR(dense_solution[static_cast<std::size_t>(i)],
+                    dense_exact[static_cast<std::size_t>(i)],
+                    1e-11);
+    }
+
+    auto backend_dense_work = backend_dense_operator;
+    auto backend_dense_solution = backend_dense_rhs;
+    ASSERT_TRUE(solveDenseSystemInPlace(
+        backend_dense_work, backend_dense_solution, static_cast<int>(n_global)));
+    for (int i = 0; i < n_global; ++i) {
+        EXPECT_NEAR(backend_dense_solution[static_cast<std::size_t>(i)],
+                    dense_exact[static_cast<std::size_t>(i)],
+                    1e-11);
+    }
+
+    auto backend_dense_work_acc = backend_dense_operator_acc;
+    auto backend_dense_solution_acc = backend_dense_rhs_acc;
+    ASSERT_TRUE(solveDenseSystemInPlace(
+        backend_dense_work_acc, backend_dense_solution_acc, static_cast<int>(n_global)));
+
+    const auto x_exact_global = gatherOwnedGlobalVector(*x_exact, n_global, MPI_COMM_WORLD);
+    for (int i = 0; i < n_global; ++i) {
+        EXPECT_NEAR(x_exact_global[static_cast<std::size_t>(i)],
+                    dense_exact[static_cast<std::size_t>(i)],
+                    1e-12);
+    }
+    const auto b_global = gatherOwnedGlobalVector(*b, n_global, MPI_COMM_WORLD);
+    auto b_acc = factory.createVector(n_global);
+    b_acc->copyFrom(*b);
+    auto* b_acc_fs = dynamic_cast<FsilsVector*>(b_acc.get());
+    ASSERT_NE(b_acc_fs, nullptr);
+    if (b_acc_fs != nullptr) {
+        b_acc_fs->accumulateOverlap();
+    }
+    const auto b_acc_global = gatherOwnedGlobalVector(*b_acc, n_global, MPI_COMM_WORLD);
+    for (int i = 0; i < n_global; ++i) {
+        EXPECT_NEAR(b_global[static_cast<std::size_t>(i)],
+                    dense_rhs[static_cast<std::size_t>(i)],
+                    1e-10)
+            << "backend distributed operator does not match dense assembled oracle at rhs entry " << i;
+        EXPECT_NEAR(b_global[static_cast<std::size_t>(i)],
+                    backend_dense_rhs[static_cast<std::size_t>(i)],
+                    1e-10)
+            << "backend distributed operator does not match sampled dense backend oracle at rhs entry "
+            << i;
+        EXPECT_NEAR(b_acc_global[static_cast<std::size_t>(i)],
+                    backend_dense_rhs_acc[static_cast<std::size_t>(i)],
+                    1e-10)
+            << "backend accumulated rhs does not match accumulated sampled dense backend oracle at rhs entry "
+            << i;
+    }
+
+    const auto x_ref_global = gatherOwnedGlobalVector(*x_ref, n_global, MPI_COMM_WORLD);
+    const auto x_bs_global = gatherOwnedGlobalVector(*x_bs, n_global, MPI_COMM_WORLD);
+    const auto x_ref_global_old_node =
+        gatherOwnedGlobalVectorByOldNode(*x_ref, n_global, MPI_COMM_WORLD);
+    const auto x_bs_global_old_node =
+        gatherOwnedGlobalVectorByOldNode(*x_bs, n_global, MPI_COMM_WORLD);
+    const Real ref_dense_rel =
+        denseRelativeResidual(dense_operator, static_cast<int>(n_global), x_ref_global, dense_rhs);
+    const Real bs_dense_rel =
+        denseRelativeResidual(dense_operator, static_cast<int>(n_global), x_bs_global, dense_rhs);
+    const Real ref_backend_dense_rel =
+        denseRelativeResidual(backend_dense_operator,
+                              static_cast<int>(n_global),
+                              x_ref_global,
+                              backend_dense_rhs);
+    const Real bs_backend_dense_rel =
+        denseRelativeResidual(backend_dense_operator,
+                              static_cast<int>(n_global),
+                              x_bs_global,
+                              backend_dense_rhs);
+    const Real ref_backend_dense_rel_accop =
+        denseRelativeResidual(backend_dense_operator_acc,
+                              static_cast<int>(n_global),
+                              x_ref_global,
+                              backend_dense_rhs_acc);
+    const Real bs_backend_dense_rel_accop =
+        denseRelativeResidual(backend_dense_operator_acc,
+                              static_cast<int>(n_global),
+                              x_bs_global,
+                              backend_dense_rhs_acc);
+    const Real exact_backend_dense_rel_vs_bacc =
+        denseRelativeResidual(backend_dense_operator,
+                              static_cast<int>(n_global),
+                              dense_exact,
+                              b_acc_global);
+    const Real ref_backend_dense_rel_vs_bacc =
+        denseRelativeResidual(backend_dense_operator,
+                              static_cast<int>(n_global),
+                              x_ref_global,
+                              b_acc_global);
+    const Real bs_backend_dense_rel_vs_bacc =
+        denseRelativeResidual(backend_dense_operator,
+                              static_cast<int>(n_global),
+                              x_bs_global,
+                              b_acc_global);
+
+    auto Ax_ref = factory.createVector(n_global);
+    A->mult(*x_ref, *Ax_ref);
+    addRankOneContribution(factory,
+                           *Ax_ref,
+                           *x_ref,
+                           std::span<const RankOneUpdate>(updates.data(), updates.size()),
+                           MPI_COMM_WORLD);
+    const auto Ax_ref_global = gatherOwnedGlobalVector(*Ax_ref, n_global, MPI_COMM_WORLD);
+    const auto dense_Ax_ref = denseMatVec(backend_dense_operator, static_cast<int>(n_global), x_ref_global);
+    const auto dense_Ax_ref_old_node =
+        denseMatVec(backend_dense_operator, static_cast<int>(n_global), x_ref_global_old_node);
+
+    auto Ax_bs = factory.createVector(n_global);
+    A->mult(*x_bs, *Ax_bs);
+    addRankOneContribution(factory,
+                           *Ax_bs,
+                           *x_bs,
+                           std::span<const RankOneUpdate>(updates.data(), updates.size()),
+                           MPI_COMM_WORLD);
+    const auto Ax_bs_global = gatherOwnedGlobalVector(*Ax_bs, n_global, MPI_COMM_WORLD);
+    const auto dense_Ax_bs = denseMatVec(backend_dense_operator, static_cast<int>(n_global), x_bs_global);
+    const auto dense_Ax_bs_old_node =
+        denseMatVec(backend_dense_operator, static_cast<int>(n_global), x_bs_global_old_node);
+
+    Real ref_gather_oldnode_max_abs = Real(0.0);
+    Real bs_gather_oldnode_max_abs = Real(0.0);
+    Real ref_apply_dense_max_abs = Real(0.0);
+    Real ref_apply_dense_oldnode_max_abs = Real(0.0);
+    Real bs_apply_dense_max_abs = Real(0.0);
+    Real bs_apply_dense_oldnode_max_abs = Real(0.0);
+    for (int i = 0; i < n_global; ++i) {
+        ref_gather_oldnode_max_abs =
+            std::max(ref_gather_oldnode_max_abs,
+                     std::abs(x_ref_global[static_cast<std::size_t>(i)] -
+                              x_ref_global_old_node[static_cast<std::size_t>(i)]));
+        bs_gather_oldnode_max_abs =
+            std::max(bs_gather_oldnode_max_abs,
+                     std::abs(x_bs_global[static_cast<std::size_t>(i)] -
+                              x_bs_global_old_node[static_cast<std::size_t>(i)]));
+        ref_apply_dense_max_abs =
+            std::max(ref_apply_dense_max_abs,
+                     std::abs(Ax_ref_global[static_cast<std::size_t>(i)] -
+                              dense_Ax_ref[static_cast<std::size_t>(i)]));
+        ref_apply_dense_oldnode_max_abs =
+            std::max(ref_apply_dense_oldnode_max_abs,
+                     std::abs(Ax_ref_global[static_cast<std::size_t>(i)] -
+                              dense_Ax_ref_old_node[static_cast<std::size_t>(i)]));
+        bs_apply_dense_max_abs =
+            std::max(bs_apply_dense_max_abs,
+                     std::abs(Ax_bs_global[static_cast<std::size_t>(i)] -
+                              dense_Ax_bs[static_cast<std::size_t>(i)]));
+        bs_apply_dense_oldnode_max_abs =
+            std::max(bs_apply_dense_oldnode_max_abs,
+                     std::abs(Ax_bs_global[static_cast<std::size_t>(i)] -
+                              dense_Ax_bs_old_node[static_cast<std::size_t>(i)]));
+    }
+
+    auto denseResidualAfterSync = [&](const GenericVector& x_in,
+                                      bool accumulate_first,
+                                      bool update_after,
+                                      std::span<const Real> dense_matrix,
+                                      std::span<const Real> rhs) -> Real {
+        auto tmp = factory.createVector(n_global);
+        tmp->copyFrom(x_in);
+        auto* tmp_fs = dynamic_cast<FsilsVector*>(tmp.get());
+        EXPECT_NE(tmp_fs, nullptr);
+        if (tmp_fs == nullptr) {
+            return std::numeric_limits<Real>::infinity();
+        }
+        if (accumulate_first) {
+            tmp_fs->accumulateOverlap();
+        }
+        if (update_after) {
+            tmp_fs->updateGhosts();
+        }
+        const auto tmp_global = gatherOwnedGlobalVector(*tmp_fs, n_global, MPI_COMM_WORLD);
+        return denseRelativeResidual(dense_matrix, static_cast<int>(n_global), tmp_global, rhs);
+    };
+    const Real ref_dense_rel_update = denseResidualAfterSync(
+        *x_ref, /*accumulate_first=*/false, /*update_after=*/true, dense_operator, dense_rhs);
+    const Real ref_dense_rel_acc = denseResidualAfterSync(
+        *x_ref, /*accumulate_first=*/true, /*update_after=*/false, dense_operator, dense_rhs);
+    const Real ref_dense_rel_acc_update = denseResidualAfterSync(
+        *x_ref, /*accumulate_first=*/true, /*update_after=*/true, dense_operator, dense_rhs);
+    const Real bs_dense_rel_update = denseResidualAfterSync(
+        *x_bs, /*accumulate_first=*/false, /*update_after=*/true, dense_operator, dense_rhs);
+    const Real bs_dense_rel_acc = denseResidualAfterSync(
+        *x_bs, /*accumulate_first=*/true, /*update_after=*/false, dense_operator, dense_rhs);
+    const Real bs_dense_rel_acc_update = denseResidualAfterSync(
+        *x_bs, /*accumulate_first=*/true, /*update_after=*/true, dense_operator, dense_rhs);
+    const Real ref_backend_dense_rel_update = denseResidualAfterSync(
+        *x_ref,
+        /*accumulate_first=*/false,
+        /*update_after=*/true,
+        backend_dense_operator,
+        backend_dense_rhs);
+    const Real ref_backend_dense_rel_sync_acc = denseResidualAfterSync(
+        *x_ref,
+        /*accumulate_first=*/true,
+        /*update_after=*/false,
+        backend_dense_operator,
+        backend_dense_rhs);
+    const Real ref_backend_dense_rel_acc_update = denseResidualAfterSync(
+        *x_ref,
+        /*accumulate_first=*/true,
+        /*update_after=*/true,
+        backend_dense_operator,
+        backend_dense_rhs);
+    const Real bs_backend_dense_rel_update = denseResidualAfterSync(
+        *x_bs,
+        /*accumulate_first=*/false,
+        /*update_after=*/true,
+        backend_dense_operator,
+        backend_dense_rhs);
+    const Real bs_backend_dense_rel_sync_acc = denseResidualAfterSync(
+        *x_bs,
+        /*accumulate_first=*/true,
+        /*update_after=*/false,
+        backend_dense_operator,
+        backend_dense_rhs);
+    const Real bs_backend_dense_rel_acc_update = denseResidualAfterSync(
+        *x_bs,
+        /*accumulate_first=*/true,
+        /*update_after=*/true,
+        backend_dense_operator,
+        backend_dense_rhs);
+    const Real ref_backend_dense_rel_accop_update = denseResidualAfterSync(
+        *x_ref,
+        /*accumulate_first=*/false,
+        /*update_after=*/true,
+        backend_dense_operator_acc,
+        backend_dense_rhs_acc);
+    const Real ref_backend_dense_rel_accop_acc = denseResidualAfterSync(
+        *x_ref,
+        /*accumulate_first=*/true,
+        /*update_after=*/false,
+        backend_dense_operator_acc,
+        backend_dense_rhs_acc);
+    const Real ref_backend_dense_rel_accop_acc_update = denseResidualAfterSync(
+        *x_ref,
+        /*accumulate_first=*/true,
+        /*update_after=*/true,
+        backend_dense_operator_acc,
+        backend_dense_rhs_acc);
+    const Real bs_backend_dense_rel_accop_update = denseResidualAfterSync(
+        *x_bs,
+        /*accumulate_first=*/false,
+        /*update_after=*/true,
+        backend_dense_operator_acc,
+        backend_dense_rhs_acc);
+    const Real bs_backend_dense_rel_accop_acc = denseResidualAfterSync(
+        *x_bs,
+        /*accumulate_first=*/true,
+        /*update_after=*/false,
+        backend_dense_operator_acc,
+        backend_dense_rhs_acc);
+    const Real bs_backend_dense_rel_accop_acc_update = denseResidualAfterSync(
+        *x_bs,
+        /*accumulate_first=*/true,
+        /*update_after=*/true,
+        backend_dense_operator_acc,
+        backend_dense_rhs_acc);
+
+    EXPECT_LE(ref_dense_rel, 1e-8)
+        << "distributed GMRES reference solve deviates from dense/direct residual"
+        << " raw=" << ref_dense_rel
+        << " update=" << ref_dense_rel_update
+        << " acc=" << ref_dense_rel_acc
+        << " acc_update=" << ref_dense_rel_acc_update;
+    EXPECT_LE(bs_dense_rel, 2e-3)
+        << "distributed BlockSchur solve deviates from dense/direct residual"
+        << " raw=" << bs_dense_rel
+        << " update=" << bs_dense_rel_update
+        << " acc=" << bs_dense_rel_acc
+        << " acc_update=" << bs_dense_rel_acc_update;
+    EXPECT_LE(ref_backend_dense_rel, 1e-8)
+        << "distributed GMRES reference solve deviates from sampled dense backend residual"
+        << " raw=" << ref_backend_dense_rel
+        << " update=" << ref_backend_dense_rel_update
+        << " acc=" << ref_backend_dense_rel_sync_acc
+        << " acc_update=" << ref_backend_dense_rel_acc_update
+        << " gather_vs_oldnode=" << ref_gather_oldnode_max_abs
+        << " apply_vs_dense=" << ref_apply_dense_max_abs
+        << " apply_vs_dense_oldnode=" << ref_apply_dense_oldnode_max_abs
+        << " hand_vs_backend_max_abs=" << dense_operator_max_abs_diff
+        << " worst_row=" << dense_operator_worst_row
+        << " worst_col=" << dense_operator_worst_col;
+    EXPECT_LE(bs_backend_dense_rel, 2e-3)
+        << "distributed BlockSchur solve deviates from sampled dense backend residual"
+        << " raw=" << bs_backend_dense_rel
+        << " update=" << bs_backend_dense_rel_update
+        << " acc=" << bs_backend_dense_rel_sync_acc
+        << " acc_update=" << bs_backend_dense_rel_acc_update
+        << " gather_vs_oldnode=" << bs_gather_oldnode_max_abs
+        << " apply_vs_dense=" << bs_apply_dense_max_abs
+        << " apply_vs_dense_oldnode=" << bs_apply_dense_oldnode_max_abs
+        << " hand_vs_backend_max_abs=" << dense_operator_max_abs_diff
+        << " worst_row=" << dense_operator_worst_row
+        << " worst_col=" << dense_operator_worst_col;
+    EXPECT_LE(ref_backend_dense_rel_accop, 1e-8)
+        << "distributed GMRES reference solve deviates from accumulated sampled dense backend residual"
+        << " raw=" << ref_backend_dense_rel_accop
+        << " update=" << ref_backend_dense_rel_accop_update
+        << " acc=" << ref_backend_dense_rel_accop_acc
+        << " acc_update=" << ref_backend_dense_rel_accop_acc_update
+        << " raw_vs_acc_op_max_abs=" << dense_operator_acc_max_abs_diff
+        << " worst_row=" << dense_operator_acc_worst_row
+        << " worst_col=" << dense_operator_acc_worst_col;
+    EXPECT_LE(bs_backend_dense_rel_accop, 2e-3)
+        << "distributed BlockSchur solve deviates from accumulated sampled dense backend residual"
+        << " raw=" << bs_backend_dense_rel_accop
+        << " update=" << bs_backend_dense_rel_accop_update
+        << " acc=" << bs_backend_dense_rel_accop_acc
+        << " acc_update=" << bs_backend_dense_rel_accop_acc_update
+        << " raw_vs_acc_op_max_abs=" << dense_operator_acc_max_abs_diff
+        << " worst_row=" << dense_operator_acc_worst_row
+        << " worst_col=" << dense_operator_acc_worst_col;
+    EXPECT_LE(std::abs(ref_dense_rel - ref_rel), std::max<Real>(1e-10, ref_dense_rel * 1e-1))
+        << "distributed residual helper and dense residual disagree for GMRES";
+    EXPECT_LE(std::abs(bs_dense_rel - bs_rel), std::max<Real>(1e-6, bs_dense_rel * 1e-1))
+        << "distributed residual helper and dense residual disagree for BlockSchur";
+    EXPECT_LE(std::abs(ref_backend_dense_rel - ref_rel),
+              std::max<Real>(1e-10, ref_backend_dense_rel * 1e-1))
+        << "distributed residual helper and sampled dense backend residual disagree for GMRES";
+    EXPECT_LE(std::abs(bs_backend_dense_rel - bs_rel),
+              std::max<Real>(1e-6, bs_backend_dense_rel * 1e-1))
+        << "distributed residual helper and sampled dense backend residual disagree for BlockSchur";
+    EXPECT_LE(std::abs(ref_backend_dense_rel_accop - ref_rel),
+              std::max<Real>(1e-10, ref_backend_dense_rel_accop * 1e-1))
+        << "distributed residual helper and accumulated sampled dense backend residual disagree for GMRES";
+    EXPECT_LE(std::abs(bs_backend_dense_rel_accop - bs_rel),
+              std::max<Real>(1e-6, bs_backend_dense_rel_accop * 1e-1))
+        << "distributed residual helper and accumulated sampled dense backend residual disagree for BlockSchur";
+
+    const auto exact_dots =
+        collectRankOneDots(*x_exact, std::span<const RankOneUpdate>(updates.data(), updates.size()), MPI_COMM_WORLD);
+    const auto ref_dots =
+        collectRankOneDots(*x_ref, std::span<const RankOneUpdate>(updates.data(), updates.size()), MPI_COMM_WORLD);
+    const auto bs_dots =
+        collectRankOneDots(*x_bs, std::span<const RankOneUpdate>(updates.data(), updates.size()), MPI_COMM_WORLD);
+    const auto dense_ref_dots =
+        denseRankOneDots(x_ref_global, dense_modes);
+    const auto dense_bs_dots =
+        denseRankOneDots(x_bs_global, dense_modes);
+
+    ASSERT_EQ(exact_dots.size(), ref_dots.size());
+    ASSERT_EQ(exact_dots.size(), bs_dots.size());
+    ASSERT_EQ(ref_dots.size(), dense_ref_dots.size());
+    ASSERT_EQ(bs_dots.size(), dense_bs_dots.size());
+    for (std::size_t i = 0; i < exact_dots.size(); ++i) {
+        const Real ref_tol = std::max<Real>(1e-9, std::abs(exact_dots[i]) * 1e-8);
+        EXPECT_NEAR(ref_dots[i], exact_dots[i], ref_tol);
+        EXPECT_NEAR(ref_dots[i], dense_ref_dots[i], ref_tol);
+
+        const Real bs_tol = std::max<Real>(2e-3, std::abs(ref_dots[i]) * 5e-2);
+        EXPECT_NEAR(bs_dots[i], ref_dots[i], bs_tol);
+        EXPECT_NEAR(bs_dots[i], dense_bs_dots[i], bs_tol);
     }
 }
 

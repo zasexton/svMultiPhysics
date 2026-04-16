@@ -14,6 +14,10 @@
 
 #include "Assembly/Assembler.h"
 
+#include "Auxiliary/AuxiliaryBindings.h"
+#include "Auxiliary/AuxiliaryModelDSL.h"
+#include "Auxiliary/AuxiliaryModelBuilder.h"
+
 #include "Backends/FSILS/FsilsFactory.h"
 #include "Backends/Interfaces/DofPermutation.h"
 #include "Backends/Interfaces/LinearSolver.h"
@@ -44,6 +48,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <iostream>
 #include <cstdint>
 #include <cstddef>
 #include <limits>
@@ -85,15 +90,27 @@ std::vector<int> neighborRanks(int my_rank, int world_size)
     return neighbors;
 }
 
+int stripCellOwner(int cell, int n_cells, int world_size)
+{
+    FE_THROW_IF(n_cells < 1, InvalidArgumentException, "stripCellOwner: n_cells must be >= 1");
+    FE_THROW_IF(world_size < 1, InvalidArgumentException, "stripCellOwner: world_size must be >= 1");
+    const int scaled = (cell * world_size) / n_cells;
+    return std::min(std::max(scaled, 0), world_size - 1);
+}
+
 // 2D strip of Quad4 cells, with interleaved node IDs:
 // x-index i has nodes {2*i (bottom), 2*i+1 (top)}.
 class StripQuadMeshAccess final : public IMeshAccess {
 public:
-    StripQuadMeshAccess(int n_cells, int my_rank)
+    StripQuadMeshAccess(int n_cells, int my_rank, int world_size)
         : n_cells_(n_cells)
         , my_rank_(my_rank)
+        , world_size_(world_size)
     {
         FE_THROW_IF(n_cells_ < 1, InvalidArgumentException, "StripQuadMeshAccess: n_cells must be >= 1");
+        FE_THROW_IF(world_size_ < 1,
+                    InvalidArgumentException,
+                    "StripQuadMeshAccess: world_size must be >= 1");
 
         const int n_x = n_cells_ + 1;
         const int n_nodes = 2 * n_x;
@@ -118,16 +135,21 @@ public:
     [[nodiscard]] GlobalIndex numCells() const override { return static_cast<GlobalIndex>(cells_.size()); }
     [[nodiscard]] GlobalIndex numOwnedCells() const override
     {
-        // We use a simple model: cell c is owned by rank c (requires n_cells == world_size in the test).
-        return 1;
+        GlobalIndex owned = 0;
+        for (int c = 0; c < n_cells_; ++c) {
+            if (stripCellOwner(c, n_cells_, world_size_) == my_rank_) {
+                ++owned;
+            }
+        }
+        return owned;
     }
-    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 2; }
     [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
     [[nodiscard]] int dimension() const override { return 2; }
 
     [[nodiscard]] bool isOwnedCell(GlobalIndex cell_id) const override
     {
-        return static_cast<int>(cell_id) == my_rank_;
+        return stripCellOwner(static_cast<int>(cell_id), n_cells_, world_size_) == my_rank_;
     }
 
     [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return ElementType::Quad4; }
@@ -153,8 +175,26 @@ public:
         }
     }
 
-    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/, GlobalIndex /*cell_id*/) const override { return 0; }
-    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return -1; }
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex face_id, GlobalIndex cell_id) const override
+    {
+        if (face_id == 0 && cell_id == 0) {
+            return 3; // left boundary on first cell
+        }
+        if (face_id == 1 && cell_id == static_cast<GlobalIndex>(n_cells_ - 1)) {
+            return 1; // right boundary on last cell
+        }
+        return 0;
+    }
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex face_id) const override
+    {
+        if (face_id == 0) {
+            return 11;
+        }
+        if (face_id == 1) {
+            return 12;
+        }
+        return -1;
+    }
     [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex /*face_id*/) const override { return {0, 0}; }
 
     void forEachCell(std::function<void(GlobalIndex)> callback) const override
@@ -164,12 +204,22 @@ public:
 
     void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override
     {
-        callback(static_cast<GlobalIndex>(my_rank_));
+        for (int c = 0; c < n_cells_; ++c) {
+            if (stripCellOwner(c, n_cells_, world_size_) == my_rank_) {
+                callback(static_cast<GlobalIndex>(c));
+            }
+        }
     }
 
-    void forEachBoundaryFace(int /*marker*/,
-                             std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override
+    void forEachBoundaryFace(int marker,
+                             std::function<void(GlobalIndex, GlobalIndex)> callback) const override
     {
+        if (marker < 0 || marker == 11) {
+            callback(/*face_id=*/0, /*cell_id=*/0);
+        }
+        if (marker < 0 || marker == 12) {
+            callback(/*face_id=*/1, /*cell_id=*/static_cast<GlobalIndex>(n_cells_ - 1));
+        }
     }
 
     void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override
@@ -179,6 +229,7 @@ public:
 private:
     int n_cells_{0};
     int my_rank_{0};
+    int world_size_{1};
     std::vector<std::array<Real, 3>> nodes_{};
     std::vector<std::array<GlobalIndex, 4>> cells_{};
 };
@@ -212,7 +263,7 @@ private:
     topo.cell_owner_ranks.resize(static_cast<std::size_t>(topo.n_cells));
     for (int c = 0; c < n_cells; ++c) {
         topo.cell_gids[static_cast<std::size_t>(c)] = static_cast<dofs::gid_t>(c);
-        topo.cell_owner_ranks[static_cast<std::size_t>(c)] = c;
+        topo.cell_owner_ranks[static_cast<std::size_t>(c)] = stripCellOwner(c, n_cells, world_size);
     }
 
     topo.neighbor_ranks = neighborRanks(my_rank, world_size);
@@ -521,6 +572,101 @@ backends::SolverOptions fsilsBlockSchurOptions(
     return o;
 }
 
+std::unique_ptr<systems::FESystem>
+buildOutletCoupledTransientSystem(MPI_Comm comm,
+                                  int rank,
+                                  int size,
+                                  int n_cells)
+{
+    auto mesh = std::make_shared<StripQuadMeshAccess>(n_cells, rank, size);
+    const auto topo = buildStripTopology(n_cells, rank, size);
+
+    const auto u_space = spaces::VectorSpace(spaces::SpaceType::H1,
+                                             ElementType::Quad4,
+                                             /*order=*/1,
+                                             /*components=*/2);
+    const auto p_space = spaces::Space(spaces::SpaceType::H1,
+                                       ElementType::Quad4,
+                                       /*order=*/1,
+                                       /*components=*/1);
+
+    auto sys = std::make_unique<systems::FESystem>(mesh);
+    const auto u_field = sys->addField(systems::FieldSpec{.name = "u", .space = u_space, .components = 2});
+    const auto p_field = sys->addField(systems::FieldSpec{.name = "p", .space = p_space, .components = 1});
+    sys->addOperator("op");
+
+    const auto u_state = forms::FormExpr::stateField(u_field, *u_space, "u");
+    const auto p_state = forms::FormExpr::stateField(p_field, *p_space, "p");
+    const auto u_disc = forms::FormExpr::discreteField(u_field, *u_space, "u_disc");
+    const auto v = forms::TestFunction(*u_space, "v");
+    const auto q = forms::TestFunction(*p_space, "q");
+    const auto n = forms::FormExpr::normal();
+
+    const auto Q_left = sys->boundaryIntegral(forms::inner(u_disc, n), /*marker=*/11);
+    const auto Q_right = sys->boundaryIntegral(forms::inner(u_disc, n), /*marker=*/12);
+
+    auto resistance_model = systems::aux::model("resistive_direct_only", [](systems::ModelFacade& m) {
+        auto Q = m.input("Q");
+        auto P = m.state("P", systems::AuxiliaryVariableKind::Algebraic);
+        auto Rsum = m.param("Rsum");
+        auto Pd = m.param("Pd");
+
+        m.initialGuess("P", 0.0);
+        m << systems::alg(P) == P - (Pd + Rsum * Q);
+        m << systems::out("P_out") == P;
+    });
+
+    auto left_inst = sys->deploy(
+        systems::use(resistance_model).name("left_outlet").boundary(11).monolithic()
+            .bind("Q", Q_left)
+            .param("Rsum", 80.0)
+            .param("Pd", 20.0)
+            .initialState({{"P", 20.0}}));
+    auto right_inst = sys->deploy(
+        systems::use(resistance_model).name("right_outlet").boundary(12).monolithic()
+            .bind("Q", Q_right)
+            .param("Rsum", 110.0)
+            .param("Pd", 25.0)
+            .initialState({{"P", 25.0}}));
+
+    const auto one = forms::FormExpr::constant(Real(1.0));
+    const auto lambda = forms::FormExpr::constant(Real(0.75));
+    const auto nu = forms::FormExpr::constant(Real(0.05));
+    const auto eps = forms::FormExpr::constant(Real(0.20));
+    const auto kappa = forms::FormExpr::constant(Real(0.0));
+
+    const auto residual =
+        (forms::inner(u_state.dt(1), v) +
+         lambda * forms::inner(u_state, v) +
+         nu * forms::inner(forms::grad(u_state), forms::grad(v)) +
+         eps * (one + forms::inner(u_state, u_state)) * forms::inner(u_state, v) -
+         p_state * forms::div(v))
+            .dx() +
+        (q * forms::div(u_state) + kappa * p_state * q).dx() -
+        (left_inst.output("P_out") * forms::inner(v, n)).ds(11) +
+        (right_inst.output("P_out") * forms::inner(v, n)).ds(12);
+
+    (void)systems::installFormulation(*sys, "op", {u_field, p_field}, residual);
+
+    systems::SetupOptions setup_opts;
+    setup_opts.assembler_name = "StandardAssembler";
+    setup_opts.assembly_options.ghost_policy = GhostPolicy::ReverseScatter;
+    setup_opts.assembly_options.deterministic = true;
+    setup_opts.assembly_options.overlap_communication = false;
+    setup_opts.dof_options.global_numbering = dofs::GlobalNumberingMode::DenseGlobalIds;
+    setup_opts.dof_options.ownership = dofs::OwnershipStrategy::LowestRank;
+    setup_opts.dof_options.my_rank = rank;
+    setup_opts.dof_options.world_size = size;
+    setup_opts.dof_options.mpi_comm = comm;
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = topo;
+    sys->setup(setup_opts, inputs);
+    sys->finalizeAuxiliaryLayout();
+
+    return sys;
+}
+
 } // namespace
 
 TEST(TimeLoopFsilsConvergenceMPI, GeneralizedAlphaConvergesWithAlgebraicField)
@@ -543,7 +689,7 @@ TEST(TimeLoopFsilsConvergenceMPI, GeneralizedAlphaConvergesWithAlgebraicField)
 
         // One owned cell per rank; all cells present as ghosts to enable OwnedRowsOnly-style assembly.
         const int n_cells = size;
-        auto mesh = std::make_shared<StripQuadMeshAccess>(n_cells, rank);
+        auto mesh = std::make_shared<StripQuadMeshAccess>(n_cells, rank, size);
 
         const auto u_space = spaces::VectorSpace(spaces::SpaceType::H1, ElementType::Quad4, /*order=*/1, /*components=*/2);
         const auto p_space = spaces::Space(spaces::SpaceType::H1, ElementType::Quad4, /*order=*/1, /*components=*/1);
@@ -694,7 +840,6 @@ TEST(TimeLoopFsilsConvergenceMPI, GeneralizedAlphaConvergesWithAlgebraicField)
 
             bool saw_collective_activity = false;
             bool saw_blockschur_report = false;
-            bool saw_blockschur_recovery = false;
             for (const auto& nr : nonlinear_reports) {
                 EXPECT_TRUE(nr.converged);
                 EXPECT_TRUE(nr.linear.converged);
@@ -717,18 +862,140 @@ TEST(TimeLoopFsilsConvergenceMPI, GeneralizedAlphaConvergesWithAlgebraicField)
                     EXPECT_GE(nr.linear.blockschur_schur_solve_time_seconds, 0.0);
                     EXPECT_GE(nr.linear.blockschur_collective_calls_max_per_outer, 0u);
                     EXPECT_GE(nr.linear.blockschur_collective_time_max_per_outer, 0.0);
-                } else if (nr.linear.message.find("fallback gmres") != std::string::npos) {
-                    EXPECT_NE(nr.linear.message.find("fallback gmres"), std::string::npos);
-                    saw_blockschur_recovery = true;
                 }
             }
             EXPECT_TRUE(saw_collective_activity);
-            EXPECT_TRUE(saw_blockschur_report || saw_blockschur_recovery);
+            EXPECT_TRUE(saw_blockschur_report);
         }
     };
 
     run_case(/*deterministic_mode=*/true, /*overlap_communication=*/false);
     run_case(/*deterministic_mode=*/true, /*overlap_communication=*/true);
+#endif
+}
+
+TEST(TimeLoopFsilsConvergenceMPI, DISABLED_GeneralizedAlphaMonolithicResistanceOutletsProbe)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    constexpr int n_cells = 4;
+    if (size > n_cells) {
+        GTEST_SKIP() << "Probe uses a fixed 4-cell strip; run with at most 4 MPI ranks";
+    }
+
+    auto sys = buildOutletCoupledTransientSystem(comm, rank, size, n_cells);
+    ASSERT_TRUE(sys);
+    ASSERT_TRUE(sys->isSetup());
+    const auto* gauge_reg = sys->gaugeRegistryIfPresent();
+    const std::size_t gauge_candidates = gauge_reg ? gauge_reg->candidates().size() : 0u;
+    const std::size_t gauge_resolved = gauge_reg ? gauge_reg->resolvedModes().size() : 0u;
+
+    const auto n_dofs = sys->dofHandler().getNumDofs();
+    constexpr int dof_per_node = 3;
+
+    dofs::DofDistributionOptions dof_options;
+    dof_options.global_numbering = dofs::GlobalNumberingMode::DenseGlobalIds;
+    dof_options.ownership = dofs::OwnershipStrategy::LowestRank;
+    dof_options.my_rank = rank;
+    dof_options.world_size = size;
+    dof_options.mpi_comm = comm;
+
+    auto perm = buildFsilsDofPermutation(*sys, dof_per_node, dof_options);
+    ASSERT_TRUE(perm) << "Failed to build FSILS permutation for outlet-coupled probe";
+
+    backends::FsilsFactory factory(dof_per_node, perm);
+    auto linear = factory.createLinearSolver(fsilsBlockSchurOptions());
+    ASSERT_TRUE(linear);
+
+    auto history = timestepping::TimeHistory::allocate(factory,
+                                                       n_dofs,
+                                                       /*history_depth=*/2,
+                                                       /*allocate_second_order_state=*/false);
+    const double dt = 0.05;
+    history.setTime(0.0);
+    history.setDt(dt);
+    history.setPrevDt(dt);
+    history.setStepIndex(0);
+
+    auto init = [&](backends::GenericVector& vec, double scale) {
+        auto s = vec.localSpan();
+        ASSERT_EQ(static_cast<GlobalIndex>(s.size()), n_dofs);
+        for (GlobalIndex i = 0; i < n_dofs; ++i) {
+            const double sign = ((i % 3) == 1) ? -1.0 : 1.0;
+            s[static_cast<std::size_t>(i)] =
+                static_cast<Real>(scale * sign * 0.035 * static_cast<double>(i + 1));
+        }
+    };
+    init(history.uPrev(), /*scale=*/1.0);
+    init(history.uPrev2(), /*scale=*/0.9);
+    history.resetCurrentToPrevious();
+
+    auto integrator = std::make_shared<systems::BackwardDifferenceIntegrator>();
+    systems::TransientSystem transient(*sys, std::move(integrator));
+
+    timestepping::TimeLoopOptions loop_opts;
+    loop_opts.t0 = 0.0;
+    loop_opts.t_end = dt;
+    loop_opts.dt = dt;
+    loop_opts.max_steps = 1;
+    loop_opts.scheme = timestepping::SchemeKind::GeneralizedAlpha;
+    loop_opts.generalized_alpha_rho_inf = 0.5;
+    loop_opts.newton.residual_op = "op";
+    loop_opts.newton.jacobian_op = "op";
+    loop_opts.newton.max_iterations = 12;
+    loop_opts.newton.abs_tolerance = 1e-12;
+    loop_opts.newton.rel_tolerance = 1e-10;
+
+    timestepping::TimeLoop loop(loop_opts);
+
+    std::vector<timestepping::NewtonReport> nonlinear_reports;
+    timestepping::TimeLoopCallbacks callbacks;
+    callbacks.on_nonlinear_done =
+        [&nonlinear_reports](const timestepping::TimeHistory&,
+                             const timestepping::NewtonReport& nr) {
+            nonlinear_reports.push_back(nr);
+        };
+
+    timestepping::TimeLoopReport rep{};
+    bool caught_exception = false;
+    std::string caught_message{};
+    try {
+        rep = loop.run(transient, factory, *linear, history, callbacks);
+    } catch (const FEException& e) {
+        caught_exception = true;
+        caught_message = e.what();
+    }
+
+    ASSERT_FALSE(nonlinear_reports.empty());
+    if (rank == 0) {
+        const auto& nr = nonlinear_reports.back();
+        std::cout << "[mpi-gap-probe] ranks=" << size
+                  << " has_gauge=" << (sys->hasGaugeRegistry() ? 1 : 0)
+                  << " gauge_candidates=" << gauge_candidates
+                  << " gauge_resolved=" << gauge_resolved
+                  << " constraints=" << sys->constraints().numConstraints()
+                  << " reports=" << nonlinear_reports.size()
+                  << " caught=" << (caught_exception ? 1 : 0)
+                  << " success=" << (rep.success ? 1 : 0)
+                  << " converged=" << (nr.converged ? 1 : 0)
+                  << " newton_iters=" << nr.iterations
+                  << " linear_iters=" << nr.linear.iterations
+                  << " linear_rel=" << nr.linear.relative_residual
+                  << " outer=" << nr.linear.blockschur_outer_iterations
+                  << " schur_iters=" << nr.linear.blockschur_schur_iterations
+                  << " momentum_iters=" << nr.linear.blockschur_momentum_iterations
+                  << " residual=" << nr.residual_norm
+                  << " message=\"" << rep.message << "\""
+                  << " caught_message=\"" << caught_message << "\""
+                  << std::endl;
+    }
+
+    EXPECT_TRUE(std::isfinite(nonlinear_reports.back().residual_norm));
+    EXPECT_TRUE(std::isfinite(nonlinear_reports.back().linear.relative_residual));
 #endif
 }
 
@@ -745,7 +1012,7 @@ TEST(TimeLoopFsilsConvergenceMPI, FixedStepRejectsNonconvergedNewtonStep)
     }
 
     const int n_cells = size;
-    auto mesh = std::make_shared<StripQuadMeshAccess>(n_cells, rank);
+    auto mesh = std::make_shared<StripQuadMeshAccess>(n_cells, rank, size);
     const auto space = spaces::Space(spaces::SpaceType::H1, ElementType::Quad4, /*order=*/1, /*components=*/1);
     ASSERT_TRUE(space);
 

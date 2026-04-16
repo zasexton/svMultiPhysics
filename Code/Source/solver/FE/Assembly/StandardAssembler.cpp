@@ -930,6 +930,12 @@ void StandardAssembler::setSparsityPattern(const sparsity::SparsityPattern* spar
 void StandardAssembler::setOptions(const AssemblyOptions& options)
 {
     options_ = options;
+    if (options_.ghost_policy == GhostPolicy::ReverseScatter) {
+        // StandardAssembler has no ghost buffering / reverse-scatter exchange.
+        // In distributed runs correctness requires visiting locally available
+        // ghost cells/faces and restricting writes to owned rows instead.
+        options_.ghost_policy = GhostPolicy::OwnedRowsOnly;
+    }
 }
 
 void StandardAssembler::setCurrentSolution(std::span<const Real> solution)

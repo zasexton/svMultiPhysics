@@ -89,7 +89,12 @@ void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int 
   lhs.rowPtr.resize(2,nNo); 
   lhs.diagPtr.resize(nNo);
   lhs.map.resize(nNo); 
+  lhs.gNodes.resize(nNo);
   lhs.face.resize(nFaces);
+
+  for (fsils_int a = 0; a < nNo; ++a) {
+    lhs.gNodes(a) = gNodes(a);
+  }
 
   // For a sequential simulation. 
   //
@@ -479,4 +484,3 @@ void fsils_lhs_free(FSILS_lhsType& lhs)
 
 
 };
-

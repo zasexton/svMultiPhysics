@@ -927,7 +927,7 @@ CoupledResidualKernels installCoupledResidualMixed(
 
     const auto assignToBlock = [&](std::size_t ti, forms::FormExpr expr, int sign) {
         if (sign < 0) {
-            expr = forms::FormExpr::constant(-1.0) * expr;
+            expr = -expr;
         }
         if (!test_block_exprs[ti].isValid()) {
             test_block_exprs[ti] = std::move(expr);
@@ -1562,7 +1562,7 @@ std::vector<forms::FormExpr> splitByTestFunction(const forms::FormExpr& mixed_re
     std::vector<forms::FormExpr> blocks(test_infos.size());
 
     const auto assignToBlock = [&](std::size_t ti, forms::FormExpr expr, int sign) {
-        if (sign < 0) expr = forms::FormExpr::constant(-1.0) * expr;
+        if (sign < 0) expr = -expr;
         if (!blocks[ti].isValid()) {
             blocks[ti] = std::move(expr);
         } else {

@@ -1473,6 +1473,7 @@ void gmres(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearS
   auto& lhs = *system.lhs;
   const int dof = system.components;
   const auto& A = system.A;
+  const HaloExchange halo(lhs);
   const auto& enh = gmres_enhancements();
   fsils_int nNo = lhs.nNo;
   fsils_int mynNo = lhs.mynNo;
@@ -1522,6 +1523,7 @@ void gmres(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearS
     if (l == 0) {
       u.set_slice(0, R);
     } else {
+      halo.sync_vector(dof, X);
       A.apply(
           dso::ghost_synced_input(dof, X),
           dso::ghost_synced_output(dof, u_slice));
@@ -1560,6 +1562,7 @@ void gmres(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearS
       auto u_slice_prev = u.rslice(i);
       auto u_slice_next = u.rslice(i+1);
 
+      halo.sync_vector(dof, u_slice_prev);
       A.apply(
           dso::ghost_synced_input(dof, u_slice_prev),
           dso::ghost_synced_output(dof, u_slice_next));
@@ -1694,6 +1697,7 @@ void gmres(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearS
     }
   }
 
+  halo.sync_vector(dof, X);
   ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - time + ls.callD;
   ls.dB  = 10.0 * std::log(ls.fNorm / ls.dB);
   ls.stats.record_call(ls.itr - itr_before,
@@ -1720,6 +1724,7 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
   using namespace fe_fsi_linear_solver;
   auto& lhs = *system.lhs;
   const auto& A = system.A;
+  const HaloExchange halo(lhs);
   const auto& enh = gmres_enhancements();
   fsils_int nNo = lhs.nNo;
   fsils_int mynNo = lhs.mynNo;
@@ -1779,6 +1784,7 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
 
     auto u_col_curr = u.rcol(0);
 
+    halo.sync_scalar(X);
     A.apply(
         dso::ghost_synced_input(X),
         dso::ghost_synced_output(u_col_curr));
@@ -1797,6 +1803,7 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
 
       auto u_col_prev = u.rcol(i);
       auto u_col_next = u.rcol(i+1);
+      halo.sync_scalar(u_col_prev);
       A.apply(
           dso::ghost_synced_input(u_col_prev),
           dso::ghost_synced_output(u_col_next));
@@ -1905,6 +1912,7 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
     }
   }
 
+  halo.sync_scalar(X);
   R = X;
   ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - ls.callD;
   ls.dB  = 10.0 * std::log(ls.fNorm / ls.dB);
@@ -1936,6 +1944,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
   auto& lhs = *system.lhs;
   const int dof = system.components;
   const auto& A = system.A;
+  const HaloExchange halo(lhs);
   fsils_int nNo = lhs.nNo;
   fsils_int mynNo = lhs.mynNo;
   const bool has_coupled_bc = std::any_of(lhs.face.begin(), lhs.face.end(),
@@ -2075,8 +2084,9 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
 
     // C := A*U for the current matrix.
     for (int j = 0; j < recycle_k; ++j) {
-      const auto uj = recycle_U.rslice(j);
+      auto uj = recycle_U.rslice(j);
       auto cj = recycle_C.rslice(j);
+      halo.sync_vector(dof, uj);
       A.apply(
           dso::ghost_synced_input(dof, uj),
           dso::ghost_synced_output(dof, cj));
@@ -2391,6 +2401,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     apply_recycle_keep_drop();
 
     tp0 = TP();
+    halo.sync_vector(dof, X);
     A.apply(
         dso::ghost_synced_input(dof, X),
         dso::ghost_synced_output(dof, u_slice));
@@ -2459,6 +2470,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       auto u_slice_next = u.rslice(i+1);
 
       tp0 = TP();
+      halo.sync_vector(dof, u_slice_prev);
       A.apply(
           dso::ghost_synced_input(dof, u_slice_prev),
           dso::ghost_synced_output(dof, u_slice_next));
@@ -2690,6 +2702,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     }
   }
 
+  halo.sync_vector(dof, X);
   R = X;
   ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - ls.callD;
   ls.dB  = 10.0 * std::log(ls.fNorm / ls.dB);

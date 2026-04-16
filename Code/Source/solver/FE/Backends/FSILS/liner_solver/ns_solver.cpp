@@ -56,6 +56,11 @@
 #include <cmath>
 #include <cstdlib>
 #include <algorithm>
+#include <fstream>
+#include <limits>
+#include <map>
+#include <sstream>
+#include <string>
 
 namespace ns_solver {
 
@@ -69,15 +74,9 @@ namespace {
 
 constexpr int kNativeFaceDuplicateCouplingId = -2;
 
-[[nodiscard]] bool fsilsTraceEnabled() noexcept
+[[nodiscard]] bool envFlagEnabled(const char* env_name) noexcept
 {
-  const char* env = std::getenv("SVMP_FSILS_TRACE");
-  if (env == nullptr) {
-    env = std::getenv("SVMP_FSILS_NS_TRACE");
-  }
-  if (env == nullptr) {
-    env = std::getenv("SVMP_FSILS_NS_SOLVER_TRACE");
-  }
+  const char* env = std::getenv(env_name);
   if (env == nullptr) {
     return false;
   }
@@ -90,9 +89,111 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
   return *env != '0';
 }
 
+[[nodiscard]] bool fsilsTraceEnabled() noexcept
+{
+  return envFlagEnabled("SVMP_FSILS_TRACE") ||
+         envFlagEnabled("SVMP_FSILS_NS_TRACE") ||
+         envFlagEnabled("SVMP_FSILS_NS_SOLVER_TRACE");
+}
+
+[[nodiscard]] bool fsilsFullColumnCompareEnabled() noexcept
+{
+  return envFlagEnabled("SVMP_FSILS_NS_FULL_COLUMN_COMPARE");
+}
+
+[[nodiscard]] const char* fsilsOracleBlockCompareFile() noexcept
+{
+  const char* path = std::getenv("SVMP_FSILS_NS_ORACLE_BLOCK_COMPARE_FILE");
+  if (path == nullptr || *path == '\0') {
+    return nullptr;
+  }
+  return path;
+}
+
 [[nodiscard]] bool skipPostSolveOverlapSum() noexcept
 {
-  const char* env = std::getenv("SVMP_FSILS_SKIP_POST_SOLVE_COMM");
+  return envFlagEnabled("SVMP_FSILS_SKIP_POST_SOLVE_COMM");
+}
+
+[[nodiscard]] bool scalarMeanConstrainedGalerkinEnabled() noexcept
+{
+  return envFlagEnabled("SVMP_FSILS_BLOCKSCHUR_CONSTRAIN_SCALAR_MEAN");
+}
+
+[[nodiscard]] bool scalarPartitionMeanEqualizationEnabled() noexcept
+{
+  return envFlagEnabled("SVMP_FSILS_BLOCKSCHUR_EQUALIZE_PARTITION_SCALAR_MEAN");
+}
+
+[[nodiscard]] bool firstSchurZeroMeanEnabled() noexcept
+{
+  return envFlagEnabled("SVMP_FSILS_NS_FIRST_SCHUR_ZERO_MEAN");
+}
+
+[[nodiscard]] bool iter0SchurZeroMeanEnabled() noexcept
+{
+  return envFlagEnabled("SVMP_FSILS_NS_ITER0_SCHUR_ZERO_MEAN");
+}
+
+bool loadOracleScalarMode(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                          const char* path,
+                          Vector<double>& values)
+{
+  if (path == nullptr || *path == '\0') {
+    return false;
+  }
+
+  std::ifstream in(path);
+  if (!in) {
+    return false;
+  }
+
+  std::map<int, double> by_global_node;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty() || line[0] == '#') {
+      continue;
+    }
+    std::istringstream iss(line);
+    int global_node = -1;
+    double value = 0.0;
+    if (!(iss >> global_node >> value)) {
+      continue;
+    }
+    by_global_node[global_node] = value;
+  }
+  if (by_global_node.empty()) {
+    return false;
+  }
+
+  values = 0.0;
+  bool found_any = false;
+  for (fsils_int old = 0; old < lhs.nNo; ++old) {
+    if (old < 0 || old >= lhs.gNodes.size()) {
+      continue;
+    }
+    const auto it = by_global_node.find(lhs.gNodes(old));
+    if (it == by_global_node.end()) {
+      continue;
+    }
+    const int internal = lhs.map(old);
+    if (internal < 0 || internal >= values.size()) {
+      continue;
+    }
+    values(internal) = it->second;
+    found_any = true;
+  }
+  return found_any;
+}
+
+[[nodiscard]] bool iter0SchurMeanSubspaceEnabled() noexcept
+{
+  return envFlagEnabled("SVMP_FSILS_NS_ITER0_SCHUR_MEAN_SUBSPACE");
+}
+
+[[nodiscard]] bool syncOrderTraceEnabled() noexcept
+{
+  const char* env = std::getenv("SVMP_FSILS_TRACE_SYNC_ORDER");
   if (env == nullptr) {
     return false;
   }
@@ -103,6 +204,31 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
     return false;
   }
   return *env != '0';
+}
+
+void traceSyncOrder(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                    const char* label,
+                    int outer_iter,
+                    fsils_int mynNo,
+                    fsils_int nNo,
+                    double fNorm) noexcept
+{
+  if (!syncOrderTraceEnabled()) {
+    return;
+  }
+  std::fprintf(stderr,
+               "[NS_SYNC_TRACE] task=%d label=%s outer=%d mynNo=%lld nNo=%lld nReq=%d cS=%zu shnNo=%lld fNorm=%.17e skip=%d\n",
+               lhs.commu.task,
+               label,
+               outer_iter,
+               static_cast<long long>(mynNo),
+               static_cast<long long>(nNo),
+               lhs.nReq,
+               static_cast<std::size_t>(lhs.cS.size()),
+               static_cast<long long>(lhs.shnNo),
+               fNorm,
+               skipPostSolveOverlapSum() ? 1 : 0);
+  std::fflush(stderr);
 }
 
 [[nodiscard]] int reduced_local_component(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
@@ -140,6 +266,164 @@ bool fill_projected_reduced_vector(
     nonzero = true;
   }
   return nonzero;
+}
+
+double scalar_vector_mean(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                          const Vector<double>& values)
+{
+  long double local_sum = 0.0L;
+  long double local_count = 0.0L;
+  for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+    local_sum += static_cast<long double>(values(node));
+    local_count += 1.0L;
+  }
+
+  long double global_sum = local_sum;
+  long double global_count = local_count;
+#if FE_HAS_MPI
+  if (lhs.commu.nTasks > 1) {
+    fe_fsi_linear_solver::fsils_allreduce_sum(
+        &local_sum, &global_sum, 1, MPI_LONG_DOUBLE,
+        const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu));
+    fe_fsi_linear_solver::fsils_allreduce_sum(
+        &local_count, &global_count, 1, MPI_LONG_DOUBLE,
+        const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu));
+  }
+#endif
+
+  return (global_count > 0.0L) ? static_cast<double>(global_sum / global_count) : 0.0;
+}
+
+struct ScalarZeroMeanStats {
+  double mean_before{0.0};
+  double mean_after{0.0};
+  double max_abs_shift{0.0};
+};
+
+ScalarZeroMeanStats subtract_scalar_global_mean(
+    const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+    Vector<double>& values)
+{
+  ScalarZeroMeanStats stats{};
+  if (lhs.mynNo <= 0) {
+    return stats;
+  }
+
+  stats.mean_before = scalar_vector_mean(lhs, values);
+  const double shift = stats.mean_before;
+  #pragma omp parallel for schedule(static)
+  for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+    values(node) -= shift;
+  }
+  stats.mean_after = scalar_vector_mean(lhs, values);
+  stats.max_abs_shift = std::abs(shift);
+  return stats;
+}
+
+struct ScalarPartitionMeanStats {
+  double global_mean_before{0.0};
+  double local_mean_min_before{0.0};
+  double local_mean_max_before{0.0};
+  double global_mean_after{0.0};
+  double local_mean_min_after{0.0};
+  double local_mean_max_after{0.0};
+  double max_abs_shift{0.0};
+};
+
+ScalarPartitionMeanStats equalize_scalar_partition_means(
+    const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+    Vector<double>& values)
+{
+  ScalarPartitionMeanStats stats{};
+  if (lhs.commu.nTasks <= 1 || lhs.mynNo <= 0) {
+    return stats;
+  }
+
+  long double local_sum = 0.0L;
+  long double local_count = static_cast<long double>(lhs.mynNo);
+  for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+    local_sum += static_cast<long double>(values(node));
+  }
+
+  long double global_sum = local_sum;
+  long double global_count = local_count;
+#if FE_HAS_MPI
+  fe_fsi_linear_solver::fsils_allreduce_sum(
+      &local_sum, &global_sum, 1, MPI_LONG_DOUBLE,
+      const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu));
+  fe_fsi_linear_solver::fsils_allreduce_sum(
+      &local_count, &global_count, 1, MPI_LONG_DOUBLE,
+      const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu));
+#endif
+
+  const double local_mean_before =
+      (local_count > 0.0L) ? static_cast<double>(local_sum / local_count) : 0.0;
+  const double global_mean =
+      (global_count > 0.0L) ? static_cast<double>(global_sum / global_count) : 0.0;
+
+  stats.global_mean_before = global_mean;
+  stats.local_mean_min_before = local_mean_before;
+  stats.local_mean_max_before = local_mean_before;
+#if FE_HAS_MPI
+  fe_fsi_linear_solver::fsils_allreduce_in_place(
+      &stats.local_mean_min_before, 1, cm_mod::mpreal, MPI_MIN,
+      const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu));
+  fe_fsi_linear_solver::fsils_allreduce_in_place(
+      &stats.local_mean_max_before, 1, cm_mod::mpreal, MPI_MAX,
+      const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu));
+#endif
+
+  const double shift = local_mean_before - global_mean;
+  stats.max_abs_shift = std::abs(shift);
+#if FE_HAS_MPI
+  fe_fsi_linear_solver::fsils_allreduce_in_place(
+      &stats.max_abs_shift, 1, cm_mod::mpreal, MPI_MAX,
+      const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu));
+#endif
+
+  for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+    values(node) -= shift;
+  }
+
+  long double local_sum_after = 0.0L;
+  for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+    local_sum_after += static_cast<long double>(values(node));
+  }
+  const double local_mean_after =
+      (local_count > 0.0L) ? static_cast<double>(local_sum_after / local_count) : 0.0;
+  stats.global_mean_after = scalar_vector_mean(lhs, values);
+  stats.local_mean_min_after = local_mean_after;
+  stats.local_mean_max_after = local_mean_after;
+#if FE_HAS_MPI
+  fe_fsi_linear_solver::fsils_allreduce_in_place(
+      &stats.local_mean_min_after, 1, cm_mod::mpreal, MPI_MIN,
+      const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu));
+  fe_fsi_linear_solver::fsils_allreduce_in_place(
+      &stats.local_mean_max_after, 1, cm_mod::mpreal, MPI_MAX,
+      const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu));
+#endif
+  return stats;
+}
+
+double galerkin_residual_norm_sq(const Array<double>& A,
+                                 const Vector<double>& B,
+                                 const Vector<double>& x,
+                                 int active_cols,
+                                 double initial_norm_sq)
+{
+  long double quad = 0.0L;
+  long double lin = 0.0L;
+  for (int i = 0; i < active_cols; ++i) {
+    const long double xi = static_cast<long double>(x(i));
+    lin += xi * static_cast<long double>(B(i));
+    for (int j = 0; j < active_cols; ++j) {
+      quad += xi * static_cast<long double>(A(j, i)) *
+              static_cast<long double>(x(j));
+    }
+  }
+  return std::max(
+      0.0,
+      static_cast<double>(static_cast<long double>(initial_norm_sq) - 2.0L * lin + quad));
 }
 
 bool fill_projected_block_vector(
@@ -451,6 +735,124 @@ void split_scalar_block_vector(const Array<double>& in,
   }
 }
 
+struct ScalarTraceStats {
+  double l2{0.0};
+  double mean{0.0};
+  double min{0.0};
+  double max{0.0};
+};
+
+struct VectorTraceStats {
+  double l2{0.0};
+  double max_abs{0.0};
+};
+
+[[nodiscard]] ScalarTraceStats compute_scalar_trace_stats(
+    const fsils_int mynNo,
+    fe_fsi_linear_solver::FSILS_commuType& commu,
+    const Vector<double>& vec)
+{
+  const fsils_int local_n = std::min<fsils_int>(mynNo, vec.size());
+  double local_sq_sum = 0.0;
+  double local_sum = 0.0;
+  double local_min = std::numeric_limits<double>::infinity();
+  double local_max = -std::numeric_limits<double>::infinity();
+  for (fsils_int node = 0; node < local_n; ++node) {
+    const double value = vec(node);
+    local_sq_sum += value * value;
+    local_sum += value;
+    local_min = std::min(local_min, value);
+    local_max = std::max(local_max, value);
+  }
+
+  double global_sq_sum = local_sq_sum;
+  double global_sum = local_sum;
+  double global_count = static_cast<double>(local_n);
+  fe_fsi_linear_solver::fsils_allreduce_sum_in_place(&global_sq_sum, 1, cm_mod::mpreal, commu);
+  fe_fsi_linear_solver::fsils_allreduce_sum_in_place(&global_sum, 1, cm_mod::mpreal, commu);
+  fe_fsi_linear_solver::fsils_allreduce_sum_in_place(&global_count, 1, cm_mod::mpreal, commu);
+
+  double global_min = local_min;
+  double global_max = local_max;
+  if (global_count > 0.0) {
+    fe_fsi_linear_solver::fsils_allreduce_in_place(&global_min, 1, cm_mod::mpreal, MPI_MIN, commu);
+    fe_fsi_linear_solver::fsils_allreduce_in_place(&global_max, 1, cm_mod::mpreal, MPI_MAX, commu);
+  } else {
+    global_min = 0.0;
+    global_max = 0.0;
+  }
+
+  ScalarTraceStats stats;
+  stats.l2 = std::sqrt(std::max(0.0, global_sq_sum));
+  stats.mean = (global_count > 0.0) ? (global_sum / global_count) : 0.0;
+  stats.min = global_min;
+  stats.max = global_max;
+  return stats;
+}
+
+[[nodiscard]] VectorTraceStats compute_vector_trace_stats(
+    const int ncomp,
+    const fsils_int mynNo,
+    fe_fsi_linear_solver::FSILS_commuType& commu,
+    const Array<double>& vec)
+{
+  VectorTraceStats stats;
+  stats.l2 = norm::fsi_ls_normv(ncomp, mynNo, commu, vec);
+
+  double local_max_abs = 0.0;
+  for (fsils_int node = 0; node < mynNo; ++node) {
+    for (int comp = 0; comp < ncomp; ++comp) {
+      local_max_abs = std::max(local_max_abs, std::abs(vec(comp, node)));
+    }
+  }
+  stats.max_abs = local_max_abs;
+  fe_fsi_linear_solver::fsils_allreduce_in_place(&stats.max_abs, 1, cm_mod::mpreal, MPI_MAX, commu);
+  return stats;
+}
+
+void trace_scalar_block_vector_stats(bool master_flag,
+                                     const char* label,
+                                     const ScalarTraceStats& stats,
+                                     double dot_with_rhs = std::numeric_limits<double>::quiet_NaN())
+{
+  if (!master_flag) {
+    return;
+  }
+  if (std::isnan(dot_with_rhs)) {
+    fprintf(stderr,
+            "[NS_SOLVER] %s l2=%e mean=%e min=%e max=%e\n",
+            label,
+            stats.l2,
+            stats.mean,
+            stats.min,
+            stats.max);
+    return;
+  }
+
+  fprintf(stderr,
+          "[NS_SOLVER] %s l2=%e mean=%e min=%e max=%e dot_rhs=%e\n",
+          label,
+          stats.l2,
+          stats.mean,
+          stats.min,
+          stats.max,
+          dot_with_rhs);
+}
+
+void trace_momentum_block_vector_stats(bool master_flag,
+                                       const char* label,
+                                       const VectorTraceStats& stats)
+{
+  if (!master_flag) {
+    return;
+  }
+  fprintf(stderr,
+          "[NS_SOLVER] %s l2=%e max_abs=%e\n",
+          label,
+          stats.l2,
+          stats.max_abs);
+}
+
 void trace_compare_scalar_block_column(fe_fsi_linear_solver::FSILS_lhsType& lhs,
                                        int dof,
                                        const Array<double>& Val,
@@ -460,10 +862,10 @@ void trace_compare_scalar_block_column(fe_fsi_linear_solver::FSILS_lhsType& lhs,
                                        const Array<double>& trial_momentum,
                                        const Vector<double>& trial_constraint,
                                        const Array<double>& expected_momentum,
-                                       const Vector<double>& expected_constraint,
-                                       const char* label)
+  const Vector<double>& expected_constraint,
+  const char* label)
 {
-  if (!lhs.commu.masF || !fsilsTraceEnabled()) {
+  if (!fsilsTraceEnabled()) {
     return;
   }
 
@@ -509,13 +911,15 @@ void trace_compare_scalar_block_column(fe_fsi_linear_solver::FSILS_lhsType& lhs,
                  norm::fsi_ls_norms(mynNo, lhs.commu, diff_constraint));
   const double rel = (expected_norm > 0.0) ? diff_norm / expected_norm : diff_norm;
 
-  fprintf(stderr,
-          "[NS_SOLVER] full-column compare %s |expected|=%e |full|=%e |diff|=%e rel=%e\n",
-          label,
-          expected_norm,
-          full_norm,
-          diff_norm,
-          rel);
+  if (lhs.commu.masF) {
+    fprintf(stderr,
+            "[NS_SOLVER] full-column compare %s |expected|=%e |full|=%e |diff|=%e rel=%e\n",
+            label,
+            expected_norm,
+            full_norm,
+            diff_norm,
+            rel);
+  }
 }
 
 void assemble_scalar_block_vector(const Array<double>& momentum,
@@ -1008,6 +1412,7 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   ls.RI.stats.reset();
   ls.blockschur_stats.reset();
   eps = std::max(ls.RI.absTol, ls.RI.relTol*eps);
+  int i_count{0};
 
   auto update_outer_residual = [&](int max_col) {
     #pragma omp parallel for schedule(static)
@@ -1065,7 +1470,6 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   }
 
   int iBB{0};
-  int i_count{0};
 
   for (int i = 0; i < ls.RI.mItr; i++) {
     const auto collective_before_outer = lhs.commu.collective_stats;
@@ -1335,6 +1739,9 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   oldxB = 0.0;
   Array<double> Rm(nsd,nNo), Rmi(nsd,nNo), A(nB,nB), P(nNo,iB), MP(nNo,nB);
   Array3<double> U(nsd,nNo,iB), MU(nsd,nNo,nB);
+  static bool first_schur_zero_mean_consumed = false;
+  const bool iter0_mean_subspace =
+      lhs.commu.nTasks > 1 && iter0SchurMeanSubspaceEnabled();
 
   #pragma omp parallel for schedule(static)
   for (fsils_int j = 0; j < nNo; j++) {
@@ -1380,6 +1787,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   ls.RI.stats.reset();
   ls.blockschur_stats.reset();
   eps = std::max(ls.RI.absTol, ls.RI.relTol*eps);
+  int i_count{0};
 
   auto update_outer_residual = [&](int max_col) {
     #pragma omp parallel for schedule(static)
@@ -1409,8 +1817,12 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
       }
     }
 
+    traceSyncOrder(lhs, "before_sync_vector", i_count, mynNo, nNo, ls.RI.fNorm);
     halo.sync_vector(nsd, Rm, skipPostSolveOverlapSum());
+    traceSyncOrder(lhs, "after_sync_vector", i_count, mynNo, nNo, ls.RI.fNorm);
+    traceSyncOrder(lhs, "before_sync_scalar", i_count, mynNo, nNo, ls.RI.fNorm);
     halo.sync_scalar(Rc, skipPostSolveOverlapSum());
+    traceSyncOrder(lhs, "after_sync_scalar", i_count, mynNo, nNo, ls.RI.fNorm);
   };
 
   auto actual_outer_residual_norm_sq = [&]() {
@@ -1433,6 +1845,82 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   const auto schur_system =
       fe_fsi_linear_solver::distributed_solver_bundles::make_scalar_block_schur_system(
           lhs, nsd, mK, mD, mG, mL);
+
+  if (const char* oracle_path = fsilsOracleBlockCompareFile();
+      oracle_path != nullptr) {
+    Vector<double> oracle_mode(nNo);
+    if (loadOracleScalarMode(lhs, oracle_path, oracle_mode)) {
+      Array<double> gl_gp(nsd, nNo), direct_gp(nsd, nNo), diff_gp(nsd, nNo);
+      Vector<double> gl_sp(nNo), direct_sp(nNo), diff_sp(nNo);
+      gl_gp = 0.0;
+      direct_gp = 0.0;
+      diff_gp = 0.0;
+      gl_sp = 0.0;
+      direct_sp = 0.0;
+      diff_sp = 0.0;
+
+      schur_system.GL.apply(
+          dso::ghost_synced_input(oracle_mode),
+          dso::ghost_synced_output(nsd, gl_gp),
+          dso::ghost_synced_output(gl_sp));
+
+      const auto compute_direct_range = [&](fsils_int i_start, fsils_int i_end) {
+        #pragma omp parallel for schedule(static)
+        for (fsils_int row = i_start; row < i_end; ++row) {
+          for (fsils_int nz = lhs.rowPtr(0, row); nz <= lhs.rowPtr(1, row); ++nz) {
+            const fsils_int col = lhs.colPtr(nz);
+            const double p_col = oracle_mode(col);
+            for (int comp = 0; comp < nsd; ++comp) {
+              direct_gp(comp, row) +=
+                  Val((mom_start + comp) * dof + con_start, nz) * p_col;
+            }
+            direct_sp(row) += Val(con_start * dof + con_start, nz) * p_col;
+          }
+        }
+      };
+
+      if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+        compute_direct_range(0, lhs.shnNo);
+        compute_direct_range(lhs.mynNo, nNo);
+        const fe_fsi_linear_solver::HaloExchange halo(lhs);
+        halo.begin_vector(nsd, direct_gp);
+        compute_direct_range(lhs.shnNo, lhs.mynNo);
+        halo.end_vector(nsd, direct_gp);
+        halo.begin_scalar(direct_sp);
+        halo.end_scalar(direct_sp);
+      } else {
+        compute_direct_range(0, nNo);
+      }
+
+      for (fsils_int row = 0; row < nNo; ++row) {
+        diff_sp(row) = direct_sp(row) - gl_sp(row);
+        for (int comp = 0; comp < nsd; ++comp) {
+          diff_gp(comp, row) = direct_gp(comp, row) - gl_gp(comp, row);
+        }
+      }
+
+      const double oracle_norm = norm::fsi_ls_norms(mynNo, lhs.commu, oracle_mode);
+      const double gl_gp_norm = norm::fsi_ls_normv(nsd, mynNo, lhs.commu, gl_gp);
+      const double direct_gp_norm = norm::fsi_ls_normv(nsd, mynNo, lhs.commu, direct_gp);
+      const double diff_gp_norm = norm::fsi_ls_normv(nsd, mynNo, lhs.commu, diff_gp);
+      const double gl_sp_norm = norm::fsi_ls_norms(mynNo, lhs.commu, gl_sp);
+      const double direct_sp_norm = norm::fsi_ls_norms(mynNo, lhs.commu, direct_sp);
+      const double diff_sp_norm = norm::fsi_ls_norms(mynNo, lhs.commu, diff_sp);
+
+      if (lhs.commu.masF && fsilsTraceEnabled()) {
+        std::fprintf(stderr,
+                     "[NS_ORACLE_BLOCK_COMPARE] oracle_l2=%e gl_gp_l2=%e direct_gp_l2=%e diff_gp_l2=%e gl_sp_l2=%e direct_sp_l2=%e diff_sp_l2=%e\n",
+                     oracle_norm,
+                     gl_gp_norm,
+                     direct_gp_norm,
+                     diff_gp_norm,
+                     gl_sp_norm,
+                     direct_sp_norm,
+                     diff_sp_norm);
+        std::fflush(stderr);
+      }
+    }
+  }
 
   // Computes lhs.face[].nS for each face.
   bc_pre(lhs, mom_ncomp, dof, nNo, mynNo);
@@ -1530,7 +2018,6 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   dmsg << "Loop i on ls.RI.mItr ... ";
   #endif
   int iBB{0};
-  int i_count{0};
 
   for (int i = 0; i < ls.RI.mItr; i++) {
     const auto collective_before_outer = lhs.commu.collective_stats;
@@ -1554,6 +2041,20 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     U_slice = Rm;
     gmres::gmres_v(momentum_system, ls.GM, U_slice);
     halo.sync_vector(nsd, U_slice, skipPostSolveOverlapSum());
+    if (i == 0 && fsilsTraceEnabled()) {
+      trace_momentum_block_vector_stats(
+          lhs.commu.masF,
+          "iter0 momentum_rhs",
+          compute_vector_trace_stats(nsd, mynNo, lhs.commu, Rm));
+      trace_scalar_block_vector_stats(
+          lhs.commu.masF,
+          "iter0 constraint_rhs",
+          compute_scalar_trace_stats(mynNo, lhs.commu, Rc));
+      trace_momentum_block_vector_stats(
+          lhs.commu.masF,
+          "iter0 momentum_solve_invK_Rm",
+          compute_vector_trace_stats(nsd, mynNo, lhs.commu, U_slice));
+    }
 
     // P = D*U (using exact analytical mD)
     auto P_col = P.rcol(i);
@@ -1571,11 +2072,62 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
       P_col(n) = Rc(n) - P_col(n);
     }
     halo.sync_scalar(P_col, skipPostSolveOverlapSum());
+    Vector<double> iter0_schur_rhs;
+    if (i == 0 && fsilsTraceEnabled()) {
+      iter0_schur_rhs = P_col;
+      trace_scalar_block_vector_stats(
+          lhs.commu.masF,
+          "iter0 schur_rhs",
+          compute_scalar_trace_stats(mynNo, lhs.commu, iter0_schur_rhs));
+    }
 
     // P = [L - D*H*G]^-1 * P
     // VMS FIX: Solved using asymmetric BiCGStab instead of symmetric CGRAD
     bicgs::schur(schur_system, ls.CG, ls.GM, P_col);
     halo.sync_scalar(P_col, skipPostSolveOverlapSum());
+    const bool apply_first_only_zero_mean =
+        firstSchurZeroMeanEnabled() && !first_schur_zero_mean_consumed;
+    const bool apply_iter0_zero_mean = iter0SchurZeroMeanEnabled();
+    if (lhs.commu.nTasks > 1 &&
+        i == 0 &&
+        (apply_first_only_zero_mean || apply_iter0_zero_mean)) {
+      const auto zero_mean_stats = subtract_scalar_global_mean(lhs, P_col);
+      halo.sync_scalar(P_col, skipPostSolveOverlapSum());
+      if (apply_first_only_zero_mean) {
+        first_schur_zero_mean_consumed = true;
+      }
+      if (lhs.commu.masF && fsilsTraceEnabled()) {
+        fprintf(stderr,
+                "[NS_SOLVER] iter0 schur_zero_mean_post mean_before=%e mean_after=%e max_abs_shift=%e\n",
+                zero_mean_stats.mean_before,
+                zero_mean_stats.mean_after,
+                zero_mean_stats.max_abs_shift);
+      }
+    }
+    if (scalarPartitionMeanEqualizationEnabled() && lhs.commu.nTasks > 1) {
+      const auto mean_stats = equalize_scalar_partition_means(lhs, P_col);
+      halo.sync_scalar(P_col, skipPostSolveOverlapSum());
+      if (i == 0 && lhs.commu.masF && fsilsTraceEnabled()) {
+        fprintf(stderr,
+                "[NS_SOLVER] iter0 schur_partition_mean_equalize global_mean_before=%e "
+                "local_mean_min_before=%e local_mean_max_before=%e global_mean_after=%e "
+                "local_mean_min_after=%e local_mean_max_after=%e max_abs_shift=%e\n",
+                mean_stats.global_mean_before,
+                mean_stats.local_mean_min_before,
+                mean_stats.local_mean_max_before,
+                mean_stats.global_mean_after,
+                mean_stats.local_mean_min_after,
+                mean_stats.local_mean_max_after,
+                mean_stats.max_abs_shift);
+      }
+    }
+    if (i == 0 && fsilsTraceEnabled()) {
+      trace_scalar_block_vector_stats(
+          lhs.commu.masF,
+          "iter0 schur_solution",
+          compute_scalar_trace_stats(mynNo, lhs.commu, P_col),
+          dot::fsils_nc_dot_s(mynNo, iter0_schur_rhs, P_col));
+    }
 
     // MU1 = G*P
     #ifdef debug_ns_solver
@@ -1598,11 +2150,152 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     copy_scalar_array_to_vector(MP_iB_block, MP_iB);
     halo.sync_vector(nsd, MU_iB, skipPostSolveOverlapSum());
     halo.sync_scalar(MP_iB, skipPostSolveOverlapSum());
-    if (i == 0 && lhs.commu.masF && fsilsTraceEnabled()) {
+    if (i == 0 && fsilsTraceEnabled()) {
+      trace_momentum_block_vector_stats(
+          lhs.commu.masF,
+          "iter0 pressure_basis_momentum",
+          compute_vector_trace_stats(nsd, mynNo, lhs.commu, MU_iB));
+      trace_scalar_block_vector_stats(
+          lhs.commu.masF,
+          "iter0 pressure_basis_constraint",
+          compute_scalar_trace_stats(mynNo, lhs.commu, MP_iB));
+    }
+    if (i == 0 && fsilsTraceEnabled() && fsilsFullColumnCompareEnabled()) {
       Array<double> zero_momentum(nsd, nNo);
       zero_momentum = 0.0;
       trace_compare_scalar_block_column(lhs, dof, Val, mom_start, mom_ncomp, con_start,
                                         zero_momentum, P_col, MU_iB, MP_iB, "pressure_basis_iter0");
+    }
+
+    if (i == 0 && iter0_mean_subspace) {
+      const double mean_value = scalar_vector_mean(lhs, P_col);
+      if (std::abs(mean_value) > 1e-14) {
+        Vector<double> P_mean(nNo);
+        P_mean = 0.0;
+        for (fsils_int node = 0; node < mynNo; ++node) {
+          P_mean(node) = mean_value;
+        }
+        halo.sync_scalar(P_mean, skipPostSolveOverlapSum());
+
+        Array<double> MU_mean(nsd, nNo);
+        MU_mean = 0.0;
+        Vector<double> MP_mean(nNo);
+        MP_mean = 0.0;
+
+        schur_system.G.apply(
+            dso::ghost_synced_input(P_mean),
+            dso::ghost_synced_output(nsd, MU_mean));
+        schur_system.L.apply(
+            dso::ghost_synced_input(P_mean),
+            dso::ghost_synced_output(MP_mean));
+        Array<double> P_mean_block;
+        copy_scalar_vector_to_array(P_mean, P_mean_block);
+        Array<double> MP_mean_block;
+        copy_scalar_vector_to_array(MP_mean, MP_mean_block);
+        apply_constraint_block_corrections(
+            lhs, explicit_low_rank_correction, P_mean_block, MU_mean, MP_mean_block);
+        copy_scalar_array_to_vector(MP_mean_block, MP_mean);
+        halo.sync_vector(nsd, MU_mean, skipPostSolveOverlapSum());
+        halo.sync_scalar(MP_mean, skipPostSolveOverlapSum());
+
+        const double orig_orig_local =
+            dot::fsils_nc_dot_v(nsd, mynNo, MU_iB, MU_iB) +
+            dot::fsils_nc_dot_s(mynNo, MP_iB, MP_iB);
+        const double orig_mean_local =
+            dot::fsils_nc_dot_v(nsd, mynNo, MU_iB, MU_mean) +
+            dot::fsils_nc_dot_s(mynNo, MP_iB, MP_mean);
+        const double mean_mean_local =
+            dot::fsils_nc_dot_v(nsd, mynNo, MU_mean, MU_mean) +
+            dot::fsils_nc_dot_s(mynNo, MP_mean, MP_mean);
+        const double rhs_orig_local =
+            dot::fsils_nc_dot_v(nsd, mynNo, MU_iB, Rm) +
+            dot::fsils_nc_dot_s(mynNo, MP_iB, Rc);
+        const double rhs_mean_local =
+            dot::fsils_nc_dot_v(nsd, mynNo, MU_mean, Rm) +
+            dot::fsils_nc_dot_s(mynNo, MP_mean, Rc);
+
+        double local_metrics[5] = {
+            orig_orig_local,
+            orig_mean_local,
+            mean_mean_local,
+            rhs_orig_local,
+            rhs_mean_local,
+        };
+        double global_metrics[5] = {
+            orig_orig_local,
+            orig_mean_local,
+            mean_mean_local,
+            rhs_orig_local,
+            rhs_mean_local,
+        };
+        collectives.allreduce_sum(local_metrics, global_metrics, 5);
+
+        const double a00 = global_metrics[0];
+        const double a01 = global_metrics[1];
+        const double a11 = global_metrics[2];
+        const double b0 = global_metrics[3];
+        const double b1 = global_metrics[4];
+
+        auto score_gamma = [&](double gamma) -> double {
+          const double denom = a00 + 2.0 * gamma * a01 + gamma * gamma * a11;
+          if (!(denom > 1e-30)) {
+            return -1.0;
+          }
+          const double numer = b0 + gamma * b1;
+          return (numer * numer) / denom;
+        };
+
+        double best_gamma = 0.0;
+        double best_score = score_gamma(best_gamma);
+
+        auto consider_gamma = [&](double gamma) {
+          if (!std::isfinite(gamma) || std::abs(gamma) > 1e6) {
+            return;
+          }
+          const double score = score_gamma(gamma);
+          if (score > best_score) {
+            best_score = score;
+            best_gamma = gamma;
+          }
+        };
+
+        consider_gamma(-1.0);
+        const double denom = b1 * a01 - b0 * a11;
+        if (std::abs(denom) > 1e-30) {
+          consider_gamma((b0 * a01 - b1 * a00) / denom);
+        }
+
+        if (std::abs(best_gamma) > 1e-12) {
+          omp_la::omp_sum_s(nNo, best_gamma, P_col, P_mean);
+          halo.sync_scalar(P_col, skipPostSolveOverlapSum());
+          dense_axpy(nsd, nNo, MU_mean, best_gamma, MU_iB);
+          omp_la::omp_sum_s(nNo, best_gamma, MP_iB, MP_mean);
+          halo.sync_vector(nsd, MU_iB, skipPostSolveOverlapSum());
+          halo.sync_scalar(MP_iB, skipPostSolveOverlapSum());
+        }
+
+        if (lhs.commu.masF && fsilsTraceEnabled()) {
+          fprintf(stderr,
+                  "[NS_SOLVER] iter0 schur_mean_subspace mean=%e gamma=%e score0=%e score_best=%e a00=%e a01=%e a11=%e b0=%e b1=%e\n",
+                  mean_value,
+                  best_gamma,
+                  score_gamma(0.0),
+                  best_score,
+                  a00,
+                  a01,
+                  a11,
+                  b0,
+                  b1);
+          trace_momentum_block_vector_stats(
+              lhs.commu.masF,
+              "iter0 pressure_basis_momentum_subspace",
+              compute_vector_trace_stats(nsd, mynNo, lhs.commu, MU_iB));
+          trace_scalar_block_vector_stats(
+              lhs.commu.masF,
+              "iter0 pressure_basis_constraint_subspace",
+              compute_scalar_trace_stats(mynNo, lhs.commu, MP_iB));
+        }
+      }
     }
 
     // MU2 = Rm - G*P
@@ -1638,7 +2331,17 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     copy_scalar_array_to_vector(MP_iBB_block, MP_iBB);
     halo.sync_vector(nsd, MU_iBB, skipPostSolveOverlapSum());
     halo.sync_scalar(MP_iBB, skipPostSolveOverlapSum());
-    if (i == 0 && lhs.commu.masF && fsilsTraceEnabled()) {
+    if (i == 0 && fsilsTraceEnabled()) {
+      trace_momentum_block_vector_stats(
+          lhs.commu.masF,
+          "iter0 momentum_basis_momentum",
+          compute_vector_trace_stats(nsd, mynNo, lhs.commu, MU_iBB));
+      trace_scalar_block_vector_stats(
+          lhs.commu.masF,
+          "iter0 momentum_basis_constraint",
+          compute_scalar_trace_stats(mynNo, lhs.commu, MP_iBB));
+    }
+    if (i == 0 && fsilsTraceEnabled() && fsilsFullColumnCompareEnabled()) {
       Vector<double> zero_constraint(nNo);
       zero_constraint = 0.0;
       trace_compare_scalar_block_column(lhs, dof, Val, mom_start, mom_ncomp, con_start,
@@ -1696,6 +2399,91 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
 
     // Minimize GCR outer residual
     if (ge::ge(nB, iBB+1, A, xB)) {
+      if (scalarMeanConstrainedGalerkinEnabled() && lhs.commu.nTasks > 1) {
+        const int active_cols = iBB + 1;
+        Vector<double> mean_constraint(active_cols);
+        mean_constraint = 0.0;
+        double current_mean = 0.0;
+        for (int col = 0; col <= i_count; ++col) {
+          const double mean = scalar_vector_mean(lhs, P.rcol(col));
+          const int pressure_idx = 2 * col;
+          if (pressure_idx < active_cols) {
+            mean_constraint(pressure_idx) = mean;
+            current_mean += mean * xB(pressure_idx);
+          }
+        }
+
+        const double residual_sq_before =
+            galerkin_residual_norm_sq(A, B, xB, active_cols, ls.RI.iNorm * ls.RI.iNorm);
+        long double mean_sq = 0.0L;
+        for (int row = 0; row < active_cols; ++row) {
+          const long double value = static_cast<long double>(mean_constraint(row));
+          mean_sq += value * value;
+        }
+        const double mean_scale =
+            std::sqrt(std::max(0.0L, mean_sq));
+        const bool need_constraint =
+            std::isfinite(current_mean) &&
+            std::abs(current_mean) > std::max(1e-12 * std::max(1.0, mean_scale), 1e-10);
+
+        if (need_constraint) {
+          Array<double> KKT(nB + 1, nB + 1);
+          KKT = 0.0;
+          Vector<double> rhs_kkt(nB + 1);
+          rhs_kkt = 0.0;
+
+          for (int row = 0; row < active_cols; ++row) {
+            rhs_kkt(row) = B(row);
+            for (int col = 0; col < active_cols; ++col) {
+              KKT(col, row) = A(col, row);
+            }
+            KKT(active_cols, row) = mean_constraint(row);
+            KKT(row, active_cols) = mean_constraint(row);
+          }
+
+          Vector<double> candidate(nB + 1);
+          candidate = rhs_kkt;
+          const bool constrained_ok = ge::ge(nB + 1, active_cols + 1, KKT, candidate);
+          if (constrained_ok) {
+            Vector<double> candidate_x(active_cols);
+            candidate_x = 0.0;
+            for (int row = 0; row < active_cols; ++row) {
+              candidate_x(row) = candidate(row);
+            }
+            const double residual_sq_after = galerkin_residual_norm_sq(
+                A, B, candidate_x, active_cols, ls.RI.iNorm * ls.RI.iNorm);
+
+            double constrained_mean = 0.0;
+            for (int row = 0; row < active_cols; ++row) {
+              constrained_mean += mean_constraint(row) * candidate_x(row);
+            }
+
+            const bool accept_constrained =
+                std::isfinite(residual_sq_after) &&
+                residual_sq_after <=
+                    std::max(10.0 * residual_sq_before, residual_sq_before + 1e-8) &&
+                std::abs(constrained_mean) <=
+                    std::max(1e-8 * std::abs(current_mean), 1e-10);
+
+            if (lhs.commu.masF && fsilsTraceEnabled()) {
+              fprintf(stderr,
+                      "[NS_SOLVER] iter=%d scalar-mean constrained Galerkin current_mean=%e constrained_mean=%e residual_before=%e residual_after=%e accept=%d\n",
+                      i_count,
+                      current_mean,
+                      constrained_mean,
+                      std::sqrt(std::max(0.0, residual_sq_before)),
+                      std::sqrt(std::max(0.0, residual_sq_after)),
+                      accept_constrained ? 1 : 0);
+            }
+
+            if (accept_constrained) {
+              for (int row = 0; row < active_cols; ++row) {
+                xB(row) = candidate_x(row);
+              }
+            }
+          }
+        }
+      }
       oldxB = xB;
 
     } else {
@@ -1749,9 +2537,11 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     ls.RI.itr = i_count;
   }
 
+  traceSyncOrder(lhs, "before_resc_norm", ls.RI.itr, mynNo, nNo, ls.RI.fNorm);
   ls.Resc = (ls.RI.fNorm > 0.0)
       ? static_cast<int>(100.0 * std::pow(norm::fsi_ls_norms(mynNo, lhs.commu, Rc),2.0) / ls.RI.fNorm)
       : 0;
+  traceSyncOrder(lhs, "after_resc_norm", ls.RI.itr, mynNo, nNo, ls.RI.fNorm);
   ls.Resm = 100 - ls.Resc;
 
   #ifdef debug_ns_solver

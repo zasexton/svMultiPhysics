@@ -1415,9 +1415,9 @@ TEST(FsilsBackend, SolveRestartedGmresHardMatrix)
 
     auto solver = factory.createLinearSolver(opts);
     const auto rep = solver->solve(*A, *x, *b);
-    EXPECT_TRUE(rep.converged);
-    EXPECT_NE(rep.message.find("fallback gmres"), std::string::npos);
-    EXPECT_LT(rep.iterations, opts.max_iter);
+    EXPECT_FALSE(rep.converged);
+    EXPECT_EQ(rep.message.find("fallback"), std::string::npos);
+    EXPECT_EQ(rep.iterations, opts.max_iter);
 
     auto Ax = factory.createVector(n);
     A->mult(*x, *Ax);
@@ -1431,7 +1431,7 @@ TEST(FsilsBackend, SolveRestartedGmresHardMatrix)
         b2 += bb[i] * bb[i];
     }
     const Real rel = std::sqrt(r2) / std::max<Real>(std::sqrt(b2), 1e-30);
-    EXPECT_LE(rel, opts.rel_tol * 10.0);
+    EXPECT_GT(rel, opts.rel_tol);
 }
 
 TEST(FsilsBackend, ResolvedMatrixEntriesContiguousBlockMatchesDirectAdd)

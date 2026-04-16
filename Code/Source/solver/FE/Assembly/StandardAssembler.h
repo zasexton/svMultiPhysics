@@ -118,6 +118,11 @@ namespace assembly {
  * computes local element matrices/vectors, and inserts them into
  * the global system.
  *
+ * In distributed runs StandardAssembler always assembles through an
+ * owned-row filter. It does not implement the ghost buffering and
+ * reverse-scatter exchange required by GhostPolicy::ReverseScatter;
+ * callers that need that policy must use ParallelAssembler instead.
+ *
  * Usage:
  * @code
  *   StandardAssembler assembler;

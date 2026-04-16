@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <unordered_map>
 
 namespace fe_fsi_linear_solver::distributed_low_rank_correction {
@@ -9,6 +11,70 @@ namespace fe_fsi_linear_solver::distributed_low_rank_correction {
 namespace {
 
 constexpr int kNativeFaceDuplicateCouplingId = -2;
+
+[[nodiscard]] bool correctionTraceEnabled() noexcept
+{
+  const char* env = std::getenv("SVMP_FSILS_TRACE_EXPLICIT_BLOCK_CORRECTIONS");
+  if (env == nullptr) {
+    return false;
+  }
+  while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+    ++env;
+  }
+  if (*env == '\0') {
+    return false;
+  }
+  return *env != '0';
+}
+
+[[nodiscard]] int correctionTraceLimit() noexcept
+{
+  const char* env = std::getenv("SVMP_FSILS_TRACE_EXPLICIT_BLOCK_CORRECTIONS_LIMIT");
+  if (env == nullptr) {
+    return 6;
+  }
+  char* end = nullptr;
+  const long value = std::strtol(env, &end, 10);
+  if (end == env || value <= 0) {
+    return 6;
+  }
+  if (value > 1024) {
+    return 1024;
+  }
+  return static_cast<int>(value);
+}
+
+void maybeTraceCorrectionCoefficients(FSILS_lhsType& lhs,
+                                      const char* label,
+                                      const std::vector<double>& rhs,
+                                      const std::vector<double>* alpha = nullptr)
+{
+  if (!lhs.commu.masF || !correctionTraceEnabled()) {
+    return;
+  }
+
+  static int trace_count = 0;
+  if (trace_count >= correctionTraceLimit()) {
+    return;
+  }
+  ++trace_count;
+
+  std::fprintf(stderr,
+               "[LOW_RANK_CORR] call=%d label=%s rhs_count=%zu",
+               trace_count,
+               label,
+               rhs.size());
+  for (std::size_t i = 0; i < rhs.size(); ++i) {
+    std::fprintf(stderr, " rhs[%zu]=%.17e", i, rhs[i]);
+  }
+  if (alpha != nullptr) {
+    for (std::size_t i = 0; i < alpha->size(); ++i) {
+      std::fprintf(stderr, " alpha[%zu]=%.17e", i, (*alpha)[i]);
+    }
+  }
+  std::fprintf(stderr, "\n");
+  std::fflush(stderr);
+}
 
 [[nodiscard]] int reduced_local_component(const FSILS_lhsType& lhs,
                                           const FSILS_reducedFieldUpdateType& update,
@@ -291,6 +357,26 @@ bool reduced_update_has_distinct_left_right(const FSILS_reducedFieldUpdateType& 
   return !sparse_entry_sets_match(left_entries, right_entries);
 }
 
+const std::vector<FSILS_reducedSparseEntry>& projected_left_entries(
+    const FSILS_reducedFieldUpdateType& update)
+{
+  // The exact operator contracts against owned rows on the right, but it
+  // scatters the correction onto the full local view on the left.
+  return !update.left_scaled.empty()     ? update.left_scaled
+      : !update.left.empty()             ? update.left
+      : !update.left_scaled_owned.empty() ? update.left_scaled_owned
+                                         : update.left_owned;
+}
+
+const std::vector<FSILS_reducedSparseEntry>& projected_right_entries(
+    const FSILS_reducedFieldUpdateType& update)
+{
+  return !update.right_scaled_owned.empty() ? update.right_scaled_owned
+      : !update.right_owned.empty()         ? update.right_owned
+      : !update.right_scaled.empty()        ? update.right_scaled
+                                            : update.right;
+}
+
 }  // namespace
 
 Profile inspect(const FSILS_lhsType& lhs,
@@ -400,16 +486,8 @@ DistributedLowRankCorrection build(const FSILS_lhsType& lhs,
 
     ProjectedReducedCorrection projected;
     projected.sigma = update.sigma;
-    const auto& left_entries =
-        !update.left_scaled_owned.empty() ? update.left_scaled_owned
-        : !update.left_owned.empty()      ? update.left_owned
-        : !update.left_scaled.empty()     ? update.left_scaled
-                                          : update.left;
-    const auto& right_entries =
-        !update.right_scaled_owned.empty() ? update.right_scaled_owned
-        : !update.right_owned.empty()      ? update.right_owned
-        : !update.right_scaled.empty()     ? update.right_scaled
-                                           : update.right;
+    const auto& left_entries = projected_left_entries(update);
+    const auto& right_entries = projected_right_entries(update);
 
     fill_projected_block_vector(lhs, left_entries, mom_start, mom_ncomp, projected.left_momentum);
     fill_projected_block_vector(lhs, left_entries, con_start, con_ncomp, projected.left_constraint);
@@ -443,16 +521,8 @@ DistributedLowRankCorrection build(const FSILS_lhsType& lhs,
     projected.right_constraint_modes.reserve(group_data.modes.size());
 
     for (const auto& mode : group_data.modes) {
-      const auto& left_entries =
-          !mode.left_scaled_owned.empty() ? mode.left_scaled_owned
-          : !mode.left_owned.empty()      ? mode.left_owned
-          : !mode.left_scaled.empty()     ? mode.left_scaled
-                                          : mode.left;
-      const auto& right_entries =
-          !mode.right_scaled_owned.empty() ? mode.right_scaled_owned
-          : !mode.right_owned.empty()      ? mode.right_owned
-          : !mode.right_scaled.empty()     ? mode.right_scaled
-                                           : mode.right;
+      const auto& left_entries = projected_left_entries(mode);
+      const auto& right_entries = projected_right_entries(mode);
 
       projected.left_momentum_modes.emplace_back();
       projected.left_constraint_modes.emplace_back();
@@ -529,12 +599,19 @@ void apply_constraint_driven(FSILS_lhsType& lhs,
     }
   }
   allreduce_sum_in_place(lhs, rhs);
+  maybeTraceCorrectionCoefficients(lhs, "constraint_rhs", rhs, nullptr);
 
   offset = 0;
+  std::vector<double> alpha_trace;
+  alpha_trace.reserve(static_cast<std::size_t>(n_reduced));
   for (const auto& corr : correction.reduced) {
     const double alpha = corr.sigma * rhs[static_cast<std::size_t>(offset++)];
+    alpha_trace.push_back(alpha);
     dense_axpy(mom_ncomp, nNo, corr.left_momentum, alpha, out_momentum);
     dense_axpy(con_ncomp, nNo, corr.left_constraint, alpha, out_constraint);
+  }
+  if (!alpha_trace.empty()) {
+    maybeTraceCorrectionCoefficients(lhs, "constraint_reduced_alpha", rhs, &alpha_trace);
   }
 
   for (const auto& group : correction.grouped) {
@@ -603,11 +680,18 @@ void apply_momentum_driven(FSILS_lhsType& lhs,
     }
   }
   allreduce_sum_in_place(lhs, rhs);
+  maybeTraceCorrectionCoefficients(lhs, "momentum_rhs", rhs, nullptr);
 
   offset = 0;
+  std::vector<double> alpha_trace;
+  alpha_trace.reserve(static_cast<std::size_t>(n_reduced));
   for (const auto& corr : correction.reduced) {
     const double alpha = corr.sigma * rhs[static_cast<std::size_t>(offset++)];
+    alpha_trace.push_back(alpha);
     dense_axpy(con_ncomp, nNo, corr.left_constraint, alpha, out_constraint);
+  }
+  if (!alpha_trace.empty()) {
+    maybeTraceCorrectionCoefficients(lhs, "momentum_reduced_alpha", rhs, &alpha_trace);
   }
 
   for (const auto& group : correction.grouped) {

@@ -965,6 +965,64 @@ TEST(FormsInstaller, FormsInstaller_InstallFormulation_CoupledSeparatesVectorAnd
     }
 }
 
+TEST(FormsInstaller, FormsInstaller_MixedResidualNegativeBoundaryTermCompiles)
+{
+    constexpr int marker = 19;
+    auto mesh =
+        std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field =
+        sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto p_field =
+        sys.addField(svmp::FE::systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u_state = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto p_state = svmp::FE::forms::FormExpr::stateField(p_field, *space, "p");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(u_field, *space, "v");
+    const auto q = svmp::FE::forms::FormExpr::testFunction(p_field, *space, "q");
+
+    const auto residual =
+        (u_state * v).dx() +
+        (p_state * q).dx() -
+        (u_state * v).ds(marker);
+
+    svmp::FE::systems::FormInstallOptions opts;
+    opts.compiler_options.jit.enable = true;
+    EXPECT_NO_THROW(
+        svmp::FE::systems::installFormulation(sys, "op", {u_field, p_field}, residual, opts));
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    EXPECT_NO_THROW(sys.setup({}, inputs));
+
+    const auto n_dofs = sys.dofHandler().getNumDofs();
+    ASSERT_EQ(n_dofs, 8);
+
+    std::vector<Real> U(static_cast<std::size_t>(n_dofs), 0.0);
+    for (GlobalIndex i = 0; i < n_dofs; ++i) {
+        U[static_cast<std::size_t>(i)] = static_cast<Real>(0.05) * static_cast<Real>(i + 1);
+    }
+
+    svmp::FE::systems::SystemStateView state;
+    state.u = U;
+
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+    req.want_vector = true;
+
+    svmp::FE::assembly::DenseMatrixView J(n_dofs);
+    svmp::FE::assembly::DenseVectorView R(n_dofs);
+    J.zero();
+    R.zero();
+
+    const auto result = sys.assemble(req, state, &J, &R);
+    EXPECT_TRUE(result.success);
+}
+
 TEST(FormsInstaller, FormsInstaller_InstallCoupledResidual_StateFieldsTracked)
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();

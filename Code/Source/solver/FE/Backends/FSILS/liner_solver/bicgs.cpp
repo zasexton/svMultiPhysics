@@ -48,9 +48,14 @@
 #include "Array3.h"
 
 #include <cmath>
+#include <cctype>
+#include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <algorithm>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -75,6 +80,7 @@ void bicgsv(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinear
   auto& lhs = *system.lhs;
   const int dof = system.components;
   const auto& A = system.A;
+  const HaloExchange halo(lhs);
 
   fsils_int nNo = lhs.nNo;
   fsils_int mynNo = lhs.mynNo;
@@ -127,6 +133,7 @@ void bicgsv(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinear
       break;
     }
 
+    halo.sync_vector(dof, P);
     A.apply(
         dso::ghost_synced_input(dof, P),
         dso::ghost_synced_output(dof, V));
@@ -135,6 +142,7 @@ void bicgsv(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinear
     double alpha = rho / denom_alpha;
     omp_la::omp_axpby_v(dof, nNo, S, R, -alpha, V);
 
+    halo.sync_vector(dof, S);
     A.apply(
         dso::ghost_synced_input(dof, S),
         dso::ghost_synced_output(dof, T));
@@ -198,6 +206,7 @@ void bicgsv(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinear
     i_itr += 1;
   }
 
+  halo.sync_vector(dof, X);
   R = X;
   ls.itr = i_itr - 1;
   ls.fNorm = err;
@@ -241,6 +250,7 @@ void bicgss(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinear
   using namespace fe_fsi_linear_solver;
   auto& lhs = *system.lhs;
   const auto& A = system.A;
+  const HaloExchange halo(lhs);
 
   fsils_int nNo = lhs.nNo;
   fsils_int mynNo = lhs.mynNo;
@@ -292,6 +302,7 @@ void bicgss(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinear
       break;
     }
 
+    halo.sync_scalar(P);
     A.apply(
         dso::ghost_synced_input(P),
         dso::ghost_synced_output(V));
@@ -300,6 +311,7 @@ void bicgss(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinear
     double alpha = rho / denom_alpha;
     omp_la::omp_axpby_s(nNo, S, R, -alpha, V);
 
+    halo.sync_scalar(S);
     A.apply(
         dso::ghost_synced_input(S),
         dso::ghost_synced_output(T));
@@ -363,6 +375,7 @@ void bicgss(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinear
     i_itr += 1;
   }
 
+  halo.sync_scalar(X);
   R = X;
   ls.itr = i_itr - 1;
   ls.fNorm = err;
@@ -419,6 +432,768 @@ using fe_fsi_linear_solver::fsils_int;
   }
 }
 
+[[nodiscard]] bool env_enabled(const char* name) noexcept
+{
+  const char* env = std::getenv(name);
+  if (env == nullptr) {
+    return false;
+  }
+  while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+    ++env;
+  }
+  return *env != '\0' && *env != '0';
+}
+
+[[nodiscard]] bool face_only_zero_mean_project_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_FACE_ONLY_ZERO_MEAN_PROJECT");
+  return enabled;
+}
+
+[[nodiscard]] bool trace_face_only_weak_mode_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_WEAK_MODE");
+  return enabled;
+}
+
+[[nodiscard]] int trace_face_only_basis_iter() noexcept
+{
+  static const int iter =
+      std::max(1, parse_int_env("SVMP_FSILS_TRACE_FACE_ONLY_BASIS_ITER", 10));
+  return iter;
+}
+
+[[nodiscard]] bool face_only_krylov_mode_correction_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_FACE_ONLY_KRYLOV_MODE_CORRECTION");
+  return enabled;
+}
+
+[[nodiscard]] bool trace_face_only_gmres_ls_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_GMRES_LS");
+  return enabled;
+}
+
+[[nodiscard]] double face_only_gmres_diag_floor_fraction() noexcept
+{
+  static const double fraction =
+      std::max(0.0,
+               parse_double_env("SVMP_FSILS_FACE_ONLY_GMRES_DIAG_FLOOR_FRAC",
+                                0.0));
+  return fraction;
+}
+
+[[nodiscard]] double face_only_gmres_tikhonov_fraction() noexcept
+{
+  static const double fraction =
+      std::max(0.0,
+               parse_double_env("SVMP_FSILS_FACE_ONLY_GMRES_TIKHONOV_FRAC",
+                                0.0));
+  return fraction;
+}
+
+[[nodiscard]] bool face_only_gmres_mean_free_krylov_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_FACE_ONLY_GMRES_MEAN_FREE_KRYLOV");
+  return enabled;
+}
+
+[[nodiscard]] double face_only_gmres_weak_coeff_shrink() noexcept
+{
+  static const double factor =
+      std::max(0.0,
+               std::min(1.0,
+                        parse_double_env("SVMP_FSILS_FACE_ONLY_GMRES_WEAK_COEFF_SHRINK",
+                                         1.0)));
+  return factor;
+}
+
+[[nodiscard]] bool face_only_gmres_reorthog_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_FACE_ONLY_GMRES_REORTHOG");
+  return enabled;
+}
+
+[[nodiscard]] const char* face_only_reduced_dump_path() noexcept
+{
+  const char* path = std::getenv("SVMP_FSILS_TRACE_FACE_ONLY_REDUCED_DUMP");
+  if (path == nullptr || *path == '\0') {
+    return nullptr;
+  }
+  return path;
+}
+
+[[nodiscard]] int face_only_gmres_restart_dim_override() noexcept
+{
+  static const int value =
+      std::max(0, parse_int_env("SVMP_FSILS_FACE_ONLY_GMRES_SD", 0));
+  return value;
+}
+
+[[nodiscard]] bool trace_face_only_solution_stats_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_SOLUTION_STATS");
+  return enabled;
+}
+
+[[nodiscard]] bool trace_face_only_constant_span_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_CONSTANT_SPAN");
+  return enabled;
+}
+
+[[nodiscard]] bool trace_face_only_broad_span_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_BROAD_SPAN");
+  return enabled;
+}
+
+[[nodiscard]] const char* face_only_solution_dump_prefix() noexcept
+{
+  const char* path = std::getenv("SVMP_FSILS_TRACE_FACE_ONLY_SOLUTION_DUMP");
+  if (path == nullptr || *path == '\0') {
+    return nullptr;
+  }
+  return path;
+}
+
+[[nodiscard]] int face_only_solution_dump_solve_index() noexcept
+{
+  static const int value =
+      parse_int_env("SVMP_FSILS_TRACE_FACE_ONLY_SOLUTION_DUMP_SOLVE_INDEX", 0);
+  return value;
+}
+
+[[nodiscard]] bool trace_face_only_constant_mode_operator_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_CONST_MODE_OPERATOR");
+  return enabled;
+}
+
+[[nodiscard]] bool face_only_gauge2_krylov_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_FACE_ONLY_GAUGE2_KRYLOV");
+  return enabled;
+}
+
+[[nodiscard]] int face_only_gauge2_krylov_solve_index() noexcept
+{
+  static const int value =
+      parse_int_env("SVMP_FSILS_FACE_ONLY_GAUGE2_KRYLOV_SOLVE_INDEX", -1);
+  return value;
+}
+
+[[nodiscard]] bool face_only_gauge2_postproject_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_FACE_ONLY_GAUGE2_POSTPROJECT");
+  return enabled;
+}
+
+[[nodiscard]] int face_only_gauge2_postproject_solve_index() noexcept
+{
+  static const int value =
+      parse_int_env("SVMP_FSILS_FACE_ONLY_GAUGE2_POSTPROJECT_SOLVE_INDEX", -1);
+  return value;
+}
+
+[[nodiscard]] bool face_only_gauge3_postproject_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_FACE_ONLY_GAUGE3_POSTPROJECT");
+  return enabled;
+}
+
+[[nodiscard]] int face_only_gauge3_postproject_solve_index() noexcept
+{
+  static const int value =
+      parse_int_env("SVMP_FSILS_FACE_ONLY_GAUGE3_POSTPROJECT_SOLVE_INDEX", -1);
+  return value;
+}
+
+[[nodiscard]] bool face_only_weak_mode_postproject_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_FACE_ONLY_WEAK_MODE_POSTPROJECT");
+  return enabled;
+}
+
+[[nodiscard]] int face_only_weak_mode_postproject_solve_index() noexcept
+{
+  static const int value =
+      parse_int_env("SVMP_FSILS_FACE_ONLY_WEAK_MODE_POSTPROJECT_SOLVE_INDEX", -1);
+  return value;
+}
+
+[[nodiscard]] bool face_only_reduced_weak_mode_postproject_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_FACE_ONLY_REDUCED_WEAK_MODE_POSTPROJECT");
+  return enabled;
+}
+
+[[nodiscard]] int face_only_reduced_weak_mode_postproject_solve_index() noexcept
+{
+  static const int value =
+      parse_int_env("SVMP_FSILS_FACE_ONLY_REDUCED_WEAK_MODE_POSTPROJECT_SOLVE_INDEX", -1);
+  return value;
+}
+
+[[nodiscard]] double face_only_reduced_weak_mode_penalty_fraction() noexcept
+{
+  static const double fraction =
+      std::max(0.0,
+               parse_double_env("SVMP_FSILS_FACE_ONLY_REDUCED_WEAK_MODE_PENALTY_FRAC",
+                                0.0));
+  return fraction;
+}
+
+[[nodiscard]] int face_only_reduced_weak_mode_penalty_solve_index() noexcept
+{
+  static const int value =
+      parse_int_env("SVMP_FSILS_FACE_ONLY_REDUCED_WEAK_MODE_PENALTY_SOLVE_INDEX", -1);
+  return value;
+}
+
+[[nodiscard]] double face_only_reduced_weak_mode_gain() noexcept
+{
+  static const double gain =
+      parse_double_env("SVMP_FSILS_FACE_ONLY_REDUCED_WEAK_MODE_GAIN", 0.0);
+  return gain;
+}
+
+[[nodiscard]] int face_only_reduced_weak_mode_gain_solve_index() noexcept
+{
+  static const int value =
+      parse_int_env("SVMP_FSILS_FACE_ONLY_REDUCED_WEAK_MODE_GAIN_SOLVE_INDEX", -1);
+  return value;
+}
+
+[[nodiscard]] bool face_only_constant_weak_subspace_enrich_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_FACE_ONLY_CONSTANT_WEAK_SUBSPACE_ENRICH");
+  return enabled;
+}
+
+[[nodiscard]] int face_only_constant_weak_subspace_enrich_solve_index() noexcept
+{
+  static const int value =
+      parse_int_env("SVMP_FSILS_FACE_ONLY_CONSTANT_WEAK_SUBSPACE_ENRICH_SOLVE_INDEX", 0);
+  return value;
+}
+
+[[nodiscard]] bool face_only_constant_initial_guess_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_FACE_ONLY_CONSTANT_INITIAL_GUESS");
+  return enabled;
+}
+
+[[nodiscard]] int face_only_constant_initial_guess_solve_index() noexcept
+{
+  static const int value =
+      parse_int_env("SVMP_FSILS_FACE_ONLY_CONSTANT_INITIAL_GUESS_SOLVE_INDEX", 0);
+  return value;
+}
+
+[[nodiscard]] bool face_only_skip_operator_output_sync_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_FACE_ONLY_SKIP_OPERATOR_OUTPUT_SYNC");
+  return enabled;
+}
+
+[[nodiscard]] bool face_only_krylov_plus_constant_ls_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_FACE_ONLY_KRYLOV_PLUS_CONSTANT_LS");
+  return enabled;
+}
+
+[[nodiscard]] int face_only_krylov_plus_constant_ls_solve_index() noexcept
+{
+  static const int value =
+      parse_int_env("SVMP_FSILS_FACE_ONLY_KRYLOV_PLUS_CONSTANT_LS_SOLVE_INDEX", 0);
+  return value;
+}
+
+[[nodiscard]] bool face_only_krylov_plus_gauge2_ls_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_FACE_ONLY_KRYLOV_PLUS_GAUGE2_LS");
+  return enabled;
+}
+
+[[nodiscard]] int face_only_krylov_plus_gauge2_ls_solve_index() noexcept
+{
+  static const int value =
+      parse_int_env("SVMP_FSILS_FACE_ONLY_KRYLOV_PLUS_GAUGE2_LS_SOLVE_INDEX", 0);
+  return value;
+}
+
+[[nodiscard]] bool face_only_krylov_plus_gauge3_ls_enabled() noexcept
+{
+  static const bool enabled =
+      env_enabled("SVMP_FSILS_FACE_ONLY_KRYLOV_PLUS_GAUGE3_LS");
+  return enabled;
+}
+
+[[nodiscard]] int face_only_krylov_plus_gauge3_ls_solve_index() noexcept
+{
+  static const int value =
+      parse_int_env("SVMP_FSILS_FACE_ONLY_KRYLOV_PLUS_GAUGE3_LS_SOLVE_INDEX", 0);
+  return value;
+}
+
+[[nodiscard]] const char* face_only_krylov_plus_oracle_ls_file() noexcept
+{
+  const char* path = std::getenv("SVMP_FSILS_FACE_ONLY_KRYLOV_PLUS_ORACLE_LS_FILE");
+  if (path == nullptr || *path == '\0') {
+    return nullptr;
+  }
+  return path;
+}
+
+[[nodiscard]] int face_only_krylov_plus_oracle_ls_solve_index() noexcept
+{
+  static const int value =
+      parse_int_env("SVMP_FSILS_FACE_ONLY_KRYLOV_PLUS_ORACLE_LS_SOLVE_INDEX", 0);
+  return value;
+}
+
+[[nodiscard]] const char* trace_face_only_oracle_fit_file() noexcept
+{
+  const char* path = std::getenv("SVMP_FSILS_TRACE_FACE_ONLY_ORACLE_FIT_FILE");
+  if (path == nullptr || *path == '\0') {
+    return nullptr;
+  }
+  return path;
+}
+
+[[nodiscard]] int trace_face_only_oracle_fit_solve_index() noexcept
+{
+  static const int value =
+      parse_int_env("SVMP_FSILS_TRACE_FACE_ONLY_ORACLE_FIT_SOLVE_INDEX", 0);
+  return value;
+}
+
+void subtract_owned_scalar_mean(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                Vector<double>& values)
+{
+  const fsils_int local_n = std::min<fsils_int>(lhs.mynNo, values.size());
+  double local_sum = 0.0;
+  for (fsils_int node = 0; node < local_n; ++node) {
+    local_sum += values(node);
+  }
+
+  double global_sum = local_sum;
+  double global_count = static_cast<double>(local_n);
+  fe_fsi_linear_solver::fsils_allreduce_sum_in_place(
+      &global_sum, 1, cm_mod::mpreal, lhs.commu);
+  fe_fsi_linear_solver::fsils_allreduce_sum_in_place(
+      &global_count, 1, cm_mod::mpreal, lhs.commu);
+
+  if (!(global_count > 0.0)) {
+    return;
+  }
+
+  const double mean = global_sum / global_count;
+  #pragma omp parallel for schedule(static)
+  for (fsils_int node = 0; node < local_n; ++node) {
+    values(node) -= mean;
+  }
+}
+
+template <class WeightFn>
+void subtract_owned_weight_projection(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                      Vector<double>& values,
+                                      WeightFn&& weight_fn)
+{
+  const fsils_int local_n = std::min<fsils_int>(lhs.mynNo, values.size());
+  double local_dot = 0.0;
+  double local_weight_sq = 0.0;
+  for (fsils_int node = 0; node < local_n; ++node) {
+    const double weight = weight_fn(node);
+    local_dot += values(node) * weight;
+    local_weight_sq += weight * weight;
+  }
+
+  double global_dot = local_dot;
+  double global_weight_sq = local_weight_sq;
+  fe_fsi_linear_solver::fsils_allreduce_sum_in_place(
+      &global_dot, 1, cm_mod::mpreal, lhs.commu);
+  fe_fsi_linear_solver::fsils_allreduce_sum_in_place(
+      &global_weight_sq, 1, cm_mod::mpreal, lhs.commu);
+
+  if (!(global_weight_sq > std::numeric_limits<double>::epsilon())) {
+    return;
+  }
+  const double coeff = global_dot / global_weight_sq;
+  for (fsils_int node = 0; node < local_n; ++node) {
+    values(node) -= coeff * weight_fn(node);
+  }
+}
+
+template <class Weight0Fn, class Weight1Fn>
+void subtract_owned_two_weight_projection(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                          Vector<double>& values,
+                                          Weight0Fn&& weight0_fn,
+                                          Weight1Fn&& weight1_fn)
+{
+  const fsils_int local_n = std::min<fsils_int>(lhs.mynNo, values.size());
+  double local_g00 = 0.0;
+  double local_g01 = 0.0;
+  double local_g11 = 0.0;
+  double local_b0 = 0.0;
+  double local_b1 = 0.0;
+  for (fsils_int node = 0; node < local_n; ++node) {
+    const double w0 = weight0_fn(node);
+    const double w1 = weight1_fn(node);
+    const double v = values(node);
+    local_g00 += w0 * w0;
+    local_g01 += w0 * w1;
+    local_g11 += w1 * w1;
+    local_b0 += v * w0;
+    local_b1 += v * w1;
+  }
+
+  double g00 = local_g00;
+  double g01 = local_g01;
+  double g11 = local_g11;
+  double b0 = local_b0;
+  double b1 = local_b1;
+  fe_fsi_linear_solver::fsils_allreduce_sum_in_place(&g00, 1, cm_mod::mpreal, lhs.commu);
+  fe_fsi_linear_solver::fsils_allreduce_sum_in_place(&g01, 1, cm_mod::mpreal, lhs.commu);
+  fe_fsi_linear_solver::fsils_allreduce_sum_in_place(&g11, 1, cm_mod::mpreal, lhs.commu);
+  fe_fsi_linear_solver::fsils_allreduce_sum_in_place(&b0, 1, cm_mod::mpreal, lhs.commu);
+  fe_fsi_linear_solver::fsils_allreduce_sum_in_place(&b1, 1, cm_mod::mpreal, lhs.commu);
+
+  const double det = g00 * g11 - g01 * g01;
+  if (std::abs(det) > std::numeric_limits<double>::epsilon() *
+                          std::max({1.0, std::abs(g00), std::abs(g11)})) {
+    const double c0 = (b0 * g11 - b1 * g01) / det;
+    const double c1 = (g00 * b1 - g01 * b0) / det;
+    for (fsils_int node = 0; node < local_n; ++node) {
+      values(node) -= c0 * weight0_fn(node) + c1 * weight1_fn(node);
+    }
+    return;
+  }
+
+  if (g00 > std::numeric_limits<double>::epsilon()) {
+    const double c0 = b0 / g00;
+    for (fsils_int node = 0; node < local_n; ++node) {
+      values(node) -= c0 * weight0_fn(node);
+    }
+    return;
+  }
+
+  if (g11 > std::numeric_limits<double>::epsilon()) {
+    const double c1 = b1 / g11;
+    for (fsils_int node = 0; node < local_n; ++node) {
+      values(node) -= c1 * weight1_fn(node);
+    }
+  }
+}
+
+template <class Weight0Fn, class Weight1Fn, class Weight2Fn>
+void subtract_owned_three_weight_projection(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                            Vector<double>& values,
+                                            Weight0Fn&& weight0_fn,
+                                            Weight1Fn&& weight1_fn,
+                                            Weight2Fn&& weight2_fn)
+{
+  const fsils_int local_n = std::min<fsils_int>(lhs.mynNo, values.size());
+  double local_g[9] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  double local_b[3] = {0.0, 0.0, 0.0};
+  for (fsils_int node = 0; node < local_n; ++node) {
+    const double w[3] = {weight0_fn(node), weight1_fn(node), weight2_fn(node)};
+    const double v = values(node);
+    for (int i = 0; i < 3; ++i) {
+      local_b[i] += v * w[i];
+      for (int j = 0; j < 3; ++j) {
+        local_g[i * 3 + j] += w[i] * w[j];
+      }
+    }
+  }
+
+  double g[9];
+  double b[3];
+  std::copy(std::begin(local_g), std::end(local_g), std::begin(g));
+  std::copy(std::begin(local_b), std::end(local_b), std::begin(b));
+  fe_fsi_linear_solver::fsils_allreduce_sum_in_place(g, 9, cm_mod::mpreal, lhs.commu);
+  fe_fsi_linear_solver::fsils_allreduce_sum_in_place(b, 3, cm_mod::mpreal, lhs.commu);
+
+  double A[9];
+  double rhs[3];
+  std::copy(std::begin(g), std::end(g), std::begin(A));
+  std::copy(std::begin(b), std::end(b), std::begin(rhs));
+  constexpr double pivot_tol = 1e-20;
+  int rank = 3;
+  for (int k = 0; k < 3; ++k) {
+    int pivot = k;
+    double pivot_abs = std::abs(A[k * 3 + k]);
+    for (int i = k + 1; i < 3; ++i) {
+      const double cand = std::abs(A[i * 3 + k]);
+      if (cand > pivot_abs) {
+        pivot_abs = cand;
+        pivot = i;
+      }
+    }
+    if (!(pivot_abs > pivot_tol)) {
+      rank = k;
+      break;
+    }
+    if (pivot != k) {
+      for (int j = k; j < 3; ++j) {
+        std::swap(A[k * 3 + j], A[pivot * 3 + j]);
+      }
+      std::swap(rhs[k], rhs[pivot]);
+    }
+    const double diag = A[k * 3 + k];
+    for (int i = k + 1; i < 3; ++i) {
+      const double factor = A[i * 3 + k] / diag;
+      if (std::abs(factor) <= pivot_tol) {
+        continue;
+      }
+      for (int j = k; j < 3; ++j) {
+        A[i * 3 + j] -= factor * A[k * 3 + j];
+      }
+      rhs[i] -= factor * rhs[k];
+    }
+  }
+
+  if (rank == 3) {
+    double coeff[3] = {0.0, 0.0, 0.0};
+    for (int i = 2; i >= 0; --i) {
+      double sum = rhs[i];
+      for (int j = i + 1; j < 3; ++j) {
+        sum -= A[i * 3 + j] * coeff[j];
+      }
+      const double diag = A[i * 3 + i];
+      if (!(std::abs(diag) > pivot_tol)) {
+        rank = i;
+        break;
+      }
+      coeff[i] = sum / diag;
+    }
+    if (rank == 3) {
+      for (fsils_int node = 0; node < local_n; ++node) {
+        values(node) -= coeff[0] * weight0_fn(node) +
+                        coeff[1] * weight1_fn(node) +
+                        coeff[2] * weight2_fn(node);
+      }
+      return;
+    }
+  }
+
+  subtract_owned_two_weight_projection(
+      lhs,
+      values,
+      std::forward<Weight0Fn>(weight0_fn),
+      std::forward<Weight1Fn>(weight1_fn));
+  subtract_owned_weight_projection(
+      lhs,
+      values,
+      std::forward<Weight2Fn>(weight2_fn));
+}
+
+void dump_face_only_solution_owned(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                   const Vector<double>& values,
+                                   const char* prefix,
+                                   int solve_index)
+{
+  if (prefix == nullptr || *prefix == '\0') {
+    return;
+  }
+
+  std::ostringstream path;
+  path << prefix
+       << ".solve" << solve_index
+       << ".rank" << lhs.commu.task
+       << ".txt";
+  std::ofstream out(path.str());
+  if (!out) {
+    return;
+  }
+
+  out << std::setprecision(17);
+  out << "# task " << lhs.commu.task << " solve " << solve_index << "\n";
+  out << "# global_node value\n";
+  for (fsils_int old = 0; old < lhs.nNo; ++old) {
+    if (old < 0 || old >= lhs.gNodes.size()) {
+      continue;
+    }
+    const int internal = lhs.map(old);
+    if (internal < 0 || internal >= lhs.mynNo || internal >= values.size()) {
+      continue;
+    }
+    out << lhs.gNodes(old) << ' ' << values(internal) << "\n";
+  }
+}
+
+bool load_face_only_oracle_mode(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                const char* path,
+                                Vector<double>& values)
+{
+  if (path == nullptr || *path == '\0') {
+    return false;
+  }
+  std::ifstream in(path);
+  if (!in) {
+    return false;
+  }
+
+  std::unordered_map<int, double> by_global;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty() || line[0] == '#') {
+      continue;
+    }
+    std::istringstream iss(line);
+    int global_node = -1;
+    double value = 0.0;
+    if (!(iss >> global_node >> value)) {
+      continue;
+    }
+    by_global[global_node] = value;
+  }
+  if (by_global.empty()) {
+    return false;
+  }
+
+  values = 0.0;
+  bool found_any = false;
+  for (fsils_int old = 0; old < lhs.nNo; ++old) {
+    if (old < 0 || old >= lhs.gNodes.size()) {
+      continue;
+    }
+    const auto it = by_global.find(lhs.gNodes(old));
+    if (it == by_global.end()) {
+      continue;
+    }
+    const int internal = lhs.map(old);
+    if (internal < 0 || internal >= values.size()) {
+      continue;
+    }
+    values(internal) = it->second;
+    found_any = true;
+  }
+  return found_any;
+}
+
+[[nodiscard]] bool solve_dense_linear_system_local(std::vector<double>& A,
+                                                   std::vector<double>& b,
+                                                   double pivot_tol = 1e-20)
+{
+  const int n = static_cast<int>(b.size());
+  if (static_cast<int>(A.size()) != n * n) {
+    return false;
+  }
+  for (int k = 0; k < n; ++k) {
+    int pivot = k;
+    double pivot_abs = std::abs(A[static_cast<std::size_t>(k) * n + k]);
+    for (int i = k + 1; i < n; ++i) {
+      const double cand =
+          std::abs(A[static_cast<std::size_t>(i) * n + k]);
+      if (cand > pivot_abs) {
+        pivot_abs = cand;
+        pivot = i;
+      }
+    }
+    if (!(pivot_abs > pivot_tol)) {
+      return false;
+    }
+    if (pivot != k) {
+      for (int j = k; j < n; ++j) {
+        std::swap(A[static_cast<std::size_t>(k) * n + j],
+                  A[static_cast<std::size_t>(pivot) * n + j]);
+      }
+      std::swap(b[static_cast<std::size_t>(k)], b[static_cast<std::size_t>(pivot)]);
+    }
+    const double diag = A[static_cast<std::size_t>(k) * n + k];
+    for (int i = k + 1; i < n; ++i) {
+      const double factor = A[static_cast<std::size_t>(i) * n + k] / diag;
+      if (std::abs(factor) <= pivot_tol) {
+        continue;
+      }
+      for (int j = k; j < n; ++j) {
+        A[static_cast<std::size_t>(i) * n + j] -=
+            factor * A[static_cast<std::size_t>(k) * n + j];
+      }
+      b[static_cast<std::size_t>(i)] -= factor * b[static_cast<std::size_t>(k)];
+    }
+  }
+
+  for (int i = n - 1; i >= 0; --i) {
+    double value = b[static_cast<std::size_t>(i)];
+    for (int j = i + 1; j < n; ++j) {
+      value -= A[static_cast<std::size_t>(i) * n + j] * b[static_cast<std::size_t>(j)];
+    }
+    const double diag = A[static_cast<std::size_t>(i) * n + i];
+    if (!(std::abs(diag) > pivot_tol)) {
+      return false;
+    }
+    b[static_cast<std::size_t>(i)] = value / diag;
+  }
+  return true;
+}
+
+[[nodiscard]] bool approximate_smallest_eigenvector_symmetric(
+    const std::vector<double>& gram,
+    int n,
+    int seed_index,
+    std::vector<double>& out_vec)
+{
+  if (n <= 0 || static_cast<int>(gram.size()) != n * n) {
+    return false;
+  }
+  double max_diag = 0.0;
+  for (int i = 0; i < n; ++i) {
+    max_diag = std::max(max_diag, std::abs(gram[static_cast<std::size_t>(i) * n + i]));
+  }
+  const double shift = std::max(1e-12, 1e-10 * std::max(1.0, max_diag));
+  out_vec.assign(static_cast<std::size_t>(n), 0.0);
+  const int clamped_seed = std::max(0, std::min(seed_index, n - 1));
+  out_vec[static_cast<std::size_t>(clamped_seed)] = 1.0;
+
+  for (int iter = 0; iter < 6; ++iter) {
+    std::vector<double> A = gram;
+    for (int i = 0; i < n; ++i) {
+      A[static_cast<std::size_t>(i) * n + i] += shift;
+    }
+    std::vector<double> z = out_vec;
+    if (!solve_dense_linear_system_local(A, z)) {
+      return false;
+    }
+    double norm_sq = 0.0;
+    for (double value : z) {
+      norm_sq += value * value;
+    }
+    if (!(norm_sq > 1e-30)) {
+      return false;
+    }
+    const double inv_norm = 1.0 / std::sqrt(norm_sq);
+    for (double& value : z) {
+      value *= inv_norm;
+    }
+    out_vec.swap(z);
+  }
+  return true;
+}
+
 [[nodiscard]] int schur_preconditioner_reuse_solve_limit() noexcept
 {
   static const int limit = [] {
@@ -426,6 +1201,50 @@ using fe_fsi_linear_solver::fsils_int;
     return std::max(-1, requested);
   }();
   return limit;
+}
+
+[[nodiscard]] int forced_schur_preconditioner_code() noexcept
+{
+  static const int forced = []() noexcept {
+    const char* env = std::getenv("SVMP_FSILS_BLOCKSCHUR_FORCE_SCHUR_PC");
+    if (env == nullptr) {
+      return -1;
+    }
+
+    std::string value(env);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+      return static_cast<char>(std::tolower(c));
+    });
+    value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char c) {
+      return std::isspace(c) != 0;
+    }), value.end());
+
+    using fe_fsi_linear_solver::SchurPreconditionerType;
+    if (value == "diag-l") {
+      return static_cast<int>(SchurPreconditionerType::DIAG_L);
+    }
+    if (value == "blockdiag-l") {
+      return static_cast<int>(SchurPreconditionerType::BLOCKDIAG_L);
+    }
+    if (value == "ilu-l") {
+      return static_cast<int>(SchurPreconditionerType::ILU_L);
+    }
+    if (value == "algebraic-shat") {
+      return static_cast<int>(SchurPreconditionerType::ALGEBRAIC_SHAT);
+    }
+    return -1;
+  }();
+  return forced;
+}
+
+[[nodiscard]] bool schur_partition_coarse_modes_enabled() noexcept
+{
+  return env_enabled("SVMP_FSILS_SCHUR_PARTITION_COARSE");
+}
+
+[[nodiscard]] bool schur_global_mean_coarse_mode_enabled() noexcept
+{
+  return env_enabled("SVMP_FSILS_SCHUR_GLOBAL_MEAN_COARSE");
 }
 
 [[nodiscard]] std::uint64_t hash_mix(std::uint64_t seed, std::uint64_t value) noexcept
@@ -509,6 +1328,29 @@ using fe_fsi_linear_solver::fsils_int;
     return false;
   }
   return *env != '0';
+}
+
+void refresh_scalar_ghosts(const fe_fsi_linear_solver::HaloExchange& halo,
+                           Vector<double>& values,
+                           bool skip_refresh = false)
+{
+  if (skip_refresh || !halo.has_overlap()) {
+    return;
+  }
+  halo.begin_scalar(values);
+  halo.end_scalar(values);
+}
+
+void refresh_vector_ghosts(const fe_fsi_linear_solver::HaloExchange& halo,
+                           int dof,
+                           Array<double>& values,
+                           bool skip_refresh = false)
+{
+  if (skip_refresh || !halo.has_overlap()) {
+    return;
+  }
+  halo.begin_vector(dof, values);
+  halo.end_vector(dof, values);
 }
 
 struct SchurSparsityControl {
@@ -601,6 +1443,9 @@ struct SchurPreconditionerData {
   std::vector<Array<double>> low_rank_right;
   std::vector<Array<double>> low_rank_preconditioned_left;
   std::vector<double> low_rank_inner_inv;
+  std::vector<Array<double>> coarse_right;
+  std::vector<Array<double>> coarse_preconditioned_left;
+  std::vector<double> coarse_inner_inv;
   fe_fsi_linear_solver::distributed_low_rank_correction::DistributedLowRankCorrection
       explicit_low_rank_correction;
   Array<double> scratch_rhs;
@@ -674,6 +1519,14 @@ void dense_axpy(int dof,
                 const Array<double>& src,
                 double scale,
                 Array<double>& dst);
+
+void apply_hat_schur_operator(const Array<fsils_int>& rowPtr,
+                              const Vector<fsils_int>& colPtr,
+                              const Vector<fsils_int>& diagPtr,
+                              fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                              SchurPreconditionerData& pc,
+                              const Array<double>& in_vec,
+                              Array<double>& out_vec);
 
 void set_zero(double* data, int count)
 {
@@ -1782,6 +2635,26 @@ bool reduced_update_has_distinct_left_right(
   return !sparse_entry_sets_match(left_entries, right_entries);
 }
 
+const std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>& projected_left_entries(
+    const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update)
+{
+  // Match the exact reduced operator: owned-only on the contracting right
+  // side, full local support on the scattered left side.
+  return !update.left_scaled.empty()     ? update.left_scaled
+      : !update.left.empty()             ? update.left
+      : !update.left_scaled_owned.empty() ? update.left_scaled_owned
+                                         : update.left_owned;
+}
+
+const std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>& projected_right_entries(
+    const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update)
+{
+  return !update.right_scaled_owned.empty() ? update.right_scaled_owned
+      : !update.right_owned.empty()         ? update.right_owned
+      : !update.right_scaled.empty()        ? update.right_scaled
+                                            : update.right;
+}
+
 double sparse_dense_owned_dot_local(
     const fe_fsi_linear_solver::FSILS_lhsType& lhs,
     const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update,
@@ -1852,14 +2725,29 @@ void multiply_rect_transpose_local(const Array<fsils_int>& rowPtr,
                                    const Array<double>& row_values,
                                    Array<double>& col_values)
 {
+  const bool trace_setup = env_enabled("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING");
   col_values.resize(in_dof, nNo);
   col_values = 0.0;
 
   std::vector<double> contrib(static_cast<size_t>(in_dof), 0.0);
+  bool reported_oob = false;
   for (fsils_int row = 0; row < nNo; ++row) {
     const double* row_vec = row_values.data() + static_cast<size_t>(row) * static_cast<size_t>(out_dof);
     for (fsils_int p = rowPtr(0, row); p <= rowPtr(1, row); ++p) {
       const fsils_int col = colPtr(p);
+      if (col < 0 || col >= nNo) {
+        if (trace_setup && !reported_oob) {
+          std::fprintf(stderr,
+                       "[BICGS_SCHUR_SETUP] multiply_rect_transpose_local out_of_range "
+                       "row=%lld p=%lld col=%lld nNo=%lld\n",
+                       static_cast<long long>(row),
+                       static_cast<long long>(p),
+                       static_cast<long long>(col),
+                       static_cast<long long>(nNo));
+          reported_oob = true;
+        }
+        continue;
+      }
       multiply_block_vector_transpose(block_ptr(K, out_dof * in_dof, p), out_dof, in_dof,
                                       row_vec, contrib.data());
       double* col_vec = col_values.data() + static_cast<size_t>(col) * static_cast<size_t>(in_dof);
@@ -1910,6 +2798,9 @@ void build_grouped_momentum_hat_low_rank_correction(
     fsils_int nNo,
     MomentumHatData& hat)
 {
+  const bool trace_setup =
+      env_enabled("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING") && lhs.commu.masF;
+  const double total_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
   hat.low_rank_right.clear();
   hat.low_rank_preconditioned_left.clear();
   hat.low_rank_left.clear();
@@ -1917,80 +2808,158 @@ void build_grouped_momentum_hat_low_rank_correction(
   hat.low_rank_inner_inv.clear();
   hat.low_rank_inner_inv_t.clear();
 
-  struct GroupModes {
-    const fe_fsi_linear_solver::FSILS_groupedBorderedFieldCouplingType* group{nullptr};
-    std::vector<Array<double>> left_modes;
-    std::vector<Array<double>> right_modes;
+  auto append_dense_seed_block = [](std::vector<double>& dense_seed,
+                                    int old_rank,
+                                    const std::vector<double>& block,
+                                    int block_rank) {
+    std::vector<double> expanded(static_cast<std::size_t>(old_rank + block_rank) *
+                                     static_cast<std::size_t>(old_rank + block_rank),
+                                 0.0);
+    for (int i = 0; i < old_rank; ++i) {
+      for (int j = 0; j < old_rank; ++j) {
+        expanded[static_cast<std::size_t>(i) * static_cast<std::size_t>(old_rank + block_rank) +
+                 static_cast<std::size_t>(j)] =
+            dense_seed[static_cast<std::size_t>(i) * static_cast<std::size_t>(old_rank) +
+                       static_cast<std::size_t>(j)];
+      }
+    }
+    for (int i = 0; i < block_rank; ++i) {
+      for (int j = 0; j < block_rank; ++j) {
+        expanded[static_cast<std::size_t>(old_rank + i) *
+                     static_cast<std::size_t>(old_rank + block_rank) +
+                 static_cast<std::size_t>(old_rank + j)] =
+            block[static_cast<std::size_t>(i) * static_cast<std::size_t>(block_rank) +
+                  static_cast<std::size_t>(j)];
+      }
+    }
+    dense_seed.swap(expanded);
   };
 
-  std::vector<GroupModes> groups;
-  groups.reserve(lhs.grouped_bordered_field_couplings.size());
-  int total_rank = 0;
+  std::vector<double> dense_seed;
+  dense_seed.reserve(lhs.reduced_updates.size());
+
+  auto append_reduced_mode = [&](const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update)
+      -> bool {
+    Array<double> left_mode;
+    Array<double> right_mode;
+    const auto& left_entries = projected_left_entries(update);
+    const auto& right_entries = projected_right_entries(update);
+    const bool have_left_local =
+        fill_projected_reduced_vector(lhs, update, left_entries, mom_ncomp, left_mode);
+    const bool have_right_local =
+        fill_projected_reduced_vector(lhs, update, right_entries, mom_ncomp, right_mode);
+    int have_left = have_left_local ? 1 : 0;
+    int have_right = have_right_local ? 1 : 0;
+    if (lhs.commu.nTasks > 1) {
+      const fe_fsi_linear_solver::CollectiveOps collectives(lhs.commu);
+      collectives.allreduce_sum(have_left, have_left);
+      collectives.allreduce_sum(have_right, have_right);
+    }
+    if (have_left == 0 || have_right == 0) {
+      return false;
+    }
+
+    hat.low_rank_left.push_back(std::move(left_mode));
+    hat.low_rank_right.push_back(std::move(right_mode));
+    return true;
+  };
+
+  auto append_face_mode = [&](const fe_fsi_linear_solver::FSILS_faceType& face) -> bool {
+    Array<double> mode;
+    const bool have_mode_local =
+        fill_projected_face_vector(lhs, face, mom_ncomp, mode);
+    int have_mode = have_mode_local ? 1 : 0;
+    if (lhs.commu.nTasks > 1) {
+      const fe_fsi_linear_solver::CollectiveOps collectives(lhs.commu);
+      collectives.allreduce_sum(have_mode, have_mode);
+    }
+    if (have_mode == 0) {
+      return false;
+    }
+
+    hat.low_rank_left.push_back(mode);
+    hat.low_rank_right.push_back(std::move(mode));
+    return true;
+  };
+
+  const bool has_grouped_bordered = !lhs.grouped_bordered_field_couplings.empty();
+  for (const auto& update : lhs.reduced_updates) {
+    if (!update.active || std::abs(update.sigma) <= 1e-30) {
+      continue;
+    }
+    if (update.grouped_coupling_id == kNativeFaceDuplicateCouplingId) {
+      continue;
+    }
+    if (has_grouped_bordered && update.grouped_coupling_id >= 0) {
+      continue;
+    }
+    const int old_rank = static_cast<int>(hat.low_rank_left.size());
+    if (!append_reduced_mode(update)) {
+      continue;
+    }
+    append_dense_seed_block(dense_seed,
+                            old_rank,
+                            std::vector<double>{safe_inverse(update.sigma)},
+                            /*block_rank=*/1);
+  }
+
+  for (const auto& face : lhs.face) {
+    if (!face.coupledFlag || std::abs(face.res) <= 1e-30 || face.nNo <= 0) {
+      continue;
+    }
+    const int old_rank = static_cast<int>(hat.low_rank_left.size());
+    if (!append_face_mode(face)) {
+      continue;
+    }
+    append_dense_seed_block(dense_seed,
+                            old_rank,
+                            std::vector<double>{safe_inverse(face.res)},
+                            /*block_rank=*/1);
+  }
 
   for (const auto& group : lhs.grouped_bordered_field_couplings) {
     if (!group.active || group.modes.empty()) {
       continue;
     }
+    const int block_rank = static_cast<int>(group.modes.size());
+    if (group.aux_matrix.size() != static_cast<std::size_t>(block_rank * block_rank)) {
+      continue;
+    }
 
-    GroupModes kept;
-    kept.group = &group;
-    kept.left_modes.reserve(group.modes.size());
-    kept.right_modes.reserve(group.modes.size());
-
+    const int old_rank = static_cast<int>(hat.low_rank_left.size());
+    int appended = 0;
     for (const auto& mode : group.modes) {
-      const auto& left_entries =
-          !mode.left_scaled_owned.empty() ? mode.left_scaled_owned
-          : !mode.left_owned.empty()      ? mode.left_owned
-          : !mode.left_scaled.empty()     ? mode.left_scaled
-                                          : mode.left;
-      const auto& right_entries =
-          !mode.right_scaled_owned.empty() ? mode.right_scaled_owned
-          : !mode.right_owned.empty()      ? mode.right_owned
-          : !mode.right_scaled.empty()     ? mode.right_scaled
-                                           : mode.right;
-
-      Array<double> left_mode;
-      Array<double> right_mode;
-      fill_projected_reduced_vector(lhs, mode, left_entries, mom_ncomp, left_mode);
-      fill_projected_reduced_vector(lhs, mode, right_entries, mom_ncomp, right_mode);
-
-      kept.left_modes.push_back(std::move(left_mode));
-      kept.right_modes.push_back(std::move(right_mode));
+      if (append_reduced_mode(mode)) {
+        appended += 1;
+      }
+    }
+    if (appended != block_rank) {
+      hat.low_rank_left.resize(static_cast<std::size_t>(old_rank));
+      hat.low_rank_right.resize(static_cast<std::size_t>(old_rank));
+      continue;
     }
 
-    if (!kept.left_modes.empty()) {
-      total_rank += static_cast<int>(kept.left_modes.size());
-      groups.push_back(std::move(kept));
+    std::vector<double> seed_block(group.aux_matrix.size(), 0.0);
+    for (std::size_t idx = 0; idx < group.aux_matrix.size(); ++idx) {
+      seed_block[idx] = -group.aux_matrix[idx];
     }
+    append_dense_seed_block(dense_seed, old_rank, seed_block, block_rank);
   }
 
-  if (total_rank <= 0) {
+  const int total_rank = static_cast<int>(hat.low_rank_left.size());
+  if (total_rank <= 0 ||
+      dense_seed.size() != static_cast<std::size_t>(total_rank * total_rank)) {
+    hat.low_rank_right.clear();
+    hat.low_rank_left.clear();
+    if (trace_setup) {
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_SETUP] grouped_momentum_hat rank=0 early_exit=1 total=%e\n",
+                   fe_fsi_linear_solver::fsils_cpu_t() - total_t0);
+    }
     return;
   }
 
-  std::vector<double> dense_c_inv(static_cast<std::size_t>(total_rank) *
-                                  static_cast<std::size_t>(total_rank),
-                                  0.0);
-  hat.low_rank_left.reserve(static_cast<std::size_t>(total_rank));
-  hat.low_rank_right.reserve(static_cast<std::size_t>(total_rank));
-
-  int offset = 0;
-  for (const auto& kept : groups) {
-    const auto& group = *kept.group;
-    const int rank = static_cast<int>(kept.left_modes.size());
-    for (int i = 0; i < rank; ++i) {
-      hat.low_rank_left.push_back(kept.left_modes[static_cast<std::size_t>(i)]);
-      hat.low_rank_right.push_back(kept.right_modes[static_cast<std::size_t>(i)]);
-      for (int j = 0; j < rank; ++j) {
-        dense_c_inv[static_cast<std::size_t>(offset + i) * static_cast<std::size_t>(total_rank) +
-                    static_cast<std::size_t>(offset + j)] =
-            -group.aux_matrix[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
-                              static_cast<std::size_t>(j)];
-      }
-    }
-    offset += rank;
-  }
-
+  const double precondition_left_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
   hat.low_rank_preconditioned_left = hat.low_rank_left;
   hat.low_rank_preconditioned_right_t = hat.low_rank_right;
   for (auto& vec : hat.low_rank_preconditioned_left) {
@@ -2003,41 +2972,52 @@ void build_grouped_momentum_hat_low_rank_correction(
     const fe_fsi_linear_solver::HaloExchange halo(lhs);
     halo.sync_vector(mom_ncomp, vec, skip_post_solve_overlap_sum());
   }
+  const double precondition_left_t =
+      trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - precondition_left_t0 : 0.0;
 
-  std::vector<double> dense_m = dense_c_inv;
+  const double dense_dot_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
+  std::vector<double> dense_m(static_cast<std::size_t>(total_rank) *
+                                  static_cast<std::size_t>(total_rank),
+                              0.0);
   std::vector<double> dense_mt(static_cast<std::size_t>(total_rank) *
                                    static_cast<std::size_t>(total_rank),
                                0.0);
   for (int i = 0; i < total_rank; ++i) {
     for (int j = 0; j < total_rank; ++j) {
-      dense_mt[static_cast<std::size_t>(i) * static_cast<std::size_t>(total_rank) +
-               static_cast<std::size_t>(j)] =
-          dense_c_inv[static_cast<std::size_t>(j) * static_cast<std::size_t>(total_rank) +
-                      static_cast<std::size_t>(i)];
-    }
-  }
-
-  for (int i = 0; i < total_rank; ++i) {
-    for (int j = 0; j < total_rank; ++j) {
       dense_m[static_cast<std::size_t>(i) * static_cast<std::size_t>(total_rank) +
-              static_cast<std::size_t>(j)] +=
-          dot::fsils_dot_v(
+              static_cast<std::size_t>(j)] =
+          dense_dense_owned_dot_local(
+              lhs,
               mom_ncomp,
-              lhs.mynNo,
-              const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
               hat.low_rank_right[static_cast<std::size_t>(i)],
               hat.low_rank_preconditioned_left[static_cast<std::size_t>(j)]);
       dense_mt[static_cast<std::size_t>(i) * static_cast<std::size_t>(total_rank) +
-               static_cast<std::size_t>(j)] +=
-          dot::fsils_dot_v(
+               static_cast<std::size_t>(j)] =
+          dense_dense_owned_dot_local(
+              lhs,
               mom_ncomp,
-              lhs.mynNo,
-              const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
               hat.low_rank_left[static_cast<std::size_t>(i)],
               hat.low_rank_preconditioned_right_t[static_cast<std::size_t>(j)]);
     }
   }
+  allreduce_sum_in_place(const_cast<fe_fsi_linear_solver::FSILS_lhsType&>(lhs), dense_m);
+  allreduce_sum_in_place(const_cast<fe_fsi_linear_solver::FSILS_lhsType&>(lhs), dense_mt);
+  for (int i = 0; i < total_rank; ++i) {
+    for (int j = 0; j < total_rank; ++j) {
+      dense_m[static_cast<std::size_t>(i) * static_cast<std::size_t>(total_rank) +
+              static_cast<std::size_t>(j)] +=
+          dense_seed[static_cast<std::size_t>(i) * static_cast<std::size_t>(total_rank) +
+                     static_cast<std::size_t>(j)];
+      dense_mt[static_cast<std::size_t>(i) * static_cast<std::size_t>(total_rank) +
+               static_cast<std::size_t>(j)] +=
+          dense_seed[static_cast<std::size_t>(j) * static_cast<std::size_t>(total_rank) +
+                     static_cast<std::size_t>(i)];
+    }
+  }
+  const double dense_dot_t =
+      trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - dense_dot_t0 : 0.0;
 
+  const double invert_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
   hat.low_rank_inner_inv.assign(dense_m.size(), 0.0);
   hat.low_rank_inner_inv_t.assign(dense_mt.size(), 0.0);
   if (!invert_dense_block(total_rank, dense_m.data(), hat.low_rank_inner_inv.data()) ||
@@ -2048,6 +3028,32 @@ void build_grouped_momentum_hat_low_rank_correction(
     hat.low_rank_preconditioned_right_t.clear();
     hat.low_rank_inner_inv.clear();
     hat.low_rank_inner_inv_t.clear();
+  }
+  if (trace_setup) {
+    const double invert_t = fe_fsi_linear_solver::fsils_cpu_t() - invert_t0;
+    int active_groups = 0;
+    int active_faces = 0;
+    for (const auto& group : lhs.grouped_bordered_field_couplings) {
+      if (group.active && !group.modes.empty()) {
+        active_groups += 1;
+      }
+    }
+    for (const auto& face : lhs.face) {
+      if (face.coupledFlag && std::abs(face.res) > 1e-30 && face.nNo > 0) {
+        active_faces += 1;
+      }
+    }
+    std::fprintf(stderr,
+                 "[BICGS_SCHUR_SETUP] grouped_momentum_hat rank=%d groups=%d faces=%d reduced=%zu "
+                 "precondition_vectors=%e dense_dots=%e invert=%e total=%e\n",
+                 total_rank,
+                 active_groups,
+                 active_faces,
+                 lhs.reduced_updates.size(),
+                 precondition_left_t,
+                 dense_dot_t,
+                 invert_t,
+                 fe_fsi_linear_solver::fsils_cpu_t() - total_t0);
   }
 }
 
@@ -2062,116 +3068,14 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
 {
   using fe_fsi_linear_solver::SchurMomentumApproximationType;
 
+  const bool trace_setup =
+      env_enabled("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING") && lhs.commu.masF;
+  const double total_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
   MomentumHatData hat{};
   Array<double> K_eff = K;
   const auto momentum_operator =
       dso::SparseOperatorBundle(lhs, rowPtr, colPtr).vector(mom_ncomp, K_eff);
-  const int block_entries = mom_ncomp * mom_ncomp;
-  const int system_dof = (lhs.system_dof > 0) ? lhs.system_dof : mom_ncomp;
   const bool has_grouped_bordered = !lhs.grouped_bordered_field_couplings.empty();
-
-  using NodeComponentEntries = std::unordered_map<fsils_int, std::vector<std::pair<int, double>>>;
-
-  auto component_index = [&](const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update,
-                             int full_comp) -> int {
-    return fe_fsi_linear_solver::fsils_reduced_local_component(update,
-                                                               full_comp,
-                                                               mom_ncomp,
-                                                               system_dof);
-  };
-
-  auto collect_owned_by_node =
-      [&](const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update,
-          const std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>& entries,
-          NodeComponentEntries& by_node) {
-    by_node.clear();
-    for (const auto& entry : entries) {
-      if (entry.node < 0 || std::abs(entry.value) <= 1e-30) {
-        continue;
-      }
-      const fsils_int node = entry.node;
-      const int local_comp = component_index(update, entry.full_component);
-      if (node < 0 || node >= nNo || local_comp < 0 || local_comp >= mom_ncomp) {
-        continue;
-      }
-      by_node[node].emplace_back(local_comp, entry.value);
-    }
-  };
-
-  auto add_graph_outer_product = [&](const NodeComponentEntries& left_by_node,
-                                     const NodeComponentEntries& right_by_node,
-                                     double coeff) {
-    if (std::abs(coeff) <= 1e-30 || left_by_node.empty() || right_by_node.empty()) {
-      return;
-    }
-
-    for (const auto& [row_node, left_vals] : left_by_node) {
-      for (const auto& [col_node, right_vals] : right_by_node) {
-        const fsils_int nz = find_col_in_row(rowPtr, colPtr, row_node, col_node);
-        if (nz < 0) {
-          continue;
-        }
-        double* block = block_ptr(K_eff, block_entries, nz);
-        for (const auto& [li, lval] : left_vals) {
-          for (const auto& [rj, rval] : right_vals) {
-            block[li * mom_ncomp + rj] += coeff * lval * rval;
-          }
-        }
-      }
-    }
-  };
-
-  auto add_graph_update_entries =
-      [&](const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update) {
-    if (!update.active || std::abs(update.sigma) <= 1e-30) {
-      return;
-    }
-    if (update.grouped_coupling_id == kNativeFaceDuplicateCouplingId) {
-      return;
-    }
-    if (has_grouped_bordered && update.grouped_coupling_id >= 0) {
-      return;
-    }
-
-    const auto& left_entries =
-        !update.left_scaled_owned.empty() ? update.left_scaled_owned : update.left_owned;
-    const auto& right_entries =
-        !update.right_scaled_owned.empty() ? update.right_scaled_owned : update.right_owned;
-    NodeComponentEntries left_by_node;
-    NodeComponentEntries right_by_node;
-    collect_owned_by_node(update, left_entries, left_by_node);
-    collect_owned_by_node(update, right_entries, right_by_node);
-    add_graph_outer_product(left_by_node, right_by_node, update.sigma);
-  };
-
-  auto add_graph_face_entries =
-      [&](const fe_fsi_linear_solver::FSILS_faceType& face) {
-    if (!face.coupledFlag || std::abs(face.res) <= 1e-30 || face.nNo <= 0) {
-      return;
-    }
-
-    NodeComponentEntries face_by_node;
-    const int face_dof = std::min(face.dof, mom_ncomp);
-    for (int a = 0; a < face.nNo; ++a) {
-      const fsils_int node = face.glob(a);
-      if (node < 0 || node >= nNo) {
-        continue;
-      }
-      for (int comp = 0; comp < face_dof; ++comp) {
-        const double value = face.valM(comp, a);
-        if (std::abs(value) <= 1e-30) {
-          continue;
-        }
-        face_by_node[node].emplace_back(comp, value);
-      }
-    }
-
-    add_graph_outer_product(face_by_node, face_by_node, face.res);
-  };
-
-  for (const auto& update : lhs.reduced_updates) {
-    add_graph_update_entries(update);
-  }
 
   auto build_candidate =
       [&](SchurMomentumApproximationType candidate_approx) -> MomentumHatData {
@@ -2236,11 +3140,7 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
         continue;
       }
       for (const auto& mode : group.modes) {
-        const auto& left_entries =
-            !mode.left_scaled_owned.empty() ? mode.left_scaled_owned
-            : !mode.left_owned.empty()      ? mode.left_owned
-            : !mode.left_scaled.empty()     ? mode.left_scaled
-                                            : mode.left;
+        const auto& left_entries = projected_left_entries(mode);
         fill_projected_reduced_vector(lhs, mode, left_entries, mom_ncomp, probe);
         approx_apply = probe;
         apply_momentum_hat(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, candidate, approx_apply);
@@ -2259,11 +3159,7 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
         denominator += static_cast<long double>(den);
         numerator += static_cast<long double>(num);
 
-        const auto& right_entries =
-            !mode.right_scaled_owned.empty() ? mode.right_scaled_owned
-            : !mode.right_owned.empty()      ? mode.right_owned
-            : !mode.right_scaled.empty()     ? mode.right_scaled
-                                             : mode.right;
+        const auto& right_entries = projected_right_entries(mode);
         fill_projected_reduced_vector(lhs, mode, right_entries, mom_ncomp, probe_t);
         approx_apply_t = probe_t;
         apply_momentum_hat_transpose(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, candidate, approx_apply_t);
@@ -2271,6 +3167,7 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
         multiply_rect_transpose_local(rowPtr, colPtr, nNo,
                                       mom_ncomp, mom_ncomp, K_eff,
                                       approx_apply_t, residual_t);
+        halo.sync_vector(mom_ncomp, residual_t, skip_post_solve_overlap_sum());
         omp_la::omp_axpby_v(mom_ncomp, nNo, residual_t, residual_t, -1.0, probe_t);
         const double den_t = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
                                               const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
@@ -2290,17 +3187,57 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
   };
 
   if (has_grouped_bordered && approx == SchurMomentumApproximationType::ILU_K) {
+    const double ilu_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
     MomentumHatData ilu_hat = build_candidate(SchurMomentumApproximationType::ILU_K);
+    const double ilu_t = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - ilu_t0 : 0.0;
+    const double asm_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
     MomentumHatData asm_hat = build_candidate(SchurMomentumApproximationType::ASM_K);
+    const double asm_t = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - asm_t0 : 0.0;
+    const double score_ilu_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
     const double ilu_score = score_candidate(ilu_hat);
+    const double score_ilu_t =
+        trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - score_ilu_t0 : 0.0;
+    const double score_asm_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
     const double asm_score = score_candidate(asm_hat);
+    const double score_asm_t =
+        trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - score_asm_t0 : 0.0;
+    if (trace_setup) {
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_SETUP] momentum_hat grouped=1 approx=ilu-k "
+                   "build_ilu=%e build_asm=%e score_ilu=%e score_asm=%e "
+                   "ilu_score=%e asm_score=%e total=%e\n",
+                   ilu_t,
+                   asm_t,
+                   score_ilu_t,
+                   score_asm_t,
+                   ilu_score,
+                   asm_score,
+                   fe_fsi_linear_solver::fsils_cpu_t() - total_t0);
+    }
     if (std::isfinite(asm_score) && asm_score < ilu_score) {
       return asm_hat;
     }
     return ilu_hat;
   }
 
-  return build_candidate(approx);
+  const double build_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
+  MomentumHatData candidate = build_candidate(approx);
+  if (trace_setup) {
+    const char* approx_name = "unknown";
+    switch (approx) {
+      case SchurMomentumApproximationType::DIAG_K: approx_name = "diag-k"; break;
+      case SchurMomentumApproximationType::BLOCKDIAG_K: approx_name = "blockdiag-k"; break;
+      case SchurMomentumApproximationType::ILU_K: approx_name = "ilu-k"; break;
+      case SchurMomentumApproximationType::ASM_K: approx_name = "asm-k"; break;
+    }
+    std::fprintf(stderr,
+                 "[BICGS_SCHUR_SETUP] momentum_hat grouped=%d approx=%s build=%e total=%e\n",
+                 has_grouped_bordered ? 1 : 0,
+                 approx_name,
+                 fe_fsi_linear_solver::fsils_cpu_t() - build_t0,
+                 fe_fsi_linear_solver::fsils_cpu_t() - total_t0);
+  }
+  return candidate;
 }
 
 void assemble_algebraic_schur(const Array<fsils_int>& rowPtr,
@@ -2439,6 +3376,12 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
                                     const MomentumHatData& momentum_hat,
                                     SchurPreconditionerData& pc)
 {
+  const bool trace_setup =
+      env_enabled("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING") && lhs.commu.masF;
+  const bool trace_setup_all_ranks =
+      env_enabled("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING_ALL_RANKS");
+  const bool trace_setup_emit = trace_setup || trace_setup_all_ranks;
+  const double total_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
   const auto d_operator =
       dso::SparseOperatorBundle(lhs, lhs.rowPtr, lhs.colPtr)
           .rectangular(con_ncomp, mom_ncomp, D);
@@ -2450,6 +3393,33 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   };
 
   std::vector<ReducedColumn> columns;
+  auto trace_stage = [&](int column_index,
+                         const char* stage,
+                         const char* phase,
+                         double dt = -1.0) {
+    if (!trace_setup_emit) {
+      return;
+    }
+    if (dt >= 0.0) {
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_SETUP] rank=%d reduced_schur column=%d stage=%s phase=%s dt=%e\n",
+                   lhs.commu.task,
+                   column_index,
+                   stage,
+                   phase,
+                   dt);
+    } else {
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_SETUP] rank=%d reduced_schur column=%d stage=%s phase=%s\n",
+                   lhs.commu.task,
+                   column_index,
+                   stage,
+                   phase);
+    }
+    if (trace_setup_all_ranks) {
+      std::fflush(stderr);
+    }
+  };
   auto append_dense_seed_block = [](std::vector<double>& dense_seed,
                                     int old_rank,
                                     const std::vector<double>& block,
@@ -2481,40 +3451,137 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
       return;
     }
 
-    const auto& left_entries =
-        !update.left_scaled_owned.empty() ? update.left_scaled_owned
-        : !update.left_owned.empty()      ? update.left_owned
-        : !update.left_scaled.empty()     ? update.left_scaled
-                                          : update.left;
-    const auto& right_entries =
-        !update.right_scaled_owned.empty() ? update.right_scaled_owned
-        : !update.right_owned.empty()      ? update.right_owned
-        : !update.right_scaled.empty()     ? update.right_scaled
-                                           : update.right;
+    const int column_index = static_cast<int>(columns.size());
+    const double column_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
+    const auto& left_entries = projected_left_entries(update);
+    const auto& right_entries = projected_right_entries(update);
+    if (trace_setup_emit) {
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_SETUP] rank=%d reduced_schur column=%d source=update grouped_id=%d "
+                   "left_full=%zu right_full=%zu left_owned=%zu right_owned=%zu\n",
+                   lhs.commu.task,
+                   column_index,
+                   update.grouped_coupling_id,
+                   left_entries.size(),
+                   right_entries.size(),
+                   update.left_owned.size(),
+                   update.right_owned.size());
+      if (trace_setup_all_ranks) {
+        std::fflush(stderr);
+      }
+    }
 
     ReducedColumn col;
+    const double fill_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
+    trace_stage(column_index, "filled", "begin");
     fill_projected_reduced_vector(lhs, update, left_entries, mom_ncomp, col.momentum_left_hat);
     fill_projected_reduced_vector(lhs, update, right_entries, mom_ncomp, col.momentum_right_owned);
+    const double fill_t = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - fill_t0 : 0.0;
+    trace_stage(column_index, "filled", "done", fill_t);
 
     Array<double> momentum_right_t;
     fill_projected_reduced_vector(lhs, update, right_entries, mom_ncomp, momentum_right_t);
 
+    const double hat_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
     apply_momentum_hat(lhs.rowPtr, lhs.colPtr, lhs.diagPtr,
                        mom_ncomp, lhs.nNo, momentum_hat, col.momentum_left_hat);
+    const double hat_t = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - hat_t0 : 0.0;
+    trace_stage(column_index, "hat", "done", hat_t);
+    const double hat_t_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
     apply_momentum_hat_transpose(lhs.rowPtr, lhs.colPtr, lhs.diagPtr,
                                  mom_ncomp, lhs.nNo, momentum_hat, momentum_right_t);
+    const double hat_t_t = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - hat_t_t0 : 0.0;
+    trace_stage(column_index, "hat_t", "done", hat_t_t);
     const fe_fsi_linear_solver::HaloExchange halo(lhs);
+    const double sync_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
+    trace_stage(column_index, "sync_left_hat", "begin");
     halo.sync_vector(mom_ncomp, col.momentum_left_hat, skip_post_solve_overlap_sum());
+    trace_stage(column_index, "sync_left_hat", "done");
+    trace_stage(column_index, "sync_right_hat_t", "begin");
     halo.sync_vector(mom_ncomp, momentum_right_t, skip_post_solve_overlap_sum());
+    trace_stage(column_index, "sync_right_hat_t", "done");
+    const double sync_t = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - sync_t0 : 0.0;
+    trace_stage(column_index, "sync", "done", sync_t);
 
     col.schur_left.resize(con_ncomp, lhs.nNo);
+    const double d_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
+    trace_stage(column_index, "d", "begin");
     d_operator.apply(
         dso::ghost_synced_input(mom_ncomp, col.momentum_left_hat),
         dso::ghost_synced_output(con_ncomp, col.schur_left));
+    trace_stage(column_index, "d", "done");
+    const double d_t = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - d_t0 : 0.0;
+    const double gt_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
+    const bool trace_gt_sync =
+        env_enabled("SVMP_FSILS_TRACE_REDUCED_SCHUR_GT_SYNC");
+    const bool force_gt_sync =
+        env_enabled("SVMP_FSILS_REDUCED_SCHUR_FORCE_GT_SYNC");
+    if (trace_gt_sync && column_index == 0) {
+      const double local_right_l2 =
+          norm::fsi_ls_normv(mom_ncomp, lhs.mynNo, lhs.commu, momentum_right_t);
+      std::fprintf(stderr,
+                   "[BICGS_REDUCED_GT] rank=%d column=%d before_local_gt nReq=%d "
+                   "nNo=%lld mynNo=%lld con_ncomp=%d mom_ncomp=%d right_l2=%e\n",
+                   lhs.commu.task,
+                   column_index,
+                   lhs.nReq,
+                   static_cast<long long>(lhs.nNo),
+                   static_cast<long long>(lhs.mynNo),
+                   con_ncomp,
+                   mom_ncomp,
+                   local_right_l2);
+    }
+    trace_stage(column_index, "gt", "begin");
     multiply_rect_transpose_local(lhs.rowPtr, lhs.colPtr, lhs.nNo,
                                   mom_ncomp, con_ncomp, G,
                                   momentum_right_t, col.schur_right);
+    if (trace_gt_sync && column_index == 0) {
+      const double local_schur_right_l2 =
+          norm::fsi_ls_normv(con_ncomp, lhs.mynNo, lhs.commu, col.schur_right);
+      std::fprintf(stderr,
+                   "[BICGS_REDUCED_GT] rank=%d column=%d after_local_gt "
+                   "schur_right_l2=%e force_sync=%d\n",
+                   lhs.commu.task,
+                   column_index,
+                   local_schur_right_l2,
+                   force_gt_sync ? 1 : 0);
+    }
+    // schur_right is the contracting right factor of the low-rank correction
+    // and is consumed later only through owned-only dense contractions.
+    // Keep it owner-local here; halo-summing it is unnecessary and, on some
+    // grouped auxiliary paths, can deadlock in fsils_commuv().
+    if (force_gt_sync) {
+      trace_stage(column_index, "sync_gt", "begin");
+      halo.sync_vector(con_ncomp, col.schur_right, skip_post_solve_overlap_sum());
+      trace_stage(column_index, "sync_gt", "done");
+    }
+    if (trace_gt_sync && column_index == 0) {
+      const double synced_schur_right_l2 =
+          norm::fsi_ls_normv(con_ncomp, lhs.mynNo, lhs.commu, col.schur_right);
+      std::fprintf(stderr,
+                   "[BICGS_REDUCED_GT] rank=%d column=%d after_sync_gt "
+                   "schur_right_l2=%e\n",
+                   lhs.commu.task,
+                   column_index,
+                   synced_schur_right_l2);
+    }
+    const double gt_t = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - gt_t0 : 0.0;
+    trace_stage(column_index, "gt", "done", gt_t);
     columns.push_back(std::move(col));
+    if (trace_setup) {
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_SETUP] rank=%d reduced_schur column=%d fill=%e hat=%e hat_t=%e "
+                   "sync=%e d=%e gt=%e total=%e\n",
+                   lhs.commu.task,
+                   column_index,
+                   fill_t,
+                   hat_t,
+                   hat_t_t,
+                   sync_t,
+                   d_t,
+                   gt_t,
+                   fe_fsi_linear_solver::fsils_cpu_t() - column_t0);
+    }
   };
 
   auto append_face_column = [&](const fe_fsi_linear_solver::FSILS_faceType& face) {
@@ -2522,7 +3589,21 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
       return;
     }
 
+    const int column_index = static_cast<int>(columns.size());
+    if (trace_setup_emit) {
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_SETUP] rank=%d reduced_schur column=%d source=face face_nNo=%d dof=%d res=%e\n",
+                   lhs.commu.task,
+                   column_index,
+                   face.nNo,
+                   face.dof,
+                   face.res);
+      if (trace_setup_all_ranks) {
+        std::fflush(stderr);
+      }
+    }
     ReducedColumn col;
+    trace_stage(column_index, "filled", "begin");
     fill_projected_face_vector(lhs, face, mom_ncomp, col.momentum_left_hat);
     col.momentum_right_owned = col.momentum_left_hat;
     Array<double> momentum_right_t = col.momentum_left_hat;
@@ -2542,6 +3623,9 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     multiply_rect_transpose_local(lhs.rowPtr, lhs.colPtr, lhs.nNo,
                                   mom_ncomp, con_ncomp, G,
                                   momentum_right_t, col.schur_right);
+    if (env_enabled("SVMP_FSILS_REDUCED_SCHUR_FORCE_GT_SYNC")) {
+      halo.sync_vector(con_ncomp, col.schur_right, skip_post_solve_overlap_sum());
+    }
     columns.push_back(std::move(col));
   };
 
@@ -2549,6 +3633,7 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   dense_seed.reserve(lhs.reduced_updates.size());
 
   const bool has_grouped_bordered = !lhs.grouped_bordered_field_couplings.empty();
+  const double build_columns_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
   for (const auto& update : lhs.reduced_updates) {
     if (!update.active || std::abs(update.sigma) <= 1e-30) {
       continue;
@@ -2585,14 +3670,42 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     if (!group.active || group.modes.empty()) {
       continue;
     }
+    if (trace_setup_emit) {
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_SETUP] rank=%d grouped_group group=%d mode_count=%zu aux_size=%zu\n",
+                   lhs.commu.task,
+                   group.grouped_coupling_id,
+                   group.modes.size(),
+                   group.aux_matrix.size());
+      if (trace_setup_all_ranks) {
+        std::fflush(stderr);
+      }
+    }
     const int block_rank = static_cast<int>(group.modes.size());
     if (group.aux_matrix.size() != static_cast<std::size_t>(block_rank * block_rank)) {
       continue;
     }
 
     const int old_rank = static_cast<int>(columns.size());
-    for (const auto& mode : group.modes) {
+    for (std::size_t mode_index = 0; mode_index < group.modes.size(); ++mode_index) {
+      if (trace_setup_emit) {
+        std::fprintf(stderr,
+                     "[BICGS_SCHUR_SETUP] rank=%d grouped_begin group=%d mode=%zu old_rank=%d\n",
+                     lhs.commu.task,
+                     group.grouped_coupling_id,
+                     mode_index,
+                     old_rank);
+      }
+      const auto& mode = group.modes[mode_index];
       append_column(mode);
+      if (trace_setup_emit) {
+        std::fprintf(stderr,
+                     "[BICGS_SCHUR_SETUP] rank=%d grouped_end group=%d mode=%zu rank_now=%zu\n",
+                     lhs.commu.task,
+                     group.grouped_coupling_id,
+                     mode_index,
+                     columns.size());
+      }
     }
     if (static_cast<int>(columns.size()) != old_rank + block_rank) {
       columns.resize(static_cast<std::size_t>(old_rank));
@@ -2605,12 +3718,21 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     }
     append_dense_seed_block(dense_seed, old_rank, seed_block, block_rank);
   }
+  const double build_columns_t =
+      trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - build_columns_t0 : 0.0;
 
   const int rank = static_cast<int>(columns.size());
   if (rank == 0 || dense_seed.size() != static_cast<std::size_t>(rank * rank)) {
+    if (trace_setup) {
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_SETUP] reduced_schur rank=0 early_exit=1 build_columns=%e total=%e\n",
+                   build_columns_t,
+                   fe_fsi_linear_solver::fsils_cpu_t() - total_t0);
+    }
     return;
   }
 
+  const double dense_m_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
   std::vector<double> dense_m = dense_seed;
   for (int i = 0; i < rank; ++i) {
     for (int j = 0; j < rank; ++j) {
@@ -2621,11 +3743,14 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     }
   }
   allreduce_sum_in_place(lhs, dense_m);
+  const double dense_m_t =
+      trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - dense_m_t0 : 0.0;
 
   pc.low_rank_right.clear();
   pc.low_rank_preconditioned_left.clear();
   pc.low_rank_right.reserve(columns.size());
   pc.low_rank_preconditioned_left.reserve(columns.size());
+  const double precondition_left_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
   for (std::size_t column_index = 0; column_index < columns.size(); ++column_index) {
     auto& column = columns[column_index];
     pc.low_rank_right.push_back(column.schur_right);
@@ -2635,7 +3760,10 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     sync_schur_overlap(lhs, con_ncomp, z);
     pc.low_rank_preconditioned_left.push_back(std::move(z));
   }
+  const double precondition_left_t =
+      trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - precondition_left_t0 : 0.0;
 
+  const double dense_ctz_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
   std::vector<double> dense_ctz(static_cast<std::size_t>(rank) * static_cast<std::size_t>(rank), 0.0);
   for (int i = 0; i < rank; ++i) {
     for (int j = 0; j < rank; ++j) {
@@ -2646,16 +3774,272 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     }
   }
   allreduce_sum_in_place(lhs, dense_ctz);
+  const double dense_ctz_t =
+      trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - dense_ctz_t0 : 0.0;
 
   for (std::size_t idx = 0; idx < dense_m.size(); ++idx) {
     dense_m[idx] += dense_ctz[idx];
   }
 
+  const double invert_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
   pc.low_rank_inner_inv.assign(dense_m.size(), 0.0);
   if (!invert_dense_block(rank, dense_m.data(), pc.low_rank_inner_inv.data())) {
     pc.low_rank_right.clear();
     pc.low_rank_preconditioned_left.clear();
     pc.low_rank_inner_inv.clear();
+  }
+  if (trace_setup) {
+    const double invert_t = fe_fsi_linear_solver::fsils_cpu_t() - invert_t0;
+    std::fprintf(stderr,
+                 "[BICGS_SCHUR_SETUP] reduced_schur rank=%d build_columns=%e dense_m=%e "
+                 "precondition_left=%e dense_ctz=%e invert=%e total=%e\n",
+                 rank,
+                 build_columns_t,
+                 dense_m_t,
+                 precondition_left_t,
+                 dense_ctz_t,
+                 invert_t,
+                 fe_fsi_linear_solver::fsils_cpu_t() - total_t0);
+  }
+}
+
+void apply_dense_low_rank_correction(
+    fe_fsi_linear_solver::FSILS_lhsType& lhs,
+    int con_ncomp,
+    fsils_int nNo,
+    const std::vector<Array<double>>& right,
+    const std::vector<Array<double>>& preconditioned_left,
+    const std::vector<double>& inner_inv,
+    Array<double>& x)
+{
+  const int rank = static_cast<int>(right.size());
+  if (rank == 0 || preconditioned_left.size() != right.size() ||
+      inner_inv.size() != static_cast<std::size_t>(rank * rank)) {
+    return;
+  }
+
+  std::vector<double> gamma(static_cast<std::size_t>(rank), 0.0);
+  for (int i = 0; i < rank; ++i) {
+    gamma[static_cast<std::size_t>(i)] =
+        dense_dense_owned_dot_local(lhs, con_ncomp, right[static_cast<std::size_t>(i)], x);
+  }
+  allreduce_sum_in_place(lhs, gamma);
+
+  std::vector<double> delta(static_cast<std::size_t>(rank), 0.0);
+  for (int i = 0; i < rank; ++i) {
+    double sum = 0.0;
+    for (int j = 0; j < rank; ++j) {
+      sum += inner_inv[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+                       static_cast<std::size_t>(j)] *
+             gamma[static_cast<std::size_t>(j)];
+    }
+    delta[static_cast<std::size_t>(i)] = sum;
+  }
+
+  for (int i = 0; i < rank; ++i) {
+    const double scale = delta[static_cast<std::size_t>(i)];
+    if (std::abs(scale) <= 1e-30) {
+      continue;
+    }
+    const auto& z = preconditioned_left[static_cast<std::size_t>(i)];
+    for (fsils_int node = 0; node < nNo; ++node) {
+      for (int comp = 0; comp < con_ncomp; ++comp) {
+        x(comp, node) -= z(comp, node) * scale;
+      }
+    }
+  }
+}
+
+void build_partition_schur_coarse_correction(
+    const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr,
+    const Vector<fsils_int>& diagPtr,
+    fe_fsi_linear_solver::FSILS_lhsType& lhs,
+    int con_ncomp,
+    SchurPreconditionerData& pc)
+{
+  pc.coarse_right.clear();
+  pc.coarse_preconditioned_left.clear();
+  pc.coarse_inner_inv.clear();
+
+  if (!schur_partition_coarse_modes_enabled() || lhs.commu.nTasks <= 1 || con_ncomp != 1) {
+    return;
+  }
+
+  std::vector<double> owned_counts(static_cast<std::size_t>(lhs.commu.nTasks), 0.0);
+  const double local_owned = static_cast<double>(lhs.mynNo);
+  MPI_Allgather(&local_owned,
+                1,
+                cm_mod::mpreal,
+                owned_counts.data(),
+                1,
+                cm_mod::mpreal,
+                lhs.commu.comm);
+
+  std::vector<int> active_ranks;
+  active_ranks.reserve(static_cast<std::size_t>(lhs.commu.nTasks));
+  for (int rank = 0; rank < lhs.commu.nTasks; ++rank) {
+    if (owned_counts[static_cast<std::size_t>(rank)] > 0.5) {
+      active_ranks.push_back(rank);
+    }
+  }
+  if (active_ranks.size() < 2) {
+    return;
+  }
+
+  const int reference_rank = active_ranks.back();
+  const double reference_count = owned_counts[static_cast<std::size_t>(reference_rank)];
+  if (!(reference_count > 0.5)) {
+    return;
+  }
+
+  pc.coarse_right.reserve(active_ranks.size() - 1);
+  pc.coarse_preconditioned_left.reserve(active_ranks.size() - 1);
+
+  for (const int coarse_rank : active_ranks) {
+    if (coarse_rank == reference_rank) {
+      continue;
+    }
+
+    Array<double> mode(con_ncomp, lhs.nNo);
+    mode = 0.0;
+    if (lhs.commu.task == coarse_rank) {
+      for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+        mode(0, node) = 1.0;
+      }
+    } else if (lhs.commu.task == reference_rank) {
+      const double weight =
+          -owned_counts[static_cast<std::size_t>(coarse_rank)] / reference_count;
+      for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+        mode(0, node) = weight;
+      }
+    }
+
+    Array<double> z;
+    apply_hat_schur_operator(rowPtr, colPtr, diagPtr, lhs, pc, mode, z);
+    apply_base_schur_preconditioner(rowPtr, colPtr, diagPtr, pc, con_ncomp, lhs.nNo, z);
+    sync_schur_overlap(lhs, con_ncomp, z);
+    apply_dense_low_rank_correction(lhs,
+                                    con_ncomp,
+                                    lhs.nNo,
+                                    pc.low_rank_right,
+                                    pc.low_rank_preconditioned_left,
+                                    pc.low_rank_inner_inv,
+                                    z);
+
+    pc.coarse_right.push_back(std::move(mode));
+    pc.coarse_preconditioned_left.push_back(std::move(z));
+  }
+
+  const int coarse_rank_count = static_cast<int>(pc.coarse_right.size());
+  if (coarse_rank_count == 0) {
+    return;
+  }
+
+  std::vector<double> dense_m(static_cast<std::size_t>(coarse_rank_count) *
+                                  static_cast<std::size_t>(coarse_rank_count),
+                              0.0);
+  for (int i = 0; i < coarse_rank_count; ++i) {
+    for (int j = 0; j < coarse_rank_count; ++j) {
+      dense_m[static_cast<std::size_t>(i) * static_cast<std::size_t>(coarse_rank_count) +
+              static_cast<std::size_t>(j)] =
+          dense_dense_owned_dot_local(
+              lhs,
+              con_ncomp,
+              pc.coarse_right[static_cast<std::size_t>(i)],
+              pc.coarse_preconditioned_left[static_cast<std::size_t>(j)]);
+    }
+  }
+  allreduce_sum_in_place(lhs, dense_m);
+
+  pc.coarse_inner_inv.assign(dense_m.size(), 0.0);
+  if (!invert_dense_block(coarse_rank_count, dense_m.data(), pc.coarse_inner_inv.data())) {
+    pc.coarse_right.clear();
+    pc.coarse_preconditioned_left.clear();
+    pc.coarse_inner_inv.clear();
+  }
+}
+
+void build_global_mean_schur_coarse_correction(
+    const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr,
+    const Vector<fsils_int>& diagPtr,
+    fe_fsi_linear_solver::FSILS_lhsType& lhs,
+    int con_ncomp,
+    SchurPreconditionerData& pc)
+{
+  if (!schur_global_mean_coarse_mode_enabled() || con_ncomp != 1) {
+    return;
+  }
+
+  Array<double> mode(con_ncomp, lhs.nNo);
+  mode = 0.0;
+  for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+    mode(0, node) = 1.0;
+  }
+
+  Array<double> z;
+  apply_hat_schur_operator(rowPtr, colPtr, diagPtr, lhs, pc, mode, z);
+  apply_base_schur_preconditioner(rowPtr, colPtr, diagPtr, pc, con_ncomp, lhs.nNo, z);
+  sync_schur_overlap(lhs, con_ncomp, z);
+  apply_dense_low_rank_correction(lhs,
+                                  con_ncomp,
+                                  lhs.nNo,
+                                  pc.low_rank_right,
+                                  pc.low_rank_preconditioned_left,
+                                  pc.low_rank_inner_inv,
+                                  z);
+
+  const std::size_t old_count = pc.coarse_right.size();
+  pc.coarse_right.push_back(std::move(mode));
+  pc.coarse_preconditioned_left.push_back(std::move(z));
+
+  const int coarse_rank_count = static_cast<int>(pc.coarse_right.size());
+  std::vector<double> dense_m(static_cast<std::size_t>(coarse_rank_count) *
+                                  static_cast<std::size_t>(coarse_rank_count),
+                              0.0);
+  for (int i = 0; i < coarse_rank_count; ++i) {
+    for (int j = 0; j < coarse_rank_count; ++j) {
+      dense_m[static_cast<std::size_t>(i) * static_cast<std::size_t>(coarse_rank_count) +
+              static_cast<std::size_t>(j)] =
+          dense_dense_owned_dot_local(
+              lhs,
+              con_ncomp,
+              pc.coarse_right[static_cast<std::size_t>(i)],
+              pc.coarse_preconditioned_left[static_cast<std::size_t>(j)]);
+    }
+  }
+  allreduce_sum_in_place(lhs, dense_m);
+
+  pc.coarse_inner_inv.assign(dense_m.size(), 0.0);
+  if (!invert_dense_block(coarse_rank_count, dense_m.data(), pc.coarse_inner_inv.data())) {
+    pc.coarse_right.resize(old_count);
+    pc.coarse_preconditioned_left.resize(old_count);
+    if (old_count == 0u) {
+      pc.coarse_inner_inv.clear();
+    } else {
+      std::vector<double> fallback_dense(static_cast<std::size_t>(old_count) *
+                                             static_cast<std::size_t>(old_count),
+                                         0.0);
+      for (std::size_t i = 0; i < old_count; ++i) {
+        for (std::size_t j = 0; j < old_count; ++j) {
+          fallback_dense[i * old_count + j] =
+              dense_dense_owned_dot_local(lhs,
+                                          con_ncomp,
+                                          pc.coarse_right[i],
+                                          pc.coarse_preconditioned_left[j]);
+        }
+      }
+      allreduce_sum_in_place(lhs, fallback_dense);
+      pc.coarse_inner_inv.assign(fallback_dense.size(), 0.0);
+      if (!invert_dense_block(static_cast<int>(old_count),
+                              fallback_dense.data(),
+                              pc.coarse_inner_inv.data())) {
+        pc.coarse_right.clear();
+        pc.coarse_preconditioned_left.clear();
+        pc.coarse_inner_inv.clear();
+      }
+    }
   }
 }
 
@@ -2670,8 +4054,15 @@ SchurPreconditionerData build_schur_preconditioner(fe_fsi_linear_solver::FSILS_l
 {
   using fe_fsi_linear_solver::SchurPreconditionerType;
 
+  const bool trace_setup =
+      env_enabled("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING") && lhs.commu.masF;
+  const double total_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
   SchurPreconditionerData pc{};
-  const auto preconditioner = ls.schur_preconditioner;
+  const int forced_preconditioner = forced_schur_preconditioner_code();
+  const auto preconditioner =
+      (forced_preconditioner >= 0)
+          ? static_cast<SchurPreconditionerType>(forced_preconditioner)
+          : ls.schur_preconditioner;
   const bool diagonal_only = (preconditioner == SchurPreconditionerType::DIAG_L);
   const bool has_face_corrections = std::any_of(lhs.face.begin(), lhs.face.end(),
       [](const fe_fsi_linear_solver::FSILS_faceType& face) {
@@ -2685,6 +4076,12 @@ SchurPreconditionerData build_schur_preconditioner(fe_fsi_linear_solver::FSILS_l
       has_exact_schur_corrections ||
       (preconditioner == SchurPreconditionerType::ALGEBRAIC_SHAT);
   build_point_inverse_blocks(lhs.diagPtr, con_ncomp, lhs.nNo, L, diagonal_only, pc.point_inv);
+  pc.operator_D = &D;
+  pc.operator_G = &G;
+  pc.operator_L_storage = L;
+  pc.operator_L = &pc.operator_L_storage;
+  pc.operator_mom_ncomp = mom_ncomp;
+  pc.operator_con_ncomp = con_ncomp;
   if (!lhs.reduced_updates.empty() || !lhs.grouped_bordered_field_couplings.empty()) {
     // The OOP BlockSchur path permutes the per-node ordering to the explicit
     // momentum/constraint block layout before entering FSILS. The Schur
@@ -2695,9 +4092,15 @@ SchurPreconditionerData build_schur_preconditioner(fe_fsi_linear_solver::FSILS_l
   }
 
   if (need_momentum_hat) {
+    const double hat_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
     pc.momentum_hat =
         build_momentum_hat_data(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs, lhs.nNo,
                                 mom_ncomp, K, ls.schur_momentum_approximation);
+    if (trace_setup) {
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_SETUP] preconditioner momentum_hat=%e\n",
+                   fe_fsi_linear_solver::fsils_cpu_t() - hat_t0);
+    }
   }
 
   if (preconditioner == SchurPreconditionerType::ILU_L) {
@@ -2705,7 +4108,18 @@ SchurPreconditionerData build_schur_preconditioner(fe_fsi_linear_solver::FSILS_l
                          pc.ilu_factors, pc.ilu_diag_inv);
     pc.use_ilu = true;
     if (has_exact_schur_corrections) {
+      const double reduced_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
       build_reduced_schur_correction(lhs, mom_ncomp, con_ncomp, D, G, pc.momentum_hat, pc);
+      if (trace_setup) {
+        std::fprintf(stderr,
+                     "[BICGS_SCHUR_SETUP] preconditioner reduced_schur=%e\n",
+                     fe_fsi_linear_solver::fsils_cpu_t() - reduced_t0);
+      }
+    }
+    if (trace_setup) {
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_SETUP] preconditioner total=%e\n",
+                   fe_fsi_linear_solver::fsils_cpu_t() - total_t0);
     }
     return pc;
   }
@@ -2718,18 +4132,28 @@ SchurPreconditionerData build_schur_preconditioner(fe_fsi_linear_solver::FSILS_l
     factorize_block_ilu0(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs.nNo, con_ncomp, shat,
                          pc.ilu_factors, pc.ilu_diag_inv);
     pc.use_ilu = true;
-    pc.operator_D = &D;
-    pc.operator_G = &G;
-    pc.operator_L_storage = L;
-    pc.operator_L = &pc.operator_L_storage;
-    pc.operator_mom_ncomp = mom_ncomp;
-    pc.operator_con_ncomp = con_ncomp;
     pc.operator_refinement_steps = cfg.operator_refinement_steps;
     pc.operator_refinement_omega = cfg.operator_refinement_omega;
   }
 
   if (has_exact_schur_corrections) {
+    const double reduced_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
     build_reduced_schur_correction(lhs, mom_ncomp, con_ncomp, D, G, pc.momentum_hat, pc);
+    if (trace_setup) {
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_SETUP] preconditioner reduced_schur=%e\n",
+                   fe_fsi_linear_solver::fsils_cpu_t() - reduced_t0);
+    }
+  }
+  const double coarse_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
+  build_partition_schur_coarse_correction(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs, con_ncomp, pc);
+  build_global_mean_schur_coarse_correction(
+      lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs, con_ncomp, pc);
+  if (trace_setup) {
+    std::fprintf(stderr,
+                 "[BICGS_SCHUR_SETUP] preconditioner coarse=%e total=%e\n",
+                 fe_fsi_linear_solver::fsils_cpu_t() - coarse_t0,
+                 fe_fsi_linear_solver::fsils_cpu_t() - total_t0);
   }
 
   return pc;
@@ -2741,42 +4165,28 @@ void apply_schur_low_rank_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
                                      fsils_int nNo,
                                      Array<double>& x)
 {
-  const int rank = static_cast<int>(pc.low_rank_right.size());
-  if (rank == 0 || pc.low_rank_preconditioned_left.size() != pc.low_rank_right.size() ||
-      pc.low_rank_inner_inv.size() != static_cast<std::size_t>(rank * rank)) {
-    return;
-  }
+  apply_dense_low_rank_correction(lhs,
+                                  con_ncomp,
+                                  nNo,
+                                  pc.low_rank_right,
+                                  pc.low_rank_preconditioned_left,
+                                  pc.low_rank_inner_inv,
+                                  x);
+}
 
-  std::vector<double> gamma(static_cast<size_t>(rank), 0.0);
-  for (int i = 0; i < rank; ++i) {
-    gamma[static_cast<size_t>(i)] =
-        dense_dense_owned_dot_local(lhs, con_ncomp,
-                                    pc.low_rank_right[static_cast<size_t>(i)], x);
-  }
-  allreduce_sum_in_place(lhs, gamma);
-
-  std::vector<double> delta(static_cast<size_t>(rank), 0.0);
-  for (int i = 0; i < rank; ++i) {
-    double sum = 0.0;
-    for (int j = 0; j < rank; ++j) {
-      sum += pc.low_rank_inner_inv[static_cast<size_t>(i) * static_cast<size_t>(rank) + static_cast<size_t>(j)] *
-             gamma[static_cast<size_t>(j)];
-    }
-    delta[static_cast<size_t>(i)] = sum;
-  }
-
-  for (int i = 0; i < rank; ++i) {
-    const double scale = delta[static_cast<size_t>(i)];
-    if (std::abs(scale) <= 1e-30) {
-      continue;
-    }
-    const auto& z = pc.low_rank_preconditioned_left[static_cast<size_t>(i)];
-    for (fsils_int node = 0; node < nNo; ++node) {
-      for (int comp = 0; comp < con_ncomp; ++comp) {
-        x(comp, node) -= z(comp, node) * scale;
-      }
-    }
-  }
+void apply_schur_partition_coarse_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                             const SchurPreconditionerData& pc,
+                                             int con_ncomp,
+                                             fsils_int nNo,
+                                             Array<double>& x)
+{
+  apply_dense_low_rank_correction(lhs,
+                                  con_ncomp,
+                                  nNo,
+                                  pc.coarse_right,
+                                  pc.coarse_preconditioned_left,
+                                  pc.coarse_inner_inv,
+                                  x);
 }
 
 void apply_hat_schur_operator(const Array<fsils_int>& rowPtr,
@@ -2802,7 +4212,6 @@ void apply_hat_schur_operator(const Array<fsils_int>& rowPtr,
   pc.scratch_hgp.resize(mom_ncomp, nNo);
   pc.scratch_sp.resize(con_ncomp, nNo);
   pc.scratch_dgp.resize(con_ncomp, nNo);
-
   schur_ops.GL.apply(
       dso::ghost_synced_input(con_ncomp, in_vec),
       dso::ghost_synced_output(mom_ncomp, pc.scratch_gp),
@@ -2845,6 +4254,7 @@ void apply_schur_preconditioner(const Array<fsils_int>& rowPtr,
   apply_base_schur_preconditioner(rowPtr, colPtr, diagPtr, pc, con_ncomp, nNo, x);
   sync_schur_overlap(lhs, con_ncomp, x);
   apply_schur_low_rank_correction(lhs, pc, con_ncomp, nNo, x);
+  apply_schur_partition_coarse_correction(lhs, pc, con_ncomp, nNo, x);
 
   for (int step = 0; step < pc.operator_refinement_steps; ++step) {
     apply_hat_schur_operator(rowPtr, colPtr, diagPtr, lhs, pc, x, pc.scratch_ax);
@@ -2860,6 +4270,7 @@ void apply_schur_preconditioner(const Array<fsils_int>& rowPtr,
     apply_base_schur_preconditioner(rowPtr, colPtr, diagPtr, pc, con_ncomp, nNo, pc.scratch_correction);
     sync_schur_overlap(lhs, con_ncomp, pc.scratch_correction);
     apply_schur_low_rank_correction(lhs, pc, con_ncomp, nNo, pc.scratch_correction);
+    apply_schur_partition_coarse_correction(lhs, pc, con_ncomp, nNo, pc.scratch_correction);
 
     const double omega = pc.operator_refinement_omega;
     #pragma omp parallel for schedule(static)
@@ -2908,6 +4319,8 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
   auto& lhs = *system.lhs;
   const int nsd = system.momentum_components;
   const auto& D = system.D;
+  const auto& G = system.G;
+  const auto& L = system.L;
   const auto& L_values = *system.L_values;
   const auto& GL = system.GL;
 
@@ -2938,6 +4351,7 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
   for (fsils_int i = 0; i < nNo; ++i) {
     R(i) *= M_inv(i);
   }
+  const Vector<double> rhs_reference = R;
 
   ls.callD = fsils_cpu_t();
   ls.suc = false;
@@ -2954,6 +4368,9 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
   P = R;
   Rh = R;
   int i_itr = 1;
+  const bool face_only_skip_output_sync =
+      fe_fsi_linear_solver::CollectiveOps(lhs.commu).distributed() &&
+      face_only_skip_operator_output_sync_enabled();
 
   auto apply_schur_operator = [&](const Vector<double>& in_vec, Vector<double>& out_vec) {
     const Vector<double>* op_in = &in_vec;
@@ -2985,7 +4402,9 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
       out_vec(i) = M_inv(i) * (SP(i) - DGP(i));
     }
 
-    halo.sync_scalar(out_vec, skip_post_solve_overlap_sum());
+    if (!face_only_skip_output_sync) {
+      halo.sync_scalar(out_vec, skip_post_solve_overlap_sum());
+    }
   };
 
   int active_coupled_faces = static_cast<int>(std::count_if(
@@ -2994,19 +4413,1519 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
         return face.coupledFlag && std::abs(face.res) > 1e-30 && face.nNo > 0;
       }));
   const fe_fsi_linear_solver::CollectiveOps collectives(lhs.commu);
+  const bool zero_mean_project =
+      collectives.distributed() && face_only_zero_mean_project_enabled();
+  const bool zero_mean_post_project =
+      collectives.distributed() &&
+      env_enabled("SVMP_FSILS_FACE_ONLY_ZERO_MEAN_POSTPROJECT");
+  const bool inv_minv_post_project =
+      collectives.distributed() &&
+      env_enabled("SVMP_FSILS_FACE_ONLY_INV_MINV_POSTPROJECT");
+  bool gauge2_post_project =
+      collectives.distributed() &&
+      face_only_gauge2_postproject_enabled();
+  if (gauge2_post_project) {
+    static int gauge2_post_project_solve_counter = 0;
+    const int requested_solve_index = face_only_gauge2_postproject_solve_index();
+    if (requested_solve_index >= 0) {
+      gauge2_post_project =
+          (gauge2_post_project_solve_counter == requested_solve_index);
+    }
+    ++gauge2_post_project_solve_counter;
+  }
+  bool gauge3_post_project =
+      collectives.distributed() &&
+      face_only_gauge3_postproject_enabled();
+  if (gauge3_post_project) {
+    static int gauge3_post_project_solve_counter = 0;
+    const int requested_solve_index = face_only_gauge3_postproject_solve_index();
+    if (requested_solve_index >= 0) {
+      gauge3_post_project =
+          (gauge3_post_project_solve_counter == requested_solve_index);
+    }
+    ++gauge3_post_project_solve_counter;
+  }
+  bool gauge2_krylov_project =
+      collectives.distributed() &&
+      face_only_gauge2_krylov_enabled();
+  if (gauge2_krylov_project) {
+    static int gauge2_krylov_solve_counter = 0;
+    const int requested_solve_index = face_only_gauge2_krylov_solve_index();
+    if (requested_solve_index >= 0) {
+      gauge2_krylov_project =
+          (gauge2_krylov_solve_counter == requested_solve_index);
+    }
+    ++gauge2_krylov_solve_counter;
+  }
+  bool constant_subspace_enrich =
+      collectives.distributed() &&
+      env_enabled("SVMP_FSILS_FACE_ONLY_CONSTANT_SUBSPACE_ENRICH");
+  if (constant_subspace_enrich) {
+    static int constant_subspace_enrich_solve_counter = 0;
+    const int requested_solve_index =
+        std::max(0, parse_int_env("SVMP_FSILS_FACE_ONLY_CONSTANT_SUBSPACE_ENRICH_SOLVE_INDEX", 0));
+    constant_subspace_enrich =
+        (constant_subspace_enrich_solve_counter == requested_solve_index);
+    ++constant_subspace_enrich_solve_counter;
+  }
+    bool constant_weak_subspace_enrich =
+        collectives.distributed() &&
+        face_only_constant_weak_subspace_enrich_enabled();
+  if (constant_weak_subspace_enrich) {
+    static int constant_weak_subspace_enrich_solve_counter = 0;
+    const int requested_solve_index =
+        std::max(0, face_only_constant_weak_subspace_enrich_solve_index());
+    constant_weak_subspace_enrich =
+        (constant_weak_subspace_enrich_solve_counter == requested_solve_index);
+    ++constant_weak_subspace_enrich_solve_counter;
+  }
+    bool constant_initial_guess =
+        collectives.distributed() &&
+        face_only_constant_initial_guess_enabled();
+    if (constant_initial_guess) {
+      static int constant_initial_guess_solve_counter = 0;
+      const int requested_solve_index =
+          std::max(0, face_only_constant_initial_guess_solve_index());
+      constant_initial_guess =
+          (constant_initial_guess_solve_counter == requested_solve_index);
+      ++constant_initial_guess_solve_counter;
+    }
+    bool krylov_plus_constant_ls =
+        collectives.distributed() &&
+        face_only_krylov_plus_constant_ls_enabled();
+    if (krylov_plus_constant_ls) {
+      static int krylov_plus_constant_ls_solve_counter = 0;
+      const int requested_solve_index =
+          std::max(0, face_only_krylov_plus_constant_ls_solve_index());
+      krylov_plus_constant_ls =
+          (krylov_plus_constant_ls_solve_counter == requested_solve_index);
+      ++krylov_plus_constant_ls_solve_counter;
+    }
+    bool krylov_plus_gauge2_ls =
+        collectives.distributed() &&
+        face_only_krylov_plus_gauge2_ls_enabled();
+    if (krylov_plus_gauge2_ls) {
+      static int krylov_plus_gauge2_ls_solve_counter = 0;
+      const int requested_solve_index =
+          std::max(0, face_only_krylov_plus_gauge2_ls_solve_index());
+      krylov_plus_gauge2_ls =
+          (krylov_plus_gauge2_ls_solve_counter == requested_solve_index);
+      ++krylov_plus_gauge2_ls_solve_counter;
+    }
+    bool krylov_plus_gauge3_ls =
+        collectives.distributed() &&
+        face_only_krylov_plus_gauge3_ls_enabled();
+    if (krylov_plus_gauge3_ls) {
+      static int krylov_plus_gauge3_ls_solve_counter = 0;
+      const int requested_solve_index =
+          std::max(0, face_only_krylov_plus_gauge3_ls_solve_index());
+      krylov_plus_gauge3_ls =
+          (krylov_plus_gauge3_ls_solve_counter == requested_solve_index);
+      ++krylov_plus_gauge3_ls_solve_counter;
+    }
+    bool krylov_plus_oracle_ls =
+        collectives.distributed() &&
+        (face_only_krylov_plus_oracle_ls_file() != nullptr);
+    if (krylov_plus_oracle_ls) {
+      static int krylov_plus_oracle_ls_solve_counter = 0;
+      const int requested_solve_index =
+          std::max(0, face_only_krylov_plus_oracle_ls_solve_index());
+      krylov_plus_oracle_ls =
+          (krylov_plus_oracle_ls_solve_counter == requested_solve_index);
+      ++krylov_plus_oracle_ls_solve_counter;
+    }
+    bool trace_oracle_fit =
+        (trace_face_only_oracle_fit_file() != nullptr);
+    if (trace_oracle_fit) {
+      static int trace_oracle_fit_solve_counter = 0;
+      const int requested_solve_index =
+          std::max(0, trace_face_only_oracle_fit_solve_index());
+      trace_oracle_fit =
+          (trace_oracle_fit_solve_counter == requested_solve_index);
+      ++trace_oracle_fit_solve_counter;
+    }
+    bool solution_dump_enabled =
+        (face_only_solution_dump_prefix() != nullptr);
+    if (solution_dump_enabled) {
+      static int solution_dump_solve_counter = 0;
+      const int requested_solve_index =
+          std::max(0, face_only_solution_dump_solve_index());
+      solution_dump_enabled =
+          (solution_dump_solve_counter == requested_solve_index);
+      ++solution_dump_solve_counter;
+    }
+  auto project_solution_mean = [&](Vector<double>& vec) {
+    if (!zero_mean_project) {
+      return;
+    }
+    subtract_owned_scalar_mean(lhs, vec);
+  };
+  auto project_solution_gauge2 = [&](Vector<double>& vec) {
+    if (!gauge2_krylov_project) {
+      return;
+    }
+    subtract_owned_two_weight_projection(
+        lhs,
+        vec,
+        [&](fsils_int) { return 1.0; },
+        [&](fsils_int node) {
+          const double minv = M_inv(node);
+          return (std::abs(minv) > 1e-30) ? (1.0 / minv) : 0.0;
+        });
+  };
+  auto post_project_solution_mean = [&](Vector<double>& vec) {
+    if (!(zero_mean_project || zero_mean_post_project || inv_minv_post_project ||
+          gauge2_post_project || gauge3_post_project)) {
+      return;
+    }
+    if (zero_mean_project || zero_mean_post_project) {
+      subtract_owned_scalar_mean(lhs, vec);
+    }
+    if (inv_minv_post_project) {
+      subtract_owned_weight_projection(lhs, vec, [&](fsils_int node) {
+        const double minv = M_inv(node);
+        return (std::abs(minv) > 1e-30) ? (1.0 / minv) : 0.0;
+      });
+    }
+    if (gauge2_post_project) {
+      subtract_owned_two_weight_projection(
+          lhs,
+          vec,
+          [&](fsils_int) { return 1.0; },
+          [&](fsils_int node) {
+            const double minv = M_inv(node);
+            return (std::abs(minv) > 1e-30) ? (1.0 / minv) : 0.0;
+          });
+    }
+    if (gauge3_post_project) {
+      subtract_owned_three_weight_projection(
+          lhs,
+          vec,
+          [&](fsils_int) { return 1.0; },
+          [&](fsils_int node) { return M_inv(node); },
+          [&](fsils_int node) {
+            const double minv = M_inv(node);
+            return (std::abs(minv) > 1e-30) ? (1.0 / minv) : 0.0;
+          });
+    }
+  };
+  auto compute_scalar_stats = [&](const Vector<double>& vec) {
+    struct ScalarStats {
+      double l2{0.0};
+      double mean{0.0};
+      double centered_l2{0.0};
+      double count{0.0};
+      double min{0.0};
+      double max{0.0};
+    };
+
+    const fsils_int local_n = std::min<fsils_int>(mynNo, vec.size());
+    double local_sq_sum = 0.0;
+    double local_sum = 0.0;
+    double local_min = std::numeric_limits<double>::infinity();
+    double local_max = -std::numeric_limits<double>::infinity();
+    for (fsils_int node = 0; node < local_n; ++node) {
+      const double value = vec(node);
+      local_sq_sum += value * value;
+      local_sum += value;
+      local_min = std::min(local_min, value);
+      local_max = std::max(local_max, value);
+    }
+
+    double global_sq_sum = local_sq_sum;
+    double global_sum = local_sum;
+    double global_count = static_cast<double>(local_n);
+    fe_fsi_linear_solver::fsils_allreduce_sum_in_place(&global_sq_sum, 1, cm_mod::mpreal, lhs.commu);
+    fe_fsi_linear_solver::fsils_allreduce_sum_in_place(&global_sum, 1, cm_mod::mpreal, lhs.commu);
+    fe_fsi_linear_solver::fsils_allreduce_sum_in_place(&global_count, 1, cm_mod::mpreal, lhs.commu);
+
+    double global_min = local_min;
+    double global_max = local_max;
+    if (global_count > 0.0) {
+      fe_fsi_linear_solver::fsils_allreduce_in_place(&global_min, 1, cm_mod::mpreal, MPI_MIN, lhs.commu);
+      fe_fsi_linear_solver::fsils_allreduce_in_place(&global_max, 1, cm_mod::mpreal, MPI_MAX, lhs.commu);
+    } else {
+      global_min = 0.0;
+      global_max = 0.0;
+    }
+
+    ScalarStats stats;
+    stats.l2 = std::sqrt(std::max(0.0, global_sq_sum));
+    stats.mean = (global_count > 0.0) ? (global_sum / global_count) : 0.0;
+    stats.count = global_count;
+    const double centered_sq =
+        std::max(0.0, global_sq_sum - global_count * stats.mean * stats.mean);
+    stats.centered_l2 = std::sqrt(centered_sq);
+    stats.min = global_min;
+    stats.max = global_max;
+    return stats;
+  };
+  auto compute_vector_stats = [&](const Array<double>& vec) {
+    struct VectorStats {
+      double l2{0.0};
+      double max_abs{0.0};
+    };
+
+    VectorStats stats;
+    stats.l2 = norm::fsi_ls_normv(nsd, mynNo, lhs.commu, vec);
+    double local_max_abs = 0.0;
+    for (fsils_int node = 0; node < mynNo; ++node) {
+      for (int comp = 0; comp < nsd; ++comp) {
+        local_max_abs = std::max(local_max_abs, std::abs(vec(comp, node)));
+      }
+    }
+    stats.max_abs = local_max_abs;
+    fe_fsi_linear_solver::fsils_allreduce_in_place(&stats.max_abs, 1, cm_mod::mpreal, MPI_MAX, lhs.commu);
+    return stats;
+  };
+  auto emit_face_only_solution_stats = [&](const char* solver_label,
+                                           int index,
+                                           const Vector<double>& solution_vec) {
+    if (!trace_face_only_solution_stats_enabled()) {
+      return;
+    }
+
+    static bool emitted_face_only_solution_stats = false;
+    if (emitted_face_only_solution_stats) {
+      return;
+    }
+    emitted_face_only_solution_stats = true;
+
+    const auto solution_stats = compute_scalar_stats(solution_vec);
+    const double constant_ratio =
+        (solution_stats.l2 > 1e-30 && solution_stats.count > 0.0)
+            ? (std::abs(solution_stats.mean) * std::sqrt(solution_stats.count) /
+               solution_stats.l2)
+            : 0.0;
+    double local_dot_minv = 0.0;
+    double local_dot_inv_minv = 0.0;
+    double local_minv_sq = 0.0;
+    double local_inv_minv_sq = 0.0;
+    const fsils_int solution_local_n = std::min<fsils_int>(mynNo, solution_vec.size());
+    for (fsils_int node = 0; node < solution_local_n; ++node) {
+      const double minv = M_inv(node);
+      local_dot_minv += solution_vec(node) * minv;
+      local_minv_sq += minv * minv;
+      if (std::abs(minv) > 1e-30) {
+        const double inv_minv = 1.0 / minv;
+        local_dot_inv_minv += solution_vec(node) * inv_minv;
+        local_inv_minv_sq += inv_minv * inv_minv;
+      }
+    }
+    double global_dot_minv = local_dot_minv;
+    double global_dot_inv_minv = local_dot_inv_minv;
+    double global_minv_sq = local_minv_sq;
+    double global_inv_minv_sq = local_inv_minv_sq;
+    fe_fsi_linear_solver::fsils_allreduce_sum_in_place(
+        &global_dot_minv, 1, cm_mod::mpreal, lhs.commu);
+    fe_fsi_linear_solver::fsils_allreduce_sum_in_place(
+        &global_dot_inv_minv, 1, cm_mod::mpreal, lhs.commu);
+    fe_fsi_linear_solver::fsils_allreduce_sum_in_place(
+        &global_minv_sq, 1, cm_mod::mpreal, lhs.commu);
+    fe_fsi_linear_solver::fsils_allreduce_sum_in_place(
+        &global_inv_minv_sq, 1, cm_mod::mpreal, lhs.commu);
+    const double minv_ratio =
+        (solution_stats.l2 > 1e-30 && global_minv_sq > 1e-30)
+            ? (global_dot_minv /
+               (solution_stats.l2 * std::sqrt(global_minv_sq)))
+            : 0.0;
+    const double inv_minv_ratio =
+        (solution_stats.l2 > 1e-30 && global_inv_minv_sq > 1e-30)
+            ? (global_dot_inv_minv /
+               (solution_stats.l2 * std::sqrt(global_inv_minv_sq)))
+            : 0.0;
+    std::vector<double> face_sums;
+    std::vector<double> face_counts;
+    face_sums.reserve(lhs.face.size());
+    face_counts.reserve(lhs.face.size());
+    for (const auto& face : lhs.face) {
+      double local_sum = 0.0;
+      double local_count = 0.0;
+      if (face.coupledFlag && std::abs(face.res) > 1e-30) {
+        for (int a = 0; a < face.nNo; ++a) {
+          const fsils_int node = face.glob(a);
+          if (node >= 0 && node < nNo) {
+            local_sum += solution_vec(node);
+            local_count += 1.0;
+          }
+        }
+      }
+      fe_fsi_linear_solver::fsils_allreduce_sum_in_place(
+          &local_sum, 1, cm_mod::mpreal, lhs.commu);
+      fe_fsi_linear_solver::fsils_allreduce_sum_in_place(
+          &local_count, 1, cm_mod::mpreal, lhs.commu);
+      face_sums.push_back(local_sum);
+      face_counts.push_back(local_count);
+    }
+    if (lhs.commu.masF) {
+      std::fprintf(stderr,
+                   "[BICGS_FACE_ONLY_SOLUTION] solver=%s index=%d l2=%e mean=%e centered_l2=%e constant_ratio=%e minv_ratio=%e inv_minv_ratio=%e min=%e max=%e\n",
+                   solver_label,
+                   index,
+                   solution_stats.l2,
+                   solution_stats.mean,
+                   solution_stats.centered_l2,
+                   constant_ratio,
+                   minv_ratio,
+                   inv_minv_ratio,
+                   solution_stats.min,
+                   solution_stats.max);
+      for (std::size_t fi = 0; fi < lhs.face.size(); ++fi) {
+        const auto& face = lhs.face[fi];
+        if (!(face.coupledFlag && std::abs(face.res) > 1e-30)) {
+          continue;
+        }
+        const double normalized_dot =
+            (solution_stats.l2 > 1e-30 && face_counts[fi] > 0.0)
+                ? (face_sums[fi] /
+                   (solution_stats.l2 * std::sqrt(face_counts[fi])))
+                : 0.0;
+        const double face_mean =
+            (face_counts[fi] > 0.0) ? (face_sums[fi] / face_counts[fi]) : 0.0;
+        std::fprintf(stderr,
+                     "[BICGS_FACE_ONLY_SOLUTION_FACE] solver=%s face=%zu nodes=%e mean=%e normalized_dot=%e\n",
+                     solver_label,
+                     fi,
+                     face_counts[fi],
+                     face_mean,
+                     normalized_dot);
+      }
+      std::fflush(stderr);
+    }
+  };
+  auto trace_constant_mode_operator = [&](const Vector<double>& rhs_vec) {
+    static bool emitted_constant_mode_operator = false;
+    if (emitted_constant_mode_operator ||
+        !trace_face_only_constant_mode_operator_enabled() ||
+        !lhs.commu.masF) {
+      return;
+    }
+    emitted_constant_mode_operator = true;
+
+    Vector<double> constant_mode(nNo), image(nNo);
+    constant_mode = 0.0;
+    for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+      constant_mode(node) = 1.0;
+    }
+    apply_schur_operator(constant_mode, image);
+
+    const auto mode_stats = compute_scalar_stats(constant_mode);
+    const auto image_stats = compute_scalar_stats(image);
+    const double denom = dot::fsils_dot_s(mynNo, lhs.commu, image, image);
+    const double numer = dot::fsils_dot_s(mynNo, lhs.commu, image, rhs_vec);
+    const double alpha = (denom > 1e-30) ? (numer / denom) : 0.0;
+    const double image_constant_ratio =
+        (image_stats.l2 > 1e-30 && image_stats.count > 0.0)
+            ? (std::abs(image_stats.mean) * std::sqrt(image_stats.count) / image_stats.l2)
+            : 0.0;
+
+    std::fprintf(stderr,
+                 "[BICGS_FACE_ONLY_CONST_MODE] mode_l2=%e image_l2=%e image_mean=%e image_centered_l2=%e image_constant_ratio=%e alpha=%e numer=%e denom=%e\n",
+                 mode_stats.l2,
+                 image_stats.l2,
+                 image_stats.mean,
+                 image_stats.centered_l2,
+                 image_constant_ratio,
+                 alpha,
+                 numer,
+                 denom);
+    std::fflush(stderr);
+  };
+  auto trace_oracle_mode_fit = [&](const Vector<double>& rhs_vec) {
+    static bool emitted_oracle_mode_fit = false;
+    if (emitted_oracle_mode_fit || !trace_oracle_fit) {
+      return;
+    }
+
+    Vector<double> oracle_mode(nNo), oracle_image(nNo);
+    oracle_mode = 0.0;
+    if (!load_face_only_oracle_mode(lhs, trace_face_only_oracle_fit_file(), oracle_mode)) {
+      emitted_oracle_mode_fit = true;
+      if (lhs.commu.masF) {
+        std::fprintf(stderr,
+                     "[BICGS_FACE_ONLY_ORACLE_FIT] loaded=0 path=%s\n",
+                     trace_face_only_oracle_fit_file());
+        std::fflush(stderr);
+      }
+      return;
+    }
+    emitted_oracle_mode_fit = true;
+
+    apply_schur_operator(oracle_mode, oracle_image);
+    Vector<double> oracle_residual(rhs_vec), alpha_residual(rhs_vec);
+    omp_la::omp_axpby_s(nNo, oracle_residual, rhs_vec, -1.0, oracle_image);
+
+    const double oracle_image_sq =
+        dot::fsils_dot_s(mynNo, lhs.commu, oracle_image, oracle_image);
+    const double oracle_rhs_dot =
+        dot::fsils_dot_s(mynNo, lhs.commu, oracle_image, rhs_vec);
+    const double alpha = (oracle_image_sq > 1e-30) ? (oracle_rhs_dot / oracle_image_sq) : 0.0;
+
+    alpha_residual = rhs_vec;
+    omp_la::omp_axpby_s(nNo, alpha_residual, rhs_vec, -alpha, oracle_image);
+
+    const auto oracle_mode_stats = compute_scalar_stats(oracle_mode);
+    const auto oracle_image_stats = compute_scalar_stats(oracle_image);
+    const double oracle_constant_ratio =
+        (oracle_mode_stats.l2 > 1e-30 && oracle_mode_stats.count > 0.0)
+            ? (std::abs(oracle_mode_stats.mean) * std::sqrt(oracle_mode_stats.count) /
+               oracle_mode_stats.l2)
+            : 0.0;
+    const double oracle_image_constant_ratio =
+        (oracle_image_stats.l2 > 1e-30 && oracle_image_stats.count > 0.0)
+            ? (std::abs(oracle_image_stats.mean) * std::sqrt(oracle_image_stats.count) /
+               oracle_image_stats.l2)
+            : 0.0;
+    const double oracle_residual_norm =
+        norm::fsi_ls_norms(mynNo, lhs.commu, oracle_residual);
+    const double alpha_residual_norm =
+        norm::fsi_ls_norms(mynNo, lhs.commu, alpha_residual);
+
+    if (lhs.commu.masF) {
+      std::fprintf(stderr,
+                   "[BICGS_FACE_ONLY_ORACLE_FIT] loaded=1 mode_l2=%e mode_mean=%e mode_constant_ratio=%e image_l2=%e image_mean=%e image_constant_ratio=%e alpha=%e oracle_rhs_dot=%e oracle_image_sq=%e residual_alpha1=%e residual_best_alpha=%e\n",
+                   oracle_mode_stats.l2,
+                   oracle_mode_stats.mean,
+                   oracle_constant_ratio,
+                   oracle_image_stats.l2,
+                   oracle_image_stats.mean,
+                   oracle_image_constant_ratio,
+                   alpha,
+                   oracle_rhs_dot,
+                   oracle_image_sq,
+                   oracle_residual_norm,
+                   alpha_residual_norm);
+      std::fflush(stderr);
+    }
+
+    if (env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_ORACLE_STAGES")) {
+      Array<double> gp_probe(nsd, nNo);
+      Array<double> gp_sep(nsd, nNo), gp_diff(nsd, nNo);
+      Vector<double> sp_probe(nNo), dgp_probe(nNo), out_probe(nNo), oracle_sync(nNo);
+      Vector<double> sp_sep(nNo), sp_diff(nNo);
+      gp_probe = 0.0;
+      gp_sep = 0.0;
+      gp_diff = 0.0;
+      sp_probe = 0.0;
+      sp_sep = 0.0;
+      sp_diff = 0.0;
+      dgp_probe = 0.0;
+      out_probe = 0.0;
+      const fe_fsi_linear_solver::HaloExchange halo(lhs);
+      const Vector<double>* op_in = &oracle_mode;
+      if (halo.has_overlap() && !skip_post_solve_overlap_sum()) {
+        oracle_sync = oracle_mode;
+        halo.sync_scalar(oracle_sync);
+        op_in = &oracle_sync;
+      }
+
+      GL.apply(
+          dso::ghost_synced_input(*op_in),
+          dso::ghost_synced_output(nsd, gp_probe),
+          dso::ghost_synced_output(sp_probe));
+      const auto gp_gl_stats = compute_vector_stats(gp_probe);
+      const auto sp_gl_stats = compute_scalar_stats(sp_probe);
+
+      G.apply(
+          dso::ghost_synced_input(*op_in),
+          dso::ghost_synced_output(nsd, gp_sep));
+      L.apply(
+          dso::ghost_synced_input(*op_in),
+          dso::ghost_synced_output(sp_sep));
+      for (fsils_int node = 0; node < nNo; ++node) {
+        sp_diff(node) = sp_sep(node) - sp_probe(node);
+        for (int comp = 0; comp < nsd; ++comp) {
+          gp_diff(comp, node) = gp_sep(comp, node) - gp_probe(comp, node);
+        }
+      }
+      const auto gp_sep_stats = compute_vector_stats(gp_sep);
+      const auto sp_sep_stats = compute_scalar_stats(sp_sep);
+      const auto gp_diff_stats = compute_vector_stats(gp_diff);
+      const auto sp_diff_stats = compute_scalar_stats(sp_diff);
+
+      add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, nsd, gp_probe, gp_probe);
+      if (halo.has_overlap() && !skip_post_solve_overlap_sum()) {
+        halo.sync_vector(nsd, gp_probe);
+      }
+      const auto gp_pre_stats = compute_vector_stats(gp_probe);
+
+      D.apply(
+          dso::ghost_synced_input(nsd, gp_probe),
+          dso::ghost_synced_output(dgp_probe));
+      const auto dgp_stats = compute_scalar_stats(dgp_probe);
+
+      #pragma omp parallel for schedule(static)
+      for (fsils_int node = 0; node < nNo; ++node) {
+        out_probe(node) = M_inv(node) * (sp_probe(node) - dgp_probe(node));
+      }
+      if (!face_only_skip_output_sync) {
+        halo.sync_scalar(out_probe, skip_post_solve_overlap_sum());
+      }
+      const auto out_stats = compute_scalar_stats(out_probe);
+
+      if (lhs.commu.masF) {
+        std::fprintf(stderr,
+                     "[BICGS_FACE_ONLY_ORACLE_STAGE] stage=gl_gp l2=%e max_abs=%e\n",
+                     gp_gl_stats.l2,
+                     gp_gl_stats.max_abs);
+        std::fprintf(stderr,
+                     "[BICGS_FACE_ONLY_ORACLE_STAGE] stage=gl_sp l2=%e mean=%e centered_l2=%e min=%e max=%e\n",
+                     sp_gl_stats.l2,
+                     sp_gl_stats.mean,
+                     sp_gl_stats.centered_l2,
+                     sp_gl_stats.min,
+                     sp_gl_stats.max);
+        std::fprintf(stderr,
+                     "[BICGS_FACE_ONLY_ORACLE_STAGE] stage=sep_gp l2=%e max_abs=%e diff_l2=%e diff_max_abs=%e\n",
+                     gp_sep_stats.l2,
+                     gp_sep_stats.max_abs,
+                     gp_diff_stats.l2,
+                     gp_diff_stats.max_abs);
+        std::fprintf(stderr,
+                     "[BICGS_FACE_ONLY_ORACLE_STAGE] stage=sep_sp l2=%e mean=%e centered_l2=%e diff_l2=%e diff_mean=%e diff_centered_l2=%e\n",
+                     sp_sep_stats.l2,
+                     sp_sep_stats.mean,
+                     sp_sep_stats.centered_l2,
+                     sp_diff_stats.l2,
+                     sp_diff_stats.mean,
+                     sp_diff_stats.centered_l2);
+        std::fprintf(stderr,
+                     "[BICGS_FACE_ONLY_ORACLE_STAGE] stage=pre_gp l2=%e max_abs=%e\n",
+                     gp_pre_stats.l2,
+                     gp_pre_stats.max_abs);
+        std::fprintf(stderr,
+                     "[BICGS_FACE_ONLY_ORACLE_STAGE] stage=dgp l2=%e mean=%e centered_l2=%e min=%e max=%e\n",
+                     dgp_stats.l2,
+                     dgp_stats.mean,
+                     dgp_stats.centered_l2,
+                     dgp_stats.min,
+                     dgp_stats.max);
+        std::fprintf(stderr,
+                     "[BICGS_FACE_ONLY_ORACLE_STAGE] stage=out l2=%e mean=%e centered_l2=%e min=%e max=%e\n",
+                     out_stats.l2,
+                     out_stats.mean,
+                     out_stats.centered_l2,
+                     out_stats.min,
+                     out_stats.max);
+        std::fflush(stderr);
+      }
+    }
+  };
+  auto try_constant_subspace_enrich = [&](const char* solver_label,
+                                          const Vector<double>& rhs_vec,
+                                          Vector<double>& solution_vec,
+                                          Vector<double>& residual_vec,
+                                          double& residual_norm) {
+    if (!constant_subspace_enrich) {
+      return;
+    }
+
+    const double solution_norm = norm::fsi_ls_norms(mynNo, lhs.commu, solution_vec);
+    if (!(solution_norm > 1e-30)) {
+      return;
+    }
+
+    Vector<double> const_mode(nNo);
+    const_mode = 0.0;
+    for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+      const_mode(node) = 1.0;
+    }
+
+    Vector<double> ax = rhs_vec;
+    omp_la::omp_axpby_s(nNo, ax, rhs_vec, -1.0, residual_vec);
+
+    Vector<double> aconst(nNo);
+    apply_schur_operator(const_mode, aconst);
+
+    const double g00 = dot::fsils_dot_s(mynNo, lhs.commu, ax, ax);
+    const double g01 = dot::fsils_dot_s(mynNo, lhs.commu, ax, aconst);
+    const double g11 = dot::fsils_dot_s(mynNo, lhs.commu, aconst, aconst);
+    const double b0 = dot::fsils_dot_s(mynNo, lhs.commu, ax, rhs_vec);
+    const double b1 = dot::fsils_dot_s(mynNo, lhs.commu, aconst, rhs_vec);
+
+    std::vector<double> gram = {g00, g01, g01, g11};
+    std::vector<double> coeff = {b0, b1};
+    if (!solve_dense_linear_system_local(gram, coeff, 1e-30)) {
+      return;
+    }
+
+    Vector<double> candidate_solution(nNo);
+    candidate_solution = 0.0;
+    omp_la::omp_sum_s(nNo, coeff[0], candidate_solution, solution_vec);
+    omp_la::omp_sum_s(nNo, coeff[1], candidate_solution, const_mode);
+
+    Vector<double> candidate_image(nNo);
+    candidate_image = 0.0;
+    omp_la::omp_sum_s(nNo, coeff[0], candidate_image, ax);
+    omp_la::omp_sum_s(nNo, coeff[1], candidate_image, aconst);
+
+    Vector<double> candidate_residual = rhs_vec;
+    omp_la::omp_axpby_s(nNo, candidate_residual, rhs_vec, -1.0, candidate_image);
+    const double residual_before = residual_norm;
+    const double candidate_residual_norm =
+        norm::fsi_ls_norms(mynNo, lhs.commu, candidate_residual);
+
+    const bool accept =
+        std::isfinite(candidate_residual_norm) &&
+        candidate_residual_norm + 1e-12 < residual_norm;
+    if (accept) {
+      solution_vec = candidate_solution;
+      residual_vec = candidate_residual;
+      residual_norm = candidate_residual_norm;
+    }
+
+    if (lhs.commu.masF && env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_CONSTANT_SUBSPACE_ENRICH")) {
+      std::fprintf(stderr,
+                   "[BICGS_FACE_ONLY_CONST_ENRICH] solver=%s residual_before=%e residual_after=%e accept=%d coeff0=%e coeff1=%e g00=%e g01=%e g11=%e b0=%e b1=%e\n",
+                   solver_label,
+                   residual_before,
+                   candidate_residual_norm,
+                   accept ? 1 : 0,
+                   coeff[0],
+                   coeff[1],
+                   g00,
+                   g01,
+                   g11,
+                   b0,
+                   b1);
+      std::fflush(stderr);
+    }
+  };
+  auto try_constant_weak_subspace_enrich = [&](const char* solver_label,
+                                               const Vector<double>& rhs_vec,
+                                               const Vector<double>& weak_mode_vec,
+                                               Vector<double>& solution_vec,
+                                               Vector<double>& residual_vec,
+                                               double& residual_norm) {
+    if (!constant_weak_subspace_enrich) {
+      return;
+    }
+
+    const double solution_norm = norm::fsi_ls_norms(mynNo, lhs.commu, solution_vec);
+    const double weak_mode_norm = norm::fsi_ls_norms(mynNo, lhs.commu, weak_mode_vec);
+    if (!(solution_norm > 1e-30) || !(weak_mode_norm > 1e-30)) {
+      return;
+    }
+
+    Vector<double> const_mode(nNo);
+    const_mode = 0.0;
+    for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+      const_mode(node) = 1.0;
+    }
+
+    Vector<double> a_solution = rhs_vec;
+    omp_la::omp_axpby_s(nNo, a_solution, rhs_vec, -1.0, residual_vec);
+
+    Vector<double> a_const(nNo), a_weak(nNo);
+    apply_schur_operator(const_mode, a_const);
+    apply_schur_operator(weak_mode_vec, a_weak);
+
+    std::vector<double> gram(9, 0.0);
+    auto set_gram = [&](int r, int c, double value) {
+      gram[static_cast<std::size_t>(r) * 3u + static_cast<std::size_t>(c)] = value;
+    };
+    set_gram(0, 0, dot::fsils_dot_s(mynNo, lhs.commu, a_solution, a_solution));
+    set_gram(0, 1, dot::fsils_dot_s(mynNo, lhs.commu, a_solution, a_const));
+    set_gram(0, 2, dot::fsils_dot_s(mynNo, lhs.commu, a_solution, a_weak));
+    set_gram(1, 0, gram[1]);
+    set_gram(1, 1, dot::fsils_dot_s(mynNo, lhs.commu, a_const, a_const));
+    set_gram(1, 2, dot::fsils_dot_s(mynNo, lhs.commu, a_const, a_weak));
+    set_gram(2, 0, gram[2]);
+    set_gram(2, 1, gram[5]);
+    set_gram(2, 2, dot::fsils_dot_s(mynNo, lhs.commu, a_weak, a_weak));
+
+    std::vector<double> coeff(3, 0.0);
+    coeff[0] = dot::fsils_dot_s(mynNo, lhs.commu, a_solution, rhs_vec);
+    coeff[1] = dot::fsils_dot_s(mynNo, lhs.commu, a_const, rhs_vec);
+    coeff[2] = dot::fsils_dot_s(mynNo, lhs.commu, a_weak, rhs_vec);
+    if (!solve_dense_linear_system_local(gram, coeff, 1e-30)) {
+      return;
+    }
+
+    Vector<double> candidate_solution(nNo), candidate_image(nNo);
+    candidate_solution = 0.0;
+    candidate_image = 0.0;
+    omp_la::omp_sum_s(nNo, coeff[0], candidate_solution, solution_vec);
+    omp_la::omp_sum_s(nNo, coeff[1], candidate_solution, const_mode);
+    omp_la::omp_sum_s(nNo, coeff[2], candidate_solution, weak_mode_vec);
+    omp_la::omp_sum_s(nNo, coeff[0], candidate_image, a_solution);
+    omp_la::omp_sum_s(nNo, coeff[1], candidate_image, a_const);
+    omp_la::omp_sum_s(nNo, coeff[2], candidate_image, a_weak);
+
+    Vector<double> candidate_residual = rhs_vec;
+    omp_la::omp_axpby_s(nNo, candidate_residual, rhs_vec, -1.0, candidate_image);
+    const double residual_before = residual_norm;
+    const double candidate_residual_norm =
+        norm::fsi_ls_norms(mynNo, lhs.commu, candidate_residual);
+    const bool accept =
+        std::isfinite(candidate_residual_norm) &&
+        candidate_residual_norm + 1e-12 < residual_norm;
+    if (accept) {
+      solution_vec = candidate_solution;
+      residual_vec = candidate_residual;
+      residual_norm = candidate_residual_norm;
+    }
+
+    if (lhs.commu.masF &&
+        env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_CONSTANT_WEAK_SUBSPACE_ENRICH")) {
+      std::fprintf(stderr,
+                   "[BICGS_FACE_ONLY_CONST_WEAK_ENRICH] solver=%s residual_before=%e residual_after=%e accept=%d coeff0=%e coeff1=%e coeff2=%e g00=%e g11=%e g22=%e\n",
+                   solver_label,
+                   residual_before,
+                   candidate_residual_norm,
+                   accept ? 1 : 0,
+                   coeff[0],
+                   coeff[1],
+                   coeff[2],
+                   gram[0],
+                   gram[4],
+                   gram[8]);
+      std::fflush(stderr);
+    }
+  };
   {
     int global_active_coupled_faces = active_coupled_faces;
     collectives.allreduce_sum(active_coupled_faces, global_active_coupled_faces);
     active_coupled_faces = global_active_coupled_faces;
   }
+  const bool trace_face_only_legacy = env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_LEGACY_SCHUR");
+  const bool emit_face_only_legacy_trace = lhs.commu.masF && trace_face_only_legacy;
   const bool use_multi_face_gmres =
       collectives.distributed() &&
       active_coupled_faces > 1 &&
       (std::getenv("SVMP_FSILS_DISABLE_MULTI_FACE_LEGACY_GMRES") == nullptr);
+  const bool gmres_mean_free_krylov =
+      collectives.distributed() &&
+      active_coupled_faces > 1 &&
+      face_only_gmres_mean_free_krylov_enabled();
+  const bool gmres_reorthog =
+      collectives.distributed() &&
+      active_coupled_faces > 1 &&
+      face_only_gmres_reorthog_enabled();
+  bool trace_face_only_iter_history = false;
+  if (env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_ITER_HISTORY")) {
+    static bool emitted_face_only_iter_history = false;
+    static int face_only_iter_history_solve_counter = 0;
+    const int requested_solve_index =
+        std::max(0, parse_int_env("SVMP_FSILS_TRACE_FACE_ONLY_ITER_HISTORY_SOLVE_INDEX", 0));
+    if (!emitted_face_only_iter_history &&
+        face_only_iter_history_solve_counter == requested_solve_index) {
+      trace_face_only_iter_history = true;
+      emitted_face_only_iter_history = true;
+    }
+    ++face_only_iter_history_solve_counter;
+  }
+
+  static bool emitted_face_only_schur_low_rank = false;
+  if (!emitted_face_only_schur_low_rank &&
+      env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_SCHUR_LOW_RANK") &&
+      active_coupled_faces > 0) {
+    emitted_face_only_schur_low_rank = true;
+    std::vector<int> active_face_ids;
+    active_face_ids.reserve(lhs.face.size());
+    for (int fi = 0; fi < static_cast<int>(lhs.face.size()); ++fi) {
+      const auto& face = lhs.face[static_cast<std::size_t>(fi)];
+      if (face.coupledFlag && std::abs(face.res) > 1e-30) {
+        active_face_ids.push_back(fi);
+      }
+    }
+    const int rank = static_cast<int>(active_face_ids.size());
+    std::vector<double> dense_m(static_cast<std::size_t>(rank) * static_cast<std::size_t>(rank), 0.0);
+    Vector<double> probe_seed(nNo);
+    Array<double> probe_gp(nsd, nNo);
+    Vector<double> probe_sp(nNo);
+    const fe_fsi_linear_solver::HaloExchange halo(lhs);
+
+    for (int row = 0; row < rank; ++row) {
+      probe_seed = 0.0;
+      const auto& seed_face = lhs.face[static_cast<std::size_t>(active_face_ids[static_cast<std::size_t>(row)])];
+      for (int a = 0; a < seed_face.nNo; ++a) {
+        const fsils_int node = seed_face.glob(a);
+        if (node >= 0 && node < nNo) {
+          probe_seed(node) = 1.0;
+        }
+      }
+      if (halo.has_overlap() && !skip_post_solve_overlap_sum()) {
+        halo.sync_scalar(probe_seed);
+      }
+
+      GL.apply(
+          dso::ghost_synced_input(probe_seed),
+          dso::ghost_synced_output(nsd, probe_gp),
+          dso::ghost_synced_output(probe_sp));
+      add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, nsd, probe_gp, probe_gp);
+
+      std::vector<double> face_dot_local(static_cast<std::size_t>(rank), 0.0);
+      std::vector<double> face_dot_global(static_cast<std::size_t>(rank), 0.0);
+      for (int col = 0; col < rank; ++col) {
+        const auto& face = lhs.face[static_cast<std::size_t>(active_face_ids[static_cast<std::size_t>(col)])];
+        const int face_dof = std::min(face.dof, nsd);
+        double accum = 0.0;
+        for (int a = 0; a < face.nNo; ++a) {
+          const fsils_int node = face.glob(a);
+          if (node < 0 || node >= nNo) {
+            continue;
+          }
+          for (int comp = 0; comp < face_dof; ++comp) {
+            accum += face.valM(comp, a) * probe_gp(comp, node);
+          }
+        }
+        face_dot_local[static_cast<std::size_t>(col)] = accum;
+      }
+      collectives.allreduce_sum(face_dot_local.data(), face_dot_global.data(), rank);
+      for (int col = 0; col < rank; ++col) {
+        dense_m[static_cast<std::size_t>(row) * static_cast<std::size_t>(rank) +
+                static_cast<std::size_t>(col)] =
+            face_dot_global[static_cast<std::size_t>(col)];
+      }
+    }
+
+    if (lhs.commu.masF) {
+      std::fprintf(stderr,
+                   "[BICGS_FACE_ONLY_LR] rank=%d active_faces=%d distributed=%d kind=pre_gp_face_seed_response\n",
+                   rank,
+                   active_coupled_faces,
+                   collectives.distributed() ? 1 : 0);
+      for (int i = 0; i < rank; ++i) {
+        std::fprintf(stderr,
+                     "[BICGS_FACE_ONLY_LR] row=%d face_id=%d",
+                     i,
+                     active_face_ids[static_cast<std::size_t>(i)]);
+        for (int j = 0; j < rank; ++j) {
+          std::fprintf(stderr,
+                       " dense_m[%d,%d]=%.17e",
+                       i,
+                       j,
+                       dense_m[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+                               static_cast<std::size_t>(j)]);
+        }
+        std::fprintf(stderr, "\n");
+      }
+      std::fflush(stderr);
+    }
+  }
+
+  auto trace_face_response = [&](const char* phase,
+                                 const Vector<double>& schur_vec,
+                                 double rhs_norm_value,
+                                 double eps_value) {
+    if (!trace_face_only_legacy) {
+      return;
+    }
+
+    const int face_slots = static_cast<int>(lhs.face.size());
+    if (face_slots <= 0) {
+      return;
+    }
+
+    Vector<double> trace_in = schur_vec;
+    const fe_fsi_linear_solver::HaloExchange halo(lhs);
+    if (halo.has_overlap() && !skip_post_solve_overlap_sum()) {
+      halo.sync_scalar(trace_in);
+    }
+
+    GL.apply(
+        dso::ghost_synced_input(trace_in),
+        dso::ghost_synced_output(nsd, GP),
+        dso::ghost_synced_output(SP));
+
+    std::vector<double> face_dot_local(static_cast<std::size_t>(face_slots), 0.0);
+    std::vector<double> face_dot_global(static_cast<std::size_t>(face_slots), 0.0);
+    std::vector<int> face_nodes_local(static_cast<std::size_t>(face_slots), 0);
+    std::vector<int> face_nodes_global(static_cast<std::size_t>(face_slots), 0);
+    std::vector<int> active_face_ids;
+    active_face_ids.reserve(static_cast<std::size_t>(active_coupled_faces));
+
+    for (int fi = 0; fi < face_slots; ++fi) {
+      const auto& face = lhs.face[static_cast<std::size_t>(fi)];
+      if (!face.coupledFlag || std::abs(face.res) <= 1e-30) {
+        continue;
+      }
+
+      active_face_ids.push_back(fi);
+      face_nodes_local[static_cast<std::size_t>(fi)] = face.nNo;
+      const int face_dof = std::min(face.dof, nsd);
+      double accum = 0.0;
+      for (int a = 0; a < face.nNo; ++a) {
+        const fsils_int node = face.glob(a);
+        if (node < 0 || node >= nNo) {
+          continue;
+        }
+        for (int comp = 0; comp < face_dof; ++comp) {
+          accum += face.valM(comp, a) * GP(comp, node);
+        }
+      }
+      face_dot_local[static_cast<std::size_t>(fi)] = accum;
+    }
+
+    collectives.allreduce_sum(face_dot_local.data(), face_dot_global.data(), face_slots);
+    collectives.allreduce_sum(face_nodes_local.data(), face_nodes_global.data(), face_slots);
+
+    const double x_norm = norm::fsi_ls_norms(mynNo, lhs.commu, trace_in);
+    const double sp_norm = norm::fsi_ls_norms(mynNo, lhs.commu, SP);
+    const double gp_norm = norm::fsi_ls_normv(nsd, mynNo, lhs.commu, GP);
+
+    if (emit_face_only_legacy_trace) {
+      std::fprintf(stderr,
+                   "[BICGS_FACE_ONLY] phase=%s distributed=%d active_faces=%d multi_face_gmres=%d rhs_norm=%e eps=%e x_norm=%e sp_norm=%e gp_norm=%e\n",
+                   phase,
+                   collectives.distributed() ? 1 : 0,
+                   active_coupled_faces,
+                   use_multi_face_gmres ? 1 : 0,
+                   rhs_norm_value,
+                   eps_value,
+                   x_norm,
+                   sp_norm,
+                   gp_norm);
+      for (const int fi : active_face_ids) {
+        const auto& face = lhs.face[static_cast<std::size_t>(fi)];
+        std::fprintf(stderr,
+                     "[BICGS_FACE_ONLY]   face[%d] global_nodes=%d res=%e gp_face_dot=%e\n",
+                     fi,
+                     face_nodes_global[static_cast<std::size_t>(fi)],
+                     face.res,
+                     face_dot_global[static_cast<std::size_t>(fi)]);
+      }
+      std::fflush(stderr);
+    }
+  };
+
+  auto trace_residual_coarse_modes = [&](const char* phase,
+                                         const Vector<double>& residual_vec,
+                                         const Vector<double>& solution_vec) {
+    static bool emitted_face_only_coarse_residual = false;
+    if (emitted_face_only_coarse_residual ||
+        !env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_COARSE_RESIDUAL")) {
+      return;
+    }
+    emitted_face_only_coarse_residual = true;
+
+    const double residual_norm = norm::fsi_ls_norms(mynNo, lhs.commu, residual_vec);
+    if (!(residual_norm > 0.0)) {
+      return;
+    }
+
+    auto analyze_mode = [&](const char* label, Vector<double>& mode_vec) {
+      const double mode_norm = norm::fsi_ls_norms(mynNo, lhs.commu, mode_vec);
+      if (!(mode_norm > 0.0)) {
+        return;
+      }
+
+      Vector<double> ag(nNo);
+      apply_schur_operator(mode_vec, ag);
+      const double ag_norm = norm::fsi_ls_norms(mynNo, lhs.commu, ag);
+      const double ag_norm_sq = ag_norm * ag_norm;
+      if (!(ag_norm_sq > std::numeric_limits<double>::epsilon())) {
+        return;
+      }
+
+      const double numer = dot::fsils_dot_s(mynNo, lhs.commu, ag, residual_vec);
+      const double alpha = numer / ag_norm_sq;
+      const double reduced_sq =
+          std::max(0.0, residual_norm * residual_norm - (numer * numer) / ag_norm_sq);
+      const double reduced_norm = std::sqrt(reduced_sq);
+      const double solution_dot = dot::fsils_dot_s(mynNo, lhs.commu, mode_vec, solution_vec);
+
+      if (lhs.commu.masF) {
+        std::fprintf(stderr,
+                     "[BICGS_FACE_ONLY_COARSE] phase=%s label=%s residual_before=%e residual_after=%e "
+                     "alpha=%e mode_norm=%e ag_norm=%e mode_dot_solution=%e distributed=%d\n",
+                     phase,
+                     label,
+                     residual_norm,
+                     reduced_norm,
+                     alpha,
+                     mode_norm,
+                     ag_norm,
+                     solution_dot,
+                     collectives.distributed() ? 1 : 0);
+      }
+    };
+
+    Vector<double> global_mean_mode(nNo);
+    global_mean_mode = 0.0;
+    for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+      global_mean_mode(node) = 1.0;
+    }
+    analyze_mode("global_mean", global_mean_mode);
+
+    if (lhs.commu.nTasks > 1) {
+      std::vector<double> owned_counts(static_cast<std::size_t>(lhs.commu.nTasks), 0.0);
+      const double local_owned = static_cast<double>(lhs.mynNo);
+      MPI_Allgather(&local_owned,
+                    1,
+                    cm_mod::mpreal,
+                    owned_counts.data(),
+                    1,
+                    cm_mod::mpreal,
+                    lhs.commu.comm);
+
+      std::vector<int> active_ranks;
+      active_ranks.reserve(static_cast<std::size_t>(lhs.commu.nTasks));
+      for (int rank = 0; rank < lhs.commu.nTasks; ++rank) {
+        if (owned_counts[static_cast<std::size_t>(rank)] > 0.5) {
+          active_ranks.push_back(rank);
+        }
+      }
+
+      if (active_ranks.size() >= 2u) {
+        const int reference_rank = active_ranks.back();
+        const int probe_rank = active_ranks.front();
+        const double reference_count = owned_counts[static_cast<std::size_t>(reference_rank)];
+        if (reference_count > 0.5 && reference_rank != probe_rank) {
+          Vector<double> partition_mode(nNo);
+          partition_mode = 0.0;
+          if (lhs.commu.task == probe_rank) {
+            for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+              partition_mode(node) = 1.0;
+            }
+          } else if (lhs.commu.task == reference_rank) {
+            const double weight =
+                -owned_counts[static_cast<std::size_t>(probe_rank)] / reference_count;
+            for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+              partition_mode(node) = weight;
+            }
+          }
+          analyze_mode("constraint_partition", partition_mode);
+        }
+
+        std::vector<int> coarse_ranks;
+        coarse_ranks.reserve(active_ranks.size());
+        for (const int coarse_rank : active_ranks) {
+          if (coarse_rank != reference_rank) {
+            coarse_ranks.push_back(coarse_rank);
+          }
+        }
+
+        const int coarse_dim = static_cast<int>(coarse_ranks.size());
+        if (reference_count > 0.5 && coarse_dim >= 2) {
+          std::vector<Vector<double>> coarse_modes(static_cast<std::size_t>(coarse_dim),
+                                                   Vector<double>(nNo));
+          std::vector<Vector<double>> coarse_images(static_cast<std::size_t>(coarse_dim),
+                                                    Vector<double>(nNo));
+          std::vector<double> gram(static_cast<std::size_t>(coarse_dim) *
+                                       static_cast<std::size_t>(coarse_dim),
+                                   0.0);
+          std::vector<double> rhs(static_cast<std::size_t>(coarse_dim), 0.0);
+
+          for (int i = 0; i < coarse_dim; ++i) {
+            auto& mode = coarse_modes[static_cast<std::size_t>(i)];
+            mode = 0.0;
+            const int coarse_rank = coarse_ranks[static_cast<std::size_t>(i)];
+            if (lhs.commu.task == coarse_rank) {
+              for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+                mode(node) = 1.0;
+              }
+            } else if (lhs.commu.task == reference_rank) {
+              const double weight =
+                  -owned_counts[static_cast<std::size_t>(coarse_rank)] / reference_count;
+              for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+                mode(node) = weight;
+              }
+            }
+
+            auto& image = coarse_images[static_cast<std::size_t>(i)];
+            apply_schur_operator(mode, image);
+            rhs[static_cast<std::size_t>(i)] =
+                dot::fsils_dot_s(mynNo, lhs.commu, image, residual_vec);
+          }
+
+          for (int i = 0; i < coarse_dim; ++i) {
+            for (int j = 0; j < coarse_dim; ++j) {
+              gram[static_cast<std::size_t>(i) * static_cast<std::size_t>(coarse_dim) +
+                   static_cast<std::size_t>(j)] =
+                  dot::fsils_dot_s(mynNo,
+                                   lhs.commu,
+                                   coarse_images[static_cast<std::size_t>(i)],
+                                   coarse_images[static_cast<std::size_t>(j)]);
+            }
+          }
+
+          std::vector<double> gram_inv(gram.size(), 0.0);
+          if (invert_dense_block(coarse_dim, gram.data(), gram_inv.data())) {
+            std::vector<double> coeff(static_cast<std::size_t>(coarse_dim), 0.0);
+            for (int i = 0; i < coarse_dim; ++i) {
+              double accum = 0.0;
+              for (int j = 0; j < coarse_dim; ++j) {
+                accum += gram_inv[static_cast<std::size_t>(i) *
+                                      static_cast<std::size_t>(coarse_dim) +
+                                  static_cast<std::size_t>(j)] *
+                         rhs[static_cast<std::size_t>(j)];
+              }
+              coeff[static_cast<std::size_t>(i)] = accum;
+            }
+
+            Vector<double> corrected = residual_vec;
+            for (int i = 0; i < coarse_dim; ++i) {
+              omp_la::omp_axpby_s(nNo,
+                                  corrected,
+                                  corrected,
+                                  -coeff[static_cast<std::size_t>(i)],
+                                  coarse_images[static_cast<std::size_t>(i)]);
+            }
+            const double corrected_norm = norm::fsi_ls_norms(mynNo, lhs.commu, corrected);
+            double coeff_norm_sq = 0.0;
+            for (const double value : coeff) {
+              coeff_norm_sq += value * value;
+            }
+            if (lhs.commu.masF) {
+              std::fprintf(stderr,
+                           "[BICGS_FACE_ONLY_COARSE] phase=%s label=constraint_partition_subspace "
+                           "residual_before=%e residual_after=%e dim=%d coeff_norm=%e distributed=%d\n",
+                           phase,
+                           residual_norm,
+                           corrected_norm,
+                           coarse_dim,
+                           std::sqrt(std::max(0.0, coeff_norm_sq)),
+                           collectives.distributed() ? 1 : 0);
+            }
+          } else if (lhs.commu.masF) {
+            std::fprintf(stderr,
+                         "[BICGS_FACE_ONLY_COARSE] phase=%s label=constraint_partition_subspace "
+                         "gram_inversion_failed=1 dim=%d distributed=%d\n",
+                         phase,
+                         coarse_dim,
+                         collectives.distributed() ? 1 : 0);
+          }
+        }
+      }
+    }
+
+    if (lhs.commu.masF) {
+      std::fflush(stderr);
+    }
+  };
+
+  auto trace_iteration_history = [&](const char* solver_label,
+                                     const char* phase,
+                                     int iteration,
+                                     double residual_value,
+                                     double reference_norm,
+                                     const char* residual_kind) {
+    if (!trace_face_only_iter_history || !lhs.commu.masF) {
+      return;
+    }
+    std::fprintf(stderr,
+                 "[BICGS_FACE_ONLY_ITERS] solver=%s phase=%s iter=%d residual=%e "
+                 "reference=%e kind=%s distributed=%d multi_face_gmres=%d active_faces=%d\n",
+                 solver_label,
+                 phase,
+                 iteration,
+                 residual_value,
+                 reference_norm,
+                 residual_kind,
+                 collectives.distributed() ? 1 : 0,
+                 use_multi_face_gmres ? 1 : 0,
+                 active_coupled_faces);
+    std::fflush(stderr);
+  };
+
+  static bool emitted_schur_operator_probe = false;
+  if (!emitted_schur_operator_probe && env_enabled("SVMP_FSILS_TRACE_SCHUR_OPERATOR_PROBE")) {
+    emitted_schur_operator_probe = true;
+    const fe_fsi_linear_solver::HaloExchange probe_halo(lhs);
+    Vector<double> probe_in = R;
+    Vector<double> probe_in_sync(nNo);
+    const Vector<double>* op_in = &probe_in;
+    if (probe_halo.has_overlap() && !skip_post_solve_overlap_sum()) {
+      probe_in_sync = probe_in;
+      probe_halo.sync_scalar(probe_in_sync);
+      op_in = &probe_in_sync;
+    }
+
+    Array<double> probe_gp(nsd, nNo);
+    Array<double> probe_gp_pre(nsd, nNo);
+    Vector<double> probe_sp(nNo);
+    Vector<double> probe_dgp(nNo);
+    Vector<double> probe_out(nNo);
+
+    GL.apply(
+        dso::ghost_synced_input(*op_in),
+        dso::ghost_synced_output(nsd, probe_gp),
+        dso::ghost_synced_output(probe_sp));
+    probe_gp_pre = probe_gp;
+    add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, nsd, probe_gp, probe_gp);
+    if (probe_halo.has_overlap() && !skip_post_solve_overlap_sum()) {
+      probe_halo.sync_vector(nsd, probe_gp);
+    }
+    D.apply(
+        dso::ghost_synced_input(nsd, probe_gp),
+        dso::ghost_synced_output(probe_dgp));
+    #pragma omp parallel for schedule(static)
+    for (fsils_int i = 0; i < nNo; ++i) {
+      probe_out(i) = M_inv(i) * (probe_sp(i) - probe_dgp(i));
+    }
+    probe_halo.sync_scalar(probe_out, skip_post_solve_overlap_sum());
+
+    const auto in_stats = compute_scalar_stats(probe_in);
+    const auto sp_stats = compute_scalar_stats(probe_sp);
+    const auto dgp_stats = compute_scalar_stats(probe_dgp);
+    const auto out_stats = compute_scalar_stats(probe_out);
+    const auto gp_pre_stats = compute_vector_stats(probe_gp_pre);
+    const auto gp_post_stats = compute_vector_stats(probe_gp);
+
+    if (lhs.commu.masF) {
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_PROBE] distributed=%d active_faces=%d use_multi_face_gmres=%d\n",
+                   collectives.distributed() ? 1 : 0,
+                   active_coupled_faces,
+                   use_multi_face_gmres ? 1 : 0);
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_PROBE] input l2=%e mean=%e min=%e max=%e\n",
+                   in_stats.l2,
+                   in_stats.mean,
+                   in_stats.min,
+                   in_stats.max);
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_PROBE] GL_sp l2=%e mean=%e min=%e max=%e\n",
+                   sp_stats.l2,
+                   sp_stats.mean,
+                   sp_stats.min,
+                   sp_stats.max);
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_PROBE] GL_gp_pre_bc l2=%e max_abs=%e\n",
+                   gp_pre_stats.l2,
+                   gp_pre_stats.max_abs);
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_PROBE] GL_gp_post_bc l2=%e max_abs=%e\n",
+                   gp_post_stats.l2,
+                   gp_post_stats.max_abs);
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_PROBE] D_gp l2=%e mean=%e min=%e max=%e\n",
+                   dgp_stats.l2,
+                   dgp_stats.mean,
+                   dgp_stats.min,
+                   dgp_stats.max);
+      std::fprintf(stderr,
+                   "[BICGS_SCHUR_PROBE] output l2=%e mean=%e min=%e max=%e\n",
+                   out_stats.l2,
+                   out_stats.mean,
+                   out_stats.min,
+                   out_stats.max);
+      std::fflush(stderr);
+    }
+  }
+
+  struct ScalarFaceOnlySolveResult {
+    Vector<double> solution;
+    Vector<double> residual;
+    double residual_norm = 0.0;
+    int iterations = 0;
+    bool success = false;
+  };
+
+  auto run_face_only_bicgstab = [&](const Vector<double>& rhs_vec,
+                                    bool use_rhs_initial_guess,
+                                    int max_iterations) {
+    ScalarFaceOnlySolveResult result{Vector<double>(nNo), Vector<double>(nNo)};
+    Vector<double> p_local(nNo), rh_local(nNo), x_local(nNo), v_local(nNo), s_local(nNo),
+        t_local(nNo), r_local(nNo);
+
+    const double rhs_norm_local = norm::fsi_ls_norms(mynNo, lhs.commu, rhs_vec);
+    const double eps_local = std::max(ls.absTol, ls.relTol * rhs_norm_local);
+
+    if (use_rhs_initial_guess) {
+      x_local = rhs_vec;
+      project_solution_mean(x_local);
+      apply_schur_operator(x_local, r_local);
+      omp_la::omp_axpby_s(nNo, r_local, rhs_vec, -1.0, r_local);
+    } else {
+      x_local = 0.0;
+      r_local = rhs_vec;
+    }
+
+    double err_local = norm::fsi_ls_norms(mynNo, lhs.commu, r_local);
+    if (err_local <= eps_local || rhs_norm_local <= ls.absTol) {
+      result.solution = x_local;
+      result.residual = r_local;
+      result.residual_norm = err_local;
+      result.iterations = 0;
+      result.success = true;
+      return result;
+    }
+
+    double rho_local = dot::fsils_dot_s(mynNo, lhs.commu, r_local, r_local);
+    double beta_local = rho_local;
+    p_local = r_local;
+    rh_local = r_local;
+    int i_itr_local = 1;
+    bool success_local = false;
+
+    for (int i = 0; i < max_iterations; ++i) {
+      if (err_local < eps_local) {
+        success_local = true;
+        break;
+      }
+
+      apply_schur_operator(p_local, v_local);
+
+      const double denom_alpha = dot::fsils_dot_s(mynNo, lhs.commu, rh_local, v_local);
+      if (std::abs(denom_alpha) <
+          std::numeric_limits<double>::epsilon() *
+              (std::abs(rho_local) + std::numeric_limits<double>::epsilon())) {
+        break;
+      }
+      const double alpha = rho_local / denom_alpha;
+
+      omp_la::omp_axpby_s(nNo, s_local, r_local, -alpha, v_local);
+      apply_schur_operator(s_local, t_local);
+
+      double schur_locals[3] = {
+          norm::fsi_ls_norm_sq_local_s(mynNo, s_local),
+          dot::fsils_nc_dot_s(mynNo, t_local, t_local),
+          dot::fsils_nc_dot_s(mynNo, t_local, s_local),
+      };
+      double schur_globals[3] = {schur_locals[0], schur_locals[1], schur_locals[2]};
+      collectives.allreduce_sum(schur_locals, schur_globals, 3);
+      const double s_sq = schur_globals[0];
+      if (std::sqrt(s_sq) < std::numeric_limits<double>::epsilon() * std::max(rhs_norm_local, 1.0)) {
+        omp_la::omp_axpby_s(nNo, x_local, x_local, alpha, p_local);
+        project_solution_mean(x_local);
+        r_local = s_local;
+        err_local = std::sqrt(std::max(0.0, s_sq));
+        success_local = true;
+        ++i_itr_local;
+        break;
+      }
+
+      const double t_sq = schur_globals[1];
+      if (std::sqrt(t_sq) < std::numeric_limits<double>::epsilon() * std::max(rhs_norm_local, 1.0)) {
+        omp_la::omp_axpbypgz_s(nNo, x_local, x_local, alpha, p_local, 0.0, s_local);
+        project_solution_mean(x_local);
+        r_local = s_local;
+        err_local = std::sqrt(std::max(0.0, s_sq));
+        success_local = (err_local < eps_local);
+        ++i_itr_local;
+        break;
+      }
+
+      const double omega = schur_globals[2] / t_sq;
+      omp_la::omp_axpbypgz_s(nNo, x_local, x_local, alpha, p_local, omega, s_local);
+      project_solution_mean(x_local);
+      omp_la::omp_axpby_s(nNo, r_local, s_local, -omega, t_local);
+
+      double update_locals[2] = {
+          norm::fsi_ls_norm_sq_local_s(mynNo, r_local),
+          dot::fsils_nc_dot_s(mynNo, r_local, rh_local),
+      };
+      double update_globals[2] = {update_locals[0], update_locals[1]};
+      collectives.allreduce_sum(update_locals, update_globals, 2);
+      err_local = std::sqrt(std::max(0.0, update_globals[0]));
+
+      const double rho_prev = rho_local;
+      rho_local = update_globals[1];
+      const double denom_beta = rho_prev * omega;
+      if (std::abs(denom_beta) <
+          std::numeric_limits<double>::epsilon() *
+              (std::abs(rho_local) + std::numeric_limits<double>::epsilon())) {
+        break;
+      }
+      beta_local = rho_local * alpha / denom_beta;
+
+      omp_la::omp_sum_s(nNo, -omega, p_local, v_local);
+      omp_la::omp_axpby_s(nNo, p_local, r_local, beta_local, p_local);
+      ++i_itr_local;
+    }
+
+    result.solution = x_local;
+    result.residual = r_local;
+    result.residual_norm = err_local;
+    result.iterations = std::max(0, i_itr_local - 1);
+    result.success = success_local || (err_local < eps_local);
+    return result;
+  };
+
+  auto trace_branch_compare = [&](const char* primary_label,
+                                  const Vector<double>& rhs_vec,
+                                  const Vector<double>& primary_solution,
+                                  const Vector<double>& primary_residual,
+                                  double primary_residual_norm,
+                                  int primary_iterations) {
+    static bool emitted_face_only_branch_compare = false;
+    if (emitted_face_only_branch_compare ||
+        !env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_BRANCH_COMPARE") ||
+        !collectives.distributed() ||
+        active_coupled_faces <= 1) {
+      return;
+    }
+    emitted_face_only_branch_compare = true;
+
+    const bool use_rhs_initial_guess =
+        env_enabled("SVMP_FSILS_BLOCKSCHUR_SCHUR_INIT_PRECOND_RHS");
+    const int compare_max_iterations =
+        std::max(1, std::min(ls.mItr,
+                             parse_int_env("SVMP_FSILS_TRACE_FACE_ONLY_BRANCH_COMPARE_MAX_ITERS",
+                                           40)));
+    const auto alternate =
+        run_face_only_bicgstab(rhs_vec, use_rhs_initial_guess, compare_max_iterations);
+
+    Vector<double> solution_diff(nNo), residual_diff(nNo);
+    solution_diff = primary_solution;
+    residual_diff = primary_residual;
+    omp_la::omp_axpby_s(nNo, solution_diff, primary_solution, -1.0, alternate.solution);
+    omp_la::omp_axpby_s(nNo, residual_diff, primary_residual, -1.0, alternate.residual);
+
+    const double primary_solution_norm =
+        norm::fsi_ls_norms(mynNo, lhs.commu, primary_solution);
+    const double alternate_solution_norm =
+        norm::fsi_ls_norms(mynNo, lhs.commu, alternate.solution);
+    const double solution_diff_norm =
+        norm::fsi_ls_norms(mynNo, lhs.commu, solution_diff);
+    const double residual_diff_norm =
+        norm::fsi_ls_norms(mynNo, lhs.commu, residual_diff);
+
+    double best_fit_scale = 0.0;
+    const double alternate_solution_norm_sq =
+        dot::fsils_dot_s(mynNo, lhs.commu, alternate.solution, alternate.solution);
+    if (alternate_solution_norm_sq > std::numeric_limits<double>::epsilon()) {
+      best_fit_scale =
+          dot::fsils_dot_s(mynNo, lhs.commu, primary_solution, alternate.solution) /
+          alternate_solution_norm_sq;
+    }
+
+    if (lhs.commu.masF) {
+      std::fprintf(stderr,
+                   "[BICGS_FACE_ONLY_BRANCH] primary=%s alternate=bicgstab rhs_norm=%e "
+                   "primary_residual=%e alternate_residual=%e primary_iterations=%d "
+                   "alternate_iterations=%d alternate_max_iterations=%d primary_success=%d alternate_success=%d "
+                   "primary_solution_norm=%e alternate_solution_norm=%e solution_diff_norm=%e "
+                   "residual_diff_norm=%e best_fit_scale=%e distributed=%d\n",
+                   primary_label,
+                   norm::fsi_ls_norms(mynNo, lhs.commu, rhs_vec),
+                   primary_residual_norm,
+                   alternate.residual_norm,
+                   primary_iterations,
+                   alternate.iterations,
+                   compare_max_iterations,
+                   ls.suc ? 1 : 0,
+                   alternate.success ? 1 : 0,
+                   primary_solution_norm,
+                   alternate_solution_norm,
+                   solution_diff_norm,
+                   residual_diff_norm,
+                   best_fit_scale,
+                   collectives.distributed() ? 1 : 0);
+      std::fflush(stderr);
+    }
+  };
+
+  if (trace_face_only_legacy) {
+    trace_face_response("rhs", R, err_initial, eps);
+  }
+  trace_iteration_history(use_multi_face_gmres ? "gmres" : "bicgstab",
+                          "initial",
+                          0,
+                          err_initial,
+                          err_initial,
+                          "true");
+  trace_oracle_mode_fit(rhs_reference);
 
   if (use_multi_face_gmres) {
+    const int restart_dim_override = face_only_gmres_restart_dim_override();
     const int restart_dim =
-        std::max(1, std::min((ls.sD > 0 ? ls.sD : ls.mItr), ls.mItr));
+        (restart_dim_override > 0)
+            ? std::max(1, std::min(restart_dim_override, ls.mItr))
+            : std::max(1, std::min((ls.sD > 0 ? ls.sD : ls.mItr), ls.mItr));
     ls.ws.ensure_gmres_s(nNo, restart_dim);
     auto& h = ls.ws.h;
     auto& u = ls.ws.u2;
@@ -3017,14 +5936,135 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
     auto& errv = ls.ws.err;
 
     Vector<double> residual(nNo), ax(nNo);
+    Vector<double> weak_mode(nNo), weak_mode_image(nNo);
+    Vector<double> reduced_weak_mode(nNo);
+    Vector<double> constant_mode(nNo);
+    bool have_weak_mode = false;
+    bool have_reduced_weak_mode = false;
+    bool reduced_weak_mode_penalty = false;
+    double reduced_weak_mode_penalty_frac = 0.0;
+    bool reduced_weak_mode_gain_enabled = false;
+    double reduced_weak_mode_gain = 0.0;
+    bool weak_mode_post_project =
+        collectives.distributed() &&
+        face_only_weak_mode_postproject_enabled();
+    if (weak_mode_post_project) {
+      static int weak_mode_post_project_solve_counter = 0;
+      const int requested_solve_index =
+          face_only_weak_mode_postproject_solve_index();
+      if (requested_solve_index >= 0) {
+        weak_mode_post_project =
+            (weak_mode_post_project_solve_counter == requested_solve_index);
+      }
+      ++weak_mode_post_project_solve_counter;
+    }
+    bool reduced_weak_mode_post_project =
+        collectives.distributed() &&
+        face_only_reduced_weak_mode_postproject_enabled();
+    if (reduced_weak_mode_post_project) {
+      static int reduced_weak_mode_post_project_solve_counter = 0;
+      const int requested_solve_index =
+          face_only_reduced_weak_mode_postproject_solve_index();
+      if (requested_solve_index >= 0) {
+        reduced_weak_mode_post_project =
+            (reduced_weak_mode_post_project_solve_counter ==
+             requested_solve_index);
+      }
+      ++reduced_weak_mode_post_project_solve_counter;
+    }
+    reduced_weak_mode_penalty_frac =
+        face_only_reduced_weak_mode_penalty_fraction();
+    reduced_weak_mode_penalty =
+        collectives.distributed() &&
+        reduced_weak_mode_penalty_frac > 0.0;
+    if (reduced_weak_mode_penalty) {
+      static int reduced_weak_mode_penalty_solve_counter = 0;
+      const int requested_solve_index =
+          face_only_reduced_weak_mode_penalty_solve_index();
+      if (requested_solve_index >= 0) {
+        reduced_weak_mode_penalty =
+            (reduced_weak_mode_penalty_solve_counter == requested_solve_index);
+      }
+      ++reduced_weak_mode_penalty_solve_counter;
+    }
+    reduced_weak_mode_gain = face_only_reduced_weak_mode_gain();
+    reduced_weak_mode_gain_enabled =
+        collectives.distributed() &&
+        std::abs(reduced_weak_mode_gain) > 0.0;
+    if (reduced_weak_mode_gain_enabled) {
+      static int reduced_weak_mode_gain_solve_counter = 0;
+      const int requested_solve_index =
+          face_only_reduced_weak_mode_gain_solve_index();
+      if (requested_solve_index >= 0) {
+        reduced_weak_mode_gain_enabled =
+            (reduced_weak_mode_gain_solve_counter == requested_solve_index);
+      }
+      ++reduced_weak_mode_gain_solve_counter;
+    }
+    const bool need_reduced_weak_mode_vector =
+        reduced_weak_mode_post_project ||
+        reduced_weak_mode_gain_enabled ||
+        constant_weak_subspace_enrich;
+    bool emitted_basis_trace = false;
+    bool emitted_broad_span_trace = false;
+    constant_mode = 0.0;
+    Vector<double> inv_minv_mode(nNo);
+    inv_minv_mode = 0.0;
+    for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+      constant_mode(node) = 1.0;
+      const double minv = M_inv(node);
+      inv_minv_mode(node) = (std::abs(minv) > 1e-30) ? (1.0 / minv) : 0.0;
+    }
+    const double constant_mode_norm =
+        norm::fsi_ls_norms(mynNo, lhs.commu, constant_mode);
+    const double minv_mode_norm =
+        norm::fsi_ls_norms(mynNo, lhs.commu, M_inv);
+    const double inv_minv_mode_norm =
+        norm::fsi_ls_norms(mynNo, lhs.commu, inv_minv_mode);
     ls.callD = fsils_cpu_t();
     ls.suc = false;
     ls.itr = 0;
-    Xg = 0.0;
+    const bool use_preconditioned_rhs_initial_guess =
+        env_enabled("SVMP_FSILS_BLOCKSCHUR_SCHUR_INIT_PRECOND_RHS");
+    if (use_preconditioned_rhs_initial_guess) {
+      Xg = R;
+      project_solution_mean(Xg);
+    } else {
+      Xg = 0.0;
+    }
+    if (constant_initial_guess && !use_preconditioned_rhs_initial_guess) {
+      Vector<double> const_mode(nNo), a_const(nNo), residual_const(nNo);
+      const_mode = 0.0;
+      for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+        const_mode(node) = 1.0;
+      }
+      apply_schur_operator(const_mode, a_const);
+      const double denom =
+          dot::fsils_dot_s(mynNo, lhs.commu, a_const, a_const);
+      if (denom > 1e-30) {
+        const double alpha =
+            dot::fsils_dot_s(mynNo, lhs.commu, a_const, R) / denom;
+        Xg = 0.0;
+        omp_la::omp_sum_s(nNo, alpha, Xg, const_mode);
+        omp_la::omp_axpby_s(nNo, residual_const, R, -alpha, a_const);
+        const double residual_with_alpha =
+            norm::fsi_ls_norms(mynNo, lhs.commu, residual_const);
+        if (lhs.commu.masF &&
+            env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_CONSTANT_INITIAL_GUESS")) {
+          std::fprintf(stderr,
+                       "[BICGS_FACE_ONLY_CONST_INIT] alpha=%e residual_norm=%e denom=%e\n",
+                       alpha,
+                       residual_with_alpha,
+                       denom);
+          std::fflush(stderr);
+        }
+      }
+    }
 
     const double rhs_norm = norm::fsi_ls_norms(mynNo, lhs.commu, R);
     ls.iNorm = rhs_norm;
     const double gmres_eps = std::max(ls.absTol, ls.relTol * rhs_norm);
+    trace_constant_mode_operator(R);
     int restart_cycles = 0;
     int total_itr = 0;
 
@@ -3047,7 +6087,12 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
 
       apply_schur_operator(Xg, ax);
       omp_la::omp_axpby_s(nNo, residual, R, -1.0, ax);
+      if (gmres_mean_free_krylov) {
+        subtract_owned_scalar_mean(lhs, residual);
+      }
+      project_solution_gauge2(residual);
       const double beta_gmres = norm::fsi_ls_norms(mynNo, lhs.commu, residual);
+      trace_iteration_history("gmres", "restart_begin", total_itr, beta_gmres, rhs_norm, "true");
       if (beta_gmres < gmres_eps) {
         ls.suc = true;
         ls.fNorm = beta_gmres;
@@ -3076,11 +6121,29 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
         auto ui = u.rcol(i);
         auto uip1 = u.rcol(i + 1);
         apply_schur_operator(ui, uip1);
+        if (gmres_mean_free_krylov) {
+          subtract_owned_scalar_mean(lhs, uip1);
+        }
+        project_solution_gauge2(uip1);
 
         for (int j = 0; j <= i; ++j) {
           h(j, i) = dot::fsils_dot_s(mynNo, lhs.commu, u.rcol(j), uip1);
           omp_la::omp_sum_s(nNo, -h(j, i), uip1, u.rcol(j));
         }
+
+        if (gmres_reorthog) {
+          for (int j = 0; j <= i; ++j) {
+            const double correction =
+                dot::fsils_dot_s(mynNo, lhs.commu, u.rcol(j), uip1);
+            h(j, i) += correction;
+            omp_la::omp_sum_s(nNo, -correction, uip1, u.rcol(j));
+          }
+        }
+
+        if (gmres_mean_free_krylov) {
+          subtract_owned_scalar_mean(lhs, uip1);
+        }
+        project_solution_gauge2(uip1);
 
         h(i + 1, i) = norm::fsi_ls_norms(mynNo, lhs.commu, uip1);
         const bool breakdown =
@@ -3090,6 +6153,53 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
           omp_la::omp_mul_s(nNo, 1.0 / h(i + 1, i), uip1);
         } else {
           h(i + 1, i) = 0.0;
+        }
+
+        if (!emitted_basis_trace &&
+            trace_face_only_weak_mode_enabled() &&
+            collectives.distributed() &&
+            active_coupled_faces > 1 &&
+            (total_itr + 1) == trace_face_only_basis_iter()) {
+          const auto basis_stats = compute_scalar_stats(uip1);
+          const double constant_ratio =
+              (basis_stats.l2 > 1e-30 && basis_stats.count > 0.0)
+                  ? (std::abs(basis_stats.mean) * std::sqrt(basis_stats.count) / basis_stats.l2)
+                  : 0.0;
+          if (lhs.commu.masF) {
+            std::fprintf(stderr,
+                         "[BICGS_FACE_ONLY_BASIS] iter=%d basis_l2=%e basis_mean=%e basis_centered_l2=%e constant_ratio=%e min=%e max=%e\n",
+                         total_itr + 1,
+                         basis_stats.l2,
+                         basis_stats.mean,
+                         basis_stats.centered_l2,
+                         constant_ratio,
+                         basis_stats.min,
+                         basis_stats.max);
+            std::fflush(stderr);
+          }
+          emitted_basis_trace = true;
+        }
+        if (trace_face_only_constant_span_enabled() &&
+            collectives.distributed() &&
+            active_coupled_faces > 1 &&
+            constant_mode_norm > 1e-30 &&
+            lhs.commu.masF) {
+          double proj_sq = 0.0;
+          for (int j = 0; j <= i + 1; ++j) {
+            const double coeff =
+                dot::fsils_dot_s(mynNo, lhs.commu, constant_mode, u.rcol(j));
+            proj_sq += coeff * coeff;
+          }
+          const double residual_sq =
+              std::max(0.0, constant_mode_norm * constant_mode_norm - proj_sq);
+          std::fprintf(stderr,
+                       "[BICGS_FACE_ONLY_CONST_SPAN] iter=%d span_dim=%d constant_norm=%e projected_norm=%e residual_ratio=%e\n",
+                       total_itr + 1,
+                       i + 2,
+                       constant_mode_norm,
+                       std::sqrt(std::max(0.0, proj_sq)),
+                       std::sqrt(residual_sq) / constant_mode_norm);
+          std::fflush(stderr);
         }
 
         for (int j = 0; j < i; ++j) {
@@ -3114,6 +6224,12 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
 
         ++total_itr;
         ls.itr = total_itr;
+        trace_iteration_history("gmres",
+                                "inner",
+                                total_itr,
+                                std::abs(errv(i + 1)),
+                                rhs_norm,
+                                "estimate");
 
         if (std::abs(errv(i + 1)) < gmres_eps || breakdown) {
           terminated_inner = true;
@@ -3125,17 +6241,354 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
         break;
       }
 
+      if (!emitted_broad_span_trace &&
+          trace_face_only_broad_span_enabled() &&
+          collectives.distributed() &&
+          active_coupled_faces > 1 &&
+          lhs.commu.masF) {
+        auto emit_mode_span = [&](const char* label,
+                                  const Vector<double>& mode,
+                                  double mode_norm) {
+          if (!(mode_norm > 1e-30)) {
+            return;
+          }
+          double proj_sq = 0.0;
+          for (int j = 0; j <= last_i; ++j) {
+            const double coeff =
+                dot::fsils_dot_s(mynNo, lhs.commu, mode, u.rcol(j));
+            proj_sq += coeff * coeff;
+          }
+          const double residual_sq =
+              std::max(0.0, mode_norm * mode_norm - proj_sq);
+          std::fprintf(stderr,
+                       "[BICGS_FACE_ONLY_BROAD_SPAN] mode=%s span_dim=%d mode_norm=%e projected_norm=%e residual_ratio=%e\n",
+                       label,
+                       last_i + 1,
+                       mode_norm,
+                       std::sqrt(std::max(0.0, proj_sq)),
+                       std::sqrt(residual_sq) / mode_norm);
+        };
+        emit_mode_span("constant", constant_mode, constant_mode_norm);
+        emit_mode_span("minv", M_inv, minv_mode_norm);
+        emit_mode_span("inv_minv", inv_minv_mode, inv_minv_mode_norm);
+        std::fflush(stderr);
+        emitted_broad_span_trace = true;
+      }
+
       for (int i = 0; i <= last_i; ++i) {
         y(i) = errv(i);
       }
-      for (int j = last_i; j >= 0; --j) {
-        for (int k = j + 1; k <= last_i; ++k) {
-          y(j) -= h(j, k) * y(k);
+      const double gmres_diag_floor_fraction = face_only_gmres_diag_floor_fraction();
+      const double gmres_tikhonov_fraction = face_only_gmres_tikhonov_fraction();
+      const double gmres_weak_coeff_shrink = face_only_gmres_weak_coeff_shrink();
+      double gmres_diag_floor = 0.0;
+      double gmres_tikhonov_lambda = 0.0;
+      double reduced_weak_mode_penalty_lambda = 0.0;
+      double max_abs_diag_pre_backsolve = 0.0;
+      for (int j = 0; j <= last_i; ++j) {
+        max_abs_diag_pre_backsolve =
+            std::max(max_abs_diag_pre_backsolve, std::abs(h(j, j)));
+      }
+      if (gmres_diag_floor_fraction > 0.0) {
+        gmres_diag_floor = gmres_diag_floor_fraction * max_abs_diag_pre_backsolve;
+      }
+      int weakest_diag_index_for_penalty = 0;
+      double weakest_abs_diag_for_penalty = std::numeric_limits<double>::infinity();
+      for (int j = 0; j <= last_i; ++j) {
+        const double abs_diag = std::abs(h(j, j));
+        if (abs_diag < weakest_abs_diag_for_penalty) {
+          weakest_abs_diag_for_penalty = abs_diag;
+          weakest_diag_index_for_penalty = j;
         }
-        if (std::abs(h(j, j)) > std::numeric_limits<double>::epsilon()) {
-          y(j) /= h(j, j);
-        } else {
-          y(j) = 0.0;
+      }
+      if ((gmres_tikhonov_fraction > 0.0 || reduced_weak_mode_penalty) &&
+          max_abs_diag_pre_backsolve > 0.0) {
+        gmres_tikhonov_lambda =
+            gmres_tikhonov_fraction * max_abs_diag_pre_backsolve;
+        const int m = last_i + 1;
+        std::vector<double> normal(static_cast<std::size_t>(m) *
+                                   static_cast<std::size_t>(m),
+                                   0.0);
+        std::vector<double> rhs_normal(static_cast<std::size_t>(m), 0.0);
+        auto normal_at = [&](int row, int col) -> double& {
+          return normal[static_cast<std::size_t>(row) * static_cast<std::size_t>(m) +
+                        static_cast<std::size_t>(col)];
+        };
+
+        for (int row = 0; row < m; ++row) {
+          for (int col = 0; col < m; ++col) {
+            double value = 0.0;
+            const int k_begin = std::max(row, col);
+            for (int k = k_begin; k < m; ++k) {
+              value += h(row, k) * h(col, k);
+            }
+            if (row == col) {
+              value += gmres_tikhonov_lambda * gmres_tikhonov_lambda;
+            }
+            normal_at(row, col) = value;
+          }
+          double rhs_value = 0.0;
+          for (int k = row; k < m; ++k) {
+            rhs_value += h(row, k) * errv(k);
+          }
+          rhs_normal[static_cast<std::size_t>(row)] = rhs_value;
+        }
+
+        if (reduced_weak_mode_penalty) {
+          std::vector<double> reduced_weak_coeffs;
+          if (approximate_smallest_eigenvector_symmetric(
+                  normal, m, weakest_diag_index_for_penalty, reduced_weak_coeffs)) {
+            double max_normal_diag = 0.0;
+            for (int row = 0; row < m; ++row) {
+              max_normal_diag =
+                  std::max(max_normal_diag, std::abs(normal_at(row, row)));
+            }
+            reduced_weak_mode_penalty_lambda =
+                reduced_weak_mode_penalty_frac * std::max(1.0, max_normal_diag);
+            for (int row = 0; row < m; ++row) {
+              for (int col = 0; col < m; ++col) {
+                normal_at(row, col) +=
+                    reduced_weak_mode_penalty_lambda *
+                    reduced_weak_coeffs[static_cast<std::size_t>(row)] *
+                    reduced_weak_coeffs[static_cast<std::size_t>(col)];
+              }
+            }
+          }
+        }
+
+        bool solved_regularized = true;
+        for (int pivot = 0; pivot < m; ++pivot) {
+          int pivot_row = pivot;
+          double pivot_abs = std::abs(normal_at(pivot, pivot));
+          for (int row = pivot + 1; row < m; ++row) {
+            const double candidate_abs = std::abs(normal_at(row, pivot));
+            if (candidate_abs > pivot_abs) {
+              pivot_abs = candidate_abs;
+              pivot_row = row;
+            }
+          }
+          if (!(pivot_abs > std::numeric_limits<double>::epsilon())) {
+            solved_regularized = false;
+            break;
+          }
+          if (pivot_row != pivot) {
+            for (int col = pivot; col < m; ++col) {
+              std::swap(normal_at(pivot, col), normal_at(pivot_row, col));
+            }
+            std::swap(rhs_normal[static_cast<std::size_t>(pivot)],
+                      rhs_normal[static_cast<std::size_t>(pivot_row)]);
+          }
+          const double diag = normal_at(pivot, pivot);
+          for (int row = pivot + 1; row < m; ++row) {
+            const double factor = normal_at(row, pivot) / diag;
+            if (std::abs(factor) <= 0.0) {
+              continue;
+            }
+            for (int col = pivot; col < m; ++col) {
+              normal_at(row, col) -= factor * normal_at(pivot, col);
+            }
+            rhs_normal[static_cast<std::size_t>(row)] -=
+                factor * rhs_normal[static_cast<std::size_t>(pivot)];
+          }
+        }
+
+        if (solved_regularized) {
+          for (int row = m - 1; row >= 0; --row) {
+            double value = rhs_normal[static_cast<std::size_t>(row)];
+            for (int col = row + 1; col < m; ++col) {
+              value -= normal_at(row, col) * y(col);
+            }
+            const double diag = normal_at(row, row);
+            if (std::abs(diag) > std::numeric_limits<double>::epsilon()) {
+              y(row) = value / diag;
+            } else {
+              solved_regularized = false;
+              break;
+            }
+          }
+        }
+
+        if (!solved_regularized) {
+          for (int j = last_i; j >= 0; --j) {
+            for (int k = j + 1; k <= last_i; ++k) {
+              y(j) -= h(j, k) * y(k);
+            }
+            const double abs_diag = std::abs(h(j, j));
+            if (abs_diag > std::numeric_limits<double>::epsilon()) {
+              y(j) /= h(j, j);
+            } else {
+              y(j) = 0.0;
+            }
+          }
+          gmres_tikhonov_lambda = 0.0;
+        }
+      } else {
+        for (int j = last_i; j >= 0; --j) {
+          for (int k = j + 1; k <= last_i; ++k) {
+            y(j) -= h(j, k) * y(k);
+          }
+          const double abs_diag = std::abs(h(j, j));
+          if (abs_diag > std::numeric_limits<double>::epsilon()) {
+            double denom = h(j, j);
+            if (gmres_diag_floor > 0.0 && abs_diag < gmres_diag_floor) {
+              const double sign = (h(j, j) >= 0.0) ? 1.0 : -1.0;
+              denom = sign * gmres_diag_floor;
+            }
+            y(j) /= denom;
+          } else {
+            y(j) = 0.0;
+          }
+        }
+      }
+
+      int weakest_diag_index = -1;
+      double weakest_abs_diag = std::numeric_limits<double>::infinity();
+      for (int j = 0; j <= last_i; ++j) {
+        const double abs_diag = std::abs(h(j, j));
+        if (abs_diag < weakest_abs_diag) {
+          weakest_abs_diag = abs_diag;
+          weakest_diag_index = j;
+        }
+      }
+
+      if (trace_face_only_gmres_ls_enabled() && lhs.commu.masF) {
+        double coeff_l2_sq = 0.0;
+        double coeff_l1 = 0.0;
+        double min_abs_diag = std::numeric_limits<double>::infinity();
+        double max_abs_diag = 0.0;
+        int min_diag_index = -1;
+        double coeff_at_min_diag = 0.0;
+        for (int j = 0; j <= last_i; ++j) {
+          const double coeff = y(j);
+          const double abs_diag = std::abs(h(j, j));
+          coeff_l2_sq += coeff * coeff;
+          coeff_l1 += std::abs(coeff);
+          if (abs_diag < min_abs_diag) {
+            min_abs_diag = abs_diag;
+            min_diag_index = j;
+            coeff_at_min_diag = coeff;
+          }
+          max_abs_diag = std::max(max_abs_diag, abs_diag);
+        }
+        if (!std::isfinite(min_abs_diag)) {
+          min_abs_diag = 0.0;
+        }
+        const double diag_ratio =
+            (min_abs_diag > std::numeric_limits<double>::epsilon())
+                ? (max_abs_diag / min_abs_diag)
+                : std::numeric_limits<double>::infinity();
+        std::fprintf(stderr,
+                     "[BICGS_FACE_ONLY_GMRES_LS] cycle=%d last_i=%d coeff_l2=%e coeff_l1=%e min_abs_diag=%e max_abs_diag=%e diag_ratio=%e diag_floor=%e tikhonov_lambda=%e weak_mode_penalty_lambda=%e min_diag_index=%d coeff_at_min_diag=%e est_residual=%e rhs_norm=%e\n",
+                     restart_cycles,
+                     last_i,
+                     std::sqrt(coeff_l2_sq),
+                     coeff_l1,
+                     min_abs_diag,
+                     max_abs_diag,
+                     diag_ratio,
+                     gmres_diag_floor,
+                     gmres_tikhonov_lambda,
+                     reduced_weak_mode_penalty_lambda,
+                     min_diag_index,
+                     coeff_at_min_diag,
+                     std::abs(errv(last_i + 1)),
+                     rhs_norm);
+        std::fflush(stderr);
+      }
+
+      if (const char* reduced_dump_path = face_only_reduced_dump_path();
+          reduced_dump_path != nullptr &&
+          lhs.commu.masF &&
+          collectives.distributed() &&
+          active_coupled_faces > 1 &&
+          restart_cycles == 1) {
+        static bool emitted_face_only_reduced_dump = false;
+        if (!emitted_face_only_reduced_dump) {
+          emitted_face_only_reduced_dump = true;
+          std::ofstream out(reduced_dump_path, std::ios::out | std::ios::trunc);
+          if (out) {
+            const int m = last_i + 1;
+            out.setf(std::ios::scientific);
+            out.precision(17);
+            out << "cycle " << restart_cycles << "\n";
+            out << "last_i " << last_i << "\n";
+            out << "rhs_norm " << rhs_norm << "\n";
+            out << "est_residual " << std::abs(errv(last_i + 1)) << "\n";
+            out << "dimension " << m << "\n";
+            out << "errv";
+            for (int i = 0; i <= last_i + 1; ++i) {
+              out << ' ' << errv(i);
+            }
+            out << "\n";
+            out << "y";
+            for (int i = 0; i <= last_i; ++i) {
+              out << ' ' << y(i);
+            }
+            out << "\n";
+            for (int row = 0; row < m; ++row) {
+              out << "hrow " << row;
+              for (int col = 0; col < m; ++col) {
+                out << ' ' << h(row, col);
+              }
+              out << "\n";
+            }
+          }
+        }
+      }
+
+      if (gmres_weak_coeff_shrink < 1.0 &&
+          weakest_diag_index >= 0 &&
+          collectives.distributed() &&
+          active_coupled_faces > 1) {
+        Vector<double> baseline_solution(nNo);
+        Vector<double> candidate_solution(nNo);
+        Vector<double> baseline_ax(nNo);
+        Vector<double> candidate_ax(nNo);
+        Vector<double> baseline_residual(nNo);
+        Vector<double> candidate_residual(nNo);
+        baseline_solution = Xg;
+        candidate_solution = Xg;
+        for (int j = 0; j <= last_i; ++j) {
+          const double coeff = y(j);
+          if (std::abs(coeff) > 1e-30) {
+            omp_la::omp_sum_s(nNo, coeff, baseline_solution, u.rcol(j));
+          }
+          double candidate_coeff = coeff;
+          if (j == weakest_diag_index) {
+            candidate_coeff *= gmres_weak_coeff_shrink;
+          }
+          if (std::abs(candidate_coeff) > 1e-30) {
+            omp_la::omp_sum_s(nNo, candidate_coeff, candidate_solution, u.rcol(j));
+          }
+        }
+        project_solution_mean(baseline_solution);
+        project_solution_mean(candidate_solution);
+        apply_schur_operator(baseline_solution, baseline_ax);
+        apply_schur_operator(candidate_solution, candidate_ax);
+        omp_la::omp_axpby_s(nNo, baseline_residual, R, -1.0, baseline_ax);
+        omp_la::omp_axpby_s(nNo, candidate_residual, R, -1.0, candidate_ax);
+        const double baseline_true_residual =
+            norm::fsi_ls_norms(mynNo, lhs.commu, baseline_residual);
+        const double candidate_true_residual =
+            norm::fsi_ls_norms(mynNo, lhs.commu, candidate_residual);
+        const bool accept_candidate =
+            std::isfinite(candidate_true_residual) &&
+            candidate_true_residual + 1e-14 <
+                baseline_true_residual * (1.0 - 1e-3);
+        if (lhs.commu.masF && trace_face_only_gmres_ls_enabled()) {
+          std::fprintf(stderr,
+                       "[BICGS_FACE_ONLY_WEAK_COEFF] weakest_index=%d shrink=%e baseline_true_residual=%e candidate_true_residual=%e accepted=%d coeff_before=%e coeff_after=%e\n",
+                       weakest_diag_index,
+                       gmres_weak_coeff_shrink,
+                       baseline_true_residual,
+                       candidate_true_residual,
+                       accept_candidate ? 1 : 0,
+                       y(weakest_diag_index),
+                       y(weakest_diag_index) * gmres_weak_coeff_shrink);
+          std::fflush(stderr);
+        }
+        if (accept_candidate) {
+          y(weakest_diag_index) *= gmres_weak_coeff_shrink;
         }
       }
 
@@ -3143,6 +6596,222 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
         if (std::abs(y(j)) > 1e-30) {
           omp_la::omp_sum_s(nNo, y(j), Xg, u.rcol(j));
         }
+      }
+      if (last_i >= 0) {
+        weak_mode = u.rcol(last_i);
+        have_weak_mode = true;
+        if (need_reduced_weak_mode_vector) {
+          const int m = last_i + 1;
+          std::vector<double> gram(static_cast<std::size_t>(m) *
+                                       static_cast<std::size_t>(m),
+                                   0.0);
+          auto gram_at = [&](int row, int col) -> double& {
+            return gram[static_cast<std::size_t>(row) * static_cast<std::size_t>(m) +
+                        static_cast<std::size_t>(col)];
+          };
+          for (int row = 0; row < m; ++row) {
+            for (int col = 0; col < m; ++col) {
+              double value = 0.0;
+              const int k_begin = std::max(row, col);
+              for (int k = k_begin; k < m; ++k) {
+                value += h(row, k) * h(col, k);
+              }
+              gram_at(row, col) = value;
+            }
+          }
+          std::vector<double> reduced_weak_coeffs;
+          if (approximate_smallest_eigenvector_symmetric(
+                  gram, m, weakest_diag_index, reduced_weak_coeffs)) {
+            reduced_weak_mode = 0.0;
+            for (int j = 0; j < m; ++j) {
+              const double coeff = reduced_weak_coeffs[static_cast<std::size_t>(j)];
+              if (std::abs(coeff) > 1e-30) {
+                omp_la::omp_sum_s(nNo, coeff, reduced_weak_mode, u.rcol(j));
+              }
+            }
+            have_reduced_weak_mode = true;
+          }
+        }
+      }
+      if ((krylov_plus_constant_ls || krylov_plus_gauge2_ls || krylov_plus_gauge3_ls ||
+           krylov_plus_oracle_ls) &&
+          last_i >= 0) {
+        const int m = last_i + 1;
+        Vector<double> minv_mode(nNo);
+        Vector<double> inv_minv_mode(nNo);
+        Vector<double> oracle_mode(nNo);
+        minv_mode = 0.0;
+        inv_minv_mode = 0.0;
+        oracle_mode = 0.0;
+        if (krylov_plus_gauge2_ls || krylov_plus_gauge3_ls) {
+          for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+            const double minv = M_inv(node);
+            if (krylov_plus_gauge3_ls) {
+              minv_mode(node) = minv;
+            }
+            inv_minv_mode(node) = (std::abs(minv) > 1e-30) ? (1.0 / minv) : 0.0;
+          }
+        }
+        bool have_oracle_mode = false;
+        if (krylov_plus_oracle_ls) {
+          have_oracle_mode =
+              load_face_only_oracle_mode(lhs, face_only_krylov_plus_oracle_ls_file(), oracle_mode);
+        }
+        const bool use_gauge3_mode = krylov_plus_gauge3_ls;
+        const bool use_gauge2_mode = krylov_plus_gauge2_ls;
+        const bool use_oracle_mode = krylov_plus_oracle_ls && have_oracle_mode;
+        const int extra_modes =
+            1 +
+            (use_gauge3_mode ? 2 : (use_gauge2_mode ? 1 : 0)) +
+            (use_oracle_mode ? 1 : 0);
+        const int aug_dim = m + extra_modes;
+        std::vector<Vector<double>> images(static_cast<std::size_t>(aug_dim),
+                                           Vector<double>(nNo));
+        std::vector<double> gram(static_cast<std::size_t>(aug_dim) *
+                                     static_cast<std::size_t>(aug_dim),
+                                 0.0);
+        std::vector<double> coeff(static_cast<std::size_t>(aug_dim), 0.0);
+        auto gram_at = [&](int row, int col) -> double& {
+          return gram[static_cast<std::size_t>(row) * static_cast<std::size_t>(aug_dim) +
+                      static_cast<std::size_t>(col)];
+        };
+
+        for (int j = 0; j < m; ++j) {
+          apply_schur_operator(u.rcol(j), images[static_cast<std::size_t>(j)]);
+        }
+        const int constant_image_index = m;
+        int minv_image_index = -1;
+        int inv_minv_image_index = -1;
+        int oracle_image_index = -1;
+        apply_schur_operator(constant_mode,
+                             images[static_cast<std::size_t>(constant_image_index)]);
+        int next_mode_index = m + 1;
+        if (use_gauge3_mode) {
+          minv_image_index = next_mode_index++;
+          inv_minv_image_index = next_mode_index++;
+          apply_schur_operator(minv_mode,
+                               images[static_cast<std::size_t>(minv_image_index)]);
+          apply_schur_operator(inv_minv_mode,
+                               images[static_cast<std::size_t>(inv_minv_image_index)]);
+        } else if (use_gauge2_mode) {
+          inv_minv_image_index = next_mode_index++;
+          apply_schur_operator(inv_minv_mode,
+                               images[static_cast<std::size_t>(inv_minv_image_index)]);
+        }
+        if (use_oracle_mode) {
+          oracle_image_index = next_mode_index++;
+          apply_schur_operator(oracle_mode,
+                               images[static_cast<std::size_t>(oracle_image_index)]);
+        }
+
+        for (int row = 0; row < aug_dim; ++row) {
+          coeff[static_cast<std::size_t>(row)] =
+              dot::fsils_dot_s(mynNo, lhs.commu,
+                               images[static_cast<std::size_t>(row)],
+                               rhs_reference);
+          for (int col = 0; col < aug_dim; ++col) {
+            gram_at(row, col) =
+                dot::fsils_dot_s(mynNo, lhs.commu,
+                                 images[static_cast<std::size_t>(row)],
+                                 images[static_cast<std::size_t>(col)]);
+          }
+        }
+
+        if (solve_dense_linear_system_local(gram, coeff, 1e-30)) {
+          Vector<double> baseline_image(nNo), baseline_residual(rhs_reference);
+          Vector<double> candidate_solution(nNo), candidate_image(nNo), candidate_residual(rhs_reference);
+          apply_schur_operator(Xg, baseline_image);
+          omp_la::omp_axpby_s(nNo, baseline_residual, rhs_reference, -1.0, baseline_image);
+          const double baseline_norm =
+              norm::fsi_ls_norms(mynNo, lhs.commu, baseline_residual);
+          candidate_solution = 0.0;
+          candidate_image = 0.0;
+          for (int j = 0; j < m; ++j) {
+            const double c_j = coeff[static_cast<std::size_t>(j)];
+            if (std::abs(c_j) > 1e-30) {
+              omp_la::omp_sum_s(nNo, c_j, candidate_solution, u.rcol(j));
+              omp_la::omp_sum_s(nNo, c_j, candidate_image, images[static_cast<std::size_t>(j)]);
+            }
+          }
+          const double c_const = coeff[static_cast<std::size_t>(constant_image_index)];
+          if (std::abs(c_const) > 1e-30) {
+            omp_la::omp_sum_s(nNo, c_const, candidate_solution, constant_mode);
+            omp_la::omp_sum_s(nNo, c_const, candidate_image,
+                              images[static_cast<std::size_t>(constant_image_index)]);
+          }
+          double c_minv = 0.0;
+          double c_inv_minv = 0.0;
+          double c_oracle = 0.0;
+          int coeff_index = m + 1;
+          if (use_gauge3_mode) {
+            c_minv = coeff[static_cast<std::size_t>(coeff_index++)];
+            c_inv_minv = coeff[static_cast<std::size_t>(coeff_index++)];
+            if (std::abs(c_minv) > 1e-30) {
+              omp_la::omp_sum_s(nNo, c_minv, candidate_solution, minv_mode);
+              omp_la::omp_sum_s(nNo, c_minv, candidate_image,
+                                images[static_cast<std::size_t>(minv_image_index)]);
+            }
+            if (std::abs(c_inv_minv) > 1e-30) {
+              omp_la::omp_sum_s(nNo, c_inv_minv, candidate_solution, inv_minv_mode);
+              omp_la::omp_sum_s(nNo, c_inv_minv, candidate_image,
+                                images[static_cast<std::size_t>(inv_minv_image_index)]);
+            }
+          } else if (use_gauge2_mode) {
+            c_inv_minv = coeff[static_cast<std::size_t>(coeff_index++)];
+            if (std::abs(c_inv_minv) > 1e-30) {
+              omp_la::omp_sum_s(nNo, c_inv_minv, candidate_solution, inv_minv_mode);
+              omp_la::omp_sum_s(nNo, c_inv_minv, candidate_image,
+                                images[static_cast<std::size_t>(inv_minv_image_index)]);
+            }
+          }
+          if (use_oracle_mode) {
+            c_oracle = coeff[static_cast<std::size_t>(coeff_index++)];
+            if (std::abs(c_oracle) > 1e-30) {
+              omp_la::omp_sum_s(nNo, c_oracle, candidate_solution, oracle_mode);
+              omp_la::omp_sum_s(nNo, c_oracle, candidate_image,
+                                images[static_cast<std::size_t>(oracle_image_index)]);
+            }
+          }
+          omp_la::omp_axpby_s(nNo, candidate_residual, rhs_reference, -1.0, candidate_image);
+          const double candidate_norm =
+              norm::fsi_ls_norms(mynNo, lhs.commu, candidate_residual);
+          const bool accept =
+              std::isfinite(candidate_norm) &&
+              candidate_norm + 1e-12 < baseline_norm * (1.0 - 1e-3);
+          if (accept) {
+            Xg = candidate_solution;
+            residual = candidate_residual;
+            ls.fNorm = candidate_norm;
+          }
+          if (lhs.commu.masF &&
+              (env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_KRYLOV_PLUS_CONSTANT_LS") ||
+               env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_KRYLOV_PLUS_GAUGE2_LS") ||
+               env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_KRYLOV_PLUS_GAUGE3_LS") ||
+               env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_KRYLOV_PLUS_ORACLE_LS"))) {
+            std::fprintf(stderr,
+                         "[BICGS_FACE_ONLY_KRYLOV_AUG] baseline_true_residual=%e candidate_true_residual=%e accept=%d aug_dim=%d const_coeff=%e minv_coeff=%e inv_minv_coeff=%e oracle_coeff=%e reduced_residual=%e mode=%s\n",
+                         baseline_norm,
+                         candidate_norm,
+                         accept ? 1 : 0,
+                         aug_dim,
+                         c_const,
+                         c_minv,
+                         c_inv_minv,
+                         c_oracle,
+                         std::abs(errv(last_i + 1)),
+                         krylov_plus_oracle_ls ? "oracle" :
+                         (krylov_plus_gauge3_ls ? "gauge3" :
+                         (krylov_plus_gauge2_ls ? "gauge2" : "constant")));
+            std::fflush(stderr);
+          }
+        }
+      }
+      project_solution_mean(Xg);
+
+      if (collectives.distributed() &&
+          active_coupled_faces > 1 &&
+          restart_cycles == 1) {
+        emit_face_only_solution_stats("gmres", restart_cycles, Xg);
       }
 
       ls.fNorm = std::abs(errv(last_i + 1));
@@ -3161,9 +6830,118 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
       omp_la::omp_axpby_s(nNo, residual, R, -1.0, ax);
       ls.fNorm = norm::fsi_ls_norms(mynNo, lhs.commu, residual);
       ls.suc = (ls.fNorm < gmres_eps);
+    } else if (trace_face_only_iter_history) {
+      apply_schur_operator(Xg, ax);
+      omp_la::omp_axpby_s(nNo, residual, R, -1.0, ax);
     }
 
+    if (have_weak_mode &&
+        face_only_krylov_mode_correction_enabled() &&
+        collectives.distributed() &&
+        active_coupled_faces > 1) {
+      apply_schur_operator(weak_mode, weak_mode_image);
+      const double base_residual_norm = norm::fsi_ls_norms(mynNo, lhs.commu, residual);
+      const double denom =
+          dot::fsils_dot_s(mynNo, lhs.commu, weak_mode_image, weak_mode_image);
+      if (denom > 1e-30) {
+        const double numer =
+            dot::fsils_dot_s(mynNo, lhs.commu, weak_mode_image, residual);
+        const double gamma = numer / denom;
+        if (std::isfinite(gamma) && std::abs(gamma) > 1e-30) {
+          Vector<double> corrected_residual(nNo);
+          corrected_residual = residual;
+          omp_la::omp_axpby_s(
+              nNo, corrected_residual, residual, -gamma, weak_mode_image);
+          const double corrected_residual_norm =
+              norm::fsi_ls_norms(mynNo, lhs.commu, corrected_residual);
+          const bool accept_correction =
+              std::isfinite(corrected_residual_norm) &&
+              corrected_residual_norm + 1e-14 <
+                  base_residual_norm * (1.0 - 1e-3);
+          if (accept_correction) {
+            omp_la::omp_sum_s(nNo, gamma, Xg, weak_mode);
+            residual = corrected_residual;
+            ls.fNorm = corrected_residual_norm;
+            ls.suc = (ls.fNorm < gmres_eps);
+          }
+          if (lhs.commu.masF && trace_face_only_weak_mode_enabled()) {
+            std::fprintf(stderr,
+                         "[BICGS_FACE_ONLY_MODE_CORR] gamma=%e residual_before=%e residual_after=%e accepted=%d\n",
+                         gamma,
+                         base_residual_norm,
+                         corrected_residual_norm,
+                         accept_correction ? 1 : 0);
+            std::fflush(stderr);
+          }
+        }
+      }
+    }
+
+    trace_iteration_history("gmres", "final", ls.itr, norm::fsi_ls_norms(mynNo, lhs.commu, residual), rhs_norm, "true");
+    if (have_weak_mode &&
+        trace_face_only_weak_mode_enabled() &&
+        collectives.distributed() &&
+        active_coupled_faces > 1) {
+      apply_schur_operator(weak_mode, weak_mode_image);
+      const auto weak_stats = compute_scalar_stats(weak_mode);
+      const auto image_stats = compute_scalar_stats(weak_mode_image);
+      const double weak_mode_dot_residual =
+          dot::fsils_dot_s(mynNo, lhs.commu, weak_mode, residual);
+      const double weak_mode_image_dot_residual =
+          dot::fsils_dot_s(mynNo, lhs.commu, weak_mode_image, residual);
+      if (lhs.commu.masF) {
+        std::fprintf(stderr,
+                     "[BICGS_FACE_ONLY_WEAK_MODE] mode_l2=%e mode_mean=%e image_l2=%e image_mean=%e image_to_mode=%e mode_dot_residual=%e image_dot_residual=%e rhs_norm=%e residual_norm=%e\n",
+                     weak_stats.l2,
+                     weak_stats.mean,
+                     image_stats.l2,
+                     image_stats.mean,
+                     (weak_stats.l2 > 1e-30) ? (image_stats.l2 / weak_stats.l2) : 0.0,
+                     weak_mode_dot_residual,
+                     weak_mode_image_dot_residual,
+                     rhs_norm,
+                     norm::fsi_ls_norms(mynNo, lhs.commu, residual));
+        std::fflush(stderr);
+      }
+    }
+    if (have_reduced_weak_mode) {
+      try_constant_weak_subspace_enrich(
+          "gmres", rhs_reference, reduced_weak_mode, Xg, residual, ls.fNorm);
+    }
+    try_constant_subspace_enrich("gmres", rhs_reference, Xg, residual, ls.fNorm);
+    trace_face_response("final_gmres", Xg, rhs_norm, gmres_eps);
+    trace_residual_coarse_modes("final_gmres", residual, Xg);
+    trace_branch_compare("gmres", R, Xg, residual, ls.fNorm, ls.itr);
     R = Xg;
+    if (reduced_weak_mode_gain_enabled && have_reduced_weak_mode) {
+      const double mode_norm_sq =
+          dot::fsils_dot_s(mynNo, lhs.commu, reduced_weak_mode, reduced_weak_mode);
+      if (mode_norm_sq > 1e-30) {
+        const double mode_coeff =
+            dot::fsils_dot_s(mynNo, lhs.commu, R, reduced_weak_mode) /
+            mode_norm_sq;
+        const double gamma = reduced_weak_mode_gain * mode_coeff;
+        if (std::isfinite(gamma) && std::abs(gamma) > 1e-30) {
+          omp_la::omp_sum_s(nNo, gamma, R, reduced_weak_mode);
+        }
+      }
+    }
+    if (reduced_weak_mode_post_project && have_reduced_weak_mode) {
+      subtract_owned_weight_projection(
+          lhs, R, [&](fsils_int node) { return reduced_weak_mode(node); });
+    }
+    if (weak_mode_post_project && have_weak_mode) {
+      subtract_owned_weight_projection(
+          lhs, R, [&](fsils_int node) { return weak_mode(node); });
+    }
+    post_project_solution_mean(R);
+    if (solution_dump_enabled) {
+      dump_face_only_solution_owned(
+          lhs,
+          R,
+          face_only_solution_dump_prefix(),
+          face_only_solution_dump_solve_index());
+    }
     ls.callD = fsils_cpu_t() - ls.callD;
     ls.dB = (rhs_norm < std::numeric_limits<double>::epsilon() || ls.fNorm <= 0.0)
                 ? 0.0
@@ -3176,6 +6954,7 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
     return;
   }
 
+  trace_constant_mode_operator(rhs_reference);
   for (int i = 0; i < ls.mItr; ++i) {
     if (err < eps) {
       ls.suc = true;
@@ -3204,6 +6983,7 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
     const double s_sq = schur_globals[0];
     if (std::sqrt(s_sq) < std::numeric_limits<double>::epsilon() * ls.iNorm) {
       omp_la::omp_axpby_s(nNo, X, X, alpha, P);
+      project_solution_mean(X);
       R = S;
       errO = err;
       err = std::sqrt(std::max(0.0, s_sq));
@@ -3215,6 +6995,7 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
     const double t_sq = schur_globals[1];
     if (std::sqrt(t_sq) < std::numeric_limits<double>::epsilon() * ls.iNorm) {
       omp_la::omp_axpbypgz_s(nNo, X, X, alpha, P, 0.0, S);
+      project_solution_mean(X);
       R = S;
       errO = err;
       err = std::sqrt(std::max(0.0, s_sq));
@@ -3225,19 +7006,21 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
     const double omega = schur_globals[2] / t_sq;
 
     omp_la::omp_axpbypgz_s(nNo, X, X, alpha, P, omega, S);
+    project_solution_mean(X);
     omp_la::omp_axpby_s(nNo, R, S, -omega, T);
 
-    errO = err;
-    double update_locals[2] = {
-        norm::fsi_ls_norm_sq_local_s(mynNo, R),
+      errO = err;
+      double update_locals[2] = {
+          norm::fsi_ls_norm_sq_local_s(mynNo, R),
         dot::fsils_nc_dot_s(mynNo, R, Rh),
     };
     double update_globals[2] = {update_locals[0], update_locals[1]};
     collectives.allreduce_sum(update_locals, update_globals, 2);
-    err = std::sqrt(std::max(0.0, update_globals[0]));
-    const double rhoO = rho;
-    rho = update_globals[1];
-    const double denom_beta = rhoO * omega;
+      err = std::sqrt(std::max(0.0, update_globals[0]));
+      trace_iteration_history("bicgstab", "inner", i_itr, err, err_initial, "true");
+      const double rhoO = rho;
+      rho = update_globals[1];
+      const double denom_beta = rhoO * omega;
     if (std::abs(denom_beta) <
         std::numeric_limits<double>::epsilon() * (std::abs(rho) + std::numeric_limits<double>::epsilon())) {
       break;
@@ -3249,7 +7032,20 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
     ++i_itr;
   }
 
+  trace_iteration_history("bicgstab", "final", i_itr - 1, err, err_initial, "true");
+  try_constant_subspace_enrich("bicgstab", rhs_reference, X, R, err);
+  trace_face_response("final_bicgstab", X, err_initial, eps);
+  trace_residual_coarse_modes("final_bicgstab", R, X);
+  emit_face_only_solution_stats("bicgstab", i_itr - 1, X);
   R = X;
+  post_project_solution_mean(R);
+  if (solution_dump_enabled) {
+    dump_face_only_solution_owned(
+        lhs,
+        R,
+        face_only_solution_dump_prefix(),
+        face_only_solution_dump_solve_index());
+  }
   ls.itr = i_itr - 1;
   ls.fNorm = err;
   ls.callD = fsils_cpu_t() - ls.callD;
@@ -3341,6 +7137,7 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
   }
   cache.solves_since_build += 1;
   auto& pc = cache.preconditioner;
+  const fe_fsi_linear_solver::HaloExchange schur_halo(lhs);
 
   auto apply_exact_schur_operator = [&](const Array<double>& in_vec, Array<double>& out_vec) {
     system.GL.apply(
@@ -3351,11 +7148,10 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
 
     HGP = GP;
     gmres::gmres_v(system.momentum, momentum_ls, HGP);
-    const fe_fsi_linear_solver::HaloExchange halo(lhs);
-    if (halo.has_overlap() && !skip_post_solve_overlap_sum()) {
+    if (schur_halo.has_overlap() && !skip_post_solve_overlap_sum()) {
       // The nested momentum solve returns a solution-like overlap vector.
       // Push owner values back to ghosts before reusing it in D*(K^-1*G).
-      halo.sync_vector(mom_ncomp, HGP);
+      schur_halo.sync_vector(mom_ncomp, HGP);
     }
 
     system.D.apply(
@@ -3379,6 +7175,151 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
   const Array<double> rhs = R;
   Array<double> rhs_preconditioned = rhs;
   apply_schur_preconditioner(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs, pc, con_ncomp, nNo, rhs_preconditioned);
+  const bool use_preconditioned_rhs_initial_guess =
+      env_enabled("SVMP_FSILS_BLOCKSCHUR_SCHUR_INIT_PRECOND_RHS");
+  const bool trace_schur_preconditioner_probes =
+      env_enabled("SVMP_FSILS_TRACE_SCHUR_PRECONDITIONER_PROBES") && lhs.commu.masF;
+
+  auto trace_schur_preconditioner_probe = [&](const char* label, const Array<double>& q) {
+    if (!trace_schur_preconditioner_probes) {
+      return;
+    }
+
+    const double q_norm = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, q);
+    if (!(q_norm > 0.0) || !std::isfinite(q_norm)) {
+      return;
+    }
+
+    auto compute_solution_mean = [&](const Array<double>& x) -> double {
+      if (con_ncomp != 1) {
+        return 0.0;
+      }
+      double local_sum = 0.0;
+      double local_count = 0.0;
+      for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+        local_sum += x(0, node);
+        local_count += 1.0;
+      }
+      double global_sum = local_sum;
+      double global_count = local_count;
+      collectives.allreduce_sum(local_sum, global_sum);
+      collectives.allreduce_sum(local_count, global_count);
+      return (global_count > 0.0) ? (global_sum / global_count) : 0.0;
+    };
+
+    auto compute_inverse_quality =
+        [&](const Array<double>& x, Array<double>& residual_out) -> std::pair<double, double> {
+          Array<double> ax;
+          apply_exact_schur_operator(x, ax);
+          residual_out = ax;
+          #pragma omp parallel for schedule(static)
+          for (fsils_int node = 0; node < nNo; ++node) {
+            for (int comp = 0; comp < con_ncomp; ++comp) {
+              residual_out(comp, node) -= q(comp, node);
+            }
+          }
+          const double residual_norm =
+              norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, residual_out);
+          const double relative =
+              residual_norm / std::max(q_norm, std::numeric_limits<double>::min());
+          return {residual_norm, relative};
+        };
+
+    Array<double> base_solution = q;
+    apply_base_schur_preconditioner(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, pc, con_ncomp, nNo, base_solution);
+    sync_schur_overlap(lhs, con_ncomp, base_solution);
+    Array<double> base_residual;
+    const auto [base_residual_norm, base_relative] =
+        compute_inverse_quality(base_solution, base_residual);
+
+    Array<double> full_solution = q;
+    apply_schur_preconditioner(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs, pc, con_ncomp, nNo, full_solution);
+    Array<double> full_residual;
+    const auto [full_residual_norm, full_relative] =
+        compute_inverse_quality(full_solution, full_residual);
+
+    std::fprintf(stderr,
+                 "[SCHUR_PC_PROBE] label=%s distributed=%d q_norm=%e base_x_norm=%e base_mean=%e "
+                 "base_residual=%e base_rel=%e full_x_norm=%e full_mean=%e full_residual=%e full_rel=%e\n",
+                 label,
+                 collectives.distributed() ? 1 : 0,
+                 q_norm,
+                 norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, base_solution),
+                 compute_solution_mean(base_solution),
+                 base_residual_norm,
+                 base_relative,
+                 norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, full_solution),
+                 compute_solution_mean(full_solution),
+                 full_residual_norm,
+                 full_relative);
+    std::fflush(stderr);
+  };
+
+  if (trace_schur_preconditioner_probes) {
+    trace_schur_preconditioner_probe("rhs", rhs);
+
+    if (con_ncomp == 1) {
+      Array<double> global_mean_probe(con_ncomp, nNo);
+      global_mean_probe = 0.0;
+      for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+        global_mean_probe(0, node) = 1.0;
+      }
+      trace_schur_preconditioner_probe("constraint_global_mean", global_mean_probe);
+
+#if FE_HAS_MPI
+      if (lhs.commu.nTasks > 1) {
+        std::vector<double> owned_counts(static_cast<std::size_t>(lhs.commu.nTasks), 0.0);
+        const double local_owned = static_cast<double>(lhs.mynNo);
+        MPI_Allgather(&local_owned,
+                      1,
+                      cm_mod::mpreal,
+                      owned_counts.data(),
+                      1,
+                      cm_mod::mpreal,
+                      lhs.commu.comm);
+
+        std::vector<int> active_ranks;
+        active_ranks.reserve(static_cast<std::size_t>(lhs.commu.nTasks));
+        for (int rank = 0; rank < lhs.commu.nTasks; ++rank) {
+          if (owned_counts[static_cast<std::size_t>(rank)] > 0.5) {
+            active_ranks.push_back(rank);
+          }
+        }
+
+        if (active_ranks.size() >= 2u) {
+          const int reference_rank = active_ranks.back();
+          const int probe_rank = active_ranks.front();
+          const double reference_count =
+              owned_counts[static_cast<std::size_t>(reference_rank)];
+          if (reference_count > 0.5 && reference_rank != probe_rank) {
+            Array<double> partition_probe(con_ncomp, nNo);
+            partition_probe = 0.0;
+            if (lhs.commu.task == probe_rank) {
+              for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+                partition_probe(0, node) = 1.0;
+              }
+            } else if (lhs.commu.task == reference_rank) {
+              const double weight =
+                  -owned_counts[static_cast<std::size_t>(probe_rank)] / reference_count;
+              for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+                partition_probe(0, node) = weight;
+              }
+            }
+            trace_schur_preconditioner_probe("constraint_partition", partition_probe);
+          }
+        }
+      }
+#endif
+    }
+
+    const int low_rank_probe_count =
+        std::min<int>(2, static_cast<int>(pc.low_rank_right.size()));
+    for (int probe_idx = 0; probe_idx < low_rank_probe_count; ++probe_idx) {
+      trace_schur_preconditioner_probe(
+          ("low_rank_right_" + std::to_string(probe_idx)).c_str(),
+          pc.low_rank_right[static_cast<std::size_t>(probe_idx)]);
+    }
+  }
 
   if (strategy.prefer_schur_gmres) {
     const int restart_dim =
@@ -3400,7 +7341,11 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
     ls.callD = fe_fsi_linear_solver::fsils_cpu_t();
     ls.suc = false;
     ls.itr = 0;
-    Xg = 0.0;
+    if (use_preconditioned_rhs_initial_guess) {
+      Xg = rhs_preconditioned;
+    } else {
+      Xg = 0.0;
+    }
 
     const double rhs_norm = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, rhs_preconditioned);
     ls.iNorm = rhs_norm;
@@ -3424,6 +7369,7 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
     while (total_itr < ls.mItr) {
       ++restart_cycles;
 
+      schur_halo.sync_vector(con_ncomp, Xg, skip_post_solve_overlap_sum());
       apply_schur_operator(Xg, ax);
       omp_la::omp_axpby_v(con_ncomp, nNo, residual, rhs_preconditioned, -1.0, ax);
       const double beta = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, residual);
@@ -3454,6 +7400,7 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
         last_i = i;
         auto ui = u.rslice(i);
         auto uip1 = u.rslice(i + 1);
+        schur_halo.sync_vector(con_ncomp, ui, skip_post_solve_overlap_sum());
         apply_schur_operator(ui, uip1);
 
         for (int j = 0; j <= i; ++j) {
@@ -3535,6 +7482,7 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
     }
 
     if (!ls.suc) {
+      schur_halo.sync_vector(con_ncomp, Xg, skip_post_solve_overlap_sum());
       apply_schur_operator(Xg, ax);
       omp_la::omp_axpby_v(con_ncomp, nNo, residual, rhs_preconditioned, -1.0, ax);
       ls.fNorm = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, residual);
@@ -3561,8 +7509,14 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
   ls.iNorm = rhs_norm;
   const double eps = std::max(ls.absTol, ls.relTol * rhs_norm);
 
-  X = 0.0;
-  R = rhs_preconditioned;
+  if (use_preconditioned_rhs_initial_guess) {
+    X = rhs_preconditioned;
+    apply_schur_operator(X, R);
+    omp_la::omp_axpby_v(con_ncomp, nNo, R, rhs_preconditioned, -1.0, R);
+  } else {
+    X = 0.0;
+    R = rhs_preconditioned;
+  }
 
   double err = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, R);
   double errO = std::max(err, rhs_norm);

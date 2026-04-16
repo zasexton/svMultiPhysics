@@ -11,6 +11,7 @@
 #include "Constraints/AffineConstraints.h"
 #include "Constraints/GaugeDiagnostics.h"
 #include "Constraints/GaugeRegistry.h"
+#include "Constraints/SystemConstraints.h"
 #include "Core/FEException.h"
 #include "Core/Logger.h"
 #include "Dofs/DofIndexSet.h"
@@ -31,6 +32,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cctype>
+#include <fstream>
+#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -64,6 +67,103 @@ namespace {
         return !(v == "0" || v == "false" || v == "off" || v == "no");
     }();
     return enabled;
+}
+
+[[nodiscard]] bool linearProbeDumpEnabled() noexcept
+{
+    static const bool enabled = [] {
+        const char* env = std::getenv("SVMP_DEBUG_LINEAR_PROBE_DUMP");
+        if (env == nullptr) {
+            return false;
+        }
+        std::string v(env);
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return !(v == "0" || v == "false" || v == "off" || v == "no");
+    }();
+    return enabled;
+}
+
+[[nodiscard]] bool linearSolveHistoryEnabled() noexcept
+{
+    static const bool enabled = [] {
+        const char* env = std::getenv("SVMP_DEBUG_LINEAR_SOLVE_HISTORY");
+        if (env == nullptr) {
+            return false;
+        }
+        std::string v(env);
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return !(v == "0" || v == "false" || v == "off" || v == "no");
+    }();
+    return enabled;
+}
+
+[[nodiscard]] int linearSolveHistoryMaxCalls() noexcept
+{
+    static const int max_calls = [] {
+        const char* env = std::getenv("SVMP_DEBUG_LINEAR_SOLVE_HISTORY_MAX_CALLS");
+        if (env == nullptr) {
+            return -1;
+        }
+        char* end = nullptr;
+        const long parsed = std::strtol(env, &end, 10);
+        if (end == env) {
+            return -1;
+        }
+        return static_cast<int>(parsed);
+    }();
+    return max_calls;
+}
+
+[[nodiscard]] bool linearSolveComponentNormsEnabled() noexcept
+{
+    static const bool enabled = [] {
+        const char* env = std::getenv("SVMP_DEBUG_LINEAR_SOLVE_COMPONENT_NORMS");
+        if (env == nullptr) {
+            return false;
+        }
+        std::string v(env);
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return !(v == "0" || v == "false" || v == "off" || v == "no");
+    }();
+    return enabled;
+}
+
+[[nodiscard]] int linearSolveComponentNormsMaxNewtonIt() noexcept
+{
+    static const int max_it = [] {
+        const char* env = std::getenv("SVMP_DEBUG_LINEAR_SOLVE_COMPONENT_NORMS_MAX_NEWTON_IT");
+        if (env == nullptr) {
+            return -1;
+        }
+        char* end = nullptr;
+        const long parsed = std::strtol(env, &end, 10);
+        if (end == env) {
+            return -1;
+        }
+        return static_cast<int>(parsed);
+    }();
+    return max_it;
+}
+
+[[nodiscard]] std::optional<std::string> firstLinearVectorDumpPrefix()
+{
+    static const std::optional<std::string> prefix = []() -> std::optional<std::string> {
+        const char* env = std::getenv("SVMP_DEBUG_FIRST_LINEAR_VECTOR_DUMP_PREFIX");
+        if (env == nullptr) {
+            return std::nullopt;
+        }
+        while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+            ++env;
+        }
+        if (*env == '\0') {
+            return std::nullopt;
+        }
+        return std::string(env);
+    }();
+    return prefix;
 }
 
 void traceLog(const std::string& msg)
@@ -214,6 +314,220 @@ void traceLog(const std::string& msg)
         ++env;
     }
     return *env == '\0' || *env == '0';
+}
+
+[[nodiscard]] bool preserveGroupedAlgebraicDirectOnlyCouplings() noexcept
+{
+    const char* env = std::getenv("SVMP_PRESERVE_GROUPED_ALGEBRAIC_DIRECT_ONLY");
+    if (env == nullptr) {
+        return false;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    return *env != '\0' && *env != '0';
+}
+
+[[nodiscard]] bool pureAlgebraicBorderedRecoveryEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_PURE_ALGEBRAIC_BORDERED_RECOVERY");
+    if (env == nullptr) {
+        return false;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    return *env != '\0' && *env != '0';
+}
+
+[[nodiscard]] bool exactNativeRankOneWoodburyRecoveryEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_MPI_EXACT_RANK_ONE_WOODBURY");
+    if (env == nullptr) {
+        return false;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    return *env != '\0' && *env != '0';
+}
+
+[[nodiscard]] int exactNativeRankOneWoodburyRecoveryMaxNewtonIters() noexcept
+{
+    const char* env = std::getenv("SVMP_MPI_EXACT_RANK_ONE_WOODBURY_MAX_NEWTON_ITERS");
+    if (env == nullptr) {
+        return std::numeric_limits<int>::max();
+    }
+
+    char* end = nullptr;
+    const long value = std::strtol(env, &end, 10);
+    if (end == env || value <= 0 || value > static_cast<long>(std::numeric_limits<int>::max())) {
+        return std::numeric_limits<int>::max();
+    }
+    return static_cast<int>(value);
+}
+
+[[nodiscard]] bool mpiLinearSubspaceRecoveryEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_MPI_LINEAR_SUBSPACE_RECOVERY");
+    if (env == nullptr) {
+        return false;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    return *env != '\0' && *env != '0';
+}
+
+[[nodiscard]] bool mpiLinearSubspaceRecoveryNonlinearSearchEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_MPI_LINEAR_SUBSPACE_NONLINEAR_SEARCH");
+    if (env == nullptr) {
+        return false;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    return *env != '\0' && *env != '0';
+}
+
+[[nodiscard]] bool mpiLinearSubspaceRecoveryBoundaryIndicatorEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_MPI_LINEAR_SUBSPACE_BOUNDARY_INDICATOR");
+    if (env == nullptr) {
+        return false;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    return *env != '\0' && *env != '0';
+}
+
+[[nodiscard]] bool mpiLinearSubspaceRecoveryCoordinateModesEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_MPI_LINEAR_SUBSPACE_COORD_MODES");
+    if (env == nullptr) {
+        return false;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    return *env != '\0' && *env != '0';
+}
+
+[[nodiscard]] const char* mpiLinearSubspaceRecoveryVectorFilePath() noexcept
+{
+    const char* env = std::getenv("SVMP_MPI_LINEAR_SUBSPACE_VECTOR_FILE");
+    if (env == nullptr) {
+        return nullptr;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    return (*env == '\0') ? nullptr : env;
+}
+
+[[nodiscard]] bool mpiLinearSubspaceRecoveryVectorNonlinearSearchEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_MPI_LINEAR_SUBSPACE_VECTOR_NONLINEAR_SEARCH");
+    if (env == nullptr) {
+        return false;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    return *env != '\0' && *env != '0';
+}
+
+[[nodiscard]] std::optional<std::vector<Real>>
+loadMpiLinearSubspaceVectorFromFile(const std::string& path, std::size_t expected_size)
+{
+    std::ifstream in(path);
+    if (!in) {
+        return std::nullopt;
+    }
+
+    std::vector<Real> values;
+    values.reserve(expected_size);
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream iss(line);
+        double token = 0.0;
+        bool saw_any = false;
+        while (iss >> token) {
+            saw_any = true;
+        }
+        if (saw_any) {
+            values.push_back(static_cast<Real>(token));
+        }
+    }
+    if (values.size() != expected_size) {
+        return std::nullopt;
+    }
+    return values;
+}
+
+[[nodiscard]] int mpiLinearSubspaceRecoveryMaxNewtonIters() noexcept
+{
+    const char* env = std::getenv("SVMP_MPI_LINEAR_SUBSPACE_RECOVERY_MAX_NEWTON_ITERS");
+    if (env == nullptr) {
+        return 3;
+    }
+
+    char* end = nullptr;
+    const long value = std::strtol(env, &end, 10);
+    if (end == env || value <= 0 || value > static_cast<long>(std::numeric_limits<int>::max())) {
+        return 3;
+    }
+    return static_cast<int>(value);
+}
+
+[[nodiscard]] bool mpiConstraintPartitionDriftCorrectionEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_MPI_CONSTRAINT_PARTITION_DRIFT_CORRECTION");
+    if (env == nullptr) {
+        return false;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    return *env != '\0' && *env != '0';
+}
+
+[[nodiscard]] bool mpiConstraintGlobalMeanShiftCorrectionEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_MPI_CONSTRAINT_GLOBAL_MEAN_SHIFT_CORRECTION");
+    if (env == nullptr) {
+        return false;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    return *env != '\0' && *env != '0';
+}
+
+[[nodiscard]] bool mpiFirstIterationStepExpansionEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_MPI_FIRST_ITERATION_STEP_EXPANSION");
+    if (env == nullptr) {
+        return false;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    return *env != '\0' && *env != '0';
+}
+
+[[nodiscard]] bool mpiFirstIterationStepLineSearchEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_MPI_FIRST_ITERATION_STEP_LINE_SEARCH");
+    if (env == nullptr) {
+        return false;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    return *env != '\0' && *env != '0';
 }
 
 [[nodiscard]] Real lateDirectOnlyReducedInnerRelTol() noexcept
@@ -380,6 +694,205 @@ template <typename T>
 #endif
 
     return local;
+}
+
+void writeDenseVectorDump(const std::string& path, std::span<const Real> dense)
+{
+    std::ofstream out(path);
+    FE_THROW_IF(!out.is_open(),
+                systems::InvalidStateException,
+                "NewtonSolver: failed to open linear vector dump file: " + path);
+    out << std::setprecision(17) << std::scientific;
+    for (std::size_t i = 0; i < dense.size(); ++i) {
+        out << i << ' ' << dense[i] << '\n';
+    }
+}
+
+struct ScalarFieldVertexDumpRecord {
+    GlobalIndex monolithic_dof{INVALID_GLOBAL_INDEX};
+    GlobalIndex vertex_id{INVALID_GLOBAL_INDEX};
+    std::array<Real, 3> xyz{0.0, 0.0, 0.0};
+    Real value{0.0};
+};
+
+[[nodiscard]] std::optional<std::size_t> selectPreferredScalarVertexDumpFieldIndex(
+    const systems::FESystem& sys)
+{
+    const auto& fmap = sys.fieldMap();
+    std::optional<std::size_t> first_scalar;
+    for (std::size_t field_idx = 0; field_idx < fmap.numFields(); ++field_idx) {
+        const auto& field = fmap.getField(field_idx);
+        if (field.n_components != 1) {
+            continue;
+        }
+        if (!first_scalar.has_value()) {
+            first_scalar = field_idx;
+        }
+        std::string lower_name = field.name;
+        std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (lower_name.find("pressure") != std::string::npos ||
+            lower_name == "p") {
+            return field_idx;
+        }
+    }
+    return first_scalar;
+}
+
+[[nodiscard]] std::vector<ScalarFieldVertexDumpRecord> gatherScalarFieldVertexDumpRecords(
+    const systems::FESystem& sys,
+    backends::GenericVector& vec,
+    std::size_t field_idx)
+{
+    const auto& fmap = sys.fieldMap();
+    FE_THROW_IF(field_idx >= fmap.numFields(),
+                systems::InvalidStateException,
+                "NewtonSolver: scalar field vertex dump field index out of range");
+    const auto& field = fmap.getField(field_idx);
+    FE_THROW_IF(field.n_components != 1,
+                systems::InvalidStateException,
+                "NewtonSolver: scalar field vertex dump requires scalar field");
+
+    auto view = vec.createAssemblyView();
+    FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: scalar field vertex dump view");
+
+    const auto field_range = fmap.getFieldDofRange(field_idx);
+    const auto& field_dh = sys.fieldDofHandler(static_cast<FieldId>(field_idx));
+    const auto* emap = field_dh.getEntityDofMap();
+    if (emap == nullptr) {
+        return {};
+    }
+
+    const auto& field_owned = field_dh.getPartition().locallyOwned();
+    std::vector<ScalarFieldVertexDumpRecord> local_records;
+    local_records.reserve(static_cast<std::size_t>(field_owned.size()));
+    for (const auto local_dof : field_owned) {
+        const auto ent = emap->getDofEntity(local_dof);
+        if (!ent || ent->kind != dofs::EntityKind::Vertex) {
+            continue;
+        }
+        const GlobalIndex monolithic_dof = field_range.first + local_dof;
+        const auto xyz = sys.meshAccess().getNodeCoordinates(ent->id);
+        local_records.push_back(ScalarFieldVertexDumpRecord{
+            .monolithic_dof = monolithic_dof,
+            .vertex_id = ent->id,
+            .xyz = xyz,
+            .value = view->getVectorEntry(monolithic_dof),
+        });
+    }
+
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized) {
+        constexpr int kPackedStride = 6;
+        std::vector<double> local_packed(local_records.size() * kPackedStride, 0.0);
+        for (std::size_t i = 0; i < local_records.size(); ++i) {
+            const auto& rec = local_records[i];
+            local_packed[kPackedStride * i + 0] = static_cast<double>(rec.monolithic_dof);
+            local_packed[kPackedStride * i + 1] = static_cast<double>(rec.vertex_id);
+            local_packed[kPackedStride * i + 2] = static_cast<double>(rec.xyz[0]);
+            local_packed[kPackedStride * i + 3] = static_cast<double>(rec.xyz[1]);
+            local_packed[kPackedStride * i + 4] = static_cast<double>(rec.xyz[2]);
+            local_packed[kPackedStride * i + 5] = static_cast<double>(rec.value);
+        }
+
+        int mpi_size = 1;
+        MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+        std::vector<int> recv_counts(static_cast<std::size_t>(mpi_size), 0);
+        const int local_count = static_cast<int>(local_packed.size());
+        MPI_Gather(&local_count,
+                   1,
+                   MPI_INT,
+                   recv_counts.data(),
+                   1,
+                   MPI_INT,
+                   0,
+                   MPI_COMM_WORLD);
+
+        std::vector<double> gathered;
+        std::vector<int> displs;
+        if (mpiRank() == 0) {
+            displs.resize(static_cast<std::size_t>(mpi_size), 0);
+            int offset = 0;
+            for (int i = 0; i < mpi_size; ++i) {
+                displs[static_cast<std::size_t>(i)] = offset;
+                offset += recv_counts[static_cast<std::size_t>(i)];
+            }
+            gathered.resize(static_cast<std::size_t>(offset), 0.0);
+        }
+
+        MPI_Gatherv(local_packed.data(),
+                    local_count,
+                    MPI_DOUBLE,
+                    gathered.data(),
+                    recv_counts.data(),
+                    displs.data(),
+                    MPI_DOUBLE,
+                    0,
+                    MPI_COMM_WORLD);
+
+        if (mpiRank() != 0) {
+            return {};
+        }
+
+        std::vector<ScalarFieldVertexDumpRecord> global_records;
+        global_records.reserve(gathered.size() / kPackedStride);
+        for (std::size_t i = 0; i + (kPackedStride - 1) < gathered.size(); i += kPackedStride) {
+            global_records.push_back(ScalarFieldVertexDumpRecord{
+                .monolithic_dof = static_cast<GlobalIndex>(std::llround(gathered[i + 0])),
+                .vertex_id = static_cast<GlobalIndex>(std::llround(gathered[i + 1])),
+                .xyz = {static_cast<Real>(gathered[i + 2]),
+                        static_cast<Real>(gathered[i + 3]),
+                        static_cast<Real>(gathered[i + 4])},
+                .value = static_cast<Real>(gathered[i + 5]),
+            });
+        }
+        return global_records;
+    }
+#endif
+
+    return local_records;
+}
+
+void writeScalarFieldVertexDumpRecords(const std::string& path,
+                                       std::string_view field_name,
+                                       std::span<const ScalarFieldVertexDumpRecord> records)
+{
+    std::vector<ScalarFieldVertexDumpRecord> sorted(records.begin(), records.end());
+    std::sort(sorted.begin(),
+              sorted.end(),
+              [](const ScalarFieldVertexDumpRecord& a, const ScalarFieldVertexDumpRecord& b) {
+                  if (a.xyz[0] != b.xyz[0]) {
+                      return a.xyz[0] < b.xyz[0];
+                  }
+                  if (a.xyz[1] != b.xyz[1]) {
+                      return a.xyz[1] < b.xyz[1];
+                  }
+                  if (a.xyz[2] != b.xyz[2]) {
+                      return a.xyz[2] < b.xyz[2];
+                  }
+                  if (a.vertex_id != b.vertex_id) {
+                      return a.vertex_id < b.vertex_id;
+                  }
+                  return a.monolithic_dof < b.monolithic_dof;
+              });
+
+    std::ofstream out(path);
+    FE_THROW_IF(!out.is_open(),
+                systems::InvalidStateException,
+                "NewtonSolver: failed to open scalar field vertex dump file: " + path);
+    out << std::setprecision(17) << std::scientific;
+    out << "# field " << field_name << '\n';
+    out << "# monolithic_dof vertex_id x y z value\n";
+    for (const auto& rec : sorted) {
+        out << rec.monolithic_dof << ' '
+            << rec.vertex_id << ' '
+            << rec.xyz[0] << ' '
+            << rec.xyz[1] << ' '
+            << rec.xyz[2] << ' '
+            << rec.value << '\n';
+    }
 }
 
 [[nodiscard]] bool jacobianCheckEnabled() noexcept
@@ -2058,43 +2571,32 @@ struct SolverOptionsGuard {
 {
     backends::SolverOptions opts = base;
 
-    const Real target_rel =
-        (base.rel_tol > Real(0.0) && std::isfinite(static_cast<double>(base.rel_tol)))
-            ? std::min(static_cast<Real>(1e-8), static_cast<Real>(base.rel_tol * Real(1e-2)))
-            : static_cast<Real>(1e-8);
-    opts.rel_tol = std::max(target_rel, static_cast<Real>(1e-12));
-
-    const Real target_abs =
-        (base.abs_tol > Real(0.0) && std::isfinite(static_cast<double>(base.abs_tol)))
-            ? std::min(base.abs_tol, static_cast<Real>(1e-12))
-            : static_cast<Real>(1e-12);
-    opts.abs_tol = std::max(target_abs, static_cast<Real>(1e-16));
-
-    // Strongly coupled bordered / native rank-one outlet solves are much less
-    // tolerant of loose inner solves than the legacy PDE-only path. Keep a
-    // meaningful lower bound, but do not throw away a larger user-requested
-    // Krylov budget from the XML/application settings.
-    opts.max_iter = std::max(base.max_iter, 200);
-
     // Bordered outlet-coupled solves cannot safely accept a native BlockSchur
     // "success" unless the wrapper also validates the original FE residual.
     // The internal FSILS residual can look converged while the true operator
-    // residual is still too large for Newton to make progress.
+    // residual is still too large for Newton to make progress. That does not
+    // imply blanket 1e-8/200 retuning for every bordered case; preserve the
+    // user-requested Krylov budget/tolerances here and make any stronger
+    // tightening an explicit, case-specific policy.
     opts.fsils_residual_check_policy = backends::FsilsResidualCheckPolicy::Always;
 
     if (base.method == backends::SolverMethod::BlockSchur) {
-        const int target_inner_max_iter = std::max(base.max_iter, 200);
+        const Real base_rel =
+            (base.rel_tol > Real(0.0) && std::isfinite(static_cast<double>(base.rel_tol)))
+                ? base.rel_tol
+                : static_cast<Real>(1e-6);
+        const int target_inner_max_iter = std::max(base.max_iter, 1);
         opts.fsils_blockschur_gm_max_iter =
             std::max(base.fsils_blockschur_gm_max_iter.value_or(0), target_inner_max_iter);
         opts.fsils_blockschur_cg_max_iter =
             std::max(base.fsils_blockschur_cg_max_iter.value_or(0), target_inner_max_iter);
 
         const Real gm_target_rel = base.fsils_blockschur_gm_rel_tol.has_value()
-            ? std::min(*base.fsils_blockschur_gm_rel_tol, opts.rel_tol)
-            : opts.rel_tol;
+            ? std::min(*base.fsils_blockschur_gm_rel_tol, base_rel)
+            : base_rel;
         const Real cg_target_rel = base.fsils_blockschur_cg_rel_tol.has_value()
-            ? std::min(*base.fsils_blockschur_cg_rel_tol, opts.rel_tol)
-            : opts.rel_tol;
+            ? std::min(*base.fsils_blockschur_cg_rel_tol, base_rel)
+            : base_rel;
         opts.fsils_blockschur_gm_rel_tol = gm_target_rel;
         opts.fsils_blockschur_cg_rel_tol = cg_target_rel;
     }
@@ -2105,7 +2607,8 @@ struct SolverOptionsGuard {
 [[nodiscard]] backends::SolverOptions
 makeValidatedNativeRankOneSolveOptions(const backends::SolverOptions& base,
                                        const int native_direct_face_mode_count,
-                                       std::optional<Real> inner_rel_override = std::nullopt)
+                                       std::optional<Real> inner_rel_override = std::nullopt,
+                                       std::optional<Real> outer_rel_floor = std::nullopt)
 {
     backends::SolverOptions opts = base;
 
@@ -2116,11 +2619,21 @@ makeValidatedNativeRankOneSolveOptions(const backends::SolverOptions& base,
     // work seen with the explicit bordered settings.
     if (base.method == backends::SolverMethod::BlockSchur) {
         (void)native_direct_face_mode_count;
+        const Real effective_outer_rel =
+            (outer_rel_floor.has_value() &&
+             base.rel_tol > Real(0.0) &&
+             std::isfinite(static_cast<double>(base.rel_tol)))
+                ? std::min(base.rel_tol, *outer_rel_floor)
+                : base.rel_tol;
+        if (effective_outer_rel > Real(0.0) &&
+            std::isfinite(static_cast<double>(effective_outer_rel))) {
+            opts.rel_tol = effective_outer_rel;
+        }
         const Real rel_scale = static_cast<Real>(1e-2);
         const Real fallback_target = static_cast<Real>(1e-6);
         const Real target_inner_rel =
-            (base.rel_tol > Real(0.0) && std::isfinite(static_cast<double>(base.rel_tol)))
-                ? std::max(static_cast<Real>(1e-10), base.rel_tol * rel_scale)
+            (opts.rel_tol > Real(0.0) && std::isfinite(static_cast<double>(opts.rel_tol)))
+                ? std::max(static_cast<Real>(1e-10), opts.rel_tol * rel_scale)
                 : fallback_target;
         const Real effective_inner_rel = inner_rel_override.has_value()
             ? std::min(target_inner_rel, *inner_rel_override)
@@ -2546,8 +3059,11 @@ void rebaseGroupedCouplingIds(std::vector<backends::ReducedFieldUpdate>& reduced
         oss << "]";
         traceLog(oss.str());
     }
-    const bool allow_native_rank_one_promotion = independent_modes;
-    const int grouped_coupling_id = independent_modes ? -1 : 0;
+    const bool preserve_grouped_direct_only = preserveGroupedAlgebraicDirectOnlyCouplings();
+    const bool allow_native_rank_one_promotion =
+        independent_modes && !preserve_grouped_direct_only;
+    const int grouped_coupling_id =
+        (independent_modes && !preserve_grouped_direct_only) ? -1 : 0;
     backends::GroupedBorderedFieldCoupling grouped{};
     grouped.grouped_coupling_id = grouped_coupling_id;
     grouped.aux_matrix = Daa;
@@ -2631,7 +3147,7 @@ void rebaseGroupedCouplingIds(std::vector<backends::ReducedFieldUpdate>& reduced
         grouped.modes.push_back(std::move(mode));
     }
 
-    if (!independent_modes &&
+    if ((!independent_modes || preserve_grouped_direct_only) &&
         !grouped.aux_matrix.empty() &&
         !grouped.modes.empty()) {
         out.grouped_couplings.push_back(std::move(grouped));
@@ -4509,12 +5025,16 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             };
 
         int ptc_retries = 0;
+        bool linear_probe_dumped = false;
+        bool first_linear_vector_dumped = false;
+        int primary_linear_solve_call_index = 0;
         while (true) {
             SolverOptionsGuard bordered_solver_options_guard{linear, base_linear_options};
             if (needs_strict_coupled_solve_options) {
                 linear.setOptions(makeBorderedSolveOptions(base_linear_options));
             } else if (needs_validated_native_rank_one_options) {
                 std::optional<Real> direct_only_inner_rel_override;
+                std::optional<Real> direct_only_outer_rel_floor;
                 if (has_native_direct_only_reduced_updates) {
                     if (const auto rel_trigger = lateDirectOnlyReducedTighteningThreshold()) {
                         const double r0 =
@@ -4539,10 +5059,19 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         }
                     }
                 }
+                if (mpiMultiTaskActive() &&
+                    (has_native_direct_face_only_updates || has_native_direct_only_reduced_updates)) {
+                    // The distributed direct-only outlet path is too loose at the
+                    // XML 1e-3 defaults on the multi-step iliac harness. Clamp the
+                    // requested outer linear tolerance to the empirically stable
+                    // 1e-5 regime without touching grouped/bordered MPI cases.
+                    direct_only_outer_rel_floor = static_cast<Real>(1e-5);
+                }
                 linear.setOptions(makeValidatedNativeRankOneSolveOptions(
                     base_linear_options,
                     native_direct_face_mode_count,
-                    direct_only_inner_rel_override));
+                    direct_only_inner_rel_override,
+                    direct_only_outer_rel_floor));
             }
             if (has_solve_bordered && !condensed_bordered_active) {
                 fsils_matrix_snapshot = captureFsilsMatrixSnapshot(J);
@@ -4598,10 +5127,144 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             if (oopTraceEnabled()) {
                 traceLog("NewtonSolver: calling linear.solve()");
             }
+            if (linearProbeDumpEnabled() && !linear_probe_dumped && it == 0 && ptc_retries == 0) {
+                linear_probe_dumped = true;
+                logVectorComponentNorms(transient.system(), *linear_rhs, "linear rhs");
+                logVectorTopEntries(transient.system(), *linear_rhs, "linear rhs", 8u);
+
+                u_backup.set(static_cast<Real>(1.0));
+                u_backup.updateGhosts();
+                residual_base.zero();
+                J.mult(u_backup, residual_base);
+                if (has_native_rank_one_updates) {
+                    addRankOneOperatorMatvec(
+                        std::span<const backends::RankOneUpdate>(effective_rank_one_updates.data(),
+                                                                 effective_rank_one_updates.size()),
+                        u_backup,
+                        residual_base);
+                    addReducedFieldOperatorMatvec(
+                        std::span<const backends::ReducedFieldUpdate>(
+                            active_reduced_field_updates.data(),
+                            active_reduced_field_updates.size()),
+                        u_backup,
+                        residual_base);
+                }
+                logVectorComponentNorms(transient.system(), u_backup, "linear probe x");
+                logVectorTopEntries(transient.system(), u_backup, "linear probe x", 8u);
+                logVectorComponentNorms(transient.system(), residual_base, "linear probe Jx");
+                logVectorTopEntries(transient.system(), residual_base, "linear probe Jx", 8u);
+
+                for (std::size_t ridx = 0; ridx < effective_rank_one_updates.size(); ++ridx) {
+                    u_backup.zero();
+                    auto probe_view = u_backup.createAssemblyView();
+                    FE_CHECK_NOT_NULL(probe_view.get(),
+                                      "NewtonSolver: rank-one probe view");
+                    probe_view->beginAssemblyPhase();
+                    for (const auto& [dof, value] : effective_rank_one_updates[ridx].v) {
+                        if (std::abs(value) > Real(1e-30)) {
+                            probe_view->addVectorEntry(dof,
+                                                       value,
+                                                       assembly::AddMode::Add);
+                        }
+                    }
+                    probe_view->finalizeAssembly();
+                    u_backup.updateGhosts();
+
+                    residual_base.zero();
+                    J.mult(u_backup, residual_base);
+                    if (has_native_rank_one_updates) {
+                        addRankOneOperatorMatvec(
+                            std::span<const backends::RankOneUpdate>(effective_rank_one_updates.data(),
+                                                                     effective_rank_one_updates.size()),
+                            u_backup,
+                            residual_base);
+                        addReducedFieldOperatorMatvec(
+                            std::span<const backends::ReducedFieldUpdate>(
+                                active_reduced_field_updates.data(),
+                                active_reduced_field_updates.size()),
+                            u_backup,
+                            residual_base);
+                    }
+
+                    const auto label_x =
+                        "rank-one probe x[" + std::to_string(ridx) + "]";
+                    const auto label_jx =
+                        "rank-one probe Jx[" + std::to_string(ridx) + "]";
+                    logVectorComponentNorms(transient.system(), u_backup, label_x);
+                    logVectorTopEntries(transient.system(), u_backup, label_x, 8u);
+                    logVectorComponentNorms(transient.system(), residual_base, label_jx);
+                    logVectorTopEntries(transient.system(), residual_base, label_jx, 8u);
+                }
+
+                if (base_linear_options.block_layout.has_value()) {
+                    const auto* constraint_block =
+                        base_linear_options.block_layout->constraintFieldBlock();
+                    if (constraint_block != nullptr &&
+                        base_linear_options.block_layout->totalComponents() > 0) {
+                        const auto& fmap = transient.system().fieldMap();
+                        std::vector<int> field_component_offsets(fmap.numFields(), 0);
+                        int component_offset = 0;
+                        for (std::size_t field_idx = 0; field_idx < fmap.numFields(); ++field_idx) {
+                            field_component_offsets[field_idx] = component_offset;
+                            component_offset += fmap.numComponents(field_idx);
+                        }
+                        u_backup.zero();
+                        auto probe_view = u_backup.createAssemblyView();
+                        FE_CHECK_NOT_NULL(probe_view.get(),
+                                          "NewtonSolver: constraint-only probe view");
+                        probe_view->beginAssemblyPhase();
+                        for (const auto dof : owned_dofs) {
+                            const auto comp = fmap.getComponentOfDof(dof);
+                            if (!comp) {
+                                continue;
+                            }
+                            const auto field_idx =
+                                static_cast<std::size_t>(std::max(comp->first, 0));
+                            if (field_idx >= fmap.numFields()) {
+                                continue;
+                            }
+                            const int block_comp =
+                                field_component_offsets[field_idx] + static_cast<int>(comp->second);
+                            if (block_comp < constraint_block->start_component ||
+                                block_comp >= constraint_block->start_component +
+                                                  constraint_block->n_components) {
+                                continue;
+                            }
+                            probe_view->addVectorEntry(dof,
+                                                       static_cast<Real>(1.0),
+                                                       assembly::AddMode::Insert);
+                        }
+                        probe_view->finalizeAssembly();
+                        u_backup.updateGhosts();
+
+                        residual_base.zero();
+                        J.mult(u_backup, residual_base);
+                        logVectorComponentNorms(
+                            transient.system(), u_backup, "constraint-only probe x");
+                        logVectorTopEntries(
+                            transient.system(), u_backup, "constraint-only probe x", 8u);
+                        logVectorComponentNorms(
+                            transient.system(), residual_base, "constraint-only probe Jx");
+                        logVectorTopEntries(
+                            transient.system(), residual_base, "constraint-only probe Jx", 8u);
+                    }
+                }
+            }
             ntp0 = NTP();
             report.linear = linear.solve(J, du, *linear_rhs);
             ntp_linear += NTP() - ntp0;
             ntp_linear_iters_total += report.linear.iterations;
+            ++primary_linear_solve_call_index;
+            std::optional<std::vector<Real>> first_linear_dense_rhs;
+            std::optional<std::vector<Real>> first_linear_dense_du_raw;
+            if (!first_linear_vector_dumped && it == 0 && ptc_retries == 0) {
+                if (const auto dump_prefix = firstLinearVectorDumpPrefix()) {
+                    first_linear_dense_rhs = gatherGlobalDenseVectorFromOwnedEntries(
+                        *linear_rhs, static_cast<std::size_t>(J.numRows()), owned_dofs);
+                    first_linear_dense_du_raw = gatherGlobalDenseVectorFromOwnedEntries(
+                        du, static_cast<std::size_t>(J.numRows()), owned_dofs);
+                }
+            }
             if (oopTraceEnabled()) {
                 std::ostringstream oss;
                 oss << "NewtonSolver: post-linear.solve du_norm=" << du.norm()
@@ -4609,10 +5272,82 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 traceLog(oss.str());
             }
             normalizeFsilsPostSolveIncrementIfNeeded(du);
+            if (!first_linear_vector_dumped && it == 0 && ptc_retries == 0) {
+                if (const auto dump_prefix = firstLinearVectorDumpPrefix()) {
+                    const auto dense_du_normalized = gatherGlobalDenseVectorFromOwnedEntries(
+                        du, static_cast<std::size_t>(J.numRows()), owned_dofs);
+                    std::optional<std::vector<ScalarFieldVertexDumpRecord>> scalar_field_vertex_records;
+                    std::optional<std::string> scalar_field_vertex_name;
+                    if (const auto field_idx =
+                            selectPreferredScalarVertexDumpFieldIndex(transient.system());
+                        field_idx.has_value()) {
+                        scalar_field_vertex_records =
+                            gatherScalarFieldVertexDumpRecords(transient.system(), du, *field_idx);
+                        scalar_field_vertex_name =
+                            transient.system().fieldMap().getField(*field_idx).name;
+                    }
+                    if (mpiRank() == 0) {
+                        FE_THROW_IF(!first_linear_dense_rhs.has_value() ||
+                                        !first_linear_dense_du_raw.has_value(),
+                                    systems::InvalidStateException,
+                                    "NewtonSolver: first linear vector dump buffers missing");
+                        writeDenseVectorDump(*dump_prefix + ".rhs.txt", *first_linear_dense_rhs);
+                        writeDenseVectorDump(*dump_prefix + ".du_raw.txt", *first_linear_dense_du_raw);
+                        writeDenseVectorDump(*dump_prefix + ".du_normalized.txt", dense_du_normalized);
+                        if (scalar_field_vertex_records.has_value() &&
+                            scalar_field_vertex_name.has_value()) {
+                            writeScalarFieldVertexDumpRecords(
+                                *dump_prefix + ".scalar_vertex_records.txt",
+                                *scalar_field_vertex_name,
+                                *scalar_field_vertex_records);
+                        }
+                    }
+                    first_linear_vector_dumped = true;
+                }
+            }
+            if (linearSolveHistoryEnabled()) {
+                const int max_calls = linearSolveHistoryMaxCalls();
+                if (max_calls < 0 || primary_linear_solve_call_index <= max_calls) {
+                    const Real rhs_norm = linear_rhs->norm();
+                    if (mpiRank() == 0) {
+                        std::ostringstream oss;
+                        oss << "NewtonSolver: linear solve history"
+                            << " call=" << primary_linear_solve_call_index
+                            << " newton_it=" << it
+                            << " ptc_retries=" << ptc_retries
+                            << " rhs_norm=" << rhs_norm
+                            << " residual_before=" << current_residual_norm
+                            << " converged=" << report.linear.converged
+                            << " iters=" << report.linear.iterations
+                            << " r0=" << report.linear.initial_residual_norm
+                            << " rn=" << report.linear.final_residual_norm
+                            << " rel=" << report.linear.relative_residual
+                            << " outer=" << report.linear.blockschur_outer_iterations
+                            << " mom_solves=" << report.linear.blockschur_momentum_solve_calls
+                            << " mom_iters=" << report.linear.blockschur_momentum_iterations
+                            << " schur_solves=" << report.linear.blockschur_schur_solve_calls
+                            << " schur_iters=" << report.linear.blockschur_schur_iterations
+                            << " native_rank_one=" << native_direct_face_mode_count
+                            << " reduced_updates=" << active_reduced_field_updates.size()
+                            << " grouped_couplings=" << grouped_bordered_field_couplings.size()
+                            << " condensed_bordered=" << (condensed_bordered_active ? 1 : 0)
+                            << " msg='" << report.linear.message << "'";
+                        FE_LOG_INFO(oss.str());
+                    }
+                }
+            }
             if (oopTraceEnabled()) {
                 std::ostringstream oss;
                 oss << "NewtonSolver: post-normalize du_norm=" << du.norm();
                 traceLog(oss.str());
+            }
+            if (linearSolveComponentNormsEnabled()) {
+                const int max_newton_it = linearSolveComponentNormsMaxNewtonIt();
+                if (max_newton_it < 0 || it <= max_newton_it) {
+                    const std::string label =
+                        "du after linear solve [newton_it=" + std::to_string(it) + "]";
+                    logVectorComponentNorms(transient.system(), du, label);
+                }
             }
             if (newtonDirectionCheckEnabled()) {
                 residual_scratch.zero();
@@ -4800,241 +5535,406 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             du.zero();
         }
 
+        auto gatherDenseVector = [&](backends::GenericVector& vec, std::size_t n) {
+            return gatherGlobalDenseVectorFromOwnedEntries(vec, n, owned_dofs);
+        };
+
+        auto scatterDenseVector = [](backends::GenericVector& vec, std::span<const Real> dense) {
+            auto view = vec.createAssemblyView();
+            FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: bordered dense scatter view");
+            view->beginAssemblyPhase();
+            for (std::size_t k = 0; k < dense.size(); ++k) {
+                view->addVectorEntry(static_cast<GlobalIndex>(k),
+                                     dense[k],
+                                     assembly::AddMode::Insert);
+            }
+            view->finalizeAssembly();
+        };
+
+        auto recoverExplicitBorderedCorrection =
+            [&](const systems::FESystem::BorderedCouplingData& solve_bordered,
+                std::span<const Real> initial_dense_du) {
+                const auto nf = solve_bordered.n_field_dofs;
+                const auto na = static_cast<std::size_t>(solve_bordered.n_aux);
+                FE_THROW_IF(nf != initial_dense_du.size(),
+                            systems::InvalidStateException,
+                            "NewtonSolver: bordered recovery field size mismatch");
+                FE_THROW_IF(solve_bordered.B.size() != nf * na ||
+                                solve_bordered.Ct.size() != nf * na ||
+                                solve_bordered.D.size() != na * na ||
+                                solve_bordered.g.size() != na,
+                            systems::InvalidStateException,
+                            "NewtonSolver: bordered coupling storage size mismatch");
+
+                std::vector<Real> dense_du(initial_dense_du.begin(), initial_dense_du.end());
+                std::vector<Real> solve_aux_delta;
+
+                // In this branch the dynamic bordered block has not been condensed into
+                // the main PDE operator. Native reduced/rank-one updates may still be
+                // active for direct outlet coupling and algebraic auxiliary elimination,
+                // but they do not include the dynamic -B D^{-1} C^T correction.
+                // Recover the bordered Schur step explicitly from K_eff^{-1} B.
+                const bool solve_already_includes_bordered_reduction = false;
+
+                if (solve_already_includes_bordered_reduction) {
+                    std::vector<Real> dense_Dinv;
+                    FE_THROW_IF(!invertDenseMatrix(solve_bordered.D, na, dense_Dinv),
+                                systems::InvalidStateException,
+                                "NewtonSolver: bordered auxiliary recovery D inversion failed");
+
+                    const auto direct_ct_du =
+                        projectCtDuFromDirectCouplingRecords(solve_bordered, dense_du);
+
+                    if (oopTraceEnabled()) {
+                        std::size_t covered_rows = 0;
+                        Real max_abs_diff = Real(0.0);
+                        for (std::size_t i = 0; i < na; ++i) {
+                            if (!direct_ct_du.row_covered[i]) {
+                                continue;
+                            }
+                            ++covered_rows;
+                            Real dense_row_value = Real(0.0);
+                            for (std::size_t k = 0; k < nf; ++k) {
+                                dense_row_value += solve_bordered.Ct[i * nf + k] * dense_du[k];
+                            }
+                            max_abs_diff = std::max(
+                                max_abs_diff,
+                                std::abs(direct_ct_du.values[i] - dense_row_value));
+                        }
+                        if (covered_rows > 0) {
+                            std::ostringstream oss;
+                            oss << "NewtonSolver: direct-record Ct projection"
+                                << " covered_rows=" << covered_rows
+                                << " max_abs_diff_vs_dense=" << max_abs_diff;
+                            traceLog(oss.str());
+                        }
+                    }
+
+                    solve_aux_delta.assign(na, Real(0.0));
+                    std::vector<Real> aux_rhs(na, Real(0.0));
+                    for (std::size_t i = 0; i < na; ++i) {
+                        Real aux_rhs_i = solve_bordered.g[i];
+                        if (direct_ct_du.row_covered[i]) {
+                            aux_rhs_i -= direct_ct_du.values[i];
+                        } else {
+                            for (std::size_t k = 0; k < nf; ++k) {
+                                aux_rhs_i -= solve_bordered.Ct[i * nf + k] * dense_du[k];
+                            }
+                        }
+                        aux_rhs[i] = aux_rhs_i;
+                    }
+                    for (std::size_t i = 0; i < na; ++i) {
+                        for (std::size_t j = 0; j < na; ++j) {
+                            solve_aux_delta[i] += dense_Dinv[i * na + j] * aux_rhs[j];
+                        }
+                    }
+                } else {
+                    const auto u0 = dense_du;
+                    std::vector<Real> z_columns(nf * na, 0.0);
+
+                    {
+                        SolverOptionsGuard bordered_solver_options_guard{linear, base_linear_options};
+                        const auto bordered_recovery_options =
+                            makeBorderedSolveOptions(base_linear_options);
+                        linear.setOptions(bordered_recovery_options);
+
+                        for (std::size_t j = 0; j < na; ++j) {
+                            restoreFsilsMatrixSnapshot(J, fsils_matrix_snapshot);
+
+                            residual_scratch.zero();
+                            {
+                                auto rhs_view = residual_scratch.createAssemblyView();
+                                FE_CHECK_NOT_NULL(rhs_view.get(), "NewtonSolver: bordered rhs view");
+                                rhs_view->beginAssemblyPhase();
+                                for (std::size_t row = 0; row < nf; ++row) {
+                                    const Real bij = solve_bordered.B[row + nf * j];
+                                    if (std::abs(bij) > Real(1e-30)) {
+                                        rhs_view->addVectorEntry(static_cast<GlobalIndex>(row),
+                                                                 bij,
+                                                                 assembly::AddMode::Add);
+                                    }
+                                }
+                                rhs_view->finalizeAssembly();
+                            }
+
+                            du.zero();
+                            ntp0 = NTP();
+                            const auto z_report = linear.solve(J, du, residual_scratch);
+                            ntp_linear += NTP() - ntp0;
+                            ntp_linear_iters_total += z_report.iterations;
+                            normalizeFsilsPostSolveIncrementIfNeeded(du);
+                            bool z_converged = z_report.converged;
+                            if (!z_converged &&
+                                has_native_rank_one_updates &&
+                                reportMeetsRequestedLinearTarget(z_report, base_linear_options)) {
+                                z_converged = true;
+                                if (oopTraceEnabled()) {
+                                    const Real rhs_norm =
+                                        std::max<Real>(static_cast<Real>(z_report.initial_residual_norm),
+                                                       static_cast<Real>(1e-30));
+                                    const Real target =
+                                        std::max(base_linear_options.abs_tol,
+                                                 base_linear_options.rel_tol * rhs_norm);
+                                    std::ostringstream oss;
+                                    oss << "NewtonSolver: accepting bordered K^{-1}B recovery at original target"
+                                        << " rn=" << z_report.final_residual_norm
+                                        << " target=" << target
+                                        << " iters=" << z_report.iterations;
+                                    traceLog(oss.str());
+                                }
+                            } else if (!z_converged &&
+                                       has_native_rank_one_updates &&
+                                       mpiMultiTaskActive() &&
+                                       reportMeetsRequestedLinearTargetWithinFactor(
+                                           z_report, base_linear_options, static_cast<Real>(4.0))) {
+                                z_converged = true;
+                                if (oopTraceEnabled()) {
+                                    const Real rhs_norm =
+                                        std::max<Real>(static_cast<Real>(z_report.initial_residual_norm),
+                                                       static_cast<Real>(1e-30));
+                                    const Real target =
+                                        std::max(base_linear_options.abs_tol,
+                                                 base_linear_options.rel_tol * rhs_norm);
+                                    std::ostringstream oss;
+                                    oss << "NewtonSolver: accepting bordered K^{-1}B recovery near target"
+                                        << " rn=" << z_report.final_residual_norm
+                                        << " target=" << target
+                                        << " factor=4"
+                                        << " iters=" << z_report.iterations;
+                                    traceLog(oss.str());
+                                }
+                            }
+                            FE_THROW_IF(!z_converged, FEException,
+                                        "NewtonSolver: bordered K^{-1}B solve did not converge: " +
+                                            z_report.message);
+
+                            const auto z_col = gatherDenseVector(du, nf);
+                            for (std::size_t row = 0; row < nf; ++row) {
+                                z_columns[j * nf + row] = z_col[row];
+                            }
+
+                            if (oopTraceEnabled()) {
+                                const auto z_norm = std::sqrt(std::inner_product(
+                                    z_col.begin(), z_col.end(), z_col.begin(), Real(0.0)));
+                                std::ostringstream oss;
+                                oss << "NewtonSolver: bordered column " << j
+                                    << " ||K^{-1}B_j||=" << z_norm
+                                    << " iters=" << z_report.iterations;
+                                traceLog(oss.str());
+                            }
+                        }
+                    }
+
+                    std::vector<Real> schur = solve_bordered.D;
+                    const auto direct_ct_u0 =
+                        projectCtDuFromDirectCouplingRecords(solve_bordered, u0);
+                    for (std::size_t j = 0; j < na; ++j) {
+                        const auto z_col =
+                            std::span<const Real>(z_columns.data() +
+                                                      static_cast<std::ptrdiff_t>(j * nf),
+                                                  nf);
+                        const auto direct_ct_z =
+                            projectCtDuFromDirectCouplingRecords(solve_bordered, z_col);
+                        for (std::size_t i = 0; i < na; ++i) {
+                            Real ctz = Real(0.0);
+                            if (direct_ct_z.row_covered[i]) {
+                                ctz = direct_ct_z.values[i];
+                            } else {
+                                for (std::size_t k = 0; k < nf; ++k) {
+                                    ctz += solve_bordered.Ct[i * nf + k] * z_columns[j * nf + k];
+                                }
+                            }
+                            schur[i * na + j] -= ctz;
+                        }
+                    }
+
+                    solve_aux_delta = solve_bordered.g;
+                    for (std::size_t i = 0; i < na; ++i) {
+                        if (direct_ct_u0.row_covered[i]) {
+                            solve_aux_delta[i] -= direct_ct_u0.values[i];
+                        } else {
+                            for (std::size_t k = 0; k < nf; ++k) {
+                                solve_aux_delta[i] -= solve_bordered.Ct[i * nf + k] * u0[k];
+                            }
+                        }
+                    }
+
+                    FE_THROW_IF(!solveDenseLinearSystem(schur, solve_aux_delta),
+                                systems::InvalidStateException,
+                                "NewtonSolver: bordered Schur solve failed");
+
+                    for (std::size_t j = 0; j < na; ++j) {
+                        const Real dxj = solve_aux_delta[j];
+                        for (std::size_t k = 0; k < nf; ++k) {
+                            dense_du[k] -= z_columns[j * nf + k] * dxj;
+                        }
+                    }
+                }
+
+                return std::pair{std::move(dense_du), std::move(solve_aux_delta)};
+            };
+
+        auto recoverExactNativeRankOneWoodbury = [&]() -> std::vector<Real> {
+            const std::size_t nf = static_cast<std::size_t>(J.numRows());
+            const std::size_t rank = effective_rank_one_updates.size();
+            FE_THROW_IF(rank == 0u,
+                        systems::InvalidStateException,
+                        "NewtonSolver: Woodbury recovery requires native rank-one updates");
+
+            SolverOptionsGuard solver_options_guard{linear, base_linear_options};
+            const std::vector<backends::RankOneUpdate> empty_rank_one_updates;
+            const std::vector<backends::ReducedFieldUpdate> empty_reduced_updates;
+            const std::vector<backends::GroupedBorderedFieldCoupling> empty_grouped_couplings;
+            linear.setRankOneUpdates(empty_rank_one_updates);
+            linear.setReducedFieldUpdates(empty_reduced_updates);
+            linear.setGroupedBorderedFieldCouplings(empty_grouped_couplings);
+            auto woodbury_options = makeBorderedSolveOptions(base_linear_options);
+            woodbury_options.method = backends::SolverMethod::GMRES;
+            linear.setOptions(woodbury_options);
+
+            auto solveBaseSystem = [&](std::span<const std::pair<GlobalIndex, Real>> rhs_entries,
+                                       backends::GenericVector& rhs_vector,
+                                       bool preserve_existing_rhs) {
+                restoreFsilsMatrixSnapshot(J, fsils_matrix_snapshot);
+                if (!preserve_existing_rhs) {
+                    rhs_vector.zero();
+                    {
+                        auto rhs_view = rhs_vector.createAssemblyView();
+                        FE_CHECK_NOT_NULL(rhs_view.get(), "NewtonSolver: Woodbury rhs view");
+                        rhs_view->beginAssemblyPhase();
+                        for (const auto& [dof, value] : rhs_entries) {
+                            if (std::abs(value) > Real(1e-30)) {
+                                rhs_view->addVectorEntry(dof, value, assembly::AddMode::Add);
+                            }
+                        }
+                        rhs_view->finalizeAssembly();
+                    }
+                }
+
+                du.zero();
+                ntp0 = NTP();
+                const auto solve_report = linear.solve(J, du, rhs_vector);
+                ntp_linear += NTP() - ntp0;
+                ntp_linear_iters_total += solve_report.iterations;
+                normalizeFsilsPostSolveIncrementIfNeeded(du);
+                bool solve_ok = solve_report.converged ||
+                                reportMeetsRequestedLinearTarget(
+                                    solve_report, base_linear_options);
+                if (!solve_ok &&
+                    std::isfinite(solve_report.relative_residual) &&
+                    solve_report.relative_residual <= static_cast<Real>(5e-2)) {
+                    solve_ok = true;
+                    if (oopTraceEnabled()) {
+                        std::ostringstream oss;
+                        oss << "NewtonSolver: accepting Woodbury base solve at relaxed relative target"
+                            << " rel=" << solve_report.relative_residual
+                            << " iters=" << solve_report.iterations;
+                        traceLog(oss.str());
+                    }
+                }
+                FE_THROW_IF(!solve_ok,
+                            FEException,
+                            "NewtonSolver: Woodbury recovery base solve did not converge: " +
+                                solve_report.message);
+                return gatherDenseVector(du, nf);
+            };
+
+            copyVector(residual_scratch, r);
+            std::vector<Real> base_solution =
+                solveBaseSystem({}, residual_scratch, /*preserve_existing_rhs=*/true);
+            std::vector<Real> jinv_v(rank * nf, Real(0.0));
+            std::vector<Real> rhs_small(rank, Real(0.0));
+            std::vector<Real> small(rank * rank, Real(0.0));
+
+            for (std::size_t j = 0; j < rank; ++j) {
+                const auto column =
+                    solveBaseSystem(effective_rank_one_updates[j].v,
+                                    residual_scratch,
+                                    /*preserve_existing_rhs=*/false);
+                for (std::size_t row = 0; row < nf; ++row) {
+                    jinv_v[j * nf + row] = column[row];
+                }
+            }
+
+            auto sparseDenseDot = [&](std::span<const std::pair<GlobalIndex, Real>> sparse,
+                                      std::span<const Real> dense) {
+                Real value = Real(0.0);
+                for (const auto& [dof, coeff] : sparse) {
+                    const auto idx = static_cast<std::size_t>(dof);
+                    FE_THROW_IF(idx >= dense.size(),
+                                systems::InvalidStateException,
+                                "NewtonSolver: Woodbury dense dot index out of range");
+                    value += coeff * dense[idx];
+                }
+                return mpiAllreduceSumIfActive(value);
+            };
+
+            for (std::size_t i = 0; i < rank; ++i) {
+                rhs_small[i] = sparseDenseDot(effective_rank_one_updates[i].v, base_solution);
+                FE_THROW_IF(std::abs(effective_rank_one_updates[i].sigma) <= Real(1e-30),
+                            systems::InvalidStateException,
+                            "NewtonSolver: Woodbury recovery encountered zero sigma");
+                for (std::size_t j = 0; j < rank; ++j) {
+                    small[i * rank + j] =
+                        sparseDenseDot(effective_rank_one_updates[i].v,
+                                       std::span<const Real>(jinv_v.data() +
+                                                                 static_cast<std::ptrdiff_t>(j * nf),
+                                                             nf));
+                }
+                small[i * rank + i] += Real(1.0) / effective_rank_one_updates[i].sigma;
+            }
+
+            FE_THROW_IF(!solveDenseLinearSystem(small, rhs_small),
+                        systems::InvalidStateException,
+                        "NewtonSolver: Woodbury recovery dense solve failed");
+
+            for (std::size_t j = 0; j < rank; ++j) {
+                const Real alpha = rhs_small[j];
+                for (std::size_t row = 0; row < nf; ++row) {
+                    base_solution[row] -= jinv_v[j * nf + row] * alpha;
+                }
+            }
+
+            if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: exact native rank-one Woodbury recovery"
+                    << " rank=" << rank;
+                for (std::size_t i = 0; i < rank; ++i) {
+                    oss << " alpha[" << i << "]=" << rhs_small[i];
+                }
+                traceLog(oss.str());
+            }
+
+            linear.setRankOneUpdates(effective_rank_one_updates);
+            linear.setReducedFieldUpdates(active_reduced_field_updates);
+            linear.setGroupedBorderedFieldCouplings(grouped_bordered_field_couplings);
+
+            return base_solution;
+        };
+
+        if (exactNativeRankOneWoodburyRecoveryEnabled() &&
+            it < exactNativeRankOneWoodburyRecoveryMaxNewtonIters() &&
+            mpiMultiTaskActive() &&
+            has_native_direct_face_only_updates &&
+            !has_solve_bordered &&
+            !condensed_bordered_active &&
+            grouped_bordered_field_couplings.empty()) {
+            auto dense_du = recoverExactNativeRankOneWoodbury();
+            scatterDenseVector(du, dense_du);
+        }
+
         if (has_solve_bordered && !condensed_bordered_active) {
             const auto& solve_bordered = *solve_bordered_ptr;
             const auto nf = solve_bordered.n_field_dofs;
             const auto na = static_cast<std::size_t>(solve_bordered.n_aux);
             FE_THROW_IF(nf != static_cast<std::size_t>(du.size()), systems::InvalidStateException,
                         "NewtonSolver: bordered PDE block size does not match solution size");
-            FE_THROW_IF(solve_bordered.B.size() != nf * na ||
-                            solve_bordered.Ct.size() != nf * na ||
-                            solve_bordered.D.size() != na * na ||
-                            solve_bordered.g.size() != na,
-                        systems::InvalidStateException,
-                        "NewtonSolver: bordered coupling storage size mismatch");
-
-            auto gatherDenseVector = [&](backends::GenericVector& vec, std::size_t n) {
-                return gatherGlobalDenseVectorFromOwnedEntries(vec, n, owned_dofs);
-            };
-
-            auto scatterDenseVector = [](backends::GenericVector& vec, std::span<const Real> dense) {
-                auto view = vec.createAssemblyView();
-                FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: bordered dense scatter view");
-                view->beginAssemblyPhase();
-                for (std::size_t k = 0; k < dense.size(); ++k) {
-                    view->addVectorEntry(static_cast<GlobalIndex>(k),
-                                         dense[k],
-                                         assembly::AddMode::Insert);
-                }
-                view->finalizeAssembly();
-            };
 
             copyVector(residual_base, du);
             auto dense_du = gatherDenseVector(residual_base, nf);
-
-            // In this branch the dynamic bordered block has not been condensed into
-            // the main PDE operator. Native reduced/rank-one updates may still be
-            // active for direct outlet coupling and algebraic auxiliary elimination,
-            // but they do not include the dynamic -B D^{-1} C^T correction.
-            // Recover the bordered Schur step explicitly from K_eff^{-1} B.
-            const bool solve_already_includes_bordered_reduction = false;
-
-            if (solve_already_includes_bordered_reduction) {
-                std::vector<Real> dense_Dinv;
-                FE_THROW_IF(!invertDenseMatrix(solve_bordered.D, na, dense_Dinv),
-                            systems::InvalidStateException,
-                            "NewtonSolver: bordered auxiliary recovery D inversion failed");
-
-                const auto direct_ct_du =
-                    projectCtDuFromDirectCouplingRecords(solve_bordered, dense_du);
-
-                if (oopTraceEnabled()) {
-                    std::size_t covered_rows = 0;
-                    Real max_abs_diff = Real(0.0);
-                    for (std::size_t i = 0; i < na; ++i) {
-                        if (!direct_ct_du.row_covered[i]) {
-                            continue;
-                        }
-                        ++covered_rows;
-                        Real dense_row_value = Real(0.0);
-                        for (std::size_t k = 0; k < nf; ++k) {
-                            dense_row_value += solve_bordered.Ct[i * nf + k] * dense_du[k];
-                        }
-                        max_abs_diff = std::max(
-                            max_abs_diff,
-                            std::abs(direct_ct_du.values[i] - dense_row_value));
-                    }
-                    if (covered_rows > 0) {
-                        std::ostringstream oss;
-                        oss << "NewtonSolver: direct-record Ct projection"
-                            << " covered_rows=" << covered_rows
-                            << " max_abs_diff_vs_dense=" << max_abs_diff;
-                        traceLog(oss.str());
-                    }
-                }
-
-                std::vector<Real> aux_rhs(na, Real(0.0));
-                for (std::size_t i = 0; i < na; ++i) {
-                    Real value = solve_bordered.g[i];
-                    if (direct_ct_du.row_covered[i]) {
-                        value -= direct_ct_du.values[i];
-                    } else {
-                        for (std::size_t k = 0; k < nf; ++k) {
-                            value -= solve_bordered.Ct[i * nf + k] * dense_du[k];
-                        }
-                    }
-                    aux_rhs[i] = value;
-                }
-
-                solve_aux_delta.assign(na, Real(0.0));
-                for (std::size_t i = 0; i < na; ++i) {
-                    for (std::size_t j = 0; j < na; ++j) {
-                        solve_aux_delta[i] += dense_Dinv[i * na + j] * aux_rhs[j];
-                    }
-                }
-            } else {
-                const auto u0 = dense_du;
-                std::vector<Real> z_columns(nf * na, 0.0);
-
-                {
-                    SolverOptionsGuard bordered_solver_options_guard{linear, base_linear_options};
-                    const auto bordered_recovery_options =
-                        makeBorderedSolveOptions(base_linear_options);
-                    linear.setOptions(bordered_recovery_options);
-
-                    for (std::size_t j = 0; j < na; ++j) {
-                        restoreFsilsMatrixSnapshot(J, fsils_matrix_snapshot);
-
-                        residual_scratch.zero();
-                        {
-                            auto rhs_view = residual_scratch.createAssemblyView();
-                            FE_CHECK_NOT_NULL(rhs_view.get(), "NewtonSolver: bordered rhs view");
-                            rhs_view->beginAssemblyPhase();
-                            for (std::size_t row = 0; row < nf; ++row) {
-                                const Real bij = solve_bordered.B[row + nf * j];
-                                if (std::abs(bij) > Real(1e-30)) {
-                                    rhs_view->addVectorEntry(static_cast<GlobalIndex>(row),
-                                                             bij,
-                                                             assembly::AddMode::Add);
-                                }
-                            }
-                            rhs_view->finalizeAssembly();
-                        }
-
-                        du.zero();
-                        ntp0 = NTP();
-                        const auto z_report = linear.solve(J, du, residual_scratch);
-                        ntp_linear += NTP() - ntp0;
-                        ntp_linear_iters_total += z_report.iterations;
-                        normalizeFsilsPostSolveIncrementIfNeeded(du);
-                        bool z_converged = z_report.converged;
-                        if (!z_converged &&
-                            has_native_rank_one_updates &&
-                            reportMeetsRequestedLinearTarget(z_report, base_linear_options)) {
-                            z_converged = true;
-                            if (oopTraceEnabled()) {
-                                const Real rhs_norm =
-                                    std::max<Real>(static_cast<Real>(z_report.initial_residual_norm),
-                                                   static_cast<Real>(1e-30));
-                                const Real target =
-                                    std::max(base_linear_options.abs_tol,
-                                             base_linear_options.rel_tol * rhs_norm);
-                                std::ostringstream oss;
-                                oss << "NewtonSolver: accepting bordered K^{-1}B recovery at original target"
-                                    << " rn=" << z_report.final_residual_norm
-                                    << " target=" << target
-                                    << " iters=" << z_report.iterations;
-                                traceLog(oss.str());
-                            }
-                        } else if (!z_converged &&
-                                   has_native_rank_one_updates &&
-                                   mpiMultiTaskActive() &&
-                                   reportMeetsRequestedLinearTargetWithinFactor(
-                                       z_report, base_linear_options, static_cast<Real>(4.0))) {
-                            z_converged = true;
-                            if (oopTraceEnabled()) {
-                                const Real rhs_norm =
-                                    std::max<Real>(static_cast<Real>(z_report.initial_residual_norm),
-                                                   static_cast<Real>(1e-30));
-                                const Real target =
-                                    std::max(base_linear_options.abs_tol,
-                                             base_linear_options.rel_tol * rhs_norm);
-                                std::ostringstream oss;
-                                oss << "NewtonSolver: accepting bordered K^{-1}B recovery near target"
-                                    << " rn=" << z_report.final_residual_norm
-                                    << " target=" << target
-                                    << " factor=4"
-                                    << " iters=" << z_report.iterations;
-                                traceLog(oss.str());
-                            }
-                        }
-                        FE_THROW_IF(!z_converged, FEException,
-                                    "NewtonSolver: bordered K^{-1}B solve did not converge: " +
-                                        z_report.message);
-
-                        const auto z_col = gatherDenseVector(du, nf);
-                        for (std::size_t row = 0; row < nf; ++row) {
-                            z_columns[j * nf + row] = z_col[row];
-                        }
-
-                        if (oopTraceEnabled()) {
-                            const auto z_norm = std::sqrt(std::inner_product(
-                                z_col.begin(), z_col.end(), z_col.begin(), Real(0.0)));
-                            std::ostringstream oss;
-                            oss << "NewtonSolver: bordered column " << j
-                                << " ||K^{-1}B_j||=" << z_norm
-                                << " iters=" << z_report.iterations;
-                            traceLog(oss.str());
-                        }
-                    }
-                }
-
-                std::vector<Real> schur = solve_bordered.D;
-                const auto direct_ct_u0 =
-                    projectCtDuFromDirectCouplingRecords(solve_bordered, u0);
-                for (std::size_t j = 0; j < na; ++j) {
-                    const auto z_col =
-                        std::span<const Real>(z_columns.data() +
-                                                  static_cast<std::ptrdiff_t>(j * nf),
-                                              nf);
-                    const auto direct_ct_z =
-                        projectCtDuFromDirectCouplingRecords(solve_bordered, z_col);
-                    for (std::size_t i = 0; i < na; ++i) {
-                        Real ctz = Real(0.0);
-                        if (direct_ct_z.row_covered[i]) {
-                            ctz = direct_ct_z.values[i];
-                        } else {
-                            for (std::size_t k = 0; k < nf; ++k) {
-                                ctz += solve_bordered.Ct[i * nf + k] * z_columns[j * nf + k];
-                            }
-                        }
-                        schur[i * na + j] -= ctz;
-                    }
-                }
-
-                solve_aux_delta = solve_bordered.g;
-                for (std::size_t i = 0; i < na; ++i) {
-                    if (direct_ct_u0.row_covered[i]) {
-                        solve_aux_delta[i] -= direct_ct_u0.values[i];
-                    } else {
-                        for (std::size_t k = 0; k < nf; ++k) {
-                            solve_aux_delta[i] -= solve_bordered.Ct[i * nf + k] * u0[k];
-                        }
-                    }
-                }
-
-                FE_THROW_IF(!solveDenseLinearSystem(schur, solve_aux_delta),
-                            systems::InvalidStateException,
-                            "NewtonSolver: bordered Schur solve failed");
-
-                for (std::size_t j = 0; j < na; ++j) {
-                    const Real dxj = solve_aux_delta[j];
-                    for (std::size_t k = 0; k < nf; ++k) {
-                        dense_du[k] -= z_columns[j * nf + k] * dxj;
-                    }
-                }
-                scatterDenseVector(du, dense_du);
-            }
+            std::tie(dense_du, solve_aux_delta) =
+                recoverExplicitBorderedCorrection(solve_bordered, dense_du);
+            scatterDenseVector(du, dense_du);
 
             aux_delta = recoverAuxiliaryDeltaFromReduction(
                 algebraic_aux_reduction, dense_du, solve_aux_delta);
@@ -5164,11 +6064,978 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 traceLog(lin_oss.str());
             }
         } else if (algebraic_aux_reduction.active) {
-            const auto dense_du =
+            auto dense_du =
                 gatherGlobalDenseVectorFromOwnedEntries(du, static_cast<std::size_t>(J.numRows()), owned_dofs);
-            aux_delta = recoverAuxiliaryDeltaFromReduction(
-                algebraic_aux_reduction, dense_du, std::span<const Real>{});
+            const bool use_pure_algebraic_bordered_recovery =
+                pureAlgebraicBorderedRecoveryEnabled() &&
+                has_bordered &&
+                algebraic_aux_reduction.dynamic_indices.empty();
+            if (use_pure_algebraic_bordered_recovery) {
+                if (oopTraceEnabled()) {
+                    traceLog("NewtonSolver: applying explicit bordered recovery for pure algebraic auxiliary block");
+                }
+                std::tie(dense_du, solve_aux_delta) =
+                    recoverExplicitBorderedCorrection(bordered_full, dense_du);
+                scatterDenseVector(du, dense_du);
+                aux_delta = solve_aux_delta;
+            } else {
+                aux_delta = recoverAuxiliaryDeltaFromReduction(
+                    algebraic_aux_reduction, dense_du, std::span<const Real>{});
+            }
         }
+
+        auto maybeApplyMpiLinearSubspaceRecovery = [&]() {
+            const bool enabled = mpiLinearSubspaceRecoveryEnabled();
+            const bool mpi_active = mpiMultiTaskActive();
+            const bool iter_allowed = it < mpiLinearSubspaceRecoveryMaxNewtonIters();
+            const bool allow_local_condensed = !use_local_condensed_recovery;
+            const bool direct_low_rank_only =
+                has_native_direct_face_only_updates ||
+                has_native_direct_only_reduced_updates;
+            if (enabled && oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: MPI linear subspace recovery entry"
+                    << " mpi_active=" << (mpi_active ? 1 : 0)
+                    << " iter_allowed=" << (iter_allowed ? 1 : 0)
+                    << " allow_local_condensed=" << (allow_local_condensed ? 1 : 0)
+                    << " direct_low_rank_only=" << (direct_low_rank_only ? 1 : 0)
+                    << " direct_face_only=" << (has_native_direct_face_only_updates ? 1 : 0)
+                    << " direct_reduced_only=" << (has_native_direct_only_reduced_updates ? 1 : 0)
+                    << " it=" << it
+                    << " rank_one_updates=" << effective_rank_one_updates.size()
+                    << " reduced_updates=" << active_reduced_field_updates.size()
+                    << " grouped_couplings=" << grouped_bordered_field_couplings.size()
+                    << " has_solve_bordered=" << (has_solve_bordered ? 1 : 0)
+                    << " condensed_bordered_active=" << (condensed_bordered_active ? 1 : 0);
+                traceLog(oss.str());
+            }
+            if (!enabled ||
+                !mpi_active ||
+                !iter_allowed ||
+                !allow_local_condensed ||
+                !direct_low_rank_only) {
+                if (enabled && oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: MPI linear subspace recovery gate"
+                        << " enabled=" << (enabled ? 1 : 0)
+                        << " mpi_active=" << (mpi_active ? 1 : 0)
+                        << " iter_allowed=" << (iter_allowed ? 1 : 0)
+                        << " allow_local_condensed=" << (allow_local_condensed ? 1 : 0)
+                        << " direct_low_rank_only=" << (direct_low_rank_only ? 1 : 0)
+                        << " direct_face_only=" << (has_native_direct_face_only_updates ? 1 : 0)
+                        << " direct_reduced_only=" << (has_native_direct_only_reduced_updates ? 1 : 0)
+                        << " it=" << it
+                        << " rank_one_updates=" << effective_rank_one_updates.size()
+                        << " reduced_updates=" << active_reduced_field_updates.size()
+                        << " grouped_couplings=" << grouped_bordered_field_couplings.size()
+                        << " has_solve_bordered=" << (has_solve_bordered ? 1 : 0)
+                        << " condensed_bordered_active=" << (condensed_bordered_active ? 1 : 0);
+                    traceLog(oss.str());
+                }
+                return;
+            }
+
+            struct DenseSubspaceColumn {
+                std::string label;
+                std::vector<Real> z_local;
+                std::vector<Real> az_local;
+            };
+
+            auto computeTrueLinearResidualVector =
+                [&](backends::GenericVector& x_vec,
+                    backends::GenericVector& residual_vec) -> Real {
+                    x_vec.updateGhosts();
+                    residual_vec.zero();
+                    J.mult(x_vec, residual_vec);
+                    if (!effective_rank_one_updates.empty()) {
+                        addRankOneOperatorMatvec(
+                            std::span<const backends::RankOneUpdate>(
+                                effective_rank_one_updates.data(),
+                                effective_rank_one_updates.size()),
+                            x_vec,
+                            residual_vec);
+                    }
+                    if (!active_reduced_field_updates.empty()) {
+                        addReducedFieldOperatorMatvec(
+                            std::span<const backends::ReducedFieldUpdate>(
+                                active_reduced_field_updates.data(),
+                                active_reduced_field_updates.size()),
+                            x_vec,
+                            residual_vec);
+                    }
+                    axpy(residual_vec, static_cast<Real>(-1.0), r);
+                    return residual_vec.norm();
+                };
+
+            const auto du_before_span = du.localSpan();
+            std::vector<Real> du_before_local(du_before_span.begin(), du_before_span.end());
+            const auto recovery_t0 = NTP();
+            const Real residual_norm_before =
+                computeTrueLinearResidualVector(du, u_backup);
+            const auto residual_before = u_backup.localSpan();
+            if (!(std::isfinite(static_cast<double>(residual_norm_before))) ||
+                residual_before.empty()) {
+                return;
+            }
+            if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: MPI linear subspace recovery baseline"
+                    << " residual=" << residual_norm_before
+                    << " t=" << (NTP() - recovery_t0);
+                traceLog(oss.str());
+            }
+
+            std::vector<DenseSubspaceColumn> columns;
+            columns.reserve(effective_rank_one_updates.size() + 1u);
+            std::optional<std::vector<Real>> custom_vector_local;
+
+            auto sparseColumnsEqual =
+                [](std::span<const std::pair<GlobalIndex, Real>> a,
+                   std::span<const std::pair<GlobalIndex, Real>> b) -> bool {
+                    if (a.size() != b.size()) {
+                        return false;
+                    }
+                    for (std::size_t i = 0; i < a.size(); ++i) {
+                        if (a[i].first != b[i].first ||
+                            std::abs(a[i].second - b[i].second) > Real(1e-30)) {
+                            return false;
+                        }
+                    }
+                    return true;
+                };
+
+            auto appendSparseColumn =
+                [&](std::string label,
+                    std::span<const std::pair<GlobalIndex, Real>> entries) {
+                    residual_base.zero();
+                    auto z_view = residual_base.createAssemblyView();
+                    FE_CHECK_NOT_NULL(
+                        z_view.get(), "NewtonSolver: subspace recovery basis view");
+                    z_view->beginAssemblyPhase();
+                    for (const auto& [dof, value] : entries) {
+                        if (std::abs(value) > Real(1e-30)) {
+                            z_view->addVectorEntry(
+                                dof, value, assembly::AddMode::Add);
+                        }
+                    }
+                    z_view->finalizeAssembly();
+                    residual_base.updateGhosts();
+
+                    const auto z_span = residual_base.localSpan();
+                    const Real z_norm_sq = mpiAllreduceSumIfActive(std::inner_product(
+                        z_span.begin(), z_span.end(), z_span.begin(), Real(0.0)));
+                    if (!(z_norm_sq > Real(1e-30))) {
+                        return;
+                    }
+
+                    residual_scratch.zero();
+                    J.mult(residual_base, residual_scratch);
+                    if (!effective_rank_one_updates.empty()) {
+                        addRankOneOperatorMatvec(
+                            std::span<const backends::RankOneUpdate>(
+                                effective_rank_one_updates.data(),
+                                effective_rank_one_updates.size()),
+                            residual_base,
+                            residual_scratch);
+                    }
+                    if (!active_reduced_field_updates.empty()) {
+                        addReducedFieldOperatorMatvec(
+                            std::span<const backends::ReducedFieldUpdate>(
+                                active_reduced_field_updates.data(),
+                                active_reduced_field_updates.size()),
+                            residual_base,
+                            residual_scratch);
+                    }
+
+                    DenseSubspaceColumn col;
+                    col.label = std::move(label);
+                    col.z_local.assign(z_span.begin(), z_span.end());
+                    const auto az_span = residual_scratch.localSpan();
+                    col.az_local.assign(az_span.begin(), az_span.end());
+                    columns.push_back(std::move(col));
+                    if (oopTraceEnabled()) {
+                        std::ostringstream oss;
+                        oss << "NewtonSolver: MPI linear subspace recovery column"
+                            << " label=" << columns.back().label
+                            << " count=" << columns.size()
+                            << " t=" << (NTP() - recovery_t0);
+                        traceLog(oss.str());
+                    }
+                };
+
+            auto appendCurrentRecoveryVectorColumn = [&](std::string label) {
+                const auto z_span = residual_base.localSpan();
+                const Real z_norm_sq = mpiAllreduceSumIfActive(std::inner_product(
+                    z_span.begin(), z_span.end(), z_span.begin(), Real(0.0)));
+                if (!(z_norm_sq > Real(1e-30))) {
+                    return;
+                }
+
+                residual_scratch.zero();
+                J.mult(residual_base, residual_scratch);
+                if (!effective_rank_one_updates.empty()) {
+                    addRankOneOperatorMatvec(
+                        std::span<const backends::RankOneUpdate>(
+                            effective_rank_one_updates.data(),
+                            effective_rank_one_updates.size()),
+                        residual_base,
+                        residual_scratch);
+                }
+                if (!active_reduced_field_updates.empty()) {
+                    addReducedFieldOperatorMatvec(
+                        std::span<const backends::ReducedFieldUpdate>(
+                            active_reduced_field_updates.data(),
+                            active_reduced_field_updates.size()),
+                        residual_base,
+                        residual_scratch);
+                }
+
+                DenseSubspaceColumn col;
+                col.label = std::move(label);
+                col.z_local.assign(z_span.begin(), z_span.end());
+                const auto az_span = residual_scratch.localSpan();
+                col.az_local.assign(az_span.begin(), az_span.end());
+                columns.push_back(std::move(col));
+                if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: MPI linear subspace recovery column"
+                        << " label=" << columns.back().label
+                        << " count=" << columns.size()
+                        << " t=" << (NTP() - recovery_t0);
+                    traceLog(oss.str());
+                }
+            };
+
+            for (std::size_t j = 0; j < effective_rank_one_updates.size(); ++j) {
+                appendSparseColumn("rank1_" + std::to_string(j),
+                                   effective_rank_one_updates[j].v);
+            }
+            for (std::size_t j = 0; j < active_reduced_field_updates.size(); ++j) {
+                const auto& update = active_reduced_field_updates[j];
+                appendSparseColumn("reduced_right_" + std::to_string(j), update.right);
+                if (!sparseColumnsEqual(update.left, update.right)) {
+                    appendSparseColumn("reduced_left_" + std::to_string(j), update.left);
+                }
+            }
+
+            if (const char* vector_file = mpiLinearSubspaceRecoveryVectorFilePath()) {
+                auto loaded_vector = loadMpiLinearSubspaceVectorFromFile(
+                    vector_file, static_cast<std::size_t>(J.numRows()));
+                if (loaded_vector.has_value()) {
+                    residual_base.zero();
+                    auto custom_view = residual_base.createAssemblyView();
+                    FE_CHECK_NOT_NULL(
+                        custom_view.get(),
+                        "NewtonSolver: subspace recovery custom-file view");
+                    custom_view->beginAssemblyPhase();
+                    for (const auto dof : owned_dofs) {
+                        const auto idx = static_cast<std::size_t>(dof);
+                        if (idx >= loaded_vector->size()) {
+                            continue;
+                        }
+                        const Real value = (*loaded_vector)[idx];
+                        if (std::abs(value) > Real(1e-30)) {
+                            custom_view->addVectorEntry(
+                                dof, value, assembly::AddMode::Insert);
+                        }
+                    }
+                    custom_view->finalizeAssembly();
+                    residual_base.updateGhosts();
+                    {
+                        const auto custom_span = residual_base.localSpan();
+                        custom_vector_local.emplace(custom_span.begin(), custom_span.end());
+                    }
+                    appendCurrentRecoveryVectorColumn("custom_file_vector");
+                } else if (oopTraceEnabled()) {
+                    traceLog("NewtonSolver: failed to load MPI subspace recovery vector file '" +
+                             std::string(vector_file) + "'");
+                }
+            }
+
+            if (base_linear_options.block_layout.has_value()) {
+                const auto* constraint_block =
+                    base_linear_options.block_layout->constraintFieldBlock();
+                if (constraint_block != nullptr &&
+                    constraint_block->n_components == 1) {
+                    const auto& fmap = transient.system().fieldMap();
+                    std::vector<int> field_component_offsets(fmap.numFields(), 0);
+                    int component_offset = 0;
+                    for (std::size_t field_idx = 0; field_idx < fmap.numFields(); ++field_idx) {
+                        field_component_offsets[field_idx] = component_offset;
+                        component_offset += fmap.numComponents(field_idx);
+                    }
+
+                    residual_base.zero();
+                    auto z_view = residual_base.createAssemblyView();
+                    FE_CHECK_NOT_NULL(
+                        z_view.get(), "NewtonSolver: subspace recovery mean-mode view");
+                    z_view->beginAssemblyPhase();
+                    for (const auto dof : owned_dofs) {
+                        const auto comp = fmap.getComponentOfDof(dof);
+                        if (!comp) {
+                            continue;
+                        }
+                        const auto field_idx =
+                            static_cast<std::size_t>(std::max(comp->first, 0));
+                        if (field_idx >= fmap.numFields()) {
+                            continue;
+                        }
+                        const int block_comp =
+                            field_component_offsets[field_idx] +
+                            static_cast<int>(comp->second);
+                        if (block_comp == constraint_block->start_component) {
+                            z_view->addVectorEntry(
+                                dof, Real(1.0), assembly::AddMode::Insert);
+                        }
+                    }
+                    z_view->finalizeAssembly();
+                    residual_base.updateGhosts();
+                    appendCurrentRecoveryVectorColumn("constraint_mean");
+
+                    if (mpiLinearSubspaceRecoveryCoordinateModesEnabled()) {
+                        const auto* emap =
+                            transient.system().dofHandler().getEntityDofMap();
+                        if (emap != nullptr) {
+                            struct ConstraintCoordSample {
+                                GlobalIndex dof{INVALID_GLOBAL_INDEX};
+                                std::array<Real, 3> xyz{0.0, 0.0, 0.0};
+                            };
+
+                            std::vector<ConstraintCoordSample> constraint_coord_samples;
+                            constraint_coord_samples.reserve(
+                                static_cast<std::size_t>(std::max<GlobalIndex>(
+                                    static_cast<GlobalIndex>(0), owned_dofs.size())));
+                            std::array<double, 3> local_sum_xyz{0.0, 0.0, 0.0};
+                            std::array<double, 3> local_sum_xyz_sq{0.0, 0.0, 0.0};
+                            double local_coord_count = 0.0;
+
+                            for (const auto dof : owned_dofs) {
+                                const auto comp = fmap.getComponentOfDof(dof);
+                                if (!comp) {
+                                    continue;
+                                }
+                                const auto field_idx =
+                                    static_cast<std::size_t>(std::max(comp->first, 0));
+                                if (field_idx >= fmap.numFields()) {
+                                    continue;
+                                }
+                                const int block_comp =
+                                    field_component_offsets[field_idx] +
+                                    static_cast<int>(comp->second);
+                                if (block_comp != constraint_block->start_component) {
+                                    continue;
+                                }
+                                const auto ent = emap->getDofEntity(dof);
+                                if (!ent || ent->kind != dofs::EntityKind::Vertex) {
+                                    continue;
+                                }
+                                const auto xyz =
+                                    transient.system().meshAccess().getNodeCoordinates(ent->id);
+                                constraint_coord_samples.push_back(
+                                    ConstraintCoordSample{.dof = dof, .xyz = xyz});
+                                for (int d = 0; d < 3; ++d) {
+                                    const double value =
+                                        static_cast<double>(xyz[static_cast<std::size_t>(d)]);
+                                    local_sum_xyz[static_cast<std::size_t>(d)] += value;
+                                    local_sum_xyz_sq[static_cast<std::size_t>(d)] += value * value;
+                                }
+                                local_coord_count += 1.0;
+                            }
+
+                            const double global_coord_count =
+                                mpiAllreduceSumIfActive(local_coord_count);
+                            if (global_coord_count > 0.5 &&
+                                !constraint_coord_samples.empty()) {
+                                std::array<Real, 3> mean_xyz{0.0, 0.0, 0.0};
+                                std::array<Real, 3> mean_xyz_sq{0.0, 0.0, 0.0};
+                                for (int d = 0; d < 3; ++d) {
+                                    mean_xyz[static_cast<std::size_t>(d)] =
+                                        static_cast<Real>(
+                                            mpiAllreduceSumIfActive(
+                                                local_sum_xyz[static_cast<std::size_t>(d)]) /
+                                            global_coord_count);
+                                    mean_xyz_sq[static_cast<std::size_t>(d)] =
+                                        static_cast<Real>(
+                                            mpiAllreduceSumIfActive(
+                                                local_sum_xyz_sq[static_cast<std::size_t>(d)]) /
+                                            global_coord_count);
+                                }
+
+                                auto appendConstraintCoordinateMode =
+                                    [&](std::string label,
+                                        auto&& mode_fn) {
+                                        residual_base.zero();
+                                        auto coord_view = residual_base.createAssemblyView();
+                                        FE_CHECK_NOT_NULL(
+                                            coord_view.get(),
+                                            "NewtonSolver: subspace recovery coordinate-mode view");
+                                        coord_view->beginAssemblyPhase();
+                                        for (const auto& sample : constraint_coord_samples) {
+                                            const Real value = mode_fn(sample.xyz);
+                                            if (std::abs(value) > Real(1e-30)) {
+                                                coord_view->addVectorEntry(
+                                                    sample.dof,
+                                                    value,
+                                                    assembly::AddMode::Insert);
+                                            }
+                                        }
+                                        coord_view->finalizeAssembly();
+                                        residual_base.updateGhosts();
+                                        appendCurrentRecoveryVectorColumn(std::move(label));
+                                    };
+
+                                appendConstraintCoordinateMode(
+                                    "constraint_coord_x",
+                                    [&](const std::array<Real, 3>& xyz) {
+                                        return xyz[0] - mean_xyz[0];
+                                    });
+                                appendConstraintCoordinateMode(
+                                    "constraint_coord_y",
+                                    [&](const std::array<Real, 3>& xyz) {
+                                        return xyz[1] - mean_xyz[1];
+                                    });
+                                appendConstraintCoordinateMode(
+                                    "constraint_coord_z",
+                                    [&](const std::array<Real, 3>& xyz) {
+                                        return xyz[2] - mean_xyz[2];
+                                    });
+                                appendConstraintCoordinateMode(
+                                    "constraint_coord_x2",
+                                    [&](const std::array<Real, 3>& xyz) {
+                                        return xyz[0] * xyz[0] - mean_xyz_sq[0];
+                                    });
+                                appendConstraintCoordinateMode(
+                                    "constraint_coord_y2",
+                                    [&](const std::array<Real, 3>& xyz) {
+                                        return xyz[1] * xyz[1] - mean_xyz_sq[1];
+                                    });
+                                appendConstraintCoordinateMode(
+                                    "constraint_coord_z2",
+                                    [&](const std::array<Real, 3>& xyz) {
+                                        return xyz[2] * xyz[2] - mean_xyz_sq[2];
+                                    });
+                            }
+                        }
+                    }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+                    if (mpiLinearSubspaceRecoveryBoundaryIndicatorEnabled()) {
+                        const auto* sys_mesh = transient.system().mesh();
+                        if (sys_mesh != nullptr) {
+                            std::vector<int> boundary_markers;
+                            transient.system().meshAccess().forEachBoundaryFace(
+                                /*marker=*/-1,
+                                [&](GlobalIndex face_id, GlobalIndex /*cell_id*/) {
+                                    const int marker =
+                                        transient.system().meshAccess().getBoundaryFaceMarker(
+                                            face_id);
+                                    if (marker >= 0) {
+                                        boundary_markers.push_back(marker);
+                                    }
+                                });
+                            std::sort(boundary_markers.begin(), boundary_markers.end());
+                            boundary_markers.erase(
+                                std::unique(boundary_markers.begin(), boundary_markers.end()),
+                                boundary_markers.end());
+
+                            std::vector<GlobalIndex> boundary_constraint_dofs;
+                            const auto& system_dof_handler =
+                                transient.system().dofHandler();
+                            for (const int marker : boundary_markers) {
+                                auto marker_dofs = constraints::boundaryDofsByMarker(
+                                    *sys_mesh, system_dof_handler, marker);
+                                if (oopTraceEnabled()) {
+                                    std::ostringstream oss;
+                                    oss << "NewtonSolver: boundary-indicator marker probe"
+                                        << " marker=" << marker
+                                        << " dofs=" << marker_dofs.size();
+                                    if (!marker_dofs.empty()) {
+                                        oss << " first_dof=" << marker_dofs.front();
+                                    }
+                                    traceLog(oss.str());
+                                }
+                                for (const auto dof : marker_dofs) {
+                                    if (!owned_dofs.contains(dof)) {
+                                        continue;
+                                    }
+                                    const auto comp = fmap.getComponentOfDof(dof);
+                                    if (!comp) {
+                                        continue;
+                                    }
+                                    const auto field_idx = static_cast<std::size_t>(
+                                        std::max(comp->first, 0));
+                                    if (field_idx >= fmap.numFields()) {
+                                        continue;
+                                    }
+                                    const int block_comp =
+                                        field_component_offsets[field_idx] +
+                                        static_cast<int>(comp->second);
+                                    if (block_comp == constraint_block->start_component) {
+                                        boundary_constraint_dofs.push_back(dof);
+                                    }
+                                }
+                            }
+
+                            std::sort(boundary_constraint_dofs.begin(),
+                                      boundary_constraint_dofs.end());
+                            boundary_constraint_dofs.erase(
+                                std::unique(boundary_constraint_dofs.begin(),
+                                            boundary_constraint_dofs.end()),
+                                boundary_constraint_dofs.end());
+
+                            if (oopTraceEnabled()) {
+                                std::ostringstream oss;
+                                oss << "NewtonSolver: boundary-indicator summary"
+                                    << " markers=" << boundary_markers.size()
+                                    << " dofs=" << boundary_constraint_dofs.size();
+                                if (!boundary_constraint_dofs.empty()) {
+                                    oss << " first_dof=" << boundary_constraint_dofs.front();
+                                }
+                                traceLog(oss.str());
+                            }
+
+                            if (!boundary_constraint_dofs.empty()) {
+                                residual_base.zero();
+                                auto boundary_view = residual_base.createAssemblyView();
+                                FE_CHECK_NOT_NULL(
+                                    boundary_view.get(),
+                                    "NewtonSolver: subspace recovery boundary view");
+                                boundary_view->beginAssemblyPhase();
+                                for (const auto dof : boundary_constraint_dofs) {
+                                    boundary_view->addVectorEntry(
+                                        dof, Real(1.0), assembly::AddMode::Insert);
+                                }
+                                boundary_view->finalizeAssembly();
+                                residual_base.updateGhosts();
+                                appendCurrentRecoveryVectorColumn(
+                                    "constraint_boundary_indicator");
+                            }
+                        }
+                    }
+#endif
+
+#if FE_HAS_MPI
+                    int mpi_size = 1;
+                    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+                    if (mpi_size > 1) {
+                        int local_constraint_count = 0;
+                        for (const auto dof : owned_dofs) {
+                            const auto comp = fmap.getComponentOfDof(dof);
+                            if (!comp) {
+                                continue;
+                            }
+                            const auto field_idx =
+                                static_cast<std::size_t>(std::max(comp->first, 0));
+                            if (field_idx >= fmap.numFields()) {
+                                continue;
+                            }
+                            const int block_comp =
+                                field_component_offsets[field_idx] +
+                                static_cast<int>(comp->second);
+                            if (block_comp == constraint_block->start_component) {
+                                ++local_constraint_count;
+                            }
+                        }
+
+                        std::vector<int> rank_counts(static_cast<std::size_t>(mpi_size), 0);
+                        MPI_Allgather(&local_constraint_count,
+                                      1,
+                                      MPI_INT,
+                                      rank_counts.data(),
+                                      1,
+                                      MPI_INT,
+                                      MPI_COMM_WORLD);
+
+                        std::vector<int> active_ranks;
+                        active_ranks.reserve(static_cast<std::size_t>(mpi_size));
+                        for (int rank = 0; rank < mpi_size; ++rank) {
+                            if (rank_counts[static_cast<std::size_t>(rank)] > 0) {
+                                active_ranks.push_back(rank);
+                            }
+                        }
+
+                        if (active_ranks.size() >= 2u) {
+                            const int reference_rank = active_ranks.back();
+                            const int reference_count =
+                                rank_counts[static_cast<std::size_t>(reference_rank)];
+                            if (reference_count > 0) {
+                                for (const int coarse_rank : active_ranks) {
+                                    if (coarse_rank == reference_rank) {
+                                        continue;
+                                    }
+
+                                    residual_base.zero();
+                                    auto part_view = residual_base.createAssemblyView();
+                                    FE_CHECK_NOT_NULL(
+                                        part_view.get(),
+                                        "NewtonSolver: subspace recovery partition-mode view");
+                                    part_view->beginAssemblyPhase();
+                                    if (mpiRank() == coarse_rank) {
+                                        for (const auto dof : owned_dofs) {
+                                            const auto comp = fmap.getComponentOfDof(dof);
+                                            if (!comp) {
+                                                continue;
+                                            }
+                                            const auto field_idx = static_cast<std::size_t>(
+                                                std::max(comp->first, 0));
+                                            if (field_idx >= fmap.numFields()) {
+                                                continue;
+                                            }
+                                            const int block_comp =
+                                                field_component_offsets[field_idx] +
+                                                static_cast<int>(comp->second);
+                                            if (block_comp == constraint_block->start_component) {
+                                                part_view->addVectorEntry(
+                                                    dof, Real(1.0), assembly::AddMode::Insert);
+                                            }
+                                        }
+                                    } else if (mpiRank() == reference_rank) {
+                                        const Real weight = -static_cast<Real>(
+                                            static_cast<double>(
+                                                rank_counts[static_cast<std::size_t>(coarse_rank)]) /
+                                            static_cast<double>(reference_count));
+                                        for (const auto dof : owned_dofs) {
+                                            const auto comp = fmap.getComponentOfDof(dof);
+                                            if (!comp) {
+                                                continue;
+                                            }
+                                            const auto field_idx = static_cast<std::size_t>(
+                                                std::max(comp->first, 0));
+                                            if (field_idx >= fmap.numFields()) {
+                                                continue;
+                                            }
+                                            const int block_comp =
+                                                field_component_offsets[field_idx] +
+                                                static_cast<int>(comp->second);
+                                            if (block_comp == constraint_block->start_component) {
+                                                part_view->addVectorEntry(
+                                                    dof, weight, assembly::AddMode::Insert);
+                                            }
+                                        }
+                                    }
+                                    part_view->finalizeAssembly();
+                                    residual_base.updateGhosts();
+                                    appendCurrentRecoveryVectorColumn(
+                                        "constraint_partition_" + std::to_string(coarse_rank));
+                                }
+                            }
+                        }
+                    }
+#endif
+                }
+            }
+
+            const std::size_t rank = columns.size();
+            if (rank == 0u) {
+                return;
+            }
+
+            std::vector<Real> dense_m(rank * rank, Real(0.0));
+            std::vector<Real> rhs_small(rank, Real(0.0));
+            for (std::size_t i = 0; i < rank; ++i) {
+                rhs_small[i] = -mpiAllreduceSumIfActive(std::inner_product(
+                    residual_before.begin(),
+                    residual_before.end(),
+                    columns[i].az_local.begin(),
+                    Real(0.0)));
+                for (std::size_t j = 0; j < rank; ++j) {
+                    dense_m[i * rank + j] = mpiAllreduceSumIfActive(std::inner_product(
+                        columns[i].az_local.begin(),
+                        columns[i].az_local.end(),
+                        columns[j].az_local.begin(),
+                        Real(0.0)));
+                }
+                dense_m[i * rank + i] += static_cast<Real>(1e-30);
+            }
+
+            if (!solveDenseLinearSystem(dense_m, rhs_small)) {
+                return;
+            }
+            if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: MPI linear subspace recovery dense solve"
+                    << " rank=" << rank
+                    << " t=" << (NTP() - recovery_t0);
+                traceLog(oss.str());
+            }
+
+            {
+                auto du_trial = du.localSpan();
+                FE_THROW_IF(du_trial.size() != du_before_local.size(),
+                            systems::InvalidStateException,
+                            "NewtonSolver: MPI subspace recovery local size mismatch");
+                std::copy(du_before_local.begin(), du_before_local.end(), du_trial.begin());
+                for (std::size_t j = 0; j < rank; ++j) {
+                    const Real alpha = rhs_small[j];
+                    const auto& z_local = columns[j].z_local;
+                    FE_THROW_IF(z_local.size() != du_trial.size(),
+                                systems::InvalidStateException,
+                                "NewtonSolver: MPI subspace recovery basis size mismatch");
+                    for (std::size_t k = 0; k < du_trial.size(); ++k) {
+                        du_trial[k] += alpha * z_local[k];
+                    }
+                }
+            }
+            du.updateGhosts();
+
+            const Real residual_norm_after =
+                computeTrueLinearResidualVector(du, residual_base);
+            if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: MPI linear subspace recovery trial residual"
+                    << " residual=" << residual_norm_after
+                    << " t=" << (NTP() - recovery_t0);
+                traceLog(oss.str());
+            }
+            const Real required_improvement =
+                std::max<Real>(static_cast<Real>(1e-12),
+                               residual_norm_before * static_cast<Real>(1e-4));
+            const bool accept =
+                std::isfinite(static_cast<double>(residual_norm_after)) &&
+                residual_norm_after + required_improvement < residual_norm_before;
+
+            if (!accept) {
+                auto du_restore = du.localSpan();
+                FE_THROW_IF(du_restore.size() != du_before_local.size(),
+                            systems::InvalidStateException,
+                            "NewtonSolver: MPI subspace recovery restore size mismatch");
+                std::copy(du_before_local.begin(), du_before_local.end(), du_restore.begin());
+                du.updateGhosts();
+            } else if (algebraic_aux_reduction.active) {
+                const auto dense_du_trial =
+                    gatherDenseVector(du, static_cast<std::size_t>(J.numRows()));
+                aux_delta = recoverAuxiliaryDeltaFromReduction(
+                    algebraic_aux_reduction, dense_du_trial, std::span<const Real>{});
+            }
+
+            if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: MPI linear subspace recovery"
+                    << " accept=" << (accept ? 1 : 0)
+                    << " it=" << it
+                    << " residual_before=" << residual_norm_before
+                    << " residual_after=" << residual_norm_after;
+                for (std::size_t j = 0; j < rank; ++j) {
+                    oss << " " << columns[j].label << "=" << rhs_small[j];
+                }
+                traceLog(oss.str());
+            }
+
+            if (accept && mpiLinearSubspaceRecoveryNonlinearSearchEnabled()) {
+                const auto du_after_linear_recovery = du.localSpan();
+                std::vector<Real> correction_local(du_after_linear_recovery.size(), Real(0.0));
+                for (std::size_t k = 0; k < du_after_linear_recovery.size(); ++k) {
+                    correction_local[k] =
+                        du_after_linear_recovery[k] - du_before_local[k];
+                }
+                const Real correction_norm_sq = mpiAllreduceSumIfActive(std::inner_product(
+                    correction_local.begin(),
+                    correction_local.end(),
+                    correction_local.begin(),
+                    Real(0.0)));
+                if (correction_norm_sq > static_cast<Real>(1e-30)) {
+                    copyVector(u_backup, history.u());
+                    const auto bordered_backup = transient.system().borderedCoupling();
+
+                    auto evaluate_beta = [&](double beta, const char* phase) -> double {
+                        copyVector(history.u(), u_backup);
+                        transient.system().borderedCoupling() = bordered_backup;
+                        if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
+                            reg->invalidateAll();
+                        }
+
+                        residual_base.zero();
+                        {
+                            auto candidate_view = residual_base.localSpan();
+                            FE_THROW_IF(candidate_view.size() != du_before_local.size(),
+                                        systems::InvalidStateException,
+                                        "NewtonSolver: MPI nonlinear subspace candidate size mismatch");
+                            for (std::size_t k = 0; k < candidate_view.size(); ++k) {
+                                candidate_view[k] = du_before_local[k] +
+                                                    static_cast<Real>(beta) * correction_local[k];
+                            }
+                        }
+                        residual_base.updateGhosts();
+
+                        axpy(history.u(), static_cast<Real>(-1.0), residual_base);
+                        if (!constraints.empty()) {
+                            constraints.distribute(history.u());
+                        }
+                        history.u().updateGhosts();
+
+                        auto trial_state_holder = makeNewtonState(history, solve_time);
+                        return assembleResidualOnly(trial_state_holder.view, phase);
+                    };
+
+                    const double baseline_residual =
+                        evaluate_beta(0.0, "mpi_subspace_nonlinear_beta0");
+                    const std::array<double, 5> betas{0.0, 1.0, 2.0, 4.0, 8.0};
+                    double best_beta = 0.0;
+                    double best_residual = baseline_residual;
+                    for (const double beta : betas) {
+                        const double trial =
+                            evaluate_beta(beta, "mpi_subspace_nonlinear_search");
+                        if (std::isfinite(trial) &&
+                            (!std::isfinite(best_residual) || trial < best_residual)) {
+                            best_residual = trial;
+                            best_beta = beta;
+                        }
+                    }
+
+                    copyVector(history.u(), u_backup);
+                    transient.system().borderedCoupling() = bordered_backup;
+                    if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
+                        reg->invalidateAll();
+                    }
+                    history.u().updateGhosts();
+
+                    if (best_beta != 0.0 &&
+                        std::isfinite(best_residual) &&
+                        std::isfinite(baseline_residual) &&
+                        best_residual + 1e-12 < baseline_residual) {
+                        auto du_trial = du.localSpan();
+                        FE_THROW_IF(du_trial.size() != du_before_local.size(),
+                                    systems::InvalidStateException,
+                                    "NewtonSolver: MPI nonlinear subspace du size mismatch");
+                        for (std::size_t k = 0; k < du_trial.size(); ++k) {
+                            du_trial[k] = du_before_local[k] +
+                                          static_cast<Real>(best_beta) * correction_local[k];
+                        }
+                        du.updateGhosts();
+                        if (oopTraceEnabled()) {
+                            std::ostringstream oss;
+                            oss << "NewtonSolver: accepted MPI nonlinear subspace scaling"
+                                << " beta=" << best_beta
+                                << " baseline_residual=" << baseline_residual
+                                << " best_residual=" << best_residual;
+                            traceLog(oss.str());
+                        }
+                    } else if (oopTraceEnabled()) {
+                        std::ostringstream oss;
+                        oss << "NewtonSolver: rejected MPI nonlinear subspace scaling"
+                            << " baseline_residual=" << baseline_residual
+                            << " best_beta=" << best_beta
+                            << " best_residual=" << best_residual;
+                        traceLog(oss.str());
+                    }
+                }
+            }
+
+            if (custom_vector_local.has_value() &&
+                mpiLinearSubspaceRecoveryVectorNonlinearSearchEnabled()) {
+                copyVector(u_backup, history.u());
+                const auto bordered_backup = transient.system().borderedCoupling();
+
+                auto evaluate_candidate = [&](std::span<const Real> candidate_local,
+                                              const char* phase) -> double {
+                    copyVector(history.u(), u_backup);
+                    transient.system().borderedCoupling() = bordered_backup;
+                    if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
+                        reg->invalidateAll();
+                    }
+
+                    residual_base.zero();
+                    {
+                        auto candidate_view = residual_base.localSpan();
+                        FE_THROW_IF(
+                            candidate_view.size() != candidate_local.size(),
+                            systems::InvalidStateException,
+                            "NewtonSolver: MPI custom nonlinear candidate size mismatch");
+                        std::copy(candidate_local.begin(),
+                                  candidate_local.end(),
+                                  candidate_view.begin());
+                    }
+                    residual_base.updateGhosts();
+
+                    axpy(history.u(), static_cast<Real>(-1.0), residual_base);
+                    if (!constraints.empty()) {
+                        constraints.distribute(history.u());
+                    }
+                    history.u().updateGhosts();
+
+                    auto trial_state_holder = makeNewtonState(history, solve_time);
+                    return assembleResidualOnly(trial_state_holder.view, phase);
+                };
+
+                const auto du_current = du.localSpan();
+                std::vector<Real> current_du_local(du_current.begin(), du_current.end());
+                std::vector<Real> candidate_du_local(du_before_local.size(), Real(0.0));
+
+                const double current_residual =
+                    evaluate_candidate(current_du_local, "mpi_custom_vector_current");
+                const double base_residual =
+                    evaluate_candidate(du_before_local, "mpi_custom_vector_base");
+
+                const std::array<double, 5> betas{0.0, 0.25, 0.5, 1.0, 2.0};
+                double best_beta = 0.0;
+                double best_residual = current_residual;
+                for (const double beta : betas) {
+                    for (std::size_t k = 0; k < candidate_du_local.size(); ++k) {
+                        candidate_du_local[k] =
+                            du_before_local[k] +
+                            static_cast<Real>(beta) * (*custom_vector_local)[k];
+                    }
+                    const double trial =
+                        evaluate_candidate(candidate_du_local, "mpi_custom_vector_search");
+                    if (std::isfinite(trial) &&
+                        (!std::isfinite(best_residual) || trial < best_residual)) {
+                        best_residual = trial;
+                        best_beta = beta;
+                    }
+                }
+
+                copyVector(history.u(), u_backup);
+                transient.system().borderedCoupling() = bordered_backup;
+                if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
+                    reg->invalidateAll();
+                }
+                history.u().updateGhosts();
+
+                if (best_beta != 0.0 &&
+                    std::isfinite(best_residual) &&
+                    std::isfinite(current_residual) &&
+                    best_residual + 1e-12 < current_residual) {
+                    auto du_trial = du.localSpan();
+                    FE_THROW_IF(
+                        du_trial.size() != candidate_du_local.size(),
+                        systems::InvalidStateException,
+                        "NewtonSolver: MPI custom nonlinear du size mismatch");
+                    for (std::size_t k = 0; k < candidate_du_local.size(); ++k) {
+                        du_trial[k] =
+                            du_before_local[k] +
+                            static_cast<Real>(best_beta) * (*custom_vector_local)[k];
+                    }
+                    du.updateGhosts();
+                    if (algebraic_aux_reduction.active) {
+                        const auto dense_du_trial =
+                            gatherDenseVector(du, static_cast<std::size_t>(J.numRows()));
+                        aux_delta = recoverAuxiliaryDeltaFromReduction(
+                            algebraic_aux_reduction,
+                            dense_du_trial,
+                            std::span<const Real>{});
+                    }
+                    if (oopTraceEnabled()) {
+                        std::ostringstream oss;
+                        oss << "NewtonSolver: accepted MPI custom nonlinear vector search"
+                            << " current_residual=" << current_residual
+                            << " base_residual=" << base_residual
+                            << " best_beta=" << best_beta
+                            << " best_residual=" << best_residual;
+                        traceLog(oss.str());
+                    }
+                } else if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: rejected MPI custom nonlinear vector search"
+                        << " current_residual=" << current_residual
+                        << " base_residual=" << base_residual
+                        << " best_beta=" << best_beta
+                        << " best_residual=" << best_residual;
+                    traceLog(oss.str());
+                }
+            }
+        };
+
+        maybeApplyMpiLinearSubspaceRecovery();
 
         auto applyDtIncrementScaling = [&]() {
             if (!options_.scale_dt_increments || workspace.dt_field_dofs.empty()) {
@@ -5203,6 +7070,477 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         };
 
         applyDtIncrementScaling();
+
+        auto maybeApplyConstraintPartitionDriftCorrection = [&]() {
+            if (!mpiConstraintPartitionDriftCorrectionEnabled() ||
+                !mpiMultiTaskActive() ||
+                it != 0 ||
+                !aux_delta.empty() ||
+                algebraic_aux_reduction.active ||
+                use_local_condensed_recovery ||
+                !base_linear_options.block_layout.has_value()) {
+                return;
+            }
+
+            const auto* constraint_block =
+                base_linear_options.block_layout->constraintFieldBlock();
+            if (constraint_block == nullptr || constraint_block->n_components != 1) {
+                return;
+            }
+
+            const auto& fmap = transient.system().fieldMap();
+            std::vector<int> field_component_offsets(fmap.numFields(), 0);
+            int component_offset = 0;
+            for (std::size_t field_idx = 0; field_idx < fmap.numFields(); ++field_idx) {
+                field_component_offsets[field_idx] = component_offset;
+                component_offset += fmap.numComponents(field_idx);
+            }
+
+            auto du_view = du.createAssemblyView();
+            FE_CHECK_NOT_NULL(du_view.get(), "NewtonSolver: partition drift du view");
+            double local_sum = 0.0;
+            int local_count = 0;
+            for (const auto dof : owned_dofs) {
+                const auto comp = fmap.getComponentOfDof(dof);
+                if (!comp) {
+                    continue;
+                }
+                const auto field_idx = static_cast<std::size_t>(std::max(comp->first, 0));
+                if (field_idx >= fmap.numFields()) {
+                    continue;
+                }
+                const int block_comp =
+                    field_component_offsets[field_idx] + static_cast<int>(comp->second);
+                if (block_comp != constraint_block->start_component) {
+                    continue;
+                }
+                local_sum += static_cast<double>(du_view->getVectorEntry(dof));
+                ++local_count;
+            }
+
+            if (local_count == 0) {
+                return;
+            }
+
+#if FE_HAS_MPI
+            int mpi_size = 1;
+            MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+            if (mpi_size <= 1) {
+                return;
+            }
+            std::vector<double> rank_sums(static_cast<std::size_t>(mpi_size), 0.0);
+            std::vector<int> rank_counts(static_cast<std::size_t>(mpi_size), 0);
+            MPI_Allgather(&local_sum, 1, MPI_DOUBLE, rank_sums.data(), 1, MPI_DOUBLE, MPI_COMM_WORLD);
+            MPI_Allgather(&local_count, 1, MPI_INT, rank_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+#else
+            return;
+#endif
+
+            double global_sum = 0.0;
+            int global_count = 0;
+            for (std::size_t rank = 0; rank < rank_sums.size(); ++rank) {
+                global_sum += rank_sums[rank];
+                global_count += rank_counts[rank];
+            }
+            if (global_count <= 0) {
+                return;
+            }
+
+            const double local_mean = local_sum / static_cast<double>(local_count);
+            const double global_mean = global_sum / static_cast<double>(global_count);
+            const Real drift_value = static_cast<Real>(local_mean - global_mean);
+            if (!(std::isfinite(static_cast<double>(drift_value))) ||
+                std::abs(drift_value) <= static_cast<Real>(1e-12)) {
+                return;
+            }
+
+            copyVector(residual_base, du);
+            residual_base.zero();
+            auto corr_view = residual_base.createAssemblyView();
+            FE_CHECK_NOT_NULL(corr_view.get(), "NewtonSolver: partition drift correction view");
+            corr_view->beginAssemblyPhase();
+            for (const auto dof : owned_dofs) {
+                const auto comp = fmap.getComponentOfDof(dof);
+                if (!comp) {
+                    continue;
+                }
+                const auto field_idx = static_cast<std::size_t>(std::max(comp->first, 0));
+                if (field_idx >= fmap.numFields()) {
+                    continue;
+                }
+                const int block_comp =
+                    field_component_offsets[field_idx] + static_cast<int>(comp->second);
+                if (block_comp != constraint_block->start_component) {
+                    continue;
+                }
+                corr_view->addVectorEntry(dof, drift_value, assembly::AddMode::Insert);
+            }
+            corr_view->finalizeAssembly();
+            residual_base.updateGhosts();
+
+            copyVector(u_backup, history.u());
+            const auto bordered_backup = transient.system().borderedCoupling();
+
+            auto evaluate_candidate = [&](double alpha, const char* phase) -> double {
+                copyVector(history.u(), u_backup);
+                transient.system().borderedCoupling() = bordered_backup;
+                if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
+                    reg->invalidateAll();
+                }
+                axpy(history.u(), static_cast<Real>(-1.0), du);
+                if (alpha != 0.0) {
+                    axpy(history.u(), static_cast<Real>(alpha), residual_base);
+                }
+                if (!constraints.empty()) {
+                    constraints.distribute(history.u());
+                }
+                history.u().updateGhosts();
+
+                auto trial_state_holder = makeNewtonState(history, solve_time);
+                return assembleResidualOnly(trial_state_holder.view, phase);
+            };
+
+            const std::array<double, 5> alphas{0.0, 0.25, 0.5, 0.75, 1.0};
+            double best_alpha = 0.0;
+            double best_residual = std::numeric_limits<double>::infinity();
+            for (const double alpha : alphas) {
+                const double trial =
+                    evaluate_candidate(alpha, "partition_drift_correction");
+                if (std::isfinite(trial) && trial < best_residual) {
+                    best_residual = trial;
+                    best_alpha = alpha;
+                }
+            }
+
+            copyVector(history.u(), u_backup);
+            transient.system().borderedCoupling() = bordered_backup;
+            if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
+                reg->invalidateAll();
+            }
+            history.u().updateGhosts();
+
+            if (best_alpha > 0.0 && std::isfinite(best_residual) &&
+                best_residual + 1e-12 < current_residual_norm) {
+                axpy(du, static_cast<Real>(-best_alpha), residual_base);
+                du.updateGhosts();
+                if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: accepted partition drift correction"
+                        << " alpha=" << best_alpha
+                        << " local_mean=" << local_mean
+                        << " global_mean=" << global_mean
+                        << " predicted_residual=" << best_residual;
+                    traceLog(oss.str());
+                }
+            } else if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: rejected partition drift correction"
+                    << " best_alpha=" << best_alpha
+                    << " best_residual=" << best_residual
+                    << " current_residual=" << current_residual_norm;
+                traceLog(oss.str());
+            }
+        };
+
+        maybeApplyConstraintPartitionDriftCorrection();
+
+        auto maybeApplyConstraintGlobalMeanShiftCorrection = [&]() {
+            if (!mpiConstraintGlobalMeanShiftCorrectionEnabled() ||
+                !mpiMultiTaskActive() ||
+                it != 0 ||
+                !aux_delta.empty() ||
+                algebraic_aux_reduction.active ||
+                use_local_condensed_recovery ||
+                !base_linear_options.block_layout.has_value()) {
+                return;
+            }
+
+            const auto* constraint_block =
+                base_linear_options.block_layout->constraintFieldBlock();
+            if (constraint_block == nullptr ||
+                base_linear_options.block_layout->totalComponents() <= 0) {
+                return;
+            }
+
+            const auto& fmap = transient.system().fieldMap();
+            std::vector<int> field_component_offsets(fmap.numFields(), 0);
+            int component_offset = 0;
+            for (std::size_t field_idx = 0; field_idx < fmap.numFields(); ++field_idx) {
+                field_component_offsets[field_idx] = component_offset;
+                component_offset += fmap.numComponents(field_idx);
+            }
+
+            auto du_view = du.createAssemblyView();
+            FE_CHECK_NOT_NULL(du_view.get(), "NewtonSolver: global mean shift du view");
+
+            double local_sum = 0.0;
+            double local_count = 0.0;
+            for (const auto dof : owned_dofs) {
+                const auto comp = fmap.getComponentOfDof(dof);
+                if (!comp) {
+                    continue;
+                }
+                const auto field_idx =
+                    static_cast<std::size_t>(std::max(comp->first, 0));
+                if (field_idx >= fmap.numFields()) {
+                    continue;
+                }
+                const int block_comp =
+                    field_component_offsets[field_idx] + static_cast<int>(comp->second);
+                if (block_comp != constraint_block->start_component) {
+                    continue;
+                }
+                local_sum += static_cast<double>(du_view->getVectorEntry(dof));
+                local_count += 1.0;
+            }
+
+            const double global_sum = mpiAllreduceSumIfActive(local_sum);
+            const double global_count = mpiAllreduceSumIfActive(local_count);
+            if (!(global_count > 0.0)) {
+                return;
+            }
+
+            const double global_mean = global_sum / global_count;
+            if (!std::isfinite(global_mean) || std::abs(global_mean) <= 1e-12) {
+                return;
+            }
+
+            residual_base.zero();
+            auto corr_view = residual_base.createAssemblyView();
+            FE_CHECK_NOT_NULL(corr_view.get(), "NewtonSolver: global mean shift correction view");
+            corr_view->beginAssemblyPhase();
+            for (const auto dof : owned_dofs) {
+                const auto comp = fmap.getComponentOfDof(dof);
+                if (!comp) {
+                    continue;
+                }
+                const auto field_idx =
+                    static_cast<std::size_t>(std::max(comp->first, 0));
+                if (field_idx >= fmap.numFields()) {
+                    continue;
+                }
+                const int block_comp =
+                    field_component_offsets[field_idx] + static_cast<int>(comp->second);
+                if (block_comp != constraint_block->start_component) {
+                    continue;
+                }
+                corr_view->addVectorEntry(dof,
+                                          static_cast<Real>(global_mean),
+                                          assembly::AddMode::Insert);
+            }
+            corr_view->finalizeAssembly();
+            residual_base.updateGhosts();
+
+            copyVector(u_backup, history.u());
+            const auto bordered_backup = transient.system().borderedCoupling();
+
+            auto evaluate_candidate = [&](double alpha, const char* phase) -> double {
+                copyVector(history.u(), u_backup);
+                transient.system().borderedCoupling() = bordered_backup;
+                if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
+                    reg->invalidateAll();
+                }
+                axpy(history.u(), static_cast<Real>(-1.0), du);
+                if (alpha != 0.0) {
+                    axpy(history.u(), static_cast<Real>(alpha), residual_base);
+                }
+                if (!constraints.empty()) {
+                    constraints.distribute(history.u());
+                }
+                history.u().updateGhosts();
+
+                auto trial_state_holder = makeNewtonState(history, solve_time);
+                return assembleResidualOnly(trial_state_holder.view, phase);
+            };
+
+            const std::array<double, 14> alphas{
+                -16.0, -8.0, -4.0, -2.0, -1.0, -0.5, 0.0,
+                 0.5,   1.0,  2.0,  4.0,  8.0, 16.0, 32.0
+            };
+            double best_alpha = 0.0;
+            double best_residual = std::numeric_limits<double>::infinity();
+            for (const double alpha : alphas) {
+                const double trial =
+                    evaluate_candidate(alpha, "constraint_global_mean_shift_correction");
+                if (std::isfinite(trial) && trial < best_residual) {
+                    best_residual = trial;
+                    best_alpha = alpha;
+                }
+            }
+
+            copyVector(history.u(), u_backup);
+            transient.system().borderedCoupling() = bordered_backup;
+            if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
+                reg->invalidateAll();
+            }
+            history.u().updateGhosts();
+
+            if (best_alpha != 0.0 && std::isfinite(best_residual) &&
+                best_residual + 1e-12 < current_residual_norm) {
+                axpy(du, static_cast<Real>(best_alpha), residual_base);
+                du.updateGhosts();
+                if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: accepted constraint global mean shift correction"
+                        << " alpha=" << best_alpha
+                        << " global_mean=" << global_mean
+                        << " predicted_residual=" << best_residual;
+                    traceLog(oss.str());
+                }
+            } else if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: rejected constraint global mean shift correction"
+                    << " global_mean=" << global_mean
+                    << " best_alpha=" << best_alpha
+                    << " best_residual=" << best_residual
+                    << " current_residual=" << current_residual_norm;
+                traceLog(oss.str());
+            }
+        };
+
+        maybeApplyConstraintGlobalMeanShiftCorrection();
+
+        auto maybeApplyFirstIterationStepExpansion = [&]() {
+            if (!mpiFirstIterationStepExpansionEnabled() ||
+                !mpiMultiTaskActive() ||
+                it != 0 ||
+                !aux_delta.empty() ||
+                algebraic_aux_reduction.active ||
+                use_local_condensed_recovery) {
+                return;
+            }
+
+            copyVector(residual_base, du);
+            copyVector(u_backup, history.u());
+            const auto bordered_backup = transient.system().borderedCoupling();
+
+            auto evaluate_candidate = [&](double alpha, const char* phase) -> double {
+                copyVector(history.u(), u_backup);
+                transient.system().borderedCoupling() = bordered_backup;
+                if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
+                    reg->invalidateAll();
+                }
+                axpy(history.u(), static_cast<Real>(-alpha), du);
+                if (!constraints.empty()) {
+                    constraints.distribute(history.u());
+                }
+                history.u().updateGhosts();
+
+                auto trial_state_holder = makeNewtonState(history, solve_time);
+                return assembleResidualOnly(trial_state_holder.view, phase);
+            };
+
+            const std::array<double, 4> alphas{1.0, 1.25, 1.5, 2.0};
+            double best_alpha = 1.0;
+            double best_residual = std::numeric_limits<double>::infinity();
+            for (const double alpha : alphas) {
+                const double trial =
+                    evaluate_candidate(alpha, "mpi_step_expansion");
+                if (std::isfinite(trial) && trial < best_residual) {
+                    best_residual = trial;
+                    best_alpha = alpha;
+                }
+            }
+
+            copyVector(history.u(), u_backup);
+            transient.system().borderedCoupling() = bordered_backup;
+            if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
+                reg->invalidateAll();
+            }
+            history.u().updateGhosts();
+
+            if (best_alpha > 1.0 && std::isfinite(best_residual)) {
+                copyVector(du, residual_base);
+                axpy(du, static_cast<Real>(best_alpha - 1.0), residual_base);
+                du.updateGhosts();
+                if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: accepted mpi first-iteration step expansion"
+                        << " alpha=" << best_alpha
+                        << " predicted_residual=" << best_residual;
+                    traceLog(oss.str());
+                }
+            } else if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: rejected mpi first-iteration step expansion"
+                    << " best_alpha=" << best_alpha
+                    << " best_residual=" << best_residual;
+                traceLog(oss.str());
+            }
+        };
+
+        maybeApplyFirstIterationStepExpansion();
+
+        auto maybeApplyFirstIterationStepLineSearch = [&]() {
+            if (!mpiFirstIterationStepLineSearchEnabled() ||
+                !mpiMultiTaskActive() ||
+                it != 0 ||
+                !aux_delta.empty() ||
+                algebraic_aux_reduction.active ||
+                use_local_condensed_recovery) {
+                return;
+            }
+
+            copyVector(residual_base, du);
+            copyVector(u_backup, history.u());
+            const auto bordered_backup = transient.system().borderedCoupling();
+
+            auto evaluate_candidate = [&](double alpha, const char* phase) -> double {
+                copyVector(history.u(), u_backup);
+                transient.system().borderedCoupling() = bordered_backup;
+                if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
+                    reg->invalidateAll();
+                }
+                axpy(history.u(), static_cast<Real>(-alpha), du);
+                if (!constraints.empty()) {
+                    constraints.distribute(history.u());
+                }
+                history.u().updateGhosts();
+
+                auto trial_state_holder = makeNewtonState(history, solve_time);
+                return assembleResidualOnly(trial_state_holder.view, phase);
+            };
+
+            const std::array<double, 8> alphas{0.125, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0};
+            double best_alpha = 1.0;
+            double best_residual = std::numeric_limits<double>::infinity();
+            for (const double alpha : alphas) {
+                const double trial =
+                    evaluate_candidate(alpha, "mpi_step_line_search");
+                if (std::isfinite(trial) && trial < best_residual) {
+                    best_residual = trial;
+                    best_alpha = alpha;
+                }
+            }
+
+            copyVector(history.u(), u_backup);
+            transient.system().borderedCoupling() = bordered_backup;
+            if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
+                reg->invalidateAll();
+            }
+            history.u().updateGhosts();
+
+            if (std::abs(best_alpha - 1.0) > 1e-12 && std::isfinite(best_residual)) {
+                copyVector(du, residual_base);
+                axpy(du, static_cast<Real>(best_alpha - 1.0), residual_base);
+                du.updateGhosts();
+                if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: accepted mpi first-iteration step line search"
+                        << " alpha=" << best_alpha
+                        << " predicted_residual=" << best_residual;
+                    traceLog(oss.str());
+                }
+            } else if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: rejected mpi first-iteration step line search"
+                    << " best_alpha=" << best_alpha
+                    << " best_residual=" << best_residual;
+                traceLog(oss.str());
+            }
+        };
+
+        maybeApplyFirstIterationStepLineSearch();
 
         if (oopTraceEnabled()) {
             logVectorComponentNorms(transient.system(), du, "du");

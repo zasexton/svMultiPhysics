@@ -51,6 +51,7 @@
 #include "Forms/JIT/JITKernelWrapper.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdint>
 #include <iterator>
 #include <limits>
@@ -71,6 +72,30 @@ namespace FE {
 namespace systems {
 
 namespace {
+
+[[nodiscard]] std::optional<assembly::GhostPolicy> assemblyGhostPolicyOverrideFromEnv()
+{
+    const char* env = std::getenv("SVMP_ASSEMBLY_GHOST_POLICY");
+    if (env == nullptr || *env == '\0') {
+        return std::nullopt;
+    }
+
+    std::string value(env);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isspace(ch) != 0 || ch == '_' || ch == '-';
+    }), value.end());
+
+    if (value == "ownedrowsonly" || value == "owned") {
+        return assembly::GhostPolicy::OwnedRowsOnly;
+    }
+    if (value == "reversescatter" || value == "reverse") {
+        return assembly::GhostPolicy::ReverseScatter;
+    }
+    return std::nullopt;
+}
 
 #if FE_HAS_MPI
 constexpr std::uint64_t kConsistencyHashSeed = 1469598103934665603ULL;
@@ -1540,22 +1565,29 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
         }
     }
 
-    // Convert NullspaceHints from contributions into GaugeRegistry candidates.
-    // This is the primary path for gauge candidate population via
-    // FormContributionLowerer NullspaceHint emission.
-    for (const auto& contrib : contributions_) {
-        for (const auto& hint : contrib.nullspace_hints) {
+    const auto add_gauge_candidate =
+        [this](FieldId field,
+               int component,
+               analysis::NullspaceFamily family,
+               analysis::AnalysisConfidence confidence,
+               gauge::CandidateSource source,
+               const std::string& reason) {
+            if (field == INVALID_FIELD_ID) {
+                return;
+            }
+
             gauge::GaugeCandidate c;
-            c.field = hint.field;
-            c.component = hint.component;
-            c.source = gauge::CandidateSource::ExplicitDeclaration;
-            c.reason = hint.reason;
-            switch (hint.confidence) {
+            c.field = field;
+            c.component = component;
+            c.source = source;
+            c.reason = reason;
+
+            switch (confidence) {
                 case analysis::AnalysisConfidence::High:   c.confidence = gauge::Confidence::High; break;
                 case analysis::AnalysisConfidence::Medium: c.confidence = gauge::Confidence::Medium; break;
                 case analysis::AnalysisConfidence::Low:    c.confidence = gauge::Confidence::Low; break;
             }
-            switch (hint.family) {
+            switch (family) {
                 case analysis::NullspaceFamily::ScalarConstant:
                     c.family = gauge::NullspaceModeFamily::ScalarConstant; break;
                 case analysis::NullspaceFamily::ComponentwiseConstant:
@@ -1566,7 +1598,37 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                     c.family = gauge::NullspaceModeFamily::ScalarConstant; break;
             }
             gaugeRegistry().addCandidate(std::move(c));
+        };
+
+    // Convert NullspaceHints from contributions into GaugeRegistry candidates.
+    // This is the primary path for gauge candidate population via
+    // FormContributionLowerer NullspaceHint emission.
+    for (const auto& contrib : contributions_) {
+        for (const auto& hint : contrib.nullspace_hints) {
+            add_gauge_candidate(hint.field,
+                                hint.component,
+                                hint.family,
+                                hint.confidence,
+                                gauge::CandidateSource::ExplicitDeclaration,
+                                hint.reason);
         }
+    }
+
+    // MixedOperatorAnalyzer and other analysis passes can also emit field-level
+    // nullspace claims directly into the analysis report. These must feed the
+    // GaugeRegistry too; otherwise mixed saddle-point pressure gauges are
+    // inferred structurally but never enforced during setup.
+    for (const auto& claim : analysisReport().claims) {
+        if (claim.kind != analysis::PropertyKind::Nullspace ||
+            !claim.nullspace_family.has_value()) {
+            continue;
+        }
+        add_gauge_candidate(claim.field,
+                            claim.component,
+                            *claim.nullspace_family,
+                            claim.confidence,
+                            gauge::CandidateSource::FormsInference,
+                            !claim.description.empty() ? claim.description : claim.claim_origin);
     }
 
     // If the GaugeRegistry has candidates (populated by FormContributionLowerer
@@ -3133,6 +3195,12 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
         }
     }
 
+    auto assembly_options = opts.assembly_options;
+    if (const auto ghost_policy_override = assemblyGhostPolicyOverrideFromEnv();
+        ghost_policy_override.has_value()) {
+        assembly_options.ghost_policy = *ghost_policy_override;
+    }
+
     assembly::SystemCharacteristics sys_chars{};
     sys_chars.num_fields = field_registry_.size();
     sys_chars.num_cells = meshAccess().numCells();
@@ -3146,7 +3214,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     }
 
     // Resolve thread count for reporting/heuristics (0 means "auto").
-    sys_chars.num_threads = opts.assembly_options.num_threads;
+    sys_chars.num_threads = assembly_options.num_threads;
     if (sys_chars.num_threads <= 0) {
         const auto hw = std::max(1u, std::thread::hardware_concurrency());
         sys_chars.num_threads = static_cast<int>(hw);
@@ -3162,7 +3230,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 #endif
 
     assembler_selection_report_.clear();
-    assembler_ = assembly::createAssembler(opts.assembly_options, opts.assembler_name,
+    assembler_ = assembly::createAssembler(assembly_options, opts.assembler_name,
                                            form_chars, sys_chars, &assembler_selection_report_);
     FE_CHECK_NOT_NULL(assembler_.get(), "FESystem::setup: assembler");
     assembler_->setDofHandler(dof_handler_);
@@ -3175,7 +3243,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     }
 
     assembler_->setMaterialStateProvider(material_state_provider_.get());
-    assembler_->setOptions(opts.assembly_options);
+    assembler_->setOptions(assembly_options);
     assembler_->initialize();
 
     // ---------------------------------------------------------------------

@@ -33,6 +33,7 @@
 
 #include "fsils_api.hpp"
 #include "add_bc_mul.h"
+#include "distributed_mpi_ops.h"
 #include "distributed_sparse_operator.h"
 #include "dot.h"
 #include "omp_la.h"
@@ -66,6 +67,7 @@ void schur(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarConstra
 
   fsils_int nNo = lhs.nNo;
   fsils_int mynNo = lhs.mynNo;
+  const fe_fsi_linear_solver::HaloExchange halo(lhs);
 
   Vector<double> X(nNo), P(nNo), SP(nNo), DGP(nNo); 
   Array<double> GP(dof,nNo), unCondU(dof,nNo);
@@ -108,6 +110,8 @@ void schur(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarConstra
 
     errO = err;
 
+    halo.sync_scalar(P);
+
     // GP = G * P
     G.apply(
         dso::ghost_synced_input(P),
@@ -120,6 +124,8 @@ void schur(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarConstra
         break;
       }
     }
+
+    halo.sync_vector(dof, GP);
 
     // DGP = K * GP
     D.apply(
@@ -208,6 +214,7 @@ void cgrad_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
   const auto& A = system.A;
   fsils_int nNo = lhs.nNo;
   fsils_int mynNo = lhs.mynNo;
+  const fe_fsi_linear_solver::HaloExchange halo(lhs);
   #ifdef debug_cgrad_v
   dmsg << "nNo: " << nNo;
   dmsg << "mynNo: " << mynNo;
@@ -253,6 +260,8 @@ void cgrad_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     }
 
     errO = err;
+
+    halo.sync_vector(dof, P);
 
     A.apply(
         dso::ghost_synced_input(dof, P),
@@ -320,6 +329,7 @@ void cgrad_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
   const auto& A = system.A;
   fsils_int nNo = lhs.nNo;
   fsils_int mynNo = lhs.mynNo;
+  const fe_fsi_linear_solver::HaloExchange halo(lhs);
   #ifdef debug_cgrad_s
   dmsg << "nNo: " << nNo;
   dmsg << "mynNo: " << mynNo;
@@ -364,6 +374,8 @@ void cgrad_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
     }
 
     errO = err;
+
+    halo.sync_scalar(P);
 
     A.apply(
         dso::ghost_synced_input(P),
