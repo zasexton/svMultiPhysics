@@ -2300,6 +2300,7 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Systems/test_FormsInstaller.cpp
                 Tests/Unit/Systems/test_MixedManualParity.cpp
                 Tests/Unit/Systems/test_MixedFormPerformance.cpp
+                Tests/Unit/Systems/test_MortarHybridInterface.cpp
 	                Tests/Unit/Systems/test_BackendParity.cpp
 	                Tests/Unit/Systems/test_CanonicalWorkflow.cpp
 	                Tests/Unit/Systems/test_GaugeIntegration.cpp

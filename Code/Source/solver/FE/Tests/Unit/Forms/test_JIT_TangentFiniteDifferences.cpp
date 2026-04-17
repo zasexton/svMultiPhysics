@@ -14,6 +14,7 @@
 
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
+#include "Forms/BoundaryConditions.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
@@ -258,6 +259,33 @@ TEST(JITTangentFiniteDifferences, NitscheBoundaryTangentMatchesCentralDifference
     const auto gamma = FormExpr::constant(Real(25.0));
     const auto residual =
         (-inner(grad(u), n) * v - u * inner(grad(v), n) + (gamma / h()) * u * v).ds(2);
+
+    const std::vector<Real> U = {0.10, -0.20, 0.30, -0.10};
+    expectBoundaryJitJacobianMatchesCentralFD(mesh, /*boundary_marker=*/2, dof_map, space, residual, U,
+                                              /*eps=*/1e-6, /*tol=*/1e-8);
+}
+
+TEST(JITTangentFiniteDifferences, TraceNitscheBoundaryTangentMatchesCentralDifferences)
+{
+    requireLLVMJITOrSkip();
+
+    SingleTetraOneBoundaryFaceMeshAccess mesh(/*boundary_marker=*/2);
+    auto dof_map = createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto n = FormExpr::normal();
+    auto residual = (u * v).dx();
+    residual = bc::applyTraceNitsche(std::move(residual),
+                                     u,
+                                     v,
+                                     /*boundary_marker=*/2,
+                                     FormExpr::constant(0.0),
+                                     inner(grad(u), n),
+                                     inner(grad(v), n),
+                                     FormExpr::constant(1.0) / h(),
+                                     bc::ScalarTraceOperator::Identity);
 
     const std::vector<Real> U = {0.10, -0.20, 0.30, -0.10};
     expectBoundaryJitJacobianMatchesCentralFD(mesh, /*boundary_marker=*/2, dof_map, space, residual, U,

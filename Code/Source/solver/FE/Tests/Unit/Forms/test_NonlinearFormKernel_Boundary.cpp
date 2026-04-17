@@ -14,6 +14,7 @@
 
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
+#include "Forms/BoundaryConditions.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/Vocabulary.h"
@@ -103,6 +104,69 @@ TEST(NonlinearFormKernelBoundaryTest, NitscheWeakDirichletJacobianMatchesCentral
     // Symmetric Nitsche-style boundary terms (physics-agnostic verification of normal() + h()).
     const auto residual =
         (-inner(grad(u), n) * v - u * inner(grad(v), n) + (gamma / h()) * u * v).ds(2);
+
+    auto ir = compiler.compileResidual(residual);
+    NonlinearFormKernel kernel(std::move(ir), ADMode::Forward);
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    std::vector<Real> U = {0.1, -0.2, 0.3, -0.1};
+    assembler.setCurrentSolution(U);
+
+    assembly::DenseMatrixView J(4);
+    assembly::DenseVectorView R(4);
+    J.zero();
+    R.zero();
+
+    const auto result = assembler.assembleBoundaryFaces(mesh, 2, space, kernel, &J, &R);
+    EXPECT_EQ(result.boundary_faces_assembled, 1);
+
+    const Real eps = 1e-6;
+    for (GlobalIndex j = 0; j < 4; ++j) {
+        auto U_plus = U;
+        auto U_minus = U;
+        U_plus[static_cast<std::size_t>(j)] += eps;
+        U_minus[static_cast<std::size_t>(j)] -= eps;
+
+        assembler.setCurrentSolution(U_plus);
+        assembly::DenseVectorView Rp(4);
+        Rp.zero();
+        (void)assembler.assembleBoundaryFaces(mesh, 2, space, kernel, nullptr, &Rp);
+
+        assembler.setCurrentSolution(U_minus);
+        assembly::DenseVectorView Rm(4);
+        Rm.zero();
+        (void)assembler.assembleBoundaryFaces(mesh, 2, space, kernel, nullptr, &Rm);
+
+        for (GlobalIndex i = 0; i < 4; ++i) {
+            const Real fd = (Rp.getVectorEntry(i) - Rm.getVectorEntry(i)) / (2.0 * eps);
+            EXPECT_NEAR(J.getMatrixEntry(i, j), fd, 1e-9);
+        }
+    }
+}
+
+TEST(NonlinearFormKernelBoundaryTest, TraceNitscheBoundaryJacobianMatchesCentralDifferences)
+{
+    SingleTetraOneBoundaryFaceMeshAccess mesh(/*boundary_marker=*/2);
+    auto dof_map = createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto n = FormExpr::normal();
+
+    auto residual = (u * v).dx();
+    residual = bc::applyTraceNitsche(std::move(residual),
+                                     u,
+                                     v,
+                                     /*boundary_marker=*/2,
+                                     FormExpr::constant(0.0),
+                                     inner(grad(u), n),
+                                     inner(grad(v), n),
+                                     FormExpr::constant(1.0) / h(),
+                                     bc::ScalarTraceOperator::Identity);
 
     auto ir = compiler.compileResidual(residual);
     NonlinearFormKernel kernel(std::move(ir), ADMode::Forward);

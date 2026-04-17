@@ -558,6 +558,9 @@ public:
                     const GlobalIndex col = col_dofs[static_cast<std::size_t>(j)];
                     if (col < 0 || col >= matrix_->numCols()) continue;
                     const auto local_idx = static_cast<std::size_t>(i * n_cols + j);
+                    ++matrix_requested_;
+                    ++matrix_valid_;
+                    accumulateMatrixValueStats(local_matrix[local_idx]);
                     matrix_->addValue(row, col, local_matrix[local_idx], mode);
                 }
             }
@@ -647,6 +650,15 @@ public:
                     continue;
                 }
 
+                matrix_requested_ += static_cast<std::size_t>((i1 - i0) * (j1 - j0));
+                for (GlobalIndex di = i0; di < i1; ++di) {
+                    for (GlobalIndex dj = j0; dj < j1; ++dj) {
+                        ++matrix_valid_;
+                        const auto local_idx = static_cast<std::size_t>(di * n_cols + dj);
+                        accumulateMatrixValueStats(local_matrix[local_idx]);
+                    }
+                }
+
                 const std::size_t base = static_cast<std::size_t>(block_base);
                 if (base + block_sz > values_size) {
                     j0 = j1;
@@ -723,6 +735,11 @@ public:
     void addMatrixEntry(GlobalIndex row, GlobalIndex col, Real value, assembly::AddMode mode) override
     {
         FE_CHECK_NOT_NULL(matrix_, "FsilsMatrixView::matrix");
+        ++matrix_requested_;
+        if (row >= 0 && row < matrix_->numRows() && col >= 0 && col < matrix_->numCols()) {
+            ++matrix_valid_;
+            accumulateMatrixValueStats(value);
+        }
         matrix_->addValue(row, col, value, mode);
     }
 
@@ -803,7 +820,27 @@ public:
 
     void beginAssemblyPhase() override { phase_ = assembly::AssemblyPhase::Building; }
     void endAssemblyPhase() override { phase_ = assembly::AssemblyPhase::Flushing; }
-    void finalizeAssembly() override { phase_ = assembly::AssemblyPhase::Finalized; }
+    void finalizeAssembly() override {
+        phase_ = assembly::AssemblyPhase::Finalized;
+        if (std::getenv("SVMP_FSILS_MATRIX_VIEW_TRACE") != nullptr && matrix_requested_ > 0) {
+            int rank = 0;
+            if (matrix_ != nullptr) {
+                if (const auto shared = matrix_->shared()) {
+                    rank = shared->lhs.commu.task;
+                }
+            }
+            std::fprintf(stderr,
+                         "[FsilsMatrixView] rank=%d requested=%zu valid=%zu invalid=%zu nonzero=%zu value_l1=%.17g value_l2=%.17g value_max_abs=%.17g\n",
+                         rank,
+                         matrix_requested_,
+                         matrix_valid_,
+                         matrix_requested_ - matrix_valid_,
+                         matrix_nonzero_,
+                         static_cast<double>(matrix_value_l1_),
+                         static_cast<double>(std::sqrt(matrix_value_l2_sq_)),
+                         static_cast<double>(matrix_value_max_abs_));
+        }
+    }
     [[nodiscard]] assembly::AssemblyPhase getPhase() const noexcept override { return phase_; }
 
     [[nodiscard]] bool hasMatrix() const noexcept override { return true; }
@@ -861,12 +898,43 @@ public:
                                   assembly::AddMode mode = assembly::AddMode::Add) override
     {
         FE_CHECK_NOT_NULL(matrix_, "FsilsMatrixView::matrix");
+        matrix_requested_ += resolved.size();
+        const std::size_t values_size =
+            (matrix_->shared() != nullptr)
+                ? static_cast<std::size_t>(matrix_->fsilsNnz()) *
+                      static_cast<std::size_t>(matrix_->fsilsDof()) *
+                      static_cast<std::size_t>(matrix_->fsilsDof())
+                : static_cast<std::size_t>(matrix_->numRows()) * static_cast<std::size_t>(matrix_->numCols());
+        for (std::size_t i = 0; i < resolved.size(); ++i) {
+            const auto slot = resolved[i];
+            if (slot >= 0 && static_cast<std::size_t>(slot) < values_size) {
+                ++matrix_valid_;
+                accumulateMatrixValueStats(local_matrix[i]);
+            }
+        }
         matrix_->addResolvedMatrixEntries(row_dofs, col_dofs, resolved, local_matrix, mode);
     }
 
 private:
+    void accumulateMatrixValueStats(Real value) noexcept
+    {
+        const Real abs_value = std::abs(value);
+        matrix_value_l1_ += abs_value;
+        matrix_value_l2_sq_ += value * value;
+        matrix_value_max_abs_ = std::max(matrix_value_max_abs_, abs_value);
+        if (abs_value > 0.0) {
+            ++matrix_nonzero_;
+        }
+    }
+
     FsilsMatrix* matrix_{nullptr};
     assembly::AssemblyPhase phase_{assembly::AssemblyPhase::NotStarted};
+    std::size_t matrix_requested_{0};
+    std::size_t matrix_valid_{0};
+    std::size_t matrix_nonzero_{0};
+    Real matrix_value_l1_{0.0};
+    Real matrix_value_l2_sq_{0.0};
+    Real matrix_value_max_abs_{0.0};
 };
 
 } // namespace

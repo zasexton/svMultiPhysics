@@ -87,6 +87,19 @@ TEST(BoundaryConditionDescriptor, EssentialBC_MultiComponent_PerComponentDescrip
     }
 }
 
+TEST(BoundaryConditionDescriptor, NormalTraceEssentialBC_StrongNormalComponentAnchors) {
+    bc::NormalTraceEssentialBC bc(9, FormExpr::constant(0.0));
+    auto descs = bc.analysisMetadata(/*field_id=*/0, nullptr);
+
+    ASSERT_EQ(descs.size(), 1u);
+    const auto& d = descs[0];
+
+    EXPECT_EQ(d.trace_kind, TraceKind::NormalComponent);
+    EXPECT_EQ(d.enforcement_kind, EnforcementKind::Strong);
+    EXPECT_TRUE(d.anchors_constant_mode);
+    EXPECT_TRUE(d.anchors_rigid_body_translation);
+}
+
 // ============================================================================
 // NaturalBC descriptor
 // ============================================================================
@@ -99,6 +112,20 @@ TEST(BoundaryConditionDescriptor, NaturalBC_FluxAnchorsNothing) {
     const auto& d = descs[0];
 
     EXPECT_EQ(d.trace_kind, TraceKind::Flux);
+    EXPECT_EQ(d.enforcement_kind, EnforcementKind::WeakConsistent);
+    EXPECT_FALSE(d.anchors_constant_mode);
+    EXPECT_FALSE(d.anchors_rigid_body_translation);
+    EXPECT_FALSE(d.anchors_rigid_body_rotation);
+}
+
+TEST(BoundaryConditionDescriptor, TraceLoadBC_WeakConsistentNormalComponentAnchorsNothing) {
+    bc::TraceLoadBC bc(6, FormExpr::constant(1.0));
+    auto descs = bc.analysisMetadata(/*field_id=*/0, nullptr);
+
+    ASSERT_EQ(descs.size(), 1u);
+    const auto& d = descs[0];
+
+    EXPECT_EQ(d.trace_kind, TraceKind::NormalComponent);
     EXPECT_EQ(d.enforcement_kind, EnforcementKind::WeakConsistent);
     EXPECT_FALSE(d.anchors_constant_mode);
     EXPECT_FALSE(d.anchors_rigid_body_translation);
@@ -123,6 +150,62 @@ TEST(BoundaryConditionDescriptor, RobinBC_MixedAnchorsConstantNotRotation) {
     EXPECT_FALSE(d.anchors_rigid_body_rotation);
 }
 
+TEST(BoundaryConditionDescriptor, TraceRobinBC_WeakPenaltyNormalComponentAnchors) {
+    bc::TraceRobinBC bc(8, FormExpr::constant(3.0), FormExpr::constant(0.0));
+    auto descs = bc.analysisMetadata(/*field_id=*/0, nullptr);
+
+    ASSERT_EQ(descs.size(), 1u);
+    const auto& d = descs[0];
+
+    EXPECT_EQ(d.trace_kind, TraceKind::NormalComponent);
+    EXPECT_EQ(d.enforcement_kind, EnforcementKind::WeakPenalty);
+    EXPECT_TRUE(d.anchors_constant_mode);
+    EXPECT_TRUE(d.anchors_rigid_body_translation);
+    EXPECT_FALSE(d.anchors_rigid_body_rotation);
+}
+
+TEST(BoundaryConditionDescriptor, InterfaceTraceLoadBC_WeakConsistentNormalComponentOnInterface) {
+    bc::InterfaceTraceLoadBC bc(11, FormExpr::constant(1.0));
+    auto descs = bc.analysisMetadata(/*field_id=*/0, nullptr);
+
+    ASSERT_EQ(descs.size(), 1u);
+    const auto& d = descs[0];
+
+    EXPECT_EQ(d.domain, DomainKind::InterfaceFace);
+    EXPECT_EQ(d.interface_marker, 11);
+    EXPECT_EQ(d.trace_kind, TraceKind::NormalComponent);
+    EXPECT_EQ(d.enforcement_kind, EnforcementKind::WeakConsistent);
+    EXPECT_FALSE(d.anchors_constant_mode);
+}
+
+TEST(BoundaryConditionDescriptor, InterfaceTraceRobinBC_WeakPenaltyNormalComponentOnInterface) {
+    bc::InterfaceTraceRobinBC bc(12, FormExpr::constant(3.0), FormExpr::constant(0.0));
+    auto descs = bc.analysisMetadata(/*field_id=*/0, nullptr);
+
+    ASSERT_EQ(descs.size(), 1u);
+    const auto& d = descs[0];
+
+    EXPECT_EQ(d.domain, DomainKind::InterfaceFace);
+    EXPECT_EQ(d.interface_marker, 12);
+    EXPECT_EQ(d.trace_kind, TraceKind::NormalComponent);
+    EXPECT_EQ(d.enforcement_kind, EnforcementKind::WeakPenalty);
+    EXPECT_TRUE(d.anchors_constant_mode);
+}
+
+TEST(BoundaryConditionDescriptor, InterfaceTraceJumpPenaltyBC_WeakPenaltyNormalComponentOnInterface) {
+    bc::InterfaceTraceJumpPenaltyBC bc(13, FormExpr::constant(5.0), FormExpr::constant(0.0));
+    auto descs = bc.analysisMetadata(/*field_id=*/0, nullptr);
+
+    ASSERT_EQ(descs.size(), 1u);
+    const auto& d = descs[0];
+
+    EXPECT_EQ(d.domain, DomainKind::InterfaceFace);
+    EXPECT_EQ(d.interface_marker, 13);
+    EXPECT_EQ(d.trace_kind, TraceKind::NormalComponent);
+    EXPECT_EQ(d.enforcement_kind, EnforcementKind::WeakPenalty);
+    EXPECT_TRUE(d.anchors_constant_mode);
+}
+
 // ============================================================================
 // NitscheBC descriptor
 // ============================================================================
@@ -136,6 +219,42 @@ TEST(BoundaryConditionDescriptor, NitscheBC_WeakNitscheAnchorsAll) {
     const auto& d = descs[0];
 
     EXPECT_EQ(d.trace_kind, TraceKind::Value);
+    EXPECT_EQ(d.enforcement_kind, EnforcementKind::WeakNitsche);
+    EXPECT_TRUE(d.anchors_constant_mode);
+    EXPECT_TRUE(d.anchors_rigid_body_translation);
+}
+
+TEST(BoundaryConditionDescriptor, TraceNitscheBC_WeakNitscheNormalComponentAnchorsAll) {
+    bc::TraceNitscheBC bc(10,
+                          FormExpr::constant(0.0),
+                          FormExpr::constant(1.0),
+                          FormExpr::constant(1.0),
+                          FormExpr::constant(2.0));
+    auto descs = bc.analysisMetadata(/*field_id=*/0, nullptr);
+
+    ASSERT_EQ(descs.size(), 1u);
+    const auto& d = descs[0];
+
+    EXPECT_EQ(d.trace_kind, TraceKind::NormalComponent);
+    EXPECT_EQ(d.enforcement_kind, EnforcementKind::WeakNitsche);
+    EXPECT_TRUE(d.anchors_constant_mode);
+    EXPECT_TRUE(d.anchors_rigid_body_translation);
+}
+
+TEST(BoundaryConditionDescriptor, InterfaceTraceNitscheBC_WeakNitscheNormalComponentOnInterface) {
+    bc::InterfaceTraceNitscheBC bc(14,
+                                   FormExpr::constant(0.0),
+                                   FormExpr::constant(1.0),
+                                   FormExpr::constant(1.0),
+                                   FormExpr::constant(3.0));
+    auto descs = bc.analysisMetadata(/*field_id=*/0, nullptr);
+
+    ASSERT_EQ(descs.size(), 1u);
+    const auto& d = descs[0];
+
+    EXPECT_EQ(d.domain, DomainKind::InterfaceFace);
+    EXPECT_EQ(d.interface_marker, 14);
+    EXPECT_EQ(d.trace_kind, TraceKind::NormalComponent);
     EXPECT_EQ(d.enforcement_kind, EnforcementKind::WeakNitsche);
     EXPECT_TRUE(d.anchors_constant_mode);
     EXPECT_TRUE(d.anchors_rigid_body_translation);
@@ -223,6 +342,15 @@ TEST(BoundaryConditionDescriptor, DescriptorToVerdict_KernelOfSymGrad_PartiallyA
 TEST(BoundaryConditionDescriptor, DescriptorToVerdict_Neumann_Preserved) {
     BoundaryConditionDescriptor d;
     d.trace_kind = TraceKind::Flux;
+    d.enforcement_kind = EnforcementKind::WeakConsistent;
+
+    auto verdict = descriptorToVerdict(d, NullspaceModeFamily::ScalarConstant);
+    EXPECT_EQ(verdict, AnchoringVerdict::Preserved);
+}
+
+TEST(BoundaryConditionDescriptor, DescriptorToVerdict_WeakConsistentNormalComponentPreserved) {
+    BoundaryConditionDescriptor d;
+    d.trace_kind = TraceKind::NormalComponent;
     d.enforcement_kind = EnforcementKind::WeakConsistent;
 
     auto verdict = descriptorToVerdict(d, NullspaceModeFamily::ScalarConstant);

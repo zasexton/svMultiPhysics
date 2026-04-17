@@ -15,6 +15,7 @@
 #include "Sparsity/SparsityPattern.h"
 
 #include "Backends/FSILS/FsilsFactory.h"
+#include "Backends/FSILS/liner_solver/block_schur_strategy_selector.h"
 
 #include <array>
 #include <cmath>
@@ -208,6 +209,68 @@ Real fullOperatorRelativeResidualSerial(FsilsFactory& factory,
     }
 
     return r->norm() / std::max<Real>(b.norm(), 1e-30);
+}
+
+
+TEST(FsilsBackendStrategy, SerialStructuredReducedCorrectionsUseExactScalarPath)
+{
+    fe_fsi_linear_solver::FSILS_lhsType lhs{};
+    fe_fsi_linear_solver::distributed_low_rank_correction::Profile profile{};
+    profile.distributed = false;
+    profile.active_face_corrections = 0;
+    profile.active_reduced_corrections = 2;
+    profile.active_duplicate_reduced_corrections = 0;
+    profile.active_nonduplicate_reduced_corrections = 2;
+    profile.has_distinct_multi_reduced_corrections = true;
+    profile.reduced_touches_constraint = false;
+    profile.grouped_touches_constraint = false;
+
+    const auto selection =
+        fe_fsi_linear_solver::BlockSchurStrategySelector::select(lhs, profile, /*con_ncomp=*/1);
+
+    EXPECT_TRUE(selection.require_exact_momentum_low_rank_path);
+    EXPECT_FALSE(selection.use_legacy_scalar_schur());
+}
+
+TEST(FsilsBackendStrategy, SerialGroupedBorderedCorrectionsUseExactScalarPath)
+{
+    fe_fsi_linear_solver::FSILS_lhsType lhs{};
+    fe_fsi_linear_solver::distributed_low_rank_correction::Profile profile{};
+    profile.distributed = false;
+    profile.has_grouped_bordered = true;
+    profile.active_face_corrections = 0;
+    profile.active_reduced_corrections = 2;
+    profile.active_duplicate_reduced_corrections = 0;
+    profile.active_nonduplicate_reduced_corrections = 2;
+    profile.has_distinct_multi_reduced_corrections = true;
+    profile.reduced_touches_constraint = false;
+    profile.grouped_touches_constraint = false;
+
+    const auto selection =
+        fe_fsi_linear_solver::BlockSchurStrategySelector::select(lhs, profile, /*con_ncomp=*/1);
+
+    EXPECT_TRUE(selection.require_exact_momentum_low_rank_path);
+    EXPECT_FALSE(selection.use_legacy_scalar_schur());
+}
+
+TEST(FsilsBackendStrategy, SingleReducedScalarCorrectionStillUsesLegacyScalarPath)
+{
+    fe_fsi_linear_solver::FSILS_lhsType lhs{};
+    fe_fsi_linear_solver::distributed_low_rank_correction::Profile profile{};
+    profile.distributed = false;
+    profile.active_face_corrections = 0;
+    profile.active_reduced_corrections = 1;
+    profile.active_duplicate_reduced_corrections = 0;
+    profile.active_nonduplicate_reduced_corrections = 1;
+    profile.has_distinct_multi_reduced_corrections = false;
+    profile.reduced_touches_constraint = false;
+    profile.grouped_touches_constraint = false;
+
+    const auto selection =
+        fe_fsi_linear_solver::BlockSchurStrategySelector::select(lhs, profile, /*con_ncomp=*/1);
+
+    EXPECT_FALSE(selection.require_exact_momentum_low_rank_path);
+    EXPECT_TRUE(selection.use_momentum_only_low_rank_legacy_scalar_schur);
 }
 
 } // namespace

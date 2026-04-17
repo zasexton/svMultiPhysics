@@ -59,9 +59,9 @@ descriptorToVerdict(const BoundaryConditionDescriptor& desc,
             break;
     }
 
-    // If the BC is a pure Neumann/natural type, it preserves the mode
-    if (desc.enforcement_kind == EnforcementKind::WeakConsistent
-        && desc.trace_kind == TraceKind::Flux) {
+    // Pure weak-consistent boundary loads preserve the mode unless the
+    // producer explicitly claimed anchoring through the flags above.
+    if (desc.enforcement_kind == EnforcementKind::WeakConsistent) {
         return Verdict::Preserved;
     }
 
@@ -172,8 +172,9 @@ lowerBCDescriptor(const BoundaryConditionDescriptor& desc) {
         ContributionDescriptor gc;
         gc.operator_tag = "coupled_bc";
         gc.origin = desc.source;
-        gc.domain = DomainKind::CoupledBoundary;
+        gc.domain = desc.domain;
         gc.boundary_marker = desc.boundary_marker;
+        gc.interface_marker = desc.interface_marker;
         gc.role = ContributionRole::GlobalCoupling;
         gc.traits = OperatorTraitFlags::None;
         gc.confidence = AnalysisConfidence::High;

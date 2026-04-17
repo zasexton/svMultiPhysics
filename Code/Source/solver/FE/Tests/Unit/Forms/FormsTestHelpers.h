@@ -171,6 +171,104 @@ private:
     std::array<GlobalIndex, 4> cell_{};
 };
 
+class SingleTetraTwoBoundaryFaceMeshAccess final : public assembly::IMeshAccess {
+public:
+    SingleTetraTwoBoundaryFaceMeshAccess(int marker_face0, int marker_face1)
+        : markers_{marker_face0, marker_face1}
+    {
+        nodes_ = {
+            {0.0, 0.0, 0.0},  // 0
+            {1.0, 0.0, 0.0},  // 1
+            {0.0, 1.0, 0.0},  // 2
+            {0.0, 0.0, 1.0}   // 3
+        };
+        cell_ = {0, 1, 2, 3};
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 2; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override
+    {
+        return ElementType::Tetra4;
+    }
+
+    void getCellNodes(GlobalIndex /*cell_id*/, std::vector<GlobalIndex>& nodes) const override
+    {
+        nodes.assign(cell_.begin(), cell_.end());
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(GlobalIndex /*cell_id*/,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        coords.resize(cell_.size());
+        for (std::size_t i = 0; i < cell_.size(); ++i) {
+            coords[i] = nodes_.at(static_cast<std::size_t>(cell_[i]));
+        }
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex face_id,
+                                               GlobalIndex /*cell_id*/) const override
+    {
+        switch (face_id) {
+        case 0: return 0;  // {0,1,2}
+        case 1: return 1;  // {0,1,3}
+        default: return 0;
+        }
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex face_id) const override
+    {
+        return markers_.at(static_cast<std::size_t>(face_id));
+    }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex>
+    getInteriorFaceCells(GlobalIndex /*face_id*/) const override
+    {
+        return {0, 0};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        callback(0);
+    }
+
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        callback(0);
+    }
+
+    void forEachBoundaryFace(int marker,
+                             std::function<void(GlobalIndex, GlobalIndex)> callback) const override
+    {
+        for (GlobalIndex face_id = 0; face_id < 2; ++face_id) {
+            if (marker < 0 || marker == markers_[static_cast<std::size_t>(face_id)]) {
+                callback(face_id, 0);
+            }
+        }
+    }
+
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+private:
+    std::array<int, 2> markers_{-1, -1};
+    std::vector<std::array<Real, 3>> nodes_{};
+    std::array<GlobalIndex, 4> cell_{};
+};
+
 class TwoTetraSharedFaceMeshAccess final : public assembly::IMeshAccess {
 public:
     TwoTetraSharedFaceMeshAccess()

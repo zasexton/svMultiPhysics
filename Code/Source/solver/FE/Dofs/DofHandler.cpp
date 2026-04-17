@@ -15,6 +15,7 @@
 #include "Spaces/FunctionSpace.h"
 #include "Spaces/AdaptiveSpace.h"
 #include "Spaces/OrientationManager.h"
+#include "Spaces/MortarSpace.h"
 #include "Spaces/SpaceInterpolation.h"
 #include "Spaces/TraceSpace.h"
 #include "Basis/LagrangeBasis.h"
@@ -25,6 +26,7 @@
 // alone is insufficient. Prefer an explicit compile definition when provided.
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #  include "Mesh/Mesh.h"
+#  include "Mesh/Core/InterfaceMesh.h"
 #  include "Mesh/Observer/ScopedSubscription.h"
 #  define DOFHANDLER_HAS_MESH 1
 #else
@@ -9148,6 +9150,100 @@ void DofHandler::distributeDofs(const Mesh& mesh,
 #endif
 }
 
+void DofHandler::distributeDofs(const MeshBase& mesh,
+                                const svmp::InterfaceMesh& interface_mesh,
+                                const spaces::FunctionSpace& space,
+                                const DofDistributionOptions& options) {
+    checkNotFinalized();
+
+    const auto* mortar_space = dynamic_cast<const spaces::MortarSpace*>(&space);
+    FE_THROW_IF(mortar_space == nullptr, FEException,
+                "DofHandler::distributeDofs(MeshBase, InterfaceMesh): space must be a MortarSpace");
+    FE_THROW_IF(mortar_space->interface_space().continuity() != Continuity::L2, FEException,
+                "DofHandler::distributeDofs(MeshBase, InterfaceMesh): first mortar pass requires a discontinuous interface space");
+    FE_THROW_IF(interface_mesh.n_faces() == 0u, FEException,
+                "DofHandler::distributeDofs(MeshBase, InterfaceMesh): interface mesh has no faces");
+
+    my_rank_ = options.my_rank;
+    world_size_ = options.world_size;
+    global_numbering_ = options.global_numbering;
+#if FE_HAS_MPI
+    mpi_comm_ = options.mpi_comm;
+#else
+    if (world_size_ > 1) {
+        throw FEException("DofHandler::distributeDofs(MeshBase, InterfaceMesh): MPI world_size>1 but FE is built without MPI support");
+    }
+#endif
+
+    n_cells_ = static_cast<GlobalIndex>(interface_mesh.n_faces());
+    spatial_dim_ = interface_mesh.spatial_dim();
+    num_components_ = static_cast<LocalIndex>(std::max(1, space.value_dimension()));
+    dof_map_.setMyRank(my_rank_);
+    ++dof_state_revision_;
+
+    cell_edge_orient_offsets_.clear();
+    cell_edge_orient_data_.clear();
+    cell_face_orient_offsets_.clear();
+    cell_face_orient_data_.clear();
+    clearSpatialDofCoordinates();
+
+    const auto dofs_per_face = static_cast<LocalIndex>(space.dofs_per_element());
+    FE_THROW_IF(dofs_per_face <= 0, FEException,
+                "DofHandler::distributeDofs(MeshBase, InterfaceMesh): mortar space has no face DOFs");
+
+    const GlobalIndex n_iface_faces = static_cast<GlobalIndex>(interface_mesh.n_faces());
+    const GlobalIndex total_dofs =
+        n_iface_faces * static_cast<GlobalIndex>(dofs_per_face);
+
+    dof_map_ = DofMap(n_iface_faces, total_dofs, dofs_per_face);
+    dof_map_.setMyRank(my_rank_);
+    dof_map_.setNumDofs(total_dofs);
+    dof_map_.setNumLocalDofs(total_dofs);
+    dof_map_.setDofOwnership([owner = my_rank_](GlobalIndex) { return owner; });
+
+    entity_dof_map_ = std::make_unique<EntityDofMap>();
+    entity_dof_map_->reserve(/*vertices=*/0,
+                             /*edges=*/0,
+                             static_cast<GlobalIndex>(mesh.n_faces()),
+                             static_cast<GlobalIndex>(mesh.n_cells()));
+
+    std::vector<GlobalIndex> face_dofs(static_cast<std::size_t>(dofs_per_face));
+    for (GlobalIndex lf = 0; lf < n_iface_faces; ++lf) {
+        const GlobalIndex first = lf * static_cast<GlobalIndex>(dofs_per_face);
+        for (LocalIndex d = 0; d < dofs_per_face; ++d) {
+            face_dofs[static_cast<std::size_t>(d)] = first + static_cast<GlobalIndex>(d);
+        }
+        dof_map_.setCellDofs(lf, face_dofs);
+
+        const auto volume_face = static_cast<GlobalIndex>(
+            interface_mesh.volume_face(static_cast<svmp::index_t>(lf)));
+        FE_THROW_IF(volume_face < 0 || volume_face >= static_cast<GlobalIndex>(mesh.n_faces()),
+                    FEException,
+                    "DofHandler::distributeDofs(MeshBase, InterfaceMesh): interface face maps to invalid volume face");
+        entity_dof_map_->setFaceDofs(volume_face, face_dofs);
+    }
+
+    entity_dof_map_->buildReverseMapping();
+    entity_dof_map_->finalize();
+
+    partition_ = DofPartition(0, total_dofs, {});
+    partition_.setGlobalSize(total_dofs);
+    ghost_manager_.reset();
+}
+
+void DofHandler::distributeDofs(const Mesh& mesh,
+                                const svmp::InterfaceMesh& interface_mesh,
+                                const spaces::FunctionSpace& space,
+                                const DofDistributionOptions& options) {
+    DofDistributionOptions opts = options;
+    opts.my_rank = mesh.rank();
+    opts.world_size = mesh.world_size();
+#if FE_HAS_MPI && defined(MESH_HAS_MPI)
+    opts.mpi_comm = mesh.mpi_comm();
+#endif
+    distributeDofs(mesh.local_mesh(), interface_mesh, space, opts);
+}
+
 void DofHandler::distributeDofsInternal(const MeshBase& mesh,
                                          const spaces::FunctionSpace& space,
                                          const DofDistributionOptions& options,
@@ -9172,6 +9268,20 @@ void DofHandler::distributeDofs(const Mesh& /*mesh*/,
                                 const DofDistributionOptions& /*options*/) {
     throw FEException("DofHandler::distributeDofs: Mesh library not available. "
                       "Use distributeDofs(MeshTopologyInfo, DofLayoutInfo, options) instead.");
+}
+
+void DofHandler::distributeDofs(const MeshBase& /*mesh*/,
+                                const svmp::InterfaceMesh& /*interface_mesh*/,
+                                const spaces::FunctionSpace& /*space*/,
+                                const DofDistributionOptions& /*options*/) {
+    throw FEException("DofHandler::distributeDofs(MeshBase, InterfaceMesh): Mesh library not available.");
+}
+
+void DofHandler::distributeDofs(const Mesh& /*mesh*/,
+                                const svmp::InterfaceMesh& /*interface_mesh*/,
+                                const spaces::FunctionSpace& /*space*/,
+                                const DofDistributionOptions& /*options*/) {
+    throw FEException("DofHandler::distributeDofs(Mesh, InterfaceMesh): Mesh library not available.");
 }
 
 void DofHandler::distributeDofsInternal(const MeshBase& /*mesh*/,

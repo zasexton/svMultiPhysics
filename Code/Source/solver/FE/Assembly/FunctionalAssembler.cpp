@@ -107,6 +107,21 @@ void gatherVectorCoefficients(std::span<const GlobalIndex> dofs,
     }
 }
 
+std::span<const GlobalIndex> gatherDofsWithOffset(std::span<const GlobalIndex> dofs,
+                                                  GlobalIndex offset,
+                                                  std::vector<GlobalIndex>& scratch)
+{
+    if (offset == 0) {
+        return dofs;
+    }
+
+    scratch.resize(dofs.size());
+    for (std::size_t i = 0; i < dofs.size(); ++i) {
+        scratch[i] = dofs[i] + offset;
+    }
+    return std::span<const GlobalIndex>(scratch.data(), scratch.size());
+}
+
 [[nodiscard]] math::Vector<Real, 3> cross3(const math::Vector<Real, 3>& a,
                                            const math::Vector<Real, 3>& b) noexcept
 {
@@ -793,6 +808,11 @@ void FunctionalAssembler::setSolution(std::span<const Real> solution)
     solution_view_ = nullptr;
 }
 
+void FunctionalAssembler::setPrimaryFieldDofOffset(GlobalIndex offset) noexcept
+{
+    primary_field_dof_offset_ = offset;
+}
+
 void FunctionalAssembler::setSolutionView(const GlobalSystemView* solution_view) noexcept
 {
     solution_view_ = solution_view;
@@ -845,6 +865,134 @@ void FunctionalAssembler::setPreviousSolutionViewK(int k, const GlobalSystemView
     if (previous_solutions_.size() < static_cast<std::size_t>(k)) {
         previous_solutions_.resize(static_cast<std::size_t>(k));
     }
+}
+
+const FieldSolutionBinding* FunctionalAssembler::findFieldBinding(FieldId field) const noexcept
+{
+    for (const auto& binding : field_bindings_) {
+        if (binding.field == field) {
+            return &binding;
+        }
+    }
+    return nullptr;
+}
+
+bool FunctionalAssembler::usesComponentBlockedFieldOrdering(
+    const FieldSolutionBinding& binding) const noexcept
+{
+    return binding.field_type == FieldType::Vector &&
+           binding.space != nullptr &&
+           binding.space->space_type() == spaces::SpaceType::Product;
+}
+
+void FunctionalAssembler::gatherFieldCoefficients(GlobalIndex cell_id,
+                                                  const FieldSolutionBinding& binding,
+                                                  const GlobalSystemView* view,
+                                                  std::span<const Real> raw_values,
+                                                  std::vector<Real>& out,
+                                                  const char* error_prefix)
+{
+    FE_CHECK_NOT_NULL(dof_map_, "FunctionalAssembler::gatherFieldCoefficients: dof_map");
+    FE_CHECK_NOT_NULL(binding.space,
+                      "FunctionalAssembler::gatherFieldCoefficients: field binding space");
+
+    const auto all_dofs = dof_map_->getCellDofs(cell_id);
+    const int dpn = dof_per_node_;
+    const bool block_mode = (dpn == 0);
+    const auto field_dof_count = binding.space->dofs_per_element(cell_id);
+
+    FE_THROW_IF(field_dof_count == 0, InvalidArgumentException,
+                "FunctionalAssembler::gatherFieldCoefficients: empty field DOF count");
+
+    std::vector<GlobalIndex> field_dofs(field_dof_count);
+
+    if (binding.dof_map != nullptr) {
+        const auto field_local_dofs = binding.dof_map->getCellDofs(cell_id);
+        FE_THROW_IF(field_local_dofs.size() != field_dof_count, FEException,
+                    std::string(error_prefix) + ": field-local DOF count mismatch");
+        for (std::size_t i = 0; i < field_local_dofs.size(); ++i) {
+            field_dofs[i] = field_local_dofs[i] + binding.dof_offset;
+        }
+        gatherVectorCoefficients(field_dofs, view, raw_values, out, error_prefix);
+        return;
+    }
+
+    if (block_mode) {
+        const auto start = static_cast<std::size_t>(binding.component_offset);
+        const auto end = start + field_dof_count;
+        FE_THROW_IF(end > all_dofs.size(), FEException,
+                    std::string(error_prefix) + ": block field DOF slice out of bounds");
+        std::copy(all_dofs.begin() + static_cast<std::ptrdiff_t>(start),
+                  all_dofs.begin() + static_cast<std::ptrdiff_t>(end),
+                  field_dofs.begin());
+        gatherVectorCoefficients(field_dofs, view, raw_values, out, error_prefix);
+        return;
+    }
+
+    FE_THROW_IF(dpn < 0, InvalidArgumentException,
+                "FunctionalAssembler::gatherFieldCoefficients: dof_per_node must be >= 0");
+
+    if (usesComponentBlockedFieldOrdering(binding)) {
+        const int n_comp = std::max(binding.n_components, 1);
+        FE_THROW_IF((field_dof_count % static_cast<std::size_t>(n_comp)) != 0,
+                    InvalidArgumentException,
+                    "FunctionalAssembler::gatherFieldCoefficients: ProductSpace DOFs not divisible by component count");
+
+        const auto scalar_dofs_per_component =
+            field_dof_count / static_cast<std::size_t>(n_comp);
+        for (int comp = 0; comp < n_comp; ++comp) {
+            for (std::size_t j = 0; j < scalar_dofs_per_component; ++j) {
+                const auto mono_idx =
+                    static_cast<std::size_t>(j) * static_cast<std::size_t>(dpn) +
+                    static_cast<std::size_t>(binding.component_offset + comp);
+                FE_THROW_IF(mono_idx >= all_dofs.size(), FEException,
+                            std::string(error_prefix) +
+                                ": interleaved ProductSpace DOF index out of bounds");
+                field_dofs[static_cast<std::size_t>(comp) * scalar_dofs_per_component + j] =
+                    all_dofs[mono_idx];
+            }
+        }
+        gatherVectorCoefficients(field_dofs, view, raw_values, out, error_prefix);
+        return;
+    }
+
+    const int n_comp = std::max(binding.n_components, 1);
+    FE_THROW_IF((field_dof_count % static_cast<std::size_t>(n_comp)) != 0,
+                InvalidArgumentException,
+                "FunctionalAssembler::gatherFieldCoefficients: field DOFs not divisible by component count");
+
+    const auto nodes_per_component = field_dof_count / static_cast<std::size_t>(n_comp);
+    for (std::size_t node = 0; node < nodes_per_component; ++node) {
+        for (int comp = 0; comp < n_comp; ++comp) {
+            const auto mono_idx =
+                node * static_cast<std::size_t>(dpn) +
+                static_cast<std::size_t>(binding.component_offset + comp);
+            FE_THROW_IF(mono_idx >= all_dofs.size(), FEException,
+                        std::string(error_prefix) + ": interleaved field DOF index out of bounds");
+            field_dofs[node * static_cast<std::size_t>(n_comp) + static_cast<std::size_t>(comp)] =
+                all_dofs[mono_idx];
+        }
+    }
+
+    gatherVectorCoefficients(field_dofs, view, raw_values, out, error_prefix);
+}
+
+void FunctionalAssembler::gatherPrimaryFieldCoefficients(GlobalIndex cell_id,
+                                                         const GlobalSystemView* view,
+                                                         std::span<const Real> raw_values,
+                                                         std::vector<Real>& out,
+                                                         const char* error_prefix)
+{
+    const auto* binding = findFieldBinding(primary_field_);
+    if (binding == nullptr) {
+        const auto dofs = gatherDofsWithOffset(dof_map_->getCellDofs(cell_id),
+                                               primary_field_dof_offset_,
+                                               cell_dofs_);
+        gatherVectorCoefficients(dofs, view, raw_values, out, error_prefix);
+        return;
+    }
+
+    gatherFieldCoefficients(cell_id, *binding, view, raw_values, out, error_prefix);
 }
 
 void FunctionalAssembler::setTimeIntegrationContext(const TimeIntegrationContext* ctx) noexcept
@@ -1071,40 +1219,12 @@ void FunctionalAssembler::bindFieldSolutionData(AssemblyContext& context,
         FE_THROW_IF(sol_view == nullptr && sol.empty(), FEException,
                     "FunctionalAssembler: solution not set for secondary field evaluation");
 
-        // Get cell DOFs (monolithic, interleaved)
-        FE_CHECK_NOT_NULL(dof_map_, "FunctionalAssembler::bindFieldSolutionData: dof_map");
         const auto cell_id = context.cellId();
-        const auto all_dofs = dof_map_->getCellDofs(cell_id);
-        const int dpn = dof_per_node_;
-        const int comp_off = binding->component_offset;
         const int n_comp = binding->n_components;
 
-        // Extract per-field coefficients from the monolithic cell DOF array.
-        // Two modes:
-        //   dpn > 0 (interleaved): mono_idx = node * dpn + comp_off + c
-        //   dpn == 0 (block):      mono_idx = comp_off + node * n_comp + c
-        // Block mode uses comp_off as a direct start index into all_dofs.
-        const bool block_mode = (dpn <= 0);
-        const int n_nodes = block_mode
-            ? static_cast<int>(binding->space->getElement(
-                  binding->space->element_type(), cell_id).num_dofs())
-            : static_cast<int>(all_dofs.size()) / dpn;
-
-        std::vector<GlobalIndex> field_dofs;
-        field_dofs.resize(static_cast<std::size_t>(n_nodes * n_comp));
-        for (int node = 0; node < n_nodes; ++node) {
-            for (int c = 0; c < n_comp; ++c) {
-                const auto mono_idx = block_mode
-                    ? static_cast<std::size_t>(comp_off + node * n_comp + c)
-                    : static_cast<std::size_t>(node * dpn + comp_off + c);
-                FE_THROW_IF(mono_idx >= all_dofs.size(), FEException,
-                            "FunctionalAssembler: DOF index out of bounds for secondary field");
-                field_dofs[static_cast<std::size_t>(node * n_comp + c)] = all_dofs[mono_idx];
-            }
-        }
         std::vector<Real> field_coeffs;
-        gatherVectorCoefficients(field_dofs, sol_view, sol, field_coeffs,
-                                 "FunctionalAssembler: secondary field gather");
+        gatherFieldCoefficients(cell_id, *binding, sol_view, sol, field_coeffs,
+                                "FunctionalAssembler: secondary field gather");
 
         // Evaluate basis functions for this field's space at the current QPs
         const auto& field_space = *binding->space;
@@ -1112,6 +1232,7 @@ void FunctionalAssembler::bindFieldSolutionData(AssemblyContext& context,
         const auto& field_element = field_space.getElement(field_elem_type, cell_id);
         const auto& field_basis = field_element.basis();
         const int dim = context.dimension();
+        const bool component_blocked = usesComponentBlockedFieldOrdering(*binding);
 
         // Scratch for basis evaluation
         std::vector<Real> basis_vals;
@@ -1120,6 +1241,10 @@ void FunctionalAssembler::bindFieldSolutionData(AssemblyContext& context,
         const bool need_grads = hasFlag(fr.required, RequiredData::SolutionGradients) ||
                                 hasFlag(fr.required, RequiredData::SolutionHessians) ||
                                 hasFlag(fr.required, RequiredData::SolutionLaplacians);
+        const int n_nodes = (binding->field_type == FieldType::Vector && component_blocked)
+            ? static_cast<int>(binding->space->dofs_per_element(cell_id) /
+                               static_cast<std::size_t>(std::max(binding->n_components, 1)))
+            : static_cast<int>(field_element.num_dofs());
 
         if (binding->field_type == FieldType::Scalar) {
             // Evaluate scalar field at QPs
@@ -1188,11 +1313,22 @@ void FunctionalAssembler::bindFieldSolutionData(AssemblyContext& context,
                 field_basis.evaluate_values(xi, basis_vals);
 
                 AssemblyContext::Vector3D val = {0.0, 0.0, 0.0};
-                for (int i = 0; i < n_nodes; ++i) {
+                if (component_blocked) {
                     for (int comp = 0; comp < vd; ++comp) {
-                        val[static_cast<std::size_t>(comp)] +=
-                            field_coeffs[static_cast<std::size_t>(i * n_comp + comp)] *
-                            basis_vals[static_cast<std::size_t>(i)];
+                        const auto base = static_cast<std::size_t>(comp * n_nodes);
+                        for (int i = 0; i < n_nodes; ++i) {
+                            val[static_cast<std::size_t>(comp)] +=
+                                field_coeffs[base + static_cast<std::size_t>(i)] *
+                                basis_vals[static_cast<std::size_t>(i)];
+                        }
+                    }
+                } else {
+                    for (int i = 0; i < n_nodes; ++i) {
+                        for (int comp = 0; comp < vd; ++comp) {
+                            val[static_cast<std::size_t>(comp)] +=
+                                field_coeffs[static_cast<std::size_t>(i * n_comp + comp)] *
+                                basis_vals[static_cast<std::size_t>(i)];
+                        }
                     }
                 }
                 vector_values[static_cast<std::size_t>(q)] = val;
@@ -1205,8 +1341,13 @@ void FunctionalAssembler::bindFieldSolutionData(AssemblyContext& context,
                     for (int comp = 0; comp < vd; ++comp) {
                         // Accumulate reference gradient for this component
                         AssemblyContext::Vector3D gref = {0.0, 0.0, 0.0};
+                        const auto base = component_blocked
+                            ? static_cast<std::size_t>(comp * n_nodes)
+                            : static_cast<std::size_t>(comp);
                         for (int i = 0; i < n_nodes; ++i) {
-                            const Real ci = field_coeffs[static_cast<std::size_t>(i * n_comp + comp)];
+                            const Real ci = component_blocked
+                                ? field_coeffs[base + static_cast<std::size_t>(i)]
+                                : field_coeffs[static_cast<std::size_t>(i * n_comp + comp)];
                             const auto& gi = basis_grads[static_cast<std::size_t>(i)];
                             for (int d = 0; d < dim; ++d) {
                                 gref[static_cast<std::size_t>(d)] += ci * gi[static_cast<std::size_t>(d)];
@@ -1324,9 +1465,11 @@ std::vector<Real> FunctionalAssembler::assembleMultiple(
         if (need_solution) {
             FE_THROW_IF(solution_view_ == nullptr && solution_.empty(), FEException,
                         "FunctionalAssembler::assembleMultiple: kernels require solution but no solution was set");
-            const auto dofs = dof_map_->getCellDofs(cell_id);
-            gatherVectorCoefficients(dofs, solution_view_, solution_, local_solution,
-                                     "FunctionalAssembler::assembleMultiple");
+            gatherPrimaryFieldCoefficients(cell_id,
+                                           solution_view_,
+                                           solution_,
+                                           local_solution,
+                                           "FunctionalAssembler::assembleMultiple");
             context_.setSolutionCoefficients(local_solution);
         }
 
@@ -1392,14 +1535,11 @@ std::vector<Real> FunctionalAssembler::computeGoalOrientedIndicators(
     mesh_->forEachCell([&](GlobalIndex cell_id) {
         prepareContext(cell_id, required);
 
-        const auto dofs = dof_map_->getCellDofs(cell_id);
-        local_solution.resize(dofs.size());
-        for (std::size_t i = 0; i < dofs.size(); ++i) {
-            const auto dof = dofs[i];
-            FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= solution_.size(), FEException,
-                        "FunctionalAssembler::computeGoalOrientedIndicators: primal solution vector too small for DOF " + std::to_string(dof));
-            local_solution[i] = solution_[static_cast<std::size_t>(dof)];
-        }
+        gatherPrimaryFieldCoefficients(cell_id,
+                                       /*view=*/nullptr,
+                                       solution_,
+                                       local_solution,
+                                       "FunctionalAssembler::computeGoalOrientedIndicators");
         context_.setSolutionCoefficients(local_solution);
 
         // Compute DWR indicator: R(u_h) * z_h integrated over element
@@ -1557,12 +1697,14 @@ Real FunctionalAssembler::assembleCellsCore(
 	                thread_context.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
 	                thread_context.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
 		                thread_context.setHistoryWeights(history_weights_);
-		                const auto dofs = dof_map_->getCellDofs(cell_id);
 		                if (need_solution) {
 		                    FE_THROW_IF(solution_view_ == nullptr && solution_.empty(), FEException,
 		                                "FunctionalAssembler::assembleCellsCore: kernel requires solution but no solution was set");
-		                    gatherVectorCoefficients(dofs, solution_view_, solution_, local_solution,
-		                                             "FunctionalAssembler::assembleCellsCore");
+		                    gatherPrimaryFieldCoefficients(cell_id,
+		                                                  solution_view_,
+		                                                  solution_,
+		                                                  local_solution,
+		                                                  "FunctionalAssembler::assembleCellsCore");
 		                    thread_context.setSolutionCoefficients(local_solution);
 		                }
 		                if (!previous_solutions_.empty()) {
@@ -1570,8 +1712,11 @@ Real FunctionalAssembler::assembleCellsCore(
 		                        const auto& prev = previous_solutions_[k];
 		                        const auto* prev_view = (k < previous_solution_views_.size()) ? previous_solution_views_[k] : nullptr;
 		                        if (prev_view == nullptr && prev.empty()) continue;
-		                        gatherVectorCoefficients(dofs, prev_view, prev, local_prev_solution,
-		                                                 "FunctionalAssembler::assembleCellsCore");
+		                        gatherPrimaryFieldCoefficients(cell_id,
+		                                                      prev_view,
+		                                                      prev,
+		                                                      local_prev_solution,
+		                                                      "FunctionalAssembler::assembleCellsCore");
 		                        thread_context.setPreviousSolutionCoefficientsK(static_cast<int>(k + 1u), local_prev_solution);
 		                    }
 		                }
@@ -1596,12 +1741,14 @@ Real FunctionalAssembler::assembleCellsCore(
 	        std::vector<Real> local_prev_solution;
 	        mesh_->forEachCell([&](GlobalIndex cell_id) {
 		            prepareContext(cell_id, context_required);
-		            const auto dofs = dof_map_->getCellDofs(cell_id);
 		            if (need_solution) {
 		                FE_THROW_IF(solution_view_ == nullptr && solution_.empty(), FEException,
 		                            "FunctionalAssembler::assembleCellsCore: kernel requires solution but no solution was set");
-		                gatherVectorCoefficients(dofs, solution_view_, solution_, local_solution,
-		                                         "FunctionalAssembler::assembleCellsCore");
+		                gatherPrimaryFieldCoefficients(cell_id,
+		                                              solution_view_,
+		                                              solution_,
+		                                              local_solution,
+		                                              "FunctionalAssembler::assembleCellsCore");
 		                context_.setSolutionCoefficients(local_solution);
 		            }
 		            if (!previous_solutions_.empty()) {
@@ -1609,8 +1756,11 @@ Real FunctionalAssembler::assembleCellsCore(
 		                    const auto& prev = previous_solutions_[k];
 		                    const auto* prev_view = (k < previous_solution_views_.size()) ? previous_solution_views_[k] : nullptr;
 		                    if (prev_view == nullptr && prev.empty()) continue;
-		                    gatherVectorCoefficients(dofs, prev_view, prev, local_prev_solution,
-		                                             "FunctionalAssembler::assembleCellsCore");
+		                    gatherPrimaryFieldCoefficients(cell_id,
+		                                                  prev_view,
+		                                                  prev,
+		                                                  local_prev_solution,
+		                                                  "FunctionalAssembler::assembleCellsCore");
 		                    context_.setPreviousSolutionCoefficientsK(static_cast<int>(k + 1u), local_prev_solution);
 		                }
 		            }
@@ -1635,12 +1785,14 @@ Real FunctionalAssembler::assembleCellsCore(
         std::vector<Real> local_prev_solution;
 	        mesh_->forEachCell([&](GlobalIndex cell_id) {
 	            prepareContext(cell_id, context_required);
-	            const auto dofs = dof_map_->getCellDofs(cell_id);
 	            if (need_solution) {
 	                FE_THROW_IF(solution_view_ == nullptr && solution_.empty(), FEException,
 	                            "FunctionalAssembler::assembleCellsCore: kernel requires solution but no solution was set");
-	                gatherVectorCoefficients(dofs, solution_view_, solution_, local_solution,
-	                                         "FunctionalAssembler::assembleCellsCore");
+	                gatherPrimaryFieldCoefficients(cell_id,
+	                                              solution_view_,
+	                                              solution_,
+	                                              local_solution,
+	                                              "FunctionalAssembler::assembleCellsCore");
 	                context_.setSolutionCoefficients(local_solution);
 	            }
 	            if (!previous_solutions_.empty()) {
@@ -1648,8 +1800,11 @@ Real FunctionalAssembler::assembleCellsCore(
 	                    const auto& prev = previous_solutions_[k];
 	                    const auto* prev_view = (k < previous_solution_views_.size()) ? previous_solution_views_[k] : nullptr;
 	                    if (prev_view == nullptr && prev.empty()) continue;
-	                    gatherVectorCoefficients(dofs, prev_view, prev, local_prev_solution,
-	                                             "FunctionalAssembler::assembleCellsCore");
+	                    gatherPrimaryFieldCoefficients(cell_id,
+	                                                  prev_view,
+	                                                  prev,
+	                                                  local_prev_solution,
+	                                                  "FunctionalAssembler::assembleCellsCore");
 	                    context_.setPreviousSolutionCoefficientsK(static_cast<int>(k + 1u), local_prev_solution);
 	                }
 	            }
@@ -1748,21 +1903,111 @@ Real FunctionalAssembler::assembleBoundaryCore(
 	            context_.setHistoryWeights(history_weights_);
 	            context_.setBoundaryMarker(boundary_marker);
 
-		            const auto dofs = dof_map_->getCellDofs(cell_id);
-		            if (need_solution) {
-		                FE_THROW_IF(solution_view_ == nullptr && solution_.empty(), FEException,
-		                            "FunctionalAssembler::assembleBoundaryCore: kernel requires solution but no solution was set");
-		                gatherVectorCoefficients(dofs, solution_view_, solution_, local_solution,
-		                                         "FunctionalAssembler::assembleBoundaryCore");
-		                context_.setSolutionCoefficients(local_solution);
-		            }
-		            if (!previous_solutions_.empty()) {
+	            if (need_solution) {
+	                FE_THROW_IF(solution_view_ == nullptr && solution_.empty(), FEException,
+	                            "FunctionalAssembler::assembleBoundaryCore: kernel requires solution but no solution was set");
+	                gatherPrimaryFieldCoefficients(cell_id,
+	                                              solution_view_,
+	                                              solution_,
+	                                              local_solution,
+	                                              "FunctionalAssembler::assembleBoundaryCore");
+	                context_.setSolutionCoefficients(local_solution);
+                    if (std::getenv("SVMP_MONO_AUX_TRACE") != nullptr && result.faces_processed < 8) {
+                        Real coeff_sq = 0.0;
+                        for (const auto value : local_solution) {
+                            coeff_sq += value * value;
+                        }
+                        std::fprintf(stderr,
+                                     "[FunctionalAssembler] boundary_marker=%d face_id=%lld cell_id=%lld owned_cell=%d n_dofs=%zu coeff_l2=%.17g",
+                                     boundary_marker,
+                                     static_cast<long long>(face_id),
+                                     static_cast<long long>(cell_id),
+                                     mesh_->isOwnedCell(cell_id) ? 1 : 0,
+                                     local_solution.size(),
+                                     static_cast<double>(std::sqrt(coeff_sq)));
+                        if (context_.numQuadraturePoints() > 0) {
+                            if (context_.trialFieldType() == FieldType::Scalar) {
+                                std::fprintf(stderr,
+                                             " q0_scalar=%.17g",
+                                             static_cast<double>(context_.solutionValue(0)));
+                            } else if (context_.trialFieldType() == FieldType::Vector) {
+                                const auto uq = context_.solutionVectorValue(0);
+                                std::fprintf(stderr,
+                                             " q0_vector=(%.17g,%.17g,%.17g)",
+                                             static_cast<double>(uq[0]),
+                                             static_cast<double>(uq[1]),
+                                             static_cast<double>(uq[2]));
+                            }
+                        }
+                        const auto mono_trace_dofs = gatherDofsWithOffset(dof_map_->getCellDofs(cell_id),
+                                                                          primary_field_dof_offset_,
+                                                                          cell_dofs_);
+                        std::vector<GlobalIndex> primary_trace_storage;
+                        std::span<const GlobalIndex> primary_trace_dofs = mono_trace_dofs;
+                        const auto* primary_binding = findFieldBinding(primary_field_);
+                        if (primary_binding != nullptr && primary_binding->dof_map != nullptr) {
+                            const auto bound_local_dofs = primary_binding->dof_map->getCellDofs(cell_id);
+                            primary_trace_storage.resize(bound_local_dofs.size());
+                            for (std::size_t i = 0; i < bound_local_dofs.size(); ++i) {
+                                primary_trace_storage[i] =
+                                    bound_local_dofs[i] + primary_binding->dof_offset;
+                            }
+                            primary_trace_dofs = std::span<const GlobalIndex>(
+                                primary_trace_storage.data(), primary_trace_storage.size());
+                        }
+                        if (solution_view_ != nullptr && !primary_trace_dofs.empty()) {
+                            const std::size_t n_trace = std::min<std::size_t>(primary_trace_dofs.size(), 6u);
+                            std::vector<GlobalIndex> resolved(n_trace, INVALID_GLOBAL_INDEX);
+                            solution_view_->resolveVectorEntries(
+                                std::span<const GlobalIndex>(primary_trace_dofs.data(), n_trace),
+                                std::span<GlobalIndex>(resolved.data(), resolved.size()));
+                            std::fprintf(stderr, " primary_binding=%d primary_dofs=[",
+                                         primary_binding != nullptr ? 1 : 0);
+                            for (std::size_t i = 0; i < n_trace; ++i) {
+                                std::fprintf(stderr, "%s%lld", (i == 0 ? "" : ","),
+                                             static_cast<long long>(primary_trace_dofs[i]));
+                            }
+                            std::fprintf(stderr, "] primary_resolved=[");
+                            for (std::size_t i = 0; i < n_trace; ++i) {
+                                std::fprintf(stderr, "%s%lld", (i == 0 ? "" : ","),
+                                             static_cast<long long>(resolved[i]));
+                            }
+                            std::fprintf(stderr, "]");
+                            if (!mono_trace_dofs.empty() &&
+                                (mono_trace_dofs.size() != primary_trace_dofs.size() ||
+                                 !std::equal(mono_trace_dofs.begin(), mono_trace_dofs.end(),
+                                             primary_trace_dofs.begin()))) {
+                                const std::size_t n_mono_trace = std::min<std::size_t>(mono_trace_dofs.size(), 6u);
+                                std::vector<GlobalIndex> mono_resolved(n_mono_trace, INVALID_GLOBAL_INDEX);
+                                solution_view_->resolveVectorEntries(
+                                    std::span<const GlobalIndex>(mono_trace_dofs.data(), n_mono_trace),
+                                    std::span<GlobalIndex>(mono_resolved.data(), mono_resolved.size()));
+                                std::fprintf(stderr, " mono_dofs=[");
+                                for (std::size_t i = 0; i < n_mono_trace; ++i) {
+                                    std::fprintf(stderr, "%s%lld", (i == 0 ? "" : ","),
+                                                 static_cast<long long>(mono_trace_dofs[i]));
+                                }
+                                std::fprintf(stderr, "] mono_resolved=[");
+                                for (std::size_t i = 0; i < n_mono_trace; ++i) {
+                                    std::fprintf(stderr, "%s%lld", (i == 0 ? "" : ","),
+                                                 static_cast<long long>(mono_resolved[i]));
+                                }
+                                std::fprintf(stderr, "]");
+                            }
+                        }
+                        std::fprintf(stderr, "\n");
+                    }
+	            }
+	            if (!previous_solutions_.empty()) {
 		                for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
 		                    const auto& prev = previous_solutions_[k];
 		                    const auto* prev_view = (k < previous_solution_views_.size()) ? previous_solution_views_[k] : nullptr;
 		                    if (prev_view == nullptr && prev.empty()) continue;
-		                    gatherVectorCoefficients(dofs, prev_view, prev, local_prev_solution,
-		                                             "FunctionalAssembler::assembleBoundaryCore");
+		                    gatherPrimaryFieldCoefficients(cell_id,
+		                                                  prev_view,
+		                                                  prev,
+		                                                  local_prev_solution,
+		                                                  "FunctionalAssembler::assembleBoundaryCore");
 		                    context_.setPreviousSolutionCoefficientsK(static_cast<int>(k + 1u), local_prev_solution);
 		                }
 		            }

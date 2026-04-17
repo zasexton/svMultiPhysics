@@ -105,10 +105,12 @@ struct TimeIntegrationContext;
 struct FieldSolutionBinding {
     FieldId field{INVALID_FIELD_ID};                    ///< Field identifier
     const spaces::FunctionSpace* space{nullptr};        ///< Function space for this field
-    FieldType field_type{FieldType::Scalar};             ///< Scalar or vector
-    int value_dimension{1};                              ///< Number of physical components
-    int component_offset{0};                             ///< Starting component in interleaved DOF layout
-    int n_components{1};                                 ///< Number of components this field occupies
+    const dofs::DofMap* dof_map{nullptr};               ///< Optional field-local DOF map for exact gather
+    GlobalIndex dof_offset{0};                          ///< Optional monolithic offset applied to dof_map entries
+    FieldType field_type{FieldType::Scalar};            ///< Scalar or vector
+    int value_dimension{1};                             ///< Number of physical components
+    int component_offset{0};                            ///< Starting component in interleaved DOF layout
+    int n_components{1};                                ///< Number of components this field occupies
 };
 
 // ============================================================================
@@ -642,6 +644,15 @@ public:
     void setSolution(std::span<const Real> solution);
 
     /**
+     * @brief Set the global DOF offset for the primary field
+     *
+     * When the configured DOF map is field-local but the bound solution/view
+     * uses monolithic global numbering, this offset is added before gathering
+     * primary-field coefficients.
+     */
+    void setPrimaryFieldDofOffset(GlobalIndex offset) noexcept;
+
+    /**
      * @brief Provide a global-indexed solution view (MPI-aware)
      *
      * When set, the assembler will read coefficients from
@@ -841,6 +852,22 @@ private:
     // Internal Implementation
     // =========================================================================
 
+    [[nodiscard]] const FieldSolutionBinding* findFieldBinding(FieldId field) const noexcept;
+    [[nodiscard]] bool usesComponentBlockedFieldOrdering(const FieldSolutionBinding& binding) const noexcept;
+
+    void gatherFieldCoefficients(GlobalIndex cell_id,
+                                 const FieldSolutionBinding& binding,
+                                 const GlobalSystemView* view,
+                                 std::span<const Real> raw_values,
+                                 std::vector<Real>& out,
+                                 const char* error_prefix);
+
+    void gatherPrimaryFieldCoefficients(GlobalIndex cell_id,
+                                        const GlobalSystemView* view,
+                                        std::span<const Real> raw_values,
+                                        std::vector<Real>& out,
+                                        const char* error_prefix);
+
     void bindFieldSolutionData(AssemblyContext& context, std::span<const FieldRequirement> reqs);
 
     /**
@@ -917,6 +944,7 @@ private:
     // Working storage
     AssemblyContext context_;
     std::vector<GlobalIndex> cell_dofs_;
+    GlobalIndex primary_field_dof_offset_{0};
 
     // Thread-local contexts (for parallel assembly)
     std::vector<std::unique_ptr<AssemblyContext>> thread_contexts_;

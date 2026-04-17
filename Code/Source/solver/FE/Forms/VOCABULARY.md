@@ -63,6 +63,7 @@ For the full integration guide, see `Forms/SYSTEMS_INTEGRATION.md`.
 | `transpose`, `trace`, `det`, `inv` | Standard tensor operations |
 | `cofactor`, `sym`, `skew`, `dev` | Tensor decomposition helpers |
 | `norm`, `normalize`, `cross` | Vector operations |
+| `normalComponent(u)` | Scalar normal trace `u·n` (for `H(div)` / trace BC authoring) |
 | `component(i[,j])` | Component extraction |
 | `A(i[,j])` + `einsum(expr)` | Einstein-style indexed access |
 | `jump(u)`, `avg(u)` | DG jump and average |
@@ -97,6 +98,18 @@ For the full integration guide, see `Forms/SYSTEMS_INTEGRATION.md`.
 | `installStrongDirichlet(system, bcs)` | Strong Dirichlet constraints |
 | `BoundaryConditionManager::applyAll(...)` | One-call BC workflow |
 | `FormCompiler::compile()` / `compileMixed()` | Compilation without installation |
+
+### Boundary Condition Helpers
+
+`Forms/StandardBCs.h` provides physics-agnostic BC wrappers for both pointwise
+and trace-essential data:
+
+- `EssentialBC` for pointwise value data
+- `NormalTraceEssentialBC` for strong `H(div)` normal-trace data
+- `TraceLoadBC` for weak scalar trace loads such as `-∫ g tau(v) ds`
+- `TraceRobinBC` for weak scalar trace Robin terms such as `∫ alpha tau(u) tau(v) ds - ∫ rhs tau(v) ds`
+
+For `H(div)`, the scalar trace operator is typically `tau(w) = normalComponent(w)`.
 
 ### AD-backed Jacobians
 

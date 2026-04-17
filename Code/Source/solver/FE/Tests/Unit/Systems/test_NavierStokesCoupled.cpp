@@ -45,6 +45,12 @@ svmp::FE::dofs::MeshTopologyInfo singleTetraTopology()
     return topo;
 }
 
+void distributeConstrainedState(const svmp::FE::systems::FESystem& sys,
+                                std::vector<Real>& values)
+{
+    sys.constraints().distribute(values);
+}
+
 } // namespace
 
 TEST(SpaceHelpersTest, MeshInferredSpacesRejectMixedCellTypes)
@@ -130,6 +136,7 @@ TEST(NavierStokesCoupledFormsTest, ResidualAndJacobianMatchFiniteDifferences)
     for (GlobalIndex i = 0; i < n_dofs; ++i) {
         U[static_cast<std::size_t>(i)] = static_cast<Real>(0.05) * static_cast<Real>(i + 1);
     }
+    distributeConstrainedState(sys, U);
 
     svmp::FE::systems::SystemStateView state;
     state.u = U;
@@ -158,6 +165,7 @@ TEST(NavierStokesCoupledFormsTest, ResidualAndJacobianMatchFiniteDifferences)
     for (GlobalIndex j = 0; j < n_dofs; ++j) {
         auto U_plus = U;
         U_plus[static_cast<std::size_t>(j)] += eps;
+        distributeConstrainedState(sys, U_plus);
 
         svmp::FE::systems::SystemStateView state_plus;
         state_plus.u = U_plus;
@@ -225,6 +233,7 @@ TEST(NavierStokesCoupledFormsTest, CoupledResidualInstallerMatchesFiniteDifferen
     for (GlobalIndex i = 0; i < n_dofs; ++i) {
         U[static_cast<std::size_t>(i)] = static_cast<Real>(0.05) * static_cast<Real>(i + 1);
     }
+    distributeConstrainedState(sys, U);
 
     svmp::FE::systems::SystemStateView state;
     state.u = U;
@@ -252,6 +261,7 @@ TEST(NavierStokesCoupledFormsTest, CoupledResidualInstallerMatchesFiniteDifferen
     for (GlobalIndex j = 0; j < n_dofs; ++j) {
         auto U_plus = U;
         U_plus[static_cast<std::size_t>(j)] += eps;
+        distributeConstrainedState(sys, U_plus);
 
         svmp::FE::systems::SystemStateView state_plus;
         state_plus.u = U_plus;

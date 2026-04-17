@@ -12,6 +12,26 @@ namespace svmp {
 namespace FE {
 namespace analysis {
 
+namespace {
+
+[[nodiscard]] bool isPrimalTraceAnchoringBC(const BoundaryConditionDescriptor& bc) noexcept
+{
+    const bool value_like_trace =
+        bc.trace_kind == TraceKind::Value ||
+        bc.trace_kind == TraceKind::NormalComponent ||
+        bc.trace_kind == TraceKind::TangentialComponent;
+
+    if (!value_like_trace) {
+        return false;
+    }
+
+    return bc.enforcement_kind == EnforcementKind::Strong ||
+           bc.enforcement_kind == EnforcementKind::WeakPenalty ||
+           bc.enforcement_kind == EnforcementKind::WeakNitsche;
+}
+
+} // namespace
+
 std::string CompatibilityAnalyzer::name() const {
     return "CompatibilityAnalyzer";
 }
@@ -81,10 +101,10 @@ void CompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
                 all_non_algebraic_are_flux = false;
             }
 
-            if (bc.trace_kind == TraceKind::Value ||
-                bc.trace_kind == TraceKind::NormalComponent ||
-                bc.trace_kind == TraceKind::TangentialComponent) {
+            if (isPrimalTraceAnchoringBC(bc)) {
                 has_anchoring_bc = true;
+                all_non_algebraic_are_flux = false;
+            } else if (bc.enforcement_kind != EnforcementKind::WeakConsistent) {
                 all_non_algebraic_are_flux = false;
             }
         }

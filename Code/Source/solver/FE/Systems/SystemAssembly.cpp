@@ -1146,11 +1146,37 @@ assembly::AssemblyResult assembleOperator(
     }
 #endif
 
+    const bool has_partitioned_output_coupling =
+        request.want_matrix &&
+        std::any_of(system.deployed_aux_entries_.begin(),
+                    system.deployed_aux_entries_.end(),
+                    [&](const auto& entry) {
+                        if (!entry.materialized ||
+                            entry.spec.solve_mode != AuxiliarySolveMode::Partitioned) {
+                            return false;
+                        }
+                        if (!entry.deriv_provider || entry.output_ids.empty()) {
+                            return false;
+                        }
+                        return !system.consumersOfEntry_(entry).empty();
+                    });
+
+    if (has_partitioned_output_coupling &&
+        system.auxiliaryStateManagerIfPresent() &&
+        !system.auxiliaryOperatorRegistryIfPresent()) {
+        auto& aux_registry = system.auxiliaryOperatorRegistry();
+        if (!aux_registry.isLayoutFinalized()) {
+            aux_registry.finalizeLayout();
+        }
+    }
+
     // Monolithic auxiliary assembly: inject auxiliary residual/Jacobian
     // contributions.  For entries within PDE DOF range, forward to the
     // FSILS matrix/vector.  For entries involving auxiliary DOFs (outside
     // FSILS bounds), capture into bordered coupling storage for post-solve
-    // static condensation.
+    // static condensation. Partitioned FE-coupled outputs also reuse this
+    // path to emit exact field-side reduced updates when their outputs are
+    // consumed by PDE forms.
     if (system.auxiliaryStateManagerIfPresent() &&
         system.auxiliaryOperatorRegistryIfPresent()) {
         auto* aux_registry = system.auxiliaryOperatorRegistryIfPresent();
@@ -1161,7 +1187,9 @@ assembly::AssemblyResult assembleOperator(
                             return entry.spec.solve_mode == AuxiliarySolveMode::Monolithic;
                         });
         const bool has_auxiliary_operators = !aux_registry->operatorNames().empty();
-        if (!has_monolithic_deployments && !has_auxiliary_operators) {
+        if (!has_monolithic_deployments &&
+            !has_auxiliary_operators &&
+            !has_partitioned_output_coupling) {
             return total;
         }
 

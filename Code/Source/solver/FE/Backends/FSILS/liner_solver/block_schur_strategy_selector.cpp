@@ -38,10 +38,9 @@ BlockSchurStrategySelection BlockSchurStrategySelector::select(
       !disable_face_only_legacy;
 
   selection.require_exact_momentum_low_rank_path =
-      low_rank_profile.distributed &&
-      (low_rank_profile.has_grouped_bordered ||
-       (low_rank_profile.active_nonduplicate_reduced_corrections > 1 &&
-        low_rank_profile.has_distinct_multi_reduced_corrections));
+      low_rank_profile.has_grouped_bordered ||
+      (low_rank_profile.active_nonduplicate_reduced_corrections > 1 &&
+       low_rank_profile.has_distinct_multi_reduced_corrections);
 
   selection.use_momentum_only_low_rank_legacy_scalar_schur =
       (con_ncomp == 1) &&

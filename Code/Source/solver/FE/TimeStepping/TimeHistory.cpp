@@ -7,6 +7,7 @@
 
 #include "TimeStepping/TimeHistory.h"
 
+#include "Assembly/GlobalSystemView.h"
 #include "Core/FEException.h"
 
 #include <algorithm>
@@ -28,7 +29,35 @@ void copySpan(std::span<Real> dst, std::span<const Real> src)
 void repackVector(backends::GenericVector& dst, const backends::GenericVector& src)
 {
     FE_CHECK_ARG(dst.size() == src.size(), "TimeHistory: size mismatch in repackVector");
-    dst.copyFrom(src);
+
+    auto dst_view = dst.createAssemblyView();
+    auto src_view = const_cast<backends::GenericVector&>(src).createAssemblyView();
+    if (!dst_view || !src_view) {
+        dst.copyFrom(src);
+        return;
+    }
+
+    constexpr GlobalIndex kChunkSize = 4096;
+    std::vector<GlobalIndex> dofs;
+    std::vector<Real> values;
+    dofs.reserve(static_cast<std::size_t>(std::min(src.size(), kChunkSize)));
+    values.reserve(dofs.capacity());
+
+    dst_view->beginAssemblyPhase();
+    for (GlobalIndex offset = 0; offset < src.size(); offset += kChunkSize) {
+        const auto chunk = std::min<GlobalIndex>(kChunkSize, src.size() - offset);
+        dofs.resize(static_cast<std::size_t>(chunk));
+        values.resize(static_cast<std::size_t>(chunk));
+        for (GlobalIndex i = 0; i < chunk; ++i) {
+            dofs[static_cast<std::size_t>(i)] = offset + i;
+        }
+        src_view->getVectorEntries(std::span<const GlobalIndex>(dofs.data(), dofs.size()),
+                                   std::span<Real>(values.data(), values.size()));
+        dst_view->addVectorEntries(std::span<const GlobalIndex>(dofs.data(), dofs.size()),
+                                   std::span<const Real>(values.data(), values.size()),
+                                   assembly::AddMode::Insert);
+    }
+    dst_view->finalizeAssembly();
 }
 
 } // namespace

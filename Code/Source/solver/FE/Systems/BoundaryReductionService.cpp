@@ -22,10 +22,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <string>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #if FE_HAS_MPI
 #  include <mpi.h>
@@ -207,17 +209,27 @@ void BoundaryReductionService::configureAssembler(assembly::FunctionalAssembler&
                 "BoundaryReductionService: system.setup() has not been called");
 
     assembler.setMesh(system_.meshAccess());
-    assembler.setDofMap(system_.dofHandler().getDofMap());
 
     // For GEOMETRY_FIELD_ID, use the default geometry space instead of a
     // field record.  This enables geometry-only integrands (∫ 1 ds, etc.)
     // without any registered FE field.
+    const auto* primary_rec =
+        (primary_field_ == GEOMETRY_FIELD_ID) ? nullptr : &system_.fieldRecord(primary_field_);
     if (primary_field_ == GEOMETRY_FIELD_ID) {
+        assembler.setDofMap(system_.dofHandler().getDofMap());
+        assembler.setPrimaryFieldDofOffset(0);
         assembler.setSpace(geometrySpace());
         // No primary field to bind — geometry-only evaluation.
     } else {
-        const auto& rec = system_.fieldRecord(primary_field_);
+        const auto& rec = *primary_rec;
         FE_CHECK_NOT_NULL(rec.space.get(), "BoundaryReductionService: field space");
+        if (bind_solution) {
+            assembler.setDofMap(system_.dofHandler().getDofMap());
+            assembler.setPrimaryFieldDofOffset(0);
+        } else {
+            assembler.setDofMap(system_.fieldDofHandler(primary_field_).getDofMap());
+            assembler.setPrimaryFieldDofOffset(system_.fieldDofOffset(primary_field_));
+        }
         assembler.setSpace(*rec.space);
         assembler.setPrimaryField(primary_field_);
     }
@@ -271,44 +283,36 @@ void BoundaryReductionService::configureAssembler(assembly::FunctionalAssembler&
             (void)vec;
         }
 
-        // Multi-field: the FunctionalAssembler's secondary-field extraction
-        // uses `all_dofs[node * dpn + comp_off + c]` to find per-cell DOFs.
-        // FESystem uses block DOF layout, so getCellDofs() returns:
-        //   [field0_dof0, ..., field0_dofN, field1_dof0, ..., field1_dofN, ...]
-        // We set dpn=1 and comp_off = block_start_in_cell_dofs, so
-        //   mono_idx = node * 1 + block_start = node + block_start
-        // which correctly indexes into the block portion of getCellDofs().
-        if (!secondary_fields_.empty() && system_.isSetup()) {
-            // Use block DOF mode (dpn=0): the FunctionalAssembler extracts
-            // secondary field coefficients using comp_off as the direct start
-            // index within getCellDofs(), with sequential indexing.
-            assembler.setDofPerNode(0);  // signals block mode
+        // When sampling solution coefficients through a backend vector view,
+        // stay on the monolithic system DOF map and extract per-field slices
+        // via explicit bindings. Distributed field-local DOF maps can diverge
+        // from the system-global ids expected by the view even for
+        // primary-only evaluations.
+        if (system_.isSetup()) {
+            assembler.setDofPerNode(0);  // block DOF layout mode
 
-            // Find each secondary field's block start in getCellDofs().
-            const auto& sys_dm = system_.dofHandler().getDofMap();
-            const auto sys_cell_dofs = sys_dm.getCellDofs(0);
-            const int total_dpc = static_cast<int>(sys_cell_dofs.size());
+            auto register_field_binding = [&](FieldId field_id,
+                                              const spaces::FunctionSpace& field_space,
+                                              int components) {
+                const auto& sec_dh = system_.fieldDofHandler(field_id);
 
+                assembly::FieldSolutionBinding binding;
+                binding.field = field_id;
+                binding.space = &field_space;
+                binding.dof_map = &sec_dh.getDofMap();
+                binding.dof_offset = system_.fieldDofOffset(field_id);
+                binding.field_type = field_space.field_type();
+                binding.value_dimension = components;
+                binding.n_components = components;
+                assembler.registerFieldBinding(binding);
+            };
+
+            FE_CHECK_NOT_NULL(primary_rec, "BoundaryReductionService: primary record");
+            register_field_binding(primary_field_,
+                                   *primary_rec->space,
+                                   primary_rec->components);
             for (const auto& fb : secondary_fields_) {
-                const auto& sec_dh = system_.fieldDofHandler(fb.field);
-                const auto sec_off = system_.fieldDofOffset(fb.field);
-                const auto sec_cell = sec_dh.getDofMap().getCellDofs(0);
-                if (sec_cell.empty()) continue;
-
-                // Find where this field's DOFs start in the system cell DOF array.
-                const auto first_sec_global = sec_cell[0] + sec_off;
-                int block_start = -1;
-                for (int k = 0; k < total_dpc; ++k) {
-                    if (sys_cell_dofs[static_cast<std::size_t>(k)] == first_sec_global) {
-                        block_start = k;
-                        break;
-                    }
-                }
-                if (block_start < 0) continue;
-
-                assembly::FieldSolutionBinding adjusted = fb;
-                adjusted.component_offset = block_start;
-                assembler.registerFieldBinding(adjusted);
+                register_field_binding(fb.field, *fb.space, fb.n_components);
             }
         }
 
@@ -334,6 +338,22 @@ Real BoundaryReductionService::evaluateFunctionalEntry(CompiledFunctional& entry
     compileFunctionalIfNeeded(entry);
     FE_CHECK_NOT_NULL(entry.kernel.get(), "BoundaryReductionService::evaluateFunctional: kernel");
 
+    auto refreshGhostedCoefficients = [](const backends::GenericVector* vec_ptr) {
+        if (vec_ptr == nullptr) {
+            return;
+        }
+        // Explicit sampled reductions read FE coefficients through backend
+        // vector views. On distributed backends those views must see fresh
+        // owner-to-ghost copies or sampled partitioned inputs can silently
+        // evaluate with stale zeros on ghosted DOFs.
+        auto* vec = const_cast<backends::GenericVector*>(vec_ptr);
+        vec->updateGhosts();
+    };
+
+    refreshGhostedCoefficients(state.u_vector);
+    refreshGhostedCoefficients(state.u_prev_vector);
+    refreshGhostedCoefficients(state.u_prev2_vector);
+
     assembly::FunctionalAssembler assembler;
     configureAssembler(assembler, state, /*bind_solution=*/true);
 
@@ -343,6 +363,56 @@ Real BoundaryReductionService::evaluateFunctionalEntry(CompiledFunctional& entry
         auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
         solution_view = vec->createAssemblyView();
         assembler.setSolutionView(solution_view.get());
+    }
+
+    if (const char* trace_dofs_env = std::getenv("SVMP_MONO_AUX_TRACE_DOFS");
+        trace_dofs_env != nullptr && *trace_dofs_env != '\0' && solution_view != nullptr) {
+        static thread_local int trace_budget = 32;
+        if (trace_budget > 0) {
+            std::vector<GlobalIndex> trace_dofs;
+            const char* cursor = trace_dofs_env;
+            while (*cursor != '\0') {
+                char* end = nullptr;
+                const long value = std::strtol(cursor, &end, 10);
+                if (end != cursor) {
+                    trace_dofs.push_back(static_cast<GlobalIndex>(value));
+                    cursor = end;
+                }
+                while (*cursor == ',' || *cursor == ' ' || *cursor == ';') {
+                    ++cursor;
+                }
+                if (end == cursor && *cursor != '\0') {
+                    ++cursor;
+                }
+            }
+            if (!trace_dofs.empty()) {
+                std::vector<Real> trace_values(trace_dofs.size(), 0.0);
+                solution_view->getVectorEntries(trace_dofs, trace_values);
+                int rank = 0;
+#if FE_HAS_MPI
+                int mpi_initialized = 0;
+                MPI_Initialized(&mpi_initialized);
+                if (mpi_initialized) {
+                    MPI_Comm_rank(system_.dofHandler().mpiComm(), &rank);
+                }
+#endif
+                const auto& constraints = system_.constraints();
+                std::fprintf(stderr,
+                             "[BoundaryReductionTraceDofs] rank=%d functional='%s' marker=%d",
+                             rank,
+                             entry.def.name.c_str(),
+                             entry.def.boundary_marker);
+                for (std::size_t i = 0; i < trace_dofs.size(); ++i) {
+                    std::fprintf(stderr,
+                                 " dof=%lld constrained=%d value=%.17g",
+                                 static_cast<long long>(trace_dofs[i]),
+                                 constraints.isConstrained(trace_dofs[i]) ? 1 : 0,
+                                 static_cast<double>(trace_values[i]));
+                }
+                std::fprintf(stderr, "\n");
+                --trace_budget;
+            }
+        }
     }
 
     // Previous solution views for MPI.
@@ -366,6 +436,8 @@ Real BoundaryReductionService::evaluateFunctionalEntry(CompiledFunctional& entry
         raw = assembler.assembleBoundaryScalar(*entry.kernel, entry.def.boundary_marker);
     }
 
+    const auto local_result = assembler.getLastResult();
+
 #if FE_HAS_MPI
     int mpi_initialized = 0;
     MPI_Initialized(&mpi_initialized);
@@ -376,6 +448,14 @@ Real BoundaryReductionService::evaluateFunctionalEntry(CompiledFunctional& entry
 
     switch (entry.def.reduction) {
         case forms::BoundaryFunctional::Reduction::Sum:
+            if (std::getenv("SVMP_MONO_AUX_TRACE") != nullptr) {
+                std::fprintf(stderr,
+                             "[BoundaryReductionService] functional='%s' marker=%d local_faces=%lld local_raw=%.17g\n",
+                             entry.def.name.c_str(),
+                             entry.def.boundary_marker,
+                             static_cast<long long>(local_result.faces_processed),
+                             static_cast<double>(raw));
+            }
             return raw;
         case forms::BoundaryFunctional::Reduction::Average: {
             const Real area = const_cast<BoundaryReductionService*>(this)->boundaryMeasure(

@@ -807,6 +807,7 @@ private:
     // Scratch for geometry/basis computations
     std::vector<std::array<Real, 3>> cell_coords_;
     std::vector<AssemblyContext::Point3D> scratch_quad_points_;
+    std::vector<AssemblyContext::Point3D> scratch_face_quad_points_;
     std::vector<Real> scratch_quad_weights_;
     std::vector<AssemblyContext::Point3D> scratch_phys_points_;
     std::vector<AssemblyContext::Matrix3x3> scratch_jacobians_;

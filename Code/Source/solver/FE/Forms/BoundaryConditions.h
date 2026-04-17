@@ -16,6 +16,7 @@
 #include "Forms/FormExpr.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <string>
 #include <string_view>
@@ -85,6 +86,95 @@ template <class BC>
 }
 
 } // namespace detail
+
+enum class ScalarTraceOperator : std::uint8_t {
+    Identity,
+    NormalComponent
+};
+
+enum class InterfaceTraceReduction : std::uint8_t {
+    Minus,
+    Plus,
+    Jump,
+    Average
+};
+
+[[nodiscard]] inline FormExpr applyScalarTrace(const FormExpr& expr,
+                                               ScalarTraceOperator op)
+{
+    switch (op) {
+    case ScalarTraceOperator::Identity:
+        return expr;
+    case ScalarTraceOperator::NormalComponent:
+        return dot(expr, FormExpr::normal());
+    }
+
+    throw std::invalid_argument("forms::bc::applyScalarTrace: unsupported scalar trace operator");
+}
+
+[[nodiscard]] inline FormExpr normalComponent(const FormExpr& expr)
+{
+    return applyScalarTrace(expr, ScalarTraceOperator::NormalComponent);
+}
+
+[[nodiscard]] inline FormExpr applyInterfaceScalarTrace(const FormExpr& expr,
+                                                        ScalarTraceOperator op,
+                                                        InterfaceTraceReduction reduction)
+{
+    const auto minus_value = [&]() -> FormExpr {
+        switch (op) {
+        case ScalarTraceOperator::Identity:
+            return expr.minus();
+        case ScalarTraceOperator::NormalComponent:
+            return dot(expr.minus(), FormExpr::normal().minus());
+        }
+
+        throw std::invalid_argument(
+            "forms::bc::applyInterfaceScalarTrace: unsupported scalar trace operator");
+    };
+
+    const auto plus_value = [&]() -> FormExpr {
+        switch (op) {
+        case ScalarTraceOperator::Identity:
+            return expr.plus();
+        case ScalarTraceOperator::NormalComponent:
+            return dot(expr.plus(), FormExpr::normal().plus());
+        }
+
+        throw std::invalid_argument(
+            "forms::bc::applyInterfaceScalarTrace: unsupported scalar trace operator");
+    };
+
+    const auto tau_minus = minus_value();
+    const auto tau_plus = plus_value();
+
+    switch (reduction) {
+    case InterfaceTraceReduction::Minus:
+        return tau_minus;
+    case InterfaceTraceReduction::Plus:
+        return tau_plus;
+    case InterfaceTraceReduction::Jump:
+        if (op == ScalarTraceOperator::Identity) {
+            return tau_plus - tau_minus;
+        }
+        return tau_plus + tau_minus;
+    case InterfaceTraceReduction::Average:
+        if (op == ScalarTraceOperator::Identity) {
+            return 0.5 * (tau_plus + tau_minus);
+        }
+        return 0.5 * (tau_plus + tau_minus);
+    }
+
+    throw std::invalid_argument(
+        "forms::bc::applyInterfaceScalarTrace: unsupported interface trace reduction");
+}
+
+[[nodiscard]] inline FormExpr interfaceNormalComponent(const FormExpr& expr,
+                                                       InterfaceTraceReduction reduction =
+                                                           InterfaceTraceReduction::Minus)
+{
+    return applyInterfaceScalarTrace(expr, ScalarTraceOperator::NormalComponent, reduction);
+}
 
 /**
  * @brief Canonical scalar-valued boundary condition value type
@@ -296,6 +386,91 @@ struct NitscheDirichletOptions {
     bool scale_with_p{true};  ///< Scale penalty by p^2 using TrialFunction polynomial order when available
 };
 
+using TraceNitscheOptions = NitscheDirichletOptions;
+
+[[nodiscard]] inline FormExpr buildTraceNitschePenalty(const FormExpr& penalty_weight,
+                                                       const FormExpr& trial_trace_source,
+                                                       const TraceNitscheOptions& opts = {})
+{
+    if (opts.gamma <= Real(0.0)) {
+        throw std::invalid_argument("forms::bc::buildTraceNitschePenalty: gamma must be > 0");
+    }
+
+    int p = 1;
+    if (opts.scale_with_p) {
+        p = detail::polynomialOrderOrDefault(trial_trace_source, /*default_order=*/1);
+        if (p < 1) {
+            p = 1;
+        }
+    }
+
+    const auto p2 = FormExpr::constant(static_cast<Real>(p * p));
+    return FormExpr::constant(opts.gamma) * penalty_weight * p2;
+}
+
+[[nodiscard]] inline FormExpr applyTraceNitsche(FormExpr residual,
+                                                const FormExpr& u,
+                                                const FormExpr& v,
+                                                int boundary_marker,
+                                                const FormExpr& value,
+                                                const FormExpr& consistency_flux_u,
+                                                const FormExpr& adjoint_flux_v,
+                                                const FormExpr& penalty_weight,
+                                                ScalarTraceOperator trace_operator =
+                                                    ScalarTraceOperator::NormalComponent,
+                                                const TraceNitscheOptions& opts = {})
+{
+    if (boundary_marker < 0) {
+        throw std::invalid_argument("forms::bc::applyTraceNitsche: boundary_marker must be >= 0");
+    }
+
+    const auto tau_u = applyScalarTrace(u, trace_operator);
+    const auto tau_v = applyScalarTrace(v, trace_operator);
+    const auto diff = tau_u - value;
+    const auto penalty = buildTraceNitschePenalty(penalty_weight, u, opts);
+
+    residual = residual - (consistency_flux_u * tau_v).ds(boundary_marker);
+    if (opts.variant == NitscheVariant::Symmetric) {
+        residual = residual - (adjoint_flux_v * diff).ds(boundary_marker);
+    } else {
+        residual = residual + (adjoint_flux_v * diff).ds(boundary_marker);
+    }
+    residual = residual + (penalty * diff * tau_v).ds(boundary_marker);
+    return residual;
+}
+
+[[nodiscard]] inline FormExpr applyInterfaceTraceNitsche(
+    FormExpr residual,
+    const FormExpr& u,
+    const FormExpr& v,
+    int interface_marker,
+    const FormExpr& value,
+    const FormExpr& consistency_flux_u,
+    const FormExpr& adjoint_flux_v,
+    const FormExpr& penalty_weight,
+    ScalarTraceOperator trace_operator = ScalarTraceOperator::NormalComponent,
+    InterfaceTraceReduction reduction = InterfaceTraceReduction::Jump,
+    const TraceNitscheOptions& opts = {})
+{
+    if (interface_marker < 0) {
+        throw std::invalid_argument("forms::bc::applyInterfaceTraceNitsche: interface_marker must be >= 0");
+    }
+
+    const auto tau_u = applyInterfaceScalarTrace(u, trace_operator, reduction);
+    const auto tau_v = applyInterfaceScalarTrace(v, trace_operator, reduction);
+    const auto diff = tau_u - value;
+    const auto penalty = buildTraceNitschePenalty(penalty_weight, u, opts);
+
+    residual = residual - (consistency_flux_u * tau_v).dI(interface_marker);
+    if (opts.variant == NitscheVariant::Symmetric) {
+        residual = residual - (adjoint_flux_v * diff).dI(interface_marker);
+    } else {
+        residual = residual + (adjoint_flux_v * diff).dI(interface_marker);
+    }
+    residual = residual + (penalty * diff * tau_v).dI(interface_marker);
+    return residual;
+}
+
 /**
  * @brief Apply weak Dirichlet BCs for scalar Poisson diffusion using Nitsche's method
  *
@@ -333,29 +508,20 @@ template <class DirichletBC, class ValueExprFn>
     const auto n = FormExpr::normal();
     const auto h = (2.0 * FormExpr::cellVolume()) / FormExpr::facetArea();
 
-    int p = 1;
-    if (opts.scale_with_p) {
-        p = detail::polynomialOrderOrDefault(u, /*default_order=*/1);
-        if (p < 1) {
-            p = 1;
-        }
-    }
-    const auto p2 = FormExpr::constant(static_cast<Real>(p * p));
-    const auto penalty = FormExpr::constant(opts.gamma) * k * p2 / h;
-
     for (std::size_t i = 0; i < bcs.size(); ++i) {
         const auto& bc = bcs[i];
         const int marker = detail::boundaryMarkerOrThrow(bc, "forms::bc::applyNitscheDirichletPoisson");
         const auto uD = valueExpr(bc, i);
-        const auto diff = u - uD;
-
-        residual = residual - (k * inner(grad(u), n) * v).ds(marker);
-        if (opts.variant == NitscheVariant::Symmetric) {
-            residual = residual - (k * inner(grad(v), n) * diff).ds(marker);
-        } else {
-            residual = residual + (k * inner(grad(v), n) * diff).ds(marker);
-        }
-        residual = residual + (penalty * diff * v).ds(marker);
+        residual = applyTraceNitsche(std::move(residual),
+                                     u,
+                                     v,
+                                     marker,
+                                     uD,
+                                     k * inner(grad(u), n),
+                                     k * inner(grad(v), n),
+                                     k / h,
+                                     ScalarTraceOperator::Identity,
+                                     opts);
     }
     return residual;
 }

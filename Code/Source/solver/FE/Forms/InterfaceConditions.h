@@ -92,7 +92,30 @@ struct NitscheInterfaceOptions {
     if (interface_marker < 0) {
         throw std::invalid_argument("forms::interface::applyNitscheInterfacePoisson: interface_marker must be >= 0");
     }
-    return residual + nitschePoissonIntegrand(k, u, v, opts).dI(interface_marker);
+
+    bc::TraceNitscheOptions trace_opts;
+    trace_opts.gamma = opts.gamma;
+    trace_opts.variant = (opts.variant == NitscheVariant::Symmetric)
+                             ? bc::NitscheVariant::Symmetric
+                             : bc::NitscheVariant::Unsymmetric;
+    trace_opts.scale_with_p = opts.scale_with_p;
+
+    const auto n_minus = FormExpr::normal().minus();
+    const auto consistency_flux = inner(avg(k * grad(u)), n_minus);
+    const auto adjoint_flux = inner(avg(k * grad(v)), n_minus);
+    const auto penalty_weight = harmonicAverage(k) * avg(FormExpr::constant(1.0) / hNormal());
+
+    return bc::applyInterfaceTraceNitsche(std::move(residual),
+                                          u,
+                                          v,
+                                          interface_marker,
+                                          FormExpr::constant(0.0),
+                                          consistency_flux,
+                                          adjoint_flux,
+                                          penalty_weight,
+                                          bc::ScalarTraceOperator::Identity,
+                                          bc::InterfaceTraceReduction::Jump,
+                                          trace_opts);
 }
 
 } // namespace interface
@@ -101,4 +124,3 @@ struct NitscheInterfaceOptions {
 } // namespace svmp
 
 #endif // SVMP_FE_FORMS_INTERFACE_CONDITIONS_H
-

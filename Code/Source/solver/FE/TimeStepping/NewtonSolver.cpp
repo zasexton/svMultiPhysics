@@ -304,18 +304,6 @@ void traceLog(const std::string& msg)
     return 1;
 }
 
-[[nodiscard]] bool directOnlyReducedRankOnePromotionEnabled() noexcept
-{
-    const char* env = std::getenv("SVMP_DISABLE_DIRECT_ONLY_REDUCED_RANK1_PROMOTION");
-    if (env == nullptr) {
-        return true;
-    }
-    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
-        ++env;
-    }
-    return *env == '\0' || *env == '0';
-}
-
 [[nodiscard]] bool preserveGroupedAlgebraicDirectOnlyCouplings() noexcept
 {
     const char* env = std::getenv("SVMP_PRESERVE_GROUPED_ALGEBRAIC_DIRECT_ONLY");
@@ -387,7 +375,7 @@ template <typename T>
     const backends::ReducedFieldUpdate& update,
     backends::RankOneUpdate& promoted)
 {
-    if (!directOnlyReducedRankOnePromotionEnabled() || update.grouped_coupling_id >= 0) {
+    if (update.grouped_coupling_id >= 0) {
         return false;
     }
 
@@ -4464,6 +4452,25 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             solve_bordered_ptr != nullptr &&
             solve_bordered_ptr->active &&
             solve_bordered_ptr->n_aux > 0;
+        if (oopTraceEnabled() && has_solve_bordered) {
+            const auto& solve_bordered = *solve_bordered_ptr;
+            const auto l2_norm = [](const std::vector<Real>& values) {
+                return std::sqrt(std::inner_product(
+                    values.begin(), values.end(), values.begin(), 0.0));
+            };
+            std::ostringstream oss;
+            oss << "NewtonSolver: bordered solve selection"
+                << " source="
+                << ((solve_bordered_ptr == &bordered_full) ? "full" : "reduced")
+                << " n_field_dofs=" << solve_bordered.n_field_dofs
+                << " n_aux=" << solve_bordered.n_aux
+                << " direct_records=" << solve_bordered.direct_coupling_records.size()
+                << " ||B||=" << l2_norm(solve_bordered.B)
+                << " ||Ct||=" << l2_norm(solve_bordered.Ct)
+                << " ||D||=" << l2_norm(solve_bordered.D)
+                << " ||g||=" << l2_norm(solve_bordered.g);
+            traceLog(oss.str());
+        }
         bool condensed_bordered_active = false;
         std::vector<Real> condensed_rhs_shift;
         std::vector<Real> condensed_Dinv;
@@ -4681,16 +4688,28 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     traceLog(oss.str());
                 }
             }
+            const bool allow_direct_only_reduced_rank_one_promotion =
+                active_reduced_field_updates.size() == 1u;
             std::vector<backends::ReducedFieldUpdate> promoted_remaining_reduced_updates;
             promoted_remaining_reduced_updates.reserve(active_reduced_field_updates.size());
             std::size_t promoted_count = 0;
-            for (const auto& update : active_reduced_field_updates) {
-                backends::RankOneUpdate promoted_rank_one;
-                if (tryPromoteReducedFieldUpdateToNativeRankOne(update, promoted_rank_one)) {
-                    effective_rank_one_updates.push_back(std::move(promoted_rank_one));
-                    ++promoted_count;
-                } else {
-                    promoted_remaining_reduced_updates.push_back(update);
+            if (allow_direct_only_reduced_rank_one_promotion) {
+                for (const auto& update : active_reduced_field_updates) {
+                    backends::RankOneUpdate promoted_rank_one;
+                    if (tryPromoteReducedFieldUpdateToNativeRankOne(update, promoted_rank_one)) {
+                        effective_rank_one_updates.push_back(std::move(promoted_rank_one));
+                        ++promoted_count;
+                    } else {
+                        promoted_remaining_reduced_updates.push_back(update);
+                    }
+                }
+            } else {
+                promoted_remaining_reduced_updates = active_reduced_field_updates;
+                if (oopTraceEnabled() && !active_reduced_field_updates.empty()) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: keeping multi-mode direct-only reduced updates on exact reduced path"
+                        << " count=" << active_reduced_field_updates.size();
+                    traceLog(oss.str());
                 }
             }
             if (promoted_count > 0) {
@@ -5068,11 +5087,95 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                             transient.system(), residual_base, "constraint-only probe Jx", 8u);
                     }
                 }
+            }        auto gatherSelectedTraceDofs = [&]() {
+            std::vector<GlobalIndex> trace_dofs;
+            const char* trace_dofs_env = std::getenv("SVMP_MONO_AUX_TRACE_DOFS");
+            if (trace_dofs_env == nullptr || *trace_dofs_env == ' ' || !oopTraceEnabled()) {
+                return trace_dofs;
             }
+
+            const char* cursor = trace_dofs_env;
+            while (*cursor != ' ') {
+                char* end = nullptr;
+                const long value = std::strtol(cursor, &end, 10);
+                if (end != cursor) {
+                    trace_dofs.push_back(static_cast<GlobalIndex>(value));
+                    cursor = end;
+                }
+                while (*cursor == ',' || *cursor == ' ' || *cursor == ';') {
+                    ++cursor;
+                }
+                if (end == cursor && *cursor != ' ') {
+                    ++cursor;
+                }
+            }
+            return trace_dofs;
+        };
+
+        auto traceSelectedVectorDofs = [&](const char* label,
+                                           backends::GenericVector& vec) {
+            const auto trace_dofs = gatherSelectedTraceDofs();
+            if (trace_dofs.empty()) {
+                return;
+            }
+
+            auto view = vec.createAssemblyView();
+            FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: selected DOF trace view");
+            std::vector<Real> values(trace_dofs.size(), Real(0.0));
+            view->getVectorEntries(trace_dofs, values);
+
+            std::ostringstream oss;
+            oss << "NewtonSolver: selected dofs label='" << label << "'";
+            for (std::size_t i = 0; i < trace_dofs.size(); ++i) {
+                oss << " dof[" << i << "]=" << trace_dofs[i]
+                    << " value=" << values[i];
+            }
+            traceLog(oss.str());
+        };
+
+        auto traceSelectedMatrixRows = [&](const char* label,
+                                           const backends::GenericMatrix& mat) {
+            const auto trace_dofs = gatherSelectedTraceDofs();
+            if (trace_dofs.empty()) {
+                return;
+            }
+
+            constexpr Real kNnzTol = static_cast<Real>(1e-30);
+            std::ostringstream oss;
+            oss << "NewtonSolver: selected matrix rows label='" << label << "'";
+            for (std::size_t i = 0; i < trace_dofs.size(); ++i) {
+                const auto row = trace_dofs[i];
+                Real diag = mat.getEntry(row, row);
+                Real row_abs_sum = Real(0.0);
+                Real row_max_abs = Real(0.0);
+                GlobalIndex nnz = 0;
+                for (GlobalIndex col = 0; col < mat.numCols(); ++col) {
+                    const Real value = mat.getEntry(row, col);
+                    const Real abs_value = std::abs(value);
+                    row_abs_sum += abs_value;
+                    row_max_abs = std::max(row_max_abs, abs_value);
+                    if (abs_value > kNnzTol) {
+                        ++nnz;
+                    }
+                }
+                oss << " dof[" << i << "]=" << row
+                    << " diag=" << diag
+                    << " row_abs_sum=" << row_abs_sum
+                    << " row_max_abs=" << row_max_abs
+                    << " row_nnz=" << nnz;
+            }
+            traceLog(oss.str());
+        };
+
+            traceSelectedVectorDofs("u_before_linear_solve", history.u());
+            traceSelectedVectorDofs("rhs_before_linear_solve", *linear_rhs);
+            traceSelectedMatrixRows("J_before_linear_solve", J);
             ntp0 = NTP();
             report.linear = linear.solve(J, du, *linear_rhs);
             ntp_linear += NTP() - ntp0;
             ntp_linear_iters_total += report.linear.iterations;
+            traceSelectedVectorDofs("rhs_after_linear_solve", *linear_rhs);
+            traceSelectedVectorDofs("du_after_linear_solve", du);
             ++primary_linear_solve_call_index;
             std::optional<std::vector<Real>> first_linear_dense_rhs;
             std::optional<std::vector<Real>> first_linear_dense_du_raw;

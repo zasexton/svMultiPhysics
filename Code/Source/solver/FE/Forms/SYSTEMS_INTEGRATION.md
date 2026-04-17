@@ -10,6 +10,7 @@ How `FE/Forms` weak-form expressions become assembled operators in `FE/Systems`.
 | Mixed bilinear operator | `installMixedBilinear()` | `FormsInstaller.h` |
 | Mixed linear operator | `installMixedLinear()` | `FormsInstaller.h` |
 | Strong Dirichlet BCs | `installStrongDirichlet()` | `FormsInstaller.h` |
+| H(div) normal-trace BCs | `BoundaryConditionManager` + `NormalTraceEssentialBC` | `StandardBCs.h` |
 | Auto-detecting compilation | `FormCompiler::compile()` | `FormCompiler.h` |
 | Explicit mixed compilation | `FormCompiler::compileMixed()` | `FormCompiler.h` |
 | Pre-compiled IR installation | `installMixedFormIR()` | `FormsInstaller.h` |
@@ -69,6 +70,27 @@ bc_manager.applyAll(system, residual, u, v, u_field);
 
 // 5. Install the formulation
 installFormulation(system, "equations", {u_field}, residual);
+```
+
+For `H(div)` fields, strong prescribed normal flux is not lowered through
+pointwise `StrongDirichlet`. Use `forms::bc::NormalTraceEssentialBC`, which
+installs an `H(div)` trace constraint through the BC manager. Weak trace loads
+and Robin relations are available through `forms::bc::TraceLoadBC` and
+`forms::bc::TraceRobinBC`. FE intentionally does not encode a special
+"passive outflow" primitive; that is represented by leaving the normal trace
+unconstrained or by adding a generic weak trace term.
+
+Example:
+
+```cpp
+auto q = StateField(q_field, *Vhdiv, "q");
+auto w = TestField(q_field, *Vhdiv, "w");
+auto residual = inner(k_inv * q, w).dx();
+
+systems::BoundaryConditionManager bc_manager;
+bc_manager.add(forms::bc::makeNormalTraceEssentialBC(4, Constant(1.0)));
+bc_manager.add(forms::bc::makeTraceRobinBC(7, Constant(alpha), Constant(rhs)));
+bc_manager.applyAll(system, residual, q, w, q_field);
 ```
 
 For multi-field:

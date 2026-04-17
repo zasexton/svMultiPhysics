@@ -402,6 +402,31 @@ TEST(TraceSpace, HigherOrderHDivHexFaceNormalTraceMatchesVolume) {
     }
 }
 
+TEST(TraceSpace, HDivNormalTraceInterpolationMatchesPrescribedScalarField) {
+    auto hdiv = std::make_shared<HDivSpace>(ElementType::Hex8, 2);
+    TraceSpace trace(hdiv, /*face_id=*/3);
+
+    std::vector<Real> coeffs;
+    trace.interpolate(
+        [](const FunctionSpace::Value& xi) {
+            FunctionSpace::Value out{};
+            out[0] = Real(1.25) + Real(0.4) * xi[0] - Real(0.2) * xi[1];
+            return out;
+        },
+        coeffs);
+
+    ASSERT_EQ(coeffs.size(), trace.dofs_per_element());
+
+    auto quad = trace.element().quadrature();
+    ASSERT_TRUE(quad);
+    for (std::size_t q = 0; q < quad->num_points(); ++q) {
+        const auto xi = quad->point(q);
+        const Real expected = Real(1.25) + Real(0.4) * xi[0] - Real(0.2) * xi[1];
+        const Real approx = trace.evaluate_scalar(xi, coeffs);
+        EXPECT_NEAR(approx, expected, 1e-10);
+    }
+}
+
 TEST(TraceSpace, HigherOrderHCurlTetraFaceTangentialTraceMatchesVolume) {
     auto hcurl = std::make_shared<HCurlSpace>(ElementType::Tetra4, 1);
     TraceSpace trace(hcurl, /*face_id=*/2);
@@ -637,5 +662,48 @@ TEST(TraceSpace, SerendipityQuadFaceInterpolationRecoversCoefficients) {
 
     for (std::size_t i = 0; i < coeffs_known.size(); ++i) {
         EXPECT_NEAR(coeffs_interp[i], coeffs_known[i], 1e-12);
+    }
+}
+
+TEST(TraceSpace, OrientedHDivNormalTraceMapReversesHigherOrderEdgeTrace)
+{
+    const auto map = TraceSpace::orientedHDivNormalTraceMap(ElementType::Line2,
+                                                            /*trace_polynomial_order=*/2,
+                                                            /*edge_orientation=*/-1);
+
+    ASSERT_EQ(map.source_indices.size(), 3u);
+    ASSERT_EQ(map.weights.size(), 3u);
+
+    EXPECT_EQ(map.source_indices[0], 2);
+    EXPECT_EQ(map.source_indices[1], 1);
+    EXPECT_EQ(map.source_indices[2], 0);
+
+    EXPECT_DOUBLE_EQ(map.weights[0], -1.0);
+    EXPECT_DOUBLE_EQ(map.weights[1], -1.0);
+    EXPECT_DOUBLE_EQ(map.weights[2], -1.0);
+}
+
+TEST(TraceSpace, OrientedHDivNormalTraceMapRotatesQuadrilateralFaceTrace)
+{
+    spaces::OrientationManager::FaceOrientation orientation;
+    orientation.rotation = 1;
+    orientation.reflection = false;
+    orientation.sign = +1;
+    orientation.vertex_perm = {1, 2, 3, 0};
+
+    const auto map = TraceSpace::orientedHDivNormalTraceMap(ElementType::Quad4,
+                                                            /*trace_polynomial_order=*/1,
+                                                            orientation);
+
+    ASSERT_EQ(map.source_indices.size(), 4u);
+    ASSERT_EQ(map.weights.size(), 4u);
+
+    EXPECT_EQ(map.source_indices[0], 1);
+    EXPECT_EQ(map.source_indices[1], 2);
+    EXPECT_EQ(map.source_indices[2], 3);
+    EXPECT_EQ(map.source_indices[3], 0);
+
+    for (double weight : map.weights) {
+        EXPECT_DOUBLE_EQ(weight, 1.0);
     }
 }

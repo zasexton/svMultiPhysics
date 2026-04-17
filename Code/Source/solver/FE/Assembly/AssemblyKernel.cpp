@@ -8,6 +8,7 @@
 #include "AssemblyKernel.h"
 #include "AssemblyContext.h"
 #include "Math/SIMD.h"
+#include "Systems/SystemsExceptions.h"
 
 #include <algorithm>
 #include <array>
@@ -74,6 +75,11 @@ void MassKernel::computeCell(const AssemblyContext& ctx, KernelOutput& output)
     const auto n_test = ctx.numTestDofs();
     const auto n_trial = ctx.numTrialDofs();
     const auto n_qpts = ctx.numQuadraturePoints();
+    const bool test_is_vector = ctx.testUsesVectorBasis();
+    const bool trial_is_vector = ctx.trialUsesVectorBasis();
+
+    FE_THROW_IF(test_is_vector != trial_is_vector, FEException,
+                "MassKernel::computeCell requires scalar-scalar or vector-vector spaces");
 
     output.reserve(n_test, n_trial, true, false);
 
@@ -81,11 +87,19 @@ void MassKernel::computeCell(const AssemblyContext& ctx, KernelOutput& output)
         const Real w = coefficient_ * ctx.integrationWeight(q);
 
         for (LocalIndex i = 0; i < n_test; ++i) {
-            const Real phi_i = ctx.basisValue(i, q);
-
-            for (LocalIndex j = 0; j < n_trial; ++j) {
-                const Real phi_j = ctx.trialBasisValue(j, q);
-                output.matrixEntry(i, j) += w * phi_i * phi_j;
+            if (test_is_vector) {
+                const auto vi = ctx.basisVectorValue(i, q);
+                for (LocalIndex j = 0; j < n_trial; ++j) {
+                    const auto vj = ctx.trialBasisVectorValue(j, q);
+                    output.matrixEntry(i, j) +=
+                        w * (vi[0] * vj[0] + vi[1] * vj[1] + vi[2] * vj[2]);
+                }
+            } else {
+                const Real phi_i = ctx.basisValue(i, q);
+                for (LocalIndex j = 0; j < n_trial; ++j) {
+                    const Real phi_j = ctx.trialBasisValue(j, q);
+                    output.matrixEntry(i, j) += w * phi_i * phi_j;
+                }
             }
         }
     }
@@ -120,15 +134,19 @@ void MassKernel::computeCellBatch(std::span<const AssemblyContext* const> contex
         const LocalIndex n_test = lane_ctx[0]->numTestDofs();
         const LocalIndex n_trial = lane_ctx[0]->numTrialDofs();
         const LocalIndex n_qpts = lane_ctx[0]->numQuadraturePoints();
+        const bool any_vector_basis =
+            lane_ctx[0]->testUsesVectorBasis() || lane_ctx[0]->trialUsesVectorBasis();
 
         bool homogeneous = true;
         for (std::size_t lane = 1u; lane < active; ++lane) {
             homogeneous = homogeneous &&
                           (lane_ctx[lane]->numTestDofs() == n_test) &&
                           (lane_ctx[lane]->numTrialDofs() == n_trial) &&
-                          (lane_ctx[lane]->numQuadraturePoints() == n_qpts);
+                          (lane_ctx[lane]->numQuadraturePoints() == n_qpts) &&
+                          (lane_ctx[lane]->testUsesVectorBasis() == lane_ctx[0]->testUsesVectorBasis()) &&
+                          (lane_ctx[lane]->trialUsesVectorBasis() == lane_ctx[0]->trialUsesVectorBasis());
         }
-        if (!homogeneous) {
+        if (!homogeneous || any_vector_basis) {
             for (std::size_t lane = 0u; lane < active; ++lane) {
                 computeCell(*lane_ctx[lane], *lane_out[lane]);
             }
@@ -621,6 +639,161 @@ void PoissonKernel::computeCellBatch(std::span<const AssemblyContext* const> con
                         lane_out[lane]->matrixEntry(i, j) += contrib[lane];
                     }
                 }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// FacetMassKernel Implementation
+// ============================================================================
+
+FacetMassKernel::FacetMassKernel(Real coefficient,
+                                 InterfaceEvaluationSide side)
+    : coefficient_(coefficient)
+    , side_(side)
+{
+}
+
+RequiredData FacetMassKernel::getRequiredData() const
+{
+    return RequiredData::BasisValues | RequiredData::IntegrationWeights;
+}
+
+void FacetMassKernel::computeCell(const AssemblyContext&,
+                                  KernelOutput&)
+{
+    FE_THROW(FEException, "FacetMassKernel::computeCell is not implemented (face-only kernel)");
+}
+
+void FacetMassKernel::computeBoundaryFace(const AssemblyContext& ctx,
+                                          int,
+                                          KernelOutput& output)
+{
+    computeFacet(ctx, output);
+}
+
+void FacetMassKernel::computeFacet(const AssemblyContext& ctx,
+                                   KernelOutput& output) const
+{
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
+    output.reserve(n_test, n_trial, /*need_matrix=*/true, /*need_vector=*/false);
+
+    for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+        const Real w = coefficient_ * ctx.integrationWeight(q);
+        for (LocalIndex i = 0; i < n_test; ++i) {
+            const Real phi_i = ctx.basisValue(i, q);
+            for (LocalIndex j = 0; j < n_trial; ++j) {
+                output.matrixEntry(i, j) += w * phi_i * ctx.trialBasisValue(j, q);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// FacetSourceKernel Implementation
+// ============================================================================
+
+FacetSourceKernel::FacetSourceKernel(Real coefficient,
+                                     InterfaceEvaluationSide side)
+    : coefficient_(coefficient)
+    , side_(side)
+{
+}
+
+RequiredData FacetSourceKernel::getRequiredData() const
+{
+    return RequiredData::BasisValues | RequiredData::IntegrationWeights;
+}
+
+void FacetSourceKernel::computeCell(const AssemblyContext&,
+                                    KernelOutput&)
+{
+    FE_THROW(FEException, "FacetSourceKernel::computeCell is not implemented (face-only kernel)");
+}
+
+void FacetSourceKernel::computeBoundaryFace(const AssemblyContext& ctx,
+                                            int,
+                                            KernelOutput& output)
+{
+    computeFacet(ctx, output);
+}
+
+void FacetSourceKernel::computeFacet(const AssemblyContext& ctx,
+                                     KernelOutput& output) const
+{
+    const auto n_test = ctx.numTestDofs();
+    output.reserve(n_test, ctx.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/true);
+
+    for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+        const Real w = coefficient_ * ctx.integrationWeight(q);
+        for (LocalIndex i = 0; i < n_test; ++i) {
+            output.vectorEntry(i) += w * ctx.basisValue(i, q);
+        }
+    }
+}
+
+// ============================================================================
+// NormalTraceCouplingKernel Implementation
+// ============================================================================
+
+NormalTraceCouplingKernel::NormalTraceCouplingKernel(Real coefficient,
+                                                     InterfaceEvaluationSide side)
+    : coefficient_(coefficient)
+    , side_(side)
+{
+}
+
+RequiredData NormalTraceCouplingKernel::getRequiredData() const
+{
+    return RequiredData::BasisValues | RequiredData::IntegrationWeights | RequiredData::Normals;
+}
+
+void NormalTraceCouplingKernel::computeCell(const AssemblyContext&,
+                                            KernelOutput&)
+{
+    FE_THROW(FEException, "NormalTraceCouplingKernel::computeCell is not implemented (face-only kernel)");
+}
+
+void NormalTraceCouplingKernel::computeBoundaryFace(const AssemblyContext& ctx,
+                                                    int,
+                                                    KernelOutput& output)
+{
+    computeFacet(ctx, output);
+}
+
+void NormalTraceCouplingKernel::computeFacet(const AssemblyContext& ctx,
+                                             KernelOutput& output) const
+{
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
+    output.reserve(n_test, n_trial, /*need_matrix=*/true, /*need_vector=*/false);
+
+    auto test_trace = [&](LocalIndex i, LocalIndex q) -> Real {
+        if (ctx.testUsesVectorBasis()) {
+            const auto v = ctx.basisVectorValue(i, q);
+            const auto n = ctx.normal(q);
+            return v[0] * n[0] + v[1] * n[1] + v[2] * n[2];
+        }
+        return ctx.basisValue(i, q);
+    };
+
+    auto trial_trace = [&](LocalIndex j, LocalIndex q) -> Real {
+        if (ctx.trialUsesVectorBasis()) {
+            const auto v = ctx.trialBasisVectorValue(j, q);
+            const auto n = ctx.normal(q);
+            return v[0] * n[0] + v[1] * n[1] + v[2] * n[2];
+        }
+        return ctx.trialBasisValue(j, q);
+    };
+
+    for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+        const Real w = coefficient_ * ctx.integrationWeight(q);
+        for (LocalIndex i = 0; i < n_test; ++i) {
+            const Real tau_i = test_trace(i, q);
+            for (LocalIndex j = 0; j < n_trial; ++j) {
+                output.matrixEntry(i, j) += w * tau_i * trial_trace(j, q);
             }
         }
     }

@@ -15,6 +15,7 @@
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
 #include "Assembly/TimeIntegrationContext.h"
+#include "Forms/BoundaryConditions.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
@@ -272,6 +273,31 @@ TEST(JITExtendedParityTest, NitscheBoundaryMatchesInterpreter)
     const std::vector<Real> U = {0.1, -0.2, 0.3, -0.1};
     expectJitMatchesInterpreterBoundary(mesh, /*boundary_marker=*/2, dof_map, space, residual, U, /*vec_tol=*/1e-12,
                                         /*mat_tol=*/1e-12);
+}
+
+TEST(JITExtendedParityTest, TraceNitscheBoundaryMatchesInterpreter)
+{
+    SingleTetraOneBoundaryFaceMeshAccess mesh(/*boundary_marker=*/2);
+    auto dof_map = createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto n = FormExpr::normal();
+    auto residual = (u * v).dx();
+    residual = bc::applyTraceNitsche(std::move(residual),
+                                     u,
+                                     v,
+                                     /*boundary_marker=*/2,
+                                     FormExpr::constant(0.0),
+                                     inner(grad(u), n),
+                                     inner(grad(v), n),
+                                     FormExpr::constant(1.0) / h(),
+                                     bc::ScalarTraceOperator::Identity);
+
+    const std::vector<Real> U = {0.1, -0.2, 0.3, -0.1};
+    expectJitMatchesInterpreterBoundary(mesh, /*boundary_marker=*/2, dof_map, space, residual, U,
+                                        /*vec_tol=*/1e-12, /*mat_tol=*/1e-12);
 }
 
 TEST(JITExtendedParityTest, HistoryConvolutionMatchesInterpreter)

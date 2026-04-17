@@ -44,6 +44,7 @@ FE/
 | **Mixed bilinear operator** (stiffness, mass) | `installMixedBilinear(system, op, test, trial, form)` | `Systems/FormsInstaller.h` |
 | **Mixed linear operator** (load vector) | `installMixedLinear(system, op, test, form)` | `Systems/FormsInstaller.h` |
 | **Strong Dirichlet BCs** | `installStrongDirichlet(system, bcs)` | `Systems/FormsInstaller.h` |
+| **H(div) normal-trace BCs** | `BoundaryConditionManager` + `NormalTraceEssentialBC` | `Forms/StandardBCs.h` |
 | **Compile without installing** | `FormCompiler::compile(form, kind)` | `Forms/FormCompiler.h` |
 | **Auxiliary state models** | `AuxiliaryModelBuilder("name")` | `Auxiliary/AuxiliaryModelBuilder.h` |
 | **Deploy auxiliary models** | `use(model).name(...).scope(...)` | `Auxiliary/AuxiliaryBindings.h` |
@@ -85,6 +86,27 @@ These are available for advanced workflows but not needed for typical physics:
 | Direct kernel registration | `FESystem::addCellKernel()` etc. | Handwritten kernels, framework internals |
 
 See `Forms/SYSTEMS_INTEGRATION.md` for the full integration guide.
+
+For vector-basis trace conditions, the FE layer now distinguishes pointwise
+Dirichlet data from trace-essential data. `H(div)` normal-trace BCs should be
+authored through `forms::bc::NormalTraceEssentialBC`, `TraceLoadBC`, and
+`TraceRobinBC` rather than forced through pointwise `StrongDirichlet`
+declarations. "Passive" or open outflow remains a physics-level choice: leave
+the normal trace unconstrained, or add a generic weak trace relation.
+
+Short example:
+
+```cpp
+auto q_id = system.addField({.name = "q", .space = Vhdiv, .components = Vhdiv->value_dimension()});
+auto q = StateField(q_id, *Vhdiv, "q");
+auto w = TestField(q_id, *Vhdiv, "w");
+auto residual = inner(k_inv * q, w).dx();
+
+systems::BoundaryConditionManager bc_manager;
+bc_manager.add(forms::bc::makeNormalTraceEssentialBC(/*marker=*/4, Constant(1.0)));
+bc_manager.add(forms::bc::makeTraceLoadBC(/*marker=*/7, Constant(0.0)));
+bc_manager.applyAll(system, residual, q, w, q_id);
+```
 
 ---
 

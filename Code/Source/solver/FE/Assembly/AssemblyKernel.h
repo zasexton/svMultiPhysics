@@ -173,6 +173,17 @@ enum class RequiredData : std::uint32_t {
     DGFace              = Standard | Normals | FaceOrientations | NeighborData
 };
 
+/**
+ * @brief Which physical side of an InterfaceMesh face a single-sided kernel uses
+ *
+ * This is used by the first mortar/hybrid assembly pass, where a kernel is
+ * evaluated on one volume-side trace and optionally coupled to a facet field.
+ */
+enum class InterfaceEvaluationSide : std::uint8_t {
+    Minus,
+    Plus
+};
+
 // Bitwise operators for RequiredData
 inline constexpr RequiredData operator|(RequiredData a, RequiredData b) {
     return static_cast<RequiredData>(
@@ -563,6 +574,23 @@ public:
      */
     [[nodiscard]] virtual bool hasBoundaryFace() const noexcept { return false; }
 
+    /**
+     * @brief Check if this kernel can be evaluated on an InterfaceMesh with a single-sided context
+     *
+     * The mortar/hybrid interface path reuses @ref computeBoundaryFace with a
+     * face-local context built on either the minus or plus side of the
+     * interface, optionally coupled to a facet field.
+     */
+    [[nodiscard]] virtual bool hasSingleSidedInterfaceFace() const noexcept { return false; }
+
+    /**
+     * @brief Which InterfaceMesh side to use when hasSingleSidedInterfaceFace() is true
+     */
+    [[nodiscard]] virtual InterfaceEvaluationSide interfaceEvaluationSide() const noexcept
+    {
+        return InterfaceEvaluationSide::Minus;
+    }
+
     // =========================================================================
     // Interior Face Integration (DG)
     // =========================================================================
@@ -806,6 +834,89 @@ public:
 
 private:
     SourceFunction source_;
+};
+
+/**
+ * @brief Facet mass kernel for boundary faces and mortar/interface facet fields
+ *
+ * Computes \int_F c * phi_i * psi_j.
+ */
+class FacetMassKernel final : public BilinearFormKernel {
+public:
+    explicit FacetMassKernel(Real coefficient = 1.0,
+                             InterfaceEvaluationSide side = InterfaceEvaluationSide::Minus);
+
+    [[nodiscard]] RequiredData getRequiredData() const override;
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override;
+    void computeBoundaryFace(const AssemblyContext& ctx, int marker, KernelOutput& output) override;
+    [[nodiscard]] bool hasCell() const noexcept override { return false; }
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+    [[nodiscard]] bool hasSingleSidedInterfaceFace() const noexcept override { return true; }
+    [[nodiscard]] InterfaceEvaluationSide interfaceEvaluationSide() const noexcept override { return side_; }
+    [[nodiscard]] std::string name() const override { return "FacetMassKernel"; }
+    [[nodiscard]] bool isSymmetric() const noexcept override { return true; }
+
+private:
+    void computeFacet(const AssemblyContext& ctx, KernelOutput& output) const;
+
+    Real coefficient_{1.0};
+    InterfaceEvaluationSide side_{InterfaceEvaluationSide::Minus};
+};
+
+/**
+ * @brief Facet load kernel for boundary faces and mortar/interface facet fields
+ *
+ * Computes \int_F c * phi_i.
+ */
+class FacetSourceKernel final : public LinearFormKernel {
+public:
+    explicit FacetSourceKernel(Real coefficient = 1.0,
+                               InterfaceEvaluationSide side = InterfaceEvaluationSide::Minus);
+
+    [[nodiscard]] RequiredData getRequiredData() const override;
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override;
+    void computeBoundaryFace(const AssemblyContext& ctx, int marker, KernelOutput& output) override;
+    [[nodiscard]] bool hasCell() const noexcept override { return false; }
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+    [[nodiscard]] bool hasSingleSidedInterfaceFace() const noexcept override { return true; }
+    [[nodiscard]] InterfaceEvaluationSide interfaceEvaluationSide() const noexcept override { return side_; }
+    [[nodiscard]] std::string name() const override { return "FacetSourceKernel"; }
+
+private:
+    void computeFacet(const AssemblyContext& ctx, KernelOutput& output) const;
+
+    Real coefficient_{1.0};
+    InterfaceEvaluationSide side_{InterfaceEvaluationSide::Minus};
+};
+
+/**
+ * @brief Generic scalar trace-coupling kernel on a face
+ *
+ * For scalar spaces this reduces to the facet mass form. For vector-valued
+ * spaces it couples the normal component of the vector basis against the
+ * scalar trace on the opposite side:
+ *   \int_F c * tau_test(phi_i) * tau_trial(psi_j)
+ * where tau = identity for scalar bases and tau = n·(.) for vector bases.
+ */
+class NormalTraceCouplingKernel final : public BilinearFormKernel {
+public:
+    explicit NormalTraceCouplingKernel(Real coefficient = 1.0,
+                                       InterfaceEvaluationSide side = InterfaceEvaluationSide::Minus);
+
+    [[nodiscard]] RequiredData getRequiredData() const override;
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override;
+    void computeBoundaryFace(const AssemblyContext& ctx, int marker, KernelOutput& output) override;
+    [[nodiscard]] bool hasCell() const noexcept override { return false; }
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+    [[nodiscard]] bool hasSingleSidedInterfaceFace() const noexcept override { return true; }
+    [[nodiscard]] InterfaceEvaluationSide interfaceEvaluationSide() const noexcept override { return side_; }
+    [[nodiscard]] std::string name() const override { return "NormalTraceCouplingKernel"; }
+
+private:
+    void computeFacet(const AssemblyContext& ctx, KernelOutput& output) const;
+
+    Real coefficient_{1.0};
+    InterfaceEvaluationSide side_{InterfaceEvaluationSide::Minus};
 };
 
 // ============================================================================

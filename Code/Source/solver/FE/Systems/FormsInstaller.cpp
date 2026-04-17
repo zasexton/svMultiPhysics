@@ -35,6 +35,7 @@
 #include "Spaces/FunctionSpace.h"
 
 #include <algorithm>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace svmp {
@@ -229,6 +230,52 @@ bool containsCoupledTerminals(const forms::FormExprNode& node)
         }
     }
     return false;
+}
+
+void collectAuxiliaryOutputConsumerDomains(
+    const forms::FormExprNode& node,
+    std::unordered_map<std::string, std::vector<analysis::DomainKind>>& domains_by_output,
+    std::optional<analysis::DomainKind> active_domain = std::nullopt)
+{
+    using FT = forms::FormExprType;
+
+    auto record_domain = [&](std::string_view name, analysis::DomainKind domain) {
+        auto& domains = domains_by_output[std::string(name)];
+        if (std::find(domains.begin(), domains.end(), domain) == domains.end()) {
+            domains.push_back(domain);
+        }
+    };
+
+    std::optional<analysis::DomainKind> child_domain = active_domain;
+    switch (node.type()) {
+        case FT::CellIntegral:
+            child_domain = analysis::DomainKind::Cell;
+            break;
+        case FT::BoundaryIntegral:
+            child_domain = analysis::DomainKind::Boundary;
+            break;
+        case FT::InteriorFaceIntegral:
+            child_domain = analysis::DomainKind::InteriorFace;
+            break;
+        case FT::InterfaceIntegral:
+            child_domain = analysis::DomainKind::InterfaceFace;
+            break;
+        case FT::AuxiliaryOutputSymbol: {
+            auto sym = node.symbolName();
+            if (sym) {
+                record_domain(*sym, child_domain.value_or(analysis::DomainKind::Cell));
+            }
+            break;
+        }
+        default:
+            break;
+    }
+
+    for (const auto& child : node.childrenShared()) {
+        if (child) {
+            collectAuxiliaryOutputConsumerDomains(*child, domains_by_output, child_domain);
+        }
+    }
 }
 
 forms::FormExpr lowerStateFields(
@@ -607,15 +654,25 @@ CoupledResidualKernels installCoupledResidual(
                 : forms::NonlinearKernelOutput::MatrixOnly;
 
             std::optional<forms::FormIR> tangent_ir_for_plan;
-            if (dispatch.has_cell && monolithic_cell_feasible) {
+            std::optional<forms::FormIR> tangent_ir_for_kernel;
+            const bool need_symbolic_tangent_kernel = !owns_row_vector;
+            if (need_symbolic_tangent_kernel || (dispatch.has_cell && monolithic_cell_feasible)) {
                 try {
                     auto tangent_expr = forms::differentiateResidual(lowered);
-                    tangent_ir_for_plan = compiler.compileBilinear(tangent_expr);
+                    auto tangent_ir = compiler.compileBilinear(tangent_expr);
+                    if (need_symbolic_tangent_kernel) {
+                        tangent_ir_for_kernel = tangent_ir.clone();
+                    }
+                    if (dispatch.has_cell && monolithic_cell_feasible) {
+                        tangent_ir_for_plan = std::move(tangent_ir);
+                    }
                 } catch (const std::exception& e) {
-                    monolithic_cell_feasible = false;
-                    monolithic_disable_reason =
-                        "installCoupledResidual: symbolic tangent generation failed for (" +
-                        std::to_string(test_fields[i]) + "," + std::to_string(trial) + "): " + e.what();
+                    if (dispatch.has_cell && monolithic_cell_feasible) {
+                        monolithic_cell_feasible = false;
+                        monolithic_disable_reason =
+                            "installCoupledResidual: symbolic tangent generation failed for (" +
+                            std::to_string(test_fields[i]) + "," + std::to_string(trial) + "): " + e.what();
+                    }
                 }
             }
 
@@ -624,6 +681,10 @@ CoupledResidualKernels installCoupledResidual(
             if (options.compiler_options.use_symbolic_tangent) {
                 kernel = maybeWrapForJIT(
                     std::make_shared<forms::SymbolicNonlinearFormKernel>(std::move(residual_ir), output),
+                    options);
+            } else if (tangent_ir_for_kernel.has_value()) {
+                kernel = maybeWrapForJIT(
+                    std::make_shared<forms::FormKernel>(std::move(*tangent_ir_for_kernel)),
                     options);
             } else {
                 kernel = maybeWrapForJIT(
@@ -682,7 +743,8 @@ CoupledResidualKernels installCoupledResidual(
 
     plan->semantic_type = MixedKernelSemanticType::MixedBlockSet;
     plan->monolithic_cell_enabled =
-        monolithic_cell_feasible && plan->monolithic_cell_requested && monolithic_cell_blocks.size() >= 2u;
+        monolithic_cell_feasible && plan->monolithic_cell_requested &&
+        monolithic_cell_blocks.size() >= 2u;
     if (plan->monolithic_cell_enabled) {
         plan->semantic_type = MixedKernelSemanticType::MonolithicCell;
     }
@@ -1106,15 +1168,25 @@ CoupledResidualKernels installCoupledResidualMixed(
                 : forms::NonlinearKernelOutput::MatrixOnly;
 
             std::optional<forms::FormIR> tangent_ir_for_plan;
-            if (dispatch.has_cell && monolithic_cell_feasible) {
+            std::optional<forms::FormIR> tangent_ir_for_kernel;
+            const bool need_symbolic_tangent_kernel = !owns_row_vector;
+            if (need_symbolic_tangent_kernel || (dispatch.has_cell && monolithic_cell_feasible)) {
                 try {
                     auto tangent_expr = forms::differentiateResidual(lowered);
-                    tangent_ir_for_plan = compiler.compileBilinear(tangent_expr);
+                    auto tangent_ir = compiler.compileBilinear(tangent_expr);
+                    if (need_symbolic_tangent_kernel) {
+                        tangent_ir_for_kernel = tangent_ir.clone();
+                    }
+                    if (dispatch.has_cell && monolithic_cell_feasible) {
+                        tangent_ir_for_plan = std::move(tangent_ir);
+                    }
                 } catch (const std::exception& e) {
-                    monolithic_cell_feasible = false;
-                    monolithic_disable_reason =
-                        "installCoupledResidualMixed: symbolic tangent generation failed for (" +
-                        std::to_string(test_fields[i]) + "," + std::to_string(trial) + "): " + e.what();
+                    if (dispatch.has_cell && monolithic_cell_feasible) {
+                        monolithic_cell_feasible = false;
+                        monolithic_disable_reason =
+                            "installCoupledResidualMixed: symbolic tangent generation failed for (" +
+                            std::to_string(test_fields[i]) + "," + std::to_string(trial) + "): " + e.what();
+                    }
                 }
             }
 
@@ -1123,6 +1195,10 @@ CoupledResidualKernels installCoupledResidualMixed(
             if (options.compiler_options.use_symbolic_tangent) {
                 kernel = maybeWrapForJIT(
                     std::make_shared<forms::SymbolicNonlinearFormKernel>(std::move(residual_ir), output),
+                    options);
+            } else if (tangent_ir_for_kernel.has_value()) {
+                kernel = maybeWrapForJIT(
+                    std::make_shared<forms::FormKernel>(std::move(*tangent_ir_for_kernel)),
                     options);
             } else {
                 kernel = maybeWrapForJIT(
@@ -1181,7 +1257,8 @@ CoupledResidualKernels installCoupledResidualMixed(
 
     plan->semantic_type = MixedKernelSemanticType::MixedBlockSet;
     plan->monolithic_cell_enabled =
-        monolithic_cell_feasible && plan->monolithic_cell_requested && monolithic_cell_blocks.size() >= 2u;
+        monolithic_cell_feasible && plan->monolithic_cell_requested &&
+        monolithic_cell_blocks.size() >= 2u;
     if (plan->monolithic_cell_enabled) {
         plan->semantic_type = MixedKernelSemanticType::MonolithicCell;
     }
@@ -1779,8 +1856,18 @@ CoupledResidualKernels installFormulation(
 
             const auto default_field =
                 fields.empty() ? INVALID_FIELD_ID : fields.front();
+            std::unordered_map<std::string, std::vector<analysis::DomainKind>>
+                consumer_domains_by_output;
+            collectAuxiliaryOutputConsumerDomains(
+                *residual.node(), consumer_domains_by_output);
             for (const auto& [qualified_name, output_id] : output_ids) {
-                for (const auto domain : rec.active_domains) {
+                auto domains_it = consumer_domains_by_output.find(qualified_name);
+                const auto& consumer_domains =
+                    (domains_it != consumer_domains_by_output.end() &&
+                     !domains_it->second.empty())
+                    ? domains_it->second
+                    : rec.active_domains;
+                for (const auto domain : consumer_domains) {
                     analysis::AuxiliaryOutputConsumerRecord consumer;
                     consumer.output_id = static_cast<std::uint32_t>(output_id);
                     consumer.qualified_output_name = qualified_name;

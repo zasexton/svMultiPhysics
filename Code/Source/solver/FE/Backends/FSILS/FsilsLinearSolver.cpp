@@ -894,6 +894,9 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                     static_cast<GlobalIndex>(b->data().size()) != expected_local,
                 FEException, "FsilsLinearSolver::solve: FSILS vectors must have local size lhs.nNo*dof");
 
+    const auto shared_layout = A->shared();
+    FE_CHECK_NOT_NULL(shared_layout.get(), "FsilsLinearSolver::solve: shared layout");
+
     const bool requested_blockschur = (options_.method == SolverMethod::BlockSchur);
     const bool use_blockschur = requested_blockschur;
 
@@ -1094,24 +1097,27 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         use_blockschur &&
         ((!rank_one_updates_.empty() && !reduced_field_updates_.empty()) ||
          (rank_one_updates_.size() > 1));
+    const bool mpi_native_face_rank_one_requested =
+        (lhs.commu.nTasks > 1) &&
+        !rank_one_updates_.empty() &&
+        fsilsEnableMpiNativeFaceRankOne();
     const bool allow_mpi_native_face_rank_one =
-        (lhs.commu.nTasks <= 1) ||
-        pure_mpi_native_face_rank_one_case ||
-        ((lhs.commu.nTasks > 1) &&
-         !rank_one_updates_.empty() &&
-         fsilsEnableMpiNativeFaceRankOne());
-    if (lhs.commu.nTasks > 1 && !rank_one_updates_.empty() && oopTraceEnabled()) {
+        (lhs.commu.nTasks <= 1) || mpi_native_face_rank_one_requested;
+    if ((!rank_one_updates_.empty() || !reduced_field_updates_.empty() ||
+         !grouped_bordered_field_couplings_.empty()) && oopTraceEnabled()) {
         const int prefer_count = static_cast<int>(std::count_if(
             rank_one_updates_.begin(), rank_one_updates_.end(),
             [](const auto& update) { return update.prefer_native_face; }));
         std::ostringstream oss;
-        oss << "FsilsLinearSolver::solve: mpi native-face routing state"
+        oss << "FsilsLinearSolver::solve: native-face routing state"
+            << " nTasks=" << lhs.commu.nTasks
             << " rank_one=" << rank_one_updates_.size()
             << " prefer_native_face=" << prefer_count
             << " reduced=" << reduced_field_updates_.size()
             << " grouped=" << grouped_bordered_field_couplings_.size()
             << " pure_case=" << (pure_mpi_native_face_rank_one_case ? 1 : 0)
             << " prefer_case=" << (prefer_mpi_native_face_rank_one ? 1 : 0)
+            << " requested=" << (mpi_native_face_rank_one_requested ? 1 : 0)
             << " allow=" << (allow_mpi_native_face_rank_one ? 1 : 0);
         traceLog(oss.str());
     }
@@ -1122,7 +1128,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         traceLog("FsilsLinearSolver::solve: enabling MPI native-face rank-1 path "
                  "for mixed rank-1 + reduced BlockSchur outlet corrections.");
     } else if (pure_mpi_native_face_rank_one_case && oopTraceEnabled()) {
-        traceLog("FsilsLinearSolver::solve: enabling MPI native-face rank-1 path.");
+        traceLog("FsilsLinearSolver::solve: enabling MPI native-face rank-1 path "
+                 "(explicit opt-in).");
     }
 
     std::vector<std::size_t> native_face_rank_one_indices;
@@ -1960,6 +1967,74 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     double validation_time_seconds = 0.0;
     const auto solve_buffer = std::span<Real>(ri_internal_work_.data(), ri_internal_work_.size());
 
+    auto accumulateLocalBufferStats = [](std::span<const Real> values,
+                                        int local_dof,
+                                        int local_nNo,
+                                        int local_mynNo,
+                                        long double& owned_sq,
+                                        long double& ghost_sq,
+                                        Real& owned_max,
+                                        Real& ghost_max,
+                                        std::size_t& owned_nnz,
+                                        std::size_t& ghost_nnz) {
+        auto accumulate_stats = [](Real value, long double& sq, Real& max_abs, std::size_t& nnz) {
+            sq += static_cast<long double>(value) * static_cast<long double>(value);
+            const Real abs_v = std::abs(value);
+            max_abs = std::max(max_abs, abs_v);
+            if (abs_v > static_cast<Real>(1e-14)) {
+                ++nnz;
+            }
+        };
+
+        for (int internal = 0; internal < local_nNo; ++internal) {
+            const bool owned = internal < local_mynNo;
+            const std::size_t base = static_cast<std::size_t>(internal) * static_cast<std::size_t>(local_dof);
+            for (int c = 0; c < local_dof; ++c) {
+                const Real value = values[base + static_cast<std::size_t>(c)];
+                if (owned) {
+                    accumulate_stats(value, owned_sq, owned_max, owned_nnz);
+                } else {
+                    accumulate_stats(value, ghost_sq, ghost_max, ghost_nnz);
+                }
+            }
+        }
+    };
+
+    auto logLocalSolveBufferStats = [&](std::string_view phase) {
+        if (!oopTraceEnabled() || lhs.commu.nTasks <= 1) {
+            return;
+        }
+
+        long double internal_owned_sq = 0.0L;
+        long double internal_ghost_sq = 0.0L;
+        Real internal_owned_max = Real(0.0);
+        Real internal_ghost_max = Real(0.0);
+        std::size_t internal_owned_nnz = 0;
+        std::size_t internal_ghost_nnz = 0;
+        accumulateLocalBufferStats(solve_buffer,
+                                   dof,
+                                   lhs.nNo,
+                                   lhs.mynNo,
+                                   internal_owned_sq,
+                                   internal_ghost_sq,
+                                   internal_owned_max,
+                                   internal_ghost_max,
+                                   internal_owned_nnz,
+                                   internal_ghost_nnz);
+
+        std::ostringstream oss;
+        oss << "FsilsLinearSolver::solve: local solve buffer"
+            << " phase='" << phase << "'"
+            << " rank=" << lhs.commu.task
+            << " internal_owned_l2=" << std::sqrt(static_cast<double>(internal_owned_sq))
+            << " internal_owned_nnz=" << internal_owned_nnz
+            << " internal_owned_max=" << internal_owned_max
+            << " internal_ghost_l2=" << std::sqrt(static_cast<double>(internal_ghost_sq))
+            << " internal_ghost_nnz=" << internal_ghost_nnz
+            << " internal_ghost_max=" << internal_ghost_max;
+        traceLog(oss.str());
+    };
+
     auto loadSolveBufferFromVector = [&](const FsilsVector& src, bool blockschur_preparation) {
         const double tp0 = fe_fsi_linear_solver::fsils_cpu_t();
         copyVectorOldToInternal(src, solve_buffer);
@@ -1975,10 +2050,84 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             }
         }
         rhs_prepare_time_seconds += fe_fsi_linear_solver::fsils_cpu_t() - tp0;
+        logLocalSolveBufferStats(blockschur_preparation ? "prepared_rhs_blockschur" : "prepared_rhs_original");
+    };
+
+    auto logLocalReturnedSolutionStats = [&](std::string_view phase) {
+        if (!oopTraceEnabled() || lhs.commu.nTasks <= 1) {
+            return;
+        }
+
+        long double internal_owned_sq = 0.0L;
+        long double internal_ghost_sq = 0.0L;
+        Real internal_owned_max = Real(0.0);
+        Real internal_ghost_max = Real(0.0);
+        std::size_t internal_owned_nnz = 0;
+        std::size_t internal_ghost_nnz = 0;
+        accumulateLocalBufferStats(solve_buffer,
+                                   dof,
+                                   lhs.nNo,
+                                   lhs.mynNo,
+                                   internal_owned_sq,
+                                   internal_ghost_sq,
+                                   internal_owned_max,
+                                   internal_ghost_max,
+                                   internal_owned_nnz,
+                                   internal_ghost_nnz);
+
+        const auto& x_data_local = x->data();
+        const std::size_t owned_old_entries =
+            static_cast<std::size_t>(std::max(shared_layout->owned_node_count, 0)) *
+            static_cast<std::size_t>(std::max(shared_layout->dof, 0));
+        long double old_owned_sq = 0.0L;
+        long double old_ghost_sq = 0.0L;
+        Real old_owned_max = Real(0.0);
+        Real old_ghost_max = Real(0.0);
+        std::size_t old_owned_nnz = 0;
+        std::size_t old_ghost_nnz = 0;
+        for (std::size_t i = 0; i < x_data_local.size(); ++i) {
+            const Real value = x_data_local[i];
+            const Real abs_v = std::abs(value);
+            if (i < owned_old_entries) {
+                old_owned_sq += static_cast<long double>(value) * static_cast<long double>(value);
+                old_owned_max = std::max(old_owned_max, abs_v);
+                if (abs_v > static_cast<Real>(1e-14)) {
+                    ++old_owned_nnz;
+                }
+            } else {
+                old_ghost_sq += static_cast<long double>(value) * static_cast<long double>(value);
+                old_ghost_max = std::max(old_ghost_max, abs_v);
+                if (abs_v > static_cast<Real>(1e-14)) {
+                    ++old_ghost_nnz;
+                }
+            }
+        }
+
+        std::ostringstream oss;
+        oss << "FsilsLinearSolver::solve: local returned solution"
+            << " phase='" << phase << "'"
+            << " rank=" << lhs.commu.task
+            << " internal_owned_l2=" << std::sqrt(static_cast<double>(internal_owned_sq))
+            << " internal_owned_nnz=" << internal_owned_nnz
+            << " internal_owned_max=" << internal_owned_max
+            << " internal_ghost_l2=" << std::sqrt(static_cast<double>(internal_ghost_sq))
+            << " internal_ghost_nnz=" << internal_ghost_nnz
+            << " internal_ghost_max=" << internal_ghost_max
+            << " old_owned_l2=" << std::sqrt(static_cast<double>(old_owned_sq))
+            << " old_owned_nnz=" << old_owned_nnz
+            << " old_owned_max=" << old_owned_max
+            << " old_ghost_l2=" << std::sqrt(static_cast<double>(old_ghost_sq))
+            << " old_ghost_nnz=" << old_ghost_nnz
+            << " old_ghost_max=" << old_ghost_max;
+        traceLog(oss.str());
     };
 
     auto storeSolveBufferToSolution = [&]() {
         copyVectorInternalToOld(std::span<const Real>(solve_buffer.data(), solve_buffer.size()), *x);
+        if (lhs.commu.nTasks > 1) {
+            x->updateGhosts();
+        }
+        logLocalReturnedSolutionStats("stored");
     };
 
     SolverReport report;
@@ -1998,9 +2147,6 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                      (blockschur_preparation ? "blockschur" : "original") + "'");
         }
     };
-
-    const auto shared_layout = A->shared();
-    FE_CHECK_NOT_NULL(shared_layout.get(), "FsilsLinearSolver::solve: shared layout");
 
     auto computeTrueResidualVector = [&](FsilsVector& residual_true, Real& rhs_norm_out) {
         FsilsVector rhs_true(shared_layout);

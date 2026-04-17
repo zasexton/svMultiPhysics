@@ -35,6 +35,8 @@
 #include "AffineConstraints.h"
 #include "Constraint.h"
 #include "Core/Types.h"
+#include "MultiPointConstraint.h"
+#include "PeriodicBC.h"
 
 #include <vector>
 #include <span>
@@ -51,6 +53,10 @@ namespace dofs {
     class DofHandler;
     class DofMap;
     class EntityDofMap;
+}
+
+namespace spaces {
+    class HDivSpace;
 }
 
 namespace constraints {
@@ -82,6 +88,29 @@ struct PeriodicConstraintOptions {
     ComponentMask component_mask{};               ///< Which components to make periodic
     double tolerance{1e-10};                      ///< Tolerance for coordinate matching
     bool flip_sign{false};                        ///< For anti-periodic BCs
+};
+
+/**
+ * @brief Boundary trace entity specification for vector-basis trace constraints
+ *
+ * DOFs must be provided in the entity-local trace ordering for the boundary
+ * edge/face. Vertex coordinates encode entity orientation, and the outward
+ * normal is used to determine the scalar normal-trace sign relation under the
+ * periodic map.
+ */
+struct TraceBoundaryEntity {
+    std::vector<GlobalIndex> dofs;
+    std::vector<std::array<double, 3>> vertices;
+    std::array<double, 3> outward_normal{{0.0, 0.0, 0.0}};
+};
+
+/**
+ * @brief Options for H(div) trace periodic/MPC helper generation
+ */
+struct TracePeriodicConstraintOptions {
+    double tolerance{1e-10};  ///< Matching tolerance for transformed vertices
+    bool anti_periodic{false};///< Multiply the normal-trace relation by -1
+    std::function<std::array<double, 3>(std::array<double, 3>)> normal_transform{};
 };
 
 /**
@@ -195,6 +224,72 @@ void makePeriodicConstraintsTranslation(
     std::array<double, 3> translation,
     AffineConstraints& constraints,
     const PeriodicConstraintOptions& options = {});
+
+/**
+ * @brief Build orientation-aware H(div) normal-trace periodic pairs
+ *
+ * Each returned pair enforces `u_slave = weight * u_master`, with the weight
+ * accounting for:
+ * - trace-order orientation between the paired entities
+ * - the relation between transformed slave and master outward normals
+ * - optional anti-periodicity
+ */
+[[nodiscard]] std::vector<PeriodicPair> makeHDivTracePeriodicPairs(
+    const spaces::HDivSpace& space,
+    std::span<const TraceBoundaryEntity> slave_entities,
+    std::span<const TraceBoundaryEntity> master_entities,
+    const std::function<std::array<double, 3>(std::array<double, 3>)>& point_transform,
+    const TracePeriodicConstraintOptions& options = {});
+
+/**
+ * @brief Translation-specialized overload for H(div) normal-trace periodic pairs
+ */
+[[nodiscard]] std::vector<PeriodicPair> makeHDivTracePeriodicPairsTranslation(
+    const spaces::HDivSpace& space,
+    std::span<const TraceBoundaryEntity> slave_entities,
+    std::span<const TraceBoundaryEntity> master_entities,
+    std::array<double, 3> translation,
+    const TracePeriodicConstraintOptions& options = {});
+
+/**
+ * @brief Build an orientation-aware H(div) trace PeriodicBC
+ */
+[[nodiscard]] PeriodicBC makeHDivTracePeriodicBC(
+    const spaces::HDivSpace& space,
+    std::span<const TraceBoundaryEntity> slave_entities,
+    std::span<const TraceBoundaryEntity> master_entities,
+    const std::function<std::array<double, 3>(std::array<double, 3>)>& point_transform,
+    const TracePeriodicConstraintOptions& options = {});
+
+/**
+ * @brief Translation-specialized overload for an H(div) trace PeriodicBC
+ */
+[[nodiscard]] PeriodicBC makeHDivTracePeriodicBCTranslation(
+    const spaces::HDivSpace& space,
+    std::span<const TraceBoundaryEntity> slave_entities,
+    std::span<const TraceBoundaryEntity> master_entities,
+    std::array<double, 3> translation,
+    const TracePeriodicConstraintOptions& options = {});
+
+/**
+ * @brief Build an orientation-aware H(div) trace MPC
+ */
+[[nodiscard]] MultiPointConstraint makeHDivTracePeriodicMPC(
+    const spaces::HDivSpace& space,
+    std::span<const TraceBoundaryEntity> slave_entities,
+    std::span<const TraceBoundaryEntity> master_entities,
+    const std::function<std::array<double, 3>(std::array<double, 3>)>& point_transform,
+    const TracePeriodicConstraintOptions& options = {});
+
+/**
+ * @brief Translation-specialized overload for an H(div) trace MPC
+ */
+[[nodiscard]] MultiPointConstraint makeHDivTracePeriodicMPCTranslation(
+    const spaces::HDivSpace& space,
+    std::span<const TraceBoundaryEntity> slave_entities,
+    std::span<const TraceBoundaryEntity> master_entities,
+    std::array<double, 3> translation,
+    const TracePeriodicConstraintOptions& options = {});
 
 /**
  * @brief Create hanging node constraints for 1D edges

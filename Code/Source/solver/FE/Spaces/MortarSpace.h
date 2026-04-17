@@ -35,7 +35,8 @@ namespace spaces {
 
 class MortarSpace : public FunctionSpace {
 public:
-    explicit MortarSpace(std::shared_ptr<FunctionSpace> interface_space);
+    explicit MortarSpace(std::shared_ptr<FunctionSpace> interface_space,
+                         int interface_marker = -1);
 
     SpaceType space_type() const noexcept override { return SpaceType::Mortar; }
 
@@ -86,9 +87,12 @@ public:
 
     const FunctionSpace& interface_space() const noexcept { return *interface_space_; }
     std::shared_ptr<FunctionSpace> interface_space_ptr() const noexcept { return interface_space_; }
+    [[nodiscard]] int interface_marker() const noexcept { return interface_marker_; }
+    [[nodiscard]] bool is_marker_scoped() const noexcept { return interface_marker_ >= 0; }
 
 private:
     std::shared_ptr<FunctionSpace> interface_space_;
+    int interface_marker_{-1};
 };
 
 } // namespace spaces
@@ -96,4 +100,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_SPACES_MORTARSPACE_H
-

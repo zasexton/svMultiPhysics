@@ -10,6 +10,8 @@
 #include "Core/FEException.h"
 #include "TimeStepping/TimeHistory.h"
 
+#include "Backends/FSILS/FsilsFactory.h"
+#include "Sparsity/SparsityPattern.h"
 #include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
 
 #include <cmath>
@@ -231,6 +233,49 @@ TEST(TimeHistory, RepackPreservesValues)
     EXPECT_EQ(ts_test::getVectorByDof(h.uPrev()), u_prev);
     EXPECT_EQ(ts_test::getVectorByDof(h.uPrev2()), u_prev2);
     EXPECT_EQ(ts_test::getVectorByDof(h.uPrevK(3)), u_prev3);
+    EXPECT_EQ(ts_test::getVectorByDof(h.uDot()), v);
+    EXPECT_EQ(ts_test::getVectorByDof(h.uDDot()), a);
+}
+
+TEST(TimeHistory, RepackPreservesValuesAcrossFsilsPermutation)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "TimeHistory tests require the FSILS backend";
+#endif
+    auto perm = std::make_shared<svmp::FE::backends::DofPermutation>();
+    perm->forward = {2, 3, 0, 1};
+    perm->inverse = {2, 3, 0, 1};
+
+    svmp::FE::backends::FsilsFactory source_factory(/*dof_per_node=*/2, perm);
+    auto h = svmp::FE::timestepping::TimeHistory::allocate(source_factory, 4, /*history_depth=*/2,
+                                                           /*allocate_second_order_state=*/true);
+
+    const std::vector<svmp::FE::Real> u = {0.1, 0.2, 0.3, 0.4};
+    const std::vector<svmp::FE::Real> u_prev = {1.0, 2.0, 3.0, 4.0};
+    const std::vector<svmp::FE::Real> u_prev2 = {-1.0, -2.0, -3.0, -4.0};
+    const std::vector<svmp::FE::Real> v = {5.0, 6.0, 7.0, 8.0};
+    const std::vector<svmp::FE::Real> a = {-5.0, -6.0, -7.0, -8.0};
+
+    ts_test::setVectorByDof(h.u(), u);
+    ts_test::setVectorByDof(h.uPrev(), u_prev);
+    ts_test::setVectorByDof(h.uPrev2(), u_prev2);
+    ts_test::setVectorByDof(h.uDot(), v);
+    ts_test::setVectorByDof(h.uDDot(), a);
+
+    svmp::FE::backends::FsilsFactory target_factory(/*dof_per_node=*/2, perm);
+    svmp::FE::sparsity::SparsityPattern pattern(4, 4);
+    for (svmp::FE::GlobalIndex i = 0; i < 4; ++i) {
+        pattern.addEntry(i, i);
+    }
+    pattern.finalize();
+    auto mat = target_factory.createMatrix(pattern);
+    ASSERT_NE(mat.get(), nullptr);
+
+    h.repack(target_factory);
+
+    EXPECT_EQ(ts_test::getVectorByDof(h.u()), u);
+    EXPECT_EQ(ts_test::getVectorByDof(h.uPrev()), u_prev);
+    EXPECT_EQ(ts_test::getVectorByDof(h.uPrev2()), u_prev2);
     EXPECT_EQ(ts_test::getVectorByDof(h.uDot()), v);
     EXPECT_EQ(ts_test::getVectorByDof(h.uDDot()), a);
 }

@@ -46,6 +46,7 @@
 namespace svmp {
     class MeshBase;
     class DistributedMesh;
+    class InterfaceMesh;
     // Phase 5 (UNIFY_MESH): prefer the unified runtime mesh type name.
     // In the Mesh library, `Mesh` is currently an alias of `DistributedMesh`.
     using Mesh = DistributedMesh;
@@ -562,6 +563,26 @@ public:
      * @note Only available when compiled with Mesh library
      */
     void distributeDofs(const Mesh& mesh,
+                        const spaces::FunctionSpace& space,
+                        const DofDistributionOptions& options = {});
+
+    /**
+     * @brief Distribute facet-local DOFs for a MortarSpace over an InterfaceMesh
+     *
+     * This first mortar pass numbers one discontinuous interface element per
+     * InterfaceMesh face. The wrapped interface space must therefore be
+     * discontinuous (`Continuity::L2`).
+     */
+    void distributeDofs(const MeshBase& mesh,
+                        const svmp::InterfaceMesh& interface_mesh,
+                        const spaces::FunctionSpace& space,
+                        const DofDistributionOptions& options = {});
+
+    /**
+     * @brief Runtime-mesh overload for mortar/interface-face DOF distribution
+     */
+    void distributeDofs(const Mesh& mesh,
+                        const svmp::InterfaceMesh& interface_mesh,
                         const spaces::FunctionSpace& space,
                         const DofDistributionOptions& options = {});
 

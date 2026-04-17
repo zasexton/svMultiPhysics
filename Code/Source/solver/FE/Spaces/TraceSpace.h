@@ -31,6 +31,7 @@
 
 #include "Spaces/FunctionSpace.h"
 #include "Spaces/FaceRestriction.h"
+#include "Spaces/OrientationManager.h"
 #include <memory>
 
 namespace svmp {
@@ -48,6 +49,11 @@ enum class TraceKind : std::uint8_t {
 
 class TraceSpace : public FunctionSpace {
 public:
+    struct OrientedScalarTraceMap {
+        std::vector<int> source_indices;
+        std::vector<Real> weights;
+    };
+
     /// Construct trace space from a volume space and local face id
     TraceSpace(std::shared_ptr<FunctionSpace> volume_space,
                int face_id);
@@ -177,6 +183,42 @@ public:
      * @brief Access the face restriction operator
      */
     const FaceRestriction& face_restriction() const;
+
+    /**
+     * @brief Number of scalar normal-trace DOFs induced by an H(div) trace
+     *
+     * The count is determined from the trace entity topology and scalar trace
+     * polynomial order:
+     * - line: k + 1
+     * - triangle: (k + 1)(k + 2) / 2
+     * - quadrilateral: (k + 1)^2
+     */
+    [[nodiscard]] static std::size_t hdivNormalTraceDofCount(ElementType trace_element_type,
+                                                             int trace_polynomial_order);
+
+    /**
+     * @brief Oriented scalar-trace map for a 2D H(div) edge trace
+     *
+     * Returns a map from an edge-local scalar normal-trace ordering into a
+     * target aligned ordering. Each output entry satisfies:
+     *   aligned[i] = weights[i] * local[source_indices[i]]
+     */
+    [[nodiscard]] static OrientedScalarTraceMap orientedHDivNormalTraceMap(
+        ElementType trace_element_type,
+        int trace_polynomial_order,
+        OrientationManager::Sign edge_orientation);
+
+    /**
+     * @brief Oriented scalar-trace map for a 3D H(div) face trace
+     *
+     * Returns a map from a face-local scalar normal-trace ordering into a
+     * target aligned ordering. Each output entry satisfies:
+     *   aligned[i] = weights[i] * local[source_indices[i]]
+     */
+    [[nodiscard]] static OrientedScalarTraceMap orientedHDivNormalTraceMap(
+        ElementType trace_element_type,
+        int trace_polynomial_order,
+        const OrientationManager::FaceOrientation& face_orientation);
 
 private:
     std::shared_ptr<FunctionSpace> volume_space_;

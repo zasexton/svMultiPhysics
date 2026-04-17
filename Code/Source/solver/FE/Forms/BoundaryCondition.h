@@ -13,6 +13,7 @@
 #include "Forms/BoundaryConditions.h"
 #include "Analysis/BoundaryConditionDescriptor.h"
 
+#include <string>
 #include <vector>
 
 namespace svmp {
@@ -34,6 +35,31 @@ public:
     virtual ~BoundaryCondition() = default;
 
     [[nodiscard]] virtual int boundaryMarker() const = 0;
+    [[nodiscard]] virtual int interfaceMarker() const { return -1; }
+
+    [[nodiscard]] virtual analysis::DomainKind targetDomain() const
+    {
+        return interfaceMarker() >= 0 ? analysis::DomainKind::InterfaceFace
+                                      : analysis::DomainKind::Boundary;
+    }
+
+    [[nodiscard]] virtual int targetMarker() const
+    {
+        return targetDomain() == analysis::DomainKind::InterfaceFace
+                   ? interfaceMarker()
+                   : boundaryMarker();
+    }
+
+    [[nodiscard]] std::string targetDescription() const
+    {
+        const int marker = targetMarker();
+        if (targetDomain() == analysis::DomainKind::InterfaceFace) {
+            return marker >= 0 ? ("interface_marker " + std::to_string(marker))
+                               : "global interface relation";
+        }
+        return marker >= 0 ? ("boundary_marker " + std::to_string(marker))
+                           : "global boundary relation";
+    }
 
     /**
      * @brief Optional initialization hook (definition-time)
@@ -47,6 +73,21 @@ public:
     virtual void contributeToResidual(FormExpr& residual,
                                       const FormExpr& u,
                                       const FormExpr& v) const = 0;
+
+    /**
+     * @brief Optional hook for strong non-pointwise system constraints
+     *
+     * Allows a boundary condition to install setup-time constraints that are
+     * not representable as component-wise pointwise StrongDirichlet
+     * declarations, such as H(div) normal-trace essential conditions.
+     *
+     * This hook is invoked by BoundaryConditionManager after setup() and
+     * before metadata collection / residual contribution.
+     */
+    virtual void installSystemConstraints(systems::FESystem& /*system*/,
+                                          FieldId /*field_id*/) const
+    {
+    }
 
     /**
      * @brief Whether this BC contributes weak terms to the residual
@@ -63,6 +104,14 @@ public:
      * whose contributeToResidual() is guaranteed to be a no-op.
      */
     [[nodiscard]] virtual bool hasWeakTerms() const { return true; }
+
+    /**
+     * @brief Whether another condition may target the same marker/domain
+     *
+     * Weak conditions are composable by default. Strong and affine conditions
+     * remain exclusive unless a subclass explicitly relaxes that rule.
+     */
+    [[nodiscard]] virtual bool allowsMarkerSharing() const { return hasWeakTerms(); }
 
     [[nodiscard]] virtual std::vector<StrongDirichlet> getStrongConstraints(FieldId field_id) const = 0;
 

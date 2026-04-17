@@ -18,6 +18,7 @@
 #include "Forms/BoundaryFunctional.h"
 #include "Forms/FormExpr.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/ProductSpace.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <cmath>
@@ -348,6 +349,108 @@ TEST(FunctionalAssemblerBoundaryTest, FormsBoundaryFunctionalKernelEvaluatesDisc
     assembler.setDofMap(dof_map);
     assembler.setSpace(space);
     assembler.setPrimaryField(field);
+    assembler.setSolution(u);
+
+    const Real Q = assembler.assembleBoundaryScalar(*kernel, /*boundary_marker=*/2);
+    EXPECT_NEAR(Q, 0.5, 1e-12);
+}
+
+TEST(FunctionalAssemblerBoundaryTest, BlockModePrimaryFieldBindingExtractsPrimarySlice)
+{
+    constexpr FieldId pressure_field = 1;
+
+    forms::test::SingleTetraOneBoundaryFaceMeshAccess mesh(/*boundary_marker=*/2);
+
+    dofs::DofMap system_dof_map(/*n_cells=*/1, /*n_dofs_total=*/300, /*dofs_per_cell=*/8);
+    const std::array<GlobalIndex, 8> cell_dofs = {100, 101, 102, 103, 200, 201, 202, 203};
+    system_dof_map.setCellDofs(0, cell_dofs);
+    system_dof_map.setNumDofs(300);
+    system_dof_map.setNumLocalDofs(300);
+    system_dof_map.finalize();
+
+    spaces::H1Space scalar_space(ElementType::Tetra4, 1);
+
+    std::vector<Real> u(300, 0.0);
+    u[100] = 100.0;
+    u[101] = 100.0;
+    u[102] = 100.0;
+    u[103] = 100.0;
+    u[200] = 1.0;
+    u[201] = 1.0;
+    u[202] = 1.0;
+    u[203] = 1.0;
+
+    const auto integrand = forms::FormExpr::discreteField(pressure_field, scalar_space, "p");
+    auto kernel = forms::compileBoundaryFunctionalKernel(integrand, /*boundary_marker=*/2);
+
+    FunctionalAssembler assembler;
+    assembler.setMesh(mesh);
+    assembler.setDofMap(system_dof_map);
+    assembler.setSpace(scalar_space);
+    assembler.setPrimaryField(pressure_field);
+    assembler.setDofPerNode(0);
+    assembler.registerFieldBinding(assembly::FieldSolutionBinding{
+        .field = pressure_field,
+        .space = &scalar_space,
+        .field_type = FieldType::Scalar,
+        .value_dimension = 1,
+        .component_offset = 4,
+        .n_components = 1,
+    });
+    assembler.setSolution(u);
+
+    const Real Q = assembler.assembleBoundaryScalar(*kernel, /*boundary_marker=*/2);
+    EXPECT_NEAR(Q, 0.5, 1e-12);
+}
+
+TEST(FunctionalAssemblerBoundaryTest, BlockModeProductSpaceBindingUsesComponentBlockedOrdering)
+{
+    constexpr FieldId velocity_field = 2;
+
+    forms::test::SingleTetraOneBoundaryFaceMeshAccess mesh(/*boundary_marker=*/2);
+
+    dofs::DofMap system_dof_map(/*n_cells=*/1, /*n_dofs_total=*/400, /*dofs_per_cell=*/12);
+    const std::array<GlobalIndex, 12> cell_dofs = {
+        100, 101, 102, 103, 200, 201, 202, 203, 204, 205, 206, 207};
+    system_dof_map.setCellDofs(0, cell_dofs);
+    system_dof_map.setNumDofs(400);
+    system_dof_map.setNumLocalDofs(400);
+    system_dof_map.finalize();
+
+    auto scalar_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace velocity_space(scalar_space, /*components=*/2);
+
+    std::vector<Real> u(400, 0.0);
+    u[100] = 100.0;
+    u[101] = 100.0;
+    u[102] = 100.0;
+    u[103] = 100.0;
+    u[200] = 1.0;
+    u[201] = 1.0;
+    u[202] = 1.0;
+    u[203] = 1.0;
+    u[204] = 2.0;
+    u[205] = 2.0;
+    u[206] = 2.0;
+    u[207] = 2.0;
+
+    const auto integrand = forms::FormExpr::discreteField(velocity_field, velocity_space, "u").component(0);
+    auto kernel = forms::compileBoundaryFunctionalKernel(integrand, /*boundary_marker=*/2);
+
+    FunctionalAssembler assembler;
+    assembler.setMesh(mesh);
+    assembler.setDofMap(system_dof_map);
+    assembler.setSpace(velocity_space);
+    assembler.setPrimaryField(velocity_field);
+    assembler.setDofPerNode(0);
+    assembler.registerFieldBinding(assembly::FieldSolutionBinding{
+        .field = velocity_field,
+        .space = &velocity_space,
+        .field_type = FieldType::Vector,
+        .value_dimension = 2,
+        .component_offset = 4,
+        .n_components = 2,
+    });
     assembler.setSolution(u);
 
     const Real Q = assembler.assembleBoundaryScalar(*kernel, /*boundary_marker=*/2);

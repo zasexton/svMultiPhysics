@@ -13,7 +13,9 @@
 #include <gtest/gtest.h>
 #include "Constraints/ConstraintTools.h"
 #include "Constraints/AffineConstraints.h"
+#include "Spaces/HDivSpace.h"
 
+#include <array>
 #include <vector>
 
 namespace svmp {
@@ -96,6 +98,166 @@ TEST(ConstraintToolsTest, MakePeriodicConstraints_Translation) {
     ASSERT_EQ(c->entries.size(), 1);
     EXPECT_EQ(c->entries[0].master_dof, 1);
     EXPECT_DOUBLE_EQ(c->entries[0].weight, 1.0);
+}
+
+TEST(ConstraintToolsTest, MakeHDivTracePeriodicPairsTranslationUsesOppositeBoundaryNormals)
+{
+    spaces::HDivSpace space(ElementType::Quad4, /*order=*/1);
+
+    const TraceBoundaryEntity slave{
+        .dofs = {0, 1},
+        .vertices = {{{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}}},
+        .outward_normal = {{-1.0, 0.0, 0.0}},
+    };
+    const TraceBoundaryEntity master{
+        .dofs = {10, 11},
+        .vertices = {{{1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}}},
+        .outward_normal = {{1.0, 0.0, 0.0}},
+    };
+
+    const auto pairs = makeHDivTracePeriodicPairsTranslation(
+        space,
+        std::span<const TraceBoundaryEntity>(&slave, 1),
+        std::span<const TraceBoundaryEntity>(&master, 1),
+        {{1.0, 0.0, 0.0}});
+
+    ASSERT_EQ(pairs.size(), 2u);
+    EXPECT_EQ(pairs[0].slave_dof, 0);
+    EXPECT_EQ(pairs[0].master_dof, 10);
+    EXPECT_DOUBLE_EQ(pairs[0].weight, -1.0);
+    EXPECT_EQ(pairs[1].slave_dof, 1);
+    EXPECT_EQ(pairs[1].master_dof, 11);
+    EXPECT_DOUBLE_EQ(pairs[1].weight, -1.0);
+}
+
+TEST(ConstraintToolsTest, MakeHDivTracePeriodicPairsTranslationAlignsReversedEdgeTraceOrdering)
+{
+    spaces::HDivSpace space(ElementType::Quad4, /*order=*/1);
+
+    const TraceBoundaryEntity slave{
+        .dofs = {0, 1},
+        .vertices = {{{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}}},
+        .outward_normal = {{-1.0, 0.0, 0.0}},
+    };
+    const TraceBoundaryEntity master{
+        .dofs = {10, 11},
+        .vertices = {{{1.0, 1.0, 0.0}, {1.0, 0.0, 0.0}}},
+        .outward_normal = {{1.0, 0.0, 0.0}},
+    };
+
+    const auto pairs = makeHDivTracePeriodicPairsTranslation(
+        space,
+        std::span<const TraceBoundaryEntity>(&slave, 1),
+        std::span<const TraceBoundaryEntity>(&master, 1),
+        {{1.0, 0.0, 0.0}});
+
+    ASSERT_EQ(pairs.size(), 2u);
+    EXPECT_EQ(pairs[0].slave_dof, 1);
+    EXPECT_EQ(pairs[0].master_dof, 10);
+    EXPECT_DOUBLE_EQ(pairs[0].weight, 1.0);
+    EXPECT_EQ(pairs[1].slave_dof, 0);
+    EXPECT_EQ(pairs[1].master_dof, 11);
+    EXPECT_DOUBLE_EQ(pairs[1].weight, 1.0);
+}
+
+TEST(ConstraintToolsTest, MakeHDivTracePeriodicPairsTranslationPermutesQuadrilateralFaceTrace)
+{
+    spaces::HDivSpace space(ElementType::Hex8, /*order=*/1);
+
+    const TraceBoundaryEntity slave{
+        .dofs = {0, 1, 2, 3},
+        .vertices = {{{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 1.0, 1.0}, {0.0, 0.0, 1.0}}},
+        .outward_normal = {{-1.0, 0.0, 0.0}},
+    };
+    const TraceBoundaryEntity master{
+        .dofs = {10, 11, 12, 13},
+        .vertices = {{{1.0, 1.0, 0.0}, {1.0, 1.0, 1.0}, {1.0, 0.0, 1.0}, {1.0, 0.0, 0.0}}},
+        .outward_normal = {{1.0, 0.0, 0.0}},
+    };
+
+    const auto pairs = makeHDivTracePeriodicPairsTranslation(
+        space,
+        std::span<const TraceBoundaryEntity>(&slave, 1),
+        std::span<const TraceBoundaryEntity>(&master, 1),
+        {{1.0, 0.0, 0.0}});
+
+    ASSERT_EQ(pairs.size(), 4u);
+    EXPECT_EQ(pairs[0].slave_dof, 3);
+    EXPECT_EQ(pairs[0].master_dof, 10);
+    EXPECT_DOUBLE_EQ(pairs[0].weight, -1.0);
+    EXPECT_EQ(pairs[1].slave_dof, 0);
+    EXPECT_EQ(pairs[1].master_dof, 11);
+    EXPECT_DOUBLE_EQ(pairs[1].weight, -1.0);
+    EXPECT_EQ(pairs[2].slave_dof, 1);
+    EXPECT_EQ(pairs[2].master_dof, 12);
+    EXPECT_DOUBLE_EQ(pairs[2].weight, -1.0);
+    EXPECT_EQ(pairs[3].slave_dof, 2);
+    EXPECT_EQ(pairs[3].master_dof, 13);
+    EXPECT_DOUBLE_EQ(pairs[3].weight, -1.0);
+}
+
+TEST(ConstraintToolsTest, MakeHDivTracePeriodicMPCTranslationBuildsExplicitConstraints)
+{
+    spaces::HDivSpace space(ElementType::Quad4, /*order=*/0);
+
+    const TraceBoundaryEntity slave{
+        .dofs = {2},
+        .vertices = {{{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}}},
+        .outward_normal = {{-1.0, 0.0, 0.0}},
+    };
+    const TraceBoundaryEntity master{
+        .dofs = {7},
+        .vertices = {{{1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}}},
+        .outward_normal = {{1.0, 0.0, 0.0}},
+    };
+
+    auto mpc = makeHDivTracePeriodicMPCTranslation(
+        space,
+        std::span<const TraceBoundaryEntity>(&slave, 1),
+        std::span<const TraceBoundaryEntity>(&master, 1),
+        {{1.0, 0.0, 0.0}});
+
+    AffineConstraints constraints;
+    mpc.apply(constraints);
+    constraints.close();
+
+    const auto c = constraints.getConstraint(2);
+    ASSERT_TRUE(c.has_value());
+    ASSERT_EQ(c->entries.size(), 1u);
+    EXPECT_EQ(c->entries[0].master_dof, 7);
+    EXPECT_DOUBLE_EQ(c->entries[0].weight, -1.0);
+}
+
+TEST(ConstraintToolsTest, MakeHDivTracePeriodicBCTranslationBuildsPeriodicConstraint)
+{
+    spaces::HDivSpace space(ElementType::Quad4, /*order=*/0);
+
+    const TraceBoundaryEntity slave{
+        .dofs = {3},
+        .vertices = {{{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}}},
+        .outward_normal = {{-1.0, 0.0, 0.0}},
+    };
+    const TraceBoundaryEntity master{
+        .dofs = {8},
+        .vertices = {{{1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}}},
+        .outward_normal = {{1.0, 0.0, 0.0}},
+    };
+
+    auto bc = makeHDivTracePeriodicBCTranslation(
+        space,
+        std::span<const TraceBoundaryEntity>(&slave, 1),
+        std::span<const TraceBoundaryEntity>(&master, 1),
+        {{1.0, 0.0, 0.0}});
+
+    AffineConstraints constraints;
+    bc.apply(constraints);
+    constraints.close();
+
+    const auto c = constraints.getConstraint(3);
+    ASSERT_TRUE(c.has_value());
+    ASSERT_EQ(c->entries.size(), 1u);
+    EXPECT_EQ(c->entries[0].master_dof, 8);
+    EXPECT_DOUBLE_EQ(c->entries[0].weight, -1.0);
 }
 
 } // namespace test

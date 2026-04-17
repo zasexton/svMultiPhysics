@@ -148,9 +148,12 @@ void CouplingGraphAnalyzer::run(const ProblemAnalysisContext& context,
         // --- BC descriptors ---
         for (const auto& bc : context.bcDescriptors()) {
             for (const auto& rv : bc.related_variables) {
+                const std::string marker_desc =
+                    (bc.domain == DomainKind::InterfaceFace && bc.interface_marker >= 0)
+                        ? ("interface " + std::to_string(bc.interface_marker))
+                        : ("boundary " + std::to_string(bc.boundary_marker));
                 emit_coupling(bc.primary_variable, rv, bc.domain,
-                              "boundary condition on marker " +
-                              std::to_string(bc.boundary_marker));
+                              "condition on " + marker_desc);
             }
         }
         return;
@@ -199,9 +202,12 @@ void CouplingGraphAnalyzer::run(const ProblemAnalysisContext& context,
     for (const auto& bc : context.bcDescriptors()) {
         // BCs with related variables create couplings
         for (const auto& rv : bc.related_variables) {
+            const std::string marker_desc =
+                (bc.domain == DomainKind::InterfaceFace && bc.interface_marker >= 0)
+                    ? ("interface " + std::to_string(bc.interface_marker))
+                    : ("boundary " + std::to_string(bc.boundary_marker));
             emit_coupling(bc.primary_variable, rv, bc.domain,
-                          "boundary condition on marker " +
-                          std::to_string(bc.boundary_marker));
+                          "condition on " + marker_desc);
         }
     }
 }

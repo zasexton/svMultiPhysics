@@ -65,25 +65,36 @@ void resolveFsilsVectorEntriesUncached(const FsilsVector& vec,
 
     int cached_global_node = -1;
     int cached_old_node = -1;
+    static int trace_budget = 0;
+    static bool trace_init = false;
+    if (!trace_init) {
+        trace_init = true;
+        if (std::getenv("SVMP_MONO_AUX_TRACE") != nullptr) {
+            trace_budget = 100000;
+        }
+    }
 
     for (std::size_t i = 0; i < dofs.size(); ++i) {
-        auto dof = dofs[i];
-        if (dof < 0 || dof >= vec_size) {
+        const auto input_dof = dofs[i];
+        auto dof = input_dof;
+        if (input_dof < 0 || input_dof >= vec_size) {
             resolved[i] = INVALID_GLOBAL_INDEX;
             continue;
         }
 
+        auto fs_dof = dof;
         if (has_perm) {
-            if (static_cast<std::size_t>(dof) >= fwd_size) {
+            if (static_cast<std::size_t>(fs_dof) >= fwd_size) {
                 resolved[i] = INVALID_GLOBAL_INDEX;
                 continue;
             }
-            dof = fwd_data[static_cast<std::size_t>(dof)];
-            if (dof < 0 || dof >= vec_size) {
+            fs_dof = fwd_data[static_cast<std::size_t>(fs_dof)];
+            if (fs_dof < 0 || fs_dof >= vec_size) {
                 resolved[i] = INVALID_GLOBAL_INDEX;
                 continue;
             }
         }
+        dof = fs_dof;
 
         const int global_node = static_cast<int>(dof / dof_per_node);
         const int comp = static_cast<int>(dof % dof_per_node);
@@ -103,6 +114,31 @@ void resolveFsilsVectorEntriesUncached(const FsilsVector& vec,
         resolved[i] = static_cast<GlobalIndex>(
             static_cast<std::size_t>(old_node) * static_cast<std::size_t>(dof_per_node) +
             static_cast<std::size_t>(comp));
+
+        const bool trace_selected =
+            (input_dof >= 7200 && input_dof < 8400);
+        if (trace_budget > 0 && trace_selected) {
+            const int internal_node = shared->globalNodeToInternal(global_node);
+            GlobalIndex inverse_dof = INVALID_GLOBAL_INDEX;
+            if (has_perm && perm_ptr->inverse.size() > static_cast<std::size_t>(fs_dof)) {
+                inverse_dof = perm_ptr->inverse[static_cast<std::size_t>(fs_dof)];
+            }
+            std::fprintf(stderr,
+                         "[FsilsVectorResolve] fe_dof=%lld fs_dof=%lld inverse_fe=%lld global_node=%d comp=%d old_node=%d internal_node=%d shnNo=%d mynNo=%d nNo=%d old_global=%d resolved=%lld\n",
+                         static_cast<long long>(input_dof),
+                         static_cast<long long>(fs_dof),
+                         static_cast<long long>(inverse_dof),
+                         global_node,
+                         comp,
+                         old_node,
+                         internal_node,
+                         shared->lhs.shnNo,
+                         shared->lhs.mynNo,
+                         shared->lhs.nNo,
+                         shared->oldToGlobalNode(old_node),
+                         static_cast<long long>(resolved[i]));
+            --trace_budget;
+        }
     }
 }
 
@@ -115,9 +151,38 @@ void gatherFsilsVectorEntries(const FsilsVector& vec,
 
     const auto& data = vec.data();
     const auto data_size = static_cast<GlobalIndex>(data.size());
+    static int trace_budget = -1;
+    if (trace_budget < 0) {
+        trace_budget = (std::getenv("SVMP_MONO_AUX_TRACE") != nullptr) ? 128 : 0;
+    }
+    const auto* shared = vec.shared();
+    const int dof = shared ? shared->dof : 1;
     for (std::size_t i = 0; i < resolved.size(); ++i) {
         const auto idx = resolved[i];
         out[i] = (idx >= 0 && idx < data_size) ? data[static_cast<std::size_t>(idx)] : 0.0;
+        if (trace_budget > 0 && shared && idx >= 280 && idx <= 1280) {
+            const int old_node = static_cast<int>(idx / dof);
+            const int comp = static_cast<int>(idx % dof);
+            const int internal = (old_node >= 0 && old_node < shared->lhs.nNo) ? shared->lhs.map(old_node) : -1;
+            const GlobalIndex internal_idx =
+                (internal >= 0)
+                    ? static_cast<GlobalIndex>(internal) * static_cast<GlobalIndex>(dof) + static_cast<GlobalIndex>(comp)
+                    : INVALID_GLOBAL_INDEX;
+            const Real internal_value =
+                (internal_idx >= 0 && internal_idx < data_size) ? data[static_cast<std::size_t>(internal_idx)] : 0.0;
+            std::fprintf(stderr,
+                         "[FsilsVectorGather] resolved=%lld old_node=%d comp=%d internal=%d shnNo=%d mynNo=%d nNo=%d old_value=%.17g internal_value=%.17g\n",
+                         static_cast<long long>(idx),
+                         old_node,
+                         comp,
+                         internal,
+                         shared->lhs.shnNo,
+                         shared->lhs.mynNo,
+                         shared->lhs.nNo,
+                         static_cast<double>(out[i]),
+                         static_cast<double>(internal_value));
+            --trace_budget;
+        }
     }
 }
 
@@ -279,6 +344,14 @@ public:
         thread_local std::vector<GlobalIndex> resolved;
         resolved.resize(dofs.size());
         vec_->resolveEntriesCached(dofs, resolved);
+        vector_requested_ += resolved.size();
+        for (std::size_t i = 0; i < resolved.size(); ++i) {
+            const auto idx = resolved[i];
+            if (idx >= 0 && static_cast<std::size_t>(idx) < vec_->data().size()) {
+                ++vector_valid_;
+                accumulateVectorValueStats(local_vector[i]);
+            }
+        }
         applyResolvedVectorEntries(vec_->data(),
                                    std::span<const GlobalIndex>(resolved),
                                    local_vector,
@@ -292,6 +365,14 @@ public:
     {
         (void)dofs;
         FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
+        vector_requested_ += resolved.size();
+        for (std::size_t i = 0; i < resolved.size(); ++i) {
+            const auto idx = resolved[i];
+            if (idx >= 0 && static_cast<std::size_t>(idx) < vec_->data().size()) {
+                ++vector_valid_;
+                accumulateVectorValueStats(local_vector[i]);
+            }
+        }
         applyResolvedVectorEntries(vec_->data(), resolved, local_vector, mode);
     }
 
@@ -304,6 +385,10 @@ public:
         if (resolved < 0 || static_cast<std::size_t>(resolved) >= vec_->data().size()) {
             return;
         }
+
+        ++vector_requested_;
+        ++vector_valid_;
+        accumulateVectorValueStats(value);
 
         auto& dst = vec_->data()[static_cast<std::size_t>(resolved)];
         switch (mode) {
@@ -394,7 +479,28 @@ public:
 
     void beginAssemblyPhase() override { phase_ = assembly::AssemblyPhase::Building; }
     void endAssemblyPhase() override { phase_ = assembly::AssemblyPhase::Flushing; }
-    void finalizeAssembly() override { phase_ = assembly::AssemblyPhase::Finalized; }
+    void finalizeAssembly() override {
+        phase_ = assembly::AssemblyPhase::Finalized;
+        if (std::getenv("SVMP_FSILS_VECTOR_VIEW_TRACE") != nullptr && vector_requested_ > 0) {
+            int rank = 0;
+            if (vec_ != nullptr) {
+                if (const auto* shared = vec_->shared()) {
+                    rank = shared->lhs.commu.task;
+                }
+            }
+            std::fprintf(stderr,
+                         "[FsilsVectorView] rank=%d requested=%zu valid=%zu invalid=%zu nonzero=%zu value_l1=%.17g value_l2=%.17g value_max_abs=%.17g size=%zu\n",
+                         rank,
+                         vector_requested_,
+                         vector_valid_,
+                         vector_requested_ - vector_valid_,
+                         vector_nonzero_,
+                         static_cast<double>(vector_value_l1_),
+                         static_cast<double>(std::sqrt(vector_value_l2_sq_)),
+                         static_cast<double>(vector_max_abs_),
+                         vec_ ? vec_->data().size() : std::size_t(0));
+        }
+    }
     [[nodiscard]] assembly::AssemblyPhase getPhase() const noexcept override { return phase_; }
 
     [[nodiscard]] bool hasMatrix() const noexcept override { return false; }
@@ -410,8 +516,25 @@ public:
     }
 
 private:
+    void accumulateVectorValueStats(Real value) noexcept
+    {
+        const Real abs_value = std::abs(value);
+        vector_value_l1_ += abs_value;
+        vector_value_l2_sq_ += value * value;
+        vector_max_abs_ = std::max(vector_max_abs_, abs_value);
+        if (abs_value > 0.0) {
+            ++vector_nonzero_;
+        }
+    }
+
     FsilsVector* vec_{nullptr};
     assembly::AssemblyPhase phase_{assembly::AssemblyPhase::NotStarted};
+    std::size_t vector_requested_{0};
+    std::size_t vector_valid_{0};
+    std::size_t vector_nonzero_{0};
+    Real vector_value_l1_{0.0};
+    Real vector_value_l2_sq_{0.0};
+    Real vector_max_abs_{0.0};
 };
 
 } // namespace

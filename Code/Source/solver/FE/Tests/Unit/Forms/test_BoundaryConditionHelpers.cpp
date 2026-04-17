@@ -7,7 +7,11 @@
 
 #include "Forms/BoundaryConditions.h"
 #include "Forms/FormCompiler.h"
+#include "Forms/NitscheBC.h"
+#include "Forms/StandardBCs.h"
+#include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/HDivSpace.h"
 
 #include <algorithm>
 #include <array>
@@ -240,6 +244,279 @@ TEST(FormsBoundaryConditions, ApplyRobinValue_AddsTwoBoundaryTermsPerMarker)
     EXPECT_EQ(count_marker_5, 2);
     EXPECT_TRUE(saw_alpha);
     EXPECT_TRUE(saw_rhs);
+}
+
+TEST(FormsBoundaryConditions, NormalComponentHelperBuildsScalarBoundaryTrace) {
+    auto space = svmp::FE::spaces::HDivSpace(ElementType::Tetra4, /*order=*/0);
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");
+    const auto expr = svmp::FE::forms::bc::normalComponent(u);
+
+    ASSERT_TRUE(expr.isValid());
+    EXPECT_TRUE(expr.toString().find("n") != std::string::npos);
+}
+
+TEST(FormsBoundaryConditions, TraceLoadBC_AddsBoundaryTermOnNormalTrace) {
+    auto space = svmp::FE::spaces::HDivSpace(ElementType::Tetra4, /*order=*/0);
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(space, "v");
+
+    auto residual = svmp::FE::forms::dot(u, v).dx();
+    svmp::FE::forms::bc::TraceLoadBC bc(4, svmp::FE::forms::FormExpr::constant(2.0));
+    bc.contributeToResidual(residual, u, v);
+
+    svmp::FE::forms::FormCompiler compiler;
+    const auto ir = compiler.compileResidual(residual);
+
+    int count_marker_4 = 0;
+    for (const auto& term : ir.terms()) {
+        if (term.domain != svmp::FE::forms::IntegralDomain::Boundary) continue;
+        if (term.boundary_marker == 4) {
+            ++count_marker_4;
+        }
+    }
+
+    EXPECT_EQ(count_marker_4, 1);
+}
+
+TEST(FormsBoundaryConditions, TraceRobinBC_AddsTwoBoundaryTermsOnNormalTrace) {
+    auto space = svmp::FE::spaces::HDivSpace(ElementType::Tetra4, /*order=*/0);
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(space, "v");
+
+    auto residual = svmp::FE::forms::dot(u, v).dx();
+    svmp::FE::forms::bc::TraceRobinBC bc(
+        5, svmp::FE::forms::FormExpr::constant(3.0), svmp::FE::forms::FormExpr::constant(7.0));
+    bc.contributeToResidual(residual, u, v);
+
+    svmp::FE::forms::FormCompiler compiler;
+    const auto ir = compiler.compileResidual(residual);
+
+    int count_marker_5 = 0;
+    for (const auto& term : ir.terms()) {
+        if (term.domain != svmp::FE::forms::IntegralDomain::Boundary) continue;
+        if (term.boundary_marker == 5) {
+            ++count_marker_5;
+        }
+    }
+
+    EXPECT_EQ(count_marker_5, 2);
+}
+
+TEST(FormsBoundaryConditions, InterfaceNormalComponentHelperBuildsScalarInterfaceTrace) {
+    auto space = svmp::FE::spaces::HDivSpace(ElementType::Tetra4, /*order=*/0);
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");
+    const auto expr =
+        svmp::FE::forms::bc::interfaceNormalComponent(
+            u, svmp::FE::forms::bc::InterfaceTraceReduction::Jump);
+
+    ASSERT_TRUE(expr.isValid());
+    const auto s = expr.toString();
+    EXPECT_TRUE(s.find("n") != std::string::npos);
+    EXPECT_TRUE(s.find("+") != std::string::npos || s.find("-") != std::string::npos);
+}
+
+TEST(FormsBoundaryConditions, InterfaceTraceLoadBC_AddsInterfaceTermOnNormalTrace) {
+    auto space = svmp::FE::spaces::HDivSpace(ElementType::Tetra4, /*order=*/0);
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(space, "v");
+
+    auto residual = svmp::FE::forms::dot(u, v).dx();
+    svmp::FE::forms::bc::InterfaceTraceLoadBC bc(
+        12,
+        svmp::FE::forms::FormExpr::constant(2.0),
+        svmp::FE::forms::bc::ScalarTraceOperator::NormalComponent,
+        svmp::FE::forms::bc::InterfaceTraceReduction::Minus);
+    bc.contributeToResidual(residual, u, v);
+
+    svmp::FE::forms::FormCompiler compiler;
+    const auto ir = compiler.compileResidual(residual);
+
+    int count_marker_12 = 0;
+    for (const auto& term : ir.terms()) {
+        if (term.domain != svmp::FE::forms::IntegralDomain::InterfaceFace) continue;
+        if (term.interface_marker == 12) {
+            ++count_marker_12;
+        }
+    }
+
+    EXPECT_EQ(count_marker_12, 1);
+}
+
+TEST(FormsBoundaryConditions, InterfaceTraceRobinBC_AddsTwoInterfaceTermsOnNormalTrace) {
+    auto space = svmp::FE::spaces::HDivSpace(ElementType::Tetra4, /*order=*/0);
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(space, "v");
+
+    auto residual = svmp::FE::forms::dot(u, v).dx();
+    svmp::FE::forms::bc::InterfaceTraceRobinBC bc(
+        13, svmp::FE::forms::FormExpr::constant(3.0), svmp::FE::forms::FormExpr::constant(7.0));
+    bc.contributeToResidual(residual, u, v);
+
+    svmp::FE::forms::FormCompiler compiler;
+    const auto ir = compiler.compileResidual(residual);
+
+    int count_marker_13 = 0;
+    for (const auto& term : ir.terms()) {
+        if (term.domain != svmp::FE::forms::IntegralDomain::InterfaceFace) continue;
+        if (term.interface_marker == 13) {
+            ++count_marker_13;
+        }
+    }
+
+    EXPECT_EQ(count_marker_13, 2);
+}
+
+TEST(FormsBoundaryConditions, InterfaceTraceJumpPenaltyBC_AddsPenaltyTermsOnInterfaceJump) {
+    auto space = svmp::FE::spaces::HDivSpace(ElementType::Tetra4, /*order=*/0);
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(space, "v");
+
+    auto residual = svmp::FE::forms::dot(u, v).dx();
+    svmp::FE::forms::bc::InterfaceTraceJumpPenaltyBC bc(
+        14, svmp::FE::forms::FormExpr::constant(5.0), svmp::FE::forms::FormExpr::constant(0.0));
+    bc.contributeToResidual(residual, u, v);
+
+    svmp::FE::forms::FormCompiler compiler;
+    const auto ir = compiler.compileResidual(residual);
+
+    int count_marker_14 = 0;
+    for (const auto& term : ir.terms()) {
+        if (term.domain != svmp::FE::forms::IntegralDomain::InterfaceFace) continue;
+        if (term.interface_marker == 14) {
+            ++count_marker_14;
+        }
+    }
+
+    EXPECT_EQ(count_marker_14, 2);
+}
+
+TEST(FormsBoundaryConditions, ApplyTraceNitsche_AddsThreeBoundaryTermsOnIdentityTrace)
+{
+    auto space = svmp::FE::spaces::H1Space(ElementType::Tetra4, /*order=*/2);
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(space, "v");
+    const auto n = svmp::FE::forms::FormExpr::normal();
+
+    auto residual = (u * v).dx();
+    residual = svmp::FE::forms::bc::applyTraceNitsche(std::move(residual),
+                                                      u,
+                                                      v,
+                                                      /*boundary_marker=*/15,
+                                                      svmp::FE::forms::FormExpr::constant(1.0),
+                                                      inner(grad(u), n),
+                                                      inner(grad(v), n),
+                                                      svmp::FE::forms::FormExpr::constant(1.0) /
+                                                          svmp::FE::forms::h(),
+                                                      svmp::FE::forms::bc::ScalarTraceOperator::Identity);
+
+    svmp::FE::forms::FormCompiler compiler;
+    const auto ir = compiler.compileResidual(residual);
+
+    int count_marker_15 = 0;
+    for (const auto& term : ir.terms()) {
+        if (term.domain != svmp::FE::forms::IntegralDomain::Boundary) continue;
+        if (term.boundary_marker == 15) {
+            ++count_marker_15;
+        }
+    }
+
+    EXPECT_EQ(count_marker_15, 3);
+}
+
+TEST(FormsBoundaryConditions, ApplyInterfaceTraceNitsche_AddsThreeInterfaceTermsOnTraceJump)
+{
+    auto space = svmp::FE::spaces::H1Space(ElementType::Tetra4, /*order=*/1);
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(space, "v");
+    const auto n_minus = svmp::FE::forms::FormExpr::normal().minus();
+
+    auto residual = (u * v).dx();
+    residual = svmp::FE::forms::bc::applyInterfaceTraceNitsche(
+        std::move(residual),
+        u,
+        v,
+        /*interface_marker=*/16,
+        svmp::FE::forms::FormExpr::constant(0.0),
+        inner(avg(grad(u)), n_minus),
+        inner(avg(grad(v)), n_minus),
+        avg(svmp::FE::forms::FormExpr::constant(1.0) / svmp::FE::forms::hNormal()),
+        svmp::FE::forms::bc::ScalarTraceOperator::Identity,
+        svmp::FE::forms::bc::InterfaceTraceReduction::Jump);
+
+    svmp::FE::forms::FormCompiler compiler;
+    const auto ir = compiler.compileResidual(residual);
+
+    int count_marker_16 = 0;
+    for (const auto& term : ir.terms()) {
+        if (term.domain != svmp::FE::forms::IntegralDomain::InterfaceFace) continue;
+        if (term.interface_marker == 16) {
+            ++count_marker_16;
+        }
+    }
+
+    EXPECT_EQ(count_marker_16, 3);
+}
+
+TEST(FormsBoundaryConditions, TraceNitscheBC_AddsThreeBoundaryTermsOnNormalTrace)
+{
+    auto space = svmp::FE::spaces::HDivSpace(ElementType::Tetra4, /*order=*/0);
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(space, "v");
+
+    auto residual = svmp::FE::forms::dot(u, v).dx();
+    svmp::FE::forms::bc::TraceNitscheBC bc(
+        17,
+        svmp::FE::forms::FormExpr::constant(0.0),
+        svmp::FE::forms::bc::normalComponent(u),
+        svmp::FE::forms::bc::normalComponent(v),
+        svmp::FE::forms::FormExpr::constant(4.0),
+        svmp::FE::forms::bc::ScalarTraceOperator::NormalComponent);
+    bc.contributeToResidual(residual, u, v);
+
+    svmp::FE::forms::FormCompiler compiler;
+    const auto ir = compiler.compileResidual(residual);
+
+    int count_marker_17 = 0;
+    for (const auto& term : ir.terms()) {
+        if (term.domain != svmp::FE::forms::IntegralDomain::Boundary) continue;
+        if (term.boundary_marker == 17) {
+            ++count_marker_17;
+        }
+    }
+
+    EXPECT_EQ(count_marker_17, 3);
+}
+
+TEST(FormsBoundaryConditions, InterfaceTraceNitscheBC_AddsThreeInterfaceTermsOnNormalTraceJump)
+{
+    auto space = svmp::FE::spaces::HDivSpace(ElementType::Tetra4, /*order=*/0);
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(space, "v");
+    const auto n_minus = svmp::FE::forms::FormExpr::normal().minus();
+
+    auto residual = svmp::FE::forms::dot(u, v).dx();
+    svmp::FE::forms::bc::InterfaceTraceNitscheBC bc(
+        18,
+        svmp::FE::forms::FormExpr::constant(0.0),
+        inner(avg(u), n_minus),
+        inner(avg(v), n_minus),
+        svmp::FE::forms::FormExpr::constant(6.0),
+        svmp::FE::forms::bc::ScalarTraceOperator::NormalComponent,
+        svmp::FE::forms::bc::InterfaceTraceReduction::Jump);
+    bc.contributeToResidual(residual, u, v);
+
+    svmp::FE::forms::FormCompiler compiler;
+    const auto ir = compiler.compileResidual(residual);
+
+    int count_marker_18 = 0;
+    for (const auto& term : ir.terms()) {
+        if (term.domain != svmp::FE::forms::IntegralDomain::InterfaceFace) continue;
+        if (term.interface_marker == 18) {
+            ++count_marker_18;
+        }
+    }
+
+    EXPECT_EQ(count_marker_18, 3);
 }
 
 TEST(FormsBoundaryConditions, MakeStrongDirichletList_ThrowsOnInvalidMarker)

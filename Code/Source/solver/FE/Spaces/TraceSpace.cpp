@@ -22,10 +22,12 @@
 #include "Elements/ReferenceElement.h"
 #include "Geometry/IsoparametricMapping.h"
 #include "Quadrature/QuadratureFactory.h"
+#include "Spaces/HDivSpace.h"
 
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <sstream>
 
 namespace svmp {
@@ -98,6 +100,60 @@ Vec3 normalized_or_throw(Vec3 v, const char* message) {
     FE_CHECK_ARG(v.norm() > Real(0), message);
     v.normalize();
     return v;
+}
+
+std::size_t hdiv_scalar_trace_dof_count(ElementType trace_element_type,
+                                        int trace_polynomial_order)
+{
+    FE_CHECK_ARG(trace_polynomial_order >= 0,
+                 "TraceSpace: negative H(div) trace polynomial order");
+
+    const std::size_t k = static_cast<std::size_t>(trace_polynomial_order);
+    switch (trace_element_type) {
+        case ElementType::Line2:
+            return k + 1u;
+        case ElementType::Triangle3:
+            return (k + 1u) * (k + 2u) / 2u;
+        case ElementType::Quad4:
+            return (k + 1u) * (k + 1u);
+        default:
+            throw FEException("TraceSpace: unsupported H(div) scalar trace element type",
+                              __FILE__, __LINE__, __func__, FEStatus::InvalidElement);
+    }
+}
+
+TraceSpace::OrientedScalarTraceMap oriented_scalar_trace_map_from_values(
+    const std::vector<Real>& oriented_values)
+{
+    TraceSpace::OrientedScalarTraceMap map;
+    map.source_indices.resize(oriented_values.size(), -1);
+    map.weights.resize(oriented_values.size(), Real(0));
+
+    const Real tol = Real(1e-12);
+    std::vector<bool> seen(oriented_values.size(), false);
+
+    for (std::size_t i = 0; i < oriented_values.size(); ++i) {
+        const Real value = oriented_values[i];
+        const Real mag = std::abs(value);
+        const auto rounded = static_cast<long long>(std::llround(static_cast<double>(mag)));
+        FE_CHECK_ARG(rounded >= 1,
+                     "TraceSpace: invalid oriented scalar-trace label");
+        FE_CHECK_ARG(std::abs(mag - static_cast<Real>(rounded)) <= tol,
+                     "TraceSpace: oriented scalar-trace label must be integer-valued");
+
+        const int source_idx = static_cast<int>(rounded - 1);
+        FE_CHECK_ARG(source_idx >= 0 &&
+                         source_idx < static_cast<int>(oriented_values.size()),
+                     "TraceSpace: oriented scalar-trace source index out of range");
+        FE_CHECK_ARG(!seen[static_cast<std::size_t>(source_idx)],
+                     "TraceSpace: duplicate oriented scalar-trace source index");
+
+        seen[static_cast<std::size_t>(source_idx)] = true;
+        map.source_indices[i] = source_idx;
+        map.weights[i] = (value >= Real(0)) ? Real(1) : Real(-1);
+    }
+
+    return map;
 }
 
 std::vector<int> incident_face_edges(const elements::ReferenceElement& ref,
@@ -1054,6 +1110,52 @@ const FaceRestriction& TraceSpace::face_restriction() const {
     FE_CHECK_NOT_NULL(restriction_.get(),
                       "TraceSpace::face_restriction is only available for scalar trace spaces");
     return *restriction_;
+}
+
+std::size_t TraceSpace::hdivNormalTraceDofCount(ElementType trace_element_type,
+                                                int trace_polynomial_order)
+{
+    return hdiv_scalar_trace_dof_count(trace_element_type, trace_polynomial_order);
+}
+
+TraceSpace::OrientedScalarTraceMap TraceSpace::orientedHDivNormalTraceMap(
+    ElementType trace_element_type,
+    int trace_polynomial_order,
+    OrientationManager::Sign edge_orientation)
+{
+    FE_CHECK_ARG(trace_element_type == ElementType::Line2,
+                 "TraceSpace::orientedHDivNormalTraceMap(edge): expected a line trace element");
+
+    const auto n_trace_dofs = hdiv_scalar_trace_dof_count(trace_element_type, trace_polynomial_order);
+    std::vector<Real> labels(n_trace_dofs, Real(0));
+    for (std::size_t i = 0; i < n_trace_dofs; ++i) {
+        labels[i] = static_cast<Real>(i + 1u);
+    }
+
+    return oriented_scalar_trace_map_from_values(
+        HDivSpace::apply_edge_orientation(labels, edge_orientation));
+}
+
+TraceSpace::OrientedScalarTraceMap TraceSpace::orientedHDivNormalTraceMap(
+    ElementType trace_element_type,
+    int trace_polynomial_order,
+    const OrientationManager::FaceOrientation& face_orientation)
+{
+    FE_CHECK_ARG(trace_element_type == ElementType::Triangle3 ||
+                     trace_element_type == ElementType::Quad4,
+                 "TraceSpace::orientedHDivNormalTraceMap(face): expected a triangular or quadrilateral trace element");
+
+    const auto n_trace_dofs = hdiv_scalar_trace_dof_count(trace_element_type, trace_polynomial_order);
+    std::vector<Real> labels(n_trace_dofs, Real(0));
+    for (std::size_t i = 0; i < n_trace_dofs; ++i) {
+        labels[i] = static_cast<Real>(i + 1u);
+    }
+
+    return oriented_scalar_trace_map_from_values(
+        HDivSpace::apply_face_orientation(trace_element_type,
+                                          labels,
+                                          face_orientation,
+                                          trace_polynomial_order));
 }
 
 } // namespace spaces

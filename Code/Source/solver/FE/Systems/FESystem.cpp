@@ -481,12 +481,23 @@ void scatterAuxiliaryFlatEntity(const AuxiliaryBlockStorage& blk,
     const dofs::IndexSet& owned_dofs,
     backends::RankOneUpdate& promoted)
 {
+    auto log_failure = [&](const std::string& reason) {
+        if (!monolithicDirectTraceEnabled()) {
+            return;
+        }
+        std::ostringstream oss;
+        oss << "FESystem: native rank-one promotion rejected reason='" << reason << "'";
+        FE_LOG_INFO(oss.str());
+    };
+
     if (!nativeFaceRankOnePromotionEnabled()) {
+        log_failure("disabled");
         return false;
     }
 
     constexpr Real kTol = static_cast<Real>(1e-14);
     if (!(std::abs(doutput_dinput) > kTol) || output_gradient.empty() || input_gradient.empty()) {
+        log_failure("missing_data");
         return false;
     }
 
@@ -520,11 +531,13 @@ void scatterAuxiliaryFlatEntity(const AuxiliaryBlockStorage& blk,
     if (global_q_has == 0 || global_dR_has == 0 ||
         !(global_q_norm_sq > kTol * kTol) ||
         !(global_dRdQ_norm_sq > kTol * kTol)) {
+        log_failure("degenerate_norm");
         return false;
     }
 
     const Real sigma = global_cross / global_q_norm_sq;
     if (!(std::abs(sigma) > kTol)) {
+        log_failure("zero_sigma");
         return false;
     }
 
@@ -543,6 +556,18 @@ void scatterAuxiliaryFlatEntity(const AuxiliaryBlockStorage& blk,
     constexpr Real kRelTolSq = static_cast<Real>(1e-4);
     const Real residual_sq = mpiAllreduceSumIfActive(local_residual_sq);
     if (!(residual_sq / std::max(global_dRdQ_norm_sq, Real(1e-30)) <= kRelTolSq)) {
+        if (monolithicDirectTraceEnabled()) {
+            std::ostringstream oss;
+            oss << "FESystem: native rank-one promotion rejected"
+                << " reason='non_rank_one'"
+                << " doutput_dinput=" << doutput_dinput
+                << " sigma=" << sigma
+                << " q_norm=" << std::sqrt(global_q_norm_sq)
+                << " dRdQ_norm=" << std::sqrt(global_dRdQ_norm_sq)
+                << " rel_residual_sq="
+                << residual_sq / std::max(global_dRdQ_norm_sq, Real(1e-30));
+            FE_LOG_INFO(oss.str());
+        }
         return false;
     }
 
@@ -554,6 +579,15 @@ void scatterAuxiliaryFlatEntity(const AuxiliaryBlockStorage& blk,
         if (owned_dofs.contains(dof)) {
             promoted.v.emplace_back(dof, value);
         }
+    }
+    if (monolithicDirectTraceEnabled()) {
+        std::ostringstream oss;
+        oss << "FESystem: native rank-one promotion accepted"
+            << " sigma=" << sigma
+            << " q_norm=" << std::sqrt(global_q_norm_sq)
+            << " dRdQ_norm=" << std::sqrt(global_dRdQ_norm_sq)
+            << " owned_nnz=" << promoted.v.size();
+        FE_LOG_INFO(oss.str());
     }
     return true;
 }
@@ -4599,6 +4633,21 @@ void FESystem::registerBoundaryIntegralInput(
             } else {
                 out[0] = 0.0;
             }
+
+            if (monolithicAuxTraceEnabled()) {
+                Real local_u_sq = 0.0;
+                for (const auto value : state.u) {
+                    local_u_sq += value * value;
+                }
+                std::ostringstream oss;
+                oss << "boundaryIntegralInput: name='" << func_name
+                    << "' time=" << time
+                    << " dt=" << dt
+                    << " local_u_l2=" << std::sqrt(local_u_sq)
+                    << " local_u_size=" << state.u.size()
+                    << " value=" << out[0];
+                FE_LOG_INFO(oss.str());
+            }
         });
 }
 
@@ -5114,7 +5163,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                         for (const auto target_fid : ref_fields) {
                                             auto grad = svc_it->second->evaluateFunctionalGradient(
                                                 func_name, target_fid, state,
-                                                bordered_coupling_.active);
+                                                use_constraints_in_assembly_);
 
                                             // For averages, apply quotient rule:
                                             // d(I/M)/du = (dI/du)/M  (measure M is constant w.r.t. u
@@ -5414,9 +5463,12 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
     if (want_matrix && matrix_out) {
         for (auto& entry : deployed_aux_entries_) {
             if (!entry.materialized) continue;
-            if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) continue;
-            const bool local_condensed = entry.local_condensed;
-            const bool direct_only = entry.lower_to_direct_only;
+            const bool is_monolithic = entry.spec.solve_mode == AuxiliarySolveMode::Monolithic;
+            const bool is_partitioned = entry.spec.solve_mode == AuxiliarySolveMode::Partitioned;
+            if (!is_monolithic && !is_partitioned) continue;
+            const bool local_condensed = is_monolithic && entry.local_condensed;
+            const bool direct_only =
+                (is_monolithic && entry.lower_to_direct_only) || is_partitioned;
             const auto n_outputs = static_cast<int>(entry.model->outputCount());
             const int dim = entry.model->dimension();
             if (n_outputs == 0 || dim == 0) continue;
@@ -5425,9 +5477,11 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
 
             auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
             const auto n_entities = blk.entityCount();
+            const bool apply_monolithic_functional_constraints =
+                use_constraints_in_assembly_ && is_monolithic;
 
             std::size_t block_offset = 0;
-            if (!local_condensed && !direct_only) {
+            if (is_monolithic && !local_condensed && !direct_only) {
                 for (const auto& bl : mixed.aux_layout.blocks) {
                     if (bl.name == entry.instance_name) {
                         block_offset = bl.offset + mixed.aux_layout.mixed_system_offset;
@@ -5533,7 +5587,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 ctx.user_data = state.user_data;
 
                 auto& ed = entity_data[e];
-                if (!local_condensed && !direct_only) {
+                if (is_monolithic && !local_condensed && !direct_only) {
                     ed.aux_dofs.resize(static_cast<std::size_t>(dim));
                     for (int j = 0; j < dim; ++j) {
                         ed.aux_dofs[static_cast<std::size_t>(j)] = static_cast<GlobalIndex>(
@@ -5693,7 +5747,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                     for (const auto target_fid : ref_fields) {
                         auto grad = svc_it->second->evaluateFunctionalGradient(
                             func_name, target_fid, state,
-                            bordered_coupling_.active);
+                            apply_monolithic_functional_constraints);
 
                         if (is_domain_region_avg && auxiliary_input_registry_) {
                             const std::string meas_name = handle.registryName() + "__measure";
@@ -5736,7 +5790,27 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 };
 
                 ed.n_inputs = static_cast<int>(ctx.inputs.size());
-                if (entry.deriv_provider && !entry.coupled_bindings.empty() && ed.n_inputs > 0) {
+                if (entry.deriv_provider && !entry.coupled_bindings.empty() &&
+                    ed.n_inputs > 0) {
+                    ed.input_gradients.resize(static_cast<std::size_t>(ed.n_inputs));
+                    ed.input_gradient_sources.assign(static_cast<std::size_t>(ed.n_inputs), 0);
+                    visitCoupledInputComponents([&](const std::string&,
+                                                    const AuxiliaryInputHandle& handle,
+                                                    int input_col) {
+                        if (input_col < 0 || input_col >= ed.n_inputs) {
+                            return;
+                        }
+                        auto grad = exactInputGradient(handle);
+                        if (!grad.empty()) {
+                            ed.input_gradients[static_cast<std::size_t>(input_col)] =
+                                std::move(grad);
+                            ed.input_gradient_sources[static_cast<std::size_t>(input_col)] = 1;
+                        }
+                    });
+                }
+
+                if (is_monolithic && entry.deriv_provider &&
+                    !entry.coupled_bindings.empty() && ed.n_inputs > 0) {
                     std::vector<Real> direct_dF_dx(
                         static_cast<std::size_t>(dim * dim), 0.0);
                     std::vector<Real> direct_dF_dinputs(
@@ -5753,21 +5827,6 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                     }
                     ed.dF_dx = direct_dF_dx;
                     ed.dF_dinputs = direct_dF_dinputs;
-                    ed.input_gradients.resize(static_cast<std::size_t>(ed.n_inputs));
-                    ed.input_gradient_sources.assign(static_cast<std::size_t>(ed.n_inputs), 0);
-                    visitCoupledInputComponents([&](const std::string&,
-                                                    const AuxiliaryInputHandle& handle,
-                                                    int input_col) {
-                        if (input_col < 0 || input_col >= ed.n_inputs) {
-                            return;
-                        }
-                        auto grad = exactInputGradient(handle);
-                        if (!grad.empty()) {
-                            ed.input_gradients[static_cast<std::size_t>(input_col)] =
-                                std::move(grad);
-                            ed.input_gradient_sources[static_cast<std::size_t>(input_col)] = 1;
-                        }
-                    });
                     for (int input_col = 0; input_col < ed.n_inputs; ++input_col) {
                         auto& grad = ed.input_gradients[static_cast<std::size_t>(input_col)];
                         if (!grad.empty() || local_condensed ||
@@ -6240,6 +6299,26 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                                 << " grad_norm=" << std::sqrt(q_norm_sq)
                                                 << " dR_nnz=" << dR_rank1_entries.size()
                                                 << " dR_norm=" << std::sqrt(dR_norm_sq);
+                                            oss << " grad_entries=[";
+                                            bool first = true;
+                                            for (const auto& [dof, qj] : q_u) {
+                                                if (!first) {
+                                                    oss << ", ";
+                                                }
+                                                first = false;
+                                                oss << "(" << dof << ":" << qj << ")";
+                                            }
+                                            oss << "]";
+                                            oss << " dR_entries=[";
+                                            first = true;
+                                            for (const auto& [dof, dRi_dOk] : dR_rank1_entries) {
+                                                if (!first) {
+                                                    oss << ", ";
+                                                }
+                                                first = false;
+                                                oss << "(" << dof << ":" << dRi_dOk << ")";
+                                            }
+                                            oss << "]";
                                             FE_LOG_INFO(oss.str());
                                         }
                                         // For live monolithic solves, prefer the exact
@@ -6345,7 +6424,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                             }
                         }
                     }
-                    if (entry.lower_to_direct_only && !coupling_record.output_gradient.empty()) {
+                    if (direct_only && !coupling_record.output_gradient.empty()) {
                         bool promoted_direct_only = false;
                         int active_input_col = -1;
                         if (!coupling_record.dO_dI.empty()) {

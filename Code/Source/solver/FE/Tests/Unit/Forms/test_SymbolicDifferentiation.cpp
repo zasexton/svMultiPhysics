@@ -15,6 +15,7 @@
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
 #include "Assembly/TimeIntegrationContext.h"
+#include "Forms/BoundaryConditions.h"
 #include "Forms/ConstitutiveModel.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
@@ -655,6 +656,31 @@ TEST(SymbolicNonlinearFormKernelTest, DGInteriorPenaltyJacobianMatchesAD)
 
     const std::vector<Real> U = {0.1, -0.2, 0.3, -0.1, 0.05, -0.07, 0.08, -0.09};
     compareADAndSymbolic(mesh, dof_map, space, space, sipg, U);
+}
+
+TEST(SymbolicNonlinearFormKernelTest, TraceNitscheBoundaryJacobianMatchesAD)
+{
+    SingleTetraOneBoundaryFaceMeshAccess mesh(/*boundary_marker=*/2);
+    auto dof_map = createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto n = FormExpr::normal();
+
+    auto residual = (u * v).dx();
+    residual = bc::applyTraceNitsche(std::move(residual),
+                                     u,
+                                     v,
+                                     /*boundary_marker=*/2,
+                                     FormExpr::constant(0.0),
+                                     inner(grad(u), n),
+                                     inner(grad(v), n),
+                                     FormExpr::constant(2.0),
+                                     bc::ScalarTraceOperator::Identity);
+
+    const std::vector<Real> U = {0.1, -0.2, 0.3, -0.1};
+    compareADAndSymbolic(mesh, dof_map, space, space, residual, U);
 }
 
 TEST(SymbolicNonlinearFormKernelTest, RestrictMinusPlusJacobianMatchesAD)

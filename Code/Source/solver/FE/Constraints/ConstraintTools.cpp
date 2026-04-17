@@ -6,14 +6,272 @@
  */
 
 #include "ConstraintTools.h"
+#include "MultiPointConstraint.h"
+#include "PeriodicBC.h"
+#include "Spaces/HDivSpace.h"
+#include "Spaces/TraceSpace.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 namespace svmp {
 namespace FE {
 namespace constraints {
+
+namespace {
+
+using Point3 = std::array<double, 3>;
+
+double squaredDistance(const Point3& a, const Point3& b)
+{
+    const double dx = a[0] - b[0];
+    const double dy = a[1] - b[1];
+    const double dz = a[2] - b[2];
+    return dx * dx + dy * dy + dz * dz;
+}
+
+Point3 applyTransform(const std::function<Point3(Point3)>& transform, const Point3& value)
+{
+    if (transform) {
+        return transform(value);
+    }
+    return value;
+}
+
+Point3 normalizedNormal(const Point3& normal, const char* label)
+{
+    const double norm_sq = normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2];
+    FE_CHECK_ARG(norm_sq > 0.0, label);
+    const double inv_norm = 1.0 / std::sqrt(norm_sq);
+    return Point3{{normal[0] * inv_norm, normal[1] * inv_norm, normal[2] * inv_norm}};
+}
+
+ElementType traceElementTypeFromVertexCount(std::size_t n_vertices)
+{
+    switch (n_vertices) {
+        case 2u:
+            return ElementType::Line2;
+        case 3u:
+            return ElementType::Triangle3;
+        case 4u:
+            return ElementType::Quad4;
+        default:
+            throw FEException("ConstraintTools: unsupported boundary trace entity vertex count",
+                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+}
+
+std::optional<std::vector<int>> matchEntityVertices(std::span<const Point3> slave_vertices,
+                                                    std::span<const Point3> master_vertices,
+                                                    const std::function<Point3(Point3)>& point_transform,
+                                                    double tolerance)
+{
+    if (slave_vertices.size() != master_vertices.size()) {
+        return std::nullopt;
+    }
+
+    const double tol_sq = tolerance * tolerance;
+    std::vector<int> matched(slave_vertices.size(), -1);
+    std::vector<bool> used(master_vertices.size(), false);
+
+    for (std::size_t i = 0; i < slave_vertices.size(); ++i) {
+        const Point3 transformed = applyTransform(point_transform, slave_vertices[i]);
+        double best_dist_sq = std::numeric_limits<double>::max();
+        int best_j = -1;
+
+        for (std::size_t j = 0; j < master_vertices.size(); ++j) {
+            if (used[j]) {
+                continue;
+            }
+
+            const double dist_sq = squaredDistance(transformed, master_vertices[j]);
+            if (dist_sq < best_dist_sq) {
+                best_dist_sq = dist_sq;
+                best_j = static_cast<int>(j);
+            }
+        }
+
+        if (best_j < 0 || best_dist_sq > tol_sq) {
+            return std::nullopt;
+        }
+
+        used[static_cast<std::size_t>(best_j)] = true;
+        matched[i] = best_j;
+    }
+
+    return matched;
+}
+
+double maxMatchedVertexDistance(std::span<const Point3> slave_vertices,
+                                std::span<const Point3> master_vertices,
+                                const std::function<Point3(Point3)>& point_transform,
+                                std::span<const int> matched)
+{
+    double max_dist_sq = 0.0;
+    for (std::size_t i = 0; i < slave_vertices.size(); ++i) {
+        const Point3 transformed = applyTransform(point_transform, slave_vertices[i]);
+        const int master_idx = matched[i];
+        FE_CHECK_ARG(master_idx >= 0 &&
+                         master_idx < static_cast<int>(master_vertices.size()),
+                     "ConstraintTools: matched vertex index out of range");
+        max_dist_sq = std::max(max_dist_sq,
+                               squaredDistance(transformed, master_vertices[static_cast<std::size_t>(master_idx)]));
+    }
+    return std::sqrt(max_dist_sq);
+}
+
+spaces::TraceSpace::OrientedScalarTraceMap makeTraceOrientationMap(
+    ElementType trace_element_type,
+    int trace_polynomial_order,
+    std::span<const int> matched_vertices)
+{
+    if (trace_element_type == ElementType::Line2) {
+        FE_CHECK_ARG(matched_vertices.size() == 2u,
+                     "ConstraintTools: line trace requires two matched vertices");
+        FE_CHECK_ARG((matched_vertices[0] == 0 && matched_vertices[1] == 1) ||
+                         (matched_vertices[0] == 1 && matched_vertices[1] == 0),
+                     "ConstraintTools: invalid edge-vertex permutation for H(div) trace");
+        const auto sign = (matched_vertices[0] == 0) ? +1 : -1;
+        return spaces::TraceSpace::orientedHDivNormalTraceMap(trace_element_type,
+                                                              trace_polynomial_order,
+                                                              sign);
+    }
+
+    if (trace_element_type == ElementType::Triangle3) {
+        FE_CHECK_ARG(matched_vertices.size() == 3u,
+                     "ConstraintTools: triangular trace requires three matched vertices");
+        const std::array<int, 3> local = {0, 1, 2};
+        const std::array<int, 3> global = {
+            matched_vertices[0], matched_vertices[1], matched_vertices[2]};
+        const auto orientation = spaces::OrientationManager::triangle_face_orientation(local, global);
+        return spaces::TraceSpace::orientedHDivNormalTraceMap(trace_element_type,
+                                                              trace_polynomial_order,
+                                                              orientation);
+    }
+
+    FE_CHECK_ARG(trace_element_type == ElementType::Quad4,
+                 "ConstraintTools: unsupported H(div) trace element type");
+    FE_CHECK_ARG(matched_vertices.size() == 4u,
+                 "ConstraintTools: quadrilateral trace requires four matched vertices");
+    const std::array<int, 4> local = {0, 1, 2, 3};
+    const std::array<int, 4> global = {
+        matched_vertices[0], matched_vertices[1], matched_vertices[2], matched_vertices[3]};
+    const auto orientation = spaces::OrientationManager::quad_face_orientation(local, global);
+    return spaces::TraceSpace::orientedHDivNormalTraceMap(trace_element_type,
+                                                          trace_polynomial_order,
+                                                          orientation);
+}
+
+double normalRelationWeight(const Point3& slave_normal,
+                            const Point3& master_normal,
+                            const TracePeriodicConstraintOptions& options)
+{
+    const Point3 slave_transformed =
+        normalizedNormal(applyTransform(options.normal_transform, slave_normal),
+                         "ConstraintTools: transformed slave normal is degenerate");
+    const Point3 master_unit =
+        normalizedNormal(master_normal, "ConstraintTools: master normal is degenerate");
+
+    const double dot =
+        slave_transformed[0] * master_unit[0] +
+        slave_transformed[1] * master_unit[1] +
+        slave_transformed[2] * master_unit[2];
+    FE_CHECK_ARG(std::abs(dot) > 1e-10,
+                 "ConstraintTools: periodic trace normals must be aligned or anti-aligned");
+
+    double weight = (dot >= 0.0) ? 1.0 : -1.0;
+    if (options.anti_periodic) {
+        weight *= -1.0;
+    }
+    return weight;
+}
+
+std::vector<PeriodicPair> buildHDivTracePairs(const spaces::HDivSpace& space,
+                                              std::span<const TraceBoundaryEntity> slave_entities,
+                                              std::span<const TraceBoundaryEntity> master_entities,
+                                              const std::function<Point3(Point3)>& point_transform,
+                                              const TracePeriodicConstraintOptions& options)
+{
+    FE_CHECK_ARG(!slave_entities.empty(),
+                 "ConstraintTools: H(div) trace periodic helper requires at least one slave entity");
+    FE_CHECK_ARG(!master_entities.empty(),
+                 "ConstraintTools: H(div) trace periodic helper requires at least one master entity");
+
+    const int trace_order = space.polynomial_order();
+    std::vector<PeriodicPair> pairs;
+    std::vector<bool> used_master(master_entities.size(), false);
+
+    for (const auto& slave : slave_entities) {
+        FE_CHECK_ARG(!slave.vertices.empty(),
+                     "ConstraintTools: slave trace entity must provide vertices");
+
+        const ElementType trace_element_type = traceElementTypeFromVertexCount(slave.vertices.size());
+        const auto expected_dofs =
+            spaces::TraceSpace::hdivNormalTraceDofCount(trace_element_type, trace_order);
+        FE_CHECK_ARG(slave.dofs.size() == expected_dofs,
+                     "ConstraintTools: slave trace entity DOF count does not match H(div) trace size");
+
+        std::optional<std::size_t> best_master;
+        std::vector<int> best_matched_vertices;
+        double best_distance = std::numeric_limits<double>::max();
+
+        for (std::size_t master_idx = 0; master_idx < master_entities.size(); ++master_idx) {
+            if (used_master[master_idx]) {
+                continue;
+            }
+            const auto& master = master_entities[master_idx];
+            if (master.vertices.size() != slave.vertices.size()) {
+                continue;
+            }
+            if (master.dofs.size() != expected_dofs) {
+                continue;
+            }
+
+            const auto matched_vertices =
+                matchEntityVertices(slave.vertices, master.vertices, point_transform, options.tolerance);
+            if (!matched_vertices.has_value()) {
+                continue;
+            }
+
+            const double distance =
+                maxMatchedVertexDistance(slave.vertices, master.vertices, point_transform, *matched_vertices);
+            if (distance < best_distance) {
+                best_master = master_idx;
+                best_matched_vertices = *matched_vertices;
+                best_distance = distance;
+            }
+        }
+
+        FE_CHECK_ARG(best_master.has_value(),
+                     "ConstraintTools: failed to match an H(div) slave trace entity to a master entity");
+
+        used_master[*best_master] = true;
+        const auto& master = master_entities[*best_master];
+        const auto trace_map =
+            makeTraceOrientationMap(trace_element_type, trace_order, best_matched_vertices);
+        const double normal_weight =
+            normalRelationWeight(slave.outward_normal, master.outward_normal, options);
+
+        FE_CHECK_ARG(trace_map.source_indices.size() == master.dofs.size(),
+                     "ConstraintTools: H(div) trace orientation map size mismatch");
+        for (std::size_t i = 0; i < trace_map.source_indices.size(); ++i) {
+            const int slave_local = trace_map.source_indices[i];
+            FE_CHECK_ARG(slave_local >= 0 &&
+                             slave_local < static_cast<int>(slave.dofs.size()),
+                         "ConstraintTools: H(div) slave trace local index out of range");
+            pairs.push_back(PeriodicPair{
+                slave.dofs[static_cast<std::size_t>(slave_local)],
+                master.dofs[i],
+                normal_weight * static_cast<double>(trace_map.weights[i])});
+        }
+    }
+
+    return pairs;
+}
+
+} // namespace
 
 // ============================================================================
 // Dirichlet constraint generation
@@ -128,6 +386,93 @@ void makePeriodicConstraintsTranslation(
 
     makePeriodicConstraints(slave_dofs, slave_coords, master_dofs, master_coords,
                             transform, constraints, options);
+}
+
+std::vector<PeriodicPair> makeHDivTracePeriodicPairs(
+    const spaces::HDivSpace& space,
+    std::span<const TraceBoundaryEntity> slave_entities,
+    std::span<const TraceBoundaryEntity> master_entities,
+    const std::function<std::array<double, 3>(std::array<double, 3>)>& point_transform,
+    const TracePeriodicConstraintOptions& options)
+{
+    return buildHDivTracePairs(space, slave_entities, master_entities, point_transform, options);
+}
+
+std::vector<PeriodicPair> makeHDivTracePeriodicPairsTranslation(
+    const spaces::HDivSpace& space,
+    std::span<const TraceBoundaryEntity> slave_entities,
+    std::span<const TraceBoundaryEntity> master_entities,
+    std::array<double, 3> translation,
+    const TracePeriodicConstraintOptions& options)
+{
+    auto transform = [translation](std::array<double, 3> p) -> std::array<double, 3> {
+        return {{p[0] + translation[0], p[1] + translation[1], p[2] + translation[2]}};
+    };
+    return buildHDivTracePairs(space, slave_entities, master_entities, transform, options);
+}
+
+PeriodicBC makeHDivTracePeriodicBC(
+    const spaces::HDivSpace& space,
+    std::span<const TraceBoundaryEntity> slave_entities,
+    std::span<const TraceBoundaryEntity> master_entities,
+    const std::function<std::array<double, 3>(std::array<double, 3>)>& point_transform,
+    const TracePeriodicConstraintOptions& options)
+{
+    return PeriodicBC(makeHDivTracePeriodicPairs(space,
+                                                 slave_entities,
+                                                 master_entities,
+                                                 point_transform,
+                                                 options));
+}
+
+PeriodicBC makeHDivTracePeriodicBCTranslation(
+    const spaces::HDivSpace& space,
+    std::span<const TraceBoundaryEntity> slave_entities,
+    std::span<const TraceBoundaryEntity> master_entities,
+    std::array<double, 3> translation,
+    const TracePeriodicConstraintOptions& options)
+{
+    return PeriodicBC(makeHDivTracePeriodicPairsTranslation(space,
+                                                            slave_entities,
+                                                            master_entities,
+                                                            translation,
+                                                            options));
+}
+
+MultiPointConstraint makeHDivTracePeriodicMPC(
+    const spaces::HDivSpace& space,
+    std::span<const TraceBoundaryEntity> slave_entities,
+    std::span<const TraceBoundaryEntity> master_entities,
+    const std::function<std::array<double, 3>(std::array<double, 3>)>& point_transform,
+    const TracePeriodicConstraintOptions& options)
+{
+    MultiPointConstraint mpc;
+    for (const auto& pair : makeHDivTracePeriodicPairs(space,
+                                                       slave_entities,
+                                                       master_entities,
+                                                       point_transform,
+                                                       options)) {
+        mpc.addConstraint(pair.slave_dof, pair.master_dof, pair.weight);
+    }
+    return mpc;
+}
+
+MultiPointConstraint makeHDivTracePeriodicMPCTranslation(
+    const spaces::HDivSpace& space,
+    std::span<const TraceBoundaryEntity> slave_entities,
+    std::span<const TraceBoundaryEntity> master_entities,
+    std::array<double, 3> translation,
+    const TracePeriodicConstraintOptions& options)
+{
+    MultiPointConstraint mpc;
+    for (const auto& pair : makeHDivTracePeriodicPairsTranslation(space,
+                                                                  slave_entities,
+                                                                  master_entities,
+                                                                  translation,
+                                                                  options)) {
+        mpc.addConstraint(pair.slave_dof, pair.master_dof, pair.weight);
+    }
+    return mpc;
 }
 
 // ============================================================================

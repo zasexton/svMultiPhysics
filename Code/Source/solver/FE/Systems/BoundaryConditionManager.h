@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -103,21 +104,42 @@ public:
 
     void validate() const
     {
-        std::unordered_map<int, const forms::bc::BoundaryCondition*> seen;
+        struct MarkerBucket {
+            const forms::bc::BoundaryCondition* exclusive{nullptr};
+            std::size_t shared_count{0};
+        };
+
+        std::unordered_map<std::string, MarkerBucket> seen;
         for (const auto& bc : bcs_) {
             if (!bc) {
                 throw std::invalid_argument("BoundaryConditionManager::validate: null boundary condition");
             }
-            const int marker = bc->boundaryMarker();
+            const int marker = bc->targetMarker();
             if (marker < 0) {
                 continue;
             }
 
-            auto [it, inserted] = seen.emplace(marker, bc.get());
-            if (!inserted) {
-                throw std::invalid_argument("BoundaryConditionManager::validate: multiple boundary conditions target boundary_marker " +
-                                            std::to_string(marker));
+            std::ostringstream oss;
+            oss << static_cast<int>(bc->targetDomain()) << ":" << marker;
+            auto& bucket = seen[oss.str()];
+
+            if (bc->allowsMarkerSharing()) {
+                if (bucket.exclusive) {
+                    throw std::invalid_argument(
+                        "BoundaryConditionManager::validate: weak boundary condition targets "
+                        + bc->targetDescription() +
+                        " but that target is already reserved by an exclusive condition");
+                }
+                ++bucket.shared_count;
+                continue;
             }
+
+            if (bucket.exclusive || bucket.shared_count > 0u) {
+                throw std::invalid_argument(
+                    "BoundaryConditionManager::validate: multiple incompatible boundary conditions target "
+                    + bc->targetDescription());
+            }
+            bucket.exclusive = bc.get();
         }
     }
 
@@ -148,6 +170,7 @@ public:
                 throw std::invalid_argument("BoundaryConditionManager::apply: null boundary condition");
             }
             bc->setup(system, field_id);
+            bc->installSystemConstraints(system, field_id);
         }
 
         // Collect analysis metadata (BC descriptors) from BCs BEFORE they are moved.
@@ -272,8 +295,8 @@ public:
             if (!bc) continue;
             if (bc->hasWeakTerms()) {
                 throw std::invalid_argument(
-                    "BoundaryConditionManager::applyAll(system, field_id): BC on marker "
-                    + std::to_string(bc->boundaryMarker())
+                    "BoundaryConditionManager::applyAll(system, field_id): BC on "
+                    + bc->targetDescription()
                     + " has weak residual terms but no residual expression was provided. "
                       "Use applyAll(system, residual, u, v, field_id) for fields with "
                       "Neumann, Robin, or Nitsche BCs.");
@@ -284,6 +307,7 @@ public:
         for (const auto& bc : bcs_) {
             if (!bc) continue;
             bc->setup(system, field_id);
+            bc->installSystemConstraints(system, field_id);
         }
 
         collectAnalysisMetadata_(system, field_id);
@@ -314,7 +338,6 @@ private:
 
         for (const auto& bc : bcs_) {
             if (!bc) continue;
-            const int marker = bc->boundaryMarker();
             auto descs = bc->analysisMetadata(field_id, &system);
             for (auto& d : descs) {
                 auto contributions = analysis::lowerBCDescriptor(d);
@@ -322,7 +345,15 @@ private:
                     system.addContribution(std::move(c));
                 }
 
-                const std::string src = "BC on boundary " + std::to_string(marker);
+                std::string src = "BC on ";
+                if (d.domain == analysis::DomainKind::InterfaceFace && d.interface_marker >= 0) {
+                    src += "interface " + std::to_string(d.interface_marker);
+                } else if (d.boundary_marker >= 0) {
+                    src += "boundary " + std::to_string(d.boundary_marker);
+                } else {
+                    src += bc->targetDescription();
+                }
+
                 for (auto family : {gauge::NullspaceModeFamily::ScalarConstant,
                                     gauge::NullspaceModeFamily::ComponentwiseConstant,
                                     gauge::NullspaceModeFamily::KernelOfSymGrad}) {
@@ -341,7 +372,7 @@ private:
                             ev.family = family;
                             ev.verdict = verdict;
                             ev.source = src;
-                            ev.boundary_marker = marker;
+                            ev.boundary_marker = d.boundary_marker;
                             reg.addAnchoring(std::move(ev));
                         }
                     } else {
@@ -350,7 +381,7 @@ private:
                         ev.family = family;
                         ev.verdict = verdict;
                         ev.source = src;
-                        ev.boundary_marker = marker;
+                        ev.boundary_marker = d.boundary_marker;
                         reg.addAnchoring(std::move(ev));
                     }
                 }

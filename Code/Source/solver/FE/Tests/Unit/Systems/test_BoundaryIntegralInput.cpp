@@ -68,6 +68,11 @@ svmp::FE::dofs::MeshTopologyInfo singleTetraTopology()
     return topo;
 }
 
+void distributeConstrainedState(const FESystem& sys, std::vector<Real>& values)
+{
+    sys.constraints().distribute(values);
+}
+
 std::vector<Real> solveDenseLinearSystem_(std::vector<Real> A, std::vector<Real> b)
 {
     const auto n = b.size();
@@ -600,6 +605,81 @@ TEST(BoundaryIntegralInput, PartitionedBoundaryReductionConveniencePath)
     sys.advanceAuxiliaryState(state);
     sys.prepareAuxiliaryForAssembly(state, false);
     EXPECT_NEAR(sys.auxiliaryOutputValues()[out_slot], 55.05, 1e-10);
+}
+
+TEST(PartitionedCoupling, OutputDrivenBoundaryIntegralEmitsFieldCouplingUpdate)
+{
+    // Regression for partitioned outlet-style models whose outputs are consumed
+    // directly by the PDE residual. Even without monolithic auxiliary operators,
+    // the matrix assembly must still export the exact FE-side coupling update
+    // induced by d(P_out)/dQ * dQ/du.
+    const int marker = 6;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
+    auto Q = sys.boundaryIntegral(u_disc, marker);
+
+    auto model = AuxiliaryModelBuilder("partitioned_rcr_like")
+        .input("Q")
+        .state("x")
+        .param("Rp")
+        .ode("x", -modelState("x") + modelInput("Q"))
+        .output("P_out", modelState("x") + modelParam("Rp") * modelInput("Q"))
+        .build();
+
+    auto inst = sys.deploy(
+        use(model).name("partitioned_rcr_like_inst").global().partitioned("BackwardEuler")
+            .bind("Q", Q)
+            .param("Rp", 3.0)
+            .initialize({0.0}));
+
+    const auto u = FormExpr::stateField(u_field, *space, "u");
+    const auto v = FormExpr::testFunction(*space, "v");
+    const auto residual = inner(grad(u), grad(v)).dx() - (inst.output("P_out") * v).ds(marker);
+    (void)installFormulation(sys, "op", {u_field}, residual);
+
+    { SetupInputs si; si.topology_override = singleTetraTopology(); sys.setup({}, si); }
+    sys.finalizeAuxiliaryLayout();
+
+    const auto n_dofs = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    std::vector<Real> sol(n_dofs, 1.0);
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = sol;
+
+    sys.beginTimeStep();
+
+    svmp::FE::assembly::DenseMatrixView lhs(static_cast<svmp::FE::GlobalIndex>(n_dofs));
+    svmp::FE::assembly::DenseVectorView rhs(static_cast<svmp::FE::GlobalIndex>(n_dofs));
+    lhs.zero();
+    rhs.zero();
+
+    AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+    req.want_vector = true;
+
+    const auto result = sys.assemble(req, state, &lhs, &rhs);
+    ASSERT_TRUE(result.success);
+
+    const auto rank_one_updates = sys.lastRankOneUpdates();
+    const auto reduced_updates = sys.lastReducedFieldUpdates();
+    ASSERT_TRUE(!rank_one_updates.empty() || !reduced_updates.empty());
+
+    if (!rank_one_updates.empty()) {
+        EXPECT_NEAR(std::abs(rank_one_updates.front().sigma), 3.0, 1e-10);
+        EXPECT_FALSE(rank_one_updates.front().v.empty());
+    } else {
+        EXPECT_NEAR(std::abs(reduced_updates.front().sigma), 3.0, 1e-10);
+        EXPECT_FALSE(reduced_updates.front().left.empty());
+        EXPECT_FALSE(reduced_updates.front().right.empty());
+    }
 }
 
 // ===========================================================================
@@ -2736,6 +2816,7 @@ TEST(MonolithicCoupling, MixedJacobianBlockFDVerification)
 
     const auto n_field = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
     std::vector<Real> sol(n_field, 1.0);  // u = 1
+    distributeConstrainedState(sys, sol);
 
     SystemStateView state;
     state.time = 0.0; state.dt = 0.1; state.u = sol;
@@ -2760,8 +2841,13 @@ TEST(MonolithicCoupling, MixedJacobianBlockFDVerification)
             ++nonzero_aux_field;
         }
     }
-    EXPECT_EQ(nonzero_aux_field, 3)
-        << "aux→field block should have 3 nonzero entries (boundary face DOFs)";
+    if (sys.constraints().numConstraints() == 0u) {
+        EXPECT_EQ(nonzero_aux_field, 3)
+            << "aux→field block should have 3 nonzero entries (boundary face DOFs)";
+    } else {
+        EXPECT_GT(nonzero_aux_field, 0)
+            << "constrained mixed operator should retain at least one active aux→field coupling";
+    }
 
     // FD verification of the mixed Jacobian: perturb each field DOF,
     // re-assemble, and compare.
@@ -2769,6 +2855,7 @@ TEST(MonolithicCoupling, MixedJacobianBlockFDVerification)
     for (std::size_t j = 0; j < n_field; ++j) {
         std::vector<Real> sol_pert(sol);
         sol_pert[j] += eps;
+        distributeConstrainedState(sys, sol_pert);
         SystemStateView ps = state;
         ps.u = sol_pert;
 

@@ -38,9 +38,76 @@
 
 #include <cstdio>
 #include <chrono>
+#include <cstdlib>
 #include <memory>
+#include <sstream>
 
 namespace fe_fsi_linear_solver {
+
+namespace {
+
+[[nodiscard]] bool fsilsSolveVectorTraceEnabled() noexcept
+{
+  const char* env = std::getenv("SVMP_FSILS_SOLVE_VECTOR_TRACE");
+  if (env == nullptr) {
+    return false;
+  }
+  while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+    ++env;
+  }
+  return *env != '\0' && *env != '0';
+}
+
+void traceLocalArrayStats(const FSILS_lhsType& lhs,
+                          const char* phase,
+                          const int dof,
+                          const Array<double>& R)
+{
+  if (!fsilsSolveVectorTraceEnabled() || lhs.commu.nTasks <= 1) {
+    return;
+  }
+
+  long double owned_sq = 0.0L;
+  long double ghost_sq = 0.0L;
+  double owned_max = 0.0;
+  double ghost_max = 0.0;
+  std::size_t owned_nnz = 0;
+  std::size_t ghost_nnz = 0;
+  for (fsils_int a = 0; a < lhs.nNo; ++a) {
+    const bool owned = a < lhs.mynNo;
+    for (int i = 0; i < dof; ++i) {
+      const double value = R(i, a);
+      const double abs_v = std::abs(value);
+      if (owned) {
+        owned_sq += static_cast<long double>(value) * static_cast<long double>(value);
+        owned_max = std::max(owned_max, abs_v);
+        if (abs_v > 1e-14) {
+          ++owned_nnz;
+        }
+      } else {
+        ghost_sq += static_cast<long double>(value) * static_cast<long double>(value);
+        ghost_max = std::max(ghost_max, abs_v);
+        if (abs_v > 1e-14) {
+          ++ghost_nnz;
+        }
+      }
+    }
+  }
+
+  std::ostringstream oss;
+  oss << "[fsils_solve_vec] rank=" << lhs.commu.task
+      << " phase=" << phase
+      << " owned_l2=" << std::sqrt(static_cast<double>(owned_sq))
+      << " owned_nnz=" << owned_nnz
+      << " owned_max=" << owned_max
+      << " ghost_l2=" << std::sqrt(static_cast<double>(ghost_sq))
+      << " ghost_nnz=" << ghost_nnz
+      << " ghost_max=" << ghost_max;
+  std::fprintf(stderr, "%s\n", oss.str().c_str());
+  std::fflush(stderr);
+}
+
+} // namespace
 
 /// @brief In this routine, the appropriate LS algorithm is called and
 /// the solution is returned.
@@ -141,6 +208,7 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
     tp_alloc_and_perm = TP() - tp0;
   }
   auto& R = *R_ptr;
+  traceLocalArrayStats(lhs, "input_rhs", dof, R);
 
   // Apply preconditioner.
   //
@@ -156,6 +224,7 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
     //PRINT *, "This linear solver and preconditioner combination is not supported."
   }
   tp_precond = TP() - tp0;
+  traceLocalArrayStats(lhs, "after_precond", dof, R);
 
   // Solve for 'R'.
   //
@@ -211,6 +280,7 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
       throw std::runtime_error("FSILS: LS_type not defined");
   }
   tp_solver = TP() - tp0;
+  traceLocalArrayStats(lhs, "after_solver", dof, R);
 
   // Element-wise multiplication.
   //
@@ -225,6 +295,7 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
     // so downstream nonlinear updates see a single consistent field.
     fsils_syncv(lhs, dof, R);
   }
+  traceLocalArrayStats(lhs, "after_sync", dof, R);
 
   if (!ls.ri_internal_order) {
     for (int a = 0; a < nNo; a++) {
