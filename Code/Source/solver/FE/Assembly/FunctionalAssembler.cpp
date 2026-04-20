@@ -906,6 +906,25 @@ void FunctionalAssembler::gatherFieldCoefficients(GlobalIndex cell_id,
 
     std::vector<GlobalIndex> field_dofs(field_dof_count);
 
+    if (block_mode && binding.field_global_size > 0) {
+        const GlobalIndex field_begin = binding.dof_offset;
+        const GlobalIndex field_end = binding.dof_offset + binding.field_global_size;
+        std::size_t count = 0;
+        for (const auto dof : all_dofs) {
+            if (dof >= field_begin && dof < field_end) {
+                FE_THROW_IF(count >= field_dofs.size(), FEException,
+                            std::string(error_prefix) +
+                                ": monolithic field range gather overflow");
+                field_dofs[count++] = dof;
+            }
+        }
+        FE_THROW_IF(count != field_dofs.size(), FEException,
+                    std::string(error_prefix) +
+                        ": monolithic field range gather size mismatch");
+        gatherVectorCoefficients(field_dofs, view, raw_values, out, error_prefix);
+        return;
+    }
+
     if (binding.dof_map != nullptr) {
         const auto field_local_dofs = binding.dof_map->getCellDofs(cell_id);
         FE_THROW_IF(field_local_dofs.size() != field_dof_count, FEException,
@@ -1682,9 +1701,12 @@ Real FunctionalAssembler::assembleCellsCore(
             std::vector<Real> local_solution;
             std::vector<Real> local_prev_solution;
 
-	            #pragma omp for schedule(static)
-	            for (GlobalIndex cell_id = 0; cell_id < mesh_->numCells(); ++cell_id) {
-	                prepareCellContext(thread_context, *mesh_, cell_id, *space_, context_required);
+            #pragma omp for schedule(static)
+            for (GlobalIndex cell_id = 0; cell_id < mesh_->numCells(); ++cell_id) {
+                if (!mesh_->isOwnedCell(cell_id)) {
+                    continue;
+                }
+                prepareCellContext(thread_context, *mesh_, cell_id, *space_, context_required);
 	                thread_context.clearAllPreviousSolutionData();
 	                thread_context.setTimeIntegrationContext(time_integration_);
 	                thread_context.setTime(time_);
@@ -1740,6 +1762,9 @@ Real FunctionalAssembler::assembleCellsCore(
 	        std::vector<Real> local_solution;
 	        std::vector<Real> local_prev_solution;
 	        mesh_->forEachCell([&](GlobalIndex cell_id) {
+                if (!mesh_->isOwnedCell(cell_id)) {
+                    return;
+                }
 		            prepareContext(cell_id, context_required);
 		            if (need_solution) {
 		                FE_THROW_IF(solution_view_ == nullptr && solution_.empty(), FEException,
@@ -1784,6 +1809,9 @@ Real FunctionalAssembler::assembleCellsCore(
         std::vector<Real> local_solution;
         std::vector<Real> local_prev_solution;
 	        mesh_->forEachCell([&](GlobalIndex cell_id) {
+                if (!mesh_->isOwnedCell(cell_id)) {
+                    return;
+                }
 	            prepareContext(cell_id, context_required);
 	            if (need_solution) {
 	                FE_THROW_IF(solution_view_ == nullptr && solution_.empty(), FEException,
@@ -1885,6 +1913,9 @@ Real FunctionalAssembler::assembleBoundaryCore(
     std::vector<Real> local_prev_solution;
     mesh_->forEachBoundaryFace(boundary_marker,
 	        [&](GlobalIndex face_id, GlobalIndex cell_id) {
+                if (!mesh_->isOwnedCell(cell_id)) {
+                    return;
+                }
 	            // Prepare face context
 	            const LocalIndex local_face_id = mesh_->getLocalFaceIndex(face_id, cell_id);
 	            prepareBoundaryFaceContext(context_, *mesh_, face_id, cell_id, local_face_id, *space_, context_required);
@@ -1925,6 +1956,19 @@ Real FunctionalAssembler::assembleBoundaryCore(
                                      mesh_->isOwnedCell(cell_id) ? 1 : 0,
                                      local_solution.size(),
                                      static_cast<double>(std::sqrt(coeff_sq)));
+                        const std::size_t n_coeff_trace =
+                            std::min<std::size_t>(local_solution.size(), 8u);
+                        std::fprintf(stderr, " coeffs=[");
+                        for (std::size_t i = 0; i < n_coeff_trace; ++i) {
+                            std::fprintf(stderr,
+                                         "%s%.17g",
+                                         (i == 0 ? "" : ","),
+                                         static_cast<double>(local_solution[i]));
+                        }
+                        if (local_solution.size() > n_coeff_trace) {
+                            std::fprintf(stderr, ",...");
+                        }
+                        std::fprintf(stderr, "]");
                         if (context_.numQuadraturePoints() > 0) {
                             if (context_.trialFieldType() == FieldType::Scalar) {
                                 std::fprintf(stderr,

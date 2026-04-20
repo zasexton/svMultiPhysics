@@ -594,6 +594,104 @@ public:
         return base_->getVectorEntry(dof);
     }
 
+    [[nodiscard]] const void* vectorLayoutHandle() const noexcept override
+    {
+        return base_ ? base_->vectorLayoutHandle() : nullptr;
+    }
+
+    void resolveVectorEntries(std::span<const GlobalIndex> dofs,
+                              std::span<GlobalIndex> resolved) const override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        FE_THROW_IF(resolved.size() != dofs.size(), FEException,
+                    "OwnedRowOnlyView::resolveVectorEntries: size mismatch");
+
+        bool all_owned = true;
+        for (const auto dof : dofs) {
+            if (!isOwnedRow(dof)) {
+                all_owned = false;
+                break;
+            }
+        }
+        if (all_owned) {
+            base_->resolveVectorEntries(dofs, resolved);
+            return;
+        }
+
+        std::fill(resolved.begin(), resolved.end(), INVALID_GLOBAL_INDEX);
+        std::vector<GlobalIndex> owned_dofs;
+        owned_dofs.reserve(dofs.size());
+        std::vector<std::size_t> owned_idx;
+        owned_idx.reserve(dofs.size());
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            const auto dof = dofs[i];
+            if (!isOwnedRow(dof)) {
+                continue;
+            }
+            owned_dofs.push_back(dof);
+            owned_idx.push_back(i);
+        }
+        if (owned_dofs.empty()) {
+            return;
+        }
+
+        std::vector<GlobalIndex> owned_resolved(owned_dofs.size(), INVALID_GLOBAL_INDEX);
+        base_->resolveVectorEntries(
+            std::span<const GlobalIndex>(owned_dofs),
+            std::span<GlobalIndex>(owned_resolved));
+        for (std::size_t i = 0; i < owned_idx.size(); ++i) {
+            resolved[owned_idx[i]] = owned_resolved[i];
+        }
+    }
+
+    void addVectorEntriesResolved(std::span<const GlobalIndex> dofs,
+                                  std::span<const GlobalIndex> resolved,
+                                  std::span<const Real> local_vector,
+                                  AddMode mode = AddMode::Add) override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        FE_THROW_IF(dofs.size() != local_vector.size() || resolved.size() != local_vector.size(),
+                    FEException,
+                    "OwnedRowOnlyView::addVectorEntriesResolved: size mismatch");
+
+        bool all_owned = true;
+        for (const auto dof : dofs) {
+            if (!isOwnedRow(dof)) {
+                all_owned = false;
+                break;
+            }
+        }
+        if (all_owned) {
+            base_->addVectorEntriesResolved(dofs, resolved, local_vector, mode);
+            return;
+        }
+
+        owned_rows_.clear();
+        owned_vector_.clear();
+        owned_rows_.reserve(dofs.size());
+        owned_vector_.reserve(local_vector.size());
+        std::vector<GlobalIndex> owned_resolved;
+        owned_resolved.reserve(resolved.size());
+
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            const auto dof = dofs[i];
+            if (!isOwnedRow(dof)) {
+                continue;
+            }
+            owned_rows_.push_back(dof);
+            owned_vector_.push_back(local_vector[i]);
+            owned_resolved.push_back(resolved[i]);
+        }
+
+        if (!owned_rows_.empty()) {
+            base_->addVectorEntriesResolved(
+                std::span<const GlobalIndex>(owned_rows_),
+                std::span<const GlobalIndex>(owned_resolved),
+                std::span<const Real>(owned_vector_),
+                mode);
+        }
+    }
+
     void beginAssemblyPhase() override
     {
         FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
@@ -1667,10 +1765,35 @@ void StandardAssembler::insertLocalForCell(
     }
 
     // Use pre-resolved CSR slots when available (avoids hash probes per insertion).
-    const auto resolved = getResolvedCellMatrixEntries(
+    auto resolved = getResolvedCellMatrixEntries(
         cell_id, row_dof_map, row_dof_offset, col_dof_map, col_dof_offset, matrix_view);
-    const auto resolved_vector = getResolvedCellVectorEntries(
+    if (output.has_matrix &&
+        resolved.empty() &&
+        matrix_view != nullptr &&
+        cached_cell_dof_mesh_ != nullptr &&
+        row_dof_map != nullptr &&
+        col_dof_map != nullptr &&
+        matrix_view->insertionCapabilities().resolved_matrix_entries) {
+        ensureResolvedMatrixTable(
+            *cached_cell_dof_mesh_, row_dof_map, row_dof_offset,
+            col_dof_map, col_dof_offset, matrix_view);
+        resolved = getResolvedCellMatrixEntries(
+            cell_id, row_dof_map, row_dof_offset, col_dof_map, col_dof_offset, matrix_view);
+    }
+
+    auto resolved_vector = getResolvedCellVectorEntries(
         cell_id, row_dof_map, row_dof_offset, vector_view);
+    if (output.has_vector &&
+        resolved_vector.empty() &&
+        vector_view != nullptr &&
+        cached_cell_dof_mesh_ != nullptr &&
+        row_dof_map != nullptr &&
+        vector_view->insertionCapabilities().resolved_vector_entries) {
+        ensureResolvedVectorTable(
+            *cached_cell_dof_mesh_, row_dof_map, row_dof_offset, vector_view);
+        resolved_vector = getResolvedCellVectorEntries(
+            cell_id, row_dof_map, row_dof_offset, vector_view);
+    }
     insertLocal(output, row_dofs, col_dofs, matrix_view, vector_view, resolved, resolved_vector);
 }
 
@@ -5602,6 +5725,138 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             }
         }
 
+        if (parent_term.assemble_vector && !parent_term.assemble_matrix) {
+            AssemblyContext fallback_ctx;
+            fallback_ctx.reserve(max_dofs, max_qpts, mesh.dimension());
+            KernelOutput fallback_output;
+            std::deque<CellCoefficientCacheEntry> fallback_coefficient_cache;
+            std::deque<CellFieldEvaluationCacheEntry> fallback_field_eval_cache;
+
+            for (const auto cell_id : cell_ids) {
+                fallback_coefficient_cache.clear();
+                fallback_field_eval_cache.clear();
+
+                for (std::size_t bi = 0; bi < n_blocks; ++bi) {
+                    const auto& bs = monolithic_kernel->blockSpec(bi);
+                    const bool block_want_vector =
+                        bs.want_vector && parent_term.assemble_vector;
+                    if (!bs.fallback_kernel || !block_want_vector) {
+                        continue;
+                    }
+
+                    prepareGeometry(fallback_ctx, mesh, cell_id, *fused_quad_rule);
+                    prepareBasis(fallback_ctx,
+                                 mesh,
+                                 cell_id,
+                                 *bs.test_space,
+                                 *bs.trial_space,
+                                 bs.fallback_kernel->getRequiredData(),
+                                 *fused_quad_rule);
+                    setCommonContextState(fallback_ctx);
+
+                    if (!union_field_reqs.empty()) {
+                        populateFieldSolutionDataFast(
+                            fallback_ctx,
+                            mesh,
+                            cell_id,
+                            union_field_reqs,
+                            &fallback_coefficient_cache,
+                            &fallback_field_eval_cache);
+                    } else {
+                        fallback_ctx.clearFieldSolutionData();
+                    }
+
+                    const auto row_dofs = getCellDofsCached(
+                        mesh, cell_id, bs.row_dof_map, bs.row_dof_offset);
+                    const auto col_dofs = getCellDofsCached(
+                        mesh, cell_id, bs.col_dof_map, bs.col_dof_offset);
+
+                    fallback_ctx.setSolutionCoefficientsOnly(std::span<const Real>{});
+                    if (monolithic_block_needs_solution[bi]) {
+                        const auto solution_coeffs =
+                            gatherCachedCellVectorCoefficients(
+                                fallback_coefficient_cache,
+                                mesh,
+                                cell_id,
+                                bs.col_dof_map,
+                                bs.col_dof_offset,
+                                bs.trial_space,
+                                col_dofs,
+                                /*history_index=*/0,
+                                fallback_ctx.trialUsesVectorBasis(),
+                                "assembleCellsFused");
+
+                        if (monolithic_block_use_coeffs_only[bi]) {
+                            fallback_ctx.setSolutionCoefficientsOnly(solution_coeffs);
+                        } else {
+                            fallback_ctx.setSolutionCoefficients(solution_coeffs);
+                        }
+
+                        for (int k = 1; k <= monolithic_required_history; ++k) {
+                            const auto prev_solution_coeffs =
+                                gatherCachedCellVectorCoefficients(
+                                    fallback_coefficient_cache,
+                                    mesh,
+                                    cell_id,
+                                    bs.col_dof_map,
+                                    bs.col_dof_offset,
+                                    bs.trial_space,
+                                    col_dofs,
+                                    k,
+                                    fallback_ctx.trialUsesVectorBasis(),
+                                    "assembleCellsFused");
+                            if (monolithic_block_use_coeffs_only[bi]) {
+                                fallback_ctx.setPreviousSolutionCoefficientsOnlyK(
+                                    k, prev_solution_coeffs);
+                            } else {
+                                fallback_ctx.setPreviousSolutionCoefficientsK(
+                                    k, prev_solution_coeffs);
+                            }
+                        }
+                    }
+
+                    fallback_output.reserve(
+                        static_cast<LocalIndex>(row_dofs.size()),
+                        static_cast<LocalIndex>(col_dofs.size()),
+                        /*need_matrix=*/false,
+                        /*need_vector=*/true);
+                    bs.fallback_kernel->computeCell(fallback_ctx, fallback_output);
+                    fallback_output.has_matrix = false;
+                    fallback_output.has_vector = !fallback_output.local_vector.empty();
+                    if (!fallback_output.has_vector) {
+                        continue;
+                    }
+
+                    if (fallback_ctx.testUsesVectorBasis() ||
+                        fallback_ctx.trialUsesVectorBasis()) {
+                        applyVectorBasisOutputOrientation(
+                            mesh,
+                            cell_id,
+                            *bs.test_space,
+                            cell_id,
+                            *bs.trial_space,
+                            fallback_output);
+                    }
+
+                    insertLocalForCell(
+                        cell_id,
+                        bs.row_dof_map,
+                        bs.row_dof_offset,
+                        bs.col_dof_map,
+                        bs.col_dof_offset,
+                        fallback_output,
+                        row_dofs,
+                        col_dofs,
+                        nullptr,
+                        parent_term.vector_view);
+                    result.vector_entries_inserted +=
+                        static_cast<GlobalIndex>(row_dofs.size());
+                }
+            }
+
+            return result;
+        }
+
         const std::size_t monolithic_batch_size =
             (options_.use_batching && options_.batch_size > 1)
                 ? static_cast<std::size_t>(options_.batch_size)
@@ -7225,7 +7480,6 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         ? getResolvedCellVectorEntries(cell_id, bs.row_dof_map, bs.row_dof_offset,
                                                        parent_term.vector_view)
                         : std::span<const GlobalIndex>{};
-
                 auto& insert = block_inserts[bi];
                 if (cell_constrained) {
                     insertLocalConstrained(workspace.output, workspace.row_dofs, workspace.col_dofs,
@@ -8256,7 +8510,19 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             }
                             auto col_dofs = gc.col_dofs;
 
-                            // Kernel compute (batch of 1)
+                            // Shape the reused output buffer for this exact block before
+                            // computeCellBatch(). Nonlinear kernels infer requested outputs
+                            // from the incoming buffer flags/storage, so clear() alone can
+                            // accidentally carry a stale matrix/vector request across blocks.
+                            thread_output.n_test_dofs = static_cast<LocalIndex>(row_dofs.size());
+                            thread_output.n_trial_dofs = static_cast<LocalIndex>(col_dofs.size());
+                            thread_output.reserveNoZero(
+                                thread_output.n_test_dofs,
+                                thread_output.n_trial_dofs,
+                                block_want_matrix,
+                                block_want_vector);
+                            thread_output.has_matrix = block_want_matrix;
+                            thread_output.has_vector = block_want_vector;
                             thread_output.clear();
                             const AssemblyContext* ctx_ptr = &thread_ctx;
                             bs.fallback_kernel->computeCellBatch(
@@ -8754,7 +9020,19 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         }
                         if (!omp_slot_parallel) tp_fb_sol += TP() - tp0;
 
-                        batch_outputs[slot].clear();
+                        auto& output = batch_outputs[slot];
+                        output.n_test_dofs =
+                            static_cast<LocalIndex>(batch_dofs[bi][slot].row_dofs.size());
+                        output.n_trial_dofs =
+                            static_cast<LocalIndex>(batch_dofs[bi][slot].col_dofs.size());
+                        output.reserveNoZero(
+                            output.n_test_dofs,
+                            output.n_trial_dofs,
+                            block_want_matrix,
+                            block_want_vector);
+                        output.has_matrix = block_want_matrix;
+                        output.has_vector = block_want_vector;
+                        output.clear();
                         batch_context_ptrs[slot] = &ctx;
                     }
 

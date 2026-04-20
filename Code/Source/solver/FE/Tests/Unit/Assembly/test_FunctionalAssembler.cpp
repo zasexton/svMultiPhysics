@@ -403,6 +403,63 @@ TEST(FunctionalAssemblerBoundaryTest, BlockModePrimaryFieldBindingExtractsPrimar
     EXPECT_NEAR(Q, 0.5, 1e-12);
 }
 
+TEST(FunctionalAssemblerBoundaryTest, BlockModePrimaryFieldBindingUsesMonolithicRangeBeforeFieldLocalMap)
+{
+    constexpr FieldId pressure_field = 1;
+
+    forms::test::SingleTetraOneBoundaryFaceMeshAccess mesh(/*boundary_marker=*/2);
+
+    dofs::DofMap system_dof_map(/*n_cells=*/1, /*n_dofs_total=*/300, /*dofs_per_cell=*/8);
+    const std::array<GlobalIndex, 8> cell_dofs = {100, 101, 102, 103, 200, 201, 202, 203};
+    system_dof_map.setCellDofs(0, cell_dofs);
+    system_dof_map.setNumDofs(300);
+    system_dof_map.setNumLocalDofs(300);
+    system_dof_map.finalize();
+
+    dofs::DofMap field_local_map(/*n_cells=*/1, /*n_dofs_total=*/100, /*dofs_per_cell=*/4);
+    const std::array<GlobalIndex, 4> bogus_field_dofs = {50, 51, 52, 53};
+    field_local_map.setCellDofs(0, bogus_field_dofs);
+    field_local_map.setNumDofs(100);
+    field_local_map.setNumLocalDofs(100);
+    field_local_map.finalize();
+
+    spaces::H1Space scalar_space(ElementType::Tetra4, 1);
+
+    std::vector<Real> u(300, 0.0);
+    u[100] = 100.0;
+    u[101] = 100.0;
+    u[102] = 100.0;
+    u[103] = 100.0;
+    u[200] = 1.0;
+    u[201] = 1.0;
+    u[202] = 1.0;
+    u[203] = 1.0;
+
+    const auto integrand = forms::FormExpr::discreteField(pressure_field, scalar_space, "p");
+    auto kernel = forms::compileBoundaryFunctionalKernel(integrand, /*boundary_marker=*/2);
+
+    FunctionalAssembler assembler;
+    assembler.setMesh(mesh);
+    assembler.setDofMap(system_dof_map);
+    assembler.setSpace(scalar_space);
+    assembler.setPrimaryField(pressure_field);
+    assembler.setDofPerNode(0);
+    assembler.registerFieldBinding(assembly::FieldSolutionBinding{
+        .field = pressure_field,
+        .space = &scalar_space,
+        .dof_map = &field_local_map,
+        .dof_offset = 200,
+        .field_global_size = 100,
+        .field_type = FieldType::Scalar,
+        .value_dimension = 1,
+        .n_components = 1,
+    });
+    assembler.setSolution(u);
+
+    const Real Q = assembler.assembleBoundaryScalar(*kernel, /*boundary_marker=*/2);
+    EXPECT_NEAR(Q, 0.5, 1e-12);
+}
+
 TEST(FunctionalAssemblerBoundaryTest, BlockModeProductSpaceBindingUsesComponentBlockedOrdering)
 {
     constexpr FieldId velocity_field = 2;

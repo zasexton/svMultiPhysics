@@ -211,6 +211,16 @@ Real fullOperatorRelativeResidualSerial(FsilsFactory& factory,
     return r->norm() / std::max<Real>(b.norm(), 1e-30);
 }
 
+void expectVectorMatches(std::span<const Real> actual,
+                         std::span<const Real> expected,
+                         Real tol = 1e-12)
+{
+    ASSERT_EQ(actual.size(), expected.size());
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+        EXPECT_NEAR(actual[i], expected[i], tol) << "mismatch at dof " << i;
+    }
+}
+
 
 TEST(FsilsBackendStrategy, SerialStructuredReducedCorrectionsUseExactScalarPath)
 {
@@ -824,6 +834,403 @@ TEST(FsilsBackend, ReducedFieldUpdateSolversConverge)
             factory, *A, *x, *b, std::span<const ReducedFieldUpdate>(&upd, 1));
         EXPECT_LE(rel, 1e-8);
     }
+}
+
+TEST(FsilsBackend, ReducedFieldUpdateEmptyActiveComponentsMeansAllComponents)
+{
+    FsilsFactory factory(/*dof_per_node=*/3);
+    const auto pattern = make_dense_pattern(3);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(3);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+    const GlobalIndex dofs[3] = {0, 1, 2};
+    const Real Ke[9] = {4.0, 1.0, 1.0,
+                        1.0, 3.0, 0.0,
+                        1.0, 0.0, 1.0};
+    viewA->addMatrixEntries(dofs, Ke, assembly::AddMode::Insert);
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    ReducedFieldUpdate upd_all{};
+    upd_all.sigma = 650.0;
+    upd_all.active_components = {0, 1, 2};
+    upd_all.left = {
+        {0, 0.10},
+        {1, -0.07},
+        {2, 0.09},
+    };
+    upd_all.right = {
+        {0, 0.05},
+        {1, 0.12},
+        {2, -0.08},
+    };
+
+    ReducedFieldUpdate upd_empty = upd_all;
+    upd_empty.active_components.clear();
+
+    auto x_exact = factory.createVector(3);
+    {
+        auto xs = x_exact->localSpan();
+        std::fill(xs.begin(), xs.end(), Real(1.0));
+    }
+    A->mult(*x_exact, *b);
+    addReducedFieldContributionSerial(
+        factory, *b, *x_exact, std::span<const ReducedFieldUpdate>(&upd_all, 1));
+
+    SolverOptions opts;
+    opts.method = SolverMethod::BlockSchur;
+    opts.preconditioner = PreconditionerType::Diagonal;
+    opts.rel_tol = 1e-8;
+    opts.abs_tol = 1e-12;
+    opts.max_iter = 20;
+    opts.krylov_dim = 40;
+    opts.fsils_blockschur_gm_max_iter = 120;
+    opts.fsils_blockschur_cg_max_iter = 120;
+    opts.fsils_blockschur_gm_rel_tol = 1e-10;
+    opts.fsils_blockschur_cg_rel_tol = 1e-10;
+    BlockLayout layout;
+    layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
+    layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
+    layout.momentum_block = 0;
+    layout.constraint_block = 1;
+    opts.block_layout = layout;
+
+    auto solve_with_update = [&](const ReducedFieldUpdate& upd)
+        -> std::pair<std::shared_ptr<GenericVector>, Real> {
+        auto solver = factory.createLinearSolver(opts);
+        EXPECT_TRUE(solver->supportsNativeReducedFieldUpdates());
+        solver->setReducedFieldUpdates(std::span<const ReducedFieldUpdate>(&upd, 1));
+        auto x = factory.createVector(3);
+        const auto rep = solver->solve(*A, *x, *b);
+        EXPECT_TRUE(rep.converged);
+        const Real rel = fullOperatorRelativeResidualSerial(
+            factory, *A, *x, *b, std::span<const ReducedFieldUpdate>(&upd_all, 1));
+        return std::pair<std::shared_ptr<GenericVector>, Real>(std::move(x), rel);
+    };
+
+    const auto [x_all, rel_all] = solve_with_update(upd_all);
+    const auto [x_empty, rel_empty] = solve_with_update(upd_empty);
+
+    EXPECT_LE(rel_all, 1e-8);
+    EXPECT_LE(rel_empty, 1e-8);
+
+    const auto xs_all = x_all->localSpan();
+    const auto xs_empty = x_empty->localSpan();
+    ASSERT_EQ(xs_all.size(), xs_empty.size());
+    for (std::size_t i = 0; i < xs_all.size(); ++i) {
+        EXPECT_NEAR(xs_empty[i], xs_all[i], 1e-10);
+    }
+}
+
+TEST(FsilsBackend, ReducedFieldUpdateFaceCacheAddBcMulMatchesSparse)
+{
+    FsilsFactory factory(/*dof_per_node=*/3);
+    const auto pattern = make_dense_pattern(3);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(3);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+    const GlobalIndex dofs[3] = {0, 1, 2};
+    const Real Ke[9] = {4.0, 1.0, 1.0,
+                        1.0, 3.0, 0.0,
+                        1.0, 0.0, 1.0};
+    viewA->addMatrixEntries(dofs, Ke, assembly::AddMode::Insert);
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    ReducedFieldUpdate upd{};
+    upd.sigma = 800.0;
+    upd.active_components = {0, 1};
+    upd.left = {
+        {0, 0.10},
+        {1, -0.07},
+    };
+    upd.right = {
+        {0, 0.05},
+        {1, 0.12},
+    };
+
+    auto x_exact = factory.createVector(3);
+    {
+        auto xs = x_exact->localSpan();
+        std::fill(xs.begin(), xs.end(), Real(1.0));
+    }
+    A->mult(*x_exact, *b);
+    addReducedFieldContributionSerial(
+        factory, *b, *x_exact, std::span<const ReducedFieldUpdate>(&upd, 1));
+
+    SolverOptions opts;
+    opts.method = SolverMethod::BlockSchur;
+    opts.preconditioner = PreconditionerType::Diagonal;
+    opts.rel_tol = 1e-8;
+    opts.abs_tol = 1e-12;
+    opts.max_iter = 20;
+    opts.krylov_dim = 40;
+    opts.fsils_blockschur_gm_max_iter = 120;
+    opts.fsils_blockschur_cg_max_iter = 120;
+    opts.fsils_blockschur_gm_rel_tol = 1e-10;
+    opts.fsils_blockschur_cg_rel_tol = 1e-10;
+    BlockLayout layout;
+    layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
+    layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
+    layout.momentum_block = 0;
+    layout.constraint_block = 1;
+    opts.block_layout = layout;
+
+    struct SolveCase {
+        std::shared_ptr<GenericVector> x;
+        Real rel{0.0};
+        SolverReport rep{};
+    };
+
+    auto solve_with_face_cache = [&](bool disable_face_cache) {
+        std::unique_ptr<ScopedEnvVar> face_cache_guard;
+        if (disable_face_cache) {
+            face_cache_guard = std::make_unique<ScopedEnvVar>(
+                "SVMP_DISABLE_REDUCED_FACE_CACHE_ADD_BC_MUL", "1");
+        }
+
+        auto solver = factory.createLinearSolver(opts);
+        EXPECT_TRUE(solver->supportsNativeReducedFieldUpdates());
+        solver->setReducedFieldUpdates(std::span<const ReducedFieldUpdate>(&upd, 1));
+        auto x = factory.createVector(3);
+        const auto rep = solver->solve(*A, *x, *b);
+        EXPECT_TRUE(rep.converged);
+        const Real rel = fullOperatorRelativeResidualSerial(
+            factory, *A, *x, *b, std::span<const ReducedFieldUpdate>(&upd, 1));
+        return SolveCase{std::move(x), rel, rep};
+    };
+
+    const auto cached = solve_with_face_cache(/*disable_face_cache=*/false);
+    const auto sparse = solve_with_face_cache(/*disable_face_cache=*/true);
+
+    EXPECT_LE(cached.rel, 1e-8);
+    EXPECT_LE(sparse.rel, 1e-8);
+    EXPECT_EQ(cached.rep.iterations, sparse.rep.iterations);
+    EXPECT_EQ(cached.rep.blockschur_outer_iterations, sparse.rep.blockschur_outer_iterations);
+    EXPECT_EQ(cached.rep.blockschur_schur_solve_calls, sparse.rep.blockschur_schur_solve_calls);
+    EXPECT_EQ(cached.rep.blockschur_schur_iterations, sparse.rep.blockschur_schur_iterations);
+
+    const auto xs_cached = cached.x->localSpan();
+    const auto xs_sparse = sparse.x->localSpan();
+    ASSERT_EQ(xs_cached.size(), xs_sparse.size());
+    for (std::size_t i = 0; i < xs_cached.size(); ++i) {
+        EXPECT_NEAR(xs_cached[i], xs_sparse[i], 1e-10);
+    }
+}
+
+TEST(FsilsBackend, ReducedFieldUpdateDistributedShapeConverges)
+{
+    constexpr int dof = 3;
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+
+    FsilsFactory factory(dof);
+    const auto pattern = make_dense_pattern(n_global);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(n_global);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+
+    const int edof = 2 * dof;
+    std::vector<Real> Ke(edof * edof, 0.0);
+    const auto setKe = [&](int r, int c, Real v) {
+        Ke[static_cast<std::size_t>(r * edof + c)] = v;
+    };
+
+    const Real B[3][3] = {
+        {4.0, 1.0, 1.0},
+        {1.0, 3.0, 0.0},
+        {1.0, 0.0, 1.0},
+    };
+    const Real C[3][3] = {
+        {-1.0, 0.0, 0.0},
+        { 0.0,-1.0, 0.0},
+        { 0.0, 0.0, 0.0},
+    };
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            setKe(r, c, B[r][c]);
+            setKe(r, c + 3, C[r][c]);
+            setKe(r + 3, c, C[c][r]);
+            setKe(r + 3, c + 3, B[r][c]);
+        }
+    }
+
+    {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    }
+    {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = 3 + i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    }
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    ReducedFieldUpdate upd{};
+    upd.sigma = 1500.0;
+    upd.active_components = {0, 1};
+    upd.left = {
+        {0, 0.03},
+        {1, -0.02},
+        {6, 0.10},
+        {7, -0.07},
+    };
+    upd.right = {
+        {0, 0.05},
+        {1, 0.12},
+        {6, -0.02},
+        {7, 0.08},
+    };
+
+    auto x_exact = factory.createVector(n_global);
+    {
+        auto xs = x_exact->localSpan();
+        std::fill(xs.begin(), xs.end(), Real(1.0));
+    }
+    A->mult(*x_exact, *b);
+    addReducedFieldContributionSerial(
+        factory, *b, *x_exact, std::span<const ReducedFieldUpdate>(&upd, 1));
+
+    SolverOptions opts;
+    opts.method = SolverMethod::BlockSchur;
+    opts.preconditioner = PreconditionerType::Diagonal;
+    opts.rel_tol = 1e-8;
+    opts.abs_tol = 1e-12;
+    opts.max_iter = 20;
+    opts.krylov_dim = 40;
+    opts.fsils_blockschur_gm_max_iter = 120;
+    opts.fsils_blockschur_cg_max_iter = 120;
+    opts.fsils_blockschur_gm_rel_tol = 1e-10;
+    opts.fsils_blockschur_cg_rel_tol = 1e-10;
+    BlockLayout layout;
+    layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
+    layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
+    layout.momentum_block = 0;
+    layout.constraint_block = 1;
+    opts.block_layout = layout;
+
+    auto solver = factory.createLinearSolver(opts);
+    ASSERT_TRUE(solver->supportsNativeReducedFieldUpdates());
+    solver->setReducedFieldUpdates(std::span<const ReducedFieldUpdate>(&upd, 1));
+    auto x = factory.createVector(n_global);
+    const auto rep = solver->solve(*A, *x, *b);
+    EXPECT_TRUE(rep.converged);
+    const Real rel = fullOperatorRelativeResidualSerial(
+        factory, *A, *x, *b, std::span<const ReducedFieldUpdate>(&upd, 1));
+    EXPECT_LE(rel, 1e-8);
+}
+
+TEST(FsilsBackend, ReducedFieldUpdateDistributedShapeRhsMatchesReference)
+{
+    constexpr int dof = 3;
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+
+    FsilsFactory factory(dof);
+    const auto pattern = make_dense_pattern(n_global);
+    auto A = factory.createMatrix(pattern);
+    auto b_matrix = factory.createVector(n_global);
+    auto b_full = factory.createVector(n_global);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+
+    const int edof = 2 * dof;
+    std::vector<Real> Ke(edof * edof, 0.0);
+    const auto setKe = [&](int r, int c, Real v) {
+        Ke[static_cast<std::size_t>(r * edof + c)] = v;
+    };
+
+    const Real B[3][3] = {
+        {4.0, 1.0, 1.0},
+        {1.0, 3.0, 0.0},
+        {1.0, 0.0, 1.0},
+    };
+    const Real C[3][3] = {
+        {-1.0, 0.0, 0.0},
+        { 0.0,-1.0, 0.0},
+        { 0.0, 0.0, 0.0},
+    };
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            setKe(r, c, B[r][c]);
+            setKe(r, c + 3, C[r][c]);
+            setKe(r + 3, c, C[c][r]);
+            setKe(r + 3, c + 3, B[r][c]);
+        }
+    }
+
+    {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    }
+    {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = 3 + i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    }
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    ReducedFieldUpdate upd{};
+    upd.sigma = 1500.0;
+    upd.active_components = {0, 1};
+    upd.left = {
+        {0, 0.03},
+        {1, -0.02},
+        {6, 0.10},
+        {7, -0.07},
+    };
+    upd.right = {
+        {0, 0.05},
+        {1, 0.12},
+        {6, -0.02},
+        {7, 0.08},
+    };
+
+    auto x_exact = factory.createVector(n_global);
+    {
+        auto xs = x_exact->localSpan();
+        std::fill(xs.begin(), xs.end(), Real(1.0));
+    }
+
+    A->mult(*x_exact, *b_matrix);
+    b_full->copyFrom(*b_matrix);
+    addReducedFieldContributionSerial(
+        factory, *b_full, *x_exact, std::span<const ReducedFieldUpdate>(&upd, 1));
+
+    static constexpr Real expected_matrix[] = {
+        5.0, 3.0, 2.0,
+        10.0, 6.0, 4.0,
+        5.0, 3.0, 2.0,
+    };
+    static constexpr Real expected_full[] = {
+        15.35, -3.9, 2.0,
+        10.0, 6.0, 4.0,
+        39.5, -21.15, 2.0,
+    };
+
+    expectVectorMatches(b_matrix->localSpan(), expected_matrix);
+    expectVectorMatches(b_full->localSpan(), expected_full);
 }
 
 TEST(FsilsBackend, ReducedFieldUpdateGroupedWoodburySolversConverge)

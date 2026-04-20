@@ -3934,7 +3934,6 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     // =================================
 
     double prev_residual_norm = -1.0;
-
     for (int it = 0; it < max_it; ++it) {
         ntp0 = NTP();
         history.updateGhosts();
@@ -5087,96 +5086,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                             transient.system(), residual_base, "constraint-only probe Jx", 8u);
                     }
                 }
-            }        auto gatherSelectedTraceDofs = [&]() {
-            std::vector<GlobalIndex> trace_dofs;
-            const char* trace_dofs_env = std::getenv("SVMP_MONO_AUX_TRACE_DOFS");
-            if (trace_dofs_env == nullptr || *trace_dofs_env == ' ' || !oopTraceEnabled()) {
-                return trace_dofs;
             }
-
-            const char* cursor = trace_dofs_env;
-            while (*cursor != ' ') {
-                char* end = nullptr;
-                const long value = std::strtol(cursor, &end, 10);
-                if (end != cursor) {
-                    trace_dofs.push_back(static_cast<GlobalIndex>(value));
-                    cursor = end;
-                }
-                while (*cursor == ',' || *cursor == ' ' || *cursor == ';') {
-                    ++cursor;
-                }
-                if (end == cursor && *cursor != ' ') {
-                    ++cursor;
-                }
-            }
-            return trace_dofs;
-        };
-
-        auto traceSelectedVectorDofs = [&](const char* label,
-                                           backends::GenericVector& vec) {
-            const auto trace_dofs = gatherSelectedTraceDofs();
-            if (trace_dofs.empty()) {
-                return;
-            }
-
-            auto view = vec.createAssemblyView();
-            FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: selected DOF trace view");
-            std::vector<Real> values(trace_dofs.size(), Real(0.0));
-            view->getVectorEntries(trace_dofs, values);
-
-            std::ostringstream oss;
-            oss << "NewtonSolver: selected dofs label='" << label << "'";
-            for (std::size_t i = 0; i < trace_dofs.size(); ++i) {
-                oss << " dof[" << i << "]=" << trace_dofs[i]
-                    << " value=" << values[i];
-            }
-            traceLog(oss.str());
-        };
-
-        auto traceSelectedMatrixRows = [&](const char* label,
-                                           const backends::GenericMatrix& mat) {
-            const auto trace_dofs = gatherSelectedTraceDofs();
-            if (trace_dofs.empty()) {
-                return;
-            }
-
-            constexpr Real kNnzTol = static_cast<Real>(1e-30);
-            std::ostringstream oss;
-            oss << "NewtonSolver: selected matrix rows label='" << label << "'";
-            for (std::size_t i = 0; i < trace_dofs.size(); ++i) {
-                const auto row = trace_dofs[i];
-                Real diag = mat.getEntry(row, row);
-                Real row_abs_sum = Real(0.0);
-                Real row_max_abs = Real(0.0);
-                GlobalIndex nnz = 0;
-                for (GlobalIndex col = 0; col < mat.numCols(); ++col) {
-                    const Real value = mat.getEntry(row, col);
-                    const Real abs_value = std::abs(value);
-                    row_abs_sum += abs_value;
-                    row_max_abs = std::max(row_max_abs, abs_value);
-                    if (abs_value > kNnzTol) {
-                        ++nnz;
-                    }
-                }
-                oss << " dof[" << i << "]=" << row
-                    << " diag=" << diag
-                    << " row_abs_sum=" << row_abs_sum
-                    << " row_max_abs=" << row_max_abs
-                    << " row_nnz=" << nnz;
-            }
-            traceLog(oss.str());
-        };
-
-            traceSelectedVectorDofs("u_before_linear_solve", history.u());
-            traceSelectedVectorDofs("rhs_before_linear_solve", *linear_rhs);
-            traceSelectedMatrixRows("J_before_linear_solve", J);
             ntp0 = NTP();
             report.linear = linear.solve(J, du, *linear_rhs);
             ntp_linear += NTP() - ntp0;
             ntp_linear_iters_total += report.linear.iterations;
-            traceSelectedVectorDofs("rhs_after_linear_solve", *linear_rhs);
-            traceSelectedVectorDofs("du_after_linear_solve", du);
-            ++primary_linear_solve_call_index;
             std::optional<std::vector<Real>> first_linear_dense_rhs;
             std::optional<std::vector<Real>> first_linear_dense_du_raw;
             if (!first_linear_vector_dumped && it == 0 && ptc_retries == 0) {
@@ -5228,6 +5142,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 }
             }
             if (linearSolveHistoryEnabled()) {
+                ++primary_linear_solve_call_index;
                 const int max_calls = linearSolveHistoryMaxCalls();
                 if (max_calls < 0 || primary_linear_solve_call_index <= max_calls) {
                     const Real rhs_norm = linear_rhs->norm();
@@ -5556,7 +5471,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
                     {
                         SolverOptionsGuard bordered_solver_options_guard{linear, base_linear_options};
-                        const auto bordered_recovery_options =
+                        auto bordered_recovery_options =
                             makeBorderedSolveOptions(base_linear_options);
                         linear.setOptions(bordered_recovery_options);
 
@@ -5569,6 +5484,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                 FE_CHECK_NOT_NULL(rhs_view.get(), "NewtonSolver: bordered rhs view");
                                 rhs_view->beginAssemblyPhase();
                                 for (std::size_t row = 0; row < nf; ++row) {
+                                    if (!owned_dofs.contains(static_cast<GlobalIndex>(row))) {
+                                        continue;
+                                    }
                                     const Real bij = solve_bordered.B[row + nf * j];
                                     if (std::abs(bij) > Real(1e-30)) {
                                         rhs_view->addVectorEntry(static_cast<GlobalIndex>(row),
@@ -6010,7 +5928,6 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 << " budget=" << line_search_iteration_budget;
             traceLog(oss.str());
         }
-
         for (int ls = 0; ls < line_search_iteration_budget; ++ls) {
             last_tried_alpha = alpha;
             trial_norm = evaluateLineSearchTrial(alpha, /*phase=*/"line_search");
@@ -6041,7 +5958,6 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     << " ok=" << (ok ? 1 : 0);
                 traceLog(oss.str());
             }
-
             if (std::isfinite(trial_norm) && trial_norm < best_trial_norm) {
                 best_trial_norm = trial_norm;
                 best_alpha = alpha;

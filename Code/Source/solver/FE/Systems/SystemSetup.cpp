@@ -98,6 +98,19 @@ namespace {
     return std::nullopt;
 }
 
+[[nodiscard]] bool dofPermutationTraceEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_TRACE_DOF_PERMUTATION");
+    if (env == nullptr || *env == '\0') {
+        return false;
+    }
+    std::string value(env);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return !(value == "0" || value == "false" || value == "off" || value == "no");
+}
+
 #if FE_HAS_MPI
 constexpr std::uint64_t kConsistencyHashSeed = 1469598103934665603ULL;
 
@@ -574,14 +587,23 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
                                                                                    const assembly::IMeshAccess& mesh,
                                                                                    const dofs::DofDistributionOptions& dof_options)
 {
+    auto fail = [&](const std::string& reason) -> std::optional<NodalInterleavedDofMap> {
+        if (dofPermutationTraceEnabled()) {
+            std::ostringstream oss;
+            oss << "FESystem::setup: nodal dof permutation unavailable: " << reason;
+            FE_LOG_INFO(oss.str());
+        }
+        return std::nullopt;
+    };
+
     const GlobalIndex total_dofs = dof_handler.getNumDofs();
     if (total_dofs <= 0) {
-        return std::nullopt;
+        return fail("total_dofs<=0");
     }
 
     const std::size_t n_fields = field_map.numFields();
     if (n_fields == 0u) {
-        return std::nullopt;
+        return fail("n_fields==0");
     }
 
     GlobalIndex n_nodes = -1;
@@ -592,7 +614,7 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
         // backend permutation. In that case, simply report that no nodal map is available and let
         // the caller fall back to the natural owner-contiguous FE numbering when possible.
         if (field.component_dof_layout != dofs::FieldComponentDofLayout::ComponentWise) {
-            return std::nullopt;
+            return fail("field component_dof_layout is not ComponentWise");
         }
         FE_THROW_IF(field.n_components <= 0, InvalidStateException,
                     "FESystem::setup: invalid field components for node-interleaved distributed sparsity");
@@ -603,15 +625,15 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
         if (n_nodes < 0) {
             n_nodes = n_per_component;
         } else if (n_nodes != n_per_component) {
-            return std::nullopt;
+            return fail("fields have different dofs-per-component counts");
         }
         dof_per_node += field.n_components;
     }
     if (n_nodes <= 0 || dof_per_node <= 0) {
-        return std::nullopt;
+        return fail("n_nodes<=0 or dof_per_node<=0");
     }
     if (total_dofs != static_cast<GlobalIndex>(dof_per_node) * n_nodes) {
-        return std::nullopt;
+        return fail("total_dofs != dof_per_node*n_nodes");
     }
 
 #if !FE_HAS_MPI
@@ -619,7 +641,7 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
     (void)field_map;
     (void)mesh;
     (void)dof_options;
-    return std::nullopt;
+    return fail("FE_HAS_MPI disabled");
 #else
     // In MPI, overlap backends (FSILS) require that owned rows form a contiguous range in the
     // backend (node-interleaved) indexing. When FE global numbering is process-count independent
@@ -630,8 +652,8 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
 
     const int my_rank = dof_options.my_rank;
     const int world_size = dof_options.world_size;
-    if (my_rank < 0 || world_size <= 1 || my_rank >= world_size) {
-        return std::nullopt;
+    if (my_rank < 0 || world_size <= 0 || my_rank >= world_size) {
+        return fail("invalid my_rank/world_size");
     }
 
     // Spatial ordering within the owner block is optional but default-on (note 18).
@@ -657,19 +679,48 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
     const auto& part = dof_handler.getPartition();
     const auto owned_size = part.localOwnedSize();
     if (owned_size <= 0) {
-        return std::nullopt;
+        return fail("owned_size<=0");
     }
 
-    // Representative field/component used to identify nodes (stable across fields).
-    const auto& rep_field = field_map.getField(0);
+    // Representative field/component used to identify node ownership. Prefer the field with the
+    // fewest components so mixed systems can use a scalar nodal field (e.g. pressure) instead of a
+    // block-numbered vector field whose components may be partitioned separately.
+    std::size_t rep_field_idx = 0u;
+    LocalIndex rep_components = std::numeric_limits<LocalIndex>::max();
+    for (std::size_t f = 0; f < n_fields; ++f) {
+        const auto& field = field_map.getField(f);
+        if (field.component_dof_layout != dofs::FieldComponentDofLayout::ComponentWise ||
+            field.n_components <= 0) {
+            continue;
+        }
+        if (field.n_components < rep_components) {
+            rep_components = field.n_components;
+            rep_field_idx = f;
+        }
+    }
+    const auto& rep_field = field_map.getField(rep_field_idx);
     if (rep_field.component_dof_layout != dofs::FieldComponentDofLayout::ComponentWise ||
         rep_field.n_components <= 0) {
-        return std::nullopt;
+        return fail("representative field is not component-wise");
     }
 
     const GlobalIndex rep_n_nodes = rep_field.n_dofs / std::max<GlobalIndex>(1, rep_field.n_components);
     if (rep_n_nodes != n_nodes) {
-        return std::nullopt;
+        return fail("representative field node count mismatch");
+    }
+
+    std::vector<int> node_owner(static_cast<std::size_t>(n_nodes), -1);
+    for (GlobalIndex node = 0; node < n_nodes; ++node) {
+        const GlobalIndex fe0 = field_map.componentToGlobal(rep_field_idx, 0, node);
+        if (fe0 < 0 || fe0 >= total_dofs) {
+            return fail("representative componentToGlobal(rep_field,0,node) out of range");
+        }
+
+        const int owner = dof_handler.getDofMap().getDofOwner(fe0);
+        if (owner < 0 || owner >= world_size) {
+            return fail("representative dof owner outside [0,world_size)");
+        }
+        node_owner[static_cast<std::size_t>(node)] = owner;
     }
 
     auto decode_node_comp = [&](const dofs::FieldDescriptor& field,
@@ -691,42 +742,31 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
 	        return std::make_pair(node, c);
 	    };
 
-	    // Derive locally relevant nodes across all fields/components, and record node ownership using
-	    // locally present DOFs. We require nodal ownership to be consistent across the node's DOFs.
-	    std::unordered_map<GlobalIndex, int> node_owner;
+	    // Derive locally relevant nodes across all fields/components. Node ownership comes from the
+	    // representative component above so that block-numbered vector fields can still build a nodal
+	    // backend map even when different components of the same physical node are owned by different
+	    // FE ranks.
 	    std::vector<GlobalIndex> relevant_nodes_fe;
 	    {
 	        const auto relevant_dofs = part.locallyRelevant().toVector();
 	        relevant_nodes_fe.reserve(relevant_dofs.size() /
 	                                      static_cast<std::size_t>(std::max<GlobalIndex>(1, dof_per_node)) +
 	                                  8u);
-	        node_owner.reserve(relevant_nodes_fe.capacity());
 
 	        for (const auto fe : relevant_dofs) {
-	            const auto fld = field_map.globalToField(fe);
-	            if (!fld.has_value()) {
-	                continue;
-	            }
+            const auto fld = field_map.globalToField(fe);
+            if (!fld.has_value()) {
+                continue;
+            }
 	            const auto& field = field_map.getField(static_cast<std::size_t>(fld->first));
-	            const auto decoded = decode_node_comp(field, fld->second);
-	            if (!decoded.has_value()) {
-	                return std::nullopt;
-	            }
-	            const auto node = decoded->first;
-	            if (node < 0 || node >= n_nodes) {
-	                return std::nullopt;
-	            }
-
-	            const int owner = dof_handler.getDofMap().getDofOwner(fe);
-	            if (owner < 0 || owner >= world_size) {
-	                return std::nullopt;
-	            }
-
-	            auto [it, inserted] = node_owner.emplace(node, owner);
-	            if (!inserted && it->second != owner) {
-	                // Ownership differs across DOFs on the same node; cannot build a node-interleaved backend map.
-	                return std::nullopt;
-	            }
+            const auto decoded = decode_node_comp(field, fld->second);
+            if (!decoded.has_value()) {
+                return fail("decode_node_comp failed");
+            }
+            const auto node = decoded->first;
+            if (node < 0 || node >= n_nodes) {
+                return fail("decoded node outside [0,n_nodes)");
+            }
 
 	            relevant_nodes_fe.push_back(node);
 	        }
@@ -735,7 +775,7 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
 	    std::sort(relevant_nodes_fe.begin(), relevant_nodes_fe.end());
 	    relevant_nodes_fe.erase(std::unique(relevant_nodes_fe.begin(), relevant_nodes_fe.end()), relevant_nodes_fe.end());
 	    if (relevant_nodes_fe.empty()) {
-	        return std::nullopt;
+	        return fail("relevant_nodes_fe is empty");
 	    }
 
 	    FE_THROW_IF(owned_size % static_cast<GlobalIndex>(dof_per_node) != 0,
@@ -748,11 +788,10 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
 	    owned_nodes_fe.reserve(static_cast<std::size_t>(expected_owned_nodes) + 8u);
 	    ghost_nodes_fe.reserve(relevant_nodes_fe.size());
 	    for (const auto node : relevant_nodes_fe) {
-	        const auto it = node_owner.find(node);
-	        if (it == node_owner.end()) {
-	            return std::nullopt;
+	        const int owner = node_owner[static_cast<std::size_t>(node)];
+	        if (owner < 0 || owner >= world_size) {
+	            return fail("owned/ghost node missing valid owner entry");
 	        }
-	        const int owner = it->second;
 	        if (owner == my_rank) {
 	            owned_nodes_fe.push_back(node);
 	        } else {
@@ -761,7 +800,14 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
 	    }
 
 	    if (static_cast<GlobalIndex>(owned_nodes_fe.size()) != expected_owned_nodes) {
-	        return std::nullopt;
+	        std::ostringstream oss;
+	        oss << "owned_nodes_fe.size()!=expected_owned_nodes"
+	            << " owned_nodes_fe=" << owned_nodes_fe.size()
+	            << " expected=" << expected_owned_nodes
+	            << " relevant_nodes_fe=" << relevant_nodes_fe.size()
+	            << " owned_size=" << owned_size
+	            << " dof_per_node=" << dof_per_node;
+	        return fail(oss.str());
 	    }
 
     // Compute a spatial (Morton/Hilbert) ordering for owned nodes within this rank's owner block.
@@ -786,7 +832,7 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
     for (const auto node : owned_nodes_fe) {
         const GlobalIndex fe0 = field_map.componentToGlobal(0, 0, node);
         if (fe0 < 0 || fe0 >= total_dofs) {
-            return std::nullopt;
+            return fail("componentToGlobal(0,0,node) out of range");
         }
 
         std::array<double, 3> xyz{static_cast<double>(node), static_cast<double>(node), static_cast<double>(node)};
@@ -849,7 +895,11 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
         node_total += owned_counts[static_cast<std::size_t>(r)];
     }
     if (node_total != static_cast<std::int64_t>(n_nodes)) {
-        return std::nullopt;
+        std::ostringstream oss;
+        oss << "sum owned node counts != n_nodes"
+            << " node_total=" << node_total
+            << " n_nodes=" << n_nodes;
+        return fail(oss.str());
     }
 
     std::unordered_map<GlobalIndex, GlobalIndex> fe_node_to_backend;
@@ -862,13 +912,9 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
 	    // Resolve backend node ids for ghost nodes by querying their owner ranks.
 	    std::vector<std::vector<GlobalIndex>> requests(static_cast<std::size_t>(world_size));
 	    for (const auto node : ghost_nodes_fe) {
-	        const auto it = node_owner.find(node);
-	        if (it == node_owner.end()) {
-	            return std::nullopt;
-	        }
-	        const int owner = it->second;
+	        const int owner = node_owner[static_cast<std::size_t>(node)];
 	        if (owner < 0 || owner >= world_size) {
-	            return std::nullopt;
+	            return fail("ghost node owner outside [0,world_size)");
 	        }
 	        if (owner == my_rank) {
             continue;
@@ -920,7 +966,7 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
         const auto node = recv_nodes[i];
         const auto it = fe_node_to_backend.find(node);
         if (it == fe_node_to_backend.end()) {
-            return std::nullopt;
+            return fail("owner did not resolve requested ghost node backend id");
         }
         send_backends[i] = it->second;
     }
@@ -936,7 +982,7 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
         const auto node = send_nodes[i];
         const auto backend = recv_backends[i];
         if (backend < 0 || backend >= n_nodes) {
-            return std::nullopt;
+            return fail("received ghost backend id outside [0,n_nodes)");
         }
         fe_node_to_backend.emplace(node, backend);
         ghost_nodes_backend.push_back(static_cast<int>(backend));
@@ -965,7 +1011,7 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
     }
     for (const int node : map.ghost_nodes) {
         if (node < 0 || static_cast<GlobalIndex>(node) >= n_nodes) {
-            return std::nullopt;
+            return fail("ghost backend node outside [0,n_nodes)");
         }
         map.node_is_ghost[static_cast<std::size_t>(node)] = 1;
         map.node_is_relevant[static_cast<std::size_t>(node)] = 1;
@@ -978,11 +1024,11 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
 	    for (const auto node : relevant_nodes_fe) {
 	        const auto it = fe_node_to_backend.find(node);
 	        if (it == fe_node_to_backend.end()) {
-	            return std::nullopt;
+	            return fail("relevant FE node missing backend mapping");
 	        }
         const GlobalIndex backend_node = it->second;
         if (backend_node < 0 || backend_node >= n_nodes) {
-            return std::nullopt;
+            return fail("backend node outside [0,n_nodes)");
         }
 
         int comp_offset = 0;
@@ -993,15 +1039,15 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
                 const GlobalIndex fs =
                     backend_node * static_cast<GlobalIndex>(dof_per_node) + static_cast<GlobalIndex>(comp_offset);
                 if (fe < 0 || fe >= total_dofs || fs < 0 || fs >= total_dofs) {
-                    return std::nullopt;
+                    return fail("fe or fs index outside [0,total_dofs)");
                 }
                 auto& fwd = map.fe_to_fs[static_cast<std::size_t>(fe)];
                 auto& inv = map.fs_to_fe[static_cast<std::size_t>(fs)];
                 if (fwd != INVALID_GLOBAL_INDEX && fwd != fs) {
-                    return std::nullopt;
+                    return fail("forward permutation conflict");
                 }
                 if (inv != INVALID_GLOBAL_INDEX && inv != fe) {
-                    return std::nullopt;
+                    return fail("inverse permutation conflict");
                 }
                 fwd = fs;
                 inv = fe;
@@ -1009,33 +1055,33 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
             }
         }
         if (comp_offset != dof_per_node) {
-            return std::nullopt;
+            return fail("comp_offset != dof_per_node");
         }
     }
 
+    if (dofPermutationTraceEnabled()) {
+        std::ostringstream oss;
+        oss << "FESystem::setup: nodal dof permutation built"
+            << " total_dofs=" << total_dofs
+            << " n_nodes=" << n_nodes
+            << " dof_per_node=" << dof_per_node
+            << " owned_nodes=" << owned_nodes_fe.size()
+            << " ghost_nodes=" << map.ghost_nodes.size()
+            << " owned_range=[" << map.owned_range.first << "," << map.owned_range.last << ")";
+        FE_LOG_INFO(oss.str());
+    }
     return map;
 #endif // FE_HAS_MPI
 }
 
 [[nodiscard]] bool numberingInterleavesComponents(const dofs::DofDistributionOptions& dof_options)
 {
-    const bool explicit_spatial =
-        dof_options.numbering == dofs::DofNumberingStrategy::Morton ||
-        dof_options.numbering == dofs::DofNumberingStrategy::Hilbert;
-    bool apply_default_spatial =
-        dof_options.enable_spatial_locality_ordering &&
-        dof_options.numbering == dofs::DofNumberingStrategy::Sequential;
-
-    // Mirror DofHandler::distributeDofs default-spatial disablement in MPI.
-    if (dof_options.world_size > 1 &&
-        (dof_options.global_numbering != dofs::GlobalNumberingMode::OwnerContiguous ||
-         dof_options.reproducible_across_communicators)) {
-        apply_default_spatial = false;
-    }
-
-    return dof_options.numbering == dofs::DofNumberingStrategy::Interleaved ||
-           explicit_spatial ||
-           apply_default_spatial;
+    // The monolithic DofMap is assembled by offsetting each field handler's
+    // numbering. Spatial renumbering changes the ordering of those DOFs, but
+    // it does not convert component-wise block numbering into node-interleaved
+    // numbering. Only the explicit Interleaved strategy changes the component
+    // layout.
+    return dof_options.numbering == dofs::DofNumberingStrategy::Interleaved;
 }
 
 [[nodiscard]] dofs::FieldLayout fieldLayoutForSystem(std::size_t n_fields,
@@ -2353,7 +2399,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 #if FE_HAS_MPI
     int mpi_initialized_dof_map = 0;
     MPI_Initialized(&mpi_initialized_dof_map);
-    if (mpi_parallel && mpi_initialized_dof_map) {
+    if (mpi_initialized_dof_map) {
         backend_map = tryBuildNodalInterleavedDofMap(dof_handler_, field_map_, meshAccess(), opts.dof_options);
     }
 #endif

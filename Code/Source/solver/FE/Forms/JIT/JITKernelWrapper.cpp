@@ -40,6 +40,29 @@ namespace {
 
 using JITFn = void (*)(const void*);
 
+struct RequestedKernelOutputs {
+    bool matrix{false};
+    bool vector{false};
+};
+
+[[nodiscard]] RequestedKernelOutputs requestedKernelOutputs(
+    const assembly::KernelOutput& output,
+    bool can_matrix,
+    bool can_vector) noexcept
+{
+    bool want_matrix = output.has_matrix || !output.local_matrix.empty();
+    bool want_vector = output.has_vector || !output.local_vector.empty();
+    if (!want_matrix && !want_vector) {
+        want_matrix = can_matrix;
+        want_vector = can_vector;
+    }
+
+    RequestedKernelOutputs requested;
+    requested.matrix = can_matrix && want_matrix;
+    requested.vector = can_vector && want_vector;
+    return requested;
+}
+
 [[nodiscard]] bool traceSpecializationEnabled() noexcept
 {
     static const bool enabled = [] {
@@ -343,6 +366,14 @@ JITKernelWrapper::JITKernelWrapper(std::shared_ptr<assembly::AssemblyKernel> fal
     } else {
         kind_ = WrappedKind::Unknown;
     }
+
+    if (kind_ == WrappedKind::SymbolicNonlinearFormKernel ||
+        kind_ == WrappedKind::NonlinearFormKernel) {
+        // Nonlinear JIT kernels are currently more robust on the scalar ABI
+        // path than on the SIMD-padded batch path used by linear kernels.
+        options_.vectorize = false;
+        options_.simd_batch = false;
+    }
 }
 
 assembly::RequiredData JITKernelWrapper::getRequiredData() const
@@ -553,8 +584,12 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
             return;
         }
 
-        const bool want_matrix = k_sym ? !k_sym->isVectorOnly() : !k_nl->isVectorOnly();
-        const bool want_vector = k_sym ? !k_sym->isMatrixOnly() : !k_nl->isMatrixOnly();
+        const auto requested = requestedKernelOutputs(
+            output,
+            k_sym ? !k_sym->isVectorOnly() : !k_nl->isVectorOnly(),
+            k_sym ? !k_sym->isMatrixOnly() : !k_nl->isMatrixOnly());
+        const bool want_matrix = requested.matrix;
+        const bool want_vector = requested.vector;
         const auto& updates = k_sym ? k_sym->inlinedStateUpdates().cell : k_nl->inlinedStateUpdates().cell;
         const auto* state_layout = k_sym ? k_sym->constitutiveStateLayout() : k_nl->constitutiveStateLayout();
         const auto& residual_ir = k_sym ? k_sym->residualIR() : k_nl->residualIR();
@@ -1027,8 +1062,12 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
             const auto* k_nl = dynamic_cast<const NonlinearFormKernel*>(fallback_.get());
 
             if (k_sym || k_nl) {
-                const bool want_matrix = k_sym ? !k_sym->isVectorOnly() : !k_nl->isVectorOnly();
-                const bool want_vector = k_sym ? !k_sym->isMatrixOnly() : !k_nl->isMatrixOnly();
+                const auto requested = requestedKernelOutputs(
+                    outputs[first_idx],
+                    k_sym ? !k_sym->isVectorOnly() : !k_nl->isVectorOnly(),
+                    k_sym ? !k_sym->isMatrixOnly() : !k_nl->isMatrixOnly());
+                const bool want_matrix = requested.matrix;
+                const bool want_vector = requested.vector;
                 const auto& updates = k_sym ? k_sym->inlinedStateUpdates().cell : k_nl->inlinedStateUpdates().cell;
                 const auto* state_layout = k_sym ? k_sym->constitutiveStateLayout() : k_nl->constitutiveStateLayout();
                 const auto& residual_ir = k_sym ? k_sym->residualIR() : k_nl->residualIR();
@@ -1472,8 +1511,12 @@ void JITKernelWrapper::computeBoundaryFace(const assembly::AssemblyContext& ctx,
             fallback_->computeBoundaryFace(ctx, boundary_marker, output);
             return;
         }
-        const bool want_matrix = !k->isVectorOnly();
-        const bool want_vector = !k->isMatrixOnly();
+        const auto requested = requestedKernelOutputs(
+            output,
+            !k->isVectorOnly(),
+            !k->isMatrixOnly());
+        const bool want_matrix = requested.matrix;
+        const bool want_vector = requested.vector;
 
         output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), want_matrix, want_vector);
         output.clear();
@@ -1633,18 +1676,35 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
             return;
         }
 
-        const bool want_matrix = !k->isVectorOnly();
-        const bool want_vector = !k->isMatrixOnly();
+        const auto minus_requested = requestedKernelOutputs(
+            output_minus,
+            !k->isVectorOnly(),
+            !k->isMatrixOnly());
+        const auto plus_requested = requestedKernelOutputs(
+            output_plus,
+            !k->isVectorOnly(),
+            !k->isMatrixOnly());
+        const auto mp_requested = requestedKernelOutputs(
+            coupling_minus_plus,
+            !k->isVectorOnly(),
+            /*can_vector=*/false);
+        const auto pm_requested = requestedKernelOutputs(
+            coupling_plus_minus,
+            !k->isVectorOnly(),
+            /*can_vector=*/false);
+        const bool want_matrix =
+            minus_requested.matrix || plus_requested.matrix || mp_requested.matrix || pm_requested.matrix;
+        const bool want_vector = minus_requested.vector || plus_requested.vector;
 
         const auto n_test_minus = ctx_minus.numTestDofs();
         const auto n_trial_minus = ctx_minus.numTrialDofs();
         const auto n_test_plus = ctx_plus.numTestDofs();
         const auto n_trial_plus = ctx_plus.numTrialDofs();
 
-        output_minus.reserve(n_test_minus, n_trial_minus, want_matrix, want_vector);
-        output_plus.reserve(n_test_plus, n_trial_plus, want_matrix, want_vector);
-        coupling_minus_plus.reserve(n_test_minus, n_trial_plus, want_matrix, /*need_vector=*/false);
-        coupling_plus_minus.reserve(n_test_plus, n_trial_minus, want_matrix, /*need_vector=*/false);
+        output_minus.reserve(n_test_minus, n_trial_minus, minus_requested.matrix, minus_requested.vector);
+        output_plus.reserve(n_test_plus, n_trial_plus, plus_requested.matrix, plus_requested.vector);
+        coupling_minus_plus.reserve(n_test_minus, n_trial_plus, mp_requested.matrix, /*need_vector=*/false);
+        coupling_plus_minus.reserve(n_test_plus, n_trial_minus, pm_requested.matrix, /*need_vector=*/false);
 
         output_minus.clear();
         output_plus.clear();
@@ -1688,13 +1748,13 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
 	            callJIT(compiled.interior_face, &args);
 	        }
 
-        output_minus.has_matrix = want_matrix;
-        output_minus.has_vector = want_vector;
-        output_plus.has_matrix = want_matrix;
-        output_plus.has_vector = want_vector;
-        coupling_minus_plus.has_matrix = want_matrix;
+        output_minus.has_matrix = minus_requested.matrix;
+        output_minus.has_vector = minus_requested.vector;
+        output_plus.has_matrix = plus_requested.matrix;
+        output_plus.has_vector = plus_requested.vector;
+        coupling_minus_plus.has_matrix = mp_requested.matrix;
         coupling_minus_plus.has_vector = false;
-        coupling_plus_minus.has_matrix = want_matrix;
+        coupling_plus_minus.has_matrix = pm_requested.matrix;
         coupling_plus_minus.has_vector = false;
         return;
     }
@@ -1812,18 +1872,35 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
             return;
         }
 
-        const bool want_matrix = !k->isVectorOnly();
-        const bool want_vector = !k->isMatrixOnly();
+        const auto minus_requested = requestedKernelOutputs(
+            output_minus,
+            !k->isVectorOnly(),
+            !k->isMatrixOnly());
+        const auto plus_requested = requestedKernelOutputs(
+            output_plus,
+            !k->isVectorOnly(),
+            !k->isMatrixOnly());
+        const auto mp_requested = requestedKernelOutputs(
+            coupling_minus_plus,
+            !k->isVectorOnly(),
+            /*can_vector=*/false);
+        const auto pm_requested = requestedKernelOutputs(
+            coupling_plus_minus,
+            !k->isVectorOnly(),
+            /*can_vector=*/false);
+        const bool want_matrix =
+            minus_requested.matrix || plus_requested.matrix || mp_requested.matrix || pm_requested.matrix;
+        const bool want_vector = minus_requested.vector || plus_requested.vector;
 
         const auto n_test_minus = ctx_minus.numTestDofs();
         const auto n_trial_minus = ctx_minus.numTrialDofs();
         const auto n_test_plus = ctx_plus.numTestDofs();
         const auto n_trial_plus = ctx_plus.numTrialDofs();
 
-        output_minus.reserve(n_test_minus, n_trial_minus, want_matrix, want_vector);
-        output_plus.reserve(n_test_plus, n_trial_plus, want_matrix, want_vector);
-        coupling_minus_plus.reserve(n_test_minus, n_trial_plus, want_matrix, /*need_vector=*/false);
-        coupling_plus_minus.reserve(n_test_plus, n_trial_minus, want_matrix, /*need_vector=*/false);
+        output_minus.reserve(n_test_minus, n_trial_minus, minus_requested.matrix, minus_requested.vector);
+        output_plus.reserve(n_test_plus, n_trial_plus, plus_requested.matrix, plus_requested.vector);
+        coupling_minus_plus.reserve(n_test_minus, n_trial_plus, mp_requested.matrix, /*need_vector=*/false);
+        coupling_plus_minus.reserve(n_test_plus, n_trial_minus, pm_requested.matrix, /*need_vector=*/false);
 
         output_minus.clear();
         output_plus.clear();
@@ -1879,13 +1956,13 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
 	            }
 	        }
 
-        output_minus.has_matrix = want_matrix;
-        output_minus.has_vector = want_vector;
-        output_plus.has_matrix = want_matrix;
-        output_plus.has_vector = want_vector;
-        coupling_minus_plus.has_matrix = want_matrix;
+        output_minus.has_matrix = minus_requested.matrix;
+        output_minus.has_vector = minus_requested.vector;
+        output_plus.has_matrix = plus_requested.matrix;
+        output_plus.has_vector = plus_requested.vector;
+        coupling_minus_plus.has_matrix = mp_requested.matrix;
         coupling_minus_plus.has_vector = false;
-        coupling_plus_minus.has_matrix = want_matrix;
+        coupling_plus_minus.has_matrix = pm_requested.matrix;
         coupling_plus_minus.has_vector = false;
         return;
     }

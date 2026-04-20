@@ -849,12 +849,9 @@ assembly::AssemblyResult assembleOperator(
             aux_inputs = input_reg->all();
         }
 
-        // For auxiliary state: if there's exactly one block, pass its work
-        // buffer directly. Otherwise the state is accessed through the
-        // legacy coupled_aux path or per-block via the manager.
         std::span<const Real> aux_state_flat;
-        if (aux_mgr && aux_mgr->blockCount() == 1) {
-            aux_state_flat = aux_mgr->state().block(0).work();
+        if (aux_mgr && aux_mgr->blockCount() > 0) {
+            aux_state_flat = system.auxiliaryStateValues();
         }
 
         auto aux_outputs = system.auxiliaryOutputValues();

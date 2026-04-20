@@ -35,12 +35,118 @@
 
 #include "fsils_api.hpp"
 
+#include <algorithm>
+#include <cstdlib>
+#include <iostream>
 #include <math.h>
 #include <limits>
+#include <vector>
 
 namespace precond {
 
 using fe_fsi_linear_solver::fsils_int;
+
+namespace {
+
+[[nodiscard]] bool trace_precond_reduced_support() noexcept
+{
+  static const bool enabled = [] {
+    const char* env = std::getenv("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING");
+    if (env == nullptr || *env == '\0' || *env == '0') {
+      return false;
+    }
+    env = std::getenv("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING_ALL_RANKS");
+    return env != nullptr && *env != '\0' && *env != '0';
+  }();
+  return enabled;
+}
+
+[[nodiscard]] int internal_to_old_node(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                       const int internal_node) noexcept
+{
+  for (int old = 0; old < lhs.nNo; ++old) {
+    if (lhs.map(old) == internal_node) {
+      return old;
+    }
+  }
+  return -1;
+}
+
+[[nodiscard]] std::vector<int>
+collect_traced_reduced_nodes(const fe_fsi_linear_solver::FSILS_lhsType& lhs)
+{
+  std::vector<int> nodes;
+  nodes.reserve(16);
+  auto append_entries = [&](const auto& entries) {
+    for (const auto& entry : entries) {
+      if (entry.node < 0 || entry.node >= lhs.nNo) {
+        continue;
+      }
+      nodes.push_back(entry.node);
+    }
+  };
+
+  for (const auto& update : lhs.reduced_updates) {
+    append_entries(update.right_owned);
+    append_entries(update.left_owned);
+  }
+  for (const auto& group : lhs.grouped_bordered_field_couplings) {
+    for (const auto& mode : group.modes) {
+      append_entries(mode.right_owned);
+      append_entries(mode.left_owned);
+    }
+  }
+  for (int fa = 0; fa < lhs.nFaces; ++fa) {
+    const auto& face = lhs.face[fa];
+    if (face.bGrp != fe_fsi_linear_solver::BcType::BC_TYPE_Dir) {
+      continue;
+    }
+    for (int a = 0; a < face.nNo; ++a) {
+      const int node = face.glob(a);
+      if (node < 0 || node >= lhs.nNo) {
+        continue;
+      }
+      nodes.push_back(node);
+    }
+  }
+
+  std::sort(nodes.begin(), nodes.end());
+  nodes.erase(std::unique(nodes.begin(), nodes.end()), nodes.end());
+  constexpr std::size_t kMaxNodes = 8;
+  if (nodes.size() > kMaxNodes) {
+    nodes.resize(kMaxNodes);
+  }
+  return nodes;
+}
+
+void trace_precond_w_stage(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                           const char* stage,
+                           const Array<double>& W,
+                           const std::vector<int>& nodes,
+                           const int dof)
+{
+  if (!trace_precond_reduced_support() || nodes.empty()) {
+    return;
+  }
+
+  std::cout << "[PRECOND_REDUCED_W] rank=" << lhs.commu.task
+            << " stage=" << stage;
+  for (const int internal_node : nodes) {
+    const int old_node = internal_to_old_node(lhs, internal_node);
+    const int global_node =
+        (old_node >= 0 && old_node < lhs.gNodes.size()) ? lhs.gNodes(old_node) : -1;
+    std::cout << " node(internal=" << internal_node
+              << ",old=" << old_node
+              << ",global=" << global_node
+              << ')';
+    for (int comp = 0; comp < dof; ++comp) {
+      std::cout << " w(" << comp << ")=" << W(comp, internal_node);
+    }
+  }
+  std::cout << std::endl;
+}
+
+} // namespace
 
 /// @brief Post-multipling Val by W: Val = Val*W
 ///
@@ -141,6 +247,7 @@ void precond_diag(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_in
   dmsg << "W.nrows: " << W.nrows_;
   dmsg << "W.ncols: " << W.ncols_;
   #endif
+  const auto traced_reduced_nodes = collect_traced_reduced_nodes(lhs);
 
   // Calculating W: W = diag(K)
   //
@@ -188,7 +295,9 @@ void precond_diag(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_in
     } break;
   }
 
+  trace_precond_w_stage(lhs, "raw_diag", W, traced_reduced_nodes, dof);
   fsils_commuv(lhs, dof, W);
+  trace_precond_w_stage(lhs, "after_commuv", W, traced_reduced_nodes, dof);
 
   // Accounting for Dirichlet BC and inversing W = W^{-1/2}
   //
@@ -203,6 +312,7 @@ void precond_diag(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_in
   for (fsils_int i = 0; i < W.size(); i++) {
     W(i) = 1.0 / sqrt(fabs(W(i)));
   }
+  trace_precond_w_stage(lhs, "after_inv_sqrt", W, traced_reduced_nodes, dof);
 
   for (int faIn = 0; faIn < lhs.nFaces; faIn++) {
     auto& face = lhs.face[faIn];
@@ -226,6 +336,7 @@ void precond_diag(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_in
       }
     }
   }
+  trace_precond_w_stage(lhs, "after_dirichlet_faces", W, traced_reduced_nodes, dof);
 
   // Pre-multipling K with W: K = W*K
   pre_mul(rowPtr, lhs.nNo, lhs.nnz, dof, Val, W);
@@ -264,6 +375,29 @@ void precond_diag(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_in
     update.left_scaled_owned = update.left_owned;
     update.right_scaled_owned = update.right_owned;
 
+    if (trace_precond_reduced_support()) {
+      std::cout << "[PRECOND_REDUCED_ENTRIES] rank=" << lhs.commu.task
+                << " stage=right_owned_raw";
+      int emitted = 0;
+      for (const auto& entry : update.right_owned) {
+        if (entry.node < 0 || entry.node >= lhs.nNo) {
+          continue;
+        }
+        const int old_node = internal_to_old_node(lhs, entry.node);
+        const int global_node =
+            (old_node >= 0 && old_node < lhs.gNodes.size()) ? lhs.gNodes(old_node) : -1;
+        std::cout << " entry(internal=" << entry.node
+                  << ",old=" << old_node
+                  << ",global=" << global_node
+                  << ",full_comp=" << entry.full_component
+                  << ",val=" << entry.value << ')';
+        if (++emitted >= 8) {
+          break;
+        }
+      }
+      std::cout << std::endl;
+    }
+
     auto scale_entries = [&](std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>& entries) {
       const int system_dof = (lhs.system_dof > 0) ? lhs.system_dof : dof;
       for (auto& entry : entries) {
@@ -285,6 +419,29 @@ void precond_diag(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_in
     scale_entries(update.right_scaled);
     scale_entries(update.left_scaled_owned);
     scale_entries(update.right_scaled_owned);
+
+    if (trace_precond_reduced_support()) {
+      std::cout << "[PRECOND_REDUCED_ENTRIES] rank=" << lhs.commu.task
+                << " stage=right_owned_scaled";
+      int emitted = 0;
+      for (const auto& entry : update.right_scaled_owned) {
+        if (entry.node < 0 || entry.node >= lhs.nNo) {
+          continue;
+        }
+        const int old_node = internal_to_old_node(lhs, entry.node);
+        const int global_node =
+            (old_node >= 0 && old_node < lhs.gNodes.size()) ? lhs.gNodes(old_node) : -1;
+        std::cout << " entry(internal=" << entry.node
+                  << ",old=" << old_node
+                  << ",global=" << global_node
+                  << ",full_comp=" << entry.full_component
+                  << ",val=" << entry.value << ')';
+        if (++emitted >= 8) {
+          break;
+        }
+      }
+      std::cout << std::endl;
+    }
 
     auto scale_face = [&](fe_fsi_linear_solver::FSILS_faceType& face) {
       if (face.nNo <= 0 || face.dof <= 0) {

@@ -301,6 +301,7 @@ void BoundaryReductionService::configureAssembler(assembly::FunctionalAssembler&
                 binding.space = &field_space;
                 binding.dof_map = &sec_dh.getDofMap();
                 binding.dof_offset = system_.fieldDofOffset(field_id);
+                binding.field_global_size = sec_dh.getNumDofs();
                 binding.field_type = field_space.field_type();
                 binding.value_dimension = components;
                 binding.n_components = components;

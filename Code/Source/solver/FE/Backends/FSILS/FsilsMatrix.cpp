@@ -25,6 +25,7 @@
 #include <limits>
 #include <mpi.h>
 #include <numeric>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -95,6 +96,12 @@ namespace {
 {
     const char* value = std::getenv(name);
     return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+[[nodiscard]] bool matrix_diag_trace_enabled() noexcept
+{
+    return env_flag_enabled("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING") ||
+           env_flag_enabled("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING_ALL_RANKS");
 }
 
 [[nodiscard]] bool ghost_rows_look_nodal_interleaved(std::span<const GlobalIndex> ghost_rows, int dof)
@@ -790,11 +797,12 @@ public:
 		                continue;
 		            }
 
-		            const int global_node = static_cast<int>(row_fs / dof);
-		            const int row_comp = static_cast<int>(row_fs % dof);
+            const int global_node = static_cast<int>(row_fs / dof);
+            const int row_comp = static_cast<int>(row_fs % dof);
 
-		            const int internal = shared->globalNodeToInternal(global_node);
-	            if (internal < 0) continue;
+            const int internal = shared->globalNodeToInternal(global_node);
+            const int old = shared->globalNodeToOld(global_node);
+            if (internal < 0 || old < 0) continue;
 
             const int start = lhs.rowPtr(0, internal);
             const int end = lhs.rowPtr(1, internal);
@@ -806,7 +814,11 @@ public:
                 }
             }
 
-            if (set_diagonal && row_dof < matrix_->numCols()) {
+            // Distributed constrained rows are already represented on ghost ranks.
+            // Zero the ghost copies too, but only restore the identity diagonal on
+            // the owning row so overlap-summed matvecs do not overcount it.
+            const bool row_is_owned = old < shared->owned_node_count;
+            if (set_diagonal && row_is_owned && row_dof < matrix_->numCols()) {
                 matrix_->addValue(row_dof, row_dof, 1.0, assembly::AddMode::Insert);
             }
         }
@@ -822,6 +834,46 @@ public:
     void endAssemblyPhase() override { phase_ = assembly::AssemblyPhase::Flushing; }
     void finalizeAssembly() override {
         phase_ = assembly::AssemblyPhase::Finalized;
+        if (matrix_ != nullptr && matrix_diag_trace_enabled()) {
+            if (const auto shared = matrix_->shared()) {
+                static int diag_trace_budget = 0;
+                static bool diag_trace_init = false;
+                if (!diag_trace_init) {
+                    diag_trace_init = true;
+                    diag_trace_budget = 8;
+                }
+                const bool trace_all_ranks =
+                    env_flag_enabled("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING_ALL_RANKS");
+                const bool trace_this_rank = trace_all_ranks || shared->lhs.commu.task == 0;
+                if (trace_this_rank && diag_trace_budget > 0) {
+                    --diag_trace_budget;
+                    const auto* perm = shared->dof_permutation.get();
+                    const bool has_perm = (perm != nullptr && !perm->forward.empty());
+                    constexpr GlobalIndex kTraceDofs = 12;
+                    std::ostringstream oss;
+                    oss << "[FSILS_MATRIX_DIAG] rank=" << shared->lhs.commu.task;
+                    for (GlobalIndex fe_dof = 0; fe_dof < std::min(matrix_->numRows(), kTraceDofs); ++fe_dof) {
+                        GlobalIndex fs_dof = fe_dof;
+                        if (has_perm) {
+                            fs_dof = perm->forward[static_cast<std::size_t>(fe_dof)];
+                        }
+                        int global_node = -1;
+                        int comp = -1;
+                        if (fs_dof >= 0 && fs_dof < matrix_->numRows()) {
+                            global_node = static_cast<int>(fs_dof / shared->dof);
+                            comp = static_cast<int>(fs_dof % shared->dof);
+                        }
+                        oss << " fe(" << fe_dof << ")="
+                            << matrix_->getEntry(fe_dof, fe_dof)
+                            << "{fs=" << fs_dof
+                            << ",gn=" << global_node
+                            << ",c=" << comp
+                            << "}";
+                    }
+                    std::fprintf(stderr, "%s\n", oss.str().c_str());
+                }
+            }
+        }
         if (std::getenv("SVMP_FSILS_MATRIX_VIEW_TRACE") != nullptr && matrix_requested_ > 0) {
             int rank = 0;
             if (matrix_ != nullptr) {

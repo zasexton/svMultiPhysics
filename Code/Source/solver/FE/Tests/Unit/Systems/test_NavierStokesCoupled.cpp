@@ -22,6 +22,7 @@
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <array>
+#include <cmath>
 #include <memory>
 #include <vector>
 
@@ -49,6 +50,29 @@ void distributeConstrainedState(const svmp::FE::systems::FESystem& sys,
                                 std::vector<Real>& values)
 {
     sys.constraints().distribute(values);
+}
+
+Real l2Norm(const std::vector<Real>& v)
+{
+    Real s = 0.0;
+    for (const auto x : v) {
+        s += x * x;
+    }
+    return std::sqrt(s);
+}
+
+std::vector<Real> matVec(const svmp::FE::assembly::DenseSystemView& A,
+                         const std::vector<Real>& x)
+{
+    std::vector<Real> y(static_cast<std::size_t>(A.numRows()), 0.0);
+    for (GlobalIndex i = 0; i < A.numRows(); ++i) {
+        Real acc = 0.0;
+        for (GlobalIndex j = 0; j < A.numCols(); ++j) {
+            acc += A.getMatrixEntry(i, j) * x[static_cast<std::size_t>(j)];
+        }
+        y[static_cast<std::size_t>(i)] = acc;
+    }
+    return y;
 }
 
 } // namespace
@@ -151,32 +175,52 @@ TEST(NavierStokesCoupledFormsTest, ResidualAndJacobianMatchFiniteDifferences)
     auto result = sys.assemble(req, state, &out, &out);
     EXPECT_TRUE(result.success);
 
-    std::vector<Real> R0(static_cast<std::size_t>(n_dofs), 0.0);
-    for (GlobalIndex i = 0; i < n_dofs; ++i) {
-        R0[static_cast<std::size_t>(i)] = out.getVectorEntry(i);
-    }
-
-    // Finite-difference check: J(:,j) ~= (R(U+eps e_j) - R(U)) / eps
-    const Real eps = 1e-7;
+    const Real eps = 1e-6;
     svmp::FE::systems::AssemblyRequest req_vec;
     req_vec.op = "ns";
     req_vec.want_vector = true;
 
-    for (GlobalIndex j = 0; j < n_dofs; ++j) {
+    // Auto-enforced gauge constraints make this a reduced constrained operator.
+    // Verify the Jacobian on homogeneous, constraint-compatible directions.
+    const std::array<Real, 3> seeds = {0.37, 0.61, 0.89};
+    for (const Real seed : seeds) {
+        std::vector<Real> dU(static_cast<std::size_t>(n_dofs), 0.0);
+        for (GlobalIndex i = 0; i < n_dofs; ++i) {
+            const Real x = static_cast<Real>(i + 1);
+            dU[static_cast<std::size_t>(i)] =
+                static_cast<Real>(0.17) * std::sin(static_cast<double>(seed * x)) +
+                static_cast<Real>(0.05) * std::cos(static_cast<double>((seed + 0.23) * x));
+        }
+        sys.constraints().distributeHomogeneous(dU);
+        ASSERT_GT(l2Norm(dU), 1e-12);
+
+        const auto JdU = matVec(out, dU);
+
         auto U_plus = U;
-        U_plus[static_cast<std::size_t>(j)] += eps;
+        auto U_minus = U;
+        for (GlobalIndex i = 0; i < n_dofs; ++i) {
+            U_plus[static_cast<std::size_t>(i)] += eps * dU[static_cast<std::size_t>(i)];
+            U_minus[static_cast<std::size_t>(i)] -= eps * dU[static_cast<std::size_t>(i)];
+        }
         distributeConstrainedState(sys, U_plus);
+        distributeConstrainedState(sys, U_minus);
 
         svmp::FE::systems::SystemStateView state_plus;
         state_plus.u = U_plus;
+        svmp::FE::systems::SystemStateView state_minus;
+        state_minus.u = U_minus;
 
         svmp::FE::assembly::DenseVectorView Rp(n_dofs);
+        svmp::FE::assembly::DenseVectorView Rm(n_dofs);
         Rp.zero();
+        Rm.zero();
         (void)sys.assemble(req_vec, state_plus, nullptr, &Rp);
+        (void)sys.assemble(req_vec, state_minus, nullptr, &Rm);
 
         for (GlobalIndex i = 0; i < n_dofs; ++i) {
-            const Real fd = (Rp.getVectorEntry(i) - R0[static_cast<std::size_t>(i)]) / eps;
-            EXPECT_NEAR(out.getMatrixEntry(i, j), fd, 5e-6);
+            const Real fd =
+                (Rp.getVectorEntry(i) - Rm.getVectorEntry(i)) / (2.0 * eps);
+            EXPECT_NEAR(JdU[static_cast<std::size_t>(i)], fd, 5e-6) << " row=" << i;
         }
     }
 }
@@ -248,31 +292,50 @@ TEST(NavierStokesCoupledFormsTest, CoupledResidualInstallerMatchesFiniteDifferen
     auto result = sys.assemble(req, state, &out, &out);
     EXPECT_TRUE(result.success);
 
-    std::vector<Real> R0(static_cast<std::size_t>(n_dofs), 0.0);
-    for (GlobalIndex i = 0; i < n_dofs; ++i) {
-        R0[static_cast<std::size_t>(i)] = out.getVectorEntry(i);
-    }
-
-    const Real eps = 1e-7;
+    const Real eps = 1e-6;
     svmp::FE::systems::AssemblyRequest req_vec;
     req_vec.op = "ns_coupled";
     req_vec.want_vector = true;
 
-    for (GlobalIndex j = 0; j < n_dofs; ++j) {
+    const std::array<Real, 3> seeds = {0.41, 0.73, 1.07};
+    for (const Real seed : seeds) {
+        std::vector<Real> dU(static_cast<std::size_t>(n_dofs), 0.0);
+        for (GlobalIndex i = 0; i < n_dofs; ++i) {
+            const Real x = static_cast<Real>(i + 1);
+            dU[static_cast<std::size_t>(i)] =
+                static_cast<Real>(0.13) * std::sin(static_cast<double>(seed * x)) +
+                static_cast<Real>(0.07) * std::cos(static_cast<double>((seed + 0.17) * x));
+        }
+        sys.constraints().distributeHomogeneous(dU);
+        ASSERT_GT(l2Norm(dU), 1e-12);
+
+        const auto JdU = matVec(out, dU);
+
         auto U_plus = U;
-        U_plus[static_cast<std::size_t>(j)] += eps;
+        auto U_minus = U;
+        for (GlobalIndex i = 0; i < n_dofs; ++i) {
+            U_plus[static_cast<std::size_t>(i)] += eps * dU[static_cast<std::size_t>(i)];
+            U_minus[static_cast<std::size_t>(i)] -= eps * dU[static_cast<std::size_t>(i)];
+        }
         distributeConstrainedState(sys, U_plus);
+        distributeConstrainedState(sys, U_minus);
 
         svmp::FE::systems::SystemStateView state_plus;
         state_plus.u = U_plus;
+        svmp::FE::systems::SystemStateView state_minus;
+        state_minus.u = U_minus;
 
         svmp::FE::assembly::DenseVectorView Rp(n_dofs);
+        svmp::FE::assembly::DenseVectorView Rm(n_dofs);
         Rp.zero();
+        Rm.zero();
         (void)sys.assemble(req_vec, state_plus, nullptr, &Rp);
+        (void)sys.assemble(req_vec, state_minus, nullptr, &Rm);
 
         for (GlobalIndex i = 0; i < n_dofs; ++i) {
-            const Real fd = (Rp.getVectorEntry(i) - R0[static_cast<std::size_t>(i)]) / eps;
-            EXPECT_NEAR(out.getMatrixEntry(i, j), fd, 5e-6);
+            const Real fd =
+                (Rp.getVectorEntry(i) - Rm.getVectorEntry(i)) / (2.0 * eps);
+            EXPECT_NEAR(JdU[static_cast<std::size_t>(i)], fd, 5e-6);
         }
     }
 }

@@ -124,6 +124,102 @@ double dense_dense_owned_dot_local(const FSILS_lhsType& lhs,
   return local_dot;
 }
 
+double dense_dense_all_dot_local(const FSILS_lhsType& lhs,
+                                 int dof,
+                                 const Array<double>& left,
+                                 const Array<double>& right)
+{
+  double local_dot = 0.0;
+  for (fsils_int node = 0; node < lhs.nNo; ++node) {
+    for (int comp = 0; comp < dof; ++comp) {
+      local_dot += left(comp, node) * right(comp, node);
+    }
+  }
+  return local_dot;
+}
+
+double dense_masked_input_sq_owned_local(const FSILS_lhsType& lhs,
+                                         int dof,
+                                         const Array<double>& mode,
+                                         const Array<double>& input)
+{
+  double local_sq = 0.0;
+  for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+    for (int comp = 0; comp < dof; ++comp) {
+      if (std::abs(mode(comp, node)) <= 1e-30) {
+        continue;
+      }
+      const double value = input(comp, node);
+      local_sq += value * value;
+    }
+  }
+  return local_sq;
+}
+
+void maybeTraceProjectedMode(const FSILS_lhsType& lhs,
+                             const char* label,
+                             const Array<double>& values)
+{
+  if (!correctionTraceEnabled()) {
+    return;
+  }
+
+  static int projected_mode_trace_count = 0;
+  if (projected_mode_trace_count >= correctionTraceLimit()) {
+    return;
+  }
+  ++projected_mode_trace_count;
+
+  const int dof = values.nrows();
+  const double support_owned = dense_dense_owned_dot_local(lhs, dof, values, values);
+  const double support_all = dense_dense_all_dot_local(lhs, dof, values, values);
+
+  std::fprintf(stderr,
+               "[LOW_RANK_MODE] call=%d rank=%d label=%s support_owned=%.17e support_all=%.17e",
+               projected_mode_trace_count,
+               lhs.commu.task,
+               label,
+               support_owned,
+               support_all);
+
+  int printed = 0;
+  for (fsils_int node = 0; node < lhs.nNo && printed < 6; ++node) {
+    for (int comp = 0; comp < dof && printed < 6; ++comp) {
+      const double value = values(comp, node);
+      if (std::abs(value) <= 1e-30) {
+        continue;
+      }
+      std::fprintf(stderr,
+                   " nz[%d]=(c=%d,n=%d,v=%.17e)",
+                   printed,
+                   comp,
+                   static_cast<int>(node),
+                   value);
+      ++printed;
+    }
+  }
+  std::fprintf(stderr, "\n");
+  std::fflush(stderr);
+}
+
+double dense_masked_input_sq_all_local(const FSILS_lhsType& lhs,
+                                       int dof,
+                                       const Array<double>& mode,
+                                       const Array<double>& input)
+{
+  double local_sq = 0.0;
+  for (fsils_int node = 0; node < lhs.nNo; ++node) {
+    for (int comp = 0; comp < dof; ++comp) {
+      if (std::abs(mode(comp, node)) <= 1e-30) {
+        continue;
+      }
+      const double value = input(comp, node);
+      local_sq += value * value;
+    }
+  }
+  return local_sq;
+}
+
 void allreduce_sum_in_place(FSILS_lhsType& lhs,
                             std::vector<double>& values)
 {
@@ -133,6 +229,182 @@ void allreduce_sum_in_place(FSILS_lhsType& lhs,
                                  cm_mod::mpreal,
                                  lhs.commu);
   }
+}
+
+void allreduce_sum_in_place(FSILS_lhsType& lhs,
+                            std::vector<int>& values)
+{
+  if (lhs.commu.nTasks > 1 && !values.empty()) {
+    fsils_allreduce_sum_in_place(values.data(),
+                                 static_cast<int>(values.size()),
+                                 cm_mod::mpint,
+                                 lhs.commu);
+  }
+}
+
+void compute_momentum_rhs_projections(FSILS_lhsType& lhs,
+                                      const DistributedLowRankCorrection& correction,
+                                      const Array<double>& in_momentum,
+                                      std::vector<double>& rhs,
+                                      bool use_left = false,
+                                      std::vector<double>* rhs_all = nullptr,
+                                      std::vector<double>* rhs_support_owned = nullptr,
+                                      std::vector<double>* rhs_support_all = nullptr,
+                                      std::vector<double>* input_support_owned_sq = nullptr,
+                                      std::vector<double>* input_support_all_sq = nullptr)
+{
+  const int mom_ncomp = in_momentum.nrows();
+  int total_rhs = static_cast<int>(correction.reduced.size());
+  for (const auto& group : correction.grouped) {
+    total_rhs += static_cast<int>(group.right_momentum_modes.size());
+  }
+
+  rhs.assign(static_cast<std::size_t>(total_rhs), 0.0);
+  if (rhs_all != nullptr) {
+    rhs_all->assign(static_cast<std::size_t>(total_rhs), 0.0);
+  }
+  if (rhs_support_owned != nullptr) {
+    rhs_support_owned->assign(static_cast<std::size_t>(total_rhs), 0.0);
+  }
+  if (rhs_support_all != nullptr) {
+    rhs_support_all->assign(static_cast<std::size_t>(total_rhs), 0.0);
+  }
+  if (input_support_owned_sq != nullptr) {
+    input_support_owned_sq->assign(static_cast<std::size_t>(total_rhs), 0.0);
+  }
+  if (input_support_all_sq != nullptr) {
+    input_support_all_sq->assign(static_cast<std::size_t>(total_rhs), 0.0);
+  }
+
+  int offset = 0;
+  for (const auto& corr : correction.reduced) {
+    const auto& mode = use_left ? corr.left_momentum : corr.right_momentum;
+    const auto idx = static_cast<std::size_t>(offset++);
+    rhs[idx] = dense_dense_owned_dot_local(lhs, mom_ncomp, mode, in_momentum);
+    if (rhs_all != nullptr) {
+      (*rhs_all)[idx] = dense_dense_all_dot_local(lhs, mom_ncomp, mode, in_momentum);
+    }
+    if (rhs_support_owned != nullptr) {
+      (*rhs_support_owned)[idx] = dense_dense_owned_dot_local(lhs, mom_ncomp, mode, mode);
+    }
+    if (rhs_support_all != nullptr) {
+      (*rhs_support_all)[idx] = dense_dense_all_dot_local(lhs, mom_ncomp, mode, mode);
+    }
+    if (input_support_owned_sq != nullptr) {
+      (*input_support_owned_sq)[idx] =
+          dense_masked_input_sq_owned_local(lhs, mom_ncomp, mode, in_momentum);
+    }
+    if (input_support_all_sq != nullptr) {
+      (*input_support_all_sq)[idx] =
+          dense_masked_input_sq_all_local(lhs, mom_ncomp, mode, in_momentum);
+    }
+  }
+
+  for (const auto& group : correction.grouped) {
+    const auto& modes = use_left ? group.left_momentum_modes : group.right_momentum_modes;
+    for (const auto& mode : modes) {
+      const auto idx = static_cast<std::size_t>(offset++);
+      rhs[idx] = dense_dense_owned_dot_local(lhs, mom_ncomp, mode, in_momentum);
+      if (rhs_all != nullptr) {
+        (*rhs_all)[idx] = dense_dense_all_dot_local(lhs, mom_ncomp, mode, in_momentum);
+      }
+      if (rhs_support_owned != nullptr) {
+        (*rhs_support_owned)[idx] = dense_dense_owned_dot_local(lhs, mom_ncomp, mode, mode);
+      }
+      if (rhs_support_all != nullptr) {
+        (*rhs_support_all)[idx] = dense_dense_all_dot_local(lhs, mom_ncomp, mode, mode);
+      }
+      if (input_support_owned_sq != nullptr) {
+        (*input_support_owned_sq)[idx] =
+            dense_masked_input_sq_owned_local(lhs, mom_ncomp, mode, in_momentum);
+      }
+      if (input_support_all_sq != nullptr) {
+        (*input_support_all_sq)[idx] =
+            dense_masked_input_sq_all_local(lhs, mom_ncomp, mode, in_momentum);
+      }
+    }
+  }
+
+  allreduce_sum_in_place(lhs, rhs);
+  if (rhs_all != nullptr) {
+    allreduce_sum_in_place(lhs, *rhs_all);
+  }
+  if (rhs_support_owned != nullptr) {
+    allreduce_sum_in_place(lhs, *rhs_support_owned);
+  }
+  if (rhs_support_all != nullptr) {
+    allreduce_sum_in_place(lhs, *rhs_support_all);
+  }
+  if (input_support_owned_sq != nullptr) {
+    allreduce_sum_in_place(lhs, *input_support_owned_sq);
+  }
+  if (input_support_all_sq != nullptr) {
+    allreduce_sum_in_place(lhs, *input_support_all_sq);
+  }
+}
+
+void maybeTraceMomentumProjection(FSILS_lhsType& lhs,
+                                  const char* label,
+                                  const Array<double>& in_momentum,
+                                  const std::vector<double>& rhs,
+                                  const std::vector<double>& rhs_all,
+                                  const std::vector<double>& rhs_support_owned,
+                                  const std::vector<double>& rhs_support_all,
+                                  const std::vector<double>& input_support_owned_sq,
+                                  const std::vector<double>& input_support_all_sq)
+{
+  if (!correctionTraceEnabled()) {
+    return;
+  }
+
+  static int momentum_projection_trace_count = 0;
+  if (momentum_projection_trace_count >= correctionTraceLimit()) {
+    return;
+  }
+  ++momentum_projection_trace_count;
+
+  const int mom_ncomp = in_momentum.nrows();
+  double input_owned_sq = 0.0;
+  double input_all_sq = 0.0;
+  for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+    for (int comp = 0; comp < mom_ncomp; ++comp) {
+      const double v = in_momentum(comp, node);
+      input_owned_sq += v * v;
+    }
+  }
+  for (fsils_int node = 0; node < lhs.nNo; ++node) {
+    for (int comp = 0; comp < mom_ncomp; ++comp) {
+      const double v = in_momentum(comp, node);
+      input_all_sq += v * v;
+    }
+  }
+
+  std::fprintf(stderr,
+               "[LOW_RANK_CORR_DIAG] rank=%d label=%s count=%zu input_owned_l2=%.17e input_all_l2=%.17e",
+               lhs.commu.task,
+               label,
+               rhs.size(),
+               std::sqrt(input_owned_sq),
+               std::sqrt(input_all_sq));
+  for (std::size_t i = 0; i < rhs.size(); ++i) {
+    std::fprintf(stderr,
+                 " rhs_owned[%zu]=%.17e rhs_all[%zu]=%.17e support_owned[%zu]=%.17e support_all[%zu]=%.17e"
+                 " input_support_owned_l2[%zu]=%.17e input_support_all_l2[%zu]=%.17e",
+                 i,
+                 rhs[i],
+                 i,
+                 rhs_all[i],
+                 i,
+                 rhs_support_owned[i],
+                 i,
+                 rhs_support_all[i],
+                 i,
+                 std::sqrt(input_support_owned_sq[i]),
+                 i,
+                 std::sqrt(input_support_all_sq[i]));
+  }
+  std::fprintf(stderr, "\n");
+  std::fflush(stderr);
 }
 
 void dense_axpy(int dof,
@@ -369,12 +641,20 @@ const std::vector<FSILS_reducedSparseEntry>& projected_left_entries(
 }
 
 const std::vector<FSILS_reducedSparseEntry>& projected_right_entries(
+    const FSILS_lhsType& lhs,
     const FSILS_reducedFieldUpdateType& update)
 {
-  return !update.right_scaled_owned.empty() ? update.right_scaled_owned
-      : !update.right_owned.empty()         ? update.right_owned
-      : !update.right_scaled.empty()        ? update.right_scaled
-                                            : update.right;
+  if (!update.right_scaled_owned.empty()) {
+    return update.right_scaled_owned;
+  }
+  if (!update.right_owned.empty()) {
+    return update.right_owned;
+  }
+  if (lhs.commu.nTasks > 1) {
+    static const std::vector<FSILS_reducedSparseEntry> empty_entries;
+    return empty_entries;
+  }
+  return !update.right_scaled.empty() ? update.right_scaled : update.right;
 }
 
 }  // namespace
@@ -391,55 +671,35 @@ Profile inspect(const FSILS_lhsType& lhs,
   profile.distributed = lhs.commu.nTasks > 1;
   profile.has_grouped_bordered = !lhs.grouped_bordered_field_couplings.empty();
 
-  int local_active_face_corrections = 0;
-  for (const auto& face : lhs.face) {
-    if (face.coupledFlag && std::abs(face.res) > 1e-30 && face.nNo > 0) {
-      ++local_active_face_corrections;
-    }
+  std::vector<int> face_active_flags(lhs.face.size(), 0);
+  for (std::size_t i = 0; i < lhs.face.size(); ++i) {
+    const auto& face = lhs.face[i];
+    face_active_flags[i] =
+        (face.coupledFlag && std::abs(face.res) > 1e-30 && face.nNo > 0) ? 1 : 0;
   }
+  allreduce_sum_in_place(const_cast<FSILS_lhsType&>(lhs), face_active_flags);
+  profile.active_face_corrections = static_cast<int>(
+      std::count_if(face_active_flags.begin(), face_active_flags.end(),
+                    [](int active) { return active > 0; }));
 
-  int local_active_reduced_corrections = 0;
-  int local_active_duplicate_reduced_corrections = 0;
+  std::vector<int> reduced_active_flags(lhs.reduced_updates.size(), 0);
+  std::vector<int> reduced_duplicate_flags(lhs.reduced_updates.size(), 0);
   bool local_has_distinct_multi_reduced_corrections = false;
-  for (const auto& update : lhs.reduced_updates) {
+  for (std::size_t i = 0; i < lhs.reduced_updates.size(); ++i) {
+    const auto& update = lhs.reduced_updates[i];
     if (!update.active || std::abs(update.sigma) <= 1e-30) {
       continue;
     }
-    ++local_active_reduced_corrections;
+    reduced_active_flags[i] = 1;
     if (update.grouped_coupling_id == kNativeFaceDuplicateCouplingId) {
-      ++local_active_duplicate_reduced_corrections;
+      reduced_duplicate_flags[i] = 1;
     } else if (reduced_update_has_distinct_left_right(update)) {
       local_has_distinct_multi_reduced_corrections = true;
     }
   }
-
-  profile.active_face_corrections = local_active_face_corrections;
-  profile.active_reduced_corrections = local_active_reduced_corrections;
-  profile.active_duplicate_reduced_corrections = local_active_duplicate_reduced_corrections;
   if (lhs.commu.nTasks > 1) {
-    int global_active_face_corrections = profile.active_face_corrections;
-    int global_active_reduced_corrections = profile.active_reduced_corrections;
-    int global_active_duplicate_reduced_corrections =
-        profile.active_duplicate_reduced_corrections;
-    fsils_allreduce_sum(&profile.active_face_corrections,
-                        &global_active_face_corrections,
-                        1,
-                        cm_mod::mpint,
-                        const_cast<FSILS_commuType&>(lhs.commu));
-    fsils_allreduce_sum(&profile.active_reduced_corrections,
-                        &global_active_reduced_corrections,
-                        1,
-                        cm_mod::mpint,
-                        const_cast<FSILS_commuType&>(lhs.commu));
-    fsils_allreduce_sum(&profile.active_duplicate_reduced_corrections,
-                        &global_active_duplicate_reduced_corrections,
-                        1,
-                        cm_mod::mpint,
-                        const_cast<FSILS_commuType&>(lhs.commu));
-    profile.active_face_corrections = global_active_face_corrections;
-    profile.active_reduced_corrections = global_active_reduced_corrections;
-    profile.active_duplicate_reduced_corrections =
-        global_active_duplicate_reduced_corrections;
+    allreduce_sum_in_place(const_cast<FSILS_lhsType&>(lhs), reduced_active_flags);
+    allreduce_sum_in_place(const_cast<FSILS_lhsType&>(lhs), reduced_duplicate_flags);
 
     int local_distinct = local_has_distinct_multi_reduced_corrections ? 1 : 0;
     int global_distinct = local_distinct;
@@ -452,6 +712,13 @@ Profile inspect(const FSILS_lhsType& lhs,
   } else {
     profile.has_distinct_multi_reduced_corrections = local_has_distinct_multi_reduced_corrections;
   }
+
+  profile.active_reduced_corrections = static_cast<int>(
+      std::count_if(reduced_active_flags.begin(), reduced_active_flags.end(),
+                    [](int active) { return active > 0; }));
+  profile.active_duplicate_reduced_corrections = static_cast<int>(
+      std::count_if(reduced_duplicate_flags.begin(), reduced_duplicate_flags.end(),
+                    [](int active) { return active > 0; }));
 
   profile.active_nonduplicate_reduced_corrections =
       std::max(0, profile.active_reduced_corrections -
@@ -487,12 +754,14 @@ DistributedLowRankCorrection build(const FSILS_lhsType& lhs,
     ProjectedReducedCorrection projected;
     projected.sigma = update.sigma;
     const auto& left_entries = projected_left_entries(update);
-    const auto& right_entries = projected_right_entries(update);
-
-    fill_projected_block_vector(lhs, left_entries, mom_start, mom_ncomp, projected.left_momentum);
+    const auto& right_entries = projected_right_entries(lhs, update);
+    fill_projected_block_vector(
+        lhs, left_entries, mom_start, mom_ncomp, projected.left_momentum);
     fill_projected_block_vector(lhs, left_entries, con_start, con_ncomp, projected.left_constraint);
     fill_projected_block_vector(lhs, right_entries, mom_start, mom_ncomp, projected.right_momentum);
     fill_projected_block_vector(lhs, right_entries, con_start, con_ncomp, projected.right_constraint);
+    maybeTraceProjectedMode(lhs, "reduced_left_momentum", projected.left_momentum);
+    maybeTraceProjectedMode(lhs, "reduced_right_momentum", projected.right_momentum);
     correction.reduced.push_back(std::move(projected));
   }
 
@@ -521,14 +790,12 @@ DistributedLowRankCorrection build(const FSILS_lhsType& lhs,
     projected.right_constraint_modes.reserve(group_data.modes.size());
 
     for (const auto& mode : group_data.modes) {
-      const auto& left_entries = projected_left_entries(mode);
-      const auto& right_entries = projected_right_entries(mode);
-
       projected.left_momentum_modes.emplace_back();
       projected.left_constraint_modes.emplace_back();
       projected.right_momentum_modes.emplace_back();
       projected.right_constraint_modes.emplace_back();
-
+      const auto& left_entries = projected_left_entries(mode);
+      const auto& right_entries = projected_right_entries(lhs, mode);
       fill_projected_block_vector(lhs,
                                   left_entries,
                                   mom_start,
@@ -589,7 +856,7 @@ void apply_constraint_driven(FSILS_lhsType& lhs,
   std::vector<double> rhs(static_cast<std::size_t>(total_rhs), 0.0);
   int offset = 0;
   for (const auto& corr : correction.reduced) {
-    rhs[static_cast<std::size_t>(offset++)] =
+      rhs[static_cast<std::size_t>(offset++)] =
         dense_dense_owned_dot_local(lhs, con_ncomp, corr.right_constraint, in_constraint);
   }
   for (const auto& group : correction.grouped) {
@@ -667,22 +934,38 @@ void apply_momentum_driven(FSILS_lhsType& lhs,
   const int con_ncomp = out_constraint.nrows();
   const fsils_int nNo = out_constraint.ncols();
 
-  std::vector<double> rhs(static_cast<std::size_t>(total_rhs), 0.0);
-  int offset = 0;
-  for (const auto& corr : correction.reduced) {
-    rhs[static_cast<std::size_t>(offset++)] =
-        dense_dense_owned_dot_local(lhs, mom_ncomp, corr.right_momentum, in_momentum);
+  std::vector<double> rhs;
+  std::vector<double> rhs_all;
+  std::vector<double> rhs_support_owned;
+  std::vector<double> rhs_support_all;
+  std::vector<double> input_support_owned_sq;
+  std::vector<double> input_support_all_sq;
+  if (correctionTraceEnabled()) {
+    compute_momentum_rhs_projections(lhs,
+                                     correction,
+                                     in_momentum,
+                                     rhs,
+                                     false,
+                                     &rhs_all,
+                                     &rhs_support_owned,
+                                     &rhs_support_all,
+                                     &input_support_owned_sq,
+                                     &input_support_all_sq);
+    maybeTraceMomentumProjection(lhs,
+                                 "momentum_rhs_diag",
+                                 in_momentum,
+                                 rhs,
+                                 rhs_all,
+                                 rhs_support_owned,
+                                 rhs_support_all,
+                                 input_support_owned_sq,
+                                 input_support_all_sq);
+  } else {
+    compute_momentum_rhs_projections(lhs, correction, in_momentum, rhs);
   }
-  for (const auto& group : correction.grouped) {
-    for (const auto& mode : group.right_momentum_modes) {
-      rhs[static_cast<std::size_t>(offset++)] =
-          dense_dense_owned_dot_local(lhs, mom_ncomp, mode, in_momentum);
-    }
-  }
-  allreduce_sum_in_place(lhs, rhs);
   maybeTraceCorrectionCoefficients(lhs, "momentum_rhs", rhs, nullptr);
 
-  offset = 0;
+  int offset = 0;
   std::vector<double> alpha_trace;
   alpha_trace.reserve(static_cast<std::size_t>(n_reduced));
   for (const auto& corr : correction.reduced) {
@@ -721,6 +1004,43 @@ void apply_momentum_driven(FSILS_lhsType& lhs,
                  out_constraint);
     }
   }
+}
+
+void trace_momentum_projection(FSILS_lhsType& lhs,
+                               const DistributedLowRankCorrection& correction,
+                               const char* label,
+                               const Array<double>& in_momentum,
+                               bool use_left)
+{
+  if (correction.empty() || !correctionTraceEnabled()) {
+    return;
+  }
+
+  std::vector<double> rhs;
+  std::vector<double> rhs_all;
+  std::vector<double> rhs_support_owned;
+  std::vector<double> rhs_support_all;
+  std::vector<double> input_support_owned_sq;
+  std::vector<double> input_support_all_sq;
+  compute_momentum_rhs_projections(lhs,
+                                   correction,
+                                   in_momentum,
+                                   rhs,
+                                   use_left,
+                                   &rhs_all,
+                                   &rhs_support_owned,
+                                   &rhs_support_all,
+                                   &input_support_owned_sq,
+                                   &input_support_all_sq);
+  maybeTraceMomentumProjection(lhs,
+                               label,
+                               in_momentum,
+                               rhs,
+                               rhs_all,
+                               rhs_support_owned,
+                               rhs_support_all,
+                               input_support_owned_sq,
+                               input_support_all_sq);
 }
 
 }  // namespace fe_fsi_linear_solver::distributed_low_rank_correction

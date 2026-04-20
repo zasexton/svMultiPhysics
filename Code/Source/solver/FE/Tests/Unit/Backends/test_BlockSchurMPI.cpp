@@ -16,12 +16,16 @@
 #include "Sparsity/DistributedSparsityPattern.h"
 
 #include "Backends/FSILS/FsilsFactory.h"
+#include "Backends/FSILS/FsilsMatrix.h"
 #include "Backends/FSILS/FsilsVector.h"
+#include "Backends/FSILS/liner_solver/fsils_api.hpp"
 
 #include <mpi.h>
 #include <array>
 #include <cmath>
 #include <limits>
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,6 +35,33 @@ namespace {
 
 using svmp::FE::sparsity::DistributedSparsityPattern;
 using svmp::FE::sparsity::IndexRange;
+
+class ScopedEnvVar final {
+public:
+    ScopedEnvVar(const char* key, const char* value) : key_(key)
+    {
+        if (const char* prior = std::getenv(key_)) {
+            prior_value_ = std::string(prior);
+        }
+        ::setenv(key_, value, 1);
+    }
+
+    ~ScopedEnvVar()
+    {
+        if (prior_value_.has_value()) {
+            ::setenv(key_, prior_value_->c_str(), 1);
+        } else {
+            ::unsetenv(key_);
+        }
+    }
+
+    ScopedEnvVar(const ScopedEnvVar&) = delete;
+    ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
+
+private:
+    const char* key_{nullptr};
+    std::optional<std::string> prior_value_{};
+};
 
 SolverOptions makeFsilsBlockSchurOptions(int dof_per_node,
                                          int primary_components,
@@ -318,6 +349,176 @@ std::vector<Real> gatherOwnedGlobalVectorByOldNode(const GenericVector& x,
                   MPI_SUM,
                   comm);
     return gathered;
+}
+
+std::vector<Real> copyOldToInternalBuffer(const FsilsVector& src)
+{
+    const auto* shared = src.shared();
+    EXPECT_NE(shared, nullptr);
+    if (shared == nullptr) {
+        return {};
+    }
+
+    const int dof = shared->dof;
+    const int nNo = shared->lhs.nNo;
+    std::vector<Real> internal(static_cast<std::size_t>(dof) * static_cast<std::size_t>(nNo),
+                               Real(0.0));
+    const auto& lhs = shared->lhs;
+    const auto& src_data = src.data();
+    for (int old = 0; old < nNo; ++old) {
+        const int internal_node = lhs.map(old);
+        const std::size_t src_base =
+            static_cast<std::size_t>(old) * static_cast<std::size_t>(dof);
+        const std::size_t dst_base =
+            static_cast<std::size_t>(internal_node) * static_cast<std::size_t>(dof);
+        for (int c = 0; c < dof; ++c) {
+            internal[dst_base + static_cast<std::size_t>(c)] =
+                src_data[src_base + static_cast<std::size_t>(c)];
+        }
+    }
+    return internal;
+}
+
+std::vector<Real> gatherOwnedInternalGlobalVector(const FsilsShared& shared,
+                                                  std::span<const Real> internal,
+                                                  GlobalIndex n_global,
+                                                  MPI_Comm comm)
+{
+    const int dof = shared.dof;
+    const int nNo = shared.lhs.nNo;
+    EXPECT_EQ(static_cast<int>(internal.size()), dof * nNo);
+
+    std::vector<Real> local(static_cast<std::size_t>(n_global), Real(0.0));
+    for (int internal_node = 0; internal_node < nNo; ++internal_node) {
+        int old = -1;
+        if (!shared.old_of_internal.empty()) {
+            old = shared.old_of_internal[static_cast<std::size_t>(internal_node)];
+        } else {
+            for (int candidate_old = 0; candidate_old < nNo; ++candidate_old) {
+                if (shared.lhs.map(candidate_old) == internal_node) {
+                    old = candidate_old;
+                    break;
+                }
+            }
+        }
+        if (old < 0 || old >= shared.owned_node_count) {
+            continue;
+        }
+        const int global_node = shared.oldToGlobalNode(old);
+        if (global_node < 0) {
+            continue;
+        }
+        const std::size_t src_base =
+            static_cast<std::size_t>(internal_node) * static_cast<std::size_t>(dof);
+        const std::size_t dst_base =
+            static_cast<std::size_t>(global_node) * static_cast<std::size_t>(dof);
+        for (int c = 0; c < dof; ++c) {
+            local[dst_base + static_cast<std::size_t>(c)] =
+                internal[src_base + static_cast<std::size_t>(c)];
+        }
+    }
+
+    std::vector<Real> gathered(static_cast<std::size_t>(n_global), Real(0.0));
+    MPI_Allreduce(local.data(),
+                  gathered.data(),
+                  static_cast<int>(n_global),
+                  MPI_DOUBLE,
+                  MPI_SUM,
+                  comm);
+    return gathered;
+}
+
+std::vector<Real> gatherOwnedInternalGlobalMatrix(const FsilsMatrix& A,
+                                                  GlobalIndex n_global,
+                                                  MPI_Comm comm)
+{
+    const auto shared = A.shared();
+    EXPECT_NE(shared, nullptr);
+    if (shared == nullptr) {
+        return {};
+    }
+
+    const int dof = shared->dof;
+    const auto& lhs = shared->lhs;
+    const auto* values = A.fsilsValuesPtr();
+    const std::size_t n_dense =
+        static_cast<std::size_t>(n_global) * static_cast<std::size_t>(n_global);
+    std::vector<Real> local(n_dense, Real(0.0));
+
+    for (int internal_row = 0; internal_row < lhs.nNo; ++internal_row) {
+        int old_row = -1;
+        if (!shared->old_of_internal.empty()) {
+            old_row = shared->old_of_internal[static_cast<std::size_t>(internal_row)];
+        } else {
+            for (int candidate_old = 0; candidate_old < lhs.nNo; ++candidate_old) {
+                if (lhs.map(candidate_old) == internal_row) {
+                    old_row = candidate_old;
+                    break;
+                }
+            }
+        }
+        if (old_row < 0 || old_row >= shared->owned_node_count) {
+            continue;
+        }
+        const int global_row_node = shared->oldToGlobalNode(old_row);
+        if (global_row_node < 0) {
+            continue;
+        }
+
+        for (int nz = lhs.rowPtr(0, internal_row); nz <= lhs.rowPtr(1, internal_row); ++nz) {
+            const int internal_col = lhs.colPtr(nz);
+            int old_col = -1;
+            if (!shared->old_of_internal.empty()) {
+                old_col = shared->old_of_internal[static_cast<std::size_t>(internal_col)];
+            } else {
+                for (int candidate_old = 0; candidate_old < lhs.nNo; ++candidate_old) {
+                    if (lhs.map(candidate_old) == internal_col) {
+                        old_col = candidate_old;
+                        break;
+                    }
+                }
+            }
+            const int global_col_node = shared->oldToGlobalNode(old_col);
+            if (global_col_node < 0) {
+                continue;
+            }
+
+            const std::size_t block_base =
+                static_cast<std::size_t>(nz) * static_cast<std::size_t>(dof * dof);
+            for (int row_comp = 0; row_comp < dof; ++row_comp) {
+                const std::size_t global_row =
+                    static_cast<std::size_t>(global_row_node) * static_cast<std::size_t>(dof) +
+                    static_cast<std::size_t>(row_comp);
+                for (int col_comp = 0; col_comp < dof; ++col_comp) {
+                    const std::size_t global_col =
+                        static_cast<std::size_t>(global_col_node) * static_cast<std::size_t>(dof) +
+                        static_cast<std::size_t>(col_comp);
+                    local[global_row * static_cast<std::size_t>(n_global) + global_col] =
+                        values[block_base +
+                               static_cast<std::size_t>(row_comp * dof + col_comp)];
+                }
+            }
+        }
+    }
+
+    std::vector<Real> gathered(n_dense, Real(0.0));
+    MPI_Allreduce(local.data(),
+                  gathered.data(),
+                  static_cast<int>(n_dense),
+                  MPI_DOUBLE,
+                  MPI_SUM,
+                  comm);
+    return gathered;
+}
+
+void expectGatheredVectorMatches(const std::vector<Real>& actual,
+                                 std::span<const Real> expected,
+                                 Real tol = 1e-12)
+{
+    ASSERT_EQ(actual.size(), expected.size());
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+        EXPECT_NEAR(actual[i], expected[i], tol) << "mismatch at dof " << i;
+    }
 }
 
 [[nodiscard]] bool solveDenseSystemInPlace(std::vector<Real>& a,
@@ -1430,6 +1631,1132 @@ TEST(FsilsBackendMPI, ReducedFieldUpdateSolversConvergeComparable)
                                                       MPI_COMM_WORLD);
         EXPECT_LE(rel, 1e-8);
     }
+}
+
+TEST(FsilsBackendMPI, ReducedFieldUpdateEmptyActiveComponentsMeansAllComponents)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 3;
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+
+    const IndexRange owned = (rank == 0) ? IndexRange{0, 3} : IndexRange{3, 9};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+
+    if (rank == 0) {
+        const std::array<GlobalIndex, 6> edofs = {0, 1, 2, 3, 4, 5};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    } else {
+        const std::array<GlobalIndex, 6> edofs = {3, 4, 5, 6, 7, 8};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    }
+
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> ghost_rows{3, 4, 5};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 6, 12, 18};
+        std::vector<GlobalIndex> ghost_cols;
+        ghost_cols.reserve(18);
+        for (int r = 0; r < dof; ++r) {
+            for (GlobalIndex c = 0; c < static_cast<GlobalIndex>(2 * dof); ++c) {
+                ghost_cols.push_back(c);
+            }
+        }
+        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
+    }
+
+    FsilsFactory factory(dof);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(n_global);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+
+    const int edof = 2 * dof;
+    std::vector<Real> Ke(edof * edof, 0.0);
+    const auto setKe = [&](int r, int c, Real v) {
+        Ke[static_cast<std::size_t>(r * edof + c)] = v;
+    };
+
+    const Real B[3][3] = {
+        {4.0, 1.0, 1.0},
+        {1.0, 3.0, 0.0},
+        {1.0, 0.0, 1.0},
+    };
+    const Real C[3][3] = {
+        {-1.0, 0.0, 0.0},
+        { 0.0,-1.0, 0.0},
+        { 0.0, 0.0, 0.0},
+    };
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            setKe(r, c, B[r][c]);
+            setKe(r, c + 3, C[r][c]);
+            setKe(r + 3, c, C[c][r]);
+        }
+    }
+    for (int r = 0; r < edof; ++r) {
+        setKe(r, r, Ke[static_cast<std::size_t>(r * edof + r)] + 0.5);
+    }
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    } else {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = 3 + i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    }
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    ReducedFieldUpdate upd_all{};
+    upd_all.sigma = 900.0;
+    upd_all.active_components = {0, 1, 2};
+    if (rank == 0) {
+        upd_all.left = {
+            {0, 0.06},
+            {1, -0.03},
+            {2, 0.07},
+        };
+        upd_all.right = {
+            {0, 0.02},
+            {1, 0.08},
+            {2, -0.05},
+        };
+    } else {
+        upd_all.left = {
+            {6, 0.10},
+            {7, -0.04},
+            {8, 0.09},
+        };
+        upd_all.right = {
+            {6, -0.02},
+            {7, 0.11},
+            {8, 0.05},
+        };
+    }
+
+    ReducedFieldUpdate upd_empty = upd_all;
+    upd_empty.active_components.clear();
+
+    auto x_exact = factory.createVector(n_global);
+    {
+        auto xs = x_exact->localSpan();
+        std::fill(xs.begin(), xs.end(), Real(1.0));
+    }
+    x_exact->updateGhosts();
+    A->mult(*x_exact, *b);
+    addReducedFieldContribution(factory,
+                                *b,
+                                *x_exact,
+                                std::span<const ReducedFieldUpdate>(&upd_all, 1),
+                                MPI_COMM_WORLD);
+
+    SolverOptions opts = makeFsilsBlockSchurOptions(/*dof_per_node=*/3,
+                                                    /*primary_components=*/2,
+                                                    /*constraint_components=*/1,
+                                                    FsilsBlockSchurSchurPreconditioner::DiagL,
+                                                    FsilsBlockSchurMomentumApproximation::DiagK);
+    opts.rel_tol = 1e-8;
+    opts.abs_tol = 1e-12;
+    opts.max_iter = 20;
+    opts.krylov_dim = 40;
+    opts.fsils_blockschur_gm_max_iter = 120;
+    opts.fsils_blockschur_cg_max_iter = 120;
+    opts.fsils_blockschur_gm_rel_tol = 1e-10;
+    opts.fsils_blockschur_cg_rel_tol = 1e-10;
+
+    auto solve_with_update = [&](const ReducedFieldUpdate& upd)
+        -> std::pair<std::shared_ptr<GenericVector>, Real> {
+        auto solver = factory.createLinearSolver(opts);
+        EXPECT_TRUE(solver->supportsNativeReducedFieldUpdates());
+        solver->setReducedFieldUpdates(std::span<const ReducedFieldUpdate>(&upd, 1));
+        solver->setEffectiveTimeStep(1.0 / 300.0);
+        auto x = factory.createVector(n_global);
+        const auto rep = solver->solve(*A, *x, *b);
+        EXPECT_TRUE(rep.converged);
+        expectSolverReportSane(rep, opts.max_iter);
+        expectBlockSchurMetricsPresent(rep);
+        const Real rel = fullOperatorRelativeResidual(factory,
+                                                      *A,
+                                                      *x,
+                                                      *b,
+                                                      std::span<const ReducedFieldUpdate>(&upd_all, 1),
+                                                      MPI_COMM_WORLD);
+        return {std::move(x), rel};
+    };
+
+    const auto [x_all, rel_all] = solve_with_update(upd_all);
+    const auto [x_empty, rel_empty] = solve_with_update(upd_empty);
+
+    EXPECT_LE(rel_all, 1e-8);
+    EXPECT_LE(rel_empty, 1e-8);
+
+    const auto xs_all = x_all->localSpan();
+    const auto xs_empty = x_empty->localSpan();
+    ASSERT_EQ(xs_all.size(), xs_empty.size());
+    for (std::size_t i = 0; i < xs_all.size(); ++i) {
+        EXPECT_NEAR(xs_empty[i], xs_all[i], 1e-10);
+    }
+}
+
+TEST(FsilsBackendMPI, ReducedFieldUpdateFaceCacheAddBcMulMatchesSparse)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 3;
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+
+    const IndexRange owned = (rank == 0) ? IndexRange{0, 3} : IndexRange{3, 9};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+
+    if (rank == 0) {
+        const std::array<GlobalIndex, 6> edofs = {0, 1, 2, 3, 4, 5};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    } else {
+        const std::array<GlobalIndex, 6> edofs = {3, 4, 5, 6, 7, 8};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    }
+
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> ghost_rows{3, 4, 5};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 6, 12, 18};
+        std::vector<GlobalIndex> ghost_cols;
+        ghost_cols.reserve(18);
+        for (int r = 0; r < dof; ++r) {
+            for (GlobalIndex c = 0; c < static_cast<GlobalIndex>(2 * dof); ++c) {
+                ghost_cols.push_back(c);
+            }
+        }
+        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
+    }
+
+    FsilsFactory factory(dof);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(n_global);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+
+    const int edof = 2 * dof;
+    std::vector<Real> Ke(edof * edof, 0.0);
+    const auto setKe = [&](int r, int c, Real v) {
+        Ke[static_cast<std::size_t>(r * edof + c)] = v;
+    };
+
+    const Real B[3][3] = {
+        {4.0, 1.0, 1.0},
+        {1.0, 3.0, 0.0},
+        {1.0, 0.0, 1.0},
+    };
+    const Real C[3][3] = {
+        {-1.0, 0.0, 0.0},
+        { 0.0,-1.0, 0.0},
+        { 0.0, 0.0, 0.0},
+    };
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            setKe(r, c, B[r][c]);
+            setKe(r, c + 3, C[r][c]);
+            setKe(r + 3, c, C[c][r]);
+            setKe(r + 3, c + 3, B[r][c]);
+        }
+    }
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    } else {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = 3 + i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    }
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    ReducedFieldUpdate upd{};
+    upd.sigma = 1500.0;
+    upd.active_components = {0, 1};
+    if (rank == 0) {
+        upd.left = {
+            {0, 0.03},
+            {1, -0.02},
+        };
+        upd.right = {
+            {0, 0.05},
+            {1, 0.12},
+        };
+    } else {
+        upd.left = {
+            {6, 0.10},
+            {7, -0.07},
+        };
+        upd.right = {
+            {6, -0.02},
+            {7, 0.08},
+        };
+    }
+
+    auto x_exact = factory.createVector(n_global);
+    {
+        auto xs = x_exact->localSpan();
+        std::fill(xs.begin(), xs.end(), Real(1.0));
+    }
+    x_exact->updateGhosts();
+    A->mult(*x_exact, *b);
+    addReducedFieldContribution(factory,
+                                *b,
+                                *x_exact,
+                                std::span<const ReducedFieldUpdate>(&upd, 1),
+                                MPI_COMM_WORLD);
+
+    SolverOptions opts = makeFsilsBlockSchurOptions(/*dof_per_node=*/3,
+                                                    /*primary_components=*/2,
+                                                    /*constraint_components=*/1,
+                                                    FsilsBlockSchurSchurPreconditioner::DiagL,
+                                                    FsilsBlockSchurMomentumApproximation::DiagK);
+    opts.rel_tol = 1e-8;
+    opts.abs_tol = 1e-12;
+    opts.max_iter = 20;
+    opts.krylov_dim = 40;
+    opts.fsils_blockschur_gm_max_iter = 120;
+    opts.fsils_blockschur_cg_max_iter = 120;
+    opts.fsils_blockschur_gm_rel_tol = 1e-10;
+    opts.fsils_blockschur_cg_rel_tol = 1e-10;
+
+    struct SolveCase {
+        std::shared_ptr<GenericVector> x;
+        Real rel{0.0};
+        SolverReport rep{};
+    };
+
+    auto solve_with_face_cache = [&](bool disable_face_cache) {
+        std::unique_ptr<ScopedEnvVar> face_cache_guard;
+        if (disable_face_cache) {
+            face_cache_guard = std::make_unique<ScopedEnvVar>(
+                "SVMP_DISABLE_REDUCED_FACE_CACHE_ADD_BC_MUL", "1");
+        }
+
+        auto solver = factory.createLinearSolver(opts);
+        EXPECT_TRUE(solver->supportsNativeReducedFieldUpdates());
+        solver->setReducedFieldUpdates(std::span<const ReducedFieldUpdate>(&upd, 1));
+        solver->setEffectiveTimeStep(1.0 / 300.0);
+        auto x = factory.createVector(n_global);
+        const auto rep = solver->solve(*A, *x, *b);
+        EXPECT_TRUE(rep.converged);
+        expectSolverReportSane(rep, opts.max_iter);
+        expectBlockSchurMetricsPresent(rep);
+        const Real rel = fullOperatorRelativeResidual(factory,
+                                                      *A,
+                                                      *x,
+                                                      *b,
+                                                      std::span<const ReducedFieldUpdate>(&upd, 1),
+                                                      MPI_COMM_WORLD);
+        return SolveCase{std::move(x), rel, rep};
+    };
+
+    const auto cached = solve_with_face_cache(/*disable_face_cache=*/false);
+    const auto sparse = solve_with_face_cache(/*disable_face_cache=*/true);
+
+    EXPECT_LE(cached.rel, 1e-8);
+    EXPECT_LE(sparse.rel, 1e-8);
+    EXPECT_EQ(cached.rep.iterations, sparse.rep.iterations);
+    EXPECT_EQ(cached.rep.blockschur_outer_iterations, sparse.rep.blockschur_outer_iterations);
+    EXPECT_EQ(cached.rep.blockschur_schur_solve_calls, sparse.rep.blockschur_schur_solve_calls);
+    EXPECT_EQ(cached.rep.blockschur_schur_iterations, sparse.rep.blockschur_schur_iterations);
+
+    const auto xs_cached = cached.x->localSpan();
+    const auto xs_sparse = sparse.x->localSpan();
+    ASSERT_EQ(xs_cached.size(), xs_sparse.size());
+    for (std::size_t i = 0; i < xs_cached.size(); ++i) {
+        EXPECT_NEAR(xs_cached[i], xs_sparse[i], 1e-10);
+    }
+}
+
+TEST(FsilsBackendMPI, ReducedFieldUpdateDistributedShapeRhsMatchesReference)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 3;
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+
+    const IndexRange owned = (rank == 0) ? IndexRange{0, 3} : IndexRange{3, 9};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+
+    if (rank == 0) {
+        const std::array<GlobalIndex, 6> edofs = {0, 1, 2, 3, 4, 5};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    } else {
+        const std::array<GlobalIndex, 6> edofs = {3, 4, 5, 6, 7, 8};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    }
+
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> ghost_rows{3, 4, 5};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 6, 12, 18};
+        std::vector<GlobalIndex> ghost_cols;
+        ghost_cols.reserve(18);
+        for (int r = 0; r < dof; ++r) {
+            for (GlobalIndex c = 0; c < static_cast<GlobalIndex>(2 * dof); ++c) {
+                ghost_cols.push_back(c);
+            }
+        }
+        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
+    }
+
+    FsilsFactory factory(dof);
+    auto A = factory.createMatrix(pattern);
+    auto b_matrix = factory.createVector(n_global);
+    auto b_full = factory.createVector(n_global);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+
+    const int edof = 2 * dof;
+    std::vector<Real> Ke(edof * edof, 0.0);
+    const auto setKe = [&](int r, int c, Real v) {
+        Ke[static_cast<std::size_t>(r * edof + c)] = v;
+    };
+
+    const Real B[3][3] = {
+        {4.0, 1.0, 1.0},
+        {1.0, 3.0, 0.0},
+        {1.0, 0.0, 1.0},
+    };
+    const Real C[3][3] = {
+        {-1.0, 0.0, 0.0},
+        { 0.0,-1.0, 0.0},
+        { 0.0, 0.0, 0.0},
+    };
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            setKe(r, c, B[r][c]);
+            setKe(r, c + 3, C[r][c]);
+            setKe(r + 3, c, C[c][r]);
+            setKe(r + 3, c + 3, B[r][c]);
+        }
+    }
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    } else {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = 3 + i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    }
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    ReducedFieldUpdate upd{};
+    upd.sigma = 1500.0;
+    upd.active_components = {0, 1};
+    if (rank == 0) {
+        upd.left = {
+            {0, 0.03},
+            {1, -0.02},
+        };
+        upd.right = {
+            {0, 0.05},
+            {1, 0.12},
+        };
+    } else {
+        upd.left = {
+            {6, 0.10},
+            {7, -0.07},
+        };
+        upd.right = {
+            {6, -0.02},
+            {7, 0.08},
+        };
+    }
+
+    auto x_exact = factory.createVector(n_global);
+    {
+        auto xs = x_exact->localSpan();
+        std::fill(xs.begin(), xs.end(), Real(1.0));
+    }
+    x_exact->updateGhosts();
+
+    A->mult(*x_exact, *b_matrix);
+    b_full->copyFrom(*b_matrix);
+    addReducedFieldContribution(factory,
+                                *b_full,
+                                *x_exact,
+                                std::span<const ReducedFieldUpdate>(&upd, 1),
+                                MPI_COMM_WORLD);
+
+    const auto gathered_matrix = gatherOwnedGlobalVector(*b_matrix, n_global, MPI_COMM_WORLD);
+    const auto gathered_full = gatherOwnedGlobalVector(*b_full, n_global, MPI_COMM_WORLD);
+
+    static constexpr Real expected_matrix[] = {
+        5.0, 3.0, 2.0,
+        10.0, 6.0, 4.0,
+        5.0, 3.0, 2.0,
+    };
+    static constexpr Real expected_full[] = {
+        15.35, -3.9, 2.0,
+        10.0, 6.0, 4.0,
+        39.5, -21.15, 2.0,
+    };
+
+    expectGatheredVectorMatches(gathered_matrix, expected_matrix);
+    expectGatheredVectorMatches(gathered_full, expected_full);
+}
+
+TEST(FsilsBackendMPI, DISABLED_DistributedShapeInternalRawMatrixMatchesReference)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 3;
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+
+    const IndexRange owned = (rank == 0) ? IndexRange{0, 3} : IndexRange{3, 9};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+
+    if (rank == 0) {
+        const std::array<GlobalIndex, 6> edofs = {0, 1, 2, 3, 4, 5};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    } else {
+        const std::array<GlobalIndex, 6> edofs = {3, 4, 5, 6, 7, 8};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    }
+
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> ghost_rows{3, 4, 5};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 6, 12, 18};
+        std::vector<GlobalIndex> ghost_cols;
+        ghost_cols.reserve(18);
+        for (int r = 0; r < dof; ++r) {
+            for (GlobalIndex c = 0; c < static_cast<GlobalIndex>(2 * dof); ++c) {
+                ghost_cols.push_back(c);
+            }
+        }
+        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
+    }
+
+    FsilsFactory factory(dof);
+    auto A = factory.createMatrix(pattern);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+
+    const int edof = 2 * dof;
+    std::vector<Real> Ke(edof * edof, 0.0);
+    const auto setKe = [&](int r, int c, Real v) {
+        Ke[static_cast<std::size_t>(r * edof + c)] = v;
+    };
+
+    const Real B[3][3] = {
+        {4.0, 1.0, 1.0},
+        {1.0, 3.0, 0.0},
+        {1.0, 0.0, 1.0},
+    };
+    const Real C[3][3] = {
+        {-1.0, 0.0, 0.0},
+        { 0.0,-1.0, 0.0},
+        { 0.0, 0.0, 0.0},
+    };
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            setKe(r, c, B[r][c]);
+            setKe(r, c + 3, C[r][c]);
+            setKe(r + 3, c, C[c][r]);
+            setKe(r + 3, c + 3, B[r][c]);
+        }
+    }
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    } else {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = 3 + i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    }
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    const auto* A_fs = dynamic_cast<const FsilsMatrix*>(A.get());
+    ASSERT_NE(A_fs, nullptr);
+    const auto gathered = gatherOwnedInternalGlobalMatrix(*A_fs, n_global, MPI_COMM_WORLD);
+
+    std::vector<Real> expected(static_cast<std::size_t>(n_global * n_global), Real(0.0));
+    auto add_block = [&](int row_node, int col_node, const Real block[3][3]) {
+        for (int r = 0; r < dof; ++r) {
+            for (int c = 0; c < dof; ++c) {
+                expected[static_cast<std::size_t>(row_node * dof + r) * static_cast<std::size_t>(n_global) +
+                         static_cast<std::size_t>(col_node * dof + c)] += block[r][c];
+            }
+        }
+    };
+    add_block(0, 0, B);
+    add_block(0, 1, C);
+    add_block(1, 0, C);
+    add_block(1, 1, B);
+    add_block(1, 1, B);
+    add_block(1, 2, C);
+    add_block(2, 1, C);
+    add_block(2, 2, B);
+
+    ASSERT_EQ(gathered.size(), expected.size());
+    for (std::size_t i = 0; i < gathered.size(); ++i) {
+        EXPECT_NEAR(gathered[i], expected[i], 1e-12) << "matrix mismatch at dense idx " << i;
+    }
+}
+
+TEST(FsilsBackendMPI, ReducedFieldUpdateDistributedShapeConverges)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 3;
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+
+    const IndexRange owned = (rank == 0) ? IndexRange{0, 3} : IndexRange{3, 9};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+
+    if (rank == 0) {
+        const std::array<GlobalIndex, 6> edofs = {0, 1, 2, 3, 4, 5};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    } else {
+        const std::array<GlobalIndex, 6> edofs = {3, 4, 5, 6, 7, 8};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    }
+
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> ghost_rows{3, 4, 5};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 6, 12, 18};
+        std::vector<GlobalIndex> ghost_cols;
+        ghost_cols.reserve(18);
+        for (int r = 0; r < dof; ++r) {
+            for (GlobalIndex c = 0; c < static_cast<GlobalIndex>(2 * dof); ++c) {
+                ghost_cols.push_back(c);
+            }
+        }
+        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
+    }
+
+    FsilsFactory factory(dof);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(n_global);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+
+    const int edof = 2 * dof;
+    std::vector<Real> Ke(edof * edof, 0.0);
+    const auto setKe = [&](int r, int c, Real v) {
+        Ke[static_cast<std::size_t>(r * edof + c)] = v;
+    };
+
+    const Real B[3][3] = {
+        {4.0, 1.0, 1.0},
+        {1.0, 3.0, 0.0},
+        {1.0, 0.0, 1.0},
+    };
+    const Real C[3][3] = {
+        {-1.0, 0.0, 0.0},
+        { 0.0,-1.0, 0.0},
+        { 0.0, 0.0, 0.0},
+    };
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            setKe(r, c, B[r][c]);
+            setKe(r, c + 3, C[r][c]);
+            setKe(r + 3, c, C[c][r]);
+            setKe(r + 3, c + 3, B[r][c]);
+        }
+    }
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    } else {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = 3 + i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    }
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    ReducedFieldUpdate upd{};
+    upd.sigma = 1500.0;
+    upd.active_components = {0, 1};
+    if (rank == 0) {
+        upd.left = {
+            {0, 0.03},
+            {1, -0.02},
+        };
+        upd.right = {
+            {0, 0.05},
+            {1, 0.12},
+        };
+    } else {
+        upd.left = {
+            {6, 0.10},
+            {7, -0.07},
+        };
+        upd.right = {
+            {6, -0.02},
+            {7, 0.08},
+        };
+    }
+
+    auto x_exact = factory.createVector(n_global);
+    {
+        auto xs = x_exact->localSpan();
+        std::fill(xs.begin(), xs.end(), Real(1.0));
+    }
+    x_exact->updateGhosts();
+    A->mult(*x_exact, *b);
+    addReducedFieldContribution(factory,
+                                *b,
+                                *x_exact,
+                                std::span<const ReducedFieldUpdate>(&upd, 1),
+                                MPI_COMM_WORLD);
+
+    SolverOptions opts = makeFsilsBlockSchurOptions(/*dof_per_node=*/3,
+                                                    /*primary_components=*/2,
+                                                    /*constraint_components=*/1,
+                                                    FsilsBlockSchurSchurPreconditioner::DiagL,
+                                                    FsilsBlockSchurMomentumApproximation::DiagK);
+    opts.rel_tol = 1e-8;
+    opts.abs_tol = 1e-12;
+    opts.max_iter = 20;
+    opts.krylov_dim = 40;
+    opts.fsils_blockschur_gm_max_iter = 120;
+    opts.fsils_blockschur_cg_max_iter = 120;
+    opts.fsils_blockschur_gm_rel_tol = 1e-10;
+    opts.fsils_blockschur_cg_rel_tol = 1e-10;
+
+    auto solver = factory.createLinearSolver(opts);
+    ASSERT_TRUE(solver->supportsNativeReducedFieldUpdates());
+    solver->setReducedFieldUpdates(std::span<const ReducedFieldUpdate>(&upd, 1));
+    solver->setEffectiveTimeStep(1.0 / 300.0);
+    auto x = factory.createVector(n_global);
+    const auto rep = solver->solve(*A, *x, *b);
+    EXPECT_TRUE(rep.converged);
+    expectSolverReportSane(rep, opts.max_iter);
+    expectBlockSchurMetricsPresent(rep);
+
+    const Real rel = fullOperatorRelativeResidual(factory,
+                                                  *A,
+                                                  *x,
+                                                  *b,
+                                                  std::span<const ReducedFieldUpdate>(&upd, 1),
+                                                  MPI_COMM_WORLD);
+    EXPECT_LE(rel, 1e-8);
+}
+
+TEST(FsilsBackendMPI, ReducedFieldUpdateDistributedShapeConvergesWithPartitionLocalRhs)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 3;
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+
+    const IndexRange owned = (rank == 0) ? IndexRange{0, 3} : IndexRange{3, 9};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+
+    if (rank == 0) {
+        const std::array<GlobalIndex, 6> edofs = {0, 1, 2, 3, 4, 5};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    } else {
+        const std::array<GlobalIndex, 6> edofs = {3, 4, 5, 6, 7, 8};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    }
+
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> ghost_rows{3, 4, 5};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 6, 12, 18};
+        std::vector<GlobalIndex> ghost_cols;
+        ghost_cols.reserve(18);
+        for (int r = 0; r < dof; ++r) {
+            for (GlobalIndex c = 0; c < static_cast<GlobalIndex>(2 * dof); ++c) {
+                ghost_cols.push_back(c);
+            }
+        }
+        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
+    }
+
+    FsilsFactory factory(dof);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(n_global);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+
+    const int edof = 2 * dof;
+    std::vector<Real> Ke(edof * edof, 0.0);
+    const auto setKe = [&](int r, int c, Real v) {
+        Ke[static_cast<std::size_t>(r * edof + c)] = v;
+    };
+
+    const Real B[3][3] = {
+        {4.0, 1.0, 1.0},
+        {1.0, 3.0, 0.0},
+        {1.0, 0.0, 1.0},
+    };
+    const Real C[3][3] = {
+        {-1.0, 0.0, 0.0},
+        { 0.0,-1.0, 0.0},
+        { 0.0, 0.0, 0.0},
+    };
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            setKe(r, c, B[r][c]);
+            setKe(r, c + 3, C[r][c]);
+            setKe(r + 3, c, C[c][r]);
+            setKe(r + 3, c + 3, B[r][c]);
+        }
+    }
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    } else {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = 3 + i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    }
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    ReducedFieldUpdate upd{};
+    upd.sigma = 1500.0;
+    upd.active_components = {0, 1};
+    if (rank == 0) {
+        upd.left = {
+            {0, 0.03},
+            {1, -0.02},
+        };
+        upd.right = {
+            {0, 0.05},
+            {1, 0.12},
+        };
+    } else {
+        upd.left = {
+            {6, 0.10},
+            {7, -0.07},
+        };
+        upd.right = {
+            {6, -0.02},
+            {7, 0.08},
+        };
+    }
+
+    auto x_exact = factory.createVector(n_global);
+    {
+        auto xs = x_exact->localSpan();
+        std::fill(xs.begin(), xs.end(), Real(1.0));
+    }
+    x_exact->updateGhosts();
+
+    auto viewB = b->createAssemblyView();
+    viewB->beginAssemblyPhase();
+    const std::array<Real, 6> be = {5.0, 3.0, 2.0, 5.0, 3.0, 2.0};
+    if (rank == 0) {
+        std::array<GlobalIndex, 6> idx = {0, 1, 2, 3, 4, 5};
+        viewB->addVectorEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(be.data(), be.size()),
+                                assembly::AddMode::Add);
+    } else {
+        std::array<GlobalIndex, 6> idx = {3, 4, 5, 6, 7, 8};
+        viewB->addVectorEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(be.data(), be.size()),
+                                assembly::AddMode::Add);
+    }
+    viewB->finalizeAssembly();
+    addReducedFieldContribution(factory,
+                                *b,
+                                *x_exact,
+                                std::span<const ReducedFieldUpdate>(&upd, 1),
+                                MPI_COMM_WORLD);
+
+    SolverOptions opts = makeFsilsBlockSchurOptions(/*dof_per_node=*/3,
+                                                    /*primary_components=*/2,
+                                                    /*constraint_components=*/1,
+                                                    FsilsBlockSchurSchurPreconditioner::DiagL,
+                                                    FsilsBlockSchurMomentumApproximation::DiagK);
+    opts.rel_tol = 1e-8;
+    opts.abs_tol = 1e-12;
+    opts.max_iter = 20;
+    opts.krylov_dim = 40;
+    opts.fsils_blockschur_gm_max_iter = 120;
+    opts.fsils_blockschur_cg_max_iter = 120;
+    opts.fsils_blockschur_gm_rel_tol = 1e-10;
+    opts.fsils_blockschur_cg_rel_tol = 1e-10;
+
+    auto solver = factory.createLinearSolver(opts);
+    ASSERT_TRUE(solver->supportsNativeReducedFieldUpdates());
+    solver->setReducedFieldUpdates(std::span<const ReducedFieldUpdate>(&upd, 1));
+    solver->setEffectiveTimeStep(1.0 / 300.0);
+    auto x = factory.createVector(n_global);
+    const auto rep = solver->solve(*A, *x, *b);
+    EXPECT_TRUE(rep.converged);
+    expectSolverReportSane(rep, opts.max_iter);
+    expectBlockSchurMetricsPresent(rep);
+
+    const Real rel = fullOperatorRelativeResidual(factory,
+                                                  *A,
+                                                  *x,
+                                                  *b,
+                                                  std::span<const ReducedFieldUpdate>(&upd, 1),
+                                                  MPI_COMM_WORLD);
+    EXPECT_LE(rel, 1e-8);
+}
+
+TEST(FsilsBackendMPI, DISABLED_ReducedFieldUpdateDistributedShapeInternalRhsHandoffMatchesReference)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 3;
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+
+    const IndexRange owned = (rank == 0) ? IndexRange{0, 3} : IndexRange{3, 9};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+
+    if (rank == 0) {
+        const std::array<GlobalIndex, 6> edofs = {0, 1, 2, 3, 4, 5};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    } else {
+        const std::array<GlobalIndex, 6> edofs = {3, 4, 5, 6, 7, 8};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    }
+
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> ghost_rows{3, 4, 5};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 6, 12, 18};
+        std::vector<GlobalIndex> ghost_cols;
+        ghost_cols.reserve(18);
+        for (int r = 0; r < dof; ++r) {
+            for (GlobalIndex c = 0; c < static_cast<GlobalIndex>(2 * dof); ++c) {
+                ghost_cols.push_back(c);
+            }
+        }
+        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
+    }
+
+    FsilsFactory factory(dof);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(n_global);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+
+    const int edof = 2 * dof;
+    std::vector<Real> Ke(edof * edof, 0.0);
+    const auto setKe = [&](int r, int c, Real v) {
+        Ke[static_cast<std::size_t>(r * edof + c)] = v;
+    };
+
+    const Real B[3][3] = {
+        {4.0, 1.0, 1.0},
+        {1.0, 3.0, 0.0},
+        {1.0, 0.0, 1.0},
+    };
+    const Real C[3][3] = {
+        {-1.0, 0.0, 0.0},
+        { 0.0,-1.0, 0.0},
+        { 0.0, 0.0, 0.0},
+    };
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            setKe(r, c, B[r][c]);
+            setKe(r, c + 3, C[r][c]);
+            setKe(r + 3, c, C[c][r]);
+            setKe(r + 3, c + 3, B[r][c]);
+        }
+    }
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    } else {
+        std::vector<GlobalIndex> idx(edof);
+        for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = 3 + i;
+        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                std::span<const Real>(Ke.data(), Ke.size()),
+                                assembly::AddMode::Add);
+    }
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    ReducedFieldUpdate upd{};
+    upd.sigma = 1500.0;
+    upd.active_components = {0, 1};
+    if (rank == 0) {
+        upd.left = {
+            {0, 0.03},
+            {1, -0.02},
+        };
+        upd.right = {
+            {0, 0.05},
+            {1, 0.12},
+        };
+    } else {
+        upd.left = {
+            {6, 0.10},
+            {7, -0.07},
+        };
+        upd.right = {
+            {6, -0.02},
+            {7, 0.08},
+        };
+    }
+
+    auto x_exact = factory.createVector(n_global);
+    {
+        auto xs = x_exact->localSpan();
+        std::fill(xs.begin(), xs.end(), Real(1.0));
+    }
+    x_exact->updateGhosts();
+    A->mult(*x_exact, *b);
+    addReducedFieldContribution(factory,
+                                *b,
+                                *x_exact,
+                                std::span<const ReducedFieldUpdate>(&upd, 1),
+                                MPI_COMM_WORLD);
+
+    const auto* b_fs = dynamic_cast<const FsilsVector*>(b.get());
+    ASSERT_NE(b_fs, nullptr);
+    ASSERT_NE(b_fs->shared(), nullptr);
+    const auto& shared = *b_fs->shared();
+
+    static constexpr Real expected_full[] = {
+        15.35, -3.9, 2.0,
+        10.0, 6.0, 4.0,
+        39.5, -21.15, 2.0,
+    };
+
+    const auto pre_internal = copyOldToInternalBuffer(*b_fs);
+    const auto gathered_pre =
+        gatherOwnedInternalGlobalVector(shared, pre_internal, n_global, MPI_COMM_WORLD);
+    expectGatheredVectorMatches(gathered_pre, expected_full);
+
+    auto post_internal = pre_internal;
+    Array<double> Ri(shared.dof, shared.lhs.nNo, post_internal.data());
+    fe_fsi_linear_solver::fsils_commuv(shared.lhs, shared.dof, Ri);
+    const auto gathered_post =
+        gatherOwnedInternalGlobalVector(shared, post_internal, n_global, MPI_COMM_WORLD);
+    expectGatheredVectorMatches(gathered_post, expected_full);
 }
 
 TEST(FsilsBackendMPI, GroupedBorderedFieldCouplingSolversConvergeComparable)

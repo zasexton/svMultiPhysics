@@ -806,6 +806,14 @@ public:
     [[nodiscard]] std::span<const Real> auxiliaryOutputValues() const noexcept;
 
     /**
+     * @brief Get the flattened current auxiliary work-state values.
+     *
+     * Updated on demand from the auxiliary state manager and returned in block
+     * registration order. Empty if no auxiliary blocks are deployed.
+     */
+    [[nodiscard]] std::span<const Real> auxiliaryStateValues() const noexcept;
+
+    /**
      * @brief Get the stable logical id of a named auxiliary output.
      *
      * Unlike `auxiliaryOutputSlotOf(...)`, this identity is assigned at deploy
@@ -1489,6 +1497,7 @@ private:
         bool partitioned_auxiliary_advance_valid_{false};
         Real partitioned_auxiliary_advance_time_{std::numeric_limits<Real>::quiet_NaN()};
         Real partitioned_auxiliary_advance_dt_{std::numeric_limits<Real>::quiet_NaN()};
+    mutable std::vector<Real> aux_state_flat_{}; ///< Flattened work-state values for assembly
     mutable std::vector<Real> aux_output_flat_{}; ///< Flattened output values for assembly
     std::vector<assembly::AuxiliaryOutputBinding> auxiliary_output_bindings_{};
 

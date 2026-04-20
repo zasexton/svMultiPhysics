@@ -74,6 +74,12 @@ void apply_momentum_driven(FSILS_lhsType& lhs,
                            const Array<double>& in_momentum,
                            Array<double>& out_constraint);
 
+void trace_momentum_projection(FSILS_lhsType& lhs,
+                               const DistributedLowRankCorrection& correction,
+                               const char* label,
+                               const Array<double>& in_momentum,
+                               bool use_left = false);
+
 }  // namespace fe_fsi_linear_solver::distributed_low_rank_correction
 
 #endif  // SV_FE_LS_DISTRIBUTED_LOW_RANK_CORRECTION_H

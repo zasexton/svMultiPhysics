@@ -1686,6 +1686,7 @@ void subtract_transpose_block_vector_product(double* y,
 }
 
 void build_point_inverse_blocks(const Vector<fsils_int>& diagPtr,
+                                const fe_fsi_linear_solver::FSILS_lhsType* lhs,
                                 int block_size,
                                 fsils_int nNo,
                                 const Array<double>& values,
@@ -1697,19 +1698,30 @@ void build_point_inverse_blocks(const Vector<fsils_int>& diagPtr,
 
   std::vector<double> diag_block(static_cast<size_t>(block_entries), 0.0);
   std::vector<double> inv_block(static_cast<size_t>(block_entries), 0.0);
+  Array<double> diag_blocks(block_entries, nNo);
   for (fsils_int i = 0; i < nNo; ++i) {
     const fsils_int diag_nz = diagPtr(i);
+    for (int entry = 0; entry < block_entries; ++entry) {
+      diag_blocks(entry, i) = values(entry, diag_nz);
+    }
+  }
+  if (lhs != nullptr && lhs->commu.nTasks > 1 && lhs->nReq > 0) {
+    fsils_commuv(*lhs, block_entries, diag_blocks);
+  }
+  for (fsils_int i = 0; i < nNo; ++i) {
     double* out = block_ptr(inv_blocks, block_entries, i);
     if (diagonal_only) {
       set_zero(out, block_entries);
       for (int d = 0; d < block_size; ++d) {
-        out[d * block_size + d] = safe_inverse(values(d * block_size + d, diag_nz));
+        out[d * block_size + d] = safe_inverse(
+            diag_blocks(d * block_size + d, i));
       }
       continue;
     }
 
-    const double* src = block_ptr(values, block_entries, diag_nz);
-    std::copy(src, src + block_entries, diag_block.begin());
+    for (int entry = 0; entry < block_entries; ++entry) {
+      diag_block[static_cast<std::size_t>(entry)] = diag_blocks(entry, i);
+    }
     if (!invert_dense_block(block_size, diag_block.data(), inv_block.data())) {
       set_zero(out, block_entries);
       for (int d = 0; d < block_size; ++d) {
@@ -2647,12 +2659,33 @@ const std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>& projected_lef
 }
 
 const std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>& projected_right_entries(
+    const fe_fsi_linear_solver::FSILS_lhsType& lhs,
     const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update)
 {
-  return !update.right_scaled_owned.empty() ? update.right_scaled_owned
-      : !update.right_owned.empty()         ? update.right_owned
-      : !update.right_scaled.empty()        ? update.right_scaled
-                                            : update.right;
+  if (!update.right_scaled_owned.empty()) {
+    return update.right_scaled_owned;
+  }
+  if (!update.right_owned.empty()) {
+    return update.right_owned;
+  }
+  if (lhs.commu.nTasks > 1) {
+    static const std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry> empty_entries;
+    return empty_entries;
+  }
+  return !update.right_scaled.empty() ? update.right_scaled : update.right;
+}
+
+const std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>& projected_right_entries_for_transpose(
+    const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update)
+{
+  // The exact reduced Schur G^T apply needs the full local support of the
+  // right factor so each rank can contribute to the constraint rows it owns.
+  // Using the owned-only right entries here drops valid ghost-supported rows
+  // in distributed runs and can zero the resulting schur_right column.
+  return !update.right_scaled.empty()     ? update.right_scaled
+      : !update.right.empty()             ? update.right
+      : !update.right_scaled_owned.empty() ? update.right_scaled_owned
+                                          : update.right_owned;
 }
 
 double sparse_dense_owned_dot_local(
@@ -2695,6 +2728,81 @@ void allreduce_sum_in_place(fe_fsi_linear_solver::FSILS_lhsType& lhs,
 {
   const fe_fsi_linear_solver::CollectiveOps collectives(lhs.commu);
   collectives.allreduce_sum(values);
+}
+
+void trace_dense_matrix(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                        const char* label,
+                        const std::vector<double>& values,
+                        int rank)
+{
+  if (!env_enabled("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING")) {
+    return;
+  }
+  if (!lhs.commu.masF) {
+    return;
+  }
+  std::fprintf(stderr,
+               "[BICGS_SCHUR_SETUP] %s rank=%d",
+               label,
+               rank);
+  for (int i = 0; i < rank; ++i) {
+    for (int j = 0; j < rank; ++j) {
+      std::fprintf(stderr,
+                   " m(%d,%d)=%.17e",
+                   i,
+                   j,
+                   values[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+                          static_cast<std::size_t>(j)]);
+    }
+  }
+  std::fprintf(stderr, "\n");
+}
+
+double dense_dense_owned_norm_local(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                    int dof,
+                                    const Array<double>& vec)
+{
+  const double local = dense_dense_owned_dot_local(lhs, dof, vec, vec);
+  return (local > 0.0) ? std::sqrt(local) : 0.0;
+}
+
+void trace_dense_vector_owned_entries(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                      const char* label,
+                                      int dof,
+                                      const Array<double>& vec)
+{
+  if (!env_enabled("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING_ALL_RANKS")) {
+    return;
+  }
+  static int dump_count = 0;
+  if (dump_count >= 16) {
+    return;
+  }
+  ++dump_count;
+  std::fprintf(stderr, "[BICGS_SCHUR_SETUP] %s rank=%d", label, lhs.commu.task);
+  for (fsils_int old = 0; old < lhs.nNo; ++old) {
+    if (old < 0 || old >= lhs.gNodes.size()) {
+      continue;
+    }
+    const int internal = lhs.map(old);
+    if (internal < 0 || internal >= lhs.mynNo) {
+      continue;
+    }
+    for (int comp = 0; comp < dof; ++comp) {
+      const double value = vec(comp, internal);
+      if (std::abs(value) <= 1e-30) {
+        continue;
+      }
+      std::fprintf(stderr,
+                   " entry(old=%lld,global=%d,internal=%d,comp=%d,val=%.17e)",
+                   static_cast<long long>(old),
+                   lhs.gNodes(old),
+                   internal,
+                   comp,
+                   value);
+    }
+  }
+  std::fprintf(stderr, "\n");
 }
 
 void dense_axpy(int dof,
@@ -2843,7 +2951,8 @@ void build_grouped_momentum_hat_low_rank_correction(
     Array<double> left_mode;
     Array<double> right_mode;
     const auto& left_entries = projected_left_entries(update);
-    const auto& right_entries = projected_right_entries(update);
+    const auto& right_entries = projected_right_entries(lhs, update);
+    const auto& right_entries_for_gt = projected_right_entries_for_transpose(update);
     const bool have_left_local =
         fill_projected_reduced_vector(lhs, update, left_entries, mom_ncomp, left_mode);
     const bool have_right_local =
@@ -3002,6 +3111,8 @@ void build_grouped_momentum_hat_low_rank_correction(
   }
   allreduce_sum_in_place(const_cast<fe_fsi_linear_solver::FSILS_lhsType&>(lhs), dense_m);
   allreduce_sum_in_place(const_cast<fe_fsi_linear_solver::FSILS_lhsType&>(lhs), dense_mt);
+  trace_dense_matrix(lhs, "grouped_momentum_hat_dense_m_preseed", dense_m, total_rank);
+  trace_dense_matrix(lhs, "grouped_momentum_hat_dense_mt_preseed", dense_mt, total_rank);
   for (int i = 0; i < total_rank; ++i) {
     for (int j = 0; j < total_rank; ++j) {
       dense_m[static_cast<std::size_t>(i) * static_cast<std::size_t>(total_rank) +
@@ -3014,6 +3125,8 @@ void build_grouped_momentum_hat_low_rank_correction(
                      static_cast<std::size_t>(i)];
     }
   }
+  trace_dense_matrix(lhs, "grouped_momentum_hat_dense_m_total", dense_m, total_rank);
+  trace_dense_matrix(lhs, "grouped_momentum_hat_dense_mt_total", dense_mt, total_rank);
   const double dense_dot_t =
       trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - dense_dot_t0 : 0.0;
 
@@ -3084,14 +3197,14 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
     candidate.commu = &lhs.commu;
     switch (candidate_approx) {
       case SchurMomentumApproximationType::DIAG_K:
-        build_point_inverse_blocks(diagPtr, mom_ncomp, nNo, K_eff, /*diagonal_only=*/true, candidate.point_inv);
+        build_point_inverse_blocks(diagPtr, &lhs, mom_ncomp, nNo, K_eff, /*diagonal_only=*/true, candidate.point_inv);
         build_sparse_block_diagonal_inverse(diagPtr, mom_ncomp, nNo, K_eff.ncols(), candidate.point_inv,
                                             candidate.sparse_inverse);
         build_grouped_momentum_hat_low_rank_correction(rowPtr, colPtr, diagPtr, lhs,
                                                        mom_ncomp, nNo, candidate);
         return candidate;
       case SchurMomentumApproximationType::BLOCKDIAG_K:
-        build_point_inverse_blocks(diagPtr, mom_ncomp, nNo, K_eff, /*diagonal_only=*/false, candidate.point_inv);
+        build_point_inverse_blocks(diagPtr, &lhs, mom_ncomp, nNo, K_eff, /*diagonal_only=*/false, candidate.point_inv);
         build_sparse_block_diagonal_inverse(diagPtr, mom_ncomp, nNo, K_eff.ncols(), candidate.point_inv,
                                             candidate.sparse_inverse);
         build_grouped_momentum_hat_low_rank_correction(rowPtr, colPtr, diagPtr, lhs,
@@ -3115,7 +3228,7 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
                                        candidate.asm_patch_ptr, candidate.asm_patch_nodes,
                                        candidate.asm_patch_matrix_ptr, candidate.asm_patch_inverse,
                                        candidate.sparse_inverse);
-        build_point_inverse_blocks(diagPtr, mom_ncomp, nNo, K_eff, /*diagonal_only=*/false, candidate.point_inv);
+        build_point_inverse_blocks(diagPtr, &lhs, mom_ncomp, nNo, K_eff, /*diagonal_only=*/false, candidate.point_inv);
         candidate.use_asm = true;
         build_grouped_momentum_hat_low_rank_correction(rowPtr, colPtr, diagPtr, lhs,
                                                        mom_ncomp, nNo, candidate);
@@ -3159,7 +3272,7 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
         denominator += static_cast<long double>(den);
         numerator += static_cast<long double>(num);
 
-        const auto& right_entries = projected_right_entries(mode);
+        const auto& right_entries = projected_right_entries(lhs, mode);
         fill_projected_reduced_vector(lhs, mode, right_entries, mom_ncomp, probe_t);
         approx_apply_t = probe_t;
         apply_momentum_hat_transpose(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, candidate, approx_apply_t);
@@ -3454,7 +3567,8 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     const int column_index = static_cast<int>(columns.size());
     const double column_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
     const auto& left_entries = projected_left_entries(update);
-    const auto& right_entries = projected_right_entries(update);
+    const auto& right_entries = projected_right_entries(lhs, update);
+    const auto& right_entries_for_gt = projected_right_entries_for_transpose(update);
     if (trace_setup_emit) {
       std::fprintf(stderr,
                    "[BICGS_SCHUR_SETUP] rank=%d reduced_schur column=%d source=update grouped_id=%d "
@@ -3476,11 +3590,15 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     trace_stage(column_index, "filled", "begin");
     fill_projected_reduced_vector(lhs, update, left_entries, mom_ncomp, col.momentum_left_hat);
     fill_projected_reduced_vector(lhs, update, right_entries, mom_ncomp, col.momentum_right_owned);
+    if (trace_setup_all_ranks && column_index < 2) {
+      trace_dense_vector_owned_entries(lhs, "reduced_schur_right_owned", mom_ncomp, col.momentum_right_owned);
+      trace_dense_vector_owned_entries(lhs, "reduced_schur_left_before_hat", mom_ncomp, col.momentum_left_hat);
+    }
     const double fill_t = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - fill_t0 : 0.0;
     trace_stage(column_index, "filled", "done", fill_t);
 
     Array<double> momentum_right_t;
-    fill_projected_reduced_vector(lhs, update, right_entries, mom_ncomp, momentum_right_t);
+    fill_projected_reduced_vector(lhs, update, right_entries_for_gt, mom_ncomp, momentum_right_t);
 
     const double hat_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
     apply_momentum_hat(lhs.rowPtr, lhs.colPtr, lhs.diagPtr,
@@ -3500,6 +3618,10 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     trace_stage(column_index, "sync_right_hat_t", "begin");
     halo.sync_vector(mom_ncomp, momentum_right_t, skip_post_solve_overlap_sum());
     trace_stage(column_index, "sync_right_hat_t", "done");
+    if (trace_setup_all_ranks && column_index < 2) {
+      trace_dense_vector_owned_entries(lhs, "reduced_schur_left_after_hat", mom_ncomp, col.momentum_left_hat);
+      trace_dense_vector_owned_entries(lhs, "reduced_schur_right_after_hat_t", mom_ncomp, momentum_right_t);
+    }
     const double sync_t = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - sync_t0 : 0.0;
     trace_stage(column_index, "sync", "done", sync_t);
 
@@ -3568,10 +3690,18 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     const double gt_t = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - gt_t0 : 0.0;
     trace_stage(column_index, "gt", "done", gt_t);
     columns.push_back(std::move(col));
-    if (trace_setup) {
+    if (trace_setup_emit) {
+      const double right_owned_l2 =
+          dense_dense_owned_norm_local(lhs, mom_ncomp, col.momentum_right_owned);
+      const double left_hat_l2 =
+          dense_dense_owned_norm_local(lhs, mom_ncomp, col.momentum_left_hat);
+      const double schur_left_l2 =
+          dense_dense_owned_norm_local(lhs, con_ncomp, col.schur_left);
+      const double schur_right_l2 =
+          dense_dense_owned_norm_local(lhs, con_ncomp, col.schur_right);
       std::fprintf(stderr,
                    "[BICGS_SCHUR_SETUP] rank=%d reduced_schur column=%d fill=%e hat=%e hat_t=%e "
-                   "sync=%e d=%e gt=%e total=%e\n",
+                   "sync=%e d=%e gt=%e |right|=%e |left_hat|=%e |schur_left|=%e |schur_right|=%e total=%e\n",
                    lhs.commu.task,
                    column_index,
                    fill_t,
@@ -3580,7 +3710,14 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
                    sync_t,
                    d_t,
                    gt_t,
+                   right_owned_l2,
+                   left_hat_l2,
+                   schur_left_l2,
+                   schur_right_l2,
                    fe_fsi_linear_solver::fsils_cpu_t() - column_t0);
+      if (trace_setup_all_ranks) {
+        std::fflush(stderr);
+      }
     }
   };
 
@@ -3734,15 +3871,24 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
 
   const double dense_m_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
   std::vector<double> dense_m = dense_seed;
+  std::vector<double> dense_m_local(static_cast<std::size_t>(rank) * static_cast<std::size_t>(rank), 0.0);
   for (int i = 0; i < rank; ++i) {
     for (int j = 0; j < rank; ++j) {
-      dense_m[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) + static_cast<std::size_t>(j)] +=
+      const double local_dot =
           dense_dense_owned_dot_local(lhs, mom_ncomp,
                                       columns[static_cast<std::size_t>(i)].momentum_right_owned,
                                       columns[static_cast<std::size_t>(j)].momentum_left_hat);
+      dense_m_local[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+                    static_cast<std::size_t>(j)] = local_dot;
+      dense_m[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+              static_cast<std::size_t>(j)] += local_dot;
     }
   }
+  if (trace_setup_emit && env_enabled("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING_ALL_RANKS")) {
+    trace_dense_matrix(lhs, "reduced_schur_dense_m_local", dense_m_local, rank);
+  }
   allreduce_sum_in_place(lhs, dense_m);
+  trace_dense_matrix(lhs, "reduced_schur_dense_m", dense_m, rank);
   const double dense_m_t =
       trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - dense_m_t0 : 0.0;
 
@@ -3765,21 +3911,31 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
 
   const double dense_ctz_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
   std::vector<double> dense_ctz(static_cast<std::size_t>(rank) * static_cast<std::size_t>(rank), 0.0);
+  std::vector<double> dense_ctz_local(static_cast<std::size_t>(rank) * static_cast<std::size_t>(rank), 0.0);
   for (int i = 0; i < rank; ++i) {
     for (int j = 0; j < rank; ++j) {
-      dense_ctz[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) + static_cast<std::size_t>(j)] =
+      const double local_dot =
           dense_dense_owned_dot_local(lhs, con_ncomp,
                                       pc.low_rank_right[static_cast<std::size_t>(i)],
                                       pc.low_rank_preconditioned_left[static_cast<std::size_t>(j)]);
+      dense_ctz_local[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+                      static_cast<std::size_t>(j)] = local_dot;
+      dense_ctz[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+                static_cast<std::size_t>(j)] = local_dot;
     }
   }
+  if (trace_setup_emit && env_enabled("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING_ALL_RANKS")) {
+    trace_dense_matrix(lhs, "reduced_schur_dense_ctz_local", dense_ctz_local, rank);
+  }
   allreduce_sum_in_place(lhs, dense_ctz);
+  trace_dense_matrix(lhs, "reduced_schur_dense_ctz", dense_ctz, rank);
   const double dense_ctz_t =
       trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - dense_ctz_t0 : 0.0;
 
   for (std::size_t idx = 0; idx < dense_m.size(); ++idx) {
     dense_m[idx] += dense_ctz[idx];
   }
+  trace_dense_matrix(lhs, "reduced_schur_dense_total", dense_m, rank);
 
   const double invert_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
   pc.low_rank_inner_inv.assign(dense_m.size(), 0.0);
@@ -4075,7 +4231,7 @@ SchurPreconditionerData build_schur_preconditioner(fe_fsi_linear_solver::FSILS_l
   const bool need_momentum_hat =
       has_exact_schur_corrections ||
       (preconditioner == SchurPreconditionerType::ALGEBRAIC_SHAT);
-  build_point_inverse_blocks(lhs.diagPtr, con_ncomp, lhs.nNo, L, diagonal_only, pc.point_inv);
+  build_point_inverse_blocks(lhs.diagPtr, &lhs, con_ncomp, lhs.nNo, L, diagonal_only, pc.point_inv);
   pc.operator_D = &D;
   pc.operator_G = &G;
   pc.operator_L_storage = L;
@@ -4340,10 +4496,17 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
 
   Array<double> GP(nsd, nNo);
   Vector<double> SP(nNo), DGP(nNo);
+  Vector<double> M_diag(nNo);
   Vector<double> M_inv(nNo);
   Vector<double> in_sync(nNo);
   for (fsils_int i = 0; i < nNo; ++i) {
-    const double diag_val = L_values(lhs.diagPtr(i));
+    M_diag(i) = L_values(lhs.diagPtr(i));
+  }
+  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+    fsils_commus(lhs, M_diag);
+  }
+  for (fsils_int i = 0; i < nNo; ++i) {
+    const double diag_val = M_diag(i);
     M_inv(i) = (std::abs(diag_val) > 1e-12) ? 1.0 / diag_val : 1.0;
   }
 
@@ -4371,7 +4534,6 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
   const bool face_only_skip_output_sync =
       fe_fsi_linear_solver::CollectiveOps(lhs.commu).distributed() &&
       face_only_skip_operator_output_sync_enabled();
-
   auto apply_schur_operator = [&](const Vector<double>& in_vec, Vector<double>& out_vec) {
     const Vector<double>* op_in = &in_vec;
     const fe_fsi_linear_solver::HaloExchange halo(lhs);
@@ -5191,7 +5353,6 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
   const bool trace_face_only_legacy = env_enabled("SVMP_FSILS_TRACE_FACE_ONLY_LEGACY_SCHUR");
   const bool emit_face_only_legacy_trace = lhs.commu.masF && trace_face_only_legacy;
   const bool use_multi_face_gmres =
-      collectives.distributed() &&
       active_coupled_faces > 1 &&
       (std::getenv("SVMP_FSILS_DISABLE_MULTI_FACE_LEGACY_GMRES") == nullptr);
   const bool gmres_mean_free_krylov =
@@ -7085,7 +7246,6 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
   const auto strategy =
       fe_fsi_linear_solver::BlockSchurStrategySelector::select(
           lhs, low_rank_profile, con_ncomp);
-
   if (strategy.use_legacy_scalar_schur()) {
     Vector<double> R_scalar;
     copy_scalar_array_to_vector(R, R_scalar);
@@ -7145,7 +7305,6 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
         dso::ghost_synced_output(mom_ncomp, GP),
         dso::ghost_synced_output(con_ncomp, SP));
     apply_explicit_constraint_schur_corrections(lhs, pc, in_vec, GP, SP);
-
     HGP = GP;
     gmres::gmres_v(system.momentum, momentum_ls, HGP);
     if (schur_halo.has_overlap() && !skip_post_solve_overlap_sum()) {
@@ -7153,7 +7312,6 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
       // Push owner values back to ghosts before reusing it in D*(K^-1*G).
       schur_halo.sync_vector(mom_ncomp, HGP);
     }
-
     system.D.apply(
         dso::ghost_synced_input(mom_ncomp, HGP),
         dso::ghost_synced_output(con_ncomp, DGP));

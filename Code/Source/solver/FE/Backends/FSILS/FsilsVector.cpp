@@ -475,6 +475,7 @@ public:
         resolved.resize(dofs.size());
         vec_->resolveEntriesCached(dofs, resolved);
         gatherFsilsVectorEntries(*vec_, resolved, out);
+
     }
 
     void beginAssemblyPhase() override { phase_ = assembly::AssemblyPhase::Building; }

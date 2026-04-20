@@ -206,18 +206,17 @@ void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int 
      gtlPtr[Ac] = a;
   }
 
-  // Including the nodes shared by processors with higher ID at the end,
-  // and including the nodes shared by lower processors IDs at the front.
-  // shnNo is counter for lower ID and mynNo is counter for higher ID
-  //
-  lhs.mynNo = nNo;
-  lhs.shnNo = 0;
-  #ifdef debug_fsils_lhs_create
-  dmsg << "lhs.mynNo: " << lhs.mynNo;
-  dmsg << "tF: " << tF;
-  #endif
+  // Classify shared nodes into front (shared with lower ranks) and back (shared with higher ranks).
+  // The original FSILS code appended these in processor encounter order, which makes the internal
+  // permutation depend on communicator topology. Keep the same front/local/back contract, but make
+  // the node order within the shared bands canonical in global-node space.
+  std::vector<int> lower_shared_nodes;
+  std::vector<int> higher_shared_nodes;
+  lower_shared_nodes.reserve(nNo);
+  higher_shared_nodes.reserve(nNo);
 
-  // Iterate candidates from highest rank to lowest (reverse order)
+  // Iterate candidates from highest rank to lowest to preserve the original marking logic, but do
+  // not finalize the internal order yet.
   for (int c = nCandidates - 1; c >= 0; c--) {
     int rank_i = candidates[c];
     int other_nNo = all_info[3*rank_i];
@@ -236,14 +235,11 @@ void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int 
         int localNodeIndex = gtl_it->second;
         // If this node has not been included already
         if (aNodes(localNodeIndex, self_cand_idx) != -1) {
-          // If the processor ID is lower, it is appended to the beginning
+          // Classify by processor ID; the final internal order is canonicalized below.
           if (rank_i < tF) {
-            ltg(lhs.shnNo) = Ac;
-            lhs.shnNo = lhs.shnNo + 1;
-          // If the processor ID is higher, it is appended to the end
+            lower_shared_nodes.push_back(Ac);
           } else {
-            ltg(lhs.mynNo-1) = Ac;
-            lhs.mynNo = lhs.mynNo - 1;
+            higher_shared_nodes.push_back(Ac);
           }
           aNodes(localNodeIndex, self_cand_idx) = -1;
         }
@@ -251,27 +247,44 @@ void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int 
     }
   }
 
+  std::sort(lower_shared_nodes.begin(), lower_shared_nodes.end());
+  lower_shared_nodes.erase(std::unique(lower_shared_nodes.begin(), lower_shared_nodes.end()),
+                           lower_shared_nodes.end());
+  std::sort(higher_shared_nodes.begin(), higher_shared_nodes.end());
+  higher_shared_nodes.erase(std::unique(higher_shared_nodes.begin(), higher_shared_nodes.end()),
+                            higher_shared_nodes.end());
+
+  lhs.shnNo = static_cast<int>(lower_shared_nodes.size());
+  lhs.mynNo = nNo - static_cast<int>(higher_shared_nodes.size());
+
   #ifdef debug_fsils_lhs_create
   dmsg << "lhs.shnNo: " << lhs.shnNo;
   dmsg << "lhs.mynNo: " << lhs.mynNo;
   #endif
 
-  // Now including the local nodes that are left behind
-  //
-  int j = lhs.shnNo + 1;
+  for (int i = 0; i < lhs.shnNo; ++i) {
+    ltg(i) = lower_shared_nodes[static_cast<std::size_t>(i)];
+  }
+
+  // Now include the local nodes left behind in their original local order.
+  int j = lhs.shnNo;
 
   for (int a = 0; a < nNo; a++) {
     int Ac = aNodes(a, self_cand_idx);
     //  If this node has not been included already
     if (Ac != -1) {
-      ltg(j-1) = Ac;
+      ltg(j) = Ac;
       j = j + 1;
     }
   }
 
-  if (j != lhs.mynNo+1) {
+  if (j != lhs.mynNo) {
     throw std::runtime_error("FSILS: Unexpected behavior: j=" + std::to_string(j) + " lhs.mynNo: " + std::to_string(lhs.mynNo) + ".");
     MPI_Finalize();
+  }
+
+  for (std::size_t i = 0; i < higher_shared_nodes.size(); ++i) {
+    ltg(lhs.mynNo + static_cast<int>(i)) = higher_shared_nodes[i];
   }
 
   // Having the new ltg pointer, map is constructed

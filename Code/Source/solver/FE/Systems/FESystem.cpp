@@ -6327,7 +6327,9 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                         // blocks are handled after aggregation so they can
                                         // recover the exact native face rank-one path when
                                         // appropriate.
-                                        if (!entry.lower_to_direct_only && !q_u.empty()) {
+                                        const bool global_q_u_nonempty =
+                                            mpiAllreduceSumIfActive(q_u.empty() ? 0 : 1) > 0;
+                                        if (!entry.lower_to_direct_only && global_q_u_nonempty) {
                                             if (monolithicDirectTraceEnabled()) {
                                                 std::ostringstream oss;
                                                 oss << "FESystem: monolithic direct coupling"
@@ -6335,7 +6337,10 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                                     << " output='" << oname << "'"
                                                     << " entity=" << e
                                                     << " input_col=" << input_col
-                                                    << " path='reduced_exact_update'";
+                                                    << " path='reduced_exact_update'"
+                                                    << " local_grad_nnz=" << q_u.size()
+                                                    << " global_grad_active="
+                                                    << (global_q_u_nonempty ? 1 : 0);
                                                 FE_LOG_INFO(oss.str());
                                             }
                                             backends::ReducedFieldUpdate reduced_update;
@@ -7833,8 +7838,45 @@ FESystem::assembleBoundaryGradient(FieldId field,
         void zero() override {}
     };
 
+    auto refreshGhostedCoefficients = [](const backends::GenericVector* vec_ptr) {
+        if (vec_ptr == nullptr) {
+            return;
+        }
+        auto* vec = const_cast<backends::GenericVector*>(vec_ptr);
+        vec->updateGhosts();
+    };
+
+    std::function<int(const forms::FormExprNode&)> maxPreviousSolutionHistory =
+        [&](const forms::FormExprNode& node) -> int {
+        int max_history = 0;
+        if (node.type() == forms::FormExprType::PreviousSolutionRef) {
+            max_history = std::max(max_history, node.historyIndex().value_or(1));
+        }
+        for (const auto* child : node.children()) {
+            if (child != nullptr) {
+                max_history = std::max(max_history, maxPreviousSolutionHistory(*child));
+            }
+        }
+        return max_history;
+    };
+
+    const int required_history =
+        integrand_trial.node() ? maxPreviousSolutionHistory(*integrand_trial.node()) : 0;
+
+    refreshGhostedCoefficients(state.u_vector);
+    if (required_history >= 1) {
+        refreshGhostedCoefficients(state.u_prev_vector);
+    }
+    if (required_history >= 2) {
+        refreshGhostedCoefficients(state.u_prev2_vector);
+    }
+
     std::unique_ptr<assembly::GlobalSystemView> temp_sol_view;
+    std::unique_ptr<assembly::GlobalSystemView> temp_prev_view;
+    std::unique_ptr<assembly::GlobalSystemView> temp_prev2_view;
     std::unique_ptr<SpanSolutionView> span_sol_view;
+    std::unique_ptr<SpanSolutionView> span_prev_view;
+    std::unique_ptr<SpanSolutionView> span_prev2_view;
     if (state.u_vector) {
         auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
         temp_sol_view = vec->createAssemblyView();
@@ -7844,6 +7886,26 @@ FESystem::assembleBoundaryGradient(FieldId field,
         // StandardAssembler can access field values during gradient assembly.
         span_sol_view = std::make_unique<SpanSolutionView>(state.u, n_total);
         assembler_->setCurrentSolutionView(span_sol_view.get());
+    }
+
+    if (required_history >= 1 && state.u_prev_vector) {
+        auto* vec = const_cast<backends::GenericVector*>(state.u_prev_vector);
+        temp_prev_view = vec->createAssemblyView();
+        assembler_->setPreviousSolutionView(temp_prev_view.get());
+    } else if (required_history >= 1 && !state.u_prev.empty()) {
+        span_prev_view = std::make_unique<SpanSolutionView>(state.u_prev, n_total);
+        assembler_->setPreviousSolution(state.u_prev);
+        assembler_->setPreviousSolutionView(span_prev_view.get());
+    }
+
+    if (required_history >= 2 && state.u_prev2_vector) {
+        auto* vec = const_cast<backends::GenericVector*>(state.u_prev2_vector);
+        temp_prev2_view = vec->createAssemblyView();
+        assembler_->setPreviousSolutionViewK(2, temp_prev2_view.get());
+    } else if (required_history >= 2 && !state.u_prev2.empty()) {
+        span_prev2_view = std::make_unique<SpanSolutionView>(state.u_prev2, n_total);
+        assembler_->setPreviousSolutionK(2, state.u_prev2);
+        assembler_->setPreviousSolutionViewK(2, span_prev2_view.get());
     }
 
     if (boundary_marker >= 0) {
@@ -7929,6 +7991,21 @@ std::span<const Real> FESystem::auxiliaryOutputValues() const noexcept
                                  entry.output_buffer.end());
     }
     return aux_output_flat_;
+}
+
+std::span<const Real> FESystem::auxiliaryStateValues() const noexcept
+{
+    aux_state_flat_.clear();
+    if (!auxiliary_state_manager_) {
+        return aux_state_flat_;
+    }
+
+    const auto& state = auxiliary_state_manager_->state();
+    for (std::size_t i = 0; i < state.blockCount(); ++i) {
+        const auto work = state.block(i).work();
+        aux_state_flat_.insert(aux_state_flat_.end(), work.begin(), work.end());
+    }
+    return aux_state_flat_;
 }
 
 Real FESystem::auxiliaryConstraintValue(std::string_view instance_name,

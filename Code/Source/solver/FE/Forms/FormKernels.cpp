@@ -68,6 +68,29 @@ struct ConstitutiveStateLayout {
 
 namespace {
 
+struct RequestedKernelOutputs {
+    bool matrix{false};
+    bool vector{false};
+};
+
+[[nodiscard]] RequestedKernelOutputs requestedKernelOutputs(
+    const assembly::KernelOutput& output,
+    bool can_matrix,
+    bool can_vector) noexcept
+{
+    bool want_matrix = output.has_matrix || !output.local_matrix.empty();
+    bool want_vector = output.has_vector || !output.local_vector.empty();
+    if (!want_matrix && !want_vector) {
+        want_matrix = can_matrix;
+        want_vector = can_vector;
+    }
+
+    RequestedKernelOutputs requested;
+    requested.matrix = can_matrix && want_matrix;
+    requested.vector = can_vector && want_vector;
+    return requested;
+}
+
 const assembly::AssemblyContext& ctxForSide(const assembly::AssemblyContext& ctx_minus,
                                             const assembly::AssemblyContext* ctx_plus,
                                             Side side)
@@ -13287,8 +13310,12 @@ void NonlinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, asse
     const auto n_test = ctx.numTestDofs();
     const auto n_trial = ctx.numTrialDofs();
 
-    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
-    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+    const auto requested = requestedKernelOutputs(
+        output,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        output_ != NonlinearKernelOutput::MatrixOnly);
+    const bool want_matrix = requested.matrix;
+    const bool want_vector = requested.vector;
     output.reserve(n_test, n_trial, want_matrix, want_vector);
 
     const auto n_qpts = ctx.numQuadraturePoints();
@@ -13364,8 +13391,12 @@ void NonlinearFormKernel::computeCellBatch(std::span<const assembly::AssemblyCon
             const LocalIndex n_trial = lane_ctx[0]->numTrialDofs();
             const LocalIndex n_qpts = lane_ctx[0]->numQuadraturePoints();
 
-            const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
-            const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+            const auto requested = requestedKernelOutputs(
+                *lane_out[0],
+                output_ != NonlinearKernelOutput::VectorOnly,
+                output_ != NonlinearKernelOutput::MatrixOnly);
+            const bool want_matrix = requested.matrix;
+            const bool want_vector = requested.vector;
             const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
 
             for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
@@ -13467,8 +13498,12 @@ void NonlinearFormKernel::computeBoundaryFace(
     const auto n_test = ctx.numTestDofs();
     const auto n_trial = ctx.numTrialDofs();
 
-    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
-    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+    const auto requested = requestedKernelOutputs(
+        output,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        output_ != NonlinearKernelOutput::MatrixOnly);
+    const bool want_matrix = requested.matrix;
+    const bool want_vector = requested.vector;
     output.reserve(n_test, n_trial, want_matrix, want_vector);
 
     const auto n_qpts = ctx.numQuadraturePoints();
@@ -13561,13 +13596,27 @@ void NonlinearFormKernel::computeInteriorFace(
     const auto n_test_plus = ctx_plus.numTestDofs();
     const auto n_trial_plus = ctx_plus.numTrialDofs();
 
-    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
-    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+    const auto minus_requested = requestedKernelOutputs(
+        output_minus,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        output_ != NonlinearKernelOutput::MatrixOnly);
+    const auto plus_requested = requestedKernelOutputs(
+        output_plus,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        output_ != NonlinearKernelOutput::MatrixOnly);
+    const auto mp_requested = requestedKernelOutputs(
+        coupling_mp,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        /*can_vector=*/false);
+    const auto pm_requested = requestedKernelOutputs(
+        coupling_pm,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        /*can_vector=*/false);
 
-    output_minus.reserve(n_test_minus, n_trial_minus, want_matrix, want_vector);
-    output_plus.reserve(n_test_plus, n_trial_plus, want_matrix, want_vector);
-    coupling_mp.reserve(n_test_minus, n_trial_plus, want_matrix, /*need_vector=*/false);
-    coupling_pm.reserve(n_test_plus, n_trial_minus, want_matrix, /*need_vector=*/false);
+    output_minus.reserve(n_test_minus, n_trial_minus, minus_requested.matrix, minus_requested.vector);
+    output_plus.reserve(n_test_plus, n_trial_plus, plus_requested.matrix, plus_requested.vector);
+    coupling_mp.reserve(n_test_minus, n_trial_plus, mp_requested.matrix, /*need_vector=*/false);
+    coupling_pm.reserve(n_test_plus, n_trial_minus, pm_requested.matrix, /*need_vector=*/false);
 
     const bool want_minus_matrix = output_minus.has_matrix;
     const bool want_minus_vector = output_minus.has_vector;
@@ -13696,13 +13745,27 @@ void NonlinearFormKernel::computeInterfaceFace(
     const auto n_test_plus = ctx_plus.numTestDofs();
     const auto n_trial_plus = ctx_plus.numTrialDofs();
 
-    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
-    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+    const auto minus_requested = requestedKernelOutputs(
+        output_minus,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        output_ != NonlinearKernelOutput::MatrixOnly);
+    const auto plus_requested = requestedKernelOutputs(
+        output_plus,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        output_ != NonlinearKernelOutput::MatrixOnly);
+    const auto mp_requested = requestedKernelOutputs(
+        coupling_mp,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        /*can_vector=*/false);
+    const auto pm_requested = requestedKernelOutputs(
+        coupling_pm,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        /*can_vector=*/false);
 
-    output_minus.reserve(n_test_minus, n_trial_minus, want_matrix, want_vector);
-    output_plus.reserve(n_test_plus, n_trial_plus, want_matrix, want_vector);
-    coupling_mp.reserve(n_test_minus, n_trial_plus, want_matrix, /*need_vector=*/false);
-    coupling_pm.reserve(n_test_plus, n_trial_minus, want_matrix, /*need_vector=*/false);
+    output_minus.reserve(n_test_minus, n_trial_minus, minus_requested.matrix, minus_requested.vector);
+    output_plus.reserve(n_test_plus, n_trial_plus, plus_requested.matrix, plus_requested.vector);
+    coupling_mp.reserve(n_test_minus, n_trial_plus, mp_requested.matrix, /*need_vector=*/false);
+    coupling_pm.reserve(n_test_plus, n_trial_minus, pm_requested.matrix, /*need_vector=*/false);
 
     const bool want_minus_matrix = output_minus.has_matrix;
     const bool want_minus_vector = output_minus.has_vector;
@@ -14390,8 +14453,12 @@ void SymbolicNonlinearFormKernel::computeCell(const assembly::AssemblyContext& c
     const auto n_test = ctx.numTestDofs();
     const auto n_trial = ctx.numTrialDofs();
 
-    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
-    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+    const auto requested = requestedKernelOutputs(
+        output,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        output_ != NonlinearKernelOutput::MatrixOnly);
+    const bool want_matrix = requested.matrix;
+    const bool want_vector = requested.vector;
     FE_THROW_IF(want_matrix && !tangent_ready_, InvalidArgumentException,
                 "SymbolicNonlinearFormKernel: tangent IR not built; call resolveInlinableConstitutives() during setup");
     FE_THROW_IF((want_vector || material_state_spec_.bytes_per_qpt > 0u) && !residual_scalar_ready_, InvalidArgumentException,
@@ -14478,8 +14545,12 @@ void SymbolicNonlinearFormKernel::computeCellBatch(std::span<const assembly::Ass
 {
     ensureInterpreterLoweredIndexedAccess();
 
-    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
-    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+    const auto requested = requestedKernelOutputs(
+        outputs.empty() ? assembly::KernelOutput{} : outputs.front(),
+        output_ != NonlinearKernelOutput::VectorOnly,
+        output_ != NonlinearKernelOutput::MatrixOnly);
+    const bool want_matrix = requested.matrix;
+    const bool want_vector = requested.vector;
     FE_THROW_IF(want_matrix && !tangent_ready_, InvalidArgumentException,
                 "SymbolicNonlinearFormKernel: tangent IR not built; call resolveInlinableConstitutives() during setup");
     FE_THROW_IF((want_vector || material_state_spec_.bytes_per_qpt > 0u) && !residual_scalar_ready_, InvalidArgumentException,
@@ -14611,8 +14682,12 @@ void SymbolicNonlinearFormKernel::computeBoundaryFace(const assembly::AssemblyCo
     const auto n_test = ctx.numTestDofs();
     const auto n_trial = ctx.numTrialDofs();
 
-    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
-    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+    const auto requested = requestedKernelOutputs(
+        output,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        output_ != NonlinearKernelOutput::MatrixOnly);
+    const bool want_matrix = requested.matrix;
+    const bool want_vector = requested.vector;
     FE_THROW_IF(want_matrix && !tangent_ready_, InvalidArgumentException,
                 "SymbolicNonlinearFormKernel: tangent IR not built; call resolveInlinableConstitutives() during setup");
     FE_THROW_IF((want_vector || material_state_spec_.bytes_per_qpt > 0u) && !residual_scalar_ready_, InvalidArgumentException,
@@ -14724,17 +14799,34 @@ void SymbolicNonlinearFormKernel::computeInteriorFace(const assembly::AssemblyCo
     const auto n_test_plus = ctx_plus.numTestDofs();
     const auto n_trial_plus = ctx_plus.numTrialDofs();
 
-    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
-    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+    const auto minus_requested = requestedKernelOutputs(
+        output_minus,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        output_ != NonlinearKernelOutput::MatrixOnly);
+    const auto plus_requested = requestedKernelOutputs(
+        output_plus,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        output_ != NonlinearKernelOutput::MatrixOnly);
+    const auto mp_requested = requestedKernelOutputs(
+        coupling_mp,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        /*can_vector=*/false);
+    const auto pm_requested = requestedKernelOutputs(
+        coupling_pm,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        /*can_vector=*/false);
+    const bool want_matrix =
+        minus_requested.matrix || plus_requested.matrix || mp_requested.matrix || pm_requested.matrix;
+    const bool want_vector = minus_requested.vector || plus_requested.vector;
     FE_THROW_IF(want_matrix && !tangent_ready_, InvalidArgumentException,
                 "SymbolicNonlinearFormKernel: tangent IR not built; call resolveInlinableConstitutives() during setup");
     FE_THROW_IF((want_vector || material_state_spec_.bytes_per_qpt > 0u) && !residual_scalar_ready_, InvalidArgumentException,
                 "SymbolicNonlinearFormKernel: residual IR not prepared for scalar evaluation; call resolveInlinableConstitutives() during setup");
 
-    output_minus.reserve(n_test_minus, n_trial_minus, want_matrix, want_vector);
-    output_plus.reserve(n_test_plus, n_trial_plus, want_matrix, want_vector);
-    coupling_mp.reserve(n_test_minus, n_trial_plus, want_matrix, /*need_vector=*/false);
-    coupling_pm.reserve(n_test_plus, n_trial_minus, want_matrix, /*need_vector=*/false);
+    output_minus.reserve(n_test_minus, n_trial_minus, minus_requested.matrix, minus_requested.vector);
+    output_plus.reserve(n_test_plus, n_trial_plus, plus_requested.matrix, plus_requested.vector);
+    coupling_mp.reserve(n_test_minus, n_trial_plus, mp_requested.matrix, /*need_vector=*/false);
+    coupling_pm.reserve(n_test_plus, n_trial_minus, pm_requested.matrix, /*need_vector=*/false);
 
     const auto n_qpts = ctx_minus.numQuadraturePoints();
 
@@ -14857,17 +14949,34 @@ void SymbolicNonlinearFormKernel::computeInterfaceFace(const assembly::AssemblyC
     const auto n_test_plus = ctx_plus.numTestDofs();
     const auto n_trial_plus = ctx_plus.numTrialDofs();
 
-    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
-    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+    const auto minus_requested = requestedKernelOutputs(
+        output_minus,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        output_ != NonlinearKernelOutput::MatrixOnly);
+    const auto plus_requested = requestedKernelOutputs(
+        output_plus,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        output_ != NonlinearKernelOutput::MatrixOnly);
+    const auto mp_requested = requestedKernelOutputs(
+        coupling_mp,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        /*can_vector=*/false);
+    const auto pm_requested = requestedKernelOutputs(
+        coupling_pm,
+        output_ != NonlinearKernelOutput::VectorOnly,
+        /*can_vector=*/false);
+    const bool want_matrix =
+        minus_requested.matrix || plus_requested.matrix || mp_requested.matrix || pm_requested.matrix;
+    const bool want_vector = minus_requested.vector || plus_requested.vector;
     FE_THROW_IF(want_matrix && !tangent_ready_, InvalidArgumentException,
                 "SymbolicNonlinearFormKernel: tangent IR not built; call resolveInlinableConstitutives() during setup");
     FE_THROW_IF((want_vector || material_state_spec_.bytes_per_qpt > 0u) && !residual_scalar_ready_, InvalidArgumentException,
                 "SymbolicNonlinearFormKernel: residual IR not prepared for scalar evaluation; call resolveInlinableConstitutives() during setup");
 
-    output_minus.reserve(n_test_minus, n_trial_minus, want_matrix, want_vector);
-    output_plus.reserve(n_test_plus, n_trial_plus, want_matrix, want_vector);
-    coupling_mp.reserve(n_test_minus, n_trial_plus, want_matrix, /*need_vector=*/false);
-    coupling_pm.reserve(n_test_plus, n_trial_minus, want_matrix, /*need_vector=*/false);
+    output_minus.reserve(n_test_minus, n_trial_minus, minus_requested.matrix, minus_requested.vector);
+    output_plus.reserve(n_test_plus, n_trial_plus, plus_requested.matrix, plus_requested.vector);
+    coupling_mp.reserve(n_test_minus, n_trial_plus, mp_requested.matrix, /*need_vector=*/false);
+    coupling_pm.reserve(n_test_plus, n_trial_minus, pm_requested.matrix, /*need_vector=*/false);
 
     const auto n_qpts = ctx_minus.numQuadraturePoints();
 

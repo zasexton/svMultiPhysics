@@ -262,29 +262,72 @@ TEST(NonlinearJacobianVerificationTest, ReverseADJacobianMatchesCentralDifferenc
     req_vec.op = "ns_reverse";
     req_vec.want_vector = true;
 
-    for (GlobalIndex j = 0; j < n_dofs; ++j) {
-        auto U_plus = U;
-        auto U_minus = U;
-        U_plus[static_cast<std::size_t>(j)] += eps_fd;
-        U_minus[static_cast<std::size_t>(j)] -= eps_fd;
-        distributeConstrainedState(sys, U_plus);
-        distributeConstrainedState(sys, U_minus);
+    if (sys.constraints().numConstraints() > 0u) {
+        const std::array<Real, 3> seeds = {0.29, 0.53, 0.83};
+        for (const Real seed : seeds) {
+            std::vector<Real> dU(static_cast<std::size_t>(n_dofs), 0.0);
+            for (GlobalIndex i = 0; i < n_dofs; ++i) {
+                const Real x = static_cast<Real>(i + 1);
+                dU[static_cast<std::size_t>(i)] =
+                    static_cast<Real>(0.15) * std::sin(static_cast<double>(seed * x)) +
+                    static_cast<Real>(0.06) * std::cos(static_cast<double>((seed + 0.21) * x));
+            }
+            sys.constraints().distributeHomogeneous(dU);
+            ASSERT_GT(l2Norm(dU), 1e-12);
 
-        svmp::FE::systems::SystemStateView state_plus;
-        state_plus.u = U_plus;
-        svmp::FE::systems::SystemStateView state_minus;
-        state_minus.u = U_minus;
+            const auto JdU = matVec(out, dU);
 
-        svmp::FE::assembly::DenseVectorView Rp(n_dofs);
-        svmp::FE::assembly::DenseVectorView Rm(n_dofs);
-        Rp.zero();
-        Rm.zero();
-        (void)sys.assemble(req_vec, state_plus, nullptr, &Rp);
-        (void)sys.assemble(req_vec, state_minus, nullptr, &Rm);
+            auto U_plus = U;
+            auto U_minus = U;
+            for (GlobalIndex i = 0; i < n_dofs; ++i) {
+                U_plus[static_cast<std::size_t>(i)] += eps_fd * dU[static_cast<std::size_t>(i)];
+                U_minus[static_cast<std::size_t>(i)] -= eps_fd * dU[static_cast<std::size_t>(i)];
+            }
+            distributeConstrainedState(sys, U_plus);
+            distributeConstrainedState(sys, U_minus);
 
-        for (GlobalIndex i = 0; i < n_dofs; ++i) {
-            const Real fd = (Rp.getVectorEntry(i) - Rm.getVectorEntry(i)) / (2.0 * eps_fd);
-            EXPECT_NEAR(out.getMatrixEntry(i, j), fd, fd_tol);
+            svmp::FE::systems::SystemStateView state_plus;
+            state_plus.u = U_plus;
+            svmp::FE::systems::SystemStateView state_minus;
+            state_minus.u = U_minus;
+
+            svmp::FE::assembly::DenseVectorView Rp(n_dofs);
+            svmp::FE::assembly::DenseVectorView Rm(n_dofs);
+            Rp.zero();
+            Rm.zero();
+            (void)sys.assemble(req_vec, state_plus, nullptr, &Rp);
+            (void)sys.assemble(req_vec, state_minus, nullptr, &Rm);
+
+            for (GlobalIndex i = 0; i < n_dofs; ++i) {
+                const Real fd = (Rp.getVectorEntry(i) - Rm.getVectorEntry(i)) / (2.0 * eps_fd);
+                EXPECT_NEAR(JdU[static_cast<std::size_t>(i)], fd, fd_tol);
+            }
+        }
+    } else {
+        for (GlobalIndex j = 0; j < n_dofs; ++j) {
+            auto U_plus = U;
+            auto U_minus = U;
+            U_plus[static_cast<std::size_t>(j)] += eps_fd;
+            U_minus[static_cast<std::size_t>(j)] -= eps_fd;
+            distributeConstrainedState(sys, U_plus);
+            distributeConstrainedState(sys, U_minus);
+
+            svmp::FE::systems::SystemStateView state_plus;
+            state_plus.u = U_plus;
+            svmp::FE::systems::SystemStateView state_minus;
+            state_minus.u = U_minus;
+
+            svmp::FE::assembly::DenseVectorView Rp(n_dofs);
+            svmp::FE::assembly::DenseVectorView Rm(n_dofs);
+            Rp.zero();
+            Rm.zero();
+            (void)sys.assemble(req_vec, state_plus, nullptr, &Rp);
+            (void)sys.assemble(req_vec, state_minus, nullptr, &Rm);
+
+            for (GlobalIndex i = 0; i < n_dofs; ++i) {
+                const Real fd = (Rp.getVectorEntry(i) - Rm.getVectorEntry(i)) / (2.0 * eps_fd);
+                EXPECT_NEAR(out.getMatrixEntry(i, j), fd, fd_tol);
+            }
         }
     }
 

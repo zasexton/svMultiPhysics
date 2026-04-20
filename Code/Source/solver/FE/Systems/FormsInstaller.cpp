@@ -189,6 +189,10 @@ KernelPtr maybeWrapForJIT(KernelPtr kernel, const FormInstallOptions& options)
     if (!kernel || !options.compiler_options.jit.enable) {
         return kernel;
     }
+    if (dynamic_cast<forms::NonlinearFormKernel*>(kernel.get()) != nullptr ||
+        dynamic_cast<forms::SymbolicNonlinearFormKernel*>(kernel.get()) != nullptr) {
+        return kernel;
+    }
     return std::make_shared<forms::jit::JITKernelWrapper>(std::move(kernel), options.compiler_options.jit);
 }
 

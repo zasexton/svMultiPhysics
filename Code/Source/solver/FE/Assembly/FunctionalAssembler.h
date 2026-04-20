@@ -107,6 +107,7 @@ struct FieldSolutionBinding {
     const spaces::FunctionSpace* space{nullptr};        ///< Function space for this field
     const dofs::DofMap* dof_map{nullptr};               ///< Optional field-local DOF map for exact gather
     GlobalIndex dof_offset{0};                          ///< Optional monolithic offset applied to dof_map entries
+    GlobalIndex field_global_size{0};                   ///< Optional monolithic field block size for block-layout gathers
     FieldType field_type{FieldType::Scalar};            ///< Scalar or vector
     int value_dimension{1};                             ///< Number of physical components
     int component_offset{0};                            ///< Starting component in interleaved DOF layout
