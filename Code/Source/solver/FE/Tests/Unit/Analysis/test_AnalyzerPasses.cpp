@@ -321,6 +321,35 @@ TEST(ConstraintRankAnalyzer, NullspaceWithDirichletBC_NoUnderConstraint) {
     EXPECT_EQ(under.size(), 0u);
 }
 
+TEST(ConstraintRankAnalyzer, NullspaceWithWeakInequalityBC_NoUnderConstraintButInfo) {
+    ConstraintRankAnalyzer pass;
+    ProblemAnalysisContext ctx;
+
+    BoundaryConditionDescriptor desc;
+    desc.primary_variable = VariableKey::field(0);
+    desc.trace_kind = TraceKind::NormalComponent;
+    desc.enforcement_kind = EnforcementKind::WeakInequality;
+    desc.anchors_constant_mode = true;
+    desc.state_dependent_activation = true;
+    desc.inequality_sense = InequalitySense::LessEqual;
+    ctx.addBCDescriptor(desc);
+
+    ProblemAnalysisReport report;
+    PropertyClaim nullspace_claim;
+    nullspace_claim.kind = PropertyKind::Nullspace;
+    nullspace_claim.status = PropertyStatus::Exact;
+    nullspace_claim.field = 0;
+    nullspace_claim.description = "scalar constant mode";
+    report.claims.push_back(nullspace_claim);
+
+    pass.run(ctx, report);
+
+    auto under = report.claimsOfKind(PropertyKind::UnderConstraint);
+    EXPECT_EQ(under.size(), 0u);
+    ASSERT_EQ(report.issues.size(), 1u);
+    EXPECT_NE(report.issues[0].message.find("weakly anchored"), std::string::npos);
+}
+
 // ============================================================================
 // CompatibilityAnalyzer
 // ============================================================================
@@ -357,6 +386,32 @@ TEST(CompatibilityAnalyzer, NoNullspace_NoCompatibility) {
     pass.run(ctx, report);
 
     EXPECT_EQ(report.countByKind(PropertyKind::CompatibilityCondition), 0u);
+}
+
+TEST(CompatibilityAnalyzer, WeakInequalityBC_SuppressesPureFluxCompatibilityClaim) {
+    CompatibilityAnalyzer pass;
+    ProblemAnalysisContext ctx;
+
+    BoundaryConditionDescriptor desc;
+    desc.primary_variable = VariableKey::field(0);
+    desc.trace_kind = TraceKind::NormalComponent;
+    desc.enforcement_kind = EnforcementKind::WeakInequality;
+    desc.anchors_constant_mode = true;
+    desc.state_dependent_activation = true;
+    desc.inequality_sense = InequalitySense::LessEqual;
+    ctx.addBCDescriptor(desc);
+
+    ProblemAnalysisReport report;
+    PropertyClaim nc;
+    nc.kind = PropertyKind::Nullspace;
+    nc.status = PropertyStatus::Exact;
+    nc.field = 0;
+    report.claims.push_back(nc);
+
+    pass.run(ctx, report);
+
+    auto compat = report.claimsOfKind(PropertyKind::CompatibilityCondition);
+    EXPECT_EQ(compat.size(), 0u);
 }
 
 // ============================================================================

@@ -11,6 +11,12 @@ How `FE/Forms` weak-form expressions become assembled operators in `FE/Systems`.
 | Mixed linear operator | `installMixedLinear()` | `FormsInstaller.h` |
 | Strong Dirichlet BCs | `installStrongDirichlet()` | `FormsInstaller.h` |
 | H(div) normal-trace BCs | `BoundaryConditionManager` + `NormalTraceEssentialBC` | `StandardBCs.h` |
+| Interface trace BCs | `BoundaryConditionManager` + `InterfaceTraceLoadBC` / `InterfaceTraceRobinBC` / `InterfaceTraceJumpPenaltyBC` | `StandardBCs.h` |
+| Trace Nitsche BCs | `TraceNitscheBC` / `InterfaceTraceNitscheBC` | `NitscheBC.h` |
+| One-sided trace laws | `TraceInequalityBC` | `StandardBCs.h` |
+| H(div) periodic/MPC trace helpers | `makeHDivTracePeriodicBC*()` / `makeHDivTracePeriodicMPC*()` | `ConstraintTools.h` |
+| Mixed-dimensional interface fields | `FESystem::addInterfaceField()` | `FESystem.h` |
+| Mortar/hybrid facet fields | `MortarSpace` + `FESystem::addInterfaceFaceKernel()` | `MortarSpace.h` / `FESystem.h` |
 | Auto-detecting compilation | `FormCompiler::compile()` | `FormCompiler.h` |
 | Explicit mixed compilation | `FormCompiler::compileMixed()` | `FormCompiler.h` |
 | Pre-compiled IR installation | `installMixedFormIR()` | `FormsInstaller.h` |
@@ -76,9 +82,11 @@ For `H(div)` fields, strong prescribed normal flux is not lowered through
 pointwise `StrongDirichlet`. Use `forms::bc::NormalTraceEssentialBC`, which
 installs an `H(div)` trace constraint through the BC manager. Weak trace loads
 and Robin relations are available through `forms::bc::TraceLoadBC` and
-`forms::bc::TraceRobinBC`. FE intentionally does not encode a special
-"passive outflow" primitive; that is represented by leaving the normal trace
-unconstrained or by adding a generic weak trace term.
+`forms::bc::TraceRobinBC`. Trace-consistent weak imposition uses
+`forms::bc::TraceNitscheBC` or `forms::bc::InterfaceTraceNitscheBC`. One-sided
+boundary behavior uses `forms::bc::TraceInequalityBC`. FE intentionally does
+not encode a special "passive outflow" primitive; that is represented by
+leaving the normal trace unconstrained or by adding a generic weak trace term.
 
 Example:
 
@@ -92,6 +100,42 @@ bc_manager.add(forms::bc::makeNormalTraceEssentialBC(4, Constant(1.0)));
 bc_manager.add(forms::bc::makeTraceRobinBC(7, Constant(alpha), Constant(rhs)));
 bc_manager.applyAll(system, residual, q, w, q_field);
 ```
+
+Interface trace conditions use the same manager surface:
+
+```cpp
+bc_manager.add(forms::bc::makeInterfaceTraceLoadBC(marker, Constant(0.0)));
+bc_manager.add(forms::bc::makeInterfaceTraceJumpPenaltyBC(marker,
+                                                          Constant(beta),
+                                                          Constant(0.0)));
+bc_manager.applyAll(system, residual, q, w, q_field);
+```
+
+The canonical public trace-condition names are:
+
+- `NormalTraceEssentialBC`
+- `TraceLoadBC`
+- `TraceRobinBC`
+- `TraceNitscheBC`
+- `TraceInequalityBC`
+- `InterfaceTraceLoadBC`
+- `InterfaceTraceRobinBC`
+- `InterfaceTraceJumpPenaltyBC`
+- `InterfaceTraceNitscheBC`
+
+## 2.1 Advanced H(div) Paths
+
+Three advanced `H(div)` capabilities currently live on the expert/system side
+rather than the high-level `FormsInstaller` path:
+
+- periodic and MPC trace relations through `Constraints/ConstraintTools.h`
+- mortar and hybridized facet unknowns through `spaces::MortarSpace`
+- mixed-dimensional codimension-1 unknowns through `FESystem::addInterfaceField()`
+
+These are intentional FE-core capabilities, but today they are assembled
+through explicit `FESystem` registration rather than a formulation-module
+wrapper. The current public usage examples are collected in
+`Docs/HDIV_ADVANCED_USAGE_GUIDE.md`.
 
 For multi-field:
 ```cpp

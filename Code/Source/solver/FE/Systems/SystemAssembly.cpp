@@ -1060,8 +1060,19 @@ assembly::AssemblyResult assembleOperator(
                 continue;
             }
 
-            assembler.setRowDofMap(*term.row_dof_map, term.row_dof_offset);
-            assembler.setColDofMap(*term.col_dof_map, term.col_dof_offset);
+            const auto& test_field = system.field_registry_.get(term.test_field);
+            const auto& trial_field = system.field_registry_.get(term.trial_field);
+            const auto row_scope =
+                (test_field.scope == FieldScope::InterfaceFace)
+                    ? assembly::DofEntityScope::InterfaceFace
+                    : assembly::DofEntityScope::Cell;
+            const auto col_scope =
+                (trial_field.scope == FieldScope::InterfaceFace)
+                    ? assembly::DofEntityScope::InterfaceFace
+                    : assembly::DofEntityScope::Cell;
+
+            assembler.setRowDofMap(*term.row_dof_map, term.row_dof_offset, row_scope);
+            assembler.setColDofMap(*term.col_dof_map, term.col_dof_offset, col_scope);
 
             auto assemble_on_marker = [&](int marker) {
                 auto it = system.interface_meshes_.find(marker);

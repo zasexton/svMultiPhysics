@@ -26,10 +26,17 @@ class FunctionSpace;
 
 namespace systems {
 
+enum class FieldScope : std::uint8_t {
+    VolumeCell,
+    InterfaceFace
+};
+
 struct FieldSpec {
     std::string name;
     std::shared_ptr<const spaces::FunctionSpace> space;
     int components{1};
+    FieldScope scope{FieldScope::VolumeCell};
+    int interface_marker{-1};
 };
 
 struct FieldRecord {
@@ -37,6 +44,8 @@ struct FieldRecord {
     std::string name;
     std::shared_ptr<const spaces::FunctionSpace> space;
     int components{1};
+    FieldScope scope{FieldScope::VolumeCell};
+    int interface_marker{-1};
 
     // Transient metadata (derived from registered kernels containing `dt(...)`)
     bool time_dependent{false};

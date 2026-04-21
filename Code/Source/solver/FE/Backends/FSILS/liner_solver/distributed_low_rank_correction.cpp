@@ -650,10 +650,11 @@ const std::vector<FSILS_reducedSparseEntry>& projected_right_entries(
   if (!update.right_owned.empty()) {
     return update.right_owned;
   }
-  if (lhs.commu.nTasks > 1) {
-    static const std::vector<FSILS_reducedSparseEntry> empty_entries;
-    return empty_entries;
-  }
+  // Reduced updates may be internalized onto one rank, then expanded back to
+  // the full local overlap with fsils_commuv. Non-owning ranks can therefore
+  // legitimately have an empty owned view while still needing the full local
+  // right support to contribute their owned rows to the distributed projection.
+  (void)lhs;
   return !update.right_scaled.empty() ? update.right_scaled : update.right;
 }
 

@@ -302,6 +302,66 @@ TEST(FormsBoundaryConditions, TraceRobinBC_AddsTwoBoundaryTermsOnNormalTrace) {
     EXPECT_EQ(count_marker_5, 2);
 }
 
+TEST(FormsBoundaryConditions, ApplyTraceInequality_AddsBoundaryTermOnNormalTrace) {
+    auto space = svmp::FE::spaces::HDivSpace(ElementType::Tetra4, /*order=*/0);
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(space, "v");
+
+    auto residual = svmp::FE::forms::dot(u, v).dx();
+    svmp::FE::forms::bc::TraceInequalityOptions opts;
+    opts.sense = svmp::FE::forms::bc::TraceInequalitySense::LessEqual;
+    residual = svmp::FE::forms::bc::applyTraceInequality(std::move(residual),
+                                                         u,
+                                                         v,
+                                                         6,
+                                                         svmp::FE::forms::FormExpr::constant(1.0),
+                                                         svmp::FE::forms::FormExpr::constant(3.0),
+                                                         opts);
+
+    svmp::FE::forms::FormCompiler compiler;
+    const auto ir = compiler.compileResidual(residual);
+
+    int count_marker_6 = 0;
+    for (const auto& term : ir.terms()) {
+        if (term.domain != svmp::FE::forms::IntegralDomain::Boundary) continue;
+        if (term.boundary_marker == 6) {
+            ++count_marker_6;
+        }
+    }
+
+    EXPECT_EQ(count_marker_6, 1);
+}
+
+TEST(FormsBoundaryConditions, TraceInequalityBC_SmoothLinearizationCompiles) {
+    auto space = svmp::FE::spaces::HDivSpace(ElementType::Tetra4, /*order=*/0);
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(space, "v");
+
+    auto residual = svmp::FE::forms::dot(u, v).dx();
+    svmp::FE::forms::bc::TraceInequalityOptions opts;
+    opts.linearization = svmp::FE::forms::bc::TraceInequalityLinearization::Smooth;
+    opts.smoothing_epsilon = svmp::FE::forms::FormExpr::constant(1e-3);
+    svmp::FE::forms::bc::TraceInequalityBC bc(
+        7,
+        svmp::FE::forms::FormExpr::constant(0.0),
+        svmp::FE::forms::FormExpr::constant(2.0),
+        opts);
+    bc.contributeToResidual(residual, u, v);
+
+    svmp::FE::forms::FormCompiler compiler;
+    const auto ir = compiler.compileResidual(residual);
+
+    int count_marker_7 = 0;
+    for (const auto& term : ir.terms()) {
+        if (term.domain != svmp::FE::forms::IntegralDomain::Boundary) continue;
+        if (term.boundary_marker == 7) {
+            ++count_marker_7;
+        }
+    }
+
+    EXPECT_EQ(count_marker_7, 1);
+}
+
 TEST(FormsBoundaryConditions, InterfaceNormalComponentHelperBuildsScalarInterfaceTrace) {
     auto space = svmp::FE::spaces::HDivSpace(ElementType::Tetra4, /*order=*/0);
     const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");

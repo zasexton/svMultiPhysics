@@ -144,6 +144,11 @@ struct FieldSolutionAccess {
     GlobalIndex dof_offset{0};
 };
 
+enum class DofEntityScope : std::uint8_t {
+    Cell,
+    InterfaceFace
+};
+
 /**
  * @brief Provider interface for per-cell material state
  *
@@ -502,9 +507,13 @@ public:
      *
      * Default implementation forwards to @ref setDofMap and requires zero offset.
      */
-    virtual void setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset = 0) {
+    virtual void setRowDofMap(const dofs::DofMap& dof_map,
+                              GlobalIndex row_offset = 0,
+                              DofEntityScope row_scope = DofEntityScope::Cell) {
         FE_THROW_IF(row_offset != 0, FEException,
                     "Assembler::setRowDofMap: offsets not supported by this assembler");
+        FE_THROW_IF(row_scope != DofEntityScope::Cell, FEException,
+                    "Assembler::setRowDofMap: non-cell entity scopes are not supported by this assembler");
         setDofMap(dof_map);
     }
 
@@ -513,9 +522,13 @@ public:
      *
      * Default implementation forwards to @ref setDofMap and requires zero offset.
      */
-    virtual void setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset = 0) {
+    virtual void setColDofMap(const dofs::DofMap& dof_map,
+                              GlobalIndex col_offset = 0,
+                              DofEntityScope col_scope = DofEntityScope::Cell) {
         FE_THROW_IF(col_offset != 0, FEException,
                     "Assembler::setColDofMap: offsets not supported by this assembler");
+        FE_THROW_IF(col_scope != DofEntityScope::Cell, FEException,
+                    "Assembler::setColDofMap: non-cell entity scopes are not supported by this assembler");
         setDofMap(dof_map);
     }
 

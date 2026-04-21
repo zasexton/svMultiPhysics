@@ -2741,7 +2741,6 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::getS
     if (!compiler_) {
         return nullptr;
     }
-
     const bool face_domain = (domain == IntegralDomain::InteriorFace || domain == IntegralDomain::InterfaceFace);
     if (face_domain && ctx_plus == nullptr) {
         if (traceSpecializationEnabled()) {
@@ -3080,60 +3079,20 @@ void JITKernelWrapper::maybeCompile()
             compiled_residual_ = CompiledDispatch{};
         }
 
-        // 2) Compile tangent (via symbolic differentiation)
-        if (want_matrix) {
-            try {
-                const auto& res_ir = k->residualIR();
-                FormCompiler fcomp;
-                // Use the same options as the residual compilation
-                SymbolicOptions sopts;
-                sopts.jit = options_;
-                fcomp.setOptions(sopts);
-
-                // Differentiate residual FormIR terms to get tangent FormIR
-                FormIR tan_ir;
-                tan_ir.setKind(FormKind::Bilinear);
-                tan_ir.setTestSpace(res_ir.testSpace());
-                tan_ir.setTrialSpace(res_ir.trialSpace());
-                
-                std::vector<IntegralTerm> tan_terms;
-                for (const auto& term : res_ir.terms()) {
-                    if (canDifferentiateSymbolically(term.integrand)) {
-                        const auto diff = differentiateResidual(term.integrand);
-                        const auto diff_ir = fcomp.compileBilinear(diff);
-                        for (const auto& dt : diff_ir.terms()) {
-                            IntegralTerm nt = dt;
-                            nt.domain = term.domain;
-                            nt.boundary_marker = term.boundary_marker;
-                            nt.interface_marker = term.interface_marker;
-                            tan_terms.push_back(std::move(nt));
-                        }
-                    } else {
-                        throw std::runtime_error("integrand cannot be differentiated symbolically");
-                    }
-                }
-                tan_ir.setTerms(std::move(tan_terms));
-
-                const auto r_tan = compiler_->compile(tan_ir, vopt);
-                if (!r_tan.ok) {
-                    warnCompileFailureOnce("NonlinearFormKernel(tangent-symbolic)", r_tan.message);
-                    return;
-                }
-                fillDispatch(compiled_tangent_, r_tan);
-            } catch (const std::exception& e) {
-                warnCompileFailureOnce("NonlinearFormKernel(symbolic-diff)", e.what());
-                return;
-            }
-        } else {
-            compiled_tangent_ = CompiledDispatch{};
-        }
+        // Keep the original exact AD tangent on matrix assemblies.
+        //
+        // The residual still benefits from LLVM JIT on the hot residual-only
+        // path, but the coupled Navier-Stokes monolithic cases are more
+        // sensitive to tangent fidelity than to tangent assembly throughput.
+        compiled_tangent_ = CompiledDispatch{};
 
         compiled_revision_ = revision_;
         {
             std::ostringstream detail;
             detail << "event=generic_compile kind=NonlinearFormKernel"
                    << " residual_cell=" << compiled_residual_.cell
-                   << " tangent_cell=" << compiled_tangent_.cell;
+                   << " tangent_cell=" << compiled_tangent_.cell
+                   << " exact_tangent_fallback=1";
             traceSpecialization(this, *fallback_, compiled_revision_, detail.str());
         }
         return;

@@ -187,7 +187,7 @@ private:
     std::vector<std::array<GlobalIndex, 4>> cells_{};
 };
 
-DofMap buildComponentBlockedDofMap(int n_cells, int dof_per_node)
+DofMap buildComponentBlockedDofMap(int n_cells, int dof_per_node, int my_rank)
 {
     const GlobalIndex n_nodes = static_cast<GlobalIndex>(2 * (n_cells + 1));
     const GlobalIndex n_dofs = n_nodes * static_cast<GlobalIndex>(dof_per_node);
@@ -195,6 +195,9 @@ DofMap buildComponentBlockedDofMap(int n_cells, int dof_per_node)
 
     DofMap map(static_cast<GlobalIndex>(n_cells), n_dofs, dofs_per_cell);
     map.setNumDofs(n_dofs);
+    map.setMyRank(my_rank);
+    map.setNumLocalDofs((my_rank == 0) ? n_dofs : GlobalIndex(0));
+    map.setDofOwnership([](GlobalIndex) { return 0; });
 
     for (int c = 0; c < n_cells; ++c) {
         const std::array<GlobalIndex, 4> nodes = {
@@ -281,12 +284,22 @@ DistributedSparsityPattern buildFsilsPatternForStrip(MPI_Comm comm,
     pattern.ensureDiagonal();
     pattern.finalize();
 
-    // Ghost rows for the "right" x=rank+1 node pair on all ranks except the last.
-    if (rank != size - 1) {
-        const std::array<GlobalIndex, 2> ghost_nodes = {
-            static_cast<GlobalIndex>(2 * (rank + 1) + 0),
-            static_cast<GlobalIndex>(2 * (rank + 1) + 1),
-        };
+    // The ghost state tests below assemble a dense rank-0 reference from a backend
+    // vector view. Give rank 0 full remote node coverage so updateGhosts() can make
+    // that reference exact; other ranks keep the minimal one-cell overlap.
+    if (rank == 0 || rank != size - 1) {
+        std::vector<GlobalIndex> ghost_nodes;
+        if (rank == 0) {
+            ghost_nodes.reserve(static_cast<std::size_t>(n_nodes - owned_node_count));
+            for (GlobalIndex node = owned_node_start + owned_node_count; node < n_nodes; ++node) {
+                ghost_nodes.push_back(node);
+            }
+        } else {
+            ghost_nodes = {
+                static_cast<GlobalIndex>(2 * (rank + 1) + 0),
+                static_cast<GlobalIndex>(2 * (rank + 1) + 1),
+            };
+        }
 
         std::vector<GlobalIndex> ghost_rows;
         ghost_rows.reserve(static_cast<std::size_t>(ghost_nodes.size() * static_cast<std::size_t>(dof_per_node)));
@@ -297,10 +310,21 @@ DistributedSparsityPattern buildFsilsPatternForStrip(MPI_Comm comm,
         }
         std::sort(ghost_rows.begin(), ghost_rows.end());
 
-        // Column closure: all DOFs of the current cell (4 nodes * dof).
-        std::vector<GlobalIndex> cell_cols = edofs_backend;
-        std::sort(cell_cols.begin(), cell_cols.end());
-        cell_cols.erase(std::unique(cell_cols.begin(), cell_cols.end()), cell_cols.end());
+        // Column closure:
+        // - rank 0 carries a full-state reference view, so give every ghost row the
+        //   full FE column set.
+        // - other ranks only need the current cell closure.
+        std::vector<GlobalIndex> cell_cols;
+        if (rank == 0) {
+            cell_cols.reserve(static_cast<std::size_t>(n_dofs));
+            for (GlobalIndex dof = 0; dof < n_dofs; ++dof) {
+                cell_cols.push_back(dof);
+            }
+        } else {
+            cell_cols = edofs_backend;
+            std::sort(cell_cols.begin(), cell_cols.end());
+            cell_cols.erase(std::unique(cell_cols.begin(), cell_cols.end()), cell_cols.end());
+        }
 
         const std::size_t cols_per_row = cell_cols.size();
         std::vector<GlobalIndex> ghost_row_ptr;
@@ -444,7 +468,7 @@ TEST(FsilsSolutionViewGhostUpdateMPI, StaleGhostValuesChangeAssemblyUntilUpdateG
     forms::NonlinearFormKernel kernel(std::move(ir), forms::ADMode::Forward, forms::NonlinearKernelOutput::Both);
     kernel.resolveInlinableConstitutives();
 
-    const auto dof_map = buildComponentBlockedDofMap(n_cells, dof);
+    const auto dof_map = buildComponentBlockedDofMap(n_cells, dof, rank);
     ASSERT_EQ(dof_map.getNumDofs(), n_dofs);
 
     // Global reference solution vector in FE ordering (component-blocked).
@@ -556,7 +580,7 @@ TEST(FsilsSolutionViewGhostUpdateMPI, HistoryViewsRequireUpdateGhostsForDtTerms)
     forms::NonlinearFormKernel kernel(std::move(ir), forms::ADMode::Forward, forms::NonlinearKernelOutput::Both);
     kernel.resolveInlinableConstitutives();
 
-    const auto dof_map = buildComponentBlockedDofMap(n_cells, dof);
+    const auto dof_map = buildComponentBlockedDofMap(n_cells, dof, rank);
     ASSERT_EQ(dof_map.getNumDofs(), n_dofs);
 
     std::vector<Real> U0(static_cast<std::size_t>(n_dofs), Real(0.0));

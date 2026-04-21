@@ -25,6 +25,7 @@
 #include "Constraints/GaugeRegistry.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -60,7 +61,18 @@ enum class EnforcementKind : std::uint8_t {
     WeakConsistent,   ///< Consistent weak form (Neumann-type)
     WeakPenalty,      ///< Penalty method (Robin-type)
     WeakNitsche,      ///< Nitsche's method (symmetric or nonsymmetric)
+    WeakInequality,   ///< One-sided weak trace law with state-dependent activation
     AffineRelation,   ///< Algebraic constraint (periodic, MPC)
+};
+
+/**
+ * @brief One-sided sense for inequality or complementarity trace laws
+ */
+enum class InequalitySense : std::uint8_t {
+    None,
+    LessEqual,
+    GreaterEqual,
+    Complementarity,
 };
 
 /**
@@ -97,7 +109,9 @@ struct BoundaryConditionDescriptor {
     std::optional<ScalingDescriptor> scaling;
     std::optional<BalanceDescriptor> balance;
     std::optional<PairingKind> relation_kind;
+    std::optional<InequalitySense> inequality_sense;
     std::string pairing_group;
+    bool state_dependent_activation{false};
 };
 
 // ============================================================================
@@ -106,6 +120,7 @@ struct BoundaryConditionDescriptor {
 
 [[nodiscard]] const char* toString(TraceKind k) noexcept;
 [[nodiscard]] const char* toString(EnforcementKind k) noexcept;
+[[nodiscard]] const char* toString(InequalitySense k) noexcept;
 
 // ============================================================================
 // Lower BC descriptor → ContributionDescriptor(s)

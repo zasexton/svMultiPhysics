@@ -6,18 +6,21 @@
 #include <gtest/gtest.h>
 
 #include "Systems/FESystem.h"
+#include "Systems/TransientSystem.h"
 
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/GlobalSystemView.h"
 
 #include "Dofs/EntityDofMap.h"
 
+#include "Spaces/H1Space.h"
 #include "Spaces/HDivSpace.h"
 #include "Spaces/L2Space.h"
 #include "Spaces/MortarSpace.h"
 
 #include "Mesh/Mesh.h"
 #include "Mesh/Core/MeshBase.h"
+#include "Mesh/Core/InterfaceMesh.h"
 #include "Mesh/Topology/CellShape.h"
 
 #include <algorithm>
@@ -45,14 +48,17 @@ using svmp::FE::assembly::InterfaceEvaluationSide;
 using svmp::FE::assembly::MassKernel;
 using svmp::FE::assembly::NormalTraceCouplingKernel;
 
+using svmp::FE::spaces::H1Space;
 using svmp::FE::spaces::HDivSpace;
 using svmp::FE::spaces::L2Space;
 using svmp::FE::spaces::MortarSpace;
 
 using svmp::FE::systems::AssemblyRequest;
+using svmp::FE::systems::BackwardDifferenceIntegrator;
 using svmp::FE::systems::FESystem;
 using svmp::FE::systems::FieldSpec;
 using svmp::FE::systems::SystemStateView;
+using svmp::FE::systems::TransientSystem;
 
 namespace {
 
@@ -91,6 +97,56 @@ std::shared_ptr<Mesh> build_two_quad_mesh_with_interface_set(const std::string& 
         if (has1 && has4) {
             mbase.add_to_set(EntityKind::Face, set_name, f);
             break;
+        }
+    }
+
+    return mesh;
+}
+
+std::shared_ptr<Mesh> build_four_quad_mesh_with_interface_set(const std::string& set_name)
+{
+    auto base = std::make_shared<MeshBase>();
+
+    const std::vector<svmp::real_t> X_ref = {
+        0.0, 0.0,
+        1.0, 0.0,
+        2.0, 0.0,
+        0.0, 1.0,
+        1.0, 1.0,
+        2.0, 1.0,
+        0.0, 2.0,
+        1.0, 2.0,
+        2.0, 2.0
+    };
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4, 8, 12, 16};
+    const std::vector<svmp::index_t> cell2vertex = {
+        0, 1, 4, 3,
+        1, 2, 5, 4,
+        3, 4, 7, 6,
+        4, 5, 8, 7
+    };
+
+    CellShape shape{};
+    shape.family = CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(/*spatial_dim=*/2, X_ref, cell2vertex_offsets, cell2vertex,
+                            {shape, shape, shape, shape});
+    base->finalize();
+
+    auto mesh = svmp::create_mesh(std::move(base));
+    auto& mbase = mesh->local_mesh();
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(mbase.n_faces()); ++f) {
+        const auto verts = mbase.face_vertices(f);
+        if (verts.size() != 2u) {
+            continue;
+        }
+        const bool lower_segment =
+            (verts[0] == 1 || verts[1] == 1) && (verts[0] == 4 || verts[1] == 4);
+        const bool upper_segment =
+            (verts[0] == 4 || verts[1] == 4) && (verts[0] == 7 || verts[1] == 7);
+        if (lower_segment || upper_segment) {
+            mbase.add_to_set(EntityKind::Face, set_name, f);
         }
     }
 
@@ -216,6 +272,59 @@ std::vector<double> subvector(const DenseVectorView& b, GlobalIndex i0, GlobalIn
     }
     return out;
 }
+
+class InterfaceDtResidualKernel final : public svmp::FE::assembly::LinearFormKernel {
+public:
+    explicit InterfaceDtResidualKernel(Real coefficient = 1.0,
+                                       InterfaceEvaluationSide side = InterfaceEvaluationSide::Minus)
+        : coefficient_(coefficient)
+        , side_(side)
+    {
+    }
+
+    [[nodiscard]] svmp::FE::assembly::RequiredData getRequiredData() const override
+    {
+        using svmp::FE::assembly::RequiredData;
+        return RequiredData::BasisValues | RequiredData::IntegrationWeights |
+               RequiredData::SolutionValues;
+    }
+
+    void computeCell(const svmp::FE::assembly::AssemblyContext&, svmp::FE::assembly::KernelOutput&) override
+    {
+        FE_THROW(svmp::FE::FEException,
+                 "InterfaceDtResidualKernel::computeCell is not implemented (face-only kernel)");
+    }
+
+    void computeBoundaryFace(const svmp::FE::assembly::AssemblyContext& ctx,
+                             int,
+                             svmp::FE::assembly::KernelOutput& output) override
+    {
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(),
+                       /*need_matrix=*/false, /*need_vector=*/true);
+
+        for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+            const Real du = ctx.solutionValue(q) - ctx.previousSolutionValue(q);
+            const Real w = coefficient_ * ctx.integrationWeight(q);
+            for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
+                output.vectorEntry(i) += w * ctx.basisValue(i, q) * du;
+            }
+        }
+    }
+
+    [[nodiscard]] bool hasCell() const noexcept override { return false; }
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+    [[nodiscard]] bool hasSingleSidedInterfaceFace() const noexcept override { return true; }
+    [[nodiscard]] InterfaceEvaluationSide interfaceEvaluationSide() const noexcept override
+    {
+        return side_;
+    }
+    [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override { return 1; }
+    [[nodiscard]] std::string name() const override { return "InterfaceDtResidualKernel"; }
+
+private:
+    Real coefficient_{1.0};
+    InterfaceEvaluationSide side_{InterfaceEvaluationSide::Minus};
+};
 
 } // namespace
 
@@ -386,4 +495,166 @@ TEST(FESystemMortar, HybridizedToyCondensationMatchesFullSolve)
                     x_full[static_cast<std::size_t>(i)], 1e-10);
     }
     EXPECT_NEAR(lambda_condensed, x_full[static_cast<std::size_t>(n_q)], 1e-10);
+}
+
+TEST(FESystemMixedDimensional, SetupDistributesContinuousInterfaceFieldOnConnectedInterface)
+{
+    constexpr int marker = 23;
+    auto mesh = build_four_quad_mesh_with_interface_set("middle_vertical");
+
+    auto lambda_space = std::make_shared<H1Space>(ElementType::Line2, /*order=*/1);
+
+    FESystem sys(mesh);
+    sys.setInterfaceMeshFromFaceSet(marker, "middle_vertical");
+    const auto lambda = sys.addInterfaceField("lambda", lambda_space, marker);
+    sys.setup();
+
+    const auto& iface = sys.interfaceMesh(marker);
+    ASSERT_EQ(iface.n_faces(), 2u);
+    ASSERT_EQ(sys.fieldDofHandler(lambda).getNumDofs(), 3);
+
+    const auto first_face_dofs = sys.fieldDofHandler(lambda).getCellDofs(0);
+    const auto second_face_dofs = sys.fieldDofHandler(lambda).getCellDofs(1);
+    ASSERT_EQ(first_face_dofs.size(), 2u);
+    ASSERT_EQ(second_face_dofs.size(), 2u);
+
+    std::vector<GlobalIndex> shared;
+    for (GlobalIndex dof : first_face_dofs) {
+        if (std::find(second_face_dofs.begin(), second_face_dofs.end(), dof) != second_face_dofs.end()) {
+            shared.push_back(dof);
+        }
+    }
+    ASSERT_EQ(shared.size(), 1u);
+
+    const auto* emap = sys.fieldDofHandler(lambda).getEntityDofMap();
+    ASSERT_NE(emap, nullptr);
+
+    GlobalIndex middle_dof = -1;
+    for (std::size_t lv = 0; lv < iface.vertex_gids().size(); ++lv) {
+        if (iface.vertex_gids()[lv] != 4) {
+            continue;
+        }
+        const auto vertex_dofs = emap->getVertexDofs(static_cast<GlobalIndex>(lv));
+        ASSERT_EQ(vertex_dofs.size(), 1u);
+        middle_dof = vertex_dofs[0];
+        break;
+    }
+
+    ASSERT_GE(middle_dof, 0);
+    EXPECT_EQ(shared.front(), middle_dof);
+}
+
+TEST(FESystemMixedDimensional, InterfaceFieldHistoryAssemblyUsesPreviousState)
+{
+    constexpr int marker = 23;
+    auto mesh = build_four_quad_mesh_with_interface_set("middle_vertical");
+
+    auto lambda_space = std::make_shared<H1Space>(ElementType::Line2, /*order=*/1);
+
+    FESystem sys(mesh);
+    sys.setInterfaceMeshFromFaceSet(marker, "middle_vertical");
+    const auto lambda = sys.addInterfaceField("lambda", lambda_space, marker);
+    sys.addOperator("dt_interface");
+    sys.addInterfaceFaceKernel("dt_interface", marker, lambda,
+                               std::make_shared<InterfaceDtResidualKernel>());
+    EXPECT_TRUE(sys.isTransient());
+    EXPECT_EQ(sys.temporalOrder(), 1);
+    sys.setup();
+
+    ASSERT_EQ(sys.fieldDofHandler(lambda).getNumDofs(), 3);
+    const auto lambda_offset = sys.fieldDofOffset(lambda);
+
+    std::vector<Real> u_n = {2.0, 2.0, 2.0};
+    std::vector<Real> u_prev = {1.0, 1.0, 1.0};
+
+    SystemStateView state;
+    state.dt = 1.0;
+    state.u = u_n;
+    state.u_prev = u_prev;
+
+    DenseVectorView residual(sys.dofHandler().getNumDofs());
+    residual.zero();
+
+    AssemblyRequest req;
+    req.op = "dt_interface";
+    req.want_vector = true;
+
+    TransientSystem transient(sys, std::make_shared<BackwardDifferenceIntegrator>());
+    const auto result = transient.assemble(req, state, nullptr, &residual);
+    ASSERT_TRUE(result.success);
+
+    std::vector<Real> values;
+    values.reserve(static_cast<std::size_t>(sys.fieldDofHandler(lambda).getNumDofs()));
+    for (GlobalIndex i = 0; i < sys.fieldDofHandler(lambda).getNumDofs(); ++i) {
+        values.push_back(residual.getVectorEntry(lambda_offset + i));
+    }
+    std::sort(values.begin(), values.end());
+
+    ASSERT_EQ(values.size(), 3u);
+    EXPECT_NEAR(values[0], 0.5, 1e-12);
+    EXPECT_NEAR(values[1], 0.5, 1e-12);
+    EXPECT_NEAR(values[2], 1.0, 1e-12);
+}
+
+TEST(FESystemMixedDimensional, InterfaceFieldCouplingConservesSymmetricExchange)
+{
+    constexpr int marker = 17;
+    auto mesh = build_two_quad_mesh_with_interface_set("middle");
+
+    auto volume_space = std::make_shared<L2Space>(ElementType::Quad4, /*order=*/0);
+    auto interface_space = std::make_shared<L2Space>(ElementType::Line2, /*order=*/0);
+
+    FESystem sys(mesh);
+    sys.setInterfaceMeshFromFaceSet(marker, "middle");
+    const auto q = sys.addField(FieldSpec{.name = "q", .space = volume_space});
+    const auto lambda = sys.addInterfaceField("lambda", interface_space, marker);
+    sys.addOperator("mixeddim_balance");
+    sys.addCellKernel("mixeddim_balance", q, std::make_shared<MassKernel>(1.0));
+    sys.addInterfaceFaceKernel("mixeddim_balance", marker, q, lambda,
+                               std::make_shared<NormalTraceCouplingKernel>(1.0, InterfaceEvaluationSide::Minus));
+    sys.addInterfaceFaceKernel("mixeddim_balance", marker, q, lambda,
+                               std::make_shared<NormalTraceCouplingKernel>(1.0, InterfaceEvaluationSide::Plus));
+    sys.addInterfaceFaceKernel("mixeddim_balance", marker, lambda, q,
+                               std::make_shared<NormalTraceCouplingKernel>(1.0, InterfaceEvaluationSide::Minus));
+    sys.addInterfaceFaceKernel("mixeddim_balance", marker, lambda, q,
+                               std::make_shared<NormalTraceCouplingKernel>(1.0, InterfaceEvaluationSide::Plus));
+    sys.addInterfaceFaceKernel("mixeddim_balance", marker, lambda,
+                               std::make_shared<FacetSourceKernel>(1.0));
+    sys.setup();
+
+    DenseMatrixView A(sys.dofHandler().getNumDofs());
+    DenseVectorView b(sys.dofHandler().getNumDofs());
+    SystemStateView state;
+    AssemblyRequest req;
+    req.op = "mixeddim_balance";
+    req.want_matrix = true;
+    req.want_vector = true;
+    const auto result = sys.assemble(req, state, &A, &b);
+    ASSERT_TRUE(result.success);
+
+    const auto q_off = sys.fieldDofOffset(q);
+    const auto lambda_off = sys.fieldDofOffset(lambda);
+    const int n_q = static_cast<int>(sys.fieldDofHandler(q).getNumDofs());
+    const int n_lambda = static_cast<int>(sys.fieldDofHandler(lambda).getNumDofs());
+    ASSERT_EQ(n_q, 2);
+    ASSERT_EQ(n_lambda, 1);
+
+    std::vector<double> Afull(static_cast<std::size_t>((n_q + n_lambda) * (n_q + n_lambda)), 0.0);
+    std::vector<double> bfull(static_cast<std::size_t>(n_q + n_lambda), 0.0);
+    for (int i = 0; i < n_q + n_lambda; ++i) {
+        bfull[static_cast<std::size_t>(i)] = b.getVectorEntry(i);
+        for (int j = 0; j < n_q + n_lambda; ++j) {
+            Afull[static_cast<std::size_t>(i) * (n_q + n_lambda) + j] = A.getMatrixEntry(i, j);
+        }
+    }
+
+    const auto x = dense_solve(Afull, bfull, n_q + n_lambda);
+
+    EXPECT_GT(block_abs_sum(A, q_off, q_off + n_q, lambda_off, lambda_off + n_lambda), 0.0);
+    EXPECT_GT(block_abs_sum(A, lambda_off, lambda_off + n_lambda, q_off, q_off + n_q), 0.0);
+
+    EXPECT_NEAR(x[0], 0.5, 1e-12);
+    EXPECT_NEAR(x[1], 0.5, 1e-12);
+    EXPECT_NEAR(x[2], -0.5, 1e-12);
+    EXPECT_NEAR(x[0] + x[1], 1.0, 1e-12);
 }

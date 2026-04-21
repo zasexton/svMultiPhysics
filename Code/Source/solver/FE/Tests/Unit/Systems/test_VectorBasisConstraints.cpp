@@ -349,6 +349,17 @@ TEST(VectorBasisConstraints, BoundaryConditionManagerAllowsMultipleWeakTraceCond
     EXPECT_NO_THROW(bc_manager.validate());
 }
 
+TEST(VectorBasisConstraints, BoundaryConditionManagerTreatsTraceInequalityAsExclusive)
+{
+    BoundaryConditionManager bc_manager;
+    bc_manager.add(std::make_unique<forms::bc::TraceInequalityBC>(
+        7, forms::FormExpr::constant(0.0), forms::FormExpr::constant(4.0)));
+    bc_manager.add(
+        std::make_unique<forms::bc::TraceLoadBC>(7, forms::FormExpr::constant(2.0)));
+
+    EXPECT_THROW((void)bc_manager.validate(), std::invalid_argument);
+}
+
 TEST(VectorBasisConstraints, BoundaryConditionManagerRejectsStrongAndWeakTraceConditionsOnSameMarker)
 {
     BoundaryConditionManager bc_manager;
@@ -358,6 +369,21 @@ TEST(VectorBasisConstraints, BoundaryConditionManagerRejectsStrongAndWeakTraceCo
         std::make_unique<forms::bc::TraceLoadBC>(7, forms::FormExpr::constant(2.0)));
 
     EXPECT_THROW((void)bc_manager.validate(), std::invalid_argument);
+}
+
+TEST(VectorBasisConstraints, BoundaryConditionManagerRejectsWeakTraceInequalityInStrongOnlyApply)
+{
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<spaces::HDivSpace>(ElementType::Tetra4, /*order=*/0);
+
+    FESystem sys(mesh);
+    const auto B = sys.addField(FieldSpec{.name = "B", .space = space, .components = space->value_dimension()});
+
+    BoundaryConditionManager bc_manager;
+    bc_manager.add(std::make_unique<forms::bc::TraceInequalityBC>(
+        7, forms::FormExpr::constant(0.0), forms::FormExpr::constant(4.0)));
+
+    EXPECT_THROW(bc_manager.applyAll(sys, B), std::invalid_argument);
 }
 
 TEST(VectorBasisConstraints, BoundaryConditionManagerSeparatesBoundaryAndInterfaceMarkers)
@@ -410,6 +436,47 @@ TEST(VectorBasisConstraints, BoundaryConditionManagerInstallsInterfaceTraceMetad
     }
 
     EXPECT_EQ(interface_terms, 3);
+}
+
+TEST(VectorBasisConstraints, BoundaryConditionManagerInstallsTraceInequalityMetadataAndResidualTerms)
+{
+    auto mesh = std::make_shared<forms::test::SingleTetraOneBoundaryFaceMeshAccess>(9);
+    auto space = std::make_shared<spaces::HDivSpace>(ElementType::Tetra4, /*order=*/0);
+
+    FESystem sys(mesh);
+    const auto B = sys.addField(FieldSpec{.name = "B", .space = space, .components = space->value_dimension()});
+
+    const auto u = forms::FormExpr::trialFunction(*space, "B");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    auto residual = forms::dot(u, v).dx();
+
+    BoundaryConditionManager bc_manager;
+    bc_manager.add(std::make_unique<forms::bc::TraceInequalityBC>(
+        9, forms::FormExpr::constant(0.0), forms::FormExpr::constant(4.0)));
+    bc_manager.applyAll(sys, residual, u, v, B);
+
+    ASSERT_EQ(sys.boundaryConditionDescriptors().size(), 1u);
+    const auto& desc = sys.boundaryConditionDescriptors().front();
+    EXPECT_EQ(desc.domain, analysis::DomainKind::Boundary);
+    EXPECT_EQ(desc.boundary_marker, 9);
+    EXPECT_EQ(desc.trace_kind, analysis::TraceKind::NormalComponent);
+    EXPECT_EQ(desc.enforcement_kind, analysis::EnforcementKind::WeakInequality);
+    ASSERT_TRUE(desc.inequality_sense.has_value());
+    EXPECT_EQ(*desc.inequality_sense, analysis::InequalitySense::LessEqual);
+    EXPECT_TRUE(desc.state_dependent_activation);
+
+    forms::FormCompiler compiler;
+    const auto ir = compiler.compileResidual(residual);
+
+    int boundary_terms = 0;
+    for (const auto& term : ir.terms()) {
+        if (term.domain != forms::IntegralDomain::Boundary) continue;
+        if (term.boundary_marker == 9) {
+            ++boundary_terms;
+        }
+    }
+
+    EXPECT_EQ(boundary_terms, 1);
 }
 
 TEST(VectorBasisConstraints, MonolithicDofHandlerPreservesCellOrientationsForVectorBasisFields)

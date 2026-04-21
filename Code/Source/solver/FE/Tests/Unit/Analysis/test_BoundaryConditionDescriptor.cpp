@@ -40,7 +40,15 @@ TEST(BoundaryConditionDescriptor, ToString_EnforcementKind) {
     EXPECT_STREQ(toString(EnforcementKind::WeakConsistent), "WeakConsistent");
     EXPECT_STREQ(toString(EnforcementKind::WeakPenalty), "WeakPenalty");
     EXPECT_STREQ(toString(EnforcementKind::WeakNitsche), "WeakNitsche");
+    EXPECT_STREQ(toString(EnforcementKind::WeakInequality), "WeakInequality");
     EXPECT_STREQ(toString(EnforcementKind::AffineRelation), "AffineRelation");
+}
+
+TEST(BoundaryConditionDescriptor, ToString_InequalitySense) {
+    EXPECT_STREQ(toString(InequalitySense::None), "None");
+    EXPECT_STREQ(toString(InequalitySense::LessEqual), "LessEqual");
+    EXPECT_STREQ(toString(InequalitySense::GreaterEqual), "GreaterEqual");
+    EXPECT_STREQ(toString(InequalitySense::Complementarity), "Complementarity");
 }
 
 // ============================================================================
@@ -162,6 +170,27 @@ TEST(BoundaryConditionDescriptor, TraceRobinBC_WeakPenaltyNormalComponentAnchors
     EXPECT_TRUE(d.anchors_constant_mode);
     EXPECT_TRUE(d.anchors_rigid_body_translation);
     EXPECT_FALSE(d.anchors_rigid_body_rotation);
+}
+
+TEST(BoundaryConditionDescriptor, TraceInequalityBC_WeakInequalityNormalComponentIsStateDependent) {
+    bc::TraceInequalityOptions opts;
+    opts.sense = bc::TraceInequalitySense::GreaterEqual;
+    bc::TraceInequalityBC bc(15,
+                             FormExpr::constant(0.0),
+                             FormExpr::constant(4.0),
+                             opts);
+    auto descs = bc.analysisMetadata(/*field_id=*/0, nullptr);
+
+    ASSERT_EQ(descs.size(), 1u);
+    const auto& d = descs[0];
+
+    EXPECT_EQ(d.trace_kind, TraceKind::NormalComponent);
+    EXPECT_EQ(d.enforcement_kind, EnforcementKind::WeakInequality);
+    ASSERT_TRUE(d.inequality_sense.has_value());
+    EXPECT_EQ(*d.inequality_sense, InequalitySense::GreaterEqual);
+    EXPECT_TRUE(d.state_dependent_activation);
+    EXPECT_TRUE(d.anchors_constant_mode);
+    EXPECT_TRUE(d.anchors_rigid_body_translation);
 }
 
 TEST(BoundaryConditionDescriptor, InterfaceTraceLoadBC_WeakConsistentNormalComponentOnInterface) {
@@ -405,6 +434,15 @@ TEST(BoundaryConditionDescriptor, NaturalBC_DescriptorToVerdict) {
               AnchoringVerdict::Preserved);
 }
 
+TEST(BoundaryConditionDescriptor, DescriptorToVerdict_WeakInequality_PartiallyAnchored) {
+    BoundaryConditionDescriptor d;
+    d.enforcement_kind = EnforcementKind::WeakInequality;
+    d.anchors_constant_mode = true;
+
+    auto verdict = descriptorToVerdict(d, NullspaceModeFamily::ScalarConstant);
+    EXPECT_EQ(verdict, AnchoringVerdict::PartiallyAnchored);
+}
+
 TEST(BoundaryConditionDescriptor, PeriodicBC_DescriptorToVerdict) {
     bc::PeriodicBC bc(1, 2, {1.0, 0.0, 0.0});
 
@@ -481,6 +519,26 @@ TEST(BoundaryConditionDescriptor, LowerNitsche) {
     EXPECT_TRUE(hasFlag(contribs[0].traits, OperatorTraitFlags::NullspaceLifting));
     EXPECT_EQ(contribs[1].role, ContributionRole::StabilizationBlock);
     EXPECT_TRUE(hasFlag(contribs[1].traits, OperatorTraitFlags::HasMass));
+}
+
+TEST(BoundaryConditionDescriptor, LowerWeakInequality) {
+    BoundaryConditionDescriptor desc;
+    desc.primary_variable = VariableKey::field(0);
+    desc.boundary_marker = 4;
+    desc.enforcement_kind = EnforcementKind::WeakInequality;
+    desc.anchors_constant_mode = true;
+    desc.state_dependent_activation = true;
+    desc.inequality_sense = InequalitySense::LessEqual;
+
+    auto contribs = lowerBCDescriptor(desc);
+    ASSERT_EQ(contribs.size(), 1u);
+    EXPECT_EQ(contribs[0].role, ContributionRole::BoundaryConstraint);
+    EXPECT_TRUE(hasFlag(contribs[0].traits, OperatorTraitFlags::HasMass));
+    EXPECT_TRUE(hasFlag(contribs[0].traits, OperatorTraitFlags::NullspaceLifting));
+    ASSERT_TRUE(contribs[0].nullspace_effect.has_value());
+    EXPECT_EQ(*contribs[0].nullspace_effect, NullspaceEffect::WeaklyLifts);
+    ASSERT_TRUE(contribs[0].consistency_kind.has_value());
+    EXPECT_EQ(*contribs[0].consistency_kind, ConsistencyKind::ConsistentPerturbation);
 }
 
 TEST(BoundaryConditionDescriptor, LowerNeumann) {

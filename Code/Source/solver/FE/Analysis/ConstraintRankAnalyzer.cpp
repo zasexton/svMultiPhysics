@@ -130,7 +130,8 @@ void ConstraintRankAnalyzer::run(const ProblemAnalysisContext& context,
             // If no contributions were lowered, fall back to BC flags for these too.
             if (!anchors_constant &&
                 (bc.enforcement_kind == EnforcementKind::WeakPenalty ||
-                 bc.enforcement_kind == EnforcementKind::WeakNitsche)) {
+                 bc.enforcement_kind == EnforcementKind::WeakNitsche ||
+                 bc.enforcement_kind == EnforcementKind::WeakInequality)) {
                 if (bc.anchors_constant_mode) {
                     anchors_constant = true;
                     weak_only = true;

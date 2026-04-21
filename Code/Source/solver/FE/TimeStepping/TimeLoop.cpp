@@ -8,7 +8,6 @@
 #include "TimeStepping/TimeLoop.h"
 
 #include "Core/FEException.h"
-#include "Core/Logger.h"
 #include "Math/FiniteDifference.h"
 #include "Sparsity/SparsityPattern.h"
 #include "Systems/SystemsExceptions.h"
@@ -16,6 +15,7 @@
 #include "TimeStepping/CollocationMethods.h"
 #include "TimeStepping/MultiStageScheme.h"
 #include "TimeStepping/NewmarkBeta.h"
+#include "TimeStepping/ConstraintSync.h"
 #include "TimeStepping/TimeSteppingUtils.h"
 #include "TimeStepping/VSVO_BDF_Controller.h"
 
@@ -26,29 +26,11 @@
 #include <unordered_map>
 #include <vector>
 
-#if FE_HAS_MPI
-#include <mpi.h>
-#endif
-
 namespace svmp {
 namespace FE {
 namespace timestepping {
 
 namespace {
-
-int worldRank() noexcept
-{
-#if FE_HAS_MPI
-    int initialized = 0;
-    MPI_Initialized(&initialized);
-    if (initialized) {
-        int rank = 0;
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-        return rank;
-    }
-#endif
-    return 0;
-}
 
 void copyVector(backends::GenericVector& dst, const backends::GenericVector& src)
 {
@@ -335,11 +317,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
         const auto& constraints = sys.constraints();
         if (!constraints.empty()) {
             sys.updateConstraints(t0, history.dt());
-            constraints.distribute(history.u());
-            for (int k = 1; k <= history.historyDepth(); ++k) {
-                constraints.distribute(history.uPrevK(k));
-            }
-            history.updateGhosts();
+            detail::updateGhostsAndDistributeConstraints(constraints, history);
         }
     }
 
@@ -851,7 +829,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                         /*require_u_ddot=*/false);
         }
 
-        history.updateGhosts();
+        detail::updateGhostsAndDistributeConstraints(constraints, history);
         const auto u_n = history.uPrevSpan();
         FE_CHECK_ARG(static_cast<GlobalIndex>(u_n.size()) == n_dofs, "TimeLoop: collocation u_n size mismatch");
 
@@ -1635,7 +1613,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                                     /*require_u_ddot=*/!had_u_ddot);
 
                         // Ensure (u_n, v_n, a_n) values are ghost-consistent before constructing constants.
-                        history.updateGhosts();
+                        detail::updateGhostsAndDistributeConstraints(transient.system().constraints(), history);
 
                         // Save displacement history since we overwrite the first two slots with
                         // scheme-specific constant vectors.
@@ -1860,7 +1838,42 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                     } catch (const std::exception&) {
                                         rep.converged = false;
                                     }
-                                    if (!rep.converged) {
+
+                                    bool accept_udot_init_solve = rep.converged;
+                                    if (!accept_udot_init_solve &&
+                                        std::isfinite(rep.initial_residual_norm) &&
+                                        std::isfinite(rep.final_residual_norm)) {
+                                        const Real rhs_norm = std::max<Real>(
+                                            static_cast<Real>(rep.initial_residual_norm),
+                                            static_cast<Real>(1e-30));
+                                        const Real requested_target = std::max(
+                                            init_opts.abs_tol,
+                                            init_opts.rel_tol * rhs_norm);
+                                        const bool meets_requested_target =
+                                            std::isfinite(static_cast<double>(requested_target)) &&
+                                            rep.final_residual_norm <= requested_target;
+
+                                        bool meets_nonlinear_floor = false;
+                                        if (options_.newton.abs_tolerance > 0.0 &&
+                                            std::isfinite(rep.relative_residual)) {
+                                            const Real nonlinear_floor =
+                                                static_cast<Real>(options_.newton.abs_tolerance);
+                                            const Real relaxed_relative_target =
+                                                init_opts.rel_tol > 0.0
+                                                    ? static_cast<Real>(2.0) * init_opts.rel_tol
+                                                    : std::numeric_limits<Real>::infinity();
+                                            meets_nonlinear_floor =
+                                                std::isfinite(static_cast<double>(nonlinear_floor)) &&
+                                                std::isfinite(static_cast<double>(relaxed_relative_target)) &&
+                                                rep.final_residual_norm <= nonlinear_floor &&
+                                                rep.relative_residual <= relaxed_relative_target;
+                                        }
+
+                                        accept_udot_init_solve =
+                                            meets_requested_target || meets_nonlinear_floor;
+                                    }
+
+                                    if (!accept_udot_init_solve) {
                                         // Fall back to a finite-difference uDot (may be zero at the first step).
                                         (void)utils::initializeSecondOrderStateFromDisplacementHistory(
                                             history,
@@ -1868,6 +1881,8 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                             history.uDDot().localSpan(),
                                             /*overwrite_u_dot=*/true,
                                             /*overwrite_u_ddot=*/false);
+                                    } else {
+                                        rep.converged = true;
                                     }
                                 } else {
                                     (void)utils::initializeSecondOrderStateFromDisplacementHistory(
@@ -1887,7 +1902,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 	                        }
 
                         // Ensure (u_n, uDot_n) values are ghost-consistent before constructing constants.
-                        history.updateGhosts();
+                        detail::updateGhostsAndDistributeConstraints(transient.system().constraints(), history);
 
                         // Save displacement history (u^{n-1}) since we overwrite uPrev2 with uDot^n
                         // for the stage solve.
@@ -1918,10 +1933,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                             for (std::size_t i = 0; i < cur.size(); ++i) {
                                 cur[i] += alpha_dt * v[i];
                             }
-                            if (!constraints.empty()) {
-                                constraints.distribute(history.u());
-                            }
-                            history.u().updateGhosts();
+                            detail::updateGhostsAndDistributeConstraints(constraints, history.u());
                         }
 
 	                        nr = newton.solveStep(transient_stage, linear, stage_time, history, workspace);
@@ -1983,7 +1995,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                                     /*require_u_ddot=*/!had_u_ddot);
 
                         // Ensure (u_n, v_n, a_n) values are ghost-consistent before constructing constants.
-                        history.updateGhosts();
+                        detail::updateGhostsAndDistributeConstraints(transient.system().constraints(), history);
 
                         // Save displacement history since we overwrite the first two slots with
                         // scheme-specific constant vectors.
@@ -2074,7 +2086,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                                         /*overwrite_u_ddot=*/!had_u_ddot,
                                                         /*require_u_ddot=*/!had_u_ddot);
 
-                            history.updateGhosts();
+                            detail::updateGhostsAndDistributeConstraints(transient.system().constraints(), history);
 
                             copyVector(*scratch_vec0, history.uPrev());
                             copyVector(*scratch_vec2, history.uPrev2());
@@ -2714,7 +2726,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     // Ensure stateful kernels (MaterialStateProvider / GlobalKernelStateProvider) are committed
                     // for the accepted end-of-step state at t_{n+1}, even when the scheme's nonlinear solve was
                     // performed at an intermediate stage time (e.g., generalized-α, Gauss collocation).
-                    history.updateGhosts();
+                    detail::updateGhostsAndDistributeConstraints(transient.system().constraints(), history);
 
                     // Save displacement history since we overwrite the first two slots with
                     // end-state constants for dt(u) and dt(u,2).

@@ -31,7 +31,18 @@ const char* toString(EnforcementKind k) noexcept {
         case EnforcementKind::WeakConsistent:  return "WeakConsistent";
         case EnforcementKind::WeakPenalty:     return "WeakPenalty";
         case EnforcementKind::WeakNitsche:     return "WeakNitsche";
+        case EnforcementKind::WeakInequality:  return "WeakInequality";
         case EnforcementKind::AffineRelation:  return "AffineRelation";
+    }
+    return "Unknown";
+}
+
+const char* toString(InequalitySense k) noexcept {
+    switch (k) {
+        case InequalitySense::None:            return "None";
+        case InequalitySense::LessEqual:       return "LessEqual";
+        case InequalitySense::GreaterEqual:    return "GreaterEqual";
+        case InequalitySense::Complementarity: return "Complementarity";
     }
     return "Unknown";
 }
@@ -46,12 +57,20 @@ descriptorToVerdict(const BoundaryConditionDescriptor& desc,
     switch (family) {
         case Family::ScalarConstant:
         case Family::ComponentwiseConstant:
+            if (desc.enforcement_kind == EnforcementKind::WeakInequality &&
+                desc.anchors_constant_mode) {
+                return Verdict::PartiallyAnchored;
+            }
             if (desc.anchors_constant_mode) return Verdict::Anchored;
             break;
 
         case Family::KernelOfSymGrad:
             if (desc.anchors_rigid_body_translation && desc.anchors_rigid_body_rotation) {
                 return Verdict::Anchored;
+            }
+            if (desc.enforcement_kind == EnforcementKind::WeakInequality &&
+                (desc.anchors_rigid_body_translation || desc.anchors_rigid_body_rotation)) {
+                return Verdict::PartiallyAnchored;
             }
             if (desc.anchors_rigid_body_translation) {
                 return Verdict::PartiallyAnchored;
@@ -138,6 +157,15 @@ lowerBCDescriptor(const BoundaryConditionDescriptor& desc) {
                 stab.traits = OperatorTraitFlags::HasMass;
                 result.push_back(std::move(stab));
             }
+            break;
+
+        case EnforcementKind::WeakInequality:
+            // One-sided trace law → BoundaryConstraint + HasMass + weak lifting
+            d.role = ContributionRole::BoundaryConstraint;
+            d.traits = OperatorTraitFlags::HasMass | OperatorTraitFlags::NullspaceLifting;
+            d.nullspace_effect = NullspaceEffect::WeaklyLifts;
+            d.consistency_kind = ConsistencyKind::ConsistentPerturbation;
+            result.push_back(d);
             break;
 
         case EnforcementKind::WeakConsistent:

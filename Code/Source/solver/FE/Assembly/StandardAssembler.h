@@ -75,6 +75,7 @@
 #include <deque>
 #include <memory>
 #include <span>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -118,10 +119,12 @@ namespace assembly {
  * computes local element matrices/vectors, and inserts them into
  * the global system.
  *
- * In distributed runs StandardAssembler always assembles through an
- * owned-row filter. It does not implement the ghost buffering and
- * reverse-scatter exchange required by GhostPolicy::ReverseScatter;
- * callers that need that policy must use ParallelAssembler instead.
+ * When the provided mesh view contains unowned/ghost cells,
+ * StandardAssembler assembles through an owned-row filter. It does not
+ * implement the ghost buffering and reverse-scatter exchange required by
+ * GhostPolicy::ReverseScatter; callers that need that policy on ghosted
+ * distributed meshes must use ParallelAssembler instead. On ownership-complete
+ * mesh views (for example, a serial reference mesh), it can assemble all rows.
  *
  * Usage:
  * @code
@@ -182,8 +185,12 @@ public:
     using Assembler::assembleMatrix;
 
     void setDofMap(const dofs::DofMap& dof_map) override;
-    void setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset = 0) override;
-    void setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset = 0) override;
+    void setRowDofMap(const dofs::DofMap& dof_map,
+                      GlobalIndex row_offset = 0,
+                      DofEntityScope row_scope = DofEntityScope::Cell) override;
+    void setColDofMap(const dofs::DofMap& dof_map,
+                      GlobalIndex col_offset = 0,
+                      DofEntityScope col_scope = DofEntityScope::Cell) override;
     void setDofHandler(const dofs::DofHandler& dof_handler) override;
     void setConstraints(const constraints::AffineConstraints* constraints) override;
     void setSuppressConstraintInhomogeneity(bool suppress) override;
@@ -582,7 +589,9 @@ private:
         const spaces::FunctionSpace& trial_space,
         RequiredData required_data,
         ContextType type,
-        std::span<const LocalIndex> align_facet_to_reference = {});
+        std::span<const LocalIndex> align_facet_to_reference = {},
+        bool force_test_face_reference_coords = false,
+        bool force_trial_face_reference_coords = false);
 
     struct FieldAccessPlan;
     void ensureFieldAccessPlans(const IMeshAccess& mesh);
@@ -776,6 +785,8 @@ private:
     const dofs::DofMap* col_dof_map_{nullptr};
     GlobalIndex row_dof_offset_{0};
     GlobalIndex col_dof_offset_{0};
+    DofEntityScope row_dof_scope_{DofEntityScope::Cell};
+    DofEntityScope col_dof_scope_{DofEntityScope::Cell};
     const dofs::DofHandler* dof_handler_{nullptr};
     const constraints::AffineConstraints* constraints_{nullptr};
     const sparsity::SparsityPattern* sparsity_{nullptr};
@@ -948,6 +959,7 @@ private:
     // Typically 1-2 entries (one per unique basis in coupled blocks). Invalidated with mapping type.
     struct FieldBCacheEntry {
         const basis::BasisFunction* basis{nullptr};
+        const quadrature::QuadratureRule* quad{nullptr};
         bool gradients{false};
         bool hessians{false};
         const basis::BasisCacheEntry* entry{nullptr};
@@ -1099,6 +1111,8 @@ private:
         FieldId field_id{INVALID_FIELD_ID};
         const FieldAccessPlan* access{nullptr};
         const basis::BasisCacheEntry* bcache{nullptr};
+        ElementType cell_type{ElementType::Unknown};
+        std::string basis_cache_identity{};
         bool is_product{false};
         FieldType field_type{FieldType::Scalar};
         int value_dim{1};

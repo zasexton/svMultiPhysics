@@ -9157,12 +9157,46 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
     checkNotFinalized();
 
     const auto* mortar_space = dynamic_cast<const spaces::MortarSpace*>(&space);
-    FE_THROW_IF(mortar_space == nullptr, FEException,
-                "DofHandler::distributeDofs(MeshBase, InterfaceMesh): space must be a MortarSpace");
-    FE_THROW_IF(mortar_space->interface_space().continuity() != Continuity::L2, FEException,
-                "DofHandler::distributeDofs(MeshBase, InterfaceMesh): first mortar pass requires a discontinuous interface space");
     FE_THROW_IF(interface_mesh.n_faces() == 0u, FEException,
                 "DofHandler::distributeDofs(MeshBase, InterfaceMesh): interface mesh has no faces");
+
+    if (mortar_space == nullptr) {
+        const auto infer_interface_dim = [&]() -> int {
+            auto [verts_ptr, n_face_verts] = interface_mesh.face_vertices_span(0);
+            (void)verts_ptr;
+            if (n_face_verts == 2u) {
+                return 1;
+            }
+            if (n_face_verts == 3u || n_face_verts == 4u) {
+                return 2;
+            }
+            throw FEException(
+                "DofHandler::distributeDofs(MeshBase, InterfaceMesh): unsupported interface face topology for codimension-1 field distribution");
+        };
+
+        MeshTopologyInfo topology;
+        topology.n_cells = static_cast<GlobalIndex>(interface_mesh.n_faces());
+        topology.n_vertices = static_cast<GlobalIndex>(interface_mesh.n_vertices());
+        topology.n_edges = 0;
+        topology.n_faces = 0;
+        topology.dim = infer_interface_dim();
+        topology.cell2vertex_offsets.assign(interface_mesh.face2vertex_offsets().begin(),
+                                            interface_mesh.face2vertex_offsets().end());
+        topology.cell2vertex_data.assign(interface_mesh.face2vertex().begin(),
+                                         interface_mesh.face2vertex().end());
+        topology.vertex_gids.assign(interface_mesh.vertex_gids().begin(),
+                                    interface_mesh.vertex_gids().end());
+        topology.cell_gids.assign(interface_mesh.face_gids().begin(),
+                                  interface_mesh.face_gids().end());
+        topology.cell_owner_ranks.assign(static_cast<std::size_t>(topology.n_cells),
+                                         options.my_rank);
+
+        distributeDofs(topology, space, options);
+        return;
+    }
+
+    FE_THROW_IF(mortar_space->interface_space().continuity() != Continuity::L2, FEException,
+                "DofHandler::distributeDofs(MeshBase, InterfaceMesh): first mortar pass requires a discontinuous interface space");
 
     my_rank_ = options.my_rank;
     world_size_ = options.world_size;
@@ -9241,6 +9275,61 @@ void DofHandler::distributeDofs(const Mesh& mesh,
 #if FE_HAS_MPI && defined(MESH_HAS_MPI)
     opts.mpi_comm = mesh.mpi_comm();
 #endif
+
+    if (dynamic_cast<const spaces::MortarSpace*>(&space) == nullptr) {
+        const auto infer_interface_dim = [&]() -> int {
+            auto [verts_ptr, n_face_verts] = interface_mesh.face_vertices_span(0);
+            (void)verts_ptr;
+            if (n_face_verts == 2u) {
+                return 1;
+            }
+            if (n_face_verts == 3u || n_face_verts == 4u) {
+                return 2;
+            }
+            throw FEException(
+                "DofHandler::distributeDofs(Mesh, InterfaceMesh): unsupported interface face topology for codimension-1 field distribution");
+        };
+
+        MeshTopologyInfo topology;
+        topology.n_cells = static_cast<GlobalIndex>(interface_mesh.n_faces());
+        topology.n_vertices = static_cast<GlobalIndex>(interface_mesh.n_vertices());
+        topology.n_edges = 0;
+        topology.n_faces = 0;
+        topology.dim = infer_interface_dim();
+        topology.cell2vertex_offsets.assign(interface_mesh.face2vertex_offsets().begin(),
+                                            interface_mesh.face2vertex_offsets().end());
+        topology.cell2vertex_data.assign(interface_mesh.face2vertex().begin(),
+                                         interface_mesh.face2vertex().end());
+        topology.vertex_gids.assign(interface_mesh.vertex_gids().begin(),
+                                    interface_mesh.vertex_gids().end());
+        topology.cell_gids.assign(interface_mesh.face_gids().begin(),
+                                  interface_mesh.face_gids().end());
+        topology.cell_owner_ranks.resize(static_cast<std::size_t>(topology.n_cells),
+                                         opts.my_rank);
+        for (std::size_t lf = 0; lf < interface_mesh.n_faces(); ++lf) {
+            const auto local_face = static_cast<svmp::index_t>(lf);
+            const auto minus_cell = interface_mesh.volume_cell_minus(local_face);
+            const auto plus_cell = interface_mesh.volume_cell_plus(local_face);
+            const auto owner_cell =
+                (minus_cell != svmp::INVALID_INDEX) ? minus_cell : plus_cell;
+            topology.cell_owner_ranks[lf] =
+                (owner_cell != svmp::INVALID_INDEX)
+                    ? static_cast<int>(mesh.owner_rank_cell(owner_cell))
+                    : opts.my_rank;
+        }
+        topology.neighbor_ranks.clear();
+        topology.neighbor_ranks.reserve(mesh.neighbor_ranks().size());
+        for (auto rank : mesh.neighbor_ranks()) {
+            const int rr = static_cast<int>(rank);
+            if (rr != opts.my_rank) {
+                topology.neighbor_ranks.push_back(rr);
+            }
+        }
+
+        distributeDofs(topology, space, opts);
+        return;
+    }
+
     distributeDofs(mesh.local_mesh(), interface_mesh, space, opts);
 }
 

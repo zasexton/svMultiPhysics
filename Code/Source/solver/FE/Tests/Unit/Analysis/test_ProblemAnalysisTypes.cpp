@@ -564,6 +564,22 @@ TEST(ProblemAnalysisContext, FieldDescriptor_Phase21_SpaceMetadata) {
     EXPECT_TRUE(result->supports_local_balance_closure);
 }
 
+TEST(ProblemAnalysisContext, FieldDescriptor_MixedDimensionalMetadata) {
+    ProblemAnalysisContext ctx;
+
+    FieldDescriptor fd;
+    fd.field_id = 7;
+    fd.name = "lambda";
+    fd.domain = DomainKind::InterfaceFace;
+    fd.interface_marker = 17;
+    ctx.addFieldDescriptor(fd);
+
+    const auto* result = ctx.fieldDescriptor(7);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->domain, DomainKind::InterfaceFace);
+    EXPECT_EQ(result->interface_marker, 17);
+}
+
 TEST(ProblemAnalysisContext, InputsVersionIncrementsOnMutation) {
     ProblemAnalysisContext ctx;
     EXPECT_EQ(ctx.inputsVersion(), 0u);

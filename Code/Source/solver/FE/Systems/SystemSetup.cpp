@@ -1224,6 +1224,24 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     field_dof_handlers_.resize(n_fields);
     field_dof_offsets_.assign(n_fields, 0);
 
+    auto interface_mesh_for_field = [&](const FieldRecord& rec) -> const svmp::InterfaceMesh* {
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+        if (rec.scope != FieldScope::InterfaceFace) {
+            return nullptr;
+        }
+        auto iface_it = interface_meshes_.find(rec.interface_marker);
+        FE_THROW_IF(iface_it == interface_meshes_.end() || !iface_it->second,
+                    InvalidArgumentException,
+                    "FESystem::setup: missing InterfaceMesh for interface-scoped field '" +
+                        rec.name + "' on interface marker " +
+                        std::to_string(rec.interface_marker));
+        return iface_it->second.get();
+#else
+        (void)rec;
+        return nullptr;
+#endif
+    };
+
     auto distribute_field = [&](const FieldRecord& rec) {
         FE_CHECK_NOT_NULL(rec.space.get(), "FESystem::setup: field.space");
 
@@ -1236,15 +1254,16 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                     dynamic_cast<const spaces::MortarSpace*>(rec.space.get());
                 FE_CHECK_NOT_NULL(mortar_space,
                                   "FESystem::setup: mortar field must use MortarSpace");
-                FE_THROW_IF(!mortar_space->is_marker_scoped(), InvalidArgumentException,
-                            "FESystem::setup: MortarSpace fields must specify an interface marker");
-                auto iface_it = interface_meshes_.find(mortar_space->interface_marker());
-                FE_THROW_IF(iface_it == interface_meshes_.end() || !iface_it->second,
-                            InvalidArgumentException,
-                            "FESystem::setup: missing InterfaceMesh for mortar field '" +
-                                rec.name + "' on interface marker " +
-                                std::to_string(mortar_space->interface_marker()));
-                dh.distributeDofs(*mesh_, *iface_it->second, *rec.space, opts.dof_options);
+                FE_THROW_IF(rec.scope != FieldScope::InterfaceFace, InvalidArgumentException,
+                            "FESystem::setup: mortar field '" + rec.name +
+                                "' must be registered as an interface-scoped field");
+                const auto* iface = interface_mesh_for_field(rec);
+                FE_CHECK_NOT_NULL(iface, "FESystem::setup: mortar field interface mesh");
+                dh.distributeDofs(*mesh_, *iface, *rec.space, opts.dof_options);
+            } else if (rec.scope == FieldScope::InterfaceFace) {
+                const auto* iface = interface_mesh_for_field(rec);
+                FE_CHECK_NOT_NULL(iface, "FESystem::setup: interface field interface mesh");
+                dh.distributeDofs(*mesh_, *iface, *rec.space, opts.dof_options);
             } else {
                 dh.distributeDofs(*mesh_, *rec.space, opts.dof_options);
             }
@@ -1254,6 +1273,9 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 #endif
 
         if (inputs.topology_override.has_value()) {
+            FE_THROW_IF(rec.scope == FieldScope::InterfaceFace, InvalidArgumentException,
+                        "FESystem::setup: interface-scoped field '" + rec.name +
+                            "' requires Mesh and InterfaceMesh input; topology_override is volume-only");
             const auto& topology = *inputs.topology_override;
             FE_THROW_IF(topology.n_cells <= 0, InvalidArgumentException,
                         "FESystem::setup: topology_override has no cells");
@@ -1301,7 +1323,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
         const auto idx = static_cast<std::size_t>(rec.id);
         const auto offset = field_dof_offsets_[idx];
 
-        if (rec.space->space_type() != spaces::SpaceType::Mortar) {
+        if (rec.scope != FieldScope::InterfaceFace) {
             auto local = field_dof_handlers_[idx].getDofMap().getCellDofs(cell);
             out.reserve(out.size() + local.size());
             for (auto d : local) {
@@ -1311,20 +1333,12 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
         }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-        const auto* mortar_space =
-            dynamic_cast<const spaces::MortarSpace*>(rec.space.get());
-        FE_CHECK_NOT_NULL(mortar_space,
-                          "FESystem::setup: mortar field must use MortarSpace");
-        auto iface_it = interface_meshes_.find(mortar_space->interface_marker());
-        FE_THROW_IF(iface_it == interface_meshes_.end() || !iface_it->second,
-                    InvalidStateException,
-                    "FESystem::setup: missing InterfaceMesh for mortar field '" +
-                        rec.name + "'");
-        const auto& iface = *iface_it->second;
-        for (std::size_t lf = 0; lf < iface.n_faces(); ++lf) {
+        const auto* iface = interface_mesh_for_field(rec);
+        FE_CHECK_NOT_NULL(iface, "FESystem::setup: interface field interface mesh");
+        for (std::size_t lf = 0; lf < iface->n_faces(); ++lf) {
             const auto local_face = static_cast<svmp::index_t>(lf);
-            const auto minus_cell = static_cast<GlobalIndex>(iface.volume_cell_minus(local_face));
-            const auto plus_cell = static_cast<GlobalIndex>(iface.volume_cell_plus(local_face));
+            const auto minus_cell = static_cast<GlobalIndex>(iface->volume_cell_minus(local_face));
+            const auto plus_cell = static_cast<GlobalIndex>(iface->volume_cell_plus(local_face));
             if (minus_cell != cell && plus_cell != cell) {
                 continue;
             }
@@ -1338,7 +1352,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
         return;
 #else
         FE_THROW(InvalidStateException,
-                 "FESystem::setup: mortar fields require Mesh support");
+                 "FESystem::setup: interface-scoped fields require Mesh support");
 #endif
     };
 
@@ -1348,7 +1362,20 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
         for (const auto& rec : field_registry_.records()) {
             append_field_cell_dofs(rec, cell, cell_dofs);
         }
-        monolithic_map.setCellDofs(cell, cell_dofs);
+        if (!cell_dofs.empty()) {
+            std::vector<GlobalIndex> unique_dofs;
+            unique_dofs.reserve(cell_dofs.size());
+            std::unordered_set<GlobalIndex> seen;
+            seen.reserve(cell_dofs.size());
+            for (auto dof : cell_dofs) {
+                if (seen.insert(dof).second) {
+                    unique_dofs.push_back(dof);
+                }
+            }
+            monolithic_map.setCellDofs(cell, unique_dofs);
+        } else {
+            monolithic_map.setCellDofs(cell, cell_dofs);
+        }
     }
 
     // Merge entity-DOF maps if available (Mesh-driven workflows).
@@ -1360,6 +1387,10 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
         GlobalIndex max_faces = 0;
         GlobalIndex max_cells = 0;
         for (const auto& rec : field_registry_.records()) {
+            if (rec.scope == FieldScope::InterfaceFace &&
+                rec.space->space_type() != spaces::SpaceType::Mortar) {
+                continue;
+            }
             const auto idx = static_cast<std::size_t>(rec.id);
             auto* map = field_dof_handlers_[idx].getEntityDofMap();
             if (map == nullptr) {
@@ -1381,6 +1412,10 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
             for (GlobalIndex v = 0; v < max_vertices; ++v) {
                 entity_dofs.clear();
                 for (const auto& rec : field_registry_.records()) {
+                    if (rec.scope == FieldScope::InterfaceFace &&
+                        rec.space->space_type() != spaces::SpaceType::Mortar) {
+                        continue;
+                    }
                     const auto idx = static_cast<std::size_t>(rec.id);
                     const auto offset = field_dof_offsets_[idx];
                     const auto* emap = field_dof_handlers_[idx].getEntityDofMap();
@@ -1400,6 +1435,10 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
             for (GlobalIndex e = 0; e < max_edges; ++e) {
                 entity_dofs.clear();
                 for (const auto& rec : field_registry_.records()) {
+                    if (rec.scope == FieldScope::InterfaceFace &&
+                        rec.space->space_type() != spaces::SpaceType::Mortar) {
+                        continue;
+                    }
                     const auto idx = static_cast<std::size_t>(rec.id);
                     const auto offset = field_dof_offsets_[idx];
                     const auto* emap = field_dof_handlers_[idx].getEntityDofMap();
@@ -1419,6 +1458,10 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
             for (GlobalIndex f = 0; f < max_faces; ++f) {
                 entity_dofs.clear();
                 for (const auto& rec : field_registry_.records()) {
+                    if (rec.scope == FieldScope::InterfaceFace &&
+                        rec.space->space_type() != spaces::SpaceType::Mortar) {
+                        continue;
+                    }
                     const auto idx = static_cast<std::size_t>(rec.id);
                     const auto offset = field_dof_offsets_[idx];
                     const auto* emap = field_dof_handlers_[idx].getEntityDofMap();
@@ -1438,6 +1481,10 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
             for (GlobalIndex c = 0; c < max_cells; ++c) {
                 entity_dofs.clear();
                 for (const auto& rec : field_registry_.records()) {
+                    if (rec.scope == FieldScope::InterfaceFace &&
+                        rec.space->space_type() != spaces::SpaceType::Mortar) {
+                        continue;
+                    }
                     const auto idx = static_cast<std::size_t>(rec.id);
                     const auto offset = field_dof_offsets_[idx];
                     const auto* emap = field_dof_handlers_[idx].getEntityDofMap();
@@ -2748,10 +2795,10 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 		            const auto& col_map = field_dof_handlers_[trial_idx].getDofMap();
 		            const auto row_offset = field_dof_offsets_[test_idx];
 		            const auto col_offset = field_dof_offsets_[trial_idx];
-                    const bool test_is_mortar =
-                        field_registry_.get(test_field).space->space_type() == spaces::SpaceType::Mortar;
-                    const bool trial_is_mortar =
-                        field_registry_.get(trial_field).space->space_type() == spaces::SpaceType::Mortar;
+                    const bool test_is_interface_field =
+                        field_registry_.get(test_field).scope == FieldScope::InterfaceFace;
+                    const bool trial_is_interface_field =
+                        field_registry_.get(trial_field).scope == FieldScope::InterfaceFace;
 
 		            auto add_interface_mesh_couplings = [&](const svmp::InterfaceMesh& iface) {
 		                for (std::size_t lf = 0; lf < iface.n_faces(); ++lf) {
@@ -2764,7 +2811,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                             iface_col_dofs_minus.clear();
                             iface_col_dofs_plus.clear();
 
-                            if (test_is_mortar) {
+                            if (test_is_interface_field) {
                                 auto local_face_row = row_map.getCellDofs(static_cast<GlobalIndex>(lf));
                                 iface_row_dofs_minus.resize(local_face_row.size());
                                 for (std::size_t i = 0; i < local_face_row.size(); ++i) {
@@ -2787,7 +2834,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                                 }
                             }
 
-                            if (trial_is_mortar) {
+                            if (trial_is_interface_field) {
                                 auto local_face_col = col_map.getCellDofs(static_cast<GlobalIndex>(lf));
                                 iface_col_dofs_minus.resize(local_face_col.size());
                                 for (std::size_t j = 0; j < local_face_col.size(); ++j) {
@@ -2810,16 +2857,16 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                                 }
                             }
 
-                            if (test_is_mortar && trial_is_mortar) {
+                            if (test_is_interface_field && trial_is_interface_field) {
                                 add_element_couplings(iface_row_dofs_minus, iface_col_dofs_minus);
-                            } else if (test_is_mortar) {
+                            } else if (test_is_interface_field) {
                                 if (!iface_col_dofs_minus.empty()) {
                                     add_element_couplings(iface_row_dofs_minus, iface_col_dofs_minus);
                                 }
                                 if (!iface_col_dofs_plus.empty()) {
                                     add_element_couplings(iface_row_dofs_minus, iface_col_dofs_plus);
                                 }
-                            } else if (trial_is_mortar) {
+                            } else if (trial_is_interface_field) {
                                 if (!iface_row_dofs_minus.empty()) {
                                     add_element_couplings(iface_row_dofs_minus, iface_col_dofs_minus);
                                 }

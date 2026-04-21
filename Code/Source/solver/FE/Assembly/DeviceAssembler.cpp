@@ -198,14 +198,18 @@ void DeviceAssembler::setDofMap(const dofs::DofMap& dof_map)
     impl_->cpu_assembler->setDofMap(dof_map);
 }
 
-void DeviceAssembler::setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset)
+void DeviceAssembler::setRowDofMap(const dofs::DofMap& dof_map,
+                                   GlobalIndex row_offset,
+                                   DofEntityScope row_scope)
 {
-    impl_->cpu_assembler->setRowDofMap(dof_map, row_offset);
+    impl_->cpu_assembler->setRowDofMap(dof_map, row_offset, row_scope);
 }
 
-void DeviceAssembler::setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset)
+void DeviceAssembler::setColDofMap(const dofs::DofMap& dof_map,
+                                   GlobalIndex col_offset,
+                                   DofEntityScope col_scope)
 {
-    impl_->cpu_assembler->setColDofMap(dof_map, col_offset);
+    impl_->cpu_assembler->setColDofMap(dof_map, col_offset, col_scope);
 }
 
 void DeviceAssembler::setDofHandler(const dofs::DofHandler& dof_handler)

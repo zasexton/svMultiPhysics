@@ -153,8 +153,12 @@ public:
     // =========================================================================
 
     void setDofMap(const dofs::DofMap& dof_map) override;
-    void setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset = 0) override;
-    void setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset = 0) override;
+    void setRowDofMap(const dofs::DofMap& dof_map,
+                      GlobalIndex row_offset = 0,
+                      DofEntityScope row_scope = DofEntityScope::Cell) override;
+    void setColDofMap(const dofs::DofMap& dof_map,
+                      GlobalIndex col_offset = 0,
+                      DofEntityScope col_scope = DofEntityScope::Cell) override;
     void setDofHandler(const dofs::DofHandler& dof_handler) override;
     void setConstraints(const constraints::AffineConstraints* constraints) override;
     void setSparsityPattern(const sparsity::SparsityPattern* sparsity) override;

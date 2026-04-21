@@ -31,6 +31,18 @@ namespace detail {
                : analysis::TraceKind::Value;
 }
 
+[[nodiscard]] inline analysis::InequalitySense inequalitySenseFor(TraceInequalitySense sense)
+{
+    switch (sense) {
+    case TraceInequalitySense::LessEqual:
+        return analysis::InequalitySense::LessEqual;
+    case TraceInequalitySense::GreaterEqual:
+        return analysis::InequalitySense::GreaterEqual;
+    }
+
+    return analysis::InequalitySense::None;
+}
+
 [[nodiscard]] inline std::string sourceFor(std::string_view name,
                                            analysis::DomainKind domain,
                                            int marker)
@@ -485,6 +497,92 @@ private:
 };
 
 /**
+ * @brief Weak one-sided scalar-trace law:
+ *        ∫ sign * penalty * positive_part(signed_gap) * tau(v) ds
+ *
+ * This is the first FE-side nonlinear inequality contract for scalar traces.
+ * In semismooth mode it uses `max(0, signed_gap)`; in smooth mode it uses a
+ * regularized `smoothMax`.
+ */
+class TraceInequalityBC final : public BoundaryCondition {
+public:
+    TraceInequalityBC(int boundary_marker,
+                      FormExpr bound,
+                      FormExpr penalty,
+                      TraceInequalityOptions options = {})
+        : boundary_marker_(boundary_marker)
+        , bound_(std::move(bound))
+        , penalty_(std::move(penalty))
+        , options_(std::move(options))
+    {
+        if (boundary_marker_ < 0) {
+            throw std::invalid_argument("TraceInequalityBC: boundary_marker must be >= 0");
+        }
+        if (!bound_.isValid()) {
+            throw std::invalid_argument("TraceInequalityBC: invalid bound expression");
+        }
+        if (!penalty_.isValid()) {
+            throw std::invalid_argument("TraceInequalityBC: invalid penalty expression");
+        }
+        if (bound_.hasTest() || bound_.hasTrial()) {
+            throw std::invalid_argument("TraceInequalityBC: bound must not contain test/trial functions");
+        }
+        if (penalty_.hasTest() || penalty_.hasTrial()) {
+            throw std::invalid_argument("TraceInequalityBC: penalty must not contain test/trial functions");
+        }
+        if (options_.linearization == TraceInequalityLinearization::Smooth) {
+            if (!options_.smoothing_epsilon.isValid()) {
+                throw std::invalid_argument(
+                    "TraceInequalityBC: smooth linearization requires a valid smoothing epsilon");
+            }
+            if (options_.smoothing_epsilon.hasTest() || options_.smoothing_epsilon.hasTrial()) {
+                throw std::invalid_argument(
+                    "TraceInequalityBC: smoothing epsilon must not contain test/trial functions");
+            }
+        }
+    }
+
+    [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] bool allowsMarkerSharing() const override { return false; }
+
+    void contributeToResidual(FormExpr& residual,
+                              const FormExpr& u,
+                              const FormExpr& v) const override
+    {
+        residual = applyTraceInequality(
+            std::move(residual), u, v, boundary_marker_, bound_, penalty_, options_);
+    }
+
+    [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId /*field_id*/) const override
+    {
+        return {};
+    }
+
+    [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
+    analysisMetadata(FieldId field_id, const systems::FESystem* /*system*/) const override
+    {
+        analysis::BoundaryConditionDescriptor d;
+        d.primary_variable = analysis::VariableKey::field(field_id);
+        d.boundary_marker = boundary_marker_;
+        d.trace_kind = detail::traceKindFor(options_.trace_operator);
+        d.enforcement_kind = analysis::EnforcementKind::WeakInequality;
+        d.anchors_constant_mode = true;
+        d.anchors_rigid_body_translation = true;
+        d.anchors_rigid_body_rotation = false;
+        d.inequality_sense = detail::inequalitySenseFor(options_.sense);
+        d.state_dependent_activation = true;
+        d.source = "TraceInequalityBC on marker " + std::to_string(boundary_marker_);
+        return {d};
+    }
+
+private:
+    int boundary_marker_{-1};
+    FormExpr bound_{};
+    FormExpr penalty_{};
+    TraceInequalityOptions options_{};
+};
+
+/**
  * @brief Weak trace load condition on an interface marker.
  *
  * Adds:
@@ -724,6 +822,16 @@ makeTraceRobinBC(int boundary_marker,
 {
     return std::make_unique<TraceRobinBC>(
         boundary_marker, std::move(alpha), std::move(rhs), trace_operator);
+}
+
+[[nodiscard]] inline std::unique_ptr<BoundaryCondition>
+makeTraceInequalityBC(int boundary_marker,
+                      FormExpr bound,
+                      FormExpr penalty,
+                      TraceInequalityOptions options = {})
+{
+    return std::make_unique<TraceInequalityBC>(
+        boundary_marker, std::move(bound), std::move(penalty), std::move(options));
 }
 
 [[nodiscard]] inline std::unique_ptr<BoundaryCondition>

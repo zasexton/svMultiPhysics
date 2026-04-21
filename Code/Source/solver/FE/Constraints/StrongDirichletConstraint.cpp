@@ -10,14 +10,23 @@
 #include "Systems/FESystem.h"
 #include "Systems/SystemsExceptions.h"
 
+#include "Core/Logger.h"
+
 #include "Forms/PointEvaluator.h"
 
 #include "Geometry/MappingFactory.h"
 #include "Spaces/FaceRestriction.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <limits>
+#include <sstream>
 #include <unordered_map>
 #include <utility>
+
+#if FE_HAS_MPI
+#  include <mpi.h>
+#endif
 
 namespace svmp {
 namespace FE {
@@ -32,6 +41,67 @@ struct BoundaryDofsWithCoords {
     std::vector<GlobalIndex> dofs;
     std::vector<std::array<Real, 3>> coords;
 };
+
+[[nodiscard]] bool strongDirichletTraceEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_TRACE_STRONG_DIRICHLET");
+    if (env != nullptr && env[0] != '\0') {
+        return true;
+    }
+    env = std::getenv("SVMP_OOP_SOLVER_TRACE");
+    return env != nullptr && env[0] != '\0';
+}
+
+[[nodiscard]] int strongDirichletTraceRank() noexcept
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized) {
+        int rank = 0;
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        return rank;
+    }
+#endif
+    return 0;
+}
+
+void traceStrongDirichletEvent(const std::string& phase,
+                               int boundary_marker,
+                               int component,
+                               std::size_t total_dofs,
+                               std::size_t owned_dofs,
+                               std::size_t constrained_dofs,
+                               std::size_t missing_constraints,
+                               double time,
+                               double dt,
+                               double min_value,
+                               double max_value,
+                               const std::string& sample_summary)
+{
+    if (!strongDirichletTraceEnabled()) {
+        return;
+    }
+
+    std::ostringstream oss;
+    oss << "StrongDirichletConstraint[" << phase << "]"
+        << " rank=" << strongDirichletTraceRank()
+        << " marker=" << boundary_marker
+        << " component=" << component
+        << " total_dofs=" << total_dofs
+        << " owned_dofs=" << owned_dofs
+        << " constrained_dofs=" << constrained_dofs
+        << " missing_constraints=" << missing_constraints
+        << " time=" << time
+        << " dt=" << dt;
+    if (total_dofs > 0) {
+        oss << " value_range=[" << min_value << "," << max_value << "]";
+    }
+    if (!sample_summary.empty()) {
+        oss << " samples=" << sample_summary;
+    }
+    FE_LOG_INFO(oss.str());
+}
 
 [[nodiscard]] spaces::FaceRestriction& getFaceRestriction(
     std::unordered_map<int, spaces::FaceRestriction>& cache,
@@ -208,18 +278,56 @@ void StrongDirichletConstraint::apply(const FESystem& system, constraints::Affin
     pctx.time = 0.0;
     pctx.dt = 0.0;
 
+    std::size_t owned_dofs = 0;
+    std::size_t constrained_dofs = 0;
+    double min_value = std::numeric_limits<double>::infinity();
+    double max_value = -std::numeric_limits<double>::infinity();
+    std::ostringstream sample;
+    int sample_count = 0;
+
     for (std::size_t i = 0; i < dofs_.size(); ++i) {
         const auto dof = dofs_[i];
         if (!owned.contains(dof)) {
             continue;
         }
+        ++owned_dofs;
         pctx.x = coords_[i];
         const Real v = forms::evaluateScalarAt(value_, pctx);
         constraints.addDirichlet(dof, v);
+        ++constrained_dofs;
+        min_value = std::min(min_value, static_cast<double>(v));
+        max_value = std::max(max_value, static_cast<double>(v));
+        if (sample_count < 4) {
+            if (sample_count > 0) {
+                sample << "; ";
+            }
+            sample << "{dof=" << dof
+                   << ",x=(" << coords_[i][0] << "," << coords_[i][1] << "," << coords_[i][2] << ")"
+                   << ",v=" << v << "}";
+            ++sample_count;
+        }
     }
+
+    if (owned_dofs == 0) {
+        min_value = 0.0;
+        max_value = 0.0;
+    }
+
+    traceStrongDirichletEvent("apply",
+                              boundary_marker_,
+                              component_,
+                              dofs_.size(),
+                              owned_dofs,
+                              constrained_dofs,
+                              /*missing_constraints=*/0,
+                              /*time=*/0.0,
+                              /*dt=*/0.0,
+                              min_value,
+                              max_value,
+                              sample.str());
 }
 
-bool StrongDirichletConstraint::updateValues(const FESystem& /*system*/,
+bool StrongDirichletConstraint::updateValues(const FESystem& system,
                                              constraints::AffineConstraints& constraints,
                                              double time,
                                              double dt)
@@ -232,11 +340,61 @@ bool StrongDirichletConstraint::updateValues(const FESystem& /*system*/,
     pctx.time = static_cast<Real>(time);
     pctx.dt = static_cast<Real>(dt);
 
+    const auto& owned = system.dofHandler().getPartition().locallyOwned();
+    std::size_t owned_dofs = 0;
+    std::size_t constrained_dofs = 0;
+    std::size_t missing_constraints = 0;
+    double min_value = std::numeric_limits<double>::infinity();
+    double max_value = -std::numeric_limits<double>::infinity();
+    std::ostringstream sample;
+    int sample_count = 0;
+
     for (std::size_t i = 0; i < dofs_.size(); ++i) {
+        const auto dof = dofs_[i];
+        if (owned.contains(dof)) {
+            ++owned_dofs;
+        }
         pctx.x = coords_[i];
         const Real v = forms::evaluateScalarAt(value_, pctx);
-        constraints.updateInhomogeneity(dofs_[i], v);
+        const bool constrained = constraints.isConstrained(dof);
+        if (!constrained) {
+            ++missing_constraints;
+        } else {
+            ++constrained_dofs;
+        }
+        min_value = std::min(min_value, static_cast<double>(v));
+        max_value = std::max(max_value, static_cast<double>(v));
+        if (sample_count < 6) {
+            if (sample_count > 0) {
+                sample << "; ";
+            }
+            sample << "{dof=" << dof
+                   << ",owned=" << (owned.contains(dof) ? 1 : 0)
+                   << ",constrained=" << (constrained ? 1 : 0)
+                   << ",x=(" << coords_[i][0] << "," << coords_[i][1] << "," << coords_[i][2] << ")"
+                   << ",v=" << v << "}";
+            ++sample_count;
+        }
+        constraints.updateInhomogeneity(dof, v);
     }
+
+    if (dofs_.empty()) {
+        min_value = 0.0;
+        max_value = 0.0;
+    }
+
+    traceStrongDirichletEvent("update",
+                              boundary_marker_,
+                              component_,
+                              dofs_.size(),
+                              owned_dofs,
+                              constrained_dofs,
+                              missing_constraints,
+                              time,
+                              dt,
+                              min_value,
+                              max_value,
+                              sample.str());
 
     return true;
 }

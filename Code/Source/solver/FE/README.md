@@ -45,6 +45,12 @@ FE/
 | **Mixed linear operator** (load vector) | `installMixedLinear(system, op, test, form)` | `Systems/FormsInstaller.h` |
 | **Strong Dirichlet BCs** | `installStrongDirichlet(system, bcs)` | `Systems/FormsInstaller.h` |
 | **H(div) normal-trace BCs** | `BoundaryConditionManager` + `NormalTraceEssentialBC` | `Forms/StandardBCs.h` |
+| **Interface trace BCs** | `BoundaryConditionManager` + `InterfaceTraceLoadBC` / `InterfaceTraceRobinBC` / `InterfaceTraceJumpPenaltyBC` | `Forms/StandardBCs.h` |
+| **Trace Nitsche BCs** | `TraceNitscheBC` / `InterfaceTraceNitscheBC` | `Forms/NitscheBC.h` |
+| **One-sided trace laws** | `TraceInequalityBC` | `Forms/StandardBCs.h` |
+| **H(div) periodic/MPC trace relations** | `makeHDivTracePeriodicBC*()` / `makeHDivTracePeriodicMPC*()` | `Constraints/ConstraintTools.h` |
+| **Mixed-dimensional interface fields** | `FESystem::addInterfaceField()` | `Systems/FESystem.h` |
+| **Mortar/hybrid facet fields** | `MortarSpace` + `FESystem::addInterfaceFaceKernel()` | `Spaces/MortarSpace.h` / `Systems/FESystem.h` |
 | **Compile without installing** | `FormCompiler::compile(form, kind)` | `Forms/FormCompiler.h` |
 | **Auxiliary state models** | `AuxiliaryModelBuilder("name")` | `Auxiliary/AuxiliaryModelBuilder.h` |
 | **Deploy auxiliary models** | `use(model).name(...).scope(...)` | `Auxiliary/AuxiliaryBindings.h` |
@@ -89,10 +95,13 @@ See `Forms/SYSTEMS_INTEGRATION.md` for the full integration guide.
 
 For vector-basis trace conditions, the FE layer now distinguishes pointwise
 Dirichlet data from trace-essential data. `H(div)` normal-trace BCs should be
-authored through `forms::bc::NormalTraceEssentialBC`, `TraceLoadBC`, and
-`TraceRobinBC` rather than forced through pointwise `StrongDirichlet`
-declarations. "Passive" or open outflow remains a physics-level choice: leave
-the normal trace unconstrained, or add a generic weak trace relation.
+authored through `forms::bc::NormalTraceEssentialBC`, `TraceLoadBC`,
+`TraceRobinBC`, `TraceNitscheBC`, and `TraceInequalityBC` rather than forced
+through pointwise `StrongDirichlet` declarations. Interface laws use the
+parallel `InterfaceTrace*` names. "Passive" or open outflow remains a
+physics-level choice: leave the normal trace unconstrained, or add a generic
+weak trace relation. One-sided behavior such as "outflow allowed, inflow
+penalized" should use `TraceInequalityBC`.
 
 Short example:
 
@@ -107,6 +116,10 @@ bc_manager.add(forms::bc::makeNormalTraceEssentialBC(/*marker=*/4, Constant(1.0)
 bc_manager.add(forms::bc::makeTraceLoadBC(/*marker=*/7, Constant(0.0)));
 bc_manager.applyAll(system, residual, q, w, q_id);
 ```
+
+For the full advanced trace, periodic, mortar, mixed-dimensional, and
+inequality surface, see
+`Docs/HDIV_ADVANCED_USAGE_GUIDE.md`.
 
 ---
 
@@ -770,7 +783,7 @@ public:
 | `MixedSpace` | Heterogeneous fields (e.g., velocity + pressure) |
 | `CompositeSpace` | Composite of arbitrary spaces |
 | `TraceSpace` | Restriction to boundary/face |
-| `MortarSpace` | Lagrange multiplier space for mortar methods |
+| `MortarSpace` | Marker-scoped interface multiplier space for mortar and hybridized facet assembly |
 | `EnrichedSpace` | Enriched with bubble functions, partition of unity |
 | `AdaptiveSpace` | p-adaptive (variable polynomial order) |
 | `GenericBasisSpace` | Generic basis-backed space wrapper |

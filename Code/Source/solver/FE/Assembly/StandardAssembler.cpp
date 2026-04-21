@@ -130,6 +130,13 @@ namespace {
     return max_cells;
 }
 
+[[nodiscard]] inline bool jitKernelSupportsCoefficientsOnly(
+    const forms::jit::JITKernelWrapper& jit) noexcept
+{
+    (void)jit;
+    return false;
+}
+
 [[nodiscard]] bool invertDenseMatrix(std::span<const Real> A,
                                      LocalIndex n,
                                      std::vector<Real>& inv,
@@ -380,11 +387,23 @@ int defaultGeometryOrder(ElementType element_type) noexcept
 
 [[nodiscard]] AssemblyOptions normalizeStandardAssemblerOptions(AssemblyOptions options) noexcept
 {
-    // StandardAssembler does not implement reverse-scatter exchange.
-    // Normalize to owned-row insertion so callers see the actual supported
-    // policy in both serial and distributed runs.
-    options.ghost_policy = GhostPolicy::OwnedRowsOnly;
+    // Preserve the requested ghost policy. StandardAssembler decides per mesh
+    // traversal whether it must fall back to owned-row filtering.
     return options;
+}
+
+[[nodiscard]] bool requiresOwnedRowFiltering(const AssemblyOptions& options,
+                                             const IMeshAccess& mesh) noexcept
+{
+    if (options.ghost_policy == GhostPolicy::OwnedRowsOnly) {
+        return true;
+    }
+
+    // StandardAssembler does not implement reverse-scatter exchange, so it can
+    // only honor "assemble all rows" semantics when the provided mesh view is
+    // ownership-complete. If the traversal includes any unowned/ghost cells,
+    // fall back to owned-row insertion to avoid double counting.
+    return mesh.numOwnedCells() != mesh.numCells();
 }
 
 class OwnedRowOnlyView final : public GlobalSystemView {
@@ -977,16 +996,21 @@ void StandardAssembler::setDofMap(const dofs::DofMap& dof_map)
     col_dof_map_ = &dof_map;
     row_dof_offset_ = 0;
     col_dof_offset_ = 0;
+    row_dof_scope_ = DofEntityScope::Cell;
+    col_dof_scope_ = DofEntityScope::Cell;
     cell_dof_tables_.clear();
     cell_resolved_vector_tables_.clear();
     cell_resolved_matrix_tables_.clear();
     field_access_plans_.clear();
 }
 
-void StandardAssembler::setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset)
+void StandardAssembler::setRowDofMap(const dofs::DofMap& dof_map,
+                                     GlobalIndex row_offset,
+                                     DofEntityScope row_scope)
 {
     row_dof_map_ = &dof_map;
     row_dof_offset_ = row_offset;
+    row_dof_scope_ = row_scope;
     // NOTE: Do NOT clear cell_dof_tables_, cell_resolved_*_tables_, or
     // field_access_plans_ here.  These caches are keyed by (dof_map_ptr, offset)
     // and remain valid when the assembler's "default" DOF maps change.
@@ -994,10 +1018,13 @@ void StandardAssembler::setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex ro
     // matrix tables on 75K-cell meshes).
 }
 
-void StandardAssembler::setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset)
+void StandardAssembler::setColDofMap(const dofs::DofMap& dof_map,
+                                     GlobalIndex col_offset,
+                                     DofEntityScope col_scope)
 {
     col_dof_map_ = &dof_map;
     col_dof_offset_ = col_offset;
+    col_dof_scope_ = col_scope;
     // See setRowDofMap note above.
 }
 
@@ -1008,6 +1035,8 @@ void StandardAssembler::setDofHandler(const dofs::DofHandler& dof_handler)
     col_dof_map_ = row_dof_map_;
     row_dof_offset_ = 0;
     col_dof_offset_ = 0;
+    row_dof_scope_ = DofEntityScope::Cell;
+    col_dof_scope_ = DofEntityScope::Cell;
     cell_dof_tables_.clear();
     cell_resolved_vector_tables_.clear();
     cell_resolved_matrix_tables_.clear();
@@ -2135,6 +2164,7 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
     if (!col_dof_map_) {
         col_dof_map_ = row_dof_map_;
         col_dof_offset_ = row_dof_offset_;
+        col_dof_scope_ = row_dof_scope_;
     }
     (void)getCellDofTable(mesh, row_dof_map_, row_dof_offset_);
     (void)getCellDofTable(mesh, col_dof_map_, col_dof_offset_);
@@ -2154,7 +2184,7 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
     constexpr LocalIndex max_qpts = 27;
     context_.reserve(max_dofs, max_qpts, mesh.dimension());
 
-    const bool owned_rows_only = (options_.ghost_policy == GhostPolicy::OwnedRowsOnly);
+    const bool owned_rows_only = requiresOwnedRowFiltering(options_, mesh);
     std::optional<OwnedRowOnlyView> owned_row_matrix;
     std::optional<OwnedRowOnlyView> owned_row_vector;
     GlobalSystemView* insert_matrix_view = matrix_view;
@@ -2346,6 +2376,7 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
     if (!col_dof_map_) {
         col_dof_map_ = row_dof_map_;
         col_dof_offset_ = row_dof_offset_;
+        col_dof_scope_ = row_dof_scope_;
     }
     (void)getCellDofTable(mesh, row_dof_map_, row_dof_offset_);
     (void)getCellDofTable(mesh, col_dof_map_, col_dof_offset_);
@@ -2363,7 +2394,7 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
                               col_dof_map_->getMaxDofsPerCell()),
                      /*max_qpts=*/27, mesh.dimension());
 
-    const bool owned_rows_only = (options_.ghost_policy == GhostPolicy::OwnedRowsOnly);
+    const bool owned_rows_only = requiresOwnedRowFiltering(options_, mesh);
     std::optional<OwnedRowOnlyView> owned_row_matrix;
     std::optional<OwnedRowOnlyView> owned_row_vector;
     GlobalSystemView* insert_matrix_view = &matrix_view;
@@ -2664,16 +2695,20 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
     }
     ensureCellDofTables(mesh);
 
-    const bool test_is_mortar = (test_space.space_type() == spaces::SpaceType::Mortar);
-    const bool trial_is_mortar = (trial_space.space_type() == spaces::SpaceType::Mortar);
-    const bool use_single_sided_interface = test_is_mortar || trial_is_mortar;
+    const bool test_is_interface_field =
+        row_dof_scope_ == DofEntityScope::InterfaceFace ||
+        test_space.space_type() == spaces::SpaceType::Mortar;
+    const bool trial_is_interface_field =
+        col_dof_scope_ == DofEntityScope::InterfaceFace ||
+        trial_space.space_type() == spaces::SpaceType::Mortar;
+    const bool use_single_sided_interface = test_is_interface_field || trial_is_interface_field;
 
     if (!kernel.hasInterfaceFace() && !use_single_sided_interface) {
         return result;
     }
     if (use_single_sided_interface && !kernel.hasSingleSidedInterfaceFace()) {
         FE_THROW(FEException,
-                 "StandardAssembler::assembleInterfaceFaces: mortar/facet fields require kernels that implement hasSingleSidedInterfaceFace()");
+                 "StandardAssembler::assembleInterfaceFaces: interface-owned facet fields require kernels that implement hasSingleSidedInterfaceFace()");
     }
 
     matrix_view.beginAssemblyPhase();
@@ -2705,6 +2740,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
     if (!col_dof_map_) {
         col_dof_map_ = row_dof_map_;
         col_dof_offset_ = row_dof_offset_;
+        col_dof_scope_ = row_dof_scope_;
     }
 
     if (use_single_sided_interface) {
@@ -2728,6 +2764,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         std::vector<GlobalIndex> iface_col_dofs_storage;
         std::vector<Real> iface_solution_coeffs;
         std::vector<std::vector<Real>> iface_prev_solution_coeffs;
+        std::vector<GlobalIndex> selected_cell_nodes;
 
         auto direct_face_dofs = [](const dofs::DofMap& dof_map,
                                    GlobalIndex entity_id,
@@ -2760,7 +2797,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
             return {cell_minus, face_minus};
         };
 
-        const bool owned_rows_only = (options_.ghost_policy == GhostPolicy::OwnedRowsOnly);
+        const bool owned_rows_only = requiresOwnedRowFiltering(options_, mesh);
         const auto should_process_single = [&](GlobalIndex volume_cell) -> bool {
             return !owned_rows_only || mesh.isOwnedCell(volume_cell);
         };
@@ -2793,22 +2830,74 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
                     continue;
                 }
 
-                const auto row_dofs = test_is_mortar
+                const auto row_dofs = test_is_interface_field
                                           ? direct_face_dofs(*row_dof_map_,
                                                              static_cast<GlobalIndex>(local_iface),
                                                              row_dof_offset_,
                                                              iface_row_dofs_storage)
                                           : getCellDofsCached(mesh, volume_cell, row_dof_map_, row_dof_offset_);
-                const auto col_dofs = trial_is_mortar
+                const auto col_dofs = trial_is_interface_field
                                           ? direct_face_dofs(*col_dof_map_,
                                                              static_cast<GlobalIndex>(local_iface),
                                                              col_dof_offset_,
                                                              iface_col_dofs_storage)
                                           : getCellDofsCached(mesh, volume_cell, col_dof_map_, col_dof_offset_);
+                const bool test_force_face_reference =
+                    test_is_interface_field &&
+                    test_space.space_type() != spaces::SpaceType::Mortar;
+                const bool trial_force_face_reference =
+                    trial_is_interface_field &&
+                    trial_space.space_type() != spaces::SpaceType::Mortar;
+                std::array<LocalIndex, 4> align_iface_storage{};
+                std::span<const LocalIndex> align_iface{};
+                if (test_force_face_reference || trial_force_face_reference) {
+                    const ElementType selected_cell_type = mesh.getCellType(volume_cell);
+                    elements::ReferenceElement ref =
+                        elements::ReferenceElement::create(selected_cell_type);
+                    const auto& face_nodes =
+                        ref.face_nodes(static_cast<std::size_t>(local_face));
+                    if (face_nodes.size() == 2u || face_nodes.size() == 3u ||
+                        face_nodes.size() == 4u) {
+                        mesh.getCellNodes(volume_cell, selected_cell_nodes);
+                        auto [iface_vertices_ptr, iface_vertex_count] =
+                            interface_mesh.face_vertices_span(iface);
+                        if (iface_vertex_count == face_nodes.size()) {
+                            bool ok = true;
+                            for (std::size_t j = 0; j < iface_vertex_count; ++j) {
+                                const GlobalIndex iface_vertex =
+                                    static_cast<GlobalIndex>(
+                                        interface_mesh.volume_vertex(iface_vertices_ptr[j]));
+                                std::size_t i_match = face_nodes.size();
+                                for (std::size_t i = 0; i < face_nodes.size(); ++i) {
+                                    const GlobalIndex cell_vertex =
+                                        selected_cell_nodes.at(static_cast<std::size_t>(face_nodes[i]));
+                                    if (cell_vertex == iface_vertex) {
+                                        i_match = i;
+                                        break;
+                                    }
+                                }
+                                align_iface_storage[j] =
+                                    static_cast<LocalIndex>(i_match);
+                                if (i_match >= face_nodes.size()) {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                            if (ok) {
+                                align_iface = std::span<const LocalIndex>(
+                                    align_iface_storage.data(),
+                                    iface_vertex_count);
+                            }
+                        }
+                    }
+                }
 
                 prepareContextFace(context_, mesh, face_id, volume_cell, local_face,
                                    test_space, trial_space, required_data,
-                                   ContextType::BoundaryFace);
+                                   ContextType::BoundaryFace,
+                                   align_iface,
+                                   test_force_face_reference,
+                                   trial_force_face_reference);
                 context_.setMaterialState(nullptr, nullptr, 0u, 0u);
                 context_.setTimeIntegrationContext(time_integration_);
                 context_.setTime(time_);
@@ -2830,7 +2919,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
                     gatherVectorCoefficients(col_dofs, current_solution_view_, current_solution_,
                                              iface_solution_coeffs, &resolved_cache,
                                              "StandardAssembler::assembleInterfaceFaces", true);
-                    if (!trial_is_mortar && context_.trialUsesVectorBasis()) {
+                    if (!trial_is_interface_field && context_.trialUsesVectorBasis()) {
                         applyVectorBasisGlobalToLocal(mesh, volume_cell, trial_space,
                                                       std::span<Real>(iface_solution_coeffs));
                     }
@@ -2853,7 +2942,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
                                 gatherVectorCoefficients(col_dofs, prev_view, prev,
                                                          coeffs_k, &resolved_cache,
                                                          "StandardAssembler::assembleInterfaceFaces", true);
-                                if (!trial_is_mortar && context_.trialUsesVectorBasis()) {
+                                if (!trial_is_interface_field && context_.trialUsesVectorBasis()) {
                                     applyVectorBasisGlobalToLocal(mesh, volume_cell, trial_space,
                                                                   std::span<Real>(coeffs_k));
                                 }
@@ -2934,7 +3023,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
     std::vector<GlobalIndex> cell_nodes_minus;
     std::vector<GlobalIndex> cell_nodes_plus;
 
-    const bool owned_rows_only = (options_.ghost_policy == GhostPolicy::OwnedRowsOnly);
+    const bool owned_rows_only = requiresOwnedRowFiltering(options_, mesh);
     const auto should_process = [&](GlobalIndex cell_minus, GlobalIndex cell_plus) -> bool {
         if (owned_rows_only) {
             return mesh.isOwnedCell(cell_minus) || mesh.isOwnedCell(cell_plus);
@@ -3274,6 +3363,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
     if (!col_dof_map_) {
         col_dof_map_ = row_dof_map_;
         col_dof_offset_ = row_dof_offset_;
+        col_dof_scope_ = row_dof_scope_;
     }
     (void)getCellDofTable(mesh, row_dof_map_, row_dof_offset_);
     (void)getCellDofTable(mesh, col_dof_map_, col_dof_offset_);
@@ -3300,7 +3390,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
     // the runtime shapes of geometry tensors (J, Jinv, normals, etc.) used by Forms.
     context_.reserve(max_dofs, max_qpts, mesh.dimension());
 
-    const bool owned_rows_only = (options_.ghost_policy == GhostPolicy::OwnedRowsOnly);
+    const bool owned_rows_only = requiresOwnedRowFiltering(options_, mesh);
     std::optional<OwnedRowOnlyView> owned_row_matrix;
     std::optional<OwnedRowOnlyView> owned_row_vector;
     GlobalSystemView* insert_matrix_view = matrix_view;
@@ -5318,7 +5408,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     context_.reserve(max_dofs, max_qpts, mesh.dimension());
 
     // Determine owned-rows-only policy
-    const bool owned_rows_only = (options_.ghost_policy == GhostPolicy::OwnedRowsOnly);
+    const bool owned_rows_only = requiresOwnedRowFiltering(options_, mesh);
 
     // Build cell ID list
     std::vector<GlobalIndex> cell_ids;
@@ -5631,7 +5721,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             auto* jit = dynamic_cast<forms::jit::JITKernelWrapper*>(bs.fallback_kernel.get());
             if (jit != nullptr) {
                 jit->ensureCompiled();
-                monolithic_block_use_coeffs_only[bi] = jit->isJITReady();
+                monolithic_block_use_coeffs_only[bi] =
+                    jitKernelSupportsCoefficientsOnly(*jit);
             }
         }
 
@@ -7329,6 +7420,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         }
                         throw;
                     }
+
                 }
             }
 
@@ -7416,7 +7508,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 }
             }
 
-            if (run_compiled_dispatch && parent_term.assemble_vector) {
+            if (parent_term.assemble_matrix && parent_term.assemble_vector) {
                 for (std::size_t bi = 0; bi < n_blocks; ++bi) {
                     const auto& bs = monolithic_kernel->blockSpec(bi);
                     auto& workspace = block_workspaces[bi];
@@ -7863,7 +7955,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     break;
                 }
                 jit->ensureCompiled();
-                if (!jit->isJITReady()) {
+                if (!jitKernelSupportsCoefficientsOnly(*jit)) {
                     use_coeffs_only = false;
                     break;
                 }
@@ -9602,7 +9694,9 @@ void StandardAssembler::prepareContextFace(
     const spaces::FunctionSpace& trial_space,
     RequiredData required_data,
     ContextType type,
-    std::span<const LocalIndex> align_facet_to_reference)
+    std::span<const LocalIndex> align_facet_to_reference,
+    bool force_test_face_reference_coords,
+    bool force_trial_face_reference_coords)
 {
     // Face assembly reuses cell-assembly scratch arrays (scratch_ref_gradients_, etc.).
     // Invalidate the cell-basis fast-path cache so the next prepareBasis call
@@ -9636,16 +9730,18 @@ void StandardAssembler::prepareContextFace(
             throw std::runtime_error("StandardAssembler::prepareContextFace: unsupported face topology");
     }
 
-    const auto uses_face_reference_coords = [](const spaces::FunctionSpace& space) {
+    const auto uses_trace_face_reference_coords = [](const spaces::FunctionSpace& space) {
         return space.space_type() == spaces::SpaceType::Trace ||
                space.space_type() == spaces::SpaceType::Mortar;
     };
 
-    if (uses_face_reference_coords(test_space)) {
+    if (force_test_face_reference_coords ||
+        uses_trace_face_reference_coords(test_space)) {
         FE_CHECK_ARG(test_space.element_type() == face_type,
                      "StandardAssembler::prepareContextFace: face-based test space element type must match the active face topology");
     }
-    if (uses_face_reference_coords(trial_space)) {
+    if (force_trial_face_reference_coords ||
+        uses_trace_face_reference_coords(trial_space)) {
         FE_CHECK_ARG(trial_space.element_type() == face_type,
                      "StandardAssembler::prepareContextFace: face-based trial space element type must match the active face topology");
     }
@@ -9878,10 +9974,23 @@ void StandardAssembler::prepareContextFace(
             facet_coords = math::Vector<Real, 3>{t, Real(0), Real(0)};
         } else if (face_type == ElementType::Quad4) {
             // Quad quadrature is on [-1,1]^2; facet parameterization uses (s,t) in [0,1]^2
-            facet_coords = math::Vector<Real, 3>{
-                (qpt[0] + Real(1)) * Real(0.5),
-                (qpt[1] + Real(1)) * Real(0.5),
-                Real(0)};
+            Real s = (qpt[0] + Real(1)) * Real(0.5);
+            Real t = (qpt[1] + Real(1)) * Real(0.5);
+            if (!align_facet_to_reference.empty() && align_facet_to_reference.size() == 4) {
+                const std::array<Real, 4> w_ref{
+                    (Real(1) - s) * (Real(1) - t),
+                    s * (Real(1) - t),
+                    s * t,
+                    (Real(1) - s) * t};
+                std::array<Real, 4> w_local{0.0, 0.0, 0.0, 0.0};
+                for (std::size_t j = 0; j < 4; ++j) {
+                    const auto src = static_cast<std::size_t>(align_facet_to_reference[j]);
+                    w_local[j] = w_ref[src];
+                }
+                s = w_local[1] + w_local[2];
+                t = w_local[2] + w_local[3];
+            }
+            facet_coords = math::Vector<Real, 3>{s, t, Real(0)};
         } else {
             // Triangle quadrature uses reference simplex coordinates (0<=x,y, x+y<=1)
             const Real x = qpt[0];
@@ -9910,9 +10019,24 @@ void StandardAssembler::prepareContextFace(
             }
         }
 
-        const auto facet_basis_point = facet_coords;
-        scratch_face_quad_points_[static_cast<std::size_t>(q)] =
-            {facet_basis_point[0], facet_basis_point[1], facet_basis_point[2]};
+        AssemblyContext::Point3D trace_face_point{
+            facet_coords[0], facet_coords[1], facet_coords[2]};
+        AssemblyContext::Point3D embedded_face_point{};
+        if (face_type == ElementType::Line2) {
+            embedded_face_point = {
+                Real(2) * facet_coords[0] - Real(1),
+                Real(0),
+                Real(0)};
+        } else if (face_type == ElementType::Quad4) {
+            embedded_face_point = {
+                Real(2) * facet_coords[0] - Real(1),
+                Real(2) * facet_coords[1] - Real(1),
+                Real(0)};
+        } else {
+            embedded_face_point = {
+                facet_coords[0], facet_coords[1], facet_coords[2]};
+        }
+        scratch_face_quad_points_[static_cast<std::size_t>(q)] = trace_face_point;
 
         // Map to the cell reference coordinates on the requested face
         const math::Vector<Real, 3> xi = elements::ElementTransform::facet_to_reference(
@@ -9980,19 +10104,41 @@ void StandardAssembler::prepareContextFace(
             scratch_quad_points_[q][0],
             scratch_quad_points_[q][1],
             scratch_quad_points_[q][2]};
-        const auto& xi_face_point = scratch_face_quad_points_[static_cast<std::size_t>(q)];
-        const math::Vector<Real, 3> xi_test = uses_face_reference_coords(test_space)
-                                                  ? math::Vector<Real, 3>{
-                                                        xi_face_point[0],
-                                                        xi_face_point[1],
-                                                        xi_face_point[2]}
-                                                  : xi;
-        const math::Vector<Real, 3> xi_trial = uses_face_reference_coords(trial_space)
-                                                   ? math::Vector<Real, 3>{
-                                                         xi_face_point[0],
-                                                         xi_face_point[1],
-                                                         xi_face_point[2]}
-                                                   : xi;
+        const auto& xi_trace_face_point =
+            scratch_face_quad_points_[static_cast<std::size_t>(q)];
+        math::Vector<Real, 3> xi_embedded_face{};
+        if (face_type == ElementType::Line2) {
+            xi_embedded_face = math::Vector<Real, 3>{
+                Real(2) * xi_trace_face_point[0] - Real(1),
+                Real(0),
+                Real(0)};
+        } else if (face_type == ElementType::Quad4) {
+            xi_embedded_face = math::Vector<Real, 3>{
+                Real(2) * xi_trace_face_point[0] - Real(1),
+                Real(2) * xi_trace_face_point[1] - Real(1),
+                Real(0)};
+        } else {
+            xi_embedded_face = math::Vector<Real, 3>{
+                xi_trace_face_point[0],
+                xi_trace_face_point[1],
+                xi_trace_face_point[2]};
+        }
+        const math::Vector<Real, 3> xi_test =
+            force_test_face_reference_coords
+                ? xi_embedded_face
+                : (uses_trace_face_reference_coords(test_space)
+                       ? math::Vector<Real, 3>{xi_trace_face_point[0],
+                                               xi_trace_face_point[1],
+                                               xi_trace_face_point[2]}
+                       : xi);
+        const math::Vector<Real, 3> xi_trial =
+            force_trial_face_reference_coords
+                ? xi_embedded_face
+                : (uses_trace_face_reference_coords(trial_space)
+                       ? math::Vector<Real, 3>{xi_trace_face_point[0],
+                                               xi_trace_face_point[1],
+                                               xi_trace_face_point[2]}
+                       : xi);
 
         const auto& J = scratch_jacobians_[q];
         const auto& J_inv = scratch_inv_jacobians_[q];
@@ -11091,10 +11237,46 @@ void StandardAssembler::populateFieldSolutionData(
     auto& scalar_hessians = scratch_fsd_scalar_hessians_;
     auto& scalar_laplacians = scratch_fsd_scalar_laplacians_;
 
-    auto& vector_values = scratch_fsd_vector_values_;
-    auto& vector_jacobians = scratch_fsd_vector_jacobians_;
-    auto& vector_component_hessians = scratch_fsd_vector_component_hessians_;
-    auto& vector_component_laplacians = scratch_fsd_vector_component_laplacians_;
+	    auto& vector_values = scratch_fsd_vector_values_;
+	    auto& vector_jacobians = scratch_fsd_vector_jacobians_;
+	    auto& vector_component_hessians = scratch_fsd_vector_component_hessians_;
+	    auto& vector_component_laplacians = scratch_fsd_vector_component_laplacians_;
+        const auto cache_entry_usable =
+            [&](const basis::BasisCacheEntry* entry,
+                LocalIndex expected_dofs,
+                bool need_gradients_local,
+                bool need_hessians_local) -> bool {
+                const auto n_qpts_local =
+                    static_cast<std::size_t>(context.numQuadraturePoints());
+                if (entry == nullptr ||
+                    entry->num_qpts != n_qpts_local ||
+                    entry->num_dofs != static_cast<std::size_t>(expected_dofs) ||
+                    entry->scalar_values.size() <
+                        static_cast<std::size_t>(expected_dofs) * n_qpts_local) {
+                    return false;
+                }
+                if (need_gradients_local) {
+                    if (entry->gradients.size() < n_qpts_local) {
+                        return false;
+                    }
+                    for (std::size_t q = 0; q < n_qpts_local; ++q) {
+                        if (entry->gradients[q].size() < static_cast<std::size_t>(expected_dofs)) {
+                            return false;
+                        }
+                    }
+                }
+                if (need_hessians_local) {
+                    if (entry->hessians.size() < n_qpts_local) {
+                        return false;
+                    }
+                    for (std::size_t q = 0; q < n_qpts_local; ++q) {
+                        if (entry->hessians[q].size() < static_cast<std::size_t>(expected_dofs)) {
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            };
 
     for (const auto& req : requirements) {
         FE_THROW_IF(req.field == INVALID_FIELD_ID, FEException,
@@ -11162,21 +11344,29 @@ void StandardAssembler::populateFieldSolutionData(
 
             // Use BasisCache for field basis evaluations when quad rule is available.
             // Look up in flat cache first to avoid repeated mutex+hash per cell.
-            const basis::BasisCacheEntry* field_bcache = nullptr;
-            if (cached_quad_rule_ &&
-                static_cast<LocalIndex>(cached_quad_rule_->num_points()) == n_qpts) {
-                for (const auto& fc : cached_field_bcache_) {
-                    if (fc.basis == &basis && fc.gradients == need_gradients && fc.hessians == need_hessians) {
-                        field_bcache = fc.entry;
-                        break;
-                    }
+	            const basis::BasisCacheEntry* field_bcache = nullptr;
+	            if (cached_quad_rule_ &&
+	                static_cast<LocalIndex>(cached_quad_rule_->num_points()) == n_qpts) {
+	                for (const auto& fc : cached_field_bcache_) {
+	                    if (fc.basis == &basis &&
+                            fc.quad == cached_quad_rule_.get() &&
+                            fc.gradients == need_gradients &&
+                            fc.hessians == need_hessians) {
+	                        field_bcache = fc.entry;
+	                        break;
+	                    }
+	                }
+	                if (!field_bcache) {
+	                    field_bcache = &basis::BasisCache::instance().get_or_compute(
+	                        basis, *cached_quad_rule_, need_gradients, need_hessians);
+	                    cached_field_bcache_.push_back(
+                            {&basis, cached_quad_rule_.get(),
+                             need_gradients, need_hessians, field_bcache});
+	                }
+	            }
+                if (!cache_entry_usable(field_bcache, n_dofs, need_gradients, need_hessians)) {
+                    field_bcache = nullptr;
                 }
-                if (!field_bcache) {
-                    field_bcache = &basis::BasisCache::instance().get_or_compute(
-                        basis, *cached_quad_rule_, need_gradients, need_hessians);
-                    cached_field_bcache_.push_back({&basis, need_gradients, need_hessians, field_bcache});
-                }
-            }
 
             // Get inverse Jacobians span once (avoid per-QP accessor overhead).
             const auto ctx_inv_jacs_span = context.inverseJacobians();
@@ -11541,21 +11731,30 @@ void StandardAssembler::populateFieldSolutionData(
 
             // Use BasisCache for ProductSpace field basis evaluations.
             // Look up in flat cache first to avoid repeated mutex+hash per cell.
-            const basis::BasisCacheEntry* field_bcache_ps = nullptr;
-            if (cached_quad_rule_ &&
-                static_cast<LocalIndex>(cached_quad_rule_->num_points()) == n_qpts) {
-                for (const auto& fc : cached_field_bcache_) {
-                    if (fc.basis == &basis && fc.gradients == need_gradients && fc.hessians == need_hessians) {
-                        field_bcache_ps = fc.entry;
-                        break;
-                    }
+	            const basis::BasisCacheEntry* field_bcache_ps = nullptr;
+	            if (cached_quad_rule_ &&
+	                static_cast<LocalIndex>(cached_quad_rule_->num_points()) == n_qpts) {
+	                for (const auto& fc : cached_field_bcache_) {
+	                    if (fc.basis == &basis &&
+                            fc.quad == cached_quad_rule_.get() &&
+                            fc.gradients == need_gradients &&
+                            fc.hessians == need_hessians) {
+	                        field_bcache_ps = fc.entry;
+	                        break;
+	                    }
+	                }
+	                if (!field_bcache_ps) {
+	                    field_bcache_ps = &basis::BasisCache::instance().get_or_compute(
+	                        basis, *cached_quad_rule_, need_gradients, need_hessians);
+	                    cached_field_bcache_.push_back(
+                            {&basis, cached_quad_rule_.get(),
+                             need_gradients, need_hessians, field_bcache_ps});
+	                }
+	            }
+                if (!cache_entry_usable(field_bcache_ps, n_scalar_dofs,
+                                        need_gradients, need_hessians)) {
+                    field_bcache_ps = nullptr;
                 }
-                if (!field_bcache_ps) {
-                    field_bcache_ps = &basis::BasisCache::instance().get_or_compute(
-                        basis, *cached_quad_rule_, need_gradients, need_hessians);
-                    cached_field_bcache_.push_back({&basis, need_gradients, need_hessians, field_bcache_ps});
-                }
-            }
 
             // Get inverse Jacobians span once (avoid per-QP accessor overhead).
             const auto ctx_inv_jacs_ps = context.inverseJacobians();
@@ -11794,10 +11993,51 @@ void StandardAssembler::populateFieldSolutionData(
     auto& scalar_hessians = ws.fsd_scalar_hessians;
     auto& scalar_laplacians = ws.fsd_scalar_laplacians;
 
-    auto& vector_values = ws.fsd_vector_values;
-    auto& vector_jacobians = ws.fsd_vector_jacobians;
-    auto& vector_component_hessians = ws.fsd_vector_comp_hessians;
-    auto& vector_component_laplacians = ws.fsd_vector_comp_laplacians;
+	    auto& vector_values = ws.fsd_vector_values;
+	    auto& vector_jacobians = ws.fsd_vector_jacobians;
+	    auto& vector_component_hessians = ws.fsd_vector_comp_hessians;
+	    auto& vector_component_laplacians = ws.fsd_vector_comp_laplacians;
+        const auto cache_entry_usable =
+            [&](const basis::BasisCacheEntry* entry,
+                LocalIndex expected_dofs,
+                bool need_gradients_local,
+                bool need_hessians_local) -> bool {
+                if (entry == nullptr ||
+                    entry->num_qpts != static_cast<std::size_t>(context.numQuadraturePoints()) ||
+                    entry->num_dofs != static_cast<std::size_t>(expected_dofs) ||
+                    entry->scalar_values.size() <
+                        static_cast<std::size_t>(expected_dofs) *
+                        static_cast<std::size_t>(context.numQuadraturePoints())) {
+                    return false;
+                }
+                if (need_gradients_local) {
+                    if (entry->gradients.size() <
+                        static_cast<std::size_t>(context.numQuadraturePoints())) {
+                        return false;
+                    }
+                    for (std::size_t q = 0;
+                         q < static_cast<std::size_t>(context.numQuadraturePoints()); ++q) {
+                        if (entry->gradients[q].size() <
+                            static_cast<std::size_t>(expected_dofs)) {
+                            return false;
+                        }
+                    }
+                }
+                if (need_hessians_local) {
+                    if (entry->hessians.size() <
+                        static_cast<std::size_t>(context.numQuadraturePoints())) {
+                        return false;
+                    }
+                    for (std::size_t q = 0;
+                         q < static_cast<std::size_t>(context.numQuadraturePoints()); ++q) {
+                        if (entry->hessians[q].size() <
+                            static_cast<std::size_t>(expected_dofs)) {
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            };
 
     for (const auto& req : requirements) {
         FE_THROW_IF(req.field == INVALID_FIELD_ID, FEException,
@@ -11866,22 +12106,29 @@ void StandardAssembler::populateFieldSolutionData(
             // Use BasisCache for field basis evaluations when quad rule is available.
             // Read-only lookup in pre-populated cache; do NOT insert on miss
             // (this overload may run from multiple threads).
-            const basis::BasisCacheEntry* field_bcache = nullptr;
-            if (cached_quad_rule_ &&
-                static_cast<LocalIndex>(cached_quad_rule_->num_points()) == n_qpts) {
-                for (const auto& fc : cached_field_bcache_) {
-                    if (fc.basis == &basis && fc.gradients == need_gradients && fc.hessians == need_hessians) {
-                        field_bcache = fc.entry;
-                        break;
-                    }
-                }
+	            const basis::BasisCacheEntry* field_bcache = nullptr;
+	            if (cached_quad_rule_ &&
+	                static_cast<LocalIndex>(cached_quad_rule_->num_points()) == n_qpts) {
+	                for (const auto& fc : cached_field_bcache_) {
+	                    if (fc.basis == &basis &&
+                            fc.quad == cached_quad_rule_.get() &&
+                            fc.gradients == need_gradients &&
+                            fc.hessians == need_hessians) {
+	                        field_bcache = fc.entry;
+	                        break;
+	                    }
+	                }
                 // Cache miss: query the global thread-safe BasisCache singleton
                 // but do NOT insert into cached_field_bcache_ (shared state).
                 if (!field_bcache) {
-                    field_bcache = &basis::BasisCache::instance().get_or_compute(
-                        basis, *cached_quad_rule_, need_gradients, need_hessians);
+	                    field_bcache = &basis::BasisCache::instance().get_or_compute(
+	                        basis, *cached_quad_rule_, need_gradients, need_hessians);
+	                }
+	            }
+                if (!cache_entry_usable(field_bcache, n_dofs,
+                                        need_gradients, need_hessians)) {
+                    field_bcache = nullptr;
                 }
-            }
 
             // Get inverse Jacobians span once (avoid per-QP accessor overhead).
             const auto ctx_inv_jacs_span = context.inverseJacobians();
@@ -12200,22 +12447,29 @@ void StandardAssembler::populateFieldSolutionData(
 
             // Use BasisCache for ProductSpace field basis evaluations.
             // Read-only lookup in pre-populated cache; do NOT insert on miss.
-            const basis::BasisCacheEntry* field_bcache_ps = nullptr;
-            if (cached_quad_rule_ &&
-                static_cast<LocalIndex>(cached_quad_rule_->num_points()) == n_qpts) {
-                for (const auto& fc : cached_field_bcache_) {
-                    if (fc.basis == &basis && fc.gradients == need_gradients && fc.hessians == need_hessians) {
-                        field_bcache_ps = fc.entry;
-                        break;
-                    }
-                }
+	            const basis::BasisCacheEntry* field_bcache_ps = nullptr;
+	            if (cached_quad_rule_ &&
+	                static_cast<LocalIndex>(cached_quad_rule_->num_points()) == n_qpts) {
+	                for (const auto& fc : cached_field_bcache_) {
+	                    if (fc.basis == &basis &&
+                            fc.quad == cached_quad_rule_.get() &&
+                            fc.gradients == need_gradients &&
+                            fc.hessians == need_hessians) {
+	                        field_bcache_ps = fc.entry;
+	                        break;
+	                    }
+	                }
                 // Cache miss: query the global thread-safe BasisCache singleton
                 // but do NOT insert into cached_field_bcache_ (shared state).
                 if (!field_bcache_ps) {
-                    field_bcache_ps = &basis::BasisCache::instance().get_or_compute(
-                        basis, *cached_quad_rule_, need_gradients, need_hessians);
+	                    field_bcache_ps = &basis::BasisCache::instance().get_or_compute(
+	                        basis, *cached_quad_rule_, need_gradients, need_hessians);
+	                }
+	            }
+                if (!cache_entry_usable(field_bcache_ps, n_scalar_dofs,
+                                        need_gradients, need_hessians)) {
+                    field_bcache_ps = nullptr;
                 }
-            }
 
             // Get inverse Jacobians span once (avoid per-QP accessor overhead).
             const auto ctx_inv_jacs_ps = context.inverseJacobians();
@@ -12821,6 +13075,8 @@ void StandardAssembler::ensureFieldRecipes(
         if (first_cell >= 0) {
             const ElementType cell_type = mesh.getCellType(first_cell);
             const auto& element = getElement(space, first_cell, cell_type);
+            recipe.cell_type = cell_type;
+            recipe.basis_cache_identity = element.basis().cache_identity();
             recipe.n_scalar_dofs = static_cast<LocalIndex>(element.num_dofs());
         }
 
@@ -12883,6 +13139,62 @@ void StandardAssembler::populateFieldSolutionDataFast(
 
     const auto n_qpts = context.numQuadraturePoints();
     const auto ctx_inv_jacs = context.inverseJacobians();
+    const auto cell_type = mesh.getCellType(cell_id);
+    if (cell_type == ElementType::Triangle3 || cell_type == ElementType::Triangle6 ||
+        cell_type == ElementType::Tetra4 || cell_type == ElementType::Tetra10) {
+        populateFieldSolutionData(context, mesh, cell_id, requirements);
+        return;
+    }
+    const auto fallback_to_original =
+        [&]() {
+            populateFieldSolutionData(context, mesh, cell_id, requirements);
+            context.resumeJITFieldTableRebuild();
+        };
+    const auto recipe_matches_current_cell =
+        [&](const CachedFieldRecipe& recipe,
+            std::span<const Real> coeffs,
+            bool need_gradients) -> bool {
+            if (recipe.access == nullptr || recipe.access->space == nullptr ||
+                recipe.bcache == nullptr || recipe.cell_type == ElementType::Unknown) {
+                return false;
+            }
+
+            const auto& element = getElement(*recipe.access->space, cell_id, cell_type);
+            if (cell_type != recipe.cell_type ||
+                static_cast<LocalIndex>(element.num_dofs()) != recipe.n_scalar_dofs ||
+                element.basis().cache_identity() != recipe.basis_cache_identity) {
+                return false;
+            }
+
+            const auto n_scalar_sz = static_cast<std::size_t>(recipe.n_scalar_dofs);
+            const auto n_qpts_sz = static_cast<std::size_t>(n_qpts);
+            const auto required_coeffs =
+                (recipe.is_product && recipe.field_type == FieldType::Vector)
+                    ? static_cast<std::size_t>(std::max(recipe.value_dim, 0)) * n_scalar_sz
+                    : n_scalar_sz;
+
+            if (coeffs.size() < required_coeffs ||
+                recipe.bcache->num_dofs != n_scalar_sz ||
+                recipe.bcache->num_qpts != n_qpts_sz ||
+                recipe.bcache->scalar_values.size() < n_scalar_sz * n_qpts_sz) {
+                return false;
+            }
+
+            if (!need_gradients) {
+                return true;
+            }
+
+            if (ctx_inv_jacs.size() < n_qpts_sz ||
+                recipe.bcache->gradients.size() < n_qpts_sz) {
+                return false;
+            }
+            for (std::size_t q = 0; q < n_qpts_sz; ++q) {
+                if (recipe.bcache->gradients[q].size() < n_scalar_sz) {
+                    return false;
+                }
+            }
+            return true;
+        };
 
     auto& scalar_values = scratch_fsd_scalar_values_;
     auto& scalar_gradients = scratch_fsd_scalar_gradients_;
@@ -12954,8 +13266,7 @@ void StandardAssembler::populateFieldSolutionDataFast(
             (want_hessians && !recipe.want_hessians) ||
             (want_laplacians && !recipe.want_laplacians) ||
             want_hessians || want_laplacians) {
-            populateFieldSolutionData(context, mesh, cell_id, requirements);
-            context.resumeJITFieldTableRebuild();
+            fallback_to_original();
             return;
         }
 
@@ -12999,9 +13310,13 @@ void StandardAssembler::populateFieldSolutionDataFast(
                           current_solution_, coeff_scratch,
                           "populateFieldSolutionDataFast", false);
                       return std::span<const Real>(coeff_scratch);
-                  }();
+            }();
 
-        // Use cached basis cache entry (no hash lookup)
+        if (!recipe_matches_current_cell(recipe, local_coeffs, want_gradients)) {
+            fallback_to_original();
+            return;
+        }
+
         const auto* field_bcache = recipe.bcache;
 
         if (recipe.field_type == FieldType::Scalar && !recipe.is_product) {
@@ -13019,10 +13334,8 @@ void StandardAssembler::populateFieldSolutionDataFast(
             }
 
             if (field_bcache && !field_bcache->scalar_values.empty()) {
-                // Fast path: use cached reference basis
-                // Accumulate in reference space, then transform
-                // scalar_values layout: [dof * n_qpts + qp]
-                // gradients layout: [dof][qp] (vector of vectors)
+                // Fast path: use cached reference basis.
+                // BasisCache gradients are stored as [qp][dof].
                 const auto& sv = field_bcache->scalar_values;
                 const auto& sg = field_bcache->gradients;
                 const bool have_grads = want_gradients && !sg.empty();
@@ -13036,8 +13349,8 @@ void StandardAssembler::populateFieldSolutionDataFast(
                                          static_cast<std::size_t>(n_qpts) +
                                          static_cast<std::size_t>(q)];
                         if (have_grads) {
-                            const auto& gi = sg[static_cast<std::size_t>(i)]
-                                               [static_cast<std::size_t>(q)];
+                            const auto& gi = sg[static_cast<std::size_t>(q)]
+                                               [static_cast<std::size_t>(i)];
                             gref0 += c * gi[0];
                             gref1 += c * gi[1];
                             gref2 += c * gi[2];
@@ -13119,8 +13432,8 @@ void StandardAssembler::populateFieldSolutionDataFast(
                                            static_cast<std::size_t>(q)];
                         Real gref0 = 0, gref1 = 0, gref2 = 0;
                         if (have_grads) {
-                            const auto& gi = sg[static_cast<std::size_t>(si)]
-                                               [static_cast<std::size_t>(q)];
+                            const auto& gi = sg[static_cast<std::size_t>(q)]
+                                               [static_cast<std::size_t>(si)];
                             gref0 = gi[0];
                             gref1 = gi[1];
                             gref2 = gi[2];
@@ -13156,8 +13469,7 @@ void StandardAssembler::populateFieldSolutionDataFast(
                     }
                 }
             } else {
-                populateFieldSolutionData(context, mesh, cell_id, requirements);
-                context.resumeJITFieldTableRebuild();
+                fallback_to_original();
                 return;
             }
 
@@ -13264,6 +13576,11 @@ void StandardAssembler::populateFieldSolutionDataFast(
                                       "populateFieldSolutionDataFast:prev", false);
                                   return std::span<const Real>(prev_coeffs);
                               }();
+
+                    if (!recipe_matches_current_cell(recipe, prev_coeff_span, false)) {
+                        fallback_to_original();
+                        return;
+                    }
 
                     const auto& sv = recipe.bcache->scalar_values;
 

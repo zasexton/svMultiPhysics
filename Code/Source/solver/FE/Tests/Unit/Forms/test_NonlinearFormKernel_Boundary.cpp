@@ -22,12 +22,103 @@
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <array>
+#include <cmath>
 #include <vector>
 
 namespace svmp {
 namespace FE {
 namespace forms {
 namespace test {
+
+namespace {
+
+[[nodiscard]] std::array<Real, 4> solveLinear4x4(const assembly::DenseMatrixView& A,
+                                                 const assembly::DenseVectorView& b)
+{
+    std::array<std::array<Real, 5>, 4> aug{};
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            aug[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] =
+                A.getMatrixEntry(static_cast<GlobalIndex>(i), static_cast<GlobalIndex>(j));
+        }
+        aug[static_cast<std::size_t>(i)][4] = b.getVectorEntry(static_cast<GlobalIndex>(i));
+    }
+
+    for (int col = 0; col < 4; ++col) {
+        int pivot = col;
+        Real pivot_abs = std::abs(aug[static_cast<std::size_t>(pivot)][static_cast<std::size_t>(col)]);
+        for (int row = col + 1; row < 4; ++row) {
+            const Real cand_abs = std::abs(aug[static_cast<std::size_t>(row)][static_cast<std::size_t>(col)]);
+            if (cand_abs > pivot_abs) {
+                pivot = row;
+                pivot_abs = cand_abs;
+            }
+        }
+        EXPECT_GT(pivot_abs, 1e-14);
+        if (pivot != col) {
+            std::swap(aug[static_cast<std::size_t>(pivot)], aug[static_cast<std::size_t>(col)]);
+        }
+
+        const Real diag = aug[static_cast<std::size_t>(col)][static_cast<std::size_t>(col)];
+        for (int j = col; j < 5; ++j) {
+            aug[static_cast<std::size_t>(col)][static_cast<std::size_t>(j)] /= diag;
+        }
+        for (int row = 0; row < 4; ++row) {
+            if (row == col) {
+                continue;
+            }
+            const Real factor = aug[static_cast<std::size_t>(row)][static_cast<std::size_t>(col)];
+            if (factor == Real(0)) {
+                continue;
+            }
+            for (int j = col; j < 5; ++j) {
+                aug[static_cast<std::size_t>(row)][static_cast<std::size_t>(j)] -=
+                    factor * aug[static_cast<std::size_t>(col)][static_cast<std::size_t>(j)];
+            }
+        }
+    }
+
+    std::array<Real, 4> x{};
+    for (int i = 0; i < 4; ++i) {
+        x[static_cast<std::size_t>(i)] = aug[static_cast<std::size_t>(i)][4];
+    }
+    return x;
+}
+
+[[nodiscard]] Real vectorNorm4(const assembly::DenseVectorView& v)
+{
+    Real sum = 0.0;
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        const Real value = v.getVectorEntry(i);
+        sum += value * value;
+    }
+    return std::sqrt(sum);
+}
+
+void assembleCellAndBoundary(const SingleTetraOneBoundaryFaceMeshAccess& mesh,
+                             spaces::H1Space& space,
+                             assembly::StandardAssembler& assembler,
+                             assembly::AssemblyKernel& kernel,
+                             assembly::DenseMatrixView* J,
+                             assembly::DenseVectorView* R)
+{
+    if (J) {
+        J->zero();
+    }
+    if (R) {
+        R->zero();
+    }
+    if (J && R) {
+        (void)assembler.assembleBoth(mesh, space, kernel, *J, *R);
+    } else if (J) {
+        (void)assembler.assembleMatrix(mesh, space, kernel, *J);
+    } else if (R) {
+        (void)assembler.assembleVector(mesh, space, kernel, *R);
+    }
+    (void)assembler.assembleBoundaryFaces(mesh, /*boundary_marker=*/2, space, kernel, J, R);
+}
+
+} // namespace
 
 TEST(NonlinearFormKernelBoundaryTest, JacobianMatchesCentralDifferences)
 {
@@ -206,6 +297,191 @@ TEST(NonlinearFormKernelBoundaryTest, TraceNitscheBoundaryJacobianMatchesCentral
             const Real fd = (Rp.getVectorEntry(i) - Rm.getVectorEntry(i)) / (2.0 * eps);
             EXPECT_NEAR(J.getMatrixEntry(i, j), fd, 1e-9);
         }
+    }
+}
+
+TEST(NonlinearFormKernelBoundaryTest, TraceInequalityBoundaryJacobianMatchesCentralDifferencesWhenActive)
+{
+    SingleTetraOneBoundaryFaceMeshAccess mesh(/*boundary_marker=*/2);
+    auto dof_map = createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    auto residual = (FormExpr::constant(0.0) * u * v).dx();
+    bc::TraceInequalityOptions opts;
+    opts.trace_operator = bc::ScalarTraceOperator::Identity;
+    opts.sense = bc::TraceInequalitySense::LessEqual;
+    residual = bc::applyTraceInequality(std::move(residual),
+                                        u,
+                                        v,
+                                        /*boundary_marker=*/2,
+                                        FormExpr::constant(0.0),
+                                        FormExpr::constant(4.0),
+                                        opts);
+
+    auto ir = compiler.compileResidual(residual);
+    NonlinearFormKernel kernel(std::move(ir), ADMode::Forward);
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    std::vector<Real> U = {0.2, 0.3, 0.4, 0.25};
+    assembler.setCurrentSolution(U);
+
+    assembly::DenseMatrixView J(4);
+    assembly::DenseVectorView R(4);
+    J.zero();
+    R.zero();
+
+    const auto result = assembler.assembleBoundaryFaces(mesh, 2, space, kernel, &J, &R);
+    EXPECT_EQ(result.boundary_faces_assembled, 1);
+
+    const Real eps = 1e-6;
+    for (GlobalIndex j = 0; j < 4; ++j) {
+        auto U_plus = U;
+        auto U_minus = U;
+        U_plus[static_cast<std::size_t>(j)] += eps;
+        U_minus[static_cast<std::size_t>(j)] -= eps;
+
+        assembler.setCurrentSolution(U_plus);
+        assembly::DenseVectorView Rp(4);
+        Rp.zero();
+        (void)assembler.assembleBoundaryFaces(mesh, 2, space, kernel, nullptr, &Rp);
+
+        assembler.setCurrentSolution(U_minus);
+        assembly::DenseVectorView Rm(4);
+        Rm.zero();
+        (void)assembler.assembleBoundaryFaces(mesh, 2, space, kernel, nullptr, &Rm);
+
+        for (GlobalIndex i = 0; i < 4; ++i) {
+            const Real fd = (Rp.getVectorEntry(i) - Rm.getVectorEntry(i)) / (2.0 * eps);
+            EXPECT_NEAR(J.getMatrixEntry(i, j), fd, 1e-8);
+        }
+    }
+}
+
+TEST(NonlinearFormKernelBoundaryTest, TraceInequalityBoundaryResidualAndJacobianVanishWhenInactive)
+{
+    SingleTetraOneBoundaryFaceMeshAccess mesh(/*boundary_marker=*/2);
+    auto dof_map = createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    auto residual = (FormExpr::constant(0.0) * u * v).dx();
+    bc::TraceInequalityOptions opts;
+    opts.trace_operator = bc::ScalarTraceOperator::Identity;
+    opts.sense = bc::TraceInequalitySense::LessEqual;
+    residual = bc::applyTraceInequality(std::move(residual),
+                                        u,
+                                        v,
+                                        /*boundary_marker=*/2,
+                                        FormExpr::constant(0.0),
+                                        FormExpr::constant(4.0),
+                                        opts);
+
+    auto ir = compiler.compileResidual(residual);
+    NonlinearFormKernel kernel(std::move(ir), ADMode::Forward);
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    std::vector<Real> U = {-0.2, -0.3, -0.4, -0.25};
+    assembler.setCurrentSolution(U);
+
+    assembly::DenseMatrixView J(4);
+    assembly::DenseVectorView R(4);
+    J.zero();
+    R.zero();
+
+    const auto result = assembler.assembleBoundaryFaces(mesh, 2, space, kernel, &J, &R);
+    EXPECT_EQ(result.boundary_faces_assembled, 1);
+
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        EXPECT_NEAR(R.getVectorEntry(i), 0.0, 1e-12);
+        for (GlobalIndex j = 0; j < 4; ++j) {
+            EXPECT_NEAR(J.getMatrixEntry(i, j), 0.0, 1e-12);
+        }
+    }
+}
+
+TEST(NonlinearFormKernelBoundaryTest, TraceInequalityBoundarySemiSmoothNewtonSwitchesActiveSet)
+{
+    SingleTetraOneBoundaryFaceMeshAccess mesh(/*boundary_marker=*/2);
+    auto dof_map = createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    auto residual = ((u - FormExpr::constant(-0.1)) * v).dx();
+    bc::TraceInequalityOptions opts;
+    opts.trace_operator = bc::ScalarTraceOperator::Identity;
+    opts.sense = bc::TraceInequalitySense::LessEqual;
+    residual = bc::applyTraceInequality(std::move(residual),
+                                        u,
+                                        v,
+                                        /*boundary_marker=*/2,
+                                        FormExpr::constant(0.0),
+                                        FormExpr::constant(40.0),
+                                        opts);
+
+    auto ir = compiler.compileResidual(residual);
+    NonlinearFormKernel kernel(std::move(ir), ADMode::Forward);
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    std::vector<Real> U0 = {0.3, 0.3, 0.3, 0.3};
+    assembler.setCurrentSolution(U0);
+
+    assembly::DenseMatrixView J0(4);
+    assembly::DenseVectorView R0(4);
+    assembleCellAndBoundary(mesh, space, assembler, kernel, &J0, &R0);
+
+    const Real r0_norm = vectorNorm4(R0);
+    EXPECT_GT(r0_norm, 1e-6);
+
+    const auto du0 = solveLinear4x4(J0, R0);
+    std::vector<Real> U1 = U0;
+    for (std::size_t i = 0; i < U1.size(); ++i) {
+        U1[i] -= du0[i];
+    }
+
+    for (const Real value : U1) {
+        EXPECT_LT(value, 0.0);
+    }
+
+    assembler.setCurrentSolution(U1);
+    assembly::DenseMatrixView J1(4);
+    assembly::DenseVectorView R1(4);
+    assembleCellAndBoundary(mesh, space, assembler, kernel, &J1, &R1);
+
+    const Real r1_norm = vectorNorm4(R1);
+    EXPECT_GT(r1_norm, 1e-10);
+    EXPECT_LT(r1_norm, r0_norm);
+
+    const auto du1 = solveLinear4x4(J1, R1);
+    std::vector<Real> U2 = U1;
+    for (std::size_t i = 0; i < U2.size(); ++i) {
+        U2[i] -= du1[i];
+    }
+
+    assembler.setCurrentSolution(U2);
+    assembly::DenseMatrixView J2(4);
+    assembly::DenseVectorView R2(4);
+    assembleCellAndBoundary(mesh, space, assembler, kernel, &J2, &R2);
+
+    const Real r2_norm = vectorNorm4(R2);
+    EXPECT_LT(r2_norm, 1e-12);
+    for (const Real value : U2) {
+        EXPECT_NEAR(value, -0.1, 1e-12);
     }
 }
 

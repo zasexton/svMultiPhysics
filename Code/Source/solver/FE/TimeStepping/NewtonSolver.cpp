@@ -19,6 +19,7 @@
 #include "Auxiliary/AuxiliaryOperatorRegistry.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
 #include "Systems/SystemsExceptions.h"
+#include "TimeStepping/ConstraintSync.h"
 
 #if defined(FE_HAS_FSILS)
 #  include "Backends/FSILS/FsilsMatrix.h"
@@ -3265,7 +3266,13 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     const auto& constraints = sys.constraints();
     const int temporal_order = transient.system().temporalOrder();
 
-    history.updateGhosts();
+    auto syncHistoryState = [&]() {
+        detail::updateGhostsAndDistributeConstraints(constraints, history);
+    };
+
+    auto syncCurrentState = [&]() {
+        detail::updateGhostsAndDistributeConstraints(constraints, history.u());
+    };
 
     struct NewtonStateWithContext {
         systems::SystemStateView view{};
@@ -3282,15 +3289,16 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         return out;
     };
 
-    auto base_state_holder = makeNewtonState(history, solve_time);
-    const auto& base_state = base_state_holder.view;
-    FE_THROW_IF(!(base_state.dt > 0.0), InvalidArgumentException, "NewtonSolver: dt must be > 0");
-    FE_THROW_IF(!std::isfinite(base_state.time), InvalidArgumentException, "NewtonSolver: solve_time must be finite");
-
     // Ensure time-dependent constraints (Dirichlet, etc.) are evaluated at the actual solve time.
     // This is required for multi-stage schemes (e.g., generalized-α) where the nonlinear solve
     // occurs at a stage time t_{n+α_f}, not necessarily at t_{n+1}.
-    transient.system().updateConstraints(solve_time, base_state.dt);
+    FE_THROW_IF(!(history.dt() > 0.0), InvalidArgumentException, "NewtonSolver: dt must be > 0");
+    FE_THROW_IF(!std::isfinite(solve_time), InvalidArgumentException, "NewtonSolver: solve_time must be finite");
+    transient.system().updateConstraints(solve_time, history.dt());
+    syncHistoryState();
+
+    auto base_state_holder = makeNewtonState(history, solve_time);
+    const auto& base_state = base_state_holder.view;
 
     std::optional<assembly::TimeIntegrationContext> dt_scale_ctx;
     if (options_.scale_dt_increments && !(options_.dt_increment_scale > 0.0)) {
@@ -3393,6 +3401,22 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     auto computeResidualNorm = [&]() -> double {
         return borderedResidualNormForConvergence(
             r, residual_scratch, transient.system().borderedCoupling());
+    };
+
+    auto traceResidualDebugState = [&](const char* phase) {
+        if (!oopTraceEnabled()) {
+            return;
+        }
+        std::ostringstream oss;
+        oss << "NewtonSolver: residual debug";
+        if (phase != nullptr) {
+            oss << " phase='" << phase << "'";
+        }
+        oss << " raw_l2=" << r.norm()
+            << " conv_norm=" << computeResidualNorm()
+            << " constrained_dofs=" << constrained_dofs.size();
+        traceLog(oss.str());
+        logVectorComponentNorms(transient.system(), r, "residual debug");
     };
 
     auto traceResidualComponents = [&](const char* phase) {
@@ -3517,7 +3541,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             traceLog(oss.str());
         }
 
+        traceResidualDebugState("residual_pre_constraints");
         applyResidualAdditionAndConstraints();
+        traceResidualDebugState("residual_post_constraints");
         traceResidualComponents(phase);
         return computeResidualNorm();
     };
@@ -3589,7 +3615,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             traceLog(oss.str());
         }
 
+        traceResidualDebugState("jacobian_and_residual_pre_constraints");
         applyResidualAdditionAndConstraints();
+        traceResidualDebugState("jacobian_and_residual_post_constraints");
         traceResidualComponents("jacobian_and_residual");
         return computeResidualNorm();
     };
@@ -3936,12 +3964,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     double prev_residual_norm = -1.0;
     for (int it = 0; it < max_it; ++it) {
         ntp0 = NTP();
-        history.updateGhosts();
-
-        if (!constraints.empty()) {
-            constraints.distribute(history.u());
-            history.u().updateGhosts();
-        }
+        syncHistoryState();
         ntp_constraints += NTP() - ntp0;
 
         auto state_holder = makeNewtonState(history, solve_time);
@@ -4139,10 +4162,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
                 auto restoreDiagnosticState = [&]() {
                     copyVector(history.u(), u_backup);
-                    if (!constraints.empty()) {
-                        constraints.distribute(history.u());
-                    }
-                    history.u().updateGhosts();
+                    syncCurrentState();
                     if (!aux_state_backup.empty()) {
                         transient.system().restoreAuxiliaryState(aux_state_backup);
                     }
@@ -4174,10 +4194,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
                 // Assemble r(u + h*v) with residual_op into residual_scratch.
                 axpy(history.u(), static_cast<Real>(h), du);
-                if (!constraints.empty()) {
-                    constraints.distribute(history.u());
-                }
-                history.u().updateGhosts();
+                syncCurrentState();
 
                 residual_scratch.zero();
                 {
@@ -4841,11 +4858,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             [&](const backends::SolverReport& rep,
                 const Real residual_fraction,
                 const Real max_relative_residual) -> bool {
-                const bool strict_coupled_validation_active =
-                    (needs_strict_coupled_solve_options ||
-                     needs_validated_native_rank_one_options);
-                if (!strict_coupled_validation_active ||
-                    !(options_.abs_tolerance > 0.0) ||
+                if (!(options_.abs_tolerance > 0.0) ||
                     !(residual_fraction > static_cast<Real>(0.0)) ||
                     !(max_relative_residual > static_cast<Real>(0.0)) ||
                     !std::isfinite(rep.final_residual_norm) ||
@@ -5843,10 +5856,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 transient.system().applyLocalCondensedRecovery(dense_du, static_cast<Real>(1.0));
             }
             axpy(history.u(), static_cast<Real>(-1.0), du);
-            if (!constraints.empty()) {
-                constraints.distribute(history.u());
-            }
-            history.u().updateGhosts();
+            syncCurrentState();
             ntp_update += NTP() - ntp0;
             have_residual = false;
 
@@ -5900,10 +5910,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 reg->invalidateAll();
             }
             axpy(history.u(), static_cast<Real>(-trial_alpha), du);
-            if (!constraints.empty()) {
-                constraints.distribute(history.u());
-            }
-            history.u().updateGhosts();
+            syncCurrentState();
 
             auto trial_state_holder = makeNewtonState(history, solve_time);
             return assembleResidualOnly(trial_state_holder.view, phase);
@@ -6060,11 +6067,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     // exit due to reaching `max_it`, capture the final residual norm for reporting, but do
     // not override the explicit iteration limit with a late convergence declaration.
     if (!have_residual) {
-        history.updateGhosts();
-        if (!constraints.empty()) {
-            constraints.distribute(history.u());
-            history.u().updateGhosts();
-        }
+        syncHistoryState();
         auto final_state_holder = makeNewtonState(history, solve_time);
         current_residual_norm = assembleResidualOnly(
             final_state_holder.view, /*phase=*/"final_check");

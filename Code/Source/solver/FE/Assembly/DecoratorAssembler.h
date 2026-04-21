@@ -66,14 +66,18 @@ public:
 
     void setDofMap(const dofs::DofMap& dof_map) override { base_->setDofMap(dof_map); }
 
-    void setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset = 0) override
+    void setRowDofMap(const dofs::DofMap& dof_map,
+                      GlobalIndex row_offset = 0,
+                      DofEntityScope row_scope = DofEntityScope::Cell) override
     {
-        base_->setRowDofMap(dof_map, row_offset);
+        base_->setRowDofMap(dof_map, row_offset, row_scope);
     }
 
-    void setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset = 0) override
+    void setColDofMap(const dofs::DofMap& dof_map,
+                      GlobalIndex col_offset = 0,
+                      DofEntityScope col_scope = DofEntityScope::Cell) override
     {
-        base_->setColDofMap(dof_map, col_offset);
+        base_->setColDofMap(dof_map, col_offset, col_scope);
     }
 
     void setDofHandler(const dofs::DofHandler& dof_handler) override { base_->setDofHandler(dof_handler); }

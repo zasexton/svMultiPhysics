@@ -398,9 +398,11 @@ void ParallelAssembler::setDofMap(const dofs::DofMap& dof_map)
     ghost_manager_.setOwnershipOffset(0);
 }
 
-void ParallelAssembler::setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset)
+void ParallelAssembler::setRowDofMap(const dofs::DofMap& dof_map,
+                                     GlobalIndex row_offset,
+                                     DofEntityScope row_scope)
 {
-    local_assembler_.setRowDofMap(dof_map, row_offset);
+    local_assembler_.setRowDofMap(dof_map, row_offset, row_scope);
 
     // If no system-level DOF handler is configured, fall back to using the row map
     // for ghost ownership queries. This mode cannot safely switch row maps during an
@@ -415,9 +417,11 @@ void ParallelAssembler::setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex ro
     }
 }
 
-void ParallelAssembler::setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset)
+void ParallelAssembler::setColDofMap(const dofs::DofMap& dof_map,
+                                     GlobalIndex col_offset,
+                                     DofEntityScope col_scope)
 {
-    local_assembler_.setColDofMap(dof_map, col_offset);
+    local_assembler_.setColDofMap(dof_map, col_offset, col_scope);
 }
 
 void ParallelAssembler::setDofHandler(const dofs::DofHandler& dof_handler)

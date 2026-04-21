@@ -27,7 +27,8 @@ namespace {
 
     return bc.enforcement_kind == EnforcementKind::Strong ||
            bc.enforcement_kind == EnforcementKind::WeakPenalty ||
-           bc.enforcement_kind == EnforcementKind::WeakNitsche;
+           bc.enforcement_kind == EnforcementKind::WeakNitsche ||
+           bc.enforcement_kind == EnforcementKind::WeakInequality;
 }
 
 } // namespace

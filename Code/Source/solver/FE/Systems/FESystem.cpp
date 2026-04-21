@@ -211,6 +211,52 @@ void addUnambiguousRoleMappings(backends::SolverOptions& options,
     }
 }
 
+[[nodiscard]] const char* fieldScopeName(FieldScope scope) noexcept
+{
+    switch (scope) {
+        case FieldScope::VolumeCell:
+            return "volume";
+        case FieldScope::InterfaceFace:
+            return "interface";
+    }
+    return "unknown";
+}
+
+void validateKernelFieldScopes(const FieldRegistry& registry,
+                               FieldId test_field,
+                               FieldId trial_field,
+                               analysis::DomainKind domain,
+                               std::string_view api_name)
+{
+    const auto& test_rec = registry.get(test_field);
+    const auto& trial_rec = registry.get(trial_field);
+
+    const auto is_interface = [](const FieldRecord& rec) noexcept {
+        return rec.scope == FieldScope::InterfaceFace;
+    };
+
+    if (domain == analysis::DomainKind::InterfaceFace) {
+        FE_THROW_IF(is_interface(test_rec) && test_rec.interface_marker < 0,
+                    InvalidArgumentException,
+                    std::string(api_name) + ": interface-scoped test field '" +
+                        test_rec.name + "' is missing an interface marker");
+        FE_THROW_IF(is_interface(trial_rec) && trial_rec.interface_marker < 0,
+                    InvalidArgumentException,
+                    std::string(api_name) + ": interface-scoped trial field '" +
+                        trial_rec.name + "' is missing an interface marker");
+        return;
+    }
+
+    FE_THROW_IF(is_interface(test_rec), InvalidArgumentException,
+                std::string(api_name) + ": " + fieldScopeName(test_rec.scope) +
+                    "-scoped test field '" + test_rec.name +
+                    "' can only be used in interface-face kernels");
+    FE_THROW_IF(is_interface(trial_rec), InvalidArgumentException,
+                std::string(api_name) + ": " + fieldScopeName(trial_rec.scope) +
+                    "-scoped trial field '" + trial_rec.name +
+                    "' can only be used in interface-face kernels");
+}
+
 } // namespace
 
 /// Walk an expression tree and collect all FieldIds referenced by
@@ -1410,6 +1456,10 @@ analysis::ProblemAnalysisReport FESystem::runProblemAnalysis() const {
         fd.name = fr.name;
         fd.value_dimension = fr.components;
         fd.field_type = (fr.components > 1) ? FieldType::Vector : FieldType::Scalar;
+        fd.domain = (fr.scope == FieldScope::InterfaceFace)
+                        ? analysis::DomainKind::InterfaceFace
+                        : analysis::DomainKind::Cell;
+        fd.interface_marker = fr.interface_marker;
         if (fr.space) {
             fd.polynomial_order = fr.space->polynomial_order();
             fd.topological_dimension = fr.space->topological_dimension();
@@ -1537,6 +1587,20 @@ FieldId FESystem::addField(FieldSpec spec)
     return field_registry_.add(std::move(spec));
 }
 
+FieldId FESystem::addInterfaceField(std::string name,
+                                    std::shared_ptr<const spaces::FunctionSpace> space,
+                                    InterfaceId interface_marker,
+                                    int components)
+{
+    FieldSpec spec;
+    spec.name = std::move(name);
+    spec.space = std::move(space);
+    spec.components = components;
+    spec.scope = FieldScope::InterfaceFace;
+    spec.interface_marker = interface_marker;
+    return addField(std::move(spec));
+}
+
 void FESystem::addConstraint(std::unique_ptr<constraints::Constraint> c)
 {
     invalidateSetup();
@@ -1567,6 +1631,9 @@ void FESystem::addCellKernel(OperatorTag op, FieldId test_field, FieldId trial_f
                              std::shared_ptr<assembly::AssemblyKernel> kernel)
 {
     invalidateSetup();
+    validateKernelFieldScopes(field_registry_, test_field, trial_field,
+                              analysis::DomainKind::Cell,
+                              "FESystem::addCellKernel");
     if (!operator_registry_.has(op)) {
         operator_registry_.addOperator(op);
     }
@@ -1587,6 +1654,9 @@ void FESystem::addBoundaryKernel(OperatorTag op, BoundaryId boundary, FieldId te
                                  FieldId trial_field, std::shared_ptr<assembly::AssemblyKernel> kernel)
 {
     invalidateSetup();
+    validateKernelFieldScopes(field_registry_, test_field, trial_field,
+                              analysis::DomainKind::Boundary,
+                              "FESystem::addBoundaryKernel");
     if (!operator_registry_.has(op)) {
         operator_registry_.addOperator(op);
     }
@@ -1607,6 +1677,9 @@ void FESystem::addInteriorFaceKernel(OperatorTag op, FieldId test_field, FieldId
                                      std::shared_ptr<assembly::AssemblyKernel> kernel)
 {
     invalidateSetup();
+    validateKernelFieldScopes(field_registry_, test_field, trial_field,
+                              analysis::DomainKind::InteriorFace,
+                              "FESystem::addInteriorFaceKernel");
     if (!operator_registry_.has(op)) {
         operator_registry_.addOperator(op);
     }
@@ -1627,6 +1700,9 @@ void FESystem::addInterfaceFaceKernel(OperatorTag op, InterfaceId interface_mark
                                       std::shared_ptr<assembly::AssemblyKernel> kernel)
 {
     invalidateSetup();
+    validateKernelFieldScopes(field_registry_, test_field, trial_field,
+                              analysis::DomainKind::InterfaceFace,
+                              "FESystem::addInterfaceFaceKernel");
     if (!operator_registry_.has(op)) {
         operator_registry_.addOperator(op);
     }
@@ -2019,6 +2095,9 @@ int FESystem::temporalOrder() const noexcept
             if (term.kernel) max_order = std::max(max_order, term.kernel->maxTemporalDerivativeOrder());
         }
         for (const auto& term : def.interior) {
+            if (term.kernel) max_order = std::max(max_order, term.kernel->maxTemporalDerivativeOrder());
+        }
+        for (const auto& term : def.interface_faces) {
             if (term.kernel) max_order = std::max(max_order, term.kernel->maxTemporalDerivativeOrder());
         }
     }

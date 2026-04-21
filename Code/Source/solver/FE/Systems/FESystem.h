@@ -167,6 +167,10 @@ public:
 
     // ---- Definition phase ----
     FieldId addField(FieldSpec spec);
+    FieldId addInterfaceField(std::string name,
+                              std::shared_ptr<const spaces::FunctionSpace> space,
+                              InterfaceId interface_marker,
+                              int components = 0);
     void addConstraint(std::unique_ptr<constraints::Constraint> c);
     void addSystemConstraint(std::unique_ptr<constraints::ISystemConstraint> c);
 

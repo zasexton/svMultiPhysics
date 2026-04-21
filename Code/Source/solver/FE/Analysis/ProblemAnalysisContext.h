@@ -59,6 +59,8 @@ struct FieldDescriptor {
     int topological_dimension{0};        ///< Spatial dimension of the mesh
     int polynomial_order{1};
     Continuity continuity{Continuity::C0};
+    DomainKind domain{DomainKind::Cell};
+    int interface_marker{-1};
 
     /// True when per-component DOF extraction is supported (ProductSpace / H1 vectors).
     /// False for vector-basis fields (HDiv/HCurl) where DOFs are on vector-valued

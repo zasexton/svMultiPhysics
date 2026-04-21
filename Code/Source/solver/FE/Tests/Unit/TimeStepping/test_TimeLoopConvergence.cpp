@@ -14,6 +14,7 @@
 
 #include "Core/Types.h"
 
+#include "Forms/BoundaryConditions.h"
 #include "Forms/Forms.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
@@ -1393,6 +1394,99 @@ TEST(NewtonSolverSanity, SolveStepConvergesForLinearReaction)
     const auto rep = newton.solveStep(transient, *linear, dt, history, ws);
     EXPECT_TRUE(rep.converged);
     EXPECT_LE(rep.iterations, 2);
+}
+
+TEST(NewtonSolverSanity, TraceInequalityBoundarySwitchesFromActiveToInactive)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+
+    constexpr int marker = 2;
+    constexpr double dt = 0.1;
+    constexpr double target_value = -0.1;
+    constexpr double penalty = 40.0;
+
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    svmp::FE::forms::FormCompiler compiler;
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+
+    const auto cell_form = ((u - svmp::FE::forms::FormExpr::constant(static_cast<Real>(target_value))) * v).dx();
+    auto cell_ir = compiler.compileResidual(cell_form);
+    auto cell_kernel =
+        std::make_shared<svmp::FE::forms::NonlinearFormKernel>(std::move(cell_ir), svmp::FE::forms::ADMode::Forward);
+    sys.addCellKernel("op", u_field, u_field, cell_kernel);
+
+    auto boundary_form = (svmp::FE::forms::FormExpr::constant(0.0) * u * v).dx();
+    svmp::FE::forms::bc::TraceInequalityOptions opts;
+    opts.trace_operator = svmp::FE::forms::bc::ScalarTraceOperator::Identity;
+    opts.sense = svmp::FE::forms::bc::TraceInequalitySense::LessEqual;
+    boundary_form = svmp::FE::forms::bc::applyTraceInequality(std::move(boundary_form),
+                                                              u,
+                                                              v,
+                                                              marker,
+                                                              svmp::FE::forms::FormExpr::constant(0.0),
+                                                              svmp::FE::forms::FormExpr::constant(
+                                                                  static_cast<Real>(penalty)),
+                                                              opts);
+    auto boundary_ir = compiler.compileResidual(boundary_form);
+    auto boundary_kernel = std::make_shared<svmp::FE::forms::NonlinearFormKernel>(
+        std::move(boundary_ir), svmp::FE::forms::ADMode::Forward);
+    sys.addBoundaryKernel("op", marker, u_field, u_field, boundary_kernel);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    auto integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    svmp::FE::systems::TransientSystem transient(sys, integrator);
+
+    auto factory = createTestFactory();
+    ASSERT_NE(factory.get(), nullptr);
+    auto linear = factory->createLinearSolver(directSolve());
+    ASSERT_NE(linear.get(), nullptr);
+
+    auto history = svmp::FE::timestepping::TimeHistory::allocate(*factory, sys.dofHandler().getNumDofs());
+    history.setDt(dt);
+    history.setPrevDt(dt);
+
+    const std::vector<Real> initial(sys.dofHandler().getNumDofs(), static_cast<Real>(0.3));
+    setVectorByDof(history.uPrev(), initial);
+    setVectorByDof(history.uPrev2(), initial);
+    history.resetCurrentToPrevious();
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 8;
+    nopt.abs_tolerance = 1e-12;
+    nopt.rel_tolerance = 0.0;
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(sys, *factory, ws);
+    ASSERT_TRUE(ws.isAllocated());
+
+    history.repack(*factory);
+
+    const auto rep = newton.solveStep(transient, *linear, dt, history, ws);
+    EXPECT_TRUE(rep.converged);
+    EXPECT_GE(rep.iterations, 2);
+    EXPECT_LT(rep.residual_norm, 1e-12);
+
+    const auto solved = getVectorByDof(history.u());
+    ASSERT_FALSE(solved.empty());
+    for (const Real value : solved) {
+        EXPECT_LT(value, static_cast<Real>(0.0));
+        EXPECT_NEAR(value, static_cast<Real>(target_value), 1e-12);
+    }
 }
 
 TEST(TimeLoopConvergence, BackwardEuler_IsFirstOrder_ForReactionEquation)

@@ -388,6 +388,74 @@ struct NitscheDirichletOptions {
 
 using TraceNitscheOptions = NitscheDirichletOptions;
 
+enum class TraceInequalitySense : std::uint8_t {
+    LessEqual,
+    GreaterEqual
+};
+
+enum class TraceInequalityLinearization : std::uint8_t {
+    SemiSmooth,
+    Smooth
+};
+
+struct TraceInequalityOptions {
+    ScalarTraceOperator trace_operator{ScalarTraceOperator::NormalComponent};
+    TraceInequalitySense sense{TraceInequalitySense::LessEqual};
+    TraceInequalityLinearization linearization{TraceInequalityLinearization::SemiSmooth};
+    FormExpr smoothing_epsilon{};
+};
+
+[[nodiscard]] inline FormExpr traceInequalityViolation(
+    const FormExpr& trace_value,
+    const FormExpr& bound,
+    const TraceInequalityOptions& opts = {})
+{
+    const auto signed_gap =
+        (opts.sense == TraceInequalitySense::LessEqual)
+            ? (trace_value - bound)
+            : (bound - trace_value);
+
+    if (opts.linearization == TraceInequalityLinearization::Smooth) {
+        if (!opts.smoothing_epsilon.isValid()) {
+            throw std::invalid_argument(
+                "forms::bc::traceInequalityViolation: smooth linearization requires a valid smoothing_epsilon");
+        }
+        return smoothMax(FormExpr::constant(0.0), signed_gap, opts.smoothing_epsilon);
+    }
+
+    return max(FormExpr::constant(0.0), signed_gap);
+}
+
+[[nodiscard]] inline FormExpr applyTraceInequality(
+    FormExpr residual,
+    const FormExpr& u,
+    const FormExpr& v,
+    int boundary_marker,
+    const FormExpr& bound,
+    const FormExpr& penalty_weight,
+    const TraceInequalityOptions& opts = {})
+{
+    if (boundary_marker < 0) {
+        throw std::invalid_argument("forms::bc::applyTraceInequality: boundary_marker must be >= 0");
+    }
+    if (!bound.isValid()) {
+        throw std::invalid_argument("forms::bc::applyTraceInequality: invalid bound expression");
+    }
+    if (!penalty_weight.isValid()) {
+        throw std::invalid_argument("forms::bc::applyTraceInequality: invalid penalty_weight expression");
+    }
+
+    const auto tau_u = applyScalarTrace(u, opts.trace_operator);
+    const auto tau_v = applyScalarTrace(v, opts.trace_operator);
+    const auto violation = traceInequalityViolation(tau_u, bound, opts);
+    const Real direction = (opts.sense == TraceInequalitySense::LessEqual) ? Real(1.0) : Real(-1.0);
+
+    residual = residual +
+               (FormExpr::constant(direction) * penalty_weight * violation * tau_v)
+                   .ds(boundary_marker);
+    return residual;
+}
+
 [[nodiscard]] inline FormExpr buildTraceNitschePenalty(const FormExpr& penalty_weight,
                                                        const FormExpr& trial_trace_source,
                                                        const TraceNitscheOptions& opts = {})

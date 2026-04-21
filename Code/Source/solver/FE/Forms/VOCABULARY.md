@@ -108,8 +108,38 @@ and trace-essential data:
 - `NormalTraceEssentialBC` for strong `H(div)` normal-trace data
 - `TraceLoadBC` for weak scalar trace loads such as `-∫ g tau(v) ds`
 - `TraceRobinBC` for weak scalar trace Robin terms such as `∫ alpha tau(u) tau(v) ds - ∫ rhs tau(v) ds`
+- `TraceInequalityBC` for one-sided scalar trace laws such as `tau(u) <= g`
+- `InterfaceTraceLoadBC` for weak interface trace loads on `.dI(marker)`
+- `InterfaceTraceRobinBC` for weak interface exchange or Robin laws
+- `InterfaceTraceJumpPenaltyBC` for interface trace jump penalization
+- `TraceNitscheBC` for weak boundary imposition of scalar trace relations
+- `InterfaceTraceNitscheBC` for weak interface imposition of scalar trace relations
 
 For `H(div)`, the scalar trace operator is typically `tau(w) = normalComponent(w)`.
+
+These are the canonical public class names for the trace-condition surface.
+Boundary conditions and interface conditions intentionally use parallel names.
+
+Use the ordinary strong or weak trace helpers when the intended law is an
+equality such as `tau(u) = g`, Robin exchange, or weak continuity. Use
+`TraceInequalityBC` only for one-sided laws where the trace may switch between
+active and inactive behavior during the nonlinear solve.
+
+### Constraint and Interface Helpers
+
+The advanced `H(div)` infrastructure also exposes the following canonical
+public helpers:
+
+| Helper | Description |
+|--------|-------------|
+| `makeHDivTracePeriodicPairs*()` | Build orientation-aware periodic trace pairings |
+| `makeHDivTracePeriodicBC*()` | Build an algebraic periodic trace constraint |
+| `makeHDivTracePeriodicMPC*()` | Build an MPC trace relation with the same orientation rules |
+| `spaces::MortarSpace` | Marker-scoped mortar or hybridized facet field space |
+| `FESystem::addInterfaceField()` | Register a true codimension-1 interface field |
+
+See `Docs/HDIV_ADVANCED_USAGE_GUIDE.md` for short usage examples covering the
+trace, periodic/MPC, mortar, mixed-dimensional, and inequality paths.
 
 ### AD-backed Jacobians
 

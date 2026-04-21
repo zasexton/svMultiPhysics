@@ -232,14 +232,18 @@ void ColoredAssembler::setDofMap(const dofs::DofMap& dof_map)
     base().setDofMap(dof_map);
 }
 
-void ColoredAssembler::setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset)
+void ColoredAssembler::setRowDofMap(const dofs::DofMap& dof_map,
+                                    GlobalIndex row_offset,
+                                    DofEntityScope row_scope)
 {
     dof_map_ = &dof_map;
     invalidateColoring();
-    base().setRowDofMap(dof_map, row_offset);
+    base().setRowDofMap(dof_map, row_offset, row_scope);
 }
 
-void ColoredAssembler::setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset)
+void ColoredAssembler::setColDofMap(const dofs::DofMap& dof_map,
+                                    GlobalIndex col_offset,
+                                    DofEntityScope col_scope)
 {
     // Coloring currently uses a single DofMap. Prefer the row map; fall back to
     // the column map if the row map was not set.
@@ -247,7 +251,7 @@ void ColoredAssembler::setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col
         dof_map_ = &dof_map;
     }
     invalidateColoring();
-    base().setColDofMap(dof_map, col_offset);
+    base().setColDofMap(dof_map, col_offset, col_scope);
 }
 
 void ColoredAssembler::setOptions(const AssemblyOptions& options)

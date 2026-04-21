@@ -8,6 +8,7 @@
 #include "Systems/FieldRegistry.h"
 
 #include "Spaces/FunctionSpace.h"
+#include "Spaces/MortarSpace.h"
 
 #include <algorithm>
 
@@ -31,6 +32,33 @@ FieldId FieldRegistry::add(FieldSpec spec)
     rec.name = std::move(spec.name);
     rec.space = std::move(spec.space);
     rec.components = spec.components > 0 ? spec.components : rec.space->value_dimension();
+    rec.scope = spec.scope;
+    rec.interface_marker = spec.interface_marker;
+
+    if (rec.space->space_type() == spaces::SpaceType::Mortar) {
+        const auto* mortar_space = dynamic_cast<const spaces::MortarSpace*>(rec.space.get());
+        FE_CHECK_NOT_NULL(mortar_space, "FieldRegistry::add: mortar field space");
+        rec.scope = FieldScope::InterfaceFace;
+        if (rec.interface_marker >= 0) {
+            FE_THROW_IF(rec.interface_marker != mortar_space->interface_marker(),
+                        InvalidArgumentException,
+                        "FieldRegistry::add: mortar field '" + rec.name +
+                            "' was given interface_marker=" + std::to_string(rec.interface_marker) +
+                            ", but MortarSpace is scoped to marker " +
+                            std::to_string(mortar_space->interface_marker()));
+        }
+        rec.interface_marker = mortar_space->interface_marker();
+    }
+
+    if (rec.scope == FieldScope::InterfaceFace) {
+        FE_THROW_IF(rec.interface_marker < 0, InvalidArgumentException,
+                    "FieldRegistry::add: interface-scoped field '" + rec.name +
+                        "' must specify interface_marker >= 0");
+    } else {
+        FE_THROW_IF(rec.interface_marker >= 0, InvalidArgumentException,
+                    "FieldRegistry::add: volume field '" + rec.name +
+                        "' cannot specify interface_marker");
+    }
 
     fields_.push_back(rec);
     name_to_id_[fields_.back().name] = fields_.back().id;

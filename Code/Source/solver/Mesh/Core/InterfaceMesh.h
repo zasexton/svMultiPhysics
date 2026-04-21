@@ -87,6 +87,9 @@ public:
   // ---- Topology access
   const std::vector<gid_t>& face_gids() const { return trace_face_gid_; }
   const std::vector<gid_t>& vertex_gids() const { return trace_vertex_gid_; }
+  index_t volume_vertex(index_t local_vertex_id) const {
+    return trace_vertex_to_volume_vertex_.at(static_cast<size_t>(local_vertex_id));
+  }
 
   // Face connectivity (CSR format)
   const std::vector<offset_t>& face2vertex_offsets() const { return trace_face2vertex_offsets_; }
