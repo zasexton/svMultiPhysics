@@ -343,6 +343,9 @@ public:
     /// Set the stepper configuration (Partitioned only).
     AuxiliaryDeployedInstance& stepper(AuxiliaryStepperSpec spec);
 
+    /// Set local failure handling for Partitioned auxiliary advancement.
+    AuxiliaryDeployedInstance& failurePolicy(AuxiliaryFailurePolicy policy);
+
     // ---- Convenience scope sugar ----
 
     /// Shorthand for `.scope(AuxiliaryStateScope::Global)`.
@@ -367,6 +370,19 @@ public:
     AuxiliaryDeployedInstance& quadraturePoint()
     {
         return scope(AuxiliaryStateScope::QuadraturePoint);
+    }
+
+    /// Shorthand for `.scope(AuxiliaryStateScope::Region)`.
+    AuxiliaryDeployedInstance& region()
+    {
+        return scope(AuxiliaryStateScope::Region);
+    }
+
+    /// Explicit alias for `.region()` when a call site also uses
+    /// `.region(AuxiliaryDeploymentRegion{...})`.
+    AuxiliaryDeployedInstance& regionScope()
+    {
+        return region();
     }
 
     /// Shorthand for `.scope(AuxiliaryStateScope::Boundary)` with a boundary
@@ -609,6 +625,10 @@ public:
     {
         return stepper_spec_;
     }
+    [[nodiscard]] const AuxiliaryFailurePolicy& getFailurePolicy() const noexcept
+    {
+        return failure_policy_;
+    }
     [[nodiscard]] bool hasExplicitStepper() const noexcept
     {
         return has_explicit_stepper_;
@@ -725,6 +745,7 @@ private:
     bool has_explicit_schedule_{false};
     AuxiliaryStepperSpec stepper_spec_{};
     bool has_explicit_stepper_{false};
+    AuxiliaryFailurePolicy failure_policy_{};
     std::unordered_map<std::string, std::string> input_bindings_{};
     /// FE-backed handle bindings keyed by model input name.
     std::unordered_map<std::string, AuxiliaryInputHandle> coupled_bindings_{};

@@ -143,6 +143,25 @@ TEST(AuxiliaryBlockIndexing, QuadraturePointScope_UniformQPs)
 }
 
 // ---------------------------------------------------------------------------
+//  Region scope
+// ---------------------------------------------------------------------------
+
+TEST(AuxiliaryBlockIndexing, RegionScope)
+{
+    auto idx = AuxiliaryBlockIndexing::createRegion(
+        /*n_regions=*/4, /*stride=*/3);
+
+    EXPECT_EQ(idx.scope(), AuxiliaryStateScope::Region);
+    EXPECT_EQ(idx.totalEntityCount(), 4u);
+    EXPECT_EQ(idx.ownedEntityCount(), 4u);
+    EXPECT_EQ(idx.ghostEntityCount(), 0u);
+    EXPECT_EQ(idx.componentStride(), 3);
+    EXPECT_EQ(idx.totalStorageSize(), 12u);
+    EXPECT_EQ(idx.ownedStorageSize(), 12u);
+    EXPECT_EQ(idx.flatIndex(2, 1), 7u);
+}
+
+// ---------------------------------------------------------------------------
 //  Facet scope
 // ---------------------------------------------------------------------------
 
@@ -170,6 +189,8 @@ TEST(AuxiliaryBlockIndexing, ZeroStrideThrows)
     EXPECT_THROW(AuxiliaryBlockIndexing::createNode(10, 0, 0),
                  svmp::FE::InvalidArgumentException);
     EXPECT_THROW(AuxiliaryBlockIndexing::createCell(10, -1),
+                 svmp::FE::InvalidArgumentException);
+    EXPECT_THROW(AuxiliaryBlockIndexing::createRegion(2, 0),
                  svmp::FE::InvalidArgumentException);
 }
 

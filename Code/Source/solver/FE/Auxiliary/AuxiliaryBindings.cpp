@@ -70,6 +70,13 @@ AuxiliaryDeployedInstance& AuxiliaryDeployedInstance::stepper(AuxiliaryStepperSp
     return *this;
 }
 
+AuxiliaryDeployedInstance& AuxiliaryDeployedInstance::failurePolicy(
+    AuxiliaryFailurePolicy policy)
+{
+    failure_policy_ = policy;
+    return *this;
+}
+
 AuxiliaryDeployedInstance& AuxiliaryDeployedInstance::bind(
     const std::string& model_input, const std::string& registry_input)
 {

@@ -17,6 +17,7 @@
  * | `Node`            | Mesh vertices (owned + ghost)       | `numVertices`               |
  * | `Cell`            | Mesh cells (owned)                  | `numCells`                  |
  * | `QuadraturePoint` | QPs per cell × cells                | `sum(n_qp_per_cell)`        |
+ * | `Region`          | Topology regions / components       | topology context            |
  * | `Boundary`        | One per named boundary collection   | 1                           |
  * | `Facet`           | Faces/edges on a named boundary     | boundary entity count       |
  *
@@ -31,6 +32,7 @@
  * - `Node` scope: owned nodes first, ghost nodes appended.
  * - `Cell` scope: owned cells only (ghosts are typically not needed).
  * - `QuadraturePoint` scope: inherits cell ownership.
+ * - `Region` scope: owned topology-region entities only.
  * - `Boundary` scope: single instance on a named boundary, no distribution.
  * - `Facet` scope: stable entity ordering on boundary subsets.
  */
@@ -100,6 +102,16 @@ public:
      */
     static AuxiliaryBlockIndexing createQuadraturePoint(
         std::span<const std::size_t> qp_offsets,
+        int component_stride);
+
+    /**
+     * @brief Create indexing for Region scope.
+     *
+     * @param n_regions Number of topology regions owned/materialized locally.
+     * @param component_stride Components per region.
+     */
+    static AuxiliaryBlockIndexing createRegion(
+        std::size_t n_regions,
         int component_stride);
 
     /**

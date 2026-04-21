@@ -55,8 +55,10 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <cstdint>
 #include <algorithm>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <sstream>
@@ -113,6 +115,89 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
 [[nodiscard]] bool skipPostSolveHaloSync() noexcept
 {
   return envFlagEnabled("SVMP_FSILS_SKIP_POST_SOLVE_COMM");
+}
+
+[[nodiscard]] const char* fsilsNsDumpPrefix() noexcept
+{
+  const char* env = std::getenv("SVMP_FSILS_NS_DUMP_PREFIX");
+  if (env == nullptr) {
+    return nullptr;
+  }
+  while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+    ++env;
+  }
+  return (*env == '\0') ? nullptr : env;
+}
+
+[[nodiscard]] int fsilsNsDumpMaxSolves() noexcept
+{
+  const char* env = std::getenv("SVMP_FSILS_NS_DUMP_MAX_SOLVES");
+  if (env == nullptr || *env == '\0') {
+    return 1;
+  }
+  char* end = nullptr;
+  const long value = std::strtol(env, &end, 10);
+  return (end == env) ? 1 : static_cast<int>(value);
+}
+
+void dumpScalarVectorByGlobalNode(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                  const char* prefix,
+                                  std::uint64_t solve_id,
+                                  int outer_iter,
+                                  const char* label,
+                                  const Vector<double>& values)
+{
+  if (prefix == nullptr || *prefix == '\0') {
+    return;
+  }
+
+  std::ostringstream path;
+  path << prefix << ".solve" << solve_id
+       << ".iter" << outer_iter
+       << "." << label
+       << ".rank" << lhs.commu.task << ".txt";
+  std::ofstream out(path.str());
+  if (!out) {
+    return;
+  }
+
+  out << std::setprecision(17) << std::scientific;
+  out << "# task " << lhs.commu.task
+      << " nTasks " << lhs.commu.nTasks
+      << " solve " << solve_id
+      << " iter " << outer_iter
+      << " label " << label
+      << " mynNo " << lhs.mynNo
+      << " nNo " << lhs.nNo << '\n';
+  const bool has_debug_global_nodes = lhs.debug_global_nodes.size() == lhs.nNo;
+  out << "# global_node value old_node internal_node";
+  if (has_debug_global_nodes) {
+    out << " backend_node";
+  }
+  out << '\n';
+
+  for (fsils_int old_node = 0; old_node < lhs.nNo; ++old_node) {
+    if (old_node < 0 || old_node >= lhs.gNodes.size()) {
+      continue;
+    }
+    const int internal_node = lhs.map(old_node);
+    if (internal_node < 0 || internal_node >= lhs.mynNo || internal_node >= values.size()) {
+      continue;
+    }
+    const int global_node =
+        has_debug_global_nodes ? lhs.debug_global_nodes(old_node) : lhs.gNodes(old_node);
+    if (global_node < 0) {
+      continue;
+    }
+    out << global_node << ' '
+        << values(internal_node) << ' '
+        << old_node << ' '
+        << internal_node;
+    if (has_debug_global_nodes) {
+      out << ' ' << lhs.gNodes(old_node);
+    }
+    out << '\n';
+  }
 }
 
 bool loadOracleScalarMode(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
@@ -1714,6 +1799,21 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   Array<double> Rm(nsd,nNo), Rmi(nsd,nNo), A(nB,nB), P(nNo,iB), MP(nNo,nB);
   Array3<double> U(nsd,nNo,iB), MU(nsd,nNo,nB);
 
+  static std::uint64_t ns_dump_solve_counter = 0;
+  const char* ns_dump_prefix = fsilsNsDumpPrefix();
+  const std::uint64_t ns_dump_solve_id =
+      (ns_dump_prefix == nullptr) ? 0 : ns_dump_solve_counter++;
+  const int ns_dump_max_solves = fsilsNsDumpMaxSolves();
+  const bool ns_dump_enabled =
+      ns_dump_prefix != nullptr &&
+      (ns_dump_max_solves < 0 ||
+       ns_dump_solve_id < static_cast<std::uint64_t>(ns_dump_max_solves));
+  auto dump_scalar_stage = [&](const char* label, int iter, const Vector<double>& values) {
+    if (ns_dump_enabled) {
+      dumpScalarVectorByGlobalNode(lhs, ns_dump_prefix, ns_dump_solve_id, iter, label, values);
+    }
+  };
+
   #pragma omp parallel for schedule(static)
   for (fsils_int j = 0; j < nNo; j++) {
     for (int i = 0; i < nsd; i++) {
@@ -1724,6 +1824,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
 
   Rm = Rmi;
   Rc = Rci;
+  dump_scalar_stage("initial_Rci", -1, Rci);
 
   double eps = std::sqrt(std::max(
       0.0,
@@ -2032,6 +2133,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
       P_col(n) = Rc(n) - P_col(n);
     }
     halo.sync_owned_to_ghost_scalar(P_col, skipPostSolveHaloSync());
+    dump_scalar_stage("schur_rhs_before_schur", i, P_col);
     Vector<double> iter0_schur_rhs;
     if (i == 0 && fsilsTraceEnabled()) {
       iter0_schur_rhs = P_col;
@@ -2045,6 +2147,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     // VMS FIX: Solved using asymmetric BiCGStab instead of symmetric CGRAD
     bicgs::schur(schur_system, ls.CG, ls.GM, P_col);
     halo.sync_owned_to_ghost_scalar(P_col, skipPostSolveHaloSync());
+    dump_scalar_stage("schur_solution_after_schur", i, P_col);
     if (i == 0 && fsilsTraceEnabled()) {
       trace_scalar_block_vector_stats(
           lhs.commu.masF,
@@ -2067,11 +2170,13 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     schur_system.L.apply(
         dso::ghost_synced_input(P.rcol(i)),
         dso::owned_only_output(MP_iB));
+    dump_scalar_stage("MP_iB_before_constraint_corrections", i, MP_iB);
     copy_scalar_vector_to_array(P_col, P_block);
     Array<double> MP_iB_block;
     copy_scalar_vector_to_array(MP_iB, MP_iB_block);
     apply_constraint_block_corrections(lhs, explicit_low_rank_correction, P_block, MU_iB, MP_iB_block);
     copy_scalar_array_to_vector(MP_iB_block, MP_iB);
+    dump_scalar_stage("MP_iB_after_constraint_corrections", i, MP_iB);
     halo.sync_owned_to_ghost_vector(nsd, MU_iB, skipPostSolveHaloSync());
     halo.sync_owned_to_ghost_scalar(MP_iB, skipPostSolveHaloSync());
     if (i == 0 && fsilsTraceEnabled()) {
@@ -2118,10 +2223,12 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     schur_system.D.apply(
         dso::ghost_synced_input(nsd, U_slice),
         dso::owned_only_output(MP_iBB));
+    dump_scalar_stage("MP_iBB_before_momentum_corrections", i, MP_iBB);
     Array<double> MP_iBB_block;
     copy_scalar_vector_to_array(MP_iBB, MP_iBB_block);
     apply_momentum_block_corrections(lhs, explicit_low_rank_correction, U_slice, MP_iBB_block);
     copy_scalar_array_to_vector(MP_iBB_block, MP_iBB);
+    dump_scalar_stage("MP_iBB_after_momentum_corrections", i, MP_iBB);
     halo.sync_owned_to_ghost_vector(nsd, MU_iBB, skipPostSolveHaloSync());
     halo.sync_owned_to_ghost_scalar(MP_iBB, skipPostSolveHaloSync());
     if (i == 0 && fsilsTraceEnabled()) {
@@ -2291,6 +2398,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
       }
     }
   }
+  dump_scalar_stage("final_Rci_reconstructed", -1, Rci);
 
   // Set Calling duration.
   ls.RI.callD = fe_fsi_linear_solver::fsils_cpu_t() - ls.RI.callD;

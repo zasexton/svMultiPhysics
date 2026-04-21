@@ -19,19 +19,21 @@ TEST(AuxiliaryStateTypes, ScopeEnumValues)
     EXPECT_NE(AuxiliaryStateScope::Global, AuxiliaryStateScope::Node);
     EXPECT_NE(AuxiliaryStateScope::Node, AuxiliaryStateScope::Cell);
     EXPECT_NE(AuxiliaryStateScope::Cell, AuxiliaryStateScope::QuadraturePoint);
-    EXPECT_NE(AuxiliaryStateScope::QuadraturePoint, AuxiliaryStateScope::Facet);
+    EXPECT_NE(AuxiliaryStateScope::QuadraturePoint, AuxiliaryStateScope::Region);
+    EXPECT_NE(AuxiliaryStateScope::Region, AuxiliaryStateScope::Facet);
     EXPECT_NE(AuxiliaryStateScope::Facet, AuxiliaryStateScope::Boundary);
 
-    // Verify all six values are distinct
+    // Verify all seven values are distinct
     const auto scopes = {
         AuxiliaryStateScope::Global,
         AuxiliaryStateScope::Boundary,
         AuxiliaryStateScope::Node,
         AuxiliaryStateScope::Cell,
         AuxiliaryStateScope::QuadraturePoint,
+        AuxiliaryStateScope::Region,
         AuxiliaryStateScope::Facet
     };
-    EXPECT_EQ(scopes.size(), 6u);
+    EXPECT_EQ(scopes.size(), 7u);
 }
 
 TEST(AuxiliaryStateTypes, VariableKindEnumValues)
@@ -197,6 +199,10 @@ TEST(AuxiliaryStateTypes, SpecConvenienceFactoriesSetCommonDefaults)
     const auto qp = AuxiliaryStateSpec::quadratureField("chemistry", 3);
     EXPECT_EQ(qp.scope, AuxiliaryStateScope::QuadraturePoint);
     EXPECT_EQ(qp.sync_policy, AuxiliarySyncPolicy::OwnedOnly);
+
+    const auto region = AuxiliaryStateSpec::regionField("region_average", 2);
+    EXPECT_EQ(region.scope, AuxiliaryStateScope::Region);
+    EXPECT_EQ(region.sync_policy, AuxiliarySyncPolicy::OwnedOnly);
 
     const auto facet = AuxiliaryStateSpec::facetField("traction", 2);
     EXPECT_EQ(facet.scope, AuxiliaryStateScope::Facet);

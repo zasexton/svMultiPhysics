@@ -285,6 +285,8 @@ static void gatherFieldIds(const forms::FormExprNode& node, std::vector<FieldId>
             return "cell";
         case AuxiliaryStateScope::QuadraturePoint:
             return "qp";
+        case AuxiliaryStateScope::Region:
+            return "region";
         case AuxiliaryStateScope::Boundary:
             return "b";
         case AuxiliaryStateScope::Facet:
@@ -3162,6 +3164,7 @@ void FESystem::deployAuxiliaryModel(AuxiliaryDeployedInstance instance)
     entry.spec.layout_mode = instance.getLayoutMode();
     entry.spec.ordering = instance.getEntityOrdering();
     entry.spec.deployment_region = instance.getRegion();
+    entry.spec.failure_policy = instance.getFailurePolicy();
     // Copy derivative policy: prefer explicit instance policy, then built-model policy.
     if (instance.hasExplicitDerivativePolicy()) {
         entry.spec.derivative_policy = instance.getDerivativePolicy();
@@ -4079,13 +4082,39 @@ void FESystem::advanceAuxiliaryState(Real time, Real dt)
                     hs.push_back(hd.back());
                 }
 
-                ep->stepper->advanceFromWork(
-                    *ep->model, *ep->deriv_provider,
-                    ew, x_prev,
-                    hs, bound_inputs, params,
-                    ss.t_start, ss.dt_sub, e);
-
-                std::copy(ew.begin(), ew.end(), x_prev.begin());
+                const auto ew_start = ew;
+                const auto x_prev_start = x_prev;
+                AuxiliaryStepResult step_result{};
+                bool converged = false;
+                const int max_attempts =
+                    std::max(0, ep->spec.failure_policy.max_local_retries) + 1;
+                for (int attempt = 0; attempt < max_attempts; ++attempt) {
+                    ew = ew_start;
+                    x_prev = x_prev_start;
+                    step_result = ep->stepper->advanceFromWork(
+                        *ep->model, *ep->deriv_provider,
+                        ew, x_prev,
+                        hs, bound_inputs, params,
+                        ss.t_start, ss.dt_sub, e);
+                    if (step_result.converged) {
+                        converged = true;
+                        break;
+                    }
+                }
+                if (!converged) {
+                    if (ep->spec.failure_policy.reject_timestep_on_failure) {
+                        FE_THROW(InvalidStateException,
+                                 "FESystem::advanceAuxiliaryState: partitioned auxiliary block '" +
+                                 ep->instance_name + "' failed to converge for entity " +
+                                 std::to_string(e) + " after " +
+                                 std::to_string(max_attempts) + " attempt(s); final residual norm=" +
+                                 std::to_string(step_result.final_residual_norm));
+                    }
+                    ew = ew_start;
+                    x_prev = x_prev_start;
+                } else {
+                    std::copy(ew.begin(), ew.end(), x_prev.begin());
+                }
                 blk.scatterEntityWork(e, ew);
             }
         }
@@ -4160,9 +4189,31 @@ void FESystem::advanceOneEntry(DeployedAuxEntry& entry, Real time, Real dt, int 
             hs.push_back(hd.back());
         }
 
-        entry.stepper->advance(*entry.model, *entry.deriv_provider,
-                                ew, ec, hs, bound_inputs, params,
-                                time, dt, substep_count, e);
+        AuxiliaryStepResult step_result{};
+        bool converged = false;
+        const int max_attempts =
+            std::max(0, entry.spec.failure_policy.max_local_retries) + 1;
+        for (int attempt = 0; attempt < max_attempts; ++attempt) {
+            std::copy(ec.begin(), ec.end(), ew.begin());
+            step_result = entry.stepper->advance(*entry.model, *entry.deriv_provider,
+                                                  ew, ec, hs, bound_inputs, params,
+                                                  time, dt, substep_count, e);
+            if (step_result.converged) {
+                converged = true;
+                break;
+            }
+        }
+        if (!converged) {
+            if (entry.spec.failure_policy.reject_timestep_on_failure) {
+                FE_THROW(InvalidStateException,
+                         "FESystem::advanceAuxiliaryState: partitioned auxiliary block '" +
+                         entry.instance_name + "' failed to converge for entity " +
+                         std::to_string(e) + " after " +
+                         std::to_string(max_attempts) + " attempt(s); final residual norm=" +
+                         std::to_string(step_result.final_residual_norm));
+            }
+            std::copy(ec.begin(), ec.end(), ew.begin());
+        }
         blk.scatterEntityWork(e, ew);
     }
 }
@@ -4596,6 +4647,8 @@ namespace {
             return assembly::AuxiliaryOutputScope::Cell;
         case AuxiliaryStateScope::QuadraturePoint:
             return assembly::AuxiliaryOutputScope::QuadraturePoint;
+        case AuxiliaryStateScope::Region:
+            return assembly::AuxiliaryOutputScope::Region;
         case AuxiliaryStateScope::Facet:
             return assembly::AuxiliaryOutputScope::Facet;
         case AuxiliaryStateScope::Node:
@@ -7146,6 +7199,17 @@ void FESystem::finalizeAuxiliaryLayout()
                         owned_entity_count = 0;
                     }
                     break;
+                case AuxiliaryStateScope::Region:
+                    if (topology_context_) {
+                        entity_count = static_cast<std::size_t>(std::max(0, topology_context_->numRegions()));
+                    } else if (mesh_access_) {
+                        auto topo = analysis::TopologyAnalysisContext::build(*mesh_access_);
+                        entity_count = static_cast<std::size_t>(std::max(0, topo.numRegions()));
+                    } else {
+                        entity_count = 1;
+                    }
+                    owned_entity_count = entity_count;
+                    break;
             }
         } else if (entry.spec.scope == AuxiliaryStateScope::Node && mesh_access_) {
             const auto mesh_entity_count =
@@ -7165,74 +7229,182 @@ void FESystem::finalizeAuxiliaryLayout()
         }
 
         // Region-to-entity expansion.
-        // If the deployment region restricts to a subset, build an entity map
-        // and adjust entity_count to the restricted set size.
-        // Boundary scope is exempt: its region is metadata (which boundary),
-        // not a per-entity expansion — entity_count stays 1.
+        // If the deployment region restricts to a subset, build a map in the
+        // entity space implied by the auxiliary scope. Boundary and Global
+        // scopes treat the deployment region as metadata; their entity count
+        // remains one.
         const auto& region = entry.spec.deployment_region;
-        if (region.isRestricted() && entry.spec.scope != AuxiliaryStateScope::Boundary) {
+        if (region.isRestricted() &&
+            entry.spec.scope != AuxiliaryStateScope::Boundary &&
+            entry.spec.scope != AuxiliaryStateScope::Global) {
             if (!region.explicit_entities.empty()) {
                 // Explicit entity set: use directly.
                 entry.entity_map = region.explicit_entities;
             } else if (mesh_access_) {
-                // Marker-based region: expand against mesh topology.
+                auto parse_region_identity = [&](std::string_view label) {
+                    try {
+                        return std::stoi(region.identity);
+                    } catch (...) {
+                        FE_THROW(InvalidArgumentException,
+                                 "FESystem::finalizeAuxiliaryLayout: " +
+                                     std::string(label) +
+                                     " identity must be an integer, got '" +
+                                     region.identity + "'");
+                    }
+                    return 0;
+                };
+
+                auto sort_unique = [](std::vector<std::size_t>& values) {
+                    std::sort(values.begin(), values.end());
+                    values.erase(std::unique(values.begin(), values.end()), values.end());
+                };
+
+                auto cells_to_nodes = [&](std::span<const std::size_t> cells) {
+                    std::vector<std::size_t> nodes_out;
+                    std::vector<GlobalIndex> cell_nodes;
+                    for (const auto cell : cells) {
+                        cell_nodes.clear();
+                        mesh_access_->getCellNodes(static_cast<GlobalIndex>(cell), cell_nodes);
+                        for (const auto node : cell_nodes) {
+                            if (node >= 0) {
+                                nodes_out.push_back(static_cast<std::size_t>(node));
+                            }
+                        }
+                    }
+                    sort_unique(nodes_out);
+                    return nodes_out;
+                };
+
+                auto cells_to_regions = [&](std::span<const std::size_t> cells) {
+                    std::vector<std::size_t> regions_out;
+                    std::optional<analysis::TopologyAnalysisContext> local_topology;
+                    const auto* topo = topology_context_ ? &*topology_context_ : nullptr;
+                    if (topo == nullptr) {
+                        local_topology = analysis::TopologyAnalysisContext::build(*mesh_access_);
+                        topo = &*local_topology;
+                    }
+                    for (const auto cell : cells) {
+                        const int region_id = topo->regionForCell(static_cast<GlobalIndex>(cell));
+                        if (region_id >= 0) {
+                            regions_out.push_back(static_cast<std::size_t>(region_id));
+                        }
+                    }
+                    sort_unique(regions_out);
+                    return regions_out;
+                };
+
+                auto assign_from_cells = [&](std::vector<std::size_t> cells) {
+                    sort_unique(cells);
+                    switch (entry.spec.scope) {
+                        case AuxiliaryStateScope::Cell:
+                        case AuxiliaryStateScope::QuadraturePoint:
+                            entry.entity_map = std::move(cells);
+                            break;
+                        case AuxiliaryStateScope::Node:
+                            entry.entity_map = cells_to_nodes(cells);
+                            break;
+                        case AuxiliaryStateScope::Region:
+                            entry.entity_map = cells_to_regions(cells);
+                            break;
+                        case AuxiliaryStateScope::Facet:
+                            FE_THROW(InvalidArgumentException,
+                                     "FESystem::finalizeAuxiliaryLayout: CellSet/MaterialIdSet "
+                                     "deployment cannot be expanded to Facet scope for auxiliary "
+                                     "instance '" + entry.instance_name + "'");
+                            break;
+                        case AuxiliaryStateScope::Global:
+                        case AuxiliaryStateScope::Boundary:
+                            break;
+                    }
+                };
+
+                auto assign_from_boundary_faces =
+                    [&](std::vector<std::size_t> faces, std::vector<std::size_t> cells) {
+                        sort_unique(faces);
+                        sort_unique(cells);
+                        switch (entry.spec.scope) {
+                            case AuxiliaryStateScope::Facet:
+                                entry.entity_map = std::move(faces);
+                                break;
+                            case AuxiliaryStateScope::Cell:
+                            case AuxiliaryStateScope::QuadraturePoint:
+                                entry.entity_map = std::move(cells);
+                                break;
+                            case AuxiliaryStateScope::Node:
+                                entry.entity_map = cells_to_nodes(cells);
+                                break;
+                            case AuxiliaryStateScope::Region:
+                                entry.entity_map = cells_to_regions(cells);
+                                break;
+                            case AuxiliaryStateScope::Global:
+                            case AuxiliaryStateScope::Boundary:
+                                break;
+                        }
+                    };
+
+                // Marker-based region: expand against mesh topology and then
+                // project to the target auxiliary scope.
                 switch (region.kind) {
                     case AuxiliaryRegionKind::CellSet:
                     case AuxiliaryRegionKind::MaterialIdSet: {
-                        // Parse identity as integer domain/material ID.
-                        int target_id = 0;
-                        try { target_id = std::stoi(region.identity); }
-                        catch (...) {
-                            FE_THROW(InvalidArgumentException,
-                                     "FESystem::finalizeAuxiliaryLayout: CellSet/"
-                                     "MaterialIdSet identity must be an integer, got '"
-                                     + region.identity + "'");
-                        }
+                        const int target_id = parse_region_identity("CellSet/MaterialIdSet");
+                        std::vector<std::size_t> cells;
                         mesh_access_->forEachOwnedCell([&](GlobalIndex cell_id) {
                             if (mesh_access_->getCellDomainId(cell_id) == target_id) {
-                                entry.entity_map.push_back(
-                                    static_cast<std::size_t>(cell_id));
+                                cells.push_back(static_cast<std::size_t>(cell_id));
                             }
                         });
+                        assign_from_cells(std::move(cells));
                         break;
                     }
                     case AuxiliaryRegionKind::BoundarySet: {
-                        int marker = 0;
-                        try { marker = std::stoi(region.identity); }
-                        catch (...) {
-                            FE_THROW(InvalidArgumentException,
-                                     "FESystem::finalizeAuxiliaryLayout: BoundarySet "
-                                     "identity must be an integer marker, got '"
-                                     + region.identity + "'");
-                        }
+                        const int marker = parse_region_identity("BoundarySet");
+                        std::vector<std::size_t> faces;
+                        std::vector<std::size_t> cells;
                         mesh_access_->forEachBoundaryFace(marker,
-                            [&](GlobalIndex face_id, GlobalIndex /*cell_id*/) {
-                                entry.entity_map.push_back(
-                                    static_cast<std::size_t>(face_id));
+                            [&](GlobalIndex face_id, GlobalIndex cell_id) {
+                                if (face_id >= 0) {
+                                    faces.push_back(static_cast<std::size_t>(face_id));
+                                }
+                                if (cell_id >= 0) {
+                                    cells.push_back(static_cast<std::size_t>(cell_id));
+                                }
                             });
+                        assign_from_boundary_faces(std::move(faces), std::move(cells));
                         break;
                     }
                     case AuxiliaryRegionKind::InterfaceSet: {
-                        int marker = 0;
-                        try { marker = std::stoi(region.identity); }
-                        catch (...) {
-                            FE_THROW(InvalidArgumentException,
-                                     "FESystem::finalizeAuxiliaryLayout: InterfaceSet "
-                                     "identity must be an integer marker, got '"
-                                     + region.identity + "'");
-                        }
+                        const int marker = parse_region_identity("InterfaceSet");
                         // Collect ALL interior faces.  IMeshAccess does not
                         // expose per-face interface markers, so we cannot
                         // filter by the requested marker.  The identity is
                         // stored for restart/remap metadata only.
                         (void)marker;
+                        std::vector<std::size_t> faces;
+                        std::vector<std::size_t> cells;
                         mesh_access_->forEachInteriorFace(
-                            [&](GlobalIndex face_id, GlobalIndex /*c0*/, GlobalIndex /*c1*/) {
-                                entry.entity_map.push_back(
-                                    static_cast<std::size_t>(face_id));
+                            [&](GlobalIndex face_id, GlobalIndex c0, GlobalIndex c1) {
+                                if (face_id >= 0) {
+                                    faces.push_back(static_cast<std::size_t>(face_id));
+                                }
+                                if (c0 >= 0) {
+                                    cells.push_back(static_cast<std::size_t>(c0));
+                                }
+                                if (c1 >= 0) {
+                                    cells.push_back(static_cast<std::size_t>(c1));
+                                }
                             });
+                        assign_from_boundary_faces(std::move(faces), std::move(cells));
                         break;
                     }
+                    case AuxiliaryRegionKind::WholeDomain:
+                        break;
+                    case AuxiliaryRegionKind::FormulationDefined:
+                        FE_THROW(InvalidArgumentException,
+                                 "FESystem::finalizeAuxiliaryLayout: FormulationDefined "
+                                 "deployment region for auxiliary instance '" +
+                                 entry.instance_name + "' requires explicit_entities");
+                        break;
                     default:
                         break;
                 }
@@ -7257,6 +7429,13 @@ void FESystem::finalizeAuxiliaryLayout()
                     owned_entity_count = entity_count;
                 }
             }
+        } else if (region.isRestricted() &&
+                   entry.spec.scope == AuxiliaryStateScope::Global &&
+                   !region.explicit_entities.empty()) {
+            FE_THROW(InvalidArgumentException,
+                     "FESystem::finalizeAuxiliaryLayout: Global scope auxiliary instance '" +
+                     entry.instance_name +
+                     "' treats deployment_region as metadata and does not support explicit_entities");
         }
 
         if (entry.spec.scope == AuxiliaryStateScope::QuadraturePoint) {
@@ -7356,6 +7535,7 @@ void FESystem::finalizeAuxiliaryLayout()
                         case AuxiliaryStateScope::Boundary: scope_name = "Boundary"; break;
                         case AuxiliaryStateScope::Cell: scope_name = "Cell"; break;
                         case AuxiliaryStateScope::QuadraturePoint: scope_name = "QuadraturePoint"; break;
+                        case AuxiliaryStateScope::Region: scope_name = "Region"; break;
                         case AuxiliaryStateScope::Facet: scope_name = "Facet"; break;
                         case AuxiliaryStateScope::Node: break; // unreachable
                     }

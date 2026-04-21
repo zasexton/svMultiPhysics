@@ -409,6 +409,10 @@ class FSILS_lhsType
     /// Global node id for each old/local node index (old ordering).
     Vector<int> gNodes;
 
+    /// Stable FE global node id for each old/local node index. This is used
+    /// only by diagnostics when the FSILS backend node id is partition-local.
+    Vector<int> debug_global_nodes;
+
     FSILS_commuType commu;
 
     std::vector<FSILS_faceType> face;

@@ -36,10 +36,14 @@
 #include "fsils_api.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <math.h>
 #include <limits>
+#include <sstream>
 #include <vector>
 
 namespace precond {
@@ -59,6 +63,29 @@ namespace {
     return env != nullptr && *env != '\0' && *env != '0';
   }();
   return enabled;
+}
+
+[[nodiscard]] const char* precond_reduced_dump_prefix() noexcept
+{
+  const char* env = std::getenv("SVMP_FSILS_PRECOND_REDUCED_DUMP_PREFIX");
+  if (env == nullptr) {
+    return nullptr;
+  }
+  while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+    ++env;
+  }
+  return (*env == '\0') ? nullptr : env;
+}
+
+[[nodiscard]] int precond_reduced_dump_max_calls() noexcept
+{
+  const char* env = std::getenv("SVMP_FSILS_PRECOND_REDUCED_DUMP_MAX_CALLS");
+  if (env == nullptr || *env == '\0') {
+    return 4;
+  }
+  char* end = nullptr;
+  const long value = std::strtol(env, &end, 10);
+  return (end == env) ? 4 : static_cast<int>(value);
 }
 
 [[nodiscard]] int internal_to_old_node(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
@@ -144,6 +171,141 @@ void trace_precond_w_stage(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
     }
   }
   std::cout << std::endl;
+}
+
+void dump_precond_reduced_state(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                const Array<double>& W,
+                                const int dof)
+{
+  if (lhs.reduced_updates.empty()) {
+    return;
+  }
+
+  const char* prefix = precond_reduced_dump_prefix();
+  if (prefix == nullptr) {
+    return;
+  }
+
+  static std::uint64_t call_id = 0;
+  const std::uint64_t this_call = call_id++;
+  const int max_calls = precond_reduced_dump_max_calls();
+  if (max_calls >= 0 && this_call >= static_cast<std::uint64_t>(max_calls)) {
+    return;
+  }
+
+  std::ostringstream path;
+  path << prefix << ".call" << this_call << ".rank" << lhs.commu.task << ".txt";
+  std::ofstream out(path.str());
+  if (!out) {
+    return;
+  }
+
+  out << std::setprecision(17) << std::scientific;
+  out << "# task " << lhs.commu.task
+      << " nTasks " << lhs.commu.nTasks
+      << " call " << this_call
+      << " dof " << dof
+      << " system_dof " << lhs.system_dof
+      << " mynNo " << lhs.mynNo
+      << " nNo " << lhs.nNo
+      << " reduced_update_count " << lhs.reduced_updates.size() << '\n';
+  out << "# kind update side scope scaled owned node old_node backend_node full_comp local_comp value w\n";
+
+  const int system_dof = (lhs.system_dof > 0) ? lhs.system_dof : dof;
+  auto write_entries =
+      [&](std::size_t update_index,
+          const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update,
+          const char* side,
+          const char* scope,
+          bool scaled,
+          const std::vector<fe_fsi_linear_solver::FSILS_reducedSparseEntry>& entries) {
+    for (const auto& entry : entries) {
+      const int node = static_cast<int>(entry.node);
+      const int old_node = internal_to_old_node(lhs, node);
+      const int backend_node =
+          (old_node >= 0 && old_node < lhs.gNodes.size()) ? lhs.gNodes(old_node) : -1;
+      const int local_comp =
+          fe_fsi_linear_solver::fsils_reduced_local_component(update,
+                                                              entry.full_component,
+                                                              dof,
+                                                              system_dof);
+      const double w =
+          (local_comp >= 0 && local_comp < W.nrows() && node >= 0 && node < W.ncols())
+              ? W(local_comp, node)
+              : std::numeric_limits<double>::quiet_NaN();
+      out << "entry " << update_index << ' '
+          << side << ' '
+          << scope << ' '
+          << (scaled ? 1 : 0) << ' '
+          << ((node >= 0 && node < lhs.mynNo) ? 1 : 0) << ' '
+          << node << ' '
+          << old_node << ' '
+          << backend_node << ' '
+          << entry.full_component << ' '
+          << local_comp << ' '
+          << entry.value << ' '
+          << w << '\n';
+    }
+  };
+
+  auto write_face =
+      [&](std::size_t update_index,
+          const char* side,
+          const fe_fsi_linear_solver::FSILS_faceType& face) {
+    const int face_dof = std::min(face.dof, dof);
+    for (int a = 0; a < face.nNo; ++a) {
+      const int node = face.glob(a);
+      const int old_node = internal_to_old_node(lhs, node);
+      const int backend_node =
+          (old_node >= 0 && old_node < lhs.gNodes.size()) ? lhs.gNodes(old_node) : -1;
+      for (int comp = 0; comp < face_dof; ++comp) {
+        out << "face " << update_index << ' '
+            << side << ' '
+            << "val" << ' '
+            << 0 << ' '
+            << ((node >= 0 && node < lhs.mynNo) ? 1 : 0) << ' '
+            << node << ' '
+            << old_node << ' '
+            << backend_node << ' '
+            << comp << ' '
+            << comp << ' '
+            << face.val(comp, a) << ' '
+            << std::numeric_limits<double>::quiet_NaN() << '\n';
+        const double w =
+            (comp >= 0 && comp < W.nrows() && node >= 0 && node < W.ncols())
+                ? W(comp, node)
+                : std::numeric_limits<double>::quiet_NaN();
+        out << "face " << update_index << ' '
+            << side << ' '
+            << "valM" << ' '
+            << 1 << ' '
+            << ((node >= 0 && node < lhs.mynNo) ? 1 : 0) << ' '
+            << node << ' '
+            << old_node << ' '
+            << backend_node << ' '
+            << comp << ' '
+            << comp << ' '
+            << face.valM(comp, a) << ' '
+            << w << '\n';
+      }
+    }
+  };
+
+  for (std::size_t update_index = 0; update_index < lhs.reduced_updates.size(); ++update_index) {
+    const auto& update = lhs.reduced_updates[update_index];
+    write_entries(update_index, update, "left", "full", false, update.left);
+    write_entries(update_index, update, "left", "owned", false, update.left_owned);
+    write_entries(update_index, update, "left", "full", true, update.left_scaled);
+    write_entries(update_index, update, "left", "owned", true, update.left_scaled_owned);
+    write_entries(update_index, update, "right", "full", false, update.right);
+    write_entries(update_index, update, "right", "owned", false, update.right_owned);
+    write_entries(update_index, update, "right", "full", true, update.right_scaled);
+    write_entries(update_index, update, "right", "owned", true, update.right_scaled_owned);
+    if (update.has_face_cache) {
+      write_face(update_index, "left_face", update.left_face);
+      write_face(update_index, "right_face", update.right_face);
+    }
+  }
 }
 
 } // namespace
@@ -472,6 +634,8 @@ void precond_diag(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_in
       scale_face(update.right_face);
     }
   }
+
+  dump_precond_reduced_state(lhs, W, dof);
 
   for (auto& group : lhs.grouped_bordered_field_couplings) {
     for (std::size_t mode_idx = 0; mode_idx < group.modes.size(); ++mode_idx) {

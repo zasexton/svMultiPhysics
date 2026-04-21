@@ -4783,6 +4783,10 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     auto runFsilsSolve = [&](bool blockschur_preparation, std::string& error_out) -> bool {
         error_out.clear();
         try {
+            lhs.debug_global_nodes.resize(lhs.nNo);
+            for (int old = 0; old < lhs.nNo; ++old) {
+                lhs.debug_global_nodes(old) = shared_layout->oldToGlobalNode(old);
+            }
             const auto& res_current = blockschur_preparation ? res_blockschur : res_original;
             fe_fsi_linear_solver::fsils_solve(lhs, ls, dof, Ri, Val, prec, incL, res_current);
             return true;

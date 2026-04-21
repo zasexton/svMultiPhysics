@@ -51,6 +51,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -1245,6 +1246,153 @@ bool load_face_only_oracle_mode(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
 [[nodiscard]] bool schur_global_mean_coarse_mode_enabled() noexcept
 {
   return env_enabled("SVMP_FSILS_SCHUR_GLOBAL_MEAN_COARSE");
+}
+
+[[nodiscard]] const char* schur_dump_prefix() noexcept
+{
+  const char* env = std::getenv("SVMP_FSILS_SCHUR_DUMP_PREFIX");
+  if (env == nullptr) {
+    return nullptr;
+  }
+  while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+    ++env;
+  }
+  return (*env == '\0') ? nullptr : env;
+}
+
+[[nodiscard]] int schur_dump_max_solves() noexcept
+{
+  return parse_int_env("SVMP_FSILS_SCHUR_DUMP_MAX_SOLVES", 1);
+}
+
+[[nodiscard]] int schur_dump_max_iters() noexcept
+{
+  return std::max(0, parse_int_env("SVMP_FSILS_SCHUR_DUMP_MAX_ITERS", 1));
+}
+
+void dump_schur_array_owned(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                            const char* prefix,
+                            std::uint64_t solve_id,
+                            const char* label,
+                            const Array<double>& values)
+{
+  if (prefix == nullptr || *prefix == '\0') {
+    return;
+  }
+
+  std::ostringstream path;
+  path << prefix
+       << ".solve" << solve_id
+       << "." << label
+       << ".rank" << lhs.commu.task
+       << ".txt";
+  std::ofstream out(path.str());
+  if (!out) {
+    return;
+  }
+
+  const int con_ncomp = values.nrows();
+  const bool has_debug_global_nodes = lhs.debug_global_nodes.size() == lhs.nNo;
+
+  out << std::setprecision(17) << std::scientific;
+  out << "# task " << lhs.commu.task
+      << " nTasks " << lhs.commu.nTasks
+      << " solve " << solve_id
+      << " label " << label
+      << " con_ncomp " << con_ncomp
+      << " mynNo " << lhs.mynNo
+      << " nNo " << lhs.nNo << '\n';
+  out << "# global_node component value old_node internal_node";
+  if (has_debug_global_nodes) {
+    out << " backend_node";
+  }
+  out << '\n';
+
+  for (fsils_int old_node = 0; old_node < lhs.nNo; ++old_node) {
+    if (old_node < 0 || old_node >= lhs.gNodes.size()) {
+      continue;
+    }
+    const int internal_node = lhs.map(old_node);
+    if (internal_node < 0 || internal_node >= lhs.mynNo) {
+      continue;
+    }
+    const int global_node =
+        has_debug_global_nodes ? lhs.debug_global_nodes(old_node) : lhs.gNodes(old_node);
+    if (global_node < 0) {
+      continue;
+    }
+    for (int comp = 0; comp < con_ncomp; ++comp) {
+      out << global_node << ' '
+          << comp << ' '
+          << values(comp, internal_node) << ' '
+          << old_node << ' '
+          << internal_node;
+      if (has_debug_global_nodes) {
+        out << ' ' << lhs.gNodes(old_node);
+      }
+      out << '\n';
+    }
+  }
+}
+
+void dump_schur_vector_owned(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                             const char* prefix,
+                             std::uint64_t solve_id,
+                             const char* label,
+                             const Vector<double>& values)
+{
+  if (prefix == nullptr || *prefix == '\0') {
+    return;
+  }
+
+  std::ostringstream path;
+  path << prefix
+       << ".legacy.solve" << solve_id
+       << "." << label
+       << ".rank" << lhs.commu.task
+       << ".txt";
+  std::ofstream out(path.str());
+  if (!out) {
+    return;
+  }
+
+  const bool has_debug_global_nodes = lhs.debug_global_nodes.size() == lhs.nNo;
+
+  out << std::setprecision(17) << std::scientific;
+  out << "# task " << lhs.commu.task
+      << " nTasks " << lhs.commu.nTasks
+      << " solve " << solve_id
+      << " label " << label
+      << " mynNo " << lhs.mynNo
+      << " nNo " << lhs.nNo << '\n';
+  out << "# global_node value old_node internal_node";
+  if (has_debug_global_nodes) {
+    out << " backend_node";
+  }
+  out << '\n';
+
+  for (fsils_int old_node = 0; old_node < lhs.nNo; ++old_node) {
+    if (old_node < 0 || old_node >= lhs.gNodes.size()) {
+      continue;
+    }
+    const int internal_node = lhs.map(old_node);
+    if (internal_node < 0 || internal_node >= lhs.mynNo || internal_node >= values.size()) {
+      continue;
+    }
+    const int global_node =
+        has_debug_global_nodes ? lhs.debug_global_nodes(old_node) : lhs.gNodes(old_node);
+    if (global_node < 0) {
+      continue;
+    }
+    out << global_node << ' '
+        << values(internal_node) << ' '
+        << old_node << ' '
+        << internal_node;
+    if (has_debug_global_nodes) {
+      out << ' ' << lhs.gNodes(old_node);
+    }
+    out << '\n';
+  }
 }
 
 [[nodiscard]] std::uint64_t hash_mix(std::uint64_t seed, std::uint64_t value) noexcept
@@ -4499,6 +4647,24 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
   Vector<double> M_diag(nNo);
   Vector<double> M_inv(nNo);
   Vector<double> in_sync(nNo);
+  static std::uint64_t legacy_schur_dump_counter = 0;
+  const char* legacy_dump_prefix = schur_dump_prefix();
+  const std::uint64_t legacy_dump_solve_id =
+      (legacy_dump_prefix == nullptr) ? 0 : legacy_schur_dump_counter++;
+  const int legacy_dump_max_solves = schur_dump_max_solves();
+  const int legacy_dump_max_iters = schur_dump_max_iters();
+  const bool legacy_dump_enabled =
+      legacy_dump_prefix != nullptr &&
+      (legacy_dump_max_solves < 0 ||
+       legacy_dump_solve_id < static_cast<std::uint64_t>(legacy_dump_max_solves));
+  auto dump_legacy = [&](const char* label, const Vector<double>& values) {
+    if (legacy_dump_enabled) {
+      dump_schur_vector_owned(lhs, legacy_dump_prefix, legacy_dump_solve_id, label, values);
+    }
+  };
+
+  const Vector<double> rhs_unpreconditioned = R;
+  dump_legacy("rhs_unpreconditioned", rhs_unpreconditioned);
   for (fsils_int i = 0; i < nNo; ++i) {
     M_diag(i) = L_values(lhs.diagPtr(i));
   }
@@ -4513,6 +4679,9 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
     R(i) *= M_inv(i);
   }
   const Vector<double> rhs_reference = R;
+  dump_legacy("diagonal_L", M_diag);
+  dump_legacy("diagonal_L_inv", M_inv);
+  dump_legacy("rhs_preconditioned_Minv", rhs_reference);
 
   ls.callD = fsils_cpu_t();
   ls.suc = false;
@@ -4566,6 +4735,121 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
       halo.sync_owned_to_ghost_scalar(out_vec, skip_post_solve_halo_sync());
     }
   };
+
+  auto dump_legacy_operator_decomposition = [&](const char* label, const Vector<double>& in_vec) {
+    if (!legacy_dump_enabled) {
+      return;
+    }
+
+    const Vector<double>* op_in = &in_vec;
+    Vector<double> probe_in_sync(nNo);
+    const fe_fsi_linear_solver::HaloExchange probe_halo(lhs);
+    if (probe_halo.has_owned_halo() && !skip_post_solve_halo_sync()) {
+      probe_in_sync = in_vec;
+      probe_halo.sync_owned_to_ghost_scalar(probe_in_sync);
+      op_in = &probe_in_sync;
+    }
+
+    Array<double> probe_gp(nsd, nNo);
+    Vector<double> probe_sp(nNo), probe_dgp(nNo), probe_raw(nNo), probe_out(nNo);
+    GL.apply(
+        dso::ghost_synced_input(*op_in),
+        dso::owned_only_output(nsd, probe_gp),
+        dso::owned_only_output(probe_sp));
+    dump_schur_array_owned(
+        lhs,
+        legacy_dump_prefix,
+        legacy_dump_solve_id,
+        (std::string("legacy.operator_") + label + "_GP_after_GL").c_str(),
+        probe_gp);
+    add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, nsd, probe_gp, probe_gp);
+    dump_schur_array_owned(
+        lhs,
+        legacy_dump_prefix,
+        legacy_dump_solve_id,
+        (std::string("legacy.operator_") + label + "_GP_after_add_bc").c_str(),
+        probe_gp);
+    if (probe_halo.has_owned_halo() && !skip_post_solve_halo_sync()) {
+      probe_halo.sync_owned_to_ghost_vector(nsd, probe_gp);
+    }
+    dump_schur_array_owned(
+        lhs,
+        legacy_dump_prefix,
+        legacy_dump_solve_id,
+        (std::string("legacy.operator_") + label + "_GP_before_D").c_str(),
+        probe_gp);
+    D.apply(
+        dso::ghost_synced_input(nsd, probe_gp),
+        dso::owned_only_output(probe_dgp));
+    #pragma omp parallel for schedule(static)
+    for (fsils_int i = 0; i < nNo; ++i) {
+      probe_raw(i) = probe_sp(i) - probe_dgp(i);
+      probe_out(i) = M_inv(i) * probe_raw(i);
+    }
+    if (!face_only_skip_output_sync) {
+      probe_halo.sync_owned_to_ghost_scalar(probe_out, skip_post_solve_halo_sync());
+    }
+
+    dump_legacy((std::string("operator_") + label + "_input").c_str(), in_vec);
+    dump_legacy((std::string("operator_") + label + "_SP").c_str(), probe_sp);
+    dump_legacy((std::string("operator_") + label + "_DGP").c_str(), probe_dgp);
+    dump_legacy((std::string("operator_") + label + "_raw_SP_minus_DGP").c_str(), probe_raw);
+    dump_legacy((std::string("operator_") + label + "_Minv_raw").c_str(), probe_out);
+  };
+
+  if (legacy_dump_enabled) {
+    dump_legacy_operator_decomposition("rhs", rhs_reference);
+
+    Vector<double> global_mean_probe(nNo);
+    global_mean_probe = 0.0;
+    for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+      global_mean_probe(node) = 1.0;
+    }
+    dump_legacy_operator_decomposition("global_mean", global_mean_probe);
+
+#if FE_HAS_MPI
+    if (lhs.commu.nTasks > 1) {
+      std::vector<double> owned_counts(static_cast<std::size_t>(lhs.commu.nTasks), 0.0);
+      const double local_owned = static_cast<double>(lhs.mynNo);
+      MPI_Allgather(&local_owned,
+                    1,
+                    cm_mod::mpreal,
+                    owned_counts.data(),
+                    1,
+                    cm_mod::mpreal,
+                    lhs.commu.comm);
+
+      std::vector<int> active_ranks;
+      active_ranks.reserve(static_cast<std::size_t>(lhs.commu.nTasks));
+      for (int rank = 0; rank < lhs.commu.nTasks; ++rank) {
+        if (owned_counts[static_cast<std::size_t>(rank)] > 0.5) {
+          active_ranks.push_back(rank);
+        }
+      }
+      if (active_ranks.size() >= 2u) {
+        const int reference_rank = active_ranks.back();
+        const int probe_rank = active_ranks.front();
+        const double reference_count = owned_counts[static_cast<std::size_t>(reference_rank)];
+        if (reference_count > 0.5 && reference_rank != probe_rank) {
+          Vector<double> partition_probe(nNo);
+          partition_probe = 0.0;
+          if (lhs.commu.task == probe_rank) {
+            for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+              partition_probe(node) = 1.0;
+            }
+          } else if (lhs.commu.task == reference_rank) {
+            const double weight =
+                -owned_counts[static_cast<std::size_t>(probe_rank)] / reference_count;
+            for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+              partition_probe(node) = weight;
+            }
+          }
+          dump_legacy_operator_decomposition("partition_0", partition_probe);
+        }
+      }
+    }
+#endif
+  }
 
   int active_coupled_faces = static_cast<int>(std::count_if(
       lhs.face.begin(), lhs.face.end(),
@@ -6219,6 +6503,7 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
         }
       }
     }
+    dump_legacy("gmres_initial_guess", Xg);
 
     const double rhs_norm = norm::fsi_ls_norms(mynNo, lhs.commu, R);
     ls.iNorm = rhs_norm;
@@ -6246,6 +6531,10 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
 
       apply_schur_operator(Xg, ax);
       omp_la::omp_axpby_s(nNo, residual, R, -1.0, ax);
+      if (legacy_dump_enabled && total_itr == 0) {
+        dump_legacy("gmres_initial_operator", ax);
+        dump_legacy("gmres_initial_residual", residual);
+      }
       if (gmres_mean_free_krylov) {
         subtract_owned_scalar_mean(lhs, residual);
       }
@@ -6280,6 +6569,10 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
         auto ui = u.rcol(i);
         auto uip1 = u.rcol(i + 1);
         apply_schur_operator(ui, uip1);
+        if (legacy_dump_enabled && restart_cycles == 1 && i < legacy_dump_max_iters) {
+          dump_legacy((std::string("gmres_iter") + std::to_string(i) + "_basis").c_str(), ui);
+          dump_legacy((std::string("gmres_iter") + std::to_string(i) + "_operator").c_str(), uip1);
+        }
         if (gmres_mean_free_krylov) {
           subtract_owned_scalar_mean(lhs, uip1);
         }
@@ -7072,6 +7365,7 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
     trace_residual_coarse_modes("final_gmres", residual, Xg);
     trace_branch_compare("gmres", R, Xg, residual, ls.fNorm, ls.itr);
     R = Xg;
+    dump_legacy("gmres_solution_final", R);
     if (reduced_weak_mode_gain_enabled && have_reduced_weak_mode) {
       const double mode_norm_sq =
           dot::fsils_dot_s(mynNo, lhs.commu, reduced_weak_mode, reduced_weak_mode);
@@ -7114,6 +7408,8 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
   }
 
   trace_constant_mode_operator(rhs_reference);
+  dump_legacy("bicg_initial_guess", X);
+  dump_legacy("bicg_initial_residual", R);
   for (int i = 0; i < ls.mItr; ++i) {
     if (err < eps) {
       ls.suc = true;
@@ -7121,6 +7417,10 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
     }
 
     apply_schur_operator(P, V);
+    if (legacy_dump_enabled && i < legacy_dump_max_iters) {
+      dump_legacy((std::string("bicg_iter") + std::to_string(i) + "_P").c_str(), P);
+      dump_legacy((std::string("bicg_iter") + std::to_string(i) + "_V").c_str(), V);
+    }
 
     const double denom_alpha = dot::fsils_dot_s(mynNo, lhs.commu, Rh, V);
     if (std::abs(denom_alpha) <
@@ -7131,6 +7431,10 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
 
     omp_la::omp_axpby_s(nNo, S, R, -alpha, V);
     apply_schur_operator(S, T);
+    if (legacy_dump_enabled && i < legacy_dump_max_iters) {
+      dump_legacy((std::string("bicg_iter") + std::to_string(i) + "_S").c_str(), S);
+      dump_legacy((std::string("bicg_iter") + std::to_string(i) + "_T").c_str(), T);
+    }
 
     double schur_locals[3] = {
         norm::fsi_ls_norm_sq_local_s(mynNo, S),
@@ -7197,7 +7501,9 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
   trace_residual_coarse_modes("final_bicgstab", R, X);
   emit_face_only_solution_stats("bicgstab", i_itr - 1, X);
   R = X;
+  dump_legacy("bicg_solution_final_pre_postproject", R);
   post_project_solution_mean(R);
+  dump_legacy("bicg_solution_final", R);
   if (solution_dump_enabled) {
     dump_face_only_solution_owned(
         lhs,
@@ -7244,6 +7550,23 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
   const auto strategy =
       fe_fsi_linear_solver::BlockSchurStrategySelector::select(
           lhs, low_rank_profile, con_ncomp);
+
+  static std::uint64_t schur_dump_solve_counter = 0;
+  const char* dump_prefix = schur_dump_prefix();
+  const std::uint64_t dump_solve_id =
+      (dump_prefix == nullptr) ? 0 : schur_dump_solve_counter++;
+  const int dump_max_solves = schur_dump_max_solves();
+  const int dump_max_iters = schur_dump_max_iters();
+  const bool dump_enabled =
+      dump_prefix != nullptr &&
+      (dump_max_solves < 0 ||
+       dump_solve_id < static_cast<std::uint64_t>(dump_max_solves));
+  auto dump_schur = [&](const char* label, const Array<double>& values) {
+    if (dump_enabled) {
+      dump_schur_array_owned(lhs, dump_prefix, dump_solve_id, label, values);
+    }
+  };
+
   if (strategy.use_legacy_scalar_schur()) {
     Vector<double> R_scalar;
     copy_scalar_array_to_vector(R, R_scalar);
@@ -7255,6 +7578,7 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
         dsb::make_scalar_block_schur_system(lhs, mom_ncomp, K, D, G, L_scalar),
         ls, R_scalar);
     copy_scalar_vector_to_array(R_scalar, R);
+    dump_schur("legacy_scalar_solution", R);
     return;
   }
 
@@ -7330,8 +7654,100 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
   };
 
   const Array<double> rhs = R;
+  dump_schur("rhs", rhs);
   Array<double> rhs_preconditioned = rhs;
   apply_schur_preconditioner(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs, pc, con_ncomp, nNo, rhs_preconditioned);
+  dump_schur("rhs_preconditioned_full", rhs_preconditioned);
+  if (dump_enabled) {
+    Array<double> rhs_preconditioned_base = rhs;
+    apply_base_schur_preconditioner(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, pc, con_ncomp, nNo,
+                                    rhs_preconditioned_base);
+    sync_schur_halo(lhs, con_ncomp, rhs_preconditioned_base);
+    dump_schur("rhs_preconditioned_base", rhs_preconditioned_base);
+
+    Array<double> exact_rhs;
+    apply_exact_schur_operator(rhs, exact_rhs);
+    dump_schur("exact_operator_rhs", exact_rhs);
+
+    Array<double> exact_rhs_preconditioned = exact_rhs;
+    apply_schur_preconditioner(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs, pc, con_ncomp, nNo,
+                               exact_rhs_preconditioned);
+    dump_schur("exact_operator_rhs_preconditioned", exact_rhs_preconditioned);
+
+    if (con_ncomp == 1) {
+      Array<double> global_mean(con_ncomp, nNo);
+      global_mean = 0.0;
+      for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+        global_mean(0, node) = 1.0;
+      }
+      schur_halo.sync_owned_to_ghost_vector(con_ncomp, global_mean, skip_post_solve_halo_sync());
+      dump_schur("probe_global_mean", global_mean);
+
+      Array<double> exact_global_mean;
+      apply_exact_schur_operator(global_mean, exact_global_mean);
+      dump_schur("exact_operator_global_mean", exact_global_mean);
+
+      Array<double> preconditioned_global_mean = global_mean;
+      apply_schur_preconditioner(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs, pc, con_ncomp, nNo,
+                                 preconditioned_global_mean);
+      dump_schur("preconditioned_global_mean", preconditioned_global_mean);
+
+#if FE_HAS_MPI
+      if (lhs.commu.nTasks > 1) {
+        std::vector<double> owned_counts(static_cast<std::size_t>(lhs.commu.nTasks), 0.0);
+        const double local_owned = static_cast<double>(lhs.mynNo);
+        MPI_Allgather(&local_owned,
+                      1,
+                      cm_mod::mpreal,
+                      owned_counts.data(),
+                      1,
+                      cm_mod::mpreal,
+                      lhs.commu.comm);
+
+        std::vector<int> active_ranks;
+        active_ranks.reserve(static_cast<std::size_t>(lhs.commu.nTasks));
+        for (int rank = 0; rank < lhs.commu.nTasks; ++rank) {
+          if (owned_counts[static_cast<std::size_t>(rank)] > 0.5) {
+            active_ranks.push_back(rank);
+          }
+        }
+        if (active_ranks.size() >= 2u) {
+          const int reference_rank = active_ranks.back();
+          const int probe_rank = active_ranks.front();
+          const double reference_count =
+              owned_counts[static_cast<std::size_t>(reference_rank)];
+          if (reference_count > 0.5 && reference_rank != probe_rank) {
+            Array<double> partition_probe(con_ncomp, nNo);
+            partition_probe = 0.0;
+            if (lhs.commu.task == probe_rank) {
+              for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+                partition_probe(0, node) = 1.0;
+              }
+            } else if (lhs.commu.task == reference_rank) {
+              const double weight =
+                  -owned_counts[static_cast<std::size_t>(probe_rank)] / reference_count;
+              for (fsils_int node = 0; node < lhs.mynNo; ++node) {
+                partition_probe(0, node) = weight;
+              }
+            }
+            schur_halo.sync_owned_to_ghost_vector(con_ncomp, partition_probe,
+                                                  skip_post_solve_halo_sync());
+            dump_schur("probe_partition_0", partition_probe);
+
+            Array<double> exact_partition_probe;
+            apply_exact_schur_operator(partition_probe, exact_partition_probe);
+            dump_schur("exact_operator_partition_0", exact_partition_probe);
+
+            Array<double> preconditioned_partition_probe = partition_probe;
+            apply_schur_preconditioner(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs, pc, con_ncomp, nNo,
+                                       preconditioned_partition_probe);
+            dump_schur("preconditioned_partition_0", preconditioned_partition_probe);
+          }
+        }
+      }
+#endif
+    }
+  }
   const bool use_preconditioned_rhs_initial_guess =
       env_enabled("SVMP_FSILS_BLOCKSCHUR_SCHUR_INIT_PRECOND_RHS");
   const bool trace_schur_preconditioner_probes =
@@ -7503,6 +7919,7 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
     } else {
       Xg = 0.0;
     }
+    dump_schur("gmres_initial_guess", Xg);
 
     const double rhs_norm = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, rhs_preconditioned);
     ls.iNorm = rhs_norm;
@@ -7529,6 +7946,10 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
       schur_halo.sync_owned_to_ghost_vector(con_ncomp, Xg, skip_post_solve_halo_sync());
       apply_schur_operator(Xg, ax);
       omp_la::omp_axpby_v(con_ncomp, nNo, residual, rhs_preconditioned, -1.0, ax);
+      if (dump_enabled && total_itr == 0) {
+        dump_schur("gmres_initial_operator", ax);
+        dump_schur("gmres_initial_residual", residual);
+      }
       const double beta = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, residual);
       if (beta < eps) {
         ls.suc = true;
@@ -7559,6 +7980,10 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
         auto uip1 = u.rslice(i + 1);
         schur_halo.sync_owned_to_ghost_vector(con_ncomp, ui, skip_post_solve_halo_sync());
         apply_schur_operator(ui, uip1);
+        if (dump_enabled && restart_cycles == 1 && i < dump_max_iters) {
+          dump_schur(("gmres_iter" + std::to_string(i) + "_basis").c_str(), ui);
+          dump_schur(("gmres_iter" + std::to_string(i) + "_operator").c_str(), uip1);
+        }
 
         for (int j = 0; j <= i; ++j) {
           h(j, i) = dot::fsils_dot_v(con_ncomp, mynNo, lhs.commu, u.rslice(j), uip1);
@@ -7647,6 +8072,7 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
     }
 
     R = Xg;
+    dump_schur("gmres_solution_final", R);
     ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - ls.callD;
     ls.dB = (rhs_norm < std::numeric_limits<double>::epsilon() || ls.fNorm <= 0.0)
                 ? 0.0
@@ -7674,6 +8100,8 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
     X = 0.0;
     R = rhs_preconditioned;
   }
+  dump_schur("bicg_initial_guess", X);
+  dump_schur("bicg_initial_residual", R);
 
   double err = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, R);
   double errO = std::max(err, rhs_norm);
@@ -7691,6 +8119,10 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
     }
 
     apply_schur_operator(P, V);
+    if (dump_enabled && i < dump_max_iters) {
+      dump_schur(("bicg_iter" + std::to_string(i) + "_P").c_str(), P);
+      dump_schur(("bicg_iter" + std::to_string(i) + "_V").c_str(), V);
+    }
 
     const double denom_alpha = dot::fsils_dot_v(con_ncomp, mynNo, lhs.commu, Rh, V);
     if (std::abs(denom_alpha) <
@@ -7701,6 +8133,10 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
 
     omp_la::omp_axpby_v(con_ncomp, nNo, S, R, -alpha, V);
     apply_schur_operator(S, T);
+    if (dump_enabled && i < dump_max_iters) {
+      dump_schur(("bicg_iter" + std::to_string(i) + "_S").c_str(), S);
+      dump_schur(("bicg_iter" + std::to_string(i) + "_T").c_str(), T);
+    }
 
     double schur_locals[3] = {
         norm::fsi_ls_norm_sq_local_v(con_ncomp, mynNo, S),
@@ -7761,6 +8197,7 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
   }
 
   R = X;
+  dump_schur("bicg_solution_final", R);
   ls.itr = i_itr - 1;
   ls.fNorm = err;
   ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - ls.callD;

@@ -92,6 +92,18 @@ TEST(AuxiliaryBlockStorage, FixedStrideSetup_QuadraturePoint)
     EXPECT_EQ(storage.storageSize(), 1200u); // 200 * 6
 }
 
+TEST(AuxiliaryBlockStorage, FixedStrideSetup_Region)
+{
+    AuxiliaryBlockStorage storage;
+    auto spec = makeSpec("region_state", 2, AuxiliaryStateScope::Region);
+
+    storage.setupFixedStride(spec, 3);
+
+    EXPECT_EQ(storage.scope(), AuxiliaryStateScope::Region);
+    EXPECT_EQ(storage.entityCount(), 3u);
+    EXPECT_EQ(storage.storageSize(), 6u);
+}
+
 TEST(AuxiliaryBlockStorage, FixedStrideSetup_Facet)
 {
     AuxiliaryBlockStorage storage;

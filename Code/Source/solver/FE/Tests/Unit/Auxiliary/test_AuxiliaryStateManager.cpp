@@ -561,10 +561,10 @@ TEST(AuxiliaryStateManager, StorageSummary)
 }
 
 // ---------------------------------------------------------------------------
-//  All five scopes in one manager
+//  All scopes in one manager
 // ---------------------------------------------------------------------------
 
-TEST(AuxiliaryStateManager, AllSixScopesRegistered)
+TEST(AuxiliaryStateManager, AllSevenScopesRegistered)
 {
     AuxiliaryStateManager mgr;
 
@@ -573,21 +573,37 @@ TEST(AuxiliaryStateManager, AllSixScopesRegistered)
     mgr.registerBlock(makeSpec("node", 4, AuxiliaryStateScope::Node), 50);
     mgr.registerBlock(makeSpec("cell", 1, AuxiliaryStateScope::Cell), 200);
     mgr.registerBlock(makeSpec("qp", 6, AuxiliaryStateScope::QuadraturePoint), 800);
+    mgr.registerBlock(makeSpec("region", 5, AuxiliaryStateScope::Region), 4);
     mgr.registerBlock(makeSpec("facet", 2, AuxiliaryStateScope::Facet), 30);
 
-    EXPECT_EQ(mgr.blockCount(), 6u);
+    EXPECT_EQ(mgr.blockCount(), 7u);
 
     EXPECT_EQ(mgr.getBlock("global").scope(), AuxiliaryStateScope::Global);
     EXPECT_EQ(mgr.getBlock("boundary").scope(), AuxiliaryStateScope::Boundary);
     EXPECT_EQ(mgr.getBlock("node").scope(), AuxiliaryStateScope::Node);
     EXPECT_EQ(mgr.getBlock("cell").scope(), AuxiliaryStateScope::Cell);
     EXPECT_EQ(mgr.getBlock("qp").scope(), AuxiliaryStateScope::QuadraturePoint);
+    EXPECT_EQ(mgr.getBlock("region").scope(), AuxiliaryStateScope::Region);
     EXPECT_EQ(mgr.getBlock("facet").scope(), AuxiliaryStateScope::Facet);
 
     auto summary = mgr.storageSummary();
     EXPECT_EQ(summary.total_work_storage,
-              2u + 3u + 200u + 200u + 4800u + 60u); // 5265
+              2u + 3u + 200u + 200u + 4800u + 20u + 60u); // 5285
 
+    EXPECT_NO_THROW(mgr.validate());
+}
+
+TEST(AuxiliaryStateManager, RegisterRegionBlockPreservesIndexing)
+{
+    AuxiliaryStateManager mgr;
+
+    mgr.registerBlock(makeSpec("region", 2, AuxiliaryStateScope::Region), 3);
+
+    const auto& idx = mgr.getIndexing("region");
+    EXPECT_EQ(idx.scope(), AuxiliaryStateScope::Region);
+    EXPECT_EQ(idx.totalEntityCount(), 3u);
+    EXPECT_EQ(idx.ownedEntityCount(), 3u);
+    EXPECT_EQ(idx.flatIndex(2, 1), 5u);
     EXPECT_NO_THROW(mgr.validate());
 }
 

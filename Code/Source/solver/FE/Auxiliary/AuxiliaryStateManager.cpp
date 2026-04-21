@@ -76,6 +76,11 @@ std::size_t AuxiliaryStateManager::registerBlock(
             indexing = AuxiliaryBlockIndexing::createCell(
                 entity_count, spec.size);
             break;
+        case AuxiliaryStateScope::Region:
+            FE_THROW_IF(owned_entity_count != entity_count, InvalidArgumentException,
+                        "AuxiliaryStateManager::registerBlock: Region scope does not support ghosts");
+            indexing = AuxiliaryBlockIndexing::createRegion(entity_count, spec.size);
+            break;
         case AuxiliaryStateScope::Boundary:
             FE_THROW_IF(entity_count != 1u, InvalidArgumentException,
                         "AuxiliaryStateManager::registerBlock: Boundary scope requires entity_count == 1");
@@ -149,6 +154,9 @@ std::size_t AuxiliaryStateManager::registerBlockRagged(
     switch (spec.scope) {
         case AuxiliaryStateScope::Cell:
             indexing = AuxiliaryBlockIndexing::createCell(n_entities, 1);
+            break;
+        case AuxiliaryStateScope::Region:
+            indexing = AuxiliaryBlockIndexing::createRegion(n_entities, 1);
             break;
         default:
             // For ragged layout with other scopes, use a generic index.

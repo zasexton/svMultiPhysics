@@ -118,6 +118,9 @@ enum class AuxiliaryStateScope : std::uint8_t {
     /// One instance per quadrature point per cell.
     QuadraturePoint,
 
+    /// One instance per topology region / connected component.
+    Region,
+
     /// One instance per boundary facet (face, edge, or vertex on a named
     /// boundary).  Supports stable entity indexing on boundary subsets.
     Facet
@@ -586,7 +589,7 @@ struct AuxiliaryStateSpec {
     /// If non-empty, must have exactly `size` entries.
     std::vector<AuxiliaryVariableKind> variable_kinds{};
 
-    /// Storage scope (Global, Boundary, Node, Cell, QuadraturePoint, Facet).
+    /// Storage scope (Global, Boundary, Node, Cell, QuadraturePoint, Region, Facet).
     AuxiliaryStateScope scope{AuxiliaryStateScope::Global};
 
     /// Solve mode (Partitioned or Monolithic).
@@ -686,6 +689,16 @@ struct AuxiliaryStateSpec {
         spec.name = std::move(name);
         spec.size = ncomp;
         spec.scope = AuxiliaryStateScope::QuadraturePoint;
+        spec.sync_policy = AuxiliarySyncPolicy::OwnedOnly;
+        return spec;
+    }
+
+    [[nodiscard]] static AuxiliaryStateSpec regionField(std::string name, int ncomp)
+    {
+        AuxiliaryStateSpec spec;
+        spec.name = std::move(name);
+        spec.size = ncomp;
+        spec.scope = AuxiliaryStateScope::Region;
         spec.sync_policy = AuxiliarySyncPolicy::OwnedOnly;
         return spec;
     }

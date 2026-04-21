@@ -32,6 +32,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -63,6 +69,41 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
     ++env;
   }
   return *env != '\0' && *env != '0';
+}
+
+[[nodiscard]] const char* addBcMulDumpPrefix() noexcept
+{
+  const char* env = std::getenv("SVMP_FSILS_ADD_BC_MUL_DUMP_PREFIX");
+  if (env == nullptr) {
+    return nullptr;
+  }
+  while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+    ++env;
+  }
+  return (*env == '\0') ? nullptr : env;
+}
+
+[[nodiscard]] int addBcMulDumpMaxCalls() noexcept
+{
+  const char* env = std::getenv("SVMP_FSILS_ADD_BC_MUL_DUMP_MAX_CALLS");
+  if (env == nullptr || *env == '\0') {
+    return 80;
+  }
+  char* end = nullptr;
+  const long value = std::strtol(env, &end, 10);
+  return (end == env) ? 80 : static_cast<int>(value);
+}
+
+[[nodiscard]] const char* bcopTypeName(BcopType op_type) noexcept
+{
+  switch (op_type) {
+    case BcopType::BCOP_TYPE_ADD:
+      return "ADD";
+    case BcopType::BCOP_TYPE_PRE:
+      return "PRE";
+    default:
+      return "UNKNOWN";
+  }
 }
 
 struct ReducedEntryKey
@@ -137,6 +178,126 @@ inline int entry_local_component(const FSILS_lhsType& lhs,
                                                               entry.full_component,
                                                               dof,
                                                               system_dof);
+}
+
+void dumpReducedAddBcMul(const FSILS_lhsType& lhs,
+                         BcopType op_type,
+                         int dof,
+                         const std::vector<double>& reduced_dots,
+                         const std::vector<int>& exact_group_ids)
+{
+  const char* prefix = addBcMulDumpPrefix();
+  if (prefix == nullptr) {
+    return;
+  }
+
+  static std::uint64_t call_id = 0;
+  const std::uint64_t this_call = call_id++;
+  const int max_calls = addBcMulDumpMaxCalls();
+  if (max_calls >= 0 && this_call >= static_cast<std::uint64_t>(max_calls)) {
+    return;
+  }
+
+  std::ostringstream path;
+  path << prefix << ".call" << this_call << "." << bcopTypeName(op_type)
+       << ".rank" << lhs.commu.task << ".txt";
+  std::ofstream out(path.str());
+  if (!out) {
+    return;
+  }
+
+  const bool exact_reduced_pre =
+      op_type == BcopType::BCOP_TYPE_PRE &&
+      !lhs.reduced_update_pc_active_indices.empty() &&
+      lhs.reduced_update_pc_inner_inv.size() ==
+          lhs.reduced_update_pc_active_indices.size() *
+              lhs.reduced_update_pc_active_indices.size();
+
+  out << std::setprecision(17) << std::scientific;
+  out << "# task " << lhs.commu.task
+      << " nTasks " << lhs.commu.nTasks
+      << " call " << this_call
+      << " op " << bcopTypeName(op_type)
+      << " dof " << dof
+      << " reduced_update_count " << lhs.reduced_updates.size()
+      << " use_face_cache " << (lhs.use_reduced_face_cache_in_add_bc_mul ? 1 : 0)
+      << " exact_reduced_pre " << (exact_reduced_pre ? 1 : 0) << '\n';
+  out << "# idx active duplicate handled_exact face_cache grouped_id sigma nS dot generic_coef generic_scale left_nnz right_nnz left_face_nNo right_face_nNo path\n";
+
+  for (std::size_t idx = 0; idx < lhs.reduced_updates.size(); ++idx) {
+    const auto& update = lhs.reduced_updates[idx];
+    const bool duplicate = update.grouped_coupling_id == kNativeFaceDuplicateCouplingId;
+    const bool handled_exact =
+        std::find(exact_group_ids.begin(), exact_group_ids.end(), update.grouped_coupling_id) !=
+        exact_group_ids.end();
+    double generic_coef = update.sigma;
+    if (op_type == BcopType::BCOP_TYPE_PRE) {
+      generic_coef = -update.sigma / (1.0 + update.sigma * update.nS);
+    }
+    const double dot = (idx < reduced_dots.size()) ? reduced_dots[idx] : 0.0;
+    const bool use_face_path = lhs.use_reduced_face_cache_in_add_bc_mul && update.has_face_cache;
+    out << idx << ' '
+        << (update.active ? 1 : 0) << ' '
+        << (duplicate ? 1 : 0) << ' '
+        << (handled_exact ? 1 : 0) << ' '
+        << (update.has_face_cache ? 1 : 0) << ' '
+        << update.grouped_coupling_id << ' '
+        << update.sigma << ' '
+        << update.nS << ' '
+        << dot << ' '
+        << generic_coef << ' '
+        << generic_coef * dot << ' '
+        << update.left.size() << ' '
+        << update.right_owned.size() << ' '
+        << update.left_face.nNo << ' '
+        << update.right_face.nNo << ' '
+        << (use_face_path ? "face" : "sparse") << '\n';
+  }
+
+  if (exact_reduced_pre) {
+    const int rank = static_cast<int>(lhs.reduced_update_pc_active_indices.size());
+    std::vector<double> coarse_rhs(static_cast<std::size_t>(rank), 0.0);
+    std::vector<double> coarse_sol(static_cast<std::size_t>(rank), 0.0);
+    for (int i = 0; i < rank; ++i) {
+      const int update_index =
+          lhs.reduced_update_pc_active_indices[static_cast<std::size_t>(i)];
+      if (update_index >= 0 && update_index < static_cast<int>(reduced_dots.size())) {
+        coarse_rhs[static_cast<std::size_t>(i)] =
+            reduced_dots[static_cast<std::size_t>(update_index)];
+      }
+    }
+    for (int i = 0; i < rank; ++i) {
+      double value = 0.0;
+      for (int j = 0; j < rank; ++j) {
+        value += lhs.reduced_update_pc_inner_inv[static_cast<std::size_t>(i) *
+                                                     static_cast<std::size_t>(rank) +
+                                                 static_cast<std::size_t>(j)] *
+                 coarse_rhs[static_cast<std::size_t>(j)];
+      }
+      coarse_sol[static_cast<std::size_t>(i)] = value;
+    }
+    out << "# exact_pre rank " << rank << '\n';
+    out << "# exact_i update_index rhs coarse_sol effective_scale inner_inv_row\n";
+    for (int i = 0; i < rank; ++i) {
+      const int update_index =
+          lhs.reduced_update_pc_active_indices[static_cast<std::size_t>(i)];
+      const double sigma =
+          (update_index >= 0 && update_index < static_cast<int>(lhs.reduced_updates.size()))
+              ? lhs.reduced_updates[static_cast<std::size_t>(update_index)].sigma
+              : 0.0;
+      out << i << ' '
+          << update_index << ' '
+          << coarse_rhs[static_cast<std::size_t>(i)] << ' '
+          << coarse_sol[static_cast<std::size_t>(i)] << ' '
+          << -sigma * coarse_sol[static_cast<std::size_t>(i)];
+      for (int j = 0; j < rank; ++j) {
+        out << ' ' << lhs.reduced_update_pc_inner_inv[static_cast<std::size_t>(i) *
+                                                          static_cast<std::size_t>(rank) +
+                                                      static_cast<std::size_t>(j)];
+      }
+      out << '\n';
+    }
+  }
 }
 
 inline double sparse_dot_owned(const FSILS_lhsType& lhs,
@@ -543,10 +704,6 @@ void compute_reduced_update_preconditioner_coupling(FSILS_lhsType& lhs)
   }
 
   std::vector<double> dense_m(static_cast<std::size_t>(rank) * static_cast<std::size_t>(rank), 0.0);
-  for (int i = 0; i < rank; ++i) {
-    dense_m[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
-            static_cast<std::size_t>(i)] = 1.0;
-  }
 
   for (int i = 0; i < rank; ++i) {
     const auto& update_i = lhs.reduced_updates[static_cast<std::size_t>(active_indices[static_cast<std::size_t>(i)])];
@@ -568,6 +725,10 @@ void compute_reduced_update_preconditioner_coupling(FSILS_lhsType& lhs)
                                  static_cast<int>(dense_m.size()),
                                  cm_mod::mpreal,
                                  lhs.commu);
+  }
+  for (int i = 0; i < rank; ++i) {
+    dense_m[static_cast<std::size_t>(i) * static_cast<std::size_t>(rank) +
+            static_cast<std::size_t>(i)] += 1.0;
   }
 
   std::vector<double> dense_inv;
@@ -812,6 +973,7 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
                                    cm_mod::mpreal,
                                    lhs.commu);
     }
+    dumpReducedAddBcMul(lhs, op_Type, dof, reduced_dots, exact_group_ids);
 
     // Apply the reduced modes as one grouped coarse correction instead of
     // independent scalar Sherman-Morrison updates. This preserves the exact

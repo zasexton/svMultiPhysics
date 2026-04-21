@@ -98,6 +98,27 @@ AuxiliaryBlockIndexing AuxiliaryBlockIndexing::createQuadraturePoint(
 }
 
 // ---------------------------------------------------------------------------
+//  Region
+// ---------------------------------------------------------------------------
+
+AuxiliaryBlockIndexing AuxiliaryBlockIndexing::createRegion(
+    std::size_t n_regions,
+    int component_stride)
+{
+    FE_THROW_IF(component_stride <= 0, InvalidArgumentException,
+                "AuxiliaryBlockIndexing::createRegion: stride must be > 0");
+
+    AuxiliaryBlockIndexing idx;
+    idx.scope_ = AuxiliaryStateScope::Region;
+    idx.total_entity_count_ = n_regions;
+    idx.owned_entity_count_ = n_regions;
+    idx.component_stride_ = component_stride;
+    idx.total_storage_size_ = n_regions *
+                              static_cast<std::size_t>(component_stride);
+    return idx;
+}
+
+// ---------------------------------------------------------------------------
 //  Boundary (one instance per named boundary collection)
 // ---------------------------------------------------------------------------
 

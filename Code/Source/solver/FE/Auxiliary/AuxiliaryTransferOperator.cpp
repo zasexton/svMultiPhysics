@@ -128,6 +128,7 @@ AuxiliaryRestartSchema AuxiliaryTransferOperator::buildSchema(
         case AuxiliaryStateScope::Node: schema.scope_name = "Node"; break;
         case AuxiliaryStateScope::Cell: schema.scope_name = "Cell"; break;
         case AuxiliaryStateScope::QuadraturePoint: schema.scope_name = "QuadraturePoint"; break;
+        case AuxiliaryStateScope::Region: schema.scope_name = "Region"; break;
         case AuxiliaryStateScope::Facet: schema.scope_name = "Facet"; break;
     }
 

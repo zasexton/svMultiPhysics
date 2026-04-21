@@ -117,6 +117,7 @@ enum class AuxiliaryOutputScope : std::uint8_t {
     Boundary,
     Cell,
     QuadraturePoint,
+    Region,
     Facet,
     Node
 };
@@ -1335,6 +1336,7 @@ public:
             switch (binding.scope) {
                 case AuxiliaryOutputScope::Global:
                 case AuxiliaryOutputScope::Boundary:
+                case AuxiliaryOutputScope::Region:
                 case AuxiliaryOutputScope::Node:
                     return valueAtEntity(0u);
                 case AuxiliaryOutputScope::Cell: {

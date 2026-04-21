@@ -2850,12 +2850,74 @@ TEST(AuxiliaryBindingsDSL, ConvenienceSugar)
     auto ig = use(model).name("g").global();
     EXPECT_EQ(ig.getScope(), AuxiliaryStateScope::Global);
 
+    auto ir = use(model).name("r").region();
+    EXPECT_EQ(ir.getScope(), AuxiliaryStateScope::Region);
+
     auto ip = use(model).name("p").partitioned("BackwardEuler");
     EXPECT_EQ(ip.getSolveMode(), AuxiliarySolveMode::Partitioned);
     EXPECT_EQ(ip.getStepperSpec().method_name, "BackwardEuler");
 
     auto im = use(model).name("m").monolithic();
     EXPECT_EQ(im.getSolveMode(), AuxiliarySolveMode::Monolithic);
+}
+
+TEST(AuxiliaryModelBuilder, PartitionedFailurePolicyRejectsFailedLocalSolve)
+{
+    using namespace svmp::FE;
+
+    auto model = aux_test::buildDecay(1.0);
+    systems::FESystem system(std::shared_ptr<const assembly::IMeshAccess>{});
+
+    AuxiliaryStepperSpec stepper;
+    stepper.method_name = "BackwardEuler";
+    stepper.max_nonlinear_iters = 0;
+
+    AuxiliaryFailurePolicy policy;
+    policy.max_local_retries = 1;
+    policy.reject_timestep_on_failure = true;
+
+    system.deployAuxiliaryModel(
+        use(model).name("bad_step").global().partitioned("BackwardEuler")
+            .stepper(stepper)
+            .failurePolicy(policy)
+            .param("k", 1.0)
+            .initialize({1.0}));
+    system.finalizeAuxiliaryLayout();
+
+    EXPECT_THROW(system.advanceAuxiliaryState(0.0, 0.1),
+                 svmp::FE::systems::InvalidStateException);
+}
+
+TEST(AuxiliaryModelBuilder, PartitionedFailurePolicyCanKeepCommittedState)
+{
+    using namespace svmp::FE;
+
+    auto model = aux_test::buildDecay(1.0);
+    systems::FESystem system(std::shared_ptr<const assembly::IMeshAccess>{});
+
+    AuxiliaryStepperSpec stepper;
+    stepper.method_name = "BackwardEuler";
+    stepper.max_nonlinear_iters = 0;
+
+    AuxiliaryFailurePolicy policy;
+    policy.max_local_retries = 0;
+    policy.reject_timestep_on_failure = false;
+
+    system.deployAuxiliaryModel(
+        use(model).name("nonrejecting_step").global().partitioned("BackwardEuler")
+            .stepper(stepper)
+            .failurePolicy(policy)
+            .param("k", 1.0)
+            .initialize({1.0}));
+    system.finalizeAuxiliaryLayout();
+
+    auto* mgr = system.auxiliaryStateManagerIfPresent();
+    ASSERT_NE(mgr, nullptr);
+    auto& blk = mgr->getBlock("nonrejecting_step");
+
+    EXPECT_NO_THROW(system.advanceAuxiliaryState(0.0, 0.1));
+    EXPECT_DOUBLE_EQ(blk.work()[0], 1.0);
+    EXPECT_DOUBLE_EQ(blk.committed()[0], 1.0);
 }
 
 TEST(AuxiliaryBindingsDSL, UnknownParamRejected)
