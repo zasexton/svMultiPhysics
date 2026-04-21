@@ -5277,6 +5277,15 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                     if (env.test_active != side) {
                         return out;
                     }
+                    if (ctx.testUsesVectorBasis()) {
+                        out.m = ctx.basisVectorJacobian(env.i, q);
+                        for (int r = vd; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) {
+                                out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = 0.0;
+                            }
+                        }
+                        return out;
+                    }
                     const LocalIndex n_test = ctx.numTestDofs();
                     if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
                         throw FEException("Forms: grad(TestFunction) DOF count is not divisible by value_dimension",
@@ -5331,6 +5340,15 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                     out.matrix_rows = vd;
                     out.matrix_cols = dim;
                     if (env.trial_active != side) {
+                        return out;
+                    }
+                    if (ctx.trialUsesVectorBasis()) {
+                        out.m = ctx.trialBasisVectorJacobian(env.j, q);
+                        for (int r = vd; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) {
+                                out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = 0.0;
+                            }
+                        }
                         return out;
                     }
                     const LocalIndex n_trial = ctx.numTrialDofs();
@@ -9181,6 +9199,16 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                     if (env.test_active != side) {
                         return out;
                     }
+                    if (ctx.testUsesVectorBasis()) {
+                        const auto J = ctx.basisVectorJacobian(env.i, q);
+                        for (int r = 0; r < vd; ++r) {
+                            for (int c = 0; c < dim; ++c) {
+                                out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)].value =
+                                    J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                            }
+                        }
+                        return out;
+                    }
                     const LocalIndex n_test = ctx.numTestDofs();
                     if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
                         throw FEException("Forms: grad(TestFunction) DOF count is not divisible by value_dimension (dual)",
@@ -9247,6 +9275,24 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                         }
                     }
                     if (env.trial_active != side) {
+                        return out;
+                    }
+                    if (ctx.trialUsesVectorBasis()) {
+                        const auto Jval = ctx.solutionJacobian(q);
+                        for (int r = 0; r < vd; ++r) {
+                            for (int c = 0; c < dim; ++c) {
+                                Dual Jij = makeDualConstant(
+                                    Jval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)],
+                                    env.ws->alloc());
+                                for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                                    const auto Jphi =
+                                        ctx.trialBasisVectorJacobian(static_cast<LocalIndex>(j), q);
+                                    Jij.deriv[j] =
+                                        Jphi[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                                }
+                                out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = Jij;
+                            }
+                        }
                         return out;
                     }
                     const LocalIndex n_trial = ctx.numTrialDofs();
@@ -9323,6 +9369,25 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
 	                    out.kind = EvalValue<Dual>::Kind::Matrix;
 	                    out.matrix_rows = vd;
 	                    out.matrix_cols = dim;
+                    if (state_current && env.trial_active == side && ctx.trialUsesVectorBasis()) {
+                        for (int r = 0; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) {
+                                Dual Jrc = makeDualConstant(
+                                    Jval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)],
+                                    env.ws->alloc());
+                                if (r < vd && c < dim) {
+                                    for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                                        const auto Jphi =
+                                            ctx.trialBasisVectorJacobian(static_cast<LocalIndex>(j), q);
+                                        Jrc.deriv[j] =
+                                            Jphi[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                                    }
+                                }
+                                out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = Jrc;
+                            }
+                        }
+                        return out;
+                    }
 	                    LocalIndex dofs_per_component = 0;
 	                    if (state_current && env.trial_active == side) {
 	                        const LocalIndex n_trial = ctx.numTrialDofs();

@@ -269,22 +269,17 @@ FunctionSpace::Jacobian FunctionSpace::evaluate_jacobian(
         return result;
     }
 
-    // Vector-valued bases do not currently expose analytic basis Jacobians, so
-    // differentiate the public field evaluation numerically in reference space.
-    const Real eps = Real(1e-6);
-    const int dim = std::max(0, topological_dimension());
-    for (int d = 0; d < dim && d < 3; ++d) {
-        Value forward = xi;
-        Value backward = xi;
-        forward[static_cast<std::size_t>(d)] += eps;
-        backward[static_cast<std::size_t>(d)] -= eps;
+    std::vector<basis::VectorJacobian> jacobians;
+    jacobians.resize(ndofs);
+    basis.evaluate_vector_jacobians(xi, jacobians);
 
-        const Value vf = evaluate(forward, coefficients);
-        const Value vb = evaluate(backward, coefficients);
-        const Value diff = (vf - vb) / (Real(2) * eps);
-        for (int comp = 0; comp < 3; ++comp) {
-            result(static_cast<std::size_t>(comp), static_cast<std::size_t>(d)) =
-                diff[static_cast<std::size_t>(comp)];
+    for (std::size_t i = 0; i < ndofs; ++i) {
+        const Real coef = coefficients[i];
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                result(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) +=
+                    coef * jacobians[i](static_cast<std::size_t>(r), static_cast<std::size_t>(c));
+            }
         }
     }
 

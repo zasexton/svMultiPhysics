@@ -51,6 +51,46 @@ public:
     static math::Vector<Real, 3> hcurl_vector(const GeometryMapping& mapping,
                                               const math::Vector<Real, 3>& v_ref,
                                               const math::Matrix<Real, 3, 3>& jacobian_inverse);
+
+    /// Ordinary vector-field Jacobian transform: grad_x v = grad_xi(v) * J^{-1}.
+    static math::Matrix<Real, 3, 3> vector_jacobian(
+        const GeometryMapping& mapping,
+        const math::Matrix<Real, 3, 3>& jac_ref,
+        const math::Vector<Real, 3>& xi);
+
+    /// Ordinary vector-field Jacobian transform with a precomputed inverse Jacobian.
+    static math::Matrix<Real, 3, 3> vector_jacobian(
+        const GeometryMapping& mapping,
+        const math::Matrix<Real, 3, 3>& jac_ref,
+        const math::Matrix<Real, 3, 3>& jacobian_inverse);
+
+    /// Affine H(div) Piola vector-Jacobian transform:
+    /// grad_x v = (1/detJ) * J * grad_xi(v_hat) * J^{-1}.
+    static math::Matrix<Real, 3, 3> hdiv_vector_jacobian(
+        const GeometryMapping& mapping,
+        const math::Matrix<Real, 3, 3>& jac_ref,
+        const math::Vector<Real, 3>& xi);
+
+    /// Affine H(div) Piola vector-Jacobian transform with precomputed geometry.
+    static math::Matrix<Real, 3, 3> hdiv_vector_jacobian(
+        const GeometryMapping& mapping,
+        const math::Matrix<Real, 3, 3>& jac_ref,
+        const math::Matrix<Real, 3, 3>& jacobian,
+        const math::Matrix<Real, 3, 3>& jacobian_inverse,
+        Real det_jacobian);
+
+    /// Affine H(curl) Piola vector-Jacobian transform:
+    /// grad_x v = J^{-T} * grad_xi(v_hat) * J^{-1}.
+    static math::Matrix<Real, 3, 3> hcurl_vector_jacobian(
+        const GeometryMapping& mapping,
+        const math::Matrix<Real, 3, 3>& jac_ref,
+        const math::Vector<Real, 3>& xi);
+
+    /// Affine H(curl) Piola vector-Jacobian transform with a precomputed inverse Jacobian.
+    static math::Matrix<Real, 3, 3> hcurl_vector_jacobian(
+        const GeometryMapping& mapping,
+        const math::Matrix<Real, 3, 3>& jac_ref,
+        const math::Matrix<Real, 3, 3>& jacobian_inverse);
 };
 
 } // namespace geometry

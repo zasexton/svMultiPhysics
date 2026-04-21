@@ -480,6 +480,7 @@ private:
         std::vector<AssemblyContext::Matrix3x3> fsd_vector_comp_hessians;
         std::vector<Real> fsd_vector_comp_laplacians;
         std::vector<math::Vector<Real, 3>> vec_values_at_pt;
+        std::vector<basis::VectorJacobian> vec_jacobians_at_pt;
         std::vector<math::Vector<Real, 3>> vec_curls_at_pt;
         std::vector<Real> vec_divs_at_pt;
     };
@@ -827,6 +828,7 @@ private:
     std::vector<Real> scratch_integration_weights_;
     std::vector<Real> scratch_basis_values_;
     std::vector<AssemblyContext::Vector3D> scratch_basis_vector_values_;
+    std::vector<AssemblyContext::Matrix3x3> scratch_basis_vector_jacobians_;
     std::vector<AssemblyContext::Vector3D> scratch_basis_curls_;
     std::vector<Real> scratch_basis_divergences_;
     std::vector<AssemblyContext::Vector3D> scratch_ref_gradients_;
@@ -846,6 +848,7 @@ private:
     std::vector<basis::Gradient> scratch_scalar_gradients_at_pt_;
     std::vector<basis::Hessian> scratch_scalar_hessians_at_pt_;
     std::vector<math::Vector<Real, 3>> scratch_vec_values_at_pt_;
+    std::vector<basis::VectorJacobian> scratch_vec_jacobians_at_pt_;
     std::vector<math::Vector<Real, 3>> scratch_vec_curls_at_pt_;
     std::vector<Real> scratch_vec_divs_at_pt_;
     std::vector<Real> scratch_field_local_coeffs_;

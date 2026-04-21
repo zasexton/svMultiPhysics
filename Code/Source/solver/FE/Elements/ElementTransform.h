@@ -84,6 +84,30 @@ public:
                                           const std::vector<math::Vector<Real, 3>>& v_ref,
                                           std::vector<math::Vector<Real, 3>>& v_phys);
 
+    /**
+     * @brief Ordinary vector-field Jacobian transform.
+     */
+    static void vector_jacobians_to_physical(const geometry::GeometryMapping& mapping,
+                                             const math::Vector<Real, 3>& xi,
+                                             const std::vector<basis::VectorJacobian>& jac_ref,
+                                             std::vector<basis::VectorJacobian>& jac_phys);
+
+    /**
+     * @brief Affine H(div) Piola transform for vector-basis Jacobians.
+     */
+    static void hdiv_vector_jacobians_to_physical(const geometry::GeometryMapping& mapping,
+                                                  const math::Vector<Real, 3>& xi,
+                                                  const std::vector<basis::VectorJacobian>& jac_ref,
+                                                  std::vector<basis::VectorJacobian>& jac_phys);
+
+    /**
+     * @brief Affine H(curl) Piola transform for vector-basis Jacobians.
+     */
+    static void hcurl_vector_jacobians_to_physical(const geometry::GeometryMapping& mapping,
+                                                   const math::Vector<Real, 3>& xi,
+                                                   const std::vector<basis::VectorJacobian>& jac_ref,
+                                                   std::vector<basis::VectorJacobian>& jac_phys);
+
     // =========================================================================
     // Facet Frame and Trace Evaluation
     // =========================================================================
@@ -194,4 +218,3 @@ public:
 } // namespace svmp
 
 #endif // SVMP_FE_ELEMENTS_ELEMENTTRANSFORM_H
-

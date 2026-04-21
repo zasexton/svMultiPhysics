@@ -31,6 +31,7 @@ namespace basis {
 
 using Gradient = math::Vector<Real, 3>;
 using Hessian  = math::Matrix<Real, 3, 3>;
+using VectorJacobian = math::Matrix<Real, 3, 3>;
 
 /**
  * @brief Base interface for scalar and vector-valued basis families
@@ -103,6 +104,16 @@ public:
     virtual void evaluate_vector_values(const math::Vector<Real, 3>& xi,
                                         std::vector<math::Vector<Real, 3>>& values) const;
 
+    /**
+     * @brief Evaluate reference-space Jacobians of vector-valued basis functions
+     *
+     * The returned matrix for basis function `i` has entries
+     * `jacobians[i](component, derivative_direction) = d phi_i_component / d xi_direction`.
+     * Unused rows/columns are zero-filled for lower-dimensional elements.
+     */
+    virtual void evaluate_vector_jacobians(const math::Vector<Real, 3>& xi,
+                                           std::vector<VectorJacobian>& jacobians) const;
+
     /// Evaluate divergence of vector-valued basis functions (if applicable)
     virtual void evaluate_divergence(const math::Vector<Real, 3>& xi,
                                      std::vector<Real>& divergence) const;
@@ -140,6 +151,12 @@ inline void BasisFunction::evaluate_hessians(const math::Vector<Real, 3>& xi,
 inline void BasisFunction::evaluate_vector_values(const math::Vector<Real, 3>&,
                                                   std::vector<math::Vector<Real, 3>>&) const {
     throw BasisEvaluationException("Vector-valued evaluation requested on scalar basis",
+                                   __FILE__, __LINE__, __func__);
+}
+
+inline void BasisFunction::evaluate_vector_jacobians(const math::Vector<Real, 3>&,
+                                                     std::vector<VectorJacobian>&) const {
+    throw BasisEvaluationException("Vector-basis Jacobian evaluation requested on scalar basis",
                                    __FILE__, __LINE__, __func__);
 }
 

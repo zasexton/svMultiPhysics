@@ -28,6 +28,8 @@ namespace {
 
 using Vec3 = math::Vector<Real, 3>;
 
+inline std::vector<Real> powers(Real x, int max_p);
+
 inline bool is_triangle(ElementType type) {
     return type == ElementType::Triangle3 || type == ElementType::Triangle6;
 }
@@ -180,6 +182,95 @@ inline Real eval_transformed_rt_monomial_divergence(const std::array<int, 4>& mo
            px[static_cast<std::size_t>(px_pow)] *
            py[static_cast<std::size_t>(py_pow)] *
            pz[static_cast<std::size_t>(pz_pow - 1)];
+}
+
+inline void add_component_monomial_jacobian(VectorJacobian& J,
+                                            int component,
+                                            int px_pow,
+                                            int py_pow,
+                                            int pz_pow,
+                                            Real coefficient,
+                                            const std::vector<Real>& px,
+                                            const std::vector<Real>& py,
+                                            const std::vector<Real>& pz) {
+    const auto comp = static_cast<std::size_t>(component);
+    if (px_pow > 0) {
+        J(comp, 0) += coefficient * Real(px_pow) *
+                      px[static_cast<std::size_t>(px_pow - 1)] *
+                      py[static_cast<std::size_t>(py_pow)] *
+                      pz[static_cast<std::size_t>(pz_pow)];
+    }
+    if (py_pow > 0) {
+        J(comp, 1) += coefficient * Real(py_pow) *
+                      px[static_cast<std::size_t>(px_pow)] *
+                      py[static_cast<std::size_t>(py_pow - 1)] *
+                      pz[static_cast<std::size_t>(pz_pow)];
+    }
+    if (pz_pow > 0) {
+        J(comp, 2) += coefficient * Real(pz_pow) *
+                      px[static_cast<std::size_t>(px_pow)] *
+                      py[static_cast<std::size_t>(py_pow)] *
+                      pz[static_cast<std::size_t>(pz_pow - 1)];
+    }
+}
+
+inline VectorJacobian eval_transformed_component_monomial_jacobian(
+    const std::array<int, 4>& mono,
+    const std::vector<Real>& px,
+    const std::vector<Real>& py,
+    const std::vector<Real>& pz) {
+    VectorJacobian J{};
+    add_component_monomial_jacobian(J, mono[0], mono[1], mono[2], mono[3], Real(1), px, py, pz);
+    return J;
+}
+
+template <typename ModalPolynomials>
+void evaluate_nodal_modal_vector_jacobians(const ModalPolynomials& monomials,
+                                           const std::vector<Real>& coeffs,
+                                           std::size_t n,
+                                           const Vec3& xi,
+                                           std::vector<VectorJacobian>& jacobians) {
+    jacobians.assign(n, VectorJacobian{});
+
+    int max_px = 0;
+    int max_py = 0;
+    int max_pz = 0;
+    for (const auto& poly : monomials) {
+        for (int t = 0; t < poly.num_terms; ++t) {
+            const auto& m = poly.terms[static_cast<std::size_t>(t)];
+            max_px = std::max(max_px, m.px);
+            max_py = std::max(max_py, m.py);
+            max_pz = std::max(max_pz, m.pz);
+        }
+    }
+
+    const auto px = powers(xi[0], max_px);
+    const auto py = powers(xi[1], max_py);
+    const auto pz = powers(xi[2], max_pz);
+
+    std::vector<VectorJacobian> modal_jacs(n, VectorJacobian{});
+    for (std::size_t p = 0; p < n; ++p) {
+        const auto& poly = monomials[p];
+        auto& J = modal_jacs[p];
+        for (int t = 0; t < poly.num_terms; ++t) {
+            const auto& m = poly.terms[static_cast<std::size_t>(t)];
+            add_component_monomial_jacobian(J, m.component, m.px, m.py, m.pz, m.coefficient, px, py, pz);
+        }
+    }
+
+    FE_CHECK_ARG(coeffs.size() == n * n,
+                 "evaluate_nodal_modal_vector_jacobians: coefficient size mismatch");
+    for (std::size_t p = 0; p < n; ++p) {
+        const auto& Jp = modal_jacs[p];
+        for (std::size_t j = 0; j < n; ++j) {
+            const Real c = coeffs[p * n + j];
+            for (std::size_t r = 0; r < 3; ++r) {
+                for (std::size_t col = 0; col < 3; ++col) {
+                    jacobians[j](r, col) += c * Jp(r, col);
+                }
+            }
+        }
+    }
 }
 
 inline std::vector<std::array<int, 4>> make_nd_extra_monomial_candidates(ElementType,
@@ -347,6 +438,33 @@ void eval_direct_curl_exact(const Vec3& xi,
 }
 
 template <typename EvalFn>
+void eval_direct_jacobians_exact(const Vec3& xi,
+                                 EvalFn&& eval,
+                                 std::vector<VectorJacobian>& jacobians) {
+    using DiffVec3 = DirectVec3<Diff3>;
+
+    std::vector<DiffVec3> values;
+    eval(make_direct_vec3(Diff3::variable_x(xi[0]),
+                          Diff3::variable_y(xi[1]),
+                          Diff3::variable_z(xi[2])),
+         values);
+
+    jacobians.assign(values.size(), VectorJacobian{});
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        const auto& v = values[i];
+        jacobians[i](0, 0) = v[0].dx;
+        jacobians[i](0, 1) = v[0].dy;
+        jacobians[i](0, 2) = v[0].dz;
+        jacobians[i](1, 0) = v[1].dx;
+        jacobians[i](1, 1) = v[1].dy;
+        jacobians[i](1, 2) = v[1].dz;
+        jacobians[i](2, 0) = v[2].dx;
+        jacobians[i](2, 1) = v[2].dy;
+        jacobians[i](2, 2) = v[2].dz;
+    }
+}
+
+template <typename EvalFn>
 void eval_direct_divergence_exact(const Vec3& xi,
                                   EvalFn&& eval,
                                   std::vector<Real>& divergence) {
@@ -401,19 +519,23 @@ void eval_direct_divergence_exact(const Vec3& xi,
 // - Face functions: satisfy face normal flux moments
 // - Interior functions: bubble functions with zero normal flux on all faces
 
-inline void eval_wedge_rt1_direct(const Vec3& xi, std::vector<Vec3>& values) {
-    const Real x = xi[0];
-    const Real y = xi[1];
-    const Real z = xi[2];
+template <typename Scalar>
+inline void eval_wedge_rt1_direct_impl(const DirectVec3<Scalar>& xi,
+                                       std::vector<DirectVec3<Scalar>>& values) {
+    using ValueVec = DirectVec3<Scalar>;
+
+    const auto x = xi[0];
+    const auto y = xi[1];
+    const auto z = xi[2];
 
     // Barycentric coordinates for the triangular cross-section
-    const Real L0 = Real(1) - x - y;  // opposite to edge from v1 to v2
-    const Real L1 = x;
-    const Real L2 = y;
+    const auto L0 = Real(1) - x - y;  // opposite to edge from v1 to v2
+    const auto L1 = x;
+    const auto L2 = y;
 
     // Linear z-selectors
-    const Real zb = (Real(1) - z) * Real(0.5);  // 1 at z=-1, 0 at z=+1
-    const Real zt = (Real(1) + z) * Real(0.5);  // 0 at z=-1, 1 at z=+1
+    const auto zb = (Real(1) - z) * Real(0.5);  // 1 at z=-1, 0 at z=+1
+    const auto zt = (Real(1) + z) * Real(0.5);  // 0 at z=-1, 1 at z=+1
 
     values.resize(24);
     std::size_t idx = 0;
@@ -427,22 +549,22 @@ inline void eval_wedge_rt1_direct(const Vec3& xi, std::vector<Vec3>& values) {
     // Basis function for DOF i has unit moment against test_i and zero against others
 
     // Face DOF 0: test = 1 (constant)
-    values[idx++] = Vec3{Real(0), Real(0), zb * (Real(-2))};
+    values[idx++] = ValueVec{Real(0), Real(0), zb * (Real(-2))};
     // Face DOF 1: test = x (linear in x)
-    values[idx++] = Vec3{Real(0), Real(0), zb * (Real(-6) * x + Real(2))};
+    values[idx++] = ValueVec{Real(0), Real(0), zb * (Real(-6) * x + Real(2))};
     // Face DOF 2: test = y (linear in y)
-    values[idx++] = Vec3{Real(0), Real(0), zb * (Real(-6) * y + Real(2))};
+    values[idx++] = ValueVec{Real(0), Real(0), zb * (Real(-6) * y + Real(2))};
 
     // ==========================================================================
     // Top triangular face (z=+1): 3 DOFs - P_1 normal flux moments
     // Normal n = (0, 0, +1), so v.n = v_z
     // ==========================================================================
     // Face DOF 3: test = 1
-    values[idx++] = Vec3{Real(0), Real(0), zt * Real(2)};
+    values[idx++] = ValueVec{Real(0), Real(0), zt * Real(2)};
     // Face DOF 4: test = x
-    values[idx++] = Vec3{Real(0), Real(0), zt * (Real(6) * x - Real(2))};
+    values[idx++] = ValueVec{Real(0), Real(0), zt * (Real(6) * x - Real(2))};
     // Face DOF 5: test = y
-    values[idx++] = Vec3{Real(0), Real(0), zt * (Real(6) * y - Real(2))};
+    values[idx++] = ValueVec{Real(0), Real(0), zt * (Real(6) * y - Real(2))};
 
     // ==========================================================================
     // Quad face 2 (y=0): 4 DOFs - Q_1 normal flux moments
@@ -451,20 +573,20 @@ inline void eval_wedge_rt1_direct(const Vec3& xi, std::vector<Vec3>& values) {
     // Q_1 test functions: {1, x, z, x*z} (mapped to face coords)
     // ==========================================================================
     // Use y-localization: (1-y) gives 1 on face, 0 on opposite edge
-    values[idx++] = Vec3{Real(0), (y - Real(1)), Real(0)}; // DOF 6: test = 1
-    values[idx++] = Vec3{Real(0), (y - Real(1)) * (Real(3) * x - Real(1)), Real(0)}; // DOF 7: test = x
-    values[idx++] = Vec3{Real(0), (y - Real(1)) * z, Real(0)}; // DOF 8: test = z
-    values[idx++] = Vec3{Real(0), (y - Real(1)) * (Real(3) * x - Real(1)) * z, Real(0)}; // DOF 9: test = x*z
+    values[idx++] = ValueVec{Real(0), (y - Real(1)), Real(0)}; // DOF 6: test = 1
+    values[idx++] = ValueVec{Real(0), (y - Real(1)) * (Real(3) * x - Real(1)), Real(0)}; // DOF 7: test = x
+    values[idx++] = ValueVec{Real(0), (y - Real(1)) * z, Real(0)}; // DOF 8: test = z
+    values[idx++] = ValueVec{Real(0), (y - Real(1)) * (Real(3) * x - Real(1)) * z, Real(0)}; // DOF 9: test = x*z
 
     // ==========================================================================
     // Quad face 3 (x=0): 4 DOFs - Q_1 normal flux moments
     // Normal n = (-1, 0, 0), so v.n = -v_x
     // Face parameterized by (y, z) in [0,1] x [-1,1]
     // ==========================================================================
-    values[idx++] = Vec3{(x - Real(1)), Real(0), Real(0)}; // DOF 10: test = 1
-    values[idx++] = Vec3{(x - Real(1)) * (Real(3) * y - Real(1)), Real(0), Real(0)}; // DOF 11: test = y
-    values[idx++] = Vec3{(x - Real(1)) * z, Real(0), Real(0)}; // DOF 12: test = z
-    values[idx++] = Vec3{(x - Real(1)) * (Real(3) * y - Real(1)) * z, Real(0), Real(0)}; // DOF 13: test = y*z
+    values[idx++] = ValueVec{(x - Real(1)), Real(0), Real(0)}; // DOF 10: test = 1
+    values[idx++] = ValueVec{(x - Real(1)) * (Real(3) * y - Real(1)), Real(0), Real(0)}; // DOF 11: test = y
+    values[idx++] = ValueVec{(x - Real(1)) * z, Real(0), Real(0)}; // DOF 12: test = z
+    values[idx++] = ValueVec{(x - Real(1)) * (Real(3) * y - Real(1)) * z, Real(0), Real(0)}; // DOF 13: test = y*z
 
     // ==========================================================================
     // Quad face 4 (x+y=1): 4 DOFs - Q_1 normal flux moments
@@ -474,13 +596,13 @@ inline void eval_wedge_rt1_direct(const Vec3& xi, std::vector<Vec3>& values) {
     // On face x+y=1: localization = 1
     // On opposite edge (x=0, y=0): localization = -1
     // ==========================================================================
-    const Real loc4 = x + y;  // 1 on face, 0 on opposite vertex
+    const auto loc4 = x + y;  // 1 on face, 0 on opposite vertex
     // v.n needs to integrate correctly against Q_1 tests
     // Use v = (loc4 * f, loc4 * f, 0) so v.n = sqrt(2) * loc4 * f
-    values[idx++] = Vec3{loc4, loc4, Real(0)}; // DOF 14: test = 1
-    values[idx++] = Vec3{loc4 * (Real(3) * x - Real(1)), loc4 * (Real(3) * x - Real(1)), Real(0)}; // DOF 15: test = s (face param)
-    values[idx++] = Vec3{loc4 * z, loc4 * z, Real(0)}; // DOF 16: test = z
-    values[idx++] = Vec3{loc4 * (Real(3) * x - Real(1)) * z, loc4 * (Real(3) * x - Real(1)) * z, Real(0)}; // DOF 17: test = s*z
+    values[idx++] = ValueVec{loc4, loc4, Real(0)}; // DOF 14: test = 1
+    values[idx++] = ValueVec{loc4 * (Real(3) * x - Real(1)), loc4 * (Real(3) * x - Real(1)), Real(0)}; // DOF 15: test = s (face param)
+    values[idx++] = ValueVec{loc4 * z, loc4 * z, Real(0)}; // DOF 16: test = z
+    values[idx++] = ValueVec{loc4 * (Real(3) * x - Real(1)) * z, loc4 * (Real(3) * x - Real(1)) * z, Real(0)}; // DOF 17: test = s*z
 
     // ==========================================================================
     // Interior DOFs: 6 DOFs
@@ -490,17 +612,21 @@ inline void eval_wedge_rt1_direct(const Vec3& xi, std::vector<Vec3>& values) {
     // Use: v = bubble(x,y,z) * constant_vector
     // Bubble = L0*L1*L2 * (1-z^2) = x*(1-x-y)*y*(1-z^2)
     // ==========================================================================
-    const Real bubble_xy = L0 * L1 * L2;  // = x*(1-x-y)*y, zero on all edges of triangle
-    const Real bubble_z = (Real(1) - z * z);  // zero at z = +/- 1
-    const Real bubble = bubble_xy * bubble_z;
+    const auto bubble_xy = L0 * L1 * L2;  // = x*(1-x-y)*y, zero on all edges of triangle
+    const auto bubble_z = (Real(1) - z * z);  // zero at z = +/- 1
+    const auto bubble = bubble_xy * bubble_z;
 
     // 6 interior DOFs: test against {e_x, e_y, e_z, z*e_x, z*e_y, z*e_z}
-    values[idx++] = Vec3{bubble * Real(60), Real(0), Real(0)}; // DOF 18
-    values[idx++] = Vec3{Real(0), bubble * Real(60), Real(0)}; // DOF 19
-    values[idx++] = Vec3{Real(0), Real(0), bubble * Real(60)}; // DOF 20
-    values[idx++] = Vec3{bubble * z * Real(180), Real(0), Real(0)}; // DOF 21
-    values[idx++] = Vec3{Real(0), bubble * z * Real(180), Real(0)}; // DOF 22
-    values[idx++] = Vec3{Real(0), Real(0), bubble * z * Real(180)}; // DOF 23
+    values[idx++] = ValueVec{bubble * Real(60), Real(0), Real(0)}; // DOF 18
+    values[idx++] = ValueVec{Real(0), bubble * Real(60), Real(0)}; // DOF 19
+    values[idx++] = ValueVec{Real(0), Real(0), bubble * Real(60)}; // DOF 20
+    values[idx++] = ValueVec{bubble * z * Real(180), Real(0), Real(0)}; // DOF 21
+    values[idx++] = ValueVec{Real(0), bubble * z * Real(180), Real(0)}; // DOF 22
+    values[idx++] = ValueVec{Real(0), Real(0), bubble * z * Real(180)}; // DOF 23
+}
+
+inline void eval_wedge_rt1_direct(const Vec3& xi, std::vector<Vec3>& values) {
+    eval_direct_values_real(xi, eval_wedge_rt1_direct_impl<Real>, values);
 }
 
 inline void eval_wedge_rt1_divergence_direct(const Vec3& xi, std::vector<Real>& divergence) {
@@ -712,16 +838,20 @@ inline void eval_wedge_nd1_direct(const Vec3& xi, std::vector<Vec3>& values) {
 //   - 4 tri faces: 3 DOFs each = 12 DOFs (P_1 normal moments)
 //   - Interior: 3 DOFs
 
-inline void eval_pyramid_rt1_direct(const Vec3& xi, std::vector<Vec3>& values) {
-    const Real x = xi[0];
-    const Real y = xi[1];
-    const Real z = xi[2];
+template <typename Scalar>
+inline void eval_pyramid_rt1_direct_impl(const DirectVec3<Scalar>& xi,
+                                         std::vector<DirectVec3<Scalar>>& values) {
+    using ValueVec = DirectVec3<Scalar>;
+
+    const auto x = xi[0];
+    const auto y = xi[1];
+    const auto z = xi[2];
 
     // For pyramid, z in [0,1], base at z=0, apex at z=1
     // Base spans [-1,1] x [-1,1] at z=0
 
     // Vertex-based coordinates for the base quad
-    const Real zc = Real(1) - z;  // complement of z, 1 at base, 0 at apex
+    const auto zc = Real(1) - z;  // complement of z, 1 at base, 0 at apex
 
     values.resize(19);
     std::size_t idx = 0;
@@ -731,60 +861,64 @@ inline void eval_pyramid_rt1_direct(const Vec3& xi, std::vector<Vec3>& values) {
     // Normal n = (0,0,-1), v.n = -v_z
     // Q_1 test functions on base: {1, x, y, xy}
     // ==========================================================================
-    values[idx++] = Vec3{Real(0), Real(0), -zc}; // DOF 0: test = 1
-    values[idx++] = Vec3{Real(0), Real(0), -zc * x * Real(3)}; // DOF 1: test = x
-    values[idx++] = Vec3{Real(0), Real(0), -zc * y * Real(3)}; // DOF 2: test = y
-    values[idx++] = Vec3{Real(0), Real(0), -zc * x * y * Real(9)}; // DOF 3: test = xy
+    values[idx++] = ValueVec{Real(0), Real(0), -zc}; // DOF 0: test = 1
+    values[idx++] = ValueVec{Real(0), Real(0), -zc * x * Real(3)}; // DOF 1: test = x
+    values[idx++] = ValueVec{Real(0), Real(0), -zc * y * Real(3)}; // DOF 2: test = y
+    values[idx++] = ValueVec{Real(0), Real(0), -zc * x * y * Real(9)}; // DOF 3: test = xy
 
     // ==========================================================================
     // Triangular face 1 (front, y = -1+z at apex): 3 DOFs
     // Vertices: v0=(-1,-1,0), v1=(1,-1,0), v4=(0,0,1)
     // Outward normal points in -y direction
     // ==========================================================================
-    const Real loc_f1 = Real(1) + y - z;  // 1 on face 1, decreases away from it
-    values[idx++] = Vec3{Real(0), -loc_f1, Real(0)}; // DOF 4: test = 1
-    values[idx++] = Vec3{Real(0), -loc_f1 * x * Real(3), Real(0)}; // DOF 5: test = x (face param)
-    values[idx++] = Vec3{Real(0), -loc_f1 * z * Real(3), Real(0)}; // DOF 6: test = z (face param)
+    const auto loc_f1 = Real(1) + y - z;  // 1 on face 1, decreases away from it
+    values[idx++] = ValueVec{Real(0), -loc_f1, Real(0)}; // DOF 4: test = 1
+    values[idx++] = ValueVec{Real(0), -loc_f1 * x * Real(3), Real(0)}; // DOF 5: test = x (face param)
+    values[idx++] = ValueVec{Real(0), -loc_f1 * z * Real(3), Real(0)}; // DOF 6: test = z (face param)
 
     // ==========================================================================
     // Triangular face 2 (right, x = 1-z at apex): 3 DOFs
     // Vertices: v1=(1,-1,0), v2=(1,1,0), v4=(0,0,1)
     // Outward normal points in +x direction
     // ==========================================================================
-    const Real loc_f2 = Real(1) - x - z;  // 1 on face 2
-    values[idx++] = Vec3{-loc_f2, Real(0), Real(0)}; // DOF 7: test = 1
-    values[idx++] = Vec3{-loc_f2 * y * Real(3), Real(0), Real(0)}; // DOF 8: test = y
-    values[idx++] = Vec3{-loc_f2 * z * Real(3), Real(0), Real(0)}; // DOF 9: test = z
+    const auto loc_f2 = Real(1) - x - z;  // 1 on face 2
+    values[idx++] = ValueVec{-loc_f2, Real(0), Real(0)}; // DOF 7: test = 1
+    values[idx++] = ValueVec{-loc_f2 * y * Real(3), Real(0), Real(0)}; // DOF 8: test = y
+    values[idx++] = ValueVec{-loc_f2 * z * Real(3), Real(0), Real(0)}; // DOF 9: test = z
 
     // ==========================================================================
     // Triangular face 3 (back, y = 1-z at apex): 3 DOFs
     // Vertices: v2=(1,1,0), v3=(-1,1,0), v4=(0,0,1)
     // Outward normal points in +y direction
     // ==========================================================================
-    const Real loc_f3 = Real(1) - y - z;  // 1 on face 3
-    values[idx++] = Vec3{Real(0), -loc_f3, Real(0)}; // DOF 10: test = 1
-    values[idx++] = Vec3{Real(0), -loc_f3 * x * Real(3), Real(0)}; // DOF 11: test = x
-    values[idx++] = Vec3{Real(0), -loc_f3 * z * Real(3), Real(0)}; // DOF 12: test = z
+    const auto loc_f3 = Real(1) - y - z;  // 1 on face 3
+    values[idx++] = ValueVec{Real(0), -loc_f3, Real(0)}; // DOF 10: test = 1
+    values[idx++] = ValueVec{Real(0), -loc_f3 * x * Real(3), Real(0)}; // DOF 11: test = x
+    values[idx++] = ValueVec{Real(0), -loc_f3 * z * Real(3), Real(0)}; // DOF 12: test = z
 
     // ==========================================================================
     // Triangular face 4 (left, x = -1+z at apex): 3 DOFs
     // Vertices: v3=(-1,1,0), v0=(-1,-1,0), v4=(0,0,1)
     // Outward normal points in -x direction
     // ==========================================================================
-    const Real loc_f4 = Real(1) + x - z;  // 1 on face 4
-    values[idx++] = Vec3{loc_f4, Real(0), Real(0)}; // DOF 13: test = 1
-    values[idx++] = Vec3{loc_f4 * y * Real(3), Real(0), Real(0)}; // DOF 14: test = y
-    values[idx++] = Vec3{loc_f4 * z * Real(3), Real(0), Real(0)}; // DOF 15: test = z
+    const auto loc_f4 = Real(1) + x - z;  // 1 on face 4
+    values[idx++] = ValueVec{loc_f4, Real(0), Real(0)}; // DOF 13: test = 1
+    values[idx++] = ValueVec{loc_f4 * y * Real(3), Real(0), Real(0)}; // DOF 14: test = y
+    values[idx++] = ValueVec{loc_f4 * z * Real(3), Real(0), Real(0)}; // DOF 15: test = z
 
     // ==========================================================================
     // Interior DOFs: 3 DOFs
     // Bubble function that vanishes on all faces
     // ==========================================================================
     // Interior bubble: product of all face localizations
-    const Real bubble = zc * loc_f1 * loc_f2 * loc_f3 * loc_f4;
-    values[idx++] = Vec3{bubble * Real(120), Real(0), Real(0)}; // DOF 16
-    values[idx++] = Vec3{Real(0), bubble * Real(120), Real(0)}; // DOF 17
-    values[idx++] = Vec3{Real(0), Real(0), bubble * Real(120)}; // DOF 18
+    const auto bubble = zc * loc_f1 * loc_f2 * loc_f3 * loc_f4;
+    values[idx++] = ValueVec{bubble * Real(120), Real(0), Real(0)}; // DOF 16
+    values[idx++] = ValueVec{Real(0), bubble * Real(120), Real(0)}; // DOF 17
+    values[idx++] = ValueVec{Real(0), Real(0), bubble * Real(120)}; // DOF 18
+}
+
+inline void eval_pyramid_rt1_direct(const Vec3& xi, std::vector<Vec3>& values) {
+    eval_direct_values_real(xi, eval_pyramid_rt1_direct_impl<Real>, values);
 }
 
 inline void eval_pyramid_rt1_divergence_direct(const Vec3& xi, std::vector<Real>& divergence) {
@@ -2810,6 +2944,151 @@ void RaviartThomasBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
     values[5] = math::Vector<Real, 3>{Real(0), Real(0), Real(0.25) * (Real(1) - z)};
 }
 
+void RaviartThomasBasis::evaluate_vector_jacobians(const math::Vector<Real, 3>& xi,
+                                                   std::vector<VectorJacobian>& jacobians) const {
+    if (use_transformed_direct_seed_) {
+        const std::size_t n = size_;
+        const std::size_t num_seed = transformed_seed_indices_.size();
+        const std::size_t num_extra = transformed_monomial_candidates_.size();
+        const std::size_t candidate_count = num_seed + num_extra;
+        jacobians.assign(n, VectorJacobian{});
+        FE_CHECK_ARG(coeffs_.size() == candidate_count * n,
+                     "RaviartThomasBasis::evaluate_vector_jacobians: transformed RT coefficient size mismatch");
+
+        std::size_t candidate = 0;
+        if (num_seed > 0) {
+            std::vector<VectorJacobian> seed_jacobians;
+            if (is_wedge(element_type_) && order_ == 1) {
+                eval_direct_jacobians_exact(xi, eval_wedge_rt1_direct_impl<Diff3>, seed_jacobians);
+            } else if (is_wedge(element_type_) && order_ == 2) {
+                eval_direct_jacobians_exact(xi, eval_wedge_rt2_direct_impl<Diff3>, seed_jacobians);
+            } else if (is_pyramid(element_type_) && order_ == 1) {
+                eval_direct_jacobians_exact(xi, eval_pyramid_rt1_direct_impl<Diff3>, seed_jacobians);
+            } else if (is_pyramid(element_type_) && order_ == 2) {
+                eval_direct_jacobians_exact(xi, eval_pyramid_rt2_direct_impl<Diff3>, seed_jacobians);
+            } else {
+                throw NotImplementedException(
+                    "RaviartThomasBasis::evaluate_vector_jacobians: transformed RT seed Jacobians currently support wedge/pyramid orders 1-2",
+                    __FILE__, __LINE__, __func__);
+            }
+            FE_CHECK_ARG(seed_jacobians.size() >= num_seed,
+                         "RaviartThomasBasis::evaluate_vector_jacobians: RT seed Jacobian size mismatch");
+
+            for (int seed_idx : transformed_seed_indices_) {
+                FE_CHECK_ARG(seed_idx >= 0 &&
+                                 static_cast<std::size_t>(seed_idx) < seed_jacobians.size(),
+                             "RaviartThomasBasis::evaluate_vector_jacobians: transformed RT seed index out of range");
+                const auto& seed = seed_jacobians[static_cast<std::size_t>(seed_idx)];
+                for (std::size_t j = 0; j < n; ++j) {
+                    const Real c = coeffs_[candidate * n + j];
+                    for (std::size_t r = 0; r < 3; ++r) {
+                        for (std::size_t col = 0; col < 3; ++col) {
+                            jacobians[j](r, col) += c * seed(r, col);
+                        }
+                    }
+                }
+                ++candidate;
+            }
+        }
+
+        if (num_extra > 0) {
+            int max_px = 0;
+            int max_py = 0;
+            int max_pz = 0;
+            for (const auto& mono : transformed_monomial_candidates_) {
+                max_px = std::max(max_px, mono[1]);
+                max_py = std::max(max_py, mono[2]);
+                max_pz = std::max(max_pz, mono[3]);
+            }
+            const auto px = powers(xi[0], max_px);
+            const auto py = powers(xi[1], max_py);
+            const auto pz = powers(xi[2], max_pz);
+
+            for (const auto& mono : transformed_monomial_candidates_) {
+                const auto J = eval_transformed_component_monomial_jacobian(mono, px, py, pz);
+                for (std::size_t j = 0; j < n; ++j) {
+                    const Real c = coeffs_[candidate * n + j];
+                    for (std::size_t r = 0; r < 3; ++r) {
+                        for (std::size_t col = 0; col < 3; ++col) {
+                            jacobians[j](r, col) += c * J(r, col);
+                        }
+                    }
+                }
+                ++candidate;
+            }
+        }
+        return;
+    }
+
+    if (nodal_generated_) {
+        evaluate_nodal_modal_vector_jacobians(monomials_, coeffs_, size_, xi, jacobians);
+        return;
+    }
+
+    jacobians.assign(size_, VectorJacobian{});
+
+    if (dimension_ == 2) {
+        if (is_triangle(element_type_)) {
+            constexpr Real inv_sqrt2 = Real(0.70710678118654752440084436210484903928483593768847L);
+            jacobians[0](0, 0) = inv_sqrt2;
+            jacobians[0](1, 1) = inv_sqrt2;
+            jacobians[1](0, 0) = Real(1);
+            jacobians[1](1, 1) = Real(1);
+            jacobians[2](0, 0) = Real(1);
+            jacobians[2](1, 1) = Real(1);
+            return;
+        }
+        jacobians[0](0, 0) = Real(0.5);
+        jacobians[1](0, 0) = -Real(0.5);
+        jacobians[2](1, 1) = Real(0.5);
+        jacobians[3](1, 1) = -Real(0.5);
+        return;
+    }
+
+    if (is_tetrahedron(element_type_)) {
+        constexpr Real c0 = Real(-1.15470053837925152901829756100391491129520350254025L);
+        jacobians[0](0, 0) = -Real(2);
+        jacobians[0](1, 1) = -Real(2);
+        jacobians[0](2, 2) = -Real(2);
+        jacobians[1](0, 0) = -Real(2);
+        jacobians[1](1, 1) = -Real(2);
+        jacobians[1](2, 2) = -Real(2);
+        jacobians[2](0, 0) = c0;
+        jacobians[2](1, 1) = c0;
+        jacobians[2](2, 2) = c0;
+        jacobians[3](0, 0) = -Real(2);
+        jacobians[3](1, 1) = -Real(2);
+        jacobians[3](2, 2) = -Real(2);
+        return;
+    }
+
+    if (is_wedge(element_type_)) {
+        jacobians[0](2, 2) = Real(1);
+        jacobians[1](2, 2) = Real(1);
+        jacobians[2](0, 0) = Real(1);
+        jacobians[3](0, 0) = -Real(1);
+        jacobians[4](0, 0) = -Real(1);
+        return;
+    }
+
+    if (is_pyramid(element_type_)) {
+        jacobians[0](0, 0) = Real(3) / Real(8);
+        jacobians[0](1, 1) = Real(3) / Real(8);
+        jacobians[1](1, 1) = Real(3) / Real(4);
+        jacobians[2](0, 0) = Real(3) / Real(4);
+        jacobians[3](1, 1) = Real(3) / Real(4);
+        jacobians[4](0, 0) = Real(3) / Real(4);
+        return;
+    }
+
+    jacobians[0](0, 0) = Real(0.25);
+    jacobians[1](0, 0) = -Real(0.25);
+    jacobians[2](1, 1) = Real(0.25);
+    jacobians[3](1, 1) = -Real(0.25);
+    jacobians[4](2, 2) = Real(0.25);
+    jacobians[5](2, 2) = -Real(0.25);
+}
+
 void RaviartThomasBasis::evaluate_divergence(const math::Vector<Real, 3>& xi,
                                              std::vector<Real>& divergence) const {
     if (use_transformed_direct_seed_) {
@@ -4278,6 +4557,255 @@ void NedelecBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
     values[11] = math::Vector<Real, 3>{ Real(0), Real(0), Real(0.125) * (Real(1) - x) * (Real(1) + y)};  // 3-7
 }
 
+void NedelecBasis::evaluate_vector_jacobians(const math::Vector<Real, 3>& xi,
+                                             std::vector<VectorJacobian>& jacobians) const {
+    if (use_transformed_direct_seed_) {
+        const std::size_t n = size_;
+        const std::size_t num_seed = (order_ <= 2) ? n : 0u;
+        const std::size_t num_extra = transformed_monomial_candidates_.size();
+        const std::size_t candidate_count = num_seed + num_extra;
+        jacobians.assign(n, VectorJacobian{});
+
+        FE_CHECK_ARG(coeffs_.size() == candidate_count * n,
+                     "NedelecBasis::evaluate_vector_jacobians: transformed ND coefficient size mismatch");
+
+        if (num_seed > 0) {
+            std::vector<VectorJacobian> seed_jacobians;
+            if (is_wedge(element_type_) && order_ == 1) {
+                eval_direct_jacobians_exact(xi, eval_wedge_nd1_direct_impl<Diff3>, seed_jacobians);
+            } else if (is_wedge(element_type_) && order_ == 2) {
+                eval_direct_jacobians_exact(xi, eval_wedge_nd2_direct_impl<Diff3>, seed_jacobians);
+            } else if (is_pyramid(element_type_) && order_ == 1) {
+                eval_direct_jacobians_exact(xi, eval_pyramid_nd1_direct_impl<Diff3>, seed_jacobians);
+            } else if (is_pyramid(element_type_) && order_ == 2) {
+                eval_direct_jacobians_exact(xi, eval_pyramid_nd2_direct_impl<Diff3>, seed_jacobians);
+            } else {
+                throw NotImplementedException(
+                    "NedelecBasis::evaluate_vector_jacobians: transformed ND seed Jacobians currently support wedge/pyramid orders 1-2",
+                    __FILE__, __LINE__, __func__);
+            }
+            FE_CHECK_ARG(seed_jacobians.size() == n,
+                         "NedelecBasis::evaluate_vector_jacobians: ND seed Jacobian size mismatch");
+
+            for (std::size_t p = 0; p < n; ++p) {
+                const auto& Jp = seed_jacobians[p];
+                for (std::size_t j = 0; j < n; ++j) {
+                    const Real c = coeffs_[p * n + j];
+                    for (std::size_t r = 0; r < 3; ++r) {
+                        for (std::size_t col = 0; col < 3; ++col) {
+                            jacobians[j](r, col) += c * Jp(r, col);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (num_extra > 0) {
+            int max_px = 0;
+            int max_py = 0;
+            int max_pz = 0;
+            for (const auto& mono : transformed_monomial_candidates_) {
+                max_px = std::max(max_px, mono[1]);
+                max_py = std::max(max_py, mono[2]);
+                max_pz = std::max(max_pz, mono[3]);
+            }
+            const auto px = powers(xi[0], max_px);
+            const auto py = powers(xi[1], max_py);
+            const auto pz = powers(xi[2], max_pz);
+
+            std::size_t candidate = num_seed;
+            for (const auto& mono : transformed_monomial_candidates_) {
+                const auto J = eval_transformed_component_monomial_jacobian(mono, px, py, pz);
+                for (std::size_t j = 0; j < n; ++j) {
+                    const Real c = coeffs_[candidate * n + j];
+                    for (std::size_t r = 0; r < 3; ++r) {
+                        for (std::size_t col = 0; col < 3; ++col) {
+                            jacobians[j](r, col) += c * J(r, col);
+                        }
+                    }
+                }
+                ++candidate;
+            }
+        }
+        return;
+    }
+
+    if (use_direct_construction_) {
+        if (is_wedge(element_type_)) {
+            if (order_ == 1) {
+                eval_direct_jacobians_exact(xi, eval_wedge_nd1_direct_impl<Diff3>, jacobians);
+            } else if (order_ == 2) {
+                eval_direct_jacobians_exact(xi, eval_wedge_nd2_direct_impl<Diff3>, jacobians);
+            } else {
+                throw NotImplementedException("NedelecBasis direct wedge Jacobian evaluation currently supports orders 1-2",
+                                              __FILE__, __LINE__, __func__);
+            }
+        } else if (is_pyramid(element_type_)) {
+            if (order_ == 1) {
+                eval_direct_jacobians_exact(xi, eval_pyramid_nd1_direct_impl<Diff3>, jacobians);
+            } else if (order_ == 2) {
+                eval_direct_jacobians_exact(xi, eval_pyramid_nd2_direct_impl<Diff3>, jacobians);
+            } else {
+                throw NotImplementedException("NedelecBasis direct pyramid Jacobian evaluation currently supports orders 1-2",
+                                              __FILE__, __LINE__, __func__);
+            }
+        }
+        return;
+    }
+
+    if (nodal_generated_) {
+        evaluate_nodal_modal_vector_jacobians(monomials_, coeffs_, size_, xi, jacobians);
+        return;
+    }
+
+    jacobians.assign(size_, VectorJacobian{});
+
+    if (dimension_ == 2) {
+        if (is_triangle(element_type_)) {
+            for (auto& J : jacobians) {
+                J(0, 1) = -Real(1);
+                J(1, 0) = Real(1);
+            }
+            return;
+        }
+        jacobians[0](0, 1) = -Real(0.25);
+        jacobians[1](1, 0) = Real(0.25);
+        jacobians[2](0, 1) = -Real(0.25);
+        jacobians[3](1, 0) = Real(0.25);
+        return;
+    }
+
+    const Real x = xi[0];
+    const Real y = xi[1];
+    const Real z = xi[2];
+
+    if (is_wedge(element_type_)) {
+        const Real lb = (Real(1) - z) * Real(0.5);
+        const Real lt = (Real(1) + z) * Real(0.5);
+
+        jacobians[0](0, 1) = -lb;
+        jacobians[0](0, 2) = -(Real(1) - y) * Real(0.5);
+        jacobians[0](1, 0) = lb;
+        jacobians[0](1, 2) = -x * Real(0.5);
+
+        jacobians[1](0, 1) = -lb;
+        jacobians[1](0, 2) = y * Real(0.5);
+        jacobians[1](1, 0) = lb;
+        jacobians[1](1, 2) = -x * Real(0.5);
+
+        jacobians[2](0, 1) = -lb;
+        jacobians[2](0, 2) = y * Real(0.5);
+        jacobians[2](1, 0) = lb;
+        jacobians[2](1, 2) = -(x - Real(1)) * Real(0.5);
+
+        jacobians[3](0, 1) = -lt;
+        jacobians[3](0, 2) = (Real(1) - y) * Real(0.5);
+        jacobians[3](1, 0) = lt;
+        jacobians[3](1, 2) = x * Real(0.5);
+
+        jacobians[4](0, 1) = -lt;
+        jacobians[4](0, 2) = -y * Real(0.5);
+        jacobians[4](1, 0) = lt;
+        jacobians[4](1, 2) = x * Real(0.5);
+
+        jacobians[5](0, 1) = -lt;
+        jacobians[5](0, 2) = -y * Real(0.5);
+        jacobians[5](1, 0) = lt;
+        jacobians[5](1, 2) = (x - Real(1)) * Real(0.5);
+
+        jacobians[6](2, 0) = -Real(0.5);
+        jacobians[6](2, 1) = -Real(0.5);
+        jacobians[7](2, 0) = Real(0.5);
+        jacobians[8](2, 1) = Real(0.5);
+        return;
+    }
+
+    if (is_pyramid(element_type_)) {
+        jacobians[0](0, 1) = -Real(0.25);
+        jacobians[0](2, 0) = (Real(4) - Real(3) * y) / Real(8);
+        jacobians[0](2, 1) = -Real(3) * x / Real(8);
+
+        jacobians[1](1, 0) = Real(0.25);
+        jacobians[1](2, 0) = Real(3) * y / Real(8);
+        jacobians[1](2, 1) = (Real(3) * x + Real(4)) / Real(8);
+
+        jacobians[2](0, 1) = -Real(0.25);
+        jacobians[2](2, 0) = (-Real(3) * y - Real(4)) / Real(8);
+        jacobians[2](2, 1) = -Real(3) * x / Real(8);
+
+        jacobians[3](1, 0) = Real(0.25);
+        jacobians[3](2, 0) = Real(3) * y / Real(8);
+        jacobians[3](2, 1) = (Real(3) * x - Real(4)) / Real(8);
+
+        jacobians[4](2, 0) = Real(3) * y / Real(4) - Real(0.5);
+        jacobians[4](2, 1) = Real(3) * x / Real(4) - Real(0.5);
+
+        jacobians[5](2, 0) = -Real(3) * y / Real(4) + Real(0.5);
+        jacobians[5](2, 1) = -Real(3) * x / Real(4) - Real(0.5);
+
+        jacobians[6](2, 0) = Real(3) * y / Real(4) + Real(0.5);
+        jacobians[6](2, 1) = Real(3) * x / Real(4) + Real(0.5);
+
+        jacobians[7](2, 0) = -Real(3) * y / Real(4) - Real(0.5);
+        jacobians[7](2, 1) = -Real(3) * x / Real(4) + Real(0.5);
+        return;
+    }
+
+    if (is_tetrahedron(element_type_)) {
+        jacobians[0](0, 1) = -Real(1);
+        jacobians[0](0, 2) = -Real(1);
+        jacobians[0](1, 0) = Real(1);
+        jacobians[0](2, 0) = Real(1);
+
+        jacobians[1](0, 1) = -Real(1);
+        jacobians[1](1, 0) = Real(1);
+
+        jacobians[2](0, 1) = -Real(1);
+        jacobians[2](1, 0) = Real(1);
+        jacobians[2](1, 2) = Real(1);
+        jacobians[2](2, 1) = -Real(1);
+
+        jacobians[3](0, 2) = Real(1);
+        jacobians[3](1, 2) = Real(1);
+        jacobians[3](2, 0) = -Real(1);
+        jacobians[3](2, 1) = -Real(1);
+
+        jacobians[4](0, 2) = -Real(1);
+        jacobians[4](2, 0) = Real(1);
+
+        jacobians[5](1, 2) = -Real(1);
+        jacobians[5](2, 1) = Real(1);
+        return;
+    }
+
+    jacobians[0](0, 1) = -Real(0.125) * (Real(1) - z);
+    jacobians[0](0, 2) = -Real(0.125) * (Real(1) - y);
+    jacobians[1](1, 0) = Real(0.125) * (Real(1) - z);
+    jacobians[1](1, 2) = -Real(0.125) * (Real(1) + x);
+    jacobians[2](0, 1) = -Real(0.125) * (Real(1) - z);
+    jacobians[2](0, 2) = Real(0.125) * (Real(1) + y);
+    jacobians[3](1, 0) = Real(0.125) * (Real(1) - z);
+    jacobians[3](1, 2) = Real(0.125) * (Real(1) - x);
+
+    jacobians[4](0, 1) = -Real(0.125) * (Real(1) + z);
+    jacobians[4](0, 2) = Real(0.125) * (Real(1) - y);
+    jacobians[5](1, 0) = Real(0.125) * (Real(1) + z);
+    jacobians[5](1, 2) = Real(0.125) * (Real(1) + x);
+    jacobians[6](0, 1) = -Real(0.125) * (Real(1) + z);
+    jacobians[6](0, 2) = -Real(0.125) * (Real(1) + y);
+    jacobians[7](1, 0) = Real(0.125) * (Real(1) + z);
+    jacobians[7](1, 2) = -Real(0.125) * (Real(1) - x);
+
+    jacobians[8](2, 0) = -Real(0.125) * (Real(1) - y);
+    jacobians[8](2, 1) = -Real(0.125) * (Real(1) - x);
+    jacobians[9](2, 0) = Real(0.125) * (Real(1) - y);
+    jacobians[9](2, 1) = -Real(0.125) * (Real(1) + x);
+    jacobians[10](2, 0) = Real(0.125) * (Real(1) + y);
+    jacobians[10](2, 1) = Real(0.125) * (Real(1) + x);
+    jacobians[11](2, 0) = -Real(0.125) * (Real(1) + y);
+    jacobians[11](2, 1) = Real(0.125) * (Real(1) - x);
+}
+
 void NedelecBasis::evaluate_curl(const math::Vector<Real, 3>& xi,
                                  std::vector<math::Vector<Real, 3>>& curl) const {
     if (use_transformed_direct_seed_) {
@@ -4545,10 +5073,10 @@ void NedelecBasis::evaluate_curl(const math::Vector<Real, 3>& xi,
     if (is_tetrahedron(element_type_)) {
         // Curls of the 6 tetra edge basis functions in evaluate_vector_values.
         curl.resize(6, math::Vector<Real, 3>{});
-        curl[0] = math::Vector<Real, 3>{Real(0), Real(-1), Real(1)};
+        curl[0] = math::Vector<Real, 3>{Real(0), Real(-2), Real(2)};
         curl[1] = math::Vector<Real, 3>{Real(0), Real(0), Real(2)};
-        curl[2] = math::Vector<Real, 3>{Real(0), Real(0), Real(2)};
-        curl[3] = math::Vector<Real, 3>{Real(1), Real(-1), Real(0)};
+        curl[2] = math::Vector<Real, 3>{Real(-2), Real(0), Real(2)};
+        curl[3] = math::Vector<Real, 3>{Real(-2), Real(2), Real(0)};
         curl[4] = math::Vector<Real, 3>{Real(0), Real(-2), Real(0)};
         curl[5] = math::Vector<Real, 3>{Real(2), Real(0), Real(0)};
         return;
@@ -4587,17 +5115,17 @@ void NedelecBasis::evaluate_curl(const math::Vector<Real, 3>& xi,
     curl[7][2] =  Real(0.125) * (Real(1) + z);
 
     // Vertical edges
-    curl[8][0] =  Real(0.125) * (Real(1) - x);
-    curl[8][1] = -Real(0.125) * (Real(1) - y);
+    curl[8][0] = -Real(0.125) * (Real(1) - x);
+    curl[8][1] =  Real(0.125) * (Real(1) - y);
 
-    curl[9][0] =  Real(0.125) * (Real(1) + x);
+    curl[9][0] = -Real(0.125) * (Real(1) + x);
     curl[9][1] = -Real(0.125) * (Real(1) - y);
 
     curl[10][0] =  Real(0.125) * (Real(1) + x);
     curl[10][1] = -Real(0.125) * (Real(1) + y);
 
     curl[11][0] =  Real(0.125) * (Real(1) - x);
-    curl[11][1] = -Real(0.125) * (Real(1) + y);
+    curl[11][1] =  Real(0.125) * (Real(1) + y);
     return;
 }
 
@@ -4969,6 +5497,52 @@ void BDMBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
     // Edge 3-0 (left, x=-1): outward normal -x
     values[6] = math::Vector<Real, 3>{half * (x - one), Real(0), Real(0)};                  // flux = 1
     values[7] = math::Vector<Real, 3>{half * y * (x - one), Real(0), Real(0)};              // flux = y
+}
+
+void BDMBasis::evaluate_vector_jacobians(const math::Vector<Real, 3>& xi,
+                                         std::vector<VectorJacobian>& jacobians) const {
+    if (element_type_ == ElementType::Triangle3 && !nodal_generated_) {
+        jacobians.assign(6, VectorJacobian{});
+        jacobians[0](0, 0) = Real(1);
+        jacobians[0](1, 1) = Real(1);
+        jacobians[1](0, 0) = Real(3);
+        jacobians[1](1, 0) = -Real(6);
+        jacobians[1](1, 1) = -Real(3);
+        jacobians[2](0, 0) = Real(1);
+        jacobians[2](1, 1) = Real(1);
+        jacobians[3](0, 0) = -Real(3);
+        jacobians[3](1, 1) = Real(3);
+        jacobians[4](0, 0) = Real(1);
+        jacobians[4](1, 1) = Real(1);
+        jacobians[5](0, 0) = -Real(3);
+        jacobians[5](0, 1) = -Real(6);
+        jacobians[5](1, 1) = Real(3);
+        return;
+    }
+
+    if (nodal_generated_) {
+        evaluate_nodal_modal_vector_jacobians(monomials_, coeffs_, size_, xi, jacobians);
+        return;
+    }
+
+    const Real x = xi[0];
+    const Real y = xi[1];
+    const Real half = Real(0.5);
+    const Real one = Real(1);
+
+    jacobians.assign(8, VectorJacobian{});
+    jacobians[0](1, 1) = half;
+    jacobians[1](1, 0) = half * (y - one);
+    jacobians[1](1, 1) = half * x;
+    jacobians[2](0, 0) = half;
+    jacobians[3](0, 0) = half * y;
+    jacobians[3](0, 1) = half * (one + x);
+    jacobians[4](1, 1) = half;
+    jacobians[5](1, 0) = half * (one + y);
+    jacobians[5](1, 1) = half * x;
+    jacobians[6](0, 0) = half;
+    jacobians[7](0, 0) = half * y;
+    jacobians[7](0, 1) = half * (x - one);
 }
 
 void BDMBasis::evaluate_divergence(const math::Vector<Real, 3>& xi,

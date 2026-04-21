@@ -83,6 +83,8 @@ public:
 
     void evaluate_vector_values(const math::Vector<Real, 3>& xi,
                                 std::vector<math::Vector<Real, 3>>& values) const override;
+    void evaluate_vector_jacobians(const math::Vector<Real, 3>& xi,
+                                   std::vector<VectorJacobian>& jacobians) const override;
     void evaluate_divergence(const math::Vector<Real, 3>& xi,
                              std::vector<Real>& divergence) const override;
 
@@ -135,6 +137,8 @@ public:
 
     void evaluate_vector_values(const math::Vector<Real, 3>& xi,
                                 std::vector<math::Vector<Real, 3>>& values) const override;
+    void evaluate_vector_jacobians(const math::Vector<Real, 3>& xi,
+                                   std::vector<VectorJacobian>& jacobians) const override;
     void evaluate_curl(const math::Vector<Real, 3>& xi,
                        std::vector<math::Vector<Real, 3>>& curl) const override;
 
@@ -183,6 +187,8 @@ public:
 
     void evaluate_vector_values(const math::Vector<Real, 3>& xi,
                                 std::vector<math::Vector<Real, 3>>& values) const override;
+    void evaluate_vector_jacobians(const math::Vector<Real, 3>& xi,
+                                   std::vector<VectorJacobian>& jacobians) const override;
     void evaluate_divergence(const math::Vector<Real, 3>& xi,
                              std::vector<Real>& divergence) const override;
 

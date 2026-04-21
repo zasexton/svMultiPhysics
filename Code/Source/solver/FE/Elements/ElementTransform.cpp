@@ -62,6 +62,50 @@ void ElementTransform::hcurl_vectors_to_physical(const geometry::GeometryMapping
     }
 }
 
+void ElementTransform::vector_jacobians_to_physical(
+    const geometry::GeometryMapping& mapping,
+    const math::Vector<Real, 3>& xi,
+    const std::vector<basis::VectorJacobian>& jac_ref,
+    std::vector<basis::VectorJacobian>& jac_phys)
+{
+    const std::size_t n = jac_ref.size();
+    jac_phys.resize(n);
+    const auto J_inv = mapping.jacobian_inverse(xi);
+    for (std::size_t i = 0; i < n; ++i) {
+        jac_phys[i] = PushForward::vector_jacobian(mapping, jac_ref[i], J_inv);
+    }
+}
+
+void ElementTransform::hdiv_vector_jacobians_to_physical(
+    const geometry::GeometryMapping& mapping,
+    const math::Vector<Real, 3>& xi,
+    const std::vector<basis::VectorJacobian>& jac_ref,
+    std::vector<basis::VectorJacobian>& jac_phys)
+{
+    const std::size_t n = jac_ref.size();
+    jac_phys.resize(n);
+    const auto J = mapping.jacobian(xi);
+    const auto J_inv = mapping.jacobian_inverse(xi);
+    const Real det = J.determinant();
+    for (std::size_t i = 0; i < n; ++i) {
+        jac_phys[i] = PushForward::hdiv_vector_jacobian(mapping, jac_ref[i], J, J_inv, det);
+    }
+}
+
+void ElementTransform::hcurl_vector_jacobians_to_physical(
+    const geometry::GeometryMapping& mapping,
+    const math::Vector<Real, 3>& xi,
+    const std::vector<basis::VectorJacobian>& jac_ref,
+    std::vector<basis::VectorJacobian>& jac_phys)
+{
+    const std::size_t n = jac_ref.size();
+    jac_phys.resize(n);
+    const auto J_inv = mapping.jacobian_inverse(xi);
+    for (std::size_t i = 0; i < n; ++i) {
+        jac_phys[i] = PushForward::hcurl_vector_jacobian(mapping, jac_ref[i], J_inv);
+    }
+}
+
 // =============================================================================
 // Facet Frame and Trace Evaluation Implementation
 // =============================================================================

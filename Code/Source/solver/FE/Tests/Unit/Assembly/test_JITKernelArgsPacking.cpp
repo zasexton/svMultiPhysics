@@ -7,6 +7,7 @@
 
 #include "Assembly/AssemblyContext.h"
 #include "Assembly/JIT/KernelArgs.h"
+#include "Spaces/HCurlSpace.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -337,6 +338,59 @@ TEST(JITKernelArgsPacking, PacksInterleavedGeometryV6)
     EXPECT_DOUBLE_EQ(g[q1 + AssemblyContext::kInterleavedQPointInverseJacobianOffset + 0u], 2.0 / 3.0);
     EXPECT_DOUBLE_EQ(g[q1 + AssemblyContext::kInterleavedQPointDetOffset], 13.125);
     EXPECT_DOUBLE_EQ(g[q1 + AssemblyContext::kInterleavedQPointNormalOffset + 1u], 1.0);
+}
+
+TEST(JITKernelArgsPacking, PacksVectorBasisJacobiansV6)
+{
+    spaces::HCurlSpace space(ElementType::Tetra4, 0, BasisType::Nedelec);
+
+    AssemblyContext ctx;
+    ctx.reserve(/*max_dofs=*/8, /*max_qpts=*/4, /*dim=*/3);
+    ctx.configure(/*cell_id=*/0,
+                  space,
+                  space,
+                  RequiredData::PhysicalGradients | RequiredData::SolutionGradients);
+
+    std::vector<AssemblyContext::Point3D> quad_pts = {{0.0, 0.0, 0.0}, {0.25, 0.25, 0.25}};
+    std::vector<Real> weights = {0.5, 0.5};
+    ctx.setQuadratureData(std::span<const AssemblyContext::Point3D>(quad_pts.data(), quad_pts.size()),
+                          std::span<const Real>(weights.data(), weights.size()));
+
+    const LocalIndex n_dofs = static_cast<LocalIndex>(space.dofs_per_element());
+    const LocalIndex n_qpts = static_cast<LocalIndex>(quad_pts.size());
+    std::vector<AssemblyContext::Vector3D> values(static_cast<std::size_t>(n_dofs * n_qpts));
+    std::vector<AssemblyContext::Matrix3x3> jacobians(static_cast<std::size_t>(n_dofs * n_qpts));
+    for (LocalIndex i = 0; i < n_dofs; ++i) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const auto idx = static_cast<std::size_t>(i * n_qpts + q);
+            values[idx] = {Real(i + 1), Real(q + 1), Real(0)};
+            jacobians[idx][0][0] = Real(10 * i + q);
+            jacobians[idx][2][1] = Real(100 + 10 * i + q);
+        }
+    }
+
+    ctx.setTestVectorBasisValues(n_dofs,
+                                 std::span<const AssemblyContext::Vector3D>(values.data(), values.size()));
+    ctx.setTestVectorBasisJacobians(
+        n_dofs,
+        std::span<const AssemblyContext::Matrix3x3>(jacobians.data(), jacobians.size()));
+
+    KernelOutput out;
+    out.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/true);
+
+    const auto args6 = jit::packCellKernelArgsV6(ctx, out);
+    EXPECT_EQ(args6.side.test_basis_vector_jacobians,
+              &(*ctx.testBasisVectorJacobiansRaw().data())[0][0]);
+    EXPECT_EQ(args6.side.trial_basis_vector_jacobians,
+              &(*ctx.testBasisVectorJacobiansRaw().data())[0][0]);
+    ASSERT_NE(args6.side.test_basis_vector_jacobians, nullptr);
+
+    const std::size_t nd = static_cast<std::size_t>(n_dofs);
+    const Real* packed = args6.side.test_basis_vector_jacobians;
+    // Flattened layout is q-major, then dof, then row-major 3x3.
+    const std::size_t offset = ((1u * nd + 3u) * 9u);
+    EXPECT_DOUBLE_EQ(packed[offset + 0u], Real(31));
+    EXPECT_DOUBLE_EQ(packed[offset + 7u], Real(131));
 }
 
 TEST(JITKernelArgsPacking, PacksMaterialStateAlignmentV3)

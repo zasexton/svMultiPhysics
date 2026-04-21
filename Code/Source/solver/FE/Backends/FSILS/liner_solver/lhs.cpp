@@ -35,9 +35,20 @@
 #include "DebugMsg.h"
 
 #include "mpi.h"
+
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace fe_fsi_linear_solver {
+
+namespace {
+
+constexpr int rank_derived_ownership = -1;
+
+} // namespace
 
 /// @brief Modifies:
 ///
@@ -55,8 +66,8 @@ namespace fe_fsi_linear_solver {
 ///  lhs.map
 ///  lhs.face
 //
-void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int nNo, int nnz, Vector<int>& gNodes,  
-       Vector<int> &rowPtr, Vector<int>& colPtr, int nFaces)
+static void fsils_lhs_create_impl(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int nNo, int nnz,
+       Vector<int>& gNodes, Vector<int> &rowPtr, Vector<int>& colPtr, int nFaces, int explicit_owned_nNo)
 {
   #define n_debug_fsils_lhs_create
   #ifdef debug_fsils_lhs_create
@@ -80,6 +91,10 @@ void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int 
   int nTasks = commu.nTasks;
   auto comm = commu.comm;
   auto tF = commu.tF;
+  const bool use_explicit_owned_nodes = explicit_owned_nNo >= 0;
+  if (use_explicit_owned_nodes && explicit_owned_nNo > nNo) {
+    throw std::runtime_error("FSILS: explicit owned node count exceeds local node count.");
+  }
   #ifdef debug_fsils_lhs_create
   dmsg << "nTasks: " << nTasks;
   dmsg << "tF: " << tF;
@@ -206,6 +221,18 @@ void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int 
      gtlPtr[Ac] = a;
   }
 
+  if (use_explicit_owned_nodes) {
+    lhs.mynNo = explicit_owned_nNo;
+    // The async sparse-multiply path packs all communicated nodes before posting
+    // halo exchange. With explicit FE ownership, shared owned nodes are not
+    // permuted into a lower-rank prefix, so compute the whole owned prefix first.
+    lhs.shnNo = lhs.mynNo;
+
+    for (int a = 0; a < nNo; a++) {
+      ltg(a) = gNodes(a);
+      lhs.map(a) = a;
+    }
+  } else {
   // Classify shared nodes into front (shared with lower ranks) and back (shared with higher ranks).
   // The original FSILS code appended these in processor encounter order, which makes the internal
   // permutation depend on communicator topology. Keep the same front/local/back contract, but make
@@ -300,6 +327,7 @@ void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int 
      int Ac = gNodes(a);
      lhs.map(a) = gtlPtr[Ac];
   }
+  }
 
   // Based on the new ordering of the nodes, rowPtr and colPtr are constructed
   //
@@ -383,7 +411,7 @@ void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int 
   #ifdef debug_fsils_lhs_create
   dmsg << "Setup the handles ...";
   #endif
-  j = 0;
+  int j = 0;
   for (int c = 0; c < nCandidates; c++) {
     int a = shared_count[c];
     if (a != 0) {
@@ -457,6 +485,21 @@ void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int 
   if (nCandidates > 0) {
     MPI_Waitall(nCandidates, send_reqs.data(), MPI_STATUSES_IGNORE);
   }
+}
+
+void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int nNo, int nnz, Vector<int>& gNodes,
+       Vector<int> &rowPtr, Vector<int>& colPtr, int nFaces)
+{
+  fsils_lhs_create_impl(lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, nFaces, rank_derived_ownership);
+}
+
+void fsils_lhs_create_with_explicit_owned_nodes(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int nNo,
+       int nnz, Vector<int>& gNodes, Vector<int>& rowPtr, Vector<int>& colPtr, int nFaces, int owned_nNo)
+{
+  if (owned_nNo < 0) {
+    throw std::runtime_error("FSILS: explicit owned node count must be non-negative.");
+  }
+  fsils_lhs_create_impl(lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, nFaces, owned_nNo);
 }
 
 //----------------

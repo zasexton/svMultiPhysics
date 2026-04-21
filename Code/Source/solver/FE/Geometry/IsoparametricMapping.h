@@ -36,6 +36,7 @@ public:
                                            const math::Vector<Real, 3>& initial_guess = math::Vector<Real, 3>{}) const override;
     math::Matrix<Real, 3, 3> jacobian(const math::Vector<Real, 3>& xi) const override;
     MappingHessian mapping_hessian(const math::Vector<Real, 3>& xi) const override;
+    bool isAffine() const noexcept override;
 
     void resetNodes(const std::vector<math::Vector<Real, 3>>& nodes) override { nodes_ = nodes; }
     const basis::BasisFunction& geometryBasis() const override { return *basis_; }

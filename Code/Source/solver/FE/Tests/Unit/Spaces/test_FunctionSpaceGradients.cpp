@@ -7,6 +7,7 @@
 
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/HCurlSpace.h"
+#include "FE/Spaces/HDivSpace.h"
 
 using namespace svmp::FE;
 using namespace svmp::FE::spaces;
@@ -75,6 +76,127 @@ TEST(FunctionSpaceGradients, VectorValuedSpacesExposeJacobianWithoutChangingGrad
             EXPECT_NEAR(J(static_cast<std::size_t>(comp), static_cast<std::size_t>(d)),
                         fd[static_cast<std::size_t>(comp)],
                         1e-8);
+        }
+    }
+}
+
+TEST(FunctionSpaceGradients, HCurlJacobianUsesAnalyticVectorBasisDerivatives) {
+    HCurlSpace space(ElementType::Quad4, 0, BasisType::Nedelec);
+    const std::vector<Real> coeffs = {Real(2), Real(-3), Real(5), Real(7)};
+    ASSERT_EQ(coeffs.size(), space.dofs_per_element());
+
+    const FunctionSpace::Value xi{Real(0.1), Real(-0.2), Real(0)};
+    const auto J = space.evaluate_jacobian(xi, coeffs);
+
+    EXPECT_NEAR(J(0, 0), 0.0, 1e-15);
+    EXPECT_NEAR(J(0, 1), -1.75, 1e-15);
+    EXPECT_NEAR(J(1, 0), 1.0, 1e-15);
+    EXPECT_NEAR(J(1, 1), 0.0, 1e-15);
+    EXPECT_NEAR(J(2, 0), 0.0, 1e-15);
+    EXPECT_NEAR(J(2, 1), 0.0, 1e-15);
+}
+
+TEST(FunctionSpaceGradients, HDivJacobianMatchesCoefficientWeightedBasisJacobians) {
+    HDivSpace space(ElementType::Triangle3, 0, BasisType::RaviartThomas);
+    const std::vector<Real> coeffs = {Real(1.25), Real(-0.5), Real(2.0)};
+    ASSERT_EQ(coeffs.size(), space.dofs_per_element());
+
+    const FunctionSpace::Value xi{Real(0.2), Real(0.3), Real(0)};
+    const auto J = space.evaluate_jacobian(xi, coeffs);
+
+    std::vector<basis::VectorJacobian> basis_jacobians;
+    space.element().basis().evaluate_vector_jacobians(xi, basis_jacobians);
+    ASSERT_EQ(basis_jacobians.size(), coeffs.size());
+
+    FunctionSpace::Jacobian expected{};
+    for (std::size_t i = 0; i < coeffs.size(); ++i) {
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                expected(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) +=
+                    coeffs[i] * basis_jacobians[i](static_cast<std::size_t>(r), static_cast<std::size_t>(c));
+            }
+        }
+    }
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            EXPECT_NEAR(J(static_cast<std::size_t>(r), static_cast<std::size_t>(c)),
+                        expected(static_cast<std::size_t>(r), static_cast<std::size_t>(c)),
+                        1e-15);
+        }
+    }
+}
+
+TEST(FunctionSpaceGradients, BDMJacobianMatchesAnalyticReferenceFormula) {
+    HDivSpace space(ElementType::Quad4, 1, BasisType::BDM);
+    std::vector<Real> coeffs(space.dofs_per_element(), Real(0));
+    ASSERT_EQ(coeffs.size(), 8u);
+    coeffs[1] = Real(2.0);
+    coeffs[3] = Real(-0.5);
+    coeffs[5] = Real(1.5);
+    coeffs[7] = Real(-3.0);
+
+    const FunctionSpace::Value xi{Real(0.25), Real(-0.4), Real(0)};
+    const auto J = space.evaluate_jacobian(xi, coeffs);
+
+    const Real x = xi[0];
+    const Real y = xi[1];
+    const Real expected_x_x = coeffs[3] * Real(0.5) * y + coeffs[7] * Real(0.5) * y;
+    const Real expected_x_y = coeffs[3] * Real(0.5) * (Real(1) + x) +
+                              coeffs[7] * Real(0.5) * (x - Real(1));
+    const Real expected_y_x = coeffs[1] * Real(0.5) * (y - Real(1)) +
+                              coeffs[5] * Real(0.5) * (Real(1) + y);
+    const Real expected_y_y = coeffs[1] * Real(0.5) * x + coeffs[5] * Real(0.5) * x;
+
+    EXPECT_NEAR(J(0, 0), expected_x_x, 1e-15);
+    EXPECT_NEAR(J(0, 1), expected_x_y, 1e-15);
+    EXPECT_NEAR(J(1, 0), expected_y_x, 1e-15);
+    EXPECT_NEAR(J(1, 1), expected_y_y, 1e-15);
+    EXPECT_NEAR(J(2, 0), 0.0, 1e-15);
+    EXPECT_NEAR(J(2, 1), 0.0, 1e-15);
+}
+
+TEST(FunctionSpaceGradients, CompatibleTensorVectorSpaceJacobianUsesAnalyticBasisDerivatives) {
+    elements::ElementRequest req;
+    req.element_type = ElementType::Quad4;
+    req.basis_type = BasisType::BSpline;
+    req.field_type = FieldType::Vector;
+    req.continuity = Continuity::H_div;
+    req.order = 2;
+    req.axis_orders = {2, 2};
+    req.axis_knot_vectors = {
+        {Real(0), Real(0), Real(0), Real(0.5), Real(1), Real(1), Real(1)},
+        {Real(0), Real(0), Real(0), Real(0.5), Real(1), Real(1), Real(1)}
+    };
+
+    HDivSpace space(req);
+    std::vector<Real> coeffs(space.dofs_per_element(), Real(0));
+    for (std::size_t i = 0; i < coeffs.size(); ++i) {
+        coeffs[i] = Real(0.1) * static_cast<Real>(i + 1);
+    }
+
+    const FunctionSpace::Value xi{Real(0.15), Real(-0.25), Real(0)};
+    const auto J = space.evaluate_jacobian(xi, coeffs);
+
+    std::vector<basis::VectorJacobian> basis_jacobians;
+    space.element().basis().evaluate_vector_jacobians(xi, basis_jacobians);
+    ASSERT_EQ(basis_jacobians.size(), coeffs.size());
+
+    FunctionSpace::Jacobian expected{};
+    for (std::size_t i = 0; i < coeffs.size(); ++i) {
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                expected(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) +=
+                    coeffs[i] * basis_jacobians[i](static_cast<std::size_t>(r), static_cast<std::size_t>(c));
+            }
+        }
+    }
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            EXPECT_NEAR(J(static_cast<std::size_t>(r), static_cast<std::size_t>(c)),
+                        expected(static_cast<std::size_t>(r), static_cast<std::size_t>(c)),
+                        1e-13);
         }
     }
 }

@@ -37,6 +37,9 @@ inline constexpr std::uint32_t kKernelArgsABIVersionV3 = 3u;
 inline constexpr std::uint32_t kKernelArgsABIVersionV4 = 4u;
 inline constexpr std::uint32_t kKernelArgsABIVersionV5 = 5u;
 inline constexpr std::uint32_t kKernelArgsABIVersionV6 = 6u;
+// Bump whenever any V6 argument/view struct layout changes. This is mixed into
+// JIT cache keys so disk-cached object code cannot outlive ABI layout edits.
+inline constexpr std::uint32_t kKernelArgsABILayoutRevisionV6 = 2u;
 
 /// Maximum number of previous solution coefficient vectors passed to kernels.
 /// Indexing convention: k=1 corresponds to u^{n-1}.
@@ -257,10 +260,12 @@ struct KernelSideArgsV2 {
 
     // Vector basis tables (H(curl)/H(div); row-major in i, then q)
     const Real* test_basis_vector_values_xyz{nullptr};  // [n_test_dofs * n_qpts * 3]
+    const Real* test_basis_vector_jacobians{nullptr};   // [n_qpts * n_test_dofs * 9]
     const Real* test_basis_curls_xyz{nullptr};          // [n_test_dofs * n_qpts * 3]
     const Real* test_basis_divergences{nullptr};        // [n_test_dofs * n_qpts]
 
     const Real* trial_basis_vector_values_xyz{nullptr}; // [n_trial_dofs * n_qpts * 3]
+    const Real* trial_basis_vector_jacobians{nullptr};  // [n_qpts * n_trial_dofs * 9]
     const Real* trial_basis_curls_xyz{nullptr};         // [n_trial_dofs * n_qpts * 3]
     const Real* trial_basis_divergences{nullptr};       // [n_trial_dofs * n_qpts]
 
@@ -403,10 +408,12 @@ struct KernelSideArgsV3 {
 
     // Vector basis tables (H(curl)/H(div); row-major in i, then q)
     const Real* test_basis_vector_values_xyz{nullptr};  // [n_test_dofs * n_qpts * 3]
+    const Real* test_basis_vector_jacobians{nullptr};   // [n_qpts * n_test_dofs * 9]
     const Real* test_basis_curls_xyz{nullptr};          // [n_test_dofs * n_qpts * 3]
     const Real* test_basis_divergences{nullptr};        // [n_test_dofs * n_qpts]
 
     const Real* trial_basis_vector_values_xyz{nullptr}; // [n_trial_dofs * n_qpts * 3]
+    const Real* trial_basis_vector_jacobians{nullptr};  // [n_qpts * n_trial_dofs * 9]
     const Real* trial_basis_curls_xyz{nullptr};         // [n_trial_dofs * n_qpts * 3]
     const Real* trial_basis_divergences{nullptr};       // [n_trial_dofs * n_qpts]
 
@@ -888,12 +895,14 @@ struct KernelSideArgsV6 {
     const Real* trial_phys_gradients_xyz{nullptr};  // [n_trial_dofs * n_qpts * 3]
     const Real* trial_phys_hessians{nullptr};       // [n_trial_dofs * n_qpts * 9]
 
-    // Vector basis tables (H(curl)/H(div); row-major in i, then q)
+    // Vector basis tables (H(curl)/H(div); qpt-major in q, then dof)
     const Real* test_basis_vector_values_xyz{nullptr};  // [n_test_dofs * n_qpts * 3]
+    const Real* test_basis_vector_jacobians{nullptr};   // [n_qpts * n_test_dofs * 9]
     const Real* test_basis_curls_xyz{nullptr};          // [n_test_dofs * n_qpts * 3]
     const Real* test_basis_divergences{nullptr};        // [n_test_dofs * n_qpts]
 
     const Real* trial_basis_vector_values_xyz{nullptr}; // [n_trial_dofs * n_qpts * 3]
+    const Real* trial_basis_vector_jacobians{nullptr};  // [n_qpts * n_trial_dofs * 9]
     const Real* trial_basis_curls_xyz{nullptr};         // [n_trial_dofs * n_qpts * 3]
     const Real* trial_basis_divergences{nullptr};       // [n_trial_dofs * n_qpts]
 
@@ -1029,8 +1038,10 @@ struct CoupledBlockView {
     // Basis function tables (same layout as KernelSideArgsV6 fields)
     const Real* test_basis_values{nullptr};           // [n_test_dofs * n_qpts]
     const Real* test_phys_gradients_xyz{nullptr};     // [n_test_dofs * n_qpts * 3]
+    const Real* test_basis_vector_jacobians{nullptr}; // [n_qpts * n_test_dofs * 9]
     const Real* trial_basis_values{nullptr};          // [n_trial_dofs * n_qpts]
     const Real* trial_phys_gradients_xyz{nullptr};    // [n_trial_dofs * n_qpts * 3]
+    const Real* trial_basis_vector_jacobians{nullptr};// [n_qpts * n_trial_dofs * 9]
 
     // Physical Hessians (second derivatives, for stabilization terms)
     const Real* test_phys_hessians{nullptr};          // [n_test_dofs * n_qpts * 9] or nullptr
@@ -1432,10 +1443,12 @@ namespace detail {
     out.trial_phys_hessians = flattenMat3(ctx.trialPhysicalHessiansRaw());
 
     out.test_basis_vector_values_xyz = flattenXYZ(ctx.testBasisVectorValuesRaw());
+    out.test_basis_vector_jacobians = flattenMat3(ctx.testBasisVectorJacobiansRaw());
     out.test_basis_curls_xyz = flattenXYZ(ctx.testBasisCurlsRaw());
     out.test_basis_divergences = ctx.testBasisDivergencesRaw().empty() ? nullptr : ctx.testBasisDivergencesRaw().data();
 
     out.trial_basis_vector_values_xyz = flattenXYZ(ctx.trialBasisVectorValuesRaw());
+    out.trial_basis_vector_jacobians = flattenMat3(ctx.trialBasisVectorJacobiansRaw());
     out.trial_basis_curls_xyz = flattenXYZ(ctx.trialBasisCurlsRaw());
     out.trial_basis_divergences = ctx.trialBasisDivergencesRaw().empty() ? nullptr : ctx.trialBasisDivergencesRaw().data();
 
@@ -2051,10 +2064,12 @@ namespace detail {
     out.trial_phys_hessians = flattenMat3(ctx.trialPhysicalHessiansRaw());
 
     out.test_basis_vector_values_xyz = flattenXYZ(ctx.testBasisVectorValuesRaw());
+    out.test_basis_vector_jacobians = flattenMat3(ctx.testBasisVectorJacobiansRaw());
     out.test_basis_curls_xyz = flattenXYZ(ctx.testBasisCurlsRaw());
     out.test_basis_divergences = ctx.testBasisDivergencesRaw().empty() ? nullptr : ctx.testBasisDivergencesRaw().data();
 
     out.trial_basis_vector_values_xyz = flattenXYZ(ctx.trialBasisVectorValuesRaw());
+    out.trial_basis_vector_jacobians = flattenMat3(ctx.trialBasisVectorJacobiansRaw());
     out.trial_basis_curls_xyz = flattenXYZ(ctx.trialBasisCurlsRaw());
     out.trial_basis_divergences = ctx.trialBasisDivergencesRaw().empty() ? nullptr : ctx.trialBasisDivergencesRaw().data();
 
@@ -2165,10 +2180,12 @@ namespace detail {
         assertAligned(out.trial_phys_hessians, "KernelArgsV6: trial_phys_hessians not aligned");
 
         assertAligned(out.test_basis_vector_values_xyz, "KernelArgsV6: test_basis_vector_values_xyz not aligned");
+        assertAligned(out.test_basis_vector_jacobians, "KernelArgsV6: test_basis_vector_jacobians not aligned");
         assertAligned(out.test_basis_curls_xyz, "KernelArgsV6: test_basis_curls_xyz not aligned");
         assertAligned(out.test_basis_divergences, "KernelArgsV6: test_basis_divergences not aligned");
 
         assertAligned(out.trial_basis_vector_values_xyz, "KernelArgsV6: trial_basis_vector_values_xyz not aligned");
+        assertAligned(out.trial_basis_vector_jacobians, "KernelArgsV6: trial_basis_vector_jacobians not aligned");
         assertAligned(out.trial_basis_curls_xyz, "KernelArgsV6: trial_basis_curls_xyz not aligned");
         assertAligned(out.trial_basis_divergences, "KernelArgsV6: trial_basis_divergences not aligned");
 
@@ -2565,8 +2582,10 @@ namespace detail {
     CoupledBlockView bv;
     bv.test_basis_values = ctx.testBasisValuesRaw().empty() ? nullptr : ctx.testBasisValuesRaw().data();
     bv.test_phys_gradients_xyz = detail::flattenXYZ(ctx.testPhysicalGradientsRaw());
+    bv.test_basis_vector_jacobians = detail::flattenMat3(ctx.testBasisVectorJacobiansRaw());
     bv.trial_basis_values = ctx.trialBasisValuesRaw().empty() ? nullptr : ctx.trialBasisValuesRaw().data();
     bv.trial_phys_gradients_xyz = detail::flattenXYZ(ctx.trialPhysicalGradientsRaw());
+    bv.trial_basis_vector_jacobians = detail::flattenMat3(ctx.trialBasisVectorJacobiansRaw());
     bv.test_phys_hessians = detail::flattenMat3(ctx.testPhysicalHessiansRaw());
     bv.trial_phys_hessians = detail::flattenMat3(ctx.trialPhysicalHessiansRaw());
     bv.n_test_dofs = static_cast<std::uint32_t>(ctx.numTestDofs());

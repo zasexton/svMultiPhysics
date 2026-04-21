@@ -96,6 +96,24 @@ void CompatibleTensorVectorBasis::evaluate_vector_values(
     }
 }
 
+void CompatibleTensorVectorBasis::evaluate_vector_jacobians(
+    const math::Vector<Real, 3>& xi,
+    std::vector<VectorJacobian>& jacobians) const {
+    jacobians.assign(size_, VectorJacobian{});
+    std::size_t offset = 0;
+    for (std::size_t component = 0; component < component_bases_.size(); ++component) {
+        std::vector<Gradient> gradients;
+        component_bases_[component]->evaluate_gradients(xi, gradients);
+        for (std::size_t i = 0; i < gradients.size(); ++i) {
+            for (int d = 0; d < dimension_; ++d) {
+                jacobians[offset + i](component, static_cast<std::size_t>(d)) =
+                    gradients[i][static_cast<std::size_t>(d)];
+            }
+        }
+        offset += gradients.size();
+    }
+}
+
 void CompatibleTensorVectorBasis::evaluate_divergence(
     const math::Vector<Real, 3>& xi,
     std::vector<Real>& divergence) const {

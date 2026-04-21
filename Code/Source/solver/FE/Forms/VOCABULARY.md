@@ -69,6 +69,24 @@ For the full integration guide, see `Forms/SYSTEMS_INTEGRATION.md`.
 | `jump(u)`, `avg(u)` | DG jump and average |
 | `u.minus()`, `u.plus()` | Explicit trace restrictions (DG) |
 
+### Intrinsic Vector-Basis Gradients
+
+`grad(u)` is matrix-valued for intrinsic vector finite element fields such as
+`H(div)` Raviart-Thomas/BDM spaces and `H(curl)` Nedelec spaces. The matrix
+layout is component-by-physical-coordinate derivative:
+
+```cpp
+auto q = StateField(q_field, *Vhdiv, "q");
+auto w = TestField(q_field, *Vhdiv, "w");
+auto residual = inner(grad(q), grad(w)).dx();
+```
+
+For affine mappings, the FE layer evaluates these gradients analytically using
+the appropriate Piola transform. Non-affine `H(div)` and `H(curl)` Piola
+vector-gradient requests fail explicitly until curved Piola derivative terms
+are implemented. Product-space vector `H1` fields continue to use the existing
+componentwise scalar-gradient path.
+
 ### Algebraic & Nonlinear
 
 | Operator | Description |

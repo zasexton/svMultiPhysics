@@ -204,6 +204,100 @@ TEST(PushForward, GradientAndPiolaTransforms3D) {
     EXPECT_NEAR(v_hcurl[2], 1.5, 1e-12);
 }
 
+TEST(PushForward, AffineVectorJacobianPiolaTransforms3D) {
+    std::vector<math::Vector<Real,3>> nodes = {
+        {Real(0), Real(0), Real(0)},
+        {Real(2), Real(0), Real(0)},
+        {Real(0), Real(3), Real(0)},
+        {Real(0), Real(0), Real(4)}
+    };
+    LinearMapping map(ElementType::Tetra4, nodes);
+    ASSERT_TRUE(map.isAffine());
+
+    math::Matrix<Real, 3, 3> jac_ref{};
+    jac_ref(0, 0) = Real(2);
+    jac_ref(0, 1) = Real(-1);
+    jac_ref(1, 0) = Real(3);
+    jac_ref(1, 1) = Real(4);
+    jac_ref(2, 2) = Real(-2);
+
+    const auto xi = math::Vector<Real,3>{Real(0.25), Real(0.25), Real(0.25)};
+    const auto J = map.jacobian(xi);
+    const auto Jinv = map.jacobian_inverse(xi);
+    const Real det = map.jacobian_determinant(xi);
+
+    const auto ordinary = PushForward::vector_jacobian(map, jac_ref, xi);
+    const auto hdiv = PushForward::hdiv_vector_jacobian(map, jac_ref, xi);
+    const auto hcurl = PushForward::hcurl_vector_jacobian(map, jac_ref, xi);
+
+    const math::Matrix<Real, 3, 3> expected_ordinary = jac_ref * Jinv;
+    const math::Matrix<Real, 3, 3> expected_hdiv = (J * jac_ref * Jinv) * (Real(1) / det);
+    const math::Matrix<Real, 3, 3> expected_hcurl = Jinv.transpose() * jac_ref * Jinv;
+
+    for (std::size_t r = 0; r < 3; ++r) {
+        for (std::size_t c = 0; c < 3; ++c) {
+            EXPECT_NEAR(ordinary(r, c), expected_ordinary(r, c), 1e-12);
+            EXPECT_NEAR(hdiv(r, c), expected_hdiv(r, c), 1e-12);
+            EXPECT_NEAR(hcurl(r, c), expected_hcurl(r, c), 1e-12);
+        }
+    }
+}
+
+TEST(PushForward, TensorProductAffineMappingAllowsPiolaVectorJacobians) {
+    auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Quad4, 1);
+    std::vector<math::Vector<Real,3>> nodes = {
+        {Real(0), Real(0), Real(0)},
+        {Real(2), Real(0), Real(0)},
+        {Real(2), Real(3), Real(0)},
+        {Real(0), Real(3), Real(0)}
+    };
+    IsoparametricMapping map(basis, nodes);
+    ASSERT_TRUE(map.isAffine());
+
+    math::Matrix<Real, 3, 3> jac_ref{};
+    jac_ref(0, 0) = Real(1);
+    jac_ref(0, 1) = Real(2);
+    jac_ref(1, 0) = Real(-3);
+    jac_ref(1, 1) = Real(4);
+
+    const auto xi = math::Vector<Real,3>{Real(0.1), Real(-0.2), Real(0)};
+    const auto hdiv = PushForward::hdiv_vector_jacobian(map, jac_ref, xi);
+    const auto hcurl = PushForward::hcurl_vector_jacobian(map, jac_ref, xi);
+
+    const auto J = map.jacobian(xi);
+    const auto Jinv = map.jacobian_inverse(xi);
+    const Real det = map.jacobian_determinant(xi);
+    const math::Matrix<Real, 3, 3> expected_hdiv = (J * jac_ref * Jinv) * (Real(1) / det);
+    const math::Matrix<Real, 3, 3> expected_hcurl = Jinv.transpose() * jac_ref * Jinv;
+
+    for (std::size_t r = 0; r < 3; ++r) {
+        for (std::size_t c = 0; c < 3; ++c) {
+            EXPECT_NEAR(hdiv(r, c), expected_hdiv(r, c), 1e-12);
+            EXPECT_NEAR(hcurl(r, c), expected_hcurl(r, c), 1e-12);
+        }
+    }
+}
+
+TEST(PushForward, NonAffinePiolaVectorJacobiansThrow) {
+    auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Quad4, 1);
+    std::vector<math::Vector<Real,3>> nodes = {
+        {Real(0), Real(0), Real(0)},
+        {Real(2), Real(0), Real(0)},
+        {Real(2.4), Real(3), Real(0)},
+        {Real(0), Real(3), Real(0)}
+    };
+    IsoparametricMapping map(basis, nodes);
+    ASSERT_FALSE(map.isAffine());
+
+    math::Matrix<Real, 3, 3> jac_ref{};
+    jac_ref(0, 0) = Real(1);
+    jac_ref(1, 1) = Real(1);
+    const auto xi = math::Vector<Real,3>{Real(0), Real(0), Real(0)};
+
+    EXPECT_THROW((void)PushForward::hdiv_vector_jacobian(map, jac_ref, xi), FEException);
+    EXPECT_THROW((void)PushForward::hcurl_vector_jacobian(map, jac_ref, xi), FEException);
+}
+
 TEST(PushForward, HDivAndHCurlReduceIn1D) {
     std::vector<math::Vector<Real,3>> nodes = {
         {Real(0), Real(0), Real(0)},

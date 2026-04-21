@@ -20,6 +20,61 @@ namespace {
 
 constexpr Real kDegenerateTol = detail::kDegenerateTol;
 
+std::vector<math::Vector<Real, 3>> affine_check_points(ElementType type, int dim)
+{
+    using Vec3 = math::Vector<Real, 3>;
+    switch (type) {
+    case ElementType::Line2:
+    case ElementType::Line3:
+        return {Vec3{Real(0), Real(0), Real(0)},
+                Vec3{Real(0.5), Real(0), Real(0)}};
+    case ElementType::Triangle3:
+    case ElementType::Triangle6:
+        return {Vec3{Real(1) / Real(3), Real(1) / Real(3), Real(0)},
+                Vec3{Real(0.2), Real(0.3), Real(0)}};
+    case ElementType::Quad4:
+    case ElementType::Quad8:
+    case ElementType::Quad9:
+        return {Vec3{Real(0), Real(0), Real(0)},
+                Vec3{Real(0.5), Real(-0.25), Real(0)},
+                Vec3{Real(-0.35), Real(0.4), Real(0)}};
+    case ElementType::Tetra4:
+    case ElementType::Tetra10:
+        return {Vec3{Real(0.25), Real(0.25), Real(0.25)},
+                Vec3{Real(0.2), Real(0.3), Real(0.1)}};
+    case ElementType::Hex8:
+    case ElementType::Hex20:
+    case ElementType::Hex27:
+        return {Vec3{Real(0), Real(0), Real(0)},
+                Vec3{Real(0.35), Real(-0.2), Real(0.45)},
+                Vec3{Real(-0.4), Real(0.3), Real(-0.2)}};
+    case ElementType::Wedge6:
+    case ElementType::Wedge15:
+        return {Vec3{Real(0.2), Real(0.3), Real(0)},
+                Vec3{Real(0.1), Real(0.2), Real(0.5)},
+                Vec3{Real(0.25), Real(0.1), Real(-0.35)}};
+    case ElementType::Pyramid5:
+    case ElementType::Pyramid13:
+    case ElementType::Pyramid14:
+        return {Vec3{Real(0), Real(0), Real(0.25)},
+                Vec3{Real(0.2), Real(-0.1), Real(0.35)},
+                Vec3{Real(-0.15), Real(0.25), Real(0.6)}};
+    default:
+        break;
+    }
+
+    if (dim == 1) {
+        return {Vec3{Real(0), Real(0), Real(0)},
+                Vec3{Real(0.5), Real(0), Real(0)}};
+    }
+    if (dim == 2) {
+        return {Vec3{Real(0), Real(0), Real(0)},
+                Vec3{Real(0.25), Real(-0.25), Real(0)}};
+    }
+    return {Vec3{Real(0), Real(0), Real(0)},
+            Vec3{Real(0.25), Real(-0.25), Real(0.5)}};
+}
+
 } // namespace
 
 IsoparametricMapping::IsoparametricMapping(std::shared_ptr<basis::BasisFunction> basis,
@@ -105,6 +160,29 @@ GeometryMapping::MappingHessian IsoparametricMapping::mapping_hessian(const math
     }
 
     return H;
+}
+
+bool IsoparametricMapping::isAffine() const noexcept
+{
+    try {
+        constexpr Real tol = Real(1e-12);
+        const int dim = basis_->dimension();
+        for (const auto& xi : affine_check_points(basis_->element_type(), dim)) {
+            const auto H = mapping_hessian(xi);
+            for (std::size_t m = 0; m < 3; ++m) {
+                for (int i = 0; i < dim; ++i) {
+                    for (int j = 0; j < dim; ++j) {
+                        if (std::abs(H[m](static_cast<std::size_t>(i), static_cast<std::size_t>(j))) > tol) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 math::Vector<Real, 3> IsoparametricMapping::map_to_reference(const math::Vector<Real, 3>& x_phys,

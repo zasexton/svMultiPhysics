@@ -550,6 +550,20 @@ void SimulationBuilder::setupSystem()
 #endif
   }
 
+  // FSILS is a point-block backend: its sparse graph is node-blocked, with
+  // field components carried inside each block.  In serial, use
+  // component-interleaved field numbering by default so the FE sparsity graph
+  // collapses cleanly to the FSILS node graph.  MPI currently needs the
+  // owner-contiguous setup path below to build a valid overlap permutation.
+  // Keep SVMP_DOF_NUMBERING as an explicit override.
+  if (selectBackend(params_) == svmp::FE::backends::BackendKind::FSILS &&
+      setup_opts.dof_options.world_size == 1 &&
+      std::getenv("SVMP_DOF_NUMBERING") == nullptr) {
+    setup_opts.dof_options.numbering = svmp::FE::dofs::DofNumberingStrategy::Interleaved;
+    oopCout() << "[svMultiPhysics::Application] FSILS backend: defaulting DOF numbering to interleaved"
+              << std::endl;
+  }
+
   // Allow env var override for DOF numbering strategy
   if (const char* env = std::getenv("SVMP_DOF_NUMBERING"); env != nullptr) {
     const std::string val = lower_copy(std::string(env));

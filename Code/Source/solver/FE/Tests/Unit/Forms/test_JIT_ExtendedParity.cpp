@@ -20,6 +20,7 @@
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/Vocabulary.h"
+#include "Spaces/HCurlSpace.h"
 #include "Spaces/H1Space.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
@@ -73,6 +74,20 @@ struct CompareOptions {
     std::optional<std::vector<Real>> prev_solution{};
     std::optional<std::vector<Real>> prev_solution2{};
 };
+
+[[nodiscard]] dofs::DofMap createSingleTetraDofMap(LocalIndex n_dofs)
+{
+    dofs::DofMap dof_map(1, static_cast<GlobalIndex>(n_dofs), n_dofs);
+    std::vector<GlobalIndex> cell_dofs(static_cast<std::size_t>(n_dofs));
+    for (LocalIndex i = 0; i < n_dofs; ++i) {
+        cell_dofs[static_cast<std::size_t>(i)] = static_cast<GlobalIndex>(i);
+    }
+    dof_map.setCellDofs(0, cell_dofs);
+    dof_map.setNumDofs(static_cast<GlobalIndex>(n_dofs));
+    dof_map.setNumLocalDofs(static_cast<GlobalIndex>(n_dofs));
+    dof_map.finalize();
+    return dof_map;
+}
 
 void expectJitMatchesInterpreterCell(const assembly::IMeshAccess& mesh,
                                     const dofs::DofMap& dof_map,
@@ -223,6 +238,20 @@ TEST(JITExtendedParityTest, SmoothHeavisideCellMatchesInterpreter)
     const auto residual = inner(smoothHeaviside(u, eps) * grad(u), grad(v)).dx();
 
     const std::vector<Real> U = {-0.2, 0.1, 0.25, -0.05};
+    expectJitMatchesInterpreterCell(mesh, dof_map, space, residual, U, /*vec_tol=*/1e-12, /*mat_tol=*/1e-12);
+}
+
+TEST(JITExtendedParityTest, IntrinsicVectorBasisGradientMatchesInterpreter)
+{
+    SingleTetraMeshAccess mesh;
+    spaces::HCurlSpace space(ElementType::Tetra4, /*order=*/0, BasisType::Nedelec);
+    auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto residual = (inner(sym(grad(u)), sym(grad(v))) + Real(0.25) * inner(grad(u), grad(v))).dx();
+
+    const std::vector<Real> U = {0.12, -0.08, 0.15, -0.03, 0.21, -0.11};
     expectJitMatchesInterpreterCell(mesh, dof_map, space, residual, U, /*vec_tol=*/1e-12, /*mat_tol=*/1e-12);
 }
 

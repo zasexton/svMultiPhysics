@@ -4,6 +4,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "FE/Basis/CompatibleTensorVectorBasis.h"
 #include "FE/Basis/LagrangeBasis.h"
 #include "FE/Basis/NodeOrderingConventions.h"
 #include "FE/Basis/VectorBasis.h"
@@ -16,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <memory>
 
 using namespace svmp::FE;
 using namespace svmp::FE::basis;
@@ -172,6 +174,190 @@ TEST(NedelecBasis, CurlSigns) {
         EXPECT_NEAR(c[0], 0.0, 1e-14);
         EXPECT_NEAR(c[1], 0.0, 1e-14);
         EXPECT_NEAR(c[2], 0.25, 1e-12);
+    }
+}
+
+TEST(VectorBasisJacobians, ScalarBasisThrowsClearException) {
+    LagrangeBasis basis(ElementType::Triangle3, 1);
+    std::vector<VectorJacobian> jacobians;
+
+    EXPECT_THROW(basis.evaluate_vector_jacobians({Real(0.2), Real(0.3), Real(0)}, jacobians),
+                 BasisEvaluationException);
+}
+
+TEST(VectorBasisJacobians, HDivDivergenceMatchesJacobianTrace) {
+    const std::array<std::pair<ElementType, int>, 5> rt_cases = {{
+        {ElementType::Triangle3, 0},
+        {ElementType::Quad4, 0},
+        {ElementType::Tetra4, 0},
+        {ElementType::Hex8, 0},
+        {ElementType::Wedge6, 0},
+    }};
+
+    const auto xi = svmp::FE::math::Vector<Real, 3>{Real(0.2), Real(0.15), Real(0.1)};
+    for (const auto& [type, order] : rt_cases) {
+        RaviartThomasBasis basis(type, order);
+        std::vector<VectorJacobian> jacobians;
+        std::vector<Real> divergence;
+        basis.evaluate_vector_jacobians(xi, jacobians);
+        basis.evaluate_divergence(xi, divergence);
+
+        ASSERT_EQ(jacobians.size(), divergence.size()) << static_cast<int>(type);
+        for (std::size_t i = 0; i < jacobians.size(); ++i) {
+            Real trace = Real(0);
+            for (int d = 0; d < basis.dimension(); ++d) {
+                trace += jacobians[i](static_cast<std::size_t>(d), static_cast<std::size_t>(d));
+            }
+            EXPECT_NEAR(trace, divergence[i], 1e-11)
+                << "type=" << static_cast<int>(type) << ", i=" << i;
+        }
+    }
+
+    for (ElementType type : {ElementType::Triangle3, ElementType::Quad4, ElementType::Tetra4}) {
+        BDMBasis basis(type, 1);
+        std::vector<VectorJacobian> jacobians;
+        std::vector<Real> divergence;
+        basis.evaluate_vector_jacobians(xi, jacobians);
+        basis.evaluate_divergence(xi, divergence);
+
+        ASSERT_EQ(jacobians.size(), divergence.size()) << static_cast<int>(type);
+        for (std::size_t i = 0; i < jacobians.size(); ++i) {
+            Real trace = Real(0);
+            for (int d = 0; d < basis.dimension(); ++d) {
+                trace += jacobians[i](static_cast<std::size_t>(d), static_cast<std::size_t>(d));
+            }
+            EXPECT_NEAR(trace, divergence[i], 1e-11)
+                << "type=" << static_cast<int>(type) << ", i=" << i;
+        }
+    }
+}
+
+TEST(VectorBasisJacobians, HCurlCurlMatchesJacobianSkewPart) {
+    const std::array<std::pair<ElementType, int>, 4> cases = {{
+        {ElementType::Triangle3, 0},
+        {ElementType::Quad4, 0},
+        {ElementType::Tetra4, 0},
+        {ElementType::Hex8, 0},
+    }};
+
+    const auto xi = svmp::FE::math::Vector<Real, 3>{Real(0.2), Real(-0.15), Real(0.1)};
+    for (const auto& [type, order] : cases) {
+        NedelecBasis basis(type, order);
+        std::vector<VectorJacobian> jacobians;
+        std::vector<svmp::FE::math::Vector<Real, 3>> curl;
+        basis.evaluate_vector_jacobians(xi, jacobians);
+        basis.evaluate_curl(xi, curl);
+
+        ASSERT_EQ(jacobians.size(), curl.size()) << static_cast<int>(type);
+        for (std::size_t i = 0; i < jacobians.size(); ++i) {
+            const auto& J = jacobians[i];
+            svmp::FE::math::Vector<Real, 3> from_J{
+                J(2, 1) - J(1, 2),
+                J(0, 2) - J(2, 0),
+                J(1, 0) - J(0, 1),
+            };
+            for (int d = 0; d < 3; ++d) {
+                EXPECT_NEAR(from_J[static_cast<std::size_t>(d)], curl[i][static_cast<std::size_t>(d)], 1e-11)
+                    << "type=" << static_cast<int>(type) << ", i=" << i << ", d=" << d;
+            }
+        }
+    }
+}
+
+TEST(VectorBasisJacobians, ReferenceJacobiansMatchValueFiniteDifferences) {
+    const auto xi = svmp::FE::math::Vector<Real, 3>{Real(0.21), Real(-0.17), Real(0.13)};
+    constexpr Real h = Real(1e-6);
+
+    auto check_basis = [&](const VectorBasisFunction& basis) {
+        std::vector<VectorJacobian> jacobians;
+        basis.evaluate_vector_jacobians(xi, jacobians);
+        ASSERT_EQ(jacobians.size(), basis.size());
+
+        for (int d = 0; d < basis.dimension(); ++d) {
+            auto xp = xi;
+            auto xm = xi;
+            xp[static_cast<std::size_t>(d)] += h;
+            xm[static_cast<std::size_t>(d)] -= h;
+
+            std::vector<svmp::FE::math::Vector<Real, 3>> vp;
+            std::vector<svmp::FE::math::Vector<Real, 3>> vm;
+            basis.evaluate_vector_values(xp, vp);
+            basis.evaluate_vector_values(xm, vm);
+            ASSERT_EQ(vp.size(), jacobians.size());
+            ASSERT_EQ(vm.size(), jacobians.size());
+
+            for (std::size_t i = 0; i < jacobians.size(); ++i) {
+                for (int c = 0; c < 3; ++c) {
+                    const Real fd = (vp[i][static_cast<std::size_t>(c)] -
+                                     vm[i][static_cast<std::size_t>(c)]) / (Real(2) * h);
+                    EXPECT_NEAR(jacobians[i](static_cast<std::size_t>(c), static_cast<std::size_t>(d)),
+                                fd,
+                                2e-7)
+                        << "basis=" << static_cast<int>(basis.basis_type())
+                        << ", type=" << static_cast<int>(basis.element_type())
+                        << ", i=" << i << ", c=" << c << ", d=" << d;
+                }
+            }
+        }
+    };
+
+    RaviartThomasBasis rt(ElementType::Tetra4, 0);
+    NedelecBasis nd(ElementType::Tetra4, 0);
+    BDMBasis bdm(ElementType::Triangle3, 1);
+
+    check_basis(rt);
+    check_basis(nd);
+    check_basis(bdm);
+}
+
+TEST(VectorBasisJacobians, CompatibleTensorJacobiansMatchComponentGradientsAndOperators) {
+    auto bx = std::make_shared<LagrangeBasis>(ElementType::Quad4, 1);
+    auto by = std::make_shared<LagrangeBasis>(ElementType::Quad4, 1);
+    const std::vector<DofAssociation> associations(bx->size() + by->size());
+
+    CompatibleTensorVectorBasis hdiv(CompatibleTensorVectorBasis::Family::HDiv,
+                                     BasisType::Lagrange,
+                                     bx,
+                                     by,
+                                     associations,
+                                     1,
+                                     ElementType::Quad4);
+    CompatibleTensorVectorBasis hcurl(CompatibleTensorVectorBasis::Family::HCurl,
+                                      BasisType::Lagrange,
+                                      std::make_shared<LagrangeBasis>(ElementType::Quad4, 1),
+                                      std::make_shared<LagrangeBasis>(ElementType::Quad4, 1),
+                                      associations,
+                                      1,
+                                      ElementType::Quad4);
+
+    const auto xi = svmp::FE::math::Vector<Real, 3>{Real(0.2), Real(-0.3), Real(0)};
+
+    std::vector<Gradient> gradients;
+    bx->evaluate_gradients(xi, gradients);
+
+    std::vector<VectorJacobian> jacobians;
+    hdiv.evaluate_vector_jacobians(xi, jacobians);
+    ASSERT_EQ(jacobians.size(), associations.size());
+    for (std::size_t i = 0; i < bx->size(); ++i) {
+        EXPECT_NEAR(jacobians[i](0, 0), gradients[i][0], 1e-14);
+        EXPECT_NEAR(jacobians[i](0, 1), gradients[i][1], 1e-14);
+        EXPECT_NEAR(jacobians[bx->size() + i](1, 0), gradients[i][0], 1e-14);
+        EXPECT_NEAR(jacobians[bx->size() + i](1, 1), gradients[i][1], 1e-14);
+    }
+
+    std::vector<Real> divergence;
+    hdiv.evaluate_divergence(xi, divergence);
+    ASSERT_EQ(divergence.size(), jacobians.size());
+    for (std::size_t i = 0; i < jacobians.size(); ++i) {
+        EXPECT_NEAR(jacobians[i](0, 0) + jacobians[i](1, 1), divergence[i], 1e-14);
+    }
+
+    hcurl.evaluate_vector_jacobians(xi, jacobians);
+    std::vector<svmp::FE::math::Vector<Real, 3>> curl;
+    hcurl.evaluate_curl(xi, curl);
+    ASSERT_EQ(curl.size(), jacobians.size());
+    for (std::size_t i = 0; i < jacobians.size(); ++i) {
+        EXPECT_NEAR(jacobians[i](1, 0) - jacobians[i](0, 1), curl[i][2], 1e-14);
     }
 }
 
@@ -845,8 +1031,8 @@ TEST(NedelecBasis, HexCurlConstants) {
     EXPECT_NEAR(curl[1][0],  0.125 * (Real(1) + xi[0]), 1e-12);
     EXPECT_NEAR(curl[1][2],  0.125 * (Real(1) - xi[2]), 1e-12);
     // Vertical edge 0-4: v = (1/8)(1-x)(1-y) e_z
-    EXPECT_NEAR(curl[8][0],  0.125 * (Real(1) - xi[0]), 1e-12);
-    EXPECT_NEAR(curl[8][1], -0.125 * (Real(1) - xi[1]), 1e-12);
+    EXPECT_NEAR(curl[8][0], -0.125 * (Real(1) - xi[0]), 1e-12);
+    EXPECT_NEAR(curl[8][1],  0.125 * (Real(1) - xi[1]), 1e-12);
 
     std::vector<svmp::FE::math::Vector<Real, 3>> vals;
     basis.evaluate_vector_values(xi, vals);

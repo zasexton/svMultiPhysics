@@ -176,7 +176,9 @@ struct GmresEnhancements {
   int recycle_replace_n = 0;
   bool use_mgs_dgks = false;
   double mgs_dgks_ratio = 0.5;
-  ReorthMode reorth_mode = ReorthMode::selective;  // default: current behavior
+  // Default to the historical fast path. Selective reorthogonalization remains
+  // available as an explicit opt-in when a problem genuinely needs it.
+  ReorthMode reorth_mode = ReorthMode::off;
   bool verbose = false;
 };
 
@@ -235,7 +237,11 @@ struct GmresEnhancements {
     const char* reorth_env = std::getenv("SVMP_FSILS_GMRES_REORTH");
     if (reorth_env) {
       std::string v = to_lower(std::string(reorth_env));
-      if (v == "off" || v == "no" || v == "false" || v == "0" || v == "none") {
+      if (v == "on" || v == "yes" || v == "true" || v == "1" ||
+          v == "selective" || v == "auto") {
+        c.reorth_mode = GmresEnhancements::ReorthMode::selective;
+      } else if (v == "off" || v == "no" || v == "false" || v == "0" ||
+                 v == "none") {
         c.reorth_mode = GmresEnhancements::ReorthMode::off;
       }
     }
@@ -680,6 +686,58 @@ double fused_update_norm_v_impl(const fsils_int nNo, const fsils_int mynNo, fe_f
   const int num_vecs = i + 1;
   double* v = u_next.data();
   double local_sq = 0.0;
+
+  if (use_serial_hot_path(max_omp_threads())) {
+    for (fsils_int k_start = 0; k_start < nNo; k_start += BLOCK_SIZE) {
+      const fsils_int k_end = std::min(k_start + BLOCK_SIZE, nNo);
+      const fsils_int blk_nodes = k_end - k_start;
+      const size_t blk_elems = static_cast<size_t>(blk_nodes) * static_cast<size_t>(DOF);
+
+      alignas(64) double vbuf[DOF * BLOCK_SIZE];
+      double* v_block = v + static_cast<size_t>(k_start) * static_cast<size_t>(DOF);
+
+      #pragma omp simd
+      for (size_t idx = 0; idx < blk_elems; ++idx) {
+        vbuf[idx] = v_block[idx];
+      }
+
+      for (int j = 0; j < num_vecs; ++j) {
+        const double hj = h_factors[j];
+        if (hj == 0.0) {
+          continue;
+        }
+
+        const double* uj_block = u.slice_data(j) + static_cast<size_t>(k_start) * static_cast<size_t>(DOF);
+        #pragma omp simd
+        for (size_t idx = 0; idx < blk_elems; ++idx) {
+          vbuf[idx] -= hj * uj_block[idx];
+        }
+      }
+
+      fsils_int owned_nodes = 0;
+      if (k_start < mynNo) {
+        owned_nodes = std::min(k_end, mynNo) - k_start;
+      }
+
+      const size_t owned_elems = static_cast<size_t>(owned_nodes) * static_cast<size_t>(DOF);
+      double blk_sq = 0.0;
+      #pragma omp simd reduction(+:blk_sq)
+      for (size_t idx = 0; idx < owned_elems; ++idx) {
+        blk_sq += vbuf[idx] * vbuf[idx];
+      }
+      local_sq += blk_sq;
+
+      #pragma omp simd
+      for (size_t idx = 0; idx < blk_elems; ++idx) {
+        v_block[idx] = vbuf[idx];
+      }
+    }
+
+    double global_sq = local_sq;
+    const fe_fsi_linear_solver::CollectiveOps collectives(commu);
+    collectives.allreduce_sum(local_sq, global_sq);
+    return std::sqrt(global_sq);
+  }
 
   // Deterministic partial-sum pattern: each thread stores its local sum
   // in a fixed slot, then partials are summed in thread-ID order.
@@ -1213,6 +1271,56 @@ double fused_update_norm_s(const fsils_int nNo, const fsils_int mynNo, fe_fsi_li
   const int num_vecs = i + 1;
   double* v = u_next.data();
   double local_sq = 0.0;
+
+  if (use_serial_hot_path(max_omp_threads())) {
+    for (fsils_int k_start = 0; k_start < nNo; k_start += BLOCK_SIZE) {
+      const fsils_int k_end = std::min(k_start + BLOCK_SIZE, nNo);
+      const fsils_int blk_nodes = k_end - k_start;
+
+      alignas(64) double vbuf[BLOCK_SIZE];
+      double* v_block = v + static_cast<size_t>(k_start);
+
+      #pragma omp simd
+      for (fsils_int idx = 0; idx < blk_nodes; ++idx) {
+        vbuf[idx] = v_block[static_cast<size_t>(idx)];
+      }
+
+      for (int j = 0; j < num_vecs; ++j) {
+        const double hj = h_factors[j];
+        if (hj == 0.0) {
+          continue;
+        }
+
+        const double* uj_block = u.col_data(j) + static_cast<size_t>(k_start);
+        #pragma omp simd
+        for (fsils_int idx = 0; idx < blk_nodes; ++idx) {
+          vbuf[idx] -= hj * uj_block[static_cast<size_t>(idx)];
+        }
+      }
+
+      fsils_int owned_nodes = 0;
+      if (k_start < mynNo) {
+        owned_nodes = std::min(k_end, mynNo) - k_start;
+      }
+
+      double blk_sq = 0.0;
+      #pragma omp simd reduction(+:blk_sq)
+      for (fsils_int idx = 0; idx < owned_nodes; ++idx) {
+        blk_sq += vbuf[idx] * vbuf[idx];
+      }
+      local_sq += blk_sq;
+
+      #pragma omp simd
+      for (fsils_int idx = 0; idx < blk_nodes; ++idx) {
+        v_block[static_cast<size_t>(idx)] = vbuf[idx];
+      }
+    }
+
+    double global_sq = local_sq;
+    const fe_fsi_linear_solver::CollectiveOps collectives(commu);
+    collectives.allreduce_sum(local_sq, global_sq);
+    return std::sqrt(global_sq);
+  }
 
   {
 #ifdef _OPENMP
@@ -2540,8 +2648,8 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       // we pass h_col directly (positive values = subtract).
       tp0 = TP();
       const double first_norm = fused_update_norm_v(dof, nNo, mynNo, lhs.commu, u, i, u_slice_next, h_col);
-      tp_gs_update += TP() - tp0;
-      tp_norm += TP() - tp0;
+      const double update_norm_dt = TP() - tp0;
+      tp_gs_update += update_norm_dt;
       double new_norm = first_norm;
       const double new_norm_sq = new_norm * new_norm;
 
@@ -2577,8 +2685,8 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
 
         tp0 = TP();
         new_norm = fused_update_norm_v(dof, nNo, mynNo, lhs.commu, u, i, u_slice_next, h_col);
-        tp_gs_update += TP() - tp0;
-        tp_norm += TP() - tp0;
+        const double reorth_update_norm_dt = TP() - tp0;
+        tp_gs_update += reorth_update_norm_dt;
       }
       h(i+1,i) = new_norm;
 

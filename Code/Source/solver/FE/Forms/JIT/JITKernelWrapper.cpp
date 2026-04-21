@@ -224,10 +224,12 @@ inline void patchCellSideArgsV6(assembly::jit::KernelSideArgsV6& s,
     s.trial_phys_hessians = flattenMat3(ctx.trialPhysicalHessiansRaw());
 
     s.test_basis_vector_values_xyz = flattenXYZ(ctx.testBasisVectorValuesRaw());
+    s.test_basis_vector_jacobians = flattenMat3(ctx.testBasisVectorJacobiansRaw());
     s.test_basis_curls_xyz = flattenXYZ(ctx.testBasisCurlsRaw());
     s.test_basis_divergences = ctx.testBasisDivergencesRaw().empty() ? nullptr : ctx.testBasisDivergencesRaw().data();
 
     s.trial_basis_vector_values_xyz = flattenXYZ(ctx.trialBasisVectorValuesRaw());
+    s.trial_basis_vector_jacobians = flattenMat3(ctx.trialBasisVectorJacobiansRaw());
     s.trial_basis_curls_xyz = flattenXYZ(ctx.trialBasisCurlsRaw());
     s.trial_basis_divergences = ctx.trialBasisDivergencesRaw().empty() ? nullptr : ctx.trialBasisDivergencesRaw().data();
 

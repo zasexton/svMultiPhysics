@@ -315,6 +315,7 @@ struct KernelGroupPlan {
 {
     std::uint64_t h = kFNVOffset;
     hashMix(h, static_cast<std::uint64_t>(assembly::jit::kKernelArgsABIVersionV6));
+    hashMix(h, static_cast<std::uint64_t>(assembly::jit::kKernelArgsABILayoutRevisionV6));
     hashMix(h, static_cast<std::uint64_t>(ir.kind()));
     hashMix(h, static_cast<std::uint64_t>(group.key.domain));
     hashMix(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(group.key.boundary_marker)));
@@ -1028,6 +1029,7 @@ JITCompileResult JITCompiler::Impl::compileMonolithicFormIR(
     // Mix compiler config
     std::uint64_t cache_key = kFNVOffset;
     hashMix(cache_key, static_cast<std::uint64_t>(assembly::jit::kCoupledCellKernelABIV1));
+    hashMix(cache_key, static_cast<std::uint64_t>(assembly::jit::kKernelArgsABILayoutRevisionV6));
     hashMix(cache_key, combined_hash);
     hashMix(cache_key, static_cast<std::uint64_t>(static_cast<std::int64_t>(options.optimization_level)));
     hashMix(cache_key, static_cast<std::uint64_t>(options.vectorize ? 1u : 0u));

@@ -14,6 +14,7 @@
 
 #include "Assembly/AssemblyContext.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/HCurlSpace.h"
 
 #include <array>
 #include <cmath>
@@ -251,6 +252,63 @@ TEST_F(AssemblyContextTest, SetPhysicalGradients) {
 
     auto grad = ctx_.physicalGradient(0, 0);
     EXPECT_DOUBLE_EQ(grad[0], 2.0);
+}
+
+TEST_F(AssemblyContextTest, VectorBasisJacobiansUseQuadratureMajorStorageAndBuildSolutionJacobian) {
+    spaces::HCurlSpace space(ElementType::Tetra4, 0, BasisType::Nedelec);
+    ctx_.configure(/*cell_id=*/0,
+                   space,
+                   space,
+                   RequiredData::SolutionValues | RequiredData::SolutionGradients);
+
+    std::vector<AssemblyContext::Point3D> quad_pts = {
+        {0.0, 0.0, 0.0},
+        {0.25, 0.25, 0.25},
+    };
+    std::vector<Real> weights = {0.5, 0.5};
+    ctx_.setQuadratureData(quad_pts, weights);
+
+    const LocalIndex n_dofs = static_cast<LocalIndex>(space.dofs_per_element());
+    const LocalIndex n_qpts = static_cast<LocalIndex>(quad_pts.size());
+    std::vector<AssemblyContext::Vector3D> values(static_cast<std::size_t>(n_dofs * n_qpts));
+    std::vector<AssemblyContext::Matrix3x3> jacobians(static_cast<std::size_t>(n_dofs * n_qpts));
+
+    for (LocalIndex i = 0; i < n_dofs; ++i) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const auto idx = static_cast<std::size_t>(i * n_qpts + q);
+            values[idx] = {Real(i + 1), Real(q + 2), Real(i + q)};
+            jacobians[idx][0][0] = Real(10 * i + q);
+            jacobians[idx][1][2] = Real(100 + 10 * i + q);
+        }
+    }
+
+    ctx_.setTestVectorBasisValues(n_dofs, values);
+    ctx_.setTestVectorBasisJacobians(n_dofs, jacobians);
+
+    ASSERT_EQ(ctx_.testBasisVectorJacobiansRaw().size(), jacobians.size());
+    for (LocalIndex q = 0; q < n_qpts; ++q) {
+        for (LocalIndex i = 0; i < n_dofs; ++i) {
+            const auto in = jacobians[static_cast<std::size_t>(i * n_qpts + q)];
+            const auto stored = ctx_.basisVectorJacobian(i, q);
+            EXPECT_DOUBLE_EQ(stored[0][0], in[0][0]);
+            EXPECT_DOUBLE_EQ(stored[1][2], in[1][2]);
+            EXPECT_DOUBLE_EQ(ctx_.testBasisVectorJacobiansRaw()[static_cast<std::size_t>(q * n_dofs + i)][0][0],
+                             in[0][0]);
+        }
+    }
+
+    std::vector<Real> coefficients(static_cast<std::size_t>(n_dofs), Real(0));
+    coefficients[1] = Real(2.0);
+    coefficients[3] = Real(-0.5);
+    ctx_.setSolutionCoefficients(coefficients);
+
+    for (LocalIndex q = 0; q < n_qpts; ++q) {
+        const auto J = ctx_.solutionVectorJacobian(q);
+        const auto J1 = jacobians[static_cast<std::size_t>(1 * n_qpts + q)];
+        const auto J3 = jacobians[static_cast<std::size_t>(3 * n_qpts + q)];
+        EXPECT_DOUBLE_EQ(J[0][0], Real(2.0) * J1[0][0] - Real(0.5) * J3[0][0]);
+        EXPECT_DOUBLE_EQ(J[1][2], Real(2.0) * J1[1][2] - Real(0.5) * J3[1][2]);
+    }
 }
 
 TEST_F(AssemblyContextTest, TrialBasisWithSameAsTest) {

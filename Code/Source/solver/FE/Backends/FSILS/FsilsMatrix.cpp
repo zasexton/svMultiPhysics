@@ -1455,7 +1455,8 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
     }
 
     auto commu = make_fsils_commu(backend_comm);
-    fe_fsi_linear_solver::fsils_lhs_create(shared->lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, /*nFaces=*/0);
+    fe_fsi_linear_solver::fsils_lhs_create_with_explicit_owned_nodes(
+        shared->lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, /*nFaces=*/0, owned_node_count);
 
     build_old_of_internal(*shared);
 

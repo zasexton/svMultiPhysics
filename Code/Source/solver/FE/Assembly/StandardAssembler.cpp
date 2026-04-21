@@ -130,6 +130,72 @@ namespace {
     return max_cells;
 }
 
+[[nodiscard]] AssemblyContext::Matrix3x3 transformVectorBasisJacobian(
+    const AssemblyContext::Matrix3x3& J,
+    const AssemblyContext::Matrix3x3& J_inv,
+    Real det_J,
+    const basis::VectorJacobian& jac_ref,
+    Continuity continuity,
+    bool affine_mapping,
+    const char* context)
+{
+    AssemblyContext::Matrix3x3 out{};
+    if (continuity == Continuity::H_div) {
+        FE_THROW_IF(!affine_mapping, FEException,
+                    std::string(context) +
+                        ": H(div) vector-basis Jacobians require an affine geometry mapping; "
+                        "curved Piola derivative terms are not implemented");
+        const Real inv_det = Real(1) / det_J;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                Real sum = Real(0);
+                for (int a = 0; a < 3; ++a) {
+                    for (int b = 0; b < 3; ++b) {
+                        sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(a)] *
+                               jac_ref(static_cast<std::size_t>(a), static_cast<std::size_t>(b)) *
+                               J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                    }
+                }
+                out[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = inv_det * sum;
+            }
+        }
+        return out;
+    }
+
+    if (continuity == Continuity::H_curl) {
+        FE_THROW_IF(!affine_mapping, FEException,
+                    std::string(context) +
+                        ": H(curl) vector-basis Jacobians require an affine geometry mapping; "
+                        "curved Piola derivative terms are not implemented");
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                Real sum = Real(0);
+                for (int a = 0; a < 3; ++a) {
+                    for (int b = 0; b < 3; ++b) {
+                        sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                               jac_ref(static_cast<std::size_t>(a), static_cast<std::size_t>(b)) *
+                               J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                    }
+                }
+                out[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+            }
+        }
+        return out;
+    }
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            Real sum = Real(0);
+            for (int a = 0; a < 3; ++a) {
+                sum += jac_ref(static_cast<std::size_t>(r), static_cast<std::size_t>(a)) *
+                       J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(c)];
+            }
+            out[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+        }
+    }
+    return out;
+}
+
 [[nodiscard]] inline bool jitKernelSupportsCoefficientsOnly(
     const forms::jit::JITKernelWrapper& jit) noexcept
 {
@@ -4671,6 +4737,16 @@ void StandardAssembler::prepareBasis(
         (hasFlag(required_data, RequiredData::BasisValues) ||
          hasFlag(required_data, RequiredData::SolutionValues) ||
          required_data == RequiredData::None);
+    const bool need_test_vector_jacobians =
+        test_is_vector_basis &&
+        (hasFlag(required_data, RequiredData::PhysicalGradients) ||
+         hasFlag(required_data, RequiredData::SolutionGradients) ||
+         required_data == RequiredData::None);
+    const bool need_trial_vector_jacobians =
+        trial_is_vector_basis &&
+        (hasFlag(required_data, RequiredData::PhysicalGradients) ||
+         hasFlag(required_data, RequiredData::SolutionGradients) ||
+         required_data == RequiredData::None);
 
     if (test_is_vector_basis) {
         scratch_basis_values_.clear();
@@ -4684,6 +4760,11 @@ void StandardAssembler::prepareBasis(
         } else {
             scratch_basis_vector_values_.clear();
         }
+        if (need_test_vector_jacobians) {
+            scratch_basis_vector_jacobians_.resize(test_basis_size);
+        } else {
+            scratch_basis_vector_jacobians_.clear();
+        }
         if (need_basis_curls) {
             scratch_basis_curls_.resize(test_basis_size);
         } else {
@@ -4696,6 +4777,7 @@ void StandardAssembler::prepareBasis(
         }
     } else {
         scratch_basis_vector_values_.clear();
+        scratch_basis_vector_jacobians_.clear();
         scratch_basis_curls_.clear();
         scratch_basis_divergences_.clear();
 
@@ -4713,6 +4795,7 @@ void StandardAssembler::prepareBasis(
 
     // Storage for trial if different from test — use member scratch for fast-path caching
     std::vector<AssemblyContext::Vector3D> trial_basis_vector_values;
+    std::vector<AssemblyContext::Matrix3x3> trial_basis_vector_jacobians;
     std::vector<AssemblyContext::Vector3D> trial_basis_curls;
     std::vector<Real> trial_basis_divergences;
     auto& trial_basis_values = scratch_trial_basis_values_;
@@ -4733,6 +4816,9 @@ void StandardAssembler::prepareBasis(
             if (need_trial_vector_values) {
                 trial_basis_vector_values.resize(trial_basis_size);
             }
+            if (need_trial_vector_jacobians) {
+                trial_basis_vector_jacobians.resize(trial_basis_size);
+            }
             if (need_basis_curls) {
                 trial_basis_curls.resize(trial_basis_size);
             }
@@ -4741,6 +4827,7 @@ void StandardAssembler::prepareBasis(
             }
         } else {
             trial_basis_vector_values.clear();
+            trial_basis_vector_jacobians.clear();
             trial_basis_curls.clear();
             trial_basis_divergences.clear();
 
@@ -4780,6 +4867,7 @@ void StandardAssembler::prepareBasis(
     const auto& mapping = cached_mapping_;
 
     auto& vec_values_at_pt = scratch_vec_values_at_pt_;
+    auto& vec_jacobians_at_pt = scratch_vec_jacobians_at_pt_;
     auto& vec_curls_at_pt = scratch_vec_curls_at_pt_;
     auto& vec_divs_at_pt = scratch_vec_divs_at_pt_;
 
@@ -4825,6 +4913,9 @@ void StandardAssembler::prepareBasis(
             if (need_test_vector_values) {
                 test_basis.evaluate_vector_values(xi, vec_values_at_pt);
             }
+            if (need_test_vector_jacobians) {
+                test_basis.evaluate_vector_jacobians(xi, vec_jacobians_at_pt);
+            }
             if (need_basis_curls) {
                 test_basis.evaluate_curl(xi, vec_curls_at_pt);
             }
@@ -4858,6 +4949,17 @@ void StandardAssembler::prepareBasis(
                         }
                     }
                     scratch_basis_vector_values_[idx] = vphys;
+                }
+
+                if (need_test_vector_jacobians) {
+                    scratch_basis_vector_jacobians_[idx] =
+                        transformVectorBasisJacobian(J,
+                                                     J_inv,
+                                                     det_J,
+                                                     vec_jacobians_at_pt[static_cast<std::size_t>(i)],
+                                                     cont,
+                                                     cached_mapping_affine_,
+                                                     "StandardAssembler::prepareBasis");
                 }
 
                 if (need_basis_curls) {
@@ -4948,6 +5050,9 @@ void StandardAssembler::prepareBasis(
                 if (need_trial_vector_values) {
                     trial_basis.evaluate_vector_values(xi, vec_values_at_pt);
                 }
+                if (need_trial_vector_jacobians) {
+                    trial_basis.evaluate_vector_jacobians(xi, vec_jacobians_at_pt);
+                }
                 if (need_basis_curls) {
                     trial_basis.evaluate_curl(xi, vec_curls_at_pt);
                 }
@@ -4981,6 +5086,17 @@ void StandardAssembler::prepareBasis(
                             }
                         }
                         trial_basis_vector_values[idx] = vphys;
+                    }
+
+                    if (need_trial_vector_jacobians) {
+                        trial_basis_vector_jacobians[idx] =
+                            transformVectorBasisJacobian(J,
+                                                         J_inv,
+                                                         det_J,
+                                                         vec_jacobians_at_pt[static_cast<std::size_t>(j)],
+                                                         cont,
+                                                         cached_mapping_affine_,
+                                                         "StandardAssembler::prepareBasis");
                     }
 
                     if (need_basis_curls) {
@@ -5081,6 +5197,10 @@ void StandardAssembler::prepareBasis(
                                          need_test_vector_values
                                              ? std::span<const AssemblyContext::Vector3D>(scratch_basis_vector_values_)
                                              : std::span<const AssemblyContext::Vector3D>{});
+        context.setTestVectorBasisJacobians(n_test_dofs,
+                                            need_test_vector_jacobians
+                                                ? std::span<const AssemblyContext::Matrix3x3>(scratch_basis_vector_jacobians_)
+                                                : std::span<const AssemblyContext::Matrix3x3>{});
         if (need_basis_curls) {
             context.setTestBasisCurls(n_test_dofs, std::span<const AssemblyContext::Vector3D>(scratch_basis_curls_));
         }
@@ -5100,6 +5220,10 @@ void StandardAssembler::prepareBasis(
                                               need_trial_vector_values
                                                   ? std::span<const AssemblyContext::Vector3D>(trial_basis_vector_values)
                                                   : std::span<const AssemblyContext::Vector3D>{});
+            context.setTrialVectorBasisJacobians(n_trial_dofs,
+                                                 need_trial_vector_jacobians
+                                                     ? std::span<const AssemblyContext::Matrix3x3>(trial_basis_vector_jacobians)
+                                                     : std::span<const AssemblyContext::Matrix3x3>{});
             if (need_basis_curls) {
                 context.setTrialBasisCurls(n_trial_dofs, std::span<const AssemblyContext::Vector3D>(trial_basis_curls));
             }
@@ -9811,6 +9935,16 @@ void StandardAssembler::prepareContextFace(
         (hasFlag(required_data, RequiredData::BasisValues) ||
          hasFlag(required_data, RequiredData::SolutionValues) ||
          required_data == RequiredData::None);
+    const bool need_test_vector_jacobians =
+        test_is_vector_basis &&
+        (hasFlag(required_data, RequiredData::PhysicalGradients) ||
+         hasFlag(required_data, RequiredData::SolutionGradients) ||
+         required_data == RequiredData::None);
+    const bool need_trial_vector_jacobians =
+        trial_is_vector_basis &&
+        (hasFlag(required_data, RequiredData::PhysicalGradients) ||
+         hasFlag(required_data, RequiredData::SolutionGradients) ||
+         required_data == RequiredData::None);
 
     // 5. Get cell node coordinates from mesh
     mesh.getCellCoordinates(cell_id, cell_coords_);
@@ -9870,6 +10004,11 @@ void StandardAssembler::prepareContextFace(
         } else {
             scratch_basis_vector_values_.clear();
         }
+        if (need_test_vector_jacobians) {
+            scratch_basis_vector_jacobians_.resize(test_basis_size);
+        } else {
+            scratch_basis_vector_jacobians_.clear();
+        }
         if (need_basis_curls) {
             scratch_basis_curls_.resize(test_basis_size);
         } else {
@@ -9882,6 +10021,7 @@ void StandardAssembler::prepareContextFace(
         }
     } else {
         scratch_basis_vector_values_.clear();
+        scratch_basis_vector_jacobians_.clear();
         scratch_basis_curls_.clear();
         scratch_basis_divergences_.clear();
 
@@ -9901,6 +10041,7 @@ void StandardAssembler::prepareContextFace(
     std::vector<AssemblyContext::Vector3D> trial_ref_gradients;
     std::vector<AssemblyContext::Vector3D> trial_phys_gradients;
     std::vector<AssemblyContext::Vector3D> trial_basis_vector_values;
+    std::vector<AssemblyContext::Matrix3x3> trial_basis_vector_jacobians;
     std::vector<AssemblyContext::Vector3D> trial_basis_curls;
     std::vector<Real> trial_basis_divergences;
     std::vector<AssemblyContext::Matrix3x3> trial_ref_hessians;
@@ -9917,6 +10058,9 @@ void StandardAssembler::prepareContextFace(
             if (need_trial_vector_values) {
                 trial_basis_vector_values.resize(trial_basis_size);
             }
+            if (need_trial_vector_jacobians) {
+                trial_basis_vector_jacobians.resize(trial_basis_size);
+            }
             if (need_basis_curls) {
                 trial_basis_curls.resize(trial_basis_size);
             }
@@ -9925,6 +10069,7 @@ void StandardAssembler::prepareContextFace(
             }
         } else {
             trial_basis_vector_values.clear();
+            trial_basis_vector_jacobians.clear();
             trial_basis_curls.clear();
             trial_basis_divergences.clear();
 
@@ -10096,6 +10241,7 @@ void StandardAssembler::prepareContextFace(
     auto& scalar_hessians_at_pt = scratch_scalar_hessians_at_pt_;
 
     auto& vec_values_at_pt = scratch_vec_values_at_pt_;
+    auto& vec_jacobians_at_pt = scratch_vec_jacobians_at_pt_;
     auto& vec_curls_at_pt = scratch_vec_curls_at_pt_;
     auto& vec_divs_at_pt = scratch_vec_divs_at_pt_;
 
@@ -10172,6 +10318,9 @@ void StandardAssembler::prepareContextFace(
             if (need_test_vector_values) {
                 test_basis.evaluate_vector_values(xi_test, vec_values_at_pt);
             }
+            if (need_test_vector_jacobians) {
+                test_basis.evaluate_vector_jacobians(xi_test, vec_jacobians_at_pt);
+            }
             if (need_basis_curls) {
                 test_basis.evaluate_curl(xi_test, vec_curls_at_pt);
             }
@@ -10206,6 +10355,17 @@ void StandardAssembler::prepareContextFace(
                         }
                     }
                     scratch_basis_vector_values_[idx] = vphys;
+                }
+
+                if (need_test_vector_jacobians) {
+                    scratch_basis_vector_jacobians_[idx] =
+                        transformVectorBasisJacobian(J,
+                                                     J_inv,
+                                                     det_J,
+                                                     vec_jacobians_at_pt[static_cast<std::size_t>(i)],
+                                                     cont,
+                                                     mapping->isAffine(),
+                                                     "StandardAssembler::prepareContextFace");
                 }
 
                 if (need_basis_curls) {
@@ -10298,6 +10458,9 @@ void StandardAssembler::prepareContextFace(
                 if (need_trial_vector_values) {
                     trial_basis.evaluate_vector_values(xi_trial, vec_values_at_pt);
                 }
+                if (need_trial_vector_jacobians) {
+                    trial_basis.evaluate_vector_jacobians(xi_trial, vec_jacobians_at_pt);
+                }
                 if (need_basis_curls) {
                     trial_basis.evaluate_curl(xi_trial, vec_curls_at_pt);
                 }
@@ -10332,6 +10495,17 @@ void StandardAssembler::prepareContextFace(
                             }
                         }
                         trial_basis_vector_values[idx] = vphys;
+                    }
+
+                    if (need_trial_vector_jacobians) {
+                        trial_basis_vector_jacobians[idx] =
+                            transformVectorBasisJacobian(J,
+                                                         J_inv,
+                                                         det_J,
+                                                         vec_jacobians_at_pt[static_cast<std::size_t>(j)],
+                                                         cont,
+                                                         mapping->isAffine(),
+                                                         "StandardAssembler::prepareContextFace");
                     }
 
                     if (need_basis_curls) {
@@ -10431,6 +10605,10 @@ void StandardAssembler::prepareContextFace(
                                          need_test_vector_values
                                              ? std::span<const AssemblyContext::Vector3D>(scratch_basis_vector_values_)
                                              : std::span<const AssemblyContext::Vector3D>{});
+        context.setTestVectorBasisJacobians(n_test_dofs,
+                                            need_test_vector_jacobians
+                                                ? std::span<const AssemblyContext::Matrix3x3>(scratch_basis_vector_jacobians_)
+                                                : std::span<const AssemblyContext::Matrix3x3>{});
         if (need_basis_curls) {
             context.setTestBasisCurls(n_test_dofs, std::span<const AssemblyContext::Vector3D>(scratch_basis_curls_));
         }
@@ -10450,6 +10628,10 @@ void StandardAssembler::prepareContextFace(
                                               need_trial_vector_values
                                                   ? std::span<const AssemblyContext::Vector3D>(trial_basis_vector_values)
                                                   : std::span<const AssemblyContext::Vector3D>{});
+            context.setTrialVectorBasisJacobians(n_trial_dofs,
+                                                 need_trial_vector_jacobians
+                                                     ? std::span<const AssemblyContext::Matrix3x3>(trial_basis_vector_jacobians)
+                                                     : std::span<const AssemblyContext::Matrix3x3>{});
             if (need_basis_curls) {
                 context.setTrialBasisCurls(n_trial_dofs, std::span<const AssemblyContext::Vector3D>(trial_basis_curls));
             }
@@ -11568,38 +11750,47 @@ void StandardAssembler::populateFieldSolutionData(
             FE_THROW_IF(vd <= 0 || vd > 3, FEException,
                         "StandardAssembler::populateFieldSolutionData: vector space value_dimension must be 1..3");
 
-            // Vector-basis spaces (H(curl)/H(div)) are non-Product vector-valued spaces. We currently support
-            // values only for these coefficient fields (no gradients/Hessians/Laplacians).
+            // Vector-basis spaces (H(curl)/H(div)) are non-Product vector-valued spaces.
+            // Values and affine physical Jacobians are supported; higher derivatives are not.
             if (!is_product) {
                 FE_THROW_IF(!basis.is_vector_valued(), FEException,
                             "StandardAssembler::populateFieldSolutionData: non-Product vector field is not a vector-basis space");
                 const auto cont = space.continuity();
                 FE_THROW_IF(cont != Continuity::H_curl && cont != Continuity::H_div, FEException,
                             "StandardAssembler::populateFieldSolutionData: non-Product vector field is not H(curl)/H(div)");
-                FE_THROW_IF(need_gradients || need_hessians, FEException,
-                            "StandardAssembler::populateFieldSolutionData: SolutionGradients/Hessians/Laplacians are not supported for vector-basis fields");
+                FE_THROW_IF(need_hessians, FEException,
+                            "StandardAssembler::populateFieldSolutionData: SolutionHessians/Laplacians are not supported for vector-basis fields");
                 FE_THROW_IF(n_dofs != n_scalar_dofs, FEException,
                             "StandardAssembler::populateFieldSolutionData: vector-basis DOF count mismatch");
 
                 applyVectorBasisGlobalToLocal(mesh, cell_id, space, std::span<Real>(local_coeffs));
 
                 vector_values.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Vector3D{0.0, 0.0, 0.0});
-                vector_jacobians.clear();
+                if (need_gradients) {
+                    vector_jacobians.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Matrix3x3{});
+                } else {
+                    vector_jacobians.clear();
+                }
                 vector_component_hessians.clear();
                 vector_component_laplacians.clear();
 
                 auto& vec_values_at_pt = scratch_vec_values_at_pt_;
+                auto& vec_jacobians_at_pt = scratch_vec_jacobians_at_pt_;
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
                     const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
                                                    qpts[static_cast<std::size_t>(q)][1],
                                                    qpts[static_cast<std::size_t>(q)][2]};
                     basis.evaluate_vector_values(xi, vec_values_at_pt);
+                    if (need_gradients) {
+                        basis.evaluate_vector_jacobians(xi, vec_jacobians_at_pt);
+                    }
 
                     const auto J = context.jacobian(q);
                     const auto J_inv = context.inverseJacobian(q);
                     const Real det_J = context.jacobianDet(q);
 
                     AssemblyContext::Vector3D u{0.0, 0.0, 0.0};
+                    AssemblyContext::Matrix3x3 grad_u{};
                     for (LocalIndex j = 0; j < n_dofs; ++j) {
                         const Real coef = local_coeffs[static_cast<std::size_t>(j)];
                         const auto& vref = vec_values_at_pt[static_cast<std::size_t>(j)];
@@ -11627,14 +11818,35 @@ void StandardAssembler::populateFieldSolutionData(
                         u[0] += coef * vphys[0];
                         u[1] += coef * vphys[1];
                         u[2] += coef * vphys[2];
+                        if (need_gradients) {
+                            const auto grad_phi =
+                                transformVectorBasisJacobian(J,
+                                                             J_inv,
+                                                             det_J,
+                                                             vec_jacobians_at_pt[static_cast<std::size_t>(j)],
+                                                             cont,
+                                                             cached_mapping_affine_,
+                                                             "StandardAssembler::populateFieldSolutionData");
+                            for (int r = 0; r < 3; ++r) {
+                                for (int c = 0; c < 3; ++c) {
+                                    grad_u[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
+                                        coef * grad_phi[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                                }
+                            }
+                        }
                     }
 
                     vector_values[static_cast<std::size_t>(q)] = u;
+                    if (need_gradients) {
+                        vector_jacobians[static_cast<std::size_t>(q)] = grad_u;
+                    }
                 }
 
                 context.setFieldSolutionVector(req.field, vd,
                                                want_values ? std::span<const AssemblyContext::Vector3D>(vector_values)
-                                                           : std::span<const AssemblyContext::Vector3D>{});
+                                                           : std::span<const AssemblyContext::Vector3D>{},
+                                               want_gradients ? std::span<const AssemblyContext::Matrix3x3>(vector_jacobians)
+                                                              : std::span<const AssemblyContext::Matrix3x3>{});
 
 	                if (required_history > 0) {
 	                    for (int k = 1; k <= required_history; ++k) {
@@ -12284,38 +12496,47 @@ void StandardAssembler::populateFieldSolutionData(
             FE_THROW_IF(vd <= 0 || vd > 3, FEException,
                         "StandardAssembler::populateFieldSolutionData: vector space value_dimension must be 1..3");
 
-            // Vector-basis spaces (H(curl)/H(div)) are non-Product vector-valued spaces. We currently support
-            // values only for these coefficient fields (no gradients/Hessians/Laplacians).
+            // Vector-basis spaces (H(curl)/H(div)) are non-Product vector-valued spaces.
+            // Values and affine physical Jacobians are supported; higher derivatives are not.
             if (!is_product) {
                 FE_THROW_IF(!basis.is_vector_valued(), FEException,
                             "StandardAssembler::populateFieldSolutionData: non-Product vector field is not a vector-basis space");
                 const auto cont = space.continuity();
                 FE_THROW_IF(cont != Continuity::H_curl && cont != Continuity::H_div, FEException,
                             "StandardAssembler::populateFieldSolutionData: non-Product vector field is not H(curl)/H(div)");
-                FE_THROW_IF(need_gradients || need_hessians, FEException,
-                            "StandardAssembler::populateFieldSolutionData: SolutionGradients/Hessians/Laplacians are not supported for vector-basis fields");
+                FE_THROW_IF(need_hessians, FEException,
+                            "StandardAssembler::populateFieldSolutionData: SolutionHessians/Laplacians are not supported for vector-basis fields");
                 FE_THROW_IF(n_dofs != n_scalar_dofs, FEException,
                             "StandardAssembler::populateFieldSolutionData: vector-basis DOF count mismatch");
 
                 applyVectorBasisGlobalToLocal(mesh, cell_id, space, std::span<Real>(local_coeffs));
 
                 vector_values.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Vector3D{0.0, 0.0, 0.0});
-                vector_jacobians.clear();
+                if (need_gradients) {
+                    vector_jacobians.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Matrix3x3{});
+                } else {
+                    vector_jacobians.clear();
+                }
                 vector_component_hessians.clear();
                 vector_component_laplacians.clear();
 
                 auto& vec_values_at_pt = ws.vec_values_at_pt;
+                auto& vec_jacobians_at_pt = ws.vec_jacobians_at_pt;
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
                     const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
                                                    qpts[static_cast<std::size_t>(q)][1],
                                                    qpts[static_cast<std::size_t>(q)][2]};
                     basis.evaluate_vector_values(xi, vec_values_at_pt);
+                    if (need_gradients) {
+                        basis.evaluate_vector_jacobians(xi, vec_jacobians_at_pt);
+                    }
 
                     const auto J = context.jacobian(q);
                     const auto J_inv = context.inverseJacobian(q);
                     const Real det_J = context.jacobianDet(q);
 
                     AssemblyContext::Vector3D u{0.0, 0.0, 0.0};
+                    AssemblyContext::Matrix3x3 grad_u{};
                     for (LocalIndex j = 0; j < n_dofs; ++j) {
                         const Real coef = local_coeffs[static_cast<std::size_t>(j)];
                         const auto& vref = vec_values_at_pt[static_cast<std::size_t>(j)];
@@ -12343,14 +12564,35 @@ void StandardAssembler::populateFieldSolutionData(
                         u[0] += coef * vphys[0];
                         u[1] += coef * vphys[1];
                         u[2] += coef * vphys[2];
+                        if (need_gradients) {
+                            const auto grad_phi =
+                                transformVectorBasisJacobian(J,
+                                                             J_inv,
+                                                             det_J,
+                                                             vec_jacobians_at_pt[static_cast<std::size_t>(j)],
+                                                             cont,
+                                                             cached_mapping_affine_,
+                                                             "StandardAssembler::populateFieldSolutionData");
+                            for (int r = 0; r < 3; ++r) {
+                                for (int c = 0; c < 3; ++c) {
+                                    grad_u[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
+                                        coef * grad_phi[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                                }
+                            }
+                        }
                     }
 
                     vector_values[static_cast<std::size_t>(q)] = u;
+                    if (need_gradients) {
+                        vector_jacobians[static_cast<std::size_t>(q)] = grad_u;
+                    }
                 }
 
                 context.setFieldSolutionVector(req.field, vd,
                                                want_values ? std::span<const AssemblyContext::Vector3D>(vector_values)
-                                                           : std::span<const AssemblyContext::Vector3D>{});
+                                                           : std::span<const AssemblyContext::Vector3D>{},
+                                               want_gradients ? std::span<const AssemblyContext::Matrix3x3>(vector_jacobians)
+                                                              : std::span<const AssemblyContext::Matrix3x3>{});
 
 	                if (required_history > 0) {
 	                    for (int k = 1; k <= required_history; ++k) {

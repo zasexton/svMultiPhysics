@@ -290,6 +290,8 @@ struct ABIV3 {
 
     static constexpr std::size_t side_test_vector_basis_values_xyz_off =
         offsetof(assembly::jit::KernelSideArgsV6, test_basis_vector_values_xyz);
+    static constexpr std::size_t side_test_vector_basis_jacobians_off =
+        offsetof(assembly::jit::KernelSideArgsV6, test_basis_vector_jacobians);
     static constexpr std::size_t side_test_vector_basis_curls_xyz_off =
         offsetof(assembly::jit::KernelSideArgsV6, test_basis_curls_xyz);
     static constexpr std::size_t side_test_vector_basis_divs_off =
@@ -297,6 +299,8 @@ struct ABIV3 {
 
     static constexpr std::size_t side_trial_vector_basis_values_xyz_off =
         offsetof(assembly::jit::KernelSideArgsV6, trial_basis_vector_values_xyz);
+    static constexpr std::size_t side_trial_vector_basis_jacobians_off =
+        offsetof(assembly::jit::KernelSideArgsV6, trial_basis_vector_jacobians);
     static constexpr std::size_t side_trial_vector_basis_curls_xyz_off =
         offsetof(assembly::jit::KernelSideArgsV6, trial_basis_curls_xyz);
     static constexpr std::size_t side_trial_vector_basis_divs_off =
@@ -430,10 +434,14 @@ struct ABIV3 {
         offsetof(assembly::jit::CoupledBlockView, test_basis_values);
     static constexpr std::size_t cbv_test_phys_grads_off =
         offsetof(assembly::jit::CoupledBlockView, test_phys_gradients_xyz);
+    static constexpr std::size_t cbv_test_vector_basis_jacobians_off =
+        offsetof(assembly::jit::CoupledBlockView, test_basis_vector_jacobians);
     static constexpr std::size_t cbv_trial_basis_values_off =
         offsetof(assembly::jit::CoupledBlockView, trial_basis_values);
     static constexpr std::size_t cbv_trial_phys_grads_off =
         offsetof(assembly::jit::CoupledBlockView, trial_phys_gradients_xyz);
+    static constexpr std::size_t cbv_trial_vector_basis_jacobians_off =
+        offsetof(assembly::jit::CoupledBlockView, trial_basis_vector_jacobians);
     static constexpr std::size_t cbv_test_phys_hessians_off =
         offsetof(assembly::jit::CoupledBlockView, test_phys_hessians);
     static constexpr std::size_t cbv_trial_phys_hessians_off =
@@ -2236,10 +2244,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             llvm::Value* trial_phys_hessians{nullptr};
 
             llvm::Value* test_basis_vector_values_xyz{nullptr};
+            llvm::Value* test_basis_vector_jacobians{nullptr};
             llvm::Value* test_basis_curls_xyz{nullptr};
             llvm::Value* test_basis_divs{nullptr};
 
             llvm::Value* trial_basis_vector_values_xyz{nullptr};
+            llvm::Value* trial_basis_vector_jacobians{nullptr};
             llvm::Value* trial_basis_curls_xyz{nullptr};
             llvm::Value* trial_basis_divs{nullptr};
 
@@ -2322,10 +2332,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             s.trial_phys_hessians = null_f64_ptr;
 
             s.test_basis_vector_values_xyz = null_f64_ptr;
+            s.test_basis_vector_jacobians = null_f64_ptr;
             s.test_basis_curls_xyz = null_f64_ptr;
             s.test_basis_divs = null_f64_ptr;
 
             s.trial_basis_vector_values_xyz = null_f64_ptr;
+            s.trial_basis_vector_jacobians = null_f64_ptr;
             s.trial_basis_curls_xyz = null_f64_ptr;
             s.trial_basis_divs = null_f64_ptr;
 
@@ -2389,9 +2401,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             bool need_test_phys_hessians{false};
             bool need_trial_phys_hessians{false};
             bool need_test_basis_vector_values_xyz{false};
+            bool need_test_basis_vector_jacobians{false};
             bool need_test_basis_curls_xyz{false};
             bool need_test_basis_divs{false};
             bool need_trial_basis_vector_values_xyz{false};
+            bool need_trial_basis_vector_jacobians{false};
             bool need_trial_basis_curls_xyz{false};
             bool need_trial_basis_divs{false};
             bool need_solution_coefficients{false};
@@ -2479,6 +2493,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
             PackSlot test_basis_vector_values_xyz{};
             PackSlot test_basis_vector_values_xyz_lane1{};
+            PackSlot test_basis_vector_jacobians{};
+            PackSlot test_basis_vector_jacobians_lane1{};
             PackSlot test_basis_curls_xyz{};
             PackSlot test_basis_curls_xyz_lane1{};
             PackSlot test_basis_divs{};
@@ -2486,6 +2502,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
             PackSlot trial_basis_vector_values_xyz{};
             PackSlot trial_basis_vector_values_xyz_lane1{};
+            PackSlot trial_basis_vector_jacobians{};
+            PackSlot trial_basis_vector_jacobians_lane1{};
             PackSlot trial_basis_curls_xyz{};
             PackSlot trial_basis_curls_xyz_lane1{};
             PackSlot trial_basis_divs{};
@@ -2577,10 +2595,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             s.trial_phys_hessians = loadPtr(side_ptr, ABIV3::side_trial_phys_hess_off);
 
             s.test_basis_vector_values_xyz = loadPtr(side_ptr, ABIV3::side_test_vector_basis_values_xyz_off);
+            s.test_basis_vector_jacobians = loadPtr(side_ptr, ABIV3::side_test_vector_basis_jacobians_off);
             s.test_basis_curls_xyz = loadPtr(side_ptr, ABIV3::side_test_vector_basis_curls_xyz_off);
             s.test_basis_divs = loadPtr(side_ptr, ABIV3::side_test_vector_basis_divs_off);
 
             s.trial_basis_vector_values_xyz = loadPtr(side_ptr, ABIV3::side_trial_vector_basis_values_xyz_off);
+            s.trial_basis_vector_jacobians = loadPtr(side_ptr, ABIV3::side_trial_vector_basis_jacobians_off);
             s.trial_basis_curls_xyz = loadPtr(side_ptr, ABIV3::side_trial_vector_basis_curls_xyz_off);
             s.trial_basis_divs = loadPtr(side_ptr, ABIV3::side_trial_vector_basis_divs_off);
 
@@ -2909,9 +2929,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                    side_single.test_phys_hessians = null_f64_ptr;
 	                    side_single.trial_phys_hessians = null_f64_ptr;
 	                    side_single.test_basis_vector_values_xyz = null_f64_ptr;
+	                    side_single.test_basis_vector_jacobians = null_f64_ptr;
 	                    side_single.test_basis_curls_xyz = null_f64_ptr;
 	                    side_single.test_basis_divs = null_f64_ptr;
 	                    side_single.trial_basis_vector_values_xyz = null_f64_ptr;
+	                    side_single.trial_basis_vector_jacobians = null_f64_ptr;
 	                    side_single.trial_basis_curls_xyz = null_f64_ptr;
 	                    side_single.trial_basis_divs = null_f64_ptr;
 	                    side_single.num_previous_solutions = builder.getInt32(0);
@@ -3011,9 +3033,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
 	                        // Per-element vector basis arrays
 	                        registerSimdPtr(side_single.test_basis_vector_values_xyz, ABIV3::side_test_vector_basis_values_xyz_off);
+	                        registerSimdPtr(side_single.test_basis_vector_jacobians, ABIV3::side_test_vector_basis_jacobians_off);
 	                        registerSimdPtr(side_single.test_basis_curls_xyz, ABIV3::side_test_vector_basis_curls_xyz_off);
 	                        registerSimdPtr(side_single.test_basis_divs, ABIV3::side_test_vector_basis_divs_off);
 	                        registerSimdPtr(side_single.trial_basis_vector_values_xyz, ABIV3::side_trial_vector_basis_values_xyz_off);
+	                        registerSimdPtr(side_single.trial_basis_vector_jacobians, ABIV3::side_trial_vector_basis_jacobians_off);
 	                        registerSimdPtr(side_single.trial_basis_curls_xyz, ABIV3::side_trial_vector_basis_curls_xyz_off);
 	                        registerSimdPtr(side_single.trial_basis_divs, ABIV3::side_trial_vector_basis_divs_off);
 
@@ -4585,6 +4609,202 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             return out;
         };
 
+        auto loadMatDimFromTableQMajor = [&](llvm::Value* base_ptr,
+                                             llvm::Value* n_dofs,
+                                             llvm::Value* dof_index,
+                                             llvm::Value* q_index,
+                                             std::uint32_t rows,
+                                             std::uint32_t cols) -> CodeValue {
+            CodeValue out = makeMatrix(rows, cols);
+            auto* offset = builder.CreateAdd(builder.CreateMul(q_index, n_dofs), dof_index);
+            auto* base9 = builder.CreateMul(offset, builder.getInt32(9));
+            auto* base9_64 = builder.CreateZExt(base9, i64);
+            for (std::uint32_t r = 0; r < rows; ++r) {
+                for (std::uint32_t c = 0; c < cols; ++c) {
+                    const std::uint32_t idx = r * 3u + c;
+                    out.elems[static_cast<std::size_t>(r * cols + c)] =
+                        loadRealPtrAt(base_ptr, builder.CreateAdd(base9_64, builder.getInt64(idx)));
+                }
+            }
+            return out;
+        };
+
+        // Helper: compute per-component active flags for scalar-basis
+        // vector fields WITHOUT integer division.  `vd` (value dimension)
+        // is known at C++ codegen time; for vd <= 3 we use comparisons
+        // against dofs_per_comp boundaries instead of `i / dofs_per_comp`.
+        // This eliminates ~26-cycle integer divides from the inner DOF loops.
+        auto emitComponentFlags = [&](llvm::Value* dof_index,
+                                      llvm::Value* dofs_per_comp,
+                                      std::size_t vd) -> llvm::SmallVector<llvm::Value*, 3> {
+            llvm::SmallVector<llvm::Value*, 3> flags;
+            if (vd == 1) {
+                flags.push_back(builder.getTrue());
+            } else if (vd == 2) {
+                auto* ge1 = builder.CreateICmpUGE(dof_index, dofs_per_comp);
+                flags.push_back(builder.CreateNot(ge1));
+                flags.push_back(ge1);
+            } else if (vd == 3) {
+                auto* two_dpc = builder.CreateMul(dofs_per_comp, builder.getInt32(2));
+                auto* ge1 = builder.CreateICmpUGE(dof_index, dofs_per_comp);
+                auto* ge2 = builder.CreateICmpUGE(dof_index, two_dpc);
+                flags.push_back(builder.CreateNot(ge1));
+                flags.push_back(builder.CreateAnd(ge1, builder.CreateNot(ge2)));
+                flags.push_back(ge2);
+            } else {
+                // Fallback: use integer divide for vd > 3
+                auto* comp = builder.CreateUDiv(dof_index, dofs_per_comp);
+                for (std::size_t c = 0; c < vd; ++c) {
+                    flags.push_back(builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(c))));
+                }
+            }
+            return flags;
+        };
+
+        auto loadBasisGradientMatrix = [&](const SideView& side,
+                                           bool test_side,
+                                           llvm::Value* dof_index,
+                                           llvm::Value* product_grad_q_index,
+                                           llvm::Value* vector_jac_q_index,
+                                           const Shape& shape,
+                                           const std::string& name) -> CodeValue {
+            const auto vd = static_cast<std::size_t>(shape.dims[0]);
+            const auto dim = static_cast<std::size_t>(shape.dims[1]);
+            auto* uses_vec_basis = builder.CreateICmpNE(test_side ? side.test_uses_vector_basis
+                                                                  : side.trial_uses_vector_basis,
+                                                        builder.getInt32(0));
+            auto* vb = llvm::BasicBlock::Create(*ctx, name + ".vec_basis_jac", fn);
+            auto* sb = llvm::BasicBlock::Create(*ctx, name + ".scalar_basis_grad", fn);
+            auto* merge = llvm::BasicBlock::Create(*ctx, name + ".merge", fn);
+
+            builder.CreateCondBr(uses_vec_basis, vb, sb);
+
+            builder.SetInsertPoint(vb);
+            CodeValue vb_val = loadMatDimFromTableQMajor(test_side ? side.test_basis_vector_jacobians
+                                                                   : side.trial_basis_vector_jacobians,
+                                                         test_side ? side.n_test_dofs : side.n_trial_dofs,
+                                                         dof_index,
+                                                         vector_jac_q_index,
+                                                         shape.dims[0],
+                                                         shape.dims[1]);
+            builder.CreateBr(merge);
+            auto* vb_block = builder.GetInsertBlock();
+
+            builder.SetInsertPoint(sb);
+            CodeValue sb_val = makeZero(shape);
+            auto* n_dofs = test_side ? side.n_test_dofs : side.n_trial_dofs;
+            auto* dofs_per_comp = builder.CreateUDiv(n_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+            const auto g = loadVec3FromTableQMajor(test_side ? side.test_phys_grads_xyz : side.trial_phys_grads_xyz,
+                                                   n_dofs,
+                                                   dof_index,
+                                                   product_grad_q_index);
+            const auto comp_flags = emitComponentFlags(dof_index, dofs_per_comp, vd);
+            for (std::size_t r = 0; r < vd; ++r) {
+                for (std::size_t d = 0; d < dim; ++d) {
+                    sb_val.elems[r * dim + d] = builder.CreateSelect(comp_flags[r], g[d], rc(0.0));
+                }
+            }
+            builder.CreateBr(merge);
+            auto* sb_block = builder.GetInsertBlock();
+
+            builder.SetInsertPoint(merge);
+            CodeValue out = makeZero(shape);
+            const auto n = elemCount(shape);
+            for (std::size_t k = 0; k < n; ++k) {
+                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, name + ".a");
+                phi->addIncoming(vb_val.elems[k], vb_block);
+                phi->addIncoming(sb_val.elems[k], sb_block);
+                out.elems[k] = phi;
+            }
+            return out;
+        };
+
+        auto reduceCurrentGradientMatrix = [&](const SideView& side,
+                                               llvm::Value* coeffs,
+                                               llvm::Value* jac_q_index,
+                                               const Shape& shape,
+                                               const std::string& name) -> CodeValue {
+            const auto vd = static_cast<std::size_t>(shape.dims[0]);
+            const auto dim = static_cast<std::size_t>(shape.dims[1]);
+            auto* uses_vec_basis =
+                builder.CreateICmpNE(side.trial_uses_vector_basis, builder.getInt32(0));
+            auto* vb = llvm::BasicBlock::Create(*ctx, name + ".vec_basis_jac", fn);
+            auto* sb = llvm::BasicBlock::Create(*ctx, name + ".scalar_basis_grad", fn);
+            auto* merge = llvm::BasicBlock::Create(*ctx, name + ".merge", fn);
+
+            builder.CreateCondBr(uses_vec_basis, vb, sb);
+
+            builder.SetInsertPoint(vb);
+            CodeValue vb_val = makeZero(shape);
+            {
+                const auto acc =
+                    emitReduceSum(side.n_trial_dofs, name + "_vb", vd * dim, [&](llvm::Value* j) {
+                        auto* j64 = builder.CreateZExt(j, i64);
+                        auto* cj = loadRealPtrAt(coeffs, j64);
+                        const auto Jphi = loadMatDimFromTableQMajor(side.trial_basis_vector_jacobians,
+                                                                     side.n_trial_dofs,
+                                                                     j,
+                                                                     jac_q_index,
+                                                                     shape.dims[0],
+                                                                     shape.dims[1]);
+                        std::vector<llvm::Value*> terms;
+                        terms.reserve(vd * dim);
+                        for (std::size_t k = 0; k < vd * dim; ++k) {
+                            terms.push_back(builder.CreateFMul(cj, Jphi.elems[k]));
+                        }
+                        return terms;
+                    });
+                for (std::size_t k = 0; k < vd * dim; ++k) {
+                    vb_val.elems[k] = acc[k];
+                }
+            }
+            builder.CreateBr(merge);
+            auto* vb_block = builder.GetInsertBlock();
+
+            builder.SetInsertPoint(sb);
+            CodeValue sb_val = makeZero(shape);
+            {
+                auto* dofs_per_comp =
+                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+                for (std::size_t comp = 0; comp < vd; ++comp) {
+                    const auto acc = emitReduceSum(
+                        dofs_per_comp, name + "_c" + std::to_string(comp), dim, [&](llvm::Value* jj) {
+                            auto* base =
+                                builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+                            auto* j = builder.CreateAdd(base, jj);
+                            auto* j64 = builder.CreateZExt(j, i64);
+                            auto* cj = loadRealPtrAt(coeffs, j64);
+                            const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz,
+                                                                    side.n_trial_dofs,
+                                                                    j,
+                                                                    jac_q_index);
+                            std::vector<llvm::Value*> terms;
+                            terms.reserve(dim);
+                            for (std::size_t d = 0; d < dim; ++d) {
+                                terms.push_back(builder.CreateFMul(cj, g[d]));
+                            }
+                            return terms;
+                        });
+                    for (std::size_t d = 0; d < dim; ++d) {
+                        sb_val.elems[comp * dim + d] = acc[d];
+                    }
+                }
+            }
+            builder.CreateBr(merge);
+            auto* sb_block = builder.GetInsertBlock();
+
+            builder.SetInsertPoint(merge);
+            CodeValue out = makeZero(shape);
+            const auto n = elemCount(shape);
+            for (std::size_t k = 0; k < n; ++k) {
+                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, name + ".a");
+                phi->addIncoming(vb_val.elems[k], vb_block);
+                phi->addIncoming(sb_val.elems[k], sb_block);
+                out.elems[k] = phi;
+            }
+            return out;
+        };
+
 	        auto loadXYZ = [&](llvm::Value* xyz_base,
 	                           llvm::Value* q_index) -> CodeValue {
 	            auto* base3 = builder.CreateMul(q_index, builder.getInt32(3));
@@ -5468,38 +5688,6 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             throw std::runtime_error("LLVMGen: DiscreteField/StateField history unsupported shape");
         };
 
-        // Helper: compute per-component active flags for scalar-basis
-        // vector fields WITHOUT integer division.  `vd` (value dimension)
-        // is known at C++ codegen time; for vd <= 3 we use comparisons
-        // against dofs_per_comp boundaries instead of `i / dofs_per_comp`.
-        // This eliminates ~26-cycle integer divides from the inner DOF loops.
-        auto emitComponentFlags = [&](llvm::Value* dof_index,
-                                      llvm::Value* dofs_per_comp,
-                                      std::size_t vd) -> llvm::SmallVector<llvm::Value*, 3> {
-            llvm::SmallVector<llvm::Value*, 3> flags;
-            if (vd == 1) {
-                flags.push_back(builder.getTrue());
-            } else if (vd == 2) {
-                auto* ge1 = builder.CreateICmpUGE(dof_index, dofs_per_comp);
-                flags.push_back(builder.CreateNot(ge1));
-                flags.push_back(ge1);
-            } else if (vd == 3) {
-                auto* two_dpc = builder.CreateMul(dofs_per_comp, builder.getInt32(2));
-                auto* ge1 = builder.CreateICmpUGE(dof_index, dofs_per_comp);
-                auto* ge2 = builder.CreateICmpUGE(dof_index, two_dpc);
-                flags.push_back(builder.CreateNot(ge1));
-                flags.push_back(builder.CreateAnd(ge1, builder.CreateNot(ge2)));
-                flags.push_back(ge2);
-            } else {
-                // Fallback: use integer divide for vd > 3
-                auto* comp = builder.CreateUDiv(dof_index, dofs_per_comp);
-                for (std::size_t c = 0; c < vd; ++c) {
-                    flags.push_back(builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(c))));
-                }
-            }
-            return flags;
-        };
-
 	        auto evalKernelIRSingleValue = [&](const LoweredTerm& term,
 	                                           llvm::Value* q_index,
 	                                           llvm::Value* i_index,
@@ -5863,18 +6051,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 break;
                             }
                             if (shape.kind == Shape::Kind::Matrix) {
-                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
-                                CodeValue out = makeZero(shape);
-                                const auto dofs_per_comp = builder.CreateUDiv(side.n_test_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                                const auto g = loadVec3FromTableQMajor(side.test_phys_grads_xyz, side.n_test_dofs, i_index, grad_q_index);
-                                const auto comp_flags = emitComponentFlags(i_index, dofs_per_comp, vd);
-                                for (std::size_t r = 0; r < vd; ++r) {
-                                    for (std::size_t d = 0; d < dim; ++d) {
-                                        out.elems[r * dim + d] = builder.CreateSelect(comp_flags[r], g[d], rc(0.0));
-                                    }
-                                }
-                                values[op_idx] = out;
+                                values[op_idx] =
+                                    loadBasisGradientMatrix(side, true, i_index, grad_q_index, q_index, shape, "grad_test");
                                 break;
                             }
                             throw std::runtime_error("LLVMGen: grad(TestFunction) unsupported shape");
@@ -5902,30 +6080,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    break;
 	                                }
 	                                if (shape.kind == Shape::Kind::Matrix) {
-	                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
-	                                    const auto dim = static_cast<std::size_t>(shape.dims[1]);
-	                                    CodeValue out = makeZero(shape);
-	                                    auto* dofs_per_comp =
-	                                        builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-	                                    for (std::size_t comp = 0; comp < vd; ++comp) {
-	                                        const auto acc = emitReduceSum(dofs_per_comp, "grad_u_c" + std::to_string(comp), dim, [&](llvm::Value* jj) {
-	                                            auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-	                                            auto* j = builder.CreateAdd(base, jj);
-	                                            auto* j64 = builder.CreateZExt(j, i64);
-	                                            auto* cj = loadRealPtrAt(coeffs, j64);
-	                                            const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, grad_q_index);
-	                                            std::vector<llvm::Value*> terms;
-	                                            terms.reserve(dim);
-	                                            for (std::size_t d = 0; d < dim; ++d) {
-	                                                terms.push_back(builder.CreateFMul(cj, g[d]));
-	                                            }
-	                                            return terms;
-	                                        });
-	                                        for (std::size_t d = 0; d < dim; ++d) {
-	                                            out.elems[comp * dim + d] = acc[d];
-	                                        }
-	                                    }
-	                                    values[op_idx] = out;
+	                                    values[op_idx] =
+	                                        reduceCurrentGradientMatrix(side, coeffs, q_index, shape, "grad_u");
                                     break;
                                 }
                                 throw std::runtime_error("LLVMGen: grad(u) unsupported shape");
@@ -5936,18 +6092,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 break;
                             }
                             if (shape.kind == Shape::Kind::Matrix) {
-                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
-                                CodeValue out = makeZero(shape);
-                                const auto dofs_per_comp = builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                                const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, grad_q_index);
-                                const auto comp_flags = emitComponentFlags(j_index, dofs_per_comp, vd);
-                                for (std::size_t r = 0; r < vd; ++r) {
-                                    for (std::size_t d = 0; d < dim; ++d) {
-                                        out.elems[r * dim + d] = builder.CreateSelect(comp_flags[r], g[d], rc(0.0));
-                                    }
-                                }
-                                values[op_idx] = out;
+                                values[op_idx] =
+                                    loadBasisGradientMatrix(side, false, j_index, grad_q_index, q_index, shape, "grad_trial");
                                 break;
                             }
                             throw std::runtime_error("LLVMGen: grad(TrialFunction) unsupported shape");
@@ -5976,34 +6122,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                break;
 	                            }
 	                            if (shape.kind == Shape::Kind::Matrix) {
-	                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
-	                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
-	                                CodeValue out = makeZero(shape);
 	                                auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
-	                                auto* dofs_per_comp =
-	                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-	                                for (std::size_t comp = 0; comp < vd; ++comp) {
-	                                    const auto acc = emitReduceSum(dofs_per_comp,
-	                                                                   "prev_grad" + std::to_string(k) + "_c" + std::to_string(comp),
-	                                                                   dim,
-	                                                                   [&](llvm::Value* jj) {
-	                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-	                                        auto* j = builder.CreateAdd(base, jj);
-	                                        auto* j64 = builder.CreateZExt(j, i64);
-	                                        auto* cj = loadRealPtrAt(coeffs, j64);
-	                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
-	                                        std::vector<llvm::Value*> terms;
-	                                        terms.reserve(dim);
-	                                        for (std::size_t d = 0; d < dim; ++d) {
-	                                            terms.push_back(builder.CreateFMul(cj, g[d]));
-	                                        }
-	                                        return terms;
-	                                    });
-	                                    for (std::size_t d = 0; d < dim; ++d) {
-	                                        out.elems[comp * dim + d] = acc[d];
-	                                    }
-	                                }
-                                values[op_idx] = out;
+                                values[op_idx] =
+                                    reduceCurrentGradientMatrix(side, coeffs, q_index, shape, "prev_grad" + std::to_string(k));
                                 break;
                             }
                             throw std::runtime_error("LLVMGen: grad(PreviousSolutionRef) unsupported shape");
@@ -6033,31 +6154,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    break;
 	                                }
 	                                if (shape.kind == Shape::Kind::Matrix) {
-	                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
-	                                    const auto dim = static_cast<std::size_t>(shape.dims[1]);
-	                                    CodeValue out = makeZero(shape);
-	                                    auto* dofs_per_comp =
-	                                        builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-	                                    for (std::size_t comp = 0; comp < vd; ++comp) {
-	                                        const auto acc = emitReduceSum(
-	                                            dofs_per_comp, "grad_state_u_c" + std::to_string(comp), dim, [&](llvm::Value* jj) {
-	                                            auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-	                                            auto* j = builder.CreateAdd(base, jj);
-	                                            auto* j64 = builder.CreateZExt(j, i64);
-	                                            auto* cj = loadRealPtrAt(coeffs, j64);
-	                                            const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
-	                                            std::vector<llvm::Value*> terms;
-	                                            terms.reserve(dim);
-	                                            for (std::size_t d = 0; d < dim; ++d) {
-	                                                terms.push_back(builder.CreateFMul(cj, g[d]));
-	                                            }
-	                                            return terms;
-	                                        });
-	                                        for (std::size_t d = 0; d < dim; ++d) {
-	                                            out.elems[comp * dim + d] = acc[d];
-	                                        }
-	                                    }
-	                                    values[op_idx] = out;
+	                                    values[op_idx] =
+	                                        reduceCurrentGradientMatrix(side, coeffs, q_index, shape, "grad_state_u");
                                     break;
                                 }
                                 throw std::runtime_error("LLVMGen: grad(StateField(INVALID)) unsupported shape");
@@ -6161,19 +6259,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    return g;
 	                                }
 	                                if (shape.kind == Shape::Kind::Matrix) {
-	                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
-	                                    const auto dim = static_cast<std::size_t>(shape.dims[1]);
-	                                    const auto dofs_per_comp = builder.CreateUDiv(
-	                                        side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-	                                    const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
-	                                    const auto gg = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, q_index);
-	                                    for (std::size_t r = 0; r < vd; ++r) {
-	                                        auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
-	                                        for (std::size_t d = 0; d < dim; ++d) {
-	                                            g.elems[r * dim + d] = builder.CreateSelect(is_r, gg[d], rc(0.0));
-	                                        }
-	                                    }
-	                                    return g;
+	                                    return loadBasisGradientMatrix(
+	                                        side, false, j_index, q_index, q_index, shape, "grad_dt_trial");
 	                                }
 	                                throw std::runtime_error("LLVMGen: grad(dt(TrialFunction)) unsupported shape");
 	                            };
@@ -6201,31 +6288,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                    return makeVector(static_cast<std::uint32_t>(dim), x, y, z);
 		                                }
 		                                if (shape.kind == Shape::Kind::Matrix) {
-		                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
-		                                    const auto dim = static_cast<std::size_t>(shape.dims[1]);
-		                                    CodeValue out = makeZero(shape);
-		                                    auto* dofs_per_comp =
-		                                        builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-		                                    for (std::size_t comp = 0; comp < vd; ++comp) {
-		                                        const auto acc =
-		                                            emitReduceSum(dofs_per_comp, "grad_dt_u_c" + std::to_string(comp), dim, [&](llvm::Value* jj) {
-		                                            auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-		                                            auto* j = builder.CreateAdd(base, jj);
-		                                            auto* j64 = builder.CreateZExt(j, i64);
-		                                            auto* cj = loadRealPtrAt(coeffs, j64);
-		                                            const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
-		                                            std::vector<llvm::Value*> terms;
-		                                            terms.reserve(dim);
-		                                            for (std::size_t d = 0; d < dim; ++d) {
-		                                                terms.push_back(builder.CreateFMul(cj, g[d]));
-		                                            }
-		                                            return terms;
-		                                        });
-		                                        for (std::size_t d = 0; d < dim; ++d) {
-		                                            out.elems[comp * dim + d] = acc[d];
-		                                        }
-		                                    }
-	                                    return out;
+		                                    return reduceCurrentGradientMatrix(side, coeffs, q_index, shape, "grad_dt_u");
 	                                }
 	                                throw std::runtime_error("LLVMGen: grad(dt(u)) unsupported shape");
 	                            };
@@ -8731,32 +8794,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                return makeVector(static_cast<std::uint32_t>(dim), x, y, z);
 	                            }
 	                            if (shape.kind == Shape::Kind::Matrix) {
-	                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
-	                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
-	                                CodeValue out = makeZero(shape);
-	                                auto* dofs_per_comp =
-	                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-	                                for (std::size_t comp = 0; comp < vd; ++comp) {
-	                                    const auto acc =
-	                                        emitReduceSum(dofs_per_comp, loop_base + "_c" + std::to_string(comp), dim, [&](llvm::Value* jj) {
-	                                            auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-	                                            auto* j = builder.CreateAdd(base, jj);
-	                                            auto* j64 = builder.CreateZExt(j, i64);
-	                                            auto* cj = loadRealPtrAt(coeffs_ptr, j64);
-	                                            const auto g =
-	                                                loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
-	                                            std::vector<llvm::Value*> terms;
-	                                            terms.reserve(dim);
-	                                            for (std::size_t d = 0; d < dim; ++d) {
-	                                                terms.push_back(builder.CreateFMul(cj, g[d]));
-	                                            }
-	                                            return terms;
-	                                        });
-	                                    for (std::size_t d = 0; d < dim; ++d) {
-	                                        out.elems[comp * dim + d] = acc[d];
-	                                    }
-	                                }
-	                                return out;
+	                                return reduceCurrentGradientMatrix(side, coeffs_ptr, q_index, shape, loop_base);
 	                            }
 	                            throw std::runtime_error("LLVMGen: cached grad(u) unsupported shape");
 	                        };
@@ -8905,34 +8943,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                break;
 	                            }
 	                            if (shape.kind == Shape::Kind::Matrix) {
-	                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
-	                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
-	                                CodeValue out = makeZero(shape);
-	                                auto* dofs_per_comp =
-	                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-	                                for (std::size_t comp = 0; comp < vd; ++comp) {
-	                                    const auto acc = emitReduceSum(dofs_per_comp,
-	                                                                   "prev_grad" + std::to_string(k) + "_c" +
-	                                                                       std::to_string(comp),
-	                                                                   dim,
-	                                                                   [&](llvm::Value* jj) {
-	                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-	                                        auto* j = builder.CreateAdd(base, jj);
-	                                        auto* j64 = builder.CreateZExt(j, i64);
-	                                        auto* cj = loadRealPtrAt(coeffs, j64);
-	                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
-	                                        std::vector<llvm::Value*> terms;
-	                                        terms.reserve(dim);
-	                                        for (std::size_t d = 0; d < dim; ++d) {
-	                                            terms.push_back(builder.CreateFMul(cj, g[d]));
-	                                        }
-	                                        return terms;
-	                                    });
-	                                    for (std::size_t d = 0; d < dim; ++d) {
-	                                        out.elems[comp * dim + d] = acc[d];
-	                                    }
-	                                }
-                                values[op_idx] = out;
+                                values[op_idx] =
+                                    gradFromCoeffs(coeffs, "prev_grad" + std::to_string(k));
                                 break;
                             }
                             throw std::runtime_error("LLVMGen: cached grad(PreviousSolutionRef) unsupported shape");
@@ -11580,11 +11592,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 };
 
                 auto markTestGradientAccess = [&](HelperSideRequirements& r) {
+                    r.need_test_uses_vector_basis = true;
                     r.need_test_phys_grads_xyz = true;
+                    r.need_test_basis_vector_jacobians = true;
                 };
 
                 auto markTrialGradientAccess = [&](HelperSideRequirements& r) {
+                    r.need_trial_uses_vector_basis = true;
                     r.need_trial_phys_grads_xyz = true;
+                    r.need_trial_basis_vector_jacobians = true;
                 };
 
                 auto markTestDivergenceAccess = [&](HelperSideRequirements& r) {
@@ -12294,6 +12310,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         layout.test_basis_vector_values_xyz,
                         layout.test_basis_vector_values_xyz_lane1);
                     addLaneAwareDoublePtrSlots(
+                        layout, req.need_test_basis_vector_jacobians,
+                        layout.test_basis_vector_jacobians,
+                        layout.test_basis_vector_jacobians_lane1);
+                    addLaneAwareDoublePtrSlots(
                         layout, req.need_test_basis_curls_xyz, layout.test_basis_curls_xyz,
                         layout.test_basis_curls_xyz_lane1);
                     addLaneAwareDoublePtrSlots(
@@ -12304,6 +12324,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         layout, req.need_trial_basis_vector_values_xyz,
                         layout.trial_basis_vector_values_xyz,
                         layout.trial_basis_vector_values_xyz_lane1);
+                    addLaneAwareDoublePtrSlots(
+                        layout, req.need_trial_basis_vector_jacobians,
+                        layout.trial_basis_vector_jacobians,
+                        layout.trial_basis_vector_jacobians_lane1);
                     addLaneAwareDoublePtrSlots(
                         layout, req.need_trial_basis_curls_xyz, layout.trial_basis_curls_xyz,
                         layout.trial_basis_curls_xyz_lane1);
@@ -12640,6 +12664,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             layout, h_pack, layout.test_basis_vector_values_xyz, i8_ptr,
                             "test_basis_vector_values_xyz");
                     }
+                    if (layout.test_basis_vector_jacobians) {
+                        side_single.test_basis_vector_jacobians = loadPackValue(
+                            layout, h_pack, layout.test_basis_vector_jacobians, i8_ptr,
+                            "test_basis_vector_jacobians");
+                    }
                     if (layout.test_basis_curls_xyz) {
                         side_single.test_basis_curls_xyz = loadPackValue(
                             layout, h_pack, layout.test_basis_curls_xyz, i8_ptr,
@@ -12655,6 +12684,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         side_single.trial_basis_vector_values_xyz = loadPackValue(
                             layout, h_pack, layout.trial_basis_vector_values_xyz, i8_ptr,
                             "trial_basis_vector_values_xyz");
+                    }
+                    if (layout.trial_basis_vector_jacobians) {
+                        side_single.trial_basis_vector_jacobians = loadPackValue(
+                            layout, h_pack, layout.trial_basis_vector_jacobians, i8_ptr,
+                            "trial_basis_vector_jacobians");
                     }
                     if (layout.trial_basis_curls_xyz) {
                         side_single.trial_basis_curls_xyz = loadPackValue(
@@ -12822,6 +12856,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             layout.test_basis_vector_values_xyz_lane1,
                             "test_basis_vector_values_xyz");
                         registerHelperLanePtr(
+                            side_single.test_basis_vector_jacobians,
+                            layout.test_basis_vector_jacobians_lane1,
+                            "test_basis_vector_jacobians");
+                        registerHelperLanePtr(
                             side_single.test_basis_curls_xyz,
                             layout.test_basis_curls_xyz_lane1, "test_basis_curls_xyz");
                         registerHelperLanePtr(
@@ -12831,6 +12869,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             side_single.trial_basis_vector_values_xyz,
                             layout.trial_basis_vector_values_xyz_lane1,
                             "trial_basis_vector_values_xyz");
+                        registerHelperLanePtr(
+                            side_single.trial_basis_vector_jacobians,
+                            layout.trial_basis_vector_jacobians_lane1,
+                            "trial_basis_vector_jacobians");
                         registerHelperLanePtr(
                             side_single.trial_basis_curls_xyz,
                             layout.trial_basis_curls_xyz_lane1, "trial_basis_curls_xyz");
@@ -13091,6 +13133,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         side_single.test_basis_vector_values_xyz,
                         "test_basis_vector_values_xyz");
                     storeLaneAwareDoublePtr(
+                        layout.test_basis_vector_jacobians,
+                        layout.test_basis_vector_jacobians_lane1,
+                        side_single.test_basis_vector_jacobians,
+                        "test_basis_vector_jacobians");
+                    storeLaneAwareDoublePtr(
                         layout.test_basis_curls_xyz, layout.test_basis_curls_xyz_lane1,
                         side_single.test_basis_curls_xyz, "test_basis_curls_xyz");
                     storeLaneAwareDoublePtr(
@@ -13102,6 +13149,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         layout.trial_basis_vector_values_xyz_lane1,
                         side_single.trial_basis_vector_values_xyz,
                         "trial_basis_vector_values_xyz");
+                    storeLaneAwareDoublePtr(
+                        layout.trial_basis_vector_jacobians,
+                        layout.trial_basis_vector_jacobians_lane1,
+                        side_single.trial_basis_vector_jacobians,
+                        "trial_basis_vector_jacobians");
                     storeLaneAwareDoublePtr(
                         layout.trial_basis_curls_xyz, layout.trial_basis_curls_xyz_lane1,
                         side_single.trial_basis_curls_xyz, "trial_basis_curls_xyz");
@@ -13241,8 +13293,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     side_single.trial_uses_vector_basis = loadU32(bp, ABIV3::cbv_trial_uses_vector_basis_off);
                     side_single.test_basis_values = loadPtr(bp, ABIV3::cbv_test_basis_values_off);
                     side_single.test_phys_grads_xyz = loadPtr(bp, ABIV3::cbv_test_phys_grads_off);
+                    side_single.test_basis_vector_jacobians =
+                        loadPtr(bp, ABIV3::cbv_test_vector_basis_jacobians_off);
                     side_single.trial_basis_values = loadPtr(bp, ABIV3::cbv_trial_basis_values_off);
                     side_single.trial_phys_grads_xyz = loadPtr(bp, ABIV3::cbv_trial_phys_grads_off);
+                    side_single.trial_basis_vector_jacobians =
+                        loadPtr(bp, ABIV3::cbv_trial_vector_basis_jacobians_off);
                     side_single.test_phys_hessians = loadPtr(bp, ABIV3::cbv_test_phys_hessians_off);
                     side_single.trial_phys_hessians = loadPtr(bp, ABIV3::cbv_trial_phys_hessians_off);
                     side_single.solution_coefficients = loadPtr(bp, ABIV3::cbv_solution_coefficients_off);
@@ -13290,9 +13346,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     side_single.test_phys_hessians = null_f64_p;
                     side_single.trial_phys_hessians = null_f64_p;
                     side_single.test_basis_vector_values_xyz = null_f64_p;
+                    side_single.test_basis_vector_jacobians = null_f64_p;
                     side_single.test_basis_curls_xyz = null_f64_p;
                     side_single.test_basis_divs = null_f64_p;
                     side_single.trial_basis_vector_values_xyz = null_f64_p;
+                    side_single.trial_basis_vector_jacobians = null_f64_p;
                     side_single.trial_basis_curls_xyz = null_f64_p;
                     side_single.trial_basis_divs = null_f64_p;
                     side_single.num_previous_solutions = builder.getInt32(0);
@@ -13979,20 +14037,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            return makeVector(shape.dims[0], v[0], v[1], v[2]);
 	                        }
 	                        if (shape.kind == Shape::Kind::Matrix) {
-	                            const auto vd = static_cast<std::size_t>(shape.dims[0]);
-	                            const auto dim = static_cast<std::size_t>(shape.dims[1]);
-	                            CodeValue out = makeZero(shape);
-	                            const auto dofs_per_comp = builder.CreateUDiv(
-	                                side.n_test_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-	                            const auto comp = builder.CreateUDiv(i_index, dofs_per_comp);
-	                            const auto g = loadVec3FromTableQMajor(side.test_phys_grads_xyz, side.n_test_dofs, i_index, q_index);
-	                            for (std::size_t r = 0; r < vd; ++r) {
-	                                auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
-	                                for (std::size_t d = 0; d < dim; ++d) {
-	                                    out.elems[r * dim + d] = builder.CreateSelect(is_r, g[d], rc(0.0));
-	                                }
-	                            }
-	                            return out;
+	                            return loadBasisGradientMatrix(
+	                                side, true, i_index, q_index, q_index, shape, "face_grad_test");
 	                        }
                         throw std::runtime_error("LLVMGen: grad(TestFunction) unsupported shape");
                     }
@@ -14022,30 +14068,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                return makeVector(shape.dims[0], x, y, z);
 		                            }
 		                            if (shape.kind == Shape::Kind::Matrix) {
-		                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
-		                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
-		                                CodeValue out = makeZero(shape);
-		                                auto* dofs_per_comp =
-		                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-		                                for (std::size_t comp = 0; comp < vd; ++comp) {
-	                                    const auto acc = emitReduceSum(dofs_per_comp, "grad_u_c" + std::to_string(comp), dim, [&](llvm::Value* jj) {
-	                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-	                                        auto* j = builder.CreateAdd(base, jj);
-	                                        auto* j64 = builder.CreateZExt(j, i64);
-		                                        auto* cj = loadRealPtrAt(coeffs, j64);
-		                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
-	                                        std::vector<llvm::Value*> terms;
-	                                        terms.reserve(dim);
-		                                        for (std::size_t d = 0; d < dim; ++d) {
-		                                            terms.push_back(builder.CreateFMul(cj, g[d]));
-		                                        }
-	                                        return terms;
-		                                    });
-		                                    for (std::size_t d = 0; d < dim; ++d) {
-		                                        out.elems[comp * dim + d] = acc[d];
-		                                    }
-		                                }
-	                                return out;
+		                                return reduceCurrentGradientMatrix(side, coeffs, q_index, shape, "face_grad_u");
 	                            }
                             throw std::runtime_error("LLVMGen: grad(u) unsupported shape (residual)");
                         }
@@ -14057,20 +14080,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            return makeVector(shape.dims[0], v[0], v[1], v[2]);
 	                        }
 	                        if (shape.kind == Shape::Kind::Matrix) {
-	                            const auto vd = static_cast<std::size_t>(shape.dims[0]);
-	                            const auto dim = static_cast<std::size_t>(shape.dims[1]);
-	                            CodeValue out = makeZero(shape);
-	                            const auto dofs_per_comp = builder.CreateUDiv(
-	                                side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-	                            const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
-	                            const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, q_index);
-	                            for (std::size_t r = 0; r < vd; ++r) {
-	                                auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
-	                                for (std::size_t d = 0; d < dim; ++d) {
-	                                    out.elems[r * dim + d] = builder.CreateSelect(is_r, g[d], rc(0.0));
-	                                }
-	                            }
-	                            return out;
+	                            return loadBasisGradientMatrix(
+	                                side, false, j_index, q_index, q_index, shape, "face_grad_trial");
 	                        }
                         throw std::runtime_error("LLVMGen: grad(TrialFunction) unsupported shape");
                     }
@@ -14099,33 +14110,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                            return makeVector(shape.dims[0], x, y, z);
 		                        }
 		                        if (shape.kind == Shape::Kind::Matrix) {
-		                            const auto vd = static_cast<std::size_t>(shape.dims[0]);
-		                            const auto dim = static_cast<std::size_t>(shape.dims[1]);
-		                            CodeValue out = makeZero(shape);
-		                            auto* dofs_per_comp =
-		                                builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-		                            for (std::size_t comp = 0; comp < vd; ++comp) {
-	                                const auto acc = emitReduceSum(dofs_per_comp,
-	                                                               "prev_grad" + std::to_string(k) + "_c" + std::to_string(comp),
-	                                                               dim,
-	                                                               [&](llvm::Value* jj) {
-	                                    auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-	                                    auto* j = builder.CreateAdd(base, jj);
-	                                    auto* j64 = builder.CreateZExt(j, i64);
-		                                    auto* cj = loadRealPtrAt(coeffs, j64);
-		                                    const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
-	                                    std::vector<llvm::Value*> terms;
-	                                    terms.reserve(dim);
-		                                    for (std::size_t d = 0; d < dim; ++d) {
-		                                        terms.push_back(builder.CreateFMul(cj, g[d]));
-		                                    }
-	                                    return terms;
-		                                });
-		                                for (std::size_t d = 0; d < dim; ++d) {
-		                                    out.elems[comp * dim + d] = acc[d];
-		                                }
-		                            }
-	                            return out;
+		                            return reduceCurrentGradientMatrix(
+		                                side, coeffs, q_index, shape, "face_prev_grad" + std::to_string(k));
 	                        }
                         throw std::runtime_error("LLVMGen: grad(PreviousSolutionRef) unsupported shape");
                     }
@@ -14156,31 +14142,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                return makeVector(shape.dims[0], x, y, z);
 		                            }
 		                            if (shape.kind == Shape::Kind::Matrix) {
-		                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
-		                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
-		                                CodeValue out = makeZero(shape);
-		                                auto* dofs_per_comp =
-		                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-		                                for (std::size_t comp = 0; comp < vd; ++comp) {
-	                                    const auto acc =
-	                                        emitReduceSum(dofs_per_comp, "grad_state_u_c" + std::to_string(comp), dim, [&](llvm::Value* jj) {
-	                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-	                                        auto* j = builder.CreateAdd(base, jj);
-		                                        auto* j64 = builder.CreateZExt(j, i64);
-		                                        auto* cj = loadRealPtrAt(coeffs, j64);
-		                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
-	                                        std::vector<llvm::Value*> terms;
-	                                        terms.reserve(dim);
-		                                        for (std::size_t d = 0; d < dim; ++d) {
-		                                            terms.push_back(builder.CreateFMul(cj, g[d]));
-		                                        }
-	                                        return terms;
-		                                    });
-		                                    for (std::size_t d = 0; d < dim; ++d) {
-		                                        out.elems[comp * dim + d] = acc[d];
-		                                    }
-		                                }
-	                                return out;
+		                                return reduceCurrentGradientMatrix(
+		                                    side, coeffs, q_index, shape, "face_grad_state_u");
 	                            }
 	                            throw std::runtime_error("LLVMGen: grad(StateField(INVALID)) unsupported shape");
 	                        }
@@ -14286,19 +14249,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                return makeVector(shape.dims[0], v[0], v[1], v[2]);
 	                            }
 	                            if (shape.kind == Shape::Kind::Matrix) {
-	                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
-	                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
-	                                const auto dofs_per_comp = builder.CreateUDiv(
-	                                    side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-	                                const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
-	                                const auto gg = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, q_index);
-	                                for (std::size_t r = 0; r < vd; ++r) {
-	                                    auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
-	                                    for (std::size_t d = 0; d < dim; ++d) {
-	                                        g.elems[r * dim + d] = builder.CreateSelect(is_r, gg[d], rc(0.0));
-	                                    }
-	                                }
-	                                return g;
+	                                return loadBasisGradientMatrix(
+	                                    side, false, j_index, q_index, q_index, shape, "face_grad_dt_trial");
 	                            }
                             throw std::runtime_error("LLVMGen: grad(dt(TrialFunction)) unsupported shape");
                         };
@@ -14326,31 +14278,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                return makeVector(shape.dims[0], x, y, z);
 		                            }
 		                            if (shape.kind == Shape::Kind::Matrix) {
-		                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
-		                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
-		                                CodeValue out = makeZero(shape);
-		                                auto* dofs_per_comp =
-		                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-		                                for (std::size_t comp = 0; comp < vd; ++comp) {
-	                                    const auto acc = emitReduceSum(
-	                                        dofs_per_comp, "grad_dt_u_c" + std::to_string(comp), dim, [&](llvm::Value* jj) {
-	                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-	                                        auto* j = builder.CreateAdd(base, jj);
-		                                        auto* j64 = builder.CreateZExt(j, i64);
-		                                        auto* cj = loadRealPtrAt(coeffs, j64);
-		                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
-	                                        std::vector<llvm::Value*> terms;
-	                                        terms.reserve(dim);
-		                                        for (std::size_t d = 0; d < dim; ++d) {
-		                                            terms.push_back(builder.CreateFMul(cj, g[d]));
-		                                        }
-	                                        return terms;
-		                                    });
-		                                    for (std::size_t d = 0; d < dim; ++d) {
-		                                        out.elems[comp * dim + d] = acc[d];
-		                                    }
-		                                }
-	                                return out;
+		                                return reduceCurrentGradientMatrix(
+		                                    side, coeffs, q_index, shape, "face_grad_dt_u");
 	                            }
                             throw std::runtime_error("LLVMGen: grad(dt(u)) unsupported shape");
                         };

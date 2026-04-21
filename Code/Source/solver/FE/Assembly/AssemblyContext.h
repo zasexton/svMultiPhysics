@@ -610,6 +610,21 @@ public:
     }
 
     /**
+     * @brief Get physical vector-Jacobian of a test basis function at a quadrature point
+     *
+     * Entries are [component][physical derivative direction].
+     */
+    [[nodiscard]] Matrix3x3 basisVectorJacobian(LocalIndex i, LocalIndex q) const;
+
+    /**
+     * @brief Raw test vector-basis Jacobian storage (layout: [q * n_dofs + i])
+     */
+    [[nodiscard]] std::span<const Matrix3x3> testBasisVectorJacobiansRaw() const noexcept
+    {
+        return test_basis_vector_jacobians_;
+    }
+
+    /**
      * @brief Get curl of a test basis function (physical space) at quadrature point (H(curl))
      */
     [[nodiscard]] Vector3D basisCurl(LocalIndex i, LocalIndex q) const;
@@ -709,6 +724,24 @@ public:
     {
         return trial_is_test_ ? std::span<const Vector3D>(test_basis_vector_values_)
                               : std::span<const Vector3D>(trial_basis_vector_values_);
+    }
+
+    /**
+     * @brief Get physical vector-Jacobian of a trial basis function at a quadrature point
+     *
+     * Entries are [component][physical derivative direction].
+     */
+    [[nodiscard]] Matrix3x3 trialBasisVectorJacobian(LocalIndex j, LocalIndex q) const;
+
+    /**
+     * @brief Raw trial vector-basis Jacobian storage (layout: [q * n_dofs + j])
+     *
+     * When the trial space aliases the test space, this returns the test storage.
+     */
+    [[nodiscard]] std::span<const Matrix3x3> trialBasisVectorJacobiansRaw() const noexcept
+    {
+        return trial_is_test_ ? std::span<const Matrix3x3>(test_basis_vector_jacobians_)
+                              : std::span<const Matrix3x3>(trial_basis_vector_jacobians_);
     }
 
     /**
@@ -884,6 +917,7 @@ public:
      * are meaningful.
      */
     [[nodiscard]] Matrix3x3 solutionJacobian(LocalIndex q) const;
+    [[nodiscard]] Matrix3x3 solutionVectorJacobian(LocalIndex q) const { return solutionJacobian(q); }
 
     /**
      * @brief Get previous-step solution gradient at quadrature point
@@ -1013,6 +1047,7 @@ public:
     [[nodiscard]] Vector3D fieldVectorValue(FieldId field, LocalIndex q) const;
     [[nodiscard]] Vector3D fieldGradient(FieldId field, LocalIndex q) const;
     [[nodiscard]] Matrix3x3 fieldJacobian(FieldId field, LocalIndex q) const;
+    [[nodiscard]] Matrix3x3 fieldVectorJacobian(FieldId field, LocalIndex q) const { return fieldJacobian(field, q); }
     [[nodiscard]] Matrix3x3 fieldHessian(FieldId field, LocalIndex q) const;
     [[nodiscard]] Real fieldLaplacian(FieldId field, LocalIndex q) const;
     [[nodiscard]] Matrix3x3 fieldComponentHessian(FieldId field, LocalIndex q, int component) const;
@@ -1450,6 +1485,16 @@ public:
     void setTrialVectorBasisValues(LocalIndex n_dofs, std::span<const Vector3D> values);
 
     /**
+     * @brief Set test vector-basis Jacobians (physical space; layout: [i * n_qpts + q])
+     */
+    void setTestVectorBasisJacobians(LocalIndex n_dofs, std::span<const Matrix3x3> jacobians);
+
+    /**
+     * @brief Set trial vector-basis Jacobians (physical space; layout: [j * n_qpts + q])
+     */
+    void setTrialVectorBasisJacobians(LocalIndex n_dofs, std::span<const Matrix3x3> jacobians);
+
+    /**
      * @brief Set curl of test basis functions (physical space; layout: [i * n_qpts + q])
      */
     void setTestBasisCurls(LocalIndex n_dofs, std::span<const Vector3D> curls);
@@ -1805,6 +1850,7 @@ private:
 
     // Test vector-basis data (H(curl)/H(div)) — qpt-major: [q * n_test_dofs + i]
     ArenaArray<Vector3D> test_basis_vector_values_;
+    ArenaArray<Matrix3x3> test_basis_vector_jacobians_;
     ArenaArray<Vector3D> test_basis_curls_;
     ArenaArray<Real> test_basis_divergences_;
 
@@ -1813,6 +1859,7 @@ private:
     ArenaArray<Vector3D> trial_ref_gradients_;
     ArenaArray<Vector3D> trial_phys_gradients_;
     ArenaArray<Vector3D> trial_basis_vector_values_;
+    ArenaArray<Matrix3x3> trial_basis_vector_jacobians_;
     ArenaArray<Vector3D> trial_basis_curls_;
     ArenaArray<Real> trial_basis_divergences_;
     bool trial_is_test_{true};  // Optimization flag

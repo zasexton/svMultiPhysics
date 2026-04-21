@@ -78,6 +78,7 @@ void AssemblyContext::reserve(LocalIndex max_dofs, LocalIndex max_qpts, int dim)
     const std::size_t off_test_ref_gradients = reserve_block(sizeof(Vector3D) * n_basis);
     const std::size_t off_test_phys_gradients = reserve_block(sizeof(Vector3D) * n_basis);
     const std::size_t off_test_basis_vector_values = reserve_block(sizeof(Vector3D) * n_basis);
+    const std::size_t off_test_basis_vector_jacobians = reserve_block(sizeof(Matrix3x3) * n_basis);
     const std::size_t off_test_basis_curls = reserve_block(sizeof(Vector3D) * n_basis);
     const std::size_t off_test_basis_divergences = reserve_block(sizeof(Real) * n_basis);
 
@@ -85,6 +86,7 @@ void AssemblyContext::reserve(LocalIndex max_dofs, LocalIndex max_qpts, int dim)
     const std::size_t off_trial_ref_gradients = reserve_block(sizeof(Vector3D) * n_basis);
     const std::size_t off_trial_phys_gradients = reserve_block(sizeof(Vector3D) * n_basis);
     const std::size_t off_trial_basis_vector_values = reserve_block(sizeof(Vector3D) * n_basis);
+    const std::size_t off_trial_basis_vector_jacobians = reserve_block(sizeof(Matrix3x3) * n_basis);
     const std::size_t off_trial_basis_curls = reserve_block(sizeof(Vector3D) * n_basis);
     const std::size_t off_trial_basis_divergences = reserve_block(sizeof(Real) * n_basis);
 
@@ -132,6 +134,7 @@ void AssemblyContext::reserve(LocalIndex max_dofs, LocalIndex max_qpts, int dim)
     bind(test_ref_gradients_, off_test_ref_gradients, n_basis);
     bind(test_phys_gradients_, off_test_phys_gradients, n_basis);
     bind(test_basis_vector_values_, off_test_basis_vector_values, n_basis);
+    bind(test_basis_vector_jacobians_, off_test_basis_vector_jacobians, n_basis);
     bind(test_basis_curls_, off_test_basis_curls, n_basis);
     bind(test_basis_divergences_, off_test_basis_divergences, n_basis);
 
@@ -139,6 +142,7 @@ void AssemblyContext::reserve(LocalIndex max_dofs, LocalIndex max_qpts, int dim)
     bind(trial_ref_gradients_, off_trial_ref_gradients, n_basis);
     bind(trial_phys_gradients_, off_trial_phys_gradients, n_basis);
     bind(trial_basis_vector_values_, off_trial_basis_vector_values, n_basis);
+    bind(trial_basis_vector_jacobians_, off_trial_basis_vector_jacobians, n_basis);
     bind(trial_basis_curls_, off_trial_basis_curls, n_basis);
     bind(trial_basis_divergences_, off_trial_basis_divergences, n_basis);
 
@@ -189,6 +193,7 @@ void AssemblyContext::ensureArenaCapacity(LocalIndex required_dofs, LocalIndex r
     const auto test_ref_gradients = snapshot(test_ref_gradients_);
     const auto test_phys_gradients = snapshot(test_phys_gradients_);
     const auto test_basis_vector_values = snapshot(test_basis_vector_values_);
+    const auto test_basis_vector_jacobians = snapshot(test_basis_vector_jacobians_);
     const auto test_basis_curls = snapshot(test_basis_curls_);
     const auto test_basis_divergences = snapshot(test_basis_divergences_);
 
@@ -196,6 +201,7 @@ void AssemblyContext::ensureArenaCapacity(LocalIndex required_dofs, LocalIndex r
     const auto trial_ref_gradients = snapshot(trial_ref_gradients_);
     const auto trial_phys_gradients = snapshot(trial_phys_gradients_);
     const auto trial_basis_vector_values = snapshot(trial_basis_vector_values_);
+    const auto trial_basis_vector_jacobians = snapshot(trial_basis_vector_jacobians_);
     const auto trial_basis_curls = snapshot(trial_basis_curls_);
     const auto trial_basis_divergences = snapshot(trial_basis_divergences_);
 
@@ -234,6 +240,7 @@ void AssemblyContext::ensureArenaCapacity(LocalIndex required_dofs, LocalIndex r
     restore(test_ref_gradients_, test_ref_gradients);
     restore(test_phys_gradients_, test_phys_gradients);
     restore(test_basis_vector_values_, test_basis_vector_values);
+    restore(test_basis_vector_jacobians_, test_basis_vector_jacobians);
     restore(test_basis_curls_, test_basis_curls);
     restore(test_basis_divergences_, test_basis_divergences);
 
@@ -241,6 +248,7 @@ void AssemblyContext::ensureArenaCapacity(LocalIndex required_dofs, LocalIndex r
     restore(trial_ref_gradients_, trial_ref_gradients);
     restore(trial_phys_gradients_, trial_phys_gradients);
     restore(trial_basis_vector_values_, trial_basis_vector_values);
+    restore(trial_basis_vector_jacobians_, trial_basis_vector_jacobians);
     restore(trial_basis_curls_, trial_basis_curls);
     restore(trial_basis_divergences_, trial_basis_divergences);
 
@@ -302,9 +310,11 @@ void AssemblyContext::configure(
     trial_phys_hessians_.clear();
 
     test_basis_vector_values_.clear();
+    test_basis_vector_jacobians_.clear();
     test_basis_curls_.clear();
     test_basis_divergences_.clear();
     trial_basis_vector_values_.clear();
+    trial_basis_vector_jacobians_.clear();
     trial_basis_curls_.clear();
     trial_basis_divergences_.clear();
 
@@ -358,9 +368,11 @@ void AssemblyContext::configure(
     trial_phys_hessians_.clear();
 
     test_basis_vector_values_.clear();
+    test_basis_vector_jacobians_.clear();
     test_basis_curls_.clear();
     test_basis_divergences_.clear();
     trial_basis_vector_values_.clear();
+    trial_basis_vector_jacobians_.clear();
     trial_basis_curls_.clear();
     trial_basis_divergences_.clear();
 
@@ -411,9 +423,11 @@ void AssemblyContext::configureFace(
     trial_phys_hessians_.clear();
 
     test_basis_vector_values_.clear();
+    test_basis_vector_jacobians_.clear();
     test_basis_curls_.clear();
     test_basis_divergences_.clear();
     trial_basis_vector_values_.clear();
+    trial_basis_vector_jacobians_.clear();
     trial_basis_curls_.clear();
     trial_basis_divergences_.clear();
 
@@ -465,9 +479,11 @@ void AssemblyContext::configureFace(
     trial_phys_hessians_.clear();
 
     test_basis_vector_values_.clear();
+    test_basis_vector_jacobians_.clear();
     test_basis_curls_.clear();
     test_basis_divergences_.clear();
     trial_basis_vector_values_.clear();
+    trial_basis_vector_jacobians_.clear();
     trial_basis_curls_.clear();
     trial_basis_divergences_.clear();
 
@@ -511,12 +527,14 @@ void AssemblyContext::clear()
     test_ref_gradients_.clear();
     test_phys_gradients_.clear();
     test_basis_vector_values_.clear();
+    test_basis_vector_jacobians_.clear();
     test_basis_curls_.clear();
     test_basis_divergences_.clear();
     trial_basis_values_.clear();
     trial_ref_gradients_.clear();
     trial_phys_gradients_.clear();
     trial_basis_vector_values_.clear();
+    trial_basis_vector_jacobians_.clear();
     trial_basis_curls_.clear();
     trial_basis_divergences_.clear();
     solution_coefficients_.clear();
@@ -751,6 +769,20 @@ AssemblyContext::Vector3D AssemblyContext::basisVectorValue(LocalIndex i, LocalI
     return test_basis_vector_values_[static_cast<std::size_t>(q * n_test_dofs_ + i)];
 }
 
+AssemblyContext::Matrix3x3 AssemblyContext::basisVectorJacobian(LocalIndex i, LocalIndex q) const
+{
+    if (!test_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::basisVectorJacobian: test space does not use a vector basis");
+    }
+    if (test_basis_vector_jacobians_.empty()) {
+        throw std::logic_error("AssemblyContext::basisVectorJacobian: vector basis Jacobians not set");
+    }
+    if (i >= n_test_dofs_ || q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::basisVectorJacobian: index out of range");
+    }
+    return test_basis_vector_jacobians_[static_cast<std::size_t>(q * n_test_dofs_ + i)];
+}
+
 AssemblyContext::Vector3D AssemblyContext::basisCurl(LocalIndex i, LocalIndex q) const
 {
     if (!test_is_vector_basis_) {
@@ -837,6 +869,21 @@ AssemblyContext::Vector3D AssemblyContext::trialBasisVectorValue(LocalIndex j, L
     }
     if (j >= n_trial_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::trialBasisVectorValue: index out of range");
+    }
+    return storage[static_cast<std::size_t>(q * n_trial_dofs_ + j)];
+}
+
+AssemblyContext::Matrix3x3 AssemblyContext::trialBasisVectorJacobian(LocalIndex j, LocalIndex q) const
+{
+    if (!trial_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::trialBasisVectorJacobian: trial space does not use a vector basis");
+    }
+    const auto& storage = trial_is_test_ ? test_basis_vector_jacobians_ : trial_basis_vector_jacobians_;
+    if (storage.empty()) {
+        throw std::logic_error("AssemblyContext::trialBasisVectorJacobian: vector basis Jacobians not set");
+    }
+    if (j >= n_trial_dofs_ || q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::trialBasisVectorJacobian: index out of range");
     }
     return storage[static_cast<std::size_t>(q * n_trial_dofs_ + j)];
 }
@@ -1004,9 +1051,6 @@ void AssemblyContext::setSolutionCoefficients(std::span<const Real> coefficients
         solution_jacobians_.clear();
 
         if (trial_is_vector_basis_) {
-            FE_THROW_IF(need_gradients, InvalidArgumentException,
-                        "AssemblyContext::setSolutionCoefficients: SolutionGradients are not available for vector-basis spaces; use curl()/div() operators instead");
-
             solution_vector_values_.resize(static_cast<std::size_t>(n_qpts_), Vector3D{0.0, 0.0, 0.0});
             for (LocalIndex q = 0; q < n_qpts_; ++q) {
                 Vector3D u = {0.0, 0.0, 0.0};
@@ -1018,6 +1062,24 @@ void AssemblyContext::setSolutionCoefficients(std::span<const Real> coefficients
                     u[2] += coef * phi[2];
                 }
                 solution_vector_values_[static_cast<std::size_t>(q)] = u;
+            }
+
+            if (need_gradients) {
+                solution_jacobians_.resize(static_cast<std::size_t>(n_qpts_), Matrix3x3{});
+                for (LocalIndex q = 0; q < n_qpts_; ++q) {
+                    Matrix3x3 J{};
+                    for (LocalIndex j = 0; j < n_trial_dofs_; ++j) {
+                        const auto phi_grad = trialBasisVectorJacobian(j, q);
+                        const Real coef = solution_coefficients_[static_cast<std::size_t>(j)];
+                        for (int r = 0; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) {
+                                J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
+                                    coef * phi_grad[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                            }
+                        }
+                    }
+                    solution_jacobians_[static_cast<std::size_t>(q)] = J;
+                }
             }
         } else {
             FE_CHECK_ARG(trial_value_dim_ > 0 && trial_value_dim_ <= 3,
@@ -1256,16 +1318,26 @@ void AssemblyContext::setPreviousSolutionCoefficientsK(int k, std::span<const Re
 
         if (trial_is_vector_basis_) {
             dst.vector_values.resize(static_cast<std::size_t>(n_qpts_), Vector3D{0.0, 0.0, 0.0});
+            dst.jacobians.resize(static_cast<std::size_t>(n_qpts_), Matrix3x3{});
             for (LocalIndex q = 0; q < n_qpts_; ++q) {
                 Vector3D u = {0.0, 0.0, 0.0};
+                Matrix3x3 J{};
                 for (LocalIndex j = 0; j < n_trial_dofs_; ++j) {
                     const auto phi = trialBasisVectorValue(j, q);
+                    const auto phi_grad = trialBasisVectorJacobian(j, q);
                     const Real coef = dst.coefficients[static_cast<std::size_t>(j)];
                     u[0] += coef * phi[0];
                     u[1] += coef * phi[1];
                     u[2] += coef * phi[2];
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
+                                coef * phi_grad[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                        }
+                    }
                 }
                 dst.vector_values[static_cast<std::size_t>(q)] = u;
+                dst.jacobians[static_cast<std::size_t>(q)] = J;
             }
         } else {
             FE_CHECK_ARG(trial_value_dim_ > 0 && trial_value_dim_ <= 3,
@@ -2448,6 +2520,7 @@ void AssemblyContext::setTestBasisData(
             test_ref_gradients_[q * nd + i] = gradients[i * nq + q];
 
     test_basis_vector_values_.clear();
+    test_basis_vector_jacobians_.clear();
     test_basis_curls_.clear();
     test_basis_divergences_.clear();
 }
@@ -2465,6 +2538,7 @@ void AssemblyContext::setTestBasisDataQptMajor(
     test_basis_values_.assign(values.begin(), values.end());
     test_ref_gradients_.assign(gradients.begin(), gradients.end());
     test_basis_vector_values_.clear();
+    test_basis_vector_jacobians_.clear();
     test_basis_curls_.clear();
     test_basis_divergences_.clear();
 }
@@ -2493,6 +2567,7 @@ void AssemblyContext::setTrialBasisData(
             trial_ref_gradients_[q * nd + i] = gradients[i * nq + q];
 
     trial_basis_vector_values_.clear();
+    trial_basis_vector_jacobians_.clear();
     trial_basis_curls_.clear();
     trial_basis_divergences_.clear();
 }
@@ -2508,6 +2583,7 @@ void AssemblyContext::setTrialBasisDataQptMajor(
     trial_basis_values_.assign(values.begin(), values.end());
     trial_ref_gradients_.assign(gradients.begin(), gradients.end());
     trial_basis_vector_values_.clear();
+    trial_basis_vector_jacobians_.clear();
     trial_basis_curls_.clear();
     trial_basis_divergences_.clear();
 }
@@ -2525,12 +2601,15 @@ void AssemblyContext::setTestVectorBasisValues(LocalIndex n_dofs, std::span<cons
     const auto nd = static_cast<std::size_t>(n_test_dofs_);
     const auto nq = static_cast<std::size_t>(n_qpts_);
     test_basis_vector_values_.resize(values.size());
-    for (std::size_t i = 0; i < nd; ++i)
-        for (std::size_t q = 0; q < nq; ++q)
-            test_basis_vector_values_[q * nd + i] = values[i * nq + q];
     test_basis_values_.clear();
     test_ref_gradients_.clear();
     test_phys_gradients_.clear();
+    if (values.empty()) {
+        return;
+    }
+    for (std::size_t i = 0; i < nd; ++i)
+        for (std::size_t q = 0; q < nq; ++q)
+            test_basis_vector_values_[q * nd + i] = values[i * nq + q];
 }
 
 void AssemblyContext::setTrialVectorBasisValues(LocalIndex n_dofs, std::span<const Vector3D> values)
@@ -2544,12 +2623,52 @@ void AssemblyContext::setTrialVectorBasisValues(LocalIndex n_dofs, std::span<con
     const auto nd = static_cast<std::size_t>(n_trial_dofs_);
     const auto nq = static_cast<std::size_t>(n_qpts_);
     trial_basis_vector_values_.resize(values.size());
-    for (std::size_t i = 0; i < nd; ++i)
-        for (std::size_t q = 0; q < nq; ++q)
-            trial_basis_vector_values_[q * nd + i] = values[i * nq + q];
     trial_basis_values_.clear();
     trial_ref_gradients_.clear();
     trial_phys_gradients_.clear();
+    if (values.empty()) {
+        return;
+    }
+    for (std::size_t i = 0; i < nd; ++i)
+        for (std::size_t q = 0; q < nq; ++q)
+            trial_basis_vector_values_[q * nd + i] = values[i * nq + q];
+}
+
+void AssemblyContext::setTestVectorBasisJacobians(LocalIndex n_dofs, std::span<const Matrix3x3> jacobians)
+{
+    (void)n_dofs;
+    if (!test_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::setTestVectorBasisJacobians: test space does not use a vector basis");
+    }
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
+    const auto nd = static_cast<std::size_t>(n_test_dofs_);
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    test_basis_vector_jacobians_.resize(jacobians.size());
+    if (jacobians.empty()) {
+        return;
+    }
+    for (std::size_t i = 0; i < nd; ++i)
+        for (std::size_t q = 0; q < nq; ++q)
+            test_basis_vector_jacobians_[q * nd + i] = jacobians[i * nq + q];
+}
+
+void AssemblyContext::setTrialVectorBasisJacobians(LocalIndex n_dofs, std::span<const Matrix3x3> jacobians)
+{
+    (void)n_dofs;
+    if (!trial_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::setTrialVectorBasisJacobians: trial space does not use a vector basis");
+    }
+    trial_is_test_ = false;
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
+    const auto nd = static_cast<std::size_t>(n_trial_dofs_);
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    trial_basis_vector_jacobians_.resize(jacobians.size());
+    if (jacobians.empty()) {
+        return;
+    }
+    for (std::size_t i = 0; i < nd; ++i)
+        for (std::size_t q = 0; q < nq; ++q)
+            trial_basis_vector_jacobians_[q * nd + i] = jacobians[i * nq + q];
 }
 
 void AssemblyContext::setTestBasisCurls(LocalIndex n_dofs, std::span<const Vector3D> curls)
@@ -2562,6 +2681,9 @@ void AssemblyContext::setTestBasisCurls(LocalIndex n_dofs, std::span<const Vecto
     const auto nd = static_cast<std::size_t>(n_test_dofs_);
     const auto nq = static_cast<std::size_t>(n_qpts_);
     test_basis_curls_.resize(curls.size());
+    if (curls.empty()) {
+        return;
+    }
     for (std::size_t i = 0; i < nd; ++i)
         for (std::size_t q = 0; q < nq; ++q)
             test_basis_curls_[q * nd + i] = curls[i * nq + q];
@@ -2578,6 +2700,9 @@ void AssemblyContext::setTrialBasisCurls(LocalIndex n_dofs, std::span<const Vect
     const auto nd = static_cast<std::size_t>(n_trial_dofs_);
     const auto nq = static_cast<std::size_t>(n_qpts_);
     trial_basis_curls_.resize(curls.size());
+    if (curls.empty()) {
+        return;
+    }
     for (std::size_t i = 0; i < nd; ++i)
         for (std::size_t q = 0; q < nq; ++q)
             trial_basis_curls_[q * nd + i] = curls[i * nq + q];
@@ -2593,6 +2718,9 @@ void AssemblyContext::setTestBasisDivergences(LocalIndex n_dofs, std::span<const
     const auto nd = static_cast<std::size_t>(n_test_dofs_);
     const auto nq = static_cast<std::size_t>(n_qpts_);
     test_basis_divergences_.resize(divergences.size());
+    if (divergences.empty()) {
+        return;
+    }
     for (std::size_t i = 0; i < nd; ++i)
         for (std::size_t q = 0; q < nq; ++q)
             test_basis_divergences_[q * nd + i] = divergences[i * nq + q];
@@ -2609,6 +2737,9 @@ void AssemblyContext::setTrialBasisDivergences(LocalIndex n_dofs, std::span<cons
     const auto nd = static_cast<std::size_t>(n_trial_dofs_);
     const auto nq = static_cast<std::size_t>(n_qpts_);
     trial_basis_divergences_.resize(divergences.size());
+    if (divergences.empty()) {
+        return;
+    }
     for (std::size_t i = 0; i < nd; ++i)
         for (std::size_t q = 0; q < nq; ++q)
             trial_basis_divergences_[q * nd + i] = divergences[i * nq + q];
@@ -2724,6 +2855,7 @@ void AssemblyContext::setTestBasisValuesOnlyQptMajor(LocalIndex n_dofs, std::spa
     test_basis_values_.assign(values.begin(), values.end());
     // Deliberately skip test_ref_gradients_ — caller manages physical gradients directly.
     test_basis_vector_values_.clear();
+    test_basis_vector_jacobians_.clear();
     test_basis_curls_.clear();
     test_basis_divergences_.clear();
 }
@@ -2736,6 +2868,7 @@ void AssemblyContext::setTrialBasisValuesOnlyQptMajor(LocalIndex n_dofs, std::sp
     trial_basis_values_.assign(values.begin(), values.end());
     // Deliberately skip trial_ref_gradients_ — caller manages physical gradients directly.
     trial_basis_vector_values_.clear();
+    trial_basis_vector_jacobians_.clear();
     trial_basis_curls_.clear();
     trial_basis_divergences_.clear();
 }
@@ -2802,9 +2935,11 @@ void AssemblyContext::configureForCoupledBlock(
     trial_phys_hessians_.clear();
 
     test_basis_vector_values_.clear();
+    test_basis_vector_jacobians_.clear();
     test_basis_curls_.clear();
     test_basis_divergences_.clear();
     trial_basis_vector_values_.clear();
+    trial_basis_vector_jacobians_.clear();
     trial_basis_curls_.clear();
     trial_basis_divergences_.clear();
 

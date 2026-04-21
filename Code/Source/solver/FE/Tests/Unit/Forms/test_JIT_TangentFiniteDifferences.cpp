@@ -19,6 +19,7 @@
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/Vocabulary.h"
+#include "Spaces/HCurlSpace.h"
 #include "Spaces/H1Space.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 #include "Tests/Unit/Forms/JITTestHelpers.h"
@@ -33,6 +34,20 @@ namespace forms {
 namespace test {
 
 namespace {
+
+[[nodiscard]] dofs::DofMap createSingleTetraDofMap(LocalIndex n_dofs)
+{
+    dofs::DofMap dof_map(1, static_cast<GlobalIndex>(n_dofs), n_dofs);
+    std::vector<GlobalIndex> cell_dofs(static_cast<std::size_t>(n_dofs));
+    for (LocalIndex i = 0; i < n_dofs; ++i) {
+        cell_dofs[static_cast<std::size_t>(i)] = static_cast<GlobalIndex>(i);
+    }
+    dof_map.setCellDofs(0, cell_dofs);
+    dof_map.setNumDofs(static_cast<GlobalIndex>(n_dofs));
+    dof_map.setNumLocalDofs(static_cast<GlobalIndex>(n_dofs));
+    dof_map.finalize();
+    return dof_map;
+}
 
 void expectCellJitJacobianMatchesCentralFD(const assembly::IMeshAccess& mesh,
                                            const dofs::DofMap& dof_map,
@@ -227,6 +242,24 @@ TEST(JITTangentFiniteDifferences, NonlinearDiffusionCellTangentMatchesCentralDif
 
     const std::vector<Real> U = {0.11, -0.21, 0.17, -0.08};
     expectCellJitJacobianMatchesCentralFD(mesh, dof_map, space, residual, U, /*eps=*/2e-6, /*tol=*/5e-8);
+}
+
+TEST(JITTangentFiniteDifferences, IntrinsicVectorGradientCellTangentMatchesCentralDifferences)
+{
+    requireLLVMJITOrSkip();
+
+    SingleTetraMeshAccess mesh;
+    spaces::HCurlSpace space(ElementType::Tetra4, /*order=*/0, BasisType::Nedelec);
+    auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto residual =
+        ((FormExpr::constant(Real(0.8)) + inner(u, u)) * inner(grad(u), grad(v)) +
+         Real(0.3) * inner(sym(grad(u)), sym(grad(v)))).dx();
+
+    const std::vector<Real> U = {0.12, -0.08, 0.15, -0.03, 0.21, -0.11};
+    expectCellJitJacobianMatchesCentralFD(mesh, dof_map, space, residual, U, /*eps=*/2e-6, /*tol=*/2e-7);
 }
 
 TEST(JITTangentFiniteDifferences, NonlinearReactionCellTangentMatchesCentralDifferences)
