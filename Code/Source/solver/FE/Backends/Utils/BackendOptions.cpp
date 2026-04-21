@@ -114,9 +114,45 @@ std::string validateFsilsMixedLayoutContract(const MixedBlockLayout& layout,
                "' has no explicit assembly mode";
     }
 
-    if (const auto* block = layout.firstNativeAuxiliaryBlockWithoutExplicitRowOwnership()) {
-        return "FSILS native auxiliary block '" + block->name +
-               "' has no explicit row ownership policy";
+    for (const auto& block : layout.blocks) {
+        if (block.kind != MixedBlockKind::Auxiliary ||
+            block.assembly_mode != MixedBlockAssemblyMode::NativeOwnedRows) {
+            continue;
+        }
+        if (block.row_ownership == MixedRowOwnershipPolicy::Unspecified) {
+            return "FSILS native auxiliary block '" + block.name +
+                   "' has no explicit row ownership policy";
+        }
+        if (block.row_ownership == MixedRowOwnershipPolicy::SingleOwner &&
+            block.single_owner_rank < 0) {
+            return "FSILS native auxiliary block '" + block.name +
+                   "' has no valid single-owner rank";
+        }
+        if (block.row_ownership != MixedRowOwnershipPolicy::SingleOwner) {
+            if (static_cast<GlobalIndex>(block.row_owner_ranks.size()) != block.size) {
+                return "FSILS native auxiliary block '" + block.name +
+                       "' has no concrete row-owner map";
+            }
+            if (std::any_of(block.row_owner_ranks.begin(),
+                            block.row_owner_ranks.end(),
+                            [](int owner) { return owner < 0; })) {
+                return "FSILS native auxiliary block '" + block.name +
+                       "' has invalid row-owner ranks";
+            }
+        } else if (!block.row_owner_ranks.empty()) {
+            if (static_cast<GlobalIndex>(block.row_owner_ranks.size()) != block.size) {
+                return "FSILS native auxiliary block '" + block.name +
+                       "' has inconsistent single-owner row map";
+            }
+            if (std::any_of(block.row_owner_ranks.begin(),
+                            block.row_owner_ranks.end(),
+                            [&](int owner) {
+                                return owner != block.single_owner_rank;
+                            })) {
+                return "FSILS native auxiliary block '" + block.name +
+                       "' has inconsistent single-owner row map";
+            }
+        }
     }
 
     if (!layout.hasNativeAuxiliaryRows()) {
@@ -391,7 +427,7 @@ SolverOptions normalizeSolverOptionsForBackend(const SolverOptions& options,
                             ->firstNativeAuxiliaryBlockWithoutExplicitRowOwnership()) {
                     FE_THROW(InvalidArgumentException,
                              "normalizeSolverOptionsForBackend(FSILS): native auxiliary block '" +
-                                 block->name + "' has no explicit row ownership policy");
+                                 block->name + "' has no concrete row ownership");
                 }
             }
 

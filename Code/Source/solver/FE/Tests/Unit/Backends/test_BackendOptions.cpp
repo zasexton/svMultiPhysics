@@ -376,16 +376,24 @@ TEST(MixedBlockLayout, FsilsContractValidatesNativeOwnedAuxiliaryRows)
                              MixedBlockKind::Auxiliary};
     aux.assembly_mode = MixedBlockAssemblyMode::NativeOwnedRows;
     aux.row_ownership = MixedRowOwnershipPolicy::BackendDofOwner;
+    aux.row_owner_ranks = {0, 0, 0};
     aux.node_component_start = 3;
     aux.node_component_count = 1;
     layout.blocks.push_back(aux);
 
     EXPECT_TRUE(validateFsilsMixedLayoutContract(layout, /*dof_per_node=*/4).empty());
+    EXPECT_EQ(layout.blocks.back().ownerRankForGlobalRow(10), 0);
 
     layout.blocks.back().row_ownership = MixedRowOwnershipPolicy::Unspecified;
     const auto missing_owner =
         validateFsilsMixedLayoutContract(layout, /*dof_per_node=*/4);
     EXPECT_NE(missing_owner.find("no explicit row ownership policy"), std::string::npos);
+
+    layout.blocks.back().row_ownership = MixedRowOwnershipPolicy::BackendDofOwner;
+    layout.blocks.back().row_owner_ranks.clear();
+    const auto missing_map =
+        validateFsilsMixedLayoutContract(layout, /*dof_per_node=*/4);
+    EXPECT_NE(missing_map.find("no concrete row-owner map"), std::string::npos);
 }
 
 // --- TimeIntegrationDescriptor tests ---

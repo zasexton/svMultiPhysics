@@ -1,6 +1,9 @@
 #include "Auxiliary/AuxiliaryOperatorRegistry.h"
 
+#include "Auxiliary/AuxiliaryRowOwnership.h"
+
 #include <algorithm>
+#include <utility>
 
 namespace svmp {
 namespace FE {
@@ -128,6 +131,12 @@ void AuxiliaryOperatorRegistry::registerMonolithicUnknowns(
     blk.row_ownership = rowOwnershipPolicyForScope(scope);
     if (blk.row_ownership == backends::MixedRowOwnershipPolicy::SingleOwner) {
         blk.single_owner_rank = 0;
+        blk.row_owner_ranks = buildAuxiliaryRowOwnerRanks(
+            AuxiliaryRowOwnershipSpec{.scope = scope,
+                                      .policy = blk.row_ownership,
+                                      .entity_count = entity_count,
+                                      .stride = stride,
+                                      .single_owner_rank = blk.single_owner_rank});
     }
     if (solver_meta != nullptr) {
         applySolverMetadata(blk, *solver_meta);
@@ -185,6 +194,28 @@ void AuxiliaryOperatorRegistry::setBlockSolverMetadata(
             applySolverMetadata(blk, meta);
         }
     }
+}
+
+void AuxiliaryOperatorRegistry::setBlockRowOwnerRanks(
+    std::string_view block_name, std::vector<int> row_owner_ranks)
+{
+    auto key = std::string(block_name);
+    auto it = std::find_if(aux_layout_.blocks.begin(), aux_layout_.blocks.end(),
+                           [&](const AuxiliaryBlockUnknownLayout& blk) {
+                               return blk.name == key;
+                           });
+    FE_THROW_IF(it == aux_layout_.blocks.end(), InvalidArgumentException,
+                "AuxiliaryOperatorRegistry::setBlockRowOwnerRanks: unknown block '" +
+                    key + "'");
+    FE_THROW_IF(row_owner_ranks.size() != it->n_unknowns, InvalidArgumentException,
+                "AuxiliaryOperatorRegistry::setBlockRowOwnerRanks: owner count "
+                "must match block unknown count");
+    FE_THROW_IF(std::any_of(row_owner_ranks.begin(), row_owner_ranks.end(),
+                           [](int rank) { return rank < 0; }),
+                InvalidArgumentException,
+                "AuxiliaryOperatorRegistry::setBlockRowOwnerRanks: owner ranks "
+                "must be non-negative");
+    it->row_owner_ranks = std::move(row_owner_ranks);
 }
 
 const AuxiliaryBlockSolverMetadata* AuxiliaryOperatorRegistry::getBlockSolverMetadata(

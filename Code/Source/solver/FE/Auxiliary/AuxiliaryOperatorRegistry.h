@@ -112,6 +112,11 @@ struct AuxiliaryBlockUnknownLayout {
     backends::MixedRowOwnershipPolicy row_ownership{
         backends::MixedRowOwnershipPolicy::Unspecified};
     int single_owner_rank{-1};
+
+    /// Concrete owner rank per auxiliary row in this block.  Size must match
+    /// n_unknowns when populated; SingleOwner blocks may derive ownership from
+    /// single_owner_rank without storing every row explicitly.
+    std::vector<int> row_owner_ranks{};
 };
 
 /**
@@ -312,6 +317,15 @@ public:
      */
     void setBlockSolverMetadata(std::string_view block_name,
                                  AuxiliaryBlockSolverMetadata meta);
+
+    /**
+     * @brief Set concrete row-owner ranks for one monolithic auxiliary block.
+     *
+     * The vector is indexed in the block's flat auxiliary row order and must
+     * have one entry per unknown in the block.
+     */
+    void setBlockRowOwnerRanks(std::string_view block_name,
+                               std::vector<int> row_owner_ranks);
 
     /**
      * @brief Get solver metadata for a block (empty name returns default).

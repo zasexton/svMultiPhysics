@@ -729,6 +729,7 @@ set(FE_AUXILIARY_HEADERS
     Auxiliary/AuxiliaryCouplingGraph.h
     Auxiliary/AuxiliaryOperatorBuilder.h
     Auxiliary/AuxiliaryOperatorRegistry.h
+    Auxiliary/AuxiliaryRowOwnership.h
     Auxiliary/AuxiliaryModelBuilder.h
     Auxiliary/AuxiliaryModelDSL.h
     Auxiliary/AuxiliaryBindings.h
@@ -752,6 +753,7 @@ set(FE_AUXILIARY_SOURCES
     Auxiliary/AuxiliaryCouplingGraph.cpp
     Auxiliary/AuxiliaryOperatorBuilder.cpp
     Auxiliary/AuxiliaryOperatorRegistry.cpp
+    Auxiliary/AuxiliaryRowOwnership.cpp
     Auxiliary/AuxiliaryModelBuilder.cpp
     Auxiliary/AuxiliaryBindings.cpp
     Auxiliary/AuxiliaryDAEAnalyzer.cpp

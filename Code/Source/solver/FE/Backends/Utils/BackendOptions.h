@@ -253,6 +253,7 @@ struct MixedBlockDescriptor {
     MixedBlockAssemblyMode assembly_mode{MixedBlockAssemblyMode::Unspecified};
     MixedRowOwnershipPolicy row_ownership{MixedRowOwnershipPolicy::Unspecified};
     int single_owner_rank{-1};
+    std::vector<int> row_owner_ranks{};
 
     /// Optional component metadata for native FSILS nodal-interleaved blocks.
     /// Valid only when assembly_mode == NativeOwnedRows.
@@ -281,8 +282,39 @@ struct MixedBlockDescriptor {
         if (row_ownership == MixedRowOwnershipPolicy::Unspecified) {
             return false;
         }
-        return row_ownership != MixedRowOwnershipPolicy::SingleOwner ||
-               single_owner_rank >= 0;
+        if (row_ownership == MixedRowOwnershipPolicy::SingleOwner) {
+            if (single_owner_rank < 0) {
+                return false;
+            }
+            if (!row_owner_ranks.empty()) {
+                return static_cast<GlobalIndex>(row_owner_ranks.size()) == size &&
+                       std::all_of(row_owner_ranks.begin(), row_owner_ranks.end(),
+                                   [&](int owner) {
+                                       return owner == single_owner_rank;
+                                   });
+            }
+            return true;
+        }
+        return static_cast<GlobalIndex>(row_owner_ranks.size()) == size &&
+               std::all_of(row_owner_ranks.begin(), row_owner_ranks.end(),
+                           [](int owner) { return owner >= 0; });
+    }
+
+    [[nodiscard]] int ownerRankForLocalRow(GlobalIndex local_row) const noexcept {
+        if (local_row < 0 || local_row >= size) {
+            return -1;
+        }
+        if (row_ownership == MixedRowOwnershipPolicy::SingleOwner) {
+            return single_owner_rank;
+        }
+        if (static_cast<GlobalIndex>(row_owner_ranks.size()) != size) {
+            return -1;
+        }
+        return row_owner_ranks[static_cast<std::size_t>(local_row)];
+    }
+
+    [[nodiscard]] int ownerRankForGlobalRow(GlobalIndex global_row) const noexcept {
+        return ownerRankForLocalRow(global_row - offset);
     }
 };
 

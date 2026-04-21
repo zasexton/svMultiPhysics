@@ -9,8 +9,10 @@
 #include "Auxiliary/AuxiliaryCouplingGraph.h"
 #include "Auxiliary/AuxiliaryOperatorBuilder.h"
 #include "Auxiliary/AuxiliaryOperatorRegistry.h"
+#include "Auxiliary/AuxiliaryRowOwnership.h"
 
 #include <algorithm>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -313,8 +315,79 @@ TEST(AuxiliaryOperatorRegistry, MonolithicUnknownRegistration)
     EXPECT_EQ(layout.blocks[1].name, "rcr");
     EXPECT_EQ(layout.blocks[1].offset, 400u);
     EXPECT_EQ(layout.blocks[1].n_unknowns, 3u);
+    EXPECT_EQ(layout.blocks[1].single_owner_rank, 0);
+    EXPECT_EQ(layout.blocks[1].row_owner_ranks, std::vector<int>({0, 0, 0}));
 
     EXPECT_EQ(layout.total_aux_unknowns, 403u);
+}
+
+TEST(AuxiliaryOperatorRegistry, ScopeRowOwnershipHelpersExpandToRows)
+{
+    const std::vector<int> node_owners{0, 1, 1};
+    const auto node_rows = buildAuxiliaryRowOwnerRanks(
+        AuxiliaryRowOwnershipSpec{
+            .scope = AuxiliaryStateScope::Node,
+            .policy = svmp::FE::backends::MixedRowOwnershipPolicy::BackendDofOwner,
+            .entity_count = node_owners.size(),
+            .stride = 2,
+            .entity_owner_ranks =
+                std::span<const int>{node_owners.data(), node_owners.size()}});
+    EXPECT_EQ(node_rows, std::vector<int>({0, 0, 1, 1, 1, 1}));
+
+    const std::vector<int> cell_owners{0, 2};
+    const auto cell_rows = buildAuxiliaryRowOwnerRanks(
+        AuxiliaryRowOwnershipSpec{
+            .scope = AuxiliaryStateScope::Cell,
+            .policy = svmp::FE::backends::MixedRowOwnershipPolicy::CellOwner,
+            .entity_count = cell_owners.size(),
+            .stride = 1,
+            .entity_owner_ranks =
+                std::span<const int>{cell_owners.data(), cell_owners.size()}});
+    EXPECT_EQ(cell_rows, std::vector<int>({0, 2}));
+
+    const std::vector<std::size_t> qp_offsets{0, 2, 3};
+    const auto qp_rows =
+        buildQuadraturePointRowOwnerRanks(
+            std::span<const int>{cell_owners.data(), cell_owners.size()},
+            std::span<const std::size_t>{qp_offsets.data(), qp_offsets.size()},
+            /*stride=*/2);
+    EXPECT_EQ(qp_rows, std::vector<int>({0, 0, 0, 0, 2, 2}));
+
+    const std::vector<int> cell_regions{1, 0, 1};
+    const std::vector<int> region_cell_owners{2, 0, 1};
+    const auto region_owners = buildRegionEntityOwnerRanksFromCells(
+        std::span<const int>{cell_regions.data(), cell_regions.size()},
+        std::span<const int>{region_cell_owners.data(), region_cell_owners.size()},
+        /*n_regions=*/2);
+    EXPECT_EQ(region_owners, std::vector<int>({0, 2}));
+    const auto region_rows = buildAuxiliaryRowOwnerRanks(
+        AuxiliaryRowOwnershipSpec{
+            .scope = AuxiliaryStateScope::Region,
+            .policy = svmp::FE::backends::MixedRowOwnershipPolicy::RegionOwner,
+            .entity_count = region_owners.size(),
+            .stride = 3,
+            .entity_owner_ranks =
+                std::span<const int>{region_owners.data(), region_owners.size()}});
+    EXPECT_EQ(region_rows, std::vector<int>({0, 0, 0, 2, 2, 2}));
+}
+
+TEST(AuxiliaryOperatorRegistry, ConcreteRowOwnersRoundTripThroughMixedLayout)
+{
+    AuxiliaryOperatorRegistry reg;
+    reg.registerMonolithicUnknowns("node_aux", 3, 2, AuxiliaryStateScope::Node);
+
+    const std::vector<int> row_owners{0, 0, 1, 1, 1, 1};
+    reg.setBlockRowOwnerRanks("node_aux", row_owners);
+    reg.finalizeLayout();
+
+    const auto mixed = reg.composeMixedLayout(/*n_field_unknowns=*/10);
+    ASSERT_EQ(mixed.aux_layout.blocks.size(), 1u);
+    const auto& block = mixed.aux_layout.blocks.front();
+    EXPECT_EQ(block.row_ownership,
+              svmp::FE::backends::MixedRowOwnershipPolicy::BackendDofOwner);
+    EXPECT_EQ(block.row_owner_ranks, row_owners);
+    EXPECT_THROW(reg.setBlockRowOwnerRanks("node_aux", {0}),
+                 svmp::FE::InvalidArgumentException);
 }
 
 TEST(AuxiliaryOperatorRegistry, ComposeMixedLayout)

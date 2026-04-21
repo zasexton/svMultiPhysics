@@ -404,6 +404,7 @@ TEST(FsilsBackend, CreateLinearSolverRejectsInvalidNativeAuxiliaryPartition)
                              MixedBlockKind::Auxiliary};
     aux.assembly_mode = MixedBlockAssemblyMode::NativeOwnedRows;
     aux.row_ownership = MixedRowOwnershipPolicy::BackendDofOwner;
+    aux.row_owner_ranks = {0};
     mixed.blocks.push_back(aux);
     opts.mixed_block_layout = mixed;
 

@@ -2431,6 +2431,8 @@ TEST(AuxiliaryModelBuilder, AugmentSolverOptionsExportsMixedBlockLayoutAndRoleNa
     EXPECT_EQ(lambda->assembly_mode, backends::MixedBlockAssemblyMode::BorderedReduced);
     EXPECT_EQ(lambda->row_ownership, backends::MixedRowOwnershipPolicy::SingleOwner);
     EXPECT_EQ(lambda->single_owner_rank, 0);
+    EXPECT_EQ(lambda->row_owner_ranks, std::vector<int>({0}));
+    EXPECT_EQ(lambda->ownerRankForGlobalRow(8), 0);
 
     ASSERT_EQ(opts.block_role_names.size(), 1u);
     EXPECT_EQ(opts.block_role_names[0].first, backends::BlockRole::ConstraintField);
@@ -2475,18 +2477,21 @@ TEST(AuxiliaryModelBuilder, MonolithicScopeOwnershipPoliciesPropagateIntoMixedLa
     EXPECT_EQ(global->assembly_mode, backends::MixedBlockAssemblyMode::BorderedReduced);
     EXPECT_EQ(global->row_ownership, backends::MixedRowOwnershipPolicy::SingleOwner);
     EXPECT_EQ(global->single_owner_rank, 0);
+    EXPECT_EQ(global->row_owner_ranks, std::vector<int>({0}));
 
     const auto* node = opts.mixed_block_layout->findBlock("node_aux");
     ASSERT_NE(node, nullptr);
     EXPECT_EQ(node->assembly_mode, backends::MixedBlockAssemblyMode::BorderedReduced);
     EXPECT_EQ(node->row_ownership, backends::MixedRowOwnershipPolicy::BackendDofOwner);
     EXPECT_EQ(node->single_owner_rank, -1);
+    EXPECT_TRUE(node->row_owner_ranks.empty());
 
     const auto* region = opts.mixed_block_layout->findBlock("region_aux");
     ASSERT_NE(region, nullptr);
     EXPECT_EQ(region->assembly_mode, backends::MixedBlockAssemblyMode::BorderedReduced);
     EXPECT_EQ(region->row_ownership, backends::MixedRowOwnershipPolicy::RegionOwner);
     EXPECT_EQ(region->single_owner_rank, -1);
+    EXPECT_TRUE(region->row_owner_ranks.empty());
 }
 
 // ============================================================================

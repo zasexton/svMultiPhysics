@@ -7089,6 +7089,7 @@ backends::SolverOptions FESystem::augmentSolverOptions(const backends::SolverOpt
         block.assembly_mode = aux_block.assembly_mode;
         block.row_ownership = aux_block.row_ownership;
         block.single_owner_rank = aux_block.single_owner_rank;
+        block.row_owner_ranks = aux_block.row_owner_ranks;
         mixed_layout.blocks.push_back(std::move(block));
     }
 
