@@ -456,6 +456,7 @@ struct NodalInterleavedDofMap {
     std::vector<int> ghost_nodes{};
     std::vector<unsigned char> node_is_relevant{};
     std::vector<unsigned char> node_is_ghost{};
+    std::vector<int> node_owner_rank{};
 
     [[nodiscard]] bool isGhostNode(int node) const noexcept
     {
@@ -483,6 +484,18 @@ struct NodalInterleavedDofMap {
             return INVALID_GLOBAL_INDEX;
         }
         return fe_to_fs[static_cast<std::size_t>(fe_dof)];
+    }
+
+    [[nodiscard]] int ownerRankForDof(GlobalIndex dof) const noexcept
+    {
+        if (dof_per_node <= 0 || dof < 0) {
+            return -1;
+        }
+        const auto node = static_cast<GlobalIndex>(dof / dof_per_node);
+        if (node < 0 || static_cast<std::size_t>(node) >= node_owner_rank.size()) {
+            return -1;
+        }
+        return node_owner_rank[static_cast<std::size_t>(node)];
     }
 };
 
@@ -886,14 +899,14 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
     MPI_Allgather(&owned_count_local, 1, MPI_INT64_T,
                   owned_counts.data(), 1, MPI_INT64_T, dof_options.mpi_comm);
 
-    std::int64_t node_offset = 0;
+    std::vector<std::int64_t> node_offsets(static_cast<std::size_t>(world_size) + 1u, 0);
     std::int64_t node_total = 0;
     for (int r = 0; r < world_size; ++r) {
-        if (r < my_rank) {
-            node_offset += owned_counts[static_cast<std::size_t>(r)];
-        }
+        node_offsets[static_cast<std::size_t>(r)] = node_total;
         node_total += owned_counts[static_cast<std::size_t>(r)];
     }
+    node_offsets[static_cast<std::size_t>(world_size)] = node_total;
+    const std::int64_t node_offset = node_offsets[static_cast<std::size_t>(my_rank)];
     if (node_total != static_cast<std::int64_t>(n_nodes)) {
         std::ostringstream oss;
         oss << "sum owned node counts != n_nodes"
@@ -902,11 +915,56 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
         return fail(oss.str());
     }
 
-    std::unordered_map<GlobalIndex, GlobalIndex> fe_node_to_backend;
-    fe_node_to_backend.reserve(owned_recs.size() + ghost_nodes_fe.size());
+    std::vector<int> owned_counts_int(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> owned_displs_int(static_cast<std::size_t>(world_size), 0);
+    for (int r = 0; r < world_size; ++r) {
+        if (owned_counts[static_cast<std::size_t>(r)] >
+            static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
+            return fail("owned node count exceeds MPI int range");
+        }
+        if (node_offsets[static_cast<std::size_t>(r)] >
+            static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
+            return fail("owned node displacement exceeds MPI int range");
+        }
+        owned_counts_int[static_cast<std::size_t>(r)] =
+            static_cast<int>(owned_counts[static_cast<std::size_t>(r)]);
+        owned_displs_int[static_cast<std::size_t>(r)] =
+            static_cast<int>(node_offsets[static_cast<std::size_t>(r)]);
+    }
+
+    std::vector<GlobalIndex> local_owned_nodes(owned_recs.size(), INVALID_GLOBAL_INDEX);
     for (std::size_t i = 0; i < owned_recs.size(); ++i) {
-        const auto node = owned_recs[i].node;
-        fe_node_to_backend.emplace(node, static_cast<GlobalIndex>(node_offset + static_cast<std::int64_t>(i)));
+        local_owned_nodes[i] = owned_recs[i].node;
+    }
+
+    std::vector<GlobalIndex> all_owned_nodes(static_cast<std::size_t>(node_total), INVALID_GLOBAL_INDEX);
+    MPI_Allgatherv(local_owned_nodes.data(),
+                   static_cast<int>(local_owned_nodes.size()),
+                   MPI_INT64_T,
+                   all_owned_nodes.data(),
+                   owned_counts_int.data(),
+                   owned_displs_int.data(),
+                   MPI_INT64_T,
+                   dof_options.mpi_comm);
+
+    std::unordered_map<GlobalIndex, GlobalIndex> fe_node_to_backend;
+    fe_node_to_backend.reserve(static_cast<std::size_t>(n_nodes));
+    for (int r = 0; r < world_size; ++r) {
+        const auto begin = static_cast<std::size_t>(node_offsets[static_cast<std::size_t>(r)]);
+        const auto count = static_cast<std::size_t>(owned_counts[static_cast<std::size_t>(r)]);
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto node = all_owned_nodes[begin + i];
+            if (node < 0 || node >= n_nodes) {
+                return fail("gathered owned FE node outside [0,n_nodes)");
+            }
+            const GlobalIndex backend_node =
+                static_cast<GlobalIndex>(node_offsets[static_cast<std::size_t>(r)] +
+                                         static_cast<std::int64_t>(i));
+            const auto [it, inserted] = fe_node_to_backend.emplace(node, backend_node);
+            if (!inserted && it->second != backend_node) {
+                return fail("global FE node to backend node map conflict");
+            }
+        }
     }
 
 	    // Resolve backend node ids for ghost nodes by querying their owner ranks.
@@ -1000,6 +1058,7 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
     map.ghost_nodes = std::move(ghost_nodes_backend);
     map.node_is_ghost.assign(static_cast<std::size_t>(n_nodes), 0);
     map.node_is_relevant.assign(static_cast<std::size_t>(n_nodes), 0);
+    map.node_owner_rank.assign(static_cast<std::size_t>(n_nodes), -1);
 
     const GlobalIndex owned_node_start = static_cast<GlobalIndex>(node_offset);
     const GlobalIndex owned_node_end = static_cast<GlobalIndex>(node_offset + owned_count_local);
@@ -1017,14 +1076,33 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
         map.node_is_relevant[static_cast<std::size_t>(node)] = 1;
     }
 
+    for (GlobalIndex node = 0; node < n_nodes; ++node) {
+        const auto it = fe_node_to_backend.find(node);
+        if (it == fe_node_to_backend.end()) {
+            return fail("FE node missing backend mapping for owner ranks");
+        }
+        const GlobalIndex backend_node = it->second;
+        if (backend_node < 0 || backend_node >= n_nodes) {
+            return fail("backend owner node outside [0,n_nodes)");
+        }
+        const int owner = node_owner[static_cast<std::size_t>(node)];
+        if (owner < 0 || owner >= world_size) {
+            return fail("backend owner rank outside [0,world_size)");
+        }
+        map.node_owner_rank[static_cast<std::size_t>(backend_node)] = owner;
+    }
+
 	    map.fe_to_fs.assign(static_cast<std::size_t>(total_dofs), INVALID_GLOBAL_INDEX);
 	    map.fs_to_fe.assign(static_cast<std::size_t>(total_dofs), INVALID_GLOBAL_INDEX);
 
-	    // Fill mappings for locally relevant (owned + ghost) nodes only.
-	    for (const auto node : relevant_nodes_fe) {
+	    // Fill a globally complete FE<->backend permutation. The FSILS matrix
+        // still stores only owned rows plus the local halo, but PETSc-like
+        // remote row insertion can carry arbitrary global FE columns that the
+        // receiving rank must be able to map into backend column IDs.
+	    for (GlobalIndex node = 0; node < n_nodes; ++node) {
 	        const auto it = fe_node_to_backend.find(node);
 	        if (it == fe_node_to_backend.end()) {
-	            return fail("relevant FE node missing backend mapping");
+	            return fail("FE node missing backend mapping");
 	        }
         const GlobalIndex backend_node = it->second;
         if (backend_node < 0 || backend_node >= n_nodes) {
@@ -1069,25 +1147,80 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
             << " ghost_nodes=" << map.ghost_nodes.size()
             << " owned_range=[" << map.owned_range.first << "," << map.owned_range.last << ")";
         FE_LOG_INFO(oss.str());
+
+        const std::size_t sample_nodes =
+            std::min<std::size_t>(owned_recs.size(), std::size_t{4});
+        for (std::size_t i = 0; i < sample_nodes; ++i) {
+            const auto fe_node = owned_recs[i].node;
+            const auto backend_it = fe_node_to_backend.find(fe_node);
+            if (backend_it == fe_node_to_backend.end()) {
+                continue;
+            }
+            std::ostringstream sample;
+            sample << "FESystem::setup: nodal dof permutation sample"
+                   << " rank=" << my_rank
+                   << " fe_node=" << fe_node
+                   << " backend_node=" << backend_it->second;
+            int comp_offset = 0;
+            for (std::size_t f = 0; f < n_fields; ++f) {
+                const auto& field = field_map.getField(f);
+                for (LocalIndex c = 0; c < field.n_components; ++c) {
+                    const GlobalIndex fe = field_map.componentToGlobal(f, c, fe_node);
+                    const GlobalIndex fs =
+                        backend_it->second * static_cast<GlobalIndex>(dof_per_node) +
+                        static_cast<GlobalIndex>(comp_offset);
+                    sample << " [backend_comp=" << comp_offset
+                           << " field=" << field.name
+                           << " field_comp=" << static_cast<int>(c)
+                           << " fe=" << fe
+                           << " fs=" << fs << "]";
+                    ++comp_offset;
+                }
+            }
+            FE_LOG_INFO(sample.str());
+        }
     }
     return map;
 #endif // FE_HAS_MPI
 }
 
-[[nodiscard]] bool numberingInterleavesComponents(const dofs::DofDistributionOptions& dof_options)
+[[nodiscard]] bool fieldHandlerGroupsComponentsByPoint(const dofs::DofDistributionOptions& dof_options)
 {
-    // The monolithic DofMap is assembled by offsetting each field handler's
-    // numbering. Spatial renumbering changes the ordering of those DOFs, but
-    // it does not convert component-wise block numbering into node-interleaved
-    // numbering. Only the explicit Interleaved strategy changes the component
-    // layout.
-    return dof_options.numbering == dofs::DofNumberingStrategy::Interleaved;
+    // The monolithic DofMap is assembled by offsetting each finalized field
+    // DofHandler. FieldDofMap must therefore describe the field handler's actual
+    // numbering, not just the requested high-level numbering strategy.
+    //
+    // Spatial renumbering sorts all component DOFs by their physical coordinate.
+    // Component-wise H1/ProductSpace fields assign the same coordinate to each
+    // component of a scalar DOF, so the stable (curve, old-dof) ordering groups
+    // components adjacent to each other: [u0,v0], [u1,v1], ...
+    switch (dof_options.numbering) {
+        case dofs::DofNumberingStrategy::Interleaved:
+        case dofs::DofNumberingStrategy::Morton:
+        case dofs::DofNumberingStrategy::Hilbert:
+            return true;
+        case dofs::DofNumberingStrategy::Sequential: {
+            bool applies_default_spatial =
+                dof_options.enable_spatial_locality_ordering;
+            if (dof_options.world_size > 1 &&
+                (dof_options.global_numbering != dofs::GlobalNumberingMode::OwnerContiguous ||
+                 dof_options.reproducible_across_communicators)) {
+                applies_default_spatial = false;
+            }
+            return applies_default_spatial;
+        }
+        case dofs::DofNumberingStrategy::Block:
+        case dofs::DofNumberingStrategy::Hierarchical:
+        case dofs::DofNumberingStrategy::CuthillMcKee:
+            return false;
+    }
+    return false;
 }
 
 [[nodiscard]] dofs::FieldLayout fieldLayoutForSystem(std::size_t n_fields,
                                                      const dofs::DofDistributionOptions& dof_options)
 {
-    const bool interleaved = numberingInterleavesComponents(dof_options);
+    const bool interleaved = fieldHandlerGroupsComponentsByPoint(dof_options);
     if (n_fields > 1u) {
         return interleaved ? dofs::FieldLayout::FieldBlock : dofs::FieldLayout::Block;
     }
@@ -2438,8 +2571,9 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     DistSparsityMode dist_mode = DistSparsityMode::None;
     sparsity::IndexRange owned_range{};
     // Backend DOF permutation (FSILS overlap) is needed in MPI even when FE owned DOFs are already
-    // owner-contiguous. Keep the distributed sparsity in Natural indexing when we can, but still
-    // provide a node-interleaved backend mapping.
+    // owner-contiguous. When assembly uses backend row ownership, the distributed sparsity must use
+    // that same backend row ownership/indexing; otherwise the symbolic graph and numeric assembly
+    // route rows through different owners.
     std::optional<NodalInterleavedDofMap> backend_map{};
     std::optional<NodalInterleavedDofMap> nodal_map{};
 
@@ -2452,7 +2586,11 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 #endif
 
     const auto owned_iv_opt = partition.locallyOwned().contiguousRange();
-    if (mpi_parallel && owned_iv_opt.has_value()) {
+    if (mpi_parallel && backend_map.has_value() && opts.use_backend_row_ownership_for_assembly) {
+        dist_mode = DistSparsityMode::NodalInterleaved;
+        owned_range = backend_map->owned_range;
+        nodal_map = std::move(backend_map);
+    } else if (mpi_parallel && owned_iv_opt.has_value()) {
         dist_mode = DistSparsityMode::ContiguousRange;
         owned_range = sparsity::IndexRange{owned_iv_opt->begin, owned_iv_opt->end};
     } else if (mpi_parallel && backend_map.has_value()) {
@@ -2477,6 +2615,124 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                                              ? sparsity::DistributedSparsityPattern::DofIndexing::NodalInterleaved
                                              : sparsity::DistributedSparsityPattern::DofIndexing::Natural);
         }
+
+#if FE_HAS_MPI
+        struct RemotePatternPair {
+            GlobalIndex row{-1};
+            GlobalIndex col{-1};
+
+            bool operator<(const RemotePatternPair& other) const noexcept
+            {
+                if (row != other.row) {
+                    return row < other.row;
+                }
+                return col < other.col;
+            }
+        };
+
+        int pattern_rank = opts.dof_options.my_rank;
+        int pattern_size = opts.dof_options.world_size;
+        bool remote_pattern_exchange_enabled = false;
+        std::vector<std::vector<RemotePatternPair>> remote_pattern_by_rank;
+        if (dist_pattern) {
+            int mpi_initialized_pattern = 0;
+            MPI_Initialized(&mpi_initialized_pattern);
+            if (mpi_initialized_pattern) {
+                MPI_Comm_rank(opts.dof_options.mpi_comm, &pattern_rank);
+                MPI_Comm_size(opts.dof_options.mpi_comm, &pattern_size);
+                remote_pattern_exchange_enabled = pattern_size > 1;
+                if (remote_pattern_exchange_enabled) {
+                    remote_pattern_by_rank.resize(static_cast<std::size_t>(pattern_size));
+                }
+            }
+        }
+
+        auto queue_remote_pattern_entry = [&](int owner_rank, GlobalIndex row, GlobalIndex col) {
+            if (!remote_pattern_exchange_enabled || !dist_pattern) {
+                return;
+            }
+            if (row < 0 || row >= n_total_dofs || col < 0 || col >= n_total_dofs) {
+                return;
+            }
+            if (owner_rank < 0 || owner_rank >= pattern_size) {
+                return;
+            }
+            if (owner_rank == pattern_rank) {
+                if (owned_range.contains(row)) {
+                    dist_pattern->addEntry(row, col);
+                }
+                return;
+            }
+            remote_pattern_by_rank[static_cast<std::size_t>(owner_rank)].push_back({row, col});
+        };
+
+        auto flush_remote_pattern_entries = [&]() {
+            if (!remote_pattern_exchange_enabled || !dist_pattern) {
+                return;
+            }
+
+            for (auto& entries : remote_pattern_by_rank) {
+                std::sort(entries.begin(), entries.end());
+                entries.erase(std::unique(entries.begin(),
+                                          entries.end(),
+                                          [](const RemotePatternPair& a, const RemotePatternPair& b) {
+                                              return a.row == b.row && a.col == b.col;
+                                          }),
+                              entries.end());
+            }
+
+            std::vector<int> send_counts(static_cast<std::size_t>(pattern_size), 0);
+            std::vector<int> recv_counts(static_cast<std::size_t>(pattern_size), 0);
+            std::vector<int> send_displs(static_cast<std::size_t>(pattern_size), 0);
+            std::vector<int> recv_displs(static_cast<std::size_t>(pattern_size), 0);
+
+            int total_send = 0;
+            for (int r = 0; r < pattern_size; ++r) {
+                send_displs[static_cast<std::size_t>(r)] = total_send;
+                const auto n_values =
+                    static_cast<int>(remote_pattern_by_rank[static_cast<std::size_t>(r)].size() * 2u);
+                send_counts[static_cast<std::size_t>(r)] = n_values;
+                total_send += n_values;
+            }
+
+            std::vector<GlobalIndex> send_data(static_cast<std::size_t>(total_send));
+            for (int r = 0; r < pattern_size; ++r) {
+                auto offset = send_displs[static_cast<std::size_t>(r)];
+                for (const auto& entry : remote_pattern_by_rank[static_cast<std::size_t>(r)]) {
+                    send_data[static_cast<std::size_t>(offset++)] = entry.row;
+                    send_data[static_cast<std::size_t>(offset++)] = entry.col;
+                }
+            }
+
+            MPI_Alltoall(send_counts.data(), 1, MPI_INT,
+                         recv_counts.data(), 1, MPI_INT,
+                         opts.dof_options.mpi_comm);
+
+            int total_recv = 0;
+            for (int r = 0; r < pattern_size; ++r) {
+                recv_displs[static_cast<std::size_t>(r)] = total_recv;
+                total_recv += recv_counts[static_cast<std::size_t>(r)];
+            }
+
+            std::vector<GlobalIndex> recv_data(static_cast<std::size_t>(total_recv));
+            MPI_Alltoallv(send_data.data(), send_counts.data(), send_displs.data(), MPI_INT64_T,
+                          recv_data.data(), recv_counts.data(), recv_displs.data(), MPI_INT64_T,
+                          opts.dof_options.mpi_comm);
+
+            FE_THROW_IF((recv_data.size() % 2u) != 0u, InvalidStateException,
+                        "FESystem::setup: received malformed remote distributed sparsity payload");
+            for (std::size_t i = 0; i < recv_data.size(); i += 2u) {
+                const GlobalIndex row = recv_data[i];
+                const GlobalIndex col = recv_data[i + 1u];
+                if (owned_range.contains(row) && col >= 0 && col < n_total_dofs) {
+                    dist_pattern->addEntry(row, col);
+                }
+            }
+        };
+#else
+        auto queue_remote_pattern_entry = [](int, GlobalIndex, GlobalIndex) {};
+        auto flush_remote_pattern_entries = []() {};
+#endif
 
 		        const auto& def = operator_registry_.get(tag);
 
@@ -2604,6 +2860,11 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 			                        continue;
 			                    }
 
+			                    const int owner = dof_handler_.getDofMap().getDofOwner(global_row);
+			                    for (const auto global_col : cols) {
+			                        queue_remote_pattern_entry(owner, global_row, global_col);
+			                    }
+
 			                    if (!ghost_set.contains(global_row)) {
 			                        continue;
 			                    }
@@ -2640,6 +2901,15 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 			                        dist_pattern->addEntry(global_row_fs, global_col_fs);
 			                    }
 			                    continue;
+			                }
+
+			                const int owner = nodal.ownerRankForDof(global_row_fs);
+			                for (const auto global_col_fe : cols) {
+			                    const auto global_col_fs = nodal.mapFeToFs(global_col_fe);
+			                    if (global_col_fs == INVALID_GLOBAL_INDEX) {
+			                        continue;
+			                    }
+			                    queue_remote_pattern_entry(owner, global_row_fs, global_col_fs);
 			                }
 
 			                const int node = static_cast<int>(global_row_fs / dof);
@@ -2908,6 +3178,8 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 	            }
         }
 
+        flush_remote_pattern_entries();
+
 		        if (opts.sparsity_options.ensure_diagonal) {
 		            pattern->ensureDiagonal();
 		        }
@@ -2974,9 +3246,49 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 		                const auto& nodal = *nodal_map;
 		                const int dof = nodal.dof_per_node;
 
+		                std::vector<int> ghost_nodes_closed = nodal.ghost_nodes;
+		                for (const auto col_fs : dist_pattern->getGhostColMap()) {
+		                    if (col_fs < 0 || col_fs >= n_total_dofs) {
+		                        continue;
+		                    }
+		                    const int node = static_cast<int>(col_fs / dof);
+		                    if (node < 0 || static_cast<GlobalIndex>(node) >= nodal.n_nodes) {
+		                        continue;
+		                    }
+		                    const GlobalIndex first_dof =
+		                        static_cast<GlobalIndex>(node) * static_cast<GlobalIndex>(dof);
+		                    if (owned_range.contains(first_dof)) {
+		                        continue;
+		                    }
+		                    ghost_nodes_closed.push_back(node);
+		                }
+		                std::sort(ghost_nodes_closed.begin(), ghost_nodes_closed.end());
+		                ghost_nodes_closed.erase(std::unique(ghost_nodes_closed.begin(), ghost_nodes_closed.end()),
+		                                         ghost_nodes_closed.end());
+
+		                std::vector<unsigned char> ghost_node_in_overlap(
+		                    static_cast<std::size_t>(std::max<GlobalIndex>(0, nodal.n_nodes)), 0u);
+		                for (const int node : ghost_nodes_closed) {
+		                    if (node >= 0 && static_cast<GlobalIndex>(node) < nodal.n_nodes) {
+		                        ghost_node_in_overlap[static_cast<std::size_t>(node)] = 1u;
+		                    }
+		                }
+
+		                auto col_is_in_overlap = [&](GlobalIndex col_fs) {
+		                    if (col_fs < 0 || col_fs >= n_total_dofs) {
+		                        return false;
+		                    }
+		                    const auto node = static_cast<GlobalIndex>(col_fs / dof);
+		                    if (node < 0 || static_cast<std::size_t>(node) >= ghost_node_in_overlap.size()) {
+		                        return false;
+		                    }
+		                    return nodal.isRelevantDof(col_fs) ||
+		                           ghost_node_in_overlap[static_cast<std::size_t>(node)] != 0u;
+		                };
+
 		                std::vector<GlobalIndex> ghost_row_map;
-		                ghost_row_map.reserve(nodal.ghost_nodes.size() * static_cast<std::size_t>(std::max(1, dof)));
-		                for (const int node : nodal.ghost_nodes) {
+		                ghost_row_map.reserve(ghost_nodes_closed.size() * static_cast<std::size_t>(std::max(1, dof)));
+		                for (const int node : ghost_nodes_closed) {
 		                    for (int c = 0; c < dof; ++c) {
 		                        ghost_row_map.push_back(static_cast<GlobalIndex>(node) * dof + c);
 		                    }
@@ -2992,7 +3304,8 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 			                        std::vector<GlobalIndex> cols_vec;
 			                        cols_vec.reserve(32);
 
-			                        if (full_pattern != nullptr && row_fs >= 0 && row_fs < n_total_dofs) {
+			                        if (full_pattern != nullptr && row_fs >= 0 && row_fs < n_total_dofs &&
+			                            static_cast<std::size_t>(row_fs) < nodal.fs_to_fe.size()) {
 			                            const auto row_fe = nodal.fs_to_fe[static_cast<std::size_t>(row_fs)];
 			                            if (row_fe >= 0 && row_fe < n_total_dofs) {
 			                                const auto cols_fe = full_pattern->getRowSpan(row_fe);
@@ -3001,7 +3314,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 			                                    if (col_fs == INVALID_GLOBAL_INDEX) {
 			                                        continue;
 			                                    }
-			                                    if (nodal.isRelevantDof(col_fs)) {
+			                                    if (col_is_in_overlap(col_fs)) {
 			                                        cols_vec.push_back(col_fs);
 			                                    }
 			                                }
@@ -3013,7 +3326,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 			                        cols_vec.erase(std::remove_if(cols_vec.begin(),
 			                                                     cols_vec.end(),
 			                                                     [&](GlobalIndex col) {
-			                                                         return (col < 0) || (col >= n_total_dofs) || !nodal.isRelevantDof(col);
+			                                                         return !col_is_in_overlap(col);
 			                                                     }),
 			                                       cols_vec.end());
 
@@ -3098,6 +3411,15 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     if (nodal_map.has_value() || backend_map.has_value()) {
         auto& map = nodal_map.has_value() ? *nodal_map : *backend_map;
         auto perm = std::make_shared<backends::DofPermutation>();
+        perm->owner_rank.assign(map.fe_to_fs.size(), -1);
+        if (map.dof_per_node > 0) {
+            for (GlobalIndex backend_dof = 0;
+                 backend_dof < static_cast<GlobalIndex>(perm->owner_rank.size());
+                 ++backend_dof) {
+                perm->owner_rank[static_cast<std::size_t>(backend_dof)] =
+                    map.ownerRankForDof(backend_dof);
+            }
+        }
         perm->forward = std::move(map.fe_to_fs);
         perm->inverse = std::move(map.fs_to_fe);
         dof_permutation_ = std::move(perm);
@@ -3419,6 +3741,28 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     if (const auto ghost_policy_override = assemblyGhostPolicyOverrideFromEnv();
         ghost_policy_override.has_value()) {
         assembly_options.ghost_policy = *ghost_policy_override;
+    }
+    if (opts.use_backend_row_ownership_for_assembly &&
+        dof_permutation_ != nullptr &&
+        !dof_permutation_->empty() &&
+        !dof_permutation_->owner_rank.empty()) {
+        auto perm = dof_permutation_;
+        const auto* default_owner_map = &dof_handler_.getDofMap();
+        assembly_options.row_owner_rank =
+            [perm = std::move(perm), default_owner_map](GlobalIndex fe_dof) -> int {
+                if (fe_dof < 0 ||
+                    static_cast<std::size_t>(fe_dof) >= perm->forward.size()) {
+                    return default_owner_map ? default_owner_map->getDofOwner(fe_dof) : 0;
+                }
+                const GlobalIndex backend_dof = perm->forward[static_cast<std::size_t>(fe_dof)];
+                if (backend_dof < 0 ||
+                    static_cast<std::size_t>(backend_dof) >= perm->owner_rank.size()) {
+                    return default_owner_map ? default_owner_map->getDofOwner(fe_dof) : 0;
+                }
+                const int owner = perm->owner_rank[static_cast<std::size_t>(backend_dof)];
+                return owner >= 0 ? owner
+                                  : (default_owner_map ? default_owner_map->getDofOwner(fe_dof) : 0);
+            };
     }
 
     assembly::SystemCharacteristics sys_chars{};

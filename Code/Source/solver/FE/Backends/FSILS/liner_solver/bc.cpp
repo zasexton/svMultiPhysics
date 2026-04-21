@@ -107,45 +107,9 @@ void fsils_bc_create(FSILS_lhsType& lhs, int faIn, int nNo, int dof, BcType BC_t
 
     if (Ac > 1) {
       lhs.face[faIn].sharedFlag = true;
-      Array<double> v(dof,lhs.nNo);
-      v = 0.0;
-
-      for (int a = 0; a < nNo; a++) {
-        int Ac = lhs.face[faIn].glob(a);
-        for (int i = 0; i < dof; i++) {
-          v(i,Ac) = lhs.face[faIn].val(i,a);
-        }
-      }
-
-      fsils_commuv(lhs, dof, v); 
-
-      for (int a = 0; a < nNo; a++) {
-        int Ac = lhs.face[faIn].glob(a);
-        for (int i = 0; i < dof; i++) {
-          lhs.face[faIn].val(i,a) = v(i,Ac);
-        }
-      }
-
+      fsils_reduce_shared_face_values_owned_row(lhs, dof, lhs.face[faIn].glob, lhs.face[faIn].val);
       if (BC_type == BcType::BC_TYPE_Dir) {
-        Array<double> counts(dof, lhs.nNo);
-        counts = 0.0;
-        for (int a = 0; a < nNo; a++) {
-          int Ac = lhs.face[faIn].glob(a);
-          for (int i = 0; i < dof; i++) {
-            counts(i, Ac) = 1.0;
-          }
-        }
-
-        fsils_commuv(lhs, dof, counts);
-
-        constexpr double kMaskTol = 1e-12;
-        for (int a = 0; a < nNo; a++) {
-          int Ac = lhs.face[faIn].glob(a);
-          for (int i = 0; i < dof; i++) {
-            lhs.face[faIn].val(i,a) =
-                (lhs.face[faIn].val(i,a) >= counts(i, Ac) - kMaskTol) ? 1.0 : 0.0;
-          }
-        }
+        fsils_apply_shared_dirichlet_face_mask(lhs, dof, lhs.face[faIn].glob, lhs.face[faIn].val);
       }
     }
   }
@@ -207,46 +171,9 @@ void fsils_bc_update(FSILS_lhsType& lhs, int faIn, int nNo, int dof, const Array
 
   // Communicate update among procs
   if (lhs.face[faIn].sharedFlag){
-    Array<double> v(dof,lhs.nNo);
-    v = 0.0;
-
-    for (int a = 0; a < nNo; a++) {
-      int Ac = lhs.face[faIn].glob(a);
-      for (int i = 0; i < dof; i++) {
-        v(i,Ac) = lhs.face[faIn].val(i,a);
-      }
-    }
-
-    fsils_commuv(lhs, dof, v); 
-
-    for (int a = 0; a < nNo; a++) {
-      int Ac = lhs.face[faIn].glob(a);
-      for (int i = 0; i < dof; i++) {
-        lhs.face[faIn].val(i,a) = v(i,Ac);
-      }
-    }
-
+    fsils_reduce_shared_face_values_owned_row(lhs, dof, lhs.face[faIn].glob, lhs.face[faIn].val);
     if (lhs.face[faIn].bGrp == BcType::BC_TYPE_Dir) {
-      Array<double> counts(dof,lhs.nNo);
-      counts = 0.0;
-
-      for (int a = 0; a < nNo; a++) {
-        int Ac = lhs.face[faIn].glob(a);
-        for (int i = 0; i < dof; i++) {
-          counts(i,Ac) = 1.0;
-        }
-      }
-
-      fsils_commuv(lhs, dof, counts);
-
-      constexpr double kMaskTol = 1e-12;
-      for (int a = 0; a < nNo; a++) {
-        int Ac = lhs.face[faIn].glob(a);
-        for (int i = 0; i < dof; i++) {
-          lhs.face[faIn].val(i,a) =
-              (lhs.face[faIn].val(i,a) >= counts(i,Ac) - kMaskTol) ? 1.0 : 0.0;
-        }
-      }
+      fsils_apply_shared_dirichlet_face_mask(lhs, dof, lhs.face[faIn].glob, lhs.face[faIn].val);
     }
   }
 

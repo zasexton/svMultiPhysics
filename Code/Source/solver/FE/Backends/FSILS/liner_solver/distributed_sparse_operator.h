@@ -15,13 +15,13 @@ enum class VectorState {
 
 struct UnaryOperatorContract {
   VectorState input_state{VectorState::ghost_synced};
-  VectorState output_state{VectorState::ghost_synced};
+  VectorState output_state{VectorState::owned_only};
 };
 
 struct FusedOperatorContract {
   VectorState input_state{VectorState::ghost_synced};
-  VectorState first_output_state{VectorState::ghost_synced};
-  VectorState second_output_state{VectorState::ghost_synced};
+  VectorState first_output_state{VectorState::owned_only};
+  VectorState second_output_state{VectorState::owned_only};
 };
 
 struct ScalarInput {
@@ -77,21 +77,10 @@ struct BlockOutput {
   return scalar_input(values, VectorState::ghost_synced);
 }
 
-[[nodiscard]] inline ScalarOutput ghost_synced_output(Vector<double>& values) noexcept
-{
-  return scalar_output(values, VectorState::ghost_synced);
-}
-
 [[nodiscard]] inline BlockInput ghost_synced_input(int components,
                                                    const Array<double>& values) noexcept
 {
   return block_input(components, values, VectorState::ghost_synced);
-}
-
-[[nodiscard]] inline BlockOutput ghost_synced_output(int components,
-                                                     Array<double>& values) noexcept
-{
-  return block_output(components, values, VectorState::ghost_synced);
 }
 
 [[nodiscard]] inline ScalarInput owned_only_input(const Vector<double>& values) noexcept

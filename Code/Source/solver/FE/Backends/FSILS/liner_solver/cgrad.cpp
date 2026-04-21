@@ -110,12 +110,12 @@ void schur(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarConstra
 
     errO = err;
 
-    halo.sync_scalar(P);
+    halo.sync_owned_to_ghost_scalar(P);
 
     // GP = G * P
     G.apply(
         dso::ghost_synced_input(P),
-        dso::ghost_synced_output(dof, GP));
+        dso::owned_only_output(dof, GP));
 
     for (auto& face : lhs.face) {
       if (face.coupledFlag) {
@@ -125,17 +125,17 @@ void schur(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarConstra
       }
     }
 
-    halo.sync_vector(dof, GP);
+    halo.sync_owned_to_ghost_vector(dof, GP);
 
     // DGP = K * GP
     D.apply(
         dso::ghost_synced_input(dof, GP),
-        dso::ghost_synced_output(DGP));
+        dso::owned_only_output(DGP));
 
     // SP = L * P
     L.apply(
         dso::ghost_synced_input(P),
-        dso::ghost_synced_output(SP));
+        dso::owned_only_output(SP));
 
     // SP = SP - DGP
     omp_la::omp_sum_s(nNo, -1.0, SP, DGP);
@@ -261,11 +261,11 @@ void cgrad_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
 
     errO = err;
 
-    halo.sync_vector(dof, P);
+    halo.sync_owned_to_ghost_vector(dof, P);
 
     A.apply(
         dso::ghost_synced_input(dof, P),
-        dso::ghost_synced_output(dof, KP));
+        dso::owned_only_output(dof, KP));
 
     double alpha = errO / dot::fsils_dot_v(dof, mynNo, lhs.commu, P, KP);
     omp_la::omp_sum_v(dof, nNo, alpha, X, P);
@@ -375,11 +375,11 @@ void cgrad_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
 
     errO = err;
 
-    halo.sync_scalar(P);
+    halo.sync_owned_to_ghost_scalar(P);
 
     A.apply(
         dso::ghost_synced_input(P),
-        dso::ghost_synced_output(KP));
+        dso::owned_only_output(KP));
 
     double alpha = errO / dot::fsils_dot_s(mynNo, lhs.commu, P, KP);
     omp_la::omp_sum_s(nNo, alpha, X, P);

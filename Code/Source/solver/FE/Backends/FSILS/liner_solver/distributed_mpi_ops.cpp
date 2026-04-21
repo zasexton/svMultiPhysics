@@ -88,60 +88,40 @@ HaloExchange::HaloExchange(const FSILS_lhsType& lhs) noexcept
 {
 }
 
-bool HaloExchange::has_overlap() const noexcept
+bool HaloExchange::has_owned_halo() const noexcept
 {
-  return lhs_ != nullptr &&
-         lhs_->commu.nTasks > 1 &&
-         lhs_->nReq > 0 &&
-         !lhs_->cS.empty();
+  if (lhs_ == nullptr || lhs_->commu.nTasks <= 1 || !lhs_->owned_row_operator) {
+    return false;
+  }
+  if (lhs_->owned_halo_send_nodes.size() != lhs_->owned_halo_neighbor_ranks.size() ||
+      lhs_->owned_halo_recv_nodes.size() != lhs_->owned_halo_neighbor_ranks.size()) {
+    return false;
+  }
+  return !lhs_->owned_halo_neighbor_ranks.empty();
 }
 
-void HaloExchange::sync_scalar(Vector<double>& values, bool skip_overlap_sum) const
+void HaloExchange::sync_owned_to_ghost_scalar(Vector<double>& values, bool skip_sync) const
 {
-  if (skip_overlap_sum || !has_overlap()) {
+  if (skip_sync || lhs_ == nullptr || lhs_->commu.nTasks <= 1) {
     return;
   }
-  fsils_syncs(*lhs_, values);
+  fsils_syncs_owned_to_ghost(*lhs_, values);
 }
 
-void HaloExchange::sync_vector(int dof, Array<double>& values, bool skip_overlap_sum) const
+void HaloExchange::sync_owned_to_ghost_vector(int dof, Array<double>& values, bool skip_sync) const
 {
-  if (skip_overlap_sum || !has_overlap()) {
+  if (skip_sync || lhs_ == nullptr || lhs_->commu.nTasks <= 1) {
     return;
   }
-  fsils_syncv(*lhs_, dof, values);
+  fsils_syncv_owned_to_ghost(*lhs_, dof, values);
 }
 
-void HaloExchange::begin_scalar(Vector<double>& values) const
+void HaloExchange::reverse_scatter_vector_contributions(int dof, Array<double>& values) const
 {
-  if (!has_overlap()) {
+  if (lhs_ == nullptr || lhs_->commu.nTasks <= 1) {
     return;
   }
-  fsils_commus_begin(*lhs_, values);
-}
-
-void HaloExchange::end_scalar(Vector<double>& values) const
-{
-  if (!has_overlap()) {
-    return;
-  }
-  fsils_commus_end(*lhs_, values);
-}
-
-void HaloExchange::begin_vector(int dof, Array<double>& values) const
-{
-  if (!has_overlap()) {
-    return;
-  }
-  fsils_commuv_begin(*lhs_, dof, values);
-}
-
-void HaloExchange::end_vector(int dof, Array<double>& values) const
-{
-  if (!has_overlap()) {
-    return;
-  }
-  fsils_commuv_end(*lhs_, dof, values);
+  fsils_reverse_scatterv_contribution_buffer(*lhs_, dof, values);
 }
 
 }  // namespace fe_fsi_linear_solver

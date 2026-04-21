@@ -203,6 +203,11 @@ public:
     void setMyRank(int my_rank) noexcept { my_rank_ = my_rank; }
 
     /**
+     * @brief Local MPI rank used by isOwnedDof()
+     */
+    [[nodiscard]] int myRank() const noexcept { return my_rank_; }
+
+    /**
      * @brief Transition to immutable state
      *
      * After finalization:

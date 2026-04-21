@@ -9,9 +9,14 @@
 
 #include "Assembly/GlobalSystemView.h"
 #include "Backends/FSILS/FsilsFactory.h"
+#include "Backends/FSILS/FsilsMatrix.h"
+#include "Backends/FSILS/liner_solver/fsils_api.hpp"
 #include "Backends/Utils/BackendOptions.h"
 #include "Core/FEException.h"
 #include "Sparsity/DistributedSparsityPattern.h"
+
+#include "Array.h"
+#include "Vector.h"
 
 #include <mpi.h>
 #include <cmath>
@@ -135,6 +140,95 @@ TEST(FsilsBackendMPI, SolveCGOverlap1DChain)
     if (rank == 0) {
         EXPECT_NEAR(gathered[0], gathered[1], 1e-12);
     }
+}
+
+TEST(FsilsBackendMPI, SharedFaceReductionUsesOwnedRowHalo)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 2;
+    constexpr GlobalIndex n_nodes = 2;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+
+    using svmp::FE::sparsity::DistributedSparsityPattern;
+    using svmp::FE::sparsity::IndexRange;
+
+    // rank0 owns node 0 and keeps node 1 as a ghost face node; rank1 owns node 1.
+    const IndexRange owned = (rank == 0) ? IndexRange{0, 2} : IndexRange{2, 4};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+
+    if (rank == 0) {
+        pattern.addEntry(0, 0);
+        pattern.addEntry(0, 2);
+        pattern.addEntry(1, 1);
+        pattern.addEntry(1, 3);
+    } else {
+        pattern.addEntry(2, 2);
+        pattern.addEntry(3, 3);
+    }
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> ghost_rows{2, 3};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 2, 4};
+        std::vector<GlobalIndex> ghost_cols{0, 2, 1, 3};
+        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
+    }
+
+    FsilsFactory factory(/*dof_per_node=*/dof);
+    auto A = factory.createMatrix(pattern);
+    const auto* fsils = dynamic_cast<const FsilsMatrix*>(A.get());
+    ASSERT_NE(fsils, nullptr);
+
+    const auto shared_ptr = fsils->shared();
+    ASSERT_NE(shared_ptr, nullptr);
+    const auto& shared = *shared_ptr;
+    ASSERT_TRUE(shared.lhs.owned_row_operator);
+    ASSERT_FALSE(shared.lhs.owned_halo_neighbor_ranks.empty());
+
+    const int internal_face_node = shared.globalNodeToInternal(1);
+    ASSERT_GE(internal_face_node, 0);
+    ASSERT_LT(internal_face_node, shared.lhs.nNo);
+
+    Vector<int> face_nodes(1);
+    face_nodes(0) = internal_face_node;
+    Array<double> face_values(dof, 1);
+    face_values(0, 0) = (rank == 0) ? 3.0 : 4.5;
+    face_values(1, 0) = (rank == 0) ? -1.0 : 2.25;
+
+    fe_fsi_linear_solver::fsils_reduce_shared_face_values_owned_row(
+        shared.lhs, dof, face_nodes, face_values);
+
+    EXPECT_NEAR(face_values(0, 0), 7.5, 1e-12);
+    EXPECT_NEAR(face_values(1, 0), 1.25, 1e-12);
+
+    Array<double> face_values_m(dof, 1);
+    face_values_m(0, 0) = (rank == 0) ? 0.25 : 0.75;
+    face_values_m(1, 0) = (rank == 0) ? 10.0 : -3.5;
+    fe_fsi_linear_solver::fsils_reduce_shared_face_values_owned_row(
+        shared.lhs, dof, face_nodes, face_values_m);
+
+    EXPECT_NEAR(face_values_m(0, 0), 1.0, 1e-12);
+    EXPECT_NEAR(face_values_m(1, 0), 6.5, 1e-12);
+
+    Array<double> dirichlet_mask(dof, 1);
+    dirichlet_mask(0, 0) = 1.0;
+    dirichlet_mask(1, 0) = (rank == 0) ? 1.0 : 0.0;
+    fe_fsi_linear_solver::fsils_reduce_shared_face_values_owned_row(
+        shared.lhs, dof, face_nodes, dirichlet_mask);
+    fe_fsi_linear_solver::fsils_apply_shared_dirichlet_face_mask(
+        shared.lhs, dof, face_nodes, dirichlet_mask);
+
+    EXPECT_NEAR(dirichlet_mask(0, 0), 1.0, 1e-12);
+    EXPECT_NEAR(dirichlet_mask(1, 0), 0.0, 1e-12);
 }
 
 } // namespace svmp::FE::backends

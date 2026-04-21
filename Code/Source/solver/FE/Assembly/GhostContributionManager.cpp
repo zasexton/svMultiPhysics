@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <numeric>
 
 namespace svmp {
@@ -97,7 +99,13 @@ void sortGhostMatrixEntries(std::vector<GhostContribution>& entries,
         return;
     }
 
-    // Stable radix by secondary key first, then primary.
+    // Stable radix by lowest-priority keys first, then primary keys.
+    radixSortByUint64(entries, scratch, [](const GhostContribution& e) {
+        return static_cast<std::uint64_t>(static_cast<std::uint8_t>(e.mode));
+    });
+    radixSortByUint64(entries, scratch, [](const GhostContribution& e) {
+        return static_cast<std::uint64_t>(static_cast<std::uint8_t>(e.op));
+    });
     radixSortByUint64(entries, scratch, [](const GhostContribution& e) { return sortableKey(e.global_col); });
     radixSortByUint64(entries, scratch, [](const GhostContribution& e) { return sortableKey(e.global_row); });
 }
@@ -110,7 +118,35 @@ void sortGhostVectorEntries(std::vector<GhostVectorContribution>& entries,
         return;
     }
 
+    radixSortByUint64(entries, scratch, [](const GhostVectorContribution& e) {
+        return static_cast<std::uint64_t>(static_cast<std::uint8_t>(e.mode));
+    });
+    radixSortByUint64(entries, scratch, [](const GhostVectorContribution& e) {
+        return static_cast<std::uint64_t>(static_cast<std::uint8_t>(e.op));
+    });
     radixSortByUint64(entries, scratch, [](const GhostVectorContribution& e) { return sortableKey(e.global_row); });
+}
+
+[[nodiscard]] GlobalIndex traced_ghost_row_dof() noexcept
+{
+    static const GlobalIndex traced = []() noexcept {
+        const char* env = std::getenv("SVMP_GHOST_TRACE_ROW_DOF");
+        if (env == nullptr || *env == '\0') {
+            return INVALID_GLOBAL_INDEX;
+        }
+        char* end = nullptr;
+        const auto value = std::strtoll(env, &end, 10);
+        if (end == env) {
+            return INVALID_GLOBAL_INDEX;
+        }
+        return static_cast<GlobalIndex>(value);
+    }();
+    return traced;
+}
+
+[[nodiscard]] bool should_trace_ghost_row(GlobalIndex row) noexcept
+{
+    return row == traced_ghost_row_dof();
 }
 
 } // namespace
@@ -154,6 +190,12 @@ void GhostContributionManager::setDofMap(const dofs::DofMap& dof_map)
 void GhostContributionManager::setGhostDofManager(const dofs::GhostDofManager& ghost_manager)
 {
     ghost_dof_manager_ = &ghost_manager;
+    initialized_ = false;
+}
+
+void GhostContributionManager::setExplicitRowOwner(std::function<int(GlobalIndex)> owner_rank)
+{
+    explicit_row_owner_ = std::move(owner_rank);
     initialized_ = false;
 }
 
@@ -206,13 +248,39 @@ void GhostContributionManager::buildCommunicationGraph()
     rank_to_neighbor_idx_.clear();
     ghost_owner_rank_.clear();
 
+    if (explicit_row_owner_) {
+        FE_CHECK_NOT_NULL(dof_map_, "GhostContributionManager::buildCommunicationGraph: dof_map");
+        const GlobalIndex n_cells = dof_map_->getNumCells();
+        for (GlobalIndex cell = 0; cell < n_cells; ++cell) {
+            auto cell_dofs = dof_map_->getCellDofs(cell);
+            for (const GlobalIndex local_dof : cell_dofs) {
+                const GlobalIndex system_dof = local_dof + ownership_offset_;
+                const int owner = explicitOwnerRank(system_dof);
+                if (owner < 0 || owner == my_rank_) {
+                    continue;
+                }
+                ghost_owner_rank_[local_dof] = owner;
+                if (rank_to_neighbor_idx_.find(owner) == rank_to_neighbor_idx_.end()) {
+                    rank_to_neighbor_idx_[owner] = static_cast<int>(neighbor_ranks_.size());
+                    neighbor_ranks_.push_back(owner);
+                }
+            }
+        }
+    } else {
     // Determine ghost DOFs and their owners.
     //
     // Prefer the GhostDofManager when it matches the currently configured DOF map.
     // In multi-field/block workflows, callers may keep a system-level GhostDofManager
     // while switching the row DofMap; in that case the GhostDofManager's indices may
     // be out of range for the row DofMap and we must fall back to the DofMap itself.
-    bool can_use_ghost_manager = (ghost_dof_manager_ != nullptr);
+    bool can_use_ghost_manager = false;
+    if (ghost_dof_manager_ != nullptr) {
+        const auto& ghost_dofs = ghost_dof_manager_->getGhostDofs();
+        // An empty GhostDofManager is not authoritative for reverse-scatter.
+        // Some partitioned FE layouts still expose off-owner rows through the
+        // cell DOF map, so fall back to scanning the DofMap in that case.
+        can_use_ghost_manager = !ghost_dofs.empty();
+    }
     if (can_use_ghost_manager) {
         FE_CHECK_NOT_NULL(dof_map_, "GhostContributionManager::buildCommunicationGraph: dof_map");
         const auto n = dof_map_->getNumDofs();
@@ -262,6 +330,7 @@ void GhostContributionManager::buildCommunicationGraph()
                 }
             }
         }
+    }
     }
 
 #if FE_HAS_MPI
@@ -314,9 +383,21 @@ void GhostContributionManager::buildCommunicationGraph()
 bool GhostContributionManager::addMatrixContribution(
     GlobalIndex global_row,
     GlobalIndex global_col,
-    Real value)
+    Real value,
+    AddMode mode)
 {
     if (isOwned(global_row)) {
+        if (should_trace_ghost_row(global_row)) {
+            std::fprintf(stderr,
+                         "[R%d] GhostContribution row=%lld col=%lld value=%.17g "
+                         "mode=%d owner=%d path=owned_direct\n",
+                         my_rank_,
+                         static_cast<long long>(global_row),
+                         static_cast<long long>(global_col),
+                         static_cast<double>(value),
+                         static_cast<int>(mode),
+                         my_rank_);
+        }
         return true;  // Locally owned, caller inserts directly
     }
 
@@ -329,9 +410,120 @@ bool GhostContributionManager::addMatrixContribution(
     int owner = getOwnerRank(global_row);
     int neighbor_idx = findNeighborIndex(owner);
 
+    if (should_trace_ghost_row(global_row)) {
+        std::fprintf(stderr,
+                     "[R%d] GhostContribution row=%lld col=%lld value=%.17g "
+                     "mode=%d owner=%d neighbor_idx=%d policy=%d path=%s\n",
+                     my_rank_,
+                     static_cast<long long>(global_row),
+                     static_cast<long long>(global_col),
+                     static_cast<double>(value),
+                     static_cast<int>(mode),
+                     owner,
+                     neighbor_idx,
+                     static_cast<int>(policy_),
+                     neighbor_idx >= 0 ? "buffer_send" : "drop_no_neighbor");
+    }
+
     if (neighbor_idx >= 0) {
         send_buffers_[static_cast<std::size_t>(neighbor_idx)].entries.push_back(
-            {global_row, global_col, value});
+            {global_row, global_col, value, mode, GhostMatrixOp::Entry});
+    }
+
+    return false;
+}
+
+bool GhostContributionManager::addMatrixEntryOperation(GlobalIndex global_row,
+                                                       GlobalIndex global_col,
+                                                       Real value,
+                                                       AddMode mode)
+{
+    if (isOwned(global_row)) {
+        if (should_trace_ghost_row(global_row)) {
+            std::fprintf(stderr,
+                         "[R%d] GhostMatrixOp row=%lld col=%lld value=%.17g "
+                         "mode=%d owner=%d path=local_deferred\n",
+                         my_rank_,
+                         static_cast<long long>(global_row),
+                         static_cast<long long>(global_col),
+                         static_cast<double>(value),
+                         static_cast<int>(mode),
+                         my_rank_);
+        }
+        local_matrix_ops_.push_back({global_row, global_col, value, mode, GhostMatrixOp::Entry});
+        return true;
+    }
+
+    if (policy_ == GhostPolicy::OwnedRowsOnly) {
+        return false;
+    }
+
+    int owner = getOwnerRank(global_row);
+    int neighbor_idx = findNeighborIndex(owner);
+    if (should_trace_ghost_row(global_row)) {
+        std::fprintf(stderr,
+                     "[R%d] GhostMatrixOp row=%lld col=%lld value=%.17g "
+                     "mode=%d owner=%d neighbor_idx=%d path=%s\n",
+                     my_rank_,
+                     static_cast<long long>(global_row),
+                     static_cast<long long>(global_col),
+                     static_cast<double>(value),
+                     static_cast<int>(mode),
+                     owner,
+                     neighbor_idx,
+                     neighbor_idx >= 0 ? "buffer_send" : "drop_no_neighbor");
+    }
+    if (neighbor_idx >= 0) {
+        send_buffers_[static_cast<std::size_t>(neighbor_idx)].entries.push_back(
+            {global_row, global_col, value, mode, GhostMatrixOp::Entry});
+    }
+
+    return false;
+}
+
+bool GhostContributionManager::addMatrixRowOperation(GlobalIndex global_row, bool set_diagonal)
+{
+    const GhostMatrixOp op =
+        set_diagonal ? GhostMatrixOp::ZeroRowSetDiagonal : GhostMatrixOp::ZeroRow;
+
+    if (isOwned(global_row)) {
+        local_matrix_ops_.push_back(
+            {global_row, global_row, set_diagonal ? Real(1) : Real(0), AddMode::Insert, op});
+        return true;
+    }
+
+    if (policy_ == GhostPolicy::OwnedRowsOnly) {
+        return false;
+    }
+
+    int owner = getOwnerRank(global_row);
+    int neighbor_idx = findNeighborIndex(owner);
+    if (neighbor_idx >= 0) {
+        send_buffers_[static_cast<std::size_t>(neighbor_idx)].entries.push_back(
+            {global_row, global_row, set_diagonal ? Real(1) : Real(0), AddMode::Insert, op});
+    }
+
+    return false;
+}
+
+bool GhostContributionManager::addVectorEntryOperation(GlobalIndex global_row,
+                                                       Real value,
+                                                       AddMode mode)
+{
+    if (isOwned(global_row)) {
+        local_vector_ops_.push_back({global_row, value, mode, GhostVectorOp::Entry});
+        return true;
+    }
+
+    if (policy_ == GhostPolicy::OwnedRowsOnly) {
+        return false;
+    }
+
+    int owner = getOwnerRank(global_row);
+    int neighbor_idx = findNeighborIndex(owner);
+    if (neighbor_idx >= 0) {
+        auto& buffer = send_buffers_[static_cast<std::size_t>(neighbor_idx)];
+        buffer.vector_entries.push_back({global_row, value, mode, GhostVectorOp::Entry});
     }
 
     return false;
@@ -339,7 +531,8 @@ bool GhostContributionManager::addMatrixContribution(
 
 bool GhostContributionManager::addVectorContribution(
     GlobalIndex global_row,
-    Real value)
+    Real value,
+    AddMode mode)
 {
     if (isOwned(global_row)) {
         return true;  // Locally owned, caller inserts directly
@@ -354,7 +547,28 @@ bool GhostContributionManager::addVectorContribution(
 
     if (neighbor_idx >= 0) {
         auto& buffer = send_buffers_[static_cast<std::size_t>(neighbor_idx)];
-        buffer.vector_entries.push_back({global_row, value});
+        buffer.vector_entries.push_back({global_row, value, mode, GhostVectorOp::Entry});
+    }
+
+    return false;
+}
+
+bool GhostContributionManager::addVectorZeroOperation(GlobalIndex global_row)
+{
+    if (isOwned(global_row)) {
+        local_vector_ops_.push_back({global_row, Real(0), AddMode::Insert, GhostVectorOp::Zero});
+        return true;
+    }
+
+    if (policy_ == GhostPolicy::OwnedRowsOnly) {
+        return false;
+    }
+
+    int owner = getOwnerRank(global_row);
+    int neighbor_idx = findNeighborIndex(owner);
+    if (neighbor_idx >= 0) {
+        auto& buffer = send_buffers_[static_cast<std::size_t>(neighbor_idx)];
+        buffer.vector_entries.push_back({global_row, Real(0), AddMode::Insert, GhostVectorOp::Zero});
     }
 
     return false;
@@ -364,7 +578,8 @@ void GhostContributionManager::addMatrixContributions(
     std::span<const GlobalIndex> row_dofs,
     std::span<const GlobalIndex> col_dofs,
     std::span<const Real> values,
-    std::vector<GhostContribution>& owned_contributions)
+    std::vector<GhostContribution>& owned_contributions,
+    AddMode mode)
 {
     const auto n_rows = static_cast<GlobalIndex>(row_dofs.size());
     const auto n_cols = static_cast<GlobalIndex>(col_dofs.size());
@@ -374,19 +589,48 @@ void GhostContributionManager::addMatrixContributions(
     for (GlobalIndex i = 0; i < n_rows; ++i) {
         GlobalIndex row = row_dofs[static_cast<std::size_t>(i)];
         bool is_owned = isOwned(row);
+        const bool trace_row = should_trace_ghost_row(row);
+        int owner = -1;
+        int neighbor_idx = -1;
+        if (!is_owned && policy_ == GhostPolicy::ReverseScatter) {
+            owner = getOwnerRank(row);
+            neighbor_idx = findNeighborIndex(owner);
+        }
 
         for (GlobalIndex j = 0; j < n_cols; ++j) {
             GlobalIndex col = col_dofs[static_cast<std::size_t>(j)];
             Real val = values[static_cast<std::size_t>(i * n_cols + j)];
 
             if (is_owned) {
-                owned_contributions.push_back({row, col, val});
+                if (trace_row) {
+                    std::fprintf(stderr,
+                                 "[R%d] GhostMatrixBatch row=%lld col=%lld value=%.17g "
+                                 "mode=%d owner=%d path=owned_return\n",
+                                 my_rank_,
+                                 static_cast<long long>(row),
+                                 static_cast<long long>(col),
+                                 static_cast<double>(val),
+                                 static_cast<int>(mode),
+                                 my_rank_);
+                }
+                owned_contributions.push_back({row, col, val, mode, GhostMatrixOp::Entry});
             } else if (policy_ == GhostPolicy::ReverseScatter) {
-                int owner = getOwnerRank(row);
-                int neighbor_idx = findNeighborIndex(owner);
+                if (trace_row) {
+                    std::fprintf(stderr,
+                                 "[R%d] GhostMatrixBatch row=%lld col=%lld value=%.17g "
+                                 "mode=%d owner=%d neighbor_idx=%d path=%s\n",
+                                 my_rank_,
+                                 static_cast<long long>(row),
+                                 static_cast<long long>(col),
+                                 static_cast<double>(val),
+                                 static_cast<int>(mode),
+                                 owner,
+                                 neighbor_idx,
+                                 neighbor_idx >= 0 ? "buffer_send" : "drop_no_neighbor");
+                }
                 if (neighbor_idx >= 0) {
                     send_buffers_[static_cast<std::size_t>(neighbor_idx)].entries.push_back(
-                        {row, col, val});
+                        {row, col, val, mode, GhostMatrixOp::Entry});
                 }
             }
         }
@@ -395,6 +639,9 @@ void GhostContributionManager::addMatrixContributions(
 
 bool GhostContributionManager::isOwned(GlobalIndex global_dof) const
 {
+    if (explicit_row_owner_) {
+        return explicitOwnerRank(global_dof) == my_rank_;
+    }
     FE_CHECK_NOT_NULL(dof_map_, "GhostContributionManager::isOwned: dof_map");
     FE_THROW_IF(global_dof < ownership_offset_, FEException,
                 "GhostContributionManager::isOwned: global DOF index is below ownershipOffset()");
@@ -404,6 +651,10 @@ bool GhostContributionManager::isOwned(GlobalIndex global_dof) const
 
 int GhostContributionManager::getOwnerRank(GlobalIndex global_dof) const
 {
+    if (explicit_row_owner_) {
+        const int owner = explicitOwnerRank(global_dof);
+        return owner >= 0 ? owner : my_rank_;
+    }
     FE_CHECK_NOT_NULL(dof_map_, "GhostContributionManager::getOwnerRank: dof_map");
     FE_THROW_IF(global_dof < ownership_offset_, FEException,
                 "GhostContributionManager::getOwnerRank: global DOF index is below ownershipOffset()");
@@ -417,6 +668,18 @@ int GhostContributionManager::getOwnerRank(GlobalIndex global_dof) const
     // Fall back to the DOF map ownership function if available.
     const int owner = dof_map_->getDofOwner(local);
     return owner >= 0 ? owner : my_rank_;
+}
+
+int GhostContributionManager::explicitOwnerRank(GlobalIndex global_dof) const
+{
+    if (!explicit_row_owner_) {
+        return -1;
+    }
+    const int owner = explicit_row_owner_(global_dof);
+    if (owner < 0 || owner >= world_size_) {
+        return -1;
+    }
+    return owner;
 }
 
 int GhostContributionManager::findNeighborIndex(int rank) const
@@ -716,6 +979,24 @@ void GhostContributionManager::clearReceivedContributions()
     received_vector_.clear();
 }
 
+std::vector<GhostContribution> GhostContributionManager::takeLocalMatrixOperations()
+{
+    if (deterministic_) {
+        std::vector<GhostContribution> scratch;
+        sortGhostMatrixEntries(local_matrix_ops_, scratch);
+    }
+    return std::move(local_matrix_ops_);
+}
+
+std::vector<GhostVectorContribution> GhostContributionManager::takeLocalVectorOperations()
+{
+    if (deterministic_) {
+        std::vector<GhostVectorContribution> scratch;
+        sortGhostVectorEntries(local_vector_ops_, scratch);
+    }
+    return std::move(local_vector_ops_);
+}
+
 // ============================================================================
 // Buffer Management
 // ============================================================================
@@ -725,6 +1006,8 @@ void GhostContributionManager::clearSendBuffers()
     for (auto& buffer : send_buffers_) {
         buffer.clear();
     }
+    local_matrix_ops_.clear();
+    local_vector_ops_.clear();
 
     last_stats_ = ExchangeStats{};
 }
@@ -742,6 +1025,7 @@ std::size_t GhostContributionManager::numBufferedMatrixContributions() const
     for (const auto& buffer : send_buffers_) {
         total += buffer.entries.size();
     }
+    total += local_matrix_ops_.size();
     return total;
 }
 
@@ -751,6 +1035,7 @@ std::size_t GhostContributionManager::numBufferedVectorContributions() const
     for (const auto& buffer : send_buffers_) {
         total += buffer.vector_entries.size();
     }
+    total += local_vector_ops_.size();
     return total;
 }
 

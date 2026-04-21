@@ -32,6 +32,7 @@
 #include "CmMod.h"
 #include "bicgs.h"
 #include "cgrad.h"
+#include "distributed_mpi_ops.h"
 #include "gmres.h"
 #include "ns_solver.h"
 #include "precond.h"
@@ -289,11 +290,12 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
     R(i) = Wc(i) * R(i);
   }
 
-  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-    // Krylov/block solves operate on the overlapped FSILS layout. Before the
+  const HaloExchange halo(lhs);
+  if (halo.has_owned_halo()) {
+    // Krylov/block solves operate on the owned-row FSILS layout. Before the
     // correction leaves FSILS, synchronize owner values back onto ghost nodes
     // so downstream nonlinear updates see a single consistent field.
-    fsils_syncv(lhs, dof, R);
+    halo.sync_owned_to_ghost_vector(dof, R);
   }
   traceLocalArrayStats(lhs, "after_sync", dof, R);
 

@@ -118,6 +118,7 @@ struct SetupOptions {
     std::vector<sparsity::FieldCoupling> custom_couplings{};
 
     bool use_constraints_in_assembly{true};
+    bool use_backend_row_ownership_for_assembly{false};
 
     // Iterative-solver leverage (explicit opt-in): auto-register eligible matrix-free operators.
     bool auto_register_matrix_free{false};

@@ -230,19 +230,6 @@ inline const char* fsils_solver_type_name(LinearSolverType type) noexcept
   return "Unknown";
 }
 
-class FSILS_cSType
-{
-  public:
-    /// The processor to communicate with
-    int iP = -1;
-
-    /// Number of data to be commu
-    int n = 0;
-
-    /// Pointer to the data for commu
-    Vector<int> ptr;
-};
-
 class FSILS_faceType
 {
   public:
@@ -391,8 +378,21 @@ class FSILS_lhsType
     /// nNo of shared with lower proc       (USE)
     fsils_int shnNo = 0;
 
-    /// Number of communication requests    (USE)
-    int nReq = 0;
+    /// True when the matrix stores PETSc-like owned rows only. Ghost nodes may
+    /// still be present as local columns and vector halo entries.
+    bool owned_row_operator = false;
+
+    /// Explicit owner-to-ghost halo plan used by PETSc-like owned-row operators.
+    ///
+    /// Node ids are in FSILS internal ordering. `owned_halo_send_nodes[i]` are
+    /// owned nodes whose values this rank sends to `owned_halo_neighbor_ranks[i]`.
+    /// `owned_halo_recv_nodes[i]` are local ghost nodes overwritten by values
+    /// received from that same rank.
+    std::vector<int> owned_halo_neighbor_ranks;
+    std::vector<std::vector<fsils_int>> owned_halo_send_nodes;
+    std::vector<std::vector<fsils_int>> owned_halo_recv_nodes;
+    mutable std::vector<double> owned_halo_send_buffer;
+    mutable std::vector<double> owned_halo_recv_buffer;
 
     /// Column pointer                      (USE)
     Vector<fsils_int> colPtr;
@@ -411,8 +411,6 @@ class FSILS_lhsType
 
     FSILS_commuType commu;
 
-    std::vector<FSILS_cSType> cS;
-
     std::vector<FSILS_faceType> face;
     int native_face_rank_one_count = 0;
     std::vector<FSILS_reducedFieldUpdateType> reduced_updates;
@@ -423,14 +421,6 @@ class FSILS_lhsType
     std::vector<double> reduced_update_pc_inner_inv;
     bool use_exact_grouped_bordered_pre_in_add_bc_mul = false;
     bool use_reduced_face_cache_in_add_bc_mul = false;
-
-    /// Pre-allocated communication buffers (sized once in fsils_lhs_create)
-    int nmax_commu = 0;      ///< max shared nodes across all comm partners
-    mutable std::vector<MPI_Request> commu_sReq;
-    mutable std::vector<MPI_Request> commu_rReq;
-    mutable std::vector<double> commu_sB;  ///< send buffer (flat, sized for max usage)
-    mutable std::vector<double> commu_rB;  ///< recv buffer (flat, sized for max usage)
-    int commu_dof_capacity = 0;    ///< current dof capacity for vector buffers
 };
 
 class FSILS_subLsType 

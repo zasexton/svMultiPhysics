@@ -87,6 +87,11 @@ public:
         base_->setConstraints(constraints);
     }
 
+    void setSuppressConstraintInhomogeneity(bool suppress) override
+    {
+        base_->setSuppressConstraintInhomogeneity(suppress);
+    }
+
     void setSparsityPattern(const sparsity::SparsityPattern* sparsity) override
     {
         base_->setSparsityPattern(sparsity);
@@ -110,9 +115,24 @@ public:
 
     void setPreviousSolution2(std::span<const Real> solution) override { base_->setPreviousSolution2(solution); }
 
+    void setPreviousSolutionView(const GlobalSystemView* solution_view) override
+    {
+        base_->setPreviousSolutionView(solution_view);
+    }
+
+    void setPreviousSolution2View(const GlobalSystemView* solution_view) override
+    {
+        base_->setPreviousSolution2View(solution_view);
+    }
+
     void setPreviousSolutionK(int k, std::span<const Real> solution) override
     {
         base_->setPreviousSolutionK(k, solution);
+    }
+
+    void setPreviousSolutionViewK(int k, const GlobalSystemView* solution_view) override
+    {
+        base_->setPreviousSolutionViewK(k, solution_view);
     }
 
     void setTimeIntegrationContext(const TimeIntegrationContext* ctx) override
@@ -143,6 +163,19 @@ public:
                           std::span<const Real> aux_state) noexcept override
     {
         base_->setCoupledValues(integrals, aux_state);
+    }
+
+    void setAuxiliaryValues(std::span<const Real> inputs,
+                            std::span<const Real> state,
+                            std::span<const Real> outputs = {}) noexcept override
+    {
+        base_->setAuxiliaryValues(inputs, state, outputs);
+    }
+
+    void setAuxiliaryOutputBindings(
+        std::span<const AuxiliaryOutputBinding> bindings) noexcept override
+    {
+        base_->setAuxiliaryOutputBindings(bindings);
     }
 
     void setMaterialStateProvider(IMaterialStateProvider* provider) noexcept override

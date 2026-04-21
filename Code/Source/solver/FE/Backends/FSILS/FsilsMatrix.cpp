@@ -13,6 +13,7 @@
 #include "Sparsity/SparsityPattern.h"
 
 #include "Backends/FSILS/liner_solver/commu.h"
+#include "Backends/FSILS/liner_solver/fsils_api.hpp"
 #include "Backends/FSILS/liner_solver/lhs.h"
 #include "Backends/FSILS/liner_solver/spar_mul.h"
 
@@ -21,6 +22,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <mpi.h>
@@ -104,6 +106,28 @@ namespace {
            env_flag_enabled("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING_ALL_RANKS");
 }
 
+[[nodiscard]] GlobalIndex fsils_trace_add_row_dof() noexcept
+{
+    static const GlobalIndex traced = []() noexcept {
+        const char* env = std::getenv("SVMP_FSILS_TRACE_ADD_ROW_DOF");
+        if (env == nullptr || *env == '\0') {
+            return INVALID_GLOBAL_INDEX;
+        }
+        char* end = nullptr;
+        const auto value = std::strtoll(env, &end, 10);
+        if (end == env) {
+            return INVALID_GLOBAL_INDEX;
+        }
+        return static_cast<GlobalIndex>(value);
+    }();
+    return traced;
+}
+
+[[nodiscard]] bool fsils_trace_add_row(GlobalIndex fe_row) noexcept
+{
+    return fe_row == fsils_trace_add_row_dof();
+}
+
 [[nodiscard]] bool ghost_rows_look_nodal_interleaved(std::span<const GlobalIndex> ghost_rows, int dof)
 {
     if (dof <= 0) {
@@ -177,6 +201,7 @@ namespace {
         auto normalized = std::make_shared<DofPermutation>();
         normalized->forward = perm->forward;
         normalized->inverse = std::move(inverse_from_forward);
+        normalized->owner_rank = perm->owner_rank;
         return normalized;
     }
 
@@ -206,6 +231,7 @@ namespace {
     auto normalized = std::make_shared<DofPermutation>();
     normalized->forward = perm->forward;
     normalized->inverse = std::move(inverse_from_forward);
+    normalized->owner_rank = perm->owner_rank;
     return normalized;
 }
 
@@ -277,6 +303,359 @@ void sort_row_columns_and_values(FsilsShared& shared, std::vector<Real>& values)
                     "FsilsMatrix: missing diagonal block in FSILS pattern");
         lhs.diagPtr(row) = static_cast<int>(it - cols);
     }
+}
+
+void restore_owned_row_operator_ghost_identity(FsilsShared& shared, std::vector<Real>& values)
+{
+    auto& lhs = shared.lhs;
+    if (!lhs.owned_row_operator || lhs.commu.nTasks <= 1 || lhs.mynNo >= lhs.nNo) {
+        return;
+    }
+
+    const int dof = shared.dof;
+    FE_THROW_IF(dof <= 0, FEException, "FsilsMatrix: invalid dof");
+    const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
+    FE_THROW_IF(values.size() != static_cast<std::size_t>(lhs.nnz) * block_size,
+                FEException,
+                "FsilsMatrix: values size mismatch while restoring ghost identity");
+
+    for (int row = lhs.mynNo; row < lhs.nNo; ++row) {
+        const int diag = lhs.diagPtr(row);
+        FE_THROW_IF(diag < 0 || diag >= lhs.nnz, FEException,
+                    "FsilsMatrix: invalid ghost diagonal pointer");
+
+        Real* block = values.data() + static_cast<std::size_t>(diag) * block_size;
+        std::fill(block, block + block_size, Real(0));
+        for (int c = 0; c < dof; ++c) {
+            block[block_entry_index(dof, c, c)] = Real(1);
+        }
+    }
+}
+
+[[nodiscard]] int owner_rank_for_backend_node(const FsilsShared& shared, int backend_node) noexcept
+{
+    if (backend_node < 0 || shared.dof <= 0 || !shared.dof_permutation ||
+        shared.dof_permutation->owner_rank.empty()) {
+        return -1;
+    }
+    const GlobalIndex first_backend_dof =
+        static_cast<GlobalIndex>(backend_node) * static_cast<GlobalIndex>(shared.dof);
+    if (first_backend_dof < 0) {
+        return -1;
+    }
+    for (int c = 0; c < shared.dof; ++c) {
+        const GlobalIndex backend_dof = first_backend_dof + static_cast<GlobalIndex>(c);
+        if (backend_dof < 0 ||
+            static_cast<std::size_t>(backend_dof) >= shared.dof_permutation->owner_rank.size()) {
+            continue;
+        }
+        const int owner = shared.dof_permutation->owner_rank[static_cast<std::size_t>(backend_dof)];
+        if (owner >= 0) {
+            return owner;
+        }
+    }
+    return -1;
+}
+
+void clear_owned_row_halo_plan(FsilsShared& shared)
+{
+    shared.lhs.owned_halo_neighbor_ranks.clear();
+    shared.lhs.owned_halo_send_nodes.clear();
+    shared.lhs.owned_halo_recv_nodes.clear();
+    shared.lhs.owned_halo_send_buffer.clear();
+    shared.lhs.owned_halo_recv_buffer.clear();
+}
+
+void build_owned_row_halo_plan(FsilsShared& shared)
+{
+    clear_owned_row_halo_plan(shared);
+
+#if FE_HAS_MPI
+    auto& lhs = shared.lhs;
+    if (!lhs.owned_row_operator || lhs.commu.nTasks <= 1) {
+        return;
+    }
+    const int rank = lhs.commu.task;
+    const int size = lhs.commu.nTasks;
+    std::vector<std::vector<int>> ghost_requests_by_owner(static_cast<std::size_t>(size));
+    int local_plan_ok = 1;
+    const bool have_owner_metadata =
+        shared.dof_permutation != nullptr && !shared.dof_permutation->owner_rank.empty();
+
+    if (have_owner_metadata) {
+        for (int old = shared.owned_node_count; old < lhs.nNo; ++old) {
+            const int node = shared.oldToGlobalNode(old);
+            const int owner = owner_rank_for_backend_node(shared, node);
+            if (owner < 0 || owner >= size || owner == rank) {
+                local_plan_ok = 0;
+                continue;
+            }
+            ghost_requests_by_owner[static_cast<std::size_t>(owner)].push_back(node);
+        }
+    } else {
+        local_plan_ok = 0;
+    }
+
+    int global_plan_ok = 0;
+    MPI_Allreduce(&local_plan_ok,
+                  &global_plan_ok,
+                  1,
+                  MPI_INT,
+                  MPI_MIN,
+                  lhs.commu.comm);
+    if (!have_owner_metadata || global_plan_ok == 0) {
+        // Some distributed setup paths do not carry explicit owner metadata for
+        // every backend node. Derive ownership by exchanging owned nodes once
+        // during setup; solve-time communication must use the owned halo plan.
+        std::vector<int> local_owned_nodes;
+        local_owned_nodes.reserve(static_cast<std::size_t>(std::max(shared.owned_node_count, 0)));
+        for (int old = 0; old < shared.owned_node_count; ++old) {
+            const int node = shared.oldToGlobalNode(old);
+            if (node >= 0) {
+                local_owned_nodes.push_back(node);
+            }
+        }
+
+        std::vector<int> owned_counts(static_cast<std::size_t>(size), 0);
+        const int local_owned_count = static_cast<int>(local_owned_nodes.size());
+        MPI_Allgather(&local_owned_count,
+                      1,
+                      MPI_INT,
+                      owned_counts.data(),
+                      1,
+                      MPI_INT,
+                      lhs.commu.comm);
+
+        std::vector<int> owned_displs(static_cast<std::size_t>(size + 1), 0);
+        for (int r = 0; r < size; ++r) {
+            owned_displs[static_cast<std::size_t>(r + 1)] =
+                owned_displs[static_cast<std::size_t>(r)] + owned_counts[static_cast<std::size_t>(r)];
+        }
+        std::vector<int> all_owned_nodes(static_cast<std::size_t>(owned_displs.back()), 0);
+        MPI_Allgatherv(local_owned_nodes.data(),
+                       local_owned_count,
+                       MPI_INT,
+                       all_owned_nodes.data(),
+                       owned_counts.data(),
+                       owned_displs.data(),
+                       MPI_INT,
+                       lhs.commu.comm);
+
+        std::unordered_map<int, int> owner_by_node;
+        owner_by_node.reserve(all_owned_nodes.size());
+        for (int r = 0; r < size; ++r) {
+            const int begin = owned_displs[static_cast<std::size_t>(r)];
+            const int end = owned_displs[static_cast<std::size_t>(r + 1)];
+            for (int i = begin; i < end; ++i) {
+                owner_by_node.emplace(all_owned_nodes[static_cast<std::size_t>(i)], r);
+            }
+        }
+
+        for (auto& requests : ghost_requests_by_owner) {
+            requests.clear();
+        }
+        local_plan_ok = 1;
+        for (int old = shared.owned_node_count; old < lhs.nNo; ++old) {
+            const int node = shared.oldToGlobalNode(old);
+            const auto owner_it = owner_by_node.find(node);
+            if (owner_it == owner_by_node.end() || owner_it->second == rank) {
+                local_plan_ok = 0;
+                continue;
+            }
+            ghost_requests_by_owner[static_cast<std::size_t>(owner_it->second)].push_back(node);
+        }
+        MPI_Allreduce(&local_plan_ok,
+                      &global_plan_ok,
+                      1,
+                      MPI_INT,
+                      MPI_MIN,
+                      lhs.commu.comm);
+        if (global_plan_ok == 0) {
+            if (std::getenv("SVMP_FSILS_HALO_TRACE") != nullptr) {
+                std::fprintf(stderr,
+                             "[FSILS_HALO] rank=%d explicit halo plan disabled during owner validation local_ok=%d owned=%lld local=%lld\n",
+                             rank,
+                             local_plan_ok,
+                             static_cast<long long>(lhs.mynNo),
+                             static_cast<long long>(lhs.nNo));
+            }
+            clear_owned_row_halo_plan(shared);
+            FE_THROW(InvalidArgumentException,
+                     "FsilsMatrix: failed to build explicit owned-row halo plan from owned-node exchange");
+        }
+    }
+
+    std::vector<int> send_counts(static_cast<std::size_t>(size), 0);
+    std::vector<int> recv_counts(static_cast<std::size_t>(size), 0);
+    for (int r = 0; r < size; ++r) {
+        send_counts[static_cast<std::size_t>(r)] =
+            static_cast<int>(ghost_requests_by_owner[static_cast<std::size_t>(r)].size());
+    }
+
+    MPI_Alltoall(send_counts.data(), 1, MPI_INT,
+                 recv_counts.data(), 1, MPI_INT,
+                 lhs.commu.comm);
+
+    std::vector<int> send_displs(static_cast<std::size_t>(size + 1), 0);
+    std::vector<int> recv_displs(static_cast<std::size_t>(size + 1), 0);
+    for (int r = 0; r < size; ++r) {
+        send_displs[static_cast<std::size_t>(r + 1)] =
+            send_displs[static_cast<std::size_t>(r)] + send_counts[static_cast<std::size_t>(r)];
+        recv_displs[static_cast<std::size_t>(r + 1)] =
+            recv_displs[static_cast<std::size_t>(r)] + recv_counts[static_cast<std::size_t>(r)];
+    }
+
+    std::vector<int> send_nodes(static_cast<std::size_t>(send_displs.back()), 0);
+    for (int r = 0; r < size; ++r) {
+        auto& nodes = ghost_requests_by_owner[static_cast<std::size_t>(r)];
+        std::sort(nodes.begin(), nodes.end());
+        nodes.erase(std::unique(nodes.begin(), nodes.end()), nodes.end());
+        send_counts[static_cast<std::size_t>(r)] = static_cast<int>(nodes.size());
+    }
+
+    // Counts may shrink after unique(); exchange the final request counts.
+    MPI_Alltoall(send_counts.data(), 1, MPI_INT,
+                 recv_counts.data(), 1, MPI_INT,
+                 lhs.commu.comm);
+    send_displs.assign(static_cast<std::size_t>(size + 1), 0);
+    recv_displs.assign(static_cast<std::size_t>(size + 1), 0);
+    for (int r = 0; r < size; ++r) {
+        send_displs[static_cast<std::size_t>(r + 1)] =
+            send_displs[static_cast<std::size_t>(r)] + send_counts[static_cast<std::size_t>(r)];
+        recv_displs[static_cast<std::size_t>(r + 1)] =
+            recv_displs[static_cast<std::size_t>(r)] + recv_counts[static_cast<std::size_t>(r)];
+    }
+    send_nodes.assign(static_cast<std::size_t>(send_displs.back()), 0);
+    for (int r = 0; r < size; ++r) {
+        const auto& nodes = ghost_requests_by_owner[static_cast<std::size_t>(r)];
+        std::copy(nodes.begin(),
+                  nodes.end(),
+                  send_nodes.begin() + send_displs[static_cast<std::size_t>(r)]);
+    }
+    std::vector<int> recv_nodes(static_cast<std::size_t>(recv_displs.back()), 0);
+
+    MPI_Alltoallv(send_nodes.data(),
+                  send_counts.data(),
+                  send_displs.data(),
+                  MPI_INT,
+                  recv_nodes.data(),
+                  recv_counts.data(),
+                  recv_displs.data(),
+                  MPI_INT,
+                  lhs.commu.comm);
+
+    local_plan_ok = 1;
+    for (int r = 0; r < size; ++r) {
+        if (r == rank) {
+            continue;
+        }
+        const int n_send = recv_counts[static_cast<std::size_t>(r)];
+        const int n_recv = send_counts[static_cast<std::size_t>(r)];
+        if (n_send == 0 && n_recv == 0) {
+            continue;
+        }
+
+        lhs.owned_halo_neighbor_ranks.push_back(r);
+        auto& send_internal = lhs.owned_halo_send_nodes.emplace_back();
+        auto& recv_internal = lhs.owned_halo_recv_nodes.emplace_back();
+        send_internal.reserve(static_cast<std::size_t>(std::max(n_send, 0)));
+        recv_internal.reserve(static_cast<std::size_t>(std::max(n_recv, 0)));
+
+        const int recv_begin = recv_displs[static_cast<std::size_t>(r)];
+        for (int i = 0; i < n_send; ++i) {
+            const int old = shared.globalNodeToOld(recv_nodes[static_cast<std::size_t>(recv_begin + i)]);
+            if (old < 0 || old >= shared.owned_node_count) {
+                local_plan_ok = 0;
+                continue;
+            }
+            const int internal = lhs.map(old);
+            if (internal < 0 || internal >= lhs.mynNo) {
+                local_plan_ok = 0;
+                continue;
+            }
+            send_internal.push_back(static_cast<fe_fsi_linear_solver::fsils_int>(internal));
+        }
+
+        const auto& requested_nodes = ghost_requests_by_owner[static_cast<std::size_t>(r)];
+        for (const int node : requested_nodes) {
+            const int old = shared.globalNodeToOld(node);
+            if (old < shared.owned_node_count || old >= lhs.nNo) {
+                local_plan_ok = 0;
+                continue;
+            }
+            const int internal = lhs.map(old);
+            if (internal < lhs.mynNo || internal >= lhs.nNo) {
+                local_plan_ok = 0;
+                continue;
+            }
+            recv_internal.push_back(static_cast<fe_fsi_linear_solver::fsils_int>(internal));
+        }
+    }
+
+    MPI_Allreduce(&local_plan_ok,
+                  &global_plan_ok,
+                  1,
+                  MPI_INT,
+                  MPI_MIN,
+                  lhs.commu.comm);
+    if (global_plan_ok == 0) {
+        if (std::getenv("SVMP_FSILS_HALO_TRACE") != nullptr) {
+            std::fprintf(stderr,
+                         "[FSILS_HALO] rank=%d explicit halo plan disabled during node mapping local_ok=%d owned=%lld local=%lld\n",
+                         rank,
+                         local_plan_ok,
+                         static_cast<long long>(lhs.mynNo),
+                         static_cast<long long>(lhs.nNo));
+        }
+        clear_owned_row_halo_plan(shared);
+        FE_THROW(InvalidArgumentException,
+                 "FsilsMatrix: failed to map explicit owned-row halo plan to local FSILS nodes");
+    }
+
+    if (std::getenv("SVMP_FSILS_HALO_TRACE") != nullptr) {
+        std::size_t send_nodes_total = 0;
+        std::size_t recv_nodes_total = 0;
+        for (const auto& nodes : lhs.owned_halo_send_nodes) {
+            send_nodes_total += nodes.size();
+        }
+        for (const auto& nodes : lhs.owned_halo_recv_nodes) {
+            recv_nodes_total += nodes.size();
+        }
+        std::fprintf(stderr,
+                     "[FSILS_HALO] rank=%d neighbors=%zu send_nodes=%zu recv_nodes=%zu owned=%lld local=%lld\n",
+                     rank,
+                     lhs.owned_halo_neighbor_ranks.size(),
+                     send_nodes_total,
+                     recv_nodes_total,
+                     static_cast<long long>(lhs.mynNo),
+                     static_cast<long long>(lhs.nNo));
+    }
+#else
+    (void)shared;
+#endif
+}
+
+void validate_owned_row_halo_plan(const FsilsShared& shared)
+{
+#if FE_HAS_MPI
+    const auto& lhs = shared.lhs;
+    if (!lhs.owned_row_operator || lhs.commu.nTasks <= 1) {
+        return;
+    }
+
+    FE_THROW_IF(lhs.owned_halo_send_nodes.size() != lhs.owned_halo_neighbor_ranks.size() ||
+                    lhs.owned_halo_recv_nodes.size() != lhs.owned_halo_neighbor_ranks.size(),
+                InvalidArgumentException,
+                "FsilsMatrix: distributed owned-row FSILS matrix has an invalid explicit owned halo plan");
+
+    if (lhs.nNo > lhs.mynNo) {
+        FE_THROW_IF(lhs.owned_halo_neighbor_ranks.empty(),
+                    InvalidArgumentException,
+                    "FsilsMatrix: distributed owned-row FSILS matrix with ghost nodes is missing an explicit owned halo plan");
+    }
+#else
+    (void)shared;
+#endif
 }
 
 /// Build per-row block-base lookup tables.
@@ -1115,16 +1494,22 @@ FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern,
     }
 
     auto commu = make_fsils_commu(backend_comm);
-    fe_fsi_linear_solver::fsils_lhs_create(shared->lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, /*nFaces=*/0);
+    fe_fsi_linear_solver::fsils_lhs_create_with_explicit_owned_nodes(
+        shared->lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, /*nFaces=*/0, /*owned_nNo=*/nNo);
+    FE_THROW_IF(!shared->lhs.owned_row_operator, InvalidArgumentException,
+                "FsilsMatrix: FE FSILS matrices must use explicit owned-row layout");
 
     build_old_of_internal(*shared);
 
     shared->buildGlobalToOldTable();
     shared->buildGlobalToInternalTable();
+    build_owned_row_halo_plan(*shared);
+    validate_owned_row_halo_plan(*shared);
 
     const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
     values_.assign(static_cast<std::size_t>(nnz) * block_size, 0.0);
     sort_row_columns_and_values(*shared, values_);
+    restore_owned_row_operator_ghost_identity(*shared, values_);
 
     // Build direct block-base lookup tables after sorting so the stored
     // offsets match the final colPtr/values_ layout.
@@ -1312,6 +1697,23 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
                         "FsilsMatrix: DOF permutation forward/inverse mismatch for locally present backend DOF");
         };
 
+        auto node_has_complete_mapping = [&](int global_node) {
+            if (global_node < 0 || global_node >= gnNo) {
+                return false;
+            }
+            for (int r = 0; r < dof; ++r) {
+                const auto dof_fs = static_cast<GlobalIndex>(global_node) * dof + r;
+                if (dof_fs < 0 || static_cast<std::size_t>(dof_fs) >= inv.size()) {
+                    return false;
+                }
+                const auto fe = inv[static_cast<std::size_t>(dof_fs)];
+                if (fe == INVALID_GLOBAL_INDEX) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
         auto validate_node = [&](int global_node) {
             FE_THROW_IF(global_node < 0 || global_node >= gnNo, InvalidArgumentException,
                         "FsilsMatrix: local node out of range");
@@ -1330,7 +1732,9 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
             }
         }
         for (const int node : ghost_nodes) {
-            validate_node(node);
+            if (!pattern_indices_are_backend || node_has_complete_mapping(node)) {
+                validate_node(node);
+            }
         }
     }
 
@@ -1407,10 +1811,18 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
                     "FsilsMatrix: invalid old->global node mapping");
 
         node_cols.clear();
-        for (int r = 0; r < dof; ++r) {
-            const GlobalIndex row_dof = static_cast<GlobalIndex>(global_node) * dof + r;
-            gather_row_nodes(row_dof, dof_row_nodes);
-            node_cols.insert(node_cols.end(), dof_row_nodes.begin(), dof_row_nodes.end());
+        if (old >= owned_node_count) {
+            // PETSc-style distributed matrices store only owned rows. Ghost
+            // nodes remain in the local layout as columns/vector halo slots;
+            // keep a diagonal placeholder so FSILS preconditioner bookkeeping
+            // has a valid row and diagonal pointer for every local node.
+            node_cols.push_back(global_node);
+        } else {
+            for (int r = 0; r < dof; ++r) {
+                const GlobalIndex row_dof = static_cast<GlobalIndex>(global_node) * dof + r;
+                gather_row_nodes(row_dof, dof_row_nodes);
+                node_cols.insert(node_cols.end(), dof_row_nodes.begin(), dof_row_nodes.end());
+            }
         }
 
         std::sort(node_cols.begin(), node_cols.end());
@@ -1457,15 +1869,20 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
     auto commu = make_fsils_commu(backend_comm);
     fe_fsi_linear_solver::fsils_lhs_create_with_explicit_owned_nodes(
         shared->lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, /*nFaces=*/0, owned_node_count);
+    FE_THROW_IF(!shared->lhs.owned_row_operator, InvalidArgumentException,
+                "FsilsMatrix: FE FSILS matrices must use explicit owned-row layout");
 
     build_old_of_internal(*shared);
 
     shared->buildGlobalToOldTable();
     shared->buildGlobalToInternalTable();
+    build_owned_row_halo_plan(*shared);
+    validate_owned_row_halo_plan(*shared);
 
     const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
     values_.assign(static_cast<std::size_t>(nnz) * block_size, 0.0);
     sort_row_columns_and_values(*shared, values_);
+    restore_owned_row_operator_ghost_identity(*shared, values_);
 
     // Build direct block-base lookup tables after sorting so the stored
     // offsets match the final colPtr/values_ layout.
@@ -1887,12 +2304,17 @@ void FsilsMatrix::addMatrixEntriesCached(std::span<const GlobalIndex> row_dofs,
 void FsilsMatrix::zero()
 {
     std::fill(values_.begin(), values_.end(), 0.0);
+    if (shared_) {
+        restore_owned_row_operator_ghost_identity(*shared_, values_);
+    }
     resetDroppedEntryCount();
 }
 
 void FsilsMatrix::finalizeAssembly()
 {
-    // FSILS is assembled in-place; nothing to do.
+    if (shared_) {
+        restore_owned_row_operator_ghost_identity(*shared_, values_);
+    }
 }
 
 void FsilsMatrix::mult(const GenericVector& x_in, GenericVector& y_in) const
@@ -1933,6 +2355,7 @@ void FsilsMatrix::mult(const GenericVector& x_in, GenericVector& y_in) const
     Array<double> U(dof, nNo, u_internal.data());
     Array<double> KU(dof, nNo, ku_internal.data());
 
+    fe_fsi_linear_solver::fsils_syncv_owned_to_ghost(lhs, dof, U);
     spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, K, U, KU);
 
     // Map output back to old local ordering.
@@ -1967,6 +2390,33 @@ void FsilsMatrix::multAdd(const GenericVector& x_in, GenericVector& y_in) const
 std::unique_ptr<assembly::GlobalSystemView> FsilsMatrix::createAssemblyView()
 {
     return std::make_unique<FsilsMatrixView>(*this);
+}
+
+bool FsilsMatrix::usesOwnedRowOperator() const noexcept
+{
+    return shared_ != nullptr && shared_->lhs.owned_row_operator;
+}
+
+bool FsilsMatrix::ownsFeDofRow(GlobalIndex fe_dof) const noexcept
+{
+    if (shared_ == nullptr || fe_dof < 0 || fe_dof >= global_rows_ || shared_->dof <= 0) {
+        return false;
+    }
+
+    GlobalIndex backend_dof = fe_dof;
+    if (const auto perm = shared_->dof_permutation; perm && !perm->empty()) {
+        if (static_cast<std::size_t>(fe_dof) >= perm->forward.size()) {
+            return false;
+        }
+        backend_dof = perm->forward[static_cast<std::size_t>(fe_dof)];
+    }
+    if (backend_dof < 0 || backend_dof >= global_rows_) {
+        return false;
+    }
+
+    const int global_node = static_cast<int>(backend_dof / shared_->dof);
+    const int old = shared_->globalNodeToOld(global_node);
+    return old >= 0 && old < shared_->owned_node_count;
 }
 
 	Real FsilsMatrix::getEntry(GlobalIndex row, GlobalIndex col) const
@@ -2025,7 +2475,19 @@ std::unique_ptr<assembly::GlobalSystemView> FsilsMatrix::createAssemblyView()
 
 	void FsilsMatrix::addValue(GlobalIndex row, GlobalIndex col, Real value, assembly::AddMode mode)
 	{
+        const GlobalIndex fe_row_in = row;
+        const GlobalIndex fe_col_in = col;
+        const bool trace_row = fsils_trace_add_row(fe_row_in);
 	    if (row < 0 || row >= global_rows_ || col < 0 || col >= global_cols_) {
+            if (trace_row) {
+                std::fprintf(stderr,
+                             "[FSILS_ADD] rank=%d fe_row=%lld fe_col=%lld value=%.17g mode=%d path=outside_global\n",
+                             shared_ ? shared_->lhs.commu.task : -1,
+                             static_cast<long long>(fe_row_in),
+                             static_cast<long long>(fe_col_in),
+                             static_cast<double>(value),
+                             static_cast<int>(mode));
+            }
 	        return;
 	    }
 	    FE_THROW_IF(!shared_, FEException, "FsilsMatrix::addValue: missing FSILS layout");
@@ -2033,12 +2495,33 @@ std::unique_ptr<assembly::GlobalSystemView> FsilsMatrix::createAssemblyView()
 		    if (const auto perm = shared_->dof_permutation; perm && !perm->empty()) {
 		        const auto& fwd = perm->forward;
 		        if (static_cast<std::size_t>(row) >= fwd.size() || static_cast<std::size_t>(col) >= fwd.size()) {
+                    if (trace_row) {
+                        std::fprintf(stderr,
+                                     "[FSILS_ADD] rank=%d fe_row=%lld fe_col=%lld value=%.17g mode=%d path=perm_index_outside fwd_size=%zu\n",
+                                     shared_->lhs.commu.task,
+                                     static_cast<long long>(fe_row_in),
+                                     static_cast<long long>(fe_col_in),
+                                     static_cast<double>(value),
+                                     static_cast<int>(mode),
+                                     fwd.size());
+                    }
 		            return;
 		        }
 		        row = fwd[static_cast<std::size_t>(row)];
 		        col = fwd[static_cast<std::size_t>(col)];
 		    }
 		    if (row < 0 || row >= global_rows_ || col < 0 || col >= global_cols_) {
+                if (trace_row) {
+                    std::fprintf(stderr,
+                                 "[FSILS_ADD] rank=%d fe_row=%lld fe_col=%lld backend_row=%lld backend_col=%lld value=%.17g mode=%d path=backend_invalid\n",
+                                 shared_->lhs.commu.task,
+                                 static_cast<long long>(fe_row_in),
+                                 static_cast<long long>(fe_col_in),
+                                 static_cast<long long>(row),
+                                 static_cast<long long>(col),
+                                 static_cast<double>(value),
+                                 static_cast<int>(mode));
+                }
 		        return;
 		    }
 
@@ -2051,6 +2534,21 @@ std::unique_ptr<assembly::GlobalSystemView> FsilsMatrix::createAssemblyView()
 	    const int row_internal = shared_->globalNodeToInternal(global_row_node);
 	    const int col_internal = shared_->globalNodeToInternal(global_col_node);
 	    if (row_internal < 0 || col_internal < 0) {
+            if (trace_row) {
+                std::fprintf(stderr,
+                             "[FSILS_ADD] rank=%d fe_row=%lld fe_col=%lld backend_row=%lld backend_col=%lld row_node=%d col_node=%d row_int=%d col_int=%d value=%.17g mode=%d path=internal_missing\n",
+                             shared_->lhs.commu.task,
+                             static_cast<long long>(fe_row_in),
+                             static_cast<long long>(fe_col_in),
+                             static_cast<long long>(row),
+                             static_cast<long long>(col),
+                             global_row_node,
+                             global_col_node,
+                             row_internal,
+                             col_internal,
+                             static_cast<double>(value),
+                             static_cast<int>(mode));
+            }
 	        return;
 	    }
 
@@ -2059,6 +2557,21 @@ std::unique_ptr<assembly::GlobalSystemView> FsilsMatrix::createAssemblyView()
 	    const int end = lhs.rowPtr(1, row_internal);
 	    if (start < 0 || end < start) {
 	        dropped_entry_count_.fetch_add(1, std::memory_order_relaxed);
+            if (trace_row) {
+                std::fprintf(stderr,
+                             "[FSILS_ADD] rank=%d fe_row=%lld fe_col=%lld backend_row=%lld backend_col=%lld row_node=%d col_node=%d row_int=%d col_int=%d value=%.17g mode=%d path=row_empty\n",
+                             shared_->lhs.commu.task,
+                             static_cast<long long>(fe_row_in),
+                             static_cast<long long>(fe_col_in),
+                             static_cast<long long>(row),
+                             static_cast<long long>(col),
+                             global_row_node,
+                             global_col_node,
+                             row_internal,
+                             col_internal,
+                             static_cast<double>(value),
+                             static_cast<int>(mode));
+            }
 	        return;
 	    }
 	    const auto* begin = lhs.colPtr.data() + start;
@@ -2067,6 +2580,23 @@ std::unique_ptr<assembly::GlobalSystemView> FsilsMatrix::createAssemblyView()
 	                                         static_cast<fe_fsi_linear_solver::fsils_int>(col_internal));
 	    if (col_it == finish || *col_it != col_internal) {
 	        dropped_entry_count_.fetch_add(1, std::memory_order_relaxed);
+            if (trace_row) {
+                std::fprintf(stderr,
+                             "[FSILS_ADD] rank=%d fe_row=%lld fe_col=%lld backend_row=%lld backend_col=%lld row_node=%d col_node=%d row_int=%d col_int=%d row_range=[%d,%d] value=%.17g mode=%d path=missing_column\n",
+                             shared_->lhs.commu.task,
+                             static_cast<long long>(fe_row_in),
+                             static_cast<long long>(fe_col_in),
+                             static_cast<long long>(row),
+                             static_cast<long long>(col),
+                             global_row_node,
+                             global_col_node,
+                             row_internal,
+                             col_internal,
+                             start,
+                             end,
+                             static_cast<double>(value),
+                             static_cast<int>(mode));
+            }
 	        return;
 	    }
 
@@ -2077,6 +2607,23 @@ std::unique_ptr<assembly::GlobalSystemView> FsilsMatrix::createAssemblyView()
 	        return;
 	    }
 	    Real& dst = values_[base + off];
+        if (trace_row) {
+            std::fprintf(stderr,
+                         "[FSILS_ADD] rank=%d fe_row=%lld fe_col=%lld backend_row=%lld backend_col=%lld row_node=%d col_node=%d row_int=%d col_int=%d slot=%zu old=%.17g delta=%.17g mode=%d path=apply\n",
+                         shared_->lhs.commu.task,
+                         static_cast<long long>(fe_row_in),
+                         static_cast<long long>(fe_col_in),
+                         static_cast<long long>(row),
+                         static_cast<long long>(col),
+                         global_row_node,
+                         global_col_node,
+                         row_internal,
+                         col_internal,
+                         base + off,
+                         static_cast<double>(dst),
+                         static_cast<double>(value),
+                         static_cast<int>(mode));
+        }
 
     switch (mode) {
         case assembly::AddMode::Add:

@@ -296,8 +296,8 @@ void precond_diag(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_in
   }
 
   trace_precond_w_stage(lhs, "raw_diag", W, traced_reduced_nodes, dof);
-  fsils_commuv(lhs, dof, W);
-  trace_precond_w_stage(lhs, "after_commuv", W, traced_reduced_nodes, dof);
+  fsils_syncv_owned_to_ghost(lhs, dof, W);
+  trace_precond_w_stage(lhs, "after_syncv", W, traced_reduced_nodes, dof);
 
   // Accounting for Dirichlet BC and inversing W = W^{-1/2}
   //
@@ -580,10 +580,9 @@ void precond_rcs(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_int
     }
   }
 
-  fsils_commuv(lhs, dof, Wr);
+  fsils_syncv_owned_to_ghost(lhs, dof, Wr);
 
-  // For parallel case, val and Wr can be larger than 1 due to
-  // the addition operator in FSILS_COMMUV. Hence need renormalization.
+  // Normalize the synchronized Dirichlet mask before applying it to rows/cols.
   //
   for (fsils_int i = 0; i < Wr.size(); i++) {
     Wr(i) = (Wr(i) > 0.5) ? 1.0 : 0.0;
@@ -811,8 +810,9 @@ void precond_rcs(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_int
       break;
     }
 
-    fsils_commuv(lhs, dof, Wr);
-    fsils_commuv(lhs, dof, Wc);
+    fsils_syncv_owned_to_ghost(lhs, dof, Wr);
+    fsils_reverse_scatterv_contribution_buffer(lhs, dof, Wc);
+    fsils_syncv_owned_to_ghost(lhs, dof, Wc);
 
     if ((max(abs(1.0 - Wr)) < tol) && (max(abs(1.0 - Wc)) < tol)) {
       flag = false;

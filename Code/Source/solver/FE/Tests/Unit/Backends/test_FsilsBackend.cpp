@@ -285,6 +285,18 @@ TEST(FsilsBackendStrategy, SingleReducedScalarCorrectionStillUsesLegacyScalarPat
 
 } // namespace
 
+TEST(FsilsBackend, SerialMatrixUsesExplicitOwnedRowLayout)
+{
+    const auto pattern = make_2x2_pattern();
+    FsilsMatrix matrix(pattern);
+
+    ASSERT_NE(matrix.shared(), nullptr);
+    EXPECT_TRUE(matrix.usesOwnedRowOperator());
+    EXPECT_TRUE(matrix.shared()->lhs.owned_row_operator);
+    EXPECT_EQ(matrix.shared()->lhs.mynNo, matrix.shared()->lhs.nNo);
+    EXPECT_EQ(matrix.shared()->owned_node_count, matrix.shared()->lhs.nNo);
+}
+
 TEST(FsilsBackend, SolveCG2x2)
 {
     FsilsFactory factory;

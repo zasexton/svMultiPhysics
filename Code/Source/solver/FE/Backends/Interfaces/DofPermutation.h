@@ -26,6 +26,9 @@ namespace backends {
 struct DofPermutation {
     std::vector<GlobalIndex> forward{};
     std::vector<GlobalIndex> inverse{};
+    // Optional backend-row ownership metadata. When present, owner_rank[backend_dof]
+    // gives the MPI rank that owns the backend row for that DOF.
+    std::vector<int> owner_rank{};
 
     [[nodiscard]] bool empty() const noexcept { return forward.empty() && inverse.empty(); }
 };
@@ -35,4 +38,3 @@ struct DofPermutation {
 } // namespace svmp
 
 #endif // SVMP_FE_BACKENDS_DOF_PERMUTATION_H
-

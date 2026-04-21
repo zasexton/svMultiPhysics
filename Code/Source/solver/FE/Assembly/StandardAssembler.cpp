@@ -46,6 +46,7 @@
 #include <limits>
 #include <cstring>
 #include <cstdio>
+#include <functional>
 
 #if FE_HAS_MPI
 #  include <mpi.h>
@@ -476,10 +477,12 @@ class OwnedRowOnlyView final : public GlobalSystemView {
 public:
     OwnedRowOnlyView(GlobalSystemView& base,
                      const dofs::DofMap& row_map,
-                     GlobalIndex row_offset)
+                     GlobalIndex row_offset,
+                     std::function<int(GlobalIndex)> explicit_row_owner = {})
         : base_(&base)
         , row_map_(&row_map)
         , row_offset_(row_offset)
+        , explicit_row_owner_(std::move(explicit_row_owner))
     {
     }
 
@@ -962,6 +965,12 @@ public:
 private:
     [[nodiscard]] bool isOwnedRow(GlobalIndex global_row) const noexcept
     {
+        if (explicit_row_owner_) {
+            const int owner = explicit_row_owner_(global_row);
+            if (owner >= 0) {
+                return row_map_ == nullptr || owner == row_map_->myRank();
+            }
+        }
         if (!row_map_) {
             return true;
         }
@@ -975,6 +984,7 @@ private:
     GlobalSystemView* base_{nullptr};
     const dofs::DofMap* row_map_{nullptr};
     GlobalIndex row_offset_{0};
+    std::function<int(GlobalIndex)> explicit_row_owner_{};
 
     std::vector<GlobalIndex> owned_rows_;
     std::vector<Real> owned_values_;
@@ -2257,14 +2267,14 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
     GlobalSystemView* insert_vector_view = vector_view;
     if (owned_rows_only) {
         if (matrix_view != nullptr) {
-            owned_row_matrix.emplace(*matrix_view, *row_dof_map_, row_dof_offset_);
+            owned_row_matrix.emplace(*matrix_view, *row_dof_map_, row_dof_offset_, options_.row_owner_rank);
             insert_matrix_view = &*owned_row_matrix;
         }
         if (vector_view != nullptr) {
             if (vector_view == matrix_view && owned_row_matrix) {
                 insert_vector_view = insert_matrix_view;
             } else {
-                owned_row_vector.emplace(*vector_view, *row_dof_map_, row_dof_offset_);
+                owned_row_vector.emplace(*vector_view, *row_dof_map_, row_dof_offset_, options_.row_owner_rank);
                 insert_vector_view = &*owned_row_vector;
             }
         }
@@ -2466,13 +2476,13 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
     GlobalSystemView* insert_matrix_view = &matrix_view;
     GlobalSystemView* insert_vector_view = vector_view;
     if (owned_rows_only) {
-        owned_row_matrix.emplace(matrix_view, *row_dof_map_, row_dof_offset_);
+        owned_row_matrix.emplace(matrix_view, *row_dof_map_, row_dof_offset_, options_.row_owner_rank);
         insert_matrix_view = &*owned_row_matrix;
         if (vector_view != nullptr) {
             if (vector_view == &matrix_view) {
                 insert_vector_view = insert_matrix_view;
             } else {
-                owned_row_vector.emplace(*vector_view, *row_dof_map_, row_dof_offset_);
+                owned_row_vector.emplace(*vector_view, *row_dof_map_, row_dof_offset_, options_.row_owner_rank);
                 insert_vector_view = &*owned_row_vector;
             }
         }
@@ -2873,13 +2883,13 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         GlobalSystemView* insert_matrix_view = &matrix_view;
         GlobalSystemView* insert_vector_view = vector_view;
         if (owned_rows_only) {
-            owned_row_matrix.emplace(matrix_view, *row_dof_map_, row_dof_offset_);
+            owned_row_matrix.emplace(matrix_view, *row_dof_map_, row_dof_offset_, options_.row_owner_rank);
             insert_matrix_view = &*owned_row_matrix;
             if (vector_view != nullptr) {
                 if (vector_view == &matrix_view) {
                     insert_vector_view = insert_matrix_view;
                 } else {
-                    owned_row_vector.emplace(*vector_view, *row_dof_map_, row_dof_offset_);
+                    owned_row_vector.emplace(*vector_view, *row_dof_map_, row_dof_offset_, options_.row_owner_rank);
                     insert_vector_view = &*owned_row_vector;
                 }
             }
@@ -3102,13 +3112,13 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
     GlobalSystemView* insert_matrix_view = &matrix_view;
     GlobalSystemView* insert_vector_view = vector_view;
     if (owned_rows_only) {
-        owned_row_matrix.emplace(matrix_view, *row_dof_map_, row_dof_offset_);
+        owned_row_matrix.emplace(matrix_view, *row_dof_map_, row_dof_offset_, options_.row_owner_rank);
         insert_matrix_view = &*owned_row_matrix;
         if (vector_view != nullptr) {
             if (vector_view == &matrix_view) {
                 insert_vector_view = insert_matrix_view;
             } else {
-                owned_row_vector.emplace(*vector_view, *row_dof_map_, row_dof_offset_);
+                owned_row_vector.emplace(*vector_view, *row_dof_map_, row_dof_offset_, options_.row_owner_rank);
                 insert_vector_view = &*owned_row_vector;
             }
         }
@@ -3463,14 +3473,14 @@ AssemblyResult StandardAssembler::assembleCellsCore(
     GlobalSystemView* insert_vector_view = vector_view;
     if (owned_rows_only) {
         if (matrix_view != nullptr) {
-            owned_row_matrix.emplace(*matrix_view, *row_dof_map_, row_dof_offset_);
+            owned_row_matrix.emplace(*matrix_view, *row_dof_map_, row_dof_offset_, options_.row_owner_rank);
             insert_matrix_view = &*owned_row_matrix;
         }
         if (vector_view != nullptr) {
             if (vector_view == matrix_view && owned_row_matrix) {
                 insert_vector_view = insert_matrix_view;
             } else {
-                owned_row_vector.emplace(*vector_view, *row_dof_map_, row_dof_offset_);
+                owned_row_vector.emplace(*vector_view, *row_dof_map_, row_dof_offset_, options_.row_owner_rank);
                 insert_vector_view = &*owned_row_vector;
             }
         }
@@ -5559,14 +5569,16 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         ts.insert_vector = t.vector_view;
         if (owned_rows_only) {
             if (t.matrix_view && t.assemble_matrix) {
-                ts.owned_matrix_view.emplace(*t.matrix_view, *t.row_dof_map, t.row_dof_offset);
+                ts.owned_matrix_view.emplace(*t.matrix_view, *t.row_dof_map, t.row_dof_offset,
+                                             options_.row_owner_rank);
                 ts.insert_matrix = &*ts.owned_matrix_view;
             }
             if (t.vector_view && t.assemble_vector) {
                 if (t.vector_view == t.matrix_view && ts.owned_matrix_view) {
                     ts.insert_vector = ts.insert_matrix;
                 } else {
-                    ts.owned_vector_view.emplace(*t.vector_view, *t.row_dof_map, t.row_dof_offset);
+                    ts.owned_vector_view.emplace(*t.vector_view, *t.row_dof_map, t.row_dof_offset,
+                                                options_.row_owner_rank);
                     ts.insert_vector = &*ts.owned_vector_view;
                 }
             }
@@ -5627,7 +5639,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             if (owned_rows_only) {
                 if (parent_term.matrix_view && parent_term.assemble_matrix) {
                     insert.owned_matrix_view.emplace(
-                        *parent_term.matrix_view, *bs.row_dof_map, bs.row_dof_offset);
+                        *parent_term.matrix_view, *bs.row_dof_map, bs.row_dof_offset,
+                        options_.row_owner_rank);
                     insert.insert_matrix = &*insert.owned_matrix_view;
                 }
                 if (parent_term.vector_view && parent_term.assemble_vector) {
@@ -5636,7 +5649,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         insert.insert_vector = insert.insert_matrix;
                     } else {
                         insert.owned_vector_view.emplace(
-                            *parent_term.vector_view, *bs.row_dof_map, bs.row_dof_offset);
+                            *parent_term.vector_view, *bs.row_dof_map, bs.row_dof_offset,
+                            options_.row_owner_rank);
                         insert.insert_vector = &*insert.owned_vector_view;
                     }
                 }
@@ -9286,14 +9300,16 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             std::optional<OwnedRowOnlyView> owned_vec_view;
                             if (owned_rows_only) {
                                 if (ins_mat != nullptr) {
-                                    owned_mat_view.emplace(*ins_mat, *bs.row_dof_map, bs.row_dof_offset);
+                                    owned_mat_view.emplace(*ins_mat, *bs.row_dof_map, bs.row_dof_offset,
+                                                          options_.row_owner_rank);
                                     ins_mat = &*owned_mat_view;
                                 }
                                 if (ins_vec != nullptr) {
                                     if (ins_vec == parent_term.matrix_view && owned_mat_view) {
                                         ins_vec = ins_mat;
                                     } else {
-                                        owned_vec_view.emplace(*ins_vec, *bs.row_dof_map, bs.row_dof_offset);
+                                        owned_vec_view.emplace(*ins_vec, *bs.row_dof_map, bs.row_dof_offset,
+                                                              options_.row_owner_rank);
                                         ins_vec = &*owned_vec_view;
                                     }
                                 }

@@ -102,34 +102,6 @@ struct FsilsLocalConstraintMeanStats {
     Real fluctuation_rms{0.0};
 };
 
-enum class FsilsResidualValidationSyncMode : std::uint8_t {
-    UpdateGhosts,
-    AccumulateOverlap,
-    AccumulateThenUpdateGhosts,
-};
-
-[[nodiscard]] FsilsResidualValidationSyncMode fsilsResidualValidationSyncMode() noexcept
-{
-    const char* env = std::getenv("SVMP_FSILS_RESIDUAL_VALIDATION_SYNC");
-    if (env == nullptr) {
-        return FsilsResidualValidationSyncMode::UpdateGhosts;
-    }
-
-    std::string value(env);
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
-
-    if (value == "accumulate" || value == "accumulateoverlap") {
-        return FsilsResidualValidationSyncMode::AccumulateOverlap;
-    }
-    if (value == "both" || value == "accumulate_then_update" ||
-        value == "accumulate-then-update") {
-        return FsilsResidualValidationSyncMode::AccumulateThenUpdateGhosts;
-    }
-    return FsilsResidualValidationSyncMode::UpdateGhosts;
-}
-
 [[nodiscard]] bool fsilsCompareFaceOperatorEnabled() noexcept
 {
     const char* env = std::getenv("SVMP_FSILS_COMPARE_FACE_OPERATOR");
@@ -362,7 +334,7 @@ void addRankOneUpdatesToProduct(std::span<const RankOneUpdate> updates,
         }
     }
     correction_view->finalizeAssembly();
-    correction.accumulateOverlap();
+    correction.accumulateRawContributionsAndUpdateGhosts();
 
     auto y_span = y.localSpan();
     const auto correction_span = correction.localSpan();
@@ -376,17 +348,36 @@ void addRankOneUpdatesToProduct(std::span<const RankOneUpdate> updates,
 void addReducedFieldUpdatesToProduct(std::span<const ReducedFieldUpdate> updates,
                                      FsilsVector& x,
                                      FsilsVector& y,
-                                     fe_fsi_linear_solver::FSILS_commuType& commu)
+                                     fe_fsi_linear_solver::FSILS_commuType& commu,
+                                     std::span<const GroupedBorderedFieldCoupling> exact_groups = {})
 {
     if (updates.empty()) {
         return;
     }
+
+    auto groupedUpdateHandledExactly = [&](int grouped_coupling_id) {
+        if (grouped_coupling_id < 0) {
+            return false;
+        }
+        for (const auto& group : exact_groups) {
+            const int rank = static_cast<int>(group.modes.size());
+            if (group.grouped_coupling_id == grouped_coupling_id &&
+                rank > 0 &&
+                group.aux_matrix.size() == static_cast<std::size_t>(rank * rank)) {
+                return true;
+            }
+        }
+        return false;
+    };
 
     auto x_view = x.createAssemblyView();
     FE_CHECK_NOT_NULL(x_view.get(), "FsilsLinearSolver: reduced-update x view");
 
     std::vector<Real> dots(updates.size(), Real(0.0));
     for (std::size_t u = 0; u < updates.size(); ++u) {
+        if (groupedUpdateHandledExactly(updates[u].grouped_coupling_id)) {
+            continue;
+        }
         Real local_dot = Real(0.0);
         for (const auto& [dof, val] : updates[u].right) {
             local_dot += val * x_view->getVectorEntry(dof);
@@ -416,6 +407,9 @@ void addReducedFieldUpdatesToProduct(std::span<const ReducedFieldUpdate> updates
     FE_CHECK_NOT_NULL(correction_view.get(), "FsilsLinearSolver: reduced-update correction view");
     correction_view->beginAssemblyPhase();
     for (std::size_t u = 0; u < updates.size(); ++u) {
+        if (groupedUpdateHandledExactly(updates[u].grouped_coupling_id)) {
+            continue;
+        }
         const Real scale = updates[u].sigma * dots[u];
         if (std::abs(scale) <= Real(1e-30)) {
             continue;
@@ -425,7 +419,7 @@ void addReducedFieldUpdatesToProduct(std::span<const ReducedFieldUpdate> updates
         }
     }
     correction_view->finalizeAssembly();
-    correction.accumulateOverlap();
+    correction.accumulateRawContributionsAndUpdateGhosts();
 
     auto y_span = y.localSpan();
     const auto correction_span = correction.localSpan();
@@ -507,7 +501,7 @@ void addGroupedBorderedFieldCouplingsToProduct(
     }
 
     correction_view->finalizeAssembly();
-    correction.accumulateOverlap();
+    correction.accumulateRawContributionsAndUpdateGhosts();
 
     auto y_span = y.localSpan();
     const auto correction_span = correction.localSpan();
@@ -517,6 +511,11 @@ void addGroupedBorderedFieldCouplingsToProduct(
     for (std::size_t i = 0; i < y_span.size(); ++i) {
         y_span[i] += correction_span[i];
     }
+}
+
+void prepareRhsVectorForOperator(FsilsVector& rhs)
+{
+    rhs.updateGhosts();
 }
 
 [[nodiscard]] bool solveDenseSystemInPlace(std::vector<Real>& a,
@@ -1223,6 +1222,89 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 "FsilsLinearSolver::solve: nnz exceeds FSILS int index range");
     Array<double> Val(dof * dof, static_cast<int>(nnz), values_work_.data());
 
+    auto dumpPreparedMatrixRowIfRequested = [&](std::string_view phase) {
+        const int target_global_node = fsilsDumpPreparedRowGlobalNode();
+        const int row_comp = fsilsDumpPreparedRowComponent();
+        const char* dump_prefix = fsilsDumpPreparedRowPrefix();
+        if (target_global_node < 0 || row_comp < 0 || row_comp >= dof || dump_prefix == nullptr) {
+            return;
+        }
+
+        const int target_old = shared_layout->globalNodeToOld(target_global_node);
+        if (target_old < 0 || target_old >= lhs.nNo) {
+            return;
+        }
+        const int row_internal = lhs.map(target_old);
+        if (row_internal < 0 || row_internal >= lhs.nNo) {
+            return;
+        }
+
+        std::vector<int> internal_to_old(static_cast<std::size_t>(lhs.nNo), -1);
+        for (int old = 0; old < lhs.nNo; ++old) {
+            const int internal = lhs.map(old);
+            if (internal >= 0 && internal < lhs.nNo) {
+                internal_to_old[static_cast<std::size_t>(internal)] = old;
+            }
+        }
+
+        std::ostringstream path;
+        path << dump_prefix << ".matrix." << phase
+             << ".g" << target_global_node
+             << ".r" << row_comp
+             << ".rank" << lhs.commu.task
+             << ".txt";
+        std::ofstream out(path.str());
+        if (!out) {
+            return;
+        }
+
+        const GlobalIndex backend_row_dof =
+            static_cast<GlobalIndex>(target_global_node) * static_cast<GlobalIndex>(dof) +
+            static_cast<GlobalIndex>(row_comp);
+        GlobalIndex fe_row_dof = backend_row_dof;
+        if (const auto* perm = shared_layout->dof_permutation.get();
+            perm != nullptr && !perm->inverse.empty() &&
+            static_cast<std::size_t>(backend_row_dof) < perm->inverse.size()) {
+            fe_row_dof = perm->inverse[static_cast<std::size_t>(backend_row_dof)];
+        }
+
+        const int col_comp_filter = fsilsDumpPreparedColComponent();
+        out << "# task " << lhs.commu.task
+            << " phase " << phase
+            << " global_row_node " << target_global_node
+            << " old_row " << target_old
+            << " row_kind " << ((target_old < shared_layout->owned_node_count) ? "owned" : "ghost")
+            << " internal_row " << row_internal
+            << " row_component " << row_comp
+            << " backend_row_dof " << backend_row_dof
+            << " fe_row_dof " << fe_row_dof
+            << " col_component_filter " << col_comp_filter << "\n";
+        out << "# col_global_node col_component value col_old col_kind\n";
+        for (int nz = lhs.rowPtr(0, row_internal); nz <= lhs.rowPtr(1, row_internal); ++nz) {
+            const int col_internal = lhs.colPtr(nz);
+            if (col_internal < 0 || col_internal >= lhs.nNo) {
+                continue;
+            }
+            const int col_old = internal_to_old[static_cast<std::size_t>(col_internal)];
+            if (col_old < 0 || col_old >= lhs.nNo) {
+                continue;
+            }
+            const int col_global_node = shared_layout->oldToGlobalNode(col_old);
+            const char* col_kind = (col_old < shared_layout->owned_node_count) ? "owned" : "ghost";
+            for (int col_comp = 0; col_comp < dof; ++col_comp) {
+                if (col_comp_filter >= 0 && col_comp != col_comp_filter) {
+                    continue;
+                }
+                out << col_global_node
+                    << ' ' << col_comp
+                    << ' ' << Val(row_comp * dof + col_comp, nz)
+                    << ' ' << col_old
+                    << ' ' << col_kind
+                    << '\n';
+            }
+        }
+    };
+
     // Optional scaling used for the BlockSchur solver path.
     //
     // The legacy solver scales resistance-type coupled BC tangent contributions by (gamma*dt),
@@ -1344,6 +1426,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             applyStageScalingToMatrix();
             applySaddlePointEnforcement();
         }
+        dumpPreparedMatrixRowIfRequested(blockschur_preparation ? "blockschur" : "original");
     };
 
     const bool pure_mpi_native_face_rank_one_case =
@@ -1571,45 +1654,13 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         if (total_has > 1) {
             face.sharedFlag = true;
             auto sync_face_array = [&](Array<double>& arr) {
-                Array<double> v(face_dof, lhs.nNo);
-                v = 0.0;
-
-                for (int a = 0; a < face.nNo; ++a) {
-                    const int Ac = face.glob(a);
-                    for (int i = 0; i < face_dof; ++i) {
-                        v(i, Ac) = arr(i, a);
-                    }
-                }
-
-                fe_fsi_linear_solver::fsils_commuv(lhs, face_dof, v);
-
-                for (int a = 0; a < face.nNo; ++a) {
-                    const int Ac = face.glob(a);
-                    for (int i = 0; i < face_dof; ++i) {
-                        arr(i, a) = v(i, Ac);
-                    }
-                }
+                fe_fsi_linear_solver::fsils_reduce_shared_face_values_owned_row(lhs, face_dof, face.glob, arr);
             };
 
             sync_face_array(face.val);
             if (face.bGrp == fe_fsi_linear_solver::BcType::BC_TYPE_Dir) {
-                Array<double> counts(face_dof, lhs.nNo);
-                counts = 0.0;
-                for (int a = 0; a < face.nNo; ++a) {
-                    const int Ac = face.glob(a);
-                    for (int i = 0; i < face_dof; ++i) {
-                        counts(i, Ac) = 1.0;
-                    }
-                }
-                fe_fsi_linear_solver::fsils_commuv(lhs, face_dof, counts);
-                constexpr double kMaskTol = 1e-12;
-                for (int a = 0; a < face.nNo; ++a) {
-                    const int Ac = face.glob(a);
-                    for (int i = 0; i < face_dof; ++i) {
-                        face.val(i, a) =
-                            (face.val(i, a) >= counts(i, Ac) - kMaskTol) ? 1.0 : 0.0;
-                    }
-                }
+                fe_fsi_linear_solver::fsils_apply_shared_dirichlet_face_mask(
+                    lhs, face_dof, face.glob, face.val);
             }
             if (face.valM.nrows() == face.val.nrows() && face.valM.ncols() == face.val.ncols()) {
                 sync_face_array(face.valM);
@@ -1813,7 +1864,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             }
 
             if (lhs.commu.nTasks > 1 && face_dof > 0) {
-                fe_fsi_linear_solver::fsils_commuv(lhs, face_dof, face_values);
+                fe_fsi_linear_solver::fsils_syncv_owned_to_ghost(lhs, face_dof, face_values);
             }
 
             std::vector<int> face_nodes;
@@ -1987,7 +2038,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             }
 
             if (lhs.commu.nTasks > 1) {
-                fe_fsi_linear_solver::fsils_commuv(lhs, dof, values);
+                fe_fsi_linear_solver::fsils_reverse_scatterv_contribution_buffer(lhs, dof, values);
+                fe_fsi_linear_solver::fsils_syncv_owned_to_ghost(lhs, dof, values);
             }
 
             result.full.reserve(static_cast<std::size_t>(dof) * static_cast<std::size_t>(lhs.nNo));
@@ -2607,7 +2659,11 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     auto loadSolveBufferFromVector = [&](const FsilsVector& src, bool blockschur_preparation) {
         const double tp0 = fe_fsi_linear_solver::fsils_cpu_t();
         copyVectorOldToInternal(src, solve_buffer);
-        fe_fsi_linear_solver::fsils_commuv(lhs, dof, Ri);
+        logLocalSolveBufferStats(blockschur_preparation ? "raw_rhs_blockschur" : "raw_rhs_original");
+        // Owned-row FSILS uses PETSc-like RHS semantics: off-rank row
+        // contributions are routed to their owner during FE assembly, and the
+        // solve only needs owner-to-ghost halo values for local columns.
+        fe_fsi_linear_solver::fsils_syncv_owned_to_ghost(lhs, dof, Ri);
 
         if (blockschur_preparation && stage_scale != 1.0) {
             const Real s = static_cast<Real>(stage_scale);
@@ -2718,29 +2774,22 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     auto computeTrueResidualVector = [&](FsilsVector& residual_true, Real& rhs_norm_out) {
         FsilsVector rhs_true(shared_layout);
         rhs_true.copyFrom(*b);
-        rhs_true.accumulateOverlap();
+        prepareRhsVectorForOperator(rhs_true);
         rhs_norm_out = rhs_true.norm();
 
         FsilsVector x_true(shared_layout);
         x_true.copyFrom(*x);
-        switch (fsilsResidualValidationSyncMode()) {
-            case FsilsResidualValidationSyncMode::UpdateGhosts:
-                x_true.updateGhosts();
-                break;
-            case FsilsResidualValidationSyncMode::AccumulateOverlap:
-                x_true.accumulateOverlap();
-                break;
-            case FsilsResidualValidationSyncMode::AccumulateThenUpdateGhosts:
-                x_true.accumulateOverlap();
-                x_true.updateGhosts();
-                break;
-        }
+        x_true.updateGhosts();
 
         FsilsVector ax_true(shared_layout);
         A->mult(x_true, ax_true);
         ax_true.updateGhosts();
         addRankOneUpdatesToProduct(rank_one_updates_, x_true, ax_true, lhs.commu);
-        addReducedFieldUpdatesToProduct(reduced_field_updates_, x_true, ax_true, lhs.commu);
+        addReducedFieldUpdatesToProduct(reduced_field_updates_,
+                                        x_true,
+                                        ax_true,
+                                        lhs.commu,
+                                        grouped_bordered_field_couplings_);
         addGroupedBorderedFieldCouplingsToProduct(grouped_bordered_field_couplings_,
                                                   x_true,
                                                   ax_true,
@@ -2759,7 +2808,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     auto computeOriginalRhsNorm = [&]() -> Real {
         FsilsVector rhs_true(shared_layout);
         rhs_true.copyFrom(*b);
-        rhs_true.accumulateOverlap();
+        prepareRhsVectorForOperator(rhs_true);
         return rhs_true.norm();
     };
 
@@ -2940,7 +2989,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         addReducedFieldUpdatesToProduct(reduced_field_updates_,
                                         x_eval,
                                         low_rank_eval_current,
-                                        lhs.commu);
+                                        lhs.commu,
+                                        grouped_bordered_field_couplings_);
         addGroupedBorderedFieldCouplingsToProduct(grouped_bordered_field_couplings_,
                                                   x_eval,
                                                   low_rank_eval_current,
@@ -2959,7 +3009,11 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             FsilsVector y(shared_layout);
             A->mult(q_eval, y);
             addRankOneUpdatesToProduct(rank_one_updates_, q_eval, y, lhs.commu);
-            addReducedFieldUpdatesToProduct(reduced_field_updates_, q_eval, y, lhs.commu);
+            addReducedFieldUpdatesToProduct(reduced_field_updates_,
+                                            q_eval,
+                                            y,
+                                            lhs.commu,
+                                            grouped_bordered_field_couplings_);
             addGroupedBorderedFieldCouplingsToProduct(grouped_bordered_field_couplings_,
                                                       q_eval,
                                                       y,
@@ -3383,7 +3437,11 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         FsilsVector az(shared_layout);
         az.copyFrom(az_matrix);
         addRankOneUpdatesToProduct(rank_one_updates_, mean_mode, az, lhs.commu);
-        addReducedFieldUpdatesToProduct(reduced_field_updates_, mean_mode, az, lhs.commu);
+        addReducedFieldUpdatesToProduct(reduced_field_updates_,
+                                        mean_mode,
+                                        az,
+                                        lhs.commu,
+                                        grouped_bordered_field_couplings_);
         addGroupedBorderedFieldCouplingsToProduct(grouped_bordered_field_couplings_,
                                                   mean_mode,
                                                   az,
@@ -3431,6 +3489,103 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                     local_hh_mom += hv * hv;
                 }
             }
+        }
+
+        if (const char* rows_env = std::getenv("SVMP_FSILS_MEAN_MODE_ROWS");
+            rows_env != nullptr && rows_env[0] != '\0' && rows_env[0] != '0') {
+            struct RowRec {
+                long double magnitude{0.0L};
+                Real value{0.0};
+                int internal_node{-1};
+                int old_node{-1};
+                int global_node{-1};
+                GlobalIndex backend_dof{INVALID_GLOBAL_INDEX};
+                GlobalIndex fe_dof{INVALID_GLOBAL_INDEX};
+                int owner{-1};
+            };
+
+            int limit = 8;
+            try {
+                limit = std::max(1, std::stoi(std::string(rows_env)));
+            } catch (...) {
+                limit = 8;
+            }
+
+            std::vector<RowRec> rows;
+            rows.reserve(static_cast<std::size_t>(lhs.mynNo));
+            for (int node = 0; node < lhs.mynNo; ++node) {
+                const std::size_t idx =
+                    static_cast<std::size_t>(node) * static_cast<std::size_t>(dof) +
+                    static_cast<std::size_t>(con_start);
+                const Real value = az_matrix_internal[idx];
+                if (value == Real(0.0)) {
+                    continue;
+                }
+
+                int old = -1;
+                if (shared_layout && static_cast<std::size_t>(node) < shared_layout->old_of_internal.size()) {
+                    old = shared_layout->old_of_internal[static_cast<std::size_t>(node)];
+                }
+                int global_node = -1;
+                if (shared_layout) {
+                    global_node = shared_layout->oldToGlobalNode(old);
+                }
+                const auto backend_dof =
+                    (global_node >= 0)
+                        ? static_cast<GlobalIndex>(global_node) * static_cast<GlobalIndex>(dof) +
+                              static_cast<GlobalIndex>(con_start)
+                        : INVALID_GLOBAL_INDEX;
+
+                GlobalIndex fe_dof = backend_dof;
+                int owner = -1;
+                if (shared_layout && shared_layout->dof_permutation &&
+                    !shared_layout->dof_permutation->empty() &&
+                    backend_dof >= 0 &&
+                    static_cast<std::size_t>(backend_dof) < shared_layout->dof_permutation->inverse.size()) {
+                    fe_dof = shared_layout->dof_permutation->inverse[static_cast<std::size_t>(backend_dof)];
+                    if (static_cast<std::size_t>(backend_dof) <
+                        shared_layout->dof_permutation->owner_rank.size()) {
+                        owner = shared_layout->dof_permutation->owner_rank[static_cast<std::size_t>(backend_dof)];
+                    }
+                }
+
+                rows.push_back(RowRec{std::abs(static_cast<long double>(value)),
+                                      value,
+                                      node,
+                                      old,
+                                      global_node,
+                                      backend_dof,
+                                      fe_dof,
+                                      owner});
+            }
+
+            std::sort(rows.begin(), rows.end(), [](const RowRec& a, const RowRec& b) {
+                if (a.magnitude != b.magnitude) {
+                    return a.magnitude > b.magnitude;
+                }
+                return a.global_node < b.global_node;
+            });
+
+            std::ostringstream rows_oss;
+            rows_oss << "FsilsLinearSolver::solve: mean-mode local pressure-row top"
+                     << " phase='" << phase << "'"
+                     << " rank=" << lhs.commu.task
+                     << " local_Jz_con=" << std::sqrt(std::max<long double>(0.0L, local_jj_con))
+                     << " nonzero_rows=" << rows.size();
+            const auto n_print = std::min<std::size_t>(rows.size(), static_cast<std::size_t>(limit));
+            for (std::size_t i = 0; i < n_print; ++i) {
+                const auto& r = rows[i];
+                rows_oss << " [i=" << i
+                         << " val=" << r.value
+                         << " internal=" << r.internal_node
+                         << " old=" << r.old_node
+                         << " node=" << r.global_node
+                         << " be=" << r.backend_dof
+                         << " fe=" << r.fe_dof
+                         << " owner=" << r.owner
+                         << "]";
+            }
+            traceLog(rows_oss.str());
         }
 
         long double global_rr = local_rr;
@@ -3886,7 +4041,11 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             FsilsVector fe_y(shared_layout);
             fe_y.copyFrom(fe_matrix);
             addRankOneUpdatesToProduct(rank_one_updates_, probe_fe, fe_y, lhs.commu);
-            addReducedFieldUpdatesToProduct(reduced_field_updates_, probe_fe, fe_y, lhs.commu);
+            addReducedFieldUpdatesToProduct(reduced_field_updates_,
+                                            probe_fe,
+                                            fe_y,
+                                            lhs.commu,
+                                            grouped_bordered_field_couplings_);
             addGroupedBorderedFieldCouplingsToProduct(grouped_bordered_field_couplings_,
                                                       probe_fe,
                                                       fe_y,
@@ -3924,7 +4083,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 probe_old, std::span<Real>(probe_internal_data.data(), probe_internal_data.size()));
             Array<double> probe_internal(dof, lhs.nNo, probe_internal_data.data());
             Array<double> fsils_internal(dof, lhs.nNo, fsils_internal_data.data());
-            fe_fsi_linear_solver::fsils_syncv(lhs, dof, probe_internal);
+            fe_fsi_linear_solver::fsils_syncv_owned_to_ghost(lhs, dof, probe_internal);
 
             std::vector<Real> fsils_matrix_data(solve_buffer.size(), Real(0.0));
             Array<double> fsils_matrix_internal(dof, lhs.nNo, fsils_matrix_data.data());
@@ -4111,7 +4270,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             dumpOwnerAlignedVector("rhs_input", "vector", rhs_probe);
             FsilsVector rhs_accum(shared_layout);
             rhs_accum.copyFrom(*b);
-            rhs_accum.accumulateOverlap();
+            prepareRhsVectorForOperator(rhs_accum);
             dumpOwnerAlignedVector("rhs_input_accum", "vector", rhs_accum);
         }
 
@@ -4282,7 +4441,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
         FsilsVector rhs_eval(shared_layout);
         rhs_eval.copyFrom(*b);
-        rhs_eval.accumulateOverlap();
+        prepareRhsVectorForOperator(rhs_eval);
 
         FsilsVector x_eval(shared_layout);
         x_eval.copyFrom(solution);
@@ -4307,7 +4466,11 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         FsilsVector rank_one_eval(shared_layout);
         rank_one_eval.zero();
         addRankOneUpdatesToProduct(rank_one_updates_, x_eval, rank_one_eval, lhs.commu);
-        addReducedFieldUpdatesToProduct(reduced_field_updates_, x_eval, rank_one_eval, lhs.commu);
+        addReducedFieldUpdatesToProduct(reduced_field_updates_,
+                                        x_eval,
+                                        rank_one_eval,
+                                        lhs.commu,
+                                        grouped_bordered_field_couplings_);
         addGroupedBorderedFieldCouplingsToProduct(grouped_bordered_field_couplings_,
                                                   x_eval,
                                                   rank_one_eval,
@@ -4389,22 +4552,11 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 const std::uint64_t dump_index = residual_validation_dump_index++;
                 FsilsVector rhs_true(shared_layout);
                 rhs_true.copyFrom(*b);
-                rhs_true.accumulateOverlap();
+                prepareRhsVectorForOperator(rhs_true);
 
                 FsilsVector x_true(shared_layout);
                 x_true.copyFrom(*x);
-                switch (fsilsResidualValidationSyncMode()) {
-                    case FsilsResidualValidationSyncMode::UpdateGhosts:
-                        x_true.updateGhosts();
-                        break;
-                    case FsilsResidualValidationSyncMode::AccumulateOverlap:
-                        x_true.accumulateOverlap();
-                        break;
-                    case FsilsResidualValidationSyncMode::AccumulateThenUpdateGhosts:
-                        x_true.accumulateOverlap();
-                        x_true.updateGhosts();
-                        break;
-                }
+                x_true.updateGhosts();
 
                 FsilsVector ax_matrix(shared_layout);
                 A->mult(x_true, ax_matrix);
@@ -4412,7 +4564,11 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 FsilsVector ax_full(shared_layout);
                 ax_full.copyFrom(ax_matrix);
                 addRankOneUpdatesToProduct(rank_one_updates_, x_true, ax_full, lhs.commu);
-                addReducedFieldUpdatesToProduct(reduced_field_updates_, x_true, ax_full, lhs.commu);
+                addReducedFieldUpdatesToProduct(reduced_field_updates_,
+                                                x_true,
+                                                ax_full,
+                                                lhs.commu,
+                                                grouped_bordered_field_couplings_);
                 addGroupedBorderedFieldCouplingsToProduct(grouped_bordered_field_couplings_,
                                                           x_true,
                                                           ax_full,
@@ -4783,7 +4939,11 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         FsilsVector matvec_full(shared_layout);
         matvec_full.copyFrom(matvec_only);
         addRankOneUpdatesToProduct(rank_one_updates_, *x, matvec_full, lhs.commu);
-        addReducedFieldUpdatesToProduct(reduced_field_updates_, *x, matvec_full, lhs.commu);
+        addReducedFieldUpdatesToProduct(reduced_field_updates_,
+                                        *x,
+                                        matvec_full,
+                                        lhs.commu,
+                                        grouped_bordered_field_couplings_);
         addGroupedBorderedFieldCouplingsToProduct(grouped_bordered_field_couplings_,
                                                   *x,
                                                   matvec_full,
@@ -4791,7 +4951,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
         FsilsVector rhs_check(shared_layout);
         rhs_check.copyFrom(*b);
-        rhs_check.accumulateOverlap();
+        prepareRhsVectorForOperator(rhs_check);
 
         FsilsVector x_raw(shared_layout);
         x_raw.copyFrom(*x);
@@ -4986,7 +5146,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
         FsilsVector rhs_check(shared_layout);
         rhs_check.copyFrom(*b);
-        rhs_check.accumulateOverlap();
+        prepareRhsVectorForOperator(rhs_check);
 
         FsilsVector x_check(shared_layout);
         x_check.copyFrom(*x);
@@ -4995,7 +5155,11 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         FsilsVector matvec_full(shared_layout);
         A->mult(x_check, matvec_full);
         addRankOneUpdatesToProduct(rank_one_updates_, x_check, matvec_full, lhs.commu);
-        addReducedFieldUpdatesToProduct(reduced_field_updates_, x_check, matvec_full, lhs.commu);
+        addReducedFieldUpdatesToProduct(reduced_field_updates_,
+                                        x_check,
+                                        matvec_full,
+                                        lhs.commu,
+                                        grouped_bordered_field_couplings_);
         addGroupedBorderedFieldCouplingsToProduct(grouped_bordered_field_couplings_,
                                                   x_check,
                                                   matvec_full,

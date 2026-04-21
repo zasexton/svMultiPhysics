@@ -161,6 +161,7 @@ public:
                       DofEntityScope col_scope = DofEntityScope::Cell) override;
     void setDofHandler(const dofs::DofHandler& dof_handler) override;
     void setConstraints(const constraints::AffineConstraints* constraints) override;
+    void setSuppressConstraintInhomogeneity(bool suppress) override;
     void setSparsityPattern(const sparsity::SparsityPattern* sparsity) override;
     void setOptions(const AssemblyOptions& options) override;
     void setCurrentSolution(std::span<const Real> solution) override;
@@ -183,6 +184,11 @@ public:
     void setJITConstants(std::span<const Real> constants) noexcept override;
     void setCoupledValues(std::span<const Real> integrals,
                           std::span<const Real> aux_state) noexcept override;
+    void setAuxiliaryValues(std::span<const Real> inputs,
+                            std::span<const Real> state,
+                            std::span<const Real> outputs = {}) noexcept override;
+    void setAuxiliaryOutputBindings(
+        std::span<const AuxiliaryOutputBinding> bindings) noexcept override;
     void setMaterialStateProvider(IMaterialStateProvider* provider) noexcept override;
     [[nodiscard]] const AssemblyOptions& getOptions() const noexcept override;
 
@@ -285,6 +291,18 @@ public:
         AssemblyKernel& kernel,
         GlobalSystemView& matrix_view,
         GlobalSystemView* vector_view) override;
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    [[nodiscard]] AssemblyResult assembleInterfaceFaces(
+        const IMeshAccess& mesh,
+        const svmp::InterfaceMesh& interface_mesh,
+        int interface_marker,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
+        AssemblyKernel& kernel,
+        GlobalSystemView& matrix_view,
+        GlobalSystemView* vector_view) override;
+#endif
 
     [[nodiscard]] AssemblyResult assembleCellsFused(
         const IMeshAccess& mesh,

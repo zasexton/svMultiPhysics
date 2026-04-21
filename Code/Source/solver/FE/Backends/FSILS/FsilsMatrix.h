@@ -73,6 +73,8 @@ public:
     void addValue(GlobalIndex row, GlobalIndex col, Real value, assembly::AddMode mode);
 
     [[nodiscard]] std::shared_ptr<const FsilsShared> shared() const noexcept { return shared_; }
+    [[nodiscard]] bool usesOwnedRowOperator() const noexcept;
+    [[nodiscard]] bool ownsFeDofRow(GlobalIndex fe_dof) const noexcept;
 
     // Resolve local row/column FE DOFs to FSILS value-storage slots and reuse
     // that mapping across repeated assemblies with identical connectivity.

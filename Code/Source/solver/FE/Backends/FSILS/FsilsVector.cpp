@@ -269,10 +269,10 @@ void applyResolvedVectorEntries(std::vector<Real>& data,
     }
 }
 
-void exchangeFsilsOverlap(const FsilsShared& shared,
-                          std::vector<Real>& data,
-                          std::vector<double>& internal_work,
-                          bool owner_to_ghost_only)
+void exchangeFsilsOwnedHalo(const FsilsShared& shared,
+                            std::vector<Real>& data,
+                            std::vector<double>& internal_work,
+                            bool owner_to_ghost_only)
 {
     const auto& lhs = shared.lhs;
     if (lhs.commu.nTasks == 1) {
@@ -283,12 +283,12 @@ void exchangeFsilsOverlap(const FsilsShared& shared,
     const int nNo = lhs.nNo;
     const int mynNo = lhs.mynNo;
 
-    FE_THROW_IF(dof <= 0, InvalidArgumentException, "FsilsVector overlap exchange: invalid dof");
-    FE_THROW_IF(nNo < 0, InvalidArgumentException, "FsilsVector overlap exchange: invalid local node count");
+    FE_THROW_IF(dof <= 0, InvalidArgumentException, "FsilsVector owned-halo exchange: invalid dof");
+    FE_THROW_IF(nNo < 0, InvalidArgumentException, "FsilsVector owned-halo exchange: invalid local node count");
     FE_THROW_IF(static_cast<int>(data.size()) != dof * nNo,
-                InvalidArgumentException, "FsilsVector overlap exchange: local size mismatch");
+                InvalidArgumentException, "FsilsVector owned-halo exchange: local size mismatch");
     FE_THROW_IF(mynNo < 0 || mynNo > nNo,
-                InvalidArgumentException, "FsilsVector overlap exchange: invalid mynNo");
+                InvalidArgumentException, "FsilsVector owned-halo exchange: invalid mynNo");
 
     const auto work_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(nNo);
     internal_work.resize(work_size);
@@ -301,13 +301,20 @@ void exchangeFsilsOverlap(const FsilsShared& shared,
                                         static_cast<std::size_t>(old) * static_cast<std::size_t>(dof);
             const std::size_t int_idx = static_cast<std::size_t>(c) +
                                         static_cast<std::size_t>(internal) * static_cast<std::size_t>(dof);
-            internal_work[int_idx] =
-                (owner_to_ghost_only && internal >= mynNo) ? 0.0 : static_cast<double>(data[old_idx]);
+            internal_work[int_idx] = static_cast<double>(data[old_idx]);
         }
     }
 
     Array<double> U(dof, nNo, internal_work.data());
-    fe_fsi_linear_solver::fsils_commuv(lhs, dof, U);
+    FE_THROW_IF(!lhs.owned_row_operator,
+                InvalidArgumentException,
+                "FsilsVector: FE FSILS vectors require explicit owned-row layout");
+    if (owner_to_ghost_only) {
+        fe_fsi_linear_solver::fsils_syncv_owned_to_ghost(lhs, dof, U);
+    } else {
+        fe_fsi_linear_solver::fsils_reverse_scatterv_contribution_buffer(lhs, dof, U);
+        fe_fsi_linear_solver::fsils_syncv_owned_to_ghost(lhs, dof, U);
+    }
 
     for (int old = 0; old < nNo; ++old) {
         const int internal = lhs.map(old);
@@ -661,23 +668,115 @@ Real FsilsVector::norm() const
     return std::sqrt(dot(*this));
 }
 
-void FsilsVector::exchangeOverlap(bool owner_to_ghost_only)
+void FsilsVector::exchangeOwnedHalo(bool owner_to_ghost_only)
 {
     if (!shared_) {
         return;
     }
 
-    exchangeFsilsOverlap(*shared_, data_, overlap_internal_work_, owner_to_ghost_only);
+    exchangeFsilsOwnedHalo(*shared_, data_, halo_internal_work_, owner_to_ghost_only);
 }
 
 void FsilsVector::updateGhosts()
 {
-    exchangeOverlap(/*owner_to_ghost_only=*/true);
+    exchangeOwnedHalo(/*owner_to_ghost_only=*/true);
 }
 
-void FsilsVector::accumulateOverlap()
+void FsilsVector::accumulateRawContributionsAndUpdateGhosts()
 {
-    exchangeOverlap(/*owner_to_ghost_only=*/false);
+    exchangeOwnedHalo(/*owner_to_ghost_only=*/false);
+}
+
+bool FsilsVector::usesOwnedRowLayout() const noexcept
+{
+    return shared_ != nullptr && shared_->lhs.owned_row_operator;
+}
+
+bool FsilsVector::ownsFeDof(GlobalIndex fe_dof) const noexcept
+{
+    if (fe_dof < 0 || fe_dof >= global_size_) {
+        return false;
+    }
+    if (!shared_) {
+        return true;
+    }
+    if (shared_->dof <= 0) {
+        return false;
+    }
+
+    GlobalIndex backend_dof = fe_dof;
+    if (const auto perm = shared_->dof_permutation; perm && !perm->empty()) {
+        if (static_cast<std::size_t>(fe_dof) >= perm->forward.size()) {
+            return false;
+        }
+        backend_dof = perm->forward[static_cast<std::size_t>(fe_dof)];
+    }
+    if (backend_dof < 0 || backend_dof >= global_size_) {
+        return false;
+    }
+
+    const int global_node = static_cast<int>(backend_dof / shared_->dof);
+    const int old = shared_->globalNodeToOld(global_node);
+    if (old < 0 || old >= shared_->lhs.nNo) {
+        return false;
+    }
+
+    return old < shared_->owned_node_count;
+}
+
+std::vector<GlobalIndex> FsilsVector::ownedFeDofs() const
+{
+    if (!shared_) {
+        std::vector<GlobalIndex> out;
+        out.reserve(static_cast<std::size_t>(std::max<GlobalIndex>(global_size_, 0)));
+        for (GlobalIndex dof = 0; dof < global_size_; ++dof) {
+            out.push_back(dof);
+        }
+        return out;
+    }
+
+    const int dof = shared_->dof;
+    FE_THROW_IF(dof <= 0, InvalidArgumentException, "FsilsVector::ownedFeDofs: invalid dof");
+
+    const auto* perm = shared_->dof_permutation.get();
+    const bool has_inverse = perm != nullptr && !perm->inverse.empty();
+    const int owned_nodes = shared_->owned_node_count;
+
+    std::vector<GlobalIndex> out;
+    out.reserve(static_cast<std::size_t>(std::max(owned_nodes, 0)) *
+                static_cast<std::size_t>(dof));
+
+    for (int old = 0; old < shared_->lhs.nNo; ++old) {
+        if (old >= shared_->owned_node_count) {
+            continue;
+        }
+
+        const int backend_node = shared_->oldToGlobalNode(old);
+        if (backend_node < 0) {
+            continue;
+        }
+        for (int c = 0; c < dof; ++c) {
+            const GlobalIndex backend_dof =
+                static_cast<GlobalIndex>(backend_node) * static_cast<GlobalIndex>(dof) +
+                static_cast<GlobalIndex>(c);
+            if (backend_dof < 0 || backend_dof >= global_size_) {
+                continue;
+            }
+
+            GlobalIndex fe_dof = backend_dof;
+            if (has_inverse) {
+                if (static_cast<std::size_t>(backend_dof) >= perm->inverse.size()) {
+                    continue;
+                }
+                fe_dof = perm->inverse[static_cast<std::size_t>(backend_dof)];
+            }
+            if (fe_dof >= 0 && fe_dof < global_size_) {
+                out.push_back(fe_dof);
+            }
+        }
+    }
+
+    return out;
 }
 
 std::unique_ptr<assembly::GlobalSystemView> FsilsVector::createAssemblyView()

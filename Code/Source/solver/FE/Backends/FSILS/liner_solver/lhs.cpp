@@ -81,6 +81,7 @@ static void fsils_lhs_create_impl(FSILS_lhsType& lhs, FSILS_commuType& commu, in
   lhs.nnz = nnz;
   lhs.commu = commu;
   lhs.nFaces = nFaces;
+  lhs.owned_row_operator = (explicit_owned_nNo >= 0);
   #ifdef debug_fsils_lhs_create
   dmsg << "gnNo: " << gnNo;
   dmsg << "nNo: " << nNo;
@@ -140,6 +141,33 @@ static void fsils_lhs_create_impl(FSILS_lhsType& lhs, FSILS_commuType& commu, in
     return; 
   }
 
+  if (use_explicit_owned_nodes) {
+    for (fsils_int i = 0; i < nnz; i++) {
+      lhs.colPtr(i) = colPtr(i);
+    }
+
+    for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+      fsils_int s = rowPtr(Ac);
+      fsils_int e = rowPtr(Ac+1) - 1;
+
+      for (fsils_int i = s; i <= e; i++) {
+        int a = colPtr(i);
+        if (Ac == a) {
+          lhs.diagPtr(Ac) = i;
+          break;
+        }
+      }
+
+      lhs.rowPtr(0,Ac) = s;
+      lhs.rowPtr(1,Ac) = e;
+      lhs.map(Ac) = Ac;
+    }
+
+    lhs.mynNo = explicit_owned_nNo;
+    lhs.shnNo = lhs.mynNo;
+    return;
+  }
+
   // Phase 6A: Scalable P2P boundary discovery
   // Step 1: Exchange node count and range (min/max global ID) per rank
   // instead of the full O(maxnNo * nTasks) Allgatherv.
@@ -174,13 +202,7 @@ static void fsils_lhs_create_impl(FSILS_lhsType& lhs, FSILS_commuType& commu, in
 
   // Allocate storage only for candidates + self
   int nCandidates = static_cast<int>(candidates.size());
-  // Map from rank -> candidate index (or -1)
-  std::vector<int> rank_to_cand(nTasks, -1);
   int self_cand_idx = nCandidates; // self stored at index nCandidates
-  for (int c = 0; c < nCandidates; c++) {
-    rank_to_cand[candidates[c]] = c;
-  }
-  rank_to_cand[tF] = self_cand_idx;
 
   // aNodes now sized (maxnNo, nCandidates+1) — candidates + self
   Array<int> aNodes(maxnNo, nCandidates + 1);
@@ -221,18 +243,6 @@ static void fsils_lhs_create_impl(FSILS_lhsType& lhs, FSILS_commuType& commu, in
      gtlPtr[Ac] = a;
   }
 
-  if (use_explicit_owned_nodes) {
-    lhs.mynNo = explicit_owned_nNo;
-    // The async sparse-multiply path packs all communicated nodes before posting
-    // halo exchange. With explicit FE ownership, shared owned nodes are not
-    // permuted into a lower-rank prefix, so compute the whole owned prefix first.
-    lhs.shnNo = lhs.mynNo;
-
-    for (int a = 0; a < nNo; a++) {
-      ltg(a) = gNodes(a);
-      lhs.map(a) = a;
-    }
-  } else {
   // Classify shared nodes into front (shared with lower ranks) and back (shared with higher ranks).
   // The original FSILS code appended these in processor encounter order, which makes the internal
   // permutation depend on communicator topology. Keep the same front/local/back contract, but make
@@ -327,7 +337,6 @@ static void fsils_lhs_create_impl(FSILS_lhsType& lhs, FSILS_commuType& commu, in
      int Ac = gNodes(a);
      lhs.map(a) = gtlPtr[Ac];
   }
-  }
 
   // Based on the new ordering of the nodes, rowPtr and colPtr are constructed
   //
@@ -352,136 +361,10 @@ static void fsils_lhs_create_impl(FSILS_lhsType& lhs, FSILS_commuType& commu, in
     }
   }
 
-  // Constructing the communication data structure based on the ltg
-  // P2P exchange of reordered ltg with candidates
-  //
-  for (int i = 0; i < nNo; i++) {
-    aNodes(i, self_cand_idx) = ltg(i);
-  }
-  for (int i = nNo; i < maxnNo; i++) {
-    aNodes(i, self_cand_idx) = -1;
-  }
-
-  // Wait for first-round sends to complete before reusing buffers
-  if (nCandidates > 0) {
-    MPI_Waitall(nCandidates, send_reqs.data(), MPI_STATUSES_IGNORE);
-  }
-
-  for (int c = 0; c < nCandidates; c++) {
-    int other_nNo = all_info[3*candidates[c]];
-    MPI_Irecv(&aNodes(0, c), other_nNo, cm_mod::mpint, candidates[c], 3, comm, &recv_reqs[c]);
-    MPI_Isend(&aNodes(0, self_cand_idx), nNo, cm_mod::mpint, candidates[c], 3, comm, &send_reqs[c]);
-  }
-
-  if (nCandidates > 0) {
-    MPI_Waitall(nCandidates, recv_reqs.data(), MPI_STATUSES_IGNORE);
-  }
-
-  // Count shared nodes with each candidate
-  std::vector<int> shared_count(nCandidates, 0);
-  lhs.nReq = 0;
-
-  for (int c = 0; c < nCandidates; c++) {
-    int other_nNo = all_info[3*candidates[c]];
-    for (int a = 0; a < other_nNo; a++) {
-      int Ac = aNodes(a, c);
-      if (Ac == -1) {
-        break;
-      }
-      if (gtlPtr.count(Ac)) {
-        shared_count[c]++;
-      }
-    }
-
-    if (shared_count[c] != 0) {
-      lhs.nReq = lhs.nReq + 1;
-    }
-  }
-  #ifdef debug_fsils_lhs_create
-  dmsg << "lhs.nReq: " << lhs.nReq;
-  #endif
-
-  lhs.cS.resize(lhs.nReq);
-
-  // Now that we know which processor is communicating to which, we can
-  // setup the handles and structures
-  //
-  // lhs.cS[j].iP is the processor to communicate with.
-  //
-  #ifdef debug_fsils_lhs_create
-  dmsg << "Setup the handles ...";
-  #endif
-  int j = 0;
-  for (int c = 0; c < nCandidates; c++) {
-    int a = shared_count[c];
-    if (a != 0) {
-      lhs.cS[j].iP = candidates[c];
-      lhs.cS[j].n = a;
-      lhs.cS[j].ptr.resize(a);
-      j = j + 1;
-    }
-  }
-
-  // Pre-allocate communication buffers
-  if (lhs.nReq > 0) {
-    lhs.nmax_commu = std::max_element(lhs.cS.begin(), lhs.cS.end(),
-        [](const FSILS_cSType& a, const FSILS_cSType& b){ return a.n < b.n; })->n;
-    lhs.commu_sReq.resize(lhs.nReq);
-    lhs.commu_rReq.resize(lhs.nReq);
-    // Pre-allocate scalar comm buffers (nmax * nReq)
-    size_t scalar_sz = static_cast<size_t>(lhs.nmax_commu) * lhs.nReq;
-    lhs.commu_sB.resize(scalar_sz);
-    lhs.commu_rB.resize(scalar_sz);
-    lhs.commu_dof_capacity = 1;
-  }
-
-  // Order of nodes in ptr is based on the node order in processor
-  // with higher ID. ptr is calculated for tF+1:nTasks and will be
-  // sent over.
-  //
-  #ifdef debug_fsils_lhs_create
-  dmsg << "Order of nodes ...";
-  #endif
-  MPI_Status status;
-
-  for (int i = 0; i < lhs.nReq; i++) {
-    int iP = lhs.cS[i].iP;
-
-    if (iP < tF) {
-      MPI_Recv(lhs.cS[i].ptr.data(), lhs.cS[i].n, cm_mod::mpint, iP, 1,  comm, &status);
-
-      for (int j = 0; j < lhs.cS[i].n; j++) {
-        lhs.cS[i].ptr[j] = gtlPtr[lhs.cS[i].ptr[j]];
-      }
-    } else {
-      // This is a counter for the shared nodes
-      j = 0;
-      int cand_idx = rank_to_cand[iP];
-      int other_nNo = all_info[3*iP];
-      for (int a = 0; a < other_nNo; a++) {
-        // Global node number in processor iP at location a
-        int Ac = aNodes(a, cand_idx);
-        // Exit if this is the last node
-        if (Ac == -1) {
-          break;
-        }
-        // Corresponding local node in current processor
-        auto gtl_it2 = gtlPtr.find(Ac);
-        if (gtl_it2 != gtlPtr.end()) {
-          lhs.cS[i].ptr[j] = Ac;
-          j = j + 1;
-        }
-      }
-
-      MPI_Send(lhs.cS[i].ptr.data(), lhs.cS[i].n, cm_mod::mpint, iP, 1, comm);
-
-      for (int j = 0; j < lhs.cS[i].n; j++) {
-        lhs.cS[i].ptr[j] = gtlPtr[lhs.cS[i].ptr[j]];
-      }
-    }
-  }
-
-  // Wait for second-round sends to complete before local buffers go out of scope
+  // Wait for first-round sends to complete before local buffers go out of scope.
+  // FE solve-time communication is handled by the explicit owned_halo_* plan;
+  // this rank-derived path only needs the exchanged node lists to build the
+  // internal ordering above.
   if (nCandidates > 0) {
     MPI_Waitall(nCandidates, send_reqs.data(), MPI_STATUSES_IGNORE);
   }
@@ -514,28 +397,23 @@ void fsils_lhs_free(FSILS_lhsType& lhs)
     }
   }
 
-  for (int i = 0; i < lhs.nReq; i++) {
-    //IF (ALLOCATED(lhs.cS(i).ptr)) DEALLOCATE(lhs.cS(i).ptr)
-  }
-
   lhs.foC = false;
   lhs.gnNo   = 0;
   lhs.nNo    = 0;
   lhs.nnz    = 0;
   lhs.nFaces = 0;
+  lhs.owned_row_operator = false;
 
   lhs.colPtr.clear();
   lhs.rowPtr.clear();
   lhs.diagPtr.clear();
   lhs.map.clear();
-  lhs.cS.clear();
   lhs.face.clear();
-  lhs.nmax_commu = 0;
-  lhs.commu_sReq.clear();
-  lhs.commu_rReq.clear();
-  lhs.commu_sB.clear();
-  lhs.commu_rB.clear();
-  lhs.commu_dof_capacity = 0;
+  lhs.owned_halo_neighbor_ranks.clear();
+  lhs.owned_halo_send_nodes.clear();
+  lhs.owned_halo_recv_nodes.clear();
+  lhs.owned_halo_send_buffer.clear();
+  lhs.owned_halo_recv_buffer.clear();
 }
 
 

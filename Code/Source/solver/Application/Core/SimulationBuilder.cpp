@@ -563,6 +563,9 @@ void SimulationBuilder::setupSystem()
     oopCout() << "[svMultiPhysics::Application] FSILS backend: defaulting DOF numbering to interleaved"
               << std::endl;
   }
+  if (selectBackend(params_) == svmp::FE::backends::BackendKind::FSILS) {
+    setup_opts.use_backend_row_ownership_for_assembly = true;
+  }
 
   // Allow env var override for DOF numbering strategy
   if (const char* env = std::getenv("SVMP_DOF_NUMBERING"); env != nullptr) {

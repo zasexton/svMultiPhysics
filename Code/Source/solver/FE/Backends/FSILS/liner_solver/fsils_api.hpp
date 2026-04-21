@@ -47,19 +47,21 @@ void fsils_bc_free(FSILS_lhsType& lhs, int faIn);
 
 void fsils_bc_update(FSILS_lhsType& lhs, int faIn, int nNo, int dof, const Array<double>& Val);
     
-void fsils_commus(const FSILS_lhsType& lhs, Vector<double>& R);
+void fsils_reduce_shared_face_values_owned_row(const FSILS_lhsType& lhs,
+    int dof,
+    const Vector<int>& face_nodes,
+    Array<double>& face_values);
 
-void fsils_commuv(const FSILS_lhsType& lhs, int dof, Array<double>& R);
+void fsils_apply_shared_dirichlet_face_mask(const FSILS_lhsType& lhs,
+    int dof,
+    const Vector<int>& face_nodes,
+    Array<double>& face_values);
 
-void fsils_syncs(const FSILS_lhsType& lhs, Vector<double>& R);
+void fsils_reverse_scatterv_contribution_buffer(const FSILS_lhsType& lhs, int dof, Array<double>& R);
 
-void fsils_syncv(const FSILS_lhsType& lhs, int dof, Array<double>& R);
+void fsils_syncs_owned_to_ghost(const FSILS_lhsType& lhs, Vector<double>& R);
 
-void fsils_commus_begin(const FSILS_lhsType& lhs, Vector<double>& R);
-void fsils_commus_end(const FSILS_lhsType& lhs, Vector<double>& R);
-
-void fsils_commuv_begin(const FSILS_lhsType& lhs, int dof, Array<double>& R);
-void fsils_commuv_end(const FSILS_lhsType& lhs, int dof, Array<double>& R);
+void fsils_syncv_owned_to_ghost(const FSILS_lhsType& lhs, int dof, Array<double>& R);
 
 double fsils_cpu_t();
 
@@ -73,4 +75,3 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
 };
 
 #endif
-

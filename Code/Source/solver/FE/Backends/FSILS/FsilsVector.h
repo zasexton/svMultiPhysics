@@ -41,16 +41,13 @@ public:
     void updateGhosts() override;
 
     /**
-     * @brief Sum overlap contributions on shared nodes (additive communication).
+     * @brief Accumulate a raw contribution buffer and refresh ghost entries.
      *
-     * FSILS uses additive overlap exchange (`fsils_commuv`). This helper applies
-     * that exchange to the current vector values so that each rank holds the
-     * summed value for shared nodes.
-     *
-     * This is intentionally separate from updateGhosts(), which implements an
-     * owner->ghost synchronization used for solution/state vectors.
+     * Use this only for buffers that intentionally contain independently
+     * assembled contributions on both owned and ghost entries. Ordinary solver
+     * vectors should use updateGhosts() instead.
      */
-    void accumulateOverlap();
+    void accumulateRawContributionsAndUpdateGhosts();
 
     [[nodiscard]] std::unique_ptr<assembly::GlobalSystemView> createAssemblyView() override;
 
@@ -58,6 +55,9 @@ public:
     [[nodiscard]] std::span<const Real> localSpan() const override;
 
     [[nodiscard]] const FsilsShared* shared() const noexcept { return shared_.get(); }
+    [[nodiscard]] bool usesOwnedRowLayout() const noexcept;
+    [[nodiscard]] bool ownsFeDof(GlobalIndex fe_dof) const noexcept;
+    [[nodiscard]] std::vector<GlobalIndex> ownedFeDofs() const;
 
     [[nodiscard]] std::vector<Real>& data() noexcept { return data_; }
     [[nodiscard]] const std::vector<Real>& data() const noexcept { return data_; }
@@ -73,12 +73,12 @@ private:
         std::vector<GlobalIndex> resolved{};
     };
 
-    void exchangeOverlap(bool owner_to_ghost_only);
+    void exchangeOwnedHalo(bool owner_to_ghost_only);
 
     GlobalIndex global_size_{0};
     std::shared_ptr<const FsilsShared> shared_{};
     std::vector<Real> data_;
-    mutable std::vector<double> overlap_internal_work_{};
+    mutable std::vector<double> halo_internal_work_{};
     mutable std::unordered_map<std::size_t, std::vector<ResolutionCacheEntry>> resolution_cache_{};
 };
 

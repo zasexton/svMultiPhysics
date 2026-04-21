@@ -188,7 +188,7 @@ void addRankOneContribution(FsilsFactory& factory,
     auto* corr_fs = dynamic_cast<FsilsVector*>(corr.get());
     EXPECT_NE(corr_fs, nullptr);
     if (corr_fs != nullptr) {
-        corr_fs->accumulateOverlap();
+        corr_fs->updateGhosts();
     }
 
     auto ys = y.localSpan();
@@ -220,7 +220,7 @@ Real fullOperatorRelativeResidual(FsilsFactory& factory,
     auto* b_fs = dynamic_cast<FsilsVector*>(b_acc.get());
     EXPECT_NE(b_fs, nullptr);
     if (b_fs != nullptr) {
-        b_fs->accumulateOverlap();
+        b_fs->updateGhosts();
     }
 
     auto r = factory.createVector(b.size());
@@ -694,7 +694,7 @@ std::vector<Real> sampleDenseOperatorFromBackend(FsilsFactory& factory,
             auto* y_fs = dynamic_cast<FsilsVector*>(y.get());
             EXPECT_NE(y_fs, nullptr);
             if (y_fs != nullptr) {
-                y_fs->accumulateOverlap();
+                y_fs->updateGhosts();
             }
         }
 
@@ -771,7 +771,7 @@ void addReducedFieldContribution(FsilsFactory& factory,
     auto* corr_fs = dynamic_cast<FsilsVector*>(corr.get());
     EXPECT_NE(corr_fs, nullptr);
     if (corr_fs != nullptr) {
-        corr_fs->accumulateOverlap();
+        corr_fs->updateGhosts();
     }
 
     auto ys = y.localSpan();
@@ -803,7 +803,7 @@ Real fullOperatorRelativeResidual(FsilsFactory& factory,
     auto* b_fs = dynamic_cast<FsilsVector*>(b_acc.get());
     EXPECT_NE(b_fs, nullptr);
     if (b_fs != nullptr) {
-        b_fs->accumulateOverlap();
+        b_fs->updateGhosts();
     }
 
     auto r = factory.createVector(b.size());
@@ -1152,7 +1152,7 @@ TEST(FsilsBackendMPI, SolveNSBlockSchur3DOF)
         }
         auto* b_fs = dynamic_cast<FsilsVector*>(b_acc.get());
         ASSERT_NE(b_fs, nullptr);
-        b_fs->accumulateOverlap();
+        b_fs->updateGhosts();
 
         auto Ax = factory.createVector(n_global);
         A->mult(*x_case, *Ax);
@@ -2142,12 +2142,12 @@ TEST(FsilsBackendMPI, ReducedFieldUpdateDistributedShapeRhsMatchesReference)
 
     static constexpr Real expected_matrix[] = {
         5.0, 3.0, 2.0,
-        10.0, 6.0, 4.0,
+        5.0, 3.0, 2.0,
         5.0, 3.0, 2.0,
     };
     static constexpr Real expected_full[] = {
         15.35, -3.9, 2.0,
-        10.0, 6.0, 4.0,
+        5.0, 3.0, 2.0,
         39.5, -21.15, 2.0,
     };
 
@@ -2742,7 +2742,7 @@ TEST(FsilsBackendMPI, DISABLED_ReducedFieldUpdateDistributedShapeInternalRhsHand
 
     static constexpr Real expected_full[] = {
         15.35, -3.9, 2.0,
-        10.0, 6.0, 4.0,
+        5.0, 3.0, 2.0,
         39.5, -21.15, 2.0,
     };
 
@@ -2753,7 +2753,7 @@ TEST(FsilsBackendMPI, DISABLED_ReducedFieldUpdateDistributedShapeInternalRhsHand
 
     auto post_internal = pre_internal;
     Array<double> Ri(shared.dof, shared.lhs.nNo, post_internal.data());
-    fe_fsi_linear_solver::fsils_commuv(shared.lhs, shared.dof, Ri);
+    fe_fsi_linear_solver::fsils_syncv_owned_to_ghost(shared.lhs, shared.dof, Ri);
     const auto gathered_post =
         gatherOwnedInternalGlobalVector(shared, post_internal, n_global, MPI_COMM_WORLD);
     expectGatheredVectorMatches(gathered_post, expected_full);
@@ -4207,7 +4207,7 @@ TEST(FsilsBackendMPI, DISABLED_DistributedRankOneLooseBlockSchurTracksReferenceM
     auto* b_acc_fs = dynamic_cast<FsilsVector*>(b_acc.get());
     ASSERT_NE(b_acc_fs, nullptr);
     if (b_acc_fs != nullptr) {
-        b_acc_fs->accumulateOverlap();
+        b_acc_fs->updateGhosts();
     }
     const auto b_acc_global = gatherOwnedGlobalVector(*b_acc, n_global, MPI_COMM_WORLD);
     for (int i = 0; i < n_global; ++i) {
@@ -4343,7 +4343,7 @@ TEST(FsilsBackendMPI, DISABLED_DistributedRankOneLooseBlockSchurTracksReferenceM
             return std::numeric_limits<Real>::infinity();
         }
         if (accumulate_first) {
-            tmp_fs->accumulateOverlap();
+            tmp_fs->updateGhosts();
         }
         if (update_after) {
             tmp_fs->updateGhosts();
@@ -4698,7 +4698,7 @@ TEST(FsilsBackendMPI, SolveNSBlockSchur3DOFSubcommunicator)
     }
     auto* b_fs = dynamic_cast<FsilsVector*>(b_acc.get());
     ASSERT_NE(b_fs, nullptr);
-    b_fs->accumulateOverlap();
+    b_fs->updateGhosts();
 
     auto Ax = factory.createVector(n_global);
     A->mult(*x, *Ax);

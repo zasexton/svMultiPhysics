@@ -133,19 +133,19 @@ void bicgsv(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinear
       break;
     }
 
-    halo.sync_vector(dof, P);
+    halo.sync_owned_to_ghost_vector(dof, P);
     A.apply(
         dso::ghost_synced_input(dof, P),
-        dso::ghost_synced_output(dof, V));
+        dso::owned_only_output(dof, V));
     double denom_alpha = dot::fsils_dot_v(dof, mynNo, lhs.commu, Rh, V);
     if (std::abs(denom_alpha) < std::numeric_limits<double>::epsilon() * (std::abs(rho) + std::numeric_limits<double>::epsilon())) break;
     double alpha = rho / denom_alpha;
     omp_la::omp_axpby_v(dof, nNo, S, R, -alpha, V);
 
-    halo.sync_vector(dof, S);
+    halo.sync_owned_to_ghost_vector(dof, S);
     A.apply(
         dso::ghost_synced_input(dof, S),
-        dso::ghost_synced_output(dof, T));
+        dso::owned_only_output(dof, T));
     double schur_locals[3] = {
         norm::fsi_ls_norm_sq_local_v(dof, mynNo, S),
         dot::fsils_nc_dot_v(dof, mynNo, T, T),
@@ -206,7 +206,7 @@ void bicgsv(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinear
     i_itr += 1;
   }
 
-  halo.sync_vector(dof, X);
+  halo.sync_owned_to_ghost_vector(dof, X);
   R = X;
   ls.itr = i_itr - 1;
   ls.fNorm = err;
@@ -302,19 +302,19 @@ void bicgss(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinear
       break;
     }
 
-    halo.sync_scalar(P);
+    halo.sync_owned_to_ghost_scalar(P);
     A.apply(
         dso::ghost_synced_input(P),
-        dso::ghost_synced_output(V));
+        dso::owned_only_output(V));
     double denom_alpha = dot::fsils_dot_s(mynNo, lhs.commu, Rh, V);
     if (std::abs(denom_alpha) < std::numeric_limits<double>::epsilon() * (std::abs(rho) + std::numeric_limits<double>::epsilon())) break;
     double alpha = rho / denom_alpha;
     omp_la::omp_axpby_s(nNo, S, R, -alpha, V);
 
-    halo.sync_scalar(S);
+    halo.sync_owned_to_ghost_scalar(S);
     A.apply(
         dso::ghost_synced_input(S),
-        dso::ghost_synced_output(T));
+        dso::owned_only_output(T));
     double schur_locals[3] = {
         norm::fsi_ls_norm_sq_local_s(mynNo, S),
         dot::fsils_nc_dot_s(mynNo, T, T),
@@ -375,7 +375,7 @@ void bicgss(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinear
     i_itr += 1;
   }
 
-  halo.sync_scalar(X);
+  halo.sync_owned_to_ghost_scalar(X);
   R = X;
   ls.itr = i_itr - 1;
   ls.fNorm = err;
@@ -1315,7 +1315,7 @@ bool load_face_only_oracle_mode(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
   return signature;
 }
 
-[[nodiscard]] bool skip_post_solve_overlap_sum() noexcept
+[[nodiscard]] bool skip_post_solve_halo_sync() noexcept
 {
   const char* env = std::getenv("SVMP_FSILS_SKIP_POST_SOLVE_COMM");
   if (!env) {
@@ -1334,11 +1334,10 @@ void refresh_scalar_ghosts(const fe_fsi_linear_solver::HaloExchange& halo,
                            Vector<double>& values,
                            bool skip_refresh = false)
 {
-  if (skip_refresh || !halo.has_overlap()) {
+  if (skip_refresh || !halo.has_owned_halo()) {
     return;
   }
-  halo.begin_scalar(values);
-  halo.end_scalar(values);
+  halo.sync_owned_to_ghost_scalar(values);
 }
 
 void refresh_vector_ghosts(const fe_fsi_linear_solver::HaloExchange& halo,
@@ -1346,11 +1345,10 @@ void refresh_vector_ghosts(const fe_fsi_linear_solver::HaloExchange& halo,
                            Array<double>& values,
                            bool skip_refresh = false)
 {
-  if (skip_refresh || !halo.has_overlap()) {
+  if (skip_refresh || !halo.has_owned_halo()) {
     return;
   }
-  halo.begin_vector(dof, values);
-  halo.end_vector(dof, values);
+  halo.sync_owned_to_ghost_vector(dof, values);
 }
 
 struct SchurSparsityControl {
@@ -1705,8 +1703,9 @@ void build_point_inverse_blocks(const Vector<fsils_int>& diagPtr,
       diag_blocks(entry, i) = values(entry, diag_nz);
     }
   }
-  if (lhs != nullptr && lhs->commu.nTasks > 1 && lhs->nReq > 0) {
-    fsils_commuv(*lhs, block_entries, diag_blocks);
+  if (lhs != nullptr) {
+    const fe_fsi_linear_solver::HaloExchange halo(*lhs);
+    halo.sync_owned_to_ghost_vector(block_entries, diag_blocks);
   }
   for (fsils_int i = 0; i < nNo; ++i) {
     double* out = block_ptr(inv_blocks, block_entries, i);
@@ -2292,12 +2291,12 @@ void apply_base_schur_preconditioner(const Array<fsils_int>& rowPtr,
   apply_point_block_inverse(pc.point_inv, con_ncomp, nNo, x);
 }
 
-void sync_schur_overlap(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+void sync_schur_halo(fe_fsi_linear_solver::FSILS_lhsType& lhs,
                         int con_ncomp,
                         Array<double>& x)
 {
   const fe_fsi_linear_solver::HaloExchange halo(lhs);
-  halo.sync_vector(con_ncomp, x, skip_post_solve_overlap_sum());
+  halo.sync_owned_to_ghost_vector(con_ncomp, x, skip_post_solve_halo_sync());
 }
 
 void apply_momentum_hat_low_rank_correction(int mom_ncomp,
@@ -3074,12 +3073,12 @@ void build_grouped_momentum_hat_low_rank_correction(
   for (auto& vec : hat.low_rank_preconditioned_left) {
     apply_momentum_hat(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, hat, vec);
     const fe_fsi_linear_solver::HaloExchange halo(lhs);
-    halo.sync_vector(mom_ncomp, vec, skip_post_solve_overlap_sum());
+    halo.sync_owned_to_ghost_vector(mom_ncomp, vec, skip_post_solve_halo_sync());
   }
   for (auto& vec : hat.low_rank_preconditioned_right_t) {
     apply_momentum_hat_transpose(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, hat, vec);
     const fe_fsi_linear_solver::HaloExchange halo(lhs);
-    halo.sync_vector(mom_ncomp, vec, skip_post_solve_overlap_sum());
+    halo.sync_owned_to_ghost_vector(mom_ncomp, vec, skip_post_solve_halo_sync());
   }
   const double precondition_left_t =
       trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - precondition_left_t0 : 0.0;
@@ -3258,10 +3257,10 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
         approx_apply = probe;
         apply_momentum_hat(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, candidate, approx_apply);
         const fe_fsi_linear_solver::HaloExchange halo(lhs);
-        halo.sync_vector(mom_ncomp, approx_apply, skip_post_solve_overlap_sum());
+        halo.sync_owned_to_ghost_vector(mom_ncomp, approx_apply, skip_post_solve_halo_sync());
         momentum_operator.apply(
             dso::ghost_synced_input(mom_ncomp, approx_apply),
-            dso::ghost_synced_output(mom_ncomp, residual));
+            dso::owned_only_output(mom_ncomp, residual));
         omp_la::omp_axpby_v(mom_ncomp, nNo, residual, residual, -1.0, probe);
         const double den = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
                                             const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
@@ -3276,11 +3275,11 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
         fill_projected_reduced_vector(lhs, mode, right_entries, mom_ncomp, probe_t);
         approx_apply_t = probe_t;
         apply_momentum_hat_transpose(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, candidate, approx_apply_t);
-        halo.sync_vector(mom_ncomp, approx_apply_t, skip_post_solve_overlap_sum());
+        halo.sync_owned_to_ghost_vector(mom_ncomp, approx_apply_t, skip_post_solve_halo_sync());
         multiply_rect_transpose_local(rowPtr, colPtr, nNo,
                                       mom_ncomp, mom_ncomp, K_eff,
                                       approx_apply_t, residual_t);
-        halo.sync_vector(mom_ncomp, residual_t, skip_post_solve_overlap_sum());
+        halo.sync_owned_to_ghost_vector(mom_ncomp, residual_t, skip_post_solve_halo_sync());
         omp_la::omp_axpby_v(mom_ncomp, nNo, residual_t, residual_t, -1.0, probe_t);
         const double den_t = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
                                               const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
@@ -3613,10 +3612,10 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     const fe_fsi_linear_solver::HaloExchange halo(lhs);
     const double sync_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
     trace_stage(column_index, "sync_left_hat", "begin");
-    halo.sync_vector(mom_ncomp, col.momentum_left_hat, skip_post_solve_overlap_sum());
+    halo.sync_owned_to_ghost_vector(mom_ncomp, col.momentum_left_hat, skip_post_solve_halo_sync());
     trace_stage(column_index, "sync_left_hat", "done");
     trace_stage(column_index, "sync_right_hat_t", "begin");
-    halo.sync_vector(mom_ncomp, momentum_right_t, skip_post_solve_overlap_sum());
+    halo.sync_owned_to_ghost_vector(mom_ncomp, momentum_right_t, skip_post_solve_halo_sync());
     trace_stage(column_index, "sync_right_hat_t", "done");
     if (trace_setup_all_ranks && column_index < 2) {
       trace_dense_vector_owned_entries(lhs, "reduced_schur_left_after_hat", mom_ncomp, col.momentum_left_hat);
@@ -3630,7 +3629,7 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     trace_stage(column_index, "d", "begin");
     d_operator.apply(
         dso::ghost_synced_input(mom_ncomp, col.momentum_left_hat),
-        dso::ghost_synced_output(con_ncomp, col.schur_left));
+        dso::owned_only_output(con_ncomp, col.schur_left));
     trace_stage(column_index, "d", "done");
     const double d_t = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - d_t0 : 0.0;
     const double gt_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
@@ -3642,11 +3641,11 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
       const double local_right_l2 =
           norm::fsi_ls_normv(mom_ncomp, lhs.mynNo, lhs.commu, momentum_right_t);
       std::fprintf(stderr,
-                   "[BICGS_REDUCED_GT] rank=%d column=%d before_local_gt nReq=%d "
+                   "[BICGS_REDUCED_GT] rank=%d column=%d before_local_gt owned_halo_neighbors=%zu "
                    "nNo=%lld mynNo=%lld con_ncomp=%d mom_ncomp=%d right_l2=%e\n",
                    lhs.commu.task,
                    column_index,
-                   lhs.nReq,
+                   lhs.owned_halo_neighbor_ranks.size(),
                    static_cast<long long>(lhs.nNo),
                    static_cast<long long>(lhs.mynNo),
                    con_ncomp,
@@ -3670,11 +3669,11 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     }
     // schur_right is the contracting right factor of the low-rank correction
     // and is consumed later only through owned-only dense contractions.
-    // Keep it owner-local here; halo-summing it is unnecessary and, on some
-    // grouped auxiliary paths, can deadlock in fsils_commuv().
+    // Keep it owner-local here; additive overlap is unnecessary and, on some
+    // grouped auxiliary paths, can deadlock.
     if (force_gt_sync) {
       trace_stage(column_index, "sync_gt", "begin");
-      halo.sync_vector(con_ncomp, col.schur_right, skip_post_solve_overlap_sum());
+      halo.sync_owned_to_ghost_vector(con_ncomp, col.schur_right, skip_post_solve_halo_sync());
       trace_stage(column_index, "sync_gt", "done");
     }
     if (trace_gt_sync && column_index == 0) {
@@ -3750,18 +3749,18 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     apply_momentum_hat_transpose(lhs.rowPtr, lhs.colPtr, lhs.diagPtr,
                                  mom_ncomp, lhs.nNo, momentum_hat, momentum_right_t);
     const fe_fsi_linear_solver::HaloExchange halo(lhs);
-    halo.sync_vector(mom_ncomp, col.momentum_left_hat, skip_post_solve_overlap_sum());
-    halo.sync_vector(mom_ncomp, momentum_right_t, skip_post_solve_overlap_sum());
+    halo.sync_owned_to_ghost_vector(mom_ncomp, col.momentum_left_hat, skip_post_solve_halo_sync());
+    halo.sync_owned_to_ghost_vector(mom_ncomp, momentum_right_t, skip_post_solve_halo_sync());
 
     col.schur_left.resize(con_ncomp, lhs.nNo);
     d_operator.apply(
         dso::ghost_synced_input(mom_ncomp, col.momentum_left_hat),
-        dso::ghost_synced_output(con_ncomp, col.schur_left));
+        dso::owned_only_output(con_ncomp, col.schur_left));
     multiply_rect_transpose_local(lhs.rowPtr, lhs.colPtr, lhs.nNo,
                                   mom_ncomp, con_ncomp, G,
                                   momentum_right_t, col.schur_right);
     if (env_enabled("SVMP_FSILS_REDUCED_SCHUR_FORCE_GT_SYNC")) {
-      halo.sync_vector(con_ncomp, col.schur_right, skip_post_solve_overlap_sum());
+      halo.sync_owned_to_ghost_vector(con_ncomp, col.schur_right, skip_post_solve_halo_sync());
     }
     columns.push_back(std::move(col));
   };
@@ -3903,7 +3902,7 @@ void build_reduced_schur_correction(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     Array<double> z = column.schur_left;
     apply_base_schur_preconditioner(lhs.rowPtr, lhs.colPtr, lhs.diagPtr,
                                     pc, con_ncomp, lhs.nNo, z);
-    sync_schur_overlap(lhs, con_ncomp, z);
+    sync_schur_halo(lhs, con_ncomp, z);
     pc.low_rank_preconditioned_left.push_back(std::move(z));
   }
   const double precondition_left_t =
@@ -4074,7 +4073,7 @@ void build_partition_schur_coarse_correction(
     Array<double> z;
     apply_hat_schur_operator(rowPtr, colPtr, diagPtr, lhs, pc, mode, z);
     apply_base_schur_preconditioner(rowPtr, colPtr, diagPtr, pc, con_ncomp, lhs.nNo, z);
-    sync_schur_overlap(lhs, con_ncomp, z);
+    sync_schur_halo(lhs, con_ncomp, z);
     apply_dense_low_rank_correction(lhs,
                                     con_ncomp,
                                     lhs.nNo,
@@ -4137,7 +4136,7 @@ void build_global_mean_schur_coarse_correction(
   Array<double> z;
   apply_hat_schur_operator(rowPtr, colPtr, diagPtr, lhs, pc, mode, z);
   apply_base_schur_preconditioner(rowPtr, colPtr, diagPtr, pc, con_ncomp, lhs.nNo, z);
-  sync_schur_overlap(lhs, con_ncomp, z);
+  sync_schur_halo(lhs, con_ncomp, z);
   apply_dense_low_rank_correction(lhs,
                                   con_ncomp,
                                   lhs.nNo,
@@ -4368,20 +4367,21 @@ void apply_hat_schur_operator(const Array<fsils_int>& rowPtr,
   pc.scratch_hgp.resize(mom_ncomp, nNo);
   pc.scratch_sp.resize(con_ncomp, nNo);
   pc.scratch_dgp.resize(con_ncomp, nNo);
+  const fe_fsi_linear_solver::HaloExchange hat_halo(lhs);
   schur_ops.GL.apply(
       dso::ghost_synced_input(con_ncomp, in_vec),
-      dso::ghost_synced_output(mom_ncomp, pc.scratch_gp),
-      dso::ghost_synced_output(con_ncomp, pc.scratch_sp));
+      dso::owned_only_output(mom_ncomp, pc.scratch_gp),
+      dso::owned_only_output(con_ncomp, pc.scratch_sp));
   apply_explicit_constraint_schur_corrections(lhs, pc, in_vec, pc.scratch_gp, pc.scratch_sp);
+  hat_halo.sync_owned_to_ghost_vector(mom_ncomp, pc.scratch_gp, skip_post_solve_halo_sync());
 
   pc.scratch_hgp = pc.scratch_gp;
   apply_momentum_hat(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, pc.momentum_hat, pc.scratch_hgp);
-  const fe_fsi_linear_solver::HaloExchange hat_halo(lhs);
-  hat_halo.sync_vector(mom_ncomp, pc.scratch_hgp, skip_post_solve_overlap_sum());
+  hat_halo.sync_owned_to_ghost_vector(mom_ncomp, pc.scratch_hgp, skip_post_solve_halo_sync());
 
   schur_ops.D.apply(
       dso::ghost_synced_input(mom_ncomp, pc.scratch_hgp),
-      dso::ghost_synced_output(con_ncomp, pc.scratch_dgp));
+      dso::owned_only_output(con_ncomp, pc.scratch_dgp));
   apply_explicit_momentum_schur_corrections(lhs, pc, pc.scratch_hgp, pc.scratch_dgp);
 
   out_vec.resize(con_ncomp, nNo);
@@ -4408,7 +4408,7 @@ void apply_schur_preconditioner(const Array<fsils_int>& rowPtr,
   }
 
   apply_base_schur_preconditioner(rowPtr, colPtr, diagPtr, pc, con_ncomp, nNo, x);
-  sync_schur_overlap(lhs, con_ncomp, x);
+  sync_schur_halo(lhs, con_ncomp, x);
   apply_schur_low_rank_correction(lhs, pc, con_ncomp, nNo, x);
   apply_schur_partition_coarse_correction(lhs, pc, con_ncomp, nNo, x);
 
@@ -4424,7 +4424,7 @@ void apply_schur_preconditioner(const Array<fsils_int>& rowPtr,
     }
 
     apply_base_schur_preconditioner(rowPtr, colPtr, diagPtr, pc, con_ncomp, nNo, pc.scratch_correction);
-    sync_schur_overlap(lhs, con_ncomp, pc.scratch_correction);
+    sync_schur_halo(lhs, con_ncomp, pc.scratch_correction);
     apply_schur_low_rank_correction(lhs, pc, con_ncomp, nNo, pc.scratch_correction);
     apply_schur_partition_coarse_correction(lhs, pc, con_ncomp, nNo, pc.scratch_correction);
 
@@ -4502,9 +4502,7 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
   for (fsils_int i = 0; i < nNo; ++i) {
     M_diag(i) = L_values(lhs.diagPtr(i));
   }
-  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-    fsils_commus(lhs, M_diag);
-  }
+  fe_fsi_linear_solver::HaloExchange(lhs).sync_owned_to_ghost_scalar(M_diag);
   for (fsils_int i = 0; i < nNo; ++i) {
     const double diag_val = M_diag(i);
     M_inv(i) = (std::abs(diag_val) > 1e-12) ? 1.0 / diag_val : 1.0;
@@ -4537,27 +4535,27 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
   auto apply_schur_operator = [&](const Vector<double>& in_vec, Vector<double>& out_vec) {
     const Vector<double>* op_in = &in_vec;
     const fe_fsi_linear_solver::HaloExchange halo(lhs);
-    if (halo.has_overlap() && !skip_post_solve_overlap_sum()) {
+    if (halo.has_owned_halo() && !skip_post_solve_halo_sync()) {
       // BiCGStab updates overlap vectors locally; synchronize before reuse in the
       // next Schur matvec so owned values drive ghost entries consistently.
       in_sync = in_vec;
-      halo.sync_scalar(in_sync);
+      halo.sync_owned_to_ghost_scalar(in_sync);
       op_in = &in_sync;
     }
 
     GL.apply(
         dso::ghost_synced_input(*op_in),
-        dso::ghost_synced_output(nsd, GP),
-        dso::ghost_synced_output(SP));
+        dso::owned_only_output(nsd, GP),
+        dso::owned_only_output(SP));
     add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, nsd, GP, GP);
-    if (halo.has_overlap() && !skip_post_solve_overlap_sum()) {
+    if (halo.has_owned_halo() && !skip_post_solve_halo_sync()) {
       // The coupled-face correction modifies a momentum overlap field in place.
       // Synchronize before reusing it in D*(...) on neighboring owned rows.
-      halo.sync_vector(nsd, GP);
+      halo.sync_owned_to_ghost_vector(nsd, GP);
     }
     D.apply(
         dso::ghost_synced_input(nsd, GP),
-        dso::ghost_synced_output(DGP));
+        dso::owned_only_output(DGP));
 
     #pragma omp parallel for schedule(static)
     for (fsils_int i = 0; i < nNo; ++i) {
@@ -4565,7 +4563,7 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
     }
 
     if (!face_only_skip_output_sync) {
-      halo.sync_scalar(out_vec, skip_post_solve_overlap_sum());
+      halo.sync_owned_to_ghost_scalar(out_vec, skip_post_solve_halo_sync());
     }
   };
 
@@ -5075,25 +5073,25 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
       out_probe = 0.0;
       const fe_fsi_linear_solver::HaloExchange halo(lhs);
       const Vector<double>* op_in = &oracle_mode;
-      if (halo.has_overlap() && !skip_post_solve_overlap_sum()) {
+      if (halo.has_owned_halo() && !skip_post_solve_halo_sync()) {
         oracle_sync = oracle_mode;
-        halo.sync_scalar(oracle_sync);
+        halo.sync_owned_to_ghost_scalar(oracle_sync);
         op_in = &oracle_sync;
       }
 
       GL.apply(
           dso::ghost_synced_input(*op_in),
-          dso::ghost_synced_output(nsd, gp_probe),
-          dso::ghost_synced_output(sp_probe));
+          dso::owned_only_output(nsd, gp_probe),
+          dso::owned_only_output(sp_probe));
       const auto gp_gl_stats = compute_vector_stats(gp_probe);
       const auto sp_gl_stats = compute_scalar_stats(sp_probe);
 
       G.apply(
           dso::ghost_synced_input(*op_in),
-          dso::ghost_synced_output(nsd, gp_sep));
+          dso::owned_only_output(nsd, gp_sep));
       L.apply(
           dso::ghost_synced_input(*op_in),
-          dso::ghost_synced_output(sp_sep));
+          dso::owned_only_output(sp_sep));
       for (fsils_int node = 0; node < nNo; ++node) {
         sp_diff(node) = sp_sep(node) - sp_probe(node);
         for (int comp = 0; comp < nsd; ++comp) {
@@ -5106,14 +5104,14 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
       const auto sp_diff_stats = compute_scalar_stats(sp_diff);
 
       add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, nsd, gp_probe, gp_probe);
-      if (halo.has_overlap() && !skip_post_solve_overlap_sum()) {
-        halo.sync_vector(nsd, gp_probe);
+      if (halo.has_owned_halo() && !skip_post_solve_halo_sync()) {
+        halo.sync_owned_to_ghost_vector(nsd, gp_probe);
       }
       const auto gp_pre_stats = compute_vector_stats(gp_probe);
 
       D.apply(
           dso::ghost_synced_input(nsd, gp_probe),
-          dso::ghost_synced_output(dgp_probe));
+          dso::owned_only_output(dgp_probe));
       const auto dgp_stats = compute_scalar_stats(dgp_probe);
 
       #pragma omp parallel for schedule(static)
@@ -5121,7 +5119,7 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
         out_probe(node) = M_inv(node) * (sp_probe(node) - dgp_probe(node));
       }
       if (!face_only_skip_output_sync) {
-        halo.sync_scalar(out_probe, skip_post_solve_overlap_sum());
+        halo.sync_owned_to_ghost_scalar(out_probe, skip_post_solve_halo_sync());
       }
       const auto out_stats = compute_scalar_stats(out_probe);
 
@@ -5406,14 +5404,14 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
           probe_seed(node) = 1.0;
         }
       }
-      if (halo.has_overlap() && !skip_post_solve_overlap_sum()) {
-        halo.sync_scalar(probe_seed);
+      if (halo.has_owned_halo() && !skip_post_solve_halo_sync()) {
+        halo.sync_owned_to_ghost_scalar(probe_seed);
       }
 
       GL.apply(
           dso::ghost_synced_input(probe_seed),
-          dso::ghost_synced_output(nsd, probe_gp),
-          dso::ghost_synced_output(probe_sp));
+          dso::owned_only_output(nsd, probe_gp),
+          dso::owned_only_output(probe_sp));
       add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, nsd, probe_gp, probe_gp);
 
       std::vector<double> face_dot_local(static_cast<std::size_t>(rank), 0.0);
@@ -5481,14 +5479,14 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
 
     Vector<double> trace_in = schur_vec;
     const fe_fsi_linear_solver::HaloExchange halo(lhs);
-    if (halo.has_overlap() && !skip_post_solve_overlap_sum()) {
-      halo.sync_scalar(trace_in);
+    if (halo.has_owned_halo() && !skip_post_solve_halo_sync()) {
+      halo.sync_owned_to_ghost_scalar(trace_in);
     }
 
     GL.apply(
         dso::ghost_synced_input(trace_in),
-        dso::ghost_synced_output(nsd, GP),
-        dso::ghost_synced_output(SP));
+        dso::owned_only_output(nsd, GP),
+        dso::owned_only_output(SP));
 
     std::vector<double> face_dot_local(static_cast<std::size_t>(face_slots), 0.0);
     std::vector<double> face_dot_global(static_cast<std::size_t>(face_slots), 0.0);
@@ -5788,9 +5786,9 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
     Vector<double> probe_in = R;
     Vector<double> probe_in_sync(nNo);
     const Vector<double>* op_in = &probe_in;
-    if (probe_halo.has_overlap() && !skip_post_solve_overlap_sum()) {
+    if (probe_halo.has_owned_halo() && !skip_post_solve_halo_sync()) {
       probe_in_sync = probe_in;
-      probe_halo.sync_scalar(probe_in_sync);
+      probe_halo.sync_owned_to_ghost_scalar(probe_in_sync);
       op_in = &probe_in_sync;
     }
 
@@ -5802,21 +5800,21 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
 
     GL.apply(
         dso::ghost_synced_input(*op_in),
-        dso::ghost_synced_output(nsd, probe_gp),
-        dso::ghost_synced_output(probe_sp));
+        dso::owned_only_output(nsd, probe_gp),
+        dso::owned_only_output(probe_sp));
     probe_gp_pre = probe_gp;
     add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, nsd, probe_gp, probe_gp);
-    if (probe_halo.has_overlap() && !skip_post_solve_overlap_sum()) {
-      probe_halo.sync_vector(nsd, probe_gp);
+    if (probe_halo.has_owned_halo() && !skip_post_solve_halo_sync()) {
+      probe_halo.sync_owned_to_ghost_vector(nsd, probe_gp);
     }
     D.apply(
         dso::ghost_synced_input(nsd, probe_gp),
-        dso::ghost_synced_output(probe_dgp));
+        dso::owned_only_output(probe_dgp));
     #pragma omp parallel for schedule(static)
     for (fsils_int i = 0; i < nNo; ++i) {
       probe_out(i) = M_inv(i) * (probe_sp(i) - probe_dgp(i));
     }
-    probe_halo.sync_scalar(probe_out, skip_post_solve_overlap_sum());
+    probe_halo.sync_owned_to_ghost_scalar(probe_out, skip_post_solve_halo_sync());
 
     const auto in_stats = compute_scalar_stats(probe_in);
     const auto sp_stats = compute_scalar_stats(probe_sp);
@@ -7302,19 +7300,20 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
   auto apply_exact_schur_operator = [&](const Array<double>& in_vec, Array<double>& out_vec) {
     system.GL.apply(
         dso::ghost_synced_input(con_ncomp, in_vec),
-        dso::ghost_synced_output(mom_ncomp, GP),
-        dso::ghost_synced_output(con_ncomp, SP));
+        dso::owned_only_output(mom_ncomp, GP),
+        dso::owned_only_output(con_ncomp, SP));
     apply_explicit_constraint_schur_corrections(lhs, pc, in_vec, GP, SP);
+    schur_halo.sync_owned_to_ghost_vector(mom_ncomp, GP, skip_post_solve_halo_sync());
     HGP = GP;
     gmres::gmres_v(system.momentum, momentum_ls, HGP);
-    if (schur_halo.has_overlap() && !skip_post_solve_overlap_sum()) {
+    if (schur_halo.has_owned_halo() && !skip_post_solve_halo_sync()) {
       // The nested momentum solve returns a solution-like overlap vector.
       // Push owner values back to ghosts before reusing it in D*(K^-1*G).
-      schur_halo.sync_vector(mom_ncomp, HGP);
+      schur_halo.sync_owned_to_ghost_vector(mom_ncomp, HGP);
     }
     system.D.apply(
         dso::ghost_synced_input(mom_ncomp, HGP),
-        dso::ghost_synced_output(con_ncomp, DGP));
+        dso::owned_only_output(con_ncomp, DGP));
     apply_explicit_momentum_schur_corrections(lhs, pc, HGP, DGP);
 
     #pragma omp parallel for schedule(static)
@@ -7385,7 +7384,7 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
 
     Array<double> base_solution = q;
     apply_base_schur_preconditioner(lhs.rowPtr, lhs.colPtr, lhs.diagPtr, pc, con_ncomp, nNo, base_solution);
-    sync_schur_overlap(lhs, con_ncomp, base_solution);
+    sync_schur_halo(lhs, con_ncomp, base_solution);
     Array<double> base_residual;
     const auto [base_residual_norm, base_relative] =
         compute_inverse_quality(base_solution, base_residual);
@@ -7527,7 +7526,7 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
     while (total_itr < ls.mItr) {
       ++restart_cycles;
 
-      schur_halo.sync_vector(con_ncomp, Xg, skip_post_solve_overlap_sum());
+      schur_halo.sync_owned_to_ghost_vector(con_ncomp, Xg, skip_post_solve_halo_sync());
       apply_schur_operator(Xg, ax);
       omp_la::omp_axpby_v(con_ncomp, nNo, residual, rhs_preconditioned, -1.0, ax);
       const double beta = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, residual);
@@ -7558,7 +7557,7 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
         last_i = i;
         auto ui = u.rslice(i);
         auto uip1 = u.rslice(i + 1);
-        schur_halo.sync_vector(con_ncomp, ui, skip_post_solve_overlap_sum());
+        schur_halo.sync_owned_to_ghost_vector(con_ncomp, ui, skip_post_solve_halo_sync());
         apply_schur_operator(ui, uip1);
 
         for (int j = 0; j <= i; ++j) {
@@ -7640,7 +7639,7 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
     }
 
     if (!ls.suc) {
-      schur_halo.sync_vector(con_ncomp, Xg, skip_post_solve_overlap_sum());
+      schur_halo.sync_owned_to_ghost_vector(con_ncomp, Xg, skip_post_solve_halo_sync());
       apply_schur_operator(Xg, ax);
       omp_la::omp_axpby_v(con_ncomp, nNo, residual, rhs_preconditioned, -1.0, ax);
       ls.fNorm = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, residual);

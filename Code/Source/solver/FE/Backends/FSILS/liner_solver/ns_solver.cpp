@@ -110,7 +110,7 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
   return path;
 }
 
-[[nodiscard]] bool skipPostSolveOverlapSum() noexcept
+[[nodiscard]] bool skipPostSolveHaloSync() noexcept
 {
   return envFlagEnabled("SVMP_FSILS_SKIP_POST_SOLVE_COMM");
 }
@@ -192,17 +192,16 @@ void traceSyncOrder(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
     return;
   }
   std::fprintf(stderr,
-               "[NS_SYNC_TRACE] task=%d label=%s outer=%d mynNo=%lld nNo=%lld nReq=%d cS=%zu shnNo=%lld fNorm=%.17e skip=%d\n",
+               "[NS_SYNC_TRACE] task=%d label=%s outer=%d mynNo=%lld nNo=%lld owned_halo_neighbors=%zu shnNo=%lld fNorm=%.17e skip=%d\n",
                lhs.commu.task,
                label,
                outer_iter,
                static_cast<long long>(mynNo),
                static_cast<long long>(nNo),
-               lhs.nReq,
-               static_cast<std::size_t>(lhs.cS.size()),
+               lhs.owned_halo_neighbor_ranks.size(),
                static_cast<long long>(lhs.shnNo),
                fNorm,
-               skipPostSolveOverlapSum() ? 1 : 0);
+               skipPostSolveHaloSync() ? 1 : 0);
   std::fflush(stderr);
 }
 
@@ -648,7 +647,7 @@ void apply_full_coupled_operator(
   auto& lhs = *system.lhs;
   system.A.apply(
       dso::ghost_synced_input(system.components, x),
-      dso::ghost_synced_output(system.components, y));
+      dso::owned_only_output(system.components, y));
   add_bc_mul::add_bc_mul(lhs, add_bc_mul::BcopType::BCOP_TYPE_ADD, system.components, x, y);
 }
 
@@ -984,11 +983,11 @@ bool ns_solver_coupled_fgmres_scalar(
 
     mom_sol = mom_rhs;
     gmres::gmres_v(momentum_system, ls.GM, mom_sol);
-    halo.sync_vector(mom_ncomp, mom_sol, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_vector(mom_ncomp, mom_sol, skipPostSolveHaloSync());
 
     schur_system.D.apply(
         dso::ghost_synced_input(mom_ncomp, mom_sol),
-        dso::ghost_synced_output(con_tmp));
+        dso::owned_only_output(con_tmp));
     copy_scalar_vector_to_array(con_tmp, dummy_constraint);
     apply_momentum_block_corrections(lhs, explicit_low_rank_correction, mom_sol, dummy_constraint);
     copy_scalar_array_to_vector(dummy_constraint, con_tmp);
@@ -1002,7 +1001,7 @@ bool ns_solver_coupled_fgmres_scalar(
 
     schur_system.G.apply(
         dso::ghost_synced_input(con_sol),
-        dso::ghost_synced_output(mom_ncomp, gp));
+        dso::owned_only_output(mom_ncomp, gp));
     copy_scalar_vector_to_array(con_sol, dummy_constraint);
     Array<double> dummy_lp(pressure_ncomp, nNo);
     dummy_lp = 0.0;
@@ -1018,7 +1017,7 @@ bool ns_solver_coupled_fgmres_scalar(
 
     mom_sol = mom_tmp;
     gmres::gmres_v(momentum_system, ls.GM, mom_sol);
-    halo.sync_vector(mom_ncomp, mom_sol, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_vector(mom_ncomp, mom_sol, skipPostSolveHaloSync());
 
     assemble_scalar_block_vector(mom_sol, con_sol, dof, mom_start, mom_ncomp, con_start, out_vec);
   };
@@ -1419,8 +1418,8 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
       }
     }
 
-    halo.sync_vector(nsd, Rm, skipPostSolveOverlapSum());
-    halo.sync_vector(con_ncomp, Rc, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_vector(nsd, Rm, skipPostSolveHaloSync());
+    halo.sync_owned_to_ghost_vector(con_ncomp, Rc, skipPostSolveHaloSync());
   };
 
   auto actual_outer_residual_norm_sq = [&]() {
@@ -1457,13 +1456,13 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     auto U_slice = U.rslice(i);
     U_slice = Rm;
     gmres::gmres_v(momentum_system, ls.GM, U_slice);
-    halo.sync_vector(nsd, U_slice, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_vector(nsd, U_slice, skipPostSolveHaloSync());
 
     // P = D*U (rect: con_ncomp output × mom_ncomp input)
     auto P_slice = Pcon.rslice(i);
     schur_system.D.apply(
         dso::ghost_synced_input(mom_ncomp, U_slice),
-        dso::ghost_synced_output(con_ncomp, P_slice));
+        dso::owned_only_output(con_ncomp, P_slice));
     apply_momentum_block_corrections(lhs, explicit_low_rank_correction, U_slice, P_slice);
 
     // P = Rc - P
@@ -1473,25 +1472,25 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
         P_slice(k,n) = Rc(k,n) - P_slice(k,n);
       }
     }
-    halo.sync_vector(con_ncomp, P_slice, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_vector(con_ncomp, P_slice, skipPostSolveHaloSync());
 
     // P = [L - D*H*G]^-1 * P  (multi-component Schur complement)
     bicgs::schur_mc(schur_system, ls.CG, ls.GM, P_slice);
-    halo.sync_vector(con_ncomp, P_slice, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_vector(con_ncomp, P_slice, skipPostSolveHaloSync());
 
     // MU1 = G*P (rect: mom_ncomp output × con_ncomp input)
     P_slice = Pcon.rslice(i);
     auto MU_iB = MU.rslice(iB);
     schur_system.G.apply(
         dso::ghost_synced_input(con_ncomp, P_slice),
-        dso::ghost_synced_output(mom_ncomp, MU_iB));
+        dso::owned_only_output(mom_ncomp, MU_iB));
     auto MP_iB = MPcon.rslice(iB);
     schur_system.L.apply(
         dso::ghost_synced_input(con_ncomp, Pcon.rslice(i)),
-        dso::ghost_synced_output(con_ncomp, MP_iB));
+        dso::owned_only_output(con_ncomp, MP_iB));
     apply_constraint_block_corrections(lhs, explicit_low_rank_correction, P_slice, MU_iB, MP_iB);
-    halo.sync_vector(nsd, MU_iB, skipPostSolveOverlapSum());
-    halo.sync_vector(con_ncomp, MP_iB, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_vector(nsd, MU_iB, skipPostSolveHaloSync());
+    halo.sync_owned_to_ghost_vector(con_ncomp, MP_iB, skipPostSolveHaloSync());
 
     // MU2 = Rm - G*P
     auto MU_iBB = MU.rslice(iBB);
@@ -1501,27 +1500,27 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
         MU_iBB(d,n) = Rm(d,n) - MU_iB(d,n);
       }
     }
-    halo.sync_vector(nsd, MU_iBB, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_vector(nsd, MU_iBB, skipPostSolveHaloSync());
 
     // U = inv(K) * [Rm - G*P]
     U_slice = MU_iBB;
     gmres::gmres_v(momentum_system, ls.GM, U_slice);
-    halo.sync_vector(nsd, U_slice, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_vector(nsd, U_slice, skipPostSolveHaloSync());
 
     // MU2 = K*U
     momentum_system.A.apply(
         dso::ghost_synced_input(nsd, U_slice),
-        dso::ghost_synced_output(nsd, MU_iBB));
+        dso::owned_only_output(nsd, MU_iBB));
     add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, nsd, U_slice, MU_iBB);
 
     // MP2 = D*U (rect: con_ncomp × mom_ncomp)
     auto MP_iBB = MPcon.rslice(iBB);
     schur_system.D.apply(
         dso::ghost_synced_input(mom_ncomp, U_slice),
-        dso::ghost_synced_output(con_ncomp, MP_iBB));
+        dso::owned_only_output(con_ncomp, MP_iBB));
     apply_momentum_block_corrections(lhs, explicit_low_rank_correction, U_slice, MP_iBB);
-    halo.sync_vector(nsd, MU_iBB, skipPostSolveOverlapSum());
-    halo.sync_vector(con_ncomp, MP_iBB, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_vector(nsd, MU_iBB, skipPostSolveHaloSync());
+    halo.sync_owned_to_ghost_vector(con_ncomp, MP_iBB, skipPostSolveHaloSync());
 
     // GCR inner products
     int c = 0;
@@ -1790,10 +1789,10 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     }
 
     traceSyncOrder(lhs, "before_sync_vector", i_count, mynNo, nNo, ls.RI.fNorm);
-    halo.sync_vector(nsd, Rm, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_vector(nsd, Rm, skipPostSolveHaloSync());
     traceSyncOrder(lhs, "after_sync_vector", i_count, mynNo, nNo, ls.RI.fNorm);
     traceSyncOrder(lhs, "before_sync_scalar", i_count, mynNo, nNo, ls.RI.fNorm);
-    halo.sync_scalar(Rc, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_scalar(Rc, skipPostSolveHaloSync());
     traceSyncOrder(lhs, "after_sync_scalar", i_count, mynNo, nNo, ls.RI.fNorm);
   };
 
@@ -1833,8 +1832,8 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
 
       schur_system.GL.apply(
           dso::ghost_synced_input(oracle_mode),
-          dso::ghost_synced_output(nsd, gl_gp),
-          dso::ghost_synced_output(gl_sp));
+          dso::owned_only_output(nsd, gl_gp),
+          dso::owned_only_output(gl_sp));
 
       const auto compute_direct_range = [&](fsils_int i_start, fsils_int i_end) {
         #pragma omp parallel for schedule(static)
@@ -1851,18 +1850,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
         }
       };
 
-      if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
-        compute_direct_range(0, lhs.shnNo);
-        compute_direct_range(lhs.mynNo, nNo);
-        const fe_fsi_linear_solver::HaloExchange halo(lhs);
-        halo.begin_vector(nsd, direct_gp);
-        compute_direct_range(lhs.shnNo, lhs.mynNo);
-        halo.end_vector(nsd, direct_gp);
-        halo.begin_scalar(direct_sp);
-        halo.end_scalar(direct_sp);
-      } else {
-        compute_direct_range(0, nNo);
-      }
+      compute_direct_range(0, lhs.mynNo);
 
       for (fsils_int row = 0; row < nNo; ++row) {
         diff_sp(row) = direct_sp(row) - gl_sp(row);
@@ -2012,7 +2000,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     auto U_slice = U.rslice(i);
     U_slice = Rm;
     gmres::gmres_v(momentum_system, ls.GM, U_slice);
-    halo.sync_vector(nsd, U_slice, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_vector(nsd, U_slice, skipPostSolveHaloSync());
     if (i == 0 && fsilsTraceEnabled()) {
       trace_momentum_block_vector_stats(
           lhs.commu.masF,
@@ -2032,7 +2020,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     auto P_col = P.rcol(i);
     schur_system.D.apply(
         dso::ghost_synced_input(nsd, U_slice),
-        dso::ghost_synced_output(P_col));
+        dso::owned_only_output(P_col));
     Array<double> P_block;
     copy_scalar_vector_to_array(P_col, P_block);
     apply_momentum_block_corrections(lhs, explicit_low_rank_correction, U_slice, P_block);
@@ -2043,7 +2031,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     for (fsils_int n = 0; n < nNo; n++) {
       P_col(n) = Rc(n) - P_col(n);
     }
-    halo.sync_scalar(P_col, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_scalar(P_col, skipPostSolveHaloSync());
     Vector<double> iter0_schur_rhs;
     if (i == 0 && fsilsTraceEnabled()) {
       iter0_schur_rhs = P_col;
@@ -2056,7 +2044,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     // P = [L - D*H*G]^-1 * P
     // VMS FIX: Solved using asymmetric BiCGStab instead of symmetric CGRAD
     bicgs::schur(schur_system, ls.CG, ls.GM, P_col);
-    halo.sync_scalar(P_col, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_scalar(P_col, skipPostSolveHaloSync());
     if (i == 0 && fsilsTraceEnabled()) {
       trace_scalar_block_vector_stats(
           lhs.commu.masF,
@@ -2074,18 +2062,18 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     auto MU_iB = MU.rslice(iB);
     schur_system.G.apply(
         dso::ghost_synced_input(P_col),
-        dso::ghost_synced_output(nsd, MU_iB));
+        dso::owned_only_output(nsd, MU_iB));
     auto MP_iB = MP.rcol(iB);
     schur_system.L.apply(
         dso::ghost_synced_input(P.rcol(i)),
-        dso::ghost_synced_output(MP_iB));
+        dso::owned_only_output(MP_iB));
     copy_scalar_vector_to_array(P_col, P_block);
     Array<double> MP_iB_block;
     copy_scalar_vector_to_array(MP_iB, MP_iB_block);
     apply_constraint_block_corrections(lhs, explicit_low_rank_correction, P_block, MU_iB, MP_iB_block);
     copy_scalar_array_to_vector(MP_iB_block, MP_iB);
-    halo.sync_vector(nsd, MU_iB, skipPostSolveOverlapSum());
-    halo.sync_scalar(MP_iB, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_vector(nsd, MU_iB, skipPostSolveHaloSync());
+    halo.sync_owned_to_ghost_scalar(MP_iB, skipPostSolveHaloSync());
     if (i == 0 && fsilsTraceEnabled()) {
       trace_momentum_block_vector_stats(
           lhs.commu.masF,
@@ -2111,17 +2099,17 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
         MU_iBB(d,n) = Rm(d,n) - MU_iB(d,n);
       }
     }
-    halo.sync_vector(nsd, MU_iBB, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_vector(nsd, MU_iBB, skipPostSolveHaloSync());
 
     // U = inv(K) * [Rm - G*P]
     U_slice = MU_iBB;
     gmres::gmres_v(momentum_system, ls.GM, U_slice);
-    halo.sync_vector(nsd, U_slice, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_vector(nsd, U_slice, skipPostSolveHaloSync());
 
     // MU2 = K*U
     momentum_system.A.apply(
         dso::ghost_synced_input(nsd, U_slice),
-        dso::ghost_synced_output(nsd, MU_iBB));
+        dso::owned_only_output(nsd, MU_iBB));
 
     add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, nsd, U_slice, MU_iBB);
 
@@ -2129,13 +2117,13 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     auto MP_iBB = MP.rcol(iBB);
     schur_system.D.apply(
         dso::ghost_synced_input(nsd, U_slice),
-        dso::ghost_synced_output(MP_iBB));
+        dso::owned_only_output(MP_iBB));
     Array<double> MP_iBB_block;
     copy_scalar_vector_to_array(MP_iBB, MP_iBB_block);
     apply_momentum_block_corrections(lhs, explicit_low_rank_correction, U_slice, MP_iBB_block);
     copy_scalar_array_to_vector(MP_iBB_block, MP_iBB);
-    halo.sync_vector(nsd, MU_iBB, skipPostSolveOverlapSum());
-    halo.sync_scalar(MP_iBB, skipPostSolveOverlapSum());
+    halo.sync_owned_to_ghost_vector(nsd, MU_iBB, skipPostSolveHaloSync());
+    halo.sync_owned_to_ghost_scalar(MP_iBB, skipPostSolveHaloSync());
     if (i == 0 && fsilsTraceEnabled()) {
       trace_momentum_block_vector_stats(
           lhs.commu.masF,

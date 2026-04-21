@@ -47,15 +47,15 @@
     - The upstream `fsils_solve()` path always applies a post-solve diagonal scaling step (`Wc ⊙ R`); if no preconditioner routine runs, `Wc` is undefined.
     - For correctness, the FE FSILS backend treats `PreconditionerType::None` (and unsupported ILU/AMG requests) as the built-in diagonal preconditioner (`PREC_FSILS`), unless `RowColumnScaling`/`fsils_use_rcs` is requested.
     - `FsilsLinearSolver` detects numerical breakdowns (NaN/Inf residuals, corrupted iteration counts, non-finite solution values) and returns a safe `SolverReport` with `converged=false` and a zeroed solution vector.
-  - MPI is supported via FSILS’ native **overlap/shared-node** communication model:
-    - `FsilsMatrix` supports `sparsity::DistributedSparsityPattern` and uses stored **ghost rows** to include overlap nodes locally (owned nodes + ghost nodes).
+  - MPI is supported through FSILS owned-row operators with explicit halo storage:
+    - `FsilsMatrix` supports `sparsity::DistributedSparsityPattern` and stores owned rows with ghost nodes available as local columns and vector halo entries.
     - Ghost row requirements (per rank):
       - Ghost rows must include **all components** of each ghost node (i.e., if `dof_per_node=k`, then every ghost node must provide `k` dof-rows).
       - Ghost row columns must reference only nodes present in the local overlap set (owned nodes + ghost nodes).
-    - `FsilsLinearSolver` applies an FSILS `COMMU` to its working RHS vector before calling `fsils_solve()` (FSILS assumes overlap contributions have been communicated before norm/dot operations).
+    - FE assembly routes off-owner row contributions to the owning rank; solver vectors use explicit owner-to-ghost synchronization only when ghost values are required as operator input.
   - Vector ghost synchronization:
     - `FsilsVector::localSpan()` exposes the full overlap storage (`owned nodes + ghost nodes`, interleaved by `dof_per_node`).
-    - `FsilsVector::updateGhosts()` performs an **owner → ghost** update (copies owned values into ghost slots) using FSILS overlap communication (`fsils_commuv`) with local ghost slots zeroed to avoid double-counting.
+    - `FsilsVector::updateGhosts()` performs an explicit **owner → ghost** update that copies owned values into ghost slots.
 
 ## PETSc backend (optional)
 

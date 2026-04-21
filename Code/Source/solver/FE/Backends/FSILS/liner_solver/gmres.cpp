@@ -130,6 +130,12 @@ constexpr int DOT_THREAD_PAD = 8; // doubles (64 bytes) to reduce false sharing
   return default_value;
 }
 
+[[nodiscard]] bool gmres_debug_trace_enabled() noexcept
+{
+  static const bool enabled = parse_bool_env("SVMP_FSILS_GMRES_DEBUG_TRACE", false);
+  return enabled;
+}
+
 [[nodiscard]] int parse_int_env(const char* name, int default_value) noexcept
 {
   const char* env = std::getenv(name);
@@ -1631,10 +1637,10 @@ void gmres(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearS
     if (l == 0) {
       u.set_slice(0, R);
     } else {
-      halo.sync_vector(dof, X);
+      halo.sync_owned_to_ghost_vector(dof, X);
       A.apply(
           dso::ghost_synced_input(dof, X),
-          dso::ghost_synced_output(dof, u_slice));
+          dso::owned_only_output(dof, u_slice));
       add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, X, u_slice);
       ls.itr = ls.itr + 1;
 
@@ -1670,10 +1676,10 @@ void gmres(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearS
       auto u_slice_prev = u.rslice(i);
       auto u_slice_next = u.rslice(i+1);
 
-      halo.sync_vector(dof, u_slice_prev);
+      halo.sync_owned_to_ghost_vector(dof, u_slice_prev);
       A.apply(
           dso::ghost_synced_input(dof, u_slice_prev),
-          dso::ghost_synced_output(dof, u_slice_next));
+          dso::owned_only_output(dof, u_slice_next));
       add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, u_slice_prev, u_slice_next);
       ls.itr = ls.itr + 1;
 
@@ -1773,8 +1779,11 @@ void gmres(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearS
       err(i+1) = -s(i)*err(i);
       err(i) = c(i)*err(i);
 
-      if (std::abs(err(i+1)) < eps || breakdown) {
+      if (std::abs(err(i+1)) < eps) {
         ls.suc = true;
+        break;
+      }
+      if (breakdown) {
         break;
       }
     }
@@ -1783,9 +1792,27 @@ void gmres(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearS
 
     for (int i = 0; i <= last_i; i++) y(i) = err(i);
 
+    bool backsolve_ok = true;
     for (int j = last_i; j >= 0; j--) {
       for (int k = j+1; k <= last_i; k++) y(j) -= h(j,k)*y(k);
+      const double h_diag = h(j,j);
+      const double backsolve_tol =
+          std::numeric_limits<double>::epsilon() *
+          std::max(std::max(ls.iNorm, std::abs(y(j))), 1.0) * 1e2;
+      if (std::abs(h_diag) <= backsolve_tol) {
+        if (std::abs(y(j)) <= eps) {
+          y(j) = 0.0;
+          continue;
+        }
+        backsolve_ok = false;
+        break;
+      }
       y(j) /= h(j,j);
+    }
+    if (!backsolve_ok) {
+      ls.suc = false;
+      ls.fNorm = std::max(std::abs(err(last_i+1)), eps);
+      break;
     }
 
     fused_recon_v(dof, nNo, u, last_i, X, y);
@@ -1805,7 +1832,7 @@ void gmres(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearS
     }
   }
 
-  halo.sync_vector(dof, X);
+  halo.sync_owned_to_ghost_vector(dof, X);
   ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - time + ls.callD;
   ls.dB  = 10.0 * std::log(ls.fNorm / ls.dB);
   ls.stats.record_call(ls.itr - itr_before,
@@ -1892,10 +1919,10 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
 
     auto u_col_curr = u.rcol(0);
 
-    halo.sync_scalar(X);
+    halo.sync_owned_to_ghost_scalar(X);
     A.apply(
         dso::ghost_synced_input(X),
-        dso::ghost_synced_output(u_col_curr));
+        dso::owned_only_output(u_col_curr));
     omp_la::omp_axpby_s(nNo, u_col_curr, R, -1.0, u_col_curr);
 
     err[0] = norm::fsi_ls_norms(mynNo, lhs.commu, u_col_curr);
@@ -1911,10 +1938,10 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
 
       auto u_col_prev = u.rcol(i);
       auto u_col_next = u.rcol(i+1);
-      halo.sync_scalar(u_col_prev);
+      halo.sync_owned_to_ghost_scalar(u_col_prev);
       A.apply(
           dso::ghost_synced_input(u_col_prev),
-          dso::ghost_synced_output(u_col_next));
+          dso::owned_only_output(u_col_next));
 
       // --- CGS Step 1 with Pythagorean trick ---
       const double zz_local = fused_dot_zz_s(mynNo, u, i, u_col_next, h_col,
@@ -1988,8 +2015,11 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
       err(i+1) = -s(i)*err(i);
       err(i) = c(i)*err(i);
 
-      if (std::abs(err(i+1)) < eps || breakdown) {
+      if (std::abs(err(i+1)) < eps) {
         ls.suc = true;
+        break;
+      }
+      if (breakdown) {
         break;
       }
     }
@@ -1998,9 +2028,27 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
 
     for (int i = 0; i <= last_i; i++) y(i) = err(i);
 
+    bool backsolve_ok = true;
     for (int j = last_i; j >= 0; j--) {
       for (int k = j+1; k <= last_i; k++) y(j) -= h(j,k)*y(k);
+      const double h_diag = h(j,j);
+      const double backsolve_tol =
+          std::numeric_limits<double>::epsilon() *
+          std::max(std::max(ls.iNorm, std::abs(y(j))), 1.0) * 1e2;
+      if (std::abs(h_diag) <= backsolve_tol) {
+        if (std::abs(y(j)) <= eps) {
+          y(j) = 0.0;
+          continue;
+        }
+        backsolve_ok = false;
+        break;
+      }
       y(j) /= h(j,j);
+    }
+    if (!backsolve_ok) {
+      ls.suc = false;
+      ls.fNorm = std::max(std::abs(err(last_i+1)), eps);
+      break;
     }
 
     fused_recon_s(nNo, u, last_i, X, y);
@@ -2020,7 +2068,7 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
     }
   }
 
-  halo.sync_scalar(X);
+  halo.sync_owned_to_ghost_scalar(X);
   R = X;
   ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - ls.callD;
   ls.dB  = 10.0 * std::log(ls.fNorm / ls.dB);
@@ -2194,10 +2242,10 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     for (int j = 0; j < recycle_k; ++j) {
       auto uj = recycle_U.rslice(j);
       auto cj = recycle_C.rslice(j);
-      halo.sync_vector(dof, uj);
+      halo.sync_owned_to_ghost_vector(dof, uj);
       A.apply(
           dso::ghost_synced_input(dof, uj),
-          dso::ghost_synced_output(dof, cj));
+          dso::owned_only_output(dof, cj));
       add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, uj, cj);
       if (has_coupled_bc) {
         add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, cj, cj);
@@ -2509,10 +2557,20 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     apply_recycle_keep_drop();
 
     tp0 = TP();
-    halo.sync_vector(dof, X);
+    halo.sync_owned_to_ghost_vector(dof, X);
     A.apply(
         dso::ghost_synced_input(dof, X),
-        dso::ghost_synced_output(dof, u_slice));
+        dso::owned_only_output(dof, u_slice));
+    if (gmres_debug_trace_enabled()) {
+      const double ax0_norm = norm::fsi_ls_normv(dof, mynNo, lhs.commu, u_slice);
+      std::fprintf(stderr,
+                   "[GMRES_DEBUG] rank=%d cycle=%d initial_ax_norm=%e owned_row_operator=%d\n",
+                   lhs.commu.task,
+                   l,
+                   ax0_norm,
+                   lhs.owned_row_operator ? 1 : 0);
+      std::fflush(stderr);
+    }
     tp_spmv += TP() - tp0;
 
     tp0 = TP();
@@ -2578,10 +2636,20 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       auto u_slice_next = u.rslice(i+1);
 
       tp0 = TP();
-      halo.sync_vector(dof, u_slice_prev);
+      halo.sync_owned_to_ghost_vector(dof, u_slice_prev);
       A.apply(
           dso::ghost_synced_input(dof, u_slice_prev),
-          dso::ghost_synced_output(dof, u_slice_next));
+          dso::owned_only_output(dof, u_slice_next));
+      if (gmres_debug_trace_enabled() && l == 0 && i < 3) {
+        const double arnoldi_image_norm = norm::fsi_ls_normv(dof, mynNo, lhs.commu, u_slice_next);
+        std::fprintf(stderr,
+                     "[GMRES_DEBUG] rank=%d cycle=%d iter=%d arnoldi_image_norm=%e\n",
+                     lhs.commu.task,
+                     l,
+                     i,
+                     arnoldi_image_norm);
+        std::fflush(stderr);
+      }
       tp_spmv += TP() - tp0;
 
       tp0 = TP();
@@ -2640,6 +2708,17 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       }
 
       const double old_norm_sq = h_col[static_cast<size_t>(i+1)];
+      if (gmres_debug_trace_enabled() && l == 0 && i < 3) {
+        std::fprintf(stderr,
+                     "[GMRES_DEBUG] rank=%d cycle=%d iter=%d h00=%e old_norm=%e proj_sq=%e\n",
+                     lhs.commu.task,
+                     l,
+                     i,
+                     h(i, i),
+                     std::sqrt(std::max(0.0, old_norm_sq)),
+                     proj_sq_norm);
+        std::fflush(stderr);
+      }
 
       // Cache-blocked axpy: w -= sum_j h_col[j] * u[j] in a single L1-tiled
       // pass.  Each tile loads w into a local buffer, accumulates all
@@ -2689,6 +2768,16 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
         tp_gs_update += reorth_update_norm_dt;
       }
       h(i+1,i) = new_norm;
+      if (gmres_debug_trace_enabled() && l == 0 && i < 3) {
+        std::fprintf(stderr,
+                     "[GMRES_DEBUG] rank=%d cycle=%d iter=%d new_norm=%e breakdown_tol=%e\n",
+                     lhs.commu.task,
+                     l,
+                     i,
+                     new_norm,
+                     std::numeric_limits<double>::epsilon() * std::max(ls.iNorm, 1.0) * 1e2);
+        std::fflush(stderr);
+      }
 
       // Happy Breakdown Protection
       bool breakdown = false;
@@ -2723,8 +2812,11 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       err(i) = c(i)*err(i);
       tp_givens += TP() - tp0;
 
-      if (std::abs(err(i+1)) < eps || breakdown) {
+      if (std::abs(err(i+1)) < eps) {
         ls.suc = true;
+        break;
+      }
+      if (breakdown) {
         break;
       }
 
@@ -2752,9 +2844,27 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     tp0 = TP();
     for (int i = 0; i <= last_i; i++) y(i) = err(i);
 
+    bool backsolve_ok = true;
     for (int j = last_i; j >= 0; j--) {
       for (int k = j+1; k <= last_i; k++) y(j) -= h(j,k)*y(k);
+      const double h_diag = h(j,j);
+      const double backsolve_tol =
+          std::numeric_limits<double>::epsilon() *
+          std::max(std::max(ls.iNorm, std::abs(y(j))), 1.0) * 1e2;
+      if (std::abs(h_diag) <= backsolve_tol) {
+        if (std::abs(y(j)) <= eps) {
+          y(j) = 0.0;
+          continue;
+        }
+        backsolve_ok = false;
+        break;
+      }
       y(j) /= h(j,j);
+    }
+    if (!backsolve_ok) {
+      ls.suc = false;
+      ls.fNorm = std::max(std::abs(err(last_i+1)), eps);
+      break;
     }
 
     fused_recon_v(dof, nNo, u, last_i, X, y);
@@ -2810,7 +2920,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     }
   }
 
-  halo.sync_vector(dof, X);
+  halo.sync_owned_to_ghost_vector(dof, X);
   R = X;
   ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - ls.callD;
   ls.dB  = 10.0 * std::log(ls.fNorm / ls.dB);

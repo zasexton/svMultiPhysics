@@ -459,6 +459,26 @@ template <typename T>
     return true;
 }
 
+[[nodiscard]] std::vector<GlobalIndex> ownedDofsForVector(
+    const backends::GenericVector& vec,
+    const dofs::IndexSet& fe_owned_dofs)
+{
+#if defined(FE_HAS_FSILS)
+    if (const auto* fs = dynamic_cast<const backends::FsilsVector*>(&vec);
+        fs != nullptr && fs->usesOwnedRowLayout()) {
+        return fs->ownedFeDofs();
+    }
+#endif
+    return fe_owned_dofs.toVector();
+}
+
+[[nodiscard]] dofs::IndexSet ownedDofSetForVector(
+    const backends::GenericVector& vec,
+    const dofs::IndexSet& fe_owned_dofs)
+{
+    return dofs::IndexSet(ownedDofsForVector(vec, fe_owned_dofs));
+}
+
 [[nodiscard]] std::vector<Real> gatherGlobalDenseVectorFromOwnedEntries(
     backends::GenericVector& vec,
     std::size_t n,
@@ -466,9 +486,10 @@ template <typename T>
 {
     auto view = vec.createAssemblyView();
     FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: global dense gather view");
+    const auto vector_owned_dofs = ownedDofsForVector(vec, owned_dofs);
 
     std::vector<Real> local(n, Real(0.0));
-    for (const auto dof : owned_dofs) {
+    for (const auto dof : vector_owned_dofs) {
         const auto idx = static_cast<std::size_t>(dof);
         if (idx >= n) {
             continue;
@@ -801,9 +822,9 @@ double residualNormForConvergence(const backends::GenericVector& r, backends::Ge
     FE_CHECK_ARG(src.size() == dst.size(), "NewtonSolver: FSILS residual scratch size mismatch");
     std::copy(src.begin(), src.end(), dst.begin());
 
-    // Assemble-time residuals are distributed by element ownership. FSILS expects overlap
-    // contributions to be summed before norm/dot-based convergence checks.
-    scratch_fs->accumulateOverlap();
+    // PETSc-like owned-row FSILS vectors hold authoritative values on owner rows.
+    // Norms only reduce owned rows, so additive overlap accumulation is not part
+    // of convergence checks.
     return scratch_fs->norm();
 #else
     return r.norm();
@@ -868,17 +889,13 @@ void zeroVectorEntries(std::span<const GlobalIndex> dofs, backends::GenericVecto
     view->finalizeAssembly();
 }
 
-void accumulateOverlapIfNeeded(backends::GenericVector& vec)
+void syncOwnedRowHaloIfNeeded(backends::GenericVector& vec)
 {
 #if defined(FE_HAS_FSILS)
-    if (vec.backendKind() != backends::BackendKind::FSILS) {
-        return;
+    if (auto* fs = dynamic_cast<backends::FsilsVector*>(&vec);
+        fs != nullptr && fs->usesOwnedRowLayout()) {
+        fs->updateGhosts();
     }
-    auto* fs = dynamic_cast<backends::FsilsVector*>(&vec);
-    if (fs == nullptr) {
-        return;
-    }
-    fs->accumulateOverlap();
 #else
     (void)vec;
 #endif
@@ -887,8 +904,6 @@ void accumulateOverlapIfNeeded(backends::GenericVector& vec)
 enum class FsilsPostSolveSyncMode {
     Off,
     UpdateGhosts,
-    AccumulateOverlap,
-    AccumulateThenUpdateGhosts,
 };
 
 [[nodiscard]] FsilsPostSolveSyncMode fsilsPostSolveSyncMode() noexcept
@@ -903,12 +918,6 @@ enum class FsilsPostSolveSyncMode {
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (value == "update" || value == "ghost" || value == "updateghosts") {
         return FsilsPostSolveSyncMode::UpdateGhosts;
-    }
-    if (value == "accumulate" || value == "sum") {
-        return FsilsPostSolveSyncMode::AccumulateOverlap;
-    }
-    if (value == "both" || value == "accumulate_then_update") {
-        return FsilsPostSolveSyncMode::AccumulateThenUpdateGhosts;
     }
     return FsilsPostSolveSyncMode::Off;
 }
@@ -960,7 +969,8 @@ void logJacobianCheckComponentBreakdown(const systems::FESystem& sys,
                                        backends::GenericVector& matrix_err)
 {
     const auto& fmap = sys.fieldMap();
-    const auto owned_dofs = sys.dofHandler().getPartition().locallyOwned().toVector();
+    const auto owned_dofs =
+        ownedDofsForVector(fd, sys.dofHandler().getPartition().locallyOwned());
     if (owned_dofs.empty() || fmap.numFields() == 0) {
         return;
     }
@@ -1065,7 +1075,8 @@ void logJacobianCheckTopEntries(const systems::FESystem& sys,
                                 backends::GenericVector& err,
                                 std::size_t top_k)
 {
-    const auto owned_dofs = sys.dofHandler().getPartition().locallyOwned().toVector();
+    const auto owned_dofs =
+        ownedDofsForVector(err, sys.dofHandler().getPartition().locallyOwned());
     if (owned_dofs.empty() || top_k == 0u) {
         return;
     }
@@ -1118,7 +1129,8 @@ void logVectorComponentNorms(const systems::FESystem& sys,
                              std::string_view label)
 {
     const auto& fmap = sys.fieldMap();
-    const auto owned_dofs = sys.dofHandler().getPartition().locallyOwned().toVector();
+    const auto owned_dofs =
+        ownedDofsForVector(vec, sys.dofHandler().getPartition().locallyOwned());
     if (owned_dofs.empty() || fmap.numFields() == 0) {
         return;
     }
@@ -1235,7 +1247,8 @@ void logVectorTopEntries(const systems::FESystem& sys,
                          std::string_view label,
                          std::size_t top_k)
 {
-    const auto owned_dofs = sys.dofHandler().getPartition().locallyOwned().toVector();
+    const auto owned_dofs =
+        ownedDofsForVector(vec, sys.dofHandler().getPartition().locallyOwned());
     if (owned_dofs.empty() || top_k == 0u) {
         return;
     }
@@ -1310,13 +1323,6 @@ void normalizeFsilsPostSolveIncrementIfNeeded(backends::GenericVector& vec)
         case FsilsPostSolveSyncMode::UpdateGhosts:
             fs->updateGhosts();
             break;
-        case FsilsPostSolveSyncMode::AccumulateOverlap:
-            fs->accumulateOverlap();
-            break;
-        case FsilsPostSolveSyncMode::AccumulateThenUpdateGhosts:
-            fs->accumulateOverlap();
-            fs->updateGhosts();
-            break;
     }
 
     if (oopTraceEnabled()) {
@@ -1327,12 +1333,6 @@ void normalizeFsilsPostSolveIncrementIfNeeded(backends::GenericVector& vec)
                 break;
             case FsilsPostSolveSyncMode::UpdateGhosts:
                 mode_name = "update";
-                break;
-            case FsilsPostSolveSyncMode::AccumulateOverlap:
-                mode_name = "accumulate";
-                break;
-            case FsilsPostSolveSyncMode::AccumulateThenUpdateGhosts:
-                mode_name = "both";
                 break;
         }
         traceLog("NewtonSolver: applied FSILS post-solve increment sync mode='" + mode_name + "'");
@@ -3271,13 +3271,16 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             return;
         }
         constraints.distribute(history.u());
+        syncOwnedRowHaloIfNeeded(history.u());
         for (int k = 1; k <= history.historyDepth(); ++k) {
             constraints.distribute(history.uPrevK(k));
+            syncOwnedRowHaloIfNeeded(history.uPrevK(k));
         }
     };
 
     auto syncCurrentState = [&]() {
         constraints.updateGhostsAndDistribute(history.u());
+        syncOwnedRowHaloIfNeeded(history.u());
     };
 
     struct NewtonStateWithContext {
@@ -3444,6 +3447,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
     const bool ptc_enabled = options_.pseudo_transient.enabled;
     std::vector<GlobalIndex> ptc_owned_dofs;
+    bool ptc_uses_backend_owned_rows = false;
     if (ptc_enabled && workspace.ptc_mass_lumped != nullptr) {
         const auto dt_fields = sys.timeDerivativeFields(options_.jacobian_op);
         if (!dt_fields.empty()) {
@@ -3460,12 +3464,31 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 const auto range = fmap.getFieldDofRange(idx);
                 dt_dofs_all = dt_dofs_all.unionWith(dofs::IndexSet(range.first, range.second));
             }
-            const auto& owned = sys.dofHandler().getPartition().locallyOwned();
-            ptc_owned_dofs = dt_dofs_all.intersectionWith(owned).toVector();
+#if defined(FE_HAS_FSILS)
+            if (const auto* fsils_jacobian = dynamic_cast<const backends::FsilsMatrix*>(&J);
+                fsils_jacobian != nullptr && fsils_jacobian->usesOwnedRowOperator()) {
+                ptc_uses_backend_owned_rows = true;
+                const auto dt_dofs = dt_dofs_all.toVector();
+                ptc_owned_dofs.reserve(dt_dofs.size());
+                for (const auto dof : dt_dofs) {
+                    if (fsils_jacobian->ownsFeDofRow(dof)) {
+                        ptc_owned_dofs.push_back(dof);
+                    }
+                }
+            } else
+#endif
+            {
+                const auto& owned = sys.dofHandler().getPartition().locallyOwned();
+                ptc_owned_dofs = dt_dofs_all.intersectionWith(owned).toVector();
+            }
         }
     }
 
     const bool ptc_can_run = ptc_enabled && (workspace.ptc_mass_lumped != nullptr) && !ptc_owned_dofs.empty();
+    if (oopTraceEnabled() && ptc_enabled) {
+        traceLog("NewtonSolver: PTC diagonal ownership rows=" + std::to_string(ptc_owned_dofs.size()) +
+                 (ptc_uses_backend_owned_rows ? " mode=backend-owned-row" : " mode=fe-owned"));
+    }
     bool ptc_mass_ready = false;
     double ptc_gamma = 0.0;
     double ptc_gamma_applied = 0.0;
@@ -4272,8 +4295,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 axpy(residual_base, static_cast<Real>(-1.0), u_backup);
                 const double rank_one_jv_norm = residual_base.norm();
 
-                // The FD residual is assembled by element ownership; sum overlap contributions once for comparison.
-                accumulateOverlapIfNeeded(residual_scratch);
+                // FD residuals follow the owned-row vector contract; sync halos
+                // only when the subsequent diagnostic consumes ghost values.
+                syncOwnedRowHaloIfNeeded(residual_scratch);
                 const double fd_norm = residual_scratch.norm();
 
                 // u_backup <- (J_matrix + rank1)*v - FD
@@ -4416,7 +4440,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
         const auto& bordered_full = transient.system().borderedCoupling();
         const bool has_bordered = bordered_full.active && bordered_full.n_aux > 0;
-        const auto& owned_dofs = transient.system().dofHandler().getPartition().locallyOwned();
+        const auto owned_dofs =
+            ownedDofSetForVector(du, transient.system().dofHandler().getPartition().locallyOwned());
         active_reduced_field_updates = effective_reduced_field_updates;
         grouped_bordered_field_couplings.clear();
         algebraic_aux_reduction = {};

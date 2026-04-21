@@ -31,15 +31,11 @@ class HaloExchange {
  public:
   explicit HaloExchange(const FSILS_lhsType& lhs) noexcept;
 
-  [[nodiscard]] bool has_overlap() const noexcept;
+  [[nodiscard]] bool has_owned_halo() const noexcept;
 
-  void sync_scalar(Vector<double>& values, bool skip_overlap_sum = false) const;
-  void sync_vector(int dof, Array<double>& values, bool skip_overlap_sum = false) const;
-
-  void begin_scalar(Vector<double>& values) const;
-  void end_scalar(Vector<double>& values) const;
-  void begin_vector(int dof, Array<double>& values) const;
-  void end_vector(int dof, Array<double>& values) const;
+  void sync_owned_to_ghost_scalar(Vector<double>& values, bool skip_sync = false) const;
+  void sync_owned_to_ghost_vector(int dof, Array<double>& values, bool skip_sync = false) const;
+  void reverse_scatter_vector_contributions(int dof, Array<double>& values) const;
 
  private:
   const FSILS_lhsType* lhs_{nullptr};

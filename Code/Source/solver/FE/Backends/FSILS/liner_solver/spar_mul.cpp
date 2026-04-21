@@ -37,7 +37,6 @@
 
 #include "spar_mul.h"
 
-#include "distributed_mpi_ops.h"
 #include "distributed_sparse_operator.h"
 #include "fsils_api.hpp"
 
@@ -530,9 +529,19 @@ namespace fe_fsi_linear_solver::distributed_sparse_operator {
 
 namespace {
 
-[[nodiscard]] bool has_overlap(const FSILS_lhsType& lhs) noexcept
+[[nodiscard]] bool valid_output_state(VectorState state) noexcept
 {
-  return lhs.commu.nTasks > 1 && lhs.nReq > 0;
+  return state == VectorState::owned_only ||
+         state == VectorState::ghost_zeroed;
+}
+
+[[nodiscard]] std::string invalid_output_state_message(const char* op_name,
+                                                       const char* role,
+                                                       VectorState actual)
+{
+  return std::string(op_name) + " requires " + role +
+      " state `owned_only` or `ghost_zeroed` but received `" +
+      to_string(actual) + "`";
 }
 
 [[nodiscard]] std::string state_mismatch_message(const char* op_name,
@@ -554,6 +563,15 @@ void require_state(const char* op_name,
   }
 }
 
+void require_output_state(const char* op_name,
+                          const char* role,
+                          VectorState actual)
+{
+  if (!valid_output_state(actual)) {
+    throw std::logic_error(invalid_output_state_message(op_name, role, actual));
+  }
+}
+
 void require_components(const char* op_name,
                         const char* role,
                         int expected,
@@ -565,22 +583,30 @@ void require_components(const char* op_name,
   }
 }
 
+void zero_scalar_range(fsils_int i_start, fsils_int i_end, Vector<double>& values)
+{
+  for (fsils_int i = i_start; i < i_end; ++i) {
+    values(i) = 0.0;
+  }
+}
+
+void zero_vector_range(fsils_int i_start, fsils_int i_end, int components, Array<double>& values)
+{
+  for (fsils_int i = i_start; i < i_end; ++i) {
+    for (int c = 0; c < components; ++c) {
+      values(c, i) = 0.0;
+    }
+  }
+}
+
 template <typename ComputeRange>
 void apply_scalar_output(const FSILS_lhsType& lhs,
                          ComputeRange&& compute_range,
                          Vector<double>& output)
 {
   const fsils_int nNo = lhs.nNo;
-  if (has_overlap(lhs)) {
-    compute_range(0, lhs.shnNo);
-    compute_range(lhs.mynNo, nNo);
-    const HaloExchange halo(lhs);
-    halo.begin_scalar(output);
-    compute_range(lhs.shnNo, lhs.mynNo);
-    halo.end_scalar(output);
-  } else {
-    compute_range(0, nNo);
-  }
+  compute_range(0, lhs.mynNo);
+  zero_scalar_range(lhs.mynNo, nNo, output);
 }
 
 template <typename ComputeRange>
@@ -590,16 +616,8 @@ void apply_vector_output(const FSILS_lhsType& lhs,
                          Array<double>& output)
 {
   const fsils_int nNo = lhs.nNo;
-  if (has_overlap(lhs)) {
-    compute_range(0, lhs.shnNo);
-    compute_range(lhs.mynNo, nNo);
-    const HaloExchange halo(lhs);
-    halo.begin_vector(components, output);
-    compute_range(lhs.shnNo, lhs.mynNo);
-    halo.end_vector(components, output);
-  } else {
-    compute_range(0, nNo);
-  }
+  compute_range(0, lhs.mynNo);
+  zero_vector_range(lhs.mynNo, nNo, components, output);
 }
 
 void apply_sv_range(fsils_int i_start,
@@ -710,7 +728,7 @@ void ScalarToScalarOperator::apply(ScalarInput input, ScalarOutput output) const
   static constexpr const char* kOperatorName = "ScalarToScalarOperator";
   const auto op_contract = contract();
   require_state(kOperatorName, "input", op_contract.input_state, input.state);
-  require_state(kOperatorName, "output", op_contract.output_state, output.state);
+  require_output_state(kOperatorName, "output", output.state);
 
   auto compute_range = [&](fsils_int i_start, fsils_int i_end) {
     spar_mul::fsils_spar_mul_ss_range(i_start, i_end, *row_ptr_, *col_ptr_,
@@ -742,7 +760,7 @@ void ScalarToVectorOperator::apply(ScalarInput input, BlockOutput output) const
   static constexpr const char* kOperatorName = "ScalarToVectorOperator";
   const auto op_contract = contract();
   require_state(kOperatorName, "input", op_contract.input_state, input.state);
-  require_state(kOperatorName, "output", op_contract.output_state, output.state);
+  require_output_state(kOperatorName, "output", output.state);
   require_components(kOperatorName, "output", components_, output.components);
 
   auto compute_range = [&](fsils_int i_start, fsils_int i_end) {
@@ -775,7 +793,7 @@ void VectorToScalarOperator::apply(BlockInput input, ScalarOutput output) const
   static constexpr const char* kOperatorName = "VectorToScalarOperator";
   const auto op_contract = contract();
   require_state(kOperatorName, "input", op_contract.input_state, input.state);
-  require_state(kOperatorName, "output", op_contract.output_state, output.state);
+  require_output_state(kOperatorName, "output", output.state);
   require_components(kOperatorName, "input", components_, input.components);
 
   auto compute_range = [&](fsils_int i_start, fsils_int i_end) {
@@ -808,7 +826,7 @@ void VectorToVectorOperator::apply(BlockInput input, BlockOutput output) const
   static constexpr const char* kOperatorName = "VectorToVectorOperator";
   const auto op_contract = contract();
   require_state(kOperatorName, "input", op_contract.input_state, input.state);
-  require_state(kOperatorName, "output", op_contract.output_state, output.state);
+  require_output_state(kOperatorName, "output", output.state);
   require_components(kOperatorName, "input", components_, input.components);
   require_components(kOperatorName, "output", components_, output.components);
 
@@ -844,7 +862,7 @@ void RectangularOperator::apply(BlockInput input, BlockOutput output) const
   static constexpr const char* kOperatorName = "RectangularOperator";
   const auto op_contract = contract();
   require_state(kOperatorName, "input", op_contract.input_state, input.state);
-  require_state(kOperatorName, "output", op_contract.output_state, output.state);
+  require_output_state(kOperatorName, "output", output.state);
   require_components(kOperatorName, "input", in_components_, input.components);
   require_components(kOperatorName, "output", out_components_, output.components);
 
@@ -889,8 +907,8 @@ void FusedScalarConstraintOperator::apply(ScalarInput input,
   static constexpr const char* kOperatorName = "FusedScalarConstraintOperator";
   const auto op_contract = contract();
   require_state(kOperatorName, "input", op_contract.input_state, input.state);
-  require_state(kOperatorName, "momentum output", op_contract.first_output_state, momentum_output.state);
-  require_state(kOperatorName, "constraint output", op_contract.second_output_state, constraint_output.state);
+  require_output_state(kOperatorName, "momentum output", momentum_output.state);
+  require_output_state(kOperatorName, "constraint output", constraint_output.state);
   require_components(kOperatorName, "momentum output", momentum_components_, momentum_output.components);
 
   auto compute_range = [&](fsils_int i_start, fsils_int i_end) {
@@ -900,18 +918,9 @@ void FusedScalarConstraintOperator::apply(ScalarInput input,
   };
 
   const fsils_int nNo = lhs_->nNo;
-  if (has_overlap(*lhs_)) {
-    compute_range(0, lhs_->shnNo);
-    compute_range(lhs_->mynNo, nNo);
-    const HaloExchange halo(*lhs_);
-    halo.begin_vector(momentum_components_, momentum_output.values);
-    compute_range(lhs_->shnNo, lhs_->mynNo);
-    halo.end_vector(momentum_components_, momentum_output.values);
-    halo.begin_scalar(constraint_output.values);
-    halo.end_scalar(constraint_output.values);
-  } else {
-    compute_range(0, nNo);
-  }
+  compute_range(0, lhs_->mynNo);
+  zero_vector_range(lhs_->mynNo, nNo, momentum_components_, momentum_output.values);
+  zero_scalar_range(lhs_->mynNo, nNo, constraint_output.values);
 }
 
 FusedRectangularConstraintOperator::FusedRectangularConstraintOperator(
@@ -944,8 +953,8 @@ void FusedRectangularConstraintOperator::apply(BlockInput input,
   static constexpr const char* kOperatorName = "FusedRectangularConstraintOperator";
   const auto op_contract = contract();
   require_state(kOperatorName, "input", op_contract.input_state, input.state);
-  require_state(kOperatorName, "momentum output", op_contract.first_output_state, momentum_output.state);
-  require_state(kOperatorName, "constraint output", op_contract.second_output_state, constraint_output.state);
+  require_output_state(kOperatorName, "momentum output", momentum_output.state);
+  require_output_state(kOperatorName, "constraint output", constraint_output.state);
   require_components(kOperatorName, "input", constraint_components_, input.components);
   require_components(kOperatorName, "momentum output", momentum_components_, momentum_output.components);
   require_components(kOperatorName, "constraint output", constraint_components_, constraint_output.components);
@@ -958,18 +967,9 @@ void FusedRectangularConstraintOperator::apply(BlockInput input,
   };
 
   const fsils_int nNo = lhs_->nNo;
-  if (has_overlap(*lhs_)) {
-    compute_range(0, lhs_->shnNo);
-    compute_range(lhs_->mynNo, nNo);
-    const HaloExchange halo(*lhs_);
-    halo.begin_vector(momentum_components_, momentum_output.values);
-    compute_range(lhs_->shnNo, lhs_->mynNo);
-    halo.end_vector(momentum_components_, momentum_output.values);
-    halo.begin_vector(constraint_components_, constraint_output.values);
-    halo.end_vector(constraint_components_, constraint_output.values);
-  } else {
-    compute_range(0, nNo);
-  }
+  compute_range(0, lhs_->mynNo);
+  zero_vector_range(lhs_->mynNo, nNo, momentum_components_, momentum_output.values);
+  zero_vector_range(lhs_->mynNo, nNo, constraint_components_, constraint_output.values);
 }
 
 SparseOperatorBundle::SparseOperatorBundle(const FSILS_lhsType& lhs,
@@ -1041,7 +1041,7 @@ void fsils_spar_mul_ss(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
 {
   const auto ops = fe_fsi_linear_solver::distributed_sparse_operator::SparseOperatorBundle(lhs, rowPtr, colPtr);
   ops.scalar(K).apply(fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_input(U),
-                      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(KU));
+                      fe_fsi_linear_solver::distributed_sparse_operator::owned_only_output(KU));
 }
 
 void fsils_spar_mul_sv(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
@@ -1051,7 +1051,7 @@ void fsils_spar_mul_sv(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
   const auto ops = fe_fsi_linear_solver::distributed_sparse_operator::SparseOperatorBundle(lhs, rowPtr, colPtr);
   ops.scalar_to_vector(dof, K).apply(
       fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_input(U),
-      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(dof, KU));
+      fe_fsi_linear_solver::distributed_sparse_operator::owned_only_output(dof, KU));
 }
 
 void fsils_spar_mul_vs(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
@@ -1061,7 +1061,7 @@ void fsils_spar_mul_vs(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
   const auto ops = fe_fsi_linear_solver::distributed_sparse_operator::SparseOperatorBundle(lhs, rowPtr, colPtr);
   ops.vector_to_scalar(dof, K).apply(
       fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_input(dof, U),
-      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(KU));
+      fe_fsi_linear_solver::distributed_sparse_operator::owned_only_output(KU));
 }
 
 void fsils_spar_mul_vv(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
@@ -1071,7 +1071,7 @@ void fsils_spar_mul_vv(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
   const auto ops = fe_fsi_linear_solver::distributed_sparse_operator::SparseOperatorBundle(lhs, rowPtr, colPtr);
   ops.vector(dof, K).apply(
       fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_input(dof, U),
-      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(dof, KU));
+      fe_fsi_linear_solver::distributed_sparse_operator::owned_only_output(dof, KU));
 }
 
 void fsils_spar_mul_sv_ss_fused(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
@@ -1082,8 +1082,8 @@ void fsils_spar_mul_sv_ss_fused(FSILS_lhsType& lhs, const Array<fsils_int>& rowP
   const auto ops = fe_fsi_linear_solver::distributed_sparse_operator::SparseOperatorBundle(lhs, rowPtr, colPtr);
   ops.fused_scalar_constraint(nsd, G, L).apply(
       fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_input(in_vec),
-      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(nsd, GP),
-      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(SP));
+      fe_fsi_linear_solver::distributed_sparse_operator::owned_only_output(nsd, GP),
+      fe_fsi_linear_solver::distributed_sparse_operator::owned_only_output(SP));
 }
 
 void fsils_spar_mul_rect(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
@@ -1093,7 +1093,7 @@ void fsils_spar_mul_rect(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
   const auto ops = fe_fsi_linear_solver::distributed_sparse_operator::SparseOperatorBundle(lhs, rowPtr, colPtr);
   ops.rectangular(out_dof, in_dof, K).apply(
       fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_input(in_dof, U),
-      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(out_dof, KU));
+      fe_fsi_linear_solver::distributed_sparse_operator::owned_only_output(out_dof, KU));
 }
 
 void fsils_spar_mul_rect_vv_fused(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
@@ -1104,8 +1104,8 @@ void fsils_spar_mul_rect_vv_fused(FSILS_lhsType& lhs, const Array<fsils_int>& ro
   const auto ops = fe_fsi_linear_solver::distributed_sparse_operator::SparseOperatorBundle(lhs, rowPtr, colPtr);
   ops.fused_rectangular_constraint(mom_ncomp, con_ncomp, G, L).apply(
       fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_input(con_ncomp, P),
-      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(mom_ncomp, GP),
-      fe_fsi_linear_solver::distributed_sparse_operator::ghost_synced_output(con_ncomp, SP));
+      fe_fsi_linear_solver::distributed_sparse_operator::owned_only_output(mom_ncomp, GP),
+      fe_fsi_linear_solver::distributed_sparse_operator::owned_only_output(con_ncomp, SP));
 }
 
 }  // namespace spar_mul

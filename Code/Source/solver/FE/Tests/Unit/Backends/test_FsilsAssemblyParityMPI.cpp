@@ -9,6 +9,7 @@
 
 #include "Assembly/GlobalSystemView.h"
 #include "Backends/FSILS/FsilsFactory.h"
+#include "Backends/FSILS/FsilsMatrix.h"
 #include "Backends/FSILS/FsilsVector.h"
 #include "Backends/Interfaces/DofPermutation.h"
 #include "Core/Types.h"
@@ -102,12 +103,78 @@ std::vector<Real> gatherLocalMatrixEntries(const GenericMatrix& A, GlobalIndex n
     return local;
 }
 
-std::vector<Real> gatherLocalVectorEntries(GenericVector& v, GlobalIndex n_global)
+std::vector<Real> gatherOwnedLocalMatrixEntries(const GenericMatrix& A, GlobalIndex n_global)
+{
+    const auto* fsils = dynamic_cast<const FsilsMatrix*>(&A);
+    EXPECT_NE(fsils, nullptr);
+
+    std::vector<Real> local(static_cast<std::size_t>(n_global) * static_cast<std::size_t>(n_global), Real(0.0));
+    if (fsils == nullptr) {
+        return local;
+    }
+
+    for (GlobalIndex i = 0; i < n_global; ++i) {
+        if (!fsils->ownsFeDofRow(i)) {
+            continue;
+        }
+        for (GlobalIndex j = 0; j < n_global; ++j) {
+            local[static_cast<std::size_t>(i) * static_cast<std::size_t>(n_global) + static_cast<std::size_t>(j)] =
+                A.getEntry(i, j);
+        }
+    }
+    return local;
+}
+
+std::vector<Real> gatherOwnedLocalMatrixEntries(const DenseMatrixView& A,
+                                                const FsilsMatrix& layout,
+                                                GlobalIndex n_global)
+{
+    std::vector<Real> local(static_cast<std::size_t>(n_global) * static_cast<std::size_t>(n_global), Real(0.0));
+    const auto data = A.data();
+    for (GlobalIndex i = 0; i < n_global; ++i) {
+        if (!layout.ownsFeDofRow(i)) {
+            continue;
+        }
+        for (GlobalIndex j = 0; j < n_global; ++j) {
+            const auto idx = static_cast<std::size_t>(i) * static_cast<std::size_t>(n_global) +
+                             static_cast<std::size_t>(j);
+            local[idx] = data[idx];
+        }
+    }
+    return local;
+}
+
+std::vector<Real> gatherOwnedLocalVectorEntries(GenericVector& v, GlobalIndex n_global)
 {
     auto view = v.createAssemblyView();
+    const auto* fsils = dynamic_cast<const FsilsVector*>(&v);
+    EXPECT_NE(fsils, nullptr);
+
     std::vector<Real> local(static_cast<std::size_t>(n_global), Real(0.0));
+    if (fsils == nullptr) {
+        return local;
+    }
+
     for (GlobalIndex i = 0; i < n_global; ++i) {
+        if (!fsils->ownsFeDof(i)) {
+            continue;
+        }
         local[static_cast<std::size_t>(i)] = view->getVectorEntry(i);
+    }
+    return local;
+}
+
+std::vector<Real> gatherOwnedLocalVectorEntries(const DenseVectorView& v,
+                                                const FsilsVector& layout,
+                                                GlobalIndex n_global)
+{
+    std::vector<Real> local(static_cast<std::size_t>(n_global), Real(0.0));
+    const auto data = v.data();
+    for (GlobalIndex i = 0; i < n_global; ++i) {
+        if (!layout.ownsFeDof(i)) {
+            continue;
+        }
+        local[static_cast<std::size_t>(i)] = data[static_cast<std::size_t>(i)];
     }
     return local;
 }
@@ -160,7 +227,7 @@ void assembleElement(GlobalSystemView& mat_view,
 
 } // namespace
 
-TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithoutPermutation)
+TEST(FsilsAssemblyParityMPI, OwnedRowDirectAssemblyMatchesDenseWithoutPermutation)
 {
     MPI_Comm comm = MPI_COMM_WORLD;
     const int rank = mpiRank(comm);
@@ -187,7 +254,8 @@ TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithoutPermutation)
     pattern.ensureDiagonal();
     pattern.finalize();
 
-    // Ghost rows for shared node 1 on rank 0 (overlap model).
+    // Ghost rows for shared node 1 on rank 0 provide the input-vector halo.
+    // Direct backend views intentionally keep matrix/RHS rows owner-only.
     if (rank == 0) {
         std::vector<GlobalIndex> ghost_rows{3, 4, 5};
         std::vector<GlobalIndex> ghost_row_ptr{0, 6, 12, 18};
@@ -246,11 +314,18 @@ TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithoutPermutation)
     Ad.finalizeAssembly();
     bd.finalizeAssembly();
 
-    const auto dense_global_A = allreduceSum(Ad.data(), comm);
-    const auto dense_global_b = allreduceSum(bd.data(), comm);
+    const auto* A_fs = dynamic_cast<const FsilsMatrix*>(A.get());
+    ASSERT_NE(A_fs, nullptr);
+    const auto* b_fs = dynamic_cast<FsilsVector*>(b.get());
+    ASSERT_NE(b_fs, nullptr);
 
-    const auto fsils_local_A = gatherLocalMatrixEntries(*A, n_global);
-    const auto fsils_local_b = gatherLocalVectorEntries(*b, n_global);
+    const auto dense_local_A = gatherOwnedLocalMatrixEntries(Ad, *A_fs, n_global);
+    const auto dense_local_b = gatherOwnedLocalVectorEntries(bd, *b_fs, n_global);
+    const auto dense_global_A = allreduceSum(dense_local_A, comm);
+    const auto dense_global_b = allreduceSum(dense_local_b, comm);
+
+    const auto fsils_local_A = gatherOwnedLocalMatrixEntries(*A, n_global);
+    const auto fsils_local_b = gatherOwnedLocalVectorEntries(*b, n_global);
     const auto fsils_global_A = allreduceSum(fsils_local_A, comm);
     const auto fsils_global_b = allreduceSum(fsils_local_b, comm);
 
@@ -304,7 +379,7 @@ TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithoutPermutation)
     }
 }
 
-TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithPermutation)
+TEST(FsilsAssemblyParityMPI, OwnedRowDirectAssemblyMatchesDenseWithPermutation)
 {
     MPI_Comm comm = MPI_COMM_WORLD;
     const int rank = mpiRank(comm);
@@ -423,11 +498,18 @@ TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithPermutation)
     Ad.finalizeAssembly();
     bd.finalizeAssembly();
 
-    const auto dense_global_A = allreduceSum(Ad.data(), comm);
-    const auto dense_global_b = allreduceSum(bd.data(), comm);
+    const auto* A_fs = dynamic_cast<const FsilsMatrix*>(A.get());
+    ASSERT_NE(A_fs, nullptr);
+    const auto* b_fs = dynamic_cast<FsilsVector*>(b.get());
+    ASSERT_NE(b_fs, nullptr);
 
-    const auto fsils_local_A = gatherLocalMatrixEntries(*A, n_global);
-    const auto fsils_local_b = gatherLocalVectorEntries(*b, n_global);
+    const auto dense_local_A = gatherOwnedLocalMatrixEntries(Ad, *A_fs, n_global);
+    const auto dense_local_b = gatherOwnedLocalVectorEntries(bd, *b_fs, n_global);
+    const auto dense_global_A = allreduceSum(dense_local_A, comm);
+    const auto dense_global_b = allreduceSum(dense_local_b, comm);
+
+    const auto fsils_local_A = gatherOwnedLocalMatrixEntries(*A, n_global);
+    const auto fsils_local_b = gatherOwnedLocalVectorEntries(*b, n_global);
     const auto fsils_global_A = allreduceSum(fsils_local_A, comm);
     const auto fsils_global_b = allreduceSum(fsils_local_b, comm);
 
@@ -480,7 +562,7 @@ TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithPermutation)
     }
 }
 
-TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithPermutationNaturalIndexing)
+TEST(FsilsAssemblyParityMPI, OwnedRowDirectAssemblyMatchesDenseWithPermutationNaturalIndexing)
 {
     MPI_Comm comm = MPI_COMM_WORLD;
     const int rank = mpiRank(comm);
@@ -543,7 +625,8 @@ TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithPermutationNaturalIn
     pattern.ensureDiagonal();
     pattern.finalize();
 
-    // Ghost rows for shared node 1 on rank 0 (overlap model), in FE index space.
+    // Ghost rows for shared node 1 on rank 0, in FE index space.
+    // Direct backend views intentionally keep matrix/RHS rows owner-only.
     if (rank == 0) {
         std::vector<GlobalIndex> ghost_rows{3, 5, 7};
         std::vector<GlobalIndex> ghost_row_ptr{0, 6, 12, 18};
@@ -601,11 +684,18 @@ TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithPermutationNaturalIn
     Ad.finalizeAssembly();
     bd.finalizeAssembly();
 
-    const auto dense_global_A = allreduceSum(Ad.data(), comm);
-    const auto dense_global_b = allreduceSum(bd.data(), comm);
+    const auto* A_fs = dynamic_cast<const FsilsMatrix*>(A.get());
+    ASSERT_NE(A_fs, nullptr);
+    const auto* b_fs = dynamic_cast<FsilsVector*>(b.get());
+    ASSERT_NE(b_fs, nullptr);
 
-    const auto fsils_local_A = gatherLocalMatrixEntries(*A, n_global);
-    const auto fsils_local_b = gatherLocalVectorEntries(*b, n_global);
+    const auto dense_local_A = gatherOwnedLocalMatrixEntries(Ad, *A_fs, n_global);
+    const auto dense_local_b = gatherOwnedLocalVectorEntries(bd, *b_fs, n_global);
+    const auto dense_global_A = allreduceSum(dense_local_A, comm);
+    const auto dense_global_b = allreduceSum(dense_local_b, comm);
+
+    const auto fsils_local_A = gatherOwnedLocalMatrixEntries(*A, n_global);
+    const auto fsils_local_b = gatherOwnedLocalVectorEntries(*b, n_global);
     const auto fsils_global_A = allreduceSum(fsils_local_A, comm);
     const auto fsils_global_b = allreduceSum(fsils_local_b, comm);
 
@@ -658,7 +748,7 @@ TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithPermutationNaturalIn
     }
 }
 
-TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithPermutationNaturalIndexing_NormalizesInverse)
+TEST(FsilsAssemblyParityMPI, OwnedRowDirectAssemblyMatchesDenseWithPermutationNaturalIndexing_NormalizesInverse)
 {
     MPI_Comm comm = MPI_COMM_WORLD;
     const int rank = mpiRank(comm);
@@ -766,11 +856,18 @@ TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithPermutationNaturalIn
     Ad.finalizeAssembly();
     bd.finalizeAssembly();
 
-    const auto dense_global_A = allreduceSum(Ad.data(), comm);
-    const auto dense_global_b = allreduceSum(bd.data(), comm);
+    const auto* A_fs = dynamic_cast<const FsilsMatrix*>(A.get());
+    ASSERT_NE(A_fs, nullptr);
+    const auto* b_fs = dynamic_cast<FsilsVector*>(b.get());
+    ASSERT_NE(b_fs, nullptr);
 
-    const auto fsils_local_A = gatherLocalMatrixEntries(*A, n_global);
-    const auto fsils_local_b = gatherLocalVectorEntries(*b, n_global);
+    const auto dense_local_A = gatherOwnedLocalMatrixEntries(Ad, *A_fs, n_global);
+    const auto dense_local_b = gatherOwnedLocalVectorEntries(bd, *b_fs, n_global);
+    const auto dense_global_A = allreduceSum(dense_local_A, comm);
+    const auto dense_global_b = allreduceSum(dense_local_b, comm);
+
+    const auto fsils_local_A = gatherOwnedLocalMatrixEntries(*A, n_global);
+    const auto fsils_local_b = gatherOwnedLocalVectorEntries(*b, n_global);
     const auto fsils_global_A = allreduceSum(fsils_local_A, comm);
     const auto fsils_global_b = allreduceSum(fsils_local_b, comm);
 

@@ -134,6 +134,10 @@ std::unique_ptr<Assembler> createAssembler(const AssemblyOptions& options,
         name = "standardassembler";
     }
 
+    const bool mpi_active = system.mpi_world_size > 1;
+    const bool mpi_reverse_scatter =
+        mpi_active && (options.ghost_policy == GhostPolicy::ReverseScatter);
+
     std::unique_ptr<Assembler> base;
 
     if (name == "auto" || name == "autoassembler") {
@@ -168,7 +172,6 @@ std::unique_ptr<Assembler> createAssembler(const AssemblyOptions& options,
         }
 
         // Candidate: ParallelAssembler (only when MPI is active and the workload fits current limitations).
-        const bool mpi_active = system.mpi_world_size > 1;
         const bool single_field = system.num_fields == 1u;
         const bool needs_full_context = (form.required_data & kContextRequiredBits) != RequiredData::None;
 
@@ -181,7 +184,10 @@ std::unique_ptr<Assembler> createAssembler(const AssemblyOptions& options,
             !form.needsFieldSolutions() &&
             !needs_full_context;
 
-        if (parallel_applicable) {
+        if (mpi_reverse_scatter) {
+            reportLine("Auto selected base: ParallelAssembler (MPI ReverseScatter requires ghost contribution exchange)");
+            base = createParallelAssembler(options);
+        } else if (parallel_applicable) {
             reportLine("Auto selected base: ParallelAssembler (MPI active, single-field, minimal kernel requirements)");
             base = createParallelAssembler(options);
         } else {
@@ -193,8 +199,13 @@ std::unique_ptr<Assembler> createAssembler(const AssemblyOptions& options,
             base = createStandardAssembler(options);
         }
     } else if (name == "standard" || name == "standardassembler") {
-        reportLine("Explicit selection: StandardAssembler");
-        base = createStandardAssembler(options);
+        if (mpi_reverse_scatter) {
+            reportLine("Explicit StandardAssembler remapped to ParallelAssembler: MPI ReverseScatter requires ghost contribution exchange");
+            base = createParallelAssembler(options);
+        } else {
+            reportLine("Explicit selection: StandardAssembler");
+            base = createStandardAssembler(options);
+        }
     } else if (name == "parallel" || name == "parallelassembler") {
         reportLine("Explicit selection: ParallelAssembler");
         base = createParallelAssembler(options);

@@ -32,7 +32,7 @@
 //
 //
 // Only the part of U which is owned by this processor is included in
-// norm calculation, i.e. U(:,1:cS(tF)%ptr+cS(tF)%n-1)
+// Norm calculations operate on owned rows only for distributed FE FSILS.
 // In order to have the correct answer it is needed that COMMU has
 // been done before calling this function (or the ansesters of U
 // are passed through COMMU)

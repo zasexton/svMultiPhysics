@@ -651,9 +651,10 @@ const std::vector<FSILS_reducedSparseEntry>& projected_right_entries(
     return update.right_owned;
   }
   // Reduced updates may be internalized onto one rank, then expanded back to
-  // the full local overlap with fsils_commuv. Non-owning ranks can therefore
-  // legitimately have an empty owned view while still needing the full local
-  // right support to contribute their owned rows to the distributed projection.
+  // the full local halo through owner-to-ghost sync. Non-owning ranks can
+  // therefore legitimately have an empty owned view while still needing the
+  // full local right support to contribute their owned rows to the distributed
+  // projection.
   (void)lhs;
   return !update.right_scaled.empty() ? update.right_scaled : update.right;
 }

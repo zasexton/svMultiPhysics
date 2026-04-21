@@ -44,6 +44,10 @@
 
 #include "fsils_std.h"
 
+#include <algorithm>
+#include <stdexcept>
+#include <vector>
+
 namespace fe_fsi_linear_solver {
 
 namespace {
@@ -56,137 +60,112 @@ constexpr int kFsilsVectorCommTagBase = 1200;
   return kFsilsVectorCommTagBase + ((dof > 0) ? dof : 0);
 }
 
-} // namespace
-
-void fsils_commus(const FSILS_lhsType& lhs, Vector<double>& R)
+[[nodiscard]] bool has_owned_halo_plan(const FSILS_lhsType& lhs) noexcept
 {
-  if (lhs.commu.nTasks == 1) {
-    return;
-  }
-
-  int nReq = lhs.nReq;
-  if (lhs.cS.size() == 0 || nReq == 0) {
-    return;
-  }
-
-  int nmax = lhs.nmax_commu;
-  auto& sB = lhs.commu_sB;
-  auto& rB = lhs.commu_rB;
-  auto& sReq = lhs.commu_sReq;
-  auto& rReq = lhs.commu_rReq;
-
-  // Ensure buffers are large enough (should already be from fsils_lhs_create)
-  size_t needed = static_cast<size_t>(nmax) * nReq;
-  if (sB.size() < needed) { sB.resize(needed); rB.resize(needed); }
-
-  for (int i = 0; i < nReq; i++) {
-    for (int j = 0; j < lhs.cS[i].n; j++) {
-      int k = lhs.cS[i].ptr(j);
-      sB[j + i*nmax] = R(k);
-    }
-  }
-
-  const int mpi_tag = kFsilsScalarCommTag;
-
-  for (int i = 0; i < nReq; i++) {
-    MPI_Irecv(&rB[i*nmax], lhs.cS[i].n, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &rReq[i]);
-    MPI_Isend(&sB[i*nmax], lhs.cS[i].n, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &sReq[i]);
-  }
-
-  MPI_Waitall(nReq, rReq.data(), MPI_STATUSES_IGNORE);
-
-  for (int i = 0; i < nReq; i++) {
-    for (int j = 0; j < lhs.cS[i].n; j++) {
-      int k = lhs.cS[i].ptr(j);
-      R(k) = R(k) + rB[j + i*nmax];
-    }
-  }
-
-  MPI_Waitall(nReq, sReq.data(), MPI_STATUSES_IGNORE);
+  return lhs.owned_row_operator &&
+         lhs.commu.nTasks > 1 &&
+         lhs.owned_halo_send_nodes.size() == lhs.owned_halo_neighbor_ranks.size() &&
+         lhs.owned_halo_recv_nodes.size() == lhs.owned_halo_neighbor_ranks.size() &&
+         (lhs.nNo <= lhs.mynNo || !lhs.owned_halo_neighbor_ranks.empty());
 }
 
-void fsils_syncs(const FSILS_lhsType& lhs, Vector<double>& R)
+void require_owned_halo_plan(const FSILS_lhsType& lhs, const char* operation)
 {
-  if (lhs.commu.nTasks == 1) {
-    return;
+  if (!lhs.owned_row_operator) {
+    throw std::runtime_error(std::string(operation) + " requires an explicit owned-row layout");
   }
+  if (!has_owned_halo_plan(lhs)) {
+    throw std::runtime_error(std::string(operation) + " requires an explicit owned-row halo plan");
+  }
+}
 
-  if (lhs.cS.size() == 0 || lhs.nReq == 0) {
+void fsils_syncs_owned_halo(const FSILS_lhsType& lhs, Vector<double>& R)
+{
+  const int n_neighbors = static_cast<int>(lhs.owned_halo_neighbor_ranks.size());
+  if (n_neighbors == 0) {
     return;
   }
 
   for (fsils_int k = lhs.mynNo; k < lhs.nNo; ++k) {
     R(k) = 0.0;
   }
-  fsils_commus(lhs, R);
+
+  std::size_t send_total = 0;
+  std::size_t recv_total = 0;
+  for (int i = 0; i < n_neighbors; ++i) {
+    send_total += lhs.owned_halo_send_nodes[static_cast<std::size_t>(i)].size();
+    recv_total += lhs.owned_halo_recv_nodes[static_cast<std::size_t>(i)].size();
+  }
+
+  auto& send_buffer = lhs.owned_halo_send_buffer;
+  auto& recv_buffer = lhs.owned_halo_recv_buffer;
+  send_buffer.resize(send_total);
+  recv_buffer.resize(recv_total);
+
+  std::vector<MPI_Request> recv_req;
+  std::vector<MPI_Request> send_req;
+  recv_req.reserve(static_cast<std::size_t>(n_neighbors));
+  send_req.reserve(static_cast<std::size_t>(n_neighbors));
+
+  const int mpi_tag = kFsilsScalarCommTag;
+  std::size_t send_offset = 0;
+  std::size_t recv_offset = 0;
+  for (int i = 0; i < n_neighbors; ++i) {
+    const auto& send_nodes = lhs.owned_halo_send_nodes[static_cast<std::size_t>(i)];
+    const auto& recv_nodes = lhs.owned_halo_recv_nodes[static_cast<std::size_t>(i)];
+    const int peer = lhs.owned_halo_neighbor_ranks[static_cast<std::size_t>(i)];
+
+    for (std::size_t j = 0; j < send_nodes.size(); ++j) {
+      send_buffer[send_offset + j] = R(send_nodes[j]);
+    }
+
+    if (!recv_nodes.empty()) {
+      recv_req.push_back(MPI_REQUEST_NULL);
+      MPI_Irecv(recv_buffer.data() + recv_offset,
+                static_cast<int>(recv_nodes.size()),
+                mpreal,
+                peer,
+                mpi_tag,
+                lhs.commu.comm,
+                &recv_req.back());
+    }
+    if (!send_nodes.empty()) {
+      send_req.push_back(MPI_REQUEST_NULL);
+      MPI_Isend(send_buffer.data() + send_offset,
+                static_cast<int>(send_nodes.size()),
+                mpreal,
+                peer,
+                mpi_tag,
+                lhs.commu.comm,
+                &send_req.back());
+    }
+
+    send_offset += send_nodes.size();
+    recv_offset += recv_nodes.size();
+  }
+
+  if (!recv_req.empty()) {
+    MPI_Waitall(static_cast<int>(recv_req.size()), recv_req.data(), MPI_STATUSES_IGNORE);
+  }
+
+  recv_offset = 0;
+  for (int i = 0; i < n_neighbors; ++i) {
+    const auto& recv_nodes = lhs.owned_halo_recv_nodes[static_cast<std::size_t>(i)];
+    for (std::size_t j = 0; j < recv_nodes.size(); ++j) {
+      R(recv_nodes[j]) = recv_buffer[recv_offset + j];
+    }
+    recv_offset += recv_nodes.size();
+  }
+
+  if (!send_req.empty()) {
+    MPI_Waitall(static_cast<int>(send_req.size()), send_req.data(), MPI_STATUSES_IGNORE);
+  }
 }
 
-/// @brief This a both way communication with three main part:
-///
-/// 1 - rTmp {in master} = R          {from slave}
-/// 2 - R    {in master} = R + rTmp   {both from master}
-/// 3 - rTmp {in master} = R          {from master}
-/// 4 - R    {in slave}  = rTmp       {from master}
-//
-void fsils_commuv(const FSILS_lhsType& lhs, int dof, Array<double>& R)
+void fsils_syncv_owned_halo(const FSILS_lhsType& lhs, int dof, Array<double>& R)
 {
-  if (lhs.commu.nTasks == 1) {
-    return;
-  }
-
-  if (lhs.cS.size() == 0 || lhs.nReq == 0) {
-    return;
-  }
-
-  int nReq = lhs.nReq;
-  int nmax = lhs.nmax_commu;
-  auto& sReq = lhs.commu_sReq;
-  auto& rReq = lhs.commu_rReq;
-  auto& sB = lhs.commu_sB;
-  auto& rB = lhs.commu_rB;
-
-  // Ensure buffers are large enough for this dof
-  size_t needed = static_cast<size_t>(dof) * nmax * nReq;
-  if (sB.size() < needed) { sB.resize(needed); rB.resize(needed); }
-  size_t slice_sz = static_cast<size_t>(dof) * nmax;
-
-  for (int i = 0; i < nReq; i++) {
-    for (int j = 0; j < lhs.cS[i].n; j++) {
-      int k = lhs.cS[i].ptr(j);
-      for (int l = 0; l < dof; l++) {
-        sB[l + j*dof + i*slice_sz] = R(l,k);
-      }
-    }
-  }
-
-  const int mpi_tag = fsils_vector_comm_tag(dof);
-
-  for (int i = 0; i < nReq; i++) {
-    MPI_Irecv(&rB[i*slice_sz], lhs.cS[i].n*dof, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &rReq[i]);
-    MPI_Isend(&sB[i*slice_sz], lhs.cS[i].n*dof, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &sReq[i]);
-  }
-
-  MPI_Waitall(nReq, rReq.data(), MPI_STATUSES_IGNORE);
-
-  for (int i = 0; i < nReq; i++) {
-    for (int j = 0; j < lhs.cS[i].n; j++) {
-      int k = lhs.cS[i].ptr(j);
-      for (int l = 0; l < dof; l++) {
-        R(l,k) = R(l,k) + rB[l + j*dof + i*slice_sz];
-      }
-    }
-  }
-
-  MPI_Waitall(nReq, sReq.data(), MPI_STATUSES_IGNORE);
-}
-
-void fsils_syncv(const FSILS_lhsType& lhs, int dof, Array<double>& R)
-{
-  if (lhs.commu.nTasks == 1) {
-    return;
-  }
-
-  if (lhs.cS.size() == 0 || lhs.nReq == 0) {
+  const int n_neighbors = static_cast<int>(lhs.owned_halo_neighbor_ranks.size());
+  if (n_neighbors == 0) {
     return;
   }
 
@@ -195,121 +174,308 @@ void fsils_syncv(const FSILS_lhsType& lhs, int dof, Array<double>& R)
       R(l, k) = 0.0;
     }
   }
-  fsils_commuv(lhs, dof, R);
-}
 
-/// @brief Begin async scalar communication: pack + post Isend/Irecv.
-void fsils_commus_begin(const FSILS_lhsType& lhs, Vector<double>& R)
-{
-  if (lhs.commu.nTasks == 1) return;
-  if (lhs.cS.size() == 0 || lhs.nReq == 0) return;
-
-  int nReq = lhs.nReq;
-  int nmax = lhs.nmax_commu;
-  auto& sB = lhs.commu_sB;
-  auto& rB = lhs.commu_rB;
-  auto& sReq = lhs.commu_sReq;
-  auto& rReq = lhs.commu_rReq;
-
-  size_t needed = static_cast<size_t>(nmax) * nReq;
-  if (sB.size() < needed) { sB.resize(needed); rB.resize(needed); }
-
-  for (int i = 0; i < nReq; i++) {
-    for (int j = 0; j < lhs.cS[i].n; j++) {
-      int k = lhs.cS[i].ptr(j);
-      sB[j + i*nmax] = R(k);
-    }
+  std::size_t send_nodes_total = 0;
+  std::size_t recv_nodes_total = 0;
+  for (int i = 0; i < n_neighbors; ++i) {
+    send_nodes_total += lhs.owned_halo_send_nodes[static_cast<std::size_t>(i)].size();
+    recv_nodes_total += lhs.owned_halo_recv_nodes[static_cast<std::size_t>(i)].size();
   }
 
-  const int mpi_tag = kFsilsScalarCommTag;
-  for (int i = 0; i < nReq; i++) {
-    MPI_Irecv(&rB[i*nmax], lhs.cS[i].n, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &rReq[i]);
-    MPI_Isend(&sB[i*nmax], lhs.cS[i].n, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &sReq[i]);
-  }
-}
+  auto& send_buffer = lhs.owned_halo_send_buffer;
+  auto& recv_buffer = lhs.owned_halo_recv_buffer;
+  send_buffer.resize(static_cast<std::size_t>(std::max(dof, 0)) * send_nodes_total);
+  recv_buffer.resize(static_cast<std::size_t>(std::max(dof, 0)) * recv_nodes_total);
 
-/// @brief Finish async scalar communication: wait + unpack + accumulate.
-void fsils_commus_end(const FSILS_lhsType& lhs, Vector<double>& R)
-{
-  if (lhs.commu.nTasks == 1) return;
-  if (lhs.cS.size() == 0 || lhs.nReq == 0) return;
-
-  int nReq = lhs.nReq;
-  int nmax = lhs.nmax_commu;
-  auto& rB = lhs.commu_rB;
-  auto& sReq = lhs.commu_sReq;
-  auto& rReq = lhs.commu_rReq;
-
-  MPI_Waitall(nReq, rReq.data(), MPI_STATUSES_IGNORE);
-
-  for (int i = 0; i < nReq; i++) {
-    for (int j = 0; j < lhs.cS[i].n; j++) {
-      int k = lhs.cS[i].ptr(j);
-      R(k) = R(k) + rB[j + i*nmax];
-    }
-  }
-
-  MPI_Waitall(nReq, sReq.data(), MPI_STATUSES_IGNORE);
-}
-
-/// @brief Begin async vector communication: pack + post Isend/Irecv.
-void fsils_commuv_begin(const FSILS_lhsType& lhs, int dof, Array<double>& R)
-{
-  if (lhs.commu.nTasks == 1) return;
-  if (lhs.cS.size() == 0 || lhs.nReq == 0) return;
-
-  int nReq = lhs.nReq;
-  int nmax = lhs.nmax_commu;
-  auto& sB = lhs.commu_sB;
-  auto& rB = lhs.commu_rB;
-  auto& sReq = lhs.commu_sReq;
-  auto& rReq = lhs.commu_rReq;
-
-  size_t needed = static_cast<size_t>(dof) * nmax * nReq;
-  if (sB.size() < needed) { sB.resize(needed); rB.resize(needed); }
-  size_t slice_sz = static_cast<size_t>(dof) * nmax;
-
-  for (int i = 0; i < nReq; i++) {
-    for (int j = 0; j < lhs.cS[i].n; j++) {
-      int k = lhs.cS[i].ptr(j);
-      for (int l = 0; l < dof; l++) {
-        sB[l + j*dof + i*slice_sz] = R(l,k);
-      }
-    }
-  }
+  std::vector<MPI_Request> recv_req;
+  std::vector<MPI_Request> send_req;
+  recv_req.reserve(static_cast<std::size_t>(n_neighbors));
+  send_req.reserve(static_cast<std::size_t>(n_neighbors));
 
   const int mpi_tag = fsils_vector_comm_tag(dof);
-  for (int i = 0; i < nReq; i++) {
-    MPI_Irecv(&rB[i*slice_sz], lhs.cS[i].n*dof, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &rReq[i]);
-    MPI_Isend(&sB[i*slice_sz], lhs.cS[i].n*dof, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &sReq[i]);
+  std::size_t send_offset = 0;
+  std::size_t recv_offset = 0;
+  for (int i = 0; i < n_neighbors; ++i) {
+    const auto& send_nodes = lhs.owned_halo_send_nodes[static_cast<std::size_t>(i)];
+    const auto& recv_nodes = lhs.owned_halo_recv_nodes[static_cast<std::size_t>(i)];
+    const int peer = lhs.owned_halo_neighbor_ranks[static_cast<std::size_t>(i)];
+
+    for (std::size_t j = 0; j < send_nodes.size(); ++j) {
+      const auto node = send_nodes[j];
+      for (int l = 0; l < dof; ++l) {
+        send_buffer[send_offset + j * static_cast<std::size_t>(dof) + static_cast<std::size_t>(l)] =
+            R(l, node);
+      }
+    }
+
+    if (!recv_nodes.empty()) {
+      recv_req.push_back(MPI_REQUEST_NULL);
+      MPI_Irecv(recv_buffer.data() + recv_offset,
+                static_cast<int>(recv_nodes.size()) * dof,
+                mpreal,
+                peer,
+                mpi_tag,
+                lhs.commu.comm,
+                &recv_req.back());
+    }
+    if (!send_nodes.empty()) {
+      send_req.push_back(MPI_REQUEST_NULL);
+      MPI_Isend(send_buffer.data() + send_offset,
+                static_cast<int>(send_nodes.size()) * dof,
+                mpreal,
+                peer,
+                mpi_tag,
+                lhs.commu.comm,
+                &send_req.back());
+    }
+
+    send_offset += send_nodes.size() * static_cast<std::size_t>(dof);
+    recv_offset += recv_nodes.size() * static_cast<std::size_t>(dof);
+  }
+
+  if (!recv_req.empty()) {
+    MPI_Waitall(static_cast<int>(recv_req.size()), recv_req.data(), MPI_STATUSES_IGNORE);
+  }
+
+  recv_offset = 0;
+  for (int i = 0; i < n_neighbors; ++i) {
+    const auto& recv_nodes = lhs.owned_halo_recv_nodes[static_cast<std::size_t>(i)];
+    for (std::size_t j = 0; j < recv_nodes.size(); ++j) {
+      const auto node = recv_nodes[j];
+      for (int l = 0; l < dof; ++l) {
+        R(l, node) =
+            recv_buffer[recv_offset + j * static_cast<std::size_t>(dof) + static_cast<std::size_t>(l)];
+      }
+    }
+    recv_offset += recv_nodes.size() * static_cast<std::size_t>(dof);
+  }
+
+  if (!send_req.empty()) {
+    MPI_Waitall(static_cast<int>(send_req.size()), send_req.data(), MPI_STATUSES_IGNORE);
   }
 }
 
-/// @brief Finish async vector communication: wait + unpack + accumulate.
-void fsils_commuv_end(const FSILS_lhsType& lhs, int dof, Array<double>& R)
+void fsils_reverse_scatterv_owned_halo(const FSILS_lhsType& lhs, int dof, Array<double>& R)
 {
-  if (lhs.commu.nTasks == 1) return;
-  if (lhs.cS.size() == 0 || lhs.nReq == 0) return;
+  const int n_neighbors = static_cast<int>(lhs.owned_halo_neighbor_ranks.size());
+  if (n_neighbors == 0) {
+    return;
+  }
 
-  int nReq = lhs.nReq;
-  int nmax = lhs.nmax_commu;
-  auto& rB = lhs.commu_rB;
-  auto& sReq = lhs.commu_sReq;
-  auto& rReq = lhs.commu_rReq;
-  size_t slice_sz = static_cast<size_t>(dof) * nmax;
+  std::size_t send_nodes_total = 0;
+  std::size_t recv_nodes_total = 0;
+  for (int i = 0; i < n_neighbors; ++i) {
+    // Reverse of owner->ghost sync: local ghosts are sent back to the owning
+    // peer, and owned rows receive raw contributions from that peer's ghosts.
+    send_nodes_total += lhs.owned_halo_recv_nodes[static_cast<std::size_t>(i)].size();
+    recv_nodes_total += lhs.owned_halo_send_nodes[static_cast<std::size_t>(i)].size();
+  }
 
-  MPI_Waitall(nReq, rReq.data(), MPI_STATUSES_IGNORE);
+  auto& send_buffer = lhs.owned_halo_send_buffer;
+  auto& recv_buffer = lhs.owned_halo_recv_buffer;
+  send_buffer.resize(static_cast<std::size_t>(std::max(dof, 0)) * send_nodes_total);
+  recv_buffer.resize(static_cast<std::size_t>(std::max(dof, 0)) * recv_nodes_total);
 
-  for (int i = 0; i < nReq; i++) {
-    for (int j = 0; j < lhs.cS[i].n; j++) {
-      int k = lhs.cS[i].ptr(j);
-      for (int l = 0; l < dof; l++) {
-        R(l,k) = R(l,k) + rB[l + j*dof + i*slice_sz];
+  std::vector<MPI_Request> recv_req;
+  std::vector<MPI_Request> send_req;
+  recv_req.reserve(static_cast<std::size_t>(n_neighbors));
+  send_req.reserve(static_cast<std::size_t>(n_neighbors));
+
+  const int mpi_tag = fsils_vector_comm_tag(dof);
+  std::size_t send_offset = 0;
+  std::size_t recv_offset = 0;
+  for (int i = 0; i < n_neighbors; ++i) {
+    const auto& ghost_nodes = lhs.owned_halo_recv_nodes[static_cast<std::size_t>(i)];
+    const auto& owned_nodes = lhs.owned_halo_send_nodes[static_cast<std::size_t>(i)];
+    const int peer = lhs.owned_halo_neighbor_ranks[static_cast<std::size_t>(i)];
+
+    for (std::size_t j = 0; j < ghost_nodes.size(); ++j) {
+      const auto node = ghost_nodes[j];
+      for (int l = 0; l < dof; ++l) {
+        send_buffer[send_offset + j * static_cast<std::size_t>(dof) + static_cast<std::size_t>(l)] =
+            R(l, node);
+      }
+    }
+
+    if (!owned_nodes.empty()) {
+      recv_req.push_back(MPI_REQUEST_NULL);
+      MPI_Irecv(recv_buffer.data() + recv_offset,
+                static_cast<int>(owned_nodes.size()) * dof,
+                mpreal,
+                peer,
+                mpi_tag,
+                lhs.commu.comm,
+                &recv_req.back());
+    }
+    if (!ghost_nodes.empty()) {
+      send_req.push_back(MPI_REQUEST_NULL);
+      MPI_Isend(send_buffer.data() + send_offset,
+                static_cast<int>(ghost_nodes.size()) * dof,
+                mpreal,
+                peer,
+                mpi_tag,
+                lhs.commu.comm,
+                &send_req.back());
+    }
+
+    send_offset += ghost_nodes.size() * static_cast<std::size_t>(dof);
+    recv_offset += owned_nodes.size() * static_cast<std::size_t>(dof);
+  }
+
+  if (!recv_req.empty()) {
+    MPI_Waitall(static_cast<int>(recv_req.size()), recv_req.data(), MPI_STATUSES_IGNORE);
+  }
+
+  recv_offset = 0;
+  for (int i = 0; i < n_neighbors; ++i) {
+    const auto& owned_nodes = lhs.owned_halo_send_nodes[static_cast<std::size_t>(i)];
+    for (std::size_t j = 0; j < owned_nodes.size(); ++j) {
+      const auto node = owned_nodes[j];
+      for (int l = 0; l < dof; ++l) {
+        R(l, node) +=
+            recv_buffer[recv_offset + j * static_cast<std::size_t>(dof) + static_cast<std::size_t>(l)];
+      }
+    }
+    recv_offset += owned_nodes.size() * static_cast<std::size_t>(dof);
+  }
+
+  if (!send_req.empty()) {
+    MPI_Waitall(static_cast<int>(send_req.size()), send_req.data(), MPI_STATUSES_IGNORE);
+  }
+
+  for (int i = 0; i < n_neighbors; ++i) {
+    const auto& ghost_nodes = lhs.owned_halo_recv_nodes[static_cast<std::size_t>(i)];
+    for (const auto node : ghost_nodes) {
+      for (int l = 0; l < dof; ++l) {
+        R(l, node) = 0.0;
       }
     }
   }
+}
 
-  MPI_Waitall(nReq, sReq.data(), MPI_STATUSES_IGNORE);
+} // namespace
+
+static void fsils_syncs_impl(const FSILS_lhsType& lhs, Vector<double>& R)
+{
+  if (lhs.commu.nTasks == 1) {
+    return;
+  }
+
+  require_owned_halo_plan(lhs, "FSILS scalar owner-to-ghost sync");
+  fsils_syncs_owned_halo(lhs, R);
+}
+
+void fsils_syncs_owned_to_ghost(const FSILS_lhsType& lhs, Vector<double>& R)
+{
+  fsils_syncs_impl(lhs, R);
+}
+
+void fsils_reduce_shared_face_values_owned_row(const FSILS_lhsType& lhs,
+    int dof,
+    const Vector<int>& face_nodes,
+    Array<double>& face_values)
+{
+  if (lhs.commu.nTasks <= 1 || dof <= 0 || face_nodes.size() <= 0 || face_values.size() <= 0) {
+    return;
+  }
+
+  const int face_node_count = std::min(face_nodes.size(), face_values.ncols());
+  const int face_dof = std::min(dof, face_values.nrows());
+  if (face_node_count <= 0 || face_dof <= 0) {
+    return;
+  }
+
+  Array<double> contributions(dof, lhs.nNo);
+  contributions = 0.0;
+  for (int a = 0; a < face_node_count; ++a) {
+    const int node = face_nodes(a);
+    if (node < 0 || node >= lhs.nNo) {
+      continue;
+    }
+    for (int i = 0; i < face_dof; ++i) {
+      contributions(i, node) = face_values(i, a);
+    }
+  }
+
+  fsils_reverse_scatterv_contribution_buffer(lhs, dof, contributions);
+  fsils_syncv_owned_to_ghost(lhs, dof, contributions);
+
+  for (int a = 0; a < face_node_count; ++a) {
+    const int node = face_nodes(a);
+    if (node < 0 || node >= lhs.nNo) {
+      continue;
+    }
+    for (int i = 0; i < face_dof; ++i) {
+      face_values(i, a) = contributions(i, node);
+    }
+  }
+}
+
+void fsils_apply_shared_dirichlet_face_mask(const FSILS_lhsType& lhs,
+    int dof,
+    const Vector<int>& face_nodes,
+    Array<double>& face_values)
+{
+  if (lhs.commu.nTasks <= 1 || dof <= 0 || face_nodes.size() <= 0 || face_values.size() <= 0) {
+    return;
+  }
+
+  const int face_node_count = std::min(face_nodes.size(), face_values.ncols());
+  const int face_dof = std::min(dof, face_values.nrows());
+  if (face_node_count <= 0 || face_dof <= 0) {
+    return;
+  }
+
+  Array<double> counts(dof, face_node_count);
+  counts = 0.0;
+  for (int a = 0; a < face_node_count; ++a) {
+    for (int i = 0; i < face_dof; ++i) {
+      counts(i, a) = 1.0;
+    }
+  }
+
+  fsils_reduce_shared_face_values_owned_row(lhs, dof, face_nodes, counts);
+
+  constexpr double kMaskTol = 1e-12;
+  for (int a = 0; a < face_node_count; ++a) {
+    const int node = face_nodes(a);
+    if (node < 0 || node >= lhs.nNo) {
+      continue;
+    }
+    for (int i = 0; i < face_dof; ++i) {
+      face_values(i, a) = (face_values(i, a) >= counts(i, a) - kMaskTol) ? 1.0 : 0.0;
+    }
+  }
+}
+
+static void fsils_reverse_scatterv_impl(const FSILS_lhsType& lhs, int dof, Array<double>& R)
+{
+  if (lhs.commu.nTasks == 1) {
+    return;
+  }
+
+  require_owned_halo_plan(lhs, "FSILS reverse scatter");
+  fsils_reverse_scatterv_owned_halo(lhs, dof, R);
+}
+
+void fsils_reverse_scatterv_contribution_buffer(const FSILS_lhsType& lhs, int dof, Array<double>& R)
+{
+  fsils_reverse_scatterv_impl(lhs, dof, R);
+}
+
+static void fsils_syncv_impl(const FSILS_lhsType& lhs, int dof, Array<double>& R)
+{
+  if (lhs.commu.nTasks == 1) {
+    return;
+  }
+
+  require_owned_halo_plan(lhs, "FSILS vector owner-to-ghost sync");
+  fsils_syncv_owned_halo(lhs, dof, R);
+}
+
+void fsils_syncv_owned_to_ghost(const FSILS_lhsType& lhs, int dof, Array<double>& R)
+{
+  fsils_syncv_impl(lhs, dof, R);
 }
 
 };

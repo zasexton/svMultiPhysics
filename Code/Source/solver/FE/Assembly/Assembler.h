@@ -264,6 +264,7 @@ struct AssemblyOptions {
     // Determinism
     bool deterministic{true};            ///< Require deterministic results
     bool stable_insertion_order{true};   ///< Stable ordering for floating-point
+    std::function<int(GlobalIndex)> row_owner_rank{}; ///< Optional explicit owner for assembled global rows
 
     // Performance hints
     bool use_batching{true};             ///< Batch element operations in StandardAssembler

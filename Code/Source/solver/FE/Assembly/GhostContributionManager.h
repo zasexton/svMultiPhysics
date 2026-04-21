@@ -62,6 +62,7 @@
 #include "Core/Types.h"
 #include "Core/FEConfig.h"
 #include "Assembler.h"  // For GhostPolicy enum
+#include "GlobalSystemView.h"  // For AddMode
 
 #include <vector>
 #include <span>
@@ -70,6 +71,7 @@
 #include <memory>
 #include <cstdint>
 #include <chrono>
+#include <functional>
 
 #if FE_HAS_MPI
 #  include <mpi.h>
@@ -92,16 +94,39 @@ namespace assembly {
 // ============================================================================
 
 /**
+ * @brief Matrix operation carried by ghost contribution exchange
+ */
+enum class GhostMatrixOp : std::uint8_t {
+    Entry,              ///< Apply a scalar matrix entry using AddMode
+    ZeroRow,            ///< Zero a row without restoring the diagonal
+    ZeroRowSetDiagonal  ///< Zero a row and restore the backend's default diagonal
+};
+
+/**
+ * @brief Vector operation carried by ghost contribution exchange
+ */
+enum class GhostVectorOp : std::uint8_t {
+    Entry, ///< Apply a scalar vector entry using AddMode
+    Zero   ///< Zero a vector entry
+};
+
+/**
  * @brief Single ghost contribution entry
  */
 struct GhostContribution {
     GlobalIndex global_row;     ///< Global row index
     GlobalIndex global_col;     ///< Global column index (ignored for vectors)
     Real value;                 ///< Contribution value
+    AddMode mode{AddMode::Add}; ///< Entry accumulation mode
+    GhostMatrixOp op{GhostMatrixOp::Entry}; ///< Matrix operation kind
 
     bool operator<(const GhostContribution& other) const noexcept {
         if (global_row != other.global_row) return global_row < other.global_row;
-        return global_col < other.global_col;
+        if (global_col != other.global_col) return global_col < other.global_col;
+        if (op != other.op) {
+            return static_cast<std::uint8_t>(op) < static_cast<std::uint8_t>(other.op);
+        }
+        return static_cast<std::uint8_t>(mode) < static_cast<std::uint8_t>(other.mode);
     }
 };
 
@@ -111,9 +136,15 @@ struct GhostContribution {
 struct GhostVectorContribution {
     GlobalIndex global_row;  ///< Global row index
     Real value;              ///< Contribution value
+    AddMode mode{AddMode::Add}; ///< Entry accumulation mode
+    GhostVectorOp op{GhostVectorOp::Entry}; ///< Vector operation kind
 
     bool operator<(const GhostVectorContribution& other) const noexcept {
-        return global_row < other.global_row;
+        if (global_row != other.global_row) return global_row < other.global_row;
+        if (op != other.op) {
+            return static_cast<std::uint8_t>(op) < static_cast<std::uint8_t>(other.op);
+        }
+        return static_cast<std::uint8_t>(mode) < static_cast<std::uint8_t>(other.mode);
     }
 };
 
@@ -268,6 +299,16 @@ public:
      */
     [[nodiscard]] GlobalIndex ownershipOffset() const noexcept { return ownership_offset_; }
 
+    /**
+     * @brief Set an explicit owner-rank callback for global assembled row indices
+     *
+     * When present, reverse-scatter routing uses this callback instead of the
+     * DofMap ownership function. This is intended for backend layouts whose row
+     * ownership differs from FE numbering, e.g. a PETSc-like owned-row operator
+     * with a backend permutation.
+     */
+    void setExplicitRowOwner(std::function<int(GlobalIndex)> owner_rank);
+
     // =========================================================================
     // Initialization
     // =========================================================================
@@ -302,7 +343,23 @@ public:
      * @param value Contribution value
      * @return true if locally owned (caller should insert), false if buffered
      */
-    bool addMatrixContribution(GlobalIndex global_row, GlobalIndex global_col, Real value);
+    bool addMatrixContribution(GlobalIndex global_row,
+                               GlobalIndex global_col,
+                               Real value,
+                               AddMode mode = AddMode::Add);
+
+    /**
+     * @brief Defer a matrix entry operation so it is applied after remote additive entries
+     */
+    bool addMatrixEntryOperation(GlobalIndex global_row,
+                                 GlobalIndex global_col,
+                                 Real value,
+                                 AddMode mode);
+
+    /**
+     * @brief Add a matrix row operation (zeroRows) to be applied by the owner
+     */
+    bool addMatrixRowOperation(GlobalIndex global_row, bool set_diagonal);
 
     /**
      * @brief Add a vector contribution
@@ -311,7 +368,21 @@ public:
      * @param value Contribution value
      * @return true if locally owned, false if buffered
      */
-    bool addVectorContribution(GlobalIndex global_row, Real value);
+    bool addVectorContribution(GlobalIndex global_row,
+                               Real value,
+                               AddMode mode = AddMode::Add);
+
+    /**
+     * @brief Defer a vector entry operation so it is applied after remote additive entries
+     */
+    bool addVectorEntryOperation(GlobalIndex global_row,
+                                 Real value,
+                                 AddMode mode);
+
+    /**
+     * @brief Add a vector zero operation to be applied by the owner
+     */
+    bool addVectorZeroOperation(GlobalIndex global_row);
 
     /**
      * @brief Add a batch of matrix contributions
@@ -325,7 +396,8 @@ public:
         std::span<const GlobalIndex> row_dofs,
         std::span<const GlobalIndex> col_dofs,
         std::span<const Real> values,
-        std::vector<GhostContribution>& owned_contributions);
+        std::vector<GhostContribution>& owned_contributions,
+        AddMode mode = AddMode::Add);
 
     /**
      * @brief Check if a DOF is locally owned
@@ -408,6 +480,16 @@ public:
      */
     void clearReceivedContributions();
 
+    /**
+     * @brief Move locally owned deferred matrix operations out of the manager
+     */
+    [[nodiscard]] std::vector<GhostContribution> takeLocalMatrixOperations();
+
+    /**
+     * @brief Move locally owned deferred vector operations out of the manager
+     */
+    [[nodiscard]] std::vector<GhostVectorContribution> takeLocalVectorOperations();
+
     // =========================================================================
     // Buffer Management
     // =========================================================================
@@ -477,11 +559,13 @@ private:
     void buildCommunicationGraph();
     void sortBuffersForDeterminism();
     int findNeighborIndex(int rank) const;
+    [[nodiscard]] int explicitOwnerRank(GlobalIndex global_dof) const;
 
     // Configuration
     const dofs::DofMap* dof_map_{nullptr};
     const dofs::GhostDofManager* ghost_dof_manager_{nullptr};
     GlobalIndex ownership_offset_{0};
+    std::function<int(GlobalIndex)> explicit_row_owner_{};
     GhostPolicy policy_{GhostPolicy::ReverseScatter};
     bool deterministic_{AssemblyOptions{}.deterministic};
 
@@ -505,6 +589,8 @@ private:
     // Receive buffers
     std::vector<GhostContribution> received_matrix_;
     std::vector<GhostVectorContribution> received_vector_;
+    std::vector<GhostContribution> local_matrix_ops_;
+    std::vector<GhostVectorContribution> local_vector_ops_;
 
     // State
     bool initialized_{false};
