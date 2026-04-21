@@ -479,6 +479,15 @@ public:
     void distribute(backends::GenericVector& vec) const;
 
     /**
+     * @brief Refresh backend ghost values, then re-impose constrained entries.
+     *
+     * Distributed backends may overwrite overlap entries during ghost
+     * synchronization. For inhomogeneous Dirichlet data, callers should use
+     * this helper instead of calling `vec.updateGhosts()` after `distribute()`.
+     */
+    void updateGhostsAndDistribute(backends::GenericVector& vec) const;
+
+    /**
      * @brief Distribute constraints to a vector, treating inhomogeneities as zero.
      *
      * Enforces the homogeneous form:

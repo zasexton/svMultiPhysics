@@ -683,6 +683,15 @@ void AffineConstraints::distribute(backends::GenericVector& vec) const
     view->finalizeAssembly();
 }
 
+void AffineConstraints::updateGhostsAndDistribute(backends::GenericVector& vec) const
+{
+    vec.updateGhosts();
+    if (empty()) {
+        return;
+    }
+    distribute(vec);
+}
+
 void AffineConstraints::distributeHomogeneous(double* vec, GlobalIndex vec_size) const
 {
     if (!is_closed_) {

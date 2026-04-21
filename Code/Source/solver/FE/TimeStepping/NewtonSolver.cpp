@@ -19,7 +19,6 @@
 #include "Auxiliary/AuxiliaryOperatorRegistry.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
 #include "Systems/SystemsExceptions.h"
-#include "TimeStepping/ConstraintSync.h"
 
 #if defined(FE_HAS_FSILS)
 #  include "Backends/FSILS/FsilsMatrix.h"
@@ -3267,11 +3266,18 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     const int temporal_order = transient.system().temporalOrder();
 
     auto syncHistoryState = [&]() {
-        detail::updateGhostsAndDistributeConstraints(constraints, history);
+        history.updateGhosts();
+        if (constraints.empty()) {
+            return;
+        }
+        constraints.distribute(history.u());
+        for (int k = 1; k <= history.historyDepth(); ++k) {
+            constraints.distribute(history.uPrevK(k));
+        }
     };
 
     auto syncCurrentState = [&]() {
-        detail::updateGhostsAndDistributeConstraints(constraints, history.u());
+        constraints.updateGhostsAndDistribute(history.u());
     };
 
     struct NewtonStateWithContext {
