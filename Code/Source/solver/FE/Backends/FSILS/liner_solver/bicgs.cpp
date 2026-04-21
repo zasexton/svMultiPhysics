@@ -445,6 +445,17 @@ using fe_fsi_linear_solver::fsils_int;
   return *env != '\0' && *env != '0';
 }
 
+[[nodiscard]] int forced_schur_bicgstab_iterations(
+    const fe_fsi_linear_solver::FSILS_subLsType& ls) noexcept
+{
+  const int requested =
+      parse_int_env("SVMP_FSILS_BLOCKSCHUR_SCHUR_FIXED_ITERS", 0);
+  if (requested <= 0) {
+    return 0;
+  }
+  return std::min(requested, std::max(0, ls.mItr));
+}
+
 [[nodiscard]] bool face_only_zero_mean_project_enabled() noexcept
 {
   static const bool enabled =
@@ -7410,8 +7421,11 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
   trace_constant_mode_operator(rhs_reference);
   dump_legacy("bicg_initial_guess", X);
   dump_legacy("bicg_initial_residual", R);
+  const int fixed_bicg_iters = forced_schur_bicgstab_iterations(ls);
   for (int i = 0; i < ls.mItr; ++i) {
-    if (err < eps) {
+    const bool hold_for_fixed_iters =
+        fixed_bicg_iters > 0 && i < fixed_bicg_iters;
+    if (err < eps && !hold_for_fixed_iters) {
       ls.suc = true;
       break;
     }
@@ -7493,6 +7507,9 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
     omp_la::omp_sum_s(nNo, -omega, P, V);
     omp_la::omp_axpby_s(nNo, P, R, beta, P);
     ++i_itr;
+  }
+  if (fixed_bicg_iters > 0) {
+    ls.suc = (err < eps);
   }
 
   trace_iteration_history("bicgstab", "final", i_itr - 1, err, err_initial, "true");
@@ -8111,9 +8128,12 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
   P = R;
   Rh = R;
   int i_itr = 1;
+  const int fixed_bicg_iters = forced_schur_bicgstab_iterations(ls);
 
   for (int i = 0; i < ls.mItr; ++i) {
-    if (err < eps) {
+    const bool hold_for_fixed_iters =
+        fixed_bicg_iters > 0 && i < fixed_bicg_iters;
+    if (err < eps && !hold_for_fixed_iters) {
       ls.suc = true;
       break;
     }
@@ -8194,6 +8214,9 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
     omp_la::omp_axpby_v(con_ncomp, nNo, P, R, beta, P);
 
     i_itr += 1;
+  }
+  if (fixed_bicg_iters > 0) {
+    ls.suc = (err < eps);
   }
 
   R = X;

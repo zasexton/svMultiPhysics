@@ -2428,10 +2428,65 @@ TEST(AuxiliaryModelBuilder, AugmentSolverOptionsExportsMixedBlockLayoutAndRoleNa
     EXPECT_EQ(lambda->size, 1);
     EXPECT_EQ(lambda->role, backends::BlockRole::ConstraintField);
     EXPECT_EQ(lambda->kind, backends::MixedBlockKind::Auxiliary);
+    EXPECT_EQ(lambda->assembly_mode, backends::MixedBlockAssemblyMode::BorderedReduced);
+    EXPECT_EQ(lambda->row_ownership, backends::MixedRowOwnershipPolicy::SingleOwner);
+    EXPECT_EQ(lambda->single_owner_rank, 0);
 
     ASSERT_EQ(opts.block_role_names.size(), 1u);
     EXPECT_EQ(opts.block_role_names[0].first, backends::BlockRole::ConstraintField);
     EXPECT_EQ(opts.block_role_names[0].second, "lambda_block");
+}
+
+TEST(AuxiliaryModelBuilder, MonolithicScopeOwnershipPoliciesPropagateIntoMixedLayout)
+{
+    using namespace svmp::FE;
+
+    auto model = aux_test::buildDecay(1.0);
+
+    systems::FESystem system(std::shared_ptr<const assembly::IMeshAccess>{});
+    system.deployAuxiliaryModel(
+        use(model)
+            .name("global_aux")
+            .scope(AuxiliaryStateScope::Global)
+            .solveMode(AuxiliarySolveMode::Monolithic)
+            .initialize({0.0}));
+    system.deployAuxiliaryModel(
+        use(model)
+            .name("node_aux")
+            .scope(AuxiliaryStateScope::Node)
+            .entityCount(2)
+            .solveMode(AuxiliarySolveMode::Monolithic)
+            .initialize({0.0}));
+    system.deployAuxiliaryModel(
+        use(model)
+            .name("region_aux")
+            .region()
+            .entityCount(3)
+            .solveMode(AuxiliarySolveMode::Monolithic)
+            .initialize({0.0}));
+
+    system.finalizeAuxiliaryLayout();
+    const auto opts = system.augmentSolverOptions(backends::SolverOptions{},
+                                                  /*n_field_unknowns=*/0);
+    ASSERT_TRUE(opts.mixed_block_layout.has_value());
+
+    const auto* global = opts.mixed_block_layout->findBlock("global_aux");
+    ASSERT_NE(global, nullptr);
+    EXPECT_EQ(global->assembly_mode, backends::MixedBlockAssemblyMode::BorderedReduced);
+    EXPECT_EQ(global->row_ownership, backends::MixedRowOwnershipPolicy::SingleOwner);
+    EXPECT_EQ(global->single_owner_rank, 0);
+
+    const auto* node = opts.mixed_block_layout->findBlock("node_aux");
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->assembly_mode, backends::MixedBlockAssemblyMode::BorderedReduced);
+    EXPECT_EQ(node->row_ownership, backends::MixedRowOwnershipPolicy::BackendDofOwner);
+    EXPECT_EQ(node->single_owner_rank, -1);
+
+    const auto* region = opts.mixed_block_layout->findBlock("region_aux");
+    ASSERT_NE(region, nullptr);
+    EXPECT_EQ(region->assembly_mode, backends::MixedBlockAssemblyMode::BorderedReduced);
+    EXPECT_EQ(region->row_ownership, backends::MixedRowOwnershipPolicy::RegionOwner);
+    EXPECT_EQ(region->single_owner_rank, -1);
 }
 
 // ============================================================================

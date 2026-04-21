@@ -360,13 +360,17 @@ TEST(FsilsBackend, CreateLinearSolverNormalizesMetadataDrivenBlockSchurOptions)
     mixed.total_unknowns = 10;
     mixed.blocks.push_back({"velocity", 0, 8, BlockRole::PrimaryField, MixedBlockKind::Field});
     mixed.blocks.push_back({"pressure", 8, 1, BlockRole::ConstraintField, MixedBlockKind::Field});
-    mixed.blocks.push_back({"stiff_aux",
-                            9,
-                            1,
-                            BlockRole::AuxiliaryField,
-                            MixedBlockKind::Auxiliary,
-                            /*block_diagonal_suitable=*/false,
-                            /*special_precondition=*/true});
+    MixedBlockDescriptor stiff_aux{"stiff_aux",
+                                   9,
+                                   1,
+                                   BlockRole::AuxiliaryField,
+                                   MixedBlockKind::Auxiliary,
+                                   /*block_diagonal_suitable=*/false,
+                                   /*special_precondition=*/true};
+    stiff_aux.assembly_mode = MixedBlockAssemblyMode::BorderedReduced;
+    stiff_aux.row_ownership = MixedRowOwnershipPolicy::SingleOwner;
+    stiff_aux.single_owner_rank = 0;
+    mixed.blocks.push_back(stiff_aux);
     mixed.primary_block = 0;
     mixed.constraint_block = 1;
     opts.mixed_block_layout = mixed;
@@ -378,6 +382,37 @@ TEST(FsilsBackend, CreateLinearSolverNormalizesMetadataDrivenBlockSchurOptions)
               FsilsBlockSchurSchurPreconditioner::AlgebraicSchur);
     EXPECT_EQ(stored.fsils_blockschur_momentum_approximation,
               FsilsBlockSchurMomentumApproximation::ASM);
+}
+
+TEST(FsilsBackend, CreateLinearSolverRejectsInvalidNativeAuxiliaryPartition)
+{
+    FsilsFactory factory(/*dof_per_node=*/3);
+
+    SolverOptions opts{};
+    MixedBlockLayout mixed{};
+    mixed.field_unknowns = 2;
+    mixed.auxiliary_unknowns = 1;
+    mixed.total_unknowns = 3;
+
+    MixedBlockDescriptor velocity{"velocity", 0, 2, BlockRole::PrimaryField,
+                                  MixedBlockKind::Field};
+    velocity.node_component_start = 0;
+    velocity.node_component_count = 2;
+    mixed.blocks.push_back(velocity);
+
+    MixedBlockDescriptor aux{"temperature_aux", 2, 1, BlockRole::AuxiliaryField,
+                             MixedBlockKind::Auxiliary};
+    aux.assembly_mode = MixedBlockAssemblyMode::NativeOwnedRows;
+    aux.row_ownership = MixedRowOwnershipPolicy::BackendDofOwner;
+    mixed.blocks.push_back(aux);
+    opts.mixed_block_layout = mixed;
+
+    EXPECT_THROW((void)factory.createLinearSolver(opts), InvalidArgumentException);
+
+    mixed.blocks.back().node_component_start = 2;
+    mixed.blocks.back().node_component_count = 1;
+    opts.mixed_block_layout = mixed;
+    EXPECT_NO_THROW((void)factory.createLinearSolver(opts));
 }
 
 TEST(FsilsBackend, SolveCGDof2SingleNode)

@@ -17,6 +17,27 @@ namespace {
     return backends::BlockRole::AuxiliaryField;
 }
 
+[[nodiscard]] backends::MixedRowOwnershipPolicy rowOwnershipPolicyForScope(
+    AuxiliaryStateScope scope) noexcept
+{
+    switch (scope) {
+        case AuxiliaryStateScope::Global:
+        case AuxiliaryStateScope::Boundary:
+            return backends::MixedRowOwnershipPolicy::SingleOwner;
+        case AuxiliaryStateScope::Node:
+            return backends::MixedRowOwnershipPolicy::BackendDofOwner;
+        case AuxiliaryStateScope::Cell:
+            return backends::MixedRowOwnershipPolicy::CellOwner;
+        case AuxiliaryStateScope::QuadraturePoint:
+            return backends::MixedRowOwnershipPolicy::QuadraturePointOwner;
+        case AuxiliaryStateScope::Region:
+            return backends::MixedRowOwnershipPolicy::RegionOwner;
+        case AuxiliaryStateScope::Facet:
+            return backends::MixedRowOwnershipPolicy::FacetOwner;
+    }
+    return backends::MixedRowOwnershipPolicy::Unspecified;
+}
+
 void applySolverMetadata(AuxiliaryBlockUnknownLayout& blk,
                          const AuxiliaryBlockSolverMetadata& meta)
 {
@@ -104,6 +125,10 @@ void AuxiliaryOperatorRegistry::registerMonolithicUnknowns(
     blk.n_unknowns = entity_count * static_cast<std::size_t>(stride);
     blk.scope = scope;
     blk.constraint_groups = std::move(constraint_groups);
+    blk.row_ownership = rowOwnershipPolicyForScope(scope);
+    if (blk.row_ownership == backends::MixedRowOwnershipPolicy::SingleOwner) {
+        blk.single_owner_rank = 0;
+    }
     if (solver_meta != nullptr) {
         applySolverMetadata(blk, *solver_meta);
         block_solver_meta_[blk.name] = *solver_meta;

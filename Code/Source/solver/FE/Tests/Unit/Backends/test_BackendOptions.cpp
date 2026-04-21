@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "Backends/Utils/BackendOptions.h"
+#include "Core/FEException.h"
 
 namespace svmp::FE::backends {
 
@@ -37,6 +38,10 @@ TEST(BackendOptions, ToString)
     EXPECT_EQ(fsilsBlockSchurMomentumApproximationToString(
                   FsilsBlockSchurMomentumApproximation::Auto),
               "auto");
+    EXPECT_EQ(mixedBlockAssemblyModeToString(MixedBlockAssemblyMode::BorderedReduced),
+              "bordered-reduced");
+    EXPECT_EQ(mixedRowOwnershipPolicyToString(MixedRowOwnershipPolicy::BackendDofOwner),
+              "backend-dof-owner");
 }
 
 // --- BlockLayout tests ---
@@ -279,7 +284,12 @@ TEST(MixedBlockLayout, FindByExtentAndRole)
     layout.total_unknowns = 10;
     layout.blocks.push_back({"velocity", 0, 6, BlockRole::PrimaryField, MixedBlockKind::Field});
     layout.blocks.push_back({"pressure", 6, 2, BlockRole::ConstraintField, MixedBlockKind::Field});
-    layout.blocks.push_back({"lambda", 8, 2, BlockRole::ConstraintField, MixedBlockKind::Auxiliary});
+    MixedBlockDescriptor lambda{"lambda", 8, 2, BlockRole::ConstraintField,
+                                MixedBlockKind::Auxiliary};
+    lambda.assembly_mode = MixedBlockAssemblyMode::BorderedReduced;
+    lambda.row_ownership = MixedRowOwnershipPolicy::SingleOwner;
+    lambda.single_owner_rank = 0;
+    layout.blocks.push_back(lambda);
     layout.primary_block = 0;
 
     const auto* vel = layout.findBlockByExtent(0, 6);
@@ -293,9 +303,89 @@ TEST(MixedBlockLayout, FindByExtentAndRole)
     const auto* aux = layout.findBlock("lambda");
     ASSERT_NE(aux, nullptr);
     EXPECT_EQ(aux->kind, MixedBlockKind::Auxiliary);
+    EXPECT_TRUE(layout.hasAuxiliaryBlocks());
+    EXPECT_FALSE(layout.hasNativeAuxiliaryRows());
+    EXPECT_EQ(layout.firstAuxiliaryBlockWithoutExplicitAssemblyContract(), nullptr);
 
     EXPECT_TRUE(layout.matchesTotalUnknowns(10));
     EXPECT_FALSE(layout.matchesTotalUnknowns(8));
+}
+
+TEST(MixedBlockLayout, FsilsContractRejectsAmbiguousAuxiliaryAssemblyMode)
+{
+    MixedBlockLayout layout{};
+    layout.field_unknowns = 8;
+    layout.auxiliary_unknowns = 1;
+    layout.total_unknowns = 9;
+    layout.blocks.push_back({"velocity", 0, 8, BlockRole::PrimaryField,
+                             MixedBlockKind::Field});
+    layout.blocks.push_back({"lambda", 8, 1, BlockRole::ConstraintField,
+                             MixedBlockKind::Auxiliary});
+
+    const auto msg = validateFsilsMixedLayoutContract(layout, /*dof_per_node=*/3);
+    EXPECT_NE(msg.find("no explicit assembly mode"), std::string::npos);
+
+    SolverOptions opts{};
+    opts.mixed_block_layout = layout;
+    EXPECT_THROW((void)normalizeSolverOptionsForBackend(opts, BackendKind::FSILS),
+                 InvalidArgumentException);
+}
+
+TEST(MixedBlockLayout, FsilsContractAcceptsBorderedReducedAuxiliaryMetadata)
+{
+    MixedBlockLayout layout{};
+    layout.field_unknowns = 8;
+    layout.auxiliary_unknowns = 1;
+    layout.total_unknowns = 9;
+    layout.blocks.push_back({"velocity", 0, 8, BlockRole::PrimaryField,
+                             MixedBlockKind::Field});
+
+    MixedBlockDescriptor aux{"lambda", 8, 1, BlockRole::ConstraintField,
+                             MixedBlockKind::Auxiliary};
+    aux.assembly_mode = MixedBlockAssemblyMode::BorderedReduced;
+    aux.row_ownership = MixedRowOwnershipPolicy::SingleOwner;
+    aux.single_owner_rank = 0;
+    layout.blocks.push_back(aux);
+
+    EXPECT_TRUE(validateFsilsMixedLayoutContract(layout, /*dof_per_node=*/3).empty());
+    SolverOptions opts{};
+    opts.mixed_block_layout = layout;
+    EXPECT_NO_THROW((void)normalizeSolverOptionsForBackend(opts, BackendKind::FSILS));
+}
+
+TEST(MixedBlockLayout, FsilsContractValidatesNativeOwnedAuxiliaryRows)
+{
+    MixedBlockLayout layout{};
+    layout.field_unknowns = 9;
+    layout.auxiliary_unknowns = 3;
+    layout.total_unknowns = 12;
+
+    MixedBlockDescriptor velocity{"velocity", 0, 6, BlockRole::PrimaryField,
+                                  MixedBlockKind::Field};
+    velocity.node_component_start = 0;
+    velocity.node_component_count = 2;
+    layout.blocks.push_back(velocity);
+
+    MixedBlockDescriptor pressure{"pressure", 6, 3, BlockRole::ConstraintField,
+                                  MixedBlockKind::Field};
+    pressure.node_component_start = 2;
+    pressure.node_component_count = 1;
+    layout.blocks.push_back(pressure);
+
+    MixedBlockDescriptor aux{"temperature_aux", 9, 3, BlockRole::AuxiliaryField,
+                             MixedBlockKind::Auxiliary};
+    aux.assembly_mode = MixedBlockAssemblyMode::NativeOwnedRows;
+    aux.row_ownership = MixedRowOwnershipPolicy::BackendDofOwner;
+    aux.node_component_start = 3;
+    aux.node_component_count = 1;
+    layout.blocks.push_back(aux);
+
+    EXPECT_TRUE(validateFsilsMixedLayoutContract(layout, /*dof_per_node=*/4).empty());
+
+    layout.blocks.back().row_ownership = MixedRowOwnershipPolicy::Unspecified;
+    const auto missing_owner =
+        validateFsilsMixedLayoutContract(layout, /*dof_per_node=*/4);
+    EXPECT_NE(missing_owner.find("no explicit row ownership policy"), std::string::npos);
 }
 
 // --- TimeIntegrationDescriptor tests ---
@@ -411,7 +501,12 @@ TEST(SolverOptions, ResolveBlockNameForRoleFallsBackToMixedLayout)
 {
     SolverOptions opts{};
     MixedBlockLayout layout{};
-    layout.blocks.push_back({"lambda", 8, 1, BlockRole::ConstraintField, MixedBlockKind::Auxiliary});
+    MixedBlockDescriptor lambda{"lambda", 8, 1, BlockRole::ConstraintField,
+                                MixedBlockKind::Auxiliary};
+    lambda.assembly_mode = MixedBlockAssemblyMode::BorderedReduced;
+    lambda.row_ownership = MixedRowOwnershipPolicy::SingleOwner;
+    lambda.single_owner_rank = 0;
+    layout.blocks.push_back(lambda);
     opts.mixed_block_layout = layout;
 
     EXPECT_EQ(opts.resolveBlockNameForRole(BlockRole::ConstraintField), "lambda");
@@ -435,15 +530,19 @@ TEST(SolverOptions, NormalizeFsilsBlockSchurPolicyFromAuxiliaryMetadata)
     mixed.total_unknowns = 11;
     mixed.blocks.push_back({"velocity", 0, 8, BlockRole::PrimaryField, MixedBlockKind::Field});
     mixed.blocks.push_back({"pressure", 8, 1, BlockRole::ConstraintField, MixedBlockKind::Field});
-    mixed.blocks.push_back({"stiff_aux",
-                            9,
-                            2,
-                            BlockRole::AuxiliaryField,
-                            MixedBlockKind::Auxiliary,
-                            /*block_diagonal_suitable=*/false,
-                            /*special_precondition=*/true,
-                            /*schur_eliminable=*/true,
-                            "velocity"});
+    MixedBlockDescriptor stiff_aux{"stiff_aux",
+                                   9,
+                                   2,
+                                   BlockRole::AuxiliaryField,
+                                   MixedBlockKind::Auxiliary,
+                                   /*block_diagonal_suitable=*/false,
+                                   /*special_precondition=*/true,
+                                   /*schur_eliminable=*/true,
+                                   "velocity"};
+    stiff_aux.assembly_mode = MixedBlockAssemblyMode::BorderedReduced;
+    stiff_aux.row_ownership = MixedRowOwnershipPolicy::SingleOwner;
+    stiff_aux.single_owner_rank = 0;
+    mixed.blocks.push_back(stiff_aux);
     mixed.primary_block = 0;
     mixed.constraint_block = 1;
     opts.mixed_block_layout = mixed;
@@ -469,13 +568,17 @@ TEST(SolverOptions, NormalizePetscBlockPreconditionerFromAuxiliaryMetadata)
     mixed.auxiliary_unknowns = 2;
     mixed.total_unknowns = 6;
     mixed.blocks.push_back({"velocity", 0, 4, BlockRole::PrimaryField, MixedBlockKind::Field});
-    mixed.blocks.push_back({"stiff_aux",
-                            4,
-                            2,
-                            BlockRole::AuxiliaryField,
-                            MixedBlockKind::Auxiliary,
-                            /*block_diagonal_suitable=*/false,
-                            /*special_precondition=*/true});
+    MixedBlockDescriptor stiff_aux{"stiff_aux",
+                                   4,
+                                   2,
+                                   BlockRole::AuxiliaryField,
+                                   MixedBlockKind::Auxiliary,
+                                   /*block_diagonal_suitable=*/false,
+                                   /*special_precondition=*/true};
+    stiff_aux.assembly_mode = MixedBlockAssemblyMode::BorderedReduced;
+    stiff_aux.row_ownership = MixedRowOwnershipPolicy::SingleOwner;
+    stiff_aux.single_owner_rank = 0;
+    mixed.blocks.push_back(stiff_aux);
     opts.mixed_block_layout = mixed;
 
     const auto normalized = normalizeSolverOptionsForBackend(

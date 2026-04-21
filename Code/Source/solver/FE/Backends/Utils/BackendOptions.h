@@ -197,6 +197,45 @@ enum class MixedBlockKind : std::uint8_t {
     Auxiliary
 };
 
+/**
+ * @brief How a mixed block participates in backend assembly.
+ *
+ * Auxiliary blocks must state this explicitly for FSILS because native FSILS
+ * matrix/vector storage is row-owned and nodal-interleaved.  Blocks that are
+ * reduced, condensed, or direct-only must not be treated as appended native
+ * backend rows.
+ */
+enum class MixedBlockAssemblyMode : std::uint8_t {
+    Unspecified = 0,
+    NativeOwnedRows,
+    BorderedReduced,
+    LocalCondensed,
+    DirectOnlyLowered,
+    MetadataOnly
+};
+
+/**
+ * @brief Row ownership policy for native auxiliary rows.
+ *
+ * This is policy metadata, not a distributed owner map by itself.  Backends
+ * that accept native auxiliary rows must either derive concrete row owners
+ * from this policy or reject the layout before matrix construction.
+ */
+enum class MixedRowOwnershipPolicy : std::uint8_t {
+    Unspecified = 0,
+    SingleOwner,
+    BackendDofOwner,
+    CellOwner,
+    QuadraturePointOwner,
+    RegionOwner,
+    FacetOwner
+};
+
+[[nodiscard]] std::string_view
+mixedBlockAssemblyModeToString(MixedBlockAssemblyMode mode) noexcept;
+[[nodiscard]] std::string_view
+mixedRowOwnershipPolicyToString(MixedRowOwnershipPolicy policy) noexcept;
+
 /// Describes one absolute-offset block in a mixed field + auxiliary system.
 struct MixedBlockDescriptor {
     std::string name{};
@@ -208,6 +247,43 @@ struct MixedBlockDescriptor {
     bool special_precondition{false};
     bool schur_eliminable{false};
     std::string schur_complement_partner{};
+
+    /// Explicit assembly/ownership contract.  Field blocks are native rows by
+    /// definition; auxiliary blocks must set assembly_mode explicitly.
+    MixedBlockAssemblyMode assembly_mode{MixedBlockAssemblyMode::Unspecified};
+    MixedRowOwnershipPolicy row_ownership{MixedRowOwnershipPolicy::Unspecified};
+    int single_owner_rank{-1};
+
+    /// Optional component metadata for native FSILS nodal-interleaved blocks.
+    /// Valid only when assembly_mode == NativeOwnedRows.
+    int node_component_start{-1};
+    int node_component_count{0};
+
+    [[nodiscard]] bool isAuxiliary() const noexcept {
+        return kind == MixedBlockKind::Auxiliary;
+    }
+
+    [[nodiscard]] bool usesNativeOwnedRows() const noexcept {
+        return kind == MixedBlockKind::Field ||
+               assembly_mode == MixedBlockAssemblyMode::NativeOwnedRows;
+    }
+
+    [[nodiscard]] bool hasExplicitAuxiliaryAssemblyContract() const noexcept {
+        return kind != MixedBlockKind::Auxiliary ||
+               assembly_mode != MixedBlockAssemblyMode::Unspecified;
+    }
+
+    [[nodiscard]] bool hasExplicitNativeRowOwnership() const noexcept {
+        if (kind != MixedBlockKind::Auxiliary ||
+            assembly_mode != MixedBlockAssemblyMode::NativeOwnedRows) {
+            return true;
+        }
+        if (row_ownership == MixedRowOwnershipPolicy::Unspecified) {
+            return false;
+        }
+        return row_ownership != MixedRowOwnershipPolicy::SingleOwner ||
+               single_owner_rank >= 0;
+    }
 };
 
 /// Describes a mixed global block layout using absolute offsets and sizes.
@@ -305,6 +381,39 @@ struct MixedBlockLayout {
         return std::any_of(blocks.begin(), blocks.end(), [](const auto& block) {
             return block.schur_eliminable;
         });
+    }
+
+    [[nodiscard]] bool hasAuxiliaryBlocks() const noexcept {
+        return std::any_of(blocks.begin(), blocks.end(), [](const auto& block) {
+            return block.kind == MixedBlockKind::Auxiliary;
+        });
+    }
+
+    [[nodiscard]] bool hasNativeAuxiliaryRows() const noexcept {
+        return std::any_of(blocks.begin(), blocks.end(), [](const auto& block) {
+            return block.kind == MixedBlockKind::Auxiliary &&
+                   block.assembly_mode == MixedBlockAssemblyMode::NativeOwnedRows;
+        });
+    }
+
+    [[nodiscard]] const MixedBlockDescriptor*
+    firstAuxiliaryBlockWithoutExplicitAssemblyContract() const noexcept {
+        for (const auto& block : blocks) {
+            if (!block.hasExplicitAuxiliaryAssemblyContract()) {
+                return &block;
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] const MixedBlockDescriptor*
+    firstNativeAuxiliaryBlockWithoutExplicitRowOwnership() const noexcept {
+        for (const auto& block : blocks) {
+            if (!block.hasExplicitNativeRowOwnership()) {
+                return &block;
+            }
+        }
+        return nullptr;
     }
 };
 
@@ -516,6 +625,17 @@ struct SolverReport {
 fsilsBlockSchurPreconditionerToString(FsilsBlockSchurSchurPreconditioner pc) noexcept;
 [[nodiscard]] std::string_view
 fsilsBlockSchurMomentumApproximationToString(FsilsBlockSchurMomentumApproximation approx) noexcept;
+
+/**
+ * @brief Validate the FSILS mixed-layout contract.
+ *
+ * Returns an empty string when valid.  A native auxiliary-row layout must have
+ * explicit row ownership and enough nodal-component metadata to prove it can be
+ * represented in FSILS' fixed `dof_per_node` nodal-interleaved storage.
+ */
+[[nodiscard]] std::string validateFsilsMixedLayoutContract(
+    const MixedBlockLayout& layout,
+    int dof_per_node);
 
 /**
  * @brief Apply backend-specific policy defaults derived from block metadata.

@@ -7,7 +7,10 @@
 
 #include "Backends/Utils/BackendOptions.h"
 
+#include "Core/FEException.h"
+
 #include <algorithm>
+#include <string>
 
 namespace svmp {
 namespace FE {
@@ -74,6 +77,87 @@ fsilsBlockSchurMomentumApproximationToString(FsilsBlockSchurMomentumApproximatio
         case FsilsBlockSchurMomentumApproximation::ASM: return "asm-k";
         default: return "unknown";
     }
+}
+
+std::string_view mixedBlockAssemblyModeToString(MixedBlockAssemblyMode mode) noexcept
+{
+    switch (mode) {
+        case MixedBlockAssemblyMode::Unspecified: return "unspecified";
+        case MixedBlockAssemblyMode::NativeOwnedRows: return "native-owned-rows";
+        case MixedBlockAssemblyMode::BorderedReduced: return "bordered-reduced";
+        case MixedBlockAssemblyMode::LocalCondensed: return "local-condensed";
+        case MixedBlockAssemblyMode::DirectOnlyLowered: return "direct-only-lowered";
+        case MixedBlockAssemblyMode::MetadataOnly: return "metadata-only";
+        default: return "unknown";
+    }
+}
+
+std::string_view mixedRowOwnershipPolicyToString(MixedRowOwnershipPolicy policy) noexcept
+{
+    switch (policy) {
+        case MixedRowOwnershipPolicy::Unspecified: return "unspecified";
+        case MixedRowOwnershipPolicy::SingleOwner: return "single-owner";
+        case MixedRowOwnershipPolicy::BackendDofOwner: return "backend-dof-owner";
+        case MixedRowOwnershipPolicy::CellOwner: return "cell-owner";
+        case MixedRowOwnershipPolicy::QuadraturePointOwner: return "quadrature-point-owner";
+        case MixedRowOwnershipPolicy::RegionOwner: return "region-owner";
+        case MixedRowOwnershipPolicy::FacetOwner: return "facet-owner";
+        default: return "unknown";
+    }
+}
+
+std::string validateFsilsMixedLayoutContract(const MixedBlockLayout& layout,
+                                             int dof_per_node)
+{
+    if (const auto* block = layout.firstAuxiliaryBlockWithoutExplicitAssemblyContract()) {
+        return "FSILS mixed auxiliary block '" + block->name +
+               "' has no explicit assembly mode";
+    }
+
+    if (const auto* block = layout.firstNativeAuxiliaryBlockWithoutExplicitRowOwnership()) {
+        return "FSILS native auxiliary block '" + block->name +
+               "' has no explicit row ownership policy";
+    }
+
+    if (!layout.hasNativeAuxiliaryRows()) {
+        return {};
+    }
+
+    if (dof_per_node <= 0) {
+        return "FSILS native auxiliary rows require dof_per_node > 0";
+    }
+
+    std::vector<int> component_coverage(static_cast<std::size_t>(dof_per_node), 0);
+    for (const auto& block : layout.blocks) {
+        if (!block.usesNativeOwnedRows()) {
+            continue;
+        }
+        if (block.node_component_start < 0 || block.node_component_count <= 0) {
+            return "FSILS native mixed block '" + block.name +
+                   "' is missing nodal component-range metadata";
+        }
+        if (block.node_component_start + block.node_component_count > dof_per_node) {
+            return "FSILS native mixed block '" + block.name +
+                   "' component range exceeds dof_per_node";
+        }
+        for (int c = block.node_component_start;
+             c < block.node_component_start + block.node_component_count; ++c) {
+            auto& count = component_coverage[static_cast<std::size_t>(c)];
+            ++count;
+            if (count > 1) {
+                return "FSILS native mixed block '" + block.name +
+                       "' overlaps another nodal component range";
+            }
+        }
+    }
+
+    for (int c = 0; c < dof_per_node; ++c) {
+        if (component_coverage[static_cast<std::size_t>(c)] != 1) {
+            return "FSILS native mixed blocks do not partition [0, dof_per_node)";
+        }
+    }
+
+    return {};
 }
 
 namespace {
@@ -294,6 +378,23 @@ SolverOptions normalizeSolverOptionsForBackend(const SolverOptions& options,
             break;
 
         case BackendKind::FSILS:
+            if (normalized.mixed_block_layout.has_value()) {
+                if (const auto* block =
+                        normalized.mixed_block_layout
+                            ->firstAuxiliaryBlockWithoutExplicitAssemblyContract()) {
+                    FE_THROW(InvalidArgumentException,
+                             "normalizeSolverOptionsForBackend(FSILS): mixed auxiliary block '" +
+                                 block->name + "' has no explicit assembly mode");
+                }
+                if (const auto* block =
+                        normalized.mixed_block_layout
+                            ->firstNativeAuxiliaryBlockWithoutExplicitRowOwnership()) {
+                    FE_THROW(InvalidArgumentException,
+                             "normalizeSolverOptionsForBackend(FSILS): native auxiliary block '" +
+                                 block->name + "' has no explicit row ownership policy");
+                }
+            }
+
             if (hasSpecialPreconditionBlocks(normalized) &&
                 normalized.preconditioner != PreconditionerType::RowColumnScaling) {
                 normalized.fsils_use_rcs = true;

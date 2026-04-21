@@ -7086,6 +7086,9 @@ backends::SolverOptions FESystem::augmentSolverOptions(const backends::SolverOpt
             (aux_block.role == AuxiliaryBlockRole::SpecialPrecondition);
         block.schur_eliminable = aux_block.schur_eliminable;
         block.schur_complement_partner = aux_block.schur_complement_partner;
+        block.assembly_mode = aux_block.assembly_mode;
+        block.row_ownership = aux_block.row_ownership;
+        block.single_owner_rank = aux_block.single_owner_rank;
         mixed_layout.blocks.push_back(std::move(block));
     }
 

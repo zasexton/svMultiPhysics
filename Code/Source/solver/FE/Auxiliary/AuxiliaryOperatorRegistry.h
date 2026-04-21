@@ -102,6 +102,16 @@ struct AuxiliaryBlockUnknownLayout {
     bool schur_eliminable{false};
     std::string schur_complement_partner{};
     std::vector<std::vector<int>> constraint_groups{};
+
+    /// Backend-facing assembly/ownership contract.  Current monolithic
+    /// auxiliary rows are assembled through bordered/reduced storage unless a
+    /// future scope-specific path explicitly upgrades them to native backend
+    /// rows with concrete ownership.
+    backends::MixedBlockAssemblyMode assembly_mode{
+        backends::MixedBlockAssemblyMode::BorderedReduced};
+    backends::MixedRowOwnershipPolicy row_ownership{
+        backends::MixedRowOwnershipPolicy::Unspecified};
+    int single_owner_rank{-1};
 };
 
 /**

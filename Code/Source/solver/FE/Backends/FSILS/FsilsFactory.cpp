@@ -73,6 +73,13 @@ FsilsFactory::createVector(GlobalIndex local_size, GlobalIndex global_size) cons
 std::unique_ptr<LinearSolver>
 FsilsFactory::createLinearSolver(const SolverOptions& options) const
 {
+    if (options.mixed_block_layout.has_value()) {
+        const auto contract_error =
+            validateFsilsMixedLayoutContract(*options.mixed_block_layout,
+                                             dof_per_node_);
+        FE_THROW_IF(!contract_error.empty(), InvalidArgumentException,
+                    "FsilsFactory::createLinearSolver: " + contract_error);
+    }
     return std::make_unique<FsilsLinearSolver>(options);
 }
 

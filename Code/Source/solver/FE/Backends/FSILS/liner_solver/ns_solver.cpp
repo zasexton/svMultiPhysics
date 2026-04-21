@@ -91,6 +91,22 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
   return *env != '0';
 }
 
+[[nodiscard]] int envIntValue(const char* env_name, int default_value) noexcept
+{
+  const char* env = std::getenv(env_name);
+  if (env == nullptr || *env == '\0') {
+    return default_value;
+  }
+  char* end = nullptr;
+  const long value = std::strtol(env, &end, 10);
+  return (end == env) ? default_value : static_cast<int>(value);
+}
+
+[[nodiscard]] int blockSchurMinOuterIterations() noexcept
+{
+  return std::max(0, envIntValue("SVMP_FSILS_BLOCKSCHUR_MIN_OUTER_ITERS", 0));
+}
+
 [[nodiscard]] bool fsilsTraceEnabled() noexcept
 {
   return envFlagEnabled("SVMP_FSILS_TRACE") ||
@@ -1472,6 +1488,7 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   ls.blockschur_stats.reset();
   eps = std::max(ls.RI.absTol, ls.RI.relTol*eps);
   int i_count{0};
+  const int min_outer_iters = blockSchurMinOuterIterations();
 
   auto update_outer_residual = [&](int max_col) {
     #pragma omp parallel for schedule(static)
@@ -1667,7 +1684,8 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
     ls.blockschur_stats.record_outer_iteration(
         fsils_collective_delta(collective_before_outer, lhs.commu.collective_stats));
 
-    if (ls.RI.fNorm < eps*eps) {
+    const bool outer_converged = ls.RI.fNorm < eps*eps;
+    if (outer_converged && (i + 1) >= min_outer_iters) {
       ls.RI.suc = true;
       break;
     }
@@ -1860,6 +1878,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   ls.blockschur_stats.reset();
   eps = std::max(ls.RI.absTol, ls.RI.relTol*eps);
   int i_count{0};
+  const int min_outer_iters = blockSchurMinOuterIterations();
 
   auto update_outer_residual = [&](int max_col) {
     #pragma omp parallel for schedule(static)
@@ -2339,7 +2358,8 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
               ls.GM.itr, ls.GM.fNorm, ls.CG.itr, ls.CG.fNorm);
     }
 
-    if (ls.RI.fNorm < eps*eps) {
+    const bool outer_converged = ls.RI.fNorm < eps*eps;
+    if (outer_converged && (i + 1) >= min_outer_iters) {
       ls.RI.suc = true;
       break;
     }
