@@ -90,6 +90,139 @@ TEST(AuxiliaryStateManager, RegisterBlockRagged)
 
     EXPECT_EQ(mgr.getBlock("ragged").entityCount(), 3u);
     EXPECT_EQ(mgr.getBlock("ragged").storageSize(), 10u);
+
+    const auto& idx = mgr.getIndexing("ragged");
+    EXPECT_EQ(idx.scope(), AuxiliaryStateScope::Cell);
+    EXPECT_EQ(idx.layoutMode(), AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(idx.totalEntityCount(), 3u);
+    EXPECT_EQ(idx.totalStorageSize(), 10u);
+    EXPECT_EQ(idx.componentOffsets().size(), offsets.size());
+    EXPECT_EQ(idx.entityComponentCount(2), 5u);
+
+    const auto& metadata = mgr.getEntityRemapMetadata("ragged");
+    EXPECT_EQ(metadata.scope, AuxiliaryStateScope::Cell);
+    EXPECT_EQ(metadata.component_offsets, offsets);
+    EXPECT_NO_THROW(mgr.validate());
+}
+
+TEST(AuxiliaryStateManager, RegisterRaggedNodePreservesOwnedGhostIndexing)
+{
+    AuxiliaryStateManager mgr;
+
+    auto spec = makeSpec("ragged_node", 0, AuxiliaryStateScope::Node);
+    spec.layout_mode = AuxiliaryLayoutMode::Ragged;
+    spec.sync_policy = AuxiliarySyncPolicy::OwnedAndGhost;
+
+    const std::vector<std::size_t> offsets = {0, 2, 5, 6};
+    mgr.registerBlockRagged(spec, offsets, /*owned_entity_count=*/2);
+
+    const auto& block = mgr.getBlock("ragged_node");
+    EXPECT_EQ(block.scope(), AuxiliaryStateScope::Node);
+    EXPECT_EQ(block.layoutMode(), AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(block.entityCount(), 3u);
+    EXPECT_EQ(block.ownedEntityCount(), 2u);
+    EXPECT_EQ(block.storageSize(), 6u);
+    EXPECT_EQ(block.blockLayout().owned_storage_size, 5u);
+
+    const auto& idx = mgr.getIndexing("ragged_node");
+    EXPECT_EQ(idx.scope(), AuxiliaryStateScope::Node);
+    EXPECT_EQ(idx.layoutMode(), AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(idx.ownedEntityCount(), 2u);
+    EXPECT_EQ(idx.ghostEntityCount(), 1u);
+    EXPECT_EQ(idx.ownedStorageSize(), 5u);
+    EXPECT_EQ(idx.componentOffsets().size(), offsets.size());
+    EXPECT_EQ(idx.flatIndex(1, 2), 4u);
+
+    const auto& metadata = mgr.getEntityRemapMetadata("ragged_node");
+    EXPECT_EQ(metadata.entity_ids, (std::vector<std::size_t>{0u, 1u, 2u}));
+    EXPECT_EQ(metadata.owned_entity_count, 2u);
+    EXPECT_EQ(metadata.component_offsets, offsets);
+    EXPECT_NO_THROW(mgr.validate());
+}
+
+TEST(AuxiliaryStateManager, RegisterRaggedQuadraturePointPreservesQPOffsets)
+{
+    AuxiliaryStateManager mgr;
+
+    auto spec = makeSpec("ragged_qp", 0, AuxiliaryStateScope::QuadraturePoint);
+    spec.layout_mode = AuxiliaryLayoutMode::Ragged;
+
+    const std::vector<std::size_t> qp_offsets = {0, 2, 5};
+    const std::vector<std::size_t> component_offsets = {0, 2, 3, 6, 6, 8};
+    mgr.registerBlockRaggedWithQPOffsets(spec, qp_offsets, component_offsets);
+
+    const auto& block = mgr.getBlock("ragged_qp");
+    EXPECT_EQ(block.scope(), AuxiliaryStateScope::QuadraturePoint);
+    EXPECT_EQ(block.layoutMode(), AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(block.entityCount(), 5u);
+    EXPECT_EQ(block.storageSize(), 8u);
+
+    const auto& idx = mgr.getIndexing("ragged_qp");
+    EXPECT_EQ(idx.scope(), AuxiliaryStateScope::QuadraturePoint);
+    EXPECT_EQ(idx.layoutMode(), AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(idx.totalEntityCount(), 5u);
+    EXPECT_EQ(idx.totalStorageSize(), 8u);
+    EXPECT_EQ(idx.qpOffsets().size(), qp_offsets.size());
+    EXPECT_EQ(idx.componentOffsets().size(), component_offsets.size());
+    EXPECT_EQ(idx.qpsForCell(1), 3u);
+    EXPECT_EQ(idx.qpFlatIndex(1, 0, 2), 5u);
+
+    const auto& metadata = mgr.getEntityRemapMetadata("ragged_qp");
+    EXPECT_EQ(metadata.component_offsets, component_offsets);
+    EXPECT_EQ(metadata.qp_offsets, qp_offsets);
+
+    const auto schema = mgr.restartSchema("ragged_qp");
+    EXPECT_EQ(schema.storage_size, component_offsets.back());
+    EXPECT_EQ(schema.component_offsets, component_offsets);
+    EXPECT_EQ(schema.qp_offsets, qp_offsets);
+
+    auto wrong_payload = schema;
+    wrong_payload.component_offsets = {0, 2, 3, 6, 7, 9};
+    EXPECT_FALSE(AuxiliaryTransferOperator::validateRestart(schema, wrong_payload).valid);
+    EXPECT_NO_THROW(mgr.validate());
+}
+
+TEST(AuxiliaryStateManager, RegisterRaggedRegionPreservesRegionScope)
+{
+    AuxiliaryStateManager mgr;
+
+    auto spec = makeSpec("ragged_region", 0, AuxiliaryStateScope::Region);
+    spec.layout_mode = AuxiliaryLayoutMode::Ragged;
+
+    const std::vector<std::size_t> offsets = {0, 1, 1, 4};
+    mgr.registerBlockRagged(spec, offsets);
+
+    const auto& block = mgr.getBlock("ragged_region");
+    EXPECT_EQ(block.scope(), AuxiliaryStateScope::Region);
+    EXPECT_EQ(block.layoutMode(), AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(block.entityCount(), 3u);
+    EXPECT_EQ(block.storageSize(), 4u);
+
+    const auto& idx = mgr.getIndexing("ragged_region");
+    EXPECT_EQ(idx.scope(), AuxiliaryStateScope::Region);
+    EXPECT_EQ(idx.layoutMode(), AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(idx.entityComponentCount(1), 0u);
+    EXPECT_EQ(idx.flatIndex(2, 2), 3u);
+
+    EXPECT_EQ(mgr.getEntityRemapMetadata("ragged_region").component_offsets, offsets);
+    EXPECT_NO_THROW(mgr.validate());
+}
+
+TEST(AuxiliaryStateManager, RaggedRegistrationRejectsScopeAmbiguity)
+{
+    AuxiliaryStateManager mgr;
+
+    auto qp_spec = makeSpec("bad_qp", 0, AuxiliaryStateScope::QuadraturePoint);
+    qp_spec.layout_mode = AuxiliaryLayoutMode::Ragged;
+    EXPECT_THROW(
+        mgr.registerBlockRagged(qp_spec, std::vector<std::size_t>{0, 2}),
+        svmp::FE::InvalidArgumentException);
+
+    auto facet_spec = makeSpec("bad_facet", 0, AuxiliaryStateScope::Facet);
+    facet_spec.layout_mode = AuxiliaryLayoutMode::Ragged;
+    EXPECT_THROW(
+        mgr.registerBlockRagged(facet_spec, std::vector<std::size_t>{0, 2}),
+        svmp::FE::InvalidArgumentException);
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +299,53 @@ TEST(AuxiliaryStateManager, RegisterNodeBlockWithOwnedGhostSplit)
     EXPECT_EQ(layout.owned_storage_size, 10u);
 
     EXPECT_NO_THROW(mgr.validate());
+}
+
+TEST(AuxiliaryStateManager, RegisterRestrictedNodeBlockPreservesRestartMetadata)
+{
+    AuxiliaryStateManager mgr;
+
+    auto spec = makeSpec("restricted_nodes", 2, AuxiliaryStateScope::Node);
+    spec.sync_policy = AuxiliarySyncPolicy::OwnedAndGhost;
+    spec.deployment_region.kind = AuxiliaryRegionKind::FormulationDefined;
+    spec.deployment_region.identity = "node-subset";
+    spec.deployment_region.explicit_entities = {1u, 3u, 5u, 7u};
+
+    mgr.registerBlock(spec, /*entity_count=*/4, /*owned_entity_count=*/2);
+
+    AuxiliaryEntityRemapMetadata metadata;
+    metadata.deployment_region = spec.deployment_region;
+    metadata.entity_ids = {1u, 3u, 5u, 7u};
+    mgr.setEntityRemapMetadata("restricted_nodes", metadata);
+
+    const auto& indexing = mgr.getIndexing("restricted_nodes");
+    EXPECT_EQ(indexing.totalEntityCount(), 4u);
+    EXPECT_EQ(indexing.ownedEntityCount(), 2u);
+    EXPECT_EQ(indexing.ghostEntityCount(), 2u);
+    EXPECT_EQ(indexing.ownedStorageSize(), 4u);
+
+    const auto& stored = mgr.getEntityRemapMetadata("restricted_nodes");
+    EXPECT_EQ(stored.scope, AuxiliaryStateScope::Node);
+    EXPECT_EQ(stored.owned_entity_count, 2u);
+    EXPECT_EQ(stored.entity_ids, (std::vector<std::size_t>{1u, 3u, 5u, 7u}));
+
+    const auto schema = mgr.restartSchema("restricted_nodes");
+    EXPECT_EQ(schema.scope_name, "Node");
+    EXPECT_EQ(schema.deployment_region_kind, "FormulationDefined");
+    EXPECT_EQ(schema.region_identity, "node-subset");
+    EXPECT_EQ(schema.entity_ids, (std::vector<std::size_t>{1u, 3u, 5u, 7u}));
+    EXPECT_EQ(schema.owned_entity_count, 2u);
+
+    auto wrong_payload = schema;
+    wrong_payload.entity_ids = {1u, 3u, 5u, 8u};
+    const auto validation =
+        AuxiliaryTransferOperator::validateRestart(schema, wrong_payload);
+    EXPECT_FALSE(validation.valid);
+
+    AuxiliaryEntityRemapMetadata bad_metadata;
+    bad_metadata.entity_ids = {1u, 3u, 5u};
+    EXPECT_THROW(mgr.setEntityRemapMetadata("restricted_nodes", bad_metadata),
+                 svmp::FE::InvalidArgumentException);
 }
 
 TEST(AuxiliaryStateManager, GhostSplitRejectedForNonNodeScope)

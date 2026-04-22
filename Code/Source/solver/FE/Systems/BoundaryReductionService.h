@@ -220,6 +220,20 @@ public:
         const SystemStateView& state,
         bool apply_constraints = true);
 
+    /**
+     * @brief Gradient of a domain functional over an explicit cell subset.
+     *
+     * Used by topology-Region entity-local monolithic auxiliary inputs, where
+     * each auxiliary entity owns a different cell subset under one registered
+     * functional name.
+     */
+    [[nodiscard]] std::vector<SensitivityEntry> evaluateFunctionalGradientOverCells(
+        std::string_view name,
+        FieldId target_field,
+        std::span<const GlobalIndex> cell_ids,
+        const SystemStateView& state,
+        bool apply_constraints = true);
+
     // -----------------------------------------------------------------
     //  Accessors
     // -----------------------------------------------------------------

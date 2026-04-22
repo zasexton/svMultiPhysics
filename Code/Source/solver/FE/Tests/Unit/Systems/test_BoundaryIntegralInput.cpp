@@ -659,7 +659,7 @@ TEST(BoundaryIntegralInput, FESystem_ConsistentInitializesRegionPartitionedDAEAn
     }
 }
 
-TEST(BoundaryIntegralInput, FESystem_ConsistentInitializesCellAndQpMonolithicHooksPerEntity)
+TEST(BoundaryIntegralInput, FESystem_ConsistentInitializesCellQpAndRegionMonolithicHooksPerEntity)
 {
     FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
 
@@ -667,6 +667,8 @@ TEST(BoundaryIntegralInput, FESystem_ConsistentInitializesCellAndQpMonolithicHoo
                                                               /*model_initializes=*/true);
     auto qp_model = std::make_shared<EntityIndexedDAEModel>(Real(40.0),
                                                             /*model_initializes=*/true);
+    auto region_model = std::make_shared<EntityIndexedDAEModel>(Real(50.0),
+                                                                /*model_initializes=*/true);
     sys.deployAuxiliaryModel(
         use(cell_model).name("cell_mono_dae").cell().entityCount(2)
             .monolithic()
@@ -675,6 +677,11 @@ TEST(BoundaryIntegralInput, FESystem_ConsistentInitializesCellAndQpMonolithicHoo
         use(qp_model).name("qp_mono_dae").quadraturePoint()
             .region(explicitQpCellRegion({0u, 1u}))
             .qpOffsets({0u, 1u, 3u})
+            .monolithic()
+            .initialize({1.0, 0.0}));
+    sys.deployAuxiliaryModel(
+        use(region_model).name("region_mono_dae").scope(AuxiliaryStateScope::Region)
+            .entityCount(2)
             .monolithic()
             .initialize({1.0, 0.0}));
     sys.finalizeAuxiliaryLayout();
@@ -699,6 +706,14 @@ TEST(BoundaryIntegralInput, FESystem_ConsistentInitializesCellAndQpMonolithicHoo
         const auto committed = qp_block.gatherEntityCommitted(e);
         ASSERT_EQ(committed.size(), 2u);
         EXPECT_NEAR(committed[1], 40.0 + static_cast<Real>(e), 1e-12);
+    }
+
+    const auto& region_block = sys.auxiliaryStateManager().getBlock("region_mono_dae");
+    ASSERT_EQ(region_block.entityCount(), 2u);
+    for (std::size_t e = 0; e < region_block.entityCount(); ++e) {
+        const auto committed = region_block.gatherEntityCommitted(e);
+        ASSERT_EQ(committed.size(), 2u);
+        EXPECT_NEAR(committed[1], 50.0 + static_cast<Real>(e), 1e-12);
     }
 }
 
@@ -1079,12 +1094,13 @@ TEST(BoundaryIntegralInput, FESystem_RegionPartitionedEventsUseEntityLocalContex
     EXPECT_NEAR(outputs[2], 1.0, 1e-12);
 }
 
-TEST(BoundaryIntegralInput, FESystem_MonolithicEventsCoverCellAndQpScopes)
+TEST(BoundaryIntegralInput, FESystem_MonolithicEventsCoverCellQpAndRegionScopes)
 {
     FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
 
     auto cell_model = std::make_shared<EntityIndexedEventResetModel>();
     auto qp_model = std::make_shared<EntityIndexedEventResetModel>();
+    auto region_model = std::make_shared<EntityIndexedEventResetModel>();
     sys.deployAuxiliaryModel(
         use(cell_model).name("cell_mono_event").cell().entityCount(2)
             .monolithic()
@@ -1093,6 +1109,11 @@ TEST(BoundaryIntegralInput, FESystem_MonolithicEventsCoverCellAndQpScopes)
         use(qp_model).name("qp_mono_event").quadraturePoint()
             .region(explicitQpCellRegion({0u, 1u}))
             .qpOffsets({0u, 1u, 3u})
+            .monolithic()
+            .initialize({-1.0}));
+    sys.deployAuxiliaryModel(
+        use(region_model).name("region_mono_event").scope(AuxiliaryStateScope::Region)
+            .entityCount(2)
             .monolithic()
             .initialize({-1.0}));
     sys.finalizeAuxiliaryLayout();
@@ -1106,6 +1127,10 @@ TEST(BoundaryIntegralInput, FESystem_MonolithicEventsCoverCellAndQpScopes)
     qp_block.scatterEntityWork(1u, std::vector<Real>{1.0});
     qp_block.scatterEntityWork(2u, std::vector<Real>{1.0});
 
+    auto& region_block = sys.auxiliaryStateManager().getBlock("region_mono_event");
+    region_block.scatterEntityWork(0u, std::vector<Real>{1.0});
+    region_block.scatterEntityWork(1u, std::vector<Real>{1.0});
+
     sys.finalizeMonolithicAuxiliaryStageState(
         /*alpha_f=*/1.0, /*gamma=*/1.0, /*dt=*/1.0, /*final_time=*/1.0);
 
@@ -1114,6 +1139,8 @@ TEST(BoundaryIntegralInput, FESystem_MonolithicEventsCoverCellAndQpScopes)
     EXPECT_NEAR(qp_block.gatherEntityWork(0u)[0], 100.0, 1e-12);
     EXPECT_NEAR(qp_block.gatherEntityWork(1u)[0], 1.0, 1e-12);
     EXPECT_NEAR(qp_block.gatherEntityWork(2u)[0], 1.0, 1e-12);
+    EXPECT_NEAR(region_block.gatherEntityWork(0u)[0], 100.0, 1e-12);
+    EXPECT_NEAR(region_block.gatherEntityWork(1u)[0], 1.0, 1e-12);
 }
 
 TEST(BoundaryIntegralInput, FirstNonlinearAssemblyAdvancesPartitionedAuxiliary)
@@ -5568,8 +5595,8 @@ TEST(MonolithicCoupling, QuadraturePointScopedLocalCondensationAutoLayoutMatches
 
 TEST(MonolithicCoupling, DirectFieldNonH1SpaceRejected)
 {
-    // Node-scoped model referencing a field with L2 (DG) space should be
-    // rejected — direct field references require H1 (nodal Lagrange) spaces.
+    // Restricted Node-scoped model referencing a field with L2 (DG) space
+    // should be rejected: direct field references require H1/C0 nodal spaces.
     const int marker = 5;
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
     auto dg_space = std::make_shared<svmp::FE::spaces::L2Space>(ElementType::Tetra4, 1);
@@ -5586,9 +5613,13 @@ TEST(MonolithicCoupling, DirectFieldNonH1SpaceRejected)
         m << ddt(x) == c_disc;  // references L2/DG field
     });
 
+    AuxiliaryDeploymentRegion restricted_nodes;
+    restricted_nodes.kind = AuxiliaryRegionKind::FormulationDefined;
+    restricted_nodes.identity = "restricted-node-direct-field-negative";
+    restricted_nodes.explicit_entities = {0u, 1u, 2u, 3u};
+
     sys.deploy(
-        use(model).name("dg_inst").node().monolithic()
-            .entityCount(4)
+        use(model).name("dg_inst").node().region(restricted_nodes).monolithic()
             .initialize({0.0}));
 
     // Need a formulation to satisfy setup.

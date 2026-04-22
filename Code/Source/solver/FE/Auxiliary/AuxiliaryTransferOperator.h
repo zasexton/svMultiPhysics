@@ -77,6 +77,7 @@ struct AuxiliaryRestartSchema {
     std::size_t storage_size{0};
     std::size_t history_depth{0};
     std::vector<std::size_t> entity_ids{};
+    std::vector<std::size_t> component_offsets{};
     std::vector<std::size_t> qp_offsets{};
     std::vector<std::size_t> qp_cell_ids{};
     std::vector<AuxiliaryRegionMembershipMetadata> region_membership{};

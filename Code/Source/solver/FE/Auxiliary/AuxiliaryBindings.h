@@ -45,6 +45,7 @@
 #include "Auxiliary/AuxiliaryModelBuilder.h"
 #include "Systems/FEQuantityDefinition.h"
 
+#include <functional>
 #include <initializer_list>
 #include <memory>
 #include <optional>
@@ -317,6 +318,9 @@ struct AuxiliaryConstraintBinding {
  */
 class AuxiliaryDeployedInstance {
 public:
+    using RaggedEntitySizeProvider =
+        std::function<std::size_t(const AuxiliaryRaggedEntityContext&)>;
+
     explicit AuxiliaryDeployedInstance(std::shared_ptr<AuxiliaryStateModel> model);
 
     /// Set the instance name (defaults to the model name until deployment finalization).
@@ -534,6 +538,12 @@ public:
     /// Optional CSR-style QP offsets for QuadraturePoint scope.
     AuxiliaryDeployedInstance& qpOffsets(std::vector<std::size_t> offsets);
 
+    /// Provide per-entity component counts for ragged deployments.
+    AuxiliaryDeployedInstance& raggedEntitySize(RaggedEntitySizeProvider provider);
+
+    /// Advanced path: provide canonical ragged component offsets directly.
+    AuxiliaryDeployedInstance& raggedComponentOffsets(std::vector<std::size_t> offsets);
+
     /// Use the quadrature layout associated with a reference FE field.
     AuxiliaryDeployedInstance& quadratureLike(FieldId field);
 
@@ -666,6 +676,19 @@ public:
     {
         return qp_offsets_;
     }
+    [[nodiscard]] bool hasRaggedEntitySizeProvider() const noexcept
+    {
+        return static_cast<bool>(ragged_entity_size_provider_);
+    }
+    [[nodiscard]] const RaggedEntitySizeProvider&
+    raggedEntitySizeProvider() const noexcept
+    {
+        return ragged_entity_size_provider_;
+    }
+    [[nodiscard]] std::span<const std::size_t> raggedComponentOffsets() const noexcept
+    {
+        return ragged_component_offsets_;
+    }
     [[nodiscard]] FieldId quadratureReferenceField() const noexcept
     {
         return quadrature_reference_field_;
@@ -761,6 +784,8 @@ private:
     std::vector<Real> initial_values_{};
     std::size_t entity_count_{0}; ///< 0 = auto-detect from scope/mesh
     std::vector<std::size_t> qp_offsets_{};
+    RaggedEntitySizeProvider ragged_entity_size_provider_{};
+    std::vector<std::size_t> ragged_component_offsets_{};
     FieldId quadrature_reference_field_{INVALID_FIELD_ID};
     std::string quadrature_reference_operator_{};
     std::string variant_group_{};

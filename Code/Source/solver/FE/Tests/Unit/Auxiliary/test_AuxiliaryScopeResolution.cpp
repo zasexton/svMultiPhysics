@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "Auxiliary/AuxiliaryBindings.h"
+#include "Auxiliary/AuxiliaryInputRegistry.h"
 #include "Auxiliary/AuxiliaryModelBuilder.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
 #include "Backends/Utils/BackendOptions.h"
@@ -15,6 +16,7 @@
 #include "Systems/FormsInstaller.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
+#include <algorithm>
 #include <array>
 #include <functional>
 #include <memory>
@@ -35,10 +37,29 @@ std::shared_ptr<BuiltAuxiliaryModel> buildScalarDecayModel()
         .build();
 }
 
+std::shared_ptr<BuiltAuxiliaryModel> buildMixedDAEModel()
+{
+    return AuxiliaryModelBuilder("scope_mixed_dae")
+        .state("x")
+        .state("z", AuxiliaryVariableKind::Algebraic)
+        .ode("x", -modelState("x") + modelState("z"))
+        .algebraic("z", modelState("x") + modelState("z") -
+                            svmp::FE::forms::FormExpr::constant(1.0))
+        .build();
+}
+
 AuxiliaryDeploymentRegion materialRegion(int id)
 {
     AuxiliaryDeploymentRegion region;
     region.kind = AuxiliaryRegionKind::MaterialIdSet;
+    region.identity = std::to_string(id);
+    return region;
+}
+
+AuxiliaryDeploymentRegion topologyRegion(std::size_t id)
+{
+    AuxiliaryDeploymentRegion region;
+    region.kind = AuxiliaryRegionKind::TopologyRegion;
     region.identity = std::to_string(id);
     return region;
 }
@@ -294,6 +315,42 @@ svmp::FE::dofs::MeshTopologyInfo twoDisconnectedTetraTopology()
     return topo;
 }
 
+void expectRestartInvalidWithError(const AuxiliaryRestartSchema& expected,
+                                   const AuxiliaryRestartSchema& payload,
+                                   const std::string& expected_error_fragment)
+{
+    const auto validation =
+        AuxiliaryTransferOperator::validateRestart(expected, payload);
+    EXPECT_FALSE(validation.valid);
+    EXPECT_TRUE(std::any_of(validation.errors.begin(),
+                            validation.errors.end(),
+                            [&](const std::string& error) {
+                                return error.find(expected_error_fragment) !=
+                                       std::string::npos;
+                            }))
+        << "Expected validation error containing '" << expected_error_fragment << "'";
+}
+
+template <typename Exception>
+void expectFinalizeThrowsWithMessage(FESystem& system,
+                                     const std::string& expected_fragment)
+{
+    bool threw_expected = false;
+    try {
+        system.finalizeAuxiliaryLayout();
+    } catch (const Exception& ex) {
+        threw_expected = true;
+        EXPECT_NE(std::string(ex.what()).find(expected_fragment), std::string::npos)
+            << "Expected exception message containing '" << expected_fragment
+            << "', got: " << ex.what();
+    } catch (const std::exception& ex) {
+        ADD_FAILURE() << "Expected different exception type; got: " << ex.what();
+        return;
+    }
+    EXPECT_TRUE(threw_expected)
+        << "Expected finalizeAuxiliaryLayout() to throw";
+}
+
 } // namespace
 
 TEST(AuxiliaryScopeResolution, MaterialIdSetProjectsToCellNodeAndRegionScopes)
@@ -336,6 +393,350 @@ TEST(AuxiliaryScopeResolution, MaterialIdSetProjectsToCellNodeAndRegionScopes)
               (std::vector<std::size_t>{0u}));
     EXPECT_EQ(mgr.getEntityRemapMetadata("qp_mat1").qp_offsets,
               (std::vector<std::size_t>{0u, 4u}));
+
+    const auto cell_schema = mgr.restartSchema("cell_mat1");
+    EXPECT_EQ(cell_schema.scope_name, "Cell");
+    EXPECT_EQ(cell_schema.deployment_region_kind, "MaterialIdSet");
+    EXPECT_EQ(cell_schema.region_identity, "1");
+    EXPECT_EQ(cell_schema.entity_ids, (std::vector<std::size_t>{0u}));
+
+    auto wrong_cell_payload = cell_schema;
+    wrong_cell_payload.entity_ids = {1u};
+    const auto cell_validation =
+        AuxiliaryTransferOperator::validateRestart(cell_schema, wrong_cell_payload);
+    EXPECT_FALSE(cell_validation.valid);
+    EXPECT_TRUE(std::any_of(cell_validation.errors.begin(),
+                            cell_validation.errors.end(),
+                            [](const std::string& error) {
+                                return error.find("Entity map mismatch") != std::string::npos;
+                            }));
+
+    const auto qp_schema = mgr.restartSchema("qp_mat1");
+    EXPECT_EQ(qp_schema.scope_name, "QuadraturePoint");
+    EXPECT_EQ(qp_schema.deployment_region_kind, "MaterialIdSet");
+    EXPECT_EQ(qp_schema.region_identity, "1");
+    EXPECT_EQ(qp_schema.entity_ids,
+              (std::vector<std::size_t>{0u, 1u, 2u, 3u}));
+    EXPECT_EQ(qp_schema.qp_cell_ids, (std::vector<std::size_t>{0u}));
+    EXPECT_EQ(qp_schema.qp_offsets, (std::vector<std::size_t>{0u, 4u}));
+
+    auto wrong_qp_offsets = qp_schema;
+    wrong_qp_offsets.qp_offsets = {0u, 3u};
+    const auto qp_offset_validation =
+        AuxiliaryTransferOperator::validateRestart(qp_schema, wrong_qp_offsets);
+    EXPECT_FALSE(qp_offset_validation.valid);
+    EXPECT_TRUE(std::any_of(qp_offset_validation.errors.begin(),
+                            qp_offset_validation.errors.end(),
+                            [](const std::string& error) {
+                                return error.find("QP offsets mismatch") != std::string::npos;
+                            }));
+
+    auto wrong_qp_cells = qp_schema;
+    wrong_qp_cells.qp_cell_ids = {1u};
+    const auto qp_cell_validation =
+        AuxiliaryTransferOperator::validateRestart(qp_schema, wrong_qp_cells);
+    EXPECT_FALSE(qp_cell_validation.valid);
+    EXPECT_TRUE(std::any_of(qp_cell_validation.errors.begin(),
+                            qp_cell_validation.errors.end(),
+                            [](const std::string& error) {
+                                return error.find("QP covered-cell map mismatch") !=
+                                       std::string::npos;
+                            }));
+}
+
+TEST(AuxiliaryScopeResolution, CellLocalCondensationRejectsEntityLocalAuxiliaryOutputInput)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+
+    FESystem system(mesh);
+
+    AuxiliaryInputSpec input_spec;
+    input_spec.name = "neighbor_aux";
+    input_spec.size = 1;
+    input_spec.entity_count = 1;
+    input_spec.producer = AuxiliaryInputProducer::AuxiliaryOutput;
+    system.auxiliaryInputRegistry().registerEntityInput(
+        input_spec,
+        [](svmp::FE::Real, svmp::FE::Real, std::size_t,
+           std::span<svmp::FE::Real> out) {
+            out[0] = svmp::FE::Real(0.0);
+        });
+
+    auto model = AuxiliaryModelBuilder("cell_aux_output_dependency")
+        .input("neighbor_aux")
+        .state("x")
+        .ode("x", modelInput("neighbor_aux") - modelState("x"))
+        .build();
+
+    system.deployAuxiliaryModel(
+        use(model).name("cell_bad_coupling").cell().monolithic()
+            .entityCount(1)
+            .bind("neighbor_aux", "neighbor_aux")
+            .initialize({0.0}));
+
+    EXPECT_THROW(system.finalizeAuxiliaryLayout(), svmp::FE::InvalidArgumentException);
+}
+
+TEST(AuxiliaryScopeResolution, QuadraturePointEntityLocalBindingRequiresCoveredCellMap)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::TwoCellMixedTypeMeshAccess>();
+
+    FESystem system(mesh);
+
+    AuxiliaryInputSpec input_spec;
+    input_spec.name = "cell_input";
+    input_spec.size = 1;
+    input_spec.entity_count = 1;
+    input_spec.producer = AuxiliaryInputProducer::DirectUserData;
+    system.auxiliaryInputRegistry().registerEntityInput(
+        input_spec,
+        [](svmp::FE::Real, svmp::FE::Real, std::size_t,
+           std::span<svmp::FE::Real> out) {
+            out[0] = svmp::FE::Real(0.0);
+        });
+
+    auto model = AuxiliaryModelBuilder("qp_cell_input_dependency")
+        .input("cell_input")
+        .state("x")
+        .ode("x", modelInput("cell_input") - modelState("x"))
+        .build();
+
+    system.deployAuxiliaryModel(
+        use(model).name("qp_bad_cell_map").quadraturePoint()
+            .region(materialRegion(2))
+            .monolithic()
+            .qpOffsets({0u, 1u})
+            .bind("cell_input", "cell_input")
+            .initialize({0.0}));
+
+    EXPECT_THROW(system.finalizeAuxiliaryLayout(), svmp::FE::InvalidArgumentException);
+}
+
+TEST(AuxiliaryScopeResolution, RaggedRejectsEntityLocalAuxiliaryOutputCoupling)
+{
+    auto mesh = std::make_shared<OwnedSubsetNodeMeshAccess>();
+
+    FESystem system(mesh);
+
+    AuxiliaryInputSpec input_spec;
+    input_spec.name = "neighbor_aux";
+    input_spec.size = 1;
+    input_spec.entity_count = 5;
+    input_spec.producer = AuxiliaryInputProducer::AuxiliaryOutput;
+    system.auxiliaryInputRegistry().registerEntityInput(
+        input_spec,
+        [](svmp::FE::Real, svmp::FE::Real, std::size_t,
+           std::span<svmp::FE::Real> out) {
+            out[0] = svmp::FE::Real(0.0);
+        });
+
+    auto model = AuxiliaryModelBuilder("ragged_aux_output_coupling")
+        .input("neighbor_aux")
+        .state("x")
+        .ode("x", modelInput("neighbor_aux") - modelState("x"))
+        .build();
+
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_node_aux_output").node().region(materialRegion(7))
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedEntitySize([](const AuxiliaryRaggedEntityContext&) {
+                return 1u;
+            })
+            .partitioned("ForwardEuler")
+            .bind("neighbor_aux", "neighbor_aux")
+            .initialize({0.0}));
+
+    expectFinalizeThrowsWithMessage<svmp::FE::InvalidArgumentException>(
+        system, "auxiliary-to-auxiliary coupling");
+}
+
+TEST(AuxiliaryScopeResolution, RaggedRejectsScopeMismatchedFEBackedEntityLocalBinding)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::TwoCellMixedTypeMeshAccess>();
+
+    FESystem system(mesh);
+
+    AuxiliaryInputSpec input_spec;
+    input_spec.name = "sampled_node_field";
+    input_spec.size = 1;
+    input_spec.entity_count = 2;
+    input_spec.producer = AuxiliaryInputProducer::SampledStateField;
+    system.auxiliaryInputRegistry().registerEntityInput(
+        input_spec,
+        [](svmp::FE::Real, svmp::FE::Real, std::size_t,
+           std::span<svmp::FE::Real> out) {
+            out[0] = svmp::FE::Real(0.0);
+        });
+
+    auto model = AuxiliaryModelBuilder("ragged_scope_mismatched_fe_input")
+        .input("sampled_node_field")
+        .state("x")
+        .ode("x", modelInput("sampled_node_field") - modelState("x"))
+        .build();
+
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_cell_sampled_node_field").cell().region(materialRegion(1))
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedComponentOffsets({0u, 1u})
+            .partitioned("ForwardEuler")
+            .bind("sampled_node_field", "sampled_node_field")
+            .initialize({0.0}));
+
+    expectFinalizeThrowsWithMessage<svmp::FE::InvalidArgumentException>(
+        system, "scope-matched quantity provider");
+}
+
+TEST(AuxiliaryScopeResolution, RaggedQuadraturePointRejectsIncompatibleQPOffsets)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::TwoCellMixedTypeMeshAccess>();
+    auto model = buildScalarDecayModel();
+
+    FESystem system(mesh);
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_qp_bad_layout").quadraturePoint().region(materialRegion(1))
+            .qpOffsets({0u, 1u, 2u})
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedEntitySize([](const AuxiliaryRaggedEntityContext&) {
+                return 1u;
+            })
+            .partitioned("ForwardEuler")
+            .initialize({0.0}));
+
+    expectFinalizeThrowsWithMessage<svmp::FE::InvalidArgumentException>(
+        system, "qpOffsets().size()");
+}
+
+TEST(AuxiliaryScopeResolution, RaggedCellMonolithicLocalCondensationFinalizesUniformSlices)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::TwoCellMixedTypeMeshAccess>();
+    auto model = buildScalarDecayModel();
+
+    FESystem system(mesh);
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_cell_mono").cell().region(materialRegion(1))
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedComponentOffsets({0u, 1u})
+            .monolithic()
+            .initialize({1.0}));
+
+    system.finalizeAuxiliaryLayout();
+
+    const auto& block = system.auxiliaryStateManager().getBlock("ragged_cell_mono");
+    EXPECT_EQ(block.layoutMode(), AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(block.entityCount(), 1u);
+    EXPECT_EQ(block.storageSize(), 1u);
+
+    auto* registry = system.auxiliaryOperatorRegistryIfPresent();
+    ASSERT_NE(registry, nullptr);
+    EXPECT_EQ(registry->findLayoutBlock("ragged_cell_mono"), nullptr);
+}
+
+TEST(AuxiliaryScopeResolution,
+     RaggedQuadraturePointMonolithicLocalCondensationFinalizesUniformSlices)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::TwoCellMixedTypeMeshAccess>();
+    auto model = buildScalarDecayModel();
+
+    FESystem system(mesh);
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_qp_mono").quadraturePoint().region(materialRegion(1))
+            .qpOffsets({0u, 2u})
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedEntitySize([](const AuxiliaryRaggedEntityContext&) {
+                return 1u;
+            })
+            .monolithic()
+            .initialize({2.0}));
+
+    system.finalizeAuxiliaryLayout();
+
+    const auto& mgr = system.auxiliaryStateManager();
+    const auto& block = mgr.getBlock("ragged_qp_mono");
+    EXPECT_EQ(block.layoutMode(), AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(block.entityCount(), 2u);
+    EXPECT_EQ(block.storageSize(), 2u);
+    const auto qp_offsets_span = mgr.getIndexing("ragged_qp_mono").qpOffsets();
+    const std::vector<std::size_t> qp_offsets(qp_offsets_span.begin(),
+                                              qp_offsets_span.end());
+    EXPECT_EQ(qp_offsets, (std::vector<std::size_t>{0u, 2u}));
+
+    auto* registry = system.auxiliaryOperatorRegistryIfPresent();
+    ASSERT_NE(registry, nullptr);
+    EXPECT_EQ(registry->findLayoutBlock("ragged_qp_mono"), nullptr);
+}
+
+TEST(AuxiliaryScopeResolution,
+     RaggedCellMonolithicLocalCondensationRejectsVariableWidthSlices)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::TwoCellMixedTypeMeshAccess>();
+    auto model = buildScalarDecayModel();
+
+    FESystem system(mesh);
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_cell_mono_bad_width").cell().region(materialRegion(1))
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedComponentOffsets({0u, 2u})
+            .monolithic()
+            .initialize({1.0}));
+
+    expectFinalizeThrowsWithMessage<svmp::FE::InvalidArgumentException>(
+        system, "local-condensation contract");
+}
+
+TEST(AuxiliaryScopeResolution,
+     RaggedCellMonolithicLocalCondensationRejectsAuxiliaryOutputCoupling)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::TwoCellMixedTypeMeshAccess>();
+
+    FESystem system(mesh);
+
+    AuxiliaryInputSpec input_spec;
+    input_spec.name = "neighbor_aux";
+    input_spec.size = 1;
+    input_spec.entity_count = 2;
+    input_spec.producer = AuxiliaryInputProducer::AuxiliaryOutput;
+    system.auxiliaryInputRegistry().registerEntityInput(
+        input_spec,
+        [](svmp::FE::Real, svmp::FE::Real, std::size_t,
+           std::span<svmp::FE::Real> out) {
+            out[0] = svmp::FE::Real(0.0);
+        });
+
+    auto model = AuxiliaryModelBuilder("ragged_cell_aux_output_dependency")
+        .input("neighbor_aux")
+        .state("x")
+        .ode("x", modelInput("neighbor_aux") - modelState("x"))
+        .build();
+
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_cell_bad_coupling").cell().region(materialRegion(1))
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedComponentOffsets({0u, 1u})
+            .monolithic()
+            .bind("neighbor_aux", "neighbor_aux")
+            .initialize({0.0}));
+
+    expectFinalizeThrowsWithMessage<svmp::FE::InvalidArgumentException>(
+        system, "independent local-condensation contract");
+}
+
+TEST(AuxiliaryScopeResolution, RaggedNodeMonolithicRejectsMissingBackendOwnership)
+{
+    auto mesh = std::make_shared<OwnedSubsetNodeMeshAccess>();
+    auto model = buildScalarDecayModel();
+
+    FESystem system(mesh);
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_node_mono_no_owner").node().region(materialRegion(7))
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedEntitySize([](const AuxiliaryRaggedEntityContext&) {
+                return 1u;
+            })
+            .monolithic()
+            .initialize({1.0}));
+
+    expectFinalizeThrowsWithMessage<svmp::FE::systems::InvalidStateException>(
+        system, "backend row ownership metadata");
 }
 
 TEST(AuxiliaryScopeResolution, RestrictedNodeScopePreservesOwnedGhostSplit)
@@ -353,6 +754,471 @@ TEST(AuxiliaryScopeResolution, RestrictedNodeScopePreservesOwnedGhostSplit)
     const auto& block = system.auxiliaryStateManager().getBlock("node_mat7");
     EXPECT_EQ(block.entityCount(), 4u);
     EXPECT_EQ(block.ownedEntityCount(), 2u);
+}
+
+TEST(AuxiliaryScopeResolution, RaggedRestrictedNodeScopeRegistersOwnedGhostOffsets)
+{
+    auto mesh = std::make_shared<OwnedSubsetNodeMeshAccess>();
+    auto model = buildScalarDecayModel();
+
+    FESystem system(mesh);
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_node_mat7").node().region(materialRegion(7))
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedEntitySize([](const AuxiliaryRaggedEntityContext& ctx) {
+                return ctx.original_entity_id == 4u ? 3u : 1u;
+            })
+            .partitioned("ForwardEuler"));
+
+    system.finalizeAuxiliaryLayout();
+
+    const auto& mgr = system.auxiliaryStateManager();
+    const auto& block = mgr.getBlock("ragged_node_mat7");
+    EXPECT_EQ(block.layoutMode(), AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(block.entityCount(), 4u);
+    EXPECT_EQ(block.ownedEntityCount(), 2u);
+    EXPECT_EQ(block.storageSize(), 6u);
+
+    const auto offsets_span =
+        mgr.getIndexing("ragged_node_mat7").componentOffsets();
+    const std::vector<std::size_t> offsets(offsets_span.begin(),
+                                           offsets_span.end());
+    EXPECT_EQ(offsets, (std::vector<std::size_t>{0u, 1u, 2u, 3u, 6u}));
+
+    const auto& metadata = mgr.getEntityRemapMetadata("ragged_node_mat7");
+    EXPECT_EQ(metadata.entity_ids,
+              (std::vector<std::size_t>{1u, 2u, 3u, 4u}));
+    EXPECT_EQ(metadata.component_offsets, offsets);
+
+    const auto schema = mgr.restartSchema("ragged_node_mat7");
+    EXPECT_EQ(schema.entity_ids,
+              (std::vector<std::size_t>{1u, 2u, 3u, 4u}));
+    EXPECT_EQ(schema.component_offsets, offsets);
+
+    auto wrong_entity_ids = schema;
+    wrong_entity_ids.entity_ids = {1u, 2u, 3u, 99u};
+    expectRestartInvalidWithError(schema, wrong_entity_ids, "Entity map mismatch");
+
+    auto wrong_component_offsets = schema;
+    wrong_component_offsets.component_offsets = {0u, 1u, 2u, 4u, 6u};
+    expectRestartInvalidWithError(
+        schema, wrong_component_offsets, "Ragged component offsets mismatch");
+}
+
+TEST(AuxiliaryScopeResolution, RaggedRestrictedCellScopeRegistersExplicitOffsets)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::TwoCellMixedTypeMeshAccess>();
+    auto model = buildScalarDecayModel();
+
+    FESystem system(mesh);
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_cell_mat1").cell().region(materialRegion(1))
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedComponentOffsets({0u, 2u})
+            .partitioned("ForwardEuler")
+            .initialize({4.0, 5.0}));
+
+    system.finalizeAuxiliaryLayout();
+
+    const auto& mgr = system.auxiliaryStateManager();
+    const auto& block = mgr.getBlock("ragged_cell_mat1");
+    EXPECT_EQ(block.layoutMode(), AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(block.entityCount(), 1u);
+    EXPECT_EQ(block.storageSize(), 2u);
+    EXPECT_EQ(block.work()[0], svmp::FE::Real(4.0));
+    EXPECT_EQ(block.work()[1], svmp::FE::Real(5.0));
+
+    const auto offsets_span =
+        mgr.getIndexing("ragged_cell_mat1").componentOffsets();
+    const std::vector<std::size_t> offsets(offsets_span.begin(),
+                                           offsets_span.end());
+    EXPECT_EQ(offsets, (std::vector<std::size_t>{0u, 2u}));
+
+    const auto& metadata = mgr.getEntityRemapMetadata("ragged_cell_mat1");
+    EXPECT_EQ(metadata.entity_ids, (std::vector<std::size_t>{0u}));
+    EXPECT_EQ(metadata.component_offsets, offsets);
+
+    const auto schema = mgr.restartSchema("ragged_cell_mat1");
+    EXPECT_EQ(schema.entity_ids, (std::vector<std::size_t>{0u}));
+    EXPECT_EQ(schema.component_offsets, offsets);
+
+    auto wrong_entity_ids = schema;
+    wrong_entity_ids.entity_ids = {1u};
+    expectRestartInvalidWithError(schema, wrong_entity_ids, "Entity map mismatch");
+
+    auto wrong_component_offsets = schema;
+    wrong_component_offsets.component_offsets = {0u, 1u};
+    expectRestartInvalidWithError(
+        schema, wrong_component_offsets, "Ragged component offsets mismatch");
+}
+
+TEST(AuxiliaryScopeResolution, RaggedRestrictedQuadraturePointScopeRegistersOffsets)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::TwoCellMixedTypeMeshAccess>();
+    auto model = buildScalarDecayModel();
+
+    FESystem system(mesh);
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_qp_mat1").quadraturePoint().region(materialRegion(1))
+            .qpOffsets({0u, 2u})
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedEntitySize([](const AuxiliaryRaggedEntityContext& ctx) {
+                return ctx.cell_id + ctx.local_qp_index + 1u;
+            })
+            .partitioned("ForwardEuler")
+            .initialize({2.0}));
+
+    system.finalizeAuxiliaryLayout();
+
+    const auto& mgr = system.auxiliaryStateManager();
+    const auto& block = mgr.getBlock("ragged_qp_mat1");
+    EXPECT_EQ(block.layoutMode(), AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(block.entityCount(), 2u);
+    EXPECT_EQ(block.storageSize(), 3u);
+    EXPECT_EQ(block.work()[0], svmp::FE::Real(2.0));
+    EXPECT_EQ(block.work()[1], svmp::FE::Real(2.0));
+    EXPECT_EQ(block.work()[2], svmp::FE::Real(2.0));
+
+    const auto offsets_span =
+        mgr.getIndexing("ragged_qp_mat1").componentOffsets();
+    const std::vector<std::size_t> offsets(offsets_span.begin(),
+                                           offsets_span.end());
+    EXPECT_EQ(offsets, (std::vector<std::size_t>{0u, 1u, 3u}));
+    EXPECT_EQ(mgr.getIndexing("ragged_qp_mat1").qpOffsets().size(), 2u);
+
+    const auto& metadata = mgr.getEntityRemapMetadata("ragged_qp_mat1");
+    EXPECT_EQ(metadata.entity_ids, (std::vector<std::size_t>{0u, 1u}));
+    EXPECT_EQ(metadata.qp_cell_ids, (std::vector<std::size_t>{0u}));
+    EXPECT_EQ(metadata.qp_offsets, (std::vector<std::size_t>{0u, 2u}));
+    EXPECT_EQ(metadata.component_offsets, offsets);
+
+    const auto schema = mgr.restartSchema("ragged_qp_mat1");
+    EXPECT_EQ(schema.entity_ids, (std::vector<std::size_t>{0u, 1u}));
+    EXPECT_EQ(schema.qp_cell_ids, (std::vector<std::size_t>{0u}));
+    EXPECT_EQ(schema.qp_offsets, (std::vector<std::size_t>{0u, 2u}));
+    EXPECT_EQ(schema.component_offsets, offsets);
+
+    auto wrong_entity_ids = schema;
+    wrong_entity_ids.entity_ids = {0u, 2u};
+    expectRestartInvalidWithError(schema, wrong_entity_ids, "Entity map mismatch");
+
+    auto wrong_qp_cell_ids = schema;
+    wrong_qp_cell_ids.qp_cell_ids = {1u};
+    expectRestartInvalidWithError(
+        schema, wrong_qp_cell_ids, "QP covered-cell map mismatch");
+
+    auto wrong_qp_offsets = schema;
+    wrong_qp_offsets.qp_offsets = {0u, 1u};
+    expectRestartInvalidWithError(schema, wrong_qp_offsets, "QP offsets mismatch");
+
+    auto wrong_component_offsets = schema;
+    wrong_component_offsets.component_offsets = {0u, 1u, 2u};
+    expectRestartInvalidWithError(
+        schema, wrong_component_offsets, "Ragged component offsets mismatch");
+}
+
+TEST(AuxiliaryScopeResolution, RaggedPartitionedRuntimeAdvancesUniformSlices)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::TwoCellMixedTypeMeshAccess>();
+    auto model = buildScalarDecayModel();
+
+    FESystem system(mesh);
+    const auto mat1 = materialRegion(1);
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_runtime_node").node().region(mat1)
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedEntitySize([](const AuxiliaryRaggedEntityContext&) {
+                return 1u;
+            })
+            .partitioned("ForwardEuler")
+            .initialize({1.0}));
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_runtime_cell").cell().region(mat1)
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedComponentOffsets({0u, 1u})
+            .partitioned("ForwardEuler")
+            .initialize({4.0}));
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_runtime_qp").quadraturePoint().region(mat1)
+            .qpOffsets({0u, 2u})
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedEntitySize([](const AuxiliaryRaggedEntityContext&) {
+                return 1u;
+            })
+            .partitioned("ForwardEuler")
+            .initialize({2.0}));
+
+    system.finalizeAuxiliaryLayout();
+    system.advanceAuxiliaryState(0.0, 0.25);
+
+    const auto& mgr = system.auxiliaryStateManager();
+    const auto& node_block = mgr.getBlock("ragged_runtime_node");
+    ASSERT_EQ(node_block.entityCount(), 4u);
+    for (std::size_t e = 0; e < node_block.entityCount(); ++e) {
+        const auto x = node_block.gatherEntityWork(e);
+        ASSERT_EQ(x.size(), 1u);
+        EXPECT_NEAR(x[0], 0.75, 1e-12);
+    }
+
+    const auto cell_x = mgr.getBlock("ragged_runtime_cell").gatherEntityWork(0);
+    ASSERT_EQ(cell_x.size(), 1u);
+    EXPECT_NEAR(cell_x[0], 3.0, 1e-12);
+
+    const auto& qp_block = mgr.getBlock("ragged_runtime_qp");
+    ASSERT_EQ(qp_block.entityCount(), 2u);
+    for (std::size_t e = 0; e < qp_block.entityCount(); ++e) {
+        const auto x = qp_block.gatherEntityWork(e);
+        ASSERT_EQ(x.size(), 1u);
+        EXPECT_NEAR(x[0], 1.5, 1e-12);
+    }
+}
+
+TEST(AuxiliaryScopeResolution, RaggedPartitionedRuntimeRejectsVariableWidthModelMismatch)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::TwoCellMixedTypeMeshAccess>();
+    auto model = buildScalarDecayModel();
+
+    FESystem system(mesh);
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_runtime_bad_width").quadraturePoint()
+            .region(materialRegion(1))
+            .qpOffsets({0u, 2u})
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedEntitySize([](const AuxiliaryRaggedEntityContext& ctx) {
+                return ctx.materialized_entity_index + 1u;
+            })
+            .partitioned("ForwardEuler")
+            .initialize({2.0}));
+
+    system.finalizeAuxiliaryLayout();
+
+    EXPECT_THROW(system.advanceAuxiliaryState(0.0, 0.25),
+                 svmp::FE::InvalidArgumentException);
+}
+
+TEST(AuxiliaryScopeResolution, RaggedPartitionedMixedDAEInitializesAndAdvancesSlices)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::TwoCellMixedTypeMeshAccess>();
+    auto model = buildMixedDAEModel();
+
+    FESystem system(mesh);
+    const auto mat1 = materialRegion(1);
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_dae_node").node().region(mat1)
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedEntitySize([](const AuxiliaryRaggedEntityContext&) {
+                return 2u;
+            })
+            .partitioned("BackwardEuler")
+            .initialize({0.2, 0.0}));
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_dae_cell").cell().region(mat1)
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedComponentOffsets({0u, 2u})
+            .partitioned("BackwardEuler")
+            .initialize({0.2, 0.0}));
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_dae_qp").quadraturePoint().region(mat1)
+            .qpOffsets({0u, 2u})
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedEntitySize([](const AuxiliaryRaggedEntityContext&) {
+                return 2u;
+            })
+            .partitioned("BackwardEuler")
+            .initialize({0.2, 0.0}));
+
+    system.finalizeAuxiliaryLayout();
+    system.advanceAuxiliaryState(0.0, 0.1);
+
+    auto expect_block = [&](const std::string& block_name) {
+        const auto& block = system.auxiliaryStateManager().getBlock(block_name);
+        for (std::size_t e = 0; e < block.entityCount(); ++e) {
+            const auto committed = block.gatherEntityCommitted(e);
+            ASSERT_EQ(committed.size(), 2u);
+            EXPECT_NEAR(committed[0], 0.2, 1e-12);
+            EXPECT_NEAR(committed[1], 0.8, 1e-12);
+
+            const auto work = block.gatherEntityWork(e);
+            ASSERT_EQ(work.size(), 2u);
+            EXPECT_NEAR(work[0], 0.25, 1e-12);
+            EXPECT_NEAR(work[1], 0.75, 1e-12);
+        }
+    };
+
+    expect_block("ragged_dae_node");
+    expect_block("ragged_dae_cell");
+    expect_block("ragged_dae_qp");
+}
+
+TEST(AuxiliaryScopeResolution, RaggedPartitionedMixedDAEFailurePolicyRestoresSlices)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::TwoCellMixedTypeMeshAccess>();
+    auto model = buildMixedDAEModel();
+
+    AuxiliaryStepperSpec stepper;
+    stepper.method_name = "BackwardEuler";
+    stepper.max_nonlinear_iters = 0;
+
+    AuxiliaryFailurePolicy policy;
+    policy.max_local_retries = 1;
+    policy.reject_timestep_on_failure = false;
+
+    FESystem system(mesh);
+    const auto mat1 = materialRegion(1);
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_dae_fail_node").node().region(mat1)
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedEntitySize([](const AuxiliaryRaggedEntityContext&) {
+                return 2u;
+            })
+            .partitioned("BackwardEuler")
+            .stepper(stepper)
+            .failurePolicy(policy)
+            .initialize({0.2, 0.0}));
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_dae_fail_cell").cell().region(mat1)
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedComponentOffsets({0u, 2u})
+            .partitioned("BackwardEuler")
+            .stepper(stepper)
+            .failurePolicy(policy)
+            .initialize({0.2, 0.0}));
+    system.deployAuxiliaryModel(
+        use(model).name("ragged_dae_fail_qp").quadraturePoint().region(mat1)
+            .qpOffsets({0u, 2u})
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedEntitySize([](const AuxiliaryRaggedEntityContext&) {
+                return 2u;
+            })
+            .partitioned("BackwardEuler")
+            .stepper(stepper)
+            .failurePolicy(policy)
+            .initialize({0.2, 0.0}));
+
+    system.finalizeAuxiliaryLayout();
+    EXPECT_NO_THROW(system.advanceAuxiliaryState(0.0, 0.1));
+
+    auto expect_restored_block = [&](const std::string& block_name) {
+        const auto& block = system.auxiliaryStateManager().getBlock(block_name);
+        for (std::size_t e = 0; e < block.entityCount(); ++e) {
+            const auto committed = block.gatherEntityCommitted(e);
+            ASSERT_EQ(committed.size(), 2u);
+            EXPECT_NEAR(committed[0], 0.2, 1e-12);
+            EXPECT_NEAR(committed[1], 0.8, 1e-12);
+
+            const auto work = block.gatherEntityWork(e);
+            ASSERT_EQ(work.size(), 2u);
+            EXPECT_NEAR(work[0], committed[0], 1e-12);
+            EXPECT_NEAR(work[1], committed[1], 1e-12);
+        }
+    };
+
+    expect_restored_block("ragged_dae_fail_node");
+    expect_restored_block("ragged_dae_fail_cell");
+    expect_restored_block("ragged_dae_fail_qp");
+}
+
+TEST(AuxiliaryScopeResolution, RaggedPartitionedMixedDAEFailurePolicyRejectsFailedSolve)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::TwoCellMixedTypeMeshAccess>();
+    auto model = buildMixedDAEModel();
+
+    AuxiliaryStepperSpec stepper;
+    stepper.method_name = "BackwardEuler";
+    stepper.max_nonlinear_iters = 0;
+
+    AuxiliaryFailurePolicy policy;
+    policy.max_local_retries = 1;
+    policy.reject_timestep_on_failure = true;
+
+    for (const auto scope : {AuxiliaryStateScope::Node,
+                             AuxiliaryStateScope::Cell,
+                             AuxiliaryStateScope::QuadraturePoint}) {
+        FESystem system(mesh);
+        auto deployment = use(model).name("ragged_dae_reject")
+            .scope(scope)
+            .region(materialRegion(1))
+            .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .partitioned("BackwardEuler")
+            .stepper(stepper)
+            .failurePolicy(policy)
+            .initialize({0.2, 0.0});
+        if (scope == AuxiliaryStateScope::Cell) {
+            deployment.raggedComponentOffsets({0u, 2u});
+        } else {
+            deployment.raggedEntitySize([](const AuxiliaryRaggedEntityContext&) {
+                return 2u;
+            });
+        }
+        if (scope == AuxiliaryStateScope::QuadraturePoint) {
+            deployment.qpOffsets({0u, 2u});
+        }
+        system.deployAuxiliaryModel(std::move(deployment));
+        system.finalizeAuxiliaryLayout();
+
+        EXPECT_THROW(system.advanceAuxiliaryState(0.0, 0.1),
+                     svmp::FE::systems::InvalidStateException);
+    }
+}
+
+TEST(AuxiliaryScopeResolution, BoundarySetProjectsNodeScopeToBoundaryFaceNodes)
+{
+    auto mesh = std::make_shared<TwoDisconnectedTetraMeshAccess>();
+    auto model = buildScalarDecayModel();
+
+    AuxiliaryDeploymentRegion boundary30;
+    boundary30.kind = AuxiliaryRegionKind::BoundarySet;
+    boundary30.identity = "30";
+
+    FESystem system(mesh);
+    system.deployAuxiliaryModel(
+        use(model).name("node_boundary30").node().region(boundary30)
+            .partitioned("ForwardEuler").initialize({1.0}));
+
+    system.finalizeAuxiliaryLayout();
+
+    const auto& block = system.auxiliaryStateManager().getBlock("node_boundary30");
+    EXPECT_EQ(block.entityCount(), 3u);
+    EXPECT_EQ(block.ownedEntityCount(), 3u);
+    EXPECT_EQ(system.auxiliaryStateManager()
+                  .getEntityRemapMetadata("node_boundary30")
+                  .entity_ids,
+	              (std::vector<std::size_t>{0u, 1u, 2u}));
+}
+
+TEST(AuxiliaryScopeResolution, TopologyRegionProjectsNodeScopeToRegionNodes)
+{
+    auto mesh = std::make_shared<TwoDisconnectedTetraMeshAccess>();
+    auto model = buildScalarDecayModel();
+
+    FESystem system(mesh);
+    system.deployAuxiliaryModel(
+        use(model).name("node_topology_region1").node().region(topologyRegion(1))
+            .partitioned("ForwardEuler").initialize({1.0}));
+
+    system.finalizeAuxiliaryLayout();
+
+    const auto& mgr = system.auxiliaryStateManager();
+    const auto& block = mgr.getBlock("node_topology_region1");
+    EXPECT_EQ(block.entityCount(), 4u);
+    EXPECT_EQ(block.ownedEntityCount(), 4u);
+
+    const auto& metadata =
+        mgr.getEntityRemapMetadata("node_topology_region1");
+    EXPECT_EQ(metadata.entity_ids,
+              (std::vector<std::size_t>{4u, 5u, 6u, 7u}));
+
+    const auto schema = mgr.restartSchema("node_topology_region1");
+    EXPECT_EQ(schema.deployment_region_kind, "TopologyRegion");
+    EXPECT_EQ(schema.region_identity, "1");
+    EXPECT_EQ(schema.entity_ids,
+              (std::vector<std::size_t>{4u, 5u, 6u, 7u}));
+
+    auto wrong_payload = schema;
+    wrong_payload.entity_ids = {0u, 1u, 2u, 3u};
+    const auto validation =
+        AuxiliaryTransferOperator::validateRestart(schema, wrong_payload);
+    EXPECT_FALSE(validation.valid);
 }
 
 TEST(AuxiliaryScopeResolution, RegionScopeMaterializesDisconnectedTopologyRegions)
@@ -462,8 +1328,9 @@ TEST(AuxiliaryScopeResolution, RegionLocalFEAverageFeedsEachTopologyRegionEntity
         system,
         "op",
         {u_field},
-        svmp::FE::forms::inner(svmp::FE::forms::grad(u_state),
-                               svmp::FE::forms::grad(v)).dx());
+        (svmp::FE::forms::inner(svmp::FE::forms::grad(u_state),
+                                svmp::FE::forms::grad(v)) +
+         u_state * v).dx());
 
     SetupInputs inputs;
     inputs.topology_override = twoDisconnectedTetraTopology();
@@ -509,6 +1376,111 @@ TEST(AuxiliaryScopeResolution, RegionLocalFEAverageFeedsEachTopologyRegionEntity
     ASSERT_EQ(block.entityCount(), 2u);
     EXPECT_NEAR(block.gatherEntityWork(0)[0], 2.0, 1e-10);
     EXPECT_NEAR(block.gatherEntityWork(1)[0], 5.0, 1e-10);
+}
+
+TEST(AuxiliaryScopeResolution, RegionMonolithicFEAverageAssemblesDenseReference)
+{
+    auto mesh = std::make_shared<TwoDisconnectedTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        svmp::FE::ElementType::Tetra4, 1);
+
+    FESystem system(mesh);
+    const auto u_field = system.addField(
+        FieldSpec{.name = "u", .space = space, .components = 1});
+    system.addOperator("op");
+
+    const auto u_disc = svmp::FE::forms::FormExpr::discreteField(
+        u_field, *space, "u");
+    const auto region_average = system.regionAverage("region_mono_avg", u_disc);
+
+    auto model = AuxiliaryModelBuilder("region_monolithic_average")
+        .input("avg")
+        .state("x")
+        .ode("x", modelInput("avg") - modelState("x"))
+        .build();
+    system.deployAuxiliaryModel(
+        use(model).name("region_mono_inputs").scope(AuxiliaryStateScope::Region)
+            .monolithic()
+            .bind("avg", region_average)
+            .initialize({0.0}));
+
+    const auto u_state = svmp::FE::forms::FormExpr::stateField(
+        u_field, *space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    (void)installFormulation(
+        system,
+        "op",
+        {u_field},
+        (svmp::FE::forms::inner(svmp::FE::forms::grad(u_state),
+                                svmp::FE::forms::grad(v)) +
+         u_state * v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = twoDisconnectedTetraTopology();
+    system.setup({}, inputs);
+    system.finalizeAuxiliaryLayout();
+
+    const auto n_field =
+        static_cast<std::size_t>(system.dofHandler().getNumDofs());
+    ASSERT_EQ(n_field, 8u);
+
+    std::vector<svmp::FE::Real> solution(n_field, 0.0);
+    const auto* entity_map =
+        system.fieldDofHandler(u_field).getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+    const auto field_offset = system.fieldDofOffset(u_field);
+    auto set_region_nodes = [&](std::span<const svmp::FE::GlobalIndex> nodes,
+                                svmp::FE::Real value) {
+        for (const auto node : nodes) {
+            const auto dofs = entity_map->getVertexDofs(node);
+            ASSERT_EQ(dofs.size(), 1u);
+            const auto idx = static_cast<std::size_t>(dofs[0] + field_offset);
+            ASSERT_LT(idx, solution.size());
+            solution[idx] = value;
+        }
+    };
+    const std::array<svmp::FE::GlobalIndex, 4> r0_nodes{0, 1, 2, 3};
+    const std::array<svmp::FE::GlobalIndex, 4> r1_nodes{4, 5, 6, 7};
+    set_region_nodes(r0_nodes, 2.0);
+    set_region_nodes(r1_nodes, 5.0);
+
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 1.0;
+    state.u = solution;
+
+    std::vector<svmp::FE::Real> residual;
+    std::vector<svmp::FE::Real> matrix;
+    system.assembleMixedAuxiliaryDense(state, n_field, residual, matrix);
+
+    const auto n_total = n_field + std::size_t{2};
+    ASSERT_EQ(residual.size(), n_total);
+    ASSERT_EQ(matrix.size(), n_total * n_total);
+
+    EXPECT_NEAR(residual[n_field + 0u], -2.0, 1e-10);
+    EXPECT_NEAR(residual[n_field + 1u], -5.0, 1e-10);
+    EXPECT_NEAR(matrix[(n_field + 0u) * n_total + (n_field + 0u)], 2.0, 1e-10);
+    EXPECT_NEAR(matrix[(n_field + 1u) * n_total + (n_field + 1u)], 2.0, 1e-10);
+    EXPECT_NEAR(matrix[(n_field + 0u) * n_total + (n_field + 1u)], 0.0, 1e-10);
+    EXPECT_NEAR(matrix[(n_field + 1u) * n_total + (n_field + 0u)], 0.0, 1e-10);
+
+    auto expect_ct = [&](std::size_t aux_row,
+                         std::span<const svmp::FE::GlobalIndex> active_nodes) {
+        for (svmp::FE::GlobalIndex node = 0; node < 8; ++node) {
+            const auto dofs = entity_map->getVertexDofs(node);
+            ASSERT_EQ(dofs.size(), 1u);
+            const auto dof = static_cast<std::size_t>(dofs[0] + field_offset);
+            const bool active =
+                std::find(active_nodes.begin(), active_nodes.end(), node) !=
+                active_nodes.end();
+            const auto row = n_field + aux_row;
+            const auto expected = active ? -0.25 : 0.0;
+            EXPECT_NEAR(matrix[row * n_total + dof], expected, 1e-10)
+                << "aux row " << aux_row << " field node " << node;
+        }
+    };
+    expect_ct(0u, r0_nodes);
+    expect_ct(1u, r1_nodes);
 }
 
 TEST(AuxiliaryScopeResolution, RegionMonolithicLayoutHasDeterministicRowOwners)

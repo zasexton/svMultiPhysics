@@ -677,6 +677,63 @@ BoundaryReductionService::evaluateFunctionalGradient(std::string_view name,
     return grad_entries;
 }
 
+std::vector<BoundaryReductionService::SensitivityEntry>
+BoundaryReductionService::evaluateFunctionalGradientOverCells(
+    std::string_view name,
+    FieldId target_field,
+    std::span<const GlobalIndex> cell_ids,
+    const SystemStateView& state,
+    bool apply_constraints)
+{
+    auto it = name_to_functional_.find(std::string(name));
+    FE_THROW_IF(it == name_to_functional_.end(), InvalidArgumentException,
+                "BoundaryReductionService::evaluateFunctionalGradientOverCells: "
+                "unknown functional '" + std::string(name) + "'");
+
+    auto& entry = functionals_.at(it->second);
+    FE_THROW_IF(!entry.def.is_domain_functional, InvalidArgumentException,
+                "BoundaryReductionService::evaluateFunctionalGradientOverCells: "
+                "functional '" + std::string(name) +
+                "' is not a domain functional");
+    compileFunctionalIfNeeded(entry);
+
+    FE_THROW_IF(!system_.isSetup(), InvalidArgumentException,
+                "BoundaryReductionService::evaluateFunctionalGradientOverCells: "
+                "system.setup() not called");
+
+    if (target_field == GEOMETRY_FIELD_ID || cell_ids.empty()) {
+        return {};
+    }
+
+    const auto& rec = system_.fieldRecord(target_field);
+    FE_CHECK_NOT_NULL(rec.space.get(),
+                      "BoundaryReductionService::evaluateFunctionalGradientOverCells: "
+                      "field space");
+
+    const auto trial = forms::FormExpr::trialFunction(*rec.space, "u");
+    auto integrand_trial = entry.def.integrand.transformNodes(
+        [&](const forms::FormExprNode& n) -> std::optional<forms::FormExpr> {
+            if (n.type() != forms::FormExprType::DiscreteField &&
+                n.type() != forms::FormExprType::StateField) {
+                return std::nullopt;
+            }
+            const auto fid = n.fieldId();
+            if (!fid || *fid != target_field) {
+                return std::nullopt;
+            }
+            return trial;
+        });
+
+    return system_.assembleBoundaryGradient(
+        target_field,
+        integrand_trial,
+        entry.def.boundary_marker,
+        state,
+        apply_constraints,
+        /*region_marker=*/-1,
+        cell_ids);
+}
+
 // ---------------------------------------------------------------------------
 //  Accessors
 // ---------------------------------------------------------------------------

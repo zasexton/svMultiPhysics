@@ -189,6 +189,24 @@ std::vector<Real> gatherOwnedLocalVectorEntries(const DenseVectorView& v,
     return local;
 }
 
+DistributedSparsityPattern makeTwoRankDiagonalPattern(int rank)
+{
+    constexpr GlobalIndex n_global = 2;
+    const auto owned = (rank == 0) ? IndexRange{0, 1} : IndexRange{1, 2};
+    const GlobalIndex owned_row = (rank == 0) ? 0 : 1;
+    const GlobalIndex ghost_row = (rank == 0) ? 1 : 0;
+
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+    pattern.setDofIndexing(DistributedSparsityPattern::DofIndexing::NodalInterleaved);
+    pattern.addEntry(owned_row, owned_row);
+    pattern.ensureDiagonal();
+    pattern.finalize();
+    pattern.setGhostRows(std::vector<GlobalIndex>{ghost_row},
+                         std::vector<GlobalIndex>{0, 1},
+                         std::vector<GlobalIndex>{ghost_row});
+    return pattern;
+}
+
 std::vector<Real> makeScaledComponentTwoNodeMatrix(int dof_per_node, std::span<const Real> scales)
 {
     const int dof = dof_per_node;
@@ -1275,6 +1293,75 @@ TEST(FsilsAssemblyParityMPI, VectorUpdateGhostsIsOwnerAuthoritativeAndRawAccumul
     } else {
         EXPECT_NEAR(view->getVectorEntry(1), 12.0, 1e-14);
     }
+}
+
+TEST(FsilsAssemblyParityMPI, MatrixInsertionCountersAreOwnedRowAuthoritative)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    const GlobalIndex owned_row = (rank == 0) ? 0 : 1;
+    const GlobalIndex ghost_row = (rank == 0) ? 1 : 0;
+
+    auto pattern = makeTwoRankDiagonalPattern(rank);
+    FsilsFactory factory(/*dof_per_node=*/1);
+    auto matrix = factory.createMatrix(pattern);
+    auto* fs = dynamic_cast<FsilsMatrix*>(matrix.get());
+    ASSERT_NE(fs, nullptr);
+    ASSERT_TRUE(fs->usesOwnedRowOperator());
+    EXPECT_TRUE(fs->ownsFeDofRow(owned_row));
+    EXPECT_FALSE(fs->ownsFeDofRow(ghost_row));
+
+    auto view = matrix->createAssemblyView();
+
+    auto reset_matrix_counters = [&]() {
+        matrix->zero();
+        FsilsMatrix::resetDroppedEntryCount();
+        FsilsMatrix::resetOffOwnerWriteCount();
+    };
+    auto expect_global_counters = [&](std::uint64_t expected_off_owner,
+                                      std::uint64_t expected_dropped) {
+        matrix->finalizeAssembly();
+        const auto off_owner =
+            allreduceSum(FsilsMatrix::offOwnerWriteCount(), comm);
+        const auto dropped =
+            allreduceSum(FsilsMatrix::droppedEntryCount(), comm);
+        EXPECT_EQ(off_owner, expected_off_owner);
+        EXPECT_EQ(dropped, expected_dropped);
+    };
+
+    reset_matrix_counters();
+    view->addMatrixEntry(
+        ghost_row, ghost_row, Real(2.0), assembly::AddMode::Add);
+    expect_global_counters(/*expected_off_owner=*/2u,
+                           /*expected_dropped=*/0u);
+
+    reset_matrix_counters();
+    view->addMatrixEntry(
+        owned_row, ghost_row, Real(3.0), assembly::AddMode::Add);
+    expect_global_counters(/*expected_off_owner=*/0u,
+                           /*expected_dropped=*/2u);
+
+    const std::array<GlobalIndex, 1> rows{owned_row};
+    const std::array<GlobalIndex, 2> cols{owned_row, ghost_row};
+    const std::array<Real, 2> local_values{Real(1.0), Real(4.0)};
+
+    reset_matrix_counters();
+    view->addMatrixEntries(rows, cols, local_values, assembly::AddMode::Add);
+    expect_global_counters(/*expected_off_owner=*/0u,
+                           /*expected_dropped=*/2u);
+
+    reset_matrix_counters();
+    std::array<GlobalIndex, 2> resolved{};
+    view->resolveMatrixEntries(rows, cols, resolved);
+    view->addMatrixEntriesResolved(
+        rows, cols, resolved, local_values, assembly::AddMode::Add);
+    expect_global_counters(/*expected_off_owner=*/0u,
+                           /*expected_dropped=*/2u);
 }
 
 } // namespace svmp::FE::backends

@@ -90,8 +90,8 @@ void AuxiliaryBlockStorage::setupRagged(
 {
     FE_THROW_IF(spec.name.empty(), InvalidArgumentException,
                 "AuxiliaryBlockStorage::setupRagged: empty block name");
-    FE_THROW_IF(offsets.size() < 2u, InvalidArgumentException,
-                "AuxiliaryBlockStorage::setupRagged: offsets must have >= 2 entries");
+    FE_THROW_IF(offsets.empty(), InvalidArgumentException,
+                "AuxiliaryBlockStorage::setupRagged: offsets must not be empty");
     FE_THROW_IF(offsets[0] != 0u, InvalidArgumentException,
                 "AuxiliaryBlockStorage::setupRagged: offsets[0] must be 0");
 
@@ -248,9 +248,16 @@ void gatherFromBuffer(const std::vector<Real, AlignedAllocator<Real, kFEPreferre
                        const std::vector<std::size_t>& offsets,
                        std::vector<Real>& out)
 {
+    FE_THROW_IF(entity_idx >= entity_count, InvalidArgumentException,
+                "AuxiliaryBlockStorage::gatherEntity: entity index " +
+                    std::to_string(entity_idx) + " exceeds entity count " +
+                    std::to_string(entity_count));
     const auto s = static_cast<std::size_t>(stride);
     out.resize(s);
     if (layout == AuxiliaryLayoutMode::Ragged) {
+        FE_THROW_IF(offsets.size() != entity_count + 1u, InvalidStateException,
+                    "AuxiliaryBlockStorage::gatherEntity: ragged offsets do not "
+                    "match entity count");
         const auto off = offsets[entity_idx];
         const auto len = offsets[entity_idx + 1] - off;
         out.resize(len);
@@ -304,11 +311,22 @@ std::vector<Real> AuxiliaryBlockStorage::gatherEntityHistory(
 void AuxiliaryBlockStorage::scatterEntityWork(std::size_t entity_idx,
                                                 std::span<const Real> values)
 {
+    FE_THROW_IF(entity_idx >= entity_count_, InvalidArgumentException,
+                "AuxiliaryBlockStorage::scatterEntityWork: entity index " +
+                    std::to_string(entity_idx) + " exceeds entity count " +
+                    std::to_string(entity_count_));
     const auto s = static_cast<std::size_t>(component_stride_);
+    const auto expected = layout_mode_ == AuxiliaryLayoutMode::Ragged
+        ? entity_offsets_[entity_idx + 1] - entity_offsets_[entity_idx]
+        : s;
+    FE_THROW_IF(values.size() != expected, InvalidArgumentException,
+                "AuxiliaryBlockStorage::scatterEntityWork: entity " +
+                    std::to_string(entity_idx) + " received " +
+                    std::to_string(values.size()) + " value(s), expected " +
+                    std::to_string(expected));
     if (layout_mode_ == AuxiliaryLayoutMode::Ragged) {
         const auto off = entity_offsets_[entity_idx];
-        const auto len = entity_offsets_[entity_idx + 1] - off;
-        std::copy(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(len),
+        std::copy(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(expected),
                   work_.begin() + static_cast<std::ptrdiff_t>(off));
     } else if (ordering_ == AuxiliaryEntityOrdering::ByEntityThenComponent) {
         const auto off = entity_idx * s;

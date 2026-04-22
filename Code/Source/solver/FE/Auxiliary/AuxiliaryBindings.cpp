@@ -1,5 +1,6 @@
 #include "Auxiliary/AuxiliaryBindings.h"
 
+#include <algorithm>
 #include <exception>
 #include <unordered_set>
 
@@ -135,6 +136,22 @@ AuxiliaryDeployedInstance& AuxiliaryDeployedInstance::qpOffsets(
     std::vector<std::size_t> offsets)
 {
     qp_offsets_ = std::move(offsets);
+    return *this;
+}
+
+AuxiliaryDeployedInstance& AuxiliaryDeployedInstance::raggedEntitySize(
+    RaggedEntitySizeProvider provider)
+{
+    FE_THROW_IF(!provider, InvalidArgumentException,
+                "AuxiliaryDeployedInstance::raggedEntitySize: provider is empty");
+    ragged_entity_size_provider_ = std::move(provider);
+    return *this;
+}
+
+AuxiliaryDeployedInstance& AuxiliaryDeployedInstance::raggedComponentOffsets(
+    std::vector<std::size_t> offsets)
+{
+    ragged_component_offsets_ = std::move(offsets);
     return *this;
 }
 
@@ -329,10 +346,13 @@ std::string AuxiliaryDeployedInstance::validate() const
                "' attaches solver metadata but is not Monolithic";
     }
 
-    // Check initial values size if provided.
+    // Check fixed-stride initial values size if provided.  Ragged deployments
+    // validate/broadcast initial values after scope resolution, once the
+    // component offsets and total storage size are known.
     if (!initial_values_.empty()) {
         const auto dim = static_cast<std::size_t>(model_->dimension());
-        if (initial_values_.size() != dim) {
+        if (layout_mode_ != AuxiliaryLayoutMode::Ragged &&
+            initial_values_.size() != dim) {
             return "initial_values size (" +
                    std::to_string(initial_values_.size()) +
                    ") != model dimension (" + std::to_string(dim) + ")";
@@ -420,6 +440,48 @@ std::string AuxiliaryDeployedInstance::validate() const
         return "instance '" + instance_name_ +
                "' is QuadraturePoint scoped and must not specify entityCount(); "
                "QP entity counts are derived from inferred or explicit qpOffsets()";
+    }
+
+    const bool has_ragged_size_provider =
+        static_cast<bool>(ragged_entity_size_provider_);
+    const bool has_ragged_offsets = !ragged_component_offsets_.empty();
+    if (layout_mode_ == AuxiliaryLayoutMode::Ragged) {
+        if (has_ragged_size_provider == has_ragged_offsets) {
+            return "instance '" + instance_name_ +
+                   "' uses Ragged layout and must provide exactly one of "
+                   "raggedEntitySize() or raggedComponentOffsets()";
+        }
+        if (entity_count_ != 0) {
+            return "instance '" + instance_name_ +
+                   "' uses Ragged layout and must not specify entityCount(); "
+                   "ragged entity count is derived from scope resolution and "
+                   "component offsets/provider metadata";
+        }
+        if (entity_ordering_ != AuxiliaryEntityOrdering::ByEntityThenComponent) {
+            return "instance '" + instance_name_ +
+                   "' uses Ragged layout with unsupported entityOrdering(); "
+                   "ragged storage currently requires ByEntityThenComponent";
+        }
+        if (has_ragged_offsets) {
+            if (ragged_component_offsets_.empty()) {
+                return "instance '" + instance_name_ +
+                       "' has empty raggedComponentOffsets()";
+            }
+            if (ragged_component_offsets_.front() != 0u) {
+                return "instance '" + instance_name_ +
+                       "' has raggedComponentOffsets() whose first entry is not 0";
+            }
+            if (!std::is_sorted(ragged_component_offsets_.begin(),
+                                ragged_component_offsets_.end())) {
+                return "instance '" + instance_name_ +
+                       "' has non-monotone raggedComponentOffsets()";
+            }
+        }
+    } else {
+        if (has_ragged_size_provider || has_ragged_offsets) {
+            return "instance '" + instance_name_ +
+                   "' provides ragged layout metadata but layoutMode() is not Ragged";
+        }
     }
 
     if (scope_ != AuxiliaryStateScope::QuadraturePoint &&

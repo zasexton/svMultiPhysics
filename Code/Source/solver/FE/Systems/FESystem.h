@@ -1181,6 +1181,7 @@ private:
         std::size_t entity_index{0};
         std::size_t block_ordinal{0};
         std::uint64_t global_entity_key{0};
+        bool has_aux_equation_terms{false};
         std::vector<std::vector<std::pair<GlobalIndex, Real>>> B_columns{};
         std::vector<std::vector<std::pair<GlobalIndex, Real>>> Ct_rows{};
         std::vector<Real> D_inv{};
@@ -1281,7 +1282,8 @@ private:
 
 	    std::unique_ptr<assembly::Assembler> assembler_{};
         bool use_constraints_in_assembly_{true};
-		    std::string assembler_selection_report_{};
+        bool use_backend_row_ownership_for_assembly_{false};
+			    std::string assembler_selection_report_{};
 		    std::unique_ptr<assembly::IMaterialStateProvider> material_state_provider_{};
 	    std::unique_ptr<GlobalKernelStateProvider> global_kernel_state_provider_{};
     std::unique_ptr<OperatorBackends> operator_backends_{};
@@ -1325,6 +1327,8 @@ private:
         std::optional<AuxiliaryBlockSolverMetadata> solver_metadata{};
         std::size_t explicit_entity_count{0}; ///< 0 = auto from scope/mesh
         std::vector<std::uint32_t> output_ids{};
+        AuxiliaryDeployedInstance::RaggedEntitySizeProvider ragged_entity_size_provider{};
+        std::vector<std::size_t> ragged_component_offsets{};
         FieldId quadrature_reference_field{INVALID_FIELD_ID};
         std::string quadrature_reference_operator{};
         std::string variant_group{};
@@ -1377,9 +1381,20 @@ private:
     [[nodiscard]] AuxiliaryEntityRemapMetadata
     buildAuxiliaryEntityRemapMetadata_(const DeployedAuxEntry& entry,
                                        const AuxiliaryScopeResolution& resolution);
+    [[nodiscard]] std::vector<std::size_t>
+    buildAuxiliaryRaggedComponentOffsets_(const DeployedAuxEntry& entry,
+                                          const AuxiliaryScopeResolution& resolution) const;
+    [[nodiscard]] std::vector<Real>
+    buildAuxiliaryRaggedInitialValues_(const DeployedAuxEntry& entry,
+                                       std::span<const std::size_t> component_offsets) const;
+    void validateEntityLocalAuxiliaryBindings_() const;
     [[nodiscard]] std::vector<int>
     buildAuxiliaryRegionRowOwnerRanks_(const DeployedAuxEntry& entry,
                                        std::size_t entity_count);
+    [[nodiscard]] int nodeAuxiliaryOwnerRank_(std::size_t node_id) const;
+    [[nodiscard]] std::vector<int>
+    buildAuxiliaryNodeRowOwnerRanks_(const DeployedAuxEntry& entry,
+                                     std::size_t entity_count) const;
     /// Deferred dependency pairs (dependent, dependency) from derivedInput().
     /// Wired by finalizeDeferredInputDeps() when all inputs are registered.
     std::vector<std::pair<std::string, std::string>> deferred_input_deps_{};
@@ -1403,6 +1418,8 @@ private:
     [[nodiscard]] AuxiliaryScopeResolution
     resolveAuxiliaryDeploymentScope_(DeployedAuxEntry& entry);
     void validateMonolithicAuxiliaryLifecycle_(const DeployedAuxEntry& entry) const;
+    void validateRaggedMonolithicLocalCondensationEligibility_(
+        const DeployedAuxEntry& entry) const;
     void validateAuxiliaryMixedLayoutContract_() const;
     void inferQuadraturePointLayout_(DeployedAuxEntry& entry);
     void assignAuxiliaryOutputIds_(DeployedAuxEntry& entry);
@@ -1439,7 +1456,8 @@ public:
                               int boundary_marker,
                               const SystemStateView& state,
                               bool apply_constraints = true,
-                              int region_marker = -1);
+                              int region_marker = -1,
+                              std::span<const GlobalIndex> cell_filter = {});
 
 private:
 
@@ -1460,6 +1478,13 @@ private:
         const AuxiliaryBlockStorage& blk,
         std::size_t entity_index,
         std::vector<std::vector<Real>>& storage) const;
+    void validatePartitionedAuxiliaryEntityWidth_(
+        const char* caller,
+        const DeployedAuxEntry& entry,
+        const AuxiliaryBlockStorage& blk,
+        std::size_t entity_index,
+        std::size_t actual_width,
+        const char* slice_name) const;
 
     /// Rebuild input vector for a generic (non-built) model at a specific entity,
     /// using declared input names with name:size parsing.
@@ -1600,6 +1625,10 @@ public:
         std::vector<Real> Ct;           ///< dR_aux/du rows (n_aux × n_field_dofs, row-major)
         std::vector<Real> dF_dxdot;     ///< Raw dF/dxdot block (n_aux × n_aux, row-major)
         std::vector<AuxiliaryVariableKind> aux_variable_kinds{}; ///< Per-aux unknown classification in mixed-storage order
+        std::vector<int> aux_row_owner_ranks{}; ///< Owner rank per bordered auxiliary row when owner-routed.
+        std::vector<char> aux_row_owner_routed{}; ///< Nonzero when a row must be inserted only by its owner.
+        std::vector<int> aux_row_local_contribution_flags{}; ///< 1 if this rank contributed the owner-routed row.
+        std::vector<int> aux_row_global_contributor_counts{}; ///< MPI sum of local contribution flags.
 
         void clear() {
             active = false;
@@ -1610,6 +1639,10 @@ public:
             D.clear(); g.clear(); B.clear(); Ct.clear();
             dF_dxdot.clear();
             aux_variable_kinds.clear();
+            aux_row_owner_ranks.clear();
+            aux_row_owner_routed.clear();
+            aux_row_local_contribution_flags.clear();
+            aux_row_global_contributor_counts.clear();
             aux_blocks.clear();
             dF_dinputs.clear();
             dO_dx.clear();
@@ -1653,6 +1686,10 @@ public:
             dF_dxdot.assign(static_cast<std::size_t>(na * na), 0.0);
             aux_variable_kinds.assign(static_cast<std::size_t>(na),
                                       AuxiliaryVariableKind::Differential);
+            aux_row_owner_ranks.assign(static_cast<std::size_t>(na), -1);
+            aux_row_owner_routed.assign(static_cast<std::size_t>(na), char{0});
+            aux_row_local_contribution_flags.assign(static_cast<std::size_t>(na), 0);
+            aux_row_global_contributor_counts.assign(static_cast<std::size_t>(na), 0);
             dF_dinputs.clear();
             dO_dx.clear();
             dO_dI.clear();

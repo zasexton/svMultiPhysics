@@ -769,6 +769,8 @@ TEST(AuxiliaryBlockStorage, GatherScatter_Ragged)
     storage.scatterEntityWork(1, std::vector<Real>{300, 400, 500});
     EXPECT_DOUBLE_EQ(storage.work()[2], 300.0);
     EXPECT_DOUBLE_EQ(storage.work()[4], 500.0);
+    EXPECT_THROW(storage.scatterEntityWork(1, std::vector<Real>{1.0, 2.0}),
+                 svmp::FE::InvalidArgumentException);
 }
 
 TEST(AuxiliaryBlockStorage, GatherHistory_ByComponentThenEntity)

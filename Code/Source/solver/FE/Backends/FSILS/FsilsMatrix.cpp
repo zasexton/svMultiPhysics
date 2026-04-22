@@ -173,6 +173,24 @@ enum class LocalRowOwnership : std::uint8_t {
                                            : LocalRowOwnership::NonOwnedLocal;
 }
 
+[[nodiscard]] bool is_valid_fe_matrix_col(const FsilsShared& shared,
+                                          GlobalIndex fe_col,
+                                          GlobalIndex global_cols) noexcept
+{
+    if (fe_col < 0 || fe_col >= global_cols || shared.dof <= 0) {
+        return false;
+    }
+
+    GlobalIndex backend_col = fe_col;
+    if (const auto perm = shared.dof_permutation; perm && !perm->empty()) {
+        if (static_cast<std::size_t>(fe_col) >= perm->forward.size()) {
+            return false;
+        }
+        backend_col = perm->forward[static_cast<std::size_t>(fe_col)];
+    }
+    return backend_col >= 0 && backend_col < global_cols;
+}
+
 [[nodiscard]] bool ghost_rows_look_nodal_interleaved(std::span<const GlobalIndex> ghost_rows, int dof)
 {
     if (dof <= 0) {
@@ -998,182 +1016,23 @@ public:
             return;
         }
 
-        const int dof = shared->dof;
-        const auto& lhs = shared->lhs;
-        const auto perm = shared->dof_permutation;
-        const bool have_perm = perm && !perm->empty();
-        const GlobalIndex num_rows_global = matrix_->numRows();
-        const GlobalIndex num_cols_global = matrix_->numCols();
-        const int nNo = lhs.nNo;
+        thread_local std::vector<GlobalIndex> resolved;
+        resolved.resize(local_matrix.size());
+        matrix_->resolveMatrixEntrySlotsCached(row_dofs, col_dofs, resolved);
 
-        struct DofInfo {
-            int old_node;
-            int component;
-            int internal_node;
-        };
-
-        thread_local std::vector<DofInfo> row_info;
-        thread_local std::vector<DofInfo> col_info;
-        row_info.resize(static_cast<std::size_t>(n_rows));
-        col_info.resize(static_cast<std::size_t>(n_cols));
-
-        auto resolve_dof = [&](GlobalIndex fe_dof) -> DofInfo {
-            if (fe_dof < 0 || fe_dof >= num_rows_global) {
-                return {-1, -1, -1};
+        matrix_requested_ += resolved.size();
+        const std::size_t values_size =
+            static_cast<std::size_t>(matrix_->fsilsNnz()) *
+            static_cast<std::size_t>(matrix_->fsilsDof()) *
+            static_cast<std::size_t>(matrix_->fsilsDof());
+        for (std::size_t idx = 0; idx < resolved.size(); ++idx) {
+            const auto slot = resolved[idx];
+            if (slot >= 0 && static_cast<std::size_t>(slot) < values_size) {
+                ++matrix_valid_;
+                accumulateMatrixValueStats(local_matrix[idx]);
             }
-            GlobalIndex fs_dof = fe_dof;
-            if (have_perm) {
-                if (static_cast<std::size_t>(fe_dof) >= perm->forward.size()) {
-                    return {-1, -1, -1};
-                }
-                fs_dof = perm->forward[static_cast<std::size_t>(fe_dof)];
-            }
-            if (fs_dof < 0 || fs_dof >= num_cols_global) {
-                return {-1, -1, -1};
-            }
-            const int global_node = static_cast<int>(fs_dof / dof);
-            const int comp = static_cast<int>(fs_dof % dof);
-            const int old = shared->globalNodeToOld(global_node);
-            if (old < 0 || old >= nNo) {
-                return {-1, -1, -1};
-            }
-            return {old, comp, lhs.map(old)};
-        };
-
-        for (GlobalIndex i = 0; i < n_rows; ++i) {
-            row_info[static_cast<std::size_t>(i)] = resolve_dof(row_dofs[static_cast<std::size_t>(i)]);
         }
-        for (GlobalIndex j = 0; j < n_cols; ++j) {
-            col_info[static_cast<std::size_t>(j)] = resolve_dof(col_dofs[static_cast<std::size_t>(j)]);
-        }
-
-        Real* values_ptr = matrix_->fsilsValuesPtr();
-        const std::size_t block_sz = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
-        const auto values_size = static_cast<std::size_t>(matrix_->fsilsNnz()) * block_sz;
-
-        thread_local std::vector<Real> block_buf;
-        block_buf.resize(block_sz);
-
-        for (GlobalIndex i0 = 0; i0 < n_rows; ) {
-            const auto& ri0 = row_info[static_cast<std::size_t>(i0)];
-            if (ri0.old_node < 0) { ++i0; continue; }
-
-            GlobalIndex i1 = i0 + 1;
-            while (i1 < n_rows && row_info[static_cast<std::size_t>(i1)].old_node == ri0.old_node) {
-                ++i1;
-            }
-
-            if (ri0.old_node >= shared->owned_node_count) {
-                for (GlobalIndex di = i0; di < i1; ++di) {
-                    const auto row = row_dofs[static_cast<std::size_t>(di)];
-                    for (GlobalIndex dj = 0; dj < n_cols; ++dj) {
-                        const auto col = col_dofs[static_cast<std::size_t>(dj)];
-                        const auto local_idx = static_cast<std::size_t>(di * n_cols + dj);
-                        matrix_->addValue(row, col, local_matrix[local_idx], mode);
-                    }
-                }
-                i0 = i1;
-                continue;
-            }
-
-            const int row_int = ri0.internal_node;
-
-            for (GlobalIndex j0 = 0; j0 < n_cols; ) {
-                const auto& ci0 = col_info[static_cast<std::size_t>(j0)];
-                if (ci0.old_node < 0) { ++j0; continue; }
-
-                GlobalIndex j1 = j0 + 1;
-                while (j1 < n_cols && col_info[static_cast<std::size_t>(j1)].old_node == ci0.old_node) {
-                    ++j1;
-                }
-
-                const int col_int = ci0.internal_node;
-                const GlobalIndex block_base = shared->blockBase(row_int, col_int);
-                if (block_base == INVALID_GLOBAL_INDEX) {
-                    j0 = j1;
-                    continue;
-                }
-
-                matrix_requested_ += static_cast<std::size_t>((i1 - i0) * (j1 - j0));
-                for (GlobalIndex di = i0; di < i1; ++di) {
-                    for (GlobalIndex dj = j0; dj < j1; ++dj) {
-                        ++matrix_valid_;
-                        const auto local_idx = static_cast<std::size_t>(di * n_cols + dj);
-                        accumulateMatrixValueStats(local_matrix[local_idx]);
-                    }
-                }
-
-                const std::size_t base = static_cast<std::size_t>(block_base);
-                if (base + block_sz > values_size) {
-                    j0 = j1;
-                    continue;
-                }
-                Real* dst = values_ptr + base;
-
-                const GlobalIndex row_run = i1 - i0;
-                const GlobalIndex col_run = j1 - j0;
-
-                if (row_run == dof && col_run == dof && mode == assembly::AddMode::Add) {
-                    for (GlobalIndex di = i0; di < i1; ++di) {
-                        const int r = row_info[static_cast<std::size_t>(di)].component;
-                        for (GlobalIndex dj = j0; dj < j1; ++dj) {
-                            const int c = col_info[static_cast<std::size_t>(dj)].component;
-                            const auto local_idx = static_cast<std::size_t>(di * n_cols + dj);
-                            dst[block_entry_index(dof, r, c)] += local_matrix[local_idx];
-                        }
-                    }
-                } else if (row_run == dof && col_run == dof) {
-                    std::fill(block_buf.begin(), block_buf.begin() + static_cast<std::ptrdiff_t>(block_sz), Real(0));
-                    for (GlobalIndex di = i0; di < i1; ++di) {
-                        const int r = row_info[static_cast<std::size_t>(di)].component;
-                        for (GlobalIndex dj = j0; dj < j1; ++dj) {
-                            const int c = col_info[static_cast<std::size_t>(dj)].component;
-                            const auto local_idx = static_cast<std::size_t>(di * n_cols + dj);
-                            block_buf[block_entry_index(dof, r, c)] = local_matrix[local_idx];
-                        }
-                    }
-                    switch (mode) {
-                        case assembly::AddMode::Insert:
-                            for (std::size_t k = 0; k < block_sz; ++k) dst[k] = block_buf[k];
-                            break;
-                        case assembly::AddMode::Max:
-                            for (std::size_t k = 0; k < block_sz; ++k) dst[k] = std::max(dst[k], block_buf[k]);
-                            break;
-                        case assembly::AddMode::Min:
-                            for (std::size_t k = 0; k < block_sz; ++k) dst[k] = std::min(dst[k], block_buf[k]);
-                            break;
-                        default:
-                            break;
-                    }
-                } else {
-                    for (GlobalIndex di = i0; di < i1; ++di) {
-                        const int r = row_info[static_cast<std::size_t>(di)].component;
-                        for (GlobalIndex dj = j0; dj < j1; ++dj) {
-                            const int c = col_info[static_cast<std::size_t>(dj)].component;
-                            const auto local_idx = static_cast<std::size_t>(di * n_cols + dj);
-                            const std::size_t off = block_entry_index(dof, r, c);
-                            switch (mode) {
-                                case assembly::AddMode::Add:
-                                    dst[off] += local_matrix[local_idx];
-                                    break;
-                                case assembly::AddMode::Insert:
-                                    dst[off] = local_matrix[local_idx];
-                                    break;
-                                case assembly::AddMode::Max:
-                                    dst[off] = std::max(dst[off], local_matrix[local_idx]);
-                                    break;
-                                case assembly::AddMode::Min:
-                                    dst[off] = std::min(dst[off], local_matrix[local_idx]);
-                                    break;
-                            }
-                        }
-                    }
-                }
-
-                j0 = j1;
-            }
-            i0 = i1;
-        }
+        matrix_->addResolvedMatrixEntries(row_dofs, col_dofs, resolved, local_matrix, mode);
     }
 
     void addMatrixEntry(GlobalIndex row, GlobalIndex col, Real value, assembly::AddMode mode) override
@@ -2024,9 +1883,11 @@ void FsilsMatrix::addResolvedMatrixEntries(std::span<const GlobalIndex> row_dofs
     const auto n_cols = static_cast<GlobalIndex>(col_dofs.size());
     std::vector<unsigned char> owned_row;
     std::vector<unsigned char> off_owner_row;
+    std::vector<unsigned char> valid_col;
     bool all_rows_owned = true;
     owned_row.resize(row_dofs.size(), 0);
     off_owner_row.resize(row_dofs.size(), 0);
+    valid_col.resize(col_dofs.size(), 0);
     for (GlobalIndex i = 0; i < n_rows; ++i) {
         const auto status = classify_fe_matrix_row(
             *shared_, row_dofs[static_cast<std::size_t>(i)], numRows());
@@ -2038,6 +1899,34 @@ void FsilsMatrix::addResolvedMatrixEntries(std::span<const GlobalIndex> row_dofs
                 off_owner_row[static_cast<std::size_t>(i)] = 1;
             }
         }
+    }
+    for (GlobalIndex j = 0; j < n_cols; ++j) {
+        if (is_valid_fe_matrix_col(
+                *shared_, col_dofs[static_cast<std::size_t>(j)], numCols())) {
+            valid_col[static_cast<std::size_t>(j)] = 1;
+        }
+    }
+
+    std::uint64_t dropped_entries = 0;
+    for (GlobalIndex i = 0; i < n_rows; ++i) {
+        const auto row_idx = static_cast<std::size_t>(i);
+        if (owned_row[row_idx] == 0) {
+            continue;
+        }
+        for (GlobalIndex j = 0; j < n_cols; ++j) {
+            const auto col_idx = static_cast<std::size_t>(j);
+            if (valid_col[col_idx] == 0) {
+                continue;
+            }
+            const auto idx = static_cast<std::size_t>(i * n_cols + j);
+            const auto slot = resolved[idx];
+            if (slot < 0 || static_cast<std::size_t>(slot) >= values_size) {
+                ++dropped_entries;
+            }
+        }
+    }
+    if (dropped_entries > 0) {
+        dropped_entry_count_.fetch_add(dropped_entries, std::memory_order_relaxed);
     }
 
     const auto* slots = resolved.data();
@@ -2196,6 +2085,7 @@ void FsilsMatrix::addMatrixEntriesCached(std::span<const GlobalIndex> row_dofs,
         int internal_node{-1};
         int component{-1};
         int old_node{-1};
+        bool valid_global{false};
     };
 
     thread_local std::vector<DofInfo> row_info;
@@ -2225,18 +2115,18 @@ void FsilsMatrix::addMatrixEntriesCached(std::span<const GlobalIndex> row_dofs,
         const int comp = static_cast<int>(fs_dof % dof);
         if (global_node == cached_global_node) {
             const int old = shared_->globalNodeToOld(global_node);
-            return {cached_internal_node, comp, old};
+            return {cached_internal_node, comp, old, true};
         }
 
         const int old = shared_->globalNodeToOld(global_node);
         if (old < 0 || old >= shared_->lhs.nNo) {
-            return {};
+            return {-1, comp, old, true};
         }
         const int internal = shared_->lhs.map(old);
 
         cached_global_node = global_node;
         cached_internal_node = internal;
-        return {internal, comp, old};
+        return {internal, comp, old, true};
     };
 
     for (GlobalIndex i = 0; i < n_rows; ++i) {
@@ -2320,6 +2210,11 @@ void FsilsMatrix::addMatrixEntriesCached(std::span<const GlobalIndex> row_dofs,
         for (GlobalIndex j0 = 0; j0 < n_cols; ) {
             const auto& ci0 = col_info[static_cast<std::size_t>(j0)];
             if (ci0.internal_node < 0) {
+                if (ci0.valid_global) {
+                    dropped_entry_count_.fetch_add(
+                        static_cast<std::uint64_t>(i1 - i0),
+                        std::memory_order_relaxed);
+                }
                 ++j0;
                 continue;
             }
@@ -2343,6 +2238,10 @@ void FsilsMatrix::addMatrixEntriesCached(std::span<const GlobalIndex> row_dofs,
 
             const auto base = static_cast<std::size_t>(block_base);
             if (base + block_sz > values_.size()) {
+                dropped_entry_count_.fetch_add(
+                    static_cast<std::uint64_t>(row_run) *
+                        static_cast<std::uint64_t>(col_run),
+                    std::memory_order_relaxed);
                 j0 = j1;
                 continue;
             }
@@ -2687,6 +2586,9 @@ bool FsilsMatrix::ownsFeDofRow(GlobalIndex fe_dof) const noexcept
             : -1;
 	    const int col_internal = shared_->globalNodeToInternal(global_col_node);
 	    if (row_internal < 0 || col_internal < 0) {
+            if (row_old >= 0 && row_old < shared_->owned_node_count) {
+                dropped_entry_count_.fetch_add(1, std::memory_order_relaxed);
+            }
             if (trace_row) {
                 std::fprintf(stderr,
                              "[FSILS_ADD] rank=%d fe_row=%lld fe_col=%lld backend_row=%lld backend_col=%lld row_node=%d col_node=%d row_int=%d col_int=%d value=%.17g mode=%d path=internal_missing\n",
@@ -2757,6 +2659,7 @@ bool FsilsMatrix::ownsFeDofRow(GlobalIndex fe_dof) const noexcept
 	    const std::size_t base = static_cast<std::size_t>(col_it - lhs.colPtr.data()) * block_size;
 	    const std::size_t off = block_entry_index(dof, row_comp, col_comp);
 	    if (base + off >= values_.size()) {
+	        dropped_entry_count_.fetch_add(1, std::memory_order_relaxed);
 	        return;
 	    }
 	    Real& dst = values_[base + off];
@@ -2831,6 +2734,9 @@ void FsilsMatrix::addBlock(int row_internal, int col_internal, const Real* block
     const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
     const std::size_t base = static_cast<std::size_t>(col_it - lhs.colPtr.data()) * block_size;
     if (base + block_size > values_.size()) {
+        dropped_entry_count_.fetch_add(
+            static_cast<std::uint64_t>(dof) * static_cast<std::uint64_t>(dof),
+            std::memory_order_relaxed);
         return;
     }
     Real* dst = values_.data() + base;

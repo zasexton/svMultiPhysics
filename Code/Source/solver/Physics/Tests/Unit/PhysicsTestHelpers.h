@@ -269,6 +269,11 @@ inline void expectOperatorJacobianMatchesCentralFD(FE::systems::FESystem& system
     return unitTestDataDir() / "Square" / "mesh" / "mesh-complete.mesh.vtu";
 }
 
+[[nodiscard]] inline std::filesystem::path cubeMeshVtuPath()
+{
+    return unitTestDataDir() / "Cube" / "mesh" / "mesh-complete.mesh.vtu";
+}
+
 [[nodiscard]] inline std::filesystem::path squareMeshSurfacesDir()
 {
     return unitTestDataDir() / "Square" / "mesh" / "mesh-surfaces";
@@ -284,6 +289,107 @@ inline constexpr svmp::label_t kSquareBoundaryLeft = 1;
 inline constexpr svmp::label_t kSquareBoundaryRight = 2;
 inline constexpr svmp::label_t kSquareBoundaryBottom = 3;
 inline constexpr svmp::label_t kSquareBoundaryTop = 4;
+
+inline constexpr svmp::label_t kCubeBoundaryLeft = 1;
+inline constexpr svmp::label_t kCubeBoundaryRight = 2;
+inline constexpr svmp::label_t kCubeBoundaryBack = 3;
+inline constexpr svmp::label_t kCubeBoundaryFront = 4;
+inline constexpr svmp::label_t kCubeBoundaryBottom = 5;
+inline constexpr svmp::label_t kCubeBoundaryTop = 6;
+
+struct CubeBoundaryBounds {
+    double xmin{0.0};
+    double xmax{0.0};
+    double ymin{0.0};
+    double ymax{0.0};
+    double zmin{0.0};
+    double zmax{0.0};
+};
+
+[[nodiscard]] inline CubeBoundaryBounds computeCubeBoundaryBounds(const svmp::MeshBase& mesh)
+{
+    CubeBoundaryBounds b;
+    b.xmin = b.ymin = b.zmin = std::numeric_limits<double>::infinity();
+    b.xmax = b.ymax = b.zmax = -std::numeric_limits<double>::infinity();
+    for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(mesh.n_vertices()); ++v) {
+        const auto xyz = mesh.get_vertex_coords(v);
+        const double x = static_cast<double>(xyz[0]);
+        const double y = static_cast<double>(xyz[1]);
+        const double z = static_cast<double>(xyz[2]);
+        b.xmin = std::min(b.xmin, x);
+        b.xmax = std::max(b.xmax, x);
+        b.ymin = std::min(b.ymin, y);
+        b.ymax = std::max(b.ymax, y);
+        b.zmin = std::min(b.zmin, z);
+        b.zmax = std::max(b.zmax, z);
+    }
+    return b;
+}
+
+inline void registerCubeBoundaryLabels(svmp::MeshBase& mesh)
+{
+    mesh.register_label("left", kCubeBoundaryLeft);
+    mesh.register_label("right", kCubeBoundaryRight);
+    mesh.register_label("back", kCubeBoundaryBack);
+    mesh.register_label("front", kCubeBoundaryFront);
+    mesh.register_label("bottom", kCubeBoundaryBottom);
+    mesh.register_label("top", kCubeBoundaryTop);
+}
+
+inline void markCubeBoundaryFacesByGeometry(svmp::MeshBase& mesh)
+{
+    if (mesh.dim() != 3) {
+        throw std::runtime_error("markCubeBoundaryFacesByGeometry: expected a 3D volume mesh");
+    }
+
+    const auto b = computeCubeBoundaryBounds(mesh);
+    const double scale = std::max({1.0,
+                                   std::abs(b.xmax - b.xmin),
+                                   std::abs(b.ymax - b.ymin),
+                                   std::abs(b.zmax - b.zmin)});
+    const double tol = 1e-10 * scale;
+
+    for (const auto f : mesh.boundary_faces()) {
+        const auto fv = mesh.face_vertices(f);
+        if (fv.empty()) {
+            continue;
+        }
+
+        double cx = 0.0;
+        double cy = 0.0;
+        double cz = 0.0;
+        for (const auto v : fv) {
+            const auto xyz = mesh.get_vertex_coords(v);
+            cx += static_cast<double>(xyz[0]);
+            cy += static_cast<double>(xyz[1]);
+            cz += static_cast<double>(xyz[2]);
+        }
+        const double inv_n = 1.0 / static_cast<double>(fv.size());
+        cx *= inv_n;
+        cy *= inv_n;
+        cz *= inv_n;
+
+        svmp::label_t marker = svmp::INVALID_LABEL;
+        if (std::abs(cx - b.xmin) <= tol) {
+            marker = kCubeBoundaryLeft;
+        } else if (std::abs(cx - b.xmax) <= tol) {
+            marker = kCubeBoundaryRight;
+        } else if (std::abs(cy - b.ymin) <= tol) {
+            marker = kCubeBoundaryBack;
+        } else if (std::abs(cy - b.ymax) <= tol) {
+            marker = kCubeBoundaryFront;
+        } else if (std::abs(cz - b.zmin) <= tol) {
+            marker = kCubeBoundaryBottom;
+        } else if (std::abs(cz - b.zmax) <= tol) {
+            marker = kCubeBoundaryTop;
+        }
+
+        if (marker == svmp::INVALID_LABEL) {
+            throw std::runtime_error("markCubeBoundaryFacesByGeometry: found boundary face not on a cube side");
+        }
+        mesh.set_boundary_label(f, marker);
+    }
+}
 
 /**
  * @brief Mark boundary faces on a 2D volume mesh using a VTP surface mesh.
@@ -566,6 +672,46 @@ loadSquareMeshWithMarkedBoundaries(svmp::MeshComm comm = svmp::MeshComm::world()
             throw std::runtime_error("loadSquareMeshWithMarkedBoundaries: found unlabeled boundary face");
         }
     }
+    return svmp::create_mesh(std::move(base), comm);
+#  endif
+}
+
+/**
+ * @brief Load the tetrahedral cube mesh (VTU) and label its six planar boundary sides.
+ *
+ * Requires:
+ * - FE built with Mesh integration (`FE_WITH_MESH=ON` -> `SVMP_FE_WITH_MESH=1`)
+ * - Mesh built with VTK enabled (`MESH_ENABLE_VTK=ON` -> `MESH_HAS_VTK` defined)
+ */
+[[nodiscard]] inline std::shared_ptr<const svmp::Mesh>
+loadCubeMeshWithMarkedBoundaries(svmp::MeshComm comm = svmp::MeshComm::world())
+{
+#  if !defined(MESH_HAS_VTK)
+    throw std::runtime_error("loadCubeMeshWithMarkedBoundaries: Mesh was built without VTK support (MESH_HAS_VTK not defined)");
+#  else
+    const auto vtu_path = cubeMeshVtuPath();
+    if (!std::filesystem::exists(vtu_path)) {
+        throw std::runtime_error("loadCubeMeshWithMarkedBoundaries: missing test mesh file: " + vtu_path.string());
+    }
+
+    svmp::MeshIOOptions opts;
+    opts.format = "vtu";
+    opts.path = vtu_path.string();
+
+    if (comm.is_parallel()) {
+        opts.kv["ghost_layers"] = "1";
+        opts.kv["partition_method"] = "block";
+
+        auto mesh = svmp::load_mesh(opts, comm);
+        auto& base = mesh->base();
+        registerCubeBoundaryLabels(base);
+        markCubeBoundaryFacesByGeometry(base);
+        return mesh;
+    }
+
+    auto base = std::make_shared<svmp::MeshBase>(svmp::MeshBase::load(opts));
+    registerCubeBoundaryLabels(*base);
+    markCubeBoundaryFacesByGeometry(*base);
     return svmp::create_mesh(std::move(base), comm);
 #  endif
 }

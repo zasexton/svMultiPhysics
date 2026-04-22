@@ -17,6 +17,7 @@ namespace {
         case AuxiliaryRegionKind::CellSet: return "CellSet";
         case AuxiliaryRegionKind::BoundarySet: return "BoundarySet";
         case AuxiliaryRegionKind::MaterialIdSet: return "MaterialIdSet";
+        case AuxiliaryRegionKind::TopologyRegion: return "TopologyRegion";
         case AuxiliaryRegionKind::InterfaceSet: return "InterfaceSet";
         case AuxiliaryRegionKind::FormulationDefined: return "FormulationDefined";
     }
@@ -168,7 +169,6 @@ AuxiliaryRestartSchema AuxiliaryTransferOperator::buildSchema(
     schema.owned_entity_count = entity_metadata != nullptr
         ? entity_metadata->owned_entity_count
         : entity_count;
-    schema.storage_size = entity_count * static_cast<std::size_t>(component_count);
     schema.history_depth = history_depth;
     schema.region_identity = region_identity;
 
@@ -195,10 +195,14 @@ AuxiliaryRestartSchema AuxiliaryTransferOperator::buildSchema(
         schema.region_identity = entity_metadata->deployment_region.identity;
         schema.region_version = entity_metadata->deployment_region.version;
         schema.entity_ids = entity_metadata->entity_ids;
+        schema.component_offsets = entity_metadata->component_offsets;
         schema.qp_offsets = entity_metadata->qp_offsets;
         schema.qp_cell_ids = entity_metadata->qp_cell_ids;
         schema.region_membership = entity_metadata->region_membership;
     }
+    schema.storage_size = !schema.component_offsets.empty()
+        ? schema.component_offsets.back()
+        : entity_count * static_cast<std::size_t>(component_count);
 
     // Simple hash of the schema fields.
     std::size_t h = std::hash<std::string>{}(schema.block_name);
@@ -213,6 +217,7 @@ AuxiliaryRestartSchema AuxiliaryTransferOperator::buildSchema(
     hashCombine(h, schema.storage_size);
     hashCombine(h, schema.history_depth);
     hashRange(h, schema.entity_ids);
+    hashRange(h, schema.component_offsets);
     hashRange(h, schema.qp_offsets);
     hashRange(h, schema.qp_cell_ids);
     hashRegionMembership(h, schema.region_membership);
@@ -289,6 +294,12 @@ RestartValidationResult AuxiliaryTransferOperator::validateRestart(
     if (payload.entity_ids != expected.entity_ids) {
         result.valid = false;
         result.errors.push_back("Entity map mismatch: restart/remap requires matching stable entity ids");
+    }
+
+    if (payload.component_offsets != expected.component_offsets) {
+        result.valid = false;
+        result.errors.push_back(
+            "Ragged component offsets mismatch: restart/remap requires matching component layout");
     }
 
     if (payload.qp_offsets != expected.qp_offsets) {

@@ -3854,6 +3854,8 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     FE_CHECK_NOT_NULL(assembler_.get(), "FESystem::setup: assembler");
     assembler_->setDofHandler(dof_handler_);
     use_constraints_in_assembly_ = opts.use_constraints_in_assembly;
+    use_backend_row_ownership_for_assembly_ =
+        opts.use_backend_row_ownership_for_assembly;
 
     if (opts.use_constraints_in_assembly) {
         assembler_->setConstraints(&affine_constraints_);

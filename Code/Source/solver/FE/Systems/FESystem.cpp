@@ -33,7 +33,9 @@
 #include "Assembly/GlobalSystemView.h"
 
 #include "Backends/Interfaces/GenericVector.h"
+#include "Backends/Interfaces/DofPermutation.h"
 #include "Dofs/EntityDofMap.h"
+#include "Elements/ReferenceElement.h"
 
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
@@ -1365,6 +1367,7 @@ void FESystem::invalidateSetup() noexcept
     distributed_sparsity_by_op_.clear();
     dof_permutation_.reset();
     parameter_registry_.clear();
+    use_backend_row_ownership_for_assembly_ = false;
     if (operator_backends_) {
         operator_backends_->invalidateCache();
     }
@@ -2024,6 +2027,9 @@ void FESystem::applyLocalCondensedRecovery(std::span<const Real> dense_du, Real 
     }
 
     for (const auto& rec : last_local_condensed_records_) {
+        if (!rec.has_aux_equation_terms) {
+            continue;
+        }
         if (!auxiliary_state_manager_->hasBlock(rec.block_name)) {
             continue;
         }
@@ -3563,6 +3569,9 @@ void FESystem::deployAuxiliaryModel(AuxiliaryDeployedInstance instance)
     }
     entry.explicit_entity_count = instance.getEntityCount();
     entry.qp_offsets.assign(instance.qpOffsets().begin(), instance.qpOffsets().end());
+    entry.ragged_entity_size_provider = instance.raggedEntitySizeProvider();
+    entry.ragged_component_offsets.assign(instance.raggedComponentOffsets().begin(),
+                                          instance.raggedComponentOffsets().end());
     entry.quadrature_reference_field = instance.quadratureReferenceField();
     entry.quadrature_reference_operator = instance.quadratureReferenceOperator();
     entry.variant_group = instance.variantGroup();
@@ -4104,10 +4113,7 @@ AuxiliaryInputHandle FESystem::regionIntegral(
     def->expression = integrand;
     def->region_marker = -1;
     def->capabilities.explicit_evaluation = true;
-    // Exact monolithic dI/du for entity-local topology regions needs the
-    // consuming auxiliary entity context.  Keep this explicit provider
-    // partitioned-only until Region monolithic strategy is completed.
-    def->capabilities.monolithic_linearization = false;
+    def->capabilities.monolithic_linearization = !refs.empty();
 
     FieldId primary_fid = INVALID_FIELD_ID;
     if (!refs.empty()) {
@@ -4276,7 +4282,7 @@ AuxiliaryInputHandle FESystem::regionAverage(
     def->expression = integrand;
     def->region_marker = -1;
     def->capabilities.explicit_evaluation = true;
-    def->capabilities.monolithic_linearization = false;
+    def->capabilities.monolithic_linearization = !refs.empty();
 
     const std::string integral_name = input_name + "__integral";
     const std::string measure_name = input_name + "__measure";
@@ -4536,6 +4542,13 @@ void FESystem::initializeAuxiliaryDAEBlocksIfNeeded_(Real time, Real dt)
 
         for (std::size_t e = 0; e < n_authoritative_entities; ++e) {
             auto x = blk.gatherEntityWork(e);
+            validatePartitionedAuxiliaryEntityWidth_(
+                "FESystem::initializeAuxiliaryDAEBlocksIfNeeded",
+                entry,
+                blk,
+                e,
+                x.size(),
+                "state");
             const auto orig_e = emap.empty() ? e : emap[e];
 
             if (has_entity_local_inputs && auxiliary_input_registry_) {
@@ -4590,6 +4603,31 @@ void FESystem::initializeAuxiliaryDAEBlocksIfNeeded_(Real time, Real dt)
                         " dt=" + std::to_string(dt));
         }
     }
+}
+
+void FESystem::validatePartitionedAuxiliaryEntityWidth_(
+    const char* caller,
+    const DeployedAuxEntry& entry,
+    const AuxiliaryBlockStorage& blk,
+    std::size_t entity_index,
+    std::size_t actual_width,
+    const char* slice_name) const
+{
+    const auto expected_width = static_cast<std::size_t>(entry.spec.size);
+    FE_THROW_IF(actual_width != expected_width, InvalidArgumentException,
+                std::string(caller) + ": partitioned auxiliary block '" +
+                    entry.instance_name + "' " + slice_name + " slice for entity " +
+                    std::to_string(entity_index) + " has " +
+                    (blk.layoutMode() == AuxiliaryLayoutMode::Ragged
+                         ? std::string("ragged ")
+                         : std::string("")) +
+                    "width " + std::to_string(actual_width) +
+                    " but the AuxiliaryStateModel dimension is " +
+                    std::to_string(expected_width) +
+                    ". The current partitioned runtime requires every per-entity "
+                    "slice to match the fixed model dimension; use uniform "
+                    "ragged widths equal to the model dimension or provide a "
+                    "variable-width model/runtime contract.");
 }
 
 void FESystem::advanceAuxiliaryState(Real time, Real dt)
@@ -4664,6 +4702,13 @@ void FESystem::advanceAuxiliaryState(Real time, Real dt)
 
             for (std::size_t e = 0; e < n_entities; ++e) {
                 auto ew = blk.gatherEntityWork(e);
+                validatePartitionedAuxiliaryEntityWidth_(
+                    "FESystem::advanceAuxiliaryState",
+                    *ep,
+                    blk,
+                    e,
+                    ew.size(),
+                    "work");
                 const auto orig_e = emap.empty() ? e : emap[e];
 
                 // Initialize x_prev from committed on first substep.
@@ -4671,6 +4716,13 @@ void FESystem::advanceAuxiliaryState(Real time, Real dt)
                 auto it = block_x_prev.find(key);
                 if (it == block_x_prev.end()) {
                     auto ec = blk.gatherEntityCommitted(e);
+                    validatePartitionedAuxiliaryEntityWidth_(
+                        "FESystem::advanceAuxiliaryState",
+                        *ep,
+                        blk,
+                        e,
+                        ec.size(),
+                        "committed");
                     block_x_prev[key] = std::vector<Real>(ec.begin(), ec.end());
                     std::copy(block_x_prev[key].begin(), block_x_prev[key].end(), ew.begin());
                 }
@@ -4699,6 +4751,13 @@ void FESystem::advanceAuxiliaryState(Real time, Real dt)
                 std::vector<std::span<const Real>> hs;
                 for (std::size_t k = 0; k < blk.history().depth(); ++k) {
                     hd.push_back(blk.gatherEntityHistory(k, e));
+                    validatePartitionedAuxiliaryEntityWidth_(
+                        "FESystem::advanceAuxiliaryState",
+                        *ep,
+                        blk,
+                        e,
+                        hd.back().size(),
+                        "history");
                     hs.push_back(hd.back());
                 }
 
@@ -4794,6 +4853,20 @@ void FESystem::advanceOneEntry(DeployedAuxEntry& entry, Real time, Real dt, int 
     for (std::size_t e = 0; e < n_entities; ++e) {
         auto ew = blk.gatherEntityWork(e);
         auto ec = blk.gatherEntityCommitted(e);
+        validatePartitionedAuxiliaryEntityWidth_(
+            "FESystem::advanceAuxiliaryState",
+            entry,
+            blk,
+            e,
+            ew.size(),
+            "work");
+        validatePartitionedAuxiliaryEntityWidth_(
+            "FESystem::advanceAuxiliaryState",
+            entry,
+            blk,
+            e,
+            ec.size(),
+            "committed");
         const auto orig_e = emap.empty() ? e : emap[e];
 
         if (has_entity_local_inputs && auxiliary_input_registry_) {
@@ -4817,6 +4890,13 @@ void FESystem::advanceOneEntry(DeployedAuxEntry& entry, Real time, Real dt, int 
         std::vector<std::span<const Real>> hs;
         for (std::size_t k = 0; k < blk.history().depth(); ++k) {
             hd.push_back(blk.gatherEntityHistory(k, e));
+            validatePartitionedAuxiliaryEntityWidth_(
+                "FESystem::advanceAuxiliaryState",
+                entry,
+                blk,
+                e,
+                hd.back().size(),
+                "history");
             hs.push_back(hd.back());
         }
 
@@ -5545,11 +5625,54 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                    isSingleOwnerBorderedScope(aux_entry.spec.scope);
         };
 
+    auto useOwnerRoutedBorderedAssembly =
+        [&](const DeployedAuxEntry& aux_entry,
+            bool aux_local_condensed,
+            bool aux_direct_only) noexcept {
+        return !aux_local_condensed && !aux_direct_only &&
+                   (aux_entry.spec.scope == AuxiliaryStateScope::Node ||
+                    aux_entry.spec.scope == AuxiliaryStateScope::Region);
+    };
+
     auto isSingleOwnerBorderedAssemblyRank =
         [&](const DeployedAuxEntry& aux_entry) {
             return currentMpiRank() ==
                    singleOwnerRankForAuxBlock(aux_entry.instance_name);
         };
+
+    auto borderedAuxRowIndex = [&](GlobalIndex aux_dof) -> std::optional<std::size_t> {
+        const auto nf = static_cast<GlobalIndex>(n_field_dofs);
+        if (aux_dof < nf) {
+            return std::nullopt;
+        }
+        const auto row = static_cast<std::size_t>(aux_dof - nf);
+        if (row >= static_cast<std::size_t>(bordered_coupling_.n_aux)) {
+            return std::nullopt;
+        }
+        return row;
+    };
+
+    auto ownsBorderedAuxRow = [&](GlobalIndex aux_dof) {
+        const auto row = borderedAuxRowIndex(aux_dof);
+        if (!row.has_value() ||
+            *row >= bordered_coupling_.aux_row_owner_routed.size() ||
+            bordered_coupling_.aux_row_owner_routed[*row] == char{0}) {
+            return true;
+        }
+        return *row < bordered_coupling_.aux_row_owner_ranks.size() &&
+               bordered_coupling_.aux_row_owner_ranks[*row] == currentMpiRank();
+    };
+
+    auto markBorderedAuxRowContribution = [&](GlobalIndex aux_dof) {
+        const auto row = borderedAuxRowIndex(aux_dof);
+        if (!row.has_value() ||
+            *row >= bordered_coupling_.aux_row_owner_routed.size() ||
+            bordered_coupling_.aux_row_owner_routed[*row] == char{0} ||
+            *row >= bordered_coupling_.aux_row_local_contribution_flags.size()) {
+            return;
+        }
+        bordered_coupling_.aux_row_local_contribution_flags[*row] = 1;
+    };
 
     auto deploymentOrdinal = [&](std::string_view block_name) -> std::size_t {
         for (std::size_t i = 0; i < deployed_aux_entries_.size(); ++i) {
@@ -5606,6 +5729,18 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                    static_cast<std::uint64_t>(q_local);
         }
         return static_cast<std::uint64_t>(orig_entity);
+    };
+
+    auto ownsLocalCondensedAuxEquation =
+        [&](const DeployedAuxEntry& aux_entry,
+            const AuxiliaryBlockStorage&,
+            std::size_t,
+            std::size_t orig_entity) {
+        if (!aux_entry.local_condensed ||
+            aux_entry.spec.scope != AuxiliaryStateScope::Node) {
+            return true;
+        }
+        return nodeAuxiliaryOwnerRank_(orig_entity) == currentMpiRank();
     };
 
     auto findLocalCondensedRecord =
@@ -5734,6 +5869,10 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
             auto entity_committed = blk.gatherEntityCommitted(e);
             const auto orig_e = originalEntityForAuxEntity(entry, e);
             const auto global_entity_key = globalEntityKeyForAuxEntity(entry, e);
+            if (local_condensed &&
+                !ownsLocalCondensedAuxEquation(entry, blk, e, orig_e)) {
+                continue;
+            }
             const auto entity_committed_rate = gatherMonolithicCommittedRate(entry, e);
             auto temporal = buildMonolithicAuxiliaryTemporalEvaluation(
                 entry.stepper_spec, blk, e, entity_x, entity_committed, entity_committed_rate, state);
@@ -5833,6 +5972,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                     if (local_condensed) {
                         auto& rec = ensureLocalCondensedRecord(
                             entry.instance_name, e, block_ordinal, global_entity_key, dim);
+                        rec.has_aux_equation_terms = true;
                         rec.g = entity_res;
                     } else if (vector_out) {
                         vector_out->addVectorEntries(aux_dofs, entity_res);
@@ -5859,13 +5999,18 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 }
                 entry.deriv_provider->evaluateJacobian(*entry.model, ctx, jac_req);
 
-                if (!entity_dFdxdot.empty() && bordered_coupling_.active &&
+                if (!local_condensed &&
+                    !entity_dFdxdot.empty() && bordered_coupling_.active &&
                     bordered_coupling_.dF_dxdot.size() ==
                         static_cast<std::size_t>(bordered_coupling_.n_aux * bordered_coupling_.n_aux)) {
                     const auto na = static_cast<std::size_t>(bordered_coupling_.n_aux);
                     for (int r = 0; r < dim; ++r) {
+                        const auto row_dof = aux_dofs[static_cast<std::size_t>(r)];
+                        if (!ownsBorderedAuxRow(row_dof)) {
+                            continue;
+                        }
                         const auto ai = static_cast<std::size_t>(
-                            aux_dofs[static_cast<std::size_t>(r)] - static_cast<GlobalIndex>(n_field_dofs));
+                            row_dof - static_cast<GlobalIndex>(n_field_dofs));
                         if (ai >= na) continue;
                         for (int c = 0; c < dim; ++c) {
                             const auto aj = static_cast<std::size_t>(
@@ -5873,6 +6018,10 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                             if (aj >= na) continue;
                             bordered_coupling_.dF_dxdot[ai * na + aj] +=
                                 entity_dFdxdot[static_cast<std::size_t>(r * dim + c)];
+                            if (std::abs(entity_dFdxdot[static_cast<std::size_t>(r * dim + c)]) >
+                                Real(1e-30)) {
+                                markBorderedAuxRowContribution(row_dof);
+                            }
                         }
                     }
                 }
@@ -5893,6 +6042,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 } else if (local_condensed) {
                     auto& rec = ensureLocalCondensedRecord(
                         entry.instance_name, e, block_ordinal, global_entity_key, dim);
+                    rec.has_aux_equation_terms = true;
                     rec.D_inv.clear();
                     if (!invertDenseMatrix(entity_jac, static_cast<std::size_t>(dim), rec.D_inv)) {
                         FE_THROW(InvalidStateException,
@@ -5999,6 +6149,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                                     auto& rec = ensureLocalCondensedRecord(
                                                         entry.instance_name, e, block_ordinal,
                                                         global_entity_key, dim);
+                                                    rec.has_aux_equation_terms = true;
                                                     for (int r = 0; r < dim; ++r) {
                                                         addSparseEntry(
                                                             rec.Ct_rows[static_cast<std::size_t>(r)],
@@ -6044,10 +6195,24 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                     const auto svc_fid = ref_fields[0];
                                     auto svc_it = boundary_reduction_services_.find(svc_fid);
                                     if (svc_it != boundary_reduction_services_.end() && svc_it->second) {
+                                        const bool topology_region_quantity =
+                                            (handle.kind() == FEQuantityKind::RegionIntegral ||
+                                             handle.kind() == FEQuantityKind::RegionAverage) &&
+                                            handle.definition() != nullptr &&
+                                            handle.definition()->region_marker < 0 &&
+                                            auxiliary_input_registry_ &&
+                                            auxiliary_input_registry_->isEntityLocal(handle.registryName());
                                         for (const auto target_fid : ref_fields) {
-                                            auto grad = svc_it->second->evaluateFunctionalGradient(
-                                                func_name, target_fid, state,
-                                                use_constraints_in_assembly_);
+                                            auto grad = topology_region_quantity
+                                                ? svc_it->second->evaluateFunctionalGradientOverCells(
+                                                    func_name,
+                                                    target_fid,
+                                                    auxiliaryTopologyRegionCells_(orig_e),
+                                                    state,
+                                                    use_constraints_in_assembly_)
+                                                : svc_it->second->evaluateFunctionalGradient(
+                                                    func_name, target_fid, state,
+                                                    use_constraints_in_assembly_);
 
                                             // For averages, apply quotient rule:
                                             // d(I/M)/du = (dI/du)/M  (measure M is constant w.r.t. u
@@ -6057,8 +6222,16 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                                 const std::string meas_name =
                                                     handle.registryName() + "__measure";
                                                 if (auxiliary_input_registry_->hasInput(meas_name)) {
-                                                    const Real measure =
-                                                        auxiliary_input_registry_->get(meas_name);
+                                                    Real measure = Real(0.0);
+                                                    if (topology_region_quantity &&
+                                                        auxiliary_input_registry_->isEntityLocal(meas_name)) {
+                                                        const auto meas =
+                                                            auxiliary_input_registry_->valuesOf(
+                                                                meas_name, orig_e);
+                                                        measure = meas.empty() ? Real(0.0) : meas[0];
+                                                    } else {
+                                                        measure = auxiliary_input_registry_->get(meas_name);
+                                                    }
                                                     if (measure > 0.0) {
                                                         for (auto& se : grad) se.value /= measure;
                                                     }
@@ -6074,8 +6247,12 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                             const bool single_owner_bordered_insert =
                                                 useSingleOwnerBorderedAssembly(
                                                     entry, local_condensed, /*aux_direct_only=*/false);
+                                            const bool owner_routed_bordered_insert =
+                                                useOwnerRoutedBorderedAssembly(
+                                                    entry, local_condensed, /*aux_direct_only=*/false);
 #if FE_HAS_MPI
-                                            if (single_owner_bordered_insert) {
+                                            if (single_owner_bordered_insert ||
+                                                owner_routed_bordered_insert) {
                                                 gradient_entries = allreduceSumSparsePairs(
                                                     std::move(gradient_entries), dof_handler_.mpiComm());
                                             }
@@ -6097,6 +6274,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                                     auto& rec = ensureLocalCondensedRecord(
                                                         entry.instance_name, e, block_ordinal,
                                                         global_entity_key, dim);
+                                                    rec.has_aux_equation_terms = true;
                                                     for (int r = 0; r < dim; ++r) {
                                                         addSparseEntry(
                                                             rec.Ct_rows[static_cast<std::size_t>(r)],
@@ -6118,6 +6296,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                     if (local_condensed && want_matrix && !dense_solution.empty()) {
                         auto& rec = ensureLocalCondensedRecord(
                             entry.instance_name, e, block_ordinal, global_entity_key, dim);
+                        rec.has_aux_equation_terms = true;
                         const bool needs_ct_rows = std::all_of(
                             rec.Ct_rows.begin(),
                             rec.Ct_rows.end(),
@@ -6202,7 +6381,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
     // The derivative expression may itself depend on the field value
     // (nonlinear case), so we populate field_values in the context.
     // ----------------------------------------------------------------
-    if (want_matrix && matrix_out) {
+    if (want_matrix) {
         for (auto& entry : deployed_aux_entries_) {
             if (!entry.materialized) continue;
             if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) continue;
@@ -6220,13 +6399,16 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
 
             auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
             const auto n_ent = blk.entityCount();
+            const bool local_condensed = entry.local_condensed;
 
             // Find this block's offset in the mixed layout.
             std::size_t block_offset = 0;
-            for (const auto& bl : mixed.aux_layout.blocks) {
-                if (bl.name == entry.instance_name) {
-                    block_offset = bl.offset + mixed.aux_layout.mixed_system_offset;
-                    break;
+            if (!local_condensed) {
+                for (const auto& bl : mixed.aux_layout.blocks) {
+                    if (bl.name == entry.instance_name) {
+                        block_offset = bl.offset + mixed.aux_layout.mixed_system_offset;
+                        break;
+                    }
                 }
             }
 
@@ -6245,10 +6427,17 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 }
             }
 
+            const auto block_ordinal = deploymentOrdinal(entry.instance_name);
+
             for (std::size_t e = 0; e < n_ent; ++e) {
                 auto entity_x = blk.gatherEntityWork(e);
                 auto entity_committed = blk.gatherEntityCommitted(e);
                 const auto orig_e = originalEntityForAuxEntity(entry, e);
+                const auto global_entity_key = globalEntityKeyForAuxEntity(entry, e);
+                if (local_condensed &&
+                    !ownsLocalCondensedAuxEquation(entry, blk, e, orig_e)) {
+                    continue;
+                }
                 const auto entity_committed_rate = gatherMonolithicCommittedRate(entry, e);
                 auto temporal = buildMonolithicAuxiliaryTemporalEvaluation(
                     entry.stepper_spec, blk, e, entity_x, entity_committed, entity_committed_rate, state);
@@ -6308,10 +6497,12 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
 
                 // Build global DOF indices for this entity's auxiliary unknowns.
                 std::vector<GlobalIndex> aux_dofs(static_cast<std::size_t>(dim));
-                for (int i = 0; i < dim; ++i) {
-                    aux_dofs[static_cast<std::size_t>(i)] = static_cast<GlobalIndex>(
-                        block_offset + e * static_cast<std::size_t>(dim) +
-                        static_cast<std::size_t>(i));
+                if (!local_condensed) {
+                    for (int i = 0; i < dim; ++i) {
+                        aux_dofs[static_cast<std::size_t>(i)] = static_cast<GlobalIndex>(
+                            block_offset + e * static_cast<std::size_t>(dim) +
+                            static_cast<std::size_t>(i));
+                    }
                 }
 
                 // For each referenced FE field, evaluate dF/d(field_comp) and
@@ -6346,7 +6537,19 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                             col_vals[static_cast<std::size_t>(i)] =
                                 (idx < dF_dfield.size()) ? dF_dfield[idx] : 0.0;
                         }
-                        matrix_out->addMatrixEntries(aux_dofs, col, col_vals);
+                        if (local_condensed) {
+                            auto& rec = ensureLocalCondensedRecord(
+                                entry.instance_name, e, block_ordinal, global_entity_key, dim);
+                            rec.has_aux_equation_terms = true;
+                            for (int i = 0; i < dim; ++i) {
+                                addSparseEntry(
+                                    rec.Ct_rows[static_cast<std::size_t>(i)],
+                                    global_dof,
+                                    col_vals[static_cast<std::size_t>(i)]);
+                            }
+                        } else if (matrix_out) {
+                            matrix_out->addMatrixEntries(aux_dofs, col, col_vals);
+                        }
                     }
                 }
             }
@@ -6641,6 +6844,13 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                     if (is_domain_region_avg) {
                         func_name += "__integral";
                     }
+                    const bool topology_region_quantity =
+                        (kind == FEQuantityKind::RegionIntegral ||
+                         kind == FEQuantityKind::RegionAverage) &&
+                        handle.definition() != nullptr &&
+                        handle.definition()->region_marker < 0 &&
+                        auxiliary_input_registry_ &&
+                        auxiliary_input_registry_->isEntityLocal(handle.registryName());
 
                     std::unordered_map<GlobalIndex, Real> accum;
                     const auto svc_fid = ref_fields.front();
@@ -6650,14 +6860,29 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                     }
 
                     for (const auto target_fid : ref_fields) {
-                        auto grad = svc_it->second->evaluateFunctionalGradient(
-                            func_name, target_fid, state,
-                            apply_monolithic_functional_constraints);
+                        auto grad = topology_region_quantity
+                            ? svc_it->second->evaluateFunctionalGradientOverCells(
+                                func_name,
+                                target_fid,
+                                auxiliaryTopologyRegionCells_(orig_e),
+                                state,
+                                apply_monolithic_functional_constraints)
+                            : svc_it->second->evaluateFunctionalGradient(
+                                func_name, target_fid, state,
+                                apply_monolithic_functional_constraints);
 
                         if (is_domain_region_avg && auxiliary_input_registry_) {
                             const std::string meas_name = handle.registryName() + "__measure";
                             if (auxiliary_input_registry_->hasInput(meas_name)) {
-                                const Real measure = auxiliary_input_registry_->get(meas_name);
+                                Real measure = Real(0.0);
+                                if (topology_region_quantity &&
+                                    auxiliary_input_registry_->isEntityLocal(meas_name)) {
+                                    const auto meas =
+                                        auxiliary_input_registry_->valuesOf(meas_name, orig_e);
+                                    measure = meas.empty() ? Real(0.0) : meas[0];
+                                } else {
+                                    measure = auxiliary_input_registry_->get(meas_name);
+                                }
                                 if (measure > Real(0.0)) {
                                     for (auto& se : grad) {
                                         se.value /= measure;
@@ -6839,10 +7064,13 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                         }
                     }
 
-                    if (local_condensed && !ed.dF_dinputs.empty() &&
+                    if (local_condensed &&
+                        ownsLocalCondensedAuxEquation(entry, blk, e, orig_e) &&
+                        !ed.dF_dinputs.empty() &&
                         !ed.input_gradients.empty()) {
                         auto& rec = ensureLocalCondensedRecord(
                             entry.instance_name, e, block_ordinal, global_entity_key, dim);
+                        rec.has_aux_equation_terms = true;
                         const bool needs_ct_rows = std::all_of(
                             rec.Ct_rows.begin(),
                             rec.Ct_rows.end(),
@@ -7486,26 +7714,35 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
             return nullptr;
         };
 
-        if (want_matrix) {
-            std::vector<CondensedSlot> update_slots;
-            for (const auto& rec : last_local_condensed_records_) {
-                const auto dim = rec.g.size();
-                if (dim == 0 || rec.D_inv.size() != dim * dim ||
-                    rec.Ct_rows.size() != dim || rec.B_columns.size() != dim) {
-                    continue;
-                }
-
-                for (std::size_t j = 0; j < dim; ++j) {
-                    update_slots.push_back(CondensedSlot{
-                        rec.block_ordinal, rec.global_entity_key, j});
-                }
+        auto recordDimension = [](const LocalCondensedEntityRecord& rec) -> std::size_t {
+            if (!rec.B_columns.empty()) {
+                return rec.B_columns.size();
             }
+            if (!rec.Ct_rows.empty()) {
+                return rec.Ct_rows.size();
+            }
+            return rec.g.size();
+        };
 
+        auto hasEquationTerms =
+            [&](const LocalCondensedEntityRecord& rec, std::size_t dim) {
+            return rec.has_aux_equation_terms &&
+                   dim > 0u &&
+                   rec.D_inv.size() == dim * dim &&
+                   rec.Ct_rows.size() == dim;
+        };
+
+        auto hasBColumns =
+            [](const LocalCondensedEntityRecord& rec, std::size_t dim) {
+            return dim > 0u && rec.B_columns.size() == dim;
+        };
+
+        auto gatherGlobalSlots = [&](std::vector<CondensedSlot> slots) {
 #if FE_HAS_MPI
             {
                 std::vector<LocalCondensedSlotKey> mpi_slots;
-                mpi_slots.reserve(update_slots.size());
-                for (const auto& slot : update_slots) {
+                mpi_slots.reserve(slots.size());
+                for (const auto& slot : slots) {
                     mpi_slots.push_back(LocalCondensedSlotKey{
                         static_cast<unsigned long long>(slot.block_ordinal),
                         static_cast<unsigned long long>(slot.entity_key),
@@ -7513,30 +7750,49 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 }
                 const auto gathered =
                     allgatherLocalCondensedSlotKeys(std::move(mpi_slots), dof_handler_.mpiComm());
-                update_slots.clear();
-                update_slots.reserve(gathered.size());
+                slots.clear();
+                slots.reserve(gathered.size());
                 for (const auto& slot : gathered) {
-                    update_slots.push_back(CondensedSlot{
+                    slots.push_back(CondensedSlot{
                         static_cast<std::size_t>(slot.block_ordinal),
                         static_cast<std::uint64_t>(slot.entity_key),
                         static_cast<std::size_t>(slot.component)});
                 }
             }
 #endif
-            sortUniqueSlots(update_slots);
+            sortUniqueSlots(slots);
+            return slots;
+        };
+
+        auto localCondensedSlots = [&]() {
+            std::vector<CondensedSlot> slots;
+            for (const auto& rec : last_local_condensed_records_) {
+                const auto dim = recordDimension(rec);
+                if (!hasBColumns(rec, dim) && !hasEquationTerms(rec, dim)) {
+                    continue;
+                }
+                for (std::size_t j = 0; j < dim; ++j) {
+                    slots.push_back(CondensedSlot{
+                        rec.block_ordinal, rec.global_entity_key, j});
+                }
+            }
+            return gatherGlobalSlots(std::move(slots));
+        };
+
+        if (want_matrix) {
+            std::vector<CondensedSlot> update_slots = localCondensedSlots();
 
             for (const auto& slot : update_slots) {
                 std::vector<std::pair<GlobalIndex, Real>> left_entries;
                 std::vector<std::pair<GlobalIndex, Real>> right_entries;
 
                 if (const auto* rec = findRecordForSlot(slot)) {
-                    const auto dim = rec->g.size();
-                    if (slot.component < dim &&
-                        rec->D_inv.size() == dim * dim &&
-                        rec->Ct_rows.size() == dim &&
-                        rec->B_columns.size() == dim) {
+                    const auto dim = recordDimension(*rec);
+                    if (slot.component < dim && hasBColumns(*rec, dim)) {
                         left_entries = rec->B_columns[slot.component];
+                    }
 
+                    if (slot.component < dim && hasEquationTerms(*rec, dim)) {
                         std::unordered_map<GlobalIndex, Real> right_dense;
                         for (std::size_t row = 0; row < dim; ++row) {
                             const Real coeff = rec->D_inv[slot.component * dim + row];
@@ -7584,43 +7840,51 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
         }
 
         if (want_vector) {
-            std::vector<std::pair<GlobalIndex, Real>> rhs_shift_entries;
-            for (const auto& rec : last_local_condensed_records_) {
-                const auto dim = rec.g.size();
-                if (dim == 0 || rec.D_inv.size() != dim * dim ||
-                    rec.B_columns.size() != dim) {
-                    continue;
-                }
+            std::vector<CondensedSlot> rhs_slots = localCondensedSlots();
+            last_local_condensed_rhs_shift_.assign(n_field_dofs, Real(0.0));
 
-                std::vector<Real> dinv_g(dim, Real(0.0));
-                for (std::size_t i = 0; i < dim; ++i) {
-                    for (std::size_t j = 0; j < dim; ++j) {
-                        dinv_g[i] += rec.D_inv[i * dim + j] * rec.g[j];
-                    }
-                }
+            for (const auto& slot : rhs_slots) {
+                std::vector<std::pair<GlobalIndex, Real>> left_entries;
+                Real coeff = Real(0.0);
 
-                for (std::size_t j = 0; j < dim; ++j) {
-                    const Real coeff = dinv_g[j];
-                    if (std::abs(coeff) <= Real(1e-30)) {
-                        continue;
+                if (const auto* rec = findRecordForSlot(slot)) {
+                    const auto dim = recordDimension(*rec);
+                    if (slot.component < dim && hasBColumns(*rec, dim)) {
+                        left_entries = rec->B_columns[slot.component];
                     }
-                    for (const auto& [dof, val] : rec.B_columns[j]) {
-                        rhs_shift_entries.emplace_back(dof, val * coeff);
+                    if (slot.component < dim && hasEquationTerms(*rec, dim) &&
+                        rec->g.size() == dim) {
+                        for (std::size_t row = 0; row < dim; ++row) {
+                            coeff += rec->D_inv[slot.component * dim + row] *
+                                     rec->g[row];
+                        }
                     }
                 }
-            }
 
 #if FE_HAS_MPI
-            rhs_shift_entries =
-                allreduceSumSparsePairs(std::move(rhs_shift_entries), dof_handler_.mpiComm());
+                left_entries =
+                    allreduceSumSparsePairs(std::move(left_entries), dof_handler_.mpiComm());
+                {
+                    int mpi_initialized = 0;
+                    MPI_Initialized(&mpi_initialized);
+                    if (mpi_initialized) {
+                        Real global_coeff = coeff;
+                        MPI_Allreduce(&coeff, &global_coeff, 1, MPI_DOUBLE, MPI_SUM,
+                                      dof_handler_.mpiComm());
+                        coeff = global_coeff;
+                    }
+                }
 #endif
 
-            last_local_condensed_rhs_shift_.assign(n_field_dofs, Real(0.0));
-            for (const auto& [dof, val] : rhs_shift_entries) {
-                const auto dof_idx = static_cast<std::size_t>(dof);
-                if (dof_idx < last_local_condensed_rhs_shift_.size() &&
-                    owned_dofs.contains(dof)) {
-                    last_local_condensed_rhs_shift_[dof_idx] += val;
+                if (std::abs(coeff) <= Real(1e-30)) {
+                    continue;
+                }
+                for (const auto& [dof, val] : left_entries) {
+                    const auto dof_idx = static_cast<std::size_t>(dof);
+                    if (dof_idx < last_local_condensed_rhs_shift_.size() &&
+                        owned_dofs.contains(dof)) {
+                        last_local_condensed_rhs_shift_[dof_idx] += val * coeff;
+                    }
                 }
             }
         }
@@ -8200,6 +8464,38 @@ FESystem::resolveAuxiliaryDeploymentScope_(DeployedAuxEntry& entry)
                 return nodes_out;
             };
 
+            auto face_cells_to_nodes =
+                [&](std::span<const std::pair<std::size_t, std::size_t>> face_cells) {
+                std::vector<std::size_t> nodes_out;
+                std::vector<GlobalIndex> cell_nodes;
+                for (const auto& [face, cell] : face_cells) {
+                    cell_nodes.clear();
+                    const auto cell_id = static_cast<GlobalIndex>(cell);
+                    mesh_access_->getCellNodes(cell_id, cell_nodes);
+                    const auto local_face = mesh_access_->getLocalFaceIndex(
+                        static_cast<GlobalIndex>(face), cell_id);
+                    const auto ref = elements::ReferenceElement::create(
+                        mesh_access_->getCellType(cell_id));
+                    const auto& face_nodes =
+                        ref.face_nodes(static_cast<std::size_t>(local_face));
+                    for (const auto local_node : face_nodes) {
+                        const auto node_idx = static_cast<std::size_t>(local_node);
+                        FE_THROW_IF(node_idx >= cell_nodes.size(), InvalidStateException,
+                                    "FESystem::finalizeAuxiliaryLayout: face "
+                                    "node index out of range while expanding "
+                                    "Node deployment region for auxiliary "
+                                    "instance '" +
+                                        entry.instance_name + "'");
+                        const auto node = cell_nodes[node_idx];
+                        if (node >= 0) {
+                            nodes_out.push_back(static_cast<std::size_t>(node));
+                        }
+                    }
+                }
+                sort_unique(nodes_out);
+                return nodes_out;
+            };
+
             auto cells_to_regions = [&](std::span<const std::size_t> cells) {
                 std::vector<std::size_t> regions_out;
                 std::optional<analysis::TopologyAnalysisContext> local_topology;
@@ -8244,9 +8540,14 @@ FESystem::resolveAuxiliaryDeploymentScope_(DeployedAuxEntry& entry)
             };
 
             auto assign_from_boundary_faces =
-                [&](std::vector<std::size_t> faces, std::vector<std::size_t> cells) {
+                [&](std::vector<std::size_t> faces,
+                    std::vector<std::size_t> cells,
+                    std::vector<std::pair<std::size_t, std::size_t>> face_cells) {
                     sort_unique(faces);
                     sort_unique(cells);
+                    std::sort(face_cells.begin(), face_cells.end());
+                    face_cells.erase(std::unique(face_cells.begin(), face_cells.end()),
+                                     face_cells.end());
                     switch (entry.spec.scope) {
                         case AuxiliaryStateScope::Facet:
                             entry.entity_map = std::move(faces);
@@ -8256,7 +8557,7 @@ FESystem::resolveAuxiliaryDeploymentScope_(DeployedAuxEntry& entry)
                             entry.entity_map = std::move(cells);
                             break;
                         case AuxiliaryStateScope::Node:
-                            entry.entity_map = cells_to_nodes(cells);
+                            entry.entity_map = face_cells_to_nodes(face_cells);
                             break;
                         case AuxiliaryStateScope::Region:
                             entry.entity_map = cells_to_regions(cells);
@@ -8266,6 +8567,57 @@ FESystem::resolveAuxiliaryDeploymentScope_(DeployedAuxEntry& entry)
                             break;
                     }
                 };
+
+            auto topology_region_id = [&](std::string_view label) {
+                const int parsed_region_id = parse_region_identity(label);
+                FE_THROW_IF(parsed_region_id < 0,
+                            InvalidArgumentException,
+                            "FESystem::finalizeAuxiliaryLayout: " +
+                                std::string(label) +
+                                " identity must be a nonnegative topology "
+                                "region id, got '" +
+                                region.identity + "'");
+                ensureAuxiliaryRegionLookupCache_();
+                const auto region_id = static_cast<std::size_t>(parsed_region_id);
+                const auto n_regions = auxiliary_region_lookup_cache_
+                    ? auxiliary_region_lookup_cache_->region_ids.size()
+                    : std::size_t{0};
+                FE_THROW_IF(region_id >= n_regions,
+                            InvalidArgumentException,
+                            "FESystem::finalizeAuxiliaryLayout: " +
+                                std::string(label) +
+                                " references topology region " +
+                                std::to_string(region_id) + " but only " +
+                                std::to_string(n_regions) + " regions exist");
+                return region_id;
+            };
+
+            auto assign_from_topology_region = [&](std::size_t region_id) {
+                FE_THROW_IF(!auxiliary_region_lookup_cache_,
+                            InvalidStateException,
+                            "FESystem::finalizeAuxiliaryLayout: missing topology "
+                            "region lookup cache while expanding auxiliary "
+                            "deployment");
+                const auto& cache = *auxiliary_region_lookup_cache_;
+                switch (entry.spec.scope) {
+                    case AuxiliaryStateScope::Cell:
+                    case AuxiliaryStateScope::QuadraturePoint:
+                        entry.entity_map = cache.region_to_cells[region_id];
+                        break;
+                    case AuxiliaryStateScope::Node:
+                        entry.entity_map = cache.region_to_nodes[region_id];
+                        break;
+                    case AuxiliaryStateScope::Region:
+                        entry.entity_map = {region_id};
+                        break;
+                    case AuxiliaryStateScope::Facet:
+                        entry.entity_map = cache.region_to_interface_faces[region_id];
+                        break;
+                    case AuxiliaryStateScope::Global:
+                    case AuxiliaryStateScope::Boundary:
+                        break;
+                }
+            };
 
             switch (region.kind) {
                 case AuxiliaryRegionKind::CellSet:
@@ -8289,6 +8641,7 @@ FESystem::resolveAuxiliaryDeploymentScope_(DeployedAuxEntry& entry)
                     const int marker = parse_region_identity("BoundarySet");
                     std::vector<std::size_t> faces;
                     std::vector<std::size_t> cells;
+                    std::vector<std::pair<std::size_t, std::size_t>> face_cells;
                     mesh_access_->forEachBoundaryFace(marker,
                         [&](GlobalIndex face_id, GlobalIndex cell_id) {
                             if (face_id >= 0) {
@@ -8297,8 +8650,14 @@ FESystem::resolveAuxiliaryDeploymentScope_(DeployedAuxEntry& entry)
                             if (cell_id >= 0) {
                                 cells.push_back(static_cast<std::size_t>(cell_id));
                             }
+                            if (face_id >= 0 && cell_id >= 0) {
+                                face_cells.emplace_back(static_cast<std::size_t>(face_id),
+                                                        static_cast<std::size_t>(cell_id));
+                            }
                         });
-                    assign_from_boundary_faces(std::move(faces), std::move(cells));
+                    assign_from_boundary_faces(std::move(faces),
+                                               std::move(cells),
+                                               std::move(face_cells));
                     break;
                 }
                 case AuxiliaryRegionKind::InterfaceSet: {
@@ -8306,6 +8665,7 @@ FESystem::resolveAuxiliaryDeploymentScope_(DeployedAuxEntry& entry)
                     (void)marker;
                     std::vector<std::size_t> faces;
                     std::vector<std::size_t> cells;
+                    std::vector<std::pair<std::size_t, std::size_t>> face_cells;
                     mesh_access_->forEachInteriorFace(
                         [&](GlobalIndex face_id, GlobalIndex c0, GlobalIndex c1) {
                             if (face_id >= 0) {
@@ -8317,12 +8677,27 @@ FESystem::resolveAuxiliaryDeploymentScope_(DeployedAuxEntry& entry)
                             if (c1 >= 0) {
                                 cells.push_back(static_cast<std::size_t>(c1));
                             }
+                            if (face_id >= 0 && c0 >= 0) {
+                                face_cells.emplace_back(static_cast<std::size_t>(face_id),
+                                                        static_cast<std::size_t>(c0));
+                            }
+                            if (face_id >= 0 && c1 >= 0) {
+                                face_cells.emplace_back(static_cast<std::size_t>(face_id),
+                                                        static_cast<std::size_t>(c1));
+                            }
                         });
-                    assign_from_boundary_faces(std::move(faces), std::move(cells));
-                    break;
-                }
-                case AuxiliaryRegionKind::WholeDomain:
-                    break;
+	                    assign_from_boundary_faces(std::move(faces),
+	                                               std::move(cells),
+	                                               std::move(face_cells));
+	                    break;
+	                }
+	                case AuxiliaryRegionKind::TopologyRegion: {
+	                    assign_from_topology_region(
+	                        topology_region_id("TopologyRegion"));
+	                    break;
+	                }
+	                case AuxiliaryRegionKind::WholeDomain:
+	                    break;
                 case AuxiliaryRegionKind::FormulationDefined:
                     FE_THROW(InvalidArgumentException,
                              "FESystem::finalizeAuxiliaryLayout: FormulationDefined "
@@ -8645,6 +9020,10 @@ FESystem::buildAuxiliaryEntityRemapMetadata_(
         }
     }
 
+    if (entry.spec.layout_mode == AuxiliaryLayoutMode::Ragged) {
+        metadata.component_offsets = entry.ragged_component_offsets;
+    }
+
     if (entry.spec.scope == AuxiliaryStateScope::Region) {
         ensureAuxiliaryRegionLookupCache_();
         metadata.region_membership.reserve(metadata.entity_ids.size());
@@ -8667,6 +9046,351 @@ FESystem::buildAuxiliaryEntityRemapMetadata_(
     }
 
     return metadata;
+}
+
+std::vector<std::size_t> FESystem::buildAuxiliaryRaggedComponentOffsets_(
+    const DeployedAuxEntry& entry,
+    const AuxiliaryScopeResolution& resolution) const
+{
+    FE_THROW_IF(entry.spec.layout_mode != AuxiliaryLayoutMode::Ragged,
+                InvalidArgumentException,
+                "FESystem::buildAuxiliaryRaggedComponentOffsets_: instance '" +
+                    entry.instance_name + "' is not ragged");
+
+    const auto entity_count = resolution.entity_count;
+
+    if (!entry.ragged_component_offsets.empty()) {
+        FE_THROW_IF(entry.ragged_component_offsets.size() != entity_count + 1u,
+                    InvalidArgumentException,
+                    "FESystem::finalizeAuxiliaryLayout: raggedComponentOffsets() "
+                    "for instance '" +
+                        entry.instance_name + "' has " +
+                        std::to_string(entry.ragged_component_offsets.size()) +
+                        " entries but resolved scope has " +
+                        std::to_string(entity_count) + " entities");
+        FE_THROW_IF(entry.ragged_component_offsets.front() != 0u,
+                    InvalidArgumentException,
+                    "FESystem::finalizeAuxiliaryLayout: raggedComponentOffsets() "
+                    "for instance '" +
+                        entry.instance_name + "' must start at 0");
+        FE_THROW_IF(!std::is_sorted(entry.ragged_component_offsets.begin(),
+                                    entry.ragged_component_offsets.end()),
+                    InvalidArgumentException,
+                    "FESystem::finalizeAuxiliaryLayout: raggedComponentOffsets() "
+                    "for instance '" +
+                        entry.instance_name + "' must be nondecreasing");
+        return entry.ragged_component_offsets;
+    }
+
+    FE_THROW_IF(!entry.ragged_entity_size_provider, InvalidArgumentException,
+                "FESystem::finalizeAuxiliaryLayout: ragged instance '" +
+                    entry.instance_name +
+                    "' has no raggedEntitySize() provider or component offsets");
+
+    switch (entry.spec.scope) {
+        case AuxiliaryStateScope::Node:
+        case AuxiliaryStateScope::Cell:
+        case AuxiliaryStateScope::QuadraturePoint:
+        case AuxiliaryStateScope::Region:
+            break;
+        case AuxiliaryStateScope::Global:
+        case AuxiliaryStateScope::Boundary:
+        case AuxiliaryStateScope::Facet:
+            FE_THROW(NotImplementedException,
+                     "FESystem::finalizeAuxiliaryLayout: ragged deployment for '" +
+                         entry.instance_name +
+                         "' is currently supported only for Node, Cell, "
+                         "QuadraturePoint, and Region scopes");
+    }
+
+    std::vector<std::size_t> offsets(entity_count + 1u, 0u);
+    for (std::size_t entity = 0; entity < entity_count; ++entity) {
+        AuxiliaryRaggedEntityContext ctx;
+        ctx.scope = entry.spec.scope;
+        ctx.materialized_entity_index = entity;
+        ctx.original_entity_id = entity;
+
+        if (entry.spec.scope == AuxiliaryStateScope::QuadraturePoint) {
+            FE_THROW_IF(entry.qp_offsets.empty(), InvalidStateException,
+                        "FESystem::finalizeAuxiliaryLayout: QuadraturePoint "
+                        "ragged instance '" +
+                            entry.instance_name +
+                            "' has no resolved qpOffsets()");
+            auto upper = std::upper_bound(entry.qp_offsets.begin(),
+                                          entry.qp_offsets.end(),
+                                          entity);
+            FE_THROW_IF(upper == entry.qp_offsets.begin(), InvalidStateException,
+                        "FESystem::finalizeAuxiliaryLayout: unable to map flat "
+                        "QP entity to a covered cell for ragged instance '" +
+                            entry.instance_name + "'");
+            auto cell_ordinal = static_cast<std::size_t>(
+                std::distance(entry.qp_offsets.begin(), upper) - 1);
+            if (cell_ordinal + 1u >= entry.qp_offsets.size()) {
+                cell_ordinal = entry.qp_offsets.size() - 2u;
+            }
+            ctx.cell_id = entry.entity_map.empty()
+                ? cell_ordinal
+                : entry.entity_map.at(cell_ordinal);
+            ctx.local_qp_index = entity - entry.qp_offsets.at(cell_ordinal);
+            ctx.original_entity_id = entity;
+        } else if (!entry.entity_map.empty()) {
+            ctx.original_entity_id = entry.entity_map.at(entity);
+        }
+
+        const auto width = entry.ragged_entity_size_provider(ctx);
+        FE_THROW_IF(width >
+                        std::numeric_limits<std::size_t>::max() - offsets[entity],
+                    InvalidArgumentException,
+                    "FESystem::finalizeAuxiliaryLayout: raggedEntitySize() "
+                    "overflow for instance '" +
+                        entry.instance_name + "'");
+        offsets[entity + 1u] = offsets[entity] + width;
+    }
+    return offsets;
+}
+
+std::vector<Real> FESystem::buildAuxiliaryRaggedInitialValues_(
+    const DeployedAuxEntry& entry,
+    std::span<const std::size_t> component_offsets) const
+{
+    FE_THROW_IF(component_offsets.empty(), InvalidArgumentException,
+                "FESystem::buildAuxiliaryRaggedInitialValues_: empty offsets "
+                "for instance '" +
+                    entry.instance_name + "'");
+
+    if (entry.initial_values.empty()) {
+        return {};
+    }
+
+    const auto total_storage = component_offsets.back();
+    if (entry.initial_values.size() == total_storage) {
+        return entry.initial_values;
+    }
+    FE_THROW_IF(total_storage == 0u, InvalidArgumentException,
+                "FESystem::finalizeAuxiliaryLayout: ragged initial values for "
+                "instance '" +
+                    entry.instance_name +
+                    "' are non-empty but the resolved ragged storage is empty");
+
+    if (entry.initial_values.size() == 1u) {
+        return std::vector<Real>(total_storage, entry.initial_values.front());
+    }
+
+    const auto model_dim = static_cast<std::size_t>(entry.spec.size);
+    if (entry.initial_values.size() == model_dim) {
+        std::vector<Real> full_init(total_storage, Real{0.0});
+        for (std::size_t entity = 0; entity + 1u < component_offsets.size(); ++entity) {
+            const auto begin = component_offsets[entity];
+            const auto end = component_offsets[entity + 1u];
+            const auto width = end - begin;
+            FE_THROW_IF(width != model_dim, InvalidArgumentException,
+                        "FESystem::finalizeAuxiliaryLayout: ragged initial "
+                        "state for instance '" +
+                            entry.instance_name +
+                            "' has model-dimension values, but at least one "
+                            "entity has a different ragged component count");
+            std::copy(entry.initial_values.begin(),
+                      entry.initial_values.end(),
+                      full_init.begin() + static_cast<std::ptrdiff_t>(begin));
+        }
+        return full_init;
+    }
+
+    FE_THROW(InvalidArgumentException,
+             "FESystem::finalizeAuxiliaryLayout: ragged initial_values size (" +
+                 std::to_string(entry.initial_values.size()) +
+                 ") for instance '" + entry.instance_name +
+                 "' must be empty, exactly the resolved storage size (" +
+                 std::to_string(total_storage) +
+                 "), a single broadcast value, or the model dimension for "
+                 "uniform-width ragged entities");
+}
+
+void FESystem::validateEntityLocalAuxiliaryBindings_() const
+{
+    if (!auxiliary_input_registry_) {
+        return;
+    }
+
+    auto coveredOriginalEntities = [&](const DeployedAuxEntry& entry) {
+        std::vector<std::size_t> entities;
+        if (entry.spec.scope == AuxiliaryStateScope::QuadraturePoint) {
+            if (!entry.entity_map.empty()) {
+                return entry.entity_map;
+            }
+            if (entry.qp_offsets.size() > 1u) {
+                entities.resize(entry.qp_offsets.size() - 1u);
+                std::iota(entities.begin(), entities.end(), std::size_t{0});
+            }
+            return entities;
+        }
+
+        if (!entry.entity_map.empty()) {
+            return entry.entity_map;
+        }
+
+        std::size_t count = entry.explicit_entity_count;
+        if (auxiliary_state_manager_ &&
+            auxiliary_state_manager_->hasBlock(entry.instance_name)) {
+            count = auxiliary_state_manager_->getBlock(entry.instance_name).entityCount();
+        }
+        entities.resize(count);
+        std::iota(entities.begin(), entities.end(), std::size_t{0});
+        return entities;
+    };
+    auto scopeName = [](AuxiliaryStateScope scope) -> const char* {
+        switch (scope) {
+            case AuxiliaryStateScope::Global: return "Global";
+            case AuxiliaryStateScope::Boundary: return "Boundary";
+            case AuxiliaryStateScope::Node: return "Node";
+            case AuxiliaryStateScope::Cell: return "Cell";
+            case AuxiliaryStateScope::QuadraturePoint: return "QuadraturePoint";
+            case AuxiliaryStateScope::Region: return "Region";
+            case AuxiliaryStateScope::Facet: return "Facet";
+        }
+        return "Unknown";
+    };
+    auto producerName = [](AuxiliaryInputProducer producer) -> const char* {
+        switch (producer) {
+            case AuxiliaryInputProducer::BoundaryReduction: return "BoundaryReduction";
+            case AuxiliaryInputProducer::FormulationCallback: return "FormulationCallback";
+            case AuxiliaryInputProducer::ParameterDerived: return "ParameterDerived";
+            case AuxiliaryInputProducer::DirectUserData: return "DirectUserData";
+            case AuxiliaryInputProducer::AuxiliaryOutput: return "AuxiliaryOutput";
+            case AuxiliaryInputProducer::SampledStateField: return "SampledStateField";
+            case AuxiliaryInputProducer::CoupledField: return "CoupledField";
+            case AuxiliaryInputProducer::CellAverage: return "CellAverage";
+            case AuxiliaryInputProducer::CellSample: return "CellSample";
+            case AuxiliaryInputProducer::DomainAverage: return "DomainAverage";
+            case AuxiliaryInputProducer::DomainIntegral: return "DomainIntegral";
+            case AuxiliaryInputProducer::RegionAverage: return "RegionAverage";
+            case AuxiliaryInputProducer::RegionIntegral: return "RegionIntegral";
+            case AuxiliaryInputProducer::SampledBoundaryTrace: return "SampledBoundaryTrace";
+            case AuxiliaryInputProducer::CoupledBoundaryTrace: return "CoupledBoundaryTrace";
+            case AuxiliaryInputProducer::SampledBoundaryReduction:
+                return "SampledBoundaryReduction";
+            case AuxiliaryInputProducer::CoupledBoundaryReduction:
+                return "CoupledBoundaryReduction";
+        }
+        return "Unknown";
+    };
+    auto isFEBackedEntityLocalProducer = [](AuxiliaryInputProducer producer) noexcept {
+        switch (producer) {
+            case AuxiliaryInputProducer::SampledStateField:
+            case AuxiliaryInputProducer::CoupledField:
+            case AuxiliaryInputProducer::CellAverage:
+            case AuxiliaryInputProducer::CellSample:
+            case AuxiliaryInputProducer::RegionAverage:
+            case AuxiliaryInputProducer::RegionIntegral:
+            case AuxiliaryInputProducer::SampledBoundaryTrace:
+            case AuxiliaryInputProducer::CoupledBoundaryTrace:
+                return true;
+            default:
+                return false;
+        }
+    };
+    auto isRaggedScopeCompatibleFEBackedProducer =
+        [](AuxiliaryStateScope scope, AuxiliaryInputProducer producer) noexcept {
+        switch (scope) {
+            case AuxiliaryStateScope::Node:
+                return producer == AuxiliaryInputProducer::SampledStateField ||
+                       producer == AuxiliaryInputProducer::CoupledField;
+            case AuxiliaryStateScope::Cell:
+            case AuxiliaryStateScope::QuadraturePoint:
+                return producer == AuxiliaryInputProducer::CellAverage ||
+                       producer == AuxiliaryInputProducer::CellSample;
+            case AuxiliaryStateScope::Region:
+                return producer == AuxiliaryInputProducer::RegionAverage ||
+                       producer == AuxiliaryInputProducer::RegionIntegral;
+            case AuxiliaryStateScope::Global:
+            case AuxiliaryStateScope::Boundary:
+            case AuxiliaryStateScope::Facet:
+                return false;
+        }
+        return false;
+    };
+
+    for (const auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized || entry.input_bindings.empty()) {
+            continue;
+        }
+
+        const bool local_condensed_cell_like =
+            entry.local_condensed &&
+            (entry.spec.scope == AuxiliaryStateScope::Cell ||
+             entry.spec.scope == AuxiliaryStateScope::QuadraturePoint);
+        const auto original_entities = coveredOriginalEntities(entry);
+        const auto max_entity_it =
+            std::max_element(original_entities.begin(), original_entities.end());
+
+        for (const auto& [model_input, registry_input] : entry.input_bindings) {
+            (void)model_input;
+            if (!auxiliary_input_registry_->hasInput(registry_input) ||
+                !auxiliary_input_registry_->isEntityLocal(registry_input)) {
+                continue;
+            }
+
+            const auto& input_spec =
+                auxiliary_input_registry_->specOf(registry_input);
+            if (max_entity_it != original_entities.end()) {
+                FE_THROW_IF(
+                    *max_entity_it >= input_spec.entity_count,
+                    InvalidArgumentException,
+                    "FESystem::finalizeAuxiliaryLayout: auxiliary instance '" +
+                        entry.instance_name + "' binds entity-local input '" +
+                        registry_input + "' with entity_count=" +
+                        std::to_string(input_spec.entity_count) +
+                        " but its " + std::string(scopeName(entry.spec.scope)) +
+                        " deployment covers original entity id " +
+                        std::to_string(*max_entity_it) +
+                        ". Entity-local bindings are indexed by stable original "
+                        "entity ids; register the provider over the full original "
+                        "entity map or use a scope-matched FE quantity provider.");
+            }
+
+            FE_THROW_IF(
+                local_condensed_cell_like &&
+                    input_spec.producer == AuxiliaryInputProducer::AuxiliaryOutput,
+                InvalidArgumentException,
+                "FESystem::finalizeAuxiliaryLayout: local-condensed " +
+                    std::string(scopeName(entry.spec.scope)) + " auxiliary instance '" +
+                    entry.instance_name + "' cannot bind entity-local auxiliary "
+                    "output input '" + registry_input +
+                    "'. Cross-entity or auxiliary-to-auxiliary coupling does not "
+                    "satisfy the independent local-condensation contract; use an "
+                    "AuxiliaryOperator or a bordered/reduced formulation that "
+                    "assembles the coupling explicitly.");
+
+            FE_THROW_IF(
+                entry.spec.layout_mode == AuxiliaryLayoutMode::Ragged &&
+                    input_spec.producer == AuxiliaryInputProducer::AuxiliaryOutput,
+                InvalidArgumentException,
+                "FESystem::finalizeAuxiliaryLayout: ragged " +
+                    std::string(scopeName(entry.spec.scope)) +
+                    " auxiliary instance '" + entry.instance_name +
+                    "' cannot bind entity-local auxiliary output input '" +
+                    registry_input +
+                    "'. Cross-entity or auxiliary-to-auxiliary coupling is not "
+                    "part of the ragged AuxiliaryModel runtime contract; use an "
+                    "AuxiliaryOperator or an explicitly assembled coupling.");
+
+            FE_THROW_IF(
+                entry.spec.layout_mode == AuxiliaryLayoutMode::Ragged &&
+                    isFEBackedEntityLocalProducer(input_spec.producer) &&
+                    !isRaggedScopeCompatibleFEBackedProducer(entry.spec.scope,
+                                                             input_spec.producer),
+                InvalidArgumentException,
+                "FESystem::finalizeAuxiliaryLayout: ragged " +
+                    std::string(scopeName(entry.spec.scope)) +
+                    " auxiliary instance '" + entry.instance_name +
+                    "' cannot bind FE-backed entity-local input '" +
+                    registry_input + "' produced by " +
+                    producerName(input_spec.producer) +
+                    ". Ragged FE-backed inputs must use a scope-matched "
+                    "quantity provider so stable entity ids and component "
+                    "offsets remain well-defined.");
+        }
+    }
 }
 
 std::vector<int>
@@ -8723,6 +9447,120 @@ FESystem::buildAuxiliaryRegionRowOwnerRanks_(const DeployedAuxEntry& entry,
             .entity_owner_ranks = std::span<const int>(entity_owner_ranks)});
 }
 
+int FESystem::nodeAuxiliaryOwnerRank_(std::size_t node_id) const
+{
+    auto ownerFromFieldDof = [&](GlobalIndex fe_dof) {
+        int owner = -1;
+        if (dof_permutation_ != nullptr &&
+            !dof_permutation_->owner_rank.empty() &&
+            fe_dof >= 0) {
+            GlobalIndex backend_dof = fe_dof;
+            if (!dof_permutation_->forward.empty() &&
+                static_cast<std::size_t>(fe_dof) < dof_permutation_->forward.size()) {
+                backend_dof = dof_permutation_->forward[static_cast<std::size_t>(fe_dof)];
+            }
+            if (backend_dof >= 0 &&
+                static_cast<std::size_t>(backend_dof) <
+                    dof_permutation_->owner_rank.size()) {
+                owner =
+                    dof_permutation_->owner_rank[static_cast<std::size_t>(backend_dof)];
+            }
+        }
+        if (owner < 0) {
+            owner = dof_handler_.getDofMap().getDofOwner(fe_dof);
+        }
+        return owner;
+    };
+
+    for (std::size_t field_idx = 0; field_idx < field_dof_handlers_.size(); ++field_idx) {
+        if (field_idx >= field_dof_offsets_.size()) {
+            break;
+        }
+        const auto* entity_map = field_dof_handlers_[field_idx].getEntityDofMap();
+        if (entity_map == nullptr) {
+            continue;
+        }
+        const auto vertex_dofs =
+            entity_map->getVertexDofs(static_cast<GlobalIndex>(node_id));
+        if (vertex_dofs.empty()) {
+            continue;
+        }
+        return ownerFromFieldDof(
+            static_cast<GlobalIndex>(vertex_dofs.front() + field_dof_offsets_[field_idx]));
+    }
+
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized) {
+        int rank = 0;
+        int comm_size = 1;
+        MPI_Comm comm = is_setup_ ? dof_handler_.mpiComm() : MPI_COMM_WORLD;
+        MPI_Comm_rank(comm, &rank);
+        MPI_Comm_size(comm, &comm_size);
+        if (comm_size <= 1) {
+            return 0;
+        }
+        if (mesh_access_ != nullptr) {
+            const auto owned_vertices =
+                static_cast<std::size_t>(
+                    std::max<GlobalIndex>(0, mesh_access_->numOwnedVertices()));
+            if (node_id < owned_vertices) {
+                return rank;
+            }
+        }
+        FE_THROW(InvalidStateException,
+                 "FESystem::nodeAuxiliaryOwnerRank: cannot derive backend row "
+                 "owner for node " +
+                     std::to_string(node_id) +
+                     ". Node monolithic assembly in MPI requires a C0 nodal "
+                     "field DOF owner or explicit backend permutation owner map.");
+    }
+#endif
+
+    return 0;
+}
+
+std::vector<int>
+FESystem::buildAuxiliaryNodeRowOwnerRanks_(const DeployedAuxEntry& entry,
+                                           std::size_t entity_count) const
+{
+    FE_THROW_IF(entry.spec.scope != AuxiliaryStateScope::Node,
+                InvalidArgumentException,
+                "FESystem::buildAuxiliaryNodeRowOwnerRanks: entry is not "
+                "Node-scoped");
+
+    std::vector<std::size_t> entity_ids;
+    if (!entry.entity_map.empty()) {
+        entity_ids = entry.entity_map;
+    } else {
+        entity_ids.resize(entity_count);
+        std::iota(entity_ids.begin(), entity_ids.end(), std::size_t{0});
+    }
+
+    std::vector<int> entity_owner_ranks;
+    entity_owner_ranks.reserve(entity_ids.size());
+    for (const auto node_id : entity_ids) {
+        const int owner = nodeAuxiliaryOwnerRank_(node_id);
+        FE_THROW_IF(owner < 0,
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: Node monolithic block '" +
+                        entry.instance_name +
+                        "' has no deterministic owner for node " +
+                        std::to_string(node_id));
+        entity_owner_ranks.push_back(owner);
+    }
+
+    return buildAuxiliaryRowOwnerRanks(
+        AuxiliaryRowOwnershipSpec{
+            .scope = AuxiliaryStateScope::Node,
+            .policy = backends::MixedRowOwnershipPolicy::BackendDofOwner,
+            .entity_count = entity_owner_ranks.size(),
+            .stride = entry.spec.size,
+            .single_owner_rank = -1,
+            .entity_owner_ranks = std::span<const int>(entity_owner_ranks)});
+}
+
 void FESystem::validateMonolithicAuxiliaryLifecycle_(const DeployedAuxEntry& entry) const
 {
     if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) {
@@ -8741,6 +9579,219 @@ void FESystem::validateMonolithicAuxiliaryLifecycle_(const DeployedAuxEntry& ent
                     "' declares nonsmooth/complementarity hooks. Native monolithic "
                     "nonsmooth handling requires a semismooth or active-set policy "
                     "and is not part of the fixed-stride scope-completion path yet.");
+}
+
+void FESystem::validateRaggedMonolithicLocalCondensationEligibility_(
+    const DeployedAuxEntry& entry) const
+{
+    if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic ||
+        entry.spec.layout_mode != AuxiliaryLayoutMode::Ragged) {
+        return;
+    }
+
+    auto scopeName = [](AuxiliaryStateScope scope) -> const char* {
+        switch (scope) {
+            case AuxiliaryStateScope::Global: return "Global";
+            case AuxiliaryStateScope::Boundary: return "Boundary";
+            case AuxiliaryStateScope::Node: return "Node";
+            case AuxiliaryStateScope::Cell: return "Cell";
+            case AuxiliaryStateScope::QuadraturePoint: return "QuadraturePoint";
+            case AuxiliaryStateScope::Region: return "Region";
+            case AuxiliaryStateScope::Facet: return "Facet";
+        }
+        return "Unknown";
+    };
+
+    const bool cell_like =
+        entry.spec.scope == AuxiliaryStateScope::Cell ||
+        entry.spec.scope == AuxiliaryStateScope::QuadraturePoint;
+    const bool node_scope = entry.spec.scope == AuxiliaryStateScope::Node;
+    FE_THROW_IF(!cell_like && !node_scope, NotImplementedException,
+                "FESystem::finalizeAuxiliaryLayout: ragged monolithic "
+                "auxiliary instance '" +
+                    entry.instance_name + "' has " +
+                    scopeName(entry.spec.scope) +
+                    " scope. The current ragged monolithic contract is "
+                    "limited to independent Cell/QuadraturePoint local "
+                    "condensation or owner-backed Node local condensation. "
+                    "Other scopes require explicit row-owner metadata, "
+                    "compatible distributed sparsity, and zero dropped-entry "
+                    "FSILS tests.");
+
+    if (node_scope) {
+        const bool has_backend_owner_map =
+            use_backend_row_ownership_for_assembly_ &&
+            dof_permutation_ != nullptr &&
+            !dof_permutation_->empty() &&
+            !dof_permutation_->owner_rank.empty();
+        FE_THROW_IF(!has_backend_owner_map, InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: ragged Node "
+                    "monolithic auxiliary instance '" +
+                        entry.instance_name +
+                        "' requires backend row ownership metadata before it "
+                        "can use owner-backed local condensation. Call setup() "
+                        "with use_backend_row_ownership_for_assembly=true and "
+                        "a backend permutation owner map, or keep the block "
+                        "partitioned.");
+    }
+
+    FE_THROW_IF(!entry.local_condensed, InvalidStateException,
+                "FESystem::finalizeAuxiliaryLayout: ragged " +
+                    std::string(scopeName(entry.spec.scope)) +
+                    " monolithic auxiliary instance '" + entry.instance_name +
+                    "' is not marked for local condensation. Ragged Cell/QP "
+                    "and Node monolithic blocks must use a proven "
+                    "local-condensation contract and must not enter bordered "
+                    "or native auxiliary-row assembly.");
+
+    FE_THROW_IF(!auxiliary_state_manager_ ||
+                    !auxiliary_state_manager_->hasBlock(entry.instance_name),
+                InvalidStateException,
+                "FESystem::finalizeAuxiliaryLayout: ragged monolithic "
+                "auxiliary instance '" +
+                    entry.instance_name +
+                    "' was not materialized before local-condensation "
+                    "eligibility validation");
+
+    const auto& block = auxiliary_state_manager_->getBlock(entry.instance_name);
+    FE_THROW_IF(block.layoutMode() != AuxiliaryLayoutMode::Ragged,
+                InvalidStateException,
+                "FESystem::finalizeAuxiliaryLayout: ragged monolithic "
+                "auxiliary instance '" +
+                    entry.instance_name +
+                    "' was registered with a non-ragged storage layout");
+
+    const auto offsets = block.entityOffsets();
+    FE_THROW_IF(offsets.size() != block.entityCount() + 1u,
+                InvalidStateException,
+                "FESystem::finalizeAuxiliaryLayout: ragged monolithic "
+                "auxiliary instance '" +
+                    entry.instance_name +
+                    "' has inconsistent component offsets for local "
+                    "condensation");
+
+    const auto model_dim = static_cast<std::size_t>(entry.spec.size);
+    std::vector<std::size_t> entity_ids;
+    if (node_scope) {
+        if (!entry.entity_map.empty()) {
+            entity_ids = entry.entity_map;
+        } else {
+            entity_ids.resize(block.entityCount());
+            std::iota(entity_ids.begin(), entity_ids.end(), std::size_t{0});
+        }
+        FE_THROW_IF(entity_ids.size() != block.entityCount(),
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: ragged Node "
+                    "monolithic auxiliary instance '" +
+                        entry.instance_name +
+                        "' has inconsistent node entity metadata for "
+                        "owner-backed local condensation");
+    }
+
+    auto strictBackendOwnerForNode = [&](std::size_t node_id) {
+        FE_THROW_IF(dof_permutation_ == nullptr ||
+                        dof_permutation_->forward.empty() ||
+                        dof_permutation_->owner_rank.empty(),
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: ragged Node "
+                    "monolithic auxiliary instance '" +
+                        entry.instance_name +
+                        "' has no backend DOF owner map");
+
+        for (std::size_t field_idx = 0;
+             field_idx < field_dof_handlers_.size() &&
+             field_idx < field_dof_offsets_.size();
+             ++field_idx) {
+            const auto* entity_map =
+                field_dof_handlers_[field_idx].getEntityDofMap();
+            if (entity_map == nullptr) {
+                continue;
+            }
+            const auto vertex_dofs =
+                entity_map->getVertexDofs(static_cast<GlobalIndex>(node_id));
+            if (vertex_dofs.empty()) {
+                continue;
+            }
+            const auto fe_dof = static_cast<GlobalIndex>(
+                vertex_dofs.front() + field_dof_offsets_[field_idx]);
+            FE_THROW_IF(fe_dof < 0 ||
+                            static_cast<std::size_t>(fe_dof) >=
+                                dof_permutation_->forward.size(),
+                        InvalidStateException,
+                        "FESystem::finalizeAuxiliaryLayout: ragged Node "
+                        "monolithic auxiliary instance '" +
+                            entry.instance_name +
+                            "' cannot map node " + std::to_string(node_id) +
+                            " to a backend-owned FE DOF");
+            const auto backend_dof =
+                dof_permutation_->forward[static_cast<std::size_t>(fe_dof)];
+            FE_THROW_IF(backend_dof < 0 ||
+                            static_cast<std::size_t>(backend_dof) >=
+                                dof_permutation_->owner_rank.size(),
+                        InvalidStateException,
+                        "FESystem::finalizeAuxiliaryLayout: ragged Node "
+                        "monolithic auxiliary instance '" +
+                            entry.instance_name +
+                            "' maps node " + std::to_string(node_id) +
+                            " to a backend DOF without owner metadata");
+            const int owner =
+                dof_permutation_->owner_rank[static_cast<std::size_t>(backend_dof)];
+            FE_THROW_IF(owner < 0, InvalidStateException,
+                        "FESystem::finalizeAuxiliaryLayout: ragged Node "
+                        "monolithic auxiliary instance '" +
+                            entry.instance_name +
+                            "' has invalid backend owner metadata for node " +
+                            std::to_string(node_id));
+            return owner;
+        }
+
+        FE_THROW(InvalidStateException,
+                 "FESystem::finalizeAuxiliaryLayout: ragged Node monolithic "
+                 "auxiliary instance '" +
+                     entry.instance_name +
+                     "' requires at least one C0 nodal FE field whose vertex "
+                     "DOFs define backend row ownership for node " +
+                     std::to_string(node_id));
+        return -1;
+    };
+
+    std::vector<int> node_row_owner_ranks;
+    if (node_scope) {
+        node_row_owner_ranks.reserve(block.storageSize());
+    }
+    for (std::size_t entity = 0; entity < block.entityCount(); ++entity) {
+        const auto width = offsets[entity + 1u] - offsets[entity];
+        FE_THROW_IF(width != model_dim, InvalidArgumentException,
+                    "FESystem::finalizeAuxiliaryLayout: ragged "
+                        + std::string(scopeName(entry.spec.scope)) +
+                        " monolithic auxiliary instance '" +
+                        entry.instance_name +
+                        "' does not satisfy the local-condensation contract: "
+                        "entity " + std::to_string(entity) +
+                        " has ragged width " + std::to_string(width) +
+                        " but the fixed AuxiliaryStateModel dimension is " +
+                        std::to_string(model_dim) +
+                        ". Variable-width monolithic local condensation is "
+                        "not implemented; use uniform ragged widths matching "
+                        "the model dimension or provide an AuxiliaryOperator "
+                        "with an explicit assembly contract.");
+        if (node_scope) {
+            const int owner =
+                strictBackendOwnerForNode(entity_ids[entity]);
+            for (std::size_t component = 0; component < width; ++component) {
+                node_row_owner_ranks.push_back(owner);
+            }
+        }
+    }
+    if (node_scope) {
+        FE_THROW_IF(node_row_owner_ranks.size() != block.storageSize(),
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: ragged Node "
+                    "monolithic auxiliary instance '" +
+                        entry.instance_name +
+                        "' does not have one backend owner per ragged "
+                        "component row");
+    }
 }
 
 void FESystem::validateAuxiliaryMixedLayoutContract_() const
@@ -8828,6 +9879,42 @@ void FESystem::validateAuxiliaryMixedLayoutContract_() const
                         "Region sparse/distributed row strategy represents the "
                         "layout in backend sparsity and solver metadata");
     }
+
+    for (const auto& block : layout.blocks) {
+        if (block.n_unknowns == 0u ||
+            block.scope != AuxiliaryStateScope::Node) {
+            continue;
+        }
+
+        FE_THROW_IF(block.row_ownership != backends::MixedRowOwnershipPolicy::BackendDofOwner,
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: Node monolithic auxiliary "
+                    "block '" +
+                        block.name +
+                        "' must use backend-DOF-owner row metadata");
+        FE_THROW_IF(block.row_owner_ranks.size() != block.n_unknowns,
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: Node monolithic auxiliary "
+                    "block '" +
+                        block.name + "' has an incomplete backend row-owner map");
+        FE_THROW_IF(std::any_of(block.row_owner_ranks.begin(),
+                                block.row_owner_ranks.end(),
+                                [](int owner) { return owner < 0; }),
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: Node monolithic auxiliary "
+                    "block '" +
+                        block.name + "' has invalid backend row-owner ranks");
+        FE_THROW_IF(block.assembly_mode == backends::MixedBlockAssemblyMode::NativeOwnedRows,
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: Node monolithic auxiliary "
+                    "block '" +
+                        block.name +
+                        "' cannot be assembled as native FSILS rows until the "
+                        "backend advertises a complete nodal component block "
+                        "covering field and auxiliary components. Use the "
+                        "owner-backed sparse condensed path or bordered/reduced "
+                        "coupling.");
+    }
 }
 
 void FESystem::rollbackAuxiliaryState()
@@ -8903,16 +9990,42 @@ void FESystem::finalizeAuxiliaryLayout()
             }
         }
         if (entry.spec.layout_mode == AuxiliaryLayoutMode::Ragged) {
-            // Ragged layout is not supported through the FESystem deployment
-            // API.  Both Partitioned stepping and Monolithic assembly assume
-            // fixed per-entity dimension (spec.size).  Ragged blocks must be
-            // registered directly via AuxiliaryStateManager::registerBlockRagged().
-            FE_THROW(NotImplementedException,
-                     "FESystem::finalizeAuxiliaryLayout: ragged layout for '"
-                     + entry.instance_name + "' is not supported through the "
-                     "deployment API.  The stepper and monolithic assembly "
-                     "paths assume fixed per-entity dimension.  Use "
-                     "AuxiliaryStateManager::registerBlockRagged() directly.");
+            if (entry.spec.solve_mode == AuxiliarySolveMode::Monolithic) {
+                const bool supported_ragged_monolithic =
+                    entry.spec.scope == AuxiliaryStateScope::Node ||
+                    entry.spec.scope == AuxiliaryStateScope::Cell ||
+                    entry.spec.scope == AuxiliaryStateScope::QuadraturePoint;
+                FE_THROW_IF(!supported_ragged_monolithic, NotImplementedException,
+                            "FESystem::finalizeAuxiliaryLayout: ragged "
+                            "monolithic deployment for '" +
+                                entry.instance_name +
+                                "' is enabled only for independent Cell/"
+                                "QuadraturePoint local condensation or "
+                                "owner-backed Node local condensation. Other "
+                                "scopes still require explicit row-owner "
+                                "metadata, compatible distributed sparsity, "
+                                "and zero dropped-entry FSILS tests.");
+            }
+
+            auto component_offsets =
+                buildAuxiliaryRaggedComponentOffsets_(entry, scope_resolution);
+            auto ragged_init =
+                buildAuxiliaryRaggedInitialValues_(entry, component_offsets);
+            entry.ragged_component_offsets = component_offsets;
+
+            const auto init_span = ragged_init.empty()
+                ? std::span<const Real>{}
+                : std::span<const Real>(ragged_init);
+            if (entry.spec.scope == AuxiliaryStateScope::QuadraturePoint) {
+                mgr.registerBlockRaggedWithQPOffsets(
+                    entry.spec, entry.qp_offsets, component_offsets, init_span);
+            } else {
+                mgr.registerBlockRagged(
+                    entry.spec, component_offsets, owned_entity_count, init_span);
+            }
+            mgr.setEntityRemapMetadata(
+                entry.instance_name,
+                buildAuxiliaryEntityRemapMetadata_(entry, scope_resolution));
         } else {
             const auto init_span = full_init.empty()
                 ? std::span<const Real>{}
@@ -9106,12 +10219,26 @@ void FESystem::finalizeAuxiliaryLayout()
         if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) {
             continue;
         }
-        entry.lower_to_direct_only = canLowerAlgebraicAuxiliaryToDirectOnly_(entry);
+        const bool ragged_local_condensed_monolithic =
+            entry.spec.layout_mode == AuxiliaryLayoutMode::Ragged &&
+            (entry.spec.scope == AuxiliaryStateScope::Node ||
+             entry.spec.scope == AuxiliaryStateScope::Cell ||
+             entry.spec.scope == AuxiliaryStateScope::QuadraturePoint);
+        entry.lower_to_direct_only = ragged_local_condensed_monolithic
+            ? false
+            : canLowerAlgebraicAuxiliaryToDirectOnly_(entry);
+        const bool node_owner_backed_sparse =
+            entry.spec.scope == AuxiliaryStateScope::Node &&
+            use_backend_row_ownership_for_assembly_ &&
+            dof_permutation_ != nullptr &&
+            !dof_permutation_->owner_rank.empty();
         entry.local_condensed =
             !entry.lower_to_direct_only &&
-            (entry.spec.scope == AuxiliaryStateScope::Cell ||
+            (node_owner_backed_sparse ||
+             entry.spec.scope == AuxiliaryStateScope::Cell ||
              entry.spec.scope == AuxiliaryStateScope::QuadraturePoint ||
              entry.spec.scope == AuxiliaryStateScope::Facet);
+        validateRaggedMonolithicLocalCondensationEligibility_(entry);
         if (monolithicAuxTraceEnabled()) {
             auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get());
             std::ostringstream oss;
@@ -9196,9 +10323,15 @@ void FESystem::finalizeAuxiliaryLayout()
                 auxiliaryOperatorRegistry().setBlockRowOwnerRanks(
                     entry.instance_name,
                     buildAuxiliaryRegionRowOwnerRanks_(entry, entity_count));
+            } else if (entry.spec.scope == AuxiliaryStateScope::Node) {
+                auxiliaryOperatorRegistry().setBlockRowOwnerRanks(
+                    entry.instance_name,
+                    buildAuxiliaryNodeRowOwnerRanks_(entry, entity_count));
             }
         }
     }
+
+    validateEntityLocalAuxiliaryBindings_();
 
     if (!auxiliary_operator_registry_) {
         const bool has_monolithic_aux =
@@ -9424,7 +10557,8 @@ FESystem::assembleBoundaryGradient(FieldId field,
                                     int boundary_marker,
                                     const SystemStateView& state,
                                     bool apply_constraints,
-                                    int region_marker)
+                                    int region_marker,
+                                    std::span<const GlobalIndex> cell_filter)
 {
     const auto& rec = fieldRecord(field);
     FE_CHECK_NOT_NULL(rec.space.get(),
@@ -9643,12 +10777,15 @@ FESystem::assembleBoundaryGradient(FieldId field,
             forms::BoundaryFunctionalGradientKernel& inner;
             const FESystem& system;
             int region_marker;
+            std::span<const GlobalIndex> cell_filter;
             explicit CellGradKernelAdapter(forms::BoundaryFunctionalGradientKernel& k,
                                            const FESystem& s,
-                                           int marker)
+                                           int marker,
+                                           std::span<const GlobalIndex> cells)
                 : inner(k)
                 , system(s)
-                , region_marker(marker) {}
+                , region_marker(marker)
+                , cell_filter(cells) {}
             [[nodiscard]] bool hasCell() const noexcept override { return true; }
             [[nodiscard]] bool hasBoundaryFace() const noexcept override { return false; }
             [[nodiscard]] bool hasInteriorFace() const noexcept override { return false; }
@@ -9672,6 +10809,17 @@ FESystem::assembleBoundaryGradient(FieldId field,
                         return;
                     }
                 }
+                if (!cell_filter.empty()) {
+                    const auto cell_id = ctx.cellId();
+                    if (cell_id < 0 ||
+                        std::find(cell_filter.begin(), cell_filter.end(), cell_id) ==
+                            cell_filter.end()) {
+                        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(),
+                                       /*need_matrix=*/false, /*need_vector=*/true);
+                        std::fill(output.local_vector.begin(), output.local_vector.end(), 0.0);
+                        return;
+                    }
+                }
                 // Reuse the boundary face computation logic (which uses
                 // Dual arithmetic for per-DOF derivatives) but call it
                 // for a cell context.  The gradient kernel's computeBoundaryFace
@@ -9681,7 +10829,7 @@ FESystem::assembleBoundaryGradient(FieldId field,
             }
         };
 
-        CellGradKernelAdapter cell_adapter(grad_kernel, *this, region_marker);
+        CellGradKernelAdapter cell_adapter(grad_kernel, *this, region_marker, cell_filter);
         assembler_->assembleVector(
             meshAccess(), *rec.space, cell_adapter, accum);
     }

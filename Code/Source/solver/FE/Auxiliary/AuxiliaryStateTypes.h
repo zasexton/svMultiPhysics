@@ -226,6 +226,22 @@ enum class AuxiliaryEntityOrdering : std::uint8_t {
     ByComponentThenEntity
 };
 
+/**
+ * @brief Entity identity passed to deployment-path ragged size providers.
+ *
+ * `materialized_entity_index` follows the resolved storage order for the
+ * deployment; `original_entity_id` is the stable mesh/topology identity used
+ * for restart/remap checks.  For QuadraturePoint scope, `cell_id` and
+ * `local_qp_index` identify the source cell-local quadrature point.
+ */
+struct AuxiliaryRaggedEntityContext {
+    AuxiliaryStateScope scope{AuxiliaryStateScope::Global};
+    std::size_t materialized_entity_index{0};
+    std::size_t original_entity_id{0};
+    std::size_t cell_id{static_cast<std::size_t>(-1)};
+    std::size_t local_qp_index{static_cast<std::size_t>(-1)};
+};
+
 // ---------------------------------------------------------------------------
 //  Synchronization and transfer
 // ---------------------------------------------------------------------------
@@ -432,6 +448,9 @@ enum class AuxiliaryRegionKind : std::uint8_t {
     /// Selected cells by material ID.
     MaterialIdSet,
 
+    /// Selected topology region / connected-component id from TopologyAnalysisContext.
+    TopologyRegion,
+
     /// Selected interface entities.
     InterfaceSet,
 
@@ -457,7 +476,7 @@ struct AuxiliaryDeploymentRegion {
     /// Explicit entity indices for FormulationDefined regions.
     /// When non-empty, this is the authoritative entity set regardless
     /// of `kind`.  For mesh-marker-based kinds (CellSet, BoundarySet,
-    /// MaterialIdSet, InterfaceSet), the entity expansion uses the
+    /// MaterialIdSet, TopologyRegion, InterfaceSet), the entity expansion uses the
     /// marker + mesh topology; the explicit set is a fallback or
     /// override for callers without mesh access.
     std::vector<std::size_t> explicit_entities{};
@@ -501,6 +520,7 @@ struct AuxiliaryEntityRemapMetadata {
     AuxiliaryDeploymentRegion deployment_region{};
     std::vector<std::size_t> entity_ids{};
     std::size_t owned_entity_count{0};
+    std::vector<std::size_t> component_offsets{};
     std::vector<std::size_t> qp_offsets{};
     std::vector<std::size_t> qp_cell_ids{};
     std::vector<AuxiliaryRegionMembershipMetadata> region_membership{};

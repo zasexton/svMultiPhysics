@@ -1701,7 +1701,7 @@ TEST(AuxiliaryModelBuilder, DeployRejectsTrailingJunkInSuffix)
         InvalidArgumentException);
 }
 
-TEST(AuxiliaryModelBuilder, DeployRejectsRaggedLayout)
+TEST(AuxiliaryModelBuilder, DeployRejectsRaggedLayoutWithoutSizeContract)
 {
     using namespace svmp::FE;
 
@@ -1712,10 +1712,31 @@ TEST(AuxiliaryModelBuilder, DeployRejectsRaggedLayout)
 
     systems::FESystem system(std::shared_ptr<const assembly::IMeshAccess>{});
 
-    // Ragged layout should be rejected at finalization.
+    EXPECT_THROW(
+        system.deployAuxiliaryModel(
+            use(model).name("ragged_inst")
+                .layoutMode(AuxiliaryLayoutMode::Ragged)
+                .initialize({0.0})),
+        InvalidArgumentException);
+}
+
+TEST(AuxiliaryModelBuilder, DeployRejectsRaggedLayoutAtFinalizeAfterContractAccepted)
+{
+    using namespace svmp::FE;
+
+    auto model = AuxiliaryModelBuilder("ragged_test_with_provider")
+        .state("x")
+        .ode("x", -modelState("x"))
+        .build();
+
+    systems::FESystem system(std::shared_ptr<const assembly::IMeshAccess>{});
+
     system.deployAuxiliaryModel(
         use(model).name("ragged_inst")
             .layoutMode(AuxiliaryLayoutMode::Ragged)
+            .raggedEntitySize([](const AuxiliaryRaggedEntityContext& ctx) {
+                return ctx.materialized_entity_index + 1u;
+            })
             .initialize({0.0}));
 
     EXPECT_THROW(system.finalizeAuxiliaryLayout(), NotImplementedException);
@@ -2712,7 +2733,7 @@ TEST(AuxiliaryModelBuilder, MonolithicScopeOwnershipPoliciesPropagateIntoMixedLa
     EXPECT_EQ(node->assembly_mode, backends::MixedBlockAssemblyMode::BorderedReduced);
     EXPECT_EQ(node->row_ownership, backends::MixedRowOwnershipPolicy::BackendDofOwner);
     EXPECT_EQ(node->single_owner_rank, -1);
-    EXPECT_TRUE(node->row_owner_ranks.empty());
+    EXPECT_EQ(node->row_owner_ranks, (std::vector<int>{0, 0}));
 
     const auto* region = opts.mixed_block_layout->findBlock("region_aux");
     ASSERT_NE(region, nullptr);
@@ -2754,6 +2775,103 @@ TEST(AuxiliaryModelBuilder, RejectsSlashInParamName)
     EXPECT_THROW(
         AuxiliaryModelBuilder("test").param("p/q"),
         svmp::FE::InvalidArgumentException);
+}
+
+TEST(AuxiliaryBindings, RaggedEntitySizeProviderSatisfiesDeploymentContract)
+{
+    auto model = AuxiliaryModelBuilder("ragged_provider_contract")
+        .state("x")
+        .ode("x", -modelState("x"))
+        .build();
+
+    auto instance = use(model)
+        .name("ragged_provider_inst")
+        .layoutMode(AuxiliaryLayoutMode::Ragged)
+        .raggedEntitySize([](const AuxiliaryRaggedEntityContext& ctx) {
+            return ctx.original_entity_id + 2u;
+        })
+        .initialize({0.0});
+
+    EXPECT_TRUE(instance.validate().empty());
+    ASSERT_TRUE(instance.hasRaggedEntitySizeProvider());
+
+    AuxiliaryRaggedEntityContext ctx;
+    ctx.original_entity_id = 3u;
+    EXPECT_EQ(instance.raggedEntitySizeProvider()(ctx), 5u);
+    EXPECT_TRUE(instance.raggedComponentOffsets().empty());
+}
+
+TEST(AuxiliaryBindings, RaggedComponentOffsetsSatisfyAdvancedDeploymentContract)
+{
+    auto model = AuxiliaryModelBuilder("ragged_offsets_contract")
+        .state("x")
+        .ode("x", -modelState("x"))
+        .build();
+
+    auto instance = use(model)
+        .name("ragged_offsets_inst")
+        .layoutMode(AuxiliaryLayoutMode::Ragged)
+        .raggedComponentOffsets({0u, 2u, 5u})
+        .initialize({0.0});
+
+    EXPECT_TRUE(instance.validate().empty());
+    EXPECT_FALSE(instance.hasRaggedEntitySizeProvider());
+    ASSERT_EQ(instance.raggedComponentOffsets().size(), 3u);
+    EXPECT_EQ(instance.raggedComponentOffsets()[2], 5u);
+}
+
+TEST(AuxiliaryBindings, RaggedRejectsAmbiguousSizeContracts)
+{
+    auto model = AuxiliaryModelBuilder("ragged_ambiguous_contract")
+        .state("x")
+        .ode("x", -modelState("x"))
+        .build();
+
+    auto instance = use(model)
+        .name("ragged_ambiguous_inst")
+        .layoutMode(AuxiliaryLayoutMode::Ragged)
+        .raggedEntitySize([](const AuxiliaryRaggedEntityContext&) { return 1u; })
+        .raggedComponentOffsets({0u, 1u})
+        .initialize({0.0});
+
+    const auto err = instance.validate();
+    EXPECT_FALSE(err.empty());
+    EXPECT_NE(err.find("exactly one"), std::string::npos);
+}
+
+TEST(AuxiliaryBindings, RaggedRejectsInvalidComponentOffsets)
+{
+    auto model = AuxiliaryModelBuilder("ragged_invalid_offsets")
+        .state("x")
+        .ode("x", -modelState("x"))
+        .build();
+
+    auto instance = use(model)
+        .name("ragged_invalid_offsets_inst")
+        .layoutMode(AuxiliaryLayoutMode::Ragged)
+        .raggedComponentOffsets({0u, 3u, 2u})
+        .initialize({0.0});
+
+    const auto err = instance.validate();
+    EXPECT_FALSE(err.empty());
+    EXPECT_NE(err.find("non-monotone"), std::string::npos);
+}
+
+TEST(AuxiliaryBindings, FixedStrideRejectsRaggedSizeContract)
+{
+    auto model = AuxiliaryModelBuilder("fixed_stride_ragged_contract")
+        .state("x")
+        .ode("x", -modelState("x"))
+        .build();
+
+    auto instance = use(model)
+        .name("fixed_stride_ragged_inst")
+        .raggedEntitySize([](const AuxiliaryRaggedEntityContext&) { return 1u; })
+        .initialize({0.0});
+
+    const auto err = instance.validate();
+    EXPECT_FALSE(err.empty());
+    EXPECT_NE(err.find("layoutMode"), std::string::npos);
 }
 
 TEST(AuxiliaryBindings, RejectsSlashInInstanceName)

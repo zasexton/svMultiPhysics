@@ -68,6 +68,24 @@ TEST(AuxiliaryBlockIndexing, NodeScope_WithGhosts)
     EXPECT_EQ(idx.flatIndex(85, 1), 171u); // 85*2 + 1
 }
 
+TEST(AuxiliaryBlockIndexing, RestrictedNodeSubsetOwnedGhostLayout)
+{
+    auto idx = AuxiliaryBlockIndexing::createNode(
+        /*n_owned=*/2, /*n_ghost=*/2, /*stride=*/3);
+
+    EXPECT_EQ(idx.scope(), AuxiliaryStateScope::Node);
+    EXPECT_EQ(idx.totalEntityCount(), 4u);
+    EXPECT_EQ(idx.ownedEntityCount(), 2u);
+    EXPECT_EQ(idx.ghostEntityCount(), 2u);
+    EXPECT_EQ(idx.totalStorageSize(), 12u);
+    EXPECT_EQ(idx.ownedStorageSize(), 6u);
+
+    EXPECT_EQ(idx.flatIndex(0, 0), 0u);
+    EXPECT_EQ(idx.flatIndex(1, 2), 5u);
+    EXPECT_EQ(idx.flatIndex(2, 0), 6u);
+    EXPECT_EQ(idx.flatIndex(3, 2), 11u);
+}
+
 // ---------------------------------------------------------------------------
 //  Cell scope
 // ---------------------------------------------------------------------------
@@ -142,6 +160,65 @@ TEST(AuxiliaryBlockIndexing, QuadraturePointScope_UniformQPs)
     }
 }
 
+TEST(AuxiliaryBlockIndexing, RaggedNodeScopePreservesOwnedGhostOffsets)
+{
+    const std::vector<std::size_t> component_offsets = {0, 2, 5, 5, 9};
+
+    auto idx = AuxiliaryBlockIndexing::createRaggedNode(
+        /*n_owned=*/2, /*n_ghost=*/2, component_offsets);
+
+    EXPECT_EQ(idx.scope(), AuxiliaryStateScope::Node);
+    EXPECT_EQ(idx.layoutMode(), AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(idx.totalEntityCount(), 4u);
+    EXPECT_EQ(idx.ownedEntityCount(), 2u);
+    EXPECT_EQ(idx.ghostEntityCount(), 2u);
+    EXPECT_EQ(idx.componentStride(), 0);
+    EXPECT_EQ(idx.totalStorageSize(), 9u);
+    EXPECT_EQ(idx.ownedStorageSize(), 5u);
+    EXPECT_EQ(idx.componentOffsets().size(), component_offsets.size());
+    EXPECT_EQ(idx.entityStorageOffset(1), 2u);
+    EXPECT_EQ(idx.entityComponentCount(1), 3u);
+    EXPECT_EQ(idx.entityComponentCount(2), 0u);
+    EXPECT_EQ(idx.flatIndex(1, 2), 4u);
+}
+
+TEST(AuxiliaryBlockIndexing, RaggedCellScope)
+{
+    const std::vector<std::size_t> component_offsets = {0, 1, 4, 6};
+
+    auto idx = AuxiliaryBlockIndexing::createRaggedCell(component_offsets);
+
+    EXPECT_EQ(idx.scope(), AuxiliaryStateScope::Cell);
+    EXPECT_EQ(idx.layoutMode(), AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(idx.totalEntityCount(), 3u);
+    EXPECT_EQ(idx.ownedEntityCount(), 3u);
+    EXPECT_EQ(idx.totalStorageSize(), 6u);
+    EXPECT_EQ(idx.ownedStorageSize(), 6u);
+    EXPECT_EQ(idx.entityComponentCount(0), 1u);
+    EXPECT_EQ(idx.entityComponentCount(1), 3u);
+    EXPECT_EQ(idx.flatIndex(2, 1), 5u);
+}
+
+TEST(AuxiliaryBlockIndexing, RaggedQuadraturePointScopePreservesCellOffsets)
+{
+    const std::vector<std::size_t> qp_offsets = {0, 2, 5};
+    const std::vector<std::size_t> component_offsets = {0, 3, 4, 4, 6, 7};
+
+    auto idx = AuxiliaryBlockIndexing::createRaggedQuadraturePoint(
+        qp_offsets, component_offsets);
+
+    EXPECT_EQ(idx.scope(), AuxiliaryStateScope::QuadraturePoint);
+    EXPECT_EQ(idx.layoutMode(), AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(idx.totalEntityCount(), 5u);
+    EXPECT_EQ(idx.totalStorageSize(), 7u);
+    EXPECT_EQ(idx.qpsForCell(0), 2u);
+    EXPECT_EQ(idx.qpsForCell(1), 3u);
+    EXPECT_EQ(idx.qpOffsets().size(), qp_offsets.size());
+    EXPECT_EQ(idx.componentOffsets().size(), component_offsets.size());
+    EXPECT_EQ(idx.entityComponentCount(2), 0u);
+    EXPECT_EQ(idx.qpFlatIndex(1, 1, 1), 5u);
+}
+
 // ---------------------------------------------------------------------------
 //  Region scope
 // ---------------------------------------------------------------------------
@@ -159,6 +236,21 @@ TEST(AuxiliaryBlockIndexing, RegionScope)
     EXPECT_EQ(idx.totalStorageSize(), 12u);
     EXPECT_EQ(idx.ownedStorageSize(), 12u);
     EXPECT_EQ(idx.flatIndex(2, 1), 7u);
+}
+
+TEST(AuxiliaryBlockIndexing, RaggedRegionScope)
+{
+    const std::vector<std::size_t> component_offsets = {0, 2, 2, 5};
+
+    auto idx = AuxiliaryBlockIndexing::createRaggedRegion(component_offsets);
+
+    EXPECT_EQ(idx.scope(), AuxiliaryStateScope::Region);
+    EXPECT_EQ(idx.layoutMode(), AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(idx.totalEntityCount(), 3u);
+    EXPECT_EQ(idx.ownedEntityCount(), 3u);
+    EXPECT_EQ(idx.totalStorageSize(), 5u);
+    EXPECT_EQ(idx.entityComponentCount(1), 0u);
+    EXPECT_EQ(idx.flatIndex(2, 2), 4u);
 }
 
 // ---------------------------------------------------------------------------
@@ -206,5 +298,29 @@ TEST(AuxiliaryBlockIndexing, QPOffsetsValidation)
     EXPECT_THROW(
         AuxiliaryBlockIndexing::createQuadraturePoint(
             std::vector<std::size_t>{1, 5}, 1),
+        svmp::FE::InvalidArgumentException);
+
+    EXPECT_THROW(
+        AuxiliaryBlockIndexing::createQuadraturePoint(
+            std::vector<std::size_t>{0, 5, 4}, 1),
+        svmp::FE::InvalidArgumentException);
+}
+
+TEST(AuxiliaryBlockIndexing, RaggedValidation)
+{
+    EXPECT_THROW(
+        AuxiliaryBlockIndexing::createRaggedNode(
+            2, 0, std::vector<std::size_t>{0, 1}),
+        svmp::FE::InvalidArgumentException);
+
+    EXPECT_THROW(
+        AuxiliaryBlockIndexing::createRaggedCell(
+            std::vector<std::size_t>{0, 3, 2}),
+        svmp::FE::InvalidArgumentException);
+
+    EXPECT_THROW(
+        AuxiliaryBlockIndexing::createRaggedQuadraturePoint(
+            std::vector<std::size_t>{0, 2},
+            std::vector<std::size_t>{0, 1}),
         svmp::FE::InvalidArgumentException);
 }

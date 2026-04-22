@@ -47,6 +47,7 @@ void hashRange(std::size_t& seed, const std::vector<T>& values)
     hashRange(h, metadata.deployment_region.explicit_entities);
     hashRange(h, metadata.entity_ids);
     hashCombine(h, metadata.owned_entity_count);
+    hashRange(h, metadata.component_offsets);
     hashRange(h, metadata.qp_offsets);
     hashRange(h, metadata.qp_cell_ids);
     hashCombine(h, metadata.region_membership.size());
@@ -72,6 +73,8 @@ void hashRange(std::size_t& seed, const std::vector<T>& values)
     std::iota(metadata.entity_ids.begin(), metadata.entity_ids.end(), std::size_t{0});
     const auto qp_offsets = indexing.qpOffsets();
     metadata.qp_offsets.assign(qp_offsets.begin(), qp_offsets.end());
+    const auto component_offsets = indexing.componentOffsets();
+    metadata.component_offsets.assign(component_offsets.begin(), component_offsets.end());
     metadata.metadata_hash = hashEntityMetadata(metadata);
     return metadata;
 }
@@ -123,6 +126,8 @@ void refreshEntityMetadataAfterResize(AuxiliaryEntityRemapMetadata& metadata,
     }
     const auto qp_offsets = indexing.qpOffsets();
     metadata.qp_offsets.assign(qp_offsets.begin(), qp_offsets.end());
+    const auto component_offsets = indexing.componentOffsets();
+    metadata.component_offsets.assign(component_offsets.begin(), component_offsets.end());
     metadata.metadata_hash = hashEntityMetadata(metadata);
 }
 
@@ -257,28 +262,96 @@ std::size_t AuxiliaryStateManager::registerBlockRagged(
     std::span<const std::size_t> offsets,
     std::span<const Real> initial_values)
 {
+    FE_THROW_IF(offsets.empty(), InvalidArgumentException,
+                "AuxiliaryStateManager::registerBlockRagged: offsets must not be empty");
+    return registerBlockRagged(spec, offsets, offsets.size() - 1u, initial_values);
+}
+
+std::size_t AuxiliaryStateManager::registerBlockRagged(
+    const AuxiliaryStateSpec& spec,
+    std::span<const std::size_t> offsets,
+    std::size_t owned_entity_count,
+    std::span<const Real> initial_values)
+{
     FE_THROW_IF(spec.name.empty(), InvalidArgumentException,
                 "AuxiliaryStateManager::registerBlockRagged: empty block name");
     FE_THROW_IF(meta_name_to_index_.count(spec.name) != 0u, InvalidArgumentException,
                 "AuxiliaryStateManager::registerBlockRagged: duplicate '" + spec.name + "'");
+    FE_THROW_IF(spec.layout_mode != AuxiliaryLayoutMode::Ragged, InvalidArgumentException,
+                "AuxiliaryStateManager::registerBlockRagged: spec layout_mode must be Ragged");
+    FE_THROW_IF(offsets.empty(), InvalidArgumentException,
+                "AuxiliaryStateManager::registerBlockRagged: offsets must not be empty");
+
+    const auto n_entities = offsets.size() - 1u;
+    FE_THROW_IF(owned_entity_count > n_entities, InvalidArgumentException,
+                "AuxiliaryStateManager::registerBlockRagged: owned_entity_count exceeds entity count");
+
+    AuxiliaryBlockIndexing indexing;
+    switch (spec.scope) {
+        case AuxiliaryStateScope::Node:
+            indexing = AuxiliaryBlockIndexing::createRaggedNode(
+                owned_entity_count, n_entities - owned_entity_count, offsets);
+            break;
+        case AuxiliaryStateScope::Cell:
+            FE_THROW_IF(owned_entity_count != n_entities, InvalidArgumentException,
+                        "AuxiliaryStateManager::registerBlockRagged: Cell scope does not support ghosts");
+            indexing = AuxiliaryBlockIndexing::createRaggedCell(offsets);
+            break;
+        case AuxiliaryStateScope::QuadraturePoint:
+            FE_THROW(InvalidArgumentException,
+                     "AuxiliaryStateManager::registerBlockRagged: QuadraturePoint "
+                     "ragged blocks require registerBlockRaggedWithQPOffsets()");
+        case AuxiliaryStateScope::Region:
+            FE_THROW_IF(owned_entity_count != n_entities, InvalidArgumentException,
+                        "AuxiliaryStateManager::registerBlockRagged: Region scope does not support ghosts");
+            indexing = AuxiliaryBlockIndexing::createRaggedRegion(offsets);
+            break;
+        case AuxiliaryStateScope::Global:
+        case AuxiliaryStateScope::Boundary:
+        case AuxiliaryStateScope::Facet:
+            FE_THROW(InvalidArgumentException,
+                     "AuxiliaryStateManager::registerBlockRagged: ragged layout is "
+                     "only scope-correct for Node, Cell, QuadraturePoint with "
+                     "QP offsets, and Region in this manager path");
+    }
 
     const auto block_idx = state_.registerBlockRagged(spec, offsets, initial_values);
+    state_.block(block_idx).setOwnedEntityCount(indexing.ownedEntityCount());
 
-    // Ragged blocks use a simple entity-count indexing (no stride).
-    AuxiliaryBlockIndexing indexing;
-    const auto n_entities = offsets.size() - 1;
-    switch (spec.scope) {
-        case AuxiliaryStateScope::Cell:
-            indexing = AuxiliaryBlockIndexing::createCell(n_entities, 1);
-            break;
-        case AuxiliaryStateScope::Region:
-            indexing = AuxiliaryBlockIndexing::createRegion(n_entities, 1);
-            break;
-        default:
-            // For ragged layout with other scopes, use a generic index.
-            indexing = AuxiliaryBlockIndexing::createCell(n_entities, 1);
-            break;
-    }
+    const auto meta_idx = block_meta_.size();
+    block_meta_.push_back(BlockMeta{
+        spec,
+        indexing,
+        makeDefaultEntityMetadata(spec, indexing),
+        {},
+        {},
+    });
+    meta_name_to_index_.emplace(spec.name, meta_idx);
+
+    return block_idx;
+}
+
+std::size_t AuxiliaryStateManager::registerBlockRaggedWithQPOffsets(
+    const AuxiliaryStateSpec& spec,
+    std::span<const std::size_t> qp_offsets,
+    std::span<const std::size_t> component_offsets,
+    std::span<const Real> initial_values)
+{
+    FE_THROW_IF(spec.name.empty(), InvalidArgumentException,
+                "AuxiliaryStateManager::registerBlockRaggedWithQPOffsets: empty block name");
+    FE_THROW_IF(meta_name_to_index_.count(spec.name) != 0u, InvalidArgumentException,
+                "AuxiliaryStateManager::registerBlockRaggedWithQPOffsets: duplicate '" +
+                    spec.name + "'");
+    FE_THROW_IF(spec.scope != AuxiliaryStateScope::QuadraturePoint, InvalidArgumentException,
+                "AuxiliaryStateManager::registerBlockRaggedWithQPOffsets: scope must be QuadraturePoint");
+    FE_THROW_IF(spec.layout_mode != AuxiliaryLayoutMode::Ragged, InvalidArgumentException,
+                "AuxiliaryStateManager::registerBlockRaggedWithQPOffsets: spec layout_mode must be Ragged");
+
+    const auto indexing =
+        AuxiliaryBlockIndexing::createRaggedQuadraturePoint(qp_offsets, component_offsets);
+    const auto block_idx =
+        state_.registerBlockRagged(spec, component_offsets, initial_values);
+    state_.block(block_idx).setOwnedEntityCount(indexing.ownedEntityCount());
 
     const auto meta_idx = block_meta_.size();
     block_meta_.push_back(BlockMeta{
@@ -330,6 +403,17 @@ void AuxiliaryStateManager::setEntityRemapMetadata(
                 InvalidArgumentException,
                 "AuxiliaryStateManager::setEntityRemapMetadata: entity id count for block '" +
                     meta.spec.name + "' does not match the registered entity count");
+    if (metadata.component_offsets.empty()) {
+        const auto component_offsets = meta.indexing.componentOffsets();
+        metadata.component_offsets.assign(component_offsets.begin(), component_offsets.end());
+    }
+    FE_THROW_IF(!metadata.component_offsets.empty() &&
+                    metadata.component_offsets != std::vector<std::size_t>(
+                        meta.indexing.componentOffsets().begin(),
+                        meta.indexing.componentOffsets().end()),
+                InvalidArgumentException,
+                "AuxiliaryStateManager::setEntityRemapMetadata: component offset map for block '" +
+                    meta.spec.name + "' does not match the registered ragged layout");
     if (metadata.qp_offsets.empty()) {
         const auto qp_offsets = meta.indexing.qpOffsets();
         metadata.qp_offsets.assign(qp_offsets.begin(), qp_offsets.end());
@@ -645,6 +729,9 @@ void AuxiliaryStateManager::validate() const
         FE_THROW_IF(blk.work().size() != blk.committed().size(), InvalidStateException,
                     "AuxiliaryStateManager::validate: work/committed size mismatch "
                     "for block '" + blk.name() + "'");
+        FE_THROW_IF(blk.layoutMode() != meta.indexing.layoutMode(), InvalidStateException,
+                    "AuxiliaryStateManager::validate: layout mode mismatch for block '" +
+                        blk.name() + "'");
         FE_THROW_IF(blk.entityCount() != meta.indexing.totalEntityCount(), InvalidStateException,
                     "AuxiliaryStateManager::validate: entity count mismatch for block '" +
                         blk.name() + "'");
@@ -660,6 +747,18 @@ void AuxiliaryStateManager::validate() const
                         "for block '" + blk.name() + "'");
             FE_THROW_IF(blk.storageSize() != meta.indexing.totalStorageSize(), InvalidStateException,
                         "AuxiliaryStateManager::validate: indexing storage mismatch "
+                        "for block '" + blk.name() + "'");
+        } else {
+            FE_THROW_IF(blk.storageSize() != meta.indexing.totalStorageSize(), InvalidStateException,
+                        "AuxiliaryStateManager::validate: ragged indexing storage mismatch "
+                        "for block '" + blk.name() + "'");
+            const auto block_offsets = blk.entityOffsets();
+            const auto indexing_offsets = meta.indexing.componentOffsets();
+            FE_THROW_IF(block_offsets.size() != indexing_offsets.size() ||
+                            !std::equal(block_offsets.begin(), block_offsets.end(),
+                                        indexing_offsets.begin()),
+                        InvalidStateException,
+                        "AuxiliaryStateManager::validate: ragged component offset mismatch "
                         "for block '" + blk.name() + "'");
         }
     }

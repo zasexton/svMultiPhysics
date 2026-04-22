@@ -529,7 +529,8 @@ buildLocalCondensedAuxSystem(systems::AuxiliaryStateScope scope,
                              MPI_Comm comm,
                              int rank,
                              int size,
-                             bool backend_owned_rows)
+                             bool backend_owned_rows,
+                             bool ragged_layout = false)
 {
     auto space = spaces::Space(spaces::SpaceType::H1,
                                ElementType::Quad4,
@@ -551,11 +552,23 @@ buildLocalCondensedAuxSystem(systems::AuxiliaryStateScope scope,
     });
 
     const std::string instance_name =
-        scope == systems::AuxiliaryStateScope::Cell ? "cell_aux" : "qp_aux";
+        ragged_layout && scope == systems::AuxiliaryStateScope::Cell
+            ? "ragged_cell_aux"
+        : ragged_layout && scope == systems::AuxiliaryStateScope::QuadraturePoint
+            ? "ragged_qp_aux"
+        : scope == systems::AuxiliaryStateScope::Cell ? "cell_aux"
+        : (scope == systems::AuxiliaryStateScope::QuadraturePoint ? "qp_aux"
+                                                                  : "node_aux");
     auto deployment = systems::use(model)
         .name(instance_name)
         .monolithic()
         .scope(scope);
+    if (ragged_layout) {
+        deployment.layoutMode(systems::AuxiliaryLayoutMode::Ragged)
+            .raggedEntitySize([](const systems::AuxiliaryRaggedEntityContext&) {
+                return 2u;
+            });
+    }
     auto inst = sys->deploy(deployment);
 
     const auto u = forms::FormExpr::stateField(u_field, *space, "u");
@@ -583,6 +596,106 @@ buildLocalCondensedAuxSystem(systems::AuxiliaryStateScope scope,
     sys->setup(opts, inputs);
     sys->finalizeAuxiliaryLayout();
     sys->beginTimeStep();
+
+    return sys;
+}
+
+std::string localCondensedAuxBlockName(systems::AuxiliaryStateScope scope,
+                                       bool ragged_layout)
+{
+    if (ragged_layout && scope == systems::AuxiliaryStateScope::Cell) {
+        return "ragged_cell_aux";
+    }
+    if (ragged_layout && scope == systems::AuxiliaryStateScope::QuadraturePoint) {
+        return "ragged_qp_aux";
+    }
+    if (scope == systems::AuxiliaryStateScope::Cell) {
+        return "cell_aux";
+    }
+    if (scope == systems::AuxiliaryStateScope::QuadraturePoint) {
+        return "qp_aux";
+    }
+    return "node_aux";
+}
+
+void expectUniformRaggedLocalCondensedBlock(systems::FESystem& sys,
+                                           std::string_view aux_block_name,
+                                           std::size_t expected_width)
+{
+    const auto& mgr = sys.auxiliaryStateManager();
+    ASSERT_TRUE(mgr.hasBlock(std::string(aux_block_name)));
+    const auto& block = mgr.getBlock(std::string(aux_block_name));
+    EXPECT_EQ(block.layoutMode(), systems::AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(block.ownedEntityCount(), block.entityCount());
+    const auto offsets = block.entityOffsets();
+    ASSERT_EQ(offsets.size(), block.entityCount() + 1u);
+    ASSERT_FALSE(offsets.empty());
+    EXPECT_EQ(offsets.front(), 0u);
+    EXPECT_EQ(offsets.back(), block.storageSize());
+    for (std::size_t entity = 0; entity < block.entityCount(); ++entity) {
+        EXPECT_EQ(offsets[entity + 1u] - offsets[entity], expected_width)
+            << "entity " << entity;
+        EXPECT_EQ(block.gatherEntityWork(entity).size(), expected_width)
+            << "entity " << entity;
+    }
+}
+
+std::unique_ptr<systems::FESystem>
+buildRaggedNodeMonolithicOwnerSystem(std::shared_ptr<const IMeshAccess> mesh,
+                                     const dofs::MeshTopologyInfo& topo,
+                                     MPI_Comm comm,
+                                     int rank,
+                                     int size,
+                                     bool backend_owned_rows,
+                                     bool variable_width)
+{
+    auto space = spaces::Space(spaces::SpaceType::H1,
+                               ElementType::Quad4,
+                               /*order=*/1,
+                               /*components=*/1);
+    auto sys = std::make_unique<systems::FESystem>(std::move(mesh));
+    const auto u_field =
+        sys->addField(systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys->addOperator("op");
+
+    auto model = systems::aux::model("ragged_node_owner_backed_mpi",
+                                     [](systems::ModelFacade& m) {
+        auto x = m.state("x");
+        m << systems::ddt(x) == forms::FormExpr::constant(1.0) - x;
+    });
+
+    sys->deploy(systems::use(model)
+        .name(variable_width ? "ragged_node_bad_width" : "ragged_node_aux")
+        .node()
+        .monolithic()
+        .layoutMode(systems::AuxiliaryLayoutMode::Ragged)
+        .raggedEntitySize([variable_width](const systems::AuxiliaryRaggedEntityContext& ctx) {
+            return variable_width && ctx.materialized_entity_index == 0u ? 2u : 1u;
+        })
+        .initialize({0.25}));
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::TestFunction(*space, "v");
+    (void)systems::installFormulation(
+        *sys,
+        "op",
+        {u_field},
+        (forms::inner(forms::grad(u), forms::grad(v)) + u * v).dx());
+
+    systems::SetupOptions opts;
+    opts.assembler_name = "StandardAssembler";
+    opts.assembly_options.deterministic = true;
+    opts.assembly_options.overlap_communication = false;
+    opts.use_backend_row_ownership_for_assembly = backend_owned_rows;
+    opts.dof_options.global_numbering = dofs::GlobalNumberingMode::DenseGlobalIds;
+    opts.dof_options.ownership = dofs::OwnershipStrategy::LowestRank;
+    opts.dof_options.my_rank = rank;
+    opts.dof_options.world_size = size;
+    opts.dof_options.mpi_comm = comm;
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = topo;
+    sys->setup(opts, inputs);
 
     return sys;
 }
@@ -835,7 +948,8 @@ EffectiveAssembly assembleFsilsEffective(systems::FESystem& sys,
 
 void expectLocalCondensedScopeMatchesRowOwnedDenseReference(
     systems::AuxiliaryStateScope scope,
-    std::span<const int> cell_owners)
+    std::span<const int> cell_owners,
+    bool ragged_layout = false)
 {
 #if !defined(FE_HAS_FSILS)
     GTEST_SKIP() << "FSILS backend is not enabled in this build";
@@ -856,7 +970,8 @@ void expectLocalCondensedScopeMatchesRowOwnedDenseReference(
         comm,
         rank,
         size,
-        /*backend_owned_rows=*/true);
+        /*backend_owned_rows=*/true,
+        ragged_layout);
 
     const auto reference_topo = twoQuadTopology(cell_owners, rank, size);
     auto sys_reference = buildLocalCondensedAuxSystem(
@@ -867,7 +982,8 @@ void expectLocalCondensedScopeMatchesRowOwnedDenseReference(
         comm,
         rank,
         size,
-        /*backend_owned_rows=*/true);
+        /*backend_owned_rows=*/true,
+        ragged_layout);
 
     const auto n_dofs = sys_parallel->dofHandler().getNumDofs();
     ASSERT_EQ(n_dofs, sys_reference->dofHandler().getNumDofs());
@@ -883,9 +999,15 @@ void expectLocalCondensedScopeMatchesRowOwnedDenseReference(
     state.dt = 0.1;
     state.u = u;
 
+    const auto aux_name = localCondensedAuxBlockName(scope, ragged_layout);
+    if (ragged_layout) {
+        ASSERT_TRUE(scope == systems::AuxiliaryStateScope::Cell ||
+                    scope == systems::AuxiliaryStateScope::QuadraturePoint);
+        expectUniformRaggedLocalCondensedBlock(*sys_reference, aux_name, 2u);
+        expectUniformRaggedLocalCondensedBlock(*sys_parallel, aux_name, 2u);
+    }
+
     const auto reference = assembleDenseEffective(*sys_reference, state, comm);
-    const auto aux_name =
-        scope == systems::AuxiliaryStateScope::Cell ? "cell_aux" : "qp_aux";
     const auto parallel =
         assembleFsilsEffective(*sys_parallel, state, comm, rank, aux_name);
 
@@ -1091,6 +1213,134 @@ TEST(AuxiliaryScopeCompletionMPI,
 }
 
 TEST(AuxiliaryScopeCompletionMPI,
+     RaggedCellLocalCondensationMatchesDenseReferenceWithoutDroppedEntries)
+{
+    const std::vector<int> cell_owners{0, 1};
+    expectLocalCondensedScopeMatchesRowOwnedDenseReference(
+        systems::AuxiliaryStateScope::Cell, cell_owners, /*ragged_layout=*/true);
+}
+
+TEST(AuxiliaryScopeCompletionMPI,
+     RaggedQuadraturePointLocalCondensationMatchesDenseReferenceWithoutDroppedEntries)
+{
+    const std::vector<int> cell_owners{0, 1};
+    expectLocalCondensedScopeMatchesRowOwnedDenseReference(
+        systems::AuxiliaryStateScope::QuadraturePoint,
+        cell_owners,
+        /*ragged_layout=*/true);
+}
+
+TEST(AuxiliaryScopeCompletionMPI,
+     RaggedNodeMonolithicRequiresBackendOwnerMap)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "This regression uses a fixed two-cell strip; run with exactly 2 MPI ranks";
+    }
+
+    const std::vector<int> cell_owners{0, 1};
+    const auto topo = twoQuadTopology(cell_owners, rank, size);
+    auto sys = buildRaggedNodeMonolithicOwnerSystem(
+        std::make_shared<TwoQuadStripMeshAccess>(cell_owners, rank),
+        topo,
+        comm,
+        rank,
+        size,
+        /*backend_owned_rows=*/false,
+        /*variable_width=*/false);
+
+    try {
+        sys->finalizeAuxiliaryLayout();
+        ADD_FAILURE() << "Expected ragged Node monolithic finalize to require backend owners";
+    } catch (const systems::InvalidStateException& ex) {
+        EXPECT_NE(std::string(ex.what()).find("backend row ownership metadata"),
+                  std::string::npos)
+            << ex.what();
+    }
+}
+
+TEST(AuxiliaryScopeCompletionMPI,
+     RaggedNodeMonolithicUsesOwnerBackedLocalCondensation)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "This regression uses a fixed two-cell strip; run with exactly 2 MPI ranks";
+    }
+
+    const std::vector<int> cell_owners{0, 1};
+    const auto topo = twoQuadTopology(cell_owners, rank, size);
+    auto sys = buildRaggedNodeMonolithicOwnerSystem(
+        std::make_shared<TwoQuadStripMeshAccess>(cell_owners, rank),
+        topo,
+        comm,
+        rank,
+        size,
+        /*backend_owned_rows=*/true,
+        /*variable_width=*/false);
+
+    ASSERT_NO_THROW(sys->finalizeAuxiliaryLayout());
+    ASSERT_NE(sys->dofPermutation(), nullptr);
+    ASSERT_FALSE(sys->dofPermutation()->owner_rank.empty());
+
+    const auto& block = sys->auxiliaryStateManager().getBlock("ragged_node_aux");
+    EXPECT_EQ(block.layoutMode(), systems::AuxiliaryLayoutMode::Ragged);
+    EXPECT_EQ(block.storageSize(), block.entityCount());
+
+    const auto layout = sys->augmentSolverOptions(
+        backends::SolverOptions{},
+        static_cast<std::size_t>(sys->dofHandler().getNumDofs()));
+    ASSERT_TRUE(layout.mixed_block_layout.has_value());
+    EXPECT_EQ(layout.mixed_block_layout->auxiliary_unknowns, 0);
+    EXPECT_EQ(layout.mixed_block_layout->findBlock("ragged_node_aux"), nullptr);
+    EXPECT_TRUE(backends::validateFsilsMixedLayoutContract(
+                    *layout.mixed_block_layout, /*dof_per_node=*/1)
+                    .empty());
+}
+
+TEST(AuxiliaryScopeCompletionMPI,
+     RaggedNodeMonolithicRejectsVariableWidthOwnerBackedSlices)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "This regression uses a fixed two-cell strip; run with exactly 2 MPI ranks";
+    }
+
+    const std::vector<int> cell_owners{0, 1};
+    const auto topo = twoQuadTopology(cell_owners, rank, size);
+    auto sys = buildRaggedNodeMonolithicOwnerSystem(
+        std::make_shared<TwoQuadStripMeshAccess>(cell_owners, rank),
+        topo,
+        comm,
+        rank,
+        size,
+        /*backend_owned_rows=*/true,
+        /*variable_width=*/true);
+
+    try {
+        sys->finalizeAuxiliaryLayout();
+        ADD_FAILURE() << "Expected variable-width ragged Node monolithic finalize to fail";
+    } catch (const InvalidArgumentException& ex) {
+        EXPECT_NE(std::string(ex.what()).find("local-condensation contract"),
+                  std::string::npos)
+            << ex.what();
+    }
+}
+
+TEST(AuxiliaryScopeCompletionMPI,
+     NodeLocalCondensationUsesOwnerBackedSparseFsilsRowsWithoutDroppedEntries)
+{
+    const std::vector<int> cell_owners{0, 1};
+    expectLocalCondensedScopeMatchesRowOwnedDenseReference(
+        systems::AuxiliaryStateScope::Node, cell_owners);
+}
+
+TEST(AuxiliaryScopeCompletionMPI,
      CellLocalCondensationHandlesRanksWithNoOwnedEntities)
 {
     const std::vector<int> cell_owners{0, 0};
@@ -1195,6 +1445,174 @@ TEST(AuxiliaryScopeCompletionMPI,
                   MPI_SUM,
                   comm);
     EXPECT_EQ(global_owned_region_rows, 2);
+}
+
+TEST(AuxiliaryScopeCompletionMPI,
+     RegionMonolithicBorderedReducedUsesOwnerRoutedRowsWithoutDroppedEntries)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "This regression uses two disconnected cells; run with exactly 2 MPI ranks";
+    }
+
+    const std::vector<int> cell_owners{1, 0};
+    auto mesh = std::make_shared<TwoDisconnectedQuadMeshAccess>(cell_owners, rank);
+    const auto topo = twoDisconnectedQuadTopology(cell_owners, rank, size);
+
+    systems::FESystem sys(mesh);
+    auto space = spaces::Space(spaces::SpaceType::H1,
+                               ElementType::Quad4,
+                               /*order=*/1,
+                               /*components=*/1);
+    const auto u_field = sys.addField(
+        systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u_disc = forms::FormExpr::discreteField(u_field, *space, "u");
+    const auto region_average = sys.regionAverage("region_mono_avg_mpi", u_disc);
+
+    auto model = systems::AuxiliaryModelBuilder("region_monolithic_mpi")
+        .input("avg")
+        .state("x")
+        .ode("x", systems::modelInput("avg") - systems::modelState("x"))
+        .build();
+    sys.deployAuxiliaryModel(
+        systems::use(model).name("region_mono_coupled")
+            .scope(systems::AuxiliaryStateScope::Region)
+            .monolithic()
+            .bind("avg", region_average)
+            .initialize({0.0}));
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::TestFunction(*space, "v");
+    const auto residual =
+        (forms::inner(forms::grad(u), forms::grad(v)) + u * v).dx();
+    (void)systems::installFormulation(sys, "op", {u_field}, residual);
+
+    systems::SetupOptions opts;
+    opts.assembler_name = "StandardAssembler";
+    opts.assembly_options.deterministic = true;
+    opts.assembly_options.overlap_communication = false;
+    opts.use_backend_row_ownership_for_assembly = true;
+    opts.dof_options.global_numbering = dofs::GlobalNumberingMode::DenseGlobalIds;
+    opts.dof_options.ownership = dofs::OwnershipStrategy::LowestRank;
+    opts.dof_options.my_rank = rank;
+    opts.dof_options.world_size = size;
+    opts.dof_options.mpi_comm = comm;
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = topo;
+    sys.setup(opts, inputs);
+    sys.finalizeAuxiliaryLayout();
+    sys.beginTimeStep();
+
+    const auto n_dofs = sys.dofHandler().getNumDofs();
+    ASSERT_EQ(n_dofs, 8);
+
+    const auto layout = sys.augmentSolverOptions(
+        backends::SolverOptions{}, static_cast<std::size_t>(n_dofs));
+    ASSERT_TRUE(layout.mixed_block_layout.has_value());
+    const auto* aux_block =
+        layout.mixed_block_layout->findBlock("region_mono_coupled");
+    ASSERT_NE(aux_block, nullptr);
+    EXPECT_EQ(aux_block->assembly_mode,
+              backends::MixedBlockAssemblyMode::BorderedReduced);
+    EXPECT_EQ(aux_block->row_ownership,
+              backends::MixedRowOwnershipPolicy::RegionOwner);
+    EXPECT_EQ(aux_block->row_owner_ranks, (std::vector<int>{1, 0}));
+    EXPECT_TRUE(backends::validateFsilsMixedLayoutContract(
+                    *layout.mixed_block_layout, /*dof_per_node=*/1)
+                    .empty());
+
+    const auto* dist_pattern = sys.distributedSparsityIfAvailable("op");
+    ASSERT_NE(dist_pattern, nullptr);
+    auto perm = sys.dofPermutation();
+    ASSERT_TRUE(perm);
+    ASSERT_FALSE(perm->empty());
+
+    backends::FsilsFactory factory(/*dof_per_node=*/1, perm, comm);
+    auto A = factory.createMatrix(*dist_pattern);
+    auto b = factory.createVector(n_dofs);
+    A->zero();
+    b->zero();
+
+    auto* A_fsils = dynamic_cast<backends::FsilsMatrix*>(A.get());
+    auto* b_fsils = dynamic_cast<backends::FsilsVector*>(b.get());
+    ASSERT_NE(A_fsils, nullptr);
+    ASSERT_NE(b_fsils, nullptr);
+    EXPECT_TRUE(A_fsils->usesOwnedRowOperator());
+    EXPECT_TRUE(b_fsils->usesOwnedRowLayout());
+
+    std::vector<Real> u_values(static_cast<std::size_t>(n_dofs), Real(0.0));
+    for (GlobalIndex i = 0; i < n_dofs; ++i) {
+        u_values[static_cast<std::size_t>(i)] =
+            Real(0.1) + Real(0.05) * Real(i);
+    }
+
+    systems::SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = u_values;
+
+    systems::AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+    req.want_vector = true;
+    req.is_nonlinear_iteration = true;
+
+    backends::FsilsMatrix::resetDroppedEntryCount();
+    backends::FsilsMatrix::resetOffOwnerWriteCount();
+    auto A_view = A->createAssemblyView();
+    auto b_view = b->createAssemblyView();
+    const auto result = sys.assemble(req, state, A_view.get(), b_view.get());
+    ASSERT_TRUE(result.success) << result.error_message;
+    A->finalizeAssembly();
+
+    const auto off_owner = allreduceUnsigned(
+        static_cast<unsigned long long>(backends::FsilsMatrix::offOwnerWriteCount()),
+        comm);
+    const auto dropped = allreduceUnsigned(
+        static_cast<unsigned long long>(backends::FsilsMatrix::droppedEntryCount()),
+        comm);
+    EXPECT_EQ(off_owner, 0ULL);
+    EXPECT_EQ(dropped, 0ULL);
+
+    const auto& bc = sys.borderedCoupling();
+    ASSERT_TRUE(bc.active);
+    ASSERT_TRUE(bc.globally_reduced);
+    EXPECT_FALSE(bc.aux_self_terms_replicated);
+    ASSERT_EQ(bc.n_aux, 2);
+    EXPECT_EQ(bc.aux_row_owner_ranks, (std::vector<int>{1, 0}));
+    EXPECT_EQ(bc.aux_row_owner_routed, (std::vector<char>{char{1}, char{1}}));
+    EXPECT_EQ(bc.aux_row_global_contributor_counts, (std::vector<int>{1, 1}));
+
+    ASSERT_EQ(bc.D.size(), 4u);
+    EXPECT_NEAR(bc.D[0], 11.0, 1e-11);
+    EXPECT_NEAR(bc.D[1], 0.0, 1e-11);
+    EXPECT_NEAR(bc.D[2], 0.0, 1e-11);
+    EXPECT_NEAR(bc.D[3], 11.0, 1e-11);
+    ASSERT_EQ(bc.g.size(), 2u);
+    EXPECT_NEAR(bc.g[0], -0.175, 1e-11);
+    EXPECT_NEAR(bc.g[1], -0.375, 1e-11);
+
+    ASSERT_EQ(bc.Ct.size(), static_cast<std::size_t>(2 * n_dofs));
+    for (GlobalIndex dof = 0; dof < n_dofs; ++dof) {
+        const auto col = static_cast<std::size_t>(dof);
+        const auto expected_r0 = dof < 4 ? Real(-0.25) : Real(0.0);
+        const auto expected_r1 = dof >= 4 ? Real(-0.25) : Real(0.0);
+        EXPECT_NEAR(bc.Ct[col], expected_r0, 1e-11)
+            << "Region 0 Ct dof " << dof;
+        EXPECT_NEAR(bc.Ct[static_cast<std::size_t>(n_dofs) + col],
+                    expected_r1,
+                    1e-11)
+            << "Region 1 Ct dof " << dof;
+    }
+#endif
 }
 
 } // namespace svmp::FE::assembly::testing

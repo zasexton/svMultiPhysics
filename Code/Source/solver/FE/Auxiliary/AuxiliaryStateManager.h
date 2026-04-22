@@ -165,6 +165,30 @@ public:
                                     std::span<const std::size_t> offsets,
                                     std::span<const Real> initial_values = {});
 
+    /**
+     * @brief Register a block with ragged layout and an explicit owned prefix.
+     *
+     * `Node` ragged blocks may use `owned_entity_count < entity_count` to
+     * preserve owned/ghost ordering.  Other ragged scopes currently require all
+     * entities to be owned locally.
+     */
+    std::size_t registerBlockRagged(const AuxiliaryStateSpec& spec,
+                                    std::span<const std::size_t> offsets,
+                                    std::size_t owned_entity_count,
+                                    std::span<const Real> initial_values = {});
+
+    /**
+     * @brief Register a QuadraturePoint-scoped ragged block with covered-cell QP offsets.
+     *
+     * `qp_offsets` maps covered cells to flat QP entities.  `component_offsets`
+     * maps those flat QP entities to variable-size component slices.
+     */
+    std::size_t registerBlockRaggedWithQPOffsets(
+        const AuxiliaryStateSpec& spec,
+        std::span<const std::size_t> qp_offsets,
+        std::span<const std::size_t> component_offsets,
+        std::span<const Real> initial_values = {});
+
     // -----------------------------------------------------------------
     //  Access
     // -----------------------------------------------------------------

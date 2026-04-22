@@ -125,6 +125,8 @@ void hashBorderedConsistencyString(std::uint64_t& hash, const std::string& value
     hashBorderedConsistencyBytes(local_hash, bc.B.size());
     hashBorderedConsistencyBytes(local_hash, bc.Ct.size());
     hashBorderedConsistencyBytes(local_hash, bc.dF_dxdot.size());
+    hashBorderedConsistencySpan(local_hash, std::span<const int>(bc.aux_row_owner_ranks));
+    hashBorderedConsistencySpan(local_hash, std::span<const char>(bc.aux_row_owner_routed));
     hashBorderedConsistencyBytes(local_hash, bc.aux_variable_kinds.size());
     for (const auto kind : bc.aux_variable_kinds) {
         hashBorderedConsistencyBytes(local_hash, static_cast<std::uint8_t>(kind));
@@ -138,6 +140,8 @@ void hashBorderedConsistencyString(std::uint64_t& hash, const std::string& value
     int local_count = 0;
     local_count += 1;
     local_count += 5;
+    local_count += static_cast<int>(bc.aux_row_owner_ranks.size());
+    local_count += static_cast<int>(bc.aux_row_owner_routed.size());
     local_count += 2 * static_cast<int>(bc.aux_variable_kinds.size());
     local_count += 2 * static_cast<int>(bc.aux_blocks.size());
 
@@ -178,6 +182,9 @@ void hashBorderedConsistencyString(std::uint64_t& hash, const std::string& value
     hashBorderedConsistencyBytes(local_hash, bc.aux_self_terms_replicated);
     hashBorderedConsistencyBytes(local_hash, bc.n_aux);
     hashBorderedConsistencyBytes(local_hash, bc.n_field_dofs);
+    hashBorderedConsistencySpan(local_hash, std::span<const int>(bc.aux_row_owner_ranks));
+    hashBorderedConsistencySpan(local_hash, std::span<const char>(bc.aux_row_owner_routed));
+    hashBorderedConsistencySpan(local_hash, std::span<const int>(bc.aux_row_global_contributor_counts));
 
     hashBorderedConsistencyBytes(local_hash, bc.aux_variable_kinds.size());
     for (const auto kind : bc.aux_variable_kinds) {
@@ -192,6 +199,9 @@ void hashBorderedConsistencyString(std::uint64_t& hash, const std::string& value
 
     int local_count = 0;
     local_count += 5;
+    local_count += static_cast<int>(bc.aux_row_owner_ranks.size());
+    local_count += static_cast<int>(bc.aux_row_owner_routed.size());
+    local_count += static_cast<int>(bc.aux_row_global_contributor_counts.size());
     local_count += 2 * static_cast<int>(bc.aux_variable_kinds.size());
     local_count += 2 * static_cast<int>(bc.aux_blocks.size());
 
@@ -403,6 +413,22 @@ void allreduceDenseEntries(std::vector<Real>& data, MPI_Comm comm)
                   comm);
     data.swap(global);
 }
+
+void allreduceIntEntries(std::vector<int>& data, MPI_Comm comm)
+{
+    if (data.empty()) {
+        return;
+    }
+
+    std::vector<int> global(data.size(), 0);
+    MPI_Allreduce(data.data(),
+                  global.data(),
+                  static_cast<int>(data.size()),
+                  MPI_INT,
+                  MPI_SUM,
+                  comm);
+    data.swap(global);
+}
 #endif
 
 template <class OwnedPredicate>
@@ -452,6 +478,9 @@ void synchronizeBorderedCouplingForReplicatedSolve(FESystem::BorderedCouplingDat
                 allreduceDenseEntries(bc.g, comm);
             }
         }
+        bc.aux_row_global_contributor_counts =
+            bc.aux_row_local_contribution_flags;
+        allreduceIntEntries(bc.aux_row_global_contributor_counts, comm);
 
         bc.globally_reduced = true;
         if (!replicatedBorderedCouplingConsistentAcrossRanks(
@@ -465,6 +494,8 @@ void synchronizeBorderedCouplingForReplicatedSolve(FESystem::BorderedCouplingDat
 #endif
 
     bc.globally_reduced = true;
+    bc.aux_row_global_contributor_counts =
+        bc.aux_row_local_contribution_flags;
 }
 
 class SparseVectorAccumulatorView final : public assembly::GlobalSystemView {
@@ -1217,123 +1248,127 @@ assembly::AssemblyResult assembleOperator(
 
         if (n_aux > 0) {
             auto& bc = system.borderedCoupling();
+            const auto mixed_for_bordered =
+                aux_registry->composeMixedLayout(n_field_dofs);
+
+            auto layoutBlockFor = [&](std::string_view name)
+                -> const AuxiliaryBlockUnknownLayout* {
+                for (const auto& block : mixed_for_bordered.aux_layout.blocks) {
+                    if (block.name == name) {
+                        return &block;
+                    }
+                }
+                return nullptr;
+            };
+
+            auto populate_bordered_metadata = [&]() {
+                bc.aux_blocks.clear();
+                bc.aux_variable_kinds.clear();
+                bc.aux_row_owner_ranks.assign(static_cast<std::size_t>(bc.n_aux), -1);
+                bc.aux_row_owner_routed.assign(static_cast<std::size_t>(bc.n_aux), char{0});
+                bc.aux_row_local_contribution_flags.assign(
+                    static_cast<std::size_t>(bc.n_aux), 0);
+                bc.aux_row_global_contributor_counts.assign(
+                    static_cast<std::size_t>(bc.n_aux), 0);
+                bc.aux_self_terms_replicated = true;
+
+                std::size_t aux_row_offset = 0;
+                for (const auto& entry : system.deployed_aux_entries_) {
+                    if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic ||
+                        entry.lower_to_direct_only ||
+                        entry.local_condensed) {
+                        continue;
+                    }
+
+                    if (entry.spec.scope == AuxiliaryStateScope::Node ||
+                        entry.spec.scope == AuxiliaryStateScope::Region) {
+                        bc.aux_self_terms_replicated = false;
+                    }
+
+                    const AuxiliaryBlockStorage* blk_ptr = nullptr;
+                    int block_dim = entry.spec.size;
+                    if (auto* mgr = system.auxiliaryStateManagerIfPresent();
+                        mgr && mgr->hasBlock(entry.instance_name)) {
+                        blk_ptr = &mgr->getBlock(entry.instance_name);
+                        block_dim = static_cast<int>(blk_ptr->storageSize());
+                    }
+                    bc.aux_blocks.push_back({entry.instance_name, block_dim});
+
+                    const auto* layout_block = layoutBlockFor(entry.instance_name);
+                    const auto block_rows = static_cast<std::size_t>(
+                        std::max(block_dim, 0));
+                    const bool owner_routed =
+                        layout_block != nullptr &&
+                        (layout_block->row_ownership ==
+                             backends::MixedRowOwnershipPolicy::BackendDofOwner ||
+                         layout_block->row_ownership ==
+                             backends::MixedRowOwnershipPolicy::RegionOwner);
+
+                    for (std::size_t local_row = 0; local_row < block_rows; ++local_row) {
+                        const auto global_row = aux_row_offset + local_row;
+                        if (global_row >= bc.aux_row_owner_ranks.size()) {
+                            break;
+                        }
+                        int owner = -1;
+                        if (layout_block != nullptr) {
+                            if (local_row < layout_block->row_owner_ranks.size()) {
+                                owner = layout_block->row_owner_ranks[local_row];
+                            } else if (layout_block->row_ownership ==
+                                           backends::MixedRowOwnershipPolicy::SingleOwner) {
+                                owner = layout_block->single_owner_rank;
+                            }
+                        }
+                        bc.aux_row_owner_ranks[global_row] = owner;
+                        bc.aux_row_owner_routed[global_row] =
+                            owner_routed ? char{1} : char{0};
+                    }
+                    aux_row_offset += block_rows;
+
+                    const auto& meta = entry.model->structuralMetadata();
+                    const auto& kinds = meta.variable_kinds;
+                    const int stride = entry.spec.size;
+                    std::size_t entity_count = entry.explicit_entity_count;
+                    auto ordering = entry.spec.ordering;
+                    if (blk_ptr != nullptr) {
+                        entity_count = blk_ptr->entityCount();
+                        ordering = blk_ptr->ordering();
+                    } else if (entity_count == 0) {
+                        entity_count = 1;
+                    }
+                    auto kind_at = [&](int component) {
+                        const auto idx = static_cast<std::size_t>(component);
+                        return (idx < kinds.size())
+                            ? kinds[idx]
+                            : AuxiliaryVariableKind::Differential;
+                    };
+                    if (ordering == AuxiliaryEntityOrdering::ByComponentThenEntity) {
+                        for (int c = 0; c < stride; ++c) {
+                            for (std::size_t e = 0; e < entity_count; ++e) {
+                                (void)e;
+                                bc.aux_variable_kinds.push_back(kind_at(c));
+                            }
+                        }
+                    } else {
+                        for (std::size_t e = 0; e < entity_count; ++e) {
+                            (void)e;
+                            for (int c = 0; c < stride; ++c) {
+                                bc.aux_variable_kinds.push_back(kind_at(c));
+                            }
+                        }
+                    }
+                }
+            };
 
             // Only reset bordered blocks when assembling the Jacobian.
             // Residual-only assembly must not clear the Jacobian blocks
             // (D, B, Ct) that were populated during the J+r assembly.
             if (request.want_matrix) {
                 bc.resize(n_aux, n_field_dofs);
-                bc.aux_blocks.clear();
-                bc.aux_variable_kinds.clear();
-                bc.aux_self_terms_replicated = true;
-                for (const auto& entry : system.deployed_aux_entries_) {
-                    if (entry.spec.solve_mode == AuxiliarySolveMode::Monolithic) {
-                        if (entry.lower_to_direct_only) {
-                            continue;
-                        }
-                        if (entry.spec.scope == AuxiliaryStateScope::Node) {
-                            bc.aux_self_terms_replicated = false;
-                        }
-                        const AuxiliaryBlockStorage* blk_ptr = nullptr;
-                        int block_dim = entry.spec.size;
-                        if (auto* mgr = system.auxiliaryStateManagerIfPresent();
-                            mgr && mgr->hasBlock(entry.instance_name)) {
-                            blk_ptr = &mgr->getBlock(entry.instance_name);
-                            block_dim = static_cast<int>(
-                                blk_ptr->storageSize());
-                        }
-                        bc.aux_blocks.push_back({entry.instance_name, block_dim});
-                        const auto& meta = entry.model->structuralMetadata();
-                        const auto& kinds = meta.variable_kinds;
-                        const int stride = entry.spec.size;
-                        std::size_t entity_count = entry.explicit_entity_count;
-                        auto ordering = entry.spec.ordering;
-                        if (blk_ptr != nullptr) {
-                            entity_count = blk_ptr->entityCount();
-                            ordering = blk_ptr->ordering();
-                        } else if (entity_count == 0) {
-                            entity_count = 1;
-                        }
-                        auto kind_at = [&](int component) {
-                            const auto idx = static_cast<std::size_t>(component);
-                            return (idx < kinds.size())
-                                ? kinds[idx]
-                                : AuxiliaryVariableKind::Differential;
-                        };
-                        if (ordering == AuxiliaryEntityOrdering::ByComponentThenEntity) {
-                            for (int c = 0; c < stride; ++c) {
-                                for (std::size_t e = 0; e < entity_count; ++e) {
-                                    (void)e;
-                                    bc.aux_variable_kinds.push_back(kind_at(c));
-                                }
-                            }
-                        } else {
-                            for (std::size_t e = 0; e < entity_count; ++e) {
-                                (void)e;
-                                for (int c = 0; c < stride; ++c) {
-                                    bc.aux_variable_kinds.push_back(kind_at(c));
-                                }
-                            }
-                        }
-                    }
-                }
+                populate_bordered_metadata();
             } else if (!bc.active) {
                 // First call (residual-only before any J+r): initialize.
                 bc.resize(n_aux, n_field_dofs);
-                bc.aux_blocks.clear();
-                bc.aux_variable_kinds.clear();
-                bc.aux_self_terms_replicated = true;
-                for (const auto& entry : system.deployed_aux_entries_) {
-                    if (entry.spec.solve_mode == AuxiliarySolveMode::Monolithic) {
-                        if (entry.lower_to_direct_only) {
-                            continue;
-                        }
-                        if (entry.spec.scope == AuxiliaryStateScope::Node) {
-                            bc.aux_self_terms_replicated = false;
-                        }
-                        const AuxiliaryBlockStorage* blk_ptr = nullptr;
-                        int block_dim = entry.spec.size;
-                        if (auto* mgr = system.auxiliaryStateManagerIfPresent();
-                            mgr && mgr->hasBlock(entry.instance_name)) {
-                            blk_ptr = &mgr->getBlock(entry.instance_name);
-                            block_dim = static_cast<int>(
-                                blk_ptr->storageSize());
-                        }
-                        bc.aux_blocks.push_back({entry.instance_name, block_dim});
-                        const auto& meta = entry.model->structuralMetadata();
-                        const auto& kinds = meta.variable_kinds;
-                        const int stride = entry.spec.size;
-                        std::size_t entity_count = entry.explicit_entity_count;
-                        auto ordering = entry.spec.ordering;
-                        if (blk_ptr != nullptr) {
-                            entity_count = blk_ptr->entityCount();
-                            ordering = blk_ptr->ordering();
-                        } else if (entity_count == 0) {
-                            entity_count = 1;
-                        }
-                        auto kind_at = [&](int component) {
-                            const auto idx = static_cast<std::size_t>(component);
-                            return (idx < kinds.size())
-                                ? kinds[idx]
-                                : AuxiliaryVariableKind::Differential;
-                        };
-                        if (ordering == AuxiliaryEntityOrdering::ByComponentThenEntity) {
-                            for (int c = 0; c < stride; ++c) {
-                                for (std::size_t e = 0; e < entity_count; ++e) {
-                                    (void)e;
-                                    bc.aux_variable_kinds.push_back(kind_at(c));
-                                }
-                            }
-                        } else {
-                            for (std::size_t e = 0; e < entity_count; ++e) {
-                                (void)e;
-                                for (int c = 0; c < stride; ++c) {
-                                    bc.aux_variable_kinds.push_back(kind_at(c));
-                                }
-                            }
-                        }
-                    }
-                }
+                populate_bordered_metadata();
             }
             // Always re-zero g (auxiliary residual) since it changes each assembly.
             std::fill(bc.g.begin(), bc.g.end(), 0.0);
@@ -1345,6 +1380,29 @@ assembly::AssemblyResult assembleOperator(
                 assembly::GlobalSystemView* inner_vec;
                 FESystem::BorderedCouplingData* bc;
                 GlobalIndex nf; // n_field_dofs
+                int rank{0};
+
+                [[nodiscard]] bool ownsAuxRow(std::size_t aux_row) const noexcept
+                {
+                    if (bc == nullptr ||
+                        aux_row >= bc->aux_row_owner_routed.size() ||
+                        bc->aux_row_owner_routed[aux_row] == char{0}) {
+                        return true;
+                    }
+                    return aux_row < bc->aux_row_owner_ranks.size() &&
+                           bc->aux_row_owner_ranks[aux_row] == rank;
+                }
+
+                void markAuxRowContribution(std::size_t aux_row) const noexcept
+                {
+                    if (bc == nullptr ||
+                        aux_row >= bc->aux_row_owner_routed.size() ||
+                        bc->aux_row_owner_routed[aux_row] == char{0} ||
+                        aux_row >= bc->aux_row_local_contribution_flags.size()) {
+                        return;
+                    }
+                    bc->aux_row_local_contribution_flags[aux_row] = 1;
+                }
 
                 void addMatrixEntries(std::span<const GlobalIndex> row_dofs,
                     std::span<const GlobalIndex> col_dofs,
@@ -1367,8 +1425,10 @@ assembly::AssemblyResult assembleOperator(
                                 const auto ai = static_cast<std::size_t>(r - nf);
                                 const auto aj = static_cast<std::size_t>(c - nf);
                                 const auto na = static_cast<std::size_t>(bc->n_aux);
-                                if (ai < na && aj < na)
+                                if (ai < na && aj < na && ownsAuxRow(ai)) {
                                     bc->D[ai * na + aj] += v;
+                                    markAuxRowContribution(ai);
+                                }
                             } else if (r < nf && c >= nf) {
                                 // PDE×Aux → B block (col-major: B[r + nf*aux_col])
                                 const auto aj = static_cast<std::size_t>(c - nf);
@@ -1377,8 +1437,11 @@ assembly::AssemblyResult assembleOperator(
                             } else {
                                 // Aux×PDE → C^T block (row-major: Ct[aux_row * nf + col])
                                 const auto ai = static_cast<std::size_t>(r - nf);
-                                if (ai < static_cast<std::size_t>(bc->n_aux))
+                                if (ai < static_cast<std::size_t>(bc->n_aux) &&
+                                    ownsAuxRow(ai)) {
                                     bc->Ct[ai * bc->n_field_dofs + static_cast<std::size_t>(c)] += v;
+                                    markAuxRowContribution(ai);
+                                }
                             }
                         }
                     }
@@ -1399,8 +1462,13 @@ assembly::AssemblyResult assembleOperator(
                             if (inner_vec) inner_vec->addVectorEntry(dofs[i], vals[i], mode);
                         } else {
                             const auto ai = static_cast<std::size_t>(dofs[i] - nf);
-                            if (ai < static_cast<std::size_t>(bc->n_aux))
+                            if (ai < static_cast<std::size_t>(bc->n_aux) &&
+                                ownsAuxRow(ai)) {
                                 bc->g[ai] += vals[i];
+                                if (std::abs(vals[i]) > Real(1e-30)) {
+                                    markAuxRowContribution(ai);
+                                }
+                            }
                         }
                     }
                 }
@@ -1433,6 +1501,16 @@ assembly::AssemblyResult assembleOperator(
             bview.inner_vec = (request.want_vector ? vector_out : nullptr);
             bview.bc = &bc;
             bview.nf = static_cast<GlobalIndex>(n_field_dofs);
+            bview.rank = 0;
+#if FE_HAS_MPI
+            {
+                int mpi_initialized = 0;
+                MPI_Initialized(&mpi_initialized);
+                if (mpi_initialized) {
+                    MPI_Comm_rank(system.dofHandler().mpiComm(), &bview.rank);
+                }
+            }
+#endif
 
             system.assembleMixedAuxiliaryIntoGlobal(
                 state, &bview, &bview,

@@ -41,6 +41,8 @@ namespace {
 
 using DarcyExactPressure = double (*)(double, double);
 using DarcyExactFlux = std::array<double, 2> (*)(double, double);
+using DarcyExactPressure3D = double (*)(double, double, double);
+using DarcyExactFlux3D = std::array<double, 3> (*)(double, double, double);
 
 struct SquareBounds {
     double xmin{0.0};
@@ -470,6 +472,259 @@ std::array<double, 2> q_quadratic(double x, double) { return {2.0 * x - 1.0, 0.0
 double p_affine_interior(double x, double y) { return 1.0 - x + 0.25 * y; }
 std::array<double, 2> q_affine_interior(double, double) { return {1.0, -0.25}; }
 
+bool isCubeBoundaryVertex(const svmp::MeshBase& mesh, svmp::index_t vertex)
+{
+    const auto b = computeCubeBoundaryBounds(mesh);
+    const auto xyz = mesh.get_vertex_coords(vertex);
+    const double scale = std::max({1.0,
+                                   std::abs(b.xmax - b.xmin),
+                                   std::abs(b.ymax - b.ymin),
+                                   std::abs(b.zmax - b.zmin)});
+    const double tol = 1e-10 * scale;
+    const double x = static_cast<double>(xyz[0]);
+    const double y = static_cast<double>(xyz[1]);
+    const double z = static_cast<double>(xyz[2]);
+    return std::abs(x - b.xmin) <= tol ||
+           std::abs(x - b.xmax) <= tol ||
+           std::abs(y - b.ymin) <= tol ||
+           std::abs(y - b.ymax) <= tol ||
+           std::abs(z - b.zmin) <= tol ||
+           std::abs(z - b.zmax) <= tol;
+}
+
+svmp::index_t nearestInteriorVertex3D(const svmp::MeshBase& mesh,
+                                      double x_target,
+                                      double y_target,
+                                      double z_target)
+{
+    svmp::index_t best = svmp::INVALID_INDEX;
+    double best_dist2 = std::numeric_limits<double>::infinity();
+    for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(mesh.n_vertices()); ++v) {
+        if (isCubeBoundaryVertex(mesh, v)) {
+            continue;
+        }
+        const auto xyz = mesh.get_vertex_coords(v);
+        const double dx = static_cast<double>(xyz[0]) - x_target;
+        const double dy = static_cast<double>(xyz[1]) - y_target;
+        const double dz = static_cast<double>(xyz[2]) - z_target;
+        const double dist2 = dx * dx + dy * dy + dz * dz;
+        if (dist2 < best_dist2) {
+            best_dist2 = dist2;
+            best = v;
+        }
+    }
+    return best;
+}
+
+std::vector<formulations::poisson::PoissonOptions::NodeDirichletBC>
+nodeConstraintsForVertices3D(const svmp::MeshBase& mesh,
+                             DarcyExactPressure3D exact,
+                             bool include_boundary,
+                             std::vector<svmp::index_t> extra_vertices = {})
+{
+    const auto& gids = mesh.vertex_gids();
+    if (gids.size() != mesh.n_vertices()) {
+        throw std::runtime_error("Cube Darcy MMS test requires GlobalVertexID data on the Cube mesh");
+    }
+
+    std::vector<formulations::poisson::PoissonOptions::NodeDirichletBC> values;
+    auto add_vertex = [&](svmp::index_t v) {
+        const auto xyz = mesh.get_vertex_coords(v);
+        values.push_back(formulations::poisson::PoissonOptions::NodeDirichletBC{
+            static_cast<svmp::FE::GlobalIndex>(gids[static_cast<std::size_t>(v)]),
+            static_cast<svmp::FE::Real>(exact(static_cast<double>(xyz[0]),
+                                              static_cast<double>(xyz[1]),
+                                              static_cast<double>(xyz[2]))),
+        });
+    };
+
+    if (include_boundary) {
+        for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(mesh.n_vertices()); ++v) {
+            if (isCubeBoundaryVertex(mesh, v)) {
+                add_vertex(v);
+            }
+        }
+    }
+
+    for (const auto v : extra_vertices) {
+        if (v != svmp::INVALID_INDEX) {
+            add_vertex(v);
+        }
+    }
+    return values;
+}
+
+double maxVertexPressureError3D(const svmp::FE::systems::FESystem& system,
+                                const svmp::MeshBase& mesh,
+                                std::span<const svmp::FE::Real> u,
+                                DarcyExactPressure3D exact)
+{
+    const auto* entity_map = system.fieldDofHandler(0).getEntityDofMap();
+    EXPECT_NE(entity_map, nullptr);
+    if (!entity_map) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    double max_err = 0.0;
+    const auto field_offset = system.fieldDofOffset(0);
+    for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(mesh.n_vertices()); ++v) {
+        const auto vdofs = entity_map->getVertexDofs(static_cast<svmp::FE::GlobalIndex>(v));
+        EXPECT_EQ(vdofs.size(), 1u);
+        if (vdofs.empty()) {
+            return std::numeric_limits<double>::infinity();
+        }
+        const auto dof = vdofs[0] + field_offset;
+        EXPECT_GE(dof, 0);
+        EXPECT_LT(static_cast<std::size_t>(dof), u.size());
+        const auto xyz = mesh.get_vertex_coords(v);
+        const double expected = exact(static_cast<double>(xyz[0]),
+                                      static_cast<double>(xyz[1]),
+                                      static_cast<double>(xyz[2]));
+        max_err = std::max(max_err,
+                           std::abs(static_cast<double>(u[static_cast<std::size_t>(dof)]) - expected));
+    }
+    return max_err;
+}
+
+double maxQ2TetraPressureDofError3D(const svmp::FE::systems::FESystem& system,
+                                    const svmp::MeshBase& mesh,
+                                    std::span<const svmp::FE::Real> u,
+                                    DarcyExactPressure3D exact)
+{
+    const auto* entity_map = system.fieldDofHandler(0).getEntityDofMap();
+    EXPECT_NE(entity_map, nullptr);
+    if (!entity_map) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    double max_err = maxVertexPressureError3D(system, mesh, u, exact);
+    const auto field_offset = system.fieldDofOffset(0);
+
+    for (svmp::index_t e = 0; e < static_cast<svmp::index_t>(mesh.n_edges()); ++e) {
+        const auto edofs = entity_map->getEdgeDofs(static_cast<svmp::FE::GlobalIndex>(e));
+        if (edofs.empty()) {
+            continue;
+        }
+        EXPECT_EQ(edofs.size(), 1u);
+        const auto dof = edofs[0] + field_offset;
+        EXPECT_GE(dof, 0);
+        EXPECT_LT(static_cast<std::size_t>(dof), u.size());
+
+        const auto ev = mesh.edge_vertices(e);
+        const auto p0 = mesh.get_vertex_coords(ev[0]);
+        const auto p1 = mesh.get_vertex_coords(ev[1]);
+        const double x = 0.5 * (static_cast<double>(p0[0]) + static_cast<double>(p1[0]));
+        const double y = 0.5 * (static_cast<double>(p0[1]) + static_cast<double>(p1[1]));
+        const double z = 0.5 * (static_cast<double>(p0[2]) + static_cast<double>(p1[2]));
+        max_err = std::max(max_err,
+                           std::abs(static_cast<double>(u[static_cast<std::size_t>(dof)]) -
+                                    exact(x, y, z)));
+    }
+
+    return max_err;
+}
+
+double maxCellFluxError3D(const svmp::MeshBase& mesh, DarcyExactFlux3D exact_cell_average)
+{
+    const auto h = mesh.field_handle(svmp::EntityKind::Volume, "Darcy_flux");
+    EXPECT_EQ(mesh.field_components(h), 3u);
+    const auto* data = mesh.field_data_as<double>(h);
+    EXPECT_NE(data, nullptr);
+    if (!data) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    double max_err = 0.0;
+    for (svmp::index_t c = 0; c < static_cast<svmp::index_t>(mesh.n_cells()); ++c) {
+        const auto centroid = mesh.cell_centroid(c);
+        const auto expected = exact_cell_average(static_cast<double>(centroid[0]),
+                                                 static_cast<double>(centroid[1]),
+                                                 static_cast<double>(centroid[2]));
+        const std::size_t offset = static_cast<std::size_t>(c) * 3u;
+        for (std::size_t d = 0; d < 3u; ++d) {
+            max_err = std::max(max_err, std::abs(data[offset + d] - expected[d]));
+        }
+    }
+    return max_err;
+}
+
+double maxVertexFluxError3D(const svmp::MeshBase& mesh, DarcyExactFlux3D exact_vertex_flux)
+{
+    const auto h = mesh.field_handle(svmp::EntityKind::Vertex, "Darcy_flux_node");
+    EXPECT_EQ(mesh.field_components(h), 3u);
+    const auto* data = mesh.field_data_as<double>(h);
+    EXPECT_NE(data, nullptr);
+    if (!data) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    double max_err = 0.0;
+    for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(mesh.n_vertices()); ++v) {
+        const auto xyz = mesh.get_vertex_coords(v);
+        const auto expected = exact_vertex_flux(static_cast<double>(xyz[0]),
+                                                static_cast<double>(xyz[1]),
+                                                static_cast<double>(xyz[2]));
+        const std::size_t offset = static_cast<std::size_t>(v) * 3u;
+        for (std::size_t d = 0; d < 3u; ++d) {
+            max_err = std::max(max_err, std::abs(data[offset + d] - expected[d]));
+        }
+    }
+    return max_err;
+}
+
+double maxPatchAverageFluxError3D(const svmp::MeshBase& mesh, DarcyExactFlux3D exact_cell_average)
+{
+    const auto h = mesh.field_handle(svmp::EntityKind::Vertex, "Darcy_flux_node");
+    EXPECT_EQ(mesh.field_components(h), 3u);
+    const auto* data = mesh.field_data_as<double>(h);
+    EXPECT_NE(data, nullptr);
+    if (!data) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    std::vector<std::array<double, 3>> accum(mesh.n_vertices(), {0.0, 0.0, 0.0});
+    std::vector<int> counts(mesh.n_vertices(), 0);
+    for (svmp::index_t c = 0; c < static_cast<svmp::index_t>(mesh.n_cells()); ++c) {
+        const auto centroid = mesh.cell_centroid(c);
+        const auto cell_flux = exact_cell_average(static_cast<double>(centroid[0]),
+                                                  static_cast<double>(centroid[1]),
+                                                  static_cast<double>(centroid[2]));
+        for (const auto v : mesh.cell_vertices(c)) {
+            for (std::size_t d = 0; d < 3u; ++d) {
+                accum[static_cast<std::size_t>(v)][d] += cell_flux[d];
+            }
+            counts[static_cast<std::size_t>(v)] += 1;
+        }
+    }
+
+    double max_err = 0.0;
+    for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(mesh.n_vertices()); ++v) {
+        const int n = counts[static_cast<std::size_t>(v)];
+        EXPECT_GT(n, 0);
+        if (n <= 0) {
+            continue;
+        }
+        const std::size_t offset = static_cast<std::size_t>(v) * 3u;
+        for (std::size_t d = 0; d < 3u; ++d) {
+            const double expected = accum[static_cast<std::size_t>(v)][d] / static_cast<double>(n);
+            max_err = std::max(max_err, std::abs(data[offset + d] - expected));
+        }
+    }
+    return max_err;
+}
+
+double p_linear3(double x, double, double) { return 1.0 - x; }
+std::array<double, 3> q_linear3(double, double, double) { return {1.0, 0.0, 0.0}; }
+
+double p_affine_boundary3(double x, double y, double z) { return x + 2.0 * y - 0.5 * z; }
+std::array<double, 3> q_affine_boundary3(double, double, double) { return {-1.0, -2.0, 0.5}; }
+
+double p_quadratic3(double x, double, double) { return x * (1.0 - x); }
+std::array<double, 3> q_quadratic3(double x, double, double) { return {2.0 * x - 1.0, 0.0, 0.0}; }
+
+double p_affine_interior3(double x, double y, double z) { return 1.0 - x + 0.25 * y - 0.125 * z; }
+std::array<double, 3> q_affine_interior3(double, double, double) { return {1.0, -0.25, 0.125}; }
+
 } // namespace
 
 TEST(DarcySquareMMS, LinearPressureConstantFlux)
@@ -695,6 +950,256 @@ TEST(DarcySquareMMS, DerivedFieldsRoundTripVtuOutput)
     if (reloaded.has_field(svmp::EntityKind::Volume, "Darcy_flux")) {
         const auto h = reloaded.field_handle(svmp::EntityKind::Volume, "Darcy_flux");
         EXPECT_EQ(reloaded.field_components(h), 2u);
+    }
+
+    std::filesystem::remove(out_path);
+#  endif
+#endif
+}
+
+TEST(DarcyCubeMMS, LinearPressureConstantFlux)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+#  if !defined(MESH_HAS_VTK)
+    GTEST_SKIP() << "Requires Mesh built with VTK support (MESH_ENABLE_VTK=ON).";
+#  else
+    std::string backend_error;
+    auto backend = tryCreateDarcyMmsBackend(backend_error);
+    if (!backend.factory) {
+        GTEST_SKIP() << "Requires Eigen or FSILS backend: " << backend_error;
+    }
+
+    const auto mesh = loadCubeMeshWithMarkedBoundaries();
+    ASSERT_TRUE(mesh);
+    ASSERT_EQ(mesh->dim(), 3);
+    auto mesh_mut = std::const_pointer_cast<svmp::Mesh>(mesh);
+    const auto bounds = computeCubeBoundaryBounds(mesh->base());
+
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(svmp::FE::ElementType::Tetra4, /*order=*/1);
+    formulations::poisson::PoissonOptions opts;
+    opts.source = 0.0;
+    opts.dirichlet = {
+        {.boundary_marker = static_cast<int>(kCubeBoundaryLeft),
+         .value = svmp::FE::Real(p_linear3(bounds.xmin, 0.0, 0.0))},
+        {.boundary_marker = static_cast<int>(kCubeBoundaryRight),
+         .value = svmp::FE::Real(p_linear3(bounds.xmax, 0.0, 0.0))},
+    };
+
+    svmp::FE::systems::FESystem system(mesh);
+    installDarcyMmsModule(system, space, std::move(opts));
+    ASSERT_EQ(system.derivedResults().size(), 2u);
+    ASSERT_NO_THROW(system.setup());
+
+    auto history = solveSteadyDarcySystem(system, backend);
+    appendDarcyDerivedFields(system, *mesh_mut, history);
+
+    EXPECT_LT(maxVertexPressureError3D(system, mesh_mut->base(), history.uSpan(), p_linear3),
+              backend.pressure_tolerance);
+    EXPECT_LT(maxCellFluxError3D(mesh_mut->base(), q_linear3), backend.flux_tolerance);
+    EXPECT_LT(maxVertexFluxError3D(mesh_mut->base(), q_linear3), backend.flux_tolerance);
+#  endif
+#endif
+}
+
+TEST(DarcyCubeMMS, AffineHarmonicBoundaryNodeConstraints)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+#  if !defined(MESH_HAS_VTK)
+    GTEST_SKIP() << "Requires Mesh built with VTK support (MESH_ENABLE_VTK=ON).";
+#  else
+    std::string backend_error;
+    auto backend = tryCreateDarcyMmsBackend(backend_error);
+    if (!backend.factory) {
+        GTEST_SKIP() << "Requires Eigen or FSILS backend: " << backend_error;
+    }
+
+    const auto mesh = loadCubeMeshWithMarkedBoundaries();
+    ASSERT_TRUE(mesh);
+    ASSERT_EQ(mesh->dim(), 3);
+    auto mesh_mut = std::const_pointer_cast<svmp::Mesh>(mesh);
+
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(svmp::FE::ElementType::Tetra4, /*order=*/1);
+    formulations::poisson::PoissonOptions opts;
+    opts.source = 0.0;
+    ASSERT_NO_THROW(opts.node_dirichlet.values =
+                        nodeConstraintsForVertices3D(mesh->base(),
+                                                     p_affine_boundary3,
+                                                     /*include_boundary=*/true));
+
+    svmp::FE::systems::FESystem system(mesh);
+    installDarcyMmsModule(system, space, std::move(opts));
+    ASSERT_NO_THROW(system.setup());
+
+    auto history = solveSteadyDarcySystem(system, backend);
+    appendDarcyDerivedFields(system, *mesh_mut, history);
+
+    EXPECT_LT(maxVertexPressureError3D(system, mesh_mut->base(), history.uSpan(), p_affine_boundary3),
+              backend.pressure_tolerance);
+    EXPECT_LT(maxCellFluxError3D(mesh_mut->base(), q_affine_boundary3), backend.flux_tolerance);
+    EXPECT_LT(maxVertexFluxError3D(mesh_mut->base(), q_affine_boundary3), backend.flux_tolerance);
+#  endif
+#endif
+}
+
+TEST(DarcyCubeMMS, QuadraticConstantSourceQ2)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+#  if !defined(MESH_HAS_VTK)
+    GTEST_SKIP() << "Requires Mesh built with VTK support (MESH_ENABLE_VTK=ON).";
+#  else
+    std::string backend_error;
+    auto backend = tryCreateDarcyMmsBackend(backend_error);
+    if (!backend.factory) {
+        GTEST_SKIP() << "Requires Eigen or FSILS backend: " << backend_error;
+    }
+
+    const auto mesh = loadCubeMeshWithMarkedBoundaries();
+    ASSERT_TRUE(mesh);
+    ASSERT_EQ(mesh->dim(), 3);
+    auto mesh_mut = std::const_pointer_cast<svmp::Mesh>(mesh);
+    const auto bounds = computeCubeBoundaryBounds(mesh->base());
+
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(svmp::FE::ElementType::Tetra4, /*order=*/2);
+    formulations::poisson::PoissonOptions opts;
+    opts.source = 2.0;
+    opts.dirichlet = {
+        {.boundary_marker = static_cast<int>(kCubeBoundaryLeft),
+         .value = svmp::FE::Real(p_quadratic3(bounds.xmin, 0.0, 0.0))},
+        {.boundary_marker = static_cast<int>(kCubeBoundaryRight),
+         .value = svmp::FE::Real(p_quadratic3(bounds.xmax, 0.0, 0.0))},
+    };
+
+    svmp::FE::systems::FESystem system(mesh);
+    installDarcyMmsModule(system, space, std::move(opts));
+    ASSERT_NO_THROW(system.setup());
+
+    auto history = solveSteadyDarcySystem(system, backend);
+    appendDarcyDerivedFields(system, *mesh_mut, history);
+
+    EXPECT_LT(maxQ2TetraPressureDofError3D(system, mesh_mut->base(), history.uSpan(), p_quadratic3),
+              backend.pressure_tolerance);
+    EXPECT_LT(maxCellFluxError3D(mesh_mut->base(), q_quadratic3), backend.quadratic_flux_tolerance);
+    EXPECT_LT(maxPatchAverageFluxError3D(mesh_mut->base(), q_quadratic3), backend.quadratic_flux_tolerance);
+#  endif
+#endif
+}
+
+TEST(DarcyCubeMMS, AffinePressureWithInteriorNodeConstraint)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+#  if !defined(MESH_HAS_VTK)
+    GTEST_SKIP() << "Requires Mesh built with VTK support (MESH_ENABLE_VTK=ON).";
+#  else
+    std::string backend_error;
+    auto backend = tryCreateDarcyMmsBackend(backend_error);
+    if (!backend.factory) {
+        GTEST_SKIP() << "Requires Eigen or FSILS backend: " << backend_error;
+    }
+
+    const auto mesh = loadCubeMeshWithMarkedBoundaries();
+    ASSERT_TRUE(mesh);
+    ASSERT_EQ(mesh->dim(), 3);
+    auto mesh_mut = std::const_pointer_cast<svmp::Mesh>(mesh);
+
+    const auto bounds = computeCubeBoundaryBounds(mesh->base());
+    const auto interior = nearestInteriorVertex3D(mesh->base(),
+                                                  0.5 * (bounds.xmin + bounds.xmax),
+                                                  0.5 * (bounds.ymin + bounds.ymax),
+                                                  0.5 * (bounds.zmin + bounds.zmax));
+    ASSERT_NE(interior, svmp::INVALID_INDEX);
+
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(svmp::FE::ElementType::Tetra4, /*order=*/1);
+    formulations::poisson::PoissonOptions opts;
+    opts.source = 0.0;
+    ASSERT_NO_THROW(opts.node_dirichlet.values =
+                        nodeConstraintsForVertices3D(mesh->base(),
+                                                     p_affine_interior3,
+                                                     /*include_boundary=*/true,
+                                                     {interior}));
+
+    svmp::FE::systems::FESystem system(mesh);
+    installDarcyMmsModule(system, space, std::move(opts));
+    ASSERT_NO_THROW(system.setup());
+
+    auto history = solveSteadyDarcySystem(system, backend);
+    appendDarcyDerivedFields(system, *mesh_mut, history);
+
+    EXPECT_LT(maxVertexPressureError3D(system, mesh_mut->base(), history.uSpan(), p_affine_interior3),
+              backend.pressure_tolerance);
+    EXPECT_LT(maxCellFluxError3D(mesh_mut->base(), q_affine_interior3), backend.flux_tolerance);
+    EXPECT_LT(maxVertexFluxError3D(mesh_mut->base(), q_affine_interior3), backend.flux_tolerance);
+#  endif
+#endif
+}
+
+TEST(DarcyCubeMMS, DerivedFieldsRoundTripVtuOutput)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+#  if !defined(MESH_HAS_VTK)
+    GTEST_SKIP() << "Requires Mesh built with VTK support (MESH_ENABLE_VTK=ON).";
+#  else
+    std::string backend_error;
+    auto backend = tryCreateDarcyMmsBackend(backend_error);
+    if (!backend.factory) {
+        GTEST_SKIP() << "Requires Eigen or FSILS backend: " << backend_error;
+    }
+
+    const auto mesh = loadCubeMeshWithMarkedBoundaries();
+    ASSERT_TRUE(mesh);
+    ASSERT_EQ(mesh->dim(), 3);
+    auto mesh_mut = std::const_pointer_cast<svmp::Mesh>(mesh);
+    const auto bounds = computeCubeBoundaryBounds(mesh->base());
+
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(svmp::FE::ElementType::Tetra4, /*order=*/1);
+    formulations::poisson::PoissonOptions opts;
+    opts.source = 0.0;
+    opts.dirichlet = {
+        {.boundary_marker = static_cast<int>(kCubeBoundaryLeft),
+         .value = svmp::FE::Real(p_linear3(bounds.xmin, 0.0, 0.0))},
+        {.boundary_marker = static_cast<int>(kCubeBoundaryRight),
+         .value = svmp::FE::Real(p_linear3(bounds.xmax, 0.0, 0.0))},
+    };
+
+    svmp::FE::systems::FESystem system(mesh);
+    installDarcyMmsModule(system, space, std::move(opts));
+    ASSERT_NO_THROW(system.setup());
+
+    auto history = solveSteadyDarcySystem(system, backend);
+    appendDarcyDerivedFields(system, *mesh_mut, history);
+    attachPressureVertexField(system, mesh_mut->base(), history.uSpan());
+
+    const auto out_path = std::filesystem::temp_directory_path() / "svmp_darcy_cube_mms_roundtrip.vtu";
+    std::filesystem::remove(out_path);
+    ASSERT_NO_THROW(svmp::save_mesh(*mesh_mut, out_path.string()));
+
+    svmp::MeshIOOptions opts_io;
+    opts_io.format = "vtu";
+    opts_io.path = out_path.string();
+    const auto reloaded = svmp::MeshBase::load(opts_io);
+
+    EXPECT_TRUE(reloaded.has_field(svmp::EntityKind::Vertex, "Pressure"));
+    EXPECT_TRUE(reloaded.has_field(svmp::EntityKind::Vertex, "Darcy_flux_node"));
+    EXPECT_TRUE(reloaded.has_field(svmp::EntityKind::Volume, "Darcy_flux"));
+    EXPECT_FALSE(reloaded.has_field(svmp::EntityKind::Volume, "Darcy_flux_node"));
+    EXPECT_FALSE(reloaded.has_field(svmp::EntityKind::Vertex, "Darcy_flux"));
+
+    if (reloaded.has_field(svmp::EntityKind::Vertex, "Darcy_flux_node")) {
+        const auto h = reloaded.field_handle(svmp::EntityKind::Vertex, "Darcy_flux_node");
+        EXPECT_EQ(reloaded.field_components(h), 3u);
+    }
+    if (reloaded.has_field(svmp::EntityKind::Volume, "Darcy_flux")) {
+        const auto h = reloaded.field_handle(svmp::EntityKind::Volume, "Darcy_flux");
+        EXPECT_EQ(reloaded.field_components(h), 3u);
     }
 
     std::filesystem::remove(out_path);
