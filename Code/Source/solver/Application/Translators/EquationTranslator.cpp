@@ -59,13 +59,13 @@ svmp::Physics::DomainInput snapshot_domain(const DomainParameters& domain)
 namespace application {
 namespace translators {
 
-std::unique_ptr<svmp::Physics::PhysicsModule> EquationTranslator::createModule(
-    const EquationParameters& eq_params, svmp::FE::systems::FESystem& system,
+svmp::Physics::EquationModuleInput EquationTranslator::buildInput(
+    const EquationParameters& eq_params,
     const std::map<std::string, std::shared_ptr<svmp::Mesh>>& meshes)
 {
   const std::string eq_type = eq_params.type.value();
 
-  application::core::oopCout() << "[svMultiPhysics::Application] EquationTranslator: createModule(type='" << eq_type
+  application::core::oopCout() << "[svMultiPhysics::Application] EquationTranslator: buildInput(type='" << eq_type
                                << "')" << std::endl;
 
   if (meshes.empty()) {
@@ -106,6 +106,28 @@ std::unique_ptr<svmp::Physics::PhysicsModule> EquationTranslator::createModule(
     input.module_options_file_path = eq_params.module_options_file_path.value();
     application::core::oopCout() << "[svMultiPhysics::Application] EquationTranslator: module_options_file_path='"
                                  << input.module_options_file_path << "'" << std::endl;
+  }
+
+  if (eq_params.node_pressure_constraints.value_set) {
+    const auto id_type = eq_params.node_pressure_constraints.id_type.value();
+    const auto values_file_path = eq_params.node_pressure_constraints.values_file_path.value();
+    if (id_type != "Global_vertex_gid") {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] <Node_pressure_constraints><Id_type> must be 'Global_vertex_gid' "
+          "for the new OOP solver Darcy/Poisson node pressure constraint path.");
+    }
+    if (values_file_path.empty()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] <Node_pressure_constraints><Values_file_path> must be non-empty.");
+    }
+
+    svmp::Physics::NodePressureConstraintInput node_pressure_constraints;
+    node_pressure_constraints.id_type = id_type;
+    node_pressure_constraints.values_file_path = values_file_path;
+    input.node_pressure_constraints = std::move(node_pressure_constraints);
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] EquationTranslator: node_pressure_constraints id_type='"
+        << id_type << "' values_file_path='" << values_file_path << "'" << std::endl;
   }
 
   if (eq_params.default_domain) {
@@ -158,6 +180,19 @@ std::unique_ptr<svmp::Physics::PhysicsModule> EquationTranslator::createModule(
       input.boundary_conditions.push_back(std::move(bc_in));
     }
   }
+
+  return input;
+}
+
+std::unique_ptr<svmp::Physics::PhysicsModule> EquationTranslator::createModule(
+    const EquationParameters& eq_params, svmp::FE::systems::FESystem& system,
+    const std::map<std::string, std::shared_ptr<svmp::Mesh>>& meshes)
+{
+  const auto input = buildInput(eq_params, meshes);
+  const std::string eq_type = input.equation_type;
+
+  application::core::oopCout() << "[svMultiPhysics::Application] EquationTranslator: createModule(type='" << eq_type
+                               << "')" << std::endl;
 
   auto& registry = svmp::Physics::EquationModuleRegistry::instance();
   const auto types = registry.registeredTypes();

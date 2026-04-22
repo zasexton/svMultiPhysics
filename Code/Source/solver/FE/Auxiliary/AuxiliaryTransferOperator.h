@@ -69,10 +69,17 @@ struct AuxiliaryRestartSchema {
     int component_count{0};
     std::string scope_name{};           ///< "Global", "Node", etc.
     std::string ordering_name{};        ///< "ByEntityThenComponent", etc.
+    std::string deployment_region_kind{};
     std::string region_identity{};      ///< Deployment region identity
+    std::string region_version{};
     std::size_t entity_count{0};
+    std::size_t owned_entity_count{0};
     std::size_t storage_size{0};
     std::size_t history_depth{0};
+    std::vector<std::size_t> entity_ids{};
+    std::vector<std::size_t> qp_offsets{};
+    std::vector<std::size_t> qp_cell_ids{};
+    std::vector<AuxiliaryRegionMembershipMetadata> region_membership{};
 
     /// Schema version hash (for detecting format changes).
     std::uint64_t schema_hash{0};
@@ -157,7 +164,8 @@ public:
         AuxiliaryEntityOrdering ordering,
         const std::string& region_identity,
         std::size_t entity_count,
-        std::size_t history_depth);
+        std::size_t history_depth,
+        const AuxiliaryEntityRemapMetadata* entity_metadata = nullptr);
 
     /**
      * @brief Validate a restart payload against expected schema.

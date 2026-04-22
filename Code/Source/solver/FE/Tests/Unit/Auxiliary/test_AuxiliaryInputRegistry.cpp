@@ -196,12 +196,14 @@ TEST(AuxiliaryInputRegistry, AllProducerTypesRegisterable)
     reg.registerInput(mkSpec("i", AuxiliaryInputProducer::CellSample));
     reg.registerInput(mkSpec("j", AuxiliaryInputProducer::DomainAverage));
     reg.registerInput(mkSpec("k", AuxiliaryInputProducer::DomainIntegral));
-    reg.registerInput(mkSpec("l", AuxiliaryInputProducer::SampledBoundaryTrace));
-    reg.registerInput(mkSpec("m", AuxiliaryInputProducer::CoupledBoundaryTrace));
-    reg.registerInput(mkSpec("n", AuxiliaryInputProducer::SampledBoundaryReduction));
-    reg.registerInput(mkSpec("o", AuxiliaryInputProducer::CoupledBoundaryReduction));
+    reg.registerInput(mkSpec("l", AuxiliaryInputProducer::RegionAverage));
+    reg.registerInput(mkSpec("m", AuxiliaryInputProducer::RegionIntegral));
+    reg.registerInput(mkSpec("n", AuxiliaryInputProducer::SampledBoundaryTrace));
+    reg.registerInput(mkSpec("o", AuxiliaryInputProducer::CoupledBoundaryTrace));
+    reg.registerInput(mkSpec("p", AuxiliaryInputProducer::SampledBoundaryReduction));
+    reg.registerInput(mkSpec("q", AuxiliaryInputProducer::CoupledBoundaryReduction));
 
-    EXPECT_EQ(reg.inputCount(), 15u);
+    EXPECT_EQ(reg.inputCount(), 17u);
 }
 
 // ---------------------------------------------------------------------------

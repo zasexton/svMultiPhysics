@@ -15,7 +15,8 @@ InitializationResult AuxiliaryInitializationSolver::solve(
     std::span<const Real> params,
     Real time,
     const InitializationOptions& opts,
-    IndexReductionHook index_reduction)
+    IndexReductionHook index_reduction,
+    std::size_t entity_index)
 {
     InitializationResult result;
     const int n = model.dimension();
@@ -43,6 +44,7 @@ InitializationResult AuxiliaryInitializationSolver::solve(
         init_req.time = time;
         init_req.inputs = inputs;
         init_req.params = params;
+        init_req.entity_index = entity_index;
         model.initializeAlgebraic(init_req);
         result.converged = true;
         result.diagnostics.push_back("Used model's initializeAlgebraic()");
@@ -68,6 +70,7 @@ InitializationResult AuxiliaryInitializationSolver::solve(
         ctx.xdot = xdot;
         ctx.inputs = inputs;
         ctx.params = params;
+        ctx.entity_index = entity_index;
 
         AuxiliaryResidualRequest res_req;
         res_req.residual = residual;

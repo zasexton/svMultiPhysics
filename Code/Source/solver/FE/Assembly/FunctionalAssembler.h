@@ -746,6 +746,18 @@ public:
     [[nodiscard]] Real assembleScalar(FunctionalKernel& kernel);
 
     /**
+     * @brief Assemble a scalar functional over an explicit cell subset.
+     *
+     * Cell ids are interpreted in the mesh-global numbering used by
+     * IMeshAccess.  Non-owned cells are still ignored by the usual owned-cell
+     * assembly rule.  An empty subset evaluates to zero, so distributed callers
+     * can pass local slices and still participate in external reductions.
+     */
+    [[nodiscard]] Real assembleScalarOverCells(
+        FunctionalKernel& kernel,
+        std::span<const GlobalIndex> cell_ids);
+
+    /**
      * @brief Assemble scalar with detailed result
      */
     [[nodiscard]] FunctionalResult assembleScalarDetailed(FunctionalKernel& kernel);
@@ -874,7 +886,10 @@ private:
     /**
      * @brief Core assembly loop for cells
      */
-    Real assembleCellsCore(FunctionalKernel& kernel, FunctionalResult& result);
+    Real assembleCellsCore(
+        FunctionalKernel& kernel,
+        FunctionalResult& result,
+        std::span<const GlobalIndex> selected_cells = {});
 
     /**
      * @brief Core assembly loop for boundary faces

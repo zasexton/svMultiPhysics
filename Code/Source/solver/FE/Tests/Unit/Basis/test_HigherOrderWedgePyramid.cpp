@@ -345,6 +345,99 @@ static double integrate_rt_face_functional(const RaviartThomasBasis& basis,
     return value;
 }
 
+static std::vector<double> integrate_rt_face_functionals(const RaviartThomasBasis& basis,
+                                                         ElementType elem_type,
+                                                         int face_id,
+                                                         int moment_index,
+                                                         int quad_order = 8) {
+    using svmp::FE::math::Vector;
+    using namespace svmp::FE::quadrature;
+
+    const auto ref = elements::ReferenceElement::create(elem_type);
+    const auto& face_nodes = ref.face_nodes(static_cast<std::size_t>(face_id));
+    std::vector<double> values_for_basis(basis.size(), 0.0);
+
+    if (face_nodes.size() == 3u) {
+        const LagrangeBasis face_basis(ElementType::Triangle3, basis.order());
+        TriangleQuadrature tri(quad_order);
+
+        const Vector<Real,3> v0 =
+            NodeOrdering::get_node_coords(elem_type, static_cast<std::size_t>(face_nodes[0]));
+        const Vector<Real,3> v1 =
+            NodeOrdering::get_node_coords(elem_type, static_cast<std::size_t>(face_nodes[1]));
+        const Vector<Real,3> v2 =
+            NodeOrdering::get_node_coords(elem_type, static_cast<std::size_t>(face_nodes[2]));
+        const Vector<Real,3> e01 = v1 - v0;
+        const Vector<Real,3> e02 = v2 - v0;
+        const Vector<Real,3> cross = e01.cross(e02);
+
+        for (std::size_t q = 0; q < tri.num_points(); ++q) {
+            const auto& pt = tri.point(q);
+            const Real u = pt[0];
+            const Real v = pt[1];
+            const Vector<Real,3> xi = v0 + e01 * u + e02 * v;
+
+            std::vector<Real> face_vals;
+            face_basis.evaluate_values(Vector<Real,3>{u, v, Real(0)}, face_vals);
+
+            std::vector<Vector<Real,3>> basis_values;
+            basis.evaluate_vector_values(xi, basis_values);
+            const double weight =
+                static_cast<double>(tri.weight(q)) *
+                static_cast<double>(face_vals[static_cast<std::size_t>(moment_index)]);
+
+            for (std::size_t i = 0; i < basis_values.size(); ++i) {
+                const auto& basis_value = basis_values[i];
+                const double flux =
+                    static_cast<double>(basis_value[0] * cross[0] +
+                                        basis_value[1] * cross[1] +
+                                        basis_value[2] * cross[2]);
+                values_for_basis[i] += weight * flux;
+            }
+        }
+        return values_for_basis;
+    }
+
+    const LagrangeBasis face_basis(ElementType::Quad4, basis.order());
+    QuadrilateralQuadrature quad(quad_order, quad_order);
+    const std::array<Vector<Real,3>, 4> fv{
+        NodeOrdering::get_node_coords(elem_type, static_cast<std::size_t>(face_nodes[0])),
+        NodeOrdering::get_node_coords(elem_type, static_cast<std::size_t>(face_nodes[1])),
+        NodeOrdering::get_node_coords(elem_type, static_cast<std::size_t>(face_nodes[2])),
+        NodeOrdering::get_node_coords(elem_type, static_cast<std::size_t>(face_nodes[3]))
+    };
+
+    for (std::size_t q = 0; q < quad.num_points(); ++q) {
+        const auto& pt = quad.point(q);
+        const Real u = pt[0];
+        const Real v = pt[1];
+        const Vector<Real,3> xi = bilinear_face_point(fv, u, v);
+        const Vector<Real,3> du = bilinear_face_du(fv, u, v);
+        const Vector<Real,3> dv = bilinear_face_dv(fv, u, v);
+        const Vector<Real,3> cross = du.cross(dv);
+
+        std::vector<Real> face_vals;
+        face_basis.evaluate_values(Vector<Real,3>{u, v, Real(0)}, face_vals);
+
+        std::vector<Vector<Real,3>> basis_values;
+        basis.evaluate_vector_values(xi, basis_values);
+        const double weight =
+            static_cast<double>(quad.weight(q)) *
+            static_cast<double>(face_vals[static_cast<std::size_t>(moment_index)]);
+
+        for (std::size_t i = 0; i < basis_values.size(); ++i) {
+            const auto& basis_value = basis_values[i];
+            const double flux =
+                static_cast<double>(basis_value[0] * cross[0] +
+                                    basis_value[1] * cross[1] +
+                                    basis_value[2] * cross[2]);
+            values_for_basis[i] += weight * flux;
+        }
+    }
+
+    return values_for_basis;
+}
+
 static double integrate_rt_face_flux_outward(const RaviartThomasBasis& basis,
                                              ElementType elem_type,
                                              int face_id,
@@ -728,18 +821,18 @@ static double integrate_nd_edge_tangential_moment(const NedelecBasis& basis,
     return moment;
 }
 
-static double integrate_nd_face_tangential_moment(const NedelecBasis& basis,
-                                                  ElementType elem_type,
-                                                  int face_id,
-                                                  int moment_index,
-                                                  int func_id,
-                                                  int quad_order = 8) {
+static std::vector<double> integrate_nd_face_tangential_moments(const NedelecBasis& basis,
+                                                                ElementType elem_type,
+                                                                int face_id,
+                                                                int moment_index,
+                                                                int quad_order = 8) {
     using svmp::FE::basis::LagrangeBasis;
     using svmp::FE::math::Vector;
 
     const int k = basis.order();
     const auto ref = elements::ReferenceElement::create(elem_type);
     const auto& face_nodes = ref.face_nodes(static_cast<std::size_t>(face_id));
+    std::vector<double> moments(basis.size(), 0.0);
 
     if (face_nodes.size() == 3u) {
         const Vector<Real,3> v0 =
@@ -762,7 +855,6 @@ static double integrate_nd_face_tangential_moment(const NedelecBasis& basis,
             QuadratureType::GaussLegendre,
             /*use_cache=*/false);
 
-        double moment = 0.0;
         for (std::size_t q = 0; q < quad->num_points(); ++q) {
             const auto pt = quad->point(q);
             const Real u = pt[0];
@@ -775,12 +867,14 @@ static double integrate_nd_face_tangential_moment(const NedelecBasis& basis,
             const Vector<Real,3> xi = v0 + tu * u + tv * v;
             std::vector<Vector<Real,3>> vals;
             basis.evaluate_vector_values(xi, vals);
-            const auto& w = vals[static_cast<std::size_t>(func_id)];
             const Vector<Real,3>& tangent = (dir_id == 0) ? tu : tv;
+            const double weight = static_cast<double>(quad->weight(q) * scale * phi);
 
-            moment += static_cast<double>(quad->weight(q) * (scale * phi * w.dot(tangent)));
+            for (std::size_t i = 0; i < vals.size(); ++i) {
+                moments[i] += weight * static_cast<double>(vals[i].dot(tangent));
+            }
         }
-        return moment;
+        return moments;
     }
 
     const std::array<Vector<Real,3>, 4> fv{
@@ -806,7 +900,6 @@ static double integrate_nd_face_tangential_moment(const NedelecBasis& basis,
         QuadratureType::GaussLegendre,
         /*use_cache=*/false);
 
-    double moment = 0.0;
     for (std::size_t q = 0; q < quad->num_points(); ++q) {
         const auto pt = quad->point(q);
         const Real u = pt[0];
@@ -841,11 +934,13 @@ static double integrate_nd_face_tangential_moment(const NedelecBasis& basis,
 
         std::vector<Vector<Real,3>> vals;
         basis.evaluate_vector_values(xi, vals);
-        const auto& w = vals[static_cast<std::size_t>(func_id)];
-        moment += static_cast<double>(quad->weight(q) * (scale * phi * w.dot(tangent)));
+        const double weight = static_cast<double>(quad->weight(q) * scale * phi);
+        for (std::size_t i = 0; i < vals.size(); ++i) {
+            moments[i] += weight * static_cast<double>(vals[i].dot(tangent));
+        }
     }
 
-    return moment;
+    return moments;
 }
 
 static void expect_nd_edge_kronecker(const NedelecBasis& basis,
@@ -885,26 +980,26 @@ static void expect_nd_face_kronecker(const NedelecBasis& basis,
     ASSERT_EQ(assoc.size(), basis.size());
 
     const auto ref = elements::ReferenceElement::create(elem_type);
-    for (std::size_t i = 0; i < basis.size(); ++i) {
-        for (std::size_t f = 0; f < ref.num_faces(); ++f) {
-            const auto& face_nodes = ref.face_nodes(f);
-            const int dofs_per_face = (face_nodes.size() == 3u)
-                ? basis.order() * (basis.order() + 1)
-                : 2 * basis.order() * (basis.order() + 1);
+    for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+        const auto& face_nodes = ref.face_nodes(f);
+        const int dofs_per_face = (face_nodes.size() == 3u)
+            ? basis.order() * (basis.order() + 1)
+            : 2 * basis.order() * (basis.order() + 1);
 
-            for (int m = 0; m < dofs_per_face; ++m) {
-                const double functional = integrate_nd_face_tangential_moment(
-                    basis,
-                    elem_type,
-                    static_cast<int>(f),
-                    m,
-                    static_cast<int>(i),
-                    10);
+        for (int m = 0; m < dofs_per_face; ++m) {
+            const auto functionals = integrate_nd_face_tangential_moments(
+                basis,
+                elem_type,
+                static_cast<int>(f),
+                m,
+                10);
+            ASSERT_EQ(functionals.size(), basis.size());
+            for (std::size_t i = 0; i < basis.size(); ++i) {
                 const bool is_own_dof =
                     assoc[i].entity_type == DofEntity::Face &&
                     assoc[i].entity_id == static_cast<int>(f) &&
                     assoc[i].moment_index == m;
-                EXPECT_NEAR(functional, is_own_dof ? 1.0 : 0.0, tol)
+                EXPECT_NEAR(functionals[i], is_own_dof ? 1.0 : 0.0, tol)
                     << "ND face functional (" << f << ", " << m
                     << ") applied to basis function " << i
                     << " should be " << (is_own_dof ? 1.0 : 0.0);
@@ -1981,26 +2076,26 @@ TEST(HigherOrderWedgePyramid, WedgeRT3FaceNormalMoment) {
     auto assoc = basis.dof_associations();
     ASSERT_EQ(assoc.size(), 140u);
     const auto ref = elements::ReferenceElement::create(ElementType::Wedge6);
-    for (std::size_t i = 0; i < assoc.size(); ++i) {
-        for (std::size_t f = 0; f < ref.num_faces(); ++f) {
-            const auto& face_nodes = ref.face_nodes(f);
-            const std::size_t nface = (face_nodes.size() == 3u)
-                ? static_cast<std::size_t>((basis.order() + 1) * (basis.order() + 2) / 2)
-                : static_cast<std::size_t>((basis.order() + 1) * (basis.order() + 1));
+    for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+        const auto& face_nodes = ref.face_nodes(f);
+        const std::size_t nface = (face_nodes.size() == 3u)
+            ? static_cast<std::size_t>((basis.order() + 1) * (basis.order() + 2) / 2)
+            : static_cast<std::size_t>((basis.order() + 1) * (basis.order() + 1));
 
-            for (std::size_t m = 0; m < nface; ++m) {
-                const double functional = integrate_rt_face_functional(
-                    basis,
-                    ElementType::Wedge6,
-                    static_cast<int>(f),
-                    static_cast<int>(m),
-                    static_cast<int>(i),
-                    12);
+        for (std::size_t m = 0; m < nface; ++m) {
+            const auto functionals = integrate_rt_face_functionals(
+                basis,
+                ElementType::Wedge6,
+                static_cast<int>(f),
+                static_cast<int>(m),
+                12);
+            ASSERT_EQ(functionals.size(), assoc.size());
+            for (std::size_t i = 0; i < assoc.size(); ++i) {
                 const bool is_own_face_dof =
                     assoc[i].entity_type == DofEntity::Face &&
                     assoc[i].entity_id == static_cast<int>(f) &&
                     assoc[i].moment_index == static_cast<int>(m);
-                EXPECT_NEAR(functional, is_own_face_dof ? 1.0 : 0.0, 5e-7)
+                EXPECT_NEAR(functionals[i], is_own_face_dof ? 1.0 : 0.0, 5e-7)
                     << "Wedge RT(3): face functional (" << f << ", " << m
                     << ") applied to basis function " << i
                     << " should be " << (is_own_face_dof ? 1.0 : 0.0);
@@ -2016,26 +2111,26 @@ TEST(HigherOrderWedgePyramid, PyramidRT3FaceNormalMoment) {
     auto assoc = basis.dof_associations();
     ASSERT_EQ(assoc.size(), 137u);
     const auto ref = elements::ReferenceElement::create(ElementType::Pyramid5);
-    for (std::size_t i = 0; i < assoc.size(); ++i) {
-        for (std::size_t f = 0; f < ref.num_faces(); ++f) {
-            const auto& face_nodes = ref.face_nodes(f);
-            const std::size_t nface = (face_nodes.size() == 3u)
-                ? static_cast<std::size_t>((basis.order() + 1) * (basis.order() + 2) / 2)
-                : static_cast<std::size_t>((basis.order() + 1) * (basis.order() + 1));
+    for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+        const auto& face_nodes = ref.face_nodes(f);
+        const std::size_t nface = (face_nodes.size() == 3u)
+            ? static_cast<std::size_t>((basis.order() + 1) * (basis.order() + 2) / 2)
+            : static_cast<std::size_t>((basis.order() + 1) * (basis.order() + 1));
 
-            for (std::size_t m = 0; m < nface; ++m) {
-                const double functional = integrate_rt_face_functional(
-                    basis,
-                    ElementType::Pyramid5,
-                    static_cast<int>(f),
-                    static_cast<int>(m),
-                    static_cast<int>(i),
-                    12);
+        for (std::size_t m = 0; m < nface; ++m) {
+            const auto functionals = integrate_rt_face_functionals(
+                basis,
+                ElementType::Pyramid5,
+                static_cast<int>(f),
+                static_cast<int>(m),
+                12);
+            ASSERT_EQ(functionals.size(), assoc.size());
+            for (std::size_t i = 0; i < assoc.size(); ++i) {
                 const bool is_own_face_dof =
                     assoc[i].entity_type == DofEntity::Face &&
                     assoc[i].entity_id == static_cast<int>(f) &&
                     assoc[i].moment_index == static_cast<int>(m);
-                EXPECT_NEAR(functional, is_own_face_dof ? 1.0 : 0.0, 2e-6)
+                EXPECT_NEAR(functionals[i], is_own_face_dof ? 1.0 : 0.0, 2e-6)
                     << "Pyramid RT(3): face functional (" << f << ", " << m
                     << ") applied to basis function " << i
                     << " should be " << (is_own_face_dof ? 1.0 : 0.0);

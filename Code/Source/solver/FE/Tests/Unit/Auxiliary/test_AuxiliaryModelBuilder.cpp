@@ -143,6 +143,107 @@ public:
     }
 };
 
+class SmoothEventResetModel final : public AuxiliaryStateModel {
+public:
+    [[nodiscard]] std::string modelName() const override { return "SmoothEventReset"; }
+    [[nodiscard]] int dimension() const override { return 1; }
+
+    [[nodiscard]] AuxiliaryStructuralMetadata structuralMetadata() const override
+    {
+        AuxiliaryStructuralMetadata meta;
+        meta.variable_kinds = {AuxiliaryVariableKind::Differential};
+        meta.has_events = true;
+        meta.n_event_functions = 1;
+        return meta;
+    }
+
+    void evaluateResidual(const AuxiliaryLocalContext& ctx,
+                          AuxiliaryResidualRequest& request) const override
+    {
+        request.residual[0] = ctx.xdot[0];
+    }
+
+    [[nodiscard]] bool hasAnalyticJacobian() const override { return true; }
+
+    void evaluateJacobian(const AuxiliaryLocalContext&,
+                          AuxiliaryJacobianRequest& request) const override
+    {
+        if (!request.dF_dx.empty()) {
+            request.dF_dx[0] = 0.0;
+        }
+        if (request.want_dF_dxdot && !request.dF_dxdot.empty()) {
+            request.dF_dxdot[0] = 1.0;
+        }
+    }
+
+    [[nodiscard]] bool hasEventFunctions() const override { return true; }
+
+    AuxiliaryEventResult evaluateEvents(const AuxiliaryLocalContext& ctx) const override
+    {
+        AuxiliaryEventResult result;
+        result.values = {ctx.x[0]};
+        result.active = {true};
+        return result;
+    }
+
+    void resetAfterEvent(const AuxiliaryLocalContext&,
+                         int event_index,
+                         std::span<Real> x_new) const override
+    {
+        if (event_index == 0) {
+            x_new[0] = 42.0;
+        }
+    }
+};
+
+class RuntimeMetadataModel final : public AuxiliaryStateModel {
+public:
+    [[nodiscard]] std::string modelName() const override { return "RuntimeMetadata"; }
+    [[nodiscard]] int dimension() const override { return 2; }
+
+    [[nodiscard]] AuxiliaryStructuralMetadata structuralMetadata() const override
+    {
+        AuxiliaryStructuralMetadata meta;
+        meta.variable_kinds = {
+            AuxiliaryVariableKind::Differential,
+            AuxiliaryVariableKind::Algebraic};
+        meta.constraint_groups = {{1}};
+        meta.dae_index_hint = 1;
+        meta.has_events = true;
+        meta.has_nonsmooth = true;
+        meta.n_event_functions = 2;
+        return meta;
+    }
+
+    void evaluateResidual(const AuxiliaryLocalContext& ctx,
+                          AuxiliaryResidualRequest& request) const override
+    {
+        request.residual[0] = ctx.xdot[0] + ctx.x[0];
+        request.residual[1] = ctx.x[0] + ctx.x[1] - Real(1.0);
+    }
+
+    [[nodiscard]] bool hasMassMatrix() const override { return true; }
+    [[nodiscard]] std::vector<Real> massDiagonal() const override
+    {
+        return {Real(2.0), Real(0.0)};
+    }
+
+    [[nodiscard]] bool hasEventFunctions() const override { return true; }
+    [[nodiscard]] AuxiliaryEventResult evaluateEvents(const AuxiliaryLocalContext& ctx) const override
+    {
+        AuxiliaryEventResult result;
+        result.values = {ctx.x[0], ctx.x[1]};
+        result.active = {true, true};
+        return result;
+    }
+
+    [[nodiscard]] bool hasNonsmoothHooks() const override { return true; }
+    std::vector<Real> evaluateComplementarity(const AuxiliaryLocalContext& ctx) const override
+    {
+        return {ctx.x[1]};
+    }
+};
+
 } // namespace aux_test
 
 TEST(AuxiliaryStateIntegration, AdvanceAuxiliaryStateSyncsGhostedBlocks)
@@ -181,6 +282,101 @@ TEST(AuxiliaryStateIntegration, FinalizeMonolithicStageSyncsGhostedBlocks)
 
     system.finalizeMonolithicAuxiliaryStageState(0.5, 0.1);
     EXPECT_TRUE(hook_called);
+}
+
+TEST(AuxiliaryStateIntegration, FinalizeMonolithicStageAppliesSmoothEventResetAtAlphaOne)
+{
+    svmp::FE::systems::FESystem system(
+        std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+    auto model = std::make_shared<aux_test::SmoothEventResetModel>();
+
+    system.deployAuxiliaryModel(
+        use(model)
+            .name("event_mono")
+            .scope(AuxiliaryStateScope::Global)
+            .solveMode(AuxiliarySolveMode::Monolithic)
+            .initialize({-1.0}));
+    system.finalizeAuxiliaryLayout();
+
+    auto& blk = system.auxiliaryStateManager().getBlock("event_mono");
+    blk.work()[0] = 1.0;
+
+    system.finalizeMonolithicAuxiliaryStageState(
+        /*alpha_f=*/1.0,
+        /*gamma=*/1.0,
+        /*dt=*/1.0,
+        /*final_time=*/1.0);
+
+    EXPECT_NEAR(blk.work()[0], 42.0, 1e-12);
+}
+
+TEST(AuxiliaryStateIntegration, FinalizeMonolithicStageAppliesSmoothEventResetAfterStageTransform)
+{
+    svmp::FE::systems::FESystem system(
+        std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+    auto model = std::make_shared<aux_test::SmoothEventResetModel>();
+
+    system.deployAuxiliaryModel(
+        use(model)
+            .name("event_mono_ga")
+            .scope(AuxiliaryStateScope::Global)
+            .solveMode(AuxiliarySolveMode::Monolithic)
+            .initialize({-1.0}));
+    system.finalizeAuxiliaryLayout();
+
+    auto& blk = system.auxiliaryStateManager().getBlock("event_mono_ga");
+    blk.work()[0] = 0.0;
+
+    system.finalizeMonolithicAuxiliaryStageState(
+        /*alpha_f=*/0.5,
+        /*gamma=*/0.5,
+        /*dt=*/1.0,
+        /*final_time=*/1.0);
+
+    EXPECT_NEAR(blk.work()[0], 42.0, 1e-12);
+}
+
+TEST(AuxiliaryStateIntegration, DeployAuxiliaryModelSurfacesRuntimeMetadataInRegisteredSpec)
+{
+    svmp::FE::systems::FESystem system(
+        std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+    auto model = std::make_shared<aux_test::RuntimeMetadataModel>();
+
+    AuxiliaryNonsmoothPolicy policy;
+    policy.active_set = ActiveSetStrategy::SemismoothNewton;
+    policy.complementarity = ComplementarityStrategy::ActiveSet;
+    policy.transition = HybridTransitionStrategy::Hysteresis;
+    policy.max_active_set_iters = 7;
+    policy.complementarity_tol = 3.0e-8;
+    policy.hysteresis_band = 0.125;
+
+    system.deployAuxiliaryModel(
+        use(model)
+            .name("runtime_meta")
+            .scope(AuxiliaryStateScope::Global)
+            .solveMode(AuxiliarySolveMode::Partitioned)
+            .nonsmoothPolicy(policy)
+            .initialize({0.0, 1.0}));
+    system.finalizeAuxiliaryLayout();
+
+    const auto& spec = system.auxiliaryStateManager().getSpec("runtime_meta");
+    ASSERT_EQ(spec.variable_kinds.size(), 2u);
+    EXPECT_EQ(spec.variable_kinds[0], AuxiliaryVariableKind::Differential);
+    EXPECT_EQ(spec.variable_kinds[1], AuxiliaryVariableKind::Algebraic);
+    ASSERT_EQ(spec.constraint_groups.size(), 1u);
+    EXPECT_EQ(spec.constraint_groups[0], std::vector<int>({1}));
+    EXPECT_EQ(spec.dae_index_hint, 1);
+    EXPECT_TRUE(spec.has_mass_matrix);
+    EXPECT_EQ(spec.mass_diagonal, std::vector<Real>({Real(2.0), Real(0.0)}));
+    EXPECT_EQ(spec.event_mode, AuxiliaryEventMode::EventHook);
+    EXPECT_EQ(spec.n_event_functions, 2);
+    EXPECT_TRUE(spec.has_nonsmooth);
+    EXPECT_EQ(spec.nonsmooth_policy.active_set, ActiveSetStrategy::SemismoothNewton);
+    EXPECT_EQ(spec.nonsmooth_policy.complementarity, ComplementarityStrategy::ActiveSet);
+    EXPECT_EQ(spec.nonsmooth_policy.transition, HybridTransitionStrategy::Hysteresis);
+    EXPECT_EQ(spec.nonsmooth_policy.max_active_set_iters, 7);
+    EXPECT_NEAR(spec.nonsmooth_policy.complementarity_tol, 3.0e-8, 1.0e-16);
+    EXPECT_NEAR(spec.nonsmooth_policy.hysteresis_band, 0.125, 1.0e-16);
 }
 
 // ============================================================================
@@ -2199,6 +2395,38 @@ TEST(AuxiliaryModelBuilder, EndToEnd_MonolithicAssembly_WithInputs)
     EXPECT_NEAR(jacobian[0], 1.0, 1e-5);
 }
 
+TEST(AuxiliaryModelBuilder, PureAlgebraicGlobalDirectOnlyRemainsLowered)
+{
+    using namespace svmp::FE;
+
+    auto model = aux::model("direct_only_global", [](ModelFacade& m) {
+        auto Q = m.input("Q");
+        auto P = m.state("P", AuxiliaryVariableKind::Algebraic);
+        m << alg(P) == P - (Q + forms::FormExpr::constant(1.0));
+        m << out("P_out") == P;
+    });
+
+    systems::FESystem system(std::shared_ptr<const assembly::IMeshAccess>{});
+    auto& reg = system.auxiliaryInputRegistry();
+    reg.registerInput({.name = "Q_source", .size = 1},
+                      [](Real, Real, std::span<Real> out) { out[0] = 2.0; });
+
+    system.deployAuxiliaryModel(
+        use(model)
+            .name("direct_only_inst")
+            .scope(AuxiliaryStateScope::Global)
+            .solveMode(AuxiliarySolveMode::Monolithic)
+            .bind("Q", "Q_source")
+            .initialize({0.0}));
+    system.finalizeAuxiliaryLayout();
+
+    const auto layout = system.composeMixedSystemLayout(0);
+    EXPECT_EQ(layout.n_aux_unknowns, 0u);
+    EXPECT_EQ(layout.total_unknowns, 0u);
+    EXPECT_FALSE(system.auxiliaryOutputMetadataUsesRef("direct_only_inst/P_out"));
+    EXPECT_TRUE(system.loweredAuxiliaryOutputExpr("direct_only_inst/P_out").has_value());
+}
+
 TEST(AuxiliaryModelBuilder, EndToEnd_MonolithicAssembly_UsesGeneralizedAlphaStencil)
 {
     using namespace svmp::FE;
@@ -2491,7 +2719,7 @@ TEST(AuxiliaryModelBuilder, MonolithicScopeOwnershipPoliciesPropagateIntoMixedLa
     EXPECT_EQ(region->assembly_mode, backends::MixedBlockAssemblyMode::BorderedReduced);
     EXPECT_EQ(region->row_ownership, backends::MixedRowOwnershipPolicy::RegionOwner);
     EXPECT_EQ(region->single_owner_rank, -1);
-    EXPECT_TRUE(region->row_owner_ranks.empty());
+    EXPECT_EQ(region->row_owner_ranks, std::vector<int>({0, 0, 0}));
 }
 
 // ============================================================================

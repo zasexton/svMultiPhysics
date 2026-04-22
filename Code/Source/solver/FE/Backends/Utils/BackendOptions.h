@@ -366,6 +366,21 @@ struct MixedBlockLayout {
         return nullptr;
     }
 
+    [[nodiscard]] const MixedBlockDescriptor*
+    findBlockContaining(GlobalIndex row) const noexcept {
+        for (const auto& b : blocks) {
+            if (row >= b.offset && row < b.offset + b.size) {
+                return &b;
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] int ownerRankForGlobalRow(GlobalIndex row) const noexcept {
+        const auto* block = findBlockContaining(row);
+        return block ? block->ownerRankForGlobalRow(row) : -1;
+    }
+
     [[nodiscard]] const MixedBlockDescriptor* primaryFieldBlock() const noexcept {
         if (auto* p = findBlockByRole(BlockRole::PrimaryField)) return p;
         if (primary_block && *primary_block >= 0 && *primary_block < static_cast<int>(blocks.size())) {

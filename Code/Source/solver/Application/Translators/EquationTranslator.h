@@ -5,6 +5,7 @@
 #include <string>
 
 #include "Mesh/Mesh.h"
+#include "Physics/Core/EquationModuleInput.h"
 
 class EquationParameters;
 
@@ -27,6 +28,10 @@ namespace translators {
 
 class EquationTranslator {
 public:
+  static svmp::Physics::EquationModuleInput buildInput(
+      const EquationParameters& eq_params,
+      const std::map<std::string, std::shared_ptr<svmp::Mesh>>& meshes);
+
   static std::unique_ptr<svmp::Physics::PhysicsModule> createModule(
       const EquationParameters& eq_params, svmp::FE::systems::FESystem& system,
       const std::map<std::string, std::shared_ptr<svmp::Mesh>>& meshes);

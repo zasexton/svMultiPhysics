@@ -463,6 +463,102 @@ private:
     const IMeshAccess* base_{nullptr};
 };
 
+class OwnedCellsMeshAccess final : public IMeshAccess {
+public:
+    explicit OwnedCellsMeshAccess(const IMeshAccess& base)
+        : base_(&base)
+    {
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return base_->numCells(); }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return base_->numCells(); }
+    [[nodiscard]] GlobalIndex numVertices() const override { return base_->numVertices(); }
+    [[nodiscard]] GlobalIndex numOwnedVertices() const override { return base_->numVertices(); }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return base_->numBoundaryFaces(); }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return base_->numInteriorFaces(); }
+    [[nodiscard]] int dimension() const override { return base_->dimension(); }
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex cell_id) const override { return base_->getCellType(cell_id); }
+    [[nodiscard]] int getCellDomainId(GlobalIndex cell_id) const override { return base_->getCellDomainId(cell_id); }
+
+    void getCellNodes(GlobalIndex cell_id, std::vector<GlobalIndex>& nodes) const override
+    {
+        base_->getCellNodes(cell_id, nodes);
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return base_->getNodeCoordinates(node_id);
+    }
+
+    void getCellCoordinates(GlobalIndex cell_id, std::vector<std::array<Real, 3>>& coords) const override
+    {
+        base_->getCellCoordinates(cell_id, coords);
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex face_id, GlobalIndex cell_id) const override
+    {
+        return base_->getLocalFaceIndex(face_id, cell_id);
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex face_id) const override
+    {
+        return base_->getBoundaryFaceMarker(face_id);
+    }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex face_id) const override
+    {
+        return base_->getInteriorFaceCells(face_id);
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        base_->forEachOwnedCell(std::move(callback));
+    }
+
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        base_->forEachOwnedCell(std::move(callback));
+    }
+
+    void forEachBoundaryFace(int marker,
+                             std::function<void(GlobalIndex, GlobalIndex)> callback) const override
+    {
+        base_->forEachBoundaryFace(marker, [&](GlobalIndex face_id, GlobalIndex cell_id) {
+            if (base_->isOwnedCell(cell_id)) {
+                callback(face_id, cell_id);
+            }
+        });
+    }
+
+    void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> callback) const override
+    {
+        base_->forEachInteriorFace(
+            [&](GlobalIndex face_id, GlobalIndex cell_minus, GlobalIndex cell_plus) {
+                if (base_->isOwnedCell(cell_minus)) {
+                    callback(face_id, cell_minus, cell_plus);
+                }
+            });
+    }
+
+private:
+    const IMeshAccess* base_{nullptr};
+};
+
+template <typename Callback>
+AssemblyResult withPolicyMeshAccess(const IMeshAccess& mesh,
+                                    GhostPolicy policy,
+                                    Callback&& callback)
+{
+    if (policy == GhostPolicy::ReverseScatter) {
+        OwnedCellsMeshAccess owned_mesh(mesh);
+        return callback(owned_mesh);
+    }
+
+    AllLocalCellsMeshAccess all_local_mesh(mesh);
+    return callback(all_local_mesh);
+}
+
 } // namespace
 
 // ============================================================================
@@ -1000,10 +1096,11 @@ AssemblyResult ParallelAssembler::assembleCellsFused(
         }
     }
 
-    // ParallelAssembler owns ghost routing. Present all locally visible cells
-    // as traversable so StandardAssembler does not pre-filter off-owner rows.
-    AllLocalCellsMeshAccess all_local_mesh(mesh);
-    return local_assembler_.assembleCellsFused(all_local_mesh, routed_terms);
+    // OwnedRowsOnly assembles all locally visible cells and filters rows.
+    // ReverseScatter assembles each owned cell once and routes off-owner rows.
+    return withPolicyMeshAccess(mesh, ghost_policy_, [&](const IMeshAccess& policy_mesh) {
+        return local_assembler_.assembleCellsFused(policy_mesh, routed_terms);
+    });
 }
 
 // ============================================================================
@@ -1023,31 +1120,33 @@ AssemblyResult ParallelAssembler::assembleBoundaryFaces(
     }
     beginGhostAssemblyIfNeeded();
 
-    if (matrix_view && vector_view) {
-        AllLocalCellsMeshAccess all_local_mesh(mesh);
-        if (matrix_view == vector_view) {
-            GhostRoutingView routed(*matrix_view, ghost_manager_, ghost_policy_);
-            return local_assembler_.assembleBoundaryFaces(all_local_mesh, boundary_marker, space, kernel, &routed, &routed);
+    return withPolicyMeshAccess(mesh, ghost_policy_, [&](const IMeshAccess& policy_mesh) -> AssemblyResult {
+        if (matrix_view && vector_view) {
+            if (matrix_view == vector_view) {
+                GhostRoutingView routed(*matrix_view, ghost_manager_, ghost_policy_);
+                return local_assembler_.assembleBoundaryFaces(policy_mesh, boundary_marker, space, kernel, &routed,
+                                                             &routed);
+            }
+            GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
+            GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleBoundaryFaces(policy_mesh, boundary_marker, space, kernel, &routed_matrix,
+                                                         &routed_vector);
         }
-        GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
-        GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
-        return local_assembler_.assembleBoundaryFaces(all_local_mesh, boundary_marker, space, kernel,
-                                                     &routed_matrix, &routed_vector);
-    }
 
-    if (matrix_view) {
-        AllLocalCellsMeshAccess all_local_mesh(mesh);
-        GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
-        return local_assembler_.assembleBoundaryFaces(all_local_mesh, boundary_marker, space, kernel, &routed_matrix, nullptr);
-    }
+        if (matrix_view) {
+            GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleBoundaryFaces(policy_mesh, boundary_marker, space, kernel, &routed_matrix,
+                                                         nullptr);
+        }
 
-    if (vector_view) {
-        AllLocalCellsMeshAccess all_local_mesh(mesh);
-        GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
-        return local_assembler_.assembleBoundaryFaces(all_local_mesh, boundary_marker, space, kernel, nullptr, &routed_vector);
-    }
+        if (vector_view) {
+            GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleBoundaryFaces(policy_mesh, boundary_marker, space, kernel, nullptr,
+                                                         &routed_vector);
+        }
 
-    return {};
+        return {};
+    });
 }
 
 AssemblyResult ParallelAssembler::assembleBoundaryFaces(
@@ -1064,34 +1163,33 @@ AssemblyResult ParallelAssembler::assembleBoundaryFaces(
     }
     beginGhostAssemblyIfNeeded();
 
-    if (matrix_view && vector_view) {
-        AllLocalCellsMeshAccess all_local_mesh(mesh);
-        if (matrix_view == vector_view) {
-            GhostRoutingView routed(*matrix_view, ghost_manager_, ghost_policy_);
-            return local_assembler_.assembleBoundaryFaces(all_local_mesh, boundary_marker, test_space, trial_space, kernel,
-                                                         &routed, &routed);
+    return withPolicyMeshAccess(mesh, ghost_policy_, [&](const IMeshAccess& policy_mesh) -> AssemblyResult {
+        if (matrix_view && vector_view) {
+            if (matrix_view == vector_view) {
+                GhostRoutingView routed(*matrix_view, ghost_manager_, ghost_policy_);
+                return local_assembler_.assembleBoundaryFaces(policy_mesh, boundary_marker, test_space, trial_space,
+                                                             kernel, &routed, &routed);
+            }
+            GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
+            GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleBoundaryFaces(policy_mesh, boundary_marker, test_space, trial_space,
+                                                         kernel, &routed_matrix, &routed_vector);
         }
-        GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
-        GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
-        return local_assembler_.assembleBoundaryFaces(all_local_mesh, boundary_marker, test_space, trial_space, kernel,
-                                                     &routed_matrix, &routed_vector);
-    }
 
-    if (matrix_view) {
-        AllLocalCellsMeshAccess all_local_mesh(mesh);
-        GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
-        return local_assembler_.assembleBoundaryFaces(all_local_mesh, boundary_marker, test_space, trial_space, kernel,
-                                                     &routed_matrix, nullptr);
-    }
+        if (matrix_view) {
+            GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleBoundaryFaces(policy_mesh, boundary_marker, test_space, trial_space, kernel,
+                                                         &routed_matrix, nullptr);
+        }
 
-    if (vector_view) {
-        AllLocalCellsMeshAccess all_local_mesh(mesh);
-        GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
-        return local_assembler_.assembleBoundaryFaces(all_local_mesh, boundary_marker, test_space, trial_space, kernel,
-                                                     nullptr, &routed_vector);
-    }
+        if (vector_view) {
+            GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleBoundaryFaces(policy_mesh, boundary_marker, test_space, trial_space, kernel,
+                                                         nullptr, &routed_vector);
+        }
 
-    return {};
+        return {};
+    });
 }
 
 AssemblyResult ParallelAssembler::assembleInteriorFaces(
@@ -1107,21 +1205,23 @@ AssemblyResult ParallelAssembler::assembleInteriorFaces(
     }
     beginGhostAssemblyIfNeeded();
 
-    if (vector_view != nullptr) {
-        AllLocalCellsMeshAccess all_local_mesh(mesh);
-        if (&matrix_view == vector_view) {
-            GhostRoutingView routed(matrix_view, ghost_manager_, ghost_policy_);
-            return local_assembler_.assembleInteriorFaces(all_local_mesh, test_space, trial_space, kernel, routed, &routed);
+    return withPolicyMeshAccess(mesh, ghost_policy_, [&](const IMeshAccess& policy_mesh) -> AssemblyResult {
+        if (vector_view != nullptr) {
+            if (&matrix_view == vector_view) {
+                GhostRoutingView routed(matrix_view, ghost_manager_, ghost_policy_);
+                return local_assembler_.assembleInteriorFaces(policy_mesh, test_space, trial_space, kernel, routed,
+                                                             &routed);
+            }
+            GhostRoutingView routed_matrix(matrix_view, ghost_manager_, ghost_policy_);
+            GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleInteriorFaces(policy_mesh, test_space, trial_space, kernel, routed_matrix,
+                                                         &routed_vector);
         }
-        GhostRoutingView routed_matrix(matrix_view, ghost_manager_, ghost_policy_);
-        GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
-        return local_assembler_.assembleInteriorFaces(all_local_mesh, test_space, trial_space, kernel,
-                                                     routed_matrix, &routed_vector);
-    }
 
-    AllLocalCellsMeshAccess all_local_mesh(mesh);
-    GhostRoutingView routed_matrix(matrix_view, ghost_manager_, ghost_policy_);
-    return local_assembler_.assembleInteriorFaces(all_local_mesh, test_space, trial_space, kernel, routed_matrix, nullptr);
+        GhostRoutingView routed_matrix(matrix_view, ghost_manager_, ghost_policy_);
+        return local_assembler_.assembleInteriorFaces(policy_mesh, test_space, trial_space, kernel, routed_matrix,
+                                                     nullptr);
+    });
 }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -1140,26 +1240,23 @@ AssemblyResult ParallelAssembler::assembleInterfaceFaces(
     }
     beginGhostAssemblyIfNeeded();
 
-    if (vector_view != nullptr) {
-        AllLocalCellsMeshAccess all_local_mesh(mesh);
-        if (&matrix_view == vector_view) {
-            GhostRoutingView routed(matrix_view, ghost_manager_, ghost_policy_);
-            return local_assembler_.assembleInterfaceFaces(
-                all_local_mesh, interface_mesh, interface_marker, test_space, trial_space, kernel,
-                routed, &routed);
+    return withPolicyMeshAccess(mesh, ghost_policy_, [&](const IMeshAccess& policy_mesh) -> AssemblyResult {
+        if (vector_view != nullptr) {
+            if (&matrix_view == vector_view) {
+                GhostRoutingView routed(matrix_view, ghost_manager_, ghost_policy_);
+                return local_assembler_.assembleInterfaceFaces(policy_mesh, interface_mesh, interface_marker,
+                                                              test_space, trial_space, kernel, routed, &routed);
+            }
+            GhostRoutingView routed_matrix(matrix_view, ghost_manager_, ghost_policy_);
+            GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleInterfaceFaces(policy_mesh, interface_mesh, interface_marker, test_space,
+                                                          trial_space, kernel, routed_matrix, &routed_vector);
         }
-        GhostRoutingView routed_matrix(matrix_view, ghost_manager_, ghost_policy_);
-        GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
-        return local_assembler_.assembleInterfaceFaces(
-            all_local_mesh, interface_mesh, interface_marker, test_space, trial_space, kernel,
-            routed_matrix, &routed_vector);
-    }
 
-    AllLocalCellsMeshAccess all_local_mesh(mesh);
-    GhostRoutingView routed_matrix(matrix_view, ghost_manager_, ghost_policy_);
-    return local_assembler_.assembleInterfaceFaces(
-        all_local_mesh, interface_mesh, interface_marker, test_space, trial_space, kernel,
-        routed_matrix, nullptr);
+        GhostRoutingView routed_matrix(matrix_view, ghost_manager_, ghost_policy_);
+        return local_assembler_.assembleInterfaceFaces(policy_mesh, interface_mesh, interface_marker, test_space,
+                                                      trial_space, kernel, routed_matrix, nullptr);
+    });
 }
 #endif
 
@@ -1207,29 +1304,30 @@ AssemblyResult ParallelAssembler::assembleCellsParallel(
     beginGhostAssemblyIfNeeded();
 
     auto assemble_with_routing = [&](const IMeshAccess& mesh_view) -> AssemblyResult {
-        AllLocalCellsMeshAccess all_local_mesh(mesh_view);
-        if (assemble_matrix && matrix_view && assemble_vector && vector_view) {
-            if (matrix_view == vector_view) {
-                GhostRoutingView routed(*matrix_view, ghost_manager_, ghost_policy_);
-                return local_assembler_.assembleBoth(all_local_mesh, test_space, trial_space, kernel, routed, routed);
+        return withPolicyMeshAccess(mesh_view, ghost_policy_, [&](const IMeshAccess& policy_mesh) -> AssemblyResult {
+            if (assemble_matrix && matrix_view && assemble_vector && vector_view) {
+                if (matrix_view == vector_view) {
+                    GhostRoutingView routed(*matrix_view, ghost_manager_, ghost_policy_);
+                    return local_assembler_.assembleBoth(policy_mesh, test_space, trial_space, kernel, routed, routed);
+                }
+                GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
+                GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+                return local_assembler_.assembleBoth(policy_mesh, test_space, trial_space, kernel, routed_matrix,
+                                                     routed_vector);
             }
-            GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
-            GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
-            return local_assembler_.assembleBoth(all_local_mesh, test_space, trial_space, kernel,
-                                                 routed_matrix, routed_vector);
-        }
 
-        if (assemble_matrix && matrix_view) {
-            GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
-            return local_assembler_.assembleMatrix(all_local_mesh, test_space, trial_space, kernel, routed_matrix);
-        }
+            if (assemble_matrix && matrix_view) {
+                GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
+                return local_assembler_.assembleMatrix(policy_mesh, test_space, trial_space, kernel, routed_matrix);
+            }
 
-        if (assemble_vector && vector_view) {
-            GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
-            return local_assembler_.assembleVector(all_local_mesh, test_space, kernel, routed_vector);
-        }
+            if (assemble_vector && vector_view) {
+                GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+                return local_assembler_.assembleVector(policy_mesh, test_space, kernel, routed_vector);
+            }
 
-        return {};
+            return {};
+        });
     };
 
 #if FE_HAS_MPI

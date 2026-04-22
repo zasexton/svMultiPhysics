@@ -37,6 +37,10 @@ namespace Physics {
 namespace formulations {
 namespace poisson {
 
+enum class NodeIdType {
+    GlobalVertexGid,
+};
+
 struct PoissonOptions {
     using SpatialFunction = std::function<FE::Real(FE::Real x, FE::Real y, FE::Real z)>;
     using TimeFunction = std::function<FE::Real(FE::Real x, FE::Real y, FE::Real z, FE::Real t)>;
@@ -56,6 +60,16 @@ struct PoissonOptions {
         int boundary_marker{-1};
         ScalarValue alpha{};
         ScalarValue rhs{};
+    };
+
+    struct NodeDirichletBC {
+        FE::GlobalIndex node_id{-1};
+        FE::Real value{0.0};
+    };
+
+    struct NodeDirichletBCSet {
+        NodeIdType id_type{NodeIdType::GlobalVertexGid};
+        std::vector<NodeDirichletBC> values{};
     };
 
     /**
@@ -88,6 +102,7 @@ struct PoissonOptions {
     FE::Real source{0.0};
     bool enable_jit{SVMP_FE_ENABLE_LLVM_JIT != 0};
     bool enable_jit_specialization{true};
+    bool register_darcy_flux_output{false};
 
     // Boundary conditions.
     //
@@ -99,6 +114,7 @@ struct PoissonOptions {
     std::vector<NeumannBC> neumann{};
     std::vector<RobinBC> robin{};
     std::vector<CoupledRCRNeumannBC> coupled_neumann_rcr{};
+    NodeDirichletBCSet node_dirichlet{};
 
     // Weak Dirichlet (Nitsche) options.
     FE::Real nitsche_gamma{10.0};

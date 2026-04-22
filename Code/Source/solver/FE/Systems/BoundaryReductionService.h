@@ -153,6 +153,19 @@ public:
     [[nodiscard]] Real evaluateFunctional(std::string_view name, const SystemStateView& state);
 
     /**
+     * @brief Evaluate a domain functional over an explicit cell subset.
+     *
+     * The named functional must be a domain functional.  The supplied cells are
+     * mesh-global ids; the FunctionalAssembler will ignore cells not owned by
+     * the current rank, and this service performs the same MPI sum reduction as
+     * evaluateFunctional().
+     */
+    [[nodiscard]] Real evaluateFunctionalOverCells(
+        std::string_view name,
+        std::span<const GlobalIndex> cell_ids,
+        const SystemStateView& state);
+
+    /**
      * @brief Evaluate all registered boundary functionals.
      *
      * @param state System state.

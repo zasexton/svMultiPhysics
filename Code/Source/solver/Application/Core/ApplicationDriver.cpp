@@ -3,6 +3,7 @@
 #include "Application/Core/OopMpiLog.h"
 #include "Application/Core/SimulationBuilder.h"
 
+#include "FE/PostProcessing/DerivedResultTypes.h"
 #include "FE/Systems/TimeIntegrator.h"
 #include "FE/Systems/TransientSystem.h"
 #include "FE/TimeStepping/NewtonSolver.h"
@@ -807,6 +808,25 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
 
     if (oopTraceEnabled()) {
       oopCout() << "[svMultiPhysics::Application] VTK output: field '" << rec.name << "' done." << std::endl;
+    }
+  }
+
+  const auto derived = sim.fe_system->derivedResults();
+  if (!derived.empty()) {
+    if (oopTraceEnabled()) {
+      oopCout() << "[svMultiPhysics::Application] VTK output: evaluating "
+                << derived.size() << " derived result field(s)." << std::endl;
+      for (const auto& def : derived) {
+        oopCout() << "[svMultiPhysics::Application] VTK output: derived field '" << def.name
+                  << "' scope=" << svmp::FE::post::toString(def.scope)
+                  << " policy=" << svmp::FE::post::toString(def.policy)
+                  << " components=" << svmp::FE::post::componentCount(def.shape)
+                  << std::endl;
+      }
+    }
+    sim.fe_system->appendDerivedResultFields(mesh.local_mesh(), state);
+    if (oopTraceEnabled()) {
+      oopCout() << "[svMultiPhysics::Application] VTK output: derived result fields done." << std::endl;
     }
   }
 

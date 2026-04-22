@@ -77,6 +77,13 @@ AuxiliaryDeployedInstance& AuxiliaryDeployedInstance::failurePolicy(
     return *this;
 }
 
+AuxiliaryDeployedInstance& AuxiliaryDeployedInstance::nonsmoothPolicy(
+    AuxiliaryNonsmoothPolicy policy)
+{
+    nonsmooth_policy_ = policy;
+    return *this;
+}
+
 AuxiliaryDeployedInstance& AuxiliaryDeployedInstance::bind(
     const std::string& model_input, const std::string& registry_input)
 {

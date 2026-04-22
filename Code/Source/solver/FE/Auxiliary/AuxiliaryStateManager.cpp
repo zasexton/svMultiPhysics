@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <functional>
+#include <numeric>
 
 namespace svmp {
 namespace FE {
@@ -17,6 +19,111 @@ std::size_t AuxiliaryStateManager::metaIndex(std::string_view name) const
     FE_THROW_IF(it == meta_name_to_index_.end(), InvalidArgumentException,
                 "AuxiliaryStateManager: unknown block '" + std::string(name) + "'");
     return it->second;
+}
+
+template <typename T>
+void hashCombine(std::size_t& seed, const T& value)
+{
+    seed ^= std::hash<T>{}(value) + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
+}
+
+template <typename T>
+void hashRange(std::size_t& seed, const std::vector<T>& values)
+{
+    hashCombine(seed, values.size());
+    for (const auto& value : values) {
+        hashCombine(seed, value);
+    }
+}
+
+[[nodiscard]] std::uint64_t hashEntityMetadata(
+    const AuxiliaryEntityRemapMetadata& metadata)
+{
+    std::size_t h = 0;
+    hashCombine(h, static_cast<int>(metadata.scope));
+    hashCombine(h, static_cast<int>(metadata.deployment_region.kind));
+    hashCombine(h, metadata.deployment_region.identity);
+    hashCombine(h, metadata.deployment_region.version);
+    hashRange(h, metadata.deployment_region.explicit_entities);
+    hashRange(h, metadata.entity_ids);
+    hashCombine(h, metadata.owned_entity_count);
+    hashRange(h, metadata.qp_offsets);
+    hashRange(h, metadata.qp_cell_ids);
+    hashCombine(h, metadata.region_membership.size());
+    for (const auto& region : metadata.region_membership) {
+        hashCombine(h, region.region_id);
+        hashRange(h, region.cell_ids);
+        hashRange(h, region.node_ids);
+        hashRange(h, region.boundary_markers);
+        hashRange(h, region.interface_face_ids);
+    }
+    return static_cast<std::uint64_t>(h);
+}
+
+[[nodiscard]] AuxiliaryEntityRemapMetadata makeDefaultEntityMetadata(
+    const AuxiliaryStateSpec& spec,
+    const AuxiliaryBlockIndexing& indexing)
+{
+    AuxiliaryEntityRemapMetadata metadata;
+    metadata.scope = spec.scope;
+    metadata.deployment_region = spec.deployment_region;
+    metadata.owned_entity_count = indexing.ownedEntityCount();
+    metadata.entity_ids.resize(indexing.totalEntityCount());
+    std::iota(metadata.entity_ids.begin(), metadata.entity_ids.end(), std::size_t{0});
+    const auto qp_offsets = indexing.qpOffsets();
+    metadata.qp_offsets.assign(qp_offsets.begin(), qp_offsets.end());
+    metadata.metadata_hash = hashEntityMetadata(metadata);
+    return metadata;
+}
+
+[[nodiscard]] AuxiliaryBlockIndexing makeResizedIndexing(
+    const AuxiliaryStateSpec& spec,
+    const AuxiliaryBlockIndexing& old_indexing,
+    std::size_t new_entity_count)
+{
+    switch (spec.scope) {
+        case AuxiliaryStateScope::Global:
+            return AuxiliaryBlockIndexing::createGlobal(spec.size);
+        case AuxiliaryStateScope::Node: {
+            const auto owned = std::min(old_indexing.ownedEntityCount(), new_entity_count);
+            return AuxiliaryBlockIndexing::createNode(
+                owned, new_entity_count - owned, spec.size);
+        }
+        case AuxiliaryStateScope::Cell:
+            return AuxiliaryBlockIndexing::createCell(new_entity_count, spec.size);
+        case AuxiliaryStateScope::QuadraturePoint:
+            if (!old_indexing.qpOffsets().empty() &&
+                old_indexing.qpOffsets().back() == new_entity_count) {
+                return AuxiliaryBlockIndexing::createQuadraturePoint(
+                    old_indexing.qpOffsets(), spec.size);
+            }
+            return AuxiliaryBlockIndexing::createCell(new_entity_count, spec.size);
+        case AuxiliaryStateScope::Region:
+            return AuxiliaryBlockIndexing::createRegion(new_entity_count, spec.size);
+        case AuxiliaryStateScope::Boundary:
+            return AuxiliaryBlockIndexing::createBoundary(spec.size);
+        case AuxiliaryStateScope::Facet:
+            return AuxiliaryBlockIndexing::createFacet(new_entity_count, spec.size);
+    }
+    return AuxiliaryBlockIndexing::createCell(new_entity_count, spec.size);
+}
+
+void refreshEntityMetadataAfterResize(AuxiliaryEntityRemapMetadata& metadata,
+                                      const AuxiliaryStateSpec& spec,
+                                      const AuxiliaryBlockIndexing& indexing,
+                                      std::size_t new_entity_count)
+{
+    metadata.scope = spec.scope;
+    metadata.owned_entity_count = indexing.ownedEntityCount();
+    if (metadata.entity_ids.size() != new_entity_count) {
+        metadata.entity_ids.resize(new_entity_count);
+        std::iota(metadata.entity_ids.begin(), metadata.entity_ids.end(), std::size_t{0});
+        metadata.region_membership.clear();
+        metadata.qp_cell_ids.clear();
+    }
+    const auto qp_offsets = indexing.qpOffsets();
+    metadata.qp_offsets.assign(qp_offsets.begin(), qp_offsets.end());
+    metadata.metadata_hash = hashEntityMetadata(metadata);
 }
 
 // ---------------------------------------------------------------------------
@@ -100,7 +207,13 @@ std::size_t AuxiliaryStateManager::registerBlock(
     state_.block(block_idx).setOwnedEntityCount(indexing.ownedEntityCount());
 
     const auto meta_idx = block_meta_.size();
-    block_meta_.push_back(BlockMeta{spec, indexing, {}, {}});
+    block_meta_.push_back(BlockMeta{
+        spec,
+        indexing,
+        makeDefaultEntityMetadata(spec, indexing),
+        {},
+        {},
+    });
     meta_name_to_index_.emplace(spec.name, meta_idx);
 
     return block_idx;
@@ -118,8 +231,8 @@ std::size_t AuxiliaryStateManager::registerBlockWithQPOffsets(
                     + spec.name + "'");
     FE_THROW_IF(spec.scope != AuxiliaryStateScope::QuadraturePoint, InvalidArgumentException,
                 "AuxiliaryStateManager::registerBlockWithQPOffsets: scope must be QuadraturePoint");
-    FE_THROW_IF(qp_offsets.size() < 2u, InvalidArgumentException,
-                "AuxiliaryStateManager::registerBlockWithQPOffsets: qp_offsets must have >= 2 entries");
+    FE_THROW_IF(qp_offsets.empty(), InvalidArgumentException,
+                "AuxiliaryStateManager::registerBlockWithQPOffsets: qp_offsets must have at least one entry");
 
     const auto total_qps = qp_offsets.back();
     const auto block_idx = state_.registerBlock(spec, total_qps, initial_values);
@@ -130,7 +243,10 @@ std::size_t AuxiliaryStateManager::registerBlockWithQPOffsets(
         AuxiliaryBlockIndexing::createQuadraturePoint(qp_offsets, spec.size),
         {},
         {},
+        {},
     });
+    block_meta_.back().entity_metadata =
+        makeDefaultEntityMetadata(spec, block_meta_.back().indexing);
     meta_name_to_index_.emplace(spec.name, meta_idx);
 
     return block_idx;
@@ -165,7 +281,13 @@ std::size_t AuxiliaryStateManager::registerBlockRagged(
     }
 
     const auto meta_idx = block_meta_.size();
-    block_meta_.push_back(BlockMeta{spec, indexing, {}, {}});
+    block_meta_.push_back(BlockMeta{
+        spec,
+        indexing,
+        makeDefaultEntityMetadata(spec, indexing),
+        {},
+        {},
+    });
     meta_name_to_index_.emplace(spec.name, meta_idx);
 
     return block_idx;
@@ -185,6 +307,49 @@ const AuxiliaryStateSpec& AuxiliaryStateManager::getSpec(
     std::string_view name) const
 {
     return block_meta_[metaIndex(name)].spec;
+}
+
+const AuxiliaryEntityRemapMetadata&
+AuxiliaryStateManager::getEntityRemapMetadata(std::string_view name) const
+{
+    return block_meta_[metaIndex(name)].entity_metadata;
+}
+
+void AuxiliaryStateManager::setEntityRemapMetadata(
+    std::string_view name,
+    AuxiliaryEntityRemapMetadata metadata)
+{
+    auto& meta = block_meta_[metaIndex(name)];
+    metadata.scope = meta.spec.scope;
+    metadata.owned_entity_count = meta.indexing.ownedEntityCount();
+    if (metadata.entity_ids.empty()) {
+        metadata.entity_ids.resize(meta.indexing.totalEntityCount());
+        std::iota(metadata.entity_ids.begin(), metadata.entity_ids.end(), std::size_t{0});
+    }
+    FE_THROW_IF(metadata.entity_ids.size() != meta.indexing.totalEntityCount(),
+                InvalidArgumentException,
+                "AuxiliaryStateManager::setEntityRemapMetadata: entity id count for block '" +
+                    meta.spec.name + "' does not match the registered entity count");
+    if (metadata.qp_offsets.empty()) {
+        const auto qp_offsets = meta.indexing.qpOffsets();
+        metadata.qp_offsets.assign(qp_offsets.begin(), qp_offsets.end());
+    }
+    metadata.metadata_hash = hashEntityMetadata(metadata);
+    meta.entity_metadata = std::move(metadata);
+}
+
+AuxiliaryRestartSchema AuxiliaryStateManager::restartSchema(std::string_view name) const
+{
+    const auto& meta = block_meta_[metaIndex(name)];
+    return AuxiliaryTransferOperator::buildSchema(
+        meta.spec.name,
+        meta.spec.size,
+        meta.spec.scope,
+        meta.spec.ordering,
+        meta.spec.deployment_region.identity,
+        meta.indexing.totalEntityCount(),
+        static_cast<std::size_t>(std::max(0, meta.spec.history_depth)),
+        &meta.entity_metadata);
 }
 
 // ---------------------------------------------------------------------------
@@ -433,13 +598,23 @@ void AuxiliaryStateManager::transferBlock(
         // Default: resize and preserve existing data.
         blk.resize(new_entity_count);
     }
+    meta.indexing = makeResizedIndexing(meta.spec, meta.indexing, new_entity_count);
+    blk.setOwnedEntityCount(meta.indexing.ownedEntityCount());
+    refreshEntityMetadataAfterResize(
+        meta.entity_metadata, meta.spec, meta.indexing, new_entity_count);
 }
 
 void AuxiliaryStateManager::reinitializeBlock(
     std::string_view block_name, std::size_t new_entity_count)
 {
+    auto meta_idx = metaIndex(block_name);
+    auto& meta = block_meta_[meta_idx];
     auto& blk = state_.getBlock(block_name);
     blk.resize(new_entity_count);
+    meta.indexing = makeResizedIndexing(meta.spec, meta.indexing, new_entity_count);
+    blk.setOwnedEntityCount(meta.indexing.ownedEntityCount());
+    refreshEntityMetadataAfterResize(
+        meta.entity_metadata, meta.spec, meta.indexing, new_entity_count);
 
     // Zero-fill both buffers.
     auto work = blk.work();

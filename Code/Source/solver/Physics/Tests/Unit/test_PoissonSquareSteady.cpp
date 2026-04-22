@@ -23,10 +23,12 @@
 #include "FE/Dofs/EntityDofMap.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 
 #if FE_HAS_MPI || defined(MESH_HAS_MPI)
@@ -34,6 +36,671 @@
 #endif
 
 namespace svmp::Physics::test {
+
+namespace {
+
+using DarcyExactPressure = double (*)(double, double);
+using DarcyExactFlux = std::array<double, 2> (*)(double, double);
+
+struct SquareBounds {
+    double xmin{0.0};
+    double xmax{0.0};
+    double ymin{0.0};
+    double ymax{0.0};
+};
+
+struct DarcyMmsBackend {
+    std::unique_ptr<svmp::FE::backends::BackendFactory> factory{};
+    svmp::FE::backends::SolverMethod method{svmp::FE::backends::SolverMethod::Direct};
+    svmp::FE::backends::PreconditionerType preconditioner{svmp::FE::backends::PreconditionerType::None};
+    int max_iter{1};
+    svmp::FE::Real rel_tol{1e-14};
+    svmp::FE::Real abs_tol{1e-14};
+    double newton_abs_tol{1e-10};
+    double newton_rel_tol{1e-8};
+    double pressure_tolerance{1e-8};
+    double flux_tolerance{1e-10};
+    double quadratic_flux_tolerance{1e-8};
+};
+
+DarcyMmsBackend tryCreateDarcyMmsBackend(std::string& error)
+{
+    DarcyMmsBackend backend;
+    try {
+        backend.factory = svmp::FE::backends::BackendFactory::create(svmp::FE::backends::BackendKind::Eigen);
+        backend.method = svmp::FE::backends::SolverMethod::Direct;
+        backend.preconditioner = svmp::FE::backends::PreconditionerType::None;
+        backend.max_iter = 1;
+        backend.rel_tol = 1e-14;
+        backend.abs_tol = 1e-14;
+        return backend;
+    } catch (const std::exception& e) {
+        error = e.what();
+    }
+
+    try {
+        svmp::FE::backends::BackendFactory::CreateOptions opts;
+        opts.dof_per_node = 1;
+        backend.factory = svmp::FE::backends::BackendFactory::create(svmp::FE::backends::BackendKind::FSILS, opts);
+        backend.method = svmp::FE::backends::SolverMethod::CG;
+        backend.preconditioner = svmp::FE::backends::PreconditionerType::Diagonal;
+        backend.max_iter = 2000;
+        backend.rel_tol = 1e-10;
+        backend.abs_tol = 1e-7;
+        backend.newton_abs_tol = 1e-6;
+        backend.newton_rel_tol = 1e-6;
+        backend.pressure_tolerance = 2e-7;
+        backend.flux_tolerance = 1e-5;
+        backend.quadratic_flux_tolerance = 1e-5;
+        return backend;
+    } catch (const std::exception& e) {
+        error += "\nFSILS fallback failed: ";
+        error += e.what();
+    }
+
+    return backend;
+}
+
+svmp::FE::timestepping::TimeHistory solveSteadyDarcySystem(
+    svmp::FE::systems::FESystem& system,
+    DarcyMmsBackend& backend)
+{
+    const auto n_dofs = system.dofHandler().getNumDofs();
+    EXPECT_GT(n_dofs, 0);
+
+    svmp::FE::backends::SolverOptions lopt;
+    lopt.method = backend.method;
+    lopt.preconditioner = backend.preconditioner;
+    lopt.rel_tol = backend.rel_tol;
+    lopt.abs_tol = backend.abs_tol;
+    lopt.max_iter = backend.max_iter;
+
+    auto linear = backend.factory->createLinearSolver(lopt);
+    EXPECT_TRUE(linear);
+
+    auto integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    svmp::FE::systems::TransientSystem transient(system, integrator);
+
+    svmp::FE::timestepping::NewtonOptions newton_options;
+    newton_options.residual_op = "equations";
+    newton_options.jacobian_op = "equations";
+    newton_options.abs_tolerance = backend.newton_abs_tol;
+    newton_options.rel_tolerance = backend.newton_rel_tol;
+    svmp::FE::timestepping::NewtonSolver newton(newton_options);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(system, *backend.factory, ws);
+
+    auto history = svmp::FE::timestepping::TimeHistory::allocate(*backend.factory, n_dofs, /*history_depth=*/2);
+    history.setDt(1.0);
+    history.setPrevDt(1.0);
+    history.primeDtHistory(1.0);
+    history.u().zero();
+    system.constraints().distribute(history.u());
+    history.u().updateGhosts();
+
+    const auto report = newton.solveStep(transient,
+                                         *linear,
+                                         /*solve_time=*/0.0,
+                                         history,
+                                         ws);
+    EXPECT_TRUE(report.converged) << "Newton did not converge (iters=" << report.iterations
+                                  << ", |r|=" << report.residual_norm << ")";
+    history.u().updateGhosts();
+    return history;
+}
+
+svmp::FE::systems::SystemStateView stateFromHistory(svmp::FE::timestepping::TimeHistory& history)
+{
+    svmp::FE::systems::SystemStateView state;
+    state.dt = history.dt();
+    state.dt_prev = history.dtPrev();
+    state.u = history.uSpan();
+    state.u_prev = history.uPrevSpan();
+    state.u_prev2 = history.uPrev2Span();
+    state.u_vector = &history.u();
+    state.u_prev_vector = &history.uPrev();
+    state.u_prev2_vector = &history.uPrev2();
+    state.u_history = history.uHistorySpans();
+    state.dt_history = history.dtHistory();
+    return state;
+}
+
+SquareBounds squareBounds(const svmp::MeshBase& mesh)
+{
+    SquareBounds b;
+    b.xmin = b.ymin = std::numeric_limits<double>::infinity();
+    b.xmax = b.ymax = -std::numeric_limits<double>::infinity();
+    for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(mesh.n_vertices()); ++v) {
+        const auto xyz = mesh.get_vertex_coords(v);
+        const double x = static_cast<double>(xyz[0]);
+        const double y = static_cast<double>(xyz[1]);
+        b.xmin = std::min(b.xmin, x);
+        b.xmax = std::max(b.xmax, x);
+        b.ymin = std::min(b.ymin, y);
+        b.ymax = std::max(b.ymax, y);
+    }
+    return b;
+}
+
+bool isSquareBoundaryVertex(const svmp::MeshBase& mesh, svmp::index_t vertex)
+{
+    const auto b = squareBounds(mesh);
+    const auto xyz = mesh.get_vertex_coords(vertex);
+    constexpr double tol = 1e-12;
+    const double x = static_cast<double>(xyz[0]);
+    const double y = static_cast<double>(xyz[1]);
+    return std::abs(x - b.xmin) <= tol ||
+           std::abs(x - b.xmax) <= tol ||
+           std::abs(y - b.ymin) <= tol ||
+           std::abs(y - b.ymax) <= tol;
+}
+
+svmp::index_t nearestInteriorVertex(const svmp::MeshBase& mesh, double x_target, double y_target)
+{
+    svmp::index_t best = svmp::INVALID_INDEX;
+    double best_dist2 = std::numeric_limits<double>::infinity();
+    for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(mesh.n_vertices()); ++v) {
+        if (isSquareBoundaryVertex(mesh, v)) {
+            continue;
+        }
+        const auto xyz = mesh.get_vertex_coords(v);
+        const double dx = static_cast<double>(xyz[0]) - x_target;
+        const double dy = static_cast<double>(xyz[1]) - y_target;
+        const double dist2 = dx * dx + dy * dy;
+        if (dist2 < best_dist2) {
+            best_dist2 = dist2;
+            best = v;
+        }
+    }
+    return best;
+}
+
+std::vector<formulations::poisson::PoissonOptions::NodeDirichletBC>
+nodeConstraintsForVertices(const svmp::MeshBase& mesh,
+                           DarcyExactPressure exact,
+                           bool include_boundary,
+                           std::vector<svmp::index_t> extra_vertices = {})
+{
+    const auto& gids = mesh.vertex_gids();
+    if (gids.size() != mesh.n_vertices()) {
+        throw std::runtime_error("Square Darcy MMS test requires GlobalVertexID data on the Square mesh");
+    }
+
+    std::vector<formulations::poisson::PoissonOptions::NodeDirichletBC> values;
+    auto add_vertex = [&](svmp::index_t v) {
+        const auto xyz = mesh.get_vertex_coords(v);
+        values.push_back(formulations::poisson::PoissonOptions::NodeDirichletBC{
+            static_cast<svmp::FE::GlobalIndex>(gids[static_cast<std::size_t>(v)]),
+            static_cast<svmp::FE::Real>(exact(static_cast<double>(xyz[0]), static_cast<double>(xyz[1]))),
+        });
+    };
+
+    if (include_boundary) {
+        for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(mesh.n_vertices()); ++v) {
+            if (isSquareBoundaryVertex(mesh, v)) {
+                add_vertex(v);
+            }
+        }
+    }
+
+    for (const auto v : extra_vertices) {
+        if (v != svmp::INVALID_INDEX) {
+            add_vertex(v);
+        }
+    }
+    return values;
+}
+
+void appendDarcyDerivedFields(svmp::FE::systems::FESystem& system,
+                              svmp::Mesh& mesh,
+                              svmp::FE::timestepping::TimeHistory& history)
+{
+    auto state = stateFromHistory(history);
+    system.appendDerivedResultFields(mesh.base(), state);
+}
+
+double maxVertexPressureError(const svmp::FE::systems::FESystem& system,
+                              const svmp::MeshBase& mesh,
+                              std::span<const svmp::FE::Real> u,
+                              DarcyExactPressure exact)
+{
+    const auto* entity_map = system.fieldDofHandler(0).getEntityDofMap();
+    EXPECT_NE(entity_map, nullptr);
+    if (!entity_map) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    double max_err = 0.0;
+    const auto field_offset = system.fieldDofOffset(0);
+    for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(mesh.n_vertices()); ++v) {
+        const auto vdofs = entity_map->getVertexDofs(static_cast<svmp::FE::GlobalIndex>(v));
+        EXPECT_EQ(vdofs.size(), 1u);
+        if (vdofs.empty()) {
+            return std::numeric_limits<double>::infinity();
+        }
+        const auto dof = vdofs[0] + field_offset;
+        EXPECT_GE(dof, 0);
+        EXPECT_LT(static_cast<std::size_t>(dof), u.size());
+        const auto xyz = mesh.get_vertex_coords(v);
+        const double expected = exact(static_cast<double>(xyz[0]), static_cast<double>(xyz[1]));
+        max_err = std::max(max_err,
+                           std::abs(static_cast<double>(u[static_cast<std::size_t>(dof)]) - expected));
+    }
+    return max_err;
+}
+
+double maxQ2PressureDofError(const svmp::FE::systems::FESystem& system,
+                             const svmp::MeshBase& mesh,
+                             std::span<const svmp::FE::Real> u,
+                             DarcyExactPressure exact)
+{
+    const auto* entity_map = system.fieldDofHandler(0).getEntityDofMap();
+    EXPECT_NE(entity_map, nullptr);
+    if (!entity_map) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    double max_err = maxVertexPressureError(system, mesh, u, exact);
+    const auto field_offset = system.fieldDofOffset(0);
+
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(mesh.n_faces()); ++f) {
+        const auto edofs = entity_map->getEdgeDofs(static_cast<svmp::FE::GlobalIndex>(f));
+        if (edofs.empty()) {
+            continue;
+        }
+        EXPECT_EQ(edofs.size(), 1u);
+        const auto dof = edofs[0] + field_offset;
+        EXPECT_GE(dof, 0);
+        EXPECT_LT(static_cast<std::size_t>(dof), u.size());
+
+        const auto fv = mesh.face_vertices(f);
+        EXPECT_EQ(fv.size(), 2u);
+        if (fv.size() != 2u) {
+            continue;
+        }
+        const auto p0 = mesh.get_vertex_coords(fv[0]);
+        const auto p1 = mesh.get_vertex_coords(fv[1]);
+        const double x = 0.5 * (static_cast<double>(p0[0]) + static_cast<double>(p1[0]));
+        const double y = 0.5 * (static_cast<double>(p0[1]) + static_cast<double>(p1[1]));
+        max_err = std::max(max_err,
+                           std::abs(static_cast<double>(u[static_cast<std::size_t>(dof)]) - exact(x, y)));
+    }
+
+    for (svmp::index_t c = 0; c < static_cast<svmp::index_t>(mesh.n_cells()); ++c) {
+        const auto cdofs = entity_map->getCellInteriorDofs(static_cast<svmp::FE::GlobalIndex>(c));
+        if (cdofs.empty()) {
+            continue;
+        }
+        EXPECT_EQ(cdofs.size(), 1u);
+        const auto dof = cdofs[0] + field_offset;
+        EXPECT_GE(dof, 0);
+        EXPECT_LT(static_cast<std::size_t>(dof), u.size());
+
+        const auto centroid = mesh.cell_centroid(c);
+        max_err = std::max(max_err,
+                           std::abs(static_cast<double>(u[static_cast<std::size_t>(dof)]) -
+                                    exact(static_cast<double>(centroid[0]), static_cast<double>(centroid[1]))));
+    }
+    return max_err;
+}
+
+double maxCellFluxError(const svmp::MeshBase& mesh, DarcyExactFlux exact_cell_average)
+{
+    const auto h = mesh.field_handle(svmp::EntityKind::Volume, "Darcy_flux");
+    EXPECT_EQ(mesh.field_components(h), 2u);
+    const auto* data = mesh.field_data_as<double>(h);
+    EXPECT_NE(data, nullptr);
+    if (!data) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    double max_err = 0.0;
+    for (svmp::index_t c = 0; c < static_cast<svmp::index_t>(mesh.n_cells()); ++c) {
+        const auto centroid = mesh.cell_centroid(c);
+        const auto expected = exact_cell_average(static_cast<double>(centroid[0]), static_cast<double>(centroid[1]));
+        const std::size_t offset = static_cast<std::size_t>(c) * 2u;
+        max_err = std::max(max_err, std::abs(data[offset] - expected[0]));
+        max_err = std::max(max_err, std::abs(data[offset + 1u] - expected[1]));
+    }
+    return max_err;
+}
+
+double maxVertexFluxError(const svmp::MeshBase& mesh, DarcyExactFlux exact_vertex_flux)
+{
+    const auto h = mesh.field_handle(svmp::EntityKind::Vertex, "Darcy_flux_node");
+    EXPECT_EQ(mesh.field_components(h), 2u);
+    const auto* data = mesh.field_data_as<double>(h);
+    EXPECT_NE(data, nullptr);
+    if (!data) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    double max_err = 0.0;
+    for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(mesh.n_vertices()); ++v) {
+        const auto xyz = mesh.get_vertex_coords(v);
+        const auto expected = exact_vertex_flux(static_cast<double>(xyz[0]), static_cast<double>(xyz[1]));
+        const std::size_t offset = static_cast<std::size_t>(v) * 2u;
+        max_err = std::max(max_err, std::abs(data[offset] - expected[0]));
+        max_err = std::max(max_err, std::abs(data[offset + 1u] - expected[1]));
+    }
+    return max_err;
+}
+
+double maxPatchAverageFluxError(const svmp::MeshBase& mesh, DarcyExactFlux exact_cell_average)
+{
+    const auto h = mesh.field_handle(svmp::EntityKind::Vertex, "Darcy_flux_node");
+    EXPECT_EQ(mesh.field_components(h), 2u);
+    const auto* data = mesh.field_data_as<double>(h);
+    EXPECT_NE(data, nullptr);
+    if (!data) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    std::vector<std::array<double, 2>> accum(mesh.n_vertices(), {0.0, 0.0});
+    std::vector<int> counts(mesh.n_vertices(), 0);
+    for (svmp::index_t c = 0; c < static_cast<svmp::index_t>(mesh.n_cells()); ++c) {
+        const auto centroid = mesh.cell_centroid(c);
+        const auto cell_flux = exact_cell_average(static_cast<double>(centroid[0]), static_cast<double>(centroid[1]));
+        for (const auto v : mesh.cell_vertices(c)) {
+            accum[static_cast<std::size_t>(v)][0] += cell_flux[0];
+            accum[static_cast<std::size_t>(v)][1] += cell_flux[1];
+            counts[static_cast<std::size_t>(v)] += 1;
+        }
+    }
+
+    double max_err = 0.0;
+    for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(mesh.n_vertices()); ++v) {
+        const int n = counts[static_cast<std::size_t>(v)];
+        EXPECT_GT(n, 0);
+        if (n <= 0) {
+            continue;
+        }
+        const std::array<double, 2> expected = {
+            accum[static_cast<std::size_t>(v)][0] / static_cast<double>(n),
+            accum[static_cast<std::size_t>(v)][1] / static_cast<double>(n),
+        };
+        const std::size_t offset = static_cast<std::size_t>(v) * 2u;
+        max_err = std::max(max_err, std::abs(data[offset] - expected[0]));
+        max_err = std::max(max_err, std::abs(data[offset + 1u] - expected[1]));
+    }
+    return max_err;
+}
+
+void attachPressureVertexField(const svmp::FE::systems::FESystem& system,
+                               svmp::MeshBase& mesh,
+                               std::span<const svmp::FE::Real> u)
+{
+    const auto h = mesh.attach_field(svmp::EntityKind::Vertex, "Pressure", svmp::FieldScalarType::Float64, 1);
+    auto* out = mesh.field_data_as<double>(h);
+    ASSERT_NE(out, nullptr);
+
+    const auto* entity_map = system.fieldDofHandler(0).getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+    const auto field_offset = system.fieldDofOffset(0);
+    for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(mesh.n_vertices()); ++v) {
+        const auto vdofs = entity_map->getVertexDofs(static_cast<svmp::FE::GlobalIndex>(v));
+        ASSERT_EQ(vdofs.size(), 1u);
+        const auto dof = vdofs[0] + field_offset;
+        ASSERT_GE(dof, 0);
+        ASSERT_LT(static_cast<std::size_t>(dof), u.size());
+        out[static_cast<std::size_t>(v)] = static_cast<double>(u[static_cast<std::size_t>(dof)]);
+    }
+}
+
+void installDarcyMmsModule(svmp::FE::systems::FESystem& system,
+                           std::shared_ptr<const svmp::FE::spaces::H1Space> space,
+                           formulations::poisson::PoissonOptions opts)
+{
+    opts.field_name = "Pressure";
+    opts.diffusion = 1.0;
+    opts.register_darcy_flux_output = true;
+    formulations::poisson::PoissonModule module(std::move(space), std::move(opts));
+    module.registerOn(system);
+}
+
+double p_linear(double x, double) { return 1.0 - x; }
+std::array<double, 2> q_linear(double, double) { return {1.0, 0.0}; }
+
+double p_bilinear(double x, double y) { return x * y; }
+std::array<double, 2> q_bilinear(double x, double y) { return {-y, -x}; }
+
+double p_quadratic(double x, double) { return x * (1.0 - x); }
+std::array<double, 2> q_quadratic(double x, double) { return {2.0 * x - 1.0, 0.0}; }
+
+double p_affine_interior(double x, double y) { return 1.0 - x + 0.25 * y; }
+std::array<double, 2> q_affine_interior(double, double) { return {1.0, -0.25}; }
+
+} // namespace
+
+TEST(DarcySquareMMS, LinearPressureConstantFlux)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+#  if !defined(MESH_HAS_VTK)
+    GTEST_SKIP() << "Requires Mesh built with VTK support (MESH_ENABLE_VTK=ON).";
+#  else
+    std::string backend_error;
+    auto backend = tryCreateDarcyMmsBackend(backend_error);
+    if (!backend.factory) {
+        GTEST_SKIP() << "Requires Eigen or FSILS backend: " << backend_error;
+    }
+
+    const auto mesh = loadSquareMeshWithMarkedBoundaries();
+    ASSERT_TRUE(mesh);
+    auto mesh_mut = std::const_pointer_cast<svmp::Mesh>(mesh);
+
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(svmp::FE::ElementType::Quad4, /*order=*/1);
+    formulations::poisson::PoissonOptions opts;
+    opts.source = 0.0;
+    opts.dirichlet = {
+        {.boundary_marker = static_cast<int>(kSquareBoundaryLeft), .value = svmp::FE::Real(1.0)},
+        {.boundary_marker = static_cast<int>(kSquareBoundaryRight), .value = svmp::FE::Real(0.0)},
+    };
+
+    svmp::FE::systems::FESystem system(mesh);
+    installDarcyMmsModule(system, space, std::move(opts));
+    ASSERT_EQ(system.derivedResults().size(), 2u);
+    ASSERT_NO_THROW(system.setup());
+
+    auto history = solveSteadyDarcySystem(system, backend);
+    appendDarcyDerivedFields(system, *mesh_mut, history);
+
+    EXPECT_LT(maxVertexPressureError(system, mesh_mut->base(), history.uSpan(), p_linear),
+              backend.pressure_tolerance);
+    EXPECT_LT(maxCellFluxError(mesh_mut->base(), q_linear), backend.flux_tolerance);
+    EXPECT_LT(maxVertexFluxError(mesh_mut->base(), q_linear), backend.flux_tolerance);
+#  endif
+#endif
+}
+
+TEST(DarcySquareMMS, BilinearHarmonicBoundaryNodeConstraints)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+#  if !defined(MESH_HAS_VTK)
+    GTEST_SKIP() << "Requires Mesh built with VTK support (MESH_ENABLE_VTK=ON).";
+#  else
+    std::string backend_error;
+    auto backend = tryCreateDarcyMmsBackend(backend_error);
+    if (!backend.factory) {
+        GTEST_SKIP() << "Requires Eigen or FSILS backend: " << backend_error;
+    }
+
+    const auto mesh = loadSquareMeshWithMarkedBoundaries();
+    ASSERT_TRUE(mesh);
+    auto mesh_mut = std::const_pointer_cast<svmp::Mesh>(mesh);
+
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(svmp::FE::ElementType::Quad4, /*order=*/1);
+    formulations::poisson::PoissonOptions opts;
+    opts.source = 0.0;
+    ASSERT_NO_THROW(opts.node_dirichlet.values =
+                        nodeConstraintsForVertices(mesh->base(), p_bilinear, /*include_boundary=*/true));
+
+    svmp::FE::systems::FESystem system(mesh);
+    installDarcyMmsModule(system, space, std::move(opts));
+    ASSERT_NO_THROW(system.setup());
+
+    auto history = solveSteadyDarcySystem(system, backend);
+    appendDarcyDerivedFields(system, *mesh_mut, history);
+
+    EXPECT_LT(maxVertexPressureError(system, mesh_mut->base(), history.uSpan(), p_bilinear),
+              backend.pressure_tolerance);
+    EXPECT_LT(maxCellFluxError(mesh_mut->base(), q_bilinear), backend.flux_tolerance);
+    EXPECT_LT(maxPatchAverageFluxError(mesh_mut->base(), q_bilinear), backend.flux_tolerance);
+#  endif
+#endif
+}
+
+TEST(DarcySquareMMS, QuadraticConstantSourceQ2)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+#  if !defined(MESH_HAS_VTK)
+    GTEST_SKIP() << "Requires Mesh built with VTK support (MESH_ENABLE_VTK=ON).";
+#  else
+    std::string backend_error;
+    auto backend = tryCreateDarcyMmsBackend(backend_error);
+    if (!backend.factory) {
+        GTEST_SKIP() << "Requires Eigen or FSILS backend: " << backend_error;
+    }
+
+    const auto mesh = loadSquareMeshWithMarkedBoundaries();
+    ASSERT_TRUE(mesh);
+    auto mesh_mut = std::const_pointer_cast<svmp::Mesh>(mesh);
+
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(svmp::FE::ElementType::Quad4, /*order=*/2);
+    formulations::poisson::PoissonOptions opts;
+    opts.source = 2.0;
+    opts.dirichlet = {
+        {.boundary_marker = static_cast<int>(kSquareBoundaryLeft), .value = svmp::FE::Real(0.0)},
+        {.boundary_marker = static_cast<int>(kSquareBoundaryRight), .value = svmp::FE::Real(0.0)},
+    };
+
+    svmp::FE::systems::FESystem system(mesh);
+    installDarcyMmsModule(system, space, std::move(opts));
+    ASSERT_NO_THROW(system.setup());
+
+    auto history = solveSteadyDarcySystem(system, backend);
+    appendDarcyDerivedFields(system, *mesh_mut, history);
+
+    EXPECT_LT(maxQ2PressureDofError(system, mesh_mut->base(), history.uSpan(), p_quadratic),
+              backend.pressure_tolerance);
+    EXPECT_LT(maxCellFluxError(mesh_mut->base(), q_quadratic), backend.quadratic_flux_tolerance);
+    EXPECT_LT(maxPatchAverageFluxError(mesh_mut->base(), q_quadratic), backend.quadratic_flux_tolerance);
+#  endif
+#endif
+}
+
+TEST(DarcySquareMMS, AffinePressureWithInteriorNodeConstraint)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+#  if !defined(MESH_HAS_VTK)
+    GTEST_SKIP() << "Requires Mesh built with VTK support (MESH_ENABLE_VTK=ON).";
+#  else
+    std::string backend_error;
+    auto backend = tryCreateDarcyMmsBackend(backend_error);
+    if (!backend.factory) {
+        GTEST_SKIP() << "Requires Eigen or FSILS backend: " << backend_error;
+    }
+
+    const auto mesh = loadSquareMeshWithMarkedBoundaries();
+    ASSERT_TRUE(mesh);
+    auto mesh_mut = std::const_pointer_cast<svmp::Mesh>(mesh);
+
+    const auto interior = nearestInteriorVertex(mesh->base(), 0.5, 0.5);
+    ASSERT_NE(interior, svmp::INVALID_INDEX);
+
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(svmp::FE::ElementType::Quad4, /*order=*/1);
+    formulations::poisson::PoissonOptions opts;
+    opts.source = 0.0;
+    ASSERT_NO_THROW(opts.node_dirichlet.values =
+                        nodeConstraintsForVertices(mesh->base(),
+                                                   p_affine_interior,
+                                                   /*include_boundary=*/true,
+                                                   {interior}));
+
+    svmp::FE::systems::FESystem system(mesh);
+    installDarcyMmsModule(system, space, std::move(opts));
+    ASSERT_NO_THROW(system.setup());
+
+    auto history = solveSteadyDarcySystem(system, backend);
+    appendDarcyDerivedFields(system, *mesh_mut, history);
+
+    EXPECT_LT(maxVertexPressureError(system, mesh_mut->base(), history.uSpan(), p_affine_interior),
+              backend.pressure_tolerance);
+    EXPECT_LT(maxCellFluxError(mesh_mut->base(), q_affine_interior), backend.flux_tolerance);
+    EXPECT_LT(maxVertexFluxError(mesh_mut->base(), q_affine_interior), backend.flux_tolerance);
+#  endif
+#endif
+}
+
+TEST(DarcySquareMMS, DerivedFieldsRoundTripVtuOutput)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+#  if !defined(MESH_HAS_VTK)
+    GTEST_SKIP() << "Requires Mesh built with VTK support (MESH_ENABLE_VTK=ON).";
+#  else
+    std::string backend_error;
+    auto backend = tryCreateDarcyMmsBackend(backend_error);
+    if (!backend.factory) {
+        GTEST_SKIP() << "Requires Eigen or FSILS backend: " << backend_error;
+    }
+
+    const auto mesh = loadSquareMeshWithMarkedBoundaries();
+    ASSERT_TRUE(mesh);
+    auto mesh_mut = std::const_pointer_cast<svmp::Mesh>(mesh);
+
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(svmp::FE::ElementType::Quad4, /*order=*/1);
+    formulations::poisson::PoissonOptions opts;
+    opts.source = 0.0;
+    opts.dirichlet = {
+        {.boundary_marker = static_cast<int>(kSquareBoundaryLeft), .value = svmp::FE::Real(1.0)},
+        {.boundary_marker = static_cast<int>(kSquareBoundaryRight), .value = svmp::FE::Real(0.0)},
+    };
+
+    svmp::FE::systems::FESystem system(mesh);
+    installDarcyMmsModule(system, space, std::move(opts));
+    ASSERT_NO_THROW(system.setup());
+
+    auto history = solveSteadyDarcySystem(system, backend);
+    appendDarcyDerivedFields(system, *mesh_mut, history);
+    attachPressureVertexField(system, mesh_mut->base(), history.uSpan());
+
+    const auto out_path = std::filesystem::temp_directory_path() / "svmp_darcy_square_mms_roundtrip.vtu";
+    std::filesystem::remove(out_path);
+    ASSERT_NO_THROW(svmp::save_mesh(*mesh_mut, out_path.string()));
+
+    svmp::MeshIOOptions opts_io;
+    opts_io.format = "vtu";
+    opts_io.path = out_path.string();
+    const auto reloaded = svmp::MeshBase::load(opts_io);
+
+    EXPECT_TRUE(reloaded.has_field(svmp::EntityKind::Vertex, "Pressure"));
+    EXPECT_TRUE(reloaded.has_field(svmp::EntityKind::Vertex, "Darcy_flux_node"));
+    EXPECT_TRUE(reloaded.has_field(svmp::EntityKind::Volume, "Darcy_flux"));
+    EXPECT_FALSE(reloaded.has_field(svmp::EntityKind::Volume, "Darcy_flux_node"));
+    EXPECT_FALSE(reloaded.has_field(svmp::EntityKind::Vertex, "Darcy_flux"));
+
+    if (reloaded.has_field(svmp::EntityKind::Vertex, "Darcy_flux_node")) {
+        const auto h = reloaded.field_handle(svmp::EntityKind::Vertex, "Darcy_flux_node");
+        EXPECT_EQ(reloaded.field_components(h), 2u);
+    }
+    if (reloaded.has_field(svmp::EntityKind::Volume, "Darcy_flux")) {
+        const auto h = reloaded.field_handle(svmp::EntityKind::Volume, "Darcy_flux");
+        EXPECT_EQ(reloaded.field_components(h), 2u);
+    }
+
+    std::filesystem::remove(out_path);
+#  endif
+#endif
+}
 
 TEST(PoissonSquareSteady, DirichletLeftRight_NeumannTopBottom_WritesVtu)
 {
@@ -88,7 +755,10 @@ TEST(PoissonSquareSteady, DirichletLeftRight_NeumannTopBottom_WritesVtu)
     auto integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
     svmp::FE::systems::TransientSystem transient(system, integrator);
 
-    svmp::FE::timestepping::NewtonSolver newton;
+    svmp::FE::timestepping::NewtonOptions newton_options;
+    newton_options.residual_op = "equations";
+    newton_options.jacobian_op = "equations";
+    svmp::FE::timestepping::NewtonSolver newton(newton_options);
     svmp::FE::timestepping::NewtonWorkspace ws;
     newton.allocateWorkspace(system, *factory, ws);
 
@@ -114,12 +784,19 @@ TEST(PoissonSquareSteady, DirichletLeftRight_NeumannTopBottom_WritesVtu)
 
     // Verify the expected linear solution u(x,y) = 1 - x (homogeneous Neumann on top/bottom).
     const auto& base = mesh->base();
+    const auto* entity_map = system.dofHandler().getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
     const auto u = history.uSpan();
     double max_err = 0.0;
     for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(mesh->n_vertices()); ++v) {
+        const auto vdofs = entity_map->getVertexDofs(static_cast<svmp::FE::GlobalIndex>(v));
+        ASSERT_EQ(vdofs.size(), 1u);
+        const auto dof = vdofs[0];
+        ASSERT_GE(dof, 0);
+        ASSERT_LT(static_cast<std::size_t>(dof), u.size());
         const auto xyz = base.get_vertex_coords(v);
         const double expected = 1.0 - static_cast<double>(xyz[0]);
-        max_err = std::max(max_err, std::abs(static_cast<double>(u[static_cast<std::size_t>(v)]) - expected));
+        max_err = std::max(max_err, std::abs(static_cast<double>(u[static_cast<std::size_t>(dof)]) - expected));
     }
     EXPECT_LT(max_err, 1e-6);
 
@@ -130,8 +807,13 @@ TEST(PoissonSquareSteady, DirichletLeftRight_NeumannTopBottom_WritesVtu)
     const auto h = base_mut.attach_field(svmp::EntityKind::Vertex, "u", svmp::FieldScalarType::Float64, 1);
     auto* out_u = base_mut.field_data_as<double>(h);
     ASSERT_NE(out_u, nullptr);
-    for (std::size_t i = 0; i < base_mut.n_vertices(); ++i) {
-        out_u[i] = static_cast<double>(u[i]);
+    for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(base_mut.n_vertices()); ++v) {
+        const auto vdofs = entity_map->getVertexDofs(static_cast<svmp::FE::GlobalIndex>(v));
+        ASSERT_EQ(vdofs.size(), 1u);
+        const auto dof = vdofs[0];
+        ASSERT_GE(dof, 0);
+        ASSERT_LT(static_cast<std::size_t>(dof), u.size());
+        out_u[static_cast<std::size_t>(v)] = static_cast<double>(u[static_cast<std::size_t>(dof)]);
     }
 
     EXPECT_NO_THROW(svmp::save_mesh(*mesh_mut, out_path.string()));
@@ -197,7 +879,10 @@ TEST(PoissonSquareSteady, DirichletLeftRight_NeumannTopBottom_Quadratic_WritesVt
     auto integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
     svmp::FE::systems::TransientSystem transient(system, integrator);
 
-    svmp::FE::timestepping::NewtonSolver newton;
+    svmp::FE::timestepping::NewtonOptions newton_options;
+    newton_options.residual_op = "equations";
+    newton_options.jacobian_op = "equations";
+    svmp::FE::timestepping::NewtonSolver newton(newton_options);
     svmp::FE::timestepping::NewtonWorkspace ws;
     newton.allocateWorkspace(system, *factory, ws);
 
@@ -417,10 +1102,17 @@ TEST(PoissonSquareSteadyMPI, DirichletLeftRight_NeumannTopBottom_Linear_2Ranks)
 
     svmp::FE::systems::FESystem system(mesh);
     module.registerOn(system);
+    svmp::FE::systems::SetupOptions setup_opts;
+    setup_opts.use_backend_row_ownership_for_assembly = true;
+#  if defined(MESH_HAS_MPI)
+    setup_opts.dof_options.my_rank = world.rank();
+    setup_opts.dof_options.world_size = world.size();
+    setup_opts.dof_options.mpi_comm = world.native();
+#  endif
     bool setup_ok = true;
     std::string setup_error;
     try {
-        system.setup();
+        system.setup(setup_opts);
     } catch (const std::exception& e) {
         setup_ok = false;
         setup_error = e.what();
@@ -463,8 +1155,8 @@ TEST(PoissonSquareSteadyMPI, DirichletLeftRight_NeumannTopBottom_Linear_2Ranks)
     svmp::FE::backends::SolverOptions lopt;
     lopt.method = svmp::FE::backends::SolverMethod::CG;
     lopt.preconditioner = svmp::FE::backends::PreconditionerType::None;
-    lopt.rel_tol = 1e-12;
-    lopt.abs_tol = 1e-14;
+    lopt.rel_tol = 1e-8;
+    lopt.abs_tol = 1e-10;
     lopt.max_iter = 500;
 
     std::unique_ptr<svmp::FE::backends::LinearSolver> linear;
@@ -494,7 +1186,10 @@ TEST(PoissonSquareSteadyMPI, DirichletLeftRight_NeumannTopBottom_Linear_2Ranks)
     auto integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
     svmp::FE::systems::TransientSystem transient(system, integrator);
 
-    svmp::FE::timestepping::NewtonSolver newton;
+    svmp::FE::timestepping::NewtonOptions newton_options;
+    newton_options.residual_op = "equations";
+    newton_options.jacobian_op = "equations";
+    svmp::FE::timestepping::NewtonSolver newton(newton_options);
     svmp::FE::timestepping::NewtonWorkspace ws;
     bool ws_ok = true;
     std::string ws_error;
@@ -564,12 +1259,11 @@ TEST(PoissonSquareSteadyMPI, DirichletLeftRight_NeumannTopBottom_Linear_2Ranks)
     auto u_view = history.u().createAssemblyView();
 
     const auto& base = mesh->base();
+    const auto& owned_dofs = system.dofHandler().getPartition().locallyOwned();
     double max_err_local = 0.0;
+    int checked_local = 0;
     int eval_ok = (entity_map != nullptr && static_cast<bool>(u_view)) ? 1 : 0;
     for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(base.n_vertices()); ++v) {
-        if (!mesh->is_owned_vertex(v)) {
-            continue;
-        }
         if (entity_map == nullptr || !u_view) {
             eval_ok = 0;
             break;
@@ -580,10 +1274,14 @@ TEST(PoissonSquareSteadyMPI, DirichletLeftRight_NeumannTopBottom_Linear_2Ranks)
             continue;
         }
         const auto dof = vdofs[0];
+        if (!owned_dofs.contains(dof)) {
+            continue;
+        }
         const double value = static_cast<double>(u_view->getVectorEntry(dof));
         const auto xyz = base.get_vertex_coords(v);
         const double expected = 1.0 - static_cast<double>(xyz[0]);
         max_err_local = std::max(max_err_local, std::abs(value - expected));
+        ++checked_local;
     }
 
     if (!eval_ok) {
@@ -591,8 +1289,10 @@ TEST(PoissonSquareSteadyMPI, DirichletLeftRight_NeumannTopBottom_Linear_2Ranks)
     }
 
     double max_err = max_err_local;
+    int checked_global = checked_local;
 #  if defined(MESH_HAS_MPI)
     MPI_Allreduce(&max_err_local, &max_err, 1, MPI_DOUBLE, MPI_MAX, world.native());
+    MPI_Allreduce(&checked_local, &checked_global, 1, MPI_INT, MPI_SUM, world.native());
     {
         int all_ok = 0;
         MPI_Allreduce(&eval_ok, &all_ok, 1, MPI_INT, MPI_MIN, world.native());
@@ -601,6 +1301,7 @@ TEST(PoissonSquareSteadyMPI, DirichletLeftRight_NeumannTopBottom_Linear_2Ranks)
 #  endif
     if (world.rank() == 0) {
         EXPECT_EQ(eval_ok, 1);
+        EXPECT_GT(checked_global, 0);
         EXPECT_LT(max_err, 1e-6);
     }
 

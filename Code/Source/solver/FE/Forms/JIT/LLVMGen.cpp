@@ -5121,7 +5121,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         const bool want_vector = coupled ? true : ((ir.kind() == FormKind::Linear) || is_residual || is_fused);
 
         if (is_face_domain) {
-            if (!coupled && ir.kind() == FormKind::Linear) {
+            if (!coupled && ir.kind() == FormKind::Linear && !is_functional) {
                 return LLVMGenResult{.ok = false, .message = "LLVMGen: face kernels currently support bilinear/residual forms only"};
             }
         }
@@ -11974,6 +11974,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 emitMatrixAccum(element_matrix_single, side_single.n_trial_dofs, i, j, contrib);
                             }, /*is_dof_loop=*/true);
                         }, /*is_dof_loop=*/true);
+                    } else if (is_functional) {
+                        auto* val = evalKernelIRSingle(terms[t], q_zero, builder.getInt32(0),
+                                                        builder.getInt32(0), side_single, cached_ptr);
+                        auto* contrib = builder.CreateFMul(scaled_vol, val);
+                        emitVectorAccum(element_vector_single, builder.getInt32(0), contrib);
                     } else {
                         emitForLoop(side_single.n_test_dofs, "hi" + std::to_string(t), [&](llvm::Value* i) {
                             auto* val = evalKernelIRSingle(terms[t], q_zero, i, builder.getInt32(0), side_single, cached_ptr);
@@ -12105,6 +12110,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 }, /*is_dof_loop=*/true);
                             }
                         }
+                    } else if (is_functional) {
+                        auto* val = evalKernelIRSingle(terms[t], q, builder.getInt32(0),
+                                                        builder.getInt32(0), side_single, cached_ptr);
+                        auto* contrib = builder.CreateFMul(scaled_w, val);
+                        emitVectorAccum(element_vector_single, builder.getInt32(0), contrib);
                     } else {
                         emitForLoop(side_single.n_test_dofs, "i" + std::to_string(t), [&](llvm::Value* i) {
                             auto* val = evalKernelIRSingle(terms[t], q, i, builder.getInt32(0), side_single, cached_ptr);

@@ -250,6 +250,7 @@ const std::map<std::string,EquationType> equation_name_to_type = {
     {"heatS", EquationType::phys_heatS},
     {"laplace", EquationType::phys_heatS},
     {"poisson", EquationType::phys_heatS},
+    {"darcy", EquationType::phys_heatS},
 
     {"stokes", EquationType::phys_stokes},
 
@@ -359,4 +360,3 @@ const std::map<std::string,SolverType> solver_name_to_type
 
 
 };
-

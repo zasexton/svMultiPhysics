@@ -196,11 +196,11 @@ TEST(AuxiliaryBlockIndexing, ZeroStrideThrows)
 
 TEST(AuxiliaryBlockIndexing, QPOffsetsValidation)
 {
-    // Too few entries
-    EXPECT_THROW(
-        AuxiliaryBlockIndexing::createQuadraturePoint(
-            std::vector<std::size_t>{0}, 1),
-        svmp::FE::InvalidArgumentException);
+    // Empty local QP layouts are valid for MPI ranks with zero covered cells.
+    const auto empty_local =
+        AuxiliaryBlockIndexing::createQuadraturePoint(std::vector<std::size_t>{0}, 1);
+    EXPECT_EQ(empty_local.totalEntityCount(), 0u);
+    EXPECT_EQ(empty_local.qpOffsets().size(), 1u);
 
     // offsets[0] != 0
     EXPECT_THROW(

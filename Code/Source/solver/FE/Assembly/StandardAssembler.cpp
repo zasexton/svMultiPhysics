@@ -462,6 +462,9 @@ int defaultGeometryOrder(ElementType element_type) noexcept
 [[nodiscard]] bool requiresOwnedRowFiltering(const AssemblyOptions& options,
                                              const IMeshAccess& mesh) noexcept
 {
+    if (options.allow_unowned_row_accumulation) {
+        return false;
+    }
     if (options.ghost_policy == GhostPolicy::OwnedRowsOnly) {
         return true;
     }

@@ -2,10 +2,56 @@
 
 #include <algorithm>
 #include <cstring>
+#include <functional>
 
 namespace svmp {
 namespace FE {
 namespace systems {
+
+namespace {
+
+[[nodiscard]] const char* regionKindName(AuxiliaryRegionKind kind) noexcept
+{
+    switch (kind) {
+        case AuxiliaryRegionKind::WholeDomain: return "WholeDomain";
+        case AuxiliaryRegionKind::CellSet: return "CellSet";
+        case AuxiliaryRegionKind::BoundarySet: return "BoundarySet";
+        case AuxiliaryRegionKind::MaterialIdSet: return "MaterialIdSet";
+        case AuxiliaryRegionKind::InterfaceSet: return "InterfaceSet";
+        case AuxiliaryRegionKind::FormulationDefined: return "FormulationDefined";
+    }
+    return "Unknown";
+}
+
+template <typename T>
+void hashCombine(std::size_t& seed, const T& value)
+{
+    seed ^= std::hash<T>{}(value) + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
+}
+
+template <typename T>
+void hashRange(std::size_t& seed, const std::vector<T>& values)
+{
+    hashCombine(seed, values.size());
+    for (const auto& value : values) {
+        hashCombine(seed, value);
+    }
+}
+
+void hashRegionMembership(std::size_t& seed,
+                          const std::vector<AuxiliaryRegionMembershipMetadata>& memberships)
+{
+    hashCombine(seed, memberships.size());
+    for (const auto& membership : memberships) {
+        hashCombine(seed, membership.region_id);
+        hashRange(seed, membership.cell_ids);
+        hashRange(seed, membership.node_ids);
+        hashRange(seed, membership.boundary_markers);
+        hashRange(seed, membership.interface_face_ids);
+    }
+}
+
+} // namespace
 
 AuxiliaryTransferOperator::AuxiliaryTransferOperator(
     std::string block_name, AuxiliaryTransferStrategy strategy)
@@ -112,12 +158,16 @@ AuxiliaryRestartSchema AuxiliaryTransferOperator::buildSchema(
     AuxiliaryEntityOrdering ordering,
     const std::string& region_identity,
     std::size_t entity_count,
-    std::size_t history_depth)
+    std::size_t history_depth,
+    const AuxiliaryEntityRemapMetadata* entity_metadata)
 {
     AuxiliaryRestartSchema schema;
     schema.block_name = block_name;
     schema.component_count = component_count;
     schema.entity_count = entity_count;
+    schema.owned_entity_count = entity_metadata != nullptr
+        ? entity_metadata->owned_entity_count
+        : entity_count;
     schema.storage_size = entity_count * static_cast<std::size_t>(component_count);
     schema.history_depth = history_depth;
     schema.region_identity = region_identity;
@@ -139,12 +189,33 @@ AuxiliaryRestartSchema AuxiliaryTransferOperator::buildSchema(
             schema.ordering_name = "ByComponentThenEntity"; break;
     }
 
+    if (entity_metadata != nullptr) {
+        schema.deployment_region_kind =
+            regionKindName(entity_metadata->deployment_region.kind);
+        schema.region_identity = entity_metadata->deployment_region.identity;
+        schema.region_version = entity_metadata->deployment_region.version;
+        schema.entity_ids = entity_metadata->entity_ids;
+        schema.qp_offsets = entity_metadata->qp_offsets;
+        schema.qp_cell_ids = entity_metadata->qp_cell_ids;
+        schema.region_membership = entity_metadata->region_membership;
+    }
+
     // Simple hash of the schema fields.
     std::size_t h = std::hash<std::string>{}(schema.block_name);
-    h ^= std::hash<int>{}(schema.component_count) * 2654435761u;
-    h ^= std::hash<std::string>{}(schema.scope_name) * 40503u;
-    h ^= std::hash<std::string>{}(schema.ordering_name) * 12345u;
-    h ^= std::hash<std::string>{}(schema.region_identity) * 67890u;
+    hashCombine(h, schema.component_count);
+    hashCombine(h, schema.scope_name);
+    hashCombine(h, schema.ordering_name);
+    hashCombine(h, schema.deployment_region_kind);
+    hashCombine(h, schema.region_identity);
+    hashCombine(h, schema.region_version);
+    hashCombine(h, schema.entity_count);
+    hashCombine(h, schema.owned_entity_count);
+    hashCombine(h, schema.storage_size);
+    hashCombine(h, schema.history_depth);
+    hashRange(h, schema.entity_ids);
+    hashRange(h, schema.qp_offsets);
+    hashRange(h, schema.qp_cell_ids);
+    hashRegionMembership(h, schema.region_membership);
     schema.schema_hash = static_cast<std::uint64_t>(h);
 
     return schema;
@@ -190,6 +261,50 @@ RestartValidationResult AuxiliaryTransferOperator::validateRestart(
         result.errors.push_back(
             "Region mismatch: expected '" + expected.region_identity +
             "', got '" + payload.region_identity + "'");
+    }
+
+    if (payload.deployment_region_kind != expected.deployment_region_kind) {
+        result.valid = false;
+        result.errors.push_back(
+            "Deployment region kind mismatch: expected '" +
+            expected.deployment_region_kind + "', got '" +
+            payload.deployment_region_kind + "'");
+    }
+
+    if (payload.region_version != expected.region_version) {
+        result.valid = false;
+        result.errors.push_back(
+            "Deployment region version mismatch: expected '" +
+            expected.region_version + "', got '" + payload.region_version + "'");
+    }
+
+    if (payload.owned_entity_count != expected.owned_entity_count) {
+        result.valid = false;
+        result.errors.push_back(
+            "Owned entity count mismatch: expected " +
+            std::to_string(expected.owned_entity_count) +
+            ", got " + std::to_string(payload.owned_entity_count));
+    }
+
+    if (payload.entity_ids != expected.entity_ids) {
+        result.valid = false;
+        result.errors.push_back("Entity map mismatch: restart/remap requires matching stable entity ids");
+    }
+
+    if (payload.qp_offsets != expected.qp_offsets) {
+        result.valid = false;
+        result.errors.push_back("QP offsets mismatch: restart/remap requires matching quadrature layout");
+    }
+
+    if (payload.qp_cell_ids != expected.qp_cell_ids) {
+        result.valid = false;
+        result.errors.push_back("QP covered-cell map mismatch: restart/remap requires matching cell ids");
+    }
+
+    if (payload.region_membership != expected.region_membership) {
+        result.valid = false;
+        result.errors.push_back(
+            "Region membership mismatch: restart/remap requires matching topology-region maps");
     }
 
     if (payload.entity_count != expected.entity_count) {

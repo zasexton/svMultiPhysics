@@ -75,9 +75,9 @@ AuxiliaryBlockIndexing AuxiliaryBlockIndexing::createQuadraturePoint(
 {
     FE_THROW_IF(component_stride <= 0, InvalidArgumentException,
                 "AuxiliaryBlockIndexing::createQuadraturePoint: stride must be > 0");
-    FE_THROW_IF(qp_offsets.size() < 2u, InvalidArgumentException,
+    FE_THROW_IF(qp_offsets.empty(), InvalidArgumentException,
                 "AuxiliaryBlockIndexing::createQuadraturePoint: "
-                "qp_offsets must have >= 2 entries");
+                "qp_offsets must have at least one entry");
     FE_THROW_IF(qp_offsets[0] != 0u, InvalidArgumentException,
                 "AuxiliaryBlockIndexing::createQuadraturePoint: "
                 "qp_offsets[0] must be 0");
@@ -86,7 +86,6 @@ AuxiliaryBlockIndexing AuxiliaryBlockIndexing::createQuadraturePoint(
     idx.scope_ = AuxiliaryStateScope::QuadraturePoint;
     idx.qp_offsets_.assign(qp_offsets.begin(), qp_offsets.end());
 
-    const auto n_cells = qp_offsets.size() - 1;
     const auto total_qps = qp_offsets.back();
 
     idx.total_entity_count_ = total_qps;

@@ -164,6 +164,7 @@ std::string validateFsilsMixedLayoutContract(const MixedBlockLayout& layout,
     }
 
     std::vector<int> component_coverage(static_cast<std::size_t>(dof_per_node), 0);
+    std::optional<GlobalIndex> common_node_count{};
     for (const auto& block : layout.blocks) {
         if (!block.usesNativeOwnedRows()) {
             continue;
@@ -175,6 +176,23 @@ std::string validateFsilsMixedLayoutContract(const MixedBlockLayout& layout,
         if (block.node_component_start + block.node_component_count > dof_per_node) {
             return "FSILS native mixed block '" + block.name +
                    "' component range exceeds dof_per_node";
+        }
+        if (block.size <= 0 ||
+            (block.size % static_cast<GlobalIndex>(block.node_component_count)) != 0) {
+            return "FSILS native mixed block '" + block.name +
+                   "' size is not a whole number of nodal component blocks";
+        }
+        const GlobalIndex block_node_count =
+            block.size / static_cast<GlobalIndex>(block.node_component_count);
+        if (block_node_count <= 0) {
+            return "FSILS native mixed block '" + block.name +
+                   "' has no represented nodes";
+        }
+        if (!common_node_count.has_value()) {
+            common_node_count = block_node_count;
+        } else if (*common_node_count != block_node_count) {
+            return "FSILS native mixed block '" + block.name +
+                   "' size is inconsistent with the common nodal-interleaved layout";
         }
         for (int c = block.node_component_start;
              c < block.node_component_start + block.node_component_count; ++c) {
@@ -191,6 +209,12 @@ std::string validateFsilsMixedLayoutContract(const MixedBlockLayout& layout,
         if (component_coverage[static_cast<std::size_t>(c)] != 1) {
             return "FSILS native mixed blocks do not partition [0, dof_per_node)";
         }
+    }
+
+    if (common_node_count.has_value() &&
+        layout.total_unknowns != *common_node_count * static_cast<GlobalIndex>(dof_per_node)) {
+        return "FSILS native mixed layout total_unknowns is inconsistent with "
+               "common_node_count * dof_per_node";
     }
 
     return {};

@@ -26,6 +26,8 @@
  * | `CellSample`              | Point-sampled FE field within a cell.             |
  * | `DomainAverage`           | Domain-averaged FE field quantity.                |
  * | `DomainIntegral`          | Domain-integrated FE field quantity.              |
+ * | `RegionAverage`           | Topology-region-local FE field average.           |
+ * | `RegionIntegral`          | Topology-region-local FE field integral.          |
  * | `SampledBoundaryTrace`    | FE field sampled on a boundary.                   |
  * | `CoupledBoundaryTrace`    | Symbolic boundary field dependency (monolithic).  |
  * | `SampledBoundaryReduction`| Boundary-reduced FE field quantity (explicit).    |
@@ -42,23 +44,25 @@
  *
  * ## Scope validity
  *
- * | Provider                  | Global | Node | Cell | QP  | BndEnt |
- * |---------------------------|--------|------|------|-----|--------|
- * | BoundaryReduction         |  yes   |  no  |  no  |  no |  no    |
- * | FormulationCallback       |  yes   |  yes |  yes |  yes|  yes   |
- * | ParameterDerived          |  yes   |  yes |  yes |  yes|  yes   |
- * | DirectUserData            |  yes   |  yes |  yes |  yes|  yes   |
- * | AuxiliaryOutput           |  yes   |  yes |  yes |  yes|  yes   |
- * | SampledStateField         |  no    |  yes |  yes |  yes|  no    |
- * | CoupledField              |  no    |  yes |  yes |  yes|  no    |
- * | CellAverage               |  no    |  no  |  yes |  yes|  no    |
- * | CellSample                |  no    |  no  |  yes |  yes|  no    |
- * | DomainAverage             |  yes   |  no  |  no  |  no |  no    |
- * | DomainIntegral            |  yes   |  no  |  no  |  no |  no    |
- * | SampledBoundaryTrace      |  no    |  no  |  no  |  no |  yes   |
- * | CoupledBoundaryTrace      |  no    |  no  |  no  |  no |  yes   |
- * | SampledBoundaryReduction  |  yes   |  no  |  no  |  no |  no    |
- * | CoupledBoundaryReduction  |  yes   |  no  |  no  |  no |  no    |
+ * | Provider                  | Global | Node | Cell | QP  | Region | BndEnt |
+ * |---------------------------|--------|------|------|-----|--------|--------|
+ * | BoundaryReduction         |  yes   |  no  |  no  |  no |  no    |  no    |
+ * | FormulationCallback       |  yes   |  yes |  yes |  yes|  yes   |  yes   |
+ * | ParameterDerived          |  yes   |  yes |  yes |  yes|  yes   |  yes   |
+ * | DirectUserData            |  yes   |  yes |  yes |  yes|  yes   |  yes   |
+ * | AuxiliaryOutput           |  yes   |  yes |  yes |  yes|  yes   |  yes   |
+ * | SampledStateField         |  no    |  yes |  yes |  yes|  no    |  no    |
+ * | CoupledField              |  no    |  yes |  yes |  yes|  no    |  no    |
+ * | CellAverage               |  no    |  no  |  yes |  yes|  no    |  no    |
+ * | CellSample                |  no    |  no  |  yes |  yes|  no    |  no    |
+ * | DomainAverage             |  yes   |  no  |  no  |  no |  no    |  no    |
+ * | DomainIntegral            |  yes   |  no  |  no  |  no |  no    |  no    |
+ * | RegionAverage             |  no    |  no  |  no  |  no |  yes   |  no    |
+ * | RegionIntegral            |  no    |  no  |  no  |  no |  yes   |  no    |
+ * | SampledBoundaryTrace      |  no    |  no  |  no  |  no |  no    |  yes   |
+ * | CoupledBoundaryTrace      |  no    |  no  |  no  |  no |  no    |  yes   |
+ * | SampledBoundaryReduction  |  yes   |  no  |  no  |  no |  no    |  no    |
+ * | CoupledBoundaryReduction  |  yes   |  no  |  no  |  no |  no    |  no    |
  *
  * `Global` scope requires explicit reductions — no implicit field-to-scalar
  * collapse.  `CoupledField` and `CoupledBoundaryTrace` lower into symbolic
@@ -143,6 +147,12 @@ enum class AuxiliaryInputProducer : std::uint8_t {
 
     /// Domain-integrated FE field quantity.
     DomainIntegral,
+
+    /// Topology-region-local FE field average.
+    RegionAverage,
+
+    /// Topology-region-local FE field integral.
+    RegionIntegral,
 
     // -- Boundary-binding providers --
 

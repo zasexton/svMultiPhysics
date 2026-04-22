@@ -346,6 +346,9 @@ public:
     /// Set local failure handling for Partitioned auxiliary advancement.
     AuxiliaryDeployedInstance& failurePolicy(AuxiliaryFailurePolicy policy);
 
+    /// Set nonsmooth/event-manager policy metadata for this deployment.
+    AuxiliaryDeployedInstance& nonsmoothPolicy(AuxiliaryNonsmoothPolicy policy);
+
     // ---- Convenience scope sugar ----
 
     /// Shorthand for `.scope(AuxiliaryStateScope::Global)`.
@@ -629,6 +632,10 @@ public:
     {
         return failure_policy_;
     }
+    [[nodiscard]] const AuxiliaryNonsmoothPolicy& getNonsmoothPolicy() const noexcept
+    {
+        return nonsmooth_policy_;
+    }
     [[nodiscard]] bool hasExplicitStepper() const noexcept
     {
         return has_explicit_stepper_;
@@ -746,6 +753,7 @@ private:
     AuxiliaryStepperSpec stepper_spec_{};
     bool has_explicit_stepper_{false};
     AuxiliaryFailurePolicy failure_policy_{};
+    AuxiliaryNonsmoothPolicy nonsmooth_policy_{};
     std::unordered_map<std::string, std::string> input_bindings_{};
     /// FE-backed handle bindings keyed by model input name.
     std::unordered_map<std::string, AuxiliaryInputHandle> coupled_bindings_{};

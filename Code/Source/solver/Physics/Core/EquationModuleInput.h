@@ -2,6 +2,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,11 @@ struct DomainInput {
   ParameterMap params{};
 };
 
+struct NodePressureConstraintInput {
+  std::string id_type{};
+  std::string values_file_path{};
+};
+
 struct EquationModuleInput {
   std::string equation_type{};
 
@@ -44,6 +50,8 @@ struct EquationModuleInput {
   std::vector<DomainInput> domains{};
 
   std::vector<BoundaryConditionInput> boundary_conditions{};
+
+  std::optional<NodePressureConstraintInput> node_pressure_constraints{};
 };
 
 } // namespace svmp::Physics

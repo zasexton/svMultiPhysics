@@ -857,6 +857,30 @@ class BoundaryConditionParameters : public ParameterLists
     Parameter<double> resistance;
 };
 
+/// @brief Node-based pressure Dirichlet constraints for Darcy-through-Poisson.
+///
+/// \code {.xml}
+/// <Node_pressure_constraints>
+///   <Id_type>Global_vertex_gid</Id_type>
+///   <Values_file_path>known_pressure_nodes.csv</Values_file_path>
+/// </Node_pressure_constraints>
+/// \endcode
+class NodePressureConstraintsParameters : public ParameterLists
+{
+  public:
+    NodePressureConstraintsParameters();
+
+    static const std::string xml_element_name_;
+
+    void set_values(tinyxml2::XMLElement* xml_elem);
+    void print_parameters();
+
+    Parameter<std::string> id_type;
+    Parameter<std::string> values_file_path;
+
+    bool value_set = false;
+};
+
 /// @brief The OutputParameters class stores parameters for the
 /// Output XML element under Add_equation.
 ///
@@ -1406,6 +1430,8 @@ class EquationParameters : public ParameterLists
     std::vector<BodyForceParameters*> body_forces;
 
     std::vector<BoundaryConditionParameters*> boundary_conditions;
+
+    NodePressureConstraintsParameters node_pressure_constraints;
 
     CoupleCplBCParameters couple_to_cplBC;
     CoupleGenBCParameters couple_to_genBC;

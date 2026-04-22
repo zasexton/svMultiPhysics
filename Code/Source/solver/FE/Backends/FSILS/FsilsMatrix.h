@@ -103,6 +103,10 @@ public:
     [[nodiscard]] static std::uint64_t droppedEntryCount() noexcept;
     /// Reset the dropped-entry counter to zero.
     static void resetDroppedEntryCount() noexcept;
+    /// Number of attempted matrix writes to locally present but non-owned rows since last reset.
+    [[nodiscard]] static std::uint64_t offOwnerWriteCount() noexcept;
+    /// Reset the off-owner write counter to zero.
+    static void resetOffOwnerWriteCount() noexcept;
 
     /// Insert a dof*dof block for a single (row_internal, col_internal) node pair.
     /// Does ONE CSR column lookup instead of dof*dof individual lookups.
@@ -111,6 +115,7 @@ public:
 
 private:
     static std::atomic<std::uint64_t> dropped_entry_count_;
+    static std::atomic<std::uint64_t> off_owner_write_count_;
     GlobalIndex global_rows_{0};
     GlobalIndex global_cols_{0};
     GlobalIndex nnz_{0};

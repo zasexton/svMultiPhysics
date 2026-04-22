@@ -12,6 +12,7 @@
 #include "Backends/FSILS/FsilsMatrix.h"
 #include "Backends/FSILS/FsilsVector.h"
 #include "Backends/Interfaces/DofPermutation.h"
+#include "Backends/Utils/BackendOptions.h"
 #include "Core/Types.h"
 #include "Sparsity/DistributedSparsityPattern.h"
 
@@ -21,6 +22,8 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <span>
@@ -63,6 +66,13 @@ std::vector<Real> allreduceSum(std::span<const Real> local, MPI_Comm comm)
     std::vector<Real> global(local.size(), Real(0.0));
     const int n = static_cast<int>(local.size());
     MPI_Allreduce(local.data(), global.data(), n, mpiRealType(), MPI_SUM, comm);
+    return global;
+}
+
+std::uint64_t allreduceSum(std::uint64_t local, MPI_Comm comm)
+{
+    std::uint64_t global = 0;
+    MPI_Allreduce(&local, &global, 1, MPI_UINT64_T, MPI_SUM, comm);
     return global;
 }
 
@@ -223,6 +233,51 @@ void assembleElement(GlobalSystemView& mat_view,
 {
     mat_view.addMatrixEntries(edofs, Ke, assembly::AddMode::Add);
     vec_view.addVectorEntries(edofs, be, assembly::AddMode::Add);
+}
+
+void assembleElementOwnedRows(GlobalSystemView& mat_view,
+                              GlobalSystemView& vec_view,
+                              std::span<const GlobalIndex> edofs,
+                              std::span<const Real> Ke,
+                              std::span<const Real> be,
+                              const std::function<int(GlobalIndex)>& row_owner,
+                              int rank)
+{
+    const auto n = static_cast<GlobalIndex>(edofs.size());
+    FE_THROW_IF(Ke.size() != static_cast<std::size_t>(n * n) ||
+                    be.size() != static_cast<std::size_t>(n),
+                FEException,
+                "assembleElementOwnedRows: element matrix/vector size mismatch");
+
+    std::vector<GlobalIndex> owned_rows;
+    std::vector<Real> owned_matrix;
+    std::vector<Real> owned_vector;
+    owned_rows.reserve(edofs.size());
+    owned_matrix.reserve(Ke.size());
+    owned_vector.reserve(be.size());
+
+    for (GlobalIndex i = 0; i < n; ++i) {
+        const auto row = edofs[static_cast<std::size_t>(i)];
+        if (row_owner(row) != rank) {
+            continue;
+        }
+        owned_rows.push_back(row);
+        owned_vector.push_back(be[static_cast<std::size_t>(i)]);
+        const auto row_begin = Ke.begin() + static_cast<std::ptrdiff_t>(i * n);
+        owned_matrix.insert(owned_matrix.end(),
+                            row_begin,
+                            row_begin + static_cast<std::ptrdiff_t>(n));
+    }
+
+    if (!owned_rows.empty()) {
+        mat_view.addMatrixEntries(std::span<const GlobalIndex>(owned_rows),
+                                  edofs,
+                                  std::span<const Real>(owned_matrix),
+                                  assembly::AddMode::Add);
+        vec_view.addVectorEntries(std::span<const GlobalIndex>(owned_rows),
+                                  std::span<const Real>(owned_vector),
+                                  assembly::AddMode::Add);
+    }
 }
 
 } // namespace
@@ -917,6 +972,308 @@ TEST(FsilsAssemblyParityMPI, OwnedRowDirectAssemblyMatchesDenseWithPermutationNa
                                            : backend_dof;
             EXPECT_NEAR(viewx->getVectorEntry(fe_dof), 1.0, 1e-10);
         }
+    }
+}
+
+TEST(FsilsAssemblyParityMPI, MixedAuxOwnerMapDrivesSparsityAndNumericAssembly)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 4; // three field components plus one native auxiliary component
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex field_unknowns = 3 * n_nodes;
+    constexpr GlobalIndex n_global = dof * n_nodes;
+
+    auto perm = std::make_shared<DofPermutation>();
+    perm->forward.assign(static_cast<std::size_t>(n_global), INVALID_GLOBAL_INDEX);
+    perm->inverse.assign(static_cast<std::size_t>(n_global), INVALID_GLOBAL_INDEX);
+    perm->owner_rank.assign(static_cast<std::size_t>(n_global), -1);
+
+    for (GlobalIndex node = 0; node < n_nodes; ++node) {
+        for (int c = 0; c < dof; ++c) {
+            const GlobalIndex fe = static_cast<GlobalIndex>(c) * n_nodes + node;
+            const GlobalIndex be = node * dof + c;
+            perm->forward[static_cast<std::size_t>(fe)] = be;
+            perm->inverse[static_cast<std::size_t>(be)] = fe;
+            perm->owner_rank[static_cast<std::size_t>(be)] = (node == 0) ? 0 : 1;
+        }
+    }
+
+    MixedBlockLayout layout;
+    layout.field_unknowns = field_unknowns;
+    layout.auxiliary_unknowns = n_nodes;
+    layout.total_unknowns = n_global;
+
+    MixedBlockDescriptor field;
+    field.name = "field";
+    field.offset = 0;
+    field.size = field_unknowns;
+    field.kind = MixedBlockKind::Field;
+    field.node_component_start = 0;
+    field.node_component_count = 3;
+    layout.blocks.push_back(field);
+
+    MixedBlockDescriptor aux;
+    aux.name = "node_aux";
+    aux.offset = field_unknowns;
+    aux.size = n_nodes;
+    aux.kind = MixedBlockKind::Auxiliary;
+    aux.role = BlockRole::AuxiliaryField;
+    aux.assembly_mode = MixedBlockAssemblyMode::NativeOwnedRows;
+    aux.row_ownership = MixedRowOwnershipPolicy::BackendDofOwner;
+    aux.row_owner_ranks = {0, 1, 1};
+    aux.node_component_start = 3;
+    aux.node_component_count = 1;
+    layout.blocks.push_back(aux);
+
+    const std::function<int(GlobalIndex)> row_owner = [&](GlobalIndex fe_row) -> int {
+        const int mixed_owner = layout.ownerRankForGlobalRow(fe_row);
+        if (mixed_owner >= 0) {
+            return mixed_owner;
+        }
+        if (fe_row < 0 || fe_row >= n_global ||
+            static_cast<std::size_t>(fe_row) >= perm->forward.size()) {
+            return -1;
+        }
+        const GlobalIndex backend_row = perm->forward[static_cast<std::size_t>(fe_row)];
+        if (backend_row < 0 ||
+            static_cast<std::size_t>(backend_row) >= perm->owner_rank.size()) {
+            return -1;
+        }
+        return perm->owner_rank[static_cast<std::size_t>(backend_row)];
+    };
+
+    const IndexRange owned_backend = (rank == 0) ? IndexRange{0, 4} : IndexRange{4, 12};
+    DistributedSparsityPattern pattern(owned_backend, owned_backend, n_global, n_global);
+    pattern.setDofIndexing(DistributedSparsityPattern::DofIndexing::NodalInterleaved);
+
+    const std::array<GlobalIndex, 8> elem01_fe = {0, 3, 6, 9, 1, 4, 7, 10};
+    const std::array<GlobalIndex, 8> elem12_fe = {1, 4, 7, 10, 2, 5, 8, 11};
+
+    auto add_owned_pattern = [&](const std::array<GlobalIndex, 8>& edofs_fe) {
+        for (const auto row_fe : edofs_fe) {
+            if (row_owner(row_fe) != rank) {
+                continue;
+            }
+            const auto row_be = perm->forward[static_cast<std::size_t>(row_fe)];
+            for (const auto col_fe : edofs_fe) {
+                const auto col_be = perm->forward[static_cast<std::size_t>(col_fe)];
+                pattern.addEntry(row_be, col_be);
+            }
+        }
+    };
+    add_owned_pattern(elem01_fe);
+    add_owned_pattern(elem12_fe);
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    auto set_ghost_node = [&](GlobalIndex node, GlobalIndex first_col, GlobalIndex last_col_exclusive) {
+        std::vector<GlobalIndex> ghost_rows;
+        std::vector<GlobalIndex> ghost_row_ptr;
+        std::vector<GlobalIndex> ghost_cols;
+        ghost_rows.reserve(static_cast<std::size_t>(dof));
+        ghost_row_ptr.reserve(static_cast<std::size_t>(dof) + 1u);
+        ghost_row_ptr.push_back(0);
+        for (int c = 0; c < dof; ++c) {
+            ghost_rows.push_back(node * dof + c);
+            for (GlobalIndex col = first_col; col < last_col_exclusive; ++col) {
+                ghost_cols.push_back(col);
+            }
+            ghost_row_ptr.push_back(static_cast<GlobalIndex>(ghost_cols.size()));
+        }
+        pattern.setGhostRows(std::move(ghost_rows),
+                             std::move(ghost_row_ptr),
+                             std::move(ghost_cols));
+    };
+    if (rank == 0) {
+        set_ghost_node(/*node=*/1, /*first_col=*/0, /*last_col_exclusive=*/8);
+    } else {
+        set_ghost_node(/*node=*/0, /*first_col=*/0, /*last_col_exclusive=*/8);
+    }
+
+    const std::array<Real, dof> scales = {2.0, 3.0, 5.0, 7.0};
+    const auto Ke = makeScaledComponentTwoNodeMatrix(dof, scales);
+    const std::vector<Real> ones(8, 1.0);
+    const auto be = matVec(Ke, /*n=*/8, ones);
+
+    FsilsFactory factory(dof, perm);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(n_global);
+    A->zero();
+    b->zero();
+    FsilsMatrix::resetDroppedEntryCount();
+    FsilsMatrix::resetOffOwnerWriteCount();
+
+    auto* A_fs = dynamic_cast<FsilsMatrix*>(A.get());
+    ASSERT_NE(A_fs, nullptr);
+    auto* b_fs = dynamic_cast<FsilsVector*>(b.get());
+    ASSERT_NE(b_fs, nullptr);
+    EXPECT_TRUE(A_fs->usesOwnedRowOperator());
+    EXPECT_TRUE(b_fs->usesOwnedRowLayout());
+    for (GlobalIndex fe = 0; fe < n_global; ++fe) {
+        const bool owned_here = row_owner(fe) == rank;
+        EXPECT_EQ(A_fs->ownsFeDofRow(fe), owned_here) << "fe row " << fe;
+        EXPECT_EQ(b_fs->ownsFeDof(fe), owned_here) << "fe dof " << fe;
+    }
+
+    auto viewA = A->createAssemblyView();
+    auto viewb = b->createAssemblyView();
+    viewA->beginAssemblyPhase();
+    viewb->beginAssemblyPhase();
+    assembleElementOwnedRows(*viewA, *viewb, elem01_fe, Ke, be, row_owner, rank);
+    assembleElementOwnedRows(*viewA, *viewb, elem12_fe, Ke, be, row_owner, rank);
+    viewA->finalizeAssembly();
+    viewb->finalizeAssembly();
+    A->finalizeAssembly();
+
+    DenseMatrixView Ad(n_global);
+    DenseVectorView bd(n_global);
+    Ad.zero();
+    bd.zero();
+    Ad.beginAssemblyPhase();
+    bd.beginAssemblyPhase();
+    assembleElementOwnedRows(Ad, bd, elem01_fe, Ke, be, row_owner, rank);
+    assembleElementOwnedRows(Ad, bd, elem12_fe, Ke, be, row_owner, rank);
+    Ad.finalizeAssembly();
+    bd.finalizeAssembly();
+
+    const auto off_owner_global = allreduceSum(FsilsMatrix::offOwnerWriteCount(), comm);
+    const auto dropped_global = allreduceSum(FsilsMatrix::droppedEntryCount(), comm);
+    if (rank == 0) {
+        EXPECT_EQ(off_owner_global, 0u);
+        EXPECT_EQ(dropped_global, 0u);
+    }
+
+    const auto dense_local_A = gatherOwnedLocalMatrixEntries(Ad, *A_fs, n_global);
+    const auto dense_local_b = gatherOwnedLocalVectorEntries(bd, *b_fs, n_global);
+    const auto dense_global_A = allreduceSum(dense_local_A, comm);
+    const auto dense_global_b = allreduceSum(dense_local_b, comm);
+
+    const auto fsils_local_A = gatherOwnedLocalMatrixEntries(*A, n_global);
+    const auto fsils_local_b = gatherOwnedLocalVectorEntries(*b, n_global);
+    const auto fsils_global_A = allreduceSum(fsils_local_A, comm);
+    const auto fsils_global_b = allreduceSum(fsils_local_b, comm);
+
+    if (rank == 0) {
+        constexpr Real tol = 1e-14;
+        const auto dA = maxAbsDiffWithIndex(dense_global_A, fsils_global_A);
+        const auto db = maxAbsDiffWithIndex(dense_global_b, fsils_global_b);
+        EXPECT_LT(dA.max_abs, tol) << "Max |A_dense-A_fsils|=" << dA.max_abs
+                                  << " at idx=" << dA.idx
+                                  << " (dense=" << dA.a << ", fsils=" << dA.b << ")";
+        EXPECT_LT(db.max_abs, tol) << "Max |b_dense-b_fsils|=" << db.max_abs
+                                  << " at idx=" << db.idx
+                                  << " (dense=" << db.a << ", fsils=" << db.b << ")";
+    }
+}
+
+TEST(FsilsAssemblyParityMPI, VectorUpdateGhostsIsOwnerAuthoritativeAndRawAccumulationIsExplicit)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr GlobalIndex n_global = 3;
+    const IndexRange owned = (rank == 0) ? IndexRange{0, 1} : IndexRange{1, 3};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+    pattern.setDofIndexing(DistributedSparsityPattern::DofIndexing::NodalInterleaved);
+    if (rank == 0) {
+        pattern.addEntry(0, 0);
+        pattern.addEntry(0, 1);
+    } else {
+        pattern.addEntry(1, 0);
+        pattern.addEntry(1, 1);
+        pattern.addEntry(1, 2);
+        pattern.addEntry(2, 1);
+        pattern.addEntry(2, 2);
+    }
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    if (rank == 0) {
+        pattern.setGhostRows(std::vector<GlobalIndex>{1},
+                             std::vector<GlobalIndex>{0, 2},
+                             std::vector<GlobalIndex>{0, 1});
+    } else {
+        pattern.setGhostRows(std::vector<GlobalIndex>{0},
+                             std::vector<GlobalIndex>{0, 2},
+                             std::vector<GlobalIndex>{0, 1});
+    }
+
+    FsilsFactory factory(/*dof_per_node=*/1);
+    auto matrix_layout = factory.createMatrix(pattern);
+    (void)matrix_layout;
+    auto vec = factory.createVector(n_global);
+    auto* fs = dynamic_cast<FsilsVector*>(vec.get());
+    ASSERT_NE(fs, nullptr);
+    ASSERT_TRUE(fs->usesOwnedRowLayout());
+
+    auto view = vec->createAssemblyView();
+
+    vec->set(-100.0);
+    if (rank == 0) {
+        view->setVectorEntries(std::array<GlobalIndex, 1>{0},
+                               std::array<Real, 1>{10.0});
+        EXPECT_FALSE(fs->ownsFeDof(1));
+        EXPECT_NEAR(view->getVectorEntry(1), -100.0, 1e-14);
+    } else {
+        view->setVectorEntries(std::array<GlobalIndex, 2>{1, 2},
+                               std::array<Real, 2>{20.0, 30.0});
+        EXPECT_TRUE(fs->ownsFeDof(1));
+    }
+
+    vec->updateGhosts();
+    if (rank == 0) {
+        EXPECT_NEAR(view->getVectorEntry(1), 20.0, 1e-14)
+            << "ordinary vectors must copy owner rows to ghosts";
+    } else {
+        EXPECT_NEAR(view->getVectorEntry(1), 20.0, 1e-14);
+    }
+
+    vec->zero();
+    if (rank == 0) {
+        view->addVectorEntries(std::array<GlobalIndex, 2>{0, 1},
+                               std::array<Real, 2>{10.0, 5.0},
+                               assembly::AddMode::Add);
+    } else {
+        view->addVectorEntries(std::array<GlobalIndex, 2>{1, 2},
+                               std::array<Real, 2>{7.0, 11.0},
+                               assembly::AddMode::Add);
+    }
+
+    vec->updateGhosts();
+    if (rank == 0) {
+        EXPECT_NEAR(view->getVectorEntry(1), 7.0, 1e-14)
+            << "updateGhosts must not reverse-scatter raw ghost contributions";
+    } else {
+        EXPECT_NEAR(view->getVectorEntry(1), 7.0, 1e-14);
+    }
+
+    vec->zero();
+    if (rank == 0) {
+        view->addVectorEntries(std::array<GlobalIndex, 2>{0, 1},
+                               std::array<Real, 2>{10.0, 5.0},
+                               assembly::AddMode::Add);
+    } else {
+        view->addVectorEntries(std::array<GlobalIndex, 2>{1, 2},
+                               std::array<Real, 2>{7.0, 11.0},
+                               assembly::AddMode::Add);
+    }
+
+    fs->accumulateRawContributionsAndUpdateGhosts();
+    if (rank == 0) {
+        EXPECT_NEAR(view->getVectorEntry(1), 12.0, 1e-14)
+            << "raw contribution buffers must explicitly reverse-scatter before ghost sync";
+    } else {
+        EXPECT_NEAR(view->getVectorEntry(1), 12.0, 1e-14);
     }
 }
 

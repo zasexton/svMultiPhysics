@@ -21,6 +21,7 @@
 #include "Spaces/ProductSpace.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
+#include <array>
 #include <cmath>
 #include <functional>
 #include <vector>
@@ -212,6 +213,24 @@ TEST(FunctionalAssemblerTest, ConstructionWithOptions) {
 
     EXPECT_EQ(opts.num_threads, 4);
     EXPECT_TRUE(opts.use_kahan_summation);
+}
+
+TEST(FunctionalAssemblerTest, AssembleScalarOverCellsTreatsEmptySubsetAsZero)
+{
+    forms::test::SingleTetraOneBoundaryFaceMeshAccess mesh(/*boundary_marker=*/2);
+    auto dof_map = forms::test::createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    FunctionalAssembler assembler;
+    assembler.setMesh(mesh);
+    assembler.setDofMap(dof_map);
+    assembler.setSpace(space);
+
+    VolumeKernel kernel;
+    const std::array<GlobalIndex, 1> one_cell{0};
+    EXPECT_NEAR(assembler.assembleScalarOverCells(kernel, one_cell), 1.0 / 6.0, 1e-12);
+    EXPECT_NEAR(assembler.assembleScalarOverCells(kernel, std::span<const GlobalIndex>{}),
+                0.0, 1e-12);
 }
 
 TEST(FunctionalAssemblerTest, SetOptions) {

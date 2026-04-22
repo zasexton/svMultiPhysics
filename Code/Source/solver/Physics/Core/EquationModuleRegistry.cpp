@@ -4,10 +4,29 @@
 
 #include <stdexcept>
 
+namespace svmp::Physics::formulations::navier_stokes {
+void forceLink_NavierStokesRegister();
+}
+
+namespace svmp::Physics::formulations::poisson {
+void forceLink_PoissonRegister();
+}
+
 namespace svmp::Physics {
+
+namespace {
+
+void forceLinkBuiltInEquationRegistrations()
+{
+  formulations::navier_stokes::forceLink_NavierStokesRegister();
+  formulations::poisson::forceLink_PoissonRegister();
+}
+
+} // namespace
 
 EquationModuleRegistry& EquationModuleRegistry::instance()
 {
+  forceLinkBuiltInEquationRegistrations();
   static EquationModuleRegistry registry;
   return registry;
 }
@@ -52,4 +71,3 @@ std::vector<std::string> EquationModuleRegistry::registeredTypes() const
 }
 
 } // namespace svmp::Physics
-

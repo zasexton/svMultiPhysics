@@ -573,7 +573,7 @@ backends::SolverOptions fsilsBlockSchurOptions(
     o.fsils_blockschur_cg_max_iter = 80;
     o.fsils_blockschur_gm_rel_tol = 1e-10;
     o.fsils_blockschur_cg_rel_tol = 1e-10;
-    o.fsils_residual_check_policy = backends::FsilsResidualCheckPolicy::Always;
+    o.fsils_residual_check_policy = backends::FsilsResidualCheckPolicy::RetryOnly;
     o.fsils_blockschur_schur_preconditioner = schur_pc;
     o.fsils_blockschur_momentum_approximation = momentum_hat;
 

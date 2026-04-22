@@ -396,6 +396,33 @@ TEST(MixedBlockLayout, FsilsContractValidatesNativeOwnedAuxiliaryRows)
     EXPECT_NE(missing_map.find("no concrete row-owner map"), std::string::npos);
 }
 
+TEST(MixedBlockLayout, FsilsContractRejectsNativeGlobalScalarAsNodalBlock)
+{
+    MixedBlockLayout layout{};
+    layout.field_unknowns = 6;
+    layout.auxiliary_unknowns = 1;
+    layout.total_unknowns = 7;
+
+    MixedBlockDescriptor field{"u", 0, 6, BlockRole::PrimaryField,
+                               MixedBlockKind::Field};
+    field.node_component_start = 0;
+    field.node_component_count = 1;
+    layout.blocks.push_back(field);
+
+    MixedBlockDescriptor aux{"global_aux", 6, 1, BlockRole::AuxiliaryField,
+                             MixedBlockKind::Auxiliary};
+    aux.assembly_mode = MixedBlockAssemblyMode::NativeOwnedRows;
+    aux.row_ownership = MixedRowOwnershipPolicy::SingleOwner;
+    aux.single_owner_rank = 0;
+    aux.row_owner_ranks = {0};
+    aux.node_component_start = 1;
+    aux.node_component_count = 1;
+    layout.blocks.push_back(aux);
+
+    const auto msg = validateFsilsMixedLayoutContract(layout, /*dof_per_node=*/2);
+    EXPECT_NE(msg.find("common nodal-interleaved layout"), std::string::npos);
+}
+
 // --- TimeIntegrationDescriptor tests ---
 
 TEST(TimeIntegrationDescriptor, DefaultConstruction)

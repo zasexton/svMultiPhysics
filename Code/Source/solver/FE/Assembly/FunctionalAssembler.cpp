@@ -27,6 +27,7 @@
 #include <stdexcept>
 #include <thread>
 #include <mutex>
+#include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -1421,6 +1422,25 @@ Real FunctionalAssembler::assembleScalar(FunctionalKernel& kernel)
     return kernel.postProcess(value);
 }
 
+Real FunctionalAssembler::assembleScalarOverCells(
+    FunctionalKernel& kernel,
+    std::span<const GlobalIndex> cell_ids)
+{
+    if (cell_ids.empty()) {
+        FunctionalResult result;
+        result.value = Real(0.0);
+        result.elements_processed = 0;
+        last_result_ = result;
+        return kernel.postProcess(Real(0.0));
+    }
+
+    FunctionalResult result;
+    Real value = assembleCellsCore(kernel, result, cell_ids);
+    last_result_ = result;
+
+    return kernel.postProcess(value);
+}
+
 FunctionalResult FunctionalAssembler::assembleScalarDetailed(FunctionalKernel& kernel)
 {
     FunctionalResult result;
@@ -1645,7 +1665,8 @@ const FunctionalResult& FunctionalAssembler::getLastResult() const noexcept
 
 Real FunctionalAssembler::assembleCellsCore(
     FunctionalKernel& kernel,
-    FunctionalResult& result)
+    FunctionalResult& result,
+    std::span<const GlobalIndex> selected_cells)
 {
     if (!isConfigured()) {
         result.success = false;
@@ -1681,15 +1702,28 @@ Real FunctionalAssembler::assembleCellsCore(
     Real total = 0.0;
     KahanAccumulator accumulator;
 
+    std::vector<GlobalIndex> selected_cells_sorted;
+    selected_cells_sorted.assign(selected_cells.begin(), selected_cells.end());
+    std::sort(selected_cells_sorted.begin(), selected_cells_sorted.end());
+    selected_cells_sorted.erase(
+        std::unique(selected_cells_sorted.begin(), selected_cells_sorted.end()),
+        selected_cells_sorted.end());
+    auto accepts_cell = [&](GlobalIndex cell_id) {
+        return selected_cells_sorted.empty() ||
+               std::binary_search(selected_cells_sorted.begin(),
+                                  selected_cells_sorted.end(),
+                                  cell_id);
+    };
+
     const int num_threads = options_.num_threads;
     const bool use_parallel = (num_threads > 1);
 
     if (use_parallel && options_.deterministic) {
         // Deterministic parallel: gather local contributions then reduce
         std::vector<Real> local_values;
+#ifdef _OPENMP
         std::mutex values_mutex;
 
-#ifdef _OPENMP
         #pragma omp parallel num_threads(num_threads)
         {
             AssemblyContext thread_context;
@@ -1704,6 +1738,9 @@ Real FunctionalAssembler::assembleCellsCore(
             #pragma omp for schedule(static)
             for (GlobalIndex cell_id = 0; cell_id < mesh_->numCells(); ++cell_id) {
                 if (!mesh_->isOwnedCell(cell_id)) {
+                    continue;
+                }
+                if (!accepts_cell(cell_id)) {
                     continue;
                 }
                 prepareCellContext(thread_context, *mesh_, cell_id, *space_, context_required);
@@ -1765,6 +1802,9 @@ Real FunctionalAssembler::assembleCellsCore(
                 if (!mesh_->isOwnedCell(cell_id)) {
                     return;
                 }
+                if (!accepts_cell(cell_id)) {
+                    return;
+                }
 		            prepareContext(cell_id, context_required);
 		            if (need_solution) {
 		                FE_THROW_IF(solution_view_ == nullptr && solution_.empty(), FEException,
@@ -1810,6 +1850,9 @@ Real FunctionalAssembler::assembleCellsCore(
         std::vector<Real> local_prev_solution;
 	        mesh_->forEachCell([&](GlobalIndex cell_id) {
                 if (!mesh_->isOwnedCell(cell_id)) {
+                    return;
+                }
+                if (!accepts_cell(cell_id)) {
                     return;
                 }
 	            prepareContext(cell_id, context_required);

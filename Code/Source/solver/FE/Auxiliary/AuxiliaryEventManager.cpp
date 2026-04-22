@@ -13,7 +13,9 @@ std::vector<DetectedEvent> AuxiliaryEventManager::detectEvents(
     Real t,
     Real dt,
     std::span<const Real> inputs,
-    std::span<const Real> params)
+    std::span<const Real> params,
+    std::span<const std::span<const Real>> history,
+    std::size_t entity_index)
 {
     last_events_.clear();
     diagnostics_.clear();
@@ -28,10 +30,13 @@ std::vector<DetectedEvent> AuxiliaryEventManager::detectEvents(
     AuxiliaryLocalContext ctx_pre;
     ctx_pre.time = t;
     ctx_pre.dt = dt;
+    ctx_pre.effective_dt = dt;
     ctx_pre.x = x_pre;
     ctx_pre.xdot = xdot_zero;
+    ctx_pre.history = history;
     ctx_pre.inputs = inputs;
     ctx_pre.params = params;
+    ctx_pre.entity_index = entity_index;
 
     auto events_pre = model.evaluateEvents(ctx_pre);
 
@@ -39,10 +44,13 @@ std::vector<DetectedEvent> AuxiliaryEventManager::detectEvents(
     AuxiliaryLocalContext ctx_post;
     ctx_post.time = t + dt;
     ctx_post.dt = dt;
+    ctx_post.effective_dt = dt;
     ctx_post.x = x_post;
     ctx_post.xdot = xdot_zero;
+    ctx_post.history = history;
     ctx_post.inputs = inputs;
     ctx_post.params = params;
+    ctx_post.entity_index = entity_index;
 
     auto events_post = model.evaluateEvents(ctx_post);
 
@@ -88,10 +96,13 @@ std::vector<DetectedEvent> AuxiliaryEventManager::detectEvents(
                     AuxiliaryLocalContext ctx_mid;
                     ctx_mid.time = t_mid;
                     ctx_mid.dt = dt;
+                    ctx_mid.effective_dt = dt;
                     ctx_mid.x = x_mid;
                     ctx_mid.xdot = xdot_zero;
+                    ctx_mid.history = history;
                     ctx_mid.inputs = inputs;
                     ctx_mid.params = params;
+                    ctx_mid.entity_index = entity_index;
 
                     auto events_mid = model.evaluateEvents(ctx_mid);
                     const Real g_mid = events_mid.values[i];
@@ -133,17 +144,24 @@ void AuxiliaryEventManager::applyTransition(
     std::span<Real> x,
     Real t,
     std::span<const Real> inputs,
-    std::span<const Real> params)
+    std::span<const Real> params,
+    std::span<const std::span<const Real>> history,
+    std::size_t entity_index,
+    Real dt)
 {
     const int n = model.dimension();
     std::vector<Real> xdot_zero(static_cast<std::size_t>(n), 0.0);
 
     AuxiliaryLocalContext ctx;
     ctx.time = t;
+    ctx.dt = dt;
+    ctx.effective_dt = dt;
     ctx.x = x;
     ctx.xdot = xdot_zero;
+    ctx.history = history;
     ctx.inputs = inputs;
     ctx.params = params;
+    ctx.entity_index = entity_index;
 
     model.resetAfterEvent(ctx, event.event_index, x);
 }

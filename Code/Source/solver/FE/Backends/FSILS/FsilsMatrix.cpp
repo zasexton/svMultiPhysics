@@ -39,6 +39,7 @@ namespace FE {
 namespace backends {
 
 std::atomic<std::uint64_t> FsilsMatrix::dropped_entry_count_{0};
+std::atomic<std::uint64_t> FsilsMatrix::off_owner_write_count_{0};
 
 std::uint64_t FsilsMatrix::droppedEntryCount() noexcept
 {
@@ -48,6 +49,16 @@ std::uint64_t FsilsMatrix::droppedEntryCount() noexcept
 void FsilsMatrix::resetDroppedEntryCount() noexcept
 {
     dropped_entry_count_.store(0, std::memory_order_relaxed);
+}
+
+std::uint64_t FsilsMatrix::offOwnerWriteCount() noexcept
+{
+    return off_owner_write_count_.load(std::memory_order_relaxed);
+}
+
+void FsilsMatrix::resetOffOwnerWriteCount() noexcept
+{
+    off_owner_write_count_.store(0, std::memory_order_relaxed);
 }
 
 namespace {
@@ -126,6 +137,40 @@ namespace {
 [[nodiscard]] bool fsils_trace_add_row(GlobalIndex fe_row) noexcept
 {
     return fe_row == fsils_trace_add_row_dof();
+}
+
+enum class LocalRowOwnership : std::uint8_t {
+    Absent,
+    Owned,
+    NonOwnedLocal
+};
+
+[[nodiscard]] LocalRowOwnership classify_fe_matrix_row(const FsilsShared& shared,
+                                                       GlobalIndex fe_row,
+                                                       GlobalIndex global_rows) noexcept
+{
+    if (fe_row < 0 || fe_row >= global_rows || shared.dof <= 0) {
+        return LocalRowOwnership::Absent;
+    }
+
+    GlobalIndex backend_row = fe_row;
+    if (const auto perm = shared.dof_permutation; perm && !perm->empty()) {
+        if (static_cast<std::size_t>(fe_row) >= perm->forward.size()) {
+            return LocalRowOwnership::Absent;
+        }
+        backend_row = perm->forward[static_cast<std::size_t>(fe_row)];
+    }
+    if (backend_row < 0 || backend_row >= global_rows) {
+        return LocalRowOwnership::Absent;
+    }
+
+    const int global_node = static_cast<int>(backend_row / shared.dof);
+    const int old = shared.globalNodeToOld(global_node);
+    if (old < 0 || old >= shared.lhs.nNo) {
+        return LocalRowOwnership::Absent;
+    }
+    return (old < shared.owned_node_count) ? LocalRowOwnership::Owned
+                                           : LocalRowOwnership::NonOwnedLocal;
 }
 
 [[nodiscard]] bool ghost_rows_look_nodal_interleaved(std::span<const GlobalIndex> ghost_rows, int dof)
@@ -1016,6 +1061,19 @@ public:
             GlobalIndex i1 = i0 + 1;
             while (i1 < n_rows && row_info[static_cast<std::size_t>(i1)].old_node == ri0.old_node) {
                 ++i1;
+            }
+
+            if (ri0.old_node >= shared->owned_node_count) {
+                for (GlobalIndex di = i0; di < i1; ++di) {
+                    const auto row = row_dofs[static_cast<std::size_t>(di)];
+                    for (GlobalIndex dj = 0; dj < n_cols; ++dj) {
+                        const auto col = col_dofs[static_cast<std::size_t>(dj)];
+                        const auto local_idx = static_cast<std::size_t>(di * n_cols + dj);
+                        matrix_->addValue(row, col, local_matrix[local_idx], mode);
+                    }
+                }
+                i0 = i1;
+                continue;
             }
 
             const int row_int = ri0.internal_node;
@@ -1934,8 +1992,6 @@ void FsilsMatrix::addResolvedMatrixEntries(std::span<const GlobalIndex> row_dofs
                     resolved.size() != row_dofs.size() * col_dofs.size(),
                 InvalidArgumentException,
                 "FsilsMatrix::addResolvedMatrixEntries: size mismatch");
-    (void)row_dofs;
-    (void)col_dofs;
 
     if (!shared_) {
         const auto n_rows = static_cast<GlobalIndex>(row_dofs.size());
@@ -1964,10 +2020,70 @@ void FsilsMatrix::addResolvedMatrixEntries(std::span<const GlobalIndex> row_dofs
         static_cast<std::size_t>(shared_->dof) *
         static_cast<std::size_t>(shared_->dof);
 
+    const auto n_rows = static_cast<GlobalIndex>(row_dofs.size());
+    const auto n_cols = static_cast<GlobalIndex>(col_dofs.size());
+    std::vector<unsigned char> owned_row;
+    std::vector<unsigned char> off_owner_row;
+    bool all_rows_owned = true;
+    owned_row.resize(row_dofs.size(), 0);
+    off_owner_row.resize(row_dofs.size(), 0);
+    for (GlobalIndex i = 0; i < n_rows; ++i) {
+        const auto status = classify_fe_matrix_row(
+            *shared_, row_dofs[static_cast<std::size_t>(i)], numRows());
+        if (status == LocalRowOwnership::Owned) {
+            owned_row[static_cast<std::size_t>(i)] = 1;
+        } else {
+            all_rows_owned = false;
+            if (status == LocalRowOwnership::NonOwnedLocal) {
+                off_owner_row[static_cast<std::size_t>(i)] = 1;
+            }
+        }
+    }
+
     const auto* slots = resolved.data();
     const auto* local = local_matrix.data();
     const std::size_t n = resolved.size();
     constexpr std::size_t kMinContiguousRun = 2u;
+
+    auto apply_scalar = [&](GlobalIndex slot, Real value) {
+        if (slot < 0 || static_cast<std::size_t>(slot) >= values_size) {
+            return;
+        }
+        Real& dst = values[static_cast<std::size_t>(slot)];
+        switch (mode) {
+            case assembly::AddMode::Add:
+                dst += value;
+                break;
+            case assembly::AddMode::Insert:
+                dst = value;
+                break;
+            case assembly::AddMode::Max:
+                dst = std::max(dst, value);
+                break;
+            case assembly::AddMode::Min:
+                dst = std::min(dst, value);
+                break;
+        }
+    };
+
+    if (!all_rows_owned) {
+        for (GlobalIndex i = 0; i < n_rows; ++i) {
+            const auto row_idx = static_cast<std::size_t>(i);
+            if (off_owner_row[row_idx] != 0) {
+                off_owner_write_count_.fetch_add(static_cast<std::uint64_t>(n_cols),
+                                                 std::memory_order_relaxed);
+                continue;
+            }
+            if (owned_row[row_idx] == 0) {
+                continue;
+            }
+            for (GlobalIndex j = 0; j < n_cols; ++j) {
+                const auto idx = static_cast<std::size_t>(i * n_cols + j);
+                apply_scalar(resolved[idx], local_matrix[idx]);
+            }
+        }
+        return;
+    }
 
     const auto applyContiguousRuns =
         [&](auto&& op_scalar, auto&& op_run) {
@@ -2079,6 +2195,7 @@ void FsilsMatrix::addMatrixEntriesCached(std::span<const GlobalIndex> row_dofs,
     struct DofInfo {
         int internal_node{-1};
         int component{-1};
+        int old_node{-1};
     };
 
     thread_local std::vector<DofInfo> row_info;
@@ -2107,17 +2224,19 @@ void FsilsMatrix::addMatrixEntriesCached(std::span<const GlobalIndex> row_dofs,
         const int global_node = static_cast<int>(fs_dof / dof);
         const int comp = static_cast<int>(fs_dof % dof);
         if (global_node == cached_global_node) {
-            return {cached_internal_node, comp};
+            const int old = shared_->globalNodeToOld(global_node);
+            return {cached_internal_node, comp, old};
         }
 
-        const int internal = shared_->globalNodeToInternal(global_node);
-        if (internal < 0) {
+        const int old = shared_->globalNodeToOld(global_node);
+        if (old < 0 || old >= shared_->lhs.nNo) {
             return {};
         }
+        const int internal = shared_->lhs.map(old);
 
         cached_global_node = global_node;
         cached_internal_node = internal;
-        return {internal, comp};
+        return {internal, comp, old};
     };
 
     for (GlobalIndex i = 0; i < n_rows; ++i) {
@@ -2149,6 +2268,9 @@ void FsilsMatrix::addMatrixEntriesCached(std::span<const GlobalIndex> row_dofs,
         for (GlobalIndex i = 0; i < n_rows; ++i) {
             const auto& ri = row_info[static_cast<std::size_t>(i)];
             if (ri.internal_node < 0) {
+                continue;
+            }
+            if (ri.old_node >= shared_->owned_node_count) {
                 continue;
             }
             for (GlobalIndex j = 0; j < n_cols; ++j) {
@@ -2185,6 +2307,14 @@ void FsilsMatrix::addMatrixEntriesCached(std::span<const GlobalIndex> row_dofs,
         while (i1 < n_rows &&
                row_info[static_cast<std::size_t>(i1)].internal_node == ri0.internal_node) {
             ++i1;
+        }
+
+        if (ri0.old_node >= shared_->owned_node_count) {
+            off_owner_write_count_.fetch_add(
+                static_cast<std::uint64_t>(i1 - i0) * static_cast<std::uint64_t>(n_cols),
+                std::memory_order_relaxed);
+            i0 = i1;
+            continue;
         }
 
         for (GlobalIndex j0 = 0; j0 < n_cols; ) {
@@ -2308,6 +2438,7 @@ void FsilsMatrix::zero()
         restore_owned_row_operator_ghost_identity(*shared_, values_);
     }
     resetDroppedEntryCount();
+    resetOffOwnerWriteCount();
 }
 
 void FsilsMatrix::finalizeAssembly()
@@ -2531,7 +2662,29 @@ bool FsilsMatrix::ownsFeDofRow(GlobalIndex fe_dof) const noexcept
 		    const int row_comp = static_cast<int>(row % dof);
 	    const int col_comp = static_cast<int>(col % dof);
 
-	    const int row_internal = shared_->globalNodeToInternal(global_row_node);
+        const int row_old = shared_->globalNodeToOld(global_row_node);
+        if (row_old >= shared_->owned_node_count && row_old < shared_->lhs.nNo) {
+            off_owner_write_count_.fetch_add(1, std::memory_order_relaxed);
+            if (trace_row) {
+                std::fprintf(stderr,
+                             "[FSILS_ADD] rank=%d fe_row=%lld fe_col=%lld backend_row=%lld backend_col=%lld row_node=%d row_old=%d owned_nodes=%d value=%.17g mode=%d path=off_owner_row\n",
+                             shared_->lhs.commu.task,
+                             static_cast<long long>(fe_row_in),
+                             static_cast<long long>(fe_col_in),
+                             static_cast<long long>(row),
+                             static_cast<long long>(col),
+                             global_row_node,
+                             row_old,
+                             shared_->owned_node_count,
+                             static_cast<double>(value),
+                             static_cast<int>(mode));
+            }
+            return;
+        }
+
+	    const int row_internal = (row_old >= 0 && row_old < shared_->lhs.nNo)
+            ? shared_->lhs.map(row_old)
+            : -1;
 	    const int col_internal = shared_->globalNodeToInternal(global_col_node);
 	    if (row_internal < 0 || col_internal < 0) {
             if (trace_row) {
@@ -2647,6 +2800,16 @@ void FsilsMatrix::addBlock(int row_internal, int col_internal, const Real* block
     if (row_internal < 0 || row_internal >= shared_->lhs.nNo ||
         col_internal < 0 || col_internal >= shared_->lhs.nNo) {
         return;
+    }
+
+    if (static_cast<std::size_t>(row_internal) < shared_->old_of_internal.size()) {
+        const int row_old = shared_->old_of_internal[static_cast<std::size_t>(row_internal)];
+        if (row_old >= shared_->owned_node_count && row_old < shared_->lhs.nNo) {
+            off_owner_write_count_.fetch_add(
+                static_cast<std::uint64_t>(dof) * static_cast<std::uint64_t>(dof),
+                std::memory_order_relaxed);
+            return;
+        }
     }
 
     const auto& lhs = shared_->lhs;

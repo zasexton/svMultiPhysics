@@ -26,6 +26,8 @@
 #include "Constraints/SystemConstraint.h"
 #include "Systems/SystemState.h"
 #include "Systems/SystemSetup.h"
+#include "PostProcessing/DerivedResultOutput.h"
+#include "PostProcessing/DerivedResultRegistry.h"
 
 #include "Assembly/Assembler.h"
 
@@ -70,6 +72,8 @@ class InterfaceMesh;
 #endif
 
 namespace svmp {
+class MeshBase;
+
 namespace FE {
 
 namespace sparsity {
@@ -104,6 +108,7 @@ class AuxiliaryStateModel;
 class AuxiliaryMultirateScheduler;
 class AuxiliaryStateStepper;
 class AuxiliaryDerivativeProvider;
+class AuxiliaryEventManager;
 class AuxiliaryBlockStorage;
 struct MixedSystemLayout;
 
@@ -219,6 +224,13 @@ public:
                              const assembly::MatrixFreeOptions& options);
     [[nodiscard]] std::shared_ptr<assembly::MatrixFreeOperator>
     matrixFreeOperator(const OperatorTag& op) const;
+
+    post::DerivedResultHandle addDerivedResult(post::DerivedResultDefinition def);
+    [[nodiscard]] std::span<const post::DerivedResultDefinition> derivedResults() const noexcept;
+    void appendDerivedResultFields(
+        svmp::MeshBase& mesh,
+        const SystemStateView& state,
+        const post::DerivedResultOutputOptions& options = {}) const;
 
     void addFunctionalKernel(std::string tag,
                              std::shared_ptr<assembly::FunctionalKernel> kernel);
@@ -570,6 +582,18 @@ public:
         AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
 
     /**
+     * @brief Register a topology-region-local integral as an entity-local input.
+     *
+     * Computes one `∫_{R_i} expr dx` value per topology region.  Region-scoped
+     * auxiliary blocks consume the value for their materialized region entity
+     * through the normal entity-local input registry path.
+     */
+    AuxiliaryInputHandle regionIntegral(
+        const std::string& input_name,
+        forms::FormExpr integrand,
+        AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
+
+    /**
      * @brief Register a region-restricted integral as an auxiliary input.
      *
      * Computes `∫_R expr dx` over cells matching the given marker.
@@ -578,6 +602,16 @@ public:
         const std::string& input_name,
         forms::FormExpr integrand,
         int region_marker,
+        AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
+
+    /**
+     * @brief Register a topology-region-local average as an entity-local input.
+     *
+     * Computes one `∫_{R_i} expr dx / ∫_{R_i} 1 dx` value per topology region.
+     */
+    AuxiliaryInputHandle regionAverage(
+        const std::string& input_name,
+        forms::FormExpr integrand,
         AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
 
     /**
@@ -1145,6 +1179,8 @@ private:
     struct LocalCondensedEntityRecord {
         std::string block_name{};
         std::size_t entity_index{0};
+        std::size_t block_ordinal{0};
+        std::uint64_t global_entity_key{0};
         std::vector<std::vector<std::pair<GlobalIndex, Real>>> B_columns{};
         std::vector<std::vector<std::pair<GlobalIndex, Real>>> Ct_rows{};
         std::vector<Real> D_inv{};
@@ -1254,6 +1290,7 @@ private:
     std::unique_ptr<AuxiliaryOperatorRegistry> auxiliary_operator_registry_{};
     std::unique_ptr<AuxiliaryInputRegistry> auxiliary_input_registry_{};
     std::unique_ptr<FEQuantityRegistry> fe_quantity_registry_{};
+    std::unique_ptr<post::DerivedResultRegistry> derived_result_registry_{};
 
     /// Cached system state for FE-coupled auxiliary input callbacks.
     /// Set by cacheSystemState() which is called from prepareAuxiliaryForAssembly(),
@@ -1295,15 +1332,29 @@ private:
         AuxiliaryActivationMode activation_mode{AuxiliaryActivationMode::Auto};
         std::unique_ptr<AuxiliaryStateStepper> stepper{};
         std::unique_ptr<AuxiliaryDerivativeProvider> deriv_provider{};
+        std::vector<std::unique_ptr<AuxiliaryEventManager>> event_managers{};
         std::vector<Real> output_buffer{}; ///< Evaluated output values
         bool lower_to_direct_only{false};  ///< Keep semantic block/output, but exclude from live monolithic solve.
         bool local_condensed{false};       ///< Eliminate locally into reduced field updates instead of dense bordered layout.
         bool selected{true};
         bool materialized{false};
+        bool consistent_initialization_done{false};
         /// Entity map: indices of entities this block covers.
         /// Empty = all entities (WholeDomain / no restriction).
         std::vector<std::size_t> entity_map{};
         std::vector<std::size_t> qp_offsets{};
+    };
+    struct AuxiliaryScopeResolution {
+        std::size_t entity_count{0};
+        std::size_t owned_entity_count{0};
+    };
+    struct AuxiliaryRegionLookupCache {
+        std::vector<std::size_t> region_ids{};
+        std::vector<std::vector<std::size_t>> region_to_cells{};
+        std::vector<std::vector<std::size_t>> region_to_nodes{};
+        std::vector<std::vector<int>> region_to_boundary_markers{};
+        std::vector<std::vector<std::size_t>> region_to_interface_faces{};
+        std::vector<int> region_owner_ranks{};
     };
     std::vector<DeployedAuxEntry> deployed_aux_entries_{};
     std::unordered_map<std::string, forms::FormExpr> lowered_aux_output_exprs_by_name_{};
@@ -1319,6 +1370,16 @@ private:
     synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
                                           std::string_view output_name) const;
     void buildAuxiliaryOutputBindings_();
+    void ensureAuxiliaryRegionLookupCache_();
+    [[nodiscard]] std::size_t auxiliaryTopologyRegionInputEntityCount_() const;
+    [[nodiscard]] std::vector<GlobalIndex>
+    auxiliaryTopologyRegionCells_(std::size_t region_id) const;
+    [[nodiscard]] AuxiliaryEntityRemapMetadata
+    buildAuxiliaryEntityRemapMetadata_(const DeployedAuxEntry& entry,
+                                       const AuxiliaryScopeResolution& resolution);
+    [[nodiscard]] std::vector<int>
+    buildAuxiliaryRegionRowOwnerRanks_(const DeployedAuxEntry& entry,
+                                       std::size_t entity_count);
     /// Deferred dependency pairs (dependent, dependency) from derivedInput().
     /// Wired by finalizeDeferredInputDeps() when all inputs are registered.
     std::vector<std::pair<std::string, std::string>> deferred_input_deps_{};
@@ -1339,6 +1400,10 @@ private:
     consumersOfEntry_(const DeployedAuxEntry& entry) const;
     [[nodiscard]] std::vector<std::size_t> collectCoveredCells_(
         const DeployedAuxEntry& entry) const;
+    [[nodiscard]] AuxiliaryScopeResolution
+    resolveAuxiliaryDeploymentScope_(DeployedAuxEntry& entry);
+    void validateMonolithicAuxiliaryLifecycle_(const DeployedAuxEntry& entry) const;
+    void validateAuxiliaryMixedLayoutContract_() const;
     void inferQuadraturePointLayout_(DeployedAuxEntry& entry);
     void assignAuxiliaryOutputIds_(DeployedAuxEntry& entry);
     AuxiliaryInputHandle registerBoundaryIntegralHandle_(
@@ -1380,6 +1445,9 @@ private:
 
     void advanceOneEntry(DeployedAuxEntry& entry, Real time, Real dt, int substep_count);
 
+    /// Run one-time DAE consistent initialization for materialized auxiliary blocks.
+    void initializeAuxiliaryDAEBlocksIfNeeded_(Real time, Real dt);
+
     /// Build ordered parameter vector for a deployed entry.
     [[nodiscard]] std::vector<Real> buildParamVector(const DeployedAuxEntry& entry) const;
 
@@ -1407,6 +1475,14 @@ private:
     /// state and previous-step FE inputs.
     void initializeMonolithicCommittedRate(const DeployedAuxEntry& entry,
                                            const SystemStateView& prev_state);
+
+    /// Apply smooth event/reset hooks after an accepted monolithic step.
+    void applyMonolithicAcceptedStepEvents_(Real step_start_time,
+                                            Real dt,
+                                            Real gamma);
+
+    /// Update monolithic committed-rate buffers from accepted final states.
+    void updateMonolithicFinalRates_(Real gamma, Real dt);
 
     /// Ensure a flat committed-rate buffer exists for the given block.
     void ensureMonolithicCommittedRateBuffer(const DeployedAuxEntry& entry,
@@ -1492,6 +1568,7 @@ private:
 
     std::optional<analysis::TopologyAnalysisContext> topology_context_;
     std::optional<analysis::InterfaceTopologyContext> interface_topology_context_;
+    std::optional<AuxiliaryRegionLookupCache> auxiliary_region_lookup_cache_;
     std::optional<analysis::ConstraintAnalysisSummary> constraint_summary_;
     mutable std::optional<analysis::ProblemAnalysisReport> analysis_report_cache_;
     mutable std::uint64_t analysis_inputs_version_{0};

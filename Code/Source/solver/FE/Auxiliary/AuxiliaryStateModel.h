@@ -176,6 +176,10 @@ struct AuxiliaryInitializationRequest {
 
     /// Parameters.
     std::span<const Real> params{};
+
+    /// Materialized entity index for per-entity initialization hooks.
+    /// Global-scope models receive 0.
+    std::size_t entity_index{0};
 };
 
 // ---------------------------------------------------------------------------

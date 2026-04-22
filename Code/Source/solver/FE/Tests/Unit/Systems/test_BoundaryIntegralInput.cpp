@@ -25,7 +25,9 @@
 
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
+#include <algorithm>
 #include <cmath>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -170,6 +172,146 @@ void assembleFieldSystemWithReductions_(FESystem& sys,
     }
 }
 
+class EntityIndexedDAEModel final : public AuxiliaryStateModel {
+public:
+    explicit EntityIndexedDAEModel(Real target_base, bool model_initializes = false)
+        : target_base_(target_base)
+        , model_initializes_(model_initializes)
+    {
+    }
+
+    std::string modelName() const override { return "EntityIndexedDAEModel"; }
+    int dimension() const override { return 2; }
+
+    AuxiliaryStructuralMetadata structuralMetadata() const override
+    {
+        AuxiliaryStructuralMetadata meta;
+        meta.variable_kinds = {AuxiliaryVariableKind::Differential,
+                               AuxiliaryVariableKind::Algebraic};
+        meta.dae_index_hint = 1;
+        return meta;
+    }
+
+    void evaluateResidual(const AuxiliaryLocalContext& ctx,
+                          AuxiliaryResidualRequest& req) const override
+    {
+        req.residual[0] = ctx.xdot[0] + ctx.x[0] - Real(1.0);
+        req.residual[1] = ctx.x[1] - targetFor(ctx.entity_index);
+    }
+
+    bool hasAnalyticJacobian() const override { return true; }
+
+    void evaluateJacobian(const AuxiliaryLocalContext&,
+                          AuxiliaryJacobianRequest& req) const override
+    {
+        if (!req.dF_dx.empty()) {
+            req.dF_dx[0] = Real(1.0); req.dF_dx[1] = Real(0.0);
+            req.dF_dx[2] = Real(0.0); req.dF_dx[3] = Real(1.0);
+        }
+        if (req.want_dF_dxdot && !req.dF_dxdot.empty()) {
+            req.dF_dxdot[0] = Real(1.0); req.dF_dxdot[1] = Real(0.0);
+            req.dF_dxdot[2] = Real(0.0); req.dF_dxdot[3] = Real(0.0);
+        }
+    }
+
+    bool hasConsistentInitialization() const override { return model_initializes_; }
+
+    void initializeAlgebraic(AuxiliaryInitializationRequest& request) const override
+    {
+        request.x[1] = targetFor(request.entity_index);
+    }
+
+    int outputCount() const override { return 1; }
+    std::vector<std::string> outputNames() const override { return {"z_out"}; }
+
+    void evaluateOutputs(const AuxiliaryLocalContext& ctx,
+                         std::span<Real> output) const override
+    {
+        output[0] = ctx.x[1];
+    }
+
+private:
+    [[nodiscard]] Real targetFor(std::size_t entity_index) const
+    {
+        return target_base_ + static_cast<Real>(entity_index);
+    }
+
+    Real target_base_{0.0};
+    bool model_initializes_{false};
+};
+
+class EntityIndexedEventResetModel final : public AuxiliaryStateModel {
+public:
+    std::string modelName() const override { return "EntityIndexedEventResetModel"; }
+    int dimension() const override { return 1; }
+
+    AuxiliaryStructuralMetadata structuralMetadata() const override
+    {
+        AuxiliaryStructuralMetadata meta;
+        meta.variable_kinds = {AuxiliaryVariableKind::Differential};
+        meta.has_events = true;
+        meta.n_event_functions = 1;
+        return meta;
+    }
+
+    void evaluateResidual(const AuxiliaryLocalContext& ctx,
+                          AuxiliaryResidualRequest& req) const override
+    {
+        req.residual[0] = ctx.xdot[0] - Real(2.0);
+    }
+
+    bool hasAnalyticJacobian() const override { return true; }
+
+    void evaluateJacobian(const AuxiliaryLocalContext&,
+                          AuxiliaryJacobianRequest& req) const override
+    {
+        if (!req.dF_dx.empty()) {
+            req.dF_dx[0] = Real(0.0);
+        }
+        if (req.want_dF_dxdot && !req.dF_dxdot.empty()) {
+            req.dF_dxdot[0] = Real(1.0);
+        }
+    }
+
+    bool hasEventFunctions() const override { return true; }
+
+    AuxiliaryEventResult evaluateEvents(const AuxiliaryLocalContext& ctx) const override
+    {
+        const Real threshold = (ctx.entity_index == 0u) ? Real(0.0) : Real(2.0);
+        AuxiliaryEventResult result;
+        result.values = {ctx.x[0] - threshold};
+        result.active = {true};
+        return result;
+    }
+
+    void resetAfterEvent(const AuxiliaryLocalContext& ctx,
+                         int event_index,
+                         std::span<Real> x_new) const override
+    {
+        if (event_index == 0) {
+            x_new[0] = Real(100.0) + static_cast<Real>(ctx.entity_index);
+        }
+    }
+
+    int outputCount() const override { return 1; }
+    std::vector<std::string> outputNames() const override { return {"x_out"}; }
+
+    void evaluateOutputs(const AuxiliaryLocalContext& ctx,
+                         std::span<Real> output) const override
+    {
+        output[0] = ctx.x[0];
+    }
+};
+
+AuxiliaryDeploymentRegion explicitQpCellRegion(std::vector<std::size_t> cells)
+{
+    AuxiliaryDeploymentRegion region;
+    region.kind = AuxiliaryRegionKind::FormulationDefined;
+    region.identity = "explicit-qp-cells";
+    region.explicit_entities = std::move(cells);
+    return region;
+}
+
 } // namespace
 
 // ===========================================================================
@@ -302,6 +444,676 @@ TEST(BoundaryIntegralInput, FESystem_WithAuxiliaryModel_EndToEnd)
     const auto out_slot = sys.auxiliaryOutputSlotOf("decay_inst", "Y");
     ASSERT_NE(out_slot, std::string::npos);
     EXPECT_NEAR(sys.auxiliaryOutputValues()[out_slot], 9.95, 1e-10);
+}
+
+TEST(BoundaryIntegralInput, FESystem_ConsistentInitializesGlobalPartitionedDAE)
+{
+    FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+
+    auto model = AuxiliaryModelBuilder("global_dae_init")
+        .state("x", AuxiliaryVariableKind::Differential)
+        .state("z", AuxiliaryVariableKind::Algebraic)
+        .ode("x", -modelState("x") + modelState("z"))
+        .algebraic("z", modelState("z") - FormExpr::constant(3.0))
+        .output("z_out", modelState("z"))
+        .build();
+
+    sys.deployAuxiliaryModel(
+        use(model).name("dae_inst").global().partitioned("BackwardEuler")
+            .initialize({1.0, 0.0}));
+    sys.finalizeAuxiliaryLayout();
+
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+
+    sys.prepareAuxiliaryForAssembly(state, false);
+
+    const auto& spec = sys.auxiliaryStateManager().getSpec("dae_inst");
+    ASSERT_EQ(spec.variable_kinds.size(), 2u);
+    EXPECT_EQ(spec.variable_kinds[0], AuxiliaryVariableKind::Differential);
+    EXPECT_EQ(spec.variable_kinds[1], AuxiliaryVariableKind::Algebraic);
+
+    const auto& block = sys.auxiliaryStateManager().getBlock("dae_inst");
+    const auto committed = block.committed();
+    ASSERT_EQ(committed.size(), 2u);
+    EXPECT_NEAR(committed[0], 1.0, 1e-14);
+    EXPECT_NEAR(committed[1], 3.0, 1e-12);
+
+    const auto out_slot = sys.auxiliaryOutputSlotOf("dae_inst", "z_out");
+    ASSERT_NE(out_slot, std::string::npos);
+    EXPECT_NEAR(sys.auxiliaryOutputValues()[out_slot], 3.0, 1e-12);
+}
+
+TEST(BoundaryIntegralInput, FESystem_GlobalPartitionedFailurePolicyRejectsAndRestores)
+{
+    auto make_fail_model = [](const std::string& name) {
+        return AuxiliaryModelBuilder(name)
+            .state("x")
+            .param("k")
+            .ode("x", -modelParam("k") * modelState("x"))
+            .build();
+    };
+
+    AuxiliaryStepperSpec stepper;
+    stepper.method_name = "BackwardEuler";
+    stepper.max_nonlinear_iters = 0;
+
+    AuxiliaryFailurePolicy reject_policy;
+    reject_policy.max_local_retries = 1;
+    reject_policy.reject_timestep_on_failure = true;
+
+    {
+        FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+        sys.deployAuxiliaryModel(
+            use(make_fail_model("global_fail_reject"))
+                .name("global_fail_reject")
+                .global()
+                .partitioned("BackwardEuler")
+                .stepper(stepper)
+                .failurePolicy(reject_policy)
+                .param("k", 1.0)
+                .initialize({1.0}));
+        sys.finalizeAuxiliaryLayout();
+
+        EXPECT_THROW(sys.advanceAuxiliaryState(0.0, 0.1), InvalidStateException);
+    }
+
+    AuxiliaryFailurePolicy restore_policy;
+    restore_policy.max_local_retries = 0;
+    restore_policy.reject_timestep_on_failure = false;
+
+    {
+        FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+        sys.deployAuxiliaryModel(
+            use(make_fail_model("global_fail_restore"))
+                .name("global_fail_restore")
+                .global()
+                .partitioned("BackwardEuler")
+                .stepper(stepper)
+                .failurePolicy(restore_policy)
+                .param("k", 1.0)
+                .initialize({1.0}));
+        sys.finalizeAuxiliaryLayout();
+
+        auto& block = sys.auxiliaryStateManager().getBlock("global_fail_restore");
+        ASSERT_NO_THROW(sys.advanceAuxiliaryState(0.0, 0.1));
+        ASSERT_EQ(block.work().size(), 1u);
+        ASSERT_EQ(block.committed().size(), 1u);
+        EXPECT_DOUBLE_EQ(block.work()[0], 1.0);
+        EXPECT_DOUBLE_EQ(block.committed()[0], 1.0);
+    }
+}
+
+TEST(BoundaryIntegralInput, FESystem_ConsistentInitializesCellPartitionedDAEPerEntity)
+{
+    FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+
+    auto model = std::make_shared<EntityIndexedDAEModel>(Real(10.0));
+    sys.deployAuxiliaryModel(
+        use(model).name("cell_dae").cell().entityCount(3)
+            .partitioned("BackwardEuler")
+            .initialize({1.0, 0.0}));
+    sys.finalizeAuxiliaryLayout();
+
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+
+    sys.prepareAuxiliaryForAssembly(state, false);
+
+    const auto& block = sys.auxiliaryStateManager().getBlock("cell_dae");
+    ASSERT_EQ(block.entityCount(), 3u);
+    for (std::size_t e = 0; e < block.entityCount(); ++e) {
+        const auto committed = block.gatherEntityCommitted(e);
+        ASSERT_EQ(committed.size(), 2u);
+        EXPECT_NEAR(committed[0], 1.0, 1e-14);
+        EXPECT_NEAR(committed[1], 10.0 + static_cast<Real>(e), 1e-12);
+    }
+
+    const auto outputs = sys.auxiliaryOutputValues();
+    ASSERT_EQ(outputs.size(), 3u);
+    EXPECT_NEAR(outputs[0], 10.0, 1e-12);
+    EXPECT_NEAR(outputs[1], 11.0, 1e-12);
+    EXPECT_NEAR(outputs[2], 12.0, 1e-12);
+}
+
+TEST(BoundaryIntegralInput, FESystem_ConsistentInitializesQuadraturePointPartitionedDAEPerEntity)
+{
+    FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+
+    auto model = std::make_shared<EntityIndexedDAEModel>(Real(20.0));
+    sys.deployAuxiliaryModel(
+        use(model).name("qp_dae").quadraturePoint()
+            .region(explicitQpCellRegion({0u, 1u}))
+            .qpOffsets({0u, 2u, 3u})
+            .partitioned("BackwardEuler")
+            .initialize({1.0, 0.0}));
+    sys.finalizeAuxiliaryLayout();
+
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+
+    sys.prepareAuxiliaryForAssembly(state, false);
+
+    const auto& block = sys.auxiliaryStateManager().getBlock("qp_dae");
+    ASSERT_EQ(block.entityCount(), 3u);
+    for (std::size_t e = 0; e < block.entityCount(); ++e) {
+        const auto committed = block.gatherEntityCommitted(e);
+        ASSERT_EQ(committed.size(), 2u);
+        EXPECT_NEAR(committed[0], 1.0, 1e-14);
+        EXPECT_NEAR(committed[1], 20.0 + static_cast<Real>(e), 1e-12);
+    }
+
+    const auto outputs = sys.auxiliaryOutputValues();
+    ASSERT_EQ(outputs.size(), 3u);
+    EXPECT_NEAR(outputs[0], 20.0, 1e-12);
+    EXPECT_NEAR(outputs[1], 21.0, 1e-12);
+    EXPECT_NEAR(outputs[2], 22.0, 1e-12);
+}
+
+TEST(BoundaryIntegralInput, FESystem_ConsistentInitializesRegionPartitionedDAEAndRestarts)
+{
+    FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+
+    auto model = std::make_shared<EntityIndexedDAEModel>(Real(50.0));
+    sys.deployAuxiliaryModel(
+        use(model).name("region_dae").scope(AuxiliaryStateScope::Region)
+            .entityCount(2)
+            .partitioned("BackwardEuler")
+            .initialize({1.0, 0.0}));
+    sys.finalizeAuxiliaryLayout();
+
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+
+    sys.prepareAuxiliaryForAssembly(state, false);
+
+    auto& block = sys.auxiliaryStateManager().getBlock("region_dae");
+    ASSERT_EQ(block.entityCount(), 2u);
+    for (std::size_t e = 0; e < block.entityCount(); ++e) {
+        const auto committed = block.gatherEntityCommitted(e);
+        const auto work = block.gatherEntityWork(e);
+        ASSERT_EQ(committed.size(), 2u);
+        ASSERT_EQ(work.size(), 2u);
+        EXPECT_NEAR(committed[0], 1.0, 1e-14);
+        EXPECT_NEAR(committed[1], 50.0 + static_cast<Real>(e), 1e-12);
+        EXPECT_NEAR(work[1], committed[1], 1e-12);
+    }
+
+    const auto packed = sys.checkpointAuxiliaryState();
+    block.scatterEntityWork(0u, std::vector<Real>{9.0, 9.0});
+    block.scatterEntityWork(1u, std::vector<Real>{8.0, 8.0});
+    auto committed_mut = block.committedMutable();
+    std::fill(committed_mut.begin(), committed_mut.end(), Real(-1.0));
+
+    sys.restoreAuxiliaryState(packed);
+
+    for (std::size_t e = 0; e < block.entityCount(); ++e) {
+        const auto committed = block.gatherEntityCommitted(e);
+        const auto work = block.gatherEntityWork(e);
+        EXPECT_NEAR(committed[1], 50.0 + static_cast<Real>(e), 1e-12);
+        EXPECT_NEAR(work[1], 50.0 + static_cast<Real>(e), 1e-12);
+    }
+}
+
+TEST(BoundaryIntegralInput, FESystem_ConsistentInitializesCellAndQpMonolithicHooksPerEntity)
+{
+    FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+
+    auto cell_model = std::make_shared<EntityIndexedDAEModel>(Real(30.0),
+                                                              /*model_initializes=*/true);
+    auto qp_model = std::make_shared<EntityIndexedDAEModel>(Real(40.0),
+                                                            /*model_initializes=*/true);
+    sys.deployAuxiliaryModel(
+        use(cell_model).name("cell_mono_dae").cell().entityCount(2)
+            .monolithic()
+            .initialize({1.0, 0.0}));
+    sys.deployAuxiliaryModel(
+        use(qp_model).name("qp_mono_dae").quadraturePoint()
+            .region(explicitQpCellRegion({0u, 1u}))
+            .qpOffsets({0u, 1u, 3u})
+            .monolithic()
+            .initialize({1.0, 0.0}));
+    sys.finalizeAuxiliaryLayout();
+
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+
+    sys.prepareAuxiliaryForAssembly(state, false);
+
+    const auto& cell_block = sys.auxiliaryStateManager().getBlock("cell_mono_dae");
+    ASSERT_EQ(cell_block.entityCount(), 2u);
+    for (std::size_t e = 0; e < cell_block.entityCount(); ++e) {
+        const auto committed = cell_block.gatherEntityCommitted(e);
+        ASSERT_EQ(committed.size(), 2u);
+        EXPECT_NEAR(committed[1], 30.0 + static_cast<Real>(e), 1e-12);
+    }
+
+    const auto& qp_block = sys.auxiliaryStateManager().getBlock("qp_mono_dae");
+    ASSERT_EQ(qp_block.entityCount(), 3u);
+    for (std::size_t e = 0; e < qp_block.entityCount(); ++e) {
+        const auto committed = qp_block.gatherEntityCommitted(e);
+        ASSERT_EQ(committed.size(), 2u);
+        EXPECT_NEAR(committed[1], 40.0 + static_cast<Real>(e), 1e-12);
+    }
+}
+
+TEST(BoundaryIntegralInput, FESystem_PartitionedFailurePolicyCoversCellAndQpScopes)
+{
+    auto make_fail_model = [](const std::string& name) {
+        return AuxiliaryModelBuilder(name)
+            .state("x")
+            .param("k")
+            .ode("x", -modelParam("k") * modelState("x"))
+            .build();
+    };
+
+    AuxiliaryStepperSpec stepper;
+    stepper.method_name = "BackwardEuler";
+    stepper.max_nonlinear_iters = 0;
+
+    AuxiliaryFailurePolicy reject_policy;
+    reject_policy.max_local_retries = 1;
+    reject_policy.reject_timestep_on_failure = true;
+
+    {
+        FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+        sys.deployAuxiliaryModel(
+            use(make_fail_model("cell_fail")).name("cell_fail").cell().entityCount(2)
+                .partitioned("BackwardEuler")
+                .stepper(stepper)
+                .failurePolicy(reject_policy)
+                .param("k", 1.0)
+                .initialize({1.0}));
+        sys.finalizeAuxiliaryLayout();
+        EXPECT_THROW(sys.advanceAuxiliaryState(0.0, 0.1), InvalidStateException);
+    }
+
+    {
+        FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+        sys.deployAuxiliaryModel(
+            use(make_fail_model("qp_fail")).name("qp_fail").quadraturePoint()
+                .region(explicitQpCellRegion({0u, 1u}))
+                .qpOffsets({0u, 1u, 3u})
+                .partitioned("BackwardEuler")
+                .stepper(stepper)
+                .failurePolicy(reject_policy)
+                .param("k", 1.0)
+                .initialize({1.0}));
+        sys.finalizeAuxiliaryLayout();
+        EXPECT_THROW(sys.advanceAuxiliaryState(0.0, 0.1), InvalidStateException);
+    }
+
+    AuxiliaryFailurePolicy restore_policy;
+    restore_policy.max_local_retries = 0;
+    restore_policy.reject_timestep_on_failure = false;
+
+    {
+        FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+        sys.deployAuxiliaryModel(
+            use(make_fail_model("cell_restore")).name("cell_restore").cell().entityCount(2)
+                .partitioned("BackwardEuler")
+                .stepper(stepper)
+                .failurePolicy(restore_policy)
+                .param("k", 1.0)
+                .initialize({1.0}));
+        sys.finalizeAuxiliaryLayout();
+        ASSERT_NO_THROW(sys.advanceAuxiliaryState(0.0, 0.1));
+        const auto& block = sys.auxiliaryStateManager().getBlock("cell_restore");
+        ASSERT_EQ(block.work().size(), 2u);
+        EXPECT_DOUBLE_EQ(block.work()[0], 1.0);
+        EXPECT_DOUBLE_EQ(block.work()[1], 1.0);
+    }
+
+    {
+        FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+        sys.deployAuxiliaryModel(
+            use(make_fail_model("qp_restore")).name("qp_restore").quadraturePoint()
+                .region(explicitQpCellRegion({0u, 1u}))
+                .qpOffsets({0u, 1u, 3u})
+                .partitioned("BackwardEuler")
+                .stepper(stepper)
+                .failurePolicy(restore_policy)
+                .param("k", 1.0)
+                .initialize({1.0}));
+        sys.finalizeAuxiliaryLayout();
+        ASSERT_NO_THROW(sys.advanceAuxiliaryState(0.0, 0.1));
+        const auto& block = sys.auxiliaryStateManager().getBlock("qp_restore");
+        ASSERT_EQ(block.work().size(), 3u);
+        EXPECT_DOUBLE_EQ(block.work()[0], 1.0);
+        EXPECT_DOUBLE_EQ(block.work()[1], 1.0);
+        EXPECT_DOUBLE_EQ(block.work()[2], 1.0);
+    }
+}
+
+TEST(BoundaryIntegralInput, FESystem_PartitionedFailurePolicyCoversRegionScope)
+{
+    auto make_fail_model = [](const std::string& name) {
+        return AuxiliaryModelBuilder(name)
+            .state("x")
+            .param("k")
+            .ode("x", -modelParam("k") * modelState("x"))
+            .build();
+    };
+
+    AuxiliaryStepperSpec stepper;
+    stepper.method_name = "BackwardEuler";
+    stepper.max_nonlinear_iters = 0;
+
+    AuxiliaryFailurePolicy reject_policy;
+    reject_policy.max_local_retries = 1;
+    reject_policy.reject_timestep_on_failure = true;
+
+    {
+        FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+        sys.deployAuxiliaryModel(
+            use(make_fail_model("region_fail")).name("region_fail")
+                .scope(AuxiliaryStateScope::Region)
+                .entityCount(2)
+                .partitioned("BackwardEuler")
+                .stepper(stepper)
+                .failurePolicy(reject_policy)
+                .param("k", 1.0)
+                .initialize({1.0}));
+        sys.finalizeAuxiliaryLayout();
+        EXPECT_THROW(sys.advanceAuxiliaryState(0.0, 0.1), InvalidStateException);
+    }
+
+    AuxiliaryFailurePolicy restore_policy;
+    restore_policy.max_local_retries = 0;
+    restore_policy.reject_timestep_on_failure = false;
+
+    {
+        FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+        sys.deployAuxiliaryModel(
+            use(make_fail_model("region_restore")).name("region_restore")
+                .scope(AuxiliaryStateScope::Region)
+                .entityCount(2)
+                .partitioned("BackwardEuler")
+                .stepper(stepper)
+                .failurePolicy(restore_policy)
+                .param("k", 1.0)
+                .initialize({1.0}));
+        sys.finalizeAuxiliaryLayout();
+        ASSERT_NO_THROW(sys.advanceAuxiliaryState(0.0, 0.1));
+        const auto& block = sys.auxiliaryStateManager().getBlock("region_restore");
+        ASSERT_EQ(block.work().size(), 2u);
+        EXPECT_DOUBLE_EQ(block.work()[0], 1.0);
+        EXPECT_DOUBLE_EQ(block.work()[1], 1.0);
+    }
+}
+
+TEST(BoundaryIntegralInput, FESystem_AppliesPartitionedEventResetAfterStep)
+{
+    class EventResetModel final : public AuxiliaryStateModel {
+    public:
+        std::string modelName() const override { return "EventResetModel"; }
+        int dimension() const override { return 1; }
+
+        AuxiliaryStructuralMetadata structuralMetadata() const override
+        {
+            AuxiliaryStructuralMetadata meta;
+            meta.variable_kinds = {AuxiliaryVariableKind::Differential};
+            meta.has_events = true;
+            meta.n_event_functions = 1;
+            return meta;
+        }
+
+        void evaluateResidual(const AuxiliaryLocalContext& ctx,
+                              AuxiliaryResidualRequest& req) const override
+        {
+            req.residual[0] = ctx.xdot[0] - 2.0;
+        }
+
+        bool hasAnalyticJacobian() const override { return true; }
+
+        void evaluateJacobian(const AuxiliaryLocalContext&,
+                              AuxiliaryJacobianRequest& req) const override
+        {
+            if (!req.dF_dx.empty()) {
+                req.dF_dx[0] = 0.0;
+            }
+            if (req.want_dF_dxdot && !req.dF_dxdot.empty()) {
+                req.dF_dxdot[0] = 1.0;
+            }
+        }
+
+        bool hasEventFunctions() const override { return true; }
+
+        AuxiliaryEventResult evaluateEvents(const AuxiliaryLocalContext& ctx) const override
+        {
+            AuxiliaryEventResult result;
+            result.values = {ctx.x[0]};
+            result.active = {true};
+            return result;
+        }
+
+        void resetAfterEvent(const AuxiliaryLocalContext&,
+                             int event_index,
+                             std::span<Real> x_new) const override
+        {
+            if (event_index == 0) {
+                x_new[0] = 42.0;
+            }
+        }
+
+        int outputCount() const override { return 1; }
+        std::vector<std::string> outputNames() const override { return {"x_out"}; }
+
+        void evaluateOutputs(const AuxiliaryLocalContext& ctx,
+                             std::span<Real> output) const override
+        {
+            output[0] = ctx.x[0];
+        }
+    };
+
+    FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+    auto model = std::make_shared<EventResetModel>();
+    sys.deployAuxiliaryModel(
+        use(model).name("event_inst").global().partitioned("ForwardEuler")
+            .initialize({-1.0}));
+    sys.finalizeAuxiliaryLayout();
+
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 1.0;
+
+    sys.advanceAuxiliaryState(state);
+    sys.prepareAuxiliaryForAssembly(state, false);
+
+    EXPECT_EQ(sys.auxiliaryStateManager().getSpec("event_inst").event_mode,
+              AuxiliaryEventMode::EventHook);
+
+    const auto out_slot = sys.auxiliaryOutputSlotOf("event_inst", "x_out");
+    ASSERT_NE(out_slot, std::string::npos);
+    EXPECT_NEAR(sys.auxiliaryOutputValues()[out_slot], 42.0, 1e-12);
+}
+
+TEST(BoundaryIntegralInput, FESystem_PartitionedEventsUseEntityLocalContext)
+{
+    class EntityEventModel final : public AuxiliaryStateModel {
+    public:
+        std::string modelName() const override { return "EntityEventModel"; }
+        int dimension() const override { return 1; }
+
+        AuxiliaryStructuralMetadata structuralMetadata() const override
+        {
+            AuxiliaryStructuralMetadata meta;
+            meta.variable_kinds = {AuxiliaryVariableKind::Differential};
+            meta.has_events = true;
+            meta.n_event_functions = 1;
+            return meta;
+        }
+
+        void evaluateResidual(const AuxiliaryLocalContext& ctx,
+                              AuxiliaryResidualRequest& req) const override
+        {
+            req.residual[0] = ctx.xdot[0] - 2.0;
+        }
+
+        bool hasAnalyticJacobian() const override { return true; }
+
+        void evaluateJacobian(const AuxiliaryLocalContext&,
+                              AuxiliaryJacobianRequest& req) const override
+        {
+            if (!req.dF_dx.empty()) {
+                req.dF_dx[0] = 0.0;
+            }
+            if (req.want_dF_dxdot && !req.dF_dxdot.empty()) {
+                req.dF_dxdot[0] = 1.0;
+            }
+        }
+
+        bool hasEventFunctions() const override { return true; }
+
+        AuxiliaryEventResult evaluateEvents(const AuxiliaryLocalContext& ctx) const override
+        {
+            const Real threshold = (ctx.entity_index == 0u) ? Real(0.0) : Real(2.0);
+            AuxiliaryEventResult result;
+            result.values = {ctx.x[0] - threshold};
+            result.active = {true};
+            return result;
+        }
+
+        void resetAfterEvent(const AuxiliaryLocalContext& ctx,
+                             int event_index,
+                             std::span<Real> x_new) const override
+        {
+            if (event_index == 0) {
+                x_new[0] = Real(100.0) + static_cast<Real>(ctx.entity_index);
+            }
+        }
+
+        int outputCount() const override { return 1; }
+        std::vector<std::string> outputNames() const override { return {"x_out"}; }
+
+        void evaluateOutputs(const AuxiliaryLocalContext& ctx,
+                             std::span<Real> output) const override
+        {
+            output[0] = ctx.x[0];
+        }
+    };
+
+    FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+    auto model = std::make_shared<EntityEventModel>();
+    sys.deployAuxiliaryModel(
+        use(model).name("cell_event_inst").cell().entityCount(2)
+            .partitioned("ForwardEuler")
+            .initialize({-1.0}));
+    sys.finalizeAuxiliaryLayout();
+
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 1.0;
+
+    sys.advanceAuxiliaryState(state);
+    sys.prepareAuxiliaryForAssembly(state, false);
+
+    EXPECT_EQ(sys.auxiliaryStateManager().getSpec("cell_event_inst").event_mode,
+              AuxiliaryEventMode::EventHook);
+
+    const auto outputs = sys.auxiliaryOutputValues();
+    ASSERT_EQ(outputs.size(), 2u);
+    EXPECT_NEAR(outputs[0], 100.0, 1e-12);
+    EXPECT_NEAR(outputs[1], 1.0, 1e-12);
+}
+
+TEST(BoundaryIntegralInput, FESystem_QuadraturePointPartitionedEventsUseEntityLocalContext)
+{
+    FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+    auto model = std::make_shared<EntityIndexedEventResetModel>();
+    sys.deployAuxiliaryModel(
+        use(model).name("qp_event_inst").quadraturePoint()
+            .region(explicitQpCellRegion({0u, 1u}))
+            .qpOffsets({0u, 1u, 3u})
+            .partitioned("ForwardEuler")
+            .initialize({-1.0}));
+    sys.finalizeAuxiliaryLayout();
+
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 1.0;
+
+    sys.advanceAuxiliaryState(state);
+    sys.prepareAuxiliaryForAssembly(state, false);
+
+    EXPECT_EQ(sys.auxiliaryStateManager().getSpec("qp_event_inst").event_mode,
+              AuxiliaryEventMode::EventHook);
+
+    const auto outputs = sys.auxiliaryOutputValues();
+    ASSERT_EQ(outputs.size(), 3u);
+    EXPECT_NEAR(outputs[0], 100.0, 1e-12);
+    EXPECT_NEAR(outputs[1], 1.0, 1e-12);
+    EXPECT_NEAR(outputs[2], 1.0, 1e-12);
+}
+
+TEST(BoundaryIntegralInput, FESystem_RegionPartitionedEventsUseEntityLocalContext)
+{
+    FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+    auto model = std::make_shared<EntityIndexedEventResetModel>();
+    sys.deployAuxiliaryModel(
+        use(model).name("region_event_inst").scope(AuxiliaryStateScope::Region)
+            .entityCount(3)
+            .partitioned("ForwardEuler")
+            .initialize({-1.0}));
+    sys.finalizeAuxiliaryLayout();
+
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 1.0;
+
+    sys.advanceAuxiliaryState(state);
+    sys.prepareAuxiliaryForAssembly(state, false);
+
+    EXPECT_EQ(sys.auxiliaryStateManager().getSpec("region_event_inst").event_mode,
+              AuxiliaryEventMode::EventHook);
+
+    const auto outputs = sys.auxiliaryOutputValues();
+    ASSERT_EQ(outputs.size(), 3u);
+    EXPECT_NEAR(outputs[0], 100.0, 1e-12);
+    EXPECT_NEAR(outputs[1], 1.0, 1e-12);
+    EXPECT_NEAR(outputs[2], 1.0, 1e-12);
+}
+
+TEST(BoundaryIntegralInput, FESystem_MonolithicEventsCoverCellAndQpScopes)
+{
+    FESystem sys(std::shared_ptr<const svmp::FE::assembly::IMeshAccess>{});
+
+    auto cell_model = std::make_shared<EntityIndexedEventResetModel>();
+    auto qp_model = std::make_shared<EntityIndexedEventResetModel>();
+    sys.deployAuxiliaryModel(
+        use(cell_model).name("cell_mono_event").cell().entityCount(2)
+            .monolithic()
+            .initialize({-1.0}));
+    sys.deployAuxiliaryModel(
+        use(qp_model).name("qp_mono_event").quadraturePoint()
+            .region(explicitQpCellRegion({0u, 1u}))
+            .qpOffsets({0u, 1u, 3u})
+            .monolithic()
+            .initialize({-1.0}));
+    sys.finalizeAuxiliaryLayout();
+
+    auto& cell_block = sys.auxiliaryStateManager().getBlock("cell_mono_event");
+    cell_block.scatterEntityWork(0u, std::vector<Real>{1.0});
+    cell_block.scatterEntityWork(1u, std::vector<Real>{1.0});
+
+    auto& qp_block = sys.auxiliaryStateManager().getBlock("qp_mono_event");
+    qp_block.scatterEntityWork(0u, std::vector<Real>{1.0});
+    qp_block.scatterEntityWork(1u, std::vector<Real>{1.0});
+    qp_block.scatterEntityWork(2u, std::vector<Real>{1.0});
+
+    sys.finalizeMonolithicAuxiliaryStageState(
+        /*alpha_f=*/1.0, /*gamma=*/1.0, /*dt=*/1.0, /*final_time=*/1.0);
+
+    EXPECT_NEAR(cell_block.gatherEntityWork(0u)[0], 100.0, 1e-12);
+    EXPECT_NEAR(cell_block.gatherEntityWork(1u)[0], 1.0, 1e-12);
+    EXPECT_NEAR(qp_block.gatherEntityWork(0u)[0], 100.0, 1e-12);
+    EXPECT_NEAR(qp_block.gatherEntityWork(1u)[0], 1.0, 1e-12);
+    EXPECT_NEAR(qp_block.gatherEntityWork(2u)[0], 1.0, 1e-12);
 }
 
 TEST(BoundaryIntegralInput, FirstNonlinearAssemblyAdvancesPartitionedAuxiliary)
@@ -3720,6 +4532,111 @@ TEST(MonolithicCoupling, PureAlgebraicResistanceOutletEmitsDirectCouplingUpdate)
     EXPECT_NEAR(native_rank_one_it->sigma, -110.0, 1e-12);
     EXPECT_FALSE(native_rank_one_it->v.empty());
     EXPECT_TRUE(reduced_updates.empty());
+}
+
+TEST(MonolithicCoupling, GlobalMixedDAEWithFEBackedInputAssemblesAuxAndFieldCoupling)
+{
+    const int marker = 5;
+    auto mesh =
+        std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
+    auto Q = sys.boundaryIntegral(u_disc, marker);
+
+    auto model = aux::model("global_fe_mixed_dae", [](ModelFacade& m) {
+        auto Q = m.input("Q");
+        auto x = m.state("x");
+        auto z = m.state("z", AuxiliaryVariableKind::Algebraic);
+
+        m << ddt(x) == Q - x - z;
+        m << alg(z) == x + z - FormExpr::constant(1.0);
+    });
+
+    sys.deployAuxiliaryModel(
+        use(model)
+            .name("global_fe_dae")
+            .global()
+            .monolithic()
+            .bind("Q", Q)
+            .initialize({0.5, 0.25}));
+
+    const auto u = FormExpr::stateField(u_field, *space, "u");
+    const auto v = FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, inner(grad(u), grad(v)).dx());
+
+    SetupInputs si;
+    si.topology_override = singleTetraTopology();
+    SetupOptions opts;
+    opts.use_constraints_in_assembly = false;
+    sys.setup(opts, si);
+    sys.finalizeAuxiliaryLayout();
+
+    const auto n_dofs = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    ASSERT_EQ(n_dofs, 4u);
+
+    auto* mgr = sys.auxiliaryStateManagerIfPresent();
+    ASSERT_NE(mgr, nullptr);
+    auto& blk = mgr->getBlock("global_fe_dae");
+    blk.work()[0] = 0.6;
+    blk.work()[1] = 0.25;
+
+    std::vector<Real> sol(n_dofs, 1.0);
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = sol;
+
+    std::vector<Real> residual;
+    std::vector<Real> matrix;
+    sys.assembleMixedAuxiliaryDense(state, n_dofs, residual, matrix);
+
+    const auto layout = sys.composeMixedSystemLayout(n_dofs);
+    EXPECT_EQ(layout.n_aux_unknowns, 2u);
+    ASSERT_EQ(layout.total_unknowns, n_dofs + 2u);
+
+    const auto n_total = layout.total_unknowns;
+    const auto row_x = n_dofs;
+    const auto row_z = n_dofs + 1u;
+    auto* reg = sys.auxiliaryInputRegistryIfPresent();
+    ASSERT_NE(reg, nullptr);
+    const Real q_value = reg->get(Q.registryName());
+
+    ASSERT_EQ(residual.size(), n_total);
+    EXPECT_NEAR(residual[row_x],
+                Real(1.0) + Real(0.6) + Real(0.25) - q_value,
+                1e-12);
+    EXPECT_NEAR(residual[row_z], Real(0.6) + Real(0.25) - Real(1.0), 1e-12);
+
+    ASSERT_EQ(matrix.size(), n_total * n_total);
+    EXPECT_NEAR(matrix[row_x * n_total + row_x], 11.0, 1e-12);
+    EXPECT_NEAR(matrix[row_x * n_total + row_z], 1.0, 1e-12);
+    EXPECT_NEAR(matrix[row_z * n_total + row_x], 1.0, 1e-12);
+    EXPECT_NEAR(matrix[row_z * n_total + row_z], 1.0, 1e-12);
+
+    auto* svc = sys.boundaryReductionServiceIfPresent(u_field);
+    ASSERT_NE(svc, nullptr);
+    const auto grad = svc->evaluateFunctionalGradient(
+        Q.registryName(), u_field, state, /*apply_constraints=*/false);
+    std::vector<Real> expected_field_coupling(n_dofs, Real(0.0));
+    for (const auto& se : grad) {
+        ASSERT_GE(se.dof, 0);
+        ASSERT_LT(static_cast<std::size_t>(se.dof), n_dofs);
+        expected_field_coupling[static_cast<std::size_t>(se.dof)] += -se.value;
+    }
+    EXPECT_TRUE(std::any_of(expected_field_coupling.begin(),
+                            expected_field_coupling.end(),
+                            [](Real value) { return std::abs(value) > Real(1e-14); }));
+
+    for (std::size_t col = 0; col < n_dofs; ++col) {
+        EXPECT_NEAR(matrix[row_x * n_total + col], expected_field_coupling[col], 1e-12)
+            << "dF_x/dfield[" << col << "] should follow dF/dQ * dQ/du";
+        EXPECT_NEAR(matrix[row_z * n_total + col], 0.0, 1e-12);
+    }
 }
 
 TEST(MonolithicCoupling, DomainAverageGradientFDVerification)

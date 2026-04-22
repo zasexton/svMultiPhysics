@@ -100,6 +100,8 @@ public:
      * @param time    Initialization time.
      * @param opts    Solver options.
      * @param index_reduction  Optional index-reduction hook.
+     * @param entity_index Per-entity scope index passed to residual and
+     *                     model-owned initialization hooks.
      */
     [[nodiscard]] static InitializationResult solve(
         const AuxiliaryStateModel& model,
@@ -109,7 +111,8 @@ public:
         std::span<const Real> params,
         Real time,
         const InitializationOptions& opts = {},
-        IndexReductionHook index_reduction = {});
+        IndexReductionHook index_reduction = {},
+        std::size_t entity_index = 0);
 };
 
 } // namespace systems

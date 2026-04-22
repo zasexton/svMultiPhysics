@@ -521,6 +521,7 @@ set(FE_CONSTRAINTS_HEADERS
     Constraints/SystemConstraint.h
     Constraints/SystemConstraints.h
     Constraints/StrongDirichletConstraint.h
+    Constraints/VertexDirichletConstraint.h
     Constraints/AuxiliaryDrivenDirichletConstraint.h
     Constraints/HCurlTangentialConstraint.h
     Constraints/HDivNormalConstraint.h
@@ -546,6 +547,7 @@ set(FE_CONSTRAINTS_SOURCES
     Constraints/GaugeRegistry.cpp
     Constraints/SystemConstraints.cpp
     Constraints/StrongDirichletConstraint.cpp
+    Constraints/VertexDirichletConstraint.cpp
     Constraints/AuxiliaryDrivenDirichletConstraint.cpp
     Constraints/HCurlTangentialConstraint.cpp
     Constraints/HDivNormalConstraint.cpp
@@ -812,6 +814,21 @@ set(FE_SYSTEMS_SOURCES
     Systems/AuxiliaryQuadratureLayout.cpp
     Systems/FEQuantityRegistry.cpp
     Systems/TransientSystem.cpp
+)
+
+set(FE_POSTPROCESSING_HEADERS
+    PostProcessing/DerivedResultTypes.h
+    PostProcessing/DerivedResultBuilder.h
+    PostProcessing/DerivedResultRegistry.h
+    PostProcessing/DerivedResultEvaluator.h
+    PostProcessing/DerivedResultOutput.h
+)
+
+set(FE_POSTPROCESSING_SOURCES
+    PostProcessing/DerivedResultTypes.cpp
+    PostProcessing/DerivedResultRegistry.cpp
+    PostProcessing/DerivedResultEvaluator.cpp
+    PostProcessing/DerivedResultOutput.cpp
 )
 
 # Forms sources (requires FE/Assembly; used by SymbolicAssembler)
@@ -1152,6 +1169,8 @@ if(FE_ENABLE_ASSEMBLY)
     list(APPEND FE_ALL_SOURCES ${FE_AUXILIARY_SOURCES})
     list(APPEND FE_ALL_HEADERS ${FE_SYSTEMS_HEADERS})
     list(APPEND FE_ALL_SOURCES ${FE_SYSTEMS_SOURCES})
+    list(APPEND FE_ALL_HEADERS ${FE_POSTPROCESSING_HEADERS})
+    list(APPEND FE_ALL_SOURCES ${FE_POSTPROCESSING_SOURCES})
     list(APPEND FE_ALL_HEADERS ${FE_FORMS_HEADERS})
     list(APPEND FE_ALL_SOURCES ${FE_FORMS_SOURCES})
     list(APPEND FE_ALL_HEADERS ${FE_TIMESTEPPING_HEADERS})
@@ -2185,6 +2204,22 @@ if(FE_BUILD_TESTS)
             add_test(NAME FE_Forms_Tests COMMAND test_fe_forms)
         endif()
 
+        # PostProcessing module tests (derived output registration/evaluation)
+        if(FE_WITH_MESH AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/PostProcessing/test_main.cpp)
+            set(FE_POSTPROCESSING_TEST_SOURCES
+                Tests/Unit/PostProcessing/test_DerivedResultPostProcessing.cpp
+                Tests/Unit/PostProcessing/test_main.cpp
+            )
+            add_executable(test_fe_postprocessing ${FE_POSTPROCESSING_TEST_SOURCES})
+            _svmp_fe_target_enable_warnings(test_fe_postprocessing)
+            target_link_libraries(test_fe_postprocessing
+                PRIVATE
+                    svfe
+                    ${GTEST_LIBRARIES}
+            )
+            add_test(NAME FE_PostProcessing_Tests COMMAND test_fe_postprocessing)
+        endif()
+
         # Constitutive module tests (depends on Forms + Systems + Assembly)
         if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Constitutive/test_main.cpp)
             set(FE_CONSTITUTIVE_TEST_SOURCES
@@ -2270,6 +2305,7 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Auxiliary/test_AuxiliaryInputRegistry.cpp
                 Tests/Unit/Auxiliary/test_AuxiliaryOperators.cpp
                 Tests/Unit/Auxiliary/test_AuxiliaryModelBuilder.cpp
+                Tests/Unit/Auxiliary/test_AuxiliaryScopeResolution.cpp
                 Tests/Unit/Auxiliary/test_main.cpp
             )
             add_executable(test_fe_auxiliary ${FE_AUXILIARY_TEST_SOURCES})

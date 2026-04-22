@@ -691,8 +691,8 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
 
     const auto& part = dof_handler.getPartition();
     const auto owned_size = part.localOwnedSize();
-    if (owned_size <= 0) {
-        return fail("owned_size<=0");
+    if (owned_size < 0) {
+        return fail("owned_size<0");
     }
 
     // Representative field/component used to identify node ownership. Prefer the field with the
@@ -785,13 +785,10 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
 	        }
 	    }
 
-	    std::sort(relevant_nodes_fe.begin(), relevant_nodes_fe.end());
-	    relevant_nodes_fe.erase(std::unique(relevant_nodes_fe.begin(), relevant_nodes_fe.end()), relevant_nodes_fe.end());
-	    if (relevant_nodes_fe.empty()) {
-	        return fail("relevant_nodes_fe is empty");
-	    }
+    std::sort(relevant_nodes_fe.begin(), relevant_nodes_fe.end());
+    relevant_nodes_fe.erase(std::unique(relevant_nodes_fe.begin(), relevant_nodes_fe.end()), relevant_nodes_fe.end());
 
-	    FE_THROW_IF(owned_size % static_cast<GlobalIndex>(dof_per_node) != 0,
+    FE_THROW_IF(owned_size % static_cast<GlobalIndex>(dof_per_node) != 0,
 	                InvalidArgumentException,
 	                "FESystem::setup: nodal interleaved distributed sparsity requires owned DOFs to be a multiple of dof_per_node");
 	    const GlobalIndex expected_owned_nodes = owned_size / static_cast<GlobalIndex>(dof_per_node);
@@ -1328,8 +1325,10 @@ LocalIndex maxInteriorFaceQuadraturePoints(const assembly::IMeshAccess& mesh,
 
 } // namespace
 
-void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
+void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 {
+    SetupOptions opts = user_opts;
+
     invalidateSetup();
 
     FE_THROW_IF(field_registry_.size() == 0u, InvalidStateException,
@@ -1349,6 +1348,34 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
         mesh_access_ = std::make_shared<assembly::MeshAccess>(*mesh_, coord_cfg_);
         if (!search_access_) {
             search_access_ = std::make_shared<MeshSearchAccess>(*mesh_, coord_cfg_);
+        }
+    }
+
+    if (mesh_) {
+        opts.dof_options.my_rank = mesh_->rank();
+        opts.dof_options.world_size = mesh_->world_size();
+#  if FE_HAS_MPI && defined(MESH_HAS_MPI)
+        opts.dof_options.mpi_comm = mesh_->mpi_comm();
+#  endif
+    }
+#endif
+
+#if FE_HAS_MPI
+    {
+        int mpi_initialized = 0;
+        MPI_Initialized(&mpi_initialized);
+        if (mpi_initialized) {
+            int comm_rank = 0;
+            int comm_size = 1;
+            MPI_Comm_rank(opts.dof_options.mpi_comm, &comm_rank);
+            MPI_Comm_size(opts.dof_options.mpi_comm, &comm_size);
+
+            if (opts.dof_options.world_size == 1 &&
+                opts.dof_options.my_rank == 0 &&
+                comm_size > 1) {
+                opts.dof_options.my_rank = comm_rank;
+                opts.dof_options.world_size = comm_size;
+            }
         }
     }
 #endif
@@ -2564,7 +2591,30 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     const auto n_cells_sparsity = meshAccess().numCells();
 
     const auto& partition = dof_handler_.getPartition();
-    const bool mpi_parallel = (partition.globalSize() > 0) && (partition.globalSize() > partition.localOwnedSize());
+    bool mpi_parallel =
+        (partition.globalSize() > 0) && (partition.globalSize() > partition.localOwnedSize());
+#if FE_HAS_MPI
+    {
+        int mpi_initialized_parallel = 0;
+        MPI_Initialized(&mpi_initialized_parallel);
+        if (mpi_initialized_parallel && partition.globalSize() > 0) {
+            int comm_size = 1;
+            MPI_Comm_size(dof_handler_.mpiComm(), &comm_size);
+            if (comm_size > 1) {
+                const int local_partial =
+                    (partition.globalSize() > partition.localOwnedSize()) ? 1 : 0;
+                int any_partial = 0;
+                MPI_Allreduce(&local_partial,
+                              &any_partial,
+                              1,
+                              MPI_INT,
+                              MPI_MAX,
+                              dof_handler_.mpiComm());
+                mpi_parallel = (any_partial != 0);
+            }
+        }
+    }
+#endif
 
     enum class DistSparsityMode { None, ContiguousRange, NodalInterleaved };
 
@@ -3738,8 +3788,8 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     }
 
     auto assembly_options = opts.assembly_options;
-    if (const auto ghost_policy_override = assemblyGhostPolicyOverrideFromEnv();
-        ghost_policy_override.has_value()) {
+    const auto ghost_policy_override = assemblyGhostPolicyOverrideFromEnv();
+    if (ghost_policy_override.has_value()) {
         assembly_options.ghost_policy = *ghost_policy_override;
     }
     if (opts.use_backend_row_ownership_for_assembly &&
@@ -3763,6 +3813,11 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                 return owner >= 0 ? owner
                                   : (default_owner_map ? default_owner_map->getDofOwner(fe_dof) : 0);
             };
+        if (!ghost_policy_override.has_value()) {
+            // Backend row ownership is a row-filtered assembly mode. Reverse-scatter
+            // would also assemble ghost-cell replicas and can double-count rows.
+            assembly_options.ghost_policy = assembly::GhostPolicy::OwnedRowsOnly;
+        }
     }
 
     assembly::SystemCharacteristics sys_chars{};

@@ -75,6 +75,9 @@
  *   - Auxiliary outputs: derived expressions, not primary solve targets.
  */
 
+#include "Core/Types.h"
+#include "Auxiliary/AuxiliaryNonsmoothPolicy.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -466,6 +469,44 @@ struct AuxiliaryDeploymentRegion {
         return kind != AuxiliaryRegionKind::WholeDomain ||
                !explicit_entities.empty();
     }
+
+    [[nodiscard]] bool operator==(const AuxiliaryDeploymentRegion&) const = default;
+};
+
+/**
+ * @brief Stable membership metadata for one topology-region auxiliary entity.
+ *
+ * Region ids are the canonical ids produced by `TopologyAnalysisContext`, not
+ * material ids, boundary markers, or deployment-region labels.
+ */
+struct AuxiliaryRegionMembershipMetadata {
+    std::size_t region_id{0};
+    std::vector<std::size_t> cell_ids{};
+    std::vector<std::size_t> node_ids{};
+    std::vector<int> boundary_markers{};
+    std::vector<std::size_t> interface_face_ids{};
+
+    [[nodiscard]] bool operator==(const AuxiliaryRegionMembershipMetadata&) const = default;
+};
+
+/**
+ * @brief Stable entity identity and remap metadata for a materialized block.
+ *
+ * `entity_ids` is in storage order.  For unrestricted deployments this is the
+ * canonical identity range for the scope; for restricted deployments it is the
+ * resolved entity subset after owned/ghost ordering has been applied.
+ */
+struct AuxiliaryEntityRemapMetadata {
+    AuxiliaryStateScope scope{AuxiliaryStateScope::Global};
+    AuxiliaryDeploymentRegion deployment_region{};
+    std::vector<std::size_t> entity_ids{};
+    std::size_t owned_entity_count{0};
+    std::vector<std::size_t> qp_offsets{};
+    std::vector<std::size_t> qp_cell_ids{};
+    std::vector<AuxiliaryRegionMembershipMetadata> region_membership{};
+    std::uint64_t metadata_hash{0};
+
+    [[nodiscard]] bool operator==(const AuxiliaryEntityRemapMetadata&) const = default;
 };
 
 // ---------------------------------------------------------------------------
@@ -589,6 +630,19 @@ struct AuxiliaryStateSpec {
     /// If non-empty, must have exactly `size` entries.
     std::vector<AuxiliaryVariableKind> variable_kinds{};
 
+    /// Optional constraint grouping (e.g. algebraic row blocks).
+    std::vector<std::vector<int>> constraint_groups{};
+
+    /// Optional DAE index hint.  -1 means unspecified.
+    int dae_index_hint{-1};
+
+    /// Whether the model declares an explicit mass-like operator.
+    bool has_mass_matrix{false};
+
+    /// Optional diagonal mass entries.  Empty means identity for
+    /// differential rows unless `has_mass_matrix` is true.
+    std::vector<Real> mass_diagonal{};
+
     /// Storage scope (Global, Boundary, Node, Cell, QuadraturePoint, Region, Facet).
     AuxiliaryStateScope scope{AuxiliaryStateScope::Global};
 
@@ -626,6 +680,15 @@ struct AuxiliaryStateSpec {
 
     /// Event/nonsmooth extension hooks.
     AuxiliaryEventMode event_mode{AuxiliaryEventMode::None};
+
+    /// Number of smooth event functions declared by the model.
+    int n_event_functions{0};
+
+    /// Whether the model declares nonsmooth/complementarity behavior.
+    bool has_nonsmooth{false};
+
+    /// Runtime policy for nonsmooth/event-manager behavior.
+    AuxiliaryNonsmoothPolicy nonsmooth_policy{};
 
     /// Derivative policy for Jacobians and optional second derivatives.
     AuxiliaryDerivativePolicy derivative_policy{};

@@ -432,7 +432,17 @@ Real BoundaryReductionService::evaluateFunctionalEntry(CompiledFunctional& entry
 
     Real raw = 0.0;
     if (entry.def.is_domain_functional) {
-        raw = assembler.assembleScalar(*entry.kernel);
+        if (entry.def.region_marker >= 0) {
+            std::vector<GlobalIndex> cells;
+            system_.meshAccess().forEachCell([&](GlobalIndex cell_id) {
+                if (system_.meshAccess().getCellDomainId(cell_id) == entry.def.region_marker) {
+                    cells.push_back(cell_id);
+                }
+            });
+            raw = assembler.assembleScalarOverCells(*entry.kernel, cells);
+        } else {
+            raw = assembler.assembleScalar(*entry.kernel);
+        }
     } else {
         raw = assembler.assembleBoundaryScalar(*entry.kernel, entry.def.boundary_marker);
     }
@@ -481,6 +491,78 @@ Real BoundaryReductionService::evaluateFunctional(std::string_view name, const S
                 "BoundaryReductionService::evaluateFunctional: unknown functional '" +
                 std::string(name) + "'");
     return evaluateFunctionalEntry(functionals_.at(it->second), state);
+}
+
+Real BoundaryReductionService::evaluateFunctionalOverCells(
+    std::string_view name,
+    std::span<const GlobalIndex> cell_ids,
+    const SystemStateView& state)
+{
+    auto it = name_to_functional_.find(std::string(name));
+    FE_THROW_IF(it == name_to_functional_.end(), InvalidArgumentException,
+                "BoundaryReductionService::evaluateFunctionalOverCells: unknown functional '" +
+                std::string(name) + "'");
+
+    auto& entry = functionals_.at(it->second);
+    FE_THROW_IF(!entry.def.is_domain_functional, InvalidArgumentException,
+                "BoundaryReductionService::evaluateFunctionalOverCells: functional '" +
+                std::string(name) + "' is not a domain functional");
+
+    compileFunctionalIfNeeded(entry);
+    FE_CHECK_NOT_NULL(entry.kernel.get(),
+                      "BoundaryReductionService::evaluateFunctionalOverCells: kernel");
+
+    auto refreshGhostedCoefficients = [](const backends::GenericVector* vec_ptr) {
+        if (vec_ptr == nullptr) {
+            return;
+        }
+        auto* vec = const_cast<backends::GenericVector*>(vec_ptr);
+        vec->updateGhosts();
+    };
+
+    refreshGhostedCoefficients(state.u_vector);
+    refreshGhostedCoefficients(state.u_prev_vector);
+    refreshGhostedCoefficients(state.u_prev2_vector);
+
+    assembly::FunctionalAssembler assembler;
+    configureAssembler(assembler, state, /*bind_solution=*/true);
+
+    std::unique_ptr<assembly::GlobalSystemView> solution_view;
+    if (state.u_vector != nullptr) {
+        auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
+        solution_view = vec->createAssemblyView();
+        assembler.setSolutionView(solution_view.get());
+    }
+
+    std::unique_ptr<assembly::GlobalSystemView> prev_solution_view;
+    std::unique_ptr<assembly::GlobalSystemView> prev2_solution_view;
+    if (state.u_prev_vector != nullptr) {
+        auto* vec = const_cast<backends::GenericVector*>(state.u_prev_vector);
+        prev_solution_view = vec->createAssemblyView();
+        assembler.setPreviousSolutionView(prev_solution_view.get());
+    }
+    if (state.u_prev2_vector != nullptr) {
+        auto* vec = const_cast<backends::GenericVector*>(state.u_prev2_vector);
+        prev2_solution_view = vec->createAssemblyView();
+        assembler.setPreviousSolution2View(prev2_solution_view.get());
+    }
+
+    Real raw = assembler.assembleScalarOverCells(*entry.kernel, cell_ids);
+
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized) {
+        raw = allreduceSum(raw, system_.dofHandler().mpiComm());
+    }
+#endif
+
+    if (entry.def.reduction == forms::BoundaryFunctional::Reduction::Sum) {
+        return raw;
+    }
+
+    FE_THROW(NotImplementedException,
+             "BoundaryReductionService::evaluateFunctionalOverCells: only Sum reduction is supported");
 }
 
 std::vector<Real> BoundaryReductionService::evaluateAll(const SystemStateView& state)

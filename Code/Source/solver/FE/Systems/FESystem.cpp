@@ -7,17 +7,22 @@
 
 #include "Systems/FESystem.h"
 
+#include "PostProcessing/DerivedResultEvaluator.h"
+
 #include "Systems/SystemAssembly.h"
 #include "Systems/AuxiliaryQuadratureLayout.h"
 #include "Systems/OperatorBackends.h"
 #include "Systems/BoundaryReductionService.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
 #include "Auxiliary/AuxiliaryOperatorRegistry.h"
+#include "Auxiliary/AuxiliaryRowOwnership.h"
 #include "Auxiliary/AuxiliaryInputRegistry.h"
 #include "Auxiliary/AuxiliaryBindings.h"
 #include "Auxiliary/AuxiliaryModelBuilder.h"
 #include "Auxiliary/AuxiliaryStateStepper.h"
 #include "Auxiliary/AuxiliaryMultirateScheduler.h"
+#include "Auxiliary/AuxiliaryInitializationSolver.h"
+#include "Auxiliary/AuxiliaryEventManager.h"
 #include "Constraints/AuxiliaryDrivenDirichletConstraint.h"
 #include "Forms/PointEvaluator.h"
 #include "Auxiliary/AuxiliaryDerivativeProvider.h"
@@ -47,8 +52,10 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <numeric>
 #include <sstream>
+#include <tuple>
 #include <type_traits>
 #include <unordered_set>
 
@@ -661,6 +668,33 @@ void scatterAuxiliaryFlatEntity(const AuxiliaryBlockStorage& blk,
         });
 }
 
+[[nodiscard]] bool needsConsistentAuxiliaryInitialization(
+    const AuxiliaryStateModel& model,
+    std::size_t dim,
+    AuxiliarySolveMode solve_mode)
+{
+    if (model.hasConsistentInitialization()) {
+        return true;
+    }
+    if (solve_mode != AuxiliarySolveMode::Partitioned) {
+        return false;
+    }
+    if (dim == 0) {
+        return false;
+    }
+
+    const auto meta = model.structuralMetadata();
+    if (meta.variable_kinds.size() < dim) {
+        return false;
+    }
+    return std::any_of(
+        meta.variable_kinds.begin(),
+        meta.variable_kinds.begin() + static_cast<std::ptrdiff_t>(dim),
+        [](AuxiliaryVariableKind kind) {
+            return kind == AuxiliaryVariableKind::Algebraic;
+        });
+}
+
 [[nodiscard]] forms::FormExpr exprFromNodeShared(
     const std::shared_ptr<const forms::FormExprNode>& node)
 {
@@ -930,7 +964,126 @@ MPI_Datatype mpiGlobalIndexType()
     }
     return out;
 }
+
+struct LocalCondensedSlotKey {
+    unsigned long long block_ordinal{0};
+    unsigned long long entity_key{0};
+    unsigned long long component{0};
+};
+
+[[nodiscard]] std::vector<LocalCondensedSlotKey> allgatherLocalCondensedSlotKeys(
+    std::vector<LocalCondensedSlotKey> local,
+    MPI_Comm comm)
+{
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (!mpi_initialized) {
+        return local;
+    }
+
+    auto sort_unique = [](std::vector<LocalCondensedSlotKey>& keys) {
+        std::sort(keys.begin(), keys.end(), [](const auto& a, const auto& b) {
+            return std::tie(a.block_ordinal, a.entity_key, a.component) <
+                   std::tie(b.block_ordinal, b.entity_key, b.component);
+        });
+        keys.erase(std::unique(keys.begin(), keys.end(), [](const auto& a, const auto& b) {
+                       return a.block_ordinal == b.block_ordinal &&
+                              a.entity_key == b.entity_key &&
+                              a.component == b.component;
+                   }),
+                   keys.end());
+    };
+
+    int comm_size = 1;
+    MPI_Comm_size(comm, &comm_size);
+    if (comm_size <= 1) {
+        sort_unique(local);
+        return local;
+    }
+
+    const int local_n = static_cast<int>(local.size());
+    std::vector<int> counts(static_cast<std::size_t>(comm_size), 0);
+    MPI_Allgather(&local_n, 1, MPI_INT, counts.data(), 1, MPI_INT, comm);
+
+    std::vector<int> displs(static_cast<std::size_t>(comm_size), 0);
+    int total_n = 0;
+    for (int r = 0; r < comm_size; ++r) {
+        displs[static_cast<std::size_t>(r)] = total_n;
+        total_n += counts[static_cast<std::size_t>(r)];
+    }
+
+    std::vector<unsigned long long> send(
+        static_cast<std::size_t>(local_n) * 3u, 0ull);
+    for (int i = 0; i < local_n; ++i) {
+        const auto base = static_cast<std::size_t>(i) * 3u;
+        send[base + 0u] = local[static_cast<std::size_t>(i)].block_ordinal;
+        send[base + 1u] = local[static_cast<std::size_t>(i)].entity_key;
+        send[base + 2u] = local[static_cast<std::size_t>(i)].component;
+    }
+
+    std::vector<int> counts3(counts.size(), 0);
+    std::vector<int> displs3(displs.size(), 0);
+    for (std::size_t i = 0; i < counts.size(); ++i) {
+        counts3[i] = counts[i] * 3;
+        displs3[i] = displs[i] * 3;
+    }
+
+    std::vector<unsigned long long> recv(
+        static_cast<std::size_t>(total_n) * 3u, 0ull);
+    MPI_Allgatherv(send.data(), local_n * 3, MPI_UNSIGNED_LONG_LONG,
+                   recv.data(), counts3.data(), displs3.data(),
+                   MPI_UNSIGNED_LONG_LONG, comm);
+
+    std::vector<LocalCondensedSlotKey> gathered;
+    gathered.reserve(static_cast<std::size_t>(total_n));
+    for (int i = 0; i < total_n; ++i) {
+        const auto base = static_cast<std::size_t>(i) * 3u;
+        gathered.push_back(LocalCondensedSlotKey{
+            recv[base + 0u], recv[base + 1u], recv[base + 2u]});
+    }
+    sort_unique(gathered);
+    return gathered;
+}
 #endif
+
+class ScopedAssemblerOptions final {
+public:
+    ScopedAssemblerOptions(assembly::Assembler* assembler,
+                           assembly::AssemblyOptions options)
+        : assembler_(assembler)
+        , saved_options_(assembler != nullptr ? assembler->getOptions()
+                                              : assembly::AssemblyOptions{})
+        , active_(assembler != nullptr)
+    {
+        if (active_) {
+            assembler_->setOptions(options);
+        }
+    }
+
+    ScopedAssemblerOptions(const ScopedAssemblerOptions&) = delete;
+    ScopedAssemblerOptions& operator=(const ScopedAssemblerOptions&) = delete;
+
+    ~ScopedAssemblerOptions()
+    {
+        if (active_) {
+            assembler_->setOptions(saved_options_);
+        }
+    }
+
+private:
+    assembly::Assembler* assembler_{nullptr};
+    assembly::AssemblyOptions saved_options_{};
+    bool active_{false};
+};
+
+[[nodiscard]] assembly::AssemblyOptions localSensitivityAssemblyOptions(
+    const assembly::Assembler& assembler)
+{
+    auto options = assembler.getOptions();
+    options.allow_unowned_row_accumulation = true;
+    options.row_owner_rank = {};
+    return options;
+}
 
 [[nodiscard]] std::vector<Real> reconstructRateFromHistory(
     std::span<const Real> committed,
@@ -1238,6 +1391,7 @@ void FESystem::invalidateSetup() noexcept
     contributions_.resize(contributions_def_count_);
     topology_context_.reset();
     interface_topology_context_.reset();
+    auxiliary_region_lookup_cache_.reset();
     constraint_summary_.reset();
 
     // Note: GaugeRegistry is NOT cleared here. Candidate deduplication in
@@ -1299,6 +1453,7 @@ void FESystem::addVariableDescriptor(analysis::VariableDescriptor desc) {
 
 void FESystem::buildTopologyContext() {
     topology_context_ = analysis::TopologyAnalysisContext::build(meshAccess());
+    auxiliary_region_lookup_cache_.reset();
     invalidateAnalysisCache();
 }
 
@@ -1346,6 +1501,7 @@ void FESystem::buildInterfaceTopologyContext() {
 #endif
 
     interface_topology_context_ = std::move(ctx);
+    auxiliary_region_lookup_cache_.reset();
     invalidateAnalysisCache();
 }
 
@@ -1745,6 +1901,37 @@ std::shared_ptr<assembly::MatrixFreeOperator> FESystem::matrixFreeOperator(const
     requireSingleFieldSetup();
     FE_CHECK_NOT_NULL(operator_backends_.get(), "FESystem::operator_backends");
     return operator_backends_->matrixFreeOperator(*this, op);
+}
+
+post::DerivedResultHandle FESystem::addDerivedResult(post::DerivedResultDefinition def)
+{
+    if (!derived_result_registry_) {
+        derived_result_registry_ = std::make_unique<post::DerivedResultRegistry>();
+    }
+    return derived_result_registry_->registerDefinition(std::move(def));
+}
+
+std::span<const post::DerivedResultDefinition> FESystem::derivedResults() const noexcept
+{
+    if (!derived_result_registry_) {
+        return {};
+    }
+    return derived_result_registry_->all();
+}
+
+void FESystem::appendDerivedResultFields(
+    svmp::MeshBase& mesh,
+    const SystemStateView& state,
+    const post::DerivedResultOutputOptions& options) const
+{
+    if (!derived_result_registry_ || derived_result_registry_->all().empty()) {
+        return;
+    }
+    requireSetup();
+    post::DerivedResultEvaluator evaluator(*this, state);
+    for (const auto& def : derived_result_registry_->all()) {
+        evaluator.evaluateToMeshField(mesh, def, options);
+    }
 }
 
 void FESystem::addFunctionalKernel(std::string tag,
@@ -2354,57 +2541,38 @@ void FESystem::finalizeMonolithicAuxiliaryStageState(
     FE_THROW_IF(!(alpha_f > 0.0) || !std::isfinite(alpha_f), InvalidArgumentException,
                 "FESystem::finalizeMonolithicAuxiliaryStageState: alpha_f must be finite and > 0");
 
+    const Real previous_auxiliary_time = last_auxiliary_advance_time_;
     last_auxiliary_advance_time_ = final_time;
 
-    if (!auxiliary_state_manager_ || std::abs(alpha_f - Real(1.0)) <= Real(1e-14)) {
+    if (!auxiliary_state_manager_) {
         return;
     }
 
-    const Real inv_alpha_f = Real(1.0) / alpha_f;
-    const Real c_prev = (alpha_f - Real(1.0)) * inv_alpha_f;
+    const bool transform_stage =
+        std::abs(alpha_f - Real(1.0)) > Real(1e-14);
+    if (transform_stage) {
+        const Real inv_alpha_f = Real(1.0) / alpha_f;
+        const Real c_prev = (alpha_f - Real(1.0)) * inv_alpha_f;
 
-    for (auto& entry : deployed_aux_entries_) {
-        if (!entry.materialized) {
-            continue;
-        }
-        if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) {
-            continue;
-        }
-        if (!auxiliary_state_manager_->hasBlock(entry.instance_name)) {
-            continue;
-        }
-
-        auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
-        const auto meta = entry.model->structuralMetadata();
-        const auto& kinds = meta.variable_kinds;
-
-        for (std::size_t e = 0; e < blk.entityCount(); ++e) {
-            auto stage_state = blk.gatherEntityWork(e);
-            const auto committed = blk.gatherEntityCommitted(e);
-            auto committed_rate = gatherMonolithicCommittedRate(entry, e);
-            bool changed = false;
-            for (std::size_t i = 0; i < stage_state.size() && i < committed.size(); ++i) {
-                const bool differential =
-                    i < kinds.size()
-                        ? (kinds[i] == AuxiliaryVariableKind::Differential)
-                        : true;
-                if (!differential) {
-                    continue;
-                }
-                stage_state[i] = inv_alpha_f * stage_state[i] + c_prev * committed[i];
-                changed = true;
+        for (auto& entry : deployed_aux_entries_) {
+            if (!entry.materialized) {
+                continue;
             }
-            if (changed) {
-                blk.scatterEntityWork(e, stage_state);
+            if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) {
+                continue;
+            }
+            if (!auxiliary_state_manager_->hasBlock(entry.instance_name)) {
+                continue;
             }
 
-            if (gamma > Real(0.0) && dt > Real(0.0) &&
-                std::isfinite(static_cast<double>(gamma)) &&
-                std::isfinite(static_cast<double>(dt)) &&
-                committed_rate.size() == stage_state.size()) {
-                const Real inv_gamma_dt = Real(1.0) / (gamma * dt);
-                const Real c_old = (Real(1.0) - gamma) / gamma;
-                std::vector<Real> final_rate(stage_state.size(), Real(0.0));
+            auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
+            const auto meta = entry.model->structuralMetadata();
+            const auto& kinds = meta.variable_kinds;
+
+            for (std::size_t e = 0; e < blk.entityCount(); ++e) {
+                auto stage_state = blk.gatherEntityWork(e);
+                const auto committed = blk.gatherEntityCommitted(e);
+                bool changed = false;
                 for (std::size_t i = 0; i < stage_state.size() && i < committed.size(); ++i) {
                     const bool differential =
                         i < kinds.size()
@@ -2413,17 +2581,200 @@ void FESystem::finalizeMonolithicAuxiliaryStageState(
                     if (!differential) {
                         continue;
                     }
-                    final_rate[i] =
-                        inv_gamma_dt * (stage_state[i] - committed[i]) -
-                        c_old * committed_rate[i];
+                    stage_state[i] = inv_alpha_f * stage_state[i] + c_prev * committed[i];
+                    changed = true;
                 }
-                scatterMonolithicCommittedRate(entry, e, final_rate);
-                monolithic_aux_committed_rates_valid_.insert(entry.instance_name);
+                if (changed) {
+                    blk.scatterEntityWork(e, stage_state);
+                }
             }
         }
     }
 
+    Real event_dt = dt;
+    if (!(event_dt > Real(0.0)) ||
+        !std::isfinite(static_cast<double>(event_dt))) {
+        event_dt = final_time - previous_auxiliary_time;
+    }
+    if (event_dt > Real(0.0) &&
+        std::isfinite(static_cast<double>(event_dt))) {
+        applyMonolithicAcceptedStepEvents_(final_time - event_dt, event_dt, gamma);
+    }
+
+    updateMonolithicFinalRates_(gamma, dt);
     auxiliary_state_manager_->syncGhosts();
+}
+
+void FESystem::applyMonolithicAcceptedStepEvents_(Real step_start_time,
+                                                  Real dt,
+                                                  Real gamma)
+{
+    if (!auxiliary_state_manager_ ||
+        !(dt > Real(0.0)) ||
+        !std::isfinite(static_cast<double>(dt))) {
+        return;
+    }
+
+    const bool rates_will_refresh =
+        gamma > Real(0.0) && std::isfinite(static_cast<double>(gamma));
+
+    for (auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized ||
+            entry.spec.solve_mode != AuxiliarySolveMode::Monolithic ||
+            entry.event_managers.empty() ||
+            !entry.model ||
+            !entry.model->hasEventFunctions() ||
+            !auxiliary_state_manager_->hasBlock(entry.instance_name)) {
+            continue;
+        }
+
+        auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
+        auto params = buildParamVector(entry);
+        auto bound_inputs = buildInputVector(entry);
+
+        bool has_entity_local_inputs = false;
+        if (auxiliary_input_registry_) {
+            for (const auto& [model_name, reg_name] : entry.input_bindings) {
+                (void)model_name;
+                if (auxiliary_input_registry_->hasInput(reg_name) &&
+                    auxiliary_input_registry_->isEntityLocal(reg_name)) {
+                    has_entity_local_inputs = true;
+                    break;
+                }
+            }
+        }
+
+        const auto& emap = entry.entity_map;
+        const auto n_authoritative_entities =
+            std::min(blk.ownedEntityCount(), entry.event_managers.size());
+        bool block_changed = false;
+
+        for (std::size_t e = 0; e < n_authoritative_entities; ++e) {
+            if (!entry.event_managers[e]) {
+                continue;
+            }
+
+            const auto committed = blk.gatherEntityCommitted(e);
+            auto final_state = blk.gatherEntityWork(e);
+            const auto orig_e = emap.empty() ? e : emap[e];
+
+            if (has_entity_local_inputs && auxiliary_input_registry_) {
+                bound_inputs.clear();
+                if (auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get())) {
+                    for (const auto& inp : built->signature().inputs) {
+                        auto bind_it = entry.input_bindings.find(inp.name);
+                        if (bind_it != entry.input_bindings.end()) {
+                            auto vals = auxiliary_input_registry_->valuesOf(bind_it->second, orig_e);
+                            bound_inputs.insert(bound_inputs.end(), vals.begin(), vals.end());
+                        } else {
+                            bound_inputs.resize(
+                                bound_inputs.size() + static_cast<std::size_t>(inp.size),
+                                Real(0.0));
+                        }
+                    }
+                } else {
+                    rebuildGenericInputsForEntity(entry, orig_e, bound_inputs);
+                }
+            }
+
+            std::vector<std::vector<Real>> history_storage;
+            auto history_spans = buildHistorySpans_(blk, e, history_storage);
+            auto& event_manager = *entry.event_managers[e];
+            const auto events = event_manager.detectEvents(
+                *entry.model,
+                committed,
+                final_state,
+                step_start_time,
+                dt,
+                bound_inputs,
+                params,
+                history_spans,
+                e);
+            if (events.empty()) {
+                continue;
+            }
+
+            for (const auto& event : events) {
+                event_manager.applyTransition(
+                    *entry.model,
+                    event,
+                    final_state,
+                    event.event_time,
+                    bound_inputs,
+                    params,
+                    history_spans,
+                    e,
+                    dt);
+            }
+
+            blk.scatterEntityWork(e, final_state);
+            block_changed = true;
+        }
+
+        if (block_changed && blk.ownedEntityCount() < blk.entityCount()) {
+            auxiliary_state_manager_->syncGhosts(entry.instance_name);
+        }
+        if (block_changed && !rates_will_refresh) {
+            monolithic_aux_committed_rates_valid_.erase(entry.instance_name);
+        }
+    }
+}
+
+void FESystem::updateMonolithicFinalRates_(Real gamma, Real dt)
+{
+    if (!auxiliary_state_manager_ ||
+        !(gamma > Real(0.0)) ||
+        !(dt > Real(0.0)) ||
+        !std::isfinite(static_cast<double>(gamma)) ||
+        !std::isfinite(static_cast<double>(dt))) {
+        return;
+    }
+
+    const Real inv_gamma_dt = Real(1.0) / (gamma * dt);
+    const Real c_old = (Real(1.0) - gamma) / gamma;
+
+    for (const auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized ||
+            entry.spec.solve_mode != AuxiliarySolveMode::Monolithic ||
+            !entry.model ||
+            !auxiliary_state_manager_->hasBlock(entry.instance_name)) {
+            continue;
+        }
+
+        const auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
+        const auto meta = entry.model->structuralMetadata();
+        const auto& kinds = meta.variable_kinds;
+        bool updated = false;
+
+        for (std::size_t e = 0; e < blk.entityCount(); ++e) {
+            const auto final_state = blk.gatherEntityWork(e);
+            const auto committed = blk.gatherEntityCommitted(e);
+            const auto committed_rate = gatherMonolithicCommittedRate(entry, e);
+            if (committed_rate.size() != final_state.size()) {
+                continue;
+            }
+
+            std::vector<Real> final_rate(final_state.size(), Real(0.0));
+            for (std::size_t i = 0; i < final_state.size() && i < committed.size(); ++i) {
+                const bool differential =
+                    i < kinds.size()
+                        ? (kinds[i] == AuxiliaryVariableKind::Differential)
+                        : true;
+                if (!differential) {
+                    continue;
+                }
+                final_rate[i] =
+                    inv_gamma_dt * (final_state[i] - committed[i]) -
+                    c_old * committed_rate[i];
+            }
+            scatterMonolithicCommittedRate(entry, e, final_rate);
+            updated = true;
+        }
+
+        if (updated) {
+            monolithic_aux_committed_rates_valid_.insert(entry.instance_name);
+        }
+    }
 }
 
 void FESystem::ensureMonolithicCommittedRateBuffer(
@@ -2686,6 +3037,8 @@ void FESystem::ensureMonolithicCommittedRates(const SystemStateView& state)
             case AuxiliaryInputProducer::CellSample:
             case AuxiliaryInputProducer::DomainAverage:
             case AuxiliaryInputProducer::DomainIntegral:
+            case AuxiliaryInputProducer::RegionAverage:
+            case AuxiliaryInputProducer::RegionIntegral:
             case AuxiliaryInputProducer::SampledBoundaryTrace:
             case AuxiliaryInputProducer::CoupledBoundaryTrace:
             case AuxiliaryInputProducer::SampledBoundaryReduction:
@@ -2795,8 +3148,6 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
     // after finalization, both vectors are empty.
     finalizeDeferredInputDeps();
 
-    ensureMonolithicCommittedRates(state);
-
     // Cache the full system state for FE-coupled input callbacks.
     cacheSystemState(state);
 
@@ -2804,6 +3155,9 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
     if (auxiliary_input_registry_) {
         auxiliary_input_registry_->evaluate(state.time, state.dt, is_nonlinear_iteration);
     }
+
+    initializeAuxiliaryDAEBlocksIfNeeded_(state.time, state.dt);
+    ensureMonolithicCommittedRates(state);
 
     const Real aux_dt = effectiveAuxiliaryDt(state);
 
@@ -3165,6 +3519,30 @@ void FESystem::deployAuxiliaryModel(AuxiliaryDeployedInstance instance)
     entry.spec.ordering = instance.getEntityOrdering();
     entry.spec.deployment_region = instance.getRegion();
     entry.spec.failure_policy = instance.getFailurePolicy();
+    const auto structural_metadata = instance.model()->structuralMetadata();
+    entry.spec.variable_kinds = structural_metadata.variable_kinds;
+    entry.spec.constraint_groups = structural_metadata.constraint_groups;
+    entry.spec.dae_index_hint = structural_metadata.dae_index_hint;
+    entry.spec.n_event_functions = structural_metadata.n_event_functions;
+    entry.spec.has_nonsmooth =
+        instance.model()->hasNonsmoothHooks() || structural_metadata.has_nonsmooth;
+    entry.spec.nonsmooth_policy = instance.getNonsmoothPolicy();
+    entry.spec.mass_diagonal = instance.model()->massDiagonal();
+    FE_THROW_IF(!entry.spec.mass_diagonal.empty() &&
+                    entry.spec.mass_diagonal.size() !=
+                        static_cast<std::size_t>(entry.spec.size),
+                InvalidArgumentException,
+                "FESystem::deployAuxiliaryModel: auxiliary instance '" +
+                    entry.instance_name + "' returned massDiagonal() of size " +
+                    std::to_string(entry.spec.mass_diagonal.size()) +
+                    " for block dimension " + std::to_string(entry.spec.size));
+    entry.spec.has_mass_matrix =
+        instance.model()->hasMassMatrix() || !entry.spec.mass_diagonal.empty();
+    if (instance.model()->hasEventFunctions() || structural_metadata.has_events) {
+        entry.spec.event_mode = AuxiliaryEventMode::EventHook;
+    } else if (entry.spec.has_nonsmooth) {
+        entry.spec.event_mode = AuxiliaryEventMode::ComplementarityHook;
+    }
     // Copy derivative policy: prefer explicit instance policy, then built-model policy.
     if (instance.hasExplicitDerivativePolicy()) {
         entry.spec.derivative_policy = instance.getDerivativePolicy();
@@ -3598,7 +3976,7 @@ AuxiliaryInputHandle FESystem::domainIntegral(
     AuxiliaryInputSpec spec;
     spec.name = input_name;
     spec.size = 1;
-    spec.producer = AuxiliaryInputProducer::DomainIntegral;
+    spec.producer = AuxiliaryInputProducer::RegionIntegral;
     spec.update_schedule = schedule;
     spec.requires_mpi_reduction = true;
 
@@ -3685,7 +4063,7 @@ AuxiliaryInputHandle FESystem::domainAverage(
     AuxiliaryInputSpec spec;
     spec.name = input_name;
     spec.size = 1;
-    spec.producer = AuxiliaryInputProducer::DomainAverage;
+    spec.producer = AuxiliaryInputProducer::RegionAverage;
     spec.update_schedule = schedule;
 
     auto* reg_ptr = &reg;
@@ -3700,6 +4078,94 @@ AuxiliaryInputHandle FESystem::domainAverage(
         });
     reg.addDependency(input_name, integral_name);
     reg.addDependency(input_name, measure_name);
+
+    feQuantityRegistry().registerDefinition(*def);
+    return AuxiliaryInputHandle(input_name, std::move(def));
+}
+
+AuxiliaryInputHandle FESystem::regionIntegral(
+    const std::string& input_name,
+    forms::FormExpr integrand,
+    AuxiliaryInputUpdateSchedule schedule)
+{
+    FE_THROW_IF(input_name.empty(), InvalidArgumentException,
+                "FESystem::regionIntegral: empty input_name");
+
+    std::vector<FieldId> refs;
+    if (const auto* root = integrand.node()) {
+        gatherFieldIds(*root, refs);
+    }
+
+    auto def = std::make_shared<FEQuantityDefinition>();
+    def->name = input_name;
+    def->kind = FEQuantityKind::RegionIntegral;
+    def->shape = FEQuantityShape::scalar();
+    def->referenced_fields = refs;
+    def->expression = integrand;
+    def->region_marker = -1;
+    def->capabilities.explicit_evaluation = true;
+    // Exact monolithic dI/du for entity-local topology regions needs the
+    // consuming auxiliary entity context.  Keep this explicit provider
+    // partitioned-only until Region monolithic strategy is completed.
+    def->capabilities.monolithic_linearization = false;
+
+    FieldId primary_fid = INVALID_FIELD_ID;
+    if (!refs.empty()) {
+        primary_fid = refs.front();
+    } else {
+        const auto& recs = field_registry_.records();
+        if (!recs.empty()) primary_fid = static_cast<FieldId>(0);
+    }
+    FE_THROW_IF(primary_fid == INVALID_FIELD_ID, InvalidStateException,
+                "FESystem::regionIntegral('" + input_name +
+                    "'): at least one FE field must be registered");
+
+    auto& svc = boundaryReductionService(primary_fid);
+    forms::BoundaryFunctional region_func;
+    region_func.name = input_name;
+    region_func.integrand = integrand;
+    region_func.boundary_marker = -1;
+    region_func.reduction = forms::BoundaryFunctional::Reduction::Sum;
+    region_func.is_domain_functional = true;
+    region_func.region_marker = -1;
+    svc.addBoundaryFunctional(region_func);
+    bindSecondaryFields(svc, primary_fid, refs);
+
+    auto& reg = auxiliaryInputRegistry();
+    AuxiliaryInputSpec spec;
+    spec.name = input_name;
+    spec.size = 1;
+    spec.entity_count = auxiliaryTopologyRegionInputEntityCount_();
+    spec.producer = AuxiliaryInputProducer::RegionIntegral;
+    spec.update_schedule = schedule;
+    spec.requires_mpi_reduction = true;
+
+    const auto captured_fid = primary_fid;
+    const std::string func_name = input_name;
+
+    reg.registerEntityInput(spec,
+        [this, func_name, captured_fid]
+        (Real time, Real dt, std::size_t entity_index, std::span<Real> out) {
+            SystemStateView state;
+            state.time = time;
+            state.dt = dt;
+            state.u = cached_solution_u_;
+            state.u_vector = cached_solution_vector_;
+            state.u_prev = cached_solution_u_prev_;
+            state.u_prev_vector = cached_solution_prev_vector_;
+            state.u_prev2 = cached_solution_u_prev2_;
+            state.u_prev2_vector = cached_solution_prev2_vector_;
+            state.time_integration = cached_time_integration_;
+            state.user_data = cached_user_data_;
+
+            const auto cells = auxiliaryTopologyRegionCells_(entity_index);
+            auto it = boundary_reduction_services_.find(captured_fid);
+            if (it != boundary_reduction_services_.end() && it->second) {
+                out[0] = it->second->evaluateFunctionalOverCells(func_name, cells, state);
+            } else {
+                out[0] = Real(0.0);
+            }
+        });
 
     feQuantityRegistry().registerDefinition(*def);
     return AuxiliaryInputHandle(input_name, std::move(def));
@@ -3784,6 +4250,62 @@ AuxiliaryInputHandle FESystem::regionIntegral(
                 out[0] = 0.0;
             }
         });
+
+    feQuantityRegistry().registerDefinition(*def);
+    return AuxiliaryInputHandle(input_name, std::move(def));
+}
+
+AuxiliaryInputHandle FESystem::regionAverage(
+    const std::string& input_name,
+    forms::FormExpr integrand,
+    AuxiliaryInputUpdateSchedule schedule)
+{
+    FE_THROW_IF(input_name.empty(), InvalidArgumentException,
+                "FESystem::regionAverage: empty input_name");
+
+    std::vector<FieldId> refs;
+    if (const auto* root = integrand.node()) {
+        gatherFieldIds(*root, refs);
+    }
+
+    auto def = std::make_shared<FEQuantityDefinition>();
+    def->name = input_name;
+    def->kind = FEQuantityKind::RegionAverage;
+    def->shape = FEQuantityShape::scalar();
+    def->referenced_fields = refs;
+    def->expression = integrand;
+    def->region_marker = -1;
+    def->capabilities.explicit_evaluation = true;
+    def->capabilities.monolithic_linearization = false;
+
+    const std::string integral_name = input_name + "__integral";
+    const std::string measure_name = input_name + "__measure";
+
+    regionIntegral(integral_name, integrand, schedule);
+    regionIntegral(measure_name, forms::FormExpr::constant(1.0), schedule);
+
+    auto& reg = auxiliaryInputRegistry();
+    AuxiliaryInputSpec spec;
+    spec.name = input_name;
+    spec.size = 1;
+    spec.entity_count = auxiliaryTopologyRegionInputEntityCount_();
+    spec.producer = AuxiliaryInputProducer::RegionAverage;
+    spec.update_schedule = schedule;
+
+    auto* reg_ptr = &reg;
+    const auto int_name = integral_name;
+    const auto meas_name = measure_name;
+
+    reg.registerEntityInput(spec,
+        [reg_ptr, int_name, meas_name]
+        (Real, Real, std::size_t entity_index, std::span<Real> out) {
+            const auto integral = reg_ptr->valuesOf(int_name, entity_index);
+            const auto measure = reg_ptr->valuesOf(meas_name, entity_index);
+            const Real m = measure.empty() ? Real(0.0) : measure[0];
+            out[0] = (m > Real(0.0) && !integral.empty()) ? integral[0] / m : Real(0.0);
+        });
+    reg.addDependency(input_name, integral_name);
+    reg.addDependency(input_name, measure_name);
 
     feQuantityRegistry().registerDefinition(*def);
     return AuxiliaryInputHandle(input_name, std::move(def));
@@ -3974,6 +4496,102 @@ void FESystem::advanceAuxiliaryState(const SystemStateView& state,
     advanceAuxiliaryState(static_cast<Real>(state.time), static_cast<Real>(state.dt));
 }
 
+void FESystem::initializeAuxiliaryDAEBlocksIfNeeded_(Real time, Real dt)
+{
+    if (!auxiliary_state_manager_) {
+        return;
+    }
+
+    for (auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized ||
+            entry.consistent_initialization_done ||
+            !entry.model ||
+            !entry.deriv_provider ||
+            !auxiliary_state_manager_->hasBlock(entry.instance_name) ||
+            !needsConsistentAuxiliaryInitialization(
+                *entry.model,
+                static_cast<std::size_t>(entry.spec.size),
+                entry.spec.solve_mode)) {
+            continue;
+        }
+
+        auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
+        auto params = buildParamVector(entry);
+        auto bound_inputs = buildInputVector(entry);
+
+        bool has_entity_local_inputs = false;
+        if (auxiliary_input_registry_) {
+            for (const auto& [model_name, reg_name] : entry.input_bindings) {
+                (void)model_name;
+                if (auxiliary_input_registry_->hasInput(reg_name) &&
+                    auxiliary_input_registry_->isEntityLocal(reg_name)) {
+                    has_entity_local_inputs = true;
+                    break;
+                }
+            }
+        }
+
+        const auto& emap = entry.entity_map;
+        const auto n_authoritative_entities = blk.ownedEntityCount();
+
+        for (std::size_t e = 0; e < n_authoritative_entities; ++e) {
+            auto x = blk.gatherEntityWork(e);
+            const auto orig_e = emap.empty() ? e : emap[e];
+
+            if (has_entity_local_inputs && auxiliary_input_registry_) {
+                bound_inputs.clear();
+                if (auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get())) {
+                    for (const auto& inp : built->signature().inputs) {
+                        auto bind_it = entry.input_bindings.find(inp.name);
+                        if (bind_it != entry.input_bindings.end()) {
+                            auto vals = auxiliary_input_registry_->valuesOf(bind_it->second, orig_e);
+                            bound_inputs.insert(bound_inputs.end(), vals.begin(), vals.end());
+                        } else {
+                            bound_inputs.resize(
+                                bound_inputs.size() + static_cast<std::size_t>(inp.size),
+                                Real(0.0));
+                        }
+                    }
+                } else {
+                    rebuildGenericInputsForEntity(entry, orig_e, bound_inputs);
+                }
+            }
+
+            const auto result = AuxiliaryInitializationSolver::solve(
+                *entry.model,
+                *entry.deriv_provider,
+                x,
+                bound_inputs,
+                params,
+                time,
+                InitializationOptions{},
+                IndexReductionHook{},
+                e);
+            FE_THROW_IF(!result.converged, InvalidStateException,
+                        "FESystem::initializeAuxiliaryDAEBlocksIfNeeded: auxiliary block '" +
+                            entry.instance_name + "' failed consistent initialization for entity " +
+                            std::to_string(e) + " at time " + std::to_string(time) +
+                            " with residual norm " +
+                            std::to_string(result.final_residual_norm));
+
+            blk.scatterEntityWork(e, x);
+        }
+
+        if (blk.ownedEntityCount() < blk.entityCount()) {
+            auxiliary_state_manager_->syncGhosts(entry.instance_name);
+        }
+        const auto initialized = blk.work();
+        blk.initialize(initialized);
+        entry.consistent_initialization_done = true;
+
+        if (monolithicAuxTraceEnabled()) {
+            FE_LOG_INFO("FESystem: consistent-initialized auxiliary block '" +
+                        entry.instance_name + "' at time=" + std::to_string(time) +
+                        " dt=" + std::to_string(dt));
+        }
+    }
+}
+
 void FESystem::advanceAuxiliaryState(Real time, Real dt)
 {
     last_auxiliary_advance_time_ = time + dt;
@@ -3984,6 +4602,8 @@ void FESystem::advanceAuxiliaryState(Real time, Real dt)
     if (auxiliary_input_registry_) {
         auxiliary_input_registry_->evaluate(time, dt);
     }
+
+    initializeAuxiliaryDAEBlocksIfNeeded_(time, dt);
 
     // Check if any block uses Multirate scheduling (interleaved time ordering).
     bool has_multirate = false;
@@ -4113,6 +4733,17 @@ void FESystem::advanceAuxiliaryState(Real time, Real dt)
                     ew = ew_start;
                     x_prev = x_prev_start;
                 } else {
+                    if (e < ep->event_managers.size() && ep->event_managers[e]) {
+                        auto& event_manager = *ep->event_managers[e];
+                        const auto events = event_manager.detectEvents(
+                            *ep->model, x_prev_start, ew,
+                            ss.t_start, ss.dt_sub, bound_inputs, params, hs, e);
+                        for (const auto& event : events) {
+                            event_manager.applyTransition(
+                                *ep->model, event, ew, event.event_time,
+                                bound_inputs, params, hs, e, ss.dt_sub);
+                        }
+                    }
                     std::copy(ew.begin(), ew.end(), x_prev.begin());
                 }
                 blk.scatterEntityWork(e, ew);
@@ -4213,6 +4844,15 @@ void FESystem::advanceOneEntry(DeployedAuxEntry& entry, Real time, Real dt, int 
                          std::to_string(step_result.final_residual_norm));
             }
             std::copy(ec.begin(), ec.end(), ew.begin());
+        }
+        if (converged && e < entry.event_managers.size() && entry.event_managers[e]) {
+            auto& event_manager = *entry.event_managers[e];
+            const auto events = event_manager.detectEvents(
+                *entry.model, ec, ew, time, dt, bound_inputs, params, hs, e);
+            for (const auto& event : events) {
+                event_manager.applyTransition(
+                    *entry.model, event, ew, event.event_time, bound_inputs, params, hs, e, dt);
+            }
         }
         blk.scatterEntityWork(e, ew);
     }
@@ -4868,11 +5508,114 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
         entries.emplace_back(dof, value);
     };
 
+    auto isSingleOwnerBorderedScope = [](AuxiliaryStateScope scope) noexcept {
+        return scope == AuxiliaryStateScope::Global ||
+               scope == AuxiliaryStateScope::Boundary;
+    };
+
+    auto currentMpiRank = [&]() -> int {
+#if FE_HAS_MPI
+        int mpi_initialized = 0;
+        MPI_Initialized(&mpi_initialized);
+        if (mpi_initialized) {
+            int rank = 0;
+            MPI_Comm_rank(dof_handler_.mpiComm(), &rank);
+            return rank;
+        }
+#endif
+        return 0;
+    };
+
+    auto singleOwnerRankForAuxBlock = [&](std::string_view block_name) -> int {
+        for (const auto& bl : mixed.aux_layout.blocks) {
+            if (bl.name == block_name &&
+                bl.row_ownership == backends::MixedRowOwnershipPolicy::SingleOwner &&
+                bl.single_owner_rank >= 0) {
+                return bl.single_owner_rank;
+            }
+        }
+        return 0;
+    };
+
+    auto useSingleOwnerBorderedAssembly =
+        [&](const DeployedAuxEntry& aux_entry,
+            bool aux_local_condensed,
+            bool aux_direct_only) noexcept {
+            return !aux_local_condensed && !aux_direct_only &&
+                   isSingleOwnerBorderedScope(aux_entry.spec.scope);
+        };
+
+    auto isSingleOwnerBorderedAssemblyRank =
+        [&](const DeployedAuxEntry& aux_entry) {
+            return currentMpiRank() ==
+                   singleOwnerRankForAuxBlock(aux_entry.instance_name);
+        };
+
+    auto deploymentOrdinal = [&](std::string_view block_name) -> std::size_t {
+        for (std::size_t i = 0; i < deployed_aux_entries_.size(); ++i) {
+            if (deployed_aux_entries_[i].instance_name == block_name) {
+                return i;
+            }
+        }
+        return 0u;
+    };
+
+    auto qpCellOrdinalForEntity =
+        [](const DeployedAuxEntry& aux_entry,
+           std::size_t entity_index) -> std::size_t {
+        if (aux_entry.qp_offsets.size() < 2u) {
+            return 0u;
+        }
+        auto upper = std::upper_bound(aux_entry.qp_offsets.begin(),
+                                      aux_entry.qp_offsets.end(),
+                                      entity_index);
+        if (upper == aux_entry.qp_offsets.begin()) {
+            return 0u;
+        }
+        auto cell_ord = static_cast<std::size_t>(
+            std::distance(aux_entry.qp_offsets.begin(), upper) - 1);
+        if (cell_ord + 1u >= aux_entry.qp_offsets.size()) {
+            cell_ord = aux_entry.qp_offsets.size() - 2u;
+        }
+        return cell_ord;
+    };
+
+    auto originalEntityForAuxEntity =
+        [&](const DeployedAuxEntry& aux_entry,
+            std::size_t entity_index) -> std::size_t {
+        if (aux_entry.spec.scope == AuxiliaryStateScope::QuadraturePoint) {
+            const auto cell_ord = qpCellOrdinalForEntity(aux_entry, entity_index);
+            return aux_entry.entity_map.empty()
+                ? cell_ord
+                : aux_entry.entity_map.at(cell_ord);
+        }
+        return aux_entry.entity_map.empty()
+            ? entity_index
+            : aux_entry.entity_map.at(entity_index);
+    };
+
+    auto globalEntityKeyForAuxEntity =
+        [&](const DeployedAuxEntry& aux_entry,
+            std::size_t entity_index) -> std::uint64_t {
+        const auto orig_entity = originalEntityForAuxEntity(aux_entry, entity_index);
+        if (aux_entry.spec.scope == AuxiliaryStateScope::QuadraturePoint) {
+            const auto cell_ord = qpCellOrdinalForEntity(aux_entry, entity_index);
+            const auto qp_begin = aux_entry.qp_offsets.at(cell_ord);
+            const auto q_local = entity_index - qp_begin;
+            return (static_cast<std::uint64_t>(orig_entity) << 32u) |
+                   static_cast<std::uint64_t>(q_local);
+        }
+        return static_cast<std::uint64_t>(orig_entity);
+    };
+
     auto findLocalCondensedRecord =
         [&](std::string_view block_name,
-            std::size_t entity_index) -> LocalCondensedEntityRecord* {
+            std::size_t entity_index,
+            std::uint64_t global_entity_key) -> LocalCondensedEntityRecord* {
             for (auto& rec : last_local_condensed_records_) {
-                if (rec.block_name == block_name && rec.entity_index == entity_index) {
+                if (rec.block_name == block_name &&
+                    rec.entity_index == entity_index &&
+                    rec.global_entity_key == global_entity_key) {
                     return &rec;
                 }
             }
@@ -4882,14 +5625,19 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
     auto ensureLocalCondensedRecord =
         [&](std::string_view block_name,
             std::size_t entity_index,
+            std::size_t block_ordinal,
+            std::uint64_t global_entity_key,
             int dim) -> LocalCondensedEntityRecord& {
-            if (auto* existing = findLocalCondensedRecord(block_name, entity_index)) {
+            if (auto* existing =
+                    findLocalCondensedRecord(block_name, entity_index, global_entity_key)) {
                 return *existing;
             }
             last_local_condensed_records_.push_back(LocalCondensedEntityRecord{});
             auto& rec = last_local_condensed_records_.back();
             rec.block_name = std::string(block_name);
             rec.entity_index = entity_index;
+            rec.block_ordinal = block_ordinal;
+            rec.global_entity_key = global_entity_key;
             rec.B_columns.resize(static_cast<std::size_t>(dim));
             rec.Ct_rows.resize(static_cast<std::size_t>(dim));
             rec.g.assign(static_cast<std::size_t>(dim), Real(0.0));
@@ -4979,12 +5727,13 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
             }
         }
 
-        const auto& emap = entry.entity_map;
+        const auto block_ordinal = deploymentOrdinal(entry.instance_name);
 
         for (std::size_t e = 0; e < n_entities; ++e) {
             auto entity_x = blk.gatherEntityWork(e);
             auto entity_committed = blk.gatherEntityCommitted(e);
-            const auto orig_e = emap.empty() ? e : emap[e];
+            const auto orig_e = originalEntityForAuxEntity(entry, e);
+            const auto global_entity_key = globalEntityKeyForAuxEntity(entry, e);
             const auto entity_committed_rate = gatherMonolithicCommittedRate(entry, e);
             auto temporal = buildMonolithicAuxiliaryTemporalEvaluation(
                 entry.stepper_spec, blk, e, entity_x, entity_committed, entity_committed_rate, state);
@@ -5082,7 +5831,8 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 }
                 if (want_vector) {
                     if (local_condensed) {
-                        auto& rec = ensureLocalCondensedRecord(entry.instance_name, e, dim);
+                        auto& rec = ensureLocalCondensedRecord(
+                            entry.instance_name, e, block_ordinal, global_entity_key, dim);
                         rec.g = entity_res;
                     } else if (vector_out) {
                         vector_out->addVectorEntries(aux_dofs, entity_res);
@@ -5141,7 +5891,8 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                     }
                     matrix_out->addMatrixEntries(aux_dofs, aux_dofs, entity_jac);
                 } else if (local_condensed) {
-                    auto& rec = ensureLocalCondensedRecord(entry.instance_name, e, dim);
+                    auto& rec = ensureLocalCondensedRecord(
+                        entry.instance_name, e, block_ordinal, global_entity_key, dim);
                     rec.D_inv.clear();
                     if (!invertDenseMatrix(entity_jac, static_cast<std::size_t>(dim), rec.D_inv)) {
                         FE_THROW(InvalidStateException,
@@ -5232,7 +5983,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                             // dI/du for sampled field = identity at vertex DOFs.
                                             // Use the actual DOF map for vertex e.
                                             auto vertex_dofs = emap->getVertexDofs(
-                                                static_cast<GlobalIndex>(e));
+                                                static_cast<GlobalIndex>(orig_e));
                                             // Extract dF/dI column for this input.
                                             std::vector<Real> col(static_cast<std::size_t>(dim));
                                             for (int r = 0; r < dim; ++r) {
@@ -5246,7 +5997,8 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                                     local_dof + fld_off);
                                                 if (local_condensed) {
                                                     auto& rec = ensureLocalCondensedRecord(
-                                                        entry.instance_name, e, dim);
+                                                        entry.instance_name, e, block_ordinal,
+                                                        global_entity_key, dim);
                                                     for (int r = 0; r < dim; ++r) {
                                                         addSparseEntry(
                                                             rec.Ct_rows[static_cast<std::size_t>(r)],
@@ -5313,25 +6065,46 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                                 }
                                             }
 
+                                            std::vector<std::pair<GlobalIndex, Real>> gradient_entries;
+                                            gradient_entries.reserve(grad.size());
                                             for (const auto& se : grad) {
+                                                gradient_entries.emplace_back(se.dof, se.value);
+                                            }
+
+                                            const bool single_owner_bordered_insert =
+                                                useSingleOwnerBorderedAssembly(
+                                                    entry, local_condensed, /*aux_direct_only=*/false);
+#if FE_HAS_MPI
+                                            if (single_owner_bordered_insert) {
+                                                gradient_entries = allreduceSumSparsePairs(
+                                                    std::move(gradient_entries), dof_handler_.mpiComm());
+                                            }
+#endif
+                                            if (single_owner_bordered_insert &&
+                                                !isSingleOwnerBorderedAssemblyRank(entry)) {
+                                                continue;
+                                            }
+
+                                            for (const auto& [dof, dI_du] : gradient_entries) {
                                                 std::vector<Real> col(static_cast<std::size_t>(dim));
                                                 for (int r = 0; r < dim; ++r) {
                                                     col[static_cast<std::size_t>(r)] =
                                                         entity_dFdi[static_cast<std::size_t>(
                                                             r * n_inp + input_col)];
                                                 }
-                                                for (auto& c : col) c *= se.value;
+                                                for (auto& c : col) c *= dI_du;
                                                 if (local_condensed) {
                                                     auto& rec = ensureLocalCondensedRecord(
-                                                        entry.instance_name, e, dim);
+                                                        entry.instance_name, e, block_ordinal,
+                                                        global_entity_key, dim);
                                                     for (int r = 0; r < dim; ++r) {
                                                         addSparseEntry(
                                                             rec.Ct_rows[static_cast<std::size_t>(r)],
-                                                            se.dof,
+                                                            dof,
                                                             col[static_cast<std::size_t>(r)]);
                                                     }
                                                 } else if (matrix_out) {
-                                                    std::vector<GlobalIndex> field_dof = {se.dof};
+                                                    std::vector<GlobalIndex> field_dof = {dof};
                                                     matrix_out->addMatrixEntries(aux_dofs, field_dof, col);
                                                 }
                                             }
@@ -5343,7 +6116,8 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                     });
 
                     if (local_condensed && want_matrix && !dense_solution.empty()) {
-                        auto& rec = ensureLocalCondensedRecord(entry.instance_name, e, dim);
+                        auto& rec = ensureLocalCondensedRecord(
+                            entry.instance_name, e, block_ordinal, global_entity_key, dim);
                         const bool needs_ct_rows = std::all_of(
                             rec.Ct_rows.begin(),
                             rec.Ct_rows.end(),
@@ -5471,12 +6245,10 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 }
             }
 
-            const auto& ent_map = entry.entity_map;
-
             for (std::size_t e = 0; e < n_ent; ++e) {
                 auto entity_x = blk.gatherEntityWork(e);
                 auto entity_committed = blk.gatherEntityCommitted(e);
-                const auto orig_e = ent_map.empty() ? e : ent_map[e];
+                const auto orig_e = originalEntityForAuxEntity(entry, e);
                 const auto entity_committed_rate = gatherMonolithicCommittedRate(entry, e);
                 auto temporal = buildMonolithicAuxiliaryTemporalEvaluation(
                     entry.stepper_spec, blk, e, entity_x, entity_committed, entity_committed_rate, state);
@@ -5649,12 +6421,13 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
             };
 
             std::vector<EntityCouplingData> entity_data(n_entities);
-            const auto& ent_map = entry.entity_map;
+            const auto block_ordinal = deploymentOrdinal(entry.instance_name);
 
             for (std::size_t e = 0; e < n_entities; ++e) {
                 auto entity_x = blk.gatherEntityWork(e);
                 auto entity_committed = blk.gatherEntityCommitted(e);
-                const auto orig_e = ent_map.empty() ? e : ent_map[e];
+                const auto orig_e = originalEntityForAuxEntity(entry, e);
+                const auto global_entity_key = globalEntityKeyForAuxEntity(entry, e);
                 const auto entity_committed_rate = gatherMonolithicCommittedRate(entry, e);
                 auto temporal = buildMonolithicAuxiliaryTemporalEvaluation(
                     entry.stepper_spec, blk, e, entity_x, entity_committed, entity_committed_rate, state);
@@ -6068,7 +6841,8 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
 
                     if (local_condensed && !ed.dF_dinputs.empty() &&
                         !ed.input_gradients.empty()) {
-                        auto& rec = ensureLocalCondensedRecord(entry.instance_name, e, dim);
+                        auto& rec = ensureLocalCondensedRecord(
+                            entry.instance_name, e, block_ordinal, global_entity_key, dim);
                         const bool needs_ct_rows = std::all_of(
                             rec.Ct_rows.begin(),
                             rec.Ct_rows.end(),
@@ -6159,6 +6933,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
 
                 for (std::size_t e = 0; e < n_entities; ++e) {
                     const auto& ed = entity_data[e];
+                    const auto global_entity_key = globalEntityKeyForAuxEntity(entry, e);
                     bool has_state_sensitivity = false;
                     if (!direct_only) {
                         for (int j = 0; j < dim; ++j) {
@@ -6315,6 +7090,11 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                     assembler_->setCurrentSolutionView(sol_view.get());
                                 }
 
+                                const auto sensitivity_options =
+                                    localSensitivityAssemblyOptions(*assembler_);
+                                ScopedAssemblerOptions sensitivity_option_guard(
+                                    assembler_.get(), sensitivity_options);
+
                                 const auto& drec = fieldRecord(test_field);
                                 if (drec.space) {
                                     const auto foff = fieldDofOffset(test_field);
@@ -6358,7 +7138,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
 
                                 std::unordered_map<GlobalIndex, Real> dR_rank1_entries = dR_vec.entries;
 #if FE_HAS_MPI
-                                {
+                                if (!local_condensed) {
                                     std::vector<std::pair<GlobalIndex, Real>> local_pairs;
                                     local_pairs.reserve(dR_vec.entries.size());
                                     for (const auto& [dof, val] : dR_vec.entries) {
@@ -6373,6 +7153,9 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                     }
                                 }
 #endif
+                                // Local-condensed Cell/QP blocks reduce B columns later through
+                                // globally ordered condensed slots. Avoid a per-entity collective
+                                // here because not every rank owns every condensed entity.
 
                                 for (const auto& [dof, val] : dR_rank1_entries) {
                                     if (std::abs(val) <= kDirectCouplingEntryTol) {
@@ -6510,20 +7293,29 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                     }
                                 }
 
-                                for (const auto& [dof_i, dRi_dOk] : dR_vec.entries) {
-                                    if (std::abs(dRi_dOk) < 1e-14) continue;
-                                    for (int j = 0; j < dim; ++j) {
-                                        const Real dOk_dxj =
-                                            ed.dO_dx[static_cast<std::size_t>(k * dim + j)];
-                                        if (std::abs(dOk_dxj) < 1e-14) continue;
+                                const bool single_owner_bordered_insert =
+                                    useSingleOwnerBorderedAssembly(entry, local_condensed, direct_only);
+                                const bool insert_bordered_output_gradient =
+                                    !single_owner_bordered_insert ||
+                                    isSingleOwnerBorderedAssemblyRank(entry);
+                                const auto& bordered_output_gradient =
+                                    single_owner_bordered_insert ? dR_rank1_entries : dR_vec.entries;
+                                if (insert_bordered_output_gradient) {
+                                    for (const auto& [dof_i, dRi_dOk] : bordered_output_gradient) {
+                                        if (std::abs(dRi_dOk) < 1e-14) continue;
+                                        for (int j = 0; j < dim; ++j) {
+                                            const Real dOk_dxj =
+                                                ed.dO_dx[static_cast<std::size_t>(k * dim + j)];
+                                            if (std::abs(dOk_dxj) < 1e-14) continue;
 
-                                        const Real val = dRi_dOk * dOk_dxj;
-                                        if (!direct_only && !local_condensed) {
-                                            std::vector<GlobalIndex> row = {dof_i};
-                                            std::vector<GlobalIndex> col = {
-                                                ed.aux_dofs[static_cast<std::size_t>(j)]};
-                                            std::vector<Real> mat = {val};
-                                            matrix_out->addMatrixEntries(row, col, mat);
+                                            const Real val = dRi_dOk * dOk_dxj;
+                                            if (!direct_only && !local_condensed) {
+                                                std::vector<GlobalIndex> row = {dof_i};
+                                                std::vector<GlobalIndex> col = {
+                                                    ed.aux_dofs[static_cast<std::size_t>(j)]};
+                                                std::vector<Real> mat = {val};
+                                                matrix_out->addMatrixEntries(row, col, mat);
+                                            }
                                         }
                                     }
                                 }
@@ -6544,9 +7336,10 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                               coupling_record.output_gradient.end(),
                               [](const auto& a, const auto& b) {
                                   return a.first < b.first;
-                              });
+                    });
                     if (local_condensed) {
-                        auto& rec = ensureLocalCondensedRecord(entry.instance_name, e, dim);
+                        auto& rec = ensureLocalCondensedRecord(
+                            entry.instance_name, e, block_ordinal, global_entity_key, dim);
                         for (const auto& [dof_i, dRi_dOk] : coupling_record.output_gradient) {
                             for (int j = 0; j < dim; ++j) {
                                 const Real dOk_dxj =
@@ -6659,10 +7452,42 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
         }
     }
 
-    if (!last_local_condensed_records_.empty()) {
+    const int global_local_condensed_record_count =
+        mpiAllreduceSumIfActive(static_cast<int>(last_local_condensed_records_.size()));
+    if (global_local_condensed_record_count > 0) {
         const auto& owned_dofs = dof_handler_.getPartition().locallyOwned();
 
+        struct CondensedSlot {
+            std::size_t block_ordinal{0};
+            std::uint64_t entity_key{0};
+            std::size_t component{0};
+        };
+
+        auto sortUniqueSlots = [](std::vector<CondensedSlot>& slots) {
+            std::sort(slots.begin(), slots.end(), [](const auto& a, const auto& b) {
+                return std::tie(a.block_ordinal, a.entity_key, a.component) <
+                       std::tie(b.block_ordinal, b.entity_key, b.component);
+            });
+            slots.erase(std::unique(slots.begin(), slots.end(), [](const auto& a, const auto& b) {
+                            return a.block_ordinal == b.block_ordinal &&
+                                   a.entity_key == b.entity_key &&
+                                   a.component == b.component;
+                        }),
+                        slots.end());
+        };
+
+        auto findRecordForSlot = [&](const CondensedSlot& slot) -> const LocalCondensedEntityRecord* {
+            for (const auto& rec : last_local_condensed_records_) {
+                if (rec.block_ordinal == slot.block_ordinal &&
+                    rec.global_entity_key == slot.entity_key) {
+                    return &rec;
+                }
+            }
+            return nullptr;
+        };
+
         if (want_matrix) {
+            std::vector<CondensedSlot> update_slots;
             for (const auto& rec : last_local_condensed_records_) {
                 const auto dim = rec.g.size();
                 if (dim == 0 || rec.D_inv.size() != dim * dim ||
@@ -6671,43 +7496,95 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 }
 
                 for (std::size_t j = 0; j < dim; ++j) {
-                    std::unordered_map<GlobalIndex, Real> right_dense;
-                    for (std::size_t row = 0; row < dim; ++row) {
-                        const Real coeff = rec.D_inv[j * dim + row];
-                        if (std::abs(coeff) <= Real(1e-30)) {
-                            continue;
-                        }
-                        for (const auto& [dof, val] : rec.Ct_rows[row]) {
-                            right_dense[dof] += coeff * val;
-                        }
-                    }
+                    update_slots.push_back(CondensedSlot{
+                        rec.block_ordinal, rec.global_entity_key, j});
+                }
+            }
 
-                    backends::ReducedFieldUpdate reduced_update;
-                    reduced_update.sigma = Real(-1.0);
-                    for (const auto& [dof, val] : rec.B_columns[j]) {
-                        if (owned_dofs.contains(dof) &&
-                            std::abs(val) > kDirectCouplingEntryTol) {
-                            reduced_update.left.emplace_back(dof, val);
-                        }
-                    }
-                    for (const auto& [dof, val] : right_dense) {
-                        if (owned_dofs.contains(dof) &&
-                            std::abs(val) > kDirectCouplingEntryTol) {
-                            reduced_update.right.emplace_back(dof, val);
-                        }
-                    }
+#if FE_HAS_MPI
+            {
+                std::vector<LocalCondensedSlotKey> mpi_slots;
+                mpi_slots.reserve(update_slots.size());
+                for (const auto& slot : update_slots) {
+                    mpi_slots.push_back(LocalCondensedSlotKey{
+                        static_cast<unsigned long long>(slot.block_ordinal),
+                        static_cast<unsigned long long>(slot.entity_key),
+                        static_cast<unsigned long long>(slot.component)});
+                }
+                const auto gathered =
+                    allgatherLocalCondensedSlotKeys(std::move(mpi_slots), dof_handler_.mpiComm());
+                update_slots.clear();
+                update_slots.reserve(gathered.size());
+                for (const auto& slot : gathered) {
+                    update_slots.push_back(CondensedSlot{
+                        static_cast<std::size_t>(slot.block_ordinal),
+                        static_cast<std::uint64_t>(slot.entity_key),
+                        static_cast<std::size_t>(slot.component)});
+                }
+            }
+#endif
+            sortUniqueSlots(update_slots);
 
-                    // Preserve globally active reduced-update slots even when this rank owns no
-                    // local entries for the condensed field factor on one side.
-                    if (std::abs(reduced_update.sigma) > kDirectCouplingEntryTol) {
-                        last_reduced_field_updates_.push_back(std::move(reduced_update));
+            for (const auto& slot : update_slots) {
+                std::vector<std::pair<GlobalIndex, Real>> left_entries;
+                std::vector<std::pair<GlobalIndex, Real>> right_entries;
+
+                if (const auto* rec = findRecordForSlot(slot)) {
+                    const auto dim = rec->g.size();
+                    if (slot.component < dim &&
+                        rec->D_inv.size() == dim * dim &&
+                        rec->Ct_rows.size() == dim &&
+                        rec->B_columns.size() == dim) {
+                        left_entries = rec->B_columns[slot.component];
+
+                        std::unordered_map<GlobalIndex, Real> right_dense;
+                        for (std::size_t row = 0; row < dim; ++row) {
+                            const Real coeff = rec->D_inv[slot.component * dim + row];
+                            if (std::abs(coeff) <= Real(1e-30)) {
+                                continue;
+                            }
+                            for (const auto& [dof, val] : rec->Ct_rows[row]) {
+                                right_dense[dof] += coeff * val;
+                            }
+                        }
+                        right_entries.reserve(right_dense.size());
+                        for (const auto& [dof, val] : right_dense) {
+                            right_entries.emplace_back(dof, val);
+                        }
                     }
                 }
+
+#if FE_HAS_MPI
+                left_entries =
+                    allreduceSumSparsePairs(std::move(left_entries), dof_handler_.mpiComm());
+                right_entries =
+                    allreduceSumSparsePairs(std::move(right_entries), dof_handler_.mpiComm());
+#endif
+
+                backends::ReducedFieldUpdate reduced_update;
+                reduced_update.sigma = Real(-1.0);
+                for (const auto& [dof, val] : left_entries) {
+                    if (owned_dofs.contains(dof) &&
+                        std::abs(val) > kDirectCouplingEntryTol) {
+                        reduced_update.left.emplace_back(dof, val);
+                    }
+                }
+                for (const auto& [dof, val] : right_entries) {
+                    if (owned_dofs.contains(dof) &&
+                        std::abs(val) > kDirectCouplingEntryTol) {
+                        reduced_update.right.emplace_back(dof, val);
+                    }
+                }
+
+                // Every rank pushes the same globally ordered slot. Its factors
+                // are owner-partitioned, so FSILS low-rank dot products are
+                // globally reduced without mixing different cell/QP entities.
+                last_reduced_field_updates_.push_back(std::move(reduced_update));
             }
         }
 
         if (want_vector) {
-            last_local_condensed_rhs_shift_.assign(n_field_dofs, Real(0.0));
+            std::vector<std::pair<GlobalIndex, Real>> rhs_shift_entries;
             for (const auto& rec : last_local_condensed_records_) {
                 const auto dim = rec.g.size();
                 if (dim == 0 || rec.D_inv.size() != dim * dim ||
@@ -6728,11 +7605,22 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                         continue;
                     }
                     for (const auto& [dof, val] : rec.B_columns[j]) {
-                        const auto dof_idx = static_cast<std::size_t>(dof);
-                        if (dof_idx < last_local_condensed_rhs_shift_.size()) {
-                            last_local_condensed_rhs_shift_[dof_idx] += val * coeff;
-                        }
+                        rhs_shift_entries.emplace_back(dof, val * coeff);
                     }
+                }
+            }
+
+#if FE_HAS_MPI
+            rhs_shift_entries =
+                allreduceSumSparsePairs(std::move(rhs_shift_entries), dof_handler_.mpiComm());
+#endif
+
+            last_local_condensed_rhs_shift_.assign(n_field_dofs, Real(0.0));
+            for (const auto& [dof, val] : rhs_shift_entries) {
+                const auto dof_idx = static_cast<std::size_t>(dof);
+                if (dof_idx < last_local_condensed_rhs_shift_.size() &&
+                    owned_dofs.contains(dof)) {
+                    last_local_condensed_rhs_shift_[dof_idx] += val;
                 }
             }
         }
@@ -6900,6 +7788,7 @@ void FESystem::assembleMonolithicAuxiliary(
     if (auxiliary_input_registry_) {
         auxiliary_input_registry_->evaluate(time, dt, is_nonlinear_iteration);
     }
+    initializeAuxiliaryDAEBlocksIfNeeded_(time, dt);
 
     SystemStateView mono_state;
     mono_state.time = time;
@@ -7110,6 +7999,837 @@ backends::SolverOptions FESystem::augmentSolverOptions(const backends::SolverOpt
     return augmentSolverOptions(base, n_field_unknowns);
 }
 
+FESystem::AuxiliaryScopeResolution
+FESystem::resolveAuxiliaryDeploymentScope_(DeployedAuxEntry& entry)
+{
+    std::size_t entity_count = entry.explicit_entity_count;
+    std::size_t owned_entity_count = entity_count;
+
+    if (entity_count == 0) {
+        switch (entry.spec.scope) {
+            case AuxiliaryStateScope::Global:
+                entity_count = 1;
+                owned_entity_count = entity_count;
+                break;
+            case AuxiliaryStateScope::Node:
+                if (mesh_access_) {
+                    entity_count =
+                        static_cast<std::size_t>(std::max<GlobalIndex>(0, mesh_access_->numVertices()));
+                    owned_entity_count =
+                        static_cast<std::size_t>(std::max<GlobalIndex>(0, mesh_access_->numOwnedVertices()));
+                    FE_THROW_IF(owned_entity_count > entity_count, InvalidStateException,
+                                "FESystem::finalizeAuxiliaryLayout: mesh reports "
+                                "numOwnedVertices() > numVertices() for Node scope");
+                } else {
+                    FE_THROW(InvalidStateException,
+                             "FESystem::finalizeAuxiliaryLayout: Node scope requires "
+                             "mesh vertex count via IMeshAccess::numVertices() or "
+                             "an explicit .entityCount()");
+                }
+                break;
+            case AuxiliaryStateScope::Cell:
+                if (mesh_access_) {
+                    entry.entity_map.clear();
+                    mesh_access_->forEachOwnedCell([&](GlobalIndex cell_id) {
+                        if (cell_id >= 0) {
+                            entry.entity_map.push_back(static_cast<std::size_t>(cell_id));
+                        }
+                    });
+                    entity_count = entry.entity_map.size();
+                    const auto reported_owned =
+                        static_cast<std::size_t>(mesh_access_->numOwnedCells());
+                    FE_THROW_IF(reported_owned != entity_count, InvalidStateException,
+                                "FESystem::finalizeAuxiliaryLayout: Cell scope owned-cell "
+                                "iteration count does not match numOwnedCells()");
+                } else {
+                    entity_count = 1;
+                }
+                owned_entity_count = entity_count;
+                break;
+            case AuxiliaryStateScope::Boundary:
+                entity_count = 1;
+                owned_entity_count = entity_count;
+                break;
+            case AuxiliaryStateScope::Facet:
+                if (mesh_access_) {
+                    entity_count = static_cast<std::size_t>(mesh_access_->numBoundaryFaces());
+                } else {
+                    entity_count = 1;
+                }
+                owned_entity_count = entity_count;
+                break;
+            case AuxiliaryStateScope::QuadraturePoint:
+                if (!entry.qp_offsets.empty()) {
+                    entity_count = entry.qp_offsets.back();
+                    owned_entity_count = entity_count;
+                } else {
+                    entity_count = 0;
+                    owned_entity_count = 0;
+                }
+                break;
+            case AuxiliaryStateScope::Region:
+                if (topology_context_) {
+                    entity_count = static_cast<std::size_t>(std::max(0, topology_context_->numRegions()));
+                } else if (mesh_access_) {
+                    auto topo = analysis::TopologyAnalysisContext::build(*mesh_access_);
+                    entity_count = static_cast<std::size_t>(std::max(0, topo.numRegions()));
+                } else {
+                    entity_count = 1;
+                }
+                owned_entity_count = entity_count;
+                break;
+        }
+    } else if (entry.spec.scope == AuxiliaryStateScope::Node && mesh_access_) {
+        const auto mesh_entity_count =
+            static_cast<std::size_t>(std::max<GlobalIndex>(0, mesh_access_->numVertices()));
+        const auto mesh_owned_entity_count =
+            static_cast<std::size_t>(std::max<GlobalIndex>(0, mesh_access_->numOwnedVertices()));
+        FE_THROW_IF(mesh_owned_entity_count > mesh_entity_count, InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: mesh reports "
+                    "numOwnedVertices() > numVertices() for Node scope");
+        FE_THROW_IF(entity_count != mesh_entity_count, InvalidArgumentException,
+                    "FESystem::finalizeAuxiliaryLayout: Node scope instance '" +
+                    entry.instance_name + "' requested entityCount()=" +
+                    std::to_string(entity_count) + " but the mesh exposes " +
+                    std::to_string(mesh_entity_count) +
+                    " vertices. Omit entityCount() and let the backend derive it.");
+        owned_entity_count = mesh_owned_entity_count;
+    }
+
+    const auto& region = entry.spec.deployment_region;
+    if (region.isRestricted() &&
+        entry.spec.scope != AuxiliaryStateScope::Boundary &&
+        entry.spec.scope != AuxiliaryStateScope::Global) {
+        if (!region.explicit_entities.empty()) {
+            entry.entity_map = region.explicit_entities;
+        } else if (mesh_access_) {
+            auto parse_region_identity = [&](std::string_view label) {
+                try {
+                    return std::stoi(region.identity);
+                } catch (...) {
+                    FE_THROW(InvalidArgumentException,
+                             "FESystem::finalizeAuxiliaryLayout: " +
+                                 std::string(label) +
+                                 " identity must be an integer, got '" +
+                                 region.identity + "'");
+                }
+                return 0;
+            };
+
+            auto sort_unique = [](std::vector<std::size_t>& values) {
+                std::sort(values.begin(), values.end());
+                values.erase(std::unique(values.begin(), values.end()), values.end());
+            };
+
+            auto union_region_ids_across_ranks =
+                [&](std::vector<std::size_t> region_ids) {
+                    sort_unique(region_ids);
+#if FE_HAS_MPI
+                    int mpi_initialized = 0;
+                    MPI_Initialized(&mpi_initialized);
+                    if (mpi_initialized) {
+                        MPI_Comm comm = is_setup_ ? dof_handler_.mpiComm() : MPI_COMM_WORLD;
+                        int comm_size = 1;
+                        MPI_Comm_size(comm, &comm_size);
+                        if (comm_size > 1) {
+                            std::optional<analysis::TopologyAnalysisContext> local_topology;
+                            const auto* topo = topology_context_ ? &*topology_context_ : nullptr;
+                            if (topo == nullptr && mesh_access_) {
+                                local_topology =
+                                    analysis::TopologyAnalysisContext::build(*mesh_access_);
+                                topo = &*local_topology;
+                            }
+                            const auto n_regions = topo
+                                ? static_cast<std::size_t>(std::max(0, topo->numRegions()))
+                                : std::size_t{0};
+                            if (n_regions > 0u) {
+                                FE_THROW_IF(
+                                    n_regions >
+                                        static_cast<std::size_t>(
+                                            std::numeric_limits<int>::max()),
+                                    InvalidStateException,
+                                    "FESystem::finalizeAuxiliaryLayout: too many "
+                                    "topology regions for MPI region-id union");
+                                std::vector<int> local_flags(n_regions, 0);
+                                for (const auto region_id : region_ids) {
+                                    FE_THROW_IF(region_id >= n_regions,
+                                                InvalidArgumentException,
+                                                "FESystem::finalizeAuxiliaryLayout: "
+                                                "Region-scope deployment references "
+                                                "topology region " +
+                                                    std::to_string(region_id) +
+                                                    " but only " +
+                                                    std::to_string(n_regions) +
+                                                    " regions exist");
+                                    local_flags[region_id] = 1;
+                                }
+                                std::vector<int> global_flags(n_regions, 0);
+                                MPI_Allreduce(local_flags.data(),
+                                              global_flags.data(),
+                                              static_cast<int>(n_regions),
+                                              MPI_INT,
+                                              MPI_MAX,
+                                              comm);
+                                region_ids.clear();
+                                for (std::size_t region_id = 0; region_id < n_regions;
+                                     ++region_id) {
+                                    if (global_flags[region_id] != 0) {
+                                        region_ids.push_back(region_id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+#endif
+                    return region_ids;
+                };
+
+            auto cells_to_nodes = [&](std::span<const std::size_t> cells) {
+                std::vector<std::size_t> nodes_out;
+                std::vector<GlobalIndex> cell_nodes;
+                for (const auto cell : cells) {
+                    cell_nodes.clear();
+                    mesh_access_->getCellNodes(static_cast<GlobalIndex>(cell), cell_nodes);
+                    for (const auto node : cell_nodes) {
+                        if (node >= 0) {
+                            nodes_out.push_back(static_cast<std::size_t>(node));
+                        }
+                    }
+                }
+                sort_unique(nodes_out);
+                return nodes_out;
+            };
+
+            auto cells_to_regions = [&](std::span<const std::size_t> cells) {
+                std::vector<std::size_t> regions_out;
+                std::optional<analysis::TopologyAnalysisContext> local_topology;
+                const auto* topo = topology_context_ ? &*topology_context_ : nullptr;
+                if (topo == nullptr) {
+                    local_topology = analysis::TopologyAnalysisContext::build(*mesh_access_);
+                    topo = &*local_topology;
+                }
+                for (const auto cell : cells) {
+                    const int region_id = topo->regionForCell(static_cast<GlobalIndex>(cell));
+                    if (region_id >= 0) {
+                        regions_out.push_back(static_cast<std::size_t>(region_id));
+                    }
+                }
+                sort_unique(regions_out);
+                return union_region_ids_across_ranks(std::move(regions_out));
+            };
+
+            auto assign_from_cells = [&](std::vector<std::size_t> cells) {
+                sort_unique(cells);
+                switch (entry.spec.scope) {
+                    case AuxiliaryStateScope::Cell:
+                    case AuxiliaryStateScope::QuadraturePoint:
+                        entry.entity_map = std::move(cells);
+                        break;
+                    case AuxiliaryStateScope::Node:
+                        entry.entity_map = cells_to_nodes(cells);
+                        break;
+                    case AuxiliaryStateScope::Region:
+                        entry.entity_map = cells_to_regions(cells);
+                        break;
+                    case AuxiliaryStateScope::Facet:
+                        FE_THROW(InvalidArgumentException,
+                                 "FESystem::finalizeAuxiliaryLayout: CellSet/MaterialIdSet "
+                                 "deployment cannot be expanded to Facet scope for auxiliary "
+                                 "instance '" + entry.instance_name + "'");
+                        break;
+                    case AuxiliaryStateScope::Global:
+                    case AuxiliaryStateScope::Boundary:
+                        break;
+                }
+            };
+
+            auto assign_from_boundary_faces =
+                [&](std::vector<std::size_t> faces, std::vector<std::size_t> cells) {
+                    sort_unique(faces);
+                    sort_unique(cells);
+                    switch (entry.spec.scope) {
+                        case AuxiliaryStateScope::Facet:
+                            entry.entity_map = std::move(faces);
+                            break;
+                        case AuxiliaryStateScope::Cell:
+                        case AuxiliaryStateScope::QuadraturePoint:
+                            entry.entity_map = std::move(cells);
+                            break;
+                        case AuxiliaryStateScope::Node:
+                            entry.entity_map = cells_to_nodes(cells);
+                            break;
+                        case AuxiliaryStateScope::Region:
+                            entry.entity_map = cells_to_regions(cells);
+                            break;
+                        case AuxiliaryStateScope::Global:
+                        case AuxiliaryStateScope::Boundary:
+                            break;
+                    }
+                };
+
+            switch (region.kind) {
+                case AuxiliaryRegionKind::CellSet:
+                case AuxiliaryRegionKind::MaterialIdSet: {
+                    const int target_id = parse_region_identity("CellSet/MaterialIdSet");
+                    std::vector<std::size_t> cells;
+                    auto append_matching_cell = [&](GlobalIndex cell_id) {
+                        if (mesh_access_->getCellDomainId(cell_id) == target_id) {
+                            cells.push_back(static_cast<std::size_t>(cell_id));
+                        }
+                    };
+                    if (entry.spec.scope == AuxiliaryStateScope::Region) {
+                        mesh_access_->forEachCell(append_matching_cell);
+                    } else {
+                        mesh_access_->forEachOwnedCell(append_matching_cell);
+                    }
+                    assign_from_cells(std::move(cells));
+                    break;
+                }
+                case AuxiliaryRegionKind::BoundarySet: {
+                    const int marker = parse_region_identity("BoundarySet");
+                    std::vector<std::size_t> faces;
+                    std::vector<std::size_t> cells;
+                    mesh_access_->forEachBoundaryFace(marker,
+                        [&](GlobalIndex face_id, GlobalIndex cell_id) {
+                            if (face_id >= 0) {
+                                faces.push_back(static_cast<std::size_t>(face_id));
+                            }
+                            if (cell_id >= 0) {
+                                cells.push_back(static_cast<std::size_t>(cell_id));
+                            }
+                        });
+                    assign_from_boundary_faces(std::move(faces), std::move(cells));
+                    break;
+                }
+                case AuxiliaryRegionKind::InterfaceSet: {
+                    const int marker = parse_region_identity("InterfaceSet");
+                    (void)marker;
+                    std::vector<std::size_t> faces;
+                    std::vector<std::size_t> cells;
+                    mesh_access_->forEachInteriorFace(
+                        [&](GlobalIndex face_id, GlobalIndex c0, GlobalIndex c1) {
+                            if (face_id >= 0) {
+                                faces.push_back(static_cast<std::size_t>(face_id));
+                            }
+                            if (c0 >= 0) {
+                                cells.push_back(static_cast<std::size_t>(c0));
+                            }
+                            if (c1 >= 0) {
+                                cells.push_back(static_cast<std::size_t>(c1));
+                            }
+                        });
+                    assign_from_boundary_faces(std::move(faces), std::move(cells));
+                    break;
+                }
+                case AuxiliaryRegionKind::WholeDomain:
+                    break;
+                case AuxiliaryRegionKind::FormulationDefined:
+                    FE_THROW(InvalidArgumentException,
+                             "FESystem::finalizeAuxiliaryLayout: FormulationDefined "
+                             "deployment region for auxiliary instance '" +
+                             entry.instance_name + "' requires explicit_entities");
+                    break;
+            }
+            FE_THROW_IF(entry.entity_map.empty() &&
+                        region.kind != AuxiliaryRegionKind::WholeDomain,
+                        InvalidStateException,
+                        "FESystem::finalizeAuxiliaryLayout: marker-based region '"
+                        + region.identity + "' expanded to 0 entities");
+        } else {
+            FE_THROW(InvalidStateException,
+                     "FESystem::finalizeAuxiliaryLayout: deployment region "
+                     "kind '" + region.identity + "' requires mesh access "
+                     "for marker-based entity expansion, but no mesh was "
+                     "provided to FESystem");
+        }
+        if (!entry.entity_map.empty()) {
+            if (entry.spec.scope == AuxiliaryStateScope::QuadraturePoint) {
+                owned_entity_count = entry.entity_map.size();
+            } else if (entry.spec.scope == AuxiliaryStateScope::Node && mesh_access_) {
+                const auto mesh_entity_count =
+                    static_cast<std::size_t>(std::max<GlobalIndex>(0, mesh_access_->numVertices()));
+                const auto mesh_owned_entity_count =
+                    static_cast<std::size_t>(std::max<GlobalIndex>(0, mesh_access_->numOwnedVertices()));
+                FE_THROW_IF(mesh_owned_entity_count > mesh_entity_count, InvalidStateException,
+                            "FESystem::finalizeAuxiliaryLayout: mesh reports "
+                            "numOwnedVertices() > numVertices() for Node scope");
+                for (const auto node : entry.entity_map) {
+                    FE_THROW_IF(node >= mesh_entity_count, InvalidArgumentException,
+                                "FESystem::finalizeAuxiliaryLayout: Node scope instance '" +
+                                entry.instance_name + "' references node " +
+                                std::to_string(node) + " but the mesh exposes only " +
+                                std::to_string(mesh_entity_count) + " vertices");
+                }
+                const auto first_ghost = std::stable_partition(
+                    entry.entity_map.begin(),
+                    entry.entity_map.end(),
+                    [mesh_owned_entity_count](std::size_t node) {
+                        return node < mesh_owned_entity_count;
+                    });
+                entity_count = entry.entity_map.size();
+                owned_entity_count = static_cast<std::size_t>(
+                    std::distance(entry.entity_map.begin(), first_ghost));
+            } else {
+                entity_count = entry.entity_map.size();
+                owned_entity_count = entity_count;
+            }
+        }
+    } else if (region.isRestricted() &&
+               entry.spec.scope == AuxiliaryStateScope::Global &&
+               !region.explicit_entities.empty()) {
+        FE_THROW(InvalidArgumentException,
+                 "FESystem::finalizeAuxiliaryLayout: Global scope auxiliary instance '" +
+                 entry.instance_name +
+                 "' treats deployment_region as metadata and does not support explicit_entities");
+    }
+
+    if (entry.spec.scope == AuxiliaryStateScope::QuadraturePoint) {
+        inferQuadraturePointLayout_(entry);
+        if (!entry.materialized) {
+            return {};
+        }
+        entity_count = entry.qp_offsets.back();
+        owned_entity_count = entity_count;
+    } else {
+        entry.materialized = true;
+    }
+
+    return AuxiliaryScopeResolution{entity_count, owned_entity_count};
+}
+
+void FESystem::ensureAuxiliaryRegionLookupCache_()
+{
+    if (auxiliary_region_lookup_cache_.has_value()) {
+        return;
+    }
+
+    AuxiliaryRegionLookupCache cache;
+    if (!topology_context_ && mesh_access_) {
+        topology_context_ = analysis::TopologyAnalysisContext::build(*mesh_access_);
+    }
+
+    auto sort_unique = [](auto& values) {
+        std::sort(values.begin(), values.end());
+        values.erase(std::unique(values.begin(), values.end()), values.end());
+    };
+
+    if (topology_context_) {
+        const auto n_regions =
+            static_cast<std::size_t>(std::max(0, topology_context_->numRegions()));
+        cache.region_ids.resize(n_regions);
+        std::iota(cache.region_ids.begin(), cache.region_ids.end(), std::size_t{0});
+        cache.region_to_cells.resize(n_regions);
+        cache.region_to_nodes.resize(n_regions);
+        cache.region_to_boundary_markers.resize(n_regions);
+        cache.region_to_interface_faces.resize(n_regions);
+        cache.region_owner_ranks.assign(n_regions, -1);
+
+        std::vector<GlobalIndex> cell_nodes;
+        for (const auto& component : topology_context_->components) {
+            if (component.region_id < 0) {
+                continue;
+            }
+            const auto region_id = static_cast<std::size_t>(component.region_id);
+            if (region_id >= n_regions) {
+                continue;
+            }
+
+            auto& cells = cache.region_to_cells[region_id];
+            cells.clear();
+            cells.reserve(component.cell_indices.size());
+            for (const auto cell : component.cell_indices) {
+                if (cell < 0) {
+                    continue;
+                }
+                cells.push_back(static_cast<std::size_t>(cell));
+                if (!mesh_access_) {
+                    continue;
+                }
+                cell_nodes.clear();
+                mesh_access_->getCellNodes(cell, cell_nodes);
+                auto& nodes = cache.region_to_nodes[region_id];
+                for (const auto node : cell_nodes) {
+                    if (node >= 0) {
+                        nodes.push_back(static_cast<std::size_t>(node));
+                    }
+                }
+            }
+
+            sort_unique(cells);
+            sort_unique(cache.region_to_nodes[region_id]);
+            cache.region_to_boundary_markers[region_id].assign(
+                component.boundary_markers.begin(),
+                component.boundary_markers.end());
+            sort_unique(cache.region_to_boundary_markers[region_id]);
+        }
+
+        if (interface_topology_context_) {
+            for (std::size_t face_idx = 0; face_idx < interface_topology_context_->faces.size();
+                 ++face_idx) {
+                const auto& face = interface_topology_context_->faces[face_idx];
+                auto append_face = [&](int region_id) {
+                    if (region_id < 0) {
+                        return;
+                    }
+                    const auto rid = static_cast<std::size_t>(region_id);
+                    if (rid < cache.region_to_interface_faces.size()) {
+                        cache.region_to_interface_faces[rid].push_back(face_idx);
+                    }
+                };
+                append_face(face.minus_region);
+                append_face(face.plus_region);
+            }
+            for (auto& faces : cache.region_to_interface_faces) {
+                sort_unique(faces);
+            }
+        }
+
+        const auto sentinel = std::numeric_limits<long long>::max();
+        std::vector<long long> local_min_cell(n_regions, sentinel);
+
+        int rank = 0;
+#if FE_HAS_MPI
+        int mpi_initialized = 0;
+        MPI_Initialized(&mpi_initialized);
+        MPI_Comm comm = MPI_COMM_WORLD;
+        int comm_size = 1;
+        if (mpi_initialized) {
+            comm = is_setup_ ? dof_handler_.mpiComm() : MPI_COMM_WORLD;
+            MPI_Comm_rank(comm, &rank);
+            MPI_Comm_size(comm, &comm_size);
+        }
+#endif
+
+        for (std::size_t region_id = 0; region_id < cache.region_to_cells.size();
+             ++region_id) {
+            for (const auto cell : cache.region_to_cells[region_id]) {
+                const auto cell_id = static_cast<GlobalIndex>(cell);
+                if (mesh_access_ && !mesh_access_->isOwnedCell(cell_id)) {
+                    continue;
+                }
+                local_min_cell[region_id] =
+                    std::min(local_min_cell[region_id],
+                             static_cast<long long>(cell_id));
+            }
+        }
+
+        std::vector<long long> global_min_cell = local_min_cell;
+#if FE_HAS_MPI
+        if (mpi_initialized && comm_size > 1 && n_regions > 0u) {
+            FE_THROW_IF(n_regions >
+                            static_cast<std::size_t>(std::numeric_limits<int>::max()),
+                        InvalidStateException,
+                        "FESystem::finalizeAuxiliaryLayout: too many topology "
+                        "regions for MPI region-owner reduction");
+            MPI_Allreduce(local_min_cell.data(),
+                          global_min_cell.data(),
+                          static_cast<int>(n_regions),
+                          MPI_LONG_LONG,
+                          MPI_MIN,
+                          comm);
+        }
+#endif
+
+        std::vector<int> local_owner_candidate(n_regions,
+                                               std::numeric_limits<int>::max());
+        for (std::size_t region_id = 0; region_id < n_regions; ++region_id) {
+            if (global_min_cell[region_id] != sentinel &&
+                local_min_cell[region_id] == global_min_cell[region_id]) {
+                local_owner_candidate[region_id] = rank;
+            }
+        }
+
+        std::vector<int> global_owner = local_owner_candidate;
+#if FE_HAS_MPI
+        if (mpi_initialized && comm_size > 1 && n_regions > 0u) {
+            MPI_Allreduce(local_owner_candidate.data(),
+                          global_owner.data(),
+                          static_cast<int>(n_regions),
+                          MPI_INT,
+                          MPI_MIN,
+                          comm);
+        }
+#endif
+
+        for (std::size_t region_id = 0; region_id < n_regions; ++region_id) {
+            FE_THROW_IF(global_min_cell[region_id] == sentinel ||
+                            global_owner[region_id] ==
+                                std::numeric_limits<int>::max(),
+                        InvalidStateException,
+                        "FESystem::finalizeAuxiliaryLayout: topology region " +
+                            std::to_string(region_id) +
+                            " has no owned cell from which to derive a "
+                            "deterministic region row owner");
+            cache.region_owner_ranks[region_id] = global_owner[region_id];
+        }
+    }
+
+    auxiliary_region_lookup_cache_ = std::move(cache);
+}
+
+std::size_t FESystem::auxiliaryTopologyRegionInputEntityCount_() const
+{
+    if (topology_context_) {
+        return static_cast<std::size_t>(std::max(0, topology_context_->numRegions()));
+    }
+    FE_THROW_IF(!mesh_access_, InvalidStateException,
+                "FESystem::regionIntegral: topology-region-local inputs require a mesh");
+    auto topology = analysis::TopologyAnalysisContext::build(*mesh_access_);
+    const auto n_regions = static_cast<std::size_t>(std::max(0, topology.numRegions()));
+    if (n_regions > 0u) {
+        return n_regions;
+    }
+    return static_cast<std::size_t>(std::max<GlobalIndex>(1, mesh_access_->numCells()));
+}
+
+std::vector<GlobalIndex>
+FESystem::auxiliaryTopologyRegionCells_(std::size_t region_id) const
+{
+    std::vector<GlobalIndex> cells;
+    if (!mesh_access_) {
+        return cells;
+    }
+
+    const analysis::TopologyAnalysisContext* topology =
+        topology_context_ ? &*topology_context_ : nullptr;
+    std::optional<analysis::TopologyAnalysisContext> local_topology;
+    if (!topology) {
+        local_topology = analysis::TopologyAnalysisContext::build(*mesh_access_);
+        topology = &*local_topology;
+    }
+
+    if (!topology || region_id >= static_cast<std::size_t>(std::max(0, topology->numRegions()))) {
+        return cells;
+    }
+
+    mesh_access_->forEachCell([&](GlobalIndex cell_id) {
+        const auto cell_region = topology->regionForCell(cell_id);
+        if (cell_region >= 0 &&
+            static_cast<std::size_t>(cell_region) == region_id) {
+            cells.push_back(cell_id);
+        }
+    });
+
+    std::sort(cells.begin(), cells.end());
+    cells.erase(std::unique(cells.begin(), cells.end()), cells.end());
+    return cells;
+}
+
+AuxiliaryEntityRemapMetadata
+FESystem::buildAuxiliaryEntityRemapMetadata_(
+    const DeployedAuxEntry& entry,
+    const AuxiliaryScopeResolution& resolution)
+{
+    AuxiliaryEntityRemapMetadata metadata;
+    metadata.scope = entry.spec.scope;
+    metadata.deployment_region = entry.spec.deployment_region;
+    metadata.owned_entity_count = resolution.owned_entity_count;
+
+    if (entry.spec.scope == AuxiliaryStateScope::QuadraturePoint) {
+        metadata.entity_ids.resize(resolution.entity_count);
+        std::iota(metadata.entity_ids.begin(), metadata.entity_ids.end(), std::size_t{0});
+    } else if (!entry.entity_map.empty()) {
+        metadata.entity_ids = entry.entity_map;
+    } else {
+        metadata.entity_ids.resize(resolution.entity_count);
+        std::iota(metadata.entity_ids.begin(), metadata.entity_ids.end(), std::size_t{0});
+    }
+
+    if (entry.spec.scope == AuxiliaryStateScope::QuadraturePoint) {
+        metadata.qp_offsets = entry.qp_offsets;
+        if (!entry.entity_map.empty()) {
+            metadata.qp_cell_ids = entry.entity_map;
+        } else if (entry.qp_offsets.size() > 1u) {
+            metadata.qp_cell_ids.resize(entry.qp_offsets.size() - 1u);
+            std::iota(metadata.qp_cell_ids.begin(), metadata.qp_cell_ids.end(), std::size_t{0});
+        }
+    }
+
+    if (entry.spec.scope == AuxiliaryStateScope::Region) {
+        ensureAuxiliaryRegionLookupCache_();
+        metadata.region_membership.reserve(metadata.entity_ids.size());
+        for (const auto region_id : metadata.entity_ids) {
+            AuxiliaryRegionMembershipMetadata membership;
+            membership.region_id = region_id;
+            if (auxiliary_region_lookup_cache_ &&
+                region_id < auxiliary_region_lookup_cache_->region_to_cells.size()) {
+                membership.cell_ids =
+                    auxiliary_region_lookup_cache_->region_to_cells[region_id];
+                membership.node_ids =
+                    auxiliary_region_lookup_cache_->region_to_nodes[region_id];
+                membership.boundary_markers =
+                    auxiliary_region_lookup_cache_->region_to_boundary_markers[region_id];
+                membership.interface_face_ids =
+                    auxiliary_region_lookup_cache_->region_to_interface_faces[region_id];
+            }
+            metadata.region_membership.push_back(std::move(membership));
+        }
+    }
+
+    return metadata;
+}
+
+std::vector<int>
+FESystem::buildAuxiliaryRegionRowOwnerRanks_(const DeployedAuxEntry& entry,
+                                             std::size_t entity_count)
+{
+    FE_THROW_IF(entry.spec.scope != AuxiliaryStateScope::Region,
+                InvalidArgumentException,
+                "FESystem::buildAuxiliaryRegionRowOwnerRanks: entry is not "
+                "Region-scoped");
+    ensureAuxiliaryRegionLookupCache_();
+
+    std::vector<std::size_t> entity_ids;
+    if (!entry.entity_map.empty()) {
+        entity_ids = entry.entity_map;
+    } else {
+        entity_ids.resize(entity_count);
+        std::iota(entity_ids.begin(), entity_ids.end(), std::size_t{0});
+    }
+
+    std::vector<int> entity_owner_ranks;
+    entity_owner_ranks.reserve(entity_ids.size());
+    for (const auto region_id : entity_ids) {
+        int owner = 0;
+        if (auxiliary_region_lookup_cache_ &&
+            !auxiliary_region_lookup_cache_->region_owner_ranks.empty()) {
+            FE_THROW_IF(
+                region_id >= auxiliary_region_lookup_cache_->region_owner_ranks.size(),
+                InvalidArgumentException,
+                "FESystem::finalizeAuxiliaryLayout: Region monolithic block '" +
+                    entry.instance_name + "' references topology region " +
+                    std::to_string(region_id) + " but owner metadata exists for only " +
+                    std::to_string(
+                        auxiliary_region_lookup_cache_->region_owner_ranks.size()) +
+                    " regions");
+            owner = auxiliary_region_lookup_cache_->region_owner_ranks[region_id];
+        }
+        FE_THROW_IF(owner < 0,
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: Region monolithic block '" +
+                        entry.instance_name +
+                        "' has no deterministic owner for topology region " +
+                        std::to_string(region_id));
+        entity_owner_ranks.push_back(owner);
+    }
+
+    return buildAuxiliaryRowOwnerRanks(
+        AuxiliaryRowOwnershipSpec{
+            .scope = AuxiliaryStateScope::Region,
+            .policy = backends::MixedRowOwnershipPolicy::RegionOwner,
+            .entity_count = entity_owner_ranks.size(),
+            .stride = entry.spec.size,
+            .single_owner_rank = -1,
+            .entity_owner_ranks = std::span<const int>(entity_owner_ranks)});
+}
+
+void FESystem::validateMonolithicAuxiliaryLifecycle_(const DeployedAuxEntry& entry) const
+{
+    if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic) {
+        return;
+    }
+
+    const auto structural = entry.model->structuralMetadata();
+    const bool has_nonsmooth =
+        entry.spec.has_nonsmooth || entry.model->hasNonsmoothHooks() ||
+        structural.has_nonsmooth || entry.spec.event_mode == AuxiliaryEventMode::ActiveSetHook ||
+        entry.spec.event_mode == AuxiliaryEventMode::ComplementarityHook;
+
+    FE_THROW_IF(has_nonsmooth, NotImplementedException,
+                "FESystem::finalizeAuxiliaryLayout: monolithic auxiliary instance '" +
+                    entry.instance_name +
+                    "' declares nonsmooth/complementarity hooks. Native monolithic "
+                    "nonsmooth handling requires a semismooth or active-set policy "
+                    "and is not part of the fixed-stride scope-completion path yet.");
+}
+
+void FESystem::validateAuxiliaryMixedLayoutContract_() const
+{
+    if (!auxiliary_operator_registry_ ||
+        !auxiliary_operator_registry_->isLayoutFinalized()) {
+        return;
+    }
+
+    const auto& layout = auxiliary_operator_registry_->auxiliaryLayout();
+    for (const auto& block : layout.blocks) {
+        if (block.n_unknowns == 0u) {
+            continue;
+        }
+
+        const bool global_like =
+            block.scope == AuxiliaryStateScope::Global ||
+            block.scope == AuxiliaryStateScope::Boundary;
+        if (!global_like) {
+            continue;
+        }
+
+        FE_THROW_IF(block.row_ownership != backends::MixedRowOwnershipPolicy::SingleOwner,
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: global monolithic auxiliary block '" +
+                        block.name +
+                        "' must use single-owner row metadata for MPI/FSILS");
+        FE_THROW_IF(block.single_owner_rank < 0,
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: global monolithic auxiliary block '" +
+                        block.name + "' has no valid single-owner rank");
+        FE_THROW_IF(!block.row_owner_ranks.empty() &&
+                        block.row_owner_ranks.size() != block.n_unknowns,
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: global monolithic auxiliary block '" +
+                        block.name + "' has an incomplete row-owner map");
+        FE_THROW_IF(!block.row_owner_ranks.empty() &&
+                        std::any_of(block.row_owner_ranks.begin(),
+                                    block.row_owner_ranks.end(),
+                                    [&](int owner) {
+                                        return owner != block.single_owner_rank;
+                                    }),
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: global monolithic auxiliary block '" +
+                        block.name + "' has row owners inconsistent with its single owner");
+        FE_THROW_IF(block.assembly_mode == backends::MixedBlockAssemblyMode::NativeOwnedRows,
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: global monolithic auxiliary block '" +
+                        block.name +
+                        "' cannot be assembled as native FSILS rows. Use direct-only "
+                        "lowering or bordered/reduced coupling unless a complete "
+                        "nodal-interleaved FSILS layout is explicitly implemented.");
+    }
+
+    for (const auto& block : layout.blocks) {
+        if (block.n_unknowns == 0u ||
+            block.scope != AuxiliaryStateScope::Region) {
+            continue;
+        }
+
+        FE_THROW_IF(block.row_ownership != backends::MixedRowOwnershipPolicy::RegionOwner,
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: Region monolithic auxiliary "
+                    "block '" +
+                        block.name +
+                        "' must use explicit region-owner row metadata");
+        FE_THROW_IF(block.row_owner_ranks.size() != block.n_unknowns,
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: Region monolithic auxiliary "
+                    "block '" +
+                        block.name + "' has an incomplete row-owner map");
+        FE_THROW_IF(std::any_of(block.row_owner_ranks.begin(),
+                                block.row_owner_ranks.end(),
+                                [](int owner) { return owner < 0; }),
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: Region monolithic auxiliary "
+                    "block '" +
+                        block.name + "' has invalid row-owner ranks");
+        FE_THROW_IF(block.assembly_mode == backends::MixedBlockAssemblyMode::NativeOwnedRows,
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: Region monolithic auxiliary "
+                    "block '" +
+                        block.name +
+                        "' cannot be assembled as native FSILS rows until a "
+                        "Region sparse/distributed row strategy represents the "
+                        "layout in backend sparsity and solver metadata");
+    }
+}
+
 void FESystem::rollbackAuxiliaryState()
 {
     if (auxiliary_state_manager_) {
@@ -7147,311 +8867,12 @@ void FESystem::finalizeAuxiliaryLayout()
 
         auto& mgr = auxiliaryStateManager();
 
-        // Determine entity count: prefer explicit, then mesh-derived, then 1.
-        // Node scope also carries an owned/ghost split when the mesh exposes
-        // vertex ownership metadata.
-        std::size_t entity_count = entry.explicit_entity_count;
-        std::size_t owned_entity_count = entity_count;
-        if (entity_count == 0) {
-            switch (entry.spec.scope) {
-                case AuxiliaryStateScope::Global:
-                    entity_count = 1;
-                    owned_entity_count = entity_count;
-                    break;
-                case AuxiliaryStateScope::Node:
-                    if (mesh_access_) {
-                        entity_count =
-                            static_cast<std::size_t>(std::max<GlobalIndex>(0, mesh_access_->numVertices()));
-                        owned_entity_count =
-                            static_cast<std::size_t>(std::max<GlobalIndex>(0, mesh_access_->numOwnedVertices()));
-                        FE_THROW_IF(owned_entity_count > entity_count, InvalidStateException,
-                                    "FESystem::finalizeAuxiliaryLayout: mesh reports "
-                                    "numOwnedVertices() > numVertices() for Node scope");
-                    } else {
-                        FE_THROW(InvalidStateException,
-                                 "FESystem::finalizeAuxiliaryLayout: Node scope requires "
-                                 "mesh vertex count via IMeshAccess::numVertices() or "
-                                 "an explicit .entityCount()");
-                    }
-                    break;
-                case AuxiliaryStateScope::Cell:
-                    if (mesh_access_) {
-                        entity_count = static_cast<std::size_t>(mesh_access_->numOwnedCells());
-                    } else {
-                        entity_count = 1;
-                    }
-                    owned_entity_count = entity_count;
-                    break;
-                case AuxiliaryStateScope::Boundary:
-                    entity_count = 1;
-                    owned_entity_count = entity_count;
-                    break;
-                case AuxiliaryStateScope::Facet:
-                    if (mesh_access_) {
-                        entity_count = static_cast<std::size_t>(mesh_access_->numBoundaryFaces());
-                    } else {
-                        entity_count = 1;
-                    }
-                    owned_entity_count = entity_count;
-                    break;
-                case AuxiliaryStateScope::QuadraturePoint:
-                    if (!entry.qp_offsets.empty()) {
-                        entity_count = entry.qp_offsets.back();
-                        owned_entity_count = entity_count;
-                    } else {
-                        entity_count = 0;
-                        owned_entity_count = 0;
-                    }
-                    break;
-                case AuxiliaryStateScope::Region:
-                    if (topology_context_) {
-                        entity_count = static_cast<std::size_t>(std::max(0, topology_context_->numRegions()));
-                    } else if (mesh_access_) {
-                        auto topo = analysis::TopologyAnalysisContext::build(*mesh_access_);
-                        entity_count = static_cast<std::size_t>(std::max(0, topo.numRegions()));
-                    } else {
-                        entity_count = 1;
-                    }
-                    owned_entity_count = entity_count;
-                    break;
-            }
-        } else if (entry.spec.scope == AuxiliaryStateScope::Node && mesh_access_) {
-            const auto mesh_entity_count =
-                static_cast<std::size_t>(std::max<GlobalIndex>(0, mesh_access_->numVertices()));
-            const auto mesh_owned_entity_count =
-                static_cast<std::size_t>(std::max<GlobalIndex>(0, mesh_access_->numOwnedVertices()));
-            FE_THROW_IF(mesh_owned_entity_count > mesh_entity_count, InvalidStateException,
-                        "FESystem::finalizeAuxiliaryLayout: mesh reports "
-                        "numOwnedVertices() > numVertices() for Node scope");
-            FE_THROW_IF(entity_count != mesh_entity_count, InvalidArgumentException,
-                        "FESystem::finalizeAuxiliaryLayout: Node scope instance '" +
-                        entry.instance_name + "' requested entityCount()=" +
-                        std::to_string(entity_count) + " but the mesh exposes " +
-                        std::to_string(mesh_entity_count) +
-                        " vertices. Omit entityCount() and let the backend derive it.");
-            owned_entity_count = mesh_owned_entity_count;
+        const auto scope_resolution = resolveAuxiliaryDeploymentScope_(entry);
+        if (!entry.materialized) {
+            continue;
         }
-
-        // Region-to-entity expansion.
-        // If the deployment region restricts to a subset, build a map in the
-        // entity space implied by the auxiliary scope. Boundary and Global
-        // scopes treat the deployment region as metadata; their entity count
-        // remains one.
-        const auto& region = entry.spec.deployment_region;
-        if (region.isRestricted() &&
-            entry.spec.scope != AuxiliaryStateScope::Boundary &&
-            entry.spec.scope != AuxiliaryStateScope::Global) {
-            if (!region.explicit_entities.empty()) {
-                // Explicit entity set: use directly.
-                entry.entity_map = region.explicit_entities;
-            } else if (mesh_access_) {
-                auto parse_region_identity = [&](std::string_view label) {
-                    try {
-                        return std::stoi(region.identity);
-                    } catch (...) {
-                        FE_THROW(InvalidArgumentException,
-                                 "FESystem::finalizeAuxiliaryLayout: " +
-                                     std::string(label) +
-                                     " identity must be an integer, got '" +
-                                     region.identity + "'");
-                    }
-                    return 0;
-                };
-
-                auto sort_unique = [](std::vector<std::size_t>& values) {
-                    std::sort(values.begin(), values.end());
-                    values.erase(std::unique(values.begin(), values.end()), values.end());
-                };
-
-                auto cells_to_nodes = [&](std::span<const std::size_t> cells) {
-                    std::vector<std::size_t> nodes_out;
-                    std::vector<GlobalIndex> cell_nodes;
-                    for (const auto cell : cells) {
-                        cell_nodes.clear();
-                        mesh_access_->getCellNodes(static_cast<GlobalIndex>(cell), cell_nodes);
-                        for (const auto node : cell_nodes) {
-                            if (node >= 0) {
-                                nodes_out.push_back(static_cast<std::size_t>(node));
-                            }
-                        }
-                    }
-                    sort_unique(nodes_out);
-                    return nodes_out;
-                };
-
-                auto cells_to_regions = [&](std::span<const std::size_t> cells) {
-                    std::vector<std::size_t> regions_out;
-                    std::optional<analysis::TopologyAnalysisContext> local_topology;
-                    const auto* topo = topology_context_ ? &*topology_context_ : nullptr;
-                    if (topo == nullptr) {
-                        local_topology = analysis::TopologyAnalysisContext::build(*mesh_access_);
-                        topo = &*local_topology;
-                    }
-                    for (const auto cell : cells) {
-                        const int region_id = topo->regionForCell(static_cast<GlobalIndex>(cell));
-                        if (region_id >= 0) {
-                            regions_out.push_back(static_cast<std::size_t>(region_id));
-                        }
-                    }
-                    sort_unique(regions_out);
-                    return regions_out;
-                };
-
-                auto assign_from_cells = [&](std::vector<std::size_t> cells) {
-                    sort_unique(cells);
-                    switch (entry.spec.scope) {
-                        case AuxiliaryStateScope::Cell:
-                        case AuxiliaryStateScope::QuadraturePoint:
-                            entry.entity_map = std::move(cells);
-                            break;
-                        case AuxiliaryStateScope::Node:
-                            entry.entity_map = cells_to_nodes(cells);
-                            break;
-                        case AuxiliaryStateScope::Region:
-                            entry.entity_map = cells_to_regions(cells);
-                            break;
-                        case AuxiliaryStateScope::Facet:
-                            FE_THROW(InvalidArgumentException,
-                                     "FESystem::finalizeAuxiliaryLayout: CellSet/MaterialIdSet "
-                                     "deployment cannot be expanded to Facet scope for auxiliary "
-                                     "instance '" + entry.instance_name + "'");
-                            break;
-                        case AuxiliaryStateScope::Global:
-                        case AuxiliaryStateScope::Boundary:
-                            break;
-                    }
-                };
-
-                auto assign_from_boundary_faces =
-                    [&](std::vector<std::size_t> faces, std::vector<std::size_t> cells) {
-                        sort_unique(faces);
-                        sort_unique(cells);
-                        switch (entry.spec.scope) {
-                            case AuxiliaryStateScope::Facet:
-                                entry.entity_map = std::move(faces);
-                                break;
-                            case AuxiliaryStateScope::Cell:
-                            case AuxiliaryStateScope::QuadraturePoint:
-                                entry.entity_map = std::move(cells);
-                                break;
-                            case AuxiliaryStateScope::Node:
-                                entry.entity_map = cells_to_nodes(cells);
-                                break;
-                            case AuxiliaryStateScope::Region:
-                                entry.entity_map = cells_to_regions(cells);
-                                break;
-                            case AuxiliaryStateScope::Global:
-                            case AuxiliaryStateScope::Boundary:
-                                break;
-                        }
-                    };
-
-                // Marker-based region: expand against mesh topology and then
-                // project to the target auxiliary scope.
-                switch (region.kind) {
-                    case AuxiliaryRegionKind::CellSet:
-                    case AuxiliaryRegionKind::MaterialIdSet: {
-                        const int target_id = parse_region_identity("CellSet/MaterialIdSet");
-                        std::vector<std::size_t> cells;
-                        mesh_access_->forEachOwnedCell([&](GlobalIndex cell_id) {
-                            if (mesh_access_->getCellDomainId(cell_id) == target_id) {
-                                cells.push_back(static_cast<std::size_t>(cell_id));
-                            }
-                        });
-                        assign_from_cells(std::move(cells));
-                        break;
-                    }
-                    case AuxiliaryRegionKind::BoundarySet: {
-                        const int marker = parse_region_identity("BoundarySet");
-                        std::vector<std::size_t> faces;
-                        std::vector<std::size_t> cells;
-                        mesh_access_->forEachBoundaryFace(marker,
-                            [&](GlobalIndex face_id, GlobalIndex cell_id) {
-                                if (face_id >= 0) {
-                                    faces.push_back(static_cast<std::size_t>(face_id));
-                                }
-                                if (cell_id >= 0) {
-                                    cells.push_back(static_cast<std::size_t>(cell_id));
-                                }
-                            });
-                        assign_from_boundary_faces(std::move(faces), std::move(cells));
-                        break;
-                    }
-                    case AuxiliaryRegionKind::InterfaceSet: {
-                        const int marker = parse_region_identity("InterfaceSet");
-                        // Collect ALL interior faces.  IMeshAccess does not
-                        // expose per-face interface markers, so we cannot
-                        // filter by the requested marker.  The identity is
-                        // stored for restart/remap metadata only.
-                        (void)marker;
-                        std::vector<std::size_t> faces;
-                        std::vector<std::size_t> cells;
-                        mesh_access_->forEachInteriorFace(
-                            [&](GlobalIndex face_id, GlobalIndex c0, GlobalIndex c1) {
-                                if (face_id >= 0) {
-                                    faces.push_back(static_cast<std::size_t>(face_id));
-                                }
-                                if (c0 >= 0) {
-                                    cells.push_back(static_cast<std::size_t>(c0));
-                                }
-                                if (c1 >= 0) {
-                                    cells.push_back(static_cast<std::size_t>(c1));
-                                }
-                            });
-                        assign_from_boundary_faces(std::move(faces), std::move(cells));
-                        break;
-                    }
-                    case AuxiliaryRegionKind::WholeDomain:
-                        break;
-                    case AuxiliaryRegionKind::FormulationDefined:
-                        FE_THROW(InvalidArgumentException,
-                                 "FESystem::finalizeAuxiliaryLayout: FormulationDefined "
-                                 "deployment region for auxiliary instance '" +
-                                 entry.instance_name + "' requires explicit_entities");
-                        break;
-                    default:
-                        break;
-                }
-                FE_THROW_IF(entry.entity_map.empty() &&
-                            region.kind != AuxiliaryRegionKind::WholeDomain,
-                            InvalidStateException,
-                            "FESystem::finalizeAuxiliaryLayout: marker-based region '"
-                            + region.identity + "' expanded to 0 entities");
-            } else {
-                FE_THROW(InvalidStateException,
-                         "FESystem::finalizeAuxiliaryLayout: deployment region "
-                         "kind '" + region.identity + "' requires mesh access "
-                         "for marker-based entity expansion, but no mesh was "
-                         "provided to FESystem");
-            }
-            if (!entry.entity_map.empty()) {
-                if (entry.spec.scope == AuxiliaryStateScope::QuadraturePoint) {
-                    owned_entity_count = entry.entity_map.size();
-                } else {
-                    // The block storage size is the restricted entity count.
-                    entity_count = entry.entity_map.size();
-                    owned_entity_count = entity_count;
-                }
-            }
-        } else if (region.isRestricted() &&
-                   entry.spec.scope == AuxiliaryStateScope::Global &&
-                   !region.explicit_entities.empty()) {
-            FE_THROW(InvalidArgumentException,
-                     "FESystem::finalizeAuxiliaryLayout: Global scope auxiliary instance '" +
-                     entry.instance_name +
-                     "' treats deployment_region as metadata and does not support explicit_entities");
-        }
-
-        if (entry.spec.scope == AuxiliaryStateScope::QuadraturePoint) {
-            inferQuadraturePointLayout_(entry);
-            if (!entry.materialized) {
-                continue;
-            }
-            entity_count = entry.qp_offsets.back();
-            owned_entity_count = entity_count;
-        } else {
-            entry.materialized = true;
-        }
+        const auto entity_count = scope_resolution.entity_count;
+        const auto owned_entity_count = scope_resolution.owned_entity_count;
 
         // Register the block.
         // Build initial values: if provided values match dim (not total),
@@ -7502,6 +8923,9 @@ void FESystem::finalizeAuxiliaryLayout()
             } else {
                 mgr.registerBlock(entry.spec, entity_count, owned_entity_count, init_span);
             }
+            mgr.setEntityRemapMetadata(
+                entry.instance_name,
+                buildAuxiliaryEntityRemapMetadata_(entry, scope_resolution));
         }
 
         // Create stepper and derivative provider for partitioned blocks.
@@ -7511,11 +8935,33 @@ void FESystem::finalizeAuxiliaryLayout()
 
             entry.deriv_provider = std::make_unique<AuxiliaryDerivativeProvider>();
             entry.deriv_provider->setup(*entry.model, entry.spec.derivative_policy);
+            if (entry.model->hasEventFunctions()) {
+                const auto& blk = mgr.getBlock(entry.instance_name);
+                entry.event_managers.clear();
+                entry.event_managers.reserve(blk.entityCount());
+                for (std::size_t e = 0; e < blk.entityCount(); ++e) {
+                    auto manager = std::make_unique<AuxiliaryEventManager>();
+                    manager->setNonsmoothPolicy(entry.spec.nonsmooth_policy);
+                    entry.event_managers.push_back(std::move(manager));
+                }
+            }
         }
 
         if (entry.spec.solve_mode == AuxiliarySolveMode::Monolithic) {
+            validateMonolithicAuxiliaryLifecycle_(entry);
             entry.deriv_provider = std::make_unique<AuxiliaryDerivativeProvider>();
             entry.deriv_provider->setup(*entry.model, entry.spec.derivative_policy);
+            if (entry.spec.event_mode == AuxiliaryEventMode::EventHook ||
+                entry.model->hasEventFunctions()) {
+                const auto& blk = mgr.getBlock(entry.instance_name);
+                entry.event_managers.clear();
+                entry.event_managers.reserve(blk.entityCount());
+                for (std::size_t e = 0; e < blk.entityCount(); ++e) {
+                    auto manager = std::make_unique<AuxiliaryEventManager>();
+                    manager->setNonsmoothPolicy(entry.spec.nonsmooth_policy);
+                    entry.event_managers.push_back(std::move(manager));
+                }
+            }
             // Defer lower_to_direct_only until after all deferred FE-coupled
             // inputs and lowered output expressions are available. Purely
             // algebraic monolithic outlet models can then drop out of the
@@ -7746,6 +9192,11 @@ void FESystem::finalizeAuxiliaryLayout()
                 entry.spec.size, entry.spec.scope,
                 solver_metadata ? &*solver_metadata : nullptr,
                 structural.constraint_groups);
+            if (entry.spec.scope == AuxiliaryStateScope::Region) {
+                auxiliaryOperatorRegistry().setBlockRowOwnerRanks(
+                    entry.instance_name,
+                    buildAuxiliaryRegionRowOwnerRanks_(entry, entity_count));
+            }
         }
     }
 
@@ -7765,6 +9216,7 @@ void FESystem::finalizeAuxiliaryLayout()
         !auxiliary_operator_registry_->isLayoutFinalized()) {
         auxiliary_operator_registry_->finalizeLayout();
     }
+    validateAuxiliaryMixedLayoutContract_();
 }
 
 void FESystem::assembleMixedAuxiliaryDense(
@@ -8170,6 +9622,10 @@ FESystem::assembleBoundaryGradient(FieldId field,
         assembler_->setPreviousSolutionK(2, state.u_prev2);
         assembler_->setPreviousSolutionViewK(2, span_prev2_view.get());
     }
+
+    const auto sensitivity_options = localSensitivityAssemblyOptions(*assembler_);
+    ScopedAssemblerOptions sensitivity_option_guard(
+        assembler_.get(), sensitivity_options);
 
     if (boundary_marker >= 0) {
         // Boundary face gradient assembly.
@@ -9103,11 +10559,18 @@ void FESystem::inferQuadraturePointLayout_(DeployedAuxEntry& entry)
                         "' has no usable quadrature reference field metadata");
     }
 
-    FE_THROW_IF(entry.entity_map.empty(),
-                InvalidStateException,
-                "FESystem::finalizeAuxiliaryLayout: QuadraturePoint instance '" +
-                    entry.instance_name +
-                    "' expanded to zero covered cells");
+    const int global_covered_cells =
+        mpiAllreduceSumIfActive(static_cast<int>(entry.entity_map.size()));
+    if (entry.entity_map.empty()) {
+        FE_THROW_IF(global_covered_cells <= 0,
+                    InvalidStateException,
+                    "FESystem::finalizeAuxiliaryLayout: QuadraturePoint instance '" +
+                        entry.instance_name +
+                        "' expanded to zero covered cells");
+        entry.qp_offsets = {0u};
+        entry.materialized = true;
+        return;
+    }
 
     if (entry.qp_offsets.empty()) {
         FE_THROW_IF(!mesh_access_, InvalidStateException,

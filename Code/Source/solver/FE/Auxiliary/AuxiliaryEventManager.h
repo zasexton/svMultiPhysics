@@ -138,6 +138,8 @@ public:
      * @param dt           Step size.
      * @param inputs       Auxiliary inputs.
      * @param params       Parameters.
+     * @param history      Entity-local auxiliary history.
+     * @param entity_index Entity index for per-entity scoped models.
      */
     [[nodiscard]] std::vector<DetectedEvent> detectEvents(
         const AuxiliaryStateModel& model,
@@ -146,7 +148,9 @@ public:
         Real t,
         Real dt,
         std::span<const Real> inputs = {},
-        std::span<const Real> params = {});
+        std::span<const Real> params = {},
+        std::span<const std::span<const Real>> history = {},
+        std::size_t entity_index = 0);
 
     /**
      * @brief Apply state transition for a detected event.
@@ -159,6 +163,9 @@ public:
      * @param t        Current time (at event).
      * @param inputs   Auxiliary inputs.
      * @param params   Parameters.
+     * @param history  Entity-local auxiliary history.
+     * @param entity_index Entity index for per-entity scoped models.
+     * @param dt       Effective step size for the event transition context.
      */
     void applyTransition(
         const AuxiliaryStateModel& model,
@@ -166,7 +173,10 @@ public:
         std::span<Real> x,
         Real t,
         std::span<const Real> inputs = {},
-        std::span<const Real> params = {});
+        std::span<const Real> params = {},
+        std::span<const std::span<const Real>> history = {},
+        std::size_t entity_index = 0,
+        Real dt = 0.0);
 
     // -----------------------------------------------------------------
     //  Diagnostics

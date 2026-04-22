@@ -8,7 +8,9 @@
 #include "Physics/Formulations/Poisson/PoissonModule.h"
 
 #include "Physics/Formulations/Poisson/PoissonBCFactories.h"
+#include "Physics/Formulations/Poisson/PoissonPostProcessing.h"
 
+#include "FE/Constraints/VertexDirichletConstraint.h"
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/FESystem.h"
@@ -60,8 +62,29 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
     spec.name = options_.field_name;
     spec.space = space_;
     const FE::FieldId u_id = system.addField(std::move(spec));
+    post::registerPostProcessing(system, u_id, *space_, options_);
 
     system.addOperator("equations");
+
+    if (!options_.node_dirichlet.values.empty()) {
+        std::vector<FE::constraints::VertexDirichletValue> values;
+        values.reserve(options_.node_dirichlet.values.size());
+        for (const auto& in : options_.node_dirichlet.values) {
+            values.push_back(FE::constraints::VertexDirichletValue{in.node_id, in.value});
+        }
+
+        FE::constraints::VertexIdMode mode = FE::constraints::VertexIdMode::GlobalVertexGid;
+        switch (options_.node_dirichlet.id_type) {
+        case NodeIdType::GlobalVertexGid:
+            mode = FE::constraints::VertexIdMode::GlobalVertexGid;
+            break;
+        default:
+            throw std::invalid_argument("PoissonModule::registerOn: unsupported node Dirichlet id type");
+        }
+
+        system.addSystemConstraint(
+            std::make_unique<FE::constraints::VertexDirichletConstraint>(u_id, std::move(values), mode));
+    }
 
     using namespace svmp::FE::forms;
 

@@ -8,6 +8,8 @@
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 #include "Constraints/SystemConstraints.h"
+#include "Constraints/VertexDirichletConstraint.h"
+#include "Dofs/EntityDofMap.h"
 #include "Auxiliary/AuxiliaryBindings.h"
 #include "Auxiliary/AuxiliaryModelBuilder.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
@@ -94,7 +96,78 @@ std::shared_ptr<Mesh> build_single_quad_mesh_with_left_edge_marker(int marker)
     return svmp::create_mesh(std::move(base));
 }
 
+std::shared_ptr<Mesh> build_single_quad_mesh_with_vertex_gids()
+{
+    auto base = std::make_shared<MeshBase>();
+
+    const std::vector<svmp::real_t> X_ref = {
+        0.0, 0.0,
+        1.0, 0.0,
+        1.0, 1.0,
+        0.0, 1.0
+    };
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4};
+    const std::vector<svmp::index_t> cell2vertex = {0, 1, 2, 3};
+
+    CellShape shape{};
+    shape.family = CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(/*spatial_dim=*/2, X_ref, cell2vertex_offsets, cell2vertex, {shape});
+    base->set_vertex_gids({10, 20, 30, 40});
+    base->finalize();
+
+    return svmp::create_mesh(std::move(base));
+}
+
 } // namespace
+
+TEST(VertexDirichletConstraint, GlobalVertexGidConstrainsScalarH1Vertex)
+{
+    auto mesh = build_single_quad_mesh_with_vertex_gids();
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+
+    FESystem sys(mesh);
+    auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+
+    std::vector<svmp::FE::constraints::VertexDirichletValue> values = {
+        {.vertex_id = 30, .value = 3.25},
+    };
+    sys.addSystemConstraint(std::make_unique<svmp::FE::constraints::VertexDirichletConstraint>(
+        u, std::move(values), svmp::FE::constraints::VertexIdMode::GlobalVertexGid));
+
+    sys.setup();
+
+    const auto* entity = sys.fieldDofHandler(u).getEntityDofMap();
+    ASSERT_NE(entity, nullptr);
+    const auto vertex_dofs = entity->getVertexDofs(2);
+    ASSERT_EQ(vertex_dofs.size(), 1u);
+    const auto dof = vertex_dofs.front() + sys.fieldDofOffset(u);
+
+    EXPECT_TRUE(sys.constraints().isConstrained(dof));
+    EXPECT_NEAR(sys.constraints().getInhomogeneity(dof), 3.25, 1e-12);
+}
+
+TEST(VertexDirichletConstraint, MissingGlobalVertexGidFailsDuringSetup)
+{
+    auto mesh = build_single_quad_mesh_with_vertex_gids();
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+
+    FESystem sys(mesh);
+    auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+
+    std::vector<svmp::FE::constraints::VertexDirichletValue> values = {
+        {.vertex_id = 999, .value = 1.0},
+    };
+    sys.addSystemConstraint(std::make_unique<svmp::FE::constraints::VertexDirichletConstraint>(
+        u, std::move(values), svmp::FE::constraints::VertexIdMode::GlobalVertexGid));
+
+    EXPECT_THROW(sys.setup(), std::invalid_argument);
+}
 
 TEST(StrongDirichletConstraint, InstalledBeforeSetupAffectsAssembly)
 {

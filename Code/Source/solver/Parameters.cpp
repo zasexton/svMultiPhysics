@@ -589,6 +589,50 @@ void BoundaryConditionParameters::set_values(tinyxml2::XMLElement* xml_elem)
 }
 
 //////////////////////////////////////////////////////////
+//          NodePressureConstraintsParameters            //
+//////////////////////////////////////////////////////////
+
+const std::string NodePressureConstraintsParameters::xml_element_name_ = "Node_pressure_constraints";
+
+NodePressureConstraintsParameters::NodePressureConstraintsParameters()
+{
+  bool required = true;
+
+  set_parameter("Id_type", "Global_vertex_gid", !required, id_type);
+  set_parameter("Values_file_path", "", required, values_file_path);
+}
+
+void NodePressureConstraintsParameters::set_values(tinyxml2::XMLElement* xml_elem)
+{
+  std::string error_msg = "Unknown " + xml_element_name_ + " XML element '";
+  using std::placeholders::_1;
+  using std::placeholders::_2;
+  std::function<void(const std::string&, const std::string&)> ftpr =
+      std::bind(&NodePressureConstraintsParameters::set_parameter_value, *this, _1, _2);
+  xml_util_set_parameters(ftpr, xml_elem, error_msg);
+  check_required();
+
+  value_set = true;
+}
+
+void NodePressureConstraintsParameters::print_parameters()
+{
+  if (!value_set) {
+    return;
+  }
+
+  std::cout << std::endl;
+  std::cout << "----------------------------------" << std::endl;
+  std::cout << "Node Pressure Constraint Parameters" << std::endl;
+  std::cout << "----------------------------------" << std::endl;
+
+  auto params_name_value = get_parameter_list();
+  for (auto& [key, value] : params_name_value) {
+    std::cout << key << ": " << value << std::endl;
+  }
+}
+
+//////////////////////////////////////////////////////////
 //            ConstitutiveModelParameters               //
 //////////////////////////////////////////////////////////
 
@@ -2157,6 +2201,8 @@ void EquationParameters::print_parameters()
     bc->print_parameters();
   }
 
+  node_pressure_constraints.print_parameters();
+
   for (auto& bf : body_forces) {
     bf->print_parameters();
   }
@@ -2186,6 +2232,9 @@ void EquationParameters::set_values(tinyxml2::XMLElement* eq_elem)
       auto bc_params = new BoundaryConditionParameters();
       bc_params->set_values(item);
       boundary_conditions.push_back(bc_params);
+
+    } else if (name == NodePressureConstraintsParameters::xml_element_name_) {
+      node_pressure_constraints.set_values(item);
 
     } else if (name == ConstitutiveModelParameters::xml_element_name_) {
       default_domain->constitutive_model.set_values(item);

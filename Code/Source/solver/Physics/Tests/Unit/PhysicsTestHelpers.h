@@ -184,6 +184,77 @@ inline void expectJacobianMatchesCentralFD(FE::systems::FESystem& system,
     }
 }
 
+inline void expectOperatorJacobianMatchesCentralFD(FE::systems::FESystem& system,
+                                                   const FE::systems::SystemStateView& base_state,
+                                                   std::string_view op,
+                                                   FE::Real eps = 1e-6,
+                                                   FE::Real rtol = 5e-5,
+                                                   FE::Real atol = 1e-8)
+{
+    ASSERT_FALSE(op.empty());
+
+    const auto n = system.dofHandler().getNumDofs();
+    ASSERT_GT(n, 0);
+
+    FE::assembly::DenseMatrixView J(n);
+    {
+        FE::systems::AssemblyRequest req;
+        req.op = std::string(op);
+        req.want_matrix = true;
+        const auto result = system.assemble(req, base_state, &J, nullptr);
+        ASSERT_TRUE(result.success) << result.error_message;
+    }
+
+    const std::vector<FE::Real> u0(base_state.u.begin(), base_state.u.end());
+    ASSERT_EQ(static_cast<FE::GlobalIndex>(u0.size()), n);
+
+    const auto& constraints = system.constraints();
+
+    for (FE::GlobalIndex j = 0; j < n; ++j) {
+        if (constraints.isConstrained(j)) {
+            continue;
+        }
+
+        std::vector<FE::Real> u_plus = u0;
+        std::vector<FE::Real> u_minus = u0;
+        u_plus[static_cast<std::size_t>(j)] += eps;
+        u_minus[static_cast<std::size_t>(j)] -= eps;
+
+        FE::systems::SystemStateView state_plus = base_state;
+        FE::systems::SystemStateView state_minus = base_state;
+        state_plus.u = std::span<const FE::Real>(u_plus);
+        state_minus.u = std::span<const FE::Real>(u_minus);
+
+        FE::assembly::DenseVectorView r_plus(n);
+        FE::assembly::DenseVectorView r_minus(n);
+        {
+            FE::systems::AssemblyRequest req;
+            req.op = std::string(op);
+            req.want_vector = true;
+            const auto rp = system.assemble(req, state_plus, nullptr, &r_plus);
+            ASSERT_TRUE(rp.success) << rp.error_message;
+        }
+        {
+            FE::systems::AssemblyRequest req;
+            req.op = std::string(op);
+            req.want_vector = true;
+            const auto rm = system.assemble(req, state_minus, nullptr, &r_minus);
+            ASSERT_TRUE(rm.success) << rm.error_message;
+        }
+
+        for (FE::GlobalIndex i = 0; i < n; ++i) {
+            if (constraints.isConstrained(i)) {
+                continue;
+            }
+
+            const FE::Real fd = (r_plus[i] - r_minus[i]) / (2.0 * eps);
+            const FE::Real Jij = J(i, j);
+            const FE::Real tol = atol + rtol * std::max<FE::Real>(1.0, std::abs(fd));
+            EXPECT_NEAR(Jij, fd, tol) << "Mismatch at (i=" << i << ", j=" << j << ")";
+        }
+    }
+}
+
 //------------------------------------------------------------------------------
 // Optional Mesh + VTK helpers (for larger, still-simple meshes)
 //------------------------------------------------------------------------------

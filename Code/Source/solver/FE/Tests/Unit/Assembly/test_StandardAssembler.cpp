@@ -1767,7 +1767,7 @@ TEST_F(StandardAssemblerTest, SetOptions) {
     EXPECT_FALSE(opts.use_constraints);
 }
 
-TEST_F(StandardAssemblerTest, ReverseScatterPolicyIsNormalizedToOwnedRowsOnly)
+TEST_F(StandardAssemblerTest, ReverseScatterPolicyIsPreserved)
 {
     AssemblyOptions options;
     options.ghost_policy = GhostPolicy::ReverseScatter;
@@ -1775,7 +1775,7 @@ TEST_F(StandardAssemblerTest, ReverseScatterPolicyIsNormalizedToOwnedRowsOnly)
     assembler_->setOptions(options);
 
     const auto& opts = assembler_->getOptions();
-    EXPECT_EQ(opts.ghost_policy, GhostPolicy::OwnedRowsOnly);
+    EXPECT_EQ(opts.ghost_policy, GhostPolicy::ReverseScatter);
 }
 
 TEST_F(StandardAssemblerTest, InitializeWithoutConfig) {

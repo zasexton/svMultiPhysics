@@ -65,6 +65,7 @@
 #include "Auxiliary/AuxiliaryStateTypes.h"
 #include "Auxiliary/AuxiliaryState.h"
 #include "Auxiliary/AuxiliaryStateIndexing.h"
+#include "Auxiliary/AuxiliaryTransferOperator.h"
 #include "Systems/SystemsExceptions.h"
 
 #include <cstddef>
@@ -196,6 +197,17 @@ public:
 
     /// Get the spec used to register a block.
     [[nodiscard]] const AuxiliaryStateSpec& getSpec(std::string_view name) const;
+
+    /// Stable entity identity/remap metadata used for restart validation.
+    [[nodiscard]] const AuxiliaryEntityRemapMetadata&
+    getEntityRemapMetadata(std::string_view name) const;
+
+    /// Override entity identity/remap metadata after scope-aware deployment resolution.
+    void setEntityRemapMetadata(std::string_view name,
+                                AuxiliaryEntityRemapMetadata metadata);
+
+    /// Build a restart schema for the registered block, including entity metadata.
+    [[nodiscard]] AuxiliaryRestartSchema restartSchema(std::string_view name) const;
 
     // -----------------------------------------------------------------
     //  Ghost synchronization
@@ -360,6 +372,7 @@ private:
     struct BlockMeta {
         AuxiliaryStateSpec spec{};
         AuxiliaryBlockIndexing indexing{};
+        AuxiliaryEntityRemapMetadata entity_metadata{};
         TransferHook transfer_hook{};
         GhostSyncHook ghost_sync_hook{};
     };
