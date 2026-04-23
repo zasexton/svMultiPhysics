@@ -8,7 +8,11 @@
 #include "Systems/BoundaryReductionService.h"
 
 #include "Assembly/FunctionalAssembler.h"
+#if defined(FE_HAS_FSILS)
+#include "Backends/FSILS/FsilsVector.h"
+#endif
 #include "Backends/Interfaces/GenericVector.h"
+#include "Dofs/DofIndexSet.h"
 #include "Forms/BoundaryFunctional.h"
 #include "Forms/FormExpr.h"
 #include "Forms/FormKernels.h"  // for BoundaryFunctionalGradientKernel
@@ -57,7 +61,201 @@ Real allreduceSum(Real local, MPI_Comm comm)
     MPI_Allreduce(&local, &global, 1, mpiRealType(), MPI_SUM, comm);
     return global;
 }
+
+bool mpiUsesMultipleRanks(MPI_Comm comm)
+{
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (!mpi_initialized) {
+        return false;
+    }
+    int size = 1;
+    MPI_Comm_size(comm, &size);
+    return size > 1;
+}
 #endif
+
+[[nodiscard]] std::vector<GlobalIndex> ownedDofsForVector(
+    const backends::GenericVector& vec,
+    const dofs::IndexSet& fe_owned_dofs)
+{
+#if defined(FE_HAS_FSILS)
+    if (const auto* fs = dynamic_cast<const backends::FsilsVector*>(&vec);
+        fs != nullptr && fs->usesOwnedRowLayout()) {
+        return fs->ownedFeDofs();
+    }
+#else
+    (void)vec;
+#endif
+    return fe_owned_dofs.toVector();
+}
+
+#if FE_HAS_MPI
+[[nodiscard]] std::vector<Real> gatherGlobalDenseVectorFromOwners(
+    const backends::GenericVector& vec,
+    GlobalIndex global_size,
+    const dofs::IndexSet& fe_owned_dofs,
+    MPI_Comm comm)
+{
+    FE_THROW_IF(global_size < 0, InvalidArgumentException,
+                "BoundaryReductionService: negative vector size");
+
+    auto* mutable_vec = const_cast<backends::GenericVector*>(&vec);
+    auto view = mutable_vec->createAssemblyView();
+    FE_CHECK_NOT_NULL(view.get(), "BoundaryReductionService: global dense gather view");
+
+    const auto n = static_cast<std::size_t>(global_size);
+    std::vector<Real> local(n, Real(0.0));
+    for (const auto dof : ownedDofsForVector(vec, fe_owned_dofs)) {
+        if (dof < 0 || dof >= global_size) {
+            continue;
+        }
+        local[static_cast<std::size_t>(dof)] = view->getVectorEntry(dof);
+    }
+
+    std::vector<Real> global(n, Real(0.0));
+    if (!local.empty()) {
+        MPI_Allreduce(local.data(),
+                      global.data(),
+                      static_cast<int>(local.size()),
+                      mpiRealType(),
+                      MPI_SUM,
+                      comm);
+    }
+    return global;
+}
+#endif
+
+struct DistributedFunctionalState {
+    SystemStateView view{};
+    std::vector<Real> u{};
+    std::vector<Real> u_prev{};
+    std::vector<Real> u_prev2{};
+};
+
+[[nodiscard]] DistributedFunctionalState makeFunctionalEvaluationState(
+    const FESystem& system,
+    const SystemStateView& state)
+{
+    DistributedFunctionalState out;
+    out.view = state;
+
+#if FE_HAS_MPI
+    const auto comm = system.dofHandler().mpiComm();
+    if (!mpiUsesMultipleRanks(comm)) {
+        return out;
+    }
+
+    const auto& owned = system.dofHandler().getPartition().locallyOwned();
+    auto gather_if_backed = [&](const backends::GenericVector* vec,
+                                std::span<const Real>& span,
+                                const backends::GenericVector*& vec_slot,
+                                std::vector<Real>& storage) {
+        if (vec == nullptr) {
+            return;
+        }
+        const auto global_size = vec->size();
+        storage = gatherGlobalDenseVectorFromOwners(*vec, global_size, owned, comm);
+        span = std::span<const Real>(storage.data(), storage.size());
+        vec_slot = nullptr;
+    };
+
+    gather_if_backed(state.u_vector, out.view.u, out.view.u_vector, out.u);
+    gather_if_backed(state.u_prev_vector, out.view.u_prev, out.view.u_prev_vector, out.u_prev);
+    gather_if_backed(state.u_prev2_vector, out.view.u_prev2, out.view.u_prev2_vector, out.u_prev2);
+
+    // The dense snapshot replaces backend-vector sampling. If callers supplied
+    // a compact history span tied to backend local storage, prefer the explicit
+    // dense previous-state spans that were gathered above.
+    if (!out.view.u_history.empty() &&
+        (state.u_prev_vector != nullptr || state.u_prev2_vector != nullptr)) {
+        out.view.u_history = {};
+    }
+#else
+    (void)system;
+#endif
+
+    return out;
+}
+
+void traceSampledVectorDofs(const FESystem& system,
+                            const forms::BoundaryFunctional& functional,
+                            const backends::GenericVector* vec_ptr)
+{
+    const char* trace_dofs_env = std::getenv("SVMP_MONO_AUX_TRACE_DOFS");
+    if (trace_dofs_env == nullptr || *trace_dofs_env == '\0' || vec_ptr == nullptr) {
+        return;
+    }
+
+    static thread_local int trace_budget = 64;
+    if (trace_budget <= 0) {
+        return;
+    }
+
+    std::vector<GlobalIndex> trace_dofs;
+    const char* cursor = trace_dofs_env;
+    while (*cursor != '\0') {
+        char* end = nullptr;
+        const long value = std::strtol(cursor, &end, 10);
+        if (end != cursor) {
+            trace_dofs.push_back(static_cast<GlobalIndex>(value));
+            cursor = end;
+        }
+        while (*cursor == ',' || *cursor == ' ' || *cursor == ';') {
+            ++cursor;
+        }
+        if (end == cursor && *cursor != '\0') {
+            ++cursor;
+        }
+    }
+    if (trace_dofs.empty()) {
+        return;
+    }
+
+    auto* vec = const_cast<backends::GenericVector*>(vec_ptr);
+    auto view = vec->createAssemblyView();
+    if (!view) {
+        return;
+    }
+
+    std::vector<Real> trace_values(trace_dofs.size(), 0.0);
+    view->getVectorEntries(trace_dofs, trace_values);
+
+    int rank = 0;
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized) {
+        MPI_Comm_rank(system.dofHandler().mpiComm(), &rank);
+    }
+#endif
+
+    const auto& constraints = system.constraints();
+#if defined(FE_HAS_FSILS)
+    const auto* fsils_vec = dynamic_cast<const backends::FsilsVector*>(vec_ptr);
+#else
+    const void* fsils_vec = nullptr;
+#endif
+    std::fprintf(stderr,
+                 "[BoundaryReductionVectorDofs] rank=%d functional='%s' marker=%d",
+                 rank,
+                 functional.name.c_str(),
+                 functional.boundary_marker);
+    for (std::size_t i = 0; i < trace_dofs.size(); ++i) {
+        std::fprintf(stderr,
+                     " dof=%lld constrained=%d owned=%d value=%.17g",
+                     static_cast<long long>(trace_dofs[i]),
+                     constraints.isConstrained(trace_dofs[i]) ? 1 : 0,
+#if defined(FE_HAS_FSILS)
+                     fsils_vec != nullptr && fsils_vec->ownsFeDof(trace_dofs[i]) ? 1 : 0,
+#else
+                     0,
+#endif
+                     static_cast<double>(trace_values[i]));
+    }
+    std::fprintf(stderr, "\n");
+    --trace_budget;
+}
 
 /// Trivial FunctionalKernel that integrates 1.0 over boundary faces to compute
 /// the geometric measure (area in 3D, length in 2D) of a boundary marker.
@@ -355,13 +553,17 @@ Real BoundaryReductionService::evaluateFunctionalEntry(CompiledFunctional& entry
     refreshGhostedCoefficients(state.u_prev_vector);
     refreshGhostedCoefficients(state.u_prev2_vector);
 
+    traceSampledVectorDofs(system_, entry.def, state.u_vector);
+
+    auto eval_state = makeFunctionalEvaluationState(system_, state);
+
     assembly::FunctionalAssembler assembler;
-    configureAssembler(assembler, state, /*bind_solution=*/true);
+    configureAssembler(assembler, eval_state.view, /*bind_solution=*/true);
 
     // Bind solution view for MPI-aware DOF access.
     std::unique_ptr<assembly::GlobalSystemView> solution_view;
-    if (state.u_vector != nullptr) {
-        auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
+    if (eval_state.view.u_vector != nullptr) {
+        auto* vec = const_cast<backends::GenericVector*>(eval_state.view.u_vector);
         solution_view = vec->createAssemblyView();
         assembler.setSolutionView(solution_view.get());
     }
@@ -419,13 +621,13 @@ Real BoundaryReductionService::evaluateFunctionalEntry(CompiledFunctional& entry
     // Previous solution views for MPI.
     std::unique_ptr<assembly::GlobalSystemView> prev_solution_view;
     std::unique_ptr<assembly::GlobalSystemView> prev2_solution_view;
-    if (state.u_prev_vector != nullptr) {
-        auto* vec = const_cast<backends::GenericVector*>(state.u_prev_vector);
+    if (eval_state.view.u_prev_vector != nullptr) {
+        auto* vec = const_cast<backends::GenericVector*>(eval_state.view.u_prev_vector);
         prev_solution_view = vec->createAssemblyView();
         assembler.setPreviousSolutionView(prev_solution_view.get());
     }
-    if (state.u_prev2_vector != nullptr) {
-        auto* vec = const_cast<backends::GenericVector*>(state.u_prev2_vector);
+    if (eval_state.view.u_prev2_vector != nullptr) {
+        auto* vec = const_cast<backends::GenericVector*>(eval_state.view.u_prev2_vector);
         prev2_solution_view = vec->createAssemblyView();
         assembler.setPreviousSolution2View(prev2_solution_view.get());
     }
@@ -524,25 +726,27 @@ Real BoundaryReductionService::evaluateFunctionalOverCells(
     refreshGhostedCoefficients(state.u_prev_vector);
     refreshGhostedCoefficients(state.u_prev2_vector);
 
+    auto eval_state = makeFunctionalEvaluationState(system_, state);
+
     assembly::FunctionalAssembler assembler;
-    configureAssembler(assembler, state, /*bind_solution=*/true);
+    configureAssembler(assembler, eval_state.view, /*bind_solution=*/true);
 
     std::unique_ptr<assembly::GlobalSystemView> solution_view;
-    if (state.u_vector != nullptr) {
-        auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
+    if (eval_state.view.u_vector != nullptr) {
+        auto* vec = const_cast<backends::GenericVector*>(eval_state.view.u_vector);
         solution_view = vec->createAssemblyView();
         assembler.setSolutionView(solution_view.get());
     }
 
     std::unique_ptr<assembly::GlobalSystemView> prev_solution_view;
     std::unique_ptr<assembly::GlobalSystemView> prev2_solution_view;
-    if (state.u_prev_vector != nullptr) {
-        auto* vec = const_cast<backends::GenericVector*>(state.u_prev_vector);
+    if (eval_state.view.u_prev_vector != nullptr) {
+        auto* vec = const_cast<backends::GenericVector*>(eval_state.view.u_prev_vector);
         prev_solution_view = vec->createAssemblyView();
         assembler.setPreviousSolutionView(prev_solution_view.get());
     }
-    if (state.u_prev2_vector != nullptr) {
-        auto* vec = const_cast<backends::GenericVector*>(state.u_prev2_vector);
+    if (eval_state.view.u_prev2_vector != nullptr) {
+        auto* vec = const_cast<backends::GenericVector*>(eval_state.view.u_prev2_vector);
         prev2_solution_view = vec->createAssemblyView();
         assembler.setPreviousSolution2View(prev2_solution_view.get());
     }

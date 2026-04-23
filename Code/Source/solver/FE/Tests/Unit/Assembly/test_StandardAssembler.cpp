@@ -25,8 +25,10 @@
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/Assembler.h"
 #include "Dofs/DofMap.h"
+#include "Forms/MonolithicCellKernel.h"
 #include "Spaces/FunctionSpace.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/ProductSpace.h"
 #include "Constraints/AffineConstraints.h"
 #include "Elements/LagrangeElement.h"
 #include "Geometry/MappingFactory.h"
@@ -221,6 +223,78 @@ public:
     {
         callback(0);
     }
+
+    void forEachBoundaryFace(int /*marker*/,
+                             std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+private:
+    std::vector<std::array<Real, 3>> nodes_{};
+    std::array<GlobalIndex, 4> cell_{};
+};
+
+class AffineSingleQuadMeshAccess final : public IMeshAccess {
+public:
+    AffineSingleQuadMeshAccess()
+    {
+        nodes_ = {
+            {0.0, 0.0, 0.0},
+            {2.0, 0.0, 0.0},
+            {2.0, 1.0, 0.0},
+            {0.0, 1.0, 0.0},
+        };
+        cell_ = {0, 1, 2, 3};
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return ElementType::Quad4; }
+
+    void getCellNodes(GlobalIndex /*cell_id*/, std::vector<GlobalIndex>& nodes) const override
+    {
+        nodes.assign(cell_.begin(), cell_.end());
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(GlobalIndex /*cell_id*/,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        coords.resize(cell_.size());
+        for (std::size_t i = 0; i < cell_.size(); ++i) {
+            coords[i] = nodes_.at(static_cast<std::size_t>(cell_[i]));
+        }
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/,
+                                               GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return -1; }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex>
+    getInteriorFaceCells(GlobalIndex /*face_id*/) const override
+    {
+        return {0, 0};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
 
     void forEachBoundaryFace(int /*marker*/,
                              std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override
@@ -500,6 +574,36 @@ inline dofs::DofMap createTestDofMap() {
     return dof_map;
 }
 
+inline dofs::DofMap createSingleCellDofMap(GlobalIndex n_dofs)
+{
+    dofs::DofMap dof_map(1, n_dofs, static_cast<LocalIndex>(n_dofs));
+    std::vector<GlobalIndex> cell_dofs(static_cast<std::size_t>(n_dofs));
+    std::iota(cell_dofs.begin(), cell_dofs.end(), GlobalIndex{0});
+    dof_map.setCellDofs(0, cell_dofs);
+    dof_map.setNumDofs(n_dofs);
+    dof_map.setNumLocalDofs(n_dofs);
+    dof_map.finalize();
+    return dof_map;
+}
+
+inline void expectDenseSystemNear(const TestDenseSystemView& actual,
+                                  const TestDenseSystemView& expected,
+                                  Real tol,
+                                  const char* label)
+{
+    ASSERT_EQ(actual.matrix().size(), expected.matrix().size()) << label;
+    ASSERT_EQ(actual.vectorData().size(), expected.vectorData().size()) << label;
+
+    for (std::size_t i = 0; i < actual.matrix().size(); ++i) {
+        EXPECT_NEAR(actual.matrix()[i], expected.matrix()[i], tol)
+            << label << " matrix[" << i << "]";
+    }
+    for (std::size_t i = 0; i < actual.vectorData().size(); ++i) {
+        EXPECT_NEAR(actual.vectorData()[i], expected.vectorData()[i], tol)
+            << label << " vector[" << i << "]";
+    }
+}
+
 /**
  * @brief Identity kernel for testing - produces identity matrix contributions
  */
@@ -697,6 +801,339 @@ public:
         return RequiredData::PhysicalGradients | RequiredData::IntegrationWeights;
     }
 };
+
+class RectangularMassKernel final : public AssemblyKernel {
+public:
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        const auto n_test = ctx.numTestDofs();
+        const auto n_trial = ctx.numTrialDofs();
+        const auto n_qpts = ctx.numQuadraturePoints();
+
+        output.reserve(n_test, n_trial, /*need_matrix=*/true, /*need_vector=*/true);
+
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx.integrationWeight(q);
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                const Real phi_i = ctx.basisValue(i, q);
+                for (LocalIndex j = 0; j < n_trial; ++j) {
+                    const Real psi_j = ctx.trialBasisValue(j, q);
+                    output.local_matrix[static_cast<std::size_t>(i * n_trial + j)] +=
+                        w * phi_i * psi_j;
+                }
+                output.local_vector[static_cast<std::size_t>(i)] += w * phi_i;
+            }
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::BasisValues | RequiredData::IntegrationWeights;
+    }
+};
+
+class RectangularStiffnessKernel final : public AssemblyKernel {
+public:
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        const auto n_test = ctx.numTestDofs();
+        const auto n_trial = ctx.numTrialDofs();
+        const auto n_qpts = ctx.numQuadraturePoints();
+
+        output.reserve(n_test, n_trial, /*need_matrix=*/true, /*need_vector=*/true);
+
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx.integrationWeight(q);
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                const auto grad_i = ctx.physicalGradient(i, q);
+                Real rhs_coeff = 0.0;
+                for (int d = 0; d < 3; ++d) {
+                    rhs_coeff += grad_i[static_cast<std::size_t>(d)];
+                }
+                output.local_vector[static_cast<std::size_t>(i)] += w * rhs_coeff;
+
+                for (LocalIndex j = 0; j < n_trial; ++j) {
+                    const auto grad_j = ctx.trialPhysicalGradient(j, q);
+                    Real dot = 0.0;
+                    for (int d = 0; d < 3; ++d) {
+                        dot += grad_i[static_cast<std::size_t>(d)] *
+                               grad_j[static_cast<std::size_t>(d)];
+                    }
+                    output.local_matrix[static_cast<std::size_t>(i * n_trial + j)] += w * dot;
+                }
+            }
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::PhysicalGradients | RequiredData::IntegrationWeights;
+    }
+};
+
+class FieldAwareKernel final : public AssemblyKernel {
+public:
+    FieldAwareKernel(FieldId scalar_field, FieldId vector_field)
+        : scalar_field_(scalar_field)
+        , vector_field_(vector_field)
+    {
+    }
+
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        const auto n_test = ctx.numTestDofs();
+        const auto n_trial = ctx.numTrialDofs();
+        const auto n_qpts = ctx.numQuadraturePoints();
+
+        output.reserve(n_test, n_trial, /*need_matrix=*/true, /*need_vector=*/true);
+
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx.integrationWeight(q);
+            const Real scalar = ctx.fieldValue(scalar_field_, q);
+            const auto scalar_grad = ctx.fieldGradient(scalar_field_, q);
+            const auto vec = ctx.fieldVectorValue(vector_field_, q);
+            const auto vec_jac = ctx.fieldJacobian(vector_field_, q);
+            const Real scalar_prev1 = ctx.fieldPreviousValue(scalar_field_, q, 1);
+            const Real scalar_prev2 = ctx.fieldPreviousValue(scalar_field_, q, 2);
+            const auto vec_prev1 = ctx.fieldPreviousVectorValue(vector_field_, q, 1);
+            const auto vec_prev2 = ctx.fieldPreviousVectorValue(vector_field_, q, 2);
+
+            const Real mass_coeff =
+                Real(0.50) * scalar +
+                Real(0.10) * (scalar_grad[0] + Real(0.5) * scalar_grad[1]) +
+                Real(0.05) * (vec[0] - Real(1.5) * vec[1]) +
+                Real(0.03) * (vec_jac[0][0] + Real(0.75) * vec_jac[1][1]) +
+                Real(0.125) * scalar_prev1 -
+                Real(0.0625) * scalar_prev2 +
+                Real(0.04) * vec_prev1[0] -
+                Real(0.015) * vec_prev2[1];
+
+            const Real rhs_coeff =
+                scalar -
+                Real(0.25) * scalar_prev1 +
+                Real(0.10) * scalar_prev2 +
+                Real(0.2) * vec[0] +
+                Real(0.05) * vec_prev1[1] -
+                Real(0.03) * vec_prev2[0];
+
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                const Real phi_i = ctx.basisValue(i, q);
+                const auto grad_i = ctx.physicalGradient(i, q);
+                output.local_vector[static_cast<std::size_t>(i)] +=
+                    w * phi_i * rhs_coeff;
+
+                for (LocalIndex j = 0; j < n_trial; ++j) {
+                    const Real psi_j = ctx.trialBasisValue(j, q);
+                    const auto grad_j = ctx.trialPhysicalGradient(j, q);
+                    Real grad_dot = 0.0;
+                    for (int d = 0; d < 3; ++d) {
+                        grad_dot += grad_i[static_cast<std::size_t>(d)] *
+                                    grad_j[static_cast<std::size_t>(d)];
+                    }
+
+                    output.local_matrix[static_cast<std::size_t>(i * n_trial + j)] +=
+                        w * (mass_coeff * phi_i * psi_j + Real(0.2) * grad_dot);
+                }
+            }
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::BasisValues |
+               RequiredData::PhysicalGradients |
+               RequiredData::IntegrationWeights;
+    }
+
+    [[nodiscard]] std::vector<FieldRequirement> fieldRequirements() const override
+    {
+        return {
+            FieldRequirement{
+                scalar_field_,
+                RequiredData::SolutionValues | RequiredData::SolutionGradients},
+            FieldRequirement{
+                vector_field_,
+                RequiredData::SolutionValues | RequiredData::SolutionGradients},
+        };
+    }
+
+private:
+    FieldId scalar_field_{INVALID_FIELD_ID};
+    FieldId vector_field_{INVALID_FIELD_ID};
+};
+
+class BasisHessianEnergyKernel final : public AssemblyKernel {
+public:
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        const auto n_test = ctx.numTestDofs();
+        const auto n_trial = ctx.numTrialDofs();
+        const auto n_qpts = ctx.numQuadraturePoints();
+
+        output.reserve(n_test, n_trial, /*need_matrix=*/true, /*need_vector=*/true);
+
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx.integrationWeight(q);
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                const Real phi_i = ctx.basisValue(i, q);
+                const auto Hi = ctx.physicalHessian(i, q);
+                const Real trace_i = Hi[0][0] + Hi[1][1] + Hi[2][2];
+                output.local_vector[static_cast<std::size_t>(i)] +=
+                    w * phi_i * (Real(0.3) + trace_i);
+
+                for (LocalIndex j = 0; j < n_trial; ++j) {
+                    const Real psi_j = ctx.trialBasisValue(j, q);
+                    const auto Hj = ctx.trialPhysicalHessian(j, q);
+                    Real hdot = 0.0;
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            hdot += Hi[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
+                                    Hj[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                        }
+                    }
+                    output.local_matrix[static_cast<std::size_t>(i * n_trial + j)] +=
+                        w * (phi_i * psi_j + Real(0.05) * hdot);
+                }
+            }
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::BasisValues |
+               RequiredData::BasisHessians |
+               RequiredData::IntegrationWeights;
+    }
+};
+
+class FieldFullDerivativeKernel final : public AssemblyKernel {
+public:
+    FieldFullDerivativeKernel(FieldId scalar_field, FieldId vector_field)
+        : scalar_field_(scalar_field)
+        , vector_field_(vector_field)
+    {
+    }
+
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        const auto n_test = ctx.numTestDofs();
+        const auto n_trial = ctx.numTrialDofs();
+        const auto n_qpts = ctx.numQuadraturePoints();
+
+        output.reserve(n_test, n_trial, /*need_matrix=*/true, /*need_vector=*/true);
+
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx.integrationWeight(q);
+            const Real scalar = ctx.fieldValue(scalar_field_, q);
+            const auto scalar_grad = ctx.fieldGradient(scalar_field_, q);
+            const auto scalar_hess = ctx.fieldHessian(scalar_field_, q);
+            const Real scalar_lap = ctx.fieldLaplacian(scalar_field_, q);
+            const auto vec = ctx.fieldVectorValue(vector_field_, q);
+            const auto vec_jac = ctx.fieldJacobian(vector_field_, q);
+            const auto vec_hess0 = ctx.fieldComponentHessian(vector_field_, q, 0);
+            const Real vec_lap1 = ctx.fieldComponentLaplacian(vector_field_, q, 1);
+
+            const Real field_coeff =
+                Real(0.40) * scalar +
+                Real(0.07) * scalar_grad[0] -
+                Real(0.03) * scalar_grad[1] +
+                Real(0.05) * (scalar_hess[0][0] + Real(0.5) * scalar_hess[1][1]) +
+                Real(0.02) * scalar_lap +
+                Real(0.09) * vec[0] -
+                Real(0.04) * vec[1] +
+                Real(0.015) * (vec_jac[0][0] - vec_jac[1][1]) +
+                Real(0.01) * (vec_hess0[0][0] + vec_hess0[0][1]) -
+                Real(0.006) * vec_lap1;
+
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                const Real phi_i = ctx.basisValue(i, q);
+                output.local_vector[static_cast<std::size_t>(i)] +=
+                    w * phi_i * field_coeff;
+
+                for (LocalIndex j = 0; j < n_trial; ++j) {
+                    const Real psi_j = ctx.trialBasisValue(j, q);
+                    output.local_matrix[static_cast<std::size_t>(i * n_trial + j)] +=
+                        w * phi_i * psi_j * (Real(1.0) + field_coeff);
+                }
+            }
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::BasisValues | RequiredData::IntegrationWeights;
+    }
+
+    [[nodiscard]] std::vector<FieldRequirement> fieldRequirements() const override
+    {
+        const auto all_derivatives =
+            RequiredData::SolutionValues |
+            RequiredData::SolutionGradients |
+            RequiredData::SolutionHessians |
+            RequiredData::SolutionLaplacians;
+        return {
+            FieldRequirement{scalar_field_, all_derivatives},
+            FieldRequirement{vector_field_, all_derivatives},
+        };
+    }
+
+private:
+    FieldId scalar_field_{INVALID_FIELD_ID};
+    FieldId vector_field_{INVALID_FIELD_ID};
+};
+
+inline AssemblyResult assembleDiagonalMonolithic(
+    StandardAssembler& assembler,
+    const IMeshAccess& mesh,
+    const spaces::FunctionSpace& space,
+    const dofs::DofMap& dof_map,
+    const std::vector<std::shared_ptr<AssemblyKernel>>& kernels,
+    TestDenseSystemView& output)
+{
+    std::vector<forms::MonolithicCellKernel::BlockSpec> blocks;
+    blocks.reserve(kernels.size());
+    const auto block_size = static_cast<GlobalIndex>(space.dofs_per_element());
+
+    for (std::size_t bi = 0; bi < kernels.size(); ++bi) {
+        const auto offset = static_cast<GlobalIndex>(bi) * block_size;
+        blocks.push_back(forms::MonolithicCellKernel::BlockSpec{
+            .test_field = static_cast<FieldId>(2000 + static_cast<int>(bi)),
+            .trial_field = static_cast<FieldId>(2000 + static_cast<int>(bi)),
+            .want_matrix = true,
+            .want_vector = true,
+            .fallback_kernel = kernels[bi],
+            .test_space = &space,
+            .trial_space = &space,
+            .row_dof_map = &dof_map,
+            .col_dof_map = &dof_map,
+            .row_dof_offset = offset,
+            .col_dof_offset = offset,
+        });
+    }
+
+    forms::MonolithicCellKernel monolithic_kernel(
+        std::move(blocks),
+        std::shared_ptr<forms::jit::JITCompiler>{},
+        forms::JITOptions{});
+    monolithic_kernel.setResolved();
+
+    const FusedCellTerm parent_term{
+        .test_space = &space,
+        .trial_space = &space,
+        .kernel = &monolithic_kernel,
+        .row_dof_map = &dof_map,
+        .col_dof_map = &dof_map,
+        .row_dof_offset = 0,
+        .col_dof_offset = 0,
+        .matrix_view = &output,
+        .vector_view = &output,
+        .assemble_matrix = true,
+        .assemble_vector = true,
+    };
+
+    return assembler.assembleCellsFused(
+        mesh, std::span<const FusedCellTerm>(&parent_term, 1));
+}
 
 // Forward declaration for mock element
 class MockElement;
@@ -2506,6 +2943,575 @@ TEST(StandardAssemblerEdgeCases, ConstraintChainDistributesToMasters) {
     // Constrained rows are not populated by distribution.
     EXPECT_DOUBLE_EQ(sys.getMatrixEntry(0, 0), 0.0);
     EXPECT_DOUBLE_EQ(sys.getMatrixEntry(1, 1), 0.0);
+}
+
+TEST(StandardAssemblerCaches, MonolithicFieldPopulationFastPathMatchesSequentialFallbackOnQuad4)
+{
+    SingleQuadMeshAccess mesh;
+    auto scalar_space = std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+    auto vector_space = std::make_shared<spaces::ProductSpace>(scalar_space, /*components=*/2);
+    auto scalar_map = createSingleCellDofMap(4);
+    auto vector_map = createSingleCellDofMap(8);
+
+    constexpr FieldId kScalarField = 101;
+    constexpr FieldId kVectorField = 102;
+
+    std::array<FieldSolutionAccess, 2> field_access = {{
+        FieldSolutionAccess{
+            .field = kScalarField,
+            .space = scalar_space.get(),
+            .dof_map = &scalar_map,
+            .dof_offset = 0,
+        },
+        FieldSolutionAccess{
+            .field = kVectorField,
+            .space = vector_space.get(),
+            .dof_map = &vector_map,
+            .dof_offset = 4,
+        },
+    }};
+
+    std::vector<Real> current(12, 0.0);
+    std::vector<Real> previous1(12, 0.0);
+    std::vector<Real> previous2(12, 0.0);
+    for (std::size_t i = 0; i < current.size(); ++i) {
+        current[i] = Real(0.07) * Real(i + 1);
+        previous1[i] = Real(-0.03) * Real(i + 2);
+        previous2[i] = Real(0.02) * Real(i + 3);
+    }
+
+    TimeIntegrationContext time_ctx;
+    time_ctx.integrator_name = "test-history";
+    time_ctx.dt1 = TimeDerivativeStencil{
+        .order = 1,
+        .a = {Real(1.0), Real(-1.0), Real(0.25)},
+    };
+
+    auto configure_field_state = [&](StandardAssembler& assembler) {
+        assembler.setFieldSolutionAccess(field_access);
+        assembler.setCurrentSolution(current);
+        assembler.setPreviousSolution(previous1);
+        assembler.setPreviousSolution2(previous2);
+        assembler.setTimeIntegrationContext(&time_ctx);
+    };
+
+    auto block0_kernel = std::make_shared<FieldAwareKernel>(kScalarField, kVectorField);
+    auto block1_kernel = std::make_shared<FieldAwareKernel>(kScalarField, kVectorField);
+
+    TestDenseSystemView reference(8);
+    reference.zero();
+
+    StandardAssembler sequential;
+    sequential.setDofMap(scalar_map);
+    sequential.initialize();
+    configure_field_state(sequential);
+
+    sequential.setRowDofMap(scalar_map, /*row_offset=*/0);
+    sequential.setColDofMap(scalar_map, /*col_offset=*/0);
+    auto seq0 = sequential.assembleBoth(
+        mesh, *scalar_space, *scalar_space, *block0_kernel, reference, reference);
+    EXPECT_TRUE(seq0.success);
+
+    sequential.setRowDofMap(scalar_map, /*row_offset=*/4);
+    sequential.setColDofMap(scalar_map, /*col_offset=*/4);
+    auto seq1 = sequential.assembleBoth(
+        mesh, *scalar_space, *scalar_space, *block1_kernel, reference, reference);
+    EXPECT_TRUE(seq1.success);
+
+    std::vector<forms::MonolithicCellKernel::BlockSpec> blocks;
+    blocks.push_back(forms::MonolithicCellKernel::BlockSpec{
+        .test_field = 1,
+        .trial_field = 1,
+        .want_matrix = true,
+        .want_vector = true,
+        .fallback_kernel = block0_kernel,
+        .test_space = scalar_space.get(),
+        .trial_space = scalar_space.get(),
+        .row_dof_map = &scalar_map,
+        .col_dof_map = &scalar_map,
+        .row_dof_offset = 0,
+        .col_dof_offset = 0,
+    });
+    blocks.push_back(forms::MonolithicCellKernel::BlockSpec{
+        .test_field = 2,
+        .trial_field = 2,
+        .want_matrix = true,
+        .want_vector = true,
+        .fallback_kernel = block1_kernel,
+        .test_space = scalar_space.get(),
+        .trial_space = scalar_space.get(),
+        .row_dof_map = &scalar_map,
+        .col_dof_map = &scalar_map,
+        .row_dof_offset = 4,
+        .col_dof_offset = 4,
+    });
+
+    forms::MonolithicCellKernel monolithic_kernel(
+        std::move(blocks),
+        std::shared_ptr<forms::jit::JITCompiler>{},
+        forms::JITOptions{});
+    monolithic_kernel.setResolved();
+
+    TestDenseSystemView actual(8);
+    actual.zero();
+
+    StandardAssembler monolithic;
+    monolithic.setDofMap(scalar_map);
+    monolithic.initialize();
+    configure_field_state(monolithic);
+
+    const FusedCellTerm parent_term{
+        .test_space = scalar_space.get(),
+        .trial_space = scalar_space.get(),
+        .kernel = &monolithic_kernel,
+        .row_dof_map = &scalar_map,
+        .col_dof_map = &scalar_map,
+        .row_dof_offset = 0,
+        .col_dof_offset = 0,
+        .matrix_view = &actual,
+        .vector_view = &actual,
+        .assemble_matrix = true,
+        .assemble_vector = true,
+    };
+
+    const auto fused = monolithic.assembleCellsFused(
+        mesh, std::span<const FusedCellTerm>(&parent_term, 1));
+    EXPECT_TRUE(fused.success);
+    expectDenseSystemNear(
+        actual, reference, Real(1.0e-12),
+        "Monolithic field fast-path parity");
+}
+
+TEST(StandardAssemblerCaches, GeometryCacheInvalidatesAcrossQuadToTetraReuse)
+{
+    SingleQuadMeshAccess quad_mesh;
+    spaces::H1Space quad_space(ElementType::Quad4, /*order=*/1);
+    auto quad_map = createSingleCellDofMap(4);
+
+    const std::array<std::array<Real, 3>, 4> tetra_nodes = {{
+        {0.0, 0.0, 0.0},
+        {1.2, 0.1, 0.0},
+        {0.2, 1.1, 0.1},
+        {0.1, 0.3, 1.4},
+    }};
+    ConfigurableSingleTetraMeshAccess tetra_mesh(
+        tetra_nodes, /*cell_nodes=*/{0, 1, 2, 3});
+    spaces::H1Space tetra_space(ElementType::Tetra4, /*order=*/1);
+    auto tetra_map = createSingleCellDofMap(4);
+
+    RectangularStiffnessKernel warmup_kernel;
+    RectangularStiffnessKernel test_kernel;
+    RectangularStiffnessKernel reference_kernel;
+
+    StandardAssembler reused;
+    reused.setDofMap(quad_map);
+    reused.initialize();
+
+    TestDenseSystemView quad_warmup(4);
+    quad_warmup.zero();
+    auto warm = reused.assembleBoth(
+        quad_mesh, quad_space, quad_space, warmup_kernel, quad_warmup, quad_warmup);
+    EXPECT_TRUE(warm.success);
+
+    reused.setDofMap(tetra_map);
+    reused.setRowDofMap(tetra_map);
+    reused.setColDofMap(tetra_map);
+    reused.initialize();
+
+    TestDenseSystemView actual(4);
+    actual.zero();
+    auto reused_result = reused.assembleBoth(
+        tetra_mesh, tetra_space, tetra_space, test_kernel, actual, actual);
+    EXPECT_TRUE(reused_result.success);
+
+    StandardAssembler fresh;
+    fresh.setDofMap(tetra_map);
+    fresh.initialize();
+
+    TestDenseSystemView expected(4);
+    expected.zero();
+    auto fresh_result = fresh.assembleBoth(
+        tetra_mesh, tetra_space, tetra_space, reference_kernel, expected, expected);
+    EXPECT_TRUE(fresh_result.success);
+
+    expectDenseSystemNear(
+        actual, expected, Real(1.0e-12),
+        "Geometry cache invalidation");
+}
+
+TEST(StandardAssemblerCaches, BasisCachesInvalidateAcrossSameSpaceToRectangularFusedReuse)
+{
+    SingleQuadMeshAccess mesh;
+    spaces::H1Space q1_space(ElementType::Quad4, /*order=*/1);
+    spaces::H1Space q2_space(ElementType::Quad4, /*order=*/2);
+    auto q1_map = createSingleCellDofMap(4);
+    auto q2_map = createSingleCellDofMap(9);
+
+    ASSERT_EQ(q1_space.dofs_per_element(), std::size_t{4});
+    ASSERT_EQ(q2_space.dofs_per_element(), std::size_t{9});
+
+    RectangularMassKernel warmup_kernel;
+    RectangularMassKernel reused_kernel_a;
+    RectangularMassKernel reused_kernel_b;
+    RectangularMassKernel fresh_kernel_a;
+    RectangularMassKernel fresh_kernel_b;
+
+    auto assemble_rectangular_fused =
+        [&](StandardAssembler& assembler,
+            RectangularMassKernel& kernel_a,
+            RectangularMassKernel& kernel_b,
+            TestDenseSystemView& out) {
+            assembler.setRowDofMap(q1_map);
+            assembler.setColDofMap(q2_map);
+
+            const std::array<FusedCellTerm, 2> terms = {{
+                FusedCellTerm{
+                    .test_space = &q1_space,
+                    .trial_space = &q2_space,
+                    .kernel = &kernel_a,
+                    .row_dof_map = &q1_map,
+                    .col_dof_map = &q2_map,
+                    .row_dof_offset = 0,
+                    .col_dof_offset = 0,
+                    .matrix_view = &out,
+                    .vector_view = &out,
+                    .assemble_matrix = true,
+                    .assemble_vector = true,
+                },
+                FusedCellTerm{
+                    .test_space = &q1_space,
+                    .trial_space = &q2_space,
+                    .kernel = &kernel_b,
+                    .row_dof_map = &q1_map,
+                    .col_dof_map = &q2_map,
+                    .row_dof_offset = 0,
+                    .col_dof_offset = 0,
+                    .matrix_view = &out,
+                    .vector_view = &out,
+                    .assemble_matrix = true,
+                    .assemble_vector = true,
+                },
+            }};
+
+            return assembler.assembleCellsFused(
+                mesh, std::span<const FusedCellTerm>(terms));
+        };
+
+    StandardAssembler reused;
+    reused.setDofMap(q1_map);
+    reused.initialize();
+
+    TestDenseSystemView warmup(4);
+    warmup.zero();
+    auto warm = reused.assembleBoth(
+        mesh, q1_space, q1_space, warmup_kernel, warmup, warmup);
+    EXPECT_TRUE(warm.success);
+
+    TestDenseSystemView actual(9);
+    actual.zero();
+    auto reused_result = assemble_rectangular_fused(
+        reused, reused_kernel_a, reused_kernel_b, actual);
+    EXPECT_TRUE(reused_result.success);
+
+    StandardAssembler fresh;
+    fresh.setDofMap(q1_map);
+    fresh.initialize();
+
+    TestDenseSystemView expected(9);
+    expected.zero();
+    auto fresh_result = assemble_rectangular_fused(
+        fresh, fresh_kernel_a, fresh_kernel_b, expected);
+    EXPECT_TRUE(fresh_result.success);
+
+    expectDenseSystemNear(
+        actual, expected, Real(1.0e-12),
+        "Basis cache invalidation");
+}
+
+TEST(StandardAssemblerCaches, BasisCachesRefreshAcrossHessianRequirementAndProductSpaceReuse)
+{
+    AffineSingleQuadMeshAccess mesh;
+    auto q1_space = std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+    auto q2_space = std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/2);
+    auto product_space = std::make_shared<spaces::ProductSpace>(q1_space, /*components=*/2);
+    auto q2_map = createSingleCellDofMap(9);
+    auto product_map = createSingleCellDofMap(8);
+
+    RectangularMassKernel warmup_kernel;
+    BasisHessianEnergyKernel reused_hessian_kernel;
+    BasisHessianEnergyKernel fresh_hessian_kernel;
+    RectangularStiffnessKernel reused_product_kernel;
+    RectangularStiffnessKernel fresh_product_kernel;
+
+    StandardAssembler reused;
+    reused.setDofMap(q2_map);
+    reused.initialize();
+
+    TestDenseSystemView warmup(9);
+    warmup.zero();
+    auto warm = reused.assembleBoth(
+        mesh, *q2_space, *q2_space, warmup_kernel, warmup, warmup);
+    EXPECT_TRUE(warm.success);
+
+    TestDenseSystemView actual_hessian(9);
+    actual_hessian.zero();
+    auto hessian_reused = reused.assembleBoth(
+        mesh, *q2_space, *q2_space, reused_hessian_kernel, actual_hessian, actual_hessian);
+    EXPECT_TRUE(hessian_reused.success);
+
+    StandardAssembler fresh_hessian;
+    fresh_hessian.setDofMap(q2_map);
+    fresh_hessian.initialize();
+
+    TestDenseSystemView expected_hessian(9);
+    expected_hessian.zero();
+    auto hessian_fresh = fresh_hessian.assembleBoth(
+        mesh, *q2_space, *q2_space, fresh_hessian_kernel, expected_hessian, expected_hessian);
+    EXPECT_TRUE(hessian_fresh.success);
+    expectDenseSystemNear(
+        actual_hessian, expected_hessian, Real(1.0e-12),
+        "Basis cache hessian requirement refresh");
+
+    constexpr GlobalIndex kProductOffset = 2;
+    reused.setDofMap(product_map);
+    reused.setRowDofMap(product_map, kProductOffset);
+    reused.setColDofMap(product_map, kProductOffset);
+    reused.initialize();
+
+    TestDenseSystemView actual_product(10);
+    actual_product.zero();
+    auto product_reused = reused.assembleBoth(
+        mesh, *product_space, *product_space,
+        reused_product_kernel, actual_product, actual_product);
+    EXPECT_TRUE(product_reused.success);
+
+    StandardAssembler fresh_product;
+    fresh_product.setDofMap(product_map);
+    fresh_product.setRowDofMap(product_map, kProductOffset);
+    fresh_product.setColDofMap(product_map, kProductOffset);
+    fresh_product.initialize();
+
+    TestDenseSystemView expected_product(10);
+    expected_product.zero();
+    auto product_fresh = fresh_product.assembleBoth(
+        mesh, *product_space, *product_space,
+        fresh_product_kernel, expected_product, expected_product);
+    EXPECT_TRUE(product_fresh.success);
+    expectDenseSystemNear(
+        actual_product, expected_product, Real(1.0e-12),
+        "Basis cache scalar-to-ProductSpace refresh");
+}
+
+TEST(StandardAssemblerCaches, TrialBasisCacheRefreshesAcrossOffsetAndQuadratureReuse)
+{
+    AffineSingleQuadMeshAccess mesh;
+    spaces::H1Space q1_space(ElementType::Quad4, /*order=*/1);
+    spaces::H1Space q2_space(ElementType::Quad4, /*order=*/2);
+    auto q1_map = createSingleCellDofMap(4);
+    auto q2_map = createSingleCellDofMap(9);
+
+    RectangularStiffnessKernel warmup_kernel;
+    RectangularStiffnessKernel reused_kernel;
+    RectangularStiffnessKernel fresh_kernel;
+
+    constexpr GlobalIndex kRowOffset = 2;
+    constexpr GlobalIndex kColOffset = 8;
+
+    auto assemble_offset_rectangular =
+        [&](StandardAssembler& assembler,
+            RectangularStiffnessKernel& kernel,
+            TestDenseSystemView& out) {
+            assembler.setRowDofMap(q1_map, kRowOffset);
+            assembler.setColDofMap(q2_map, kColOffset);
+
+            const FusedCellTerm term{
+                .test_space = &q1_space,
+                .trial_space = &q2_space,
+                .kernel = &kernel,
+                .row_dof_map = &q1_map,
+                .col_dof_map = &q2_map,
+                .row_dof_offset = kRowOffset,
+                .col_dof_offset = kColOffset,
+                .matrix_view = &out,
+                .vector_view = &out,
+                .assemble_matrix = true,
+                .assemble_vector = true,
+            };
+            return assembler.assembleCellsFused(
+                mesh, std::span<const FusedCellTerm>(&term, 1));
+        };
+
+    StandardAssembler reused;
+    reused.setDofMap(q1_map);
+    reused.initialize();
+
+    TestDenseSystemView warmup(4);
+    warmup.zero();
+    auto warm = reused.assembleBoth(
+        mesh, q1_space, q1_space, warmup_kernel, warmup, warmup);
+    EXPECT_TRUE(warm.success);
+
+    TestDenseSystemView actual(17);
+    actual.zero();
+    auto reused_result = assemble_offset_rectangular(reused, reused_kernel, actual);
+    EXPECT_TRUE(reused_result.success);
+
+    StandardAssembler fresh;
+    fresh.setDofMap(q1_map);
+    fresh.initialize();
+
+    TestDenseSystemView expected(17);
+    expected.zero();
+    auto fresh_result = assemble_offset_rectangular(fresh, fresh_kernel, expected);
+    EXPECT_TRUE(fresh_result.success);
+
+    expectDenseSystemNear(
+        actual, expected, Real(1.0e-12),
+        "Trial basis cache offset/quadrature refresh");
+}
+
+TEST(StandardAssemblerCaches, CoupledQptMajorCacheRefreshesAcrossSpaceAndHessianRequirementReuse)
+{
+    AffineSingleQuadMeshAccess mesh;
+    spaces::H1Space q1_space(ElementType::Quad4, /*order=*/1);
+    spaces::H1Space q2_space(ElementType::Quad4, /*order=*/2);
+    auto q1_map = createSingleCellDofMap(4);
+    auto q2_map = createSingleCellDofMap(9);
+
+    auto run_monolithic =
+        [&](StandardAssembler& assembler,
+            const spaces::FunctionSpace& space,
+            const dofs::DofMap& map,
+            bool require_hessians,
+            TestDenseSystemView& out) {
+            std::vector<std::shared_ptr<AssemblyKernel>> kernels;
+            if (require_hessians) {
+                kernels.push_back(std::make_shared<BasisHessianEnergyKernel>());
+                kernels.push_back(std::make_shared<BasisHessianEnergyKernel>());
+            } else {
+                kernels.push_back(std::make_shared<RectangularMassKernel>());
+                kernels.push_back(std::make_shared<RectangularMassKernel>());
+            }
+            return assembleDiagonalMonolithic(assembler, mesh, space, map, kernels, out);
+        };
+
+    StandardAssembler reused;
+    reused.setDofMap(q1_map);
+    reused.initialize();
+
+    TestDenseSystemView warmup(8);
+    warmup.zero();
+    auto warm = run_monolithic(
+        reused, q1_space, q1_map, /*require_hessians=*/false, warmup);
+    EXPECT_TRUE(warm.success);
+
+    TestDenseSystemView actual_q2(18);
+    actual_q2.zero();
+    auto reused_q2 = run_monolithic(
+        reused, q2_space, q2_map, /*require_hessians=*/false, actual_q2);
+    EXPECT_TRUE(reused_q2.success);
+
+    StandardAssembler fresh_q2;
+    fresh_q2.setDofMap(q2_map);
+    fresh_q2.initialize();
+
+    TestDenseSystemView expected_q2(18);
+    expected_q2.zero();
+    auto fresh_q2_result = run_monolithic(
+        fresh_q2, q2_space, q2_map, /*require_hessians=*/false, expected_q2);
+    EXPECT_TRUE(fresh_q2_result.success);
+    expectDenseSystemNear(
+        actual_q2, expected_q2, Real(1.0e-12),
+        "Coupled qpt-major space refresh");
+
+    TestDenseSystemView actual_hessian(18);
+    actual_hessian.zero();
+    auto reused_hessian = run_monolithic(
+        reused, q2_space, q2_map, /*require_hessians=*/true, actual_hessian);
+    EXPECT_TRUE(reused_hessian.success);
+
+    StandardAssembler fresh_hessian;
+    fresh_hessian.setDofMap(q2_map);
+    fresh_hessian.initialize();
+
+    TestDenseSystemView expected_hessian(18);
+    expected_hessian.zero();
+    auto fresh_hessian_result = run_monolithic(
+        fresh_hessian, q2_space, q2_map, /*require_hessians=*/true, expected_hessian);
+    EXPECT_TRUE(fresh_hessian_result.success);
+    expectDenseSystemNear(
+        actual_hessian, expected_hessian, Real(1.0e-12),
+        "Coupled qpt-major Hessian refresh");
+}
+
+TEST(StandardAssemblerCaches, FieldFastPathFallsBackForHessianAndLaplacianRequirements)
+{
+    AffineSingleQuadMeshAccess mesh;
+    auto state_space = std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+    auto field_scalar_space = std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/2);
+    auto field_vector_space = std::make_shared<spaces::ProductSpace>(field_scalar_space, /*components=*/2);
+    auto state_map = createSingleCellDofMap(4);
+    auto scalar_field_map = createSingleCellDofMap(9);
+    auto vector_field_map = createSingleCellDofMap(18);
+
+    constexpr FieldId kScalarField = 301;
+    constexpr FieldId kVectorField = 302;
+
+    std::array<FieldSolutionAccess, 2> field_access = {{
+        FieldSolutionAccess{
+            .field = kScalarField,
+            .space = field_scalar_space.get(),
+            .dof_map = &scalar_field_map,
+            .dof_offset = 0,
+        },
+        FieldSolutionAccess{
+            .field = kVectorField,
+            .space = field_vector_space.get(),
+            .dof_map = &vector_field_map,
+            .dof_offset = 9,
+        },
+    }};
+
+    std::vector<Real> current(27, 0.0);
+    for (std::size_t i = 0; i < current.size(); ++i) {
+        current[i] =
+            Real(0.04) * Real(i + 1) +
+            Real(0.01) * Real((i % 5) + 1);
+    }
+
+    auto configure_field_state = [&](StandardAssembler& assembler) {
+        assembler.setFieldSolutionAccess(field_access);
+        assembler.setCurrentSolution(current);
+    };
+
+    auto kernel = std::make_shared<FieldFullDerivativeKernel>(kScalarField, kVectorField);
+
+    StandardAssembler sequential;
+    sequential.setDofMap(state_map);
+    sequential.initialize();
+    configure_field_state(sequential);
+
+    TestDenseSystemView reference(4);
+    reference.zero();
+    auto seq = sequential.assembleBoth(
+        mesh, *state_space, *state_space, *kernel, reference, reference);
+    EXPECT_TRUE(seq.success);
+
+    StandardAssembler monolithic;
+    monolithic.setDofMap(state_map);
+    monolithic.initialize();
+    configure_field_state(monolithic);
+
+    TestDenseSystemView actual(4);
+    actual.zero();
+    std::vector<std::shared_ptr<AssemblyKernel>> kernels{kernel};
+    auto fused = assembleDiagonalMonolithic(
+        monolithic, mesh, *state_space, state_map, kernels, actual);
+    EXPECT_TRUE(fused.success);
+
+    expectDenseSystemNear(
+        actual, reference, Real(1.0e-12),
+        "Field fast-path Hessian/Laplacian fallback");
 }
 
 // ============================================================================

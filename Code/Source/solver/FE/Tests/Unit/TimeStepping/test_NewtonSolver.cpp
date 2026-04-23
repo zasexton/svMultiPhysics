@@ -215,6 +215,97 @@ private:
     svmp::FE::backends::LinearSolver& inner_;
 };
 
+class RecordingEffectiveTimeStepSolver final : public svmp::FE::backends::LinearSolver {
+public:
+    explicit RecordingEffectiveTimeStepSolver(svmp::FE::backends::LinearSolver& inner)
+        : inner_(inner)
+    {
+    }
+
+    [[nodiscard]] svmp::FE::backends::BackendKind backendKind() const noexcept override
+    {
+        return inner_.backendKind();
+    }
+
+    void setOptions(const svmp::FE::backends::SolverOptions& options) override
+    {
+        inner_.setOptions(options);
+    }
+
+    [[nodiscard]] const svmp::FE::backends::SolverOptions& getOptions() const noexcept override
+    {
+        return inner_.getOptions();
+    }
+
+    [[nodiscard]] svmp::FE::backends::SolverReport solve(const svmp::FE::backends::GenericMatrix& A,
+                                                          svmp::FE::backends::GenericVector& x,
+                                                          const svmp::FE::backends::GenericVector& b) override
+    {
+        return inner_.solve(A, x, b);
+    }
+
+    void setEffectiveTimeStep(double dt_eff) override
+    {
+        effective_time_steps.push_back(dt_eff);
+        inner_.setEffectiveTimeStep(dt_eff);
+    }
+
+    std::vector<double> effective_time_steps{};
+
+private:
+    svmp::FE::backends::LinearSolver& inner_;
+};
+
+class FailOnceThenSolveRecordingMatrixSolver final : public svmp::FE::backends::LinearSolver {
+public:
+    explicit FailOnceThenSolveRecordingMatrixSolver(svmp::FE::backends::LinearSolver& inner)
+        : inner_(inner)
+    {
+    }
+
+    [[nodiscard]] svmp::FE::backends::BackendKind backendKind() const noexcept override
+    {
+        return inner_.backendKind();
+    }
+
+    void setOptions(const svmp::FE::backends::SolverOptions& options) override
+    {
+        inner_.setOptions(options);
+    }
+
+    [[nodiscard]] const svmp::FE::backends::SolverOptions& getOptions() const noexcept override
+    {
+        return inner_.getOptions();
+    }
+
+    [[nodiscard]] svmp::FE::backends::SolverReport solve(const svmp::FE::backends::GenericMatrix& A,
+                                                          svmp::FE::backends::GenericVector& x,
+                                                          const svmp::FE::backends::GenericVector& b) override
+    {
+        ++solve_calls;
+        observed_diagonals.push_back(static_cast<double>(A.getEntry(0, 0)));
+        if (solve_calls == 1) {
+            svmp::FE::backends::SolverReport rep;
+            rep.converged = false;
+            rep.iterations = 0;
+            rep.message = "intentional first failure for PTC retry test";
+            return rep;
+        }
+        return inner_.solve(A, x, b);
+    }
+
+    void setEffectiveTimeStep(double dt_eff) override
+    {
+        inner_.setEffectiveTimeStep(dt_eff);
+    }
+
+    int solve_calls{0};
+    std::vector<double> observed_diagonals{};
+
+private:
+    svmp::FE::backends::LinearSolver& inner_;
+};
+
 class RecordingRankOneSolver final : public svmp::FE::backends::LinearSolver {
 public:
     explicit RecordingRankOneSolver(svmp::FE::backends::LinearSolver& inner)
@@ -958,6 +1049,112 @@ TEST(NewtonSolver, ReportContainsResidualNormsWhenNotConverged)
     EXPECT_TRUE(rep.linear.converged);
 }
 
+TEST(NewtonSolver, MonolithicAuxiliaryReportsComponentResidualNorms)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeDirectCouplingProblem(/*dt=*/0.1, /*u0=*/{0.2, -0.4, 0.1, 0.7});
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 1e-20;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.use_line_search = true;
+    nopt.line_search_max_iterations = 1;
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    const auto rep = newton.solveStep(*problem.transient,
+                                      *problem.linear,
+                                      /*solve_time=*/problem.history.dt(),
+                                      problem.history,
+                                      ws);
+
+    EXPECT_TRUE(rep.component_residual_convergence);
+    EXPECT_TRUE(std::isfinite(rep.field_residual_norm0));
+    EXPECT_TRUE(std::isfinite(rep.field_residual_norm));
+    EXPECT_TRUE(std::isfinite(rep.auxiliary_residual_norm0));
+    EXPECT_TRUE(std::isfinite(rep.auxiliary_residual_norm));
+    EXPECT_GT(rep.field_residual_norm0, 0.0);
+    EXPECT_GT(rep.auxiliary_residual_norm0, 0.0);
+
+    const double initial_combined =
+        std::hypot(rep.field_residual_norm0, rep.auxiliary_residual_norm0);
+    const double final_combined =
+        std::hypot(rep.field_residual_norm, rep.auxiliary_residual_norm);
+    EXPECT_NEAR(rep.residual_norm0,
+                initial_combined,
+                1e-12 * std::max(1.0, initial_combined));
+    EXPECT_NEAR(rep.residual_norm,
+                final_combined,
+                1e-12 * std::max(1.0, final_combined));
+}
+
+TEST(NewtonSolver, MonolithicAuxiliaryConvergenceRequiresEachResidualComponent)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    svmp::FE::timestepping::NewtonOptions probe_opts;
+    probe_opts.residual_op = "op";
+    probe_opts.jacobian_op = "op";
+    probe_opts.max_iterations = 1;
+    probe_opts.abs_tolerance = 1e-30;
+    probe_opts.rel_tolerance = 0.0;
+    probe_opts.step_tolerance = 0.0;
+    probe_opts.use_line_search = true;
+    probe_opts.line_search_max_iterations = 1;
+
+    auto probe_problem = makeDirectCouplingProblem(/*dt=*/0.1, /*u0=*/{0.2, -0.4, 0.1, 0.7});
+    svmp::FE::timestepping::NewtonSolver probe_newton(probe_opts);
+    svmp::FE::timestepping::NewtonWorkspace probe_ws;
+    probe_newton.allocateWorkspace(*probe_problem.sys, *probe_problem.factory, probe_ws);
+    probe_problem.history.repack(*probe_problem.factory);
+
+    const auto probe_rep = probe_newton.solveStep(*probe_problem.transient,
+                                                  *probe_problem.linear,
+                                                  /*solve_time=*/probe_problem.history.dt(),
+                                                  probe_problem.history,
+                                                  probe_ws);
+    ASSERT_TRUE(probe_rep.component_residual_convergence);
+    ASSERT_GT(probe_rep.residual_norm0, 0.0);
+    ASSERT_GT(probe_rep.field_residual_norm0, 0.0);
+
+    const double combined_rel = probe_rep.residual_norm / probe_rep.residual_norm0;
+    const double field_rel = probe_rep.field_residual_norm / probe_rep.field_residual_norm0;
+    if (!(std::isfinite(combined_rel) && std::isfinite(field_rel) &&
+          combined_rel > 0.0 && combined_rel < field_rel)) {
+        GTEST_SKIP() << "Fixture did not produce a combined-relative gap for this backend/configuration";
+    }
+
+    auto problem = makeDirectCouplingProblem(/*dt=*/0.1, /*u0=*/{0.2, -0.4, 0.1, 0.7});
+    auto nopt = probe_opts;
+    nopt.rel_tolerance = std::sqrt(combined_rel * field_rel);
+    nopt.abs_tolerance = 0.0;
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    const auto rep = newton.solveStep(*problem.transient,
+                                      *problem.linear,
+                                      /*solve_time=*/problem.history.dt(),
+                                      problem.history,
+                                      ws);
+
+    EXPECT_FALSE(rep.converged);
+    EXPECT_LT(rep.residual_norm / rep.residual_norm0, nopt.rel_tolerance);
+    EXPECT_GT(rep.field_residual_norm / rep.field_residual_norm0, nopt.rel_tolerance);
+}
+
 TEST(NewtonSolver, StagnationDoesNotOverrideRequestedTolerances)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
@@ -1071,6 +1268,113 @@ TEST(NewtonSolver, ThrowsWhenLinearSolveFails)
                  svmp::FE::FEException);
 }
 
+TEST(NewtonSolver, PassesEffectiveStageTimeStepToLinearSolver)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto make_problem = [] {
+        return makeScalarProblem(
+            [](const svmp::FE::forms::FormExpr& u, const svmp::FE::forms::FormExpr& v) {
+                return (u * v).dx();
+            },
+            /*dt=*/0.2,
+            /*u0=*/{1.0});
+    };
+
+    auto stage_problem = make_problem();
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 0.0;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.use_line_search = false;
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*stage_problem.sys, *stage_problem.factory, ws);
+    stage_problem.history.repack(*stage_problem.factory);
+
+    RecordingEffectiveTimeStepSolver stage_solver(*stage_problem.linear);
+    (void)newton.solveStep(*stage_problem.transient,
+                           stage_solver,
+                           /*solve_time=*/stage_problem.history.time() + 0.05,
+                           stage_problem.history,
+                           ws);
+    ASSERT_FALSE(stage_solver.effective_time_steps.empty());
+    EXPECT_NEAR(stage_solver.effective_time_steps.front(), 0.05, 1e-15);
+
+    auto fallback_problem = make_problem();
+    svmp::FE::timestepping::NewtonWorkspace ws_fallback;
+    newton.allocateWorkspace(*fallback_problem.sys, *fallback_problem.factory, ws_fallback);
+    fallback_problem.history.repack(*fallback_problem.factory);
+
+    RecordingEffectiveTimeStepSolver fallback_solver(*fallback_problem.linear);
+    (void)newton.solveStep(*fallback_problem.transient,
+                           fallback_solver,
+                           /*solve_time=*/fallback_problem.history.time(),
+                           fallback_problem.history,
+                           ws_fallback);
+    ASSERT_FALSE(fallback_solver.effective_time_steps.empty());
+    EXPECT_NEAR(fallback_solver.effective_time_steps.front(), fallback_problem.history.dt(), 1e-15);
+}
+
+TEST(NewtonSolver, PtcRetryAppliesMassLumpedDiagonalShiftAndRestoresJacobian)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr double dt = 0.2;
+    constexpr double lambda = 2.0;
+    constexpr double gamma = 3.5;
+    auto problem = makeScalarProblem(
+        [&](const svmp::FE::forms::FormExpr& u, const svmp::FE::forms::FormExpr& v) {
+            return (svmp::FE::forms::dt(u) * v + (u * v) * static_cast<svmp::FE::Real>(lambda)).dx();
+        },
+        dt,
+        /*u0=*/{1.0});
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 0.0;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.use_line_search = false;
+    nopt.pseudo_transient.enabled = true;
+    nopt.pseudo_transient.activate_on_linear_failure = true;
+    nopt.pseudo_transient.gamma_initial = gamma;
+    nopt.pseudo_transient.gamma_growth = 2.0;
+    nopt.pseudo_transient.gamma_max = 10.0;
+    nopt.pseudo_transient.max_linear_retries = 2;
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    FailOnceThenSolveRecordingMatrixSolver linear(*problem.linear);
+    EXPECT_NO_THROW((void)newton.solveStep(*problem.transient,
+                                           linear,
+                                           /*solve_time=*/problem.history.dt(),
+                                           problem.history,
+                                           ws));
+
+    ASSERT_EQ(linear.solve_calls, 2);
+    ASSERT_EQ(linear.observed_diagonals.size(), 2u);
+    ASSERT_NE(ws.ptc_mass_lumped, nullptr);
+    const auto mass = ws.ptc_mass_lumped->localSpan();
+    ASSERT_EQ(mass.size(), 1u);
+    const double expected_shift = gamma * std::abs(static_cast<double>(mass[0]));
+    EXPECT_GT(expected_shift, 0.0);
+    EXPECT_NEAR(linear.observed_diagonals[1] - linear.observed_diagonals[0],
+                expected_shift,
+                1e-12);
+}
+
 // The Jacobian-check path still validates the coupled reduced-update
 // contribution, but it now does so through the assembled/system-side operator
 // path instead of leaving a non-empty reduced-update set installed on the
@@ -1139,6 +1443,7 @@ TEST(NewtonSolver, ExplicitRankOneUsesCoupledSolveOptions)
     ts_test::setVectorByDof(problem.history.u(), {0.9, -0.1, 0.35, -0.6});
 
     RecordingSolveOptionsSolver linear(*problem.linear, /*native_rank_one_support=*/true);
+    const auto base_options = linear.getOptions();
     (void)newton.solveStep(*problem.transient,
                            linear,
                            /*solve_time=*/problem.history.dt(),
@@ -1150,9 +1455,9 @@ TEST(NewtonSolver, ExplicitRankOneUsesCoupledSolveOptions)
     EXPECT_TRUE(linear.last_updates.empty());
     EXPECT_EQ(linear.options_seen_in_solve->fsils_residual_check_policy,
               svmp::FE::backends::FsilsResidualCheckPolicy::Always);
-    EXPECT_GE(linear.options_seen_in_solve->max_iter, 200);
-    EXPECT_LE(linear.options_seen_in_solve->rel_tol, static_cast<svmp::FE::Real>(1e-8));
-    EXPECT_LE(linear.options_seen_in_solve->abs_tol, static_cast<svmp::FE::Real>(1e-12));
+    EXPECT_EQ(linear.options_seen_in_solve->max_iter, base_options.max_iter);
+    EXPECT_EQ(linear.options_seen_in_solve->rel_tol, base_options.rel_tol);
+    EXPECT_EQ(linear.options_seen_in_solve->abs_tol, base_options.abs_tol);
 }
 
 TEST(NewtonSolver, ExportsMixedAuxiliaryLayoutIntoLinearSolverOptions)

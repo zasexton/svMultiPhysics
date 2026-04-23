@@ -857,21 +857,22 @@ double auxiliaryResidualNormForConvergence(const systems::FESystem::BorderedCoup
     return std::sqrt(static_cast<double>(local_sq));
 }
 
-double borderedResidualNormForConvergence(const backends::GenericVector& r,
-                                          backends::GenericVector& scratch,
-                                          const systems::FESystem::BorderedCouplingData& bordered)
-{
-    const double pde_norm = residualNormForConvergence(r, scratch);
-    const double aux_norm = auxiliaryResidualNormForConvergence(bordered);
-    return std::hypot(pde_norm, aux_norm);
-}
+struct ResidualNormComponents {
+    double field{0.0};
+    double auxiliary{0.0};
 
-[[nodiscard]] std::pair<double, double> borderedResidualNormComponentsForConvergence(
+    [[nodiscard]] double combined() const noexcept
+    {
+        return std::hypot(field, auxiliary);
+    }
+};
+
+[[nodiscard]] ResidualNormComponents borderedResidualNormComponentsForConvergence(
     const backends::GenericVector& r,
     backends::GenericVector& scratch,
     const systems::FESystem::BorderedCouplingData& bordered)
 {
-    return {
+    return ResidualNormComponents{
         residualNormForConvergence(r, scratch),
         auxiliaryResidualNormForConvergence(bordered)
     };
@@ -3407,9 +3408,36 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         J_zero->finalizeAssembly();
     };
 
-    auto computeResidualNorm = [&]() -> double {
-        return borderedResidualNormForConvergence(
+    bool have_residual = false;
+    ResidualNormComponents current_residual_components{};
+    ResidualNormComponents initial_residual_components{};
+    double current_residual_norm = std::numeric_limits<double>::quiet_NaN();
+
+    auto componentResidualConvergenceActive = [&]() -> bool {
+        const auto& bordered = transient.system().borderedCoupling();
+        return has_monolithic_auxiliary_unknowns && bordered.active && bordered.n_aux > 0;
+    };
+
+    auto computeResidualComponents = [&]() -> ResidualNormComponents {
+        return borderedResidualNormComponentsForConvergence(
             r, residual_scratch, transient.system().borderedCoupling());
+    };
+
+    auto computeResidualNorm = [&]() -> double {
+        return computeResidualComponents().combined();
+    };
+
+    auto refreshResidualComponents = [&]() -> double {
+        current_residual_components = computeResidualComponents();
+        current_residual_norm = current_residual_components.combined();
+        return current_residual_norm;
+    };
+
+    auto updateResidualReport = [&]() {
+        report.residual_norm = current_residual_norm;
+        report.field_residual_norm = current_residual_components.field;
+        report.auxiliary_residual_norm = current_residual_components.auxiliary;
+        report.component_residual_convergence = componentResidualConvergenceActive();
     };
 
     auto traceResidualDebugState = [&](const char* phase) {
@@ -3432,16 +3460,15 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         if (!oopTraceEnabled()) {
             return;
         }
-        const auto [pde_norm, aux_norm] = borderedResidualNormComponentsForConvergence(
-            r, residual_scratch, transient.system().borderedCoupling());
+        const auto components = computeResidualComponents();
         std::ostringstream oss;
         oss << "NewtonSolver: residual components";
         if (phase != nullptr) {
             oss << " phase='" << phase << "'";
         }
-        oss << " pde=" << pde_norm
-            << " aux=" << aux_norm
-            << " combined=" << std::hypot(pde_norm, aux_norm);
+        oss << " field=" << components.field
+            << " aux=" << components.auxiliary
+            << " combined=" << components.combined();
         traceLog(oss.str());
     };
 
@@ -3574,7 +3601,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         applyResidualAdditionAndConstraints();
         traceResidualDebugState("residual_post_constraints");
         traceResidualComponents(phase);
-        return computeResidualNorm();
+        return refreshResidualComponents();
     };
 
     auto assembleJacobianOnly = [&](const systems::SystemStateView& state) {
@@ -3648,7 +3675,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         applyResidualAdditionAndConstraints();
         traceResidualDebugState("jacobian_and_residual_post_constraints");
         traceResidualComponents("jacobian_and_residual");
-        return computeResidualNorm();
+        return refreshResidualComponents();
     };
 
     auto assembleJacobianAndResidualWithJacobianOp = [&](const systems::SystemStateView& state,
@@ -3696,7 +3723,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
         residual_op_used = options_.jacobian_op;
         applyResidualAdditionAndConstraints();
-        return computeResidualNorm();
+        return refreshResidualComponents();
     };
 
     bool force_explicit_rank_one_updates =
@@ -3829,13 +3856,16 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         return true;
     };
 
-    auto tolerancesSatisfied = [&](double norm, bool pre_first_update) -> bool {
+    auto scalarToleranceSatisfied = [&](double norm, double norm0, bool pre_first_update) -> bool {
+        if (!std::isfinite(norm)) {
+            return false;
+        }
         const bool abs_enabled = options_.abs_tolerance > 0.0;
         const bool rel_enabled = options_.rel_tolerance > 0.0;
         const bool abs_ok = abs_enabled && norm <= options_.abs_tolerance;
         const bool rel_ok = rel_enabled
-            && (report.residual_norm0 > 0.0
-                    ? (norm / report.residual_norm0 <= options_.rel_tolerance)
+            && (norm0 > 0.0 && std::isfinite(norm0)
+                    ? (norm / norm0 <= options_.rel_tolerance)
                     : abs_ok);
         if (!abs_enabled && !rel_enabled) {
             return false;
@@ -3851,6 +3881,43 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             return false;
         }
         return abs_ok || rel_ok;
+    };
+
+    auto componentToleranceSatisfied = [&](double norm, double norm0, bool pre_first_update) -> bool {
+        if (norm == 0.0 && norm0 == 0.0) {
+            return true;
+        }
+        return scalarToleranceSatisfied(norm, norm0, pre_first_update);
+    };
+
+    auto tolerancesSatisfied = [&](bool pre_first_update) -> bool {
+        if (!componentResidualConvergenceActive()) {
+            return scalarToleranceSatisfied(current_residual_norm, report.residual_norm0, pre_first_update);
+        }
+        const bool field_ok = componentToleranceSatisfied(current_residual_components.field,
+                                                          initial_residual_components.field,
+                                                          pre_first_update);
+        const bool aux_ok = componentToleranceSatisfied(current_residual_components.auxiliary,
+                                                        initial_residual_components.auxiliary,
+                                                        pre_first_update);
+        if (oopTraceEnabled()) {
+            std::ostringstream oss;
+            const double field_rel =
+                (initial_residual_components.field > 0.0 && std::isfinite(initial_residual_components.field))
+                    ? current_residual_components.field / initial_residual_components.field
+                    : std::numeric_limits<double>::quiet_NaN();
+            const double aux_rel =
+                (initial_residual_components.auxiliary > 0.0 && std::isfinite(initial_residual_components.auxiliary))
+                    ? current_residual_components.auxiliary / initial_residual_components.auxiliary
+                    : std::numeric_limits<double>::quiet_NaN();
+            oss << "NewtonSolver: component convergence"
+                << " field_ok=" << (field_ok ? 1 : 0)
+                << " aux_ok=" << (aux_ok ? 1 : 0)
+                << " field_rel=" << field_rel
+                << " aux_rel=" << aux_rel;
+            traceLog(oss.str());
+        }
+        return field_ok && aux_ok;
     };
 
     auto assembleDtOnlyJacobianAndLumpedDiagonal = [&](const systems::SystemStateView& state) -> bool {
@@ -3933,8 +4000,6 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         ptc_gamma_applied = clamped;
     };
 
-    bool have_residual = false;
-    double current_residual_norm = std::numeric_limits<double>::quiet_NaN();
     bool have_jacobian = false;
     int last_jacobian_it = -1;
     const int base_jacobian_period = std::max(1, options_.jacobian_rebuild_period);
@@ -4048,9 +4113,12 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             ntp_assembly_count++;
         }
 
-        report.residual_norm = current_residual_norm;
+        updateResidualReport();
         if (it == 0) {
+            initial_residual_components = current_residual_components;
             report.residual_norm0 = current_residual_norm;
+            report.field_residual_norm0 = initial_residual_components.field;
+            report.auxiliary_residual_norm0 = initial_residual_components.auxiliary;
         }
 
         if (oopTraceEnabled()) {
@@ -4059,7 +4127,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             oss << "NewtonSolver: it=" << it
                 << " ||r||=" << report.residual_norm
                 << " ||r0||=" << report.residual_norm0
-                << " rel=" << (report.residual_norm / denom);
+                << " rel=" << (report.residual_norm / denom)
+                << " ||r_field||=" << report.field_residual_norm
+                << " ||r_aux||=" << report.auxiliary_residual_norm;
             traceLog(oss.str());
         }
 
@@ -4094,7 +4164,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             }
         }
 
-        if (tolerancesSatisfied(current_residual_norm, /*pre_first_update=*/it == 0)) {
+        if (tolerancesSatisfied(/*pre_first_update=*/it == 0)) {
             report.converged = true;
             report.iterations = it;
             if (oopTraceEnabled()) {
@@ -4892,6 +4962,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 if (!(options_.abs_tolerance > 0.0) ||
                     !(residual_fraction > static_cast<Real>(0.0)) ||
                     !(max_relative_residual > static_cast<Real>(0.0)) ||
+                    rep.iterations <= 0 ||
+                    !(rep.initial_residual_norm > static_cast<Real>(0.0)) ||
+                    !(rep.final_residual_norm >= static_cast<Real>(0.0)) ||
+                    !(rep.relative_residual >= static_cast<Real>(0.0)) ||
+                    !std::isfinite(rep.initial_residual_norm) ||
                     !std::isfinite(rep.final_residual_norm) ||
                     !std::isfinite(rep.relative_residual)) {
                     return false;
@@ -5519,6 +5594,45 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                             makeBorderedSolveOptions(base_linear_options);
                         linear.setOptions(bordered_recovery_options);
 
+                        auto bordered_column_residual =
+                            [&](backends::GenericVector& rhs,
+                                backends::GenericVector& x,
+                                backends::GenericVector& product,
+                                backends::GenericVector& residual) {
+                                product.zero();
+                                J.mult(x, product);
+                                if (!effective_rank_one_updates.empty()) {
+                                    addRankOneOperatorMatvec(
+                                        std::span<const backends::RankOneUpdate>(
+                                            effective_rank_one_updates.data(),
+                                            effective_rank_one_updates.size()),
+                                        x,
+                                        product);
+                                }
+                                if (!active_reduced_field_updates.empty()) {
+                                    addReducedFieldOperatorMatvec(
+                                        std::span<const backends::ReducedFieldUpdate>(
+                                            active_reduced_field_updates.data(),
+                                            active_reduced_field_updates.size()),
+                                        x,
+                                        product);
+                                }
+                                copyVector(residual, rhs);
+                                axpy(residual, static_cast<Real>(-1.0), product);
+                                syncOwnedRowHaloIfNeeded(residual);
+                                const Real rhs_norm =
+                                    std::max<Real>(static_cast<Real>(rhs.norm()), static_cast<Real>(1e-30));
+                                const Real residual_norm = static_cast<Real>(residual.norm());
+                                return std::pair{residual_norm, rhs_norm};
+                            };
+
+                        auto bordered_column_target = [&](Real rhs_norm) {
+                            return std::max<Real>(
+                                bordered_recovery_options.abs_tol,
+                                bordered_recovery_options.rel_tol *
+                                    std::max<Real>(rhs_norm, static_cast<Real>(1e-30)));
+                        };
+
                         for (std::size_t j = 0; j < na; ++j) {
                             restoreFsilsMatrixSnapshot(J, fsils_matrix_snapshot);
 
@@ -5543,10 +5657,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
                             du.zero();
                             ntp0 = NTP();
-                            const auto z_report = linear.solve(J, du, residual_scratch);
+                            auto z_report = linear.solve(J, du, residual_scratch);
                             ntp_linear += NTP() - ntp0;
                             ntp_linear_iters_total += z_report.iterations;
                             normalizeFsilsPostSolveIncrementIfNeeded(du);
+                            int z_total_iterations = z_report.iterations;
                             bool z_converged = z_report.converged;
                             if (!z_converged &&
                                 has_native_rank_one_updates &&
@@ -5587,6 +5702,88 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                     traceLog(oss.str());
                                 }
                             }
+                            if (!z_converged && grouped_bordered_field_couplings.empty()) {
+                                constexpr int max_polish_attempts = 2;
+                                for (int polish = 0;
+                                     polish < max_polish_attempts && !z_converged;
+                                     ++polish) {
+                                    restoreFsilsMatrixSnapshot(J, fsils_matrix_snapshot);
+                                    auto [before_norm, rhs_norm] =
+                                        bordered_column_residual(residual_scratch,
+                                                                 du,
+                                                                 u_backup,
+                                                                 residual_base);
+                                    const Real target = bordered_column_target(rhs_norm);
+                                    if (std::isfinite(static_cast<double>(before_norm)) &&
+                                        before_norm <= target) {
+                                        z_converged = true;
+                                        z_report.converged = true;
+                                        z_report.final_residual_norm = before_norm;
+                                        z_report.relative_residual =
+                                            before_norm / std::max<Real>(rhs_norm, static_cast<Real>(1e-30));
+                                        if (oopTraceEnabled()) {
+                                            std::ostringstream oss;
+                                            oss << "NewtonSolver: accepting bordered K^{-1}B residual replay"
+                                                << " column=" << j
+                                                << " residual=" << before_norm
+                                                << " target=" << target;
+                                            traceLog(oss.str());
+                                        }
+                                        break;
+                                    }
+                                    if (!std::isfinite(static_cast<double>(before_norm))) {
+                                        break;
+                                    }
+
+                                    restoreFsilsMatrixSnapshot(J, fsils_matrix_snapshot);
+                                    u_backup.zero();
+                                    ntp0 = NTP();
+                                    auto polish_report =
+                                        linear.solve(J, u_backup, residual_base);
+                                    ntp_linear += NTP() - ntp0;
+                                    ntp_linear_iters_total += polish_report.iterations;
+                                    z_total_iterations += polish_report.iterations;
+                                    normalizeFsilsPostSolveIncrementIfNeeded(u_backup);
+                                    axpy(du, static_cast<Real>(1.0), u_backup);
+
+                                    restoreFsilsMatrixSnapshot(J, fsils_matrix_snapshot);
+                                    auto [after_norm, after_rhs_norm] =
+                                        bordered_column_residual(residual_scratch,
+                                                                 du,
+                                                                 u_backup,
+                                                                 residual_base);
+                                    const Real after_target =
+                                        bordered_column_target(after_rhs_norm);
+                                    if (oopTraceEnabled()) {
+                                        std::ostringstream oss;
+                                        oss << "NewtonSolver: bordered K^{-1}B residual polish"
+                                            << " column=" << j
+                                            << " attempt=" << (polish + 1)
+                                            << " before=" << before_norm
+                                            << " after=" << after_norm
+                                            << " target=" << after_target
+                                            << " correction_converged="
+                                            << (polish_report.converged ? 1 : 0)
+                                            << " correction_iters="
+                                            << polish_report.iterations;
+                                        traceLog(oss.str());
+                                    }
+                                    if (std::isfinite(static_cast<double>(after_norm)) &&
+                                        after_norm <= after_target) {
+                                        z_converged = true;
+                                        z_report = polish_report;
+                                        z_report.converged = true;
+                                        z_report.iterations = z_total_iterations;
+                                        z_report.initial_residual_norm = after_rhs_norm;
+                                        z_report.final_residual_norm = after_norm;
+                                        z_report.relative_residual =
+                                            after_norm /
+                                            std::max<Real>(after_rhs_norm, static_cast<Real>(1e-30));
+                                        z_report.message = "bordered K^{-1}B residual polish";
+                                    }
+                                }
+                            }
+                            z_report.iterations = z_total_iterations;
                             FE_THROW_IF(!z_converged, FEException,
                                         "NewtonSolver: bordered K^{-1}B solve did not converge: " +
                                             z_report.message);
@@ -6071,7 +6268,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             if (step_norm <= options_.step_tolerance) {
                 report.converged = true;
                 report.iterations = it + 1;
-                report.residual_norm = current_residual_norm;
+                updateResidualReport();
                 if (oopTraceEnabled()) {
                     traceLog("NewtonSolver: converged by step tolerance.");
                 }
@@ -6081,10 +6278,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         }
 
         if (!reverted_to_original &&
-            tolerancesSatisfied(current_residual_norm, /*pre_first_update=*/false)) {
+            tolerancesSatisfied(/*pre_first_update=*/false)) {
             report.converged = true;
             report.iterations = it + 1;
-            report.residual_norm = current_residual_norm;
+            updateResidualReport();
             if (oopTraceEnabled()) {
                 traceLog("NewtonSolver: converged after line search update (tolerances satisfied).");
             }
@@ -6103,13 +6300,13 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         current_residual_norm = assembleResidualOnly(
             final_state_holder.view, /*phase=*/"final_check");
         have_residual = true;
-        report.residual_norm = current_residual_norm;
+        updateResidualReport();
     }
 
     report.converged = false;
     report.iterations = max_it;
     if (have_residual && std::isfinite(current_residual_norm)) {
-        report.residual_norm = current_residual_norm;
+        updateResidualReport();
     }
     if (oopTraceEnabled()) {
         traceLog("NewtonSolver: reached max iterations without convergence.");

@@ -487,7 +487,9 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
 
   const auto report = newton.solveStep(transient, *sim.linear_solver, solve_time, *sim.time_history, workspace);
   oopCout() << "[svMultiPhysics::Application] Steady Newton: converged=" << report.converged
-            << " iterations=" << report.iterations << " residual_norm=" << report.residual_norm << std::endl;
+            << " iterations=" << report.iterations << " residual_norm=" << report.residual_norm
+            << " field_residual_norm=" << report.field_residual_norm
+            << " auxiliary_residual_norm=" << report.auxiliary_residual_norm << std::endl;
 
   if (!report.converged) {
     throw std::runtime_error(
@@ -614,6 +616,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     oopCout() << "[svMultiPhysics::Application] TimeLoop: nonlinear_done step=" << h.stepIndex()
               << " time=" << h.time() << " converged=" << nr.converged
               << " iters=" << nr.iterations << " ||r||=" << nr.residual_norm
+              << " ||r_field||=" << nr.field_residual_norm
+              << " ||r_aux||=" << nr.auxiliary_residual_norm
               << " (linear: converged=" << nr.linear.converged
               << " iters=" << nr.linear.iterations
               << " rel=" << nr.linear.relative_residual << ")" << std::endl;
@@ -632,7 +636,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_rejected step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << " reason=" << step_reject_reason_to_string(reason)
               << " (newton: converged=" << nr.converged << " iters=" << nr.iterations
-              << " ||r||=" << nr.residual_norm << ")" << std::endl;
+              << " ||r||=" << nr.residual_norm
+              << " ||r_field||=" << nr.field_residual_norm
+              << " ||r_aux||=" << nr.auxiliary_residual_norm << ")" << std::endl;
   };
   callbacks.on_dt_updated = [&](double old_dt, double new_dt, int step_index, int attempt_index) {
     if (!oopTraceEnabled()) {

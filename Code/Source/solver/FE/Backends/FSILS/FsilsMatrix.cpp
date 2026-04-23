@@ -2311,6 +2311,8 @@ void FsilsMatrix::addMatrixEntriesCached(std::span<const GlobalIndex> row_dofs,
 
             j0 = j1;
         }
+
+        i0 = i1;
     }
 
     if (!validate_slots.empty()) {

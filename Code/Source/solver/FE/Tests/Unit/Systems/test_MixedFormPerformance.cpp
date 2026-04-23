@@ -20,6 +20,7 @@
 #include "Systems/TimeIntegrator.h"
 #include "Systems/TransientSystem.h"
 
+#include "Dofs/DofMap.h"
 #include "TimeStepping/GeneralizedAlpha.h"
 #include "TimeStepping/TimeSteppingUtils.h"
 
@@ -892,6 +893,234 @@ TEST(MixedFormPerformance, PerBlockJIT_MixedBilinear)
         }
     }
     EXPECT_GT(norm, 0.0) << "Assembled matrix from JIT mixed bilinear should be non-zero";
+}
+
+TEST(MonolithicCellKernelBlockSpec, PreservesResolvedMixedBlockMetadata)
+{
+    svmp::FE::spaces::H1Space scalar_space(ElementType::Tetra4, 1);
+    svmp::FE::dofs::DofMap row_map(1, 4, 4);
+    svmp::FE::dofs::DofMap col_map(1, 4, 4);
+    const std::vector<GlobalIndex> cell_dofs{0, 1, 2, 3};
+    row_map.setCellDofs(0, cell_dofs);
+    row_map.setNumDofs(4);
+    row_map.setNumLocalDofs(4);
+    row_map.finalize();
+    col_map.setCellDofs(0, cell_dofs);
+    col_map.setNumDofs(4);
+    col_map.setNumLocalDofs(4);
+    col_map.finalize();
+
+    svmp::FE::forms::FormCompiler compiler;
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(scalar_space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(scalar_space, "v");
+    const auto mass = (u * v).dx();
+
+    auto matrix_fallback = std::make_shared<svmp::FE::forms::FormKernel>(compiler.compileBilinear(mass));
+    auto matrix_ir = compiler.compileBilinear(mass);
+    auto residual_ir = compiler.compileResidual(mass);
+
+    constexpr FieldId velocity_field = 11;
+    constexpr FieldId pressure_field = 12;
+
+    std::vector<svmp::FE::forms::MonolithicCellKernel::BlockSpec> blocks;
+    blocks.push_back(svmp::FE::forms::MonolithicCellKernel::BlockSpec{
+        .test_field = velocity_field,
+        .trial_field = pressure_field,
+        .want_matrix = true,
+        .want_vector = false,
+        .fallback_kernel = matrix_fallback,
+        .tangent_ir = std::move(matrix_ir),
+        .test_space = &scalar_space,
+        .trial_space = &scalar_space,
+        .row_dof_map = &row_map,
+        .col_dof_map = &col_map,
+        .row_dof_offset = 8,
+        .col_dof_offset = 12,
+    });
+    blocks.push_back(svmp::FE::forms::MonolithicCellKernel::BlockSpec{
+        .test_field = pressure_field,
+        .trial_field = velocity_field,
+        .want_matrix = false,
+        .want_vector = true,
+        .residual_ir = std::move(residual_ir),
+        .test_space = &scalar_space,
+        .trial_space = &scalar_space,
+        .row_dof_map = &row_map,
+        .col_dof_map = &col_map,
+        .row_dof_offset = 16,
+        .col_dof_offset = 20,
+    });
+
+    svmp::FE::forms::MonolithicCellKernel kernel(
+        std::move(blocks),
+        nullptr,
+        svmp::FE::forms::JITOptions{});
+
+    ASSERT_EQ(kernel.numBlocks(), 2u);
+    EXPECT_TRUE(kernel.hasCell());
+    EXPECT_FALSE(kernel.isMatrixOnly());
+    EXPECT_FALSE(kernel.isVectorOnly());
+    EXPECT_EQ(kernel.semanticKernelKind(), svmp::FE::assembly::SemanticKernelKind::MonolithicCell);
+    EXPECT_FALSE(kernel.isResolved());
+
+    const auto& matrix_block = kernel.blockSpec(0);
+    EXPECT_EQ(matrix_block.test_field, velocity_field);
+    EXPECT_EQ(matrix_block.trial_field, pressure_field);
+    EXPECT_TRUE(matrix_block.want_matrix);
+    EXPECT_FALSE(matrix_block.want_vector);
+    EXPECT_EQ(matrix_block.fallback_kernel, matrix_fallback);
+    EXPECT_TRUE(matrix_block.tangent_ir.has_value());
+    EXPECT_FALSE(matrix_block.residual_ir.has_value());
+    EXPECT_EQ(matrix_block.test_space, &scalar_space);
+    EXPECT_EQ(matrix_block.trial_space, &scalar_space);
+    EXPECT_EQ(matrix_block.row_dof_map, &row_map);
+    EXPECT_EQ(matrix_block.col_dof_map, &col_map);
+    EXPECT_EQ(matrix_block.row_dof_offset, 8);
+    EXPECT_EQ(matrix_block.col_dof_offset, 12);
+
+    const auto& vector_block = kernel.blockSpec(1);
+    EXPECT_EQ(vector_block.test_field, pressure_field);
+    EXPECT_EQ(vector_block.trial_field, velocity_field);
+    EXPECT_FALSE(vector_block.want_matrix);
+    EXPECT_TRUE(vector_block.want_vector);
+    EXPECT_FALSE(vector_block.tangent_ir.has_value());
+    EXPECT_TRUE(vector_block.residual_ir.has_value());
+    EXPECT_EQ(vector_block.row_dof_offset, 16);
+    EXPECT_EQ(vector_block.col_dof_offset, 20);
+
+    kernel.mutableBlockSpec(1).row_dof_offset = 24;
+    EXPECT_EQ(kernel.blockSpec(1).row_dof_offset, 24);
+    kernel.setResolved();
+    EXPECT_TRUE(kernel.isResolved());
+}
+
+TEST(MonolithicCellKernelBlockSpec, RoutesMatrixVectorAndMixedBlocksIndependently)
+{
+    svmp::FE::spaces::H1Space scalar_space(ElementType::Tetra4, 1);
+    svmp::FE::dofs::DofMap row_map(1, 4, 4);
+    svmp::FE::dofs::DofMap col_map(1, 4, 4);
+    const std::vector<GlobalIndex> cell_dofs{0, 1, 2, 3};
+    row_map.setCellDofs(0, cell_dofs);
+    row_map.setNumDofs(4);
+    row_map.setNumLocalDofs(4);
+    row_map.finalize();
+    col_map.setCellDofs(0, cell_dofs);
+    col_map.setNumDofs(4);
+    col_map.setNumLocalDofs(4);
+    col_map.finalize();
+
+    svmp::FE::forms::FormCompiler compiler;
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(scalar_space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(scalar_space, "v");
+
+    auto matrix_fallback =
+        std::make_shared<svmp::FE::forms::FormKernel>(compiler.compileBilinear((u * v).dx()));
+    auto vector_fallback =
+        std::make_shared<svmp::FE::forms::SymbolicNonlinearFormKernel>(
+            compiler.compileResidual((u * u * v).dx()),
+            svmp::FE::forms::NonlinearKernelOutput::Both);
+    auto mixed_fallback =
+        std::make_shared<svmp::FE::forms::SymbolicNonlinearFormKernel>(
+            compiler.compileResidual((svmp::FE::forms::FormExpr::constant(2.0) * u * u * v).dx()),
+            svmp::FE::forms::NonlinearKernelOutput::Both);
+
+    constexpr FieldId velocity_field = 21;
+    constexpr FieldId pressure_field = 22;
+    constexpr FieldId temperature_field = 23;
+
+    std::vector<svmp::FE::forms::MonolithicCellKernel::BlockSpec> blocks;
+    blocks.push_back(svmp::FE::forms::MonolithicCellKernel::BlockSpec{
+        .test_field = velocity_field,
+        .trial_field = pressure_field,
+        .want_matrix = true,
+        .want_vector = false,
+        .fallback_kernel = matrix_fallback,
+        .tangent_ir = compiler.compileBilinear((u * v).dx()),
+        .test_space = &scalar_space,
+        .trial_space = &scalar_space,
+        .row_dof_map = &row_map,
+        .col_dof_map = &col_map,
+        .row_dof_offset = 4,
+        .col_dof_offset = 8,
+    });
+    blocks.push_back(svmp::FE::forms::MonolithicCellKernel::BlockSpec{
+        .test_field = pressure_field,
+        .trial_field = velocity_field,
+        .want_matrix = false,
+        .want_vector = true,
+        .fallback_kernel = vector_fallback,
+        .residual_ir = compiler.compileResidual((u * u * v).dx()),
+        .test_space = &scalar_space,
+        .trial_space = &scalar_space,
+        .row_dof_map = &row_map,
+        .col_dof_map = &col_map,
+        .row_dof_offset = 12,
+        .col_dof_offset = 16,
+    });
+    blocks.push_back(svmp::FE::forms::MonolithicCellKernel::BlockSpec{
+        .test_field = temperature_field,
+        .trial_field = temperature_field,
+        .want_matrix = true,
+        .want_vector = true,
+        .fallback_kernel = mixed_fallback,
+        .tangent_ir = compiler.compileBilinear((svmp::FE::forms::FormExpr::constant(3.0) * u * v).dx()),
+        .residual_ir = compiler.compileResidual((svmp::FE::forms::FormExpr::constant(4.0) * u * u * v).dx()),
+        .test_space = &scalar_space,
+        .trial_space = &scalar_space,
+        .row_dof_map = &row_map,
+        .col_dof_map = &col_map,
+        .row_dof_offset = 20,
+        .col_dof_offset = 24,
+    });
+
+    svmp::FE::forms::MonolithicCellKernel kernel(
+        std::move(blocks),
+        nullptr,
+        svmp::FE::forms::JITOptions{});
+
+    ASSERT_EQ(kernel.numBlocks(), 3u);
+    EXPECT_TRUE(kernel.hasCell());
+    EXPECT_FALSE(kernel.isMatrixOnly());
+    EXPECT_FALSE(kernel.isVectorOnly());
+    EXPECT_EQ(kernel.name(), "MonolithicCellKernel[3 blocks]");
+
+    const auto& matrix_only = kernel.blockSpec(0);
+    EXPECT_EQ(matrix_only.test_field, velocity_field);
+    EXPECT_EQ(matrix_only.trial_field, pressure_field);
+    EXPECT_TRUE(matrix_only.want_matrix);
+    EXPECT_FALSE(matrix_only.want_vector);
+    EXPECT_EQ(matrix_only.fallback_kernel, matrix_fallback);
+    EXPECT_TRUE(matrix_only.tangent_ir.has_value());
+    EXPECT_FALSE(matrix_only.residual_ir.has_value());
+    EXPECT_EQ(matrix_only.row_dof_map, &row_map);
+    EXPECT_EQ(matrix_only.col_dof_map, &col_map);
+    EXPECT_EQ(matrix_only.row_dof_offset, 4);
+    EXPECT_EQ(matrix_only.col_dof_offset, 8);
+
+    const auto& vector_only = kernel.blockSpec(1);
+    EXPECT_EQ(vector_only.test_field, pressure_field);
+    EXPECT_EQ(vector_only.trial_field, velocity_field);
+    EXPECT_FALSE(vector_only.want_matrix);
+    EXPECT_TRUE(vector_only.want_vector);
+    EXPECT_EQ(vector_only.fallback_kernel, vector_fallback);
+    EXPECT_FALSE(vector_only.tangent_ir.has_value());
+    EXPECT_TRUE(vector_only.residual_ir.has_value());
+    EXPECT_EQ(vector_only.row_dof_offset, 12);
+    EXPECT_EQ(vector_only.col_dof_offset, 16);
+
+    const auto& mixed = kernel.blockSpec(2);
+    EXPECT_EQ(mixed.test_field, temperature_field);
+    EXPECT_EQ(mixed.trial_field, temperature_field);
+    EXPECT_TRUE(mixed.want_matrix);
+    EXPECT_TRUE(mixed.want_vector);
+    EXPECT_EQ(mixed.fallback_kernel, mixed_fallback);
+    EXPECT_TRUE(mixed.tangent_ir.has_value());
+    EXPECT_TRUE(mixed.residual_ir.has_value());
+    EXPECT_EQ(mixed.row_dof_offset, 20);
+    EXPECT_EQ(mixed.col_dof_offset, 24);
+
+    kernel.mutableBlockSpec(2).col_dof_offset = 28;
+    EXPECT_EQ(kernel.blockSpec(2).col_dof_offset, 28);
 }
 
 // ============================================================================

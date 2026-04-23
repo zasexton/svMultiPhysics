@@ -873,6 +873,7 @@ set(FE_FORMS_HEADERS
 	    Forms/PointEvaluator.h
 	    Forms/JIT/ExternalCalls.h
 	    Forms/JIT/InlinableConstitutiveModel.h
+	    Forms/JIT/JITCacheKey.h
 	    Forms/JIT/JITCompiler.h
 	    Forms/JIT/JITEngine.h
 	    Forms/JIT/JITFormKernel.h
@@ -916,6 +917,7 @@ set(FE_FORMS_SOURCES
 	    Forms/PointEvaluator.cpp
 	    Forms/JIT/ExternalCalls.cpp
 	    Forms/JIT/HardwareProfile.cpp
+	    Forms/JIT/JITCacheKey.cpp
 	    Forms/JIT/JITCompiler.cpp
 	    Forms/JIT/JITEngine.cpp
 	    Forms/JIT/KernelIR.cpp
@@ -2119,6 +2121,7 @@ if(FE_BUILD_TESTS)
 			                    Tests/Unit/Forms/test_JITValidation.cpp
 			                    Tests/Unit/Forms/test_KernelIR_Lowering.cpp
 			                    Tests/Unit/Forms/test_ExternalCallsNewPhysics.cpp
+				                    Tests/Unit/Forms/test_JITCacheKey.cpp
 				                    Tests/Unit/Forms/test_JITCompiler_CacheAndThreads.cpp
 					                    Tests/Unit/Forms/test_JITCompiler_ErrorHandling.cpp
 						                    Tests/Unit/Forms/test_JIT_CacheRegression.cpp

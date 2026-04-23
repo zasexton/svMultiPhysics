@@ -103,6 +103,59 @@ constexpr int DOT_THREAD_PAD = 8; // doubles (64 bytes) to reduce false sharing
   return num_threads <= 1;
 }
 
+void apply_givens_rotation(Array<double>& h, Vector<double>& c, Vector<double>& s, Vector<double>& err, const int i)
+{
+  for (int j = 0; j <= i - 1; j++) {
+    double tmp_h = c(j)*h(j,i) + s(j)*h(j+1,i);
+    h(j+1,i) = -s(j)*h(j,i) + c(j)*h(j+1,i);
+    h(j,i) = tmp_h;
+  }
+
+  double tmp_hypot = std::hypot(h(i,i), h(i+1,i));
+  if (tmp_hypot == 0.0) {
+    c(i) = 1.0; s(i) = 0.0;
+  } else {
+    c(i) = h(i,i) / tmp_hypot; s(i) = h(i+1,i) / tmp_hypot;
+  }
+
+  h(i,i) = tmp_hypot;
+  h(i+1,i) = 0.0;
+
+  err(i+1) = -s(i)*err(i);
+  err(i) = c(i)*err(i);
+}
+
+bool backsolve_hessenberg(const Array<double>& h,
+                          const Vector<double>& rhs,
+                          const int last_i,
+                          const double initial_norm,
+                          const double eps,
+                          Vector<double>& y)
+{
+  for (int i = 0; i <= last_i; i++) {
+    y(i) = rhs(i);
+  }
+
+  for (int j = last_i; j >= 0; j--) {
+    for (int k = j + 1; k <= last_i; k++) {
+      y(j) -= h(j,k)*y(k);
+    }
+    const double h_diag = h(j,j);
+    const double backsolve_tol =
+        std::numeric_limits<double>::epsilon() *
+        std::max(std::max(initial_norm, std::abs(y(j))), 1.0) * 1e2;
+    if (std::abs(h_diag) <= backsolve_tol) {
+      if (std::abs(y(j)) <= eps) {
+        y(j) = 0.0;
+        continue;
+      }
+      return false;
+    }
+    y(j) /= h_diag;
+  }
+  return true;
+}
+
 [[nodiscard]] std::string to_lower(std::string s)
 {
   std::transform(s.begin(), s.end(), s.begin(),
@@ -1523,6 +1576,61 @@ void fused_recon_s(const fsils_int nNo, Array<double>& u, const int last_i, Vect
 
 } // namespace
 
+namespace test {
+
+double fused_dot_zz_v_for_test(const int dof,
+                               const fe_fsi_linear_solver::fsils_int mynNo,
+                               Array3<double>& u,
+                               const int i,
+                               const Array<double>& u_next,
+                               std::vector<double>& h_col,
+                               const int num_threads)
+{
+  const int thread_stride = dot_thread_stride(static_cast<int>(h_col.size()));
+  std::vector<double> thread_buf(static_cast<std::size_t>(std::max(num_threads, 1)) *
+                                 static_cast<std::size_t>(thread_stride), 0.0);
+  return fused_dot_zz_v(dof,
+                        mynNo,
+                        u,
+                        i,
+                        u_next,
+                        h_col,
+                        thread_buf.data(),
+                        thread_stride,
+                        std::max(num_threads, 1));
+}
+
+void fused_update_v_inplace_for_test(const int dof,
+                                     const fe_fsi_linear_solver::fsils_int nNo,
+                                     Array3<double>& u,
+                                     const int i,
+                                     Array<double>& u_next,
+                                     const std::vector<double>& h_factors)
+{
+  fused_update_v_inplace(dof, nNo, u, i, u_next, h_factors);
+}
+
+void apply_givens_rotation_for_test(Array<double>& h,
+                                    Vector<double>& c,
+                                    Vector<double>& s,
+                                    Vector<double>& err,
+                                    const int i)
+{
+  apply_givens_rotation(h, c, s, err, i);
+}
+
+bool backsolve_hessenberg_for_test(const Array<double>& h,
+                                   const Vector<double>& rhs,
+                                   const int last_i,
+                                   const double initial_norm,
+                                   const double eps,
+                                   Vector<double>& y)
+{
+  return backsolve_hessenberg(h, rhs, last_i, initial_norm, eps, y);
+}
+
+} // namespace test
+
 /// @brief Pre-calculates the boundary condition normalization factor.
 /// Removed O(N) heap allocation, using fast local accumulations.
 void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
@@ -1760,24 +1868,7 @@ void gmres(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearS
         breakdown = true;
       }
 
-      for (int j = 0; j <= i-1; j++) {
-        double tmp_h = c(j)*h(j,i) + s(j)*h(j+1,i);
-        h(j+1,i) = -s(j)*h(j,i) + c(j)*h(j+1,i);
-        h(j,i) = tmp_h;
-      }
-
-      double tmp_hypot = std::hypot(h(i,i), h(i+1,i));
-      if (tmp_hypot == 0.0) {
-        c(i) = 1.0; s(i) = 0.0;
-      } else {
-        c(i) = h(i,i) / tmp_hypot; s(i) = h(i+1,i) / tmp_hypot;
-      }
-
-      h(i,i) = tmp_hypot;
-      h(i+1,i) = 0.0;
-
-      err(i+1) = -s(i)*err(i);
-      err(i) = c(i)*err(i);
+      apply_givens_rotation(h, c, s, err, i);
 
       if (std::abs(err(i+1)) < eps) {
         ls.suc = true;
@@ -1790,25 +1881,7 @@ void gmres(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearS
 
     if (last_i >= ls.sD) last_i = ls.sD - 1;
 
-    for (int i = 0; i <= last_i; i++) y(i) = err(i);
-
-    bool backsolve_ok = true;
-    for (int j = last_i; j >= 0; j--) {
-      for (int k = j+1; k <= last_i; k++) y(j) -= h(j,k)*y(k);
-      const double h_diag = h(j,j);
-      const double backsolve_tol =
-          std::numeric_limits<double>::epsilon() *
-          std::max(std::max(ls.iNorm, std::abs(y(j))), 1.0) * 1e2;
-      if (std::abs(h_diag) <= backsolve_tol) {
-        if (std::abs(y(j)) <= eps) {
-          y(j) = 0.0;
-          continue;
-        }
-        backsolve_ok = false;
-        break;
-      }
-      y(j) /= h(j,j);
-    }
+    const bool backsolve_ok = backsolve_hessenberg(h, err, last_i, ls.iNorm, eps, y);
     if (!backsolve_ok) {
       ls.suc = false;
       ls.fNorm = std::max(std::abs(err(last_i+1)), eps);
@@ -1997,23 +2070,7 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
         breakdown = true;
       }
 
-      for (int j = 0; j <= i-1; j++) {
-        double tmp_h = c(j)*h(j,i) + s(j)*h(j+1,i);
-        h(j+1,i) = -s(j)*h(j,i) + c(j)*h(j+1,i);
-        h(j,i) = tmp_h;
-      }
-
-      double tmp_hypot = std::hypot(h(i,i), h(i+1,i));
-      if (tmp_hypot == 0.0) {
-        c(i) = 1.0; s(i) = 0.0;
-      } else {
-        c(i) = h(i,i) / tmp_hypot; s(i) = h(i+1,i) / tmp_hypot;
-      }
-
-      h(i,i) = tmp_hypot;
-      h(i+1,i) = 0.0;
-      err(i+1) = -s(i)*err(i);
-      err(i) = c(i)*err(i);
+      apply_givens_rotation(h, c, s, err, i);
 
       if (std::abs(err(i+1)) < eps) {
         ls.suc = true;
@@ -2026,25 +2083,7 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
 
     if (last_i >= ls.sD) last_i = ls.sD - 1;
 
-    for (int i = 0; i <= last_i; i++) y(i) = err(i);
-
-    bool backsolve_ok = true;
-    for (int j = last_i; j >= 0; j--) {
-      for (int k = j+1; k <= last_i; k++) y(j) -= h(j,k)*y(k);
-      const double h_diag = h(j,j);
-      const double backsolve_tol =
-          std::numeric_limits<double>::epsilon() *
-          std::max(std::max(ls.iNorm, std::abs(y(j))), 1.0) * 1e2;
-      if (std::abs(h_diag) <= backsolve_tol) {
-        if (std::abs(y(j)) <= eps) {
-          y(j) = 0.0;
-          continue;
-        }
-        backsolve_ok = false;
-        break;
-      }
-      y(j) /= h(j,j);
-    }
+    const bool backsolve_ok = backsolve_hessenberg(h, err, last_i, ls.iNorm, eps, y);
     if (!backsolve_ok) {
       ls.suc = false;
       ls.fNorm = std::max(std::abs(err(last_i+1)), eps);
@@ -2792,24 +2831,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       }
 
       tp0 = TP();
-      for (int j = 0; j <= i-1; j++) {
-        double tmp_h = c(j)*h(j,i) + s(j)*h(j+1,i);
-        h(j+1,i) = -s(j)*h(j,i) + c(j)*h(j+1,i);
-        h(j,i) = tmp_h;
-      }
-
-      double tmp_hypot = std::hypot(h(i,i), h(i+1,i));
-      if (tmp_hypot == 0.0) {
-        c(i) = 1.0; s(i) = 0.0;
-      } else {
-        c(i) = h(i,i) / tmp_hypot; s(i) = h(i+1,i) / tmp_hypot;
-      }
-
-      h(i,i) = tmp_hypot;
-      h(i+1,i) = 0.0;
-
-      err(i+1) = -s(i)*err(i);
-      err(i) = c(i)*err(i);
+      apply_givens_rotation(h, c, s, err, i);
       tp_givens += TP() - tp0;
 
       if (std::abs(err(i+1)) < eps) {
@@ -2842,25 +2864,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     if (last_i >= ls.sD) last_i = ls.sD - 1;
 
     tp0 = TP();
-    for (int i = 0; i <= last_i; i++) y(i) = err(i);
-
-    bool backsolve_ok = true;
-    for (int j = last_i; j >= 0; j--) {
-      for (int k = j+1; k <= last_i; k++) y(j) -= h(j,k)*y(k);
-      const double h_diag = h(j,j);
-      const double backsolve_tol =
-          std::numeric_limits<double>::epsilon() *
-          std::max(std::max(ls.iNorm, std::abs(y(j))), 1.0) * 1e2;
-      if (std::abs(h_diag) <= backsolve_tol) {
-        if (std::abs(y(j)) <= eps) {
-          y(j) = 0.0;
-          continue;
-        }
-        backsolve_ok = false;
-        break;
-      }
-      y(j) /= h(j,j);
-    }
+    const bool backsolve_ok = backsolve_hessenberg(h, err, last_i, ls.iNorm, eps, y);
     if (!backsolve_ok) {
       ls.suc = false;
       ls.fNorm = std::max(std::abs(err(last_i+1)), eps);

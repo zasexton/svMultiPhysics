@@ -93,6 +93,11 @@ struct NewtonReport {
     int iterations{0};
     double residual_norm0{0.0};
     double residual_norm{0.0};
+    double field_residual_norm0{0.0};
+    double field_residual_norm{0.0};
+    double auxiliary_residual_norm0{0.0};
+    double auxiliary_residual_norm{0.0};
+    bool component_residual_convergence{false};
     backends::SolverReport linear{};
 };
 

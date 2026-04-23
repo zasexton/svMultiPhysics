@@ -622,6 +622,9 @@ void FsilsVector::copyFrom(const GenericVector& other)
     const auto* o = dynamic_cast<const FsilsVector*>(&other);
     FE_THROW_IF(!o, InvalidArgumentException, "FsilsVector::copyFrom: backend mismatch");
     FE_THROW_IF(size() != o->size(), InvalidArgumentException, "FsilsVector::copyFrom: size mismatch");
+    FE_THROW_IF(data_.size() != o->data_.size(),
+                InvalidArgumentException,
+                "FsilsVector::copyFrom: local size mismatch");
     std::copy(o->data_.begin(), o->data_.end(), data_.begin());
 }
 

@@ -3998,7 +3998,6 @@ void StandardAssembler::prepareGeometry(
 
     if (cell_type != cached_mapping_type_ ||
         geom_order != cached_mapping_order_ ||
-        use_affine != cached_mapping_affine_ ||
         !cached_mapping_) {
         geometry::MappingRequest map_request;
         map_request.element_type = cell_type;
@@ -4007,7 +4006,6 @@ void StandardAssembler::prepareGeometry(
         cached_mapping_ = geometry::MappingFactory::create(map_request, scratch_node_coords_);
         cached_mapping_type_ = cell_type;
         cached_mapping_order_ = geom_order;
-        cached_mapping_affine_ = use_affine;
         // Invalidate cached BasisCacheEntry pointers — will be re-looked-up below.
         cached_geom_bcache_ = nullptr;
         cached_test_bcache_ = nullptr;
@@ -4016,6 +4014,9 @@ void StandardAssembler::prepareGeometry(
     } else {
         cached_mapping_->resetNodes(scratch_node_coords_);
     }
+    // This is node-dependent for tensor-product/isoparametric cells; geometry
+    // order alone is not enough to classify the actual mapping as affine.
+    cached_mapping_affine_ = cached_mapping_->isAffine();
     const auto& mapping = cached_mapping_;
 #ifdef SVMP_FE_ASSEMBLY_TIMING
     g_pc_mapping += PC_TP() - pc_t0;
@@ -4206,9 +4207,12 @@ void StandardAssembler::prepareGeometry(
     g_pc_jacobian += PC_TP() - pc_t0;
 #endif
 
-    // Cache quad_rule for use in populateFieldSolutionData BasisCache lookups
-    cached_quad_rule_ = std::shared_ptr<const quadrature::QuadratureRule>(
-        std::shared_ptr<const quadrature::QuadratureRule>{}, &quad_rule);
+    // Cache quad_rule for populateFieldSolutionData BasisCache lookups. If a
+    // caller already installed an owning shared_ptr for this rule, preserve it.
+    if (cached_quad_rule_.get() != &quad_rule) {
+        cached_quad_rule_ = std::shared_ptr<const quadrature::QuadratureRule>(
+            std::shared_ptr<const quadrature::QuadratureRule>{}, &quad_rule);
+    }
 }
 
 void StandardAssembler::prepareGeometry(
@@ -4235,7 +4239,6 @@ void StandardAssembler::prepareGeometry(
 
     if (cell_type != ws.mapping_type ||
         geom_order != ws.mapping_order ||
-        use_affine != ws.mapping_affine ||
         !ws.mapping) {
         geometry::MappingRequest map_request;
         map_request.element_type = cell_type;
@@ -4244,11 +4247,13 @@ void StandardAssembler::prepareGeometry(
         ws.mapping = geometry::MappingFactory::create(map_request, ws.node_coords);
         ws.mapping_type = cell_type;
         ws.mapping_order = geom_order;
-        ws.mapping_affine = use_affine;
         ws.geom_bcache = nullptr;
     } else {
         ws.mapping->resetNodes(ws.node_coords);
     }
+    // This is node-dependent for tensor-product/isoparametric cells; geometry
+    // order alone is not enough to classify the actual mapping as affine.
+    ws.mapping_affine = ws.mapping->isAffine();
     const auto& mapping = ws.mapping;
 
     const auto n_qpts = static_cast<LocalIndex>(quad_rule.num_points());
@@ -5487,6 +5492,11 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             }
         }
     }
+    if (cached_quad_rule_.get() != fused_quad_rule.get()) {
+        cached_field_bcache_.clear();
+        cached_field_recipes_valid_ = false;
+    }
+    cached_quad_rule_ = fused_quad_rule;
 
     // Pre-compute per-term data requirements
     struct TermData {
@@ -6522,7 +6532,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             const auto& bs = monolithic_kernel->blockSpec(bi);
                             auto& shared = shared_contexts[slot];
                             const bool use_expansion_this_block =
-                                use_batch_basis || (use_coupled_scalar_cache && bi > 0);
+                                use_batch_basis ||
+                                (use_coupled_scalar_cache && cached_mapping_affine_ && bi > 0);
                             const bool preloaded_geometry_ctx =
                                 (&ctx == &batch_block_workspaces[slot].ctx);
 
@@ -7200,7 +7211,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 const auto& bs = monolithic_kernel->blockSpec(bi);
                 auto& workspace = block_workspaces[bi];
                 const bool use_expansion_this_block =
-                    use_coupled_scalar_cache && bi > 0;
+                    use_coupled_scalar_cache && cached_mapping_affine_ && bi > 0;
 
                 tp0 = TP();
                 workspace.ctx.copyGeometryDataFrom(shared_ctx);
@@ -8997,7 +9008,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     // path (physical gradients were pre-computed in the batch
                     // gradient transform above).  Otherwise, only blocks 1+ use it.
                     const bool use_expansion_this_block =
-                        use_batch_basis || (use_coupled_scalar_cache && bi > 0);
+                        use_batch_basis ||
+                        (use_coupled_scalar_cache && cached_mapping_affine_ && bi > 0);
 
                     // When all conditions are met, the expansion slot loop can be
                     // parallelized: each slot writes only to independent per-slot
@@ -13300,7 +13312,18 @@ void StandardAssembler::ensureFieldRecipes(
         bool match = (cached_field_recipes_.size() == requirements.size());
         if (match) {
             for (std::size_t i = 0; i < requirements.size(); ++i) {
-                if (cached_field_recipes_[i].field_id != requirements[i].field) {
+                const auto& req = requirements[i];
+                const bool want_values =
+                    hasFlag(req.required, RequiredData::SolutionValues) ||
+                    (req.required == RequiredData::None);
+                const bool want_gradients = hasFlag(req.required, RequiredData::SolutionGradients);
+                const bool want_hessians = hasFlag(req.required, RequiredData::SolutionHessians);
+                const bool want_laplacians = hasFlag(req.required, RequiredData::SolutionLaplacians);
+                if (cached_field_recipes_[i].field_id != req.field ||
+                    cached_field_recipes_[i].want_values != want_values ||
+                    cached_field_recipes_[i].want_gradients != want_gradients ||
+                    cached_field_recipes_[i].want_hessians != want_hessians ||
+                    cached_field_recipes_[i].want_laplacians != want_laplacians) {
                     match = false;
                     break;
                 }

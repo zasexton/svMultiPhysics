@@ -51,4 +51,36 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
 void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
     const Array<double>& Val, Array<double>& R);
 
+namespace test {
+
+double fused_dot_zz_v_for_test(const int dof,
+    const fe_fsi_linear_solver::fsils_int mynNo,
+    Array3<double>& u,
+    const int i,
+    const Array<double>& u_next,
+    std::vector<double>& h_col,
+    const int num_threads = 1);
+
+void fused_update_v_inplace_for_test(const int dof,
+    const fe_fsi_linear_solver::fsils_int nNo,
+    Array3<double>& u,
+    const int i,
+    Array<double>& u_next,
+    const std::vector<double>& h_factors);
+
+void apply_givens_rotation_for_test(Array<double>& h,
+    Vector<double>& c,
+    Vector<double>& s,
+    Vector<double>& err,
+    const int i);
+
+bool backsolve_hessenberg_for_test(const Array<double>& h,
+    const Vector<double>& rhs,
+    const int last_i,
+    const double initial_norm,
+    const double eps,
+    Vector<double>& y);
+
+} // namespace test
+
 };

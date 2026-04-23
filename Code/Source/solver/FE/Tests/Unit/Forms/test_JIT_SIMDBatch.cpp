@@ -191,12 +191,12 @@ void expectDenseNear(const assembly::DenseVectorView& a,
 // JITOptions factories
 // ============================================================================
 
-[[nodiscard]] forms::JITOptions makeJITOptions(bool simd_batch)
+[[nodiscard]] forms::JITOptions makeJITOptions(bool simd_batch, bool vectorize = true)
 {
     forms::JITOptions opt;
     opt.enable = true;
     opt.optimization_level = 2;
-    opt.vectorize = true;
+    opt.vectorize = vectorize;
     opt.simd_batch = simd_batch;
     opt.cache_kernels = true;
     return opt;
@@ -212,6 +212,74 @@ struct SIMDBatchCompareOptions {
     std::optional<std::vector<Real>> prev_solution{};
     std::span<const assembly::FieldSolutionAccess> field_access{};
 };
+
+void expectJITBatchOptionsMatch(const assembly::IMeshAccess& mesh,
+                                const dofs::DofMap& row_map,
+                                const dofs::DofMap& col_map,
+                                const spaces::FunctionSpace& test_space,
+                                const spaces::FunctionSpace& trial_space,
+                                const FormExpr& residual,
+                                const std::vector<Real>& U,
+                                const forms::JITOptions& lhs_options,
+                                const forms::JITOptions& rhs_options,
+                                Real vec_tol,
+                                Real mat_tol,
+                                const SIMDBatchCompareOptions& options = {})
+{
+    FormCompiler compiler;
+
+    auto lhs_ir = compiler.compileResidual(residual);
+    auto rhs_ir = compiler.compileResidual(residual);
+
+    auto lhs_fallback =
+        std::make_shared<SymbolicNonlinearFormKernel>(std::move(lhs_ir), NonlinearKernelOutput::Both);
+    forms::jit::JITKernelWrapper lhs_kernel(lhs_fallback, lhs_options);
+    lhs_kernel.resolveInlinableConstitutives();
+
+    auto rhs_fallback =
+        std::make_shared<SymbolicNonlinearFormKernel>(std::move(rhs_ir), NonlinearKernelOutput::Both);
+    forms::jit::JITKernelWrapper rhs_kernel(rhs_fallback, rhs_options);
+    rhs_kernel.resolveInlinableConstitutives();
+
+    auto runAssembly = [&](assembly::AssemblyKernel& kernel,
+                           assembly::DenseMatrixView& J,
+                           assembly::DenseVectorView& R) {
+        assembly::StandardAssembler assembler;
+        if (&row_map == &col_map) {
+            assembler.setDofMap(row_map);
+        } else {
+            assembler.setRowDofMap(row_map);
+            assembler.setColDofMap(col_map);
+        }
+        assembler.setCurrentSolution(U);
+        assembler.setTimeIntegrationContext(options.time_ctx);
+        assembler.setTimeStep(options.time_step);
+        if (options.prev_solution.has_value()) {
+            assembler.setPreviousSolution(*options.prev_solution);
+        }
+        if (!options.field_access.empty()) {
+            assembler.setFieldSolutionAccess(options.field_access);
+        }
+        J.zero();
+        R.zero();
+        auto result = assembler.assembleBoth(mesh, test_space, trial_space, kernel, J, R);
+        EXPECT_GT(result.elements_assembled, 0) << "No cells assembled";
+    };
+
+    const GlobalIndex n_rows = row_map.getNumDofs();
+    const GlobalIndex n_cols = col_map.getNumDofs();
+
+    assembly::DenseMatrixView J_lhs(n_rows, n_cols);
+    assembly::DenseVectorView R_lhs(n_rows);
+    runAssembly(lhs_kernel, J_lhs, R_lhs);
+
+    assembly::DenseMatrixView J_rhs(n_rows, n_cols);
+    assembly::DenseVectorView R_rhs(n_rows);
+    runAssembly(rhs_kernel, J_rhs, R_rhs);
+
+    expectDenseNear(R_lhs, R_rhs, vec_tol, "residual");
+    expectDenseNear(J_lhs, J_rhs, mat_tol, "tangent");
+}
 
 /**
  * @brief Compare full assembly results between simd_batch=true and simd_batch=false.
@@ -357,6 +425,65 @@ TEST(JITSIMDBatchParity, NonlinearReactionDiffusion_Tetra4)
 
     expectSIMDBatchMatchesScalar(mesh, dof_map, space, residual, U,
                                 /*vec_tol=*/1e-14, /*mat_tol=*/1e-14);
+}
+
+TEST(JITSIMDBatchParity, SingleCellUnderfilledBatch_Tetra4)
+{
+    SingleTetraMeshAccess mesh;
+    auto dof_map = createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto residual = (inner(grad(u), grad(v)) + FormExpr::constant(0.5) * u * u * v).dx();
+
+    const std::vector<Real> U = {0.25, -0.5, 0.75, -0.1};
+
+    expectSIMDBatchMatchesScalar(mesh, dof_map, space, residual, U,
+                                /*vec_tol=*/1e-14, /*mat_tol=*/1e-14);
+}
+
+TEST(JITSIMDBatchParity, VectorizationDisabledBatchMatchesScalarPath_Tetra4)
+{
+    TwoTetraSharedFaceMeshAccess mesh;
+    auto dof_map = createTwoTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto residual = (inner(grad(u), grad(v)) + u * u * v).dx();
+
+    const std::vector<Real> U = {0.4, -0.2, 0.6, 0.1, -0.3};
+
+    auto batch_no_vector = makeJITOptions(/*simd_batch=*/true, /*vectorize=*/false);
+    auto scalar_no_vector = makeJITOptions(/*simd_batch=*/false, /*vectorize=*/false);
+
+    expectJITBatchOptionsMatch(mesh, dof_map, dof_map, space, space, residual, U,
+                               batch_no_vector, scalar_no_vector,
+                               /*vec_tol=*/1e-14, /*mat_tol=*/1e-14);
+}
+
+TEST(JITSIMDBatchParity, VectorTestScalarTrialCrossBlock_Triangle3)
+{
+    constexpr int dim = 2;
+
+    FourTriangleMeshAccess mesh;
+    auto base = std::make_shared<spaces::H1Space>(ElementType::Triangle3, /*order=*/1);
+    spaces::ProductSpace vel_space(base, dim);
+    spaces::H1Space pressure_space(ElementType::Triangle3, /*order=*/1);
+
+    auto row_map = createFourTriangleVectorDofMap();
+    auto col_map = createFourTriangleDofMap();
+
+    const auto p = TrialFunction(pressure_space, "p");
+    const auto v = TestFunction(vel_space, "v");
+    const auto residual = (p * div(v)).dx();
+
+    const std::vector<Real> U = {0.2, -0.1, 0.4, 0.05, -0.3};
+
+    expectSIMDBatchMatchesScalar(mesh, row_map, col_map, vel_space, pressure_space,
+                                residual, U,
+                                /*vec_tol=*/1e-13, /*mat_tol=*/1e-13);
 }
 
 // ============================================================================

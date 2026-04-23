@@ -1069,6 +1069,39 @@ struct GmresLaunchConfig {
     return limit;
 }
 
+[[nodiscard]] int fsilsBlockSchurOuterIterationCap(bool has_coupled_updates) noexcept
+{
+    if (const char* env = std::getenv("SVMP_FSILS_BLOCKSCHUR_OUTER_CAP")) {
+        std::string value(env);
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char ch) {
+            return std::isspace(ch) != 0;
+        }), value.end());
+
+        if (value == "none" || value == "unlimited" || value == "off") {
+            return std::numeric_limits<int>::max();
+        }
+
+        try {
+            const int parsed = std::stoi(value);
+            if (parsed > 0) {
+                return parsed;
+            }
+        } catch (...) {
+        }
+    }
+
+    // BlockSchur uses RI.mItr as an outer basis/workspace dimension. Keep a
+    // conservative cap for ordinary fractional-step solves, but allow larger
+    // explicit budgets for coupled/reduced update solves where tight true
+    // residual validation is required. Override with
+    // SVMP_FSILS_BLOCKSCHUR_OUTER_CAP when a case needs a different workspace
+    // policy.
+    return has_coupled_updates ? 200 : 50;
+}
+
 struct ResolvedSaddlePointBlocks {
     const BlockDescriptor* primary{nullptr};
     const BlockDescriptor* constraint{nullptr};
@@ -1506,23 +1539,31 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
     auto& ls = ls_;
     if (use_blockschur) {
-        // FSILS BlockSchur uses RI.mItr as an outer basis dimension and allocates
-        // O(nNo * mItr) workspace. Keep the legacy-safe cap for the fractional-step
-        // path, then return the primary BlockSchur result for Newton-side handling.
-        const int safe_max_iter = (options_.max_iter > 50) ? 10 : options_.max_iter;
+        const int requested_max_iter = std::max(1, options_.max_iter);
+        const int outer_cap = fsilsBlockSchurOuterIterationCap(has_native_rank_one_updates);
+        const int effective_max_iter = std::min(requested_max_iter, outer_cap);
+        if (oopTraceEnabled()) {
+            std::ostringstream cap_oss;
+            cap_oss << "FsilsLinearSolver::solve: BlockSchur outer iteration policy"
+                    << " requested=" << requested_max_iter
+                    << " cap=" << outer_cap
+                    << " effective=" << effective_max_iter
+                    << " coupled_updates=" << (has_native_rank_one_updates ? 1 : 0);
+            traceLog(cap_oss.str());
+        }
         if (options_.krylov_dim > 0) {
             fe_fsi_linear_solver::fsils_ls_create(ls,
                                                   fe_fsi_linear_solver::LS_TYPE_NS,
                                                   options_.rel_tol,
                                                   options_.abs_tol,
-                                                  safe_max_iter,
+                                                  effective_max_iter,
                                                   options_.krylov_dim);
         } else {
             fe_fsi_linear_solver::fsils_ls_create(ls,
                                                   fe_fsi_linear_solver::LS_TYPE_NS,
                                                   options_.rel_tol,
                                                   options_.abs_tol,
-                                                  safe_max_iter);
+                                                  effective_max_iter);
         }
 
         // Legacy semantics: GM/CG inherit absTol and Krylov dimension from RI.

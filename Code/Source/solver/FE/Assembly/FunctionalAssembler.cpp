@@ -22,6 +22,8 @@
 #include <chrono>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <numeric>
 #include <span>
 #include <stdexcept>
@@ -105,6 +107,36 @@ void gatherVectorCoefficients(std::span<const GlobalIndex> dofs,
                     std::string(error_prefix) + ": solution vector too small for DOF " +
                         std::to_string(dof));
         out[i] = raw_values[static_cast<std::size_t>(dof)];
+    }
+
+    if (std::getenv("SVMP_MONO_AUX_TRACE_DOF_GATHER") != nullptr) {
+        static thread_local int trace_budget = 64;
+        if (trace_budget > 0) {
+            Real l2 = 0.0;
+            for (const auto value : out) {
+                l2 += value * value;
+            }
+            const auto n_trace = std::min<std::size_t>(dofs.size(), 12u);
+            std::fprintf(stderr,
+                         "[FunctionalAssemblerDofGather] prefix='%s' view=%d raw_size=%zu n_dofs=%zu l2=%.17g",
+                         error_prefix ? error_prefix : "",
+                         view != nullptr ? 1 : 0,
+                         raw_values.size(),
+                         dofs.size(),
+                         static_cast<double>(std::sqrt(l2)));
+            for (std::size_t i = 0; i < n_trace; ++i) {
+                std::fprintf(stderr,
+                             " dof[%zu]=%lld val=%.17g",
+                             i,
+                             static_cast<long long>(dofs[i]),
+                             static_cast<double>(out[i]));
+            }
+            if (dofs.size() > n_trace) {
+                std::fprintf(stderr, " ...");
+            }
+            std::fprintf(stderr, "\n");
+            --trace_budget;
+        }
     }
 }
 

@@ -3814,9 +3814,12 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                                   : (default_owner_map ? default_owner_map->getDofOwner(fe_dof) : 0);
             };
         if (!ghost_policy_override.has_value()) {
-            // Backend row ownership is a row-filtered assembly mode. Reverse-scatter
-            // would also assemble ghost-cell replicas and can double-count rows.
-            assembly_options.ghost_policy = assembly::GhostPolicy::OwnedRowsOnly;
+            // Backend row ownership defines the target owner of each FE row,
+            // but numeric element assembly still has to route off-owner rows
+            // from owned cells to those owners. ReverseScatter traverses owned
+            // cells only and sends off-owner rows, matching the distributed
+            // sparsity construction above without double-counting ghost cells.
+            assembly_options.ghost_policy = assembly::GhostPolicy::ReverseScatter;
         }
     }
 

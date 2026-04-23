@@ -37,6 +37,7 @@ public:
     [[nodiscard]] bool supportsNativeRankOneUpdates() const noexcept override { return true; }
     [[nodiscard]] bool supportsNativeReducedFieldUpdates() const noexcept override { return true; }
     void setEffectiveTimeStep(double dt_eff) override;
+    [[nodiscard]] double effectiveTimeStepForTesting() const noexcept { return dt_eff_; }
 
     [[nodiscard]] bool supportsNullspace() const noexcept override { return true; }
     void setNullspaceBasis(std::span<const std::vector<double>> basis) override;

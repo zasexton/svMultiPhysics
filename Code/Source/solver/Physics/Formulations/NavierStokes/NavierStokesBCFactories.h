@@ -297,13 +297,12 @@ namespace detail {
             std::move(flow_rate),
             FE::systems::AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
 
-        // Step 2: Deploy the standard RCR model as a partitioned auxiliary
-        // state update. This keeps the boundary model out of the monolithic
-        // Newton block while preserving the same boundary pressure output.
+        // Step 2: Deploy the standard RCR model into the monolithic Newton
+        // block so the outlet pressure and flow Jacobian are solved together.
         auto rcr = system.deploy(
             use(detail::rcrOutflowModel())
                 .boundary(marker)
-                .partitioned("BackwardEuler")
+                .monolithic()
                 .params({{"Rp", Rp}, {"C", C}, {"Rd", Rd}, {"Pd", Pd}})
                 .bind("Q", Q)
                 .initialState({{"X", bc.X0}})

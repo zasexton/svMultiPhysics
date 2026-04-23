@@ -15,6 +15,7 @@
 #include "Forms/BlockForm.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/Index.h"
 #include "Spaces/HCurlSpace.h"
 #include "Spaces/HDivSpace.h"
 #include "Spaces/H1Space.h"
@@ -25,11 +26,94 @@
 
 #include <memory>
 #include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace svmp {
 namespace FE {
 namespace forms {
 namespace test {
+
+TEST(FormCompilerTest, ConstructorAndSetOptionsPreserveSymbolicTangentOptions)
+{
+    SymbolicOptions opts;
+    opts.ad_mode = ADMode::Forward;
+    opts.use_symbolic_tangent = true;
+    opts.simplify_expressions = false;
+    opts.exploit_sparsity = false;
+    opts.cache_expressions = false;
+    opts.verbose = true;
+    opts.jit.enable = true;
+    opts.jit.optimization_level = 3;
+    opts.jit.vectorize = false;
+    opts.jit.tensor.mode = TensorLoweringMode::Auto;
+
+    FormCompiler compiler(opts);
+    EXPECT_EQ(compiler.options().ad_mode, ADMode::Forward);
+    EXPECT_TRUE(compiler.options().use_symbolic_tangent);
+    EXPECT_FALSE(compiler.options().simplify_expressions);
+    EXPECT_FALSE(compiler.options().exploit_sparsity);
+    EXPECT_FALSE(compiler.options().cache_expressions);
+    EXPECT_TRUE(compiler.options().verbose);
+    EXPECT_TRUE(compiler.options().jit.enable);
+    EXPECT_EQ(compiler.options().jit.optimization_level, 3);
+    EXPECT_FALSE(compiler.options().jit.vectorize);
+    EXPECT_EQ(compiler.options().jit.tensor.mode, TensorLoweringMode::Auto);
+
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto ir = compiler.compileResidual((u * u * v).dx());
+    EXPECT_TRUE(ir.isCompiled());
+    EXPECT_EQ(ir.kind(), FormKind::Residual);
+    EXPECT_TRUE(compiler.options().use_symbolic_tangent);
+
+    SymbolicOptions reset;
+    reset.use_symbolic_tangent = false;
+    reset.jit.enable = false;
+    compiler.setOptions(reset);
+    EXPECT_FALSE(compiler.options().use_symbolic_tangent);
+    EXPECT_FALSE(compiler.options().jit.enable);
+}
+
+TEST(FormCompilerTest, DefaultAndMoveConstructorsPreserveOptionsAndUsability)
+{
+    FormCompiler default_compiler;
+    const SymbolicOptions defaults;
+    EXPECT_EQ(default_compiler.options().ad_mode, defaults.ad_mode);
+    EXPECT_EQ(default_compiler.options().use_symbolic_tangent, defaults.use_symbolic_tangent);
+    EXPECT_EQ(default_compiler.options().jit.enable, defaults.jit.enable);
+    EXPECT_EQ(default_compiler.options().jit.optimization_level, defaults.jit.optimization_level);
+    EXPECT_EQ(default_compiler.options().jit.tensor.mode, defaults.jit.tensor.mode);
+
+    SymbolicOptions opts;
+    opts.ad_mode = ADMode::Reverse;
+    opts.use_symbolic_tangent = true;
+    opts.jit.enable = true;
+    opts.jit.optimization_level = 1;
+    opts.jit.simd_batch = false;
+
+    FormCompiler configured(opts);
+    FormCompiler moved_constructed(std::move(configured));
+    EXPECT_EQ(moved_constructed.options().ad_mode, ADMode::Reverse);
+    EXPECT_TRUE(moved_constructed.options().use_symbolic_tangent);
+    EXPECT_TRUE(moved_constructed.options().jit.enable);
+    EXPECT_EQ(moved_constructed.options().jit.optimization_level, 1);
+    EXPECT_FALSE(moved_constructed.options().jit.simd_batch);
+
+    FormCompiler moved_assigned;
+    moved_assigned = std::move(moved_constructed);
+    EXPECT_EQ(moved_assigned.options().ad_mode, ADMode::Reverse);
+    EXPECT_TRUE(moved_assigned.options().use_symbolic_tangent);
+
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto ir = moved_assigned.compileBilinear((u * v).dx());
+    EXPECT_TRUE(ir.isCompiled());
+    EXPECT_EQ(ir.kind(), FormKind::Bilinear);
+}
 
 TEST(FormCompilerTest, RequiresTopLevelIntegrals)
 {
@@ -65,6 +149,170 @@ TEST(FormCompilerTest, CompileResidualRequiresTrialAndTest)
     spaces::H1Space space(ElementType::Tetra4, 1);
     const auto v = FormExpr::testFunction(space, "v");
     EXPECT_THROW((void)compiler.compileResidual(v.dx()), std::invalid_argument);
+}
+
+TEST(FormCompilerTest, CompileImplRejectsUnresolvedCoupledAndAuxiliaryPlaceholders)
+{
+    FormCompiler compiler;
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    const std::vector<FormExpr> placeholders = {
+        FormExpr::auxiliaryState("aux_state"),
+        FormExpr::auxiliaryInput("aux_input"),
+        FormExpr::auxiliaryOutput("aux_output"),
+        FormExpr::boundaryIntegral(v, 2, "wall_reduction"),
+    };
+
+    for (const auto& placeholder : placeholders) {
+        try {
+            (void)compiler.compileBilinear((u * placeholder * v).dx());
+            FAIL() << "Expected unresolved placeholder rejection for " << placeholder.toString();
+        } catch (const std::invalid_argument& e) {
+            const std::string msg = e.what();
+            EXPECT_NE(msg.find("unresolved placeholder terminal"), std::string::npos);
+            EXPECT_NE(msg.find(placeholder.toString()), std::string::npos);
+        }
+    }
+}
+
+TEST(FormCompilerTest, CompileImplRejectsUnloweredIndexedAccessWhenJITDisabled)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const Index i("i");
+
+    SymbolicOptions no_jit;
+    no_jit.jit.enable = false;
+    FormCompiler interpreter_compiler(no_jit);
+    EXPECT_THROW((void)interpreter_compiler.compileBilinear((grad(u)(i) * grad(v)(i)).dx()),
+                 std::invalid_argument);
+
+    SymbolicOptions jit_enabled;
+    jit_enabled.jit.enable = true;
+    FormCompiler jit_compiler(jit_enabled);
+    EXPECT_NO_THROW((void)jit_compiler.compileBilinear((grad(u)(i) * grad(v)(i)).dx()));
+}
+
+TEST(FormCompilerTest, CompileImplMarksFaceGeometryAndNeighborRequirements)
+{
+    FormCompiler compiler;
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    const auto form = (jump(u) * jump(v)).dS() + (minus(u) * minus(v)).dI(7);
+    const auto ir = compiler.compileBilinear(form);
+
+    EXPECT_TRUE(ir.isCompiled());
+    EXPECT_TRUE(ir.hasInteriorFaceTerms());
+    EXPECT_TRUE(ir.hasInterfaceFaceTerms());
+    EXPECT_TRUE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::Normals));
+    EXPECT_TRUE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::NeighborData));
+    EXPECT_TRUE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::FaceOrientations));
+
+    ASSERT_EQ(ir.terms().size(), 2u);
+    bool saw_interior = false;
+    bool saw_interface = false;
+    for (const auto& term : ir.terms()) {
+        if (term.domain == IntegralDomain::InteriorFace) {
+            saw_interior = true;
+            EXPECT_EQ(term.interface_marker, -1);
+            EXPECT_TRUE(assembly::hasFlag(term.required_data, assembly::RequiredData::NeighborData));
+        }
+        if (term.domain == IntegralDomain::InterfaceFace) {
+            saw_interface = true;
+            EXPECT_EQ(term.interface_marker, 7);
+            EXPECT_TRUE(assembly::hasFlag(term.required_data, assembly::RequiredData::FaceOrientations));
+        }
+    }
+    EXPECT_TRUE(saw_interior);
+    EXPECT_TRUE(saw_interface);
+}
+
+TEST(FormCompilerTest, CompileImplPopulatesDumpAndSortedFieldRequirements)
+{
+    FormCompiler compiler;
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    constexpr FieldId low_field = 3;
+    constexpr FieldId high_field = 9;
+    const auto low = FormExpr::discreteField(low_field, space, "low");
+    const auto high = FormExpr::stateField(high_field, space, "high");
+
+    const auto residual = (low * u * v + inner(grad(high), grad(v))).dx();
+    const auto ir = compiler.compileResidual(residual);
+
+    EXPECT_TRUE(ir.isCompiled());
+    EXPECT_EQ(ir.kind(), FormKind::Residual);
+    EXPECT_EQ(ir.maxTimeDerivativeOrder(), 0);
+
+    const auto dump = ir.dump();
+    EXPECT_NE(dump.find("kind: residual"), std::string::npos);
+    EXPECT_NE(dump.find("terms:"), std::string::npos);
+    EXPECT_NE(dump.find("dx"), std::string::npos);
+
+    const auto& reqs = ir.fieldRequirements();
+    ASSERT_EQ(reqs.size(), 2u);
+    EXPECT_EQ(reqs[0].field, low_field);
+    EXPECT_TRUE(assembly::hasFlag(reqs[0].required, assembly::RequiredData::SolutionValues));
+    EXPECT_FALSE(assembly::hasFlag(reqs[0].required, assembly::RequiredData::SolutionGradients));
+
+    EXPECT_EQ(reqs[1].field, high_field);
+    EXPECT_TRUE(assembly::hasFlag(reqs[1].required, assembly::RequiredData::SolutionValues));
+    EXPECT_TRUE(assembly::hasFlag(reqs[1].required, assembly::RequiredData::SolutionGradients));
+}
+
+TEST(FormCompilerTest, CompileResidualPreservesMultiDomainMetadataAndRequirements)
+{
+    FormCompiler compiler;
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    const auto residual =
+        (u * u * v).dx() +
+        (u * v).ds(4) +
+        (minus(u) * minus(v)).dI(8);
+    const auto ir = compiler.compileResidual(residual);
+
+    EXPECT_TRUE(ir.isCompiled());
+    EXPECT_EQ(ir.kind(), FormKind::Residual);
+    EXPECT_TRUE(ir.hasCellTerms());
+    EXPECT_TRUE(ir.hasBoundaryTerms());
+    EXPECT_TRUE(ir.hasInterfaceFaceTerms());
+    EXPECT_TRUE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::SolutionValues));
+    EXPECT_TRUE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::Normals));
+    EXPECT_TRUE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::NeighborData));
+    EXPECT_TRUE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::FaceOrientations));
+
+    ASSERT_EQ(ir.terms().size(), 3u);
+    bool saw_cell = false;
+    bool saw_boundary = false;
+    bool saw_interface = false;
+    for (const auto& term : ir.terms()) {
+        if (term.domain == IntegralDomain::Cell) {
+            saw_cell = true;
+            EXPECT_EQ(term.boundary_marker, -1);
+            EXPECT_EQ(term.interface_marker, -1);
+        } else if (term.domain == IntegralDomain::Boundary) {
+            saw_boundary = true;
+            EXPECT_EQ(term.boundary_marker, 4);
+            EXPECT_TRUE(assembly::hasFlag(term.required_data, assembly::RequiredData::Normals));
+        } else if (term.domain == IntegralDomain::InterfaceFace) {
+            saw_interface = true;
+            EXPECT_EQ(term.interface_marker, 8);
+            EXPECT_TRUE(assembly::hasFlag(term.required_data, assembly::RequiredData::NeighborData));
+            EXPECT_TRUE(assembly::hasFlag(term.required_data, assembly::RequiredData::FaceOrientations));
+        }
+    }
+    EXPECT_TRUE(saw_cell);
+    EXPECT_TRUE(saw_boundary);
+    EXPECT_TRUE(saw_interface);
 }
 
 TEST(FormCompilerTest, CompilesMultipleTermsAndMarkers)

@@ -43,6 +43,7 @@
 #include <llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/IR/Module.h>
+#include <llvm/Object/ObjectFile.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Transforms/Scalar/ADCE.h>
 #include <llvm/Transforms/Scalar/EarlyCSE.h>
@@ -317,12 +318,31 @@ public:
             return nullptr;
         }
 
+        auto buf = std::move(*buf_or_err);
+        auto object_or_error = llvm::object::ObjectFile::createObjectFile(buf->getMemBufferRef());
+        if (!object_or_error) {
+            llvm::consumeError(object_or_error.takeError());
+            if (counters_ != nullptr) {
+                counters_->misses.fetch_add(1u, std::memory_order_relaxed);
+            }
+            std::filesystem::remove(path, ec);
+            return nullptr;
+        }
+
+        if (!objectDefinesSymbol(**object_or_error, module_id)) {
+            if (counters_ != nullptr) {
+                counters_->misses.fetch_add(1u, std::memory_order_relaxed);
+            }
+            std::filesystem::remove(path, ec);
+            return nullptr;
+        }
+
         if (counters_ != nullptr) {
             counters_->disk_hits.fetch_add(1u, std::memory_order_relaxed);
-            counters_->bytes_read.fetch_add(static_cast<std::uint64_t>((*buf_or_err)->getBufferSize()),
+            counters_->bytes_read.fetch_add(static_cast<std::uint64_t>(buf->getBufferSize()),
                                             std::memory_order_relaxed);
         }
-        return std::move(*buf_or_err);
+        return buf;
     }
 
     [[nodiscard]] std::unique_ptr<llvm::MemoryBuffer> getObject(const llvm::Module* module) override
@@ -334,6 +354,25 @@ public:
     }
 
 private:
+    [[nodiscard]] static bool objectDefinesSymbol(llvm::object::ObjectFile& object,
+                                                  std::string_view module_id)
+    {
+        const std::string expected(module_id);
+        const std::string expected_macho = "_" + expected;
+        for (const auto& symbol : object.symbols()) {
+            auto name_or_error = symbol.getName();
+            if (!name_or_error) {
+                llvm::consumeError(name_or_error.takeError());
+                continue;
+            }
+            const auto name = name_or_error->str();
+            if (name == expected || name == expected_macho) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     [[nodiscard]] static std::string sanitizeFilename(std::string_view s)
     {
         std::string out;
@@ -1050,6 +1089,12 @@ bool JITEngine::tryLoadFromObjectCache(std::string_view name)
     }
 
     if (!buf) {
+        return false;
+    }
+
+    auto object_or_error = llvm::object::ObjectFile::createObjectFile(buf->getMemBufferRef());
+    if (!object_or_error) {
+        llvm::consumeError(object_or_error.takeError());
         return false;
     }
 

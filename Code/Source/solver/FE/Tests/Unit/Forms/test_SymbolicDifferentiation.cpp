@@ -34,6 +34,9 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace svmp {
@@ -145,6 +148,29 @@ void compareADAndSymbolic(const assembly::IMeshAccess& mesh,
     dof_map.setNumLocalDofs(n_dofs);
     dof_map.finalize();
     return dof_map;
+}
+
+[[nodiscard]] std::size_t countNodes(const FormExpr& expr,
+                                     FormExprType type,
+                                     std::optional<std::string_view> name = std::nullopt)
+{
+    if (!expr.isValid() || !expr.node()) {
+        return 0u;
+    }
+
+    std::size_t count = 0u;
+    const auto visit = [&](const auto& self, const FormExprNode& node) -> void {
+        if (node.type() == type && (!name || node.toString() == *name)) {
+            ++count;
+        }
+        for (const auto& child : node.childrenShared()) {
+            if (child) {
+                self(self, *child);
+            }
+        }
+    };
+    visit(visit, *expr.node());
+    return count;
 }
 
 } // namespace
@@ -819,6 +845,146 @@ public:
         return spec;
     }
 };
+
+TEST(SymbolicDifferentiabilityCheck, AcceptsBroadSupportedExpressionShapes)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    const auto residual =
+        ((u.smoothAbs(FormExpr::constant(1.0e-6)) + FormExpr::previousSolution(1)) * v).dx();
+    const auto result = checkSymbolicDifferentiability(residual);
+
+    EXPECT_TRUE(result.ok);
+    EXPECT_FALSE(result.first_issue.has_value());
+    EXPECT_TRUE(canDifferentiateSymbolically(residual));
+}
+
+TEST(SymbolicDifferentiabilityCheck, ReportsInvalidExpression)
+{
+    const FormExpr invalid;
+    const auto result = checkSymbolicDifferentiability(invalid);
+
+    EXPECT_FALSE(result.ok);
+    ASSERT_TRUE(result.first_issue.has_value());
+    EXPECT_EQ(result.first_issue->type, FormExprType::Constant);
+    EXPECT_NE(result.first_issue->message.find("invalid expression"), std::string::npos);
+    EXPECT_FALSE(canDifferentiateSymbolically(invalid));
+}
+
+TEST(SymbolicDifferentiabilityCheck, ReportsNestedConstitutiveNodes)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    auto model = std::make_shared<InlinableSquareModel>();
+    const auto constitutive_call = FormExpr::constitutive(model, u);
+    const auto residual = (FormExpr::constitutiveOutput(constitutive_call, 0) * v).dx();
+    const auto result = checkSymbolicDifferentiability(residual);
+
+    EXPECT_FALSE(result.ok);
+    ASSERT_TRUE(result.first_issue.has_value());
+    EXPECT_EQ(result.first_issue->type, FormExprType::ConstitutiveOutput);
+    EXPECT_NE(result.first_issue->message.find("Constitutive nodes must be inlined"), std::string::npos);
+    EXPECT_FALSE(result.first_issue->subexpr.empty());
+}
+
+TEST(SymbolicDifferentiabilityCheck, ReportsDirectConstitutiveNodesInsideComposite)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    auto model = std::make_shared<InlinableSquareModel>();
+    const auto residual = ((FormExpr::constitutive(model, u) + u) * v).dx();
+    const auto result = checkSymbolicDifferentiability(residual);
+
+    EXPECT_FALSE(result.ok);
+    ASSERT_TRUE(result.first_issue.has_value());
+    EXPECT_EQ(result.first_issue->type, FormExprType::Constitutive);
+    EXPECT_NE(result.first_issue->message.find("Constitutive nodes must be inlined"), std::string::npos);
+    EXPECT_FALSE(result.first_issue->subexpr.empty());
+}
+
+TEST(SymbolicDifferentiationImplContract, PublicEntryPointsSurfaceValidationErrors)
+{
+    const FormExpr invalid;
+    EXPECT_THROW((void)differentiateResidual(invalid), std::invalid_argument);
+
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    auto model = std::make_shared<InlinableSquareModel>();
+    const auto residual = (FormExpr::constitutive(model, u) * v).dx();
+
+    try {
+        (void)differentiateResidual(residual);
+        FAIL() << "Expected constitutive residual to be rejected before differentiation";
+    } catch (const std::invalid_argument& e) {
+        const std::string msg = e.what();
+        EXPECT_NE(msg.find("Constitutive nodes must be inlined"), std::string::npos);
+    }
+
+    EXPECT_THROW((void)differentiateResidual((u * v).dx(), FormExpr::parameterRef(0)),
+                 std::invalid_argument);
+}
+
+TEST(SymbolicDifferentiationImplContract, SpecificTrialFunctionTargetsOnlyMatchingTrial)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto w = FormExpr::trialFunction(space, "w");
+
+    const auto expr = u * w;
+    const auto d_du = differentiateResidual(expr, u);
+    const auto d_dw = differentiateResidual(expr, w);
+
+    EXPECT_GT(countNodes(d_du, FormExprType::TrialFunction, "du"), 0u);
+    EXPECT_EQ(countNodes(d_du, FormExprType::TrialFunction, "dw"), 0u);
+    EXPECT_GT(countNodes(d_du, FormExprType::StateField, "w"), 0u);
+
+    EXPECT_GT(countNodes(d_dw, FormExprType::TrialFunction, "dw"), 0u);
+    EXPECT_EQ(countNodes(d_dw, FormExprType::TrialFunction, "du"), 0u);
+    EXPECT_GT(countNodes(d_dw, FormExprType::StateField, "u"), 0u);
+}
+
+TEST(SymbolicDifferentiationImplContract, AuxiliaryOutputTargetDifferentiatesOnlyMatchingSlot)
+{
+    const auto y3 = FormExpr::auxiliaryOutputRef(3);
+    const auto y4 = FormExpr::auxiliaryOutputRef(4);
+    const auto expr = y3 * y4 + y4 * y4;
+
+    const auto d_y3 = differentiateResidual(expr, y3);
+    const auto d_y4 = differentiateResidual(expr, y4);
+
+    PointEvalContext ctx;
+    const std::array<Real, 5> outputs = {0.0, 0.0, 0.0, 2.0, 5.0};
+    ctx.auxiliary_outputs = std::span<const Real>(outputs.data(), outputs.size());
+
+    EXPECT_DOUBLE_EQ(evaluateScalarAt(d_y3, ctx), 5.0);
+    EXPECT_DOUBLE_EQ(evaluateScalarAt(d_y4, ctx), 12.0);
+}
+
+TEST(SymbolicDifferentiationImplContract, FieldIdTargetsRejectInconsistentMetadata)
+{
+    spaces::H1Space h1(ElementType::Tetra4, 1);
+    spaces::L2Space l2(ElementType::Tetra4, 1);
+    const auto v = FormExpr::testFunction(h1, "v");
+    constexpr FieldId p_field = 42;
+
+    const auto p_h1 = FormExpr::stateField(p_field, h1, "p");
+    const auto p_l2 = FormExpr::stateField(p_field, l2, "p");
+    EXPECT_THROW((void)differentiateResidual(((p_h1 + p_l2) * v).dx(), p_field),
+                 std::invalid_argument);
+
+    const auto p_named = FormExpr::stateField(p_field, h1, "p");
+    const auto p_renamed = FormExpr::stateField(p_field, h1, "pressure");
+    EXPECT_THROW((void)differentiateResidual(((p_named + p_renamed) * v).dx(), p_field),
+                 std::invalid_argument);
+}
 
 TEST(SymbolicNonlinearFormKernelTest, InlinableConstitutiveJacobianMatchesAD)
 {

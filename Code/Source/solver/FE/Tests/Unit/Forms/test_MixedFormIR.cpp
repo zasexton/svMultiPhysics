@@ -19,7 +19,9 @@
 #include "Spaces/L2Space.h"
 #include "Spaces/ProductSpace.h"
 
+#include <array>
 #include <stdexcept>
+#include <utility>
 
 namespace svmp {
 namespace FE {
@@ -655,6 +657,78 @@ TEST(CompileMixed, AutoDetect_MixedField)
     EXPECT_TRUE(mir.hasBlock(0, 1));
     EXPECT_TRUE(mir.hasBlock(1, 0));
     EXPECT_FALSE(mir.hasBlock(1, 1));
+}
+
+TEST(CompileMixed, ThreeFieldSparseLayoutPreservesOrderingDomainsAndProvenance)
+{
+    FormCompiler compiler;
+
+    auto scalar_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace V(scalar_space, /*components=*/3);
+    spaces::L2Space Q(ElementType::Tetra4, 0);
+    spaces::H1Space T(ElementType::Tetra4, 1);
+
+    const auto u = FormExpr::trialFunction(V, "u");
+    const auto v = FormExpr::testFunction(V, "v");
+    const auto theta = FormExpr::trialFunction(T, "theta");
+    const auto psi = FormExpr::testFunction(T, "psi");
+    const auto p = FormExpr::trialFunction(Q, "p");
+    const auto q = FormExpr::testFunction(Q, "q");
+
+    const auto form =
+        inner(grad(u), grad(v)).dx() +
+        (theta * div(v)).dx() +
+        (div(u) * q).dx() +
+        (p * q).ds(4) +
+        (minus(theta) * minus(psi)).dI(6);
+
+    const auto mir = compiler.compileMixed(form, FormKind::Bilinear);
+
+    ASSERT_EQ(mir.numTestFields(), 3u);
+    ASSERT_EQ(mir.numTrialFields(), 3u);
+    EXPECT_EQ(mir.numActiveBlocks(), 5u);
+
+    ASSERT_EQ(mir.testFields().size(), 3u);
+    EXPECT_EQ(mir.testFields()[0].name, "v");
+    EXPECT_EQ(mir.testFields()[1].name, "q");
+    EXPECT_EQ(mir.testFields()[2].name, "psi");
+
+    ASSERT_EQ(mir.trialFields().size(), 3u);
+    EXPECT_EQ(mir.trialFields()[0].name, "u");
+    EXPECT_EQ(mir.trialFields()[1].name, "theta");
+    EXPECT_EQ(mir.trialFields()[2].name, "p");
+
+    const std::array<std::pair<std::size_t, std::size_t>, 5> active_blocks = {{
+        {0u, 0u}, {0u, 1u}, {1u, 0u}, {1u, 2u}, {2u, 1u},
+    }};
+    for (const auto& [row, col] : active_blocks) {
+        ASSERT_TRUE(mir.hasBlock(row, col)) << "Expected active block (" << row << "," << col << ")";
+        ASSERT_TRUE(mir.blockProvenance(row, col).has_value());
+        EXPECT_EQ(mir.blockProvenance(row, col)->contributing_term_indices.size(), 1u);
+    }
+
+    EXPECT_FALSE(mir.hasBlock(0, 2));
+    EXPECT_FALSE(mir.hasBlock(1, 1));
+    EXPECT_FALSE(mir.hasBlock(2, 0));
+    EXPECT_FALSE(mir.hasBlock(2, 2));
+    EXPECT_FALSE(mir.blockProvenance(2, 2).has_value());
+
+    EXPECT_TRUE(mir.block(0, 0).hasCellTerms());
+    EXPECT_TRUE(mir.block(0, 1).hasCellTerms());
+    EXPECT_TRUE(mir.block(1, 0).hasCellTerms());
+    EXPECT_TRUE(mir.block(1, 2).hasBoundaryTerms());
+    ASSERT_EQ(mir.block(1, 2).terms().size(), 1u);
+    EXPECT_EQ(mir.block(1, 2).terms()[0].boundary_marker, 4);
+
+    EXPECT_TRUE(mir.block(2, 1).hasInterfaceFaceTerms());
+    ASSERT_EQ(mir.block(2, 1).terms().size(), 1u);
+    EXPECT_EQ(mir.block(2, 1).terms()[0].interface_marker, 6);
+
+    EXPECT_TRUE(mir.domainSummary().has_cell_terms);
+    EXPECT_TRUE(mir.domainSummary().has_boundary_terms);
+    EXPECT_TRUE(mir.domainSummary().has_interface_face_terms);
+    ASSERT_EQ(mir.domainSummary().boundary_markers.size(), 1u);
+    EXPECT_EQ(mir.domainSummary().boundary_markers.front(), 4);
 }
 
 // ============================================================================

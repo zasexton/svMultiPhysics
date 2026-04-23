@@ -11,6 +11,7 @@
 
 #include "Assembly/JIT/KernelArgs.h"
 #include "Forms/JIT/HardwareProfile.h"
+#include "Forms/JIT/JITCacheKey.h"
 #include "Forms/JIT/JITEngine.h"
 #include "Forms/JIT/KernelIR.h"
 #include "Forms/JIT/LLVMGen.h"
@@ -43,13 +44,11 @@ namespace jit {
 
 namespace {
 
-constexpr std::uint64_t kFNVOffset = 14695981039346656037ULL;
-constexpr std::uint64_t kFNVPrime = 1099511628211ULL;
+constexpr std::uint64_t kFNVOffset = kCacheKeyFNVOffset;
 
 inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
 {
-    h ^= v;
-    h *= kFNVPrime;
+    mixCacheKey(h, v);
 }
 
 [[nodiscard]] bool containsTestOrTrial(const FormExprNode& node) noexcept
@@ -124,13 +123,6 @@ inferFunctionalTrialSpaceSignature(const FormExprNode& node, bool& out_conflict)
 }
 
 #if SVMP_FE_ENABLE_LLVM_JIT
-[[nodiscard]] std::string toHex(std::uint64_t v)
-{
-    std::ostringstream oss;
-    oss << std::hex << v;
-    return oss.str();
-}
-
 [[nodiscard]] const char* toString(IntegralDomain d) noexcept
 {
     switch (d) {
@@ -150,11 +142,7 @@ inferFunctionalTrialSpaceSignature(const FormExprNode& node, bool& out_conflict)
 
 [[nodiscard]] std::uint64_t hashString(std::string_view s) noexcept
 {
-    std::uint64_t h = kFNVOffset;
-    for (const char ch : s) {
-        hashMix(h, static_cast<std::uint64_t>(static_cast<unsigned char>(ch)));
-    }
-    return h;
+    return hashStringForCacheKey(s);
 }
 
 #if SVMP_FE_ENABLE_LLVM_JIT
@@ -206,35 +194,12 @@ inferFunctionalTrialSpaceSignature(const FormExprNode& node, bool& out_conflict)
 #if SVMP_FE_ENABLE_LLVM_JIT
 [[nodiscard]] std::uint64_t hashTensorOptions(const TensorJITOptions& opt) noexcept
 {
-    std::uint64_t h = kFNVOffset;
-    hashMix(h, static_cast<std::uint64_t>(opt.mode));
-    hashMix(h, static_cast<std::uint64_t>(opt.force_loop_nest ? 1u : 0u));
-    hashMix(h, static_cast<std::uint64_t>(opt.enable_symmetry_lowering ? 1u : 0u));
-    hashMix(h, static_cast<std::uint64_t>(opt.enable_optimal_contraction_order ? 1u : 0u));
-    hashMix(h, static_cast<std::uint64_t>(opt.enable_vectorization_hints ? 1u : 0u));
-    hashMix(h, static_cast<std::uint64_t>(opt.enable_delta_shortcuts ? 1u : 0u));
-    hashMix(h, opt.scalar_expansion_term_threshold);
-    hashMix(h, static_cast<std::uint64_t>(opt.temp_stack_max_entries));
-    hashMix(h, static_cast<std::uint64_t>(opt.temp_alignment_bytes));
-    hashMix(h, static_cast<std::uint64_t>(opt.temp_enable_reuse ? 1u : 0u));
-    hashMix(h, static_cast<std::uint64_t>(opt.enable_polly ? 1u : 0u));
-    hashMix(h, static_cast<std::uint64_t>(opt.enable_loop_tiling ? 1u : 0u));
-    hashMix(h, static_cast<std::uint64_t>(opt.tile_size));
-    hashMix(h, static_cast<std::uint64_t>(opt.min_tiling_extent));
-    return h;
+    return hashTensorOptionsForCacheKey(opt);
 }
 
 [[nodiscard]] std::uint64_t hashSpecializationCodegenOptions(const JITSpecializationOptions& opt) noexcept
 {
-    std::uint64_t h = kFNVOffset;
-    hashMix(h, static_cast<std::uint64_t>(opt.enable_loop_unroll_metadata ? 1u : 0u));
-    hashMix(h, static_cast<std::uint64_t>(opt.max_unroll_trip_count));
-    // Both bytes/op estimates are live codegen inputs. Include them so that
-    // changing the estimate invalidates cached kernels compiled with the old
-    // policy.
-    hashMix(h, static_cast<std::uint64_t>(opt.bytes_per_op_estimate));
-    hashMix(h, static_cast<std::uint64_t>(opt.raw_bytes_per_op_estimate));
-    return h;
+    return hashSpecializationCodegenOptionsForCacheKey(opt);
 }
 
 struct SpaceSigHash {
@@ -299,78 +264,6 @@ struct KernelGroupPlan {
     bool cacheable{true};
     std::vector<std::size_t> term_indices{};
 };
-
-[[nodiscard]] std::uint64_t computeKernelCacheKey(const FormIR& ir,
-                                                  const KernelGroupPlan& group,
-                                                  std::uint64_t combined_ir_hash,
-                                                  const SpaceSigHash& test_sig_hash,
-                                                  const SpaceSigHash& trial_sig_hash,
-                                                  const JITOptions& jit_options,
-                                                  std::string_view target_triple,
-                                                  std::string_view data_layout,
-                                                  std::string_view cpu_name,
-                                                  std::string_view cpu_features,
-                                                  std::string_view llvm_version,
-                                                  const JITCompileSpecialization* specialization) noexcept
-{
-    std::uint64_t h = kFNVOffset;
-    hashMix(h, static_cast<std::uint64_t>(assembly::jit::kKernelArgsABIVersionV6));
-    hashMix(h, static_cast<std::uint64_t>(assembly::jit::kKernelArgsABILayoutRevisionV6));
-    hashMix(h, static_cast<std::uint64_t>(ir.kind()));
-    hashMix(h, static_cast<std::uint64_t>(group.key.domain));
-    hashMix(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(group.key.boundary_marker)));
-    hashMix(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(group.key.interface_marker)));
-    hashMix(h, combined_ir_hash);
-    hashMix(h, test_sig_hash.h);
-    hashMix(h, trial_sig_hash.h);
-    hashMix(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(jit_options.optimization_level)));
-    hashMix(h, static_cast<std::uint64_t>(jit_options.vectorize ? 1u : 0u));
-    hashMix(h, static_cast<std::uint64_t>(jit_options.simd_batch ? 1u : 0u));
-    hashMix(h, hashTensorOptions(jit_options.tensor));
-    hashMix(h, hashSpecializationCodegenOptions(jit_options.specialization));
-    hashMix(h, static_cast<std::uint64_t>(jit_options.debug_info ? 1u : 0u));
-    hashMix(h, hashString(target_triple));
-    hashMix(h, hashString(data_layout));
-    hashMix(h, hashString(cpu_name));
-    hashMix(h, hashString(cpu_features));
-    hashMix(h, hashString(llvm_version));
-
-    // Hardware profile: cache hierarchy sizes affect codegen decisions
-    // (term-group splitting, colocation budgets, unroll suppression).
-    // Include in key so that disk-cached kernels are not reused across
-    // machines with different cache sizes.
-    hashMix(h, hardwareProfile().stableHash64());
-
-    const bool use_spec = (specialization != nullptr) && (specialization->domain == group.key.domain);
-    hashMix(h, static_cast<std::uint64_t>(use_spec ? 1u : 0u));
-    if (use_spec) {
-        const auto mixOptU32 = [&](const std::optional<std::uint32_t>& v) {
-            hashMix(h, static_cast<std::uint64_t>(v.has_value() ? 1u : 0u));
-            if (v) {
-                hashMix(h, static_cast<std::uint64_t>(*v));
-            }
-        };
-
-        mixOptU32(specialization->n_qpts_minus);
-        mixOptU32(specialization->n_test_dofs_minus);
-        mixOptU32(specialization->n_trial_dofs_minus);
-        mixOptU32(specialization->n_qpts_plus);
-        mixOptU32(specialization->n_test_dofs_plus);
-        mixOptU32(specialization->n_trial_dofs_plus);
-
-        hashMix(h, static_cast<std::uint64_t>(specialization->is_affine ? 1u : 0u));
-
-        // text_budget_bytes affects whether DOF loop unroll metadata is
-        // emitted for specialized kernels, so it must be part of this key.
-        hashMix(h, static_cast<std::uint64_t>(jit_options.specialization.text_budget_bytes));
-    }
-    return h;
-}
-
-[[nodiscard]] std::string stableSymbolForKernel(std::uint64_t cache_key)
-{
-    return "svmp_fe_jit_kernel_" + toHex(cache_key);
-}
 
 struct CompilationPlan {
     bool ok{false};
@@ -487,18 +380,25 @@ struct CompilationPlan {
         }
 
         group.cacheable = cacheable;
-        group.cache_key = computeKernelCacheKey(ir,
-                                                group,
-                                                combined_ir_hash,
-                                                test_sig_hash,
-                                                trial_sig_hash,
-                                                jit_options,
-                                                target_triple,
-                                                data_layout,
-                                                cpu_name,
-                                                cpu_features,
-                                                llvm_version,
-                                                specialization);
+        group.cache_key = computeKernelCacheKey(KernelCacheKeyInputs{
+            .abi_version = assembly::jit::kKernelArgsABIVersionV6,
+            .abi_layout_revision = assembly::jit::kKernelArgsABILayoutRevisionV6,
+            .form_kind = ir.kind(),
+            .domain = group.key.domain,
+            .boundary_marker = group.key.boundary_marker,
+            .interface_marker = group.key.interface_marker,
+            .combined_ir_hash = combined_ir_hash,
+            .test_space_hash = test_sig_hash.h,
+            .trial_space_hash = trial_sig_hash.h,
+            .jit_options = jit_options,
+            .target_triple = target_triple,
+            .data_layout = data_layout,
+            .cpu_name = cpu_name,
+            .cpu_features = cpu_features,
+            .llvm_version = llvm_version,
+            .hardware_profile_hash = hardwareProfile().stableHash64(),
+            .specialization = specialization,
+        });
         plan.cacheable = plan.cacheable && group.cacheable;
         plan.groups.push_back(std::move(group));
     }
@@ -875,7 +775,7 @@ JITCompileResult JITCompiler::Impl::compileFormIR(const FormIR& ir,
             out.message += toString(group.key.domain);
             out.message += "\nBoundary marker: " + std::to_string(group.key.boundary_marker);
             out.message += "\nInterface marker: " + std::to_string(group.key.interface_marker);
-            out.message += "\nCache key: 0x" + toHex(group.cache_key);
+            out.message += "\nCache key: 0x" + cacheKeyToHex(group.cache_key);
             out.message += "\n\nFormIR dump:\n" + ir.dump();
             out.cacheable = false;
             return out;
@@ -1296,7 +1196,7 @@ JITCompileResult JITCompiler::compileColocated(
                 hashMix(kernel_key, group.cache_key);
             }
         }
-        kernel_symbols.push_back("svmp_fe_jit_coloc_" + toHex(kernel_key));
+        kernel_symbols.push_back("svmp_fe_jit_coloc_" + cacheKeyToHex(kernel_key));
     }
 
     // Try to look up all symbols — if they all resolve, the colocated module

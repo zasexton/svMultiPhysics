@@ -10,10 +10,14 @@
 #include "Forms/FormExpr.h"
 #include "Forms/JIT/KernelIR.h"
 #include "Forms/JIT/HardwareProfile.h"
+#include "Spaces/H1Space.h"
+#include "Spaces/L2Space.h"
 
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <stdexcept>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -111,6 +115,132 @@ TEST(KernelIRHashing, DifferentExprsDifferentHash)
     EXPECT_NE(h1, h2);
 }
 
+TEST(KernelIRHashing, StableHashCoversLeafMetadataAndNonCommutativeOrder)
+{
+    const auto a = FormExpr::parameterRef(0);
+    const auto b = FormExpr::parameterRef(1);
+
+    EXPECT_NE(jit::lowerToKernelIR(a).ir.stableHash64(),
+              jit::lowerToKernelIR(b).ir.stableHash64());
+    EXPECT_NE(jit::lowerToKernelIR(a - b).ir.stableHash64(),
+              jit::lowerToKernelIR(b - a).ir.stableHash64());
+
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    spaces::L2Space l2_space(ElementType::Tetra4, 1);
+    const auto p1 = FormExpr::stateField(101, space, "p");
+    const auto p2 = FormExpr::stateField(102, space, "p");
+    const auto q1 = FormExpr::stateField(101, space, "q");
+    const auto p_l2 = FormExpr::stateField(101, l2_space, "p");
+    EXPECT_NE(jit::lowerToKernelIR(p1).ir.stableHash64(),
+              jit::lowerToKernelIR(p2).ir.stableHash64());
+    EXPECT_NE(jit::lowerToKernelIR(p1).ir.stableHash64(),
+              jit::lowerToKernelIR(p_l2).ir.stableHash64());
+    // Symbol display names are intentionally not part of KernelIR codegen identity.
+    // Once FieldId and space metadata match, two references lower to the same IR.
+    EXPECT_EQ(jit::lowerToKernelIR(p1).ir.stableHash64(),
+              jit::lowerToKernelIR(q1).ir.stableHash64());
+}
+
+TEST(KernelIRHashing, StableHashHandlesEmptyAndRejectsMalformedIR)
+{
+    jit::KernelIR empty;
+    EXPECT_EQ(empty.stableHash64(), 0u);
+
+    jit::KernelIR bad_root;
+    bad_root.ops.push_back(jit::KernelIROp{.type = FormExprType::Constant});
+    bad_root.root = 4u;
+    EXPECT_THROW((void)bad_root.stableHash64(), std::out_of_range);
+
+    jit::KernelIR non_topological;
+    non_topological.ops.push_back(jit::KernelIROp{
+        .type = FormExprType::Add,
+        .first_child = 0u,
+        .child_count = 2u,
+    });
+    non_topological.children = {0u, 0u};
+    non_topological.root = 0u;
+    EXPECT_THROW((void)non_topological.stableHash64(), std::logic_error);
+}
+
+TEST(KernelIRHashing, PerOpStructuralHashesMatchStableRootHash)
+{
+    const auto a = FormExpr::parameterRef(0);
+    const auto b = FormExpr::parameterRef(1);
+    const auto c = FormExpr::constant(Real(2.0));
+
+    const auto r = jit::lowerToKernelIR((a + b) * c);
+    const auto hashes = r.ir.perOpStructuralHashes();
+
+    ASSERT_EQ(hashes.size(), r.ir.ops.size());
+    ASSERT_LT(static_cast<std::size_t>(r.ir.root), hashes.size());
+    EXPECT_EQ(hashes[static_cast<std::size_t>(r.ir.root)], r.ir.stableHash64());
+    for (const auto h : hashes) {
+        EXPECT_NE(h, 0u);
+    }
+}
+
+TEST(KernelIRHashing, PerOpStructuralHashesIdentifyDuplicateSubtreesWithoutCSE)
+{
+    const auto a = FormExpr::parameterRef(0);
+    const auto b = FormExpr::constant(Real(1.0));
+    const auto sub = a + b;
+
+    jit::KernelIRBuildOptions opts;
+    opts.cse = false;
+    opts.canonicalize_commutative = false;
+    const auto r = jit::lowerToKernelIR(sub * sub, opts);
+    const auto hashes = r.ir.perOpStructuralHashes();
+
+    std::vector<std::uint64_t> add_hashes;
+    for (std::size_t i = 0; i < r.ir.ops.size(); ++i) {
+        if (r.ir.ops[i].type == FormExprType::Add) {
+            add_hashes.push_back(hashes[i]);
+        }
+    }
+
+    ASSERT_EQ(add_hashes.size(), 2u);
+    EXPECT_EQ(add_hashes[0], add_hashes[1]);
+}
+
+TEST(KernelIRHashing, PerOpStructuralHashesAreCommutativeButMetadataSensitive)
+{
+    const auto a = FormExpr::parameterRef(0);
+    const auto b = FormExpr::parameterRef(1);
+    const auto c = FormExpr::parameterRef(2);
+
+    jit::KernelIRBuildOptions opts;
+    opts.cse = false;
+    opts.canonicalize_commutative = false;
+
+    const auto ab = jit::lowerToKernelIR(a + b, opts).ir;
+    const auto ba = jit::lowerToKernelIR(b + a, opts).ir;
+    const auto ac = jit::lowerToKernelIR(a + c, opts).ir;
+    const auto a_minus_b = jit::lowerToKernelIR(a - b, opts).ir;
+
+    EXPECT_EQ(ab.perOpStructuralHashes()[ab.root], ba.perOpStructuralHashes()[ba.root]);
+    EXPECT_NE(ab.perOpStructuralHashes()[ab.root], ac.perOpStructuralHashes()[ac.root]);
+    EXPECT_NE(ab.perOpStructuralHashes()[ab.root], a_minus_b.perOpStructuralHashes()[a_minus_b.root]);
+}
+
+TEST(KernelIRHashing, PerOpStructuralHashesTrackOptimizeResult)
+{
+    const auto a = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(a + FormExpr::typedZero());
+    const auto before_hashes = r.ir.perOpStructuralHashes();
+    ASSERT_EQ(before_hashes.size(), r.ir.ops.size());
+
+    const auto eliminated = r.ir.optimize();
+    EXPECT_GT(eliminated, 0u);
+
+    const auto after_hashes = r.ir.perOpStructuralHashes();
+    ASSERT_EQ(after_hashes.size(), r.ir.ops.size());
+    ASSERT_LT(static_cast<std::size_t>(r.ir.root), after_hashes.size());
+    EXPECT_EQ(after_hashes[static_cast<std::size_t>(r.ir.root)], r.ir.stableHash64());
+
+    const auto expected = jit::lowerToKernelIR(a).ir.stableHash64();
+    EXPECT_EQ(r.ir.stableHash64(), expected);
+}
+
 // ============================================================================
 // Optimize: zero propagation (shape-aware)
 // ============================================================================
@@ -120,7 +250,6 @@ TEST(KernelIROptimize, ConstantFoldingMultiply)
     // const * const → const
     const auto expr = FormExpr::constant(Real(3.0)) * FormExpr::constant(Real(4.0));
     auto r = jit::lowerToKernelIR(expr);
-    const auto before = r.ir.opCount();
     const auto eliminated = r.ir.optimize();
     EXPECT_GT(eliminated, 0u);
 
@@ -435,6 +564,47 @@ TEST(KernelIRCost, TranscendentalOpsInflated)
     // sqrt(x): cost(x)=1 + 1(op) + 4(transcendental) = 6
     // x + y:   cost(x)=1 + cost(y)=1 + 1(op) = 3
     EXPECT_GT(costs_sqrt[r_sqrt.ir.root], costs_add[r_add.ir.root]);
+}
+
+TEST(KernelIRCost, FieldAndHistoryLeavesRepresentReduceSums)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    const auto state = jit::lowerToKernelIR(FormExpr::stateField(1, space, "p"));
+    const auto discrete = jit::lowerToKernelIR(FormExpr::discreteField(2, space, "q"));
+    const auto previous = jit::lowerToKernelIR(FormExpr::previousSolution(1));
+
+    EXPECT_EQ(state.ir.subtreeCosts()[state.ir.root], 16u);
+    EXPECT_EQ(discrete.ir.subtreeCosts()[discrete.ir.root], 16u);
+    EXPECT_EQ(previous.ir.subtreeCosts()[previous.ir.root], 16u);
+}
+
+TEST(KernelIRCost, FieldAndBasisGradientsIncludeTransformOverhead)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    const auto state_grad = jit::lowerToKernelIR(grad(FormExpr::stateField(1, space, "p")));
+    const auto trial_grad = jit::lowerToKernelIR(grad(FormExpr::trialFunction(space, "u")));
+    const auto param_grad = jit::lowerToKernelIR(grad(FormExpr::parameterRef(0)));
+
+    EXPECT_EQ(state_grad.ir.subtreeCosts()[state_grad.ir.root], 25u);
+    EXPECT_EQ(trial_grad.ir.subtreeCosts()[trial_grad.ir.root], 10u);
+    EXPECT_EQ(param_grad.ir.subtreeCosts()[param_grad.ir.root], 2u);
+}
+
+TEST(KernelIRCost, MatrixSpectralOpsAreInflatedRelativeToAlgebraicOps)
+{
+    const auto A = FormExpr::asTensor({
+        {FormExpr::parameterRef(0), FormExpr::parameterRef(1)},
+        {FormExpr::parameterRef(2), FormExpr::parameterRef(3)},
+    });
+
+    const auto det_ir = jit::lowerToKernelIR(A.det()).ir;
+    const auto trace_ir = jit::lowerToKernelIR(A.trace()).ir;
+    const auto inv_ir = jit::lowerToKernelIR(A.inv()).ir;
+
+    EXPECT_GT(det_ir.subtreeCosts()[det_ir.root], trace_ir.subtreeCosts()[trace_ir.root]);
+    EXPECT_GT(inv_ir.subtreeCosts()[inv_ir.root], trace_ir.subtreeCosts()[trace_ir.root]);
 }
 
 // ============================================================================
