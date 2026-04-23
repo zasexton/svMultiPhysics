@@ -540,6 +540,7 @@ class FSILS_subLsType
       // GMRES scratch (avoid per-call allocations).
       std::vector<double> h_col;
       std::vector<double> dot_thread;
+      std::vector<double> basis_panel_v;
 
       // Recycled/deflation subspace for GMRES (vector version).
       // Stores U (correction space) and C = A*U (orthonormal columns) for
@@ -563,6 +564,21 @@ class FSILS_subLsType
         const size_t needed = static_cast<size_t>(nthreads) * static_cast<size_t>(stride);
         if (dot_thread.size() < needed) {
           dot_thread.resize(needed);
+        }
+      }
+
+      /// Ensure vector-GMRES tile-major basis shadow storage is available.
+      /// Layout is scalar-entry major: panel[entry * (sD + 1) + basis_index].
+      void ensure_gmres_basis_panel_v(const int dof_, const int nNo_, const int sD_)
+      {
+        if (dof_ <= 0 || nNo_ <= 0 || sD_ < 0) {
+          return;
+        }
+        const std::size_t entries = static_cast<std::size_t>(dof_) * static_cast<std::size_t>(nNo_);
+        const std::size_t stride = static_cast<std::size_t>(sD_ + 1);
+        const std::size_t needed = entries * stride;
+        if (basis_panel_v.size() < needed) {
+          basis_panel_v.resize(needed);
         }
       }
 

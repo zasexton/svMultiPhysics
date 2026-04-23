@@ -54,6 +54,19 @@ TEST(AuxiliaryBlockStorage, FixedStrideSetup_Global)
     EXPECT_EQ(storage.storageSize(), 3u);
 }
 
+TEST(AuxiliaryBlockStorage, FixedStrideSetup_Boundary)
+{
+    AuxiliaryBlockStorage storage;
+    auto spec = makeSpec("outlet_rcr", 3, AuxiliaryStateScope::Boundary);
+
+    storage.setupFixedStride(spec, 1);
+
+    EXPECT_TRUE(storage.isSetup());
+    EXPECT_EQ(storage.scope(), AuxiliaryStateScope::Boundary);
+    EXPECT_EQ(storage.entityCount(), 1u);
+    EXPECT_EQ(storage.storageSize(), 3u);
+}
+
 TEST(AuxiliaryBlockStorage, FixedStrideSetup_Node)
 {
     AuxiliaryBlockStorage storage;
@@ -116,6 +129,17 @@ TEST(AuxiliaryBlockStorage, FixedStrideSetup_Facet)
     EXPECT_EQ(storage.storageSize(), 60u);
 }
 
+TEST(AuxiliaryBlockStorage, FixedStrideRejectsRaggedLayoutSpec)
+{
+    AuxiliaryBlockStorage storage;
+    auto spec = makeSpec("wrong_layout", 2, AuxiliaryStateScope::Cell);
+    spec.layout_mode = AuxiliaryLayoutMode::Ragged;
+
+    EXPECT_THROW(storage.setupFixedStride(spec, 4),
+                 svmp::FE::InvalidArgumentException);
+    EXPECT_FALSE(storage.isSetup());
+}
+
 // ---------------------------------------------------------------------------
 //  Work buffer access
 // ---------------------------------------------------------------------------
@@ -153,6 +177,30 @@ TEST(AuxiliaryBlockStorage, EntityViewFixedStride)
     EXPECT_DOUBLE_EQ(entity2[0], 10.0);
     EXPECT_DOUBLE_EQ(entity2[1], 20.0);
     EXPECT_DOUBLE_EQ(entity2[2], 30.0);
+}
+
+TEST(AuxiliaryBlockStorage, EntityViewRejectsComponentMajorFixedStride)
+{
+    AuxiliaryBlockStorage storage;
+    auto spec = makeSpec("v", 2, AuxiliaryStateScope::Node);
+    spec.ordering = AuxiliaryEntityOrdering::ByComponentThenEntity;
+    storage.setupFixedStride(spec, 3);
+
+    auto w = storage.work();
+    w[0] = 10.0; w[1] = 20.0; w[2] = 30.0;
+    w[3] = 11.0; w[4] = 21.0; w[5] = 31.0;
+    storage.initialize(w);
+
+    EXPECT_THROW(storage.workEntity(1), svmp::FE::systems::InvalidStateException);
+
+    const auto& const_storage = storage;
+    EXPECT_THROW(const_storage.workEntity(1), svmp::FE::systems::InvalidStateException);
+    EXPECT_THROW(const_storage.committedEntity(1), svmp::FE::systems::InvalidStateException);
+
+    const auto gathered = storage.gatherEntityWork(1);
+    ASSERT_EQ(gathered.size(), 2u);
+    EXPECT_DOUBLE_EQ(gathered[0], 20.0);
+    EXPECT_DOUBLE_EQ(gathered[1], 21.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -349,6 +397,30 @@ TEST(AuxiliaryBlockStorage, RaggedLayout)
     EXPECT_DOUBLE_EQ(storage.work()[2], 42.0); // offset 2 for entity 1
 }
 
+TEST(AuxiliaryBlockStorage, RaggedLayoutRejectsNonmonotoneOffsets)
+{
+    AuxiliaryBlockStorage storage;
+    AuxiliaryStateSpec spec;
+    spec.name = "ragged_block";
+    spec.size = 0;
+    spec.scope = AuxiliaryStateScope::Cell;
+    spec.layout_mode = AuxiliaryLayoutMode::Ragged;
+
+    EXPECT_THROW(storage.setupRagged(spec, std::vector<std::size_t>{0, 4, 3}),
+                 svmp::FE::InvalidArgumentException);
+    EXPECT_FALSE(storage.isSetup());
+}
+
+TEST(AuxiliaryBlockStorage, RaggedRejectsFixedStrideLayoutSpec)
+{
+    AuxiliaryBlockStorage storage;
+    auto spec = makeSpec("wrong_layout", 2, AuxiliaryStateScope::Cell);
+
+    EXPECT_THROW(storage.setupRagged(spec, std::vector<std::size_t>{0, 2, 5}),
+                 svmp::FE::InvalidArgumentException);
+    EXPECT_FALSE(storage.isSetup());
+}
+
 // ---------------------------------------------------------------------------
 //  Resize (fixed-stride)
 // ---------------------------------------------------------------------------
@@ -491,6 +563,25 @@ TEST(AuxiliaryStateMultiBlock, DuplicateBlockNameThrows)
     EXPECT_THROW(state.registerBlock(spec, 1), svmp::FE::InvalidArgumentException);
 }
 
+TEST(AuxiliaryStateMultiBlock, InvalidFixedStrideRegistrationLeavesStateUnchanged)
+{
+    AuxiliaryState state;
+
+    AuxiliaryStateSpec spec;
+    spec.name = "bad";
+    spec.size = 0;
+    spec.scope = AuxiliaryStateScope::Cell;
+
+    EXPECT_THROW(state.registerBlock(spec, 3), svmp::FE::InvalidArgumentException);
+    EXPECT_EQ(state.blockCount(), 0u);
+    EXPECT_FALSE(state.hasBlock("bad"));
+
+    spec.size = 1;
+    EXPECT_NO_THROW(state.registerBlock(spec, 3));
+    EXPECT_EQ(state.blockCount(), 1u);
+    EXPECT_TRUE(state.hasBlock("bad"));
+}
+
 TEST(AuxiliaryStateMultiBlock, RegisterBlockWithInitialValues)
 {
     AuxiliaryState state;
@@ -526,6 +617,40 @@ TEST(AuxiliaryStateMultiBlock, RegisterBlockRagged)
     EXPECT_EQ(blk.layoutMode(), AuxiliaryLayoutMode::Ragged);
     EXPECT_EQ(blk.entityCount(), 2u);
     EXPECT_EQ(blk.storageSize(), 5u);
+}
+
+TEST(AuxiliaryStateMultiBlock, InvalidRaggedRegistrationLeavesStateUnchanged)
+{
+    AuxiliaryState state;
+
+    AuxiliaryStateSpec spec;
+    spec.name = "ragged";
+    spec.size = 0;
+    spec.scope = AuxiliaryStateScope::Cell;
+    spec.layout_mode = AuxiliaryLayoutMode::Ragged;
+
+    EXPECT_THROW(state.registerBlockRagged(spec, std::vector<std::size_t>{0, 4, 3}),
+                 svmp::FE::InvalidArgumentException);
+    EXPECT_EQ(state.blockCount(), 0u);
+    EXPECT_FALSE(state.hasBlock("ragged"));
+
+    EXPECT_NO_THROW(state.registerBlockRagged(spec, std::vector<std::size_t>{0, 4, 4}));
+    EXPECT_EQ(state.blockCount(), 1u);
+    EXPECT_TRUE(state.hasBlock("ragged"));
+}
+
+TEST(AuxiliaryStateMultiBlock, RaggedRegistrationRequiresRaggedSpec)
+{
+    AuxiliaryState state;
+
+    AuxiliaryStateSpec spec;
+    spec.name = "ragged";
+    spec.size = 0;
+    spec.scope = AuxiliaryStateScope::Cell;
+
+    EXPECT_THROW(state.registerBlockRagged(spec, std::vector<std::size_t>{0, 2}),
+                 svmp::FE::InvalidArgumentException);
+    EXPECT_EQ(state.blockCount(), 0u);
 }
 
 TEST(AuxiliaryStateMultiBlock, BlockNames)

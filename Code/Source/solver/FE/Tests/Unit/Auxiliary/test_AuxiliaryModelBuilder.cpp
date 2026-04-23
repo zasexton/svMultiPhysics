@@ -2710,9 +2710,22 @@ TEST(AuxiliaryModelBuilder, MonolithicScopeOwnershipPoliciesPropagateIntoMixedLa
             .initialize({0.0}));
     system.deployAuxiliaryModel(
         use(model)
+            .name("boundary_aux")
+            .boundary(7)
+            .solveMode(AuxiliarySolveMode::Monolithic)
+            .initialize({0.0}));
+    system.deployAuxiliaryModel(
+        use(model)
             .name("region_aux")
             .region()
             .entityCount(3)
+            .solveMode(AuxiliarySolveMode::Monolithic)
+            .initialize({0.0}));
+    system.deployAuxiliaryModel(
+        use(model)
+            .name("facet_aux")
+            .facet()
+            .entityCount(2)
             .solveMode(AuxiliarySolveMode::Monolithic)
             .initialize({0.0}));
 
@@ -2735,12 +2748,26 @@ TEST(AuxiliaryModelBuilder, MonolithicScopeOwnershipPoliciesPropagateIntoMixedLa
     EXPECT_EQ(node->single_owner_rank, -1);
     EXPECT_EQ(node->row_owner_ranks, (std::vector<int>{0, 0}));
 
+    const auto* boundary = opts.mixed_block_layout->findBlock("boundary_aux");
+    ASSERT_NE(boundary, nullptr);
+    EXPECT_EQ(boundary->assembly_mode, backends::MixedBlockAssemblyMode::BorderedReduced);
+    EXPECT_EQ(boundary->row_ownership, backends::MixedRowOwnershipPolicy::SingleOwner);
+    EXPECT_EQ(boundary->single_owner_rank, 0);
+    EXPECT_EQ(boundary->row_owner_ranks, std::vector<int>({0}));
+
     const auto* region = opts.mixed_block_layout->findBlock("region_aux");
     ASSERT_NE(region, nullptr);
     EXPECT_EQ(region->assembly_mode, backends::MixedBlockAssemblyMode::BorderedReduced);
     EXPECT_EQ(region->row_ownership, backends::MixedRowOwnershipPolicy::RegionOwner);
     EXPECT_EQ(region->single_owner_rank, -1);
     EXPECT_EQ(region->row_owner_ranks, std::vector<int>({0, 0, 0}));
+
+    const auto* facet = opts.mixed_block_layout->findBlock("facet_aux");
+    EXPECT_EQ(facet, nullptr);
+
+    const auto& facet_block = system.auxiliaryStateManager().getBlock("facet_aux");
+    EXPECT_EQ(facet_block.scope(), AuxiliaryStateScope::Facet);
+    EXPECT_EQ(facet_block.entityCount(), 2u);
 }
 
 // ============================================================================

@@ -1251,12 +1251,14 @@ bool load_face_only_oracle_mode(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
 
 [[nodiscard]] bool schur_partition_coarse_modes_enabled() noexcept
 {
-  return env_enabled("SVMP_FSILS_SCHUR_PARTITION_COARSE");
+  return env_enabled("SVMP_FSILS_SCHUR_PARTITION_COARSE") &&
+         !env_enabled("SVMP_FSILS_DISABLE_SCHUR_PARTITION_COARSE");
 }
 
 [[nodiscard]] bool schur_global_mean_coarse_mode_enabled() noexcept
 {
-  return env_enabled("SVMP_FSILS_SCHUR_GLOBAL_MEAN_COARSE");
+  return env_enabled("SVMP_FSILS_SCHUR_GLOBAL_MEAN_COARSE") &&
+         !env_enabled("SVMP_FSILS_DISABLE_SCHUR_GLOBAL_MEAN_COARSE");
 }
 
 [[nodiscard]] const char* schur_dump_prefix() noexcept
@@ -3110,7 +3112,6 @@ void build_grouped_momentum_hat_low_rank_correction(
     Array<double> right_mode;
     const auto& left_entries = projected_left_entries(update);
     const auto& right_entries = projected_right_entries(lhs, update);
-    const auto& right_entries_for_gt = projected_right_entries_for_transpose(update);
     const bool have_left_local =
         fill_projected_reduced_vector(lhs, update, left_entries, mom_ncomp, left_mode);
     const bool have_right_local =
@@ -3347,6 +3348,32 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
   const auto momentum_operator =
       dso::SparseOperatorBundle(lhs, rowPtr, colPtr).vector(mom_ncomp, K_eff);
   const bool has_grouped_bordered = !lhs.grouped_bordered_field_couplings.empty();
+  const bool has_active_grouped_bordered = std::any_of(
+      lhs.grouped_bordered_field_couplings.begin(),
+      lhs.grouped_bordered_field_couplings.end(),
+      [](const fe_fsi_linear_solver::FSILS_groupedBorderedFieldCouplingType& group) {
+        return group.active && !group.modes.empty();
+      });
+  const bool has_active_face_corrections = std::any_of(
+      lhs.face.begin(),
+      lhs.face.end(),
+      [](const fe_fsi_linear_solver::FSILS_faceType& face) {
+        return face.coupledFlag && std::abs(face.res) > 1e-30 && face.nNo > 0;
+      });
+  const bool has_active_standalone_reduced_updates = std::any_of(
+      lhs.reduced_updates.begin(),
+      lhs.reduced_updates.end(),
+      [&](const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& update) {
+        if (!update.active || std::abs(update.sigma) <= 1e-30 ||
+            update.grouped_coupling_id == kNativeFaceDuplicateCouplingId) {
+          return false;
+        }
+        return !(has_grouped_bordered && update.grouped_coupling_id >= 0);
+      });
+  const bool has_exact_momentum_modes =
+      has_active_grouped_bordered ||
+      has_active_face_corrections ||
+      has_active_standalone_reduced_updates;
 
   auto build_candidate =
       [&](SchurMomentumApproximationType candidate_approx) -> MomentumHatData {
@@ -3399,55 +3426,102 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
   auto score_candidate = [&](const MomentumHatData& candidate) -> double {
     long double numerator = 0.0L;
     long double denominator = 0.0L;
-    Array<double> probe(mom_ncomp, nNo);
-    Array<double> approx_apply(mom_ncomp, nNo);
-    Array<double> residual(mom_ncomp, nNo);
-    Array<double> probe_t(mom_ncomp, nNo);
-    Array<double> approx_apply_t(mom_ncomp, nNo);
-    Array<double> residual_t(mom_ncomp, nNo);
+    const fe_fsi_linear_solver::HaloExchange halo(lhs);
+
+    auto accumulate_mode_score = [&](const Array<double>& left_mode,
+                                     const Array<double>& right_mode) {
+      Array<double> approx_apply = left_mode;
+      Array<double> residual(mom_ncomp, nNo);
+      apply_momentum_hat(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, candidate, approx_apply);
+      halo.sync_owned_to_ghost_vector(mom_ncomp, approx_apply, skip_post_solve_halo_sync());
+      momentum_operator.apply(
+          dso::ghost_synced_input(mom_ncomp, approx_apply),
+          dso::owned_only_output(mom_ncomp, residual));
+      omp_la::omp_axpby_v(mom_ncomp, nNo, residual, residual, -1.0, left_mode);
+      const double den = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
+                                          const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
+                                          left_mode, left_mode);
+      const double num = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
+                                          const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
+                                          residual, residual);
+      denominator += static_cast<long double>(den);
+      numerator += static_cast<long double>(num);
+
+      Array<double> approx_apply_t = right_mode;
+      Array<double> residual_t(mom_ncomp, nNo);
+      apply_momentum_hat_transpose(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, candidate, approx_apply_t);
+      halo.sync_owned_to_ghost_vector(mom_ncomp, approx_apply_t, skip_post_solve_halo_sync());
+      multiply_rect_transpose_local(rowPtr, colPtr, nNo,
+                                    mom_ncomp, mom_ncomp, K_eff,
+                                    approx_apply_t, residual_t);
+      halo.sync_owned_to_ghost_vector(mom_ncomp, residual_t, skip_post_solve_halo_sync());
+      omp_la::omp_axpby_v(mom_ncomp, nNo, residual_t, residual_t, -1.0, right_mode);
+      const double den_t = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
+                                            const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
+                                            right_mode, right_mode);
+      const double num_t = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
+                                            const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
+                                            residual_t, residual_t);
+      denominator += static_cast<long double>(den_t);
+      numerator += static_cast<long double>(num_t);
+    };
+
+    auto score_reduced_mode =
+        [&](const fe_fsi_linear_solver::FSILS_reducedFieldUpdateType& mode) {
+      Array<double> left_mode;
+      Array<double> right_mode;
+      const bool have_left_local =
+          fill_projected_reduced_vector(lhs, mode, projected_left_entries(mode), mom_ncomp, left_mode);
+      const bool have_right_local =
+          fill_projected_reduced_vector(lhs, mode, projected_right_entries(lhs, mode), mom_ncomp, right_mode);
+      int have_left = have_left_local ? 1 : 0;
+      int have_right = have_right_local ? 1 : 0;
+      if (lhs.commu.nTasks > 1) {
+        const fe_fsi_linear_solver::CollectiveOps collectives(lhs.commu);
+        collectives.allreduce_sum(have_left, have_left);
+        collectives.allreduce_sum(have_right, have_right);
+      }
+      if (have_left == 0 || have_right == 0) {
+        return;
+      }
+      accumulate_mode_score(left_mode, right_mode);
+    };
+
+    for (const auto& update : lhs.reduced_updates) {
+      if (!update.active || std::abs(update.sigma) <= 1e-30 ||
+          update.grouped_coupling_id == kNativeFaceDuplicateCouplingId) {
+        continue;
+      }
+      if (has_grouped_bordered && update.grouped_coupling_id >= 0) {
+        continue;
+      }
+      score_reduced_mode(update);
+    }
+
+    for (const auto& face : lhs.face) {
+      if (!face.coupledFlag || std::abs(face.res) <= 1e-30 || face.nNo <= 0) {
+        continue;
+      }
+      Array<double> mode;
+      const bool have_mode_local =
+          fill_projected_face_vector(lhs, face, mom_ncomp, mode);
+      int have_mode = have_mode_local ? 1 : 0;
+      if (lhs.commu.nTasks > 1) {
+        const fe_fsi_linear_solver::CollectiveOps collectives(lhs.commu);
+        collectives.allreduce_sum(have_mode, have_mode);
+      }
+      if (have_mode == 0) {
+        continue;
+      }
+      accumulate_mode_score(mode, mode);
+    }
 
     for (const auto& group : lhs.grouped_bordered_field_couplings) {
       if (!group.active) {
         continue;
       }
       for (const auto& mode : group.modes) {
-        const auto& left_entries = projected_left_entries(mode);
-        fill_projected_reduced_vector(lhs, mode, left_entries, mom_ncomp, probe);
-        approx_apply = probe;
-        apply_momentum_hat(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, candidate, approx_apply);
-        const fe_fsi_linear_solver::HaloExchange halo(lhs);
-        halo.sync_owned_to_ghost_vector(mom_ncomp, approx_apply, skip_post_solve_halo_sync());
-        momentum_operator.apply(
-            dso::ghost_synced_input(mom_ncomp, approx_apply),
-            dso::owned_only_output(mom_ncomp, residual));
-        omp_la::omp_axpby_v(mom_ncomp, nNo, residual, residual, -1.0, probe);
-        const double den = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
-                                            const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
-                                            probe, probe);
-        const double num = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
-                                            const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
-                                            residual, residual);
-        denominator += static_cast<long double>(den);
-        numerator += static_cast<long double>(num);
-
-        const auto& right_entries = projected_right_entries(lhs, mode);
-        fill_projected_reduced_vector(lhs, mode, right_entries, mom_ncomp, probe_t);
-        approx_apply_t = probe_t;
-        apply_momentum_hat_transpose(rowPtr, colPtr, diagPtr, mom_ncomp, nNo, candidate, approx_apply_t);
-        halo.sync_owned_to_ghost_vector(mom_ncomp, approx_apply_t, skip_post_solve_halo_sync());
-        multiply_rect_transpose_local(rowPtr, colPtr, nNo,
-                                      mom_ncomp, mom_ncomp, K_eff,
-                                      approx_apply_t, residual_t);
-        halo.sync_owned_to_ghost_vector(mom_ncomp, residual_t, skip_post_solve_halo_sync());
-        omp_la::omp_axpby_v(mom_ncomp, nNo, residual_t, residual_t, -1.0, probe_t);
-        const double den_t = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
-                                              const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
-                                              probe_t, probe_t);
-        const double num_t = dot::fsils_dot_v(mom_ncomp, lhs.mynNo,
-                                              const_cast<fe_fsi_linear_solver::FSILS_commuType&>(lhs.commu),
-                                              residual_t, residual_t);
-        denominator += static_cast<long double>(den_t);
-        numerator += static_cast<long double>(num_t);
+        score_reduced_mode(mode);
       }
     }
 
@@ -3457,7 +3531,7 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
     return static_cast<double>(numerator / denominator);
   };
 
-  if (has_grouped_bordered && approx == SchurMomentumApproximationType::ILU_K) {
+  if (has_exact_momentum_modes && approx == SchurMomentumApproximationType::ILU_K) {
     const double ilu_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
     MomentumHatData ilu_hat = build_candidate(SchurMomentumApproximationType::ILU_K);
     const double ilu_t = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - ilu_t0 : 0.0;
@@ -3474,7 +3548,7 @@ MomentumHatData build_momentum_hat_data(const Array<fsils_int>& rowPtr,
         trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() - score_asm_t0 : 0.0;
     if (trace_setup) {
       std::fprintf(stderr,
-                   "[BICGS_SCHUR_SETUP] momentum_hat grouped=1 approx=ilu-k "
+                   "[BICGS_SCHUR_SETUP] momentum_hat adaptive=1 approx=ilu-k "
                    "build_ilu=%e build_asm=%e score_ilu=%e score_asm=%e "
                    "ilu_score=%e asm_score=%e total=%e\n",
                    ilu_t,
@@ -4179,6 +4253,9 @@ void build_partition_schur_coarse_correction(
   if (!schur_partition_coarse_modes_enabled() || lhs.commu.nTasks <= 1 || con_ncomp != 1) {
     return;
   }
+  if (pc.momentum_hat.point_inv.nrows() == 0 || pc.momentum_hat.point_inv.ncols() == 0) {
+    return;
+  }
 
   std::vector<double> owned_counts(static_cast<std::size_t>(lhs.commu.nTasks), 0.0);
   const double local_owned = static_cast<double>(lhs.mynNo);
@@ -4283,6 +4360,9 @@ void build_global_mean_schur_coarse_correction(
     SchurPreconditionerData& pc)
 {
   if (!schur_global_mean_coarse_mode_enabled() || con_ncomp != 1) {
+    return;
+  }
+  if (pc.momentum_hat.point_inv.nrows() == 0 || pc.momentum_hat.point_inv.ncols() == 0) {
     return;
   }
 
@@ -4430,9 +4510,15 @@ SchurPreconditionerData build_schur_preconditioner(fe_fsi_linear_solver::FSILS_l
                      fe_fsi_linear_solver::fsils_cpu_t() - reduced_t0);
       }
     }
+    const double coarse_t0 = trace_setup ? fe_fsi_linear_solver::fsils_cpu_t() : 0.0;
+    build_partition_schur_coarse_correction(
+        lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs, con_ncomp, pc);
+    build_global_mean_schur_coarse_correction(
+        lhs.rowPtr, lhs.colPtr, lhs.diagPtr, lhs, con_ncomp, pc);
     if (trace_setup) {
       std::fprintf(stderr,
-                   "[BICGS_SCHUR_SETUP] preconditioner total=%e\n",
+                   "[BICGS_SCHUR_SETUP] preconditioner coarse=%e total=%e\n",
+                   fe_fsi_linear_solver::fsils_cpu_t() - coarse_t0,
                    fe_fsi_linear_solver::fsils_cpu_t() - total_t0);
     }
     return pc;

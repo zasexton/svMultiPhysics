@@ -37,6 +37,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -86,23 +87,20 @@ public:
                     "AuxiliaryState::registerBlock: empty block name");
         FE_THROW_IF(block_name_to_index_.count(spec.name) != 0u, InvalidArgumentException,
                     "AuxiliaryState::registerBlock: duplicate block '" + spec.name + "'");
+        FE_THROW_IF(spec.layout_mode != AuxiliaryLayoutMode::FixedStride,
+                    NotImplementedException,
+                    "AuxiliaryState::registerBlock: ragged layout requires "
+                    "registerBlockRagged()");
 
-        const auto idx = blocks_.size();
-        blocks_.emplace_back();
-        auto& block = blocks_.back();
-
-        if (spec.layout_mode == AuxiliaryLayoutMode::FixedStride) {
-            block.setupFixedStride(spec, entity_count);
-        } else {
-            FE_THROW(NotImplementedException,
-                     "AuxiliaryState::registerBlock: ragged layout requires "
-                     "registerBlockRagged()");
-        }
+        AuxiliaryBlockStorage block;
+        block.setupFixedStride(spec, entity_count);
 
         if (!initial_values.empty()) {
             block.initialize(initial_values);
         }
 
+        const auto idx = blocks_.size();
+        blocks_.push_back(std::move(block));
         block_name_to_index_.emplace(spec.name, idx);
         return idx;
     }
@@ -124,16 +122,19 @@ public:
                     "AuxiliaryState::registerBlockRagged: empty block name");
         FE_THROW_IF(block_name_to_index_.count(spec.name) != 0u, InvalidArgumentException,
                     "AuxiliaryState::registerBlockRagged: duplicate block '" + spec.name + "'");
+        FE_THROW_IF(spec.layout_mode != AuxiliaryLayoutMode::Ragged,
+                    InvalidArgumentException,
+                    "AuxiliaryState::registerBlockRagged: spec layout_mode must be Ragged");
 
-        const auto idx = blocks_.size();
-        blocks_.emplace_back();
-        auto& block = blocks_.back();
+        AuxiliaryBlockStorage block;
         block.setupRagged(spec, offsets);
 
         if (!initial_values.empty()) {
             block.initialize(initial_values);
         }
 
+        const auto idx = blocks_.size();
+        blocks_.push_back(std::move(block));
         block_name_to_index_.emplace(spec.name, idx);
         return idx;
     }

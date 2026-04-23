@@ -15,7 +15,7 @@
  * |-------------------|-------------------------------------|-----------------------------|
  * | `Global`          | Single synthetic entity (id=0)      | 1                           |
  * | `Node`            | Mesh vertices (owned + ghost)       | `numVertices`               |
- * | `Cell`            | Mesh cells (owned)                  | `numCells`                  |
+ * | `Cell`            | Mesh cells (owned)                  | `numOwnedCells`             |
  * | `QuadraturePoint` | QPs per cell × cells                | `sum(n_qp_per_cell)`        |
  * | `Region`          | Topology regions / components       | topology context            |
  * | `Boundary`        | One per named boundary collection   | 1                           |

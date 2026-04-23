@@ -225,6 +225,86 @@ private:
     std::array<std::array<GlobalIndex, 4>, 2> cells_{};
 };
 
+class RestrictedNodeOwnershipMeshAccess final : public IMeshAccess {
+public:
+    explicit RestrictedNodeOwnershipMeshAccess(GlobalIndex owned_vertices)
+        : owned_vertices_(owned_vertices)
+    {
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numVertices() const override { return 6; }
+    [[nodiscard]] GlobalIndex numOwnedVertices() const override { return owned_vertices_; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex) const override { return true; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex) const override
+    {
+        return ElementType::Tetra4;
+    }
+    [[nodiscard]] int getCellDomainId(GlobalIndex) const override { return 7; }
+
+    void getCellNodes(GlobalIndex, std::vector<GlobalIndex>& nodes) const override
+    {
+        nodes = {0, 1, 2, 3};
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return {static_cast<Real>(node_id), 0.0, 0.0};
+    }
+
+    void getCellCoordinates(GlobalIndex,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        coords = {{
+            {0.0, 0.0, 0.0},
+            {1.0, 0.0, 0.0},
+            {0.0, 1.0, 0.0},
+            {0.0, 0.0, 1.0},
+        }};
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex, GlobalIndex) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex) const override { return -1; }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex>
+    getInteriorFaceCells(GlobalIndex) const override
+    {
+        return {-1, -1};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        callback(0);
+    }
+
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        callback(0);
+    }
+
+    void forEachBoundaryFace(int,
+                             std::function<void(GlobalIndex, GlobalIndex)>) const override
+    {
+    }
+
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)>) const override
+    {
+    }
+
+private:
+    GlobalIndex owned_vertices_{0};
+};
+
 class TwoDisconnectedQuadMeshAccess final : public IMeshAccess {
 public:
     TwoDisconnectedQuadMeshAccess(std::vector<int> cell_owner_ranks, int my_rank)
@@ -1023,6 +1103,65 @@ void expectLocalCondensedScopeMatchesRowOwnedDenseReference(
 }
 
 } // namespace
+
+TEST(AuxiliaryScopeCompletionMPI,
+     RestrictedNodeScopePartitionsExplicitNodeIdsByLocalOwnership)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "This regression uses rank-specific node ownership; run with exactly 2 MPI ranks";
+    }
+
+    auto model = systems::aux::model("restricted_node_partition_mpi",
+                                     [](systems::ModelFacade& m) {
+        auto x = m.state("x");
+        m << systems::ddt(x) == forms::FormExpr::constant(1.0) - x;
+    });
+
+    systems::AuxiliaryDeploymentRegion region;
+    region.kind = systems::AuxiliaryRegionKind::FormulationDefined;
+    region.identity = "rank_local_nodes";
+    region.explicit_entities =
+        rank == 0 ? std::vector<std::size_t>{4u, 0u, 5u, 2u}
+                  : std::vector<std::size_t>{3u, 1u, 5u, 0u};
+
+    const GlobalIndex owned_vertices = rank == 0 ? 3 : 2;
+    systems::FESystem system(
+        std::make_shared<RestrictedNodeOwnershipMeshAccess>(owned_vertices));
+    system.deployAuxiliaryModel(
+        systems::use(model).name("node_subset").node().region(region)
+            .partitioned("ForwardEuler").initialize({1.0}));
+
+    system.finalizeAuxiliaryLayout();
+
+    const auto& mgr = system.auxiliaryStateManager();
+    const auto& block = mgr.getBlock("node_subset");
+    const auto& indexing = mgr.getIndexing("node_subset");
+    const auto& metadata = mgr.getEntityRemapMetadata("node_subset");
+
+    const std::vector<std::size_t> expected_entities =
+        rank == 0 ? std::vector<std::size_t>{0u, 2u, 4u, 5u}
+                  : std::vector<std::size_t>{1u, 0u, 3u, 5u};
+    const std::size_t expected_owned_count = 2u;
+
+    EXPECT_EQ(block.scope(), systems::AuxiliaryStateScope::Node);
+    EXPECT_EQ(block.entityCount(), expected_entities.size());
+    EXPECT_EQ(block.ownedEntityCount(), expected_owned_count);
+    EXPECT_EQ(indexing.scope(), systems::AuxiliaryStateScope::Node);
+    EXPECT_EQ(indexing.totalEntityCount(), expected_entities.size());
+    EXPECT_EQ(indexing.ownedEntityCount(), expected_owned_count);
+    EXPECT_EQ(metadata.entity_ids, expected_entities);
+
+    for (std::size_t i = 0; i < metadata.entity_ids.size(); ++i) {
+        if (i < expected_owned_count) {
+            EXPECT_LT(metadata.entity_ids[i], static_cast<std::size_t>(owned_vertices));
+        } else {
+            EXPECT_GE(metadata.entity_ids[i], static_cast<std::size_t>(owned_vertices));
+        }
+    }
+}
 
 TEST(AuxiliaryScopeCompletionMPI,
      GlobalMonolithicDAEUsesBorderedReducedFsilsContractWithoutDroppedEntries)

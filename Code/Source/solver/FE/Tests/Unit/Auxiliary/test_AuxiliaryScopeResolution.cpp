@@ -1186,6 +1186,137 @@ TEST(AuxiliaryScopeResolution, BoundarySetProjectsNodeScopeToBoundaryFaceNodes)
 	              (std::vector<std::size_t>{0u, 1u, 2u}));
 }
 
+TEST(AuxiliaryScopeResolution, BoundaryScopeMaterializesSingleBoundaryCollection)
+{
+    auto mesh = std::make_shared<TwoDisconnectedTetraMeshAccess>();
+    auto model = buildScalarDecayModel();
+
+    FESystem system(mesh);
+    system.deployAuxiliaryModel(
+        use(model).name("boundary30").boundary(30)
+            .partitioned("ForwardEuler").initialize({1.0}));
+
+    system.finalizeAuxiliaryLayout();
+
+    const auto& mgr = system.auxiliaryStateManager();
+    const auto& block = mgr.getBlock("boundary30");
+    EXPECT_EQ(block.scope(), AuxiliaryStateScope::Boundary);
+    EXPECT_EQ(block.entityCount(), 1u);
+    EXPECT_EQ(block.ownedEntityCount(), 1u);
+
+    const auto& indexing = mgr.getIndexing("boundary30");
+    EXPECT_EQ(indexing.scope(), AuxiliaryStateScope::Boundary);
+    EXPECT_EQ(indexing.totalEntityCount(), 1u);
+
+    const auto& metadata = mgr.getEntityRemapMetadata("boundary30");
+    EXPECT_EQ(metadata.scope, AuxiliaryStateScope::Boundary);
+    EXPECT_EQ(metadata.deployment_region.kind, AuxiliaryRegionKind::BoundarySet);
+    EXPECT_EQ(metadata.deployment_region.identity, "30");
+    EXPECT_EQ(metadata.entity_ids, (std::vector<std::size_t>{0u}));
+
+    const auto schema = mgr.restartSchema("boundary30");
+    EXPECT_EQ(schema.scope_name, "Boundary");
+    EXPECT_EQ(schema.deployment_region_kind, "BoundarySet");
+    EXPECT_EQ(schema.region_identity, "30");
+    EXPECT_EQ(schema.entity_ids, (std::vector<std::size_t>{0u}));
+
+    auto wrong_marker = schema;
+    wrong_marker.region_identity = "40";
+    expectRestartInvalidWithError(schema, wrong_marker, "Region mismatch");
+
+    auto wrong_entity_ids = schema;
+    wrong_entity_ids.entity_ids = {1u};
+    expectRestartInvalidWithError(schema, wrong_entity_ids, "Entity map mismatch");
+}
+
+TEST(AuxiliaryScopeResolution, BoundaryScopeAllowsExternalMarkerMetadata)
+{
+    auto mesh = std::make_shared<TwoDisconnectedTetraMeshAccess>();
+    auto model = buildScalarDecayModel();
+
+    FESystem system(mesh);
+    system.deployAuxiliaryModel(
+        use(model).name("boundary999").boundary(999)
+            .partitioned("ForwardEuler").initialize({1.0}));
+
+    system.finalizeAuxiliaryLayout();
+
+    const auto& mgr = system.auxiliaryStateManager();
+    EXPECT_EQ(mgr.getBlock("boundary999").scope(), AuxiliaryStateScope::Boundary);
+    EXPECT_EQ(mgr.getBlock("boundary999").entityCount(), 1u);
+
+    const auto schema = mgr.restartSchema("boundary999");
+    EXPECT_EQ(schema.scope_name, "Boundary");
+    EXPECT_EQ(schema.deployment_region_kind, "BoundarySet");
+    EXPECT_EQ(schema.region_identity, "999");
+    EXPECT_EQ(schema.entity_ids, (std::vector<std::size_t>{0u}));
+}
+
+TEST(AuxiliaryScopeResolution, BoundarySetProjectsFacetScopeToBoundaryFaces)
+{
+    auto mesh = std::make_shared<TwoDisconnectedTetraMeshAccess>();
+    auto model = buildScalarDecayModel();
+
+    AuxiliaryDeploymentRegion boundary40;
+    boundary40.kind = AuxiliaryRegionKind::BoundarySet;
+    boundary40.identity = "40";
+
+    FESystem system(mesh);
+    system.deployAuxiliaryModel(
+        use(model).name("facet_boundary40").facet().region(boundary40)
+            .partitioned("ForwardEuler").initialize({1.0}));
+
+    system.finalizeAuxiliaryLayout();
+
+    const auto& mgr = system.auxiliaryStateManager();
+    const auto& block = mgr.getBlock("facet_boundary40");
+    EXPECT_EQ(block.scope(), AuxiliaryStateScope::Facet);
+    EXPECT_EQ(block.entityCount(), 1u);
+    EXPECT_EQ(block.ownedEntityCount(), 1u);
+
+    const auto& indexing = mgr.getIndexing("facet_boundary40");
+    EXPECT_EQ(indexing.scope(), AuxiliaryStateScope::Facet);
+    EXPECT_EQ(indexing.totalEntityCount(), 1u);
+
+    const auto& metadata = mgr.getEntityRemapMetadata("facet_boundary40");
+    EXPECT_EQ(metadata.scope, AuxiliaryStateScope::Facet);
+    EXPECT_EQ(metadata.deployment_region.kind, AuxiliaryRegionKind::BoundarySet);
+    EXPECT_EQ(metadata.deployment_region.identity, "40");
+    EXPECT_EQ(metadata.entity_ids, (std::vector<std::size_t>{1u}));
+
+    const auto schema = mgr.restartSchema("facet_boundary40");
+    EXPECT_EQ(schema.scope_name, "Facet");
+    EXPECT_EQ(schema.deployment_region_kind, "BoundarySet");
+    EXPECT_EQ(schema.region_identity, "40");
+    EXPECT_EQ(schema.entity_ids, (std::vector<std::size_t>{1u}));
+
+    auto wrong_marker = schema;
+    wrong_marker.region_identity = "30";
+    expectRestartInvalidWithError(schema, wrong_marker, "Region mismatch");
+
+    auto wrong_entity_ids = schema;
+    wrong_entity_ids.entity_ids = {0u};
+    expectRestartInvalidWithError(schema, wrong_entity_ids, "Entity map mismatch");
+}
+
+TEST(AuxiliaryScopeResolution, MissingBoundarySetRejectsFacetScope)
+{
+    auto mesh = std::make_shared<TwoDisconnectedTetraMeshAccess>();
+    auto model = buildScalarDecayModel();
+
+    AuxiliaryDeploymentRegion boundary999;
+    boundary999.kind = AuxiliaryRegionKind::BoundarySet;
+    boundary999.identity = "999";
+
+    FESystem system(mesh);
+    system.deployAuxiliaryModel(
+        use(model).name("facet_boundary999").facet().region(boundary999)
+            .partitioned("ForwardEuler").initialize({1.0}));
+
+    expectFinalizeThrowsWithMessage<svmp::FE::systems::InvalidStateException>(
+        system, "expanded to 0 entities");
+}
+
 TEST(AuxiliaryScopeResolution, TopologyRegionProjectsNodeScopeToRegionNodes)
 {
     auto mesh = std::make_shared<TwoDisconnectedTetraMeshAccess>();

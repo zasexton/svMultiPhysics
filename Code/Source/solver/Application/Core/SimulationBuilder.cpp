@@ -167,6 +167,36 @@ svmp::FE::backends::BackendKind selectBackend(const Parameters& params)
   return BackendKind::FSILS;
 }
 
+bool applyFsilsLocalityOrderingEnv(svmp::FE::dofs::DofDistributionOptions& options)
+{
+  const char* env = std::getenv("SVMP_FSILS_LOCALITY_ORDERING");
+  if (env == nullptr || env[0] == '\0') {
+    return false;
+  }
+
+  const auto v = lower_copy(std::string(env));
+  using S = svmp::FE::dofs::DofNumberingStrategy;
+  if (v == "off" || v == "none" || v == "interleaved") {
+    options.numbering = S::Interleaved;
+    return true;
+  }
+  if (v == "auto" || v == "morton") {
+    options.numbering = S::Morton;
+    return true;
+  }
+  if (v == "hilbert") {
+    options.numbering = S::Hilbert;
+    return true;
+  }
+  if (v == "rcm" || v == "cuthill-mckee") {
+    options.numbering = S::CuthillMcKee;
+    return true;
+  }
+
+  throw std::runtime_error("[svMultiPhysics::Application] Unsupported SVMP_FSILS_LOCALITY_ORDERING='" +
+                           std::string(env) + "'. Supported values: off, auto, morton, hilbert, rcm.");
+}
+
 svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& params,
                                                          svmp::FE::backends::BackendKind backend_kind)
 {
@@ -551,19 +581,22 @@ void SimulationBuilder::setupSystem()
   }
 
   // FSILS is a point-block backend: its sparse graph is node-blocked, with
-  // field components carried inside each block.  In serial, use
-  // component-interleaved field numbering by default so the FE sparsity graph
-  // collapses cleanly to the FSILS node graph.  MPI currently needs the
-  // owner-contiguous setup path below to build a valid overlap permutation.
-  // Keep SVMP_DOF_NUMBERING as an explicit override.
-  if (selectBackend(params_) == svmp::FE::backends::BackendKind::FSILS &&
-      setup_opts.dof_options.world_size == 1 &&
-      std::getenv("SVMP_DOF_NUMBERING") == nullptr) {
-    setup_opts.dof_options.numbering = svmp::FE::dofs::DofNumberingStrategy::Interleaved;
-    oopCout() << "[svMultiPhysics::Application] FSILS backend: defaulting DOF numbering to interleaved"
-              << std::endl;
+  // field components carried inside each block.  Default to Morton node
+  // ordering for locality; keep SVMP_FSILS_LOCALITY_ORDERING and
+  // SVMP_DOF_NUMBERING as explicit overrides for benchmarking/debugging.
+  const bool fsils_backend = selectBackend(params_) == svmp::FE::backends::BackendKind::FSILS;
+  if (fsils_backend) {
+    if (applyFsilsLocalityOrderingEnv(setup_opts.dof_options)) {
+      oopCout() << "[svMultiPhysics::Application] SVMP_FSILS_LOCALITY_ORDERING="
+                << std::getenv("SVMP_FSILS_LOCALITY_ORDERING")
+                << " -> FSILS locality numbering override applied" << std::endl;
+    } else if (std::getenv("SVMP_DOF_NUMBERING") == nullptr) {
+      setup_opts.dof_options.numbering = svmp::FE::dofs::DofNumberingStrategy::Morton;
+      oopCout() << "[svMultiPhysics::Application] FSILS backend: defaulting locality numbering to Morton"
+                << std::endl;
+    }
   }
-  if (selectBackend(params_) == svmp::FE::backends::BackendKind::FSILS) {
+  if (fsils_backend) {
     setup_opts.use_backend_row_ownership_for_assembly = true;
   }
 

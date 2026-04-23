@@ -48,6 +48,8 @@ void AuxiliaryBlockStorage::setupFixedStride(
 {
     FE_THROW_IF(spec.name.empty(), InvalidArgumentException,
                 "AuxiliaryBlockStorage::setupFixedStride: empty block name");
+    FE_THROW_IF(spec.layout_mode != AuxiliaryLayoutMode::FixedStride, InvalidArgumentException,
+                "AuxiliaryBlockStorage::setupFixedStride: spec.layout_mode must be FixedStride");
     FE_THROW_IF(spec.size <= 0, InvalidArgumentException,
                 "AuxiliaryBlockStorage::setupFixedStride: spec.size must be > 0");
 
@@ -90,10 +92,16 @@ void AuxiliaryBlockStorage::setupRagged(
 {
     FE_THROW_IF(spec.name.empty(), InvalidArgumentException,
                 "AuxiliaryBlockStorage::setupRagged: empty block name");
+    FE_THROW_IF(spec.layout_mode != AuxiliaryLayoutMode::Ragged, InvalidArgumentException,
+                "AuxiliaryBlockStorage::setupRagged: spec.layout_mode must be Ragged");
     FE_THROW_IF(offsets.empty(), InvalidArgumentException,
                 "AuxiliaryBlockStorage::setupRagged: offsets must not be empty");
     FE_THROW_IF(offsets[0] != 0u, InvalidArgumentException,
                 "AuxiliaryBlockStorage::setupRagged: offsets[0] must be 0");
+    for (std::size_t i = 1; i < offsets.size(); ++i) {
+        FE_THROW_IF(offsets[i] < offsets[i - 1], InvalidArgumentException,
+                    "AuxiliaryBlockStorage::setupRagged: offsets must be nondecreasing");
+    }
 
     name_ = spec.name;
     scope_ = spec.scope;

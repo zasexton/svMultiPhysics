@@ -8,6 +8,8 @@
 #include "Auxiliary/AuxiliaryStateTypes.h"
 #include "Auxiliary/AuxiliaryState.h"
 
+#include <set>
+
 using namespace svmp::FE::systems;
 
 // ---------------------------------------------------------------------------
@@ -24,7 +26,7 @@ TEST(AuxiliaryStateTypes, ScopeEnumValues)
     EXPECT_NE(AuxiliaryStateScope::Facet, AuxiliaryStateScope::Boundary);
 
     // Verify all seven values are distinct
-    const auto scopes = {
+    const std::set<AuxiliaryStateScope> scopes = {
         AuxiliaryStateScope::Global,
         AuxiliaryStateScope::Boundary,
         AuxiliaryStateScope::Node,

@@ -79,6 +79,11 @@ void hashRange(std::size_t& seed, const std::vector<T>& values)
     return metadata;
 }
 
+[[nodiscard]] std::vector<std::size_t> makeFlatQPOffsets(std::size_t total_qps)
+{
+    return std::vector<std::size_t>{0u, total_qps};
+}
+
 [[nodiscard]] AuxiliaryBlockIndexing makeResizedIndexing(
     const AuxiliaryStateSpec& spec,
     const AuxiliaryBlockIndexing& old_indexing,
@@ -100,7 +105,14 @@ void hashRange(std::size_t& seed, const std::vector<T>& values)
                 return AuxiliaryBlockIndexing::createQuadraturePoint(
                     old_indexing.qpOffsets(), spec.size);
             }
-            return AuxiliaryBlockIndexing::createCell(new_entity_count, spec.size);
+            if (old_indexing.qpOffsets().empty() ||
+                old_indexing.qpOffsets().size() == 2u) {
+                return AuxiliaryBlockIndexing::createQuadraturePoint(
+                    makeFlatQPOffsets(new_entity_count), spec.size);
+            }
+            FE_THROW(InvalidArgumentException,
+                     "AuxiliaryStateManager: cannot resize QuadraturePoint indexing "
+                     "without updated qp_offsets");
         case AuxiliaryStateScope::Region:
             return AuxiliaryBlockIndexing::createRegion(new_entity_count, spec.size);
         case AuxiliaryStateScope::Boundary:
@@ -183,10 +195,10 @@ std::size_t AuxiliaryStateManager::registerBlock(
         case AuxiliaryStateScope::QuadraturePoint:
             FE_THROW_IF(owned_entity_count != entity_count, InvalidArgumentException,
                         "AuxiliaryStateManager::registerBlock: QuadraturePoint scope does not support ghosts");
-            // QP scope with uniform QP count not known here; use flat entity.
-            // Caller should use registerBlockWithQPOffsets for proper indexing.
-            indexing = AuxiliaryBlockIndexing::createCell(
-                entity_count, spec.size);
+            // Direct registration does not know the per-cell QP partition.
+            // Preserve QP scope with one synthetic covered-cell bucket.
+            indexing = AuxiliaryBlockIndexing::createQuadraturePoint(
+                makeFlatQPOffsets(entity_count), spec.size);
             break;
         case AuxiliaryStateScope::Region:
             FE_THROW_IF(owned_entity_count != entity_count, InvalidArgumentException,
@@ -239,13 +251,15 @@ std::size_t AuxiliaryStateManager::registerBlockWithQPOffsets(
     FE_THROW_IF(qp_offsets.empty(), InvalidArgumentException,
                 "AuxiliaryStateManager::registerBlockWithQPOffsets: qp_offsets must have at least one entry");
 
+    const auto indexing =
+        AuxiliaryBlockIndexing::createQuadraturePoint(qp_offsets, spec.size);
     const auto total_qps = qp_offsets.back();
     const auto block_idx = state_.registerBlock(spec, total_qps, initial_values);
 
     const auto meta_idx = block_meta_.size();
     block_meta_.push_back(BlockMeta{
         spec,
-        AuxiliaryBlockIndexing::createQuadraturePoint(qp_offsets, spec.size),
+        indexing,
         {},
         {},
         {},
@@ -666,12 +680,12 @@ void AuxiliaryStateManager::transferBlock(
     auto meta_idx = metaIndex(block_name);
     auto& meta = block_meta_[meta_idx];
     auto& blk = state_.getBlock(block_name);
+    auto new_indexing = makeResizedIndexing(meta.spec, meta.indexing, new_entity_count);
 
     if (meta.transfer_hook) {
         // Use the hook for custom remap.
         const auto old_count = blk.entityCount();
-        const auto new_sz = new_entity_count *
-                            static_cast<std::size_t>(blk.componentStride());
+        const auto new_sz = new_indexing.totalStorageSize();
 
         std::vector<Real> new_data(new_sz, 0.0);
         meta.transfer_hook(blk.work(), old_count, new_entity_count, new_data);
@@ -682,7 +696,7 @@ void AuxiliaryStateManager::transferBlock(
         // Default: resize and preserve existing data.
         blk.resize(new_entity_count);
     }
-    meta.indexing = makeResizedIndexing(meta.spec, meta.indexing, new_entity_count);
+    meta.indexing = std::move(new_indexing);
     blk.setOwnedEntityCount(meta.indexing.ownedEntityCount());
     refreshEntityMetadataAfterResize(
         meta.entity_metadata, meta.spec, meta.indexing, new_entity_count);
@@ -694,8 +708,9 @@ void AuxiliaryStateManager::reinitializeBlock(
     auto meta_idx = metaIndex(block_name);
     auto& meta = block_meta_[meta_idx];
     auto& blk = state_.getBlock(block_name);
+    auto new_indexing = makeResizedIndexing(meta.spec, meta.indexing, new_entity_count);
     blk.resize(new_entity_count);
-    meta.indexing = makeResizedIndexing(meta.spec, meta.indexing, new_entity_count);
+    meta.indexing = std::move(new_indexing);
     blk.setOwnedEntityCount(meta.indexing.ownedEntityCount());
     refreshEntityMetadataAfterResize(
         meta.entity_metadata, meta.spec, meta.indexing, new_entity_count);
@@ -725,6 +740,15 @@ void AuxiliaryStateManager::validate() const
         FE_THROW_IF(blk.name() != meta.spec.name, InvalidStateException,
                     "AuxiliaryStateManager::validate: block name mismatch at index " +
                         std::to_string(i));
+        FE_THROW_IF(blk.scope() != meta.spec.scope, InvalidStateException,
+                    "AuxiliaryStateManager::validate: block scope mismatch for block '" +
+                        blk.name() + "'");
+        FE_THROW_IF(meta.indexing.scope() != meta.spec.scope, InvalidStateException,
+                    "AuxiliaryStateManager::validate: indexing scope mismatch for block '" +
+                        blk.name() + "'");
+        FE_THROW_IF(blk.layoutMode() != meta.spec.layout_mode, InvalidStateException,
+                    "AuxiliaryStateManager::validate: block layout mode mismatch for block '" +
+                        blk.name() + "'");
 
         FE_THROW_IF(blk.work().size() != blk.committed().size(), InvalidStateException,
                     "AuxiliaryStateManager::validate: work/committed size mismatch "

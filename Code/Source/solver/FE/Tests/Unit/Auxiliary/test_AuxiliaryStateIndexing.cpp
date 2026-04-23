@@ -254,8 +254,22 @@ TEST(AuxiliaryBlockIndexing, RaggedRegionScope)
 }
 
 // ---------------------------------------------------------------------------
-//  Facet scope
+//  Boundary and facet scope
 // ---------------------------------------------------------------------------
+
+TEST(AuxiliaryBlockIndexing, BoundaryScope)
+{
+    auto idx = AuxiliaryBlockIndexing::createBoundary(/*stride=*/3);
+
+    EXPECT_EQ(idx.scope(), AuxiliaryStateScope::Boundary);
+    EXPECT_EQ(idx.totalEntityCount(), 1u);
+    EXPECT_EQ(idx.ownedEntityCount(), 1u);
+    EXPECT_EQ(idx.ghostEntityCount(), 0u);
+    EXPECT_EQ(idx.componentStride(), 3);
+    EXPECT_EQ(idx.totalStorageSize(), 3u);
+    EXPECT_EQ(idx.ownedStorageSize(), 3u);
+    EXPECT_EQ(idx.flatIndex(0, 2), 2u);
+}
 
 TEST(AuxiliaryBlockIndexing, FacetScope)
 {

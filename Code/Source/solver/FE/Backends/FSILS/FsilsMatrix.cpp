@@ -368,6 +368,69 @@ void sort_row_columns_and_values(FsilsShared& shared, std::vector<Real>& values)
     }
 }
 
+void maybe_log_matrix_locality(const FsilsShared& shared)
+{
+    if (!env_flag_enabled("SVMP_FSILS_MATRIX_LOCALITY_PROFILE")) {
+        return;
+    }
+
+    const auto& lhs = shared.lhs;
+    const int nNo = lhs.nNo;
+    if (nNo <= 0 || lhs.nnz <= 0) {
+        return;
+    }
+
+    long long row_nnz_sum = 0;
+    long long abs_delta_sum = 0;
+    long long diag_position_sum = 0;
+    int max_row_nnz = 0;
+    int max_abs_delta = 0;
+    long long near_cacheline_edges = 0;
+
+    for (int row = 0; row < nNo; ++row) {
+        const int start = lhs.rowPtr(0, row);
+        const int end = lhs.rowPtr(1, row);
+        if (start < 0 || end < start) {
+            continue;
+        }
+        const int row_nnz = end - start + 1;
+        row_nnz_sum += row_nnz;
+        max_row_nnz = std::max(max_row_nnz, row_nnz);
+
+        const int diag = lhs.diagPtr(row);
+        if (diag >= start && diag <= end) {
+            diag_position_sum += diag - start;
+        }
+
+        for (int idx = start; idx <= end; ++idx) {
+            const int col = lhs.colPtr(idx);
+            const int delta = std::abs(col - row);
+            abs_delta_sum += delta;
+            max_abs_delta = std::max(max_abs_delta, delta);
+            if (delta <= 8) {
+                ++near_cacheline_edges;
+            }
+        }
+    }
+
+    const double nnz = static_cast<double>(lhs.nnz > 0 ? lhs.nnz : 1);
+    const double rows = static_cast<double>(std::max(1, nNo));
+    std::fprintf(stderr,
+                 "[FSILS_MATRIX_LOCALITY] rank=%d nNo=%d mynNo=%d nnz=%d avg_row_nnz=%.3f max_row_nnz=%d "
+                 "avg_abs_col_delta=%.3f max_abs_col_delta=%d near8=%.2f%% avg_diag_pos=%.3f dof=%d\n",
+                 lhs.commu.task,
+                 nNo,
+                 lhs.mynNo,
+                 lhs.nnz,
+                 static_cast<double>(row_nnz_sum) / rows,
+                 max_row_nnz,
+                 static_cast<double>(abs_delta_sum) / nnz,
+                 max_abs_delta,
+                 100.0 * static_cast<double>(near_cacheline_edges) / nnz,
+                 static_cast<double>(diag_position_sum) / rows,
+                 shared.dof);
+}
+
 void restore_owned_row_operator_ghost_identity(FsilsShared& shared, std::vector<Real>& values)
 {
     auto& lhs = shared.lhs;
@@ -1426,6 +1489,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern,
     const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
     values_.assign(static_cast<std::size_t>(nnz) * block_size, 0.0);
     sort_row_columns_and_values(*shared, values_);
+    maybe_log_matrix_locality(*shared);
     restore_owned_row_operator_ghost_identity(*shared, values_);
 
     // Build direct block-base lookup tables after sorting so the stored
@@ -1799,6 +1863,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
     const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
     values_.assign(static_cast<std::size_t>(nnz) * block_size, 0.0);
     sort_row_columns_and_values(*shared, values_);
+    maybe_log_matrix_locality(*shared);
     restore_owned_row_operator_ghost_identity(*shared, values_);
 
     // Build direct block-base lookup tables after sorting so the stored

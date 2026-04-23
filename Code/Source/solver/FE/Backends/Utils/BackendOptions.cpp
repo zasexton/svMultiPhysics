@@ -376,19 +376,9 @@ void addMetadataRoleMappings(SolverOptions& options)
 }
 
 [[nodiscard]] FsilsBlockSchurSchurPreconditioner chooseAutoFsilsSchurPreconditioner(
-    const SolverOptions& options) noexcept
+    const SolverOptions&) noexcept
 {
-    if (hasSpecialPreconditionBlocks(options) ||
-        hasNonBlockDiagonalAuxiliaryBlocks(options) ||
-        hasSchurEliminableBlocks(options)) {
-        return FsilsBlockSchurSchurPreconditioner::AlgebraicSchur;
-    }
-
-    if (constraintComponents(options) > 1) {
-        return FsilsBlockSchurSchurPreconditioner::BlockDiagL;
-    }
-
-    return FsilsBlockSchurSchurPreconditioner::DiagL;
+    return FsilsBlockSchurSchurPreconditioner::AlgebraicSchur;
 }
 
 [[nodiscard]] FsilsBlockSchurMomentumApproximation chooseAutoFsilsMomentumApproximation(
@@ -398,15 +388,7 @@ void addMetadataRoleMappings(SolverOptions& options)
         return FsilsBlockSchurMomentumApproximation::ASM;
     }
 
-    if (hasNonBlockDiagonalAuxiliaryBlocks(options)) {
-        return FsilsBlockSchurMomentumApproximation::ILUK;
-    }
-
-    if (hasSchurEliminableBlocks(options) || primaryComponents(options) > 1) {
-        return FsilsBlockSchurMomentumApproximation::BlockDiagK;
-    }
-
-    return FsilsBlockSchurMomentumApproximation::DiagK;
+    return FsilsBlockSchurMomentumApproximation::ILUK;
 }
 
 } // namespace

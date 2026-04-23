@@ -619,12 +619,12 @@ struct SolverOptions {
     std::optional<int> fsils_blockschur_cg_max_iter{};
     std::optional<Real> fsils_blockschur_gm_rel_tol{};
     std::optional<Real> fsils_blockschur_cg_rel_tol{};
-    /// `Auto` resolves to a concrete Schur-side preconditioner from auxiliary
-    /// mixed-layout metadata when available.
+    /// `Auto` resolves to the strongest FSILS-native algebraic Schur
+    /// approximation unless the user requests a cheaper concrete option.
     FsilsBlockSchurSchurPreconditioner fsils_blockschur_schur_preconditioner{
         FsilsBlockSchurSchurPreconditioner::Auto};
-    /// `Auto` resolves to a concrete momentum approximation from auxiliary
-    /// mixed-layout metadata when available.
+    /// `Auto` resolves to a physics-agnostic momentum inverse approximation
+    /// selected from backend metadata and runtime algebraic scoring.
     FsilsBlockSchurMomentumApproximation fsils_blockschur_momentum_approximation{
         FsilsBlockSchurMomentumApproximation::Auto};
 

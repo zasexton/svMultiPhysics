@@ -236,7 +236,12 @@ TEST(AuxiliaryStateManager, GetIndexingForScopes)
     mgr.registerBlock(makeSpec("G", 2, AuxiliaryStateScope::Global), 1);
     mgr.registerBlock(makeSpec("N", 4, AuxiliaryStateScope::Node), 50);
     mgr.registerBlock(makeSpec("C", 1, AuxiliaryStateScope::Cell), 200);
-    mgr.registerBlock(makeSpec("B", 3, AuxiliaryStateScope::Facet), 30);
+    mgr.registerBlock(makeSpec("R", 2, AuxiliaryStateScope::Region), 4);
+    mgr.registerBlock(makeSpec("B", 3, AuxiliaryStateScope::Boundary), 1);
+    mgr.registerBlock(makeSpec("F", 3, AuxiliaryStateScope::Facet), 30);
+    mgr.registerBlockWithQPOffsets(
+        makeSpec("Q", 2, AuxiliaryStateScope::QuadraturePoint),
+        std::vector<std::size_t>{0, 2, 5});
 
     auto& gi = mgr.getIndexing("G");
     EXPECT_EQ(gi.scope(), AuxiliaryStateScope::Global);
@@ -249,11 +254,25 @@ TEST(AuxiliaryStateManager, GetIndexingForScopes)
     EXPECT_EQ(ni.totalStorageSize(), 200u);
 
     auto& ci = mgr.getIndexing("C");
+    EXPECT_EQ(ci.scope(), AuxiliaryStateScope::Cell);
     EXPECT_EQ(ci.totalEntityCount(), 200u);
 
     auto& bi = mgr.getIndexing("B");
-    EXPECT_EQ(bi.scope(), AuxiliaryStateScope::Facet);
-    EXPECT_EQ(bi.totalEntityCount(), 30u);
+    EXPECT_EQ(bi.scope(), AuxiliaryStateScope::Boundary);
+    EXPECT_EQ(bi.totalEntityCount(), 1u);
+
+    auto& fi = mgr.getIndexing("F");
+    EXPECT_EQ(fi.scope(), AuxiliaryStateScope::Facet);
+    EXPECT_EQ(fi.totalEntityCount(), 30u);
+
+    auto& qi = mgr.getIndexing("Q");
+    EXPECT_EQ(qi.scope(), AuxiliaryStateScope::QuadraturePoint);
+    EXPECT_EQ(qi.totalEntityCount(), 5u);
+    EXPECT_EQ(qi.qpsForCell(1), 3u);
+
+    auto& ri = mgr.getIndexing("R");
+    EXPECT_EQ(ri.scope(), AuxiliaryStateScope::Region);
+    EXPECT_EQ(ri.totalEntityCount(), 4u);
 }
 
 TEST(AuxiliaryStateManager, GetSpecByName)
@@ -712,6 +731,66 @@ TEST(AuxiliaryStateManager, ReinitializeBlockZeroFills)
     }
 }
 
+TEST(AuxiliaryStateManager, TransferFlatQuadraturePointPreservesQPScope)
+{
+    AuxiliaryStateManager mgr;
+    mgr.registerBlock(makeSpec("qp", 2, AuxiliaryStateScope::QuadraturePoint), 5);
+
+    ASSERT_EQ(mgr.getIndexing("qp").scope(), AuxiliaryStateScope::QuadraturePoint);
+    ASSERT_EQ(mgr.getIndexing("qp").qpOffsets().size(), 2u);
+    EXPECT_EQ(mgr.getIndexing("qp").qpOffsets()[1], 5u);
+
+    mgr.transferBlock("qp", 7);
+
+    EXPECT_EQ(mgr.getBlock("qp").scope(), AuxiliaryStateScope::QuadraturePoint);
+    EXPECT_EQ(mgr.getBlock("qp").entityCount(), 7u);
+    EXPECT_EQ(mgr.getIndexing("qp").scope(), AuxiliaryStateScope::QuadraturePoint);
+    ASSERT_EQ(mgr.getIndexing("qp").qpOffsets().size(), 2u);
+    EXPECT_EQ(mgr.getIndexing("qp").qpOffsets()[1], 7u);
+    EXPECT_NO_THROW(mgr.validate());
+
+    mgr.reinitializeBlock("qp", 3);
+    EXPECT_EQ(mgr.getBlock("qp").entityCount(), 3u);
+    EXPECT_EQ(mgr.getIndexing("qp").scope(), AuxiliaryStateScope::QuadraturePoint);
+    ASSERT_EQ(mgr.getIndexing("qp").qpOffsets().size(), 2u);
+    EXPECT_EQ(mgr.getIndexing("qp").qpOffsets()[1], 3u);
+    EXPECT_NO_THROW(mgr.validate());
+}
+
+TEST(AuxiliaryStateManager, TransferPerCellQuadraturePointRejectsMissingNewOffsets)
+{
+    AuxiliaryStateManager mgr;
+    const std::vector<std::size_t> qp_offsets{0, 2, 5};
+    mgr.registerBlockWithQPOffsets(
+        makeSpec("qp", 1, AuxiliaryStateScope::QuadraturePoint), qp_offsets);
+
+    EXPECT_NO_THROW(mgr.transferBlock("qp", 5));
+    EXPECT_EQ(mgr.getIndexing("qp").scope(), AuxiliaryStateScope::QuadraturePoint);
+    ASSERT_EQ(mgr.getIndexing("qp").qpOffsets().size(), qp_offsets.size());
+    EXPECT_EQ(mgr.getIndexing("qp").qpOffsets()[2], 5u);
+
+    mgr.getBlock("qp").work()[0] = 9.0;
+    mgr.getBlock("qp").work()[4] = 11.0;
+    EXPECT_NO_THROW(mgr.reinitializeBlock("qp", 5));
+    EXPECT_EQ(mgr.getIndexing("qp").scope(), AuxiliaryStateScope::QuadraturePoint);
+    ASSERT_EQ(mgr.getIndexing("qp").qpOffsets().size(), qp_offsets.size());
+    EXPECT_EQ(mgr.getIndexing("qp").qpOffsets()[1], 2u);
+    EXPECT_EQ(mgr.getIndexing("qp").qpOffsets()[2], 5u);
+    for (const auto value : mgr.getBlock("qp").work()) {
+        EXPECT_DOUBLE_EQ(value, 0.0);
+    }
+
+    EXPECT_THROW(mgr.transferBlock("qp", 6), svmp::FE::InvalidArgumentException);
+    EXPECT_EQ(mgr.getBlock("qp").entityCount(), 5u);
+    ASSERT_EQ(mgr.getIndexing("qp").qpOffsets().size(), qp_offsets.size());
+    EXPECT_EQ(mgr.getIndexing("qp").qpOffsets()[2], 5u);
+    EXPECT_NO_THROW(mgr.validate());
+
+    EXPECT_THROW(mgr.reinitializeBlock("qp", 6), svmp::FE::InvalidArgumentException);
+    EXPECT_EQ(mgr.getBlock("qp").entityCount(), 5u);
+    EXPECT_NO_THROW(mgr.validate());
+}
+
 // ---------------------------------------------------------------------------
 //  Validation
 // ---------------------------------------------------------------------------
@@ -766,10 +845,34 @@ TEST(AuxiliaryStateManager, AllSevenScopesRegistered)
     EXPECT_EQ(mgr.getBlock("region").scope(), AuxiliaryStateScope::Region);
     EXPECT_EQ(mgr.getBlock("facet").scope(), AuxiliaryStateScope::Facet);
 
+    EXPECT_EQ(mgr.getIndexing("global").scope(), AuxiliaryStateScope::Global);
+    EXPECT_EQ(mgr.getIndexing("boundary").scope(), AuxiliaryStateScope::Boundary);
+    EXPECT_EQ(mgr.getIndexing("node").scope(), AuxiliaryStateScope::Node);
+    EXPECT_EQ(mgr.getIndexing("cell").scope(), AuxiliaryStateScope::Cell);
+    EXPECT_EQ(mgr.getIndexing("qp").scope(), AuxiliaryStateScope::QuadraturePoint);
+    EXPECT_EQ(mgr.getIndexing("region").scope(), AuxiliaryStateScope::Region);
+    EXPECT_EQ(mgr.getIndexing("facet").scope(), AuxiliaryStateScope::Facet);
+
     auto summary = mgr.storageSummary();
     EXPECT_EQ(summary.total_work_storage,
               2u + 3u + 200u + 200u + 4800u + 20u + 60u); // 5285
 
+    EXPECT_NO_THROW(mgr.validate());
+}
+
+TEST(AuxiliaryStateManager, RegisterFlatQuadraturePointBlockPreservesQPScope)
+{
+    AuxiliaryStateManager mgr;
+
+    mgr.registerBlock(makeSpec("qp", 2, AuxiliaryStateScope::QuadraturePoint), 4);
+
+    const auto& idx = mgr.getIndexing("qp");
+    EXPECT_EQ(idx.scope(), AuxiliaryStateScope::QuadraturePoint);
+    EXPECT_EQ(idx.totalEntityCount(), 4u);
+    ASSERT_EQ(idx.qpOffsets().size(), 2u);
+    EXPECT_EQ(idx.qpOffsets()[0], 0u);
+    EXPECT_EQ(idx.qpOffsets()[1], 4u);
+    EXPECT_EQ(idx.qpsForCell(0), 4u);
     EXPECT_NO_THROW(mgr.validate());
 }
 
@@ -804,6 +907,26 @@ TEST(AuxiliaryStateManager, RegisterQuadraturePointBlockWithOffsetsPreservesInde
     EXPECT_EQ(idx.qpFlatIndex(1, 2, 1), (4u + 2u) * 2u + 1u);
 }
 
+TEST(AuxiliaryStateManager, RegisterQuadraturePointBlockInvalidOffsetsLeavesManagerUnchanged)
+{
+    AuxiliaryStateManager mgr;
+    auto spec = makeSpec("qp", 2, AuxiliaryStateScope::QuadraturePoint);
+
+    EXPECT_THROW(
+        mgr.registerBlockWithQPOffsets(spec, std::vector<std::size_t>{1, 3}),
+        svmp::FE::InvalidArgumentException);
+
+    EXPECT_EQ(mgr.blockCount(), 0u);
+    EXPECT_FALSE(mgr.hasBlock("qp"));
+    EXPECT_NO_THROW(mgr.validate());
+
+    EXPECT_NO_THROW(
+        mgr.registerBlockWithQPOffsets(spec, std::vector<std::size_t>{0, 3}));
+    EXPECT_EQ(mgr.blockCount(), 1u);
+    EXPECT_TRUE(mgr.hasBlock("qp"));
+    EXPECT_NO_THROW(mgr.validate());
+}
+
 // ---------------------------------------------------------------------------
 //  Ownership rules for Monolithic blocks
 // ---------------------------------------------------------------------------
@@ -825,6 +948,29 @@ TEST(AuxiliaryStateManager, MonolithicBlockUsesAuxLayouts)
     // Block is stored with auxiliary-specific layout, not FE DOF maps
     auto& blk = mgr.getBlock("mono_aux");
     EXPECT_EQ(blk.storageSize(), 300u); // 100 nodes × 3 components
+}
+
+TEST(AuxiliaryStateManager, MonolithicBoundaryAndFacetBlocksPreserveScopeAndIndexing)
+{
+    AuxiliaryStateManager mgr;
+
+    auto boundary = makeSpec("boundary_aux", 3, AuxiliaryStateScope::Boundary);
+    boundary.solve_mode = AuxiliarySolveMode::Monolithic;
+    mgr.registerBlock(boundary, 1);
+
+    auto facet = makeSpec("facet_aux", 2, AuxiliaryStateScope::Facet);
+    facet.solve_mode = AuxiliarySolveMode::Monolithic;
+    mgr.registerBlock(facet, 4);
+
+    EXPECT_EQ(mgr.getSpec("boundary_aux").solve_mode, AuxiliarySolveMode::Monolithic);
+    EXPECT_EQ(mgr.getSpec("facet_aux").solve_mode, AuxiliarySolveMode::Monolithic);
+    EXPECT_EQ(mgr.getBlock("boundary_aux").scope(), AuxiliaryStateScope::Boundary);
+    EXPECT_EQ(mgr.getBlock("facet_aux").scope(), AuxiliaryStateScope::Facet);
+    EXPECT_EQ(mgr.getIndexing("boundary_aux").scope(), AuxiliaryStateScope::Boundary);
+    EXPECT_EQ(mgr.getIndexing("facet_aux").scope(), AuxiliaryStateScope::Facet);
+    EXPECT_EQ(mgr.getBlock("boundary_aux").storageSize(), 3u);
+    EXPECT_EQ(mgr.getBlock("facet_aux").storageSize(), 8u);
+    EXPECT_NO_THROW(mgr.validate());
 }
 
 // ---------------------------------------------------------------------------

@@ -41,6 +41,7 @@
 #include "fsils_api.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -62,6 +63,94 @@ namespace {
 #else
   return true;
 #endif
+}
+
+[[nodiscard]] bool prefetch_enabled() noexcept
+{
+  static const bool enabled = []() {
+    const char* env = std::getenv("SVMP_FSILS_SPMV_PREFETCH");
+    if (env == nullptr || env[0] == '\0') {
+      return true;
+    }
+    const std::string v(env);
+    return !(v == "0" || v == "off" || v == "OFF" || v == "false" || v == "FALSE");
+  }();
+  return enabled;
+}
+
+inline void prefetch_read(const double* ptr) noexcept
+{
+#if defined(__GNUC__) || defined(__clang__)
+  __builtin_prefetch(ptr, 0, 1);
+#else
+  (void)ptr;
+#endif
+}
+
+template <int DOF>
+inline void accumulate_vv_block(const double* __restrict__ kj,
+                                const double* __restrict__ uc,
+                                double* __restrict__ sums) noexcept
+{
+  if constexpr (DOF == 1) {
+    sums[0] += kj[0] * uc[0];
+  } else if constexpr (DOF == 2) {
+    const double u0 = uc[0];
+    const double u1 = uc[1];
+    sums[0] += kj[0] * u0 + kj[1] * u1;
+    sums[1] += kj[2] * u0 + kj[3] * u1;
+  } else if constexpr (DOF == 3) {
+    const double u0 = uc[0];
+    const double u1 = uc[1];
+    const double u2 = uc[2];
+    sums[0] += kj[0] * u0 + kj[1] * u1 + kj[2] * u2;
+    sums[1] += kj[3] * u0 + kj[4] * u1 + kj[5] * u2;
+    sums[2] += kj[6] * u0 + kj[7] * u1 + kj[8] * u2;
+  } else if constexpr (DOF == 4) {
+    const double u0 = uc[0];
+    const double u1 = uc[1];
+    const double u2 = uc[2];
+    const double u3 = uc[3];
+    sums[0] += kj[0]  * u0 + kj[1]  * u1 + kj[2]  * u2 + kj[3]  * u3;
+    sums[1] += kj[4]  * u0 + kj[5]  * u1 + kj[6]  * u2 + kj[7]  * u3;
+    sums[2] += kj[8]  * u0 + kj[9]  * u1 + kj[10] * u2 + kj[11] * u3;
+    sums[3] += kj[12] * u0 + kj[13] * u1 + kj[14] * u2 + kj[15] * u3;
+  } else {
+    for (int l = 0; l < DOF; l++) {
+      double s = 0.0;
+      for (int k = 0; k < DOF; k++) {
+        s += kj[l * DOF + k] * uc[k];
+      }
+      sums[l] += s;
+    }
+  }
+}
+
+template <int DOF>
+inline void accumulate_vv_range(fsils_int first, fsils_int last,
+                                const Vector<fsils_int>& colPtr,
+                                const double* __restrict__ k_data,
+                                const double* __restrict__ u_data,
+                                bool do_prefetch,
+                                double* __restrict__ sums) noexcept
+{
+  if (first > last) {
+    return;
+  }
+
+  constexpr int DOF2 = DOF * DOF;
+  constexpr fsils_int kPrefetchDistance = 2;
+  const fsils_int* __restrict__ cp = colPtr.data();
+  for (fsils_int j = first; j <= last; j++) {
+    if (do_prefetch && j + kPrefetchDistance <= last) {
+      const fsils_int next_col = cp[j + kPrefetchDistance];
+      prefetch_read(u_data + static_cast<size_t>(next_col) * DOF);
+    }
+    const fsils_int col = cp[j];
+    const double* __restrict__ kj = k_data + static_cast<size_t>(j) * DOF2;
+    const double* __restrict__ uc = u_data + static_cast<size_t>(col) * DOF;
+    accumulate_vv_block<DOF>(kj, uc, sums);
+  }
 }
 
 } // namespace
@@ -222,32 +311,35 @@ static void fsils_spar_mul_vs_dyn(fsils_int iStart, fsils_int iEnd, int dof,
 template <int DOF>
 static void fsils_spar_mul_vv_impl(fsils_int iStart, fsils_int iEnd,
     const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
+    const Vector<fsils_int>* diagPtr,
     const Array<double>& K, const Array<double>& U, Array<double>& KU)
 {
   constexpr int DOF2 = DOF * DOF;
   const fsils_int* __restrict__ rp = rowPtr.data();   // column-major: rowPtr(r,c) = rp[r + c*2]
-  const fsils_int* __restrict__ cp = colPtr.data();
+  const fsils_int* __restrict__ diag_data =
+      (diagPtr && diagPtr->size() >= iEnd) ? diagPtr->data() : nullptr;
   const double* __restrict__ k_data = K.data();
   const double* __restrict__ u_data = U.data();
   double* __restrict__ ku_data = KU.data();
+  const bool do_prefetch = prefetch_enabled();
 
   if (use_serial_hot_path()) {
     for (fsils_int i = iStart; i < iEnd; i++) {
       double sums[DOF] = {};
       const fsils_int j_start = rp[2*i];
       const fsils_int j_end   = rp[2*i + 1];
-      for (fsils_int j = j_start; j <= j_end; j++) {
-        const fsils_int col = cp[j];
-        const double* __restrict__ kj = k_data + static_cast<size_t>(j) * DOF2;
-        const double* __restrict__ uc = u_data + static_cast<size_t>(col) * DOF;
-        for (int l = 0; l < DOF; l++) {
-          double s = 0.0;
-          for (int k = 0; k < DOF; k++) {
-            s += kj[l * DOF + k] * uc[k];
-          }
-          sums[l] += s;
-        }
+
+      const fsils_int diag = diag_data ? diag_data[i] : -1;
+      if (diag >= j_start && diag <= j_end) {
+        const double* __restrict__ kj = k_data + static_cast<size_t>(diag) * DOF2;
+        const double* __restrict__ uc = u_data + static_cast<size_t>(i) * DOF;
+        accumulate_vv_block<DOF>(kj, uc, sums);
+        accumulate_vv_range<DOF>(j_start, diag - 1, colPtr, k_data, u_data, do_prefetch, sums);
+        accumulate_vv_range<DOF>(diag + 1, j_end, colPtr, k_data, u_data, do_prefetch, sums);
+      } else {
+        accumulate_vv_range<DOF>(j_start, j_end, colPtr, k_data, u_data, do_prefetch, sums);
       }
+
       double* __restrict__ kui = ku_data + static_cast<size_t>(i) * DOF;
       for (int l = 0; l < DOF; l++) {
         kui[l] = sums[l];
@@ -261,18 +353,18 @@ static void fsils_spar_mul_vv_impl(fsils_int iStart, fsils_int iEnd,
     double sums[DOF] = {};
     const fsils_int j_start = rp[2*i];      // rowPtr(0, i)
     const fsils_int j_end   = rp[2*i + 1];  // rowPtr(1, i)
-    for (fsils_int j = j_start; j <= j_end; j++) {
-      const fsils_int col = cp[j];
-      const double* __restrict__ kj = k_data + static_cast<size_t>(j) * DOF2;
-      const double* __restrict__ uc = u_data + static_cast<size_t>(col) * DOF;
-      for (int l = 0; l < DOF; l++) {
-        double s = 0.0;
-        for (int k = 0; k < DOF; k++) {
-          s += kj[l * DOF + k] * uc[k];
-        }
-        sums[l] += s;
-      }
+
+    const fsils_int diag = diag_data ? diag_data[i] : -1;
+    if (diag >= j_start && diag <= j_end) {
+      const double* __restrict__ kj = k_data + static_cast<size_t>(diag) * DOF2;
+      const double* __restrict__ uc = u_data + static_cast<size_t>(i) * DOF;
+      accumulate_vv_block<DOF>(kj, uc, sums);
+      accumulate_vv_range<DOF>(j_start, diag - 1, colPtr, k_data, u_data, do_prefetch, sums);
+      accumulate_vv_range<DOF>(diag + 1, j_end, colPtr, k_data, u_data, do_prefetch, sums);
+    } else {
+      accumulate_vv_range<DOF>(j_start, j_end, colPtr, k_data, u_data, do_prefetch, sums);
     }
+
     double* __restrict__ kui = ku_data + static_cast<size_t>(i) * DOF;
     for (int l = 0; l < DOF; l++) {
       kui[l] = sums[l];
@@ -661,15 +753,16 @@ void apply_vv_range(fsils_int i_start,
                     int dof,
                     const Array<fsils_int>& row_ptr,
                     const Vector<fsils_int>& col_ptr,
+                    const Vector<fsils_int>* diag_ptr,
                     const Array<double>& values,
                     const Array<double>& input,
                     Array<double>& output)
 {
   switch (dof) {
-    case 1: spar_mul::fsils_spar_mul_vv_impl<1>(i_start, i_end, row_ptr, col_ptr, values, input, output); break;
-    case 2: spar_mul::fsils_spar_mul_vv_impl<2>(i_start, i_end, row_ptr, col_ptr, values, input, output); break;
-    case 3: spar_mul::fsils_spar_mul_vv_impl<3>(i_start, i_end, row_ptr, col_ptr, values, input, output); break;
-    case 4: spar_mul::fsils_spar_mul_vv_impl<4>(i_start, i_end, row_ptr, col_ptr, values, input, output); break;
+    case 1: spar_mul::fsils_spar_mul_vv_impl<1>(i_start, i_end, row_ptr, col_ptr, diag_ptr, values, input, output); break;
+    case 2: spar_mul::fsils_spar_mul_vv_impl<2>(i_start, i_end, row_ptr, col_ptr, diag_ptr, values, input, output); break;
+    case 3: spar_mul::fsils_spar_mul_vv_impl<3>(i_start, i_end, row_ptr, col_ptr, diag_ptr, values, input, output); break;
+    case 4: spar_mul::fsils_spar_mul_vv_impl<4>(i_start, i_end, row_ptr, col_ptr, diag_ptr, values, input, output); break;
     default: spar_mul::fsils_spar_mul_vv_dyn(i_start, i_end, dof, row_ptr, col_ptr, values, input, output); break;
   }
 }
@@ -832,7 +925,7 @@ void VectorToVectorOperator::apply(BlockInput input, BlockOutput output) const
 
   auto compute_range = [&](fsils_int i_start, fsils_int i_end) {
     apply_vv_range(i_start, i_end, components_, *row_ptr_, *col_ptr_,
-                   *values_, input.values, output.values);
+                   lhs_ ? &lhs_->diagPtr : nullptr, *values_, input.values, output.values);
   };
   apply_vector_output(*lhs_, components_, compute_range, output.values);
 }
@@ -869,7 +962,7 @@ void RectangularOperator::apply(BlockInput input, BlockOutput output) const
   auto compute_range = [&](fsils_int i_start, fsils_int i_end) {
     if (out_components_ == in_components_) {
       apply_vv_range(i_start, i_end, out_components_, *row_ptr_, *col_ptr_,
-                     *values_, input.values, output.values);
+                     lhs_ ? &lhs_->diagPtr : nullptr, *values_, input.values, output.values);
       return;
     }
     spar_mul::fsils_spar_mul_rect_range(i_start, i_end, out_components_, in_components_,

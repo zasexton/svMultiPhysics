@@ -135,17 +135,19 @@ public:
     /// Full read-only view of the work buffer.
     [[nodiscard]] std::span<const Real> work() const noexcept { return work_; }
 
-    /// View of entity `i` in the work buffer (fixed-stride).
-    [[nodiscard]] std::span<Real> workEntity(std::size_t entity_idx) noexcept
+    /// View of entity `i` in the work buffer when the entity is contiguous.
+    [[nodiscard]] std::span<Real> workEntity(std::size_t entity_idx)
     {
+        validateContiguousEntityView(entity_idx, "AuxiliaryBlockStorage::workEntity");
         const auto off = entityOffset(entity_idx);
         const auto len = entityLength(entity_idx);
         return {work_.data() + off, len};
     }
 
-    /// Read-only view of entity `i` in the work buffer (fixed-stride).
-    [[nodiscard]] std::span<const Real> workEntity(std::size_t entity_idx) const noexcept
+    /// Read-only view of entity `i` in the work buffer when the entity is contiguous.
+    [[nodiscard]] std::span<const Real> workEntity(std::size_t entity_idx) const
     {
+        validateContiguousEntityView(entity_idx, "AuxiliaryBlockStorage::workEntity");
         const auto off = entityOffset(entity_idx);
         const auto len = entityLength(entity_idx);
         return {work_.data() + off, len};
@@ -161,9 +163,10 @@ public:
     /// Writable committed buffer access for manager-level synchronization and restore paths.
     [[nodiscard]] std::span<Real> committedMutable() noexcept { return committed_; }
 
-    /// View of entity `i` in the committed buffer.
-    [[nodiscard]] std::span<const Real> committedEntity(std::size_t entity_idx) const noexcept
+    /// View of entity `i` in the committed buffer when the entity is contiguous.
+    [[nodiscard]] std::span<const Real> committedEntity(std::size_t entity_idx) const
     {
+        validateContiguousEntityView(entity_idx, "AuxiliaryBlockStorage::committedEntity");
         const auto off = entityOffset(entity_idx);
         const auto len = entityLength(entity_idx);
         return {committed_.data() + off, len};
@@ -267,6 +270,22 @@ public:
     [[nodiscard]] AuxiliaryStateBlockLayout blockLayout() const noexcept;
 
 private:
+    void validateContiguousEntityView(std::size_t entity_idx, const char* caller) const
+    {
+        FE_THROW_IF(!is_setup_, InvalidStateException,
+                    std::string(caller) + ": storage is not set up");
+        FE_THROW_IF(entity_idx >= entity_count_, InvalidArgumentException,
+                    std::string(caller) + ": entity index " +
+                        std::to_string(entity_idx) + " exceeds entity count " +
+                        std::to_string(entity_count_));
+        FE_THROW_IF(layout_mode_ == AuxiliaryLayoutMode::FixedStride &&
+                        ordering_ == AuxiliaryEntityOrdering::ByComponentThenEntity,
+                    InvalidStateException,
+                    std::string(caller) +
+                        ": entity data is strided for ByComponentThenEntity; "
+                        "use gatherEntityWork()/gatherEntityCommitted() instead");
+    }
+
     [[nodiscard]] std::size_t entityOffset(std::size_t entity_idx) const noexcept
     {
         if (layout_mode_ == AuxiliaryLayoutMode::Ragged) {

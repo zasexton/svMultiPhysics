@@ -189,6 +189,11 @@ bool backsolve_hessenberg(const Array<double>& h,
   return enabled;
 }
 
+[[nodiscard]] bool product_fits_size_t(const std::size_t a, const std::size_t b) noexcept
+{
+  return b == 0 || a <= std::numeric_limits<std::size_t>::max() / b;
+}
+
 [[nodiscard]] int parse_int_env(const char* name, int default_value) noexcept
 {
   const char* env = std::getenv(name);
@@ -239,6 +244,10 @@ struct GmresEnhancements {
   // available as an explicit opt-in when a problem genuinely needs it.
   ReorthMode reorth_mode = ReorthMode::off;
   bool verbose = false;
+  bool profile = false;
+  bool use_basis_panel = true;
+  int basis_panel_min_sD = 16;
+  int basis_panel_max_mb = 1024;
 };
 
 [[nodiscard]] const GmresEnhancements& gmres_enhancements()
@@ -247,6 +256,10 @@ struct GmresEnhancements {
     GmresEnhancements c{};
     c.recycle_k = std::max(0, parse_int_env("SVMP_FSILS_GMRES_RECYCLE_K", 0));
     c.verbose = parse_bool_env("SVMP_FSILS_GMRES_RECYCLE_VERBOSE", false);
+    c.profile = parse_bool_env("SVMP_FSILS_GMRES_PROFILE", c.verbose);
+    c.use_basis_panel = parse_bool_env("SVMP_FSILS_GMRES_BASIS_PANEL", true);
+    c.basis_panel_min_sD = std::max(0, parse_int_env("SVMP_FSILS_GMRES_BASIS_PANEL_MIN_SD", 16));
+    c.basis_panel_max_mb = std::max(0, parse_int_env("SVMP_FSILS_GMRES_BASIS_PANEL_MAX_MB", 1024));
 
     const char* update = std::getenv("SVMP_FSILS_GMRES_RECYCLE_UPDATE");
     if (update) {
@@ -917,6 +930,180 @@ double fused_update_norm_v(const int dof, const fsils_int nNo, const fsils_int m
     case 4: return fused_update_norm_v_impl<4>(nNo, mynNo, commu, u, i, u_next, h_factors);
     default: return fused_update_norm_v_dyn(dof, nNo, mynNo, commu, u, i, u_next, h_factors);
   }
+}
+
+void copy_basis_column_to_panel_v(const int dof,
+                                  const fsils_int nNo,
+                                  const Array<double>& basis_vector,
+                                  double* panel,
+                                  const int panel_stride,
+                                  const int basis_index,
+                                  const int num_threads)
+{
+  const fsils_int entries = nNo * static_cast<fsils_int>(dof);
+  const double* src = basis_vector.data();
+
+  if (use_serial_hot_path(num_threads)) {
+    for (fsils_int e = 0; e < entries; ++e) {
+      panel[static_cast<std::size_t>(e) * static_cast<std::size_t>(panel_stride) +
+            static_cast<std::size_t>(basis_index)] = src[static_cast<std::size_t>(e)];
+    }
+    return;
+  }
+
+  #pragma omp parallel for schedule(static)
+  for (fsils_int e = 0; e < entries; ++e) {
+    panel[static_cast<std::size_t>(e) * static_cast<std::size_t>(panel_stride) +
+          static_cast<std::size_t>(basis_index)] = src[static_cast<std::size_t>(e)];
+  }
+}
+
+double fused_dot_zz_panel_v(const int dof,
+                            const fsils_int mynNo,
+                            const double* panel,
+                            const int panel_stride,
+                            const int i,
+                            const Array<double>& u_next,
+                            std::vector<double>& h_col,
+                            double* thread_buf,
+                            const int thread_stride,
+                            const int num_threads)
+{
+  const int num_vecs = i + 1;
+  const fsils_int owned_entries = mynNo * static_cast<fsils_int>(dof);
+  const double* v = u_next.data();
+
+  if (use_serial_hot_path(num_threads)) {
+    std::fill(h_col.begin(), h_col.begin() + num_vecs, 0.0);
+    double zz_sum = 0.0;
+    for (fsils_int e = 0; e < owned_entries; ++e) {
+      const std::size_t ee = static_cast<std::size_t>(e);
+      const double ve = v[ee];
+      zz_sum += ve * ve;
+      const double* row = panel + ee * static_cast<std::size_t>(panel_stride);
+      #pragma omp simd
+      for (int j = 0; j < num_vecs; ++j) {
+        h_col[static_cast<std::size_t>(j)] += row[static_cast<std::size_t>(j)] * ve;
+      }
+    }
+    return zz_sum;
+  }
+
+  std::fill(thread_buf, thread_buf + static_cast<std::size_t>(num_threads) * thread_stride, 0.0);
+
+  #pragma omp parallel
+  {
+    const int tid = omp_thread_num();
+    double* local = thread_buf + static_cast<std::size_t>(tid) * thread_stride;
+
+    #pragma omp for schedule(static)
+    for (fsils_int e = 0; e < owned_entries; ++e) {
+      const std::size_t ee = static_cast<std::size_t>(e);
+      const double ve = v[ee];
+      local[num_vecs] += ve * ve;
+      const double* row = panel + ee * static_cast<std::size_t>(panel_stride);
+      #pragma omp simd
+      for (int j = 0; j < num_vecs; ++j) {
+        local[j] += row[static_cast<std::size_t>(j)] * ve;
+      }
+    }
+  }
+
+  for (int j = 0; j < num_vecs; ++j) {
+    double sum = 0.0;
+    for (int t = 0; t < num_threads; ++t) {
+      sum += thread_buf[static_cast<std::size_t>(t) * thread_stride + j];
+    }
+    h_col[static_cast<std::size_t>(j)] = sum;
+  }
+
+  double zz_sum = 0.0;
+  for (int t = 0; t < num_threads; ++t) {
+    zz_sum += thread_buf[static_cast<std::size_t>(t) * thread_stride + num_vecs];
+  }
+  return zz_sum;
+}
+
+double fused_update_norm_panel_v(const int dof,
+                                 const fsils_int nNo,
+                                 const fsils_int mynNo,
+                                 fe_fsi_linear_solver::FSILS_commuType& commu,
+                                 const double* panel,
+                                 const int panel_stride,
+                                 const int i,
+                                 Array<double>& u_next,
+                                 const std::vector<double>& h_factors,
+                                 const int num_threads)
+{
+  const int num_vecs = i + 1;
+  const fsils_int total_entries = nNo * static_cast<fsils_int>(dof);
+  const fsils_int owned_entries = mynNo * static_cast<fsils_int>(dof);
+  double* v = u_next.data();
+  double local_sq = 0.0;
+
+  auto update_one = [&](const fsils_int e) {
+    const std::size_t ee = static_cast<std::size_t>(e);
+    const double* row = panel + ee * static_cast<std::size_t>(panel_stride);
+    double correction = 0.0;
+    #pragma omp simd reduction(+:correction)
+    for (int j = 0; j < num_vecs; ++j) {
+      correction += h_factors[static_cast<std::size_t>(j)] * row[static_cast<std::size_t>(j)];
+    }
+    const double updated = v[ee] - correction;
+    v[ee] = updated;
+    return updated;
+  };
+
+  if (use_serial_hot_path(num_threads)) {
+    for (fsils_int e = 0; e < total_entries; ++e) {
+      const double updated = update_one(e);
+      if (e < owned_entries) {
+        local_sq += updated * updated;
+      }
+    }
+  } else {
+#ifdef _OPENMP
+    const int max_t = num_threads;
+    constexpr int kStackMax = 64;
+    double stack_partials[kStackMax];
+    double* partials = (max_t <= kStackMax) ? stack_partials : new double[max_t];
+    for (int t = 0; t < max_t; ++t) partials[t] = 0.0;
+
+    #pragma omp parallel
+    {
+      const int tid = omp_get_thread_num();
+      double thread_sq = 0.0;
+
+      #pragma omp for schedule(static)
+      for (fsils_int e = 0; e < total_entries; ++e) {
+        const double updated = update_one(e);
+        if (e < owned_entries) {
+          thread_sq += updated * updated;
+        }
+      }
+      partials[tid] = thread_sq;
+    }
+
+    for (int t = 0; t < max_t; ++t) {
+      local_sq += partials[t];
+    }
+    if (max_t > kStackMax) {
+      delete[] partials;
+    }
+#else
+    for (fsils_int e = 0; e < total_entries; ++e) {
+      const double updated = update_one(e);
+      if (e < owned_entries) {
+        local_sq += updated * updated;
+      }
+    }
+#endif
+  }
+
+  double global_sq = local_sq;
+  const fe_fsi_linear_solver::CollectiveOps collectives(commu);
+  collectives.allreduce_sum(local_sq, global_sq);
+  return std::sqrt(global_sq);
 }
 
 template <int DOF>
@@ -2164,8 +2351,11 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
   // ===== TIMING PROFILE =====
   double tp_spmv = 0.0, tp_bc_mul = 0.0, tp_dot_gs = 0.0;
   double tp_allreduce = 0.0, tp_gs_update = 0.0, tp_norm = 0.0;
-  double tp_vecops = 0.0, tp_givens = 0.0, tp_recon = 0.0;
+  double tp_vecops = 0.0, tp_givens = 0.0, tp_recon = 0.0, tp_panel_copy = 0.0;
   int tp_reorth_count = 0, tp_restarts = 0;
+  int tp_spmv_calls = 0, tp_bc_mul_calls = 0, tp_dot_calls = 0, tp_allreduce_calls = 0;
+  int tp_gs_update_calls = 0, tp_norm_calls = 0, tp_vecops_calls = 0;
+  int tp_givens_calls = 0, tp_recon_calls = 0, tp_panel_copy_calls = 0;
   auto TP = [](){ return fe_fsi_linear_solver::fsils_cpu_t(); };
   double tp0;
   // ===========================
@@ -2173,6 +2363,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
   tp0 = TP();
   double eps = norm::fsi_ls_normv(dof, mynNo, lhs.commu, R);
   tp_norm += TP() - tp0;
+  ++tp_norm_calls;
 
   ls.iNorm = eps;
   ls.fNorm = eps;
@@ -2203,6 +2394,32 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
 
   // ===== RECYCLED/DEFLATED GMRES (optional) =====
   const auto& enh = gmres_enhancements();
+  const int basis_panel_stride = ls.sD + 1;
+  const std::size_t basis_panel_entries =
+      (dof > 0 && nNo > 0) ? static_cast<std::size_t>(dof) * static_cast<std::size_t>(nNo) : 0u;
+  const bool basis_panel_size_fits =
+      product_fits_size_t(basis_panel_entries, static_cast<std::size_t>(basis_panel_stride));
+  const std::size_t basis_panel_values = basis_panel_size_fits
+      ? basis_panel_entries * static_cast<std::size_t>(basis_panel_stride)
+      : std::numeric_limits<std::size_t>::max();
+  const std::size_t basis_panel_bytes =
+      (basis_panel_values <= std::numeric_limits<std::size_t>::max() / sizeof(double))
+      ? basis_panel_values * sizeof(double)
+      : std::numeric_limits<std::size_t>::max();
+  const std::size_t basis_panel_max_bytes =
+      (enh.basis_panel_max_mb == 0)
+          ? std::numeric_limits<std::size_t>::max()
+          : static_cast<std::size_t>(enh.basis_panel_max_mb) * 1024u * 1024u;
+  const bool use_basis_panel =
+      enh.use_basis_panel &&
+      ls.sD >= enh.basis_panel_min_sD &&
+      basis_panel_size_fits &&
+      basis_panel_bytes <= basis_panel_max_bytes;
+  double* basis_panel = nullptr;
+  if (use_basis_panel) {
+    ls.ws.ensure_gmres_basis_panel_v(dof, static_cast<int>(nNo), ls.sD);
+    basis_panel = ls.ws.basis_panel_v.data();
+  }
   const int recycle_k_req = std::min(enh.recycle_k, ls.sD);
   if (recycle_k_req > 0) {
     ls.ws.ensure_recycle_v(dof, nNo, recycle_k_req);
@@ -2611,19 +2828,23 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       std::fflush(stderr);
     }
     tp_spmv += TP() - tp0;
+    ++tp_spmv_calls;
 
     tp0 = TP();
     add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, X, u_slice);
     tp_bc_mul += TP() - tp0;
+    ++tp_bc_mul_calls;
 
     tp0 = TP();
     omp_la::omp_axpby_v(dof, nNo, u_slice, R, -1.0, u_slice);
     tp_vecops += TP() - tp0;
+    ++tp_vecops_calls;
 
     if (has_coupled_bc) {
       tp0 = TP();
       add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, u_slice, u_slice);
       tp_bc_mul += TP() - tp0;
+      ++tp_bc_mul_calls;
     }
 
     // Deflated/recycling GMRES: project residual and apply correction.
@@ -2632,10 +2853,12 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       fused_dot_v(dof, mynNo, recycle_C, recycle_k - 1, u_slice, h_col,
                   dot_thread.data(), thread_stride, num_threads);
       tp_dot_gs += TP() - tp0;
+      ++tp_dot_calls;
 
       tp0 = TP();
       bcast::fsils_bcast_v(recycle_k, h_col, lhs.commu);
       tp_allreduce += TP() - tp0;
+      ++tp_allreduce_calls;
 
       for (int j = 0; j < recycle_k; ++j) {
         recycle_y(j) = h_col[j];
@@ -2644,15 +2867,18 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       tp0 = TP();
       fused_recon_v(dof, nNo, recycle_U, recycle_k - 1, X, recycle_y);
       tp_recon += TP() - tp0;
+      ++tp_recon_calls;
 
       tp0 = TP();
       fused_update_v_inplace(dof, nNo, recycle_C, recycle_k - 1, u_slice, h_col);
       tp_gs_update += TP() - tp0;
+      ++tp_gs_update_calls;
     }
 
     tp0 = TP();
     err[0] = norm::fsi_ls_normv(dof, mynNo, lhs.commu, u.rslice(0));
     tp_norm += TP() - tp0;
+    ++tp_norm_calls;
 
     if (std::abs(err[0]) <= std::numeric_limits<double>::epsilon()) {
       ls.suc = true; break;
@@ -2663,6 +2889,20 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     tp0 = TP();
     omp_la::omp_mul_v(dof, nNo, 1.0 / err[0], u_slice);
     tp_vecops += TP() - tp0;
+    ++tp_vecops_calls;
+
+    if (use_basis_panel) {
+      tp0 = TP();
+      copy_basis_column_to_panel_v(dof,
+                                   nNo,
+                                   u_slice,
+                                   basis_panel,
+                                   basis_panel_stride,
+                                   0,
+                                   num_threads);
+      tp_panel_copy += TP() - tp0;
+      ++tp_panel_copy_calls;
+    }
 
     // Adaptive early restart: track intra-restart convergence
     int inner_stag_count = 0;
@@ -2690,15 +2930,18 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
         std::fflush(stderr);
       }
       tp_spmv += TP() - tp0;
+      ++tp_spmv_calls;
 
       tp0 = TP();
       add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, u_slice_prev, u_slice_next);
       tp_bc_mul += TP() - tp0;
+      ++tp_bc_mul_calls;
 
       if (has_coupled_bc) {
         tp0 = TP();
         add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, u_slice_next, u_slice_next);
         tp_bc_mul += TP() - tp0;
+        ++tp_bc_mul_calls;
       }
 
       // Deflated/recycling GMRES: project the new Arnoldi vector.
@@ -2707,10 +2950,12 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
         fused_dot_v(dof, mynNo, recycle_C, recycle_k - 1, u_slice_next, h_col,
                     dot_thread.data(), thread_stride, num_threads);
         tp_dot_gs += TP() - tp0;
+        ++tp_dot_calls;
 
         tp0 = TP();
         bcast::fsils_bcast_v(recycle_k, h_col, lhs.commu);
         tp_allreduce += TP() - tp0;
+        ++tp_allreduce_calls;
 
         // Store coupling coefficients B(:,i) = C^T * (A*v_i) before projection.
         // These are required to apply the corresponding U-space correction
@@ -2723,6 +2968,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
         tp0 = TP();
         fused_update_v_inplace(dof, nNo, recycle_C, recycle_k - 1, u_slice_next, h_col);
         tp_gs_update += TP() - tp0;
+        ++tp_gs_update_calls;
       }
 
       // --- Cache-blocked CGS Step 1 with Pythagorean trick ---
@@ -2732,13 +2978,28 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       // through L1, avoiding the per-vector DRAM round-trip of sequential
       // dot products.
       tp0 = TP();
-      h_col[static_cast<size_t>(i+1)] = fused_dot_zz_v(dof, mynNo, u, i, u_slice_next, h_col,
-                                                         dot_thread.data(), thread_stride, num_threads);
+      if (use_basis_panel) {
+        h_col[static_cast<size_t>(i+1)] = fused_dot_zz_panel_v(dof,
+                                                               mynNo,
+                                                               basis_panel,
+                                                               basis_panel_stride,
+                                                               i,
+                                                               u_slice_next,
+                                                               h_col,
+                                                               dot_thread.data(),
+                                                               thread_stride,
+                                                               num_threads);
+      } else {
+        h_col[static_cast<size_t>(i+1)] = fused_dot_zz_v(dof, mynNo, u, i, u_slice_next, h_col,
+                                                           dot_thread.data(), thread_stride, num_threads);
+      }
       tp_dot_gs += TP() - tp0;
+      ++tp_dot_calls;
 
       tp0 = TP();
       bcast::fsils_bcast_v(i + 2, h_col, lhs.commu);
       tp_allreduce += TP() - tp0;
+      ++tp_allreduce_calls;
 
       double proj_sq_norm = 0.0;
       for (int j = 0; j <= i; j++) {
@@ -2765,9 +3026,21 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       // Note: fused_update_v_inplace does vbuf[k] -= hj * u[j][k], so
       // we pass h_col directly (positive values = subtract).
       tp0 = TP();
-      const double first_norm = fused_update_norm_v(dof, nNo, mynNo, lhs.commu, u, i, u_slice_next, h_col);
+      const double first_norm = use_basis_panel
+          ? fused_update_norm_panel_v(dof,
+                                      nNo,
+                                      mynNo,
+                                      lhs.commu,
+                                      basis_panel,
+                                      basis_panel_stride,
+                                      i,
+                                      u_slice_next,
+                                      h_col,
+                                      num_threads)
+          : fused_update_norm_v(dof, nNo, mynNo, lhs.commu, u, i, u_slice_next, h_col);
       const double update_norm_dt = TP() - tp0;
       tp_gs_update += update_norm_dt;
+      ++tp_gs_update_calls;
       double new_norm = first_norm;
       const double new_norm_sq = new_norm * new_norm;
 
@@ -2789,22 +3062,49 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
         tp_reorth_count++;
 
         tp0 = TP();
-        h_col[static_cast<size_t>(i+1)] = fused_dot_zz_v(dof, mynNo, u, i, u_slice_next, h_col,
-                                                           dot_thread.data(), thread_stride, num_threads);
+        if (use_basis_panel) {
+          h_col[static_cast<size_t>(i+1)] = fused_dot_zz_panel_v(dof,
+                                                                 mynNo,
+                                                                 basis_panel,
+                                                                 basis_panel_stride,
+                                                                 i,
+                                                                 u_slice_next,
+                                                                 h_col,
+                                                                 dot_thread.data(),
+                                                                 thread_stride,
+                                                                 num_threads);
+        } else {
+          h_col[static_cast<size_t>(i+1)] = fused_dot_zz_v(dof, mynNo, u, i, u_slice_next, h_col,
+                                                             dot_thread.data(), thread_stride, num_threads);
+        }
         tp_dot_gs += TP() - tp0;
+        ++tp_dot_calls;
 
         tp0 = TP();
         bcast::fsils_bcast_v(i + 2, h_col, lhs.commu);
         tp_allreduce += TP() - tp0;
+        ++tp_allreduce_calls;
 
         for (int j = 0; j <= i; ++j) {
           h(j,i) += h_col[j];
         }
 
         tp0 = TP();
-        new_norm = fused_update_norm_v(dof, nNo, mynNo, lhs.commu, u, i, u_slice_next, h_col);
+        new_norm = use_basis_panel
+            ? fused_update_norm_panel_v(dof,
+                                        nNo,
+                                        mynNo,
+                                        lhs.commu,
+                                        basis_panel,
+                                        basis_panel_stride,
+                                        i,
+                                        u_slice_next,
+                                        h_col,
+                                        num_threads)
+            : fused_update_norm_v(dof, nNo, mynNo, lhs.commu, u, i, u_slice_next, h_col);
         const double reorth_update_norm_dt = TP() - tp0;
         tp_gs_update += reorth_update_norm_dt;
+        ++tp_gs_update_calls;
       }
       h(i+1,i) = new_norm;
       if (gmres_debug_trace_enabled() && l == 0 && i < 3) {
@@ -2825,6 +3125,20 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
         tp0 = TP();
         omp_la::omp_mul_v(dof, nNo, 1.0/h(i+1,i), u_slice_next);
         tp_vecops += TP() - tp0;
+        ++tp_vecops_calls;
+
+        if (use_basis_panel) {
+          tp0 = TP();
+          copy_basis_column_to_panel_v(dof,
+                                       nNo,
+                                       u_slice_next,
+                                       basis_panel,
+                                       basis_panel_stride,
+                                       i + 1,
+                                       num_threads);
+          tp_panel_copy += TP() - tp0;
+          ++tp_panel_copy_calls;
+        }
       } else {
         h(i+1,i) = 0.0;
         breakdown = true;
@@ -2833,6 +3147,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       tp0 = TP();
       apply_givens_rotation(h, c, s, err, i);
       tp_givens += TP() - tp0;
+      ++tp_givens_calls;
 
       if (std::abs(err(i+1)) < eps) {
         ls.suc = true;
@@ -2873,6 +3188,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
 
     fused_recon_v(dof, nNo, u, last_i, X, y);
     tp_recon += TP() - tp0;
+    ++tp_recon_calls;
 
     // Recycling correction: X += U * ( -B * y ), where B(:,i) = C^T*(A*v_i).
     // This cancels the C-component of A*(V*y) and ensures ||err|| matches
@@ -2893,6 +3209,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       tp0 = TP();
       fused_recon_v(dof, nNo, recycle_U, recycle_k - 1, X, recycle_y);
       tp_recon += TP() - tp0;
+      ++tp_recon_calls;
     }
 
     ls.fNorm = std::abs(err(last_i+1));
@@ -2936,33 +3253,35 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
 
   // ===== PRINT TIMING PROFILE =====
   double tp_total = tp_spmv + tp_bc_mul + tp_dot_gs + tp_allreduce +
-                    tp_gs_update + tp_norm + tp_vecops + tp_givens + tp_recon;
-  if (enh.verbose && lhs.commu.task == 0 && tp_total > 0.0) {
+                    tp_gs_update + tp_norm + tp_vecops + tp_givens + tp_recon + tp_panel_copy;
+  if ((enh.profile || enh.verbose) && lhs.commu.task == 0 && tp_total > 0.0) {
     auto pct = [&](double t) { return 100.0 * t / tp_total; };
     fprintf(stderr,
       "\n=== GMRES_V TIMING PROFILE (rank 0) ===\n"
       "  Total GMRES time:     %10.6f s  (iters=%d, restarts=%d, reorth=%d)\n"
-      "  SpMV:                 %10.6f s  (%5.1f%%)\n"
-      "  BC multiply:          %10.6f s  (%5.1f%%)\n"
-      "  GS dot products:      %10.6f s  (%5.1f%%)\n"
-      "  MPI AllReduce:        %10.6f s  (%5.1f%%)\n"
-      "  GS vector update:     %10.6f s  (%5.1f%%)\n"
-      "  Norm computation:     %10.6f s  (%5.1f%%)\n"
-      "  Vector ops (scale):   %10.6f s  (%5.1f%%)\n"
-      "  Givens rotation:      %10.6f s  (%5.1f%%)\n"
-      "  Reconstruction:       %10.6f s  (%5.1f%%)\n"
+      "  SpMV:                 %10.6f s  (%5.1f%%)  calls=%d\n"
+      "  BC multiply:          %10.6f s  (%5.1f%%)  calls=%d\n"
+      "  GS dot products:      %10.6f s  (%5.1f%%)  calls=%d\n"
+      "  MPI AllReduce:        %10.6f s  (%5.1f%%)  calls=%d\n"
+      "  GS vector update:     %10.6f s  (%5.1f%%)  calls=%d\n"
+      "  Norm computation:     %10.6f s  (%5.1f%%)  calls=%d\n"
+      "  Vector ops (scale):   %10.6f s  (%5.1f%%)  calls=%d\n"
+      "  Basis panel copy:     %10.6f s  (%5.1f%%)  calls=%d  enabled=%d\n"
+      "  Givens rotation:      %10.6f s  (%5.1f%%)  calls=%d\n"
+      "  Reconstruction:       %10.6f s  (%5.1f%%)  calls=%d\n"
       "  dof=%d  nNo=%lld  mynNo=%lld  nnz=%lld  sD=%d\n"
       "========================================\n",
       tp_total, ls.itr, tp_restarts, tp_reorth_count,
-      tp_spmv, pct(tp_spmv),
-      tp_bc_mul, pct(tp_bc_mul),
-      tp_dot_gs, pct(tp_dot_gs),
-      tp_allreduce, pct(tp_allreduce),
-      tp_gs_update, pct(tp_gs_update),
-      tp_norm, pct(tp_norm),
-      tp_vecops, pct(tp_vecops),
-      tp_givens, pct(tp_givens),
-      tp_recon, pct(tp_recon),
+      tp_spmv, pct(tp_spmv), tp_spmv_calls,
+      tp_bc_mul, pct(tp_bc_mul), tp_bc_mul_calls,
+      tp_dot_gs, pct(tp_dot_gs), tp_dot_calls,
+      tp_allreduce, pct(tp_allreduce), tp_allreduce_calls,
+      tp_gs_update, pct(tp_gs_update), tp_gs_update_calls,
+      tp_norm, pct(tp_norm), tp_norm_calls,
+      tp_vecops, pct(tp_vecops), tp_vecops_calls,
+      tp_panel_copy, pct(tp_panel_copy), tp_panel_copy_calls, use_basis_panel ? 1 : 0,
+      tp_givens, pct(tp_givens), tp_givens_calls,
+      tp_recon, pct(tp_recon), tp_recon_calls,
       dof, (long long)nNo, (long long)mynNo, (long long)lhs.nnz, ls.sD);
   }
   // ==================================
