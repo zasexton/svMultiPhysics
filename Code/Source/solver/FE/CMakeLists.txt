@@ -776,6 +776,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/BoundaryConditionManager.h
     Systems/BoundaryReductionService.h
     Systems/AuxiliaryQuadratureLayout.h
+    Systems/FEAdaptivityTransfer.h
     Systems/FESystem.h
     Systems/FormsInstaller.h
     Systems/FieldRegistry.h
@@ -799,6 +800,7 @@ set(FE_SYSTEMS_HEADERS
 
 set(FE_SYSTEMS_SOURCES
     Systems/ContactPenaltyKernel.cpp
+    Systems/FEAdaptivityTransfer.cpp
     Systems/FESystem.cpp
     Systems/FormsInstaller.cpp
     Systems/FieldRegistry.cpp
@@ -836,10 +838,12 @@ set(FE_POSTPROCESSING_SOURCES
 if(FE_WITH_MESH)
     set(FE_MOVINGMESH_HEADERS
         MovingMesh/GeometryRegularizationBackend.h
+        MovingMesh/MovingDomainOrchestrator.h
     )
 
     set(FE_MOVINGMESH_SOURCES
         MovingMesh/GeometryRegularizationBackend.cpp
+        MovingMesh/MovingDomainOrchestrator.cpp
     )
 else()
     set(FE_MOVINGMESH_HEADERS)
@@ -1830,6 +1834,7 @@ if(FE_BUILD_TESTS)
     if(FE_WITH_MESH AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/MovingMesh/test_main.cpp)
         set(FE_MOVINGMESH_TEST_SOURCES
             Tests/Unit/MovingMesh/test_FEMeshMotionBackend.cpp
+            Tests/Unit/MovingMesh/test_MovingDomainOrchestrator.cpp
             Tests/Unit/MovingMesh/test_main.cpp
         )
         add_executable(test_fe_movingmesh ${FE_MOVINGMESH_TEST_SOURCES})
@@ -2366,6 +2371,8 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_SearchAccess.cpp
 		                Tests/Unit/Systems/test_ParameterRegistry.cpp
 		                Tests/Unit/Systems/test_FieldEvaluation.cpp
+		                Tests/Unit/Systems/test_FEAdaptivityTransfer.cpp
+		                Tests/Unit/Systems/test_FEMovingMeshRestart.cpp
 		                Tests/Unit/Systems/test_FESystem.cpp
 		                Tests/Unit/Systems/test_AssemblerSelection.cpp
 		                Tests/Unit/Systems/test_MultiFieldRectangularAssembly.cpp

@@ -66,9 +66,12 @@
 #include <vector>
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Systems/FEAdaptivityTransfer.h"
 #include "Mesh/Motion/MotionState.h"
 namespace svmp {
+struct AdaptivityOptions;
 class InterfaceMesh;
+struct RefinementDelta;
 }
 #endif
 
@@ -198,6 +201,37 @@ struct MeshCoordinateUpdateResult {
     std::size_t components_updated{0};
     MeshCoordinateUpdateStage stage{MeshCoordinateUpdateStage::TrialNonlinearIterate};
     std::uint64_t geometry_revision{0};
+};
+
+struct FEAdaptedStateTransferRequest {
+    std::span<const Real> solution{};
+    std::span<const Real> previous_solution{};
+    std::span<const Real> previous_solution2{};
+    std::vector<Real>* transferred_solution{nullptr};
+    std::vector<Real>* transferred_previous_solution{nullptr};
+    std::vector<Real>* transferred_previous_solution2{nullptr};
+    FEFieldTransferOptions field_transfer_options{};
+    SetupOptions setup_options{};
+    bool rebuild_setup{true};
+    bool transfer_auxiliary_state{true};
+    bool transfer_material_state{true};
+    bool transfer_boundary_and_coupling_state{true};
+};
+
+struct FEAdaptedStateTransferResult {
+    bool dof_handler_rebuilt{false};
+    bool constraint_layout_rebuilt{false};
+    bool sparsity_rebuilt{false};
+    bool solution_transferred{false};
+    bool previous_solution_transferred{false};
+    bool previous_solution2_transferred{false};
+    bool auxiliary_state_transfer_handled{false};
+    bool material_state_transfer_handled{false};
+    bool boundary_coupling_state_transfer_handled{false};
+    std::size_t values_transferred{0};
+    FELayoutRevisionState layout_before{};
+    FELayoutRevisionState layout_after{};
+    std::vector<std::string> diagnostics{};
 };
 #endif
 
@@ -1087,6 +1121,12 @@ public:
 	    std::size_t syncBoundMeshMotionFieldsToState(assembly::GlobalSystemView& vector_view) const;
 	    void notifyMeshGeometryAdvanced();
 	    void notifyMeshTopologyLayoutChanged();
+	    FEAdaptedStateTransferResult onMeshAdapted(
+	        const svmp::MeshBase& old_mesh,
+	        const svmp::MeshBase& new_mesh,
+	        const svmp::RefinementDelta& delta,
+	        const svmp::AdaptivityOptions& options,
+	        const FEAdaptedStateTransferRequest& request = {});
 
 	    void setInterfaceMesh(InterfaceId marker, std::shared_ptr<const svmp::InterfaceMesh> mesh);
 	    [[nodiscard]] bool hasInterfaceMesh(InterfaceId marker) const noexcept;

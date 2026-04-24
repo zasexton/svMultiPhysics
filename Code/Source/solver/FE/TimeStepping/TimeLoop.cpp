@@ -1586,6 +1586,11 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             const double dt_prev_step = history.dtPrev();
 
             const double solve_time = t + dt;
+            if (callbacks.on_before_physics_solve) {
+                const bool moving_domain_ok = callbacks.on_before_physics_solve(history, solve_time, dt);
+                FE_THROW_IF(!moving_domain_ok, FEException,
+                            "TimeLoop: before-physics-solve callback rejected the step");
+            }
             transient.system().beginTimeStep();
 
             int scheme_order = 0;

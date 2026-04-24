@@ -46,6 +46,7 @@
 #include <vtkCell.h>
 #include <vtkCellData.h>
 #include <vtkPointData.h>
+#include <vtkFieldData.h>
 #include <vtkIdTypeArray.h>
 #include <vtkIntArray.h>
 #include <vtkLongLongArray.h>
@@ -107,6 +108,18 @@ void VTKWriter::write(const MeshBase& mesh, const MeshIOOptions& options) {
     write_opts.compressed = (compress_it->second == "true" || compress_it->second == "1");
   }
 
+  auto current_coords_it = options.kv.find("write_current_coordinates");
+  if (current_coords_it != options.kv.end()) {
+    write_opts.write_current_coordinates =
+        (current_coords_it->second == "true" || current_coords_it->second == "1");
+  }
+
+  auto current_points_it = options.kv.find("use_current_coordinates_as_points");
+  if (current_points_it != options.kv.end()) {
+    write_opts.use_current_coordinates_as_points =
+        (current_points_it->second == "true" || current_points_it->second == "1");
+  }
+
   // Dispatch based on format
   if (format == "vtk") {
     write_vtk(mesh, filename, write_opts);
@@ -137,7 +150,7 @@ void VTKWriter::write(const MeshBase& mesh, const MeshIOOptions& options) {
 void VTKWriter::write_vtk(const MeshBase& mesh, const std::string& filename,
                          const WriteOptions& opts) {
   // Convert to UnstructuredGrid
-  auto ugrid = convert_to_unstructured_grid(mesh);
+  auto ugrid = convert_to_unstructured_grid(mesh, opts);
 
   // Write field data
   write_field_data(mesh, ugrid, opts);
@@ -160,7 +173,7 @@ void VTKWriter::write_vtk(const MeshBase& mesh, const std::string& filename,
 void VTKWriter::write_vtu(const MeshBase& mesh, const std::string& filename,
                          const WriteOptions& opts) {
   // Convert to UnstructuredGrid
-  auto ugrid = convert_to_unstructured_grid(mesh);
+  auto ugrid = convert_to_unstructured_grid(mesh, opts);
 
   // Write field data
   write_field_data(mesh, ugrid, opts);
@@ -189,7 +202,7 @@ void VTKWriter::write_vtu(const MeshBase& mesh, const std::string& filename,
 void VTKWriter::write_vtp(const MeshBase& mesh, const std::string& filename,
                          const WriteOptions& opts) {
   // Convert to PolyData
-  auto polydata = convert_to_polydata(mesh);
+  auto polydata = convert_to_polydata(mesh, opts);
 
   // Write field data
   write_field_data(mesh, polydata, opts);
@@ -247,14 +260,19 @@ void VTKWriter::write_pvtu(const MeshBase& mesh, const std::string& filename,
   }
 }
 
-vtkSmartPointer<vtkUnstructuredGrid> VTKWriter::convert_to_unstructured_grid(const MeshBase& mesh) {
+vtkSmartPointer<vtkUnstructuredGrid> VTKWriter::convert_to_unstructured_grid(const MeshBase& mesh,
+                                                                             const WriteOptions& opts) {
   setup_vtk_registry();
 
   vtkSmartPointer<vtkUnstructuredGrid> ugrid =
       vtkSmartPointer<vtkUnstructuredGrid>::New();
 
   // Create points
-  auto points = create_vtk_points(mesh, Configuration::Reference);
+  const Configuration points_cfg =
+      (opts.use_current_coordinates_as_points && mesh.has_current_coords())
+          ? Configuration::Current
+          : Configuration::Reference;
+  auto points = create_vtk_points(mesh, points_cfg);
   ugrid->SetPoints(points);
 
   // Create cells
@@ -263,14 +281,19 @@ vtkSmartPointer<vtkUnstructuredGrid> VTKWriter::convert_to_unstructured_grid(con
   return ugrid;
 }
 
-vtkSmartPointer<vtkPolyData> VTKWriter::convert_to_polydata(const MeshBase& mesh) {
+vtkSmartPointer<vtkPolyData> VTKWriter::convert_to_polydata(const MeshBase& mesh,
+                                                            const WriteOptions& opts) {
   setup_vtk_registry();
 
   vtkSmartPointer<vtkPolyData> polydata =
       vtkSmartPointer<vtkPolyData>::New();
 
   // Create points
-  auto points = create_vtk_points(mesh, Configuration::Reference);
+  const Configuration points_cfg =
+      (opts.use_current_coordinates_as_points && mesh.has_current_coords())
+          ? Configuration::Current
+          : Configuration::Reference;
+  auto points = create_vtk_points(mesh, points_cfg);
   polydata->SetPoints(points);
 
   // Create cells - for PolyData we need to separate by type
@@ -973,6 +996,31 @@ int VTKWriter::cellshape_to_vtk(const CellShape& shape) {
 
 void VTKWriter::write_field_data(const MeshBase& mesh, vtkDataSet* dataset,
                                 const WriteOptions& opts) {
+  if (auto* field_data = dataset ? dataset->GetFieldData() : nullptr) {
+    vtkSmartPointer<vtkIntArray> active_config = vtkSmartPointer<vtkIntArray>::New();
+    active_config->SetName("SVMPActiveConfiguration");
+    active_config->SetNumberOfComponents(1);
+    active_config->SetNumberOfTuples(1);
+    active_config->SetValue(0, mesh.active_configuration() == Configuration::Current ? 1 : 0);
+    field_data->AddArray(active_config);
+
+    vtkSmartPointer<vtkLongLongArray> revisions = vtkSmartPointer<vtkLongLongArray>::New();
+    revisions->SetName("SVMPMeshRevisionState");
+    revisions->SetNumberOfComponents(9);
+    revisions->SetNumberOfTuples(1);
+    const auto rev = mesh.revision_state();
+    revisions->SetComponent(0, 0, static_cast<double>(rev.geometry));
+    revisions->SetComponent(0, 1, static_cast<double>(rev.reference_geometry));
+    revisions->SetComponent(0, 2, static_cast<double>(rev.current_geometry));
+    revisions->SetComponent(0, 3, static_cast<double>(rev.topology));
+    revisions->SetComponent(0, 4, static_cast<double>(rev.ownership));
+    revisions->SetComponent(0, 5, static_cast<double>(rev.numbering));
+    revisions->SetComponent(0, 6, static_cast<double>(rev.field_layout));
+    revisions->SetComponent(0, 7, static_cast<double>(rev.labels));
+    revisions->SetComponent(0, 8, static_cast<double>(rev.active_configuration));
+    field_data->AddArray(revisions);
+  }
+
   // Write region labels
   write_region_labels(mesh, dataset);
 
@@ -1400,16 +1448,54 @@ void VTKWriter::write_point_data(const MeshBase& mesh, vtkDataSet* dataset,
 
   // Write current coordinates if available
   if (mesh.has_current_coords()) {
-    vtkSmartPointer<vtkDoubleArray> displacement = vtkSmartPointer<vtkDoubleArray>::New();
-    displacement->SetName("Displacement");
-    displacement->SetNumberOfComponents(3);
-    displacement->SetNumberOfTuples(static_cast<vtkIdType>(n_points));
-
     const std::vector<real_t>& X_ref = mesh.X_ref();
     const std::vector<real_t>& X_cur = mesh.X_cur();
     int spatial_dim = mesh.dim();
 
     const size_t n_base = mesh.n_vertices();
+    if (opts.write_current_coordinates) {
+      vtkSmartPointer<vtkDoubleArray> current_coordinates = vtkSmartPointer<vtkDoubleArray>::New();
+      current_coordinates->SetName("CurrentCoordinates");
+      current_coordinates->SetNumberOfComponents(3);
+      current_coordinates->SetNumberOfTuples(static_cast<vtkIdType>(n_points));
+
+      for (size_t i = 0; i < n_points; ++i) {
+        double xcur[3] = {0, 0, 0};
+        if (i < n_base) {
+          for (int d = 0; d < spatial_dim; ++d) {
+            xcur[d] = X_cur[i * spatial_dim + d];
+          }
+        }
+        current_coordinates->SetTuple(static_cast<vtkIdType>(i), xcur);
+      }
+
+      if (!coons_points.empty()) {
+        auto value_at_xcur = [&](vtkIdType pid, size_t comp) -> double {
+          const size_t v = static_cast<size_t>(pid);
+          if (v >= n_base) return 0.0;
+          if (comp >= static_cast<size_t>(spatial_dim)) return 0.0;
+          return static_cast<double>(X_cur[v * spatial_dim + comp]);
+        };
+
+        for (const auto& rec : coons_points) {
+          const size_t pid = static_cast<size_t>(rec.point_id);
+          if (pid >= n_points) continue;
+          double xcur[3] = {0.0, 0.0, 0.0};
+          for (size_t comp = 0; comp < 3; ++comp) {
+            xcur[comp] = coons_eval_component(rec, comp, value_at_xcur);
+          }
+          current_coordinates->SetTuple(static_cast<vtkIdType>(pid), xcur);
+        }
+      }
+
+      point_data->AddArray(current_coordinates);
+    }
+
+    vtkSmartPointer<vtkDoubleArray> displacement = vtkSmartPointer<vtkDoubleArray>::New();
+    displacement->SetName("Displacement");
+    displacement->SetNumberOfComponents(3);
+    displacement->SetNumberOfTuples(static_cast<vtkIdType>(n_points));
+
     for (size_t i = 0; i < n_points; ++i) {
       double disp[3] = {0, 0, 0};
       if (i < n_base) {

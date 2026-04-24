@@ -40,6 +40,7 @@
 #include "../Boundary/BoundaryKey.h"
 #include "../IO/GmshReader.h"
 #include "../IO/MFEMReader.h"
+#include "../IO/MovingMeshRestart.h"
 
 #ifdef MESH_HAS_VTK
 #include "../IO/VTKReader.h"
@@ -2070,6 +2071,7 @@ void ensure_meshbase_io_registered() {
 #endif
         GmshReader::register_with_mesh_io();
         MFEMReader::register_with_mesh_io();
+        moving_mesh_restart::register_with_mesh();
     });
 }
 } // namespace

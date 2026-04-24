@@ -146,6 +146,16 @@ private:
   static void read_field_data(vtkDataSet* dataset, MeshBase& mesh);
 
   /**
+   * @brief Restore moving-mesh current coordinates from VTK point-data arrays.
+   */
+  static void restore_current_coordinates(vtkDataSet* dataset, MeshBase& mesh);
+
+  /**
+   * @brief Restore active configuration metadata when written by VTKWriter.
+   */
+  static void restore_active_configuration(vtkDataSet* dataset, MeshBase& mesh);
+
+  /**
    * @brief Read cell data arrays
    */
   static void read_cell_data(vtkDataSet* dataset, MeshBase& mesh);

@@ -56,6 +56,14 @@
 namespace svmp {
 
 /**
+ * @brief Coordinate provenance domains tracked for moving-mesh transfer.
+ */
+enum class CoordinateProvenanceDomain : std::uint8_t {
+  Reference,
+  Current
+};
+
+/**
  * @brief Provenance record for a newly-created vertex
  *
  * For linear (P1/Q1) nodal fields, this is sufficient to drive prolongation and
@@ -65,6 +73,8 @@ namespace svmp {
 struct VertexProvenanceRecord {
   gid_t new_vertex_gid = INVALID_GID;
   std::vector<std::pair<gid_t, double>> parent_vertex_weights;
+  std::vector<std::pair<gid_t, double>> reference_coordinate_weights;
+  std::vector<std::pair<gid_t, double>> current_coordinate_weights;
 };
 
 /**
@@ -91,4 +101,3 @@ struct RefinementDelta {
 } // namespace svmp
 
 #endif // SVMP_REFINEMENT_DELTA_H
-

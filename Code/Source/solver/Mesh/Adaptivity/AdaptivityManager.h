@@ -33,6 +33,7 @@
 
 #include "Options.h"
 #include "ErrorEstimator.h"
+#include "FieldTransfer.h"
 #include "Marker.h"
 #include "RefinementDelta.h"
 #include "HighOrderEmbedding.h"
@@ -47,7 +48,6 @@ namespace svmp {
 class MeshBase;
 class MeshFields;
 class RefinementRule;
-class FieldTransfer;
 class QualityChecker;
 class ConformityEnforcer;
 class AdaptivityFEInterface;
@@ -121,6 +121,9 @@ struct AdaptivityResult {
 
   /** Warning messages */
   std::vector<std::string> warning_messages;
+
+  /** Field-transfer statistics and moving-mesh diagnostics */
+  TransferStats transfer_stats;
 
   /**
    * @brief Generate summary report

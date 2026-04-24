@@ -31,6 +31,7 @@
 #include "FieldTransfer.h"
 #include "../Core/MeshBase.h"
 #include "../Fields/MeshFields.h"
+#include "../Motion/MotionFields.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -38,6 +39,7 @@
 #include <limits>
 #include <numeric>
 #include <stdexcept>
+#include <set>
 #include <type_traits>
 #include <unordered_set>
 
@@ -61,6 +63,83 @@ bool should_transfer_field_name(const AdaptivityOptions& options, const std::str
     if (n == name) return false;
   }
   return true;
+}
+
+void record_motion_transfer(TransferStats& stats,
+                            const std::string& name,
+                            size_t entity_count,
+                            size_t components) {
+  if (motion::is_standard_motion_field_name(name)) {
+    stats.motion_values_transferred[name] = entity_count * components;
+  }
+}
+
+template <typename ScalarT>
+void enforce_component_sum_conservation(const MeshBase& old_mesh,
+                                        const MeshBase& new_mesh,
+                                        const FieldHandle& old_h,
+                                        const FieldHandle& new_h,
+                                        const std::string& name,
+                                        double tolerance,
+                                        TransferStats& stats) {
+  if constexpr (!std::is_floating_point_v<ScalarT>) {
+    (void)old_mesh;
+    (void)new_mesh;
+    (void)old_h;
+    (void)new_h;
+    (void)name;
+    (void)tolerance;
+    (void)stats;
+    return;
+  } else {
+    const size_t old_n = MeshFields::field_entity_count(old_mesh, old_h);
+    const size_t new_n = MeshFields::field_entity_count(new_mesh, new_h);
+    const size_t components = MeshFields::field_components(old_mesh, old_h);
+    if (components == 0u || new_n == 0u) {
+      return;
+    }
+
+    const auto* old_data = MeshFields::field_data_as<const ScalarT>(old_mesh, old_h);
+    auto* new_data = MeshFields::field_data_as<ScalarT>(const_cast<MeshBase&>(new_mesh), new_h);
+    if (!old_data || !new_data) {
+      stats.diagnostics.push_back("Conservative transfer skipped for field '" + name +
+                                  "' because field data were unavailable");
+      return;
+    }
+
+    double max_error = 0.0;
+    for (size_t c = 0; c < components; ++c) {
+      long double old_sum = 0.0L;
+      long double new_sum = 0.0L;
+      for (size_t i = 0; i < old_n; ++i) {
+        old_sum += static_cast<long double>(old_data[i * components + c]);
+      }
+      for (size_t i = 0; i < new_n; ++i) {
+        new_sum += static_cast<long double>(new_data[i * components + c]);
+      }
+
+      if (std::abs(static_cast<double>(new_sum)) > tolerance) {
+        const long double scale = old_sum / new_sum;
+        for (size_t i = 0; i < new_n; ++i) {
+          new_data[i * components + c] =
+              static_cast<ScalarT>(static_cast<long double>(new_data[i * components + c]) * scale);
+        }
+      } else {
+        const long double fill = old_sum / static_cast<long double>(new_n);
+        for (size_t i = 0; i < new_n; ++i) {
+          new_data[i * components + c] = static_cast<ScalarT>(fill);
+        }
+      }
+
+      long double corrected_sum = 0.0L;
+      for (size_t i = 0; i < new_n; ++i) {
+        corrected_sum += static_cast<long double>(new_data[i * components + c]);
+      }
+      max_error = std::max(max_error,
+                           std::abs(static_cast<double>(corrected_sum - old_sum)));
+    }
+    stats.conservation_errors[name] = max_error;
+  }
 }
 
 template <typename T>
@@ -384,9 +463,11 @@ TransferStats LinearInterpolationTransfer::transfer(
   TransferStats stats;
 
   const std::vector<EntityKind> kinds = {EntityKind::Vertex, EntityKind::Volume};
+  std::set<std::string> seen_fields;
   for (EntityKind kind : kinds) {
     for (const auto& name : old_mesh.field_names(kind)) {
       if (!should_transfer_field_name(options, name)) continue;
+      seen_fields.insert(name);
 
       const FieldHandle old_h = MeshFields::get_field_handle(old_mesh, kind, name);
       if (old_h.id == 0) continue;
@@ -408,10 +489,16 @@ TransferStats LinearInterpolationTransfer::transfer(
         switch (type) {
           case FieldScalarType::Float64:
             transfer_vertex_numeric_by_weights_or_gid<double>(old_mesh, writable_new_mesh, old_h, new_h, parent_child, /*round_integral=*/false);
+            if (options.preserve_integrals) {
+              enforce_component_sum_conservation<double>(old_mesh, writable_new_mesh, old_h, new_h, name, 1.0e-12, stats);
+            }
             stats.num_prolongations++;
             break;
           case FieldScalarType::Float32:
             transfer_vertex_numeric_by_weights_or_gid<float>(old_mesh, writable_new_mesh, old_h, new_h, parent_child, /*round_integral=*/false);
+            if (options.preserve_integrals) {
+              enforce_component_sum_conservation<float>(old_mesh, writable_new_mesh, old_h, new_h, name, 1.0e-6, stats);
+            }
             stats.num_prolongations++;
             break;
           case FieldScalarType::Int32:
@@ -435,10 +522,16 @@ TransferStats LinearInterpolationTransfer::transfer(
         switch (type) {
           case FieldScalarType::Float64:
             transfer_cell_numeric<double>(old_mesh, writable_new_mesh, old_h, new_h, parent_child, /*average_for_coarsening=*/true);
+            if (options.preserve_integrals) {
+              enforce_component_sum_conservation<double>(old_mesh, writable_new_mesh, old_h, new_h, name, 1.0e-12, stats);
+            }
             stats.num_restrictions++;
             break;
           case FieldScalarType::Float32:
             transfer_cell_numeric<float>(old_mesh, writable_new_mesh, old_h, new_h, parent_child, /*average_for_coarsening=*/true);
+            if (options.preserve_integrals) {
+              enforce_component_sum_conservation<float>(old_mesh, writable_new_mesh, old_h, new_h, name, 1.0e-6, stats);
+            }
             stats.num_restrictions++;
             break;
           case FieldScalarType::Int32:
@@ -460,7 +553,18 @@ TransferStats LinearInterpolationTransfer::transfer(
         }
       }
 
+      record_motion_transfer(stats,
+                             name,
+                             MeshFields::field_entity_count(writable_new_mesh, new_h),
+                             components);
       stats.num_fields++;
+    }
+  }
+
+  for (const auto& name : options.transfer_fields) {
+    if (seen_fields.find(name) == seen_fields.end()) {
+      stats.diagnostics.push_back("Requested transfer field '" + name +
+                                  "' was not found on the source mesh");
     }
   }
 
@@ -615,7 +719,9 @@ TransferStats ConservativeTransfer::transfer(
     const AdaptivityOptions& options) const {
   LinearInterpolationTransfer::Config cfg;
   LinearInterpolationTransfer linear(cfg);
-  return linear.transfer(old_mesh, new_mesh, old_fields, new_fields, parent_child, options);
+  AdaptivityOptions conservative_options = options;
+  conservative_options.preserve_integrals = true;
+  return linear.transfer(old_mesh, new_mesh, old_fields, new_fields, parent_child, conservative_options);
 }
 
 void ConservativeTransfer::prolongate(
@@ -757,9 +863,11 @@ TransferStats InjectionTransfer::transfer(
   TransferStats stats;
 
   const std::vector<EntityKind> kinds = {EntityKind::Vertex, EntityKind::Volume};
+  std::set<std::string> seen_fields;
   for (EntityKind kind : kinds) {
     for (const auto& name : old_mesh.field_names(kind)) {
       if (!should_transfer_field_name(options, name)) continue;
+      seen_fields.insert(name);
 
       const FieldHandle old_h = MeshFields::get_field_handle(old_mesh, kind, name);
       if (old_h.id == 0) continue;
@@ -817,7 +925,18 @@ TransferStats InjectionTransfer::transfer(
         }
       }
 
+      record_motion_transfer(stats,
+                             name,
+                             MeshFields::field_entity_count(writable_new_mesh, new_h),
+                             components);
       stats.num_fields++;
+    }
+  }
+
+  for (const auto& name : options.transfer_fields) {
+    if (seen_fields.find(name) == seen_fields.end()) {
+      stats.diagnostics.push_back("Requested transfer field '" + name +
+                                  "' was not found on the source mesh");
     }
   }
 

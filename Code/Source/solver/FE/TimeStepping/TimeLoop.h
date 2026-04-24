@@ -90,6 +90,19 @@ struct TimeLoopOptions {
 
 struct TimeLoopCallbacks {
     std::function<void(const TimeHistory&)> on_step_start{};
+    /**
+     * @brief Optional hook run after step-start history reset and before the physics solve.
+     *
+     * This is the documented moving-domain insertion point for prescribed/ALE
+     * mesh motion at the accepted time level t + dt. The hook runs before
+     * `TransientSystem::beginTimeStep()` and before nonlinear iteration/assembly,
+     * so geometry-change notifications can invalidate FE caches before use.
+     * Remeshing, checkpoint, and output remain later application responsibilities:
+     * they should observe the accepted geometry after the nonlinear solve commits.
+     *
+     * Return false to reject the attempted step before physics assembly.
+     */
+    std::function<bool(TimeHistory&, double solve_time, double dt)> on_before_physics_solve{};
     std::function<void(const TimeHistory&, const NewtonReport&)> on_nonlinear_done{};
     std::function<void(const TimeHistory&)> on_step_accepted{};
 

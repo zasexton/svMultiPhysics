@@ -11,6 +11,7 @@
 
 #include "Systems/SystemAssembly.h"
 #include "Systems/AuxiliaryQuadratureLayout.h"
+#include "Systems/FEAdaptivityTransfer.h"
 #include "Systems/OperatorBackends.h"
 #include "Systems/BoundaryReductionService.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
@@ -68,6 +69,8 @@
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #include "Assembly/MeshAccess.h"
+#include "Mesh/Adaptivity/Options.h"
+#include "Mesh/Core/MeshBase.h"
 #include "Mesh/Core/InterfaceMesh.h"
 #include "Mesh/Fields/MeshFields.h"
 #include "Mesh/Motion/MotionFields.h"
@@ -2244,6 +2247,314 @@ std::size_t FESystem::syncBoundMeshMotionFieldsToState(assembly::GlobalSystemVie
     }
 
     return values_written;
+}
+
+FEAdaptedStateTransferResult FESystem::onMeshAdapted(
+    const svmp::MeshBase& old_mesh,
+    const svmp::MeshBase& new_mesh,
+    const svmp::RefinementDelta& delta,
+    const svmp::AdaptivityOptions& options,
+    const FEAdaptedStateTransferRequest& request)
+{
+    (void)options;
+    requireSetup();
+
+    const bool transfer_solution =
+        request.transferred_solution != nullptr && !request.solution.empty();
+    const bool transfer_previous =
+        request.transferred_previous_solution != nullptr && !request.previous_solution.empty();
+    const bool transfer_previous2 =
+        request.transferred_previous_solution2 != nullptr && !request.previous_solution2.empty();
+    const bool any_transfer = transfer_solution || transfer_previous || transfer_previous2;
+
+    FE_THROW_IF(any_transfer && !request.rebuild_setup, InvalidArgumentException,
+                "FESystem::onMeshAdapted: FE state transfer requires rebuild_setup=true");
+
+    FEAdaptedStateTransferResult result;
+    result.layout_before = feLayoutRevisionState();
+
+    struct PendingFieldTransfer {
+        FieldId field{INVALID_FIELD_ID};
+        int components{1};
+        std::vector<Real> solution{};
+        std::vector<Real> previous{};
+        std::vector<Real> previous2{};
+        bool has_solution{false};
+        bool has_previous{false};
+        bool has_previous2{false};
+    };
+
+    std::vector<PendingFieldTransfer> pending;
+    pending.reserve(field_registry_.size());
+
+    const auto old_total_dofs = static_cast<std::size_t>(dof_handler_.getNumDofs());
+
+    auto extract_vertex_values = [&](const FieldRecord& rec,
+                                     std::span<const Real> state,
+                                     std::vector<Real>& vertex_values,
+                                     const char* label) {
+        FE_THROW_IF(state.size() < old_total_dofs, InvalidArgumentException,
+                    std::string("FESystem::onMeshAdapted: ") + label +
+                        " vector is smaller than the pre-adaptation DOF layout");
+
+        const auto field_idx = static_cast<std::size_t>(rec.id);
+        FE_THROW_IF(field_idx >= field_dof_handlers_.size() ||
+                        field_idx >= field_dof_offsets_.size(),
+                    InvalidStateException,
+                    "FESystem::onMeshAdapted: invalid field layout for '" + rec.name + "'");
+
+        const auto* entity_map = field_dof_handlers_[field_idx].getEntityDofMap();
+        FE_THROW_IF(entity_map == nullptr, InvalidStateException,
+                    "FESystem::onMeshAdapted: field '" + rec.name +
+                        "' has no entity DOF map for nodal transfer");
+        FE_THROW_IF(static_cast<std::size_t>(entity_map->numVertices()) < old_mesh.n_vertices(),
+                    InvalidStateException,
+                    "FESystem::onMeshAdapted: field '" + rec.name +
+                        "' does not cover every old mesh vertex");
+
+        const auto components = static_cast<std::size_t>(std::max(1, rec.components));
+        vertex_values.assign(old_mesh.n_vertices() * components, Real(0));
+        const GlobalIndex offset = field_dof_offsets_[field_idx];
+        for (std::size_t v = 0; v < old_mesh.n_vertices(); ++v) {
+            const auto vertex_dofs = entity_map->getVertexDofs(static_cast<GlobalIndex>(v));
+            FE_THROW_IF(vertex_dofs.size() < components, InvalidStateException,
+                        "FESystem::onMeshAdapted: field '" + rec.name +
+                            "' vertex DOF component count is smaller than the field component count");
+            for (std::size_t c = 0; c < components; ++c) {
+                const GlobalIndex dof = offset + vertex_dofs[c];
+                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= state.size(),
+                            InvalidArgumentException,
+                            "FESystem::onMeshAdapted: " + std::string(label) +
+                                " vector does not contain a required DOF for field '" +
+                                rec.name + "'");
+                vertex_values[v * components + c] = state[static_cast<std::size_t>(dof)];
+            }
+        }
+    };
+
+    auto prepare_transfer = [&](const FieldRecord& rec,
+                                std::span<const Real> source,
+                                std::vector<Real>& target_values,
+                                const char* label) {
+        std::vector<Real> old_values;
+        extract_vertex_values(rec, source, old_values, label);
+        target_values.assign(new_mesh.n_vertices() * static_cast<std::size_t>(std::max(1, rec.components)),
+                             Real(0));
+        const auto diag = transferNodalFieldByVertexProvenance(old_mesh,
+                                                               new_mesh,
+                                                               delta,
+                                                               std::max(1, rec.components),
+                                                               old_values,
+                                                               target_values,
+                                                               request.field_transfer_options);
+        result.values_transferred += diag.values_transferred;
+        result.diagnostics.insert(result.diagnostics.end(),
+                                  diag.diagnostics.begin(),
+                                  diag.diagnostics.end());
+        if (!diag.success) {
+            result.diagnostics.push_back("Nodal transfer for field '" + rec.name +
+                                         "' reported incomplete diagnostics");
+        }
+    };
+
+    if (any_transfer) {
+        for (const auto& rec : field_registry_.records()) {
+            if (rec.scope != FieldScope::VolumeCell) {
+                continue;
+            }
+            const auto field_idx = static_cast<std::size_t>(rec.id);
+            if (field_idx >= field_dof_handlers_.size()) {
+                continue;
+            }
+            const auto* entity_map = field_dof_handlers_[field_idx].getEntityDofMap();
+            if (entity_map == nullptr ||
+                static_cast<std::size_t>(entity_map->numVertices()) < old_mesh.n_vertices()) {
+                result.diagnostics.push_back("Skipping field '" + rec.name +
+                                             "' during adaptation transfer because it has no complete vertex DOF layout");
+                continue;
+            }
+
+            PendingFieldTransfer item;
+            item.field = rec.id;
+            item.components = std::max(1, rec.components);
+            if (transfer_solution) {
+                prepare_transfer(rec, request.solution, item.solution, "solution");
+                item.has_solution = true;
+            }
+            if (transfer_previous) {
+                prepare_transfer(rec, request.previous_solution, item.previous, "previous solution");
+                item.has_previous = true;
+            }
+            if (transfer_previous2) {
+                prepare_transfer(rec, request.previous_solution2, item.previous2, "second previous solution");
+                item.has_previous2 = true;
+            }
+            if (item.has_solution || item.has_previous || item.has_previous2) {
+                pending.push_back(std::move(item));
+            }
+        }
+    }
+
+    bool auxiliary_transfer_complete = true;
+    if (request.transfer_auxiliary_state && auxiliary_state_manager_) {
+        const auto block_names = auxiliary_state_manager_->state().blockNames();
+        for (const auto& block_name : block_names) {
+            const auto& spec = auxiliary_state_manager_->getSpec(block_name);
+            const auto& block = auxiliary_state_manager_->getBlock(block_name);
+            std::optional<std::size_t> new_entity_count;
+
+            switch (spec.scope) {
+                case AuxiliaryStateScope::Global:
+                case AuxiliaryStateScope::Boundary:
+                case AuxiliaryStateScope::Region:
+                    new_entity_count = block.entityCount();
+                    break;
+                case AuxiliaryStateScope::Node:
+                    new_entity_count = new_mesh.n_vertices();
+                    break;
+                case AuxiliaryStateScope::Cell:
+                    new_entity_count = new_mesh.n_cells();
+                    break;
+                case AuxiliaryStateScope::Facet:
+                    new_entity_count = new_mesh.n_faces();
+                    break;
+                case AuxiliaryStateScope::QuadraturePoint:
+                    if (spec.transfer_policy == AuxiliaryTransferPolicy::None) {
+                        new_entity_count = block.entityCount();
+                    } else {
+                        auxiliary_transfer_complete = false;
+                        result.diagnostics.push_back(
+                            "Auxiliary quadrature-point block '" + block_name +
+                            "' requires a remesh-specific quadrature transfer outside the generic Phase 10 path");
+                    }
+                    break;
+            }
+
+            if (!new_entity_count.has_value()) {
+                continue;
+            }
+
+            if (spec.transfer_policy == AuxiliaryTransferPolicy::None) {
+                auxiliary_state_manager_->reinitializeBlock(block_name, *new_entity_count);
+                result.diagnostics.push_back(
+                    "Auxiliary block '" + block_name +
+                    "' was reinitialized because its transfer policy is None");
+            } else {
+                auxiliary_state_manager_->transferBlock(block_name, *new_entity_count);
+                result.diagnostics.push_back(
+                    "Auxiliary block '" + block_name +
+                    "' was transferred through its registered physics-agnostic transfer hook or default resize policy");
+            }
+        }
+    }
+
+    const bool had_boundary_services = !boundary_reduction_services_.empty();
+    const bool had_interface_meshes = !interface_meshes_.empty();
+    if (had_boundary_services) {
+        boundary_reduction_services_.clear();
+        result.diagnostics.push_back(
+            "Boundary reduction services were invalidated because the mesh topology changed");
+    }
+    if (had_interface_meshes) {
+        interface_meshes_.clear();
+        result.diagnostics.push_back(
+            "Interface meshes were invalidated because remeshing changes interface entity identity");
+    }
+
+    notifyMeshTopologyLayoutChanged();
+    if (request.rebuild_setup) {
+        setup(request.setup_options);
+        result.dof_handler_rebuilt = true;
+        result.constraint_layout_rebuilt = true;
+        result.sparsity_rebuilt = true;
+    }
+
+    auto scatter_vertex_values = [&](const std::vector<Real>& vertex_values,
+                                     const PendingFieldTransfer& item,
+                                     std::vector<Real>& state_out,
+                                     const char* label) {
+        const auto field_idx = static_cast<std::size_t>(item.field);
+        FE_THROW_IF(field_idx >= field_dof_handlers_.size() ||
+                        field_idx >= field_dof_offsets_.size(),
+                    InvalidStateException,
+                    "FESystem::onMeshAdapted: invalid post-adaptation field layout");
+
+        const auto* entity_map = field_dof_handlers_[field_idx].getEntityDofMap();
+        FE_THROW_IF(entity_map == nullptr, InvalidStateException,
+                    "FESystem::onMeshAdapted: post-adaptation field has no entity DOF map");
+        FE_THROW_IF(static_cast<std::size_t>(entity_map->numVertices()) < new_mesh.n_vertices(),
+                    InvalidStateException,
+                    "FESystem::onMeshAdapted: post-adaptation field does not cover every new mesh vertex");
+
+        const auto components = static_cast<std::size_t>(std::max(1, item.components));
+        FE_THROW_IF(vertex_values.size() < new_mesh.n_vertices() * components,
+                    InvalidStateException,
+                    "FESystem::onMeshAdapted: transferred vertex data are incomplete");
+
+        const GlobalIndex offset = field_dof_offsets_[field_idx];
+        for (std::size_t v = 0; v < new_mesh.n_vertices(); ++v) {
+            const auto vertex_dofs = entity_map->getVertexDofs(static_cast<GlobalIndex>(v));
+            FE_THROW_IF(vertex_dofs.size() < components, InvalidStateException,
+                        "FESystem::onMeshAdapted: post-adaptation vertex DOF component count mismatch");
+            for (std::size_t c = 0; c < components; ++c) {
+                const GlobalIndex dof = offset + vertex_dofs[c];
+                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= state_out.size(),
+                            InvalidStateException,
+                            "FESystem::onMeshAdapted: " + std::string(label) +
+                                " output vector is smaller than the rebuilt DOF layout");
+                state_out[static_cast<std::size_t>(dof)] = vertex_values[v * components + c];
+            }
+        }
+    };
+
+    const auto new_total_dofs = static_cast<std::size_t>(dof_handler_.getNumDofs());
+    if (transfer_solution) {
+        request.transferred_solution->assign(new_total_dofs, Real(0));
+    }
+    if (transfer_previous) {
+        request.transferred_previous_solution->assign(new_total_dofs, Real(0));
+    }
+    if (transfer_previous2) {
+        request.transferred_previous_solution2->assign(new_total_dofs, Real(0));
+    }
+
+    for (const auto& item : pending) {
+        if (transfer_solution && item.has_solution) {
+            scatter_vertex_values(item.solution, item, *request.transferred_solution, "solution");
+        }
+        if (transfer_previous && item.has_previous) {
+            scatter_vertex_values(item.previous, item, *request.transferred_previous_solution, "previous solution");
+        }
+        if (transfer_previous2 && item.has_previous2) {
+            scatter_vertex_values(item.previous2, item, *request.transferred_previous_solution2, "second previous solution");
+        }
+    }
+
+    result.solution_transferred = transfer_solution;
+    result.previous_solution_transferred = transfer_previous;
+    result.previous_solution2_transferred = transfer_previous2;
+    result.auxiliary_state_transfer_handled = request.transfer_auxiliary_state && auxiliary_transfer_complete;
+    result.material_state_transfer_handled = request.transfer_material_state;
+    result.boundary_coupling_state_transfer_handled = request.transfer_boundary_and_coupling_state;
+    if (request.transfer_auxiliary_state) {
+        if (!auxiliary_state_manager_) {
+            result.diagnostics.push_back(
+                "No auxiliary state manager was present during adaptation");
+        } else {
+            result.diagnostics.push_back(
+                "Auxiliary state layout was invalidated and rebuilt through setup(); value remap used registered block transfer hooks where available");
+        }
+    }
+    if (request.transfer_material_state) {
+        result.diagnostics.push_back(
+            "Material/global kernel state providers were invalidated and rebuilt through setup(); constitutive history transformations remain provider-owned");
+    }
+    if (request.transfer_boundary_and_coupling_state) {
+        result.diagnostics.push_back(
+            "Boundary/coupling state was invalidated at the topology-change boundary; callers must rebuild mesh-dependent coupling operators after remesh");
+    }
+    result.layout_after = feLayoutRevisionState();
+    return result;
 }
 
 void FESystem::notifyMeshGeometryAdvanced()

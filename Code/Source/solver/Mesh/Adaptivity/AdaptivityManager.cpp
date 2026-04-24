@@ -135,6 +135,45 @@ std::vector<gid_t> sorted_unique(std::vector<gid_t> v) {
   return v;
 }
 
+std::array<real_t, 3> coordinate_from_storage(const std::vector<real_t>& coords,
+                                              size_t vertex,
+                                              int dim) {
+  std::array<real_t, 3> xyz{0.0, 0.0, 0.0};
+  const size_t base = vertex * static_cast<size_t>(dim);
+  if (base + static_cast<size_t>(dim) > coords.size()) {
+    return xyz;
+  }
+  for (int d = 0; d < dim && d < 3; ++d) {
+    xyz[static_cast<size_t>(d)] = coords[base + static_cast<size_t>(d)];
+  }
+  return xyz;
+}
+
+std::array<real_t, 3> interpolate_coordinate(
+    const std::vector<real_t>& coords,
+    int dim,
+    const std::vector<std::pair<size_t, double>>& parent_local_weights,
+    const std::vector<index_t>& parent_cell_vertices,
+    const std::array<real_t, 3>& fallback) {
+  if (parent_local_weights.empty()) {
+    return fallback;
+  }
+
+  std::array<real_t, 3> xyz{0.0, 0.0, 0.0};
+  bool used = false;
+  for (const auto& [li, w] : parent_local_weights) {
+    if (li >= parent_cell_vertices.size()) continue;
+    const index_t v = parent_cell_vertices[li];
+    if (v < 0) continue;
+    const auto p = coordinate_from_storage(coords, static_cast<size_t>(v), dim);
+    for (int d = 0; d < dim && d < 3; ++d) {
+      xyz[static_cast<size_t>(d)] += static_cast<real_t>(w) * p[static_cast<size_t>(d)];
+    }
+    used = true;
+  }
+  return used ? xyz : fallback;
+}
+
 int default_num_corners(CellFamily family) {
   switch (family) {
     case CellFamily::Point:   return 1;
@@ -413,6 +452,10 @@ std::string AdaptivityResult::summary() const {
   ss << "  Coarsened: " << num_coarsened << "\n";
   ss << "  Min quality: " << min_quality << "\n";
   ss << "  Avg quality: " << avg_quality << "\n";
+  ss << "  Fields transferred: " << transfer_stats.num_fields << "\n";
+  if (!transfer_stats.motion_values_transferred.empty()) {
+    ss << "  Motion fields transferred: " << transfer_stats.motion_values_transferred.size() << "\n";
+  }
   return ss.str();
 }
 
@@ -555,11 +598,27 @@ AdaptivityResult AdaptivityManager::refine(MeshBase& mesh,
     }
   }
 
+  (void)fields;
+
   const int dim = (mesh.dim() > 0) ? mesh.dim() : 3;
+  const bool old_has_current_coords = mesh.has_current_coords();
+  const Configuration old_active_config = mesh.active_configuration();
+  const auto& old_Xref = mesh.X_ref();
+  std::vector<real_t> old_Xcur;
+  if (old_has_current_coords) {
+    old_Xcur = mesh.X_cur();
+    if (old_Xcur.size() != old_Xref.size()) {
+      result.error_messages.push_back("Refine(): current-coordinate size mismatch");
+      result.success = false;
+      return result;
+    }
+  }
+
   MeshBase new_mesh(dim);
 
   // Copy existing vertices (preserve order).
-  std::vector<real_t> new_Xref = mesh.X_ref();
+  std::vector<real_t> new_Xref = old_Xref;
+  std::vector<real_t> new_Xcur = old_Xcur;
   std::vector<gid_t> new_vgids = mesh.vertex_gids();
   gid_t next_v_gid = max_gid_or(new_vgids, 0) + 1;
 
@@ -592,7 +651,7 @@ AdaptivityResult AdaptivityManager::refine(MeshBase& mesh,
 
   auto ensure_new_vertex = [&](const std::vector<std::pair<size_t, double>>& parent_local_weights,
                                const std::vector<index_t>& parent_cell_vertices,
-                               const std::array<real_t, 3>& xyz) -> index_t {
+                               const std::array<real_t, 3>& fallback_ref) -> index_t {
     std::vector<std::pair<gid_t, double>> weights_gid;
     weights_gid.reserve(parent_local_weights.size());
     std::vector<std::pair<size_t, double>> weights_old_index;
@@ -617,15 +676,37 @@ AdaptivityResult AdaptivityManager::refine(MeshBase& mesh,
     }
 
     const index_t new_vidx = static_cast<index_t>(new_vgids.size());
+    const auto xyz_ref = interpolate_coordinate(old_Xref,
+                                                dim,
+                                                parent_local_weights,
+                                                parent_cell_vertices,
+                                                fallback_ref);
     for (int d = 0; d < dim; ++d) {
-      new_Xref.push_back(xyz[static_cast<size_t>(d)]);
+      new_Xref.push_back(xyz_ref[static_cast<size_t>(d)]);
+    }
+    if (old_has_current_coords) {
+      const auto xyz_cur = interpolate_coordinate(old_Xcur,
+                                                  dim,
+                                                  parent_local_weights,
+                                                  parent_cell_vertices,
+                                                  xyz_ref);
+      for (int d = 0; d < dim; ++d) {
+        new_Xcur.push_back(xyz_cur[static_cast<size_t>(d)]);
+      }
     }
     const gid_t new_gid = next_v_gid++;
     new_vgids.push_back(new_gid);
     new_vertex_by_key.emplace(key, new_vidx);
 
     MeshLabels::record_vertex_provenance_gid(mesh, new_gid, weights_gid);
-    delta->new_vertices.push_back(VertexProvenanceRecord{new_gid, weights_gid});
+    VertexProvenanceRecord record;
+    record.new_vertex_gid = new_gid;
+    record.parent_vertex_weights = weights_gid;
+    record.reference_coordinate_weights = weights_gid;
+    if (old_has_current_coords) {
+      record.current_coordinate_weights = weights_gid;
+    }
+    delta->new_vertices.push_back(std::move(record));
     if (!weights_old_index.empty()) {
       parent_child.child_vertex_weights[static_cast<size_t>(new_vidx)] = weights_old_index;
     }
@@ -674,7 +755,8 @@ AdaptivityResult AdaptivityManager::refine(MeshBase& mesh,
       std::vector<std::array<real_t, 3>> corner_xyz;
       corner_xyz.reserve(static_cast<size_t>(n_corners));
       for (int i = 0; i < n_corners; ++i) {
-        corner_xyz.push_back(mesh.get_vertex_coords(parent_verts[static_cast<size_t>(i)]));
+        corner_xyz.push_back(coordinate_from_storage(
+            old_Xref, static_cast<size_t>(parent_verts[static_cast<size_t>(i)]), dim));
       }
 
       // Apply refinement rule.
@@ -914,7 +996,8 @@ AdaptivityResult AdaptivityManager::refine(MeshBase& mesh,
               const size_t j = kv.first;
               if (j >= parent_verts.size()) continue;
               const double Nj = kv.second;
-              const auto pj = mesh.get_vertex_coords(parent_verts[static_cast<size_t>(j)]);
+              const auto pj = coordinate_from_storage(
+                  old_Xref, static_cast<size_t>(parent_verts[static_cast<size_t>(j)]), dim);
               xyz[0] += static_cast<real_t>(Nj) * pj[0];
               xyz[1] += static_cast<real_t>(Nj) * pj[1];
               xyz[2] += static_cast<real_t>(Nj) * pj[2];
@@ -991,7 +1074,8 @@ AdaptivityResult AdaptivityManager::refine(MeshBase& mesh,
               const size_t j = kv.first;
               if (j >= parent_verts.size()) continue;
               const double Nj = kv.second;
-              const auto pj = mesh.get_vertex_coords(parent_verts[static_cast<size_t>(j)]);
+              const auto pj = coordinate_from_storage(
+                  old_Xref, static_cast<size_t>(parent_verts[static_cast<size_t>(j)]), dim);
               xyz[0] += static_cast<real_t>(Nj) * pj[0];
               xyz[1] += static_cast<real_t>(Nj) * pj[1];
               xyz[2] += static_cast<real_t>(Nj) * pj[2];
@@ -1049,6 +1133,14 @@ AdaptivityResult AdaptivityManager::refine(MeshBase& mesh,
   new_mesh.set_vertex_gids(std::move(new_vgids));
   new_mesh.set_cell_gids(std::move(new_cgids));
   new_mesh.finalize();
+  if (old_has_current_coords) {
+    new_mesh.set_current_coords(new_Xcur);
+  }
+  if (old_active_config == Configuration::Current && old_has_current_coords) {
+    new_mesh.use_current_configuration();
+  } else {
+    new_mesh.use_reference_configuration();
+  }
 
   // Restore per-cell metadata.
   new_mesh.set_cell_refinement_levels(std::move(new_levels));
@@ -1075,11 +1167,13 @@ AdaptivityResult AdaptivityManager::refine(MeshBase& mesh,
     }
   }
 
-  // Transfer fields if requested.
-  if (fields && field_transfer_) {
+  // Transfer attached fields. This includes standard moving-mesh fields even
+  // when callers do not pass a separate MeshFields facade.
+  if (field_transfer_) {
     MeshFields old_fields;
     MeshFields new_fields;
-    (void)field_transfer_->transfer(mesh, new_mesh, old_fields, new_fields, parent_child, options_);
+    result.transfer_stats =
+        field_transfer_->transfer(mesh, new_mesh, old_fields, new_fields, parent_child, options_);
   }
 
   // FE callback with refinement delta (GID-based).
@@ -1100,6 +1194,7 @@ AdaptivityResult AdaptivityManager::refine(MeshBase& mesh,
 AdaptivityResult AdaptivityManager::coarsen(MeshBase& mesh,
                                            const std::vector<bool>& marks,
                                            MeshFields* fields) {
+  (void)fields;
   AdaptivityResult result;
   result.initial_cell_count = mesh.n_cells();
   result.initial_vertex_count = mesh.n_vertices();
@@ -1238,12 +1333,25 @@ AdaptivityResult AdaptivityManager::coarsen(MeshBase& mesh,
     parents.push_back(std::move(rp));
   }
 
+  const int dim = (mesh.dim() > 0) ? mesh.dim() : 3;
+  const bool old_has_current_coords = mesh.has_current_coords();
+  const Configuration old_active_config = mesh.active_configuration();
+  const auto& old_Xref = mesh.X_ref();
+  std::vector<real_t> old_Xcur;
+  if (old_has_current_coords) {
+    old_Xcur = mesh.X_cur();
+    if (old_Xcur.size() != old_Xref.size()) {
+      result.error_messages.push_back("Coarsen(): current-coordinate size mismatch");
+      result.success = false;
+      return result;
+    }
+  }
+
   // Determine required vertices (by GID).
   std::unordered_map<gid_t, index_t> new_vidx_by_gid;
   std::vector<real_t> new_Xref;
+  std::vector<real_t> new_Xcur;
   std::vector<gid_t> new_vgids;
-
-  const int dim = (mesh.dim() > 0) ? mesh.dim() : 3;
 
   auto require_gid = [&](gid_t g) {
     if (g == INVALID_GID) return;
@@ -1253,8 +1361,16 @@ AdaptivityResult AdaptivityManager::coarsen(MeshBase& mesh,
     const index_t nv = static_cast<index_t>(new_vgids.size());
     new_vidx_by_gid[g] = nv;
     new_vgids.push_back(g);
-    const auto xyz = mesh.get_vertex_coords(ov);
-    for (int d = 0; d < dim; ++d) new_Xref.push_back(xyz[static_cast<size_t>(d)]);
+    const auto xyz_ref = coordinate_from_storage(old_Xref, static_cast<size_t>(ov), dim);
+    for (int d = 0; d < dim; ++d) {
+      new_Xref.push_back(xyz_ref[static_cast<size_t>(d)]);
+    }
+    if (old_has_current_coords) {
+      const auto xyz_cur = coordinate_from_storage(old_Xcur, static_cast<size_t>(ov), dim);
+      for (int d = 0; d < dim; ++d) {
+        new_Xcur.push_back(xyz_cur[static_cast<size_t>(d)]);
+      }
+    }
   };
 
   // Preserve vertex order by scanning old vertex GIDs.
@@ -1333,6 +1449,14 @@ AdaptivityResult AdaptivityManager::coarsen(MeshBase& mesh,
   new_mesh.set_vertex_gids(std::move(new_vgids));
   new_mesh.set_cell_gids(std::move(new_cgids));
   new_mesh.finalize();
+  if (old_has_current_coords) {
+    new_mesh.set_current_coords(new_Xcur);
+  }
+  if (old_active_config == Configuration::Current && old_has_current_coords) {
+    new_mesh.use_current_configuration();
+  } else {
+    new_mesh.use_reference_configuration();
+  }
   new_mesh.set_cell_refinement_levels(std::move(new_levels));
   for (index_t c = 0; c < static_cast<index_t>(new_regions.size()); ++c) {
     new_mesh.set_region_label(c, new_regions[static_cast<size_t>(c)]);
@@ -1375,10 +1499,11 @@ AdaptivityResult AdaptivityManager::coarsen(MeshBase& mesh,
     }
   }
 
-  if (fields && field_transfer_) {
+  if (field_transfer_) {
     MeshFields old_fields;
     MeshFields new_fields;
-    (void)field_transfer_->transfer(mesh, new_mesh, old_fields, new_fields, parent_child, options_);
+    result.transfer_stats =
+        field_transfer_->transfer(mesh, new_mesh, old_fields, new_fields, parent_child, options_);
   }
 
   mesh = std::move(new_mesh);

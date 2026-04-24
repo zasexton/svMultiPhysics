@@ -147,7 +147,8 @@ foreach(src_rel IN LISTS ALL_TEST_SOURCES)
 
 
   # Optional: skip IO parity test unless VTK is enabled and found
-  if(_category STREQUAL "IO" AND (NOT MESH_ENABLE_VTK OR NOT VTK_FOUND))
+  if(_category STREQUAL "IO" AND NOT test_name STREQUAL "test_MovingMeshRestart" AND
+     (NOT MESH_ENABLE_VTK OR NOT VTK_FOUND))
     message(STATUS "Skipping ${src_rel} (VTK disabled or not found)")
     continue()
   endif()

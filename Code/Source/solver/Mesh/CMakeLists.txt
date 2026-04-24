@@ -392,6 +392,8 @@ set(MESH_IO_SOURCES
     IO/GmshReader.cpp
     IO/MFEMReader.h
     IO/MFEMReader.cpp
+    IO/MovingMeshRestart.h
+    IO/MovingMeshRestart.cpp
 )
 
 # VTK I/O (only if VTK is available)

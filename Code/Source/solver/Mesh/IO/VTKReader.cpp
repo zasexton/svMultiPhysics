@@ -47,6 +47,7 @@
 #include <vtkCell.h>
 #include <vtkCellData.h>
 #include <vtkPointData.h>
+#include <vtkFieldData.h>
 #include <vtkDataArray.h>
 #include <vtkIdTypeArray.h>
 #include <vtkIntArray.h>
@@ -394,6 +395,10 @@ MeshBase VTKReader::convert_from_vtk_dataset(vtkDataSet* dataset, int force_min_
   // Apply global IDs (GIDs) from the VTK dataset if present.
   apply_global_ids_if_present(dataset, mesh);
 
+  // Restore current coordinates before field and FE consumers can build geometry caches.
+  restore_current_coordinates(dataset, mesh);
+  restore_active_configuration(dataset, mesh);
+
   // Read field data
   read_field_data(dataset, mesh);
 
@@ -660,6 +665,65 @@ void VTKReader::read_field_data(vtkDataSet* dataset, MeshBase& mesh) {
   read_point_data(dataset, mesh);
 }
 
+void VTKReader::restore_current_coordinates(vtkDataSet* dataset, MeshBase& mesh) {
+  vtkPointData* point_data = dataset ? dataset->GetPointData() : nullptr;
+  if (!point_data) return;
+
+  vtkDataArray* current = point_data->GetArray("CurrentCoordinates");
+  if (!current) current = point_data->GetArray("current_coordinates");
+  if (!current) current = point_data->GetArray("X_cur");
+
+  std::vector<real_t> x_cur;
+  const int dim = mesh.dim();
+  const auto n_vertices = static_cast<vtkIdType>(mesh.n_vertices());
+  if (current && current->GetNumberOfComponents() >= dim &&
+      current->GetNumberOfTuples() >= n_vertices) {
+    x_cur.assign(mesh.X_ref().size(), real_t(0));
+    for (vtkIdType v = 0; v < n_vertices; ++v) {
+      for (int d = 0; d < dim; ++d) {
+        x_cur[static_cast<size_t>(v) * static_cast<size_t>(dim) + static_cast<size_t>(d)] =
+            static_cast<real_t>(current->GetComponent(v, d));
+      }
+    }
+  } else {
+    vtkDataArray* displacement = point_data->GetArray("Displacement");
+    if (!displacement) displacement = point_data->GetArray("mesh_displacement");
+    if (!displacement || displacement->GetNumberOfComponents() < dim ||
+        displacement->GetNumberOfTuples() < n_vertices) {
+      return;
+    }
+
+    x_cur = mesh.X_ref();
+    for (vtkIdType v = 0; v < n_vertices; ++v) {
+      for (int d = 0; d < dim; ++d) {
+        x_cur[static_cast<size_t>(v) * static_cast<size_t>(dim) + static_cast<size_t>(d)] +=
+            static_cast<real_t>(displacement->GetComponent(v, d));
+      }
+    }
+  }
+
+  mesh.set_current_coords(x_cur);
+}
+
+void VTKReader::restore_active_configuration(vtkDataSet* dataset, MeshBase& mesh) {
+  vtkFieldData* field_data = dataset ? dataset->GetFieldData() : nullptr;
+  if (!field_data) return;
+
+  vtkDataArray* active = field_data->GetArray("SVMPActiveConfiguration");
+  if (!active || active->GetNumberOfTuples() < 1 || active->GetNumberOfComponents() < 1) {
+    return;
+  }
+
+  const int value = static_cast<int>(std::llround(active->GetComponent(0, 0)));
+  if (value == 1) {
+    if (mesh.has_current_coords()) {
+      mesh.use_current_configuration();
+    }
+  } else {
+    mesh.use_reference_configuration();
+  }
+}
+
 void VTKReader::read_cell_data(vtkDataSet* dataset, MeshBase& mesh) {
   vtkCellData* cell_data = dataset->GetCellData();
   if (!cell_data) return;
@@ -675,6 +739,9 @@ void VTKReader::read_cell_data(vtkDataSet* dataset, MeshBase& mesh) {
     if (global_ids && array == global_ids) continue;
 
     std::string name = array->GetName() ? array->GetName() : "field_" + std::to_string(i);
+    if (name == "CurrentCoordinates" || name == "current_coordinates" || name == "X_cur") {
+      continue;
+    }
     int n_components = array->GetNumberOfComponents();
     vtkIdType n_tuples = array->GetNumberOfTuples();
 
@@ -759,6 +826,9 @@ void VTKReader::read_point_data(vtkDataSet* dataset, MeshBase& mesh) {
     if (global_ids && array == global_ids) continue;
 
     std::string name = array->GetName() ? array->GetName() : "field_" + std::to_string(i);
+    if (name == "CurrentCoordinates" || name == "current_coordinates" || name == "X_cur") {
+      continue;
+    }
     int n_components = array->GetNumberOfComponents();
     vtkIdType n_tuples = array->GetNumberOfTuples();
 

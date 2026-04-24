@@ -72,6 +72,8 @@ public:
     bool write_cell_data = true;  ///< Write cell-attached fields
     bool write_point_data = true; ///< Write point-attached fields
     bool write_ghost_cells = false; ///< Include ghost cells in output
+    bool write_current_coordinates = true; ///< Emit X_cur as a point-data array when available
+    bool use_current_coordinates_as_points = false; ///< Write VTK geometry points in the current frame
     std::vector<std::string> cell_fields_to_write;  ///< Specific fields (empty = all)
     std::vector<std::string> point_fields_to_write; ///< Specific fields (empty = all)
   };
@@ -122,12 +124,14 @@ private:
   /**
    * @brief Convert MeshBase to VTK UnstructuredGrid
    */
-  static vtkSmartPointer<vtkUnstructuredGrid> convert_to_unstructured_grid(const MeshBase& mesh);
+  static vtkSmartPointer<vtkUnstructuredGrid> convert_to_unstructured_grid(const MeshBase& mesh,
+                                                                           const WriteOptions& opts);
 
   /**
    * @brief Convert MeshBase to VTK PolyData
    */
-  static vtkSmartPointer<vtkPolyData> convert_to_polydata(const MeshBase& mesh);
+  static vtkSmartPointer<vtkPolyData> convert_to_polydata(const MeshBase& mesh,
+                                                          const WriteOptions& opts);
 
   /**
    * @brief Create VTK points from mesh coordinates

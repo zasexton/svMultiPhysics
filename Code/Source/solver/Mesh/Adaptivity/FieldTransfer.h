@@ -82,6 +82,12 @@ struct TransferStats {
   /** Conservation error for each field */
   std::map<std::string, double> conservation_errors;
 
+  /** Number of scalar values transferred for standard mesh-motion fields */
+  std::map<std::string, size_t> motion_values_transferred;
+
+  /** Transfer diagnostics and recoverable warnings */
+  std::vector<std::string> diagnostics;
+
   /** Maximum interpolation error */
   double max_interpolation_error = 0.0;
 
