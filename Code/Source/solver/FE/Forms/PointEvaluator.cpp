@@ -190,10 +190,13 @@ struct DualValue {
         case FormExprType::ReferenceCoordinate:
             throw std::invalid_argument("PointEvaluator: ReferenceCoordinate is not available in PointEvalContext");
         case FormExprType::CurrentCoordinate:
+        case FormExprType::PreviousCoordinate:
         case FormExprType::ReferencePhysicalCoordinate:
         case FormExprType::MeshDisplacement:
         case FormExprType::MeshVelocity:
         case FormExprType::MeshAcceleration:
+        case FormExprType::PreviousMeshVelocity:
+        case FormExprType::PredictedMeshVelocity:
             throw std::invalid_argument("PointEvaluator: moving-domain vector terminal is not available in PointEvalContext");
         case FormExprType::ParameterRef: {
             const auto slot = node.slotIndex();
@@ -471,10 +474,13 @@ struct DualValue {
         case FormExprType::ReferenceCoordinate:
             throw std::invalid_argument("PointEvaluatorDual: ReferenceCoordinate is not available in PointEvalContext");
         case FormExprType::CurrentCoordinate:
+        case FormExprType::PreviousCoordinate:
         case FormExprType::ReferencePhysicalCoordinate:
         case FormExprType::MeshDisplacement:
         case FormExprType::MeshVelocity:
         case FormExprType::MeshAcceleration:
+        case FormExprType::PreviousMeshVelocity:
+        case FormExprType::PredictedMeshVelocity:
             throw std::invalid_argument("PointEvaluatorDual: moving-domain vector terminal is not available in PointEvalContext");
         case FormExprType::ParameterRef: {
             const auto slot = node.slotIndex();

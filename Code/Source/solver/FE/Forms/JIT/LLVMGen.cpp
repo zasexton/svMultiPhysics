@@ -355,6 +355,12 @@ struct ABIV3 {
         offsetof(assembly::jit::KernelSideArgsV6, mesh_velocities_xyz);
     static constexpr std::size_t side_mesh_accelerations_xyz_off =
         offsetof(assembly::jit::KernelSideArgsV6, mesh_accelerations_xyz);
+    static constexpr std::size_t side_previous_physical_points_xyz_off =
+        offsetof(assembly::jit::KernelSideArgsV6, previous_physical_points_xyz);
+    static constexpr std::size_t side_previous_mesh_velocities_xyz_off =
+        offsetof(assembly::jit::KernelSideArgsV6, previous_mesh_velocities_xyz);
+    static constexpr std::size_t side_predicted_mesh_velocities_xyz_off =
+        offsetof(assembly::jit::KernelSideArgsV6, predicted_mesh_velocities_xyz);
 
     static constexpr std::size_t side_time_off = offsetof(assembly::jit::KernelSideArgsV6, time);
     static constexpr std::size_t side_dt_off = offsetof(assembly::jit::KernelSideArgsV6, dt);
@@ -816,7 +822,10 @@ struct ShapeInferenceResult {
             case FormExprType::MeshVelocity:
             case FormExprType::MeshAcceleration:
             case FormExprType::CurrentCoordinate:
+            case FormExprType::PreviousCoordinate:
             case FormExprType::ReferencePhysicalCoordinate:
+            case FormExprType::PreviousMeshVelocity:
+            case FormExprType::PredictedMeshVelocity:
             case FormExprType::CurrentNormal:
             case FormExprType::ReferenceNormal:
                 out.shapes[idx] = vectorShape(dim);
@@ -2331,6 +2340,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             llvm::Value* mesh_displacements_xyz{nullptr};
             llvm::Value* mesh_velocities_xyz{nullptr};
             llvm::Value* mesh_accelerations_xyz{nullptr};
+            llvm::Value* previous_physical_points_xyz{nullptr};
+            llvm::Value* previous_mesh_velocities_xyz{nullptr};
+            llvm::Value* predicted_mesh_velocities_xyz{nullptr};
 
             llvm::Value* time{nullptr};
             llvm::Value* dt{nullptr};
@@ -2432,6 +2444,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             s.mesh_displacements_xyz = null_f64_ptr;
             s.mesh_velocities_xyz = null_f64_ptr;
             s.mesh_accelerations_xyz = null_f64_ptr;
+            s.previous_physical_points_xyz = null_f64_ptr;
+            s.previous_mesh_velocities_xyz = null_f64_ptr;
+            s.predicted_mesh_velocities_xyz = null_f64_ptr;
 
             s.time = f64c(0.0);
             s.dt = f64c(0.0);
@@ -2708,6 +2723,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             s.mesh_displacements_xyz = loadPtr(side_ptr, ABIV3::side_mesh_displacements_xyz_off);
             s.mesh_velocities_xyz = loadPtr(side_ptr, ABIV3::side_mesh_velocities_xyz_off);
             s.mesh_accelerations_xyz = loadPtr(side_ptr, ABIV3::side_mesh_accelerations_xyz_off);
+            s.previous_physical_points_xyz = loadPtr(side_ptr, ABIV3::side_previous_physical_points_xyz_off);
+            s.previous_mesh_velocities_xyz = loadPtr(side_ptr, ABIV3::side_previous_mesh_velocities_xyz_off);
+            s.predicted_mesh_velocities_xyz = loadPtr(side_ptr, ABIV3::side_predicted_mesh_velocities_xyz_off);
 
             s.time = loadF64(side_ptr, ABIV3::side_time_off);
             s.dt = loadF64(side_ptr, ABIV3::side_dt_off);
@@ -3048,6 +3066,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         side_single.mesh_displacements_xyz = null_f64_ptr;
                         side_single.mesh_velocities_xyz = null_f64_ptr;
                         side_single.mesh_accelerations_xyz = null_f64_ptr;
+                        side_single.previous_physical_points_xyz = null_f64_ptr;
+                        side_single.previous_mesh_velocities_xyz = null_f64_ptr;
+                        side_single.predicted_mesh_velocities_xyz = null_f64_ptr;
 	                    side_single.cell_domain_id = builder.getInt32(0);
 	                    side_single.facet_area = f64c(0.0);
 	                    side_single.material_state_old_base = null_f64_ptr;
@@ -3178,6 +3199,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             registerSimdPtr(side_single.mesh_displacements_xyz, ABIV3::side_mesh_displacements_xyz_off);
                             registerSimdPtr(side_single.mesh_velocities_xyz, ABIV3::side_mesh_velocities_xyz_off);
                             registerSimdPtr(side_single.mesh_accelerations_xyz, ABIV3::side_mesh_accelerations_xyz_off);
+                            registerSimdPtr(side_single.previous_physical_points_xyz, ABIV3::side_previous_physical_points_xyz_off);
+                            registerSimdPtr(side_single.previous_mesh_velocities_xyz, ABIV3::side_previous_mesh_velocities_xyz_off);
+                            registerSimdPtr(side_single.predicted_mesh_velocities_xyz, ABIV3::side_predicted_mesh_velocities_xyz_off);
 
 	                        // Per-element material state
 	                        registerSimdPtr(side_single.material_state_old_base, ABIV3::side_material_state_old_base_off);
@@ -6005,8 +6029,20 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         values[op_idx] = loadXYZDim(side.current_physical_points_xyz, q_index, shape.dims[0]);
                         break;
 
+                    case FormExprType::PreviousCoordinate:
+                        values[op_idx] = loadXYZDim(side.previous_physical_points_xyz, q_index, shape.dims[0]);
+                        break;
+
                     case FormExprType::ReferencePhysicalCoordinate:
                         values[op_idx] = loadXYZDim(side.reference_physical_points_xyz, q_index, shape.dims[0]);
+                        break;
+
+                    case FormExprType::PreviousMeshVelocity:
+                        values[op_idx] = loadXYZDim(side.previous_mesh_velocities_xyz, q_index, shape.dims[0]);
+                        break;
+
+                    case FormExprType::PredictedMeshVelocity:
+                        values[op_idx] = loadXYZDim(side.predicted_mesh_velocities_xyz, q_index, shape.dims[0]);
                         break;
 
                     case FormExprType::Normal:
@@ -8901,8 +8937,17 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     case FormExprType::CurrentCoordinate:
                         values[op_idx] = loadXYZDim(side.current_physical_points_xyz, q_index, shape.dims[0]);
                         break;
+                    case FormExprType::PreviousCoordinate:
+                        values[op_idx] = loadXYZDim(side.previous_physical_points_xyz, q_index, shape.dims[0]);
+                        break;
                     case FormExprType::ReferencePhysicalCoordinate:
                         values[op_idx] = loadXYZDim(side.reference_physical_points_xyz, q_index, shape.dims[0]);
+                        break;
+                    case FormExprType::PreviousMeshVelocity:
+                        values[op_idx] = loadXYZDim(side.previous_mesh_velocities_xyz, q_index, shape.dims[0]);
+                        break;
+                    case FormExprType::PredictedMeshVelocity:
+                        values[op_idx] = loadXYZDim(side.predicted_mesh_velocities_xyz, q_index, shape.dims[0]);
                         break;
                     case FormExprType::Normal:
                         values[op_idx] =
@@ -10678,9 +10723,24 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             values_plus[op_idx] = loadXYZDim(side_plus.current_physical_points_xyz, q_index, shape.dims[0]);
                             break;
 
+                        case FormExprType::PreviousCoordinate:
+                            values_minus[op_idx] = loadXYZDim(side_minus.previous_physical_points_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.previous_physical_points_xyz, q_index, shape.dims[0]);
+                            break;
+
                         case FormExprType::ReferencePhysicalCoordinate:
                             values_minus[op_idx] = loadXYZDim(side_minus.reference_physical_points_xyz, q_index, shape.dims[0]);
                             values_plus[op_idx] = loadXYZDim(side_plus.reference_physical_points_xyz, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::PreviousMeshVelocity:
+                            values_minus[op_idx] = loadXYZDim(side_minus.previous_mesh_velocities_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.previous_mesh_velocities_xyz, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::PredictedMeshVelocity:
+                            values_minus[op_idx] = loadXYZDim(side_minus.predicted_mesh_velocities_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.predicted_mesh_velocities_xyz, q_index, shape.dims[0]);
                             break;
 
 	                    case FormExprType::Normal:
@@ -11758,7 +11818,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     case FormExprType::MeshVelocity:
                     case FormExprType::MeshAcceleration:
                     case FormExprType::CurrentCoordinate:
+                    case FormExprType::PreviousCoordinate:
                     case FormExprType::ReferencePhysicalCoordinate:
+                    case FormExprType::PreviousMeshVelocity:
+                    case FormExprType::PredictedMeshVelocity:
                     case FormExprType::CurrentJacobian:
                     case FormExprType::ReferenceJacobian:
                     case FormExprType::CurrentJacobianDeterminant:
@@ -15689,9 +15752,24 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             values_plus[op_idx] = loadXYZDim(side_plus.current_physical_points_xyz, q_index, shape.dims[0]);
                             break;
 
+                        case FormExprType::PreviousCoordinate:
+                            values_minus[op_idx] = loadXYZDim(side_minus.previous_physical_points_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.previous_physical_points_xyz, q_index, shape.dims[0]);
+                            break;
+
                         case FormExprType::ReferencePhysicalCoordinate:
                             values_minus[op_idx] = loadXYZDim(side_minus.reference_physical_points_xyz, q_index, shape.dims[0]);
                             values_plus[op_idx] = loadXYZDim(side_plus.reference_physical_points_xyz, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::PreviousMeshVelocity:
+                            values_minus[op_idx] = loadXYZDim(side_minus.previous_mesh_velocities_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.previous_mesh_velocities_xyz, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::PredictedMeshVelocity:
+                            values_minus[op_idx] = loadXYZDim(side_minus.predicted_mesh_velocities_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.predicted_mesh_velocities_xyz, q_index, shape.dims[0]);
                             break;
 
 	                        case FormExprType::Normal:

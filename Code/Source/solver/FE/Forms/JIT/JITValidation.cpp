@@ -251,7 +251,10 @@ struct ConstantMatrix {
         case FormExprType::MeshVelocity:
         case FormExprType::MeshAcceleration:
         case FormExprType::CurrentCoordinate:
+        case FormExprType::PreviousCoordinate:
         case FormExprType::ReferencePhysicalCoordinate:
+        case FormExprType::PreviousMeshVelocity:
+        case FormExprType::PredictedMeshVelocity:
         case FormExprType::CurrentNormal:
         case FormExprType::ReferenceNormal: {
             const std::uint32_t dim = ctx.trial_sig

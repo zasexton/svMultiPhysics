@@ -272,11 +272,14 @@ inline std::vector<FormExpr> TestFunctions(const spaces::MixedSpace& W,
 inline FormExpr x() { return FormExpr::coordinate(); }
 inline FormExpr X() { return FormExpr::referenceCoordinate(); }
 inline FormExpr currentCoordinate() { return FormExpr::currentCoordinate(); }
+inline FormExpr previousCoordinate() { return FormExpr::previousCoordinate(); }
 inline FormExpr referenceCoordinatePhysical() { return FormExpr::referenceCoordinatePhysical(); }
 inline FormExpr meshDisplacement() { return FormExpr::meshDisplacement(); }
 inline FormExpr meshVelocity() { return FormExpr::meshVelocity(); }
 inline FormExpr domainVelocity() { return FormExpr::domainVelocity(); }
 inline FormExpr meshAcceleration() { return FormExpr::meshAcceleration(); }
+inline FormExpr previousMeshVelocity() { return FormExpr::previousMeshVelocity(); }
+inline FormExpr predictedMeshVelocity() { return FormExpr::predictedMeshVelocity(); }
 inline FormExpr t() { return FormExpr::time(); }
 inline FormExpr deltat() { return FormExpr::timeStep(); }
 inline FormExpr deltat_eff() { return FormExpr::effectiveTimeStep(); }

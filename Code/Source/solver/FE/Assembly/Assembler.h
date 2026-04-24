@@ -158,6 +158,7 @@ struct MeshMotionFieldAccess {
     FieldId previous_coordinates{INVALID_FIELD_ID};
     FieldId previous_mesh_displacement{INVALID_FIELD_ID};
     FieldId previous_mesh_velocity{INVALID_FIELD_ID};
+    FieldId predicted_mesh_velocity{INVALID_FIELD_ID};
 };
 
 enum class DofEntityScope : std::uint8_t {

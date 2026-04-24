@@ -4801,9 +4801,24 @@ EvalValue<Real> evalRealDispatchCurrentCoordinate(const FormExprNode&, const Eva
     return evalRealVectorTerminal(env, side, q, &assembly::AssemblyContext::currentPhysicalPoint);
 }
 
+EvalValue<Real> evalRealDispatchPreviousCoordinate(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    return evalRealVectorTerminal(env, side, q, &assembly::AssemblyContext::previousCoordinate);
+}
+
 EvalValue<Real> evalRealDispatchReferencePhysicalCoordinate(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
 {
     return evalRealVectorTerminal(env, side, q, &assembly::AssemblyContext::referencePhysicalPoint);
+}
+
+EvalValue<Real> evalRealDispatchPreviousMeshVelocity(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    return evalRealVectorTerminal(env, side, q, &assembly::AssemblyContext::previousMeshVelocity);
+}
+
+EvalValue<Real> evalRealDispatchPredictedMeshVelocity(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    return evalRealVectorTerminal(env, side, q, &assembly::AssemblyContext::predictedMeshVelocity);
 }
 
 EvalValue<Real> evalRealDispatchCurrentJacobian(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
@@ -4902,7 +4917,10 @@ const std::array<EvalRealDispatchFn, kFormExprDispatchSize>& evalRealDispatchTab
         table[static_cast<std::size_t>(FormExprType::MeshVelocity)] = &evalRealDispatchMeshVelocity;
         table[static_cast<std::size_t>(FormExprType::MeshAcceleration)] = &evalRealDispatchMeshAcceleration;
         table[static_cast<std::size_t>(FormExprType::CurrentCoordinate)] = &evalRealDispatchCurrentCoordinate;
+        table[static_cast<std::size_t>(FormExprType::PreviousCoordinate)] = &evalRealDispatchPreviousCoordinate;
         table[static_cast<std::size_t>(FormExprType::ReferencePhysicalCoordinate)] = &evalRealDispatchReferencePhysicalCoordinate;
+        table[static_cast<std::size_t>(FormExprType::PreviousMeshVelocity)] = &evalRealDispatchPreviousMeshVelocity;
+        table[static_cast<std::size_t>(FormExprType::PredictedMeshVelocity)] = &evalRealDispatchPredictedMeshVelocity;
         table[static_cast<std::size_t>(FormExprType::CurrentJacobian)] = &evalRealDispatchCurrentJacobian;
         table[static_cast<std::size_t>(FormExprType::ReferenceJacobian)] = &evalRealDispatchReferenceJacobian;
         table[static_cast<std::size_t>(FormExprType::CurrentJacobianDeterminant)] = &evalRealDispatchCurrentMeasure;
@@ -4975,8 +4993,14 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
             return evalRealDispatchMeshAcceleration(node, env, side, q);
         case FormExprType::CurrentCoordinate:
             return evalRealDispatchCurrentCoordinate(node, env, side, q);
+        case FormExprType::PreviousCoordinate:
+            return evalRealDispatchPreviousCoordinate(node, env, side, q);
         case FormExprType::ReferencePhysicalCoordinate:
             return evalRealDispatchReferencePhysicalCoordinate(node, env, side, q);
+        case FormExprType::PreviousMeshVelocity:
+            return evalRealDispatchPreviousMeshVelocity(node, env, side, q);
+        case FormExprType::PredictedMeshVelocity:
+            return evalRealDispatchPredictedMeshVelocity(node, env, side, q);
         case FormExprType::CurrentJacobian:
             return evalRealDispatchCurrentJacobian(node, env, side, q);
         case FormExprType::ReferenceJacobian:
@@ -8958,9 +8982,24 @@ EvalValue<Dual> evalDualDispatchCurrentCoordinate(const FormExprNode&, const Eva
     return out;
 }
 
+EvalValue<Dual> evalDualDispatchPreviousCoordinate(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
+{
+    return evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::previousCoordinate);
+}
+
 EvalValue<Dual> evalDualDispatchReferencePhysicalCoordinate(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
 {
     return evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::referencePhysicalPoint);
+}
+
+EvalValue<Dual> evalDualDispatchPreviousMeshVelocity(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
+{
+    return evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::previousMeshVelocity);
+}
+
+EvalValue<Dual> evalDualDispatchPredictedMeshVelocity(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
+{
+    return evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::predictedMeshVelocity);
 }
 
 EvalValue<Dual> evalDualDispatchCurrentJacobian(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
@@ -9117,7 +9156,10 @@ const std::array<EvalDualDispatchFn, kFormExprDispatchSize>& evalDualDispatchTab
         table[static_cast<std::size_t>(FormExprType::MeshVelocity)] = &evalDualDispatchMeshVelocity;
         table[static_cast<std::size_t>(FormExprType::MeshAcceleration)] = &evalDualDispatchMeshAcceleration;
         table[static_cast<std::size_t>(FormExprType::CurrentCoordinate)] = &evalDualDispatchCurrentCoordinate;
+        table[static_cast<std::size_t>(FormExprType::PreviousCoordinate)] = &evalDualDispatchPreviousCoordinate;
         table[static_cast<std::size_t>(FormExprType::ReferencePhysicalCoordinate)] = &evalDualDispatchReferencePhysicalCoordinate;
+        table[static_cast<std::size_t>(FormExprType::PreviousMeshVelocity)] = &evalDualDispatchPreviousMeshVelocity;
+        table[static_cast<std::size_t>(FormExprType::PredictedMeshVelocity)] = &evalDualDispatchPredictedMeshVelocity;
         table[static_cast<std::size_t>(FormExprType::CurrentJacobian)] = &evalDualDispatchCurrentJacobian;
         table[static_cast<std::size_t>(FormExprType::ReferenceJacobian)] = &evalDualDispatchReferenceJacobian;
         table[static_cast<std::size_t>(FormExprType::CurrentJacobianDeterminant)] = &evalDualDispatchCurrentMeasure;
@@ -9210,8 +9252,14 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
             return evalDualDispatchMeshAcceleration(node, env, side, q);
         case FormExprType::CurrentCoordinate:
             return evalDualDispatchCurrentCoordinate(node, env, side, q);
+        case FormExprType::PreviousCoordinate:
+            return evalDualDispatchPreviousCoordinate(node, env, side, q);
         case FormExprType::ReferencePhysicalCoordinate:
             return evalDualDispatchReferencePhysicalCoordinate(node, env, side, q);
+        case FormExprType::PreviousMeshVelocity:
+            return evalDualDispatchPreviousMeshVelocity(node, env, side, q);
+        case FormExprType::PredictedMeshVelocity:
+            return evalDualDispatchPredictedMeshVelocity(node, env, side, q);
         case FormExprType::CurrentJacobian:
             return evalDualDispatchCurrentJacobian(node, env, side, q);
         case FormExprType::ReferenceJacobian:

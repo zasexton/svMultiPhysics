@@ -1187,6 +1187,15 @@ std::vector<FieldRequirement> StandardAssembler::effectiveFieldRequirements(
     if (hasFlag(required_data, RequiredData::MeshAcceleration)) {
         add_or_merge(mesh_motion_field_access_.mesh_acceleration);
     }
+    if (hasFlag(required_data, RequiredData::PreviousPhysicalPoints)) {
+        add_or_merge(mesh_motion_field_access_.previous_coordinates);
+    }
+    if (hasFlag(required_data, RequiredData::PreviousMeshVelocity)) {
+        add_or_merge(mesh_motion_field_access_.previous_mesh_velocity);
+    }
+    if (hasFlag(required_data, RequiredData::PredictedMeshVelocity)) {
+        add_or_merge(mesh_motion_field_access_.predicted_mesh_velocity);
+    }
 
     return out;
 }
@@ -1209,6 +1218,15 @@ void StandardAssembler::validateMovingDomainRequirements(RequiredData required_d
     require_field(hasFlag(required_data, RequiredData::MeshAcceleration),
                   mesh_motion_field_access_.mesh_acceleration,
                   "RequiredData::MeshAcceleration");
+    require_field(hasFlag(required_data, RequiredData::PreviousPhysicalPoints),
+                  mesh_motion_field_access_.previous_coordinates,
+                  "RequiredData::PreviousPhysicalPoints");
+    require_field(hasFlag(required_data, RequiredData::PreviousMeshVelocity),
+                  mesh_motion_field_access_.previous_mesh_velocity,
+                  "RequiredData::PreviousMeshVelocity");
+    require_field(hasFlag(required_data, RequiredData::PredictedMeshVelocity),
+                  mesh_motion_field_access_.predicted_mesh_velocity,
+                  "RequiredData::PredictedMeshVelocity");
 }
 
 void StandardAssembler::populateMovingDomainFieldData(AssemblyContext& context,
@@ -1252,6 +1270,21 @@ void StandardAssembler::populateMovingDomainFieldData(AssemblyContext& context,
         bind_vector_field(mesh_motion_field_access_.mesh_acceleration,
                           "MeshAcceleration",
                           &AssemblyContext::setMeshAccelerations);
+    }
+    if (hasFlag(required_data, RequiredData::PreviousPhysicalPoints)) {
+        bind_vector_field(mesh_motion_field_access_.previous_coordinates,
+                          "PreviousPhysicalPoints",
+                          &AssemblyContext::setPreviousCoordinates);
+    }
+    if (hasFlag(required_data, RequiredData::PreviousMeshVelocity)) {
+        bind_vector_field(mesh_motion_field_access_.previous_mesh_velocity,
+                          "PreviousMeshVelocity",
+                          &AssemblyContext::setPreviousMeshVelocities);
+    }
+    if (hasFlag(required_data, RequiredData::PredictedMeshVelocity)) {
+        bind_vector_field(mesh_motion_field_access_.predicted_mesh_velocity,
+                          "PredictedMeshVelocity",
+                          &AssemblyContext::setPredictedMeshVelocities);
     }
 }
 
@@ -5853,6 +5886,9 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         return hasFlag(data, RequiredData::MeshDisplacement) ||
                hasFlag(data, RequiredData::MeshVelocity) ||
                hasFlag(data, RequiredData::MeshAcceleration) ||
+               hasFlag(data, RequiredData::PreviousPhysicalPoints) ||
+               hasFlag(data, RequiredData::PreviousMeshVelocity) ||
+               hasFlag(data, RequiredData::PredictedMeshVelocity) ||
                hasFlag(data, RequiredData::ReferencePhysicalPoints) ||
                hasFlag(data, RequiredData::CurrentPhysicalPoints) ||
                hasFlag(data, RequiredData::ReferenceJacobians) ||

@@ -24,6 +24,7 @@
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 #include "Tests/Unit/Forms/JITTestHelpers.h"
 
+#include <array>
 #include <cmath>
 #include <stdexcept>
 #include <vector>
@@ -319,6 +320,81 @@ assembly::DenseVectorView assembleMovingCellLinearWithMeshFields(dofs::DofMap& s
     return vec;
 }
 
+assembly::DenseVectorView assembleMovingCellLinearWithTimeLevelMeshFields(
+    dofs::DofMap& scalar_dof_map,
+    const assembly::IMeshAccess& mesh,
+    const spaces::FunctionSpace& scalar_space,
+    assembly::AssemblyKernel& kernel,
+    const spaces::FunctionSpace& vector_space,
+    const dofs::DofMap& vector_dof_map,
+    const std::vector<Real>& current_solution)
+{
+    constexpr FieldId kDisplacement = 711;
+    constexpr FieldId kVelocity = 712;
+    constexpr FieldId kAcceleration = 713;
+    constexpr FieldId kPreviousCoordinates = 714;
+    constexpr FieldId kPreviousVelocity = 715;
+    constexpr FieldId kPredictedVelocity = 716;
+
+    const auto n = vector_dof_map.getNumDofs();
+    std::array<assembly::FieldSolutionAccess, 6> field_access = {{
+        assembly::FieldSolutionAccess{
+            .field = kDisplacement,
+            .space = &vector_space,
+            .dof_map = &vector_dof_map,
+            .dof_offset = 0,
+        },
+        assembly::FieldSolutionAccess{
+            .field = kVelocity,
+            .space = &vector_space,
+            .dof_map = &vector_dof_map,
+            .dof_offset = n,
+        },
+        assembly::FieldSolutionAccess{
+            .field = kAcceleration,
+            .space = &vector_space,
+            .dof_map = &vector_dof_map,
+            .dof_offset = 2 * n,
+        },
+        assembly::FieldSolutionAccess{
+            .field = kPreviousCoordinates,
+            .space = &vector_space,
+            .dof_map = &vector_dof_map,
+            .dof_offset = 3 * n,
+        },
+        assembly::FieldSolutionAccess{
+            .field = kPreviousVelocity,
+            .space = &vector_space,
+            .dof_map = &vector_dof_map,
+            .dof_offset = 4 * n,
+        },
+        assembly::FieldSolutionAccess{
+            .field = kPredictedVelocity,
+            .space = &vector_space,
+            .dof_map = &vector_dof_map,
+            .dof_offset = 5 * n,
+        },
+    }};
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(scalar_dof_map);
+    assembler.setFieldSolutionAccess(field_access);
+    assembler.setMeshMotionFieldAccess(assembly::MeshMotionFieldAccess{
+        .mesh_displacement = kDisplacement,
+        .mesh_velocity = kVelocity,
+        .mesh_acceleration = kAcceleration,
+        .previous_coordinates = kPreviousCoordinates,
+        .previous_mesh_velocity = kPreviousVelocity,
+        .predicted_mesh_velocity = kPredictedVelocity,
+    });
+    assembler.setCurrentSolution(current_solution);
+
+    assembly::DenseVectorView vec(static_cast<GlobalIndex>(scalar_dof_map.getNumDofs()));
+    vec.zero();
+    (void)assembler.assembleVector(mesh, scalar_space, kernel, vec);
+    return vec;
+}
+
 assembly::DenseVectorView assembleBoundaryLinearWithKernel(dofs::DofMap& dof_map,
                                                            const assembly::IMeshAccess& mesh,
                                                            int marker,
@@ -601,6 +677,9 @@ TEST(FormVocabularyTest, RequiredDataInferenceIncludesGeometryAndMeasures)
     require_linear_flag(component(meshVelocity(), 0), assembly::RequiredData::MeshVelocity);
     require_linear_flag(component(domainVelocity(), 0), assembly::RequiredData::MeshVelocity);
     require_linear_flag(component(meshAcceleration(), 0), assembly::RequiredData::MeshAcceleration);
+    require_linear_flag(component(previousCoordinate(), 0), assembly::RequiredData::PreviousPhysicalPoints);
+    require_linear_flag(component(previousMeshVelocity(), 0), assembly::RequiredData::PreviousMeshVelocity);
+    require_linear_flag(component(predictedMeshVelocity(), 0), assembly::RequiredData::PredictedMeshVelocity);
     require_linear_flag(component(currentCoordinate(), 0), assembly::RequiredData::CurrentPhysicalPoints);
     require_linear_flag(component(referenceCoordinatePhysical(), 0), assembly::RequiredData::ReferencePhysicalPoints);
     require_linear_flag(component(currentJacobian(), 0, 0), assembly::RequiredData::CurrentJacobians);
@@ -621,6 +700,66 @@ TEST(FormVocabularyTest, RequiredDataInferenceIncludesGeometryAndMeasures)
                                            GeometryConfiguration::Current,
                                            GeometryConfiguration::Reference), 0),
                         assembly::RequiredData::ConfigurationTransforms);
+}
+
+TEST(FormVocabularyTest, MovingDomainTimeLevelTerminalsMatchInterpreterAndJIT)
+{
+    requireLLVMJITOrSkip();
+
+    MovingSingleTetraMeshAccess mesh;
+    auto scalar_dof_map = createSingleTetraDofMap();
+    spaces::H1Space scalar_space(ElementType::Tetra4, 1);
+
+    auto base_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace vector_space(base_space, /*components=*/3);
+    auto vector_dof_map =
+        createSingleTetraDenseDofMap(static_cast<LocalIndex>(vector_space.dofs_per_element()));
+
+    const auto n_field_dofs = static_cast<std::size_t>(vector_dof_map.getNumDofs());
+    std::vector<Real> current_solution(6u * n_field_dofs, 0.0);
+    std::fill(current_solution.begin() + static_cast<std::ptrdiff_t>(3u * n_field_dofs),
+              current_solution.begin() + static_cast<std::ptrdiff_t>(4u * n_field_dofs),
+              0.75);
+    std::fill(current_solution.begin() + static_cast<std::ptrdiff_t>(4u * n_field_dofs),
+              current_solution.begin() + static_cast<std::ptrdiff_t>(5u * n_field_dofs),
+              0.125);
+    std::fill(current_solution.begin() + static_cast<std::ptrdiff_t>(5u * n_field_dofs),
+              current_solution.end(),
+              0.25);
+
+    FormCompiler compiler;
+    const auto v = FormExpr::testFunction(scalar_space, "v");
+    const auto scalar = component(previousCoordinate(), 0) +
+                        component(previousMeshVelocity(), 1) +
+                        component(predictedMeshVelocity(), 2);
+    const auto form = (scalar * v).dx();
+
+    auto interp_kernel = std::make_shared<FormKernel>(compiler.compileLinear(form));
+    auto jit_fallback = std::make_shared<FormKernel>(compiler.compileLinear(form));
+    jit::JITKernelWrapper jit_kernel(jit_fallback, makeUnitTestJITOptions());
+    jit_kernel.ensureCompiled();
+    ASSERT_TRUE(jit_kernel.isJITReady());
+
+    auto interp = assembleMovingCellLinearWithTimeLevelMeshFields(scalar_dof_map,
+                                                                  mesh,
+                                                                  scalar_space,
+                                                                  *interp_kernel,
+                                                                  vector_space,
+                                                                  vector_dof_map,
+                                                                  current_solution);
+    auto jit = assembleMovingCellLinearWithTimeLevelMeshFields(scalar_dof_map,
+                                                               mesh,
+                                                               scalar_space,
+                                                               jit_kernel,
+                                                               vector_space,
+                                                               vector_dof_map,
+                                                               current_solution);
+
+    const Real expected_entry = (0.75 + 0.125 + 0.25) * singleTetraP1BasisIntegral();
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        EXPECT_NEAR(interp.getVectorEntry(i), expected_entry, 5e-12);
+        EXPECT_NEAR(jit.getVectorEntry(i), interp.getVectorEntry(i), 5e-12);
+    }
 }
 
 TEST(FormVocabularyTest, MovingDomainCoordinateTerminalsUseExplicitFrames)

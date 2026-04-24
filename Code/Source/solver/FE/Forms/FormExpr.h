@@ -239,7 +239,10 @@ struct SymbolicOptions {
         MeshVelocity,
         MeshAcceleration,
         CurrentCoordinate,
+        PreviousCoordinate,
         ReferencePhysicalCoordinate,
+        PreviousMeshVelocity,
+        PredictedMeshVelocity,
         CurrentJacobian,
         ReferenceJacobian,
         CurrentJacobianDeterminant,
@@ -528,7 +531,10 @@ public:
         static FormExpr domainVelocity();
         static FormExpr meshAcceleration();
         static FormExpr currentCoordinate();
+        static FormExpr previousCoordinate();
         static FormExpr referenceCoordinatePhysical();
+        static FormExpr previousMeshVelocity();
+        static FormExpr predictedMeshVelocity();
         static FormExpr currentJacobian();
         static FormExpr referenceJacobian();
         static FormExpr currentJacobianDeterminant();

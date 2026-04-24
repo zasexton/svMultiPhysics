@@ -39,7 +39,7 @@ inline constexpr std::uint32_t kKernelArgsABIVersionV5 = 5u;
 inline constexpr std::uint32_t kKernelArgsABIVersionV6 = 6u;
 // Bump whenever any V6 argument/view struct layout changes. This is mixed into
 // JIT cache keys so disk-cached object code cannot outlive ABI layout edits.
-inline constexpr std::uint32_t kKernelArgsABILayoutRevisionV6 = 3u;
+inline constexpr std::uint32_t kKernelArgsABILayoutRevisionV6 = 4u;
 
 /// Maximum number of previous solution coefficient vectors passed to kernels.
 /// Indexing convention: k=1 corresponds to u^{n-1}.
@@ -982,6 +982,9 @@ struct KernelSideArgsV6 {
     const Real* mesh_displacements_xyz{nullptr};         // [n_qpts * 3]
     const Real* mesh_velocities_xyz{nullptr};            // [n_qpts * 3]
     const Real* mesh_accelerations_xyz{nullptr};         // [n_qpts * 3]
+    const Real* previous_physical_points_xyz{nullptr};   // [n_qpts * 3]
+    const Real* previous_mesh_velocities_xyz{nullptr};   // [n_qpts * 3]
+    const Real* predicted_mesh_velocities_xyz{nullptr};  // [n_qpts * 3]
 };
 
 struct CellKernelArgsV6 {
@@ -2144,6 +2147,9 @@ namespace detail {
     out.mesh_displacements_xyz = detail::flattenXYZ(ctx.meshDisplacements());
     out.mesh_velocities_xyz = detail::flattenXYZ(ctx.meshVelocities());
     out.mesh_accelerations_xyz = detail::flattenXYZ(ctx.meshAccelerations());
+    out.previous_physical_points_xyz = detail::flattenXYZ(ctx.previousCoordinates());
+    out.previous_mesh_velocities_xyz = detail::flattenXYZ(ctx.previousMeshVelocities());
+    out.predicted_mesh_velocities_xyz = detail::flattenXYZ(ctx.predictedMeshVelocities());
 
     if (const auto* ti = ctx.timeIntegrationContext()) {
         out.time_derivative_term_weight = ti->time_derivative_term_weight;
@@ -2246,6 +2252,9 @@ namespace detail {
         assertAligned(out.mesh_displacements_xyz, "KernelArgsV6: mesh_displacements_xyz not aligned");
         assertAligned(out.mesh_velocities_xyz, "KernelArgsV6: mesh_velocities_xyz not aligned");
         assertAligned(out.mesh_accelerations_xyz, "KernelArgsV6: mesh_accelerations_xyz not aligned");
+        assertAligned(out.previous_physical_points_xyz, "KernelArgsV6: previous_physical_points_xyz not aligned");
+        assertAligned(out.previous_mesh_velocities_xyz, "KernelArgsV6: previous_mesh_velocities_xyz not aligned");
+        assertAligned(out.predicted_mesh_velocities_xyz, "KernelArgsV6: predicted_mesh_velocities_xyz not aligned");
 
         if (!field_table.empty()) {
             FE_ASSERT_MSG(isAligned(out.field_solutions, alignof(FieldSolutionEntryV1)),

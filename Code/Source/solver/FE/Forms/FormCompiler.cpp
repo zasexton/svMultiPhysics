@@ -367,8 +367,17 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
             case FormExprType::CurrentCoordinate:
                 required |= RequiredData::CurrentPhysicalPoints;
                 break;
+            case FormExprType::PreviousCoordinate:
+                required |= RequiredData::PreviousPhysicalPoints;
+                break;
             case FormExprType::ReferencePhysicalCoordinate:
                 required |= RequiredData::ReferencePhysicalPoints;
+                break;
+            case FormExprType::PreviousMeshVelocity:
+                required |= RequiredData::PreviousMeshVelocity;
+                break;
+            case FormExprType::PredictedMeshVelocity:
+                required |= RequiredData::PredictedMeshVelocity;
                 break;
             case FormExprType::CurrentJacobian:
                 required |= RequiredData::CurrentJacobians;

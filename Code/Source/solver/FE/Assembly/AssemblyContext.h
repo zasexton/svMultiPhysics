@@ -560,6 +560,8 @@ public:
     [[nodiscard]] Vector3D meshVelocity(LocalIndex q) const;
     [[nodiscard]] Vector3D meshAcceleration(LocalIndex q) const;
     [[nodiscard]] Vector3D previousCoordinate(LocalIndex q) const;
+    [[nodiscard]] Vector3D previousMeshVelocity(LocalIndex q) const;
+    [[nodiscard]] Vector3D predictedMeshVelocity(LocalIndex q) const;
     [[nodiscard]] std::span<const Vector3D> meshDisplacements() const noexcept
     {
         return mesh_displacements_;
@@ -575,6 +577,14 @@ public:
     [[nodiscard]] std::span<const Vector3D> previousCoordinates() const noexcept
     {
         return previous_coordinates_;
+    }
+    [[nodiscard]] std::span<const Vector3D> previousMeshVelocities() const noexcept
+    {
+        return previous_mesh_velocities_;
+    }
+    [[nodiscard]] std::span<const Vector3D> predictedMeshVelocities() const noexcept
+    {
+        return predicted_mesh_velocities_;
     }
 
     // Interleaved quadrature-point geometry (SoA->AoSoA bridge for JIT kernels):
@@ -1763,6 +1773,8 @@ public:
     void setMeshVelocities(std::span<const Vector3D> velocities);
     void setMeshAccelerations(std::span<const Vector3D> accelerations);
     void setPreviousCoordinates(std::span<const Vector3D> coordinates);
+    void setPreviousMeshVelocities(std::span<const Vector3D> velocities);
+    void setPredictedMeshVelocities(std::span<const Vector3D> velocities);
 
     // =========================================================================
     // Direct Geometry Population (zero-copy path)
@@ -1967,6 +1979,8 @@ private:
     JITAlignedVector<Vector3D> mesh_velocities_{};
     JITAlignedVector<Vector3D> mesh_accelerations_{};
     JITAlignedVector<Vector3D> previous_coordinates_{};
+    JITAlignedVector<Vector3D> previous_mesh_velocities_{};
+    JITAlignedVector<Vector3D> predicted_mesh_velocities_{};
 
     // Entity measures (optional)
     Real cell_diameter_{0.0};

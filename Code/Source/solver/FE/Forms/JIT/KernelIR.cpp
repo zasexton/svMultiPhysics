@@ -65,7 +65,10 @@ inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
         case FormExprType::MeshVelocity: return "MeshVelocity";
         case FormExprType::MeshAcceleration: return "MeshAcceleration";
         case FormExprType::CurrentCoordinate: return "CurrentCoordinate";
+        case FormExprType::PreviousCoordinate: return "PreviousCoordinate";
         case FormExprType::ReferencePhysicalCoordinate: return "ReferencePhysicalCoordinate";
+        case FormExprType::PreviousMeshVelocity: return "PreviousMeshVelocity";
+        case FormExprType::PredictedMeshVelocity: return "PredictedMeshVelocity";
         case FormExprType::CurrentJacobian: return "CurrentJacobian";
         case FormExprType::ReferenceJacobian: return "ReferenceJacobian";
         case FormExprType::CurrentJacobianDeterminant: return "CurrentJacobianDeterminant";

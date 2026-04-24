@@ -632,6 +632,8 @@ void AssemblyContext::clearMovingDomainData() noexcept
     mesh_velocities_.clear();
     mesh_accelerations_.clear();
     previous_coordinates_.clear();
+    previous_mesh_velocities_.clear();
+    predicted_mesh_velocities_.clear();
 }
 
 // ============================================================================
@@ -846,6 +848,18 @@ AssemblyContext::Vector3D AssemblyContext::previousCoordinate(LocalIndex q) cons
 {
     return requireQPointData(previous_coordinates_, q, n_qpts_,
                              "AssemblyContext::previousCoordinate");
+}
+
+AssemblyContext::Vector3D AssemblyContext::previousMeshVelocity(LocalIndex q) const
+{
+    return requireQPointData(previous_mesh_velocities_, q, n_qpts_,
+                             "AssemblyContext::previousMeshVelocity");
+}
+
+AssemblyContext::Vector3D AssemblyContext::predictedMeshVelocity(LocalIndex q) const
+{
+    return requireQPointData(predicted_mesh_velocities_, q, n_qpts_,
+                             "AssemblyContext::predictedMeshVelocity");
 }
 
 void AssemblyContext::setEntityMeasures(Real cell_diameter, Real cell_volume, Real facet_area)
@@ -2670,6 +2684,8 @@ void AssemblyContext::copyGeometryDataFrom(const AssemblyContext& other)
     mesh_velocities_ = other.mesh_velocities_;
     mesh_accelerations_ = other.mesh_accelerations_;
     previous_coordinates_ = other.previous_coordinates_;
+    previous_mesh_velocities_ = other.previous_mesh_velocities_;
+    predicted_mesh_velocities_ = other.predicted_mesh_velocities_;
     interleaved_dirty_ = true;
 }
 
@@ -3243,6 +3259,18 @@ void AssemblyContext::setPreviousCoordinates(std::span<const Vector3D> coordinat
 {
     requireQPointSpanSize(coordinates.size(), n_qpts_, "AssemblyContext::setPreviousCoordinates");
     previous_coordinates_.assign(coordinates.begin(), coordinates.end());
+}
+
+void AssemblyContext::setPreviousMeshVelocities(std::span<const Vector3D> velocities)
+{
+    requireQPointSpanSize(velocities.size(), n_qpts_, "AssemblyContext::setPreviousMeshVelocities");
+    previous_mesh_velocities_.assign(velocities.begin(), velocities.end());
+}
+
+void AssemblyContext::setPredictedMeshVelocities(std::span<const Vector3D> velocities)
+{
+    requireQPointSpanSize(velocities.size(), n_qpts_, "AssemblyContext::setPredictedMeshVelocities");
+    predicted_mesh_velocities_.assign(velocities.begin(), velocities.end());
 }
 
 void AssemblyContext::setSolutionValues(std::span<const Real> values)

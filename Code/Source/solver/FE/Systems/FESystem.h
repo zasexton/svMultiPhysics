@@ -169,7 +169,8 @@ enum class MeshMotionFieldRole : std::uint8_t {
     Acceleration,
     PreviousCoordinates,
     PreviousDisplacement,
-    PreviousVelocity
+    PreviousVelocity,
+    PredictedVelocity
 };
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH

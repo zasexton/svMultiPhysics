@@ -84,7 +84,10 @@ bool decomposeAffineInTrial(const FormExpr& expr, Decomp& out, std::string* reas
         case FormExprType::MeshVelocity:
         case FormExprType::MeshAcceleration:
         case FormExprType::CurrentCoordinate:
+        case FormExprType::PreviousCoordinate:
         case FormExprType::ReferencePhysicalCoordinate:
+        case FormExprType::PreviousMeshVelocity:
+        case FormExprType::PredictedMeshVelocity:
         case FormExprType::CurrentJacobian:
         case FormExprType::ReferenceJacobian:
         case FormExprType::CurrentJacobianDeterminant:

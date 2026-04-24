@@ -902,7 +902,10 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
             case FormExprType::MeshVelocity:
             case FormExprType::MeshAcceleration:
             case FormExprType::CurrentCoordinate:
+            case FormExprType::PreviousCoordinate:
             case FormExprType::ReferencePhysicalCoordinate:
+            case FormExprType::PreviousMeshVelocity:
+            case FormExprType::PredictedMeshVelocity:
             case FormExprType::CurrentJacobian:
             case FormExprType::ReferenceJacobian:
             case FormExprType::CurrentJacobianDeterminant:
@@ -1782,7 +1785,10 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
             case FormExprType::MeshVelocity:
             case FormExprType::MeshAcceleration:
             case FormExprType::CurrentCoordinate:
+            case FormExprType::PreviousCoordinate:
             case FormExprType::ReferencePhysicalCoordinate:
+            case FormExprType::PreviousMeshVelocity:
+            case FormExprType::PredictedMeshVelocity:
             case FormExprType::CurrentJacobian:
             case FormExprType::ReferenceJacobian:
             case FormExprType::CurrentJacobianDeterminant:

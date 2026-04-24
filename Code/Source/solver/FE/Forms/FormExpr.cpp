@@ -2284,9 +2284,24 @@ FormExpr FormExpr::currentCoordinate()
     return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::CurrentCoordinate, "x_current"));
 }
 
+FormExpr FormExpr::previousCoordinate()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::PreviousCoordinate, "x_previous"));
+}
+
 FormExpr FormExpr::referenceCoordinatePhysical()
 {
     return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::ReferencePhysicalCoordinate, "X_physical"));
+}
+
+FormExpr FormExpr::previousMeshVelocity()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::PreviousMeshVelocity, "meshVelocity_previous"));
+}
+
+FormExpr FormExpr::predictedMeshVelocity()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::PredictedMeshVelocity, "meshVelocity_predicted"));
 }
 
 FormExpr FormExpr::currentJacobian()

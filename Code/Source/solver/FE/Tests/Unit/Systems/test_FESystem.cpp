@@ -411,12 +411,15 @@ TEST(FESystem, MeshMotionFieldBindingsArePhysicsNeutral)
         FieldSpec{.name = "mesh_acceleration", .space = vector_space, .components = 2});
     const auto previous_velocity = sys.addField(
         FieldSpec{.name = "previous_mesh_velocity", .space = vector_space, .components = 2});
+    const auto predicted_velocity = sys.addField(
+        FieldSpec{.name = "predicted_mesh_velocity", .space = vector_space, .components = 2});
 
     sys.bindMeshMotionField(MeshMotionFieldRole::Displacement, displacement);
     sys.bindMeshMotionField("velocity", "mesh_velocity");
     sys.bindMeshMotionField("previous_coordinates", previous);
     sys.bindMeshMotionField("acceleration", acceleration);
     sys.bindMeshMotionField("previous_velocity", previous_velocity);
+    sys.bindMeshMotionField("predicted_velocity", predicted_velocity);
 
     const auto access = sys.meshMotionFieldAccess();
     EXPECT_EQ(access.mesh_displacement, displacement);
@@ -424,6 +427,7 @@ TEST(FESystem, MeshMotionFieldBindingsArePhysicsNeutral)
     EXPECT_EQ(access.previous_coordinates, previous);
     EXPECT_EQ(access.mesh_acceleration, acceleration);
     EXPECT_EQ(access.previous_mesh_velocity, previous_velocity);
+    EXPECT_EQ(access.predicted_mesh_velocity, predicted_velocity);
 
     const auto bound_displacement = sys.meshMotionField(MeshMotionFieldRole::Displacement);
     ASSERT_TRUE(bound_displacement.has_value());

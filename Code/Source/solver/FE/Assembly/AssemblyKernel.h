@@ -178,6 +178,9 @@ enum class RequiredData : std::uint64_t {
     CurrentMeasures         = 1ull << 40, ///< Current-frame measure factors at quadrature points
     SurfaceJacobians        = 1ull << 41, ///< Surface Jacobian/tangent transform data
     ConfigurationTransforms = 1ull << 42, ///< Transform from reference to current configuration
+    PreviousPhysicalPoints  = 1ull << 43, ///< Previous-time physical coordinates at quadrature points
+    PreviousMeshVelocity    = 1ull << 44, ///< Previous-time mesh velocity field value at quadrature points
+    PredictedMeshVelocity   = 1ull << 45, ///< Predicted/stage mesh velocity field value at quadrature points
 
     // Common combinations
     BasicGeometry       = PhysicalPoints | JacobianDets | InverseJacobians,

@@ -1797,6 +1797,11 @@ MeshMotionFieldRole parseMeshMotionFieldRole(std::string_view role_name)
         role_name == "previous_velocity") {
         return MeshMotionFieldRole::PreviousVelocity;
     }
+    if (role_name == "predicted_mesh_velocity" ||
+        role_name == "mesh_velocity_predicted" ||
+        role_name == "predicted_velocity") {
+        return MeshMotionFieldRole::PredictedVelocity;
+    }
     FE_THROW(InvalidArgumentException,
              "FESystem::bindMeshMotionField: unknown mesh-motion role '" +
                  std::string(role_name) + "'");
@@ -1818,6 +1823,8 @@ FieldId& meshMotionRoleSlot(assembly::MeshMotionFieldAccess& access,
             return access.previous_mesh_displacement;
         case MeshMotionFieldRole::PreviousVelocity:
             return access.previous_mesh_velocity;
+        case MeshMotionFieldRole::PredictedVelocity:
+            return access.predicted_mesh_velocity;
     }
     return access.mesh_displacement;
 }
@@ -1838,6 +1845,8 @@ FieldId meshMotionRoleValue(const assembly::MeshMotionFieldAccess& access,
             return access.previous_mesh_displacement;
         case MeshMotionFieldRole::PreviousVelocity:
             return access.previous_mesh_velocity;
+        case MeshMotionFieldRole::PredictedVelocity:
+            return access.predicted_mesh_velocity;
     }
     return INVALID_FIELD_ID;
 }
@@ -1858,6 +1867,8 @@ svmp::motion::MotionFieldRole toMeshMotionRole(MeshMotionFieldRole role) noexcep
             return svmp::motion::MotionFieldRole::PreviousDisplacement;
         case MeshMotionFieldRole::PreviousVelocity:
             return svmp::motion::MotionFieldRole::PreviousVelocity;
+        case MeshMotionFieldRole::PredictedVelocity:
+            return svmp::motion::MotionFieldRole::Velocity;
     }
     return svmp::motion::MotionFieldRole::Displacement;
 }
