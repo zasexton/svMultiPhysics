@@ -2008,53 +2008,14 @@ void FsilsMatrix::addResolvedMatrixEntries(std::span<const GlobalIndex> row_dofs
     const auto* slots = resolved.data();
     const auto* local = local_matrix.data();
     const std::size_t n = resolved.size();
+    const std::size_t n_cols_size = static_cast<std::size_t>(n_cols);
     constexpr std::size_t kMinContiguousRun = 2u;
 
-    auto apply_scalar = [&](GlobalIndex slot, Real value) {
-        if (slot < 0 || static_cast<std::size_t>(slot) >= values_size) {
-            return;
-        }
-        Real& dst = values[static_cast<std::size_t>(slot)];
-        switch (mode) {
-            case assembly::AddMode::Add:
-                dst += value;
-                break;
-            case assembly::AddMode::Insert:
-                dst = value;
-                break;
-            case assembly::AddMode::Max:
-                dst = std::max(dst, value);
-                break;
-            case assembly::AddMode::Min:
-                dst = std::min(dst, value);
-                break;
-        }
-    };
-
-    if (!all_rows_owned) {
-        for (GlobalIndex i = 0; i < n_rows; ++i) {
-            const auto row_idx = static_cast<std::size_t>(i);
-            if (off_owner_row[row_idx] != 0) {
-                off_owner_write_count_.fetch_add(static_cast<std::uint64_t>(n_cols),
-                                                 std::memory_order_relaxed);
-                continue;
-            }
-            if (owned_row[row_idx] == 0) {
-                continue;
-            }
-            for (GlobalIndex j = 0; j < n_cols; ++j) {
-                const auto idx = static_cast<std::size_t>(i * n_cols + j);
-                apply_scalar(resolved[idx], local_matrix[idx]);
-            }
-        }
-        flush_dropped_entries();
-        return;
-    }
-
     const auto applyContiguousRuns =
-        [&](auto&& op_scalar, auto&& op_run) {
-            std::size_t idx = 0;
-            while (idx < n) {
+        [&](std::size_t first, std::size_t count, auto&& op_scalar, auto&& op_run) {
+            std::size_t idx = first;
+            const std::size_t last = first + count;
+            while (idx < last) {
                 const auto slot = slots[idx];
                 if (slot < 0 || static_cast<std::size_t>(slot) >= values_size) {
                     ++idx;
@@ -2062,7 +2023,7 @@ void FsilsMatrix::addResolvedMatrixEntries(std::span<const GlobalIndex> row_dofs
                 }
 
                 std::size_t run = 1u;
-                while (idx + run < n) {
+                while (idx + run < last) {
                     const auto next_slot = slots[idx + run];
                     if (next_slot < 0 ||
                         static_cast<std::size_t>(next_slot) >= values_size ||
@@ -2082,42 +2043,67 @@ void FsilsMatrix::addResolvedMatrixEntries(std::span<const GlobalIndex> row_dofs
             }
         };
 
-    switch (mode) {
-        case assembly::AddMode::Add:
-            applyContiguousRuns(
-                [](Real& dst, Real src) { dst += src; },
-                [](Real* dst, const Real* src, std::size_t count) {
-                    for (std::size_t k = 0; k < count; ++k) {
-                        dst[k] += src[k];
-                    }
-                });
-            break;
-        case assembly::AddMode::Insert:
-            applyContiguousRuns(
-                [](Real& dst, Real src) { dst = src; },
-                [](Real* dst, const Real* src, std::size_t count) {
-                    std::copy_n(src, count, dst);
-                });
-            break;
-        case assembly::AddMode::Max:
-            applyContiguousRuns(
-                [](Real& dst, Real src) { dst = std::max(dst, src); },
-                [](Real* dst, const Real* src, std::size_t count) {
-                    for (std::size_t k = 0; k < count; ++k) {
-                        dst[k] = std::max(dst[k], src[k]);
-                    }
-                });
-            break;
-        case assembly::AddMode::Min:
-            applyContiguousRuns(
-                [](Real& dst, Real src) { dst = std::min(dst, src); },
-                [](Real* dst, const Real* src, std::size_t count) {
-                    for (std::size_t k = 0; k < count; ++k) {
-                        dst[k] = std::min(dst[k], src[k]);
-                    }
-                });
-            break;
+    const auto applyRangeByMode = [&](std::size_t first, std::size_t count) {
+        switch (mode) {
+            case assembly::AddMode::Add:
+                applyContiguousRuns(
+                    first, count,
+                    [](Real& dst, Real src) { dst += src; },
+                    [](Real* dst, const Real* src, std::size_t run_count) {
+                        for (std::size_t k = 0; k < run_count; ++k) {
+                            dst[k] += src[k];
+                        }
+                    });
+                break;
+            case assembly::AddMode::Insert:
+                applyContiguousRuns(
+                    first, count,
+                    [](Real& dst, Real src) { dst = src; },
+                    [](Real* dst, const Real* src, std::size_t run_count) {
+                        std::copy_n(src, run_count, dst);
+                    });
+                break;
+            case assembly::AddMode::Max:
+                applyContiguousRuns(
+                    first, count,
+                    [](Real& dst, Real src) { dst = std::max(dst, src); },
+                    [](Real* dst, const Real* src, std::size_t run_count) {
+                        for (std::size_t k = 0; k < run_count; ++k) {
+                            dst[k] = std::max(dst[k], src[k]);
+                        }
+                    });
+                break;
+            case assembly::AddMode::Min:
+                applyContiguousRuns(
+                    first, count,
+                    [](Real& dst, Real src) { dst = std::min(dst, src); },
+                    [](Real* dst, const Real* src, std::size_t run_count) {
+                        for (std::size_t k = 0; k < run_count; ++k) {
+                            dst[k] = std::min(dst[k], src[k]);
+                        }
+                    });
+                break;
+        }
+    };
+
+    if (!all_rows_owned) {
+        for (GlobalIndex i = 0; i < n_rows; ++i) {
+            const auto row_idx = static_cast<std::size_t>(i);
+            if (off_owner_row[row_idx] != 0) {
+                off_owner_write_count_.fetch_add(static_cast<std::uint64_t>(n_cols),
+                                                 std::memory_order_relaxed);
+                continue;
+            }
+            if (owned_row[row_idx] == 0) {
+                continue;
+            }
+            applyRangeByMode(row_idx * n_cols_size, n_cols_size);
+        }
+        flush_dropped_entries();
+        return;
     }
+
+    applyRangeByMode(0u, n);
     flush_dropped_entries();
 }
 

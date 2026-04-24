@@ -872,6 +872,7 @@ public:
      * @return grad_x(psi_j)
      */
     [[nodiscard]] Vector3D trialPhysicalGradient(LocalIndex j, LocalIndex q) const;
+    [[nodiscard]] Vector3D trialReferenceGradient(LocalIndex j, LocalIndex q) const;
 
     /**
      * @brief Raw trial physical gradients storage (layout: [q * n_trial_dofs + j])

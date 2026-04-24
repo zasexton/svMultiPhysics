@@ -8184,6 +8184,7 @@ struct EvalEnvDual {
     DualWorkspace* ws{nullptr};
     const ConstitutiveStateLayout* constitutive_state{nullptr};
     ConstitutiveCallCacheDual* constitutive_cache{nullptr};
+    bool geometry_sensitivity_active{false};
 
     // Optional coupled-scalar seeding (for sensitivity assembly).
     std::optional<std::uint32_t> coupled_integral_seed_slot{};
@@ -8676,6 +8677,256 @@ EvalValue<Dual> evalDualScalarTerminal(const EvalEnvDual& env,
     return out;
 }
 
+[[nodiscard]] std::array<Real, 3> matrixVector(
+    const assembly::AssemblyContext::Matrix3x3& A,
+    const std::array<Real, 3>& x) noexcept
+{
+    std::array<Real, 3> out{0.0, 0.0, 0.0};
+    for (std::size_t r = 0; r < 3u; ++r) {
+        for (std::size_t c = 0; c < 3u; ++c) {
+            out[r] += A[r][c] * x[c];
+        }
+    }
+    return out;
+}
+
+[[nodiscard]] Real dot3(const std::array<Real, 3>& a,
+                        const std::array<Real, 3>& b) noexcept
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+[[nodiscard]] std::array<Real, 3> cross3(const std::array<Real, 3>& a,
+                                         const std::array<Real, 3>& b) noexcept
+{
+    return {
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    };
+}
+
+[[nodiscard]] std::array<Real, 3> column3(
+    const assembly::AssemblyContext::Matrix3x3& A,
+    int column) noexcept
+{
+    const auto c = static_cast<std::size_t>(column);
+    return {A[0][c], A[1][c], A[2][c]};
+}
+
+[[nodiscard]] std::array<Real, 3> trialGeometryVectorSeed(
+    const assembly::AssemblyContext& ctx,
+    LocalIndex j,
+    LocalIndex q)
+{
+    if (ctx.trialUsesVectorBasis()) {
+        return ctx.trialBasisVectorValue(j, q);
+    }
+
+    const int vd = ctx.trialValueDimension();
+    FE_THROW_IF(vd <= 0 || vd > 3, InvalidArgumentException,
+                "Forms: geometry sensitivity requires a 1..3 dimensional mesh-motion trial field");
+    const LocalIndex n_trial = ctx.numTrialDofs();
+    FE_THROW_IF((n_trial % static_cast<LocalIndex>(vd)) != 0, InvalidArgumentException,
+                "Forms: geometry sensitivity trial DOF count is not divisible by value dimension");
+    const LocalIndex dofs_per_component =
+        static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+    const int component = static_cast<int>(j / dofs_per_component);
+    FE_THROW_IF(component < 0 || component >= vd, InvalidArgumentException,
+                "Forms: geometry sensitivity trial component is out of range");
+
+    std::array<Real, 3> out{0.0, 0.0, 0.0};
+    out[static_cast<std::size_t>(component)] = ctx.trialBasisValue(j, q);
+    return out;
+}
+
+[[nodiscard]] assembly::AssemblyContext::Matrix3x3 trialGeometryJacobianSeed(
+    const assembly::AssemblyContext& ctx,
+    LocalIndex j,
+    LocalIndex q)
+{
+    FE_THROW_IF(ctx.trialUsesVectorBasis(), InvalidArgumentException,
+                "Forms: current-geometry sensitivity requires scalar-component H1/Product mesh-motion trials");
+
+    const int vd = ctx.trialValueDimension();
+    FE_THROW_IF(vd <= 0 || vd > 3, InvalidArgumentException,
+                "Forms: geometry sensitivity requires a 1..3 dimensional mesh-motion trial field");
+    const LocalIndex n_trial = ctx.numTrialDofs();
+    FE_THROW_IF((n_trial % static_cast<LocalIndex>(vd)) != 0, InvalidArgumentException,
+                "Forms: geometry sensitivity trial DOF count is not divisible by value dimension");
+    const LocalIndex dofs_per_component =
+        static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+    const int component = static_cast<int>(j / dofs_per_component);
+    FE_THROW_IF(component < 0 || component >= vd, InvalidArgumentException,
+                "Forms: geometry sensitivity trial component is out of range");
+
+    assembly::AssemblyContext::Matrix3x3 out{};
+    const auto grad_ref = ctx.trialReferenceGradient(j, q);
+    for (int xi = 0; xi < ctx.dimension(); ++xi) {
+        out[static_cast<std::size_t>(component)][static_cast<std::size_t>(xi)] =
+            grad_ref[static_cast<std::size_t>(xi)];
+    }
+    return out;
+}
+
+[[nodiscard]] Real traceProduct(
+    const assembly::AssemblyContext::Matrix3x3& A,
+    const assembly::AssemblyContext::Matrix3x3& B,
+    int dim) noexcept
+{
+    Real value = 0.0;
+    for (int i = 0; i < dim; ++i) {
+        for (int j = 0; j < dim; ++j) {
+            value += A[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] *
+                     B[static_cast<std::size_t>(j)][static_cast<std::size_t>(i)];
+        }
+    }
+    return value;
+}
+
+[[nodiscard]] Real currentCellMeasureDerivative(
+    const assembly::AssemblyContext& ctx,
+    LocalIndex q,
+    LocalIndex j)
+{
+    const auto dJ = trialGeometryJacobianSeed(ctx, j, q);
+    return ctx.currentMeasure(q) * traceProduct(ctx.currentInverseJacobian(q), dJ, ctx.dimension());
+}
+
+[[nodiscard]] std::array<Real, 3> surfaceTangentDerivative(
+    const assembly::AssemblyContext& ctx,
+    LocalIndex q,
+    LocalIndex j,
+    int tangent_column)
+{
+    FE_THROW_IF(ctx.trialUsesVectorBasis(), InvalidArgumentException,
+                "Forms: current-face geometry sensitivity requires scalar-component H1/Product mesh-motion trials");
+
+    const int vd = ctx.trialValueDimension();
+    FE_THROW_IF(vd <= 0 || vd > 3, InvalidArgumentException,
+                "Forms: geometry sensitivity requires a 1..3 dimensional mesh-motion trial field");
+    const LocalIndex n_trial = ctx.numTrialDofs();
+    FE_THROW_IF((n_trial % static_cast<LocalIndex>(vd)) != 0, InvalidArgumentException,
+                "Forms: geometry sensitivity trial DOF count is not divisible by value dimension");
+    const LocalIndex dofs_per_component =
+        static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+    const int component = static_cast<int>(j / dofs_per_component);
+    FE_THROW_IF(component < 0 || component >= vd, InvalidArgumentException,
+                "Forms: geometry sensitivity trial component is out of range");
+
+    const auto tangent = column3(ctx.surfaceJacobian(q), tangent_column);
+    const auto dxi_ds = matrixVector(ctx.currentInverseJacobian(q), tangent);
+    const auto grad_ref = ctx.trialReferenceGradient(j, q);
+    const Real dN_ds = dot3(grad_ref, dxi_ds);
+
+    std::array<Real, 3> out{0.0, 0.0, 0.0};
+    out[static_cast<std::size_t>(component)] = dN_ds;
+    return out;
+}
+
+[[nodiscard]] Real currentFaceMeasureDerivative(
+    const assembly::AssemblyContext& ctx,
+    LocalIndex q,
+    LocalIndex j)
+{
+    const int dim = ctx.dimension();
+    if (dim == 3) {
+        const auto t0 = column3(ctx.surfaceJacobian(q), 0);
+        const auto t1 = column3(ctx.surfaceJacobian(q), 1);
+        const auto dt0 = surfaceTangentDerivative(ctx, q, j, 0);
+        const auto dt1 = surfaceTangentDerivative(ctx, q, j, 1);
+        const auto d_area_vec_a = cross3(dt0, t1);
+        const auto d_area_vec_b = cross3(t0, dt1);
+        const auto normal = ctx.currentNormal(q);
+        return dot3(normal, {d_area_vec_a[0] + d_area_vec_b[0],
+                             d_area_vec_a[1] + d_area_vec_b[1],
+                             d_area_vec_a[2] + d_area_vec_b[2]});
+    }
+    if (dim == 2) {
+        const auto t0 = column3(ctx.surfaceJacobian(q), 0);
+        const auto dt0 = surfaceTangentDerivative(ctx, q, j, 0);
+        const Real measure = ctx.currentMeasure(q);
+        if (!(measure > 0.0)) {
+            return 0.0;
+        }
+        return dot3(t0, dt0) / measure;
+    }
+    return 0.0;
+}
+
+[[nodiscard]] std::array<Real, 3> currentFaceNormalDerivative(
+    const assembly::AssemblyContext& ctx,
+    LocalIndex q,
+    LocalIndex j)
+{
+    const int dim = ctx.dimension();
+    if (dim == 3) {
+        const auto t0 = column3(ctx.surfaceJacobian(q), 0);
+        const auto t1 = column3(ctx.surfaceJacobian(q), 1);
+        const auto dt0 = surfaceTangentDerivative(ctx, q, j, 0);
+        const auto dt1 = surfaceTangentDerivative(ctx, q, j, 1);
+        const auto d_area_vec_a = cross3(dt0, t1);
+        const auto d_area_vec_b = cross3(t0, dt1);
+        const std::array<Real, 3> d_area_vec{
+            d_area_vec_a[0] + d_area_vec_b[0],
+            d_area_vec_a[1] + d_area_vec_b[1],
+            d_area_vec_a[2] + d_area_vec_b[2]};
+        const auto normal = ctx.currentNormal(q);
+        const Real normal_part = dot3(normal, d_area_vec);
+        std::array<Real, 3> out{};
+        const Real measure = ctx.currentMeasure(q);
+        if (!(measure > 0.0)) {
+            return out;
+        }
+        for (std::size_t d = 0; d < 3u; ++d) {
+            out[d] = (d_area_vec[d] - normal[d] * normal_part) / measure;
+        }
+        return out;
+    }
+    if (dim == 2) {
+        const auto t0 = column3(ctx.surfaceJacobian(q), 0);
+        const auto dt0 = surfaceTangentDerivative(ctx, q, j, 0);
+        const Real measure = ctx.currentMeasure(q);
+        std::array<Real, 3> out{};
+        if (!(measure > 0.0)) {
+            return out;
+        }
+        const std::array<Real, 3> unit_t{t0[0] / measure, t0[1] / measure, 0.0};
+        const Real dmeasure = dot3(unit_t, dt0);
+        const std::array<Real, 3> dunit_t{
+            (dt0[0] - unit_t[0] * dmeasure) / measure,
+            (dt0[1] - unit_t[1] * dmeasure) / measure,
+            0.0};
+        out[0] = -dunit_t[1];
+        out[1] = dunit_t[0];
+        return out;
+    }
+    return {0.0, 0.0, 0.0};
+}
+
+[[nodiscard]] Real currentMeasureDerivative(
+    const assembly::AssemblyContext& ctx,
+    LocalIndex q,
+    LocalIndex j)
+{
+    if (ctx.contextType() == assembly::ContextType::Cell) {
+        return currentCellMeasureDerivative(ctx, q, j);
+    }
+    return currentFaceMeasureDerivative(ctx, q, j);
+}
+
+[[nodiscard]] Real integrationWeightDerivative(
+    const assembly::AssemblyContext& ctx,
+    LocalIndex q,
+    LocalIndex j)
+{
+    const Real measure = ctx.currentMeasure(q);
+    if (!(measure > 0.0)) {
+        return 0.0;
+    }
+    return ctx.integrationWeight(q) * currentMeasureDerivative(ctx, q, j) / measure;
+}
+
 EvalValue<Dual> evalDualDispatchMeshDisplacement(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
 {
     return evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::meshDisplacement);
@@ -8693,7 +8944,18 @@ EvalValue<Dual> evalDualDispatchMeshAcceleration(const FormExprNode&, const Eval
 
 EvalValue<Dual> evalDualDispatchCurrentCoordinate(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
 {
-    return evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::currentPhysicalPoint);
+    auto out = evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::currentPhysicalPoint);
+    if (env.geometry_sensitivity_active && env.trial_active == side) {
+        for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+            const auto seed = trialGeometryVectorSeed(ctxForSide(env.minus, env.plus, side),
+                                                      static_cast<LocalIndex>(j),
+                                                      q);
+            for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                out.vectorAt(d).deriv[j] = seed[d];
+            }
+        }
+    }
+    return out;
 }
 
 EvalValue<Dual> evalDualDispatchReferencePhysicalCoordinate(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
@@ -8703,7 +8965,19 @@ EvalValue<Dual> evalDualDispatchReferencePhysicalCoordinate(const FormExprNode&,
 
 EvalValue<Dual> evalDualDispatchCurrentJacobian(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
 {
-    return evalDualMatrixTerminal(env, side, q, &assembly::AssemblyContext::currentJacobian);
+    auto out = evalDualMatrixTerminal(env, side, q, &assembly::AssemblyContext::currentJacobian);
+    if (env.geometry_sensitivity_active && env.trial_active == side) {
+        const auto& ctx = ctxForSide(env.minus, env.plus, side);
+        for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+            const auto seed = trialGeometryJacobianSeed(ctx, static_cast<LocalIndex>(j), q);
+            for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+                for (std::size_t c = 0; c < out.matrixCols(); ++c) {
+                    out.matrixAt(r, c).deriv[j] = seed[r][c];
+                }
+            }
+        }
+    }
+    return out;
 }
 
 EvalValue<Dual> evalDualDispatchReferenceJacobian(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
@@ -8713,7 +8987,14 @@ EvalValue<Dual> evalDualDispatchReferenceJacobian(const FormExprNode&, const Eva
 
 EvalValue<Dual> evalDualDispatchCurrentMeasure(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
 {
-    return evalDualScalarTerminal(env, side, q, &assembly::AssemblyContext::currentMeasure);
+    auto out = evalDualScalarTerminal(env, side, q, &assembly::AssemblyContext::currentMeasure);
+    if (env.geometry_sensitivity_active && env.trial_active == side) {
+        const auto& ctx = ctxForSide(env.minus, env.plus, side);
+        for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+            out.s.deriv[j] = currentMeasureDerivative(ctx, q, static_cast<LocalIndex>(j));
+        }
+    }
+    return out;
 }
 
 EvalValue<Dual> evalDualDispatchReferenceMeasure(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
@@ -8723,7 +9004,17 @@ EvalValue<Dual> evalDualDispatchReferenceMeasure(const FormExprNode&, const Eval
 
 EvalValue<Dual> evalDualDispatchCurrentNormal(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
 {
-    return evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::currentNormal);
+    auto out = evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::currentNormal);
+    if (env.geometry_sensitivity_active && env.trial_active == side) {
+        const auto& ctx = ctxForSide(env.minus, env.plus, side);
+        for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+            const auto seed = currentFaceNormalDerivative(ctx, q, static_cast<LocalIndex>(j));
+            for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                out.vectorAt(d).deriv[j] = seed[d];
+            }
+        }
+    }
+    return out;
 }
 
 EvalValue<Dual> evalDualDispatchReferenceNormal(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
@@ -8733,7 +9024,26 @@ EvalValue<Dual> evalDualDispatchReferenceNormal(const FormExprNode&, const EvalE
 
 EvalValue<Dual> evalDualDispatchSurfaceJacobian(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
 {
-    return evalDualMatrixTerminal(env, side, q, &assembly::AssemblyContext::surfaceJacobian);
+    auto out = evalDualMatrixTerminal(env, side, q, &assembly::AssemblyContext::surfaceJacobian);
+    if (env.geometry_sensitivity_active && env.trial_active == side) {
+        const auto& ctx = ctxForSide(env.minus, env.plus, side);
+        const int face_dim = (ctx.dimension() == 3) ? 2 : ((ctx.dimension() == 2) ? 1 : 0);
+        for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+            for (int c = 0; c < face_dim; ++c) {
+                const auto seed = surfaceTangentDerivative(ctx, q, static_cast<LocalIndex>(j), c);
+                for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+                    out.matrixAt(r, static_cast<std::size_t>(c)).deriv[j] = seed[r];
+                }
+            }
+            if (ctx.dimension() >= 2) {
+                const auto dn = currentFaceNormalDerivative(ctx, q, static_cast<LocalIndex>(j));
+                for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+                    out.matrixAt(r, 2u).deriv[j] = dn[r];
+                }
+            }
+        }
+    }
+    return out;
 }
 
 EvalValue<Dual> evalDualDispatchCellDiameter(const FormExprNode&,
@@ -13696,6 +14006,7 @@ void NonlinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, asse
     ConstitutiveCallCacheDual constitutive_cache;
 
     const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
+    const bool geometry_sensitivity_active = residual_ir_.geometrySensitivityActive();
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const Real w = ctx.integrationWeight(q);
         ws.reset(n_trial_ad);
@@ -13711,6 +14022,7 @@ void NonlinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, asse
 
             EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, n_trial_ad, &ws,
                             constitutive_state_.get(), &constitutive_cache};
+            env.geometry_sensitivity_active = geometry_sensitivity_active;
             Dual sum_q = makeDualConstant(0.0, ws.alloc());
 
             for (const auto& term : residual_ir_.terms()) {
@@ -13733,6 +14045,10 @@ void NonlinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, asse
             }
             for (std::size_t j = 0; j < row.size(); ++j) {
                 row[j] += w * sum_q.deriv[j];
+                if (geometry_sensitivity_active) {
+                    row[j] += integrationWeightDerivative(ctx, q, static_cast<LocalIndex>(j)) *
+                              sum_q.value;
+                }
             }
         }
     }
@@ -13778,6 +14094,7 @@ void NonlinearFormKernel::computeCellBatch(std::span<const assembly::AssemblyCon
 
             std::vector<DualWorkspace> workspaces(lane_ctx.size());
             std::vector<ConstitutiveCallCacheDual> constitutive_cache(lane_ctx.size());
+            const bool geometry_sensitivity_active = residual_ir_.geometrySensitivityActive();
 
             for (LocalIndex q = 0; q < n_qpts; ++q) {
                 for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
@@ -13806,6 +14123,7 @@ void NonlinearFormKernel::computeCellBatch(std::span<const assembly::AssemblyCon
                             n_trial_ad, &workspaces[lane], constitutive_state_.get(),
                             &constitutive_cache[lane]
                         });
+                        envs.back().geometry_sensitivity_active = geometry_sensitivity_active;
                         sums.push_back(makeDualConstant(0.0, workspaces[lane].alloc()));
                     }
 
@@ -13839,6 +14157,13 @@ void NonlinearFormKernel::computeCellBatch(std::span<const assembly::AssemblyCon
                         if (want_matrix) {
                             for (std::size_t j = 0; j < rows[lane].size(); ++j) {
                                 rows[lane][j] += w * sums[lane].deriv[j];
+                                if (geometry_sensitivity_active) {
+                                    rows[lane][j] += integrationWeightDerivative(
+                                                         *lane_ctx[lane],
+                                                         q,
+                                                         static_cast<LocalIndex>(j)) *
+                                                     sums[lane].value;
+                                }
                             }
                         }
                     }
@@ -13900,6 +14225,7 @@ void NonlinearFormKernel::computeBoundaryFace(
     ConstitutiveCallCacheDual constitutive_cache;
 
     const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
+    const bool geometry_sensitivity_active = residual_ir_.geometrySensitivityActive();
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const Real w = ctx.integrationWeight(q);
         ws.reset(n_trial_ad);
@@ -13915,6 +14241,7 @@ void NonlinearFormKernel::computeBoundaryFace(
 
             EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, n_trial_ad, &ws,
                             constitutive_state_.get(), &constitutive_cache};
+            env.geometry_sensitivity_active = geometry_sensitivity_active;
             Dual sum_q = makeDualConstant(0.0, ws.alloc());
 
             for (const auto& term : residual_ir_.terms()) {
@@ -13938,6 +14265,10 @@ void NonlinearFormKernel::computeBoundaryFace(
             }
             for (std::size_t j = 0; j < row.size(); ++j) {
                 row[j] += w * sum_q.deriv[j];
+                if (geometry_sensitivity_active) {
+                    row[j] += integrationWeightDerivative(ctx, q, static_cast<LocalIndex>(j)) *
+                              sum_q.value;
+                }
             }
         }
     }
@@ -14024,6 +14355,7 @@ void NonlinearFormKernel::computeInteriorFace(
         const auto* time_ctx = ctx_eval.timeIntegrationContext();
         const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
         ConstitutiveCallCacheDual constitutive_cache;
+        const bool geometry_sensitivity_active = residual_ir_.geometrySensitivityActive();
         for (LocalIndex q = 0; q < n_qpts; ++q) {
             const Real w = ctx_eval.integrationWeight(q);
             ws.reset(n_trial_ad);
@@ -14039,6 +14371,7 @@ void NonlinearFormKernel::computeInteriorFace(
 
                 EvalEnvDual env{ctx_minus, &ctx_plus, test_active, trial_active, i,
                                 n_trial_ad, &ws, constitutive_state_.get(), &constitutive_cache};
+                env.geometry_sensitivity_active = geometry_sensitivity_active;
 
                 Dual sum_q = makeDualConstant(0.0, ws.alloc());
                 for (const auto& term : residual_ir_.terms()) {
@@ -14061,6 +14394,10 @@ void NonlinearFormKernel::computeInteriorFace(
                 }
                 for (std::size_t j = 0; j < row.size(); ++j) {
                     row[j] += w * sum_q.deriv[j];
+                    if (geometry_sensitivity_active && trial_active == eval_side) {
+                        row[j] += integrationWeightDerivative(ctx_eval, q, static_cast<LocalIndex>(j)) *
+                                  sum_q.value;
+                    }
                 }
             }
         }
@@ -14173,6 +14510,7 @@ void NonlinearFormKernel::computeInterfaceFace(
         const auto* time_ctx = ctx_eval.timeIntegrationContext();
         const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
         ConstitutiveCallCacheDual constitutive_cache;
+        const bool geometry_sensitivity_active = residual_ir_.geometrySensitivityActive();
         for (LocalIndex q = 0; q < n_qpts; ++q) {
             const Real w = ctx_eval.integrationWeight(q);
             ws.reset(n_trial_ad);
@@ -14188,6 +14526,7 @@ void NonlinearFormKernel::computeInterfaceFace(
 
                 EvalEnvDual env{ctx_minus, &ctx_plus, test_active, trial_active, i,
                                 n_trial_ad, &ws, constitutive_state_.get(), &constitutive_cache};
+                env.geometry_sensitivity_active = geometry_sensitivity_active;
 
                 Dual sum_q = makeDualConstant(0.0, ws.alloc());
                 for (const auto& term : residual_ir_.terms()) {
@@ -14211,6 +14550,10 @@ void NonlinearFormKernel::computeInterfaceFace(
                 }
                 for (std::size_t j = 0; j < row.size(); ++j) {
                     row[j] += w * sum_q.deriv[j];
+                    if (geometry_sensitivity_active && trial_active == eval_side) {
+                        row[j] += integrationWeightDerivative(ctx_eval, q, static_cast<LocalIndex>(j)) *
+                                  sum_q.value;
+                    }
                 }
             }
         }
@@ -14579,6 +14922,11 @@ SymbolicNonlinearFormKernel::SymbolicNonlinearFormKernel(FormIR residual_ir, Non
     }
     if (residual_ir_.kind() != FormKind::Residual) {
         throw std::invalid_argument("SymbolicNonlinearFormKernel: IR kind must be Residual");
+    }
+    if (residual_ir_.geometrySensitivityActive()) {
+        throw std::invalid_argument(
+            "SymbolicNonlinearFormKernel: monolithic geometry sensitivity requires "
+            "the AD NonlinearFormKernel path");
     }
 
     const FormIR* irs[] = {&residual_ir_};

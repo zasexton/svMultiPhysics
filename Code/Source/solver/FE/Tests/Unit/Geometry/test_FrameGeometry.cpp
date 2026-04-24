@@ -180,3 +180,80 @@ TEST(FrameGeometry, FaceSensitivitiesIgnoreOppositeTetraNodeForFaceZero)
         }
     }
 }
+
+TEST(FrameGeometry, CellGeometrySensitivityMatchesFiniteDifferenceForTetra)
+{
+    const std::vector<Point3D> nodes{
+        {0.0, 0.0, 0.0},
+        {1.2, 0.1, 0.0},
+        {0.2, 1.1, 0.1},
+        {0.1, 0.2, 1.3},
+    };
+    const auto quad = quadrature::QuadratureFactory::create(ElementType::Tetra4, 2);
+
+    const auto analytic = evaluateCellGeometrySensitivity(ElementType::Tetra4, *quad, nodes);
+    const auto fd =
+        finiteDifferenceCellGeometrySensitivity(ElementType::Tetra4, *quad, nodes, 1e-7);
+
+    ASSERT_EQ(analytic.n_qpts, fd.n_qpts);
+    ASSERT_EQ(analytic.n_nodes, fd.n_nodes);
+    for (LocalIndex q = 0; q < analytic.n_qpts; ++q) {
+        for (LocalIndex node = 0; node < analytic.n_nodes; ++node) {
+            for (int component = 0; component < 3; ++component) {
+                const auto& dx = analytic.physical_points.at(q, node, component);
+                const auto& dx_fd = fd.physical_points.at(q, node, component);
+                const auto& dJ = analytic.jacobians.at(q, node, component);
+                const auto& dJ_fd = fd.jacobians.at(q, node, component);
+                const auto& dJinv = analytic.inverse_jacobians.at(q, node, component);
+                const auto& dJinv_fd = fd.inverse_jacobians.at(q, node, component);
+                for (std::size_t d = 0; d < 3u; ++d) {
+                    EXPECT_NEAR(dx[d], dx_fd[d], 2e-8);
+                }
+                expectMatrixNear(dJ, dJ_fd, 2e-8);
+                expectMatrixNear(dJinv, dJinv_fd, 2e-7);
+                EXPECT_NEAR(analytic.measures.at(q, node, component),
+                            fd.measures.at(q, node, component),
+                            2e-8);
+            }
+        }
+    }
+}
+
+TEST(FrameGeometry, FaceGeometrySensitivityEvaluationMatchesFiniteDifferencePath)
+{
+    const std::vector<Point3D> nodes{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0},
+        {0.0, 0.0, 1.0},
+    };
+    const auto face_quad = quadrature::QuadratureFactory::create(ElementType::Triangle3, 2);
+
+    const auto evaluated = evaluateFaceGeometrySensitivity(ElementType::Tetra4,
+                                                           /*local_face_id=*/0,
+                                                           ElementType::Triangle3,
+                                                           *face_quad,
+                                                           nodes);
+    const auto fd = finiteDifferenceFaceGeometrySensitivity(ElementType::Tetra4,
+                                                            /*local_face_id=*/0,
+                                                            ElementType::Triangle3,
+                                                            *face_quad,
+                                                            nodes);
+
+    ASSERT_EQ(evaluated.n_qpts, fd.n_qpts);
+    ASSERT_EQ(evaluated.n_nodes, fd.n_nodes);
+    for (LocalIndex q = 0; q < evaluated.n_qpts; ++q) {
+        for (LocalIndex node = 0; node < evaluated.n_nodes; ++node) {
+            for (int component = 0; component < 3; ++component) {
+                const auto& dn = evaluated.normals.at(q, node, component);
+                const auto& dn_fd = fd.normals.at(q, node, component);
+                for (std::size_t d = 0; d < 3u; ++d) {
+                    EXPECT_NEAR(dn[d], dn_fd[d], 1e-12);
+                }
+                EXPECT_NEAR(evaluated.measures.at(q, node, component),
+                            fd.measures.at(q, node, component),
+                            1e-12);
+            }
+        }
+    }
+}

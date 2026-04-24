@@ -149,6 +149,15 @@ toGeometryNodes(std::span<const Point3D> coordinates);
     std::span<const Point3D> coordinates,
     Real step = Real(1e-7));
 
+[[nodiscard]] CellGeometrySensitivity evaluateCellGeometrySensitivity(
+    const GeometryMapping& mapping,
+    const quadrature::QuadratureRule& quad_rule);
+
+[[nodiscard]] CellGeometrySensitivity evaluateCellGeometrySensitivity(
+    ElementType cell_type,
+    const quadrature::QuadratureRule& quad_rule,
+    std::span<const Point3D> coordinates);
+
 [[nodiscard]] FaceGeometrySensitivity finiteDifferenceFaceGeometrySensitivity(
     ElementType cell_type,
     LocalIndex local_face_id,
@@ -157,6 +166,14 @@ toGeometryNodes(std::span<const Point3D> coordinates);
     std::span<const Point3D> coordinates,
     std::span<const LocalIndex> align_facet_to_reference = {},
     Real step = Real(1e-7));
+
+[[nodiscard]] FaceGeometrySensitivity evaluateFaceGeometrySensitivity(
+    ElementType cell_type,
+    LocalIndex local_face_id,
+    ElementType face_type,
+    const quadrature::QuadratureRule& quad_rule,
+    std::span<const Point3D> coordinates,
+    std::span<const LocalIndex> align_facet_to_reference = {});
 
 } // namespace geometry
 } // namespace FE

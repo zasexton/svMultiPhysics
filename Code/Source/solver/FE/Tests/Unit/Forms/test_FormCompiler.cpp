@@ -134,7 +134,7 @@ TEST(FormCompilerTest, DefaultAndMoveConstructorsPreserveOptionsAndUsability)
     EXPECT_EQ(ir.kind(), FormKind::Bilinear);
 }
 
-TEST(FormCompilerTest, GeometrySensitivityModeFailsClosedForGeometryTerminals)
+TEST(FormCompilerTest, GeometrySensitivityModeRecordsGeometryTerminalDependencies)
 {
     SymbolicOptions opts;
     opts.geometry_sensitivity.mode = GeometrySensitivityMode::MeshMotionUnknowns;
@@ -145,13 +145,26 @@ TEST(FormCompilerTest, GeometrySensitivityModeFailsClosedForGeometryTerminals)
     const auto u = FormExpr::trialFunction(space, "u");
     const auto v = FormExpr::testFunction(space, "v");
 
-    EXPECT_THROW(
-        (void)compiler.compileResidual(
-            (component(FormExpr::currentCoordinate(), 0) * u * v).dx()),
-        std::invalid_argument);
+    const auto geometry_ir = compiler.compileResidual(
+        (component(FormExpr::currentCoordinate(), 0) * u * v).dx());
+    EXPECT_TRUE(geometry_ir.isCompiled());
+    EXPECT_TRUE(geometry_ir.hasGeometrySensitivityTerminals());
+    EXPECT_TRUE(geometry_ir.geometrySensitivityActive());
+    ASSERT_EQ(geometry_ir.geometrySensitivityOptions().mode,
+              GeometrySensitivityMode::MeshMotionUnknowns);
+
+    bool found_mesh_motion_requirement = false;
+    for (const auto& req : geometry_ir.fieldRequirements()) {
+        if (req.field == opts.geometry_sensitivity.mesh_motion_field) {
+            found_mesh_motion_requirement = true;
+        }
+    }
+    EXPECT_TRUE(found_mesh_motion_requirement);
 
     const auto ir = compiler.compileResidual((u * v).dx());
     EXPECT_TRUE(ir.isCompiled());
+    EXPECT_FALSE(ir.hasGeometrySensitivityTerminals());
+    EXPECT_FALSE(ir.geometrySensitivityActive());
 }
 
 TEST(FormCompilerTest, GeometrySensitivityModeRequiresMeshMotionField)

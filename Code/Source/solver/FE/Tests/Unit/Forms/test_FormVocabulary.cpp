@@ -828,6 +828,72 @@ TEST(FormVocabularyTest, MovingDomainGeometryTerminalsAreADConstants)
     }
 }
 
+TEST(FormVocabularyTest, OptInCurrentGeometrySensitivitySeedsMeshMotionJacobian)
+{
+    MovingSingleTetraMeshAccess mesh;
+    auto base_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace vector_space(base_space, /*components=*/3);
+    auto dof_map =
+        createSingleTetraDenseDofMap(static_cast<LocalIndex>(vector_space.dofs_per_element()));
+
+    const auto u = FormExpr::trialFunction(vector_space, "mesh_displacement");
+    const auto v = FormExpr::testFunction(vector_space, "v");
+    const auto residual =
+        (inner(currentCoordinate(), v) +
+         FormExpr::constant(0.0) * inner(u, v)).dx();
+
+    auto assemble_matrix = [&](SymbolicOptions options) {
+        FormCompiler compiler(options);
+        auto ir = compiler.compileResidual(residual);
+        NonlinearFormKernel kernel(std::move(ir), ADMode::Forward);
+
+        assembly::StandardAssembler assembler;
+        assembler.setDofMap(dof_map);
+        if (options.geometry_sensitivity.mode ==
+            GeometrySensitivityMode::MeshMotionUnknowns) {
+            const std::array<assembly::FieldSolutionAccess, 1> field_access = {{
+                assembly::FieldSolutionAccess{
+                    .field = options.geometry_sensitivity.mesh_motion_field,
+                    .space = &vector_space,
+                    .dof_map = &dof_map,
+                    .dof_offset = 0,
+                },
+            }};
+            assembler.setFieldSolutionAccess(field_access);
+        }
+        assembler.setCurrentSolution(
+            std::vector<Real>(static_cast<std::size_t>(dof_map.getNumDofs()), 0.0));
+
+        assembly::DenseMatrixView J(dof_map.getNumDofs());
+        assembly::DenseVectorView R(dof_map.getNumDofs());
+        J.zero();
+        R.zero();
+        (void)assembler.assembleBoth(mesh, vector_space, vector_space, kernel, J, R);
+        return J;
+    };
+
+    const auto default_J = assemble_matrix(SymbolicOptions{});
+    for (GlobalIndex r = 0; r < dof_map.getNumDofs(); ++r) {
+        for (GlobalIndex c = 0; c < dof_map.getNumDofs(); ++c) {
+            EXPECT_NEAR(default_J.getMatrixEntry(r, c), 0.0, 1e-14);
+        }
+    }
+
+    SymbolicOptions monolithic_options;
+    monolithic_options.geometry_sensitivity.mode =
+        GeometrySensitivityMode::MeshMotionUnknowns;
+    monolithic_options.geometry_sensitivity.mesh_motion_field = 17;
+
+    const auto monolithic_J = assemble_matrix(monolithic_options);
+    Real max_abs = 0.0;
+    for (GlobalIndex r = 0; r < dof_map.getNumDofs(); ++r) {
+        for (GlobalIndex c = 0; c < dof_map.getNumDofs(); ++c) {
+            max_abs = std::max(max_abs, std::abs(monolithic_J.getMatrixEntry(r, c)));
+        }
+    }
+    EXPECT_GT(max_abs, 1e-4);
+}
+
 TEST(FormVocabularyTest, DGRestrictionsAssembleCrossBlockMass)
 {
     TwoTetraSharedFaceMeshAccess mesh;

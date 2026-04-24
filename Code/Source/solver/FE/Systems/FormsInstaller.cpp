@@ -211,6 +211,127 @@ std::unordered_set<FieldId> gatherStateFields(const forms::FormExprNode& node)
     return out;
 }
 
+bool containsGeometrySensitivityTerminal(const forms::FormExprNode& node)
+{
+    switch (node.type()) {
+        case forms::FormExprType::CurrentCoordinate:
+        case forms::FormExprType::CurrentJacobian:
+        case forms::FormExprType::CurrentJacobianDeterminant:
+        case forms::FormExprType::CurrentNormal:
+        case forms::FormExprType::CurrentMeasure:
+        case forms::FormExprType::SurfaceJacobian:
+            return true;
+        default:
+            break;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && containsGeometrySensitivityTerminal(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void validateGeometrySensitivityField(const FESystem& system,
+                                      const forms::GeometrySensitivityOptions& options)
+{
+    if (options.mode != forms::GeometrySensitivityMode::MeshMotionUnknowns) {
+        return;
+    }
+    FE_THROW_IF(options.mesh_motion_field == INVALID_FIELD_ID, InvalidArgumentException,
+                "installCoupledResidual: MeshMotionUnknowns geometry sensitivity requires "
+                "GeometrySensitivityOptions::mesh_motion_field");
+    const auto& rec = system.fieldRecord(options.mesh_motion_field);
+    FE_CHECK_NOT_NULL(rec.space.get(),
+                      "installCoupledResidual: geometry-sensitivity mesh-motion field space");
+    FE_THROW_IF(rec.space->field_type() != FieldType::Vector, InvalidArgumentException,
+                "installCoupledResidual: geometry-sensitivity mesh-motion field '" +
+                    rec.name + "' must be vector-valued");
+    const auto bound = system.meshMotionField(MeshMotionFieldRole::Displacement);
+    FE_THROW_IF(!bound.has_value() || *bound != options.mesh_motion_field,
+                InvalidArgumentException,
+                "installCoupledResidual: geometry sensitivity requested for field '" +
+                    rec.name +
+                    "' but that field is not bound as the system mesh-displacement unknown");
+}
+
+[[nodiscard]] std::unordered_set<FieldId> gatherResidualDependencies(
+    const forms::FormExprNode& node,
+    const forms::GeometrySensitivityOptions& geometry_sensitivity)
+{
+    auto out = gatherStateFields(node);
+    if (geometry_sensitivity.mode == forms::GeometrySensitivityMode::MeshMotionUnknowns &&
+        containsGeometrySensitivityTerminal(node)) {
+        FE_THROW_IF(geometry_sensitivity.mesh_motion_field == INVALID_FIELD_ID,
+                    InvalidArgumentException,
+                    "installCoupledResidual: monolithic geometry sensitivity requested "
+                    "without a mesh-motion field");
+        out.insert(geometry_sensitivity.mesh_motion_field);
+    }
+    return out;
+}
+
+[[nodiscard]] forms::SymbolicOptions compilerOptionsForTrial(
+    forms::SymbolicOptions options,
+    FieldId trial_field)
+{
+    const auto mesh_field = options.geometry_sensitivity.mesh_motion_field;
+    if (options.geometry_sensitivity.mode == forms::GeometrySensitivityMode::MeshMotionUnknowns &&
+        mesh_field != INVALID_FIELD_ID &&
+        trial_field != mesh_field) {
+        options.geometry_sensitivity.mode = forms::GeometrySensitivityMode::GeometryConstant;
+    }
+    if (options.geometry_sensitivity.mode == forms::GeometrySensitivityMode::MeshMotionUnknowns) {
+        options.use_symbolic_tangent = false;
+    }
+    return options;
+}
+
+[[nodiscard]] forms::FormExpr testProbeForField(const FieldRecord& rec)
+{
+    FE_CHECK_NOT_NULL(rec.space.get(), "installCoupledResidual: test field space");
+    auto test = forms::FormExpr::testFunction(*rec.space, rec.name);
+    if (rec.space->field_type() == FieldType::Vector) {
+        return forms::inner(test, test);
+    }
+    return test;
+}
+
+[[nodiscard]] forms::FormExpr trialProbeForField(const FieldRecord& rec)
+{
+    FE_CHECK_NOT_NULL(rec.space.get(), "installCoupledResidual: trial field space");
+    auto trial = forms::FormExpr::trialFunction(*rec.space, rec.name);
+    if (rec.space->field_type() == FieldType::Vector) {
+        return forms::inner(trial, trial);
+    }
+    return trial;
+}
+
+[[nodiscard]] forms::FormExpr ensureGeometrySensitivityTrialDependency(
+    const forms::FormExpr& expr,
+    const FESystem& system,
+    FieldId test_field,
+    FieldId trial_field,
+    const forms::SymbolicOptions& compiler_options)
+{
+    if (expr.hasTrial() ||
+        compiler_options.geometry_sensitivity.mode != forms::GeometrySensitivityMode::MeshMotionUnknowns) {
+        return expr;
+    }
+    if (!expr.isValid() || expr.node() == nullptr ||
+        !containsGeometrySensitivityTerminal(*expr.node())) {
+        return expr;
+    }
+
+    const auto& test_rec = system.fieldRecord(test_field);
+    const auto& trial_rec = system.fieldRecord(trial_field);
+    const auto zero_probe =
+        (forms::FormExpr::constant(0.0) *
+         trialProbeForField(trial_rec) *
+         testProbeForField(test_rec)).dx();
+    return expr + zero_probe;
+}
+
 bool containsCoupledTerminals(const forms::FormExprNode& node)
 {
     switch (node.type()) {
@@ -338,8 +459,18 @@ KernelPtr installResidualForm(
     FE_CHECK_NOT_NULL(test_rec.space.get(), "installResidualForm: test field space");
     FE_CHECK_NOT_NULL(trial_rec.space.get(), "installResidualForm: trial field space");
 
-    forms::FormCompiler compiler(options.compiler_options);
-    auto ir = compiler.compileResidual(residual_form);
+    validateGeometrySensitivityField(system, options.compiler_options.geometry_sensitivity);
+    auto block_options = options;
+    block_options.compiler_options =
+        compilerOptionsForTrial(options.compiler_options, trial_field);
+    const auto lowered = ensureGeometrySensitivityTrialDependency(residual_form,
+                                                                  system,
+                                                                  test_field,
+                                                                  trial_field,
+                                                                  block_options.compiler_options);
+
+    forms::FormCompiler compiler(block_options.compiler_options);
+    auto ir = compiler.compileResidual(lowered);
 
     FE_THROW_IF(!ir.testSpace().has_value(), InvalidArgumentException,
                 "installResidualForm: compiled residual missing TestFunction space");
@@ -363,11 +494,12 @@ KernelPtr installResidualForm(
     // that assembles the Jacobian from `a` and the residual vector from `K*u + L`.
     std::string reason;
     const bool has_coupled_terminals =
-        residual_form.isValid() && residual_form.node() != nullptr && containsCoupledTerminals(*residual_form.node());
-    auto split = has_coupled_terminals
+        lowered.isValid() && lowered.node() != nullptr && containsCoupledTerminals(*lowered.node());
+    const bool has_geometry_sensitivity = ir.geometrySensitivityActive();
+    auto split = (has_coupled_terminals || has_geometry_sensitivity)
                      ? std::nullopt
                      : forms::trySplitAffineResidual(
-                           residual_form,
+                           lowered,
                            forms::AffineResidualOptions{.allow_time_derivatives = false, .allow_interior_face_terms = false},
                            &reason);
 
@@ -384,14 +516,14 @@ KernelPtr installResidualForm(
             forms::LinearKernelOutput::Both);
     } else {
         (void)reason; // reserved for future diagnostics/telemetry
-        if (options.compiler_options.use_symbolic_tangent) {
+        if (block_options.compiler_options.use_symbolic_tangent) {
             kernel = std::make_shared<forms::SymbolicNonlinearFormKernel>(std::move(ir), forms::NonlinearKernelOutput::Both);
         } else {
             kernel = std::make_shared<forms::NonlinearFormKernel>(std::move(ir), options.ad_mode);
         }
     }
 
-    kernel = maybeWrapForJIT(std::move(kernel), options);
+    kernel = maybeWrapForJIT(std::move(kernel), block_options);
     registerKernel(system, op, test_field, trial_field, dispatch, kernel);
     return kernel;
 }
@@ -469,6 +601,7 @@ std::vector<std::vector<KernelPtr>> installResidualBlocks(
     FE_THROW_IF(trial_fields.size() != blocks.numTrialFields(), InvalidArgumentException,
                 "installResidualBlocks: trial_fields size does not match blocks.numTrialFields()");
 
+    validateGeometrySensitivityField(system, options.compiler_options.geometry_sensitivity);
     forms::FormCompiler compiler(options.compiler_options);
     auto compiled = compiler.compileResidual(blocks);
 
@@ -490,7 +623,7 @@ std::vector<std::vector<KernelPtr>> installResidualBlocks(
                         "installResidualBlocks: compiled residual block has no integral terms");
 
             KernelPtr kernel{};
-            if (options.compiler_options.use_symbolic_tangent) {
+            if (options.compiler_options.use_symbolic_tangent && !ir.geometrySensitivityActive()) {
                 kernel = maybeWrapForJIT(std::make_shared<forms::SymbolicNonlinearFormKernel>(
                                              std::move(ir), forms::NonlinearKernelOutput::Both),
                                          options);
@@ -533,7 +666,7 @@ CoupledResidualKernels installCoupledResidual(
     FE_THROW_IF(trial_fields.empty(), InvalidArgumentException,
                 "installCoupledResidual: empty trial field list");
 
-    forms::FormCompiler compiler(options.compiler_options);
+    validateGeometrySensitivityField(system, options.compiler_options.geometry_sensitivity);
 
     struct PendingKernelInstall {
         FieldId test_field{INVALID_FIELD_ID};
@@ -568,7 +701,8 @@ CoupledResidualKernels installCoupledResidual(
 
         const auto* root = base_expr.node();
         FE_CHECK_NOT_NULL(root, "installCoupledResidual: residual block root");
-        const auto state_fields = gatherStateFields(*root);
+        const auto state_fields =
+            gatherResidualDependencies(*root, options.compiler_options.geometry_sensitivity);
 
         FieldId active_trial = INVALID_FIELD_ID;
         if (i < trial_fields.size() && state_fields.contains(trial_fields[i])) {
@@ -583,6 +717,7 @@ CoupledResidualKernels installCoupledResidual(
         }
 
         if (active_trial == INVALID_FIELD_ID) {
+            forms::FormCompiler compiler(options.compiler_options);
             auto linear_ir = compiler.compileLinear(base_expr);
             const auto dispatch = analyzeDispatch(linear_ir);
             if (!dispatchHasAnyTerm(dispatch)) {
@@ -642,8 +777,17 @@ CoupledResidualKernels installCoupledResidual(
                 continue;
             }
 
-            const auto lowered = lowerStateFields(base_expr, trial, system);
-            auto residual_ir = compiler.compileResidual(lowered);
+            auto block_options = options;
+            block_options.compiler_options =
+                compilerOptionsForTrial(options.compiler_options, trial);
+            const auto lowered_base = lowerStateFields(base_expr, trial, system);
+            const auto lowered = ensureGeometrySensitivityTrialDependency(lowered_base,
+                                                                          system,
+                                                                          test_fields[i],
+                                                                          trial,
+                                                                          block_options.compiler_options);
+            forms::FormCompiler block_compiler(block_options.compiler_options);
+            auto residual_ir = block_compiler.compileResidual(lowered);
             const auto dispatch = analyzeDispatch(residual_ir);
             FE_THROW_IF(!dispatchHasAnyTerm(dispatch), InvalidArgumentException,
                         "installCoupledResidual: compiled Jacobian block has no integral terms");
@@ -656,10 +800,12 @@ CoupledResidualKernels installCoupledResidual(
             std::optional<forms::FormIR> tangent_ir_for_plan;
             std::optional<forms::FormIR> tangent_ir_for_kernel;
             const bool need_symbolic_tangent_kernel = !owns_row_vector;
-            if (need_symbolic_tangent_kernel || (dispatch.has_cell && monolithic_cell_feasible)) {
+            const bool block_geometry_sensitivity = residual_ir.geometrySensitivityActive();
+            if (!block_geometry_sensitivity &&
+                (need_symbolic_tangent_kernel || (dispatch.has_cell && monolithic_cell_feasible))) {
                 try {
                     auto tangent_expr = forms::differentiateResidual(lowered);
-                    auto tangent_ir = compiler.compileBilinear(tangent_expr);
+                    auto tangent_ir = block_compiler.compileBilinear(tangent_expr);
                     if (need_symbolic_tangent_kernel) {
                         tangent_ir_for_kernel = tangent_ir.clone();
                     }
@@ -678,18 +824,18 @@ CoupledResidualKernels installCoupledResidual(
 
             auto residual_ir_for_plan = residual_ir.clone();
             KernelPtr kernel{};
-            if (options.compiler_options.use_symbolic_tangent) {
+            if (block_options.compiler_options.use_symbolic_tangent) {
                 kernel = maybeWrapForJIT(
                     std::make_shared<forms::SymbolicNonlinearFormKernel>(std::move(residual_ir), output),
-                    options);
+                    block_options);
             } else if (tangent_ir_for_kernel.has_value()) {
                 kernel = maybeWrapForJIT(
                     std::make_shared<forms::FormKernel>(std::move(*tangent_ir_for_kernel)),
-                    options);
+                    block_options);
             } else {
                 kernel = maybeWrapForJIT(
                     std::make_shared<forms::NonlinearFormKernel>(std::move(residual_ir), options.ad_mode, output),
-                    options);
+                    block_options);
             }
 
             out.jacobian_blocks[i][j] = kernel;
@@ -1069,7 +1215,7 @@ CoupledResidualKernels installCoupledResidualMixed(
     bool monolithic_cell_feasible = plan->monolithic_cell_requested;
     std::string monolithic_disable_reason{};
 
-    forms::FormCompiler compiler(options.compiler_options);
+    validateGeometrySensitivityField(system, options.compiler_options.geometry_sensitivity);
 
     for (std::size_t i = 0; i < residual_blocks.numTestFields(); ++i) {
         if (!residual_blocks.hasBlock(i)) {
@@ -1082,7 +1228,8 @@ CoupledResidualKernels installCoupledResidualMixed(
 
         const auto* root = base_expr.node();
         FE_CHECK_NOT_NULL(root, "installCoupledResidualMixed: residual block root");
-        const auto state_fields = gatherStateFields(*root);
+        const auto state_fields =
+            gatherResidualDependencies(*root, options.compiler_options.geometry_sensitivity);
 
         FieldId active_trial = INVALID_FIELD_ID;
         if (i < trial_fields.size() && state_fields.contains(trial_fields[i])) {
@@ -1097,6 +1244,7 @@ CoupledResidualKernels installCoupledResidualMixed(
         }
 
         if (active_trial == INVALID_FIELD_ID) {
+            forms::FormCompiler compiler(options.compiler_options);
             auto linear_ir = compiler.compileLinear(base_expr);
             const auto dispatch = analyzeDispatch(linear_ir);
             if (!dispatchHasAnyTerm(dispatch)) {
@@ -1156,8 +1304,17 @@ CoupledResidualKernels installCoupledResidualMixed(
                 continue;
             }
 
-            const auto lowered = lowerStateFields(base_expr, trial, system);
-            auto residual_ir = compiler.compileResidual(lowered);
+            auto block_options = options;
+            block_options.compiler_options =
+                compilerOptionsForTrial(options.compiler_options, trial);
+            const auto lowered_base = lowerStateFields(base_expr, trial, system);
+            const auto lowered = ensureGeometrySensitivityTrialDependency(lowered_base,
+                                                                          system,
+                                                                          test_fields[i],
+                                                                          trial,
+                                                                          block_options.compiler_options);
+            forms::FormCompiler block_compiler(block_options.compiler_options);
+            auto residual_ir = block_compiler.compileResidual(lowered);
             const auto dispatch = analyzeDispatch(residual_ir);
             FE_THROW_IF(!dispatchHasAnyTerm(dispatch), InvalidArgumentException,
                         "installCoupledResidualMixed: compiled residual block has no integral terms");
@@ -1170,10 +1327,12 @@ CoupledResidualKernels installCoupledResidualMixed(
             std::optional<forms::FormIR> tangent_ir_for_plan;
             std::optional<forms::FormIR> tangent_ir_for_kernel;
             const bool need_symbolic_tangent_kernel = !owns_row_vector;
-            if (need_symbolic_tangent_kernel || (dispatch.has_cell && monolithic_cell_feasible)) {
+            const bool block_geometry_sensitivity = residual_ir.geometrySensitivityActive();
+            if (!block_geometry_sensitivity &&
+                (need_symbolic_tangent_kernel || (dispatch.has_cell && monolithic_cell_feasible))) {
                 try {
                     auto tangent_expr = forms::differentiateResidual(lowered);
-                    auto tangent_ir = compiler.compileBilinear(tangent_expr);
+                    auto tangent_ir = block_compiler.compileBilinear(tangent_expr);
                     if (need_symbolic_tangent_kernel) {
                         tangent_ir_for_kernel = tangent_ir.clone();
                     }
@@ -1192,18 +1351,18 @@ CoupledResidualKernels installCoupledResidualMixed(
 
             auto residual_ir_for_plan = residual_ir.clone();
             KernelPtr kernel{};
-            if (options.compiler_options.use_symbolic_tangent) {
+            if (block_options.compiler_options.use_symbolic_tangent) {
                 kernel = maybeWrapForJIT(
                     std::make_shared<forms::SymbolicNonlinearFormKernel>(std::move(residual_ir), output),
-                    options);
+                    block_options);
             } else if (tangent_ir_for_kernel.has_value()) {
                 kernel = maybeWrapForJIT(
                     std::make_shared<forms::FormKernel>(std::move(*tangent_ir_for_kernel)),
-                    options);
+                    block_options);
             } else {
                 kernel = maybeWrapForJIT(
                     std::make_shared<forms::NonlinearFormKernel>(std::move(residual_ir), options.ad_mode, output),
-                    options);
+                    block_options);
             }
 
             out.jacobian_blocks[i][j] = kernel;
@@ -1371,7 +1530,8 @@ installMixedFormIR(
                     want_matrix = true;
                     want_vector = true;
                     residual_ir_for_plan = std::move(block_ir_for_plan);
-                    if (options.compiler_options.use_symbolic_tangent) {
+                    if (options.compiler_options.use_symbolic_tangent &&
+                        !block_ir.geometrySensitivityActive()) {
                         kernel = std::make_shared<forms::SymbolicNonlinearFormKernel>(
                             std::move(block_ir), forms::NonlinearKernelOutput::Both);
                     } else {

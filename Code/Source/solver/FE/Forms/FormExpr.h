@@ -82,9 +82,8 @@ enum class GeometryConfiguration : std::uint8_t {
  *
  * The default keeps current/reference geometry constant with respect to
  * solution-field differentiation. The mesh-motion mode is an explicit request
- * for monolithic moving-mesh derivatives; until the Phase 8 geometry derivative
- * kernels are implemented, compilers fail closed rather than assembling an
- * incomplete tangent.
+ * for monolithic moving-mesh derivatives through a registered, physics-agnostic
+ * mesh-displacement unknown.
  */
 enum class GeometrySensitivityMode : std::uint8_t {
     GeometryConstant,

@@ -21,6 +21,8 @@ struct FormIR::Impl {
     std::optional<FormExprNode::SpaceSignature> test_space{};
     std::optional<FormExprNode::SpaceSignature> trial_space{};
     int max_time_derivative_order{0};
+    GeometrySensitivityOptions geometry_sensitivity{};
+    bool has_geometry_sensitivity_terminals{false};
     std::vector<IntegralTerm> terms{};
     std::string dump{};
 };
@@ -38,6 +40,13 @@ const std::vector<assembly::FieldRequirement>& FormIR::fieldRequirements() const
 const std::optional<FormExprNode::SpaceSignature>& FormIR::testSpace() const noexcept { return impl_->test_space; }
 const std::optional<FormExprNode::SpaceSignature>& FormIR::trialSpace() const noexcept { return impl_->trial_space; }
 int FormIR::maxTimeDerivativeOrder() const noexcept { return impl_->max_time_derivative_order; }
+const GeometrySensitivityOptions& FormIR::geometrySensitivityOptions() const noexcept { return impl_->geometry_sensitivity; }
+bool FormIR::hasGeometrySensitivityTerminals() const noexcept { return impl_->has_geometry_sensitivity_terminals; }
+bool FormIR::geometrySensitivityActive() const noexcept
+{
+    return impl_->has_geometry_sensitivity_terminals &&
+           impl_->geometry_sensitivity.mode == GeometrySensitivityMode::MeshMotionUnknowns;
+}
 
 bool FormIR::hasCellTerms() const noexcept
 {
@@ -122,6 +131,8 @@ void FormIR::setFieldRequirements(std::vector<assembly::FieldRequirement> reqs) 
 void FormIR::setTestSpace(std::optional<FormExprNode::SpaceSignature> sig) { impl_->test_space = std::move(sig); }
 void FormIR::setTrialSpace(std::optional<FormExprNode::SpaceSignature> sig) { impl_->trial_space = std::move(sig); }
 void FormIR::setMaxTimeDerivativeOrder(int order) { impl_->max_time_derivative_order = order; }
+void FormIR::setGeometrySensitivityOptions(GeometrySensitivityOptions options) { impl_->geometry_sensitivity = options; }
+void FormIR::setHasGeometrySensitivityTerminals(bool has_terminals) { impl_->has_geometry_sensitivity_terminals = has_terminals; }
 void FormIR::setTerms(std::vector<IntegralTerm> terms) { impl_->terms = std::move(terms); }
 void FormIR::setDump(std::string dump) { impl_->dump = std::move(dump); }
 

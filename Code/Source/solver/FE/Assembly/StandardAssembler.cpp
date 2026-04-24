@@ -6903,25 +6903,10 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                    LocalIndex n_test,
                    LocalIndex n_trial,
                    bool want_matrix,
-                   bool want_vector,
-                   bool zero_output) {
+                   bool want_vector) {
                     const auto matrix_size =
                         static_cast<std::size_t>(n_test) * static_cast<std::size_t>(n_trial);
                     const auto vector_size = static_cast<std::size_t>(n_test);
-
-                    if (!zero_output) {
-                        output.n_test_dofs = n_test;
-                        output.n_trial_dofs = n_trial;
-                        output.has_matrix = want_matrix;
-                        output.has_vector = want_vector;
-                        if (!want_matrix) {
-                            output.local_matrix.clear();
-                        }
-                        if (!want_vector) {
-                            output.local_vector.clear();
-                        }
-                        return;
-                    }
 
                     if (output.n_test_dofs != n_test ||
                         output.n_trial_dofs != n_trial ||
@@ -7074,8 +7059,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             std::span<const GlobalIndex>& col_dofs,
                             KernelOutput& output,
                             bool want_matrix,
-                            bool want_vector,
-                            bool zero_output) {
+                            bool want_vector) {
                             const auto cell_id = cell_ids[begin + slot];
                             const auto& bs = monolithic_kernel->blockSpec(bi);
                             auto& shared = shared_contexts[slot];
@@ -7302,8 +7286,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                 static_cast<LocalIndex>(row_dofs.size()),
                                 static_cast<LocalIndex>(col_dofs.size()),
                                 want_matrix,
-                                want_vector,
-                                zero_output);
+                                want_vector);
                         };
 
                     if (run_compiled_dispatch) {
@@ -7329,8 +7312,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                     workspace.col_dofs,
                                     workspace.output,
                                     block_want_matrix,
-                                    compiled_want_vector,
-                                    /*zero_output=*/true);
+                                    compiled_want_vector);
                                 auto view = assembly::jit::packCoupledBlockView(
                                     workspace.ctx, workspace.output);
                                 if (compiled_matrix_only_dispatch) {
@@ -7445,8 +7427,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                         workspace.output.n_test_dofs,
                                         workspace.output.n_trial_dofs,
                                         /*want_matrix=*/false,
-                                        /*want_vector=*/true,
-                                        /*zero_output=*/true);
+                                        /*want_vector=*/true);
                                     batch_context_ptrs[slot] = &workspace.ctx;
                                 }
 
@@ -7528,11 +7509,6 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             if (!bs.fallback_kernel || (!block_want_matrix && !block_want_vector)) {
                                 continue;
                             }
-                            const auto* jit_kernel =
-                                dynamic_cast<const forms::jit::JITKernelWrapper*>(
-                                    bs.fallback_kernel.get());
-                            const bool jit_batch_self_prepares_output =
-                                jit_kernel != nullptr && jit_kernel->isJITReady();
 
                             for (std::size_t slot = 0; slot < active; ++slot) {
                                 auto& workspace = batch_block_workspaces[slot];
@@ -7545,8 +7521,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                     workspace.col_dofs,
                                     output,
                                     block_want_matrix,
-                                    block_want_vector,
-                                    /*zero_output=*/!jit_batch_self_prepares_output);
+                                    block_want_vector);
                                 batch_context_ptrs[slot] = &workspace.ctx;
                             }
 

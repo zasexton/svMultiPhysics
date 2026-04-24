@@ -66,6 +66,7 @@
 #include <vector>
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Mesh/Motion/MotionState.h"
 namespace svmp {
 class InterfaceMesh;
 }
@@ -170,6 +171,34 @@ enum class MeshMotionFieldRole : std::uint8_t {
     PreviousDisplacement,
     PreviousVelocity
 };
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+enum class MeshCoordinateUpdateMode : std::uint8_t {
+    AbsoluteFromReference,
+    IncrementalFromCurrent
+};
+
+enum class MeshCoordinateUpdateStage : std::uint8_t {
+    TrialNonlinearIterate,
+    AcceptedNonlinearState,
+    AcceptedTimeStep,
+    AcceptedRemeshRezoneState
+};
+
+struct MeshCoordinateUpdateOptions {
+    MeshCoordinateUpdateMode mode{MeshCoordinateUpdateMode::AbsoluteFromReference};
+    MeshCoordinateUpdateStage stage{MeshCoordinateUpdateStage::TrialNonlinearIterate};
+    bool exchange_ghost_coordinates{true};
+    bool notify_geometry_advanced{true};
+};
+
+struct MeshCoordinateUpdateResult {
+    std::size_t vertices_updated{0};
+    std::size_t components_updated{0};
+    MeshCoordinateUpdateStage stage{MeshCoordinateUpdateStage::TrialNonlinearIterate};
+    std::uint64_t geometry_revision{0};
+};
+#endif
 
 class FESystem {
 public:
@@ -1041,6 +1070,17 @@ public:
 	    [[nodiscard]] const svmp::Mesh* mesh() const noexcept { return mesh_.get(); }
 	    [[nodiscard]] svmp::Configuration coordinateConfiguration() const noexcept { return coord_cfg_; }
 
+	    FieldId addMeshDisplacementUnknown(std::string name,
+	                                       std::shared_ptr<const spaces::FunctionSpace> space,
+	                                       int components = 0);
+	    void beginMeshCoordinateTransaction();
+	    MeshCoordinateUpdateResult updateCurrentCoordinatesFromMeshDisplacement(
+	        const SystemStateView& state,
+	        const MeshCoordinateUpdateOptions& options = {});
+	    void commitMeshCoordinateTransaction();
+	    void rollbackMeshCoordinateTransaction();
+	    [[nodiscard]] bool meshCoordinateTransactionActive() const noexcept;
+
 	    std::size_t bindStandardMeshMotionFieldsByName();
 	    std::size_t syncBoundMeshMotionFieldsToState(std::span<Real> state) const;
 	    std::size_t syncBoundMeshMotionFieldsToState(assembly::GlobalSystemView& vector_view) const;
@@ -1299,6 +1339,7 @@ private:
 	    std::shared_ptr<const svmp::Mesh> mesh_{};
 	    svmp::Configuration coord_cfg_{svmp::Configuration::Reference};
 	    std::unordered_map<InterfaceId, std::shared_ptr<const svmp::InterfaceMesh>> interface_meshes_{};
+	    std::optional<svmp::motion::MotionCoordinateBackup> mesh_coordinate_backup_{};
 #endif
 
     FieldRegistry field_registry_;

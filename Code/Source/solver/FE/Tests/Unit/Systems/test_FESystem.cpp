@@ -50,6 +50,9 @@ using svmp::FE::spaces::ProductSpace;
 using svmp::FE::systems::AssemblyRequest;
 using svmp::FE::systems::FESystem;
 using svmp::FE::systems::FieldSpec;
+using svmp::FE::systems::MeshCoordinateUpdateMode;
+using svmp::FE::systems::MeshCoordinateUpdateOptions;
+using svmp::FE::systems::MeshCoordinateUpdateStage;
 using svmp::FE::systems::MeshMotionFieldRole;
 using svmp::FE::systems::SystemStateView;
 
@@ -505,6 +508,67 @@ TEST(FESystem, StandardMeshMotionFieldsSyncFromMeshStorageToFEState)
     expect_vertex_values(previous_coordinates, 70.0, 80.0);
     expect_vertex_values(previous_displacement, 90.0, 100.0);
     expect_vertex_values(previous_velocity, 110.0, 120.0);
+}
+
+TEST(FESystem, MeshDisplacementUnknownUpdatesCurrentCoordinatesWithRollbackAndCommit)
+{
+    auto mesh = build_single_quad_mesh();
+    const auto handles = svmp::motion::attach_motion_fields(*mesh, 2);
+    auto* disp = svmp::MeshFields::field_data_as<svmp::real_t>(
+        mesh->local_mesh(), handles.displacement);
+    ASSERT_NE(disp, nullptr);
+    const auto ncomp = svmp::MeshFields::field_components(
+        mesh->local_mesh(), handles.displacement);
+    ASSERT_EQ(ncomp, 2u);
+    for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
+        disp[v * ncomp + 0] = 0.1 + 0.01 * static_cast<Real>(v);
+        disp[v * ncomp + 1] = -0.2 + 0.02 * static_cast<Real>(v);
+    }
+
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto vector_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
+
+    FESystem sys(mesh);
+    const auto displacement =
+        sys.addMeshDisplacementUnknown("mesh_displacement", vector_space);
+    ASSERT_EQ(sys.meshMotionField(MeshMotionFieldRole::Displacement), displacement);
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", displacement, std::make_shared<MassKernel>(1.0));
+    sys.setup();
+
+    std::vector<Real> state(static_cast<std::size_t>(sys.dofHandler().getNumDofs()), 0.0);
+    ASSERT_EQ(sys.syncBoundMeshMotionFieldsToState(state), mesh->n_vertices() * 2u);
+
+    SystemStateView view;
+    view.u = state;
+    const auto result = sys.updateCurrentCoordinatesFromMeshDisplacement(view);
+    EXPECT_TRUE(sys.meshCoordinateTransactionActive());
+    EXPECT_EQ(result.vertices_updated, mesh->n_vertices());
+    EXPECT_EQ(result.components_updated, mesh->n_vertices() * 2u);
+    EXPECT_EQ(result.stage, MeshCoordinateUpdateStage::TrialNonlinearIterate);
+    ASSERT_TRUE(mesh->has_current_coords());
+
+    const auto& X_ref = mesh->local_mesh().X_ref();
+    const auto& X_cur = mesh->local_mesh().X_cur();
+    ASSERT_EQ(X_cur.size(), X_ref.size());
+    for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
+        EXPECT_NEAR(X_cur[v * 2u + 0], X_ref[v * 2u + 0] + disp[v * ncomp + 0], 1e-12);
+        EXPECT_NEAR(X_cur[v * 2u + 1], X_ref[v * 2u + 1] + disp[v * ncomp + 1], 1e-12);
+    }
+
+    sys.rollbackMeshCoordinateTransaction();
+    EXPECT_FALSE(sys.meshCoordinateTransactionActive());
+    EXPECT_FALSE(mesh->has_current_coords());
+
+    MeshCoordinateUpdateOptions options;
+    options.stage = MeshCoordinateUpdateStage::AcceptedTimeStep;
+    options.mode = MeshCoordinateUpdateMode::AbsoluteFromReference;
+    (void)sys.updateCurrentCoordinatesFromMeshDisplacement(view, options);
+    EXPECT_FALSE(sys.meshCoordinateTransactionActive());
+    ASSERT_TRUE(mesh->has_current_coords());
+    sys.commitMeshCoordinateTransaction();
+    sys.rollbackMeshCoordinateTransaction();
+    EXPECT_TRUE(mesh->has_current_coords());
 }
 
 TEST(FESystem, MeshMotionFieldBindingRejectsMissingScalarAndDimensionMismatchedFields)

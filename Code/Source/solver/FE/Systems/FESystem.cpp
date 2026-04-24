@@ -71,6 +71,7 @@
 #include "Mesh/Core/InterfaceMesh.h"
 #include "Mesh/Fields/MeshFields.h"
 #include "Mesh/Motion/MotionFields.h"
+#include "Mesh/Motion/MotionState.h"
 #include "Systems/MeshSearchAccess.h"
 #endif
 
@@ -1922,6 +1923,30 @@ assembly::MeshMotionFieldAccess FESystem::meshMotionFieldAccess() const noexcept
 }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+FieldId FESystem::addMeshDisplacementUnknown(std::string name,
+                                             std::shared_ptr<const spaces::FunctionSpace> space,
+                                             int components)
+{
+    FE_CHECK_NOT_NULL(space.get(), "FESystem::addMeshDisplacementUnknown: space");
+    const int mesh_dim = mesh_access_ ? mesh_access_->dimension() : space->value_dimension();
+    if (components == 0) {
+        components = mesh_dim;
+    }
+    FE_THROW_IF(space->field_type() != FieldType::Vector, InvalidArgumentException,
+                "FESystem::addMeshDisplacementUnknown: mesh displacement must use a vector FE space");
+    FE_THROW_IF(components != mesh_dim, InvalidArgumentException,
+                "FESystem::addMeshDisplacementUnknown: component dimension " +
+                    std::to_string(components) +
+                    " does not match mesh dimension " + std::to_string(mesh_dim));
+    const auto field = addField(FieldSpec{
+        .name = std::move(name),
+        .space = std::move(space),
+        .components = components,
+    });
+    bindMeshMotionField(MeshMotionFieldRole::Displacement, field);
+    return field;
+}
+
 std::size_t FESystem::bindStandardMeshMotionFieldsByName()
 {
     std::size_t bound = 0;
@@ -1936,6 +1961,111 @@ std::size_t FESystem::bindStandardMeshMotionFieldsByName()
         ++bound;
     }
     return bound;
+}
+
+void FESystem::beginMeshCoordinateTransaction()
+{
+    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::beginMeshCoordinateTransaction: mesh");
+    FE_THROW_IF(mesh_coordinate_backup_.has_value(), InvalidStateException,
+                "FESystem::beginMeshCoordinateTransaction: transaction already active");
+    svmp::motion::MotionCoordinateBackup backup;
+    svmp::motion::save_coordinates(*mesh_, backup);
+    mesh_coordinate_backup_ = std::move(backup);
+}
+
+MeshCoordinateUpdateResult FESystem::updateCurrentCoordinatesFromMeshDisplacement(
+    const SystemStateView& state,
+    const MeshCoordinateUpdateOptions& options)
+{
+    requireSetup();
+    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::updateCurrentCoordinatesFromMeshDisplacement: mesh");
+
+    const auto displacement_field = meshMotionField(MeshMotionFieldRole::Displacement);
+    FE_THROW_IF(!displacement_field.has_value(), InvalidStateException,
+                "FESystem::updateCurrentCoordinatesFromMeshDisplacement: no mesh-displacement "
+                "FE field is bound");
+
+    if (options.stage == MeshCoordinateUpdateStage::TrialNonlinearIterate &&
+        !mesh_coordinate_backup_.has_value()) {
+        beginMeshCoordinateTransaction();
+    }
+
+    auto& mesh = const_cast<svmp::Mesh&>(*mesh_);
+    auto& local_mesh = mesh.local_mesh();
+    const int dim = mesh.dim();
+    FE_THROW_IF(dim <= 0, InvalidStateException,
+                "FESystem::updateCurrentCoordinatesFromMeshDisplacement: mesh dimension must be positive");
+
+    const auto n_vertices = static_cast<GlobalIndex>(mesh.n_vertices());
+    std::vector<double> displacement(
+        static_cast<std::size_t>(n_vertices) * static_cast<std::size_t>(dim),
+        0.0);
+    const bool evaluated = evaluateFieldAtVertices(*displacement_field,
+                                                   state,
+                                                   n_vertices,
+                                                   displacement);
+    FE_THROW_IF(!evaluated, InvalidStateException,
+                "FESystem::updateCurrentCoordinatesFromMeshDisplacement: mesh-displacement "
+                "field must have vertex DOFs covering every mesh vertex");
+
+    const auto& X_ref = local_mesh.X_ref();
+    FE_THROW_IF(X_ref.size() != displacement.size(), InvalidStateException,
+                "FESystem::updateCurrentCoordinatesFromMeshDisplacement: reference-coordinate "
+                "size does not match displacement field");
+
+    const bool use_current =
+        options.mode == MeshCoordinateUpdateMode::IncrementalFromCurrent &&
+        local_mesh.has_current_coords();
+    const auto& X_base = use_current ? local_mesh.X_cur() : X_ref;
+    FE_THROW_IF(X_base.size() != X_ref.size(), InvalidStateException,
+                "FESystem::updateCurrentCoordinatesFromMeshDisplacement: base-coordinate "
+                "size mismatch");
+
+    std::vector<svmp::real_t> X_new(X_ref.size(), svmp::real_t{0});
+    for (std::size_t k = 0; k < X_new.size(); ++k) {
+        X_new[k] = static_cast<svmp::real_t>(X_base[k] + displacement[k]);
+    }
+
+    mesh.set_current_coords(X_new);
+    local_mesh.use_current_configuration();
+    if (options.exchange_ghost_coordinates) {
+        mesh.update_exchange_ghost_coordinates(svmp::Configuration::Current);
+    }
+    if (options.notify_geometry_advanced) {
+        notifyMeshGeometryAdvanced();
+    }
+
+    return MeshCoordinateUpdateResult{
+        .vertices_updated = static_cast<std::size_t>(n_vertices),
+        .components_updated = static_cast<std::size_t>(n_vertices) * static_cast<std::size_t>(dim),
+        .stage = options.stage,
+        .geometry_revision = local_mesh.geometry_revision(),
+    };
+}
+
+void FESystem::commitMeshCoordinateTransaction()
+{
+    mesh_coordinate_backup_.reset();
+}
+
+void FESystem::rollbackMeshCoordinateTransaction()
+{
+    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::rollbackMeshCoordinateTransaction: mesh");
+    if (!mesh_coordinate_backup_.has_value()) {
+        return;
+    }
+    auto& mesh = const_cast<svmp::Mesh&>(*mesh_);
+    svmp::motion::restore_coordinates(mesh, *mesh_coordinate_backup_);
+    if (mesh.local_mesh().has_current_coords()) {
+        mesh.update_exchange_ghost_coordinates(svmp::Configuration::Current);
+    }
+    notifyMeshGeometryAdvanced();
+    mesh_coordinate_backup_.reset();
+}
+
+bool FESystem::meshCoordinateTransactionActive() const noexcept
+{
+    return mesh_coordinate_backup_.has_value();
 }
 
 namespace {

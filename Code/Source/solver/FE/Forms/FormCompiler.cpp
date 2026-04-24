@@ -306,9 +306,7 @@ void requireSupportedGeometrySensitivityMode(const FormExprNode& node,
     }
 
     if (containsGeometrySensitivityTerminal(node)) {
-        throw std::invalid_argument(
-            "FormCompiler: geometry sensitivity with respect to mesh-motion unknowns is opt-in "
-            "but requires Phase 8 geometry derivative kernels; refusing to assemble an incomplete tangent");
+        return;
     }
 }
 
@@ -1001,6 +999,13 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
     std::vector<IntegralTerm> terms;
     detail::collectIntegralTerms(form, /*sign=*/+1, terms);
 
+    const bool form_has_geometry_sensitivity_terminals =
+        detail::containsGeometrySensitivityTerminal(*form.node());
+    const bool geometry_sensitivity_active =
+        impl_->options.geometry_sensitivity.mode ==
+            GeometrySensitivityMode::MeshMotionUnknowns &&
+        form_has_geometry_sensitivity_terminals;
+
     assembly::RequiredData required = assembly::RequiredData::None;
     std::unordered_map<FieldId, assembly::RequiredData> field_required{};
     int max_time_order = 0;
@@ -1011,6 +1016,26 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
         t.required_data = detail::analyzeRequiredData(*t.integrand.node(), kind);
         for (const auto& fr : detail::analyzeFieldRequirements(*t.integrand.node())) {
             field_required[fr.field] |= fr.required;
+        }
+
+        const bool term_has_geometry_sensitivity_terminals =
+            geometry_sensitivity_active &&
+            detail::containsGeometrySensitivityTerminal(*t.integrand.node());
+        if (term_has_geometry_sensitivity_terminals) {
+            t.required_data |= assembly::RequiredData::BasisValues;
+            t.required_data |= assembly::RequiredData::BasisGradients;
+            t.required_data |= assembly::RequiredData::CurrentJacobians;
+            t.required_data |= assembly::RequiredData::CurrentMeasures;
+            field_required[impl_->options.geometry_sensitivity.mesh_motion_field] |=
+                assembly::RequiredData::SolutionValues |
+                assembly::RequiredData::SolutionGradients;
+
+            if (t.domain == IntegralDomain::Boundary ||
+                t.domain == IntegralDomain::InteriorFace ||
+                t.domain == IntegralDomain::InterfaceFace) {
+                t.required_data |= assembly::RequiredData::CurrentNormals;
+                t.required_data |= assembly::RequiredData::SurfaceJacobians;
+            }
         }
 
         // Face terms require face geometry context (surface measure, normals).
@@ -1041,6 +1066,8 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
     ir.setRequiredData(required);
     ir.setFieldRequirements(std::move(field_requirements));
     ir.setMaxTimeDerivativeOrder(max_time_order);
+    ir.setGeometrySensitivityOptions(impl_->options.geometry_sensitivity);
+    ir.setHasGeometrySensitivityTerminals(form_has_geometry_sensitivity_terminals);
     ir.setCompiled(true);
 
     std::ostringstream oss;

@@ -1082,6 +1082,21 @@ AssemblyContext::Vector3D AssemblyContext::trialPhysicalGradient(LocalIndex j, L
     return trial_phys_gradients_[static_cast<std::size_t>(q * n_trial_dofs_ + j)];
 }
 
+AssemblyContext::Vector3D AssemblyContext::trialReferenceGradient(LocalIndex j, LocalIndex q) const
+{
+    if (trial_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::trialReferenceGradient: scalar basis gradients not available for vector-basis spaces");
+    }
+    if (j >= n_trial_dofs_ || q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::trialReferenceGradient: index out of range");
+    }
+
+    if (trial_is_test_) {
+        return test_ref_gradients_[static_cast<std::size_t>(q * n_test_dofs_ + j)];
+    }
+    return trial_ref_gradients_[static_cast<std::size_t>(q * n_trial_dofs_ + j)];
+}
+
 AssemblyContext::Matrix3x3 AssemblyContext::trialReferenceHessian(LocalIndex j, LocalIndex q) const
 {
     if (trial_is_vector_basis_) {

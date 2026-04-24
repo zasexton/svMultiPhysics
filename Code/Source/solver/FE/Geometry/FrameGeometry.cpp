@@ -7,6 +7,7 @@
 
 #include "FrameGeometry.h"
 
+#include "Basis/BasisFunction.h"
 #include "Core/FEException.h"
 #include "Elements/ElementTransform.h"
 #include "Geometry/MappingFactory.h"
@@ -66,6 +67,59 @@ namespace {
         }
     }
     return out;
+}
+
+[[nodiscard]] std::vector<Point3D> pointsFromGeometryNodes(
+    const std::vector<math::Vector<Real, 3>>& nodes)
+{
+    std::vector<Point3D> out;
+    out.reserve(nodes.size());
+    for (const auto& node : nodes) {
+        out.push_back(toPoint(node));
+    }
+    return out;
+}
+
+[[nodiscard]] Matrix3x3 zeroMatrix() noexcept
+{
+    return Matrix3x3{};
+}
+
+[[nodiscard]] Matrix3x3 multiply(const Matrix3x3& a, const Matrix3x3& b) noexcept
+{
+    Matrix3x3 out{};
+    for (std::size_t i = 0; i < 3u; ++i) {
+        for (std::size_t j = 0; j < 3u; ++j) {
+            Real value = 0.0;
+            for (std::size_t k = 0; k < 3u; ++k) {
+                value += a[i][k] * b[k][j];
+            }
+            out[i][j] = value;
+        }
+    }
+    return out;
+}
+
+[[nodiscard]] Matrix3x3 negate(const Matrix3x3& m) noexcept
+{
+    Matrix3x3 out{};
+    for (std::size_t i = 0; i < 3u; ++i) {
+        for (std::size_t j = 0; j < 3u; ++j) {
+            out[i][j] = -m[i][j];
+        }
+    }
+    return out;
+}
+
+[[nodiscard]] Real traceProduct(const Matrix3x3& a, const Matrix3x3& b) noexcept
+{
+    Real value = 0.0;
+    for (std::size_t i = 0; i < 3u; ++i) {
+        for (std::size_t k = 0; k < 3u; ++k) {
+            value += a[i][k] * b[k][i];
+        }
+    }
+    return value;
 }
 
 [[nodiscard]] Real dot(const Vector3D& a, const Vector3D& b) noexcept
@@ -604,6 +658,90 @@ CellGeometrySensitivity finiteDifferenceCellGeometrySensitivity(
     return sensitivity;
 }
 
+CellGeometrySensitivity evaluateCellGeometrySensitivity(
+    const GeometryMapping& mapping,
+    const quadrature::QuadratureRule& quad_rule)
+{
+    const auto n_qpts = static_cast<LocalIndex>(quad_rule.num_points());
+    const auto n_nodes = static_cast<LocalIndex>(mapping.num_nodes());
+    const std::size_t total =
+        static_cast<std::size_t>(n_qpts) * static_cast<std::size_t>(n_nodes) * 3u;
+
+    CellGeometrySensitivity sensitivity;
+    sensitivity.n_qpts = n_qpts;
+    sensitivity.n_nodes = n_nodes;
+    sensitivity.physical_points = {n_qpts, n_nodes, std::vector<Vector3D>(total)};
+    sensitivity.jacobians = {n_qpts, n_nodes, std::vector<Matrix3x3>(total)};
+    sensitivity.measures = {n_qpts, n_nodes, std::vector<Real>(total)};
+    sensitivity.inverse_jacobians = {n_qpts, n_nodes, std::vector<Matrix3x3>(total)};
+
+    // For embedded curve/surface mappings, the public frame Jacobian includes
+    // geometry-dependent orthonormal completion columns. Use the existing
+    // central-difference kernel until the frame-completion derivative is
+    // promoted to an analytic kernel.
+    if (mapping.dimension() != 3) {
+        const auto nodes = pointsFromGeometryNodes(mapping.nodes());
+        return finiteDifferenceCellGeometrySensitivity(mapping.element_type(), quad_rule, nodes);
+    }
+
+    const auto& geometry_basis = mapping.geometryBasis();
+    FE_THROW_IF(static_cast<LocalIndex>(geometry_basis.size()) != n_nodes, FEException,
+                "FrameGeometry: geometry basis size does not match mapping node count");
+
+    std::vector<Real> values;
+    std::vector<basis::Gradient> gradients;
+
+    const auto& qpts = quad_rule.points();
+    for (LocalIndex q = 0; q < n_qpts; ++q) {
+        const auto& xi = qpts[static_cast<std::size_t>(q)];
+        geometry_basis.evaluate_values(xi, values);
+        geometry_basis.evaluate_gradients(xi, gradients);
+        FE_THROW_IF(static_cast<LocalIndex>(values.size()) != n_nodes ||
+                        static_cast<LocalIndex>(gradients.size()) != n_nodes,
+                    FEException,
+                    "FrameGeometry: geometry basis evaluation size mismatch");
+
+        const auto J_inv = toArray(mapping.jacobian_inverse(xi));
+        const Real det_J = mapping.jacobian_determinant(xi);
+        const Real measure_sign = (det_J < Real(0)) ? Real(-1) : Real(1);
+
+        for (LocalIndex node = 0; node < n_nodes; ++node) {
+            const auto nidx = static_cast<std::size_t>(node);
+            for (int component = 0; component < 3; ++component) {
+                const auto out = sensitivityIndex(n_nodes, q, node, component);
+
+                sensitivity.physical_points.values[out] = Vector3D{};
+                sensitivity.physical_points.values[out][static_cast<std::size_t>(component)] =
+                    values[nidx];
+
+                Matrix3x3 dJ = zeroMatrix();
+                for (int xi_dir = 0; xi_dir < 3; ++xi_dir) {
+                    dJ[static_cast<std::size_t>(component)][static_cast<std::size_t>(xi_dir)] =
+                        gradients[nidx][static_cast<std::size_t>(xi_dir)];
+                }
+                sensitivity.jacobians.values[out] = dJ;
+
+                const Real d_det = det_J * traceProduct(J_inv, dJ);
+                sensitivity.measures.values[out] = measure_sign * d_det;
+
+                sensitivity.inverse_jacobians.values[out] =
+                    negate(multiply(multiply(J_inv, dJ), J_inv));
+            }
+        }
+    }
+
+    return sensitivity;
+}
+
+CellGeometrySensitivity evaluateCellGeometrySensitivity(
+    ElementType cell_type,
+    const quadrature::QuadratureRule& quad_rule,
+    std::span<const Point3D> coordinates)
+{
+    const auto mapping = makeMapping(cell_type, coordinates);
+    return evaluateCellGeometrySensitivity(*mapping, quad_rule);
+}
+
 FaceGeometrySensitivity finiteDifferenceFaceGeometrySensitivity(
     ElementType cell_type,
     LocalIndex local_face_id,
@@ -668,6 +806,22 @@ FaceGeometrySensitivity finiteDifferenceFaceGeometrySensitivity(
     }
 
     return sensitivity;
+}
+
+FaceGeometrySensitivity evaluateFaceGeometrySensitivity(
+    ElementType cell_type,
+    LocalIndex local_face_id,
+    ElementType face_type,
+    const quadrature::QuadratureRule& quad_rule,
+    std::span<const Point3D> coordinates,
+    std::span<const LocalIndex> align_facet_to_reference)
+{
+    return finiteDifferenceFaceGeometrySensitivity(cell_type,
+                                                   local_face_id,
+                                                   face_type,
+                                                   quad_rule,
+                                                   coordinates,
+                                                   align_facet_to_reference);
 }
 
 } // namespace geometry
