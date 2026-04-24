@@ -108,11 +108,14 @@ protected:
     void set_order(int ord) noexcept { order_ = ord; }
 
 private:
+    std::string build_cache_identity() const;
+
     svmp::CellFamily cell_family_;
     int dimension_;
     int order_;
     std::vector<QuadPoint> points_;
     std::vector<Real> weights_;
+    std::string cache_identity_;
 };
 
 // --------------------------------------------------------------------------------
@@ -126,6 +129,7 @@ inline void QuadratureRule::set_data(std::vector<QuadPoint> pts, std::vector<Rea
     }
     points_ = std::move(pts);
     weights_ = std::move(wts);
+    cache_identity_ = build_cache_identity();
 }
 
 inline bool QuadratureRule::is_valid(Real tol) const {
@@ -145,6 +149,13 @@ inline bool QuadratureRule::is_valid(Real tol) const {
 }
 
 inline std::string QuadratureRule::cache_identity() const {
+    if (!cache_identity_.empty()) {
+        return cache_identity_;
+    }
+    return build_cache_identity();
+}
+
+inline std::string QuadratureRule::build_cache_identity() const {
     std::ostringstream oss;
     oss << "dim=" << dimension_
         << "|npts=" << points_.size();

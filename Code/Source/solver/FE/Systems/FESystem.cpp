@@ -1300,6 +1300,20 @@ FESystem::~FESystem() = default;
 FESystem::FESystem(FESystem&&) noexcept = default;
 FESystem& FESystem::operator=(FESystem&&) noexcept = default;
 
+std::uint64_t FESystem::systemLayoutRevision() const noexcept
+{
+    std::uint64_t key = 1469598103934665603ULL;
+    const auto mix = [&key](std::uint64_t value) noexcept {
+        key ^= value;
+        key *= 1099511628211ULL;
+    };
+    mix(fe_layout_revisions_.space);
+    mix(fe_layout_revisions_.dof_layout);
+    mix(fe_layout_revisions_.constraint_layout);
+    mix(fe_layout_revisions_.block_layout);
+    return key;
+}
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 FESystem::FESystem(std::shared_ptr<const svmp::Mesh> mesh, svmp::Configuration coord_cfg)
     : mesh_(std::move(mesh)), coord_cfg_(coord_cfg)
@@ -1745,7 +1759,10 @@ FieldId FESystem::addField(FieldSpec spec)
         FE_THROW_IF(spec.components != spec.space->value_dimension(), InvalidArgumentException,
                     "FESystem::addField: FieldSpec.components must match FunctionSpace::value_dimension()");
     }
-    return field_registry_.add(std::move(spec));
+    auto field = field_registry_.add(std::move(spec));
+    bumpSpaceRevision();
+    bumpBlockLayoutRevision();
+    return field;
 }
 
 FieldId FESystem::addInterfaceField(std::string name,
@@ -1767,6 +1784,7 @@ void FESystem::addConstraint(std::unique_ptr<constraints::Constraint> c)
     invalidateSetup();
     FE_CHECK_NOT_NULL(c.get(), "FESystem::addConstraint: constraint");
     constraint_defs_.push_back(std::move(c));
+    bumpConstraintLayoutRevision();
 }
 
 void FESystem::addSystemConstraint(std::unique_ptr<constraints::ISystemConstraint> c)
@@ -1774,6 +1792,7 @@ void FESystem::addSystemConstraint(std::unique_ptr<constraints::ISystemConstrain
     invalidateSetup();
     FE_CHECK_NOT_NULL(c.get(), "FESystem::addSystemConstraint: constraint");
     system_constraint_defs_.push_back(std::move(c));
+    bumpConstraintLayoutRevision();
 }
 
 void FESystem::addOperator(OperatorTag name)

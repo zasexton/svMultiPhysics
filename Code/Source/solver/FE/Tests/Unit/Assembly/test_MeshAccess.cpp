@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <vector>
 
 using svmp::CellFamily;
@@ -241,6 +242,54 @@ TEST(MeshAccess, TwoTrianglesBoundaryAndInteriorFaces) {
     const auto adj = access.getInteriorFaceCells(1);
     EXPECT_EQ(adj.first, 0);
     EXPECT_EQ(adj.second, 1);
+}
+
+TEST(MeshAccess, RevisionQueriesFollowMeshState)
+{
+    auto mesh = build_two_triangles_mesh();
+    MeshAccess access(mesh);
+
+    EXPECT_TRUE(access.revisionTrackingAvailable());
+    const auto initial_geometry = access.geometryRevision();
+    const auto initial_current_geometry = mesh.current_geometry_revision();
+    const auto initial_topology = access.topologyRevision();
+    const auto initial_numbering = access.numberingRevision();
+    const auto initial_labels = access.labelRevision();
+    const auto initial_epoch = access.activeConfigurationEpoch();
+
+    auto x_cur = mesh.local_mesh().X_ref();
+    ASSERT_FALSE(x_cur.empty());
+    x_cur[0] += 0.25;
+    mesh.set_current_coords(x_cur);
+    EXPECT_EQ(access.geometryRevision(), initial_geometry);
+    EXPECT_EQ(mesh.current_geometry_revision(), initial_current_geometry + 1u);
+    EXPECT_EQ(access.topologyRevision(), initial_topology);
+
+    auto* x_cur_mut = mesh.local_mesh().X_cur_data_mutable();
+    ASSERT_NE(x_cur_mut, nullptr);
+    x_cur_mut[0] += 0.125;
+    mesh.local_mesh().mark_geometry_changed();
+    EXPECT_EQ(access.geometryRevision(), initial_geometry);
+    EXPECT_EQ(mesh.current_geometry_revision(), initial_current_geometry + 2u);
+
+    mesh.use_current_configuration();
+    EXPECT_EQ(access.geometryRevision(), initial_current_geometry + 2u);
+    EXPECT_EQ(access.activeConfigurationEpoch(), initial_epoch + 1u);
+    EXPECT_EQ(access.coordinateConfigurationKey(),
+              static_cast<std::uint64_t>(svmp::Configuration::Current));
+
+    MeshAccess current_access(mesh, svmp::Configuration::Current);
+    EXPECT_EQ(current_access.geometryRevision(), initial_current_geometry + 2u);
+    EXPECT_EQ(current_access.activeConfigurationEpoch(), 0u);
+    EXPECT_EQ(current_access.coordinateConfigurationKey(),
+              static_cast<std::uint64_t>(svmp::Configuration::Current));
+
+    mesh.local_mesh().set_boundary_label(0, 3);
+    EXPECT_EQ(access.labelRevision(), initial_labels + 1u);
+
+    auto cell_gids = mesh.local_mesh().cell_gids();
+    mesh.local_mesh().set_cell_gids(std::move(cell_gids));
+    EXPECT_EQ(access.numberingRevision(), initial_numbering + 1u);
 }
 
 TEST(MeshAccess, TwoTetrahedraLocalFaceIndexAndMarkers) {

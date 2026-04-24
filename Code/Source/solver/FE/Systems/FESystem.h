@@ -155,6 +155,13 @@ struct AssemblyRequest {
     bool is_nonlinear_iteration{false};
 };
 
+struct FELayoutRevisionState {
+    std::uint64_t space{0};
+    std::uint64_t dof_layout{0};
+    std::uint64_t constraint_layout{0};
+    std::uint64_t block_layout{0};
+};
+
 class FESystem {
 public:
     explicit FESystem(std::shared_ptr<const assembly::IMeshAccess> mesh_access);
@@ -1039,6 +1046,12 @@ public:
     [[nodiscard]] const dofs::FieldDofMap& fieldMap() const noexcept { return field_map_; }
     [[nodiscard]] const dofs::BlockDofMap* blockMap() const noexcept { return block_map_.get(); }
     [[nodiscard]] const constraints::AffineConstraints& constraints() const noexcept { return affine_constraints_; }
+    [[nodiscard]] FELayoutRevisionState feLayoutRevisionState() const noexcept { return fe_layout_revisions_; }
+    [[nodiscard]] std::uint64_t spaceRevision() const noexcept { return fe_layout_revisions_.space; }
+    [[nodiscard]] std::uint64_t dofLayoutRevision() const noexcept { return fe_layout_revisions_.dof_layout; }
+    [[nodiscard]] std::uint64_t constraintLayoutRevision() const noexcept { return fe_layout_revisions_.constraint_layout; }
+    [[nodiscard]] std::uint64_t blockLayoutRevision() const noexcept { return fe_layout_revisions_.block_layout; }
+    [[nodiscard]] std::uint64_t systemLayoutRevision() const noexcept;
     [[nodiscard]] const sparsity::SparsityPattern& sparsity(const OperatorTag& op) const;
     [[nodiscard]] const sparsity::DistributedSparsityPattern* distributedSparsityIfAvailable(const OperatorTag& op) const noexcept;
     [[nodiscard]] std::shared_ptr<const backends::DofPermutation> dofPermutation() const noexcept { return dof_permutation_; }
@@ -1252,6 +1265,10 @@ private:
     void requireSetup() const;
     void requireSingleFieldSetup() const;
     void buildAssemblyPlans();
+    void bumpSpaceRevision() noexcept { ++fe_layout_revisions_.space; }
+    void bumpDofLayoutRevision() noexcept { ++fe_layout_revisions_.dof_layout; }
+    void bumpConstraintLayoutRevision() noexcept { ++fe_layout_revisions_.constraint_layout; }
+    void bumpBlockLayoutRevision() noexcept { ++fe_layout_revisions_.block_layout; }
 
     [[nodiscard]] const FieldRecord& singleField() const;
 
@@ -1275,6 +1292,7 @@ private:
     dofs::FieldDofMap field_map_{};
     std::unique_ptr<dofs::BlockDofMap> block_map_{};
 	    constraints::AffineConstraints affine_constraints_{};
+    FELayoutRevisionState fe_layout_revisions_{};
 
 		    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::SparsityPattern>> sparsity_by_op_{};
 		    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::DistributedSparsityPattern>> distributed_sparsity_by_op_{};

@@ -123,6 +123,22 @@ TEST(MeshFieldsTest, AttachListAndLookupHandles) {
   EXPECT_EQ(MeshFields::get_field_handle(mesh, EntityKind::Vertex, "does_not_exist").id, 0u);
 }
 
+TEST(MeshFieldsTest, FieldLayoutRevisionTracksAttachAndRemove) {
+  auto mesh = make_two_triangle_mesh_2d();
+
+  const auto initial_revision = mesh.field_layout_revision();
+  const auto h = MeshFields::attach_field(mesh, EntityKind::Vertex, "u", FieldScalarType::Float64, 2);
+  const auto after_attach = mesh.field_layout_revision();
+  EXPECT_GT(after_attach, initial_revision);
+
+  MeshFields::remove_field(mesh, h);
+  const auto after_remove = mesh.field_layout_revision();
+  EXPECT_GT(after_remove, after_attach);
+
+  MeshFields::attach_field(mesh, EntityKind::Volume, "p", FieldScalarType::Float32, 1);
+  EXPECT_GT(mesh.field_layout_revision(), after_remove);
+}
+
 TEST(MeshFieldsTest, DescriptorAccess) {
   auto mesh = make_two_triangle_mesh_2d();
 

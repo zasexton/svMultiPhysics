@@ -94,6 +94,7 @@ TEST(MeshEventTest, EventNameMapping) {
   EXPECT_STREQ(event_name(MeshEvent::PartitionChanged), "PartitionChanged");
   EXPECT_STREQ(event_name(MeshEvent::LabelsChanged), "LabelsChanged");
   EXPECT_STREQ(event_name(MeshEvent::FieldsChanged), "FieldsChanged");
+  EXPECT_STREQ(event_name(MeshEvent::NumberingChanged), "NumberingChanged");
   EXPECT_STREQ(event_name(MeshEvent::AdaptivityApplied), "AdaptivityApplied");
 }
 
@@ -116,6 +117,90 @@ protected:
 TEST_F(MeshEventBusTest, InitialState) {
   EXPECT_EQ(bus.num_observers(), 0);
   EXPECT_FALSE(bus.has_observers());
+  const auto revisions = bus.revision_state();
+  EXPECT_EQ(revisions.geometry, 0u);
+  EXPECT_EQ(revisions.reference_geometry, 0u);
+  EXPECT_EQ(revisions.current_geometry, 0u);
+  EXPECT_EQ(revisions.topology, 0u);
+  EXPECT_EQ(revisions.ownership, 0u);
+  EXPECT_EQ(revisions.numbering, 0u);
+  EXPECT_EQ(revisions.field_layout, 0u);
+  EXPECT_EQ(revisions.labels, 0u);
+  EXPECT_EQ(revisions.active_configuration, 0u);
+}
+
+TEST_F(MeshEventBusTest, RevisionDomainsTrackEvents) {
+  bus.notify(MeshEvent::GeometryChanged);
+  auto revisions = bus.revision_state();
+  EXPECT_EQ(revisions.geometry, 1u);
+  EXPECT_EQ(revisions.reference_geometry, 1u);
+  EXPECT_EQ(revisions.current_geometry, 1u);
+  EXPECT_EQ(revisions.topology, 0u);
+  EXPECT_EQ(revisions.numbering, 0u);
+
+  bus.notify_geometry_changed(GeometryRevisionDomain::Current);
+  revisions = bus.revision_state();
+  EXPECT_EQ(revisions.geometry, 2u);
+  EXPECT_EQ(revisions.reference_geometry, 1u);
+  EXPECT_EQ(revisions.current_geometry, 2u);
+
+  bus.notify_geometry_changed(GeometryRevisionDomain::Reference);
+  revisions = bus.revision_state();
+  EXPECT_EQ(revisions.geometry, 3u);
+  EXPECT_EQ(revisions.reference_geometry, 2u);
+  EXPECT_EQ(revisions.current_geometry, 2u);
+
+  bus.notify(MeshEvent::TopologyChanged);
+  revisions = bus.revision_state();
+  EXPECT_EQ(revisions.geometry, 3u);
+  EXPECT_EQ(revisions.topology, 1u);
+  EXPECT_EQ(revisions.numbering, 1u);
+
+  bus.notify(MeshEvent::NumberingChanged);
+  revisions = bus.revision_state();
+  EXPECT_EQ(revisions.topology, 1u);
+  EXPECT_EQ(revisions.numbering, 2u);
+
+  bus.notify(MeshEvent::PartitionChanged);
+  revisions = bus.revision_state();
+  EXPECT_EQ(revisions.ownership, 1u);
+
+  bus.notify(MeshEvent::LabelsChanged);
+  revisions = bus.revision_state();
+  EXPECT_EQ(revisions.labels, 1u);
+
+  bus.notify(MeshEvent::FieldsChanged);
+  revisions = bus.revision_state();
+  EXPECT_EQ(revisions.field_layout, 1u);
+
+  bus.notify(MeshEvent::AdaptivityApplied);
+  revisions = bus.revision_state();
+  EXPECT_EQ(revisions.geometry, 4u);
+  EXPECT_EQ(revisions.reference_geometry, 3u);
+  EXPECT_EQ(revisions.current_geometry, 3u);
+  EXPECT_EQ(revisions.topology, 2u);
+  EXPECT_EQ(revisions.numbering, 3u);
+  EXPECT_EQ(revisions.field_layout, 2u);
+  EXPECT_EQ(revisions.labels, 2u);
+  EXPECT_EQ(revisions.ownership, 1u);
+}
+
+TEST_F(MeshEventBusTest, ActiveConfigurationEpochIsIndependent) {
+  bus.notify(MeshEvent::GeometryChanged);
+  const auto before = bus.revision_state();
+
+  bus.mark_active_configuration_changed();
+  const auto after = bus.revision_state();
+
+  EXPECT_EQ(after.geometry, before.geometry);
+  EXPECT_EQ(after.reference_geometry, before.reference_geometry);
+  EXPECT_EQ(after.current_geometry, before.current_geometry);
+  EXPECT_EQ(after.topology, before.topology);
+  EXPECT_EQ(after.ownership, before.ownership);
+  EXPECT_EQ(after.numbering, before.numbering);
+  EXPECT_EQ(after.field_layout, before.field_layout);
+  EXPECT_EQ(after.labels, before.labels);
+  EXPECT_EQ(after.active_configuration, before.active_configuration + 1u);
 }
 
 TEST_F(MeshEventBusTest, SubscribeNonOwning) {
@@ -427,6 +512,7 @@ TEST(EventCounterTest, CountAllEventTypes) {
   counter.on_mesh_event(MeshEvent::PartitionChanged);
   counter.on_mesh_event(MeshEvent::LabelsChanged);
   counter.on_mesh_event(MeshEvent::FieldsChanged);
+  counter.on_mesh_event(MeshEvent::NumberingChanged);
   counter.on_mesh_event(MeshEvent::AdaptivityApplied);
 
   EXPECT_EQ(counter.count(MeshEvent::TopologyChanged), 1);
@@ -434,6 +520,7 @@ TEST(EventCounterTest, CountAllEventTypes) {
   EXPECT_EQ(counter.count(MeshEvent::PartitionChanged), 1);
   EXPECT_EQ(counter.count(MeshEvent::LabelsChanged), 1);
   EXPECT_EQ(counter.count(MeshEvent::FieldsChanged), 1);
+  EXPECT_EQ(counter.count(MeshEvent::NumberingChanged), 1);
   EXPECT_EQ(counter.count(MeshEvent::AdaptivityApplied), 1);
 }
 

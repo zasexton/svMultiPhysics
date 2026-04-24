@@ -43,6 +43,38 @@ TEST(DofMap, DefaultConstruction) {
     EXPECT_EQ(map.getNumDofs(), 0);
 }
 
+TEST(DofMap, DofLayoutRevisionTracksStructuralAndOwnershipChanges) {
+    DofMap map;
+    const auto initial = map.dofLayoutRevision();
+
+    map.reserve(1, 4);
+    const auto after_reserve = map.dofLayoutRevision();
+    EXPECT_GT(after_reserve, initial);
+
+    map.setCellDofs(0, std::vector<GlobalIndex>{0, 1, 2, 3});
+    const auto after_cell_dofs = map.dofLayoutRevision();
+    EXPECT_GT(after_cell_dofs, after_reserve);
+
+    map.setNumDofs(4);
+    const auto after_num_dofs = map.dofLayoutRevision();
+    EXPECT_GT(after_num_dofs, after_cell_dofs);
+
+    map.setNumLocalDofs(4);
+    const auto after_num_local = map.dofLayoutRevision();
+    EXPECT_GT(after_num_local, after_num_dofs);
+
+    map.setDofOwnership([](GlobalIndex) { return 0; });
+    const auto after_ownership = map.dofLayoutRevision();
+    EXPECT_GT(after_ownership, after_num_local);
+
+    map.setMyRank(1);
+    const auto after_rank = map.dofLayoutRevision();
+    EXPECT_GT(after_rank, after_ownership);
+
+    map.setMyRank(1);
+    EXPECT_EQ(map.dofLayoutRevision(), after_rank);
+}
+
 TEST(DofMap, FinalizeAndQuery) {
     auto map = makeTwoCellMapBuilding();
     EXPECT_NO_THROW(map.finalize());
@@ -126,4 +158,3 @@ TEST(DofMap, MutationsAfterFinalizeThrow) {
     EXPECT_THROW(map.reserve(2, 2), FEException);
     EXPECT_THROW(map.setCellDofs(0, std::vector<GlobalIndex>{0, 1}), FEException);
 }
-

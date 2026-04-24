@@ -39,6 +39,7 @@
 #include "Core/Types.h"
 #include "Core/FEException.h"
 
+#include <cstdint>
 #include <vector>
 #include <span>
 #include <unordered_map>
@@ -391,6 +392,10 @@ public:
      * @brief Check if constraints are closed (finalized)
      */
     [[nodiscard]] bool isClosed() const noexcept { return is_closed_; }
+    [[nodiscard]] std::uint64_t constraintLayoutRevision() const noexcept
+    {
+        return constraint_layout_revision_;
+    }
 
     // =========================================================================
     // Query (after close)
@@ -659,6 +664,7 @@ private:
      * @brief Merge duplicate entries in constraint lines
      */
     void mergeAllDuplicates();
+    void bumpConstraintLayoutRevision() noexcept { ++constraint_layout_revision_; }
 
     // =========================================================================
     // Data members
@@ -669,6 +675,7 @@ private:
 
     // State
     bool is_closed_{false};
+    std::uint64_t constraint_layout_revision_{0};
 
     // Building phase storage (sparse map)
     std::unordered_map<GlobalIndex, ConstraintLine> building_lines_;

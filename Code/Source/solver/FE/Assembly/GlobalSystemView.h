@@ -274,6 +274,18 @@ public:
     }
 
     /**
+     * @brief Revision for the matrix-layout mapping exposed by matrixLayoutHandle().
+     *
+     * Backends with mutable row/column permutations, block layouts, or local
+     * storage maps must bump this when previously resolved matrix entries are
+     * no longer valid. A zero value means the backend does not expose revision
+     * tracking beyond the layout handle identity.
+     */
+    [[nodiscard]] virtual std::uint64_t matrixLayoutRevision() const noexcept {
+        return 0;
+    }
+
+    /**
      * @brief Resolve local matrix entries into backend-local scalar slots.
      *
      * The default implementation marks all entries unresolved; callers should
@@ -389,6 +401,17 @@ public:
      */
     [[nodiscard]] virtual const void* vectorLayoutHandle() const noexcept {
         return this;
+    }
+
+    /**
+     * @brief Revision for the vector-layout mapping exposed by vectorLayoutHandle().
+     *
+     * Backends with mutable vector permutations, overlap maps, or ghost layouts
+     * must bump this when resolved vector entries/gather indices are stale. A
+     * zero value means the layout handle identity is the only version signal.
+     */
+    [[nodiscard]] virtual std::uint64_t vectorLayoutRevision() const noexcept {
+        return 0;
     }
 
     /**

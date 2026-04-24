@@ -325,6 +325,37 @@ TEST(FESystem, SetupDistributesDofsFromMesh)
     EXPECT_EQ(sys.sparsity("mass").numRows(), 4);
 }
 
+TEST(FESystem, LayoutRevisionDomainsTrackDefinitionAndSetup)
+{
+    auto mesh = build_single_quad_mesh();
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+
+    FESystem sys(mesh);
+    const auto initial = sys.feLayoutRevisionState();
+    const auto initial_system_revision = sys.systemLayoutRevision();
+
+    auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    EXPECT_GT(sys.spaceRevision(), initial.space);
+    EXPECT_GT(sys.blockLayoutRevision(), initial.block_layout);
+    EXPECT_EQ(sys.dofLayoutRevision(), initial.dof_layout);
+
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+
+    const auto before_setup = sys.feLayoutRevisionState();
+    sys.setup();
+    EXPECT_GT(sys.dofLayoutRevision(), before_setup.dof_layout);
+    EXPECT_GT(sys.blockLayoutRevision(), before_setup.block_layout);
+    EXPECT_GT(sys.constraintLayoutRevision(), before_setup.constraint_layout);
+    EXPECT_NE(sys.systemLayoutRevision(), initial_system_revision);
+
+    const auto after_setup = sys.feLayoutRevisionState();
+    sys.addConstraint(std::make_unique<TwoMasterConstraint>(0, 1, 2));
+    EXPECT_GT(sys.constraintLayoutRevision(), after_setup.constraint_layout);
+    EXPECT_EQ(sys.dofLayoutRevision(), after_setup.dof_layout);
+    EXPECT_EQ(sys.spaceRevision(), after_setup.space);
+}
+
 TEST(FESystem, AssembleAccumulatesMultipleCellTerms)
 {
     auto mesh = build_single_quad_mesh();

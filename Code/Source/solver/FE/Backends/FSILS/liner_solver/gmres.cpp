@@ -245,7 +245,7 @@ struct GmresEnhancements {
   ReorthMode reorth_mode = ReorthMode::off;
   bool verbose = false;
   bool profile = false;
-  bool use_basis_panel = true;
+  bool use_basis_panel = false;
   int basis_panel_min_sD = 16;
   int basis_panel_max_mb = 1024;
 };
@@ -257,7 +257,7 @@ struct GmresEnhancements {
     c.recycle_k = std::max(0, parse_int_env("SVMP_FSILS_GMRES_RECYCLE_K", 0));
     c.verbose = parse_bool_env("SVMP_FSILS_GMRES_RECYCLE_VERBOSE", false);
     c.profile = parse_bool_env("SVMP_FSILS_GMRES_PROFILE", c.verbose);
-    c.use_basis_panel = parse_bool_env("SVMP_FSILS_GMRES_BASIS_PANEL", true);
+    c.use_basis_panel = parse_bool_env("SVMP_FSILS_GMRES_BASIS_PANEL", false);
     c.basis_panel_min_sD = std::max(0, parse_int_env("SVMP_FSILS_GMRES_BASIS_PANEL_MIN_SD", 16));
     c.basis_panel_max_mb = std::max(0, parse_int_env("SVMP_FSILS_GMRES_BASIS_PANEL_MAX_MB", 1024));
 

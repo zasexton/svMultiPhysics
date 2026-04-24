@@ -38,6 +38,7 @@
 #include "../Search/SearchAccel.h"
 
 #include <memory>
+#include <cstdint>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -76,7 +77,7 @@ public:
   MeshBase(const MeshBase&) = delete;
   MeshBase& operator=(const MeshBase&) = delete;
   MeshBase(MeshBase&&) = default;
-  MeshBase& operator=(MeshBase&&) = default;
+  MeshBase& operator=(MeshBase&& other) noexcept;
 
   // ---- Builders ----
   void clear();
@@ -129,13 +130,30 @@ public:
   /// This is intended for internal Mesh-library routines that need to update
   /// a subset of vertex coordinates in-place (e.g., MPI ghost synchronization)
   /// without copying the full coordinate array. Callers are responsible for
-  /// emitting a GeometryChanged event after mutating this buffer.
+  /// calling mark_geometry_changed() after mutating this buffer.
   real_t* X_cur_data_mutable() noexcept { return X_cur_.empty() ? nullptr : X_cur_.data(); }
+  /// Ensure X_cur storage exists by copying X_ref without emitting an event.
+  /// Intended for compound internal mutations that emit one geometry event when
+  /// the logical update is complete.
+  void ensure_current_coords_buffer();
+  void mark_geometry_changed();
+  void mark_reference_geometry_changed();
+  void mark_current_geometry_changed();
   void set_current_coords(const std::vector<real_t>& Xcur);
   void clear_current_coords();
   Configuration active_configuration() const noexcept { return active_config_; }
-  void use_reference_configuration() { active_config_ = Configuration::Reference; }
-  void use_current_configuration() { active_config_ = Configuration::Current; }
+  void use_reference_configuration();
+  void use_current_configuration();
+  [[nodiscard]] MeshRevisionState revision_state() const { return event_bus_.revision_state(); }
+  [[nodiscard]] std::uint64_t geometry_revision() const { return event_bus_.geometry_revision(); }
+  [[nodiscard]] std::uint64_t reference_geometry_revision() const { return event_bus_.reference_geometry_revision(); }
+  [[nodiscard]] std::uint64_t current_geometry_revision() const { return event_bus_.current_geometry_revision(); }
+  [[nodiscard]] std::uint64_t topology_revision() const { return event_bus_.topology_revision(); }
+  [[nodiscard]] std::uint64_t ownership_revision() const { return event_bus_.ownership_revision(); }
+  [[nodiscard]] std::uint64_t numbering_revision() const { return event_bus_.numbering_revision(); }
+  [[nodiscard]] std::uint64_t field_layout_revision() const { return event_bus_.field_layout_revision(); }
+  [[nodiscard]] std::uint64_t label_revision() const { return event_bus_.label_revision(); }
+  [[nodiscard]] std::uint64_t active_configuration_epoch() const { return event_bus_.active_configuration_epoch(); }
 
   // Convenience vertex coordinate accessors (for small testing workflows)
   std::array<real_t,3> get_vertex_coords(index_t v) const;

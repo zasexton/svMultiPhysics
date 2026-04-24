@@ -200,7 +200,7 @@ public:
      * For mesh-independent workflows, this must be set by the caller (typically DofHandler)
      * when running in parallel.
      */
-    void setMyRank(int my_rank) noexcept { my_rank_ = my_rank; }
+    void setMyRank(int my_rank) noexcept;
 
     /**
      * @brief Local MPI rank used by isOwnedDof()
@@ -282,6 +282,18 @@ public:
      * @brief Get number of cells in the map
      */
     [[nodiscard]] GlobalIndex getNumCells() const noexcept { return n_cells_; }
+
+    /**
+     * @brief Revision for FE DOF layout and ownership metadata.
+     *
+     * This counter changes whenever the cell-to-DOF CSR structure, global/local
+     * DOF counts, ownership callback, or local rank changes. Assembly, sparsity,
+     * vector-layout, restart, and other FE-side caches must include this value
+     * when they depend on this DofMap.
+     */
+    [[nodiscard]] std::uint64_t dofLayoutRevision() const noexcept {
+        return layout_revision_.load(std::memory_order_acquire);
+    }
 
     /**
      * @brief Get maximum DOFs per cell (for preallocation)
@@ -387,6 +399,7 @@ private:
     void checkNotFinalized() const;
     void checkFinalized() const;
     void checkCellId(GlobalIndex cell_id) const;
+    void bumpLayoutRevision() noexcept;
 
     // CSR storage for cell -> DOF mapping
     std::vector<GlobalIndex> cell_dof_offsets_;  ///< [n_cells+1] offsets
@@ -403,6 +416,7 @@ private:
 
     // State management
     std::atomic<DofMapState> state_{DofMapState::Building};
+    std::atomic<std::uint64_t> layout_revision_{0};
 };
 
 } // namespace dofs

@@ -32,6 +32,7 @@
 #include "Core/Types.h"
 #include "Core/FEException.h"
 
+#include <cstdint>
 #include <vector>
 #include <span>
 #include <string>
@@ -316,6 +317,7 @@ public:
     // =========================================================================
 
     [[nodiscard]] bool isFinalized() const noexcept { return finalized_; }
+    [[nodiscard]] std::uint64_t blockLayoutRevision() const noexcept { return block_layout_revision_; }
 
 private:
     // Block descriptor
@@ -338,8 +340,10 @@ private:
 
     // State
     bool finalized_{false};
+    std::uint64_t block_layout_revision_{0};
 
     // Helpers
+    void bumpBlockLayoutRevision() noexcept { ++block_layout_revision_; }
     void checkFinalized() const;
     void checkNotFinalized() const;
     void checkBlockIndex(std::size_t idx) const;

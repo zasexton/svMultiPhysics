@@ -65,6 +65,7 @@ AffineConstraints::~AffineConstraints() = default;
 AffineConstraints::AffineConstraints(AffineConstraints&& other) noexcept
     : options_(other.options_),
       is_closed_(other.is_closed_),
+      constraint_layout_revision_(other.constraint_layout_revision_),
       building_lines_(std::move(other.building_lines_)),
       slave_dofs_(std::move(other.slave_dofs_)),
       slave_to_index_(std::move(other.slave_to_index_)),
@@ -83,6 +84,7 @@ AffineConstraints& AffineConstraints::operator=(AffineConstraints&& other) noexc
 
     options_ = other.options_;
     is_closed_ = other.is_closed_;
+    constraint_layout_revision_ = other.constraint_layout_revision_;
     building_lines_ = std::move(other.building_lines_);
     slave_dofs_ = std::move(other.slave_dofs_);
     slave_to_index_ = std::move(other.slave_to_index_);
@@ -124,6 +126,7 @@ void AffineConstraints::addLine(GlobalIndex slave_dof) {
         line.slave_dof = slave_dof;
         building_lines_[slave_dof] = std::move(line);
     }
+    bumpConstraintLayoutRevision();
 }
 
 void AffineConstraints::addLines(std::span<const GlobalIndex> slave_dofs) {
@@ -150,6 +153,7 @@ void AffineConstraints::addEntry(GlobalIndex slave_dof, GlobalIndex master_dof, 
     }
 
     line->entries.push_back({master_dof, weight});
+    bumpConstraintLayoutRevision();
 }
 
 void AffineConstraints::addEntries(GlobalIndex slave_dof,
@@ -215,6 +219,7 @@ void AffineConstraints::addDirichlet(GlobalIndex dof, double value) {
         }
         line.entries.clear();
         line.inhomogeneity = value;
+        bumpConstraintLayoutRevision();
         return;
     }
 
@@ -261,6 +266,7 @@ void AffineConstraints::merge(const AffineConstraints& other, bool overwrite) {
         CONSTRAINT_THROW("Cannot merge from closed AffineConstraints");
     }
 
+    bool changed = false;
     for (const auto& [slave, line] : other.building_lines_) {
         auto it = building_lines_.find(slave);
         if (it != building_lines_.end()) {
@@ -270,7 +276,11 @@ void AffineConstraints::merge(const AffineConstraints& other, bool overwrite) {
         }
         if (overwrite || it == building_lines_.end()) {
             building_lines_[slave] = line;
+            changed = true;
         }
+    }
+    if (changed) {
+        bumpConstraintLayoutRevision();
     }
 }
 
@@ -284,6 +294,7 @@ void AffineConstraints::clear() {
     entries_.clear();
     inhomogeneities_.clear();
     is_closed_ = false;
+    bumpConstraintLayoutRevision();
 }
 
 // ============================================================================
@@ -312,6 +323,7 @@ void AffineConstraints::close() {
     buildCSRStorage();
 
     is_closed_ = true;
+    bumpConstraintLayoutRevision();
 }
 
 void AffineConstraints::computeTransitiveClosure() {
@@ -948,6 +960,7 @@ void AffineConstraints::forEach(std::function<void(const ConstraintView&)> callb
 void AffineConstraints::setOptions(const AffineConstraintsOptions& options) {
     checkNotClosed();
     options_ = options;
+    bumpConstraintLayoutRevision();
 }
 
 // ============================================================================
@@ -972,6 +985,7 @@ ConstraintLine& AffineConstraints::getOrCreateLine(GlobalIndex slave_dof) {
         ConstraintLine line;
         line.slave_dof = slave_dof;
         building_lines_[slave_dof] = std::move(line);
+        bumpConstraintLayoutRevision();
         return building_lines_[slave_dof];
     }
     return it->second;

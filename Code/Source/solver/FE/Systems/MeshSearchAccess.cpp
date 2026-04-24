@@ -272,6 +272,7 @@ struct MeshSearchAccess::Impl {
                 case svmp::MeshEvent::TopologyChanged:
                 case svmp::MeshEvent::GeometryChanged:
                 case svmp::MeshEvent::PartitionChanged:
+                case svmp::MeshEvent::NumberingChanged:
                 case svmp::MeshEvent::LabelsChanged:
                 case svmp::MeshEvent::AdaptivityApplied:
                     revision_->fetch_add(1u, std::memory_order_relaxed);
@@ -323,6 +324,37 @@ int MeshSearchAccess::dimension() const noexcept
 svmp::Configuration MeshSearchAccess::queryConfig() const noexcept
 {
     return coord_cfg_override_enabled_ ? coord_cfg_override_ : mesh_.base().active_configuration();
+}
+
+std::uint64_t MeshSearchAccess::searchRevisionKey() const noexcept
+{
+    const auto& base = mesh_.base();
+    std::uint64_t key = 1469598103934665603ull;
+    auto mix = [&key](std::uint64_t value) {
+        key ^= value;
+        key *= 1099511628211ull;
+    };
+    const auto cfg = queryConfig();
+    const bool use_current = (cfg == svmp::Configuration::Current ||
+                              cfg == svmp::Configuration::Deformed) &&
+                             base.has_current_coords();
+    mix(use_current ? 1u : 0u);
+    mix(use_current ? base.current_geometry_revision()
+                    : base.reference_geometry_revision());
+    mix(base.topology_revision());
+    mix(base.ownership_revision());
+    mix(base.numbering_revision());
+    mix(base.label_revision());
+    mix(static_cast<std::uint64_t>(cfg));
+    if (!coord_cfg_override_enabled_) {
+        mix(base.active_configuration_epoch());
+    }
+    return key;
+}
+
+std::uint64_t MeshSearchAccess::diagnosticRevisionKey() const noexcept
+{
+    return searchRevisionKey();
 }
 
 void MeshSearchAccess::build() const
@@ -456,7 +488,7 @@ ISearchAccess::ClosestBoundaryPoint MeshSearchAccess::closestBoundaryPointOnMark
         return {};
     }
 
-    const std::uint64_t rev = impl_->revision.load(std::memory_order_relaxed);
+    const std::uint64_t rev = searchRevisionKey();
 
     std::lock_guard<std::mutex> lock(impl_->mutex);
     auto& entry = impl_->bvh_by_marker[boundary_marker];

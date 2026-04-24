@@ -161,11 +161,25 @@ public:
   const std::vector<real_t>& X_cur() const noexcept { return local_mesh().X_cur(); }
   bool has_current_coords() const noexcept { return local_mesh().has_current_coords(); }
   real_t* X_cur_data_mutable() noexcept { return local_mesh().X_cur_data_mutable(); }
+  void ensure_current_coords_buffer() { local_mesh().ensure_current_coords_buffer(); }
+  void mark_geometry_changed() { local_mesh().mark_geometry_changed(); }
+  void mark_reference_geometry_changed() { local_mesh().mark_reference_geometry_changed(); }
+  void mark_current_geometry_changed() { local_mesh().mark_current_geometry_changed(); }
   void set_current_coords(const std::vector<real_t>& Xcur) { local_mesh().set_current_coords(Xcur); }
   void clear_current_coords() { local_mesh().clear_current_coords(); }
   Configuration active_configuration() const noexcept { return local_mesh().active_configuration(); }
   void use_reference_configuration() { local_mesh().use_reference_configuration(); }
   void use_current_configuration() { local_mesh().use_current_configuration(); }
+  [[nodiscard]] MeshRevisionState revision_state() const { return local_mesh().revision_state(); }
+  [[nodiscard]] std::uint64_t geometry_revision() const { return local_mesh().geometry_revision(); }
+  [[nodiscard]] std::uint64_t reference_geometry_revision() const { return local_mesh().reference_geometry_revision(); }
+  [[nodiscard]] std::uint64_t current_geometry_revision() const { return local_mesh().current_geometry_revision(); }
+  [[nodiscard]] std::uint64_t topology_revision() const { return local_mesh().topology_revision(); }
+  [[nodiscard]] std::uint64_t ownership_revision() const { return local_mesh().ownership_revision(); }
+  [[nodiscard]] std::uint64_t numbering_revision() const { return local_mesh().numbering_revision(); }
+  [[nodiscard]] std::uint64_t field_layout_revision() const { return local_mesh().field_layout_revision(); }
+  [[nodiscard]] std::uint64_t label_revision() const { return local_mesh().label_revision(); }
+  [[nodiscard]] std::uint64_t active_configuration_epoch() const { return local_mesh().active_configuration_epoch(); }
   std::array<real_t,3> get_vertex_coords(index_t v) const { return local_mesh().get_vertex_coords(v); }
   void set_vertex_coords(index_t v, const std::array<real_t,3>& xyz) { local_mesh().set_vertex_coords(v, xyz); }
   void set_vertex_deformed_coords(index_t v, const std::array<real_t,3>& xyz) {
@@ -684,9 +698,9 @@ public:
 	    const bool use_current = (cfg == Configuration::Current || cfg == Configuration::Deformed);
 	    if (!use_current) return;
 	    if (!local_mesh().has_current_coords()) {
-	      local_mesh().set_current_coords(local_mesh().X_ref());
+	      local_mesh().ensure_current_coords_buffer();
 	    }
-	    local_mesh().event_bus().notify(MeshEvent::GeometryChanged);
+	    local_mesh().mark_geometry_changed();
 	  }
 
 	  // Migration & balancing (no-op)
@@ -939,11 +953,25 @@ public:
   const std::vector<real_t>& X_cur() const noexcept { return local_mesh().X_cur(); }
   bool has_current_coords() const noexcept { return local_mesh().has_current_coords(); }
   real_t* X_cur_data_mutable() noexcept { return local_mesh().X_cur_data_mutable(); }
+  void ensure_current_coords_buffer() { local_mesh().ensure_current_coords_buffer(); }
+  void mark_geometry_changed() { local_mesh().mark_geometry_changed(); }
+  void mark_reference_geometry_changed() { local_mesh().mark_reference_geometry_changed(); }
+  void mark_current_geometry_changed() { local_mesh().mark_current_geometry_changed(); }
   void set_current_coords(const std::vector<real_t>& Xcur) { local_mesh().set_current_coords(Xcur); }
   void clear_current_coords() { local_mesh().clear_current_coords(); }
   Configuration active_configuration() const noexcept { return local_mesh().active_configuration(); }
   void use_reference_configuration() { local_mesh().use_reference_configuration(); }
   void use_current_configuration() { local_mesh().use_current_configuration(); }
+  [[nodiscard]] MeshRevisionState revision_state() const { return local_mesh().revision_state(); }
+  [[nodiscard]] std::uint64_t geometry_revision() const { return local_mesh().geometry_revision(); }
+  [[nodiscard]] std::uint64_t reference_geometry_revision() const { return local_mesh().reference_geometry_revision(); }
+  [[nodiscard]] std::uint64_t current_geometry_revision() const { return local_mesh().current_geometry_revision(); }
+  [[nodiscard]] std::uint64_t topology_revision() const { return local_mesh().topology_revision(); }
+  [[nodiscard]] std::uint64_t ownership_revision() const { return local_mesh().ownership_revision(); }
+  [[nodiscard]] std::uint64_t numbering_revision() const { return local_mesh().numbering_revision(); }
+  [[nodiscard]] std::uint64_t field_layout_revision() const { return local_mesh().field_layout_revision(); }
+  [[nodiscard]] std::uint64_t label_revision() const { return local_mesh().label_revision(); }
+  [[nodiscard]] std::uint64_t active_configuration_epoch() const { return local_mesh().active_configuration_epoch(); }
   std::array<real_t,3> get_vertex_coords(index_t v) const { return local_mesh().get_vertex_coords(v); }
   void set_vertex_coords(index_t v, const std::array<real_t,3>& xyz) { local_mesh().set_vertex_coords(v, xyz); }
   void set_vertex_deformed_coords(index_t v, const std::array<real_t,3>& xyz) {

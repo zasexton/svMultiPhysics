@@ -1088,6 +1088,7 @@ AdaptivityResult AdaptivityManager::refine(MeshBase& mesh,
   }
 
   mesh = std::move(new_mesh);
+  mesh.event_bus().notify(MeshEvent::AdaptivityApplied);
 
   result.refinement_delta = std::move(delta);
   result.final_cell_count = mesh.n_cells();
@@ -1381,6 +1382,7 @@ AdaptivityResult AdaptivityManager::coarsen(MeshBase& mesh,
   }
 
   mesh = std::move(new_mesh);
+  mesh.event_bus().notify(MeshEvent::AdaptivityApplied);
 
   result.final_cell_count = mesh.n_cells();
   result.final_vertex_count = mesh.n_vertices();

@@ -45,6 +45,7 @@ int BlockDofMap::addBlock(const std::string& name, GlobalIndex n_dofs) {
     name_to_index_[name] = static_cast<std::size_t>(idx);
 
     total_dofs_ += n_dofs;
+    bumpBlockLayoutRevision();
 
     return idx;
 }
@@ -81,6 +82,7 @@ int BlockDofMap::addBlock(const std::string& name, GlobalIndex start_dof, Global
     name_to_index_[name] = static_cast<std::size_t>(idx);
 
     total_dofs_ = std::max(total_dofs_, end_dof);
+    bumpBlockLayoutRevision();
 
     return idx;
 }
@@ -98,7 +100,11 @@ void BlockDofMap::setCoupling(std::size_t block_i, std::size_t block_j, BlockCou
         coupling_matrix_.resize(n * n, BlockCoupling::None);
     }
 
-    coupling_matrix_[block_i * n + block_j] = coupling;
+    auto& slot = coupling_matrix_[block_i * n + block_j];
+    if (slot != coupling) {
+        slot = coupling;
+        bumpBlockLayoutRevision();
+    }
 }
 
 void BlockDofMap::setCoupling(const std::string& name_i, const std::string& name_j,
@@ -123,6 +129,7 @@ void BlockDofMap::finalize() {
     }
 
     finalized_ = true;
+    bumpBlockLayoutRevision();
 }
 
 // =============================================================================

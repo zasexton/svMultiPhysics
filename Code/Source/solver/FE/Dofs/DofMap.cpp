@@ -40,11 +40,13 @@ DofMap::DofMap(DofMap&& other) noexcept
     , owner_func_(std::move(other.owner_func_))
     , my_rank_(other.my_rank_)
     , state_(other.state_.load(std::memory_order_acquire))
+    , layout_revision_(other.layout_revision_.load(std::memory_order_acquire))
 {
     other.n_cells_ = 0;
     other.n_dofs_total_ = 0;
     other.n_dofs_local_ = 0;
     other.state_.store(DofMapState::Building, std::memory_order_release);
+    other.layout_revision_.store(0, std::memory_order_release);
 }
 
 DofMap& DofMap::operator=(DofMap&& other) noexcept {
@@ -57,11 +59,14 @@ DofMap& DofMap::operator=(DofMap&& other) noexcept {
         owner_func_ = std::move(other.owner_func_);
         my_rank_ = other.my_rank_;
         state_.store(other.state_.load(std::memory_order_acquire), std::memory_order_release);
+        const auto moved_revision = other.layout_revision_.load(std::memory_order_acquire);
+        layout_revision_.store(moved_revision + 1u, std::memory_order_release);
 
         other.n_cells_ = 0;
         other.n_dofs_total_ = 0;
         other.n_dofs_local_ = 0;
         other.state_.store(DofMapState::Building, std::memory_order_release);
+        other.layout_revision_.store(0, std::memory_order_release);
     }
     return *this;
 }
@@ -75,6 +80,7 @@ DofMap::DofMap(const DofMap& other)
     , owner_func_(other.owner_func_)
     , my_rank_(other.my_rank_)
     , state_(DofMapState::Building)  // Copy always starts in Building state
+    , layout_revision_(other.layout_revision_.load(std::memory_order_acquire))
 {
 }
 
@@ -88,6 +94,8 @@ DofMap& DofMap::operator=(const DofMap& other) {
         owner_func_ = other.owner_func_;
         my_rank_ = other.my_rank_;
         state_.store(DofMapState::Building, std::memory_order_release);  // Reset to building
+        const auto copied_revision = other.layout_revision_.load(std::memory_order_acquire);
+        layout_revision_.store(copied_revision + 1u, std::memory_order_release);
     }
     return *this;
 }
@@ -104,6 +112,7 @@ void DofMap::reserve(GlobalIndex n_cells, LocalIndex dofs_per_cell) {
     if (dofs_per_cell > 0) {
         cell_dofs_.reserve(static_cast<std::size_t>(n_cells * dofs_per_cell));
     }
+    bumpLayoutRevision();
 }
 
 void DofMap::setCellDofs(GlobalIndex cell_id, std::span<const GlobalIndex> dof_ids) {
@@ -135,6 +144,7 @@ void DofMap::setCellDofs(GlobalIndex cell_id, std::span<const GlobalIndex> dof_i
     }
 
     n_cells_ = std::max(n_cells_, cell_id + 1);
+    bumpLayoutRevision();
 }
 
 void DofMap::setCellDofsBatch(std::span<const GlobalIndex> cell_ids,
@@ -167,21 +177,33 @@ void DofMap::setCellDofsBatch(std::span<const GlobalIndex> cell_ids,
     cell_dof_offsets_.back() = static_cast<GlobalIndex>(cell_dofs_.size());
 
     n_cells_ = max_cell + 1;
+    bumpLayoutRevision();
 }
 
 void DofMap::setNumDofs(GlobalIndex n_dofs) {
     checkNotFinalized();
     n_dofs_total_ = n_dofs;
+    bumpLayoutRevision();
 }
 
 void DofMap::setNumLocalDofs(GlobalIndex n_local) {
     checkNotFinalized();
     n_dofs_local_ = n_local;
+    bumpLayoutRevision();
 }
 
 void DofMap::setDofOwnership(std::function<int(GlobalIndex)> owner_func) {
     checkNotFinalized();
     owner_func_ = std::move(owner_func);
+    bumpLayoutRevision();
+}
+
+void DofMap::setMyRank(int my_rank) noexcept {
+    if (my_rank_ == my_rank) {
+        return;
+    }
+    my_rank_ = my_rank;
+    bumpLayoutRevision();
 }
 
 void DofMap::finalize() {
@@ -360,6 +382,10 @@ void DofMap::checkCellId(GlobalIndex cell_id) const {
         throw FEException("DofMap: cell_id " + std::to_string(cell_id) +
                           " out of range [0, " + std::to_string(n_cells_) + ")");
     }
+}
+
+void DofMap::bumpLayoutRevision() noexcept {
+    layout_revision_.fetch_add(1u, std::memory_order_acq_rel);
 }
 
 } // namespace dofs

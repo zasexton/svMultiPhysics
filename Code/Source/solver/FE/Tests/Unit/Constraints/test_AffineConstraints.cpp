@@ -51,6 +51,29 @@ TEST(AffineConstraintsTest, AddSingleConstraint) {
     EXPECT_EQ(constraints.numConstraints(), 1);
 }
 
+TEST(AffineConstraintsTest, ConstraintLayoutRevisionTracksStructuralChanges) {
+    AffineConstraints constraints;
+    const auto initial = constraints.constraintLayoutRevision();
+
+    constraints.addLine(5);
+    EXPECT_GT(constraints.constraintLayoutRevision(), initial);
+    const auto after_line = constraints.constraintLayoutRevision();
+
+    constraints.addEntry(5, 10, 2.0);
+    EXPECT_GT(constraints.constraintLayoutRevision(), after_line);
+    const auto after_entry = constraints.constraintLayoutRevision();
+
+    constraints.setInhomogeneity(5, 0.5);
+    EXPECT_EQ(constraints.constraintLayoutRevision(), after_entry);
+
+    constraints.close();
+    EXPECT_GT(constraints.constraintLayoutRevision(), after_entry);
+    const auto after_close = constraints.constraintLayoutRevision();
+
+    constraints.updateInhomogeneity(5, 1.0);
+    EXPECT_EQ(constraints.constraintLayoutRevision(), after_close);
+}
+
 TEST(AffineConstraintsTest, AddDirichletDuplicateSameValueIsIdempotent) {
     AffineConstraints constraints;
 

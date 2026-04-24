@@ -1069,6 +1069,14 @@ AssemblyResult ParallelAssembler::assembleCellsFused(
         initialize();
     }
 
+    if (options_.allow_unowned_row_accumulation) {
+        // Internal temporary views, such as FE-system sensitivity accumulators,
+        // intentionally collect all owned-cell row contributions locally before
+        // a caller-managed reduction.
+        OwnedCellsMeshAccess owned_mesh(mesh);
+        return local_assembler_.assembleCellsFused(owned_mesh, terms);
+    }
+
     beginGhostAssemblyIfNeeded();
 
     // Wrap each term's matrix/vector views with GhostRoutingView
@@ -1118,6 +1126,14 @@ AssemblyResult ParallelAssembler::assembleBoundaryFaces(
     if (!initialized_) {
         initialize();
     }
+
+    if (options_.allow_unowned_row_accumulation) {
+        OwnedCellsMeshAccess owned_mesh(mesh);
+        return local_assembler_.assembleBoundaryFaces(owned_mesh, boundary_marker,
+                                                      space, kernel, matrix_view,
+                                                      vector_view);
+    }
+
     beginGhostAssemblyIfNeeded();
 
     return withPolicyMeshAccess(mesh, ghost_policy_, [&](const IMeshAccess& policy_mesh) -> AssemblyResult {
@@ -1161,6 +1177,14 @@ AssemblyResult ParallelAssembler::assembleBoundaryFaces(
     if (!initialized_) {
         initialize();
     }
+
+    if (options_.allow_unowned_row_accumulation) {
+        OwnedCellsMeshAccess owned_mesh(mesh);
+        return local_assembler_.assembleBoundaryFaces(owned_mesh, boundary_marker,
+                                                      test_space, trial_space, kernel,
+                                                      matrix_view, vector_view);
+    }
+
     beginGhostAssemblyIfNeeded();
 
     return withPolicyMeshAccess(mesh, ghost_policy_, [&](const IMeshAccess& policy_mesh) -> AssemblyResult {
@@ -1203,6 +1227,14 @@ AssemblyResult ParallelAssembler::assembleInteriorFaces(
     if (!initialized_) {
         initialize();
     }
+
+    if (options_.allow_unowned_row_accumulation) {
+        OwnedCellsMeshAccess owned_mesh(mesh);
+        return local_assembler_.assembleInteriorFaces(owned_mesh, test_space,
+                                                      trial_space, kernel,
+                                                      matrix_view, vector_view);
+    }
+
     beginGhostAssemblyIfNeeded();
 
     return withPolicyMeshAccess(mesh, ghost_policy_, [&](const IMeshAccess& policy_mesh) -> AssemblyResult {
@@ -1238,6 +1270,15 @@ AssemblyResult ParallelAssembler::assembleInterfaceFaces(
     if (!initialized_) {
         initialize();
     }
+
+    if (options_.allow_unowned_row_accumulation) {
+        OwnedCellsMeshAccess owned_mesh(mesh);
+        return local_assembler_.assembleInterfaceFaces(owned_mesh, interface_mesh,
+                                                       interface_marker, test_space,
+                                                       trial_space, kernel, matrix_view,
+                                                       vector_view);
+    }
+
     beginGhostAssemblyIfNeeded();
 
     return withPolicyMeshAccess(mesh, ghost_policy_, [&](const IMeshAccess& policy_mesh) -> AssemblyResult {
@@ -1299,6 +1340,27 @@ AssemblyResult ParallelAssembler::assembleCellsParallel(
 {
     if (!initialized_) {
         initialize();
+    }
+
+    if (options_.allow_unowned_row_accumulation) {
+        OwnedCellsMeshAccess owned_mesh(mesh);
+        if (assemble_matrix && matrix_view && assemble_vector && vector_view) {
+            if (matrix_view == vector_view) {
+                return local_assembler_.assembleBoth(owned_mesh, test_space, trial_space,
+                                                     kernel, *matrix_view, *matrix_view);
+            }
+            return local_assembler_.assembleBoth(owned_mesh, test_space, trial_space,
+                                                 kernel, *matrix_view, *vector_view);
+        }
+        if (assemble_matrix && matrix_view) {
+            return local_assembler_.assembleMatrix(owned_mesh, test_space, trial_space,
+                                                   kernel, *matrix_view);
+        }
+        if (assemble_vector && vector_view) {
+            return local_assembler_.assembleVector(owned_mesh, test_space, kernel,
+                                                   *vector_view);
+        }
+        return {};
     }
 
     beginGhostAssemblyIfNeeded();

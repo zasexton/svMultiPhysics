@@ -80,8 +80,7 @@ namespace {
 
 [[nodiscard]] inline bool monolithicCompiledDispatchEnabled() noexcept
 {
-    return core::envEnabled("SVMP_FE_ENABLE_MONOLITHIC_COMPILED_DISPATCH") &&
-           !core::envEnabled("SVMP_FE_DISABLE_MONOLITHIC_COMPILED_DISPATCH");
+    return !core::envEnabled("SVMP_FE_DISABLE_MONOLITHIC_COMPILED_DISPATCH");
 }
 
 [[nodiscard]] inline bool monolithicCompiledCompareEnabled() noexcept
@@ -373,9 +372,15 @@ int requiredHistoryStates(const TimeIntegrationContext* ctx) noexcept
 
 struct ResolvedVectorGatherCache {
     const void* layout_handle{nullptr};
+    std::uint64_t layout_revision{0};
     std::vector<GlobalIndex> dofs{};
     std::vector<GlobalIndex> resolved{};
 };
+
+[[nodiscard]] inline std::uint64_t dofLayoutRevision(const dofs::DofMap* dof_map) noexcept
+{
+    return dof_map ? dof_map->dofLayoutRevision() : 0u;
+}
 
 void gatherVectorCoefficients(
     std::span<const GlobalIndex> dofs,
@@ -404,13 +409,16 @@ void gatherVectorCoefficients(
         }
         if (cache != nullptr) {
             const void* layout_handle = view->vectorLayoutHandle();
+            const auto layout_revision = view->vectorLayoutRevision();
             const bool cache_hit =
                 cache->layout_handle == layout_handle &&
+                cache->layout_revision == layout_revision &&
                 cache->dofs.size() == dofs.size() &&
                 std::equal(cache->dofs.begin(), cache->dofs.end(), dofs.begin());
 
             if (!cache_hit) {
                 cache->layout_handle = layout_handle;
+                cache->layout_revision = layout_revision;
                 cache->dofs.assign(dofs.begin(), dofs.end());
                 cache->resolved.resize(dofs.size());
                 view->resolveVectorEntries(dofs, cache->resolved);
@@ -690,6 +698,11 @@ public:
         return base_ ? base_->vectorLayoutHandle() : nullptr;
     }
 
+    [[nodiscard]] std::uint64_t vectorLayoutRevision() const noexcept override
+    {
+        return base_ ? base_->vectorLayoutRevision() : 0u;
+    }
+
     void resolveVectorEntries(std::span<const GlobalIndex> dofs,
                               std::span<GlobalIndex> resolved) const override
     {
@@ -856,6 +869,11 @@ public:
     [[nodiscard]] const void* matrixLayoutHandle() const noexcept override
     {
         return base_ ? base_->matrixLayoutHandle() : nullptr;
+    }
+
+    [[nodiscard]] std::uint64_t matrixLayoutRevision() const noexcept override
+    {
+        return base_ ? base_->matrixLayoutRevision() : 0u;
     }
 
     void resolveMatrixEntries(std::span<const GlobalIndex> row_dofs,
@@ -1080,7 +1098,13 @@ void StandardAssembler::setDofMap(const dofs::DofMap& dof_map)
     cell_dof_tables_.clear();
     cell_resolved_vector_tables_.clear();
     cell_resolved_matrix_tables_.clear();
+    scratch_fused_resolved_.clear();
+    scratch_fused_resolved_offsets_.clear();
+    scratch_fused_vector_resolved_.clear();
+    scratch_fused_vector_resolved_offsets_.clear();
     field_access_plans_.clear();
+    cell_constrained_flags_valid_ = false;
+    coloring_valid_ = false;
 }
 
 void StandardAssembler::setRowDofMap(const dofs::DofMap& dof_map,
@@ -1090,6 +1114,8 @@ void StandardAssembler::setRowDofMap(const dofs::DofMap& dof_map,
     row_dof_map_ = &dof_map;
     row_dof_offset_ = row_offset;
     row_dof_scope_ = row_scope;
+    cell_constrained_flags_valid_ = false;
+    coloring_valid_ = false;
     // NOTE: Do NOT clear cell_dof_tables_, cell_resolved_*_tables_, or
     // field_access_plans_ here.  These caches are keyed by (dof_map_ptr, offset)
     // and remain valid when the assembler's "default" DOF maps change.
@@ -1104,6 +1130,8 @@ void StandardAssembler::setColDofMap(const dofs::DofMap& dof_map,
     col_dof_map_ = &dof_map;
     col_dof_offset_ = col_offset;
     col_dof_scope_ = col_scope;
+    cell_constrained_flags_valid_ = false;
+    coloring_valid_ = false;
     // See setRowDofMap note above.
 }
 
@@ -1119,7 +1147,13 @@ void StandardAssembler::setDofHandler(const dofs::DofHandler& dof_handler)
     cell_dof_tables_.clear();
     cell_resolved_vector_tables_.clear();
     cell_resolved_matrix_tables_.clear();
+    scratch_fused_resolved_.clear();
+    scratch_fused_resolved_offsets_.clear();
+    scratch_fused_vector_resolved_.clear();
+    scratch_fused_vector_resolved_offsets_.clear();
     field_access_plans_.clear();
+    cell_constrained_flags_valid_ = false;
+    coloring_valid_ = false;
 }
 
 void StandardAssembler::setConstraints(const constraints::AffineConstraints* constraints)
@@ -1389,6 +1423,7 @@ void StandardAssembler::reset()
     local_prev_solution_coeffs_.clear();
     field_solution_access_.clear();
     time_integration_ = nullptr;
+    flat_cell_coords_ = {};
     cached_mapping_.reset();
     cached_mapping_type_ = ElementType::Unknown;
     cached_mapping_order_ = -1;
@@ -1397,25 +1432,82 @@ void StandardAssembler::reset()
     cached_geom_volume_ = 0.0;
     cached_cell_dof_mesh_ = nullptr;
     cached_cell_dof_count_ = 0;
+    cached_cell_dof_mesh_revisions_valid_ = false;
+    cached_cell_dof_topology_revision_ = 0;
+    cached_cell_dof_ownership_revision_ = 0;
+    cached_cell_dof_numbering_revision_ = 0;
+    cached_cell_dof_field_layout_revision_ = 0;
     cell_dof_tables_.clear();
     cell_resolved_vector_tables_.clear();
     cell_resolved_matrix_tables_.clear();
     field_access_plans_.clear();
     cell_constrained_flags_valid_ = false;
+    cell_constrained_flags_constraint_revision_ = 0;
+    cell_constrained_flags_dof_revisions_.clear();
+    coloring_valid_ = false;
+    coloring_mesh_ = nullptr;
+    coloring_mesh_revisions_valid_ = false;
+    coloring_topology_revision_ = 0;
+    coloring_ownership_revision_ = 0;
+    coloring_numbering_revision_ = 0;
+    coloring_dof_revisions_.clear();
     initialized_ = false;
+}
+
+void StandardAssembler::invalidateGeometryCaches()
+{
+    flat_cell_coords_ = {};
+    cached_mapping_.reset();
+    cached_mapping_type_ = ElementType::Unknown;
+    cached_mapping_order_ = -1;
+    cached_mapping_affine_ = false;
+    cached_geom_h_ = 0.0;
+    cached_geom_volume_ = 0.0;
+}
+
+void StandardAssembler::invalidateTopologyLayoutCaches()
+{
+    reset();
 }
 
 void StandardAssembler::ensureCellDofTables(const IMeshAccess& mesh)
 {
     const auto n_cells = mesh.numCells();
-    if (cached_cell_dof_mesh_ != &mesh || cached_cell_dof_count_ != n_cells) {
+    bool invalid = (cached_cell_dof_mesh_ != &mesh || cached_cell_dof_count_ != n_cells);
+
+    if (mesh.revisionTrackingAvailable()) {
+        const auto topology_revision = mesh.topologyRevision();
+        const auto ownership_revision = mesh.ownershipRevision();
+        const auto numbering_revision = mesh.numberingRevision();
+        const auto field_layout_revision = mesh.fieldLayoutRevision();
+        invalid = invalid ||
+                  !cached_cell_dof_mesh_revisions_valid_ ||
+                  cached_cell_dof_topology_revision_ != topology_revision ||
+                  cached_cell_dof_ownership_revision_ != ownership_revision ||
+                  cached_cell_dof_numbering_revision_ != numbering_revision ||
+                  cached_cell_dof_field_layout_revision_ != field_layout_revision;
+        cached_cell_dof_topology_revision_ = topology_revision;
+        cached_cell_dof_ownership_revision_ = ownership_revision;
+        cached_cell_dof_numbering_revision_ = numbering_revision;
+        cached_cell_dof_field_layout_revision_ = field_layout_revision;
+        cached_cell_dof_mesh_revisions_valid_ = true;
+    } else {
+        cached_cell_dof_mesh_revisions_valid_ = false;
+    }
+
+    if (invalid) {
         cached_cell_dof_mesh_ = &mesh;
         cached_cell_dof_count_ = n_cells;
         cell_dof_tables_.clear();
         cell_resolved_vector_tables_.clear();
         cell_resolved_matrix_tables_.clear();
+        scratch_fused_resolved_.clear();
+        scratch_fused_resolved_offsets_.clear();
+        scratch_fused_vector_resolved_.clear();
+        scratch_fused_vector_resolved_offsets_.clear();
         field_access_plans_.clear();
         cell_constrained_flags_valid_ = false;
+        coloring_valid_ = false;
     }
 }
 
@@ -1427,11 +1519,34 @@ const StandardAssembler::CellDofTable& StandardAssembler::getCellDofTable(
 {
     FE_CHECK_NOT_NULL(dof_map, "StandardAssembler::getCellDofTable: dof_map");
     ensureCellDofTables(mesh);
+    const auto layout_revision = dofLayoutRevision(dof_map);
 
     for (const auto& table : cell_dof_tables_) {
-        if (table.dof_map == dof_map && table.dof_offset == dof_offset) {
+        if (table.dof_map == dof_map &&
+            table.dof_offset == dof_offset &&
+            table.dof_layout_revision == layout_revision) {
             return table;
         }
+    }
+
+    const bool stale_table_for_key =
+        std::any_of(cell_dof_tables_.begin(), cell_dof_tables_.end(),
+                    [&](const CellDofTable& table) {
+                        return table.dof_map == dof_map &&
+                               table.dof_offset == dof_offset &&
+                               table.dof_layout_revision != layout_revision;
+                    });
+    if (stale_table_for_key) {
+        cell_dof_tables_.clear();
+        cell_resolved_vector_tables_.clear();
+        cell_resolved_matrix_tables_.clear();
+        scratch_fused_resolved_.clear();
+        scratch_fused_resolved_offsets_.clear();
+        scratch_fused_vector_resolved_.clear();
+        scratch_fused_vector_resolved_offsets_.clear();
+        field_access_plans_.clear();
+        cell_constrained_flags_valid_ = false;
+        coloring_valid_ = false;
     }
 
     // NOTE: Do NOT clear cell_resolved_*_tables_ here.  Resolved tables are
@@ -1442,6 +1557,7 @@ const StandardAssembler::CellDofTable& StandardAssembler::getCellDofTable(
     auto& table = cell_dof_tables_.emplace_back();
     table.dof_map = dof_map;
     table.dof_offset = dof_offset;
+    table.dof_layout_revision = layout_revision;
     table.cell_offsets.resize(static_cast<std::size_t>(std::max<GlobalIndex>(0, mesh.numCells())) + 1u, 0);
 
     std::size_t total_dofs = 0;
@@ -1503,20 +1619,36 @@ void StandardAssembler::ensureResolvedVectorTable(
     if (layout_handle == nullptr) {
         return;
     }
+    const auto layout_revision = view->vectorLayoutRevision();
+    const auto dof_layout_revision = dofLayoutRevision(dof_map);
 
     for (const auto& table : cell_resolved_vector_tables_) {
         if (table.layout_handle == layout_handle &&
+            table.layout_revision == layout_revision &&
             table.dof_map == dof_map &&
-            table.dof_offset == dof_offset) {
+            table.dof_offset == dof_offset &&
+            table.dof_layout_revision == dof_layout_revision) {
             return;
         }
     }
 
+    cell_resolved_vector_tables_.erase(
+        std::remove_if(cell_resolved_vector_tables_.begin(),
+                       cell_resolved_vector_tables_.end(),
+                       [&](const CellResolvedVectorTable& table) {
+                           return table.layout_handle == layout_handle &&
+                                  table.dof_map == dof_map &&
+                                  table.dof_offset == dof_offset;
+                       }),
+        cell_resolved_vector_tables_.end());
+
     const auto& dof_table = getCellDofTable(mesh, dof_map, dof_offset);
     auto& table = cell_resolved_vector_tables_.emplace_back();
     table.layout_handle = layout_handle;
+    table.layout_revision = layout_revision;
     table.dof_map = dof_map;
     table.dof_offset = dof_offset;
+    table.dof_layout_revision = dof_layout_revision;
     table.resolved.resize(dof_table.dofs.size());
 
     for (GlobalIndex cell_id = 0; cell_id < cached_cell_dof_count_; ++cell_id) {
@@ -1556,26 +1688,47 @@ void StandardAssembler::ensureResolvedMatrixTable(
     if (layout_handle == nullptr) {
         return;
     }
+    const auto layout_revision = view->matrixLayoutRevision();
+    const auto row_dof_layout_revision = dofLayoutRevision(row_dof_map);
+    const auto col_dof_layout_revision = dofLayoutRevision(col_dof_map);
 
     for (const auto& table : cell_resolved_matrix_tables_) {
         if (table.layout_handle == layout_handle &&
+            table.layout_revision == layout_revision &&
             table.row_dof_map == row_dof_map &&
             table.row_dof_offset == row_dof_offset &&
+            table.row_dof_layout_revision == row_dof_layout_revision &&
             table.col_dof_map == col_dof_map &&
-            table.col_dof_offset == col_dof_offset) {
+            table.col_dof_offset == col_dof_offset &&
+            table.col_dof_layout_revision == col_dof_layout_revision) {
             return;
         }
     }
+
+    cell_resolved_matrix_tables_.erase(
+        std::remove_if(cell_resolved_matrix_tables_.begin(),
+                       cell_resolved_matrix_tables_.end(),
+                       [&](const CellResolvedMatrixTable& table) {
+                           return table.layout_handle == layout_handle &&
+                                  table.row_dof_map == row_dof_map &&
+                                  table.row_dof_offset == row_dof_offset &&
+                                  table.col_dof_map == col_dof_map &&
+                                  table.col_dof_offset == col_dof_offset;
+                       }),
+        cell_resolved_matrix_tables_.end());
 
     const auto& row_table = getCellDofTable(mesh, row_dof_map, row_dof_offset);
     const auto& col_table = getCellDofTable(mesh, col_dof_map, col_dof_offset);
 
     auto& table = cell_resolved_matrix_tables_.emplace_back();
     table.layout_handle = layout_handle;
+    table.layout_revision = layout_revision;
     table.row_dof_map = row_dof_map;
     table.row_dof_offset = row_dof_offset;
+    table.row_dof_layout_revision = row_dof_layout_revision;
     table.col_dof_map = col_dof_map;
     table.col_dof_offset = col_dof_offset;
+    table.col_dof_layout_revision = col_dof_layout_revision;
     table.cell_offsets.resize(static_cast<std::size_t>(cached_cell_dof_count_) + 1u, 0);
 
     std::size_t total_entries = 0;
@@ -1603,13 +1756,29 @@ void StandardAssembler::ensureResolvedMatrixTable(
 
 void StandardAssembler::ensureCellConstrainedFlags(const IMeshAccess& mesh)
 {
-    if (cell_constrained_flags_valid_) return;
+    ensureCellDofTables(mesh);
+    const auto constraint_revision =
+        constraints_ ? constraints_->constraintLayoutRevision() : 0u;
+
+    std::vector<std::pair<const dofs::DofMap*, std::uint64_t>> dof_revisions;
+    dof_revisions.reserve(cell_dof_tables_.size());
+    for (const auto& table : cell_dof_tables_) {
+        dof_revisions.emplace_back(table.dof_map, table.dof_layout_revision);
+    }
+
+    if (cell_constrained_flags_valid_ &&
+        cell_constrained_flags_constraint_revision_ == constraint_revision &&
+        cell_constrained_flags_dof_revisions_ == dof_revisions) {
+        return;
+    }
+
     if (!constraints_ || !options_.use_constraints || !constraint_distributor_) {
+        cell_constrained_flags_constraint_revision_ = constraint_revision;
+        cell_constrained_flags_dof_revisions_ = std::move(dof_revisions);
         cell_constrained_flags_valid_ = true;
         return;
     }
 
-    ensureCellDofTables(mesh);
     const auto n_cells = cached_cell_dof_count_;
     cell_constrained_flags_.resize(static_cast<std::size_t>(n_cells), 0);
 
@@ -1625,6 +1794,8 @@ void StandardAssembler::ensureCellConstrainedFlags(const IMeshAccess& mesh)
         cell_constrained_flags_[static_cast<std::size_t>(cell_id)] =
             any_constrained ? static_cast<std::uint8_t>(1u) : static_cast<std::uint8_t>(0u);
     }
+    cell_constrained_flags_constraint_revision_ = constraint_revision;
+    cell_constrained_flags_dof_revisions_ = std::move(dof_revisions);
     cell_constrained_flags_valid_ = true;
 }
 
@@ -1642,10 +1813,14 @@ std::span<const GlobalIndex> StandardAssembler::getResolvedCellVectorEntries(
     if (layout_handle == nullptr) {
         return {};
     }
+    const auto layout_revision = view->vectorLayoutRevision();
+    const auto dof_layout_revision = dofLayoutRevision(dof_map);
 
     const CellDofTable* dof_table = nullptr;
     for (const auto& table : cell_dof_tables_) {
-        if (table.dof_map == dof_map && table.dof_offset == dof_offset) {
+        if (table.dof_map == dof_map &&
+            table.dof_offset == dof_offset &&
+            table.dof_layout_revision == dof_layout_revision) {
             dof_table = &table;
             break;
         }
@@ -1656,8 +1831,10 @@ std::span<const GlobalIndex> StandardAssembler::getResolvedCellVectorEntries(
 
     for (const auto& table : cell_resolved_vector_tables_) {
         if (table.layout_handle == layout_handle &&
+            table.layout_revision == layout_revision &&
             table.dof_map == dof_map &&
-            table.dof_offset == dof_offset) {
+            table.dof_offset == dof_offset &&
+            table.dof_layout_revision == dof_layout_revision) {
             const auto begin = static_cast<std::size_t>(
                 dof_table->cell_offsets[static_cast<std::size_t>(cell_id)]);
             const auto end = static_cast<std::size_t>(
@@ -1686,13 +1863,19 @@ std::span<const GlobalIndex> StandardAssembler::getResolvedCellMatrixEntries(
     if (layout_handle == nullptr) {
         return {};
     }
+    const auto layout_revision = view->matrixLayoutRevision();
+    const auto row_dof_layout_revision = dofLayoutRevision(row_dof_map);
+    const auto col_dof_layout_revision = dofLayoutRevision(col_dof_map);
 
     for (const auto& table : cell_resolved_matrix_tables_) {
         if (table.layout_handle == layout_handle &&
+            table.layout_revision == layout_revision &&
             table.row_dof_map == row_dof_map &&
             table.row_dof_offset == row_dof_offset &&
+            table.row_dof_layout_revision == row_dof_layout_revision &&
             table.col_dof_map == col_dof_map &&
-            table.col_dof_offset == col_dof_offset) {
+            table.col_dof_offset == col_dof_offset &&
+            table.col_dof_layout_revision == col_dof_layout_revision) {
             const auto begin = static_cast<std::size_t>(
                 table.cell_offsets[static_cast<std::size_t>(cell_id)]);
             const auto end = static_cast<std::size_t>(
@@ -1707,7 +1890,22 @@ std::span<const GlobalIndex> StandardAssembler::getResolvedCellMatrixEntries(
 void StandardAssembler::ensureFieldAccessPlans(const IMeshAccess& mesh)
 {
     ensureCellDofTables(mesh);
-    if (field_access_plans_.size() == field_solution_access_.size()) {
+    bool plans_current = (field_access_plans_.size() == field_solution_access_.size());
+    if (plans_current) {
+        for (std::size_t i = 0; i < field_solution_access_.size(); ++i) {
+            const auto& access = field_solution_access_[i];
+            const auto& plan = field_access_plans_[i];
+            if (plan.field != access.field ||
+                plan.space != access.space ||
+                plan.dof_map != access.dof_map ||
+                plan.dof_offset != access.dof_offset ||
+                plan.dof_layout_revision != dofLayoutRevision(access.dof_map)) {
+                plans_current = false;
+                break;
+            }
+        }
+    }
+    if (plans_current) {
         return;
     }
 
@@ -1722,6 +1920,7 @@ void StandardAssembler::ensureFieldAccessPlans(const IMeshAccess& mesh)
             access.space,
             access.dof_map,
             access.dof_offset,
+            dofLayoutRevision(access.dof_map),
             cell_backed ? &getCellDofTable(mesh, access.dof_map, access.dof_offset) : nullptr,
             access.space->field_type(),
             access.space->space_type() == spaces::SpaceType::Product,
@@ -2116,12 +2315,27 @@ void StandardAssembler::flushCombinedInsertBatch(
         }
         if (target.assemble_vector && target.vector_view) {
             if (use_resolved_vector_insert) {
-                target.vector_view->resolveVectorEntries(
-                    dofs_span,
-                    std::span<GlobalIndex>(fallback_resolved_vector));
+                const auto cell_id = batch_cell_ids[slot];
+                std::span<const GlobalIndex> resolved_vector_span{};
+                if (!scratch_fused_vector_resolved_.empty() &&
+                    cell_id >= 0 &&
+                    static_cast<std::size_t>(cell_id) <
+                        scratch_fused_vector_resolved_offsets_.size() - 1u) {
+                    const auto offset = static_cast<std::size_t>(
+                        scratch_fused_vector_resolved_offsets_[static_cast<std::size_t>(cell_id)]);
+                    const auto end_offset = static_cast<std::size_t>(
+                        scratch_fused_vector_resolved_offsets_[static_cast<std::size_t>(cell_id) + 1u]);
+                    resolved_vector_span = std::span<const GlobalIndex>(
+                        scratch_fused_vector_resolved_.data() + offset, end_offset - offset);
+                } else {
+                    target.vector_view->resolveVectorEntries(
+                        dofs_span,
+                        std::span<GlobalIndex>(fallback_resolved_vector));
+                    resolved_vector_span = std::span<const GlobalIndex>(fallback_resolved_vector);
+                }
                 target.vector_view->addVectorEntriesResolved(
                     dofs_span,
-                    std::span<const GlobalIndex>(fallback_resolved_vector),
+                    resolved_vector_span,
                     vec_span,
                     assembly::AddMode::Add);
             } else {
@@ -3897,8 +4111,51 @@ std::shared_ptr<const quadrature::QuadratureRule> StandardAssembler::resolveQuad
 void StandardAssembler::ensureColoring(const IMeshAccess& mesh,
                                        std::span<const dofs::DofMap* const> extra_dof_maps)
 {
+    std::vector<const dofs::DofMap*> all_maps;
+    all_maps.reserve(1 + extra_dof_maps.size());
+    all_maps.push_back(row_dof_map_);
+    for (const auto* dm : extra_dof_maps) {
+        if (dm != nullptr && dm != row_dof_map_) {
+            bool found = false;
+            for (const auto* existing : all_maps) {
+                if (existing == dm) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                all_maps.push_back(dm);
+            }
+        }
+    }
+
+    std::vector<std::pair<const dofs::DofMap*, std::uint64_t>> dof_revisions;
+    dof_revisions.reserve(all_maps.size());
+    for (const auto* map : all_maps) {
+        dof_revisions.emplace_back(map, dofLayoutRevision(map));
+    }
+
+    bool mesh_revisions_current = true;
+    std::uint64_t topology_revision = 0;
+    std::uint64_t ownership_revision = 0;
+    std::uint64_t numbering_revision = 0;
+    const bool mesh_revisions_available = mesh.revisionTrackingAvailable();
+    if (mesh_revisions_available) {
+        topology_revision = mesh.topologyRevision();
+        ownership_revision = mesh.ownershipRevision();
+        numbering_revision = mesh.numberingRevision();
+        mesh_revisions_current =
+            coloring_mesh_revisions_valid_ &&
+            coloring_topology_revision_ == topology_revision &&
+            coloring_ownership_revision_ == ownership_revision &&
+            coloring_numbering_revision_ == numbering_revision;
+    }
+
     // Check if coloring is already valid for this mesh
-    if (coloring_valid_ && coloring_mesh_ == &mesh) {
+    if (coloring_valid_ &&
+        coloring_mesh_ == &mesh &&
+        mesh_revisions_current &&
+        coloring_dof_revisions_ == dof_revisions) {
         return;
     }
 
@@ -3910,19 +4167,6 @@ void StandardAssembler::ensureColoring(const IMeshAccess& mesh,
     if (extra_dof_maps.empty()) {
         graph.build(mesh, *row_dof_map_);
     } else {
-        std::vector<const dofs::DofMap*> all_maps;
-        all_maps.reserve(1 + extra_dof_maps.size());
-        all_maps.push_back(row_dof_map_);
-        for (const auto* dm : extra_dof_maps) {
-            if (dm != nullptr && dm != row_dof_map_) {
-                // Deduplicate: only add if not already present
-                bool found = false;
-                for (const auto* existing : all_maps) {
-                    if (existing == dm) { found = true; break; }
-                }
-                if (!found) all_maps.push_back(dm);
-            }
-        }
         graph.build(mesh, all_maps);
     }
 
@@ -3944,6 +4188,11 @@ void StandardAssembler::ensureColoring(const IMeshAccess& mesh,
     // Mark cache as valid
     coloring_valid_ = true;
     coloring_mesh_ = &mesh;
+    coloring_mesh_revisions_valid_ = mesh_revisions_available;
+    coloring_topology_revision_ = topology_revision;
+    coloring_ownership_revision_ = ownership_revision;
+    coloring_numbering_revision_ = numbering_revision;
+    coloring_dof_revisions_ = std::move(dof_revisions);
 }
 
 void StandardAssembler::prepareGeometry(
@@ -3960,7 +4209,17 @@ void StandardAssembler::prepareGeometry(
 
     // Get cell node coordinates — use flat table when available (Tier 2/3),
     // bypassing virtual dispatch through IMeshAccess::getCellCoordinates.
-    if (flat_cell_coords_.valid && flat_cell_coords_.mesh == &mesh &&
+    const bool flat_coords_current =
+        flat_cell_coords_.valid &&
+        flat_cell_coords_.mesh == &mesh &&
+        (!flat_cell_coords_.revision_tracking_available ||
+         (flat_cell_coords_.geometry_revision == mesh.geometryRevision() &&
+          flat_cell_coords_.topology_revision == mesh.topologyRevision() &&
+          flat_cell_coords_.ownership_revision == mesh.ownershipRevision() &&
+          flat_cell_coords_.numbering_revision == mesh.numberingRevision() &&
+          flat_cell_coords_.active_configuration_epoch == mesh.activeConfigurationEpoch() &&
+          flat_cell_coords_.coordinate_configuration_key == mesh.coordinateConfigurationKey()));
+    if (flat_coords_current &&
         cell_id >= 0 &&
         static_cast<std::size_t>(cell_id) < flat_cell_coords_.coords.size() /
             (static_cast<std::size_t>(flat_cell_coords_.nodes_per_cell) * 3u)) {
@@ -5692,20 +5951,21 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             const auto& first_el = getElement(*first_bs.test_space, first_cell, first_ct);
             coupled_n_scalar = static_cast<LocalIndex>(first_el.num_dofs());
             const auto* first_basis_ptr = &first_el.basis();
-            const int first_test_value_dim = first_bs.test_space->value_dimension();
-            const int first_trial_value_dim = first_bs.trial_space->value_dimension();
+            const std::string first_basis_identity = first_basis_ptr->cache_identity();
 
             for (std::size_t bi = 0; bi < n_blocks && use_coupled_scalar_cache; ++bi) {
                 const auto& bs = monolithic_kernel->blockSpec(bi);
                 const auto& te = getElement(*bs.test_space, first_cell, first_ct);
                 const auto& tre = getElement(*bs.trial_space, first_cell, first_ct);
-                if (te.basis().is_vector_valued() || tre.basis().is_vector_valued()) {
-                    use_coupled_scalar_cache = false;
-                } else if (&te.basis() != first_basis_ptr || &tre.basis() != first_basis_ptr ||
-                           static_cast<LocalIndex>(te.num_dofs()) != coupled_n_scalar ||
-                           static_cast<LocalIndex>(tre.num_dofs()) != coupled_n_scalar ||
-                           bs.test_space->value_dimension() != first_test_value_dim ||
-                           bs.trial_space->value_dimension() != first_trial_value_dim) {
+                const auto same_scalar_basis =
+                    [&](const auto& element) {
+                        const auto& basis = element.basis();
+                        return !basis.is_vector_valued() &&
+                               static_cast<LocalIndex>(element.num_dofs()) == coupled_n_scalar &&
+                               (&basis == first_basis_ptr ||
+                                basis.cache_identity() == first_basis_identity);
+                    };
+                if (!same_scalar_basis(te) || !same_scalar_basis(tre)) {
                     use_coupled_scalar_cache = false;
                 }
             }
@@ -6163,6 +6423,31 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 workspace.ctx.reserve(max_dofs, max_qpts, mesh.dimension());
             }
 
+            struct CompiledBlockWorkspace {
+                AssemblyContext ctx;
+                KernelOutput output;
+                std::span<const GlobalIndex> row_dofs{};
+                std::span<const GlobalIndex> col_dofs{};
+            };
+
+            std::vector<CompiledBlockWorkspace> compiled_workspaces;
+            std::vector<assembly::jit::CoupledBlockView> compiled_block_views;
+            std::vector<assembly::jit::CoupledCellKernelArgsV1> compiled_element_args;
+            std::vector<KernelOutput> compiled_vector_outputs;
+            if (run_compiled_dispatch) {
+                compiled_workspaces.resize(monolithic_batch_size * n_blocks);
+                for (auto& workspace : compiled_workspaces) {
+                    workspace.ctx.reserve(max_dofs, max_qpts, mesh.dimension());
+                }
+                compiled_block_views.resize(monolithic_batch_size * n_blocks);
+                compiled_element_args.resize(monolithic_batch_size);
+                compiled_vector_outputs.resize(monolithic_batch_size);
+            }
+            auto compiled_workspace =
+                [&](std::size_t slot, std::size_t bi) -> CompiledBlockWorkspace& {
+                    return compiled_workspaces[slot * n_blocks + bi];
+                };
+
             std::vector<int> row_group_of(n_blocks, -1);
             int n_row_groups = 0;
             for (std::size_t bi = 0; bi < n_blocks; ++bi) {
@@ -6373,16 +6658,77 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 }
             }
 
+            if (use_fused_insert && parent_term.assemble_vector && parent_term.vector_view &&
+                parent_term.vector_view->insertionCapabilities().resolved_vector_entries) {
+                const auto cn = static_cast<std::size_t>(fused_combined_n);
+                const auto n_cells = mesh.numCells();
+                const auto total_entries = static_cast<std::size_t>(n_cells) * cn;
+                const bool need_rebuild =
+                    scratch_fused_vector_resolved_offsets_.size() !=
+                        static_cast<std::size_t>(n_cells) + 1u ||
+                    scratch_fused_vector_resolved_.size() != total_entries;
+
+                if (need_rebuild && cn > 0 && n_cells > 0) {
+                    scratch_fused_vector_resolved_offsets_.resize(
+                        static_cast<std::size_t>(n_cells) + 1u);
+                    scratch_fused_vector_resolved_.resize(total_entries);
+
+                    std::vector<GlobalIndex> combined_dofs(cn);
+                    for (GlobalIndex cell_id = 0; cell_id < n_cells; ++cell_id) {
+                        for (std::size_t bi = 0; bi < n_blocks; ++bi) {
+                            const auto& bs = monolithic_kernel->blockSpec(bi);
+                            const auto& fi = fused_info[bi];
+
+                            const auto rd = getCellDofsCached(
+                                mesh, cell_id, bs.row_dof_map, bs.row_dof_offset);
+                            const int n_br = static_cast<int>(rd.size());
+                            for (int i = 0; i < n_br; ++i) {
+                                const int ci = (i / fi.row_comps) * fused_total_comps +
+                                               fi.row_comp_start + (i % fi.row_comps);
+                                combined_dofs[static_cast<std::size_t>(ci)] =
+                                    rd[static_cast<std::size_t>(i)];
+                            }
+
+                            const auto cd = getCellDofsCached(
+                                mesh, cell_id, bs.col_dof_map, bs.col_dof_offset);
+                            const int n_bc = static_cast<int>(cd.size());
+                            for (int j = 0; j < n_bc; ++j) {
+                                const int cj = (j / fi.col_comps) * fused_total_comps +
+                                               fi.col_comp_start + (j % fi.col_comps);
+                                combined_dofs[static_cast<std::size_t>(cj)] =
+                                    cd[static_cast<std::size_t>(j)];
+                            }
+                        }
+
+                        const auto offset = static_cast<std::size_t>(cell_id) * cn;
+                        scratch_fused_vector_resolved_offsets_[static_cast<std::size_t>(cell_id)] =
+                            static_cast<GlobalIndex>(offset);
+                        parent_term.vector_view->resolveVectorEntries(
+                            std::span<const GlobalIndex>(combined_dofs),
+                            std::span<GlobalIndex>(
+                                scratch_fused_vector_resolved_.data() + offset,
+                                cn));
+                    }
+                    scratch_fused_vector_resolved_offsets_[static_cast<std::size_t>(n_cells)] =
+                        static_cast<GlobalIndex>(total_entries);
+                }
+            }
+
             const auto prepareBatchOutput =
                 [](KernelOutput& output,
                    LocalIndex n_test,
                    LocalIndex n_trial,
                    bool want_matrix,
                    bool want_vector) {
+                    const auto matrix_size =
+                        static_cast<std::size_t>(n_test) * static_cast<std::size_t>(n_trial);
+                    const auto vector_size = static_cast<std::size_t>(n_test);
                     if (output.n_test_dofs != n_test ||
                         output.n_trial_dofs != n_trial ||
                         output.has_matrix != want_matrix ||
-                        output.has_vector != want_vector) {
+                        output.has_vector != want_vector ||
+                        (want_matrix && output.local_matrix.size() != matrix_size) ||
+                        (want_vector && output.local_vector.size() != vector_size)) {
                         output.reserveNoZero(n_test, n_trial, want_matrix, want_vector);
                     }
                     output.n_test_dofs = n_test;
@@ -6758,26 +7104,6 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         };
 
                     if (run_compiled_dispatch) {
-                        struct CompiledBlockWorkspace {
-                            AssemblyContext ctx;
-                            KernelOutput output;
-                            std::span<const GlobalIndex> row_dofs{};
-                            std::span<const GlobalIndex> col_dofs{};
-                        };
-
-                        std::vector<CompiledBlockWorkspace> compiled_workspaces(active * n_blocks);
-                        for (auto& workspace : compiled_workspaces) {
-                            workspace.ctx.reserve(max_dofs, max_qpts, mesh.dimension());
-                        }
-                        std::vector<assembly::jit::CoupledBlockView> compiled_block_views(active * n_blocks);
-                        std::vector<assembly::jit::CoupledCellKernelArgsV1> compiled_element_args(active);
-                        std::vector<KernelOutput> compiled_vector_outputs(active);
-
-                        auto compiled_workspace =
-                            [&](std::size_t slot, std::size_t bi) -> CompiledBlockWorkspace& {
-                                return compiled_workspaces[slot * n_blocks + bi];
-                            };
-
                         for (std::size_t bi = 0; bi < n_blocks; ++bi) {
                             const auto& bs = monolithic_kernel->blockSpec(bi);
                             const bool block_want_matrix =
@@ -8213,6 +8539,58 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             }
         }
 
+        if (use_fused_insert && parent_term.assemble_vector && parent_term.vector_view &&
+            parent_term.vector_view->insertionCapabilities().resolved_vector_entries) {
+            const auto cn = static_cast<std::size_t>(fused_combined_n);
+            const auto n_cells = mesh.numCells();
+            const auto total_entries = static_cast<std::size_t>(n_cells) * cn;
+            const bool need_rebuild =
+                scratch_fused_vector_resolved_offsets_.size() !=
+                    static_cast<std::size_t>(n_cells) + 1u ||
+                scratch_fused_vector_resolved_.size() != total_entries;
+
+            if (need_rebuild && cn > 0 && n_cells > 0) {
+                scratch_fused_vector_resolved_offsets_.resize(
+                    static_cast<std::size_t>(n_cells) + 1u);
+                scratch_fused_vector_resolved_.resize(total_entries);
+                scratch_fused_vector_resolved_offsets_[0] = 0;
+
+                std::vector<GlobalIndex> combined_dofs(cn);
+                for (GlobalIndex cell_id = 0; cell_id < n_cells; ++cell_id) {
+                    for (std::size_t bi = 0; bi < n_blocks; ++bi) {
+                        const auto& bs = mixed_block_kernel->blockSpec(bi);
+                        const auto& fi = fused_info[bi];
+                        const auto rd = getCellDofsCached(mesh, cell_id, bs.row_dof_map, bs.row_dof_offset);
+                        const int n_br = static_cast<int>(rd.size());
+                        const int tc = fused_total_comps;
+                        for (int i = 0; i < n_br; ++i) {
+                            const int ci = (i / fi.row_comps) * tc +
+                                           fi.row_comp_start + (i % fi.row_comps);
+                            combined_dofs[static_cast<std::size_t>(ci)] = rd[static_cast<std::size_t>(i)];
+                        }
+                        const auto cd = getCellDofsCached(mesh, cell_id, bs.col_dof_map, bs.col_dof_offset);
+                        const int n_bc = static_cast<int>(cd.size());
+                        for (int j = 0; j < n_bc; ++j) {
+                            const int cj = (j / fi.col_comps) * tc +
+                                           fi.col_comp_start + (j % fi.col_comps);
+                            combined_dofs[static_cast<std::size_t>(cj)] = cd[static_cast<std::size_t>(j)];
+                        }
+                    }
+
+                    const std::size_t offset = static_cast<std::size_t>(cell_id) * cn;
+                    scratch_fused_vector_resolved_offsets_[static_cast<std::size_t>(cell_id)] =
+                        static_cast<GlobalIndex>(offset);
+                    parent_term.vector_view->resolveVectorEntries(
+                        std::span<const GlobalIndex>(combined_dofs),
+                        std::span<GlobalIndex>(
+                            scratch_fused_vector_resolved_.data() + offset,
+                            cn));
+                }
+                scratch_fused_vector_resolved_offsets_[static_cast<std::size_t>(n_cells)] =
+                    static_cast<GlobalIndex>(total_entries);
+            }
+        }
+
         // ---------------------------------------------------------------
         // Coupled scalar basis cache: detect if all blocks share the same
         // scalar element basis (e.g. P1 Lagrange on Tet4).  When true,
@@ -8229,20 +8607,21 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             const auto& first_el = getElement(*first_bs.test_space, gids[0], first_ct);
             coupled_n_scalar = static_cast<LocalIndex>(first_el.num_dofs());
             const auto* first_basis_ptr = &first_el.basis();
-            const int first_test_value_dim = first_bs.test_space->value_dimension();
-            const int first_trial_value_dim = first_bs.trial_space->value_dimension();
+            const std::string first_basis_identity = first_basis_ptr->cache_identity();
 
             for (std::size_t bi = 0; bi < n_blocks && use_coupled_scalar_cache; ++bi) {
                 const auto& bs = mixed_block_kernel->blockSpec(bi);
                 const auto& te = getElement(*bs.test_space, gids[0], first_ct);
                 const auto& tre = getElement(*bs.trial_space, gids[0], first_ct);
-                if (te.basis().is_vector_valued() || tre.basis().is_vector_valued()) {
-                    use_coupled_scalar_cache = false;
-                } else if (&te.basis() != first_basis_ptr || &tre.basis() != first_basis_ptr ||
-                           static_cast<LocalIndex>(te.num_dofs()) != coupled_n_scalar ||
-                           static_cast<LocalIndex>(tre.num_dofs()) != coupled_n_scalar ||
-                           bs.test_space->value_dimension() != first_test_value_dim ||
-                           bs.trial_space->value_dimension() != first_trial_value_dim) {
+                const auto same_scalar_basis =
+                    [&](const auto& element) {
+                        const auto& basis = element.basis();
+                        return !basis.is_vector_valued() &&
+                               static_cast<LocalIndex>(element.num_dofs()) == coupled_n_scalar &&
+                               (&basis == first_basis_ptr ||
+                                basis.cache_identity() == first_basis_identity);
+                    };
+                if (!same_scalar_basis(te) || !same_scalar_basis(tre)) {
                     use_coupled_scalar_cache = false;
                 }
             }
@@ -13252,7 +13631,16 @@ std::unique_ptr<Assembler> createAssembler(const AssemblyOptions& options)
 // ============================================================================
 
 void StandardAssembler::ensureFlatCellCoords(const IMeshAccess& mesh) {
-    if (flat_cell_coords_.valid && flat_cell_coords_.mesh == &mesh) {
+    const bool has_revision_tracking = mesh.revisionTrackingAvailable();
+    if (flat_cell_coords_.valid &&
+        flat_cell_coords_.mesh == &mesh &&
+        has_revision_tracking &&
+        flat_cell_coords_.geometry_revision == mesh.geometryRevision() &&
+        flat_cell_coords_.topology_revision == mesh.topologyRevision() &&
+        flat_cell_coords_.ownership_revision == mesh.ownershipRevision() &&
+        flat_cell_coords_.numbering_revision == mesh.numberingRevision() &&
+        flat_cell_coords_.active_configuration_epoch == mesh.activeConfigurationEpoch() &&
+        flat_cell_coords_.coordinate_configuration_key == mesh.coordinateConfigurationKey()) {
         return;
     }
     const int dim = mesh.dimension();
@@ -13296,6 +13684,13 @@ void StandardAssembler::ensureFlatCellCoords(const IMeshAccess& mesh) {
     });
 
     flat_cell_coords_.mesh = &mesh;
+    flat_cell_coords_.revision_tracking_available = has_revision_tracking;
+    flat_cell_coords_.geometry_revision = mesh.geometryRevision();
+    flat_cell_coords_.topology_revision = mesh.topologyRevision();
+    flat_cell_coords_.ownership_revision = mesh.ownershipRevision();
+    flat_cell_coords_.numbering_revision = mesh.numberingRevision();
+    flat_cell_coords_.active_configuration_epoch = mesh.activeConfigurationEpoch();
+    flat_cell_coords_.coordinate_configuration_key = mesh.coordinateConfigurationKey();
     flat_cell_coords_.valid = true;
 }
 
@@ -13360,6 +13755,7 @@ void StandardAssembler::ensureFieldRecipes(
             const ElementType cell_type = mesh.getCellType(first_cell);
             const auto& element = getElement(space, first_cell, cell_type);
             recipe.cell_type = cell_type;
+            recipe.basis = &element.basis();
             recipe.basis_cache_identity = element.basis().cache_identity();
             recipe.n_scalar_dofs = static_cast<LocalIndex>(element.num_dofs());
         }
@@ -13424,11 +13820,6 @@ void StandardAssembler::populateFieldSolutionDataFast(
     const auto n_qpts = context.numQuadraturePoints();
     const auto ctx_inv_jacs = context.inverseJacobians();
     const auto cell_type = mesh.getCellType(cell_id);
-    if (cell_type == ElementType::Triangle3 || cell_type == ElementType::Triangle6 ||
-        cell_type == ElementType::Tetra4 || cell_type == ElementType::Tetra10) {
-        populateFieldSolutionData(context, mesh, cell_id, requirements);
-        return;
-    }
     const auto fallback_to_original =
         [&]() {
             populateFieldSolutionData(context, mesh, cell_id, requirements);
@@ -13444,9 +13835,13 @@ void StandardAssembler::populateFieldSolutionDataFast(
             }
 
             const auto& element = getElement(*recipe.access->space, cell_id, cell_type);
+            const auto& basis = element.basis();
             if (cell_type != recipe.cell_type ||
-                static_cast<LocalIndex>(element.num_dofs()) != recipe.n_scalar_dofs ||
-                element.basis().cache_identity() != recipe.basis_cache_identity) {
+                static_cast<LocalIndex>(element.num_dofs()) != recipe.n_scalar_dofs) {
+                return false;
+            }
+            if (recipe.basis != &basis &&
+                basis.cache_identity() != recipe.basis_cache_identity) {
                 return false;
             }
 

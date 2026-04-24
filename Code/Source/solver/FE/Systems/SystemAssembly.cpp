@@ -1160,26 +1160,63 @@ assembly::AssemblyResult assembleOperator(
 #ifdef SVMP_FE_ASSEMBLY_TIMING
     {
         int rank = 0;
+        int size = 1;
+        const double ao_total = ao_cell_time + ao_boundary_time + ao_other_time;
+        std::array<double, 4> local_times{
+            ao_total,
+            ao_cell_time,
+            ao_boundary_time,
+            ao_other_time
+        };
+        std::array<double, 4> min_times = local_times;
+        std::array<double, 4> max_times = local_times;
+        std::array<double, 4> sum_times = local_times;
 #if FE_HAS_MPI
         int mpi_init = 0;
         MPI_Initialized(&mpi_init);
-        if (mpi_init) MPI_Comm_rank(system.dofHandler().mpiComm(), &rank);
+        if (mpi_init) {
+            const auto comm = system.dofHandler().mpiComm();
+            MPI_Comm_rank(comm, &rank);
+            MPI_Comm_size(comm, &size);
+            MPI_Allreduce(local_times.data(), min_times.data(),
+                          static_cast<int>(local_times.size()),
+                          MPI_DOUBLE, MPI_MIN, comm);
+            MPI_Allreduce(local_times.data(), max_times.data(),
+                          static_cast<int>(local_times.size()),
+                          MPI_DOUBLE, MPI_MAX, comm);
+            MPI_Allreduce(local_times.data(), sum_times.data(),
+                          static_cast<int>(local_times.size()),
+                          MPI_DOUBLE, MPI_SUM, comm);
+        }
 #endif
         if (rank == 0) {
-            const double ao_total = ao_cell_time + ao_boundary_time + ao_other_time;
             if (ao_total > 1e-7) {
                 std::fprintf(stderr,
                     "  === assembleOperator TIMING (rank 0, op='%s') ===\n"
                     "    Total:              %9.6f s\n"
                     "    Cell terms:         %9.6f s  (%5.1f%%)\n"
                     "    Boundary terms:     %9.6f s  (%5.1f%%)\n"
-                    "    Other (DG+global):  %9.6f s  (%5.1f%%)\n"
-                    "  ================================================\n",
+                    "    Other (DG+global):  %9.6f s  (%5.1f%%)\n",
                     request.op.c_str(),
                     ao_total,
                     ao_cell_time,     100.0 * ao_cell_time     / ao_total,
                     ao_boundary_time, 100.0 * ao_boundary_time / ao_total,
                     ao_other_time,    100.0 * ao_other_time    / ao_total);
+                if (size > 1) {
+                    std::fprintf(stderr,
+                        "    MPI ranks:          %d\n"
+                        "    Rank min/mean/max total:    %9.6f / %9.6f / %9.6f s\n"
+                        "    Rank min/mean/max cell:     %9.6f / %9.6f / %9.6f s\n"
+                        "    Rank min/mean/max boundary: %9.6f / %9.6f / %9.6f s\n"
+                        "    Rank min/mean/max other:    %9.6f / %9.6f / %9.6f s\n",
+                        size,
+                        min_times[0], sum_times[0] / static_cast<double>(size), max_times[0],
+                        min_times[1], sum_times[1] / static_cast<double>(size), max_times[1],
+                        min_times[2], sum_times[2] / static_cast<double>(size), max_times[2],
+                        min_times[3], sum_times[3] / static_cast<double>(size), max_times[3]);
+                }
+                std::fprintf(stderr,
+                    "  ================================================\n");
             }
         }
     }

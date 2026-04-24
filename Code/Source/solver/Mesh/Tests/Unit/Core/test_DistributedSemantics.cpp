@@ -40,6 +40,7 @@
 #include <cmath>
 #include <iostream>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace svmp::test {
@@ -215,22 +216,35 @@ static void test_migration_preserves_global_counts(int rank, int world_size) {
   auto local_mesh = create_hex_strip_partition(rank);
   DistributedMesh dmesh(local_mesh, MPI_COMM_WORLD);
 
+  const auto ownership_before_exchange = dmesh.local_mesh().ownership_revision();
   dmesh.build_exchange_patterns();
+  ASSERT_EQ(dmesh.local_mesh().ownership_revision(), ownership_before_exchange + 1);
 
   const size_t expected_global_cells = static_cast<size_t>(world_size);
   const size_t expected_global_vertices = static_cast<size_t>(4 * (world_size + 1));
   const size_t expected_global_faces = static_cast<size_t>(5 * world_size + 1);
 
   std::vector<rank_t> new_owner(1, static_cast<rank_t>((rank + 1) % world_size));
+  const auto ownership_before_migration = dmesh.local_mesh().ownership_revision();
   dmesh.migrate(new_owner);
+  ASSERT_EQ(dmesh.local_mesh().ownership_revision(), ownership_before_migration + 1);
 
+  const auto ownership_before_rebuild = dmesh.local_mesh().ownership_revision();
   dmesh.build_exchange_patterns();
+  ASSERT_EQ(dmesh.local_mesh().ownership_revision(), ownership_before_rebuild + 1);
 
   ASSERT_EQ(dmesh.global_n_cells(), expected_global_cells);
   ASSERT_EQ(dmesh.global_n_vertices(), expected_global_vertices);
   ASSERT_EQ(dmesh.global_n_faces(), expected_global_faces);
 
   assert_partition_invariants(dmesh);
+
+  auto cell_gids = dmesh.local_mesh().cell_gids();
+  ASSERT(!cell_gids.empty());
+  const auto numbering_before = dmesh.local_mesh().numbering_revision();
+  cell_gids[0] += static_cast<gid_t>(1000 + rank);
+  dmesh.local_mesh().set_cell_gids(std::move(cell_gids));
+  ASSERT_EQ(dmesh.local_mesh().numbering_revision(), numbering_before + 1);
 }
 
 } // namespace svmp::test

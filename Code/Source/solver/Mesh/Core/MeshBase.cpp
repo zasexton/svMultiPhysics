@@ -119,6 +119,81 @@ MeshBase::~MeshBase() {
   MeshLabels::clear_refinement_provenance(*this);
 }
 
+MeshBase& MeshBase::operator=(MeshBase&& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+
+    spatial_dim_ = other.spatial_dim_;
+    mesh_id_ = std::move(other.mesh_id_);
+    active_config_ = other.active_config_;
+
+    X_ref_ = std::move(other.X_ref_);
+    X_cur_ = std::move(other.X_cur_);
+
+    cell_shape_ = std::move(other.cell_shape_);
+    cell2vertex_offsets_ = std::move(other.cell2vertex_offsets_);
+    cell2vertex_ = std::move(other.cell2vertex_);
+
+    face_shape_ = std::move(other.face_shape_);
+    face2vertex_offsets_ = std::move(other.face2vertex_offsets_);
+    face2vertex_ = std::move(other.face2vertex_);
+    face2cell_ = std::move(other.face2cell_);
+    cell2face_offsets_ = std::move(other.cell2face_offsets_);
+    cell2face_ = std::move(other.cell2face_);
+    cell2face_sense_ = std::move(other.cell2face_sense_);
+    cell2face_perm_ = std::move(other.cell2face_perm_);
+
+    edge2vertex_ = std::move(other.edge2vertex_);
+
+    vertex_gid_ = std::move(other.vertex_gid_);
+    cell_gid_ = std::move(other.cell_gid_);
+    face_gid_ = std::move(other.face_gid_);
+    edge_gid_ = std::move(other.edge_gid_);
+
+    vertex_owner_ = std::move(other.vertex_owner_);
+    cell_owner_ = std::move(other.cell_owner_);
+    face_owner_ = std::move(other.face_owner_);
+    edge_owner_ = std::move(other.edge_owner_);
+
+    vertex_label_id_ = std::move(other.vertex_label_id_);
+    cell_region_id_ = std::move(other.cell_region_id_);
+    face_boundary_id_ = std::move(other.face_boundary_id_);
+    edge_label_id_ = std::move(other.edge_label_id_);
+    cell_refinement_level_ = std::move(other.cell_refinement_level_);
+    for (int i = 0; i < 4; ++i) {
+        entity_sets_[i] = std::move(other.entity_sets_[i]);
+        attachments_[i] = std::move(other.attachments_[i]);
+    }
+    label_from_name_ = std::move(other.label_from_name_);
+    name_from_label_ = std::move(other.name_from_label_);
+
+    next_field_id_ = other.next_field_id_;
+    field_index_ = std::move(other.field_index_);
+    field_descriptors_ = std::move(other.field_descriptors_);
+
+    vertex2cell_offsets_ = std::move(other.vertex2cell_offsets_);
+    vertex2cell_ = std::move(other.vertex2cell_);
+    vertex2face_offsets_ = std::move(other.vertex2face_offsets_);
+    vertex2face_ = std::move(other.vertex2face_);
+    cell2cell_offsets_ = std::move(other.cell2cell_offsets_);
+    cell2cell_ = std::move(other.cell2cell_);
+
+    global2local_cell_ = std::move(other.global2local_cell_);
+    global2local_vertex_ = std::move(other.global2local_vertex_);
+    global2local_face_ = std::move(other.global2local_face_);
+    global2local_edge_ = std::move(other.global2local_edge_);
+
+    if (search_accel_) {
+        search_accel_->invalidate();
+    } else {
+        search_accel_ = std::make_unique<SearchAccel>();
+        event_bus_.subscribe(std::make_shared<SearchAccelInvalidator>(search_accel_.get()));
+    }
+
+    return *this;
+}
+
 // ==========================================
 // Builder Methods
 // ==========================================
@@ -193,7 +268,7 @@ void MeshBase::clear() {
 
     // Notify observers
     event_bus_.notify(MeshEvent::TopologyChanged);
-    event_bus_.notify(MeshEvent::GeometryChanged);
+    event_bus_.notify_geometry_changed(GeometryRevisionDomain::All);
     event_bus_.notify(MeshEvent::FieldsChanged);
 }
 
@@ -303,7 +378,7 @@ void MeshBase::build_from_arrays(
 
     // Notify observers
     event_bus_.notify(MeshEvent::TopologyChanged);
-    event_bus_.notify(MeshEvent::GeometryChanged);
+    mark_reference_geometry_changed();
 }
 
 void MeshBase::set_faces_from_arrays(
@@ -649,17 +724,49 @@ void MeshBase::finalize() {
 // Coordinate Management
 // ==========================================
 
+void MeshBase::ensure_current_coords_buffer() {
+    if (X_cur_.size() != X_ref_.size()) {
+        X_cur_ = X_ref_;
+    }
+}
+
+void MeshBase::mark_geometry_changed() {
+    mark_current_geometry_changed();
+}
+
+void MeshBase::mark_reference_geometry_changed() {
+    event_bus_.notify_geometry_changed(GeometryRevisionDomain::Reference);
+}
+
+void MeshBase::mark_current_geometry_changed() {
+    event_bus_.notify_geometry_changed(GeometryRevisionDomain::Current);
+}
+
 void MeshBase::set_current_coords(const std::vector<real_t>& Xcur) {
     if (Xcur.size() != X_ref_.size()) {
         throw std::invalid_argument("set_current_coords: size mismatch with reference coordinates");
     }
     X_cur_ = Xcur;
-    event_bus_.notify(MeshEvent::GeometryChanged);
+    mark_geometry_changed();
 }
 
 void MeshBase::clear_current_coords() {
     X_cur_.clear();
-    event_bus_.notify(MeshEvent::GeometryChanged);
+    mark_geometry_changed();
+}
+
+void MeshBase::use_reference_configuration() {
+    if (active_config_ != Configuration::Reference) {
+        active_config_ = Configuration::Reference;
+        event_bus_.mark_active_configuration_changed();
+    }
+}
+
+void MeshBase::use_current_configuration() {
+    if (active_config_ != Configuration::Current) {
+        active_config_ = Configuration::Current;
+        event_bus_.mark_active_configuration_changed();
+    }
 }
 
 std::array<real_t,3> MeshBase::get_vertex_coords(index_t v) const {
@@ -682,7 +789,7 @@ void MeshBase::set_vertex_coords(index_t v, const std::array<real_t,3>& xyz) {
     for (int i = 0; i < d && i < 3; ++i) {
         X_cur_[static_cast<size_t>(v) * d + i] = xyz[i];
     }
-    event_bus_.notify(MeshEvent::GeometryChanged);
+    mark_geometry_changed();
 }
 
 // ==========================================
@@ -2045,7 +2152,7 @@ void MeshBase::set_vertex_gids(std::vector<gid_t> gids) {
     for (index_t i = 0; i < static_cast<index_t>(vertex_gid_.size()); ++i) {
         global2local_vertex_[vertex_gid_[i]] = i;
     }
-    event_bus_.notify(MeshEvent::TopologyChanged);
+    event_bus_.notify(MeshEvent::NumberingChanged);
 }
 
 void MeshBase::set_cell_gids(std::vector<gid_t> gids) {
@@ -2055,7 +2162,7 @@ void MeshBase::set_cell_gids(std::vector<gid_t> gids) {
     for (index_t i = 0; i < static_cast<index_t>(cell_gid_.size()); ++i) {
         global2local_cell_[cell_gid_[i]] = i;
     }
-    event_bus_.notify(MeshEvent::TopologyChanged);
+    event_bus_.notify(MeshEvent::NumberingChanged);
 }
 
 void MeshBase::set_face_gids(std::vector<gid_t> gids) {
@@ -2065,7 +2172,7 @@ void MeshBase::set_face_gids(std::vector<gid_t> gids) {
     for (index_t i = 0; i < static_cast<index_t>(face_gid_.size()); ++i) {
         global2local_face_[face_gid_[i]] = i;
     }
-    event_bus_.notify(MeshEvent::TopologyChanged);
+    event_bus_.notify(MeshEvent::NumberingChanged);
 }
 
 void MeshBase::set_edge_gids(std::vector<gid_t> gids) {
@@ -2075,7 +2182,7 @@ void MeshBase::set_edge_gids(std::vector<gid_t> gids) {
     for (index_t i = 0; i < static_cast<index_t>(edge_gid_.size()); ++i) {
         global2local_edge_[edge_gid_[i]] = i;
     }
-    event_bus_.notify(MeshEvent::TopologyChanged);
+    event_bus_.notify(MeshEvent::NumberingChanged);
 }
 
 void MeshBase::rebuild_gid_maps() {

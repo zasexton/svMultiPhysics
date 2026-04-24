@@ -91,7 +91,8 @@ TEST(DofHandlerMesh, CacheInvalidatesWhenVertexGidsChange) {
     std::reverse(gids.begin(), gids.end());
     mesh.set_vertex_gids(std::move(gids));
 
-    EXPECT_EQ(counter.count(MeshEvent::TopologyChanged), 1u);
+    EXPECT_EQ(counter.count(MeshEvent::NumberingChanged), 1u);
+    EXPECT_EQ(counter.count(MeshEvent::TopologyChanged), 0u);
 
     handler.distributeDofs(mesh, space);
     const auto rev2 = handler.getDofStateRevision();

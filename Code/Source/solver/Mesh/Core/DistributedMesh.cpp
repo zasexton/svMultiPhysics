@@ -4839,7 +4839,7 @@ void DistributedMesh::update_exchange_ghost_coordinates(Configuration cfg) {
 
     // Ensure current coordinates exist for in-place exchange.
     if (!local_mesh_->has_current_coords()) {
-        local_mesh_->set_current_coords(local_mesh_->X_ref());
+        local_mesh_->ensure_current_coords_buffer();
     }
 
     const int dim = local_mesh_->dim();
@@ -4866,7 +4866,7 @@ void DistributedMesh::update_exchange_ghost_coordinates(Configuration cfg) {
                          bytes_per_vertex,
                          vertex_exchange_);
 
-    local_mesh_->event_bus().notify(MeshEvent::GeometryChanged);
+    local_mesh_->mark_geometry_changed();
 #else
     (void)cfg;
 #endif
@@ -6131,10 +6131,6 @@ void DistributedMesh::update_exchange_ghost_coordinates(Configuration cfg) {
 
 	    gather_shared_entities();
 	    build_ghost_layer(ghost_levels_);
-
-	    if (local_mesh_) {
-	        local_mesh_->event_bus().notify(MeshEvent::PartitionChanged);
-	    }
 	#endif
 	}
 
@@ -6601,9 +6597,6 @@ void DistributedMesh::rebalance(PartitionHint hint,
             if (active_size >= 2 && global_ok == 1) {
                 ghost_levels_ = saved_ghost_levels;
                 migrate(new_owner_rank_per_cell);
-                if (local_mesh_) {
-                    local_mesh_->event_bus().notify(MeshEvent::PartitionChanged);
-                }
                 return;
             }
 
@@ -6775,9 +6768,6 @@ void DistributedMesh::rebalance(PartitionHint hint,
                     // rebuilds to the intended depth.
                     ghost_levels_ = saved_ghost_levels;
                     migrate(new_owner_rank_per_cell);
-                    if (local_mesh_) {
-                        local_mesh_->event_bus().notify(MeshEvent::PartitionChanged);
-                    }
                     return;
                 }
 
@@ -6853,9 +6843,6 @@ void DistributedMesh::rebalance(PartitionHint hint,
                 }
 
                 migrate(new_owner_rank_per_cell);
-                if (local_mesh_) {
-                    local_mesh_->event_bus().notify(MeshEvent::PartitionChanged);
-                }
                 return;
             }
         }
@@ -6976,10 +6963,6 @@ void DistributedMesh::rebalance(PartitionHint hint,
     }
 
     migrate(new_owner_rank_per_cell);
-
-    if (local_mesh_) {
-        local_mesh_->event_bus().notify(MeshEvent::PartitionChanged);
-    }
 	#endif
 	}
 

@@ -45,6 +45,15 @@ public:
     [[nodiscard]] GlobalIndex numBoundaryFaces() const override;
     [[nodiscard]] GlobalIndex numInteriorFaces() const override;
     [[nodiscard]] int dimension() const override;
+    [[nodiscard]] bool revisionTrackingAvailable() const override { return true; }
+    [[nodiscard]] std::uint64_t geometryRevision() const override;
+    [[nodiscard]] std::uint64_t topologyRevision() const override;
+    [[nodiscard]] std::uint64_t ownershipRevision() const override;
+    [[nodiscard]] std::uint64_t numberingRevision() const override;
+    [[nodiscard]] std::uint64_t fieldLayoutRevision() const override;
+    [[nodiscard]] std::uint64_t labelRevision() const override;
+    [[nodiscard]] std::uint64_t activeConfigurationEpoch() const override;
+    [[nodiscard]] std::uint64_t coordinateConfigurationKey() const override;
 
     [[nodiscard]] bool isOwnedCell(GlobalIndex cell_id) const override;
     [[nodiscard]] ElementType getCellType(GlobalIndex cell_id) const override;

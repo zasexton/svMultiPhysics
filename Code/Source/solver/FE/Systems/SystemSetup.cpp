@@ -1777,6 +1777,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         }
     }
     dof_handler_.finalize();
+    bumpDofLayoutRevision();
 
     // ---------------------------------------------------------------------
     // Field/block metadata (monolithic across fields)
@@ -1817,6 +1818,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         blocks->finalize();
         block_map_ = std::move(blocks);
     }
+    bumpBlockLayoutRevision();
 
     // ---------------------------------------------------------------------
     // Constraints
@@ -2571,6 +2573,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     }
 
     affine_constraints_.close();
+    bumpConstraintLayoutRevision();
 
     // ---------------------------------------------------------------------
     // Analysis subsystem: topology + constraint summary

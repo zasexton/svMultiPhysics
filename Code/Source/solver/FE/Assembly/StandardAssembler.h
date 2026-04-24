@@ -77,6 +77,7 @@
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -313,6 +314,8 @@ public:
     void initialize() override;
     void finalize(GlobalSystemView* matrix_view, GlobalSystemView* vector_view) override;
     void reset() override;
+    void invalidateGeometryCaches() override;
+    void invalidateTopologyLayoutCaches() override;
 
     // =========================================================================
     // Query
@@ -972,21 +975,27 @@ private:
     struct CellDofTable {
         const dofs::DofMap* dof_map{nullptr};
         GlobalIndex dof_offset{0};
+        std::uint64_t dof_layout_revision{0};
         std::vector<GlobalIndex> cell_offsets{};
         std::vector<GlobalIndex> dofs{};
     };
     struct CellResolvedVectorTable {
         const void* layout_handle{nullptr};
+        std::uint64_t layout_revision{0};
         const dofs::DofMap* dof_map{nullptr};
         GlobalIndex dof_offset{0};
+        std::uint64_t dof_layout_revision{0};
         std::vector<GlobalIndex> resolved{};
     };
     struct CellResolvedMatrixTable {
         const void* layout_handle{nullptr};
+        std::uint64_t layout_revision{0};
         const dofs::DofMap* row_dof_map{nullptr};
         GlobalIndex row_dof_offset{0};
+        std::uint64_t row_dof_layout_revision{0};
         const dofs::DofMap* col_dof_map{nullptr};
         GlobalIndex col_dof_offset{0};
+        std::uint64_t col_dof_layout_revision{0};
         std::vector<GlobalIndex> cell_offsets{};
         std::vector<GlobalIndex> resolved{};
     };
@@ -995,6 +1004,7 @@ private:
         const spaces::FunctionSpace* space{nullptr};
         const dofs::DofMap* dof_map{nullptr};
         GlobalIndex dof_offset{0};
+        std::uint64_t dof_layout_revision{0};
         const CellDofTable* dof_table{nullptr};
         FieldType field_type{FieldType::Scalar};
         bool is_product{false};
@@ -1002,6 +1012,11 @@ private:
     };
     const IMeshAccess* cached_cell_dof_mesh_{nullptr};
     GlobalIndex cached_cell_dof_count_{0};
+    bool cached_cell_dof_mesh_revisions_valid_{false};
+    std::uint64_t cached_cell_dof_topology_revision_{0};
+    std::uint64_t cached_cell_dof_ownership_revision_{0};
+    std::uint64_t cached_cell_dof_numbering_revision_{0};
+    std::uint64_t cached_cell_dof_field_layout_revision_{0};
     std::deque<CellDofTable> cell_dof_tables_;
     std::vector<CellResolvedVectorTable> cell_resolved_vector_tables_;
     std::vector<CellResolvedMatrixTable> cell_resolved_matrix_tables_;
@@ -1031,11 +1046,15 @@ private:
     // for the interleaved combined DOF list of that cell.
     std::vector<GlobalIndex> scratch_fused_resolved_;
     std::vector<GlobalIndex> scratch_fused_resolved_offsets_;
+    std::vector<GlobalIndex> scratch_fused_vector_resolved_;
+    std::vector<GlobalIndex> scratch_fused_vector_resolved_offsets_;
 
     // Per-cell flag: whether any DOF in the cell is constrained.
     // Built once during first assembly call; avoids per-call hasConstrainedDofs().
     std::vector<std::uint8_t> cell_constrained_flags_;
     bool cell_constrained_flags_valid_{false};
+    std::uint64_t cell_constrained_flags_constraint_revision_{0};
+    std::vector<std::pair<const dofs::DofMap*, std::uint64_t>> cell_constrained_flags_dof_revisions_;
 
     // Graph coloring for parallel assembly (computed once, persists across Newton iterations)
     void ensureColoring(const IMeshAccess& mesh,
@@ -1045,6 +1064,11 @@ private:
     int coloring_num_colors_{0};
     bool coloring_valid_{false};
     const IMeshAccess* coloring_mesh_{nullptr};
+    bool coloring_mesh_revisions_valid_{false};
+    std::uint64_t coloring_topology_revision_{0};
+    std::uint64_t coloring_ownership_revision_{0};
+    std::uint64_t coloring_numbering_revision_{0};
+    std::vector<std::pair<const dofs::DofMap*, std::uint64_t>> coloring_dof_revisions_;
 
     // Coupled scalar basis cache: caches the n_scalar_dofs reference
     // gradients/hessians (e.g. 4 for P1 Tet4) so that block transitions
@@ -1099,6 +1123,13 @@ private:
         int nodes_per_cell{0};
         std::vector<Real> coords;         ///< [n_cells * nodes_per_cell * 3] flat xyz
         const IMeshAccess* mesh{nullptr};
+        bool revision_tracking_available{false};
+        std::uint64_t geometry_revision{0};
+        std::uint64_t topology_revision{0};
+        std::uint64_t ownership_revision{0};
+        std::uint64_t numbering_revision{0};
+        std::uint64_t active_configuration_epoch{0};
+        std::uint64_t coordinate_configuration_key{0};
     };
     FlatCellCoords flat_cell_coords_;
 
@@ -1114,6 +1145,7 @@ private:
         FieldId field_id{INVALID_FIELD_ID};
         const FieldAccessPlan* access{nullptr};
         const basis::BasisCacheEntry* bcache{nullptr};
+        const basis::BasisFunction* basis{nullptr};
         ElementType cell_type{ElementType::Unknown};
         std::string basis_cache_identity{};
         bool is_product{false};

@@ -427,6 +427,85 @@ TEST(SearchAccess, MeshSearchAccess_ClosestBoundaryPointOnMarker_RebuildsAfterGe
     EXPECT_NEAR(cp_cur.distance, 0.1, 1e-12);
 }
 
+TEST(SearchAccess, MeshSearchAccess_CurrentMotionLeavesReferenceMarkerQueryOnReferenceGeometry)
+{
+    const int marker = 79;
+    auto mesh = build_single_quad_mesh();
+    auto& base = mesh->local_mesh();
+    ASSERT_NE(mark_left_edge(base, marker), svmp::INVALID_INDEX);
+
+    MeshSearchAccess reference_access(*mesh, svmp::Configuration::Reference);
+    MeshSearchAccess current_access(*mesh, svmp::Configuration::Current);
+
+    const std::array<Real, 3> p_ref{-0.1, 0.2, 0.0};
+    const auto ref_before = reference_access.closestBoundaryPointOnMarker(marker, p_ref);
+    ASSERT_TRUE(ref_before.found);
+    EXPECT_NEAR(ref_before.closest_point[0], 0.0, 1e-12);
+
+    auto X_cur = base.X_ref();
+    for (std::size_t i = 0; i < X_cur.size(); i += 2) {
+        X_cur[i] += 10.0;
+    }
+    mesh->set_current_coords(X_cur);
+
+    const auto ref_after = reference_access.closestBoundaryPointOnMarker(marker, p_ref);
+    ASSERT_TRUE(ref_after.found);
+    EXPECT_NEAR(ref_after.closest_point[0], 0.0, 1e-12);
+
+    const std::array<Real, 3> p_cur{9.9, 0.2, 0.0};
+    const auto cur_after = current_access.closestBoundaryPointOnMarker(marker, p_cur);
+    ASSERT_TRUE(cur_after.found);
+    EXPECT_NEAR(cur_after.closest_point[0], 10.0, 1e-12);
+}
+
+TEST(SearchAccess, MeshSearchAccess_RevisionKeyTracksNumberingAndTopologyForReferenceAndCurrent)
+{
+    auto mesh = build_single_quad_mesh();
+    auto& base = mesh->local_mesh();
+
+    auto X_cur = base.X_ref();
+    for (std::size_t i = 0; i < X_cur.size(); i += 2) {
+        X_cur[i] += 10.0;
+    }
+    mesh->set_current_coords(X_cur);
+
+    MeshSearchAccess reference_access(*mesh, svmp::Configuration::Reference);
+    MeshSearchAccess current_access(*mesh, svmp::Configuration::Current);
+
+    const auto ref_initial = reference_access.diagnosticRevisionKey();
+    const auto cur_initial = current_access.diagnosticRevisionKey();
+
+    base.set_cell_gids(std::vector<svmp::gid_t>{42});
+    const auto ref_after_numbering = reference_access.diagnosticRevisionKey();
+    const auto cur_after_numbering = current_access.diagnosticRevisionKey();
+    EXPECT_NE(ref_after_numbering, ref_initial);
+    EXPECT_NE(cur_after_numbering, cur_initial);
+
+    const std::vector<svmp::real_t> X_ref = {
+        0.0, 0.0,
+        1.0, 0.0,
+        2.0, 0.0,
+        0.0, 1.0,
+        1.0, 1.0,
+        2.0, 1.0
+    };
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4, 8};
+    const std::vector<svmp::index_t> cell2vertex = {
+        0, 1, 4, 3,
+        1, 2, 5, 4
+    };
+    CellShape shape{};
+    shape.family = CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+
+    base.build_from_arrays(/*spatial_dim=*/2, X_ref, cell2vertex_offsets, cell2vertex, {shape, shape});
+    base.finalize();
+
+    EXPECT_NE(reference_access.diagnosticRevisionKey(), ref_after_numbering);
+    EXPECT_NE(current_access.diagnosticRevisionKey(), cur_after_numbering);
+}
+
 TEST(SearchAccess, MeshSearchAccess_ClosestBoundaryPointOnMarker_DeformedAliasUsesCurrentCoordinates)
 {
     const int marker = 78;

@@ -106,7 +106,7 @@ void add_displacement_to_current_coords(MeshBase& mesh,
     }
   }
 
-  mesh.event_bus().notify(MeshEvent::GeometryChanged);
+  mesh.mark_geometry_changed();
   mesh.use_current_configuration();
 }
 

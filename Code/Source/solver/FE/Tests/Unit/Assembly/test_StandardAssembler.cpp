@@ -34,6 +34,7 @@
 #include "Geometry/MappingFactory.h"
 
 #include <cmath>
+#include <cstdint>
 #include <vector>
 #include <memory>
 #include <numeric>
@@ -550,6 +551,43 @@ private:
     std::vector<Real> vector_;
     AssemblyPhase phase_{AssemblyPhase::NotStarted};
     bool finalized_{false};
+};
+
+class TrackingLayoutSystemView final : public TestDenseSystemView {
+public:
+    explicit TrackingLayoutSystemView(GlobalIndex n) : TestDenseSystemView(n) {}
+
+    [[nodiscard]] const void* matrixLayoutHandle() const noexcept override { return this; }
+    [[nodiscard]] const void* vectorLayoutHandle() const noexcept override { return this; }
+    [[nodiscard]] std::uint64_t matrixLayoutRevision() const noexcept override { return matrix_revision_; }
+    [[nodiscard]] std::uint64_t vectorLayoutRevision() const noexcept override { return vector_revision_; }
+
+    void bumpMatrixLayoutRevision() noexcept { ++matrix_revision_; }
+    void bumpVectorLayoutRevision() noexcept { ++vector_revision_; }
+
+    void resolveVectorEntries(std::span<const GlobalIndex> dofs,
+                              std::span<GlobalIndex> resolved) const override
+    {
+        ++vector_resolve_calls_;
+        GlobalSystemView::resolveVectorEntries(dofs, resolved);
+    }
+
+    void resolveMatrixEntries(std::span<const GlobalIndex> row_dofs,
+                              std::span<const GlobalIndex> col_dofs,
+                              std::span<GlobalIndex> resolved) const override
+    {
+        ++matrix_resolve_calls_;
+        GlobalSystemView::resolveMatrixEntries(row_dofs, col_dofs, resolved);
+    }
+
+    [[nodiscard]] int matrixResolveCalls() const noexcept { return matrix_resolve_calls_; }
+    [[nodiscard]] int vectorResolveCalls() const noexcept { return vector_resolve_calls_; }
+
+private:
+    std::uint64_t matrix_revision_{0};
+    std::uint64_t vector_revision_{0};
+    mutable int matrix_resolve_calls_{0};
+    mutable int vector_resolve_calls_{0};
 };
 
 /**
@@ -2491,6 +2529,15 @@ public:
     {
     }
 
+    void setNodes(std::array<std::array<Real, 3>, 4> nodes)
+    {
+        nodes_ = std::move(nodes);
+        ++geometry_revision_;
+    }
+
+    [[nodiscard]] bool revisionTrackingAvailable() const override { return true; }
+    [[nodiscard]] std::uint64_t geometryRevision() const override { return geometry_revision_; }
+
     [[nodiscard]] GlobalIndex numCells() const override { return 1; }
     [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
     [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
@@ -2538,6 +2585,7 @@ public:
 private:
     std::array<std::array<Real, 3>, 4> nodes_{};
     std::array<GlobalIndex, 4> cell_nodes_{};
+    std::uint64_t geometry_revision_{0};
 };
 
 class SinglePointMeshAccess final : public IMeshAccess {
@@ -2901,6 +2949,95 @@ TEST(StandardAssemblerEdgeCases, InvertedElementMassMatrixMatchesNonInverted) {
             EXPECT_NEAR(A.getMatrixEntry(i, j), B.getMatrixEntry(i, j), 1e-12);
         }
     }
+}
+
+TEST(StandardAssemblerCaches, ReusedAssemblerRebuildsFlatCoordinatesAfterGeometryRevision)
+{
+    std::array<std::array<Real, 3>, 4> nodes = {{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0},
+        {0.0, 0.0, 1.0},
+    }};
+    ConfigurableSingleTetraMeshAccess mesh(nodes, /*cell_nodes=*/{0, 1, 2, 3});
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+    auto dof_map = createSingleCellDofMap(4);
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    MassKernel first_kernel;
+    TestDenseSystemView first(4);
+    first.zero();
+    const auto first_result = assembler.assembleMatrix(mesh, space, space, first_kernel, first);
+    EXPECT_TRUE(first_result.success);
+    const Real first_diag = first.getMatrixEntry(0, 0);
+
+    nodes[3] = {0.0, 0.0, 2.0};
+    mesh.setNodes(nodes);
+
+    MassKernel second_kernel;
+    TestDenseSystemView second(4);
+    second.zero();
+    const auto second_result = assembler.assembleMatrix(mesh, space, space, second_kernel, second);
+    EXPECT_TRUE(second_result.success);
+
+    EXPECT_NEAR(second.getMatrixEntry(0, 0), Real(2.0) * first_diag, 1e-12);
+}
+
+TEST(StandardAssemblerCaches, ResolvedTablesRespectDofAndBackendLayoutRevisions)
+{
+    const std::array<std::array<Real, 3>, 4> nodes = {{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0},
+        {0.0, 0.0, 1.0},
+    }};
+    ConfigurableSingleTetraMeshAccess mesh(nodes, /*cell_nodes=*/{0, 1, 2, 3});
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    dofs::DofMap dof_map(1, 4, 4);
+    dof_map.setCellDofs(0, std::vector<GlobalIndex>{0, 1, 2, 3});
+    dof_map.setNumDofs(4);
+    dof_map.setNumLocalDofs(4);
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    TrackingLayoutSystemView system(4);
+    IdentityKernel kernel;
+
+    auto first = assembler.assembleBoth(mesh, space, space, kernel, system, system);
+    EXPECT_TRUE(first.success);
+    const int matrix_after_first = system.matrixResolveCalls();
+    const int vector_after_first = system.vectorResolveCalls();
+    EXPECT_GT(matrix_after_first, 0);
+    EXPECT_GT(vector_after_first, 0);
+
+    system.zero();
+    auto second = assembler.assembleBoth(mesh, space, space, kernel, system, system);
+    EXPECT_TRUE(second.success);
+    EXPECT_EQ(system.matrixResolveCalls(), matrix_after_first);
+    EXPECT_EQ(system.vectorResolveCalls(), vector_after_first);
+
+    dof_map.setNumLocalDofs(4);
+    system.zero();
+    auto after_dof_revision = assembler.assembleBoth(mesh, space, space, kernel, system, system);
+    EXPECT_TRUE(after_dof_revision.success);
+    const int matrix_after_dof = system.matrixResolveCalls();
+    const int vector_after_dof = system.vectorResolveCalls();
+    EXPECT_GT(matrix_after_dof, matrix_after_first);
+    EXPECT_GT(vector_after_dof, vector_after_first);
+
+    system.bumpMatrixLayoutRevision();
+    system.bumpVectorLayoutRevision();
+    system.zero();
+    auto after_backend_revision = assembler.assembleBoth(mesh, space, space, kernel, system, system);
+    EXPECT_TRUE(after_backend_revision.success);
+    EXPECT_GT(system.matrixResolveCalls(), matrix_after_dof);
+    EXPECT_GT(system.vectorResolveCalls(), vector_after_dof);
 }
 
 TEST(StandardAssemblerEdgeCases, ConstraintChainDistributesToMasters) {

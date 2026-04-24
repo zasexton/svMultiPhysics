@@ -121,6 +121,40 @@ TEST_F(AdaptivitySimpleTest, BasicRefinement) {
   EXPECT_TRUE(result.success);
 }
 
+TEST_F(AdaptivitySimpleTest, RefinementPreservesEventBusAndBumpsRevisionDomains) {
+  auto mesh = create_2d_quad_mesh(2, 2);
+  AdaptivityOptions options = create_default_options();
+  AdaptivityManager manager(options);
+
+  class CountingObserver final : public MeshObserver {
+  public:
+    void on_mesh_event(MeshEvent event) override {
+      if (event == MeshEvent::AdaptivityApplied) {
+        ++adaptivity_events;
+      }
+    }
+    int adaptivity_events{0};
+  };
+
+  auto observer = std::make_shared<CountingObserver>();
+  mesh->event_bus().subscribe(observer);
+
+  const auto before = mesh->revision_state();
+  std::vector<bool> marks(mesh->n_cells(), true);
+  auto result = manager.refine(*mesh, marks, nullptr);
+  ASSERT_TRUE(result.success);
+
+  const auto after = mesh->revision_state();
+  EXPECT_GT(after.geometry, before.geometry);
+  EXPECT_GT(after.reference_geometry, before.reference_geometry);
+  EXPECT_GT(after.current_geometry, before.current_geometry);
+  EXPECT_GT(after.topology, before.topology);
+  EXPECT_GT(after.numbering, before.numbering);
+  EXPECT_GT(after.field_layout, before.field_layout);
+  EXPECT_GT(after.labels, before.labels);
+  EXPECT_EQ(observer->adaptivity_events, 1);
+}
+
 // Test 2: Selective refinement
 TEST_F(AdaptivitySimpleTest, SelectiveRefinement) {
   auto mesh = create_2d_quad_mesh(2, 2);

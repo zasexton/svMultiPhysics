@@ -191,6 +191,13 @@ enum class LocalRowOwnership : std::uint8_t {
     return backend_col >= 0 && backend_col < global_cols;
 }
 
+[[nodiscard]] bool track_resolved_insert_drops() noexcept
+{
+    static const bool enabled =
+        std::getenv("SVMP_FSILS_TRACK_DROPPED_RESOLVED_INSERTS") != nullptr;
+    return enabled;
+}
+
 [[nodiscard]] bool ghost_rows_look_nodal_interleaved(std::span<const GlobalIndex> ghost_rows, int dof)
 {
     if (dof <= 0) {
@@ -1946,13 +1953,11 @@ void FsilsMatrix::addResolvedMatrixEntries(std::span<const GlobalIndex> row_dofs
 
     const auto n_rows = static_cast<GlobalIndex>(row_dofs.size());
     const auto n_cols = static_cast<GlobalIndex>(col_dofs.size());
-    std::vector<unsigned char> owned_row;
-    std::vector<unsigned char> off_owner_row;
-    std::vector<unsigned char> valid_col;
+    thread_local std::vector<unsigned char> owned_row;
+    thread_local std::vector<unsigned char> off_owner_row;
     bool all_rows_owned = true;
-    owned_row.resize(row_dofs.size(), 0);
-    off_owner_row.resize(row_dofs.size(), 0);
-    valid_col.resize(col_dofs.size(), 0);
+    owned_row.assign(row_dofs.size(), 0);
+    off_owner_row.assign(row_dofs.size(), 0);
     for (GlobalIndex i = 0; i < n_rows; ++i) {
         const auto status = classify_fe_matrix_row(
             *shared_, row_dofs[static_cast<std::size_t>(i)], numRows());
@@ -1965,34 +1970,40 @@ void FsilsMatrix::addResolvedMatrixEntries(std::span<const GlobalIndex> row_dofs
             }
         }
     }
-    for (GlobalIndex j = 0; j < n_cols; ++j) {
-        if (is_valid_fe_matrix_col(
-                *shared_, col_dofs[static_cast<std::size_t>(j)], numCols())) {
-            valid_col[static_cast<std::size_t>(j)] = 1;
-        }
-    }
 
     std::uint64_t dropped_entries = 0;
-    for (GlobalIndex i = 0; i < n_rows; ++i) {
-        const auto row_idx = static_cast<std::size_t>(i);
-        if (owned_row[row_idx] == 0) {
-            continue;
-        }
+    if (track_resolved_insert_drops()) {
+        thread_local std::vector<unsigned char> valid_col;
+        valid_col.assign(col_dofs.size(), 0);
         for (GlobalIndex j = 0; j < n_cols; ++j) {
-            const auto col_idx = static_cast<std::size_t>(j);
-            if (valid_col[col_idx] == 0) {
+            if (is_valid_fe_matrix_col(
+                    *shared_, col_dofs[static_cast<std::size_t>(j)], numCols())) {
+                valid_col[static_cast<std::size_t>(j)] = 1;
+            }
+        }
+        for (GlobalIndex i = 0; i < n_rows; ++i) {
+            const auto row_idx = static_cast<std::size_t>(i);
+            if (owned_row[row_idx] == 0) {
                 continue;
             }
-            const auto idx = static_cast<std::size_t>(i * n_cols + j);
-            const auto slot = resolved[idx];
-            if (slot < 0 || static_cast<std::size_t>(slot) >= values_size) {
-                ++dropped_entries;
+            for (GlobalIndex j = 0; j < n_cols; ++j) {
+                const auto col_idx = static_cast<std::size_t>(j);
+                if (valid_col[col_idx] == 0) {
+                    continue;
+                }
+                const auto idx = static_cast<std::size_t>(i * n_cols + j);
+                const auto slot = resolved[idx];
+                if (slot < 0 || static_cast<std::size_t>(slot) >= values_size) {
+                    ++dropped_entries;
+                }
             }
         }
     }
-    if (dropped_entries > 0) {
-        dropped_entry_count_.fetch_add(dropped_entries, std::memory_order_relaxed);
-    }
+    const auto flush_dropped_entries = [&]() {
+        if (dropped_entries > 0) {
+            dropped_entry_count_.fetch_add(dropped_entries, std::memory_order_relaxed);
+        }
+    };
 
     const auto* slots = resolved.data();
     const auto* local = local_matrix.data();
@@ -2036,6 +2047,7 @@ void FsilsMatrix::addResolvedMatrixEntries(std::span<const GlobalIndex> row_dofs
                 apply_scalar(resolved[idx], local_matrix[idx]);
             }
         }
+        flush_dropped_entries();
         return;
     }
 
@@ -2106,6 +2118,7 @@ void FsilsMatrix::addResolvedMatrixEntries(std::span<const GlobalIndex> row_dofs
                 });
             break;
     }
+    flush_dropped_entries();
 }
 
 void FsilsMatrix::addMatrixEntriesCached(std::span<const GlobalIndex> row_dofs,

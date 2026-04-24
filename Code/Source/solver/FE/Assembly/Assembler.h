@@ -69,6 +69,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <vector>
@@ -369,6 +370,36 @@ public:
 
     /// Spatial dimension (2 or 3)
     [[nodiscard]] virtual int dimension() const = 0;
+
+    /// True when the revision-domain queries below are meaningful cache keys.
+    [[nodiscard]] virtual bool revisionTrackingAvailable() const { return false; }
+
+    /// Mesh geometry revision, if available. Adapters that cannot provide
+    /// revision information return zero and consumers must invalidate
+    /// conservatively when correctness depends on mutable mesh state.
+    [[nodiscard]] virtual std::uint64_t geometryRevision() const { return 0; }
+
+    /// Mesh topology revision, if available.
+    [[nodiscard]] virtual std::uint64_t topologyRevision() const { return 0; }
+
+    /// Mesh ownership/partition revision, if available.
+    [[nodiscard]] virtual std::uint64_t ownershipRevision() const { return 0; }
+
+    /// Mesh entity numbering revision, if available.
+    [[nodiscard]] virtual std::uint64_t numberingRevision() const { return 0; }
+
+    /// Mesh field-layout revision, if available.
+    [[nodiscard]] virtual std::uint64_t fieldLayoutRevision() const { return 0; }
+
+    /// Mesh label/marker revision, if available.
+    [[nodiscard]] virtual std::uint64_t labelRevision() const { return 0; }
+
+    /// Mesh active-configuration epoch, if this adapter follows mutable
+    /// Mesh active configuration.
+    [[nodiscard]] virtual std::uint64_t activeConfigurationEpoch() const { return 0; }
+
+    /// Opaque key for the coordinate configuration used by this adapter.
+    [[nodiscard]] virtual std::uint64_t coordinateConfigurationKey() const { return 0; }
 
     /// Check if cell is locally owned
     [[nodiscard]] virtual bool isOwnedCell(GlobalIndex cell_id) const = 0;
@@ -1017,6 +1048,15 @@ public:
      * Clears internal state while keeping configuration.
      */
     virtual void reset() = 0;
+
+    /// Invalidate caches whose values depend only on mesh coordinates or the
+    /// active coordinate configuration. The default is conservative.
+    virtual void invalidateGeometryCaches() { reset(); }
+
+    /// Invalidate caches whose values depend on topology, numbering, field
+    /// layout, DOF layout, constraints, or block layout. This is stronger than
+    /// geometry-only invalidation. The default is conservative.
+    virtual void invalidateTopologyLayoutCaches() { reset(); }
 
     // =========================================================================
     // Query

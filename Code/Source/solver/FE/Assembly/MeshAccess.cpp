@@ -111,6 +111,13 @@ std::array<Real, 3> vertex_coords_from_mesh(const svmp::MeshBase& mesh,
     return x;
 }
 
+svmp::Configuration effective_coordinate_configuration(const svmp::MeshBase& mesh,
+                                                       bool coord_cfg_override_enabled,
+                                                       svmp::Configuration coord_cfg_override) noexcept
+{
+    return coord_cfg_override_enabled ? coord_cfg_override : mesh.active_configuration();
+}
+
 } // namespace
 
 MeshAccess::MeshAccess(const svmp::Mesh& mesh)
@@ -161,6 +168,46 @@ GlobalIndex MeshAccess::numInteriorFaces() const {
 
 int MeshAccess::dimension() const {
     return mesh_.dim();
+}
+
+std::uint64_t MeshAccess::geometryRevision() const {
+    const auto cfg = effective_coordinate_configuration(mesh_.base(),
+                                                        coord_cfg_override_enabled_,
+                                                        coord_cfg_override_);
+    const bool use_current = (cfg == svmp::Configuration::Current ||
+                              cfg == svmp::Configuration::Deformed) &&
+                             mesh_.has_current_coords();
+    return use_current ? mesh_.current_geometry_revision()
+                       : mesh_.reference_geometry_revision();
+}
+
+std::uint64_t MeshAccess::topologyRevision() const {
+    return mesh_.topology_revision();
+}
+
+std::uint64_t MeshAccess::ownershipRevision() const {
+    return mesh_.ownership_revision();
+}
+
+std::uint64_t MeshAccess::numberingRevision() const {
+    return mesh_.numbering_revision();
+}
+
+std::uint64_t MeshAccess::fieldLayoutRevision() const {
+    return mesh_.field_layout_revision();
+}
+
+std::uint64_t MeshAccess::labelRevision() const {
+    return mesh_.label_revision();
+}
+
+std::uint64_t MeshAccess::activeConfigurationEpoch() const {
+    return coord_cfg_override_enabled_ ? std::uint64_t{0} : mesh_.active_configuration_epoch();
+}
+
+std::uint64_t MeshAccess::coordinateConfigurationKey() const {
+    const auto cfg = coord_cfg_override_enabled_ ? coord_cfg_override_ : mesh_.active_configuration();
+    return static_cast<std::uint64_t>(cfg);
 }
 
 bool MeshAccess::isOwnedCell(GlobalIndex cell_id) const {

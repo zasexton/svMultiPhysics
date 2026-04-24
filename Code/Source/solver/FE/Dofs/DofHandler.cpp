@@ -3676,6 +3676,7 @@ struct DofHandler::MeshCacheState : MeshObserver {
         switch (event) {
             case MeshEvent::TopologyChanged:
             case MeshEvent::PartitionChanged:
+            case MeshEvent::NumberingChanged:
             case MeshEvent::AdaptivityApplied:
                 ++relevant_revision;
                 break;
@@ -8193,6 +8194,7 @@ struct DofHandler::MeshCacheState : MeshObserver {
         switch (event) {
             case MeshEvent::TopologyChanged:
             case MeshEvent::PartitionChanged:
+            case MeshEvent::NumberingChanged:
             case MeshEvent::AdaptivityApplied:
                 ++relevant_revision;
                 break;

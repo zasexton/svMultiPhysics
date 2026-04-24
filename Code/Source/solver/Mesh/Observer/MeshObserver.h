@@ -32,6 +32,7 @@
 #define SVMP_MESH_OBSERVER_H
 
 #include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -58,7 +59,14 @@ enum class MeshEvent {
   PartitionChanged,  // ownership/ghost layer changed (MPI redistribution)
   LabelsChanged,     // region/boundary labels modified
   FieldsChanged,     // field attached/removed/modified
+  NumberingChanged,  // entity global/local numbering changed without topology change
   AdaptivityApplied  // mesh refinement/coarsening applied
+};
+
+enum class GeometryRevisionDomain {
+  All,
+  Reference,
+  Current
 };
 
 // Human-readable event names
@@ -69,10 +77,30 @@ inline const char* event_name(MeshEvent evt) {
     case MeshEvent::PartitionChanged:  return "PartitionChanged";
     case MeshEvent::LabelsChanged:     return "LabelsChanged";
     case MeshEvent::FieldsChanged:     return "FieldsChanged";
+    case MeshEvent::NumberingChanged:  return "NumberingChanged";
     case MeshEvent::AdaptivityApplied: return "AdaptivityApplied";
   }
   return "Unknown";
 }
+
+/**
+ * @brief Monotonic mesh revision domains used by cache and state invalidation.
+ *
+ * These counters describe independently invalidatable mesh state domains. They
+ * intentionally live next to the event bus so all existing mutation paths that
+ * emit MeshEvent notifications participate in revision tracking.
+ */
+struct MeshRevisionState {
+  std::uint64_t geometry{0};
+  std::uint64_t reference_geometry{0};
+  std::uint64_t current_geometry{0};
+  std::uint64_t topology{0};
+  std::uint64_t ownership{0};
+  std::uint64_t numbering{0};
+  std::uint64_t field_layout{0};
+  std::uint64_t labels{0};
+  std::uint64_t active_configuration{0};
+};
 
 // ====================
 // Observer Interface
@@ -100,6 +128,7 @@ public:
     mutable std::mutex mutex;
     std::vector<MeshObserver*> observers;                        // non-owning pointers
     std::vector<std::shared_ptr<MeshObserver>> owned_observers;  // owned observers
+    MeshRevisionState revisions{};
   };
 
   MeshEventBus() : state_(std::make_shared<State>()) {}
@@ -186,6 +215,7 @@ public:
     std::vector<std::shared_ptr<MeshObserver>> owned_snapshot;
     {
       std::lock_guard<std::mutex> lock(state->mutex);
+      bump_revision_for_event(state->revisions, event);
       snapshot = state->observers;
       owned_snapshot = state->owned_observers; // keep owned observers alive for the duration
     }
@@ -196,6 +226,59 @@ public:
         obs->on_mesh_event(event);
       }
     }
+  }
+
+  void notify_geometry_changed(GeometryRevisionDomain domain) {
+    auto state = state_;
+    if (!state) {
+      return;
+    }
+
+    std::vector<MeshObserver*> snapshot;
+    std::vector<std::shared_ptr<MeshObserver>> owned_snapshot;
+    {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      bump_geometry_revision(state->revisions, domain);
+      snapshot = state->observers;
+      owned_snapshot = state->owned_observers;
+    }
+
+    (void)owned_snapshot;
+    for (auto* obs : snapshot) {
+      if (obs) {
+        obs->on_mesh_event(MeshEvent::GeometryChanged);
+      }
+    }
+  }
+
+  [[nodiscard]] MeshRevisionState revision_state() const {
+    auto state = state_;
+    if (!state) {
+      return {};
+    }
+
+    std::lock_guard<std::mutex> lock(state->mutex);
+    return state->revisions;
+  }
+
+  [[nodiscard]] std::uint64_t geometry_revision() const { return revision_state().geometry; }
+  [[nodiscard]] std::uint64_t reference_geometry_revision() const { return revision_state().reference_geometry; }
+  [[nodiscard]] std::uint64_t current_geometry_revision() const { return revision_state().current_geometry; }
+  [[nodiscard]] std::uint64_t topology_revision() const { return revision_state().topology; }
+  [[nodiscard]] std::uint64_t ownership_revision() const { return revision_state().ownership; }
+  [[nodiscard]] std::uint64_t numbering_revision() const { return revision_state().numbering; }
+  [[nodiscard]] std::uint64_t field_layout_revision() const { return revision_state().field_layout; }
+  [[nodiscard]] std::uint64_t label_revision() const { return revision_state().labels; }
+  [[nodiscard]] std::uint64_t active_configuration_epoch() const { return revision_state().active_configuration; }
+
+  void mark_active_configuration_changed() {
+    auto state = state_;
+    if (!state) {
+      return;
+    }
+
+    std::lock_guard<std::mutex> lock(state->mutex);
+    ++state->revisions.active_configuration;
   }
 
   // Query
@@ -241,6 +324,53 @@ public:
   }
 
 private:
+  static void bump_revision_for_event(MeshRevisionState& revisions, MeshEvent event) {
+    switch (event) {
+      case MeshEvent::GeometryChanged:
+        bump_geometry_revision(revisions, GeometryRevisionDomain::All);
+        break;
+      case MeshEvent::TopologyChanged:
+        ++revisions.topology;
+        ++revisions.numbering;
+        break;
+      case MeshEvent::PartitionChanged:
+        ++revisions.ownership;
+        break;
+      case MeshEvent::LabelsChanged:
+        ++revisions.labels;
+        break;
+      case MeshEvent::FieldsChanged:
+        ++revisions.field_layout;
+        break;
+      case MeshEvent::NumberingChanged:
+        ++revisions.numbering;
+        break;
+      case MeshEvent::AdaptivityApplied:
+        ++revisions.topology;
+        bump_geometry_revision(revisions, GeometryRevisionDomain::All);
+        ++revisions.numbering;
+        ++revisions.field_layout;
+        ++revisions.labels;
+        break;
+    }
+  }
+
+  static void bump_geometry_revision(MeshRevisionState& revisions, GeometryRevisionDomain domain) {
+    ++revisions.geometry;
+    switch (domain) {
+      case GeometryRevisionDomain::All:
+        ++revisions.reference_geometry;
+        ++revisions.current_geometry;
+        break;
+      case GeometryRevisionDomain::Reference:
+        ++revisions.reference_geometry;
+        break;
+      case GeometryRevisionDomain::Current:
+        ++revisions.current_geometry;
+        break;
+    }
+  }
+
   std::shared_ptr<State> state_;
 };
 

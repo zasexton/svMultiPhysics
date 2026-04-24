@@ -41,6 +41,7 @@
 
 #include <chrono>
 #include <algorithm>
+#include <cstdint>
 #include <numeric>
 #include <sstream>
 #include <functional>
@@ -121,6 +122,7 @@ inline std::size_t hashCombine(std::size_t seed, std::size_t value) {
 
 std::size_t hashDofMapConnectivity(const dofs::DofMap& dof_map) {
     std::size_t seed = 0;
+    seed = hashCombine(seed, std::hash<std::uint64_t>{}(dof_map.dofLayoutRevision()));
     seed = hashCombine(seed, std::hash<GlobalIndex>{}(dof_map.getNumDofs()));
     seed = hashCombine(seed, std::hash<GlobalIndex>{}(dof_map.getNumCells()));
 

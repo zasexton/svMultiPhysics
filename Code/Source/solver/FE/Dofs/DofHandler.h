@@ -33,6 +33,7 @@
 #include "Spaces/OrientationManager.h"
 
 #include <memory>
+#include <cstdint>
 #include <vector>
 #include <string>
 #include <functional>
@@ -807,6 +808,7 @@ public:
      * validation and unit tests.
      */
     [[nodiscard]] std::uint64_t getDofStateRevision() const noexcept { return dof_state_revision_; }
+    [[nodiscard]] std::uint64_t dofLayoutRevision() const noexcept { return dof_state_revision_; }
 
     // =========================================================================
     // Parallel support

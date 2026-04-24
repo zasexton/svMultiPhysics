@@ -34,6 +34,29 @@ TEST(BlockDofMap, BasicBlocksAndRanges) {
     EXPECT_EQ(p.second, 16);
 }
 
+TEST(BlockDofMap, BlockLayoutRevisionTracksStructuralChanges) {
+    BlockDofMap map;
+    const auto initial = map.blockLayoutRevision();
+
+    map.addBlock("velocity", 12);
+    EXPECT_GT(map.blockLayoutRevision(), initial);
+    const auto after_block = map.blockLayoutRevision();
+
+    map.addBlock("pressure", 4);
+    EXPECT_GT(map.blockLayoutRevision(), after_block);
+    const auto after_second_block = map.blockLayoutRevision();
+
+    map.setCoupling(0, 1, BlockCoupling::TwoWay);
+    EXPECT_GT(map.blockLayoutRevision(), after_second_block);
+    const auto after_coupling = map.blockLayoutRevision();
+
+    map.setCoupling(0, 1, BlockCoupling::TwoWay);
+    EXPECT_EQ(map.blockLayoutRevision(), after_coupling);
+
+    map.finalize();
+    EXPECT_GT(map.blockLayoutRevision(), after_coupling);
+}
+
 TEST(BlockDofMap, CouplingAndSaddlePointDetection) {
     BlockDofMap map;
     map.addBlock("A", 10);
@@ -71,4 +94,3 @@ TEST(BlockDofMap, ThrowsOnInvalidBlock) {
 
     EXPECT_THROW(map.getBlockName(5), FEException);
 }
-

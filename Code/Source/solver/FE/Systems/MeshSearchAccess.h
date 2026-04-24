@@ -14,6 +14,7 @@
 
 #include "Mesh/Mesh.h"
 
+#include <cstdint>
 #include <memory>
 
 namespace svmp {
@@ -68,6 +69,8 @@ public:
         const std::array<Real, 3>& point,
         Real max_distance = std::numeric_limits<Real>::infinity()) const override;
 
+    [[nodiscard]] std::uint64_t diagnosticRevisionKey() const noexcept;
+
 private:
     const svmp::Mesh& mesh_;
     bool coord_cfg_override_enabled_{false};
@@ -77,6 +80,7 @@ private:
     std::unique_ptr<Impl> impl_{};
 
     [[nodiscard]] svmp::Configuration queryConfig() const noexcept;
+    [[nodiscard]] std::uint64_t searchRevisionKey() const noexcept;
 };
 
 } // namespace systems
