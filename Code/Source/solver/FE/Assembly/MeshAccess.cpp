@@ -118,6 +118,23 @@ svmp::Configuration effective_coordinate_configuration(const svmp::MeshBase& mes
     return coord_cfg_override_enabled ? coord_cfg_override : mesh.active_configuration();
 }
 
+svmp::Configuration configuration_from_coordinate_frame(
+    CoordinateFrame frame,
+    const svmp::MeshBase& mesh,
+    bool coord_cfg_override_enabled,
+    svmp::Configuration coord_cfg_override) noexcept
+{
+    switch (frame) {
+        case CoordinateFrame::Active:
+            return effective_coordinate_configuration(mesh, coord_cfg_override_enabled, coord_cfg_override);
+        case CoordinateFrame::Reference:
+            return svmp::Configuration::Reference;
+        case CoordinateFrame::Current:
+            return svmp::Configuration::Current;
+    }
+    return svmp::Configuration::Reference;
+}
+
 } // namespace
 
 MeshAccess::MeshAccess(const svmp::Mesh& mesh)
@@ -206,8 +223,20 @@ std::uint64_t MeshAccess::activeConfigurationEpoch() const {
 }
 
 std::uint64_t MeshAccess::coordinateConfigurationKey() const {
-    const auto cfg = coord_cfg_override_enabled_ ? coord_cfg_override_ : mesh_.active_configuration();
-    return static_cast<std::uint64_t>(cfg);
+    const auto cfg = effective_coordinate_configuration(mesh_.base(),
+                                                        coord_cfg_override_enabled_,
+                                                        coord_cfg_override_);
+    const bool use_current = (cfg == svmp::Configuration::Current ||
+                              cfg == svmp::Configuration::Deformed) &&
+                             mesh_.has_current_coords();
+    std::uint64_t key = 1469598103934665603ull;
+    auto mix = [&key](std::uint64_t value) {
+        key ^= value;
+        key *= 1099511628211ull;
+    };
+    mix(static_cast<std::uint64_t>(cfg));
+    mix(use_current ? 1u : 0u);
+    return key;
 }
 
 bool MeshAccess::isOwnedCell(GlobalIndex cell_id) const {
@@ -266,6 +295,40 @@ void MeshAccess::getCellCoordinates(GlobalIndex cell_id,
         coords[i] = vertex_coords_from_mesh(mesh_.base(), static_cast<GlobalIndex>(ptr[i]),
                                             coord_cfg_override_enabled_,
                                             coord_cfg_override_);
+    }
+}
+
+bool MeshAccess::supportsCoordinateFrame(CoordinateFrame frame) const
+{
+    switch (frame) {
+        case CoordinateFrame::Active:
+        case CoordinateFrame::Reference:
+        case CoordinateFrame::Current:
+            return true;
+    }
+    return false;
+}
+
+void MeshAccess::getCellCoordinates(GlobalIndex cell_id,
+                                    CoordinateFrame frame,
+                                    std::vector<std::array<Real, 3>>& coords) const
+{
+    if (cell_id < 0 || cell_id >= numCells()) {
+        throw FEException("MeshAccess: cell_id out of range",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+
+    const auto cfg = configuration_from_coordinate_frame(frame,
+                                                         mesh_.base(),
+                                                         coord_cfg_override_enabled_,
+                                                         coord_cfg_override_);
+    const auto c = static_cast<svmp::index_t>(cell_id);
+    const auto [ptr, count] = mesh_.base().cell_vertices_span(c);
+    coords.resize(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        coords[i] = vertex_coords_from_mesh(mesh_.base(), static_cast<GlobalIndex>(ptr[i]),
+                                            true,
+                                            cfg);
     }
 }
 

@@ -40,6 +40,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <string>
 
 #ifdef MESH_HAS_MPI
 #include <mpi.h>
@@ -110,6 +111,74 @@ void add_displacement_to_current_coords(MeshBase& mesh,
   mesh.use_current_configuration();
 }
 
+std::vector<FieldHandle> valid_motion_field_handles(const MotionFieldHandles& hnd)
+{
+  std::vector<FieldHandle> out;
+  out.reserve(6);
+  const auto push_if_valid = [&out](FieldHandle h) {
+    if (h.id != 0) {
+      out.push_back(h);
+    }
+  };
+  push_if_valid(hnd.displacement);
+  push_if_valid(hnd.velocity);
+  push_if_valid(hnd.acceleration);
+  push_if_valid(hnd.previous_coordinates);
+  push_if_valid(hnd.previous_displacement);
+  push_if_valid(hnd.previous_velocity);
+  return out;
+}
+
+void copy_field_values(MeshBase& mesh,
+                       FieldHandle target,
+                       const std::vector<real_t>& values,
+                       const char* caller)
+{
+  if (target.id == 0 || values.empty()) {
+    return;
+  }
+  real_t* dst = MeshFields::field_data_as<real_t>(mesh, target);
+  if (!dst) {
+    throw std::runtime_error(std::string(caller) + ": target field data is null");
+  }
+  const size_t target_count =
+      MeshFields::field_entity_count(mesh, target) *
+      MeshFields::field_components(mesh, target);
+  if (target_count != values.size()) {
+    throw std::runtime_error(std::string(caller) + ": target field size mismatch");
+  }
+  std::copy(values.begin(), values.end(), dst);
+}
+
+void copy_coordinates_to_field(MeshBase& mesh,
+                               FieldHandle target,
+                               const std::vector<real_t>& coords,
+                               int dim,
+                               const char* caller)
+{
+  if (target.id == 0 || coords.empty()) {
+    return;
+  }
+  real_t* dst = MeshFields::field_data_as<real_t>(mesh, target);
+  if (!dst) {
+    throw std::runtime_error(std::string(caller) + ": target coordinate field data is null");
+  }
+  const size_t n_vertices = mesh.n_vertices();
+  const size_t components = MeshFields::field_components(mesh, target);
+  if (components < static_cast<size_t>(dim) ||
+      coords.size() != n_vertices * static_cast<size_t>(dim)) {
+    throw std::runtime_error(std::string(caller) + ": coordinate field size mismatch");
+  }
+  for (size_t v = 0; v < n_vertices; ++v) {
+    const size_t coord_base = v * static_cast<size_t>(dim);
+    const size_t field_base = v * components;
+    for (int d = 0; d < dim; ++d) {
+      dst[field_base + static_cast<size_t>(d)] =
+          coords[coord_base + static_cast<size_t>(d)];
+    }
+  }
+}
+
 } // namespace
 
 MeshMotion::MeshMotion(Mesh& mesh)
@@ -153,6 +222,7 @@ bool MeshMotion::advance(double dt)
 
   auto* disp = MeshFields::field_data_as<real_t>(mb, hnd.displacement);
   auto* vel  = MeshFields::field_data_as<real_t>(mb, hnd.velocity);
+  auto* acc  = MeshFields::field_data_as<real_t>(mb, hnd.acceleration);
 
   MotionFieldView disp_view;
   MotionFieldView vel_view;
@@ -168,14 +238,48 @@ bool MeshMotion::advance(double dt)
   const size_t n_vertices = mb.n_vertices();
   const size_t disp_size = n_vertices * disp_view.components;
   const size_t vel_size  = n_vertices * vel_view.components;
+  const size_t acc_components =
+      MeshFields::field_components(mb, hnd.acceleration);
+  const size_t acc_size = n_vertices * acc_components;
+
+  const std::vector<real_t> entry_coordinates =
+      mb.has_current_coords() ? mb.X_cur() : mb.X_ref();
+  const std::vector<real_t> entry_disp =
+      (disp && disp_size > 0) ? std::vector<real_t>(disp, disp + disp_size)
+                              : std::vector<real_t>{};
+  const std::vector<real_t> entry_vel =
+      (vel && vel_size > 0) ? std::vector<real_t>(vel, vel + vel_size)
+                            : std::vector<real_t>{};
 
   const auto zero_motion_fields = [&]() {
     if (disp) std::fill(disp, disp + disp_size, real_t(0));
     if (vel) std::fill(vel, vel + vel_size, real_t(0));
+    if (acc) std::fill(acc, acc + acc_size, real_t(0));
   };
 
   // No backend: accept step, leaving coordinates unchanged.
   if (!backend_) {
+    zero_motion_fields();
+    copy_coordinates_to_field(mb,
+                              hnd.previous_coordinates,
+                              entry_coordinates,
+                              dim,
+                              "MeshMotion::advance");
+    copy_field_values(mb,
+                      hnd.previous_displacement,
+                      entry_disp,
+                      "MeshMotion::advance");
+    copy_field_values(mb,
+                      hnd.previous_velocity,
+                      entry_vel,
+                      "MeshMotion::advance");
+    if (mesh_->world_size() > 1) {
+      const auto motion_fields = valid_motion_field_handles(hnd);
+      if (!motion_fields.empty()) {
+        mesh_->update_ghosts(motion_fields);
+      }
+      mesh_->update_exchange_ghost_coordinates(Configuration::Current);
+    }
     return true;
   }
 
@@ -224,7 +328,7 @@ bool MeshMotion::advance(double dt)
   std::vector<FieldHandle> exchange_motion;
   if (mesh_->world_size() > 1) {
     exchange_disp = {hnd.displacement};
-    exchange_motion = {hnd.displacement, hnd.velocity};
+    exchange_motion = valid_motion_field_handles(hnd);
   }
 
   const int max_substeps = (cfg_.max_substeps > 0) ? cfg_.max_substeps : 1;
@@ -326,6 +430,17 @@ bool MeshMotion::advance(double dt)
     if (!(accepted_substeps == 1 && last_wrote_velocity)) {
       update_velocity_from_displacement(mb, hnd, static_cast<real_t>(dt));
     }
+    if (acc && acc_components >= static_cast<size_t>(dim) && vel && !entry_vel.empty()) {
+      const real_t inv_dt = real_t(1) / static_cast<real_t>(dt);
+      for (size_t v = 0; v < n_vertices; ++v) {
+        const size_t vel_base = v * vel_view.components;
+        const size_t acc_base = v * acc_components;
+        for (int d = 0; d < dim; ++d) {
+          const size_t di = static_cast<size_t>(d);
+          acc[acc_base + di] = (vel[vel_base + di] - entry_vel[vel_base + di]) * inv_dt;
+        }
+      }
+    }
   } else {
     // dt <= 0: enforce deterministic output if no meaningful velocity can be derived.
     if (!(accepted_substeps == 1 && last_wrote_velocity)) {
@@ -333,7 +448,24 @@ bool MeshMotion::advance(double dt)
         std::fill(vel, vel + vel_size, real_t(0));
       }
     }
+    if (acc) {
+      std::fill(acc, acc + acc_size, real_t(0));
+    }
   }
+
+  copy_coordinates_to_field(mb,
+                            hnd.previous_coordinates,
+                            entry_coordinates,
+                            dim,
+                            "MeshMotion::advance");
+  copy_field_values(mb,
+                    hnd.previous_displacement,
+                    entry_disp,
+                    "MeshMotion::advance");
+  copy_field_values(mb,
+                    hnd.previous_velocity,
+                    entry_vel,
+                    "MeshMotion::advance");
 
   // In distributed meshes, ensure ghost fields are synchronized according to
   // their ghost policies and exchange ghost vertex coordinates.

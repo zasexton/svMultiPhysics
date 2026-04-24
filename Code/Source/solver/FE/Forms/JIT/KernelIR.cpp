@@ -61,6 +61,20 @@ inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
         case FormExprType::PreviousSolutionRef: return "PreviousSolutionRef";
         case FormExprType::Coordinate: return "Coordinate";
         case FormExprType::ReferenceCoordinate: return "ReferenceCoordinate";
+        case FormExprType::MeshDisplacement: return "MeshDisplacement";
+        case FormExprType::MeshVelocity: return "MeshVelocity";
+        case FormExprType::MeshAcceleration: return "MeshAcceleration";
+        case FormExprType::CurrentCoordinate: return "CurrentCoordinate";
+        case FormExprType::ReferencePhysicalCoordinate: return "ReferencePhysicalCoordinate";
+        case FormExprType::CurrentJacobian: return "CurrentJacobian";
+        case FormExprType::ReferenceJacobian: return "ReferenceJacobian";
+        case FormExprType::CurrentJacobianDeterminant: return "CurrentJacobianDeterminant";
+        case FormExprType::ReferenceJacobianDeterminant: return "ReferenceJacobianDeterminant";
+        case FormExprType::CurrentNormal: return "CurrentNormal";
+        case FormExprType::ReferenceNormal: return "ReferenceNormal";
+        case FormExprType::CurrentMeasure: return "CurrentMeasure";
+        case FormExprType::ReferenceMeasure: return "ReferenceMeasure";
+        case FormExprType::SurfaceJacobian: return "SurfaceJacobian";
         case FormExprType::Time: return "Time";
         case FormExprType::TimeStep: return "TimeStep";
         case FormExprType::EffectiveTimeStep: return "EffectiveTimeStep";
@@ -134,6 +148,8 @@ inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
         case FormExprType::DoubleContraction: return "DoubleContraction";
         case FormExprType::OuterProduct: return "OuterProduct";
         case FormExprType::CrossProduct: return "CrossProduct";
+        case FormExprType::Pullback: return "Pullback";
+        case FormExprType::Pushforward: return "Pushforward";
         case FormExprType::Power: return "Power";
         case FormExprType::Minimum: return "Minimum";
         case FormExprType::Maximum: return "Maximum";
@@ -328,6 +344,15 @@ struct ImmPayload {
         case FormExprType::TimeDerivative: {
             const auto order = node.timeDerivativeOrder().value_or(1);
             out.imm0 = static_cast<std::uint64_t>(static_cast<std::int64_t>(order));
+            return out;
+        }
+
+        case FormExprType::Pullback:
+        case FormExprType::Pushforward: {
+            const auto from = node.fromConfiguration().value_or(GeometryConfiguration::Reference);
+            const auto to = node.toConfiguration().value_or(GeometryConfiguration::Current);
+            out.imm0 = static_cast<std::uint64_t>(static_cast<std::uint8_t>(from)) |
+                       (static_cast<std::uint64_t>(static_cast<std::uint8_t>(to)) << 8u);
             return out;
         }
 

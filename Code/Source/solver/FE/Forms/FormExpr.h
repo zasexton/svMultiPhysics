@@ -65,6 +65,37 @@ enum class TensorLoweringMode : std::uint8_t {
     On,
 };
 
+/**
+ * @brief Coordinate configuration used by frame-explicit moving-domain helpers.
+ *
+ * This is intentionally a small FE/Forms vocabulary enum rather than a physics
+ * concept. It lets form authors make reference/current intent explicit without
+ * depending on mutable mesh active-configuration state.
+ */
+enum class GeometryConfiguration : std::uint8_t {
+    Reference,
+    Current
+};
+
+/**
+ * @brief Differentiation policy for frame-explicit geometry terminals.
+ *
+ * The default keeps current/reference geometry constant with respect to
+ * solution-field differentiation. The mesh-motion mode is an explicit request
+ * for monolithic moving-mesh derivatives; until the Phase 8 geometry derivative
+ * kernels are implemented, compilers fail closed rather than assembling an
+ * incomplete tangent.
+ */
+enum class GeometrySensitivityMode : std::uint8_t {
+    GeometryConstant,
+    MeshMotionUnknowns
+};
+
+struct GeometrySensitivityOptions {
+    GeometrySensitivityMode mode{GeometrySensitivityMode::GeometryConstant};
+    FieldId mesh_motion_field{INVALID_FIELD_ID};
+};
+
 struct TensorJITOptions {
     // Rollout default: keep tensor-calculus lowering opt-in until benchmark targets are met.
     TensorLoweringMode mode{TensorLoweringMode::Off};
@@ -165,6 +196,7 @@ struct JITOptions {
 struct SymbolicOptions {
     ADMode ad_mode{ADMode::None};
     bool use_symbolic_tangent{false};
+    GeometrySensitivityOptions geometry_sensitivity{};
     JITOptions jit{};
     bool simplify_expressions{true};
     bool exploit_sparsity{true};
@@ -204,6 +236,20 @@ struct SymbolicOptions {
 	    PreviousSolutionRef,      ///< Previous solution value u^{n-k} by history index k>=1
 	    Coordinate,
 	    ReferenceCoordinate,
+        MeshDisplacement,
+        MeshVelocity,
+        MeshAcceleration,
+        CurrentCoordinate,
+        ReferencePhysicalCoordinate,
+        CurrentJacobian,
+        ReferenceJacobian,
+        CurrentJacobianDeterminant,
+        ReferenceJacobianDeterminant,
+        CurrentNormal,
+        ReferenceNormal,
+        CurrentMeasure,
+        ReferenceMeasure,
+        SurfaceJacobian,
 	    Time,
 	    TimeStep,
 	    EffectiveTimeStep,        ///< Effective dt implied by dt(·) stencil coefficient (falls back to TimeStep)
@@ -242,6 +288,8 @@ struct SymbolicOptions {
     DoubleContraction,
     OuterProduct,
     CrossProduct,
+    Pullback,
+    Pushforward,
     Power,
     Minimum,
     Maximum,
@@ -388,6 +436,8 @@ public:
 		    [[nodiscard]] virtual std::optional<int> historyIndex() const { return std::nullopt; }
 		    [[nodiscard]] virtual std::optional<std::uint32_t> stateOffsetBytes() const { return std::nullopt; }
 	    [[nodiscard]] virtual std::optional<int> eigenIndex() const { return std::nullopt; }
+    [[nodiscard]] virtual std::optional<GeometryConfiguration> fromConfiguration() const { return std::nullopt; }
+    [[nodiscard]] virtual std::optional<GeometryConfiguration> toConfiguration() const { return std::nullopt; }
 
     [[nodiscard]] virtual const ScalarCoefficient* scalarCoefficient() const { return nullptr; }
     [[nodiscard]] virtual const TimeScalarCoefficient* timeScalarCoefficient() const { return nullptr; }
@@ -474,6 +524,21 @@ public:
     static FormExpr previousSolution(int steps_back = 1);
 	    static FormExpr coordinate();
 	    static FormExpr referenceCoordinate();
+        static FormExpr meshDisplacement();
+        static FormExpr meshVelocity();
+        static FormExpr domainVelocity();
+        static FormExpr meshAcceleration();
+        static FormExpr currentCoordinate();
+        static FormExpr referenceCoordinatePhysical();
+        static FormExpr currentJacobian();
+        static FormExpr referenceJacobian();
+        static FormExpr currentJacobianDeterminant();
+        static FormExpr referenceJacobianDeterminant();
+        static FormExpr currentNormal();
+        static FormExpr referenceNormal();
+        static FormExpr currentMeasure();
+        static FormExpr referenceMeasure();
+        static FormExpr surfaceJacobian();
 	    static FormExpr time();
 	    static FormExpr timeStep();
 	    static FormExpr effectiveTimeStep();
@@ -523,6 +588,12 @@ public:
     [[nodiscard]] FormExpr doubleContraction(const FormExpr& rhs) const;
     [[nodiscard]] FormExpr outer(const FormExpr& rhs) const;
     [[nodiscard]] FormExpr cross(const FormExpr& rhs) const;
+    [[nodiscard]] static FormExpr pullback(FormExpr expr,
+                                           GeometryConfiguration from,
+                                           GeometryConfiguration to);
+    [[nodiscard]] static FormExpr pushforward(FormExpr expr,
+                                              GeometryConfiguration from,
+                                              GeometryConfiguration to);
     [[nodiscard]] FormExpr pow(const FormExpr& exponent) const;
     [[nodiscard]] FormExpr min(const FormExpr& rhs) const;
     [[nodiscard]] FormExpr max(const FormExpr& rhs) const;
@@ -658,6 +729,18 @@ inline FormExpr inner(const FormExpr& a, const FormExpr& b) { return a.inner(b);
 inline FormExpr dot(const FormExpr& a, const FormExpr& b) { return a.inner(b); }
 inline FormExpr outer(const FormExpr& a, const FormExpr& b) { return a.outer(b); }
 inline FormExpr cross(const FormExpr& a, const FormExpr& b) { return a.cross(b); }
+inline FormExpr pullback(FormExpr expr,
+                         GeometryConfiguration from,
+                         GeometryConfiguration to)
+{
+    return FormExpr::pullback(std::move(expr), from, to);
+}
+inline FormExpr pushforward(FormExpr expr,
+                            GeometryConfiguration from,
+                            GeometryConfiguration to)
+{
+    return FormExpr::pushforward(std::move(expr), from, to);
+}
 inline FormExpr dt(const FormExpr& a, int order = 1) { return a.dt(order); }
 inline FormExpr pow(const FormExpr& a, const FormExpr& b) { return a.pow(b); }
 inline FormExpr min(const FormExpr& a, const FormExpr& b) { return a.min(b); }

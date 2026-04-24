@@ -157,6 +157,20 @@ FormExpr rebuildWithIndexSubstitution(const std::shared_ptr<FormExprNode>& node,
         case FormExprType::PreviousSolutionRef:
         case FormExprType::Coordinate:
         case FormExprType::ReferenceCoordinate:
+        case FormExprType::MeshDisplacement:
+        case FormExprType::MeshVelocity:
+        case FormExprType::MeshAcceleration:
+        case FormExprType::CurrentCoordinate:
+        case FormExprType::ReferencePhysicalCoordinate:
+        case FormExprType::CurrentJacobian:
+        case FormExprType::ReferenceJacobian:
+        case FormExprType::CurrentJacobianDeterminant:
+        case FormExprType::ReferenceJacobianDeterminant:
+        case FormExprType::CurrentNormal:
+        case FormExprType::ReferenceNormal:
+        case FormExprType::CurrentMeasure:
+        case FormExprType::ReferenceMeasure:
+        case FormExprType::SurfaceJacobian:
         case FormExprType::Time:
         case FormExprType::TimeStep:
         case FormExprType::EffectiveTimeStep:
@@ -193,6 +207,16 @@ FormExpr rebuildWithIndexSubstitution(const std::shared_ptr<FormExprNode>& node,
     if (t == FormExprType::RestrictPlus) return rebuildUnary(node, assignment).plus();
     if (t == FormExprType::Jump) return rebuildUnary(node, assignment).jump();
     if (t == FormExprType::Average) return rebuildUnary(node, assignment).avg();
+    if (t == FormExprType::Pullback) {
+        return pullback(rebuildUnary(node, assignment),
+                        node->fromConfiguration().value_or(GeometryConfiguration::Reference),
+                        node->toConfiguration().value_or(GeometryConfiguration::Current));
+    }
+    if (t == FormExprType::Pushforward) {
+        return pushforward(rebuildUnary(node, assignment),
+                           node->fromConfiguration().value_or(GeometryConfiguration::Reference),
+                           node->toConfiguration().value_or(GeometryConfiguration::Current));
+    }
 
     if (t == FormExprType::Transpose) return rebuildUnary(node, assignment).transpose();
     if (t == FormExprType::Trace) return rebuildUnary(node, assignment).trace();

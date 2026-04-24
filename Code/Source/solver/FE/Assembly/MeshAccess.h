@@ -54,6 +54,7 @@ public:
     [[nodiscard]] std::uint64_t labelRevision() const override;
     [[nodiscard]] std::uint64_t activeConfigurationEpoch() const override;
     [[nodiscard]] std::uint64_t coordinateConfigurationKey() const override;
+    [[nodiscard]] bool cellIdsAreDense() const override { return true; }
 
     [[nodiscard]] bool isOwnedCell(GlobalIndex cell_id) const override;
     [[nodiscard]] ElementType getCellType(GlobalIndex cell_id) const override;
@@ -64,6 +65,11 @@ public:
     [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override;
 
     void getCellCoordinates(GlobalIndex cell_id,
+                            std::vector<std::array<Real, 3>>& coords) const override;
+
+    [[nodiscard]] bool supportsCoordinateFrame(CoordinateFrame frame) const override;
+    void getCellCoordinates(GlobalIndex cell_id,
+                            CoordinateFrame frame,
                             std::vector<std::array<Real, 3>>& coords) const override;
 
     [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex face_id,

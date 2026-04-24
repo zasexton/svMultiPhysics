@@ -199,6 +199,87 @@ TEST_F(AssemblyContextTest, CopyGeometryDataFromClonesPreparedGeometryState) {
     EXPECT_DOUBLE_EQ(dst.cellVolume(), 8.0);
 }
 
+TEST_F(AssemblyContextTest, MovingDomainDataAccessorsAreFrameExplicitAndFailLoudly) {
+    const std::vector<AssemblyContext::Point3D> quad_pts = {
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+    };
+    const std::vector<Real> weights = {0.5, 0.5};
+    ctx_.setQuadratureData(quad_pts, weights);
+
+    EXPECT_THROW((void)ctx_.meshDisplacement(0), std::logic_error);
+    EXPECT_THROW((void)ctx_.referencePhysicalPoint(0), std::logic_error);
+
+    const std::vector<AssemblyContext::Point3D> reference_points = {
+        {0.25, 0.25, 0.0},
+        {0.75, 0.25, 0.0},
+    };
+    const std::vector<AssemblyContext::Point3D> current_points = {
+        {1.25, 0.25, 0.0},
+        {1.75, 0.25, 0.0},
+    };
+
+    const AssemblyContext::Matrix3x3 I = {{{1.0, 0.0, 0.0},
+                                           {0.0, 1.0, 0.0},
+                                           {0.0, 0.0, 1.0}}};
+    const AssemblyContext::Matrix3x3 Jcur = {{{2.0, 0.0, 0.0},
+                                              {0.0, 3.0, 0.0},
+                                              {0.0, 0.0, 1.0}}};
+    const std::vector<AssemblyContext::Matrix3x3> reference_jacs = {I, I};
+    const std::vector<AssemblyContext::Matrix3x3> current_jacs = {Jcur, Jcur};
+    const std::vector<Real> reference_measures = {1.0, 1.0};
+    const std::vector<Real> current_measures = {6.0, 6.0};
+
+    ctx_.setReferenceGeometry(reference_points, reference_jacs, reference_jacs, reference_measures);
+    ctx_.setCurrentGeometry(current_points, current_jacs, reference_jacs, current_measures);
+    ctx_.setConfigurationTransforms(current_jacs);
+    ctx_.setSurfaceJacobians(current_jacs);
+
+    const std::vector<AssemblyContext::Vector3D> normals = {
+        {0.0, 1.0, 0.0},
+        {0.0, 1.0, 0.0},
+    };
+    ctx_.setReferenceNormals(normals);
+    ctx_.setCurrentNormals(normals);
+
+    const std::vector<AssemblyContext::Vector3D> displacements = {
+        {1.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+    };
+    const std::vector<AssemblyContext::Vector3D> velocities = {
+        {0.0, 2.0, 0.0},
+        {0.0, 2.0, 0.0},
+    };
+    const std::vector<AssemblyContext::Vector3D> accelerations = {
+        {0.0, 0.0, 3.0},
+        {0.0, 0.0, 3.0},
+    };
+    ctx_.setMeshDisplacements(displacements);
+    ctx_.setMeshVelocities(velocities);
+    ctx_.setMeshAccelerations(accelerations);
+    ctx_.setPreviousCoordinates(reference_points);
+
+    EXPECT_DOUBLE_EQ(ctx_.referencePhysicalPoint(0)[0], 0.25);
+    EXPECT_DOUBLE_EQ(ctx_.currentPhysicalPoint(1)[0], 1.75);
+    EXPECT_DOUBLE_EQ(ctx_.currentJacobian(0)[1][1], 3.0);
+    EXPECT_DOUBLE_EQ(ctx_.currentMeasure(1), 6.0);
+    EXPECT_DOUBLE_EQ(ctx_.configurationTransform(0)[0][0], 2.0);
+    EXPECT_DOUBLE_EQ(ctx_.surfaceJacobian(0)[1][1], 3.0);
+    EXPECT_DOUBLE_EQ(ctx_.referenceNormal(0)[1], 1.0);
+    EXPECT_DOUBLE_EQ(ctx_.currentNormal(1)[1], 1.0);
+    EXPECT_DOUBLE_EQ(ctx_.meshDisplacement(0)[0], 1.0);
+    EXPECT_DOUBLE_EQ(ctx_.meshVelocity(1)[1], 2.0);
+    EXPECT_DOUBLE_EQ(ctx_.meshAcceleration(0)[2], 3.0);
+    EXPECT_DOUBLE_EQ(ctx_.previousCoordinate(1)[0], 0.75);
+
+    EXPECT_THROW((void)ctx_.currentPhysicalPoint(2), std::out_of_range);
+
+    spaces::H1Space space(ElementType::Quad4, /*order=*/1);
+    ctx_.configure(/*cell_id=*/0, space, space, RequiredData::None);
+    EXPECT_TRUE(ctx_.meshDisplacements().empty());
+    EXPECT_THROW((void)ctx_.meshDisplacement(0), std::logic_error);
+}
+
 TEST_F(AssemblyContextTest, SetBasisData) {
     std::vector<AssemblyContext::Point3D> quad_pts = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}};
     std::vector<Real> weights = {0.5, 0.5};

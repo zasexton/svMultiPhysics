@@ -687,6 +687,7 @@ endif()
 set(FE_GEOMETRY_HEADERS
     Geometry/GeometryMapping.h
     Geometry/GeometryFrameUtils.h
+    Geometry/FrameGeometry.h
     Geometry/LinearMapping.h
     Geometry/IsoparametricMapping.h
     Geometry/SubparametricMapping.h
@@ -703,6 +704,7 @@ set(FE_GEOMETRY_HEADERS
 )
 
 set(FE_GEOMETRY_SOURCES
+    Geometry/FrameGeometry.cpp
     Geometry/LinearMapping.cpp
     Geometry/IsoparametricMapping.cpp
     Geometry/InverseMapping.cpp
@@ -830,6 +832,19 @@ set(FE_POSTPROCESSING_SOURCES
     PostProcessing/DerivedResultEvaluator.cpp
     PostProcessing/DerivedResultOutput.cpp
 )
+
+if(FE_WITH_MESH)
+    set(FE_MOVINGMESH_HEADERS
+        MovingMesh/GeometryRegularizationBackend.h
+    )
+
+    set(FE_MOVINGMESH_SOURCES
+        MovingMesh/GeometryRegularizationBackend.cpp
+    )
+else()
+    set(FE_MOVINGMESH_HEADERS)
+    set(FE_MOVINGMESH_SOURCES)
+endif()
 
 # Forms sources (requires FE/Assembly; used by SymbolicAssembler)
 set(FE_FORMS_HEADERS
@@ -1146,6 +1161,7 @@ set(FE_ALL_HEADERS
     ${FE_CONSTRAINTS_HEADERS}
     ${FE_ANALYSIS_HEADERS}
     ${FE_GEOMETRY_HEADERS}
+    ${FE_MOVINGMESH_HEADERS}
     ${FE_SPARSITY_HEADERS}
 )
 
@@ -1159,6 +1175,7 @@ set(FE_ALL_SOURCES
     ${FE_CONSTRAINTS_SOURCES}
     ${FE_ANALYSIS_SOURCES}
     ${FE_GEOMETRY_SOURCES}
+    ${FE_MOVINGMESH_SOURCES}
     ${FE_SPARSITY_SOURCES}
 )
 
@@ -1807,6 +1824,22 @@ if(FE_BUILD_TESTS)
         add_test(NAME FE_Core_Tests COMMAND test_fe_core)
     endif()
 
+    # MovingMesh module tests (physics-neutral FE implementation of Mesh motion backends)
+    if(FE_WITH_MESH AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/MovingMesh/test_main.cpp)
+        set(FE_MOVINGMESH_TEST_SOURCES
+            Tests/Unit/MovingMesh/test_FEMeshMotionBackend.cpp
+            Tests/Unit/MovingMesh/test_main.cpp
+        )
+        add_executable(test_fe_movingmesh ${FE_MOVINGMESH_TEST_SOURCES})
+        _svmp_fe_target_enable_warnings(test_fe_movingmesh)
+        target_link_libraries(test_fe_movingmesh
+            PRIVATE
+                svfe
+                ${GTEST_LIBRARIES}
+        )
+        add_test(NAME FE_MovingMesh_Tests COMMAND test_fe_movingmesh)
+    endif()
+
     # Quadrature module tests
     set(FE_QUAD_TEST_SOURCES
         Tests/Unit/Quadrature/test_GaussQuadrature.cpp
@@ -1867,6 +1900,7 @@ if(FE_BUILD_TESTS)
     # Geometry module tests
     set(FE_GEOMETRY_TEST_SOURCES
         Tests/Unit/Geometry/test_LinearMapping.cpp
+        Tests/Unit/Geometry/test_FrameGeometry.cpp
         Tests/Unit/Geometry/test_IsoparametricMapping.cpp
         Tests/Unit/Geometry/test_JacobianCacheGeometryQuadrature.cpp
         Tests/Unit/Geometry/test_MetricSurfacePushForward.cpp
@@ -2391,6 +2425,23 @@ if(FE_BUILD_TESTS)
 
     # Add MPI tests if MPI is enabled
     if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
+        if(FE_WITH_MESH AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/MovingMesh/test_mainMPI.cpp)
+            set(FE_MOVINGMESH_MPI_TEST_SOURCES
+                Tests/Unit/MovingMesh/test_FEMeshMotionBackendMPI.cpp
+                Tests/Unit/MovingMesh/test_mainMPI.cpp
+            )
+            add_executable(test_fe_movingmesh_mpi ${FE_MOVINGMESH_MPI_TEST_SOURCES})
+            _svmp_fe_target_enable_warnings(test_fe_movingmesh_mpi)
+            if(TARGET GTest::gtest)
+                target_link_libraries(test_fe_movingmesh_mpi PRIVATE svfe GTest::gtest)
+            else()
+                set(_fe_movingmesh_mpi_gtest_libs ${GTEST_LIBRARIES})
+                list(REMOVE_ITEM _fe_movingmesh_mpi_gtest_libs gtest_main GTest::gtest_main)
+                target_link_libraries(test_fe_movingmesh_mpi PRIVATE svfe ${_fe_movingmesh_mpi_gtest_libs})
+            endif()
+            add_fe_mpi_test(test_fe_movingmesh_mpi 2)
+        endif()
+
         file(GLOB FE_MPI_TEST_SOURCES
             Tests/Unit/Dofs/test_*MPI*.cpp
 	        )

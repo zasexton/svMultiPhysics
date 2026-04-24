@@ -898,6 +898,20 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
             case FormExprType::PreviousSolutionRef:
             case FormExprType::Coordinate:
             case FormExprType::ReferenceCoordinate:
+            case FormExprType::MeshDisplacement:
+            case FormExprType::MeshVelocity:
+            case FormExprType::MeshAcceleration:
+            case FormExprType::CurrentCoordinate:
+            case FormExprType::ReferencePhysicalCoordinate:
+            case FormExprType::CurrentJacobian:
+            case FormExprType::ReferenceJacobian:
+            case FormExprType::CurrentJacobianDeterminant:
+            case FormExprType::ReferenceJacobianDeterminant:
+            case FormExprType::CurrentNormal:
+            case FormExprType::ReferenceNormal:
+            case FormExprType::CurrentMeasure:
+            case FormExprType::ReferenceMeasure:
+            case FormExprType::SurfaceJacobian:
             case FormExprType::Time:
             case FormExprType::TimeStep:
             case FormExprType::EffectiveTimeStep:
@@ -1062,6 +1076,20 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 const auto a = diff1(0);
                 out.primal = a.primal.avg();
                 out.deriv = a.deriv.avg();
+                break;
+            }
+            case FormExprType::Pullback:
+            case FormExprType::Pushforward: {
+                const auto a = diff1(0);
+                const auto from = node->fromConfiguration().value_or(GeometryConfiguration::Reference);
+                const auto to = node->toConfiguration().value_or(GeometryConfiguration::Current);
+                if (node->type() == FormExprType::Pullback) {
+                    out.primal = pullback(a.primal, from, to);
+                    out.deriv = pullback(a.deriv, from, to);
+                } else {
+                    out.primal = pushforward(a.primal, from, to);
+                    out.deriv = pushforward(a.deriv, from, to);
+                }
                 break;
             }
 
@@ -1750,6 +1778,20 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
             case FormExprType::PreviousSolutionRef:
             case FormExprType::Coordinate:
             case FormExprType::ReferenceCoordinate:
+            case FormExprType::MeshDisplacement:
+            case FormExprType::MeshVelocity:
+            case FormExprType::MeshAcceleration:
+            case FormExprType::CurrentCoordinate:
+            case FormExprType::ReferencePhysicalCoordinate:
+            case FormExprType::CurrentJacobian:
+            case FormExprType::ReferenceJacobian:
+            case FormExprType::CurrentJacobianDeterminant:
+            case FormExprType::ReferenceJacobianDeterminant:
+            case FormExprType::CurrentNormal:
+            case FormExprType::ReferenceNormal:
+            case FormExprType::CurrentMeasure:
+            case FormExprType::ReferenceMeasure:
+            case FormExprType::SurfaceJacobian:
             case FormExprType::Normal:
             case FormExprType::Jacobian:
             case FormExprType::JacobianInverse:
@@ -1864,6 +1906,20 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                 const auto a = diff1(0);
                 out.primal = a.primal.avg();
                 out.deriv = a.deriv.avg();
+                break;
+            }
+            case FormExprType::Pullback:
+            case FormExprType::Pushforward: {
+                const auto a = diff1(0);
+                const auto from = node->fromConfiguration().value_or(GeometryConfiguration::Reference);
+                const auto to = node->toConfiguration().value_or(GeometryConfiguration::Current);
+                if (node->type() == FormExprType::Pullback) {
+                    out.primal = pullback(a.primal, from, to);
+                    out.deriv = pullback(a.deriv, from, to);
+                } else {
+                    out.primal = pushforward(a.primal, from, to);
+                    out.deriv = pushforward(a.deriv, from, to);
+                }
                 break;
             }
 

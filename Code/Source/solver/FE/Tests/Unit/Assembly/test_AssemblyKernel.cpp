@@ -16,6 +16,8 @@
 #include "Assembly/AssemblyContext.h"
 
 #include <cmath>
+#include <cstdint>
+#include <type_traits>
 
 namespace svmp {
 namespace FE {
@@ -280,6 +282,34 @@ TEST(RequiredDataTest, StandardPreset) {
     EXPECT_TRUE(hasFlag(standard, RequiredData::JacobianDets));
     EXPECT_TRUE(hasFlag(standard, RequiredData::BasisValues));
     EXPECT_TRUE(hasFlag(standard, RequiredData::BasisGradients));
+}
+
+TEST(RequiredDataTest, MovingDomainBitsUseWideMask) {
+    using Mask = std::underlying_type_t<RequiredData>;
+    static_assert(sizeof(Mask) >= sizeof(std::uint64_t),
+                  "Moving-domain RequiredData flags require a 64-bit mask");
+
+    const RequiredData moving =
+        RequiredData::MeshDisplacement |
+        RequiredData::MeshVelocity |
+        RequiredData::ReferencePhysicalPoints |
+        RequiredData::CurrentPhysicalPoints |
+        RequiredData::ReferenceJacobians |
+        RequiredData::CurrentJacobians |
+        RequiredData::ReferenceMeasures |
+        RequiredData::CurrentMeasures |
+        RequiredData::ConfigurationTransforms;
+
+    EXPECT_TRUE(hasFlag(moving, RequiredData::MeshDisplacement));
+    EXPECT_TRUE(hasFlag(moving, RequiredData::MeshVelocity));
+    EXPECT_TRUE(hasFlag(moving, RequiredData::ReferencePhysicalPoints));
+    EXPECT_TRUE(hasFlag(moving, RequiredData::CurrentPhysicalPoints));
+    EXPECT_TRUE(hasFlag(moving, RequiredData::ReferenceJacobians));
+    EXPECT_TRUE(hasFlag(moving, RequiredData::CurrentJacobians));
+    EXPECT_TRUE(hasFlag(moving, RequiredData::ReferenceMeasures));
+    EXPECT_TRUE(hasFlag(moving, RequiredData::CurrentMeasures));
+    EXPECT_TRUE(hasFlag(moving, RequiredData::ConfigurationTransforms));
+    EXPECT_NE(static_cast<Mask>(RequiredData::ConfigurationTransforms), Mask{0});
 }
 
 // ============================================================================

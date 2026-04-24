@@ -770,6 +770,7 @@ assembly::AssemblyResult assembleOperator(
         }
         assembler.setFieldSolutionAccess(access);
     }
+    assembler.setMeshMotionFieldAccess(system.meshMotionFieldAccess());
     assembler.setTimeIntegrationContext(state.time_integration);
 
     int required_history = 0;

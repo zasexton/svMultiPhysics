@@ -329,6 +329,32 @@ struct ABIV3 {
     static constexpr std::size_t side_coupled_aux_off = offsetof(assembly::jit::KernelSideArgsV6, coupled_aux);
     static constexpr std::size_t side_auxiliary_inputs_off = offsetof(assembly::jit::KernelSideArgsV6, auxiliary_inputs);
     static constexpr std::size_t side_auxiliary_outputs_off = offsetof(assembly::jit::KernelSideArgsV6, auxiliary_outputs);
+    static constexpr std::size_t side_reference_physical_points_xyz_off =
+        offsetof(assembly::jit::KernelSideArgsV6, reference_physical_points_xyz);
+    static constexpr std::size_t side_current_physical_points_xyz_off =
+        offsetof(assembly::jit::KernelSideArgsV6, current_physical_points_xyz);
+    static constexpr std::size_t side_reference_jacobians_off =
+        offsetof(assembly::jit::KernelSideArgsV6, reference_jacobians);
+    static constexpr std::size_t side_current_jacobians_off =
+        offsetof(assembly::jit::KernelSideArgsV6, current_jacobians);
+    static constexpr std::size_t side_reference_normals_xyz_off =
+        offsetof(assembly::jit::KernelSideArgsV6, reference_normals_xyz);
+    static constexpr std::size_t side_current_normals_xyz_off =
+        offsetof(assembly::jit::KernelSideArgsV6, current_normals_xyz);
+    static constexpr std::size_t side_reference_measures_off =
+        offsetof(assembly::jit::KernelSideArgsV6, reference_measures);
+    static constexpr std::size_t side_current_measures_off =
+        offsetof(assembly::jit::KernelSideArgsV6, current_measures);
+    static constexpr std::size_t side_surface_jacobians_off =
+        offsetof(assembly::jit::KernelSideArgsV6, surface_jacobians);
+    static constexpr std::size_t side_configuration_transforms_off =
+        offsetof(assembly::jit::KernelSideArgsV6, configuration_transforms);
+    static constexpr std::size_t side_mesh_displacements_xyz_off =
+        offsetof(assembly::jit::KernelSideArgsV6, mesh_displacements_xyz);
+    static constexpr std::size_t side_mesh_velocities_xyz_off =
+        offsetof(assembly::jit::KernelSideArgsV6, mesh_velocities_xyz);
+    static constexpr std::size_t side_mesh_accelerations_xyz_off =
+        offsetof(assembly::jit::KernelSideArgsV6, mesh_accelerations_xyz);
 
     static constexpr std::size_t side_time_off = offsetof(assembly::jit::KernelSideArgsV6, time);
     static constexpr std::size_t side_dt_off = offsetof(assembly::jit::KernelSideArgsV6, dt);
@@ -662,6 +688,10 @@ struct ShapeInferenceResult {
             case FormExprType::FacetArea:
             case FormExprType::CellDomainId:
             case FormExprType::JacobianDeterminant:
+            case FormExprType::CurrentJacobianDeterminant:
+            case FormExprType::ReferenceJacobianDeterminant:
+            case FormExprType::CurrentMeasure:
+            case FormExprType::ReferenceMeasure:
                 out.shapes[idx] = scalarShape();
                 break;
 
@@ -782,6 +812,13 @@ struct ShapeInferenceResult {
             case FormExprType::Coordinate:
             case FormExprType::ReferenceCoordinate:
             case FormExprType::Normal:
+            case FormExprType::MeshDisplacement:
+            case FormExprType::MeshVelocity:
+            case FormExprType::MeshAcceleration:
+            case FormExprType::CurrentCoordinate:
+            case FormExprType::ReferencePhysicalCoordinate:
+            case FormExprType::CurrentNormal:
+            case FormExprType::ReferenceNormal:
                 out.shapes[idx] = vectorShape(dim);
                 break;
 
@@ -794,8 +831,20 @@ struct ShapeInferenceResult {
 
             case FormExprType::Jacobian:
             case FormExprType::JacobianInverse:
+            case FormExprType::CurrentJacobian:
+            case FormExprType::ReferenceJacobian:
+            case FormExprType::SurfaceJacobian:
                 out.shapes[idx] = matrixShape(dim, dim);
                 break;
+
+            case FormExprType::Pullback:
+            case FormExprType::Pushforward: {
+                if (op.child_count != 1u) {
+                    return fail("LLVMGen: frame transform expects exactly 1 child");
+                }
+                out.shapes[idx] = childAt(0);
+                break;
+            }
 
             case FormExprType::TestFunction:
             case FormExprType::TrialFunction:
@@ -2269,6 +2318,19 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             llvm::Value* coupled_aux{nullptr};
             llvm::Value* auxiliary_inputs{nullptr};
             llvm::Value* auxiliary_outputs{nullptr};
+            llvm::Value* reference_physical_points_xyz{nullptr};
+            llvm::Value* current_physical_points_xyz{nullptr};
+            llvm::Value* reference_jacobians{nullptr};
+            llvm::Value* current_jacobians{nullptr};
+            llvm::Value* reference_normals_xyz{nullptr};
+            llvm::Value* current_normals_xyz{nullptr};
+            llvm::Value* reference_measures{nullptr};
+            llvm::Value* current_measures{nullptr};
+            llvm::Value* surface_jacobians{nullptr};
+            llvm::Value* configuration_transforms{nullptr};
+            llvm::Value* mesh_displacements_xyz{nullptr};
+            llvm::Value* mesh_velocities_xyz{nullptr};
+            llvm::Value* mesh_accelerations_xyz{nullptr};
 
             llvm::Value* time{nullptr};
             llvm::Value* dt{nullptr};
@@ -2357,6 +2419,19 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             s.coupled_aux = null_f64_ptr;
             s.auxiliary_inputs = null_f64_ptr;
             s.auxiliary_outputs = null_f64_ptr;
+            s.reference_physical_points_xyz = null_f64_ptr;
+            s.current_physical_points_xyz = null_f64_ptr;
+            s.reference_jacobians = null_f64_ptr;
+            s.current_jacobians = null_f64_ptr;
+            s.reference_normals_xyz = null_f64_ptr;
+            s.current_normals_xyz = null_f64_ptr;
+            s.reference_measures = null_f64_ptr;
+            s.current_measures = null_f64_ptr;
+            s.surface_jacobians = null_f64_ptr;
+            s.configuration_transforms = null_f64_ptr;
+            s.mesh_displacements_xyz = null_f64_ptr;
+            s.mesh_velocities_xyz = null_f64_ptr;
+            s.mesh_accelerations_xyz = null_f64_ptr;
 
             s.time = f64c(0.0);
             s.dt = f64c(0.0);
@@ -2620,6 +2695,19 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             s.coupled_aux = loadPtr(side_ptr, ABIV3::side_coupled_aux_off);
             s.auxiliary_inputs = loadPtr(side_ptr, ABIV3::side_auxiliary_inputs_off);
             s.auxiliary_outputs = loadPtr(side_ptr, ABIV3::side_auxiliary_outputs_off);
+            s.reference_physical_points_xyz = loadPtr(side_ptr, ABIV3::side_reference_physical_points_xyz_off);
+            s.current_physical_points_xyz = loadPtr(side_ptr, ABIV3::side_current_physical_points_xyz_off);
+            s.reference_jacobians = loadPtr(side_ptr, ABIV3::side_reference_jacobians_off);
+            s.current_jacobians = loadPtr(side_ptr, ABIV3::side_current_jacobians_off);
+            s.reference_normals_xyz = loadPtr(side_ptr, ABIV3::side_reference_normals_xyz_off);
+            s.current_normals_xyz = loadPtr(side_ptr, ABIV3::side_current_normals_xyz_off);
+            s.reference_measures = loadPtr(side_ptr, ABIV3::side_reference_measures_off);
+            s.current_measures = loadPtr(side_ptr, ABIV3::side_current_measures_off);
+            s.surface_jacobians = loadPtr(side_ptr, ABIV3::side_surface_jacobians_off);
+            s.configuration_transforms = loadPtr(side_ptr, ABIV3::side_configuration_transforms_off);
+            s.mesh_displacements_xyz = loadPtr(side_ptr, ABIV3::side_mesh_displacements_xyz_off);
+            s.mesh_velocities_xyz = loadPtr(side_ptr, ABIV3::side_mesh_velocities_xyz_off);
+            s.mesh_accelerations_xyz = loadPtr(side_ptr, ABIV3::side_mesh_accelerations_xyz_off);
 
             s.time = loadF64(side_ptr, ABIV3::side_time_off);
             s.dt = loadF64(side_ptr, ABIV3::side_dt_off);
@@ -2945,6 +3033,21 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(i8_ptr));
 	                    side_single.coupled_integrals = null_f64_ptr;
 	                    side_single.coupled_aux = null_f64_ptr;
+                        side_single.auxiliary_inputs = null_f64_ptr;
+                        side_single.auxiliary_outputs = null_f64_ptr;
+                        side_single.reference_physical_points_xyz = null_f64_ptr;
+                        side_single.current_physical_points_xyz = null_f64_ptr;
+                        side_single.reference_jacobians = null_f64_ptr;
+                        side_single.current_jacobians = null_f64_ptr;
+                        side_single.reference_normals_xyz = null_f64_ptr;
+                        side_single.current_normals_xyz = null_f64_ptr;
+                        side_single.reference_measures = null_f64_ptr;
+                        side_single.current_measures = null_f64_ptr;
+                        side_single.surface_jacobians = null_f64_ptr;
+                        side_single.configuration_transforms = null_f64_ptr;
+                        side_single.mesh_displacements_xyz = null_f64_ptr;
+                        side_single.mesh_velocities_xyz = null_f64_ptr;
+                        side_single.mesh_accelerations_xyz = null_f64_ptr;
 	                    side_single.cell_domain_id = builder.getInt32(0);
 	                    side_single.facet_area = f64c(0.0);
 	                    side_single.material_state_old_base = null_f64_ptr;
@@ -3062,6 +3165,19 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        registerSimdPtr(side_single.coupled_aux, ABIV3::side_coupled_aux_off);
 	                        registerSimdPtr(side_single.auxiliary_inputs, ABIV3::side_auxiliary_inputs_off);
 	                        registerSimdPtr(side_single.auxiliary_outputs, ABIV3::side_auxiliary_outputs_off);
+                            registerSimdPtr(side_single.reference_physical_points_xyz, ABIV3::side_reference_physical_points_xyz_off);
+                            registerSimdPtr(side_single.current_physical_points_xyz, ABIV3::side_current_physical_points_xyz_off);
+                            registerSimdPtr(side_single.reference_jacobians, ABIV3::side_reference_jacobians_off);
+                            registerSimdPtr(side_single.current_jacobians, ABIV3::side_current_jacobians_off);
+                            registerSimdPtr(side_single.reference_normals_xyz, ABIV3::side_reference_normals_xyz_off);
+                            registerSimdPtr(side_single.current_normals_xyz, ABIV3::side_current_normals_xyz_off);
+                            registerSimdPtr(side_single.reference_measures, ABIV3::side_reference_measures_off);
+                            registerSimdPtr(side_single.current_measures, ABIV3::side_current_measures_off);
+                            registerSimdPtr(side_single.surface_jacobians, ABIV3::side_surface_jacobians_off);
+                            registerSimdPtr(side_single.configuration_transforms, ABIV3::side_configuration_transforms_off);
+                            registerSimdPtr(side_single.mesh_displacements_xyz, ABIV3::side_mesh_displacements_xyz_off);
+                            registerSimdPtr(side_single.mesh_velocities_xyz, ABIV3::side_mesh_velocities_xyz_off);
+                            registerSimdPtr(side_single.mesh_accelerations_xyz, ABIV3::side_mesh_accelerations_xyz_off);
 
 	                        // Per-element material state
 	                        registerSimdPtr(side_single.material_state_old_base, ABIV3::side_material_state_old_base_off);
@@ -5873,10 +5989,38 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         values[op_idx] = loadXYZDim(side.quad_points_xyz, q_index, shape.dims[0]);
                         break;
 
+                    case FormExprType::MeshDisplacement:
+                        values[op_idx] = loadXYZDim(side.mesh_displacements_xyz, q_index, shape.dims[0]);
+                        break;
+
+                    case FormExprType::MeshVelocity:
+                        values[op_idx] = loadXYZDim(side.mesh_velocities_xyz, q_index, shape.dims[0]);
+                        break;
+
+                    case FormExprType::MeshAcceleration:
+                        values[op_idx] = loadXYZDim(side.mesh_accelerations_xyz, q_index, shape.dims[0]);
+                        break;
+
+                    case FormExprType::CurrentCoordinate:
+                        values[op_idx] = loadXYZDim(side.current_physical_points_xyz, q_index, shape.dims[0]);
+                        break;
+
+                    case FormExprType::ReferencePhysicalCoordinate:
+                        values[op_idx] = loadXYZDim(side.reference_physical_points_xyz, q_index, shape.dims[0]);
+                        break;
+
                     case FormExprType::Normal:
                         values[op_idx] =
                             loadXYZDimFromSide(side, side.normals_xyz, q_index, shape.dims[0],
                                                side.interleaved_qpoint_geometry_normal_offset);
+                        break;
+
+                    case FormExprType::CurrentNormal:
+                        values[op_idx] = loadXYZDim(side.current_normals_xyz, q_index, shape.dims[0]);
+                        break;
+
+                    case FormExprType::ReferenceNormal:
+                        values[op_idx] = loadXYZDim(side.reference_normals_xyz, q_index, shape.dims[0]);
                         break;
 
                     case FormExprType::Jacobian:
@@ -5897,6 +6041,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                                side.interleaved_qpoint_geometry_inverse_jacobian_offset);
                         break;
 
+                    case FormExprType::CurrentJacobian:
+                        values[op_idx] = loadMatDimFromQ(side.current_jacobians, q_index, shape.dims[0]);
+                        break;
+
+                    case FormExprType::ReferenceJacobian:
+                        values[op_idx] = loadMatDimFromQ(side.reference_jacobians, q_index, shape.dims[0]);
+                        break;
+
+                    case FormExprType::SurfaceJacobian:
+                        values[op_idx] = loadMatDimFromQ(side.surface_jacobians, q_index, shape.dims[0]);
+                        break;
+
                     case FormExprType::Identity: {
                         CodeValue out = makeZero(shape);
                         const auto n = static_cast<std::size_t>(shape.dims[0]);
@@ -5913,6 +6069,26 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         values[op_idx] =
                             makeScalar(loadScalarFromSide(side, side.jacobian_dets, det_q,
                                                           side.interleaved_qpoint_geometry_det_offset));
+                        break;
+                    }
+
+                    case FormExprType::CurrentJacobianDeterminant:
+                    case FormExprType::CurrentMeasure:
+                        values[op_idx] = makeScalar(loadRealPtrAt(side.current_measures, q_index));
+                        break;
+
+                    case FormExprType::ReferenceJacobianDeterminant:
+                    case FormExprType::ReferenceMeasure:
+                        values[op_idx] = makeScalar(loadRealPtrAt(side.reference_measures, q_index));
+                        break;
+
+                    case FormExprType::Pullback:
+                    case FormExprType::Pushforward: {
+                        if (op.child_count != 1u) {
+                            throw std::runtime_error("LLVMGen: frame transform expects exactly 1 child");
+                        }
+                        const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
+                        values[op_idx] = values[child_idx];
                         break;
                     }
 
@@ -8713,10 +8889,31 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     case FormExprType::ReferenceCoordinate:
                         values[op_idx] = loadXYZDim(side.quad_points_xyz, q_index, shape.dims[0]);
                         break;
+                    case FormExprType::MeshDisplacement:
+                        values[op_idx] = loadXYZDim(side.mesh_displacements_xyz, q_index, shape.dims[0]);
+                        break;
+                    case FormExprType::MeshVelocity:
+                        values[op_idx] = loadXYZDim(side.mesh_velocities_xyz, q_index, shape.dims[0]);
+                        break;
+                    case FormExprType::MeshAcceleration:
+                        values[op_idx] = loadXYZDim(side.mesh_accelerations_xyz, q_index, shape.dims[0]);
+                        break;
+                    case FormExprType::CurrentCoordinate:
+                        values[op_idx] = loadXYZDim(side.current_physical_points_xyz, q_index, shape.dims[0]);
+                        break;
+                    case FormExprType::ReferencePhysicalCoordinate:
+                        values[op_idx] = loadXYZDim(side.reference_physical_points_xyz, q_index, shape.dims[0]);
+                        break;
                     case FormExprType::Normal:
                         values[op_idx] =
                             loadXYZDimFromSide(side, side.normals_xyz, q_index, shape.dims[0],
                                                side.interleaved_qpoint_geometry_normal_offset);
+                        break;
+                    case FormExprType::CurrentNormal:
+                        values[op_idx] = loadXYZDim(side.current_normals_xyz, q_index, shape.dims[0]);
+                        break;
+                    case FormExprType::ReferenceNormal:
+                        values[op_idx] = loadXYZDim(side.reference_normals_xyz, q_index, shape.dims[0]);
                         break;
                     case FormExprType::Jacobian:
                         values[op_idx] =
@@ -8732,6 +8929,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                                shape.dims[0],
                                                side.interleaved_qpoint_geometry_inverse_jacobian_offset);
                         break;
+                    case FormExprType::CurrentJacobian:
+                        values[op_idx] = loadMatDimFromQ(side.current_jacobians, q_index, shape.dims[0]);
+                        break;
+                    case FormExprType::ReferenceJacobian:
+                        values[op_idx] = loadMatDimFromQ(side.reference_jacobians, q_index, shape.dims[0]);
+                        break;
+                    case FormExprType::SurfaceJacobian:
+                        values[op_idx] = loadMatDimFromQ(side.surface_jacobians, q_index, shape.dims[0]);
+                        break;
                     case FormExprType::Identity: {
                         CodeValue out = makeZero(shape);
                         const auto n = static_cast<std::size_t>(shape.dims[0]);
@@ -8745,6 +8951,23 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         values[op_idx] =
                             makeScalar(loadScalarFromSide(side, side.jacobian_dets, q_index,
                                                           side.interleaved_qpoint_geometry_det_offset));
+                        break;
+                    }
+                    case FormExprType::CurrentJacobianDeterminant:
+                    case FormExprType::CurrentMeasure:
+                        values[op_idx] = makeScalar(loadRealPtrAt(side.current_measures, q_index));
+                        break;
+                    case FormExprType::ReferenceJacobianDeterminant:
+                    case FormExprType::ReferenceMeasure:
+                        values[op_idx] = makeScalar(loadRealPtrAt(side.reference_measures, q_index));
+                        break;
+                    case FormExprType::Pullback:
+                    case FormExprType::Pushforward: {
+                        if (op.child_count != 1u) {
+                            throw std::runtime_error("LLVMGen: frame transform expects exactly 1 child");
+                        }
+                        const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
+                        values[op_idx] = values[child_idx];
                         break;
                     }
                     case FormExprType::PreviousSolutionRef: {
@@ -10435,6 +10658,31 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        values_plus[op_idx] = loadXYZDim(side_plus.quad_points_xyz, q_index, shape.dims[0]);
 	                        break;
 
+                        case FormExprType::MeshDisplacement:
+                            values_minus[op_idx] = loadXYZDim(side_minus.mesh_displacements_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.mesh_displacements_xyz, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::MeshVelocity:
+                            values_minus[op_idx] = loadXYZDim(side_minus.mesh_velocities_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.mesh_velocities_xyz, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::MeshAcceleration:
+                            values_minus[op_idx] = loadXYZDim(side_minus.mesh_accelerations_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.mesh_accelerations_xyz, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::CurrentCoordinate:
+                            values_minus[op_idx] = loadXYZDim(side_minus.current_physical_points_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.current_physical_points_xyz, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::ReferencePhysicalCoordinate:
+                            values_minus[op_idx] = loadXYZDim(side_minus.reference_physical_points_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.reference_physical_points_xyz, q_index, shape.dims[0]);
+                            break;
+
 	                    case FormExprType::Normal:
 	                        values_minus[op_idx] =
 	                            loadXYZDimFromSide(side_minus, side_minus.normals_xyz, q_index, shape.dims[0],
@@ -10443,6 +10691,16 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            loadXYZDimFromSide(side_plus, side_plus.normals_xyz, q_index, shape.dims[0],
 	                                               side_plus.interleaved_qpoint_geometry_normal_offset);
 	                        break;
+
+                        case FormExprType::CurrentNormal:
+                            values_minus[op_idx] = loadXYZDim(side_minus.current_normals_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.current_normals_xyz, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::ReferenceNormal:
+                            values_minus[op_idx] = loadXYZDim(side_minus.reference_normals_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.reference_normals_xyz, q_index, shape.dims[0]);
+                            break;
 
 	                    case FormExprType::Jacobian:
 	                        values_minus[op_idx] =
@@ -10462,6 +10720,21 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                               side_plus.interleaved_qpoint_geometry_inverse_jacobian_offset);
 	                        break;
 
+                        case FormExprType::CurrentJacobian:
+                            values_minus[op_idx] = loadMatDimFromQ(side_minus.current_jacobians, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadMatDimFromQ(side_plus.current_jacobians, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::ReferenceJacobian:
+                            values_minus[op_idx] = loadMatDimFromQ(side_minus.reference_jacobians, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadMatDimFromQ(side_plus.reference_jacobians, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::SurfaceJacobian:
+                            values_minus[op_idx] = loadMatDimFromQ(side_minus.surface_jacobians, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadMatDimFromQ(side_plus.surface_jacobians, q_index, shape.dims[0]);
+                            break;
+
                     case FormExprType::Identity: {
                         CodeValue out = makeZero(shape);
                         const auto n = static_cast<std::size_t>(shape.dims[0]);
@@ -10480,6 +10753,29 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         values_plus[op_idx] =
                             makeScalar(loadScalarFromSide(side_plus, side_plus.jacobian_dets, q_index,
                                                           side_plus.interleaved_qpoint_geometry_det_offset));
+                        break;
+                    }
+
+                    case FormExprType::CurrentJacobianDeterminant:
+                    case FormExprType::CurrentMeasure:
+                        values_minus[op_idx] = makeScalar(loadRealPtrAt(side_minus.current_measures, q_index));
+                        values_plus[op_idx] = makeScalar(loadRealPtrAt(side_plus.current_measures, q_index));
+                        break;
+
+                    case FormExprType::ReferenceJacobianDeterminant:
+                    case FormExprType::ReferenceMeasure:
+                        values_minus[op_idx] = makeScalar(loadRealPtrAt(side_minus.reference_measures, q_index));
+                        values_plus[op_idx] = makeScalar(loadRealPtrAt(side_plus.reference_measures, q_index));
+                        break;
+
+                    case FormExprType::Pullback:
+                    case FormExprType::Pushforward: {
+                        if (op.child_count != 1u) {
+                            throw std::runtime_error("LLVMGen: frame transform expects exactly 1 child");
+                        }
+                        const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
+                        values_minus[op_idx] = values_minus[child_idx];
+                        values_plus[op_idx] = values_plus[child_idx];
                         break;
                     }
 
@@ -11456,6 +11752,47 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 nc_op_counts.push_back(t_ir.ir.opCount() * nc_qp_factor);
             }
             auto nc_plan = planTermGroups(nc_op_counts, nc_helper_budget, nc_bpo);
+            auto usesMovingDomainSideData = [](FormExprType type) noexcept {
+                switch (type) {
+                    case FormExprType::MeshDisplacement:
+                    case FormExprType::MeshVelocity:
+                    case FormExprType::MeshAcceleration:
+                    case FormExprType::CurrentCoordinate:
+                    case FormExprType::ReferencePhysicalCoordinate:
+                    case FormExprType::CurrentJacobian:
+                    case FormExprType::ReferenceJacobian:
+                    case FormExprType::CurrentJacobianDeterminant:
+                    case FormExprType::ReferenceJacobianDeterminant:
+                    case FormExprType::CurrentNormal:
+                    case FormExprType::ReferenceNormal:
+                    case FormExprType::CurrentMeasure:
+                    case FormExprType::ReferenceMeasure:
+                    case FormExprType::SurfaceJacobian:
+                    case FormExprType::Pullback:
+                    case FormExprType::Pushforward:
+                        return true;
+                    default:
+                        return false;
+                }
+            };
+            const bool nc_uses_moving_domain_side_data =
+                std::any_of(terms.begin(), terms.end(), [&](const LoweredTerm& term) {
+                    return std::any_of(term.ir.ops.begin(), term.ir.ops.end(),
+                                       [&](const KernelIROp& op) {
+                                           return usesMovingDomainSideData(op.type);
+                                       });
+                });
+            if (nc_plan.needs_split && nc_uses_moving_domain_side_data) {
+                // The inline JIT path lowers all moving-domain terminals. The
+                // split helper pack intentionally remains compact and does not
+                // yet mirror every frame-explicit side pointer, so keep these
+                // forms inline instead of emitting helpers with incomplete side
+                // data.
+                nc_plan.needs_split = false;
+                nc_plan.groups.clear();
+                nc_plan.groups.push_back(TermGroupPlan{
+                    0u, terms.size(), nc_plan.total_estimated_bytes});
+            }
 
             {
                 static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
@@ -15332,6 +15669,31 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            values_plus[op_idx] = loadXYZDim(side_plus.quad_points_xyz, q_index, shape.dims[0]);
 	                            break;
 
+                        case FormExprType::MeshDisplacement:
+                            values_minus[op_idx] = loadXYZDim(side_minus.mesh_displacements_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.mesh_displacements_xyz, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::MeshVelocity:
+                            values_minus[op_idx] = loadXYZDim(side_minus.mesh_velocities_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.mesh_velocities_xyz, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::MeshAcceleration:
+                            values_minus[op_idx] = loadXYZDim(side_minus.mesh_accelerations_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.mesh_accelerations_xyz, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::CurrentCoordinate:
+                            values_minus[op_idx] = loadXYZDim(side_minus.current_physical_points_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.current_physical_points_xyz, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::ReferencePhysicalCoordinate:
+                            values_minus[op_idx] = loadXYZDim(side_minus.reference_physical_points_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.reference_physical_points_xyz, q_index, shape.dims[0]);
+                            break;
+
 	                        case FormExprType::Normal:
 	                            values_minus[op_idx] =
 	                                loadXYZDimFromSide(side_minus, side_minus.normals_xyz, q_index, shape.dims[0],
@@ -15340,6 +15702,16 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                loadXYZDimFromSide(side_plus, side_plus.normals_xyz, q_index, shape.dims[0],
 	                                                   side_plus.interleaved_qpoint_geometry_normal_offset);
 	                            break;
+
+                        case FormExprType::CurrentNormal:
+                            values_minus[op_idx] = loadXYZDim(side_minus.current_normals_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.current_normals_xyz, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::ReferenceNormal:
+                            values_minus[op_idx] = loadXYZDim(side_minus.reference_normals_xyz, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadXYZDim(side_plus.reference_normals_xyz, q_index, shape.dims[0]);
+                            break;
 
 	                        case FormExprType::Jacobian:
 	                            values_minus[op_idx] =
@@ -15359,6 +15731,21 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                                   side_plus.interleaved_qpoint_geometry_inverse_jacobian_offset);
 	                            break;
 
+                        case FormExprType::CurrentJacobian:
+                            values_minus[op_idx] = loadMatDimFromQ(side_minus.current_jacobians, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadMatDimFromQ(side_plus.current_jacobians, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::ReferenceJacobian:
+                            values_minus[op_idx] = loadMatDimFromQ(side_minus.reference_jacobians, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadMatDimFromQ(side_plus.reference_jacobians, q_index, shape.dims[0]);
+                            break;
+
+                        case FormExprType::SurfaceJacobian:
+                            values_minus[op_idx] = loadMatDimFromQ(side_minus.surface_jacobians, q_index, shape.dims[0]);
+                            values_plus[op_idx] = loadMatDimFromQ(side_plus.surface_jacobians, q_index, shape.dims[0]);
+                            break;
+
                         case FormExprType::Identity: {
                             CodeValue out = makeZero(shape);
                             const auto n = static_cast<std::size_t>(shape.dims[0]);
@@ -15377,6 +15764,29 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             values_plus[op_idx] =
                                 makeScalar(loadScalarFromSide(side_plus, side_plus.jacobian_dets, q_index,
                                                               side_plus.interleaved_qpoint_geometry_det_offset));
+                            break;
+                        }
+
+                        case FormExprType::CurrentJacobianDeterminant:
+                        case FormExprType::CurrentMeasure:
+                            values_minus[op_idx] = makeScalar(loadRealPtrAt(side_minus.current_measures, q_index));
+                            values_plus[op_idx] = makeScalar(loadRealPtrAt(side_plus.current_measures, q_index));
+                            break;
+
+                        case FormExprType::ReferenceJacobianDeterminant:
+                        case FormExprType::ReferenceMeasure:
+                            values_minus[op_idx] = makeScalar(loadRealPtrAt(side_minus.reference_measures, q_index));
+                            values_plus[op_idx] = makeScalar(loadRealPtrAt(side_plus.reference_measures, q_index));
+                            break;
+
+                        case FormExprType::Pullback:
+                        case FormExprType::Pushforward: {
+                            if (op.child_count != 1u) {
+                                throw std::runtime_error("LLVMGen: frame transform expects exactly 1 child");
+                            }
+                            const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
+                            values_minus[op_idx] = values_minus[child_idx];
+                            values_plus[op_idx] = values_plus[child_idx];
                             break;
                         }
 

@@ -39,7 +39,7 @@ inline constexpr std::uint32_t kKernelArgsABIVersionV5 = 5u;
 inline constexpr std::uint32_t kKernelArgsABIVersionV6 = 6u;
 // Bump whenever any V6 argument/view struct layout changes. This is mixed into
 // JIT cache keys so disk-cached object code cannot outlive ABI layout edits.
-inline constexpr std::uint32_t kKernelArgsABILayoutRevisionV6 = 2u;
+inline constexpr std::uint32_t kKernelArgsABILayoutRevisionV6 = 3u;
 
 /// Maximum number of previous solution coefficient vectors passed to kernels.
 /// Indexing convention: k=1 corresponds to u^{n-1}.
@@ -967,6 +967,21 @@ struct KernelSideArgsV6 {
     std::uint32_t num_auxiliary_inputs{0};
     const Real* auxiliary_outputs{nullptr};
     std::uint32_t num_auxiliary_outputs{0};
+
+    // Moving-domain geometry and fields (optional; frame-explicit).
+    const Real* reference_physical_points_xyz{nullptr}; // [n_qpts * 3]
+    const Real* current_physical_points_xyz{nullptr};   // [n_qpts * 3]
+    const Real* reference_jacobians{nullptr};            // [n_qpts * 9]
+    const Real* current_jacobians{nullptr};              // [n_qpts * 9]
+    const Real* reference_normals_xyz{nullptr};          // [n_qpts * 3]
+    const Real* current_normals_xyz{nullptr};            // [n_qpts * 3]
+    const Real* reference_measures{nullptr};             // [n_qpts]
+    const Real* current_measures{nullptr};               // [n_qpts]
+    const Real* surface_jacobians{nullptr};              // [n_qpts * 9]
+    const Real* configuration_transforms{nullptr};       // [n_qpts * 9]
+    const Real* mesh_displacements_xyz{nullptr};         // [n_qpts * 3]
+    const Real* mesh_velocities_xyz{nullptr};            // [n_qpts * 3]
+    const Real* mesh_accelerations_xyz{nullptr};         // [n_qpts * 3]
 };
 
 struct CellKernelArgsV6 {
@@ -2116,6 +2131,20 @@ namespace detail {
     out.auxiliary_outputs = ctx.auxiliaryOutputs().empty() ? nullptr : ctx.auxiliaryOutputs().data();
     out.num_auxiliary_outputs = static_cast<std::uint32_t>(ctx.auxiliaryOutputs().size());
 
+    out.reference_physical_points_xyz = detail::flattenXYZ(ctx.referencePhysicalPoints());
+    out.current_physical_points_xyz = detail::flattenXYZ(ctx.currentPhysicalPoints());
+    out.reference_jacobians = detail::flattenMat3(ctx.referenceJacobians());
+    out.current_jacobians = detail::flattenMat3(ctx.currentJacobians());
+    out.reference_normals_xyz = detail::flattenXYZ(ctx.referenceNormals());
+    out.current_normals_xyz = detail::flattenXYZ(ctx.currentNormals());
+    out.reference_measures = ctx.referenceMeasures().empty() ? nullptr : ctx.referenceMeasures().data();
+    out.current_measures = ctx.currentMeasures().empty() ? nullptr : ctx.currentMeasures().data();
+    out.surface_jacobians = detail::flattenMat3(ctx.surfaceJacobians());
+    out.configuration_transforms = detail::flattenMat3(ctx.configurationTransforms());
+    out.mesh_displacements_xyz = detail::flattenXYZ(ctx.meshDisplacements());
+    out.mesh_velocities_xyz = detail::flattenXYZ(ctx.meshVelocities());
+    out.mesh_accelerations_xyz = detail::flattenXYZ(ctx.meshAccelerations());
+
     if (const auto* ti = ctx.timeIntegrationContext()) {
         out.time_derivative_term_weight = ti->time_derivative_term_weight;
         out.non_time_derivative_term_weight = ti->non_time_derivative_term_weight;
@@ -2202,6 +2231,21 @@ namespace detail {
         assertAligned(out.jit_constants, "KernelArgsV6: jit_constants not aligned");
         assertAligned(out.coupled_integrals, "KernelArgsV6: coupled_integrals not aligned");
         assertAligned(out.coupled_aux, "KernelArgsV6: coupled_aux not aligned");
+        assertAligned(out.auxiliary_inputs, "KernelArgsV6: auxiliary_inputs not aligned");
+        assertAligned(out.auxiliary_outputs, "KernelArgsV6: auxiliary_outputs not aligned");
+        assertAligned(out.reference_physical_points_xyz, "KernelArgsV6: reference_physical_points_xyz not aligned");
+        assertAligned(out.current_physical_points_xyz, "KernelArgsV6: current_physical_points_xyz not aligned");
+        assertAligned(out.reference_jacobians, "KernelArgsV6: reference_jacobians not aligned");
+        assertAligned(out.current_jacobians, "KernelArgsV6: current_jacobians not aligned");
+        assertAligned(out.reference_normals_xyz, "KernelArgsV6: reference_normals_xyz not aligned");
+        assertAligned(out.current_normals_xyz, "KernelArgsV6: current_normals_xyz not aligned");
+        assertAligned(out.reference_measures, "KernelArgsV6: reference_measures not aligned");
+        assertAligned(out.current_measures, "KernelArgsV6: current_measures not aligned");
+        assertAligned(out.surface_jacobians, "KernelArgsV6: surface_jacobians not aligned");
+        assertAligned(out.configuration_transforms, "KernelArgsV6: configuration_transforms not aligned");
+        assertAligned(out.mesh_displacements_xyz, "KernelArgsV6: mesh_displacements_xyz not aligned");
+        assertAligned(out.mesh_velocities_xyz, "KernelArgsV6: mesh_velocities_xyz not aligned");
+        assertAligned(out.mesh_accelerations_xyz, "KernelArgsV6: mesh_accelerations_xyz not aligned");
 
         if (!field_table.empty()) {
             FE_ASSERT_MSG(isAligned(out.field_solutions, alignof(FieldSolutionEntryV1)),

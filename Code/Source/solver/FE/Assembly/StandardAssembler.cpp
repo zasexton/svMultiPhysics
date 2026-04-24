@@ -17,6 +17,7 @@
 #include "Elements/ReferenceElement.h"
 #include "Quadrature/QuadratureFactory.h"
 #include "Quadrature/QuadratureRule.h"
+#include "Geometry/FrameGeometry.h"
 #include "Geometry/MappingFactory.h"
 #include "Geometry/GeometryMapping.h"
 #include "Geometry/GeometryFrameUtils.h"
@@ -80,7 +81,8 @@ namespace {
 
 [[nodiscard]] inline bool monolithicCompiledDispatchEnabled() noexcept
 {
-    return !core::envEnabled("SVMP_FE_DISABLE_MONOLITHIC_COMPILED_DISPATCH");
+    return core::envEnabled("SVMP_FE_ENABLE_MONOLITHIC_COMPILED_DISPATCH") &&
+           !core::envEnabled("SVMP_FE_DISABLE_MONOLITHIC_COMPILED_DISPATCH");
 }
 
 [[nodiscard]] inline bool monolithicCompiledCompareEnabled() noexcept
@@ -273,81 +275,6 @@ namespace {
     }
 
     return true;
-}
-
-[[nodiscard]] math::Vector<Real, 3> cross3(const math::Vector<Real, 3>& a,
-                                           const math::Vector<Real, 3>& b) noexcept
-{
-    return math::Vector<Real, 3>{
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    };
-}
-
-[[nodiscard]] Real norm3(const math::Vector<Real, 3>& v) noexcept
-{
-    return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-}
-
-[[nodiscard]] Real canonicalFaceJacobianToReference(
-    ElementType face_type,
-    std::span<const math::Vector<Real, 3>> ref_face_coords,
-    const math::Vector<Real, 3>& facet_coords)
-{
-    // Convert canonical face quadrature weights to the element-reference facet measure.
-    //
-    // Face quadrature rules are defined on canonical domains:
-    //   - Line2:    s in [-1, 1]
-    //   - Quad4:    (xi,eta) in [-1,1]^2
-    //   - Triangle: (x,y) on reference simplex (area 0.5)
-    //
-    // ElementTransform::facet_to_reference() expects facet-local parameters:
-    //   - edges:    t in [0, 1]
-    //   - quad:     (s,t) in [0,1]^2
-    //   - triangle: (x,y) on reference simplex
-    //
-    // This function returns |dX_ref/du| where u is the canonical quadrature coordinate,
-    // so that dS_ref = jac * du. Multiply quadrature weights by this factor.
-    switch (face_type) {
-        case ElementType::Line2: {
-            FE_THROW_IF(ref_face_coords.size() < 2, FEException,
-                        "canonicalFaceJacobianToReference(Line2): missing vertices");
-            const math::Vector<Real, 3> dx = ref_face_coords[1] - ref_face_coords[0];
-            // t = (s+1)/2 => dt/ds = 1/2
-            return Real(0.5) * norm3(dx);
-        }
-        case ElementType::Triangle3: {
-            FE_THROW_IF(ref_face_coords.size() < 3, FEException,
-                        "canonicalFaceJacobianToReference(Triangle3): missing vertices");
-            (void)facet_coords;
-            const math::Vector<Real, 3> e1 = ref_face_coords[1] - ref_face_coords[0];
-            const math::Vector<Real, 3> e2 = ref_face_coords[2] - ref_face_coords[0];
-            // xi(x,y) = v0 + x*(v1-v0) + y*(v2-v0) => jac = |e1 x e2|
-            return norm3(cross3(e1, e2));
-        }
-        case ElementType::Quad4: {
-            FE_THROW_IF(ref_face_coords.size() < 4, FEException,
-                        "canonicalFaceJacobianToReference(Quad4): missing vertices");
-            const Real s = facet_coords[0];
-            const Real t = facet_coords[1];
-            // X_ref(s,t) is bilinear on [0,1]^2; canonical quad weights are on [-1,1]^2.
-            // (s,t) = ((xi+1)/2, (eta+1)/2) => dxi deta = 4 ds dt, so:
-            // |dX/dxi x dX/deta| = 0.25 * |dX/ds x dX/dt|
-            math::Vector<Real, 3> dXds{};
-            math::Vector<Real, 3> dXdt{};
-            for (std::size_t i = 0; i < 3; ++i) {
-                dXds[i] = (Real(1) - t) * (ref_face_coords[1][i] - ref_face_coords[0][i]) +
-                          t * (ref_face_coords[2][i] - ref_face_coords[3][i]);
-                dXdt[i] = (Real(1) - s) * (ref_face_coords[3][i] - ref_face_coords[0][i]) +
-                          s * (ref_face_coords[2][i] - ref_face_coords[1][i]);
-            }
-            return Real(0.25) * norm3(cross3(dXds, dXdt));
-        }
-        default:
-            break;
-    }
-    return Real(1);
 }
 
 int requiredHistoryStates(const TimeIntegrationContext* ctx) noexcept
@@ -1224,6 +1151,107 @@ void StandardAssembler::setFieldSolutionAccess(std::span<const FieldSolutionAcce
         // invalidated).  DOF tables and resolved tables are keyed by DofMap
         // pointers and remain valid.
         field_access_plans_.clear();
+    }
+}
+
+void StandardAssembler::setMeshMotionFieldAccess(const MeshMotionFieldAccess& fields)
+{
+    mesh_motion_field_access_ = fields;
+}
+
+std::vector<FieldRequirement> StandardAssembler::effectiveFieldRequirements(
+    RequiredData required_data,
+    std::span<const FieldRequirement> kernel_requirements) const
+{
+    std::vector<FieldRequirement> out(kernel_requirements.begin(), kernel_requirements.end());
+
+    auto add_or_merge = [&out](FieldId field) {
+        auto it = std::find_if(out.begin(), out.end(), [&](const FieldRequirement& req) {
+            return req.field == field;
+        });
+        if (it == out.end()) {
+            out.push_back(FieldRequirement{field, RequiredData::SolutionValues});
+        } else {
+            it->required |= RequiredData::SolutionValues;
+        }
+    };
+
+    validateMovingDomainRequirements(required_data,
+                                     "StandardAssembler::effectiveFieldRequirements");
+    if (hasFlag(required_data, RequiredData::MeshDisplacement)) {
+        add_or_merge(mesh_motion_field_access_.mesh_displacement);
+    }
+    if (hasFlag(required_data, RequiredData::MeshVelocity)) {
+        add_or_merge(mesh_motion_field_access_.mesh_velocity);
+    }
+    if (hasFlag(required_data, RequiredData::MeshAcceleration)) {
+        add_or_merge(mesh_motion_field_access_.mesh_acceleration);
+    }
+
+    return out;
+}
+
+void StandardAssembler::validateMovingDomainRequirements(RequiredData required_data,
+                                                         const char* error_prefix) const
+{
+    auto require_field = [&](bool needed, FieldId field, const char* label) {
+        FE_THROW_IF(needed && field == INVALID_FIELD_ID, FEException,
+                    std::string(error_prefix) + ": kernel requests " + label +
+                        " but no mesh-motion field was registered");
+    };
+
+    require_field(hasFlag(required_data, RequiredData::MeshDisplacement),
+                  mesh_motion_field_access_.mesh_displacement,
+                  "RequiredData::MeshDisplacement");
+    require_field(hasFlag(required_data, RequiredData::MeshVelocity),
+                  mesh_motion_field_access_.mesh_velocity,
+                  "RequiredData::MeshVelocity");
+    require_field(hasFlag(required_data, RequiredData::MeshAcceleration),
+                  mesh_motion_field_access_.mesh_acceleration,
+                  "RequiredData::MeshAcceleration");
+}
+
+void StandardAssembler::populateMovingDomainFieldData(AssemblyContext& context,
+                                                      RequiredData required_data,
+                                                      const char* error_prefix)
+{
+    auto bind_vector_field = [&](FieldId field, const char* label, auto setter) {
+        FE_THROW_IF(field == INVALID_FIELD_ID, FEException,
+                    std::string(error_prefix) + ": missing mesh-motion binding for " + label);
+        FE_THROW_IF(!context.hasFieldSolutionData(field), FEException,
+                    std::string(error_prefix) + ": mesh-motion field data was not prepared for " + label);
+        FE_THROW_IF(context.fieldSolutionFieldType(field) != FieldType::Vector, FEException,
+                    std::string(error_prefix) + ": mesh-motion field for " + label +
+                        " is not vector-valued");
+        FE_THROW_IF(context.fieldSolutionValueDimension(field) != context.dimension(), FEException,
+                    std::string(error_prefix) + ": mesh-motion field for " + label +
+                        " has value dimension " +
+                        std::to_string(context.fieldSolutionValueDimension(field)) +
+                        " but mesh dimension is " + std::to_string(context.dimension()));
+
+        const auto nq = static_cast<std::size_t>(context.numQuadraturePoints());
+        scratch_mesh_motion_values_.resize(nq);
+        for (LocalIndex q = 0; q < context.numQuadraturePoints(); ++q) {
+            scratch_mesh_motion_values_[static_cast<std::size_t>(q)] =
+                context.fieldVectorValue(field, q);
+        }
+        (context.*setter)(std::span<const AssemblyContext::Vector3D>(scratch_mesh_motion_values_));
+    };
+
+    if (hasFlag(required_data, RequiredData::MeshDisplacement)) {
+        bind_vector_field(mesh_motion_field_access_.mesh_displacement,
+                          "MeshDisplacement",
+                          &AssemblyContext::setMeshDisplacements);
+    }
+    if (hasFlag(required_data, RequiredData::MeshVelocity)) {
+        bind_vector_field(mesh_motion_field_access_.mesh_velocity,
+                          "MeshVelocity",
+                          &AssemblyContext::setMeshVelocities);
+    }
+    if (hasFlag(required_data, RequiredData::MeshAcceleration)) {
+        bind_vector_field(mesh_motion_field_access_.mesh_acceleration,
+                          "MeshAcceleration",
+                          &AssemblyContext::setMeshAccelerations);
     }
 }
 
@@ -2434,7 +2462,8 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
     }
 
     const auto required_data = kernel.getRequiredData();
-    const auto field_requirements = kernel.fieldRequirements();
+    const auto kernel_field_requirements = kernel.fieldRequirements();
+    const auto field_requirements = effectiveFieldRequirements(required_data, kernel_field_requirements);
     const bool need_field_solutions = !field_requirements.empty();
     const bool need_solution =
         hasFlag(required_data, RequiredData::SolutionCoefficients) ||
@@ -2577,6 +2606,8 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
                 if (need_field_solutions) {
                     populateFieldSolutionData(context_, mesh, cell_id, field_requirements);
                 }
+                populateMovingDomainFieldData(context_, required_data,
+                                              "StandardAssembler::assembleBoundaryFaces");
 
                 if (need_material_state) {
                     auto view = material_state_provider_->getBoundaryFaceState(kernel, face_id, context_.numQuadraturePoints());
@@ -2646,7 +2677,8 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
     }
 
     const auto required_data = kernel.getRequiredData();
-    const auto field_requirements = kernel.fieldRequirements();
+    const auto kernel_field_requirements = kernel.fieldRequirements();
+    const auto field_requirements = effectiveFieldRequirements(required_data, kernel_field_requirements);
     const bool need_field_solutions = !field_requirements.empty();
     const bool need_solution =
         hasFlag(required_data, RequiredData::SolutionCoefficients) ||
@@ -2896,6 +2928,10 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
                 populateFieldSolutionData(context_, mesh, cell_minus, field_requirements);
                 populateFieldSolutionData(context_plus, mesh, cell_plus, field_requirements);
             }
+            populateMovingDomainFieldData(context_, required_data,
+                                          "StandardAssembler::assembleInteriorFaces");
+            populateMovingDomainFieldData(context_plus, required_data,
+                                          "StandardAssembler::assembleInteriorFaces");
 
             if (need_material_state) {
                 FE_THROW_IF(context_plus.numQuadraturePoints() != context_.numQuadraturePoints(), FEException,
@@ -3010,7 +3046,8 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
     }
 
     const auto required_data = kernel.getRequiredData();
-    const auto field_requirements = kernel.fieldRequirements();
+    const auto kernel_field_requirements = kernel.fieldRequirements();
+    const auto field_requirements = effectiveFieldRequirements(required_data, kernel_field_requirements);
     const bool need_field_solutions = !field_requirements.empty();
     const bool need_solution =
         hasFlag(required_data, RequiredData::SolutionCoefficients) ||
@@ -3248,6 +3285,8 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
                 if (need_field_solutions) {
                     populateFieldSolutionData(context_, mesh, volume_cell, field_requirements);
                 }
+                populateMovingDomainFieldData(context_, required_data,
+                                              "StandardAssembler::assembleInterfaceFaces");
 
                 if (need_material_state) {
                     auto view = material_state_provider_->getInteriorFaceState(
@@ -3516,6 +3555,10 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
             populateFieldSolutionData(context_, mesh, cell_minus, field_requirements);
             populateFieldSolutionData(context_plus, mesh, cell_plus, field_requirements);
         }
+        populateMovingDomainFieldData(context_, required_data,
+                                      "StandardAssembler::assembleInterfaceFaces");
+        populateMovingDomainFieldData(context_plus, required_data,
+                                      "StandardAssembler::assembleInterfaceFaces");
 
         if (need_material_state) {
             FE_THROW_IF(context_plus.numQuadraturePoints() != context_.numQuadraturePoints(), FEException,
@@ -3633,7 +3676,8 @@ AssemblyResult StandardAssembler::assembleCellsCore(
     }
 
     const auto required_data = kernel.getRequiredData();
-    const auto field_requirements = kernel.fieldRequirements();
+    const auto kernel_field_requirements = kernel.fieldRequirements();
+    const auto field_requirements = effectiveFieldRequirements(required_data, kernel_field_requirements);
     const bool need_field_solutions = !field_requirements.empty();
     const bool need_solution =
         hasFlag(required_data, RequiredData::SolutionCoefficients) ||
@@ -3814,6 +3858,8 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         if (need_field_solutions) {
             populateFieldSolutionData(ctx, mesh, cell_id, field_requirements);
         }
+        populateMovingDomainFieldData(ctx, required_data,
+                                      "StandardAssembler::assembleCellsCore");
         tp_sub_field_sol += TP_SUB() - tp_s0;
 
         tp_s0 = TP_SUB();
@@ -4212,6 +4258,11 @@ void StandardAssembler::prepareGeometry(
     const bool flat_coords_current =
         flat_cell_coords_.valid &&
         flat_cell_coords_.mesh == &mesh &&
+        flat_cell_coords_.dense_cell_ids &&
+        mesh.cellIdsAreDense() &&
+        flat_cell_coords_.cell_count == mesh.numCells() &&
+        flat_cell_coords_.nodes_per_cell > 0 &&
+        flat_cell_coords_.uniform_cell_type == cell_type &&
         (!flat_cell_coords_.revision_tracking_available ||
          (flat_cell_coords_.geometry_revision == mesh.geometryRevision() &&
           flat_cell_coords_.topology_revision == mesh.topologyRevision() &&
@@ -5631,9 +5682,119 @@ void StandardAssembler::prepareContext(
     auto quad_rule = resolveQuadratureRule(test_space, cell_id, cell_type);
     prepareGeometry(context, mesh, cell_id, *quad_rule);
     prepareBasis(context, mesh, cell_id, test_space, trial_space, required_data, *quad_rule);
+    prepareFrameExplicitGeometry(context, mesh, cell_id, cell_type, *quad_rule, required_data);
     // Override the non-owning alias from prepareBasis with the actual shared_ptr
     // so that cached_quad_rule_ survives after this function returns.
     cached_quad_rule_ = std::move(quad_rule);
+}
+
+void StandardAssembler::computeFrameGeometry(
+    ElementType cell_type,
+    const quadrature::QuadratureRule& quad_rule,
+    FrameGeometryScratch& scratch)
+{
+    const auto data = geometry::evaluateCellFrame(cell_type, quad_rule, scratch.cell_coords);
+    scratch.points = data.points;
+    scratch.jacobians = data.jacobians;
+    scratch.inverse_jacobians = data.inverse_jacobians;
+    scratch.jacobian_determinants = data.jacobian_determinants;
+    scratch.measures = data.measures;
+}
+
+void StandardAssembler::computeFaceFrameGeometry(
+    ElementType cell_type,
+    LocalIndex local_face_id,
+    ElementType face_type,
+    const quadrature::QuadratureRule& quad_rule,
+    std::span<const LocalIndex> align_facet_to_reference,
+    FaceFrameGeometryScratch& scratch)
+{
+    const auto data = geometry::evaluateFaceFrame(cell_type,
+                                                  local_face_id,
+                                                  face_type,
+                                                  quad_rule,
+                                                  scratch.cell_coords,
+                                                  align_facet_to_reference);
+    scratch.cell.points = data.cell_geometry.points;
+    scratch.cell.jacobians = data.cell_geometry.jacobians;
+    scratch.cell.inverse_jacobians = data.cell_geometry.inverse_jacobians;
+    scratch.cell.jacobian_determinants = data.cell_geometry.jacobian_determinants;
+    scratch.cell.measures = data.cell_geometry.measures;
+    scratch.cell_reference_points = data.cell_reference_points;
+    scratch.face_reference_points = data.face_reference_points;
+    scratch.canonical_to_reference_measures = data.canonical_to_reference_measures;
+    scratch.normals = data.normals;
+    scratch.surface_measures = data.surface_measures;
+    scratch.surface_jacobians = data.surface_jacobians;
+}
+
+void StandardAssembler::prepareFrameExplicitGeometry(
+    AssemblyContext& context,
+    const IMeshAccess& mesh,
+    GlobalIndex cell_id,
+    ElementType cell_type,
+    const quadrature::QuadratureRule& quad_rule,
+    RequiredData required_data)
+{
+    const bool need_reference =
+        hasFlag(required_data, RequiredData::ReferencePhysicalPoints) ||
+        hasFlag(required_data, RequiredData::ReferenceJacobians) ||
+        hasFlag(required_data, RequiredData::ReferenceMeasures) ||
+        hasFlag(required_data, RequiredData::ConfigurationTransforms);
+    const bool need_current =
+        hasFlag(required_data, RequiredData::CurrentPhysicalPoints) ||
+        hasFlag(required_data, RequiredData::CurrentJacobians) ||
+        hasFlag(required_data, RequiredData::CurrentMeasures) ||
+        hasFlag(required_data, RequiredData::ConfigurationTransforms);
+
+    if (!need_reference && !need_current &&
+        !hasFlag(required_data, RequiredData::SurfaceJacobians)) {
+        return;
+    }
+
+    if (need_reference) {
+        FE_THROW_IF(!mesh.supportsCoordinateFrame(CoordinateFrame::Reference), FEException,
+                    "StandardAssembler::prepareFrameExplicitGeometry: mesh adapter cannot provide reference coordinates");
+        mesh.getCellCoordinates(cell_id, CoordinateFrame::Reference, scratch_reference_geometry_.cell_coords);
+        computeFrameGeometry(cell_type, quad_rule, scratch_reference_geometry_);
+        context.setReferenceGeometry(scratch_reference_geometry_.points,
+                                     scratch_reference_geometry_.jacobians,
+                                     scratch_reference_geometry_.inverse_jacobians,
+                                     scratch_reference_geometry_.measures);
+    }
+
+    if (need_current) {
+        FE_THROW_IF(!mesh.supportsCoordinateFrame(CoordinateFrame::Current), FEException,
+                    "StandardAssembler::prepareFrameExplicitGeometry: mesh adapter cannot provide current coordinates");
+        mesh.getCellCoordinates(cell_id, CoordinateFrame::Current, scratch_current_geometry_.cell_coords);
+        computeFrameGeometry(cell_type, quad_rule, scratch_current_geometry_);
+        context.setCurrentGeometry(scratch_current_geometry_.points,
+                                   scratch_current_geometry_.jacobians,
+                                   scratch_current_geometry_.inverse_jacobians,
+                                   scratch_current_geometry_.measures);
+    }
+
+    if (hasFlag(required_data, RequiredData::ConfigurationTransforms)) {
+        const auto n_qpts = context.numQuadraturePoints();
+        scratch_configuration_transforms_.resize(static_cast<std::size_t>(n_qpts));
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const auto& J_cur = scratch_current_geometry_.jacobians[static_cast<std::size_t>(q)];
+            const auto& J_ref_inv = scratch_reference_geometry_.inverse_jacobians[static_cast<std::size_t>(q)];
+            scratch_configuration_transforms_[static_cast<std::size_t>(q)] =
+                geometry::configurationTransform(J_cur, J_ref_inv);
+        }
+        context.setConfigurationTransforms(scratch_configuration_transforms_);
+    }
+
+    if (hasFlag(required_data, RequiredData::SurfaceJacobians)) {
+        if (need_current) {
+            context.setSurfaceJacobians(scratch_current_geometry_.jacobians);
+        } else if (need_reference) {
+            context.setSurfaceJacobians(scratch_reference_geometry_.jacobians);
+        } else {
+            context.setSurfaceJacobians(context.jacobians());
+        }
+    }
 }
 
 // ============================================================================
@@ -5687,6 +5848,28 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             (void)getCellDofTable(mesh, access.dof_map, access.dof_offset);
         }
     }
+
+    auto needs_moving_domain_data = [](RequiredData data) {
+        return hasFlag(data, RequiredData::MeshDisplacement) ||
+               hasFlag(data, RequiredData::MeshVelocity) ||
+               hasFlag(data, RequiredData::MeshAcceleration) ||
+               hasFlag(data, RequiredData::ReferencePhysicalPoints) ||
+               hasFlag(data, RequiredData::CurrentPhysicalPoints) ||
+               hasFlag(data, RequiredData::ReferenceJacobians) ||
+               hasFlag(data, RequiredData::CurrentJacobians) ||
+               hasFlag(data, RequiredData::ReferenceNormals) ||
+               hasFlag(data, RequiredData::CurrentNormals) ||
+               hasFlag(data, RequiredData::ReferenceMeasures) ||
+               hasFlag(data, RequiredData::CurrentMeasures) ||
+               hasFlag(data, RequiredData::SurfaceJacobians) ||
+               hasFlag(data, RequiredData::ConfigurationTransforms);
+    };
+    for (const auto& t : terms) {
+        if (t.kernel->hasCell() && needs_moving_domain_data(t.kernel->getRequiredData())) {
+            return Assembler::assembleCellsFused(mesh, terms);
+        }
+    }
+
     ensureFieldAccessPlans(mesh);
     ensureResolvedVectorTables(mesh);
     ensureFlatCellCoords(mesh);
@@ -5770,7 +5953,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     for (std::size_t ti = 0; ti < terms.size(); ++ti) {
         auto& td = term_data[ti];
         td.required_data = terms[ti].kernel->getRequiredData();
-        td.field_requirements = terms[ti].kernel->fieldRequirements();
+        const auto kernel_field_requirements = terms[ti].kernel->fieldRequirements();
+        td.field_requirements = effectiveFieldRequirements(td.required_data, kernel_field_requirements);
         td.need_field_solutions = !td.field_requirements.empty();
         td.need_solution =
             hasFlag(td.required_data, RequiredData::SolutionCoefficients) ||
@@ -6719,10 +6903,26 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                    LocalIndex n_test,
                    LocalIndex n_trial,
                    bool want_matrix,
-                   bool want_vector) {
+                   bool want_vector,
+                   bool zero_output) {
                     const auto matrix_size =
                         static_cast<std::size_t>(n_test) * static_cast<std::size_t>(n_trial);
                     const auto vector_size = static_cast<std::size_t>(n_test);
+
+                    if (!zero_output) {
+                        output.n_test_dofs = n_test;
+                        output.n_trial_dofs = n_trial;
+                        output.has_matrix = want_matrix;
+                        output.has_vector = want_vector;
+                        if (!want_matrix) {
+                            output.local_matrix.clear();
+                        }
+                        if (!want_vector) {
+                            output.local_vector.clear();
+                        }
+                        return;
+                    }
+
                     if (output.n_test_dofs != n_test ||
                         output.n_trial_dofs != n_trial ||
                         output.has_matrix != want_matrix ||
@@ -6730,11 +6930,12 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         (want_matrix && output.local_matrix.size() != matrix_size) ||
                         (want_vector && output.local_vector.size() != vector_size)) {
                         output.reserveNoZero(n_test, n_trial, want_matrix, want_vector);
+                    } else {
+                        output.n_test_dofs = n_test;
+                        output.n_trial_dofs = n_trial;
+                        output.has_matrix = want_matrix;
+                        output.has_vector = want_vector;
                     }
-                    output.n_test_dofs = n_test;
-                    output.n_trial_dofs = n_trial;
-                    output.has_matrix = want_matrix;
-                    output.has_vector = want_vector;
                     output.clear();
                 };
 
@@ -6873,7 +7074,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             std::span<const GlobalIndex>& col_dofs,
                             KernelOutput& output,
                             bool want_matrix,
-                            bool want_vector) {
+                            bool want_vector,
+                            bool zero_output) {
                             const auto cell_id = cell_ids[begin + slot];
                             const auto& bs = monolithic_kernel->blockSpec(bi);
                             auto& shared = shared_contexts[slot];
@@ -7100,7 +7302,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                 static_cast<LocalIndex>(row_dofs.size()),
                                 static_cast<LocalIndex>(col_dofs.size()),
                                 want_matrix,
-                                want_vector);
+                                want_vector,
+                                zero_output);
                         };
 
                     if (run_compiled_dispatch) {
@@ -7126,7 +7329,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                     workspace.col_dofs,
                                     workspace.output,
                                     block_want_matrix,
-                                    compiled_want_vector);
+                                    compiled_want_vector,
+                                    /*zero_output=*/true);
                                 auto view = assembly::jit::packCoupledBlockView(
                                     workspace.ctx, workspace.output);
                                 if (compiled_matrix_only_dispatch) {
@@ -7241,7 +7445,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                         workspace.output.n_test_dofs,
                                         workspace.output.n_trial_dofs,
                                         /*want_matrix=*/false,
-                                        /*want_vector=*/true);
+                                        /*want_vector=*/true,
+                                        /*zero_output=*/true);
                                     batch_context_ptrs[slot] = &workspace.ctx;
                                 }
 
@@ -7323,6 +7528,11 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             if (!bs.fallback_kernel || (!block_want_matrix && !block_want_vector)) {
                                 continue;
                             }
+                            const auto* jit_kernel =
+                                dynamic_cast<const forms::jit::JITKernelWrapper*>(
+                                    bs.fallback_kernel.get());
+                            const bool jit_batch_self_prepares_output =
+                                jit_kernel != nullptr && jit_kernel->isJITReady();
 
                             for (std::size_t slot = 0; slot < active; ++slot) {
                                 auto& workspace = batch_block_workspaces[slot];
@@ -7335,7 +7545,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                     workspace.col_dofs,
                                     output,
                                     block_want_matrix,
-                                    block_want_vector);
+                                    block_want_vector,
+                                    /*zero_output=*/!jit_batch_self_prepares_output);
                                 batch_context_ptrs[slot] = &workspace.ctx;
                             }
 
@@ -10367,20 +10578,6 @@ void StandardAssembler::prepareContextFace(
             cell_coords_[i][0], cell_coords_[i][1], cell_coords_[i][2]};
     }
 
-    // Representative interior point for outward-normal consistency checks.
-    AssemblyContext::Vector3D cell_center{0.0, 0.0, 0.0};
-    if (!cell_coords_.empty()) {
-        for (const auto& xc : cell_coords_) {
-            cell_center[0] += xc[0];
-            cell_center[1] += xc[1];
-            cell_center[2] += xc[2];
-        }
-        const Real inv_n = Real(1.0) / static_cast<Real>(cell_coords_.size());
-        cell_center[0] *= inv_n;
-        cell_center[1] *= inv_n;
-        cell_center[2] *= inv_n;
-    }
-
     // 6. Create geometry mapping
     geometry::MappingRequest map_request;
     map_request.element_type = cell_type;
@@ -10388,6 +10585,61 @@ void StandardAssembler::prepareContextFace(
     map_request.use_affine = (map_request.geometry_order <= 1);
 
     auto mapping = geometry::MappingFactory::create(map_request, node_coords);
+
+    const bool need_reference_face =
+        hasFlag(required_data, RequiredData::ReferencePhysicalPoints) ||
+        hasFlag(required_data, RequiredData::ReferenceJacobians) ||
+        hasFlag(required_data, RequiredData::ReferenceMeasures) ||
+        hasFlag(required_data, RequiredData::ReferenceNormals) ||
+        hasFlag(required_data, RequiredData::ConfigurationTransforms);
+    const bool need_current_face =
+        hasFlag(required_data, RequiredData::CurrentPhysicalPoints) ||
+        hasFlag(required_data, RequiredData::CurrentJacobians) ||
+        hasFlag(required_data, RequiredData::CurrentMeasures) ||
+        hasFlag(required_data, RequiredData::CurrentNormals) ||
+        hasFlag(required_data, RequiredData::ConfigurationTransforms);
+
+    scratch_active_face_geometry_.cell_coords = cell_coords_;
+    computeFaceFrameGeometry(cell_type,
+                             local_face_id,
+                             face_type,
+                             *quad_rule,
+                             align_facet_to_reference,
+                             scratch_active_face_geometry_);
+
+    if (need_reference_face) {
+        FE_THROW_IF(!mesh.supportsCoordinateFrame(CoordinateFrame::Reference), FEException,
+                    "StandardAssembler::prepareContextFace: mesh adapter cannot provide reference coordinates");
+        mesh.getCellCoordinates(cell_id, CoordinateFrame::Reference, scratch_reference_face_geometry_.cell_coords);
+        computeFaceFrameGeometry(cell_type,
+                                 local_face_id,
+                                 face_type,
+                                 *quad_rule,
+                                 align_facet_to_reference,
+                                 scratch_reference_face_geometry_);
+    }
+
+    if (need_current_face) {
+        FE_THROW_IF(!mesh.supportsCoordinateFrame(CoordinateFrame::Current), FEException,
+                    "StandardAssembler::prepareContextFace: mesh adapter cannot provide current coordinates");
+        mesh.getCellCoordinates(cell_id, CoordinateFrame::Current, scratch_current_face_geometry_.cell_coords);
+        computeFaceFrameGeometry(cell_type,
+                                 local_face_id,
+                                 face_type,
+                                 *quad_rule,
+                                 align_facet_to_reference,
+                                 scratch_current_face_geometry_);
+    }
+
+    if (hasFlag(required_data, RequiredData::ConfigurationTransforms)) {
+        scratch_configuration_transforms_.resize(static_cast<std::size_t>(n_qpts));
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const auto qidx = static_cast<std::size_t>(q);
+            scratch_configuration_transforms_[qidx] =
+                geometry::configurationTransform(scratch_current_face_geometry_.cell.jacobians[qidx],
+                                                 scratch_reference_face_geometry_.cell.inverse_jacobians[qidx]);
+        }
+    }
 
     // 7. Resize scratch storage
     scratch_quad_points_.resize(n_qpts);
@@ -10496,153 +10748,20 @@ void StandardAssembler::prepareContextFace(
         }
     }
 
-    // 8. Map face quadrature points to element reference coordinates and compute normals/weights
-    const auto& quad_points = quad_rule->points();
+    // 8. Copy active face geometry prepared by the frame-explicit FE/Geometry helper.
     const auto& quad_weights = quad_rule->weights();
-
-    auto [vtx, ref_face_coords] =
-        elements::ElementTransform::facet_vertices(cell_type, static_cast<int>(local_face_id));
-    (void)vtx;
-
-    const AssemblyContext::Vector3D n_ref = computeFaceNormal(local_face_id, cell_type, dim);
-
     for (LocalIndex q = 0; q < n_qpts; ++q) {
-        const auto& qpt = quad_points[q];
-        scratch_quad_weights_[q] = quad_weights[q];
-
-        // Convert quadrature point to facet-local coordinates expected by ElementTransform
-        math::Vector<Real, 3> facet_coords{};
-        if (face_type == ElementType::Line2) {
-            // Line quadrature is on [-1,1]; facet parameterization uses t in [0,1]
-            Real t = (qpt[0] + Real(1)) * Real(0.5);
-            if (!align_facet_to_reference.empty() && align_facet_to_reference.size() == 2) {
-                const Real w_ref0 = Real(1) - t;
-                const Real w_ref1 = t;
-                const std::array<Real, 2> w_ref{w_ref0, w_ref1};
-                std::array<Real, 2> w_local{0.0, 0.0};
-                for (std::size_t j = 0; j < 2; ++j) {
-                    const auto src = static_cast<std::size_t>(align_facet_to_reference[j]);
-                    w_local[j] = w_ref[src];
-                }
-                t = w_local[1];
-            }
-            facet_coords = math::Vector<Real, 3>{t, Real(0), Real(0)};
-        } else if (face_type == ElementType::Quad4) {
-            // Quad quadrature is on [-1,1]^2; facet parameterization uses (s,t) in [0,1]^2
-            Real s = (qpt[0] + Real(1)) * Real(0.5);
-            Real t = (qpt[1] + Real(1)) * Real(0.5);
-            if (!align_facet_to_reference.empty() && align_facet_to_reference.size() == 4) {
-                const std::array<Real, 4> w_ref{
-                    (Real(1) - s) * (Real(1) - t),
-                    s * (Real(1) - t),
-                    s * t,
-                    (Real(1) - s) * t};
-                std::array<Real, 4> w_local{0.0, 0.0, 0.0, 0.0};
-                for (std::size_t j = 0; j < 4; ++j) {
-                    const auto src = static_cast<std::size_t>(align_facet_to_reference[j]);
-                    w_local[j] = w_ref[src];
-                }
-                s = w_local[1] + w_local[2];
-                t = w_local[2] + w_local[3];
-            }
-            facet_coords = math::Vector<Real, 3>{s, t, Real(0)};
-        } else {
-            // Triangle quadrature uses reference simplex coordinates (0<=x,y, x+y<=1)
-            const Real x = qpt[0];
-            const Real y = qpt[1];
-            facet_coords = math::Vector<Real, 3>{x, y, Real(0)};
-
-            // For interior faces, the plus-side element may have a different local face
-            // vertex ordering. The weak-form evaluation assumes that q is the same
-            // physical point on both sides, so we optionally permute barycentric weights
-            // to align this face parameterization to a reference orientation.
-            if (!align_facet_to_reference.empty()) {
-                const Real w_ref0 = Real(1) - x - y;
-                const Real w_ref1 = x;
-                const Real w_ref2 = y;
-                const std::array<Real, 3> w_ref{w_ref0, w_ref1, w_ref2};
-
-                if (align_facet_to_reference.size() == 3) {
-                    std::array<Real, 3> w_local{0.0, 0.0, 0.0};
-                    for (std::size_t j = 0; j < 3; ++j) {
-                        const auto src = static_cast<std::size_t>(align_facet_to_reference[j]);
-                        w_local[j] = w_ref[src];
-                    }
-                    // Convert back to (x,y) for the local face ordering.
-                    facet_coords = math::Vector<Real, 3>{w_local[1], w_local[2], Real(0)};
-                }
-            }
-        }
-
-        AssemblyContext::Point3D trace_face_point{
-            facet_coords[0], facet_coords[1], facet_coords[2]};
-        AssemblyContext::Point3D embedded_face_point{};
-        if (face_type == ElementType::Line2) {
-            embedded_face_point = {
-                Real(2) * facet_coords[0] - Real(1),
-                Real(0),
-                Real(0)};
-        } else if (face_type == ElementType::Quad4) {
-            embedded_face_point = {
-                Real(2) * facet_coords[0] - Real(1),
-                Real(2) * facet_coords[1] - Real(1),
-                Real(0)};
-        } else {
-            embedded_face_point = {
-                facet_coords[0], facet_coords[1], facet_coords[2]};
-        }
-        scratch_face_quad_points_[static_cast<std::size_t>(q)] = trace_face_point;
-
-        // Map to the cell reference coordinates on the requested face
-        const math::Vector<Real, 3> xi = elements::ElementTransform::facet_to_reference(
-            cell_type, static_cast<int>(local_face_id), facet_coords);
-
-        scratch_quad_points_[q] = {xi[0], xi[1], xi[2]};
-
-        // Compute physical point and mapping Jacobians
-        const auto x_phys = mapping->map_to_physical(xi);
-        scratch_phys_points_[q] = {x_phys[0], x_phys[1], x_phys[2]};
-
-        const auto J = mapping->jacobian(xi);
-        const auto J_inv = mapping->jacobian_inverse(xi);
-        const Real det_J = mapping->jacobian_determinant(xi);
-
-        for (int i = 0; i < 3; ++i) {
-            for (int j = 0; j < 3; ++j) {
-                scratch_jacobians_[q][i][j] = J(i, j);
-                scratch_inv_jacobians_[q][i][j] = J_inv(i, j);
-            }
-        }
-        scratch_jac_dets_[q] = det_J;
-
-        Real surface_measure;
-        AssemblyContext::Vector3D n_phys;
-        computeSurfaceMeasureAndNormal(n_ref, scratch_inv_jacobians_[q], det_J, dim,
-                                       surface_measure, n_phys);
-
-        // Ensure the physical unit normal points outward from the cell interior.
-        // For some meshes, facet vertex ordering can be inconsistent even when det(J) > 0; rely on a
-        // geometric check against an interior point (legacy gnnb-style).
-        {
-            const Real dx = cell_center[0] - x_phys[0];
-            const Real dy = cell_center[1] - x_phys[1];
-            const Real dz = cell_center[2] - x_phys[2];
-            const Real dot = dx * n_phys[0] + dy * n_phys[1] + dz * n_phys[2];
-            if (dot > Real(0.0)) {
-                n_phys[0] = -n_phys[0];
-                n_phys[1] = -n_phys[1];
-                n_phys[2] = -n_phys[2];
-            }
-        }
-
-        // Convert canonical face weights to element-reference facet measure, then map to physical.
-        Real w = quad_weights[q] *
-                 canonicalFaceJacobianToReference(face_type,
-                                                  std::span<const math::Vector<Real, 3>>(ref_face_coords),
-                                                  facet_coords);
-
-        scratch_integration_weights_[q] = w * surface_measure;
-        scratch_normals_[q] = n_phys;
+        const auto qidx = static_cast<std::size_t>(q);
+        scratch_quad_weights_[qidx] = quad_weights[qidx];
+        scratch_quad_points_[qidx] = scratch_active_face_geometry_.cell_reference_points[qidx];
+        scratch_face_quad_points_[qidx] = scratch_active_face_geometry_.face_reference_points[qidx];
+        scratch_phys_points_[qidx] = scratch_active_face_geometry_.cell.points[qidx];
+        scratch_jacobians_[qidx] = scratch_active_face_geometry_.cell.jacobians[qidx];
+        scratch_inv_jacobians_[qidx] = scratch_active_face_geometry_.cell.inverse_jacobians[qidx];
+        scratch_jac_dets_[qidx] = scratch_active_face_geometry_.cell.jacobian_determinants[qidx];
+        scratch_integration_weights_[qidx] =
+            quad_weights[qidx] * scratch_active_face_geometry_.surface_measures[qidx];
+        scratch_normals_[qidx] = scratch_active_face_geometry_.normals[qidx];
     }
 
     // 9. Evaluate basis functions at face quadrature points
@@ -11068,6 +11187,36 @@ void StandardAssembler::prepareContextFace(
     }
     context.setPhysicalGradients(test_phys, trial_phys);
     context.setNormals(scratch_normals_);
+    if (need_reference_face) {
+        context.setReferenceGeometry(scratch_reference_face_geometry_.cell.points,
+                                     scratch_reference_face_geometry_.cell.jacobians,
+                                     scratch_reference_face_geometry_.cell.inverse_jacobians,
+                                     scratch_reference_face_geometry_.surface_measures);
+    }
+    if (need_current_face) {
+        context.setCurrentGeometry(scratch_current_face_geometry_.cell.points,
+                                   scratch_current_face_geometry_.cell.jacobians,
+                                   scratch_current_face_geometry_.cell.inverse_jacobians,
+                                   scratch_current_face_geometry_.surface_measures);
+    }
+    if (hasFlag(required_data, RequiredData::ReferenceNormals)) {
+        context.setReferenceNormals(scratch_reference_face_geometry_.normals);
+    }
+    if (hasFlag(required_data, RequiredData::CurrentNormals)) {
+        context.setCurrentNormals(scratch_current_face_geometry_.normals);
+    }
+    if (hasFlag(required_data, RequiredData::SurfaceJacobians)) {
+        if (need_current_face) {
+            context.setSurfaceJacobians(scratch_current_face_geometry_.surface_jacobians);
+        } else if (need_reference_face) {
+            context.setSurfaceJacobians(scratch_reference_face_geometry_.surface_jacobians);
+        } else {
+            context.setSurfaceJacobians(scratch_active_face_geometry_.surface_jacobians);
+        }
+    }
+    if (hasFlag(required_data, RequiredData::ConfigurationTransforms)) {
+        context.setConfigurationTransforms(scratch_configuration_transforms_);
+    }
 
     if (need_basis_hessians) {
         const auto test_H = test_is_vector_basis
@@ -13632,8 +13781,15 @@ std::unique_ptr<Assembler> createAssembler(const AssemblyOptions& options)
 
 void StandardAssembler::ensureFlatCellCoords(const IMeshAccess& mesh) {
     const bool has_revision_tracking = mesh.revisionTrackingAvailable();
+    const auto n_cells = mesh.numCells();
     if (flat_cell_coords_.valid &&
         flat_cell_coords_.mesh == &mesh &&
+        flat_cell_coords_.dense_cell_ids &&
+        mesh.cellIdsAreDense() &&
+        flat_cell_coords_.cell_count == n_cells &&
+        n_cells > 0 &&
+        flat_cell_coords_.nodes_per_cell > 0 &&
+        flat_cell_coords_.uniform_cell_type == mesh.getCellType(0) &&
         has_revision_tracking &&
         flat_cell_coords_.geometry_revision == mesh.geometryRevision() &&
         flat_cell_coords_.topology_revision == mesh.topologyRevision() &&
@@ -13644,8 +13800,7 @@ void StandardAssembler::ensureFlatCellCoords(const IMeshAccess& mesh) {
         return;
     }
     const int dim = mesh.dimension();
-    const auto n_cells = mesh.numCells();
-    if (n_cells == 0) {
+    if (n_cells == 0 || !mesh.cellIdsAreDense()) {
         flat_cell_coords_.valid = false;
         return;
     }
@@ -13661,8 +13816,39 @@ void StandardAssembler::ensureFlatCellCoords(const IMeshAccess& mesh) {
     }
 
     std::vector<std::array<Real, 3>> tmp_coords;
+    const ElementType first_cell_type = mesh.getCellType(first_cell);
     mesh.getCellCoordinates(first_cell, tmp_coords);
     const int nodes_per_cell = static_cast<int>(tmp_coords.size());
+    if (nodes_per_cell <= 0) {
+        flat_cell_coords_.valid = false;
+        return;
+    }
+
+    bool dense_layout = true;
+    GlobalIndex visited_cells = 0;
+    mesh.forEachCell([&](GlobalIndex cid) {
+        if (!dense_layout) {
+            return;
+        }
+        if (cid != visited_cells) {
+            dense_layout = false;
+            return;
+        }
+        if (mesh.getCellType(cid) != first_cell_type) {
+            dense_layout = false;
+            return;
+        }
+        mesh.getCellCoordinates(cid, tmp_coords);
+        if (static_cast<int>(tmp_coords.size()) != nodes_per_cell) {
+            dense_layout = false;
+            return;
+        }
+        ++visited_cells;
+    });
+    if (!dense_layout || visited_cells != n_cells) {
+        flat_cell_coords_.valid = false;
+        return;
+    }
 
     // Allocate flat array: n_cells * nodes_per_cell * 3
     flat_cell_coords_.coords.resize(
@@ -13670,6 +13856,9 @@ void StandardAssembler::ensureFlatCellCoords(const IMeshAccess& mesh) {
         static_cast<std::size_t>(nodes_per_cell) * 3u);
     flat_cell_coords_.dim = dim;
     flat_cell_coords_.nodes_per_cell = nodes_per_cell;
+    flat_cell_coords_.cell_count = n_cells;
+    flat_cell_coords_.uniform_cell_type = first_cell_type;
+    flat_cell_coords_.dense_cell_ids = true;
 
     // Fill from mesh
     mesh.forEachCell([&](GlobalIndex cid) {

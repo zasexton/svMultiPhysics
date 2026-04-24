@@ -40,6 +40,8 @@ TEST(FormCompilerTest, ConstructorAndSetOptionsPreserveSymbolicTangentOptions)
     SymbolicOptions opts;
     opts.ad_mode = ADMode::Forward;
     opts.use_symbolic_tangent = true;
+    opts.geometry_sensitivity.mode = GeometrySensitivityMode::MeshMotionUnknowns;
+    opts.geometry_sensitivity.mesh_motion_field = 3;
     opts.simplify_expressions = false;
     opts.exploit_sparsity = false;
     opts.cache_expressions = false;
@@ -52,6 +54,9 @@ TEST(FormCompilerTest, ConstructorAndSetOptionsPreserveSymbolicTangentOptions)
     FormCompiler compiler(opts);
     EXPECT_EQ(compiler.options().ad_mode, ADMode::Forward);
     EXPECT_TRUE(compiler.options().use_symbolic_tangent);
+    EXPECT_EQ(compiler.options().geometry_sensitivity.mode,
+              GeometrySensitivityMode::MeshMotionUnknowns);
+    EXPECT_EQ(compiler.options().geometry_sensitivity.mesh_motion_field, 3);
     EXPECT_FALSE(compiler.options().simplify_expressions);
     EXPECT_FALSE(compiler.options().exploit_sparsity);
     EXPECT_FALSE(compiler.options().cache_expressions);
@@ -68,12 +73,16 @@ TEST(FormCompilerTest, ConstructorAndSetOptionsPreserveSymbolicTangentOptions)
     EXPECT_TRUE(ir.isCompiled());
     EXPECT_EQ(ir.kind(), FormKind::Residual);
     EXPECT_TRUE(compiler.options().use_symbolic_tangent);
+    EXPECT_EQ(compiler.options().geometry_sensitivity.mode,
+              GeometrySensitivityMode::MeshMotionUnknowns);
 
     SymbolicOptions reset;
     reset.use_symbolic_tangent = false;
     reset.jit.enable = false;
     compiler.setOptions(reset);
     EXPECT_FALSE(compiler.options().use_symbolic_tangent);
+    EXPECT_EQ(compiler.options().geometry_sensitivity.mode,
+              GeometrySensitivityMode::GeometryConstant);
     EXPECT_FALSE(compiler.options().jit.enable);
 }
 
@@ -83,6 +92,10 @@ TEST(FormCompilerTest, DefaultAndMoveConstructorsPreserveOptionsAndUsability)
     const SymbolicOptions defaults;
     EXPECT_EQ(default_compiler.options().ad_mode, defaults.ad_mode);
     EXPECT_EQ(default_compiler.options().use_symbolic_tangent, defaults.use_symbolic_tangent);
+    EXPECT_EQ(default_compiler.options().geometry_sensitivity.mode,
+              defaults.geometry_sensitivity.mode);
+    EXPECT_EQ(default_compiler.options().geometry_sensitivity.mesh_motion_field,
+              defaults.geometry_sensitivity.mesh_motion_field);
     EXPECT_EQ(default_compiler.options().jit.enable, defaults.jit.enable);
     EXPECT_EQ(default_compiler.options().jit.optimization_level, defaults.jit.optimization_level);
     EXPECT_EQ(default_compiler.options().jit.tensor.mode, defaults.jit.tensor.mode);
@@ -90,6 +103,8 @@ TEST(FormCompilerTest, DefaultAndMoveConstructorsPreserveOptionsAndUsability)
     SymbolicOptions opts;
     opts.ad_mode = ADMode::Reverse;
     opts.use_symbolic_tangent = true;
+    opts.geometry_sensitivity.mode = GeometrySensitivityMode::MeshMotionUnknowns;
+    opts.geometry_sensitivity.mesh_motion_field = 4;
     opts.jit.enable = true;
     opts.jit.optimization_level = 1;
     opts.jit.simd_batch = false;
@@ -98,6 +113,9 @@ TEST(FormCompilerTest, DefaultAndMoveConstructorsPreserveOptionsAndUsability)
     FormCompiler moved_constructed(std::move(configured));
     EXPECT_EQ(moved_constructed.options().ad_mode, ADMode::Reverse);
     EXPECT_TRUE(moved_constructed.options().use_symbolic_tangent);
+    EXPECT_EQ(moved_constructed.options().geometry_sensitivity.mode,
+              GeometrySensitivityMode::MeshMotionUnknowns);
+    EXPECT_EQ(moved_constructed.options().geometry_sensitivity.mesh_motion_field, 4);
     EXPECT_TRUE(moved_constructed.options().jit.enable);
     EXPECT_EQ(moved_constructed.options().jit.optimization_level, 1);
     EXPECT_FALSE(moved_constructed.options().jit.simd_batch);
@@ -106,6 +124,7 @@ TEST(FormCompilerTest, DefaultAndMoveConstructorsPreserveOptionsAndUsability)
     moved_assigned = std::move(moved_constructed);
     EXPECT_EQ(moved_assigned.options().ad_mode, ADMode::Reverse);
     EXPECT_TRUE(moved_assigned.options().use_symbolic_tangent);
+    EXPECT_EQ(moved_assigned.options().geometry_sensitivity.mesh_motion_field, 4);
 
     spaces::H1Space space(ElementType::Tetra4, 1);
     const auto u = FormExpr::trialFunction(space, "u");
@@ -113,6 +132,39 @@ TEST(FormCompilerTest, DefaultAndMoveConstructorsPreserveOptionsAndUsability)
     const auto ir = moved_assigned.compileBilinear((u * v).dx());
     EXPECT_TRUE(ir.isCompiled());
     EXPECT_EQ(ir.kind(), FormKind::Bilinear);
+}
+
+TEST(FormCompilerTest, GeometrySensitivityModeFailsClosedForGeometryTerminals)
+{
+    SymbolicOptions opts;
+    opts.geometry_sensitivity.mode = GeometrySensitivityMode::MeshMotionUnknowns;
+    opts.geometry_sensitivity.mesh_motion_field = 2;
+
+    FormCompiler compiler(opts);
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    EXPECT_THROW(
+        (void)compiler.compileResidual(
+            (component(FormExpr::currentCoordinate(), 0) * u * v).dx()),
+        std::invalid_argument);
+
+    const auto ir = compiler.compileResidual((u * v).dx());
+    EXPECT_TRUE(ir.isCompiled());
+}
+
+TEST(FormCompilerTest, GeometrySensitivityModeRequiresMeshMotionField)
+{
+    SymbolicOptions opts;
+    opts.geometry_sensitivity.mode = GeometrySensitivityMode::MeshMotionUnknowns;
+
+    FormCompiler compiler(opts);
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    EXPECT_THROW((void)compiler.compileResidual((u * v).dx()), std::invalid_argument);
 }
 
 TEST(FormCompilerTest, RequiresTopLevelIntegrals)

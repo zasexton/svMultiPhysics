@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <type_traits>
+#include <string>
 
 namespace svmp {
 namespace FE {
@@ -324,6 +325,7 @@ void AssemblyContext::configure(
     solution_component_laplacians_.clear();
     field_solution_data_used_ = 0;
     jit_field_solution_table_.clear();
+    clearMovingDomainData();
 }
 
 void AssemblyContext::configure(
@@ -378,6 +380,7 @@ void AssemblyContext::configure(
 
     solution_hessians_.clear();
     solution_laplacians_.clear();
+    clearMovingDomainData();
 }
 
 void AssemblyContext::configureFace(
@@ -433,6 +436,7 @@ void AssemblyContext::configureFace(
 
     solution_hessians_.clear();
     solution_laplacians_.clear();
+    clearMovingDomainData();
 }
 
 void AssemblyContext::configureFace(
@@ -489,6 +493,7 @@ void AssemblyContext::configureFace(
 
     solution_hessians_.clear();
     solution_laplacians_.clear();
+    clearMovingDomainData();
 }
 
 void AssemblyContext::clear()
@@ -566,6 +571,7 @@ void AssemblyContext::clear()
     solution_component_laplacians_.clear();
     field_solution_data_used_ = 0;
     jit_field_solution_table_.clear();
+    clearMovingDomainData();
 }
 
 bool AssemblyContext::hasPreviousSolutionData() const noexcept
@@ -606,6 +612,26 @@ void AssemblyContext::clearAllPreviousSolutionData() noexcept
     for (std::size_t i = 0; i < history_solution_data_.size(); ++i) {
         clearPreviousSolutionDataK(static_cast<int>(i + 1));
     }
+}
+
+void AssemblyContext::clearMovingDomainData() noexcept
+{
+    reference_physical_points_.clear();
+    current_physical_points_.clear();
+    reference_jacobians_.clear();
+    current_jacobians_.clear();
+    reference_inverse_jacobians_.clear();
+    current_inverse_jacobians_.clear();
+    reference_normals_.clear();
+    current_normals_.clear();
+    reference_measures_.clear();
+    current_measures_.clear();
+    surface_jacobians_.clear();
+    configuration_transforms_.clear();
+    mesh_displacements_.clear();
+    mesh_velocities_.clear();
+    mesh_accelerations_.clear();
+    previous_coordinates_.clear();
 }
 
 // ============================================================================
@@ -697,6 +723,129 @@ Real AssemblyContext::facetArea() const
         throw std::logic_error("AssemblyContext::facetArea: not available for cell context");
     }
     return facet_area_;
+}
+
+namespace {
+
+template <class Container>
+const typename Container::value_type& requireQPointData(
+    const Container& data,
+    LocalIndex q,
+    LocalIndex n_qpts,
+    const char* accessor_name)
+{
+    if (data.empty()) {
+        throw std::logic_error(std::string(accessor_name) + ": data not set");
+    }
+    if (q >= n_qpts) {
+        throw std::out_of_range(std::string(accessor_name) + ": index out of range");
+    }
+    return data[static_cast<std::size_t>(q)];
+}
+
+void requireQPointSpanSize(std::size_t size, LocalIndex n_qpts, const char* setter_name)
+{
+    if (size != static_cast<std::size_t>(n_qpts)) {
+        throw std::invalid_argument(std::string(setter_name) + ": size does not match quadrature points");
+    }
+}
+
+} // namespace
+
+AssemblyContext::Point3D AssemblyContext::referencePhysicalPoint(LocalIndex q) const
+{
+    return requireQPointData(reference_physical_points_, q, n_qpts_,
+                             "AssemblyContext::referencePhysicalPoint");
+}
+
+AssemblyContext::Point3D AssemblyContext::currentPhysicalPoint(LocalIndex q) const
+{
+    return requireQPointData(current_physical_points_, q, n_qpts_,
+                             "AssemblyContext::currentPhysicalPoint");
+}
+
+AssemblyContext::Matrix3x3 AssemblyContext::referenceJacobian(LocalIndex q) const
+{
+    return requireQPointData(reference_jacobians_, q, n_qpts_,
+                             "AssemblyContext::referenceJacobian");
+}
+
+AssemblyContext::Matrix3x3 AssemblyContext::currentJacobian(LocalIndex q) const
+{
+    return requireQPointData(current_jacobians_, q, n_qpts_,
+                             "AssemblyContext::currentJacobian");
+}
+
+AssemblyContext::Matrix3x3 AssemblyContext::referenceInverseJacobian(LocalIndex q) const
+{
+    return requireQPointData(reference_inverse_jacobians_, q, n_qpts_,
+                             "AssemblyContext::referenceInverseJacobian");
+}
+
+AssemblyContext::Matrix3x3 AssemblyContext::currentInverseJacobian(LocalIndex q) const
+{
+    return requireQPointData(current_inverse_jacobians_, q, n_qpts_,
+                             "AssemblyContext::currentInverseJacobian");
+}
+
+AssemblyContext::Vector3D AssemblyContext::referenceNormal(LocalIndex q) const
+{
+    return requireQPointData(reference_normals_, q, n_qpts_,
+                             "AssemblyContext::referenceNormal");
+}
+
+AssemblyContext::Vector3D AssemblyContext::currentNormal(LocalIndex q) const
+{
+    return requireQPointData(current_normals_, q, n_qpts_,
+                             "AssemblyContext::currentNormal");
+}
+
+Real AssemblyContext::referenceMeasure(LocalIndex q) const
+{
+    return requireQPointData(reference_measures_, q, n_qpts_,
+                             "AssemblyContext::referenceMeasure");
+}
+
+Real AssemblyContext::currentMeasure(LocalIndex q) const
+{
+    return requireQPointData(current_measures_, q, n_qpts_,
+                             "AssemblyContext::currentMeasure");
+}
+
+AssemblyContext::Matrix3x3 AssemblyContext::surfaceJacobian(LocalIndex q) const
+{
+    return requireQPointData(surface_jacobians_, q, n_qpts_,
+                             "AssemblyContext::surfaceJacobian");
+}
+
+AssemblyContext::Matrix3x3 AssemblyContext::configurationTransform(LocalIndex q) const
+{
+    return requireQPointData(configuration_transforms_, q, n_qpts_,
+                             "AssemblyContext::configurationTransform");
+}
+
+AssemblyContext::Vector3D AssemblyContext::meshDisplacement(LocalIndex q) const
+{
+    return requireQPointData(mesh_displacements_, q, n_qpts_,
+                             "AssemblyContext::meshDisplacement");
+}
+
+AssemblyContext::Vector3D AssemblyContext::meshVelocity(LocalIndex q) const
+{
+    return requireQPointData(mesh_velocities_, q, n_qpts_,
+                             "AssemblyContext::meshVelocity");
+}
+
+AssemblyContext::Vector3D AssemblyContext::meshAcceleration(LocalIndex q) const
+{
+    return requireQPointData(mesh_accelerations_, q, n_qpts_,
+                             "AssemblyContext::meshAcceleration");
+}
+
+AssemblyContext::Vector3D AssemblyContext::previousCoordinate(LocalIndex q) const
+{
+    return requireQPointData(previous_coordinates_, q, n_qpts_,
+                             "AssemblyContext::previousCoordinate");
 }
 
 void AssemblyContext::setEntityMeasures(Real cell_diameter, Real cell_volume, Real facet_area)
@@ -2490,6 +2639,22 @@ void AssemblyContext::copyGeometryDataFrom(const AssemblyContext& other)
     cell_diameter_ = other.cell_diameter_;
     cell_volume_ = other.cell_volume_;
     facet_area_ = other.facet_area_;
+    reference_physical_points_ = other.reference_physical_points_;
+    current_physical_points_ = other.current_physical_points_;
+    reference_jacobians_ = other.reference_jacobians_;
+    current_jacobians_ = other.current_jacobians_;
+    reference_inverse_jacobians_ = other.reference_inverse_jacobians_;
+    current_inverse_jacobians_ = other.current_inverse_jacobians_;
+    reference_normals_ = other.reference_normals_;
+    current_normals_ = other.current_normals_;
+    reference_measures_ = other.reference_measures_;
+    current_measures_ = other.current_measures_;
+    surface_jacobians_ = other.surface_jacobians_;
+    configuration_transforms_ = other.configuration_transforms_;
+    mesh_displacements_ = other.mesh_displacements_;
+    mesh_velocities_ = other.mesh_velocities_;
+    mesh_accelerations_ = other.mesh_accelerations_;
+    previous_coordinates_ = other.previous_coordinates_;
     interleaved_dirty_ = true;
 }
 
@@ -2945,6 +3110,7 @@ void AssemblyContext::configureForCoupledBlock(
 
     solution_hessians_.clear();
     solution_laplacians_.clear();
+    clearMovingDomainData();
 }
 
 AssemblyContext::Vector3D* AssemblyContext::testPhysGradientsWritePtr(std::size_t count)
@@ -2982,6 +3148,86 @@ void AssemblyContext::setNormals(std::span<const Vector3D> normals)
                                                                       static_cast<std::size_t>(n_qpts_))));
     normals_.assign(normals.begin(), normals.end());
     interleaved_dirty_ = true;
+}
+
+void AssemblyContext::setReferenceGeometry(std::span<const Point3D> points,
+                                           std::span<const Matrix3x3> jacobians,
+                                           std::span<const Matrix3x3> inverse_jacobians,
+                                           std::span<const Real> measures)
+{
+    requireQPointSpanSize(points.size(), n_qpts_, "AssemblyContext::setReferenceGeometry(points)");
+    requireQPointSpanSize(jacobians.size(), n_qpts_, "AssemblyContext::setReferenceGeometry(jacobians)");
+    requireQPointSpanSize(inverse_jacobians.size(), n_qpts_,
+                          "AssemblyContext::setReferenceGeometry(inverse_jacobians)");
+    requireQPointSpanSize(measures.size(), n_qpts_, "AssemblyContext::setReferenceGeometry(measures)");
+    reference_physical_points_.assign(points.begin(), points.end());
+    reference_jacobians_.assign(jacobians.begin(), jacobians.end());
+    reference_inverse_jacobians_.assign(inverse_jacobians.begin(), inverse_jacobians.end());
+    reference_measures_.assign(measures.begin(), measures.end());
+}
+
+void AssemblyContext::setCurrentGeometry(std::span<const Point3D> points,
+                                         std::span<const Matrix3x3> jacobians,
+                                         std::span<const Matrix3x3> inverse_jacobians,
+                                         std::span<const Real> measures)
+{
+    requireQPointSpanSize(points.size(), n_qpts_, "AssemblyContext::setCurrentGeometry(points)");
+    requireQPointSpanSize(jacobians.size(), n_qpts_, "AssemblyContext::setCurrentGeometry(jacobians)");
+    requireQPointSpanSize(inverse_jacobians.size(), n_qpts_,
+                          "AssemblyContext::setCurrentGeometry(inverse_jacobians)");
+    requireQPointSpanSize(measures.size(), n_qpts_, "AssemblyContext::setCurrentGeometry(measures)");
+    current_physical_points_.assign(points.begin(), points.end());
+    current_jacobians_.assign(jacobians.begin(), jacobians.end());
+    current_inverse_jacobians_.assign(inverse_jacobians.begin(), inverse_jacobians.end());
+    current_measures_.assign(measures.begin(), measures.end());
+}
+
+void AssemblyContext::setReferenceNormals(std::span<const Vector3D> normals)
+{
+    requireQPointSpanSize(normals.size(), n_qpts_, "AssemblyContext::setReferenceNormals");
+    reference_normals_.assign(normals.begin(), normals.end());
+}
+
+void AssemblyContext::setCurrentNormals(std::span<const Vector3D> normals)
+{
+    requireQPointSpanSize(normals.size(), n_qpts_, "AssemblyContext::setCurrentNormals");
+    current_normals_.assign(normals.begin(), normals.end());
+}
+
+void AssemblyContext::setSurfaceJacobians(std::span<const Matrix3x3> jacobians)
+{
+    requireQPointSpanSize(jacobians.size(), n_qpts_, "AssemblyContext::setSurfaceJacobians");
+    surface_jacobians_.assign(jacobians.begin(), jacobians.end());
+}
+
+void AssemblyContext::setConfigurationTransforms(std::span<const Matrix3x3> transforms)
+{
+    requireQPointSpanSize(transforms.size(), n_qpts_, "AssemblyContext::setConfigurationTransforms");
+    configuration_transforms_.assign(transforms.begin(), transforms.end());
+}
+
+void AssemblyContext::setMeshDisplacements(std::span<const Vector3D> displacements)
+{
+    requireQPointSpanSize(displacements.size(), n_qpts_, "AssemblyContext::setMeshDisplacements");
+    mesh_displacements_.assign(displacements.begin(), displacements.end());
+}
+
+void AssemblyContext::setMeshVelocities(std::span<const Vector3D> velocities)
+{
+    requireQPointSpanSize(velocities.size(), n_qpts_, "AssemblyContext::setMeshVelocities");
+    mesh_velocities_.assign(velocities.begin(), velocities.end());
+}
+
+void AssemblyContext::setMeshAccelerations(std::span<const Vector3D> accelerations)
+{
+    requireQPointSpanSize(accelerations.size(), n_qpts_, "AssemblyContext::setMeshAccelerations");
+    mesh_accelerations_.assign(accelerations.begin(), accelerations.end());
+}
+
+void AssemblyContext::setPreviousCoordinates(std::span<const Vector3D> coordinates)
+{
+    requireQPointSpanSize(coordinates.size(), n_qpts_, "AssemblyContext::setPreviousCoordinates");
+    previous_coordinates_.assign(coordinates.begin(), coordinates.end());
 }
 
 void AssemblyContext::setSolutionValues(std::span<const Real> values)

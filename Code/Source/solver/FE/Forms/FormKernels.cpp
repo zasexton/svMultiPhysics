@@ -4753,6 +4753,96 @@ EvalValue<Real> evalRealDispatchNormal(const FormExprNode&,
     return out;
 }
 
+EvalValue<Real> evalRealVectorTerminal(const EvalEnvReal& env,
+                                       Side side,
+                                       LocalIndex q,
+                                       std::array<Real, 3> (assembly::AssemblyContext::*accessor)(LocalIndex) const)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    EvalValue<Real> out;
+    out.kind = EvalValue<Real>::Kind::Vector;
+    out.v = (ctx.*accessor)(q);
+    out.vector_size = ctx.dimension();
+    return out;
+}
+
+EvalValue<Real> evalRealMatrixTerminal(const EvalEnvReal& env,
+                                       Side side,
+                                       LocalIndex q,
+                                       std::array<std::array<Real, 3>, 3> (assembly::AssemblyContext::*accessor)(LocalIndex) const)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+    EvalValue<Real> out;
+    out.kind = EvalValue<Real>::Kind::Matrix;
+    out.m = (ctx.*accessor)(q);
+    out.matrix_rows = dim;
+    out.matrix_cols = dim;
+    return out;
+}
+
+EvalValue<Real> evalRealDispatchMeshDisplacement(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    return evalRealVectorTerminal(env, side, q, &assembly::AssemblyContext::meshDisplacement);
+}
+
+EvalValue<Real> evalRealDispatchMeshVelocity(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    return evalRealVectorTerminal(env, side, q, &assembly::AssemblyContext::meshVelocity);
+}
+
+EvalValue<Real> evalRealDispatchMeshAcceleration(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    return evalRealVectorTerminal(env, side, q, &assembly::AssemblyContext::meshAcceleration);
+}
+
+EvalValue<Real> evalRealDispatchCurrentCoordinate(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    return evalRealVectorTerminal(env, side, q, &assembly::AssemblyContext::currentPhysicalPoint);
+}
+
+EvalValue<Real> evalRealDispatchReferencePhysicalCoordinate(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    return evalRealVectorTerminal(env, side, q, &assembly::AssemblyContext::referencePhysicalPoint);
+}
+
+EvalValue<Real> evalRealDispatchCurrentJacobian(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    return evalRealMatrixTerminal(env, side, q, &assembly::AssemblyContext::currentJacobian);
+}
+
+EvalValue<Real> evalRealDispatchReferenceJacobian(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    return evalRealMatrixTerminal(env, side, q, &assembly::AssemblyContext::referenceJacobian);
+}
+
+EvalValue<Real> evalRealDispatchCurrentMeasure(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.currentMeasure(q)};
+}
+
+EvalValue<Real> evalRealDispatchReferenceMeasure(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.referenceMeasure(q)};
+}
+
+EvalValue<Real> evalRealDispatchCurrentNormal(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    return evalRealVectorTerminal(env, side, q, &assembly::AssemblyContext::currentNormal);
+}
+
+EvalValue<Real> evalRealDispatchReferenceNormal(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    return evalRealVectorTerminal(env, side, q, &assembly::AssemblyContext::referenceNormal);
+}
+
+EvalValue<Real> evalRealDispatchSurfaceJacobian(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    return evalRealMatrixTerminal(env, side, q, &assembly::AssemblyContext::surfaceJacobian);
+}
+
 EvalValue<Real> evalRealDispatchCellDiameter(const FormExprNode&,
                                              const EvalEnvReal& env,
                                              Side side,
@@ -4808,6 +4898,20 @@ const std::array<EvalRealDispatchFn, kFormExprDispatchSize>& evalRealDispatchTab
         table[static_cast<std::size_t>(FormExprType::EffectiveTimeStep)] = &evalRealDispatchEffectiveTimeStep;
         table[static_cast<std::size_t>(FormExprType::Coordinate)] = &evalRealDispatchCoordinate;
         table[static_cast<std::size_t>(FormExprType::ReferenceCoordinate)] = &evalRealDispatchReferenceCoordinate;
+        table[static_cast<std::size_t>(FormExprType::MeshDisplacement)] = &evalRealDispatchMeshDisplacement;
+        table[static_cast<std::size_t>(FormExprType::MeshVelocity)] = &evalRealDispatchMeshVelocity;
+        table[static_cast<std::size_t>(FormExprType::MeshAcceleration)] = &evalRealDispatchMeshAcceleration;
+        table[static_cast<std::size_t>(FormExprType::CurrentCoordinate)] = &evalRealDispatchCurrentCoordinate;
+        table[static_cast<std::size_t>(FormExprType::ReferencePhysicalCoordinate)] = &evalRealDispatchReferencePhysicalCoordinate;
+        table[static_cast<std::size_t>(FormExprType::CurrentJacobian)] = &evalRealDispatchCurrentJacobian;
+        table[static_cast<std::size_t>(FormExprType::ReferenceJacobian)] = &evalRealDispatchReferenceJacobian;
+        table[static_cast<std::size_t>(FormExprType::CurrentJacobianDeterminant)] = &evalRealDispatchCurrentMeasure;
+        table[static_cast<std::size_t>(FormExprType::ReferenceJacobianDeterminant)] = &evalRealDispatchReferenceMeasure;
+        table[static_cast<std::size_t>(FormExprType::CurrentNormal)] = &evalRealDispatchCurrentNormal;
+        table[static_cast<std::size_t>(FormExprType::ReferenceNormal)] = &evalRealDispatchReferenceNormal;
+        table[static_cast<std::size_t>(FormExprType::CurrentMeasure)] = &evalRealDispatchCurrentMeasure;
+        table[static_cast<std::size_t>(FormExprType::ReferenceMeasure)] = &evalRealDispatchReferenceMeasure;
+        table[static_cast<std::size_t>(FormExprType::SurfaceJacobian)] = &evalRealDispatchSurfaceJacobian;
         table[static_cast<std::size_t>(FormExprType::Jacobian)] = &evalRealDispatchJacobian;
         table[static_cast<std::size_t>(FormExprType::JacobianInverse)] = &evalRealDispatchJacobianInverse;
         table[static_cast<std::size_t>(FormExprType::JacobianDeterminant)] = &evalRealDispatchJacobianDeterminant;
@@ -4863,6 +4967,32 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
             out.vector_size = dim;
             return out;
         }
+        case FormExprType::MeshDisplacement:
+            return evalRealDispatchMeshDisplacement(node, env, side, q);
+        case FormExprType::MeshVelocity:
+            return evalRealDispatchMeshVelocity(node, env, side, q);
+        case FormExprType::MeshAcceleration:
+            return evalRealDispatchMeshAcceleration(node, env, side, q);
+        case FormExprType::CurrentCoordinate:
+            return evalRealDispatchCurrentCoordinate(node, env, side, q);
+        case FormExprType::ReferencePhysicalCoordinate:
+            return evalRealDispatchReferencePhysicalCoordinate(node, env, side, q);
+        case FormExprType::CurrentJacobian:
+            return evalRealDispatchCurrentJacobian(node, env, side, q);
+        case FormExprType::ReferenceJacobian:
+            return evalRealDispatchReferenceJacobian(node, env, side, q);
+        case FormExprType::CurrentJacobianDeterminant:
+        case FormExprType::CurrentMeasure:
+            return evalRealDispatchCurrentMeasure(node, env, side, q);
+        case FormExprType::ReferenceJacobianDeterminant:
+        case FormExprType::ReferenceMeasure:
+            return evalRealDispatchReferenceMeasure(node, env, side, q);
+        case FormExprType::CurrentNormal:
+            return evalRealDispatchCurrentNormal(node, env, side, q);
+        case FormExprType::ReferenceNormal:
+            return evalRealDispatchReferenceNormal(node, env, side, q);
+        case FormExprType::SurfaceJacobian:
+            return evalRealDispatchSurfaceJacobian(node, env, side, q);
         case FormExprType::Identity: {
             const int idim = node.identityDim().value_or(dim);
             EvalValue<Real> out;
@@ -4912,6 +5042,14 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
         }
         case FormExprType::CellDomainId: {
             return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, static_cast<Real>(ctx.cellDomainId())};
+        }
+        case FormExprType::Pullback:
+        case FormExprType::Pushforward: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1u || !kids[0]) {
+                throw std::logic_error("Forms: frame transform node must have 1 child");
+            }
+            return evalReal(*kids[0], env, side, q);
         }
         case FormExprType::ParameterSymbol: {
             const auto nm = node.symbolName();
@@ -8487,6 +8625,117 @@ EvalValue<Dual> evalDualDispatchNormal(const FormExprNode&,
     return out;
 }
 
+EvalValue<Dual> evalDualVectorTerminal(const EvalEnvDual& env,
+                                       Side side,
+                                       LocalIndex q,
+                                       std::array<Real, 3> (assembly::AssemblyContext::*accessor)(LocalIndex) const)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+    EvalValue<Dual> out;
+    out.kind = EvalValue<Dual>::Kind::Vector;
+    out.vector_size = dim;
+    const auto v = (ctx.*accessor)(q);
+    for (int d = 0; d < 3; ++d) {
+        out.v[static_cast<std::size_t>(d)] =
+            makeDualConstant(v[static_cast<std::size_t>(d)], env.ws->alloc());
+    }
+    return out;
+}
+
+EvalValue<Dual> evalDualMatrixTerminal(const EvalEnvDual& env,
+                                       Side side,
+                                       LocalIndex q,
+                                       std::array<std::array<Real, 3>, 3> (assembly::AssemblyContext::*accessor)(LocalIndex) const)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+    EvalValue<Dual> out;
+    out.kind = EvalValue<Dual>::Kind::Matrix;
+    out.matrix_rows = dim;
+    out.matrix_cols = dim;
+    const auto m = (ctx.*accessor)(q);
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                makeDualConstant(m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+        }
+    }
+    return out;
+}
+
+EvalValue<Dual> evalDualScalarTerminal(const EvalEnvDual& env,
+                                       Side side,
+                                       LocalIndex q,
+                                       Real (assembly::AssemblyContext::*accessor)(LocalIndex) const)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    EvalValue<Dual> out;
+    out.kind = EvalValue<Dual>::Kind::Scalar;
+    out.s = makeDualConstant((ctx.*accessor)(q), env.ws->alloc());
+    return out;
+}
+
+EvalValue<Dual> evalDualDispatchMeshDisplacement(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
+{
+    return evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::meshDisplacement);
+}
+
+EvalValue<Dual> evalDualDispatchMeshVelocity(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
+{
+    return evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::meshVelocity);
+}
+
+EvalValue<Dual> evalDualDispatchMeshAcceleration(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
+{
+    return evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::meshAcceleration);
+}
+
+EvalValue<Dual> evalDualDispatchCurrentCoordinate(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
+{
+    return evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::currentPhysicalPoint);
+}
+
+EvalValue<Dual> evalDualDispatchReferencePhysicalCoordinate(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
+{
+    return evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::referencePhysicalPoint);
+}
+
+EvalValue<Dual> evalDualDispatchCurrentJacobian(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
+{
+    return evalDualMatrixTerminal(env, side, q, &assembly::AssemblyContext::currentJacobian);
+}
+
+EvalValue<Dual> evalDualDispatchReferenceJacobian(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
+{
+    return evalDualMatrixTerminal(env, side, q, &assembly::AssemblyContext::referenceJacobian);
+}
+
+EvalValue<Dual> evalDualDispatchCurrentMeasure(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
+{
+    return evalDualScalarTerminal(env, side, q, &assembly::AssemblyContext::currentMeasure);
+}
+
+EvalValue<Dual> evalDualDispatchReferenceMeasure(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
+{
+    return evalDualScalarTerminal(env, side, q, &assembly::AssemblyContext::referenceMeasure);
+}
+
+EvalValue<Dual> evalDualDispatchCurrentNormal(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
+{
+    return evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::currentNormal);
+}
+
+EvalValue<Dual> evalDualDispatchReferenceNormal(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
+{
+    return evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::referenceNormal);
+}
+
+EvalValue<Dual> evalDualDispatchSurfaceJacobian(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
+{
+    return evalDualMatrixTerminal(env, side, q, &assembly::AssemblyContext::surfaceJacobian);
+}
+
 EvalValue<Dual> evalDualDispatchCellDiameter(const FormExprNode&,
                                              const EvalEnvDual& env,
                                              Side side,
@@ -8554,6 +8803,20 @@ const std::array<EvalDualDispatchFn, kFormExprDispatchSize>& evalDualDispatchTab
         table[static_cast<std::size_t>(FormExprType::EffectiveTimeStep)] = &evalDualDispatchEffectiveTimeStep;
         table[static_cast<std::size_t>(FormExprType::Coordinate)] = &evalDualDispatchCoordinate;
         table[static_cast<std::size_t>(FormExprType::ReferenceCoordinate)] = &evalDualDispatchReferenceCoordinate;
+        table[static_cast<std::size_t>(FormExprType::MeshDisplacement)] = &evalDualDispatchMeshDisplacement;
+        table[static_cast<std::size_t>(FormExprType::MeshVelocity)] = &evalDualDispatchMeshVelocity;
+        table[static_cast<std::size_t>(FormExprType::MeshAcceleration)] = &evalDualDispatchMeshAcceleration;
+        table[static_cast<std::size_t>(FormExprType::CurrentCoordinate)] = &evalDualDispatchCurrentCoordinate;
+        table[static_cast<std::size_t>(FormExprType::ReferencePhysicalCoordinate)] = &evalDualDispatchReferencePhysicalCoordinate;
+        table[static_cast<std::size_t>(FormExprType::CurrentJacobian)] = &evalDualDispatchCurrentJacobian;
+        table[static_cast<std::size_t>(FormExprType::ReferenceJacobian)] = &evalDualDispatchReferenceJacobian;
+        table[static_cast<std::size_t>(FormExprType::CurrentJacobianDeterminant)] = &evalDualDispatchCurrentMeasure;
+        table[static_cast<std::size_t>(FormExprType::ReferenceJacobianDeterminant)] = &evalDualDispatchReferenceMeasure;
+        table[static_cast<std::size_t>(FormExprType::CurrentNormal)] = &evalDualDispatchCurrentNormal;
+        table[static_cast<std::size_t>(FormExprType::ReferenceNormal)] = &evalDualDispatchReferenceNormal;
+        table[static_cast<std::size_t>(FormExprType::CurrentMeasure)] = &evalDualDispatchCurrentMeasure;
+        table[static_cast<std::size_t>(FormExprType::ReferenceMeasure)] = &evalDualDispatchReferenceMeasure;
+        table[static_cast<std::size_t>(FormExprType::SurfaceJacobian)] = &evalDualDispatchSurfaceJacobian;
         table[static_cast<std::size_t>(FormExprType::Jacobian)] = &evalDualDispatchJacobian;
         table[static_cast<std::size_t>(FormExprType::JacobianInverse)] = &evalDualDispatchJacobianInverse;
         table[static_cast<std::size_t>(FormExprType::JacobianDeterminant)] = &evalDualDispatchJacobianDeterminant;
@@ -8629,6 +8892,32 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
             }
             return out;
         }
+        case FormExprType::MeshDisplacement:
+            return evalDualDispatchMeshDisplacement(node, env, side, q);
+        case FormExprType::MeshVelocity:
+            return evalDualDispatchMeshVelocity(node, env, side, q);
+        case FormExprType::MeshAcceleration:
+            return evalDualDispatchMeshAcceleration(node, env, side, q);
+        case FormExprType::CurrentCoordinate:
+            return evalDualDispatchCurrentCoordinate(node, env, side, q);
+        case FormExprType::ReferencePhysicalCoordinate:
+            return evalDualDispatchReferencePhysicalCoordinate(node, env, side, q);
+        case FormExprType::CurrentJacobian:
+            return evalDualDispatchCurrentJacobian(node, env, side, q);
+        case FormExprType::ReferenceJacobian:
+            return evalDualDispatchReferenceJacobian(node, env, side, q);
+        case FormExprType::CurrentJacobianDeterminant:
+        case FormExprType::CurrentMeasure:
+            return evalDualDispatchCurrentMeasure(node, env, side, q);
+        case FormExprType::ReferenceJacobianDeterminant:
+        case FormExprType::ReferenceMeasure:
+            return evalDualDispatchReferenceMeasure(node, env, side, q);
+        case FormExprType::CurrentNormal:
+            return evalDualDispatchCurrentNormal(node, env, side, q);
+        case FormExprType::ReferenceNormal:
+            return evalDualDispatchReferenceNormal(node, env, side, q);
+        case FormExprType::SurfaceJacobian:
+            return evalDualDispatchSurfaceJacobian(node, env, side, q);
         case FormExprType::Identity: {
             const int idim = node.identityDim().value_or(dim);
             EvalValue<Dual> out;
@@ -8701,6 +8990,14 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
             out.kind = EvalValue<Dual>::Kind::Scalar;
             out.s = makeDualConstant(static_cast<Real>(ctx.cellDomainId()), env.ws->alloc());
             return out;
+        }
+        case FormExprType::Pullback:
+        case FormExprType::Pushforward: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1u || !kids[0]) {
+                throw std::logic_error("Forms: frame transform node must have 1 child (dual)");
+            }
+            return evalDual(*kids[0], env, side, q);
         }
         case FormExprType::TestFunction: {
             const auto* sig = node.spaceSignature();

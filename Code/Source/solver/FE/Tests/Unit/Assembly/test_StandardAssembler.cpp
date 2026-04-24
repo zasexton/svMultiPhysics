@@ -33,12 +33,14 @@
 #include "Elements/LagrangeElement.h"
 #include "Geometry/MappingFactory.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <vector>
 #include <memory>
 #include <numeric>
 #include <limits>
+#include <utility>
 
 namespace svmp {
 namespace FE {
@@ -166,6 +168,7 @@ public:
             {1.0, 1.0, 0.0},  // 2
             {0.0, 2.0, 0.0},  // 3 (non-parallelogram)
         };
+        current_nodes_ = nodes_;
         cell_ = {0, 1, 2, 3};
     }
 
@@ -195,11 +198,45 @@ public:
     void getCellCoordinates(GlobalIndex /*cell_id*/,
                             std::vector<std::array<Real, 3>>& coords) const override
     {
+        getCellCoordinatesForNodes(nodes_, coords);
+    }
+
+    [[nodiscard]] bool supportsCoordinateFrame(CoordinateFrame frame) const noexcept override
+    {
+        return frame == CoordinateFrame::Active ||
+               frame == CoordinateFrame::Reference ||
+               frame == CoordinateFrame::Current;
+    }
+
+    void getCellCoordinates(GlobalIndex /*cell_id*/,
+                            CoordinateFrame frame,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        getCellCoordinatesForNodes(frame == CoordinateFrame::Current ? current_nodes_ : nodes_,
+                                   coords);
+    }
+
+    void setCurrentNodes(std::vector<std::array<Real, 3>> nodes)
+    {
+        current_nodes_ = std::move(nodes);
+    }
+
+    [[nodiscard]] const std::vector<std::array<Real, 3>>& referenceNodes() const noexcept
+    {
+        return nodes_;
+    }
+
+private:
+    void getCellCoordinatesForNodes(const std::vector<std::array<Real, 3>>& nodes,
+                                    std::vector<std::array<Real, 3>>& coords) const
+    {
         coords.resize(cell_.size());
         for (std::size_t i = 0; i < cell_.size(); ++i) {
-            coords[i] = nodes_.at(static_cast<std::size_t>(cell_[i]));
+            coords[i] = nodes.at(static_cast<std::size_t>(cell_[i]));
         }
     }
+
+public:
 
     [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/,
                                                GlobalIndex /*cell_id*/) const override
@@ -237,6 +274,7 @@ public:
 
 private:
     std::vector<std::array<Real, 3>> nodes_{};
+    std::vector<std::array<Real, 3>> current_nodes_{};
     std::array<GlobalIndex, 4> cell_{};
 };
 
@@ -1120,6 +1158,90 @@ private:
     FieldId vector_field_{INVALID_FIELD_ID};
 };
 
+class MovingDomainProbeKernel final : public AssemblyKernel {
+public:
+    MovingDomainProbeKernel(FieldId displacement_field, FieldId velocity_field)
+        : displacement_field_(displacement_field)
+        , velocity_field_(velocity_field)
+    {
+    }
+
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        const auto n_test = ctx.numTestDofs();
+        output.reserve(n_test, ctx.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/true);
+
+        qpts_seen = ctx.numQuadraturePoints();
+        sum_delta_x = 0.0;
+        sum_displacement_x = 0.0;
+        sum_velocity_y = 0.0;
+        max_measure_delta = 0.0;
+        first_transform_00 = 0.0;
+        output_value = 0.0;
+
+        for (LocalIndex q = 0; q < qpts_seen; ++q) {
+            const auto X = ctx.referencePhysicalPoint(q);
+            const auto x = ctx.currentPhysicalPoint(q);
+            const auto d = ctx.meshDisplacement(q);
+            const auto v = ctx.meshVelocity(q);
+            const auto F = ctx.configurationTransform(q);
+            const auto J_ref = ctx.referenceJacobian(q);
+            const auto J_cur = ctx.currentJacobian(q);
+            const Real measure_delta = std::abs(ctx.currentMeasure(q) - ctx.referenceMeasure(q));
+
+            sum_delta_x += x[0] - X[0];
+            sum_displacement_x += d[0];
+            sum_velocity_y += v[1];
+            max_measure_delta = std::max(max_measure_delta, measure_delta);
+            if (q == 0) {
+                first_transform_00 = F[0][0];
+            }
+
+            output_value += ctx.integrationWeight(q) *
+                            (x[0] - X[0] + d[0] + v[1] +
+                             F[0][0] + J_cur[0][0] - J_ref[0][0]);
+        }
+
+        if (n_test > 0) {
+            output.vectorEntry(0) = output_value;
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::IntegrationWeights |
+               RequiredData::ReferencePhysicalPoints |
+               RequiredData::CurrentPhysicalPoints |
+               RequiredData::ReferenceJacobians |
+               RequiredData::CurrentJacobians |
+               RequiredData::ReferenceMeasures |
+               RequiredData::CurrentMeasures |
+               RequiredData::ConfigurationTransforms |
+               RequiredData::MeshDisplacement |
+               RequiredData::MeshVelocity;
+    }
+
+    [[nodiscard]] std::vector<FieldRequirement> fieldRequirements() const override
+    {
+        return {
+            FieldRequirement{displacement_field_, RequiredData::SolutionValues},
+            FieldRequirement{velocity_field_, RequiredData::SolutionValues},
+        };
+    }
+
+    LocalIndex qpts_seen{0};
+    Real sum_delta_x{0.0};
+    Real sum_displacement_x{0.0};
+    Real sum_velocity_y{0.0};
+    Real max_measure_delta{0.0};
+    Real first_transform_00{0.0};
+    Real output_value{0.0};
+
+private:
+    FieldId displacement_field_{INVALID_FIELD_ID};
+    FieldId velocity_field_{INVALID_FIELD_ID};
+};
+
 inline AssemblyResult assembleDiagonalMonolithic(
     StandardAssembler& assembler,
     const IMeshAccess& mesh,
@@ -1434,6 +1556,95 @@ private:
     std::array<GlobalIndex, 4> cell_{};
 };
 
+class MovingTetraBoundaryMeshAccess : public IMeshAccess {
+public:
+    MovingTetraBoundaryMeshAccess()
+    {
+        reference_nodes_ = {
+            std::array<Real, 3>{0.0, 0.0, 0.0},
+            std::array<Real, 3>{1.0, 0.0, 0.0},
+            std::array<Real, 3>{0.0, 1.0, 0.0},
+            std::array<Real, 3>{0.0, 0.0, 1.0}
+        };
+        current_nodes_ = {
+            std::array<Real, 3>{0.0, 0.0, 0.0},
+            std::array<Real, 3>{2.0, 0.0, 0.0},
+            std::array<Real, 3>{0.0, 3.0, 0.0},
+            std::array<Real, 3>{0.0, 0.0, 1.0}
+        };
+        cell_ = {0, 1, 2, 3};
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 1; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return ElementType::Tetra4; }
+
+    void getCellNodes(GlobalIndex /*cell_id*/, std::vector<GlobalIndex>& nodes) const override
+    {
+        nodes.assign(cell_.begin(), cell_.end());
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return current_nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(GlobalIndex /*cell_id*/,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        coords = current_nodes_;
+    }
+
+    [[nodiscard]] bool supportsCoordinateFrame(CoordinateFrame frame) const override
+    {
+        return frame == CoordinateFrame::Active ||
+               frame == CoordinateFrame::Reference ||
+               frame == CoordinateFrame::Current;
+    }
+
+    void getCellCoordinates(GlobalIndex /*cell_id*/,
+                            CoordinateFrame frame,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        coords = (frame == CoordinateFrame::Reference) ? reference_nodes_ : current_nodes_;
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/,
+                                               GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return 1; }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex /*face_id*/) const override
+    {
+        return {-1, -1};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+
+    void forEachBoundaryFace(int marker,
+                             std::function<void(GlobalIndex, GlobalIndex)> callback) const override
+    {
+        if (marker == 1) {
+            callback(0, 0);
+        }
+    }
+
+    void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override {}
+
+private:
+    std::vector<std::array<Real, 3>> reference_nodes_{};
+    std::vector<std::array<Real, 3>> current_nodes_{};
+    std::array<GlobalIndex, 4> cell_{};
+};
+
 /**
  * @brief Two stacked Hex8 cells sharing one interior face at z=1.
  *
@@ -1660,6 +1871,90 @@ public:
             output.local_vector[0] = sum_w;
         }
     }
+};
+
+class MovingBoundaryFaceFrameProbeKernel : public AssemblyKernel {
+public:
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::IntegrationWeights |
+               RequiredData::ReferencePhysicalPoints |
+               RequiredData::CurrentPhysicalPoints |
+               RequiredData::ReferenceMeasures |
+               RequiredData::CurrentMeasures |
+               RequiredData::ReferenceNormals |
+               RequiredData::CurrentNormals |
+               RequiredData::SurfaceJacobians |
+               RequiredData::ConfigurationTransforms;
+    }
+
+    void computeCell(const AssemblyContext& /*ctx*/, KernelOutput& /*output*/) override {}
+
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+
+    void computeBoundaryFace(const AssemblyContext& ctx,
+                             int /*boundary_marker*/,
+                             KernelOutput& output) override
+    {
+        const auto n = ctx.numTestDofs();
+        output.local_vector.assign(static_cast<std::size_t>(n), 0.0);
+        output.has_vector = true;
+        output.has_matrix = false;
+        output.n_test_dofs = n;
+        output.n_trial_dofs = n;
+
+        active_area = 0.0;
+        reference_area = 0.0;
+        current_area = 0.0;
+        max_coordinate_error = 0.0;
+        max_normal_delta = 0.0;
+        first_F00 = 0.0;
+        first_surface_tangent_x = 0.0;
+
+        for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+            const Real w = ctx.quadratureWeight(q);
+            active_area += ctx.integrationWeight(q);
+            reference_area += w * ctx.referenceMeasure(q);
+            current_area += w * ctx.currentMeasure(q);
+
+            const auto X = ctx.referencePhysicalPoint(q);
+            const auto x = ctx.currentPhysicalPoint(q);
+            max_coordinate_error = std::max({
+                max_coordinate_error,
+                std::abs(x[0] - Real(2) * X[0]),
+                std::abs(x[1] - Real(3) * X[1]),
+                std::abs(x[2] - X[2])
+            });
+
+            const auto N = ctx.referenceNormal(q);
+            const auto n_cur = ctx.currentNormal(q);
+            max_normal_delta = std::max({
+                max_normal_delta,
+                std::abs(n_cur[0] - N[0]),
+                std::abs(n_cur[1] - N[1]),
+                std::abs(n_cur[2] - N[2])
+            });
+
+            if (q == 0) {
+                const auto F = ctx.configurationTransform(q);
+                const auto Js = ctx.surfaceJacobian(q);
+                first_F00 = F[0][0];
+                first_surface_tangent_x = Js[0][0];
+            }
+        }
+
+        if (n > 0) {
+            output.local_vector[0] = active_area;
+        }
+    }
+
+    Real active_area{0.0};
+    Real reference_area{0.0};
+    Real current_area{0.0};
+    Real max_coordinate_error{0.0};
+    Real max_normal_delta{0.0};
+    Real first_F00{0.0};
+    Real first_surface_tangent_x{0.0};
 };
 
 class InteriorFaceDiagnosticsKernel : public AssemblyKernel {
@@ -2009,6 +2304,37 @@ TEST(StandardAssemblerFaces, BoundaryFaceUsesFaceQuadratureAndNormals) {
     EXPECT_NEAR(rhs.getVectorEntry(0), 0.5, 1e-12);         // sum of integration weights
     EXPECT_NEAR(rhs.getVectorEntry(1), 0.0, 1e-12);         // max |xi.z|
     EXPECT_NEAR(rhs.getVectorEntry(2), -1.0, 1e-12);        // avg normal z component
+}
+
+TEST(StandardAssemblerMovingDomain, BoundaryFacePreparesReferenceAndCurrentGeometry) {
+    MovingTetraBoundaryMeshAccess mesh;
+
+    dofs::DofMap dof_map(1, 4, 4);
+    dof_map.setCellDofs(0, std::vector<GlobalIndex>{0, 1, 2, 3});
+    dof_map.setNumDofs(4);
+    dof_map.setNumLocalDofs(4);
+    dof_map.finalize();
+
+    MockFunctionSpace space;
+    DenseVectorView rhs(4);
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    MovingBoundaryFaceFrameProbeKernel kernel;
+    auto result = assembler.assembleBoundaryFaces(mesh, 1, space, kernel, nullptr, &rhs);
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.boundary_faces_assembled, 1);
+
+    EXPECT_NEAR(kernel.reference_area, 0.5, 1e-12);
+    EXPECT_NEAR(kernel.current_area, 3.0, 1e-12);
+    EXPECT_NEAR(kernel.active_area, 3.0, 1e-12);
+    EXPECT_NEAR(kernel.max_coordinate_error, 0.0, 1e-12);
+    EXPECT_NEAR(kernel.max_normal_delta, 0.0, 1e-12);
+    EXPECT_NEAR(kernel.first_F00, 2.0, 1e-12);
+    EXPECT_NEAR(kernel.first_surface_tangent_x, 2.0, 1e-8);
+    EXPECT_NEAR(rhs.getVectorEntry(0), 3.0, 1e-12);
 }
 
 TEST(StandardAssemblerFaces, Tetra3D_ObliqueFace2MeasureMatchesPhysicalArea) {
@@ -2537,6 +2863,10 @@ public:
 
     [[nodiscard]] bool revisionTrackingAvailable() const override { return true; }
     [[nodiscard]] std::uint64_t geometryRevision() const override { return geometry_revision_; }
+    [[nodiscard]] bool cellIdsAreDense() const override { return true; }
+
+    void resetCoordinateQueryCount() const noexcept { coordinate_query_count_ = 0; }
+    [[nodiscard]] std::size_t coordinateQueryCount() const noexcept { return coordinate_query_count_; }
 
     [[nodiscard]] GlobalIndex numCells() const override { return 1; }
     [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
@@ -2557,6 +2887,7 @@ public:
 
     void getCellCoordinates(GlobalIndex /*cell_id*/,
                             std::vector<std::array<Real, 3>>& coords) const override {
+        ++coordinate_query_count_;
         coords.resize(4);
         for (std::size_t i = 0; i < 4; ++i) {
             coords[i] = nodes_.at(static_cast<std::size_t>(cell_nodes_[i]));
@@ -2586,6 +2917,7 @@ private:
     std::array<std::array<Real, 3>, 4> nodes_{};
     std::array<GlobalIndex, 4> cell_nodes_{};
     std::uint64_t geometry_revision_{0};
+    mutable std::size_t coordinate_query_count_{0};
 };
 
 class SinglePointMeshAccess final : public IMeshAccess {
@@ -2967,23 +3299,106 @@ TEST(StandardAssemblerCaches, ReusedAssemblerRebuildsFlatCoordinatesAfterGeometr
     assembler.setDofMap(dof_map);
     assembler.initialize();
 
+    auto assemble_fused_mass = [&](TestDenseSystemView& view) {
+        MassKernel kernel;
+        const FusedCellTerm term{
+            .test_space = &space,
+            .trial_space = &space,
+            .kernel = &kernel,
+            .row_dof_map = &dof_map,
+            .col_dof_map = &dof_map,
+            .row_dof_offset = 0,
+            .col_dof_offset = 0,
+            .matrix_view = &view,
+            .vector_view = nullptr,
+            .assemble_matrix = true,
+            .assemble_vector = false,
+        };
+        return assembler.assembleCellsFused(mesh, std::span<const FusedCellTerm>(&term, 1));
+    };
+
     MassKernel first_kernel;
     TestDenseSystemView first(4);
     first.zero();
-    const auto first_result = assembler.assembleMatrix(mesh, space, space, first_kernel, first);
+    const auto first_result = assemble_fused_mass(first);
     EXPECT_TRUE(first_result.success);
     const Real first_diag = first.getMatrixEntry(0, 0);
 
     nodes[3] = {0.0, 0.0, 2.0};
     mesh.setNodes(nodes);
 
-    MassKernel second_kernel;
     TestDenseSystemView second(4);
     second.zero();
-    const auto second_result = assembler.assembleMatrix(mesh, space, space, second_kernel, second);
+    const auto second_result = assemble_fused_mass(second);
     EXPECT_TRUE(second_result.success);
 
     EXPECT_NEAR(second.getMatrixEntry(0, 0), Real(2.0) * first_diag, 1e-12);
+
+    nodes[3] = {0.0, 0.0, 3.0};
+    mesh.setNodes(nodes);
+
+    MassKernel third_kernel;
+    TestDenseSystemView third(4);
+    third.zero();
+    const auto third_result = assembler.assembleMatrix(mesh, space, space, third_kernel, third);
+    EXPECT_TRUE(third_result.success);
+
+    EXPECT_NEAR(third.getMatrixEntry(0, 0), Real(3.0) * first_diag, 1e-12);
+}
+
+TEST(StandardAssemblerCaches, FlatCoordinateCacheReusedForStaticDenseMeshes)
+{
+    const std::array<std::array<Real, 3>, 4> nodes = {{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0},
+        {0.0, 0.0, 1.0},
+    }};
+    ConfigurableSingleTetraMeshAccess mesh(nodes, /*cell_nodes=*/{0, 1, 2, 3});
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+    auto dof_map = createSingleCellDofMap(4);
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    auto assemble_fused_mass = [&](TestDenseSystemView& view) {
+        MassKernel kernel;
+        const FusedCellTerm term{
+            .test_space = &space,
+            .trial_space = &space,
+            .kernel = &kernel,
+            .row_dof_map = &dof_map,
+            .col_dof_map = &dof_map,
+            .row_dof_offset = 0,
+            .col_dof_offset = 0,
+            .matrix_view = &view,
+            .vector_view = nullptr,
+            .assemble_matrix = true,
+            .assemble_vector = false,
+        };
+        return assembler.assembleCellsFused(mesh, std::span<const FusedCellTerm>(&term, 1));
+    };
+
+    TestDenseSystemView first(4);
+    first.zero();
+    mesh.resetCoordinateQueryCount();
+    const auto first_result = assemble_fused_mass(first);
+    EXPECT_TRUE(first_result.success);
+    const auto first_queries = mesh.coordinateQueryCount();
+    EXPECT_GT(first_queries, 0u);
+
+    TestDenseSystemView second(4);
+    second.zero();
+    const auto second_result = assemble_fused_mass(second);
+    EXPECT_TRUE(second_result.success);
+    EXPECT_EQ(mesh.coordinateQueryCount(), first_queries);
+
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        for (GlobalIndex j = 0; j < 4; ++j) {
+            EXPECT_NEAR(second.getMatrixEntry(i, j), first.getMatrixEntry(i, j), 1e-12);
+        }
+    }
 }
 
 TEST(StandardAssemblerCaches, ResolvedTablesRespectDofAndBackendLayoutRevisions)
@@ -3080,6 +3495,95 @@ TEST(StandardAssemblerEdgeCases, ConstraintChainDistributesToMasters) {
     // Constrained rows are not populated by distribution.
     EXPECT_DOUBLE_EQ(sys.getMatrixEntry(0, 0), 0.0);
     EXPECT_DOUBLE_EQ(sys.getMatrixEntry(1, 1), 0.0);
+}
+
+TEST(StandardAssemblerMovingDomain, MissingMeshMotionBindingThrowsClearly)
+{
+    SingleQuadMeshAccess mesh;
+    spaces::H1Space space(ElementType::Quad4, /*order=*/1);
+    auto dof_map = createSingleCellDofMap(4);
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    DenseVectorView rhs(4);
+    MovingDomainProbeKernel kernel(/*displacement_field=*/301, /*velocity_field=*/302);
+
+    EXPECT_THROW((void)assembler.assembleVector(mesh, space, kernel, rhs), FEException);
+}
+
+TEST(StandardAssemblerMovingDomain, KernelsAccessMeshMotionAndCurrentReferenceGeometry)
+{
+    SingleQuadMeshAccess mesh;
+    auto current_nodes = mesh.referenceNodes();
+    for (auto& x : current_nodes) {
+        x[0] += 2.0;
+    }
+    mesh.setCurrentNodes(std::move(current_nodes));
+
+    auto scalar_space = std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+    auto vector_space = std::make_shared<spaces::ProductSpace>(scalar_space, /*components=*/2);
+    auto scalar_map = createSingleCellDofMap(4);
+    auto vector_map = createSingleCellDofMap(8);
+
+    constexpr FieldId kDisplacement = 301;
+    constexpr FieldId kVelocity = 302;
+    std::array<FieldSolutionAccess, 2> field_access = {{
+        FieldSolutionAccess{
+            .field = kDisplacement,
+            .space = vector_space.get(),
+            .dof_map = &vector_map,
+            .dof_offset = 0,
+        },
+        FieldSolutionAccess{
+            .field = kVelocity,
+            .space = vector_space.get(),
+            .dof_map = &vector_map,
+            .dof_offset = 8,
+        },
+    }};
+
+    std::vector<Real> current_solution(16, 0.0);
+    std::fill(current_solution.begin(), current_solution.begin() + 8, 0.5);
+    std::fill(current_solution.begin() + 8, current_solution.end(), 0.25);
+
+    StandardAssembler assembler;
+    assembler.setDofMap(scalar_map);
+    assembler.setFieldSolutionAccess(field_access);
+    assembler.setMeshMotionFieldAccess(MeshMotionFieldAccess{
+        .mesh_displacement = kDisplacement,
+        .mesh_velocity = kVelocity,
+    });
+    assembler.setCurrentSolution(current_solution);
+    assembler.initialize();
+
+    MovingDomainProbeKernel kernel(kDisplacement, kVelocity);
+    TestDenseSystemView rhs(4);
+    rhs.zero();
+    const FusedCellTerm term{
+        .test_space = scalar_space.get(),
+        .trial_space = scalar_space.get(),
+        .kernel = &kernel,
+        .row_dof_map = &scalar_map,
+        .col_dof_map = &scalar_map,
+        .row_dof_offset = 0,
+        .col_dof_offset = 0,
+        .matrix_view = nullptr,
+        .vector_view = &rhs,
+        .assemble_matrix = false,
+        .assemble_vector = true,
+    };
+
+    const auto result = assembler.assembleCellsFused(mesh, std::span<const FusedCellTerm>(&term, 1));
+    EXPECT_TRUE(result.success);
+    ASSERT_GT(kernel.qpts_seen, LocalIndex{0});
+    EXPECT_NEAR(kernel.sum_delta_x, Real(2.0) * static_cast<Real>(kernel.qpts_seen), 1e-12);
+    EXPECT_NEAR(kernel.sum_displacement_x, Real(0.5) * static_cast<Real>(kernel.qpts_seen), 1e-12);
+    EXPECT_NEAR(kernel.sum_velocity_y, Real(0.25) * static_cast<Real>(kernel.qpts_seen), 1e-12);
+    EXPECT_NEAR(kernel.max_measure_delta, 0.0, 1e-12);
+    EXPECT_NEAR(kernel.first_transform_00, 1.0, 1e-12);
+    EXPECT_NEAR(rhs.getVectorEntry(0), kernel.output_value, 1e-12);
 }
 
 TEST(StandardAssemblerCaches, MonolithicFieldPopulationFastPathMatchesSequentialFallbackOnQuad4)

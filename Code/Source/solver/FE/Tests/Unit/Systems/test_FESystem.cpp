@@ -16,9 +16,12 @@
 
 #include "Spaces/H1Space.h"
 #include "Spaces/L2Space.h"
+#include "Spaces/ProductSpace.h"
 
 #include "Mesh/Mesh.h"
 #include "Mesh/Core/MeshBase.h"
+#include "Mesh/Fields/MeshFields.h"
+#include "Mesh/Motion/MotionFields.h"
 #include "Mesh/Topology/CellShape.h"
 
 #include <array>
@@ -42,10 +45,12 @@ using svmp::FE::assembly::StandardAssembler;
 
 using svmp::FE::spaces::H1Space;
 using svmp::FE::spaces::L2Space;
+using svmp::FE::spaces::ProductSpace;
 
 using svmp::FE::systems::AssemblyRequest;
 using svmp::FE::systems::FESystem;
 using svmp::FE::systems::FieldSpec;
+using svmp::FE::systems::MeshMotionFieldRole;
 using svmp::FE::systems::SystemStateView;
 
 namespace {
@@ -305,6 +310,221 @@ TEST(FESystem, MassAssemblyRespectsCoordinateConfiguration)
             EXPECT_NEAR(M_def.getMatrixEntry(i, j), M_cur.getMatrixEntry(i, j), 1e-12);
         }
     }
+}
+
+TEST(FESystem, ReusedCurrentSystemTracksCoordinateMutationWithoutSetup)
+{
+    auto mesh = build_single_quad_mesh();
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+
+    FESystem sys(mesh, svmp::Configuration::Current);
+    const auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+    sys.setup();
+
+    DenseMatrixView reference(sys.dofHandler().getNumDofs());
+    DenseMatrixView moved(sys.dofHandler().getNumDofs());
+    SystemStateView state;
+
+    ASSERT_TRUE(sys.assembleMass(state, reference).success);
+
+    auto X_cur = mesh->local_mesh().X_ref();
+    for (std::size_t i = 0; i < X_cur.size(); i += 2) {
+        X_cur[i] *= 2.0;
+    }
+    mesh->set_current_coords(X_cur);
+
+    ASSERT_TRUE(sys.assembleMass(state, moved).success);
+
+    for (GlobalIndex i = 0; i < reference.numRows(); ++i) {
+        for (GlobalIndex j = 0; j < reference.numCols(); ++j) {
+            EXPECT_NEAR(moved.getMatrixEntry(i, j),
+                        2.0 * reference.getMatrixEntry(i, j),
+                        1e-12);
+        }
+    }
+}
+
+TEST(FESystem, MeshGeometryAdvanceNotificationPreservesLayoutAndTopologyNotificationInvalidatesSetup)
+{
+    auto mesh = build_single_quad_mesh();
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+
+    FESystem sys(mesh, svmp::Configuration::Current);
+    const auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+    sys.setup();
+
+    DenseMatrixView reference(sys.dofHandler().getNumDofs());
+    DenseMatrixView moved(sys.dofHandler().getNumDofs());
+    SystemStateView state;
+    ASSERT_TRUE(sys.assembleMass(state, reference).success);
+
+    const auto layout_before = sys.feLayoutRevisionState();
+    auto X_cur = mesh->local_mesh().X_ref();
+    for (std::size_t i = 0; i < X_cur.size(); i += 2) {
+        X_cur[i] *= 2.0;
+    }
+    mesh->set_current_coords(X_cur);
+    sys.notifyMeshGeometryAdvanced();
+
+    EXPECT_TRUE(sys.isSetup());
+    EXPECT_EQ(sys.dofLayoutRevision(), layout_before.dof_layout);
+    EXPECT_EQ(sys.constraintLayoutRevision(), layout_before.constraint_layout);
+    EXPECT_EQ(sys.blockLayoutRevision(), layout_before.block_layout);
+
+    ASSERT_TRUE(sys.assembleMass(state, moved).success);
+    for (GlobalIndex i = 0; i < reference.numRows(); ++i) {
+        for (GlobalIndex j = 0; j < reference.numCols(); ++j) {
+            EXPECT_NEAR(moved.getMatrixEntry(i, j),
+                        2.0 * reference.getMatrixEntry(i, j),
+                        1e-12);
+        }
+    }
+
+    sys.notifyMeshTopologyLayoutChanged();
+    EXPECT_FALSE(sys.isSetup());
+    EXPECT_GT(sys.dofLayoutRevision(), layout_before.dof_layout);
+    EXPECT_GT(sys.constraintLayoutRevision(), layout_before.constraint_layout);
+    EXPECT_GT(sys.blockLayoutRevision(), layout_before.block_layout);
+}
+
+TEST(FESystem, MeshMotionFieldBindingsArePhysicsNeutral)
+{
+    auto mesh = build_single_quad_mesh();
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto vector_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
+
+    FESystem sys(mesh);
+    const auto displacement = sys.addField(
+        FieldSpec{.name = "mesh_displacement", .space = vector_space, .components = 2});
+    const auto velocity = sys.addField(
+        FieldSpec{.name = "mesh_velocity", .space = vector_space, .components = 2});
+    const auto previous = sys.addField(
+        FieldSpec{.name = "previous_coordinates", .space = vector_space, .components = 2});
+    const auto acceleration = sys.addField(
+        FieldSpec{.name = "mesh_acceleration", .space = vector_space, .components = 2});
+    const auto previous_velocity = sys.addField(
+        FieldSpec{.name = "previous_mesh_velocity", .space = vector_space, .components = 2});
+
+    sys.bindMeshMotionField(MeshMotionFieldRole::Displacement, displacement);
+    sys.bindMeshMotionField("velocity", "mesh_velocity");
+    sys.bindMeshMotionField("previous_coordinates", previous);
+    sys.bindMeshMotionField("acceleration", acceleration);
+    sys.bindMeshMotionField("previous_velocity", previous_velocity);
+
+    const auto access = sys.meshMotionFieldAccess();
+    EXPECT_EQ(access.mesh_displacement, displacement);
+    EXPECT_EQ(access.mesh_velocity, velocity);
+    EXPECT_EQ(access.previous_coordinates, previous);
+    EXPECT_EQ(access.mesh_acceleration, acceleration);
+    EXPECT_EQ(access.previous_mesh_velocity, previous_velocity);
+
+    const auto bound_displacement = sys.meshMotionField(MeshMotionFieldRole::Displacement);
+    ASSERT_TRUE(bound_displacement.has_value());
+    EXPECT_EQ(*bound_displacement, displacement);
+}
+
+TEST(FESystem, StandardMeshMotionFieldsSyncFromMeshStorageToFEState)
+{
+    auto mesh = build_single_quad_mesh();
+    const auto handles = svmp::motion::attach_motion_fields(*mesh, 2);
+
+    auto fill_field = [&](svmp::FieldHandle h, Real x_base, Real y_base) {
+        auto* data = svmp::MeshFields::field_data_as<svmp::real_t>(mesh->local_mesh(), h);
+        ASSERT_NE(data, nullptr);
+        const auto ncomp = svmp::MeshFields::field_components(mesh->local_mesh(), h);
+        ASSERT_EQ(ncomp, 2u);
+        for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
+            data[v * ncomp + 0] = x_base + static_cast<Real>(v);
+            data[v * ncomp + 1] = y_base - static_cast<Real>(v);
+        }
+    };
+
+    fill_field(handles.displacement, 10.0, 20.0);
+    fill_field(handles.velocity, 30.0, 40.0);
+    fill_field(handles.acceleration, 50.0, 60.0);
+    fill_field(handles.previous_coordinates, 70.0, 80.0);
+    fill_field(handles.previous_displacement, 90.0, 100.0);
+    fill_field(handles.previous_velocity, 110.0, 120.0);
+
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto vector_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
+
+    FESystem sys(mesh);
+    const auto displacement = sys.addField(
+        FieldSpec{.name = "mesh_displacement", .space = vector_space, .components = 2});
+    const auto velocity = sys.addField(
+        FieldSpec{.name = "mesh_velocity", .space = vector_space, .components = 2});
+    const auto acceleration = sys.addField(
+        FieldSpec{.name = "mesh_acceleration", .space = vector_space, .components = 2});
+    const auto previous_coordinates = sys.addField(
+        FieldSpec{.name = "previous_coordinates", .space = vector_space, .components = 2});
+    const auto previous_displacement = sys.addField(
+        FieldSpec{.name = "previous_mesh_displacement", .space = vector_space, .components = 2});
+    const auto previous_velocity = sys.addField(
+        FieldSpec{.name = "previous_mesh_velocity", .space = vector_space, .components = 2});
+
+    EXPECT_EQ(sys.bindStandardMeshMotionFieldsByName(), 6u);
+    EXPECT_EQ(sys.meshMotionField(MeshMotionFieldRole::Displacement), displacement);
+    EXPECT_EQ(sys.meshMotionField(MeshMotionFieldRole::Velocity), velocity);
+    EXPECT_EQ(sys.meshMotionField(MeshMotionFieldRole::Acceleration), acceleration);
+    EXPECT_EQ(sys.meshMotionField(MeshMotionFieldRole::PreviousCoordinates), previous_coordinates);
+    EXPECT_EQ(sys.meshMotionField(MeshMotionFieldRole::PreviousDisplacement), previous_displacement);
+    EXPECT_EQ(sys.meshMotionField(MeshMotionFieldRole::PreviousVelocity), previous_velocity);
+
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", displacement, std::make_shared<MassKernel>(1.0));
+    sys.setup();
+
+    std::vector<Real> state(static_cast<std::size_t>(sys.dofHandler().getNumDofs()), 0.0);
+    const std::size_t written = sys.syncBoundMeshMotionFieldsToState(state);
+    EXPECT_EQ(written, 6u * mesh->n_vertices() * 2u);
+
+    auto expect_vertex_values = [&](svmp::FE::FieldId field,
+                                    Real x_base,
+                                    Real y_base) {
+        std::vector<double> values(mesh->n_vertices() * 2u, 0.0);
+        SystemStateView view;
+        view.u = state;
+        ASSERT_TRUE(sys.evaluateFieldAtVertices(field,
+                                                view,
+                                                static_cast<GlobalIndex>(mesh->n_vertices()),
+                                                values));
+        for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
+            EXPECT_NEAR(values[v * 2u + 0], x_base + static_cast<Real>(v), 1e-12);
+            EXPECT_NEAR(values[v * 2u + 1], y_base - static_cast<Real>(v), 1e-12);
+        }
+    };
+
+    expect_vertex_values(displacement, 10.0, 20.0);
+    expect_vertex_values(velocity, 30.0, 40.0);
+    expect_vertex_values(acceleration, 50.0, 60.0);
+    expect_vertex_values(previous_coordinates, 70.0, 80.0);
+    expect_vertex_values(previous_displacement, 90.0, 100.0);
+    expect_vertex_values(previous_velocity, 110.0, 120.0);
+}
+
+TEST(FESystem, MeshMotionFieldBindingRejectsMissingScalarAndDimensionMismatchedFields)
+{
+    auto mesh = build_single_quad_mesh();
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto vector_3d_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/3);
+
+    FESystem sys(mesh);
+    const auto scalar = sys.addField(
+        FieldSpec{.name = "temperature", .space = scalar_space, .components = 1});
+    const auto wrong_dim = sys.addField(
+        FieldSpec{.name = "mesh_displacement_3d", .space = vector_3d_space, .components = 3});
+
+    EXPECT_THROW(sys.bindMeshMotionField("displacement", "missing_field"),
+                 svmp::FE::InvalidArgumentException);
+    EXPECT_THROW(sys.bindMeshMotionField(MeshMotionFieldRole::Displacement, scalar),
+                 svmp::FE::InvalidArgumentException);
+    EXPECT_THROW(sys.bindMeshMotionField(MeshMotionFieldRole::Displacement, wrong_dim),
+                 svmp::FE::InvalidArgumentException);
 }
 
 TEST(FESystem, SetupDistributesDofsFromMesh)

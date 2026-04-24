@@ -125,44 +125,59 @@ enum class SemanticKernelKind : std::uint8_t {
  *
  * Using a bitfield allows efficient combination of requirements.
  */
-enum class RequiredData : std::uint32_t {
+enum class RequiredData : std::uint64_t {
     None                = 0,
 
     // Geometry data
-    PhysicalPoints      = 1 << 0,   ///< Physical coordinates at quadrature points
-    Jacobians           = 1 << 1,   ///< Jacobian matrices at quadrature points
-    JacobianDets        = 1 << 2,   ///< Jacobian determinants (for integration)
-    InverseJacobians    = 1 << 3,   ///< Inverse Jacobians (for gradient transform)
-    Normals             = 1 << 4,   ///< Surface normals (for faces)
-    Tangents            = 1 << 5,   ///< Surface tangents (for edges/faces)
-    EntityMeasures      = 1 << 6,   ///< Cell/face measures (volume/area/diameter)
+    PhysicalPoints      = 1ull << 0,   ///< Physical coordinates at quadrature points
+    Jacobians           = 1ull << 1,   ///< Jacobian matrices at quadrature points
+    JacobianDets        = 1ull << 2,   ///< Jacobian determinants (for integration)
+    InverseJacobians    = 1ull << 3,   ///< Inverse Jacobians (for gradient transform)
+    Normals             = 1ull << 4,   ///< Surface normals (for faces)
+    Tangents            = 1ull << 5,   ///< Surface tangents (for edges/faces)
+    EntityMeasures      = 1ull << 6,   ///< Cell/face measures (volume/area/diameter)
 
     // Basis function data
-    BasisValues         = 1 << 8,   ///< Basis function values at quadrature points
-    BasisGradients      = 1 << 9,   ///< Reference gradients of basis functions
-    PhysicalGradients   = 1 << 10,  ///< Physical gradients (transformed)
-    BasisHessians       = 1 << 11,  ///< Second derivatives (for C1 elements)
-    BasisCurls          = 1 << 12,  ///< Curl of basis functions (H(curl))
-    BasisDivergences    = 1 << 13,  ///< Divergence of basis functions (H(div))
+    BasisValues         = 1ull << 8,   ///< Basis function values at quadrature points
+    BasisGradients      = 1ull << 9,   ///< Reference gradients of basis functions
+    PhysicalGradients   = 1ull << 10,  ///< Physical gradients (transformed)
+    BasisHessians       = 1ull << 11,  ///< Second derivatives (for C1 elements)
+    BasisCurls          = 1ull << 12,  ///< Curl of basis functions (H(curl))
+    BasisDivergences    = 1ull << 13,  ///< Divergence of basis functions (H(div))
 
     // Quadrature data
-    QuadraturePoints    = 1 << 16,  ///< Reference quadrature point coordinates
-    QuadratureWeights   = 1 << 17,  ///< Quadrature weights
-    IntegrationWeights  = 1 << 18,  ///< Weights * |J| (ready for integration)
+    QuadraturePoints    = 1ull << 16,  ///< Reference quadrature point coordinates
+    QuadratureWeights   = 1ull << 17,  ///< Quadrature weights
+    IntegrationWeights  = 1ull << 18,  ///< Weights * |J| (ready for integration)
 
     // Solution data (for nonlinear problems)
-    SolutionCoefficients= 1 << 19,  ///< Element-local DOF coefficients for the current solution
-    SolutionValues      = 1 << 20,  ///< Solution values at quadrature points
-    SolutionGradients   = 1 << 21,  ///< Solution gradients at quadrature points
-    SolutionHessians    = 1 << 22,  ///< Solution Hessians
-    SolutionLaplacians  = 1 << 23,  ///< Solution Laplacians
+    SolutionCoefficients= 1ull << 19,  ///< Element-local DOF coefficients for the current solution
+    SolutionValues      = 1ull << 20,  ///< Solution values at quadrature points
+    SolutionGradients   = 1ull << 21,  ///< Solution gradients at quadrature points
+    SolutionHessians    = 1ull << 22,  ///< Solution Hessians
+    SolutionLaplacians  = 1ull << 23,  ///< Solution Laplacians
 
     // Material/coefficient data
-    MaterialState       = 1 << 24,  ///< Material state from previous iteration
+    MaterialState       = 1ull << 24,  ///< Material state from previous iteration
 
     // Face-specific data
-    FaceOrientations    = 1 << 28,  ///< Face orientation info (for DG)
-    NeighborData        = 1 << 29,  ///< Data from neighboring cell (for DG)
+    FaceOrientations    = 1ull << 28,  ///< Face orientation info (for DG)
+    NeighborData        = 1ull << 29,  ///< Data from neighboring cell (for DG)
+
+    // Moving-domain data (physics-neutral, frame-explicit)
+    MeshDisplacement        = 1ull << 30, ///< Mesh displacement field value at quadrature points
+    MeshVelocity            = 1ull << 31, ///< Mesh velocity field value at quadrature points
+    MeshAcceleration        = 1ull << 32, ///< Mesh acceleration field value at quadrature points
+    ReferencePhysicalPoints = 1ull << 33, ///< Reference-frame physical coordinates at quadrature points
+    CurrentPhysicalPoints   = 1ull << 34, ///< Current-frame physical coordinates at quadrature points
+    ReferenceJacobians      = 1ull << 35, ///< Reference-frame Jacobian matrices at quadrature points
+    CurrentJacobians        = 1ull << 36, ///< Current-frame Jacobian matrices at quadrature points
+    ReferenceNormals        = 1ull << 37, ///< Reference-frame surface normals at quadrature points
+    CurrentNormals          = 1ull << 38, ///< Current-frame surface normals at quadrature points
+    ReferenceMeasures       = 1ull << 39, ///< Reference-frame measure factors at quadrature points
+    CurrentMeasures         = 1ull << 40, ///< Current-frame measure factors at quadrature points
+    SurfaceJacobians        = 1ull << 41, ///< Surface Jacobian/tangent transform data
+    ConfigurationTransforms = 1ull << 42, ///< Transform from reference to current configuration
 
     // Common combinations
     BasicGeometry       = PhysicalPoints | JacobianDets | InverseJacobians,
@@ -187,12 +202,12 @@ enum class InterfaceEvaluationSide : std::uint8_t {
 // Bitwise operators for RequiredData
 inline constexpr RequiredData operator|(RequiredData a, RequiredData b) {
     return static_cast<RequiredData>(
-        static_cast<std::uint32_t>(a) | static_cast<std::uint32_t>(b));
+        static_cast<std::uint64_t>(a) | static_cast<std::uint64_t>(b));
 }
 
 inline constexpr RequiredData operator&(RequiredData a, RequiredData b) {
     return static_cast<RequiredData>(
-        static_cast<std::uint32_t>(a) & static_cast<std::uint32_t>(b));
+        static_cast<std::uint64_t>(a) & static_cast<std::uint64_t>(b));
 }
 
 inline constexpr RequiredData& operator|=(RequiredData& a, RequiredData b) {
@@ -201,7 +216,7 @@ inline constexpr RequiredData& operator|=(RequiredData& a, RequiredData b) {
 }
 
 inline constexpr bool hasFlag(RequiredData flags, RequiredData flag) {
-    return (static_cast<std::uint32_t>(flags) & static_cast<std::uint32_t>(flag)) != 0;
+    return (static_cast<std::uint64_t>(flags) & static_cast<std::uint64_t>(flag)) != 0;
 }
 
 // ============================================================================

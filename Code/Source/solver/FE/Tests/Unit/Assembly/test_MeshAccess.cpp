@@ -256,6 +256,7 @@ TEST(MeshAccess, RevisionQueriesFollowMeshState)
     const auto initial_numbering = access.numberingRevision();
     const auto initial_labels = access.labelRevision();
     const auto initial_epoch = access.activeConfigurationEpoch();
+    const auto initial_coordinate_key = access.coordinateConfigurationKey();
 
     auto x_cur = mesh.local_mesh().X_ref();
     ASSERT_FALSE(x_cur.empty());
@@ -275,14 +276,12 @@ TEST(MeshAccess, RevisionQueriesFollowMeshState)
     mesh.use_current_configuration();
     EXPECT_EQ(access.geometryRevision(), initial_current_geometry + 2u);
     EXPECT_EQ(access.activeConfigurationEpoch(), initial_epoch + 1u);
-    EXPECT_EQ(access.coordinateConfigurationKey(),
-              static_cast<std::uint64_t>(svmp::Configuration::Current));
+    EXPECT_NE(access.coordinateConfigurationKey(), initial_coordinate_key);
 
     MeshAccess current_access(mesh, svmp::Configuration::Current);
     EXPECT_EQ(current_access.geometryRevision(), initial_current_geometry + 2u);
     EXPECT_EQ(current_access.activeConfigurationEpoch(), 0u);
-    EXPECT_EQ(current_access.coordinateConfigurationKey(),
-              static_cast<std::uint64_t>(svmp::Configuration::Current));
+    EXPECT_EQ(current_access.coordinateConfigurationKey(), access.coordinateConfigurationKey());
 
     mesh.local_mesh().set_boundary_label(0, 3);
     EXPECT_EQ(access.labelRevision(), initial_labels + 1u);

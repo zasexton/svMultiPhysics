@@ -80,6 +80,20 @@ bool decomposeAffineInTrial(const FormExpr& expr, Decomp& out, std::string* reas
         case FormExprType::Constant:
         case FormExprType::Coordinate:
         case FormExprType::ReferenceCoordinate:
+        case FormExprType::MeshDisplacement:
+        case FormExprType::MeshVelocity:
+        case FormExprType::MeshAcceleration:
+        case FormExprType::CurrentCoordinate:
+        case FormExprType::ReferencePhysicalCoordinate:
+        case FormExprType::CurrentJacobian:
+        case FormExprType::ReferenceJacobian:
+        case FormExprType::CurrentJacobianDeterminant:
+        case FormExprType::ReferenceJacobianDeterminant:
+        case FormExprType::CurrentNormal:
+        case FormExprType::ReferenceNormal:
+        case FormExprType::CurrentMeasure:
+        case FormExprType::ReferenceMeasure:
+        case FormExprType::SurfaceJacobian:
         case FormExprType::Time:
         case FormExprType::TimeStep:
         case FormExprType::EffectiveTimeStep:
@@ -146,6 +160,8 @@ bool decomposeAffineInTrial(const FormExpr& expr, Decomp& out, std::string* reas
         case FormExprType::SymmetricPart:
         case FormExprType::SkewPart:
         case FormExprType::Component:
+        case FormExprType::Pullback:
+        case FormExprType::Pushforward:
         {
             const auto kids = node->childrenShared();
             if (kids.size() != 1 || !kids[0]) {
@@ -175,6 +191,14 @@ bool decomposeAffineInTrial(const FormExpr& expr, Decomp& out, std::string* reas
                         const auto c1 = node->componentIndex1().value_or(-1);
                         return e.component(c0, c1);
                     }
+                    case FormExprType::Pullback:
+                        return pullback(e,
+                                        node->fromConfiguration().value_or(GeometryConfiguration::Reference),
+                                        node->toConfiguration().value_or(GeometryConfiguration::Current));
+                    case FormExprType::Pushforward:
+                        return pushforward(e,
+                                           node->fromConfiguration().value_or(GeometryConfiguration::Reference),
+                                           node->toConfiguration().value_or(GeometryConfiguration::Current));
                     default:
                         return FormExpr{};
                 }

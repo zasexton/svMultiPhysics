@@ -162,6 +162,15 @@ struct FELayoutRevisionState {
     std::uint64_t block_layout{0};
 };
 
+enum class MeshMotionFieldRole : std::uint8_t {
+    Displacement,
+    Velocity,
+    Acceleration,
+    PreviousCoordinates,
+    PreviousDisplacement,
+    PreviousVelocity
+};
+
 class FESystem {
 public:
     explicit FESystem(std::shared_ptr<const assembly::IMeshAccess> mesh_access);
@@ -180,6 +189,11 @@ public:
 
     // ---- Definition phase ----
     FieldId addField(FieldSpec spec);
+    void bindMeshMotionField(MeshMotionFieldRole role, FieldId field);
+    void bindMeshMotionField(std::string_view role_name, FieldId field);
+    void bindMeshMotionField(std::string_view role_name, std::string_view field_name);
+    [[nodiscard]] std::optional<FieldId> meshMotionField(MeshMotionFieldRole role) const noexcept;
+    [[nodiscard]] assembly::MeshMotionFieldAccess meshMotionFieldAccess() const noexcept;
     FieldId addInterfaceField(std::string name,
                               std::shared_ptr<const spaces::FunctionSpace> space,
                               InterfaceId interface_marker,
@@ -1027,6 +1041,12 @@ public:
 	    [[nodiscard]] const svmp::Mesh* mesh() const noexcept { return mesh_.get(); }
 	    [[nodiscard]] svmp::Configuration coordinateConfiguration() const noexcept { return coord_cfg_; }
 
+	    std::size_t bindStandardMeshMotionFieldsByName();
+	    std::size_t syncBoundMeshMotionFieldsToState(std::span<Real> state) const;
+	    std::size_t syncBoundMeshMotionFieldsToState(assembly::GlobalSystemView& vector_view) const;
+	    void notifyMeshGeometryAdvanced();
+	    void notifyMeshTopologyLayoutChanged();
+
 	    void setInterfaceMesh(InterfaceId marker, std::shared_ptr<const svmp::InterfaceMesh> mesh);
 	    [[nodiscard]] bool hasInterfaceMesh(InterfaceId marker) const noexcept;
 	    [[nodiscard]] const svmp::InterfaceMesh& interfaceMesh(InterfaceId marker) const;
@@ -1293,6 +1313,7 @@ private:
     std::unique_ptr<dofs::BlockDofMap> block_map_{};
 	    constraints::AffineConstraints affine_constraints_{};
     FELayoutRevisionState fe_layout_revisions_{};
+    assembly::MeshMotionFieldAccess mesh_motion_fields_{};
 
 		    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::SparsityPattern>> sparsity_by_op_{};
 		    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::DistributedSparsityPattern>> distributed_sparsity_by_op_{};

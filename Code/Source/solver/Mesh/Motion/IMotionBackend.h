@@ -83,6 +83,11 @@ struct MotionDirichletBC {
 
   /// value(x, dt, step_scale) -> displacement increment for the current solve/substep
   std::function<std::array<real_t, 3>(const std::array<real_t, 3>&, double, double)> value;
+
+  /// Components affected by this boundary condition. Entries beyond the mesh
+  /// spatial dimension are ignored. This keeps component-wise mesh-motion
+  /// constraints in the Mesh contract without introducing physics semantics.
+  std::array<bool, 3> component_mask{{true, true, true}};
 };
 
 /**

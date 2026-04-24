@@ -227,6 +227,10 @@ struct ConstantMatrix {
         case FormExprType::TimeStep:
         case FormExprType::EffectiveTimeStep:
         case FormExprType::JacobianDeterminant:
+        case FormExprType::CurrentJacobianDeterminant:
+        case FormExprType::ReferenceJacobianDeterminant:
+        case FormExprType::CurrentMeasure:
+        case FormExprType::ReferenceMeasure:
         case FormExprType::CellDiameter:
         case FormExprType::CellVolume:
         case FormExprType::FacetArea:
@@ -242,7 +246,14 @@ struct ConstantMatrix {
 
         case FormExprType::Coordinate:
         case FormExprType::ReferenceCoordinate:
-        case FormExprType::Normal: {
+        case FormExprType::Normal:
+        case FormExprType::MeshDisplacement:
+        case FormExprType::MeshVelocity:
+        case FormExprType::MeshAcceleration:
+        case FormExprType::CurrentCoordinate:
+        case FormExprType::ReferencePhysicalCoordinate:
+        case FormExprType::CurrentNormal:
+        case FormExprType::ReferenceNormal: {
             const std::uint32_t dim = ctx.trial_sig
                                           ? static_cast<std::uint32_t>(
                                                 std::min(3, std::max(1, ctx.trial_sig->topological_dimension)))
@@ -252,12 +263,24 @@ struct ConstantMatrix {
         }
 
         case FormExprType::Jacobian:
-        case FormExprType::JacobianInverse: {
+        case FormExprType::JacobianInverse:
+        case FormExprType::CurrentJacobian:
+        case FormExprType::ReferenceJacobian:
+        case FormExprType::SurfaceJacobian: {
             const std::uint32_t dim = ctx.trial_sig
                                           ? static_cast<std::uint32_t>(
                                                 std::min(3, std::max(1, ctx.trial_sig->topological_dimension)))
                                           : 3u;
             out = matrixShape(dim, dim);
+            break;
+        }
+
+        case FormExprType::Pullback:
+        case FormExprType::Pushforward: {
+            const auto kids = node.childrenShared();
+            if (kids.size() == 1u && kids[0]) {
+                out = inferShape(*kids[0], ctx);
+            }
             break;
         }
 

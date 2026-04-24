@@ -51,6 +51,7 @@
 #include "Math/FiniteDifference.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -68,6 +69,8 @@
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #include "Assembly/MeshAccess.h"
 #include "Mesh/Core/InterfaceMesh.h"
+#include "Mesh/Fields/MeshFields.h"
+#include "Mesh/Motion/MotionFields.h"
 #include "Systems/MeshSearchAccess.h"
 #endif
 
@@ -1764,6 +1767,361 @@ FieldId FESystem::addField(FieldSpec spec)
     bumpBlockLayoutRevision();
     return field;
 }
+
+namespace {
+
+MeshMotionFieldRole parseMeshMotionFieldRole(std::string_view role_name)
+{
+    if (role_name == "mesh_displacement" || role_name == "displacement") {
+        return MeshMotionFieldRole::Displacement;
+    }
+    if (role_name == "mesh_velocity" || role_name == "velocity") {
+        return MeshMotionFieldRole::Velocity;
+    }
+    if (role_name == "mesh_acceleration" || role_name == "acceleration") {
+        return MeshMotionFieldRole::Acceleration;
+    }
+    if (role_name == "previous_coordinates" ||
+        role_name == "previous_coordinate" ||
+        role_name == "previous_coords") {
+        return MeshMotionFieldRole::PreviousCoordinates;
+    }
+    if (role_name == "previous_mesh_displacement" ||
+        role_name == "mesh_displacement_previous" ||
+        role_name == "previous_displacement") {
+        return MeshMotionFieldRole::PreviousDisplacement;
+    }
+    if (role_name == "previous_mesh_velocity" ||
+        role_name == "mesh_velocity_previous" ||
+        role_name == "previous_velocity") {
+        return MeshMotionFieldRole::PreviousVelocity;
+    }
+    FE_THROW(InvalidArgumentException,
+             "FESystem::bindMeshMotionField: unknown mesh-motion role '" +
+                 std::string(role_name) + "'");
+}
+
+FieldId& meshMotionRoleSlot(assembly::MeshMotionFieldAccess& access,
+                            MeshMotionFieldRole role) noexcept
+{
+    switch (role) {
+        case MeshMotionFieldRole::Displacement:
+            return access.mesh_displacement;
+        case MeshMotionFieldRole::Velocity:
+            return access.mesh_velocity;
+        case MeshMotionFieldRole::Acceleration:
+            return access.mesh_acceleration;
+        case MeshMotionFieldRole::PreviousCoordinates:
+            return access.previous_coordinates;
+        case MeshMotionFieldRole::PreviousDisplacement:
+            return access.previous_mesh_displacement;
+        case MeshMotionFieldRole::PreviousVelocity:
+            return access.previous_mesh_velocity;
+    }
+    return access.mesh_displacement;
+}
+
+FieldId meshMotionRoleValue(const assembly::MeshMotionFieldAccess& access,
+                            MeshMotionFieldRole role) noexcept
+{
+    switch (role) {
+        case MeshMotionFieldRole::Displacement:
+            return access.mesh_displacement;
+        case MeshMotionFieldRole::Velocity:
+            return access.mesh_velocity;
+        case MeshMotionFieldRole::Acceleration:
+            return access.mesh_acceleration;
+        case MeshMotionFieldRole::PreviousCoordinates:
+            return access.previous_coordinates;
+        case MeshMotionFieldRole::PreviousDisplacement:
+            return access.previous_mesh_displacement;
+        case MeshMotionFieldRole::PreviousVelocity:
+            return access.previous_mesh_velocity;
+    }
+    return INVALID_FIELD_ID;
+}
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+svmp::motion::MotionFieldRole toMeshMotionRole(MeshMotionFieldRole role) noexcept
+{
+    switch (role) {
+        case MeshMotionFieldRole::Displacement:
+            return svmp::motion::MotionFieldRole::Displacement;
+        case MeshMotionFieldRole::Velocity:
+            return svmp::motion::MotionFieldRole::Velocity;
+        case MeshMotionFieldRole::Acceleration:
+            return svmp::motion::MotionFieldRole::Acceleration;
+        case MeshMotionFieldRole::PreviousCoordinates:
+            return svmp::motion::MotionFieldRole::PreviousCoordinates;
+        case MeshMotionFieldRole::PreviousDisplacement:
+            return svmp::motion::MotionFieldRole::PreviousDisplacement;
+        case MeshMotionFieldRole::PreviousVelocity:
+            return svmp::motion::MotionFieldRole::PreviousVelocity;
+    }
+    return svmp::motion::MotionFieldRole::Displacement;
+}
+
+constexpr std::array<MeshMotionFieldRole, 6> kFEMeshMotionRoles = {{
+    MeshMotionFieldRole::Displacement,
+    MeshMotionFieldRole::Velocity,
+    MeshMotionFieldRole::Acceleration,
+    MeshMotionFieldRole::PreviousCoordinates,
+    MeshMotionFieldRole::PreviousDisplacement,
+    MeshMotionFieldRole::PreviousVelocity,
+}};
+#endif
+
+} // namespace
+
+void FESystem::bindMeshMotionField(MeshMotionFieldRole role, FieldId field)
+{
+    FE_THROW_IF(!field_registry_.has(field), InvalidArgumentException,
+                "FESystem::bindMeshMotionField: unknown FieldId");
+    const auto& rec = field_registry_.get(field);
+    FE_CHECK_NOT_NULL(rec.space.get(), "FESystem::bindMeshMotionField: field space");
+    FE_THROW_IF(rec.scope != FieldScope::VolumeCell, InvalidArgumentException,
+                "FESystem::bindMeshMotionField: mesh-motion fields must be volume fields");
+    FE_THROW_IF(rec.space->field_type() != FieldType::Vector, InvalidArgumentException,
+                "FESystem::bindMeshMotionField: mesh-motion field '" + rec.name +
+                    "' must be vector-valued");
+    const int mesh_dim = mesh_access_ ? mesh_access_->dimension() : rec.components;
+    FE_THROW_IF(rec.components != mesh_dim, InvalidArgumentException,
+                "FESystem::bindMeshMotionField: mesh-motion field '" + rec.name +
+                    "' has component dimension " + std::to_string(rec.components) +
+                    " but mesh dimension is " + std::to_string(mesh_dim));
+
+    meshMotionRoleSlot(mesh_motion_fields_, role) = field;
+}
+
+void FESystem::bindMeshMotionField(std::string_view role_name, FieldId field)
+{
+    bindMeshMotionField(parseMeshMotionFieldRole(role_name), field);
+}
+
+void FESystem::bindMeshMotionField(std::string_view role_name, std::string_view field_name)
+{
+    const FieldId field = field_registry_.findByName(field_name);
+    FE_THROW_IF(field == INVALID_FIELD_ID, InvalidArgumentException,
+                "FESystem::bindMeshMotionField: unknown field '" +
+                    std::string(field_name) + "'");
+    bindMeshMotionField(parseMeshMotionFieldRole(role_name), field);
+}
+
+std::optional<FieldId> FESystem::meshMotionField(MeshMotionFieldRole role) const noexcept
+{
+    const FieldId field = meshMotionRoleValue(mesh_motion_fields_, role);
+    if (field == INVALID_FIELD_ID) {
+        return std::nullopt;
+    }
+    return field;
+}
+
+assembly::MeshMotionFieldAccess FESystem::meshMotionFieldAccess() const noexcept
+{
+    return mesh_motion_fields_;
+}
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+std::size_t FESystem::bindStandardMeshMotionFieldsByName()
+{
+    std::size_t bound = 0;
+    for (const auto role : kFEMeshMotionRoles) {
+        const auto mesh_role = toMeshMotionRole(role);
+        const FieldId field = field_registry_.findByName(
+            svmp::motion::standard_motion_field_name(mesh_role));
+        if (field == INVALID_FIELD_ID) {
+            continue;
+        }
+        bindMeshMotionField(role, field);
+        ++bound;
+    }
+    return bound;
+}
+
+namespace {
+
+struct MeshMotionSyncEntry {
+    MeshMotionFieldRole fe_role{MeshMotionFieldRole::Displacement};
+    FieldId fe_field{INVALID_FIELD_ID};
+    svmp::motion::MotionFieldRole mesh_role{svmp::motion::MotionFieldRole::Displacement};
+};
+
+} // namespace
+
+std::size_t FESystem::syncBoundMeshMotionFieldsToState(std::span<Real> state) const
+{
+    requireSetup();
+    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::syncBoundMeshMotionFieldsToState: mesh");
+
+    std::size_t values_written = 0;
+    auto& local_mesh = mesh_->local_mesh();
+
+    std::vector<MeshMotionSyncEntry> entries;
+    entries.reserve(kFEMeshMotionRoles.size());
+    for (const auto role : kFEMeshMotionRoles) {
+        const FieldId field = meshMotionRoleValue(mesh_motion_fields_, role);
+        if (field == INVALID_FIELD_ID) {
+            continue;
+        }
+        entries.push_back(MeshMotionSyncEntry{role, field, toMeshMotionRole(role)});
+    }
+
+    for (const auto& entry : entries) {
+        const auto& rec = field_registry_.get(entry.fe_field);
+        const auto field_idx = static_cast<std::size_t>(entry.fe_field);
+        FE_THROW_IF(field_idx >= field_dof_handlers_.size() ||
+                        field_idx >= field_dof_offsets_.size(),
+                    InvalidStateException,
+                    "FESystem::syncBoundMeshMotionFieldsToState: invalid field layout for '" +
+                        rec.name + "'");
+
+        const auto mesh_name = svmp::motion::standard_motion_field_name(entry.mesh_role);
+        const auto mesh_field =
+            svmp::MeshFields::get_field_handle(local_mesh, svmp::EntityKind::Vertex, mesh_name);
+        FE_THROW_IF(mesh_field.id == 0, InvalidArgumentException,
+                    "FESystem::syncBoundMeshMotionFieldsToState: mesh is missing field '" +
+                        std::string(mesh_name) + "'");
+        svmp::motion::validate_motion_field(local_mesh,
+                                            mesh_field,
+                                            entry.mesh_role,
+                                            mesh_->dim());
+
+        const auto* values = svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, mesh_field);
+        FE_CHECK_NOT_NULL(values,
+                          "FESystem::syncBoundMeshMotionFieldsToState: mesh field data");
+
+        const auto* entity_map = field_dof_handlers_[field_idx].getEntityDofMap();
+        FE_THROW_IF(entity_map == nullptr, InvalidStateException,
+                    "FESystem::syncBoundMeshMotionFieldsToState: FE field '" + rec.name +
+                        "' must have vertex DOFs to sync from mesh fields");
+
+        const auto components = static_cast<std::size_t>(std::max(1, rec.components));
+        const auto mesh_components = svmp::MeshFields::field_components(local_mesh, mesh_field);
+        FE_THROW_IF(mesh_components < components, InvalidArgumentException,
+                    "FESystem::syncBoundMeshMotionFieldsToState: mesh field '" +
+                        std::string(mesh_name) + "' has fewer components than FE field '" +
+                        rec.name + "'");
+
+        const GlobalIndex offset = field_dof_offsets_[field_idx];
+        const auto n_vertices = static_cast<GlobalIndex>(mesh_->n_vertices());
+        FE_THROW_IF(entity_map->numVertices() < n_vertices, InvalidStateException,
+                    "FESystem::syncBoundMeshMotionFieldsToState: FE field '" + rec.name +
+                        "' does not cover every mesh vertex");
+
+        for (GlobalIndex v = 0; v < n_vertices; ++v) {
+            const auto vertex_dofs = entity_map->getVertexDofs(v);
+            FE_THROW_IF(vertex_dofs.size() != components, InvalidStateException,
+                        "FESystem::syncBoundMeshMotionFieldsToState: FE field '" + rec.name +
+                            "' vertex DOF component count mismatch");
+            const auto v_base = static_cast<std::size_t>(v) * mesh_components;
+            for (std::size_t c = 0; c < components; ++c) {
+                const GlobalIndex dof = offset + vertex_dofs[c];
+                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= state.size(),
+                            InvalidArgumentException,
+                            "FESystem::syncBoundMeshMotionFieldsToState: state vector is too small");
+                state[static_cast<std::size_t>(dof)] = static_cast<Real>(values[v_base + c]);
+                ++values_written;
+            }
+        }
+    }
+
+    return values_written;
+}
+
+std::size_t FESystem::syncBoundMeshMotionFieldsToState(assembly::GlobalSystemView& vector_view) const
+{
+    requireSetup();
+    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::syncBoundMeshMotionFieldsToState: mesh");
+
+    std::size_t values_written = 0;
+    auto& local_mesh = mesh_->local_mesh();
+    std::vector<GlobalIndex> dofs;
+    std::vector<Real> values_out;
+
+    for (const auto role : kFEMeshMotionRoles) {
+        const FieldId field = meshMotionRoleValue(mesh_motion_fields_, role);
+        if (field == INVALID_FIELD_ID) {
+            continue;
+        }
+
+        const auto mesh_role = toMeshMotionRole(role);
+        const auto& rec = field_registry_.get(field);
+        const auto field_idx = static_cast<std::size_t>(field);
+        FE_THROW_IF(field_idx >= field_dof_handlers_.size() ||
+                        field_idx >= field_dof_offsets_.size(),
+                    InvalidStateException,
+                    "FESystem::syncBoundMeshMotionFieldsToState: invalid field layout for '" +
+                        rec.name + "'");
+
+        const auto mesh_name = svmp::motion::standard_motion_field_name(mesh_role);
+        const auto mesh_field =
+            svmp::MeshFields::get_field_handle(local_mesh, svmp::EntityKind::Vertex, mesh_name);
+        FE_THROW_IF(mesh_field.id == 0, InvalidArgumentException,
+                    "FESystem::syncBoundMeshMotionFieldsToState: mesh is missing field '" +
+                        std::string(mesh_name) + "'");
+        svmp::motion::validate_motion_field(local_mesh,
+                                            mesh_field,
+                                            mesh_role,
+                                            mesh_->dim());
+        const auto* values = svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, mesh_field);
+        FE_CHECK_NOT_NULL(values,
+                          "FESystem::syncBoundMeshMotionFieldsToState: mesh field data");
+
+        const auto* entity_map = field_dof_handlers_[field_idx].getEntityDofMap();
+        FE_THROW_IF(entity_map == nullptr, InvalidStateException,
+                    "FESystem::syncBoundMeshMotionFieldsToState: FE field '" + rec.name +
+                        "' must have vertex DOFs to sync from mesh fields");
+
+        const auto components = static_cast<std::size_t>(std::max(1, rec.components));
+        const auto mesh_components = svmp::MeshFields::field_components(local_mesh, mesh_field);
+        FE_THROW_IF(mesh_components < components, InvalidArgumentException,
+                    "FESystem::syncBoundMeshMotionFieldsToState: mesh field '" +
+                        std::string(mesh_name) + "' has fewer components than FE field '" +
+                        rec.name + "'");
+
+        const GlobalIndex offset = field_dof_offsets_[field_idx];
+        const auto n_vertices = static_cast<GlobalIndex>(mesh_->n_vertices());
+        dofs.clear();
+        values_out.clear();
+        dofs.reserve(static_cast<std::size_t>(n_vertices) * components);
+        values_out.reserve(static_cast<std::size_t>(n_vertices) * components);
+
+        for (GlobalIndex v = 0; v < n_vertices; ++v) {
+            const auto vertex_dofs = entity_map->getVertexDofs(v);
+            FE_THROW_IF(vertex_dofs.size() != components, InvalidStateException,
+                        "FESystem::syncBoundMeshMotionFieldsToState: FE field '" + rec.name +
+                            "' vertex DOF component count mismatch");
+            const auto v_base = static_cast<std::size_t>(v) * mesh_components;
+            for (std::size_t c = 0; c < components; ++c) {
+                dofs.push_back(offset + vertex_dofs[c]);
+                values_out.push_back(static_cast<Real>(values[v_base + c]));
+            }
+        }
+
+        vector_view.setVectorEntries(dofs, values_out);
+        values_written += values_out.size();
+    }
+
+    return values_written;
+}
+
+void FESystem::notifyMeshGeometryAdvanced()
+{
+    if (assembler_) {
+        assembler_->invalidateGeometryCaches();
+    }
+    invalidateAnalysisCache();
+}
+
+void FESystem::notifyMeshTopologyLayoutChanged()
+{
+    invalidateSetup();
+    bumpDofLayoutRevision();
+    bumpConstraintLayoutRevision();
+    bumpBlockLayoutRevision();
+    invalidateAnalysisCache();
+}
+#endif
 
 FieldId FESystem::addInterfaceField(std::string name,
                                     std::shared_ptr<const spaces::FunctionSpace> space,

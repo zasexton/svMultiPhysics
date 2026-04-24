@@ -200,6 +200,7 @@ public:
 	    void setCurrentSolution(std::span<const Real> solution) override;
 	    void setCurrentSolutionView(const GlobalSystemView* solution_view) override;
 	    void setFieldSolutionAccess(std::span<const FieldSolutionAccess> fields) override;
+	    void setMeshMotionFieldAccess(const MeshMotionFieldAccess& fields) override;
 	    void setPreviousSolution(std::span<const Real> solution) override;
 	    void setPreviousSolution2(std::span<const Real> solution) override;
 	    void setPreviousSolutionView(const GlobalSystemView* solution_view) override;
@@ -576,6 +577,58 @@ private:
         RequiredData required_data,
         const quadrature::QuadratureRule& quad_rule);
 
+    struct FrameGeometryScratch {
+        std::vector<AssemblyContext::Point3D> points{};
+        std::vector<AssemblyContext::Matrix3x3> jacobians{};
+        std::vector<AssemblyContext::Matrix3x3> inverse_jacobians{};
+        std::vector<Real> jacobian_determinants{};
+        std::vector<Real> measures{};
+        std::vector<std::array<Real, 3>> cell_coords{};
+        std::vector<math::Vector<Real, 3>> node_coords{};
+    };
+
+    struct FaceFrameGeometryScratch {
+        FrameGeometryScratch cell{};
+        std::vector<AssemblyContext::Point3D> cell_reference_points{};
+        std::vector<AssemblyContext::Point3D> face_reference_points{};
+        std::vector<Real> canonical_to_reference_measures{};
+        std::vector<AssemblyContext::Vector3D> normals{};
+        std::vector<Real> surface_measures{};
+        std::vector<AssemblyContext::Matrix3x3> surface_jacobians{};
+        std::vector<std::array<Real, 3>> cell_coords{};
+    };
+
+    void prepareFrameExplicitGeometry(
+        AssemblyContext& context,
+        const IMeshAccess& mesh,
+        GlobalIndex cell_id,
+        ElementType cell_type,
+        const quadrature::QuadratureRule& quad_rule,
+        RequiredData required_data);
+
+    void computeFrameGeometry(
+        ElementType cell_type,
+        const quadrature::QuadratureRule& quad_rule,
+        FrameGeometryScratch& scratch);
+
+    void computeFaceFrameGeometry(
+        ElementType cell_type,
+        LocalIndex local_face_id,
+        ElementType face_type,
+        const quadrature::QuadratureRule& quad_rule,
+        std::span<const LocalIndex> align_facet_to_reference,
+        FaceFrameGeometryScratch& scratch);
+
+    [[nodiscard]] std::vector<FieldRequirement> effectiveFieldRequirements(
+        RequiredData required_data,
+        std::span<const FieldRequirement> kernel_requirements) const;
+
+    void validateMovingDomainRequirements(RequiredData required_data,
+                                          const char* error_prefix) const;
+    void populateMovingDomainFieldData(AssemblyContext& context,
+                                       RequiredData required_data,
+                                       const char* error_prefix);
+
 
     /**
      * @brief Prepare assembly context for a face
@@ -845,6 +898,13 @@ private:
     std::vector<AssemblyContext::Matrix3x3> scratch_trial_ref_hessians_;
     std::vector<AssemblyContext::Matrix3x3> scratch_trial_phys_hessians_;
     std::vector<AssemblyContext::Vector3D> scratch_normals_;
+    FrameGeometryScratch scratch_reference_geometry_;
+    FrameGeometryScratch scratch_current_geometry_;
+    FaceFrameGeometryScratch scratch_active_face_geometry_;
+    FaceFrameGeometryScratch scratch_reference_face_geometry_;
+    FaceFrameGeometryScratch scratch_current_face_geometry_;
+    std::vector<AssemblyContext::Matrix3x3> scratch_configuration_transforms_;
+    std::vector<AssemblyContext::Vector3D> scratch_mesh_motion_values_;
 
     // Point-wise evaluation scratch arrays
     std::vector<Real> scratch_scalar_values_at_pt_;
@@ -881,6 +941,7 @@ private:
     bool initialized_{false};
 
     std::vector<FieldSolutionAccess> field_solution_access_{};
+    MeshMotionFieldAccess mesh_motion_field_access_{};
 
     std::unordered_map<FaceTransformKey, FaceTransform, FaceTransformKeyHash> face_transform_cache_{};
 
@@ -1121,6 +1182,9 @@ private:
         bool valid{false};
         int dim{0};
         int nodes_per_cell{0};
+        GlobalIndex cell_count{0};
+        ElementType uniform_cell_type{ElementType::Unknown};
+        bool dense_cell_ids{false};
         std::vector<Real> coords;         ///< [n_cells * nodes_per_cell * 3] flat xyz
         const IMeshAccess* mesh{nullptr};
         bool revision_tracking_available{false};

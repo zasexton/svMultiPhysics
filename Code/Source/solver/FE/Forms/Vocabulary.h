@@ -271,6 +271,12 @@ inline std::vector<FormExpr> TestFunctions(const spaces::MixedSpace& W,
 
 inline FormExpr x() { return FormExpr::coordinate(); }
 inline FormExpr X() { return FormExpr::referenceCoordinate(); }
+inline FormExpr currentCoordinate() { return FormExpr::currentCoordinate(); }
+inline FormExpr referenceCoordinatePhysical() { return FormExpr::referenceCoordinatePhysical(); }
+inline FormExpr meshDisplacement() { return FormExpr::meshDisplacement(); }
+inline FormExpr meshVelocity() { return FormExpr::meshVelocity(); }
+inline FormExpr domainVelocity() { return FormExpr::domainVelocity(); }
+inline FormExpr meshAcceleration() { return FormExpr::meshAcceleration(); }
 inline FormExpr t() { return FormExpr::time(); }
 inline FormExpr deltat() { return FormExpr::timeStep(); }
 inline FormExpr deltat_eff() { return FormExpr::effectiveTimeStep(); }
@@ -282,6 +288,29 @@ inline FormExpr deltat_eff() { return FormExpr::effectiveTimeStep(); }
 inline FormExpr J() { return FormExpr::jacobian(); }
 inline FormExpr Jinv() { return FormExpr::jacobianInverse(); }
 inline FormExpr detJ() { return FormExpr::jacobianDeterminant(); }
+inline FormExpr currentJacobian() { return FormExpr::currentJacobian(); }
+inline FormExpr referenceJacobian() { return FormExpr::referenceJacobian(); }
+inline FormExpr currentJacobianDeterminant() { return FormExpr::currentJacobianDeterminant(); }
+inline FormExpr referenceJacobianDeterminant() { return FormExpr::referenceJacobianDeterminant(); }
+inline FormExpr currentNormal() { return FormExpr::currentNormal(); }
+inline FormExpr referenceNormal() { return FormExpr::referenceNormal(); }
+inline FormExpr currentMeasure() { return FormExpr::currentMeasure(); }
+inline FormExpr referenceMeasure() { return FormExpr::referenceMeasure(); }
+inline FormExpr surfaceJacobian() { return FormExpr::surfaceJacobian(); }
+inline FormExpr currentSurfaceVector() { return currentMeasure() * currentNormal(); }
+inline FormExpr referenceSurfaceVector() { return referenceMeasure() * referenceNormal(); }
+
+inline FormExpr nanson(const FormExpr& reference_surface_vector)
+{
+    return pushforward(reference_surface_vector,
+                       GeometryConfiguration::Reference,
+                       GeometryConfiguration::Current);
+}
+
+inline FormExpr nanson()
+{
+    return nanson(referenceSurfaceVector());
+}
 
 inline FormExpr h() { return FormExpr::cellDiameter(); }
 inline FormExpr vol() { return FormExpr::cellVolume(); }
@@ -304,6 +333,11 @@ inline FormExpr hNormal() { return (2.0 * vol()) / area(); }
 inline FormExpr hessian(const FormExpr& a) { return a.hessian(); }
 
 inline FormExpr laplacian(const FormExpr& a) { return trace(a.hessian()); }
+
+inline FormExpr materialDerivative(const FormExpr& field, const FormExpr& domain_velocity = domainVelocity())
+{
+    return field.dt() + inner(domain_velocity, field.grad());
+}
 
 // ---------------------------------------------------------------------------
 // Geometric differential operators (surface/level-set helpers)

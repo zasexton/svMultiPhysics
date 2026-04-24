@@ -21,6 +21,17 @@ namespace forms {
 
 namespace {
 
+[[nodiscard]] const char* configurationName(GeometryConfiguration cfg) noexcept
+{
+    switch (cfg) {
+        case GeometryConfiguration::Reference:
+            return "reference";
+        case GeometryConfiguration::Current:
+            return "current";
+    }
+    return "unknown";
+}
+
 // ============================================================================
 // Terminal nodes
 // ============================================================================
@@ -208,6 +219,22 @@ public:
     [[nodiscard]] bool hasTrial() const noexcept override { return false; }
 };
 
+class SimpleTerminalNode final : public FormExprNode {
+public:
+    SimpleTerminalNode(FormExprType type, std::string spelling)
+        : type_(type), spelling_(std::move(spelling))
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return type_; }
+    [[nodiscard]] std::string toString() const override { return spelling_; }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+
+private:
+    FormExprType type_{FormExprType::TypedZero};
+    std::string spelling_{};
+};
+
 class TimeNode final : public FormExprNode {
 public:
     [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::Time; }
@@ -315,6 +342,44 @@ public:
     [[nodiscard]] std::string toString() const override { return "domain(K)"; }
     [[nodiscard]] bool hasTest() const noexcept override { return false; }
     [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+};
+
+class FrameTransformNode final : public FormExprNode {
+public:
+    FrameTransformNode(FormExprType type,
+                       std::shared_ptr<FormExprNode> child,
+                       GeometryConfiguration from,
+                       GeometryConfiguration to)
+        : type_(type), child_(std::move(child)), from_(from), to_(to)
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return type_; }
+    [[nodiscard]] std::string toString() const override
+    {
+        const char* op = (type_ == FormExprType::Pullback) ? "pullback" : "pushforward";
+        return std::string(op) + "(" + (child_ ? child_->toString() : "<null>") + ", " +
+               configurationName(from_) + " -> " + configurationName(to_) + ")";
+    }
+    [[nodiscard]] bool hasTest() const noexcept override { return child_ && child_->hasTest(); }
+    [[nodiscard]] bool hasTrial() const noexcept override { return child_ && child_->hasTrial(); }
+    [[nodiscard]] std::optional<GeometryConfiguration> fromConfiguration() const override { return from_; }
+    [[nodiscard]] std::optional<GeometryConfiguration> toConfiguration() const override { return to_; }
+    [[nodiscard]] std::vector<std::shared_ptr<FormExprNode>> childrenShared() const override
+    {
+        return child_ ? std::vector<std::shared_ptr<FormExprNode>>{child_}
+                      : std::vector<std::shared_ptr<FormExprNode>>{};
+    }
+    [[nodiscard]] std::vector<const FormExprNode*> children() const override
+    {
+        return child_ ? std::vector<const FormExprNode*>{child_.get()}
+                      : std::vector<const FormExprNode*>{};
+    }
+
+private:
+    FormExprType type_{FormExprType::Pullback};
+    std::shared_ptr<FormExprNode> child_{};
+    GeometryConfiguration from_{GeometryConfiguration::Reference};
+    GeometryConfiguration to_{GeometryConfiguration::Current};
 };
 
 class CoefficientNode final : public FormExprNode {
@@ -2194,6 +2259,81 @@ FormExpr FormExpr::referenceCoordinate()
     return FormExpr(std::make_shared<ReferenceCoordinateNode>());
 }
 
+FormExpr FormExpr::meshDisplacement()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::MeshDisplacement, "meshDisplacement"));
+}
+
+FormExpr FormExpr::meshVelocity()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::MeshVelocity, "meshVelocity"));
+}
+
+FormExpr FormExpr::domainVelocity()
+{
+    return meshVelocity();
+}
+
+FormExpr FormExpr::meshAcceleration()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::MeshAcceleration, "meshAcceleration"));
+}
+
+FormExpr FormExpr::currentCoordinate()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::CurrentCoordinate, "x_current"));
+}
+
+FormExpr FormExpr::referenceCoordinatePhysical()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::ReferencePhysicalCoordinate, "X_physical"));
+}
+
+FormExpr FormExpr::currentJacobian()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::CurrentJacobian, "J_current"));
+}
+
+FormExpr FormExpr::referenceJacobian()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::ReferenceJacobian, "J_reference"));
+}
+
+FormExpr FormExpr::currentJacobianDeterminant()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::CurrentJacobianDeterminant, "detJ_current"));
+}
+
+FormExpr FormExpr::referenceJacobianDeterminant()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::ReferenceJacobianDeterminant, "detJ_reference"));
+}
+
+FormExpr FormExpr::currentNormal()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::CurrentNormal, "n_current"));
+}
+
+FormExpr FormExpr::referenceNormal()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::ReferenceNormal, "n_reference"));
+}
+
+FormExpr FormExpr::currentMeasure()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::CurrentMeasure, "dmu_current"));
+}
+
+FormExpr FormExpr::referenceMeasure()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::ReferenceMeasure, "dmu_reference"));
+}
+
+FormExpr FormExpr::surfaceJacobian()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::SurfaceJacobian, "J_surface"));
+}
+
 FormExpr FormExpr::time()
 {
     return FormExpr(std::make_shared<TimeNode>());
@@ -2452,6 +2592,24 @@ FormExpr FormExpr::cross(const FormExpr& rhs) const
 {
     if (!node_ || !rhs.node_) return {};
     return FormExpr(std::make_shared<CrossProductNode>(node_, rhs.node_));
+}
+
+FormExpr FormExpr::pullback(FormExpr expr,
+                            GeometryConfiguration from,
+                            GeometryConfiguration to)
+{
+    if (!expr.node_) return {};
+    return FormExpr(std::make_shared<FrameTransformNode>(
+        FormExprType::Pullback, expr.node_, from, to));
+}
+
+FormExpr FormExpr::pushforward(FormExpr expr,
+                               GeometryConfiguration from,
+                               GeometryConfiguration to)
+{
+    if (!expr.node_) return {};
+    return FormExpr(std::make_shared<FrameTransformNode>(
+        FormExprType::Pushforward, expr.node_, from, to));
 }
 
 FormExpr FormExpr::pow(const FormExpr& exponent) const
@@ -3063,6 +3221,12 @@ std::shared_ptr<FormExprNode> transformNodeShared(
         case FormExprType::RestrictPlus: return std::make_shared<RestrictPlusNode>(new_kids[0]);
         case FormExprType::Jump: return std::make_shared<JumpNode>(new_kids[0]);
         case FormExprType::Average: return std::make_shared<AverageNode>(new_kids[0]);
+        case FormExprType::Pullback:
+        case FormExprType::Pushforward: {
+            const auto from = node->fromConfiguration().value_or(GeometryConfiguration::Reference);
+            const auto to = node->toConfiguration().value_or(GeometryConfiguration::Current);
+            return std::make_shared<FrameTransformNode>(node->type(), new_kids[0], from, to);
+        }
 
         case FormExprType::Component: {
             const int i = node->componentIndex0().value_or(0);

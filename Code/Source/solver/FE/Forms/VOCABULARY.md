@@ -44,9 +44,15 @@ For the full integration guide, see `Forms/SYSTEMS_INTEGRATION.md`.
 | `TestFunction(space, name)` | Unbound test function (expert path) |
 | `Coefficient(...)` | Known field (scalar, vector, matrix, rank-4 tensor) |
 | `Constant(value)` | Runtime scalar parameter |
-| `x`, `X` | Physical / reference coordinates |
+| `x`, `X` | Active physical coordinate / reference-cell quadrature coordinate |
+| `currentCoordinate()`, `referenceCoordinatePhysical()` | Physical coordinates in current/reference mesh configurations |
+| `meshDisplacement()`, `meshVelocity()` / `domainVelocity()`, `meshAcceleration()` | Mesh-motion terminals populated by assembly field bindings |
 | `J`, `Jinv`, `detJ` | Jacobian mapping quantities |
+| `currentJacobian()`, `referenceJacobian()` | Frame-explicit geometry Jacobians |
+| `currentJacobianDeterminant()`, `referenceJacobianDeterminant()` | Frame-explicit geometry determinants/measures |
 | `n` | Outward unit normal |
+| `currentNormal()`, `referenceNormal()` | Frame-explicit surface normals |
+| `currentMeasure()`, `referenceMeasure()`, `surfaceJacobian()` | Frame-explicit cell/surface measures |
 | `h`, `vol(K)`, `area(F)` | Cell diameter, cell volume, facet measure |
 | `Constitutive(model, input)` | Constitutive model hook |
 
@@ -68,6 +74,32 @@ For the full integration guide, see `Forms/SYSTEMS_INTEGRATION.md`.
 | `A(i[,j])` + `einsum(expr)` | Einstein-style indexed access |
 | `jump(u)`, `avg(u)` | DG jump and average |
 | `u.minus()`, `u.plus()` | Explicit trace restrictions (DG) |
+
+### Moving-Domain Geometry
+
+`x()` preserves the legacy active-coordinate behavior. `X()` is the reference
+cell quadrature coordinate, not a physical material/reference coordinate. Use
+`referenceCoordinatePhysical()` when a form needs the physical reference
+configuration and `currentCoordinate()` when it needs the current configuration.
+
+The moving-domain terminals are physics-agnostic: they expose mesh/domain
+motion and frame-explicit geometry prepared by assembly. They do not encode ALE,
+FSI, solid mechanics, contact, or any other physics model.
+
+| Helper | Description |
+|--------|-------------|
+| `meshDisplacement()` | Mesh displacement field at quadrature points |
+| `meshVelocity()` / `domainVelocity()` | Mesh/domain velocity at quadrature points |
+| `meshAcceleration()` | Mesh acceleration at quadrature points when bound |
+| `currentCoordinate()` | Physical coordinate in the current mesh configuration |
+| `referenceCoordinatePhysical()` | Physical coordinate in the reference mesh configuration |
+| `currentJacobian()`, `referenceJacobian()` | Frame-explicit geometry Jacobians |
+| `currentNormal()`, `referenceNormal()` | Frame-explicit outward normals on surface integrations |
+| `currentMeasure()`, `referenceMeasure()` | Frame-explicit integration measures |
+| `surfaceJacobian()` | Surface Jacobian data prepared by assembly |
+| `pullback(expr, from, to)`, `pushforward(expr, from, to)` | Frame-labeled transform nodes; current baseline preserves the value and carries transform metadata |
+| `nanson(expr)` | Nanson-style frame transform helper, currently lowered through `pushforward(..., Reference, Current)` |
+| `materialDerivative(field, domainVelocity())` | Symbolic helper for `dt(field) + domainVelocity() . grad(field)` |
 
 ### Intrinsic Vector-Basis Gradients
 

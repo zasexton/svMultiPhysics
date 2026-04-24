@@ -334,19 +334,33 @@ TEST(MotionFieldsTest, AttachMotionFieldsCreatesExpectedFields)
   const auto hnd = motion::attach_motion_fields(mesh, 3);
   ASSERT_NE(hnd.displacement.id, 0u);
   ASSERT_NE(hnd.velocity.id, 0u);
+  ASSERT_NE(hnd.acceleration.id, 0u);
+  ASSERT_NE(hnd.previous_coordinates.id, 0u);
+  ASSERT_NE(hnd.previous_displacement.id, 0u);
+  ASSERT_NE(hnd.previous_velocity.id, 0u);
 
   EXPECT_TRUE(MeshFields::has_field(mesh.local_mesh(), EntityKind::Vertex, "mesh_displacement"));
   EXPECT_TRUE(MeshFields::has_field(mesh.local_mesh(), EntityKind::Vertex, "mesh_velocity"));
+  EXPECT_TRUE(MeshFields::has_field(mesh.local_mesh(), EntityKind::Vertex, "mesh_acceleration"));
+  EXPECT_TRUE(MeshFields::has_field(mesh.local_mesh(), EntityKind::Vertex, "previous_coordinates"));
+  EXPECT_TRUE(MeshFields::has_field(mesh.local_mesh(), EntityKind::Vertex, "previous_mesh_displacement"));
+  EXPECT_TRUE(MeshFields::has_field(mesh.local_mesh(), EntityKind::Vertex, "previous_mesh_velocity"));
 
   EXPECT_EQ(MeshFields::field_type(mesh.local_mesh(), hnd.displacement), FieldScalarType::Float64);
   EXPECT_EQ(MeshFields::field_type(mesh.local_mesh(), hnd.velocity), FieldScalarType::Float64);
+  EXPECT_EQ(MeshFields::field_type(mesh.local_mesh(), hnd.acceleration), FieldScalarType::Float64);
   EXPECT_EQ(MeshFields::field_components(mesh.local_mesh(), hnd.displacement), 3u);
   EXPECT_EQ(MeshFields::field_components(mesh.local_mesh(), hnd.velocity), 3u);
+  EXPECT_EQ(MeshFields::field_components(mesh.local_mesh(), hnd.acceleration), 3u);
 
   const auto* disp_desc = MeshFields::field_descriptor(mesh.local_mesh(), hnd.displacement);
   const auto* vel_desc  = MeshFields::field_descriptor(mesh.local_mesh(), hnd.velocity);
+  const auto* acc_desc  = MeshFields::field_descriptor(mesh.local_mesh(), hnd.acceleration);
+  const auto* prev_x_desc = MeshFields::field_descriptor(mesh.local_mesh(), hnd.previous_coordinates);
   ASSERT_NE(disp_desc, nullptr);
   ASSERT_NE(vel_desc, nullptr);
+  ASSERT_NE(acc_desc, nullptr);
+  ASSERT_NE(prev_x_desc, nullptr);
 
   EXPECT_EQ(disp_desc->units, "m");
   EXPECT_EQ(disp_desc->ghost_policy, FieldGhostPolicy::Exchange);
@@ -356,12 +370,38 @@ TEST(MotionFieldsTest, AttachMotionFieldsCreatesExpectedFields)
   EXPECT_EQ(vel_desc->ghost_policy, FieldGhostPolicy::Exchange);
   EXPECT_TRUE(vel_desc->time_dependent);
 
+  EXPECT_EQ(acc_desc->units, "m/s^2");
+  EXPECT_EQ(acc_desc->ghost_policy, FieldGhostPolicy::Exchange);
+  EXPECT_TRUE(acc_desc->time_dependent);
+
+  EXPECT_EQ(prev_x_desc->units, "m");
+  EXPECT_EQ(prev_x_desc->ghost_policy, FieldGhostPolicy::Exchange);
+  EXPECT_TRUE(prev_x_desc->time_dependent);
+  EXPECT_EQ(motion::parse_motion_field_role("mesh_velocity"), motion::MotionFieldRole::Velocity);
+  EXPECT_TRUE(motion::is_standard_motion_field_name("previous_mesh_velocity"));
+  EXPECT_STREQ(motion::standard_motion_field_name(motion::MotionFieldRole::Acceleration),
+               "mesh_acceleration");
+
   const auto hnd2 = motion::attach_motion_fields(mesh, 3);
   EXPECT_EQ(hnd2.displacement.id, hnd.displacement.id);
   EXPECT_EQ(hnd2.velocity.id, hnd.velocity.id);
+  EXPECT_EQ(hnd2.acceleration.id, hnd.acceleration.id);
+  EXPECT_EQ(hnd2.previous_coordinates.id, hnd.previous_coordinates.id);
 
   EXPECT_THROW(motion::attach_motion_fields(mesh, 2), std::runtime_error);
   EXPECT_THROW(motion::attach_motion_fields(mesh, 0), std::invalid_argument);
+}
+
+TEST(MotionFieldsTest, AttachMotionFieldsRejectsIncompatibleExistingStandardField)
+{
+  auto mesh = make_unit_tet_mesh();
+  MeshFields::attach_field(mesh.local_mesh(),
+                           EntityKind::Vertex,
+                           "mesh_displacement",
+                           FieldScalarType::Float64,
+                           2);
+
+  EXPECT_THROW(motion::attach_motion_fields(mesh, 3), std::runtime_error);
 }
 
 TEST(MotionFieldsTest, UpdateCoordinatesFromDisplacementAbsoluteAndIncremental)
@@ -384,7 +424,8 @@ TEST(MotionFieldsTest, UpdateCoordinatesFromDisplacementAbsoluteAndIncremental)
     disp[v * ncomp + 2] = 0.3 * static_cast<real_t>(v + 1);
   }
 
-  motion::update_coordinates_from_displacement(mesh, hnd, false);
+  motion::update_coordinates_from_displacement(
+      mesh, hnd, motion::DisplacementUpdateMode::AbsoluteFromReference);
 
   ASSERT_TRUE(mesh.has_current_coords());
   EXPECT_EQ(mesh.active_configuration(), Configuration::Current);
@@ -408,7 +449,8 @@ TEST(MotionFieldsTest, UpdateCoordinatesFromDisplacementAbsoluteAndIncremental)
     disp[v * ncomp + 2] = 0.00;
   }
 
-  motion::update_coordinates_from_displacement(mesh, hnd, true);
+  motion::update_coordinates_from_displacement(
+      mesh, hnd, motion::DisplacementUpdateMode::IncrementalFromCurrent);
 
   const auto& X_cur_2 = mesh.X_cur();
   ASSERT_EQ(X_cur_2.size(), X_prev.size());
@@ -515,6 +557,25 @@ TEST(MeshMotionTest, AdvanceInitializesAndResetClearsCurrentCoordinates)
   EXPECT_EQ(mesh.active_configuration(), Configuration::Current);
   EXPECT_EQ(mesh.X_cur(), mesh.X_ref());
 
+  const auto hnd = motion::attach_motion_fields(mesh, 3);
+  const auto* disp = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.displacement);
+  const auto* vel = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.velocity);
+  const auto* acc = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.acceleration);
+  const auto* prev_x =
+      MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.previous_coordinates);
+  ASSERT_NE(disp, nullptr);
+  ASSERT_NE(vel, nullptr);
+  ASSERT_NE(acc, nullptr);
+  ASSERT_NE(prev_x, nullptr);
+
+  const auto& X_ref = mesh.X_ref();
+  for (size_t i = 0; i < mesh.n_vertices() * 3u; ++i) {
+    EXPECT_NEAR(disp[i], 0.0, 1e-12);
+    EXPECT_NEAR(vel[i], 0.0, 1e-12);
+    EXPECT_NEAR(acc[i], 0.0, 1e-12);
+    EXPECT_NEAR(prev_x[i], X_ref[i], 1e-12);
+  }
+
   mm.reset_to_reference();
   EXPECT_FALSE(mesh.has_current_coords());
   EXPECT_EQ(mesh.active_configuration(), Configuration::Reference);
@@ -539,6 +600,16 @@ TEST(MeshMotionTest, InjectedBackendWritesFieldsAndUpdatesCoordinatesAndVelocity
 {
   auto mesh = make_unit_tet_mesh();
 
+  const auto hnd = motion::attach_motion_fields(mesh, 3);
+  auto* initial_vel = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.velocity);
+  ASSERT_NE(initial_vel, nullptr);
+  const size_t initial_ncomp = MeshFields::field_components(mesh.local_mesh(), hnd.velocity);
+  for (size_t v = 0; v < mesh.n_vertices(); ++v) {
+    initial_vel[v * initial_ncomp + 0] = 0.5;
+    initial_vel[v * initial_ncomp + 1] = 0.25;
+    initial_vel[v * initial_ncomp + 2] = -0.5;
+  }
+
   motion::MeshMotion mm(mesh);
   mm.set_backend(std::make_shared<ConstantDisplacementBackend>());
 
@@ -558,11 +629,16 @@ TEST(MeshMotionTest, InjectedBackendWritesFieldsAndUpdatesCoordinatesAndVelocity
     EXPECT_NEAR(X_cur[base + 2], X_ref[base + 2], 1e-12);
   }
 
-  const auto hnd = motion::attach_motion_fields(mesh, 3);
   const auto* disp = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.displacement);
   const auto* vel  = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.velocity);
+  const auto* acc  = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.acceleration);
+  const auto* prev_x = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.previous_coordinates);
+  const auto* prev_vel = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.previous_velocity);
   ASSERT_NE(disp, nullptr);
   ASSERT_NE(vel, nullptr);
+  ASSERT_NE(acc, nullptr);
+  ASSERT_NE(prev_x, nullptr);
+  ASSERT_NE(prev_vel, nullptr);
 
   const size_t ncomp = MeshFields::field_components(mesh.local_mesh(), hnd.displacement);
   ASSERT_EQ(ncomp, 3u);
@@ -576,6 +652,18 @@ TEST(MeshMotionTest, InjectedBackendWritesFieldsAndUpdatesCoordinatesAndVelocity
     EXPECT_NEAR(vel[base + 0], 1.0 / dt, 1e-12);
     EXPECT_NEAR(vel[base + 1], 0.0, 1e-12);
     EXPECT_NEAR(vel[base + 2], 0.0, 1e-12);
+
+    EXPECT_NEAR(acc[base + 0], (1.0 / dt - 0.5) / dt, 1e-12);
+    EXPECT_NEAR(acc[base + 1], (0.0 - 0.25) / dt, 1e-12);
+    EXPECT_NEAR(acc[base + 2], (0.0 + 0.5) / dt, 1e-12);
+
+    EXPECT_NEAR(prev_x[base + 0], X_ref[base + 0], 1e-12);
+    EXPECT_NEAR(prev_x[base + 1], X_ref[base + 1], 1e-12);
+    EXPECT_NEAR(prev_x[base + 2], X_ref[base + 2], 1e-12);
+
+    EXPECT_NEAR(prev_vel[base + 0], 0.5, 1e-12);
+    EXPECT_NEAR(prev_vel[base + 1], 0.25, 1e-12);
+    EXPECT_NEAR(prev_vel[base + 2], -0.5, 1e-12);
   }
 }
 

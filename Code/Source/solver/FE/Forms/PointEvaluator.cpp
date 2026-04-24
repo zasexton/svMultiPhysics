@@ -189,6 +189,12 @@ struct DualValue {
             return vector(ctx.x);
         case FormExprType::ReferenceCoordinate:
             throw std::invalid_argument("PointEvaluator: ReferenceCoordinate is not available in PointEvalContext");
+        case FormExprType::CurrentCoordinate:
+        case FormExprType::ReferencePhysicalCoordinate:
+        case FormExprType::MeshDisplacement:
+        case FormExprType::MeshVelocity:
+        case FormExprType::MeshAcceleration:
+            throw std::invalid_argument("PointEvaluator: moving-domain vector terminal is not available in PointEvalContext");
         case FormExprType::ParameterRef: {
             const auto slot = node.slotIndex();
             if (!slot) {
@@ -390,6 +396,15 @@ struct DualValue {
         case FormExprType::JacobianInverse:
         case FormExprType::JacobianDeterminant:
         case FormExprType::Normal:
+        case FormExprType::CurrentJacobian:
+        case FormExprType::ReferenceJacobian:
+        case FormExprType::CurrentJacobianDeterminant:
+        case FormExprType::ReferenceJacobianDeterminant:
+        case FormExprType::CurrentNormal:
+        case FormExprType::ReferenceNormal:
+        case FormExprType::CurrentMeasure:
+        case FormExprType::ReferenceMeasure:
+        case FormExprType::SurfaceJacobian:
         case FormExprType::CellDiameter:
         case FormExprType::CellVolume:
         case FormExprType::FacetArea:
@@ -406,6 +421,8 @@ struct DualValue {
         case FormExprType::DoubleContraction:
         case FormExprType::OuterProduct:
         case FormExprType::CrossProduct:
+        case FormExprType::Pullback:
+        case FormExprType::Pushforward:
         case FormExprType::AsVector:
         case FormExprType::AsTensor:
         case FormExprType::IndexedAccess:
@@ -453,6 +470,12 @@ struct DualValue {
             return vectorDual(ctx.x);
         case FormExprType::ReferenceCoordinate:
             throw std::invalid_argument("PointEvaluatorDual: ReferenceCoordinate is not available in PointEvalContext");
+        case FormExprType::CurrentCoordinate:
+        case FormExprType::ReferencePhysicalCoordinate:
+        case FormExprType::MeshDisplacement:
+        case FormExprType::MeshVelocity:
+        case FormExprType::MeshAcceleration:
+            throw std::invalid_argument("PointEvaluatorDual: moving-domain vector terminal is not available in PointEvalContext");
         case FormExprType::ParameterRef: {
             const auto slot = node.slotIndex();
             if (!slot) {
@@ -734,6 +757,15 @@ struct DualValue {
         case FormExprType::JacobianInverse:
         case FormExprType::JacobianDeterminant:
         case FormExprType::Normal:
+        case FormExprType::CurrentJacobian:
+        case FormExprType::ReferenceJacobian:
+        case FormExprType::CurrentJacobianDeterminant:
+        case FormExprType::ReferenceJacobianDeterminant:
+        case FormExprType::CurrentNormal:
+        case FormExprType::ReferenceNormal:
+        case FormExprType::CurrentMeasure:
+        case FormExprType::ReferenceMeasure:
+        case FormExprType::SurfaceJacobian:
         case FormExprType::CellDiameter:
         case FormExprType::CellVolume:
         case FormExprType::FacetArea:
@@ -750,6 +782,8 @@ struct DualValue {
         case FormExprType::DoubleContraction:
         case FormExprType::OuterProduct:
         case FormExprType::CrossProduct:
+        case FormExprType::Pullback:
+        case FormExprType::Pushforward:
         case FormExprType::AsVector:
         case FormExprType::AsTensor:
         case FormExprType::IndexedAccess:

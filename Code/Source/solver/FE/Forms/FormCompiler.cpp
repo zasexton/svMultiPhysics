@@ -261,6 +261,57 @@ bool integrandContainsTrialNamed(const FormExprNode& node, const std::string& tr
     return false;
 }
 
+bool isGeometrySensitivityTerminal(FormExprType type) noexcept
+{
+    switch (type) {
+        case FormExprType::CurrentCoordinate:
+        case FormExprType::CurrentJacobian:
+        case FormExprType::CurrentJacobianDeterminant:
+        case FormExprType::CurrentNormal:
+        case FormExprType::CurrentMeasure:
+        case FormExprType::SurfaceJacobian:
+        case FormExprType::Pullback:
+        case FormExprType::Pushforward:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool containsGeometrySensitivityTerminal(const FormExprNode& node)
+{
+    if (isGeometrySensitivityTerminal(node.type())) {
+        return true;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && containsGeometrySensitivityTerminal(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void requireSupportedGeometrySensitivityMode(const FormExprNode& node,
+                                             const GeometrySensitivityOptions& options)
+{
+    if (options.mode == GeometrySensitivityMode::GeometryConstant) {
+        return;
+    }
+
+    if (options.mesh_motion_field == INVALID_FIELD_ID ||
+        options.mesh_motion_field == GEOMETRY_FIELD_ID ||
+        options.mesh_motion_field == CURRENT_SOLUTION_FIELD_ID) {
+        throw std::invalid_argument(
+            "FormCompiler: geometry sensitivity mode requires an explicit mesh-motion FieldId");
+    }
+
+    if (containsGeometrySensitivityTerminal(node)) {
+        throw std::invalid_argument(
+            "FormCompiler: geometry sensitivity with respect to mesh-motion unknowns is opt-in "
+            "but requires Phase 8 geometry derivative kernels; refusing to assemble an incomplete tangent");
+    }
+}
+
 assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind kind)
 {
     using assembly::RequiredData;
@@ -306,6 +357,44 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
             case FormExprType::ReferenceCoordinate:
                 required |= RequiredData::QuadraturePoints;
                 break;
+            case FormExprType::MeshDisplacement:
+                required |= RequiredData::MeshDisplacement;
+                break;
+            case FormExprType::MeshVelocity:
+                required |= RequiredData::MeshVelocity;
+                break;
+            case FormExprType::MeshAcceleration:
+                required |= RequiredData::MeshAcceleration;
+                break;
+            case FormExprType::CurrentCoordinate:
+                required |= RequiredData::CurrentPhysicalPoints;
+                break;
+            case FormExprType::ReferencePhysicalCoordinate:
+                required |= RequiredData::ReferencePhysicalPoints;
+                break;
+            case FormExprType::CurrentJacobian:
+                required |= RequiredData::CurrentJacobians;
+                break;
+            case FormExprType::ReferenceJacobian:
+                required |= RequiredData::ReferenceJacobians;
+                break;
+            case FormExprType::CurrentJacobianDeterminant:
+            case FormExprType::CurrentMeasure:
+                required |= RequiredData::CurrentMeasures;
+                break;
+            case FormExprType::ReferenceJacobianDeterminant:
+            case FormExprType::ReferenceMeasure:
+                required |= RequiredData::ReferenceMeasures;
+                break;
+            case FormExprType::CurrentNormal:
+                required |= RequiredData::CurrentNormals;
+                break;
+            case FormExprType::ReferenceNormal:
+                required |= RequiredData::ReferenceNormals;
+                break;
+            case FormExprType::SurfaceJacobian:
+                required |= RequiredData::SurfaceJacobians;
+                break;
             case FormExprType::Jacobian:
                 required |= RequiredData::Jacobians;
                 break;
@@ -326,6 +415,10 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
             case FormExprType::MaterialStateOldRef:
             case FormExprType::MaterialStateWorkRef:
                 required |= RequiredData::MaterialState;
+                break;
+            case FormExprType::Pullback:
+            case FormExprType::Pushforward:
+                required |= RequiredData::ConfigurationTransforms;
                 break;
             case FormExprType::StateField: {
                 // StateField usually refers to an auxiliary/state variable provided as
@@ -680,6 +773,8 @@ int analyzeTimeDerivativeOrder(const FormExprNode& node, FormKind kind)
                 case FormExprType::RestrictPlus:
                 case FormExprType::Jump:
                 case FormExprType::Average:
+                case FormExprType::Pullback:
+                case FormExprType::Pushforward:
                 case FormExprType::Component:
                 case FormExprType::IndexedAccess:
                 case FormExprType::Transpose:
@@ -889,6 +984,8 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
     }
 
     detail::requireNoCoupledPlaceholders(*form.node());
+    detail::requireSupportedGeometrySensitivityMode(
+        *form.node(), impl_->options.geometry_sensitivity);
     if (!impl_->options.jit.enable) {
         detail::requireNoIndexedAccess(*form.node());
     }

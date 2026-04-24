@@ -486,6 +486,97 @@ public:
         return normals_;
     }
 
+    // =========================================================================
+    // Moving-Domain Geometry Data (optional; frame-explicit)
+    // =========================================================================
+
+    [[nodiscard]] Point3D referencePhysicalPoint(LocalIndex q) const;
+    [[nodiscard]] Point3D currentPhysicalPoint(LocalIndex q) const;
+    [[nodiscard]] std::span<const Point3D> referencePhysicalPoints() const noexcept
+    {
+        return reference_physical_points_;
+    }
+    [[nodiscard]] std::span<const Point3D> currentPhysicalPoints() const noexcept
+    {
+        return current_physical_points_;
+    }
+
+    [[nodiscard]] Matrix3x3 referenceJacobian(LocalIndex q) const;
+    [[nodiscard]] Matrix3x3 currentJacobian(LocalIndex q) const;
+    [[nodiscard]] std::span<const Matrix3x3> referenceJacobians() const noexcept
+    {
+        return reference_jacobians_;
+    }
+    [[nodiscard]] std::span<const Matrix3x3> currentJacobians() const noexcept
+    {
+        return current_jacobians_;
+    }
+
+    [[nodiscard]] Matrix3x3 referenceInverseJacobian(LocalIndex q) const;
+    [[nodiscard]] Matrix3x3 currentInverseJacobian(LocalIndex q) const;
+    [[nodiscard]] std::span<const Matrix3x3> referenceInverseJacobians() const noexcept
+    {
+        return reference_inverse_jacobians_;
+    }
+    [[nodiscard]] std::span<const Matrix3x3> currentInverseJacobians() const noexcept
+    {
+        return current_inverse_jacobians_;
+    }
+
+    [[nodiscard]] Vector3D referenceNormal(LocalIndex q) const;
+    [[nodiscard]] Vector3D currentNormal(LocalIndex q) const;
+    [[nodiscard]] std::span<const Vector3D> referenceNormals() const noexcept
+    {
+        return reference_normals_;
+    }
+    [[nodiscard]] std::span<const Vector3D> currentNormals() const noexcept
+    {
+        return current_normals_;
+    }
+
+    [[nodiscard]] Real referenceMeasure(LocalIndex q) const;
+    [[nodiscard]] Real currentMeasure(LocalIndex q) const;
+    [[nodiscard]] std::span<const Real> referenceMeasures() const noexcept
+    {
+        return reference_measures_;
+    }
+    [[nodiscard]] std::span<const Real> currentMeasures() const noexcept
+    {
+        return current_measures_;
+    }
+
+    [[nodiscard]] Matrix3x3 surfaceJacobian(LocalIndex q) const;
+    [[nodiscard]] Matrix3x3 configurationTransform(LocalIndex q) const;
+    [[nodiscard]] std::span<const Matrix3x3> surfaceJacobians() const noexcept
+    {
+        return surface_jacobians_;
+    }
+    [[nodiscard]] std::span<const Matrix3x3> configurationTransforms() const noexcept
+    {
+        return configuration_transforms_;
+    }
+
+    [[nodiscard]] Vector3D meshDisplacement(LocalIndex q) const;
+    [[nodiscard]] Vector3D meshVelocity(LocalIndex q) const;
+    [[nodiscard]] Vector3D meshAcceleration(LocalIndex q) const;
+    [[nodiscard]] Vector3D previousCoordinate(LocalIndex q) const;
+    [[nodiscard]] std::span<const Vector3D> meshDisplacements() const noexcept
+    {
+        return mesh_displacements_;
+    }
+    [[nodiscard]] std::span<const Vector3D> meshVelocities() const noexcept
+    {
+        return mesh_velocities_;
+    }
+    [[nodiscard]] std::span<const Vector3D> meshAccelerations() const noexcept
+    {
+        return mesh_accelerations_;
+    }
+    [[nodiscard]] std::span<const Vector3D> previousCoordinates() const noexcept
+    {
+        return previous_coordinates_;
+    }
+
     // Interleaved quadrature-point geometry (SoA->AoSoA bridge for JIT kernels):
     //   [q * stride +  0.. 2] physical point xyz
     //   [q * stride +  3..11] Jacobian (row-major 3x3)
@@ -1655,6 +1746,23 @@ public:
      */
     void setNormals(std::span<const Vector3D> normals);
 
+    void setReferenceGeometry(std::span<const Point3D> points,
+                              std::span<const Matrix3x3> jacobians,
+                              std::span<const Matrix3x3> inverse_jacobians,
+                              std::span<const Real> measures);
+    void setCurrentGeometry(std::span<const Point3D> points,
+                            std::span<const Matrix3x3> jacobians,
+                            std::span<const Matrix3x3> inverse_jacobians,
+                            std::span<const Real> measures);
+    void setReferenceNormals(std::span<const Vector3D> normals);
+    void setCurrentNormals(std::span<const Vector3D> normals);
+    void setSurfaceJacobians(std::span<const Matrix3x3> jacobians);
+    void setConfigurationTransforms(std::span<const Matrix3x3> transforms);
+    void setMeshDisplacements(std::span<const Vector3D> displacements);
+    void setMeshVelocities(std::span<const Vector3D> velocities);
+    void setMeshAccelerations(std::span<const Vector3D> accelerations);
+    void setPreviousCoordinates(std::span<const Vector3D> coordinates);
+
     // =========================================================================
     // Direct Geometry Population (zero-copy path)
     // =========================================================================
@@ -1795,6 +1903,7 @@ private:
     void rebuildJITFieldSolutionTable();
     void rebuildInterleavedQPointGeometry();
     void ensureArenaCapacity(LocalIndex required_dofs, LocalIndex required_qpts);
+    void clearMovingDomainData() noexcept;
 
     // Context type and identification
     ContextType type_{ContextType::Cell};
@@ -1839,6 +1948,24 @@ private:
     ArenaArray<Real> interleaved_qpoint_geometry_;
 
     mutable bool interleaved_dirty_{true};
+
+    // Moving-domain geometry data (explicit frames; optional)
+    JITAlignedVector<Point3D> reference_physical_points_{};
+    JITAlignedVector<Point3D> current_physical_points_{};
+    JITAlignedVector<Matrix3x3> reference_jacobians_{};
+    JITAlignedVector<Matrix3x3> current_jacobians_{};
+    JITAlignedVector<Matrix3x3> reference_inverse_jacobians_{};
+    JITAlignedVector<Matrix3x3> current_inverse_jacobians_{};
+    JITAlignedVector<Vector3D> reference_normals_{};
+    JITAlignedVector<Vector3D> current_normals_{};
+    JITAlignedVector<Real> reference_measures_{};
+    JITAlignedVector<Real> current_measures_{};
+    JITAlignedVector<Matrix3x3> surface_jacobians_{};
+    JITAlignedVector<Matrix3x3> configuration_transforms_{};
+    JITAlignedVector<Vector3D> mesh_displacements_{};
+    JITAlignedVector<Vector3D> mesh_velocities_{};
+    JITAlignedVector<Vector3D> mesh_accelerations_{};
+    JITAlignedVector<Vector3D> previous_coordinates_{};
 
     // Entity measures (optional)
     Real cell_diameter_{0.0};

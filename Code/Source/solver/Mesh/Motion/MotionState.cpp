@@ -93,6 +93,14 @@ void update_velocity_from_displacement(MeshBase& mesh,
         "update_velocity_from_displacement: displacement and velocity field handles must be valid");
   }
 
+  const int dim = mesh.dim();
+  if (dim <= 0) {
+    throw std::runtime_error(
+        "update_velocity_from_displacement: mesh dimension must be positive");
+  }
+  validate_motion_field(mesh, hnd.displacement, MotionFieldRole::Displacement, dim);
+  validate_motion_field(mesh, hnd.velocity, MotionFieldRole::Velocity, dim);
+
   const size_t n_vertices = mesh.n_vertices();
   if (n_vertices == 0) {
     return;

@@ -263,6 +263,31 @@ static void test_owned_displacement_is_exchanged_and_updates_ghosts(int rank, in
   ASSERT_EQ(mesh.world_size(), world_size);
   ASSERT(mesh.n_ghost_vertices() > 0);
 
+  const auto initial_hnd = motion::attach_motion_fields(mesh, mesh.dim());
+  auto* initial_disp =
+      MeshFields::field_data_as<real_t>(mesh.local_mesh(), initial_hnd.displacement);
+  auto* initial_vel =
+      MeshFields::field_data_as<real_t>(mesh.local_mesh(), initial_hnd.velocity);
+  ASSERT(initial_disp != nullptr);
+  ASSERT(initial_vel != nullptr);
+
+  const size_t initial_c =
+      MeshFields::field_components(mesh.local_mesh(), initial_hnd.displacement);
+  ASSERT_EQ(initial_c, 3u);
+  for (index_t v = 0; v < static_cast<index_t>(mesh.n_vertices()); ++v) {
+    const size_t base = static_cast<size_t>(v) * initial_c;
+    if (!mesh.is_owned_vertex(v)) {
+      continue;
+    }
+    const real_t owner_value = static_cast<real_t>(rank + 1);
+    initial_disp[base + 0] = owner_value + real_t(10);
+    initial_disp[base + 1] = owner_value + real_t(20);
+    initial_disp[base + 2] = owner_value + real_t(30);
+    initial_vel[base + 0] = owner_value + real_t(100);
+    initial_vel[base + 1] = owner_value + real_t(200);
+    initial_vel[base + 2] = owner_value + real_t(300);
+  }
+
   motion::MeshMotion mm(mesh);
   mm.set_backend(std::make_shared<OwnedOnlyDisplacementBackend>());
 
@@ -277,8 +302,19 @@ static void test_owned_displacement_is_exchanged_and_updates_ghosts(int rank, in
   const auto hnd = motion::attach_motion_fields(mesh, mesh.dim());
   const auto* disp = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.displacement);
   const auto* vel  = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.velocity);
+  const auto* acc  = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.acceleration);
+  const auto* prev_x =
+      MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.previous_coordinates);
+  const auto* prev_disp =
+      MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.previous_displacement);
+  const auto* prev_vel =
+      MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.previous_velocity);
   ASSERT(disp != nullptr);
   ASSERT(vel != nullptr);
+  ASSERT(acc != nullptr);
+  ASSERT(prev_x != nullptr);
+  ASSERT(prev_disp != nullptr);
+  ASSERT(prev_vel != nullptr);
 
   const size_t c = MeshFields::field_components(mesh.local_mesh(), hnd.displacement);
   ASSERT_EQ(c, 3u);
@@ -289,7 +325,16 @@ static void test_owned_displacement_is_exchanged_and_updates_ghosts(int rank, in
 
   for (index_t v = 0; v < static_cast<index_t>(mesh.n_vertices()); ++v) {
     const rank_t owner = mesh.owner_rank_vertex(v);
-    const real_t expected_disp_x = static_cast<real_t>(owner + 1);
+    const real_t owner_value = static_cast<real_t>(owner + 1);
+    const real_t expected_disp_x = owner_value;
+    const real_t expected_prev_disp[3] = {
+        owner_value + real_t(10),
+        owner_value + real_t(20),
+        owner_value + real_t(30)};
+    const real_t expected_prev_vel[3] = {
+        owner_value + real_t(100),
+        owner_value + real_t(200),
+        owner_value + real_t(300)};
 
     const size_t base = static_cast<size_t>(v) * c;
     ASSERT_NEAR(disp[base + 0], expected_disp_x, 1e-12);
@@ -299,6 +344,29 @@ static void test_owned_displacement_is_exchanged_and_updates_ghosts(int rank, in
     ASSERT_NEAR(vel[base + 0], expected_disp_x / static_cast<real_t>(dt), 1e-12);
     ASSERT_NEAR(vel[base + 1], 0.0, 1e-12);
     ASSERT_NEAR(vel[base + 2], 0.0, 1e-12);
+
+    ASSERT_NEAR(acc[base + 0],
+                (expected_disp_x / static_cast<real_t>(dt) - expected_prev_vel[0]) /
+                    static_cast<real_t>(dt),
+                1e-12);
+    ASSERT_NEAR(acc[base + 1],
+                (real_t(0) - expected_prev_vel[1]) / static_cast<real_t>(dt),
+                1e-12);
+    ASSERT_NEAR(acc[base + 2],
+                (real_t(0) - expected_prev_vel[2]) / static_cast<real_t>(dt),
+                1e-12);
+
+    ASSERT_NEAR(prev_x[base + 0], X_ref[base + 0], 1e-12);
+    ASSERT_NEAR(prev_x[base + 1], X_ref[base + 1], 1e-12);
+    ASSERT_NEAR(prev_x[base + 2], X_ref[base + 2], 1e-12);
+
+    ASSERT_NEAR(prev_disp[base + 0], expected_prev_disp[0], 1e-12);
+    ASSERT_NEAR(prev_disp[base + 1], expected_prev_disp[1], 1e-12);
+    ASSERT_NEAR(prev_disp[base + 2], expected_prev_disp[2], 1e-12);
+
+    ASSERT_NEAR(prev_vel[base + 0], expected_prev_vel[0], 1e-12);
+    ASSERT_NEAR(prev_vel[base + 1], expected_prev_vel[1], 1e-12);
+    ASSERT_NEAR(prev_vel[base + 2], expected_prev_vel[2], 1e-12);
 
     ASSERT_NEAR(X_cur[base + 0], X_ref[base + 0] + expected_disp_x, 1e-12);
     ASSERT_NEAR(X_cur[base + 1], X_ref[base + 1], 1e-12);
@@ -327,4 +395,3 @@ int main(int argc, char** argv)
   MPI_Finalize();
   return 0;
 }
-

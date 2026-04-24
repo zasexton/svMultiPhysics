@@ -243,20 +243,23 @@ Why this matters:
 Roadmap items:
 
 - mesh/domain motion terminals
-  - mesh displacement
-  - mesh velocity / domain velocity
+  - mesh displacement (baseline implemented)
+  - mesh velocity / domain velocity (baseline implemented)
+  - mesh acceleration (baseline implemented when a motion field is bound)
 - moving-domain differential operators
-  - material derivative
+  - material derivative (baseline symbolic helper implemented)
   - optional convected derivatives if they become a real requirement
 - reference/current configuration geometry
+  - current/reference physical coordinates (baseline implemented)
+  - current/reference Jacobians and determinants (baseline implemented)
   - current normal
   - reference normal
   - current measure
   - reference measure
 - mapping transforms
-  - surface Jacobian
-  - Nanson-type transforms
-  - current/reference pullback/pushforward semantics where needed
+  - surface Jacobian (baseline terminal implemented)
+  - Nanson-type transforms (metadata-preserving baseline implemented)
+  - current/reference pullback/pushforward semantics where needed (metadata-preserving baseline implemented)
 
 Acceptance criteria:
 
@@ -264,6 +267,12 @@ Acceptance criteria:
 - free-surface and FSI formulations can distinguish reference and current
   geometry in the DSL
 - ALE is treated as a first-class vocabulary branch, not just geometry metadata
+
+Baseline status: Phase 4 of the moving-mesh infrastructure plan adds the
+physics-neutral AST terminals, required-data lowering, interpreter/AD/JIT
+evaluation, and public `Vocabulary.h` helpers. Later roadmap work may still add
+tensor-family-specific transform semantics beyond the current metadata-carrying
+`pullback`/`pushforward` nodes.
 
 ## 6. Priority 4 - Advanced Math and Constitutive Ergonomics
 

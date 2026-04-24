@@ -145,6 +145,21 @@ struct FieldSolutionAccess {
     GlobalIndex dof_offset{0};
 };
 
+/**
+ * @brief Physics-neutral binding from moving-domain roles to FE fields
+ *
+ * These fields are evaluated like ordinary FE solution fields and exposed
+ * through frame-explicit AssemblyContext moving-domain accessors.
+ */
+struct MeshMotionFieldAccess {
+    FieldId mesh_displacement{INVALID_FIELD_ID};
+    FieldId mesh_velocity{INVALID_FIELD_ID};
+    FieldId mesh_acceleration{INVALID_FIELD_ID};
+    FieldId previous_coordinates{INVALID_FIELD_ID};
+    FieldId previous_mesh_displacement{INVALID_FIELD_ID};
+    FieldId previous_mesh_velocity{INVALID_FIELD_ID};
+};
+
 enum class DofEntityScope : std::uint8_t {
     Cell,
     InterfaceFace
@@ -316,6 +331,12 @@ struct AssemblyResult {
 // Mesh Topology Abstraction (for mesh-independent assembly)
 // ============================================================================
 
+enum class CoordinateFrame : std::uint8_t {
+    Active,
+    Reference,
+    Current
+};
+
 /**
  * @brief Abstract interface for mesh iteration during assembly
  *
@@ -401,6 +422,13 @@ public:
     /// Opaque key for the coordinate configuration used by this adapter.
     [[nodiscard]] virtual std::uint64_t coordinateConfigurationKey() const { return 0; }
 
+    /// True when valid local cell identifiers are exactly [0, numCells()).
+    ///
+    /// Consumers may use this as an indexing contract for flat per-cell tables.
+    /// Adapters that expose sparse, global, filtered, or otherwise non-dense
+    /// cell identifiers must leave this false.
+    [[nodiscard]] virtual bool cellIdsAreDense() const { return false; }
+
     /// Check if cell is locally owned
     [[nodiscard]] virtual bool isOwnedCell(GlobalIndex cell_id) const = 0;
 
@@ -428,6 +456,23 @@ public:
     /// @param coords Output vector to fill with node coordinates (size = num_nodes_per_cell)
     virtual void getCellCoordinates(GlobalIndex cell_id,
                                     std::vector<std::array<Real, 3>>& coords) const = 0;
+
+    /// Query whether this adapter can provide explicit-frame coordinates.
+    [[nodiscard]] virtual bool supportsCoordinateFrame(CoordinateFrame frame) const
+    {
+        return frame == CoordinateFrame::Active;
+    }
+
+    /// Get cell coordinates in an explicit coordinate frame when available.
+    virtual void getCellCoordinates(GlobalIndex cell_id,
+                                    CoordinateFrame frame,
+                                    std::vector<std::array<Real, 3>>& coords) const
+    {
+        if (frame != CoordinateFrame::Active) {
+            throw FEException("IMeshAccess: explicit coordinate frame is not available for this mesh adapter");
+        }
+        getCellCoordinates(cell_id, coords);
+    }
 
     /// Get the local face index within a cell for a boundary face
     /// @param face_id Global face identifier
@@ -641,6 +686,15 @@ public:
      * registry to populate AssemblyContext field data.
      */
     virtual void setFieldSolutionAccess(std::span<const FieldSolutionAccess> /*fields*/) {}
+
+    /**
+     * @brief Provide physics-neutral mesh-motion field bindings
+     *
+     * Default implementation is a no-op. Assemblers that support moving-domain
+     * kernels should use these bindings to populate RequiredData::Mesh* context
+     * values from registered FE fields.
+     */
+    virtual void setMeshMotionFieldAccess(const MeshMotionFieldAccess& /*fields*/) {}
 
     /**
      * @brief Set the previous-step solution vector (u^{n-1}) for transient assembly
