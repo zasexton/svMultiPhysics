@@ -37,6 +37,7 @@
 #include "MotionFields.h"
 #include "MotionQuality.h"
 #include "MotionState.h"
+#include "../Validation/MovingGeometryValidity.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -198,6 +199,7 @@ const MeshBase& MeshMotion::mesh() const
 
 bool MeshMotion::advance(double dt)
 {
+  last_error_.clear();
   MeshBase& mb = mesh();
 
   const bool entry_has_current = mb.has_current_coords();
@@ -214,6 +216,24 @@ bool MeshMotion::advance(double dt)
   // solve so substep increments are applied on a consistent base geometry.
   if (mesh_->world_size() > 1) {
     mesh_->update_exchange_ghost_coordinates(Configuration::Current);
+  }
+
+  const auto compatibility =
+      constraint_registry_.validate_prescribed_motion(mb,
+                                                      dirichlet_bcs_,
+                                                      dt,
+                                                      /*step_scale=*/1.0);
+  if (!compatibility.ok) {
+    last_error_ = compatibility.message;
+    if (!entry_has_current) {
+      mb.clear_current_coords();
+      mb.use_reference_configuration();
+    } else if (entry_active_cfg == Configuration::Reference) {
+      mb.use_reference_configuration();
+    } else {
+      mb.use_current_configuration();
+    }
+    return false;
   }
 
   // Attach / lookup motion fields.
@@ -382,6 +402,10 @@ bool MeshMotion::advance(double dt)
     // Apply displacement increment to current coordinates.
     add_displacement_to_current_coords(mb, disp, disp_view.components, dim, real_t(1));
 
+    if (mesh_->world_size() > 1) {
+      mesh_->update_exchange_ghost_coordinates(Configuration::Current);
+    }
+
     // Quality gating / backtracking.
     if (cfg_.enable_quality_guard) {
       const MotionQualityReport report =
@@ -409,6 +433,30 @@ bool MeshMotion::advance(double dt)
 
       // Optionally reduce subsequent substep sizes if quality is trending poor.
       current_max_scale = std::min(current_max_scale, static_cast<double>(suggested));
+    }
+
+    if (cfg_.enable_validity_guard) {
+      auto policy = cfg_.validity_policy;
+      policy.configuration = Configuration::Current;
+      const validation::MovingGeometryValidityReport validity =
+          validation::MovingGeometryValidity::evaluate(*mesh_, policy);
+
+      if (cfg_.enforce_validity_thresholds && validity.requires_rejection()) {
+        last_error_ = validity.to_string();
+
+        add_displacement_to_current_coords(mb, disp, disp_view.components, dim, real_t(-1));
+        if (mesh_->world_size() > 1) {
+          mesh_->update_exchange_ghost_coordinates(Configuration::Current);
+        }
+
+        if (validity.recommends_backtrack()) {
+          current_max_scale = step_scale * 0.5;
+          continue;
+        }
+
+        restore_entry_state();
+        return false;
+      }
     }
 
     // Accepted: accumulate displacement increment into total.

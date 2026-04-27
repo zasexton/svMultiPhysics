@@ -58,15 +58,82 @@
 #include "../Topology/CellTopology.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <fstream>
+#include <cstdlib>
+#include <sstream>
+#include <utility>
 
 namespace svmp {
 
 namespace {
+bool vtk_reader_trace_enabled() {
+  const char* value = std::getenv("SVMP_MESH_LOAD_TRACE");
+  if (!value) {
+    return false;
+  }
+
+  std::string flag(value);
+  std::transform(flag.begin(), flag.end(), flag.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return !(flag.empty() || flag == "0" || flag == "false" || flag == "off" || flag == "no");
+}
+
+std::pair<std::size_t, std::size_t> vtk_reader_process_memory_kb() {
+  std::ifstream status("/proc/self/status");
+  if (!status.good()) {
+    return {0, 0};
+  }
+
+  std::size_t rss_kb = 0;
+  std::size_t hwm_kb = 0;
+  std::string key;
+  while (status >> key) {
+    if (key == "VmRSS:") {
+      status >> rss_kb;
+    } else if (key == "VmHWM:") {
+      status >> hwm_kb;
+    }
+    std::string rest;
+    std::getline(status, rest);
+  }
+  return {rss_kb, hwm_kb};
+}
+
+std::string vtk_reader_rank_label() {
+  if (const char* rank = std::getenv("OMPI_COMM_WORLD_RANK")) {
+    return rank;
+  }
+  if (const char* rank = std::getenv("PMI_RANK")) {
+    return rank;
+  }
+  if (const char* rank = std::getenv("MPI_LOCALRANKID")) {
+    return rank;
+  }
+  return "?";
+}
+
+void trace_vtk_reader(const std::string& stage, const std::string& detail = {}) {
+  if (!vtk_reader_trace_enabled()) {
+    return;
+  }
+
+  const auto [rss_kb, hwm_kb] = vtk_reader_process_memory_kb();
+  std::cerr << "[svMultiPhysics::Mesh] rank=" << vtk_reader_rank_label()
+            << " stage=\"" << stage << "\"";
+  if (!detail.empty()) {
+    std::cerr << " " << detail;
+  }
+  if (rss_kb != 0 || hwm_kb != 0) {
+    std::cerr << " rss_mb=" << (rss_kb / 1024.0)
+              << " hwm_mb=" << (hwm_kb / 1024.0);
+  }
+  std::cerr << std::endl;
+}
 
 FieldScalarType field_type_from_vtk_data_type(int vtk_type) {
   switch (vtk_type) {
@@ -199,6 +266,44 @@ void apply_global_ids_if_present(vtkDataSet* dataset, MeshBase& mesh) {
   }
 }
 
+MeshFinalizeOptions parse_finalize_options(const MeshIOOptions& options) {
+  MeshFinalizeOptions out{};
+
+  auto parse_bool = [](const std::string& value, bool default_value) {
+    std::string v = value;
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (v == "0" || v == "false" || v == "no" || v == "off") {
+      return false;
+    }
+    if (v == "1" || v == "true" || v == "yes" || v == "on") {
+      return true;
+    }
+    return default_value;
+  };
+
+  if (auto it = options.kv.find("codim1_topology"); it != options.kv.end()) {
+    std::string value = it->second;
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (value == "none" || value == "off" || value == "false" || value == "0") {
+      out.codim1_storage = MeshCodim1StorageMode::None;
+    } else if (value == "boundary" || value == "boundary-only" || value == "boundary_only") {
+      out.codim1_storage = MeshCodim1StorageMode::BoundaryOnly;
+    } else if (value == "full" || value == "on" || value == "true" || value == "1") {
+      out.codim1_storage = MeshCodim1StorageMode::Full;
+    } else {
+      throw std::runtime_error("VTKReader: codim1_topology must be 'none', 'boundary-only', or 'full'");
+    }
+  }
+
+  if (auto it = options.kv.find("edge_topology"); it != options.kv.end()) {
+    out.edge_storage = parse_bool(it->second, out.edge_storage);
+  }
+
+  return out;
+}
+
 } // namespace
 
 // Static member definitions
@@ -247,35 +352,38 @@ MeshBase VTKReader::read(const MeshIOOptions& options) {
       force_min_dim = std::stoi(it->second);
     }
   }
+  const auto finalize_options = parse_finalize_options(options);
 
   // Dispatch based on format
   if (format == "vtk") {
-    return read_vtk(filename, force_min_dim);
+    return read_vtk(filename, force_min_dim, finalize_options);
   } else if (format == "vtu") {
-    return read_vtu(filename, force_min_dim);
+    return read_vtu(filename, force_min_dim, finalize_options);
   } else if (format == "vtp") {
-    return read_vtp(filename, force_min_dim);
+    return read_vtp(filename, force_min_dim, finalize_options);
   } else if (format == "pvtu") {
-    return read_pvtu(filename);
+    return read_pvtu(filename, finalize_options);
   } else if (format == "pvtp") {
-    return read_pvtp(filename);
+    return read_pvtp(filename, finalize_options);
   } else {
     // Try to determine format from file extension
     if (filename.find(".vtu") != std::string::npos) {
-      return read_vtu(filename, force_min_dim);
+      return read_vtu(filename, force_min_dim, finalize_options);
     } else if (filename.find(".vtp") != std::string::npos) {
-      return read_vtp(filename, force_min_dim);
+      return read_vtp(filename, force_min_dim, finalize_options);
     } else if (filename.find(".pvtu") != std::string::npos) {
-      return read_pvtu(filename);
+      return read_pvtu(filename, finalize_options);
     } else if (filename.find(".pvtp") != std::string::npos) {
-      return read_pvtp(filename);
+      return read_pvtp(filename, finalize_options);
     } else {
-      return read_vtk(filename, force_min_dim); // Default to legacy VTK
+      return read_vtk(filename, force_min_dim, finalize_options); // Default to legacy VTK
     }
   }
 }
 
-MeshBase VTKReader::read_vtk(const std::string& filename, int force_min_dim) {
+MeshBase VTKReader::read_vtk(const std::string& filename,
+                             int force_min_dim,
+                             const MeshFinalizeOptions& finalize_options) {
   // Read legacy VTK file
   vtkSmartPointer<vtkUnstructuredGridReader> reader =
       vtkSmartPointer<vtkUnstructuredGridReader>::New();
@@ -293,41 +401,80 @@ MeshBase VTKReader::read_vtk(const std::string& filename, int force_min_dim) {
       throw std::runtime_error("VTKReader: Failed to read VTK file: " + filename);
     }
 
-    return convert_from_vtk_dataset(polyReader->GetOutput(), force_min_dim);
+    return convert_from_vtk_dataset(polyReader->GetOutput(), force_min_dim, finalize_options);
   }
 
-  return convert_from_vtk_dataset(reader->GetOutput(), force_min_dim);
+  return convert_from_vtk_dataset(reader->GetOutput(), force_min_dim, finalize_options);
 }
 
-MeshBase VTKReader::read_vtu(const std::string& filename, int force_min_dim) {
+MeshBase VTKReader::read_vtu(const std::string& filename,
+                             int force_min_dim,
+                             const MeshFinalizeOptions& finalize_options) {
   // Read VTU (XML UnstructuredGrid) file
   vtkSmartPointer<vtkXMLUnstructuredGridReader> reader =
       vtkSmartPointer<vtkXMLUnstructuredGridReader>::New();
   reader->SetFileName(filename.c_str());
+  trace_vtk_reader("VTKReader::read_vtu reader update begin", "path='" + filename + "'");
   reader->Update();
 
   if (!reader->GetOutput()) {
     throw std::runtime_error("VTKReader: Failed to read VTU file: " + filename);
   }
 
-  return convert_from_vtk_dataset(reader->GetOutput(), force_min_dim);
+  {
+    std::ostringstream os;
+    os << "points=" << reader->GetOutput()->GetNumberOfPoints()
+       << " cells=" << reader->GetOutput()->GetNumberOfCells();
+    trace_vtk_reader("VTKReader::read_vtu reader update complete", os.str());
+  }
+
+  MeshBase mesh = convert_from_vtk_dataset(reader->GetOutput(), force_min_dim, finalize_options);
+  {
+    std::ostringstream os;
+    os << "vertices=" << mesh.n_vertices()
+       << " cells=" << mesh.n_cells()
+       << " faces=" << mesh.n_faces()
+       << " edges=" << mesh.n_edges();
+    trace_vtk_reader("VTKReader::read_vtu convert complete", os.str());
+  }
+  return mesh;
 }
 
-MeshBase VTKReader::read_vtp(const std::string& filename, int force_min_dim) {
+MeshBase VTKReader::read_vtp(const std::string& filename,
+                             int force_min_dim,
+                             const MeshFinalizeOptions& finalize_options) {
   // Read VTP (XML PolyData) file
   vtkSmartPointer<vtkXMLPolyDataReader> reader =
       vtkSmartPointer<vtkXMLPolyDataReader>::New();
   reader->SetFileName(filename.c_str());
+  trace_vtk_reader("VTKReader::read_vtp reader update begin", "path='" + filename + "'");
   reader->Update();
 
   if (!reader->GetOutput()) {
     throw std::runtime_error("VTKReader: Failed to read VTP file: " + filename);
   }
 
-  return convert_from_vtk_dataset(reader->GetOutput(), force_min_dim);
+  {
+    std::ostringstream os;
+    os << "points=" << reader->GetOutput()->GetNumberOfPoints()
+       << " cells=" << reader->GetOutput()->GetNumberOfCells();
+    trace_vtk_reader("VTKReader::read_vtp reader update complete", os.str());
+  }
+
+  MeshBase mesh = convert_from_vtk_dataset(reader->GetOutput(), force_min_dim, finalize_options);
+  {
+    std::ostringstream os;
+    os << "vertices=" << mesh.n_vertices()
+       << " cells=" << mesh.n_cells()
+       << " faces=" << mesh.n_faces()
+       << " edges=" << mesh.n_edges();
+    trace_vtk_reader("VTKReader::read_vtp convert complete", os.str());
+  }
+  return mesh;
 }
 
-MeshBase VTKReader::read_pvtu(const std::string& filename) {
+MeshBase VTKReader::read_pvtu(const std::string& filename,
+                              const MeshFinalizeOptions& finalize_options) {
   vtkSmartPointer<vtkXMLPUnstructuredGridReader> reader =
       vtkSmartPointer<vtkXMLPUnstructuredGridReader>::New();
   reader->SetFileName(filename.c_str());
@@ -337,10 +484,11 @@ MeshBase VTKReader::read_pvtu(const std::string& filename) {
     throw std::runtime_error("VTKReader: Failed to read PVTU file: " + filename);
   }
 
-  return convert_from_vtk_dataset(reader->GetOutput());
+  return convert_from_vtk_dataset(reader->GetOutput(), 0, finalize_options);
 }
 
-MeshBase VTKReader::read_pvtp(const std::string& filename) {
+MeshBase VTKReader::read_pvtp(const std::string& filename,
+                              const MeshFinalizeOptions& finalize_options) {
   vtkSmartPointer<vtkXMLPPolyDataReader> reader =
       vtkSmartPointer<vtkXMLPPolyDataReader>::New();
   reader->SetFileName(filename.c_str());
@@ -350,10 +498,13 @@ MeshBase VTKReader::read_pvtp(const std::string& filename) {
     throw std::runtime_error("VTKReader: Failed to read PVTP file: " + filename);
   }
 
-  return convert_from_vtk_dataset(reader->GetOutput());
+  return convert_from_vtk_dataset(reader->GetOutput(), 0, finalize_options);
 }
 
-MeshBase VTKReader::convert_from_vtk_dataset(vtkDataSet* dataset, int force_min_dim) {
+MeshBase VTKReader::convert_from_vtk_dataset(
+    vtkDataSet* dataset,
+    int force_min_dim,
+    const MeshFinalizeOptions& finalize_options) {
   if (!dataset) {
     throw std::runtime_error("VTKReader: Null dataset");
   }
@@ -366,11 +517,25 @@ MeshBase VTKReader::convert_from_vtk_dataset(vtkDataSet* dataset, int force_min_
   if (!pointset) {
     throw std::runtime_error("VTKReader: Dataset is not a vtkPointSet (cannot extract points)");
   }
+  {
+    std::ostringstream os;
+    os << "points=" << dataset->GetNumberOfPoints()
+       << " cells=" << dataset->GetNumberOfCells()
+       << " extract_codim1="
+       << (finalize_options.codim1_storage == MeshCodim1StorageMode::Full ? "true" : "false");
+    trace_vtk_reader("VTKReader::convert begin", os.str());
+  }
 
   // Extract spatial dimension and coordinates
   int spatial_dim = 0;
   std::vector<real_t> coordinates = extract_coordinates(pointset->GetPoints(), spatial_dim,
                                                          force_min_dim);
+  {
+    std::ostringstream os;
+    os << "spatial_dim=" << spatial_dim
+       << " values=" << coordinates.size();
+    trace_vtk_reader("VTKReader::convert coordinates extracted", os.str());
+  }
 
   // Extract topology
   std::vector<CellShape> cell_shapes;
@@ -381,29 +546,58 @@ MeshBase VTKReader::convert_from_vtk_dataset(vtkDataSet* dataset, int force_min_
   std::vector<index_t> face2vertex;
   std::vector<std::array<index_t,2>> face2cell;
   extract_topology(dataset, cell_shapes, cell2vertex_offsets, cell2vertex,
-                   face_shapes, face2vertex_offsets, face2vertex, face2cell);
+                   face_shapes, face2vertex_offsets, face2vertex, face2cell,
+                   finalize_options.codim1_storage == MeshCodim1StorageMode::Full);
+  {
+    std::ostringstream os;
+    os << "cells=" << cell_shapes.size()
+       << " cell_connectivity=" << cell2vertex.size()
+       << " faces=" << face_shapes.size()
+       << " face_connectivity=" << face2vertex.size();
+    trace_vtk_reader("VTKReader::convert topology extracted", os.str());
+  }
 
   // Create mesh
   MeshBase mesh(spatial_dim);
-  mesh.build_from_arrays(spatial_dim, coordinates, cell2vertex_offsets, cell2vertex, cell_shapes);
+  mesh.build_from_arrays(spatial_dim,
+                         std::move(coordinates),
+                         std::move(cell2vertex_offsets),
+                         std::move(cell2vertex),
+                         std::move(cell_shapes));
+  trace_vtk_reader("VTKReader::convert mesh arrays installed");
 
   // Install codim-1 entities if provided (e.g., from VTK polyhedron/polygon)
   if (!face_shapes.empty()) {
-    mesh.set_faces_from_arrays(face_shapes, face2vertex_offsets, face2vertex, face2cell);
+    mesh.set_faces_from_arrays(std::move(face_shapes),
+                               std::move(face2vertex_offsets),
+                               std::move(face2vertex),
+                               std::move(face2cell),
+                               MeshCodim1StorageMode::Full);
   }
 
   // Apply global IDs (GIDs) from the VTK dataset if present.
   apply_global_ids_if_present(dataset, mesh);
+  trace_vtk_reader("VTKReader::convert global ids applied");
 
   // Restore current coordinates before field and FE consumers can build geometry caches.
   restore_current_coordinates(dataset, mesh);
   restore_active_configuration(dataset, mesh);
+  trace_vtk_reader("VTKReader::convert coordinate fields restored");
 
   // Read field data
   read_field_data(dataset, mesh);
+  trace_vtk_reader("VTKReader::convert field data read");
 
   // Finalize mesh
-  mesh.finalize();
+  mesh.finalize(finalize_options);
+  {
+    std::ostringstream os;
+    os << "vertices=" << mesh.n_vertices()
+       << " cells=" << mesh.n_cells()
+       << " faces=" << mesh.n_faces()
+       << " edges=" << mesh.n_edges();
+    trace_vtk_reader("VTKReader::convert finalized", os.str());
+  }
 
   return mesh;
 }
@@ -416,7 +610,8 @@ void VTKReader::extract_topology(
     std::vector<CellShape>& face_shapes,
     std::vector<offset_t>& face2vertex_offsets,
     std::vector<index_t>& face2vertex,
-    std::vector<std::array<index_t,2>>& face2cell)
+    std::vector<std::array<index_t,2>>& face2cell,
+    bool extract_codim1)
 {
   vtkIdType n_cells = dataset->GetNumberOfCells();
 
@@ -472,6 +667,10 @@ void VTKReader::extract_topology(
       cell2vertex.push_back(static_cast<index_t>(cell->GetPointId(i)));
     }
     cell2vertex_offsets.push_back(static_cast<offset_t>(cell2vertex.size()));
+
+    if (!extract_codim1) {
+      continue;
+    }
 
     // Build codim-1 entities (faces for 3D, edges for 2D)
     const int cell_dim = cell->GetCellDimension();

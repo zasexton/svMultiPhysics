@@ -39,6 +39,25 @@ TEST(StateLayoutTest, BuilderComputesOffsetsAndStride)
     EXPECT_EQ(layout.fields()[1].size_bytes, sizeof(double));
 }
 
+TEST(StateLayoutTest, BuilderStoresFrameTransformMetadata)
+{
+    StateLayoutBuilder b("FrameAware");
+    b.add<double>("director",
+                  /*count=*/3,
+                  ::svmp::FE::state::StateVariableFrame::CurrentSpatial,
+                  ::svmp::FE::state::StateFrameTransformPolicy::Rotate,
+                  "blade_local");
+
+    const auto layout = b.build();
+    ASSERT_EQ(layout.fields().size(), 1u);
+    const auto& field = layout.fields()[0];
+    EXPECT_EQ(field.name, "director");
+    EXPECT_EQ(field.size_bytes, 3u * sizeof(double));
+    EXPECT_EQ(field.frame, ::svmp::FE::state::StateVariableFrame::CurrentSpatial);
+    EXPECT_EQ(field.transform_policy, ::svmp::FE::state::StateFrameTransformPolicy::Rotate);
+    EXPECT_EQ(field.user_frame, "blade_local");
+}
+
 TEST(StateViewTest, ReadsAndWritesTypedFields)
 {
     StateLayoutBuilder b("Example");

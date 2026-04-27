@@ -13,6 +13,7 @@
 #include "Topology/CellTopology.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <numeric>
 
@@ -571,6 +572,100 @@ TEST(CurvilinearEvalTest, PyramidLagrange_P7_NodalKroneckerSubset) {
       EXPECT_NEAR(sf.N[i], expect, 5e-9) << "i=" << i << " j=" << j;
     }
   }
+}
+
+TEST(CurvilinearEvalTest, HighOrderGeometryDofDescriptorAndSubentityViews) {
+  const int p = 3;
+  const CellShape shape = make_shape(CellFamily::Quad, p);
+  const auto nodes = vtk_lagrange_nodes(CellFamily::Quad, p);
+  ASSERT_EQ(nodes.size(), static_cast<size_t>(shape.expected_vertices()));
+  const MeshBase mesh = make_identity_mesh(shape, nodes);
+
+  const auto descriptor = mesh.geometry_order_descriptor();
+  EXPECT_EQ(descriptor.storage, GeometryDofStorage::VertexCoordinates);
+  EXPECT_EQ(descriptor.max_order, p);
+  EXPECT_TRUE(descriptor.has_high_order);
+  EXPECT_FALSE(descriptor.has_mixed_order);
+  EXPECT_EQ(descriptor.reference_dofs, nodes.size());
+  EXPECT_EQ(descriptor.current_dofs, 0u);
+  EXPECT_TRUE(mesh.has_high_order_geometry());
+  EXPECT_EQ(mesh.geometry_dof_count(), nodes.size());
+  EXPECT_EQ(mesh.geometry_order(0), p);
+
+  const auto all_dofs = mesh.cell_geometry_dofs(0);
+  ASSERT_EQ(all_dofs.size(), nodes.size());
+  for (size_t i = 0; i < all_dofs.size(); ++i) {
+    EXPECT_EQ(all_dofs[i], static_cast<index_t>(i));
+  }
+
+  const auto edge0 = mesh.cell_edge_geometry_dofs(0, 0);
+  ASSERT_EQ(edge0.size(), static_cast<size_t>(p + 1));
+  EXPECT_EQ(edge0.front(), 0);
+  EXPECT_EQ(edge0.back(), 1);
+
+  const auto face0 = mesh.cell_face_geometry_dofs(0, 0);
+  ASSERT_EQ(face0.size(), static_cast<size_t>(p + 1));
+  EXPECT_EQ(face0.front(), 0);
+  EXPECT_EQ(face0.back(), 1);
+
+  const auto interior = mesh.cell_interior_geometry_dofs(0);
+  EXPECT_EQ(interior.size(), 4u);
+
+  const CellShape linear_shape = make_shape(CellFamily::Quad, 1);
+  const std::vector<ParametricPoint> linear_nodes = {
+      corner_param(CellFamily::Quad, 0),
+      corner_param(CellFamily::Quad, 1),
+      corner_param(CellFamily::Quad, 2),
+      corner_param(CellFamily::Quad, 3),
+  };
+  const MeshBase linear_mesh = make_identity_mesh(linear_shape, linear_nodes);
+  const auto linear_descriptor = linear_mesh.geometry_order_descriptor();
+  EXPECT_EQ(linear_descriptor.max_order, 1);
+  EXPECT_FALSE(linear_descriptor.has_high_order);
+  EXPECT_EQ(linear_mesh.cell_edge_geometry_dofs(0, 0).size(), 2u);
+  EXPECT_TRUE(linear_mesh.cell_interior_geometry_dofs(0).empty());
+}
+
+TEST(CurvilinearEvalTest, HighOrderCurrentReferenceDofMutationMovesCurvedGeometryAndBumpsRevisions) {
+  const int p = 3;
+  const CellShape shape = make_shape(CellFamily::Quad, p);
+  const auto nodes = vtk_lagrange_nodes(CellFamily::Quad, p);
+  MeshBase mesh = make_identity_mesh(shape, nodes);
+
+  const auto interior = mesh.cell_interior_geometry_dofs(0);
+  ASSERT_FALSE(interior.empty());
+  const index_t dof = interior.front();
+  const ParametricPoint xi = nodes[static_cast<size_t>(dof)];
+
+  const auto ref_revision_before = mesh.reference_geometry_revision();
+  const auto cur_revision_before = mesh.current_geometry_revision();
+  std::array<real_t, 3> moved = mesh.geometry_dof_coords(dof, Configuration::Reference);
+  moved[2] = 0.75;
+  mesh.set_current_geometry_dof_coords(dof, moved);
+
+  EXPECT_EQ(mesh.reference_geometry_revision(), ref_revision_before);
+  EXPECT_GT(mesh.current_geometry_revision(), cur_revision_before);
+  ASSERT_TRUE(mesh.has_current_coords());
+  EXPECT_EQ(mesh.geometry_order_descriptor().current_dofs, nodes.size());
+
+  const auto ref_pt = mesh.geometry_dof_coords(dof, Configuration::Reference);
+  const auto cur_pt = mesh.geometry_dof_coords(dof, Configuration::Current);
+  EXPECT_NEAR(ref_pt[2], 0.0, 1e-12);
+  EXPECT_NEAR(cur_pt[2], 0.75, 1e-12);
+
+  const auto ref_eval = CurvilinearEvaluator::evaluate_geometry(mesh, 0, xi, Configuration::Reference);
+  const auto cur_eval = CurvilinearEvaluator::evaluate_geometry(mesh, 0, xi, Configuration::Current);
+  ASSERT_TRUE(ref_eval.is_valid);
+  ASSERT_TRUE(cur_eval.is_valid);
+  EXPECT_NEAR(ref_eval.coordinates[2], 0.0, 1e-12);
+  EXPECT_NEAR(cur_eval.coordinates[2], 0.75, 1e-12);
+
+  const auto ref_revision_second = mesh.reference_geometry_revision();
+  std::array<real_t, 3> ref_moved = mesh.geometry_dof_coords(0, Configuration::Reference);
+  ref_moved[2] = -0.25;
+  mesh.set_reference_geometry_dof_coords(0, ref_moved);
+  EXPECT_GT(mesh.reference_geometry_revision(), ref_revision_second);
+  EXPECT_NEAR(mesh.geometry_dof_coords(0, Configuration::Reference)[2], -0.25, 1e-12);
 }
 
 } // namespace test

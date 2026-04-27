@@ -22,6 +22,9 @@
 #include <vtkTriangle.h>
 #include <vtkQuad.h>
 
+#include <fstream>
+#include <iterator>
+
 namespace svmp { namespace test {
 
 static std::vector<std::array<real_t,3>> make_coords(CellFamily fam) {
@@ -165,6 +168,141 @@ TEST(VTKParity, OrientedCanonicalParityAndRoundTrip) {
     std::sort(b.begin(), b.end());
     EXPECT_EQ(a, b);
   }
+}
+
+TEST(VTKParity, StreamingLinearVtuRoundTripPreservesMeshData) {
+  MeshBase mesh(3);
+
+  std::vector<real_t> X = {
+      0.0, 0.0, 0.0,
+      1.0, 0.0, 0.0,
+      0.0, 1.0, 0.0,
+      0.0, 0.0, 1.0,
+  };
+  std::vector<offset_t> offsets = {0, 4};
+  std::vector<index_t> conn = {0, 1, 2, 3};
+  std::vector<CellShape> shapes(1);
+  shapes[0].family = CellFamily::Tetra;
+  shapes[0].order = 1;
+  shapes[0].num_corners = 4;
+
+  mesh.build_from_arrays(3, X, offsets, conn, shapes);
+  mesh.set_vertex_gids({101, 102, 103, 104});
+  mesh.set_cell_gids({201});
+  mesh.set_region_label(0, 7);
+
+  auto ph = mesh.attach_field(EntityKind::Vertex, "Pressure", FieldScalarType::Float64, 2);
+  auto* pressure = mesh.field_data_as<double>(ph);
+  for (size_t v = 0; v < mesh.n_vertices(); ++v) {
+    pressure[2 * v + 0] = 10.0 + static_cast<double>(v);
+    pressure[2 * v + 1] = 20.0 + static_cast<double>(v);
+  }
+
+  auto wh = mesh.attach_field(EntityKind::Volume, "CellWeight", FieldScalarType::Int32, 1);
+  auto* weights = mesh.field_data_as<std::int32_t>(wh);
+  weights[0] = 42;
+
+  std::vector<real_t> Xcur = X;
+  for (size_t v = 0; v < mesh.n_vertices(); ++v) {
+    Xcur[3 * v + 0] += 0.1;
+    Xcur[3 * v + 1] += 0.2;
+    Xcur[3 * v + 2] += 0.3;
+  }
+  mesh.set_current_coords(Xcur);
+  mesh.use_current_configuration();
+  mesh.finalize();
+
+  const std::string fname = "vtk_parity_streaming_linear.vtu";
+  MeshIOOptions optsW;
+  optsW.format = "vtu";
+  optsW.path = fname;
+  optsW.kv["streaming"] = "true";
+  VTKWriter::write(mesh, optsW);
+
+  std::ifstream file(fname);
+  ASSERT_TRUE(file.good());
+  const std::string xml((std::istreambuf_iterator<char>(file)),
+                        std::istreambuf_iterator<char>());
+  EXPECT_NE(xml.find("<FieldData>"), std::string::npos);
+  EXPECT_NE(xml.find("GlobalIds=\"GlobalVertexID\""), std::string::npos);
+  EXPECT_NE(xml.find("CurrentCoordinates"), std::string::npos);
+  EXPECT_EQ(xml.find("header_type="), std::string::npos);
+
+  MeshIOOptions optsR;
+  optsR.format = "vtu";
+  optsR.path = fname;
+  auto mesh2 = VTKReader::read(optsR);
+
+  ASSERT_EQ(mesh2.n_vertices(), mesh.n_vertices());
+  ASSERT_EQ(mesh2.n_cells(), mesh.n_cells());
+  EXPECT_EQ(mesh2.vertex_gids(), mesh.vertex_gids());
+  EXPECT_EQ(mesh2.cell_gids(), mesh.cell_gids());
+  EXPECT_EQ(mesh2.region_label(0), 7);
+  EXPECT_TRUE(mesh2.has_current_coords());
+  EXPECT_EQ(mesh2.active_configuration(), Configuration::Current);
+
+  ASSERT_TRUE(mesh2.has_field(EntityKind::Vertex, "Pressure"));
+  auto ph2 = mesh2.field_handle(EntityKind::Vertex, "Pressure");
+  ASSERT_EQ(mesh2.field_type(ph2), FieldScalarType::Float64);
+  ASSERT_EQ(mesh2.field_components(ph2), 2u);
+  const auto* pressure2 = mesh2.field_data_as<double>(ph2);
+  for (size_t i = 0; i < mesh.n_vertices() * 2; ++i) {
+    EXPECT_NEAR(pressure2[i], pressure[i], 1e-12);
+  }
+
+  ASSERT_TRUE(mesh2.has_field(EntityKind::Volume, "CellWeight"));
+  auto wh2 = mesh2.field_handle(EntityKind::Volume, "CellWeight");
+  ASSERT_EQ(mesh2.field_type(wh2), FieldScalarType::Int32);
+  ASSERT_EQ(mesh2.field_components(wh2), 1u);
+  const auto* weights2 = mesh2.field_data_as<std::int32_t>(wh2);
+  EXPECT_EQ(weights2[0], 42);
+
+  const auto& Xcur2 = mesh2.X_cur();
+  ASSERT_EQ(Xcur2.size(), Xcur.size());
+  for (size_t i = 0; i < Xcur.size(); ++i) {
+    EXPECT_NEAR(Xcur2[i], Xcur[i], 1e-12);
+  }
+
+  const std::string binary_fname = "vtk_parity_streaming_linear_binary.vtu";
+  MeshIOOptions optsWB;
+  optsWB.format = "vtu";
+  optsWB.path = binary_fname;
+  optsWB.kv["streaming"] = "true";
+  optsWB.kv["binary"] = "true";
+  VTKWriter::write(mesh, optsWB);
+
+  std::ifstream binary_file(binary_fname, std::ios::binary);
+  ASSERT_TRUE(binary_file.good());
+  const std::string binary_xml((std::istreambuf_iterator<char>(binary_file)),
+                               std::istreambuf_iterator<char>());
+  EXPECT_NE(binary_xml.find("header_type=\"UInt64\""), std::string::npos);
+  EXPECT_NE(binary_xml.find("format=\"appended\""), std::string::npos);
+  EXPECT_NE(binary_xml.find("<AppendedData encoding=\"raw\">"), std::string::npos);
+
+  MeshIOOptions optsRB;
+  optsRB.format = "vtu";
+  optsRB.path = binary_fname;
+  auto mesh3 = VTKReader::read(optsRB);
+
+  ASSERT_EQ(mesh3.n_vertices(), mesh.n_vertices());
+  ASSERT_EQ(mesh3.n_cells(), mesh.n_cells());
+  EXPECT_EQ(mesh3.vertex_gids(), mesh.vertex_gids());
+  EXPECT_EQ(mesh3.cell_gids(), mesh.cell_gids());
+  EXPECT_EQ(mesh3.region_label(0), 7);
+  EXPECT_TRUE(mesh3.has_current_coords());
+  EXPECT_EQ(mesh3.active_configuration(), Configuration::Current);
+
+  ASSERT_TRUE(mesh3.has_field(EntityKind::Vertex, "Pressure"));
+  auto ph3 = mesh3.field_handle(EntityKind::Vertex, "Pressure");
+  const auto* pressure3 = mesh3.field_data_as<double>(ph3);
+  for (size_t i = 0; i < mesh.n_vertices() * 2; ++i) {
+    EXPECT_NEAR(pressure3[i], pressure[i], 1e-12);
+  }
+
+  ASSERT_TRUE(mesh3.has_field(EntityKind::Volume, "CellWeight"));
+  auto wh3 = mesh3.field_handle(EntityKind::Volume, "CellWeight");
+  const auto* weights3 = mesh3.field_data_as<std::int32_t>(wh3);
+  EXPECT_EQ(weights3[0], 42);
 }
 
 // Build high-order nodes for common quadratic families

@@ -3778,6 +3778,7 @@ DofHandler::~DofHandler() = default;
 DofHandler::DofHandler(DofHandler&& other) noexcept
     : dof_map_(std::move(other.dof_map_))
     , partition_(std::move(other.partition_))
+    , alias_handler_(other.alias_handler_)
     , entity_dof_map_(std::move(other.entity_dof_map_))
     , ghost_manager_(std::move(other.ghost_manager_))
     , ghost_dofs_cache_(std::move(other.ghost_dofs_cache_))
@@ -3806,6 +3807,7 @@ DofHandler::DofHandler(DofHandler&& other) noexcept
     , spatial_dof_coords_(std::move(other.spatial_dof_coords_))
     , spatial_dof_coord_dim_(other.spatial_dof_coord_dim_)
 {
+    other.alias_handler_ = nullptr;
     other.finalized_ = false;
     other.ghost_cache_valid_ = false;
     other.dof_state_revision_ = 0;
@@ -3816,6 +3818,7 @@ DofHandler& DofHandler::operator=(DofHandler&& other) noexcept {
     if (this != &other) {
         dof_map_ = std::move(other.dof_map_);
         partition_ = std::move(other.partition_);
+        alias_handler_ = other.alias_handler_;
         entity_dof_map_ = std::move(other.entity_dof_map_);
         ghost_manager_ = std::move(other.ghost_manager_);
 #if FE_HAS_MPI
@@ -3844,6 +3847,7 @@ DofHandler& DofHandler::operator=(DofHandler&& other) noexcept {
         spatial_dof_coords_ = std::move(other.spatial_dof_coords_);
         spatial_dof_coord_dim_ = other.spatial_dof_coord_dim_;
 
+        other.alias_handler_ = nullptr;
         other.finalized_ = false;
         other.ghost_cache_valid_ = false;
         other.dof_state_revision_ = 0;
@@ -4258,12 +4262,18 @@ void DofHandler::distributeDofsCore(const MeshTopologyView& topology,
 
 bool DofHandler::hasCellOrientations() const noexcept
 {
+    if (alias_handler_) {
+        return alias_handler_->hasCellOrientations();
+    }
     return !cell_edge_orient_offsets_.empty() || !cell_face_orient_offsets_.empty();
 }
 
 std::span<const spaces::OrientationManager::Sign>
 DofHandler::cellEdgeOrientations(GlobalIndex cell_id) const
 {
+    if (alias_handler_) {
+        return alias_handler_->cellEdgeOrientations(cell_id);
+    }
     if (cell_id < 0) {
         return {};
     }
@@ -4282,6 +4292,9 @@ DofHandler::cellEdgeOrientations(GlobalIndex cell_id) const
 std::span<const spaces::OrientationManager::FaceOrientation>
 DofHandler::cellFaceOrientations(GlobalIndex cell_id) const
 {
+    if (alias_handler_) {
+        return alias_handler_->cellFaceOrientations(cell_id);
+    }
     if (cell_id < 0) {
         return {};
     }
@@ -5949,12 +5962,16 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
     const auto n_faces = static_cast<std::size_t>(std::max<GlobalIndex>(topology.n_faces, 0));
     const auto n_cells = static_cast<std::size_t>(std::max<GlobalIndex>(topology.n_cells, 0));
 
-    if (layout.dofs_per_edge > 0) {
+    const bool has_edge_dofs = (layout.dofs_per_edge > 0);
+    const bool has_face_dofs = layout.has_face_dofs();
+    const bool has_cell_dofs = (layout.dofs_per_cell > 0);
+
+    if (has_edge_dofs) {
         if (topology.n_edges <= 0 || topology.cell2edge_offsets.empty() || topology.cell2edge_data.empty()) {
             throw FEException("DofHandler::distributeDofs: edge-interior DOFs require cell2edge connectivity (and n_edges > 0)");
         }
     }
-    if (layout.has_face_dofs()) {
+    if (has_face_dofs) {
         if (topology.n_faces <= 0 || topology.cell2face_offsets.empty() || topology.cell2face_data.empty()) {
             throw FEException("DofHandler::distributeDofs: face-interior DOFs require cell2face connectivity (and n_faces > 0)");
         }
@@ -5962,8 +5979,10 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
 
     // Create EntityDofMap to track entity-to-DOF associations
     entity_dof_map_ = std::make_unique<EntityDofMap>();
-    entity_dof_map_->reserve(topology.n_vertices, topology.n_edges,
-                             topology.n_faces, topology.n_cells);
+    entity_dof_map_->reserve(topology.n_vertices,
+                             has_edge_dofs ? topology.n_edges : GlobalIndex{0},
+                             has_face_dofs ? topology.n_faces : GlobalIndex{0},
+                             has_cell_dofs ? topology.n_cells : GlobalIndex{0});
 
     // -------------------------------------------------------------------------
     // Phase 1: Vertex DOFs (shared across all cells touching the vertex)
@@ -5986,9 +6005,10 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
     // Phase 2: Edge DOFs (shared using canonical ordering by min vertex GID)
     // -------------------------------------------------------------------------
     // Map: edge_local_id -> first DOF for that edge
-    std::vector<GlobalIndex> edge_first_dof(n_edges, -1);
+    std::vector<GlobalIndex> edge_first_dof;
 
-    if (layout.dofs_per_edge > 0 && topology.n_edges > 0) {
+    if (has_edge_dofs && topology.n_edges > 0) {
+        edge_first_dof.assign(n_edges, -1);
         for (GlobalIndex e = 0; e < topology.n_edges; ++e) {
             edge_first_dof[static_cast<std::size_t>(e)] = next_dof;
             std::vector<GlobalIndex> e_dofs;
@@ -6002,10 +6022,12 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
     // -------------------------------------------------------------------------
     // Phase 3: Face DOFs (shared using canonical ordering by min vertex GID)
     // -------------------------------------------------------------------------
-    std::vector<GlobalIndex> face_first_dof(n_faces, -1);
-    std::vector<LocalIndex> face_dof_count(n_faces, 0);
+    std::vector<GlobalIndex> face_first_dof;
+    std::vector<LocalIndex> face_dof_count;
 
-    if (layout.has_face_dofs() && topology.n_faces > 0) {
+    if (has_face_dofs && topology.n_faces > 0) {
+        face_first_dof.assign(n_faces, -1);
+        face_dof_count.assign(n_faces, 0);
         for (GlobalIndex f = 0; f < topology.n_faces; ++f) {
             const auto fv = topology.getFaceVertices(f);
             const LocalIndex dofs_on_face = layout.face_dofs_for_vertex_count(fv.size());
@@ -6025,9 +6047,10 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
     // -------------------------------------------------------------------------
     // Phase 4: Cell interior DOFs (unique per cell)
     // -------------------------------------------------------------------------
-    std::vector<GlobalIndex> cell_first_interior_dof(n_cells, -1);
+    std::vector<GlobalIndex> cell_first_interior_dof;
 
-    if (layout.dofs_per_cell > 0) {
+    if (has_cell_dofs) {
+        cell_first_interior_dof.assign(n_cells, -1);
         for (GlobalIndex c = 0; c < topology.n_cells; ++c) {
             cell_first_interior_dof[static_cast<std::size_t>(c)] = next_dof;
             std::vector<GlobalIndex> c_dofs;
@@ -6062,7 +6085,7 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
         const std::size_t vertex_dofs_count = cell_dofs.size();
 
         // Add edge DOFs (requires cell2edge connectivity when dofs_per_edge > 0).
-        if (layout.dofs_per_edge > 0 && !topology.cell2edge_offsets.empty()) {
+        if (has_edge_dofs && !topology.cell2edge_offsets.empty()) {
             auto cell_edges = topology.getCellEdges(c);
 
             // Prefer reference-element edge ordering when topology provides edge vertices.
@@ -6180,7 +6203,7 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
         }
 
         // Add face DOFs (requires cell2face connectivity when face-interior DOFs exist).
-        if (layout.has_face_dofs() && !topology.cell2face_offsets.empty()) {
+        if (has_face_dofs && !topology.cell2face_offsets.empty()) {
             auto cell_faces = topology.getCellFaces(c);
 
             auto infer_base_type = [&](std::size_t n_verts) -> ElementType {
@@ -6294,7 +6317,7 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
         }
 
         // Add cell interior DOFs
-        if (layout.dofs_per_cell > 0) {
+        if (has_cell_dofs) {
             for (LocalIndex d = 0; d < layout.dofs_per_cell; ++d) {
                 cell_dofs.push_back(cell_first_interior_dof[static_cast<std::size_t>(c)] + d);
             }
@@ -6438,7 +6461,11 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
         throw FEException("DofHandler::distributeCGDofsParallel: vertex_gids are required for distributed CG numbering");
     }
 
-    if (layout.dofs_per_edge > 0) {
+    const bool has_edge_dofs = (layout.dofs_per_edge > 0);
+    const bool has_face_dofs = layout.has_face_dofs();
+    const bool has_cell_dofs = (layout.dofs_per_cell > 0);
+
+    if (has_edge_dofs) {
         if (topology.n_edges <= 0 || topology.cell2edge_offsets.empty() || topology.cell2edge_data.empty()) {
             throw FEException("DofHandler::distributeCGDofsParallel: edge-interior DOFs require cell2edge connectivity (and n_edges > 0)");
         }
@@ -6447,7 +6474,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
             throw FEException("DofHandler::distributeCGDofsParallel: edge-interior DOFs require edge2vertex_data for distributed CG numbering");
         }
     }
-    if (layout.has_face_dofs()) {
+    if (has_face_dofs) {
         if (topology.n_faces <= 0 || topology.cell2face_offsets.empty() || topology.cell2face_data.empty()) {
             throw FEException("DofHandler::distributeCGDofsParallel: face-interior DOFs require cell2face connectivity (and n_faces > 0)");
         }
@@ -6458,7 +6485,10 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 
     // Create EntityDofMap to track entity-to-DOF associations
     entity_dof_map_ = std::make_unique<EntityDofMap>();
-    entity_dof_map_->reserve(topology.n_vertices, topology.n_edges, topology.n_faces, topology.n_cells);
+    entity_dof_map_->reserve(topology.n_vertices,
+                             has_edge_dofs ? topology.n_edges : GlobalIndex{0},
+                             has_face_dofs ? topology.n_faces : GlobalIndex{0},
+                             has_cell_dofs ? topology.n_cells : GlobalIndex{0});
 
     // -------------------------------------------------------------------------
     // Build per-entity keys, touch flags (owned-cell incidence), and CellOwner candidates.
@@ -6479,7 +6509,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
     std::vector<gid_t> edge_cell_gid_candidate;
     std::vector<int> edge_cell_owner_candidate;
 
-    if (layout.dofs_per_edge > 0 && topology.n_edges > 0) {
+    if (has_edge_dofs && topology.n_edges > 0) {
         edge_keys.resize(n_edges);
         edge_touch.assign(n_edges, -1);
         edge_cell_gid_candidate.assign(n_edges, std::numeric_limits<gid_t>::max());
@@ -6502,10 +6532,10 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
     }
 
     const auto n_faces = static_cast<std::size_t>(topology.n_faces);
-    std::vector<LocalIndex> face_dof_count(n_faces, 0);
-    std::vector<std::uint8_t> face_vertex_count(n_faces, 0);
-    std::vector<GlobalIndex> tri_face_slot(n_faces, -1);
-    std::vector<GlobalIndex> quad_face_slot(n_faces, -1);
+    std::vector<LocalIndex> face_dof_count;
+    std::vector<std::uint8_t> face_vertex_count;
+    std::vector<GlobalIndex> tri_face_slot;
+    std::vector<GlobalIndex> quad_face_slot;
 
     std::vector<FaceKey> tri_face_keys;
     std::vector<int> tri_face_touch;
@@ -6521,7 +6551,12 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
         return topology.getFaceVertices(face_id);
     };
 
-    if (layout.has_face_dofs() && topology.n_faces > 0) {
+    if (has_face_dofs && topology.n_faces > 0) {
+        face_dof_count.assign(n_faces, 0);
+        face_vertex_count.assign(n_faces, 0);
+        tri_face_slot.assign(n_faces, -1);
+        quad_face_slot.assign(n_faces, -1);
+
         for (GlobalIndex f = 0; f < topology.n_faces; ++f) {
             const auto verts = get_face_vertices(f);
             if (verts.empty()) {
@@ -6813,7 +6848,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	                /*tag_base=*/42025);
 	        }
 
-	        if (layout.dofs_per_cell > 0) {
+	        if (has_cell_dofs) {
 	            const auto n_cells = static_cast<std::size_t>(topology.n_cells);
 	            std::vector<gid_t> cell_keys(n_cells, gid_t{-1});
 	            cell_owner_rank_out.assign(n_cells, -1);
@@ -6922,7 +6957,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	                                                              /*tag_base=*/42025);
 	        }
 
-		        if (layout.dofs_per_cell > 0) {
+		        if (has_cell_dofs) {
 		            if (topology.cell_gids.size() != static_cast<std::size_t>(topology.n_cells)) {
 		                throw FEException("DofHandler::distributeCGDofsParallel: global_numbering=GlobalIds requires cell_gids (size must equal n_cells)");
 		            }
@@ -6954,7 +6989,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	        const gid_t max_v_gid = global_max_gid(vertex_global_id, /*tag_base=*/41700, "vertex_gids");
 	        n_global_vertices = (max_v_gid >= 0) ? checked_nonneg_add(max_v_gid, gid_t{1}, "vertex gid range") : gid_t{0};
 
-	        if (layout.dofs_per_edge > 0) {
+	        if (has_edge_dofs) {
 	            const gid_t max_e_gid = global_max_gid(edge_global_id, /*tag_base=*/41710, "edge_gids");
 	            n_global_edges = (max_e_gid >= 0) ? checked_nonneg_add(max_e_gid, gid_t{1}, "edge gid range") : gid_t{0};
 	        }
@@ -6971,7 +7006,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	                (max_f_gid >= 0) ? checked_nonneg_add(max_f_gid, gid_t{1}, "quadrilateral face gid range") : gid_t{0};
 	        }
 
-		        if (layout.dofs_per_cell > 0) {
+		        if (has_cell_dofs) {
 		            const gid_t max_c_gid = global_max_gid(cell_global_id, /*tag_base=*/41730, "cell_gids");
 		            n_global_cells = (max_c_gid >= 0) ? checked_nonneg_add(max_c_gid, gid_t{1}, "cell gid range") : gid_t{0};
 		        }
@@ -7035,7 +7070,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 		                                                              /*tag_base=*/42025);
 		        }
 
-		        if (layout.dofs_per_cell > 0) {
+		        if (has_cell_dofs) {
 		            const auto n_cells = static_cast<std::size_t>(topology.n_cells);
 		            std::vector<gid_t> cell_keys(n_cells, gid_t{-1});
 		            cell_owner_rank_out.assign(n_cells, -1);
@@ -7112,8 +7147,11 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 		        }
 		    }
 
-	    std::vector<int> face_owner_rank(n_faces, -1);
-	    for (std::size_t sf = 0; sf < n_faces; ++sf) {
+	    std::vector<int> face_owner_rank;
+	    if (has_face_dofs && n_faces > 0) {
+	        face_owner_rank.assign(n_faces, -1);
+	    }
+	    for (std::size_t sf = 0; sf < face_owner_rank.size(); ++sf) {
 	        if (tri_face_slot[sf] >= 0) {
 	            const auto slot = static_cast<std::size_t>(tri_face_slot[sf]);
 	            face_owner_rank[sf] = tri_face_owner_rank[slot];
@@ -7229,8 +7267,9 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	        }
 	    }
 
-	    std::vector<GlobalIndex> edge_first_dof(n_edges, -1);
-	    if (layout.dofs_per_edge > 0 && n_edges > 0) {
+	    std::vector<GlobalIndex> edge_first_dof;
+	    if (has_edge_dofs && n_edges > 0) {
+	        edge_first_dof.assign(n_edges, -1);
 	        for (std::size_t se = 0; se < n_edges; ++se) {
 	            const auto e = static_cast<GlobalIndex>(se);
 	            const gid_t base = vertex_dofs_total + edge_global_id[se] * static_cast<gid_t>(layout.dofs_per_edge);
@@ -7250,8 +7289,9 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	    const gid_t tri_face_dof_offset = vertex_dofs_total + edge_dofs_total;
 	    const gid_t quad_face_dof_offset = tri_face_dof_offset + tri_face_dofs_total;
 
-	    std::vector<GlobalIndex> face_first_dof(n_faces, -1);
-	    if (layout.has_face_dofs() && n_faces > 0) {
+	    std::vector<GlobalIndex> face_first_dof;
+	    if (has_face_dofs && n_faces > 0) {
+	        face_first_dof.assign(n_faces, -1);
 	        for (std::size_t sf = 0; sf < n_faces; ++sf) {
 	            const LocalIndex dofs_on_face = face_dof_count[sf];
 	            if (dofs_on_face <= 0) {
@@ -7285,8 +7325,9 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	        }
 	    }
 
-	    std::vector<GlobalIndex> cell_first_interior_dof(n_cells, -1);
-	    if (layout.dofs_per_cell > 0) {
+	    std::vector<GlobalIndex> cell_first_interior_dof;
+	    if (has_cell_dofs) {
+	        cell_first_interior_dof.assign(n_cells, -1);
 	        for (std::size_t sc = 0; sc < n_cells; ++sc) {
 	            const auto c = static_cast<GlobalIndex>(sc);
 	            const gid_t base = quad_face_dof_offset + quad_face_dofs_total +
@@ -7327,7 +7368,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
         const std::size_t vertex_dofs_count = cell_dofs.size();
 
         // Add edge DOFs (requires cell2edge connectivity when dofs_per_edge > 0).
-        if (layout.dofs_per_edge > 0 && !topology.cell2edge_offsets.empty()) {
+        if (has_edge_dofs && !topology.cell2edge_offsets.empty()) {
             auto cell_edges = topology.getCellEdges(c);
 
             // Prefer reference-element edge ordering when topology provides edge vertices.
@@ -7445,7 +7486,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	        }
 
         // Add face DOFs (requires cell2face connectivity when face interiors are present).
-        if (layout.has_face_dofs() && !topology.cell2face_offsets.empty()) {
+        if (has_face_dofs && !topology.cell2face_offsets.empty()) {
             auto cell_faces = topology.getCellFaces(c);
 
             auto infer_base_type = [&](std::size_t n_verts) -> ElementType {
@@ -7558,7 +7599,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	        }
 
 	        // Add cell interior DOFs
-	        if (layout.dofs_per_cell > 0) {
+	        if (has_cell_dofs) {
 	            for (LocalIndex d = 0; d < layout.dofs_per_cell; ++d) {
 	                cell_dofs.push_back(cell_first_interior_dof[sc] + d);
 	            }
@@ -7727,7 +7768,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
     add_entity_dofs(edge_first_dof, edge_owner_rank, layout.dofs_per_edge);
     add_entity_dofs_variable(face_first_dof, face_owner_rank, face_dof_count);
 
-    if (layout.dofs_per_cell > 0) {
+	    if (has_cell_dofs) {
         std::vector<int> cell_owner_local(static_cast<std::size_t>(topology.n_cells), -1);
         for (GlobalIndex c = 0; c < topology.n_cells; ++c) {
             cell_owner_local[static_cast<std::size_t>(c)] = topology.getCellOwnerRank(c, my_rank_);
@@ -7789,7 +7830,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
     add_entity_ghosts(edge_first_dof, edge_owner_rank, layout.dofs_per_edge);
     add_entity_ghosts_variable(face_first_dof, face_owner_rank, face_dof_count);
 
-    if (layout.dofs_per_cell > 0) {
+    if (has_cell_dofs) {
         std::vector<int> cell_owner_local(static_cast<std::size_t>(topology.n_cells), -1);
         for (GlobalIndex c = 0; c < topology.n_cells; ++c) {
             cell_owner_local[static_cast<std::size_t>(c)] = topology.getCellOwnerRank(c, my_rank_);
@@ -9387,20 +9428,43 @@ void DofHandler::distributeDofsInternal(const MeshBase& /*mesh*/,
 void DofHandler::setDofMap(DofMap dof_map) {
     checkNotFinalized();
     ++dof_state_revision_;
+    alias_handler_ = nullptr;
     dof_map_ = std::move(dof_map);
     clearSpatialDofCoordinates();
 }
 
 void DofHandler::setPartition(DofPartition partition) {
     checkNotFinalized();
+    alias_handler_ = nullptr;
     partition_ = std::move(partition);
     ghost_cache_valid_ = false;
 }
 
 void DofHandler::setEntityDofMap(std::unique_ptr<EntityDofMap> entity_dof_map) {
     checkNotFinalized();
+    alias_handler_ = nullptr;
     entity_dof_map_ = std::move(entity_dof_map);
     clearSpatialDofCoordinates();
+}
+
+void DofHandler::setReadOnlyAlias(const DofHandler& source)
+{
+    checkNotFinalized();
+    FE_THROW_IF(&source == this, FEException,
+                "DofHandler::setReadOnlyAlias: cannot alias self");
+    FE_THROW_IF(!source.isFinalized(), FEException,
+                "DofHandler::setReadOnlyAlias: source handler must be finalized");
+    alias_handler_ = &source;
+    finalized_ = true;
+    n_cells_ = source.getDofMap().getNumCells();
+    my_rank_ = source.my_rank_;
+    world_size_ = source.world_size_;
+#if FE_HAS_MPI
+    mpi_comm_ = source.mpiComm();
+#endif
+    global_numbering_ = source.global_numbering_;
+    neighbor_ranks_ = source.neighbor_ranks_;
+    ++dof_state_revision_;
 }
 
 void DofHandler::clearSpatialDofCoordinates() noexcept
@@ -10189,6 +10253,13 @@ void DofHandler::renumberDofs(DofNumberingStrategy strategy) {
 }
 
 void DofHandler::finalize() {
+    if (alias_handler_) {
+        FE_THROW_IF(!alias_handler_->isFinalized(), FEException,
+                    "DofHandler::finalize: alias source is not finalized");
+        finalized_ = true;
+        return;
+    }
+
     checkNotFinalized();
 
     // Finalize the DOF map
@@ -10203,12 +10274,15 @@ void DofHandler::finalize() {
 
 DofMap& DofHandler::getDofMapMutable() {
     checkNotFinalized();
+    if (alias_handler_) {
+        throw FEException("DofHandler::getDofMapMutable: read-only alias has no mutable DofMap");
+    }
     return dof_map_;
 }
 
 std::optional<std::pair<GlobalIndex, GlobalIndex>>
 DofHandler::getLocalDofRange() const noexcept {
-    auto range = partition_.locallyOwned().contiguousRange();
+    auto range = getPartition().locallyOwned().contiguousRange();
     if (range) {
         return std::make_pair(range->begin, range->end);
     }
@@ -10216,6 +10290,9 @@ DofHandler::getLocalDofRange() const noexcept {
 }
 
 std::span<const GlobalIndex> DofHandler::getGhostDofs() const {
+    if (alias_handler_) {
+        return alias_handler_->getGhostDofs();
+    }
     if (!ghost_cache_valid_) {
         ghost_dofs_cache_ = partition_.ghost().toVector();
         ghost_cache_valid_ = true;
@@ -10225,17 +10302,19 @@ std::span<const GlobalIndex> DofHandler::getGhostDofs() const {
 
 	DofHandler::Statistics DofHandler::getStatistics() const {
 	    Statistics stats;
-    stats.total_dofs = dof_map_.getNumDofs();
-    stats.local_owned_dofs = dof_map_.getNumLocalDofs();
-    stats.ghost_dofs = partition_.ghostSize();
+    const auto& map = getDofMap();
+    stats.total_dofs = map.getNumDofs();
+    stats.local_owned_dofs = map.getNumLocalDofs();
+    stats.ghost_dofs = getPartition().ghostSize();
 
-    if (n_cells_ > 0) {
+    const auto n_cells = map.getNumCells();
+    if (n_cells > 0) {
         GlobalIndex min_dofs = std::numeric_limits<GlobalIndex>::max();
         GlobalIndex max_dofs = 0;
         GlobalIndex total_cell_dofs = 0;
 
-        for (GlobalIndex c = 0; c < n_cells_; ++c) {
-            auto n = dof_map_.getNumCellDofs(c);
+        for (GlobalIndex c = 0; c < n_cells; ++c) {
+            auto n = map.getNumCellDofs(c);
             min_dofs = std::min(min_dofs, static_cast<GlobalIndex>(n));
             max_dofs = std::max(max_dofs, static_cast<GlobalIndex>(n));
             total_cell_dofs += n;
@@ -10243,7 +10322,7 @@ std::span<const GlobalIndex> DofHandler::getGhostDofs() const {
 
         stats.min_dofs_per_cell = min_dofs;
         stats.max_dofs_per_cell = max_dofs;
-        stats.avg_dofs_per_cell = static_cast<double>(total_cell_dofs) / n_cells_;
+        stats.avg_dofs_per_cell = static_cast<double>(total_cell_dofs) / n_cells;
     }
 
 	    return stats;
@@ -10774,7 +10853,7 @@ std::span<const GlobalIndex> DofHandler::getGhostDofs() const {
 // =============================================================================
 
 void DofHandler::checkNotFinalized() const {
-    if (finalized_) {
+    if (finalized_ || alias_handler_ != nullptr) {
         throw FEException("DofHandler: operation not allowed after finalization");
     }
 }

@@ -144,20 +144,37 @@ inline void expectJacobianMatchesCentralFD(FE::systems::FESystem& system,
     const auto n = system.dofHandler().getNumDofs();
     ASSERT_GT(n, 0);
 
-    FE::assembly::DenseMatrixView J(n);
-    {
-        const auto result = system.assembleJacobian(base_state, J);
-        ASSERT_TRUE(result.success) << result.error_message;
-    }
-
     const std::vector<FE::Real> u0(base_state.u.begin(), base_state.u.end());
     ASSERT_EQ(static_cast<FE::GlobalIndex>(u0.size()), n);
 
+    const auto& constraints = system.constraints();
+    std::vector<FE::Real> base_u = u0;
+    if (!constraints.empty()) {
+        constraints.distribute(base_u);
+    }
+
+    FE::systems::SystemStateView constrained_base_state = base_state;
+    constrained_base_state.u = std::span<const FE::Real>(base_u);
+
+    FE::assembly::DenseMatrixView J(n);
+    {
+        const auto result = system.assembleJacobian(constrained_base_state, J);
+        ASSERT_TRUE(result.success) << result.error_message;
+    }
+
     for (FE::GlobalIndex j = 0; j < n; ++j) {
-        std::vector<FE::Real> u_plus = u0;
-        std::vector<FE::Real> u_minus = u0;
+        if (constraints.isConstrained(j)) {
+            continue;
+        }
+
+        std::vector<FE::Real> u_plus = base_u;
+        std::vector<FE::Real> u_minus = base_u;
         u_plus[static_cast<std::size_t>(j)] += eps;
         u_minus[static_cast<std::size_t>(j)] -= eps;
+        if (!constraints.empty()) {
+            constraints.distribute(u_plus);
+            constraints.distribute(u_minus);
+        }
 
         FE::systems::SystemStateView state_plus = base_state;
         FE::systems::SystemStateView state_minus = base_state;
@@ -176,6 +193,10 @@ inline void expectJacobianMatchesCentralFD(FE::systems::FESystem& system,
         }
 
         for (FE::GlobalIndex i = 0; i < n; ++i) {
+            if (constraints.isConstrained(i)) {
+                continue;
+            }
+
             const FE::Real fd = (r_plus[i] - r_minus[i]) / (2.0 * eps);
             const FE::Real Jij = J(i, j);
             const FE::Real tol = atol + rtol * std::max<FE::Real>(1.0, std::abs(fd));

@@ -52,6 +52,7 @@ public:
 
     void beginTimeStep();
     void commitTimeStep();
+    void rollbackTimeStep();
 
 private:
     struct AlignedBuffer {
@@ -106,4 +107,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_SYSTEMS_GLOBAL_KERNEL_STATE_PROVIDER_H
-

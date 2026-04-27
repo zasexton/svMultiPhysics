@@ -52,6 +52,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -1414,6 +1415,39 @@ void dump_schur_vector_owned(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
   return seed;
 }
 
+[[nodiscard]] std::uint64_t hash_double_bits(std::uint64_t seed, double value) noexcept
+{
+  std::uint64_t bits = 0;
+  static_assert(sizeof(bits) == sizeof(value), "double and uint64_t sizes must match");
+  std::memcpy(&bits, &value, sizeof(bits));
+  return hash_mix(seed, bits);
+}
+
+[[nodiscard]] std::uint64_t hash_array_values(std::uint64_t seed, const Array<double>& values) noexcept
+{
+  seed = hash_mix(seed, static_cast<std::uint64_t>(values.nrows()));
+  seed = hash_mix(seed, static_cast<std::uint64_t>(values.ncols()));
+  seed = hash_mix(seed, static_cast<std::uint64_t>(values.size()));
+  const double* data = values.data();
+  if (data == nullptr) {
+    return seed;
+  }
+  for (int i = 0; i < values.size(); ++i) {
+    seed = hash_double_bits(seed, data[i]);
+  }
+  return seed;
+}
+
+[[nodiscard]] std::uint64_t hash_vector_values(std::uint64_t seed,
+                                               const std::vector<double>& values) noexcept
+{
+  seed = hash_mix(seed, static_cast<std::uint64_t>(values.size()));
+  for (double value : values) {
+    seed = hash_double_bits(seed, value);
+  }
+  return seed;
+}
+
 [[nodiscard]] std::uint64_t schur_cache_topology_signature(const fe_fsi_linear_solver::FSILS_lhsType& lhs) noexcept
 {
   std::uint64_t signature = 0xcbf29ce484222325ULL;
@@ -1473,6 +1507,37 @@ void dump_schur_vector_owned(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
     }
   }
 
+  return signature;
+}
+
+[[nodiscard]] std::uint64_t schur_cache_operator_signature(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
+                                                           const Array<double>& K,
+                                                           const Array<double>& D,
+                                                           const Array<double>& G,
+                                                           const Array<double>& L) noexcept
+{
+  std::uint64_t signature = 0x6eed0e9da4d94a4fULL;
+  signature = hash_array_values(signature, K);
+  signature = hash_array_values(signature, D);
+  signature = hash_array_values(signature, G);
+  signature = hash_array_values(signature, L);
+  signature = hash_vector_values(signature, lhs.native_face_pc_dense_coeff);
+  signature = hash_vector_values(signature, lhs.reduced_update_pc_inner_inv);
+  for (const auto& group : lhs.grouped_bordered_field_couplings) {
+    signature = hash_vector_values(signature, group.aux_matrix);
+    for (const auto& mode : group.modes) {
+      for (const auto& entry : mode.left) {
+        signature = hash_mix(signature, static_cast<std::uint64_t>(entry.node + 101));
+        signature = hash_mix(signature, static_cast<std::uint64_t>(entry.full_component + 107));
+        signature = hash_double_bits(signature, entry.value);
+      }
+      for (const auto& entry : mode.right) {
+        signature = hash_mix(signature, static_cast<std::uint64_t>(entry.node + 103));
+        signature = hash_mix(signature, static_cast<std::uint64_t>(entry.full_component + 109));
+        signature = hash_double_bits(signature, entry.value);
+      }
+    }
+  }
   return signature;
 }
 
@@ -1624,6 +1689,7 @@ struct SchurSolveCacheEntry {
   fsils_int nNo{0};
   fsils_int nnz{0};
   std::uint64_t topology_signature{0};
+  std::uint64_t operator_signature{0};
   fe_fsi_linear_solver::SchurPreconditionerType schur_preconditioner{
       fe_fsi_linear_solver::SchurPreconditionerType::ALGEBRAIC_SHAT};
   fe_fsi_linear_solver::SchurMomentumApproximationType momentum_approximation{
@@ -1637,13 +1703,15 @@ struct SchurSolveCacheEntry {
                                               const fe_fsi_linear_solver::FSILS_subLsType& ls,
                                               int mom_ncomp,
                                               int con_ncomp,
-                                              std::uint64_t topology_signature) noexcept
+                                              std::uint64_t topology_signature,
+                                              std::uint64_t operator_signature) noexcept
 {
   if (!cache.valid || cache.mom_ncomp != mom_ncomp || cache.con_ncomp != con_ncomp ||
       cache.nNo != lhs.nNo || cache.nnz != lhs.nnz) {
     return true;
   }
   if (cache.topology_signature != topology_signature ||
+      cache.operator_signature != operator_signature ||
       cache.schur_preconditioner != ls.schur_preconditioner ||
       cache.momentum_approximation != ls.schur_momentum_approximation) {
     return true;
@@ -7705,7 +7773,14 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
   auto& cache = schur_cache_entry(ls);
   double pc_setup_time = 0.0;
   const std::uint64_t topology_signature = schur_cache_topology_signature(lhs);
-  if (should_rebuild_schur_cache(cache, lhs, ls, mom_ncomp, con_ncomp, topology_signature)) {
+  const std::uint64_t operator_signature = schur_cache_operator_signature(lhs, K, D, G, L);
+  if (should_rebuild_schur_cache(cache,
+                                 lhs,
+                                 ls,
+                                 mom_ncomp,
+                                 con_ncomp,
+                                 topology_signature,
+                                 operator_signature)) {
     const double setup_t0 = fe_fsi_linear_solver::fsils_cpu_t();
     cache.preconditioner = build_schur_preconditioner(lhs, ls, mom_ncomp, con_ncomp, K, D, G, L);
     cache.preconditioner.operator_L = &cache.preconditioner.operator_L_storage;
@@ -7716,6 +7791,7 @@ void schur_impl(const dsb::MultiConstraintBlockSchurSystem& system,
     cache.nNo = nNo;
     cache.nnz = lhs.nnz;
     cache.topology_signature = topology_signature;
+    cache.operator_signature = operator_signature;
     cache.schur_preconditioner = ls.schur_preconditioner;
     cache.momentum_approximation = ls.schur_momentum_approximation;
     cache.solves_since_build = 0;
@@ -8435,12 +8511,18 @@ void schur_precondition_mc(const fe_fsi_linear_solver::distributed_solver_bundle
   const fsils_int nNo = lhs.nNo;
   auto& cache = schur_cache_entry(ls);
   const std::uint64_t topology_signature = schur_cache_topology_signature(lhs);
+  const std::uint64_t operator_signature = schur_cache_operator_signature(lhs,
+                                                                         *system.momentum_values,
+                                                                         *system.D_values,
+                                                                         *system.G_values,
+                                                                         *system.L_values);
   if (should_rebuild_schur_cache(cache,
                                  lhs,
                                  ls,
                                  system.momentum_components,
                                  system.constraint_components,
-                                 topology_signature)) {
+                                 topology_signature,
+                                 operator_signature)) {
     cache.preconditioner = build_schur_preconditioner(
         lhs, ls, system.momentum_components, system.constraint_components,
         *system.momentum_values, *system.D_values, *system.G_values, *system.L_values);
@@ -8451,6 +8533,7 @@ void schur_precondition_mc(const fe_fsi_linear_solver::distributed_solver_bundle
     cache.nNo = nNo;
     cache.nnz = lhs.nnz;
     cache.topology_signature = topology_signature;
+    cache.operator_signature = operator_signature;
     cache.schur_preconditioner = ls.schur_preconditioner;
     cache.momentum_approximation = ls.schur_momentum_approximation;
     cache.solves_since_build = 0;

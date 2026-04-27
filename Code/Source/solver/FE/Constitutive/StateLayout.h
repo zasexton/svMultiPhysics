@@ -2,6 +2,7 @@
 #define SVMP_FE_CONSTITUTIVE_STATE_LAYOUT_H
 
 #include "Core/FEException.h"
+#include "Core/StateVariableMetadata.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -35,6 +36,10 @@ struct StateField {
     std::size_t offset_bytes{0};
     std::size_t size_bytes{0};
     std::size_t alignment{1};
+    state::StateVariableFrame frame{state::StateVariableFrame::FrameIndependent};
+    state::StateFrameTransformPolicy transform_policy{
+        state::StateFrameTransformPolicy::PreserveValue};
+    std::string user_frame{};
 };
 
 class StateLayout {
@@ -81,7 +86,13 @@ public:
     explicit StateLayoutBuilder(std::string name = {}) : name_(std::move(name)) {}
 
     template <class T>
-    StateLayoutBuilder& add(std::string field_name, std::size_t count = 1)
+    StateLayoutBuilder& add(
+        std::string field_name,
+        std::size_t count = 1,
+        state::StateVariableFrame frame = state::StateVariableFrame::FrameIndependent,
+        state::StateFrameTransformPolicy transform_policy =
+            state::StateFrameTransformPolicy::PreserveValue,
+        std::string user_frame = {})
     {
         FE_THROW_IF(count == 0u, InvalidArgumentException, "StateLayoutBuilder::add: count must be > 0");
         constexpr std::size_t a = alignof(T);
@@ -91,7 +102,10 @@ public:
         fields_.push_back(StateField{std::move(field_name),
                                      offset_bytes_,
                                      sizeof(T) * count,
-                                     a});
+                                     a,
+                                     frame,
+                                     transform_policy,
+                                     std::move(user_frame)});
 
         offset_bytes_ += sizeof(T) * count;
         alignment_ = std::max(alignment_, a);

@@ -61,6 +61,7 @@
 
 #include "Core/Types.h"
 #include "Core/Alignment.h"
+#include "Core/StateVariableMetadata.h"
 #include "Core/ParameterValue.h"
 #include "Analysis/ContributionDescriptor.h"
 
@@ -181,6 +182,11 @@ enum class RequiredData : std::uint64_t {
     PreviousPhysicalPoints  = 1ull << 43, ///< Previous-time physical coordinates at quadrature points
     PreviousMeshVelocity    = 1ull << 44, ///< Previous-time mesh velocity field value at quadrature points
     PredictedMeshVelocity   = 1ull << 45, ///< Predicted/stage mesh velocity field value at quadrature points
+    MeshDisplacementGradient    = 1ull << 46, ///< Spatial Jacobian of mesh displacement at quadrature points
+    MeshVelocityGradient        = 1ull << 47, ///< Spatial Jacobian of mesh velocity at quadrature points
+    MeshAccelerationGradient    = 1ull << 48, ///< Spatial Jacobian of mesh acceleration at quadrature points
+    PreviousMeshVelocityGradient= 1ull << 49, ///< Spatial Jacobian of previous mesh velocity at quadrature points
+    PredictedMeshVelocityGradient=1ull << 50, ///< Spatial Jacobian of predicted mesh velocity at quadrature points
 
     // Common combinations
     BasicGeometry       = PhysicalPoints | JacobianDets | InverseJacobians,
@@ -236,6 +242,8 @@ inline constexpr bool hasFlag(RequiredData flags, RequiredData flag) {
 struct MaterialStateSpec {
     std::size_t bytes_per_qpt{0};
     std::size_t alignment{kFEPreferredAlignmentBytes};
+    std::vector<state::StateVariableMetadata> variables{};
+    state::StateFrameTransformHook frame_transform_hook{};
 };
 
 // ============================================================================
@@ -708,6 +716,17 @@ public:
     [[nodiscard]] virtual int maxTemporalDerivativeOrder() const noexcept { return 0; }
 
     /**
+     * @brief True when matrix entries are independent of the current nonlinear state.
+     *
+     * This is intentionally conservative. Returning true means the matrix can be
+     * assembled once and reused across Newton iterations within the same problem
+     * setup/time-step state. Kernels that depend on solution values, time
+     * integration weights, runtime parameters, material state, or moving-domain
+     * unknowns must leave the default false.
+     */
+    [[nodiscard]] virtual bool hasStateIndependentMatrix() const noexcept { return false; }
+
+    /**
      * @brief Check if kernel produces symmetric matrices
      *
      * Used by assembler to potentially optimize insertion.
@@ -764,6 +783,7 @@ public:
                           std::span<KernelOutput> outputs) override;
     [[nodiscard]] std::string name() const override { return "MassKernel"; }
     [[nodiscard]] bool isSymmetric() const noexcept override { return true; }
+    [[nodiscard]] bool hasStateIndependentMatrix() const noexcept override { return true; }
 
 private:
     Real coefficient_;
@@ -788,6 +808,7 @@ public:
                           std::span<KernelOutput> outputs) override;
     [[nodiscard]] std::string name() const override { return "StiffnessKernel"; }
     [[nodiscard]] bool isSymmetric() const noexcept override { return true; }
+    [[nodiscard]] bool hasStateIndependentMatrix() const noexcept override { return true; }
 
 private:
     Real coefficient_;

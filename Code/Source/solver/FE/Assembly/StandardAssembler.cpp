@@ -21,6 +21,7 @@
 #include "Geometry/MappingFactory.h"
 #include "Geometry/GeometryMapping.h"
 #include "Geometry/GeometryFrameUtils.h"
+#include "Geometry/PushForward.h"
 #include "Basis/BasisFunction.h"
 #include "Basis/BasisCache.h"
 #include "Basis/VectorBasis.h"
@@ -48,6 +49,7 @@
 #include <cstring>
 #include <cstdio>
 #include <functional>
+#include <optional>
 
 #if FE_HAS_MPI
 #  include <mpi.h>
@@ -132,21 +134,72 @@ namespace {
     return max_cells;
 }
 
+[[nodiscard]] math::Matrix<Real, 3, 3> toMathMatrix(const AssemblyContext::Matrix3x3& A)
+{
+    math::Matrix<Real, 3, 3> M{};
+    for (std::size_t r = 0; r < 3; ++r) {
+        for (std::size_t c = 0; c < 3; ++c) {
+            M(r, c) = A[r][c];
+        }
+    }
+    return M;
+}
+
+[[nodiscard]] AssemblyContext::Matrix3x3 toContextMatrix(const math::Matrix<Real, 3, 3>& M)
+{
+    AssemblyContext::Matrix3x3 A{};
+    for (std::size_t r = 0; r < 3; ++r) {
+        for (std::size_t c = 0; c < 3; ++c) {
+            A[r][c] = M(r, c);
+        }
+    }
+    return A;
+}
+
+[[nodiscard]] std::shared_ptr<geometry::GeometryMapping> createCellMappingForPiolaGradient(
+    const IMeshAccess& mesh,
+    GlobalIndex cell_id)
+{
+    std::vector<std::array<Real, 3>> cell_coords;
+    mesh.getCellCoordinates(cell_id, cell_coords);
+    std::vector<math::Vector<Real, 3>> node_coords(cell_coords.size());
+    for (std::size_t i = 0; i < cell_coords.size(); ++i) {
+        node_coords[i] = math::Vector<Real, 3>{
+            cell_coords[i][0], cell_coords[i][1], cell_coords[i][2]};
+    }
+
+    geometry::MappingRequest map_request;
+    map_request.element_type = mesh.getCellType(cell_id);
+    map_request.geometry_order = mesh.getCellGeometryOrder(cell_id);
+    map_request.use_affine = (map_request.geometry_order <= 1);
+    return geometry::MappingFactory::create(map_request, node_coords);
+}
+
 [[nodiscard]] AssemblyContext::Matrix3x3 transformVectorBasisJacobian(
     const AssemblyContext::Matrix3x3& J,
     const AssemblyContext::Matrix3x3& J_inv,
     Real det_J,
+    const math::Vector<Real, 3>& v_ref,
     const basis::VectorJacobian& jac_ref,
     Continuity continuity,
     bool affine_mapping,
+    const geometry::PushForward::PiolaVectorGradientGeometryData* piola_geometry,
     const char* context)
 {
+    const auto require_piola_geometry = [&](const char* family) {
+        FE_THROW_IF(piola_geometry == nullptr, FEException,
+                    std::string(context) + ": " + family +
+                        " curved Piola vector-gradient requested without reusable geometry data; "
+                        "required data are J, detJ, J^{-1}, mapping Hessian, and physical derivatives of J/detJ/J^{-1}");
+    };
+
     AssemblyContext::Matrix3x3 out{};
     if (continuity == Continuity::H_div) {
-        FE_THROW_IF(!affine_mapping, FEException,
-                    std::string(context) +
-                        ": H(div) vector-basis Jacobians require an affine geometry mapping; "
-                        "curved Piola derivative terms are not implemented");
+        if (!affine_mapping) {
+            require_piola_geometry("H(div)");
+            return toContextMatrix(geometry::PushForward::hdiv_vector_jacobian(
+                v_ref, jac_ref, *piola_geometry));
+        }
         const Real inv_det = Real(1) / det_J;
         for (int r = 0; r < 3; ++r) {
             for (int c = 0; c < 3; ++c) {
@@ -165,10 +218,11 @@ namespace {
     }
 
     if (continuity == Continuity::H_curl) {
-        FE_THROW_IF(!affine_mapping, FEException,
-                    std::string(context) +
-                        ": H(curl) vector-basis Jacobians require an affine geometry mapping; "
-                        "curved Piola derivative terms are not implemented");
+        if (!affine_mapping) {
+            require_piola_geometry("H(curl)");
+            return toContextMatrix(geometry::PushForward::hcurl_vector_jacobian(
+                v_ref, jac_ref, *piola_geometry));
+        }
         for (int r = 0; r < 3; ++r) {
             for (int c = 0; c < 3; ++c) {
                 Real sum = Real(0);
@@ -364,26 +418,6 @@ void gatherVectorCoefficients(
                     std::string(error_prefix) + ": solution vector too small for DOF " +
                         std::to_string(dof));
         out[i] = raw_values[static_cast<std::size_t>(dof)];
-    }
-}
-
-int defaultGeometryOrder(ElementType element_type) noexcept
-{
-    switch (element_type) {
-        case ElementType::Line3:
-        case ElementType::Triangle6:
-        case ElementType::Quad8:
-        case ElementType::Quad9:
-        case ElementType::Tetra10:
-        case ElementType::Hex20:
-        case ElementType::Hex27:
-        case ElementType::Wedge15:
-        case ElementType::Wedge18:
-        case ElementType::Pyramid13:
-        case ElementType::Pyramid14:
-            return 2;
-        default:
-            return 1;
     }
 }
 
@@ -1165,36 +1199,61 @@ std::vector<FieldRequirement> StandardAssembler::effectiveFieldRequirements(
 {
     std::vector<FieldRequirement> out(kernel_requirements.begin(), kernel_requirements.end());
 
-    auto add_or_merge = [&out](FieldId field) {
+    auto add_or_merge = [&out](FieldId field, RequiredData bits = RequiredData::SolutionValues) {
         auto it = std::find_if(out.begin(), out.end(), [&](const FieldRequirement& req) {
             return req.field == field;
         });
         if (it == out.end()) {
-            out.push_back(FieldRequirement{field, RequiredData::SolutionValues});
+            out.push_back(FieldRequirement{field, bits});
         } else {
-            it->required |= RequiredData::SolutionValues;
+            it->required |= bits;
         }
+    };
+    const auto moving_field_bits = [](bool needs_values, bool needs_gradients) {
+        RequiredData bits = RequiredData::None;
+        if (needs_values || needs_gradients) {
+            bits |= RequiredData::SolutionValues;
+        }
+        if (needs_gradients) {
+            bits |= RequiredData::SolutionGradients;
+        }
+        return bits;
     };
 
     validateMovingDomainRequirements(required_data,
                                      "StandardAssembler::effectiveFieldRequirements");
-    if (hasFlag(required_data, RequiredData::MeshDisplacement)) {
-        add_or_merge(mesh_motion_field_access_.mesh_displacement);
+    if (hasFlag(required_data, RequiredData::MeshDisplacement) ||
+        hasFlag(required_data, RequiredData::MeshDisplacementGradient)) {
+        add_or_merge(mesh_motion_field_access_.mesh_displacement,
+                     moving_field_bits(hasFlag(required_data, RequiredData::MeshDisplacement),
+                                       hasFlag(required_data, RequiredData::MeshDisplacementGradient)));
     }
-    if (hasFlag(required_data, RequiredData::MeshVelocity)) {
-        add_or_merge(mesh_motion_field_access_.mesh_velocity);
+    if (hasFlag(required_data, RequiredData::MeshVelocity) ||
+        hasFlag(required_data, RequiredData::MeshVelocityGradient)) {
+        add_or_merge(mesh_motion_field_access_.mesh_velocity,
+                     moving_field_bits(hasFlag(required_data, RequiredData::MeshVelocity),
+                                       hasFlag(required_data, RequiredData::MeshVelocityGradient)));
     }
-    if (hasFlag(required_data, RequiredData::MeshAcceleration)) {
-        add_or_merge(mesh_motion_field_access_.mesh_acceleration);
+    if (hasFlag(required_data, RequiredData::MeshAcceleration) ||
+        hasFlag(required_data, RequiredData::MeshAccelerationGradient)) {
+        add_or_merge(mesh_motion_field_access_.mesh_acceleration,
+                     moving_field_bits(hasFlag(required_data, RequiredData::MeshAcceleration),
+                                       hasFlag(required_data, RequiredData::MeshAccelerationGradient)));
     }
     if (hasFlag(required_data, RequiredData::PreviousPhysicalPoints)) {
         add_or_merge(mesh_motion_field_access_.previous_coordinates);
     }
-    if (hasFlag(required_data, RequiredData::PreviousMeshVelocity)) {
-        add_or_merge(mesh_motion_field_access_.previous_mesh_velocity);
+    if (hasFlag(required_data, RequiredData::PreviousMeshVelocity) ||
+        hasFlag(required_data, RequiredData::PreviousMeshVelocityGradient)) {
+        add_or_merge(mesh_motion_field_access_.previous_mesh_velocity,
+                     moving_field_bits(hasFlag(required_data, RequiredData::PreviousMeshVelocity),
+                                       hasFlag(required_data, RequiredData::PreviousMeshVelocityGradient)));
     }
-    if (hasFlag(required_data, RequiredData::PredictedMeshVelocity)) {
-        add_or_merge(mesh_motion_field_access_.predicted_mesh_velocity);
+    if (hasFlag(required_data, RequiredData::PredictedMeshVelocity) ||
+        hasFlag(required_data, RequiredData::PredictedMeshVelocityGradient)) {
+        add_or_merge(mesh_motion_field_access_.predicted_mesh_velocity,
+                     moving_field_bits(hasFlag(required_data, RequiredData::PredictedMeshVelocity),
+                                       hasFlag(required_data, RequiredData::PredictedMeshVelocityGradient)));
     }
 
     return out;
@@ -1209,22 +1268,27 @@ void StandardAssembler::validateMovingDomainRequirements(RequiredData required_d
                         " but no mesh-motion field was registered");
     };
 
-    require_field(hasFlag(required_data, RequiredData::MeshDisplacement),
+    require_field(hasFlag(required_data, RequiredData::MeshDisplacement) ||
+                  hasFlag(required_data, RequiredData::MeshDisplacementGradient),
                   mesh_motion_field_access_.mesh_displacement,
                   "RequiredData::MeshDisplacement");
-    require_field(hasFlag(required_data, RequiredData::MeshVelocity),
+    require_field(hasFlag(required_data, RequiredData::MeshVelocity) ||
+                  hasFlag(required_data, RequiredData::MeshVelocityGradient),
                   mesh_motion_field_access_.mesh_velocity,
                   "RequiredData::MeshVelocity");
-    require_field(hasFlag(required_data, RequiredData::MeshAcceleration),
+    require_field(hasFlag(required_data, RequiredData::MeshAcceleration) ||
+                  hasFlag(required_data, RequiredData::MeshAccelerationGradient),
                   mesh_motion_field_access_.mesh_acceleration,
                   "RequiredData::MeshAcceleration");
     require_field(hasFlag(required_data, RequiredData::PreviousPhysicalPoints),
                   mesh_motion_field_access_.previous_coordinates,
                   "RequiredData::PreviousPhysicalPoints");
-    require_field(hasFlag(required_data, RequiredData::PreviousMeshVelocity),
+    require_field(hasFlag(required_data, RequiredData::PreviousMeshVelocity) ||
+                  hasFlag(required_data, RequiredData::PreviousMeshVelocityGradient),
                   mesh_motion_field_access_.previous_mesh_velocity,
                   "RequiredData::PreviousMeshVelocity");
-    require_field(hasFlag(required_data, RequiredData::PredictedMeshVelocity),
+    require_field(hasFlag(required_data, RequiredData::PredictedMeshVelocity) ||
+                  hasFlag(required_data, RequiredData::PredictedMeshVelocityGradient),
                   mesh_motion_field_access_.predicted_mesh_velocity,
                   "RequiredData::PredictedMeshVelocity");
 }
@@ -1233,7 +1297,7 @@ void StandardAssembler::populateMovingDomainFieldData(AssemblyContext& context,
                                                       RequiredData required_data,
                                                       const char* error_prefix)
 {
-    auto bind_vector_field = [&](FieldId field, const char* label, auto setter) {
+    auto validate_vector_field = [&](FieldId field, const char* label) {
         FE_THROW_IF(field == INVALID_FIELD_ID, FEException,
                     std::string(error_prefix) + ": missing mesh-motion binding for " + label);
         FE_THROW_IF(!context.hasFieldSolutionData(field), FEException,
@@ -1246,6 +1310,10 @@ void StandardAssembler::populateMovingDomainFieldData(AssemblyContext& context,
                         " has value dimension " +
                         std::to_string(context.fieldSolutionValueDimension(field)) +
                         " but mesh dimension is " + std::to_string(context.dimension()));
+    };
+
+    auto bind_vector_values = [&](FieldId field, const char* label, auto setter) {
+        validate_vector_field(field, label);
 
         const auto nq = static_cast<std::size_t>(context.numQuadraturePoints());
         scratch_mesh_motion_values_.resize(nq);
@@ -1255,36 +1323,72 @@ void StandardAssembler::populateMovingDomainFieldData(AssemblyContext& context,
         }
         (context.*setter)(std::span<const AssemblyContext::Vector3D>(scratch_mesh_motion_values_));
     };
+    auto bind_vector_jacobians = [&](FieldId field, const char* label, auto setter) {
+        validate_vector_field(field, label);
+
+        const auto nq = static_cast<std::size_t>(context.numQuadraturePoints());
+        scratch_mesh_motion_jacobians_.resize(nq);
+        for (LocalIndex q = 0; q < context.numQuadraturePoints(); ++q) {
+            scratch_mesh_motion_jacobians_[static_cast<std::size_t>(q)] =
+                context.fieldJacobian(field, q);
+        }
+        (context.*setter)(std::span<const AssemblyContext::Matrix3x3>(scratch_mesh_motion_jacobians_));
+    };
 
     if (hasFlag(required_data, RequiredData::MeshDisplacement)) {
-        bind_vector_field(mesh_motion_field_access_.mesh_displacement,
+        bind_vector_values(mesh_motion_field_access_.mesh_displacement,
                           "MeshDisplacement",
                           &AssemblyContext::setMeshDisplacements);
     }
+    if (hasFlag(required_data, RequiredData::MeshDisplacementGradient)) {
+        bind_vector_jacobians(mesh_motion_field_access_.mesh_displacement,
+                              "MeshDisplacementGradient",
+                              &AssemblyContext::setMeshDisplacementJacobians);
+    }
     if (hasFlag(required_data, RequiredData::MeshVelocity)) {
-        bind_vector_field(mesh_motion_field_access_.mesh_velocity,
+        bind_vector_values(mesh_motion_field_access_.mesh_velocity,
                           "MeshVelocity",
                           &AssemblyContext::setMeshVelocities);
     }
+    if (hasFlag(required_data, RequiredData::MeshVelocityGradient)) {
+        bind_vector_jacobians(mesh_motion_field_access_.mesh_velocity,
+                              "MeshVelocityGradient",
+                              &AssemblyContext::setMeshVelocityJacobians);
+    }
     if (hasFlag(required_data, RequiredData::MeshAcceleration)) {
-        bind_vector_field(mesh_motion_field_access_.mesh_acceleration,
+        bind_vector_values(mesh_motion_field_access_.mesh_acceleration,
                           "MeshAcceleration",
                           &AssemblyContext::setMeshAccelerations);
     }
+    if (hasFlag(required_data, RequiredData::MeshAccelerationGradient)) {
+        bind_vector_jacobians(mesh_motion_field_access_.mesh_acceleration,
+                              "MeshAccelerationGradient",
+                              &AssemblyContext::setMeshAccelerationJacobians);
+    }
     if (hasFlag(required_data, RequiredData::PreviousPhysicalPoints)) {
-        bind_vector_field(mesh_motion_field_access_.previous_coordinates,
+        bind_vector_values(mesh_motion_field_access_.previous_coordinates,
                           "PreviousPhysicalPoints",
                           &AssemblyContext::setPreviousCoordinates);
     }
     if (hasFlag(required_data, RequiredData::PreviousMeshVelocity)) {
-        bind_vector_field(mesh_motion_field_access_.previous_mesh_velocity,
+        bind_vector_values(mesh_motion_field_access_.previous_mesh_velocity,
                           "PreviousMeshVelocity",
                           &AssemblyContext::setPreviousMeshVelocities);
     }
+    if (hasFlag(required_data, RequiredData::PreviousMeshVelocityGradient)) {
+        bind_vector_jacobians(mesh_motion_field_access_.previous_mesh_velocity,
+                              "PreviousMeshVelocityGradient",
+                              &AssemblyContext::setPreviousMeshVelocityJacobians);
+    }
     if (hasFlag(required_data, RequiredData::PredictedMeshVelocity)) {
-        bind_vector_field(mesh_motion_field_access_.predicted_mesh_velocity,
+        bind_vector_values(mesh_motion_field_access_.predicted_mesh_velocity,
                           "PredictedMeshVelocity",
                           &AssemblyContext::setPredictedMeshVelocities);
+    }
+    if (hasFlag(required_data, RequiredData::PredictedMeshVelocityGradient)) {
+        bind_vector_jacobians(mesh_motion_field_access_.predicted_mesh_velocity,
+                              "PredictedMeshVelocityGradient",
+                              &AssemblyContext::setPredictedMeshVelocityJacobians);
     }
 }
 
@@ -2650,7 +2754,10 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
                                 "StandardAssembler::assembleBoundaryFaces: material state bytes_per_qpt mismatch");
                     FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
                                 "StandardAssembler::assembleBoundaryFaces: invalid material state stride");
-                    context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes, view.alignment);
+                    context_.setMaterialState(view.data_old, view.data_work,
+                                              view.bytes_per_qpt, view.stride_bytes,
+                                              view.alignment, view.variables,
+                                              view.old_lifecycle, view.work_lifecycle);
                 }
 
                 // Compute local contributions
@@ -2978,8 +3085,12 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
                 FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
                             "StandardAssembler::assembleInteriorFaces: invalid material state stride");
 
-                context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes, view.alignment);
-                context_plus.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes, view.alignment);
+                context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt,
+                                          view.stride_bytes, view.alignment, view.variables,
+                                          view.old_lifecycle, view.work_lifecycle);
+                context_plus.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt,
+                                              view.stride_bytes, view.alignment, view.variables,
+                                              view.old_lifecycle, view.work_lifecycle);
             }
 
             // Compute DG face contributions
@@ -3331,7 +3442,8 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
                     FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
                                 "StandardAssembler::assembleInterfaceFaces: invalid material state stride");
                     context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt,
-                                              view.stride_bytes, view.alignment);
+                                              view.stride_bytes, view.alignment, view.variables,
+                                              view.old_lifecycle, view.work_lifecycle);
                 }
 
                 output_minus.clear();
@@ -3606,8 +3718,12 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
             FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
                         "StandardAssembler::assembleInterfaceFaces: invalid material state stride");
 
-            context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes, view.alignment);
-            context_plus.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes, view.alignment);
+            context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt,
+                                      view.stride_bytes, view.alignment, view.variables,
+                                      view.old_lifecycle, view.work_lifecycle);
+            context_plus.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt,
+                                          view.stride_bytes, view.alignment, view.variables,
+                                          view.old_lifecycle, view.work_lifecycle);
         }
 
         // Compute interface face contributions
@@ -3904,7 +4020,9 @@ AssemblyResult StandardAssembler::assembleCellsCore(
                         "StandardAssembler::assembleCellsCore: material state bytes_per_qpt mismatch");
             FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
                         "StandardAssembler::assembleCellsCore: invalid material state stride");
-            ctx.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes, view.alignment);
+            ctx.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt,
+                                 view.stride_bytes, view.alignment, view.variables,
+                                 view.old_lifecycle, view.work_lifecycle);
         }
         tp_sub_material += TP_SUB() - tp_s0;
     };
@@ -4336,7 +4454,7 @@ void StandardAssembler::prepareGeometry(
 #ifdef SVMP_FE_ASSEMBLY_TIMING
     pc_t0 = PC_TP();
 #endif
-    const int geom_order = defaultGeometryOrder(cell_type);
+    const int geom_order = mesh.getCellGeometryOrder(cell_id);
     const bool use_affine = (geom_order <= 1);
 
     if (cell_type != cached_mapping_type_ ||
@@ -4577,7 +4695,7 @@ void StandardAssembler::prepareGeometry(
             ws.cell_coords[i][0], ws.cell_coords[i][1], ws.cell_coords[i][2]};
     }
 
-    const int geom_order = defaultGeometryOrder(cell_type);
+    const int geom_order = mesh.getCellGeometryOrder(cell_id);
     const bool use_affine = (geom_order <= 1);
 
     if (cell_type != ws.mapping_type ||
@@ -5246,9 +5364,33 @@ void StandardAssembler::prepareBasis(
         const auto& J_inv = ctx_inv_jacs_r[q];
         const Real det_J = ctx_jac_dets_r[q];
 
+        const bool need_curved_piola_geometry =
+            !cached_mapping_affine_ &&
+            ((need_test_vector_jacobians && test_is_vector_basis) ||
+             (need_trial_vector_jacobians && trial_is_vector_basis));
+        geometry::GeometryMapping::MappingHessian map_hess{};
+        bool map_hess_ready = false;
+        const auto mapping_hessian_at_q = [&]() -> const geometry::GeometryMapping::MappingHessian& {
+            if (!map_hess_ready) {
+                map_hess = mapping->mapping_hessian(xi);
+                map_hess_ready = true;
+            }
+            return map_hess;
+        };
+        std::optional<geometry::PushForward::PiolaVectorGradientGeometryData> piola_geometry;
+        if (need_curved_piola_geometry) {
+            piola_geometry.emplace(geometry::PushForward::piola_vector_gradient_geometry_data(
+                dim,
+                toMathMatrix(J),
+                toMathMatrix(J_inv),
+                det_J,
+                mapping_hessian_at_q(),
+                cached_mapping_affine_));
+        }
+
         std::array<AssemblyContext::Matrix3x3, 3> d2xi_dx2{};
         if (need_basis_hessians) {
-            const auto map_hess = mapping->mapping_hessian(xi);
+            const auto& map_hess = mapping_hessian_at_q();
             for (int a = 0; a < dim; ++a) {
                 for (int i = 0; i < dim; ++i) {
                     for (int j = 0; j < dim; ++j) {
@@ -5271,7 +5413,7 @@ void StandardAssembler::prepareBasis(
         }
 
         if (test_is_vector_basis) {
-            if (need_test_vector_values) {
+            if (need_test_vector_values || (need_test_vector_jacobians && !cached_mapping_affine_)) {
                 test_basis.evaluate_vector_values(xi, vec_values_at_pt);
             }
             if (need_test_vector_jacobians) {
@@ -5313,13 +5455,18 @@ void StandardAssembler::prepareBasis(
                 }
 
                 if (need_test_vector_jacobians) {
+                    const math::Vector<Real, 3> zero_vref{0.0, 0.0, 0.0};
+                    const auto& vref_for_gradient =
+                        cached_mapping_affine_ ? zero_vref : vec_values_at_pt[static_cast<std::size_t>(i)];
                     scratch_basis_vector_jacobians_[idx] =
                         transformVectorBasisJacobian(J,
                                                      J_inv,
                                                      det_J,
+                                                     vref_for_gradient,
                                                      vec_jacobians_at_pt[static_cast<std::size_t>(i)],
                                                      cont,
                                                      cached_mapping_affine_,
+                                                     piola_geometry ? &*piola_geometry : nullptr,
                                                      "StandardAssembler::prepareBasis");
                 }
 
@@ -5408,7 +5555,7 @@ void StandardAssembler::prepareBasis(
 
         if (&test_space != &trial_space) {
             if (trial_is_vector_basis) {
-                if (need_trial_vector_values) {
+                if (need_trial_vector_values || (need_trial_vector_jacobians && !cached_mapping_affine_)) {
                     trial_basis.evaluate_vector_values(xi, vec_values_at_pt);
                 }
                 if (need_trial_vector_jacobians) {
@@ -5450,13 +5597,18 @@ void StandardAssembler::prepareBasis(
                     }
 
                     if (need_trial_vector_jacobians) {
+                        const math::Vector<Real, 3> zero_vref{0.0, 0.0, 0.0};
+                        const auto& vref_for_gradient =
+                            cached_mapping_affine_ ? zero_vref : vec_values_at_pt[static_cast<std::size_t>(j)];
                         trial_basis_vector_jacobians[idx] =
                             transformVectorBasisJacobian(J,
                                                          J_inv,
                                                          det_J,
+                                                         vref_for_gradient,
                                                          vec_jacobians_at_pt[static_cast<std::size_t>(j)],
                                                          cont,
                                                          cached_mapping_affine_,
+                                                         piola_geometry ? &*piola_geometry : nullptr,
                                                          "StandardAssembler::prepareBasis");
                     }
 
@@ -5886,9 +6038,14 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         return hasFlag(data, RequiredData::MeshDisplacement) ||
                hasFlag(data, RequiredData::MeshVelocity) ||
                hasFlag(data, RequiredData::MeshAcceleration) ||
+               hasFlag(data, RequiredData::MeshDisplacementGradient) ||
+               hasFlag(data, RequiredData::MeshVelocityGradient) ||
+               hasFlag(data, RequiredData::MeshAccelerationGradient) ||
                hasFlag(data, RequiredData::PreviousPhysicalPoints) ||
                hasFlag(data, RequiredData::PreviousMeshVelocity) ||
                hasFlag(data, RequiredData::PredictedMeshVelocity) ||
+               hasFlag(data, RequiredData::PreviousMeshVelocityGradient) ||
+               hasFlag(data, RequiredData::PredictedMeshVelocityGradient) ||
                hasFlag(data, RequiredData::ReferencePhysicalPoints) ||
                hasFlag(data, RequiredData::CurrentPhysicalPoints) ||
                hasFlag(data, RequiredData::ReferenceJacobians) ||
@@ -8958,7 +9115,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         //  - not using constraints (insertLocalConstrained is not thread-safe)
         // =================================================================
         const bool all_affine = !gids.empty() &&
-            (defaultGeometryOrder(mesh.getCellType(gids[0])) <= 1);
+            (mesh.getCellGeometryOrder(gids[0]) <= 1);
         const bool use_batch_basis_early =
             use_coupled_scalar_cache && all_affine;
 
@@ -10038,7 +10195,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                                                        ctx.numQuadraturePoints());
                     FE_THROW_IF(!view, FEException, "assembleCellsFused: material state provider returned null");
                     ctx.setMaterialState(view.data_old, view.data_work,
-                                         view.bytes_per_qpt, view.stride_bytes, view.alignment);
+                                         view.bytes_per_qpt, view.stride_bytes, view.alignment,
+                                         view.variables, view.old_lifecycle, view.work_lifecycle);
                 }
 
                 batch_outputs[slot].clear();
@@ -10108,7 +10266,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                                                            ctx.numQuadraturePoints());
                         FE_THROW_IF(!view, FEException, "assembleCellsFused: material state provider returned null");
                         ctx.setMaterialState(view.data_old, view.data_work,
-                                             view.bytes_per_qpt, view.stride_bytes, view.alignment);
+                                             view.bytes_per_qpt, view.stride_bytes, view.alignment,
+                                             view.variables, view.old_lifecycle, view.work_lifecycle);
                     }
 
                     batch_outputs[slot].clear();
@@ -10355,7 +10514,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                                                     context_.numQuadraturePoints());
                 FE_THROW_IF(!view, FEException, "assembleCellsFused: material state provider returned null");
                 context_.setMaterialState(view.data_old, view.data_work,
-                                          view.bytes_per_qpt, view.stride_bytes, view.alignment);
+                                          view.bytes_per_qpt, view.stride_bytes, view.alignment,
+                                          view.variables, view.old_lifecycle, view.work_lifecycle);
             }
 
             // f. Compute kernel
@@ -10592,10 +10752,11 @@ void StandardAssembler::prepareContextFace(
     // 6. Create geometry mapping
     geometry::MappingRequest map_request;
     map_request.element_type = cell_type;
-    map_request.geometry_order = defaultGeometryOrder(cell_type);
+    map_request.geometry_order = mesh.getCellGeometryOrder(cell_id);
     map_request.use_affine = (map_request.geometry_order <= 1);
 
     auto mapping = geometry::MappingFactory::create(map_request, node_coords);
+    const bool face_mapping_affine = mapping->isAffine();
 
     const bool need_reference_face =
         hasFlag(required_data, RequiredData::ReferencePhysicalPoints) ||
@@ -10830,9 +10991,33 @@ void StandardAssembler::prepareContextFace(
         const auto& J_inv = scratch_inv_jacobians_[q];
         const Real det_J = scratch_jac_dets_[q];
 
+        const bool need_curved_piola_geometry =
+            !face_mapping_affine &&
+            ((need_test_vector_jacobians && test_is_vector_basis) ||
+             (need_trial_vector_jacobians && trial_is_vector_basis));
+        geometry::GeometryMapping::MappingHessian map_hess{};
+        bool map_hess_ready = false;
+        const auto mapping_hessian_at_q = [&]() -> const geometry::GeometryMapping::MappingHessian& {
+            if (!map_hess_ready) {
+                map_hess = mapping->mapping_hessian(xi);
+                map_hess_ready = true;
+            }
+            return map_hess;
+        };
+        std::optional<geometry::PushForward::PiolaVectorGradientGeometryData> piola_geometry;
+        if (need_curved_piola_geometry) {
+            piola_geometry.emplace(geometry::PushForward::piola_vector_gradient_geometry_data(
+                dim,
+                toMathMatrix(J),
+                toMathMatrix(J_inv),
+                det_J,
+                mapping_hessian_at_q(),
+                face_mapping_affine));
+        }
+
         std::array<AssemblyContext::Matrix3x3, 3> d2xi_dx2{};
         if (need_basis_hessians) {
-            const auto map_hess = mapping->mapping_hessian(xi);
+            const auto& map_hess = mapping_hessian_at_q();
             for (int a = 0; a < dim; ++a) {
                 for (int i = 0; i < dim; ++i) {
                     for (int j = 0; j < dim; ++j) {
@@ -10855,7 +11040,7 @@ void StandardAssembler::prepareContextFace(
         }
 
         if (test_is_vector_basis) {
-            if (need_test_vector_values) {
+            if (need_test_vector_values || (need_test_vector_jacobians && !face_mapping_affine)) {
                 test_basis.evaluate_vector_values(xi_test, vec_values_at_pt);
             }
             if (need_test_vector_jacobians) {
@@ -10898,13 +11083,18 @@ void StandardAssembler::prepareContextFace(
                 }
 
                 if (need_test_vector_jacobians) {
+                    const math::Vector<Real, 3> zero_vref{0.0, 0.0, 0.0};
+                    const auto& vref_for_gradient =
+                        face_mapping_affine ? zero_vref : vec_values_at_pt[static_cast<std::size_t>(i)];
                     scratch_basis_vector_jacobians_[idx] =
                         transformVectorBasisJacobian(J,
                                                      J_inv,
                                                      det_J,
+                                                     vref_for_gradient,
                                                      vec_jacobians_at_pt[static_cast<std::size_t>(i)],
                                                      cont,
-                                                     mapping->isAffine(),
+                                                     face_mapping_affine,
+                                                     piola_geometry ? &*piola_geometry : nullptr,
                                                      "StandardAssembler::prepareContextFace");
                 }
 
@@ -10995,7 +11185,7 @@ void StandardAssembler::prepareContextFace(
 
         if (&test_space != &trial_space) {
             if (trial_is_vector_basis) {
-                if (need_trial_vector_values) {
+                if (need_trial_vector_values || (need_trial_vector_jacobians && !face_mapping_affine)) {
                     trial_basis.evaluate_vector_values(xi_trial, vec_values_at_pt);
                 }
                 if (need_trial_vector_jacobians) {
@@ -11038,13 +11228,18 @@ void StandardAssembler::prepareContextFace(
                     }
 
                     if (need_trial_vector_jacobians) {
+                        const math::Vector<Real, 3> zero_vref{0.0, 0.0, 0.0};
+                        const auto& vref_for_gradient =
+                            face_mapping_affine ? zero_vref : vec_values_at_pt[static_cast<std::size_t>(j)];
                         trial_basis_vector_jacobians[idx] =
                             transformVectorBasisJacobian(J,
                                                          J_inv,
                                                          det_J,
+                                                         vref_for_gradient,
                                                          vec_jacobians_at_pt[static_cast<std::size_t>(j)],
                                                          cont,
-                                                         mapping->isAffine(),
+                                                         face_mapping_affine,
+                                                         piola_geometry ? &*piola_geometry : nullptr,
                                                          "StandardAssembler::prepareContextFace");
                     }
 
@@ -12321,7 +12516,7 @@ void StandardAssembler::populateFieldSolutionData(
                         "StandardAssembler::populateFieldSolutionData: vector space value_dimension must be 1..3");
 
             // Vector-basis spaces (H(curl)/H(div)) are non-Product vector-valued spaces.
-            // Values and affine physical Jacobians are supported; higher derivatives are not.
+            // Values and physical Jacobians are supported; higher derivatives are not.
             if (!is_product) {
                 FE_THROW_IF(!basis.is_vector_valued(), FEException,
                             "StandardAssembler::populateFieldSolutionData: non-Product vector field is not a vector-basis space");
@@ -12346,6 +12541,12 @@ void StandardAssembler::populateFieldSolutionData(
 
                 auto& vec_values_at_pt = scratch_vec_values_at_pt_;
                 auto& vec_jacobians_at_pt = scratch_vec_jacobians_at_pt_;
+                std::shared_ptr<geometry::GeometryMapping> piola_mapping;
+                bool vector_gradient_affine = true;
+                if (need_gradients) {
+                    piola_mapping = createCellMappingForPiolaGradient(mesh, cell_id);
+                    vector_gradient_affine = piola_mapping->isAffine();
+                }
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
                     const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
                                                    qpts[static_cast<std::size_t>(q)][1],
@@ -12358,6 +12559,16 @@ void StandardAssembler::populateFieldSolutionData(
                     const auto J = context.jacobian(q);
                     const auto J_inv = context.inverseJacobian(q);
                     const Real det_J = context.jacobianDet(q);
+                    std::optional<geometry::PushForward::PiolaVectorGradientGeometryData> piola_geometry;
+                    if (need_gradients && !vector_gradient_affine) {
+                        piola_geometry.emplace(geometry::PushForward::piola_vector_gradient_geometry_data(
+                            dim,
+                            toMathMatrix(J),
+                            toMathMatrix(J_inv),
+                            det_J,
+                            piola_mapping->mapping_hessian(xi),
+                            vector_gradient_affine));
+                    }
 
                     AssemblyContext::Vector3D u{0.0, 0.0, 0.0};
                     AssemblyContext::Matrix3x3 grad_u{};
@@ -12393,9 +12604,11 @@ void StandardAssembler::populateFieldSolutionData(
                                 transformVectorBasisJacobian(J,
                                                              J_inv,
                                                              det_J,
+                                                             vref,
                                                              vec_jacobians_at_pt[static_cast<std::size_t>(j)],
                                                              cont,
-                                                             cached_mapping_affine_,
+                                                             vector_gradient_affine,
+                                                             piola_geometry ? &*piola_geometry : nullptr,
                                                              "StandardAssembler::populateFieldSolutionData");
                             for (int r = 0; r < 3; ++r) {
                                 for (int c = 0; c < 3; ++c) {
@@ -13067,7 +13280,7 @@ void StandardAssembler::populateFieldSolutionData(
                         "StandardAssembler::populateFieldSolutionData: vector space value_dimension must be 1..3");
 
             // Vector-basis spaces (H(curl)/H(div)) are non-Product vector-valued spaces.
-            // Values and affine physical Jacobians are supported; higher derivatives are not.
+            // Values and physical Jacobians are supported; higher derivatives are not.
             if (!is_product) {
                 FE_THROW_IF(!basis.is_vector_valued(), FEException,
                             "StandardAssembler::populateFieldSolutionData: non-Product vector field is not a vector-basis space");
@@ -13092,6 +13305,12 @@ void StandardAssembler::populateFieldSolutionData(
 
                 auto& vec_values_at_pt = ws.vec_values_at_pt;
                 auto& vec_jacobians_at_pt = ws.vec_jacobians_at_pt;
+                std::shared_ptr<geometry::GeometryMapping> piola_mapping;
+                bool vector_gradient_affine = true;
+                if (need_gradients) {
+                    piola_mapping = createCellMappingForPiolaGradient(mesh, cell_id);
+                    vector_gradient_affine = piola_mapping->isAffine();
+                }
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
                     const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
                                                    qpts[static_cast<std::size_t>(q)][1],
@@ -13104,6 +13323,16 @@ void StandardAssembler::populateFieldSolutionData(
                     const auto J = context.jacobian(q);
                     const auto J_inv = context.inverseJacobian(q);
                     const Real det_J = context.jacobianDet(q);
+                    std::optional<geometry::PushForward::PiolaVectorGradientGeometryData> piola_geometry;
+                    if (need_gradients && !vector_gradient_affine) {
+                        piola_geometry.emplace(geometry::PushForward::piola_vector_gradient_geometry_data(
+                            dim,
+                            toMathMatrix(J),
+                            toMathMatrix(J_inv),
+                            det_J,
+                            piola_mapping->mapping_hessian(xi),
+                            vector_gradient_affine));
+                    }
 
                     AssemblyContext::Vector3D u{0.0, 0.0, 0.0};
                     AssemblyContext::Matrix3x3 grad_u{};
@@ -13139,9 +13368,11 @@ void StandardAssembler::populateFieldSolutionData(
                                 transformVectorBasisJacobian(J,
                                                              J_inv,
                                                              det_J,
+                                                             vref,
                                                              vec_jacobians_at_pt[static_cast<std::size_t>(j)],
                                                              cont,
-                                                             cached_mapping_affine_,
+                                                             vector_gradient_affine,
+                                                             piola_geometry ? &*piola_geometry : nullptr,
                                                              "StandardAssembler::populateFieldSolutionData");
                             for (int r = 0; r < 3; ++r) {
                                 for (int c = 0; c < 3; ++c) {

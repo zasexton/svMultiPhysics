@@ -16,10 +16,12 @@
 #include "Adaptivity/AdaptivityManager.h"
 #endif
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -78,6 +80,85 @@ MeshBase make_moved_quad_mesh()
   }
   mesh.set_current_coords(x_cur);
   mesh.use_current_configuration();
+  return mesh;
+}
+
+MeshBase make_curved_quad_p3_mesh()
+{
+  constexpr int p = 3;
+  std::vector<std::array<real_t, 3>> pts;
+  pts.reserve(16);
+
+  const std::array<std::array<real_t, 3>, 4> corners{{
+      {{-1.0, -1.0, 0.0}},
+      {{ 1.0, -1.0, 0.0}},
+      {{ 1.0,  1.0, 0.0}},
+      {{-1.0,  1.0, 0.0}},
+  }};
+  for (const auto& pt : corners) {
+    pts.push_back(pt);
+  }
+
+  const std::array<std::array<int, 2>, 4> edges = {{{0, 1}, {1, 2}, {2, 3}, {3, 0}}};
+  for (const auto& edge : edges) {
+    for (int k = 1; k < p; ++k) {
+      const real_t t = static_cast<real_t>(k) / static_cast<real_t>(p);
+      const auto& a = corners[static_cast<std::size_t>(edge[0])];
+      const auto& b = corners[static_cast<std::size_t>(edge[1])];
+      pts.push_back({(1.0 - t) * a[0] + t * b[0],
+                     (1.0 - t) * a[1] + t * b[1],
+                     0.10 + 0.02 * static_cast<real_t>(k)});
+    }
+  }
+
+  for (int i = 1; i < p; ++i) {
+    for (int j = 1; j < p; ++j) {
+      pts.push_back({-1.0 + 2.0 * static_cast<real_t>(i) / static_cast<real_t>(p),
+                     -1.0 + 2.0 * static_cast<real_t>(j) / static_cast<real_t>(p),
+                     0.20 + 0.03 * static_cast<real_t>(i * j)});
+    }
+  }
+
+  std::vector<real_t> x_ref;
+  x_ref.reserve(pts.size() * 3u);
+  for (const auto& pt : pts) {
+    x_ref.push_back(pt[0]);
+    x_ref.push_back(pt[1]);
+    x_ref.push_back(pt[2]);
+  }
+
+  std::vector<offset_t> offsets = {0, static_cast<offset_t>(pts.size())};
+  std::vector<index_t> conn(pts.size());
+  for (std::size_t i = 0; i < conn.size(); ++i) {
+    conn[i] = static_cast<index_t>(i);
+  }
+  std::vector<CellShape> shapes = {{CellFamily::Quad, 4, p}};
+
+  MeshBase mesh;
+  mesh.build_from_arrays(3, x_ref, offsets, conn, shapes);
+  mesh.finalize();
+
+  auto x_cur = mesh.X_ref();
+  for (std::size_t v = 0; v < mesh.n_vertices(); ++v) {
+    x_cur[3 * v + 0] += 0.01 * static_cast<real_t>(v);
+    x_cur[3 * v + 2] += 0.15 + 0.005 * static_cast<real_t>(v);
+  }
+  mesh.set_current_coords(x_cur);
+  mesh.use_current_configuration();
+
+  auto handles = motion::attach_motion_fields(mesh, 3);
+  auto* displacement = MeshFields::field_data_as<real_t>(mesh, handles.displacement);
+  if (!displacement) {
+    throw std::runtime_error("failed to attach high-order displacement field");
+  }
+  for (std::size_t v = 0; v < mesh.n_vertices(); ++v) {
+    for (int d = 0; d < 3; ++d) {
+      displacement[3 * v + static_cast<std::size_t>(d)] =
+          mesh.X_cur()[3 * v + static_cast<std::size_t>(d)] -
+          mesh.X_ref()[3 * v + static_cast<std::size_t>(d)];
+    }
+  }
+
   return mesh;
 }
 
@@ -171,6 +252,45 @@ TEST(MovingMeshRestart, WriteReadMovedMeshRestoresGeometryMotionAndMetadata)
   std::filesystem::remove(registry_path, ec);
 }
 
+TEST(MovingMeshRestart, ReferenceRebaseMetadataRoundtrips)
+{
+  auto mesh = make_moved_quad_mesh();
+  const auto expected_reference = mesh.X_cur();
+  ASSERT_FALSE(expected_reference.empty());
+
+  ReferenceRebaseOptions rebase_options;
+  rebase_options.current_policy = ReferenceRebaseCurrentPolicy::ClearCurrent;
+  rebase_options.motion_policy = ReferenceRebaseMotionPolicy::ResetDisplacementLikeFields;
+  rebase_options.active_configuration_after = Configuration::Reference;
+  mesh.rebase_reference_to_current(rebase_options);
+
+  const auto path = unique_path(".rebase.mmrst");
+  moving_mesh_restart::write(mesh, path);
+  const auto metadata = moving_mesh_restart::inspect(path);
+  auto loaded = moving_mesh_restart::read(path);
+
+  EXPECT_EQ(metadata.version, moving_mesh_restart::kSupportedVersion);
+  EXPECT_FALSE(metadata.has_current_coordinates);
+  EXPECT_EQ(metadata.active_configuration, Configuration::Reference);
+  EXPECT_EQ(metadata.mesh_revisions.reference_rebase, mesh.reference_rebase_epoch());
+  EXPECT_EQ(metadata.reference_rebase.mode, ReferenceConfigurationMode::UpdatedLagrangianRebased);
+  EXPECT_EQ(metadata.reference_rebase.last_source, ReferenceRebaseSource::CurrentConfiguration);
+  EXPECT_EQ(metadata.reference_rebase.epoch, mesh.reference_rebase_info().epoch);
+
+  EXPECT_EQ(loaded.reference_configuration_mode(),
+            ReferenceConfigurationMode::UpdatedLagrangianRebased);
+  EXPECT_EQ(loaded.reference_rebase_info().last_source,
+            ReferenceRebaseSource::CurrentConfiguration);
+  EXPECT_EQ(loaded.reference_rebase_info().epoch, mesh.reference_rebase_info().epoch);
+  EXPECT_EQ(loaded.reference_rebase_epoch(), mesh.reference_rebase_epoch());
+  EXPECT_EQ(loaded.active_configuration(), Configuration::Reference);
+  EXPECT_FALSE(loaded.has_current_coords());
+  expect_same_vector(loaded.X_ref(), expected_reference);
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
 TEST(MovingMeshRestart, VersionMismatchFailsClearly)
 {
   const auto path = unique_path(".bad.mmrst");
@@ -181,6 +301,51 @@ TEST(MovingMeshRestart, VersionMismatchFailsClearly)
   }
 
   EXPECT_THROW((void)moving_mesh_restart::read(path), std::runtime_error);
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+TEST(MovingMeshRestart, HighOrderCurvedGeometryDescriptorAndMotionFieldsRoundtrip)
+{
+  auto mesh = make_curved_quad_p3_mesh();
+  const auto path = unique_path(".curved-p3.mmrst");
+
+  moving_mesh_restart::WriteOptions options;
+  options.restart_epoch = 15;
+  options.motion_backend_state.emplace("geometry_storage", "vertex_coordinates");
+  moving_mesh_restart::write(mesh, path, options);
+
+  const auto metadata = moving_mesh_restart::inspect(path);
+  auto loaded = moving_mesh_restart::read(path);
+
+  EXPECT_EQ(metadata.version, moving_mesh_restart::kSupportedVersion);
+  EXPECT_EQ(metadata.geometry_order.storage, GeometryDofStorage::VertexCoordinates);
+  EXPECT_EQ(metadata.geometry_order.max_order, 3);
+  EXPECT_TRUE(metadata.geometry_order.has_high_order);
+  EXPECT_EQ(metadata.geometry_order.reference_dofs, mesh.n_vertices());
+  EXPECT_EQ(metadata.geometry_order.current_dofs, mesh.n_vertices());
+
+  EXPECT_EQ(loaded.geometry_order_descriptor().max_order, 3);
+  EXPECT_TRUE(loaded.has_high_order_geometry());
+  EXPECT_EQ(loaded.cell_geometry_dofs(0), mesh.cell_geometry_dofs(0));
+  EXPECT_EQ(loaded.cell_edge_geometry_dofs(0, 0).size(), 4u);
+  EXPECT_EQ(loaded.cell_face_geometry_dofs(0, 0).size(), 4u);
+  EXPECT_EQ(loaded.cell_interior_geometry_dofs(0).size(), 4u);
+  expect_same_vector(loaded.X_ref(), mesh.X_ref());
+  expect_same_vector(loaded.X_cur(), mesh.X_cur());
+
+  const auto disp_name = motion::standard_motion_field_name(motion::MotionFieldRole::Displacement);
+  ASSERT_TRUE(loaded.has_field(EntityKind::Vertex, disp_name));
+  const auto src = mesh.field_handle(EntityKind::Vertex, disp_name);
+  const auto dst = loaded.field_handle(EntityKind::Vertex, disp_name);
+  const auto* a = mesh.field_data_as<const real_t>(src);
+  const auto* b = loaded.field_data_as<const real_t>(dst);
+  ASSERT_NE(a, nullptr);
+  ASSERT_NE(b, nullptr);
+  for (std::size_t i = 0; i < loaded.n_vertices() * 3u; ++i) {
+    EXPECT_NEAR(b[i], a[i], 1.0e-12);
+  }
 
   std::error_code ec;
   std::filesystem::remove(path, ec);

@@ -114,6 +114,66 @@ TEST(MovingMeshAdaptivity, RefinePreservesCurrentCoordinatesMotionFieldsAndProve
   EXPECT_GT(result.transfer_stats.motion_values_transferred.count("mesh_velocity"), 0u);
 }
 
+TEST(MovingMeshAdaptivity, CoarsenPreservesAcceptedCurrentCoordinatesAndMotionFields)
+{
+  auto mesh = make_single_line_mesh();
+  const auto motion_handles = motion::attach_motion_fields(mesh, 2);
+
+  auto* displacement = MeshFields::field_data_as<real_t>(mesh, motion_handles.displacement);
+  auto* velocity = MeshFields::field_data_as<real_t>(mesh, motion_handles.velocity);
+  ASSERT_NE(displacement, nullptr);
+  ASSERT_NE(velocity, nullptr);
+
+  displacement[0] = 0.0;
+  displacement[1] = 0.0;
+  displacement[2] = 1.0;
+  displacement[3] = 0.0;
+  velocity[0] = 10.0;
+  velocity[1] = 0.0;
+  velocity[2] = 20.0;
+  velocity[3] = 0.0;
+
+  mesh.set_current_coords({0.0, 0.0, 2.0, 0.0});
+  mesh.use_current_configuration();
+
+  auto options = moving_refine_options();
+  options.enable_coarsening = true;
+  AdaptivityManager manager(options);
+
+  auto refined = manager.refine(mesh, {true}, nullptr);
+  ASSERT_TRUE(refined.success) << refined.summary();
+  ASSERT_EQ(mesh.n_cells(), 2u);
+  ASSERT_EQ(mesh.n_vertices(), 3u);
+  ASSERT_TRUE(mesh.has_current_coords());
+
+  auto coarsened = manager.coarsen(mesh, std::vector<bool>(mesh.n_cells(), true), nullptr);
+  ASSERT_TRUE(coarsened.success) << coarsened.summary();
+  ASSERT_EQ(mesh.n_cells(), 1u);
+  ASSERT_EQ(mesh.n_vertices(), 2u);
+  ASSERT_TRUE(mesh.has_current_coords());
+  EXPECT_EQ(mesh.active_configuration(), Configuration::Current);
+
+  const auto left = vertex_at_x(mesh, 0.0);
+  const auto right = vertex_at_x(mesh, 1.0);
+  ASSERT_LT(left, mesh.n_vertices());
+  ASSERT_LT(right, mesh.n_vertices());
+  EXPECT_NEAR(mesh.X_cur()[2 * left + 0], 0.0, 1.0e-12);
+  EXPECT_NEAR(mesh.X_cur()[2 * right + 0], 2.0, 1.0e-12);
+
+  const auto disp_handle =
+      MeshFields::get_field_handle(mesh, EntityKind::Vertex, motion::standard_motion_field_name(motion::MotionFieldRole::Displacement));
+  const auto vel_handle =
+      MeshFields::get_field_handle(mesh, EntityKind::Vertex, motion::standard_motion_field_name(motion::MotionFieldRole::Velocity));
+  const auto* new_displacement = MeshFields::field_data_as<const real_t>(mesh, disp_handle);
+  const auto* new_velocity = MeshFields::field_data_as<const real_t>(mesh, vel_handle);
+  ASSERT_NE(new_displacement, nullptr);
+  ASSERT_NE(new_velocity, nullptr);
+  EXPECT_NEAR(new_displacement[2 * left + 0], 0.0, 1.0e-12);
+  EXPECT_NEAR(new_displacement[2 * right + 0], 1.0, 1.0e-12);
+  EXPECT_NEAR(new_velocity[2 * left + 0], 10.0, 1.0e-12);
+  EXPECT_NEAR(new_velocity[2 * right + 0], 20.0, 1.0e-12);
+}
+
 TEST(MovingMeshAdaptivity, ConservativeTransferPreservesScalarComponentSum)
 {
   auto mesh = make_single_line_mesh();

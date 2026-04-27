@@ -80,17 +80,23 @@ public:
   /**
    * @brief Read mesh from legacy VTK file
    */
-  static MeshBase read_vtk(const std::string& filename, int force_min_dim = 0);
+  static MeshBase read_vtk(const std::string& filename,
+                           int force_min_dim = 0,
+                           const MeshFinalizeOptions& finalize_options = MeshFinalizeOptions{});
 
   /**
    * @brief Read mesh from VTU (XML UnstructuredGrid) file
    */
-  static MeshBase read_vtu(const std::string& filename, int force_min_dim = 0);
+  static MeshBase read_vtu(const std::string& filename,
+                           int force_min_dim = 0,
+                           const MeshFinalizeOptions& finalize_options = MeshFinalizeOptions{});
 
   /**
    * @brief Read mesh from VTP (XML PolyData) file
    */
-  static MeshBase read_vtp(const std::string& filename, int force_min_dim = 0);
+  static MeshBase read_vtp(const std::string& filename,
+                           int force_min_dim = 0,
+                           const MeshFinalizeOptions& finalize_options = MeshFinalizeOptions{});
 
   /**
    * @brief Read mesh from PVTU (parallel XML UnstructuredGrid) file
@@ -98,21 +104,26 @@ public:
    * In serial this loads and assembles all pieces into a single mesh.
    * For scalable MPI loading, prefer DistributedMesh::load_parallel().
    */
-  static MeshBase read_pvtu(const std::string& filename);
+  static MeshBase read_pvtu(const std::string& filename,
+                            const MeshFinalizeOptions& finalize_options = MeshFinalizeOptions{});
 
   /**
    * @brief Read mesh from PVTP (parallel XML PolyData) file
    *
    * In serial this loads and assembles all pieces into a single mesh.
    */
-  static MeshBase read_pvtp(const std::string& filename);
+  static MeshBase read_pvtp(const std::string& filename,
+                            const MeshFinalizeOptions& finalize_options = MeshFinalizeOptions{});
 
 private:
   /**
    * @brief Convert VTK dataset to MeshBase
    * @param force_min_dim If > 0, force at least this many spatial dimensions
    */
-  static MeshBase convert_from_vtk_dataset(vtkDataSet* dataset, int force_min_dim = 0);
+  static MeshBase convert_from_vtk_dataset(
+      vtkDataSet* dataset,
+      int force_min_dim = 0,
+      const MeshFinalizeOptions& finalize_options = MeshFinalizeOptions{});
 
   /**
    * @brief Extract topology from VTK dataset
@@ -126,7 +137,8 @@ private:
       std::vector<CellShape>& face_shapes,
       std::vector<offset_t>& face2vertex_offsets,
       std::vector<index_t>& face2vertex,
-      std::vector<std::array<index_t,2>>& face2cell);
+      std::vector<std::array<index_t,2>>& face2cell,
+      bool extract_codim1);
 
   /**
    * @brief Extract coordinates from VTK points

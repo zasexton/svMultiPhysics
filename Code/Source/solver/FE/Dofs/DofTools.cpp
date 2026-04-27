@@ -287,10 +287,12 @@ std::vector<GlobalIndex> extractBoundaryDofs(
             continue;
         }
 
-        // Face-interior DOFs (3D facets only).
-        if (verts.size() >= 3u) {
-            if (entity_map.numFaces() <= 0 || f >= entity_map.numFaces()) {
-                throw FEException("DofTools::extractBoundaryDofs: facet labels imply faces, but EntityDofMap has no matching faces");
+        // Face-interior DOFs (3D facets only). P1 layouts may not store any
+        // face ranges in EntityDofMap, in which case vertex DOFs still define
+        // the boundary.
+        if (verts.size() >= 3u && entity_map.numFaces() > 0) {
+            if (f >= entity_map.numFaces()) {
+                throw FEException("DofTools::extractBoundaryDofs: facet labels imply faces, but EntityDofMap face count is smaller");
             }
             push_span(entity_map.getFaceDofs(f));
         }

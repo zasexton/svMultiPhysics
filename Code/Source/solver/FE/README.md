@@ -121,11 +121,13 @@ For the full advanced trace, periodic, mortar, mixed-dimensional, and
 inequality surface, see
 `Docs/HDIV_ADVANCED_USAGE_GUIDE.md`.
 
-Vector-valued intrinsic spaces also expose analytic `grad(u)` support on
-affine cells. `H(div)` RT/BDM bases and `H(curl)` Nedelec bases provide
-reference vector-basis Jacobians, and the assembler maps them through affine
+Vector-valued intrinsic spaces also expose analytic `grad(u)` support.
+`H(div)` RT/BDM bases and `H(curl)` Nedelec bases provide reference
+vector-basis values and Jacobians, and the assembler maps them through
 contravariant or covariant Piola transforms before the Forms interpreter or JIT
-consumes them:
+consumes them. Affine cells use the reduced affine formulas; supported
+non-affine 3D curved volume cells include the analytic derivative terms for
+`J`, `detJ`, `J^{-1}`, and `J^{-T}`:
 
 ```cpp
 auto q = StateField(q_id, *Vhdiv, "q");
@@ -133,8 +135,10 @@ auto w = TestField(q_id, *Vhdiv, "w");
 auto residual = (inner(grad(q), grad(w)) + inner(div(q), div(w))).dx();
 ```
 
-Non-affine `H(div)`/`H(curl)` vector-gradient requests intentionally throw a
-clear diagnostic because curved Piola derivative terms are not implemented yet.
+Unsupported curved `H(div)`/`H(curl)` vector-gradient combinations, including
+lower-dimensional curved surface/curve mappings whose frame derivatives are not
+available, intentionally throw a clear diagnostic instead of falling back to an
+affine approximation.
 
 ---
 

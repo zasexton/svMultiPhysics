@@ -64,6 +64,7 @@
 #include "Core/Types.h"
 #include "Core/FEException.h"
 #include "Core/ParameterValue.h"
+#include "Core/StateVariableMetadata.h"
 #include "Assembly/TimeIntegrationContext.h"
 #include "Assembly/Coloring.h"
 
@@ -126,6 +127,9 @@ struct MaterialStateView {
     std::size_t bytes_per_qpt{0};      ///< Payload bytes per integration point
     std::size_t stride_bytes{0};       ///< Stride between integration points (>= bytes_per_qpt)
     std::size_t alignment{alignof(std::max_align_t)}; ///< Alignment guarantee for base pointers
+    std::span<const state::StateVariableMetadata> variables{};
+    state::StateVariableLifecycle old_lifecycle{state::StateVariableLifecycle::CommittedOld};
+    state::StateVariableLifecycle work_lifecycle{state::StateVariableLifecycle::TrialWork};
 
     [[nodiscard]] explicit operator bool() const noexcept { return data_work != nullptr; }
 };
@@ -217,6 +221,38 @@ public:
      * Default is a no-op.
      */
     virtual void commitTimeStep() {}
+
+    /**
+     * @brief Restore "work" state from the last committed "old" state.
+     *
+     * Used by moving-geometry and nonlinear transaction rollback paths.
+     * Default is a no-op for stateless providers.
+     */
+    virtual void rollbackTimeStep() {}
+
+    /**
+     * @brief Apply or validate state frame transforms for moving-geometry events.
+     *
+     * Providers with frame-sensitive state must either apply their registered
+     * transform hooks or throw before FE infrastructure can silently reuse
+     * invalid state.
+     */
+    [[nodiscard]] virtual state::StateFrameTransformResult
+    applyStateFrameTransform(const state::StateFrameTransformRequest& /*request*/)
+    {
+        return {};
+    }
+
+    [[nodiscard]] virtual state::StateVariableLifecycle materialStateLifecycle() const noexcept
+    {
+        return state::StateVariableLifecycle::TrialWork;
+    }
+
+    [[nodiscard]] virtual std::span<const state::StateVariableMetadata>
+    materialStateVariables(const AssemblyKernel& /*kernel*/) const noexcept
+    {
+        return {};
+    }
 };
 
 // ============================================================================
@@ -435,6 +471,28 @@ public:
 
     /// Get element type for a cell
     [[nodiscard]] virtual ElementType getCellType(GlobalIndex cell_id) const = 0;
+
+    /// Get the geometric mapping order for a cell.  This is intentionally
+    /// separate from the FE solution-space order.
+    [[nodiscard]] virtual int getCellGeometryOrder(GlobalIndex cell_id) const
+    {
+        switch (getCellType(cell_id)) {
+            case ElementType::Line3:
+            case ElementType::Triangle6:
+            case ElementType::Quad8:
+            case ElementType::Quad9:
+            case ElementType::Tetra10:
+            case ElementType::Hex20:
+            case ElementType::Hex27:
+            case ElementType::Wedge15:
+            case ElementType::Wedge18:
+            case ElementType::Pyramid13:
+            case ElementType::Pyramid14:
+                return 2;
+            default:
+                return 1;
+        }
+    }
 
     /// Get domain/subdomain label for a cell (used for multi-domain/multiphysics setups)
     ///

@@ -41,7 +41,10 @@
 #include <limits>
 #include <cctype>
 #include <cstring>
+#include <cstdlib>
+#include <sstream>
 #include <type_traits>
+#include <utility>
 
 #ifndef MESH_HAS_MPI
 // When MPI is not enabled, do not compile the real DistributedMesh implementation.
@@ -69,6 +72,90 @@ namespace svmp { }
 #include <mpi.h>
 
 namespace {
+    bool mesh_load_trace_enabled() {
+        const char* value = std::getenv("SVMP_MESH_LOAD_TRACE");
+        if (!value) {
+            return false;
+        }
+
+        std::string flag(value);
+        std::transform(flag.begin(), flag.end(), flag.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return !(flag.empty() || flag == "0" || flag == "false" || flag == "off" || flag == "no");
+    }
+
+    std::pair<std::size_t, std::size_t> process_memory_kb() {
+        std::ifstream status("/proc/self/status");
+        if (!status.good()) {
+            return {0, 0};
+        }
+
+        std::size_t rss_kb = 0;
+        std::size_t hwm_kb = 0;
+        std::string key;
+        while (status >> key) {
+            if (key == "VmRSS:") {
+                status >> rss_kb;
+            } else if (key == "VmHWM:") {
+                status >> hwm_kb;
+            }
+            std::string rest;
+            std::getline(status, rest);
+        }
+        return {rss_kb, hwm_kb};
+    }
+
+    void trace_mesh_load(int rank, const std::string& stage, const std::string& detail = {}) {
+        if (!mesh_load_trace_enabled()) {
+            return;
+        }
+
+        const auto [rss_kb, hwm_kb] = process_memory_kb();
+        std::cerr << "[svMultiPhysics::Mesh] rank=" << rank
+                  << " stage=\"" << stage << "\"";
+        if (!detail.empty()) {
+            std::cerr << " " << detail;
+        }
+        if (rss_kb != 0 || hwm_kb != 0) {
+            std::cerr << " rss_mb=" << (rss_kb / 1024.0)
+                      << " hwm_mb=" << (hwm_kb / 1024.0);
+        }
+        std::cerr << std::endl;
+    }
+
+    std::string lower_copy(std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value;
+    }
+
+    std::string resolve_startup_partition_method(
+        const std::unordered_map<std::string, std::string>& options,
+        int world_size,
+        bool* selected_automatically = nullptr) {
+        bool automatic = true;
+        std::string method;
+
+        const auto it = options.find("partition_method");
+        if (it != options.end()) {
+            method = lower_copy(it->second);
+            automatic = method.empty() || method == "auto";
+        }
+
+        if (automatic) {
+#if defined(SVMP_HAS_PARMETIS)
+            method = (world_size > 1) ? "parmetis" : "block";
+#else
+            method = "block";
+#endif
+        }
+
+        if (selected_automatically) {
+            *selected_automatically = automatic;
+        }
+        return method;
+    }
+
     // Helper structures and functions for MPI operations
     bool gids_are_local_iota(const std::vector<svmp::gid_t>& gids) {
         for (size_t i = 0; i < gids.size(); ++i) {
@@ -437,10 +524,20 @@ static MeshBase extract_submesh(const MeshBase& global_mesh,
     }
 
     // Step 6: Create submesh
-    submesh.build_from_arrays(global_mesh.dim(), coords, offsets, connectivity, shapes);
+    submesh.build_from_arrays(global_mesh.dim(),
+                              std::move(coords),
+                              std::move(offsets),
+                              std::move(connectivity),
+                              std::move(shapes));
     submesh.set_vertex_gids(std::move(vertex_gids));
     submesh.set_cell_gids(std::move(cell_gids));
-    submesh.finalize();
+    MeshFinalizeOptions submesh_finalize{};
+    submesh_finalize.codim1_storage =
+        (global_mesh.codim1_storage_mode() == MeshCodim1StorageMode::Full)
+            ? MeshCodim1StorageMode::Full
+            : MeshCodim1StorageMode::None;
+    submesh_finalize.edge_storage = !global_mesh.edge2vertex().empty();
+    submesh.finalize(submesh_finalize);
 
     // Step 7: Copy field data if present
     // Preserve label registry (name <-> id) so downstream code can resolve labels.
@@ -1060,6 +1157,11 @@ static void serialize_mesh(const MeshBase& mesh, std::vector<char>& buffer) {
     const auto face_gids = compute_canonical_face_gids();
     const auto edge_gids = compute_canonical_edge_gids();
 
+    const int codim1_storage_mode = static_cast<int>(mesh.codim1_storage_mode());
+    const int edge_storage_enabled = mesh.edge2vertex().empty() ? 0 : 1;
+    append_data(&codim1_storage_mode, sizeof(int));
+    append_data(&edge_storage_enabled, sizeof(int));
+
     const std::uint64_t n_faces = static_cast<std::uint64_t>(face_gids.size());
     append_data(&n_faces, sizeof(std::uint64_t));
     if (n_faces > 0) {
@@ -1305,7 +1407,11 @@ static void deserialize_mesh(const std::vector<char>& buffer, MeshBase& mesh) {
     read_data(cell_gids.data(), n_cells * sizeof(gid_t));
 
     // Initialize mesh
-    mesh.build_from_arrays(dim, coords, offsets, connectivity, shapes);
+    mesh.build_from_arrays(dim,
+                           std::move(coords),
+                           std::move(offsets),
+                           std::move(connectivity),
+                           std::move(shapes));
     mesh.set_vertex_gids(std::move(vertex_gids));
     mesh.set_cell_gids(std::move(cell_gids));
 
@@ -1440,25 +1546,20 @@ static void deserialize_mesh(const std::vector<char>& buffer, MeshBase& mesh) {
         }
     }
 
-    // Finalize before codim-1/codim-2 metadata application.
-    mesh.finalize();
-
-    // Ensure face/edge GIDs are stable so we can map by canonical ID.
-    ensure_canonical_face_gids(mesh);
-    ensure_canonical_edge_gids(mesh);
-
     // =====================================================
     // Codimension entities: faces/edges (boundary labels, sets, fields)
     // =====================================================
+
+    int codim1_storage_mode = static_cast<int>(MeshCodim1StorageMode::Full);
+    int edge_storage_enabled = 1;
+    read_data(&codim1_storage_mode, sizeof(int));
+    read_data(&edge_storage_enabled, sizeof(int));
 
     std::uint64_t n_faces = 0;
     read_data(&n_faces, sizeof(std::uint64_t));
     std::vector<gid_t> face_gids(static_cast<size_t>(n_faces));
     if (n_faces > 0) {
         read_data(face_gids.data(), static_cast<size_t>(n_faces) * sizeof(gid_t));
-    }
-    if (n_faces != static_cast<std::uint64_t>(mesh.n_faces())) {
-        throw std::runtime_error("deserialize_mesh: face count mismatch");
     }
 
     std::uint64_t n_edges = 0;
@@ -1467,6 +1568,20 @@ static void deserialize_mesh(const std::vector<char>& buffer, MeshBase& mesh) {
     if (n_edges > 0) {
         read_data(edge_gids.data(), static_cast<size_t>(n_edges) * sizeof(gid_t));
     }
+
+    MeshFinalizeOptions finalize_options{};
+    finalize_options.codim1_storage = static_cast<MeshCodim1StorageMode>(codim1_storage_mode);
+    finalize_options.edge_storage = (edge_storage_enabled != 0);
+    mesh.finalize(finalize_options);
+
+    // Ensure face/edge GIDs are stable so we can map by canonical ID.
+    ensure_canonical_face_gids(mesh);
+    ensure_canonical_edge_gids(mesh);
+
+    if (n_faces != static_cast<std::uint64_t>(mesh.n_faces())) {
+        throw std::runtime_error("deserialize_mesh: face count mismatch");
+    }
+
     if (n_edges != static_cast<std::uint64_t>(mesh.n_edges())) {
         throw std::runtime_error("deserialize_mesh: edge count mismatch");
     }
@@ -2232,7 +2347,11 @@ inline MeshBase extract_cells_by_gid(const MeshBase& mesh, const std::vector<gid
         return submesh;
     }
 
-    submesh.build_from_arrays(dim, new_coords, new_offsets, new_conn, new_cell_shapes);
+    submesh.build_from_arrays(dim,
+                              std::move(new_coords),
+                              std::move(new_offsets),
+                              std::move(new_conn),
+                              std::move(new_cell_shapes));
     submesh.set_vertex_gids(std::move(new_vertex_gids));
     submesh.set_cell_gids(std::move(new_cell_gids));
     submesh.finalize();
@@ -2486,7 +2605,11 @@ void DistributedMesh::build_ghost_layer(int levels) {
         // Rebuild mesh (this clears fields, so restore after).
         const int dim = local_mesh_->dim();
         local_mesh_->clear();
-        local_mesh_->build_from_arrays(dim, new_coords, new_offsets, new_conn, new_cell_shapes);
+        local_mesh_->build_from_arrays(dim,
+                                       std::move(new_coords),
+                                       std::move(new_offsets),
+                                       std::move(new_conn),
+                                       std::move(new_cell_shapes));
         local_mesh_->set_vertex_gids(std::move(new_vertex_gids));
 	        local_mesh_->set_cell_gids(std::move(new_cell_gids));
 	        local_mesh_->finalize();
@@ -2501,13 +2624,14 @@ void DistributedMesh::build_ghost_layer(int levels) {
 
 	        // Restore current coordinates and active configuration.
 	        if (old_has_current_coords) {
+	            const auto& rebuilt_coords = local_mesh_->X_ref();
 	            std::vector<real_t> new_current_coords;
-	            new_current_coords.reserve(new_coords.size());
+	            new_current_coords.reserve(rebuilt_coords.size());
 	            new_current_coords.insert(new_current_coords.end(), old_current_coords.begin(), old_current_coords.end());
-	            if (new_coords.size() > old_current_coords.size()) {
+	            if (rebuilt_coords.size() > old_current_coords.size()) {
 	                new_current_coords.insert(new_current_coords.end(),
-	                                          new_coords.begin() + old_current_coords.size(),
-	                                          new_coords.end());
+	                                          rebuilt_coords.begin() + old_current_coords.size(),
+	                                          rebuilt_coords.end());
 	            }
 	            local_mesh_->set_current_coords(new_current_coords);
 	        }
@@ -3926,7 +4050,11 @@ void DistributedMesh::build_ghost_layer(int levels) {
 	    }
 
 	    local_mesh_->clear();
-	    local_mesh_->build_from_arrays(spatial_dim, local_X_ref, final_offsets, local_cell2vertex, recv_cell_shapes);
+	    local_mesh_->build_from_arrays(spatial_dim,
+	                                   std::move(local_X_ref),
+	                                   std::move(final_offsets),
+	                                   std::move(local_cell2vertex),
+	                                   std::move(recv_cell_shapes));
 	    local_mesh_->set_vertex_gids(std::move(local_vertex_gids));
 	    local_mesh_->set_cell_gids(std::move(recv_cell_gids));
 	    local_mesh_->finalize();
@@ -4258,7 +4386,11 @@ void DistributedMesh::clear_ghosts() {
     snapshot_fields_all(EntityKind::Edge, local_mesh_->n_edges(), edge_gid_snapshot);
 
     local_mesh_->clear();
-    local_mesh_->build_from_arrays(dim, new_coords, new_offsets, new_conn, new_shapes);
+    local_mesh_->build_from_arrays(dim,
+                                   std::move(new_coords),
+                                   std::move(new_offsets),
+                                   std::move(new_conn),
+                                   std::move(new_shapes));
     local_mesh_->set_vertex_gids(std::move(new_vertex_gids));
 	    local_mesh_->set_cell_gids(std::move(new_cell_gids));
 	    local_mesh_->finalize();
@@ -5921,7 +6053,11 @@ void DistributedMesh::update_exchange_ghost_coordinates(Configuration cfg) {
 
 	    // Rebuild local mesh.
 	    local_mesh_->clear();
-	    local_mesh_->build_from_arrays(spatial_dim, new_coords_ref, new_cell_offsets, new_cell_connectivity, new_cell_shapes);
+	    local_mesh_->build_from_arrays(spatial_dim,
+	                                   std::move(new_coords_ref),
+	                                   std::move(new_cell_offsets),
+	                                   std::move(new_cell_connectivity),
+	                                   std::move(new_cell_shapes));
 	    local_mesh_->set_vertex_gids(std::move(new_vertex_gids));
 	    local_mesh_->set_cell_gids(std::move(new_cell_gids));
 
@@ -7282,6 +7418,8 @@ DistributedMesh DistributedMesh::load_parallel(const MeshIOOptions& opts, MPI_Co
 
     // Start timing for performance monitoring
     double io_start_time = MPI_Wtime();
+    trace_mesh_load(rank, "load_parallel begin",
+                    "path='" + opts.path + "' format='" + opts.format + "' extension='" + extension + "'");
 
     // =====================================================
     // Strategy 1: PVTU/PVTK Format (Parallel VTK)
@@ -7450,7 +7588,18 @@ DistributedMesh DistributedMesh::load_parallel(const MeshIOOptions& opts, MPI_Co
             double load_start = MPI_Wtime();
             // Note: opts.path may be a .pvtu/.pvtk; in that case we fall back to a
             // single-file VTU at <base_path>.vtu (see above).
+            trace_mesh_load(rank, "serial root mesh load begin",
+                            "path='" + serial_fallback_opts.path + "' format='" + serial_fallback_opts.format + "'");
             MeshBase global_mesh = MeshBase::load(serial_fallback_opts);
+            {
+                std::ostringstream os;
+                os << "cells=" << global_mesh.n_cells()
+                   << " vertices=" << global_mesh.n_vertices()
+                   << " faces=" << global_mesh.n_faces()
+                   << " edges=" << global_mesh.n_edges()
+                   << " elapsed_s=" << (MPI_Wtime() - load_start);
+                trace_mesh_load(rank, "serial root mesh load complete", os.str());
+            }
 
             if (opts.kv.find("verbose") != opts.kv.end()) {
                 std::cout << "Root loaded " << global_mesh.n_cells() << " cells in "
@@ -7468,14 +7617,20 @@ DistributedMesh DistributedMesh::load_parallel(const MeshIOOptions& opts, MPI_Co
             size_t n_cells = global_mesh.n_cells();
             std::vector<rank_t> cell_partition(n_cells);
 
-            std::string partition_method = "metis";  // default (falls back to deterministic block when graph is degenerate)
-            if (opts.kv.find("partition_method") != opts.kv.end()) {
-                partition_method = opts.kv.at("partition_method");
+            bool partition_method_auto = false;
+            std::string partition_method =
+                resolve_startup_partition_method(opts.kv, size, &partition_method_auto);
+            {
+                std::ostringstream os;
+                os << "method='" << partition_method << "'"
+                   << " automatic=" << (partition_method_auto ? "true" : "false")
+                   << " cells=" << n_cells;
+                trace_mesh_load(rank, "serial root partition begin", os.str());
+                if (opts.kv.find("verbose") != opts.kv.end()) {
+                    std::cout << "Serial startup partition method: " << partition_method
+                              << (partition_method_auto ? " (auto)" : " (requested)") << "\n";
+                }
             }
-
-            std::transform(partition_method.begin(), partition_method.end(),
-                           partition_method.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
             if (partition_method == "parmetis") {
                 // ParMETIS startup partitioning is performed after an initial block distribution.
@@ -7489,20 +7644,20 @@ DistributedMesh DistributedMesh::load_parallel(const MeshIOOptions& opts, MPI_Co
                 if (partition_method == "metis" || partition_method == "graph") {
                     cell_partition = partition_cells_metis(global_mesh, size, PartitionHint::Cells);
                 } else {
-                    if (opts.kv.find("verbose") != opts.kv.end()) {
-                        std::cerr << "Warning: partition_method='" << partition_method
-                                  << "' is not recognized; falling back to METIS partition.\n";
-                    }
-                    cell_partition = partition_cells_metis(global_mesh, size, PartitionHint::Cells);
+                    throw std::invalid_argument("DistributedMesh::load_parallel: unknown partition_method='" +
+                                                partition_method + "'");
                 }
 #else
-                if (opts.kv.find("verbose") != opts.kv.end()) {
-                    std::cerr << "Warning: partition_method='" << partition_method
-                              << "' requested but METIS support is not enabled; falling back to block partition.\n";
+                if (partition_method == "metis" || partition_method == "graph") {
+                    throw std::runtime_error("DistributedMesh::load_parallel: partition_method='" +
+                                             partition_method + "' requires METIS support");
                 }
-                cell_partition = partition_cells_block(n_cells, size);
+                throw std::invalid_argument("DistributedMesh::load_parallel: unknown partition_method='" +
+                                            partition_method + "'");
 #endif
             }
+            trace_mesh_load(rank, "serial root partition complete",
+                            "method='" + partition_method + "'");
 
             // =====================================================
             // Step 3: Extract and distribute submeshes
@@ -7528,20 +7683,44 @@ DistributedMesh DistributedMesh::load_parallel(const MeshIOOptions& opts, MPI_Co
                 if (r < 0 || r >= size) continue;
                 cells_by_rank[static_cast<size_t>(r)].push_back(c);
             }
+            trace_mesh_load(rank, "serial root rank cell lists complete");
 
             for (int r = 0; r < size; ++r) {
                 // Extract submesh for rank r
+                {
+                    std::ostringstream os;
+                    os << "target_rank=" << r
+                       << " cells=" << cells_by_rank[static_cast<size_t>(r)].size();
+                    trace_mesh_load(rank, "serial root submesh extract begin", os.str());
+                }
                 auto submesh = extract_submesh(global_mesh,
                                                cell_partition,
                                                static_cast<rank_t>(r),
                                                &cells_by_rank[static_cast<size_t>(r)]);
+                {
+                    std::ostringstream os;
+                    os << "target_rank=" << r
+                       << " cells=" << submesh.n_cells()
+                       << " vertices=" << submesh.n_vertices()
+                       << " faces=" << submesh.n_faces()
+                       << " edges=" << submesh.n_edges();
+                    trace_mesh_load(rank, "serial root submesh extract complete", os.str());
+                }
 
                 if (r == 0) {
                     local_mesh = std::make_shared<MeshBase>(std::move(submesh));
                 } else {
                     // Serialize and send
                     std::vector<char> buffer;
+                    trace_mesh_load(rank, "serial root submesh serialize begin",
+                                    "target_rank=" + std::to_string(r));
                     serialize_mesh(submesh, buffer);
+                    {
+                        std::ostringstream os;
+                        os << "target_rank=" << r
+                           << " bytes=" << buffer.size();
+                        trace_mesh_load(rank, "serial root submesh serialize complete", os.str());
+                    }
 
                     int buffer_size = static_cast<int>(buffer.size());
                     MPI_Send(&buffer_size, 1, MPI_INT, r, 0, comm);
@@ -7558,15 +7737,28 @@ DistributedMesh DistributedMesh::load_parallel(const MeshIOOptions& opts, MPI_Co
 
             // Direct receive from root
             int buffer_size;
+            trace_mesh_load(rank, "serial nonroot receive size begin");
             MPI_Recv(&buffer_size, 1, MPI_INT, 0, 0, comm, MPI_STATUS_IGNORE);
+            trace_mesh_load(rank, "serial nonroot receive size complete",
+                            "bytes=" + std::to_string(buffer_size));
 
             std::vector<char> buffer(static_cast<size_t>(buffer_size));
             if (buffer_size > 0) {
                 MPI_Recv(buffer.data(), buffer_size, MPI_CHAR, 0, 1, comm, MPI_STATUS_IGNORE);
             }
+            trace_mesh_load(rank, "serial nonroot receive payload complete",
+                            "bytes=" + std::to_string(buffer_size));
 
             local_mesh = std::make_shared<MeshBase>();
             deserialize_mesh(buffer, *local_mesh);
+            {
+                std::ostringstream os;
+                os << "cells=" << local_mesh->n_cells()
+                   << " vertices=" << local_mesh->n_vertices()
+                   << " faces=" << local_mesh->n_faces()
+                   << " edges=" << local_mesh->n_edges();
+                trace_mesh_load(rank, "serial nonroot deserialize complete", os.str());
+            }
         }
 
         double dist_time = MPI_Wtime() - io_start_time;
@@ -7589,17 +7781,17 @@ DistributedMesh DistributedMesh::load_parallel(const MeshIOOptions& opts, MPI_Co
     //   2) All ranks call ParMETIS on the distributed cell dual graph and migrate cells.
     //
     // This avoids rank-0 partitioning work and provides a startup path comparable to the legacy solver.
-    std::string requested_partition_method = "metis";
-    if (opts.kv.find("partition_method") != opts.kv.end()) {
-        requested_partition_method = opts.kv.at("partition_method");
-        std::transform(requested_partition_method.begin(), requested_partition_method.end(),
-                       requested_partition_method.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    }
+    bool requested_partition_method_auto = false;
+    std::string requested_partition_method =
+        resolve_startup_partition_method(opts.kv, size, &requested_partition_method_auto);
 
 #if defined(SVMP_HAS_PARMETIS)
     if (used_serial_distribution && requested_partition_method == "parmetis") {
+        trace_mesh_load(rank, "serial startup parmetis rebalance begin",
+                        std::string("automatic=") +
+                            (requested_partition_method_auto ? "true" : "false"));
         dmesh.rebalance(PartitionHint::ParMetis, opts.kv);
+        trace_mesh_load(rank, "serial startup parmetis rebalance complete");
     }
 #else
     if (used_serial_distribution && requested_partition_method == "parmetis") {

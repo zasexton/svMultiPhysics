@@ -192,6 +192,21 @@ dofs::MeshTopologyInfo buildTwoTetraTopology(bool flipped)
     return topo;
 }
 
+void expectDenseMatrixNear(const assembly::DenseMatrixView& a,
+                           const assembly::DenseMatrixView& b,
+                           Real tol)
+{
+    ASSERT_EQ(a.numRows(), b.numRows());
+    ASSERT_EQ(a.numCols(), b.numCols());
+
+    for (GlobalIndex i = 0; i < a.numRows(); ++i) {
+        for (GlobalIndex j = 0; j < a.numCols(); ++j) {
+            EXPECT_NEAR(a.getMatrixEntry(i, j), b.getMatrixEntry(i, j), tol)
+                << "i=" << i << " j=" << j;
+        }
+    }
+}
+
 } // namespace
 
 TEST(VectorBasisOrientationAssembly, HDivMassMatrixInvariantToCellVertexPermutation)
@@ -270,6 +285,40 @@ TEST(VectorBasisOrientationAssembly, HDivMassMatrixInvariantToCellVertexPermutat
     }
 }
 
+TEST(VectorBasisOrientationAssembly, HDivGradientMatrixInvariantToCellVertexPermutation)
+{
+    spaces::HDivSpace space(ElementType::Tetra4, /*order=*/0);
+
+    forms::FormCompiler compiler;
+    const auto u = forms::FormExpr::trialFunction(space, "u");
+    const auto v = forms::FormExpr::testFunction(space, "v");
+    auto ir = compiler.compileBilinear(inner(grad(u), grad(v)).dx());
+    forms::FormKernel kernel(std::move(ir));
+
+    const auto assemble = [&](bool flipped) {
+        dofs::DofHandler dh;
+        dofs::DofDistributionOptions opts;
+        opts.topology_completion = dofs::TopologyCompletion::RequireComplete;
+        dh.distributeDofs(buildTwoTetraTopology(flipped), space, opts);
+        dh.finalize();
+
+        assembly::StandardAssembler assembler;
+        assembler.setDofHandler(dh);
+
+        const auto n = dh.getNumDofs();
+        assembly::DenseMatrixView mat(n);
+        mat.zero();
+
+        TwoTetraMeshAccess mesh(flipped);
+        (void)assembler.assembleMatrix(mesh, space, space, kernel, mat);
+        return mat;
+    };
+
+    const auto mat_ref = assemble(/*flipped=*/false);
+    const auto mat_flip = assemble(/*flipped=*/true);
+    expectDenseMatrixNear(mat_ref, mat_flip, 1e-12);
+}
+
 TEST(VectorBasisOrientationAssembly, HCurlMassMatrixInvariantToCellVertexPermutation)
 {
     spaces::HCurlSpace space(ElementType::Tetra4, /*order=*/0);
@@ -311,6 +360,40 @@ TEST(VectorBasisOrientationAssembly, HCurlMassMatrixInvariantToCellVertexPermuta
                 << "i=" << i << " j=" << j;
         }
     }
+}
+
+TEST(VectorBasisOrientationAssembly, HCurlGradientMatrixInvariantToCellVertexPermutation)
+{
+    spaces::HCurlSpace space(ElementType::Tetra4, /*order=*/0);
+
+    forms::FormCompiler compiler;
+    const auto u = forms::FormExpr::trialFunction(space, "u");
+    const auto v = forms::FormExpr::testFunction(space, "v");
+    auto ir = compiler.compileBilinear(inner(grad(u), grad(v)).dx());
+    forms::FormKernel kernel(std::move(ir));
+
+    const auto assemble = [&](bool flipped) {
+        dofs::DofHandler dh;
+        dofs::DofDistributionOptions opts;
+        opts.topology_completion = dofs::TopologyCompletion::RequireComplete;
+        dh.distributeDofs(buildTwoTetraTopology(flipped), space, opts);
+        dh.finalize();
+
+        assembly::StandardAssembler assembler;
+        assembler.setDofHandler(dh);
+
+        const auto n = dh.getNumDofs();
+        assembly::DenseMatrixView mat(n);
+        mat.zero();
+
+        TwoTetraMeshAccess mesh(flipped);
+        (void)assembler.assembleMatrix(mesh, space, space, kernel, mat);
+        return mat;
+    };
+
+    const auto mat_ref = assemble(/*flipped=*/false);
+    const auto mat_flip = assemble(/*flipped=*/true);
+    expectDenseMatrixNear(mat_ref, mat_flip, 1e-12);
 }
 
 } // namespace test

@@ -143,10 +143,49 @@ public:
     void forEachOwnedCell(std::function<void(GlobalIndex)> cb) const override { cb(0); cb(1); }
 
     void forEachBoundaryFace(int marker, std::function<void(GlobalIndex, GlobalIndex)> cb) const override {
+        if (marker < 0) {
+            cb(0, 0);
+            cb(1, 1);
+            return;
+        }
         if (marker == 1) cb(0, 0);  // face 0 on cell 0
         if (marker == 2) cb(1, 1);  // face 1 on cell 1
     }
 
+    void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)>) const override {}
+};
+
+class SparseBoundaryFaceIdMesh final : public IMeshAccess {
+public:
+    [[nodiscard]] GlobalIndex numCells() const override { return 2; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 2; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 2; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+    [[nodiscard]] bool isOwnedCell(GlobalIndex) const override { return true; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex) const override { return ElementType::Tetra4; }
+
+    void getCellNodes(GlobalIndex cell_id, std::vector<GlobalIndex>& nodes) const override {
+        if (cell_id == 0) nodes = {0, 1, 2, 3};
+        else              nodes = {4, 5, 6, 7};
+    }
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex) const override { return {0,0,0}; }
+    void getCellCoordinates(GlobalIndex, std::vector<std::array<Real, 3>>& c) const override {
+        c = {{{{0,0,0}}, {{1,0,0}}, {{0,1,0}}, {{0,0,1}}}};
+    }
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex, GlobalIndex) const override { return 0; }
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex face_id) const override {
+        if (face_id == 10) return 7;
+        if (face_id == 42) return 9;
+        return -1;
+    }
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex) const override { return {0,0}; }
+    void forEachCell(std::function<void(GlobalIndex)> cb) const override { cb(0); cb(1); }
+    void forEachOwnedCell(std::function<void(GlobalIndex)> cb) const override { cb(0); cb(1); }
+    void forEachBoundaryFace(int marker, std::function<void(GlobalIndex, GlobalIndex)> cb) const override {
+        if (marker < 0 || marker == 7) cb(10, 0);
+        if (marker < 0 || marker == 9) cb(42, 1);
+    }
     void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)>) const override {}
 };
 
@@ -232,6 +271,20 @@ TEST(TopologyAnalysisContext, BoundaryMarkers_MappedToRegions) {
     // Nonexistent marker
     auto regions_bad = ctx.regionsForBoundaryMarker(99);
     EXPECT_TRUE(regions_bad.empty());
+}
+
+TEST(TopologyAnalysisContext, BoundaryMarkerDiscoveryUsesFaceIdsNotOrdinals) {
+    SparseBoundaryFaceIdMesh mesh;
+    auto ctx = TopologyAnalysisContext::build(mesh);
+
+    ASSERT_EQ(ctx.numRegions(), 2);
+    auto regions_m7 = ctx.regionsForBoundaryMarker(7);
+    ASSERT_EQ(regions_m7.size(), 1u);
+    EXPECT_EQ(regions_m7[0], ctx.regionForCell(0));
+
+    auto regions_m9 = ctx.regionsForBoundaryMarker(9);
+    ASSERT_EQ(regions_m9.size(), 1u);
+    EXPECT_EQ(regions_m9[0], ctx.regionForCell(1));
 }
 
 TEST(TopologyAnalysisContext, EmptyMesh) {

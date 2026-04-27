@@ -43,10 +43,12 @@
  */
 
 #include "../Core/MeshTypes.h"
+#include "../Constraints/MovingConstraintMetadata.h"
 #include "IMotionBackend.h"
 #include "MotionConfig.h"
 
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace svmp {
@@ -93,6 +95,21 @@ public:
   void clear_dirichlet_bcs() { dirichlet_bcs_.clear(); }
   [[nodiscard]] const std::vector<MotionDirichletBC>& dirichlet_bcs() const noexcept { return dirichlet_bcs_; }
 
+  /// Register mesh-side moving-constraint metadata used for early motion
+  /// compatibility checks. MeshMotion does not enforce these constraints; it
+  /// validates that prescribed motion does not obviously violate them before
+  /// delegating to the injected motion backend.
+  void set_constraint_metadata(const constraints::MovingMeshConstraintRegistry& registry)
+  {
+    constraint_registry_ = registry;
+  }
+  void clear_constraint_metadata() { constraint_registry_.clear(); }
+  [[nodiscard]] const constraints::MovingMeshConstraintRegistry& constraint_metadata() const noexcept
+  {
+    return constraint_registry_;
+  }
+  [[nodiscard]] const std::string& last_error() const noexcept { return last_error_; }
+
   /// Access the underlying mesh as a MeshBase view (local mesh for
   /// distributed meshes). This always returns a valid reference.
   MeshBase& mesh();
@@ -136,6 +153,8 @@ private:
   MotionConfig cfg_;
   std::shared_ptr<IMotionBackend> backend_;
   std::vector<MotionDirichletBC> dirichlet_bcs_;
+  constraints::MovingMeshConstraintRegistry constraint_registry_{};
+  std::string last_error_{};
 };
 
 } // namespace motion

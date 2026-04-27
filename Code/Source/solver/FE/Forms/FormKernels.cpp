@@ -505,6 +505,12 @@ void gatherParameterSymbols(const FormExprNode& node, std::vector<std::string_vi
     }
 
     auto layout = std::make_shared<ConstitutiveStateLayout>();
+    struct PendingStateHook {
+        std::size_t offset_bytes{0};
+        std::size_t size_bytes{0};
+        state::StateFrameTransformHook hook{};
+    };
+    std::vector<PendingStateHook> pending_state_hooks;
 
     std::size_t cursor = 0;
     std::size_t max_align = alignof(std::max_align_t);
@@ -528,12 +534,40 @@ void gatherParameterSymbols(const FormExprNode& node, std::vector<std::string_vi
                     "Forms: ConstitutiveModel stateSpec alignment must be power-of-two");
 
         cursor = alignUp(cursor, ss.alignment);
+        const auto model_offset = cursor;
         layout->blocks.push_back(ConstitutiveStateLayout::Block{
             model,
-            cursor,
+            model_offset,
             ss.bytes_per_qpt,
             ss.alignment,
         });
+        auto model_state_variables = model->stateVariables();
+        if (!model_state_variables.empty()) {
+            state::validateStateVariableMetadata(model_state_variables, ss.bytes_per_qpt,
+                                                 "Forms: ConstitutiveModel state variables");
+            for (auto variable : model_state_variables) {
+                variable.offset_bytes += model_offset;
+                spec_out.variables.push_back(std::move(variable));
+            }
+        } else if (state_layout != nullptr && !state_layout->empty()) {
+            for (const auto& field : state_layout->fields()) {
+                state::StateVariableMetadata variable;
+                variable.name = field.name;
+                variable.offset_bytes = model_offset + field.offset_bytes;
+                variable.size_bytes = field.size_bytes;
+                variable.frame = field.frame;
+                variable.transform_policy = field.transform_policy;
+                variable.user_frame = field.user_frame;
+                spec_out.variables.push_back(std::move(variable));
+            }
+        }
+        auto frame_transform_hook = model->stateFrameTransformHook();
+        if (frame_transform_hook) {
+            pending_state_hooks.push_back(PendingStateHook{
+                model_offset,
+                ss.bytes_per_qpt,
+                std::move(frame_transform_hook)});
+        }
         cursor += ss.bytes_per_qpt;
         max_align = std::max(max_align, ss.alignment);
     }
@@ -547,6 +581,23 @@ void gatherParameterSymbols(const FormExprNode& node, std::vector<std::string_vi
 
     spec_out.bytes_per_qpt = layout->bytes_per_qpt;
     spec_out.alignment = layout->alignment;
+    if (!pending_state_hooks.empty()) {
+        spec_out.frame_transform_hook =
+            [hooks = std::move(pending_state_hooks)](const state::StateVariableTransformContext& ctx) {
+                for (const auto& h : hooks) {
+                    if (ctx.variable.offset_bytes >= h.offset_bytes &&
+                        ctx.variable.offset_bytes < h.offset_bytes + h.size_bytes) {
+                        auto local_ctx = ctx;
+                        local_ctx.variable.offset_bytes -= h.offset_bytes;
+                        h.hook(local_ctx);
+                        return;
+                    }
+                }
+                FE_THROW(FEException,
+                         "Forms: no constitutive state transform hook covered state variable '" +
+                             ctx.variable.name + "'");
+            };
+    }
     return layout;
 }
 
@@ -1834,9 +1885,90 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
 	            }
 	            return out;
 	        }
-	        case FormExprType::Coordinate: {
-	            out.value.kind = EvalValue<Scalar>::Kind::Vector;
-	            out.value.vector_size = dim;
+        case FormExprType::MeshDisplacement:
+        case FormExprType::MeshVelocity:
+        case FormExprType::MeshAcceleration:
+        case FormExprType::PreviousMeshVelocity:
+        case FormExprType::PredictedMeshVelocity: {
+            assembly::AssemblyContext::Vector3D value{};
+            const char* label = nullptr;
+            switch (node.type()) {
+                case FormExprType::MeshDisplacement:
+                    value = ctx.meshDisplacement(q);
+                    label = "meshDisplacement";
+                    break;
+                case FormExprType::MeshVelocity:
+                    value = ctx.meshVelocity(q);
+                    label = "meshVelocity";
+                    break;
+                case FormExprType::MeshAcceleration:
+                    value = ctx.meshAcceleration(q);
+                    label = "meshAcceleration";
+                    break;
+                case FormExprType::PreviousMeshVelocity:
+                    value = ctx.previousMeshVelocity(q);
+                    label = "previousMeshVelocity";
+                    break;
+                case FormExprType::PredictedMeshVelocity:
+                    value = ctx.predictedMeshVelocity(q);
+                    label = "predictedMeshVelocity";
+                    break;
+                default:
+                    break;
+            }
+
+            out.value.kind = EvalValue<Scalar>::Kind::Vector;
+            out.value.vector_size = dim;
+            for (int d = 0; d < 3; ++d) {
+                out.value.v[static_cast<std::size_t>(d)] =
+                    makeScalarConstant<Scalar>(value[static_cast<std::size_t>(d)], env);
+            }
+
+            if (out.has_grad) {
+                assembly::AssemblyContext::Matrix3x3 jac{};
+                switch (node.type()) {
+                    case FormExprType::MeshDisplacement:
+                        jac = ctx.meshDisplacementJacobian(q);
+                        break;
+                    case FormExprType::MeshVelocity:
+                        jac = ctx.meshVelocityJacobian(q);
+                        break;
+                    case FormExprType::MeshAcceleration:
+                        jac = ctx.meshAccelerationJacobian(q);
+                        break;
+                    case FormExprType::PreviousMeshVelocity:
+                        jac = ctx.previousMeshVelocityJacobian(q);
+                        break;
+                    case FormExprType::PredictedMeshVelocity:
+                        jac = ctx.predictedMeshVelocityJacobian(q);
+                        break;
+                    default:
+                        break;
+                }
+                out.grad.kind = EvalValue<Scalar>::Kind::Matrix;
+                out.grad.matrix_rows = dim;
+                out.grad.matrix_cols = dim;
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        const Real entry = (r < dim && c < dim)
+                            ? jac[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)]
+                            : 0.0;
+                        out.grad.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                            makeScalarConstant<Scalar>(entry, env);
+                    }
+                }
+            }
+
+            if (out.has_hess) {
+                throw FEException(std::string("Forms: spatial Hessian of ") + label +
+                                      " is not available from mesh-motion field data",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            return out;
+        }
+        case FormExprType::Coordinate: {
+            out.value.kind = EvalValue<Scalar>::Kind::Vector;
+            out.value.vector_size = dim;
 	            const auto x = ctx.physicalPoint(q);
             for (int d = 0; d < 3; ++d) {
                 out.value.v[static_cast<std::size_t>(d)] = makeScalarConstant<Scalar>(x[static_cast<std::size_t>(d)], env);
@@ -12388,6 +12520,8 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
     return dispatch[type_index](node, env, side, q);
 }
 
+[[nodiscard]] bool bilinearMatrixStateIndependent(const FormIR& ir);
+
 } // namespace
 
 void applyInlinedMaterialStateUpdatesReal(const assembly::AssemblyContext& ctx_minus,
@@ -12480,6 +12614,10 @@ FormKernel::FormKernel(FormIR ir)
     parameter_specs_ = computeParameterSpecs(std::span<const FormIR* const>{irs});
 
     constitutive_state_ = buildConstitutiveStateLayout(ir_, material_state_spec_);
+    matrix_state_independent_ =
+        ir_.kind() == FormKind::Bilinear &&
+        material_state_spec_.bytes_per_qpt == 0u &&
+        bilinearMatrixStateIndependent(ir_);
 
     // Interpreter tensor-calculus evaluation is opt-in (rollout safety).
     tensor_interpreter_options_.mode = TensorLoweringMode::Off;
@@ -12520,6 +12658,11 @@ void FormKernel::resolveInlinableConstitutives()
                                  constitutive_state_.get(),
                                  material_state_spec_,
                                  inlined_state_updates_);
+    matrix_state_independent_ =
+        ir_.kind() == FormKind::Bilinear &&
+        material_state_spec_.bytes_per_qpt == 0u &&
+        inlined_state_updates_.empty() &&
+        bilinearMatrixStateIndependent(ir_);
 }
 
 void FormKernel::resolveParameterSlots(
@@ -12551,6 +12694,12 @@ void FormKernel::resolveParameterSlots(
     }
     rewrite_updates(inlined_state_updates_.interior_face);
     rewrite_updates(inlined_state_updates_.interface_face);
+
+    matrix_state_independent_ =
+        ir_.kind() == FormKind::Bilinear &&
+        material_state_spec_.bytes_per_qpt == 0u &&
+        inlined_state_updates_.empty() &&
+        bilinearMatrixStateIndependent(ir_);
 }
 
 void FormKernel::setTensorInterpreterOptions(TensorJITOptions options)
@@ -13236,6 +13385,324 @@ void FormKernel::computeInterfaceFace(
 
 namespace {
 
+[[nodiscard]] std::optional<Real> constantScalarValue(const FormExprNode& node)
+{
+    if (node.type() == FormExprType::TypedZero) {
+        return Real(0);
+    }
+    if (node.type() == FormExprType::Constant) {
+        return node.constantValue();
+    }
+
+    const auto kids = node.childrenShared();
+    switch (node.type()) {
+        case FormExprType::Negate:
+            if (kids.size() == 1u && kids[0]) {
+                if (const auto v = constantScalarValue(*kids[0])) {
+                    return -*v;
+                }
+            }
+            return std::nullopt;
+        case FormExprType::Add:
+        case FormExprType::Subtract:
+        case FormExprType::Multiply:
+        case FormExprType::Divide:
+        case FormExprType::Power: {
+            if (kids.size() != 2u || !kids[0] || !kids[1]) {
+                return std::nullopt;
+            }
+            const auto a = constantScalarValue(*kids[0]);
+            const auto b = constantScalarValue(*kids[1]);
+            if (!a || !b) {
+                return std::nullopt;
+            }
+            switch (node.type()) {
+                case FormExprType::Add: return *a + *b;
+                case FormExprType::Subtract: return *a - *b;
+                case FormExprType::Multiply: return *a * *b;
+                case FormExprType::Divide:
+                    if (*b == Real(0)) {
+                        return std::nullopt;
+                    }
+                    return *a / *b;
+                case FormExprType::Power: return std::pow(*a, *b);
+                default: break;
+            }
+            return std::nullopt;
+        }
+        default:
+            return std::nullopt;
+    }
+}
+
+[[nodiscard]] bool isScalarFunctionTerminal(const FormExprNode& node, FormExprType type)
+{
+    if (node.type() != type) {
+        return false;
+    }
+    const auto* sig = node.spaceSignature();
+    return sig != nullptr &&
+           sig->field_type == FieldType::Scalar &&
+           sig->value_dimension == 1;
+}
+
+[[nodiscard]] bool isGradientOfScalarTerminal(const FormExprNode& node, FormExprType type)
+{
+    if (node.type() != FormExprType::Gradient) {
+        return false;
+    }
+    const auto kids = node.childrenShared();
+    return kids.size() == 1u && kids[0] && isScalarFunctionTerminal(*kids[0], type);
+}
+
+[[nodiscard]] bool isScalarDiffusionInnerProduct(const FormExprNode& node)
+{
+    if (node.type() != FormExprType::InnerProduct) {
+        return false;
+    }
+    const auto kids = node.childrenShared();
+    if (kids.size() != 2u || !kids[0] || !kids[1]) {
+        return false;
+    }
+    const bool trial_test =
+        isGradientOfScalarTerminal(*kids[0], FormExprType::TrialFunction) &&
+        isGradientOfScalarTerminal(*kids[1], FormExprType::TestFunction);
+    const bool test_trial =
+        isGradientOfScalarTerminal(*kids[0], FormExprType::TestFunction) &&
+        isGradientOfScalarTerminal(*kids[1], FormExprType::TrialFunction);
+    return trial_test || test_trial;
+}
+
+[[nodiscard]] std::optional<Real> scalarDiffusionCoefficient(const FormExprNode& node)
+{
+    if (isScalarDiffusionInnerProduct(node)) {
+        return Real(1);
+    }
+    if (const auto c = constantScalarValue(node)) {
+        return (*c == Real(0)) ? std::optional<Real>(Real(0)) : std::nullopt;
+    }
+
+    const auto kids = node.childrenShared();
+    switch (node.type()) {
+        case FormExprType::Negate:
+            if (kids.size() == 1u && kids[0]) {
+                if (const auto c = scalarDiffusionCoefficient(*kids[0])) {
+                    return -*c;
+                }
+            }
+            return std::nullopt;
+        case FormExprType::Add:
+        case FormExprType::Subtract:
+            if (kids.size() == 2u && kids[0] && kids[1]) {
+                const auto a = scalarDiffusionCoefficient(*kids[0]);
+                const auto b = scalarDiffusionCoefficient(*kids[1]);
+                if (a && b) {
+                    return node.type() == FormExprType::Add ? (*a + *b) : (*a - *b);
+                }
+            }
+            return std::nullopt;
+        case FormExprType::Multiply:
+            if (kids.size() == 2u && kids[0] && kids[1]) {
+                if (const auto a = constantScalarValue(*kids[0])) {
+                    if (const auto b = scalarDiffusionCoefficient(*kids[1])) {
+                        return *a * *b;
+                    }
+                }
+                if (const auto b = constantScalarValue(*kids[1])) {
+                    if (const auto a = scalarDiffusionCoefficient(*kids[0])) {
+                        return *a * *b;
+                    }
+                }
+            }
+            return std::nullopt;
+        case FormExprType::Divide:
+            if (kids.size() == 2u && kids[0] && kids[1]) {
+                const auto numerator = scalarDiffusionCoefficient(*kids[0]);
+                const auto denominator = constantScalarValue(*kids[1]);
+                if (numerator && denominator && *denominator != Real(0)) {
+                    return *numerator / *denominator;
+                }
+            }
+            return std::nullopt;
+        default:
+            return std::nullopt;
+    }
+}
+
+[[nodiscard]] std::optional<Real> detectScalarDiffusionCellCoefficient(const FormIR& ir)
+{
+    if (ir.kind() != FormKind::Bilinear) {
+        return std::nullopt;
+    }
+
+    bool saw_cell_term = false;
+    Real coefficient = Real(0);
+    for (const auto& term : ir.terms()) {
+        if (term.domain != IntegralDomain::Cell) {
+            continue;
+        }
+        if (term.time_derivative_order != 0) {
+            return std::nullopt;
+        }
+        if (!term.integrand.isValid() || term.integrand.node() == nullptr) {
+            return std::nullopt;
+        }
+        const auto c = scalarDiffusionCoefficient(*term.integrand.node());
+        if (!c) {
+            return std::nullopt;
+        }
+        coefficient += *c;
+        saw_cell_term = true;
+    }
+    if (!saw_cell_term) {
+        return std::nullopt;
+    }
+    return coefficient;
+}
+
+[[nodiscard]] bool hasStateDependentRequiredData(assembly::RequiredData req) noexcept
+{
+    using assembly::RequiredData;
+    return assembly::hasFlag(req, RequiredData::SolutionCoefficients) ||
+           assembly::hasFlag(req, RequiredData::SolutionValues) ||
+           assembly::hasFlag(req, RequiredData::SolutionGradients) ||
+           assembly::hasFlag(req, RequiredData::SolutionHessians) ||
+           assembly::hasFlag(req, RequiredData::SolutionLaplacians) ||
+           assembly::hasFlag(req, RequiredData::MaterialState) ||
+           assembly::hasFlag(req, RequiredData::MeshDisplacement) ||
+           assembly::hasFlag(req, RequiredData::MeshVelocity) ||
+           assembly::hasFlag(req, RequiredData::MeshAcceleration) ||
+           assembly::hasFlag(req, RequiredData::MeshDisplacementGradient) ||
+           assembly::hasFlag(req, RequiredData::MeshVelocityGradient) ||
+           assembly::hasFlag(req, RequiredData::MeshAccelerationGradient) ||
+           assembly::hasFlag(req, RequiredData::PreviousPhysicalPoints) ||
+           assembly::hasFlag(req, RequiredData::PreviousMeshVelocity) ||
+           assembly::hasFlag(req, RequiredData::PreviousMeshVelocityGradient) ||
+           assembly::hasFlag(req, RequiredData::PredictedMeshVelocity) ||
+           assembly::hasFlag(req, RequiredData::PredictedMeshVelocityGradient);
+}
+
+[[nodiscard]] bool matrixIntegrandStateIndependent(const FormExprNode& node)
+{
+    switch (node.type()) {
+        case FormExprType::TypedZero:
+        case FormExprType::Constant:
+        case FormExprType::TestFunction:
+        case FormExprType::TrialFunction:
+        case FormExprType::Identity:
+            return true;
+        case FormExprType::Gradient:
+        case FormExprType::Divergence:
+        case FormExprType::Curl:
+        case FormExprType::Hessian:
+        case FormExprType::Negate:
+        case FormExprType::Add:
+        case FormExprType::Subtract:
+        case FormExprType::Multiply:
+        case FormExprType::Divide:
+        case FormExprType::InnerProduct:
+        case FormExprType::DoubleContraction:
+        case FormExprType::OuterProduct:
+        case FormExprType::CrossProduct:
+        case FormExprType::Power:
+        case FormExprType::Transpose:
+        case FormExprType::Trace:
+        case FormExprType::Determinant:
+        case FormExprType::Inverse:
+        case FormExprType::Cofactor:
+        case FormExprType::Deviator:
+        case FormExprType::SymmetricPart:
+        case FormExprType::SkewPart:
+        case FormExprType::Norm:
+        case FormExprType::Normalize:
+        case FormExprType::AbsoluteValue:
+        case FormExprType::Sign:
+        case FormExprType::Sqrt:
+        case FormExprType::Exp:
+        case FormExprType::Log:
+        case FormExprType::AsVector:
+        case FormExprType::AsTensor:
+        case FormExprType::Component:
+        case FormExprType::IndexedAccess:
+            break;
+        default:
+            return false;
+    }
+
+    for (const auto& child : node.childrenShared()) {
+        if (!child || !matrixIntegrandStateIndependent(*child)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool bilinearMatrixStateIndependent(const FormIR& ir)
+{
+    if (ir.kind() != FormKind::Bilinear ||
+        ir.maxTimeDerivativeOrder() != 0 ||
+        ir.geometrySensitivityActive() ||
+        !ir.fieldRequirements().empty() ||
+        hasStateDependentRequiredData(ir.requiredData())) {
+        return false;
+    }
+
+    bool saw_term = false;
+    for (const auto& term : ir.terms()) {
+        if (term.time_derivative_order != 0 ||
+            !term.integrand.isValid() ||
+            term.integrand.node() == nullptr ||
+            !matrixIntegrandStateIndependent(*term.integrand.node())) {
+            return false;
+        }
+        saw_term = true;
+    }
+    return saw_term;
+}
+
+void assembleScalarDiffusionCellMatrix(const assembly::AssemblyContext& ctx,
+                                       Real coefficient,
+                                       assembly::KernelOutput& output)
+{
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
+    const auto n_qpts = ctx.numQuadraturePoints();
+    for (LocalIndex q = 0; q < n_qpts; ++q) {
+        const Real w = coefficient * ctx.integrationWeight(q);
+        for (LocalIndex i = 0; i < n_test; ++i) {
+            const auto gi = ctx.physicalGradient(i, q);
+            for (LocalIndex j = 0; j < n_trial; ++j) {
+                const auto gj = ctx.trialPhysicalGradient(j, q);
+                const Real dot = gi[0] * gj[0] + gi[1] * gj[1] + gi[2] * gj[2];
+                output.matrixEntry(i, j) += w * dot;
+            }
+        }
+    }
+}
+
+void assembleScalarDiffusionCellVector(const assembly::AssemblyContext& ctx,
+                                       Real coefficient,
+                                       std::span<const Real> coeffs,
+                                       assembly::KernelOutput& output)
+{
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
+    const auto n_qpts = ctx.numQuadraturePoints();
+    for (LocalIndex q = 0; q < n_qpts; ++q) {
+        const Real w = coefficient * ctx.integrationWeight(q);
+        for (LocalIndex i = 0; i < n_test; ++i) {
+            const auto gi = ctx.physicalGradient(i, q);
+            Real sum = Real(0);
+            for (LocalIndex j = 0; j < n_trial; ++j) {
+                const auto gj = ctx.trialPhysicalGradient(j, q);
+                const Real dot = gi[0] * gj[0] + gi[1] * gj[1] + gi[2] * gj[2];
+                sum += dot * coeffs[static_cast<std::size_t>(j)];
+            }
+            output.vectorEntry(i) += w * sum;
+        }
+    }
+}
+
 [[nodiscard]] std::vector<assembly::FieldRequirement> mergeFieldRequirements(
     const std::vector<assembly::FieldRequirement>& a,
     const std::vector<assembly::FieldRequirement>& b)
@@ -13303,6 +13770,10 @@ LinearFormKernel::LinearFormKernel(FormIR bilinear_ir,
     // NOTE: Constitutive calls are currently not expected in affine residuals (the affine splitter
     // rejects Constitutive nodes). We still build state layout from the bilinear part for safety.
     constitutive_state_ = buildConstitutiveStateLayout(bilinear_ir_, material_state_spec_);
+    matrix_state_independent_ =
+        material_state_spec_.bytes_per_qpt == 0u &&
+        bilinearMatrixStateIndependent(bilinear_ir_);
+    scalar_diffusion_cell_coefficient_ = detectScalarDiffusionCellCoefficient(bilinear_ir_);
 }
 
 LinearFormKernel::~LinearFormKernel() = default;
@@ -13349,6 +13820,11 @@ void LinearFormKernel::resolveInlinableConstitutives()
                                  constitutive_state_.get(),
                                  material_state_spec_,
                                  inlined_state_updates_);
+    matrix_state_independent_ =
+        material_state_spec_.bytes_per_qpt == 0u &&
+        inlined_state_updates_.empty() &&
+        bilinearMatrixStateIndependent(bilinear_ir_);
+    scalar_diffusion_cell_coefficient_ = detectScalarDiffusionCellCoefficient(bilinear_ir_);
 }
 
 void LinearFormKernel::resolveParameterSlots(
@@ -13386,6 +13862,12 @@ void LinearFormKernel::resolveParameterSlots(
     if (linear_ir_.has_value()) {
         rewrite(*linear_ir_, "Forms::LinearFormKernel(linear)");
     }
+
+    matrix_state_independent_ =
+        material_state_spec_.bytes_per_qpt == 0u &&
+        inlined_state_updates_.empty() &&
+        bilinearMatrixStateIndependent(bilinear_ir_);
+    scalar_diffusion_cell_coefficient_ = detectScalarDiffusionCellCoefficient(bilinear_ir_);
 }
 
 int LinearFormKernel::maxTemporalDerivativeOrder() const noexcept
@@ -13457,27 +13939,34 @@ void LinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, assembl
 
     // 1) Assemble Jacobian (bilinear part) if requested.
     if (want_matrix) {
-        EvalEnvReal env{ctx, nullptr, FormKind::Bilinear, Side::Minus, Side::Minus, 0, 0,
-                        constitutive_state_.get(), &constitutive_cache};
+        if (scalar_diffusion_cell_coefficient_.has_value()) {
+            assembleScalarDiffusionCellMatrix(
+                ctx,
+                (*scalar_diffusion_cell_coefficient_) * termWeightFor(time_ctx, 0),
+                output);
+        } else {
+            EvalEnvReal env{ctx, nullptr, FormKind::Bilinear, Side::Minus, Side::Minus, 0, 0,
+                            constitutive_state_.get(), &constitutive_cache};
 
-        for (const auto& term : bilinear_ir_.terms()) {
-            if (term.domain != IntegralDomain::Cell) continue;
+            for (const auto& term : bilinear_ir_.terms()) {
+                if (term.domain != IntegralDomain::Cell) continue;
 
-            const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
-            if (term_weight == 0.0) continue;
+                const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
+                if (term_weight == 0.0) continue;
 
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                const Real w = ctx.integrationWeight(q);
-                for (LocalIndex i = 0; i < n_test; ++i) {
-                    env.i = i;
-                    for (LocalIndex j = 0; j < n_trial; ++j) {
-                        env.j = j;
-                        const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
-                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
-                            throw FEException("Forms: cell bilinear integrand did not evaluate to scalar",
-                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    const Real w = ctx.integrationWeight(q);
+                    for (LocalIndex i = 0; i < n_test; ++i) {
+                        env.i = i;
+                        for (LocalIndex j = 0; j < n_trial; ++j) {
+                            env.j = j;
+                            const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
+                            if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                                throw FEException("Forms: cell bilinear integrand did not evaluate to scalar",
+                                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                            }
+                            output.matrixEntry(i, j) += (term_weight * w) * val.s;
                         }
-                        output.matrixEntry(i, j) += (term_weight * w) * val.s;
                     }
                 }
             }
@@ -13525,6 +14014,12 @@ void LinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, assembl
                 }
                 output.vectorEntry(i) += sum;
             }
+        } else if (scalar_diffusion_cell_coefficient_.has_value()) {
+            assembleScalarDiffusionCellVector(
+                ctx,
+                (*scalar_diffusion_cell_coefficient_) * termWeightFor(time_ctx, 0),
+                coeffs,
+                output);
         } else {
             EvalEnvReal env{ctx, nullptr, FormKind::Bilinear, Side::Minus, Side::Minus, 0, 0,
                             constitutive_state_.get(), &constitutive_cache};
@@ -13561,6 +14056,16 @@ void LinearFormKernel::computeCellBatch(std::span<const assembly::AssemblyContex
                                         std::span<assembly::KernelOutput> outputs)
 {
     ensureInterpreterLoweredIndexedAccess();
+
+    if (scalar_diffusion_cell_coefficient_.has_value()) {
+        const std::size_t n = std::min(contexts.size(), outputs.size());
+        for (std::size_t idx = 0u; idx < n; ++idx) {
+            if (contexts[idx] != nullptr) {
+                computeCell(*contexts[idx], outputs[idx]);
+            }
+        }
+        return;
+    }
 
     constexpr std::size_t lane_width = 8u;
     runHomogeneousCellBatches<lane_width>(

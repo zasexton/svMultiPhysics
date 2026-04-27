@@ -69,7 +69,15 @@ assembly::MaterialStateSpec MixedBlockKernelSet::materialStateSpec() const noexc
             continue;
         }
         const auto spec = b.fallback_kernel->materialStateSpec();
-        merged.bytes_per_qpt = std::max(merged.bytes_per_qpt, spec.bytes_per_qpt);
+        if (spec.bytes_per_qpt > merged.bytes_per_qpt) {
+            merged.bytes_per_qpt = spec.bytes_per_qpt;
+            merged.variables = spec.variables;
+            merged.frame_transform_hook = spec.frame_transform_hook;
+        } else if (spec.bytes_per_qpt == merged.bytes_per_qpt &&
+                   merged.variables.empty() && !spec.variables.empty()) {
+            merged.variables = spec.variables;
+            merged.frame_transform_hook = spec.frame_transform_hook;
+        }
         merged.alignment = std::max(merged.alignment, spec.alignment);
     }
     return merged;

@@ -51,6 +51,13 @@ static void setupTwoDofTwoQptScalarContext(AssemblyContext& ctx)
 
 } // namespace
 
+TEST(JITKernelArgsPacking, CellBatchArgsCarriesBatchAbi)
+{
+    jit::CellKernelBatchArgsV1 args;
+    EXPECT_EQ(args.abi_version, jit::kCellKernelBatchArgsABIV1);
+    EXPECT_NE(args.abi_version, jit::kKernelArgsABIVersionV6);
+}
+
 TEST(JITKernelArgsPacking, PacksCellKernelArgsPointersAndCounts)
 {
     AssemblyContext ctx;

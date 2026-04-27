@@ -147,6 +147,22 @@ PenaltyPointContactKernel::PenaltyPointContactKernel(PenaltyContactConfig cfg)
                 "PenaltyPointContactKernel: penalty must be > 0");
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+svmp::search::ContactCandidateOptions
+makeContactCandidateOptions(const PenaltyContactConfig& cfg)
+{
+    svmp::search::ContactCandidateOptions options;
+    options.search_radius = cfg.search_radius;
+    options.activation_distance = cfg.activation_distance;
+    options.only_nearest_per_source = cfg.only_nearest;
+    options.include_inactive_candidates = true;
+    options.remove_duplicate_pairs = true;
+    options.allow_self_pairs = false;
+    options.generation_policy = "penalty-point-contact";
+    return options;
+}
+#endif
+
 void PenaltyPointContactKernel::addSparsityCouplings(const FESystem& system,
                                                      sparsity::SparsityPattern& pattern) const
 {

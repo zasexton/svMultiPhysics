@@ -4,6 +4,7 @@
 #include <cstring>
 #include <functional>
 #include <numeric>
+#include <span>
 
 namespace svmp {
 namespace FE {
@@ -59,6 +60,21 @@ void hashRange(std::size_t& seed, const std::vector<T>& values)
         hashRange(h, region.interface_face_ids);
     }
     return static_cast<std::uint64_t>(h);
+}
+
+void validateAuxiliaryStateMetadata(const AuxiliaryStateSpec& spec,
+                                    std::string_view caller)
+{
+    if (spec.state_variables.empty()) {
+        return;
+    }
+    FE_THROW_IF(spec.size <= 0, InvalidArgumentException,
+                std::string(caller) +
+                    ": state variable metadata requires positive component count");
+    state::validateStateVariableMetadata(
+        spec.state_variables,
+        static_cast<std::size_t>(spec.size) * sizeof(Real),
+        caller);
 }
 
 [[nodiscard]] AuxiliaryEntityRemapMetadata makeDefaultEntityMetadata(
@@ -169,6 +185,7 @@ std::size_t AuxiliaryStateManager::registerBlock(
                 "AuxiliaryStateManager::registerBlock: owned_entity_count " +
                     std::to_string(owned_entity_count) +
                     " exceeds entity_count " + std::to_string(entity_count));
+    validateAuxiliaryStateMetadata(spec, "AuxiliaryStateManager::registerBlock");
 
     // Create indexing descriptor for the scope.
     AuxiliaryBlockIndexing indexing;
@@ -250,6 +267,7 @@ std::size_t AuxiliaryStateManager::registerBlockWithQPOffsets(
                 "AuxiliaryStateManager::registerBlockWithQPOffsets: scope must be QuadraturePoint");
     FE_THROW_IF(qp_offsets.empty(), InvalidArgumentException,
                 "AuxiliaryStateManager::registerBlockWithQPOffsets: qp_offsets must have at least one entry");
+    validateAuxiliaryStateMetadata(spec, "AuxiliaryStateManager::registerBlockWithQPOffsets");
 
     const auto indexing =
         AuxiliaryBlockIndexing::createQuadraturePoint(qp_offsets, spec.size);
@@ -278,6 +296,7 @@ std::size_t AuxiliaryStateManager::registerBlockRagged(
 {
     FE_THROW_IF(offsets.empty(), InvalidArgumentException,
                 "AuxiliaryStateManager::registerBlockRagged: offsets must not be empty");
+    validateAuxiliaryStateMetadata(spec, "AuxiliaryStateManager::registerBlockRagged");
     return registerBlockRagged(spec, offsets, offsets.size() - 1u, initial_values);
 }
 
@@ -295,6 +314,7 @@ std::size_t AuxiliaryStateManager::registerBlockRagged(
                 "AuxiliaryStateManager::registerBlockRagged: spec layout_mode must be Ragged");
     FE_THROW_IF(offsets.empty(), InvalidArgumentException,
                 "AuxiliaryStateManager::registerBlockRagged: offsets must not be empty");
+    validateAuxiliaryStateMetadata(spec, "AuxiliaryStateManager::registerBlockRagged");
 
     const auto n_entities = offsets.size() - 1u;
     FE_THROW_IF(owned_entity_count > n_entities, InvalidArgumentException,
@@ -358,6 +378,7 @@ std::size_t AuxiliaryStateManager::registerBlockRaggedWithQPOffsets(
                     spec.name + "'");
     FE_THROW_IF(spec.scope != AuxiliaryStateScope::QuadraturePoint, InvalidArgumentException,
                 "AuxiliaryStateManager::registerBlockRaggedWithQPOffsets: scope must be QuadraturePoint");
+    validateAuxiliaryStateMetadata(spec, "AuxiliaryStateManager::registerBlockRaggedWithQPOffsets");
     FE_THROW_IF(spec.layout_mode != AuxiliaryLayoutMode::Ragged, InvalidArgumentException,
                 "AuxiliaryStateManager::registerBlockRaggedWithQPOffsets: spec layout_mode must be Ragged");
 
@@ -500,6 +521,7 @@ void AuxiliaryStateManager::resetAllToCommitted()
             blk.resetToCommitted();
         }
     }
+    lifecycle_ = state::StateVariableLifecycle::RolledBack;
 }
 
 void AuxiliaryStateManager::commitAll(Real time)
@@ -515,6 +537,7 @@ void AuxiliaryStateManager::commitAll(Real time)
             blk.commitTimeStep(time);
         }
     }
+    lifecycle_ = state::StateVariableLifecycle::Accepted;
 }
 
 void AuxiliaryStateManager::rollbackAll()
@@ -530,6 +553,75 @@ void AuxiliaryStateManager::rollbackAll()
             blk.rollback();
         }
     }
+    lifecycle_ = state::StateVariableLifecycle::RolledBack;
+}
+
+std::span<const state::StateVariableMetadata>
+AuxiliaryStateManager::stateVariables(std::string_view block_name) const
+{
+    const auto idx = metaIndex(block_name);
+    const auto& vars = block_meta_[idx].spec.state_variables;
+    return {vars.data(), vars.size()};
+}
+
+state::StateFrameTransformResult AuxiliaryStateManager::applyStateFrameTransform(
+    const state::StateFrameTransformRequest& request)
+{
+    state::StateFrameTransformResult result;
+
+    for (auto& meta : block_meta_) {
+        if (meta.spec.state_variables.empty()) {
+            continue;
+        }
+
+        auto& block = state_.getBlock(meta.spec.name);
+        for (const auto& variable : meta.spec.state_variables) {
+            ++result.variables_seen;
+            const bool requires_action =
+                state::stateVariableRequiresFrameAction(variable, request.event);
+            if (!requires_action) {
+                ++result.variable_instances_preserved;
+                continue;
+            }
+            ++result.variables_requiring_action;
+            FE_THROW_IF(!meta.spec.frame_transform_hook, InvalidStateException,
+                        "AuxiliaryStateManager: state variable '" + variable.name +
+                            "' in block '" + meta.spec.name +
+                            "' declares a frame transform policy but no transform hook");
+
+            for (std::size_t entity = 0; entity < block.entityCount(); ++entity) {
+                auto committed_entity = block.committedEntity(entity);
+                auto work_entity = block.workEntity(entity);
+                const auto committed_bytes = std::as_bytes(committed_entity);
+                auto work_bytes = std::as_writable_bytes(work_entity);
+                FE_THROW_IF(variable.offset_bytes > committed_bytes.size() ||
+                                variable.size_bytes > committed_bytes.size() - variable.offset_bytes ||
+                                variable.offset_bytes > work_bytes.size() ||
+                                variable.size_bytes > work_bytes.size() - variable.offset_bytes,
+                            InvalidStateException,
+                            "AuxiliaryStateManager: state variable '" + variable.name +
+                                "' exceeds an entity view in block '" + meta.spec.name + "'");
+
+                state::StateVariableTransformContext ctx;
+                ctx.request = request;
+                ctx.storage_domain = state::StateStorageDomain::AuxiliaryBlock;
+                ctx.storage_name = meta.spec.name;
+                ctx.entity_id = (entity < meta.entity_metadata.entity_ids.size())
+                    ? static_cast<GlobalIndex>(meta.entity_metadata.entity_ids[entity])
+                    : static_cast<GlobalIndex>(entity);
+                ctx.quadrature_point = -1;
+                ctx.variable = variable;
+                ctx.old_value = committed_bytes.subspan(variable.offset_bytes,
+                                                        variable.size_bytes);
+                ctx.work_value = work_bytes.subspan(variable.offset_bytes,
+                                                    variable.size_bytes);
+                meta.spec.frame_transform_hook(ctx);
+                ++result.variable_instances_transformed;
+            }
+        }
+    }
+
+    return result;
 }
 
 void AuxiliaryStateManager::clear()
@@ -762,6 +854,7 @@ void AuxiliaryStateManager::validate() const
         FE_THROW_IF(blk.ownedEntityCount() != meta.indexing.ownedEntityCount(), InvalidStateException,
                     "AuxiliaryStateManager::validate: owned entity count mismatch for block '" +
                         blk.name() + "'");
+        validateAuxiliaryStateMetadata(meta.spec, "AuxiliaryStateManager::validate");
 
         if (blk.layoutMode() == AuxiliaryLayoutMode::FixedStride) {
             const auto expected = blk.entityCount() *

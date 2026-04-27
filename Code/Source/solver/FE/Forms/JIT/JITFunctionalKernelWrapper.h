@@ -56,6 +56,11 @@ public:
 
     [[nodiscard]] Real evaluateCellTotal(const assembly::AssemblyContext& ctx) override;
 
+    [[nodiscard]] bool supportsCellTotalBatch() const noexcept override;
+
+    void evaluateCellTotalBatch(std::span<const assembly::AssemblyContext* const> contexts,
+                                std::span<Real> totals) override;
+
     [[nodiscard]] Real evaluateBoundaryFace(const assembly::AssemblyContext& ctx,
                                             LocalIndex q,
                                             int boundary_marker) override;

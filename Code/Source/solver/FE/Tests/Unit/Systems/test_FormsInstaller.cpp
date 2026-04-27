@@ -584,6 +584,39 @@ TEST(FormsInstaller, FormsInstaller_InstallFormulation_AffineWithRHS)
     }
 }
 
+TEST(FormsInstaller, OperatorMatrixStateIndependenceDetectedFromInstalledForms)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem affine_sys(mesh);
+    const auto affine_u =
+        affine_sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    affine_sys.addOperator("op");
+
+    const auto u = svmp::FE::forms::FormExpr::stateField(affine_u, *space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    const auto affine_residual = inner(grad(u), grad(v)).dx();
+    (void)svmp::FE::systems::installFormulation(affine_sys, "op", {affine_u}, affine_residual);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    affine_sys.setup({}, inputs);
+    EXPECT_TRUE(affine_sys.operatorMatrixStateIndependent("op"));
+
+    svmp::FE::systems::FESystem nonlinear_sys(mesh);
+    const auto nonlinear_u =
+        nonlinear_sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    nonlinear_sys.addOperator("op");
+
+    const auto u_nl = svmp::FE::forms::FormExpr::stateField(nonlinear_u, *space, "u");
+    const auto v_nl = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    const auto nonlinear_residual = (u_nl * u_nl * v_nl).dx();
+    (void)svmp::FE::systems::installFormulation(nonlinear_sys, "op", {nonlinear_u}, nonlinear_residual);
+    nonlinear_sys.setup({}, inputs);
+    EXPECT_FALSE(nonlinear_sys.operatorMatrixStateIndependent("op"));
+}
+
 TEST(FormsInstaller, FormsInstaller_InstallFormulation_MultiOpInstallsConstraintsOnce)
 {
     const int marker = 5;

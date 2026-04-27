@@ -325,10 +325,19 @@ set(MESH_LABELS_SOURCES
 set(MESH_CONSTRAINTS_SOURCES
     Constraints/HangingVertexConstraints.h
     Constraints/HangingVertexConstraints.cpp
+    Constraints/MovingConstraintMetadata.h
+    Constraints/MovingConstraintMetadata.cpp
 )
 
 # Search
 set(MESH_SEARCH_SOURCES
+    Search/CutCell.h
+    Search/CutCell.cpp
+    Search/ContactProximity.h
+    Search/ContactProximity.cpp
+    Search/CoordinateKey.h
+    Search/MultiMeshInterface.h
+    Search/MultiMeshInterface.cpp
     Search/MeshSearch.h
     Search/MeshSearch.cpp
     Search/SearchAccel.h
@@ -356,6 +365,8 @@ list(APPEND MESH_SEARCH_SOURCES
 set(MESH_VALIDATION_SOURCES
     Validation/MeshValidation.h
     Validation/MeshValidation.cpp
+    Validation/MovingGeometryValidity.h
+    Validation/MovingGeometryValidity.cpp
     Validation/SpatialHashing.h
 )
 
@@ -379,6 +390,8 @@ set(MESH_MOTION_SOURCES
     Motion/MotionState.cpp
     Motion/MotionFields.h
     Motion/MotionFields.cpp
+    Motion/MotionMap.h
+    Motion/MotionMap.cpp
     Motion/MotionQuality.h
     Motion/MotionQuality.cpp
     Motion/MeshMotion.h

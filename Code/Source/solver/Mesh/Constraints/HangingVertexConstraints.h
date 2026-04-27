@@ -35,6 +35,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -293,6 +294,20 @@ public:
    * @return true if all constraints are valid
    */
   bool validate(const MeshBase& mesh, real_t tolerance = 1e-10) const;
+
+  /**
+   * @brief Validate the geometric continuity implied by hanging constraints.
+   *
+   * This checks the selected coordinate configuration and verifies that each
+   * constrained vertex lies at the weighted interpolation point of its parent
+   * vertices. Unlike validate(), this is geometry-sensitive and is intended for
+   * moved or curved meshes after adaptivity, remeshing, or reference rebasing.
+   */
+  bool validate_geometric_continuity(
+      const MeshBase& mesh,
+      Configuration configuration = Configuration::Reference,
+      real_t tolerance = 1e-10,
+      std::string* message = nullptr) const;
 
   /**
    * @brief Get statistics about constraints

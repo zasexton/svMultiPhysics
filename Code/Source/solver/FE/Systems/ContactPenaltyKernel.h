@@ -11,6 +11,10 @@
 #include "Core/Types.h"
 #include "Systems/GlobalKernel.h"
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Mesh/Search/ContactProximity.h"
+#endif
+
 namespace svmp {
 namespace FE {
 namespace systems {
@@ -32,6 +36,11 @@ struct PenaltyContactConfig {
     // For each slave vertex, couple only to the nearest master vertex.
     bool only_nearest{true};
 };
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+[[nodiscard]] svmp::search::ContactCandidateOptions
+makeContactCandidateOptions(const PenaltyContactConfig& cfg);
+#endif
 
 /**
  * @brief Simple point-to-point penalty "contact" global kernel

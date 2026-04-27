@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -56,6 +57,15 @@ public:
 
     void beginTimeStep() override;
     void commitTimeStep() override;
+    void rollbackTimeStep() override;
+    [[nodiscard]] state::StateFrameTransformResult
+    applyStateFrameTransform(const state::StateFrameTransformRequest& request) override;
+    [[nodiscard]] state::StateVariableLifecycle materialStateLifecycle() const noexcept override
+    {
+        return work_lifecycle_;
+    }
+    [[nodiscard]] std::span<const state::StateVariableMetadata>
+    materialStateVariables(const assembly::AssemblyKernel& kernel) const noexcept override;
 
 private:
     struct AlignedBuffer {
@@ -94,6 +104,8 @@ private:
         std::size_t interior_face_stride_bytes{0};
         AlignedBuffer interior_old{};
         AlignedBuffer interior_work{};
+        std::vector<state::StateVariableMetadata> variables{};
+        state::StateFrameTransformHook frame_transform_hook{};
     };
 
     GlobalIndex num_cells_{0};
@@ -102,6 +114,7 @@ private:
     std::unordered_map<GlobalIndex, std::size_t> boundary_face_index_{};
     std::unordered_map<GlobalIndex, std::size_t> interior_face_index_{};
     std::unordered_map<const assembly::AssemblyKernel*, KernelState> states_{};
+    state::StateVariableLifecycle work_lifecycle_{state::StateVariableLifecycle::TrialWork};
 };
 
 } // namespace systems

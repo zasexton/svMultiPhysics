@@ -210,6 +210,104 @@ TEST(MovingDomainOrchestrator, DisabledDefaultPreservesReferenceStaticBehavior)
     EXPECT_EQ(mesh->local_mesh().geometry_revision(), before_revision);
 }
 
+TEST(MovingDomainOrchestrator, CoupledMonolithicModeReportsUnsupportedWithoutAdvancing)
+{
+    auto mesh = make_single_quad_mesh();
+
+    MovingDomainConfig config;
+    config.mode = MovingMeshMode::CoupledMonolithic;
+    config.fe_coordinate_configuration = Configuration::Current;
+    MovingDomainOrchestrator orchestrator(mesh, config);
+
+    const auto before_revision = mesh->local_mesh().geometry_revision();
+    const auto diagnostics = orchestrator.advance(MovingDomainAdvancePoint::BeforePhysicsSolve,
+                                                  1.0,
+                                                  0.25);
+
+    EXPECT_FALSE(diagnostics.success);
+    EXPECT_FALSE(diagnostics.advanced_geometry);
+    EXPECT_NE(diagnostics.message.find("not supported"), std::string::npos);
+    EXPECT_FALSE(mesh->local_mesh().has_current_coords());
+    EXPECT_EQ(mesh->local_mesh().active_configuration(), Configuration::Reference);
+    EXPECT_EQ(mesh->local_mesh().geometry_revision(), before_revision);
+}
+
+TEST(MovingDomainOrchestrator, CoordinateConfigurationMismatchFailsBeforeMotion)
+{
+    auto mesh = make_single_quad_mesh();
+    auto sys = make_mass_system(mesh, Configuration::Reference);
+
+    BoundaryMotionConfig boundary;
+    boundary.boundary_label = INVALID_LABEL;
+    boundary.value = {{0.1, 0.0, 0.0}};
+
+    MovingDomainConfig config;
+    config.mode = MovingMeshMode::PrescribedMotion;
+    config.fe_coordinate_configuration = Configuration::Current;
+    config.boundary_motion = {boundary};
+    MovingDomainOrchestrator orchestrator(mesh, config);
+
+    std::array<FESystem*, 1> systems{{&sys}};
+    std::span<FESystem* const> system_span(systems.data(), systems.size());
+
+    EXPECT_THROW((void)orchestrator.advance(MovingDomainAdvancePoint::BeforePhysicsSolve,
+                                            1.0,
+                                            0.25,
+                                            system_span),
+                 std::exception);
+    EXPECT_FALSE(mesh->local_mesh().has_current_coords());
+    EXPECT_EQ(mesh->local_mesh().active_configuration(), Configuration::Reference);
+}
+
+TEST(MovingDomainOrchestrator, InvalidPrescribedBoundaryRollsBackAndReportsDiagnostic)
+{
+    auto mesh = make_single_quad_mesh();
+
+    BoundaryMotionConfig boundary;
+    boundary.boundary_label = 999;
+    boundary.value = {{0.1, 0.0, 0.0}};
+
+    MovingDomainConfig config;
+    config.mode = MovingMeshMode::PrescribedMotion;
+    config.fe_coordinate_configuration = Configuration::Current;
+    config.boundary_motion = {boundary};
+    MovingDomainOrchestrator orchestrator(mesh, config);
+
+    const auto before_revision = mesh->local_mesh().geometry_revision();
+    const auto diagnostics = orchestrator.advance(MovingDomainAdvancePoint::BeforePhysicsSolve,
+                                                  1.0,
+                                                  0.25);
+
+    EXPECT_FALSE(diagnostics.success);
+    EXPECT_TRUE(diagnostics.rolled_back);
+    EXPECT_FALSE(diagnostics.advanced_geometry);
+    EXPECT_NE(diagnostics.message.find("rolled back"), std::string::npos);
+    EXPECT_FALSE(mesh->local_mesh().has_current_coords());
+    EXPECT_EQ(mesh->local_mesh().active_configuration(), Configuration::Reference);
+    EXPECT_GE(mesh->local_mesh().geometry_revision(), before_revision);
+}
+
+TEST(MovingDomainOrchestrator, ExternalBackendRequiresInjection)
+{
+    auto mesh = make_single_quad_mesh();
+
+    BoundaryMotionConfig boundary;
+    boundary.boundary_label = INVALID_LABEL;
+    boundary.value = {{0.1, 0.0, 0.0}};
+
+    MovingDomainConfig config;
+    config.mode = MovingMeshMode::PrescribedMotion;
+    config.fe_coordinate_configuration = Configuration::Current;
+    config.backend_model = MotionBackendModel::External;
+    config.boundary_motion = {boundary};
+    MovingDomainOrchestrator orchestrator(mesh, config);
+
+    EXPECT_THROW((void)orchestrator.advance(MovingDomainAdvancePoint::BeforePhysicsSolve,
+                                            1.0,
+                                            0.25),
+                 std::exception);
+}
+
 TEST(MovingDomainOrchestrator, PrescribedMotionNotifiesFESystemBeforeCurrentAssembly)
 {
     auto mesh = make_single_quad_mesh();

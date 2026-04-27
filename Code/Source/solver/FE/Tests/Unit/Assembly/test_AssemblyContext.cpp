@@ -208,6 +208,7 @@ TEST_F(AssemblyContextTest, MovingDomainDataAccessorsAreFrameExplicitAndFailLoud
     ctx_.setQuadratureData(quad_pts, weights);
 
     EXPECT_THROW((void)ctx_.meshDisplacement(0), std::logic_error);
+    EXPECT_THROW((void)ctx_.meshVelocityJacobian(0), std::logic_error);
     EXPECT_THROW((void)ctx_.referencePhysicalPoint(0), std::logic_error);
 
     const std::vector<AssemblyContext::Point3D> reference_points = {
@@ -259,6 +260,26 @@ TEST_F(AssemblyContextTest, MovingDomainDataAccessorsAreFrameExplicitAndFailLoud
     ctx_.setMeshAccelerations(accelerations);
     ctx_.setPreviousCoordinates(reference_points);
 
+    const AssemblyContext::Matrix3x3 displacement_jac = {{{0.1, 0.2, 0.0},
+                                                          {0.0, 0.3, 0.0},
+                                                          {0.0, 0.0, 0.0}}};
+    const AssemblyContext::Matrix3x3 velocity_jac = {{{1.0, 0.0, 0.0},
+                                                      {0.5, 2.0, 0.0},
+                                                      {0.0, 0.0, 0.0}}};
+    const AssemblyContext::Matrix3x3 acceleration_jac = {{{0.0, 0.0, 3.0},
+                                                          {0.0, 0.0, 0.0},
+                                                          {0.0, 0.0, 4.0}}};
+    const std::vector<AssemblyContext::Matrix3x3> displacement_jacs = {displacement_jac, displacement_jac};
+    const std::vector<AssemblyContext::Matrix3x3> velocity_jacs = {velocity_jac, velocity_jac};
+    const std::vector<AssemblyContext::Matrix3x3> acceleration_jacs = {acceleration_jac, acceleration_jac};
+    ctx_.setMeshDisplacementJacobians(displacement_jacs);
+    ctx_.setMeshVelocityJacobians(velocity_jacs);
+    ctx_.setMeshAccelerationJacobians(acceleration_jacs);
+    ctx_.setPreviousMeshVelocities(velocities);
+    ctx_.setPredictedMeshVelocities(velocities);
+    ctx_.setPreviousMeshVelocityJacobians(velocity_jacs);
+    ctx_.setPredictedMeshVelocityJacobians(velocity_jacs);
+
     EXPECT_DOUBLE_EQ(ctx_.referencePhysicalPoint(0)[0], 0.25);
     EXPECT_DOUBLE_EQ(ctx_.currentPhysicalPoint(1)[0], 1.75);
     EXPECT_DOUBLE_EQ(ctx_.currentJacobian(0)[1][1], 3.0);
@@ -271,13 +292,20 @@ TEST_F(AssemblyContextTest, MovingDomainDataAccessorsAreFrameExplicitAndFailLoud
     EXPECT_DOUBLE_EQ(ctx_.meshVelocity(1)[1], 2.0);
     EXPECT_DOUBLE_EQ(ctx_.meshAcceleration(0)[2], 3.0);
     EXPECT_DOUBLE_EQ(ctx_.previousCoordinate(1)[0], 0.75);
+    EXPECT_DOUBLE_EQ(ctx_.meshDisplacementJacobian(0)[0][1], 0.2);
+    EXPECT_DOUBLE_EQ(ctx_.meshVelocityJacobian(1)[1][0], 0.5);
+    EXPECT_DOUBLE_EQ(ctx_.meshAccelerationJacobian(0)[2][2], 4.0);
+    EXPECT_DOUBLE_EQ(ctx_.previousMeshVelocityJacobian(0)[1][1], 2.0);
+    EXPECT_DOUBLE_EQ(ctx_.predictedMeshVelocityJacobian(1)[0][0], 1.0);
 
     EXPECT_THROW((void)ctx_.currentPhysicalPoint(2), std::out_of_range);
 
     spaces::H1Space space(ElementType::Quad4, /*order=*/1);
     ctx_.configure(/*cell_id=*/0, space, space, RequiredData::None);
     EXPECT_TRUE(ctx_.meshDisplacements().empty());
+    EXPECT_TRUE(ctx_.meshVelocityJacobians().empty());
     EXPECT_THROW((void)ctx_.meshDisplacement(0), std::logic_error);
+    EXPECT_THROW((void)ctx_.meshVelocityJacobian(0), std::logic_error);
 }
 
 TEST_F(AssemblyContextTest, SetBasisData) {

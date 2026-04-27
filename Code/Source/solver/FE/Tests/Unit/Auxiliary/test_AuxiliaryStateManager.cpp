@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "Auxiliary/AuxiliaryStateManager.h"
+#include "Systems/SystemsExceptions.h"
 
 #include <cmath>
 #include <numeric>
@@ -13,6 +14,7 @@
 
 using svmp::FE::Real;
 using namespace svmp::FE::systems;
+namespace state = svmp::FE::state;
 
 // ---------------------------------------------------------------------------
 //  Helper: make a spec with given scope and size
@@ -65,6 +67,78 @@ TEST(AuxiliaryStateManager, RegisterWithInitialValues)
 
     EXPECT_DOUBLE_EQ(mgr.getBlock("X").work()[0], 3.0);
     EXPECT_DOUBLE_EQ(mgr.getBlock("X").work()[1], 7.0);
+}
+
+TEST(AuxiliaryStateManager, StateVariableMetadataAndLifecycleAreTracked)
+{
+    AuxiliaryStateManager mgr;
+
+    auto spec = makeSpec("history", 2, AuxiliaryStateScope::Cell);
+    spec.state_variables.push_back(state::StateVariableMetadata{
+        .name = "stretch",
+        .offset_bytes = 0,
+        .size_bytes = sizeof(Real),
+        .frame = state::StateVariableFrame::Reference,
+        .transform_policy = state::StateFrameTransformPolicy::PreserveValue,
+    });
+    mgr.registerBlock(spec, 2);
+
+    const auto vars = mgr.stateVariables("history");
+    ASSERT_EQ(vars.size(), 1u);
+    EXPECT_EQ(vars[0].name, "stretch");
+    EXPECT_EQ(vars[0].frame, state::StateVariableFrame::Reference);
+    EXPECT_EQ(mgr.lifecycle(), state::StateVariableLifecycle::TrialWork);
+
+    mgr.getBlock("history").work()[0] = 3.0;
+    mgr.commitAll(/*time=*/1.0);
+    EXPECT_EQ(mgr.lifecycle(), state::StateVariableLifecycle::Accepted);
+
+    mgr.getBlock("history").work()[0] = 9.0;
+    mgr.rollbackAll();
+    EXPECT_EQ(mgr.lifecycle(), state::StateVariableLifecycle::RolledBack);
+    EXPECT_DOUBLE_EQ(mgr.getBlock("history").work()[0], 3.0);
+}
+
+TEST(AuxiliaryStateManager, FrameSensitiveAuxiliaryStateRequiresHookAndCanTransform)
+{
+    AuxiliaryStateManager mgr;
+
+    int calls = 0;
+    auto spec = makeSpec("interface_state", 1, AuxiliaryStateScope::Cell);
+    spec.state_variables.push_back(state::StateVariableMetadata{
+        .name = "interface_normal",
+        .offset_bytes = 0,
+        .size_bytes = sizeof(Real),
+        .frame = state::StateVariableFrame::InterfaceLocal,
+        .transform_policy = state::StateFrameTransformPolicy::Rotate,
+    });
+    const std::vector<Real> initial_values = {1.0, 2.0};
+    mgr.registerBlock(spec, 2, initial_values);
+
+    state::StateFrameTransformRequest request;
+    request.event = state::StateFrameTransformEvent::AdaptivityTransfer;
+    EXPECT_THROW((void)mgr.applyStateFrameTransform(request),
+                 svmp::FE::systems::InvalidStateException);
+
+    AuxiliaryStateManager hooked;
+    spec.frame_transform_hook =
+        [&](const state::StateVariableTransformContext& ctx) {
+            EXPECT_EQ(ctx.request.event, state::StateFrameTransformEvent::AdaptivityTransfer);
+            EXPECT_EQ(ctx.storage_domain, state::StateStorageDomain::AuxiliaryBlock);
+            ASSERT_EQ(ctx.work_value.size(), sizeof(Real));
+            auto* value = reinterpret_cast<Real*>(ctx.work_value.data());
+            *value += 10.0;
+            ++calls;
+        };
+    hooked.registerBlock(spec, 2, initial_values);
+    const auto result = hooked.applyStateFrameTransform(request);
+
+    EXPECT_EQ(calls, 2);
+    EXPECT_EQ(result.variables_seen, 1u);
+    EXPECT_EQ(result.variables_requiring_action, 1u);
+    EXPECT_EQ(result.variable_instances_transformed, 2u);
+    EXPECT_DOUBLE_EQ(hooked.getBlock("interface_state").work()[0], 11.0);
+    EXPECT_DOUBLE_EQ(hooked.getBlock("interface_state").work()[1], 12.0);
 }
 
 TEST(AuxiliaryStateManager, DuplicateBlockThrows)

@@ -18,11 +18,14 @@
 #include "Systems/FEQuantityRegistry.h"
 #include "Systems/BoundaryReductionService.h"
 #include "Systems/FieldRegistry.h"
+#include "Systems/GeometricNonlinearity.h"
+#include "Systems/GeometryTransaction.h"
 #include "Systems/GlobalKernel.h"
 #include "Systems/GlobalKernelStateProvider.h"
 #include "Systems/OperatorRegistry.h"
 #include "Systems/ParameterRegistry.h"
 #include "Systems/SearchAccess.h"
+#include "Systems/SetupStoragePlan.h"
 #include "Constraints/SystemConstraint.h"
 #include "Systems/SystemState.h"
 #include "Systems/SystemSetup.h"
@@ -58,7 +61,9 @@
 #include <optional>
 #include <span>
 #include <array>
+#include <functional>
 #include <string>
+#include <string_view>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
@@ -67,6 +72,7 @@
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #include "Systems/FEAdaptivityTransfer.h"
+#include "Mesh/Core/MeshTypes.h"
 #include "Mesh/Motion/MotionState.h"
 namespace svmp {
 struct AdaptivityOptions;
@@ -128,6 +134,9 @@ struct SetupOptions {
 
     bool use_constraints_in_assembly{true};
     bool use_backend_row_ownership_for_assembly{false};
+    // Keep the replicated serial sparsity graph even when a distributed graph exists.
+    // Large MPI backend runs can disable this to avoid setup-time memory pressure.
+    bool retain_serial_sparsity{true};
 
     // Iterative-solver leverage (explicit opt-in): auto-register eligible matrix-free operators.
     bool auto_register_matrix_free{false};
@@ -157,13 +166,6 @@ struct AssemblyRequest {
     /// When true, EachNonlinearIteration auxiliary inputs are refreshed.
     /// Set to true on each Newton iteration within a time step.
     bool is_nonlinear_iteration{false};
-};
-
-struct FELayoutRevisionState {
-    std::uint64_t space{0};
-    std::uint64_t dof_layout{0};
-    std::uint64_t constraint_layout{0};
-    std::uint64_t block_layout{0};
 };
 
 enum class MeshMotionFieldRole : std::uint8_t {
@@ -235,6 +237,11 @@ struct FEAdaptedStateTransferResult {
 };
 #endif
 
+struct GeometryTransactionCallback {
+    std::string name;
+    std::function<void(const GeometryTransactionDiagnostics&)> callback;
+};
+
 class FESystem {
 public:
     explicit FESystem(std::shared_ptr<const assembly::IMeshAccess> mesh_access);
@@ -253,11 +260,22 @@ public:
 
     // ---- Definition phase ----
     FieldId addField(FieldSpec spec);
+    [[nodiscard]] FieldId findFieldByName(std::string_view name) const noexcept;
+    [[nodiscard]] bool hasField(std::string_view name) const noexcept;
     void bindMeshMotionField(MeshMotionFieldRole role, FieldId field);
     void bindMeshMotionField(std::string_view role_name, FieldId field);
     void bindMeshMotionField(std::string_view role_name, std::string_view field_name);
     [[nodiscard]] std::optional<FieldId> meshMotionField(MeshMotionFieldRole role) const noexcept;
     [[nodiscard]] assembly::MeshMotionFieldAccess meshMotionFieldAccess() const noexcept;
+    void setGeometricNonlinearityPolicy(GeometricNonlinearityPolicy policy);
+    [[nodiscard]] const GeometricNonlinearityPolicy& geometricNonlinearityPolicy() const noexcept;
+    [[nodiscard]] bool geometricNonlinearityEnabled() const noexcept;
+    GeometricNonlinearityTransactionEvent beginGeometricNonlinearityTrial(
+        const SystemStateView& state);
+    GeometricNonlinearityTransactionEvent acceptGeometricNonlinearityState(
+        const SystemStateView& state,
+        GeometricNonlinearityUpdatePoint update_point);
+    GeometricNonlinearityTransactionEvent rollbackGeometricNonlinearityTrial();
     FieldId addInterfaceField(std::string name,
                               std::shared_ptr<const spaces::FunctionSpace> space,
                               InterfaceId interface_marker,
@@ -309,6 +327,9 @@ public:
                              const assembly::MatrixFreeOptions& options);
     [[nodiscard]] std::shared_ptr<assembly::MatrixFreeOperator>
     matrixFreeOperator(const OperatorTag& op) const;
+    [[nodiscard]] std::size_t matrixFreeOperatorRebuildCount(const OperatorTag& op) const;
+    [[nodiscard]] OperatorRevisionSnapshot matrixFreeOperatorRevisionSnapshot(const OperatorTag& op) const;
+    [[nodiscard]] OperatorInvalidationDecision matrixFreeOperatorLastInvalidation(const OperatorTag& op) const;
 
     post::DerivedResultHandle addDerivedResult(post::DerivedResultDefinition def);
     [[nodiscard]] std::span<const post::DerivedResultDefinition> derivedResults() const noexcept;
@@ -490,10 +511,19 @@ public:
         AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
 
     // ---- Setup phase ----
+    [[nodiscard]] SetupStoragePlan computeSetupStoragePlan() const;
+    [[nodiscard]] const SetupStoragePlan& setupStoragePlan() const noexcept { return setup_storage_plan_; }
     void setup(const SetupOptions& opts = {}, const SetupInputs& inputs = {});
 
     // ---- Constraints lifecycle ----
     void updateConstraints(double time, double dt = 0.0);
+    [[nodiscard]] constraints::ConstraintDependencyDeclaration constraintDependencyDeclaration() const;
+    [[nodiscard]] constraints::ConstraintRevisionSnapshot constraintRevisionSnapshot() const noexcept;
+    [[nodiscard]] bool constraintStateStaleForCurrentRevisions() const;
+    constraints::ConstraintRefreshResult refreshConstraintStateForCurrentRevisions(
+        double time = 0.0,
+        double dt = 0.0,
+        bool allow_structural_rebuild = true);
 
     // ---- Assembly phase ----
     assembly::AssemblyResult assemble(
@@ -1114,12 +1144,24 @@ public:
 	        const MeshCoordinateUpdateOptions& options = {});
 	    void commitMeshCoordinateTransaction();
 	    void rollbackMeshCoordinateTransaction();
+	    void rebaseMeshReferenceToCurrent(const svmp::ReferenceRebaseOptions& options = {});
+	    void rebaseMeshReferenceCoordinates(
+	        std::vector<svmp::real_t> Xref,
+	        const svmp::ReferenceRebaseOptions& options = {});
 	    [[nodiscard]] bool meshCoordinateTransactionActive() const noexcept;
+	    [[nodiscard]] GeometryTransactionState meshCoordinateTransactionState() const noexcept;
+	    [[nodiscard]] GeometryConfigurationUse geometryConfigurationUse() const noexcept;
+	    [[nodiscard]] GeometryTransactionDiagnostics geometryTransactionDiagnostics() const;
+	    void addGeometryTransactionCallback(GeometryTransactionCallback hook);
+	    bool rebaseGeometricNonlinearityReference(
+	        const svmp::ReferenceRebaseOptions& options = {});
+	    std::size_t resetBoundMeshMotionField(MeshMotionFieldRole role, Real value = Real(0));
 
 	    std::size_t bindStandardMeshMotionFieldsByName();
 	    std::size_t syncBoundMeshMotionFieldsToState(std::span<Real> state) const;
 	    std::size_t syncBoundMeshMotionFieldsToState(assembly::GlobalSystemView& vector_view) const;
 	    void notifyMeshGeometryAdvanced();
+	    void notifyMeshReferenceRebased();
 	    void notifyMeshTopologyLayoutChanged();
 	    FEAdaptedStateTransferResult onMeshAdapted(
 	        const svmp::MeshBase& old_mesh,
@@ -1153,6 +1195,10 @@ public:
     [[nodiscard]] std::uint64_t constraintLayoutRevision() const noexcept { return fe_layout_revisions_.constraint_layout; }
     [[nodiscard]] std::uint64_t blockLayoutRevision() const noexcept { return fe_layout_revisions_.block_layout; }
     [[nodiscard]] std::uint64_t systemLayoutRevision() const noexcept;
+    [[nodiscard]] OperatorRevisionSnapshot operatorRevisionSnapshot() const noexcept;
+    [[nodiscard]] OperatorInvalidationDecision operatorInvalidationDecision(
+        const OperatorRevisionSnapshot& cached,
+        bool allow_lagged_jacobian_on_geometry_change = false) const;
     [[nodiscard]] const sparsity::SparsityPattern& sparsity(const OperatorTag& op) const;
     [[nodiscard]] const sparsity::DistributedSparsityPattern* distributedSparsityIfAvailable(const OperatorTag& op) const noexcept;
     [[nodiscard]] std::shared_ptr<const backends::DofPermutation> dofPermutation() const noexcept { return dof_permutation_; }
@@ -1243,6 +1289,15 @@ public:
     [[nodiscard]] bool hasOperator(const OperatorTag& op) const noexcept {
         return operator_registry_.has(op);
     }
+
+    /**
+     * @brief True when setup determined that an operator's matrix is state-independent.
+     *
+     * The decision is computed from installed kernel metadata during setup and is
+     * conservative: false means "assemble normally"; true allows Newton/time
+     * stepping infrastructure to reuse the matrix within an unchanged setup state.
+     */
+    [[nodiscard]] bool operatorMatrixStateIndependent(const OperatorTag& op) const;
 
     // ---- Rank-1 updates from coupled Jacobian assembly ----
     [[nodiscard]] std::span<const backends::RankOneUpdate> lastRankOneUpdates() const noexcept;
@@ -1352,6 +1407,7 @@ private:
         std::vector<PlannedInteriorFaceTerm> interior_terms{};
         std::vector<PlannedInterfaceFaceTerm> interface_terms{};
         std::vector<GlobalKernel*> global_terms{};
+        bool matrix_state_independent{false};
     };
 
     friend assembly::AssemblyResult assembleOperator(
@@ -1370,6 +1426,7 @@ private:
     void bumpDofLayoutRevision() noexcept { ++fe_layout_revisions_.dof_layout; }
     void bumpConstraintLayoutRevision() noexcept { ++fe_layout_revisions_.constraint_layout; }
     void bumpBlockLayoutRevision() noexcept { ++fe_layout_revisions_.block_layout; }
+    [[nodiscard]] constraints::ConstraintRevisionSnapshot captureConstraintRevisionSnapshot() const noexcept;
 
     [[nodiscard]] const FieldRecord& singleField() const;
 
@@ -1381,6 +1438,19 @@ private:
 	    svmp::Configuration coord_cfg_{svmp::Configuration::Reference};
 	    std::unordered_map<InterfaceId, std::shared_ptr<const svmp::InterfaceMesh>> interface_meshes_{};
 	    std::optional<svmp::motion::MotionCoordinateBackup> mesh_coordinate_backup_{};
+	    struct MeshMotionFieldBackup {
+	        svmp::FieldHandle handle{};
+	        std::string name{};
+	        std::vector<svmp::real_t> values{};
+	        std::size_t components{0};
+	        std::size_t entity_count{0};
+	    };
+	    std::vector<MeshMotionFieldBackup> mesh_motion_field_backup_{};
+	    GeometryTransactionState geometry_transaction_state_{GeometryTransactionState::Committed};
+	    OperatorRevisionSnapshot geometry_transaction_start_revision_{};
+	    OperatorRevisionSnapshot geometry_transaction_last_revision_{};
+	    std::string geometry_transaction_last_event_{};
+	    std::vector<GeometryTransactionCallback> geometry_transaction_callbacks_{};
 #endif
 
     FieldRegistry field_registry_;
@@ -1391,11 +1461,18 @@ private:
     dofs::DofHandler dof_handler_{};
     std::vector<dofs::DofHandler> field_dof_handlers_{};
     std::vector<GlobalIndex> field_dof_offsets_{};
+    SetupStoragePlan setup_storage_plan_{};
     dofs::FieldDofMap field_map_{};
     std::unique_ptr<dofs::BlockDofMap> block_map_{};
 	    constraints::AffineConstraints affine_constraints_{};
     FELayoutRevisionState fe_layout_revisions_{};
+    SetupOptions last_setup_options_{};
+    SetupInputs last_setup_inputs_{};
+    bool has_last_setup_{false};
+    constraints::ConstraintRevisionSnapshot constraint_revision_snapshot_{};
+    std::uint64_t constraint_time_epoch_{0};
     assembly::MeshMotionFieldAccess mesh_motion_fields_{};
+    GeometricNonlinearityPolicy geometric_nonlinearity_policy_{};
 
 		    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::SparsityPattern>> sparsity_by_op_{};
 		    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::DistributedSparsityPattern>> distributed_sparsity_by_op_{};

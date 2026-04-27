@@ -21,11 +21,14 @@
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/HCurlSpace.h"
+#include "Spaces/HDivSpace.h"
 #include "Spaces/H1Space.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
+#include <array>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace svmp {
@@ -141,6 +144,86 @@ void expectJitMatchesInterpreterCell(const assembly::IMeshAccess& mesh,
     expectDenseNear(J_jit, J_interp, mat_tol);
 }
 
+void expectJitMatchesInterpreterLinearFieldCell(const assembly::IMeshAccess& mesh,
+                                                const dofs::DofMap& dof_map,
+                                                const spaces::FunctionSpace& space,
+                                                FieldId field,
+                                                const FormExpr& linear_form,
+                                                const std::vector<Real>& field_coefficients,
+                                                Real vec_tol)
+{
+    FormCompiler compiler;
+    auto ir_interp = compiler.compileLinear(linear_form);
+    auto ir_jit = compiler.compileLinear(linear_form);
+
+    auto interp_kernel = std::make_shared<FormKernel>(std::move(ir_interp));
+    auto jit_fallback = std::make_shared<FormKernel>(std::move(ir_jit));
+    forms::jit::JITKernelWrapper jit_kernel(jit_fallback, defaultJitOptions());
+
+    const std::array<assembly::FieldSolutionAccess, 1> field_access = {{
+        assembly::FieldSolutionAccess{
+            .field = field,
+            .space = &space,
+            .dof_map = &dof_map,
+            .dof_offset = 0,
+        },
+    }};
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setFieldSolutionAccess(field_access);
+    assembler.setCurrentSolution(field_coefficients);
+
+    const GlobalIndex n = dof_map.getNumDofs();
+
+    assembly::DenseVectorView R_interp(n);
+    R_interp.zero();
+    (void)assembler.assembleVector(mesh, space, *interp_kernel, R_interp);
+
+    assembly::DenseVectorView R_jit(n);
+    R_jit.zero();
+    (void)assembler.assembleVector(mesh, space, jit_kernel, R_jit);
+
+    expectDenseNear(R_jit, R_interp, vec_tol);
+}
+
+void expectJitCellAssemblyThrowsContaining(const assembly::IMeshAccess& mesh,
+                                           const dofs::DofMap& dof_map,
+                                           const spaces::FunctionSpace& space,
+                                           const FormExpr& residual,
+                                           const std::vector<Real>& U,
+                                           std::initializer_list<const char*> snippets)
+{
+    FormCompiler compiler;
+    auto ir = compiler.compileResidual(residual);
+
+    auto fallback =
+        std::make_shared<SymbolicNonlinearFormKernel>(std::move(ir), NonlinearKernelOutput::Both);
+    forms::jit::JITKernelWrapper jit_kernel(fallback, defaultJitOptions());
+    jit_kernel.resolveInlinableConstitutives();
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setCurrentSolution(U);
+
+    const GlobalIndex n = dof_map.getNumDofs();
+    assembly::DenseMatrixView J(n);
+    assembly::DenseVectorView R(n);
+    J.zero();
+    R.zero();
+
+    try {
+        (void)assembler.assembleBoth(mesh, space, space, jit_kernel, J, R);
+        FAIL() << "Expected FEException";
+    } catch (const FEException& ex) {
+        const std::string msg = ex.what();
+        for (const auto* snippet : snippets) {
+            EXPECT_NE(msg.find(snippet), std::string::npos)
+                << "missing diagnostic snippet: " << snippet << "\nmessage: " << msg;
+        }
+    }
+}
+
 void expectJitMatchesInterpreterBoundary(const assembly::IMeshAccess& mesh,
                                         int boundary_marker,
                                         const dofs::DofMap& dof_map,
@@ -224,6 +307,44 @@ FormExpr spd2x2FromGradU(const FormExpr& u)
     return (2.0 * I) + outer(g, g);
 }
 
+struct CurvedPiolaGradientCase {
+    const char* name;
+    ElementType geometry_type;
+    ElementType space_type;
+};
+
+[[nodiscard]] std::vector<CurvedPiolaGradientCase> supportedCurvedVolumePiolaCases()
+{
+    return {
+        {"Tetra10", ElementType::Tetra10, ElementType::Tetra4},
+        {"Hex20", ElementType::Hex20, ElementType::Hex8},
+        {"Hex27", ElementType::Hex27, ElementType::Hex8},
+        {"Wedge15", ElementType::Wedge15, ElementType::Wedge6},
+        {"Wedge18", ElementType::Wedge18, ElementType::Wedge6},
+        {"Pyramid13", ElementType::Pyramid13, ElementType::Pyramid5},
+        {"Pyramid14", ElementType::Pyramid14, ElementType::Pyramid5},
+    };
+}
+
+[[nodiscard]] std::vector<CurvedPiolaGradientCase> lowerDimensionalCurvedPiolaCases()
+{
+    return {
+        {"Triangle6", ElementType::Triangle6, ElementType::Triangle3},
+        {"Quad8", ElementType::Quad8, ElementType::Quad4},
+        {"Quad9", ElementType::Quad9, ElementType::Quad4},
+    };
+}
+
+[[nodiscard]] std::vector<Real> deterministicCoefficients(std::size_t n)
+{
+    std::vector<Real> coeffs(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const Real sign = (i % 2u == 0u) ? Real(1) : Real(-1);
+        coeffs[i] = sign * (Real(0.07) + Real(0.013) * static_cast<Real>(i));
+    }
+    return coeffs;
+}
+
 } // namespace
 
 TEST(JITExtendedParityTest, SmoothHeavisideCellMatchesInterpreter)
@@ -253,6 +374,248 @@ TEST(JITExtendedParityTest, IntrinsicVectorBasisGradientMatchesInterpreter)
 
     const std::vector<Real> U = {0.12, -0.08, 0.15, -0.03, 0.21, -0.11};
     expectJitMatchesInterpreterCell(mesh, dof_map, space, residual, U, /*vec_tol=*/1e-12, /*mat_tol=*/1e-12);
+}
+
+TEST(JITExtendedParityTest, CurvedIntrinsicVectorBasisGradientMatchesInterpreter)
+{
+    CurvedTetra10MeshAccess mesh;
+
+    {
+        spaces::HCurlSpace space(ElementType::Tetra4, /*order=*/0, BasisType::Nedelec);
+        auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+
+        const auto u = TrialFunction(space, "u");
+        const auto v = TestFunction(space, "v");
+        const auto residual = (inner(sym(grad(u)), sym(grad(v))) +
+                               Real(0.25) * inner(grad(u), grad(v))).dx();
+
+        const std::vector<Real> U = {0.12, -0.08, 0.15, -0.03, 0.21, -0.11};
+        expectJitMatchesInterpreterCell(mesh, dof_map, space, residual, U,
+                                        /*vec_tol=*/1e-12, /*mat_tol=*/1e-12);
+    }
+
+    {
+        spaces::HDivSpace space(ElementType::Tetra4, /*order=*/0, BasisType::RaviartThomas);
+        auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+
+        const auto u = TrialFunction(space, "u");
+        const auto v = TestFunction(space, "v");
+        const auto residual = inner(grad(u), grad(v)).dx();
+
+        const std::vector<Real> U = {0.2, -0.1, 0.05, 0.16};
+        expectJitMatchesInterpreterCell(mesh, dof_map, space, residual, U,
+                                        /*vec_tol=*/1e-12, /*mat_tol=*/1e-12);
+    }
+}
+
+TEST(JITExtendedParityTest, CurvedVolumeIntrinsicVectorBasisGradientsCoverAllEnabledGeometryFamilies)
+{
+    for (const auto& c : supportedCurvedVolumePiolaCases()) {
+        SCOPED_TRACE(c.name);
+        CurvedSingleCellMeshAccess mesh(c.geometry_type, c.name);
+
+        {
+            spaces::HCurlSpace space(c.space_type, /*order=*/0, BasisType::Nedelec);
+            auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+
+            const auto u = TrialFunction(space, "u");
+            const auto v = TestFunction(space, "v");
+            const auto residual = (inner(sym(grad(u)), sym(grad(v))) +
+                                   Real(0.25) * inner(grad(u), grad(v))).dx();
+
+            expectJitMatchesInterpreterCell(mesh,
+                                            dof_map,
+                                            space,
+                                            residual,
+                                            deterministicCoefficients(space.dofs_per_element()),
+                                            /*vec_tol=*/2e-10,
+                                            /*mat_tol=*/2e-10);
+        }
+
+        {
+            spaces::HDivSpace space(c.space_type, /*order=*/0, BasisType::RaviartThomas);
+            auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+
+            const auto u = TrialFunction(space, "u");
+            const auto v = TestFunction(space, "v");
+            const auto residual = inner(grad(u), grad(v)).dx();
+
+            expectJitMatchesInterpreterCell(mesh,
+                                            dof_map,
+                                            space,
+                                            residual,
+                                            deterministicCoefficients(space.dofs_per_element()),
+                                            /*vec_tol=*/2e-10,
+                                            /*mat_tol=*/2e-10);
+        }
+    }
+}
+
+TEST(JITExtendedParityTest, CurvedTetra10BDMHDivVectorBasisGradientMatchesInterpreter)
+{
+    CurvedSingleCellMeshAccess mesh(ElementType::Tetra10, "Tetra10-BDM");
+    spaces::HDivSpace space(ElementType::Tetra4, /*order=*/1, BasisType::BDM);
+    auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto residual = inner(grad(u), grad(v)).dx();
+
+    expectJitMatchesInterpreterCell(mesh,
+                                    dof_map,
+                                    space,
+                                    residual,
+                                    deterministicCoefficients(space.dofs_per_element()),
+                                    /*vec_tol=*/2e-10,
+                                    /*mat_tol=*/2e-10);
+}
+
+TEST(JITExtendedParityTest, CurvedTetra10HigherOrderRTAndNedelecVectorBasisGradientMatchesInterpreter)
+{
+    CurvedSingleCellMeshAccess mesh(ElementType::Tetra10, "Tetra10-higher-order-RT-Nedelec");
+
+    {
+        spaces::HDivSpace space(ElementType::Tetra4, /*order=*/1, BasisType::RaviartThomas);
+        auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+
+        const auto u = TrialFunction(space, "u");
+        const auto v = TestFunction(space, "v");
+        const auto residual = inner(grad(u), grad(v)).dx();
+
+        expectJitMatchesInterpreterCell(mesh,
+                                        dof_map,
+                                        space,
+                                        residual,
+                                        deterministicCoefficients(space.dofs_per_element()),
+                                        /*vec_tol=*/2e-10,
+                                        /*mat_tol=*/2e-10);
+    }
+
+    {
+        spaces::HCurlSpace space(ElementType::Tetra4, /*order=*/1, BasisType::Nedelec);
+        auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+
+        const auto u = TrialFunction(space, "u");
+        const auto v = TestFunction(space, "v");
+        const auto residual = (inner(sym(grad(u)), sym(grad(v))) +
+                               Real(0.25) * inner(grad(u), grad(v))).dx();
+
+        expectJitMatchesInterpreterCell(mesh,
+                                        dof_map,
+                                        space,
+                                        residual,
+                                        deterministicCoefficients(space.dofs_per_element()),
+                                        /*vec_tol=*/2e-10,
+                                        /*mat_tol=*/2e-10);
+    }
+}
+
+TEST(JITExtendedParityTest, CurvedVectorBasisFieldGradientMatchesInterpreter)
+{
+    constexpr FieldId kCurvedVectorField = 9201;
+    CurvedSingleCellMeshAccess mesh(ElementType::Tetra10, "Tetra10-field-gradient-JIT");
+
+    auto check_field_gradient = [&](const spaces::FunctionSpace& space, const FormExpr& field_expr) {
+        auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+        const auto v = TestFunction(space, "v");
+        const auto linear_form = inner(grad(field_expr), grad(v)).dx();
+
+        expectJitMatchesInterpreterLinearFieldCell(mesh,
+                                                  dof_map,
+                                                  space,
+                                                  kCurvedVectorField,
+                                                  linear_form,
+                                                  deterministicCoefficients(space.dofs_per_element()),
+                                                  /*vec_tol=*/2e-10);
+    };
+
+    {
+        spaces::HDivSpace space(ElementType::Tetra4, /*order=*/0, BasisType::RaviartThomas);
+        check_field_gradient(space, FormExpr::discreteField(kCurvedVectorField, space, "hdiv_discrete"));
+        check_field_gradient(space, FormExpr::stateField(kCurvedVectorField, space, "hdiv_state"));
+    }
+
+    {
+        spaces::HCurlSpace space(ElementType::Tetra4, /*order=*/0, BasisType::Nedelec);
+        check_field_gradient(space, FormExpr::discreteField(kCurvedVectorField, space, "hcurl_discrete"));
+        check_field_gradient(space, FormExpr::stateField(kCurvedVectorField, space, "hcurl_state"));
+    }
+}
+
+TEST(JITExtendedParityTest, CurvedHigherOrderVectorBasisFieldGradientMatchesInterpreter)
+{
+    constexpr FieldId kCurvedVectorField = 9202;
+    CurvedSingleCellMeshAccess mesh(ElementType::Tetra10, "Tetra10-higher-order-field-gradient-JIT");
+
+    auto check_field_gradient = [&](const spaces::FunctionSpace& space, const FormExpr& field_expr) {
+        auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+        const auto v = TestFunction(space, "v");
+        const auto linear_form = inner(grad(field_expr), grad(v)).dx();
+
+        expectJitMatchesInterpreterLinearFieldCell(mesh,
+                                                  dof_map,
+                                                  space,
+                                                  kCurvedVectorField,
+                                                  linear_form,
+                                                  deterministicCoefficients(space.dofs_per_element()),
+                                                  /*vec_tol=*/3e-10);
+    };
+
+    {
+        spaces::HDivSpace space(ElementType::Tetra4, /*order=*/1, BasisType::RaviartThomas);
+        check_field_gradient(space, FormExpr::discreteField(kCurvedVectorField, space, "rt1_discrete"));
+        check_field_gradient(space, FormExpr::stateField(kCurvedVectorField, space, "rt1_state"));
+    }
+
+    {
+        spaces::HDivSpace space(ElementType::Tetra4, /*order=*/1, BasisType::BDM);
+        check_field_gradient(space, FormExpr::discreteField(kCurvedVectorField, space, "bdm1_discrete"));
+        check_field_gradient(space, FormExpr::stateField(kCurvedVectorField, space, "bdm1_state"));
+    }
+
+    {
+        spaces::HCurlSpace space(ElementType::Tetra4, /*order=*/1, BasisType::Nedelec);
+        check_field_gradient(space, FormExpr::discreteField(kCurvedVectorField, space, "nedelec1_discrete"));
+        check_field_gradient(space, FormExpr::stateField(kCurvedVectorField, space, "nedelec1_state"));
+    }
+}
+
+TEST(JITExtendedParityTest, LowerDimensionalCurvedPiolaVectorBasisGradientsFailClosed)
+{
+    for (const auto& c : lowerDimensionalCurvedPiolaCases()) {
+        SCOPED_TRACE(c.name);
+        CurvedSingleCellMeshAccess mesh(c.geometry_type, c.name);
+
+        {
+            spaces::HDivSpace space(c.space_type, /*order=*/0, BasisType::RaviartThomas);
+            auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+            const auto u = TrialFunction(space, "u");
+            const auto v = TestFunction(space, "v");
+            const auto residual = inner(grad(u), grad(v)).dx();
+            expectJitCellAssemblyThrowsContaining(
+                mesh,
+                dof_map,
+                space,
+                residual,
+                deterministicCoefficients(space.dofs_per_element()),
+                {"curved Piola", "non-affine 3D volume mappings", "lower-dimensional curved mappings"});
+        }
+
+        {
+            spaces::HCurlSpace space(c.space_type, /*order=*/0, BasisType::Nedelec);
+            auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+            const auto u = TrialFunction(space, "u");
+            const auto v = TestFunction(space, "v");
+            const auto residual = inner(grad(u), grad(v)).dx();
+            expectJitCellAssemblyThrowsContaining(
+                mesh,
+                dof_map,
+                space,
+                residual,
+                deterministicCoefficients(space.dofs_per_element()),
+                {"curved Piola", "non-affine 3D volume mappings", "lower-dimensional curved mappings"});
+        }
+    }
 }
 
 TEST(JITExtendedParityTest, MatrixExp2DCellMatchesInterpreter)

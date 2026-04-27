@@ -37,6 +37,7 @@ inline constexpr std::uint32_t kKernelArgsABIVersionV3 = 3u;
 inline constexpr std::uint32_t kKernelArgsABIVersionV4 = 4u;
 inline constexpr std::uint32_t kKernelArgsABIVersionV5 = 5u;
 inline constexpr std::uint32_t kKernelArgsABIVersionV6 = 6u;
+inline constexpr std::uint32_t kCellKernelBatchArgsABIV1 = 0xCB01'0001u;
 // Bump whenever any V6 argument/view struct layout changes. This is mixed into
 // JIT cache keys so disk-cached object code cannot outlive ABI layout edits.
 inline constexpr std::uint32_t kKernelArgsABILayoutRevisionV6 = 4u;
@@ -1026,7 +1027,7 @@ static_assert(std::is_trivially_copyable_v<InteriorFaceKernelArgsV6>);
 // =============================================================================
 
 struct CellKernelBatchArgsV1 {
-    std::uint32_t abi_version{kKernelArgsABIVersionV6};
+    std::uint32_t abi_version{kCellKernelBatchArgsABIV1};
     std::uint32_t batch_size{0};
 
     // Array-of-Structs (AoS) pointers.

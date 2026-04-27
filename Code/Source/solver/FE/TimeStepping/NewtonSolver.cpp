@@ -3309,6 +3309,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
     auto base_state_holder = makeNewtonState(history, solve_time);
     const auto& base_state = base_state_holder.view;
+    transient.system().acceptGeometricNonlinearityState(
+        base_state,
+        systems::GeometricNonlinearityUpdatePoint::AcceptedNonlinearState);
 
     std::optional<assembly::TimeIntegrationContext> dt_scale_ctx;
     if (options_.scale_dt_increments && !(options_.dt_increment_scale > 0.0)) {
@@ -3515,6 +3518,33 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     if (oopTraceEnabled() && ptc_enabled) {
         traceLog("NewtonSolver: PTC diagonal ownership rows=" + std::to_string(ptc_owned_dofs.size()) +
                  (ptc_uses_backend_owned_rows ? " mode=backend-owned-row" : " mode=fe-owned"));
+    }
+    const bool jacobian_matrix_state_independent =
+        sys.operatorMatrixStateIndependent(options_.jacobian_op);
+    const bool can_reuse_state_independent_jacobian =
+        jacobian_matrix_state_independent &&
+        !ptc_enabled &&
+        !has_monolithic_auxiliary_unknowns &&
+        !has_non_dirichlet_affine_constraints;
+    if (oopTraceEnabled()) {
+        std::string reason;
+        if (!jacobian_matrix_state_independent) {
+            reason = "operator matrix is state-dependent or unknown";
+        } else if (ptc_enabled) {
+            reason = "pseudo-transient continuation modifies the matrix";
+        } else if (has_monolithic_auxiliary_unknowns) {
+            reason = "monolithic auxiliary unknowns require fresh coupled assembly";
+        } else if (has_non_dirichlet_affine_constraints) {
+            reason = "non-Dirichlet affine constraints can alter matrix structure";
+        } else {
+            reason = "operator matrix is state-independent";
+        }
+        traceLog("NewtonSolver: jacobian reuse decision op='" + options_.jacobian_op +
+                 "' state_independent=" +
+                 (jacobian_matrix_state_independent ? "true" : "false") +
+                 " reuse=" +
+                 (can_reuse_state_independent_jacobian ? "enabled" : "disabled") +
+                 " reason='" + reason + "'");
     }
     bool ptc_mass_ready = false;
     double ptc_gamma = 0.0;
@@ -4072,7 +4102,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
         const int jacobian_period = std::max(base_jacobian_period, direct_only_outlet_jacobian_period);
         const bool need_jacobian =
-            !have_jacobian || (jacobian_period == 1) || ((it - last_jacobian_it) >= jacobian_period);
+            !have_jacobian ||
+            (!can_reuse_state_independent_jacobian &&
+             ((jacobian_period == 1) || ((it - last_jacobian_it) >= jacobian_period)));
         bool jacobian_ready = have_jacobian && !need_jacobian;
         if (!have_residual) {
             ntp0 = NTP();
@@ -6085,6 +6117,13 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             }
             axpy(history.u(), static_cast<Real>(-1.0), du);
             syncCurrentState();
+            auto accepted_state_holder = makeNewtonState(history, solve_time);
+            transient.system().acceptGeometricNonlinearityState(
+                accepted_state_holder.view,
+                systems::GeometricNonlinearityUpdatePoint::AcceptedNonlinearState);
+            if (transient.system().geometricNonlinearityEnabled()) {
+                have_jacobian = false;
+            }
             ntp_update += NTP() - ntp0;
             have_residual = false;
 
@@ -6141,6 +6180,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             syncCurrentState();
 
             auto trial_state_holder = makeNewtonState(history, solve_time);
+            transient.system().beginGeometricNonlinearityTrial(trial_state_holder.view);
             return assembleResidualOnly(trial_state_holder.view, phase);
         };
 
@@ -6252,6 +6292,17 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
         // `history.u` and `r` now correspond to the accepted trial, the best fallback
         // trial, or the restored original iterate.
+        auto accepted_state_holder = makeNewtonState(history, solve_time);
+        if (reverted_to_original) {
+            transient.system().rollbackGeometricNonlinearityTrial();
+        } else {
+            transient.system().acceptGeometricNonlinearityState(
+                accepted_state_holder.view,
+                systems::GeometricNonlinearityUpdatePoint::AcceptedNonlinearState);
+            if (transient.system().geometricNonlinearityEnabled()) {
+                have_jacobian = false;
+            }
+        }
         current_residual_norm = trial_norm;
         have_residual = std::isfinite(current_residual_norm);
 

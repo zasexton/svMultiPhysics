@@ -143,6 +143,11 @@ toGeometryNodes(std::span<const Point3D> coordinates);
     const Matrix3x3& inverse_jacobian,
     Real jacobian_determinant);
 
+/**
+ * @brief Verification-only finite-difference reference for cell geometry sensitivities.
+ *
+ * Runtime geometry evaluation should use evaluateCellGeometrySensitivity().
+ */
 [[nodiscard]] CellGeometrySensitivity finiteDifferenceCellGeometrySensitivity(
     ElementType cell_type,
     const quadrature::QuadratureRule& quad_rule,
@@ -158,6 +163,11 @@ toGeometryNodes(std::span<const Point3D> coordinates);
     const quadrature::QuadratureRule& quad_rule,
     std::span<const Point3D> coordinates);
 
+/**
+ * @brief Verification-only finite-difference reference for face geometry sensitivities.
+ *
+ * Runtime geometry evaluation should use evaluateFaceGeometrySensitivity().
+ */
 [[nodiscard]] FaceGeometrySensitivity finiteDifferenceFaceGeometrySensitivity(
     ElementType cell_type,
     LocalIndex local_face_id,

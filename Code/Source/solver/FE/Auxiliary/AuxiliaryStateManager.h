@@ -278,6 +278,17 @@ public:
      */
     void rollbackAll();
 
+    [[nodiscard]] state::StateVariableLifecycle lifecycle() const noexcept
+    {
+        return lifecycle_;
+    }
+
+    [[nodiscard]] std::span<const state::StateVariableMetadata>
+    stateVariables(std::string_view block_name) const;
+
+    [[nodiscard]] state::StateFrameTransformResult
+    applyStateFrameTransform(const state::StateFrameTransformRequest& request);
+
     /**
      * @brief Clear all blocks and registrations.
      */
@@ -403,6 +414,7 @@ private:
 
     std::vector<BlockMeta> block_meta_{};
     std::unordered_map<std::string, std::size_t> meta_name_to_index_{};
+    state::StateVariableLifecycle lifecycle_{state::StateVariableLifecycle::TrialWork};
 
     [[nodiscard]] std::size_t metaIndex(std::string_view name) const;
 };

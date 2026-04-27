@@ -76,7 +76,7 @@ public:
 
     [[nodiscard]] GlobalIndex numCells() const override { return 1; }
     [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
-    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 1; }
     [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
     [[nodiscard]] int dimension() const override { return 3; }
 
@@ -120,8 +120,9 @@ public:
     void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
 
     void forEachBoundaryFace(int /*marker*/,
-                             std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override
+                             std::function<void(GlobalIndex, GlobalIndex)> callback) const override
     {
+        callback(0, 0);
     }
 
     void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override
@@ -226,6 +227,11 @@ public:
     }
 
     [[nodiscard]] const std::array<Real, 3>& translation() const noexcept { return translation_; }
+
+    void perturbCurrentNodeComponent(GlobalIndex node_id, int component, Real delta)
+    {
+        current_nodes_.at(static_cast<std::size_t>(node_id)).at(static_cast<std::size_t>(component)) += delta;
+    }
 
 private:
     std::array<Real, 3> translation_{0.25, 0.5, -0.75};
@@ -672,14 +678,36 @@ TEST(FormVocabularyTest, RequiredDataInferenceIncludesGeometryAndMeasures)
         auto ir = compiler.compileLinear((scalar_expr * v).dx());
         EXPECT_TRUE(assembly::hasFlag(ir.requiredData(), flag));
     };
+    const auto require_linear_flags = [&](const FormExpr& scalar_expr,
+                                          assembly::RequiredData value_flag,
+                                          assembly::RequiredData gradient_flag) {
+        auto ir = compiler.compileLinear((scalar_expr * v).dx());
+        EXPECT_TRUE(assembly::hasFlag(ir.requiredData(), value_flag));
+        EXPECT_TRUE(assembly::hasFlag(ir.requiredData(), gradient_flag));
+    };
 
     require_linear_flag(component(meshDisplacement(), 0), assembly::RequiredData::MeshDisplacement);
     require_linear_flag(component(meshVelocity(), 0), assembly::RequiredData::MeshVelocity);
     require_linear_flag(component(domainVelocity(), 0), assembly::RequiredData::MeshVelocity);
     require_linear_flag(component(meshAcceleration(), 0), assembly::RequiredData::MeshAcceleration);
+    require_linear_flags(component(grad(meshDisplacement()), 0, 0),
+                         assembly::RequiredData::MeshDisplacement,
+                         assembly::RequiredData::MeshDisplacementGradient);
+    require_linear_flags(div(meshVelocity()),
+                         assembly::RequiredData::MeshVelocity,
+                         assembly::RequiredData::MeshVelocityGradient);
+    require_linear_flags(component(grad(meshAcceleration()), 0, 0),
+                         assembly::RequiredData::MeshAcceleration,
+                         assembly::RequiredData::MeshAccelerationGradient);
     require_linear_flag(component(previousCoordinate(), 0), assembly::RequiredData::PreviousPhysicalPoints);
     require_linear_flag(component(previousMeshVelocity(), 0), assembly::RequiredData::PreviousMeshVelocity);
     require_linear_flag(component(predictedMeshVelocity(), 0), assembly::RequiredData::PredictedMeshVelocity);
+    require_linear_flags(component(grad(previousMeshVelocity()), 0, 0),
+                         assembly::RequiredData::PreviousMeshVelocity,
+                         assembly::RequiredData::PreviousMeshVelocityGradient);
+    require_linear_flags(component(grad(predictedMeshVelocity()), 0, 0),
+                         assembly::RequiredData::PredictedMeshVelocity,
+                         assembly::RequiredData::PredictedMeshVelocityGradient);
     require_linear_flag(component(currentCoordinate(), 0), assembly::RequiredData::CurrentPhysicalPoints);
     require_linear_flag(component(referenceCoordinatePhysical(), 0), assembly::RequiredData::ReferencePhysicalPoints);
     require_linear_flag(component(currentJacobian(), 0, 0), assembly::RequiredData::CurrentJacobians);
@@ -700,6 +728,27 @@ TEST(FormVocabularyTest, RequiredDataInferenceIncludesGeometryAndMeasures)
                                            GeometryConfiguration::Current,
                                            GeometryConfiguration::Reference), 0),
                         assembly::RequiredData::ConfigurationTransforms);
+}
+
+TEST(FormVocabularyTest, StaticReferenceFormsDoNotRequestMovingDomainData)
+{
+    FormCompiler compiler;
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    const auto ir = compiler.compileBilinear(inner(grad(u), grad(v)).dx());
+    EXPECT_TRUE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::PhysicalGradients));
+    EXPECT_FALSE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::MeshDisplacement));
+    EXPECT_FALSE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::MeshVelocity));
+    EXPECT_FALSE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::MeshAcceleration));
+    EXPECT_FALSE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::CurrentPhysicalPoints));
+    EXPECT_FALSE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::ReferencePhysicalPoints));
+    EXPECT_FALSE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::CurrentJacobians));
+    EXPECT_FALSE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::ReferenceJacobians));
+    EXPECT_FALSE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::CurrentMeasures));
+    EXPECT_FALSE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::ReferenceMeasures));
+    EXPECT_FALSE(assembly::hasFlag(ir.requiredData(), assembly::RequiredData::ConfigurationTransforms));
 }
 
 TEST(FormVocabularyTest, MovingDomainTimeLevelTerminalsMatchInterpreterAndJIT)
@@ -1031,6 +1080,85 @@ TEST(FormVocabularyTest, OptInCurrentGeometrySensitivitySeedsMeshMotionJacobian)
         }
     }
     EXPECT_GT(max_abs, 1e-4);
+}
+
+TEST(FormVocabularyTest, CurrentGeometrySensitivityJacobianMatchesFiniteDifference)
+{
+    MovingSingleTetraMeshAccess mesh;
+    auto base_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace vector_space(base_space, /*components=*/3);
+    auto dof_map =
+        createSingleTetraDenseDofMap(static_cast<LocalIndex>(vector_space.dofs_per_element()));
+
+    constexpr FieldId kMeshMotionField = 17;
+
+    const auto u = FormExpr::trialFunction(vector_space, "mesh_displacement");
+    const auto v = FormExpr::testFunction(vector_space, "v");
+    const auto residual =
+        (inner(currentCoordinate(), v) +
+         FormExpr::constant(0.0) * inner(u, v)).dx();
+
+    SymbolicOptions options;
+    options.geometry_sensitivity.mode = GeometrySensitivityMode::MeshMotionUnknowns;
+    options.geometry_sensitivity.mesh_motion_field = kMeshMotionField;
+
+    FormCompiler compiler(options);
+    auto ir = compiler.compileResidual(residual);
+    NonlinearFormKernel kernel(std::move(ir), ADMode::Forward);
+
+    const std::array<assembly::FieldSolutionAccess, 1> field_access = {{
+        assembly::FieldSolutionAccess{
+            .field = kMeshMotionField,
+            .space = &vector_space,
+            .dof_map = &dof_map,
+            .dof_offset = 0,
+        },
+    }};
+    const std::vector<Real> zero_solution(static_cast<std::size_t>(dof_map.getNumDofs()), 0.0);
+
+    auto assemble = [&](const MovingSingleTetraMeshAccess& mesh_access,
+                        assembly::DenseMatrixView* J,
+                        assembly::DenseVectorView& R) {
+        assembly::StandardAssembler assembler;
+        assembler.setDofMap(dof_map);
+        assembler.setFieldSolutionAccess(field_access);
+        assembler.setCurrentSolution(zero_solution);
+        R.zero();
+        if (J != nullptr) {
+            J->zero();
+            (void)assembler.assembleBoth(mesh_access, vector_space, vector_space, kernel, *J, R);
+        } else {
+            (void)assembler.assembleVector(mesh_access, vector_space, kernel, R);
+        }
+    };
+
+    assembly::DenseMatrixView J(dof_map.getNumDofs());
+    assembly::DenseVectorView R(dof_map.getNumDofs());
+    assemble(mesh, &J, R);
+
+    const Real eps = 1.0e-7;
+    constexpr GlobalIndex nodes_per_component = 4;
+    for (GlobalIndex col = 0; col < dof_map.getNumDofs(); ++col) {
+        const auto node = static_cast<GlobalIndex>(col % nodes_per_component);
+        const int component = static_cast<int>(col / nodes_per_component);
+
+        auto mesh_plus = mesh;
+        mesh_plus.perturbCurrentNodeComponent(node, component, eps);
+        assembly::DenseVectorView R_plus(dof_map.getNumDofs());
+        assemble(mesh_plus, nullptr, R_plus);
+
+        auto mesh_minus = mesh;
+        mesh_minus.perturbCurrentNodeComponent(node, component, -eps);
+        assembly::DenseVectorView R_minus(dof_map.getNumDofs());
+        assemble(mesh_minus, nullptr, R_minus);
+
+        for (GlobalIndex row = 0; row < dof_map.getNumDofs(); ++row) {
+            const Real fd = (R_plus.getVectorEntry(row) - R_minus.getVectorEntry(row)) /
+                            (Real(2.0) * eps);
+            SCOPED_TRACE(::testing::Message() << "row=" << row << ", col=" << col);
+            EXPECT_NEAR(J.getMatrixEntry(row, col), fd, 2.0e-6);
+        }
+    }
 }
 
 TEST(FormVocabularyTest, DGRestrictionsAssembleCrossBlockMass)

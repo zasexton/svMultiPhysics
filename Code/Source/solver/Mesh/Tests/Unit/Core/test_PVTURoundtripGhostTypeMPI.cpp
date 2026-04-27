@@ -172,6 +172,8 @@ int main(int argc, char** argv) {
   svmp::MeshIOOptions save_opts;
   save_opts.format = "pvtu";
   save_opts.path = pvtu_path;
+  save_opts.kv["binary"] = "true";
+  save_opts.kv["streaming"] = "true";
   dmesh.save_parallel(save_opts);
 
   MPI_Barrier(MPI_COMM_WORLD);

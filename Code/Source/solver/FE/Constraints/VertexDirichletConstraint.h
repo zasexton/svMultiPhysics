@@ -40,6 +40,18 @@ public:
 
     [[nodiscard]] bool isTimeDependent() const noexcept override { return false; }
 
+    [[nodiscard]] ConstraintDependencyDeclaration dependencyDeclaration() const override
+    {
+        ConstraintDependencyDeclaration out = ISystemConstraint::dependencyDeclaration();
+        out.structural.labels = false;
+        if (mode_ == VertexIdMode::LocalVertexId) {
+            out.structural.ownership = false;
+        }
+        return out;
+    }
+
+    [[nodiscard]] systems::SetupStorageRequirements storageRequirements() const noexcept override;
+
 private:
     FieldId field_{INVALID_FIELD_ID};
     std::vector<VertexDirichletValue> values_{};

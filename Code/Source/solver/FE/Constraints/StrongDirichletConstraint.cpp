@@ -332,9 +332,11 @@ bool StrongDirichletConstraint::updateValues(const FESystem& system,
                                              double time,
                                              double dt)
 {
-    if (!is_time_dependent_) {
-        return false;
-    }
+    auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_, component_);
+    FE_THROW_IF(extracted.dofs.size() != dofs_.size(), InvalidStateException,
+                "StrongDirichletConstraint::updateValues: geometry-dependent update changed constrained DOF count; rebuild constraints instead");
+    dofs_ = std::move(extracted.dofs);
+    coords_ = std::move(extracted.coords);
 
     forms::PointEvalContext pctx;
     pctx.time = static_cast<Real>(time);
@@ -397,6 +399,24 @@ bool StrongDirichletConstraint::updateValues(const FESystem& system,
                               sample.str());
 
     return true;
+}
+
+ConstraintDependencyDeclaration StrongDirichletConstraint::dependencyDeclaration() const
+{
+    ConstraintDependencyDeclaration out = ISystemConstraint::dependencyDeclaration();
+    merge_into(out.value, ConstraintDependencyMask::meshGeometry());
+    if (is_time_dependent_) {
+        out.value.time = true;
+    }
+    return out;
+}
+
+systems::SetupStorageRequirements StrongDirichletConstraint::storageRequirements() const noexcept
+{
+    systems::SetupStorageRequirements req;
+    req.entity_dof_map = true;
+    req.boundary_face_topology = true;
+    return req;
 }
 
 } // namespace constraints

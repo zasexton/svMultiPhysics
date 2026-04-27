@@ -76,6 +76,7 @@
  */
 
 #include "Core/Types.h"
+#include "Core/StateVariableMetadata.h"
 #include "Auxiliary/AuxiliaryNonsmoothPolicy.h"
 
 #include <cstddef>
@@ -644,6 +645,15 @@ struct AuxiliaryStateSpec {
     /// Optional human-readable names for individual components.
     /// If non-empty, must have exactly `size` entries.
     std::vector<std::string> component_names{};
+
+    /// Optional frame/lifecycle metadata for components or byte ranges within
+    /// one entity's state block. Offsets are byte offsets in the entity-local
+    /// contiguous state view.
+    std::vector<state::StateVariableMetadata> state_variables{};
+
+    /// Optional formulation-owned hook for frame transforms under moving
+    /// geometry, remesh transfer, rebase, and rollback events.
+    state::StateFrameTransformHook frame_transform_hook{};
 
     /// Per-component classification as differential or algebraic.
     /// If empty, all components default to `Differential`.

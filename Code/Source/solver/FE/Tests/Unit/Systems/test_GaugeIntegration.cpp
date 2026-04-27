@@ -265,6 +265,7 @@ struct GaugeSummary {
     std::size_t resolved{0};
     std::size_t constraints{0};
     bool pressure_mode{false};
+    bool pressure_anchored{false};
     bool pressure_mean_zero{false};
 };
 
@@ -297,6 +298,9 @@ GaugeSummary summarizeGauge(const systems::FESystem& sys, FieldId pressure_field
     for (const auto& mode : reg->resolvedModes()) {
         if (mode.candidate.field == pressure_field) {
             out.pressure_mode = true;
+            if (mode.status == GaugeStatus::Anchored) {
+                out.pressure_anchored = true;
+            }
             if (mode.policy == EnforcementPolicy::MeanZeroElimination) {
                 out.pressure_mean_zero = true;
             }
@@ -351,6 +355,7 @@ struct ExactAssemblyProbeOptions {
     bool diffusion{true};
     bool nonlinear_reaction{true};
     bool monolithic_outlets{true};
+    bool constrain_velocity_boundaries{false};
 };
 
 std::unique_ptr<systems::FESystem> buildQuadStripMixedSystem(int n_cells,
@@ -520,6 +525,23 @@ std::unique_ptr<systems::FESystem> buildQuadStripMixedSystemExactAssemblyProbe(i
 
     systems::installFormulation(*sys, "op", {velocity_field, pressure_field}, residual);
 
+    if (options.constrain_velocity_boundaries) {
+        auto left_bc = bc::strongDirichlet(velocity_field,
+                                           11,
+                                           FormExpr::constant(0.0),
+                                           "u");
+        auto right_bc = bc::strongDirichlet(velocity_field,
+                                            12,
+                                            FormExpr::constant(0.0),
+                                            "u");
+        systems::installStrongDirichlet(
+            *sys,
+            std::span<const bc::StrongDirichlet>(&left_bc, 1));
+        systems::installStrongDirichlet(
+            *sys,
+            std::span<const bc::StrongDirichlet>(&right_bc, 1));
+    }
+
     systems::SetupInputs inputs;
     inputs.topology_override = quadStripTopology(n_cells);
     sys->setup({}, inputs);
@@ -537,6 +559,7 @@ void logGaugeSummary(const char* label, const GaugeSummary& s)
               << " resolved=" << s.resolved
               << " constraints=" << s.constraints
               << " pressure_mode=" << (s.pressure_mode ? 1 : 0)
+              << " pressure_anchored=" << (s.pressure_anchored ? 1 : 0)
               << " pressure_mean_zero=" << (s.pressure_mean_zero ? 1 : 0)
               << std::endl;
 }
@@ -1380,8 +1403,10 @@ TEST(GaugeIntegration, MixedSaddlePointPressureFieldGetsGauge_QuadStripExactAsse
 {
     FieldId velocity_field = INVALID_FIELD_ID;
     FieldId pressure_field = INVALID_FIELD_ID;
+    ExactAssemblyProbeOptions options;
+    options.constrain_velocity_boundaries = true;
     auto sys = buildQuadStripMixedSystemExactAssemblyProbe(/*n_cells=*/4,
-                                                           ExactAssemblyProbeOptions{},
+                                                           options,
                                                            velocity_field,
                                                            pressure_field);
     ASSERT_TRUE(sys);
@@ -1396,6 +1421,34 @@ TEST(GaugeIntegration, MixedSaddlePointPressureFieldGetsGauge_QuadStripExactAsse
     EXPECT_TRUE(gauge.pressure_mode);
     EXPECT_TRUE(gauge.pressure_mean_zero);
     EXPECT_GT(gauge.constraints, 0u);
+
+    EXPECT_EQ(analysis.pressure_mixed_claims, 1u);
+    EXPECT_EQ(analysis.pressure_nullspace_claims, 1u);
+    EXPECT_EQ(analysis.pressure_nullspace_claims_with_family, 1u);
+    EXPECT_EQ(analysis.pressure_nullspace_claims_from_mixed_analyzer, 1u);
+}
+
+TEST(GaugeIntegration, MixedSaddlePointPressureFieldAnchoredByNaturalVelocityBoundary_QuadStripExactAssembly)
+{
+    FieldId velocity_field = INVALID_FIELD_ID;
+    FieldId pressure_field = INVALID_FIELD_ID;
+    auto sys = buildQuadStripMixedSystemExactAssemblyProbe(/*n_cells=*/4,
+                                                           ExactAssemblyProbeOptions{},
+                                                           velocity_field,
+                                                           pressure_field);
+    ASSERT_TRUE(sys);
+    ASSERT_TRUE(sys->isSetup());
+
+    const auto gauge = summarizeGauge(*sys, pressure_field);
+    const auto analysis = summarizeAnalysis(*sys, pressure_field);
+
+    EXPECT_TRUE(gauge.has_registry);
+    EXPECT_EQ(gauge.candidates, 1u);
+    EXPECT_EQ(gauge.resolved, 1u);
+    EXPECT_TRUE(gauge.pressure_mode);
+    EXPECT_TRUE(gauge.pressure_anchored);
+    EXPECT_FALSE(gauge.pressure_mean_zero);
+    EXPECT_EQ(gauge.constraints, 0u);
 
     EXPECT_EQ(analysis.pressure_mixed_claims, 1u);
     EXPECT_EQ(analysis.pressure_nullspace_claims, 1u);

@@ -84,6 +84,58 @@ TEST(MovingMeshTimeIntegration, HistoryStoresAndAcceptsCoordinateAndDisplacement
     }
 }
 
+TEST(MovingMeshTimeIntegration, TrialCoordinateRollbackLeavesAcceptedHistoryAndTimeLevels)
+{
+    moving_mesh::MovingMeshTimeHistory history(/*dimension=*/2, /*entity_count=*/2, /*history_depth=*/2);
+
+    const std::vector<Real> accepted_coordinates = {0.0, 0.0, 1.0, 0.0};
+    const std::vector<Real> accepted_displacements = {0.0, 0.0, 0.1, 0.0};
+    const std::vector<Real> previous_coordinates = {-0.2, 0.0, 0.8, 0.0};
+    const std::vector<Real> previous_displacements = {-0.2, 0.0, -0.1, 0.0};
+    const std::vector<Real> previous2_coordinates = {-0.5, 0.0, 0.5, 0.0};
+    const std::vector<Real> previous2_displacements = {-0.5, 0.0, -0.4, 0.0};
+
+    history.setCurrentCoordinates(accepted_coordinates);
+    history.setCurrentMeshDisplacements(accepted_displacements);
+    history.setPreviousCoordinates(1, previous_coordinates);
+    history.setPreviousMeshDisplacements(1, previous_displacements);
+    history.setPreviousCoordinates(2, previous2_coordinates);
+    history.setPreviousMeshDisplacements(2, previous2_displacements);
+    history.setStepIndex(7);
+    history.setDt(0.25);
+    history.setPrevDt(0.5);
+
+    const std::vector<Real> trial_coordinates = {0.4, 0.1, 1.6, -0.2};
+    const std::vector<Real> trial_displacements = {0.4, 0.1, 0.6, -0.2};
+    history.setCurrentCoordinates(trial_coordinates);
+    history.setCurrentMeshDisplacements(trial_displacements);
+
+    const svmp::FE::assembly::TimeDerivativeStencil backward_euler{
+        .order = 1,
+        .a = {4.0, -4.0},
+    };
+    const auto trial_velocity =
+        moving_mesh::computeMeshVelocityFromCoordinates(history, backward_euler);
+    ASSERT_EQ(trial_velocity.size(), trial_coordinates.size());
+    EXPECT_NEAR(trial_velocity[0], 2.4, 1.0e-14);
+    EXPECT_NEAR(trial_velocity[2], 3.2, 1.0e-14);
+
+    history.setCurrentCoordinates(accepted_coordinates);
+    history.setCurrentMeshDisplacements(accepted_displacements);
+
+    EXPECT_EQ(history.stepIndex(), 7);
+    EXPECT_DOUBLE_EQ(history.dt(), 0.25);
+    EXPECT_DOUBLE_EQ(history.dtPrev(), 0.5);
+    for (std::size_t i = 0; i < accepted_coordinates.size(); ++i) {
+        EXPECT_DOUBLE_EQ(history.currentCoordinates()[i], accepted_coordinates[i]);
+        EXPECT_DOUBLE_EQ(history.currentMeshDisplacements()[i], accepted_displacements[i]);
+        EXPECT_DOUBLE_EQ(history.previousCoordinates(1)[i], previous_coordinates[i]);
+        EXPECT_DOUBLE_EQ(history.previousMeshDisplacements(1)[i], previous_displacements[i]);
+        EXPECT_DOUBLE_EQ(history.previousCoordinates(2)[i], previous2_coordinates[i]);
+        EXPECT_DOUBLE_EQ(history.previousMeshDisplacements(2)[i], previous2_displacements[i]);
+    }
+}
+
 TEST(MovingMeshTimeIntegration, BDFStencilsComputeMeshVelocityAndAcceleration)
 {
     moving_mesh::MovingMeshTimeHistory history(/*dimension=*/1, /*entity_count=*/1, /*history_depth=*/2);
@@ -205,4 +257,32 @@ TEST(MovingMeshTimeIntegration, GCLDiagnosticComparesMeasureChangeToSuppliedRate
     ASSERT_EQ(diagnostics.size(), 2u);
     EXPECT_NEAR(diagnostics[0].residual, 0.0, 1e-14);
     EXPECT_NEAR(diagnostics[1].residual, 1.0, 1e-14);
+}
+
+TEST(MovingMeshTimeIntegration, GCLDiagnosticHandlesMultipleNonuniformSteps)
+{
+    const std::vector<Real> step0_previous = {1.0, 2.0};
+    const std::vector<Real> step0_current = {1.1, 2.3};
+    const Real dt0 = 0.2;
+    const std::vector<Real> step0_rates = {
+        (step0_current[0] - step0_previous[0]) / dt0,
+        (step0_current[1] - step0_previous[1]) / dt0,
+    };
+    const auto first =
+        moving_mesh::evaluateControlVolumeGCL(step0_current, step0_previous, dt0, step0_rates);
+    ASSERT_EQ(first.size(), 2u);
+    EXPECT_NEAR(first[0].residual, 0.0, 1.0e-14);
+    EXPECT_NEAR(first[1].residual, 0.0, 1.0e-14);
+
+    const std::vector<Real> step1_current = {1.35, 2.0};
+    const Real dt1 = 0.5;
+    const std::vector<Real> step1_rates = {
+        (step1_current[0] - step0_current[0]) / dt1,
+        (step1_current[1] - step0_current[1]) / dt1,
+    };
+    const auto second =
+        moving_mesh::evaluateControlVolumeGCL(step1_current, step0_current, dt1, step1_rates);
+    ASSERT_EQ(second.size(), 2u);
+    EXPECT_NEAR(second[0].residual, 0.0, 1.0e-14);
+    EXPECT_NEAR(second[1].residual, 0.0, 1.0e-14);
 }

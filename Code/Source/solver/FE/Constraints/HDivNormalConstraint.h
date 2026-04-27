@@ -50,6 +50,25 @@ public:
 
     [[nodiscard]] bool isTimeDependent() const noexcept override { return is_time_dependent_; }
 
+    [[nodiscard]] ConstraintDependencyDeclaration dependencyDeclaration() const override
+    {
+        ConstraintDependencyDeclaration out = ISystemConstraint::dependencyDeclaration();
+        merge_into(out.value, ConstraintDependencyMask::meshGeometry());
+        if (is_time_dependent_) {
+            out.value.time = true;
+        }
+        return out;
+    }
+
+    [[nodiscard]] systems::SetupStorageRequirements storageRequirements() const noexcept override
+    {
+        systems::SetupStorageRequirements req;
+        req.entity_dof_map = true;
+        req.boundary_face_topology = true;
+        req.face_gids = true;
+        return req;
+    }
+
 private:
     struct FaceWorkItem {
         std::shared_ptr<spaces::TraceSpace> trace_space{};

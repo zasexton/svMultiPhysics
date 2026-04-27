@@ -35,6 +35,7 @@
  */
 
 #include "AffineConstraints.h"
+#include "ConstraintDependency.h"
 #include "Core/Types.h"
 #include "Core/FEException.h"
 
@@ -274,6 +275,22 @@ public:
      * @brief Check if this constraint is time-dependent
      */
     [[nodiscard]] virtual bool isTimeDependent() const noexcept { return false; }
+
+    /**
+     * @brief Revision domains that can invalidate this constraint.
+     *
+     * Direct algebraic constraints are revision-independent by default except
+     * for time-dependent inhomogeneities. Mesh-aware subclasses should declare
+     * geometry/topology/ownership/numbering/label dependencies explicitly.
+     */
+    [[nodiscard]] virtual ConstraintDependencyDeclaration dependencyDeclaration() const
+    {
+        ConstraintDependencyDeclaration out;
+        if (isTimeDependent()) {
+            out.value.time = true;
+        }
+        return out;
+    }
 
     /**
      * @brief Clone this constraint (polymorphic copy)

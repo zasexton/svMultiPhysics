@@ -117,6 +117,28 @@ std::optional<double> get_defined_double(const svmp::Physics::ParameterMap& para
   return parse_double(p->value, key);
 }
 
+std::optional<bool> get_defined_bool(const svmp::Physics::ParameterMap& params, std::string_view key)
+{
+  const auto* p = find_param(params, key);
+  if (!p || !p->defined) {
+    return std::nullopt;
+  }
+  return parse_bool_relaxed(p->value);
+}
+
+std::optional<std::string> get_defined_string(const svmp::Physics::ParameterMap& params, std::string_view key)
+{
+  const auto* p = find_param(params, key);
+  if (!p || !p->defined) {
+    return std::nullopt;
+  }
+  auto value = trim_copy(p->value);
+  if (value.empty()) {
+    return std::nullopt;
+  }
+  return value;
+}
+
 struct TemporalSpatialValues {
   struct Key {
     std::int64_t x{0};
@@ -685,6 +707,59 @@ void apply_fluid_properties(const svmp::Physics::DomainInput& domain,
       "[svMultiPhysics::Physics] Fluid viscosity model '" + model_raw +
       "' is not supported by the new solver Navier-Stokes module. Set <Use_new_OOP_solver>false</Use_new_OOP_solver> "
       "to use the legacy solver.");
+}
+
+void apply_fluid_moving_domain_params(
+    const svmp::Physics::ParameterMap& params,
+    svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
+{
+  constexpr std::array<std::string_view, 5> kAleKeys = {
+      "ALE",
+      "Enable_ALE",
+      "Use_ALE",
+      "Moving_mesh",
+      "Use_moving_mesh",
+  };
+  for (const auto key : kAleKeys) {
+    if (const auto value = get_defined_bool(params, key)) {
+      options.enable_ale = *value;
+    }
+  }
+
+  constexpr std::array<std::string_view, 3> kMovingVolumeKeys = {
+      "Moving_control_volume_transient",
+      "Include_moving_control_volume_transient",
+      "ALE_moving_control_volume_transient",
+  };
+  for (const auto key : kMovingVolumeKeys) {
+    if (const auto value = get_defined_bool(params, key)) {
+      options.include_moving_control_volume_transient = *value;
+    }
+  }
+
+  constexpr std::array<std::string_view, 3> kMeshVelocityFieldKeys = {
+      "Mesh_velocity_field",
+      "MeshVelocityField",
+      "Mesh_motion_velocity_field",
+  };
+  for (const auto key : kMeshVelocityFieldKeys) {
+    if (const auto value = get_defined_string(params, key)) {
+      options.mesh_velocity_field_name = *value;
+    }
+  }
+}
+
+void apply_fluid_moving_domain_options(
+    const svmp::Physics::EquationModuleInput& input,
+    const svmp::Physics::DomainInput& domain,
+    svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
+{
+  apply_fluid_moving_domain_params(input.equation_params, options);
+  apply_fluid_moving_domain_params(domain.params, options);
+  if (trim_copy(options.mesh_velocity_field_name).empty()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Mesh_velocity_field must be non-empty when configuring Navier-Stokes ALE.");
+  }
 }
 
 std::vector<int> parse_int_list(std::string_view raw)
@@ -1955,6 +2030,7 @@ create_navier_stokes_from_input(const svmp::Physics::EquationModuleInput& input,
   options.enable_jit_specialization =
       svmp::Physics::core::resolveOopJitSpecializationEnable(input, options.enable_jit_specialization);
 
+  apply_fluid_moving_domain_options(input, domain, options);
   apply_fluid_properties(domain, options);
   apply_fluid_bcs(input, domain, options);
 

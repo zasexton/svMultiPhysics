@@ -11,6 +11,10 @@
 #include "Core/Types.h"
 #include "Systems/GlobalKernel.h"
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Mesh/Search/ContactProximity.h"
+#endif
+
 namespace svmp {
 namespace FE {
 namespace systems {
@@ -40,6 +44,11 @@ struct PenaltySurfaceContactConfig {
     // Ignored unless track_contact_count is enabled (<= 0 defaults to a conservative value).
     LocalIndex max_state_qpts{0};
 };
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+[[nodiscard]] svmp::search::ContactCandidateOptions
+makeContactCandidateOptions(const PenaltySurfaceContactConfig& cfg);
+#endif
 
 /**
  * @brief Simple surface-to-surface penalty contact global kernel

@@ -7,6 +7,7 @@
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 
+#include "Physics/Formulations/MovingDomain/MovingDomainTerms.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 
 #include "FE/Forms/Vocabulary.h"
@@ -97,6 +98,33 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     p_spec.components = 1;
     const FE::FieldId p_id = system.addField(std::move(p_spec));
 
+    if (options_.enable_ale) {
+        auto mesh_velocity_space = options_.mesh_velocity_space ? options_.mesh_velocity_space : velocity_space_;
+        if (!mesh_velocity_space) {
+            throw std::invalid_argument("IncompressibleNavierStokesVMSModule::registerOn: null mesh_velocity_space");
+        }
+        if (mesh_velocity_space->value_dimension() != dim) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule::registerOn: mesh velocity space dimension must match velocity space");
+        }
+
+        FE::FieldId mesh_velocity_id = system.findFieldByName(options_.mesh_velocity_field_name);
+        if (mesh_velocity_id == FE::INVALID_FIELD_ID) {
+            if (!options_.auto_register_mesh_velocity_field) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule::registerOn: ALE is enabled but mesh velocity field '" +
+                    options_.mesh_velocity_field_name + "' is not registered");
+            }
+
+            FE::systems::FieldSpec w_spec;
+            w_spec.name = options_.mesh_velocity_field_name;
+            w_spec.space = std::move(mesh_velocity_space);
+            w_spec.components = dim;
+            mesh_velocity_id = system.addField(std::move(w_spec));
+        }
+        system.bindMeshMotionField(FE::systems::MeshMotionFieldRole::Velocity, mesh_velocity_id);
+    }
+
     system.addOperator("equations");
 
     using namespace svmp::FE::forms;
@@ -127,32 +155,32 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         mu = FormExpr::constant(options_.viscosity);
     }
 
-    // Convection velocity (no ALE/mesh motion here).
-    FormExpr a;
-    if (options_.enable_convection) {
-        a = u;
-    } else {
-        std::vector<FormExpr> a_comp;
-        a_comp.reserve(static_cast<std::size_t>(dim));
-        for (int d = 0; d < dim; ++d) {
-            a_comp.push_back(FormExpr::constant(0.0));
-        }
-        a = FormExpr::asVector(std::move(a_comp));
-    }
+    // ALE uses relative convection u - w_mesh. Static/default paths remain unchanged.
+    const auto zero = moving_domain::zeroVector(dim);
+    const auto mesh_velocity = moving_domain::domainVelocityOrZero(dim, options_.enable_ale);
+    const auto a = options_.enable_convection
+                       ? moving_domain::relativeConvectiveVelocity(u, dim, options_.enable_ale)
+                       : zero;
+    const bool include_mcv =
+        options_.enable_ale && options_.include_moving_control_volume_transient;
+    const auto moving_volume_strong =
+        include_mcv ? (div(mesh_velocity) * u) : zero;
 
     // Strong momentum residual (full, including dt(u)):
     //   R_m = rho*(dt(u) + (u·∇)u - f) + grad(p) - div(2 mu sym(grad(u))).
     const auto stress = FormExpr::constant(2.0) * mu * sym(grad(u));
-    const auto r_m = rho * (dt(u) + grad(u) * a - f) + grad(p) - div(stress);
+    const auto r_m = rho * (dt(u) + grad(u) * a + moving_volume_strong - f) + grad(p) - div(stress);
 
     // Galerkin terms.
     const auto inertia = rho * inner(dt(u), v);
+    const auto moving_volume =
+        moving_domain::movingControlVolumeVectorTransient(u, v, rho, dim, include_mcv);
     const auto convection = rho * inner(grad(u) * a, v);
     const auto viscous = FormExpr::constant(2.0) * mu * inner(sym(grad(u)), sym(grad(v)));
     const auto pressure = -p * div(v);
     const auto forcing = -rho * inner(f, v);
 
-    FormExpr momentum_form = (inertia + convection + viscous + pressure + forcing).dx();
+    FormExpr momentum_form = (inertia + moving_volume + convection + viscous + pressure + forcing).dx();
     FormExpr continuity_form = (q * div(u)).dx();
 
     if (options_.enable_vms) {
@@ -193,7 +221,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         const auto p_sub = -tau_c * div(u);
 
         // Advection velocity for convection-related terms (disabled for Stokes).
-        const auto u_adv = options_.enable_convection ? (u + u_sub) : a;
+        const auto u_adv = options_.enable_convection ? (u + u_sub - mesh_velocity) : a;
         const auto p_adv = p + p_sub;
 
         // Momentum: Galerkin + VMS (SUPG-like) + pressure-subscale (LSIC-like).
@@ -213,7 +241,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             cross_stress = inner(grad(v) * u_sub, rV_tau);
         }
 
-        momentum_form = (inertia + convection_adv + viscous + pressure_adv + forcing + supg + cross_stress).dx();
+        momentum_form = (inertia + moving_volume + convection_adv + viscous + pressure_adv + forcing + supg + cross_stress).dx();
 
         // Continuity: Galerkin + VMS (PSPG-like).
         continuity_form = (q * div(u) - inner(grad(q), u_sub)).dx();

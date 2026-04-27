@@ -58,6 +58,7 @@
 // Geometry components
 #include "Geometry/MeshGeometry.h"
 #include "Geometry/MeshQuality.h"
+#include "Validation/MovingGeometryValidity.h"
 
 // Observer pattern
 #include "Observer/MeshObserver.h"

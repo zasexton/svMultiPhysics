@@ -44,6 +44,55 @@ TEST(SearchAccelInvalidationTest, InvalidatesOnGeometryChanged) {
   EXPECT_FALSE(MeshSearch::has_search_structure(mesh));
 }
 
+TEST(SearchAccelInvalidationTest, InvalidatesOnTopologyChanged) {
+  MeshBase mesh = create_unit_tet_mesh();
+
+  MeshSearch::build_search_structure(mesh);
+  ASSERT_TRUE(MeshSearch::has_search_structure(mesh));
+
+  mesh.clear();
+  EXPECT_FALSE(MeshSearch::has_search_structure(mesh));
+}
+
+TEST(SearchAccelInvalidationTest, InvalidatesOnLabelsChanged) {
+  MeshBase mesh = create_unit_tet_mesh();
+
+  MeshSearch::build_search_structure(mesh);
+  ASSERT_TRUE(MeshSearch::has_search_structure(mesh));
+
+  mesh.set_region_label(0, 17);
+  EXPECT_FALSE(MeshSearch::has_search_structure(mesh));
+}
+
+TEST(SearchAccelInvalidationTest, InvalidatesOnNumberingChanged) {
+  MeshBase mesh = create_unit_tet_mesh();
+
+  MeshSearch::build_search_structure(mesh);
+  ASSERT_TRUE(MeshSearch::has_search_structure(mesh));
+
+  mesh.set_cell_gids({101});
+  EXPECT_FALSE(MeshSearch::has_search_structure(mesh));
+}
+
+TEST(SearchAccelInvalidationTest, ActiveConfigurationSwitchIsEpochVersioned) {
+  MeshBase mesh = create_unit_tet_mesh();
+  const auto initial_epoch = mesh.active_configuration_epoch();
+  const auto initial_geometry_revision = mesh.geometry_revision();
+
+  std::vector<real_t> current = mesh.X_ref();
+  current[0] += 0.25;
+  mesh.set_current_coords(current);
+  EXPECT_GT(mesh.geometry_revision(), initial_geometry_revision);
+  EXPECT_EQ(mesh.active_configuration_epoch(), initial_epoch);
+
+  const auto after_current_coords_epoch = mesh.active_configuration_epoch();
+  mesh.use_current_configuration();
+  EXPECT_GT(mesh.active_configuration_epoch(), after_current_coords_epoch);
+
+  const auto after_current_epoch = mesh.active_configuration_epoch();
+  mesh.use_reference_configuration();
+  EXPECT_GT(mesh.active_configuration_epoch(), after_current_epoch);
+}
+
 } // namespace test
 } // namespace svmp
-

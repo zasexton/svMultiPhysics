@@ -905,6 +905,7 @@ private:
     FaceFrameGeometryScratch scratch_current_face_geometry_;
     std::vector<AssemblyContext::Matrix3x3> scratch_configuration_transforms_;
     std::vector<AssemblyContext::Vector3D> scratch_mesh_motion_values_;
+    std::vector<AssemblyContext::Matrix3x3> scratch_mesh_motion_jacobians_;
 
     // Point-wise evaluation scratch arrays
     std::vector<Real> scratch_scalar_values_at_pt_;

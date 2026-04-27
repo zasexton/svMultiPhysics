@@ -11,10 +11,13 @@
 #include "Core/FEException.h"
 #include "Core/Logger.h"
 
+#include "Forms/JIT/HardwareProfile.h"
 #include "Forms/JIT/JITCompiler.h"
 #include "Forms/JIT/JITValidation.h"
 
+#include <algorithm>
 #include <utility>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -35,10 +38,31 @@ inline void callJIT(std::uintptr_t addr, const void* args) noexcept
 
 inline void overrideFunctionalWeights(assembly::jit::KernelSideArgsV6& side) noexcept
 {
+    side.n_test_dofs = 1u;
     side.time_derivative_term_weight = 1.0;
     side.non_time_derivative_term_weight = 1.0;
     side.dt_term_weights.fill(Real(1.0));
     side.max_time_derivative_order = 0u;
+}
+
+[[nodiscard]] inline assembly::jit::KernelOutputViewV6
+makeFunctionalOutputView(Real* value, std::uint32_t n_trial_dofs) noexcept
+{
+    assembly::jit::KernelOutputViewV6 out;
+    out.element_matrix = nullptr;
+    out.element_vector = value;
+    out.n_test_dofs = 1u;
+    out.n_trial_dofs = n_trial_dofs;
+    return out;
+}
+
+[[nodiscard]] inline assembly::jit::KernelSideArgsV6
+packFunctionalSide(const assembly::AssemblyContext& ctx) noexcept
+{
+    const auto checks = assembly::jit::PackingChecks{.validate_alignment = false};
+    auto side = assembly::jit::detail::packSideArgsV6(ctx, std::nullopt, std::nullopt, checks);
+    overrideFunctionalWeights(side);
+    return side;
 }
 
 } // namespace
@@ -94,25 +118,161 @@ Real JITFunctionalKernelWrapper::evaluateCellTotal(const assembly::AssemblyConte
     }
 
     try {
-        thread_local assembly::KernelOutput out;
-        out.reserve(/*n_test=*/1, /*n_trial=*/ctx.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/true);
-        out.clear();
+        Real value = 0.0;
+        auto side = packFunctionalSide(ctx);
+        auto output = makeFunctionalOutputView(&value,
+                                               static_cast<std::uint32_t>(ctx.numTrialDofs()));
 
-        const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
-        auto args = assembly::jit::packCellKernelArgsV6(ctx, out, checks);
+        if (options_.vectorize) {
+            const auto simd_w = options_.simd_batch
+                ? static_cast<std::uint32_t>(hardwareProfile().simdDoubles())
+                : 1u;
+            const auto padded_n = (simd_w >= 2u && options_.simd_batch) ? simd_w : 1u;
 
-        args.side.n_test_dofs = 1u;
-        args.output.n_test_dofs = 1u;
-        overrideFunctionalWeights(args.side);
+            thread_local std::vector<assembly::jit::KernelSideArgsV6> sides;
+            thread_local std::vector<assembly::jit::KernelOutputViewV6> outputs;
+            thread_local std::vector<Real> pad_values;
+            sides.resize(padded_n);
+            outputs.resize(padded_n);
+            pad_values.assign(padded_n > 0u ? padded_n - 1u : 0u, Real(0.0));
 
-        callJIT(addr_, &args);
-        return out.local_vector.empty() ? Real(0.0) : out.local_vector[0];
+            sides[0] = side;
+            outputs[0] = output;
+            for (std::uint32_t i = 1; i < padded_n; ++i) {
+                sides[i] = side;
+                outputs[i] = makeFunctionalOutputView(&pad_values[static_cast<std::size_t>(i - 1u)],
+                                                       static_cast<std::uint32_t>(ctx.numTrialDofs()));
+            }
+
+            assembly::jit::CellKernelBatchArgsV1 batch_args;
+            batch_args.batch_size = padded_n;
+            batch_args.sides = sides.data();
+            batch_args.outputs = outputs.data();
+            callJIT(addr_, &batch_args);
+        } else {
+            assembly::jit::CellKernelArgsV6 args;
+            args.side = side;
+            args.output = output;
+            callJIT(addr_, &args);
+        }
+        return value;
     } catch (const std::exception& e) {
         markRuntimeFailureOnce("evaluateCellTotal", e.what());
         return fallback_->evaluateCellTotal(ctx);
     } catch (...) {
         markRuntimeFailureOnce("evaluateCellTotal", "unknown exception");
         return fallback_->evaluateCellTotal(ctx);
+    }
+}
+
+bool JITFunctionalKernelWrapper::supportsCellTotalBatch() const noexcept
+{
+    return domain_ == Domain::Cell;
+}
+
+void JITFunctionalKernelWrapper::evaluateCellTotalBatch(
+    std::span<const assembly::AssemblyContext* const> contexts,
+    std::span<Real> totals)
+{
+    const std::size_t n = std::min(contexts.size(), totals.size());
+    if (n == 0u) {
+        return;
+    }
+    if (domain_ != Domain::Cell) {
+        fallback_->evaluateCellTotalBatch(contexts.first(n), totals.first(n));
+        return;
+    }
+
+    const assembly::AssemblyContext* first_ctx = nullptr;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (contexts[i] != nullptr) {
+            first_ctx = contexts[i];
+            break;
+        }
+    }
+    if (first_ctx == nullptr) {
+        std::fill_n(totals.begin(), n, Real(0.0));
+        return;
+    }
+
+    maybeCompile(*first_ctx);
+    if (!canUseJIT()) {
+        fallback_->evaluateCellTotalBatch(contexts.first(n), totals.first(n));
+        return;
+    }
+
+    try {
+        if (options_.vectorize) {
+            const auto simd_w = options_.simd_batch
+                ? static_cast<std::size_t>(hardwareProfile().simdDoubles())
+                : std::size_t{1};
+            const auto padded_n = (simd_w >= 2u && options_.simd_batch)
+                ? ((n + simd_w - 1u) / simd_w) * simd_w
+                : n;
+
+            thread_local std::vector<assembly::jit::KernelSideArgsV6> sides;
+            thread_local std::vector<assembly::jit::KernelOutputViewV6> outputs;
+            thread_local std::vector<Real> pad_values;
+            sides.resize(padded_n);
+            outputs.resize(padded_n);
+            pad_values.assign(std::max(padded_n > n ? padded_n - n : 0u, std::size_t{1}), Real(0.0));
+
+            std::size_t fill_src = static_cast<std::size_t>(-1);
+            for (std::size_t i = 0; i < n; ++i) {
+                totals[i] = 0.0;
+                if (contexts[i] == nullptr) {
+                    sides[i] = {};
+                    outputs[i] = {};
+                    continue;
+                }
+                sides[i] = packFunctionalSide(*contexts[i]);
+                outputs[i] = makeFunctionalOutputView(&totals[i],
+                                                       static_cast<std::uint32_t>(contexts[i]->numTrialDofs()));
+                if (fill_src == static_cast<std::size_t>(-1)) {
+                    fill_src = i;
+                }
+            }
+
+            FE_THROW_IF(fill_src == static_cast<std::size_t>(-1), InvalidArgumentException,
+                        "JITFunctionalKernelWrapper::evaluateCellTotalBatch: no valid contexts");
+
+            for (std::size_t i = n; i < padded_n; ++i) {
+                sides[i] = sides[fill_src];
+                outputs[i] = makeFunctionalOutputView(&pad_values[i - n],
+                                                       static_cast<std::uint32_t>(contexts[fill_src]->numTrialDofs()));
+            }
+            for (std::size_t i = 0; i < n; ++i) {
+                if (contexts[i] == nullptr) {
+                    sides[i] = sides[fill_src];
+                    outputs[i] = makeFunctionalOutputView(&pad_values[0],
+                                                           static_cast<std::uint32_t>(contexts[fill_src]->numTrialDofs()));
+                }
+            }
+
+            assembly::jit::CellKernelBatchArgsV1 batch_args;
+            batch_args.batch_size = static_cast<std::uint32_t>(padded_n);
+            batch_args.sides = sides.data();
+            batch_args.outputs = outputs.data();
+            callJIT(addr_, &batch_args);
+        } else {
+            for (std::size_t i = 0; i < n; ++i) {
+                totals[i] = 0.0;
+                if (contexts[i] == nullptr) {
+                    continue;
+                }
+                assembly::jit::CellKernelArgsV6 args;
+                args.side = packFunctionalSide(*contexts[i]);
+                args.output = makeFunctionalOutputView(&totals[i],
+                                                       static_cast<std::uint32_t>(contexts[i]->numTrialDofs()));
+                callJIT(addr_, &args);
+            }
+        }
+    } catch (const std::exception& e) {
+        markRuntimeFailureOnce("evaluateCellTotalBatch", e.what());
+        fallback_->evaluateCellTotalBatch(contexts.first(n), totals.first(n));
+    } catch (...) {
+        markRuntimeFailureOnce("evaluateCellTotalBatch", "unknown exception");
+        fallback_->evaluateCellTotalBatch(contexts.first(n), totals.first(n));
     }
 }
 

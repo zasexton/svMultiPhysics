@@ -10,6 +10,7 @@
 #include "Basis/BasisFunction.h"
 #include "Core/FEException.h"
 #include "Elements/ElementTransform.h"
+#include "Geometry/GeometryFrameUtils.h"
 #include "Geometry/MappingFactory.h"
 #include "Quadrature/QuadratureRule.h"
 
@@ -65,17 +66,6 @@ namespace {
         for (std::size_t c = 0; c < 3u; ++c) {
             out(r, c) = m[r][c];
         }
-    }
-    return out;
-}
-
-[[nodiscard]] std::vector<Point3D> pointsFromGeometryNodes(
-    const std::vector<math::Vector<Real, 3>>& nodes)
-{
-    std::vector<Point3D> out;
-    out.reserve(nodes.size());
-    for (const auto& node : nodes) {
-        out.push_back(toPoint(node));
     }
     return out;
 }
@@ -144,6 +134,170 @@ namespace {
 [[nodiscard]] Real norm(const math::Vector<Real, 3>& v) noexcept
 {
     return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+}
+
+[[nodiscard]] Vector3D toArrayVector(const math::Vector<Real, 3>& v) noexcept
+{
+    return Vector3D{v[0], v[1], v[2]};
+}
+
+[[nodiscard]] math::Vector<Real, 3> toMathVector(const Vector3D& v) noexcept
+{
+    return math::Vector<Real, 3>{v[0], v[1], v[2]};
+}
+
+[[nodiscard]] math::Vector<Real, 3> matrixColumn(const math::Matrix<Real, 3, 3>& m,
+                                                 std::size_t c) noexcept
+{
+    return math::Vector<Real, 3>{m(0, c), m(1, c), m(2, c)};
+}
+
+[[nodiscard]] math::Vector<Real, 3> unitOrZero(const math::Vector<Real, 3>& v) noexcept
+{
+    const Real n = norm(v);
+    if (n <= detail::kDegenerateTol) {
+        return math::Vector<Real, 3>{};
+    }
+    return v / n;
+}
+
+[[nodiscard]] math::Vector<Real, 3> projectedUnitDerivative(
+    const math::Vector<Real, 3>& unit,
+    const math::Vector<Real, 3>& dvalue,
+    Real value_norm) noexcept
+{
+    if (value_norm <= detail::kDegenerateTol) {
+        return math::Vector<Real, 3>{};
+    }
+    return (dvalue - unit * unit.dot(dvalue)) / value_norm;
+}
+
+[[nodiscard]] math::Vector<Real, 3> curveFrameAxis(
+    const math::Vector<Real, 3>& t_unit) noexcept
+{
+    math::Vector<Real, 3> axis{Real(1), Real(0), Real(0)};
+    if (std::abs(t_unit[0]) > Real(0.9)) {
+        axis = math::Vector<Real, 3>{Real(0), Real(1), Real(0)};
+        if (std::abs(t_unit[1]) > Real(0.9)) {
+            axis = math::Vector<Real, 3>{Real(0), Real(0), Real(1)};
+        }
+    }
+    return axis;
+}
+
+[[nodiscard]] Matrix3x3 embeddedFrameJacobianDerivative(
+    const math::Matrix<Real, 3, 3>& J,
+    int dim,
+    const basis::Gradient& gradient,
+    int component)
+{
+    Matrix3x3 dJ{};
+    const auto c = static_cast<std::size_t>(component);
+    for (int xi_dir = 0; xi_dir < dim; ++xi_dir) {
+        dJ[c][static_cast<std::size_t>(xi_dir)] =
+            gradient[static_cast<std::size_t>(xi_dir)];
+    }
+
+    if (dim == 1) {
+        const auto t = matrixColumn(J, 0);
+        const Real t_norm = norm(t);
+        if (t_norm <= detail::kDegenerateTol) {
+            return dJ;
+        }
+        const math::Vector<Real, 3> t_unit = t / t_norm;
+        auto axis = curveFrameAxis(t_unit);
+        auto n1_raw = t_unit.cross(axis);
+        Real n1_norm = norm(n1_raw);
+        if (n1_norm <= detail::kDegenerateTol) {
+            axis = math::Vector<Real, 3>{Real(0), Real(0), Real(1)};
+            n1_raw = t_unit.cross(axis);
+            n1_norm = norm(n1_raw);
+        }
+        if (n1_norm <= detail::kDegenerateTol) {
+            return dJ;
+        }
+
+        const math::Vector<Real, 3> n1 = n1_raw / n1_norm;
+        const auto dt = math::Vector<Real, 3>{
+            (component == 0) ? gradient[0] : Real(0),
+            (component == 1) ? gradient[0] : Real(0),
+            (component == 2) ? gradient[0] : Real(0)};
+        const auto dt_unit = projectedUnitDerivative(t_unit, dt, t_norm);
+        const auto dn1_raw = dt_unit.cross(axis);
+        const auto dn1 = projectedUnitDerivative(n1, dn1_raw, n1_norm);
+        const auto dn2 = dt_unit.cross(n1) + t_unit.cross(dn1);
+
+        for (std::size_t r = 0; r < 3u; ++r) {
+            dJ[r][1] = dn1[r];
+            dJ[r][2] = dn2[r];
+        }
+    } else if (dim == 2) {
+        const auto t0 = matrixColumn(J, 0);
+        const auto t1 = matrixColumn(J, 1);
+        const auto area_vec = t0.cross(t1);
+        const Real area = norm(area_vec);
+        if (area <= detail::kDegenerateTol) {
+            return dJ;
+        }
+
+        const math::Vector<Real, 3> n = area_vec / area;
+        const auto dt0 = math::Vector<Real, 3>{
+            (component == 0) ? gradient[0] : Real(0),
+            (component == 1) ? gradient[0] : Real(0),
+            (component == 2) ? gradient[0] : Real(0)};
+        const auto dt1 = math::Vector<Real, 3>{
+            (component == 0) ? gradient[1] : Real(0),
+            (component == 1) ? gradient[1] : Real(0),
+            (component == 2) ? gradient[1] : Real(0)};
+        const auto darea_vec = dt0.cross(t1) + t0.cross(dt1);
+        const auto dn = projectedUnitDerivative(n, darea_vec, area);
+
+        for (std::size_t r = 0; r < 3u; ++r) {
+            dJ[r][2] = dn[r];
+        }
+    }
+
+    return dJ;
+}
+
+[[nodiscard]] Real embeddedFrameMeasureDerivative(
+    const math::Matrix<Real, 3, 3>& J,
+    int dim,
+    const basis::Gradient& gradient,
+    int component) noexcept
+{
+    if (dim == 1) {
+        const auto t = matrixColumn(J, 0);
+        const Real t_norm = norm(t);
+        if (t_norm <= detail::kDegenerateTol) {
+            return Real(0);
+        }
+        const math::Vector<Real, 3> t_unit = t / t_norm;
+        return t_unit[static_cast<std::size_t>(component)] * gradient[0];
+    }
+
+    if (dim == 2) {
+        const auto t0 = matrixColumn(J, 0);
+        const auto t1 = matrixColumn(J, 1);
+        const auto area_vec = t0.cross(t1);
+        const Real area = norm(area_vec);
+        if (area <= detail::kDegenerateTol) {
+            return Real(0);
+        }
+        const math::Vector<Real, 3> n = area_vec / area;
+        const auto dt0 = math::Vector<Real, 3>{
+            (component == 0) ? gradient[0] : Real(0),
+            (component == 1) ? gradient[0] : Real(0),
+            (component == 2) ? gradient[0] : Real(0)};
+        const auto dt1 = math::Vector<Real, 3>{
+            (component == 0) ? gradient[1] : Real(0),
+            (component == 1) ? gradient[1] : Real(0),
+            (component == 2) ? gradient[1] : Real(0)};
+        const auto darea_vec = dt0.cross(t1) + t0.cross(dt1);
+        return n.dot(darea_vec);
+    }
+
+    return Real(0);
 }
 
 [[nodiscard]] std::shared_ptr<GeometryMapping>
@@ -265,8 +419,110 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
     return Real(1);
 }
 
-[[nodiscard]] math::Vector<Real, 3> mapFaceCanonicalPoint(
-    const GeometryMapping& mapping,
+[[nodiscard]] math::Matrix<Real, 3, 3> canonicalToFacetJacobian(
+    ElementType face_type,
+    const math::Vector<Real, 3>& canonical_point,
+    std::span<const LocalIndex> align_facet_to_reference)
+{
+    math::Matrix<Real, 3, 3> D{};
+    if (face_type == ElementType::Line2) {
+        if (align_facet_to_reference.size() == 2u) {
+            const auto src = static_cast<std::size_t>(align_facet_to_reference[1]);
+            FE_THROW_IF(src >= 2u, FEException,
+                        "FrameGeometry: invalid line face alignment index");
+            D(0, 0) = (src == 0u) ? Real(-0.5) : Real(0.5);
+        } else {
+            D(0, 0) = Real(0.5);
+        }
+        return D;
+    }
+
+    if (face_type == ElementType::Quad4) {
+        const Real s = (canonical_point[0] + Real(1)) * Real(0.5);
+        const Real t = (canonical_point[1] + Real(1)) * Real(0.5);
+        if (align_facet_to_reference.size() == 4u) {
+            const std::array<Real, 4> dw_ds{
+                -(Real(1) - t), Real(1) - t, t, -t};
+            const std::array<Real, 4> dw_dt{
+                -(Real(1) - s), -s, s, Real(1) - s};
+            const auto add_weight_derivative = [&](std::size_t local, int row) {
+                const auto src = static_cast<std::size_t>(align_facet_to_reference[local]);
+                FE_THROW_IF(src >= 4u, FEException,
+                            "FrameGeometry: invalid quad face alignment index");
+                const auto r = static_cast<std::size_t>(row);
+                D(r, 0) += Real(0.5) * dw_ds[src];
+                D(r, 1) += Real(0.5) * dw_dt[src];
+            };
+            add_weight_derivative(1u, 0);
+            add_weight_derivative(2u, 0);
+            add_weight_derivative(2u, 1);
+            add_weight_derivative(3u, 1);
+        } else {
+            D(0, 0) = Real(0.5);
+            D(1, 1) = Real(0.5);
+        }
+        return D;
+    }
+
+    if (face_type == ElementType::Triangle3) {
+        if (align_facet_to_reference.size() == 3u) {
+            const std::array<std::array<Real, 2>, 3> dw{{
+                {{Real(-1), Real(-1)}},
+                {{Real(1), Real(0)}},
+                {{Real(0), Real(1)}}}};
+            for (int row = 0; row < 2; ++row) {
+                const auto src =
+                    static_cast<std::size_t>(align_facet_to_reference[static_cast<std::size_t>(row + 1)]);
+                FE_THROW_IF(src >= 3u, FEException,
+                            "FrameGeometry: invalid triangle face alignment index");
+                const auto r = static_cast<std::size_t>(row);
+                D(r, 0) = dw[src][0];
+                D(r, 1) = dw[src][1];
+            }
+        } else {
+            D(0, 0) = Real(1);
+            D(1, 1) = Real(1);
+        }
+        return D;
+    }
+
+    return D;
+}
+
+[[nodiscard]] math::Matrix<Real, 3, 3> referenceFacetJacobian(
+    ElementType cell_type,
+    LocalIndex local_face_id,
+    const math::Vector<Real, 3>& facet_coords)
+{
+    auto [unused_vertices, coords] =
+        elements::ElementTransform::facet_vertices(cell_type, static_cast<int>(local_face_id));
+    (void)unused_vertices;
+
+    math::Matrix<Real, 3, 3> D{};
+    const int dim = element_dimension(cell_type);
+    if (dim == 2 && coords.size() >= 2u) {
+        for (std::size_t r = 0; r < 3u; ++r) {
+            D(r, 0) = coords[1][r] - coords[0][r];
+        }
+    } else if (dim == 3 && coords.size() == 3u) {
+        for (std::size_t r = 0; r < 3u; ++r) {
+            D(r, 0) = coords[1][r] - coords[0][r];
+            D(r, 1) = coords[2][r] - coords[0][r];
+        }
+    } else if (dim == 3 && coords.size() >= 4u) {
+        const Real s = facet_coords[0];
+        const Real t = facet_coords[1];
+        for (std::size_t r = 0; r < 3u; ++r) {
+            D(r, 0) = (Real(1) - t) * (coords[1][r] - coords[0][r]) +
+                      t * (coords[2][r] - coords[3][r]);
+            D(r, 1) = (Real(1) - s) * (coords[3][r] - coords[0][r]) +
+                      s * (coords[2][r] - coords[1][r]);
+        }
+    }
+    return D;
+}
+
+[[nodiscard]] math::Matrix<Real, 3, 3> referenceToCanonicalFaceJacobian(
     ElementType cell_type,
     LocalIndex local_face_id,
     ElementType face_type,
@@ -275,12 +531,11 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
 {
     const auto facet_coords =
         canonicalToFacetCoordinates(face_type, canonical_point, align_facet_to_reference);
-    const auto xi = elements::ElementTransform::facet_to_reference(
-        cell_type, static_cast<int>(local_face_id), facet_coords);
-    return mapping.map_to_physical(xi);
+    return referenceFacetJacobian(cell_type, local_face_id, facet_coords) *
+           canonicalToFacetJacobian(face_type, canonical_point, align_facet_to_reference);
 }
 
-[[nodiscard]] Matrix3x3 finiteDifferenceSurfaceJacobian(
+[[nodiscard]] Matrix3x3 analyticSurfaceJacobian(
     const GeometryMapping& mapping,
     ElementType cell_type,
     LocalIndex local_face_id,
@@ -289,29 +544,28 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
     const Vector3D& normal,
     std::span<const LocalIndex> align_facet_to_reference)
 {
-    constexpr Real eps = Real(1e-6);
     const int face_dim = (face_type == ElementType::Line2) ? 1 : 2;
     Matrix3x3 out{};
+
+    const auto facet_coords =
+        canonicalToFacetCoordinates(face_type, canonical_point, align_facet_to_reference);
+    const auto xi = elements::ElementTransform::facet_to_reference(
+        cell_type, static_cast<int>(local_face_id), facet_coords);
+    const auto J = mapping.jacobian(xi);
+    const auto dxi_dcanon =
+        referenceToCanonicalFaceJacobian(cell_type,
+                                         local_face_id,
+                                         face_type,
+                                         canonical_point,
+                                         align_facet_to_reference);
+
     for (int d = 0; d < face_dim; ++d) {
-        auto plus = canonical_point;
-        auto minus = canonical_point;
-        plus[static_cast<std::size_t>(d)] += eps;
-        minus[static_cast<std::size_t>(d)] -= eps;
-        const auto x_plus = mapFaceCanonicalPoint(mapping,
-                                                  cell_type,
-                                                  local_face_id,
-                                                  face_type,
-                                                  plus,
-                                                  align_facet_to_reference);
-        const auto x_minus = mapFaceCanonicalPoint(mapping,
-                                                   cell_type,
-                                                   local_face_id,
-                                                   face_type,
-                                                   minus,
-                                                   align_facet_to_reference);
         for (std::size_t r = 0; r < 3u; ++r) {
-            out[r][static_cast<std::size_t>(d)] =
-                (x_plus[r] - x_minus[r]) / (Real(2) * eps);
+            Real value = Real(0);
+            for (std::size_t j = 0; j < 3u; ++j) {
+                value += J(r, j) * dxi_dcanon(j, static_cast<std::size_t>(d));
+            }
+            out[r][static_cast<std::size_t>(d)] = value;
         }
     }
     for (std::size_t r = 0; r < 3u; ++r) {
@@ -411,13 +665,13 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
 
         data.normals[qidx] = surface.normal;
         data.surface_measures[qidx] = surface.measure;
-        data.surface_jacobians[qidx] = finiteDifferenceSurfaceJacobian(mapping,
-                                                                       cell_type,
-                                                                       local_face_id,
-                                                                       face_type,
-                                                                       canonical_point,
-                                                                       surface.normal,
-                                                                       align_facet_to_reference);
+        data.surface_jacobians[qidx] = analyticSurfaceJacobian(mapping,
+                                                               cell_type,
+                                                               local_face_id,
+                                                               face_type,
+                                                               canonical_point,
+                                                               surface.normal,
+                                                               align_facet_to_reference);
     }
 
     return data;
@@ -675,15 +929,6 @@ CellGeometrySensitivity evaluateCellGeometrySensitivity(
     sensitivity.measures = {n_qpts, n_nodes, std::vector<Real>(total)};
     sensitivity.inverse_jacobians = {n_qpts, n_nodes, std::vector<Matrix3x3>(total)};
 
-    // For embedded curve/surface mappings, the public frame Jacobian includes
-    // geometry-dependent orthonormal completion columns. Use the existing
-    // central-difference kernel until the frame-completion derivative is
-    // promoted to an analytic kernel.
-    if (mapping.dimension() != 3) {
-        const auto nodes = pointsFromGeometryNodes(mapping.nodes());
-        return finiteDifferenceCellGeometrySensitivity(mapping.element_type(), quad_rule, nodes);
-    }
-
     const auto& geometry_basis = mapping.geometryBasis();
     FE_THROW_IF(static_cast<LocalIndex>(geometry_basis.size()) != n_nodes, FEException,
                 "FrameGeometry: geometry basis size does not match mapping node count");
@@ -701,6 +946,7 @@ CellGeometrySensitivity evaluateCellGeometrySensitivity(
                     FEException,
                     "FrameGeometry: geometry basis evaluation size mismatch");
 
+        const auto J = mapping.jacobian(xi);
         const auto J_inv = toArray(mapping.jacobian_inverse(xi));
         const Real det_J = mapping.jacobian_determinant(xi);
         const Real measure_sign = (det_J < Real(0)) ? Real(-1) : Real(1);
@@ -715,14 +961,29 @@ CellGeometrySensitivity evaluateCellGeometrySensitivity(
                     values[nidx];
 
                 Matrix3x3 dJ = zeroMatrix();
-                for (int xi_dir = 0; xi_dir < 3; ++xi_dir) {
-                    dJ[static_cast<std::size_t>(component)][static_cast<std::size_t>(xi_dir)] =
-                        gradients[nidx][static_cast<std::size_t>(xi_dir)];
+                if (mapping.dimension() == 3) {
+                    for (int xi_dir = 0; xi_dir < 3; ++xi_dir) {
+                        dJ[static_cast<std::size_t>(component)][static_cast<std::size_t>(xi_dir)] =
+                            gradients[nidx][static_cast<std::size_t>(xi_dir)];
+                    }
+                } else {
+                    dJ = embeddedFrameJacobianDerivative(J,
+                                                         mapping.dimension(),
+                                                         gradients[nidx],
+                                                         component);
                 }
                 sensitivity.jacobians.values[out] = dJ;
 
-                const Real d_det = det_J * traceProduct(J_inv, dJ);
-                sensitivity.measures.values[out] = measure_sign * d_det;
+                if (mapping.dimension() == 3) {
+                    const Real d_det = det_J * traceProduct(J_inv, dJ);
+                    sensitivity.measures.values[out] = measure_sign * d_det;
+                } else {
+                    sensitivity.measures.values[out] =
+                        embeddedFrameMeasureDerivative(J,
+                                                       mapping.dimension(),
+                                                       gradients[nidx],
+                                                       component);
+                }
 
                 sensitivity.inverse_jacobians.values[out] =
                     negate(multiply(multiply(J_inv, dJ), J_inv));
@@ -808,6 +1069,137 @@ FaceGeometrySensitivity finiteDifferenceFaceGeometrySensitivity(
     return sensitivity;
 }
 
+FaceGeometrySensitivity evaluateFaceGeometrySensitivityAnalytic(
+    const GeometryMapping& mapping,
+    ElementType cell_type,
+    LocalIndex local_face_id,
+    ElementType face_type,
+    const quadrature::QuadratureRule& quad_rule,
+    std::span<const LocalIndex> align_facet_to_reference)
+{
+    const auto face = evaluateFaceFrame(mapping,
+                                        cell_type,
+                                        local_face_id,
+                                        face_type,
+                                        quad_rule,
+                                        align_facet_to_reference);
+    const auto n_qpts = static_cast<LocalIndex>(quad_rule.num_points());
+    const auto n_nodes = static_cast<LocalIndex>(mapping.num_nodes());
+    const std::size_t total =
+        static_cast<std::size_t>(n_qpts) * static_cast<std::size_t>(n_nodes) * 3u;
+
+    FaceGeometrySensitivity sensitivity;
+    sensitivity.n_qpts = n_qpts;
+    sensitivity.n_nodes = n_nodes;
+    sensitivity.normals = {n_qpts, n_nodes, std::vector<Vector3D>(total)};
+    sensitivity.measures = {n_qpts, n_nodes, std::vector<Real>(total)};
+
+    const auto& geometry_basis = mapping.geometryBasis();
+    FE_THROW_IF(static_cast<LocalIndex>(geometry_basis.size()) != n_nodes, FEException,
+                "FrameGeometry: geometry basis size does not match mapping node count");
+
+    std::vector<basis::Gradient> gradients;
+    const int face_dim = (face_type == ElementType::Line2) ? 1 : 2;
+
+    const auto& qpts = quad_rule.points();
+    for (LocalIndex q = 0; q < n_qpts; ++q) {
+        const auto qidx = static_cast<std::size_t>(q);
+        const auto& canonical_point = qpts[qidx];
+        const auto facet_coords =
+            canonicalToFacetCoordinates(face_type, canonical_point, align_facet_to_reference);
+        const auto xi = elements::ElementTransform::facet_to_reference(
+            cell_type, static_cast<int>(local_face_id), facet_coords);
+        const auto dxi_dcanon =
+            referenceToCanonicalFaceJacobian(cell_type,
+                                             local_face_id,
+                                             face_type,
+                                             canonical_point,
+                                             align_facet_to_reference);
+
+        geometry_basis.evaluate_gradients(xi, gradients);
+        FE_THROW_IF(static_cast<LocalIndex>(gradients.size()) != n_nodes,
+                    FEException,
+                    "FrameGeometry: geometry basis gradient size mismatch");
+
+        const auto J = mapping.jacobian(xi);
+        const auto T0 = toMathVector(Vector3D{face.surface_jacobians[qidx][0][0],
+                                             face.surface_jacobians[qidx][1][0],
+                                             face.surface_jacobians[qidx][2][0]});
+        const auto T1 = (face_dim == 2)
+                            ? toMathVector(Vector3D{face.surface_jacobians[qidx][0][1],
+                                                    face.surface_jacobians[qidx][1][1],
+                                                    face.surface_jacobians[qidx][2][1]})
+                            : math::Vector<Real, 3>{};
+        const auto evaluated_normal = toMathVector(face.normals[qidx]);
+
+        math::Vector<Real, 3> raw_vector{};
+        Real raw_norm = Real(0);
+        Real orientation_sign = Real(1);
+        if (face_dim == 2) {
+            raw_vector = T0.cross(T1);
+            raw_norm = norm(raw_vector);
+        } else {
+            const auto cell_normal = matrixColumn(J, 2);
+            raw_vector = cell_normal.cross(T0);
+            raw_norm = norm(raw_vector);
+        }
+        if (raw_norm > detail::kDegenerateTol) {
+            const math::Vector<Real, 3> raw_unit = raw_vector / raw_norm;
+            orientation_sign = (raw_unit.dot(evaluated_normal) >= Real(0)) ? Real(1) : Real(-1);
+        }
+
+        for (LocalIndex node = 0; node < n_nodes; ++node) {
+            const auto nidx = static_cast<std::size_t>(node);
+            for (int component = 0; component < 3; ++component) {
+                const auto out = sensitivityIndex(n_nodes, q, node, component);
+
+                auto dT0 = math::Vector<Real, 3>{};
+                auto dT1 = math::Vector<Real, 3>{};
+                for (int xi_dir = 0; xi_dir < mapping.dimension(); ++xi_dir) {
+                    const auto xidx = static_cast<std::size_t>(xi_dir);
+                    dT0[static_cast<std::size_t>(component)] +=
+                        gradients[nidx][xidx] * dxi_dcanon(xidx, 0);
+                    if (face_dim == 2) {
+                        dT1[static_cast<std::size_t>(component)] +=
+                            gradients[nidx][xidx] * dxi_dcanon(xidx, 1);
+                    }
+                }
+
+                math::Vector<Real, 3> draw{};
+                Real dmeasure = Real(0);
+                if (face_dim == 2) {
+                    draw = dT0.cross(T1) + T0.cross(dT1);
+                    if (raw_norm > detail::kDegenerateTol) {
+                        const math::Vector<Real, 3> raw_unit = raw_vector / raw_norm;
+                        dmeasure = raw_unit.dot(draw);
+                    }
+                } else {
+                    const auto dJ =
+                        embeddedFrameJacobianDerivative(J,
+                                                        mapping.dimension(),
+                                                        gradients[nidx],
+                                                        component);
+                    const auto dcell_normal =
+                        math::Vector<Real, 3>{dJ[0][2], dJ[1][2], dJ[2][2]};
+                    dmeasure = unitOrZero(T0).dot(dT0);
+                    draw = dcell_normal.cross(T0) + matrixColumn(J, 2).cross(dT0);
+                }
+
+                math::Vector<Real, 3> dnormal{};
+                if (raw_norm > detail::kDegenerateTol) {
+                    const math::Vector<Real, 3> raw_unit = raw_vector / raw_norm;
+                    dnormal = projectedUnitDerivative(raw_unit, draw, raw_norm) * orientation_sign;
+                }
+
+                sensitivity.normals.values[out] = toArrayVector(dnormal);
+                sensitivity.measures.values[out] = dmeasure;
+            }
+        }
+    }
+
+    return sensitivity;
+}
+
 FaceGeometrySensitivity evaluateFaceGeometrySensitivity(
     ElementType cell_type,
     LocalIndex local_face_id,
@@ -816,11 +1208,12 @@ FaceGeometrySensitivity evaluateFaceGeometrySensitivity(
     std::span<const Point3D> coordinates,
     std::span<const LocalIndex> align_facet_to_reference)
 {
-    return finiteDifferenceFaceGeometrySensitivity(cell_type,
+    const auto mapping = makeMapping(cell_type, coordinates);
+    return evaluateFaceGeometrySensitivityAnalytic(*mapping,
+                                                   cell_type,
                                                    local_face_id,
                                                    face_type,
                                                    quad_rule,
-                                                   coordinates,
                                                    align_facet_to_reference);
 }
 

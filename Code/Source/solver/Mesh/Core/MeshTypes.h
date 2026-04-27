@@ -32,6 +32,7 @@
 #define SVMP_MESH_TYPES_H
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -85,6 +86,37 @@ enum class Configuration {
   Deformed
 };
 
+enum class ReferenceConfigurationMode : std::uint8_t {
+  ImmutableOriginal,
+  UpdatedLagrangianRebased,
+  RemeshRebased
+};
+
+enum class ReferenceRebaseSource : std::uint8_t {
+  CurrentConfiguration,
+  ExplicitCoordinates,
+  RemeshedReference
+};
+
+enum class ReferenceRebaseCurrentPolicy : std::uint8_t {
+  ClearCurrent,
+  PreserveCurrent,
+  SetCurrentToReference
+};
+
+enum class ReferenceRebaseMotionPolicy : std::uint8_t {
+  LeaveFieldsUnchanged,
+  ResetDisplacementLikeFields,
+  ResetAllStandardMotionFields
+};
+
+enum class GeometryDofStorage {
+  // Geometry control points are represented by mesh vertices.  High-order
+  // cells reference edge, face, and interior geometry DOFs through their
+  // high-order cell connectivity.
+  VertexCoordinates = 0
+};
+
 /**
  * @brief Topological and geometric constraint types
  *
@@ -132,6 +164,18 @@ enum class PartitionHint {
   Custom
 };
 
+enum class MeshCodim1StorageMode : std::uint8_t {
+  None = 0,
+  BoundaryOnly,
+  Full,
+  Explicit
+};
+
+struct MeshFinalizeOptions {
+  MeshCodim1StorageMode codim1_storage{MeshCodim1StorageMode::Full};
+  bool edge_storage{true};
+};
+
 // Scalar type for field attachments (extend as needed)
 enum class FieldScalarType {
   Int32,
@@ -166,6 +210,30 @@ struct FieldHandle {
   uint32_t id = 0;
   EntityKind kind = EntityKind::Vertex;
   std::string name;
+};
+
+struct GeometryOrderDescriptor {
+  GeometryDofStorage storage = GeometryDofStorage::VertexCoordinates;
+  int max_order = 1;
+  bool has_high_order = false;
+  bool has_mixed_order = false;
+  std::size_t reference_dofs = 0;
+  std::size_t current_dofs = 0;
+};
+
+struct ReferenceRebaseOptions {
+  ReferenceRebaseSource source = ReferenceRebaseSource::CurrentConfiguration;
+  ReferenceRebaseCurrentPolicy current_policy = ReferenceRebaseCurrentPolicy::ClearCurrent;
+  ReferenceRebaseMotionPolicy motion_policy =
+      ReferenceRebaseMotionPolicy::ResetDisplacementLikeFields;
+  Configuration active_configuration_after = Configuration::Reference;
+  bool update_previous_coordinates = true;
+};
+
+struct ReferenceRebaseInfo {
+  ReferenceConfigurationMode mode = ReferenceConfigurationMode::ImmutableOriginal;
+  ReferenceRebaseSource last_source = ReferenceRebaseSource::CurrentConfiguration;
+  std::uint64_t epoch = 0;
 };
 
 // ------------------

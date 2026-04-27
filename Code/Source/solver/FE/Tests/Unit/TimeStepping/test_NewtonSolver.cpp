@@ -9,6 +9,8 @@
 
 #include "Core/FEException.h"
 
+#include "Assembly/AssemblyContext.h"
+#include "Assembly/AssemblyKernel.h"
 #include "Backends/Interfaces/BackendFactory.h"
 #include "Backends/Interfaces/LinearSolver.h"
 
@@ -72,6 +74,11 @@ public:
         return inner_->getRequiredData();
     }
 
+    [[nodiscard]] std::vector<svmp::FE::assembly::FieldRequirement> fieldRequirements() const override
+    {
+        return inner_->fieldRequirements();
+    }
+
     [[nodiscard]] svmp::FE::assembly::MaterialStateSpec materialStateSpec() const noexcept override
     {
         return inner_->materialStateSpec();
@@ -85,6 +92,11 @@ public:
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override
     {
         return inner_->maxTemporalDerivativeOrder();
+    }
+
+    [[nodiscard]] bool hasStateIndependentMatrix() const noexcept override
+    {
+        return inner_->hasStateIndependentMatrix();
     }
 
     [[nodiscard]] bool hasCell() const noexcept override { return inner_->hasCell(); }
@@ -139,6 +151,70 @@ public:
 private:
     std::shared_ptr<svmp::FE::assembly::AssemblyKernel> inner_{};
     KernelCallCounts* counts_{nullptr};
+};
+
+class AffineScalarCellKernel final : public svmp::FE::assembly::AssemblyKernel {
+public:
+    explicit AffineScalarCellKernel(svmp::FE::Real target)
+        : target_(target)
+    {
+    }
+
+    [[nodiscard]] svmp::FE::assembly::RequiredData getRequiredData() const override
+    {
+        using svmp::FE::assembly::RequiredData;
+        return RequiredData::IntegrationWeights |
+               RequiredData::BasisValues |
+               RequiredData::SolutionCoefficients;
+    }
+
+    [[nodiscard]] bool hasStateIndependentMatrix() const noexcept override { return true; }
+
+    void computeCell(const svmp::FE::assembly::AssemblyContext& ctx,
+                     svmp::FE::assembly::KernelOutput& output) override
+    {
+        const auto n_test = ctx.numTestDofs();
+        const auto n_trial = ctx.numTrialDofs();
+        bool want_matrix = output.has_matrix || !output.local_matrix.empty();
+        bool want_vector = output.has_vector || !output.local_vector.empty();
+        if (!want_matrix && !want_vector) {
+            want_matrix = true;
+            want_vector = true;
+        }
+        output.reserve(n_test, n_trial, want_matrix, want_vector);
+        output.clear();
+
+        const auto coeffs = ctx.solutionCoefficients();
+        if (want_vector && coeffs.size() < static_cast<std::size_t>(n_trial)) {
+            throw std::runtime_error("AffineScalarCellKernel: missing solution coefficients");
+        }
+
+        for (svmp::FE::LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+            const auto w = ctx.integrationWeight(q);
+            svmp::FE::Real uh = 0.0;
+            if (want_vector) {
+                for (svmp::FE::LocalIndex j = 0; j < n_trial; ++j) {
+                    uh += ctx.trialBasisValue(j, q) * coeffs[static_cast<std::size_t>(j)];
+                }
+            }
+            for (svmp::FE::LocalIndex i = 0; i < n_test; ++i) {
+                const auto vi = ctx.basisValue(i, q);
+                if (want_vector) {
+                    output.vectorEntry(i) += w * vi * (uh - target_);
+                }
+                if (want_matrix) {
+                    for (svmp::FE::LocalIndex j = 0; j < n_trial; ++j) {
+                        output.matrixEntry(i, j) += w * vi * ctx.trialBasisValue(j, q);
+                    }
+                }
+            }
+        }
+    }
+
+    [[nodiscard]] std::string name() const override { return "AffineScalarCellKernel"; }
+
+private:
+    svmp::FE::Real target_{0.0};
 };
 
 class ScalingLinearSolver final : public svmp::FE::backends::LinearSolver {
@@ -604,6 +680,55 @@ template <typename BuildForm>
     return p;
 }
 
+[[nodiscard]] ScalarProblem makeAffineScalarProblem(double target,
+                                                    double dt,
+                                                    const std::vector<svmp::FE::Real>& u0,
+                                                    KernelCallCounts* counts)
+{
+    ScalarProblem p;
+    p.mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    p.space = std::make_shared<svmp::FE::spaces::L2Space>(svmp::FE::ElementType::Tetra4, /*order=*/0);
+
+    p.sys = std::make_unique<svmp::FE::systems::FESystem>(p.mesh);
+    p.u_field = p.sys->addField(svmp::FE::systems::FieldSpec{.name = "u", .space = p.space, .components = 1});
+    p.sys->addOperator("op");
+
+    std::shared_ptr<svmp::FE::assembly::AssemblyKernel> kernel =
+        std::make_shared<AffineScalarCellKernel>(static_cast<svmp::FE::Real>(target));
+    if (counts != nullptr) {
+        kernel = std::make_shared<CountingKernel>(kernel, counts);
+    }
+    p.sys->addCellKernel("op", p.u_field, p.u_field, kernel);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = ts_test::singleTetraTopology();
+    p.sys->setup({}, inputs);
+
+    p.integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    p.transient = std::make_unique<svmp::FE::systems::TransientSystem>(*p.sys, p.integrator);
+
+    p.factory = ts_test::createTestFactory();
+    if (!p.factory) {
+        throw std::runtime_error("ScalarProblem requires the Eigen backend (enable FE_ENABLE_EIGEN)");
+    }
+    p.linear = p.factory->createLinearSolver(ts_test::directSolve());
+    if (!p.linear) {
+        throw std::runtime_error("ScalarProblem failed to create LinearSolver");
+    }
+
+    const auto n_dofs = p.sys->dofHandler().getNumDofs();
+    if (static_cast<std::size_t>(n_dofs) != u0.size()) {
+        throw std::runtime_error("ScalarProblem u0 size mismatch");
+    }
+    p.history = svmp::FE::timestepping::TimeHistory::allocate(*p.factory, n_dofs);
+    p.history.setDt(dt);
+    p.history.setPrevDt(dt);
+    ts_test::setVectorByDof(p.history.uPrev(), u0);
+    ts_test::setVectorByDof(p.history.uPrev2(), u0);
+    p.history.resetCurrentToPrevious();
+    return p;
+}
+
 [[nodiscard]] double scalarFromDofVector(svmp::FE::backends::GenericVector& vec)
 {
     const auto vals = ts_test::getVectorByDof(vec);
@@ -840,6 +965,50 @@ TEST(NewtonSolver, ReusesJacobianWhenRebuildPeriodGreaterThanOne)
     EXPECT_FALSE(rep.converged);
     EXPECT_EQ(rep.iterations, nopt.max_iterations);
 
+}
+
+TEST(NewtonSolver, ReusesStateIndependentJacobianWhenRebuildPeriodIsOne)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    KernelCallCounts counts;
+    auto problem = makeAffineScalarProblem(
+        /*target=*/2.0,
+        /*dt=*/0.1,
+        /*u0=*/{0.0},
+        &counts);
+
+    EXPECT_TRUE(problem.sys->operatorMatrixStateIndependent("op"));
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 3;
+    nopt.abs_tolerance = 0.0;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.use_line_search = false;
+    nopt.assemble_both_when_possible = true;
+    nopt.jacobian_rebuild_period = 1;
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    ScalingLinearSolver under_relaxed(*problem.linear, /*scale=*/0.25);
+    const auto rep = newton.solveStep(*problem.transient,
+                                      under_relaxed,
+                                      /*solve_time=*/problem.history.dt(),
+                                      problem.history,
+                                      ws);
+
+    EXPECT_FALSE(rep.converged);
+    EXPECT_EQ(rep.iterations, nopt.max_iterations);
+    EXPECT_EQ(counts.matrix_and_vector, 1);
+    EXPECT_EQ(counts.matrix_only, 0);
+    EXPECT_GT(counts.vector_only, 0);
 }
 
 TEST(NewtonSolver, ScalesDtIncrementsByDtOrExplicitFactor)

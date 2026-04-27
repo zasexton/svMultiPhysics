@@ -357,12 +357,15 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
                 break;
             case FormExprType::MeshDisplacement:
                 required |= RequiredData::MeshDisplacement;
+                if (order >= 1) required |= RequiredData::MeshDisplacementGradient;
                 break;
             case FormExprType::MeshVelocity:
                 required |= RequiredData::MeshVelocity;
+                if (order >= 1) required |= RequiredData::MeshVelocityGradient;
                 break;
             case FormExprType::MeshAcceleration:
                 required |= RequiredData::MeshAcceleration;
+                if (order >= 1) required |= RequiredData::MeshAccelerationGradient;
                 break;
             case FormExprType::CurrentCoordinate:
                 required |= RequiredData::CurrentPhysicalPoints;
@@ -375,9 +378,11 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
                 break;
             case FormExprType::PreviousMeshVelocity:
                 required |= RequiredData::PreviousMeshVelocity;
+                if (order >= 1) required |= RequiredData::PreviousMeshVelocityGradient;
                 break;
             case FormExprType::PredictedMeshVelocity:
                 required |= RequiredData::PredictedMeshVelocity;
+                if (order >= 1) required |= RequiredData::PredictedMeshVelocityGradient;
                 break;
             case FormExprType::CurrentJacobian:
                 required |= RequiredData::CurrentJacobians;

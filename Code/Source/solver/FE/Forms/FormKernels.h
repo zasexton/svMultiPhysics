@@ -122,6 +122,7 @@ public:
     void resolveParameterSlots(
         const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param) override;
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override { return ir_.maxTimeDerivativeOrder(); }
+    [[nodiscard]] bool hasStateIndependentMatrix() const noexcept override { return matrix_state_independent_; }
 
     /// Linear forms (FormKind::Linear) produce only a vector contribution.
     [[nodiscard]] bool isVectorOnly() const noexcept override { return ir_.kind() == FormKind::Linear; }
@@ -188,6 +189,7 @@ private:
     assembly::MaterialStateSpec material_state_spec_{};
     InlinedMaterialStateUpdateProgram inlined_state_updates_{};
     std::unique_ptr<std::once_flag> indexed_lowering_once_{std::make_unique<std::once_flag>()};
+    bool matrix_state_independent_{false};
 
     TensorJITOptions tensor_interpreter_options_{};
     std::vector<std::shared_ptr<const tensor::TensorIR>> tensor_term_ir_{};
@@ -225,6 +227,7 @@ public:
     void resolveParameterSlots(
         const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param) override;
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override;
+    [[nodiscard]] bool hasStateIndependentMatrix() const noexcept override { return matrix_state_independent_; }
 
     [[nodiscard]] bool hasCell() const noexcept override;
     [[nodiscard]] bool hasBoundaryFace() const noexcept override;
@@ -261,6 +264,10 @@ public:
     [[nodiscard]] bool isVectorOnly() const noexcept override { return output_ == LinearKernelOutput::VectorOnly; }
     [[nodiscard]] const FormIR& bilinearIR() const noexcept { return bilinear_ir_; }
     [[nodiscard]] const std::optional<FormIR>& linearIR() const noexcept { return linear_ir_; }
+    [[nodiscard]] bool hasScalarDiffusionCellFastPathForTesting() const noexcept
+    {
+        return scalar_diffusion_cell_coefficient_.has_value();
+    }
     [[nodiscard]] const InlinedMaterialStateUpdateProgram& inlinedStateUpdates() const noexcept
     {
         return inlined_state_updates_;
@@ -282,6 +289,8 @@ private:
     assembly::MaterialStateSpec material_state_spec_{};
     InlinedMaterialStateUpdateProgram inlined_state_updates_{};
     std::unique_ptr<std::once_flag> indexed_lowering_once_{std::make_unique<std::once_flag>()};
+    bool matrix_state_independent_{false};
+    std::optional<Real> scalar_diffusion_cell_coefficient_{};
 };
 
 /**

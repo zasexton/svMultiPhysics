@@ -634,6 +634,11 @@ void AssemblyContext::clearMovingDomainData() noexcept
     previous_coordinates_.clear();
     previous_mesh_velocities_.clear();
     predicted_mesh_velocities_.clear();
+    mesh_displacement_jacobians_.clear();
+    mesh_velocity_jacobians_.clear();
+    mesh_acceleration_jacobians_.clear();
+    previous_mesh_velocity_jacobians_.clear();
+    predicted_mesh_velocity_jacobians_.clear();
 }
 
 // ============================================================================
@@ -860,6 +865,36 @@ AssemblyContext::Vector3D AssemblyContext::predictedMeshVelocity(LocalIndex q) c
 {
     return requireQPointData(predicted_mesh_velocities_, q, n_qpts_,
                              "AssemblyContext::predictedMeshVelocity");
+}
+
+AssemblyContext::Matrix3x3 AssemblyContext::meshDisplacementJacobian(LocalIndex q) const
+{
+    return requireQPointData(mesh_displacement_jacobians_, q, n_qpts_,
+                             "AssemblyContext::meshDisplacementJacobian");
+}
+
+AssemblyContext::Matrix3x3 AssemblyContext::meshVelocityJacobian(LocalIndex q) const
+{
+    return requireQPointData(mesh_velocity_jacobians_, q, n_qpts_,
+                             "AssemblyContext::meshVelocityJacobian");
+}
+
+AssemblyContext::Matrix3x3 AssemblyContext::meshAccelerationJacobian(LocalIndex q) const
+{
+    return requireQPointData(mesh_acceleration_jacobians_, q, n_qpts_,
+                             "AssemblyContext::meshAccelerationJacobian");
+}
+
+AssemblyContext::Matrix3x3 AssemblyContext::previousMeshVelocityJacobian(LocalIndex q) const
+{
+    return requireQPointData(previous_mesh_velocity_jacobians_, q, n_qpts_,
+                             "AssemblyContext::previousMeshVelocityJacobian");
+}
+
+AssemblyContext::Matrix3x3 AssemblyContext::predictedMeshVelocityJacobian(LocalIndex q) const
+{
+    return requireQPointData(predicted_mesh_velocity_jacobians_, q, n_qpts_,
+                             "AssemblyContext::predictedMeshVelocityJacobian");
 }
 
 void AssemblyContext::setEntityMeasures(Real cell_diameter, Real cell_volume, Real facet_area)
@@ -2463,22 +2498,32 @@ AssemblyContext::Vector3D AssemblyContext::fieldPreviousVectorValue(FieldId fiel
 void AssemblyContext::setMaterialState(std::byte* cell_state_base,
                                        std::size_t bytes_per_qpt,
                                        std::size_t stride_bytes,
-                                       std::size_t alignment_bytes) noexcept
+                                       std::size_t alignment_bytes,
+                                       std::span<const state::StateVariableMetadata> variables,
+                                       state::StateVariableLifecycle old_lifecycle,
+                                       state::StateVariableLifecycle work_lifecycle) noexcept
 {
-    setMaterialState(cell_state_base, cell_state_base, bytes_per_qpt, stride_bytes, alignment_bytes);
+    setMaterialState(cell_state_base, cell_state_base, bytes_per_qpt, stride_bytes, alignment_bytes,
+                     variables, old_lifecycle, work_lifecycle);
 }
 
 void AssemblyContext::setMaterialState(std::byte* cell_state_old_base,
                                        std::byte* cell_state_work_base,
                                        std::size_t bytes_per_qpt,
                                        std::size_t stride_bytes,
-                                       std::size_t alignment_bytes) noexcept
+                                       std::size_t alignment_bytes,
+                                       std::span<const state::StateVariableMetadata> variables,
+                                       state::StateVariableLifecycle old_lifecycle,
+                                       state::StateVariableLifecycle work_lifecycle) noexcept
 {
     material_state_old_base_ = (cell_state_old_base != nullptr) ? cell_state_old_base : cell_state_work_base;
     material_state_work_base_ = cell_state_work_base;
     material_state_bytes_per_qpt_ = bytes_per_qpt;
     material_state_stride_bytes_ = stride_bytes;
     material_state_alignment_bytes_ = alignment_bytes;
+    material_state_variables_ = variables;
+    material_state_old_lifecycle_ = old_lifecycle;
+    material_state_work_lifecycle_ = work_lifecycle;
 }
 
 std::span<std::byte> AssemblyContext::materialState(LocalIndex q) const
@@ -2686,6 +2731,11 @@ void AssemblyContext::copyGeometryDataFrom(const AssemblyContext& other)
     previous_coordinates_ = other.previous_coordinates_;
     previous_mesh_velocities_ = other.previous_mesh_velocities_;
     predicted_mesh_velocities_ = other.predicted_mesh_velocities_;
+    mesh_displacement_jacobians_ = other.mesh_displacement_jacobians_;
+    mesh_velocity_jacobians_ = other.mesh_velocity_jacobians_;
+    mesh_acceleration_jacobians_ = other.mesh_acceleration_jacobians_;
+    previous_mesh_velocity_jacobians_ = other.previous_mesh_velocity_jacobians_;
+    predicted_mesh_velocity_jacobians_ = other.predicted_mesh_velocity_jacobians_;
     interleaved_dirty_ = true;
 }
 
@@ -3271,6 +3321,36 @@ void AssemblyContext::setPredictedMeshVelocities(std::span<const Vector3D> veloc
 {
     requireQPointSpanSize(velocities.size(), n_qpts_, "AssemblyContext::setPredictedMeshVelocities");
     predicted_mesh_velocities_.assign(velocities.begin(), velocities.end());
+}
+
+void AssemblyContext::setMeshDisplacementJacobians(std::span<const Matrix3x3> jacobians)
+{
+    requireQPointSpanSize(jacobians.size(), n_qpts_, "AssemblyContext::setMeshDisplacementJacobians");
+    mesh_displacement_jacobians_.assign(jacobians.begin(), jacobians.end());
+}
+
+void AssemblyContext::setMeshVelocityJacobians(std::span<const Matrix3x3> jacobians)
+{
+    requireQPointSpanSize(jacobians.size(), n_qpts_, "AssemblyContext::setMeshVelocityJacobians");
+    mesh_velocity_jacobians_.assign(jacobians.begin(), jacobians.end());
+}
+
+void AssemblyContext::setMeshAccelerationJacobians(std::span<const Matrix3x3> jacobians)
+{
+    requireQPointSpanSize(jacobians.size(), n_qpts_, "AssemblyContext::setMeshAccelerationJacobians");
+    mesh_acceleration_jacobians_.assign(jacobians.begin(), jacobians.end());
+}
+
+void AssemblyContext::setPreviousMeshVelocityJacobians(std::span<const Matrix3x3> jacobians)
+{
+    requireQPointSpanSize(jacobians.size(), n_qpts_, "AssemblyContext::setPreviousMeshVelocityJacobians");
+    previous_mesh_velocity_jacobians_.assign(jacobians.begin(), jacobians.end());
+}
+
+void AssemblyContext::setPredictedMeshVelocityJacobians(std::span<const Matrix3x3> jacobians)
+{
+    requireQPointSpanSize(jacobians.size(), n_qpts_, "AssemblyContext::setPredictedMeshVelocityJacobians");
+    predicted_mesh_velocity_jacobians_.assign(jacobians.begin(), jacobians.end());
 }
 
 void AssemblyContext::setSolutionValues(std::span<const Real> values)

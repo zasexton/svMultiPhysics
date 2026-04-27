@@ -617,6 +617,15 @@ public:
     void setEntityDofMap(std::unique_ptr<EntityDofMap> entity_dof_map);
 
     /**
+     * @brief Make this handler a finalized read-only alias of another handler.
+     *
+     * This is used by Systems for single-field problems where the monolithic
+     * system DOF handler is identical to the field DOF handler.  The source
+     * handler must outlive this alias and must already be finalized.
+     */
+    void setReadOnlyAlias(const DofHandler& source);
+
+    /**
      * @brief Renumber DOFs using specified strategy
      *
      * @param strategy Renumbering strategy
@@ -645,13 +654,17 @@ public:
     /**
      * @brief Check if handler is finalized
      */
-    [[nodiscard]] bool isFinalized() const noexcept { return finalized_; }
+    [[nodiscard]] bool isFinalized() const noexcept {
+        return alias_handler_ ? alias_handler_->isFinalized() : finalized_;
+    }
 
     /**
      * @brief Get the DOF map
      * @return Reference to internal DofMap
      */
-    [[nodiscard]] const DofMap& getDofMap() const noexcept { return dof_map_; }
+    [[nodiscard]] const DofMap& getDofMap() const noexcept {
+        return alias_handler_ ? alias_handler_->getDofMap() : dof_map_;
+    }
 
     /**
      * @brief Get mutable DOF map (only before finalize)
@@ -662,13 +675,17 @@ public:
     /**
      * @brief Get the partition (owned/ghost/relevant index sets)
      */
-    [[nodiscard]] const DofPartition& getPartition() const noexcept { return partition_; }
+    [[nodiscard]] const DofPartition& getPartition() const noexcept {
+        return alias_handler_ ? alias_handler_->getPartition() : partition_;
+    }
 
 #if FE_HAS_MPI
     /**
      * @brief Get the MPI communicator associated with this DOF layout
      */
-    [[nodiscard]] MPI_Comm mpiComm() const noexcept { return mpi_comm_; }
+    [[nodiscard]] MPI_Comm mpiComm() const noexcept {
+        return alias_handler_ ? alias_handler_->mpiComm() : mpi_comm_;
+    }
 #endif
 
     /**
@@ -676,7 +693,7 @@ public:
      * @return Pointer to entity DOF map, or nullptr
      */
     [[nodiscard]] const EntityDofMap* getEntityDofMap() const noexcept {
-        return entity_dof_map_.get();
+        return alias_handler_ ? alias_handler_->getEntityDofMap() : entity_dof_map_.get();
     }
 
     /**
@@ -684,7 +701,7 @@ public:
      * @return Pointer to ghost manager, or nullptr
      */
     [[nodiscard]] const GhostDofManager* getGhostManager() const noexcept {
-        return ghost_manager_.get();
+        return alias_handler_ ? alias_handler_->getGhostManager() : ghost_manager_.get();
     }
 
     // =========================================================================
@@ -735,14 +752,14 @@ public:
      * @brief Get total number of DOFs in the system
      */
     [[nodiscard]] GlobalIndex getNumDofs() const noexcept {
-        return dof_map_.getNumDofs();
+        return getDofMap().getNumDofs();
     }
 
     /**
      * @brief Get number of locally owned DOFs
      */
     [[nodiscard]] GlobalIndex getNumLocalDofs() const noexcept {
-        return dof_map_.getNumLocalDofs();
+        return getDofMap().getNumLocalDofs();
     }
 
     /**
@@ -759,7 +776,7 @@ public:
      * @brief Get DOFs for a cell
      */
     [[nodiscard]] std::span<const GlobalIndex> getCellDofs(GlobalIndex cell_id) const {
-        return dof_map_.getCellDofs(cell_id);
+        return getDofMap().getCellDofs(cell_id);
     }
 
     /**
@@ -910,6 +927,7 @@ private:
     // Core data
     DofMap dof_map_;
     DofPartition partition_;
+    const DofHandler* alias_handler_{nullptr};
 
     // Optional components (created during distribution)
     std::unique_ptr<EntityDofMap> entity_dof_map_;

@@ -90,6 +90,7 @@ struct MPCOptions {
     double coefficient_tolerance{1e-15};  ///< Tolerance for zero coefficients
     bool auto_select_slave{true};         ///< Automatically select slave DOF
     bool prefer_largest_coefficient{true}; ///< Prefer DOF with largest |coefficient| as slave
+    ConstraintDependencyDeclaration dependency_declaration{};
 };
 
 /**
@@ -197,6 +198,12 @@ public:
      * @brief Get constraint information
      */
     [[nodiscard]] ConstraintInfo getInfo() const override;
+
+    [[nodiscard]] ConstraintDependencyDeclaration dependencyDeclaration() const override {
+        ConstraintDependencyDeclaration out = Constraint::dependencyDeclaration();
+        merge_into(out, options_.dependency_declaration);
+        return out;
+    }
 
     /**
      * @brief Clone this constraint

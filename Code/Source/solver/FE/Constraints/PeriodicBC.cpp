@@ -65,6 +65,7 @@ PeriodicBC::PeriodicBC(std::vector<GlobalIndex> slave_dofs,
                         const PeriodicBCOptions& options)
     : options_(options)
 {
+    coordinate_matched_ = true;
     auto transform = [translation](std::array<double, 3> p) -> std::array<double, 3> {
         return {{p[0] + translation[0], p[1] + translation[1], p[2] + translation[2]}};
     };
@@ -80,6 +81,7 @@ PeriodicBC::PeriodicBC(std::vector<GlobalIndex> slave_dofs,
                         const PeriodicBCOptions& options)
     : options_(options)
 {
+    coordinate_matched_ = true;
     matchCoordinates(slave_dofs, slave_coords, master_dofs, master_coords, transform);
 }
 
@@ -111,6 +113,16 @@ ConstraintInfo PeriodicBC::getInfo() const {
     info.is_time_dependent = false;
     info.is_homogeneous = true;  // Periodic constraints have no inhomogeneity
     return info;
+}
+
+ConstraintDependencyDeclaration PeriodicBC::dependencyDeclaration() const {
+    ConstraintDependencyDeclaration out = Constraint::dependencyDeclaration();
+    if (coordinate_matched_) {
+        merge_into(out.structural, ConstraintDependencyMask::meshGeometry());
+        merge_into(out.structural, ConstraintDependencyMask::meshBoundaryTopology());
+        out.structural.fe_dof_layout = true;
+    }
+    return out;
 }
 
 // ============================================================================

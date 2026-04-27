@@ -11,13 +11,17 @@
 #include "Systems/FESystem.h"
 
 #include "Assembly/AssemblyKernel.h"
+#include "Assembly/GlobalSystemView.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
 #include "Dofs/EntityDofMap.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
 
 #include "Mesh/Core/MeshBase.h"
+#include "Mesh/Fields/MeshFields.h"
+#include "Mesh/IO/MovingMeshRestart.h"
 #include "Mesh/Mesh.h"
+#include "Mesh/Motion/MotionFields.h"
 #include "Mesh/Topology/CellShape.h"
 
 #ifdef MESH_HAS_ADAPTIVITY
@@ -27,9 +31,12 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <memory>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace {
@@ -42,6 +49,7 @@ using svmp::FE::ElementType;
 using svmp::FE::FieldId;
 using svmp::FE::GlobalIndex;
 using svmp::FE::Real;
+using svmp::FE::assembly::DenseMatrixView;
 using svmp::FE::assembly::MassKernel;
 using svmp::FE::spaces::H1Space;
 using svmp::FE::spaces::ProductSpace;
@@ -69,6 +77,43 @@ std::shared_ptr<Mesh> build_single_quad_mesh()
     base->build_from_arrays(2, x_ref, offsets, conn, shapes);
     base->finalize();
     return svmp::create_mesh(std::move(base));
+}
+
+std::string unique_restart_path()
+{
+    const auto stamp =
+        std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    return (std::filesystem::temp_directory_path() /
+            ("svmp_fe_adapted_moving_mesh_restart_" +
+             std::to_string(static_cast<long long>(stamp)) + ".mmrst"))
+        .string();
+}
+
+void set_scaled_current_quad_coordinates(MeshBase& mesh)
+{
+    auto x_cur = mesh.X_ref();
+    for (std::size_t v = 0; v < mesh.n_vertices(); ++v) {
+        x_cur[2u * v + 0u] = 1.5 * mesh.X_ref()[2u * v + 0u] +
+                             0.125 * mesh.X_ref()[2u * v + 1u];
+        x_cur[2u * v + 1u] = 0.875 * mesh.X_ref()[2u * v + 1u];
+    }
+    mesh.set_current_coords(x_cur);
+    mesh.use_current_configuration();
+}
+
+DenseMatrixView assemble_current_scalar_mass(std::shared_ptr<Mesh> mesh)
+{
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, 1);
+    FESystem sys(std::move(mesh), svmp::Configuration::Current);
+    const auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+    sys.setup();
+
+    DenseMatrixView mass(sys.dofHandler().getNumDofs());
+    svmp::FE::systems::SystemStateView state;
+    EXPECT_TRUE(sys.assembleMass(state, mass).success);
+    return mass;
 }
 
 MeshBase build_line_mesh_with_gids(const std::vector<svmp::real_t>& x_ref,
@@ -137,6 +182,43 @@ void write_vertex_state(const FESystem& sys,
         }
         for (std::size_t c = 0; c < components; ++c) {
             state[static_cast<std::size_t>(offset + dofs[c])] = value_fn(v, c, xyz);
+        }
+    }
+}
+
+void fill_standard_motion_fields(MeshBase& mesh)
+{
+    const auto handles = svmp::motion::attach_motion_fields(mesh, mesh.dim());
+    auto* displacement = svmp::MeshFields::field_data_as<svmp::real_t>(mesh, handles.displacement);
+    auto* velocity = svmp::MeshFields::field_data_as<svmp::real_t>(mesh, handles.velocity);
+    ASSERT_NE(displacement, nullptr);
+    ASSERT_NE(velocity, nullptr);
+    for (std::size_t v = 0; v < mesh.n_vertices(); ++v) {
+        const auto x = mesh.X_ref()[2u * v + 0u];
+        const auto y = mesh.X_ref()[2u * v + 1u];
+        displacement[2u * v + 0u] = 0.5 * x + 0.25 * y;
+        displacement[2u * v + 1u] = -0.125 * y;
+        velocity[2u * v + 0u] = 3.0 + x;
+        velocity[2u * v + 1u] = 4.0 + y;
+    }
+}
+
+void expect_standard_motion_fields_equal(const MeshBase& lhs, const MeshBase& rhs)
+{
+    for (const auto role : {svmp::motion::MotionFieldRole::Displacement,
+                            svmp::motion::MotionFieldRole::Velocity}) {
+        const auto name = svmp::motion::standard_motion_field_name(role);
+        const auto lhs_handle = svmp::MeshFields::get_field_handle(lhs, svmp::EntityKind::Vertex, name);
+        const auto rhs_handle = svmp::MeshFields::get_field_handle(rhs, svmp::EntityKind::Vertex, name);
+        const auto* lhs_data = svmp::MeshFields::field_data_as<const svmp::real_t>(lhs, lhs_handle);
+        const auto* rhs_data = svmp::MeshFields::field_data_as<const svmp::real_t>(rhs, rhs_handle);
+        ASSERT_NE(lhs_data, nullptr) << name;
+        ASSERT_NE(rhs_data, nullptr) << name;
+        ASSERT_EQ(svmp::MeshFields::field_components(lhs, lhs_handle),
+                  svmp::MeshFields::field_components(rhs, rhs_handle));
+        const auto ncomp = svmp::MeshFields::field_components(lhs, lhs_handle);
+        for (std::size_t i = 0; i < lhs.n_vertices() * ncomp; ++i) {
+            EXPECT_NEAR(rhs_data[i], lhs_data[i], 1.0e-12) << name << " component " << i;
         }
     }
 }
@@ -303,6 +385,80 @@ TEST(FEAdaptivityTransfer, OnMeshAdaptedRebuildsLayoutAndTransfersSolutionHistor
                     static_cast<Real>(20.0 + xyz[1]),
                     1.0e-12);
     }
+}
+
+TEST(FEAdaptivityTransfer, AdaptedMovingMeshRestartReassemblyMatchesAcceptedState)
+{
+    auto old_mesh = build_single_quad_mesh();
+    auto mesh = build_single_quad_mesh();
+    set_scaled_current_quad_coordinates(old_mesh->local_mesh());
+    set_scaled_current_quad_coordinates(mesh->local_mesh());
+    fill_standard_motion_fields(mesh->local_mesh());
+
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, 1);
+
+    FESystem sys(mesh, svmp::Configuration::Current);
+    const auto temperature = sys.addField(FieldSpec{.name = "temperature", .space = scalar_space, .components = 1});
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", temperature, std::make_shared<MassKernel>(1.0));
+    sys.setup();
+
+    const auto old_dofs = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    std::vector<Real> solution(old_dofs, Real(0));
+    write_vertex_state(sys, temperature, old_mesh->local_mesh(), solution,
+                       [](std::size_t, std::size_t, const std::array<svmp::real_t, 3>& xyz) {
+                           return static_cast<Real>(1.0 + xyz[0] + 2.0 * xyz[1]);
+                       });
+
+    svmp::AdaptivityManager manager(adaptivity_options());
+    auto adapt = manager.refine(mesh->local_mesh(), {true}, nullptr);
+    ASSERT_TRUE(adapt.success) << adapt.summary();
+    ASSERT_NE(adapt.refinement_delta, nullptr);
+    ASSERT_TRUE(mesh->local_mesh().has_current_coords());
+
+    std::vector<Real> transferred_solution;
+    FEAdaptedStateTransferRequest request;
+    request.solution = solution;
+    request.transferred_solution = &transferred_solution;
+    auto transfer = sys.onMeshAdapted(old_mesh->local_mesh(),
+                                      mesh->local_mesh(),
+                                      *adapt.refinement_delta,
+                                      adaptivity_options(),
+                                      request);
+    ASSERT_TRUE(transfer.solution_transferred);
+    ASSERT_EQ(transferred_solution.size(), static_cast<std::size_t>(sys.dofHandler().getNumDofs()));
+
+    DenseMatrixView accepted_mass(sys.dofHandler().getNumDofs());
+    svmp::FE::systems::SystemStateView state;
+    ASSERT_TRUE(sys.assembleMass(state, accepted_mass).success);
+
+    const auto path = unique_restart_path();
+    svmp::moving_mesh_restart::write(mesh->local_mesh(), path);
+    auto restarted_base = svmp::moving_mesh_restart::read(path);
+    ASSERT_TRUE(restarted_base.has_current_coords());
+    ASSERT_EQ(restarted_base.active_configuration(), svmp::Configuration::Current);
+    ASSERT_EQ(restarted_base.X_cur().size(), mesh->local_mesh().X_cur().size());
+    for (std::size_t i = 0; i < restarted_base.X_cur().size(); ++i) {
+        EXPECT_NEAR(restarted_base.X_cur()[i], mesh->local_mesh().X_cur()[i], 1.0e-12);
+    }
+    expect_standard_motion_fields_equal(mesh->local_mesh(), restarted_base);
+
+    auto restarted_mesh =
+        svmp::create_mesh(std::make_shared<MeshBase>(std::move(restarted_base)));
+    const auto restarted_mass = assemble_current_scalar_mass(std::move(restarted_mesh));
+
+    ASSERT_EQ(restarted_mass.numRows(), accepted_mass.numRows());
+    ASSERT_EQ(restarted_mass.numCols(), accepted_mass.numCols());
+    for (GlobalIndex i = 0; i < accepted_mass.numRows(); ++i) {
+        for (GlobalIndex j = 0; j < accepted_mass.numCols(); ++j) {
+            EXPECT_NEAR(restarted_mass.getMatrixEntry(i, j),
+                        accepted_mass.getMatrixEntry(i, j),
+                        1.0e-12);
+        }
+    }
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
 }
 #else
 TEST(FEAdaptivityTransfer, OnMeshAdaptedCoverageRequiresMeshAdaptivity)

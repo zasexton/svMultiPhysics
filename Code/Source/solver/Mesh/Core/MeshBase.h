@@ -89,12 +89,29 @@ public:
       const std::vector<offset_t>& cell2vertex_offsets,
       const std::vector<index_t>& cell2vertex,
       const std::vector<CellShape>& cell_shape);
+  void build_from_arrays(
+      int spatial_dim,
+      std::vector<real_t>&& X_ref,
+      std::vector<offset_t>&& cell2vertex_offsets,
+      std::vector<index_t>&& cell2vertex,
+      std::vector<CellShape>&& cell_shape);
 
   void set_faces_from_arrays(
       const std::vector<CellShape>& face_shape,
       const std::vector<offset_t>& face2vertex_offsets,
       const std::vector<index_t>& face2vertex,
       const std::vector<std::array<index_t,2>>& face2cell);
+  void set_faces_from_arrays(
+      std::vector<CellShape>&& face_shape,
+      std::vector<offset_t>&& face2vertex_offsets,
+      std::vector<index_t>&& face2vertex,
+      std::vector<std::array<index_t,2>>&& face2cell);
+  void set_faces_from_arrays(
+      std::vector<CellShape>&& face_shape,
+      std::vector<offset_t>&& face2vertex_offsets,
+      std::vector<index_t>&& face2vertex,
+      std::vector<std::array<index_t,2>>&& face2cell,
+      MeshCodim1StorageMode storage_mode);
   void set_cell_faces_from_arrays(
       const std::vector<offset_t>& cell2face_offsets,
       const std::vector<index_t>& cell2face,
@@ -105,8 +122,10 @@ public:
       const std::vector<int8_t>& cell2face_sense,
       const std::vector<int8_t>& cell2face_perm);
   void set_edges_from_arrays(const std::vector<std::array<index_t,2>>& edge2vertex);
+  void set_edges_from_arrays(std::vector<std::array<index_t,2>>&& edge2vertex);
 
   void finalize();
+  void finalize(const MeshFinalizeOptions& options);
 
 	  // ---- Basic queries ----
 	  int dim() const noexcept { return spatial_dim_; }
@@ -141,13 +160,26 @@ public:
   void mark_current_geometry_changed();
   void set_current_coords(const std::vector<real_t>& Xcur);
   void clear_current_coords();
+  void rebase_reference_to_current(const ReferenceRebaseOptions& options = {});
+  void rebase_reference_coordinates(
+      std::vector<real_t> Xref,
+      const ReferenceRebaseOptions& options = {});
+  void rebase_reference_after_remesh(std::vector<real_t> Xref,
+                                     ReferenceRebaseOptions options = {});
+  void restore_restart_revision_metadata(ReferenceRebaseInfo rebase_info,
+                                         MeshRevisionState revisions);
   Configuration active_configuration() const noexcept { return active_config_; }
   void use_reference_configuration();
   void use_current_configuration();
+  [[nodiscard]] ReferenceRebaseInfo reference_rebase_info() const noexcept { return rebase_info_; }
+  [[nodiscard]] ReferenceConfigurationMode reference_configuration_mode() const noexcept {
+    return rebase_info_.mode;
+  }
   [[nodiscard]] MeshRevisionState revision_state() const { return event_bus_.revision_state(); }
   [[nodiscard]] std::uint64_t geometry_revision() const { return event_bus_.geometry_revision(); }
   [[nodiscard]] std::uint64_t reference_geometry_revision() const { return event_bus_.reference_geometry_revision(); }
   [[nodiscard]] std::uint64_t current_geometry_revision() const { return event_bus_.current_geometry_revision(); }
+  [[nodiscard]] std::uint64_t reference_rebase_epoch() const { return event_bus_.reference_rebase_epoch(); }
   [[nodiscard]] std::uint64_t topology_revision() const { return event_bus_.topology_revision(); }
   [[nodiscard]] std::uint64_t ownership_revision() const { return event_bus_.ownership_revision(); }
   [[nodiscard]] std::uint64_t numbering_revision() const { return event_bus_.numbering_revision(); }
@@ -159,6 +191,24 @@ public:
   std::array<real_t,3> get_vertex_coords(index_t v) const;
   void set_vertex_coords(index_t v, const std::array<real_t,3>& xyz);
   void set_vertex_deformed_coords(index_t v, const std::array<real_t,3>& xyz) { set_vertex_coords(v, xyz); }
+
+  // ---- Geometry DOF access ----
+  //
+  // Current high-order geometry support stores geometric DOFs as vertex
+  // coordinates.  For high-order cells, edge/face/interior control points are
+  // the additional vertex ids carried by that cell's high-order connectivity.
+  [[nodiscard]] GeometryOrderDescriptor geometry_order_descriptor() const;
+  [[nodiscard]] int geometry_order(index_t c) const;
+  [[nodiscard]] bool has_high_order_geometry() const;
+  [[nodiscard]] size_t geometry_dof_count() const noexcept { return n_vertices(); }
+  [[nodiscard]] std::vector<index_t> cell_geometry_dofs(index_t c) const;
+  [[nodiscard]] std::vector<index_t> cell_edge_geometry_dofs(index_t c, int edge_id) const;
+  [[nodiscard]] std::vector<index_t> cell_face_geometry_dofs(index_t c, int face_id) const;
+  [[nodiscard]] std::vector<index_t> cell_interior_geometry_dofs(index_t c) const;
+  [[nodiscard]] std::array<real_t,3> geometry_dof_coords(
+      index_t dof, Configuration cfg = Configuration::Reference) const;
+  void set_reference_geometry_dof_coords(index_t dof, const std::array<real_t,3>& xyz);
+  void set_current_geometry_dof_coords(index_t dof, const std::array<real_t,3>& xyz);
 
   // ---- Topology access ----
   const std::vector<CellShape>& cell_shapes() const noexcept { return cell_shape_; }
@@ -189,6 +239,7 @@ public:
   const std::vector<std::array<index_t,2>>& face2cell() const noexcept { return face2cell_; }
   // Boundary labels per face (size = n_faces, INVALID_LABEL = unlabeled)
   const std::vector<label_t>& face_boundary_ids() const noexcept { return face_boundary_id_; }
+  [[nodiscard]] MeshCodim1StorageMode codim1_storage_mode() const noexcept { return codim1_storage_mode_; }
 
   // ---- Incremental builders (testing convenience; not optimized for large meshes) ----
   void add_vertex(index_t id, const std::array<real_t,3>& xyz);
@@ -214,6 +265,8 @@ public:
   index_t global_to_local_vertex(gid_t gid) const;
   index_t global_to_local_face(gid_t gid) const;
   index_t global_to_local_edge(gid_t gid) const;
+  [[nodiscard]] bool has_global_lookup_map(EntityKind kind) const noexcept;
+  [[nodiscard]] size_t global_lookup_map_size(EntityKind kind) const noexcept;
 
   // ---- Adaptivity metadata ----
   /// @brief Per-cell h-refinement level (0 = original/coarsest).
@@ -362,6 +415,7 @@ private:
   int spatial_dim_ = 0;
   std::string mesh_id_;
   Configuration active_config_ = Configuration::Reference;
+  ReferenceRebaseInfo rebase_info_{};
 
   // Coordinates
   std::vector<real_t> X_ref_;
@@ -377,6 +431,7 @@ private:
   std::vector<offset_t> face2vertex_offsets_;
   std::vector<index_t> face2vertex_;
   std::vector<std::array<index_t,2>> face2cell_;
+  MeshCodim1StorageMode codim1_storage_mode_{MeshCodim1StorageMode::None};
   // Optional cell->face adjacency (parallel arrays).
   std::vector<offset_t> cell2face_offsets_;
   std::vector<index_t> cell2face_;
@@ -431,10 +486,10 @@ private:
   mutable std::vector<index_t> cell2cell_;
 
   // Global to local maps
-  std::unordered_map<gid_t, index_t> global2local_cell_;
-  std::unordered_map<gid_t, index_t> global2local_vertex_;
-  std::unordered_map<gid_t, index_t> global2local_face_;
-  std::unordered_map<gid_t, index_t> global2local_edge_;
+  mutable std::unordered_map<gid_t, index_t> global2local_cell_;
+  mutable std::unordered_map<gid_t, index_t> global2local_vertex_;
+  mutable std::unordered_map<gid_t, index_t> global2local_face_;
+  mutable std::unordered_map<gid_t, index_t> global2local_edge_;
 
   // Search acceleration
   mutable std::unique_ptr<SearchAccel> search_accel_;
@@ -446,6 +501,10 @@ private:
   size_t entity_count(EntityKind k) const noexcept;
   void invalidate_caches();
   void rebuild_gid_maps();
+  void ensure_global2local_cell() const;
+  void ensure_global2local_vertex() const;
+  void ensure_global2local_face() const;
+  void ensure_global2local_edge() const;
 
   // IO registry storage
   static std::unordered_map<std::string, LoadFn>& readers_();

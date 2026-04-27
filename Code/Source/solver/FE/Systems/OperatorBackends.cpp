@@ -33,6 +33,9 @@ struct OperatorBackends::Impl {
 
         std::unique_ptr<assembly::MatrixFreeAssembler> assembler;
         std::shared_ptr<assembly::MatrixFreeOperator> op;
+        OperatorRevisionSnapshot revision{};
+        OperatorInvalidationDecision last_invalidation{};
+        std::size_t rebuild_count{0};
     };
 
     std::unordered_map<OperatorTag, MatrixFreeEntry> matrix_free;
@@ -59,6 +62,8 @@ void OperatorBackends::invalidateCache()
     for (auto& kv : impl_->matrix_free) {
         kv.second.op.reset();
         kv.second.assembler.reset();
+        kv.second.revision = {};
+        kv.second.last_invalidation = {};
     }
 }
 
@@ -73,6 +78,9 @@ void OperatorBackends::registerMatrixFree(OperatorTag tag,
     entry.has_custom_options = false;
     entry.op.reset();
     entry.assembler.reset();
+    entry.revision = {};
+    entry.last_invalidation = {};
+    entry.rebuild_count = 0u;
 }
 
 void OperatorBackends::registerMatrixFree(OperatorTag tag,
@@ -88,6 +96,9 @@ void OperatorBackends::registerMatrixFree(OperatorTag tag,
     entry.has_custom_options = true;
     entry.op.reset();
     entry.assembler.reset();
+    entry.revision = {};
+    entry.last_invalidation = {};
+    entry.rebuild_count = 0u;
 }
 
 bool OperatorBackends::hasMatrixFree(const OperatorTag& tag) const noexcept
@@ -114,8 +125,15 @@ OperatorBackends::matrixFreeOperator(const FESystem& system, const OperatorTag& 
     auto& entry = it->second;
     FE_CHECK_NOT_NULL(entry.kernel.get(), "OperatorBackends::matrixFreeOperator: kernel");
 
+    const auto current_revision = system.operatorRevisionSnapshot();
     if (entry.op && entry.assembler) {
-        return entry.op;
+        entry.last_invalidation =
+            decideOperatorInvalidation(entry.revision, current_revision);
+        if (!entry.last_invalidation.requires_matrix_free_refresh()) {
+            return entry.op;
+        }
+        entry.op.reset();
+        entry.assembler.reset();
     }
 
     const auto& space = *system.field_registry_.records().front().space;
@@ -139,7 +157,33 @@ OperatorBackends::matrixFreeOperator(const FESystem& system, const OperatorTag& 
 
     entry.op = entry.assembler->getOperator();
     FE_CHECK_NOT_NULL(entry.op.get(), "OperatorBackends::matrixFreeOperator: operator");
+    entry.revision = current_revision;
+    ++entry.rebuild_count;
     return entry.op;
+}
+
+std::size_t OperatorBackends::matrixFreeRebuildCount(const OperatorTag& tag) const
+{
+    auto it = impl_->matrix_free.find(tag);
+    FE_THROW_IF(it == impl_->matrix_free.end(), InvalidArgumentException,
+                "OperatorBackends::matrixFreeRebuildCount: unknown matrix-free operator '" + tag + "'");
+    return it->second.rebuild_count;
+}
+
+OperatorRevisionSnapshot OperatorBackends::matrixFreeRevisionSnapshot(const OperatorTag& tag) const
+{
+    auto it = impl_->matrix_free.find(tag);
+    FE_THROW_IF(it == impl_->matrix_free.end(), InvalidArgumentException,
+                "OperatorBackends::matrixFreeRevisionSnapshot: unknown matrix-free operator '" + tag + "'");
+    return it->second.revision;
+}
+
+OperatorInvalidationDecision OperatorBackends::matrixFreeLastInvalidation(const OperatorTag& tag) const
+{
+    auto it = impl_->matrix_free.find(tag);
+    FE_THROW_IF(it == impl_->matrix_free.end(), InvalidArgumentException,
+                "OperatorBackends::matrixFreeLastInvalidation: unknown matrix-free operator '" + tag + "'");
+    return it->second.last_invalidation;
 }
 
 void OperatorBackends::registerFunctional(std::string tag,
@@ -330,6 +374,22 @@ Real OperatorBackends::evaluateBoundaryFunctional(const FESystem& system,
         assembler.setPreviousSolution2(state.u_prev2);
     }
     return assembler.assembleBoundaryScalar(kernel, boundary_marker);
+}
+
+SetupStorageRequirements OperatorBackends::storageRequirements() const noexcept
+{
+    SetupStorageRequirements req;
+    if (!impl_) {
+        return req;
+    }
+
+    for (const auto& [tag, kernel] : impl_->functionals) {
+        (void)tag;
+        if (kernel && kernel->hasBoundaryFace()) {
+            req.boundary_face_topology = true;
+        }
+    }
+    return req;
 }
 
 } // namespace systems

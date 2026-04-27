@@ -53,6 +53,25 @@ void copyVector(backends::GenericVector& dst, const backends::GenericVector& src
     std::copy(s.begin(), s.end(), d.begin());
 }
 
+systems::SystemStateView makeAcceptedTimeStepStateView(const TimeHistory& history,
+                                                       double solve_time)
+{
+    systems::SystemStateView state;
+    state.time = solve_time;
+    state.dt = history.dt();
+    state.effective_dt = history.dt();
+    state.dt_prev = history.dtPrev();
+    state.u = history.uSpan();
+    state.u_prev = history.uPrevSpan();
+    state.u_prev2 = history.uPrev2Span();
+    state.u_vector = &history.u();
+    state.u_prev_vector = &history.uPrev();
+    state.u_prev2_vector = &history.uPrev2();
+    state.u_history = history.uHistorySpans();
+    state.dt_history = history.dtHistory();
+    return state;
+}
+
 void zeroVectorEntries(std::span<const GlobalIndex> dofs, backends::GenericVector& vec)
 {
     if (dofs.empty()) {
@@ -2850,6 +2869,11 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                             static_cast<Real>(dt),
                             static_cast<Real>(t + dt));
                     }
+                    const auto accepted_time_step_state =
+                        makeAcceptedTimeStepStateView(history, solve_time);
+                    transient.system().acceptGeometricNonlinearityState(
+                        accepted_time_step_state,
+                        systems::GeometricNonlinearityUpdatePoint::AcceptedTimeStep);
 	                transient.system().commitTimeStep();
 	                history.acceptStep(dt);
 	                if (temporal_order == 2 && options_.scheme == SchemeKind::VSVO_BDF && history.hasSecondOrderState()) {

@@ -41,6 +41,8 @@
  * belong in injected backends (e.g., future Physics libraries).
  */
 
+#include "../Validation/MovingGeometryValidity.h"
+
 #include <limits>
 
 namespace svmp {
@@ -79,6 +81,24 @@ struct MotionConfig {
   /// Maximum acceptable skewness (0 is best, ~1 is worst) before suggesting step-size reduction.
   /// Use infinity to disable the guard.
   double quality_max_skewness = std::numeric_limits<double>::infinity();
+
+  // ---- Moving-geometry validity guards (Mesh-side, physics agnostic) ----
+
+  /// Enable moved-boundary validity checks beyond element inversion/Jacobian
+  /// quality, such as self-intersection, separation, folding, and generic
+  /// geometry constraints.
+  bool enable_validity_guard = false;
+
+  /// If true, rejecting validity failures trigger rollback/backtracking.  If
+  /// false, failures are reported through diagnostics but the motion update is
+  /// accepted.
+  bool enforce_validity_thresholds = true;
+
+  /// Physics-neutral validity policy selected by the caller.  Defaults to a
+  /// conservative ALE policy; users can replace it with Contact, Shell,
+  /// BoundaryLayer, LargeStep, or a custom label-scoped policy.
+  validation::MovingGeometryValidityPolicy validity_policy =
+      validation::MovingGeometryValidity::ale_basic_policy();
 };
 
 } // namespace motion

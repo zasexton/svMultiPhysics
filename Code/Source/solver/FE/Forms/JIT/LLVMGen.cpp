@@ -2881,16 +2881,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             }
         }
 
-	                // Prepare batch loop.
-	                // Functional kernels (no test space) are always invoked through
-	                // JITFunctionalKernelWrapper which packs CellKernelArgsV6, not
-	                // the batch CellKernelBatchArgsV1.  Disable batch mode for them.
+	                // Prepare batch loop. Functional kernels now share the same
+	                // CellKernelBatchArgsV1 ABI as assembly kernels, with a
+	                // synthetic one-entry output vector.
 	                const bool is_functional = coupled ? false : !ir.testSpace().has_value();
-	                const bool use_batch = (coupled || options_.vectorize) && (domain == IntegralDomain::Cell) && !is_functional;
+	                const bool use_batch = (coupled || options_.vectorize) && (domain == IntegralDomain::Cell);
 
 	                // Determine SIMD batch eligibility: process simd_w elements per
 	                // batch iteration using <simd_w x double> vector types.
-	                // Disabled for: coupled mode, face domains, functional kernels,
+	                // Disabled for: coupled mode, face domains,
 	                // external calls (scalar ABI), env override, insufficient SIMD width.
 	                const bool has_external_calls = [&]() -> bool {
 	                    for (const auto& t : terms) {
@@ -2928,7 +2927,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                }();
 	                const bool use_simd_batch = options_.simd_batch && !simd_batch_env_off &&
 	                                            use_batch && !coupled && simd_w >= 2 &&
-	                                            !has_external_calls;
+	                                            !has_external_calls && !has_field_solutions;
 	                {
 	                    static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
 	                    if (jit_telemetry) {

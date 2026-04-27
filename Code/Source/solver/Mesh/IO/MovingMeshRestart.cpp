@@ -45,6 +45,75 @@ Configuration configuration_from_string(const std::string& value)
   throw std::runtime_error("moving mesh restart: unknown active configuration '" + value + "'");
 }
 
+int geometry_dof_storage_to_int(GeometryDofStorage storage)
+{
+  switch (storage) {
+    case GeometryDofStorage::VertexCoordinates:
+      return 0;
+  }
+  return 0;
+}
+
+GeometryDofStorage geometry_dof_storage_from_int(int value)
+{
+  if (value == 0) {
+    return GeometryDofStorage::VertexCoordinates;
+  }
+  throw std::runtime_error("moving mesh restart: invalid geometry DOF storage");
+}
+
+int reference_configuration_mode_to_int(ReferenceConfigurationMode mode)
+{
+  switch (mode) {
+    case ReferenceConfigurationMode::ImmutableOriginal:
+      return 0;
+    case ReferenceConfigurationMode::UpdatedLagrangianRebased:
+      return 1;
+    case ReferenceConfigurationMode::RemeshRebased:
+      return 2;
+  }
+  return 0;
+}
+
+ReferenceConfigurationMode reference_configuration_mode_from_int(int value)
+{
+  switch (value) {
+    case 0:
+      return ReferenceConfigurationMode::ImmutableOriginal;
+    case 1:
+      return ReferenceConfigurationMode::UpdatedLagrangianRebased;
+    case 2:
+      return ReferenceConfigurationMode::RemeshRebased;
+  }
+  throw std::runtime_error("moving mesh restart: invalid reference configuration mode");
+}
+
+int reference_rebase_source_to_int(ReferenceRebaseSource source)
+{
+  switch (source) {
+    case ReferenceRebaseSource::CurrentConfiguration:
+      return 0;
+    case ReferenceRebaseSource::ExplicitCoordinates:
+      return 1;
+    case ReferenceRebaseSource::RemeshedReference:
+      return 2;
+  }
+  return 0;
+}
+
+ReferenceRebaseSource reference_rebase_source_from_int(int value)
+{
+  switch (value) {
+    case 0:
+      return ReferenceRebaseSource::CurrentConfiguration;
+    case 1:
+      return ReferenceRebaseSource::ExplicitCoordinates;
+    case 2:
+      return ReferenceRebaseSource::RemeshedReference;
+  }
+  throw std::runtime_error("moving mesh restart: invalid reference rebase source");
+}
+
 EntityKind entity_kind_from_int(int value)
 {
   if (value < static_cast<int>(EntityKind::Vertex) || value > static_cast<int>(EntityKind::Volume)) {
@@ -183,6 +252,7 @@ void write_revision_state(std::ostream& out, const MeshRevisionState& revisions)
       << revisions.geometry << ' '
       << revisions.reference_geometry << ' '
       << revisions.current_geometry << ' '
+      << revisions.reference_rebase << ' '
       << revisions.topology << ' '
       << revisions.ownership << ' '
       << revisions.numbering << ' '
@@ -191,14 +261,17 @@ void write_revision_state(std::ostream& out, const MeshRevisionState& revisions)
       << revisions.active_configuration << '\n';
 }
 
-MeshRevisionState read_revision_state(std::istream& in)
+MeshRevisionState read_revision_state(std::istream& in, std::uint32_t version)
 {
   expect_tag(in, "revision_state");
   MeshRevisionState revisions{};
   in >> revisions.geometry
      >> revisions.reference_geometry
-     >> revisions.current_geometry
-     >> revisions.topology
+     >> revisions.current_geometry;
+  if (version >= 3u) {
+    in >> revisions.reference_rebase;
+  }
+  in >> revisions.topology
      >> revisions.ownership
      >> revisions.numbering
      >> revisions.field_layout
@@ -297,6 +370,11 @@ void write_metadata_maps(std::ostream& out, const WriteOptions& options)
     out << std::quoted(key) << ' ' << std::quoted(value) << '\n';
   }
 
+  out << "moving_geometry_validity_state " << options.moving_geometry_validity_state.size() << '\n';
+  for (const auto& [key, value] : options.moving_geometry_validity_state) {
+    out << std::quoted(key) << ' ' << std::quoted(value) << '\n';
+  }
+
   out << "adaptivity_provenance " << options.adaptivity_provenance.size() << '\n';
   for (const auto& value : options.adaptivity_provenance) {
     out << std::quoted(value) << '\n';
@@ -315,6 +393,17 @@ void read_metadata_maps(std::istream& in, Metadata& metadata)
     metadata.motion_backend_state.emplace(std::move(key), std::move(value));
   }
 
+  if (metadata.version >= 4u) {
+    expect_tag(in, "moving_geometry_validity_state");
+    in >> count;
+    for (std::size_t i = 0; i < count; ++i) {
+      std::string key;
+      std::string value;
+      in >> std::quoted(key) >> std::quoted(value);
+      metadata.moving_geometry_validity_state.emplace(std::move(key), std::move(value));
+    }
+  }
+
   expect_tag(in, "adaptivity_provenance");
   in >> count;
   metadata.adaptivity_provenance.resize(count);
@@ -325,6 +414,62 @@ void read_metadata_maps(std::istream& in, Metadata& metadata)
   if (!in) {
     throw std::runtime_error("moving mesh restart: malformed restart metadata block");
   }
+}
+
+void write_geometry_order_descriptor(std::ostream& out, const GeometryOrderDescriptor& descriptor)
+{
+  out << "geometry_order_descriptor "
+      << geometry_dof_storage_to_int(descriptor.storage) << ' '
+      << descriptor.max_order << ' '
+      << (descriptor.has_high_order ? 1 : 0) << ' '
+      << (descriptor.has_mixed_order ? 1 : 0) << ' '
+      << descriptor.reference_dofs << ' '
+      << descriptor.current_dofs << '\n';
+}
+
+GeometryOrderDescriptor read_geometry_order_descriptor(std::istream& in)
+{
+  expect_tag(in, "geometry_order_descriptor");
+  GeometryOrderDescriptor descriptor;
+  int storage = 0;
+  int has_high_order = 0;
+  int has_mixed_order = 0;
+  in >> storage
+     >> descriptor.max_order
+     >> has_high_order
+     >> has_mixed_order
+     >> descriptor.reference_dofs
+     >> descriptor.current_dofs;
+  descriptor.storage = geometry_dof_storage_from_int(storage);
+  descriptor.has_high_order = (has_high_order != 0);
+  descriptor.has_mixed_order = (has_mixed_order != 0);
+  if (!in) {
+    throw std::runtime_error("moving mesh restart: malformed geometry_order_descriptor block");
+  }
+  return descriptor;
+}
+
+void write_reference_rebase_info(std::ostream& out, const ReferenceRebaseInfo& info)
+{
+  out << "reference_rebase_info "
+      << reference_configuration_mode_to_int(info.mode) << ' '
+      << reference_rebase_source_to_int(info.last_source) << ' '
+      << info.epoch << '\n';
+}
+
+ReferenceRebaseInfo read_reference_rebase_info(std::istream& in)
+{
+  expect_tag(in, "reference_rebase_info");
+  ReferenceRebaseInfo info;
+  int mode = 0;
+  int source = 0;
+  in >> mode >> source >> info.epoch;
+  info.mode = reference_configuration_mode_from_int(mode);
+  info.last_source = reference_rebase_source_from_int(source);
+  if (!in) {
+    throw std::runtime_error("moving mesh restart: malformed reference_rebase_info block");
+  }
+  return info;
 }
 
 void write_descriptor(std::ostream& out, const FieldDescriptor* descriptor)
@@ -658,10 +803,11 @@ Payload read_payload(const std::string& path, const ReadOptions& options)
   if (!in) {
     throw std::runtime_error("moving mesh restart: malformed version block");
   }
-  if (options.require_supported_version && metadata.version != kSupportedVersion) {
+  if (options.require_supported_version &&
+      (metadata.version == 0u || metadata.version > kSupportedVersion)) {
     throw std::runtime_error("moving mesh restart: unsupported version " +
                              std::to_string(metadata.version) +
-                             "; supported version is " + std::to_string(kSupportedVersion));
+                             "; supported versions are 1-" + std::to_string(kSupportedVersion));
   }
 
   expect_tag(in, "restart_epoch");
@@ -672,8 +818,14 @@ Payload read_payload(const std::string& path, const ReadOptions& options)
   in >> active_configuration;
   metadata.active_configuration = configuration_from_string(active_configuration);
 
-  metadata.mesh_revisions = read_revision_state(in);
+  metadata.mesh_revisions = read_revision_state(in, metadata.version);
   read_metadata_maps(in, metadata);
+  if (metadata.version >= 2u) {
+    metadata.geometry_order = read_geometry_order_descriptor(in);
+  }
+  if (metadata.version >= 3u) {
+    metadata.reference_rebase = read_reference_rebase_info(in);
+  }
 
   expect_tag(in, "mesh_dim");
   int dim = 0;
@@ -775,8 +927,23 @@ Payload read_payload(const std::string& path, const ReadOptions& options)
     mesh.use_reference_configuration();
   }
 
+  const auto reconstructed_geometry_order = mesh.geometry_order_descriptor();
+  if (metadata.version >= 2u) {
+    if (metadata.geometry_order.storage != reconstructed_geometry_order.storage ||
+        metadata.geometry_order.max_order != reconstructed_geometry_order.max_order ||
+        metadata.geometry_order.has_high_order != reconstructed_geometry_order.has_high_order ||
+        metadata.geometry_order.has_mixed_order != reconstructed_geometry_order.has_mixed_order ||
+        metadata.geometry_order.reference_dofs != reconstructed_geometry_order.reference_dofs ||
+        metadata.geometry_order.current_dofs != reconstructed_geometry_order.current_dofs) {
+      throw std::runtime_error("moving mesh restart: geometry order metadata does not match restored mesh");
+    }
+  } else {
+    metadata.geometry_order = reconstructed_geometry_order;
+  }
+
   read_fields(in, mesh);
   expect_tag(in, "end");
+  mesh.restore_restart_revision_metadata(metadata.reference_rebase, metadata.mesh_revisions);
 
   return Payload{metadata, std::move(mesh)};
 }
@@ -796,6 +963,8 @@ WriteOptions write_options_from_mesh_io(const MeshIOOptions& io_options)
 
   constexpr const char* backend_prefix = "motion_backend.";
   constexpr std::size_t backend_prefix_len = 15;
+  constexpr const char* validity_prefix = "moving_geometry_validity.";
+  constexpr std::size_t validity_prefix_len = 25;
   constexpr const char* provenance_prefix = "adaptivity_provenance.";
   constexpr std::size_t provenance_prefix_len = 22;
   std::map<std::string, std::string> provenance_ordered;
@@ -803,6 +972,8 @@ WriteOptions write_options_from_mesh_io(const MeshIOOptions& io_options)
   for (const auto& [key, value] : io_options.kv) {
     if (key.rfind(backend_prefix, 0) == 0) {
       options.motion_backend_state.emplace(key.substr(backend_prefix_len), value);
+    } else if (key.rfind(validity_prefix, 0) == 0) {
+      options.moving_geometry_validity_state.emplace(key.substr(validity_prefix_len), value);
     } else if (key.rfind(provenance_prefix, 0) == 0) {
       provenance_ordered.emplace(key.substr(provenance_prefix_len), value);
     }
@@ -841,6 +1012,8 @@ void write(const MeshBase& mesh, const std::string& path, const WriteOptions& op
   out << "active_configuration " << configuration_to_string(mesh.active_configuration()) << '\n';
   write_revision_state(out, mesh.revision_state());
   write_metadata_maps(out, options);
+  write_geometry_order_descriptor(out, mesh.geometry_order_descriptor());
+  write_reference_rebase_info(out, mesh.reference_rebase_info());
 
   out << "mesh_dim " << mesh.dim() << '\n';
   write_vector(out, "x_ref", mesh.X_ref());

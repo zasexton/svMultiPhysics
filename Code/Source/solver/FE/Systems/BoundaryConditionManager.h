@@ -55,6 +55,11 @@ public:
 
     [[nodiscard]] bool isTimeDependent() const noexcept override { return false; }
 
+    [[nodiscard]] SetupStorageRequirements storageRequirements() const noexcept override
+    {
+        return {};
+    }
+
 private:
     FieldId field_id_{INVALID_FIELD_ID};
     std::vector<std::unique_ptr<forms::bc::BoundaryCondition>> bcs_{};

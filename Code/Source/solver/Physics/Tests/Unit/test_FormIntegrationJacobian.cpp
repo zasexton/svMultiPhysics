@@ -10,6 +10,7 @@
 #include "Physics/Materials/Fluid/CarreauYasudaViscosity.h"
 #include "Physics/Materials/Solid/LinearElasticStress.h"
 #include "Physics/Materials/Solid/NeoHookeanPK1.h"
+#include "Physics/Formulations/Solid/FiniteDeformationSolid.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 
 #include "FE/Forms/Vocabulary.h"
@@ -143,10 +144,8 @@ TEST(FormIntegrationJacobian, NeoHookeanForm_MatchesFiniteDifference)
     auto v = FormExpr::testFunction(*space, "v");
 
     auto model = std::make_shared<materials::solid::NeoHookeanPK1>(/*lambda=*/10.0, /*mu=*/2.0);
-    auto F = FormExpr::identity(3) + grad(u);
-    auto P = FormExpr::constitutive(model, F);
-
-    const auto residual = inner(P, grad(v)).dx();
+    const auto residual =
+        formulations::solid::totalLagrangianPK1Residual(u, v, model, 3);
 
     FE::systems::installFormulation(system, "residual", {u_id}, residual);
     FE::systems::installFormulation(system, "jacobian", {u_id}, residual);
@@ -165,6 +164,32 @@ TEST(FormIntegrationJacobian, NeoHookeanForm_MatchesFiniteDifference)
     state.u = std::span<const FE::Real>(uvec);
 
     expectJacobianMatchesCentralFD(system, state, /*eps=*/1e-6, /*rtol=*/5e-4, /*atol=*/1e-9);
+}
+
+TEST(FormIntegrationJacobian, SolidFiniteDeformationHelpersBuildFollowerAndGeometricStiffnessTerms)
+{
+    auto space =
+        FE::spaces::VectorSpace(FE::spaces::SpaceType::H1, FE::ElementType::Tetra4, /*order=*/1, /*components=*/3);
+
+    using namespace svmp::FE::forms;
+
+    const FE::FieldId u_id{0};
+    auto u = FormExpr::stateField(u_id, *space, "u");
+    auto du = FormExpr::trialFunction(*space, "du");
+    auto v = FormExpr::testFunction(*space, "v");
+    auto F = finite_deformation::deformationGradient(u, 3);
+    auto pressure = FormExpr::constant(2.0);
+    auto initial_stress = FormExpr::identity(3);
+
+    const auto follower =
+        formulations::solid::followerPressureReferenceResidual(pressure, v, F, 2);
+    const auto geometric_stiffness =
+        formulations::solid::initialStressGeometricStiffnessResidual(initial_stress,
+                                                                     du,
+                                                                     v);
+
+    EXPECT_TRUE(follower.isValid());
+    EXPECT_TRUE(geometric_stiffness.isValid());
 }
 
 } // namespace test

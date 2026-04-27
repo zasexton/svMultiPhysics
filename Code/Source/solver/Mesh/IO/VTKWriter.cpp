@@ -60,7 +60,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
+#include <iomanip>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <fstream>
 #include <sstream>
@@ -79,6 +82,11 @@ VTKWriter::VTKWriter() {
 }
 
 VTKWriter::~VTKWriter() = default;
+
+namespace {
+bool write_vtu_streaming(const MeshBase& mesh, const std::string& filename,
+                         const VTKWriter::WriteOptions& opts);
+}
 
 void VTKWriter::register_with_mesh() {
   // Register for different VTK formats
@@ -118,6 +126,11 @@ void VTKWriter::write(const MeshBase& mesh, const MeshIOOptions& options) {
   if (current_points_it != options.kv.end()) {
     write_opts.use_current_coordinates_as_points =
         (current_points_it->second == "true" || current_points_it->second == "1");
+  }
+
+  auto streaming_it = options.kv.find("streaming");
+  if (streaming_it != options.kv.end()) {
+    write_opts.streaming = (streaming_it->second == "true" || streaming_it->second == "1");
   }
 
   // Dispatch based on format
@@ -172,6 +185,10 @@ void VTKWriter::write_vtk(const MeshBase& mesh, const std::string& filename,
 
 void VTKWriter::write_vtu(const MeshBase& mesh, const std::string& filename,
                          const WriteOptions& opts) {
+  if (write_vtu_streaming(mesh, filename, opts)) {
+    return;
+  }
+
   // Convert to UnstructuredGrid
   auto ugrid = convert_to_unstructured_grid(mesh, opts);
 
@@ -424,6 +441,863 @@ static int choose_vtk_type_for(const CellShape& shape, size_t n_vertices) {
       return VTK_POLYGON;
   }
 }
+
+namespace {
+
+std::string xml_escape(const std::string& value) {
+  std::string out;
+  out.reserve(value.size());
+  for (const char ch : value) {
+    switch (ch) {
+      case '&': out += "&amp;"; break;
+      case '<': out += "&lt;"; break;
+      case '>': out += "&gt;"; break;
+      case '"': out += "&quot;"; break;
+      case '\'': out += "&apos;"; break;
+      default: out.push_back(ch); break;
+    }
+  }
+  return out;
+}
+
+const char* vtk_xml_type(FieldScalarType type) {
+  switch (type) {
+    case FieldScalarType::Int32: return "Int32";
+    case FieldScalarType::Int64: return "Int64";
+    case FieldScalarType::Float32: return "Float32";
+    case FieldScalarType::Float64: return "Float64";
+    case FieldScalarType::UInt8: return "UInt8";
+    case FieldScalarType::Custom: return nullptr;
+  }
+  return nullptr;
+}
+
+bool is_streamable_linear_cell(const CellShape& shape, size_t n_vertices) {
+  if (shape.order > 1) {
+    return false;
+  }
+
+  auto expect_vertices = [&](size_t expected) {
+    if (n_vertices != expected) {
+      return false;
+    }
+    return shape.num_corners <= 0 || static_cast<size_t>(shape.num_corners) == expected;
+  };
+
+  switch (shape.family) {
+    case CellFamily::Line: return expect_vertices(2);
+    case CellFamily::Triangle: return expect_vertices(3);
+    case CellFamily::Quad: return expect_vertices(4);
+    case CellFamily::Tetra: return expect_vertices(4);
+    case CellFamily::Hex: return expect_vertices(8);
+    case CellFamily::Wedge: return expect_vertices(6);
+    case CellFamily::Pyramid: return expect_vertices(5);
+    case CellFamily::Polygon:
+      return n_vertices >= 3 && (shape.num_corners <= 0 || static_cast<size_t>(shape.num_corners) == n_vertices);
+    default:
+      return false;
+  }
+}
+
+bool can_stream_vtu(const MeshBase& mesh, const VTKWriter::WriteOptions& opts) {
+  if (!opts.streaming || opts.compressed) {
+    return false;
+  }
+
+  for (size_t c = 0; c < mesh.n_cells(); ++c) {
+    const auto span = mesh.cell_vertices_span(static_cast<index_t>(c));
+    if (!is_streamable_linear_cell(mesh.cell_shape(static_cast<index_t>(c)), span.second)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool host_is_little_endian() {
+  const std::uint16_t value = 1;
+  return *reinterpret_cast<const std::uint8_t*>(&value) == 1;
+}
+
+template <typename T>
+void write_ascii_values(std::ostream& os, const T* values, size_t n_values,
+                        const char* indent, size_t values_per_line = 8) {
+  for (size_t i = 0; i < n_values; ++i) {
+    if ((i % values_per_line) == 0) {
+      os << '\n' << indent;
+    } else {
+      os << ' ';
+    }
+    os << values[i];
+  }
+  os << '\n';
+}
+
+void write_ascii_uint8_values(std::ostream& os, const std::uint8_t* values, size_t n_values,
+                              const char* indent, size_t values_per_line = 16) {
+  for (size_t i = 0; i < n_values; ++i) {
+    if ((i % values_per_line) == 0) {
+      os << '\n' << indent;
+    } else {
+      os << ' ';
+    }
+    os << static_cast<unsigned>(values[i]);
+  }
+  os << '\n';
+}
+
+void write_field_array(std::ostream& os, const MeshBase& mesh, EntityKind kind,
+                       const std::string& name, size_t n_tuples, const char* array_indent) {
+  if (!mesh.has_field(kind, name)) {
+    return;
+  }
+
+  const auto type = mesh.field_type_by_name(kind, name);
+  const char* vtk_type = vtk_xml_type(type);
+  if (!vtk_type) {
+    return;
+  }
+
+  const size_t components = mesh.field_components_by_name(kind, name);
+  if (components == 0 || n_tuples == 0) {
+    return;
+  }
+
+  const void* src = mesh.field_data_by_name(kind, name);
+  if (!src) {
+    return;
+  }
+
+  const size_t n_values = n_tuples * components;
+  os << array_indent << "<DataArray type=\"" << vtk_type << "\" Name=\""
+     << xml_escape(name) << "\" NumberOfComponents=\"" << components
+     << "\" NumberOfTuples=\"" << n_tuples << "\" format=\"ascii\">";
+
+  switch (type) {
+    case FieldScalarType::Int32:
+      write_ascii_values(os, static_cast<const std::int32_t*>(src), n_values, "          ");
+      break;
+    case FieldScalarType::Int64:
+      write_ascii_values(os, static_cast<const std::int64_t*>(src), n_values, "          ");
+      break;
+    case FieldScalarType::Float32:
+      write_ascii_values(os, static_cast<const float*>(src), n_values, "          ");
+      break;
+    case FieldScalarType::Float64:
+      write_ascii_values(os, static_cast<const double*>(src), n_values, "          ");
+      break;
+    case FieldScalarType::UInt8:
+      write_ascii_uint8_values(os, static_cast<const std::uint8_t*>(src), n_values, "          ");
+      break;
+    case FieldScalarType::Custom:
+      break;
+  }
+
+  os << array_indent << "</DataArray>\n";
+}
+
+std::vector<std::string> selected_field_names(const MeshBase& mesh, EntityKind kind,
+                                              const std::vector<std::string>& requested) {
+  if (!requested.empty()) {
+    return requested;
+  }
+  return mesh.field_names(kind);
+}
+
+void write_field_data_header(std::ostream& os, const MeshBase& mesh) {
+  os << "    <FieldData>\n";
+  os << "      <DataArray type=\"Int32\" Name=\"SVMPActiveConfiguration\""
+     << " NumberOfComponents=\"1\" NumberOfTuples=\"1\" format=\"ascii\">\n"
+     << "        " << (mesh.active_configuration() == Configuration::Current ? 1 : 0) << "\n"
+     << "      </DataArray>\n";
+
+  const auto rev = mesh.revision_state();
+  os << "      <DataArray type=\"Int64\" Name=\"SVMPMeshRevisionState\""
+     << " NumberOfComponents=\"9\" NumberOfTuples=\"1\" format=\"ascii\">\n"
+     << "        "
+     << static_cast<long long>(rev.geometry) << ' '
+     << static_cast<long long>(rev.reference_geometry) << ' '
+     << static_cast<long long>(rev.current_geometry) << ' '
+     << static_cast<long long>(rev.topology) << ' '
+     << static_cast<long long>(rev.ownership) << ' '
+     << static_cast<long long>(rev.numbering) << ' '
+     << static_cast<long long>(rev.field_layout) << ' '
+     << static_cast<long long>(rev.labels) << ' '
+     << static_cast<long long>(rev.active_configuration) << "\n"
+     << "      </DataArray>\n";
+  os << "    </FieldData>\n";
+}
+
+void write_region_labels_ascii(std::ostream& os, const MeshBase& mesh) {
+  os << "        <DataArray type=\"Int32\" Name=\"RegionID\" NumberOfComponents=\"1\""
+     << " NumberOfTuples=\"" << mesh.n_cells() << "\" format=\"ascii\">";
+  for (size_t c = 0; c < mesh.n_cells(); ++c) {
+    if ((c % 16) == 0) {
+      os << "\n          ";
+    } else {
+      os << ' ';
+    }
+    os << static_cast<std::int32_t>(mesh.region_label(static_cast<index_t>(c)));
+  }
+  os << "\n        </DataArray>\n";
+}
+
+void write_global_cell_ids_ascii(std::ostream& os, const MeshBase& mesh) {
+  const auto& gids = mesh.cell_gids();
+  if (gids.empty()) {
+    return;
+  }
+
+  os << "        <DataArray type=\"Int64\" IdType=\"1\" Name=\"GlobalCellID\""
+     << " NumberOfComponents=\"1\" NumberOfTuples=\"" << mesh.n_cells()
+     << "\" format=\"ascii\">";
+  for (size_t c = 0; c < mesh.n_cells(); ++c) {
+    if ((c % 8) == 0) {
+      os << "\n          ";
+    } else {
+      os << ' ';
+    }
+    const gid_t gid = (c < gids.size()) ? gids[c] : static_cast<gid_t>(c);
+    os << static_cast<std::int64_t>(gid);
+  }
+  os << "\n        </DataArray>\n";
+}
+
+void write_global_vertex_ids_ascii(std::ostream& os, const MeshBase& mesh) {
+  const auto& gids = mesh.vertex_gids();
+  if (gids.empty()) {
+    return;
+  }
+
+  os << "        <DataArray type=\"Int64\" IdType=\"1\" Name=\"GlobalVertexID\""
+     << " NumberOfComponents=\"1\" NumberOfTuples=\"" << mesh.n_vertices()
+     << "\" format=\"ascii\">";
+  for (size_t v = 0; v < mesh.n_vertices(); ++v) {
+    if ((v % 8) == 0) {
+      os << "\n          ";
+    } else {
+      os << ' ';
+    }
+    const gid_t gid = (v < gids.size()) ? gids[v] : static_cast<gid_t>(v);
+    os << static_cast<std::int64_t>(gid);
+  }
+  os << "\n        </DataArray>\n";
+}
+
+void write_point_vector3_ascii(std::ostream& os, const std::string& name,
+                               const std::vector<real_t>& values,
+                               int spatial_dim, size_t n_vertices) {
+  os << "        <DataArray type=\"Float64\" Name=\"" << xml_escape(name)
+     << "\" NumberOfComponents=\"3\" NumberOfTuples=\"" << n_vertices
+     << "\" format=\"ascii\">";
+  for (size_t v = 0; v < n_vertices; ++v) {
+    os << "\n          ";
+    for (int d = 0; d < 3; ++d) {
+      if (d > 0) os << ' ';
+      const double value = (d < spatial_dim)
+          ? static_cast<double>(values[v * static_cast<size_t>(spatial_dim) + static_cast<size_t>(d)])
+          : 0.0;
+      os << value;
+    }
+  }
+  os << "\n        </DataArray>\n";
+}
+
+void write_displacement_ascii(std::ostream& os, const MeshBase& mesh) {
+  const auto& x_ref = mesh.X_ref();
+  const auto& x_cur = mesh.X_cur();
+  const int dim = mesh.dim();
+
+  os << "        <DataArray type=\"Float64\" Name=\"Displacement\""
+     << " NumberOfComponents=\"3\" NumberOfTuples=\"" << mesh.n_vertices()
+     << "\" format=\"ascii\">";
+  for (size_t v = 0; v < mesh.n_vertices(); ++v) {
+    os << "\n          ";
+    for (int d = 0; d < 3; ++d) {
+      if (d > 0) os << ' ';
+      const double value = (d < dim)
+          ? static_cast<double>(x_cur[v * static_cast<size_t>(dim) + static_cast<size_t>(d)] -
+                                x_ref[v * static_cast<size_t>(dim) + static_cast<size_t>(d)])
+          : 0.0;
+      os << value;
+    }
+  }
+  os << "\n        </DataArray>\n";
+}
+
+void write_point_data_ascii(std::ostream& os, const MeshBase& mesh,
+                            const VTKWriter::WriteOptions& opts) {
+  os << "      <PointData";
+  if (!mesh.vertex_gids().empty()) {
+    os << " GlobalIds=\"GlobalVertexID\"";
+  }
+  os << ">\n";
+
+  if (opts.write_point_data) {
+    const auto names = selected_field_names(mesh, EntityKind::Vertex, opts.point_fields_to_write);
+    for (const auto& name : names) {
+      write_field_array(os, mesh, EntityKind::Vertex, name, mesh.n_vertices(), "        ");
+    }
+
+    if (mesh.has_current_coords()) {
+      if (opts.write_current_coordinates) {
+        write_point_vector3_ascii(os, "CurrentCoordinates", mesh.X_cur(), mesh.dim(), mesh.n_vertices());
+      }
+      write_displacement_ascii(os, mesh);
+    }
+  }
+
+  write_global_vertex_ids_ascii(os, mesh);
+  os << "      </PointData>\n";
+}
+
+void write_cell_data_ascii(std::ostream& os, const MeshBase& mesh,
+                           const VTKWriter::WriteOptions& opts) {
+  os << "      <CellData";
+  if (!mesh.cell_gids().empty()) {
+    os << " GlobalIds=\"GlobalCellID\"";
+  }
+  os << ">\n";
+
+  write_region_labels_ascii(os, mesh);
+
+  if (opts.write_cell_data) {
+    const auto names = selected_field_names(mesh, EntityKind::Volume, opts.cell_fields_to_write);
+    for (const auto& name : names) {
+      write_field_array(os, mesh, EntityKind::Volume, name, mesh.n_cells(), "        ");
+    }
+  }
+
+  write_global_cell_ids_ascii(os, mesh);
+  os << "      </CellData>\n";
+}
+
+void write_points_ascii(std::ostream& os, const MeshBase& mesh,
+                        const VTKWriter::WriteOptions& opts) {
+  const bool use_current = opts.use_current_coordinates_as_points && mesh.has_current_coords();
+  const auto& coords = use_current ? mesh.X_cur() : mesh.X_ref();
+  const int dim = mesh.dim();
+
+  os << "      <Points>\n";
+  os << "        <DataArray type=\"Float64\" Name=\"Points\" NumberOfComponents=\"3\""
+     << " NumberOfTuples=\"" << mesh.n_vertices() << "\" format=\"ascii\">";
+  for (size_t v = 0; v < mesh.n_vertices(); ++v) {
+    os << "\n          ";
+    for (int d = 0; d < 3; ++d) {
+      if (d > 0) os << ' ';
+      const double value = (d < dim)
+          ? static_cast<double>(coords[v * static_cast<size_t>(dim) + static_cast<size_t>(d)])
+          : 0.0;
+      os << value;
+    }
+  }
+  os << "\n        </DataArray>\n";
+  os << "      </Points>\n";
+}
+
+void write_cells_ascii(std::ostream& os, const MeshBase& mesh) {
+  os << "      <Cells>\n";
+
+  os << "        <DataArray type=\"Int64\" Name=\"connectivity\" format=\"ascii\">";
+  for (size_t c = 0; c < mesh.n_cells(); ++c) {
+    const auto span = mesh.cell_vertices_span(static_cast<index_t>(c));
+    os << "\n          ";
+    for (size_t i = 0; i < span.second; ++i) {
+      if (i > 0) os << ' ';
+      const index_t v = span.first[i];
+      if (v < 0 || static_cast<size_t>(v) >= mesh.n_vertices()) {
+        throw std::runtime_error("VTKWriter: cell connectivity references an invalid vertex");
+      }
+      os << static_cast<std::int64_t>(v);
+    }
+  }
+  os << "\n        </DataArray>\n";
+
+  os << "        <DataArray type=\"Int64\" Name=\"offsets\" format=\"ascii\">";
+  offset_t offset = 0;
+  for (size_t c = 0; c < mesh.n_cells(); ++c) {
+    const auto span = mesh.cell_vertices_span(static_cast<index_t>(c));
+    offset += static_cast<offset_t>(span.second);
+    if ((c % 8) == 0) {
+      os << "\n          ";
+    } else {
+      os << ' ';
+    }
+    os << static_cast<std::int64_t>(offset);
+  }
+  os << "\n        </DataArray>\n";
+
+  os << "        <DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">";
+  for (size_t c = 0; c < mesh.n_cells(); ++c) {
+    const auto span = mesh.cell_vertices_span(static_cast<index_t>(c));
+    const int vtk_type = choose_vtk_type_for(mesh.cell_shape(static_cast<index_t>(c)), span.second);
+    if ((c % 16) == 0) {
+      os << "\n          ";
+    } else {
+      os << ' ';
+    }
+    os << vtk_type;
+  }
+  os << "\n        </DataArray>\n";
+
+  os << "      </Cells>\n";
+}
+
+bool write_vtu_streaming_ascii(const MeshBase& mesh, const std::string& filename,
+                               const VTKWriter::WriteOptions& opts) {
+  if (!can_stream_vtu(mesh, opts) || opts.binary) {
+    return false;
+  }
+
+  std::ofstream os(filename);
+  if (!os) {
+    throw std::runtime_error("VTKWriter: Could not open file for writing: " + filename);
+  }
+
+  os << std::setprecision(17);
+  os << "<?xml version=\"1.0\"?>\n";
+  os << "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n";
+  os << "  <UnstructuredGrid>\n";
+  write_field_data_header(os, mesh);
+  os << "    <Piece NumberOfPoints=\"" << mesh.n_vertices()
+     << "\" NumberOfCells=\"" << mesh.n_cells() << "\">\n";
+  write_point_data_ascii(os, mesh, opts);
+  write_cell_data_ascii(os, mesh, opts);
+  write_points_ascii(os, mesh, opts);
+  write_cells_ascii(os, mesh);
+  os << "    </Piece>\n";
+  os << "  </UnstructuredGrid>\n";
+  os << "</VTKFile>\n";
+
+  if (!os) {
+    throw std::runtime_error("VTKWriter: Failed while writing file: " + filename);
+  }
+  return true;
+}
+
+struct AppendedBinaryArray {
+  std::uint64_t payload_bytes = 0;
+  std::function<void(std::ostream&)> write_payload;
+};
+
+using AppendedArrays = std::vector<AppendedBinaryArray>;
+
+std::uint64_t add_appended_array(AppendedArrays& arrays, std::uint64_t& next_offset,
+                                 std::uint64_t payload_bytes,
+                                 std::function<void(std::ostream&)> write_payload) {
+  const std::uint64_t offset = next_offset;
+  next_offset += sizeof(std::uint64_t) + payload_bytes;
+  arrays.push_back(AppendedBinaryArray{payload_bytes, std::move(write_payload)});
+  return offset;
+}
+
+void write_appended_data_array_xml(std::ostream& os,
+                                   const std::string& indent,
+                                   const std::string& type,
+                                   const std::string& name,
+                                   size_t components,
+                                   size_t tuples,
+                                   std::uint64_t offset,
+                                   bool id_type = false) {
+  os << indent << "<DataArray type=\"" << type << "\"";
+  if (id_type) {
+    os << " IdType=\"1\"";
+  }
+  os << " Name=\"" << xml_escape(name) << "\" NumberOfComponents=\"" << components
+     << "\" NumberOfTuples=\"" << tuples << "\" format=\"appended\" offset=\""
+     << offset << "\"/>\n";
+}
+
+void write_raw_bytes(std::ostream& os, const void* data, std::uint64_t bytes) {
+  if (bytes == 0) {
+    return;
+  }
+  os.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(bytes));
+}
+
+void write_repeated_vector3_payload(std::ostream& os,
+                                    const std::vector<real_t>& values,
+                                    int spatial_dim,
+                                    size_t n_vertices) {
+  constexpr size_t kChunkTuples = 8192;
+  std::vector<double> buffer(kChunkTuples * 3, 0.0);
+  for (size_t begin = 0; begin < n_vertices; begin += kChunkTuples) {
+    const size_t count = std::min(kChunkTuples, n_vertices - begin);
+    std::fill(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(count * 3), 0.0);
+    for (size_t i = 0; i < count; ++i) {
+      const size_t v = begin + i;
+      for (int d = 0; d < spatial_dim && d < 3; ++d) {
+        buffer[i * 3 + static_cast<size_t>(d)] = static_cast<double>(
+            values[v * static_cast<size_t>(spatial_dim) + static_cast<size_t>(d)]);
+      }
+    }
+    write_raw_bytes(os, buffer.data(), static_cast<std::uint64_t>(count * 3 * sizeof(double)));
+  }
+}
+
+void write_displacement_payload(std::ostream& os, const MeshBase& mesh) {
+  const auto& x_ref = mesh.X_ref();
+  const auto& x_cur = mesh.X_cur();
+  const int dim = mesh.dim();
+  constexpr size_t kChunkTuples = 8192;
+  std::vector<double> buffer(kChunkTuples * 3, 0.0);
+  for (size_t begin = 0; begin < mesh.n_vertices(); begin += kChunkTuples) {
+    const size_t count = std::min(kChunkTuples, mesh.n_vertices() - begin);
+    std::fill(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(count * 3), 0.0);
+    for (size_t j = 0; j < count; ++j) {
+      const size_t v = begin + j;
+      for (int d = 0; d < dim && d < 3; ++d) {
+        const size_t i = v * static_cast<size_t>(dim) + static_cast<size_t>(d);
+        buffer[j * 3 + static_cast<size_t>(d)] = static_cast<double>(x_cur[i] - x_ref[i]);
+      }
+    }
+    write_raw_bytes(os, buffer.data(), static_cast<std::uint64_t>(count * 3 * sizeof(double)));
+  }
+}
+
+void write_region_labels_payload(std::ostream& os, const MeshBase& mesh) {
+  constexpr size_t kChunkValues = 65536;
+  std::vector<std::int32_t> buffer(kChunkValues);
+  for (size_t begin = 0; begin < mesh.n_cells(); begin += kChunkValues) {
+    const size_t count = std::min(kChunkValues, mesh.n_cells() - begin);
+    for (size_t i = 0; i < count; ++i) {
+      buffer[i] = static_cast<std::int32_t>(
+          mesh.region_label(static_cast<index_t>(begin + i)));
+    }
+    write_raw_bytes(os, buffer.data(), static_cast<std::uint64_t>(count * sizeof(std::int32_t)));
+  }
+}
+
+void write_global_ids_payload(std::ostream& os, const std::vector<gid_t>& gids, size_t n_tuples) {
+  constexpr size_t kChunkValues = 65536;
+  std::vector<std::int64_t> buffer(kChunkValues);
+  for (size_t begin = 0; begin < n_tuples; begin += kChunkValues) {
+    const size_t count = std::min(kChunkValues, n_tuples - begin);
+    for (size_t i = 0; i < count; ++i) {
+      const size_t id = begin + i;
+      buffer[i] = static_cast<std::int64_t>(
+          (id < gids.size()) ? gids[id] : static_cast<gid_t>(id));
+    }
+    write_raw_bytes(os, buffer.data(), static_cast<std::uint64_t>(count * sizeof(std::int64_t)));
+  }
+}
+
+void write_offsets_payload(std::ostream& os, const MeshBase& mesh) {
+  constexpr size_t kChunkValues = 65536;
+  std::vector<std::int64_t> buffer(kChunkValues);
+  std::int64_t offset = 0;
+  size_t buffered = 0;
+  for (size_t c = 0; c < mesh.n_cells(); ++c) {
+    const auto span = mesh.cell_vertices_span(static_cast<index_t>(c));
+    offset += static_cast<std::int64_t>(span.second);
+    buffer[buffered++] = offset;
+    if (buffered == kChunkValues) {
+      write_raw_bytes(os, buffer.data(), static_cast<std::uint64_t>(buffered * sizeof(std::int64_t)));
+      buffered = 0;
+    }
+  }
+  if (buffered > 0) {
+    write_raw_bytes(os, buffer.data(), static_cast<std::uint64_t>(buffered * sizeof(std::int64_t)));
+  }
+}
+
+void write_cell_types_payload(std::ostream& os, const MeshBase& mesh) {
+  constexpr size_t kChunkValues = 65536;
+  std::vector<std::uint8_t> buffer(kChunkValues);
+  for (size_t begin = 0; begin < mesh.n_cells(); begin += kChunkValues) {
+    const size_t count = std::min(kChunkValues, mesh.n_cells() - begin);
+    for (size_t i = 0; i < count; ++i) {
+      const size_t c = begin + i;
+      const auto span = mesh.cell_vertices_span(static_cast<index_t>(c));
+      buffer[i] = static_cast<std::uint8_t>(
+          choose_vtk_type_for(mesh.cell_shape(static_cast<index_t>(c)), span.second));
+    }
+    write_raw_bytes(os, buffer.data(), static_cast<std::uint64_t>(count * sizeof(std::uint8_t)));
+  }
+}
+
+std::uint64_t checked_payload_bytes(size_t n_values, size_t value_bytes, const std::string& name) {
+  if (value_bytes != 0 && n_values > std::numeric_limits<std::uint64_t>::max() / value_bytes) {
+    throw std::runtime_error("VTKWriter: appended binary array is too large: " + name);
+  }
+  return static_cast<std::uint64_t>(n_values) * static_cast<std::uint64_t>(value_bytes);
+}
+
+std::uint64_t add_field_binary_array(AppendedArrays& arrays,
+                                     std::uint64_t& next_offset,
+                                     const MeshBase& mesh,
+                                     EntityKind kind,
+                                     const std::string& name,
+                                     size_t n_tuples) {
+  if (!mesh.has_field(kind, name)) {
+    return std::numeric_limits<std::uint64_t>::max();
+  }
+
+  const auto type = mesh.field_type_by_name(kind, name);
+  if (!vtk_xml_type(type)) {
+    return std::numeric_limits<std::uint64_t>::max();
+  }
+
+  const size_t components = mesh.field_components_by_name(kind, name);
+  const void* src = mesh.field_data_by_name(kind, name);
+  if (components == 0 || n_tuples == 0 || !src) {
+    return std::numeric_limits<std::uint64_t>::max();
+  }
+
+  const std::uint64_t payload_bytes =
+      checked_payload_bytes(n_tuples * components, bytes_per(type), name);
+  return add_appended_array(arrays, next_offset, payload_bytes,
+                            [src, payload_bytes](std::ostream& os) {
+                              write_raw_bytes(os, src, payload_bytes);
+                            });
+}
+
+void write_point_data_binary_xml(std::ostream& os,
+                                 AppendedArrays& arrays,
+                                 std::uint64_t& next_offset,
+                                 const MeshBase& mesh,
+                                 const VTKWriter::WriteOptions& opts) {
+  os << "      <PointData";
+  if (!mesh.vertex_gids().empty()) {
+    os << " GlobalIds=\"GlobalVertexID\"";
+  }
+  os << ">\n";
+
+  if (opts.write_point_data) {
+    const auto names = selected_field_names(mesh, EntityKind::Vertex, opts.point_fields_to_write);
+    for (const auto& name : names) {
+      if (!mesh.has_field(EntityKind::Vertex, name)) {
+        continue;
+      }
+      const auto type = mesh.field_type_by_name(EntityKind::Vertex, name);
+      const char* vtk_type = vtk_xml_type(type);
+      if (!vtk_type) {
+        continue;
+      }
+      const size_t components = mesh.field_components_by_name(EntityKind::Vertex, name);
+      const auto offset =
+          add_field_binary_array(arrays, next_offset, mesh, EntityKind::Vertex, name, mesh.n_vertices());
+      if (offset == std::numeric_limits<std::uint64_t>::max()) {
+        continue;
+      }
+      write_appended_data_array_xml(os, "        ", vtk_type, name, components, mesh.n_vertices(), offset);
+    }
+
+    if (mesh.has_current_coords()) {
+      if (opts.write_current_coordinates) {
+        const std::uint64_t payload_bytes =
+            checked_payload_bytes(mesh.n_vertices() * 3, sizeof(double), "CurrentCoordinates");
+        const auto offset = add_appended_array(
+            arrays, next_offset, payload_bytes,
+            [&mesh](std::ostream& payload_os) {
+              write_repeated_vector3_payload(payload_os, mesh.X_cur(), mesh.dim(), mesh.n_vertices());
+            });
+        write_appended_data_array_xml(os, "        ", "Float64", "CurrentCoordinates",
+                                      3, mesh.n_vertices(), offset);
+      }
+
+      const std::uint64_t payload_bytes =
+          checked_payload_bytes(mesh.n_vertices() * 3, sizeof(double), "Displacement");
+      const auto offset = add_appended_array(
+          arrays, next_offset, payload_bytes,
+          [&mesh](std::ostream& payload_os) { write_displacement_payload(payload_os, mesh); });
+      write_appended_data_array_xml(os, "        ", "Float64", "Displacement",
+                                    3, mesh.n_vertices(), offset);
+    }
+  }
+
+  if (!mesh.vertex_gids().empty()) {
+    const std::uint64_t payload_bytes =
+        checked_payload_bytes(mesh.n_vertices(), sizeof(std::int64_t), "GlobalVertexID");
+    const auto offset = add_appended_array(
+        arrays, next_offset, payload_bytes,
+        [&mesh](std::ostream& payload_os) {
+          write_global_ids_payload(payload_os, mesh.vertex_gids(), mesh.n_vertices());
+        });
+    write_appended_data_array_xml(os, "        ", "Int64", "GlobalVertexID",
+                                  1, mesh.n_vertices(), offset, true);
+  }
+
+  os << "      </PointData>\n";
+}
+
+void write_cell_data_binary_xml(std::ostream& os,
+                                AppendedArrays& arrays,
+                                std::uint64_t& next_offset,
+                                const MeshBase& mesh,
+                                const VTKWriter::WriteOptions& opts) {
+  os << "      <CellData";
+  if (!mesh.cell_gids().empty()) {
+    os << " GlobalIds=\"GlobalCellID\"";
+  }
+  os << ">\n";
+
+  {
+    const std::uint64_t payload_bytes =
+        checked_payload_bytes(mesh.n_cells(), sizeof(std::int32_t), "RegionID");
+    const auto offset = add_appended_array(
+        arrays, next_offset, payload_bytes,
+        [&mesh](std::ostream& payload_os) { write_region_labels_payload(payload_os, mesh); });
+    write_appended_data_array_xml(os, "        ", "Int32", "RegionID", 1, mesh.n_cells(), offset);
+  }
+
+  if (opts.write_cell_data) {
+    const auto names = selected_field_names(mesh, EntityKind::Volume, opts.cell_fields_to_write);
+    for (const auto& name : names) {
+      if (!mesh.has_field(EntityKind::Volume, name)) {
+        continue;
+      }
+      const auto type = mesh.field_type_by_name(EntityKind::Volume, name);
+      const char* vtk_type = vtk_xml_type(type);
+      if (!vtk_type) {
+        continue;
+      }
+      const size_t components = mesh.field_components_by_name(EntityKind::Volume, name);
+      const auto offset =
+          add_field_binary_array(arrays, next_offset, mesh, EntityKind::Volume, name, mesh.n_cells());
+      if (offset == std::numeric_limits<std::uint64_t>::max()) {
+        continue;
+      }
+      write_appended_data_array_xml(os, "        ", vtk_type, name, components, mesh.n_cells(), offset);
+    }
+  }
+
+  if (!mesh.cell_gids().empty()) {
+    const std::uint64_t payload_bytes =
+        checked_payload_bytes(mesh.n_cells(), sizeof(std::int64_t), "GlobalCellID");
+    const auto offset = add_appended_array(
+        arrays, next_offset, payload_bytes,
+        [&mesh](std::ostream& payload_os) {
+          write_global_ids_payload(payload_os, mesh.cell_gids(), mesh.n_cells());
+        });
+    write_appended_data_array_xml(os, "        ", "Int64", "GlobalCellID",
+                                  1, mesh.n_cells(), offset, true);
+  }
+
+  os << "      </CellData>\n";
+}
+
+void write_points_binary_xml(std::ostream& os,
+                             AppendedArrays& arrays,
+                             std::uint64_t& next_offset,
+                             const MeshBase& mesh,
+                             const VTKWriter::WriteOptions& opts) {
+  const bool use_current = opts.use_current_coordinates_as_points && mesh.has_current_coords();
+  const auto& coords = use_current ? mesh.X_cur() : mesh.X_ref();
+  const auto* coords_ptr = &coords;
+
+  const std::uint64_t payload_bytes =
+      checked_payload_bytes(mesh.n_vertices() * 3, sizeof(double), "Points");
+  const auto offset = add_appended_array(
+      arrays, next_offset, payload_bytes,
+      [&mesh, coords_ptr](std::ostream& payload_os) {
+        write_repeated_vector3_payload(payload_os, *coords_ptr, mesh.dim(), mesh.n_vertices());
+      });
+
+  os << "      <Points>\n";
+  write_appended_data_array_xml(os, "        ", "Float64", "Points", 3, mesh.n_vertices(), offset);
+  os << "      </Points>\n";
+}
+
+void write_cells_binary_xml(std::ostream& os,
+                            AppendedArrays& arrays,
+                            std::uint64_t& next_offset,
+                            const MeshBase& mesh) {
+  os << "      <Cells>\n";
+
+  for (const index_t v : mesh.cell2vertex()) {
+    if (v < 0 || static_cast<size_t>(v) >= mesh.n_vertices()) {
+      throw std::runtime_error("VTKWriter: cell connectivity references an invalid vertex");
+    }
+  }
+
+  static_assert(sizeof(index_t) == sizeof(std::int32_t), "VTKWriter assumes index_t is Int32");
+  const std::uint64_t conn_payload =
+      checked_payload_bytes(mesh.cell2vertex().size(), sizeof(std::int32_t), "connectivity");
+  const auto conn_offset = add_appended_array(
+      arrays, next_offset, conn_payload,
+      [&mesh, conn_payload](std::ostream& payload_os) {
+        write_raw_bytes(payload_os, mesh.cell2vertex().data(), conn_payload);
+      });
+  write_appended_data_array_xml(os, "        ", "Int32", "connectivity", 1,
+                                mesh.cell2vertex().size(), conn_offset);
+
+  const std::uint64_t offsets_payload =
+      checked_payload_bytes(mesh.n_cells(), sizeof(std::int64_t), "offsets");
+  const auto offsets_offset = add_appended_array(
+      arrays, next_offset, offsets_payload,
+      [&mesh](std::ostream& payload_os) { write_offsets_payload(payload_os, mesh); });
+  write_appended_data_array_xml(os, "        ", "Int64", "offsets", 1,
+                                mesh.n_cells(), offsets_offset);
+
+  const std::uint64_t types_payload =
+      checked_payload_bytes(mesh.n_cells(), sizeof(std::uint8_t), "types");
+  const auto types_offset = add_appended_array(
+      arrays, next_offset, types_payload,
+      [&mesh](std::ostream& payload_os) { write_cell_types_payload(payload_os, mesh); });
+  write_appended_data_array_xml(os, "        ", "UInt8", "types", 1,
+                                mesh.n_cells(), types_offset);
+
+  os << "      </Cells>\n";
+}
+
+bool write_vtu_streaming_appended_binary(const MeshBase& mesh, const std::string& filename,
+                                         const VTKWriter::WriteOptions& opts) {
+  if (!can_stream_vtu(mesh, opts) || !opts.binary) {
+    return false;
+  }
+  if (!host_is_little_endian()) {
+    return false;
+  }
+
+  std::ofstream os(filename, std::ios::binary);
+  if (!os) {
+    throw std::runtime_error("VTKWriter: Could not open file for writing: " + filename);
+  }
+
+  AppendedArrays arrays;
+  std::uint64_t next_offset = 0;
+
+  os << "<?xml version=\"1.0\"?>\n";
+  os << "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\" header_type=\"UInt64\">\n";
+  os << "  <UnstructuredGrid>\n";
+  write_field_data_header(os, mesh);
+  os << "    <Piece NumberOfPoints=\"" << mesh.n_vertices()
+     << "\" NumberOfCells=\"" << mesh.n_cells() << "\">\n";
+  write_point_data_binary_xml(os, arrays, next_offset, mesh, opts);
+  write_cell_data_binary_xml(os, arrays, next_offset, mesh, opts);
+  write_points_binary_xml(os, arrays, next_offset, mesh, opts);
+  write_cells_binary_xml(os, arrays, next_offset, mesh);
+  os << "    </Piece>\n";
+  os << "  </UnstructuredGrid>\n";
+  os << "  <AppendedData encoding=\"raw\">\n_";
+
+  for (const auto& array : arrays) {
+    const std::uint64_t payload_bytes = array.payload_bytes;
+    write_raw_bytes(os, &payload_bytes, sizeof(payload_bytes));
+    array.write_payload(os);
+  }
+
+  os << "\n  </AppendedData>\n";
+  os << "</VTKFile>\n";
+
+  if (!os) {
+    throw std::runtime_error("VTKWriter: Failed while writing file: " + filename);
+  }
+  return true;
+}
+
+bool write_vtu_streaming(const MeshBase& mesh, const std::string& filename,
+                         const VTKWriter::WriteOptions& opts) {
+  if (!can_stream_vtu(mesh, opts)) {
+    return false;
+  }
+  if (opts.binary) {
+    return write_vtu_streaming_appended_binary(mesh, filename, opts);
+  }
+  return write_vtu_streaming_ascii(mesh, filename, opts);
+}
+
+} // namespace
 
 // Reorder arbitrary high-order connectivity into VTK expected ordering:
 // corners -> edge mids (topology edge view order) -> face mids (face view order) -> center

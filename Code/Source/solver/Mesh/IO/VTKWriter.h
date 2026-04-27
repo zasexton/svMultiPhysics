@@ -74,6 +74,7 @@ public:
     bool write_ghost_cells = false; ///< Include ghost cells in output
     bool write_current_coordinates = true; ///< Emit X_cur as a point-data array when available
     bool use_current_coordinates_as_points = false; ///< Write VTK geometry points in the current frame
+    bool streaming = true;       ///< Stream supported XML VTU output directly from MeshBase storage
     std::vector<std::string> cell_fields_to_write;  ///< Specific fields (empty = all)
     std::vector<std::string> point_fields_to_write; ///< Specific fields (empty = all)
   };

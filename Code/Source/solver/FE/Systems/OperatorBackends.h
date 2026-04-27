@@ -9,7 +9,9 @@
 #define SVMP_FE_SYSTEMS_OPERATORBACKENDS_H
 
 #include "Core/Types.h"
+#include "Systems/GeometryTransaction.h"
 #include "Systems/OperatorRegistry.h"
+#include "Systems/SetupStoragePlan.h"
 #include "Systems/SystemState.h"
 
 #include <memory>
@@ -70,6 +72,10 @@ public:
     [[nodiscard]] std::shared_ptr<assembly::MatrixFreeOperator>
     matrixFreeOperator(const FESystem& system, const OperatorTag& tag) const;
 
+    [[nodiscard]] std::size_t matrixFreeRebuildCount(const OperatorTag& tag) const;
+    [[nodiscard]] OperatorRevisionSnapshot matrixFreeRevisionSnapshot(const OperatorTag& tag) const;
+    [[nodiscard]] OperatorInvalidationDecision matrixFreeLastInvalidation(const OperatorTag& tag) const;
+
     // ---------------------------------------------------------------------
     // Scalar functionals (QoIs)
     // ---------------------------------------------------------------------
@@ -85,6 +91,8 @@ public:
                                                   const std::string& tag,
                                                   int boundary_marker,
                                                   const SystemStateView& state) const;
+
+    [[nodiscard]] SetupStorageRequirements storageRequirements() const noexcept;
 
 private:
     struct Impl;

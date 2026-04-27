@@ -146,6 +146,10 @@ public:
     local_mesh().finalize();
     reset_partition_state_();
   }
+  void finalize(const MeshFinalizeOptions& options) {
+    local_mesh().finalize(options);
+    reset_partition_state_();
+  }
 
   // Basic queries
   int dim() const noexcept { return local_mesh().dim(); }
@@ -155,6 +159,9 @@ public:
   size_t n_faces() const noexcept { return local_mesh().n_faces(); }
   size_t n_edges() const noexcept { return local_mesh().n_edges(); }
   size_t n_boundary_faces() const { return local_mesh().n_boundary_faces(); }
+  [[nodiscard]] MeshCodim1StorageMode codim1_storage_mode() const noexcept {
+    return local_mesh().codim1_storage_mode();
+  }
 
   // Coordinates
   const std::vector<real_t>& X_ref() const noexcept { return local_mesh().X_ref(); }
@@ -167,13 +174,32 @@ public:
   void mark_current_geometry_changed() { local_mesh().mark_current_geometry_changed(); }
   void set_current_coords(const std::vector<real_t>& Xcur) { local_mesh().set_current_coords(Xcur); }
   void clear_current_coords() { local_mesh().clear_current_coords(); }
+  void rebase_reference_to_current(const ReferenceRebaseOptions& options = {}) {
+    local_mesh().rebase_reference_to_current(options);
+  }
+  void rebase_reference_coordinates(
+      std::vector<real_t> Xref,
+      const ReferenceRebaseOptions& options = {}) {
+    local_mesh().rebase_reference_coordinates(std::move(Xref), options);
+  }
+  void rebase_reference_after_remesh(std::vector<real_t> Xref,
+                                     ReferenceRebaseOptions options = {}) {
+    local_mesh().rebase_reference_after_remesh(std::move(Xref), options);
+  }
   Configuration active_configuration() const noexcept { return local_mesh().active_configuration(); }
   void use_reference_configuration() { local_mesh().use_reference_configuration(); }
   void use_current_configuration() { local_mesh().use_current_configuration(); }
+  [[nodiscard]] ReferenceRebaseInfo reference_rebase_info() const noexcept {
+    return local_mesh().reference_rebase_info();
+  }
+  [[nodiscard]] ReferenceConfigurationMode reference_configuration_mode() const noexcept {
+    return local_mesh().reference_configuration_mode();
+  }
   [[nodiscard]] MeshRevisionState revision_state() const { return local_mesh().revision_state(); }
   [[nodiscard]] std::uint64_t geometry_revision() const { return local_mesh().geometry_revision(); }
   [[nodiscard]] std::uint64_t reference_geometry_revision() const { return local_mesh().reference_geometry_revision(); }
   [[nodiscard]] std::uint64_t current_geometry_revision() const { return local_mesh().current_geometry_revision(); }
+  [[nodiscard]] std::uint64_t reference_rebase_epoch() const { return local_mesh().reference_rebase_epoch(); }
   [[nodiscard]] std::uint64_t topology_revision() const { return local_mesh().topology_revision(); }
   [[nodiscard]] std::uint64_t ownership_revision() const { return local_mesh().ownership_revision(); }
   [[nodiscard]] std::uint64_t numbering_revision() const { return local_mesh().numbering_revision(); }
@@ -184,6 +210,34 @@ public:
   void set_vertex_coords(index_t v, const std::array<real_t,3>& xyz) { local_mesh().set_vertex_coords(v, xyz); }
   void set_vertex_deformed_coords(index_t v, const std::array<real_t,3>& xyz) {
     local_mesh().set_vertex_deformed_coords(v, xyz);
+  }
+  [[nodiscard]] GeometryOrderDescriptor geometry_order_descriptor() const {
+    return local_mesh().geometry_order_descriptor();
+  }
+  [[nodiscard]] int geometry_order(index_t c) const { return local_mesh().geometry_order(c); }
+  [[nodiscard]] bool has_high_order_geometry() const { return local_mesh().has_high_order_geometry(); }
+  [[nodiscard]] size_t geometry_dof_count() const noexcept { return local_mesh().geometry_dof_count(); }
+  [[nodiscard]] std::vector<index_t> cell_geometry_dofs(index_t c) const {
+    return local_mesh().cell_geometry_dofs(c);
+  }
+  [[nodiscard]] std::vector<index_t> cell_edge_geometry_dofs(index_t c, int edge_id) const {
+    return local_mesh().cell_edge_geometry_dofs(c, edge_id);
+  }
+  [[nodiscard]] std::vector<index_t> cell_face_geometry_dofs(index_t c, int face_id) const {
+    return local_mesh().cell_face_geometry_dofs(c, face_id);
+  }
+  [[nodiscard]] std::vector<index_t> cell_interior_geometry_dofs(index_t c) const {
+    return local_mesh().cell_interior_geometry_dofs(c);
+  }
+  [[nodiscard]] std::array<real_t,3> geometry_dof_coords(
+      index_t dof, Configuration cfg = Configuration::Reference) const {
+    return local_mesh().geometry_dof_coords(dof, cfg);
+  }
+  void set_reference_geometry_dof_coords(index_t dof, const std::array<real_t,3>& xyz) {
+    local_mesh().set_reference_geometry_dof_coords(dof, xyz);
+  }
+  void set_current_geometry_dof_coords(index_t dof, const std::array<real_t,3>& xyz) {
+    local_mesh().set_current_geometry_dof_coords(dof, xyz);
   }
 
   // Topology access
@@ -938,6 +992,10 @@ public:
     local_mesh().finalize();
     reset_partition_state_();
   }
+  void finalize(const MeshFinalizeOptions& options) {
+    local_mesh().finalize(options);
+    reset_partition_state_();
+  }
 
   // Basic queries
   int dim() const noexcept { return local_mesh().dim(); }
@@ -947,6 +1005,9 @@ public:
   size_t n_faces() const noexcept { return local_mesh().n_faces(); }
   size_t n_edges() const noexcept { return local_mesh().n_edges(); }
   size_t n_boundary_faces() const { return local_mesh().n_boundary_faces(); }
+  [[nodiscard]] MeshCodim1StorageMode codim1_storage_mode() const noexcept {
+    return local_mesh().codim1_storage_mode();
+  }
 
   // Coordinates
   const std::vector<real_t>& X_ref() const noexcept { return local_mesh().X_ref(); }
@@ -959,13 +1020,32 @@ public:
   void mark_current_geometry_changed() { local_mesh().mark_current_geometry_changed(); }
   void set_current_coords(const std::vector<real_t>& Xcur) { local_mesh().set_current_coords(Xcur); }
   void clear_current_coords() { local_mesh().clear_current_coords(); }
+  void rebase_reference_to_current(const ReferenceRebaseOptions& options = {}) {
+    local_mesh().rebase_reference_to_current(options);
+  }
+  void rebase_reference_coordinates(
+      std::vector<real_t> Xref,
+      const ReferenceRebaseOptions& options = {}) {
+    local_mesh().rebase_reference_coordinates(std::move(Xref), options);
+  }
+  void rebase_reference_after_remesh(std::vector<real_t> Xref,
+                                     ReferenceRebaseOptions options = {}) {
+    local_mesh().rebase_reference_after_remesh(std::move(Xref), options);
+  }
   Configuration active_configuration() const noexcept { return local_mesh().active_configuration(); }
   void use_reference_configuration() { local_mesh().use_reference_configuration(); }
   void use_current_configuration() { local_mesh().use_current_configuration(); }
+  [[nodiscard]] ReferenceRebaseInfo reference_rebase_info() const noexcept {
+    return local_mesh().reference_rebase_info();
+  }
+  [[nodiscard]] ReferenceConfigurationMode reference_configuration_mode() const noexcept {
+    return local_mesh().reference_configuration_mode();
+  }
   [[nodiscard]] MeshRevisionState revision_state() const { return local_mesh().revision_state(); }
   [[nodiscard]] std::uint64_t geometry_revision() const { return local_mesh().geometry_revision(); }
   [[nodiscard]] std::uint64_t reference_geometry_revision() const { return local_mesh().reference_geometry_revision(); }
   [[nodiscard]] std::uint64_t current_geometry_revision() const { return local_mesh().current_geometry_revision(); }
+  [[nodiscard]] std::uint64_t reference_rebase_epoch() const { return local_mesh().reference_rebase_epoch(); }
   [[nodiscard]] std::uint64_t topology_revision() const { return local_mesh().topology_revision(); }
   [[nodiscard]] std::uint64_t ownership_revision() const { return local_mesh().ownership_revision(); }
   [[nodiscard]] std::uint64_t numbering_revision() const { return local_mesh().numbering_revision(); }
@@ -976,6 +1056,34 @@ public:
   void set_vertex_coords(index_t v, const std::array<real_t,3>& xyz) { local_mesh().set_vertex_coords(v, xyz); }
   void set_vertex_deformed_coords(index_t v, const std::array<real_t,3>& xyz) {
     local_mesh().set_vertex_deformed_coords(v, xyz);
+  }
+  [[nodiscard]] GeometryOrderDescriptor geometry_order_descriptor() const {
+    return local_mesh().geometry_order_descriptor();
+  }
+  [[nodiscard]] int geometry_order(index_t c) const { return local_mesh().geometry_order(c); }
+  [[nodiscard]] bool has_high_order_geometry() const { return local_mesh().has_high_order_geometry(); }
+  [[nodiscard]] size_t geometry_dof_count() const noexcept { return local_mesh().geometry_dof_count(); }
+  [[nodiscard]] std::vector<index_t> cell_geometry_dofs(index_t c) const {
+    return local_mesh().cell_geometry_dofs(c);
+  }
+  [[nodiscard]] std::vector<index_t> cell_edge_geometry_dofs(index_t c, int edge_id) const {
+    return local_mesh().cell_edge_geometry_dofs(c, edge_id);
+  }
+  [[nodiscard]] std::vector<index_t> cell_face_geometry_dofs(index_t c, int face_id) const {
+    return local_mesh().cell_face_geometry_dofs(c, face_id);
+  }
+  [[nodiscard]] std::vector<index_t> cell_interior_geometry_dofs(index_t c) const {
+    return local_mesh().cell_interior_geometry_dofs(c);
+  }
+  [[nodiscard]] std::array<real_t,3> geometry_dof_coords(
+      index_t dof, Configuration cfg = Configuration::Reference) const {
+    return local_mesh().geometry_dof_coords(dof, cfg);
+  }
+  void set_reference_geometry_dof_coords(index_t dof, const std::array<real_t,3>& xyz) {
+    local_mesh().set_reference_geometry_dof_coords(dof, xyz);
+  }
+  void set_current_geometry_dof_coords(index_t dof, const std::array<real_t,3>& xyz) {
+    local_mesh().set_current_geometry_dof_coords(dof, xyz);
   }
 
   // Topology access

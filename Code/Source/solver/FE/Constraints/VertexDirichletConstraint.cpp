@@ -197,6 +197,16 @@ bool VertexDirichletConstraint::updateValues(const systems::FESystem& system,
     return false;
 }
 
+systems::SetupStorageRequirements VertexDirichletConstraint::storageRequirements() const noexcept
+{
+    systems::SetupStorageRequirements req;
+    req.entity_dof_map = true;
+    req.vertex_topology = true;
+    req.vertex_gids = (mode_ == VertexIdMode::GlobalVertexGid);
+    req.global_vertex_lookup = (mode_ == VertexIdMode::GlobalVertexGid);
+    return req;
+}
+
 } // namespace constraints
 } // namespace FE
 } // namespace svmp

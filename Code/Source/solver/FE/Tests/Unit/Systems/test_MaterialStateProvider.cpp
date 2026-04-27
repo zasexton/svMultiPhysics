@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "Systems/MaterialStateProvider.h"
+#include "Systems/SystemsExceptions.h"
 
 #include "Assembly/AssemblyKernel.h"
 
@@ -22,6 +23,7 @@ using svmp::FE::assembly::MaterialStateSpec;
 using svmp::FE::assembly::MaterialStateView;
 using svmp::FE::assembly::RequiredData;
 using svmp::FE::systems::MaterialStateProvider;
+namespace state = svmp::FE::state;
 
 namespace {
 
@@ -265,3 +267,111 @@ TEST(MaterialStateProvider, MaterialStateProvider_MoveSemantics_PreservesState)
     expectBytesEqual(view2.data_old, /*n=*/4, std::byte{0x42});
 }
 
+TEST(MaterialStateProvider, MaterialStateProvider_ExposesStateMetadataAndLifecycle)
+{
+    DummyKernel kernel;
+    MaterialStateProvider provider(/*num_cells=*/1);
+
+    MaterialStateSpec spec;
+    spec.bytes_per_qpt = sizeof(int);
+    spec.alignment = alignof(int);
+    spec.variables.push_back(state::StateVariableMetadata{
+        .name = "plastic_strain",
+        .offset_bytes = 0,
+        .size_bytes = sizeof(int),
+        .frame = state::StateVariableFrame::Material,
+        .transform_policy = state::StateFrameTransformPolicy::PreserveValue,
+    });
+
+    provider.addKernel(kernel, spec, /*max_cell_qpts=*/1);
+
+    auto view = provider.getCellState(kernel, 0, 1);
+    ASSERT_TRUE(view);
+    ASSERT_EQ(view.variables.size(), 1u);
+    EXPECT_EQ(view.variables[0].name, "plastic_strain");
+    EXPECT_EQ(view.old_lifecycle, state::StateVariableLifecycle::CommittedOld);
+    EXPECT_EQ(view.work_lifecycle, state::StateVariableLifecycle::TrialWork);
+
+    provider.commitTimeStep();
+    view = provider.getCellState(kernel, 0, 1);
+    EXPECT_EQ(view.work_lifecycle, state::StateVariableLifecycle::Accepted);
+
+    provider.rollbackTimeStep();
+    view = provider.getCellState(kernel, 0, 1);
+    EXPECT_EQ(view.work_lifecycle, state::StateVariableLifecycle::RolledBack);
+
+    auto vars = provider.materialStateVariables(kernel);
+    ASSERT_EQ(vars.size(), 1u);
+    EXPECT_EQ(vars[0].frame, state::StateVariableFrame::Material);
+}
+
+TEST(MaterialStateProvider, MaterialStateProvider_FrameSensitiveStateRequiresTransformHook)
+{
+    DummyKernel kernel;
+    MaterialStateProvider provider(/*num_cells=*/1);
+
+    MaterialStateSpec spec;
+    spec.bytes_per_qpt = sizeof(int);
+    spec.alignment = alignof(int);
+    spec.variables.push_back(state::StateVariableMetadata{
+        .name = "spatial_tensor",
+        .offset_bytes = 0,
+        .size_bytes = sizeof(int),
+        .frame = state::StateVariableFrame::CurrentSpatial,
+        .transform_policy = state::StateFrameTransformPolicy::Rotate,
+    });
+
+    provider.addKernel(kernel, spec, /*max_cell_qpts=*/1);
+
+    state::StateFrameTransformRequest request;
+    request.event = state::StateFrameTransformEvent::OrdinaryGeometryMotion;
+    EXPECT_THROW((void)provider.applyStateFrameTransform(request),
+                 svmp::FE::systems::InvalidStateException);
+
+    request.event = state::StateFrameTransformEvent::TransactionRollback;
+    EXPECT_NO_THROW((void)provider.applyStateFrameTransform(request));
+}
+
+TEST(MaterialStateProvider, MaterialStateProvider_FrameTransformHookReceivesRebaseState)
+{
+    DummyKernel kernel;
+    MaterialStateProvider provider(/*num_cells=*/1);
+
+    int calls = 0;
+    MaterialStateSpec spec;
+    spec.bytes_per_qpt = sizeof(int);
+    spec.alignment = alignof(int);
+    spec.variables.push_back(state::StateVariableMetadata{
+        .name = "director",
+        .offset_bytes = 0,
+        .size_bytes = sizeof(int),
+        .frame = state::StateVariableFrame::CurrentSpatial,
+        .transform_policy = state::StateFrameTransformPolicy::Custom,
+    });
+    spec.frame_transform_hook =
+        [&](const state::StateVariableTransformContext& ctx) {
+            EXPECT_EQ(ctx.request.event, state::StateFrameTransformEvent::ReferenceRebase);
+            EXPECT_EQ(ctx.storage_domain, state::StateStorageDomain::MaterialCellQuadrature);
+            ASSERT_EQ(ctx.work_value.size(), sizeof(int));
+            auto* value = reinterpret_cast<int*>(ctx.work_value.data());
+            *value += 7;
+            ++calls;
+        };
+
+    provider.addKernel(kernel, spec, /*max_cell_qpts=*/2);
+    auto view = provider.getCellState(kernel, 0, 2);
+    ASSERT_TRUE(view);
+    reinterpret_cast<int*>(view.data_work)[0] = 1;
+    *reinterpret_cast<int*>(view.data_work + view.stride_bytes) = 2;
+
+    state::StateFrameTransformRequest request;
+    request.event = state::StateFrameTransformEvent::ReferenceRebase;
+    const auto result = provider.applyStateFrameTransform(request);
+
+    EXPECT_EQ(calls, 2);
+    EXPECT_EQ(result.variables_seen, 1u);
+    EXPECT_EQ(result.variables_requiring_action, 1u);
+    EXPECT_EQ(result.variable_instances_transformed, 2u);
+    EXPECT_EQ(reinterpret_cast<int*>(view.data_work)[0], 8);
+    EXPECT_EQ(*reinterpret_cast<int*>(view.data_work + view.stride_bytes), 9);
+}

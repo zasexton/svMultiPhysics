@@ -18,13 +18,14 @@
 namespace svmp {
 namespace moving_mesh_restart {
 
-inline constexpr std::uint32_t kSupportedVersion = 1;
+inline constexpr std::uint32_t kSupportedVersion = 4;
 
 struct WriteOptions {
   bool include_fields = true;
   bool include_motion_fields = true;
   std::uint64_t restart_epoch = 0;
   std::map<std::string, std::string> motion_backend_state;
+  std::map<std::string, std::string> moving_geometry_validity_state;
   std::vector<std::string> adaptivity_provenance;
 };
 
@@ -39,7 +40,10 @@ struct Metadata {
   MeshRevisionState mesh_revisions{};
   Configuration active_configuration = Configuration::Reference;
   bool has_current_coordinates = false;
+  GeometryOrderDescriptor geometry_order{};
+  ReferenceRebaseInfo reference_rebase{};
   std::map<std::string, std::string> motion_backend_state;
+  std::map<std::string, std::string> moving_geometry_validity_state;
   std::vector<std::string> adaptivity_provenance;
 };
 

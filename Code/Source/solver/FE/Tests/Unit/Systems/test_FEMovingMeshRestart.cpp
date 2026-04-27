@@ -10,9 +10,11 @@
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/GlobalSystemView.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/ProductSpace.h"
 #include "Systems/FESystem.h"
 
 #include "Mesh/Core/MeshBase.h"
+#include "Mesh/Fields/MeshFields.h"
 #include "Mesh/IO/MovingMeshRestart.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Motion/MotionFields.h"
@@ -36,8 +38,10 @@ using svmp::FE::Real;
 using svmp::FE::assembly::DenseMatrixView;
 using svmp::FE::assembly::MassKernel;
 using svmp::FE::spaces::H1Space;
+using svmp::FE::spaces::ProductSpace;
 using svmp::FE::systems::FESystem;
 using svmp::FE::systems::FieldSpec;
+using svmp::FE::systems::MeshMotionFieldRole;
 using svmp::FE::systems::SystemStateView;
 
 std::string unique_restart_path()
@@ -78,6 +82,23 @@ MeshBase build_current_quad_mesh()
     mesh.set_current_coords(x_cur);
     mesh.use_current_configuration();
     return mesh;
+}
+
+std::shared_ptr<Mesh> build_reference_quad_mesh()
+{
+    auto base = std::make_shared<MeshBase>(2);
+    const std::vector<svmp::real_t> x_ref = {
+        0.0, 0.0,
+        1.0, 0.0,
+        1.0, 1.0,
+        0.0, 1.0,
+    };
+    const std::vector<svmp::offset_t> offsets = {0, 4};
+    const std::vector<svmp::index_t> conn = {0, 1, 2, 3};
+    const std::vector<CellShape> shapes = {{CellFamily::Quad, 4, 1}};
+    base->build_from_arrays(2, x_ref, offsets, conn, shapes);
+    base->finalize();
+    return svmp::create_mesh(std::move(base));
 }
 
 DenseMatrixView assemble_current_mass(std::shared_ptr<Mesh> mesh)
@@ -129,6 +150,58 @@ TEST(FEMovingMeshRestart, RestartedCurrentCoordinatesAreVisibleBeforeAssemblyCac
                         Real(1.0e-12));
         }
     }
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
+TEST(FEMovingMeshRestart, RolledBackTrialCoordinatesAreNotWrittenAsAcceptedRestart)
+{
+    auto mesh = build_reference_quad_mesh();
+    const auto handles = svmp::motion::attach_motion_fields(*mesh, 2);
+    auto* displacement = svmp::MeshFields::field_data_as<svmp::real_t>(
+        mesh->local_mesh(), handles.displacement);
+    ASSERT_NE(displacement, nullptr);
+    const auto ncomp = svmp::MeshFields::field_components(
+        mesh->local_mesh(), handles.displacement);
+    ASSERT_EQ(ncomp, 2u);
+    for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
+        displacement[v * ncomp + 0] = 0.25 + 0.01 * static_cast<Real>(v);
+        displacement[v * ncomp + 1] = -0.10;
+    }
+
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, 1);
+    auto vector_space = std::make_shared<ProductSpace>(scalar_space, 2);
+
+    FESystem sys(mesh);
+    const auto displacement_field =
+        sys.addMeshDisplacementUnknown("mesh_displacement", vector_space);
+    ASSERT_EQ(sys.meshMotionField(MeshMotionFieldRole::Displacement), displacement_field);
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", displacement_field, std::make_shared<MassKernel>(1.0));
+    sys.setup();
+
+    std::vector<Real> state(static_cast<std::size_t>(sys.dofHandler().getNumDofs()), 0.0);
+    ASSERT_EQ(sys.syncBoundMeshMotionFieldsToState(state), mesh->n_vertices() * 2u);
+
+    SystemStateView view;
+    view.u = state;
+    const auto update = sys.updateCurrentCoordinatesFromMeshDisplacement(view);
+    ASSERT_EQ(update.vertices_updated, mesh->n_vertices());
+    ASSERT_TRUE(sys.meshCoordinateTransactionActive());
+    ASSERT_TRUE(mesh->local_mesh().has_current_coords());
+
+    sys.rollbackMeshCoordinateTransaction();
+    ASSERT_FALSE(sys.meshCoordinateTransactionActive());
+    ASSERT_FALSE(mesh->local_mesh().has_current_coords());
+    EXPECT_EQ(mesh->local_mesh().active_configuration(), svmp::Configuration::Reference);
+
+    const auto path = unique_restart_path();
+    svmp::moving_mesh_restart::write(mesh->local_mesh(), path);
+    const auto restarted = svmp::moving_mesh_restart::read(path);
+
+    EXPECT_FALSE(restarted.has_current_coords());
+    EXPECT_EQ(restarted.active_configuration(), svmp::Configuration::Reference);
 
     std::error_code ec;
     std::filesystem::remove(path, ec);

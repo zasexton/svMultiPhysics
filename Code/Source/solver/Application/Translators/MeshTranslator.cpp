@@ -5,15 +5,20 @@
 
 #include "Mesh/Mesh.h"
 #include "Mesh/Labels/MeshLabels.h"
+#include "Mesh/Search/CoordinateKey.h"
+#include "Mesh/Topology/CellTopology.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cstdint>
 #include <filesystem>
-#include <iomanip>
 #include <iostream>
-#include <sstream>
+#include <limits>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
+#include <vector>
 
 namespace {
 
@@ -24,26 +29,254 @@ std::string lower_copy(std::string s)
   return s;
 }
 
-std::string make_coord_key(const std::vector<svmp::real_t>& X, int dim, svmp::index_t v)
-{
-  std::ostringstream key;
-  key << std::scientific << std::setprecision(16);
-  const auto base = static_cast<size_t>(v) * static_cast<size_t>(dim);
-  for (int d = 0; d < dim; ++d) {
-    key << X.at(base + static_cast<size_t>(d)) << ",";
-  }
-  return key.str();
-}
+struct FaceVertexKey {
+  std::array<svmp::index_t, 8> inline_ids{};
+  std::vector<svmp::index_t> overflow_ids;
+  std::uint8_t size{0};
 
-std::string make_id_key(const std::vector<svmp::index_t>& ids)
+  bool operator==(const FaceVertexKey& other) const
+  {
+    if (size != other.size) {
+      return false;
+    }
+    if (size <= inline_ids.size()) {
+      for (std::uint8_t i = 0; i < size; ++i) {
+        if (inline_ids[static_cast<std::size_t>(i)] != other.inline_ids[static_cast<std::size_t>(i)]) {
+          return false;
+        }
+      }
+      return true;
+    }
+    return overflow_ids == other.overflow_ids;
+  }
+};
+
+struct FaceVertexKeyHash {
+  std::size_t operator()(const FaceVertexKey& key) const noexcept
+  {
+    std::size_t h = static_cast<std::size_t>(key.size) + 0x9e3779b97f4a7c15ULL;
+    const auto mix = [&h](svmp::index_t id) {
+      auto v = static_cast<std::size_t>(id);
+      h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6u) + (h >> 2u);
+    };
+    if (key.size <= key.inline_ids.size()) {
+      for (std::uint8_t i = 0; i < key.size; ++i) {
+        mix(key.inline_ids[static_cast<std::size_t>(i)]);
+      }
+    } else {
+      for (auto id : key.overflow_ids) {
+        mix(id);
+      }
+    }
+    return h;
+  }
+};
+
+FaceVertexKey make_face_vertex_key(const std::vector<svmp::index_t>& ids)
 {
-  std::string key;
-  key.reserve(ids.size() * 12);
-  for (auto id : ids) {
-    key += std::to_string(id);
-    key.push_back(',');
+  FaceVertexKey key;
+  key.size = static_cast<std::uint8_t>(std::min<std::size_t>(ids.size(), 255u));
+  if (ids.size() <= key.inline_ids.size()) {
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+      key.inline_ids[i] = ids[i];
+    }
+  } else {
+    key.overflow_ids = ids;
   }
   return key;
+}
+
+bool has_nonlocal_vertex_gids(const svmp::MeshBase& mesh)
+{
+  const auto& gids = mesh.vertex_gids();
+  if (gids.size() != mesh.n_vertices()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < gids.size(); ++i) {
+    if (gids[i] != static_cast<svmp::gid_t>(i)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+svmp::index_t match_face_vertex_to_volume(
+    const svmp::Mesh& volume_mesh,
+    const svmp::search::VertexCoordinateLocator& coordinate_locator,
+    const svmp::MeshBase& face_mesh,
+    svmp::index_t face_vertex,
+    bool use_face_gids)
+{
+  if (use_face_gids) {
+    const auto& gids = face_mesh.vertex_gids();
+    const auto i = static_cast<std::size_t>(face_vertex);
+    if (face_vertex >= 0 && i < gids.size() && gids[i] != svmp::INVALID_GID) {
+      const auto local = volume_mesh.base().global_to_local_vertex(gids[i]);
+      if (local != svmp::INVALID_INDEX) {
+        return local;
+      }
+    }
+  }
+
+  return coordinate_locator.find(face_mesh.X_ref(), face_mesh.dim(), face_vertex);
+}
+
+svmp::CellShape boundary_shape_for_vertices(int dim, std::size_t n_vertices)
+{
+  svmp::CellShape shape{};
+  if (dim == 2) {
+    shape.family = svmp::CellFamily::Line;
+    shape.num_corners = 2;
+  } else if (n_vertices == 3u) {
+    shape.family = svmp::CellFamily::Triangle;
+    shape.num_corners = 3;
+  } else if (n_vertices == 4u) {
+    shape.family = svmp::CellFamily::Quad;
+    shape.num_corners = 4;
+  } else {
+    shape.family = svmp::CellFamily::Polygon;
+    shape.num_corners = static_cast<int>(n_vertices);
+  }
+  shape.order = 1;
+  shape.is_mixed_order = false;
+  return shape;
+}
+
+struct VertexCellAdjacency {
+  std::vector<svmp::offset_t> offsets;
+  std::vector<svmp::index_t> cells;
+};
+
+VertexCellAdjacency build_owned_vertex_cell_adjacency(const svmp::Mesh& mesh)
+{
+  VertexCellAdjacency adj;
+  adj.offsets.assign(mesh.n_vertices() + 1u, 0);
+
+  for (svmp::index_t c = 0; c < static_cast<svmp::index_t>(mesh.n_cells()); ++c) {
+    if (!mesh.is_owned_cell(c)) {
+      continue;
+    }
+    auto [verts, nverts] = mesh.base().cell_vertices_span(c);
+    for (std::size_t i = 0; i < nverts; ++i) {
+      const auto v = verts[i];
+      if (v >= 0 && static_cast<std::size_t>(v) < mesh.n_vertices()) {
+        ++adj.offsets[static_cast<std::size_t>(v) + 1u];
+      }
+    }
+  }
+
+  for (std::size_t i = 0; i + 1u < adj.offsets.size(); ++i) {
+    adj.offsets[i + 1u] += adj.offsets[i];
+  }
+
+  adj.cells.assign(static_cast<std::size_t>(adj.offsets.back()), svmp::INVALID_INDEX);
+  auto cursor = adj.offsets;
+  for (svmp::index_t c = 0; c < static_cast<svmp::index_t>(mesh.n_cells()); ++c) {
+    if (!mesh.is_owned_cell(c)) {
+      continue;
+    }
+    auto [verts, nverts] = mesh.base().cell_vertices_span(c);
+    for (std::size_t i = 0; i < nverts; ++i) {
+      const auto v = verts[i];
+      if (v < 0 || static_cast<std::size_t>(v) >= mesh.n_vertices()) {
+        continue;
+      }
+      const auto pos = cursor[static_cast<std::size_t>(v)]++;
+      adj.cells[static_cast<std::size_t>(pos)] = c;
+    }
+  }
+
+  return adj;
+}
+
+struct MatchedBoundaryFace {
+  svmp::index_t cell{svmp::INVALID_INDEX};
+  std::vector<svmp::index_t> oriented_vertices;
+  svmp::CellShape shape{};
+};
+
+std::optional<MatchedBoundaryFace> match_owned_cell_boundary_face(
+    const svmp::Mesh& mesh,
+    const std::vector<svmp::index_t>& sorted_face_vertices,
+    const VertexCellAdjacency& vertex_cells)
+{
+  if (sorted_face_vertices.empty() || vertex_cells.offsets.empty()) {
+    return std::nullopt;
+  }
+
+  svmp::index_t seed_vertex = svmp::INVALID_INDEX;
+  std::size_t best_degree = std::numeric_limits<std::size_t>::max();
+  for (const auto v : sorted_face_vertices) {
+    if (v < 0 || static_cast<std::size_t>(v) + 1u >= vertex_cells.offsets.size()) {
+      return std::nullopt;
+    }
+    const auto begin = static_cast<std::size_t>(vertex_cells.offsets[static_cast<std::size_t>(v)]);
+    const auto end = static_cast<std::size_t>(vertex_cells.offsets[static_cast<std::size_t>(v) + 1u]);
+    const auto degree = end - begin;
+    if (degree < best_degree) {
+      best_degree = degree;
+      seed_vertex = v;
+    }
+  }
+  if (seed_vertex == svmp::INVALID_INDEX || best_degree == 0u) {
+    return std::nullopt;
+  }
+
+  const auto seed_begin =
+      static_cast<std::size_t>(vertex_cells.offsets[static_cast<std::size_t>(seed_vertex)]);
+  const auto seed_end =
+      static_cast<std::size_t>(vertex_cells.offsets[static_cast<std::size_t>(seed_vertex) + 1u]);
+
+  for (std::size_t pos = seed_begin; pos < seed_end; ++pos) {
+    const auto cell = vertex_cells.cells[pos];
+    if (cell == svmp::INVALID_INDEX || !mesh.is_owned_cell(cell)) {
+      continue;
+    }
+
+    auto [cell_vertices, n_cell_vertices] = mesh.base().cell_vertices_span(cell);
+    const auto& cshape = mesh.base().cell_shape(cell);
+    const auto face_view = svmp::CellTopology::get_oriented_boundary_faces_view(cshape.family);
+    if (!face_view.indices || !face_view.offsets || face_view.face_count <= 0) {
+      continue;
+    }
+
+    for (int lf = 0; lf < face_view.face_count; ++lf) {
+      const int begin = face_view.offsets[lf];
+      const int end = face_view.offsets[lf + 1];
+      if (end < begin || static_cast<std::size_t>(end - begin) != sorted_face_vertices.size()) {
+        continue;
+      }
+
+      std::vector<svmp::index_t> candidate;
+      candidate.reserve(sorted_face_vertices.size());
+      bool valid = true;
+      for (int j = begin; j < end; ++j) {
+        const auto local = face_view.indices[j];
+        if (local < 0 || static_cast<std::size_t>(local) >= n_cell_vertices) {
+          valid = false;
+          break;
+        }
+        candidate.push_back(cell_vertices[local]);
+      }
+      if (!valid) {
+        continue;
+      }
+
+      auto sorted_candidate = candidate;
+      std::sort(sorted_candidate.begin(), sorted_candidate.end());
+      if (sorted_candidate != sorted_face_vertices) {
+        continue;
+      }
+
+      MatchedBoundaryFace match;
+      match.cell = cell;
+      match.oriented_vertices = std::move(candidate);
+      match.shape = boundary_shape_for_vertices(mesh.dim(), sorted_face_vertices.size());
+      return match;
+    }
+  }
+
+  return std::nullopt;
 }
 
 } // namespace
@@ -72,6 +305,12 @@ std::shared_ptr<svmp::Mesh> MeshTranslator::loadMesh(const MeshParameters& param
     throw std::runtime_error("[svMultiPhysics::Application] Unsupported mesh file extension: '" +
                              file_path + "'.");
   }
+  io_opts.kv["codim1_topology"] = "none";
+  io_opts.kv["edge_topology"] = "false";
+
+  application::core::oopCout()
+      << "[svMultiPhysics::Application] MeshTranslator: initial mesh storage codim1=none edge=false"
+      << " (FE setup will materialize planned topology)." << std::endl;
 
   if (application::core::oopTraceEnabled()) {
     application::core::oopCout() << "[svMultiPhysics::Application] MeshTranslator: detected format='" << io_opts.format
@@ -118,13 +357,152 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
     throw std::runtime_error("[svMultiPhysics::Application] Loaded mesh has invalid dimension.");
   }
 
-  std::unordered_map<std::string, svmp::index_t> coord_to_vertex;
-  coord_to_vertex.reserve(mesh.n_vertices());
-  for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(mesh.n_vertices()); ++v) {
-    coord_to_vertex.emplace(make_coord_key(mesh.X_ref(), mesh.dim(), v), v);
+  const svmp::search::VertexCoordinateLocator coordinate_locator(mesh.base());
+
+  if (mesh.n_faces() == 0u) {
+    const auto vertex_cells = build_owned_vertex_cell_adjacency(mesh);
+
+    std::vector<svmp::CellShape> boundary_shapes;
+    std::vector<svmp::offset_t> boundary_offsets;
+    std::vector<svmp::index_t> boundary_connectivity;
+    std::vector<std::array<svmp::index_t, 2>> boundary_face2cell;
+    std::vector<svmp::label_t> boundary_labels;
+    std::vector<std::vector<std::string>> boundary_sets;
+    std::unordered_map<FaceVertexKey, svmp::index_t, FaceVertexKeyHash> face_by_vertices;
+
+    boundary_offsets.push_back(0);
+
+    svmp::label_t next_label = 1;
+    for (const auto* face : face_params) {
+      if (!face) {
+        continue;
+      }
+
+      const auto face_name = face->name.value();
+      const auto face_path = face->face_file_path.value();
+      if (face_name.empty()) {
+        throw std::runtime_error("[svMultiPhysics::Application] <Add_face> is missing required name attribute.");
+      }
+      if (face_path.empty()) {
+        throw std::runtime_error("[svMultiPhysics::Application] <Add_face name=\"" + face_name +
+                                 "\"> is missing <Face_file_path>.");
+      }
+
+      application::core::oopCout() << "[svMultiPhysics::Application]   Face '" << face_name << "': file_path='"
+                                   << face_path << "'" << std::endl;
+
+      svmp::MeshIOOptions face_opts{};
+      face_opts.path = face_path;
+      face_opts.format = detectFormat(face_path);
+      if (face_opts.format.empty()) {
+        throw std::runtime_error("[svMultiPhysics::Application] Unsupported face mesh extension: '" +
+                                 face_path + "'.");
+      }
+      face_opts.kv["force_min_dim"] = std::to_string(mesh.dim());
+      face_opts.kv["codim1_topology"] = "none";
+      face_opts.kv["edge_topology"] = "false";
+
+      svmp::MeshBase face_mesh = svmp::MeshBase::load(face_opts);
+      const bool use_face_gids = has_nonlocal_vertex_gids(face_mesh);
+
+      const auto label = next_label++;
+      application::core::oopCout() << "[svMultiPhysics::Application]   Face '" << face_name << "': format='"
+                                   << face_opts.format << "' cells=" << face_mesh.n_cells() << " -> label=" << label
+                                   << std::endl;
+      mesh.register_label(face_name, label);
+
+      svmp::index_t local_matched = 0;
+      svmp::index_t local_skipped = 0;
+
+      for (svmp::index_t c = 0; c < static_cast<svmp::index_t>(face_mesh.n_cells()); ++c) {
+        auto face_cell_vertices = face_mesh.cell_vertices(c);
+
+        std::vector<svmp::index_t> vol_vertex_ids;
+        vol_vertex_ids.reserve(face_cell_vertices.size());
+
+        bool have_all_vertices = true;
+        for (auto fv : face_cell_vertices) {
+          const auto volume_vertex =
+              match_face_vertex_to_volume(mesh, coordinate_locator, face_mesh, fv, use_face_gids);
+          if (volume_vertex == svmp::INVALID_INDEX) {
+            have_all_vertices = false;
+            break;
+          }
+          vol_vertex_ids.push_back(volume_vertex);
+        }
+        if (!have_all_vertices) {
+          ++local_skipped;
+          continue;
+        }
+
+        std::sort(vol_vertex_ids.begin(), vol_vertex_ids.end());
+        const auto unique_end = std::unique(vol_vertex_ids.begin(), vol_vertex_ids.end());
+        if (unique_end != vol_vertex_ids.end()) {
+          ++local_skipped;
+          continue;
+        }
+
+        const auto key = make_face_vertex_key(vol_vertex_ids);
+        const auto existing = face_by_vertices.find(key);
+        if (existing != face_by_vertices.end()) {
+          const auto f = existing->second;
+          boundary_labels[static_cast<std::size_t>(f)] = label;
+          boundary_sets[static_cast<std::size_t>(f)].push_back(face_name);
+          ++local_matched;
+          continue;
+        }
+
+        auto match = match_owned_cell_boundary_face(mesh, vol_vertex_ids, vertex_cells);
+        if (!match.has_value()) {
+          ++local_skipped;
+          continue;
+        }
+
+        const auto new_face = static_cast<svmp::index_t>(boundary_shapes.size());
+        boundary_shapes.push_back(match->shape);
+        boundary_connectivity.insert(boundary_connectivity.end(),
+                                     match->oriented_vertices.begin(),
+                                     match->oriented_vertices.end());
+        boundary_offsets.push_back(static_cast<svmp::offset_t>(boundary_connectivity.size()));
+        boundary_face2cell.push_back(
+            std::array<svmp::index_t, 2>{{match->cell, svmp::INVALID_INDEX}});
+        boundary_labels.push_back(label);
+        boundary_sets.push_back(std::vector<std::string>{face_name});
+        face_by_vertices.emplace(key, new_face);
+        ++local_matched;
+      }
+
+      if (application::core::oopTraceEnabled() && local_matched == 0) {
+        application::core::oopCout()
+            << "[svMultiPhysics::Application]   Face '" << face_name
+            << "': no local matches (this is expected on non-owning MPI ranks)." << std::endl;
+      }
+      if (application::core::oopTraceEnabled() && local_skipped > 0) {
+        application::core::oopCout()
+            << "[svMultiPhysics::Application]   Face '" << face_name
+            << "': skipped local surface cells=" << local_skipped << std::endl;
+      }
+    }
+
+    mesh.base().set_faces_from_arrays(std::move(boundary_shapes),
+                                      std::move(boundary_offsets),
+                                      std::move(boundary_connectivity),
+                                      std::move(boundary_face2cell),
+                                      svmp::MeshCodim1StorageMode::BoundaryOnly);
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(mesh.n_faces()); ++f) {
+      svmp::MeshLabels::set_boundary_label(mesh.base(), f, boundary_labels[static_cast<std::size_t>(f)]);
+      for (const auto& set_name : boundary_sets[static_cast<std::size_t>(f)]) {
+        mesh.add_to_set(svmp::EntityKind::Face, set_name, f);
+      }
+    }
+
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] MeshTranslator: built boundary-only face topology faces="
+        << mesh.n_faces() << std::endl;
+    return;
   }
 
-  std::unordered_map<std::string, svmp::index_t> boundary_face_by_vertices;
+  std::unordered_map<FaceVertexKey, svmp::index_t, FaceVertexKeyHash> boundary_face_by_vertices;
   const auto boundary_faces = mesh.boundary_faces();
   boundary_face_by_vertices.reserve(boundary_faces.size());
   const auto& face2cell = mesh.face2cell();
@@ -137,7 +515,7 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
     }
     auto verts = mesh.face_vertices(f);
     std::sort(verts.begin(), verts.end());
-    boundary_face_by_vertices.emplace(make_id_key(verts), f);
+    boundary_face_by_vertices.emplace(make_face_vertex_key(verts), f);
   }
 
   svmp::label_t next_label = 1;
@@ -172,8 +550,11 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
                                face_path + "'.");
     }
     face_opts.kv["force_min_dim"] = std::to_string(mesh.dim());
+    face_opts.kv["codim1_topology"] = "none";
+    face_opts.kv["edge_topology"] = "false";
 
     svmp::MeshBase face_mesh = svmp::MeshBase::load(face_opts);
+    const bool use_face_gids = has_nonlocal_vertex_gids(face_mesh);
 
     const auto label = next_label++;
     application::core::oopCout() << "[svMultiPhysics::Application]   Face '" << face_name << "': format='"
@@ -192,13 +573,13 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
 
       bool have_all_vertices = true;
       for (auto fv : face_cell_vertices) {
-        const auto key = make_coord_key(face_mesh.X_ref(), face_mesh.dim(), fv);
-        const auto it = coord_to_vertex.find(key);
-        if (it == coord_to_vertex.end()) {
+        const auto volume_vertex =
+            match_face_vertex_to_volume(mesh, coordinate_locator, face_mesh, fv, use_face_gids);
+        if (volume_vertex == svmp::INVALID_INDEX) {
           have_all_vertices = false;
           break;
         }
-        vol_vertex_ids.push_back(it->second);
+        vol_vertex_ids.push_back(volume_vertex);
       }
       if (!have_all_vertices) {
         ++local_skipped;
@@ -206,7 +587,7 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
       }
 
       std::sort(vol_vertex_ids.begin(), vol_vertex_ids.end());
-      const auto it_face = boundary_face_by_vertices.find(make_id_key(vol_vertex_ids));
+      const auto it_face = boundary_face_by_vertices.find(make_face_vertex_key(vol_vertex_ids));
       if (it_face == boundary_face_by_vertices.end()) {
         ++local_skipped;
         continue;

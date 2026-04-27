@@ -10,6 +10,7 @@
 #include "Core/FEException.h"
 #include "Dofs/EntityDofMap.h"
 #include "Forms/FormExpr.h"
+#include "Forms/JIT/JITCompiler.h"
 #include "Forms/Vocabulary.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
@@ -430,6 +431,146 @@ TEST(FESystemDerivedResults, EvaluatesDarcyStyleGradientExpression)
     ASSERT_NE(data, nullptr);
     EXPECT_NEAR(data[0], -4.0, 1e-12);
     EXPECT_NEAR(data[1], -6.0, 1e-12);
+}
+
+TEST(FESystemDerivedResults, SteadyCellAverageDoesNotGatherUnusedHistory)
+{
+    auto mesh = buildSingleQuadMesh();
+    auto space = quadH1Space();
+    FESystem system(mesh);
+    const auto pressure = system.addField(FieldSpec{.name = "Pressure", .space = space, .components = 1});
+    system.addOperator("mass");
+    system.addCellKernel("mass", pressure, std::make_shared<svmp::FE::assembly::MassKernel>(1.0));
+    system.setup();
+
+    const auto p = FormExpr::stateField(pressure, *space, "Pressure");
+    auto darcy_flux = DerivedResultBuilder("Steady_flux")
+        .scope(DerivedResultScope::Cell)
+        .policy(DerivedResultPolicy::CellAverage)
+        .shape(FEQuantityShape::vector(2))
+        .expression(-2.0 * svmp::FE::forms::grad(p))
+        .build();
+    system.addDerivedResult(std::move(darcy_flux));
+
+    std::vector<Real> u(static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    setVertexValue(system, pressure, 0, 0.0, u);
+    setVertexValue(system, pressure, 1, 2.0, u);
+    setVertexValue(system, pressure, 2, 5.0, u);
+    setVertexValue(system, pressure, 3, 3.0, u);
+
+    const Real truncated_history_value = 0.0;
+    std::span<const Real> truncated_history(&truncated_history_value, 1u);
+    std::vector<std::span<const Real>> history{truncated_history};
+
+    SystemStateView state;
+    state.u = std::span<const Real>(u.data(), u.size());
+    state.u_history = std::span<const std::span<const Real>>(history.data(), history.size());
+    system.appendDerivedResultFields(mesh->local_mesh(), state);
+
+    const auto handle = mesh->local_mesh().field_handle(EntityKind::Volume, "Steady_flux");
+    const auto* data = mesh->local_mesh().field_data_as<double>(handle);
+    ASSERT_NE(data, nullptr);
+    EXPECT_NEAR(data[0], -4.0, 1e-12);
+    EXPECT_NEAR(data[1], -6.0, 1e-12);
+}
+
+#if SVMP_FE_ENABLE_LLVM_JIT
+TEST(FESystemDerivedResults, CellAverageDerivedExpressionUsesJitCompiler)
+{
+    auto mesh = buildSingleQuadMesh();
+    auto space = quadH1Space();
+    FESystem system(mesh);
+    const auto pressure = system.addField(FieldSpec{.name = "Pressure", .space = space, .components = 1});
+    system.addOperator("mass");
+    system.addCellKernel("mass", pressure, std::make_shared<svmp::FE::assembly::MassKernel>(1.0));
+    system.setup();
+
+    const auto p = FormExpr::stateField(pressure, *space, "Pressure");
+    auto darcy_flux = DerivedResultBuilder("Jit_flux")
+        .scope(DerivedResultScope::Cell)
+        .policy(DerivedResultPolicy::CellAverage)
+        .shape(FEQuantityShape::vector(2))
+        .expression(-2.0 * svmp::FE::forms::grad(p))
+        .build();
+    system.addDerivedResult(std::move(darcy_flux));
+
+    svmp::FE::forms::JITOptions jit_options;
+    jit_options.enable = true;
+    auto compiler = svmp::FE::forms::jit::JITCompiler::getOrCreate(jit_options);
+    ASSERT_NE(compiler, nullptr);
+    compiler->resetCacheStats();
+
+    std::vector<Real> u(static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    setVertexValue(system, pressure, 0, 0.0, u);
+    setVertexValue(system, pressure, 1, 2.0, u);
+    setVertexValue(system, pressure, 2, 5.0, u);
+    setVertexValue(system, pressure, 3, 3.0, u);
+
+    SystemStateView state;
+    state.u = std::span<const Real>(u.data(), u.size());
+    system.appendDerivedResultFields(mesh->local_mesh(), state);
+
+    const auto stats = compiler->cacheStats();
+    EXPECT_GT(stats.kernel.hits + stats.kernel.misses, 0u);
+
+    const auto handle = mesh->local_mesh().field_handle(EntityKind::Volume, "Jit_flux");
+    const auto* data = mesh->local_mesh().field_data_as<double>(handle);
+    ASSERT_NE(data, nullptr);
+    EXPECT_NEAR(data[0], -4.0, 1e-12);
+    EXPECT_NEAR(data[1], -6.0, 1e-12);
+}
+#endif
+
+TEST(FESystemDerivedResults, ReusesCellAverageExpressionForPatchAverageOutput)
+{
+    auto mesh = buildSingleQuadMesh();
+    auto space = quadH1Space();
+    FESystem system(mesh);
+    const auto pressure = system.addField(FieldSpec{.name = "Pressure", .space = space, .components = 1});
+    system.addOperator("mass");
+    system.addCellKernel("mass", pressure, std::make_shared<svmp::FE::assembly::MassKernel>(1.0));
+    system.setup();
+
+    const auto p = FormExpr::stateField(pressure, *space, "Pressure");
+    const auto flux_expr = -2.0 * svmp::FE::forms::grad(p);
+    auto cell_flux = DerivedResultBuilder("Cached_flux_cell")
+        .scope(DerivedResultScope::Cell)
+        .policy(DerivedResultPolicy::CellAverage)
+        .shape(FEQuantityShape::vector(2))
+        .expression(flux_expr)
+        .build();
+    auto vertex_flux = DerivedResultBuilder("Cached_flux_vertex")
+        .scope(DerivedResultScope::Vertex)
+        .policy(DerivedResultPolicy::PatchAverage)
+        .shape(FEQuantityShape::vector(2))
+        .expression(flux_expr)
+        .build();
+    system.addDerivedResult(std::move(cell_flux));
+    system.addDerivedResult(std::move(vertex_flux));
+
+    std::vector<Real> u(static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    setVertexValue(system, pressure, 0, 0.0, u);
+    setVertexValue(system, pressure, 1, 2.0, u);
+    setVertexValue(system, pressure, 2, 5.0, u);
+    setVertexValue(system, pressure, 3, 3.0, u);
+
+    SystemStateView state;
+    state.u = std::span<const Real>(u.data(), u.size());
+    system.appendDerivedResultFields(mesh->local_mesh(), state);
+
+    const auto cell_handle = mesh->local_mesh().field_handle(EntityKind::Volume, "Cached_flux_cell");
+    const auto* cell_data = mesh->local_mesh().field_data_as<double>(cell_handle);
+    ASSERT_NE(cell_data, nullptr);
+    EXPECT_NEAR(cell_data[0], -4.0, 1e-12);
+    EXPECT_NEAR(cell_data[1], -6.0, 1e-12);
+
+    const auto vertex_handle = mesh->local_mesh().field_handle(EntityKind::Vertex, "Cached_flux_vertex");
+    const auto* vertex_data = mesh->local_mesh().field_data_as<double>(vertex_handle);
+    ASSERT_NE(vertex_data, nullptr);
+    for (int vertex = 0; vertex < 4; ++vertex) {
+        EXPECT_NEAR(vertex_data[static_cast<std::size_t>(vertex) * 2u], -4.0, 1e-12);
+        EXPECT_NEAR(vertex_data[static_cast<std::size_t>(vertex) * 2u + 1u], -6.0, 1e-12);
+    }
 }
 
 TEST(FESystemDerivedResults, EvaluatesPatchAverageRecoveredGradient)

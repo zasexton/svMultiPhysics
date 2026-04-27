@@ -25,6 +25,7 @@
 #include "Mesh/Topology/CellShape.h"
 
 #include <array>
+#include <memory>
 #include <numeric>
 #include <vector>
 
@@ -191,6 +192,58 @@ private:
     GlobalIndex master1_;
 };
 
+class GeometryValueConstraint final : public svmp::FE::constraints::Constraint {
+public:
+    explicit GeometryValueConstraint(std::shared_ptr<int> updates)
+        : updates_(std::move(updates))
+    {}
+
+    void apply(svmp::FE::constraints::AffineConstraints& constraints) const override
+    {
+        constraints.addDirichlet(0, 1.0);
+    }
+
+    [[nodiscard]] svmp::FE::constraints::ConstraintType getType() const noexcept override
+    {
+        return svmp::FE::constraints::ConstraintType::Dirichlet;
+    }
+
+    [[nodiscard]] svmp::FE::constraints::ConstraintInfo getInfo() const override
+    {
+        svmp::FE::constraints::ConstraintInfo info;
+        info.name = "GeometryValueConstraint";
+        info.type = getType();
+        info.num_constrained_dofs = 1;
+        info.is_homogeneous = false;
+        return info;
+    }
+
+    [[nodiscard]] svmp::FE::constraints::ConstraintDependencyDeclaration
+    dependencyDeclaration() const override
+    {
+        svmp::FE::constraints::ConstraintDependencyDeclaration out;
+        out.value.geometry = true;
+        return out;
+    }
+
+    [[nodiscard]] bool updateValues(svmp::FE::constraints::AffineConstraints& constraints,
+                                    double time) const override
+    {
+        (void)time;
+        constraints.updateInhomogeneity(0, 2.0);
+        ++(*updates_);
+        return true;
+    }
+
+    [[nodiscard]] std::unique_ptr<svmp::FE::constraints::Constraint> clone() const override
+    {
+        return std::make_unique<GeometryValueConstraint>(*this);
+    }
+
+private:
+    std::shared_ptr<int> updates_;
+};
+
 class DGInteriorFaceProbeKernel final : public svmp::FE::assembly::LinearFormKernel {
 public:
     [[nodiscard]] svmp::FE::assembly::RequiredData getRequiredData() const override
@@ -271,6 +324,44 @@ TEST(FESystem, CoordinateConfigurationIsPropagatedToMeshAndSearchAccess)
     EXPECT_TRUE(sys_cur.searchAccess()->locatePoint(p_cur).found);
 }
 
+TEST(FESystem, ExplicitCoordinateConfigurationIgnoresMutableActiveConfigurationSwitch)
+{
+    auto mesh = build_single_quad_mesh();
+    auto x_cur = mesh->local_mesh().X_ref();
+    for (std::size_t i = 0; i < x_cur.size(); i += 2) {
+        x_cur[i] += 4.0;
+    }
+    mesh->set_current_coords(x_cur);
+    mesh->use_reference_configuration();
+
+    FESystem sys_ref(mesh, svmp::Configuration::Reference);
+    FESystem sys_cur(mesh, svmp::Configuration::Current);
+
+    EXPECT_EQ(sys_ref.meshAccess().activeConfigurationEpoch(), 0u);
+    EXPECT_EQ(sys_cur.meshAccess().activeConfigurationEpoch(), 0u);
+
+    const auto ref_before = sys_ref.meshAccess().getNodeCoordinates(0);
+    const auto cur_before = sys_cur.meshAccess().getNodeCoordinates(0);
+    EXPECT_NEAR(ref_before[0], 0.0, 1.0e-12);
+    EXPECT_NEAR(cur_before[0], 4.0, 1.0e-12);
+
+    const auto epoch_before = mesh->active_configuration_epoch();
+    mesh->use_current_configuration();
+    EXPECT_GT(mesh->active_configuration_epoch(), epoch_before);
+
+    const auto ref_after = sys_ref.meshAccess().getNodeCoordinates(0);
+    const auto cur_after = sys_cur.meshAccess().getNodeCoordinates(0);
+    EXPECT_NEAR(ref_after[0], ref_before[0], 1.0e-12);
+    EXPECT_NEAR(cur_after[0], cur_before[0], 1.0e-12);
+
+    ASSERT_NE(sys_ref.searchAccess(), nullptr);
+    ASSERT_NE(sys_cur.searchAccess(), nullptr);
+    EXPECT_TRUE(sys_ref.searchAccess()->locatePoint({0.25, 0.25, 0.0}).found);
+    EXPECT_FALSE(sys_ref.searchAccess()->locatePoint({4.25, 0.25, 0.0}).found);
+    EXPECT_FALSE(sys_cur.searchAccess()->locatePoint({0.25, 0.25, 0.0}).found);
+    EXPECT_TRUE(sys_cur.searchAccess()->locatePoint({4.25, 0.25, 0.0}).found);
+}
+
 TEST(FESystem, MassAssemblyRespectsCoordinateConfiguration)
 {
     auto mesh = build_single_quad_mesh();
@@ -311,6 +402,46 @@ TEST(FESystem, MassAssemblyRespectsCoordinateConfiguration)
         for (GlobalIndex j = 0; j < M_ref.numCols(); ++j) {
             EXPECT_NEAR(M_cur.getMatrixEntry(i, j), 2.0 * M_ref.getMatrixEntry(i, j), 1e-12);
             EXPECT_NEAR(M_def.getMatrixEntry(i, j), M_cur.getMatrixEntry(i, j), 1e-12);
+        }
+    }
+}
+
+TEST(FESystem, PrescribedMovingMeshVectorMassRespectsCurrentGeometry)
+{
+    auto mesh = build_single_quad_mesh();
+
+    auto x_cur = mesh->local_mesh().X_ref();
+    for (std::size_t i = 0; i < x_cur.size(); i += 2u) {
+        x_cur[i] *= 2.0;
+    }
+    mesh->set_current_coords(x_cur);
+
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto vector_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
+
+    auto assemble_vector_mass = [&](svmp::Configuration cfg) {
+        FESystem sys(mesh, cfg);
+        const auto u = sys.addField(FieldSpec{.name = "u", .space = vector_space, .components = 2});
+        sys.addOperator("mass");
+        sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+        sys.setup();
+
+        DenseMatrixView mass(sys.dofHandler().getNumDofs());
+        SystemStateView state;
+        EXPECT_TRUE(sys.assembleMass(state, mass).success);
+        return mass;
+    };
+
+    const auto reference_mass = assemble_vector_mass(svmp::Configuration::Reference);
+    const auto current_mass = assemble_vector_mass(svmp::Configuration::Current);
+
+    ASSERT_EQ(reference_mass.numRows(), current_mass.numRows());
+    ASSERT_EQ(reference_mass.numCols(), current_mass.numCols());
+    for (GlobalIndex i = 0; i < reference_mass.numRows(); ++i) {
+        for (GlobalIndex j = 0; j < reference_mass.numCols(); ++j) {
+            EXPECT_NEAR(current_mass.getMatrixEntry(i, j),
+                        Real(2.0) * reference_mass.getMatrixEntry(i, j),
+                        1.0e-12);
         }
     }
 }
@@ -642,6 +773,42 @@ TEST(FESystem, LayoutRevisionDomainsTrackDefinitionAndSetup)
     EXPECT_GT(sys.constraintLayoutRevision(), after_setup.constraint_layout);
     EXPECT_EQ(sys.dofLayoutRevision(), after_setup.dof_layout);
     EXPECT_EQ(sys.spaceRevision(), after_setup.space);
+}
+
+TEST(FESystem, ConstraintRefreshTracksDeclaredGeometryDependencies)
+{
+    auto mesh = build_single_quad_mesh();
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+
+    FESystem sys(mesh);
+    auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+
+    auto updates = std::make_shared<int>(0);
+    sys.addConstraint(std::make_unique<GeometryValueConstraint>(updates));
+    sys.setup();
+
+    EXPECT_FALSE(sys.constraintStateStaleForCurrentRevisions());
+    auto no_change = sys.refreshConstraintStateForCurrentRevisions();
+    EXPECT_FALSE(no_change.dependency_changed);
+    EXPECT_EQ(*updates, 0);
+
+    auto cur = mesh->local_mesh().X_ref();
+    cur[0] += 0.25;
+    mesh->local_mesh().set_current_coords(cur);
+
+    EXPECT_TRUE(sys.constraintStateStaleForCurrentRevisions());
+    auto refreshed = sys.refreshConstraintStateForCurrentRevisions(/*time=*/0.0, /*dt=*/0.0);
+    EXPECT_TRUE(refreshed.dependency_changed);
+    EXPECT_TRUE(refreshed.value_update);
+    EXPECT_FALSE(refreshed.structural_rebuild);
+    EXPECT_EQ(*updates, 1);
+
+    auto c = sys.constraints().getConstraint(0);
+    ASSERT_TRUE(c.has_value());
+    EXPECT_DOUBLE_EQ(c->inhomogeneity, 2.0);
+    EXPECT_FALSE(sys.constraintStateStaleForCurrentRevisions());
 }
 
 TEST(FESystem, AssembleAccumulatesMultipleCellTerms)

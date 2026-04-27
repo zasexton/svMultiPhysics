@@ -8,10 +8,13 @@
 #include "Systems/MaterialStateProvider.h"
 
 #include "Core/FEException.h"
+#include "Systems/SystemsExceptions.h"
 
 #include <algorithm>
 #include <cstring>
 #include <new>
+#include <span>
+#include <string>
 
 namespace svmp {
 namespace FE {
@@ -130,6 +133,8 @@ void MaterialStateProvider::addKernel(const assembly::AssemblyKernel& kernel,
                 "MaterialStateProvider: at least one max_*_qpts must be > 0");
     FE_THROW_IF(spec.bytes_per_qpt == 0u, InvalidArgumentException, "MaterialStateProvider: bytes_per_qpt must be > 0");
     FE_THROW_IF(spec.alignment == 0u, InvalidArgumentException, "MaterialStateProvider: alignment must be > 0");
+    state::validateStateVariableMetadata(spec.variables, spec.bytes_per_qpt,
+                                         "MaterialStateProvider::addKernel");
 
     const auto* key = &kernel;
     auto it = states_.find(key);
@@ -138,6 +143,12 @@ void MaterialStateProvider::addKernel(const assembly::AssemblyKernel& kernel,
                     "MaterialStateProvider: kernel state spec mismatch (bytes_per_qpt)");
         FE_THROW_IF(it->second.alignment != spec.alignment, InvalidArgumentException,
                     "MaterialStateProvider: kernel state spec mismatch (alignment)");
+        FE_THROW_IF(it->second.variables != spec.variables, InvalidArgumentException,
+                    "MaterialStateProvider: kernel state spec mismatch (state variables)");
+        FE_THROW_IF(static_cast<bool>(it->second.frame_transform_hook) !=
+                        static_cast<bool>(spec.frame_transform_hook),
+                    InvalidArgumentException,
+                    "MaterialStateProvider: kernel state spec mismatch (frame transform hook)");
         const auto prev_max_cell_qpts = it->second.max_cell_qpts;
         it->second.max_cell_qpts = std::max(it->second.max_cell_qpts, max_cell_qpts);
         if (it->second.max_cell_qpts != prev_max_cell_qpts) {
@@ -244,6 +255,8 @@ void MaterialStateProvider::addKernel(const assembly::AssemblyKernel& kernel,
     state.bytes_per_qpt = spec.bytes_per_qpt;
     state.alignment = spec.alignment;
     state.stride_bytes = alignUp(state.bytes_per_qpt, state.alignment);
+    state.variables = std::move(spec.variables);
+    state.frame_transform_hook = std::move(spec.frame_transform_hook);
     state.max_cell_qpts = max_cell_qpts;
     state.cell_stride_bytes = static_cast<std::size_t>(state.max_cell_qpts) * state.stride_bytes;
 
@@ -289,7 +302,11 @@ assembly::MaterialStateView MaterialStateProvider::getCellState(const assembly::
     auto* old_base = it->second.buffer_old.data + static_cast<std::size_t>(cell_id) * it->second.cell_stride_bytes;
     auto* work_base = it->second.buffer_work.data + static_cast<std::size_t>(cell_id) * it->second.cell_stride_bytes;
     return assembly::MaterialStateView{old_base, work_base, it->second.bytes_per_qpt, it->second.stride_bytes,
-                                       it->second.alignment};
+                                       it->second.alignment,
+                                       std::span<const state::StateVariableMetadata>(
+                                           it->second.variables.data(), it->second.variables.size()),
+                                       state::StateVariableLifecycle::CommittedOld,
+                                       work_lifecycle_};
 }
 
 assembly::MaterialStateView MaterialStateProvider::getBoundaryFaceState(const assembly::AssemblyKernel& kernel,
@@ -317,7 +334,11 @@ assembly::MaterialStateView MaterialStateProvider::getBoundaryFaceState(const as
     auto* old_base = it->second.boundary_old.data + idx * it->second.boundary_face_stride_bytes;
     auto* work_base = it->second.boundary_work.data + idx * it->second.boundary_face_stride_bytes;
     return assembly::MaterialStateView{old_base, work_base, it->second.bytes_per_qpt, it->second.stride_bytes,
-                                       it->second.alignment};
+                                       it->second.alignment,
+                                       std::span<const state::StateVariableMetadata>(
+                                           it->second.variables.data(), it->second.variables.size()),
+                                       state::StateVariableLifecycle::CommittedOld,
+                                       work_lifecycle_};
 }
 
 assembly::MaterialStateView MaterialStateProvider::getInteriorFaceState(const assembly::AssemblyKernel& kernel,
@@ -345,7 +366,11 @@ assembly::MaterialStateView MaterialStateProvider::getInteriorFaceState(const as
     auto* old_base = it->second.interior_old.data + idx * it->second.interior_face_stride_bytes;
     auto* work_base = it->second.interior_work.data + idx * it->second.interior_face_stride_bytes;
     return assembly::MaterialStateView{old_base, work_base, it->second.bytes_per_qpt, it->second.stride_bytes,
-                                       it->second.alignment};
+                                       it->second.alignment,
+                                       std::span<const state::StateVariableMetadata>(
+                                           it->second.variables.data(), it->second.variables.size()),
+                                       state::StateVariableLifecycle::CommittedOld,
+                                       work_lifecycle_};
 }
 
 void MaterialStateProvider::beginTimeStep()
@@ -372,6 +397,7 @@ void MaterialStateProvider::beginTimeStep()
             std::memcpy(state.interior_work.data, state.interior_old.data, state.interior_old.size_bytes);
         }
     }
+    work_lifecycle_ = state::StateVariableLifecycle::TrialWork;
 }
 
 void MaterialStateProvider::commitTimeStep()
@@ -382,6 +408,113 @@ void MaterialStateProvider::commitTimeStep()
         std::swap(state.boundary_old, state.boundary_work);
         std::swap(state.interior_old, state.interior_work);
     }
+    work_lifecycle_ = state::StateVariableLifecycle::Accepted;
+}
+
+void MaterialStateProvider::rollbackTimeStep()
+{
+    beginTimeStep();
+    work_lifecycle_ = state::StateVariableLifecycle::RolledBack;
+}
+
+state::StateFrameTransformResult MaterialStateProvider::applyStateFrameTransform(
+    const state::StateFrameTransformRequest& request)
+{
+    state::StateFrameTransformResult result;
+
+    for (auto& kv : states_) {
+        auto& kernel_state = kv.second;
+
+        for (const auto& variable : kernel_state.variables) {
+            ++result.variables_seen;
+            const bool requires_action =
+                state::stateVariableRequiresFrameAction(variable, request.event);
+            if (!requires_action) {
+                ++result.variable_instances_preserved;
+                continue;
+            }
+
+            ++result.variables_requiring_action;
+            FE_THROW_IF(!kernel_state.frame_transform_hook, InvalidStateException,
+                        "MaterialStateProvider: state variable '" + variable.name +
+                            "' declares a frame transform policy but no transform hook");
+
+            const auto apply_buffer = [&](state::StateStorageDomain domain,
+                                          std::string_view storage_name,
+                                          const AlignedBuffer& old_buffer,
+                                          AlignedBuffer& work_buffer,
+                                          std::size_t entity_count,
+                                          std::size_t entity_stride_bytes,
+                                          LocalIndex max_qpts,
+                                          const std::vector<GlobalIndex>* entity_ids) {
+                if (old_buffer.data == nullptr || work_buffer.data == nullptr ||
+                    entity_count == 0u || max_qpts <= 0) {
+                    return;
+                }
+                for (std::size_t entity = 0; entity < entity_count; ++entity) {
+                    const auto entity_id = (entity_ids != nullptr)
+                        ? (*entity_ids)[entity]
+                        : static_cast<GlobalIndex>(entity);
+                    for (LocalIndex q = 0; q < max_qpts; ++q) {
+                        const auto q_offset =
+                            entity * entity_stride_bytes +
+                            static_cast<std::size_t>(q) * kernel_state.stride_bytes +
+                            variable.offset_bytes;
+                        state::StateVariableTransformContext ctx;
+                        ctx.request = request;
+                        ctx.storage_domain = domain;
+                        ctx.storage_name = storage_name;
+                        ctx.entity_id = entity_id;
+                        ctx.quadrature_point = static_cast<int>(q);
+                        ctx.variable = variable;
+                        ctx.old_value = std::span<const std::byte>(
+                            old_buffer.data + q_offset, variable.size_bytes);
+                        ctx.work_value = std::span<std::byte>(
+                            work_buffer.data + q_offset, variable.size_bytes);
+                        kernel_state.frame_transform_hook(ctx);
+                        ++result.variable_instances_transformed;
+                    }
+                }
+            };
+
+            apply_buffer(state::StateStorageDomain::MaterialCellQuadrature,
+                         "cell",
+                         kernel_state.buffer_old,
+                         kernel_state.buffer_work,
+                         static_cast<std::size_t>(num_cells_),
+                         kernel_state.cell_stride_bytes,
+                         kernel_state.max_cell_qpts,
+                         nullptr);
+            apply_buffer(state::StateStorageDomain::MaterialBoundaryFaceQuadrature,
+                         "boundary-face",
+                         kernel_state.boundary_old,
+                         kernel_state.boundary_work,
+                         boundary_face_ids_.size(),
+                         kernel_state.boundary_face_stride_bytes,
+                         kernel_state.max_boundary_face_qpts,
+                         &boundary_face_ids_);
+            apply_buffer(state::StateStorageDomain::MaterialInteriorFaceQuadrature,
+                         "interior-face",
+                         kernel_state.interior_old,
+                         kernel_state.interior_work,
+                         interior_face_ids_.size(),
+                         kernel_state.interior_face_stride_bytes,
+                         kernel_state.max_interior_face_qpts,
+                         &interior_face_ids_);
+        }
+    }
+
+    return result;
+}
+
+std::span<const state::StateVariableMetadata>
+MaterialStateProvider::materialStateVariables(const assembly::AssemblyKernel& kernel) const noexcept
+{
+    auto it = states_.find(&kernel);
+    if (it == states_.end()) {
+        return {};
+    }
+    return {it->second.variables.data(), it->second.variables.size()};
 }
 
 } // namespace systems

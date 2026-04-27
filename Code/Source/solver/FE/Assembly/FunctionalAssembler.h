@@ -71,6 +71,7 @@
 #include "AssemblyKernel.h"
 #include "AssemblyContext.h"
 
+#include <algorithm>
 #include <vector>
 #include <span>
 #include <functional>
@@ -198,6 +199,26 @@ public:
             sum += evaluateCell(ctx, q) * ctx.integrationWeight(q);
         }
         return sum;
+    }
+
+    /**
+     * @brief Whether this kernel provides a dedicated batched cell-total path.
+     *
+     * Assemblers may still call evaluateCellTotalBatch(); the default
+     * implementation falls back to scalar evaluateCellTotal() per cell.
+     */
+    [[nodiscard]] virtual bool supportsCellTotalBatch() const noexcept { return false; }
+
+    /**
+     * @brief Evaluate cell totals for a batch of cell contexts.
+     */
+    virtual void evaluateCellTotalBatch(std::span<const AssemblyContext* const> contexts,
+                                        std::span<Real> totals)
+    {
+        const std::size_t n = std::min(contexts.size(), totals.size());
+        for (std::size_t i = 0; i < n; ++i) {
+            totals[i] = contexts[i] != nullptr ? evaluateCellTotal(*contexts[i]) : Real(0.0);
+        }
     }
 
     /**
@@ -520,6 +541,11 @@ struct FunctionalAssemblyOptions {
      * @brief Verbose output
      */
     bool verbose{false};
+
+    /**
+     * @brief Number of cells evaluated per functional-kernel batch.
+     */
+    std::size_t cell_batch_size{64};
 };
 
 /**
@@ -787,6 +813,23 @@ public:
      */
     [[nodiscard]] std::vector<Real> assembleMultiple(
         std::span<FunctionalKernel* const> kernels);
+
+    /**
+     * @brief Evaluate cell-local functional totals without reducing over cells.
+     *
+     * Each kernel is evaluated once per owned cell using the same prepared
+     * AssemblyContext. The visitor receives the cell id, one integrated value per
+     * kernel, and the cell measure computed from the active quadrature rule.
+     * This is intended for FE-owned post-processing paths that need per-cell
+     * fields rather than a global scalar reduction.
+     */
+    using CellFunctionalVisitor =
+        std::function<void(GlobalIndex cell_id,
+                           std::span<const Real> values,
+                           Real cell_measure)>;
+
+    void evaluateCellFunctionals(std::span<FunctionalKernel* const> kernels,
+                                 const CellFunctionalVisitor& visitor);
 
     // =========================================================================
     // Goal-Oriented Error Estimation Support

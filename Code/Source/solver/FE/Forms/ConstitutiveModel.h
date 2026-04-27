@@ -13,6 +13,7 @@
 
 #include "Core/Types.h"
 #include "Core/ParameterValue.h"
+#include "Core/StateVariableMetadata.h"
 #include "Forms/Dual.h"
 #include "Forms/Value.h"
 
@@ -317,6 +318,23 @@ public:
      * Returning bytes_per_qpt=0 indicates the model does not require state (or does not specify it).
      */
     [[nodiscard]] virtual StateSpec stateSpec() const noexcept { return {}; }
+
+    /**
+     * @brief Optional frame/lifecycle metadata for the model's state variables.
+     *
+     * Offsets are local to the model state block described by @ref stateSpec.
+     * Model-specific frame transforms remain owned by constitutive model code;
+     * FE assembly only routes transform requests and validates coverage.
+     */
+    [[nodiscard]] virtual std::vector<state::StateVariableMetadata> stateVariables() const { return {}; }
+
+    /**
+     * @brief Optional hook for frame-aware state transforms.
+     *
+     * The hook receives model-local offsets when called through Forms material
+     * state plumbing.
+     */
+    [[nodiscard]] virtual state::StateFrameTransformHook stateFrameTransformHook() const { return {}; }
 
     /**
      * @brief Optional structured state layout metadata

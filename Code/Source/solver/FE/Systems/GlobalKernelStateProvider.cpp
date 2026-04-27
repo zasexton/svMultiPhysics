@@ -282,6 +282,11 @@ void GlobalKernelStateProvider::commitTimeStep()
     }
 }
 
+void GlobalKernelStateProvider::rollbackTimeStep()
+{
+    beginTimeStep();
+}
+
 } // namespace systems
 } // namespace FE
 } // namespace svmp

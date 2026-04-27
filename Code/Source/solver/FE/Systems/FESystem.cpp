@@ -84,6 +84,25 @@ namespace systems {
 
 namespace {
 
+[[nodiscard]] state::StateFrameTransformRequest makeStateFrameTransformRequest(
+    state::StateFrameTransformEvent event,
+    const OperatorRevisionSnapshot& snapshot)
+{
+    state::StateFrameTransformRequest request;
+    request.event = event;
+    request.source_lifecycle = state::StateVariableLifecycle::TrialWork;
+    request.target_lifecycle = state::StateVariableLifecycle::TrialWork;
+    if (snapshot.mesh.valid) {
+        request.geometry_revision = snapshot.mesh.geometry;
+        request.topology_revision = snapshot.mesh.topology;
+        request.ownership_revision = snapshot.mesh.ownership;
+        request.numbering_revision = snapshot.mesh.numbering;
+        request.field_layout_revision = snapshot.mesh.field_layout;
+        request.reference_rebase_epoch = snapshot.mesh.reference_rebase;
+    }
+    return request;
+}
+
 [[nodiscard]] bool nativeFaceRankOnePromotionEnabled() noexcept
 {
     const char* env = std::getenv("SVMP_DISABLE_MPI_NATIVE_RANK1_PROMOTION");
@@ -1321,6 +1340,169 @@ std::uint64_t FESystem::systemLayoutRevision() const noexcept
     return key;
 }
 
+constraints::ConstraintRevisionSnapshot
+FESystem::captureConstraintRevisionSnapshot() const noexcept
+{
+    constraints::ConstraintRevisionSnapshot snapshot;
+    snapshot.valid = true;
+    snapshot.fe_space = fe_layout_revisions_.space;
+    snapshot.fe_dof_layout = fe_layout_revisions_.dof_layout;
+    snapshot.fe_constraint_layout = fe_layout_revisions_.constraint_layout;
+    snapshot.fe_block_layout = fe_layout_revisions_.block_layout;
+    snapshot.time_epoch = constraint_time_epoch_;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    if (mesh_) {
+        const auto& local_mesh = mesh_->local_mesh();
+        snapshot.geometry = local_mesh.geometry_revision();
+        snapshot.reference_rebase = local_mesh.reference_rebase_epoch();
+        snapshot.topology = local_mesh.topology_revision();
+        snapshot.ownership = local_mesh.ownership_revision();
+        snapshot.numbering = local_mesh.numbering_revision();
+        snapshot.mesh_field_layout = local_mesh.field_layout_revision();
+        snapshot.labels = local_mesh.label_revision();
+        snapshot.active_configuration = local_mesh.active_configuration_epoch();
+    }
+#endif
+    return snapshot;
+}
+
+constraints::ConstraintRevisionSnapshot
+FESystem::constraintRevisionSnapshot() const noexcept
+{
+    return constraint_revision_snapshot_;
+}
+
+constraints::ConstraintDependencyDeclaration
+FESystem::constraintDependencyDeclaration() const
+{
+    constraints::ConstraintDependencyDeclaration out;
+    for (const auto& c : constraint_defs_) {
+        FE_CHECK_NOT_NULL(c.get(), "FESystem::constraintDependencyDeclaration: constraint");
+        constraints::merge_into(out, c->dependencyDeclaration());
+    }
+    for (const auto& c : system_constraint_defs_) {
+        FE_CHECK_NOT_NULL(c.get(), "FESystem::constraintDependencyDeclaration: system constraint");
+        constraints::merge_into(out, c->dependencyDeclaration());
+    }
+    return out;
+}
+
+bool FESystem::constraintStateStaleForCurrentRevisions() const
+{
+    constraints::ConstraintDependencyDeclaration deps;
+    for (const auto& c : constraint_defs_) {
+        if (c) {
+            constraints::merge_into(deps, c->dependencyDeclaration());
+        }
+    }
+    for (const auto& c : system_constraint_defs_) {
+        if (c) {
+            constraints::merge_into(deps, c->dependencyDeclaration());
+        }
+    }
+    const auto current = captureConstraintRevisionSnapshot();
+    return constraints::structural_dependency_changed(deps, constraint_revision_snapshot_, current) ||
+           constraints::value_dependency_changed(deps, constraint_revision_snapshot_, current);
+}
+
+constraints::ConstraintRefreshResult
+FESystem::refreshConstraintStateForCurrentRevisions(double time,
+                                                    double dt,
+                                                    bool allow_structural_rebuild)
+{
+    constraints::ConstraintRefreshResult result;
+    requireSetup();
+
+    const auto deps = constraintDependencyDeclaration();
+    const auto current = captureConstraintRevisionSnapshot();
+    const bool structural_changed =
+        constraints::structural_dependency_changed(deps, constraint_revision_snapshot_, current);
+    const bool value_changed =
+        constraints::value_dependency_changed(deps, constraint_revision_snapshot_, current);
+
+    if (!structural_changed && !value_changed) {
+        result.reason = "constraint dependencies unchanged";
+        return result;
+    }
+
+    result.dependency_changed = true;
+    if (structural_changed) {
+        if (!allow_structural_rebuild || !has_last_setup_) {
+            result.skipped_no_cached_setup = true;
+            result.reason = "constraint structural dependencies changed but cached setup is unavailable";
+            return result;
+        }
+        result.structural_rebuild = true;
+        result.reason = "constraint structural dependencies changed; rebuilt FE setup";
+        setup(last_setup_options_, last_setup_inputs_);
+        return result;
+    }
+
+    bool any_update = false;
+    for (const auto& c : constraint_defs_) {
+        FE_CHECK_NOT_NULL(c.get(), "FESystem::refreshConstraintStateForCurrentRevisions: constraint");
+        const auto decl = c->dependencyDeclaration();
+        if (constraints::value_dependency_changed(decl, constraint_revision_snapshot_, current)) {
+            any_update = c->updateValues(affine_constraints_, time) || any_update;
+        }
+    }
+    for (auto& c : system_constraint_defs_) {
+        FE_CHECK_NOT_NULL(c.get(), "FESystem::refreshConstraintStateForCurrentRevisions: system constraint");
+        const auto decl = c->dependencyDeclaration();
+        if (constraints::value_dependency_changed(decl, constraint_revision_snapshot_, current)) {
+            any_update = c->updateValues(*this, affine_constraints_, time, dt) || any_update;
+        }
+    }
+
+    ++constraint_time_epoch_;
+    constraint_revision_snapshot_ = captureConstraintRevisionSnapshot();
+    buildConstraintSummary();
+    invalidateAnalysisCache();
+    result.value_update = any_update;
+    result.reason = any_update ? "constraint value dependencies changed; updated inhomogeneities"
+                               : "constraint value dependencies changed; no inhomogeneity updates were needed";
+    return result;
+}
+
+OperatorRevisionSnapshot FESystem::operatorRevisionSnapshot() const noexcept
+{
+    OperatorRevisionSnapshot snapshot;
+    snapshot.valid = true;
+    snapshot.fe_layout = fe_layout_revisions_;
+    snapshot.system_layout_key = systemLayoutRevision();
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    snapshot.geometry_state = geometry_transaction_state_;
+    snapshot.geometry_use = geometryConfigurationUse();
+    if (mesh_) {
+        const auto& local_mesh = mesh_->local_mesh();
+        snapshot.mesh.valid = true;
+        snapshot.mesh.geometry = local_mesh.geometry_revision();
+        snapshot.mesh.reference_geometry = local_mesh.reference_geometry_revision();
+        snapshot.mesh.current_geometry = local_mesh.current_geometry_revision();
+        snapshot.mesh.reference_rebase = local_mesh.reference_rebase_epoch();
+        snapshot.mesh.topology = local_mesh.topology_revision();
+        snapshot.mesh.ownership = local_mesh.ownership_revision();
+        snapshot.mesh.numbering = local_mesh.numbering_revision();
+        snapshot.mesh.field_layout = local_mesh.field_layout_revision();
+        snapshot.mesh.labels = local_mesh.label_revision();
+        snapshot.mesh.active_configuration = local_mesh.active_configuration_epoch();
+    }
+#else
+    snapshot.geometry_state = GeometryTransactionState::Committed;
+    snapshot.geometry_use = GeometryConfigurationUse::Reference;
+#endif
+    return snapshot;
+}
+
+OperatorInvalidationDecision FESystem::operatorInvalidationDecision(
+    const OperatorRevisionSnapshot& cached,
+    bool allow_lagged_jacobian_on_geometry_change) const
+{
+    return decideOperatorInvalidation(cached,
+                                      operatorRevisionSnapshot(),
+                                      allow_lagged_jacobian_on_geometry_change);
+}
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 FESystem::FESystem(std::shared_ptr<const svmp::Mesh> mesh, svmp::Configuration coord_cfg)
     : mesh_(std::move(mesh)), coord_cfg_(coord_cfg)
@@ -1772,6 +1954,16 @@ FieldId FESystem::addField(FieldSpec spec)
     return field;
 }
 
+FieldId FESystem::findFieldByName(std::string_view name) const noexcept
+{
+    return field_registry_.findByName(name);
+}
+
+bool FESystem::hasField(std::string_view name) const noexcept
+{
+    return findFieldByName(name) != INVALID_FIELD_ID;
+}
+
 namespace {
 
 MeshMotionFieldRole parseMeshMotionFieldRole(std::string_view role_name)
@@ -1884,6 +2076,24 @@ constexpr std::array<MeshMotionFieldRole, 6> kFEMeshMotionRoles = {{
     MeshMotionFieldRole::PreviousDisplacement,
     MeshMotionFieldRole::PreviousVelocity,
 }};
+
+MeshCoordinateUpdateStage toMeshCoordinateUpdateStage(
+    GeometricNonlinearityUpdatePoint update_point) noexcept
+{
+    switch (update_point) {
+        case GeometricNonlinearityUpdatePoint::TrialIterate:
+            return MeshCoordinateUpdateStage::TrialNonlinearIterate;
+        case GeometricNonlinearityUpdatePoint::AcceptedNonlinearState:
+            return MeshCoordinateUpdateStage::AcceptedNonlinearState;
+        case GeometricNonlinearityUpdatePoint::AcceptedTimeStep:
+            return MeshCoordinateUpdateStage::AcceptedTimeStep;
+        case GeometricNonlinearityUpdatePoint::AcceptedRemeshOrRezoneState:
+            return MeshCoordinateUpdateStage::AcceptedRemeshRezoneState;
+        case GeometricNonlinearityUpdatePoint::RolledBackTrial:
+            return MeshCoordinateUpdateStage::TrialNonlinearIterate;
+    }
+    return MeshCoordinateUpdateStage::TrialNonlinearIterate;
+}
 #endif
 
 } // namespace
@@ -1936,6 +2146,110 @@ assembly::MeshMotionFieldAccess FESystem::meshMotionFieldAccess() const noexcept
     return mesh_motion_fields_;
 }
 
+void FESystem::setGeometricNonlinearityPolicy(GeometricNonlinearityPolicy policy)
+{
+    geometric_nonlinearity_policy_ = policy;
+    if (operator_backends_) {
+        operator_backends_->invalidateCache();
+    }
+    if (assembler_) {
+        assembler_->invalidateGeometryCaches();
+    }
+    invalidateAnalysisCache();
+}
+
+const GeometricNonlinearityPolicy& FESystem::geometricNonlinearityPolicy() const noexcept
+{
+    return geometric_nonlinearity_policy_;
+}
+
+bool FESystem::geometricNonlinearityEnabled() const noexcept
+{
+    return geometric_nonlinearity_policy_.enabled;
+}
+
+GeometricNonlinearityTransactionEvent FESystem::beginGeometricNonlinearityTrial(
+    const SystemStateView& state)
+{
+    GeometricNonlinearityTransactionEvent event{};
+    event.update_point = GeometricNonlinearityUpdatePoint::TrialIterate;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    event.geometry_state = geometry_transaction_state_;
+    if (!shouldUpdateFieldAtPoint(geometric_nonlinearity_policy_,
+                                  GeometricNonlinearityStateField::CurrentCoordinates,
+                                  event.update_point) ||
+        !mesh_ ||
+        !meshMotionField(MeshMotionFieldRole::Displacement).has_value()) {
+        return event;
+    }
+
+    MeshCoordinateUpdateOptions options;
+    options.stage = MeshCoordinateUpdateStage::TrialNonlinearIterate;
+    updateCurrentCoordinatesFromMeshDisplacement(state, options);
+    event.geometry_state = geometry_transaction_state_;
+#else
+    (void)state;
+#endif
+    return event;
+}
+
+GeometricNonlinearityTransactionEvent FESystem::acceptGeometricNonlinearityState(
+    const SystemStateView& state,
+    GeometricNonlinearityUpdatePoint update_point)
+{
+    GeometricNonlinearityTransactionEvent event{};
+    event.update_point = update_point;
+    event.nonlinear_step_accepted =
+        update_point == GeometricNonlinearityUpdatePoint::AcceptedNonlinearState;
+    event.time_step_accepted =
+        update_point == GeometricNonlinearityUpdatePoint::AcceptedTimeStep;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    event.geometry_state = geometry_transaction_state_;
+    if (!shouldUpdateFieldAtPoint(geometric_nonlinearity_policy_,
+                                  GeometricNonlinearityStateField::CurrentCoordinates,
+                                  update_point) ||
+        !mesh_ ||
+        !meshMotionField(MeshMotionFieldRole::Displacement).has_value()) {
+        return event;
+    }
+
+    MeshCoordinateUpdateOptions options;
+    options.stage = toMeshCoordinateUpdateStage(update_point);
+    updateCurrentCoordinatesFromMeshDisplacement(state, options);
+
+    if (mesh_coordinate_backup_.has_value()) {
+        mesh_coordinate_backup_.reset();
+        mesh_motion_field_backup_.clear();
+        geometry_transaction_last_revision_ = operatorRevisionSnapshot();
+        for (const auto& hook : geometry_transaction_callbacks_) {
+            if (hook.callback) {
+                hook.callback(geometryTransactionDiagnostics());
+            }
+        }
+    }
+    event.geometry_state = geometry_transaction_state_;
+#else
+    (void)state;
+#endif
+    return event;
+}
+
+GeometricNonlinearityTransactionEvent FESystem::rollbackGeometricNonlinearityTrial()
+{
+    GeometricNonlinearityTransactionEvent event{};
+    event.update_point = GeometricNonlinearityUpdatePoint::RolledBackTrial;
+    event.line_search_rejected = true;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    event.geometry_state = geometry_transaction_state_;
+    if (requiresLineSearchRollback(geometric_nonlinearity_policy_, event) &&
+        meshCoordinateTransactionActive()) {
+        rollbackMeshCoordinateTransaction();
+        event.geometry_state = geometry_transaction_state_;
+    }
+#endif
+    return event;
+}
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 FieldId FESystem::addMeshDisplacementUnknown(std::string name,
                                              std::shared_ptr<const spaces::FunctionSpace> space,
@@ -1985,6 +2299,40 @@ void FESystem::beginMeshCoordinateTransaction()
     svmp::motion::MotionCoordinateBackup backup;
     svmp::motion::save_coordinates(*mesh_, backup);
     mesh_coordinate_backup_ = std::move(backup);
+    mesh_motion_field_backup_.clear();
+
+    const auto& local_mesh = mesh_->local_mesh();
+    for (const auto role : svmp::motion::standard_motion_field_roles()) {
+        const std::string field_name(svmp::motion::standard_motion_field_name(role));
+        const auto handle =
+            svmp::MeshFields::get_field_handle(local_mesh, svmp::EntityKind::Vertex, field_name);
+        if (handle.id == 0) {
+            continue;
+        }
+        if (svmp::MeshFields::field_type(local_mesh, handle) != svmp::FieldScalarType::Float64) {
+            continue;
+        }
+        FESystem::MeshMotionFieldBackup field_backup;
+        field_backup.handle = handle;
+        field_backup.name = field_name;
+        field_backup.components = svmp::MeshFields::field_components(local_mesh, handle);
+        field_backup.entity_count = svmp::MeshFields::field_entity_count(local_mesh, handle);
+        const auto count = field_backup.components * field_backup.entity_count;
+        const auto* values = svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, handle);
+        FE_CHECK_NOT_NULL(values, "FESystem::beginMeshCoordinateTransaction: mesh-motion field data");
+        field_backup.values.assign(values, values + count);
+        mesh_motion_field_backup_.push_back(std::move(field_backup));
+    }
+
+    geometry_transaction_start_revision_ = operatorRevisionSnapshot();
+    geometry_transaction_last_revision_ = geometry_transaction_start_revision_;
+    geometry_transaction_state_ = GeometryTransactionState::Trial;
+    geometry_transaction_last_event_ = "begin";
+    for (const auto& hook : geometry_transaction_callbacks_) {
+        if (hook.callback) {
+            hook.callback(geometryTransactionDiagnostics());
+        }
+    }
 }
 
 MeshCoordinateUpdateResult FESystem::updateCurrentCoordinatesFromMeshDisplacement(
@@ -2049,6 +2397,31 @@ MeshCoordinateUpdateResult FESystem::updateCurrentCoordinatesFromMeshDisplacemen
         notifyMeshGeometryAdvanced();
     }
 
+    switch (options.stage) {
+        case MeshCoordinateUpdateStage::TrialNonlinearIterate:
+            geometry_transaction_state_ = GeometryTransactionState::Trial;
+            geometry_transaction_last_event_ = "trial-update";
+            break;
+        case MeshCoordinateUpdateStage::AcceptedNonlinearState:
+            geometry_transaction_state_ = GeometryTransactionState::Accepted;
+            geometry_transaction_last_event_ = "accepted-nonlinear-state";
+            break;
+        case MeshCoordinateUpdateStage::AcceptedTimeStep:
+            geometry_transaction_state_ = GeometryTransactionState::Committed;
+            geometry_transaction_last_event_ = "accepted-time-step";
+            break;
+        case MeshCoordinateUpdateStage::AcceptedRemeshRezoneState:
+            geometry_transaction_state_ = GeometryTransactionState::Committed;
+            geometry_transaction_last_event_ = "accepted-remesh-rezone-state";
+            break;
+    }
+    geometry_transaction_last_revision_ = operatorRevisionSnapshot();
+    for (const auto& hook : geometry_transaction_callbacks_) {
+        if (hook.callback) {
+            hook.callback(geometryTransactionDiagnostics());
+        }
+    }
+
     return MeshCoordinateUpdateResult{
         .vertices_updated = static_cast<std::size_t>(n_vertices),
         .components_updated = static_cast<std::size_t>(n_vertices) * static_cast<std::size_t>(dim),
@@ -2059,7 +2432,16 @@ MeshCoordinateUpdateResult FESystem::updateCurrentCoordinatesFromMeshDisplacemen
 
 void FESystem::commitMeshCoordinateTransaction()
 {
+    geometry_transaction_state_ = GeometryTransactionState::Accepted;
+    geometry_transaction_last_event_ = "commit";
+    geometry_transaction_last_revision_ = operatorRevisionSnapshot();
     mesh_coordinate_backup_.reset();
+    mesh_motion_field_backup_.clear();
+    for (const auto& hook : geometry_transaction_callbacks_) {
+        if (hook.callback) {
+            hook.callback(geometryTransactionDiagnostics());
+        }
+    }
 }
 
 void FESystem::rollbackMeshCoordinateTransaction()
@@ -2070,16 +2452,206 @@ void FESystem::rollbackMeshCoordinateTransaction()
     }
     auto& mesh = const_cast<svmp::Mesh&>(*mesh_);
     svmp::motion::restore_coordinates(mesh, *mesh_coordinate_backup_);
+    auto& local_mesh = mesh.local_mesh();
+    for (const auto& field_backup : mesh_motion_field_backup_) {
+        auto handle = field_backup.handle;
+        if (handle.id == 0 ||
+            !svmp::MeshFields::has_field(local_mesh, handle.kind, handle.name)) {
+            continue;
+        }
+        const auto current_components = svmp::MeshFields::field_components(local_mesh, handle);
+        const auto current_entities = svmp::MeshFields::field_entity_count(local_mesh, handle);
+        if (current_components != field_backup.components ||
+            current_entities != field_backup.entity_count ||
+            svmp::MeshFields::field_type(local_mesh, handle) != svmp::FieldScalarType::Float64) {
+            continue;
+        }
+        auto* values = svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, handle);
+        FE_CHECK_NOT_NULL(values, "FESystem::rollbackMeshCoordinateTransaction: mesh-motion field data");
+        std::copy(field_backup.values.begin(), field_backup.values.end(), values);
+    }
     if (mesh.local_mesh().has_current_coords()) {
         mesh.update_exchange_ghost_coordinates(svmp::Configuration::Current);
     }
-    notifyMeshGeometryAdvanced();
+    if (material_state_provider_) {
+        material_state_provider_->rollbackTimeStep();
+    }
+    if (global_kernel_state_provider_) {
+        global_kernel_state_provider_->rollbackTimeStep();
+    }
+    if (auxiliary_state_manager_) {
+        auxiliary_state_manager_->rollbackAll();
+    }
+    if (auxiliary_input_registry_) {
+        auxiliary_input_registry_->invalidateAll();
+    }
+    if (operator_backends_) {
+        operator_backends_->invalidateCache();
+    }
+    if (assembler_) {
+        assembler_->invalidateGeometryCaches();
+    }
+    invalidateAnalysisCache();
+    geometry_transaction_state_ = GeometryTransactionState::RolledBack;
+    geometry_transaction_last_event_ = "rollback";
+    geometry_transaction_last_revision_ = operatorRevisionSnapshot();
     mesh_coordinate_backup_.reset();
+    mesh_motion_field_backup_.clear();
+    for (const auto& hook : geometry_transaction_callbacks_) {
+        if (hook.callback) {
+            hook.callback(geometryTransactionDiagnostics());
+        }
+    }
+}
+
+void FESystem::rebaseMeshReferenceToCurrent(const svmp::ReferenceRebaseOptions& options)
+{
+    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::rebaseMeshReferenceToCurrent: mesh");
+    FE_THROW_IF(mesh_coordinate_backup_.has_value(), InvalidStateException,
+                "FESystem::rebaseMeshReferenceToCurrent: cannot rebase during an active "
+                "mesh coordinate transaction");
+
+    auto& mesh = const_cast<svmp::Mesh&>(*mesh_);
+    mesh.rebase_reference_to_current(options);
+    if (mesh.has_current_coords()) {
+        mesh.update_exchange_ghost_coordinates(svmp::Configuration::Current);
+    }
+
+    notifyMeshReferenceRebased();
+    geometry_transaction_state_ = GeometryTransactionState::Committed;
+    geometry_transaction_last_event_ = "reference-rebase-current";
+    geometry_transaction_last_revision_ = operatorRevisionSnapshot();
+    for (const auto& hook : geometry_transaction_callbacks_) {
+        if (hook.callback) {
+            hook.callback(geometryTransactionDiagnostics());
+        }
+    }
+}
+
+void FESystem::rebaseMeshReferenceCoordinates(
+    std::vector<svmp::real_t> Xref,
+    const svmp::ReferenceRebaseOptions& options)
+{
+    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::rebaseMeshReferenceCoordinates: mesh");
+    FE_THROW_IF(mesh_coordinate_backup_.has_value(), InvalidStateException,
+                "FESystem::rebaseMeshReferenceCoordinates: cannot rebase during an active "
+                "mesh coordinate transaction");
+
+    auto& mesh = const_cast<svmp::Mesh&>(*mesh_);
+    mesh.rebase_reference_coordinates(std::move(Xref), options);
+    if (mesh.has_current_coords()) {
+        mesh.update_exchange_ghost_coordinates(svmp::Configuration::Current);
+    }
+
+    notifyMeshReferenceRebased();
+    geometry_transaction_state_ = GeometryTransactionState::Committed;
+    geometry_transaction_last_event_ = "reference-rebase-explicit";
+    geometry_transaction_last_revision_ = operatorRevisionSnapshot();
+    for (const auto& hook : geometry_transaction_callbacks_) {
+        if (hook.callback) {
+            hook.callback(geometryTransactionDiagnostics());
+        }
+    }
+}
+
+bool FESystem::rebaseGeometricNonlinearityReference(
+    const svmp::ReferenceRebaseOptions& options)
+{
+    if (!geometric_nonlinearity_policy_.enabled ||
+        geometric_nonlinearity_policy_.reference_policy !=
+            geometry::FiniteDeformationReferencePolicy::UpdatedLagrangian ||
+        !mesh_) {
+        return false;
+    }
+
+    rebaseMeshReferenceToCurrent(options);
+    if (geometric_nonlinearity_policy_.reset_displacement_after_reference_rebase) {
+        (void)resetBoundMeshMotionField(MeshMotionFieldRole::Displacement, Real(0));
+    }
+    return true;
+}
+
+std::size_t FESystem::resetBoundMeshMotionField(MeshMotionFieldRole role, Real value)
+{
+    requireSetup();
+    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::resetBoundMeshMotionField: mesh");
+    if (!meshMotionField(role).has_value()) {
+        return 0;
+    }
+
+    auto& mesh = const_cast<svmp::Mesh&>(*mesh_);
+    auto& local_mesh = mesh.local_mesh();
+    const auto mesh_role = toMeshMotionRole(role);
+    const auto mesh_name = svmp::motion::standard_motion_field_name(mesh_role);
+    const auto mesh_field =
+        svmp::MeshFields::get_field_handle(local_mesh, svmp::EntityKind::Vertex, mesh_name);
+    if (mesh_field.id == 0) {
+        return 0;
+    }
+    svmp::motion::validate_motion_field(local_mesh, mesh_field, mesh_role, mesh.dim());
+    auto* values = svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, mesh_field);
+    FE_CHECK_NOT_NULL(values, "FESystem::resetBoundMeshMotionField: mesh field data");
+    const auto count = svmp::MeshFields::field_components(local_mesh, mesh_field) *
+                       svmp::MeshFields::field_entity_count(local_mesh, mesh_field);
+    std::fill(values, values + count, static_cast<svmp::real_t>(value));
+    notifyMeshGeometryAdvanced();
+    return count;
 }
 
 bool FESystem::meshCoordinateTransactionActive() const noexcept
 {
     return mesh_coordinate_backup_.has_value();
+}
+
+GeometryTransactionState FESystem::meshCoordinateTransactionState() const noexcept
+{
+    return geometry_transaction_state_;
+}
+
+GeometryConfigurationUse FESystem::geometryConfigurationUse() const noexcept
+{
+    if (!mesh_) {
+        return GeometryConfigurationUse::Reference;
+    }
+    if (geometry_transaction_state_ == GeometryTransactionState::Trial) {
+        return GeometryConfigurationUse::TrialCurrent;
+    }
+    if (geometry_transaction_state_ == GeometryTransactionState::Accepted) {
+        return GeometryConfigurationUse::AcceptedCurrent;
+    }
+    if (geometry_transaction_state_ == GeometryTransactionState::RolledBack) {
+        return mesh_->local_mesh().active_configuration() == svmp::Configuration::Current
+                   ? GeometryConfigurationUse::RolledBackCurrent
+                   : GeometryConfigurationUse::Reference;
+    }
+    const auto active = mesh_->local_mesh().active_configuration();
+    if (coord_cfg_ == svmp::Configuration::Current ||
+        coord_cfg_ == svmp::Configuration::Deformed ||
+        active == svmp::Configuration::Current ||
+        active == svmp::Configuration::Deformed) {
+        return GeometryConfigurationUse::CommittedCurrent;
+    }
+    return GeometryConfigurationUse::Reference;
+}
+
+GeometryTransactionDiagnostics FESystem::geometryTransactionDiagnostics() const
+{
+    GeometryTransactionDiagnostics diag;
+    diag.state = geometry_transaction_state_;
+    diag.geometry_use = geometryConfigurationUse();
+    diag.started_from = geometry_transaction_start_revision_;
+    diag.current = operatorRevisionSnapshot();
+    diag.last_event = geometry_transaction_last_event_;
+    return diag;
+}
+
+void FESystem::addGeometryTransactionCallback(GeometryTransactionCallback hook)
+{
+    FE_THROW_IF(hook.name.empty(), InvalidArgumentException,
+                "FESystem::addGeometryTransactionCallback: hook name must not be empty");
+    FE_THROW_IF(!hook.callback, InvalidArgumentException,
+                "FESystem::addGeometryTransactionCallback: callback must be callable");
+    geometry_transaction_callbacks_.push_back(std::move(hook));
 }
 
 namespace {
@@ -2395,6 +2967,16 @@ FEAdaptedStateTransferResult FESystem::onMeshAdapted(
         }
     }
 
+    const auto state_transfer_request = makeStateFrameTransformRequest(
+        state::StateFrameTransformEvent::AdaptivityTransfer,
+        operatorRevisionSnapshot());
+    if (request.transfer_material_state && material_state_provider_) {
+        (void)material_state_provider_->applyStateFrameTransform(state_transfer_request);
+    }
+    if (request.transfer_auxiliary_state && auxiliary_state_manager_) {
+        (void)auxiliary_state_manager_->applyStateFrameTransform(state_transfer_request);
+    }
+
     bool auxiliary_transfer_complete = true;
     if (request.transfer_auxiliary_state && auxiliary_state_manager_) {
         const auto block_names = auxiliary_state_manager_->state().blockNames();
@@ -2559,10 +3141,51 @@ FEAdaptedStateTransferResult FESystem::onMeshAdapted(
 
 void FESystem::notifyMeshGeometryAdvanced()
 {
+    const auto transform_request = makeStateFrameTransformRequest(
+        state::StateFrameTransformEvent::OrdinaryGeometryMotion,
+        operatorRevisionSnapshot());
+    if (material_state_provider_) {
+        (void)material_state_provider_->applyStateFrameTransform(transform_request);
+    }
+    if (auxiliary_state_manager_) {
+        (void)auxiliary_state_manager_->applyStateFrameTransform(transform_request);
+    }
     if (assembler_) {
         assembler_->invalidateGeometryCaches();
     }
     invalidateAnalysisCache();
+}
+
+void FESystem::notifyMeshReferenceRebased()
+{
+    const auto transform_request = makeStateFrameTransformRequest(
+        state::StateFrameTransformEvent::ReferenceRebase,
+        operatorRevisionSnapshot());
+    if (material_state_provider_) {
+        (void)material_state_provider_->applyStateFrameTransform(transform_request);
+    }
+    if (auxiliary_state_manager_) {
+        (void)auxiliary_state_manager_->applyStateFrameTransform(transform_request);
+    }
+    if (assembler_) {
+        assembler_->invalidateGeometryCaches();
+    }
+    invalidateAnalysisCache();
+    if (material_state_provider_) {
+        material_state_provider_->rollbackTimeStep();
+    }
+    if (global_kernel_state_provider_) {
+        global_kernel_state_provider_->rollbackTimeStep();
+    }
+    if (auxiliary_state_manager_) {
+        auxiliary_state_manager_->resetAllToCommitted();
+    }
+    if (auxiliary_input_registry_) {
+        auxiliary_input_registry_->invalidateAll();
+    }
+    partitioned_auxiliary_advance_valid_ = false;
+    partitioned_auxiliary_advance_time_ = std::numeric_limits<Real>::quiet_NaN();
+    partitioned_auxiliary_advance_dt_ = std::numeric_limits<Real>::quiet_NaN();
 }
 
 void FESystem::notifyMeshTopologyLayoutChanged()
@@ -2733,6 +3356,24 @@ std::shared_ptr<assembly::MatrixFreeOperator> FESystem::matrixFreeOperator(const
     requireSingleFieldSetup();
     FE_CHECK_NOT_NULL(operator_backends_.get(), "FESystem::operator_backends");
     return operator_backends_->matrixFreeOperator(*this, op);
+}
+
+std::size_t FESystem::matrixFreeOperatorRebuildCount(const OperatorTag& op) const
+{
+    FE_CHECK_NOT_NULL(operator_backends_.get(), "FESystem::operator_backends");
+    return operator_backends_->matrixFreeRebuildCount(op);
+}
+
+OperatorRevisionSnapshot FESystem::matrixFreeOperatorRevisionSnapshot(const OperatorTag& op) const
+{
+    FE_CHECK_NOT_NULL(operator_backends_.get(), "FESystem::operator_backends");
+    return operator_backends_->matrixFreeRevisionSnapshot(op);
+}
+
+OperatorInvalidationDecision FESystem::matrixFreeOperatorLastInvalidation(const OperatorTag& op) const
+{
+    FE_CHECK_NOT_NULL(operator_backends_.get(), "FESystem::operator_backends");
+    return operator_backends_->matrixFreeLastInvalidation(op);
 }
 
 post::DerivedResultHandle FESystem::addDerivedResult(post::DerivedResultDefinition def)
@@ -3281,6 +3922,15 @@ GlobalIndex FESystem::fieldDofOffset(FieldId field) const
     FE_THROW_IF(field < 0 || idx >= field_dof_offsets_.size(), InvalidArgumentException,
                 "FESystem::fieldDofOffset: invalid field id");
     return field_dof_offsets_[idx];
+}
+
+bool FESystem::operatorMatrixStateIndependent(const OperatorTag& op) const
+{
+    requireSetup();
+    const auto it = assembly_plan_by_op_.find(op);
+    FE_THROW_IF(it == assembly_plan_by_op_.end(), InvalidArgumentException,
+                "FESystem::operatorMatrixStateIndependent: unknown operator '" + op + "'");
+    return it->second.matrix_state_independent;
 }
 
 assembly::AssemblyResult FESystem::assemble(
@@ -7789,6 +8439,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                     for (int input_col = 0; input_col < ed.n_inputs; ++input_col) {
                         auto& grad = ed.input_gradients[static_cast<std::size_t>(input_col)];
                         if (!grad.empty() || local_condensed ||
+                            ed.aux_dofs.empty() ||
                             bordered_coupling_.Ct.size() <
                                 static_cast<std::size_t>(bordered_coupling_.n_aux) * n_field_dofs) {
                             continue;
@@ -12660,19 +13311,25 @@ FESystem::AuxiliaryAnalysisSummary FESystem::auxiliaryAnalysisSummary() const
 void FESystem::updateConstraints(double time, double dt)
 {
     requireSetup();
+    bool any_updated = false;
 
     for (const auto& c : constraint_defs_) {
         FE_CHECK_NOT_NULL(c.get(), "FESystem::updateConstraints: constraint");
         if (c->isTimeDependent()) {
-            (void)c->updateValues(affine_constraints_, time);
+            any_updated = c->updateValues(affine_constraints_, time) || any_updated;
         }
     }
 
     for (auto& c : system_constraint_defs_) {
         FE_CHECK_NOT_NULL(c.get(), "FESystem::updateConstraints: system constraint");
         if (c->isTimeDependent()) {
-            (void)c->updateValues(*this, affine_constraints_, time, dt);
+            any_updated = c->updateValues(*this, affine_constraints_, time, dt) || any_updated;
         }
+    }
+
+    if (any_updated) {
+        ++constraint_time_epoch_;
+        constraint_revision_snapshot_ = captureConstraintRevisionSnapshot();
     }
 }
 

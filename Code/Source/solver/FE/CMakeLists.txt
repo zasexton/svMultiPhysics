@@ -259,6 +259,7 @@ set(FE_CORE_HEADERS
     Core/FEException.h
     Core/Logger.h
     Core/KernelTrace.h
+    Core/StateVariableMetadata.h
 )
 
 set(FE_CORE_SOURCES
@@ -502,12 +503,16 @@ set(FE_DOFS_SOURCES
 set(FE_CONSTRAINTS_HEADERS
     Constraints/AffineConstraints.h
     Constraints/Constraint.h
+    Constraints/ConstraintDependency.h
     Constraints/DirichletBC.h
     Constraints/NeumannBC.h
     Constraints/PeriodicBC.h
     Constraints/HangingNodeConstraint.h
     Constraints/MultiPointConstraint.h
+    Constraints/TiedInterfaceConstraint.h
     Constraints/GlobalConstraint.h
+    Constraints/GeometricIntegralConstraint.h
+    Constraints/MovingConstraintComposition.h
     Constraints/ConstraintDistributor.h
     Constraints/ParallelConstraints.h
     Constraints/ConstraintTools.h
@@ -529,11 +534,13 @@ set(FE_CONSTRAINTS_HEADERS
 
 set(FE_CONSTRAINTS_SOURCES
     Constraints/AffineConstraints.cpp
+    Constraints/ConstraintDependency.cpp
     Constraints/DirichletBC.cpp
     Constraints/NeumannBC.cpp
     Constraints/PeriodicBC.cpp
     Constraints/HangingNodeConstraint.cpp
     Constraints/MultiPointConstraint.cpp
+    Constraints/TiedInterfaceConstraint.cpp
     Constraints/GlobalConstraint.cpp
     Constraints/ConstraintDistributor.cpp
     Constraints/ParallelConstraints.cpp
@@ -545,6 +552,7 @@ set(FE_CONSTRAINTS_SOURCES
     Constraints/ConstraintsIO.cpp
     Constraints/GaugeDiagnostics.cpp
     Constraints/GaugeRegistry.cpp
+    Constraints/MovingConstraintComposition.cpp
     Constraints/SystemConstraints.cpp
     Constraints/StrongDirichletConstraint.cpp
     Constraints/VertexDirichletConstraint.cpp
@@ -618,6 +626,10 @@ set(FE_ASSEMBLY_HEADERS
     Assembly/GlobalSystemView.h
     Assembly/AssemblyKernel.h
     Assembly/AssemblyContext.h
+    Assembly/ContactPairContext.h
+    Assembly/CutIntegrationContext.h
+    Assembly/InterfacePairContext.h
+    Assembly/GeometricNonlinearityHooks.h
     Assembly/JIT/KernelArgs.h
     Assembly/JIT/FieldSolutions.h
     Assembly/TimeIntegrationContext.h
@@ -687,6 +699,10 @@ endif()
 set(FE_GEOMETRY_HEADERS
     Geometry/GeometryMapping.h
     Geometry/GeometryFrameUtils.h
+    Geometry/CutQuadrature.h
+    Geometry/FrameAwareTransform.h
+    Geometry/MovingFrame.h
+    Geometry/FiniteDeformationKinematics.h
     Geometry/FrameGeometry.h
     Geometry/LinearMapping.h
     Geometry/IsoparametricMapping.h
@@ -705,6 +721,10 @@ set(FE_GEOMETRY_HEADERS
 
 set(FE_GEOMETRY_SOURCES
     Geometry/FrameGeometry.cpp
+    Geometry/CutQuadrature.cpp
+    Geometry/FrameAwareTransform.cpp
+    Geometry/MovingFrame.cpp
+    Geometry/FiniteDeformationKinematics.cpp
     Geometry/LinearMapping.cpp
     Geometry/IsoparametricMapping.cpp
     Geometry/InverseMapping.cpp
@@ -770,6 +790,8 @@ set(FE_AUXILIARY_SOURCES
 
 # Systems sources (requires FE/Assembly)
 set(FE_SYSTEMS_HEADERS
+    Systems/ContactOperatorInvalidation.h
+    Systems/CutIntegrationInvalidation.h
     Systems/ContactPenaltyKernel.h
     Systems/FEQuantityDefinition.h
     Systems/FEQuantityRegistry.h
@@ -780,15 +802,19 @@ set(FE_SYSTEMS_HEADERS
     Systems/FESystem.h
     Systems/FormsInstaller.h
     Systems/FieldRegistry.h
+    Systems/GeometricNonlinearity.h
+    Systems/GeometryTransaction.h
     Systems/GlobalKernel.h
     Systems/GlobalKernelStateProvider.h
     Systems/MaterialStateProvider.h
+    Systems/InterfaceOperators.h
     Systems/MeshSearchAccess.h
     Systems/MixedKernelPlan.h
     Systems/OperatorBackends.h
     Systems/OperatorRegistry.h
     Systems/ParameterRegistry.h
     Systems/SearchAccess.h
+    Systems/SetupStoragePlan.h
     Systems/SurfaceContactKernel.h
     Systems/SystemAssembly.h
     Systems/SystemSetup.h
@@ -799,13 +825,17 @@ set(FE_SYSTEMS_HEADERS
 )
 
 set(FE_SYSTEMS_SOURCES
+    Systems/ContactOperatorInvalidation.cpp
+    Systems/CutIntegrationInvalidation.cpp
     Systems/ContactPenaltyKernel.cpp
     Systems/FEAdaptivityTransfer.cpp
     Systems/FESystem.cpp
     Systems/FormsInstaller.cpp
     Systems/FieldRegistry.cpp
+    Systems/GeometryTransaction.cpp
     Systems/GlobalKernelStateProvider.cpp
     Systems/MaterialStateProvider.cpp
+    Systems/InterfaceOperators.cpp
     Systems/MeshSearchAccess.cpp
     Systems/OperatorBackends.cpp
     Systems/OperatorRegistry.cpp
@@ -861,6 +891,9 @@ set(FE_FORMS_HEADERS
     Forms/BoundaryFunctional.h
 	    Forms/AffineAnalysis.h
 	    Forms/FormExpr.h
+    Forms/CutCellForms.h
+    Forms/FiniteDeformationForms.h
+    Forms/MovingFrameForms.h
     Forms/MixedBlockKernelSet.h
     Forms/MonolithicCellKernel.h
     Forms/SymbolicDifferentiation.h
@@ -984,6 +1017,7 @@ set(FE_CONSTITUTIVE_HEADERS
     Constitutive/StateView.h
     Constitutive/Parameters.h
     Constitutive/GlobalLaw.h
+    Constitutive/StressTangentContract.h
 )
 
 # Sparsity pattern sources
@@ -1908,6 +1942,10 @@ if(FE_BUILD_TESTS)
     set(FE_GEOMETRY_TEST_SOURCES
         Tests/Unit/Geometry/test_LinearMapping.cpp
         Tests/Unit/Geometry/test_FrameGeometry.cpp
+        Tests/Unit/Geometry/test_CutQuadrature.cpp
+        Tests/Unit/Geometry/test_FrameAwareTransform.cpp
+        Tests/Unit/Geometry/test_MovingFrame.cpp
+        Tests/Unit/Geometry/test_FiniteDeformationKinematics.cpp
         Tests/Unit/Geometry/test_IsoparametricMapping.cpp
         Tests/Unit/Geometry/test_JacobianCacheGeometryQuadrature.cpp
         Tests/Unit/Geometry/test_MetricSurfacePushForward.cpp
@@ -2013,8 +2051,11 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Constraints/test_HangingNodeConstraint.cpp
         Tests/Unit/Constraints/test_PeriodicBC.cpp
         Tests/Unit/Constraints/test_MultiPointConstraint.cpp
+        Tests/Unit/Constraints/test_ConstraintDependency.cpp
         Tests/Unit/Constraints/test_GaugeRegistry.cpp
         Tests/Unit/Constraints/test_GlobalConstraint.cpp
+        Tests/Unit/Constraints/test_GeometricIntegralConstraint.cpp
+        Tests/Unit/Constraints/test_MovingConstraintComposition.cpp
         Tests/Unit/Constraints/test_ParallelConstraints.cpp
         Tests/Unit/Constraints/test_LagrangeMultiplier.cpp
         Tests/Unit/Constraints/test_PenaltyMethod.cpp
@@ -2156,8 +2197,11 @@ if(FE_BUILD_TESTS)
 
         # Forms module tests (depends on Assembly)
         if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Forms/test_main.cpp)
-		            set(FE_FORMS_TEST_SOURCES
+			            set(FE_FORMS_TEST_SOURCES
 			                Tests/Unit/Forms/test_FormExpr.cpp
+                            Tests/Unit/Forms/test_CutCellForms.cpp
+                            Tests/Unit/Forms/test_FiniteDeformationForms.cpp
+                            Tests/Unit/Forms/test_MovingFrameForms.cpp
 			                    Tests/Unit/Forms/test_CoupledTerminals.cpp
 			                    Tests/Unit/Forms/test_JITValidation.cpp
 			                    Tests/Unit/Forms/test_KernelIR_Lowering.cpp
@@ -2273,6 +2317,7 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Constitutive/test_MaterialStatePlumbing.cpp
                 Tests/Unit/Constitutive/test_Parameters.cpp
                 Tests/Unit/Constitutive/test_GlobalLaw.cpp
+                Tests/Unit/Constitutive/test_StressTangentContract.cpp
 	                Tests/Unit/Constitutive/test_main.cpp
 	            )
 	            add_executable(test_fe_constitutive ${FE_CONSTITUTIVE_TEST_SOURCES})
@@ -2365,20 +2410,27 @@ if(FE_BUILD_TESTS)
         # Systems module tests (Systems depends on Assembly; tests also require Mesh)
         if(FE_WITH_MESH AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Systems/test_main.cpp)
 	            set(FE_SYSTEMS_TEST_SOURCES
+		                Tests/Unit/Systems/test_ContactProximityInfrastructure.cpp
+		                Tests/Unit/Systems/test_CutIntegrationInfrastructure.cpp
 		                Tests/Unit/Systems/test_FieldRegistry.cpp
 		                Tests/Unit/Systems/test_ContactPenaltyKernel.cpp
 		                Tests/Unit/Systems/test_SurfaceContactKernel.cpp
 		                Tests/Unit/Systems/test_SearchAccess.cpp
+		                Tests/Unit/Systems/test_MultiMeshInterfaceOperators.cpp
+		                Tests/Unit/Systems/test_SlidingInterfaceOperators.cpp
 		                Tests/Unit/Systems/test_ParameterRegistry.cpp
 		                Tests/Unit/Systems/test_FieldEvaluation.cpp
 		                Tests/Unit/Systems/test_FEAdaptivityTransfer.cpp
 		                Tests/Unit/Systems/test_FEMovingMeshRestart.cpp
+		                Tests/Unit/Systems/test_GeometricNonlinearity.cpp
+		                Tests/Unit/Systems/test_MaterialStateProvider.cpp
 		                Tests/Unit/Systems/test_FESystem.cpp
 		                Tests/Unit/Systems/test_AssemblerSelection.cpp
 		                Tests/Unit/Systems/test_MultiFieldRectangularAssembly.cpp
                 Tests/Unit/Systems/test_NavierStokesCoupled.cpp
                 Tests/Unit/Systems/test_JacobianVerification.cpp
                 Tests/Unit/Systems/test_SystemConstraints.cpp
+                Tests/Unit/Systems/test_SetupStoragePlan.cpp
                 Tests/Unit/Systems/test_VectorBasisConstraints.cpp
                 Tests/Unit/Systems/test_StrongDirichletConstraint.cpp
                 Tests/Unit/Systems/test_FormsInstaller.cpp

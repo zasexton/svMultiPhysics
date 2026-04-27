@@ -20,6 +20,7 @@
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/HCurlSpace.h"
+#include "Spaces/HDivSpace.h"
 #include "Spaces/H1Space.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 #include "Tests/Unit/Forms/JITTestHelpers.h"
@@ -210,6 +211,16 @@ FormExpr spd2x2FromGradU(const FormExpr& u)
     return (2.0 * I) + outer(grad(u), grad(u));
 }
 
+[[nodiscard]] std::vector<Real> deterministicCoefficients(std::size_t n)
+{
+    std::vector<Real> coeffs(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const Real sign = (i % 2u == 0u) ? Real(1) : Real(-1);
+        coeffs[i] = sign * (Real(0.05) + Real(0.009) * static_cast<Real>(i));
+    }
+    return coeffs;
+}
+
 } // namespace
 
 TEST(JITTangentFiniteDifferences, PoissonCellTangentMatchesCentralDifferences)
@@ -260,6 +271,112 @@ TEST(JITTangentFiniteDifferences, IntrinsicVectorGradientCellTangentMatchesCentr
 
     const std::vector<Real> U = {0.12, -0.08, 0.15, -0.03, 0.21, -0.11};
     expectCellJitJacobianMatchesCentralFD(mesh, dof_map, space, residual, U, /*eps=*/2e-6, /*tol=*/2e-7);
+}
+
+TEST(JITTangentFiniteDifferences, CurvedIntrinsicVectorGradientCellTangentMatchesCentralDifferences)
+{
+    requireLLVMJITOrSkip();
+
+    CurvedSingleCellMeshAccess mesh(ElementType::Tetra10, "Tetra10-JIT-tangent");
+
+    {
+        spaces::HCurlSpace space(ElementType::Tetra4, /*order=*/0, BasisType::Nedelec);
+        auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+
+        const auto u = TrialFunction(space, "u");
+        const auto v = TestFunction(space, "v");
+        const auto residual =
+            ((FormExpr::constant(Real(0.8)) + Real(0.2) * inner(u, u)) *
+                 inner(grad(u), grad(v)) +
+             Real(0.15) * inner(sym(grad(u)), sym(grad(v)))).dx();
+
+        const std::vector<Real> U = {0.12, -0.08, 0.15, -0.03, 0.21, -0.11};
+        expectCellJitJacobianMatchesCentralFD(mesh, dof_map, space, residual, U,
+                                              /*eps=*/2e-6, /*tol=*/1e-6);
+    }
+
+    {
+        spaces::HDivSpace space(ElementType::Tetra4, /*order=*/0, BasisType::RaviartThomas);
+        auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+
+        const auto u = TrialFunction(space, "u");
+        const auto v = TestFunction(space, "v");
+        const auto residual =
+            ((FormExpr::constant(Real(0.6)) + Real(0.25) * inner(u, u)) *
+             inner(grad(u), grad(v))).dx();
+
+        const std::vector<Real> U = {0.20, -0.10, 0.05, 0.16};
+        expectCellJitJacobianMatchesCentralFD(mesh, dof_map, space, residual, U,
+                                              /*eps=*/2e-6, /*tol=*/1e-6);
+    }
+}
+
+TEST(JITTangentFiniteDifferences, CurvedHigherOrderVectorGradientCellTangentMatchesCentralDifferences)
+{
+    requireLLVMJITOrSkip();
+
+    CurvedSingleCellMeshAccess mesh(ElementType::Tetra10, "Tetra10-higher-order-JIT-tangent");
+
+    {
+        SCOPED_TRACE("RT1");
+        spaces::HDivSpace space(ElementType::Tetra4, /*order=*/1, BasisType::RaviartThomas);
+        auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+
+        const auto u = TrialFunction(space, "u");
+        const auto v = TestFunction(space, "v");
+        const auto residual =
+            ((FormExpr::constant(Real(0.7)) + Real(0.20) * inner(u, u)) *
+             inner(grad(u), grad(v))).dx();
+
+        expectCellJitJacobianMatchesCentralFD(mesh,
+                                              dof_map,
+                                              space,
+                                              residual,
+                                              deterministicCoefficients(space.dofs_per_element()),
+                                              /*eps=*/3e-6,
+                                              /*tol=*/5e-5);
+    }
+
+    {
+        SCOPED_TRACE("BDM1");
+        spaces::HDivSpace space(ElementType::Tetra4, /*order=*/1, BasisType::BDM);
+        auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+
+        const auto u = TrialFunction(space, "u");
+        const auto v = TestFunction(space, "v");
+        const auto residual =
+            ((FormExpr::constant(Real(0.65)) + Real(0.18) * inner(u, u)) *
+             inner(grad(u), grad(v))).dx();
+
+        expectCellJitJacobianMatchesCentralFD(mesh,
+                                              dof_map,
+                                              space,
+                                              residual,
+                                              deterministicCoefficients(space.dofs_per_element()),
+                                              /*eps=*/3e-6,
+                                              /*tol=*/5e-5);
+    }
+
+    {
+        SCOPED_TRACE("Nedelec1");
+        spaces::HCurlSpace space(ElementType::Tetra4, /*order=*/1, BasisType::Nedelec);
+        auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+
+        const auto u = TrialFunction(space, "u");
+        const auto v = TestFunction(space, "v");
+        const auto residual =
+            ((FormExpr::constant(Real(0.8)) + Real(0.16) * inner(u, u)) *
+                 inner(grad(u), grad(v)) +
+             Real(0.12) * inner(sym(grad(u)), sym(grad(v)))).dx();
+
+        expectCellJitJacobianMatchesCentralFD(mesh,
+                                              dof_map,
+                                              space,
+                                              residual,
+                                              deterministicCoefficients(space.dofs_per_element()),
+                                              /*eps=*/3e-6,
+                                              /*tol=*/5e-5);
+    }
 }
 
 TEST(JITTangentFiniteDifferences, NonlinearReactionCellTangentMatchesCentralDifferences)

@@ -318,6 +318,44 @@ static svmp::MeshBase make_mesh() {
   return mesh;
 }
 
+static svmp::MeshBase make_no_topology_mesh() {
+  const int dim = 3;
+  std::vector<svmp::real_t> coords = {
+      0.0, 0.0, 0.0,
+      1.0, 0.0, 0.0,
+      0.0, 1.0, 0.0,
+      0.0, 0.0, 1.0,
+  };
+  std::vector<svmp::offset_t> offsets = {0, 4};
+  std::vector<svmp::index_t> conn = {0, 1, 2, 3};
+  std::vector<svmp::CellShape> shapes = {{svmp::CellFamily::Tetra, 4, 1}};
+
+  svmp::MeshBase mesh;
+  mesh.build_from_arrays(dim, coords, offsets, conn, shapes);
+  mesh.set_vertex_gids({10, 20, 30, 40});
+  mesh.set_cell_gids({100});
+  svmp::MeshFinalizeOptions options;
+  options.codim1_storage = svmp::MeshCodim1StorageMode::None;
+  options.edge_storage = false;
+  mesh.finalize(options);
+
+  const auto v_h =
+      mesh.attach_field(svmp::EntityKind::Vertex, "vval", svmp::FieldScalarType::Float64, 1);
+  auto* v_data = mesh.field_data_as<svmp::real_t>(v_h);
+  ASSERT(v_data);
+  for (size_t i = 0; i < mesh.n_vertices(); ++i) {
+    v_data[i] = static_cast<svmp::real_t>(i + 1);
+  }
+
+  const auto c_h =
+      mesh.attach_field(svmp::EntityKind::Volume, "cval", svmp::FieldScalarType::Float64, 1);
+  auto* c_data = mesh.field_data_as<svmp::real_t>(c_h);
+  ASSERT(c_data);
+  c_data[0] = 42.0;
+
+  return mesh;
+}
+
 static void verify_descriptor(const svmp::MeshBase& mesh,
                               svmp::EntityKind kind,
                               const std::string& name,
@@ -511,6 +549,49 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < cg.size(); ++i) {
       ASSERT_NEAR(c_data[i], static_cast<svmp::real_t>(cg[i]) + 0.25, 1e-12);
     }
+  }
+
+  // Meshes distributed during memory-minimal startup may intentionally carry
+  // no codimension topology. Deserialization must preserve that storage plan
+  // instead of reconstructing full faces/edges by default.
+  buffer.clear();
+  if (rank == 0) {
+    auto mesh = svmp::test::make_no_topology_mesh();
+    svmp::test::internal::serialize_mesh_for_test(mesh, buffer);
+  }
+
+  buffer_size = static_cast<int>(buffer.size());
+  MPI_Bcast(&buffer_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+  ASSERT(buffer_size >= 0);
+  buffer.resize(static_cast<size_t>(buffer_size));
+  if (buffer_size > 0) {
+    MPI_Bcast(buffer.data(), buffer_size, MPI_CHAR, 0, MPI_COMM_WORLD);
+  }
+
+  svmp::MeshBase no_topology_roundtrip;
+  svmp::test::internal::deserialize_mesh_for_test(buffer, no_topology_roundtrip);
+  ASSERT_EQ(no_topology_roundtrip.n_vertices(), 4u);
+  ASSERT_EQ(no_topology_roundtrip.n_cells(), 1u);
+  ASSERT_EQ(no_topology_roundtrip.n_faces(), 0u);
+  ASSERT_EQ(no_topology_roundtrip.n_edges(), 0u);
+  ASSERT_EQ(no_topology_roundtrip.codim1_storage_mode(), svmp::MeshCodim1StorageMode::None);
+
+  ASSERT(no_topology_roundtrip.has_field(svmp::EntityKind::Vertex, "vval"));
+  {
+    const auto h = no_topology_roundtrip.field_handle(svmp::EntityKind::Vertex, "vval");
+    const auto* data = no_topology_roundtrip.field_data_as<const svmp::real_t>(h);
+    ASSERT(data);
+    for (size_t i = 0; i < no_topology_roundtrip.n_vertices(); ++i) {
+      ASSERT_NEAR(data[i], static_cast<svmp::real_t>(i + 1), 1e-12);
+    }
+  }
+
+  ASSERT(no_topology_roundtrip.has_field(svmp::EntityKind::Volume, "cval"));
+  {
+    const auto h = no_topology_roundtrip.field_handle(svmp::EntityKind::Volume, "cval");
+    const auto* data = no_topology_roundtrip.field_data_as<const svmp::real_t>(h);
+    ASSERT(data);
+    ASSERT_NEAR(data[0], 42.0, 1e-12);
   }
 
   if (rank == 0) {

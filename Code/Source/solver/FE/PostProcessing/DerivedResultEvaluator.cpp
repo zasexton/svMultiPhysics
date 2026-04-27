@@ -1,14 +1,21 @@
 #include "PostProcessing/DerivedResultEvaluator.h"
 
 #include "Assembly/Assembler.h"
+#include "Assembly/FunctionalAssembler.h"
 #include "Assembly/GlobalSystemView.h"
+#include "Assembly/TimeIntegrationContext.h"
 #include "Backends/Interfaces/GenericVector.h"
 #include "Basis/BasisFunction.h"
+#include "Core/AlignedAllocator.h"
+#include "Core/Alignment.h"
 #include "Core/FEException.h"
+#include "Core/Logger.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/DofMap.h"
 #include "Dofs/EntityDofMap.h"
 #include "Elements/Element.h"
+#include "Forms/BoundaryFunctional.h"
+#include "Forms/JIT/ExternalCalls.h"
 #include "Geometry/GeometryMapping.h"
 #include "Geometry/MappingFactory.h"
 #include "PostProcessing/DerivedResultOutput.h"
@@ -26,9 +33,12 @@
 #include <array>
 #include <cmath>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -413,13 +423,19 @@ struct FieldSampleData {
 }
 
 [[nodiscard]] std::unique_ptr<assembly::GlobalSystemView>
-makeSolutionView(const systems::SystemStateView& state)
+makeVectorView(const backends::GenericVector* vector)
 {
-    if (state.u_vector == nullptr) {
+    if (vector == nullptr) {
         return nullptr;
     }
-    auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
+    auto* vec = const_cast<backends::GenericVector*>(vector);
     return vec->createAssemblyView();
+}
+
+[[nodiscard]] std::unique_ptr<assembly::GlobalSystemView>
+makeSolutionView(const systems::SystemStateView& state)
+{
+    return makeVectorView(state.u_vector);
 }
 
 Real readSolutionEntry(GlobalIndex dof,
@@ -556,6 +572,292 @@ FieldSampleData sampleFieldOnCell(const systems::FESystem& system,
     }
 
     return out;
+}
+
+forms::FormExpr scalarComponentExpression(const DerivedResultDefinition& def,
+                                          std::size_t component)
+{
+    const auto components = componentCount(def.shape);
+    FE_THROW_IF(component >= components, InvalidArgumentException,
+                "Derived result '" + def.name + "' component index out of range");
+
+    if (components == 1) {
+        return def.expression;
+    }
+
+    switch (def.shape.kind) {
+    case systems::FEQuantityShapeKind::Vector:
+        return def.expression.component(static_cast<int>(component));
+    case systems::FEQuantityShapeKind::Tensor: {
+        const int dim = def.shape.spatial_dim > 0
+                            ? def.shape.spatial_dim
+                            : static_cast<int>(std::sqrt(static_cast<double>(components)));
+        FE_THROW_IF(dim <= 0 || static_cast<std::size_t>(dim * dim) != components,
+                    InvalidArgumentException,
+                    "Derived result '" + def.name + "' has invalid tensor shape");
+        return def.expression.component(static_cast<int>(component / static_cast<std::size_t>(dim)),
+                                        static_cast<int>(component % static_cast<std::size_t>(dim)));
+    }
+    case systems::FEQuantityShapeKind::Scalar:
+        break;
+    }
+
+    FE_THROW(InvalidArgumentException,
+             "Derived result '" + def.name + "' has scalar shape with multiple components");
+}
+
+forms::SymbolicOptions derivedResultCompilerOptions()
+{
+    forms::SymbolicOptions options{};
+    options.jit.enable = true;
+    return options;
+}
+
+int requiredHistoryStatesForExpression(const forms::FormExprNode& node,
+                                       const assembly::TimeIntegrationContext* time_context,
+                                       const std::string& result_name)
+{
+    int required = 0;
+
+    const auto visit = [&](const auto& self, const forms::FormExprNode& n) -> void {
+        switch (n.type()) {
+        case forms::FormExprType::PreviousSolutionRef:
+            required = std::max(required, n.historyIndex().value_or(1));
+            break;
+        case forms::FormExprType::TimeDerivative: {
+            const int order = n.timeDerivativeOrder().value_or(1);
+            FE_THROW_IF(time_context == nullptr, InvalidArgumentException,
+                        "Derived result '" + result_name +
+                            "' uses a time derivative but no time-integration context was provided");
+            const auto* stencil = time_context->stencil(order);
+            FE_THROW_IF(stencil == nullptr, InvalidArgumentException,
+                        "Derived result '" + result_name +
+                            "' uses an unavailable time-derivative stencil");
+            required = std::max(required, stencil->requiredHistoryStates());
+            break;
+        }
+        case forms::FormExprType::HistoryWeightedSum:
+        case forms::FormExprType::HistoryConvolution: {
+            const auto children = n.children();
+            required = std::max(required, static_cast<int>(children.size()));
+            break;
+        }
+        default:
+            break;
+        }
+
+        for (const auto* child : n.children()) {
+            if (child != nullptr) {
+                self(self, *child);
+            }
+        }
+    };
+
+    visit(visit, node);
+    return required;
+}
+
+int requiredHistoryStatesForDerivedResult(const DerivedResultDefinition& def,
+                                          const systems::SystemStateView& state)
+{
+    FE_CHECK_NOT_NULL(def.expression.node(),
+                      "DerivedResultEvaluator: derived expression node");
+    return requiredHistoryStatesForExpression(*def.expression.node(),
+                                              state.time_integration,
+                                              def.name);
+}
+
+std::vector<std::shared_ptr<assembly::FunctionalKernel>>
+makeCellFunctionalComponentKernels(const DerivedResultDefinition& def)
+{
+    const auto components = componentCount(def.shape);
+    std::vector<std::shared_ptr<assembly::FunctionalKernel>> kernels;
+    kernels.reserve(components);
+
+    const auto compiler_options = derivedResultCompilerOptions();
+    for (std::size_t c = 0; c < components; ++c) {
+        forms::BoundaryFunctional functional;
+        functional.name = def.name + "[" + std::to_string(c) + "]";
+        functional.integrand = scalarComponentExpression(def, c);
+        functional.is_domain_functional = true;
+        functional.reduction = forms::BoundaryFunctional::Reduction::Sum;
+        kernels.push_back(forms::compileBoundaryFunctionalKernel(functional, compiler_options));
+    }
+
+    return kernels;
+}
+
+void configureDerivedFunctionalAssembler(assembly::FunctionalAssembler& assembler,
+                                         const systems::FESystem& system,
+                                         const systems::SystemStateView& state,
+                                         FieldId primary_field,
+                                         const assembly::GlobalSystemView* solution_view,
+                                         const assembly::GlobalSystemView* prev_solution_view,
+                                         const assembly::GlobalSystemView* prev_solution2_view,
+                                         int required_history_states)
+{
+    const auto& primary_record = system.fieldRecord(primary_field);
+    FE_CHECK_NOT_NULL(primary_record.space.get(),
+                      "DerivedResultEvaluator: primary field space");
+
+    assembler.setMesh(system.meshAccess());
+    assembler.setDofMap(system.fieldDofHandler(primary_field).getDofMap());
+    assembler.setSpace(*primary_record.space);
+    assembler.setPrimaryField(primary_field);
+    assembler.setPrimaryFieldDofOffset(system.fieldDofOffset(primary_field));
+
+    if (solution_view != nullptr) {
+        assembler.setSolutionView(solution_view);
+    } else if (!state.u.empty()) {
+        assembler.setSolution(state.u);
+    }
+
+    if (required_history_states > 0) {
+        if (!state.u_history.empty()) {
+            FE_THROW_IF(static_cast<int>(state.u_history.size()) < required_history_states,
+                        InvalidArgumentException,
+                        "DerivedResultEvaluator: insufficient solution history for derived result");
+            for (int k = 1; k <= required_history_states; ++k) {
+                assembler.setPreviousSolutionK(k, state.u_history[static_cast<std::size_t>(k - 1)]);
+            }
+        } else {
+            FE_THROW_IF(required_history_states > 2, InvalidArgumentException,
+                        "DerivedResultEvaluator: derived result requires more than two history states");
+            if (required_history_states >= 1) {
+                if (prev_solution_view != nullptr) {
+                    assembler.setPreviousSolutionView(prev_solution_view);
+                } else if (!state.u_prev.empty()) {
+                    assembler.setPreviousSolution(state.u_prev);
+                }
+            }
+            if (required_history_states >= 2) {
+                if (prev_solution2_view != nullptr) {
+                    assembler.setPreviousSolution2View(prev_solution2_view);
+                } else if (!state.u_prev2.empty()) {
+                    assembler.setPreviousSolution2(state.u_prev2);
+                }
+            }
+        }
+
+        if (prev_solution_view != nullptr) {
+            assembler.setPreviousSolutionViewK(1, prev_solution_view);
+        }
+        if (required_history_states >= 2 && prev_solution2_view != nullptr) {
+            assembler.setPreviousSolutionViewK(2, prev_solution2_view);
+        }
+    }
+
+    assembler.setTimeIntegrationContext(state.time_integration);
+    assembler.setTime(static_cast<Real>(state.time));
+    assembler.setTimeStep(static_cast<Real>(state.dt));
+}
+
+void registerDerivedFunctionalFields(assembly::FunctionalAssembler& assembler,
+                                     const systems::FESystem& system,
+                                     const DerivedResultDefinition& def,
+                                     FieldId primary_field)
+{
+    std::vector<FieldId> referenced = def.referenced_fields;
+    if (referenced.empty()) {
+        referenced.push_back(primary_field);
+    }
+    std::sort(referenced.begin(), referenced.end());
+    referenced.erase(std::unique(referenced.begin(), referenced.end()), referenced.end());
+
+    for (const auto field : referenced) {
+        if (field == primary_field) {
+            continue;
+        }
+        const auto& rec = system.fieldRecord(field);
+        FE_CHECK_NOT_NULL(rec.space.get(),
+                          "DerivedResultEvaluator: referenced field space");
+        const auto& dh = system.fieldDofHandler(field);
+
+        assembly::FieldSolutionBinding binding;
+        binding.field = field;
+        binding.space = rec.space.get();
+        binding.dof_map = &dh.getDofMap();
+        binding.dof_offset = system.fieldDofOffset(field);
+        binding.field_global_size = dh.getNumDofs();
+        binding.field_type = rec.space->field_type();
+        binding.value_dimension = rec.components;
+        binding.n_components = rec.components;
+        assembler.registerFieldBinding(binding);
+    }
+}
+
+struct DerivedFunctionalRuntimeBindings {
+    std::unique_ptr<assembly::GlobalSystemView> solution_view;
+    std::unique_ptr<assembly::GlobalSystemView> prev_solution_view;
+    std::unique_ptr<assembly::GlobalSystemView> prev_solution2_view;
+    std::function<std::optional<Real>(std::string_view)> get_real_param_wrapped;
+    std::function<std::optional<params::Value>(std::string_view)> get_param_wrapped;
+    forms::jit::external::ExternalCallTableV1 jit_table{};
+    std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> jit_constants;
+};
+
+void bindDerivedFunctionalRuntime(assembly::FunctionalAssembler& assembler,
+                                  const systems::FESystem& system,
+                                  const systems::SystemStateView& state,
+                                  DerivedFunctionalRuntimeBindings& bindings)
+{
+    bindings.solution_view = makeVectorView(state.u_vector);
+    bindings.prev_solution_view = makeVectorView(state.u_prev_vector);
+    bindings.prev_solution2_view = makeVectorView(state.u_prev2_vector);
+
+    const auto& preg = system.parameterRegistry();
+    const bool have_param_contracts = !preg.specs().empty();
+    if (have_param_contracts) {
+        bindings.get_real_param_wrapped = preg.makeRealGetter(state);
+        bindings.get_param_wrapped = preg.makeParamGetter(state);
+    }
+    assembler.setRealParameterGetter(have_param_contracts
+                                         ? &bindings.get_real_param_wrapped
+                                         : (state.getRealParam ? &state.getRealParam : nullptr));
+    assembler.setParameterGetter(have_param_contracts
+                                     ? &bindings.get_param_wrapped
+                                     : (state.getParam ? &state.getParam : nullptr));
+
+    bindings.jit_table.context = state.user_data;
+    assembler.setUserData(&bindings.jit_table);
+
+    if (have_param_contracts && preg.slotCount() > 0u) {
+        const auto slots = preg.evaluateRealSlots(state);
+        bindings.jit_constants.assign(slots.begin(), slots.end());
+        assembler.setJITConstants(bindings.jit_constants);
+    } else {
+        assembler.setJITConstants({});
+    }
+    assembler.setCoupledValues({}, {});
+}
+
+void evaluateCellFunctionalResult(const systems::FESystem& system,
+                                  const systems::SystemStateView& state,
+                                  const DerivedResultDefinition& def,
+                                  FieldId primary_field,
+                                  const assembly::FunctionalAssembler::CellFunctionalVisitor& visitor)
+{
+    auto kernels = makeCellFunctionalComponentKernels(def);
+    std::vector<assembly::FunctionalKernel*> raw_kernels;
+    raw_kernels.reserve(kernels.size());
+    for (const auto& kernel : kernels) {
+        raw_kernels.push_back(kernel.get());
+    }
+
+    assembly::FunctionalAssembler assembler;
+    DerivedFunctionalRuntimeBindings bindings;
+    bindDerivedFunctionalRuntime(assembler, system, state, bindings);
+    const int required_history_states = requiredHistoryStatesForDerivedResult(def, state);
+    configureDerivedFunctionalAssembler(assembler,
+                                        system,
+                                        state,
+                                        primary_field,
+                                        bindings.solution_view.get(),
+                                        bindings.prev_solution_view.get(),
+                                        bindings.prev_solution2_view.get(),
+                                        required_history_states);
+    registerDerivedFunctionalFields(assembler, system, def, primary_field);
+    assembler.evaluateCellFunctionals(raw_kernels, visitor);
 }
 
 class ExpressionEvaluator {
@@ -941,13 +1243,163 @@ void writeValueToTuple(const EvalValue& value,
     return scaleValue(accum, Real(1) / measure);
 }
 
+[[nodiscard]] bool usesCellAverageSweep(const DerivedResultDefinition& def) noexcept
+{
+    if (!def.enabled) {
+        return false;
+    }
+    return (def.scope == DerivedResultScope::Cell &&
+            def.policy == DerivedResultPolicy::CellAverage) ||
+           (def.scope == DerivedResultScope::Vertex &&
+            def.policy == DerivedResultPolicy::PatchAverage);
+}
+
+[[nodiscard]] std::string cellAverageCacheKey(const DerivedResultDefinition& def)
+{
+    std::string key;
+    key.reserve(def.expression.toString().size() + 96u + def.referenced_fields.size() * 12u);
+    key += "expr=";
+    key += def.expression.toString();
+    key += "|shape=";
+    key += std::to_string(static_cast<int>(def.shape.kind));
+    key += ",";
+    key += std::to_string(def.shape.components);
+    key += ",";
+    key += std::to_string(def.shape.spatial_dim);
+    key += "|marker=";
+    key += def.marker ? std::to_string(*def.marker) : std::string("none");
+    key += "|fields=";
+
+    std::vector<FieldId> fields = def.referenced_fields;
+    std::sort(fields.begin(), fields.end());
+    for (const auto field : fields) {
+        key += std::to_string(field);
+        key += ",";
+    }
+    return key;
+}
+
+[[nodiscard]] std::unordered_set<std::string>
+findReusableCellAverageKeys(const systems::FESystem& system)
+{
+    std::unordered_map<std::string, std::size_t> counts;
+    for (const auto& def : system.derivedResults()) {
+        if (usesCellAverageSweep(def)) {
+            ++counts[cellAverageCacheKey(def)];
+        }
+    }
+
+    std::unordered_set<std::string> reusable;
+    for (const auto& [key, count] : counts) {
+        if (count > 1u) {
+            reusable.insert(key);
+        }
+    }
+    return reusable;
+}
+
+[[nodiscard]] FieldId primaryFieldForCellAverage(const systems::FESystem& system,
+                                                 const DerivedResultDefinition& def)
+{
+    if (!def.referenced_fields.empty()) {
+        return def.referenced_fields.front();
+    }
+    if (def.scope == DerivedResultScope::Cell && system.fieldMap().numFields() > 0) {
+        return 0;
+    }
+    FE_THROW(InvalidArgumentException,
+             "Derived result '" + def.name + "' has no field to define cell-average geometry");
+}
+
+[[nodiscard]] std::vector<double>
+computeCellAverageValues(const systems::FESystem& system,
+                         const systems::SystemStateView& state,
+                         const DerivedResultDefinition& def)
+{
+    const auto& mesh = system.meshAccess();
+    const auto components = componentCount(def.shape);
+    const auto primary_field = primaryFieldForCellAverage(system, def);
+    std::vector<double> values(static_cast<std::size_t>(mesh.numCells()) * components, 0.0);
+
+    evaluateCellFunctionalResult(
+        system,
+        state,
+        def,
+        primary_field,
+        [&](GlobalIndex cell_id, std::span<const Real> cell_values, Real cell_measure) {
+            FE_THROW_IF(cell_values.size() != components, InvalidArgumentException,
+                        "DerivedResultEvaluator: JIT component count mismatch for '" + def.name + "'");
+            FE_THROW_IF(cell_measure <= 0.0, InvalidArgumentException,
+                        "DerivedResultEvaluator: non-positive cell measure");
+            const auto offset = static_cast<std::size_t>(cell_id) * components;
+            FE_THROW_IF(offset + components > values.size(), InvalidArgumentException,
+                        "DerivedResultEvaluator: cell-average cache buffer is too small");
+            for (std::size_t c = 0; c < components; ++c) {
+                values[offset + c] = static_cast<double>(cell_values[c] / cell_measure);
+            }
+        });
+
+    return values;
+}
+
+void copyCellAverageValues(const std::vector<double>& values,
+                           std::size_t components,
+                           std::span<double> out)
+{
+    FE_THROW_IF(values.size() != out.size(), InvalidArgumentException,
+                "DerivedResultEvaluator: cached cell-average field size mismatch");
+    FE_THROW_IF(components == 0u, InvalidArgumentException,
+                "DerivedResultEvaluator: cached cell-average component count is zero");
+    std::copy(values.begin(), values.end(), out.begin());
+}
+
+void evaluateVertexPatchAverageFromCellValues(const systems::FESystem& system,
+                                              const std::vector<double>& cell_values,
+                                              std::size_t components,
+                                              std::span<double> out)
+{
+    const auto& mesh = system.meshAccess();
+    FE_THROW_IF(cell_values.size() != static_cast<std::size_t>(mesh.numCells()) * components,
+                InvalidArgumentException,
+                "DerivedResultEvaluator: cached cell-average input size mismatch");
+
+    std::fill(out.begin(), out.end(), 0.0);
+    std::vector<double> weights(static_cast<std::size_t>(mesh.numVertices()), 0.0);
+    std::vector<GlobalIndex> nodes;
+
+    mesh.forEachCell([&](GlobalIndex cell_id) {
+        nodes.clear();
+        mesh.getCellNodes(cell_id, nodes);
+        const auto cell_offset = static_cast<std::size_t>(cell_id) * components;
+        for (const auto vertex : nodes) {
+            const auto tuple = static_cast<std::size_t>(vertex);
+            const auto vertex_offset = tuple * components;
+            FE_THROW_IF(vertex_offset + components > out.size(), InvalidArgumentException,
+                        "DerivedResultEvaluator: vertex output buffer is too small");
+            for (std::size_t c = 0; c < components; ++c) {
+                out[vertex_offset + c] += cell_values[cell_offset + c];
+            }
+            weights[tuple] += 1.0;
+        }
+    });
+
+    for (std::size_t v = 0; v < weights.size(); ++v) {
+        if (weights[v] <= 0.0) {
+            continue;
+        }
+        const auto offset = v * components;
+        for (std::size_t c = 0; c < components; ++c) {
+            out[offset + c] /= weights[v];
+        }
+    }
+}
+
 void evaluateCellResult(const systems::FESystem& system,
                         const systems::SystemStateView& state,
                         const DerivedResultDefinition& def,
                         std::span<double> out)
 {
     const auto& mesh = system.meshAccess();
-    const auto view = makeSolutionView(state);
     const int dim = mesh.dimension();
     const auto components = componentCount(def.shape);
 
@@ -962,6 +1414,30 @@ void evaluateCellResult(const systems::FESystem& system,
     const auto& primary_record = system.fieldRecord(primary_field);
     FE_CHECK_NOT_NULL(primary_record.space.get(),
                       "DerivedResultEvaluator: primary field space");
+
+    if (def.policy == DerivedResultPolicy::CellAverage) {
+        evaluateCellFunctionalResult(
+            system,
+            state,
+            def,
+            primary_field,
+            [&](GlobalIndex cell_id, std::span<const Real> values, Real cell_measure) {
+                FE_THROW_IF(values.size() != components, InvalidArgumentException,
+                            "DerivedResultEvaluator: JIT component count mismatch for '" + def.name + "'");
+                FE_THROW_IF(cell_measure <= 0.0, InvalidArgumentException,
+                            "DerivedResultEvaluator: non-positive cell measure");
+                const auto tuple = static_cast<std::size_t>(cell_id);
+                const auto offset = tuple * components;
+                FE_THROW_IF(offset + components > out.size(), InvalidArgumentException,
+                            "DerivedResultEvaluator: derived output buffer is too small");
+                for (std::size_t c = 0; c < components; ++c) {
+                    out[offset + c] = static_cast<double>(values[c] / cell_measure);
+                }
+            });
+        return;
+    }
+
+    const auto view = makeSolutionView(state);
 
     mesh.forEachCell([&](GlobalIndex cell_id) {
         const auto samples = prepareCellSamples(mesh, cell_id, *primary_record.space, def.policy);
@@ -1057,8 +1533,7 @@ void evaluateVertexPatchAverageResult(const systems::FESystem& system,
     const auto& mesh = system.meshAccess();
     const auto components = componentCount(def.shape);
     std::vector<double> weights(static_cast<std::size_t>(mesh.numVertices()), 0.0);
-    const auto view = makeSolutionView(state);
-    const int dim = mesh.dimension();
+    std::fill(out.begin(), out.end(), 0.0);
 
     FieldId primary_field = INVALID_FIELD_ID;
     if (!def.referenced_fields.empty()) {
@@ -1071,34 +1546,28 @@ void evaluateVertexPatchAverageResult(const systems::FESystem& system,
     FE_CHECK_NOT_NULL(primary_record.space.get(),
                       "DerivedResultEvaluator: primary field space");
 
-    mesh.forEachCell([&](GlobalIndex cell_id) {
-        auto samples = prepareCellSamples(mesh, cell_id, *primary_record.space,
-                                          DerivedResultPolicy::CellAverage);
-        std::unordered_map<FieldId, FieldSampleData> fields;
-        for (const auto field : def.referenced_fields) {
-            fields.emplace(field, sampleFieldOnCell(system, field, cell_id, samples, state, view.get()));
-        }
-        ExpressionEvaluator evaluator(state, samples, fields, dim);
-        std::vector<EvalValue> q_values;
-        q_values.reserve(samples.xi.size());
-        for (std::size_t q = 0; q < samples.xi.size(); ++q) {
-            q_values.push_back(evaluator.eval(*def.expression.node(), q));
-        }
-        const auto cell_value = averageValues(q_values, samples.integration_weights);
-
-        std::vector<GlobalIndex> nodes;
-        mesh.getCellNodes(cell_id, nodes);
-        for (const auto vertex : nodes) {
-            const auto tuple = static_cast<std::size_t>(vertex);
-            const auto offset = tuple * components;
-            std::vector<double> tmp(components, 0.0);
-            writeValueToTuple(cell_value, 0, components, std::span<double>(tmp));
-            for (std::size_t c = 0; c < components; ++c) {
-                out[offset + c] += tmp[c];
+    std::vector<GlobalIndex> nodes;
+    evaluateCellFunctionalResult(
+        system,
+        state,
+        def,
+        primary_field,
+        [&](GlobalIndex cell_id, std::span<const Real> values, Real cell_measure) {
+            FE_THROW_IF(values.size() != components, InvalidArgumentException,
+                        "DerivedResultEvaluator: JIT component count mismatch for '" + def.name + "'");
+            FE_THROW_IF(cell_measure <= 0.0, InvalidArgumentException,
+                        "DerivedResultEvaluator: non-positive cell measure");
+            nodes.clear();
+            mesh.getCellNodes(cell_id, nodes);
+            for (const auto vertex : nodes) {
+                const auto tuple = static_cast<std::size_t>(vertex);
+                const auto offset = tuple * components;
+                for (std::size_t c = 0; c < components; ++c) {
+                    out[offset + c] += static_cast<double>(values[c] / cell_measure);
+                }
+                weights[tuple] += 1.0;
             }
-            weights[tuple] += 1.0;
-        }
-    });
+        });
 
     for (std::size_t v = 0; v < weights.size(); ++v) {
         if (weights[v] <= 0.0) {
@@ -1117,7 +1586,13 @@ DerivedResultEvaluator::DerivedResultEvaluator(const systems::FESystem& system,
                                                const systems::SystemStateView& state)
     : system_(system)
     , state_(state)
+    , reusable_cell_average_keys_(findReusableCellAverageKeys(system))
 {
+    if (!reusable_cell_average_keys_.empty()) {
+        FE_LOG_INFO("DerivedResultEvaluator: caching " +
+                    std::to_string(reusable_cell_average_keys_.size()) +
+                    " reusable cell-average derived expression(s) for this output pass");
+    }
 }
 
 void DerivedResultEvaluator::evaluateToMeshField(MeshBase& mesh,
@@ -1137,9 +1612,25 @@ void DerivedResultEvaluator::evaluateToMeshField(MeshBase& mesh,
     const auto components = componentCount(def.shape);
     const auto handle = ensureDerivedResultField(mesh, *kind, def.name, components, options.overwrite);
     auto data = derivedResultFieldData(mesh, handle, components);
+    const bool can_reuse_cell_average = usesCellAverageSweep(def);
+    const std::string cache_key = can_reuse_cell_average ? cellAverageCacheKey(def) : std::string{};
+    const bool use_cell_average_cache =
+        can_reuse_cell_average &&
+        reusable_cell_average_keys_.find(cache_key) != reusable_cell_average_keys_.end();
 
     switch (def.scope) {
     case DerivedResultScope::Cell:
+        if (def.policy == DerivedResultPolicy::CellAverage && use_cell_average_cache) {
+            auto& cache = cell_average_cache_[cache_key];
+            if (cache.values.empty()) {
+                cache.components = components;
+                cache.values = computeCellAverageValues(system_, state_, def);
+            }
+            FE_THROW_IF(cache.components != components, InvalidArgumentException,
+                        "DerivedResultEvaluator: cached cell-average component mismatch");
+            copyCellAverageValues(cache.values, cache.components, data);
+            return;
+        }
         evaluateCellResult(system_, state_, def, data);
         return;
     case DerivedResultScope::Vertex:
@@ -1148,6 +1639,17 @@ void DerivedResultEvaluator::evaluateToMeshField(MeshBase& mesh,
             return;
         }
         if (def.policy == DerivedResultPolicy::PatchAverage) {
+            if (use_cell_average_cache) {
+                auto& cache = cell_average_cache_[cache_key];
+                if (cache.values.empty()) {
+                    cache.components = components;
+                    cache.values = computeCellAverageValues(system_, state_, def);
+                }
+                FE_THROW_IF(cache.components != components, InvalidArgumentException,
+                            "DerivedResultEvaluator: cached cell-average component mismatch");
+                evaluateVertexPatchAverageFromCellValues(system_, cache.values, cache.components, data);
+                return;
+            }
             evaluateVertexPatchAverageResult(system_, state_, def, data);
             return;
         }

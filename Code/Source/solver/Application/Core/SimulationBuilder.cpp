@@ -197,6 +197,21 @@ bool applyFsilsLocalityOrderingEnv(svmp::FE::dofs::DofDistributionOptions& optio
                            std::string(env) + "'. Supported values: off, auto, morton, hilbert, rcm.");
 }
 
+std::string codim1StorageName(svmp::MeshCodim1StorageMode mode)
+{
+  switch (mode) {
+    case svmp::MeshCodim1StorageMode::None:
+      return "none";
+    case svmp::MeshCodim1StorageMode::BoundaryOnly:
+      return "boundary-only";
+    case svmp::MeshCodim1StorageMode::Full:
+      return "full";
+    case svmp::MeshCodim1StorageMode::Explicit:
+      return "explicit";
+  }
+  return "unknown";
+}
+
 svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& params,
                                                          svmp::FE::backends::BackendKind backend_kind)
 {
@@ -598,6 +613,11 @@ void SimulationBuilder::setupSystem()
   }
   if (fsils_backend) {
     setup_opts.use_backend_row_ownership_for_assembly = true;
+    if (setup_opts.dof_options.world_size > 1) {
+      setup_opts.retain_serial_sparsity = false;
+      oopCout() << "[svMultiPhysics::Application] FSILS backend: retaining distributed sparsity only in MPI"
+                << std::endl;
+    }
   }
 
   // Allow env var override for DOF numbering strategy
@@ -622,6 +642,15 @@ void SimulationBuilder::setupSystem()
   }
 
   components_.fe_system->setup(setup_opts);
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: FE storage plan "
+            << components_.fe_system->setupStoragePlan().summary() << std::endl;
+  if (components_.primary_mesh) {
+    const auto& base = components_.primary_mesh->base();
+    oopCout() << "[svMultiPhysics::Application] SimulationBuilder: mesh storage materialized codim1="
+              << codim1StorageName(base.codim1_storage_mode())
+              << " faces=" << base.n_faces()
+              << " edges=" << base.n_edges() << std::endl;
+  }
 
   // Materialize deployed auxiliary models (RCR, resistance BCs, etc.) into
   // the AuxiliaryStateManager so their output buffers are allocated and
@@ -799,14 +828,17 @@ void SimulationBuilder::createSolvers()
 
   // Prime backend layout (notably FSILS) by creating the system matrix once.
   if (backend_kind == svmp::FE::backends::BackendKind::FSILS) {
-    const auto& pat = components_.fe_system->sparsity("equations");
-    oopCout() << "[svMultiPhysics::Application] SimulationBuilder: priming FSILS matrix layout; pattern rows="
-              << pat.numRows() << " cols=" << pat.numCols() << " nnz=" << pat.getNnz() << std::endl;
     const auto* dist = components_.fe_system->distributedSparsityIfAvailable("equations");
     if (dist) {
+      oopCout() << "[svMultiPhysics::Application] SimulationBuilder: priming FSILS matrix layout; distributed rows="
+                << dist->globalRows() << " cols=" << dist->globalCols()
+                << " local_nnz=" << dist->getLocalNnz() << std::endl;
       (void)components_.backend->createMatrix(*dist);
     } else {
-      (void)components_.backend->createMatrix(components_.fe_system->sparsity("equations"));
+      const auto& pat = components_.fe_system->sparsity("equations");
+      oopCout() << "[svMultiPhysics::Application] SimulationBuilder: priming FSILS matrix layout; pattern rows="
+                << pat.numRows() << " cols=" << pat.numCols() << " nnz=" << pat.getNnz() << std::endl;
+      (void)components_.backend->createMatrix(pat);
     }
   }
 }

@@ -968,6 +968,63 @@ bool HangingVertexConstraints::validate(const MeshBase& mesh, real_t tolerance) 
   return true;
 }
 
+bool HangingVertexConstraints::validate_geometric_continuity(
+    const MeshBase& mesh,
+    Configuration configuration,
+    real_t tolerance,
+    std::string* message) const {
+  const size_t num_vertices = mesh.n_vertices();
+
+  for (const auto& [vertex_id, constraint] : constraints_) {
+    if (vertex_id < 0 || static_cast<size_t>(vertex_id) >= num_vertices) {
+      if (message) {
+        *message = "hanging constraint references a constrained vertex outside the mesh";
+      }
+      return false;
+    }
+    if (constraint.parent_vertices.size() != constraint.weights.size()) {
+      if (message) {
+        *message = "hanging constraint parent/weight size mismatch";
+      }
+      return false;
+    }
+
+    std::array<real_t, 3> interpolated{{0.0, 0.0, 0.0}};
+    for (size_t i = 0; i < constraint.parent_vertices.size(); ++i) {
+      const index_t parent = constraint.parent_vertices[i];
+      if (parent < 0 || static_cast<size_t>(parent) >= num_vertices) {
+        if (message) {
+          *message = "hanging constraint references a parent vertex outside the mesh";
+        }
+        return false;
+      }
+      const auto xp = mesh.geometry_dof_coords(parent, configuration);
+      const real_t w = constraint.weights[i];
+      interpolated[0] += w * xp[0];
+      interpolated[1] += w * xp[1];
+      interpolated[2] += w * xp[2];
+    }
+
+    const auto xh = mesh.geometry_dof_coords(vertex_id, configuration);
+    const real_t dx = xh[0] - interpolated[0];
+    const real_t dy = xh[1] - interpolated[1];
+    const real_t dz = xh[2] - interpolated[2];
+    const real_t err = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (err > tolerance) {
+      if (message) {
+        *message = "hanging constraint geometric continuity violation at vertex " +
+                   std::to_string(vertex_id) + " (error=" + std::to_string(err) + ")";
+      }
+      return false;
+    }
+  }
+
+  if (message) {
+    message->clear();
+  }
+  return true;
+}
+
 // Export constraints to fields for visualization
 void HangingVertexConstraints::export_to_fields(
     MeshBase& mesh,

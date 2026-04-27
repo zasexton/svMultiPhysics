@@ -17,6 +17,8 @@
 #include "Assembly/AssemblerSelection.h"
 #include "Assembly/MatrixFreeAssembler.h"
 
+#include "Basis/VectorBasis.h"
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #include "Assembly/MeshAccess.h"
 #include "Mesh/Core/InterfaceMesh.h"
@@ -37,6 +39,8 @@
 #include "Systems/SystemsExceptions.h"
 
 #include "Spaces/FunctionSpace.h"
+#include "Spaces/CompositeSpace.h"
+#include "Spaces/MixedSpace.h"
 #include "Spaces/MortarSpace.h"
 
 #include "Dofs/EntityDofMap.h"
@@ -109,6 +113,14 @@ namespace {
         return static_cast<char>(std::tolower(ch));
     });
     return !(value == "0" || value == "false" || value == "off" || value == "no");
+}
+
+void insertSortedUniqueIndex(std::vector<GlobalIndex>& values, GlobalIndex value)
+{
+    const auto it = std::lower_bound(values.begin(), values.end(), value);
+    if (it == values.end() || *it != value) {
+        values.insert(it, value);
+    }
 }
 
 #if FE_HAS_MPI
@@ -317,6 +329,281 @@ void hashConsistencySpan(std::uint64_t& hash, std::span<const T> values)
     return min_count == max_count && min_hash == max_hash;
 }
 #endif
+
+[[nodiscard]] const std::vector<std::vector<int>>* localBoundaryFaceVertexMap(ElementType type) noexcept
+{
+    static const std::vector<std::vector<int>> tet_faces =
+        {{1, 2, 3}, {0, 3, 2}, {0, 1, 3}, {0, 2, 1}};
+    static const std::vector<std::vector<int>> tri_faces =
+        {{0, 1}, {1, 2}, {2, 0}};
+    static const std::vector<std::vector<int>> hex_faces =
+        {{0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4},
+         {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}};
+    static const std::vector<std::vector<int>> quad_faces =
+        {{0, 1}, {1, 2}, {2, 3}, {3, 0}};
+
+    if (type == ElementType::Tetra4) return &tet_faces;
+    if (type == ElementType::Triangle3) return &tri_faces;
+    if (type == ElementType::Hex8) return &hex_faces;
+    if (type == ElementType::Quad4) return &quad_faces;
+    return nullptr;
+}
+
+[[nodiscard]] std::vector<int> boundaryMarkersFromMeshAccess(
+    const assembly::IMeshAccess& mesh)
+{
+    std::unordered_set<int> markers;
+    mesh.forEachBoundaryFace(/*marker=*/-1,
+        [&](GlobalIndex face_id, GlobalIndex /*cell_id*/) {
+            const int marker = mesh.getBoundaryFaceMarker(face_id);
+            if (marker >= 0) {
+                markers.insert(marker);
+            }
+        });
+
+    std::vector<int> result(markers.begin(), markers.end());
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
+[[nodiscard]] std::vector<GlobalIndex> boundaryDofsByMarkerFromMeshAccess(
+    const assembly::IMeshAccess& mesh,
+    const dofs::DofHandler& dof_handler,
+    int marker)
+{
+    if (!dof_handler.isFinalized()) {
+        return {};
+    }
+
+    const auto* entity_map = dof_handler.getEntityDofMap();
+    if (entity_map == nullptr) {
+        return {};
+    }
+
+    std::unordered_set<GlobalIndex> visited;
+    std::vector<GlobalIndex> dofs;
+    auto push_dof = [&](GlobalIndex dof) {
+        if (dof >= 0 && visited.insert(dof).second) {
+            dofs.push_back(dof);
+        }
+    };
+    auto push_span = [&](std::span<const GlobalIndex> span) {
+        for (const auto dof : span) {
+            push_dof(dof);
+        }
+    };
+
+    std::vector<GlobalIndex> cell_nodes;
+    mesh.forEachBoundaryFace(marker,
+        [&](GlobalIndex face_id, GlobalIndex cell_id) {
+            const auto local_face = mesh.getLocalFaceIndex(face_id, cell_id);
+            const auto* face_map = localBoundaryFaceVertexMap(mesh.getCellType(cell_id));
+            if (face_map == nullptr ||
+                static_cast<std::size_t>(local_face) >= face_map->size()) {
+                return;
+            }
+
+            cell_nodes.clear();
+            mesh.getCellNodes(cell_id, cell_nodes);
+
+            if (mesh.dimension() >= 3 &&
+                face_id >= 0 &&
+                face_id < entity_map->numFaces()) {
+                push_span(entity_map->getFaceDofs(face_id));
+            }
+
+            for (const int local_vertex : (*face_map)[static_cast<std::size_t>(local_face)]) {
+                if (local_vertex < 0 ||
+                    static_cast<std::size_t>(local_vertex) >= cell_nodes.size()) {
+                    continue;
+                }
+                push_span(entity_map->getVertexDofs(
+                    cell_nodes[static_cast<std::size_t>(local_vertex)]));
+            }
+        });
+
+    std::sort(dofs.begin(), dofs.end());
+    return dofs;
+}
+
+[[nodiscard]] int referenceVertexCount(ElementType type) noexcept
+{
+    switch (type) {
+        case ElementType::Point1: return 1;
+        case ElementType::Line2:
+        case ElementType::Line3: return 2;
+        case ElementType::Triangle3:
+        case ElementType::Triangle6: return 3;
+        case ElementType::Quad4:
+        case ElementType::Quad8:
+        case ElementType::Quad9: return 4;
+        case ElementType::Tetra4:
+        case ElementType::Tetra10: return 4;
+        case ElementType::Hex8:
+        case ElementType::Hex20:
+        case ElementType::Hex27: return 8;
+        case ElementType::Wedge6:
+        case ElementType::Wedge15:
+        case ElementType::Wedge18: return 6;
+        case ElementType::Pyramid5:
+        case ElementType::Pyramid13:
+        case ElementType::Pyramid14: return 5;
+        case ElementType::Unknown:
+        default: return 0;
+    }
+}
+
+[[nodiscard]] SetupStorageRequirements storageRequirementsForSpace(
+    const spaces::FunctionSpace& space,
+    const assembly::IMeshAccess* mesh_access = nullptr)
+{
+    if (space.space_type() == spaces::SpaceType::Mixed) {
+        const auto* mixed = dynamic_cast<const spaces::MixedSpace*>(&space);
+        FE_THROW_IF(mixed == nullptr, InvalidArgumentException,
+                    "FESystem::computeSetupStoragePlan: mixed space does not expose MixedSpace interface");
+        FE_THROW_IF(mixed->num_components() == 0u, InvalidArgumentException,
+                    "FESystem::computeSetupStoragePlan: mixed space has no component spaces");
+        SetupStorageRequirements req;
+        for (std::size_t i = 0; i < mixed->num_components(); ++i) {
+            const auto& component = mixed->component(i);
+            FE_CHECK_NOT_NULL(component.space.get(),
+                              "FESystem::computeSetupStoragePlan: mixed component space");
+            req.merge(storageRequirementsForSpace(*component.space, mesh_access));
+        }
+        return req;
+    }
+
+    if (space.space_type() == spaces::SpaceType::Composite) {
+        const auto* composite = dynamic_cast<const spaces::CompositeSpace*>(&space);
+        FE_THROW_IF(composite == nullptr, InvalidArgumentException,
+                    "FESystem::computeSetupStoragePlan: composite space does not expose CompositeSpace interface");
+        FE_THROW_IF(composite->num_regions() == 0u, InvalidArgumentException,
+                    "FESystem::computeSetupStoragePlan: composite space has no region spaces");
+        SetupStorageRequirements req;
+        for (std::size_t i = 0; i < composite->num_regions(); ++i) {
+            const auto& region = composite->region(i);
+            FE_CHECK_NOT_NULL(region.space.get(),
+                              "FESystem::computeSetupStoragePlan: composite region space");
+            req.merge(storageRequirementsForSpace(*region.space, mesh_access));
+        }
+        return req;
+    }
+
+    FE_THROW_IF(space.is_variable_order() && mesh_access == nullptr,
+                InvalidArgumentException,
+                "FESystem::computeSetupStoragePlan: variable-order storage requirements need mesh access");
+
+    SetupStorageRequirements req;
+    req.vertex_topology = true;
+    req.cell_topology = true;
+
+    const auto continuity = space.continuity();
+    if (continuity == Continuity::C0 || continuity == Continuity::C1) {
+        if (mesh_access != nullptr && mesh_access->numCells() > 0) {
+            std::vector<GlobalIndex> nodes;
+            for (GlobalIndex cell_id = 0; cell_id < mesh_access->numCells(); ++cell_id) {
+                mesh_access->getCellNodes(cell_id, nodes);
+                FE_THROW_IF(nodes.empty(), InvalidArgumentException,
+                            "FESystem::computeSetupStoragePlan: cell has no vertices");
+                const auto layout = dofs::DofLayoutInfo::Lagrange(
+                    space.polynomial_order(cell_id),
+                    mesh_access->dimension(),
+                    static_cast<int>(nodes.size()),
+                    space.value_dimension());
+                req.edge_topology = req.edge_topology || layout.dofs_per_edge > 0;
+                req.interior_face_topology = req.interior_face_topology || layout.has_face_dofs();
+            }
+        } else {
+            const int n_vertices = referenceVertexCount(space.element_type());
+            FE_THROW_IF(n_vertices <= 0, InvalidArgumentException,
+                        "FESystem::computeSetupStoragePlan: cannot infer reference vertex count for field space");
+            const auto layout = dofs::DofLayoutInfo::Lagrange(
+                space.polynomial_order(),
+                space.topological_dimension(),
+                n_vertices,
+                space.value_dimension());
+            req.edge_topology = layout.dofs_per_edge > 0;
+            req.interior_face_topology = layout.has_face_dofs();
+        }
+        return req;
+    }
+
+    if (continuity == Continuity::L2) {
+        return req;
+    }
+
+    if (continuity == Continuity::H_curl || continuity == Continuity::H_div) {
+        const auto& basis = space.element().basis();
+        FE_THROW_IF(!basis.is_vector_valued(), InvalidArgumentException,
+                    "FESystem::computeSetupStoragePlan: H(curl)/H(div) space must use a vector-valued basis");
+        const auto* vb = dynamic_cast<const basis::VectorBasisFunction*>(&basis);
+        FE_THROW_IF(vb == nullptr, InvalidArgumentException,
+                    "FESystem::computeSetupStoragePlan: vector basis does not expose DOF associations");
+
+        for (const auto& assoc : vb->dof_associations()) {
+            switch (assoc.entity_type) {
+                case basis::DofEntity::Edge:
+                    req.edge_topology = true;
+                    break;
+                case basis::DofEntity::Face:
+                    req.interior_face_topology = true;
+                    req.face_gids = true;
+                    break;
+                case basis::DofEntity::Vertex:
+                case basis::DofEntity::Interior:
+                    break;
+            }
+        }
+        return req;
+    }
+
+    FE_THROW(InvalidArgumentException,
+             "FESystem::computeSetupStoragePlan: unsupported field-space continuity for exact storage planning");
+}
+
+void mergeKernelDomainRequirements(const assembly::AssemblyKernel* kernel,
+                                   SetupStorageRequirements& req)
+{
+    if (kernel == nullptr) {
+        return;
+    }
+    if (kernel->hasBoundaryFace()) {
+        req.boundary_face_topology = true;
+    }
+    if (kernel->hasInteriorFace()) {
+        req.interior_face_topology = true;
+    }
+    if (kernel->hasSingleSidedInterfaceFace()) {
+        req.interface_face_topology = true;
+    }
+}
+
+void mergeQuantityRequirements(const FEQuantityDefinition& def,
+                               SetupStorageRequirements& req)
+{
+    switch (def.kind) {
+        case FEQuantityKind::BoundaryIntegral:
+        case FEQuantityKind::BoundaryAverage:
+            req.boundary_face_topology = true;
+            break;
+        case FEQuantityKind::BoundaryNodalSum:
+            req.boundary_face_topology = true;
+            req.entity_dof_map = true;
+            break;
+        case FEQuantityKind::SampledField:
+            req.entity_dof_map = true;
+            req.vertex_topology = true;
+            break;
+        case FEQuantityKind::DomainIntegral:
+        case FEQuantityKind::DomainAverage:
+        case FEQuantityKind::RegionIntegral:
+        case FEQuantityKind::RegionAverage:
+        case FEQuantityKind::FEExpression:
+        case FEQuantityKind::DerivedCallback:
+        default:
+            break;
+    }
+}
 
 class AffineConstraintsQuery final : public sparsity::IConstraintQuery {
 public:
@@ -1325,6 +1612,80 @@ LocalIndex maxInteriorFaceQuadraturePoints(const assembly::IMeshAccess& mesh,
 
 } // namespace
 
+SetupStoragePlan FESystem::computeSetupStoragePlan() const
+{
+    SetupStoragePlan plan;
+
+    for (const auto& rec : field_registry_.records()) {
+        FE_CHECK_NOT_NULL(rec.space.get(), "FESystem::computeSetupStoragePlan: field.space");
+        const auto* field_mesh_access =
+            (rec.scope == FieldScope::VolumeCell) ? mesh_access_.get() : nullptr;
+        auto req = storageRequirementsForSpace(*rec.space, field_mesh_access);
+        if (rec.scope == FieldScope::InterfaceFace) {
+            req.interface_face_topology = true;
+        }
+        plan.merge(req, "field:" + rec.name);
+    }
+
+    for (const auto& tag : operator_registry_.list()) {
+        const auto& def = operator_registry_.get(tag);
+
+        SetupStorageRequirements req;
+        for (const auto& term : def.cells) {
+            FE_CHECK_NOT_NULL(term.kernel.get(),
+                              "FESystem::computeSetupStoragePlan: null cell kernel");
+            mergeKernelDomainRequirements(term.kernel.get(), req);
+        }
+        for (const auto& term : def.boundary) {
+            FE_CHECK_NOT_NULL(term.kernel.get(),
+                              "FESystem::computeSetupStoragePlan: null boundary kernel");
+            req.boundary_face_topology = true;
+            mergeKernelDomainRequirements(term.kernel.get(), req);
+        }
+        for (const auto& term : def.interior) {
+            FE_CHECK_NOT_NULL(term.kernel.get(),
+                              "FESystem::computeSetupStoragePlan: null interior-face kernel");
+            req.interior_face_topology = true;
+            mergeKernelDomainRequirements(term.kernel.get(), req);
+        }
+        for (const auto& term : def.interface_faces) {
+            FE_CHECK_NOT_NULL(term.kernel.get(),
+                              "FESystem::computeSetupStoragePlan: null interface-face kernel");
+            req.interface_face_topology = true;
+            mergeKernelDomainRequirements(term.kernel.get(), req);
+        }
+        if (!def.global.empty()) {
+            req.cell_topology = true;
+        }
+        plan.merge(req, "operator:" + tag);
+    }
+
+    if (operator_backends_) {
+        plan.merge(operator_backends_->storageRequirements(), "operator_backends");
+    }
+
+    for (const auto& c : system_constraint_defs_) {
+        FE_CHECK_NOT_NULL(c.get(), "FESystem::computeSetupStoragePlan: system constraint");
+        plan.merge(c->storageRequirements(), "system_constraint");
+    }
+
+    if (fe_quantity_registry_) {
+        SetupStorageRequirements req;
+        for (const auto& def : fe_quantity_registry_->all()) {
+            mergeQuantityRequirements(def, req);
+        }
+        plan.merge(req, "fe_quantities");
+    }
+
+    const bool single_volume_field =
+        field_registry_.size() == 1u &&
+        !field_registry_.records().empty() &&
+        field_registry_.records().front().scope == FieldScope::VolumeCell;
+    plan.can_alias_single_field_dof_map = single_volume_field;
+
+    return plan;
+}
+
 void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 {
     SetupOptions opts = user_opts;
@@ -1357,6 +1718,61 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 #  if FE_HAS_MPI && defined(MESH_HAS_MPI)
         opts.dof_options.mpi_comm = mesh_->mpi_comm();
 #  endif
+    }
+#endif
+
+    last_setup_options_ = user_opts;
+    last_setup_inputs_ = inputs;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    if (!last_setup_inputs_.mesh && mesh_) {
+        last_setup_inputs_.mesh = mesh_;
+        last_setup_inputs_.coord_cfg = coord_cfg_;
+    }
+#endif
+    has_last_setup_ = true;
+
+    setup_storage_plan_ = computeSetupStoragePlan();
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    if (mesh_) {
+        opts.dof_options.topology_completion = dofs::TopologyCompletion::RequireComplete;
+        const auto& req = setup_storage_plan_.requirements;
+        auto& mesh_base = const_cast<svmp::Mesh&>(*mesh_).base();
+
+        MeshFinalizeOptions mesh_storage{};
+        mesh_storage.edge_storage = req.edge_topology;
+        if (req.interior_face_topology ||
+            (mesh_base.dim() == 2 && req.edge_topology)) {
+            mesh_storage.codim1_storage = MeshCodim1StorageMode::Full;
+        } else if (req.boundary_face_topology) {
+            mesh_storage.codim1_storage = MeshCodim1StorageMode::BoundaryOnly;
+        } else {
+            mesh_storage.codim1_storage = MeshCodim1StorageMode::None;
+        }
+
+        const bool needs_faces =
+            mesh_storage.codim1_storage != MeshCodim1StorageMode::None;
+        const bool boundary_faces_already_planned =
+            mesh_storage.codim1_storage == MeshCodim1StorageMode::BoundaryOnly &&
+            mesh_base.codim1_storage_mode() == MeshCodim1StorageMode::BoundaryOnly;
+        const bool faces_missing =
+            needs_faces && mesh_base.n_faces() == 0u && !boundary_faces_already_planned;
+        const bool needs_full_faces =
+            mesh_storage.codim1_storage == MeshCodim1StorageMode::Full;
+        FE_THROW_IF(needs_full_faces &&
+                    mesh_base.codim1_storage_mode() == MeshCodim1StorageMode::BoundaryOnly,
+                    InvalidStateException,
+                    "FESystem::setup: storage plan requires full interior-face topology, "
+                    "but the mesh currently holds boundary-only face topology");
+
+        const bool edges_missing =
+            mesh_storage.edge_storage && mesh_base.n_edges() == 0u;
+        if (faces_missing || edges_missing) {
+            if (!faces_missing) {
+                mesh_storage.codim1_storage = mesh_base.codim1_storage_mode();
+            }
+            mesh_base.finalize(mesh_storage);
+        }
     }
 #endif
 
@@ -1464,320 +1880,332 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         total_dofs += field_dof_handlers_[idx].getNumDofs();
     }
 
-    // Build a monolithic DofMap + EntityDofMap so Systems can expose a single global DofHandler.
-    const auto n_cells = meshAccess().numCells();
-    LocalIndex approx_dofs_per_cell = 0;
-    for (const auto& rec : field_registry_.records()) {
+    if (setup_storage_plan_.can_alias_single_field_dof_map) {
+        const auto& rec = field_registry_.records().front();
         const auto idx = static_cast<std::size_t>(rec.id);
-        approx_dofs_per_cell = static_cast<LocalIndex>(
-            approx_dofs_per_cell + field_dof_handlers_[idx].getDofMap().getMaxDofsPerCell());
-    }
-
-    dofs::DofMap monolithic_map(n_cells, total_dofs, approx_dofs_per_cell);
-    monolithic_map.setNumDofs(total_dofs);
-    monolithic_map.setNumLocalDofs(0);
-
-    auto append_field_cell_dofs = [&](const FieldRecord& rec,
-                                      GlobalIndex cell,
-                                      std::vector<GlobalIndex>& out) {
-        const auto idx = static_cast<std::size_t>(rec.id);
-        const auto offset = field_dof_offsets_[idx];
-
-        if (rec.scope != FieldScope::InterfaceFace) {
-            auto local = field_dof_handlers_[idx].getDofMap().getCellDofs(cell);
-            out.reserve(out.size() + local.size());
-            for (auto d : local) {
-                out.push_back(d + offset);
-            }
-            return;
-        }
-
-#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-        const auto* iface = interface_mesh_for_field(rec);
-        FE_CHECK_NOT_NULL(iface, "FESystem::setup: interface field interface mesh");
-        for (std::size_t lf = 0; lf < iface->n_faces(); ++lf) {
-            const auto local_face = static_cast<svmp::index_t>(lf);
-            const auto minus_cell = static_cast<GlobalIndex>(iface->volume_cell_minus(local_face));
-            const auto plus_cell = static_cast<GlobalIndex>(iface->volume_cell_plus(local_face));
-            if (minus_cell != cell && plus_cell != cell) {
-                continue;
-            }
-            auto mortar_local =
-                field_dof_handlers_[idx].getDofMap().getCellDofs(static_cast<GlobalIndex>(lf));
-            out.reserve(out.size() + mortar_local.size());
-            for (auto d : mortar_local) {
-                out.push_back(d + offset);
-            }
-        }
-        return;
-#else
-        FE_THROW(InvalidStateException,
-                 "FESystem::setup: interface-scoped fields require Mesh support");
-#endif
-    };
-
-    std::vector<GlobalIndex> cell_dofs;
-    for (GlobalIndex cell = 0; cell < n_cells; ++cell) {
-        cell_dofs.clear();
+        FE_THROW_IF(idx >= field_dof_handlers_.size(), InvalidStateException,
+                    "FESystem::setup: single-field alias references invalid FieldId");
+        field_dof_offsets_[idx] = 0;
+        dof_handler_ = dofs::DofHandler{};
+        dof_handler_.setReadOnlyAlias(field_dof_handlers_[idx]);
+        setup_storage_plan_.uses_single_field_alias = true;
+        bumpDofLayoutRevision();
+    } else {
+        // Build a monolithic DofMap + EntityDofMap so Systems can expose a single global DofHandler.
+        const auto n_cells = meshAccess().numCells();
+        LocalIndex approx_dofs_per_cell = 0;
         for (const auto& rec : field_registry_.records()) {
-            append_field_cell_dofs(rec, cell, cell_dofs);
-        }
-        if (!cell_dofs.empty()) {
-            std::vector<GlobalIndex> unique_dofs;
-            unique_dofs.reserve(cell_dofs.size());
-            std::unordered_set<GlobalIndex> seen;
-            seen.reserve(cell_dofs.size());
-            for (auto dof : cell_dofs) {
-                if (seen.insert(dof).second) {
-                    unique_dofs.push_back(dof);
-                }
-            }
-            monolithic_map.setCellDofs(cell, unique_dofs);
-        } else {
-            monolithic_map.setCellDofs(cell, cell_dofs);
-        }
-    }
-
-    // Merge entity-DOF maps if available (Mesh-driven workflows).
-    std::unique_ptr<dofs::EntityDofMap> merged_entity_map;
-    {
-        bool all_have_maps = true;
-        GlobalIndex max_vertices = 0;
-        GlobalIndex max_edges = 0;
-        GlobalIndex max_faces = 0;
-        GlobalIndex max_cells = 0;
-        for (const auto& rec : field_registry_.records()) {
-            if (rec.scope == FieldScope::InterfaceFace &&
-                rec.space->space_type() != spaces::SpaceType::Mortar) {
-                continue;
-            }
             const auto idx = static_cast<std::size_t>(rec.id);
-            auto* map = field_dof_handlers_[idx].getEntityDofMap();
-            if (map == nullptr) {
-                all_have_maps = false;
-                break;
-            }
-            max_vertices = std::max(max_vertices, map->numVertices());
-            max_edges = std::max(max_edges, map->numEdges());
-            max_faces = std::max(max_faces, map->numFaces());
-            max_cells = std::max(max_cells, map->numCells());
+            approx_dofs_per_cell = static_cast<LocalIndex>(
+                approx_dofs_per_cell + field_dof_handlers_[idx].getDofMap().getMaxDofsPerCell());
         }
 
-        if (all_have_maps) {
-            merged_entity_map = std::make_unique<dofs::EntityDofMap>();
-            merged_entity_map->reserve(max_vertices, max_edges, max_faces, max_cells);
+        dofs::DofMap monolithic_map(n_cells, total_dofs, approx_dofs_per_cell);
+        monolithic_map.setNumDofs(total_dofs);
+        monolithic_map.setNumLocalDofs(0);
 
-            std::vector<GlobalIndex> entity_dofs;
-
-            for (GlobalIndex v = 0; v < max_vertices; ++v) {
-                entity_dofs.clear();
-                for (const auto& rec : field_registry_.records()) {
-                    if (rec.scope == FieldScope::InterfaceFace &&
-                        rec.space->space_type() != spaces::SpaceType::Mortar) {
-                        continue;
-                    }
-                    const auto idx = static_cast<std::size_t>(rec.id);
-                    const auto offset = field_dof_offsets_[idx];
-                    const auto* emap = field_dof_handlers_[idx].getEntityDofMap();
-                    FE_CHECK_NOT_NULL(emap, "FESystem::setup: EntityDofMap");
-                    if (v >= emap->numVertices()) {
-                        continue;
-                    }
-                    auto vdofs = emap->getVertexDofs(v);
-                    entity_dofs.reserve(entity_dofs.size() + vdofs.size());
-                    for (auto d : vdofs) {
-                        entity_dofs.push_back(d + offset);
-                    }
-                }
-                merged_entity_map->setVertexDofs(v, entity_dofs);
-            }
-
-            for (GlobalIndex e = 0; e < max_edges; ++e) {
-                entity_dofs.clear();
-                for (const auto& rec : field_registry_.records()) {
-                    if (rec.scope == FieldScope::InterfaceFace &&
-                        rec.space->space_type() != spaces::SpaceType::Mortar) {
-                        continue;
-                    }
-                    const auto idx = static_cast<std::size_t>(rec.id);
-                    const auto offset = field_dof_offsets_[idx];
-                    const auto* emap = field_dof_handlers_[idx].getEntityDofMap();
-                    FE_CHECK_NOT_NULL(emap, "FESystem::setup: EntityDofMap");
-                    if (e >= emap->numEdges()) {
-                        continue;
-                    }
-                    auto edofs = emap->getEdgeDofs(e);
-                    entity_dofs.reserve(entity_dofs.size() + edofs.size());
-                    for (auto d : edofs) {
-                        entity_dofs.push_back(d + offset);
-                    }
-                }
-                merged_entity_map->setEdgeDofs(e, entity_dofs);
-            }
-
-            for (GlobalIndex f = 0; f < max_faces; ++f) {
-                entity_dofs.clear();
-                for (const auto& rec : field_registry_.records()) {
-                    if (rec.scope == FieldScope::InterfaceFace &&
-                        rec.space->space_type() != spaces::SpaceType::Mortar) {
-                        continue;
-                    }
-                    const auto idx = static_cast<std::size_t>(rec.id);
-                    const auto offset = field_dof_offsets_[idx];
-                    const auto* emap = field_dof_handlers_[idx].getEntityDofMap();
-                    FE_CHECK_NOT_NULL(emap, "FESystem::setup: EntityDofMap");
-                    if (f >= emap->numFaces()) {
-                        continue;
-                    }
-                    auto fdofs = emap->getFaceDofs(f);
-                    entity_dofs.reserve(entity_dofs.size() + fdofs.size());
-                    for (auto d : fdofs) {
-                        entity_dofs.push_back(d + offset);
-                    }
-                }
-                merged_entity_map->setFaceDofs(f, entity_dofs);
-            }
-
-            for (GlobalIndex c = 0; c < max_cells; ++c) {
-                entity_dofs.clear();
-                for (const auto& rec : field_registry_.records()) {
-                    if (rec.scope == FieldScope::InterfaceFace &&
-                        rec.space->space_type() != spaces::SpaceType::Mortar) {
-                        continue;
-                    }
-                    const auto idx = static_cast<std::size_t>(rec.id);
-                    const auto offset = field_dof_offsets_[idx];
-                    const auto* emap = field_dof_handlers_[idx].getEntityDofMap();
-                    FE_CHECK_NOT_NULL(emap, "FESystem::setup: EntityDofMap");
-                    if (c >= emap->numCells()) {
-                        continue;
-                    }
-                    auto cdofs = emap->getCellInteriorDofs(c);
-                    entity_dofs.reserve(entity_dofs.size() + cdofs.size());
-                    for (auto d : cdofs) {
-                        entity_dofs.push_back(d + offset);
-                    }
-                }
-                merged_entity_map->setCellInteriorDofs(c, entity_dofs);
-            }
-
-            merged_entity_map->buildReverseMapping();
-            merged_entity_map->finalize();
-        }
-    }
-
-    dofs::DofPartition part;
-    {
-        std::vector<dofs::IndexInterval> owned_intervals;
-        std::vector<GlobalIndex> owned_explicit;
-        std::vector<GlobalIndex> ghost_explicit;
-
-        for (const auto& rec : field_registry_.records()) {
+        auto append_field_cell_dofs = [&](const FieldRecord& rec,
+                                          GlobalIndex cell,
+                                          std::vector<GlobalIndex>& out) {
             const auto idx = static_cast<std::size_t>(rec.id);
             const auto offset = field_dof_offsets_[idx];
-            const auto& fpart = field_dof_handlers_[idx].getPartition();
 
-            if (auto range = fpart.locallyOwned().contiguousRange()) {
-                owned_intervals.push_back(dofs::IndexInterval{range->begin + offset, range->end + offset});
+            if (rec.scope != FieldScope::InterfaceFace) {
+                auto local = field_dof_handlers_[idx].getDofMap().getCellDofs(cell);
+                out.reserve(out.size() + local.size());
+                for (auto d : local) {
+                    out.push_back(d + offset);
+                }
+                return;
+            }
+
+    #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+            const auto* iface = interface_mesh_for_field(rec);
+            FE_CHECK_NOT_NULL(iface, "FESystem::setup: interface field interface mesh");
+            for (std::size_t lf = 0; lf < iface->n_faces(); ++lf) {
+                const auto local_face = static_cast<svmp::index_t>(lf);
+                const auto minus_cell = static_cast<GlobalIndex>(iface->volume_cell_minus(local_face));
+                const auto plus_cell = static_cast<GlobalIndex>(iface->volume_cell_plus(local_face));
+                if (minus_cell != cell && plus_cell != cell) {
+                    continue;
+                }
+                auto mortar_local =
+                    field_dof_handlers_[idx].getDofMap().getCellDofs(static_cast<GlobalIndex>(lf));
+                out.reserve(out.size() + mortar_local.size());
+                for (auto d : mortar_local) {
+                    out.push_back(d + offset);
+                }
+            }
+            return;
+    #else
+            FE_THROW(InvalidStateException,
+                     "FESystem::setup: interface-scoped fields require Mesh support");
+    #endif
+        };
+
+        std::vector<GlobalIndex> cell_dofs;
+        for (GlobalIndex cell = 0; cell < n_cells; ++cell) {
+            cell_dofs.clear();
+            for (const auto& rec : field_registry_.records()) {
+                append_field_cell_dofs(rec, cell, cell_dofs);
+            }
+            if (!cell_dofs.empty()) {
+                std::vector<GlobalIndex> unique_dofs;
+                unique_dofs.reserve(cell_dofs.size());
+                std::unordered_set<GlobalIndex> seen;
+                seen.reserve(cell_dofs.size());
+                for (auto dof : cell_dofs) {
+                    if (seen.insert(dof).second) {
+                        unique_dofs.push_back(dof);
+                    }
+                }
+                monolithic_map.setCellDofs(cell, unique_dofs);
             } else {
-                auto vec = fpart.locallyOwned().toVector();
-                owned_explicit.reserve(owned_explicit.size() + vec.size());
-                for (auto d : vec) {
-                    owned_explicit.push_back(d + offset);
+                monolithic_map.setCellDofs(cell, cell_dofs);
+            }
+        }
+
+        // Merge entity-DOF maps if available (Mesh-driven workflows).
+        std::unique_ptr<dofs::EntityDofMap> merged_entity_map;
+        {
+            bool all_have_maps = true;
+            GlobalIndex max_vertices = 0;
+            GlobalIndex max_edges = 0;
+            GlobalIndex max_faces = 0;
+            GlobalIndex max_cells = 0;
+            for (const auto& rec : field_registry_.records()) {
+                if (rec.scope == FieldScope::InterfaceFace &&
+                    rec.space->space_type() != spaces::SpaceType::Mortar) {
+                    continue;
+                }
+                const auto idx = static_cast<std::size_t>(rec.id);
+                auto* map = field_dof_handlers_[idx].getEntityDofMap();
+                if (map == nullptr) {
+                    all_have_maps = false;
+                    break;
+                }
+                max_vertices = std::max(max_vertices, map->numVertices());
+                max_edges = std::max(max_edges, map->numEdges());
+                max_faces = std::max(max_faces, map->numFaces());
+                max_cells = std::max(max_cells, map->numCells());
+            }
+
+            if (all_have_maps) {
+                merged_entity_map = std::make_unique<dofs::EntityDofMap>();
+                merged_entity_map->reserve(max_vertices, max_edges, max_faces, max_cells);
+
+                std::vector<GlobalIndex> entity_dofs;
+
+                for (GlobalIndex v = 0; v < max_vertices; ++v) {
+                    entity_dofs.clear();
+                    for (const auto& rec : field_registry_.records()) {
+                        if (rec.scope == FieldScope::InterfaceFace &&
+                            rec.space->space_type() != spaces::SpaceType::Mortar) {
+                            continue;
+                        }
+                        const auto idx = static_cast<std::size_t>(rec.id);
+                        const auto offset = field_dof_offsets_[idx];
+                        const auto* emap = field_dof_handlers_[idx].getEntityDofMap();
+                        FE_CHECK_NOT_NULL(emap, "FESystem::setup: EntityDofMap");
+                        if (v >= emap->numVertices()) {
+                            continue;
+                        }
+                        auto vdofs = emap->getVertexDofs(v);
+                        entity_dofs.reserve(entity_dofs.size() + vdofs.size());
+                        for (auto d : vdofs) {
+                            entity_dofs.push_back(d + offset);
+                        }
+                    }
+                    merged_entity_map->setVertexDofs(v, entity_dofs);
+                }
+
+                for (GlobalIndex e = 0; e < max_edges; ++e) {
+                    entity_dofs.clear();
+                    for (const auto& rec : field_registry_.records()) {
+                        if (rec.scope == FieldScope::InterfaceFace &&
+                            rec.space->space_type() != spaces::SpaceType::Mortar) {
+                            continue;
+                        }
+                        const auto idx = static_cast<std::size_t>(rec.id);
+                        const auto offset = field_dof_offsets_[idx];
+                        const auto* emap = field_dof_handlers_[idx].getEntityDofMap();
+                        FE_CHECK_NOT_NULL(emap, "FESystem::setup: EntityDofMap");
+                        if (e >= emap->numEdges()) {
+                            continue;
+                        }
+                        auto edofs = emap->getEdgeDofs(e);
+                        entity_dofs.reserve(entity_dofs.size() + edofs.size());
+                        for (auto d : edofs) {
+                            entity_dofs.push_back(d + offset);
+                        }
+                    }
+                    merged_entity_map->setEdgeDofs(e, entity_dofs);
+                }
+
+                for (GlobalIndex f = 0; f < max_faces; ++f) {
+                    entity_dofs.clear();
+                    for (const auto& rec : field_registry_.records()) {
+                        if (rec.scope == FieldScope::InterfaceFace &&
+                            rec.space->space_type() != spaces::SpaceType::Mortar) {
+                            continue;
+                        }
+                        const auto idx = static_cast<std::size_t>(rec.id);
+                        const auto offset = field_dof_offsets_[idx];
+                        const auto* emap = field_dof_handlers_[idx].getEntityDofMap();
+                        FE_CHECK_NOT_NULL(emap, "FESystem::setup: EntityDofMap");
+                        if (f >= emap->numFaces()) {
+                            continue;
+                        }
+                        auto fdofs = emap->getFaceDofs(f);
+                        entity_dofs.reserve(entity_dofs.size() + fdofs.size());
+                        for (auto d : fdofs) {
+                            entity_dofs.push_back(d + offset);
+                        }
+                    }
+                    merged_entity_map->setFaceDofs(f, entity_dofs);
+                }
+
+                for (GlobalIndex c = 0; c < max_cells; ++c) {
+                    entity_dofs.clear();
+                    for (const auto& rec : field_registry_.records()) {
+                        if (rec.scope == FieldScope::InterfaceFace &&
+                            rec.space->space_type() != spaces::SpaceType::Mortar) {
+                            continue;
+                        }
+                        const auto idx = static_cast<std::size_t>(rec.id);
+                        const auto offset = field_dof_offsets_[idx];
+                        const auto* emap = field_dof_handlers_[idx].getEntityDofMap();
+                        FE_CHECK_NOT_NULL(emap, "FESystem::setup: EntityDofMap");
+                        if (c >= emap->numCells()) {
+                            continue;
+                        }
+                        auto cdofs = emap->getCellInteriorDofs(c);
+                        entity_dofs.reserve(entity_dofs.size() + cdofs.size());
+                        for (auto d : cdofs) {
+                            entity_dofs.push_back(d + offset);
+                        }
+                    }
+                    merged_entity_map->setCellInteriorDofs(c, entity_dofs);
+                }
+
+                merged_entity_map->buildReverseMapping();
+                merged_entity_map->finalize();
+            }
+        }
+
+        dofs::DofPartition part;
+        {
+            std::vector<dofs::IndexInterval> owned_intervals;
+            std::vector<GlobalIndex> owned_explicit;
+            std::vector<GlobalIndex> ghost_explicit;
+
+            for (const auto& rec : field_registry_.records()) {
+                const auto idx = static_cast<std::size_t>(rec.id);
+                const auto offset = field_dof_offsets_[idx];
+                const auto& fpart = field_dof_handlers_[idx].getPartition();
+
+                if (auto range = fpart.locallyOwned().contiguousRange()) {
+                    owned_intervals.push_back(dofs::IndexInterval{range->begin + offset, range->end + offset});
+                } else {
+                    auto vec = fpart.locallyOwned().toVector();
+                    owned_explicit.reserve(owned_explicit.size() + vec.size());
+                    for (auto d : vec) {
+                        owned_explicit.push_back(d + offset);
+                    }
+                }
+
+                auto ghosts = fpart.ghost().toVector();
+                ghost_explicit.reserve(ghost_explicit.size() + ghosts.size());
+                for (auto d : ghosts) {
+                    ghost_explicit.push_back(d + offset);
                 }
             }
 
-            auto ghosts = fpart.ghost().toVector();
-            ghost_explicit.reserve(ghost_explicit.size() + ghosts.size());
-            for (auto d : ghosts) {
-                ghost_explicit.push_back(d + offset);
+            dofs::IndexSet owned;
+            if (!owned_intervals.empty()) {
+                owned = dofs::IndexSet(std::move(owned_intervals));
             }
+            if (!owned_explicit.empty()) {
+                owned = owned.unionWith(dofs::IndexSet(std::move(owned_explicit)));
+            }
+
+            dofs::IndexSet ghost;
+            if (!ghost_explicit.empty()) {
+                ghost = dofs::IndexSet(std::move(ghost_explicit));
+            }
+
+            part = dofs::DofPartition(std::move(owned), std::move(ghost));
+            part.setGlobalSize(total_dofs);
         }
 
-        dofs::IndexSet owned;
-        if (!owned_intervals.empty()) {
-            owned = dofs::IndexSet(std::move(owned_intervals));
+        monolithic_map.setNumLocalDofs(part.localOwnedSize());
+
+        // Systems assembly relies on DOF ownership queries for both OwnedRowsOnly and ReverseScatter
+        // ghost policies. The monolithic DofMap is built by offsetting per-field DOF indices, so we
+        // re-expose ownership by forwarding to each field's DofMap ownership function.
+        monolithic_map.setMyRank(opts.dof_options.my_rank);
+        {
+            std::vector<GlobalIndex> offsets;
+            std::vector<GlobalIndex> sizes;
+            std::vector<const dofs::DofMap*> maps;
+            offsets.reserve(field_registry_.size());
+            sizes.reserve(field_registry_.size());
+            maps.reserve(field_registry_.size());
+
+            for (const auto& rec : field_registry_.records()) {
+                const auto idx = static_cast<std::size_t>(rec.id);
+                offsets.push_back(field_dof_offsets_[idx]);
+                sizes.push_back(field_dof_handlers_[idx].getNumDofs());
+                maps.push_back(&field_dof_handlers_[idx].getDofMap());
+            }
+
+            monolithic_map.setDofOwnership(
+                [offsets = std::move(offsets),
+                 sizes = std::move(sizes),
+                 maps = std::move(maps)](GlobalIndex global_dof) -> int {
+                    if (global_dof < 0 || offsets.empty()) {
+                        return 0;
+                    }
+
+                    const auto it = std::upper_bound(offsets.begin(), offsets.end(), global_dof);
+                    const std::size_t block =
+                        (it == offsets.begin()) ? 0u : static_cast<std::size_t>(std::distance(offsets.begin(), it) - 1);
+                    if (block >= offsets.size() || block >= sizes.size() || block >= maps.size()) {
+                        return 0;
+                    }
+
+                    const GlobalIndex local = global_dof - offsets[block];
+                    if (local < 0 || local >= sizes[block]) {
+                        return 0;
+                    }
+
+                    const auto* map = maps[block];
+                    if (!map) {
+                        return 0;
+                    }
+                    return map->getDofOwner(local);
+                });
         }
-        if (!owned_explicit.empty()) {
-            owned = owned.unionWith(dofs::IndexSet(std::move(owned_explicit)));
+
+        dof_handler_ = dofs::DofHandler{};
+        dof_handler_.setDofMap(std::move(monolithic_map));
+        dof_handler_.setPartition(std::move(part));
+        dof_handler_.setRankInfo(opts.dof_options.my_rank, opts.dof_options.world_size);
+        if (merged_entity_map) {
+            dof_handler_.setEntityDofMap(std::move(merged_entity_map));
         }
-
-        dofs::IndexSet ghost;
-        if (!ghost_explicit.empty()) {
-            ghost = dofs::IndexSet(std::move(ghost_explicit));
-        }
-
-        part = dofs::DofPartition(std::move(owned), std::move(ghost));
-        part.setGlobalSize(total_dofs);
-    }
-
-    monolithic_map.setNumLocalDofs(part.localOwnedSize());
-
-    // Systems assembly relies on DOF ownership queries for both OwnedRowsOnly and ReverseScatter
-    // ghost policies. The monolithic DofMap is built by offsetting per-field DOF indices, so we
-    // re-expose ownership by forwarding to each field's DofMap ownership function.
-    monolithic_map.setMyRank(opts.dof_options.my_rank);
-    {
-        std::vector<GlobalIndex> offsets;
-        std::vector<GlobalIndex> sizes;
-        std::vector<const dofs::DofMap*> maps;
-        offsets.reserve(field_registry_.size());
-        sizes.reserve(field_registry_.size());
-        maps.reserve(field_registry_.size());
-
+        // Preserve per-cell orientation metadata (H(curl)/H(div)) by copying it from any field handler
+        // that computed it during DOF distribution.
         for (const auto& rec : field_registry_.records()) {
             const auto idx = static_cast<std::size_t>(rec.id);
-            offsets.push_back(field_dof_offsets_[idx]);
-            sizes.push_back(field_dof_handlers_[idx].getNumDofs());
-            maps.push_back(&field_dof_handlers_[idx].getDofMap());
+            if (idx < field_dof_handlers_.size() && field_dof_handlers_[idx].hasCellOrientations()) {
+                dof_handler_.copyCellOrientationsFrom(field_dof_handlers_[idx]);
+                break;
+            }
         }
-
-        monolithic_map.setDofOwnership(
-            [offsets = std::move(offsets),
-             sizes = std::move(sizes),
-             maps = std::move(maps)](GlobalIndex global_dof) -> int {
-                if (global_dof < 0 || offsets.empty()) {
-                    return 0;
-                }
-
-                const auto it = std::upper_bound(offsets.begin(), offsets.end(), global_dof);
-                const std::size_t block =
-                    (it == offsets.begin()) ? 0u : static_cast<std::size_t>(std::distance(offsets.begin(), it) - 1);
-                if (block >= offsets.size() || block >= sizes.size() || block >= maps.size()) {
-                    return 0;
-                }
-
-                const GlobalIndex local = global_dof - offsets[block];
-                if (local < 0 || local >= sizes[block]) {
-                    return 0;
-                }
-
-                const auto* map = maps[block];
-                if (!map) {
-                    return 0;
-                }
-                return map->getDofOwner(local);
-            });
+        dof_handler_.finalize();
+        bumpDofLayoutRevision();
     }
-
-    dof_handler_ = dofs::DofHandler{};
-    dof_handler_.setDofMap(std::move(monolithic_map));
-    dof_handler_.setPartition(std::move(part));
-    dof_handler_.setRankInfo(opts.dof_options.my_rank, opts.dof_options.world_size);
-    if (merged_entity_map) {
-        dof_handler_.setEntityDofMap(std::move(merged_entity_map));
-    }
-    // Preserve per-cell orientation metadata (H(curl)/H(div)) by copying it from any field handler
-    // that computed it during DOF distribution.
-    for (const auto& rec : field_registry_.records()) {
-        const auto idx = static_cast<std::size_t>(rec.id);
-        if (idx < field_dof_handlers_.size() && field_dof_handlers_[idx].hasCellOrientations()) {
-            dof_handler_.copyCellOrientationsFrom(field_dof_handlers_[idx]);
-            break;
-        }
-    }
-    dof_handler_.finalize();
-    bumpDofLayoutRevision();
 
     // ---------------------------------------------------------------------
     // Field/block metadata (monolithic across fields)
@@ -2191,8 +2619,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         // anchor P.  Currently periodic markers are not excluded; a future
         // refinement could detect periodic constraints and skip those markers.
         // -----------------------------------------------------------------
-#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-        if (mesh_) {
+        if (mesh_access_) {
             // Step 1: Collect nullspace candidate fields and their families.
             std::unordered_map<FieldId, gauge::NullspaceModeFamily> candidate_fields;
             for (const auto& c : gauge_registry_->candidates()) {
@@ -2254,24 +2681,8 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                     // is a global property of the problem. Resolving this per-rank
                     // leads to inconsistent pressure-gauge decisions when only a
                     // subset of ranks owns the outlet/inlet faces.
-                    std::unordered_set<int> local_markers;
-                    meshAccess().forEachBoundaryFace(/*marker=*/-1,
-                        [&](GlobalIndex /*face_id*/, GlobalIndex /*cell_id*/) {});
-                    // Use face_boundary_ids to collect markers efficiently.
-                    {
-                        const auto& face_labels = mesh_->local_mesh().face_boundary_ids();
-                        const auto& f2c = mesh_->local_mesh().face2cell();
-                        for (std::size_t f = 0; f < f2c.size(); ++f) {
-                            const bool c0 = (f2c[f][0] != svmp::INVALID_INDEX);
-                            const bool c1 = (f2c[f][1] != svmp::INVALID_INDEX);
-                            if (c0 != c1 && f < face_labels.size()) {
-                                const int m = static_cast<int>(face_labels[f]);
-                                if (m >= 0) local_markers.insert(m);
-                            }
-                        }
-                    }
-
-                    std::vector<int> all_markers(local_markers.begin(), local_markers.end());
+                    std::vector<int> all_markers =
+                        boundaryMarkersFromMeshAccess(meshAccess());
 #if FE_HAS_MPI
                     {
                         int mpi_initialized = 0;
@@ -2292,7 +2703,17 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 
                         for (const int marker : all_markers) {
                             // Get all DOFs on this marker (combined DOF numbering).
-                            auto marker_dofs = constraints::boundaryDofsByMarker(*mesh_, dof_handler_, marker);
+                            std::vector<GlobalIndex> marker_dofs;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+                            if (mesh_) {
+                                marker_dofs =
+                                    constraints::boundaryDofsByMarker(*mesh_, dof_handler_, marker);
+                            } else
+#endif
+                            {
+                                marker_dofs = boundaryDofsByMarkerFromMeshAccess(
+                                    meshAccess(), dof_handler_, marker);
+                            }
 
                             // Filter to DOFs belonging to field V.
                             bool has_unconstrained_v_dof = false;
@@ -2362,7 +2783,6 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                     return it->second;
                 });
         }
-#endif // SVMP_FE_WITH_MESH
 
         // Build CoordinateProvider: DOF → physical coordinates.
         // Maps a DOF to its owning vertex via EntityDofMap, then to coordinates.
@@ -2574,6 +2994,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 
     affine_constraints_.close();
     bumpConstraintLayoutRevision();
+    constraint_revision_snapshot_ = captureConstraintRevisionSnapshot();
 
     // ---------------------------------------------------------------------
     // Analysis subsystem: topology + constraint summary
@@ -2656,8 +3077,15 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     const auto& relevant_set = partition.locallyRelevant();
 
     for (const auto& tag : op_tags) {
-        auto pattern = std::make_unique<sparsity::SparsityPattern>(
-            n_total_dofs, n_total_dofs);
+        const auto& def = operator_registry_.get(tag);
+        const bool build_serial_pattern =
+            opts.retain_serial_sparsity || dist_mode == DistSparsityMode::None || !def.global.empty();
+
+        std::unique_ptr<sparsity::SparsityPattern> pattern;
+        if (build_serial_pattern) {
+            pattern = std::make_unique<sparsity::SparsityPattern>(
+                n_total_dofs, n_total_dofs);
+        }
 
         std::unique_ptr<sparsity::DistributedSparsityPattern> dist_pattern;
         std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> ghost_row_cols;
@@ -2670,23 +3098,11 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         }
 
 #if FE_HAS_MPI
-        struct RemotePatternPair {
-            GlobalIndex row{-1};
-            GlobalIndex col{-1};
-
-            bool operator<(const RemotePatternPair& other) const noexcept
-            {
-                if (row != other.row) {
-                    return row < other.row;
-                }
-                return col < other.col;
-            }
-        };
-
         int pattern_rank = opts.dof_options.my_rank;
         int pattern_size = opts.dof_options.world_size;
         bool remote_pattern_exchange_enabled = false;
-        std::vector<std::vector<RemotePatternPair>> remote_pattern_by_rank;
+        using RemotePatternRows = std::unordered_map<GlobalIndex, std::vector<GlobalIndex>>;
+        std::vector<RemotePatternRows> remote_pattern_by_rank;
         if (dist_pattern) {
             int mpi_initialized_pattern = 0;
             MPI_Initialized(&mpi_initialized_pattern);
@@ -2716,7 +3132,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 }
                 return;
             }
-            remote_pattern_by_rank[static_cast<std::size_t>(owner_rank)].push_back({row, col});
+            auto& cols_for_row =
+                remote_pattern_by_rank[static_cast<std::size_t>(owner_rank)][row];
+            insertSortedUniqueIndex(cols_for_row, col);
         };
 
         auto flush_remote_pattern_entries = [&]() {
@@ -2724,26 +3142,25 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 return;
             }
 
-            for (auto& entries : remote_pattern_by_rank) {
-                std::sort(entries.begin(), entries.end());
-                entries.erase(std::unique(entries.begin(),
-                                          entries.end(),
-                                          [](const RemotePatternPair& a, const RemotePatternPair& b) {
-                                              return a.row == b.row && a.col == b.col;
-                                          }),
-                              entries.end());
-            }
-
             std::vector<int> send_counts(static_cast<std::size_t>(pattern_size), 0);
             std::vector<int> recv_counts(static_cast<std::size_t>(pattern_size), 0);
             std::vector<int> send_displs(static_cast<std::size_t>(pattern_size), 0);
             std::vector<int> recv_displs(static_cast<std::size_t>(pattern_size), 0);
+            std::vector<std::vector<GlobalIndex>> sorted_remote_rows(static_cast<std::size_t>(pattern_size));
 
             int total_send = 0;
             for (int r = 0; r < pattern_size; ++r) {
+                const auto& rows = remote_pattern_by_rank[static_cast<std::size_t>(r)];
+                auto& sorted_rows = sorted_remote_rows[static_cast<std::size_t>(r)];
+                sorted_rows.reserve(rows.size());
+                int n_values = 0;
+                for (const auto& [row, cols] : rows) {
+                    sorted_rows.push_back(row);
+                    n_values += static_cast<int>(cols.size() * 2u);
+                }
+                std::sort(sorted_rows.begin(), sorted_rows.end());
+
                 send_displs[static_cast<std::size_t>(r)] = total_send;
-                const auto n_values =
-                    static_cast<int>(remote_pattern_by_rank[static_cast<std::size_t>(r)].size() * 2u);
                 send_counts[static_cast<std::size_t>(r)] = n_values;
                 total_send += n_values;
             }
@@ -2751,9 +3168,16 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             std::vector<GlobalIndex> send_data(static_cast<std::size_t>(total_send));
             for (int r = 0; r < pattern_size; ++r) {
                 auto offset = send_displs[static_cast<std::size_t>(r)];
-                for (const auto& entry : remote_pattern_by_rank[static_cast<std::size_t>(r)]) {
-                    send_data[static_cast<std::size_t>(offset++)] = entry.row;
-                    send_data[static_cast<std::size_t>(offset++)] = entry.col;
+                const auto& rows = remote_pattern_by_rank[static_cast<std::size_t>(r)];
+                for (const auto row : sorted_remote_rows[static_cast<std::size_t>(r)]) {
+                    const auto it = rows.find(row);
+                    if (it == rows.end()) {
+                        continue;
+                    }
+                    for (const auto col : it->second) {
+                        send_data[static_cast<std::size_t>(offset++)] = row;
+                        send_data[static_cast<std::size_t>(offset++)] = col;
+                    }
                 }
             }
 
@@ -2781,13 +3205,14 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                     dist_pattern->addEntry(row, col);
                 }
             }
+            for (auto& rows : remote_pattern_by_rank) {
+                rows.clear();
+            }
         };
 #else
         auto queue_remote_pattern_entry = [](int, GlobalIndex, GlobalIndex) {};
         auto flush_remote_pattern_entries = []() {};
 #endif
-
-		        const auto& def = operator_registry_.get(tag);
 
 		        std::vector<std::pair<FieldId, FieldId>> cell_pairs;
 		        std::vector<std::tuple<int, FieldId, FieldId>> boundary_pairs;
@@ -2897,24 +3322,24 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 		        std::vector<GlobalIndex> row_dofs;
 		        std::vector<GlobalIndex> col_dofs;
 
-			        auto add_element_couplings = [&](std::span<const GlobalIndex> rows,
-			                                         std::span<const GlobalIndex> cols) {
-			            pattern->addElementCouplings(rows, cols);
-			            if (!dist_pattern) {
-			                return;
+				        auto add_element_couplings = [&](std::span<const GlobalIndex> rows,
+				                                         std::span<const GlobalIndex> cols) {
+				            if (pattern) {
+				                pattern->addElementCouplings(rows, cols);
+				            }
+				            if (!dist_pattern) {
+				                return;
 			            }
 
-			            if (dist_mode == DistSparsityMode::ContiguousRange) {
-			                for (const auto global_row : rows) {
-			                    if (owned_range.contains(global_row)) {
-			                        for (const auto global_col : cols) {
-			                            dist_pattern->addEntry(global_row, global_col);
-			                        }
-			                        continue;
-			                    }
+				            if (dist_mode == DistSparsityMode::ContiguousRange) {
+				                for (const auto global_row : rows) {
+				                    if (owned_range.contains(global_row)) {
+				                        dist_pattern->addEntries(global_row, cols);
+				                        continue;
+				                    }
 
-			                    const int owner = dof_handler_.getDofMap().getDofOwner(global_row);
-			                    for (const auto global_col : cols) {
+				                    const int owner = dof_handler_.getDofMap().getDofOwner(global_row);
+				                    for (const auto global_col : cols) {
 			                        queue_remote_pattern_entry(owner, global_row, global_col);
 			                    }
 
@@ -2922,66 +3347,60 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 			                        continue;
 			                    }
 
-			                    auto& cols_for_row = ghost_row_cols[global_row];
-			                    for (const auto global_col : cols) {
-			                        if (relevant_set.contains(global_col)) {
-			                            cols_for_row.push_back(global_col);
-			                        }
-			                    }
-			                }
-			                return;
-			            }
+				                    auto& cols_for_row = ghost_row_cols[global_row];
+				                    for (const auto global_col : cols) {
+				                        if (relevant_set.contains(global_col)) {
+				                            insertSortedUniqueIndex(cols_for_row, global_col);
+				                        }
+				                    }
+				                }
+				                return;
+				            }
 
 			            FE_THROW_IF(dist_mode != DistSparsityMode::NodalInterleaved || !nodal_map.has_value(),
 			                        InvalidStateException,
 			                        "FESystem::setup: missing nodal interleaved mapping for distributed sparsity build");
 
-			            const auto& nodal = *nodal_map;
-			            const int dof = nodal.dof_per_node;
+				            const auto& nodal = *nodal_map;
+				            const int dof = nodal.dof_per_node;
+				            std::vector<GlobalIndex> cols_fs;
+				            cols_fs.reserve(cols.size());
+				            for (const auto global_col_fe : cols) {
+				                const auto global_col_fs = nodal.mapFeToFs(global_col_fe);
+				                if (global_col_fs != INVALID_GLOBAL_INDEX) {
+				                    insertSortedUniqueIndex(cols_fs, global_col_fs);
+				                }
+				            }
 
-			            for (const auto global_row_fe : rows) {
-			                const auto global_row_fs = nodal.mapFeToFs(global_row_fe);
-			                if (global_row_fs == INVALID_GLOBAL_INDEX) {
-			                    continue;
-			                }
+				            for (const auto global_row_fe : rows) {
+				                const auto global_row_fs = nodal.mapFeToFs(global_row_fe);
+				                if (global_row_fs == INVALID_GLOBAL_INDEX) {
+				                    continue;
+				                }
 
-			                if (owned_range.contains(global_row_fs)) {
-			                    for (const auto global_col_fe : cols) {
-			                        const auto global_col_fs = nodal.mapFeToFs(global_col_fe);
-			                        if (global_col_fs == INVALID_GLOBAL_INDEX) {
-			                            continue;
-			                        }
-			                        dist_pattern->addEntry(global_row_fs, global_col_fs);
-			                    }
-			                    continue;
-			                }
+				                if (owned_range.contains(global_row_fs)) {
+				                    dist_pattern->addEntries(global_row_fs, cols_fs);
+				                    continue;
+				                }
 
-			                const int owner = nodal.ownerRankForDof(global_row_fs);
-			                for (const auto global_col_fe : cols) {
-			                    const auto global_col_fs = nodal.mapFeToFs(global_col_fe);
-			                    if (global_col_fs == INVALID_GLOBAL_INDEX) {
-			                        continue;
-			                    }
-			                    queue_remote_pattern_entry(owner, global_row_fs, global_col_fs);
-			                }
+				                const int owner = nodal.ownerRankForDof(global_row_fs);
+				                for (const auto global_col_fs : cols_fs) {
+				                    queue_remote_pattern_entry(owner, global_row_fs, global_col_fs);
+				                }
 
 			                const int node = static_cast<int>(global_row_fs / dof);
-			                if (!nodal.isGhostNode(node)) {
+			                if (node < 0 || static_cast<GlobalIndex>(node) >= nodal.n_nodes) {
 			                    continue;
 			                }
 
-			                auto& cols_for_row = ghost_row_cols[global_row_fs];
-			                for (const auto global_col_fe : cols) {
-			                    const auto global_col_fs = nodal.mapFeToFs(global_col_fe);
-			                    if (global_col_fs == INVALID_GLOBAL_INDEX) {
-			                        continue;
-			                    }
-			                    if (nodal.isRelevantDof(global_col_fs)) {
-			                        cols_for_row.push_back(global_col_fs);
-			                    }
-			                }
-			            }
-			        };
+				                auto& cols_for_row = ghost_row_cols[global_row_fs];
+				                for (const auto global_col_fs : cols_fs) {
+				                    if (nodal.isRelevantDof(global_col_fs)) {
+				                        insertSortedUniqueIndex(cols_for_row, global_col_fs);
+				                    }
+				                }
+				            }
+				        };
 
 		        auto add_cell_couplings = [&](GlobalIndex cell_id,
 		                                      const dofs::DofMap& row_map,
@@ -3019,10 +3438,17 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 	            const auto row_offset = field_dof_offsets_[test_idx];
 	            const auto col_offset = field_dof_offsets_[trial_idx];
 
-	            for (GlobalIndex cell = 0; cell < n_cells_sparsity; ++cell) {
-	                add_cell_couplings(cell, row_map, col_map, row_offset, col_offset);
-	            }
-	        }
+		            auto add_sparse_cell = [&](GlobalIndex cell) {
+		                add_cell_couplings(cell, row_map, col_map, row_offset, col_offset);
+		            };
+		            if (dist_pattern) {
+		                meshAccess().forEachOwnedCell(add_sparse_cell);
+		            } else {
+		                for (GlobalIndex cell = 0; cell < n_cells_sparsity; ++cell) {
+		                    add_sparse_cell(cell);
+		                }
+		            }
+		        }
 
 	        // Boundary terms: only cells adjacent to the requested marker participate.
 	        std::vector<GlobalIndex> marker_cells;
@@ -3227,16 +3653,17 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 	        // Global terms: allow kernels to conservatively augment sparsity.
 	        for (const auto& kernel : def.global) {
 	            if (kernel) {
+	                FE_CHECK_NOT_NULL(pattern.get(), "FESystem::setup: serial sparsity pattern for global kernel");
 	                kernel->addSparsityCouplings(*this, *pattern);
 	            }
         }
 
         flush_remote_pattern_entries();
 
-		        if (opts.sparsity_options.ensure_diagonal) {
+		        if (pattern && opts.sparsity_options.ensure_diagonal) {
 		            pattern->ensureDiagonal();
 		        }
-	        if (opts.sparsity_options.ensure_non_empty_rows) {
+	        if (pattern && opts.sparsity_options.ensure_non_empty_rows) {
 	            pattern->ensureNonEmptyRows();
 	        }
 	        if (dist_pattern) {
@@ -3249,9 +3676,11 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 	        }
 	
 		        if (opts.use_constraints_in_assembly && !affine_constraints_.empty()) {
-		            auto query = std::make_shared<AffineConstraintsQuery>(affine_constraints_);
-		            sparsity::ConstraintSparsityAugmenter augmenter(std::move(query));
-		            augmenter.augment(*pattern, sparsity::AugmentationMode::EliminationFill);
+		            if (pattern) {
+		                auto query = std::make_shared<AffineConstraintsQuery>(affine_constraints_);
+		                sparsity::ConstraintSparsityAugmenter augmenter(std::move(query));
+		                augmenter.augment(*pattern, sparsity::AugmentationMode::EliminationFill);
+		            }
 		            if (dist_pattern) {
 		                if (dist_mode == DistSparsityMode::NodalInterleaved) {
 		                    FE_THROW_IF(!nodal_map.has_value(), InvalidStateException,
@@ -3263,15 +3692,17 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 		                    sparsity::ConstraintSparsityAugmenter dist_augmenter(std::move(dist_query));
 		                    dist_augmenter.augment(*dist_pattern, sparsity::AugmentationMode::EliminationFill);
 		                } else {
-		                    augmenter.augment(*dist_pattern, sparsity::AugmentationMode::EliminationFill);
+		                    auto dist_query = std::make_shared<AffineConstraintsQuery>(affine_constraints_);
+		                    sparsity::ConstraintSparsityAugmenter dist_augmenter(std::move(dist_query));
+		                    dist_augmenter.augment(*dist_pattern, sparsity::AugmentationMode::EliminationFill);
 		                }
 		            }
 		        }
 	
-	        if (opts.sparsity_options.ensure_diagonal) {
+	        if (pattern && opts.sparsity_options.ensure_diagonal) {
 	            pattern->ensureDiagonal();
 	        }
-	        if (opts.sparsity_options.ensure_non_empty_rows) {
+	        if (pattern && opts.sparsity_options.ensure_non_empty_rows) {
 	            pattern->ensureNonEmptyRows();
 	        }
 	        if (dist_pattern) {
@@ -3283,9 +3714,14 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 	            }
 	        }
 	
-		        pattern->finalize();
-		        const auto* full_pattern = pattern.get();
-		        sparsity_by_op_.emplace(tag, std::move(pattern));
+		        if (pattern) {
+		            pattern->finalize();
+		            sparsity_by_op_.emplace(tag, std::move(pattern));
+		        }
+		        const auto* full_pattern = [&]() -> const sparsity::SparsityPattern* {
+		            auto it = sparsity_by_op_.find(tag);
+		            return (it != sparsity_by_op_.end() && it->second) ? it->second.get() : nullptr;
+		        }();
 
 		        if (dist_pattern) {
 		            dist_pattern->finalize();
@@ -3372,6 +3808,15 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 			                                    }
 			                                }
 			                            }
+			                        } else {
+			                            const auto it_cols = ghost_row_cols.find(row_fs);
+			                            if (it_cols != ghost_row_cols.end()) {
+			                                for (const auto col_fs : it_cols->second) {
+			                                    if (col_is_in_overlap(col_fs)) {
+			                                        cols_vec.push_back(col_fs);
+			                                    }
+			                                }
+			                            }
 			                        }
 
 			                        cols_vec.push_back(row_fs); // ensure diagonal
@@ -3426,6 +3871,15 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 			                            for (const auto col : cols) {
 			                                if (relevant_set.contains(col)) {
 			                                    cols_vec.push_back(col);
+			                                }
+			                            }
+			                        } else {
+			                            const auto it_cols = ghost_row_cols.find(row);
+			                            if (it_cols != ghost_row_cols.end()) {
+			                                for (const auto col : it_cols->second) {
+			                                    if (relevant_set.contains(col)) {
+			                                        cols_vec.push_back(col);
+			                                    }
 			                                }
 			                            }
 			                        }
@@ -3483,8 +3937,69 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     // ---------------------------------------------------------------------
     // Per-cell material state storage (optional; for RequiredData::MaterialState)
     // ---------------------------------------------------------------------
+    const auto requires_material_state_storage = [&]() {
+        for (const auto& tag : operator_registry_.list()) {
+            const auto& def = operator_registry_.get(tag);
+
+            for (const auto& term : def.cells) {
+                if (!term.kernel) continue;
+
+                if (term.kernel->semanticKernelKind() == assembly::SemanticKernelKind::MonolithicCell) {
+                    const auto* monolithic =
+                        dynamic_cast<const forms::MonolithicCellKernel*>(term.kernel.get());
+                    FE_CHECK_NOT_NULL(monolithic, "FESystem::setup: monolithic cell kernel");
+                    for (std::size_t bi = 0; bi < monolithic->numBlocks(); ++bi) {
+                        const auto& bs = monolithic->blockSpec(bi);
+                        if (bs.fallback_kernel &&
+                            assembly::hasFlag(bs.fallback_kernel->getRequiredData(),
+                                              assembly::RequiredData::MaterialState)) {
+                            return true;
+                        }
+                    }
+                    continue;
+                }
+
+                if (term.kernel->semanticKernelKind() == assembly::SemanticKernelKind::MixedBlockSet) {
+                    const auto* mixed =
+                        dynamic_cast<const forms::MixedBlockKernelSet*>(term.kernel.get());
+                    FE_CHECK_NOT_NULL(mixed, "FESystem::setup: mixed block cell kernel");
+                    for (std::size_t bi = 0; bi < mixed->numBlocks(); ++bi) {
+                        const auto& bs = mixed->blockSpec(bi);
+                        if (bs.fallback_kernel &&
+                            assembly::hasFlag(bs.fallback_kernel->getRequiredData(),
+                                              assembly::RequiredData::MaterialState)) {
+                            return true;
+                        }
+                    }
+                    continue;
+                }
+
+                if (assembly::hasFlag(term.kernel->getRequiredData(),
+                                      assembly::RequiredData::MaterialState)) {
+                    return true;
+                }
+            }
+
+            for (const auto& term : def.boundary) {
+                if (term.kernel &&
+                    assembly::hasFlag(term.kernel->getRequiredData(),
+                                      assembly::RequiredData::MaterialState)) {
+                    return true;
+                }
+            }
+            for (const auto& term : def.interior) {
+                if (term.kernel &&
+                    assembly::hasFlag(term.kernel->getRequiredData(),
+                                      assembly::RequiredData::MaterialState)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
     material_state_provider_.reset();
-    {
+    if (requires_material_state_storage()) {
         std::vector<GlobalIndex> boundary_faces;
         meshAccess().forEachBoundaryFace(/*marker=*/-1, [&](GlobalIndex face_id, GlobalIndex /*cell_id*/) {
             boundary_faces.push_back(face_id);
@@ -3626,8 +4141,20 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     // ---------------------------------------------------------------------
     // Global-kernel persistent state storage (optional; for GlobalStateSpec)
     // ---------------------------------------------------------------------
+    const auto requires_global_kernel_state_storage = [&]() {
+        for (const auto& tag : operator_registry_.list()) {
+            const auto& def = operator_registry_.get(tag);
+            for (const auto& kernel : def.global) {
+                if (kernel && !kernel->globalStateSpec().empty()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
     global_kernel_state_provider_.reset();
-    {
+    if (requires_global_kernel_state_storage()) {
         std::vector<GlobalIndex> boundary_faces;
         meshAccess().forEachBoundaryFace(/*marker=*/-1, [&](GlobalIndex face_id, GlobalIndex /*cell_id*/) {
             boundary_faces.push_back(face_id);
@@ -4517,6 +5044,49 @@ void FESystem::buildAssemblyPlans()
         for (const auto& kernel : def.global) {
             FE_CHECK_NOT_NULL(kernel.get(), "FESystem::buildAssemblyPlans: global kernel");
             plan.global_terms.push_back(kernel.get());
+        }
+
+        bool has_matrix_terms = false;
+        bool matrix_state_independent = true;
+        const auto consider_matrix_term =
+            [&](const assembly::AssemblyKernel* kernel, bool matrix_capable) {
+                if (!matrix_capable) {
+                    return;
+                }
+                has_matrix_terms = true;
+                matrix_state_independent =
+                    matrix_state_independent &&
+                    kernel != nullptr &&
+                    kernel->hasStateIndependentMatrix();
+            };
+
+        for (const auto& term : plan.cell_terms) {
+            consider_matrix_term(term.kernel, term.matrix_capable);
+        }
+        for (const auto& term : plan.boundary_terms) {
+            consider_matrix_term(term.kernel, term.matrix_capable);
+        }
+        for (const auto& term : plan.interior_terms) {
+            consider_matrix_term(term.kernel, term.matrix_capable);
+        }
+        for (const auto& term : plan.interface_terms) {
+            consider_matrix_term(term.kernel, term.matrix_capable);
+        }
+
+        if (!plan.global_terms.empty()) {
+            // Global kernels do not yet expose matrix-independence metadata, so
+            // any global contribution keeps the operator on the conservative path.
+            has_matrix_terms = true;
+            matrix_state_independent = false;
+        }
+
+        plan.matrix_state_independent = has_matrix_terms && matrix_state_independent;
+        if (core::kernelTraceEnabled(core::KernelTraceChannel::Selection)) {
+            core::kernelTraceLog(
+                core::KernelTraceChannel::Selection,
+                "FESystem::buildAssemblyPlans: operator '" + tag +
+                    "' matrix_state_independent=" +
+                    (plan.matrix_state_independent ? "true" : "false"));
         }
     }
 }

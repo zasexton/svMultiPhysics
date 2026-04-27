@@ -12,9 +12,141 @@
 #include "FE/Geometry/LinearMapping.h"
 #include "FE/Basis/LagrangeBasis.h"
 #include <cmath>
+#include <functional>
+#include <initializer_list>
+#include <string>
 
 using namespace svmp::FE;
 using namespace svmp::FE::geometry;
+
+namespace {
+
+class ManufacturedCurvedVolumeMapping final : public GeometryMapping {
+public:
+    ElementType element_type() const noexcept override { return ElementType::Hex27; }
+    int dimension() const noexcept override { return 3; }
+    std::size_t num_nodes() const noexcept override { return nodes_.size(); }
+    const std::vector<math::Vector<Real, 3>>& nodes() const noexcept override { return nodes_; }
+    bool isAffine() const noexcept override { return false; }
+
+    math::Vector<Real, 3> map_to_physical(const math::Vector<Real, 3>& xi) const override {
+        const Real x = xi[0];
+        const Real y = xi[1];
+        const Real z = xi[2];
+        return math::Vector<Real, 3>{
+            x + Real(0.20) * x * y + Real(0.05) * z * z,
+            y + Real(0.15) * y * z + Real(0.04) * x * x,
+            z + Real(0.10) * x * z + Real(0.03) * y * y};
+    }
+
+    math::Vector<Real, 3> map_to_reference(const math::Vector<Real, 3>&,
+                                           const math::Vector<Real, 3>& = math::Vector<Real, 3>{}) const override {
+        throw FEException("ManufacturedCurvedVolumeMapping: inverse map not needed by this test");
+    }
+
+    math::Matrix<Real, 3, 3> jacobian(const math::Vector<Real, 3>& xi) const override {
+        const Real x = xi[0];
+        const Real y = xi[1];
+        const Real z = xi[2];
+        math::Matrix<Real, 3, 3> J{};
+        J(0, 0) = Real(1) + Real(0.20) * y;
+        J(0, 1) = Real(0.20) * x;
+        J(0, 2) = Real(0.10) * z;
+        J(1, 0) = Real(0.08) * x;
+        J(1, 1) = Real(1) + Real(0.15) * z;
+        J(1, 2) = Real(0.15) * y;
+        J(2, 0) = Real(0.10) * z;
+        J(2, 1) = Real(0.06) * y;
+        J(2, 2) = Real(1) + Real(0.10) * x;
+        return J;
+    }
+
+    MappingHessian mapping_hessian(const math::Vector<Real, 3>&) const override {
+        MappingHessian H{};
+        H[0](0, 1) = Real(0.20);
+        H[0](1, 0) = Real(0.20);
+        H[0](2, 2) = Real(0.10);
+        H[1](0, 0) = Real(0.08);
+        H[1](1, 2) = Real(0.15);
+        H[1](2, 1) = Real(0.15);
+        H[2](0, 2) = Real(0.10);
+        H[2](2, 0) = Real(0.10);
+        H[2](1, 1) = Real(0.06);
+        return H;
+    }
+
+private:
+    std::vector<math::Vector<Real, 3>> nodes_{};
+};
+
+math::Vector<Real, 3> manufacturedReferenceVector(const math::Vector<Real, 3>& xi)
+{
+    return math::Vector<Real, 3>{
+        Real(1.0) + Real(0.30) * xi[0] - Real(0.20) * xi[1] + Real(0.10) * xi[2],
+        Real(-0.4) - Real(0.05) * xi[0] + Real(0.50) * xi[1] + Real(0.10) * xi[2],
+        Real(0.7) - Real(0.30) * xi[0] + Real(0.04) * xi[1] + Real(0.20) * xi[2]};
+}
+
+math::Matrix<Real, 3, 3> manufacturedReferenceJacobian()
+{
+    math::Matrix<Real, 3, 3> jac{};
+    jac(0, 0) = Real(0.30);
+    jac(0, 1) = Real(-0.20);
+    jac(0, 2) = Real(0.10);
+    jac(1, 0) = Real(-0.05);
+    jac(1, 1) = Real(0.50);
+    jac(1, 2) = Real(0.10);
+    jac(2, 0) = Real(-0.30);
+    jac(2, 1) = Real(0.04);
+    jac(2, 2) = Real(0.20);
+    return jac;
+}
+
+void expectPhysicalGradientMatchesReferenceDirectionalDerivative(
+    const ManufacturedCurvedVolumeMapping& map,
+    const math::Vector<Real, 3>& xi,
+    const math::Matrix<Real, 3, 3>& grad_x,
+    const std::function<math::Vector<Real, 3>(const math::Vector<Real, 3>&)>& transformed_value)
+{
+    const auto J = map.jacobian(xi);
+    constexpr Real eps = Real(1e-6);
+    for (std::size_t b = 0; b < 3; ++b) {
+        math::Vector<Real, 3> xip = xi;
+        math::Vector<Real, 3> xim = xi;
+        xip[b] += eps;
+        xim[b] -= eps;
+        const auto vp = transformed_value(xip);
+        const auto vm = transformed_value(xim);
+        for (std::size_t r = 0; r < 3; ++r) {
+            const Real fd_dv_dxi = (vp[r] - vm[r]) / (Real(2) * eps);
+            Real analytic_dv_dxi = Real(0);
+            for (std::size_t c = 0; c < 3; ++c) {
+                analytic_dv_dxi += grad_x(r, c) * J(c, b);
+            }
+            EXPECT_NEAR(analytic_dv_dxi, fd_dv_dxi, 2e-7);
+        }
+    }
+}
+
+template <typename Callable>
+void expectFEExceptionContains(Callable&& callable,
+                               std::initializer_list<const char*> substrings)
+{
+    try {
+        callable();
+        FAIL() << "Expected FEException";
+    } catch (const FEException& e) {
+        const std::string msg = e.what();
+        for (const char* substring : substrings) {
+            EXPECT_NE(msg.find(substring), std::string::npos)
+                << "missing substring '" << substring << "' in: " << msg;
+        }
+    } catch (...) {
+        FAIL() << "Expected FEException";
+    }
+}
+
+} // namespace
 
 TEST(MetricTensor, IdentityMappingMetrics) {
     auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Quad4, 1);
@@ -243,6 +375,92 @@ TEST(PushForward, AffineVectorJacobianPiolaTransforms3D) {
     }
 }
 
+TEST(PushForward, CurvedHDivVectorJacobianMatchesManufacturedReferenceDerivative3D) {
+    ManufacturedCurvedVolumeMapping map;
+    const auto xi = math::Vector<Real, 3>{Real(0.17), Real(-0.22), Real(0.13)};
+    const auto v_ref = manufacturedReferenceVector(xi);
+    const auto jac_ref = manufacturedReferenceJacobian();
+
+    const auto grad_x = PushForward::hdiv_vector_jacobian(map, v_ref, jac_ref, xi);
+
+    expectPhysicalGradientMatchesReferenceDirectionalDerivative(
+        map,
+        xi,
+        grad_x,
+        [&](const math::Vector<Real, 3>& xiq) {
+            return PushForward::hdiv_vector(map, manufacturedReferenceVector(xiq), xiq);
+        });
+}
+
+TEST(PushForward, CurvedHCurlVectorJacobianMatchesManufacturedReferenceDerivative3D) {
+    ManufacturedCurvedVolumeMapping map;
+    const auto xi = math::Vector<Real, 3>{Real(-0.11), Real(0.19), Real(0.24)};
+    const auto v_ref = manufacturedReferenceVector(xi);
+    const auto jac_ref = manufacturedReferenceJacobian();
+
+    const auto grad_x = PushForward::hcurl_vector_jacobian(map, v_ref, jac_ref, xi);
+
+    expectPhysicalGradientMatchesReferenceDirectionalDerivative(
+        map,
+        xi,
+        grad_x,
+        [&](const math::Vector<Real, 3>& xiq) {
+            return PushForward::hcurl_vector(map, manufacturedReferenceVector(xiq), xiq);
+        });
+}
+
+TEST(PushForward, CurvedPiolaVectorGradientGeometryDataIsReusable) {
+    ManufacturedCurvedVolumeMapping map;
+    const auto xi = math::Vector<Real, 3>{Real(0.09), Real(0.07), Real(-0.16)};
+    const auto data = PushForward::piola_vector_gradient_geometry_data(map, xi);
+    ASSERT_FALSE(data.affine);
+    EXPECT_GT(std::abs(data.jacobian_derivatives_x[0](0, 1)), Real(1e-3));
+    EXPECT_NEAR(data.inverse_transpose_jacobian_derivatives_x[1](2, 0),
+                data.inverse_jacobian_derivatives_x[1](0, 2),
+                1e-15);
+
+    const auto jac_ref = manufacturedReferenceJacobian();
+    const auto v0 = manufacturedReferenceVector(xi);
+    const math::Vector<Real, 3> v1{Real(-0.2), Real(0.8), Real(0.35)};
+
+    const auto hdiv_direct = PushForward::hdiv_vector_jacobian(map, v0, jac_ref, xi);
+    const auto hdiv_reused = PushForward::hdiv_vector_jacobian(v0, jac_ref, data);
+    const auto hcurl_direct = PushForward::hcurl_vector_jacobian(map, v1, jac_ref, xi);
+    const auto hcurl_reused = PushForward::hcurl_vector_jacobian(v1, jac_ref, data);
+
+    for (std::size_t r = 0; r < 3; ++r) {
+        for (std::size_t c = 0; c < 3; ++c) {
+            EXPECT_NEAR(hdiv_direct(r, c), hdiv_reused(r, c), 1e-13);
+            EXPECT_NEAR(hcurl_direct(r, c), hcurl_reused(r, c), 1e-13);
+        }
+    }
+}
+
+TEST(PushForward, CurvedPiolaVectorJacobianOverloadsReduceToAffinePath) {
+    std::vector<math::Vector<Real,3>> nodes = {
+        {Real(0), Real(0), Real(0)},
+        {Real(2), Real(0), Real(0)},
+        {Real(0), Real(3), Real(0)},
+        {Real(0), Real(0), Real(4)}
+    };
+    LinearMapping map(ElementType::Tetra4, nodes);
+    const auto xi = math::Vector<Real,3>{Real(0.2), Real(0.3), Real(0.1)};
+    const math::Vector<Real, 3> v_ref{Real(0.7), Real(-0.1), Real(0.4)};
+    const auto jac_ref = manufacturedReferenceJacobian();
+
+    const auto hdiv_affine = PushForward::hdiv_vector_jacobian(map, jac_ref, xi);
+    const auto hdiv_curved_api = PushForward::hdiv_vector_jacobian(map, v_ref, jac_ref, xi);
+    const auto hcurl_affine = PushForward::hcurl_vector_jacobian(map, jac_ref, xi);
+    const auto hcurl_curved_api = PushForward::hcurl_vector_jacobian(map, v_ref, jac_ref, xi);
+
+    for (std::size_t r = 0; r < 3; ++r) {
+        for (std::size_t c = 0; c < 3; ++c) {
+            EXPECT_NEAR(hdiv_affine(r, c), hdiv_curved_api(r, c), 1e-14);
+            EXPECT_NEAR(hcurl_affine(r, c), hcurl_curved_api(r, c), 1e-14);
+        }
+    }
+}
+
 TEST(PushForward, TensorProductAffineMappingAllowsPiolaVectorJacobians) {
     auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Quad4, 1);
     std::vector<math::Vector<Real,3>> nodes = {
@@ -294,8 +512,22 @@ TEST(PushForward, NonAffinePiolaVectorJacobiansThrow) {
     jac_ref(1, 1) = Real(1);
     const auto xi = math::Vector<Real,3>{Real(0), Real(0), Real(0)};
 
-    EXPECT_THROW((void)PushForward::hdiv_vector_jacobian(map, jac_ref, xi), FEException);
-    EXPECT_THROW((void)PushForward::hcurl_vector_jacobian(map, jac_ref, xi), FEException);
+    expectFEExceptionContains(
+        [&]() { (void)PushForward::hdiv_vector_jacobian(map, jac_ref, xi); },
+        {"H(div)", "affine geometry mapping", "non-affine curved Piola gradients", "reference vector value"});
+    expectFEExceptionContains(
+        [&]() { (void)PushForward::hcurl_vector_jacobian(map, jac_ref, xi); },
+        {"H(curl)", "affine geometry mapping", "non-affine curved Piola gradients", "reference vector value"});
+
+    const math::Vector<Real, 3> v_ref{Real(0.2), Real(-0.1), Real(0.0)};
+    expectFEExceptionContains(
+        [&]() { (void)PushForward::hdiv_vector_jacobian(map, v_ref, jac_ref, xi); },
+        {"curved Piola vector-gradient derivatives", "non-affine 3D volume mappings",
+         "lower-dimensional curved mappings"});
+    expectFEExceptionContains(
+        [&]() { (void)PushForward::hcurl_vector_jacobian(map, v_ref, jac_ref, xi); },
+        {"curved Piola vector-gradient derivatives", "non-affine 3D volume mappings",
+         "lower-dimensional curved mappings"});
 }
 
 TEST(PushForward, HDivAndHCurlReduceIn1D) {

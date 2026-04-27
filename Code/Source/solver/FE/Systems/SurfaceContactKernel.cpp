@@ -290,6 +290,22 @@ PenaltySurfaceContactKernel::PenaltySurfaceContactKernel(PenaltySurfaceContactCo
                 "PenaltySurfaceContactKernel: penalty must be > 0");
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+svmp::search::ContactCandidateOptions
+makeContactCandidateOptions(const PenaltySurfaceContactConfig& cfg)
+{
+    svmp::search::ContactCandidateOptions options;
+    options.search_radius = cfg.search_radius;
+    options.activation_distance = cfg.activation_distance;
+    options.only_nearest_per_source = false;
+    options.include_inactive_candidates = true;
+    options.remove_duplicate_pairs = true;
+    options.allow_self_pairs = false;
+    options.generation_policy = "penalty-surface-contact";
+    return options;
+}
+#endif
+
 GlobalStateSpec PenaltySurfaceContactKernel::globalStateSpec() const noexcept
 {
     if (!cfg_.track_contact_count) {

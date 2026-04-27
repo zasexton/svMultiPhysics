@@ -1995,6 +1995,11 @@ int JITKernelWrapper::maxTemporalDerivativeOrder() const noexcept
     return fallback_->maxTemporalDerivativeOrder();
 }
 
+bool JITKernelWrapper::hasStateIndependentMatrix() const noexcept
+{
+    return fallback_ != nullptr && fallback_->hasStateIndependentMatrix();
+}
+
 bool JITKernelWrapper::isSymmetric() const noexcept
 {
     return fallback_->isSymmetric();

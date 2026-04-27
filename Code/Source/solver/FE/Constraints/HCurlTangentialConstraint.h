@@ -44,6 +44,22 @@ public:
 
     [[nodiscard]] bool isTimeDependent() const noexcept override { return false; }
 
+    [[nodiscard]] ConstraintDependencyDeclaration dependencyDeclaration() const override
+    {
+        ConstraintDependencyDeclaration out = ISystemConstraint::dependencyDeclaration();
+        merge_into(out.value, ConstraintDependencyMask::meshGeometry());
+        return out;
+    }
+
+    [[nodiscard]] systems::SetupStorageRequirements storageRequirements() const noexcept override
+    {
+        systems::SetupStorageRequirements req;
+        req.entity_dof_map = true;
+        req.edge_topology = true;
+        req.boundary_face_topology = true;
+        return req;
+    }
+
 private:
     FieldId field_{INVALID_FIELD_ID};
     int boundary_marker_{-1};
@@ -56,4 +72,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_CONSTRAINTS_HCURLTANGENTIALCONSTRAINT_H
-

@@ -8,9 +8,68 @@
 #include "FE/Basis/LagrangeBasis.h"
 #include "FE/Basis/SerendipityBasis.h"
 #include "FE/Basis/NodeOrderingConventions.h"
+#include "Mesh/Core/MeshBase.h"
+#include "Mesh/Topology/CellShape.h"
+
+#include <numeric>
 
 using namespace svmp::FE;
 using namespace svmp::FE::geometry;
+
+namespace {
+
+svmp::MeshBase makeQuad9GeometryDofMesh()
+{
+    auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Quad4, 2);
+    const auto& nodes = basis->nodes();
+
+    std::vector<svmp::real_t> x_ref;
+    x_ref.reserve(nodes.size() * 3u);
+    for (const auto& node : nodes) {
+        x_ref.push_back(node[0]);
+        x_ref.push_back(node[1]);
+        x_ref.push_back(node[2]);
+    }
+
+    std::vector<svmp::offset_t> offsets = {0, static_cast<svmp::offset_t>(nodes.size())};
+    std::vector<svmp::index_t> conn(nodes.size());
+    std::iota(conn.begin(), conn.end(), 0);
+    std::vector<svmp::CellShape> shapes = {{svmp::CellFamily::Quad, 4, 2}};
+
+    svmp::MeshBase mesh;
+    mesh.build_from_arrays(3, x_ref, offsets, conn, shapes);
+
+    const auto bottom_edge = mesh.cell_face_geometry_dofs(0, 0);
+    if (bottom_edge.size() >= 3u) {
+        auto mid = mesh.geometry_dof_coords(bottom_edge[1], svmp::Configuration::Reference);
+        mid[1] += 0.30;
+        mid[2] += 0.10;
+        mesh.set_current_geometry_dof_coords(bottom_edge[1], mid);
+    }
+    const auto interiors = mesh.cell_interior_geometry_dofs(0);
+    if (!interiors.empty()) {
+        auto center = mesh.geometry_dof_coords(interiors.front(), svmp::Configuration::Current);
+        center[2] += 0.40;
+        mesh.set_current_geometry_dof_coords(interiors.front(), center);
+    }
+    return mesh;
+}
+
+std::vector<math::Vector<Real, 3>> geometryNodesFromMesh(
+    const svmp::MeshBase& mesh,
+    svmp::Configuration cfg)
+{
+    std::vector<math::Vector<Real, 3>> nodes;
+    const auto dofs = mesh.cell_geometry_dofs(0);
+    nodes.reserve(dofs.size());
+    for (const auto dof : dofs) {
+        const auto x = mesh.geometry_dof_coords(dof, cfg);
+        nodes.push_back({x[0], x[1], x[2]});
+    }
+    return nodes;
+}
+
+} // namespace
 
 TEST(HigherOrderMapping, IdentityLineOrder2) {
     auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Line2, 2); // Line3
@@ -232,4 +291,28 @@ TEST(HigherOrderMapping, Hex20SerendipityNodalIdentityNoGeometryMode) {
 
     const auto det = map.jacobian_determinant(math::Vector<Real,3>{Real(0), Real(0), Real(0)});
     EXPECT_NEAR(det, 1.0, 1e-8);
+}
+
+TEST(HigherOrderMapping, MeshGeometryDofsBuildReferenceAndCurrentQuadraticMappings) {
+    auto mesh = makeQuad9GeometryDofMesh();
+    ASSERT_EQ(mesh.geometry_order_descriptor().storage, svmp::GeometryDofStorage::VertexCoordinates);
+    ASSERT_EQ(mesh.geometry_order(0), 2);
+    ASSERT_TRUE(mesh.has_current_coords());
+
+    auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Quad4, 2);
+    const auto ref_nodes = geometryNodesFromMesh(mesh, svmp::Configuration::Reference);
+    const auto cur_nodes = geometryNodesFromMesh(mesh, svmp::Configuration::Current);
+    ASSERT_EQ(ref_nodes.size(), basis->size());
+    ASSERT_EQ(cur_nodes.size(), basis->size());
+
+    IsoparametricMapping ref_map(basis, ref_nodes);
+    IsoparametricMapping cur_map(basis, cur_nodes);
+
+    const math::Vector<Real,3> xi{Real(0), Real(0), Real(0)};
+    const auto x_ref = ref_map.map_to_physical(xi);
+    const auto x_cur = cur_map.map_to_physical(xi);
+    EXPECT_NEAR(x_ref[2], 0.0, 1e-12);
+    EXPECT_GT(x_cur[2], x_ref[2] + Real(0.2));
+    EXPECT_GT(ref_map.jacobian_determinant(xi), 0.0);
+    EXPECT_GT(cur_map.jacobian_determinant(xi), 0.0);
 }

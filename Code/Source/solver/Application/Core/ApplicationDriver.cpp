@@ -4,6 +4,7 @@
 #include "Application/Core/SimulationBuilder.h"
 
 #include "FE/PostProcessing/DerivedResultTypes.h"
+#include "FE/PostProcessing/DerivedResultEvaluator.h"
 #include "FE/Systems/TimeIntegrator.h"
 #include "FE/Systems/TransientSystem.h"
 #include "FE/TimeStepping/NewtonSolver.h"
@@ -38,6 +39,69 @@
 #endif
 
 namespace {
+
+using Clock = std::chrono::steady_clock;
+
+double secondsSince(Clock::time_point start)
+{
+  return std::chrono::duration<double>(Clock::now() - start).count();
+}
+
+struct OutputTimingStats {
+  double local{0.0};
+  double min{0.0};
+  double mean{0.0};
+  double max{0.0};
+};
+
+OutputTimingStats reduceOutputTiming(double local, const svmp::MeshComm& comm)
+{
+  OutputTimingStats stats;
+  stats.local = local;
+  stats.min = local;
+  stats.mean = local;
+  stats.max = local;
+
+#ifdef MESH_HAS_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized && comm.size() > 1) {
+    double sum = 0.0;
+    MPI_Allreduce(&local, &stats.min, 1, MPI_DOUBLE, MPI_MIN, comm.native());
+    MPI_Allreduce(&local, &stats.max, 1, MPI_DOUBLE, MPI_MAX, comm.native());
+    MPI_Allreduce(&local, &sum, 1, MPI_DOUBLE, MPI_SUM, comm.native());
+    stats.mean = sum / static_cast<double>(comm.size());
+  }
+#else
+  (void)comm;
+#endif
+
+  return stats;
+}
+
+void printOutputTimingLine(const char* label,
+                           const OutputTimingStats& stats,
+                           bool mpi_parallel,
+                           double parent_seconds = 0.0)
+{
+  const double pct = parent_seconds > 0.0 ? 100.0 * stats.local / parent_seconds : 0.0;
+  if (mpi_parallel) {
+    std::fprintf(stderr,
+                 "  %-24s %10.6f s  (%5.1f%%)  rank min/mean/max %10.6f / %10.6f / %10.6f s\n",
+                 label,
+                 stats.local,
+                 pct,
+                 stats.min,
+                 stats.mean,
+                 stats.max);
+  } else {
+    std::fprintf(stderr,
+                 "  %-24s %10.6f s  (%5.1f%%)\n",
+                 label,
+                 stats.local,
+                 pct);
+  }
+}
 
 /// @brief Detect the number of physical CPU cores (excluding hyperthreads).
 /// Falls back to std::thread::hardware_concurrency() if detection fails.
@@ -717,6 +781,8 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
     return;
   }
 
+  const auto output_total_start = Clock::now();
+  const auto setup_start = Clock::now();
   const auto comm = svmp::MeshComm::world();
   const bool is_root = (comm.rank() == 0);
   const bool mpi_parallel = (comm.size() > 1);
@@ -770,8 +836,16 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
     return mesh.attach_field(svmp::EntityKind::Vertex, name, svmp::FieldScalarType::Float64, components);
   };
 
+  const double setup_seconds = secondsSince(setup_start);
+
   const auto n_fields = sim.fe_system->fieldMap().numFields();
+  double primary_field_seconds = 0.0;
+  std::vector<std::pair<std::string, double>> field_timings;
+  std::vector<std::pair<std::string, bool>> field_fast_paths;
+  field_timings.reserve(n_fields);
+  field_fast_paths.reserve(n_fields);
   for (std::size_t i = 0; i < n_fields; ++i) {
+    const auto field_start = Clock::now();
     const auto field_id = static_cast<svmp::FE::FieldId>(i);
     const auto& rec = sim.fe_system->fieldRecord(field_id);
     const auto ncomp = static_cast<std::size_t>(std::max(1, rec.components));
@@ -815,9 +889,16 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
     if (oopTraceEnabled()) {
       oopCout() << "[svMultiPhysics::Application] VTK output: field '" << rec.name << "' done." << std::endl;
     }
+    const double field_seconds = secondsSince(field_start);
+    primary_field_seconds += field_seconds;
+    field_timings.emplace_back(rec.name, field_seconds);
+    field_fast_paths.emplace_back(rec.name, fast);
   }
 
   const auto derived = sim.fe_system->derivedResults();
+  double derived_seconds = 0.0;
+  std::vector<std::pair<std::string, double>> derived_timings;
+  derived_timings.reserve(derived.size());
   if (!derived.empty()) {
     if (oopTraceEnabled()) {
       oopCout() << "[svMultiPhysics::Application] VTK output: evaluating "
@@ -830,7 +911,14 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
                   << std::endl;
       }
     }
-    sim.fe_system->appendDerivedResultFields(mesh.local_mesh(), state);
+    svmp::FE::post::DerivedResultEvaluator derived_evaluator(*sim.fe_system, state);
+    for (const auto& def : derived) {
+      const auto derived_start = Clock::now();
+      derived_evaluator.evaluateToMeshField(mesh.local_mesh(), def);
+      const double field_seconds = secondsSince(derived_start);
+      derived_seconds += field_seconds;
+      derived_timings.emplace_back(def.name, field_seconds);
+    }
     if (oopTraceEnabled()) {
       oopCout() << "[svMultiPhysics::Application] VTK output: derived result fields done." << std::endl;
     }
@@ -839,8 +927,13 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
   svmp::MeshIOOptions io{};
   io.format = mpi_parallel ? "pvtu" : "vtu";
   io.path = out_path.string();
+  io.kv["binary"] = "true";
+  io.kv["streaming"] = "true";
+  const auto save_start = Clock::now();
   mesh.save_parallel(io);
+  const double save_seconds = secondsSince(save_start);
 
+  const auto pvd_start = Clock::now();
   if (is_root) {
     oopCout() << "[svMultiPhysics::Application] Wrote VTK: " << out_path.string() << std::endl;
     if (pvd && !pvd->pvd_path.empty()) {
@@ -855,6 +948,59 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
       }
     }
   }
+  const double pvd_seconds = secondsSince(pvd_start);
+
+  const double output_total_seconds = secondsSince(output_total_start);
+  const double accounted_seconds = setup_seconds + primary_field_seconds + derived_seconds +
+                                   save_seconds + pvd_seconds;
+  const double other_seconds = std::max(0.0, output_total_seconds - accounted_seconds);
+
+  const auto total_stats = reduceOutputTiming(output_total_seconds, comm);
+  const auto setup_stats = reduceOutputTiming(setup_seconds, comm);
+  const auto primary_stats = reduceOutputTiming(primary_field_seconds, comm);
+  const auto derived_stats = reduceOutputTiming(derived_seconds, comm);
+  const auto save_stats = reduceOutputTiming(save_seconds, comm);
+  const auto pvd_stats = reduceOutputTiming(pvd_seconds, comm);
+  const auto other_stats = reduceOutputTiming(other_seconds, comm);
+
+  std::vector<OutputTimingStats> field_stats;
+  field_stats.reserve(field_timings.size());
+  for (const auto& [_, seconds] : field_timings) {
+    field_stats.push_back(reduceOutputTiming(seconds, comm));
+  }
+
+  std::vector<OutputTimingStats> derived_stats_by_field;
+  derived_stats_by_field.reserve(derived_timings.size());
+  for (const auto& [_, seconds] : derived_timings) {
+    derived_stats_by_field.push_back(reduceOutputTiming(seconds, comm));
+  }
+
+  if (is_root) {
+    std::fprintf(stderr,
+                 "\n*** VTK OUTPUT SUB-TIMING step=%d time=%.16e (rank 0) ***\n",
+                 step,
+                 time);
+    printOutputTimingLine("Total", total_stats, mpi_parallel, output_total_seconds);
+    printOutputTimingLine("Setup/state", setup_stats, mpi_parallel, output_total_seconds);
+    printOutputTimingLine("Primary fields", primary_stats, mpi_parallel, output_total_seconds);
+    for (std::size_t i = 0; i < field_timings.size(); ++i) {
+      const auto& [name, _] = field_timings[i];
+      const auto fast = i < field_fast_paths.size() && field_fast_paths[i].second;
+      const std::string label = "field " + name + (fast ? " [direct]" : " [fallback]");
+      printOutputTimingLine(label.c_str(), field_stats[i], mpi_parallel, output_total_seconds);
+    }
+    printOutputTimingLine("Derived fields", derived_stats, mpi_parallel, output_total_seconds);
+    for (std::size_t i = 0; i < derived_timings.size(); ++i) {
+      const auto& [name, _] = derived_timings[i];
+      const std::string label = "derived " + name;
+      printOutputTimingLine(label.c_str(), derived_stats_by_field[i], mpi_parallel, output_total_seconds);
+    }
+    printOutputTimingLine("Mesh save_parallel", save_stats, mpi_parallel, output_total_seconds);
+    printOutputTimingLine("PVD bookkeeping", pvd_stats, mpi_parallel, output_total_seconds);
+    printOutputTimingLine("Other", other_stats, mpi_parallel, output_total_seconds);
+    std::fprintf(stderr, "*******************************************************\n");
+  }
+
   if (oopTraceEnabled() && is_root) {
     oopCout() << "[svMultiPhysics::Application] VTK output: done step=" << step << " time=" << time << std::endl;
   }

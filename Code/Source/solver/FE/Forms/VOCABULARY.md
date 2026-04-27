@@ -114,10 +114,13 @@ auto residual = inner(grad(q), grad(w)).dx();
 ```
 
 For affine mappings, the FE layer evaluates these gradients analytically using
-the appropriate Piola transform. Non-affine `H(div)` and `H(curl)` Piola
-vector-gradient requests fail explicitly until curved Piola derivative terms
-are implemented. Product-space vector `H1` fields continue to use the existing
-componentwise scalar-gradient path.
+the appropriate Piola transform. For supported non-affine 3D curved volume
+mappings, `H(div)` and `H(curl)` gradients include the analytic derivative terms
+for `J`, `detJ`, `J^{-1}`, and `J^{-T}`. Unsupported element-family,
+geometry-order, or lower-dimensional curved-frame combinations fail before
+assembly with diagnostics rather than silently using an affine approximation.
+Product-space vector `H1` fields continue to use the existing componentwise
+scalar-gradient path.
 
 ### Algebraic & Nonlinear
 

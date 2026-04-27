@@ -175,6 +175,17 @@ struct IncompressibleNavierStokesVMSOptions {
     // This can be disabled to recover a (possibly unsteady) Stokes formulation.
     bool enable_convection{true};
 
+    // ALE/moving-domain options. Disabled by default to preserve static-mesh behavior.
+    //
+    // When enabled, the module binds a generic FE mesh-velocity field and uses
+    // FE Forms moving-domain terminals. Physics remains responsible for the
+    // ALE-specific residual choices.
+    bool enable_ale{false};
+    bool include_moving_control_volume_transient{true};
+    std::string mesh_velocity_field_name{"mesh_velocity"};
+    bool auto_register_mesh_velocity_field{true};
+    std::shared_ptr<const FE::spaces::FunctionSpace> mesh_velocity_space{};
+
     // Enable residual-based VMS stabilization (static subscales u', p').
     bool enable_vms{true};
     bool enable_jit{SVMP_FE_ENABLE_LLVM_JIT != 0};

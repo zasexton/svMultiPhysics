@@ -464,6 +464,120 @@ TEST(MotionFieldsTest, UpdateCoordinatesFromDisplacementAbsoluteAndIncremental)
   }
 }
 
+TEST(MotionFieldsTest, ReferenceRebaseToCurrentIsExplicitAndResetsDisplacementHistory)
+{
+  auto mesh = make_unit_tet_mesh();
+  auto& local_mesh = mesh.local_mesh();
+  const auto X_ref_initial = local_mesh.X_ref();
+  const auto hnd = motion::attach_motion_fields(local_mesh, 3);
+
+  auto* disp = MeshFields::field_data_as<real_t>(local_mesh, hnd.displacement);
+  auto* vel = MeshFields::field_data_as<real_t>(local_mesh, hnd.velocity);
+  auto* prev_x = MeshFields::field_data_as<real_t>(local_mesh, hnd.previous_coordinates);
+  auto* prev_disp = MeshFields::field_data_as<real_t>(local_mesh, hnd.previous_displacement);
+  ASSERT_NE(disp, nullptr);
+  ASSERT_NE(vel, nullptr);
+  ASSERT_NE(prev_x, nullptr);
+  ASSERT_NE(prev_disp, nullptr);
+
+  const auto value_count = MeshFields::field_entity_count(local_mesh, hnd.displacement) *
+                           MeshFields::field_components(local_mesh, hnd.displacement);
+  for (size_t i = 0; i < value_count; ++i) {
+    disp[i] = 10.0 + static_cast<real_t>(i);
+    vel[i] = -5.0 - static_cast<real_t>(i);
+    prev_x[i] = 20.0 + static_cast<real_t>(i);
+    prev_disp[i] = 30.0 + static_cast<real_t>(i);
+  }
+
+  auto X_cur = X_ref_initial;
+  for (size_t v = 0; v < mesh.n_vertices(); ++v) {
+    const size_t base = 3u * v;
+    X_cur[base + 0] += 0.25 * static_cast<real_t>(v + 1);
+    X_cur[base + 1] -= 0.10 * static_cast<real_t>(v + 1);
+    X_cur[base + 2] += 0.05 * static_cast<real_t>(v + 1);
+  }
+
+  const auto rebase_epoch_before = local_mesh.reference_rebase_epoch();
+  const auto reference_revision_before = local_mesh.reference_geometry_revision();
+  mesh.set_current_coords(X_cur);
+  mesh.use_current_configuration();
+  EXPECT_EQ(local_mesh.reference_configuration_mode(),
+            ReferenceConfigurationMode::ImmutableOriginal);
+  EXPECT_EQ(local_mesh.reference_rebase_epoch(), rebase_epoch_before);
+
+  local_mesh.rebase_reference_to_current();
+
+  EXPECT_EQ(local_mesh.reference_configuration_mode(),
+            ReferenceConfigurationMode::UpdatedLagrangianRebased);
+  EXPECT_EQ(local_mesh.reference_rebase_info().last_source,
+            ReferenceRebaseSource::CurrentConfiguration);
+  EXPECT_EQ(local_mesh.reference_rebase_info().epoch, 1u);
+  EXPECT_EQ(local_mesh.reference_rebase_epoch(), rebase_epoch_before + 1u);
+  EXPECT_GT(local_mesh.reference_geometry_revision(), reference_revision_before);
+  EXPECT_EQ(local_mesh.X_ref(), X_cur);
+  EXPECT_FALSE(local_mesh.has_current_coords());
+  EXPECT_EQ(local_mesh.active_configuration(), Configuration::Reference);
+
+  for (size_t i = 0; i < value_count; ++i) {
+    EXPECT_EQ(disp[i], 0.0);
+    EXPECT_EQ(prev_disp[i], 0.0);
+    EXPECT_EQ(vel[i], -5.0 - static_cast<real_t>(i));
+    EXPECT_EQ(prev_x[i], X_cur[i]);
+  }
+}
+
+TEST(MotionFieldsTest, RemeshReferenceRebaseCanSetCurrentAndResetAllMotionFields)
+{
+  auto mesh = make_unit_tet_mesh();
+  auto& local_mesh = mesh.local_mesh();
+  const auto hnd = motion::attach_motion_fields(local_mesh, 3);
+
+  auto* vel = MeshFields::field_data_as<real_t>(local_mesh, hnd.velocity);
+  auto* acc = MeshFields::field_data_as<real_t>(local_mesh, hnd.acceleration);
+  auto* prev_vel = MeshFields::field_data_as<real_t>(local_mesh, hnd.previous_velocity);
+  ASSERT_NE(vel, nullptr);
+  ASSERT_NE(acc, nullptr);
+  ASSERT_NE(prev_vel, nullptr);
+
+  const auto value_count = MeshFields::field_entity_count(local_mesh, hnd.velocity) *
+                           MeshFields::field_components(local_mesh, hnd.velocity);
+  for (size_t i = 0; i < value_count; ++i) {
+    vel[i] = 1.0 + static_cast<real_t>(i);
+    acc[i] = 2.0 + static_cast<real_t>(i);
+    prev_vel[i] = 3.0 + static_cast<real_t>(i);
+  }
+
+  auto X_new = local_mesh.X_ref();
+  for (size_t i = 0; i < X_new.size(); ++i) {
+    X_new[i] += 0.125 * static_cast<real_t>(i + 1);
+  }
+
+  ReferenceRebaseOptions options;
+  options.source = ReferenceRebaseSource::RemeshedReference;
+  options.current_policy = ReferenceRebaseCurrentPolicy::SetCurrentToReference;
+  options.motion_policy = ReferenceRebaseMotionPolicy::ResetAllStandardMotionFields;
+  options.active_configuration_after = Configuration::Current;
+
+  const auto rebase_epoch_before = local_mesh.reference_rebase_epoch();
+  local_mesh.rebase_reference_after_remesh(X_new, options);
+
+  EXPECT_EQ(local_mesh.reference_configuration_mode(),
+            ReferenceConfigurationMode::RemeshRebased);
+  EXPECT_EQ(local_mesh.reference_rebase_info().last_source,
+            ReferenceRebaseSource::RemeshedReference);
+  EXPECT_EQ(local_mesh.reference_rebase_epoch(), rebase_epoch_before + 1u);
+  EXPECT_EQ(local_mesh.X_ref(), X_new);
+  ASSERT_TRUE(local_mesh.has_current_coords());
+  EXPECT_EQ(local_mesh.X_cur(), X_new);
+  EXPECT_EQ(local_mesh.active_configuration(), Configuration::Current);
+
+  for (size_t i = 0; i < value_count; ++i) {
+    EXPECT_EQ(vel[i], 0.0);
+    EXPECT_EQ(acc[i], 0.0);
+    EXPECT_EQ(prev_vel[i], 0.0);
+  }
+}
+
 TEST(MotionStateTest, RestoreWithoutCurrentForcesReferenceConfiguration)
 {
   auto mesh = make_unit_tet_mesh();

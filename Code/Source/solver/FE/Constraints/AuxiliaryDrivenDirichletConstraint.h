@@ -27,6 +27,22 @@ public:
 
     [[nodiscard]] bool isTimeDependent() const noexcept override { return true; }
 
+    [[nodiscard]] ConstraintDependencyDeclaration dependencyDeclaration() const override
+    {
+        ConstraintDependencyDeclaration out = ISystemConstraint::dependencyDeclaration();
+        out.value.time = true;
+        merge_into(out.value, ConstraintDependencyMask::meshGeometry());
+        return out;
+    }
+
+    [[nodiscard]] systems::SetupStorageRequirements storageRequirements() const noexcept override
+    {
+        systems::SetupStorageRequirements req;
+        req.entity_dof_map = true;
+        req.boundary_face_topology = true;
+        return req;
+    }
+
 private:
     std::string instance_name_{};
     systems::AuxiliaryConstraintBinding binding_{};

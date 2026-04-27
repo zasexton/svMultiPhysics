@@ -17,6 +17,7 @@
 #include "Geometry/MappingFactory.h"
 #include "Geometry/GeometryMapping.h"
 #include "Math/Vector.h"
+#include "Basis/BasisCache.h"
 #include "Basis/BasisFunction.h"
 
 #include <chrono>
@@ -63,6 +64,10 @@ int defaultGeometryOrder(ElementType element_type) noexcept
 
 struct ContextScratch {
     std::vector<std::array<Real, 3>> cell_coords;
+    std::vector<math::Vector<Real, 3>> node_coords;
+    std::shared_ptr<geometry::GeometryMapping> mapping;
+    ElementType mapping_type{ElementType::Unknown};
+    int mapping_order{-1};
 
     std::vector<AssemblyContext::Point3D> quad_points;
     std::vector<Real> quad_weights;
@@ -76,6 +81,14 @@ struct ContextScratch {
     std::vector<Real> basis_values;
     std::vector<AssemblyContext::Vector3D> ref_gradients;
     std::vector<AssemblyContext::Vector3D> phys_gradients;
+
+    ElementType cached_quad_type{ElementType::Unknown};
+    int cached_quad_order{-1};
+    std::shared_ptr<const quadrature::QuadratureRule> cached_quad_rule;
+    const basis::BasisFunction* cached_basis{nullptr};
+    const quadrature::QuadratureRule* cached_basis_quad{nullptr};
+    bool cached_basis_hessians{false};
+    const basis::BasisCacheEntry* cached_basis_entry{nullptr};
 };
 
 ContextScratch& scratchStorage()
@@ -243,11 +256,20 @@ void prepareCellContext(AssemblyContext& context,
 
     const auto& element = space.getElement(cell_type, cell_id);
 
-    auto quad_rule = element.quadrature();
+    std::shared_ptr<const quadrature::QuadratureRule> quad_rule = element.quadrature();
     if (!quad_rule) {
         const int quad_order = quadrature::QuadratureFactory::recommended_order(
             element.polynomial_order(), false);
-        quad_rule = quadrature::QuadratureFactory::create(cell_type, quad_order);
+        if (!scratch.cached_quad_rule ||
+            scratch.cached_quad_type != cell_type ||
+            scratch.cached_quad_order != quad_order) {
+            scratch.cached_quad_rule = quadrature::QuadratureFactory::create(cell_type, quad_order);
+            scratch.cached_quad_type = cell_type;
+            scratch.cached_quad_order = quad_order;
+            scratch.cached_basis_entry = nullptr;
+            scratch.cached_basis_quad = nullptr;
+        }
+        quad_rule = scratch.cached_quad_rule;
     }
 
     const auto n_qpts = static_cast<LocalIndex>(quad_rule->num_points());
@@ -271,19 +293,29 @@ void prepareCellContext(AssemblyContext& context,
 
     mesh.getCellCoordinates(cell_id, scratch.cell_coords);
 
-    std::vector<math::Vector<Real, 3>> node_coords(scratch.cell_coords.size());
+    scratch.node_coords.resize(scratch.cell_coords.size());
     for (std::size_t i = 0; i < scratch.cell_coords.size(); ++i) {
-        node_coords[i] = math::Vector<Real, 3>{
+        scratch.node_coords[i] = math::Vector<Real, 3>{
             scratch.cell_coords[i][0],
             scratch.cell_coords[i][1],
             scratch.cell_coords[i][2]};
     }
 
-    geometry::MappingRequest map_request;
-    map_request.element_type = cell_type;
-    map_request.geometry_order = defaultGeometryOrder(cell_type);
-    map_request.use_affine = (map_request.geometry_order <= 1);
-    auto mapping = geometry::MappingFactory::create(map_request, node_coords);
+    const int geometry_order = mesh.getCellGeometryOrder(cell_id);
+    if (!scratch.mapping ||
+        scratch.mapping_type != cell_type ||
+        scratch.mapping_order != geometry_order) {
+        geometry::MappingRequest map_request;
+        map_request.element_type = cell_type;
+        map_request.geometry_order = geometry_order;
+        map_request.use_affine = (map_request.geometry_order <= 1);
+        scratch.mapping = geometry::MappingFactory::create(map_request, scratch.node_coords);
+        scratch.mapping_type = cell_type;
+        scratch.mapping_order = geometry_order;
+    } else {
+        scratch.mapping->resetNodes(scratch.node_coords);
+    }
+    auto& mapping = scratch.mapping;
 
     scratch.quad_points.resize(n_qpts);
     scratch.quad_weights.resize(n_qpts);
@@ -298,7 +330,6 @@ void prepareCellContext(AssemblyContext& context,
     scratch.ref_gradients.resize(static_cast<std::size_t>(n_dofs * n_qpts));
     scratch.phys_gradients.resize(static_cast<std::size_t>(n_dofs * n_qpts));
 
-    std::vector<basis::Hessian> hessians_at_pt;
     std::vector<AssemblyContext::Matrix3x3> ref_hessians;
     std::vector<AssemblyContext::Matrix3x3> phys_hessians;
     if (need_basis_hessians) {
@@ -309,54 +340,95 @@ void prepareCellContext(AssemblyContext& context,
     const auto& quad_points = quad_rule->points();
     const auto& quad_weights = quad_rule->weights();
 
-    for (LocalIndex q = 0; q < n_qpts; ++q) {
-        const auto& qpt = quad_points[q];
-        scratch.quad_points[q] = {qpt[0], qpt[1], qpt[2]};
-        scratch.quad_weights[q] = quad_weights[q];
+    const bool need_physical_points = hasFlag(required_data, RequiredData::PhysicalPoints);
+    if (mapping->isAffine() && n_qpts > 0 && dim == 3) {
+        const auto& qpt0 = quad_points[0];
+        const math::Vector<Real, 3> xi0{qpt0[0], qpt0[1], qpt0[2]};
+        const auto J = mapping->jacobian(xi0);
+        const auto J_inv = J.inverse();
+        const Real det_J = J.determinant();
+        const Real abs_det_J = std::abs(det_J);
 
-        const math::Vector<Real, 3> xi{qpt[0], qpt[1], qpt[2]};
-        const auto x_phys = mapping->map_to_physical(xi);
-        scratch.phys_points[q] = {x_phys[0], x_phys[1], x_phys[2]};
-
-        const auto J = mapping->jacobian(xi);
-        const auto J_inv = mapping->jacobian_inverse(xi);
-        const Real det_J = mapping->jacobian_determinant(xi);
-
+        AssemblyContext::Matrix3x3 J_arr{};
+        AssemblyContext::Matrix3x3 J_inv_arr{};
         for (int i = 0; i < 3; ++i) {
             for (int j = 0; j < 3; ++j) {
-                scratch.jacobians[q][i][j] = J(i, j);
-                scratch.inv_jacobians[q][i][j] = J_inv(i, j);
+                J_arr[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = J(i, j);
+                J_inv_arr[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = J_inv(i, j);
             }
         }
-        scratch.jac_dets[q] = det_J;
-        scratch.integration_weights[q] = quad_weights[q] * std::abs(det_J);
+
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const auto& qpt = quad_points[q];
+            scratch.quad_points[q] = {qpt[0], qpt[1], qpt[2]};
+            scratch.quad_weights[q] = quad_weights[q];
+            if (need_physical_points) {
+                const math::Vector<Real, 3> xi{qpt[0], qpt[1], qpt[2]};
+                const auto x_phys = mapping->map_to_physical(xi);
+                scratch.phys_points[q] = {x_phys[0], x_phys[1], x_phys[2]};
+            } else {
+                scratch.phys_points[q] = {0.0, 0.0, 0.0};
+            }
+            scratch.jacobians[q] = J_arr;
+            scratch.inv_jacobians[q] = J_inv_arr;
+            scratch.jac_dets[q] = det_J;
+            scratch.integration_weights[q] = quad_weights[q] * abs_det_J;
+        }
+    } else {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const auto& qpt = quad_points[q];
+            scratch.quad_points[q] = {qpt[0], qpt[1], qpt[2]};
+            scratch.quad_weights[q] = quad_weights[q];
+
+            const math::Vector<Real, 3> xi{qpt[0], qpt[1], qpt[2]};
+            if (need_physical_points) {
+                const auto x_phys = mapping->map_to_physical(xi);
+                scratch.phys_points[q] = {x_phys[0], x_phys[1], x_phys[2]};
+            } else {
+                scratch.phys_points[q] = {0.0, 0.0, 0.0};
+            }
+
+            const auto J = mapping->jacobian(xi);
+            const auto J_inv = mapping->jacobian_inverse(xi);
+            const Real det_J = mapping->jacobian_determinant(xi);
+
+            for (int i = 0; i < 3; ++i) {
+                for (int j = 0; j < 3; ++j) {
+                    scratch.jacobians[q][i][j] = J(i, j);
+                    scratch.inv_jacobians[q][i][j] = J_inv(i, j);
+                }
+            }
+            scratch.jac_dets[q] = det_J;
+            scratch.integration_weights[q] = quad_weights[q] * std::abs(det_J);
+        }
     }
 
     const auto& basis = element.basis();
-    std::vector<Real> values_at_pt;
-    std::vector<basis::Gradient> gradients_at_pt;
+    if (scratch.cached_basis_entry == nullptr ||
+        scratch.cached_basis != &basis ||
+        scratch.cached_basis_quad != quad_rule.get() ||
+        scratch.cached_basis_hessians != need_basis_hessians) {
+        scratch.cached_basis_entry = &basis::BasisCache::instance().get_or_compute(
+            basis, *quad_rule, /*gradients=*/true, need_basis_hessians);
+        scratch.cached_basis = &basis;
+        scratch.cached_basis_quad = quad_rule.get();
+        scratch.cached_basis_hessians = need_basis_hessians;
+    }
+    const auto& basis_cache = *scratch.cached_basis_entry;
 
     for (LocalIndex q = 0; q < n_qpts; ++q) {
-        const math::Vector<Real, 3> xi{
-            scratch.quad_points[q][0],
-            scratch.quad_points[q][1],
-            scratch.quad_points[q][2]};
-
-        basis.evaluate_values(xi, values_at_pt);
-        basis.evaluate_gradients(xi, gradients_at_pt);
-        if (need_basis_hessians) {
-            basis.evaluate_hessians(xi, hessians_at_pt);
-        }
-
         for (LocalIndex i = 0; i < n_dofs; ++i) {
             const LocalIndex si = is_product ? static_cast<LocalIndex>(i % n_scalar_dofs) : i;
             const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
             const std::size_t idx_phys = static_cast<std::size_t>(q * n_dofs + i);
-            scratch.basis_values[idx] = values_at_pt[static_cast<std::size_t>(si)];
+            const auto sisz = static_cast<std::size_t>(si);
+            const auto qsz = static_cast<std::size_t>(q);
+            scratch.basis_values[idx] = basis_cache.scalarValue(sisz, qsz);
+            const auto& grad = basis_cache.gradients[qsz][sisz];
             scratch.ref_gradients[idx] = {
-                gradients_at_pt[static_cast<std::size_t>(si)][0],
-                gradients_at_pt[static_cast<std::size_t>(si)][1],
-                gradients_at_pt[static_cast<std::size_t>(si)][2]};
+                grad[0],
+                grad[1],
+                grad[2]};
 
             const auto& grad_ref = scratch.ref_gradients[idx];
             const auto& J_inv = scratch.inv_jacobians[q];
@@ -369,12 +441,12 @@ void prepareCellContext(AssemblyContext& context,
             scratch.phys_gradients[idx_phys] = grad_phys;
 
             if (need_basis_hessians) {
+                const auto& hess = basis_cache.hessians[qsz][sisz];
                 AssemblyContext::Matrix3x3 H_ref{};
                 for (int r = 0; r < 3; ++r) {
                     for (int c = 0; c < 3; ++c) {
                         H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                            hessians_at_pt[static_cast<std::size_t>(si)](
-                                static_cast<std::size_t>(r), static_cast<std::size_t>(c));
+                            hess(static_cast<std::size_t>(r), static_cast<std::size_t>(c));
                     }
                 }
                 ref_hessians[idx] = H_ref;
@@ -420,11 +492,11 @@ void prepareCellContext(AssemblyContext& context,
         }
 
         Real h = 0.0;
-        for (std::size_t a = 0; a < node_coords.size(); ++a) {
-            for (std::size_t b = a + 1; b < node_coords.size(); ++b) {
-                const Real dx = node_coords[a][0] - node_coords[b][0];
-                const Real dy = node_coords[a][1] - node_coords[b][1];
-                const Real dz = node_coords[a][2] - node_coords[b][2];
+        for (std::size_t a = 0; a < scratch.node_coords.size(); ++a) {
+            for (std::size_t b = a + 1; b < scratch.node_coords.size(); ++b) {
+                const Real dx = scratch.node_coords[a][0] - scratch.node_coords[b][0];
+                const Real dy = scratch.node_coords[a][1] - scratch.node_coords[b][1];
+                const Real dz = scratch.node_coords[a][2] - scratch.node_coords[b][2];
                 const Real dist = std::sqrt(dx * dx + dy * dy + dz * dz);
                 if (dist > h) h = dist;
             }
@@ -1571,6 +1643,183 @@ std::vector<Real> FunctionalAssembler::assembleMultiple(
     last_result_.elements_processed = elements_processed;
 
     return results;
+}
+
+void FunctionalAssembler::evaluateCellFunctionals(std::span<FunctionalKernel* const> kernels,
+                                                  const CellFunctionalVisitor& visitor)
+{
+    if (!isConfigured()) {
+        throw std::runtime_error("FunctionalAssembler: not configured");
+    }
+    if (kernels.empty()) {
+        return;
+    }
+    if (!visitor) {
+        throw std::invalid_argument("FunctionalAssembler::evaluateCellFunctionals: null visitor");
+    }
+
+    auto start_time = std::chrono::steady_clock::now();
+
+    RequiredData required = RequiredData::None;
+    std::vector<FieldRequirement> field_reqs;
+    for (auto* kernel : kernels) {
+        FE_CHECK_NOT_NULL(kernel, "FunctionalAssembler::evaluateCellFunctionals: kernel");
+        required |= kernel->getRequiredData();
+        for (const auto& fr : kernel->fieldRequirements()) {
+            auto it = std::find_if(field_reqs.begin(), field_reqs.end(),
+                                   [&](const FieldRequirement& existing) {
+                                       return existing.field == fr.field;
+                                   });
+            if (it == field_reqs.end()) {
+                field_reqs.push_back(fr);
+            } else {
+                it->required |= fr.required;
+            }
+        }
+    }
+
+    RequiredData context_required = required;
+    if (!field_reqs.empty()) {
+        RequiredData field_required = RequiredData::None;
+        for (const auto& fr : field_reqs) {
+            field_required |= fr.required;
+        }
+        context_required |= field_required;
+        if (hasFlag(field_required, RequiredData::SolutionHessians) ||
+            hasFlag(field_required, RequiredData::SolutionLaplacians)) {
+            context_required |= RequiredData::BasisHessians;
+        }
+    }
+
+    const bool need_solution =
+        hasFlag(required, RequiredData::SolutionCoefficients) ||
+        hasFlag(required, RequiredData::SolutionValues) ||
+        hasFlag(required, RequiredData::SolutionGradients) ||
+        hasFlag(required, RequiredData::SolutionHessians) ||
+        hasFlag(required, RequiredData::SolutionLaplacians) ||
+        !field_reqs.empty();
+
+    const std::size_t requested_batch_size = std::max<std::size_t>(options_.cell_batch_size, 1u);
+    const std::size_t batch_size = std::min<std::size_t>(requested_batch_size, 256u);
+    std::vector<AssemblyContext> contexts(batch_size);
+    std::vector<const AssemblyContext*> context_ptrs(batch_size, nullptr);
+    std::vector<GlobalIndex> cell_ids(batch_size, 0);
+    std::vector<Real> cell_measures(batch_size, Real(0.0));
+    std::vector<Real> kernel_totals(batch_size, Real(0.0));
+    std::vector<Real> values(batch_size * kernels.size(), Real(0.0));
+    std::vector<Real> local_solution;
+    std::vector<Real> local_prev_solution;
+    std::size_t batch_count = 0u;
+    GlobalIndex elements_processed = 0;
+
+    auto prepare_context = [&](AssemblyContext& ctx, GlobalIndex cell_id) {
+        prepareCellContext(ctx, *mesh_, cell_id, *space_, context_required);
+        ctx.clearAllPreviousSolutionData();
+        ctx.setTimeIntegrationContext(time_integration_);
+        ctx.setTime(time_);
+        ctx.setTimeStep(dt_);
+        ctx.setRealParameterGetter(get_real_param_);
+        ctx.setParameterGetter(get_param_);
+        ctx.setUserData(user_data_);
+        ctx.setJITConstants(jit_constants_);
+        ctx.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+        ctx.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
+        ctx.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
+        ctx.setHistoryWeights(history_weights_);
+
+        if (need_solution) {
+            FE_THROW_IF(solution_view_ == nullptr && solution_.empty(), FEException,
+                        "FunctionalAssembler::evaluateCellFunctionals: kernel requires solution but no solution was set");
+            gatherPrimaryFieldCoefficients(cell_id,
+                                           solution_view_,
+                                           solution_,
+                                           local_solution,
+                                           "FunctionalAssembler::evaluateCellFunctionals");
+            ctx.setSolutionCoefficients(local_solution);
+        }
+
+        if (!previous_solutions_.empty()) {
+            for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
+                const auto& prev = previous_solutions_[k];
+                const auto* prev_view = (k < previous_solution_views_.size())
+                                            ? previous_solution_views_[k]
+                                            : nullptr;
+                if (prev_view == nullptr && prev.empty()) {
+                    continue;
+                }
+                gatherPrimaryFieldCoefficients(cell_id,
+                                               prev_view,
+                                               prev,
+                                               local_prev_solution,
+                                               "FunctionalAssembler::evaluateCellFunctionals");
+                ctx.setPreviousSolutionCoefficientsK(static_cast<int>(k + 1u),
+                                                     local_prev_solution);
+            }
+        }
+
+        if (!field_reqs.empty()) {
+            bindFieldSolutionData(ctx, field_reqs);
+        }
+
+        Real cell_measure = 0.0;
+        for (const auto w : ctx.integrationWeights()) {
+            cell_measure += w;
+        }
+        return cell_measure;
+    };
+
+    auto flush_batch = [&]() {
+        if (batch_count == 0u) {
+            return;
+        }
+
+        const auto context_span =
+            std::span<const AssemblyContext* const>(context_ptrs.data(), batch_count);
+        for (std::size_t k = 0; k < kernels.size(); ++k) {
+            if (!kernels[k]->hasCell()) {
+                std::fill_n(kernel_totals.begin(), batch_count, Real(0.0));
+            } else {
+                kernels[k]->evaluateCellTotalBatch(
+                    context_span,
+                    std::span<Real>(kernel_totals.data(), batch_count));
+            }
+            for (std::size_t i = 0; i < batch_count; ++i) {
+                values[i * kernels.size() + k] = kernel_totals[i];
+            }
+        }
+
+        for (std::size_t i = 0; i < batch_count; ++i) {
+            visitor(cell_ids[i],
+                    std::span<const Real>(values.data() + i * kernels.size(), kernels.size()),
+                    cell_measures[i]);
+        }
+        elements_processed += static_cast<GlobalIndex>(batch_count);
+        batch_count = 0u;
+    };
+
+    mesh_->forEachCell([&](GlobalIndex cell_id) {
+        if (!mesh_->isOwnedCell(cell_id)) {
+            return;
+        }
+
+        auto& ctx = contexts[batch_count];
+        cell_ids[batch_count] = cell_id;
+        cell_measures[batch_count] = prepare_context(ctx, cell_id);
+        context_ptrs[batch_count] = &ctx;
+        ++batch_count;
+
+        if (batch_count == batch_size) {
+            flush_batch();
+        }
+    });
+
+    flush_batch();
+
+    auto end_time = std::chrono::steady_clock::now();
+    last_result_ = FunctionalResult{};
+    last_result_.success = true;
+    last_result_.elements_processed = elements_processed;
+    last_result_.elapsed_seconds = std::chrono::duration<double>(end_time - start_time).count();
 }
 
 // ============================================================================

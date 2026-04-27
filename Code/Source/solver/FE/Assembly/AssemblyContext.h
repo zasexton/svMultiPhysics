@@ -62,6 +62,7 @@
 #include "Core/Types.h"
 #include "Core/AlignedAllocator.h"
 #include "Core/ParameterValue.h"
+#include "Core/StateVariableMetadata.h"
 #include "AssemblyKernel.h"
 #include "Assembly/JIT/FieldSolutions.h"
 #include "TimeIntegrationContext.h"
@@ -562,6 +563,11 @@ public:
     [[nodiscard]] Vector3D previousCoordinate(LocalIndex q) const;
     [[nodiscard]] Vector3D previousMeshVelocity(LocalIndex q) const;
     [[nodiscard]] Vector3D predictedMeshVelocity(LocalIndex q) const;
+    [[nodiscard]] Matrix3x3 meshDisplacementJacobian(LocalIndex q) const;
+    [[nodiscard]] Matrix3x3 meshVelocityJacobian(LocalIndex q) const;
+    [[nodiscard]] Matrix3x3 meshAccelerationJacobian(LocalIndex q) const;
+    [[nodiscard]] Matrix3x3 previousMeshVelocityJacobian(LocalIndex q) const;
+    [[nodiscard]] Matrix3x3 predictedMeshVelocityJacobian(LocalIndex q) const;
     [[nodiscard]] std::span<const Vector3D> meshDisplacements() const noexcept
     {
         return mesh_displacements_;
@@ -585,6 +591,26 @@ public:
     [[nodiscard]] std::span<const Vector3D> predictedMeshVelocities() const noexcept
     {
         return predicted_mesh_velocities_;
+    }
+    [[nodiscard]] std::span<const Matrix3x3> meshDisplacementJacobians() const noexcept
+    {
+        return mesh_displacement_jacobians_;
+    }
+    [[nodiscard]] std::span<const Matrix3x3> meshVelocityJacobians() const noexcept
+    {
+        return mesh_velocity_jacobians_;
+    }
+    [[nodiscard]] std::span<const Matrix3x3> meshAccelerationJacobians() const noexcept
+    {
+        return mesh_acceleration_jacobians_;
+    }
+    [[nodiscard]] std::span<const Matrix3x3> previousMeshVelocityJacobians() const noexcept
+    {
+        return previous_mesh_velocity_jacobians_;
+    }
+    [[nodiscard]] std::span<const Matrix3x3> predictedMeshVelocityJacobians() const noexcept
+    {
+        return predicted_mesh_velocity_jacobians_;
     }
 
     // Interleaved quadrature-point geometry (SoA->AoSoA bridge for JIT kernels):
@@ -1232,13 +1258,23 @@ public:
     void setMaterialState(std::byte* cell_state_base,
                           std::size_t bytes_per_qpt,
                           std::size_t stride_bytes,
-                          std::size_t alignment_bytes = alignof(std::max_align_t)) noexcept;
+                          std::size_t alignment_bytes = alignof(std::max_align_t),
+                          std::span<const state::StateVariableMetadata> variables = {},
+                          state::StateVariableLifecycle old_lifecycle =
+                              state::StateVariableLifecycle::CommittedOld,
+                          state::StateVariableLifecycle work_lifecycle =
+                              state::StateVariableLifecycle::TrialWork) noexcept;
 
     void setMaterialState(std::byte* cell_state_old_base,
                           std::byte* cell_state_work_base,
                           std::size_t bytes_per_qpt,
                           std::size_t stride_bytes,
-                          std::size_t alignment_bytes = alignof(std::max_align_t)) noexcept;
+                          std::size_t alignment_bytes = alignof(std::max_align_t),
+                          std::span<const state::StateVariableMetadata> variables = {},
+                          state::StateVariableLifecycle old_lifecycle =
+                              state::StateVariableLifecycle::CommittedOld,
+                          state::StateVariableLifecycle work_lifecycle =
+                              state::StateVariableLifecycle::TrialWork) noexcept;
 
     [[nodiscard]] bool hasMaterialState() const noexcept { return material_state_work_base_ != nullptr; }
     [[nodiscard]] std::size_t materialStateBytesPerQpt() const noexcept { return material_state_bytes_per_qpt_; }
@@ -1247,6 +1283,18 @@ public:
 
     [[nodiscard]] const std::byte* materialStateOldBase() const noexcept { return material_state_old_base_; }
     [[nodiscard]] std::byte* materialStateWorkBase() const noexcept { return material_state_work_base_; }
+    [[nodiscard]] std::span<const state::StateVariableMetadata> materialStateVariables() const noexcept
+    {
+        return material_state_variables_;
+    }
+    [[nodiscard]] state::StateVariableLifecycle materialStateOldLifecycle() const noexcept
+    {
+        return material_state_old_lifecycle_;
+    }
+    [[nodiscard]] state::StateVariableLifecycle materialStateWorkLifecycle() const noexcept
+    {
+        return material_state_work_lifecycle_;
+    }
 
     /**
      * @brief Access the state block for a single integration point
@@ -1775,6 +1823,11 @@ public:
     void setPreviousCoordinates(std::span<const Vector3D> coordinates);
     void setPreviousMeshVelocities(std::span<const Vector3D> velocities);
     void setPredictedMeshVelocities(std::span<const Vector3D> velocities);
+    void setMeshDisplacementJacobians(std::span<const Matrix3x3> jacobians);
+    void setMeshVelocityJacobians(std::span<const Matrix3x3> jacobians);
+    void setMeshAccelerationJacobians(std::span<const Matrix3x3> jacobians);
+    void setPreviousMeshVelocityJacobians(std::span<const Matrix3x3> jacobians);
+    void setPredictedMeshVelocityJacobians(std::span<const Matrix3x3> jacobians);
 
     // =========================================================================
     // Direct Geometry Population (zero-copy path)
@@ -1981,6 +2034,11 @@ private:
     JITAlignedVector<Vector3D> previous_coordinates_{};
     JITAlignedVector<Vector3D> previous_mesh_velocities_{};
     JITAlignedVector<Vector3D> predicted_mesh_velocities_{};
+    JITAlignedVector<Matrix3x3> mesh_displacement_jacobians_{};
+    JITAlignedVector<Matrix3x3> mesh_velocity_jacobians_{};
+    JITAlignedVector<Matrix3x3> mesh_acceleration_jacobians_{};
+    JITAlignedVector<Matrix3x3> previous_mesh_velocity_jacobians_{};
+    JITAlignedVector<Matrix3x3> predicted_mesh_velocity_jacobians_{};
 
     // Entity measures (optional)
     Real cell_diameter_{0.0};
@@ -2074,6 +2132,11 @@ private:
     std::size_t material_state_bytes_per_qpt_{0};
     std::size_t material_state_stride_bytes_{0};
     std::size_t material_state_alignment_bytes_{alignof(std::max_align_t)};
+    std::span<const state::StateVariableMetadata> material_state_variables_{};
+    state::StateVariableLifecycle material_state_old_lifecycle_{
+        state::StateVariableLifecycle::CommittedOld};
+    state::StateVariableLifecycle material_state_work_lifecycle_{
+        state::StateVariableLifecycle::TrialWork};
 
     // Optional time/parameter context (owned by Systems)
     Real time_{0.0};

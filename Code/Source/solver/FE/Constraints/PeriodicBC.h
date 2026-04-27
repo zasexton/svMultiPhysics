@@ -219,6 +219,8 @@ public:
      */
     [[nodiscard]] ConstraintInfo getInfo() const override;
 
+    [[nodiscard]] ConstraintDependencyDeclaration dependencyDeclaration() const override;
+
     /**
      * @brief Clone this constraint
      */
@@ -317,6 +319,7 @@ public:
 private:
     // Periodic pairs
     std::vector<PeriodicPair> pairs_;
+    bool coordinate_matched_{false};
 
     // Options
     PeriodicBCOptions options_;

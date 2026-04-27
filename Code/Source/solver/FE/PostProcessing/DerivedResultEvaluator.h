@@ -10,6 +10,11 @@
 #include "PostProcessing/DerivedResultRegistry.h"
 #include "Systems/SystemState.h"
 
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
 namespace svmp {
 
 class MeshBase;
@@ -32,8 +37,15 @@ public:
                              const DerivedResultOutputOptions& options = {}) const;
 
 private:
+    struct CellAverageCache {
+        std::size_t components{0};
+        std::vector<double> values{};
+    };
+
     const systems::FESystem& system_;
     const systems::SystemStateView& state_;
+    mutable std::unordered_set<std::string> reusable_cell_average_keys_{};
+    mutable std::unordered_map<std::string, CellAverageCache> cell_average_cache_{};
 };
 
 } // namespace post

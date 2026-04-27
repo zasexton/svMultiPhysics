@@ -1194,6 +1194,9 @@ TEST(NavierStokesOutletFactory, NewOverload_RCRCR_FluxInstallation)
     for (svmp::FE::GlobalIndex vtx = 0; vtx < 4; ++vtx) {
         setFieldComponent(sol, sys, u_field, vtx, /*component=*/2, -1.0);
     }
+    if (!sys.constraints().empty()) {
+        sys.constraints().distribute(sol);
+    }
 
     SystemStateView state;
     state.time = 0.0;
@@ -1422,32 +1425,54 @@ TEST(NavierStokesOutletFactory, MixedFieldBoundaryMeshJacobianMatchesFDWithoutOu
     req.op = "ns";
     req.want_matrix = true;
     req.want_vector = true;
+    req.suppress_constraint_inhomogeneity = true;
     const auto ar = sys.assemble(req, state, &lhs, &rhs);
     ASSERT_TRUE(ar.success);
 
-    std::vector<Real> base_residual(n_dofs, 0.0);
-    for (std::size_t i = 0; i < n_dofs; ++i) {
-        base_residual[i] = rhs.getVectorEntry(static_cast<svmp::FE::GlobalIndex>(i));
+    std::vector<char> constrained(n_dofs, 0);
+    for (std::size_t dof = 0; dof < n_dofs; ++dof) {
+        constrained[dof] =
+            sys.constraints().isConstrained(static_cast<svmp::FE::GlobalIndex>(dof)) ? 1 : 0;
     }
 
     const Real eps = 1e-7;
     for (std::size_t col = 0; col < n_dofs; ++col) {
-        std::vector<Real> sol_pert(sol);
-        sol_pert[col] += eps;
+        if (constrained[col]) {
+            continue;
+        }
+        std::vector<Real> sol_plus(sol);
+        std::vector<Real> sol_minus(sol);
+        sol_plus[col] += eps;
+        sol_minus[col] -= eps;
+        if (!sys.constraints().empty()) {
+            sys.constraints().distribute(sol_plus);
+            sys.constraints().distribute(sol_minus);
+        }
 
-        SystemStateView ps = state;
-        ps.u = sol_pert;
+        SystemStateView ps_plus = state;
+        SystemStateView ps_minus = state;
+        ps_plus.u = sol_plus;
+        ps_minus.u = sol_minus;
 
-        svmp::FE::assembly::DenseVectorView rhs_pert(static_cast<svmp::FE::GlobalIndex>(n_dofs));
-        rhs_pert.zero();
+        svmp::FE::assembly::DenseVectorView rhs_plus(static_cast<svmp::FE::GlobalIndex>(n_dofs));
+        svmp::FE::assembly::DenseVectorView rhs_minus(static_cast<svmp::FE::GlobalIndex>(n_dofs));
+        rhs_plus.zero();
+        rhs_minus.zero();
         AssemblyRequest req_vec = req;
         req_vec.want_matrix = false;
-        const auto ar_pert = sys.assemble(req_vec, ps, nullptr, &rhs_pert);
-        ASSERT_TRUE(ar_pert.success);
+        const auto ar_plus = sys.assemble(req_vec, ps_plus, nullptr, &rhs_plus);
+        ASSERT_TRUE(ar_plus.success);
+        const auto ar_minus = sys.assemble(req_vec, ps_minus, nullptr, &rhs_minus);
+        ASSERT_TRUE(ar_minus.success);
 
         for (std::size_t row = 0; row < n_dofs; ++row) {
+            if (constrained[row]) {
+                continue;
+            }
             const Real fd =
-                (rhs_pert.getVectorEntry(static_cast<svmp::FE::GlobalIndex>(row)) - base_residual[row]) / eps;
+                (rhs_plus.getVectorEntry(static_cast<svmp::FE::GlobalIndex>(row)) -
+                 rhs_minus.getVectorEntry(static_cast<svmp::FE::GlobalIndex>(row))) /
+                (2.0 * eps);
             const Real analytic = lhs.getMatrixEntry(static_cast<svmp::FE::GlobalIndex>(row),
                                                      static_cast<svmp::FE::GlobalIndex>(col));
             EXPECT_NEAR(analytic, fd, std::max(1e-5, std::abs(fd) * 1e-4))

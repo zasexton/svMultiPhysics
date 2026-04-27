@@ -16,8 +16,11 @@
 
 #include "Mesh/Mesh.h"
 #include "Mesh/Core/MeshBase.h"
+#include "Mesh/Fields/MeshFields.h"
+#include "Mesh/Motion/MotionFields.h"
 #include "Mesh/Topology/CellShape.h"
 
+#include <string>
 #include <vector>
 
 using svmp::CellFamily;
@@ -37,6 +40,8 @@ using svmp::FE::spaces::H1Space;
 
 using svmp::FE::systems::FESystem;
 using svmp::FE::systems::FieldSpec;
+using svmp::FE::systems::GeometryTransactionCallback;
+using svmp::FE::systems::GeometryTransactionState;
 using svmp::FE::systems::SystemStateView;
 
 namespace {
@@ -153,6 +158,255 @@ TEST(OperatorBackends, AutoRegistersMatrixFreeForEligibleCellOnlyOperator)
     for (std::size_t i = 0; i < y.size(); ++i) {
         EXPECT_NEAR(y[i], y_ref[i], 1e-12);
     }
+}
+
+TEST(OperatorBackends, MatrixFreeMassTracksCurrentGeometryRevisionWithoutRefetch)
+{
+    auto mesh = build_single_quad_mesh();
+    mesh->set_current_coords(mesh->local_mesh().X_ref());
+    mesh->use_current_configuration();
+
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto mass_kernel = std::make_shared<MassKernel>(1.0);
+    std::shared_ptr<svmp::FE::assembly::IMatrixFreeKernel> mf_kernel =
+        svmp::FE::assembly::wrapAsMatrixFreeKernel(mass_kernel);
+
+    FESystem sys(mesh, svmp::Configuration::Current);
+    auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", u, mass_kernel);
+    sys.addMatrixFreeKernel("mass_mf", mf_kernel);
+    sys.setup();
+
+    DenseMatrixView initial_mass(sys.dofHandler().getNumDofs());
+    SystemStateView state;
+    ASSERT_TRUE(sys.assembleMass(state, initial_mass).success);
+
+    auto op = sys.matrixFreeOperator("mass_mf");
+    ASSERT_TRUE(op);
+
+    std::vector<Real> x(static_cast<std::size_t>(initial_mass.numRows()), 0.0);
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        x[i] = static_cast<Real>(i + 1);
+    }
+
+    std::vector<Real> y_initial(static_cast<std::size_t>(initial_mass.numRows()), 0.0);
+    op->apply(x, y_initial);
+    const auto y_initial_ref = applyDense(initial_mass, x);
+    for (std::size_t i = 0; i < y_initial.size(); ++i) {
+        EXPECT_NEAR(y_initial[i], y_initial_ref[i], 1e-12);
+    }
+
+    const auto revision_before = mesh->local_mesh().current_geometry_revision();
+    auto x_cur = mesh->local_mesh().X_ref();
+    for (std::size_t i = 0; i < x_cur.size(); i += 2u) {
+        x_cur[i] *= 2.0;
+    }
+    mesh->set_current_coords(x_cur);
+    mesh->use_current_configuration();
+    EXPECT_GT(mesh->local_mesh().current_geometry_revision(), revision_before);
+
+    DenseMatrixView moved_mass(sys.dofHandler().getNumDofs());
+    ASSERT_TRUE(sys.assembleMass(state, moved_mass).success);
+
+    std::vector<Real> y_moved(static_cast<std::size_t>(moved_mass.numRows()), 0.0);
+    op->apply(x, y_moved);
+    const auto y_moved_ref = applyDense(moved_mass, x);
+    for (std::size_t i = 0; i < y_moved.size(); ++i) {
+        EXPECT_NEAR(y_moved[i], y_moved_ref[i], 1e-12);
+    }
+    EXPECT_NEAR(y_moved[0], Real(2.0) * y_initial[0], 1e-12);
+}
+
+TEST(OperatorBackends, InvalidationPolicyDistinguishesGeometryFromTopologyLayout)
+{
+    auto mesh = build_single_quad_mesh();
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+
+    FESystem sys(mesh, svmp::Configuration::Current);
+    sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.setup();
+
+    const auto base_revision = sys.operatorRevisionSnapshot();
+    const auto dof_revision_before = sys.dofLayoutRevision();
+
+    auto x_cur = mesh->local_mesh().X_ref();
+    for (std::size_t i = 0; i < x_cur.size(); i += 2u) {
+        x_cur[i] *= 1.25;
+    }
+    mesh->set_current_coords(x_cur);
+    mesh->use_current_configuration();
+    sys.notifyMeshGeometryAdvanced();
+
+    const auto geometry_decision = sys.operatorInvalidationDecision(base_revision);
+    EXPECT_TRUE(geometry_decision.geometry_changed);
+    EXPECT_TRUE(geometry_decision.refresh_assembled_matrix);
+    EXPECT_TRUE(geometry_decision.refresh_matrix_free_geometry);
+    EXPECT_TRUE(geometry_decision.rebuild_preconditioner);
+    EXPECT_TRUE(geometry_decision.rebuild_multigrid_hierarchy);
+    EXPECT_TRUE(geometry_decision.reject_lagged_jacobian);
+    EXPECT_FALSE(geometry_decision.rebuild_dof_layout);
+    EXPECT_FALSE(geometry_decision.rebuild_sparsity_pattern);
+    EXPECT_EQ(sys.dofLayoutRevision(), dof_revision_before);
+
+    const auto moved_revision = sys.operatorRevisionSnapshot();
+    sys.notifyMeshTopologyLayoutChanged();
+    const auto topology_decision = sys.operatorInvalidationDecision(moved_revision);
+    EXPECT_TRUE(topology_decision.fe_dof_layout_changed);
+    EXPECT_TRUE(topology_decision.fe_constraint_layout_changed);
+    EXPECT_TRUE(topology_decision.fe_block_layout_changed);
+    EXPECT_TRUE(topology_decision.rebuild_dof_layout);
+    EXPECT_TRUE(topology_decision.rebuild_sparsity_pattern);
+    EXPECT_TRUE(topology_decision.rebuild_preconditioner);
+    EXPECT_TRUE(topology_decision.rebuild_multigrid_hierarchy);
+}
+
+TEST(OperatorBackends, MatrixFreeRefetchRefreshesGeometryWithoutDofLayoutRebuild)
+{
+    auto mesh = build_single_quad_mesh();
+    mesh->set_current_coords(mesh->local_mesh().X_ref());
+    mesh->use_current_configuration();
+
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto mass_kernel = std::make_shared<MassKernel>(1.0);
+    std::shared_ptr<svmp::FE::assembly::IMatrixFreeKernel> mf_kernel =
+        svmp::FE::assembly::wrapAsMatrixFreeKernel(mass_kernel);
+
+    FESystem sys(mesh, svmp::Configuration::Current);
+    auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", u, mass_kernel);
+    sys.addMatrixFreeKernel("mass_mf", mf_kernel);
+    sys.setup();
+
+    auto op_initial = sys.matrixFreeOperator("mass_mf");
+    ASSERT_TRUE(op_initial);
+    EXPECT_EQ(sys.matrixFreeOperatorRebuildCount("mass_mf"), 1u);
+    const auto dof_revision_before = sys.dofLayoutRevision();
+
+    auto x_cur = mesh->local_mesh().X_ref();
+    for (std::size_t i = 0; i < x_cur.size(); i += 2u) {
+        x_cur[i] *= 2.0;
+    }
+    mesh->set_current_coords(x_cur);
+    mesh->use_current_configuration();
+    sys.notifyMeshGeometryAdvanced();
+
+    auto op_moved = sys.matrixFreeOperator("mass_mf");
+    ASSERT_TRUE(op_moved);
+    EXPECT_EQ(sys.matrixFreeOperatorRebuildCount("mass_mf"), 2u);
+    EXPECT_EQ(sys.dofLayoutRevision(), dof_revision_before);
+
+    const auto decision = sys.matrixFreeOperatorLastInvalidation("mass_mf");
+    EXPECT_TRUE(decision.geometry_changed);
+    EXPECT_TRUE(decision.refresh_matrix_free_geometry);
+    EXPECT_FALSE(decision.rebuild_dof_layout);
+    EXPECT_FALSE(decision.rebuild_sparsity_pattern);
+}
+
+TEST(OperatorBackends, ReferenceRebaseInvalidatesGeometryWithoutDofLayoutRebuild)
+{
+    auto mesh = build_single_quad_mesh();
+    auto X_cur = mesh->local_mesh().X_ref();
+    for (std::size_t i = 0; i < X_cur.size(); i += 2u) {
+        X_cur[i] *= 1.5;
+    }
+    mesh->set_current_coords(X_cur);
+    mesh->use_current_configuration();
+
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto mass_kernel = std::make_shared<MassKernel>(1.0);
+    std::shared_ptr<svmp::FE::assembly::IMatrixFreeKernel> mf_kernel =
+        svmp::FE::assembly::wrapAsMatrixFreeKernel(mass_kernel);
+
+    FESystem sys(mesh, svmp::Configuration::Current);
+    auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", u, mass_kernel);
+    sys.addMatrixFreeKernel("mass_mf", mf_kernel);
+    sys.setup();
+
+    auto op_before = sys.matrixFreeOperator("mass_mf");
+    ASSERT_TRUE(op_before);
+    EXPECT_EQ(sys.matrixFreeOperatorRebuildCount("mass_mf"), 1u);
+
+    const auto base_revision = sys.operatorRevisionSnapshot();
+    const auto dof_revision_before = sys.dofLayoutRevision();
+    const auto rebase_epoch_before = mesh->local_mesh().reference_rebase_epoch();
+
+    sys.rebaseMeshReferenceToCurrent();
+
+    EXPECT_EQ(mesh->local_mesh().reference_rebase_epoch(), rebase_epoch_before + 1u);
+    EXPECT_FALSE(mesh->local_mesh().has_current_coords());
+    EXPECT_EQ(mesh->local_mesh().X_ref(), X_cur);
+
+    const auto decision = sys.operatorInvalidationDecision(base_revision);
+    EXPECT_TRUE(decision.reference_rebase_changed);
+    EXPECT_TRUE(decision.geometry_changed);
+    EXPECT_TRUE(decision.refresh_assembled_matrix);
+    EXPECT_TRUE(decision.refresh_matrix_free_geometry);
+    EXPECT_FALSE(decision.rebuild_dof_layout);
+    EXPECT_FALSE(decision.rebuild_sparsity_pattern);
+    EXPECT_EQ(sys.dofLayoutRevision(), dof_revision_before);
+
+    auto op_after = sys.matrixFreeOperator("mass_mf");
+    ASSERT_TRUE(op_after);
+    EXPECT_EQ(sys.matrixFreeOperatorRebuildCount("mass_mf"), 2u);
+    const auto backend_decision = sys.matrixFreeOperatorLastInvalidation("mass_mf");
+    EXPECT_TRUE(backend_decision.reference_rebase_changed);
+    EXPECT_FALSE(backend_decision.rebuild_dof_layout);
+    EXPECT_FALSE(backend_decision.rebuild_sparsity_pattern);
+}
+
+TEST(OperatorBackends, GeometryTransactionRollbackRestoresCoordinatesAndMotionFields)
+{
+    auto mesh = build_single_quad_mesh();
+    auto& local_mesh = mesh->local_mesh();
+    mesh->set_current_coords(local_mesh.X_ref());
+    mesh->use_current_configuration();
+
+    const auto handles = svmp::motion::attach_motion_fields(local_mesh, mesh->dim());
+    auto* displacement =
+        svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, handles.displacement);
+    ASSERT_NE(displacement, nullptr);
+    const auto displacement_count =
+        svmp::MeshFields::field_entity_count(local_mesh, handles.displacement) *
+        svmp::MeshFields::field_components(local_mesh, handles.displacement);
+    for (std::size_t i = 0; i < displacement_count; ++i) {
+        displacement[i] = static_cast<svmp::real_t>(i + 1);
+    }
+    const auto committed_coords = local_mesh.X_cur();
+    const std::vector<svmp::real_t> committed_displacement(
+        displacement, displacement + displacement_count);
+
+    FESystem sys(mesh, svmp::Configuration::Current);
+    std::size_t callback_count = 0;
+    sys.addGeometryTransactionCallback(GeometryTransactionCallback{
+        .name = "count",
+        .callback = [&](const auto&) { ++callback_count; },
+    });
+
+    const auto revision_before = local_mesh.current_geometry_revision();
+    sys.beginMeshCoordinateTransaction();
+    EXPECT_TRUE(sys.meshCoordinateTransactionActive());
+    EXPECT_EQ(sys.meshCoordinateTransactionState(), GeometryTransactionState::Trial);
+
+    auto trial_coords = committed_coords;
+    trial_coords[0] += 0.5;
+    mesh->set_current_coords(trial_coords);
+    displacement[0] = 99.0;
+
+    sys.rollbackMeshCoordinateTransaction();
+    EXPECT_FALSE(sys.meshCoordinateTransactionActive());
+    EXPECT_EQ(sys.meshCoordinateTransactionState(), GeometryTransactionState::RolledBack);
+    EXPECT_GT(local_mesh.current_geometry_revision(), revision_before);
+    EXPECT_EQ(local_mesh.X_cur(), committed_coords);
+    for (std::size_t i = 0; i < displacement_count; ++i) {
+        EXPECT_EQ(displacement[i], committed_displacement[i]);
+    }
+    EXPECT_GE(callback_count, 2u);
+    EXPECT_NE(sys.geometryTransactionDiagnostics().summary().find("rolled-back"),
+              std::string::npos);
 }
 
 TEST(OperatorBackends, FunctionalL2NormOfConstantOneIsOne)

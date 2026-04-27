@@ -30,6 +30,10 @@ public:
 
     [[nodiscard]] bool isTimeDependent() const noexcept override { return is_time_dependent_; }
 
+    [[nodiscard]] ConstraintDependencyDeclaration dependencyDeclaration() const override;
+
+    [[nodiscard]] systems::SetupStorageRequirements storageRequirements() const noexcept override;
+
 private:
     FieldId field_{INVALID_FIELD_ID};
     int boundary_marker_{-1};

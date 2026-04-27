@@ -380,8 +380,12 @@ struct CompilationPlan {
         }
 
         group.cacheable = cacheable;
+        const bool uses_cell_batch_abi =
+            (group.key.domain == IntegralDomain::Cell) && jit_options.vectorize;
         group.cache_key = computeKernelCacheKey(KernelCacheKeyInputs{
-            .abi_version = assembly::jit::kKernelArgsABIVersionV6,
+            .abi_version = uses_cell_batch_abi
+                ? assembly::jit::kCellKernelBatchArgsABIV1
+                : assembly::jit::kKernelArgsABIVersionV6,
             .abi_layout_revision = assembly::jit::kKernelArgsABILayoutRevisionV6,
             .form_kind = ir.kind(),
             .domain = group.key.domain,

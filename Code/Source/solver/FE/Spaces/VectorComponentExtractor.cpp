@@ -7,7 +7,10 @@
  */
 
 #include "Spaces/VectorComponentExtractor.h"
+
 #include "Core/FEException.h"
+#include "Geometry/FrameAwareTransform.h"
+
 #include <algorithm>
 
 namespace svmp {
@@ -23,7 +26,7 @@ std::vector<Real> VectorComponentExtractor::normal_component(
 
     std::vector<Real> result(vector_field.size());
     for (std::size_t i = 0; i < vector_field.size(); ++i) {
-        result[i] = vector_field[i].dot(normals[i]);
+        result[i] = geometry::FrameAwareTransform::normalScalarComponent(vector_field[i], normals[i]);
     }
     return result;
 }
@@ -34,7 +37,7 @@ std::vector<Real> VectorComponentExtractor::normal_component(
 
     std::vector<Real> result(vector_field.size());
     for (std::size_t i = 0; i < vector_field.size(); ++i) {
-        result[i] = vector_field[i].dot(normal);
+        result[i] = geometry::FrameAwareTransform::normalScalarComponent(vector_field[i], normal);
     }
     return result;
 }
@@ -48,8 +51,7 @@ std::vector<VectorComponentExtractor::Vec3> VectorComponentExtractor::tangential
 
     std::vector<Vec3> result(vector_field.size());
     for (std::size_t i = 0; i < vector_field.size(); ++i) {
-        const Real vn = vector_field[i].dot(normals[i]);
-        result[i] = vector_field[i] - vn * normals[i];
+        result[i] = geometry::FrameAwareTransform::tangentialComponent(vector_field[i], normals[i]);
     }
     return result;
 }
@@ -60,8 +62,7 @@ std::vector<VectorComponentExtractor::Vec3> VectorComponentExtractor::tangential
 
     std::vector<Vec3> result(vector_field.size());
     for (std::size_t i = 0; i < vector_field.size(); ++i) {
-        const Real vn = vector_field[i].dot(normal);
-        result[i] = vector_field[i] - vn * normal;
+        result[i] = geometry::FrameAwareTransform::tangentialComponent(vector_field[i], normal);
     }
     return result;
 }
@@ -111,31 +112,10 @@ void VectorComponentExtractor::compute_tangent_basis(
     Vec3& tangent1,
     Vec3& tangent2) {
 
-    // Find the component of the normal with smallest absolute value
-    // This ensures we pick a direction that's not nearly parallel to the normal
-    const Real abs_x = std::abs(normal[0]);
-    const Real abs_y = std::abs(normal[1]);
-    const Real abs_z = std::abs(normal[2]);
-
-    Vec3 helper;
-    if (abs_x <= abs_y && abs_x <= abs_z) {
-        // x is smallest, use x-axis
-        helper = Vec3{Real(1), Real(0), Real(0)};
-    } else if (abs_y <= abs_z) {
-        // y is smallest, use y-axis
-        helper = Vec3{Real(0), Real(1), Real(0)};
-    } else {
-        // z is smallest, use z-axis
-        helper = Vec3{Real(0), Real(0), Real(1)};
-    }
-
-    // First tangent: helper × normal (perpendicular to normal)
-    tangent1 = math::cross(helper, normal);
-    tangent1.normalize();
-
-    // Second tangent: normal × tangent1 (perpendicular to both)
-    tangent2 = math::cross(normal, tangent1);
-    tangent2.normalize();
+    const auto frame = geometry::FrameAwareTransform::surfaceFrame(normal);
+    FE_CHECK_ARG(frame.valid, "Cannot compute tangent basis from degenerate normal");
+    tangent1 = frame.tangent0;
+    tangent2 = frame.tangent1;
 }
 
 VectorComponentExtractor::Vec2 VectorComponentExtractor::compute_tangent_2d(const Vec2& normal) {
@@ -148,8 +128,8 @@ bool VectorComponentExtractor::verify_decomposition(
     const Vec3& normal,
     Real tol) {
 
-    const Real vn = v.dot(normal);
-    Vec3 vt = v - vn * normal;
+    const Real vn = geometry::FrameAwareTransform::normalScalarComponent(v, normal);
+    const Vec3 vt = geometry::FrameAwareTransform::tangentialComponent(v, normal);
 
     const Real v_norm_sq = v.norm_squared();
     const Real vn_sq = vn * vn;

@@ -94,6 +94,7 @@ struct MeshRevisionState {
   std::uint64_t geometry{0};
   std::uint64_t reference_geometry{0};
   std::uint64_t current_geometry{0};
+  std::uint64_t reference_rebase{0};
   std::uint64_t topology{0};
   std::uint64_t ownership{0};
   std::uint64_t numbering{0};
@@ -251,6 +252,29 @@ public:
     }
   }
 
+  void notify_reference_rebased() {
+    auto state = state_;
+    if (!state) {
+      return;
+    }
+
+    std::vector<MeshObserver*> snapshot;
+    std::vector<std::shared_ptr<MeshObserver>> owned_snapshot;
+    {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      bump_reference_rebase_revision(state->revisions);
+      snapshot = state->observers;
+      owned_snapshot = state->owned_observers;
+    }
+
+    (void)owned_snapshot;
+    for (auto* obs : snapshot) {
+      if (obs) {
+        obs->on_mesh_event(MeshEvent::GeometryChanged);
+      }
+    }
+  }
+
   [[nodiscard]] MeshRevisionState revision_state() const {
     auto state = state_;
     if (!state) {
@@ -264,12 +288,23 @@ public:
   [[nodiscard]] std::uint64_t geometry_revision() const { return revision_state().geometry; }
   [[nodiscard]] std::uint64_t reference_geometry_revision() const { return revision_state().reference_geometry; }
   [[nodiscard]] std::uint64_t current_geometry_revision() const { return revision_state().current_geometry; }
+  [[nodiscard]] std::uint64_t reference_rebase_epoch() const { return revision_state().reference_rebase; }
   [[nodiscard]] std::uint64_t topology_revision() const { return revision_state().topology; }
   [[nodiscard]] std::uint64_t ownership_revision() const { return revision_state().ownership; }
   [[nodiscard]] std::uint64_t numbering_revision() const { return revision_state().numbering; }
   [[nodiscard]] std::uint64_t field_layout_revision() const { return revision_state().field_layout; }
   [[nodiscard]] std::uint64_t label_revision() const { return revision_state().labels; }
   [[nodiscard]] std::uint64_t active_configuration_epoch() const { return revision_state().active_configuration; }
+
+  void restore_revision_state(MeshRevisionState revisions) {
+    auto state = state_;
+    if (!state) {
+      return;
+    }
+
+    std::lock_guard<std::mutex> lock(state->mutex);
+    state->revisions = revisions;
+  }
 
   void mark_active_configuration_changed() {
     auto state = state_;
@@ -369,6 +404,13 @@ private:
         ++revisions.current_geometry;
         break;
     }
+  }
+
+  static void bump_reference_rebase_revision(MeshRevisionState& revisions) {
+    ++revisions.geometry;
+    ++revisions.reference_geometry;
+    ++revisions.current_geometry;
+    ++revisions.reference_rebase;
   }
 
   std::shared_ptr<State> state_;

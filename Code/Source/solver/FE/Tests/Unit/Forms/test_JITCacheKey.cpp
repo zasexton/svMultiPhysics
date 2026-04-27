@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include "Assembly/JIT/KernelArgs.h"
 #include "Forms/FormIR.h"
 #include "Forms/JIT/JITCacheKey.h"
 
@@ -150,6 +151,17 @@ TEST(JITCacheKey, StructuralInputsChangeKey)
     expectKeyChanges("IR hash", [](auto& in) { in.combined_ir_hash ^= 0x10ULL; });
     expectKeyChanges("test space hash", [](auto& in) { in.test_space_hash ^= 0x20ULL; });
     expectKeyChanges("trial space hash", [](auto& in) { in.trial_space_hash ^= 0x40ULL; });
+}
+
+TEST(JITCacheKey, CellBatchAbiDoesNotAliasScalarAbi)
+{
+    auto scalar = baseInputs();
+    scalar.abi_version = 6u;
+
+    auto batch = scalar;
+    batch.abi_version = assembly::jit::kCellKernelBatchArgsABIV1;
+
+    EXPECT_NE(keyFor(batch), keyFor(scalar));
 }
 
 TEST(JITCacheKey, TargetAndHardwareInputsChangeKey)
