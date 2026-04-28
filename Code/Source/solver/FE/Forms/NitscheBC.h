@@ -18,7 +18,11 @@ namespace forms {
 namespace bc {
 
 /**
- * @brief Scalar Nitsche Dirichlet BC for diffusion-type operators
+ * @brief Legacy scalar Nitsche Dirichlet BC for diffusion-type operators
+ *
+ * New physics modules should prefer `TraceNitscheBC`, which receives explicit
+ * consistency flux, adjoint flux, and penalty-weight expressions from the
+ * formulation.
  *
  * Imposes u = g weakly on boundary marker Γ(m) via Nitsche's method:
  *  1) Consistency: -∫ k (∇u·n) v ds

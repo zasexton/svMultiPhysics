@@ -87,6 +87,57 @@ TEST(SpectralEigenJIT, EigenNodesMatchInterpreter)
     jit_opts.optimization_level = 2;
     jit_opts.vectorize = true;
     forms::jit::JITKernelWrapper jit_kernel(jit_fallback, jit_opts);
+    jit_kernel.ensureCompiled();
+    ASSERT_TRUE(jit_kernel.isJITReady());
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    assembly::DenseMatrixView A_interp(dof_map.getNumDofs());
+    A_interp.zero();
+    (void)assembler.assembleMatrix(mesh, space, space, *interp_kernel, A_interp);
+
+    assembly::DenseMatrixView A_jit(dof_map.getNumDofs());
+    A_jit.zero();
+    (void)assembler.assembleMatrix(mesh, space, space, jit_kernel, A_jit);
+
+    expectDenseNear(A_jit, A_interp, 1e-12);
+}
+
+TEST(SpectralEigenJIT, EigenNodesHandleSIMDCellVaryingInputs)
+{
+    TwoTetraSharedFaceMeshAccess mesh;
+    auto dof_map = createTwoTetraDG_DofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    SymbolicOptions sym_opts;
+    sym_opts.jit.enable = true;
+    FormCompiler compiler(sym_opts);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    const auto volume = FormExpr::cellVolume();
+    const auto A = FormExpr::asTensor({{FormExpr::constant(1.0) + volume, FormExpr::constant(0.08)},
+                                       {FormExpr::constant(0.08), FormExpr::constant(1.7) - volume}});
+    const auto dA = FormExpr::asTensor({{FormExpr::constant(0.3) * volume, FormExpr::constant(0.02)},
+                                        {FormExpr::constant(0.02), FormExpr::constant(0.11) + volume}});
+
+    const auto lam = A.symmetricEigenvalue(0);
+    const auto dd = FormExpr::symmetricEigenvalueDirectionalDerivative(A, dA, 0);
+    const auto ddA = FormExpr::symmetricEigenvalueDirectionalDerivativeWrtA(A, dA, dA, 0);
+    const auto form = ((lam + dd + ddA) * u * v).dx();
+
+    auto interp_kernel = std::make_shared<FormKernel>(compiler.compileBilinear(form));
+    auto jit_fallback = std::make_shared<FormKernel>(compiler.compileBilinear(form));
+
+    forms::JITOptions jit_opts;
+    jit_opts.enable = true;
+    jit_opts.optimization_level = 2;
+    jit_opts.vectorize = true;
+    forms::jit::JITKernelWrapper jit_kernel(jit_fallback, jit_opts);
+    jit_kernel.ensureCompiled();
+    ASSERT_TRUE(jit_kernel.isJITReady());
 
     assembly::StandardAssembler assembler;
     assembler.setDofMap(dof_map);
@@ -105,4 +156,3 @@ TEST(SpectralEigenJIT, EigenNodesMatchInterpreter)
 #endif // SVMP_FE_ENABLE_LLVM_JIT
 
 } // namespace svmp::FE::forms::test
-

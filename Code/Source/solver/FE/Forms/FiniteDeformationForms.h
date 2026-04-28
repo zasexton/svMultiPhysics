@@ -250,6 +250,9 @@ struct FiniteDeformationLinearizationExpressions {
            (dFinvT * reference_normal) * det(F);
 }
 
+// Legacy mechanics shortcuts. New physics modules should write these densities
+// directly in their formulation files so the stress measure and virtual work
+// convention stay visible to reviewers.
 [[nodiscard]] inline FormExpr pk1InternalVirtualWorkDensity(const FormExpr& first_piola,
                                                             const FormExpr& test_displacement)
 {

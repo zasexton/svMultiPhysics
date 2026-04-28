@@ -14,7 +14,7 @@ TEST(MovingFrameForms, BuildsFrameTerminalsFromParameterSlots)
 
     const auto terminals = movingFrameTerminals(slots);
     EXPECT_TRUE(terminals.current_coordinate.isValid());
-    EXPECT_TRUE(terminals.domain_velocity.isValid());
+    EXPECT_TRUE(terminals.mesh_velocity.isValid());
     EXPECT_TRUE(terminals.relative_velocity.isValid());
 
     const auto origin = terminals.frame_origin.toString();

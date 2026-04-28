@@ -34,6 +34,7 @@
 #include "GeometryConfig.h"
 
 #include <algorithm>
+#include <cstddef>
 
 namespace svmp {
 
@@ -80,7 +81,98 @@ inline real_t signed_tet_volume6(const std::array<real_t, 3>& p0,
   return dot3(a, cross3(b, c));
 }
 
+inline void append_oriented_tet(std::vector<PolyhedronTet4>& out,
+                                std::array<std::array<real_t, 3>, 4> vertices) {
+  const real_t vol6 = signed_tet_volume6(vertices[0], vertices[1], vertices[2], vertices[3]);
+  if (std::abs(vol6) <= GeometryConfig::volume_epsilon() * 6.0) return;
+  if (vol6 < 0) std::swap(vertices[2], vertices[3]);
+  PolyhedronTet4 tet;
+  tet.vertices = vertices;
+  out.push_back(tet);
+}
+
 } // namespace
+
+std::vector<PolyhedronTet4> PolyhedronTessellation::linear_cell_tets(
+    const MeshBase& mesh,
+    index_t cell,
+    Configuration cfg) {
+  std::vector<PolyhedronTet4> out;
+  const auto shape = mesh.cell_shape(cell);
+  if (shape.family == CellFamily::Polyhedron) {
+    return convex_star_tets(mesh, cell, cfg);
+  }
+
+  const auto cell_vertices = mesh.cell_vertices_span(cell);
+  const auto* cell_verts = cell_vertices.first;
+  const auto n_cell_verts = cell_vertices.second;
+  const std::size_t n_corners =
+      shape.num_corners > 0
+          ? std::min<std::size_t>(static_cast<std::size_t>(shape.num_corners), n_cell_verts)
+          : n_cell_verts;
+  if (n_corners == 0u) return out;
+
+  std::vector<std::array<real_t, 3>> points;
+  points.reserve(n_corners);
+  for (std::size_t i = 0; i < n_corners; ++i) {
+    points.push_back(get_vertex(mesh, cell_verts[i], cfg));
+  }
+  return linear_cell_tets(shape.family, points);
+}
+
+std::vector<PolyhedronTet4> PolyhedronTessellation::linear_cell_tets(
+    CellFamily family,
+    const std::vector<std::array<real_t, 3>>& points) {
+  std::vector<PolyhedronTet4> out;
+
+  for (const auto& ids : linear_cell_tet_corner_indices(family, points.size())) {
+    std::array<std::array<real_t, 3>, 4> vertices{{
+        points[ids[0]],
+        points[ids[1]],
+        points[ids[2]],
+        points[ids[3]]}};
+    append_oriented_tet(out, vertices);
+  }
+
+  return out;
+}
+
+std::vector<std::array<std::size_t, 4>> PolyhedronTessellation::linear_cell_tet_corner_indices(
+    CellFamily family,
+    std::size_t point_count) {
+  std::vector<std::array<std::size_t, 4>> out;
+  const auto append = [&](std::array<std::size_t, 4> ids) {
+    for (const auto id : ids) {
+      if (id >= point_count) return;
+    }
+    out.push_back(ids);
+  };
+  switch (family) {
+    case CellFamily::Tetra:
+      append({0u, 1u, 2u, 3u});
+      break;
+    case CellFamily::Hex:
+      append({0u, 1u, 3u, 4u});
+      append({1u, 2u, 3u, 6u});
+      append({1u, 4u, 5u, 6u});
+      append({3u, 4u, 6u, 7u});
+      append({1u, 3u, 4u, 6u});
+      break;
+    case CellFamily::Wedge:
+      append({0u, 1u, 2u, 3u});
+      append({1u, 4u, 2u, 3u});
+      append({2u, 4u, 5u, 3u});
+      break;
+    case CellFamily::Pyramid:
+      append({0u, 1u, 2u, 4u});
+      append({0u, 2u, 3u, 4u});
+      break;
+    default:
+      break;
+  }
+
+  return out;
+}
 
 std::vector<PolyhedronTet4> PolyhedronTessellation::convex_star_tets(
     const MeshBase& mesh,
@@ -131,4 +223,3 @@ std::vector<PolyhedronTet4> PolyhedronTessellation::convex_star_tets(
 }
 
 } // namespace svmp
-

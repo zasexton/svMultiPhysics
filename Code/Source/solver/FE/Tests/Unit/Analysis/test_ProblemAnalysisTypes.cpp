@@ -6,9 +6,11 @@
 #include <gtest/gtest.h>
 
 #include "Analysis/ProblemAnalysisTypes.h"
+#include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ProblemAnalysisContext.h"
 #include "Analysis/ProblemAnalyzer.h"
 #include <sstream>
+#include <type_traits>
 #include <unordered_set>
 
 using namespace svmp::FE;
@@ -56,6 +58,8 @@ TEST(ProblemAnalysisTypes, ToString_IssueSeverity) {
 TEST(ProblemAnalysisTypes, ToString_VariableKind) {
     EXPECT_STREQ(toString(VariableKind::FieldComponent), "FieldComponent");
     EXPECT_STREQ(toString(VariableKind::AuxiliaryState), "AuxiliaryState");
+    EXPECT_STREQ(toString(VariableKind::AuxiliaryInput), "AuxiliaryInput");
+    EXPECT_STREQ(toString(VariableKind::AuxiliaryOutput), "AuxiliaryOutput");
     EXPECT_STREQ(toString(VariableKind::BoundaryFunctional), "BoundaryFunctional");
     EXPECT_STREQ(toString(VariableKind::GlobalScalar), "GlobalScalar");
 }
@@ -67,6 +71,7 @@ TEST(ProblemAnalysisTypes, ToString_DomainKind) {
     EXPECT_STREQ(toString(DomainKind::InterfaceFace), "InterfaceFace");
     EXPECT_STREQ(toString(DomainKind::Global), "Global");
     EXPECT_STREQ(toString(DomainKind::CoupledBoundary), "CoupledBoundary");
+    EXPECT_STREQ(toString(DomainKind::AuxiliaryCoupling), "AuxiliaryCoupling");
 }
 
 // ============================================================================
@@ -198,6 +203,11 @@ TEST(PropertyClaim, DefaultConstruction) {
     EXPECT_TRUE(claim.variables.empty());
     EXPECT_TRUE(claim.description.empty());
     EXPECT_TRUE(claim.evidence.empty());
+    EXPECT_FALSE(claim.applicability_class.has_value());
+    EXPECT_FALSE(claim.certification_class.has_value());
+    EXPECT_FALSE(claim.matrix_sign_structure_class.has_value());
+    EXPECT_FALSE(claim.operator_symmetry_class.has_value());
+    EXPECT_FALSE(claim.temporal_stability_class.has_value());
 }
 
 TEST(PropertyClaim, AddEvidence) {
@@ -418,6 +428,134 @@ TEST(ProblemAnalysisReport, EmptyReport_PrintsCleanly) {
     EXPECT_NE(s.find("0 claims"), std::string::npos);
 }
 
+TEST(ProblemAnalysisReport, ApplicationLogSummarizesGenericDecisions) {
+    ProblemAnalysisReport report;
+
+    PropertyClaim dmp;
+    dmp.kind = PropertyKind::DiscreteMaximumPrinciple;
+    dmp.status = PropertyStatus::Unknown;
+    dmp.claim_origin = "DiscreteMonotonicityAnalyzer";
+    dmp.field = 7;
+    dmp.applicability_class = ApplicabilityClass::Applicable;
+    dmp.certification_class = CertificationClass::Unknown;
+    dmp.description = "scalar operator requires reduced sign evidence";
+    report.claims.push_back(dmp);
+
+    PropertyClaim z_matrix;
+    z_matrix.kind = PropertyKind::ZMatrixStructure;
+    z_matrix.status = PropertyStatus::Violated;
+    z_matrix.claim_origin = "DiscreteMonotonicityAnalyzer";
+    z_matrix.field = 7;
+    z_matrix.matrix_sign_structure_class = MatrixSignStructureClass::NotZMatrix;
+    z_matrix.tested_block_id = "scalar:scalar:cell";
+    z_matrix.addEvidence("DiscreteMonotonicityAnalyzer",
+                         "positive off-diagonal count is nonzero");
+    report.claims.push_back(z_matrix);
+
+    AnalysisSummaryRequest request;
+    request.summary_kind = AnalysisSummaryKind::ReducedMatrix;
+    request.domain = DomainKind::Cell;
+    request.variables = {VariableKey::field(7)};
+    request.request_id = "ReducedMatrix:Cell";
+    request.source_analyzers = {"DiscreteMonotonicityAnalyzer"};
+    request.reasons = {"reduced free-free sign scan is required"};
+    report.request_plan.summary_requests.push_back(request);
+
+    AnalysisIssue issue;
+    issue.severity = IssueSeverity::Warning;
+    issue.message = "Z-matrix violation may break monotonicity";
+    issue.related_claim_indices = {1};
+    report.issues.push_back(issue);
+
+    std::ostringstream oss;
+    report.printApplicationLog(oss);
+    const auto output = oss.str();
+
+    EXPECT_NE(output.find("[FE/Analysis] Applicable analyzers: "
+                          "DiscreteMonotonicityAnalyzer"),
+              std::string::npos);
+    EXPECT_NE(output.find("Requested summaries: ReducedMatrix"), std::string::npos);
+    EXPECT_NE(output.find("kind=DiscreteMaximumPrinciple"), std::string::npos);
+    EXPECT_NE(output.find("status=unknown"), std::string::npos);
+    EXPECT_NE(output.find("applicability=Applicable"), std::string::npos);
+    EXPECT_NE(output.find("kind=ZMatrixStructure"), std::string::npos);
+    EXPECT_NE(output.find("status=violated"), std::string::npos);
+    EXPECT_NE(output.find("matrix_sign=NotZMatrix"), std::string::npos);
+    EXPECT_NE(output.find("block=scalar:scalar:cell"), std::string::npos);
+    EXPECT_NE(output.find("Issue severity=warning"), std::string::npos);
+}
+
+TEST(ProblemAnalysisReport, TraceLogIncludesBoundedSummaryEvidence) {
+    ProblemAnalysisReport report;
+    PropertyClaim claim;
+    claim.kind = PropertyKind::ZMatrixStructure;
+    claim.status = PropertyStatus::Violated;
+    claim.claim_origin = "DiscreteMonotonicityAnalyzer";
+    claim.addEvidence("DiscreteMonotonicityAnalyzer",
+                      "worst positive off-diagonal retained");
+    report.claims.push_back(claim);
+
+    AnalysisSummarySet summaries;
+
+    DiscreteMatrixSummary matrix;
+    matrix.block.operator_tag = "generic_cell_block";
+    matrix.rows = 4;
+    matrix.cols = 4;
+    matrix.positive_offdiag_count = 1;
+    matrix.row_sum_violation_count = 1;
+    matrix.min_row_sum = -0.25;
+    matrix.max_row_sum = 1.0;
+    matrix.sign_tolerance = 1.0e-12;
+    matrix.addWorstEntry({3, 1, 0.5, 0, 0, "positive offdiag"});
+    summaries.discrete_matrices.push_back(matrix);
+
+    ReducedMatrixSummary reduced;
+    reduced.free_free_matrix = matrix;
+    reduced.reduction_kind = ConstraintReductionKind::StrongDirichletElimination;
+    reduced.free_dof_count = 3;
+    reduced.constrained_dof_count = 1;
+    reduced.reduction_exact_for_analysis = true;
+    summaries.reduced_matrices.push_back(reduced);
+
+    LocalStencilSummary stencil;
+    stencil.block.operator_tag = "generic_element_block";
+    stencil.element = 42;
+    stencil.positive_offdiag_count = 1;
+    stencil.sign_tolerance = 1.0e-12;
+    stencil.addWorstLocalEntry({2, 0, 0.125, 0, 0, "local sign"});
+    summaries.local_stencils.push_back(stencil);
+
+    MeshGeometryQualitySummary geometry;
+    geometry.mesh_revision = 11;
+    geometry.min_jacobian = 0.25;
+    geometry.max_jacobian = 2.0;
+    geometry.poor_quality_element_count = 1;
+    geometry.worst_elements = {42, 43};
+    summaries.mesh_geometry_quality.push_back(geometry);
+
+    InitialCompatibilitySummary initial;
+    initial.initial_constraint_residual = 1.0e-3;
+    initial.initial_boundary_residual = 2.0e-3;
+    initial.invariant_domain_initial_violation_count = 1;
+    initial.residual_tolerance = 1.0e-8;
+    summaries.initial_compatibility.push_back(initial);
+
+    std::ostringstream oss;
+    report.printTraceLog(oss, &summaries);
+    const auto output = oss.str();
+
+    EXPECT_NE(output.find("[FE/Analysis][trace] claim_count=1"), std::string::npos);
+    EXPECT_NE(output.find("evidence claim=0"), std::string::npos);
+    EXPECT_NE(output.find("row_summary block=generic_cell_block"), std::string::npos);
+    EXPECT_NE(output.find("worst_entry row=3 col=1"), std::string::npos);
+    EXPECT_NE(output.find("ReducedMatrix constraint_summary"), std::string::npos);
+    EXPECT_NE(output.find("free_dofs=3 constrained_dofs=1"), std::string::npos);
+    EXPECT_NE(output.find("LocalStencil row_summary"), std::string::npos);
+    EXPECT_NE(output.find("MeshGeometry worst_element id=42"), std::string::npos);
+    EXPECT_NE(output.find("InitialCompatibility constraint_summary"),
+              std::string::npos);
+}
+
 // ============================================================================
 // ProblemAnalysisContext
 // ============================================================================
@@ -432,6 +570,11 @@ TEST(ProblemAnalysisContext, DefaultIsEmpty) {
     EXPECT_TRUE(ctx.bcDescriptors().empty());
     EXPECT_EQ(ctx.topologyContext(), nullptr);
     EXPECT_EQ(ctx.constraintSummary(), nullptr);
+    EXPECT_EQ(ctx.analysisSummaries(), nullptr);
+    EXPECT_FALSE(ctx.hasSummaryKind(AnalysisSummaryKind::DiscreteMatrix));
+    EXPECT_EQ(ctx.summaryCertificationOrUnknown(AnalysisSummaryKind::DiscreteMatrix,
+                                                CertificationClass::Certified),
+              CertificationClass::Unknown);
     EXPECT_EQ(ctx.inputsVersion(), 0u);
 }
 
@@ -607,6 +750,57 @@ TEST(ProblemAnalysisContext, InputsVersionIncrementsOnMutation) {
 
     ctx.setConstraintSummary(ConstraintAnalysisSummary{});
     EXPECT_EQ(ctx.inputsVersion(), 6u);
+
+    AnalysisSummarySet summaries;
+    summaries.discrete_matrices.push_back(DiscreteMatrixSummary{});
+    ctx.setAnalysisSummaries(std::move(summaries));
+    EXPECT_EQ(ctx.inputsVersion(), 7u);
+
+    ctx.clearAnalysisSummaries();
+    EXPECT_EQ(ctx.inputsVersion(), 8u);
+}
+
+TEST(ProblemAnalysisContext, EmptySummaryStorageKeepsContextEmptyButVersioned) {
+    ProblemAnalysisContext ctx;
+    EXPECT_TRUE(ctx.empty());
+
+    ctx.setAnalysisSummaries(AnalysisSummarySet{});
+
+    EXPECT_EQ(ctx.inputsVersion(), 1u);
+    EXPECT_TRUE(ctx.empty());
+    ASSERT_NE(ctx.analysisSummaries(), nullptr);
+    EXPECT_TRUE(ctx.analysisSummaries()->empty());
+    EXPECT_EQ(ctx.analysisSummaries()->totalSummaryCount(), 0u);
+}
+
+TEST(ProblemAnalysisContext, AnalysisSummaryStorageAndAvailability) {
+    ProblemAnalysisContext ctx;
+
+    AnalysisSummarySet summaries;
+    MeshGeometryQualitySummary mesh;
+    mesh.mesh_revision = 42;
+    mesh.min_jacobian = 0.5;
+    summaries.mesh_geometry_quality.push_back(mesh);
+
+    ctx.setAnalysisSummaries(std::move(summaries));
+
+    EXPECT_FALSE(ctx.empty());
+    ASSERT_NE(ctx.analysisSummaries(), nullptr);
+    EXPECT_EQ(ctx.analysisSummaries()->totalSummaryCount(), 1u);
+    EXPECT_TRUE(ctx.hasSummaryKind(AnalysisSummaryKind::MeshGeometryQuality));
+    EXPECT_FALSE(ctx.hasSummaryKind(AnalysisSummaryKind::DiscreteMatrix));
+    EXPECT_EQ(ctx.summaryCertificationOrUnknown(AnalysisSummaryKind::MeshGeometryQuality,
+                                                CertificationClass::Certified),
+              CertificationClass::Certified);
+    EXPECT_EQ(ctx.summaryCertificationOrUnknown(AnalysisSummaryKind::DiscreteMatrix,
+                                                CertificationClass::Certified),
+              CertificationClass::Unknown);
+
+    ctx.clearAnalysisSummaries();
+
+    EXPECT_TRUE(ctx.empty());
+    EXPECT_EQ(ctx.analysisSummaries(), nullptr);
+    EXPECT_FALSE(ctx.hasSummaryKind(AnalysisSummaryKind::MeshGeometryQuality));
 }
 
 // ============================================================================
@@ -652,9 +846,9 @@ public:
 
 TEST(ProblemAnalyzer, DefaultHasAllPasses) {
     auto analyzer = ProblemAnalyzer::createDefault();
-    EXPECT_EQ(analyzer.numPasses(), 14u);
+    EXPECT_EQ(analyzer.numPasses(), 28u);
     auto names = analyzer.passNames();
-    ASSERT_EQ(names.size(), 14u);
+    ASSERT_EQ(names.size(), 28u);
     EXPECT_EQ(names[0], "CouplingGraphAnalyzer");
     EXPECT_EQ(names[1], "KernelAnalyzer");
     EXPECT_EQ(names[2], "MixedOperatorAnalyzer");
@@ -669,6 +863,20 @@ TEST(ProblemAnalyzer, DefaultHasAllPasses) {
     EXPECT_EQ(names[11], "ConservationAnalyzer");
     EXPECT_EQ(names[12], "DAEStructureAnalyzer");
     EXPECT_EQ(names[13], "SpaceCompatibilityAnalyzer");
+    EXPECT_EQ(names[14], "DiscreteMonotonicityAnalyzer");
+    EXPECT_EQ(names[15], "MeshGeometryAnalyzer");
+    EXPECT_EQ(names[16], "TemporalStabilityAnalyzer");
+    EXPECT_EQ(names[17], "EnergyEntropyLawAnalyzer");
+    EXPECT_EQ(names[18], "CoefficientConstitutiveAnalyzer");
+    EXPECT_EQ(names[19], "NonlinearTangentAnalyzer");
+    EXPECT_EQ(names[20], "LockingRiskAnalyzer");
+    EXPECT_EQ(names[21], "SpectralSpuriousModeAnalyzer");
+    EXPECT_EQ(names[22], "ErrorEstimatorAnalyzer");
+    EXPECT_EQ(names[23], "QuadratureAdequacyAnalyzer");
+    EXPECT_EQ(names[24], "PreservationStructureAnalyzer");
+    EXPECT_EQ(names[25], "CoupledSystemStabilityAnalyzer");
+    EXPECT_EQ(names[26], "SolverCompatibilityAnalyzer");
+    EXPECT_EQ(names[27], "NumericSummaryPlanner");
 }
 
 // ============================================================================
@@ -710,6 +918,392 @@ TEST(ProblemAnalysisTypes, ToString_Phase21_ClassificationEnums) {
     EXPECT_STREQ(toString(SpaceFamily::HDiv), "HDiv");
     EXPECT_STREQ(toString(SpaceFamily::HCurl), "HCurl");
     EXPECT_STREQ(toString(SpaceFamily::L2), "L2");
+}
+
+// ============================================================================
+// Phase 1 roadmap vocabulary and structured report plumbing
+// ============================================================================
+
+TEST(ProblemAnalysisTypes, ToString_Phase1_RoadmapPropertyKinds) {
+    EXPECT_STREQ(toString(PropertyKind::DiscreteMaximumPrinciple), "DiscreteMaximumPrinciple");
+    EXPECT_STREQ(toString(PropertyKind::ZMatrixStructure), "ZMatrixStructure");
+    EXPECT_STREQ(toString(PropertyKind::MMatrixStructure), "MMatrixStructure");
+    EXPECT_STREQ(toString(PropertyKind::MatrixMonotonicityRisk), "MatrixMonotonicityRisk");
+    EXPECT_STREQ(toString(PropertyKind::CompatibleComplexStructure), "CompatibleComplexStructure");
+    EXPECT_STREQ(toString(PropertyKind::EnergyStability), "EnergyStability");
+    EXPECT_STREQ(toString(PropertyKind::EntropyStability), "EntropyStability");
+    EXPECT_STREQ(toString(PropertyKind::TemporalStability), "TemporalStability");
+    EXPECT_STREQ(toString(PropertyKind::WeakBoundaryCoercivity), "WeakBoundaryCoercivity");
+    EXPECT_STREQ(toString(PropertyKind::MeshGeometryValidity), "MeshGeometryValidity");
+    EXPECT_STREQ(toString(PropertyKind::CoefficientPositivity), "CoefficientPositivity");
+    EXPECT_STREQ(toString(PropertyKind::NonlinearTangentStructure), "NonlinearTangentStructure");
+    EXPECT_STREQ(toString(PropertyKind::LockingRisk), "LockingRisk");
+    EXPECT_STREQ(toString(PropertyKind::SpectralCorrectness), "SpectralCorrectness");
+    EXPECT_STREQ(toString(PropertyKind::ErrorEstimatorEligibility), "ErrorEstimatorEligibility");
+    EXPECT_STREQ(toString(PropertyKind::SolverCompatibility), "SolverCompatibility");
+    EXPECT_STREQ(toString(PropertyKind::QuadratureAdequacy), "QuadratureAdequacy");
+    EXPECT_STREQ(toString(PropertyKind::BoundaryComplementingCondition), "BoundaryComplementingCondition");
+    EXPECT_STREQ(toString(PropertyKind::IndefiniteOperatorResolution), "IndefiniteOperatorResolution");
+    EXPECT_STREQ(toString(PropertyKind::MinimumResidualStability), "MinimumResidualStability");
+    EXPECT_STREQ(toString(PropertyKind::InvariantDomainPreservation), "InvariantDomainPreservation");
+    EXPECT_STREQ(toString(PropertyKind::EquilibriumPreservation), "EquilibriumPreservation");
+    EXPECT_STREQ(toString(PropertyKind::GeometricConservation), "GeometricConservation");
+    EXPECT_STREQ(toString(PropertyKind::TransferOperatorCompatibility), "TransferOperatorCompatibility");
+    EXPECT_STREQ(toString(PropertyKind::AdjointConsistency), "AdjointConsistency");
+    EXPECT_STREQ(toString(PropertyKind::ParameterRobustness), "ParameterRobustness");
+    EXPECT_STREQ(toString(PropertyKind::InitialDataCompatibility), "InitialDataCompatibility");
+}
+
+TEST(ProblemAnalysisTypes, ToString_Phase1_ClassificationEnums) {
+    EXPECT_STREQ(toString(ApplicabilityClass::Applicable), "Applicable");
+    EXPECT_STREQ(toString(ApplicabilityClass::NotApplicable), "NotApplicable");
+    EXPECT_STREQ(toString(ApplicabilityClass::Unknown), "Unknown");
+
+    EXPECT_STREQ(toString(CertificationClass::Certified), "Certified");
+    EXPECT_STREQ(toString(CertificationClass::Violated), "Violated");
+    EXPECT_STREQ(toString(CertificationClass::NotCertified), "NotCertified");
+    EXPECT_STREQ(toString(CertificationClass::Unknown), "Unknown");
+
+    EXPECT_STREQ(toString(MatrixSignStructureClass::ZMatrix), "ZMatrix");
+    EXPECT_STREQ(toString(MatrixSignStructureClass::NotZMatrix), "NotZMatrix");
+    EXPECT_STREQ(toString(MatrixSignStructureClass::MMatrixCertified), "MMatrixCertified");
+    EXPECT_STREQ(toString(MatrixSignStructureClass::MMatrixNotCertified), "MMatrixNotCertified");
+    EXPECT_STREQ(toString(MatrixSignStructureClass::Unknown), "Unknown");
+
+    EXPECT_STREQ(toString(OperatorSymmetryClass::Symmetric), "Symmetric");
+    EXPECT_STREQ(toString(OperatorSymmetryClass::Skew), "Skew");
+    EXPECT_STREQ(toString(OperatorSymmetryClass::Nonsymmetric), "Nonsymmetric");
+    EXPECT_STREQ(toString(OperatorSymmetryClass::Unknown), "Unknown");
+
+    EXPECT_STREQ(toString(TemporalStabilityClass::AStable), "AStable");
+    EXPECT_STREQ(toString(TemporalStabilityClass::LStable), "LStable");
+    EXPECT_STREQ(toString(TemporalStabilityClass::BStable), "BStable");
+    EXPECT_STREQ(toString(TemporalStabilityClass::SSP), "SSP");
+    EXPECT_STREQ(toString(TemporalStabilityClass::ConditionallyStable), "ConditionallyStable");
+    EXPECT_STREQ(toString(TemporalStabilityClass::Unknown), "Unknown");
+
+    EXPECT_STREQ(toString(CoercivityClass::Coercive), "Coercive");
+    EXPECT_STREQ(toString(CoercivityClass::Semicoercive), "Semicoercive");
+    EXPECT_STREQ(toString(CoercivityClass::Indefinite), "Indefinite");
+    EXPECT_STREQ(toString(CoercivityClass::NotCoercive), "NotCoercive");
+    EXPECT_STREQ(toString(CoercivityClass::Unknown), "Unknown");
+
+    EXPECT_STREQ(toString(NullspaceHandlingClass::NotApplicable), "NotApplicable");
+    EXPECT_STREQ(toString(NullspaceHandlingClass::AnchoredByConstraints), "AnchoredByConstraints");
+    EXPECT_STREQ(toString(NullspaceHandlingClass::ProjectedOut), "ProjectedOut");
+    EXPECT_STREQ(toString(NullspaceHandlingClass::Retained), "Retained");
+    EXPECT_STREQ(toString(NullspaceHandlingClass::Uncontrolled), "Uncontrolled");
+    EXPECT_STREQ(toString(NullspaceHandlingClass::Unknown), "Unknown");
+}
+
+TEST(PropertyClaim, Phase1_StructuredRoadmapFields) {
+    PropertyClaim monotonicity;
+    monotonicity.kind = PropertyKind::ZMatrixStructure;
+    monotonicity.applicability_class = ApplicabilityClass::Applicable;
+    monotonicity.certification_class = CertificationClass::Certified;
+    monotonicity.matrix_sign_structure_class = MatrixSignStructureClass::ZMatrix;
+    monotonicity.coercivity_class = CoercivityClass::Semicoercive;
+    monotonicity.reduced_definiteness_class = CertificationClass::Certified;
+    monotonicity.nullspace_handling_class = NullspaceHandlingClass::AnchoredByConstraints;
+    monotonicity.tested_block_id = "u:u:cell";
+
+    EXPECT_EQ(*monotonicity.applicability_class, ApplicabilityClass::Applicable);
+    EXPECT_EQ(*monotonicity.certification_class, CertificationClass::Certified);
+    EXPECT_EQ(*monotonicity.matrix_sign_structure_class, MatrixSignStructureClass::ZMatrix);
+    EXPECT_EQ(*monotonicity.coercivity_class, CoercivityClass::Semicoercive);
+    EXPECT_EQ(*monotonicity.reduced_definiteness_class, CertificationClass::Certified);
+    EXPECT_EQ(*monotonicity.nullspace_handling_class, NullspaceHandlingClass::AnchoredByConstraints);
+    EXPECT_EQ(*monotonicity.tested_block_id, "u:u:cell");
+
+    PropertyClaim transport;
+    transport.kind = PropertyKind::OperatorTransportCharacter;
+    transport.peclet_number = 42.0;
+    transport.cfl_number = 0.75;
+    transport.nonnormality_indicator = 3.0;
+    transport.invariant_domain_metadata_present = true;
+    transport.well_balanced_metadata_present = false;
+
+    EXPECT_DOUBLE_EQ(*transport.peclet_number, 42.0);
+    EXPECT_DOUBLE_EQ(*transport.cfl_number, 0.75);
+    EXPECT_TRUE(*transport.invariant_domain_metadata_present);
+    EXPECT_FALSE(*transport.well_balanced_metadata_present);
+}
+
+TEST(ProblemAnalysisReport, Phase1_PrintIncludesNewKindsAndStructuredFields) {
+    ProblemAnalysisReport report;
+
+    PropertyClaim dmp;
+    dmp.kind = PropertyKind::DiscreteMaximumPrinciple;
+    dmp.status = PropertyStatus::Unknown;
+    dmp.applicability_class = ApplicabilityClass::Applicable;
+    dmp.certification_class = CertificationClass::Unknown;
+    dmp.description = "DMP check awaits numeric summaries";
+    report.claims.push_back(dmp);
+
+    PropertyClaim z;
+    z.kind = PropertyKind::ZMatrixStructure;
+    z.status = PropertyStatus::Exact;
+    z.matrix_sign_structure_class = MatrixSignStructureClass::ZMatrix;
+    z.tested_block_id = "pressure:pressure:cell";
+    report.claims.push_back(z);
+
+    PropertyClaim time;
+    time.kind = PropertyKind::TemporalStability;
+    time.status = PropertyStatus::Likely;
+    time.temporal_stability_class = TemporalStabilityClass::AStable;
+    report.claims.push_back(time);
+
+    std::ostringstream oss;
+    report.print(oss);
+    const auto output = oss.str();
+
+    EXPECT_NE(output.find("--- DiscreteMaximumPrinciple ---"), std::string::npos);
+    EXPECT_NE(output.find("--- ZMatrixStructure ---"), std::string::npos);
+    EXPECT_NE(output.find("--- TemporalStability ---"), std::string::npos);
+    EXPECT_NE(output.find("applicability=Applicable"), std::string::npos);
+    EXPECT_NE(output.find("certification=Unknown"), std::string::npos);
+    EXPECT_NE(output.find("matrix_sign=ZMatrix"), std::string::npos);
+    EXPECT_NE(output.find("tested_block=pressure:pressure:cell"), std::string::npos);
+    EXPECT_NE(output.find("temporal=AStable"), std::string::npos);
+}
+
+// ============================================================================
+// Phase 2 - Common discrete summary metadata contracts
+// ============================================================================
+
+TEST(AnalysisSummaryTypes, CommonSummaryContractsStoreRequiredFields) {
+    AnalysisSummarySet summaries;
+
+    CoefficientPropertySummary coeff;
+    coeff.coefficient = "kappa";
+    coeff.tensor_rank = TensorRank::Rank2Tensor;
+    coeff.symmetry = SymmetryClass::Symmetric;
+    coeff.positivity = PositivityClass::Positive;
+    coeff.anisotropy_ratio = 4.0;
+    coeff.contrast_ratio = 10.0;
+    summaries.coefficient_properties.push_back(coeff);
+
+    DiscreteMatrixSummary matrix;
+    matrix.backend_kind = svmp::FE::backends::BackendKind::Eigen;
+    matrix.block.test_variables = {VariableKey::field(0)};
+    matrix.block.trial_variables = {VariableKey::field(0)};
+    matrix.square = true;
+    matrix.structurally_symmetric = true;
+    matrix.sign_tolerance = 1.0e-14;
+    matrix.row_sum_tolerance = 1.0e-12;
+    matrix.symmetry_tolerance = 1.0e-13;
+    matrix.diagonal_count = 3;
+    matrix.offdiag_count = 6;
+    matrix.positive_offdiag_count = 0;
+    matrix.min_row_sum = -1.0e-15;
+    matrix.max_row_sum = 1.0e-15;
+    matrix.condition_estimate = 12.0;
+    summaries.discrete_matrices.push_back(matrix);
+
+    ReducedMatrixSummary reduced;
+    reduced.reduction_kind = ConstraintReductionKind::StrongDirichletElimination;
+    reduced.free_dof_count = 2;
+    reduced.constrained_dof_count = 1;
+    reduced.affine_terms_accounted_for = true;
+    summaries.reduced_matrices.push_back(reduced);
+
+    LocalStencilSummary stencil;
+    stencil.element = 7;
+    stencil.positive_offdiag_count = 0;
+    stencil.negative_offdiag_count = 2;
+    summaries.local_stencils.push_back(stencil);
+
+    MeshGeometryQualitySummary mesh;
+    mesh.mesh_revision = 3;
+    mesh.min_jacobian = 0.25;
+    mesh.max_jacobian = 2.0;
+    mesh.min_angle = 45.0;
+    mesh.max_aspect_ratio = 1.5;
+    mesh.min_cut_cell_fraction = 0.1;
+    mesh.worst_elements.push_back(4);
+    summaries.mesh_geometry_quality.push_back(mesh);
+
+    FluxBalanceSummary flux;
+    flux.local_residual_norm = 1.0e-12;
+    flux.global_residual_norm = 2.0e-12;
+    flux.interface_pair_residual_norm = 3.0e-12;
+    summaries.flux_balances.push_back(flux);
+
+    TemporalStabilitySummary temporal;
+    temporal.time_scheme = "generalized-alpha";
+    temporal.stability_class = TemporalStabilityClass::AStable;
+    temporal.cfl_estimate = 0.5;
+    summaries.temporal_stability.push_back(temporal);
+
+    BoundarySymbolSummary boundary;
+    boundary.principal_operator_order = 2;
+    boundary.boundary_operator_order = 1;
+    boundary.trace_coverage = TraceCapabilityFlags::Value;
+    boundary.complementing_condition_satisfied = true;
+    summaries.boundary_symbols.push_back(boundary);
+
+    InfSupEstimateSummary infsup;
+    infsup.primal_variable = VariableKey::field(0);
+    infsup.multiplier_variable = VariableKey::field(1);
+    infsup.estimate_value = 0.2;
+    infsup.estimate_scope = "unit-test";
+    infsup.nullspace_handling = NullspaceHandlingClass::ProjectedOut;
+    summaries.inf_sup_estimates.push_back(infsup);
+
+    EnergyEntropySummary energy;
+    energy.energy_entropy_id = "E";
+    energy.expected_production_sign = BalanceSignClass::Nonpositive;
+    energy.observed_discrete_balance = -1.0e-8;
+    summaries.energy_entropy.push_back(energy);
+
+    InvariantDomainSummary invariant;
+    invariant.invariant_set_id = "positive";
+    invariant.variables.push_back(VariableKey::field(0));
+    invariant.lower_bound = 0.0;
+    invariant.lower_bound_active = true;
+    invariant.limiter_evidence_present = true;
+    summaries.invariant_domains.push_back(invariant);
+
+    EquilibriumPreservationSummary equilibrium;
+    equilibrium.equilibrium_id = "rest";
+    equilibrium.flux_source_residual = 0.0;
+    equilibrium.source_quadrature_metadata_present = true;
+    summaries.equilibrium_preservation.push_back(equilibrium);
+
+    MovingDomainSummary moving;
+    moving.mesh_revision = 4;
+    moving.mesh_velocity_metadata_present = true;
+    moving.geometric_conservation_residual = 1.0e-13;
+    summaries.moving_domain.push_back(moving);
+
+    TransferOperatorSummary transfer;
+    transfer.interface_pair_id = "left-right";
+    transfer.projection_space_id = "mortar-p1";
+    transfer.conservation_residual = 1.0e-12;
+    transfer.constant_preservation_residual = 0.0;
+    summaries.transfer_operators.push_back(transfer);
+
+    AdjointConsistencySummary adjoint;
+    adjoint.contribution_id = "nitsche-face";
+    adjoint.adjoint_consistency = AdjointConsistencyKind::Yes;
+    adjoint.transpose_backend_support = true;
+    adjoint.goal_functional_id = "drag";
+    summaries.adjoint_consistency.push_back(adjoint);
+
+    ParameterScaleSummary parameter;
+    parameter.nondimensional_parameter_id = "Pe";
+    parameter.min_scale_value = 0.1;
+    parameter.max_scale_value = 100.0;
+    parameter.layer_resolution_metric = 0.25;
+    summaries.parameter_scales.push_back(parameter);
+
+    InitialCompatibilitySummary initial;
+    initial.initial_constraint_residual = 1.0e-14;
+    initial.initial_boundary_residual = 2.0e-14;
+    initial.invariant_domain_initial_violation_count = 0;
+    summaries.initial_compatibility.push_back(initial);
+
+    CompatibleComplexSummary complex;
+    complex.complex_id = "generic-sequence";
+    complex.exact_sequence_compatible = true;
+    complex.commuting_projection_available = true;
+    complex.trace_sequence_compatible = true;
+    summaries.compatible_complexes.push_back(complex);
+
+    NonlinearTangentSummary tangent;
+    tangent.residual_id = "nonlinear-residual";
+    tangent.tangent_consistency = TangentConsistencyClass::Exact;
+    tangent.jacobian_action_available = true;
+    summaries.nonlinear_tangents.push_back(tangent);
+
+    SpectralStructureSummary spectral;
+    spectral.eigenproblem_declared = true;
+    spectral.self_adjoint_evidence = true;
+    spectral.compactness_evidence = true;
+    summaries.spectral_structures.push_back(spectral);
+
+    ErrorEstimatorSummary estimator;
+    estimator.estimator_id = "residual-estimator";
+    estimator.residual_metadata_present = true;
+    estimator.jump_metadata_present = true;
+    summaries.error_estimators.push_back(estimator);
+
+    QuadratureAdequacySummary quadrature;
+    quadrature.integrand_polynomial_degree = 2;
+    quadrature.quadrature_exact_degree = 3;
+    summaries.quadrature_adequacy.push_back(quadrature);
+
+    CoupledSystemStabilitySummary coupled;
+    coupled.coupling_group = "generic-coupling";
+    coupled.monolithic_coupling = true;
+    summaries.coupled_system_stability.push_back(coupled);
+
+    EXPECT_EQ(summaries.totalSummaryCount(), 23u);
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::CoefficientProperties));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::DiscreteMatrix));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::ReducedMatrix));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::LocalStencil));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::MeshGeometryQuality));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::FluxBalance));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::TemporalStability));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::BoundarySymbol));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::InfSupEstimate));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::EnergyEntropyBalance));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::InvariantDomain));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::EquilibriumPreservation));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::MovingDomain));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::TransferOperator));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::AdjointConsistency));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::ParameterScale));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::InitialCompatibility));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::CompatibleComplex));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::NonlinearTangent));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::SpectralStructure));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::ErrorEstimator));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::QuadratureAdequacy));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::CoupledSystemStability));
+
+    EXPECT_EQ(summaries.coefficient_properties[0].tensor_rank, TensorRank::Rank2Tensor);
+    EXPECT_EQ(summaries.coefficient_properties[0].symmetry, SymmetryClass::Symmetric);
+    EXPECT_EQ(summaries.coefficient_properties[0].positivity, PositivityClass::Positive);
+    EXPECT_DOUBLE_EQ(summaries.discrete_matrices[0].row_sum_tolerance, 1.0e-12);
+    EXPECT_DOUBLE_EQ(*summaries.discrete_matrices[0].condition_estimate, 12.0);
+    EXPECT_EQ(summaries.reduced_matrices[0].reduction_kind,
+              ConstraintReductionKind::StrongDirichletElimination);
+    EXPECT_TRUE(*summaries.boundary_symbols[0].complementing_condition_satisfied);
+    EXPECT_EQ(summaries.inf_sup_estimates[0].nullspace_handling,
+              NullspaceHandlingClass::ProjectedOut);
+}
+
+TEST(AnalysisSummaryTypes, WorstSamplesAreBoundedAndDeterministic) {
+    DiscreteMatrixSummary matrix;
+    matrix.worst_entry_sample_limit = 2;
+    matrix.addWorstEntry(MatrixEntrySample{3, 4, 1.0, 1, 2, "mild"});
+    matrix.addWorstEntry(MatrixEntrySample{2, 5, -3.0, 0, 1, "worst"});
+    matrix.addWorstEntry(MatrixEntrySample{1, 6, 2.0, 0, 3, "middle"});
+
+    ASSERT_EQ(matrix.worst_entries.size(), 2u);
+    EXPECT_EQ(matrix.worst_entries[0].row, 2);
+    EXPECT_EQ(matrix.worst_entries[0].col, 5);
+    EXPECT_DOUBLE_EQ(matrix.worst_entries[0].value, -3.0);
+    EXPECT_EQ(matrix.worst_entries[1].row, 1);
+    EXPECT_EQ(matrix.worst_entries[1].col, 6);
+
+    LocalStencilSummary stencil;
+    stencil.worst_entry_sample_limit = 1;
+    stencil.addWorstLocalEntry(MatrixEntrySample{3, 3, 4.0, 1, 2, "rank1"});
+    stencil.addWorstLocalEntry(MatrixEntrySample{2, 3, 4.0, 0, 1, "rank0"});
+
+    ASSERT_EQ(stencil.worst_local_entries.size(), 1u);
+    EXPECT_EQ(stencil.worst_local_entries[0].owning_rank, 0);
+    EXPECT_EQ(stencil.worst_local_entries[0].row, 2);
+}
+
+TEST(AnalysisSummaryTypes, SummaryObjectsAreValueTypes) {
+    EXPECT_TRUE(std::is_copy_constructible_v<AnalysisSummarySet>);
+    EXPECT_TRUE(std::is_move_constructible_v<AnalysisSummarySet>);
+    EXPECT_TRUE(std::is_copy_constructible_v<DiscreteMatrixSummary>);
+    EXPECT_TRUE(std::is_move_constructible_v<MeshGeometryQualitySummary>);
 }
 
 TEST(ProblemAnalysisTypes, TraceCapabilityFlags_Bitmask) {

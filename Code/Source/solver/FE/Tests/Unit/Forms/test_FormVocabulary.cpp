@@ -240,6 +240,112 @@ private:
     std::array<GlobalIndex, 4> cell_{};
 };
 
+class FrameChangedSingleTetraMeshAccess final : public assembly::IMeshAccess {
+public:
+    explicit FrameChangedSingleTetraMeshAccess(std::array<Real, 3> scale,
+                                               int boundary_marker = -1)
+        : scale_(scale),
+          boundary_marker_(boundary_marker)
+    {
+        reference_nodes_ = {
+            {0.0, 0.0, 0.0},
+            {1.0, 0.0, 0.0},
+            {0.0, 1.0, 0.0},
+            {0.0, 0.0, 1.0}
+        };
+        current_nodes_ = {
+            {0.0, 0.0, 0.0},
+            {scale_[0], 0.0, 0.0},
+            {0.0, scale_[1], 0.0},
+            {0.0, 0.0, scale_[2]}
+        };
+        cell_ = {0, 1, 2, 3};
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override
+    {
+        return boundary_marker_ >= 0 ? 1 : 0;
+    }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return ElementType::Tetra4; }
+
+    void getCellNodes(GlobalIndex /*cell_id*/, std::vector<GlobalIndex>& nodes) const override
+    {
+        nodes.assign(cell_.begin(), cell_.end());
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return current_nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(GlobalIndex /*cell_id*/,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        coords = current_nodes_;
+    }
+
+    [[nodiscard]] bool supportsCoordinateFrame(assembly::CoordinateFrame frame) const override
+    {
+        return frame == assembly::CoordinateFrame::Active ||
+               frame == assembly::CoordinateFrame::Reference ||
+               frame == assembly::CoordinateFrame::Current;
+    }
+
+    void getCellCoordinates(GlobalIndex /*cell_id*/,
+                            assembly::CoordinateFrame frame,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        switch (frame) {
+            case assembly::CoordinateFrame::Active:
+            case assembly::CoordinateFrame::Current:
+                coords = current_nodes_;
+                return;
+            case assembly::CoordinateFrame::Reference:
+                coords = reference_nodes_;
+                return;
+        }
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/, GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return boundary_marker_; }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex /*face_id*/) const override
+    {
+        return {0, 0};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+
+    void forEachBoundaryFace(int marker,
+                             std::function<void(GlobalIndex, GlobalIndex)> callback) const override
+    {
+        if (boundary_marker_ >= 0 && (marker < 0 || marker == boundary_marker_)) {
+            callback(0, 0);
+        }
+    }
+
+    void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+private:
+    std::array<Real, 3> scale_{};
+    int boundary_marker_{-1};
+    std::vector<std::array<Real, 3>> reference_nodes_{};
+    std::vector<std::array<Real, 3>> current_nodes_{};
+    std::array<GlobalIndex, 4> cell_{};
+};
+
 assembly::DenseVectorView assembleCellLinear(const FormExpr& scalar_expr,
                                              dofs::DofMap& dof_map,
                                              const assembly::IMeshAccess& mesh,
@@ -688,7 +794,6 @@ TEST(FormVocabularyTest, RequiredDataInferenceIncludesGeometryAndMeasures)
 
     require_linear_flag(component(meshDisplacement(), 0), assembly::RequiredData::MeshDisplacement);
     require_linear_flag(component(meshVelocity(), 0), assembly::RequiredData::MeshVelocity);
-    require_linear_flag(component(domainVelocity(), 0), assembly::RequiredData::MeshVelocity);
     require_linear_flag(component(meshAcceleration(), 0), assembly::RequiredData::MeshAcceleration);
     require_linear_flags(component(grad(meshDisplacement()), 0, 0),
                          assembly::RequiredData::MeshDisplacement,
@@ -712,14 +817,21 @@ TEST(FormVocabularyTest, RequiredDataInferenceIncludesGeometryAndMeasures)
     require_linear_flag(component(referenceCoordinatePhysical(), 0), assembly::RequiredData::ReferencePhysicalPoints);
     require_linear_flag(component(currentJacobian(), 0, 0), assembly::RequiredData::CurrentJacobians);
     require_linear_flag(component(referenceJacobian(), 0, 0), assembly::RequiredData::ReferenceJacobians);
-    require_linear_flag(currentJacobianDeterminant(), assembly::RequiredData::CurrentMeasures);
-    require_linear_flag(referenceJacobianDeterminant(), assembly::RequiredData::ReferenceMeasures);
+    require_linear_flag(currentJacobianDeterminant(), assembly::RequiredData::CurrentJacobians);
+    require_linear_flag(referenceJacobianDeterminant(), assembly::RequiredData::ReferenceJacobians);
     require_linear_flag(component(currentNormal(), 0), assembly::RequiredData::CurrentNormals);
     require_linear_flag(component(referenceNormal(), 0), assembly::RequiredData::ReferenceNormals);
     require_linear_flag(currentMeasure(), assembly::RequiredData::CurrentMeasures);
     require_linear_flag(referenceMeasure(), assembly::RequiredData::ReferenceMeasures);
     require_linear_flag(component(surfaceJacobian(), 0, 0), assembly::RequiredData::SurfaceJacobians);
-    require_linear_flag(component(nanson(), 0), assembly::RequiredData::ConfigurationTransforms);
+
+    const auto ir_nanson = compiler.compileLinear((component(nanson(), 0) * v).dx());
+    EXPECT_TRUE(assembly::hasFlag(ir_nanson.requiredData(), assembly::RequiredData::CurrentJacobians));
+    EXPECT_TRUE(assembly::hasFlag(ir_nanson.requiredData(), assembly::RequiredData::ReferenceJacobians));
+    EXPECT_TRUE(assembly::hasFlag(ir_nanson.requiredData(), assembly::RequiredData::ReferenceMeasures));
+    EXPECT_TRUE(assembly::hasFlag(ir_nanson.requiredData(), assembly::RequiredData::ReferenceNormals));
+    EXPECT_FALSE(assembly::hasFlag(ir_nanson.requiredData(), assembly::RequiredData::ConfigurationTransforms));
+
     require_linear_flag(component(pushforward(referenceSurfaceVector(),
                                              GeometryConfiguration::Reference,
                                              GeometryConfiguration::Current), 0),
@@ -885,12 +997,8 @@ TEST(FormVocabularyTest, MovingDomainVolumeTerminalsMatchInterpreterAndJIT)
     FormCompiler compiler;
     const auto v = FormExpr::testFunction(scalar_space, "v");
     const auto scalar =
-        component(pushforward(meshDisplacement(),
-                              GeometryConfiguration::Reference,
-                              GeometryConfiguration::Current), 0) +
-        component(pullback(meshVelocity(),
-                           GeometryConfiguration::Current,
-                           GeometryConfiguration::Reference), 1) +
+        component(meshDisplacement(), 0) +
+        component(meshVelocity(), 1) +
         component(meshAcceleration(), 2) +
         component(currentCoordinate() - referenceCoordinatePhysical(), 0) +
         trace(currentJacobian() - referenceJacobian()) +
@@ -925,6 +1033,72 @@ TEST(FormVocabularyTest, MovingDomainVolumeTerminalsMatchInterpreterAndJIT)
     for (GlobalIndex i = 0; i < 4; ++i) {
         EXPECT_NEAR(jit.getVectorEntry(i), interp.getVectorEntry(i), 5e-12);
     }
+}
+
+TEST(FormVocabularyTest, FrameExplicitJacobianDeterminantsAreSignedAndDistinctFromMeasures)
+{
+    FrameChangedSingleTetraMeshAccess mesh(/*scale=*/{-2.0, 1.0, 1.0});
+    auto dof_map = createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    auto det_vec = assembleCellLinear(currentJacobianDeterminant(), dof_map, mesh, space);
+    auto measure_vec = assembleCellLinear(currentMeasure(), dof_map, mesh, space);
+
+    // Active integration uses the positive current volume. The determinant
+    // terminal remains signed and is therefore negative for the reflected cell.
+    const Real active_basis_integral = (2.0 * singleTetraVolume()) / 4.0;
+    const Real expected_det_entry = -2.0 * active_basis_integral;
+    const Real expected_measure_entry = 2.0 * active_basis_integral;
+
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        EXPECT_NEAR(det_vec.getVectorEntry(i), expected_det_entry, 5e-12);
+        EXPECT_NEAR(measure_vec.getVectorEntry(i), expected_measure_entry, 5e-12);
+    }
+}
+
+TEST(FormVocabularyTest, NansonSurfaceVectorMatchesCurrentSurfaceVectorOnScaledFace)
+{
+    requireLLVMJITOrSkip();
+
+    constexpr int marker = 2;
+    FrameChangedSingleTetraMeshAccess mesh(/*scale=*/{2.0, 3.0, 4.0}, marker);
+    auto dof_map = createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    FormCompiler compiler;
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto scalar = component(nanson() - currentSurfaceVector(), 2);
+    const auto form = (scalar * v).ds(marker);
+
+    auto interp_kernel = std::make_shared<FormKernel>(compiler.compileLinear(form));
+    auto jit_fallback = std::make_shared<FormKernel>(compiler.compileLinear(form));
+    jit::JITKernelWrapper jit_kernel(jit_fallback, makeUnitTestJITOptions());
+    jit_kernel.ensureCompiled();
+    ASSERT_TRUE(jit_kernel.isJITReady());
+
+    auto interp = assembleBoundaryLinearWithKernel(dof_map, mesh, marker, space, *interp_kernel);
+    auto jit = assembleBoundaryLinearWithKernel(dof_map, mesh, marker, space, jit_kernel);
+
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        EXPECT_NEAR(interp.getVectorEntry(i), 0.0, 5e-12);
+        EXPECT_NEAR(jit.getVectorEntry(i), interp.getVectorEntry(i), 5e-12);
+    }
+}
+
+TEST(FormVocabularyTest, GenericFrameTransformMarkersFailClosedWhenEvaluated)
+{
+    FrameChangedSingleTetraMeshAccess mesh(/*scale=*/{2.0, 3.0, 4.0});
+    auto dof_map = createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    const auto vector_value = as_vector({FormExpr::constant(1.0),
+                                         FormExpr::constant(0.0),
+                                         FormExpr::constant(0.0)});
+    const auto scalar = component(pushforward(vector_value,
+                                              GeometryConfiguration::Reference,
+                                              GeometryConfiguration::Current), 0);
+
+    EXPECT_THROW((void)assembleCellLinear(scalar, dof_map, mesh, space), std::exception);
 }
 
 TEST(FormVocabularyTest, MovingDomainFaceNormalsUseExplicitTerminals)

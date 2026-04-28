@@ -21,6 +21,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -37,7 +38,14 @@ struct CutIntegrationRevisionSnapshot {
     std::uint64_t label_revision{0};
     std::uint64_t active_configuration_epoch{0};
     std::uint64_t embedded_geometry_epoch{0};
+    std::uint64_t embedded_field_layout_revision{0};
+    std::uint64_t embedded_field_value_revision{0};
+    std::uint64_t embedded_source_surface_revision{0};
+    std::uint64_t embedded_provenance_revision{0};
     std::uint64_t embedded_constraint_epoch{0};
+    std::uint64_t cut_topology_revision{0};
+    std::uint64_t quadrature_policy_revision{0};
+    std::uint64_t conditioning_revision{0};
     std::uint64_t fe_space_revision{0};
     std::uint64_t fe_dof_layout_revision{0};
     std::uint64_t fe_constraint_layout_revision{0};
@@ -81,6 +89,15 @@ struct CutConditioningDiagnostic {
     std::vector<std::string> messages{};
 };
 
+struct CutConditioningNeighborhood {
+    MeshIndex cut_cell{static_cast<MeshIndex>(-1)};
+    std::vector<MeshIndex> adjacent_cells{};
+    std::vector<MeshIndex> extension_patch{};
+    Real volume_fraction{0.0};
+    Real conditioning_indicator{0.0};
+    std::uint64_t stable_id{0};
+};
+
 [[nodiscard]] CutIntegrationRefreshDecision classifyCutIntegrationRefresh(
     const CutIntegrationRevisionSnapshot& cached,
     const CutIntegrationRevisionSnapshot& current) noexcept;
@@ -89,6 +106,12 @@ struct CutConditioningDiagnostic {
     const std::vector<Real>& volume_fractions,
     Real small_fraction_threshold = 1.0e-8,
     Real degenerate_threshold = 1.0e-14);
+
+[[nodiscard]] std::vector<CutConditioningNeighborhood> buildCutConditioningNeighborhoods(
+    const std::vector<MeshIndex>& cut_cells,
+    const std::vector<Real>& volume_fractions,
+    const std::vector<std::pair<MeshIndex, MeshIndex>>& adjacency,
+    Real small_fraction_threshold = 1.0e-8);
 
 } // namespace systems
 } // namespace FE

@@ -34,6 +34,8 @@
 #include "Analysis/TopologyAnalysisContext.h"
 #include "Analysis/InterfaceTopologyContext.h"
 #include "Analysis/ConstraintAnalysisSummary.h"
+#include "Analysis/AnalysisSummaryTypes.h"
+#include "Backends/Utils/BackendOptions.h"
 
 #include <cstdint>
 #include <optional>
@@ -144,6 +146,26 @@ public:
         return constraint_summary_ ? &*constraint_summary_ : nullptr;
     }
 
+    // ---- Optional numeric/discrete summaries (Phase 2 metadata contracts) ----
+
+    void setAnalysisSummaries(AnalysisSummarySet summaries);
+    void clearAnalysisSummaries();
+    [[nodiscard]] const AnalysisSummarySet* analysisSummaries() const noexcept {
+        return analysis_summaries_ ? &*analysis_summaries_ : nullptr;
+    }
+    [[nodiscard]] bool hasSummaryKind(AnalysisSummaryKind kind) const noexcept;
+    [[nodiscard]] CertificationClass summaryCertificationOrUnknown(
+        AnalysisSummaryKind kind,
+        CertificationClass when_present) const noexcept;
+
+    // ---- Optional solver choices for compatibility checks ----
+
+    void setSolverOptions(backends::SolverOptions options);
+    void clearSolverOptions();
+    [[nodiscard]] const backends::SolverOptions* solverOptions() const noexcept {
+        return solver_options_ ? &*solver_options_ : nullptr;
+    }
+
     // ---- Version tracking for cache invalidation ----
 
     /// Monotonically increasing version; incremented on every mutation
@@ -168,6 +190,8 @@ private:
     std::optional<TopologyAnalysisContext> topology_context_;
     std::optional<InterfaceTopologyContext> interface_topology_context_;
     std::optional<ConstraintAnalysisSummary> constraint_summary_;
+    std::optional<AnalysisSummarySet> analysis_summaries_;
+    std::optional<backends::SolverOptions> solver_options_;
 
     std::uint64_t inputs_version_{0};
 };

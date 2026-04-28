@@ -10,7 +10,7 @@
 #include "Physics/Materials/Fluid/CarreauYasudaViscosity.h"
 #include "Physics/Materials/Solid/LinearElasticStress.h"
 #include "Physics/Materials/Solid/NeoHookeanPK1.h"
-#include "Physics/Formulations/Solid/FiniteDeformationSolid.h"
+#include "Physics/Tests/Unit/FiniteDeformationSolidTestSupport.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 
 #include "FE/Forms/Vocabulary.h"
@@ -145,7 +145,7 @@ TEST(FormIntegrationJacobian, NeoHookeanForm_MatchesFiniteDifference)
 
     auto model = std::make_shared<materials::solid::NeoHookeanPK1>(/*lambda=*/10.0, /*mu=*/2.0);
     const auto residual =
-        formulations::solid::totalLagrangianPK1Residual(u, v, model, 3);
+        test_support::solid::totalLagrangianPK1Residual(u, v, model, 3);
 
     FE::systems::installFormulation(system, "residual", {u_id}, residual);
     FE::systems::installFormulation(system, "jacobian", {u_id}, residual);
@@ -182,11 +182,11 @@ TEST(FormIntegrationJacobian, SolidFiniteDeformationHelpersBuildFollowerAndGeome
     auto initial_stress = FormExpr::identity(3);
 
     const auto follower =
-        formulations::solid::followerPressureReferenceResidual(pressure, v, F, 2);
+        test_support::solid::followerPressureReferenceResidual(pressure, v, F, 2);
     const auto geometric_stiffness =
-        formulations::solid::initialStressGeometricStiffnessResidual(initial_stress,
-                                                                     du,
-                                                                     v);
+        test_support::solid::initialStressGeometricStiffnessResidual(initial_stress,
+                                                                    du,
+                                                                    v);
 
     EXPECT_TRUE(follower.isValid());
     EXPECT_TRUE(geometric_stiffness.isValid());

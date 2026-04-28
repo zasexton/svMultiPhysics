@@ -776,6 +776,16 @@ ValidationResult canCompileImpl(const FormExpr& integrand,
                 break;
             }
 
+            case FormExprType::Pullback:
+            case FormExprType::Pushforward: {
+                const auto from = n.fromConfiguration().value_or(GeometryConfiguration::Reference);
+                const auto to = n.toConfiguration().value_or(GeometryConfiguration::Current);
+                if (from != to) {
+                    fail("JIT: generic pullback()/pushforward() frame markers are metadata-only; write the frame transform explicitly");
+                }
+                break;
+            }
+
             case FormExprType::SmoothAbsoluteValue:
             case FormExprType::SmoothSign:
             case FormExprType::SmoothHeaviside: {

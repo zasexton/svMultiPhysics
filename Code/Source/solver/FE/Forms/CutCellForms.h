@@ -27,6 +27,9 @@ struct CutCellParameterSlots {
     std::uint32_t side_indicator{1u};
     std::array<std::uint32_t, 3> embedded_normal{{2u, 3u, 4u}};
     std::uint32_t stabilization_scale{5u};
+    std::array<std::uint32_t, 3> measure_sensitivity{{6u, 7u, 8u}};
+    std::array<std::uint32_t, 3> normal_sensitivity{{9u, 10u, 11u}};
+    std::uint32_t quadrature_weight_sensitivity{12u};
 };
 
 [[nodiscard]] inline FormExpr cutVolumeFraction(
@@ -56,11 +59,38 @@ struct CutCellParameterSlots {
     return FormExpr::parameterRef(slots.stabilization_scale);
 }
 
+[[nodiscard]] inline FormExpr cutMeasureSensitivity(
+    const CutCellParameterSlots& slots = {})
+{
+    return FormExpr::asVector({
+        FormExpr::parameterRef(slots.measure_sensitivity[0]),
+        FormExpr::parameterRef(slots.measure_sensitivity[1]),
+        FormExpr::parameterRef(slots.measure_sensitivity[2])});
+}
+
+[[nodiscard]] inline FormExpr cutNormalSensitivity(
+    const CutCellParameterSlots& slots = {})
+{
+    return FormExpr::asVector({
+        FormExpr::parameterRef(slots.normal_sensitivity[0]),
+        FormExpr::parameterRef(slots.normal_sensitivity[1]),
+        FormExpr::parameterRef(slots.normal_sensitivity[2])});
+}
+
+[[nodiscard]] inline FormExpr cutQuadratureWeightSensitivity(
+    const CutCellParameterSlots& slots = {})
+{
+    return FormExpr::parameterRef(slots.quadrature_weight_sensitivity);
+}
+
 struct CutCellFormTerminals {
     FormExpr volume_fraction{};
     FormExpr side_indicator{};
     FormExpr embedded_normal{};
     FormExpr stabilization_scale{};
+    FormExpr measure_sensitivity{};
+    FormExpr normal_sensitivity{};
+    FormExpr quadrature_weight_sensitivity{};
 };
 
 [[nodiscard]] inline CutCellFormTerminals cutCellTerminals(
@@ -71,6 +101,9 @@ struct CutCellFormTerminals {
     terminals.side_indicator = cutSideIndicator(slots);
     terminals.embedded_normal = cutEmbeddedNormal(slots);
     terminals.stabilization_scale = cutStabilizationScale(slots);
+    terminals.measure_sensitivity = cutMeasureSensitivity(slots);
+    terminals.normal_sensitivity = cutNormalSensitivity(slots);
+    terminals.quadrature_weight_sensitivity = cutQuadratureWeightSensitivity(slots);
     return terminals;
 }
 

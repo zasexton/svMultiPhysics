@@ -5205,6 +5205,15 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
             if (kids.size() != 1u || !kids[0]) {
                 throw std::logic_error("Forms: frame transform node must have 1 child");
             }
+            const auto from = node.fromConfiguration().value_or(GeometryConfiguration::Reference);
+            const auto to = node.toConfiguration().value_or(GeometryConfiguration::Current);
+            if (from != to) {
+                throw FEException(
+                    "Forms: generic pullback()/pushforward() frame markers are metadata-only; "
+                    "write the transform explicitly with Forms primitives such as cofactor(F), inv(F), "
+                    "currentJacobian(), and referenceJacobian()",
+                    __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
             return evalReal(*kids[0], env, side, q);
         }
         case FormExprType::ParameterSymbol: {
@@ -9486,6 +9495,15 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
             const auto kids = node.childrenShared();
             if (kids.size() != 1u || !kids[0]) {
                 throw std::logic_error("Forms: frame transform node must have 1 child (dual)");
+            }
+            const auto from = node.fromConfiguration().value_or(GeometryConfiguration::Reference);
+            const auto to = node.toConfiguration().value_or(GeometryConfiguration::Current);
+            if (from != to) {
+                throw FEException(
+                    "Forms: generic pullback()/pushforward() frame markers are metadata-only; "
+                    "write the transform explicitly with Forms primitives such as cofactor(F), inv(F), "
+                    "currentJacobian(), and referenceJacobian()",
+                    __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
             }
             return evalDual(*kids[0], env, side, q);
         }

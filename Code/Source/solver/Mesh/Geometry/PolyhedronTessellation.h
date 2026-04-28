@@ -33,6 +33,7 @@
 
 #include "../Core/MeshTypes.h"
 #include <array>
+#include <cstddef>
 #include <vector>
 
 namespace svmp {
@@ -54,6 +55,42 @@ struct PolyhedronTet4 {
  */
 class PolyhedronTessellation {
 public:
+  /**
+   * @brief Return deterministic linear tetrahedra for a linear volume cell.
+   *
+   * This centralizes the canonical tetrahedral decompositions used by cut
+   * topology, measure estimation, and validation code. Tetra, hex, wedge, and
+   * pyramid cells are decomposed from their standard corner ordering. Polyhedron
+   * cells use the convex star tessellation below.
+   */
+  static std::vector<PolyhedronTet4> linear_cell_tets(
+      const MeshBase& mesh,
+      index_t cell,
+      Configuration cfg = Configuration::Reference);
+
+  /**
+   * @brief Return deterministic linear tetrahedra for explicit linear-cell points.
+   *
+   * The input points must follow the canonical corner ordering for the requested
+   * family. This overload is used by tessellated high-order cells, where the
+   * subcell points are already physical coordinates rather than mesh vertices.
+   */
+  static std::vector<PolyhedronTet4> linear_cell_tets(
+      CellFamily family,
+      const std::vector<std::array<real_t, 3>>& points);
+
+  /**
+   * @brief Return the canonical corner-index tetrahedra used for a linear volume cell.
+   *
+   * The returned indices are the same deterministic decompositions used by
+   * linear_cell_tets(). Consumers that need to carry parallel per-corner data
+   * such as parent-parametric coordinates can use this contract without
+   * duplicating the decomposition tables.
+   */
+  static std::vector<std::array<std::size_t, 4>> linear_cell_tet_corner_indices(
+      CellFamily family,
+      std::size_t point_count);
+
   static std::vector<PolyhedronTet4> convex_star_tets(
       const MeshBase& mesh,
       index_t cell,
@@ -63,4 +100,3 @@ public:
 } // namespace svmp
 
 #endif // SVMP_POLYHEDRON_TESSELLATION_H
-

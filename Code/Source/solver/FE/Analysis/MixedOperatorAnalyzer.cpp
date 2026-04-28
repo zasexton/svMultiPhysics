@@ -6,6 +6,7 @@
  */
 
 #include "Analysis/MixedOperatorAnalyzer.h"
+#include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
 #include "Analysis/FormStructureAnalyzer.h"
 
@@ -17,6 +18,85 @@
 namespace svmp {
 namespace FE {
 namespace analysis {
+
+namespace {
+
+void appendUnique(std::vector<VariableKey>& values, const VariableKey& value)
+{
+    if (std::find(values.begin(), values.end(), value) == values.end()) {
+        values.push_back(value);
+    }
+}
+
+std::vector<VariableKey> blockVariables(const OperatorBlockId& block)
+{
+    std::vector<VariableKey> variables;
+    for (const auto& v : block.test_variables) {
+        appendUnique(variables, v);
+    }
+    for (const auto& v : block.trial_variables) {
+        appendUnique(variables, v);
+    }
+    return variables;
+}
+
+void emitSchurSummaryClaim(ProblemAnalysisReport& report,
+                           const ReducedMatrixSummary& summary)
+{
+    const auto& matrix = summary.free_free_matrix;
+    const bool tagged_schur =
+        matrix.block.role == ContributionRole::ConstraintBlock ||
+        matrix.block.operator_tag.find("schur") != std::string::npos ||
+        matrix.block.operator_tag.find("Schur") != std::string::npos;
+    if (!tagged_schur) {
+        return;
+    }
+
+    const bool exact_reduction =
+        summary.reduction_exact_for_analysis &&
+        matrix.rows > 0 &&
+        matrix.cols > 0;
+
+    PropertyClaim claim;
+    claim.kind = PropertyKind::IndefiniteOperatorResolution;
+    claim.status = exact_reduction ? PropertyStatus::Preserved
+                                   : PropertyStatus::Unknown;
+    claim.confidence = exact_reduction ? AnalysisConfidence::High
+                                       : AnalysisConfidence::Medium;
+    claim.domain = matrix.block.domain;
+    claim.variables = blockVariables(matrix.block);
+    claim.reduced_definiteness_class =
+        exact_reduction ? CertificationClass::Certified
+                        : CertificationClass::Unknown;
+    claim.tested_block_id = matrix.block.operator_tag;
+    claim.description = exact_reduction
+        ? "Reduced Schur/constraint summary is available for indefinite block resolution"
+        : "Reduced Schur/constraint summary is incomplete for indefinite block resolution";
+    claim.claim_origin = "MixedOperatorAnalyzer";
+    claim.addEvidence("MixedOperatorAnalyzer",
+        "ReducedMatrixSummary for Schur-like block has rows=" +
+        std::to_string(matrix.rows) +
+        ", cols=" + std::to_string(matrix.cols) +
+        ", exact_reduction=" +
+        std::string(summary.reduction_exact_for_analysis ? "true" : "false"),
+        claim.confidence);
+    report.claims.push_back(std::move(claim));
+}
+
+void emitSchurSummaryHooks(const ProblemAnalysisContext& context,
+                           ProblemAnalysisReport& report)
+{
+    const auto* summaries = context.analysisSummaries();
+    if (!summaries) {
+        return;
+    }
+
+    for (const auto& summary : summaries->reduced_matrices) {
+        emitSchurSummaryClaim(report, summary);
+    }
+}
+
+} // namespace
 
 std::string MixedOperatorAnalyzer::name() const {
     return "MixedOperatorAnalyzer";
@@ -377,6 +457,7 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
         }
     }
 
+    emitSchurSummaryHooks(context, report);
 }
 
 } // namespace analysis

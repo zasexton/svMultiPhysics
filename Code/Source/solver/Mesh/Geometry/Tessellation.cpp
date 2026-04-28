@@ -1585,11 +1585,14 @@ void Tessellator::map_subdivision_to_physical(
     TessellatedCell& result) {
 
     result.vertices.clear();
+    result.parametric_vertices.clear();
     result.vertices.reserve(grid.points.size());
+    result.parametric_vertices.reserve(grid.points.size());
 
     for (const auto& xi : grid.points) {
         const auto eval = CurvilinearEvaluator::evaluate_geometry(mesh, cell, xi, cfg);
         result.vertices.push_back(eval.coordinates);
+        result.parametric_vertices.push_back(xi);
     }
 }
 
@@ -1601,10 +1604,13 @@ void Tessellator::map_face_subdivision_to_physical(
     TessellatedFace& result) {
 
     result.vertices.clear();
+    result.parametric_vertices.clear();
     result.vertices.reserve(grid.points.size());
+    result.parametric_vertices.reserve(grid.points.size());
 
     for (const auto& xi : grid.points) {
         result.vertices.push_back(map_face_point(mesh, face, xi, cfg));
+        result.parametric_vertices.push_back(xi);
     }
 }
 

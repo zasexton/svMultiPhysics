@@ -20,6 +20,11 @@
 #include "Analysis/ConservationAnalyzer.h"
 #include "Analysis/DAEStructureAnalyzer.h"
 #include "Analysis/SpaceCompatibilityAnalyzer.h"
+#include "Analysis/DiscreteMonotonicityAnalyzer.h"
+#include "Analysis/MeshGeometryAnalyzer.h"
+#include "Analysis/AdvancedStabilityAnalyzers.h"
+#include "Analysis/SolverCompatibilityAnalyzer.h"
+#include "Analysis/NumericSummaryPlanner.h"
 
 namespace svmp {
 namespace FE {
@@ -66,6 +71,20 @@ ProblemAnalyzer ProblemAnalyzer::createDefault() {
     //  12. ConservationAnalyzer (no dependencies beyond contributions)
     //  13. DAEStructureAnalyzer (no dependencies beyond contributions)
     //  14. SpaceCompatibilityAnalyzer (reads MixedSaddlePoint claims + field descriptors)
+    //  15. DiscreteMonotonicityAnalyzer (reads matrix/stencil summaries)
+    //  16. MeshGeometryAnalyzer (reads mesh quality summaries)
+    //  17. TemporalStabilityAnalyzer (reads temporal summaries)
+    //  18. EnergyEntropyLawAnalyzer (reads balance-law summaries)
+    //  19. CoefficientConstitutiveAnalyzer (reads coefficient summaries)
+    //  20. NonlinearTangentAnalyzer (reads tangent summaries)
+    //  21. LockingRiskAnalyzer (reads constraint/inf-sup/space evidence)
+    //  22. SpectralSpuriousModeAnalyzer (reads spectral summaries)
+    //  23. ErrorEstimatorAnalyzer (reads estimator summaries)
+    //  24. QuadratureAdequacyAnalyzer (reads quadrature summaries)
+    //  25. PreservationStructureAnalyzer (reads preservation/transfer summaries)
+    //  26. CoupledSystemStabilityAnalyzer (reads coupling/DAE evidence)
+    //  27. SolverCompatibilityAnalyzer (reads claims + configured solver)
+    //  28. NumericSummaryPlanner (reads symbolic claims + context metadata)
 
     analyzer.addPass(std::make_unique<CouplingGraphAnalyzer>());
     analyzer.addPass(std::make_unique<KernelAnalyzer>());
@@ -81,6 +100,20 @@ ProblemAnalyzer ProblemAnalyzer::createDefault() {
     analyzer.addPass(std::make_unique<ConservationAnalyzer>());
     analyzer.addPass(std::make_unique<DAEStructureAnalyzer>());
     analyzer.addPass(std::make_unique<SpaceCompatibilityAnalyzer>());
+    analyzer.addPass(std::make_unique<DiscreteMonotonicityAnalyzer>());
+    analyzer.addPass(std::make_unique<MeshGeometryAnalyzer>());
+    analyzer.addPass(std::make_unique<TemporalStabilityAnalyzer>());
+    analyzer.addPass(std::make_unique<EnergyEntropyLawAnalyzer>());
+    analyzer.addPass(std::make_unique<CoefficientConstitutiveAnalyzer>());
+    analyzer.addPass(std::make_unique<NonlinearTangentAnalyzer>());
+    analyzer.addPass(std::make_unique<LockingRiskAnalyzer>());
+    analyzer.addPass(std::make_unique<SpectralSpuriousModeAnalyzer>());
+    analyzer.addPass(std::make_unique<ErrorEstimatorAnalyzer>());
+    analyzer.addPass(std::make_unique<QuadratureAdequacyAnalyzer>());
+    analyzer.addPass(std::make_unique<PreservationStructureAnalyzer>());
+    analyzer.addPass(std::make_unique<CoupledSystemStabilityAnalyzer>());
+    analyzer.addPass(std::make_unique<SolverCompatibilityAnalyzer>());
+    analyzer.addPass(std::make_unique<NumericSummaryPlanner>());
 
     return analyzer;
 }

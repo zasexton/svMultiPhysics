@@ -37,6 +37,15 @@ enforcement systems such as gauge handling remain separate consumers of its resu
 - Preserve useful fallback behavior when only partial metadata is available.
 - Keep the core vocabulary mathematical rather than physics-labeled.
 
+## Physics-Agnostic Design Rule
+
+Analysis code must trigger from mathematical metadata only: variables, function
+spaces, operator traits, contribution roles, trace capabilities, constraints,
+topology, balance groups, numeric summary objects, and solver choices. It must
+not branch on equation names, physics module names, material-model names, or
+domain-specific field names. A new physics module participates by emitting the
+same generic descriptors and optional summaries as every other module.
+
 ## Non-Goals
 
 - Proving full well-posedness in the functional-analysis sense.
@@ -302,8 +311,58 @@ The subsystem is careful to scope claims narrowly when only part of the structur
 12. `ConservationAnalyzer`
 13. `DAEStructureAnalyzer`
 14. `SpaceCompatibilityAnalyzer`
+15. `DiscreteMonotonicityAnalyzer`
+16. `MeshGeometryAnalyzer`
+17. `TemporalStabilityAnalyzer`
+18. `EnergyEntropyLawAnalyzer`
+19. `CoefficientConstitutiveAnalyzer`
+20. `NonlinearTangentAnalyzer`
+21. `LockingRiskAnalyzer`
+22. `SpectralSpuriousModeAnalyzer`
+23. `ErrorEstimatorAnalyzer`
+24. `QuadratureAdequacyAnalyzer`
+25. `PreservationStructureAnalyzer`
+26. `CoupledSystemStabilityAnalyzer`
+27. `SolverCompatibilityAnalyzer`
+28. `NumericSummaryPlanner`
 
 The order matters because some later passes consume earlier claims.
+
+## Analyzer Family Matrix
+
+Each family is documented by mathematical trigger, emitted claims, requested or
+consumed summaries, limitations, and reference anchors used by the design plan.
+
+| Analyzer family | Mathematical trigger | Symbolic claims | Numeric summaries needed | Limitations | References |
+| --- | --- | --- | --- | --- | --- |
+| `CouplingGraphAnalyzer` | Variable coupling graph has cross-field, interface, global, or auxiliary edges | `CoupledSystemStructure`, `InterfaceCondition` | `CoupledSystemStability`, `FluxBalance`, `TemporalStability` when stability evidence is needed | Graph topology alone does not prove stability or conservation | [BrezziFortin1991], [HairerWanner] |
+| `KernelAnalyzer` | Nullspace hints, gradient-only structure, semidefinite traits, or retained kernel metadata | `Nullspace` | `ReducedMatrix`, constraint/nullspace evidence | Kernel family is unknown when metadata is absent or component extraction is unavailable | [BrennerScott2008] |
+| `MixedOperatorAnalyzer` | Off-diagonal constraint blocks and multiplier-like variables | `MixedSaddlePoint`, `Nullspace` | `InfSupEstimate`, `ReducedMatrix`, `DiscreteMatrix` | Fallback detects constraint fields without fabricating an unverified stable pair | [BrezziFortin1991], [Bathe2001InfSup] |
+| `OperatorClassAnalyzer` | Symmetric/skew/positive/second-order contribution traits and coefficient metadata | `OperatorSymmetry`, `OperatorDefiniteness`, `CoefficientPositivity` | `DiscreteMatrix`, `ReducedMatrix`, `CoefficientProperties`, `MeshGeometryQuality`, `LocalStencil` | Coercivity constants and positivity remain unknown without explicit summaries | [BrennerScott2008] |
+| `StabilizationAnalyzer` | Stabilization roles or first-order/penalty scaling metadata | `Stabilization` | `ParameterScale`, `DiscreteMatrix` | Stabilization adequacy is not certified from presence alone | [BrooksHughes1982], [ABCM2002DG] |
+| `ConstraintRankAnalyzer` | Nullspace claims plus strong, affine, periodic, multiplier, penalty, or weak constraints | `UnderConstraint`, `OverConstraint`, `ConstraintRedundancy`, `InitialDataCompatibility` | `ReducedMatrix`, `InitialCompatibility` | Affine/MPC reductions are unknown unless transformed summaries are available | [BrennerScott2008] |
+| `CompatibilityAnalyzer` | Preserved nullspace or algebraic constraint requiring data compatibility | `CompatibilityCondition`, `InitialDataCompatibility` | `InitialCompatibility` | Does not infer RHS integral balances without metadata | [BrennerScott2008], [AgmonDouglisNirenberg1959] |
+| `TopologyScopeAnalyzer` | Nullspace/constraint evidence scoped over disconnected mesh regions | `TopologyScopedKernel` | `MeshGeometryQuality`, region-specific `ReducedMatrix` | Needs topology context for region-specific conclusions | [BrennerScott2008] |
+| `InterfaceValidationAnalyzer` | Boundary/interface contributions, markers, weak penalties, flux-pair metadata | `InterfaceCondition`, `WeakBoundaryCoercivity` | `BoundarySymbol`, `FluxBalance`, `ParameterScale` | Pre-setup topology may only support warnings | [Arnold1982IP], [ABCM2002DG], [NitscheImmersed2016] |
+| `InfSupAnalyzer` | Pairing descriptors, saddle-point claims, constraint blocks | `InfSupCondition` | `InfSupEstimate`, `ReducedMatrix` | Structural pair lookup is generic and conservative; numeric estimates are optional | [BrezziFortin1991], [Bathe2001InfSup] |
+| `TransportCharacterAnalyzer` | Directional first-order traits, transport descriptors, skew/nonnormal evidence | `OperatorTransportCharacter`, `Stabilization` | `ParameterScale`, `TemporalStability`, `DiscreteMatrix`, `InvariantDomain` | Peclet/CFL/nonnormality are physics-agnostic dimensionless summaries, not equation-name checks | [BrooksHughes1982], [RoosStynesTobiska2008] |
+| `ConservationAnalyzer` | Balance groups, conservative flux variables, exchange pairs | `ConservationStructure`, `InterfaceCondition` | `FluxBalance` | Opt-in: no `BalanceDescriptor` means no conservation claim | [RaviartThomas1977] |
+| `DAEStructureAnalyzer` | Dynamic/algebraic variable descriptors, mass-like blocks, constraint blocks | `DifferentialAlgebraicStructure` | `TemporalStability`, `InitialCompatibility` | DAE index is classified only to the level supported by metadata | [HairerWanner] |
+| `SpaceCompatibilityAnalyzer` | Function-space family, trace capabilities, exact-sequence metadata, mixed pairs | `SpaceCompatibility`, `CompatibleComplexStructure` | `BoundarySymbol`, `InfSupEstimate`, `CompatibleComplex` | Custom spaces are unknown unless they emit explicit compatibility metadata | [AFW2006], [BrezziFortin1991] |
+| `DiscreteMonotonicityAnalyzer` | Scalar operator claims plus matrix/stencil sign summaries | `DiscreteMaximumPrinciple`, `ZMatrixStructure`, `MMatrixStructure`, `MatrixMonotonicityRisk` | `DiscreteMatrix`, `ReducedMatrix`, `LocalStencil`, `MeshGeometryQuality` | M-matrix certification is not attempted when reduced evidence is missing or inexact | [DMPAnisotropic2009] |
+| `MeshGeometryAnalyzer` | Mesh-quality summaries and topology-scoped geometric evidence | `MeshGeometryValidity`, `MatrixMonotonicityRisk` | `MeshGeometryQuality` | Native summaries must be provided by mesh owners; no VTK ownership or dense geometry copies | [BrennerScott2008] |
+| `TemporalStabilityAnalyzer` | Time scheme metadata, CFL/eigenvalue scale, amplification radius | `TemporalStability` | `TemporalStability` | Does not derive full time-integrator stability from method names alone | [HairerWanner], [ChungHulbert1993] |
+| `EnergyEntropyLawAnalyzer` | Declared energy/entropy balance, production sign, exchange cancellation | `EnergyStability`, `EntropyStability` | `EnergyEntropyBalance`, `FluxBalance` | Requires declared law metadata; does not infer a functional automatically | [Tadmor2016], [EnergyStableGradientFlows2021] |
+| `CoefficientConstitutiveAnalyzer` | Coefficient spectral bounds, positivity, contrast, parameter scales | `CoefficientPositivity`, `ParameterRobustness` | `CoefficientProperties`, `ParameterScale` | Black-box kernels need to provide summaries explicitly | [BrennerScott2008], [RoosStynesTobiska2008] |
+| `NonlinearTangentAnalyzer` | Nonlinear residual/tangent metadata, finite-difference action checks | `NonlinearTangentStructure` | `NonlinearTangent`, `DiscreteMatrix` | Exactness is unknown when no tangent consistency summary is available | [BrennerScott2008] |
+| `LockingRiskAnalyzer` | Constraint ratio, unstable pair evidence, near-singular scales, low-order spaces | `LockingRisk` | `InfSupEstimate`, `ReducedMatrix`, `ParameterScale` | Reports risk indicators, not a proof of locking-free behavior | [LockingReview2018], [CutFEMGhostPenalty2025] |
+| `SpectralSpuriousModeAnalyzer` | Declared eigenproblem, self-adjointness, compactness, compatible-complex metadata | `SpectralCorrectness` | `SpectralStructure`, `CompatibleComplex` | Spectral pollution checks require explicit eigenproblem and compactness evidence | [Boffi2010Eigen], [AFW2006] |
+| `ErrorEstimatorAnalyzer` | Residual/jump/flux-reconstruction/goal metadata | `ErrorEstimatorEligibility` | `ErrorEstimator`, `FluxBalance`, `AdjointConsistency` | Eligibility is distinct from an actual a posteriori error estimate | [Verfurth2013], [BeckerRannacher2001] |
+| `QuadratureAdequacyAnalyzer` | Integrand degree, quadrature exactness, reduced integration, aliasing controls | `QuadratureAdequacy` | `QuadratureAdequacy`, `LocalStencil` | Degree and aliasing evidence must come from forms or assembly summaries | [BrennerScott2008] |
+| `PreservationStructureAnalyzer` | Invariant-domain, equilibrium, moving-domain, transfer, or adjoint summaries | `InvariantDomainPreservation`, `EquilibriumPreservation`, `GeometricConservation`, `TransferOperatorCompatibility`, `AdjointConsistency` | `InvariantDomain`, `EquilibriumPreservation`, `MovingDomain`, `TransferOperator`, `AdjointConsistency` | Preservation checks are summary-backed and do not infer problem-specific equilibria | [GuermondPopovInvariantDomains], [Audusse2004WellBalanced], [GCLMovingMesh2006], [BernardiMadayPateraMortar1989], [AdjointConsistentInterface2010] |
+| `CoupledSystemStabilityAnalyzer` | Coupling-group summaries, exchange residuals, partition iteration radius, drift | `CoupledSystemStructure`, `ConservationStructure`, `DifferentialAlgebraicStructure` | `CoupledSystemStability`, `FluxBalance`, `TemporalStability` | Partitioned stability is reported from supplied summaries only | [HairerWanner] |
+| `SolverCompatibilityAnalyzer` | Solver/preconditioner choice plus symmetry, definiteness, nullspace, mixed, and scaling claims | `SolverCompatibility` | `DiscreteMatrix`, `ReducedMatrix`, block/preconditioner metadata | Does not choose a solver; it flags compatibility with the configured one | [BrennerScott2008], [BrezziFortin1991] |
+| `NumericSummaryPlanner` | Claims or context metadata that need compact numeric evidence | Summary requests, not property claims | All `AnalysisSummaryKind` values as needed | Planning only; it never computes or materializes summaries | All relevant analyzer-family references |
 
 ## What Each Pass Does
 
@@ -428,7 +487,9 @@ Typical outputs:
 
 ### `TransportCharacterAnalyzer`
 
-Detects transport-like or first-order directional structure.
+Detects transport-like or first-order directional structure. When optional
+summaries are present, it attaches Peclet-like dimensionless scale, CFL, and
+nonnormality indicators to the transport claim.
 
 Typical outputs:
 
@@ -436,7 +497,8 @@ Typical outputs:
 
 ### `ConservationAnalyzer`
 
-Consumes explicit balance metadata from contributions.
+Consumes explicit balance metadata from contributions and optional
+`FluxBalanceSummary` residuals.
 
 Important current behavior:
 
@@ -466,10 +528,34 @@ Checks:
 
 - BC trace requests against field trace capabilities
 - mixed-system space pair compatibility when a verified mixed pair is available
+- exact-sequence / compatible-complex metadata from field descriptors and
+  `CompatibleComplexSummary`
 
 Typical outputs:
 
 - `SpaceCompatibility`
+- `CompatibleComplexStructure`
+
+### Phase 6 Summary-Backed Stability Analyzers
+
+The Phase 6 analyzers consume generic `AnalysisSummarySet` metadata and prior
+symbolic claims. They do not depend on named physics modules.
+
+Typical outputs:
+
+- `TemporalStability` from `TemporalStabilityAnalyzer`
+- `EnergyStability` / `EntropyStability` from `EnergyEntropyLawAnalyzer`
+- `CoefficientPositivity` / `ParameterRobustness` from
+  `CoefficientConstitutiveAnalyzer`
+- `NonlinearTangentStructure` from `NonlinearTangentAnalyzer`
+- `LockingRisk` from `LockingRiskAnalyzer`
+- `SpectralCorrectness` from `SpectralSpuriousModeAnalyzer`
+- `ErrorEstimatorEligibility` from `ErrorEstimatorAnalyzer`
+- `QuadratureAdequacy` from `QuadratureAdequacyAnalyzer`
+- invariant-domain, equilibrium, moving-domain, transfer, and adjoint
+  preservation claims from `PreservationStructureAnalyzer`
+- coupled-system stability `CoupledSystemStructure` claims from
+  `CoupledSystemStabilityAnalyzer`
 
 ## How Analysis Data Is Produced
 
@@ -548,6 +634,32 @@ or
 ```cpp
 auto report = system.runProblemAnalysis();
 ```
+
+For compact application logs:
+
+```cpp
+const auto& report = system.analysisReport();
+report.printApplicationLog(std::cout);
+```
+
+This emits physics-agnostic lines such as:
+
+```text
+[FE/Analysis] Applicable analyzers: DiscreteMonotonicityAnalyzer, SolverCompatibilityAnalyzer
+[FE/Analysis] Requested summaries: ReducedMatrix(domain=Cell,id=ReducedMatrix:Cell,variables=field=0)
+[FE/Analysis] DiscreteMonotonicityAnalyzer: kind=ZMatrixStructure status=violated field=0 domain=Cell matrix_sign=NotZMatrix block=scalar:scalar:cell reason=positive off-diagonal entries break Z-matrix monotonicity evidence
+```
+
+For trace-level evidence, pass any available summary set:
+
+```cpp
+report.printTraceLog(std::cout, context.analysisSummaries());
+```
+
+Trace logs include bounded worst-entry, row, element, and constraint evidence
+when those summaries are available. They are intended for diagnostics and test
+evidence, while `printApplicationLog()` remains compact enough for normal setup
+logs.
 
 ## Multiphyics And Coupled Systems
 

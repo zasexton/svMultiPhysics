@@ -6,14 +6,103 @@
  */
 
 #include "Analysis/ConservationAnalyzer.h"
+#include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
 
+#include <algorithm>
+#include <cmath>
 #include <unordered_map>
 #include <vector>
 
 namespace svmp {
 namespace FE {
 namespace analysis {
+
+namespace {
+
+void appendUnique(std::vector<VariableKey>& values, const VariableKey& value)
+{
+    if (std::find(values.begin(), values.end(), value) == values.end()) {
+        values.push_back(value);
+    }
+}
+
+std::vector<VariableKey> blockVariables(const OperatorBlockId& block)
+{
+    std::vector<VariableKey> variables;
+    for (const auto& v : block.test_variables) {
+        appendUnique(variables, v);
+    }
+    for (const auto& v : block.trial_variables) {
+        appendUnique(variables, v);
+    }
+    return variables;
+}
+
+void emitFluxBalanceSummaryClaims(const ProblemAnalysisContext& context,
+                                  ProblemAnalysisReport& report)
+{
+    const auto* summaries = context.analysisSummaries();
+    if (!summaries) return;
+
+    for (const auto& summary : summaries->flux_balances) {
+        const Real tol = summary.balance_tolerance > Real{}
+            ? summary.balance_tolerance
+            : Real{1.0e-10};
+        const Real residual = std::max({
+            std::abs(summary.local_residual_norm),
+            std::abs(summary.global_residual_norm),
+            std::abs(summary.interface_pair_residual_norm)});
+        const bool violated =
+            residual > tol ||
+            summary.local_violation_count > 0u;
+
+        PropertyClaim claim;
+        claim.kind = PropertyKind::ConservationStructure;
+        claim.status = violated ? PropertyStatus::Violated
+                                : PropertyStatus::Preserved;
+        claim.confidence = AnalysisConfidence::High;
+        claim.certification_class = violated ? CertificationClass::Violated
+                                             : CertificationClass::Certified;
+        claim.conservation_class = violated
+            ? ConservationClass::ClosureBroken
+            : (summary.interface_pair_count > 0u
+                ? ConservationClass::ExchangeBalanced
+                : ConservationClass::GlobalClosureExpected);
+        claim.domain = summary.block.domain;
+        claim.variables = blockVariables(summary.block);
+        claim.local_balance_residual = summary.local_residual_norm;
+        claim.global_balance_residual = summary.global_residual_norm;
+        claim.interface_balance_residual = summary.interface_pair_residual_norm;
+        claim.flux_balance_residual = residual;
+        claim.tested_block_id = summary.block.operator_tag;
+        claim.description = violated
+            ? "Numeric flux-balance summary violates the declared tolerance"
+            : "Numeric flux-balance summary satisfies the declared tolerance";
+        claim.claim_origin = "ConservationAnalyzer";
+        claim.addEvidence("ConservationAnalyzer",
+            "FluxBalanceSummary local=" +
+            std::to_string(summary.local_residual_norm) +
+            ", global=" +
+            std::to_string(summary.global_residual_norm) +
+            ", interface=" +
+            std::to_string(summary.interface_pair_residual_norm) +
+            ", tolerance=" + std::to_string(tol) +
+            ", local_violations=" +
+            std::to_string(summary.local_violation_count));
+        if (violated) {
+            AnalysisIssue issue;
+            issue.severity = IssueSeverity::Warning;
+            issue.message =
+                "Flux-balance residual exceeds tolerance for block '" +
+                summary.block.operator_tag + "'";
+            report.issues.push_back(std::move(issue));
+        }
+        report.claims.push_back(std::move(claim));
+    }
+}
+
+} // namespace
 
 std::string ConservationAnalyzer::name() const {
     return "ConservationAnalyzer";
@@ -23,6 +112,7 @@ void ConservationAnalyzer::run(const ProblemAnalysisContext& context,
                                ProblemAnalysisReport& report) const
 {
     const auto& contributions = context.contributions();
+    emitFluxBalanceSummaryClaims(context, report);
 
     // =====================================================================
     // Group contributions by balance_group
@@ -57,7 +147,6 @@ void ConservationAnalyzer::run(const ProblemAnalysisContext& context,
         // Count contributions by sign and role
         int positive_count = 0;
         int negative_count = 0;
-        bool has_flux = false;
         bool has_local_closure_expected = false;
         bool has_boundary_flux = false;
 
@@ -72,7 +161,6 @@ void ConservationAnalyzer::run(const ProblemAnalysisContext& context,
             }
 
             if (entry.balance.role == BalanceRole::FluxLike) {
-                has_flux = true;
                 if (entry.contrib->domain == DomainKind::Boundary ||
                     entry.contrib->domain == DomainKind::CoupledBoundary) {
                     has_boundary_flux = true;

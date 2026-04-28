@@ -2269,11 +2269,6 @@ FormExpr FormExpr::meshVelocity()
     return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::MeshVelocity, "meshVelocity"));
 }
 
-FormExpr FormExpr::domainVelocity()
-{
-    return meshVelocity();
-}
-
 FormExpr FormExpr::meshAcceleration()
 {
     return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::MeshAcceleration, "meshAcceleration"));
@@ -2316,12 +2311,12 @@ FormExpr FormExpr::referenceJacobian()
 
 FormExpr FormExpr::currentJacobianDeterminant()
 {
-    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::CurrentJacobianDeterminant, "detJ_current"));
+    return currentJacobian().det();
 }
 
 FormExpr FormExpr::referenceJacobianDeterminant()
 {
-    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::ReferenceJacobianDeterminant, "detJ_reference"));
+    return referenceJacobian().det();
 }
 
 FormExpr FormExpr::currentNormal()

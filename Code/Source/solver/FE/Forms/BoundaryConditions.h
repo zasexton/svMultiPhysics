@@ -264,7 +264,7 @@ inline StrongDirichlet strongDirichlet(FieldId field,
 }
 
 /**
- * @brief Apply a list of Poisson-style Neumann BCs to a residual form without explicit loops
+ * @brief Apply scalar natural boundary data to a residual form without explicit loops
  *
  * For each BC on boundary marker Γ(m):
  *   k∇u·n = g  ⇒  adds  -∫ g v ds(m)
@@ -316,7 +316,7 @@ template <class NeumannBC, class FluxValue>
 }
 
 /**
- * @brief Apply a list of Poisson-style Robin BCs to a residual form without explicit loops
+ * @brief Apply scalar Robin-style boundary data to a residual form without explicit loops
  *
  * For each BC on boundary marker Γ(m):
  *   k∇u·n + α u = r  ⇒  adds  ∫ α u v ds(m) - ∫ r v ds(m)
@@ -540,7 +540,12 @@ struct TraceInequalityOptions {
 }
 
 /**
- * @brief Apply weak Dirichlet BCs for scalar Poisson diffusion using Nitsche's method
+ * @brief Legacy scalar-diffusion Nitsche helper.
+ *
+ * Prefer `applyTraceNitsche(...)` in new formulation code so the consistency
+ * flux, adjoint flux, and penalty weight remain explicit in the form file.
+ * This compatibility helper is retained for existing scalar Poisson-style
+ * modules.
  *
  * Imposes (on each boundary marker Γ(m)):
  *   u = uD

@@ -43,6 +43,8 @@ namespace analysis {
 enum class NullspaceFamily : std::uint8_t;
 enum class ContributionRole : std::uint8_t;
 enum class OperatorTraitFlags : std::uint32_t;
+enum class AnalysisSummaryKind : std::uint8_t;
+struct AnalysisSummarySet;
 
 // ============================================================================
 // Enumerations
@@ -71,6 +73,35 @@ enum class PropertyKind : std::uint8_t {
     DifferentialAlgebraicStructure, ///< DAE index / algebraic vs dynamic classification
     SpaceCompatibility,           ///< FE space pair compatibility (e.g., Taylor-Hood)
     OperatorTransportCharacter,   ///< First-order / convection-like / transport-dominated character
+
+    // Discrete stability and roadmap-wide claim kinds
+    DiscreteMaximumPrinciple,      ///< Discrete maximum principle applicability/certification
+    ZMatrixStructure,              ///< Off-diagonal sign structure of a discrete operator
+    MMatrixStructure,              ///< M-matrix monotonicity structure
+    MatrixMonotonicityRisk,        ///< Matrix sign/monotonicity risk evidence
+    CompatibleComplexStructure,    ///< de Rham/exact-sequence compatibility
+    EnergyStability,               ///< Discrete energy law/stability structure
+    EntropyStability,              ///< Discrete entropy law/stability structure
+    TemporalStability,             ///< Time-integration stability structure
+    WeakBoundaryCoercivity,        ///< DG/Nitsche/penalty boundary coercivity
+    MeshGeometryValidity,          ///< Mesh mapping and geometry validity
+    CoefficientPositivity,         ///< Scalar/tensor coefficient positivity
+    NonlinearTangentStructure,     ///< Nonlinear residual/tangent consistency
+    LockingRisk,                   ///< Constraint/parameter overstiffness or locking risk
+    SpectralCorrectness,           ///< Eigenproblem compactness/spurious-mode structure
+    ErrorEstimatorEligibility,     ///< A posteriori estimator applicability
+    SolverCompatibility,           ///< Solver/preconditioner compatibility with claims
+    QuadratureAdequacy,            ///< Quadrature exactness/underintegration structure
+    BoundaryComplementingCondition, ///< Boundary-symbol complementing-condition evidence
+    IndefiniteOperatorResolution,  ///< Helmholtz/shifted/indefinite operator resolution
+    MinimumResidualStability,      ///< Petrov-Galerkin/least-squares stability structure
+    InvariantDomainPreservation,   ///< Bound/positivity/invariant-domain preservation
+    EquilibriumPreservation,       ///< Well-balanced/equilibrium preservation
+    GeometricConservation,         ///< Moving-domain geometric conservation
+    TransferOperatorCompatibility, ///< Projection/mortar/transfer compatibility
+    AdjointConsistency,            ///< Adjoint-consistency of operators/interfaces
+    ParameterRobustness,           ///< Singular-perturbation/parameter robustness
+    InitialDataCompatibility,      ///< Initial data and constraint compatibility
 };
 
 /**
@@ -158,6 +189,81 @@ enum class TransportCharacterClass : std::uint8_t {
     DirectionalFirstOrderLike, ///< Has directional first-order terms (convection)
     NonNormalRisk,           ///< Non-normal operator risk (convection-dominated)
     TransportDominatedRisk,  ///< Transport-dominated regime (high Peclet)
+    Unknown,
+};
+
+/**
+ * @brief Applicability of an analyzer/property to the current mathematical structure
+ */
+enum class ApplicabilityClass : std::uint8_t {
+    Applicable,
+    NotApplicable,
+    Unknown,
+};
+
+/**
+ * @brief Certification state for a property when symbolic or numeric evidence exists
+ */
+enum class CertificationClass : std::uint8_t {
+    Certified,
+    Violated,
+    NotCertified,
+    Unknown,
+};
+
+/**
+ * @brief Matrix sign/monotonicity structure classification
+ */
+enum class MatrixSignStructureClass : std::uint8_t {
+    ZMatrix,
+    NotZMatrix,
+    MMatrixCertified,
+    MMatrixNotCertified,
+    Unknown,
+};
+
+/**
+ * @brief Operator symmetry classification independent of raw trait flags
+ */
+enum class OperatorSymmetryClass : std::uint8_t {
+    Symmetric,
+    Skew,
+    Nonsymmetric,
+    Unknown,
+};
+
+/**
+ * @brief Time integration stability classification
+ */
+enum class TemporalStabilityClass : std::uint8_t {
+    AStable,
+    LStable,
+    BStable,
+    SSP,
+    ConditionallyStable,
+    Unknown,
+};
+
+/**
+ * @brief Coercivity classification for elliptic/energy-like operators
+ */
+enum class CoercivityClass : std::uint8_t {
+    Coercive,
+    Semicoercive,
+    Indefinite,
+    NotCoercive,
+    Unknown,
+};
+
+/**
+ * @brief How nullspace modes were treated by a diagnostic or estimate
+ */
+enum class NullspaceHandlingClass : std::uint8_t {
+    NotApplicable,
+    AnchoredByConstraints,
+    ProjectedOut,
+    Retained,
+    Uncontrolled,
     Unknown,
 };
 
@@ -391,6 +497,47 @@ struct PropertyClaim {
     std::optional<SpaceCompatibilityClass> space_compatibility_class;
     std::optional<TransportCharacterClass> transport_character_class;
 
+    // ---- Phase 1 roadmap vocabulary plumbing ----
+
+    std::optional<ApplicabilityClass> applicability_class;
+    std::optional<CertificationClass> certification_class;
+    std::optional<MatrixSignStructureClass> matrix_sign_structure_class;
+    std::optional<OperatorSymmetryClass> operator_symmetry_class;
+    std::optional<TemporalStabilityClass> temporal_stability_class;
+    std::optional<CoercivityClass> coercivity_class;
+    std::optional<CertificationClass> reduced_definiteness_class;
+    std::optional<NullspaceHandlingClass> nullspace_handling_class;
+
+    /// Optional numeric evidence slots. These are scalar summaries only; full
+    /// summary objects belong to later metadata phases.
+    std::optional<double> inf_sup_estimate;
+    std::optional<double> peclet_number;
+    std::optional<double> cfl_number;
+    std::optional<double> nonnormality_indicator;
+    std::optional<double> local_balance_residual;
+    std::optional<double> global_balance_residual;
+    std::optional<double> interface_balance_residual;
+    std::optional<double> constraint_drift_norm;
+    std::optional<double> penalty_scale;
+    std::optional<double> weak_coercivity_lower_bound;
+    std::optional<double> flux_balance_residual;
+
+    /// Optional symbolic/metadata evidence slots for analyzer families that do
+    /// not require numeric summary objects.
+    std::optional<bool> exact_sequence_compatible;
+    std::optional<bool> commuting_projection_available;
+    std::optional<bool> boundary_complementing_condition_satisfied;
+    std::optional<bool> initial_data_compatible;
+    std::optional<bool> invariant_domain_metadata_present;
+    std::optional<bool> well_balanced_metadata_present;
+
+    /// Stable identifiers for richer evidence objects added in later phases.
+    std::optional<std::string> tested_block_id;
+    std::optional<std::string> estimate_scope;
+    std::optional<std::string> coefficient_id;
+    std::optional<std::string> equilibrium_id;
+    std::optional<std::string> invariant_set_id;
+
     // NOTE: claim → contribution tracing is done indirectly through the
     // existing evidence and variables fields. Analyzer passes that need to
     // reference specific contributions should do so through VariableKey
@@ -415,6 +562,36 @@ struct AnalysisIssue {
     std::vector<std::size_t> related_claim_indices;  ///< Indices into ProblemAnalysisReport::claims
 };
 
+/**
+ * @brief Request for one compact numeric/discrete summary needed by symbolic claims
+ */
+struct AnalysisSummaryRequest {
+    AnalysisSummaryKind summary_kind{};
+    DomainKind domain{DomainKind::Cell};
+    std::vector<VariableKey> variables;
+    std::vector<std::size_t> source_claim_indices;
+    std::vector<PropertyKind> source_claim_kinds;
+    std::vector<std::string> source_analyzers;
+    std::vector<std::string> reasons;
+    std::string request_id;
+    AnalysisConfidence confidence{AnalysisConfidence::Medium};
+    bool already_available{false};
+};
+
+/**
+ * @brief Plan of numeric/discrete summaries requested after symbolic analysis
+ */
+struct AnalysisRequestPlan {
+    std::vector<AnalysisSummaryRequest> summary_requests;
+
+    [[nodiscard]] bool empty() const noexcept { return summary_requests.empty(); }
+    [[nodiscard]] std::size_t size() const noexcept { return summary_requests.size(); }
+    [[nodiscard]] bool has(AnalysisSummaryKind kind) const noexcept;
+    [[nodiscard]] std::vector<const AnalysisSummaryRequest*>
+    requestsOfKind(AnalysisSummaryKind kind) const;
+    [[nodiscard]] bool hasSourceAnalyzer(const std::string& analyzer) const noexcept;
+};
+
 // ============================================================================
 // Report
 // ============================================================================
@@ -428,6 +605,7 @@ struct AnalysisIssue {
 struct ProblemAnalysisReport {
     std::vector<PropertyClaim> claims;
     std::vector<AnalysisIssue> issues;
+    AnalysisRequestPlan request_plan;
 
     // ---- Queries ----
 
@@ -465,6 +643,25 @@ struct ProblemAnalysisReport {
     void print(std::ostream& out) const;
 
     /**
+     * @brief Print compact application-facing analysis decisions.
+     *
+     * The output is intentionally physics-agnostic and uses only analyzer
+     * names, property kinds, generic variables/fields, statuses, request ids,
+     * and short evidence text.
+     */
+    void printApplicationLog(std::ostream& out) const;
+
+    /**
+     * @brief Print trace-level analysis evidence.
+     *
+     * When optional numeric summaries are provided, this includes bounded
+     * samples of worst matrix/stencil entries, row diagnostics, mesh elements,
+     * and constraint-reduction evidence.
+     */
+    void printTraceLog(std::ostream& out,
+                       const AnalysisSummarySet* summaries = nullptr) const;
+
+    /**
      * @brief One-line summary of claim and issue counts
      *
      * Example: "7 claims (3 exact, 2 likely, 2 unknown), 1 issue (1 warning)"
@@ -489,6 +686,13 @@ struct ProblemAnalysisReport {
 [[nodiscard]] const char* toString(DAEClass c) noexcept;
 [[nodiscard]] const char* toString(SpaceCompatibilityClass c) noexcept;
 [[nodiscard]] const char* toString(TransportCharacterClass c) noexcept;
+[[nodiscard]] const char* toString(ApplicabilityClass c) noexcept;
+[[nodiscard]] const char* toString(CertificationClass c) noexcept;
+[[nodiscard]] const char* toString(MatrixSignStructureClass c) noexcept;
+[[nodiscard]] const char* toString(OperatorSymmetryClass c) noexcept;
+[[nodiscard]] const char* toString(TemporalStabilityClass c) noexcept;
+[[nodiscard]] const char* toString(CoercivityClass c) noexcept;
+[[nodiscard]] const char* toString(NullspaceHandlingClass c) noexcept;
 [[nodiscard]] const char* toString(TemporalStateKind k) noexcept;
 [[nodiscard]] const char* toString(SpaceFamily f) noexcept;
 

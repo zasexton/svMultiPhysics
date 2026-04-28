@@ -6,13 +6,126 @@
  */
 
 #include "Analysis/TransportCharacterAnalyzer.h"
+#include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
 
+#include <algorithm>
+#include <cmath>
 #include <unordered_map>
+#include <vector>
 
 namespace svmp {
 namespace FE {
 namespace analysis {
+
+namespace {
+
+void appendUnique(std::vector<VariableKey>& values, const VariableKey& value)
+{
+    if (std::find(values.begin(), values.end(), value) == values.end()) {
+        values.push_back(value);
+    }
+}
+
+std::vector<VariableKey> blockVariables(const OperatorBlockId& block)
+{
+    std::vector<VariableKey> variables;
+    for (const auto& v : block.test_variables) {
+        appendUnique(variables, v);
+    }
+    for (const auto& v : block.trial_variables) {
+        appendUnique(variables, v);
+    }
+    return variables;
+}
+
+bool intersects(const std::vector<VariableKey>& a,
+                const std::vector<VariableKey>& b)
+{
+    for (const auto& av : a) {
+        if (std::find(b.begin(), b.end(), av) != b.end()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void enrichTransportClaimFromSummaries(const AnalysisSummarySet* summaries,
+                                       PropertyClaim& claim)
+{
+    if (!summaries) return;
+
+    bool added_numeric_evidence = false;
+
+    for (const auto& scale : summaries->parameter_scales) {
+        if (!claim.peclet_number ||
+            scale.max_scale_value > *claim.peclet_number) {
+            claim.peclet_number = scale.max_scale_value;
+        }
+    }
+    if (claim.peclet_number) {
+        added_numeric_evidence = true;
+        if (*claim.peclet_number > Real{1}) {
+            claim.transport_character_class =
+                TransportCharacterClass::TransportDominatedRisk;
+            if (claim.status == PropertyStatus::Exact) {
+                claim.status = PropertyStatus::Likely;
+                claim.confidence = AnalysisConfidence::Medium;
+            }
+        }
+    }
+
+    for (const auto& temporal : summaries->temporal_stability) {
+        if (!claim.cfl_number || temporal.cfl_estimate > *claim.cfl_number) {
+            claim.cfl_number = temporal.cfl_estimate;
+        }
+    }
+    if (claim.cfl_number) {
+        added_numeric_evidence = true;
+        if (*claim.cfl_number > Real{1} &&
+            claim.status != PropertyStatus::Violated) {
+            claim.status = PropertyStatus::Likely;
+            claim.confidence = AnalysisConfidence::Medium;
+        }
+    }
+
+    for (const auto& matrix : summaries->discrete_matrices) {
+        const auto matrix_vars = blockVariables(matrix.block);
+        if (!matrix_vars.empty() &&
+            !claim.variables.empty() &&
+            !intersects(matrix_vars, claim.variables)) {
+            continue;
+        }
+        const Real denom = matrix.max_abs_entry > Real{}
+            ? matrix.max_abs_entry
+            : Real{1};
+        const Real indicator = std::abs(matrix.max_symmetry_error) / denom;
+        if (!claim.nonnormality_indicator ||
+            indicator > *claim.nonnormality_indicator) {
+            claim.nonnormality_indicator = indicator;
+        }
+    }
+    if (claim.nonnormality_indicator) {
+        added_numeric_evidence = true;
+        if (*claim.nonnormality_indicator > Real{1.0e-8}) {
+            claim.transport_character_class =
+                TransportCharacterClass::NonNormalRisk;
+            if (claim.status == PropertyStatus::Exact) {
+                claim.status = PropertyStatus::Likely;
+                claim.confidence = AnalysisConfidence::Medium;
+            }
+        }
+    }
+
+    if (added_numeric_evidence) {
+        claim.addEvidence("TransportCharacterAnalyzer",
+            "Numeric summary enrichment: Peclet-like dimensionless scale, CFL, "
+            "and nonnormality indicators were consumed without physics-module names",
+            AnalysisConfidence::Medium);
+    }
+}
+
+} // namespace
 
 std::string TransportCharacterAnalyzer::name() const {
     return "TransportCharacterAnalyzer";
@@ -23,6 +136,7 @@ void TransportCharacterAnalyzer::run(const ProblemAnalysisContext& context,
 {
     const auto& contributions = context.contributions();
     if (contributions.empty()) return;
+    const auto* summaries = context.analysisSummaries();
 
     // =====================================================================
     // Per-field transport character accumulation
@@ -180,6 +294,7 @@ void TransportCharacterAnalyzer::run(const ProblemAnalysisContext& context,
             continue;
         }
 
+        enrichTransportClaimFromSummaries(summaries, claim);
         report.claims.push_back(std::move(claim));
     }
 }

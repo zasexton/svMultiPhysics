@@ -112,6 +112,10 @@ public:
      *   5. ConstraintRankAnalyzer (reads kernel claims)
      *   6. CompatibilityAnalyzer (reads kernel + constraint claims)
      *   7. TopologyScopeAnalyzer (reads all prior claims)
+     *   8. DiscreteMonotonicityAnalyzer (matrix/stencil summary consumer)
+     *   9. MeshGeometryAnalyzer (mesh-quality summary consumer)
+     *  10. SolverCompatibilityAnalyzer (solver/operator compatibility)
+     *  11. NumericSummaryPlanner (runs last; reads all symbolic claims)
      *
      * Note: In Phase 1 this returns an analyzer with no passes.
      * Passes are registered as they are implemented in Phase 7.

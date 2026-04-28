@@ -276,7 +276,6 @@ inline FormExpr previousCoordinate() { return FormExpr::previousCoordinate(); }
 inline FormExpr referenceCoordinatePhysical() { return FormExpr::referenceCoordinatePhysical(); }
 inline FormExpr meshDisplacement() { return FormExpr::meshDisplacement(); }
 inline FormExpr meshVelocity() { return FormExpr::meshVelocity(); }
-inline FormExpr domainVelocity() { return FormExpr::domainVelocity(); }
 inline FormExpr meshAcceleration() { return FormExpr::meshAcceleration(); }
 inline FormExpr previousMeshVelocity() { return FormExpr::previousMeshVelocity(); }
 inline FormExpr predictedMeshVelocity() { return FormExpr::predictedMeshVelocity(); }
@@ -305,9 +304,8 @@ inline FormExpr referenceSurfaceVector() { return referenceMeasure() * reference
 
 inline FormExpr nanson(const FormExpr& reference_surface_vector)
 {
-    return pushforward(reference_surface_vector,
-                       GeometryConfiguration::Reference,
-                       GeometryConfiguration::Current);
+    const auto F = currentJacobian() * inv(referenceJacobian());
+    return cofactor(F) * reference_surface_vector;
 }
 
 inline FormExpr nanson()
@@ -337,9 +335,9 @@ inline FormExpr hessian(const FormExpr& a) { return a.hessian(); }
 
 inline FormExpr laplacian(const FormExpr& a) { return trace(a.hessian()); }
 
-inline FormExpr materialDerivative(const FormExpr& field, const FormExpr& domain_velocity = domainVelocity())
+inline FormExpr materialDerivative(const FormExpr& field, const FormExpr& mesh_velocity = meshVelocity())
 {
-    return field.dt() + inner(domain_velocity, field.grad());
+    return field.dt() + inner(mesh_velocity, field.grad());
 }
 
 // ---------------------------------------------------------------------------

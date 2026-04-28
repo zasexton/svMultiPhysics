@@ -6,7 +6,13 @@
  */
 
 #include "Analysis/CompatibilityAnalyzer.h"
+#include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
+
+#include <algorithm>
+#include <cmath>
+#include <string>
+#include <utility>
 
 namespace svmp {
 namespace FE {
@@ -31,6 +37,49 @@ namespace {
            bc.enforcement_kind == EnforcementKind::WeakInequality;
 }
 
+void emitInitialCompatibilityClaims(const ProblemAnalysisContext& context,
+                                    ProblemAnalysisReport& report)
+{
+    const auto* summaries = context.analysisSummaries();
+    if (!summaries) {
+        return;
+    }
+
+    for (const auto& summary : summaries->initial_compatibility) {
+        const auto constraint_residual = std::abs(summary.initial_constraint_residual);
+        const auto boundary_residual = std::abs(summary.initial_boundary_residual);
+        const auto tolerance = std::max(summary.residual_tolerance, 0.0);
+        const bool violated =
+            constraint_residual > tolerance ||
+            boundary_residual > tolerance ||
+            summary.invariant_domain_initial_violation_count > 0u;
+
+        PropertyClaim claim;
+        claim.kind = PropertyKind::InitialDataCompatibility;
+        claim.status = violated ? PropertyStatus::Violated
+                                : PropertyStatus::Preserved;
+        claim.confidence = AnalysisConfidence::High;
+        claim.domain = DomainKind::Global;
+        claim.certification_class = violated ? CertificationClass::Violated
+                                             : CertificationClass::Certified;
+        claim.initial_data_compatible = !violated;
+        claim.constraint_drift_norm = constraint_residual;
+        claim.description = violated
+            ? "Initial data violates algebraic, boundary, or invariant-domain compatibility"
+            : "Initial data satisfies algebraic and boundary compatibility summary";
+        claim.claim_origin = "CompatibilityAnalyzer";
+        claim.addEvidence("CompatibilityAnalyzer",
+            "InitialCompatibilitySummary constraint_residual=" +
+            std::to_string(summary.initial_constraint_residual) +
+            ", boundary_residual=" +
+            std::to_string(summary.initial_boundary_residual) +
+            ", tolerance=" + std::to_string(summary.residual_tolerance) +
+            ", invariant_violations=" +
+            std::to_string(summary.invariant_domain_initial_violation_count));
+        report.claims.push_back(std::move(claim));
+    }
+}
+
 } // namespace
 
 std::string CompatibilityAnalyzer::name() const {
@@ -40,6 +89,8 @@ std::string CompatibilityAnalyzer::name() const {
 void CompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
                                 ProblemAnalysisReport& report) const
 {
+    emitInitialCompatibilityClaims(context, report);
+
     auto nullspace_claims = report.claimsOfKind(PropertyKind::Nullspace);
     if (nullspace_claims.empty()) return;
 

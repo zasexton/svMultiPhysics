@@ -564,6 +564,7 @@ set(FE_CONSTRAINTS_SOURCES
 # Analysis sources (problem property inference)
 set(FE_ANALYSIS_HEADERS
     Analysis/ProblemAnalysisTypes.h
+    Analysis/AnalysisSummaryTypes.h
     Analysis/ProblemAnalysisContext.h
     Analysis/ProblemAnalyzer.h
     Analysis/FormulationRecord.h
@@ -583,6 +584,12 @@ set(FE_ANALYSIS_HEADERS
     Analysis/DAEStructureAnalyzer.h
     Analysis/SpaceCompatibilityAnalyzer.h
     Analysis/TransportCharacterAnalyzer.h
+    Analysis/DiscreteMonotonicityAnalyzer.h
+    Analysis/MeshGeometryAnalyzer.h
+    Analysis/AdvancedStabilityAnalyzers.h
+    Analysis/SolverCompatibilityAnalyzer.h
+    Analysis/NumericSummaryPlanner.h
+    Analysis/SparseMatrixSummaryScanner.h
     Analysis/ContributionDescriptor.h
     Analysis/FormContributionLowerer.h
     Analysis/BoundaryConditionDescriptor.h
@@ -614,6 +621,12 @@ set(FE_ANALYSIS_SOURCES
     Analysis/DAEStructureAnalyzer.cpp
     Analysis/SpaceCompatibilityAnalyzer.cpp
     Analysis/TransportCharacterAnalyzer.cpp
+    Analysis/DiscreteMonotonicityAnalyzer.cpp
+    Analysis/MeshGeometryAnalyzer.cpp
+    Analysis/AdvancedStabilityAnalyzers.cpp
+    Analysis/SolverCompatibilityAnalyzer.cpp
+    Analysis/NumericSummaryPlanner.cpp
+    Analysis/SparseMatrixSummaryScanner.cpp
     Analysis/ContributionDescriptor.cpp
     Analysis/FormContributionLowerer.cpp
 )
@@ -2134,6 +2147,11 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Analysis/test_InterfaceValidation.cpp
         Tests/Unit/Analysis/test_Phase19InterfaceAware.cpp
         Tests/Unit/Analysis/test_Phase24AdvancedClaims.cpp
+        Tests/Unit/Analysis/test_NumericSummaryPlanner.cpp
+        Tests/Unit/Analysis/test_Phase4CoreExtensions.cpp
+        Tests/Unit/Analysis/test_Phase5SparseMatrixSummaryScanner.cpp
+        Tests/Unit/Analysis/test_Phase6ExtendedAnalyzers.cpp
+        Tests/Unit/Analysis/test_Phase7MathematicalIntegration.cpp
         Tests/Unit/Analysis/test_main.cpp
     )
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Analysis/test_main.cpp)

@@ -391,10 +391,14 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
                 required |= RequiredData::ReferenceJacobians;
                 break;
             case FormExprType::CurrentJacobianDeterminant:
+                required |= RequiredData::CurrentJacobians;
+                break;
             case FormExprType::CurrentMeasure:
                 required |= RequiredData::CurrentMeasures;
                 break;
             case FormExprType::ReferenceJacobianDeterminant:
+                required |= RequiredData::ReferenceJacobians;
+                break;
             case FormExprType::ReferenceMeasure:
                 required |= RequiredData::ReferenceMeasures;
                 break;

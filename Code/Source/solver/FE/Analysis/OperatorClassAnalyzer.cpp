@@ -6,15 +6,148 @@
  */
 
 #include "Analysis/OperatorClassAnalyzer.h"
+#include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
 #include "Analysis/FormStructureAnalyzer.h"
 
+#include <algorithm>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace svmp {
 namespace FE {
 namespace analysis {
+
+namespace {
+
+void appendUnique(std::vector<VariableKey>& values, const VariableKey& value)
+{
+    if (std::find(values.begin(), values.end(), value) == values.end()) {
+        values.push_back(value);
+    }
+}
+
+std::vector<VariableKey> blockVariables(const OperatorBlockId& block)
+{
+    std::vector<VariableKey> variables;
+    for (const auto& v : block.test_variables) {
+        appendUnique(variables, v);
+    }
+    for (const auto& v : block.trial_variables) {
+        appendUnique(variables, v);
+    }
+    return variables;
+}
+
+void emitCoefficientClaim(ProblemAnalysisReport& report,
+                          const CoefficientPropertySummary& summary)
+{
+    PropertyClaim claim;
+    claim.kind = PropertyKind::CoefficientPositivity;
+    claim.domain = summary.domain;
+    claim.confidence = AnalysisConfidence::High;
+    claim.coefficient_id = summary.coefficient;
+    claim.claim_origin = "OperatorClassAnalyzer";
+
+    switch (summary.positivity) {
+        case PositivityClass::Positive:
+        case PositivityClass::Nonnegative:
+            claim.status = PropertyStatus::Preserved;
+            claim.certification_class = CertificationClass::Certified;
+            claim.description =
+                "Coefficient '" + summary.coefficient +
+                "' has certified nonnegative/positive sign structure";
+            break;
+        case PositivityClass::Negative:
+        case PositivityClass::Nonpositive:
+        case PositivityClass::Indefinite:
+            claim.status = PropertyStatus::Violated;
+            claim.certification_class = CertificationClass::Violated;
+            claim.description =
+                "Coefficient '" + summary.coefficient +
+                "' violates elliptic positivity assumptions";
+            break;
+        case PositivityClass::Unknown:
+            claim.status = PropertyStatus::Unknown;
+            claim.certification_class = CertificationClass::Unknown;
+            claim.description =
+                "Coefficient '" + summary.coefficient +
+                "' has unknown positivity";
+            break;
+    }
+
+    claim.addEvidence("OperatorClassAnalyzer",
+        "CoefficientPropertySummary: min_eigenvalue=" +
+        std::to_string(summary.min_eigenvalue) +
+        ", max_eigenvalue=" + std::to_string(summary.max_eigenvalue) +
+        ", anisotropy_ratio=" +
+        std::to_string(summary.anisotropy_ratio));
+    report.claims.push_back(std::move(claim));
+}
+
+void emitReducedDefinitenessClaim(ProblemAnalysisReport& report,
+                                  const ReducedMatrixSummary& summary)
+{
+    const auto& matrix = summary.free_free_matrix;
+    if (matrix.rows == 0 || matrix.cols == 0) {
+        return;
+    }
+
+    const bool certified =
+        matrix.square &&
+        matrix.symmetry_evidence_complete &&
+        matrix.structurally_symmetric &&
+        matrix.numerically_symmetric &&
+        matrix.nonpositive_diagonal_count == 0u &&
+        matrix.negative_diagonal_count == 0u &&
+        summary.reduction_exact_for_analysis;
+
+    PropertyClaim claim;
+    claim.kind = PropertyKind::OperatorDefiniteness;
+    claim.status = certified ? PropertyStatus::Exact : PropertyStatus::Unknown;
+    claim.confidence = certified ? AnalysisConfidence::High
+                                 : AnalysisConfidence::Medium;
+    claim.domain = matrix.block.domain;
+    claim.variables = blockVariables(matrix.block);
+    claim.coercivity_class = certified ? CoercivityClass::Coercive
+                                       : CoercivityClass::Unknown;
+    claim.reduced_definiteness_class = certified ? CertificationClass::Certified
+                                                 : CertificationClass::Unknown;
+    claim.tested_block_id = matrix.block.operator_tag;
+    claim.description = certified
+        ? "Reduced free-free operator has certified symmetric positive diagonal evidence"
+        : "Reduced free-free operator definiteness is unknown from available summary";
+    claim.claim_origin = "OperatorClassAnalyzer";
+    claim.addEvidence("OperatorClassAnalyzer",
+        "ReducedMatrixSummary reduction=" +
+        std::to_string(static_cast<int>(summary.reduction_kind)) +
+        ", symmetry_complete=" +
+        std::string(matrix.symmetry_evidence_complete ? "true" : "false") +
+        ", exact_reduction=" +
+        std::string(summary.reduction_exact_for_analysis ? "true" : "false"),
+        claim.confidence);
+    report.claims.push_back(std::move(claim));
+}
+
+void emitSummaryBackedOperatorClaims(const ProblemAnalysisContext& context,
+                                     ProblemAnalysisReport& report)
+{
+    const auto* summaries = context.analysisSummaries();
+    if (!summaries) {
+        return;
+    }
+
+    for (const auto& summary : summaries->coefficient_properties) {
+        emitCoefficientClaim(report, summary);
+    }
+
+    for (const auto& summary : summaries->reduced_matrices) {
+        emitReducedDefinitenessClaim(report, summary);
+    }
+}
+
+} // namespace
 
 std::string OperatorClassAnalyzer::name() const {
     return "OperatorClassAnalyzer";
@@ -23,6 +156,8 @@ std::string OperatorClassAnalyzer::name() const {
 void OperatorClassAnalyzer::run(const ProblemAnalysisContext& context,
                                 ProblemAnalysisReport& report) const
 {
+    emitSummaryBackedOperatorClaims(context, report);
+
     // =====================================================================
     // PRIMARY PATH: Consume ContributionDescriptors
     // =====================================================================
@@ -100,6 +235,7 @@ void OperatorClassAnalyzer::run(const ProblemAnalysisContext& context,
                         " (stabilization may break exact symmetry)";
                 }
                 claim.symmetry_class = OperatorTraitFlags::SymmetricLike;
+                claim.operator_symmetry_class = OperatorSymmetryClass::Symmetric;
                 claim.claim_origin = "OperatorClassAnalyzer";
                 claim.addEvidence("OperatorClassAnalyzer",
                     "All DiagonalBlock contributions have SymmetricLike trait",
@@ -129,6 +265,7 @@ void OperatorClassAnalyzer::run(const ProblemAnalysisContext& context,
                         " (stabilization may affect definiteness)";
                 }
                 claim.definiteness_class = OperatorTraitFlags::PositiveSemiDefiniteLike;
+                claim.coercivity_class = CoercivityClass::Semicoercive;
                 claim.claim_origin = "OperatorClassAnalyzer";
                 claim.addEvidence("OperatorClassAnalyzer",
                     "All DiagonalBlock contributions have "
@@ -190,6 +327,8 @@ void OperatorClassAnalyzer::run(const ProblemAnalysisContext& context,
                     claim.description +=
                         " (stabilization may break exact symmetry)";
                 }
+                claim.operator_symmetry_class = OperatorSymmetryClass::Symmetric;
+                claim.claim_origin = "OperatorClassAnalyzer";
                 claim.addEvidence("OperatorClassAnalyzer", symmetry_reason,
                     claim.confidence);
                 report.claims.push_back(std::move(claim));
@@ -217,6 +356,8 @@ void OperatorClassAnalyzer::run(const ProblemAnalysisContext& context,
                     claim.description +=
                         " (stabilization may affect definiteness)";
                 }
+                claim.coercivity_class = CoercivityClass::Semicoercive;
+                claim.claim_origin = "OperatorClassAnalyzer";
                 claim.addEvidence("OperatorClassAnalyzer",
                     "only_through_annihilating_ops=true, has_absolute_value=false",
                     claim.confidence);

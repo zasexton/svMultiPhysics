@@ -11,6 +11,7 @@
 #include "Fields/MeshFields.h"
 #include "IO/MovingMeshRestart.h"
 #include "Motion/MotionFields.h"
+#include "Search/CutCell.h"
 
 #ifdef MESH_HAS_ADAPTIVITY
 #include "Adaptivity/AdaptivityManager.h"
@@ -250,6 +251,242 @@ TEST(MovingMeshRestart, WriteReadMovedMeshRestoresGeometryMotionAndMetadata)
   std::error_code ec;
   std::filesystem::remove(path, ec);
   std::filesystem::remove(registry_path, ec);
+}
+
+TEST(MovingMeshRestart, CutRegistryAndClassificationMetadataRoundtrip)
+{
+  auto mesh = make_moved_quad_mesh();
+
+  search::EmbeddedGeometryDescriptor plane;
+  plane.kind = search::EmbeddedGeometryKind::Plane;
+  plane.origin = {{0.5, 0.0, 0.0}};
+  plane.normal = {{1.0, 0.0, 0.0}};
+  plane.geometry_epoch = 6;
+  plane.revisions.geometry_epoch = 6;
+  plane.provenance.persistent_id = "restart-cut-plane";
+  plane.provenance.name = "restart cut plane";
+  plane.provenance.provenance_epoch = 6;
+
+  search::EmbeddedGeometryRegistry registry;
+  registry.register_geometry(plane);
+
+  search::CutClassificationOptions cut_options;
+  cut_options.classify_faces = false;
+  cut_options.classify_edges = false;
+  cut_options.fe_layout_revision = 12;
+  const auto cut_map = search::classify_embedded_geometry(mesh, plane, cut_options);
+
+  const auto path = unique_path(".cut.mmrst");
+  moving_mesh_restart::WriteOptions options;
+  options.restart_epoch = 77;
+  options.embedded_geometry_registry = search::make_embedded_geometry_restart_records(registry);
+  options.cut_classification_state.push_back(
+      search::make_cut_classification_restart_record(cut_map));
+
+  moving_mesh_restart::write(mesh, path, options);
+  const auto metadata = moving_mesh_restart::inspect(path);
+
+  EXPECT_EQ(metadata.version, moving_mesh_restart::kSupportedVersion);
+  ASSERT_EQ(metadata.embedded_geometry_registry.size(), 1u);
+  EXPECT_EQ(metadata.embedded_geometry_registry[0].persistent_id, "restart-cut-plane");
+  EXPECT_EQ(metadata.embedded_geometry_registry[0].revisions.geometry_epoch, 6u);
+  ASSERT_EQ(metadata.cut_classification_state.size(), 1u);
+  EXPECT_EQ(metadata.cut_classification_state[0].provenance.persistent_id, "restart-cut-plane");
+  EXPECT_EQ(metadata.cut_classification_state[0].fe_layout_revision, 12u);
+  EXPECT_GT(metadata.cut_classification_state[0].cut_cell_count, 0u);
+
+  const auto restored_registry =
+      search::restore_embedded_geometry_registry(metadata.embedded_geometry_registry);
+  ASSERT_TRUE(restored_registry.contains("restart-cut-plane"));
+  const auto rebuilt = restored_registry.classify_active(mesh, cut_options);
+  ASSERT_EQ(rebuilt.size(), 1u);
+  EXPECT_EQ(search::make_cut_classification_restart_record(rebuilt[0]).cut_topology_revision,
+            metadata.cut_classification_state[0].cut_topology_revision);
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+TEST(MovingMeshRestart, BooleanCutCompositionProvenanceRoundtripsThroughRestart)
+{
+  auto mesh = make_moved_quad_mesh();
+
+  search::EmbeddedGeometryDescriptor left;
+  left.kind = search::EmbeddedGeometryKind::Plane;
+  left.origin = {{0.5, 0.0, 0.0}};
+  left.normal = {{1.0, 0.0, 0.0}};
+  left.geometry_epoch = 21;
+  left.revisions.geometry_epoch = 21;
+  left.provenance.persistent_id = "restart-boolean-plane";
+  left.provenance.name = "restart boolean plane";
+  left.provenance.provenance_epoch = 21;
+
+  search::EmbeddedGeometryDescriptor right;
+  right.kind = search::EmbeddedGeometryKind::Sphere;
+  right.origin = {{0.0, 0.0, 0.0}};
+  right.normal = {{1.0, 0.0, 0.0}};
+  right.radius = 10.0;
+  right.geometry_epoch = 22;
+  right.revisions.geometry_epoch = 22;
+  right.provenance.persistent_id = "restart-enclosing-sphere";
+  right.provenance.name = "restart enclosing sphere";
+  right.provenance.provenance_epoch = 22;
+
+  search::EmbeddedGeometryDescriptor band;
+  band.kind = search::EmbeddedGeometryKind::BooleanComposite;
+  band.boolean_operation = search::EmbeddedGeometryBooleanOperation::Intersection;
+  band.geometry_epoch = 23;
+  band.revisions.geometry_epoch = 23;
+  band.provenance.persistent_id = "restart-inner-composite";
+  band.provenance.name = "restart inner composite";
+  band.provenance.provenance_epoch = 23;
+  band.children = {left, right};
+
+  search::EmbeddedGeometryDescriptor small_sphere;
+  small_sphere.kind = search::EmbeddedGeometryKind::Sphere;
+  small_sphere.origin = {{0.0, 0.0, 0.0}};
+  small_sphere.radius = 0.05;
+  small_sphere.geometry_epoch = 24;
+  small_sphere.revisions.geometry_epoch = 24;
+  small_sphere.provenance.persistent_id = "restart-small-nested-sphere";
+  small_sphere.provenance.name = "restart small nested sphere";
+  small_sphere.provenance.provenance_epoch = 24;
+
+  search::EmbeddedGeometryDescriptor composed;
+  composed.kind = search::EmbeddedGeometryKind::BooleanComposite;
+  composed.boolean_operation = search::EmbeddedGeometryBooleanOperation::Union;
+  composed.geometry_epoch = 25;
+  composed.revisions.geometry_epoch = 25;
+  composed.provenance.persistent_id = "restart-nested-composition";
+  composed.provenance.name = "restart nested composition";
+  composed.provenance.provenance_epoch = 25;
+  composed.children = {band, small_sphere};
+
+  search::EmbeddedGeometryRegistry registry;
+  registry.register_geometry(composed);
+
+  search::CutClassificationOptions cut_options;
+  cut_options.classify_faces = false;
+  cut_options.classify_edges = false;
+  cut_options.fe_layout_revision = 34;
+  const auto cut_map = search::classify_embedded_geometry(mesh, composed, cut_options);
+  const auto topology = search::reconstruct_cut_topology(mesh, cut_map);
+  ASSERT_FALSE(topology.side_regions.empty());
+
+  const auto path = unique_path(".cut.boolean.mmrst");
+  moving_mesh_restart::WriteOptions options;
+  options.restart_epoch = 88;
+  options.embedded_geometry_registry = search::make_embedded_geometry_restart_records(registry);
+  options.cut_classification_state.push_back(
+      search::make_cut_classification_restart_record(cut_map, topology));
+
+  moving_mesh_restart::write(mesh, path, options);
+  const auto metadata = moving_mesh_restart::inspect(path);
+
+  ASSERT_EQ(metadata.embedded_geometry_registry.size(), 1u);
+  EXPECT_EQ(metadata.embedded_geometry_registry[0].persistent_id,
+            "restart-nested-composition");
+  EXPECT_EQ(metadata.embedded_geometry_registry[0].boolean_operation,
+            search::EmbeddedGeometryBooleanOperation::Union);
+  ASSERT_EQ(metadata.embedded_geometry_registry[0].children.size(), 2u);
+  EXPECT_EQ(metadata.embedded_geometry_registry[0].children[0].persistent_id,
+            "restart-inner-composite");
+  EXPECT_EQ(metadata.embedded_geometry_registry[0].children[1].persistent_id,
+            "restart-small-nested-sphere");
+  ASSERT_EQ(metadata.embedded_geometry_registry[0].children[0].children.size(), 2u);
+  EXPECT_EQ(metadata.embedded_geometry_registry[0].children[0].children[0].persistent_id,
+            "restart-boolean-plane");
+  EXPECT_EQ(metadata.embedded_geometry_registry[0].children[0].children[1].persistent_id,
+            "restart-enclosing-sphere");
+
+  ASSERT_EQ(metadata.cut_classification_state.size(), 1u);
+  const auto& cut_restart = metadata.cut_classification_state[0];
+  EXPECT_TRUE(cut_restart.is_composed_region);
+  EXPECT_EQ(cut_restart.composition_operation,
+            search::EmbeddedGeometryBooleanOperation::Union);
+  EXPECT_EQ(cut_restart.fe_layout_revision, 34u);
+  ASSERT_EQ(cut_restart.composition_children.size(), 4u);
+  EXPECT_EQ(cut_restart.composition_children[0].parent_persistent_id,
+            "restart-nested-composition");
+  EXPECT_EQ(cut_restart.composition_children[0].provenance.persistent_id,
+            "restart-inner-composite");
+  EXPECT_EQ(cut_restart.composition_children[1].parent_persistent_id,
+            "restart-inner-composite");
+  EXPECT_EQ(cut_restart.composition_children[1].provenance.persistent_id,
+            "restart-boolean-plane");
+  EXPECT_EQ(cut_restart.composition_children[2].provenance.persistent_id,
+            "restart-enclosing-sphere");
+  EXPECT_EQ(cut_restart.composition_children[3].provenance.persistent_id,
+            "restart-small-nested-sphere");
+  EXPECT_EQ(cut_restart.side_regions.size(), topology.side_regions.size());
+  ASSERT_FALSE(cut_restart.side_regions.empty());
+  EXPECT_EQ(cut_restart.side_regions[0].provenance.persistent_id,
+            "restart-nested-composition");
+
+  const auto restored_registry =
+      search::restore_embedded_geometry_registry(metadata.embedded_geometry_registry);
+  ASSERT_TRUE(restored_registry.contains("restart-nested-composition"));
+  const auto rebuilt = restored_registry.classify_active(mesh, cut_options);
+  ASSERT_EQ(rebuilt.size(), 1u);
+  const auto rebuilt_topology = search::reconstruct_cut_topology(mesh, rebuilt[0]);
+  const auto rebuilt_restart =
+      search::make_cut_classification_restart_record(rebuilt[0], rebuilt_topology);
+  EXPECT_EQ(rebuilt_restart.composition_children.size(),
+            cut_restart.composition_children.size());
+  EXPECT_EQ(rebuilt_restart.side_regions.size(), cut_restart.side_regions.size());
+  EXPECT_EQ(rebuilt_restart.cut_topology_revision, cut_restart.cut_topology_revision);
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+TEST(MovingMeshRestart, RejectedTrialCutStateIsNotWrittenAsAcceptedRestartState)
+{
+  auto mesh = make_moved_quad_mesh();
+
+  search::EmbeddedGeometryDescriptor accepted_plane;
+  accepted_plane.kind = search::EmbeddedGeometryKind::Plane;
+  accepted_plane.origin = {{0.5, 0.0, 0.0}};
+  accepted_plane.normal = {{1.0, 0.0, 0.0}};
+  accepted_plane.geometry_epoch = 10;
+  accepted_plane.revisions.geometry_epoch = 10;
+  accepted_plane.provenance.persistent_id = "accepted-cut-plane";
+  accepted_plane.provenance.provenance_epoch = 10;
+
+  search::CutClassificationOptions cut_options;
+  cut_options.classify_faces = false;
+  cut_options.classify_edges = false;
+  auto accepted_map = search::classify_embedded_geometry(mesh, accepted_plane, cut_options);
+  accepted_map.accept_trial();
+  const auto accepted_restart = search::make_cut_classification_restart_record(accepted_map);
+
+  search::CutClassificationTransaction tx(accepted_map);
+  auto rejected_plane = accepted_plane;
+  rejected_plane.origin = {{5.0, 0.0, 0.0}};
+  rejected_plane.geometry_epoch = 99;
+  rejected_plane.revisions.geometry_epoch = 99;
+  tx.stage(search::classify_embedded_geometry(mesh, rejected_plane, cut_options));
+  tx.rollback();
+
+  search::EmbeddedGeometryRegistry registry;
+  registry.register_geometry(accepted_plane);
+
+  const auto path = unique_path(".cut.rollback.mmrst");
+  moving_mesh_restart::WriteOptions options;
+  options.embedded_geometry_registry = search::make_embedded_geometry_restart_records(registry);
+  options.cut_classification_state.push_back(accepted_restart);
+  moving_mesh_restart::write(mesh, path, options);
+  const auto metadata = moving_mesh_restart::inspect(path);
+
+  ASSERT_EQ(metadata.embedded_geometry_registry.size(), 1u);
+  EXPECT_EQ(metadata.embedded_geometry_registry[0].revisions.geometry_epoch, 10u);
+  ASSERT_EQ(metadata.cut_classification_state.size(), 1u);
+  EXPECT_EQ(metadata.cut_classification_state[0].embedded_geometry_epoch, 10u);
+  EXPECT_EQ(metadata.cut_classification_state[0].cut_topology_revision,
+            accepted_restart.cut_topology_revision);
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
 }
 
 TEST(MovingMeshRestart, ReferenceRebaseMetadataRoundtrips)

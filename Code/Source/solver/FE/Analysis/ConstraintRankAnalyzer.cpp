@@ -6,11 +6,58 @@
  */
 
 #include "Analysis/ConstraintRankAnalyzer.h"
+#include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
+
+#include <string>
+#include <utility>
 
 namespace svmp {
 namespace FE {
 namespace analysis {
+
+namespace {
+
+void emitReducedConstraintMetadataClaims(const ProblemAnalysisContext& context,
+                                         ProblemAnalysisReport& report)
+{
+    const auto* summaries = context.analysisSummaries();
+    if (!summaries) {
+        return;
+    }
+
+    for (const auto& summary : summaries->reduced_matrices) {
+        if (summary.reduction_kind != ConstraintReductionKind::AffineTransform &&
+            summary.reduction_kind != ConstraintReductionKind::PeriodicEquivalence) {
+            continue;
+        }
+        if (summary.affine_terms_accounted_for &&
+            summary.reduction_exact_for_analysis) {
+            continue;
+        }
+
+        PropertyClaim claim;
+        claim.kind = PropertyKind::InitialDataCompatibility;
+        claim.status = PropertyStatus::Unknown;
+        claim.confidence = AnalysisConfidence::Medium;
+        claim.domain = DomainKind::Global;
+        claim.reduced_definiteness_class = CertificationClass::Unknown;
+        claim.tested_block_id = summary.free_free_matrix.block.operator_tag;
+        claim.description =
+            "Reduced-operator analysis uses affine or periodic constraint metadata"
+            " without exact transformed-RHS/initial-data evidence";
+        claim.claim_origin = "ConstraintRankAnalyzer";
+        claim.addEvidence("ConstraintRankAnalyzer",
+            "ReducedMatrixSummary reports affine_terms_accounted_for=" +
+            std::string(summary.affine_terms_accounted_for ? "true" : "false") +
+            ", reduction_exact_for_analysis=" +
+            std::string(summary.reduction_exact_for_analysis ? "true" : "false"),
+            AnalysisConfidence::Medium);
+        report.claims.push_back(std::move(claim));
+    }
+}
+
+} // namespace
 
 std::string ConstraintRankAnalyzer::name() const {
     return "ConstraintRankAnalyzer";
@@ -200,6 +247,8 @@ void ConstraintRankAnalyzer::run(const ProblemAnalysisContext& context,
             report.issues.push_back(std::move(issue));
         }
     }
+
+    emitReducedConstraintMetadataClaims(context, report);
 }
 
 } // namespace analysis

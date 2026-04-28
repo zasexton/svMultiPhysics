@@ -113,6 +113,47 @@ void ProblemAnalysisContext::setConstraintSummary(ConstraintAnalysisSummary summ
 }
 
 // ============================================================================
+// Optional numeric/discrete summaries (Phase 2 metadata contracts)
+// ============================================================================
+
+void ProblemAnalysisContext::setAnalysisSummaries(AnalysisSummarySet summaries) {
+    analysis_summaries_.emplace(std::move(summaries));
+    bumpVersion();
+}
+
+void ProblemAnalysisContext::clearAnalysisSummaries() {
+    analysis_summaries_.reset();
+    bumpVersion();
+}
+
+bool ProblemAnalysisContext::hasSummaryKind(AnalysisSummaryKind kind) const noexcept {
+    return analysis_summaries_ && analysis_summaries_->has(kind);
+}
+
+CertificationClass ProblemAnalysisContext::summaryCertificationOrUnknown(
+    AnalysisSummaryKind kind,
+    CertificationClass when_present) const noexcept
+{
+    return analysis_summaries_
+        ? analysis_summaries_->certificationOrUnknown(kind, when_present)
+        : CertificationClass::Unknown;
+}
+
+// ============================================================================
+// Optional solver choices for compatibility checks
+// ============================================================================
+
+void ProblemAnalysisContext::setSolverOptions(backends::SolverOptions options) {
+    solver_options_.emplace(std::move(options));
+    bumpVersion();
+}
+
+void ProblemAnalysisContext::clearSolverOptions() {
+    solver_options_.reset();
+    bumpVersion();
+}
+
+// ============================================================================
 // Convenience
 // ============================================================================
 
@@ -123,7 +164,10 @@ bool ProblemAnalysisContext::empty() const noexcept {
         && contributions_.empty()
         && bc_descriptors_.empty()
         && !topology_context_.has_value()
-        && !constraint_summary_.has_value();
+        && !interface_topology_context_.has_value()
+        && !constraint_summary_.has_value()
+        && (!analysis_summaries_.has_value() || analysis_summaries_->empty())
+        && !solver_options_.has_value();
 }
 
 } // namespace analysis

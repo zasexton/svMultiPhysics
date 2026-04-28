@@ -8,6 +8,7 @@
 #include "Systems/CutIntegrationInvalidation.h"
 
 #include <algorithm>
+#include <limits>
 
 namespace svmp {
 namespace FE {
@@ -31,7 +32,18 @@ CutIntegrationRevisionSnapshot CutIntegrationRevisionSnapshot::capture(
     snapshot.label_revision = map.revision.label_revision;
     snapshot.active_configuration_epoch = map.revision.active_configuration_epoch;
     snapshot.embedded_geometry_epoch = map.revision.embedded_geometry_epoch;
+    snapshot.embedded_field_layout_revision = map.revision.embedded_field_layout_revision;
+    snapshot.embedded_field_value_revision = map.revision.embedded_field_value_revision;
+    snapshot.embedded_source_surface_revision = map.revision.embedded_source_surface_revision;
+    snapshot.embedded_provenance_revision = map.revision.embedded_provenance_revision;
     snapshot.embedded_constraint_epoch = map.revision.embedded_constraint_epoch;
+    std::uint64_t topo = 1469598103934665603ull;
+    for (const auto& r : map.cells) {
+        topo ^= r.cut_topology_id;
+        topo *= 1099511628211ull;
+    }
+    snapshot.cut_topology_revision = topo;
+    snapshot.quadrature_policy_revision = map.options.predicate_policy.revision_key();
     snapshot.fe_space_revision = fe_space_revision;
     snapshot.fe_dof_layout_revision = fe_dof_layout_revision;
     snapshot.fe_constraint_layout_revision = fe_constraint_layout_revision;
@@ -74,7 +86,14 @@ CutIntegrationRefreshDecision classifyCutIntegrationRefresh(
         cached.label_revision != current.label_revision ||
         cached.active_configuration_epoch != current.active_configuration_epoch ||
         cached.embedded_geometry_epoch != current.embedded_geometry_epoch ||
+        cached.embedded_field_layout_revision != current.embedded_field_layout_revision ||
+        cached.embedded_field_value_revision != current.embedded_field_value_revision ||
+        cached.embedded_source_surface_revision != current.embedded_source_surface_revision ||
+        cached.embedded_provenance_revision != current.embedded_provenance_revision ||
         cached.embedded_constraint_epoch != current.embedded_constraint_epoch ||
+        cached.cut_topology_revision != current.cut_topology_revision ||
+        cached.quadrature_policy_revision != current.quadrature_policy_revision ||
+        cached.conditioning_revision != current.conditioning_revision ||
         cached.cut_cell_count != current.cut_cell_count ||
         cached.cut_face_count != current.cut_face_count;
 
@@ -126,6 +145,47 @@ CutConditioningDiagnostic diagnoseCutConditioning(
         diagnostic.messages.push_back("small cut cells may require conditioning stabilization");
     }
     return diagnostic;
+}
+
+std::vector<CutConditioningNeighborhood> buildCutConditioningNeighborhoods(
+    const std::vector<MeshIndex>& cut_cells,
+    const std::vector<Real>& volume_fractions,
+    const std::vector<std::pair<MeshIndex, MeshIndex>>& adjacency,
+    Real small_fraction_threshold) {
+    std::vector<CutConditioningNeighborhood> neighborhoods;
+    for (std::size_t i = 0; i < cut_cells.size(); ++i) {
+        const Real fraction = i < volume_fractions.size() ? volume_fractions[i] : Real{0.0};
+        if (fraction >= small_fraction_threshold) {
+            continue;
+        }
+        CutConditioningNeighborhood n;
+        n.cut_cell = cut_cells[i];
+        n.volume_fraction = fraction;
+        n.conditioning_indicator = fraction > Real{0.0}
+                                       ? Real{1.0} / fraction
+                                       : std::numeric_limits<Real>::infinity();
+        for (const auto& edge : adjacency) {
+            if (edge.first == n.cut_cell) {
+                n.adjacent_cells.push_back(edge.second);
+            } else if (edge.second == n.cut_cell) {
+                n.adjacent_cells.push_back(edge.first);
+            }
+        }
+        std::sort(n.adjacent_cells.begin(), n.adjacent_cells.end());
+        n.adjacent_cells.erase(std::unique(n.adjacent_cells.begin(), n.adjacent_cells.end()),
+                               n.adjacent_cells.end());
+        n.extension_patch = n.adjacent_cells;
+        n.extension_patch.insert(n.extension_patch.begin(), n.cut_cell);
+        n.stable_id = static_cast<std::uint64_t>(1469598103934665603ull);
+        n.stable_id ^= static_cast<std::uint64_t>(n.cut_cell);
+        n.stable_id *= 1099511628211ull;
+        for (const auto cell : n.adjacent_cells) {
+            n.stable_id ^= static_cast<std::uint64_t>(cell);
+            n.stable_id *= 1099511628211ull;
+        }
+        neighborhoods.push_back(std::move(n));
+    }
+    return neighborhoods;
 }
 
 } // namespace systems

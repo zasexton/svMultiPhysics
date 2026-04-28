@@ -9,6 +9,7 @@
 #define SVMP_MOVING_MESH_RESTART_H
 
 #include "../Core/MeshBase.h"
+#include "../Search/CutCell.h"
 
 #include <cstdint>
 #include <map>
@@ -18,7 +19,7 @@
 namespace svmp {
 namespace moving_mesh_restart {
 
-inline constexpr std::uint32_t kSupportedVersion = 4;
+inline constexpr std::uint32_t kSupportedVersion = 5;
 
 struct WriteOptions {
   bool include_fields = true;
@@ -27,6 +28,8 @@ struct WriteOptions {
   std::map<std::string, std::string> motion_backend_state;
   std::map<std::string, std::string> moving_geometry_validity_state;
   std::vector<std::string> adaptivity_provenance;
+  std::vector<search::EmbeddedGeometryRestartRecord> embedded_geometry_registry;
+  std::vector<search::CutClassificationRestartRecord> cut_classification_state;
 };
 
 struct ReadOptions {
@@ -45,6 +48,8 @@ struct Metadata {
   std::map<std::string, std::string> motion_backend_state;
   std::map<std::string, std::string> moving_geometry_validity_state;
   std::vector<std::string> adaptivity_provenance;
+  std::vector<search::EmbeddedGeometryRestartRecord> embedded_geometry_registry;
+  std::vector<search::CutClassificationRestartRecord> cut_classification_state;
 };
 
 void write(const MeshBase& mesh, const std::string& path, const WriteOptions& options = {});

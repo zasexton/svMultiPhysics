@@ -86,17 +86,17 @@ struct MovingFrameParameterSlots {
            cross(omega, cross(omega, r));
 }
 
-[[nodiscard]] inline FormExpr relativeDomainVelocity(
+[[nodiscard]] inline FormExpr relativeMeshVelocity(
     const MovingFrameParameterSlots& slots = {})
 {
-    return FormExpr::domainVelocity() - frameVelocityAtCurrentCoordinate(slots);
+    return FormExpr::meshVelocity() - frameVelocityAtCurrentCoordinate(slots);
 }
 
 struct MovingFrameFormTerminals {
     FormExpr current_coordinate{};
     FormExpr reference_coordinate{};
-    FormExpr domain_velocity{};
-    FormExpr domain_acceleration{};
+    FormExpr mesh_velocity{};
+    FormExpr mesh_acceleration{};
     FormExpr frame_origin{};
     FormExpr frame_linear_velocity{};
     FormExpr frame_angular_velocity{};
@@ -111,14 +111,14 @@ struct MovingFrameFormTerminals {
     MovingFrameFormTerminals terminals;
     terminals.current_coordinate = FormExpr::currentCoordinate();
     terminals.reference_coordinate = FormExpr::referenceCoordinatePhysical();
-    terminals.domain_velocity = FormExpr::domainVelocity();
-    terminals.domain_acceleration = FormExpr::meshAcceleration();
+    terminals.mesh_velocity = FormExpr::meshVelocity();
+    terminals.mesh_acceleration = FormExpr::meshAcceleration();
     terminals.frame_origin = frameOrigin(slots);
     terminals.frame_linear_velocity = frameLinearVelocity(slots);
     terminals.frame_angular_velocity = frameAngularVelocity(slots);
     terminals.frame_linear_acceleration = frameLinearAcceleration(slots);
     terminals.frame_angular_acceleration = frameAngularAcceleration(slots);
-    terminals.relative_velocity = relativeDomainVelocity(slots);
+    terminals.relative_velocity = relativeMeshVelocity(slots);
     return terminals;
 }
 

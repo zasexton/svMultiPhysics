@@ -9,6 +9,7 @@
 #include "Fields/MeshFields.h"
 #include "IO/MovingMeshRestart.h"
 #include "Motion/MotionFields.h"
+#include "Search/CutCell.h"
 
 #include <mpi.h>
 
@@ -101,6 +102,22 @@ int run_moving_mesh_restart_mpi(MPI_Comm comm)
   moving_mesh_restart::WriteOptions options;
   options.restart_epoch = static_cast<std::uint64_t>(rank + 1);
   options.motion_backend_state.emplace("rank_local_backend", std::to_string(rank));
+  search::EmbeddedGeometryDescriptor plane;
+  plane.kind = search::EmbeddedGeometryKind::Plane;
+  plane.origin = {{static_cast<real_t>(rank) + 0.5, 0.0, 0.0}};
+  plane.normal = {{1.0, 0.0, 0.0}};
+  plane.geometry_epoch = static_cast<std::uint64_t>(10 + rank);
+  plane.revisions.geometry_epoch = plane.geometry_epoch;
+  plane.provenance.persistent_id = "mpi-crossing-cut-plane";
+  plane.provenance.provenance_epoch = plane.geometry_epoch;
+  search::EmbeddedGeometryRegistry registry;
+  registry.register_geometry(plane);
+  search::CutClassificationOptions cut_options;
+  cut_options.classify_faces = false;
+  cut_options.classify_edges = false;
+  const auto cut_map = search::classify_embedded_geometry(mesh, plane, cut_options);
+  options.embedded_geometry_registry = search::make_embedded_geometry_restart_records(registry);
+  options.cut_classification_state.push_back(search::make_cut_classification_restart_record(cut_map));
   moving_mesh_restart::write(mesh, path, options);
 
   const auto metadata = moving_mesh_restart::inspect(path);
@@ -110,6 +127,9 @@ int run_moving_mesh_restart_mpi(MPI_Comm comm)
   ok = ok && metadata.restart_epoch == static_cast<std::uint64_t>(rank + 1);
   ok = ok && metadata.active_configuration == Configuration::Current;
   ok = ok && metadata.has_current_coordinates;
+  ok = ok && metadata.embedded_geometry_registry.size() == 1u;
+  ok = ok && metadata.cut_classification_state.size() == 1u;
+  ok = ok && metadata.cut_classification_state.front().cut_cell_count == 1u;
   ok = ok && loaded.active_configuration() == Configuration::Current;
   ok = ok && loaded.has_current_coords();
   ok = ok && same_real_vector(loaded.X_ref(), mesh.X_ref());

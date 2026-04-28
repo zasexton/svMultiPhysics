@@ -7,7 +7,6 @@
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 
-#include "Physics/Formulations/MovingDomain/MovingDomainTerms.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 
 #include "FE/Forms/Vocabulary.h"
@@ -15,6 +14,7 @@
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
 
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -25,6 +25,8 @@
 #endif
 
 namespace {
+namespace forms = svmp::FE::forms;
+
 svmp::FE::forms::SymbolicOptions makeBoundaryFunctionalCompilerOptions(bool enable_jit,
                                                                        bool enable_jit_specialization)
 {
@@ -42,6 +44,50 @@ svmp::FE::forms::SymbolicOptions makeBoundaryFunctionalCompilerOptions(bool enab
     (void)enable_jit_specialization;
 #endif
     return options;
+}
+
+[[nodiscard]] forms::FormExpr zeroVector(int dim)
+{
+    std::vector<forms::FormExpr> components;
+    components.reserve(static_cast<std::size_t>(dim));
+    for (int d = 0; d < dim; ++d) {
+        components.push_back(forms::FormExpr::constant(0.0));
+    }
+    return forms::FormExpr::asVector(std::move(components));
+}
+
+[[nodiscard]] forms::FormExpr meshVelocityVector(int dim)
+{
+    std::vector<forms::FormExpr> components;
+    components.reserve(static_cast<std::size_t>(dim));
+    for (int d = 0; d < dim; ++d) {
+        components.push_back(forms::component(forms::meshVelocity(), d));
+    }
+    return forms::FormExpr::asVector(std::move(components));
+}
+
+[[nodiscard]] forms::FormExpr meshVelocityOrZero(int dim, bool ale_enabled)
+{
+    return ale_enabled ? meshVelocityVector(dim) : zeroVector(dim);
+}
+
+[[nodiscard]] forms::FormExpr relativeConvectiveVelocity(const forms::FormExpr& material_velocity,
+                                                        int dim,
+                                                        bool ale_enabled)
+{
+    return ale_enabled ? (material_velocity - meshVelocityVector(dim)) : material_velocity;
+}
+
+[[nodiscard]] forms::FormExpr movingControlVolumeVectorTransient(const forms::FormExpr& field,
+                                                                const forms::FormExpr& test,
+                                                                const forms::FormExpr& density,
+                                                                int dim,
+                                                                bool enabled)
+{
+    if (!enabled) {
+        return forms::FormExpr::constant(0.0);
+    }
+    return density * forms::div(meshVelocityVector(dim)) * forms::inner(field, test);
 }
 } // namespace
 
@@ -156,10 +202,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     }
 
     // ALE uses relative convection u - w_mesh. Static/default paths remain unchanged.
-    const auto zero = moving_domain::zeroVector(dim);
-    const auto mesh_velocity = moving_domain::domainVelocityOrZero(dim, options_.enable_ale);
+    const auto zero = zeroVector(dim);
+    const auto mesh_velocity = meshVelocityOrZero(dim, options_.enable_ale);
     const auto a = options_.enable_convection
-                       ? moving_domain::relativeConvectiveVelocity(u, dim, options_.enable_ale)
+                       ? relativeConvectiveVelocity(u, dim, options_.enable_ale)
                        : zero;
     const bool include_mcv =
         options_.enable_ale && options_.include_moving_control_volume_transient;
@@ -174,7 +220,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     // Galerkin terms.
     const auto inertia = rho * inner(dt(u), v);
     const auto moving_volume =
-        moving_domain::movingControlVolumeVectorTransient(u, v, rho, dim, include_mcv);
+        movingControlVolumeVectorTransient(u, v, rho, dim, include_mcv);
     const auto convection = rho * inner(grad(u) * a, v);
     const auto viscous = FormExpr::constant(2.0) * mu * inner(sym(grad(u)), sym(grad(v)));
     const auto pressure = -p * div(v);

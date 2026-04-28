@@ -122,6 +122,33 @@ EntityKind entity_kind_from_int(int value)
   return static_cast<EntityKind>(value);
 }
 
+search::EmbeddedGeometryKind embedded_geometry_kind_from_int(int value)
+{
+  if (value < static_cast<int>(search::EmbeddedGeometryKind::Plane) ||
+      value > static_cast<int>(search::EmbeddedGeometryKind::BooleanComposite)) {
+    throw std::runtime_error("moving mesh restart: invalid embedded geometry kind");
+  }
+  return static_cast<search::EmbeddedGeometryKind>(value);
+}
+
+search::EmbeddedGeometryBooleanOperation embedded_boolean_operation_from_int(int value)
+{
+  if (value < static_cast<int>(search::EmbeddedGeometryBooleanOperation::Union) ||
+      value > static_cast<int>(search::EmbeddedGeometryBooleanOperation::Difference)) {
+    throw std::runtime_error("moving mesh restart: invalid embedded Boolean operation");
+  }
+  return static_cast<search::EmbeddedGeometryBooleanOperation>(value);
+}
+
+search::CutTopologySide cut_topology_side_from_int(int value)
+{
+  if (value < static_cast<int>(search::CutTopologySide::Negative) ||
+      value > static_cast<int>(search::CutTopologySide::Interface)) {
+    throw std::runtime_error("moving mesh restart: invalid cut topology side");
+  }
+  return static_cast<search::CutTopologySide>(value);
+}
+
 FieldScalarType field_scalar_type_from_int(int value)
 {
   if (value < static_cast<int>(FieldScalarType::Int32) || value > static_cast<int>(FieldScalarType::Custom)) {
@@ -363,6 +390,291 @@ void read_sets(std::istream& in, MeshBase& mesh)
   }
 }
 
+void write_embedded_revision_state(std::ostream& out,
+                                   const search::EmbeddedGeometryRevisionState& revisions)
+{
+  out << revisions.geometry_epoch << ' '
+      << revisions.field_layout_revision << ' '
+      << revisions.field_value_revision << ' '
+      << revisions.source_surface_revision << ' '
+      << revisions.provenance_revision << ' '
+      << revisions.kinematic_constraint_revision;
+}
+
+search::EmbeddedGeometryRevisionState read_embedded_revision_state(std::istream& in)
+{
+  search::EmbeddedGeometryRevisionState revisions;
+  in >> revisions.geometry_epoch
+     >> revisions.field_layout_revision
+     >> revisions.field_value_revision
+     >> revisions.source_surface_revision
+     >> revisions.provenance_revision
+     >> revisions.kinematic_constraint_revision;
+  return revisions;
+}
+
+void write_embedded_provenance(std::ostream& out,
+                               const search::EmbeddedRegionProvenance& provenance)
+{
+  out << std::quoted(provenance.persistent_id) << ' '
+      << std::quoted(provenance.name) << ' '
+      << provenance.physical_label << ' '
+      << provenance.provenance_epoch;
+}
+
+search::EmbeddedRegionProvenance read_embedded_provenance(std::istream& in)
+{
+  search::EmbeddedRegionProvenance provenance;
+  in >> std::quoted(provenance.persistent_id)
+     >> std::quoted(provenance.name)
+     >> provenance.physical_label
+     >> provenance.provenance_epoch;
+  return provenance;
+}
+
+void write_embedded_geometry_record(std::ostream& out,
+                                    const search::EmbeddedGeometryRestartRecord& record)
+{
+  out << "embedded_geometry_record "
+      << std::quoted(record.persistent_id) << ' '
+      << std::quoted(record.name) << ' '
+      << static_cast<int>(record.kind) << ' '
+      << configuration_to_string(record.configuration) << ' '
+      << (record.active ? 1 : 0) << ' '
+      << static_cast<int>(record.boolean_operation) << ' '
+      << (record.requires_application_reregistration ? 1 : 0) << ' '
+      << record.origin[0] << ' ' << record.origin[1] << ' ' << record.origin[2] << ' '
+      << record.normal[0] << ' ' << record.normal[1] << ' ' << record.normal[2] << ' '
+      << record.radius << ' ';
+  write_embedded_revision_state(out, record.revisions);
+  out << ' ';
+  write_embedded_provenance(out, record.provenance);
+  out << ' ' << record.level_set_samples.size()
+      << ' ' << record.surface_triangles.size()
+      << ' ' << record.children.size() << '\n';
+
+  for (const auto& sample : record.level_set_samples) {
+    out << "embedded_level_set_sample "
+        << sample.point[0] << ' ' << sample.point[1] << ' ' << sample.point[2] << ' '
+        << sample.value << ' '
+        << sample.gradient[0] << ' ' << sample.gradient[1] << ' ' << sample.gradient[2] << '\n';
+  }
+  for (const auto& tri : record.surface_triangles) {
+    out << "embedded_surface_triangle ";
+    write_embedded_provenance(out, tri.provenance);
+    for (const auto& p : tri.vertices) {
+      out << ' ' << p[0] << ' ' << p[1] << ' ' << p[2];
+    }
+    out << '\n';
+  }
+  for (const auto& child : record.children) {
+    write_embedded_geometry_record(out, child);
+  }
+}
+
+search::EmbeddedGeometryRestartRecord read_embedded_geometry_record(std::istream& in)
+{
+  expect_tag(in, "embedded_geometry_record");
+  search::EmbeddedGeometryRestartRecord record;
+  std::string configuration;
+  int kind = 0;
+  int active = 0;
+  int boolean_operation = 0;
+  int requires_reregistration = 0;
+  std::size_t n_samples = 0;
+  std::size_t n_triangles = 0;
+  std::size_t n_children = 0;
+  in >> std::quoted(record.persistent_id)
+     >> std::quoted(record.name)
+     >> kind
+     >> configuration
+     >> active
+     >> boolean_operation
+     >> requires_reregistration
+     >> record.origin[0] >> record.origin[1] >> record.origin[2]
+     >> record.normal[0] >> record.normal[1] >> record.normal[2]
+     >> record.radius;
+  record.kind = embedded_geometry_kind_from_int(kind);
+  record.configuration = configuration_from_string(configuration);
+  record.active = (active != 0);
+  record.boolean_operation = embedded_boolean_operation_from_int(boolean_operation);
+  record.requires_application_reregistration = (requires_reregistration != 0);
+  record.revisions = read_embedded_revision_state(in);
+  record.provenance = read_embedded_provenance(in);
+  in >> n_samples >> n_triangles >> n_children;
+
+  record.level_set_samples.resize(n_samples);
+  for (auto& sample : record.level_set_samples) {
+    expect_tag(in, "embedded_level_set_sample");
+    in >> sample.point[0] >> sample.point[1] >> sample.point[2]
+       >> sample.value
+       >> sample.gradient[0] >> sample.gradient[1] >> sample.gradient[2];
+  }
+  record.surface_triangles.resize(n_triangles);
+  for (auto& tri : record.surface_triangles) {
+    expect_tag(in, "embedded_surface_triangle");
+    tri.provenance = read_embedded_provenance(in);
+    for (auto& p : tri.vertices) {
+      in >> p[0] >> p[1] >> p[2];
+    }
+  }
+  record.children.reserve(n_children);
+  for (std::size_t i = 0; i < n_children; ++i) {
+    record.children.push_back(read_embedded_geometry_record(in));
+  }
+  if (!in) {
+    throw std::runtime_error("moving mesh restart: malformed embedded geometry record");
+  }
+  return record;
+}
+
+void write_composition_child_record(
+    std::ostream& out,
+    const search::EmbeddedCompositionChildRestartRecord& record)
+{
+  out << "cut_composition_child "
+      << record.depth << ' '
+      << record.child_ordinal << ' '
+      << std::quoted(record.parent_persistent_id) << ' ';
+  write_embedded_provenance(out, record.provenance);
+  out << ' ' << static_cast<int>(record.kind) << ' '
+      << static_cast<int>(record.boolean_operation) << ' ';
+  write_embedded_revision_state(out, record.revisions);
+  out << '\n';
+}
+
+search::EmbeddedCompositionChildRestartRecord read_composition_child_record(std::istream& in)
+{
+  expect_tag(in, "cut_composition_child");
+  search::EmbeddedCompositionChildRestartRecord record;
+  int kind = 0;
+  int boolean_operation = 0;
+  in >> record.depth
+     >> record.child_ordinal
+     >> std::quoted(record.parent_persistent_id);
+  record.provenance = read_embedded_provenance(in);
+  in >> kind >> boolean_operation;
+  record.kind = embedded_geometry_kind_from_int(kind);
+  record.boolean_operation = embedded_boolean_operation_from_int(boolean_operation);
+  record.revisions = read_embedded_revision_state(in);
+  if (!in) {
+    throw std::runtime_error("moving mesh restart: malformed cut composition child record");
+  }
+  return record;
+}
+
+void write_cut_side_region_record(
+    std::ostream& out,
+    const search::CutSideRegionRestartRecord& record)
+{
+  out << "cut_side_region_record "
+      << record.stable_id << ' '
+      << static_cast<int>(record.side) << ' '
+      << record.parent_cell << ' '
+      << record.parent_cell_gid << ' '
+      << record.measure_estimate << ' '
+      << record.volume_fraction_estimate << ' ';
+  write_embedded_provenance(out, record.provenance);
+  out << '\n';
+}
+
+search::CutSideRegionRestartRecord read_cut_side_region_record(std::istream& in)
+{
+  expect_tag(in, "cut_side_region_record");
+  search::CutSideRegionRestartRecord record;
+  int side = 0;
+  in >> record.stable_id
+     >> side
+     >> record.parent_cell
+     >> record.parent_cell_gid
+     >> record.measure_estimate
+     >> record.volume_fraction_estimate;
+  record.side = cut_topology_side_from_int(side);
+  record.provenance = read_embedded_provenance(in);
+  if (!in) {
+    throw std::runtime_error("moving mesh restart: malformed cut side-region record");
+  }
+  return record;
+}
+
+void write_cut_classification_record(std::ostream& out,
+                                     const search::CutClassificationRestartRecord& record)
+{
+  out << "cut_classification_record "
+      << std::quoted(record.name) << ' ';
+  write_embedded_provenance(out, record.provenance);
+  out << ' ' << static_cast<int>(record.embedded_kind) << ' '
+      << (record.is_composed_region ? 1 : 0) << ' '
+      << static_cast<int>(record.composition_operation) << ' '
+      << record.revision_key << ' '
+      << record.embedded_geometry_epoch << ' '
+      << record.embedded_field_layout_revision << ' '
+      << record.embedded_field_value_revision << ' '
+      << record.embedded_source_surface_revision << ' '
+      << record.embedded_provenance_revision << ' '
+      << record.embedded_constraint_epoch << ' '
+      << record.fe_layout_revision << ' '
+      << record.predicate_policy_key << ' '
+      << record.cut_topology_revision << ' '
+      << record.cut_cell_count << ' '
+      << record.cut_face_count << ' '
+      << record.cut_edge_count << ' '
+      << record.composition_children.size() << ' '
+      << record.side_regions.size() << '\n';
+  for (const auto& child : record.composition_children) {
+    write_composition_child_record(out, child);
+  }
+  for (const auto& side_region : record.side_regions) {
+    write_cut_side_region_record(out, side_region);
+  }
+}
+
+search::CutClassificationRestartRecord read_cut_classification_record(std::istream& in)
+{
+  expect_tag(in, "cut_classification_record");
+  search::CutClassificationRestartRecord record;
+  int embedded_kind = 0;
+  int is_composed_region = 0;
+  int composition_operation = 0;
+  std::size_t n_composition_children = 0;
+  std::size_t n_side_regions = 0;
+  in >> std::quoted(record.name);
+  record.provenance = read_embedded_provenance(in);
+  in >> embedded_kind
+     >> is_composed_region
+     >> composition_operation
+     >> record.revision_key
+     >> record.embedded_geometry_epoch
+     >> record.embedded_field_layout_revision
+     >> record.embedded_field_value_revision
+     >> record.embedded_source_surface_revision
+     >> record.embedded_provenance_revision
+     >> record.embedded_constraint_epoch
+     >> record.fe_layout_revision
+     >> record.predicate_policy_key
+     >> record.cut_topology_revision
+     >> record.cut_cell_count
+     >> record.cut_face_count
+     >> record.cut_edge_count
+     >> n_composition_children
+     >> n_side_regions;
+  record.embedded_kind = embedded_geometry_kind_from_int(embedded_kind);
+  record.is_composed_region = is_composed_region != 0;
+  record.composition_operation = embedded_boolean_operation_from_int(composition_operation);
+  record.composition_children.reserve(n_composition_children);
+  for (std::size_t i = 0; i < n_composition_children; ++i) {
+    record.composition_children.push_back(read_composition_child_record(in));
+  }
+  record.side_regions.reserve(n_side_regions);
+  for (std::size_t i = 0; i < n_side_regions; ++i) {
+    record.side_regions.push_back(read_cut_side_region_record(in));
+  }
+  if (!in) {
+    throw std::runtime_error("moving mesh restart: malformed cut classification record");
+  }
+  return record;
+}
+
 void write_metadata_maps(std::ostream& out, const WriteOptions& options)
 {
   out << "motion_backend_state " << options.motion_backend_state.size() << '\n';
@@ -378,6 +690,16 @@ void write_metadata_maps(std::ostream& out, const WriteOptions& options)
   out << "adaptivity_provenance " << options.adaptivity_provenance.size() << '\n';
   for (const auto& value : options.adaptivity_provenance) {
     out << std::quoted(value) << '\n';
+  }
+
+  out << "embedded_geometry_registry " << options.embedded_geometry_registry.size() << '\n';
+  for (const auto& record : options.embedded_geometry_registry) {
+    write_embedded_geometry_record(out, record);
+  }
+
+  out << "cut_classification_state " << options.cut_classification_state.size() << '\n';
+  for (const auto& record : options.cut_classification_state) {
+    write_cut_classification_record(out, record);
   }
 }
 
@@ -409,6 +731,22 @@ void read_metadata_maps(std::istream& in, Metadata& metadata)
   metadata.adaptivity_provenance.resize(count);
   for (auto& value : metadata.adaptivity_provenance) {
     in >> std::quoted(value);
+  }
+
+  if (metadata.version >= 5u) {
+    expect_tag(in, "embedded_geometry_registry");
+    in >> count;
+    metadata.embedded_geometry_registry.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+      metadata.embedded_geometry_registry.push_back(read_embedded_geometry_record(in));
+    }
+
+    expect_tag(in, "cut_classification_state");
+    in >> count;
+    metadata.cut_classification_state.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+      metadata.cut_classification_state.push_back(read_cut_classification_record(in));
+    }
   }
 
   if (!in) {

@@ -3,15 +3,16 @@
 
 /**
  * @file Forms.h
- * @brief Umbrella header — includes the full FE/Forms surface
+ * @brief Core FE/Forms authoring surface
  *
  * @note **Not recommended as a starting include for physics modules.**
  * Most formulation code needs only:
  *   - `Forms/Vocabulary.h` (expression helpers: stateField, testFunction, grad, ...)
  *   - `Systems/FormsInstaller.h` (installFormulation, installStrongDirichlet)
  *
- * This umbrella pulls in expert/internal headers (BlockForm, Complex,
- * FormKernels, FormCompiler) that are not needed for standard workflows.
+ * Specialized Forms vocabulary such as MovingFrameForms, CutCellForms,
+ * FiniteDeformationForms, StandardBCs, and NitscheBC should be included
+ * directly by modules that need those narrower surfaces.
  */
 
 // Core authoring surface

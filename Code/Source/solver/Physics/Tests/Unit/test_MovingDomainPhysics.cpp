@@ -7,7 +7,6 @@
 
 #include <gtest/gtest.h>
 
-#include "Physics/Formulations/MovingDomain/MovingDomainTerms.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 
@@ -22,8 +21,10 @@
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
 
+#include <cstddef>
 #include <functional>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -35,7 +36,6 @@ using FE::forms::FormExpr;
 using FE::forms::FormExprNode;
 using FE::forms::FormExprType;
 constexpr FE::FieldId kMeshVelocityField = 907;
-namespace md = formulations::moving_domain;
 namespace ns = formulations::navier_stokes;
 
 bool containsExprType(const FormExprNode* node, FormExprType target)
@@ -119,6 +119,88 @@ FormExpr constantVector3(FE::Real x, FE::Real y, FE::Real z)
         FormExpr::constant(y),
         FormExpr::constant(z),
     });
+}
+
+FormExpr meshVelocityVector(int dim)
+{
+    using namespace FE::forms;
+
+    std::vector<FormExpr> components;
+    components.reserve(static_cast<std::size_t>(dim));
+    for (int d = 0; d < dim; ++d) {
+        components.push_back(component(meshVelocity(), d));
+    }
+    return FormExpr::asVector(std::move(components));
+}
+
+FormExpr relativeConvectiveVelocity(const FormExpr& material_velocity,
+                                    int dim,
+                                    bool ale_enabled)
+{
+    return ale_enabled ? (material_velocity - meshVelocityVector(dim)) : material_velocity;
+}
+
+FormExpr movingControlVolumeScalarTransient(const FormExpr& field,
+                                            const FormExpr& test,
+                                            const FormExpr& density,
+                                            int dim,
+                                            bool enabled)
+{
+    using namespace FE::forms;
+
+    if (!enabled) {
+        return FormExpr::constant(0.0);
+    }
+    return density * div(meshVelocityVector(dim)) * field * test;
+}
+
+FormExpr movingControlVolumeVectorTransient(const FormExpr& field,
+                                            const FormExpr& test,
+                                            const FormExpr& density,
+                                            int dim,
+                                            bool enabled)
+{
+    using namespace FE::forms;
+
+    if (!enabled) {
+        return FormExpr::constant(0.0);
+    }
+    return density * div(meshVelocityVector(dim)) * inner(field, test);
+}
+
+FormExpr movingBoundaryKinematicResidual(const FormExpr& physical_velocity,
+                                         const FormExpr& test_scalar)
+{
+    using namespace FE::forms;
+
+    return test_scalar * dot(physical_velocity - meshVelocity(), currentNormal()) *
+           currentMeasure();
+}
+
+FormExpr fsiDisplacementCompatibilityResidual(const FormExpr& structural_displacement,
+                                              const FormExpr& test_scalar)
+{
+    using namespace FE::forms;
+
+    return test_scalar * dot(structural_displacement - meshDisplacement(), currentNormal()) *
+           currentMeasure();
+}
+
+FormExpr fsiSurfaceTractionPowerResidual(const FormExpr& current_traction,
+                                         const FormExpr& interface_velocity_test)
+{
+    using namespace FE::forms;
+
+    return inner(current_traction, interface_velocity_test) * currentMeasure();
+}
+
+FormExpr referenceSurfaceMeasureMismatchProbe()
+{
+    using namespace FE::forms;
+
+    return currentMeasure() - referenceMeasure() +
+           dot(currentNormal() - referenceNormal(),
+               currentNormal() - referenceNormal());
 }
 
 FE::dofs::DofMap createSingleTetraDenseDofMap(FE::LocalIndex n_dofs)
@@ -225,20 +307,20 @@ TEST(MovingDomainPhysics, NavierStokesALEDisabledDoesNotConsumeMovingDomainTermi
     EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CurrentNormal));
 }
 
-TEST(MovingDomainPhysics, NavierStokesALEEnabledRegistersMeshVelocityAndConsumesDomainVelocity)
+TEST(MovingDomainPhysics, NavierStokesALEEnabledRegistersMeshVelocityAndConsumesMeshVelocity)
 {
     const auto mesh = makeMesh();
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_ale = true;
-    opts.mesh_velocity_field_name = "domain_velocity";
+    opts.mesh_velocity_field_name = "mesh_velocity";
 
     FE::systems::FESystem system(mesh);
     ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
     module.registerOn(system);
 
-    const FE::FieldId mesh_velocity_id = system.findFieldByName("domain_velocity");
+    const FE::FieldId mesh_velocity_id = system.findFieldByName("mesh_velocity");
     ASSERT_NE(mesh_velocity_id, FE::INVALID_FIELD_ID);
     EXPECT_EQ(system.meshMotionField(FE::systems::MeshMotionFieldRole::Velocity), mesh_velocity_id);
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::MeshVelocity));
@@ -253,10 +335,10 @@ TEST(MovingDomainPhysics, ALEAdvectionDiffusionManufacturedResidualUsesRelativeM
     const auto rho = FormExpr::constant(2.0);
     const auto physical_advection = constantVector3(1.0, -0.25, 0.5);
     const auto relative_advection =
-        md::relativeConvectiveVelocity(physical_advection, /*dim=*/3, /*ale_enabled=*/true);
+        relativeConvectiveVelocity(physical_advection, /*dim=*/3, /*ale_enabled=*/true);
 
     const auto residual =
-        md::movingControlVolumeScalarTransient(phi, psi, rho, /*dim=*/3, /*enabled=*/true) +
+        movingControlVolumeScalarTransient(phi, psi, rho, /*dim=*/3, /*enabled=*/true) +
         rho * dot(relative_advection, grad(phi)) * psi +
         FormExpr::constant(0.01) * dot(grad(phi), grad(psi));
 
@@ -280,9 +362,9 @@ TEST(MovingDomainPhysics, RelativeConvectiveVelocityAssemblesAsPhysicalMinusMesh
     const auto rho = FormExpr::constant(2.0);
 
     const auto ale_relative =
-        md::relativeConvectiveVelocity(constantVector3(1.0, -0.25, 0.5), 3, true);
+        relativeConvectiveVelocity(constantVector3(1.0, -0.25, 0.5), 3, true);
     const auto static_equivalent =
-        md::relativeConvectiveVelocity(constantVector3(0.75, -0.125, 0.0), 3, false);
+        relativeConvectiveVelocity(constantVector3(0.75, -0.125, 0.0), 3, false);
 
     const auto ale_integrand = rho * dot(ale_relative, grad(u)) * v;
     const auto static_integrand = rho * dot(static_equivalent, grad(u)) * v;
@@ -330,7 +412,7 @@ TEST(MovingDomainPhysics, MovingControlVolumeScalarTransientAssemblesKnownDiverg
     const auto u = FormExpr::trialFunction(scalar_space, "temperature");
     const auto v = FormExpr::testFunction(scalar_space, "test");
     const auto integrand =
-        md::movingControlVolumeScalarTransient(u, v, FormExpr::constant(2.0), 3, true);
+        movingControlVolumeScalarTransient(u, v, FormExpr::constant(2.0), 3, true);
 
     std::vector<FE::Real> solution = constantScalarTetraCoefficients(3.0);
     const auto mesh_velocity = affineXVectorTetraCoefficients();
@@ -351,7 +433,7 @@ TEST(MovingDomainPhysics, MovingControlVolumeScalarTransientAssemblesKnownDiverg
     }
 }
 
-TEST(MovingDomainPhysics, ALEIncompressibleNavierStokesManufacturedResidualUsesMovingDomainTerms)
+TEST(MovingDomainPhysics, ALEIncompressibleNavierStokesManufacturedResidualUsesMovingDomainExpressions)
 {
     using namespace FE::forms;
 
@@ -369,11 +451,11 @@ TEST(MovingDomainPhysics, ALEIncompressibleNavierStokesManufacturedResidualUsesM
     const auto rho = FormExpr::constant(1.25);
     const auto mu = FormExpr::constant(0.02);
     const auto stress = FormExpr::constant(2.0) * mu * sym(grad(u));
-    const auto relative_advection = md::relativeConvectiveVelocity(u, /*dim=*/3, /*ale_enabled=*/true);
+    const auto relative_advection = relativeConvectiveVelocity(u, /*dim=*/3, /*ale_enabled=*/true);
 
     const auto momentum =
         rho * inner(dt(u) + grad(u) * relative_advection, v) +
-        md::movingControlVolumeVectorTransient(u, v, rho, /*dim=*/3, /*enabled=*/true) +
+        movingControlVolumeVectorTransient(u, v, rho, /*dim=*/3, /*enabled=*/true) +
         FormExpr::constant(2.0) * mu * inner(sym(grad(u)), sym(grad(v))) -
         p * div(v);
     const auto continuity = q * div(u);
@@ -387,7 +469,7 @@ TEST(MovingDomainPhysics, MovingBoundaryFlowSmokeUsesGenericBoundaryTerminals)
     const auto test_scalar = FormExpr::constant(1.0);
     const auto boundary_velocity = constantVector3(0.0, 0.0, 1.0);
 
-    const auto residual = md::movingBoundaryKinematicResidual(boundary_velocity, test_scalar);
+    const auto residual = movingBoundaryKinematicResidual(boundary_velocity, test_scalar);
 
     EXPECT_TRUE(containsExprType(residual, FormExprType::MeshVelocity));
     EXPECT_TRUE(containsExprType(residual, FormExprType::CurrentNormal));
@@ -402,9 +484,9 @@ TEST(MovingDomainPhysics, FSIInterfaceKinematicsAndTractionsUseGenericGeometryTe
     const auto velocity_test = constantVector3(0.25, 0.5, 0.75);
 
     const auto residual =
-        md::fsiDisplacementCompatibilityResidual(structural_displacement, test_scalar) +
-        md::fsiSurfaceTractionPowerResidual(traction, velocity_test) +
-        md::referenceSurfaceMeasureMismatchProbe();
+        fsiDisplacementCompatibilityResidual(structural_displacement, test_scalar) +
+        fsiSurfaceTractionPowerResidual(traction, velocity_test) +
+        referenceSurfaceMeasureMismatchProbe();
 
     EXPECT_TRUE(containsExprType(residual, FormExprType::MeshDisplacement));
     EXPECT_TRUE(containsExprType(residual, FormExprType::CurrentNormal));

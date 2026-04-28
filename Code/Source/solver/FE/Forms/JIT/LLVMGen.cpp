@@ -68,6 +68,13 @@ namespace {
 /// the int returned by unpackFieldIdImm1().
 constexpr int kCurrentSolutionFid = static_cast<int>(CURRENT_SOLUTION_FIELD_ID);
 
+[[nodiscard]] bool isIdentityFrameTransform(std::uint64_t packed) noexcept
+{
+    const auto from = static_cast<GeometryConfiguration>(static_cast<std::uint8_t>(packed & 0xffu));
+    const auto to = static_cast<GeometryConfiguration>(static_cast<std::uint8_t>((packed >> 8u) & 0xffu));
+    return from == to;
+}
+
 #if SVMP_FE_ENABLE_LLVM_JIT
 [[nodiscard]] std::string sanitizeFilename(std::string_view s)
 {
@@ -4236,7 +4243,60 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             return out;
         };
 
+        auto extractLaneValue = [&](llvm::Value* value, std::uint32_t lane) -> llvm::Value* {
+            if (value == nullptr) {
+                throw std::runtime_error("LLVMGen: null value in SIMD lane extraction");
+            }
+            if (value->getType()->isVectorTy()) {
+                return builder.CreateExtractElement(value, builder.getInt32(lane));
+            }
+            return value;
+        };
+
+        auto scalarLoadRealPtrAt = [&](llvm::Value* base_ptr, std::size_t index) -> llvm::Value* {
+            auto* gep = builder.CreateGEP(f64, base_ptr, builder.getInt64(static_cast<std::uint64_t>(index)));
+            return builder.CreateLoad(f64, gep);
+        };
+
+        auto makeExternalCallOutput = [&](const Shape& s) -> CodeValue {
+            CodeValue out;
+            out.shape = s;
+            out.elems.fill(nullptr);
+            const auto n = elemCount(s);
+            for (std::size_t i = 0; i < n; ++i) {
+                out.elems[i] = simd_active ? static_cast<llvm::Value*>(llvm::UndefValue::get(vf64)) : nullptr;
+            }
+            return out;
+        };
+
+        auto assignExternalCallOutput = [&](CodeValue& out,
+                                            std::size_t index,
+                                            std::uint32_t lane,
+                                            llvm::Value* value) -> void {
+            if (simd_active) {
+                out.elems[index] = builder.CreateInsertElement(out.elems[index], value, builder.getInt32(lane));
+            } else {
+                out.elems[index] = value;
+            }
+        };
+
         auto storeMatrixToStack = [&](const CodeValue& a) -> llvm::Value* {
+            const auto n = elemCount(a.shape);
+            auto* arr_ty = llvm::ArrayType::get(f64, n);
+            auto* alloca = builder.CreateAlloca(arr_ty);
+            for (std::size_t i = 0; i < n; ++i) {
+                if (a.elems[i] != nullptr && a.elems[i]->getType()->isVectorTy()) {
+                    throw std::runtime_error("LLVMGen: vector matrix value requires lane-specific external call lowering");
+                }
+                auto* gep = builder.CreateInBoundsGEP(arr_ty,
+                                                     alloca,
+                                                     {builder.getInt32(0), builder.getInt32(static_cast<std::uint32_t>(i))});
+                builder.CreateStore(a.elems[i], gep);
+            }
+            return builder.CreatePointerCast(alloca, f64_ptr);
+        };
+
+        auto storeMatrixToStackLane = [&](const CodeValue& a, std::uint32_t lane) -> llvm::Value* {
             const auto n = elemCount(a.shape);
             auto* arr_ty = llvm::ArrayType::get(f64, n);
             auto* alloca = builder.CreateAlloca(arr_ty);
@@ -4244,9 +4304,17 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 auto* gep = builder.CreateInBoundsGEP(arr_ty,
                                                      alloca,
                                                      {builder.getInt32(0), builder.getInt32(static_cast<std::uint32_t>(i))});
-                builder.CreateStore(a.elems[i], gep);
+                builder.CreateStore(extractLaneValue(a.elems[i], lane), gep);
             }
             return builder.CreatePointerCast(alloca, f64_ptr);
+        };
+
+        auto storeMatrixToStackForExternalCall = [&](const CodeValue& a, std::uint32_t lane) -> llvm::Value* {
+            return simd_active ? storeMatrixToStackLane(a, lane) : storeMatrixToStack(a);
+        };
+
+        auto lanesForExternalCall = [&]() -> std::uint32_t {
+            return simd_active ? simd_w : 1u;
         };
 
         auto callMatrixUnary = [&](const CodeValue& a,
@@ -4260,17 +4328,17 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 throw std::runtime_error("LLVMGen: matrix function supports only 2x2 and 3x3 matrices");
             }
 
-            auto* aptr = storeMatrixToStack(a);
-            auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
-            auto* out_alloca = builder.CreateAlloca(out_arr_ty);
-            auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
-
+            CodeValue out = makeExternalCallOutput(matrixShape(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n)));
             auto callee = (n == 2u) ? fn2x2 : fn3x3;
-            builder.CreateCall(callee, {aptr, out_ptr});
-
-            CodeValue out = makeMatrix(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n));
-            for (std::size_t i = 0; i < n * n; ++i) {
-                out.elems[i] = loadRealPtrAt(out_ptr, builder.getInt64(i));
+            for (std::uint32_t lane = 0; lane < lanesForExternalCall(); ++lane) {
+                auto* aptr = storeMatrixToStackForExternalCall(a, lane);
+                auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
+                auto* out_alloca = builder.CreateAlloca(out_arr_ty);
+                auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
+                builder.CreateCall(callee, {aptr, out_ptr});
+                for (std::size_t i = 0; i < n * n; ++i) {
+                    assignExternalCallOutput(out, i, lane, scalarLoadRealPtrAt(out_ptr, i));
+                }
             }
             return out;
         };
@@ -4287,17 +4355,17 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 throw std::runtime_error("LLVMGen: matrix pow supports only 2x2 and 3x3 matrices");
             }
 
-            auto* aptr = storeMatrixToStack(a);
-            auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
-            auto* out_alloca = builder.CreateAlloca(out_arr_ty);
-            auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
-
+            CodeValue out = makeExternalCallOutput(matrixShape(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n)));
             auto callee = (n == 2u) ? fn2x2 : fn3x3;
-            builder.CreateCall(callee, {aptr, p, out_ptr});
-
-            CodeValue out = makeMatrix(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n));
-            for (std::size_t i = 0; i < n * n; ++i) {
-                out.elems[i] = loadRealPtrAt(out_ptr, builder.getInt64(i));
+            for (std::uint32_t lane = 0; lane < lanesForExternalCall(); ++lane) {
+                auto* aptr = storeMatrixToStackForExternalCall(a, lane);
+                auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
+                auto* out_alloca = builder.CreateAlloca(out_arr_ty);
+                auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
+                builder.CreateCall(callee, {aptr, extractLaneValue(p, lane), out_ptr});
+                for (std::size_t i = 0; i < n * n; ++i) {
+                    assignExternalCallOutput(out, i, lane, scalarLoadRealPtrAt(out_ptr, i));
+                }
             }
 	            return out;
 	        };
@@ -4332,18 +4400,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 throw std::runtime_error("LLVMGen: matrix function directional derivative supports only 2x2 and 3x3 matrices");
             }
 
-            auto* aptr = storeMatrixToStack(a);
-            auto* daptr = storeMatrixToStack(da);
-            auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
-            auto* out_alloca = builder.CreateAlloca(out_arr_ty);
-            auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
-
+            CodeValue out = makeExternalCallOutput(matrixShape(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n)));
             auto callee = (n == 2u) ? fn2x2 : fn3x3;
-            builder.CreateCall(callee, {aptr, daptr, out_ptr});
-
-            CodeValue out = makeMatrix(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n));
-            for (std::size_t i = 0; i < n * n; ++i) {
-                out.elems[i] = loadRealPtrAt(out_ptr, builder.getInt64(i));
+            for (std::uint32_t lane = 0; lane < lanesForExternalCall(); ++lane) {
+                auto* aptr = storeMatrixToStackForExternalCall(a, lane);
+                auto* daptr = storeMatrixToStackForExternalCall(da, lane);
+                auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
+                auto* out_alloca = builder.CreateAlloca(out_arr_ty);
+                auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
+                builder.CreateCall(callee, {aptr, daptr, out_ptr});
+                for (std::size_t i = 0; i < n * n; ++i) {
+                    assignExternalCallOutput(out, i, lane, scalarLoadRealPtrAt(out_ptr, i));
+                }
             }
             return out;
         };
@@ -4363,18 +4431,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 throw std::runtime_error("LLVMGen: matrix pow directional derivative supports only 2x2 and 3x3 matrices");
             }
 
-            auto* aptr = storeMatrixToStack(a);
-            auto* daptr = storeMatrixToStack(da);
-            auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
-            auto* out_alloca = builder.CreateAlloca(out_arr_ty);
-            auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
-
+            CodeValue out = makeExternalCallOutput(matrixShape(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n)));
             auto callee = (n == 2u) ? fn2x2 : fn3x3;
-            builder.CreateCall(callee, {aptr, daptr, p, out_ptr});
-
-            CodeValue out = makeMatrix(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n));
-            for (std::size_t i = 0; i < n * n; ++i) {
-                out.elems[i] = loadRealPtrAt(out_ptr, builder.getInt64(i));
+            for (std::uint32_t lane = 0; lane < lanesForExternalCall(); ++lane) {
+                auto* aptr = storeMatrixToStackForExternalCall(a, lane);
+                auto* daptr = storeMatrixToStackForExternalCall(da, lane);
+                auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
+                auto* out_alloca = builder.CreateAlloca(out_arr_ty);
+                auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
+                builder.CreateCall(callee, {aptr, daptr, extractLaneValue(p, lane), out_ptr});
+                for (std::size_t i = 0; i < n * n; ++i) {
+                    assignExternalCallOutput(out, i, lane, scalarLoadRealPtrAt(out_ptr, i));
+                }
             }
             return out;
         };
@@ -4389,19 +4457,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             if (n != 2u && n != 3u) {
                 throw std::runtime_error("LLVMGen: eigvec_sym_dd supports only 2x2 and 3x3 matrices");
             }
-            auto* aptr = storeMatrixToStack(a);
-            auto* daptr = storeMatrixToStack(da);
-
-            auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n));
-            auto* out_alloca = builder.CreateAlloca(out_arr_ty);
-            auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
-
+            CodeValue out = makeExternalCallOutput(vectorShape(static_cast<std::uint32_t>(n)));
             auto callee = (n == 2u) ? eigvec_sym_dd_2x2_fn : eigvec_sym_dd_3x3_fn;
-            builder.CreateCall(callee, {aptr, daptr, builder.getInt32(which), out_ptr});
-
-            CodeValue out = makeZero(vectorShape(static_cast<std::uint32_t>(n)));
-            for (std::size_t r = 0; r < n; ++r) {
-                out.elems[r] = loadRealPtrAt(out_ptr, builder.getInt64(r));
+            for (std::uint32_t lane = 0; lane < lanesForExternalCall(); ++lane) {
+                auto* aptr = storeMatrixToStackForExternalCall(a, lane);
+                auto* daptr = storeMatrixToStackForExternalCall(da, lane);
+                auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n));
+                auto* out_alloca = builder.CreateAlloca(out_arr_ty);
+                auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
+                builder.CreateCall(callee, {aptr, daptr, builder.getInt32(which), out_ptr});
+                for (std::size_t r = 0; r < n; ++r) {
+                    assignExternalCallOutput(out, r, lane, scalarLoadRealPtrAt(out_ptr, r));
+                }
             }
             return out;
         };
@@ -4417,18 +4484,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 throw std::runtime_error("LLVMGen: spectral_decomp_dd supports only 2x2 and 3x3 matrices");
             }
 
-            auto* aptr = storeMatrixToStack(a);
-            auto* daptr = storeMatrixToStack(da);
-            auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
-            auto* out_alloca = builder.CreateAlloca(out_arr_ty);
-            auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
-
+            CodeValue out = makeExternalCallOutput(matrixShape(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n)));
             auto callee = (n == 2u) ? spectral_decomp_dd_2x2_fn : spectral_decomp_dd_3x3_fn;
-            builder.CreateCall(callee, {aptr, daptr, out_ptr});
-
-            CodeValue out = makeMatrix(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n));
-            for (std::size_t i = 0; i < n * n; ++i) {
-                out.elems[i] = loadRealPtrAt(out_ptr, builder.getInt64(i));
+            for (std::uint32_t lane = 0; lane < lanesForExternalCall(); ++lane) {
+                auto* aptr = storeMatrixToStackForExternalCall(a, lane);
+                auto* daptr = storeMatrixToStackForExternalCall(da, lane);
+                auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
+                auto* out_alloca = builder.CreateAlloca(out_arr_ty);
+                auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
+                builder.CreateCall(callee, {aptr, daptr, out_ptr});
+                for (std::size_t i = 0; i < n * n; ++i) {
+                    assignExternalCallOutput(out, i, lane, scalarLoadRealPtrAt(out_ptr, i));
+                }
             }
             return out;
         };
@@ -4441,21 +4508,23 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             if (n != 2u && n != 3u) {
                 throw std::runtime_error("LLVMGen: eigvec_sym supports only 2x2 and 3x3 matrices");
             }
-            auto* aptr = storeMatrixToStack(a);
-            auto* evals_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n));
-            auto* evecs_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
-            auto* evals_alloca = builder.CreateAlloca(evals_arr_ty);
-            auto* evecs_alloca = builder.CreateAlloca(evecs_arr_ty);
-            auto* evals_ptr = builder.CreatePointerCast(evals_alloca, f64_ptr);
-            auto* evecs_ptr = builder.CreatePointerCast(evecs_alloca, f64_ptr);
             auto callee = (n == 2u) ? eig_sym_full_2x2_fn : eig_sym_full_3x3_fn;
-            builder.CreateCall(callee, {aptr, evals_ptr, evecs_ptr});
 
             const auto ww = std::min<std::uint32_t>(which, static_cast<std::uint32_t>(n > 0u ? (n - 1u) : 0u));
-            CodeValue out = makeZero(vectorShape(static_cast<std::uint32_t>(n)));
-            for (std::size_t r = 0; r < n; ++r) {
-                const auto idx = r * n + static_cast<std::size_t>(ww);
-                out.elems[r] = loadRealPtrAt(evecs_ptr, builder.getInt64(idx));
+            CodeValue out = makeExternalCallOutput(vectorShape(static_cast<std::uint32_t>(n)));
+            for (std::uint32_t lane = 0; lane < lanesForExternalCall(); ++lane) {
+                auto* aptr = storeMatrixToStackForExternalCall(a, lane);
+                auto* evals_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n));
+                auto* evecs_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
+                auto* evals_alloca = builder.CreateAlloca(evals_arr_ty);
+                auto* evecs_alloca = builder.CreateAlloca(evecs_arr_ty);
+                auto* evals_ptr = builder.CreatePointerCast(evals_alloca, f64_ptr);
+                auto* evecs_ptr = builder.CreatePointerCast(evecs_alloca, f64_ptr);
+                builder.CreateCall(callee, {aptr, evals_ptr, evecs_ptr});
+                for (std::size_t r = 0; r < n; ++r) {
+                    const auto idx = r * n + static_cast<std::size_t>(ww);
+                    assignExternalCallOutput(out, r, lane, scalarLoadRealPtrAt(evecs_ptr, idx));
+                }
             }
             return out;
         };
@@ -4468,19 +4537,21 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             if (n != 2u && n != 3u) {
                 throw std::runtime_error("LLVMGen: spectral_decomp supports only 2x2 and 3x3 matrices");
             }
-            auto* aptr = storeMatrixToStack(a);
-            auto* evals_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n));
-            auto* evecs_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
-            auto* evals_alloca = builder.CreateAlloca(evals_arr_ty);
-            auto* evecs_alloca = builder.CreateAlloca(evecs_arr_ty);
-            auto* evals_ptr = builder.CreatePointerCast(evals_alloca, f64_ptr);
-            auto* evecs_ptr = builder.CreatePointerCast(evecs_alloca, f64_ptr);
             auto callee = (n == 2u) ? eig_sym_full_2x2_fn : eig_sym_full_3x3_fn;
-            builder.CreateCall(callee, {aptr, evals_ptr, evecs_ptr});
 
-            CodeValue out = makeMatrix(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n));
-            for (std::size_t i = 0; i < n * n; ++i) {
-                out.elems[i] = loadRealPtrAt(evecs_ptr, builder.getInt64(i));
+            CodeValue out = makeExternalCallOutput(matrixShape(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n)));
+            for (std::uint32_t lane = 0; lane < lanesForExternalCall(); ++lane) {
+                auto* aptr = storeMatrixToStackForExternalCall(a, lane);
+                auto* evals_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n));
+                auto* evecs_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
+                auto* evals_alloca = builder.CreateAlloca(evals_arr_ty);
+                auto* evecs_alloca = builder.CreateAlloca(evecs_arr_ty);
+                auto* evals_ptr = builder.CreatePointerCast(evals_alloca, f64_ptr);
+                auto* evecs_ptr = builder.CreatePointerCast(evecs_alloca, f64_ptr);
+                builder.CreateCall(callee, {aptr, evals_ptr, evecs_ptr});
+                for (std::size_t i = 0; i < n * n; ++i) {
+                    assignExternalCallOutput(out, i, lane, scalarLoadRealPtrAt(evecs_ptr, i));
+                }
             }
             return out;
         };
@@ -4526,10 +4597,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             if (n != 2u && n != 3u) {
                 throw std::runtime_error("LLVMGen: eig_sym supports only 2x2 and 3x3 matrices");
             }
-            auto* aptr = storeMatrixToStack(a);
             auto callee = (n == 2u) ? eig_sym_2x2_fn : eig_sym_3x3_fn;
-            auto* val = builder.CreateCall(callee, {aptr, builder.getInt32(which)});
-            return makeScalar(val);
+            CodeValue out = makeExternalCallOutput(scalarShape());
+            for (std::uint32_t lane = 0; lane < lanesForExternalCall(); ++lane) {
+                auto* aptr = storeMatrixToStackForExternalCall(a, lane);
+                auto* val = builder.CreateCall(callee, {aptr, builder.getInt32(which)});
+                assignExternalCallOutput(out, 0u, lane, val);
+            }
+            return out;
         };
 
         auto eigSymDD = [&](const CodeValue& a, const CodeValue& da, std::uint32_t which) -> CodeValue {
@@ -4542,11 +4617,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             if (n != 2u && n != 3u) {
                 throw std::runtime_error("LLVMGen: eig_sym_dd supports only 2x2 and 3x3 matrices");
             }
-            auto* aptr = storeMatrixToStack(a);
-            auto* dptr = storeMatrixToStack(da);
             auto callee = (n == 2u) ? eig_sym_dd_2x2_fn : eig_sym_dd_3x3_fn;
-            auto* val = builder.CreateCall(callee, {aptr, dptr, builder.getInt32(which)});
-            return makeScalar(val);
+            CodeValue out = makeExternalCallOutput(scalarShape());
+            for (std::uint32_t lane = 0; lane < lanesForExternalCall(); ++lane) {
+                auto* aptr = storeMatrixToStackForExternalCall(a, lane);
+                auto* dptr = storeMatrixToStackForExternalCall(da, lane);
+                auto* val = builder.CreateCall(callee, {aptr, dptr, builder.getInt32(which)});
+                assignExternalCallOutput(out, 0u, lane, val);
+            }
+            return out;
         };
 
         auto eigSymDDWrtA = [&](const CodeValue& a,
@@ -4562,12 +4641,16 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             if (n != 2u && n != 3u) {
                 throw std::runtime_error("LLVMGen: eig_sym_ddA supports only 2x2 and 3x3 matrices");
             }
-            auto* aptr = storeMatrixToStack(a);
-            auto* bptr = storeMatrixToStack(b);
-            auto* dptr = storeMatrixToStack(da);
             auto callee = (n == 2u) ? eig_sym_ddA_2x2_fn : eig_sym_ddA_3x3_fn;
-            auto* val = builder.CreateCall(callee, {aptr, bptr, dptr, builder.getInt32(which)});
-            return makeScalar(val);
+            CodeValue out = makeExternalCallOutput(scalarShape());
+            for (std::uint32_t lane = 0; lane < lanesForExternalCall(); ++lane) {
+                auto* aptr = storeMatrixToStackForExternalCall(a, lane);
+                auto* bptr = storeMatrixToStackForExternalCall(b, lane);
+                auto* dptr = storeMatrixToStackForExternalCall(da, lane);
+                auto* val = builder.CreateCall(callee, {aptr, bptr, dptr, builder.getInt32(which)});
+                assignExternalCallOutput(out, 0u, lane, val);
+            }
+            return out;
         };
 
         auto symOrSkew = [&](bool symmetric, const CodeValue& a) -> CodeValue {
@@ -6121,6 +6204,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     case FormExprType::Pushforward: {
                         if (op.child_count != 1u) {
                             throw std::runtime_error("LLVMGen: frame transform expects exactly 1 child");
+                        }
+                        if (!isIdentityFrameTransform(op.imm0)) {
+                            throw std::runtime_error(
+                                "LLVMGen: generic pullback()/pushforward() frame markers are metadata-only; "
+                                "write the frame transform explicitly");
                         }
                         const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
                         values[op_idx] = values[child_idx];
@@ -9010,6 +9098,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         if (op.child_count != 1u) {
                             throw std::runtime_error("LLVMGen: frame transform expects exactly 1 child");
                         }
+                        if (!isIdentityFrameTransform(op.imm0)) {
+                            throw std::runtime_error(
+                                "LLVMGen: generic pullback()/pushforward() frame markers are metadata-only; "
+                                "write the frame transform explicitly");
+                        }
                         const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
                         values[op_idx] = values[child_idx];
                         break;
@@ -10831,6 +10924,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     case FormExprType::Pushforward: {
                         if (op.child_count != 1u) {
                             throw std::runtime_error("LLVMGen: frame transform expects exactly 1 child");
+                        }
+                        if (!isIdentityFrameTransform(op.imm0)) {
+                            throw std::runtime_error(
+                                "LLVMGen: generic pullback()/pushforward() frame markers are metadata-only; "
+                                "write the frame transform explicitly");
                         }
                         const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
                         values_minus[op_idx] = values_minus[child_idx];
@@ -15860,6 +15958,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         case FormExprType::Pushforward: {
                             if (op.child_count != 1u) {
                                 throw std::runtime_error("LLVMGen: frame transform expects exactly 1 child");
+                            }
+                            if (!isIdentityFrameTransform(op.imm0)) {
+                                throw std::runtime_error(
+                                    "LLVMGen: generic pullback()/pushforward() frame markers are metadata-only; "
+                                    "write the frame transform explicitly");
                             }
                             const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
                             values_minus[op_idx] = values_minus[child_idx];

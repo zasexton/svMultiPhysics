@@ -6,14 +6,67 @@
  */
 
 #include "Analysis/InfSupAnalyzer.h"
+#include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
 
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace svmp {
 namespace FE {
 namespace analysis {
+
+namespace {
+
+void emitNumericInfSupClaim(ProblemAnalysisReport& report,
+                            const InfSupEstimateSummary& summary)
+{
+    const bool positive_estimate = summary.estimate_value > 0.0;
+
+    PropertyClaim claim;
+    claim.kind = PropertyKind::InfSupCondition;
+    claim.status = positive_estimate ? PropertyStatus::Exact
+                                     : PropertyStatus::Violated;
+    claim.confidence = AnalysisConfidence::High;
+    claim.domain = summary.block.domain;
+    claim.variables.push_back(summary.primal_variable);
+    claim.variables.push_back(summary.multiplier_variable);
+    claim.inf_sup_class = positive_estimate ? InfSupClass::StructurallySupported
+                                            : InfSupClass::LikelyViolated;
+    claim.certification_class = positive_estimate ? CertificationClass::Certified
+                                                  : CertificationClass::Violated;
+    claim.inf_sup_estimate = summary.estimate_value;
+    claim.nullspace_handling_class = summary.nullspace_handling;
+    claim.tested_block_id = summary.block.operator_tag;
+    claim.estimate_scope = summary.estimate_scope;
+    claim.description = positive_estimate
+        ? "Numeric inf-sup estimate is positive for the mixed pair"
+        : "Numeric inf-sup estimate is nonpositive for the mixed pair";
+    claim.claim_origin = "InfSupAnalyzer";
+    claim.addEvidence("InfSupAnalyzer",
+        "InfSupEstimateSummary estimate=" +
+        std::to_string(summary.estimate_value) +
+        ", rows=" + std::to_string(summary.test_rows) +
+        ", cols=" + std::to_string(summary.test_cols));
+    report.claims.push_back(std::move(claim));
+}
+
+void emitNumericSummaryHooks(const ProblemAnalysisContext& context,
+                             ProblemAnalysisReport& report)
+{
+    const auto* summaries = context.analysisSummaries();
+    if (!summaries) {
+        return;
+    }
+
+    for (const auto& summary : summaries->inf_sup_estimates) {
+        emitNumericInfSupClaim(report, summary);
+    }
+}
+
+} // namespace
 
 std::string InfSupAnalyzer::name() const {
     return "InfSupAnalyzer";
@@ -212,6 +265,8 @@ void InfSupAnalyzer::run(const ProblemAnalysisContext& context,
             AnalysisConfidence::Medium);
         report.claims.push_back(std::move(claim));
     }
+
+    emitNumericSummaryHooks(context, report);
 }
 
 } // namespace analysis

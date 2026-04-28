@@ -35,7 +35,10 @@ struct NitscheInterfaceOptions {
 };
 
 /**
- * @brief Nitsche/SIPG-style interface integrand for scalar diffusion operators
+ * @brief Legacy Nitsche/SIPG-style interface integrand for scalar diffusion operators
+ *
+ * Prefer `bc::applyInterfaceTraceNitsche(...)` in new formulation code so
+ * interface fluxes and penalty weights remain explicit Forms expressions.
  *
  * For scalar diffusion with coefficient k, a common symmetric interface term is:
  *   -⟨ {k ∇u}·n ⟩ [[v]]  -  ⟨ {k ∇v}·n ⟩ [[u]]  +  (γ p^2 {k}/h_n) [[u]] [[v]]
@@ -80,7 +83,7 @@ struct NitscheInterfaceOptions {
 }
 
 /**
- * @brief Add Nitsche interface terms over `.dI(interface_marker)` to an existing residual
+ * @brief Legacy scalar-diffusion Nitsche interface shortcut over `.dI(interface_marker)`
  */
 [[nodiscard]] inline FormExpr applyNitscheInterfacePoisson(FormExpr residual,
                                                           const FormExpr& k,

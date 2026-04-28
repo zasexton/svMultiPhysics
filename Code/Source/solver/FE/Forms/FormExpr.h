@@ -528,7 +528,6 @@ public:
 	    static FormExpr referenceCoordinate();
         static FormExpr meshDisplacement();
         static FormExpr meshVelocity();
-        static FormExpr domainVelocity();
         static FormExpr meshAcceleration();
         static FormExpr currentCoordinate();
         static FormExpr previousCoordinate();

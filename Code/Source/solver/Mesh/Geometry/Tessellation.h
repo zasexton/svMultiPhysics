@@ -51,6 +51,7 @@ struct TessellatedCell {
     CellShape sub_element_shape{};
 
     std::vector<std::array<real_t, 3>> vertices;
+    std::vector<TessParamPoint> parametric_vertices;
     std::vector<index_t> connectivity;
     std::vector<int> offsets; // offsets.size() == n_sub_elements + 1
 
@@ -65,6 +66,7 @@ struct TessellatedFace {
     CellShape sub_element_shape{};
 
     std::vector<std::array<real_t, 3>> vertices;
+    std::vector<TessParamPoint> parametric_vertices;
     std::vector<index_t> connectivity;
     std::vector<int> offsets;
     std::vector<std::vector<real_t>> field_values;
