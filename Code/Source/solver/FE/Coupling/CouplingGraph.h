@@ -34,6 +34,9 @@ public:
         std::span<const CouplingContractDeclaration> declarations,
         std::span<const CouplingFormAnalysisMetadata> installed_forms);
 
+    [[nodiscard]] CouplingValidationResult validateTemporalRequirements(
+        const CouplingTemporalAvailability& availability) const;
+
     [[nodiscard]] const std::vector<CouplingContractDeclaration>& declarations() const noexcept;
     [[nodiscard]] const std::vector<CouplingFormAnalysisMetadata>&
     installedFormMetadata() const noexcept;

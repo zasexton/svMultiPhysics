@@ -2532,6 +2532,7 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Coupling/test_CouplingFormBuilder.cpp
                 Tests/Unit/Coupling/test_CouplingGraph.cpp
                 Tests/Unit/Coupling/test_CouplingHeaders.cpp
+                Tests/Unit/Coupling/test_CouplingTemporalRequirements.cpp
                 Tests/Unit/Coupling/test_CouplingContext.cpp
                 Tests/Unit/Coupling/test_CouplingRegistry.cpp
                 Tests/Unit/Coupling/test_CouplingTypes.cpp

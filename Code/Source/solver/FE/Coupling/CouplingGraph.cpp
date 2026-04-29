@@ -541,6 +541,20 @@ CouplingValidationResult CouplingGraph::buildFinalizedGraph(
     return result;
 }
 
+CouplingValidationResult CouplingGraph::validateTemporalRequirements(
+    const CouplingTemporalAvailability& availability) const
+{
+    std::vector<CouplingTemporalRequirement> requirements;
+    for (const auto& declaration : declarations_) {
+        requirements.insert(requirements.end(),
+                            declaration.temporal_requirements.begin(),
+                            declaration.temporal_requirements.end());
+    }
+    return coupling::validateTemporalRequirements(
+        std::span<const CouplingTemporalRequirement>(requirements),
+        availability);
+}
+
 const std::vector<CouplingContractDeclaration>& CouplingGraph::declarations() const noexcept
 {
     return declarations_;

@@ -17,13 +17,16 @@
 #include "Coupling/CouplingGeometryRequirements.h"
 
 #include <optional>
+#include <span>
 #include <string>
+#include <vector>
 
 namespace svmp {
 namespace FE {
 
 namespace systems {
 enum class MeshMotionFieldRole : std::uint8_t;
+struct SystemStateView;
 }
 
 namespace coupling {
@@ -50,9 +53,35 @@ struct CouplingTemporalRequirement {
     CouplingRequirement requirement{CouplingRequirement::Required};
 };
 
+struct CouplingTemporalAvailability {
+    int max_derivative_order{0};
+    int history_depth{0};
+    bool provides_time{true};
+    bool provides_time_step{true};
+    bool provides_effective_time_step{true};
+};
+
+struct CouplingTemporalRequirementSummary {
+    int max_derivative_order{0};
+    int max_history_index{0};
+    bool requires_time{false};
+    bool requires_time_step{false};
+    bool requires_effective_time_step{false};
+    std::vector<CouplingTemporalRequirement> field_temporal_requirements;
+    std::vector<CouplingTemporalRequirement> mesh_temporal_requirements;
+};
+
 [[nodiscard]] const char* toString(CouplingTemporalQuantity quantity) noexcept;
 [[nodiscard]] CouplingValidationResult validateTemporalRequirement(
     const CouplingTemporalRequirement& requirement);
+[[nodiscard]] CouplingTemporalAvailability temporalAvailabilityFromSystemState(
+    const systems::SystemStateView& state,
+    int max_derivative_order);
+[[nodiscard]] CouplingTemporalRequirementSummary summarizeTemporalRequirements(
+    std::span<const CouplingTemporalRequirement> requirements);
+[[nodiscard]] CouplingValidationResult validateTemporalRequirements(
+    std::span<const CouplingTemporalRequirement> requirements,
+    const CouplingTemporalAvailability& availability);
 
 } // namespace coupling
 } // namespace FE
