@@ -797,6 +797,23 @@ CouplingValidationResult validateDriverOwnedTransferDescriptor(
     return result;
 }
 
+CouplingValidationResult validateTransferDeclarationConsistency(
+    const CouplingTransferDeclaration& transfer)
+{
+    CouplingValidationResult result;
+    if (!isInterfaceTransferKind(transfer.kind) &&
+        transfer.interface_declaration.has_value()) {
+        result.addError(
+            "interface transfer metadata is valid only for interface transfer kinds");
+    }
+    if (transfer.kind != CouplingTransferKind::DriverOwned &&
+        !transfer.driver_owned_name.empty()) {
+        result.addError(
+            "driver-owned transfer names are valid only for driver-owned transfers");
+    }
+    return result;
+}
+
 CouplingValidationResult validateGeneralTensorEndpointDescriptors(
     const CouplingExchangeDeclaration& exchange)
 {
@@ -1366,6 +1383,7 @@ CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
         result.append(validateCouplingPortId(exchange.producer_port));
         result.append(validateCouplingPortId(exchange.consumer_port));
         result.append(validateCouplingValueDescriptor(exchange.value));
+        result.append(validateTransferDeclarationConsistency(exchange.transfer));
         if (exchange.transfer.kind == CouplingTransferKind::Unspecified) {
             result.addError("partitioned coupling exchange requires an explicit transfer");
         }

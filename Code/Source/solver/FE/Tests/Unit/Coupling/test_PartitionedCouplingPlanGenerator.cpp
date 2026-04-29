@@ -1727,6 +1727,25 @@ TEST(PartitionedCouplingPlanGenerator, RejectsUnspecifiedTransfer)
               std::string::npos);
 }
 
+TEST(PartitionedCouplingPlanGenerator, RejectsTransferDeclarationExtraMetadata)
+{
+    auto exchange = identityExchange();
+    exchange.transfer.interface_declaration = CouplingInterfaceTransferDeclaration{};
+    exchange.transfer.driver_owned_name = "copy";
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("interface transfer metadata"),
+              std::string::npos);
+    EXPECT_NE(formatDiagnostics(validation).find("driver-owned transfer names"),
+              std::string::npos);
+}
+
 TEST(PartitionedCouplingPlanGenerator, RejectsUnknownFieldEndpoint)
 {
     auto exchange = identityExchange();
