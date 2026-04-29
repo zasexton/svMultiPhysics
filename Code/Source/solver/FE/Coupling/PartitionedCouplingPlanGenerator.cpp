@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <set>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -20,23 +22,88 @@ namespace coupling {
 
 namespace {
 
-CouplingResolvedTemporalBackingKind backingForSlot(CouplingTemporalSlot slot) noexcept
+CouplingResolvedTemporalBackingKind backingForEndpoint(const CouplingEndpointRef& endpoint) noexcept
 {
-    switch (slot) {
-    case CouplingTemporalSlot::Current:
-        return CouplingResolvedTemporalBackingKind::SystemStateCurrent;
-    case CouplingTemporalSlot::Accepted:
-        return CouplingResolvedTemporalBackingKind::SystemStateAccepted;
-    case CouplingTemporalSlot::Predicted:
-        return CouplingResolvedTemporalBackingKind::SystemStatePredicted;
-    case CouplingTemporalSlot::History:
-        return CouplingResolvedTemporalBackingKind::SystemStateHistory;
-    case CouplingTemporalSlot::Stage:
-        return CouplingResolvedTemporalBackingKind::SystemStateStage;
-    case CouplingTemporalSlot::External:
+    if (endpoint.kind == CouplingEndpointKind::Field) {
+        switch (endpoint.temporal.slot) {
+        case CouplingTemporalSlot::Current:
+            return CouplingResolvedTemporalBackingKind::SystemStateCurrent;
+        case CouplingTemporalSlot::History:
+            return CouplingResolvedTemporalBackingKind::SystemStateHistory;
+        case CouplingTemporalSlot::Accepted:
+        case CouplingTemporalSlot::Predicted:
+        case CouplingTemporalSlot::Stage:
+        case CouplingTemporalSlot::External:
+            return CouplingResolvedTemporalBackingKind::None;
+        }
+    }
+    if (endpoint.kind == CouplingEndpointKind::ExternalBuffer) {
         return CouplingResolvedTemporalBackingKind::ExternalBuffer;
     }
     return CouplingResolvedTemporalBackingKind::None;
+}
+
+std::optional<int> resolvedTemporalStorageIndex(const CouplingTemporalSlotDescriptor& temporal)
+{
+    if (temporal.slot == CouplingTemporalSlot::History &&
+        temporal.history_index.has_value()) {
+        return *temporal.history_index - 1;
+    }
+    if (temporal.slot == CouplingTemporalSlot::Stage &&
+        temporal.stage_index.has_value()) {
+        return *temporal.stage_index;
+    }
+    return std::nullopt;
+}
+
+CouplingValidationResult validateEndpointResolutionSupport(
+    const CouplingEndpointRef& endpoint,
+    std::string_view role)
+{
+    CouplingValidationResult result;
+    if (endpoint.kind == CouplingEndpointKind::Field) {
+        switch (endpoint.temporal.slot) {
+        case CouplingTemporalSlot::Current:
+        case CouplingTemporalSlot::History:
+            break;
+        case CouplingTemporalSlot::Accepted:
+        case CouplingTemporalSlot::Predicted:
+        case CouplingTemporalSlot::Stage:
+        case CouplingTemporalSlot::External:
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = endpoint.participant_name.value_or(""),
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " field endpoint temporal slot " +
+                           toString(endpoint.temporal.slot) +
+                           " requires a registered provider extension",
+            });
+            break;
+        }
+        return result;
+    }
+
+    if (endpoint.kind == CouplingEndpointKind::ExternalBuffer) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .participant_name = endpoint.participant_name.value_or(""),
+            .endpoint_name = endpoint.endpoint_name,
+            .message = "partitioned " + std::string(role) +
+                       " external buffer endpoint requires a registered descriptor",
+        });
+        return result;
+    }
+
+    result.add(CouplingDiagnostic{
+        .severity = CouplingDiagnosticSeverity::Error,
+        .participant_name = endpoint.participant_name.value_or(""),
+        .endpoint_name = endpoint.endpoint_name,
+        .message = "partitioned " + std::string(role) +
+                   " endpoint kind " + toString(endpoint.kind) +
+                   " requires a registry resolver before plan generation",
+    });
+    return result;
 }
 
 bool hasPort(const std::vector<CouplingPortId>& stack, const CouplingPortId& port)
@@ -56,13 +123,15 @@ ResolvedCouplingEndpoint resolveEndpoint(const CouplingContext& ctx,
     resolved.resolved_endpoint_key = endpoint.endpoint_name;
     resolved.temporal.request = endpoint.temporal;
     resolved.temporal.provided = endpoint.temporal;
-    resolved.temporal.backing = backingForSlot(endpoint.temporal.slot);
+    resolved.temporal.backing = backingForEndpoint(endpoint);
+    resolved.temporal.storage_index = resolvedTemporalStorageIndex(endpoint.temporal);
 
     if (endpoint.kind == CouplingEndpointKind::Field &&
         endpoint.participant_name.has_value()) {
         const auto field = ctx.field(*endpoint.participant_name, endpoint.endpoint_name);
         resolved.system_name = field.system_name;
         resolved.registry_provider = "CouplingContext";
+        resolved.temporal.provider_name = "FESystem";
         resolved.field_id = field.field_id;
     }
 
@@ -195,6 +264,8 @@ CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
         }
         result.append(validateCouplingEndpointRef(*exchange.producer));
         result.append(validateCouplingEndpointRef(*exchange.consumer));
+        result.append(validateEndpointResolutionSupport(*exchange.producer, "producer"));
+        result.append(validateEndpointResolutionSupport(*exchange.consumer, "consumer"));
 
         if (exchange.producer->kind == CouplingEndpointKind::Field) {
             if (!exchange.producer->participant_name.has_value() ||

@@ -61,16 +61,22 @@ CouplingContext partitionedContext()
     return builder.build();
 }
 
-CouplingEndpointRef fieldEndpoint(std::string participant)
+CouplingEndpointRef fieldEndpoint(std::string participant,
+                                  CouplingTemporalSlotDescriptor temporal)
 {
     return CouplingEndpointRef{
         .kind = CouplingEndpointKind::Field,
         .participant_name = std::move(participant),
         .endpoint_name = "primary",
-        .temporal = CouplingTemporalSlotDescriptor{
-            .slot = CouplingTemporalSlot::Current,
-        },
+        .temporal = temporal,
     };
+}
+
+CouplingEndpointRef fieldEndpoint(std::string participant)
+{
+    return fieldEndpoint(
+        std::move(participant),
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Current});
 }
 
 CouplingPortId port(std::string name)
@@ -131,6 +137,109 @@ TEST(PartitionedCouplingPlanGenerator, GeneratesFieldIdentityExchange)
     EXPECT_EQ(plan.exchanges[0].consumer.field_id, 2);
     EXPECT_EQ(plan.exchanges[0].transfer.kind, CouplingTransferKind::Identity);
     EXPECT_TRUE(plan.cycles.empty());
+}
+
+TEST(PartitionedCouplingPlanGenerator, ResolvesFieldHistoryTemporalSlot)
+{
+    auto exchange = identityExchange();
+    exchange.producer = fieldEndpoint(
+        "left",
+        CouplingTemporalSlotDescriptor{
+            .slot = CouplingTemporalSlot::History,
+            .history_index = 2,
+        });
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        partitionedContext(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_EQ(plan.exchanges[0].producer.temporal.backing,
+              CouplingResolvedTemporalBackingKind::SystemStateHistory);
+    ASSERT_TRUE(plan.exchanges[0].producer.temporal.storage_index.has_value());
+    EXPECT_EQ(*plan.exchanges[0].producer.temporal.storage_index, 1);
+    ASSERT_TRUE(plan.exchanges[0].producer.temporal.request.history_index.has_value());
+    EXPECT_EQ(*plan.exchanges[0].producer.temporal.request.history_index, 2);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsUnsupportedFieldTemporalSlots)
+{
+    const std::vector<CouplingTemporalSlotDescriptor> unsupported_temporal_slots{
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Accepted},
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Predicted},
+        CouplingTemporalSlotDescriptor{
+            .slot = CouplingTemporalSlot::Stage,
+            .stage_index = 0,
+        },
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::External},
+    };
+
+    const PartitionedCouplingPlanGenerator generator;
+    for (const auto& temporal : unsupported_temporal_slots) {
+        SCOPED_TRACE(toString(temporal.slot));
+        auto exchange = identityExchange();
+        exchange.producer = fieldEndpoint("left", temporal);
+        const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+        const auto validation = generator.validate(
+            partitionedContext(),
+            std::span<const CouplingExchangeDeclaration>(exchanges));
+
+        EXPECT_FALSE(validation.ok());
+        EXPECT_NE(formatDiagnostics(validation).find("field endpoint temporal slot"),
+                  std::string::npos);
+    }
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsEndpointKindsWithoutResolver)
+{
+    auto exchange = identityExchange();
+    exchange.producer = CouplingEndpointRef{
+        .kind = CouplingEndpointKind::Parameter,
+        .participant_name = "left",
+        .endpoint_name = "coefficient",
+        .temporal = CouplingTemporalSlotDescriptor{
+            .slot = CouplingTemporalSlot::Current,
+        },
+    };
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("requires a registry resolver"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsExternalBufferWithoutDescriptor)
+{
+    auto exchange = identityExchange();
+    exchange.producer = CouplingEndpointRef{
+        .kind = CouplingEndpointKind::ExternalBuffer,
+        .endpoint_name = "driver_value",
+        .temporal = CouplingTemporalSlotDescriptor{
+            .slot = CouplingTemporalSlot::External,
+        },
+    };
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("requires a registered descriptor"),
+              std::string::npos);
 }
 
 TEST(PartitionedCouplingPlanGenerator, RejectsUnspecifiedTransfer)
