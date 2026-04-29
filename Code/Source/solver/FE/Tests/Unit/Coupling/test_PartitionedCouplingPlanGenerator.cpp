@@ -1638,6 +1638,79 @@ TEST(PartitionedCouplingPlanGenerator, RejectsDriverOwnedGeneralTensorFieldEndpo
               std::string::npos);
 }
 
+TEST(PartitionedCouplingPlanGenerator, GeneratesDriverOwnedGeneralTensorExternalBuffers)
+{
+    auto exchange = identityExchange();
+    exchange.value = CouplingValueDescriptor{
+        .rank = CouplingValueRank::GeneralTensor,
+        .components = 4,
+        .tensor_extents = {2, 2},
+        .tensor_packing = "row_major",
+    };
+    exchange.producer = externalBufferEndpoint("tensor_source");
+    exchange.consumer = externalBufferEndpoint("tensor_target");
+    exchange.transfer.kind = CouplingTransferKind::DriverOwned;
+    exchange.transfer.driver_owned_name = "tensor_copy";
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    auto producer_descriptor = externalBufferDescriptor(
+        "tensor_source",
+        exchange.value,
+        CouplingExternalBufferAccess::ReadOnly,
+        {CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::External}});
+    producer_descriptor.extents = {2, 2};
+    producer_descriptor.strides = {2, 1};
+    producer_descriptor.packing = "row_major";
+
+    auto consumer_descriptor = externalBufferDescriptor(
+        "tensor_target",
+        exchange.value,
+        CouplingExternalBufferAccess::WriteOnly,
+        {CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::External}});
+    consumer_descriptor.extents = {2, 2};
+    consumer_descriptor.strides = {2, 1};
+    consumer_descriptor.packing = "row_major";
+
+    CouplingDriverOwnedTransferDescriptor transfer_descriptor;
+    transfer_descriptor.transfer_name = "tensor_copy";
+    transfer_descriptor.supported_ranks = {CouplingValueRank::GeneralTensor};
+    transfer_descriptor.supported_source_temporal_slots = {
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::External}};
+    transfer_descriptor.supported_target_temporal_slots = {
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::External}};
+    transfer_descriptor.registry_revision_key = 17;
+
+    auto builder = partitionedContextBuilder(4);
+    builder.addExternalBuffer(CouplingExternalBufferRegistration{
+        .descriptor = producer_descriptor,
+    });
+    builder.addExternalBuffer(CouplingExternalBufferRegistration{
+        .descriptor = consumer_descriptor,
+    });
+    builder.addDriverOwnedTransfer(transfer_descriptor);
+    const auto context = builder.build();
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    ASSERT_EQ(plan.exchanges.size(), 1u);
+    ASSERT_TRUE(plan.exchanges[0].producer.external_buffer.has_value());
+    ASSERT_TRUE(plan.exchanges[0].consumer.external_buffer.has_value());
+    EXPECT_EQ(plan.exchanges[0].producer.external_buffer->packing, "row_major");
+    EXPECT_EQ(plan.exchanges[0].consumer.external_buffer->value.tensor_extents,
+              std::vector<int>({2, 2}));
+    ASSERT_TRUE(plan.exchanges[0].transfer.driver_owned_descriptor.has_value());
+    EXPECT_EQ(plan.exchanges[0].transfer.driver_owned_descriptor->registry_revision_key,
+              17u);
+}
+
 TEST(PartitionedCouplingPlanGenerator, InheritsExchangeSharedRegionForEndpointRegions)
 {
     auto exchange = identityExchange();
