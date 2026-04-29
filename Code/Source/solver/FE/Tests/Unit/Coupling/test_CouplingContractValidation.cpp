@@ -1,4 +1,5 @@
 #include "Coupling/CouplingDeclaration.h"
+#include "Coupling/CouplingContract.h"
 #include "Coupling/CouplingGraph.h"
 #include "Spaces/H1Space.h"
 
@@ -9,6 +10,7 @@
 #include <span>
 
 using namespace svmp::FE::coupling;
+using svmp::FE::InvalidArgumentException;
 
 namespace {
 
@@ -37,6 +39,21 @@ CouplingContractDeclaration minimalDeclaration()
     });
     return declaration;
 }
+
+class MissingFieldContract final : public CouplingContract {
+public:
+    std::string name() const override { return "missing_field_contract"; }
+
+    CouplingContractDeclaration declare() const override
+    {
+        CouplingContractDeclaration declaration;
+        declaration.contract_type = name();
+        declaration.contract_name = "missing_field_instance";
+        declaration.participants.push_back({.participant_name = "left"});
+        declaration.fields.push_back({.participant_name = "left", .field_name = "primary"});
+        return declaration;
+    }
+};
 
 } // namespace
 
@@ -170,4 +187,11 @@ TEST(CouplingContractValidation, CouplingGraphRejectsDuplicateInstances)
     EXPECT_FALSE(validation.ok());
     EXPECT_NE(formatDiagnostics(validation).find("duplicate coupling contract instance name"),
               std::string::npos);
+}
+
+TEST(CouplingContractValidation, DefaultContractValidationChecksDeclarationGraph)
+{
+    const MissingFieldContract contract;
+
+    EXPECT_THROW(contract.validate(CouplingContext{}), InvalidArgumentException);
 }

@@ -7,11 +7,24 @@
 
 #include "Coupling/CouplingContract.h"
 
+#include "Coupling/CouplingGraph.h"
+
+#include <array>
+#include <span>
+
 namespace svmp {
 namespace FE {
 namespace coupling {
 
-void CouplingContract::validate(const CouplingContext&) const {}
+void CouplingContract::validate(const CouplingContext& ctx) const
+{
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 1> declarations{declare()};
+    const auto validation = graph.buildDeclarationGraph(
+        ctx,
+        std::span<const CouplingContractDeclaration>(declarations));
+    throwIfInvalid(validation);
+}
 
 std::vector<CouplingFormContribution> CouplingContract::buildMonolithicForms(
     const CouplingContext&,
