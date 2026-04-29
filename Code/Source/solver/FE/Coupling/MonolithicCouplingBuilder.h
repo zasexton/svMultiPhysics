@@ -41,6 +41,11 @@ public:
         systems::FESystem& system,
         const ResolvedCouplingFormContribution& contribution) const;
 
+    [[nodiscard]] std::vector<CouplingFormAnalysisMetadata> installFormContributions(
+        systems::FESystem& system,
+        const CouplingContext& context,
+        std::span<const CouplingFormContribution> contributions) const;
+
     [[nodiscard]] static CouplingFormAnalysisMetadata adaptFormAnalysisMetadata(
         const analysis::FormContributionAnalysisMetadata& metadata);
 };

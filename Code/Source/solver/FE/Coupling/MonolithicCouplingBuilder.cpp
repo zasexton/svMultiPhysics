@@ -108,6 +108,20 @@ CouplingFormAnalysisMetadata MonolithicCouplingBuilder::installResolvedFormContr
     return adaptFormAnalysisMetadata(installed.analysis);
 }
 
+std::vector<CouplingFormAnalysisMetadata> MonolithicCouplingBuilder::installFormContributions(
+    systems::FESystem& system,
+    const CouplingContext& context,
+    std::span<const CouplingFormContribution> contributions) const
+{
+    std::vector<CouplingFormAnalysisMetadata> installed;
+    installed.reserve(contributions.size());
+    for (const auto& contribution : contributions) {
+        const auto resolved = resolveFormContribution(context, contribution);
+        installed.push_back(installResolvedFormContribution(system, resolved));
+    }
+    return installed;
+}
+
 CouplingFormAnalysisMetadata MonolithicCouplingBuilder::adaptFormAnalysisMetadata(
     const analysis::FormContributionAnalysisMetadata& metadata)
 {

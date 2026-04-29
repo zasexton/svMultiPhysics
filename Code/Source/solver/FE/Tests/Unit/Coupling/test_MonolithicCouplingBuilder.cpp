@@ -1,6 +1,7 @@
 #include "Coupling/MonolithicCouplingBuilder.h"
 
 #include "Analysis/ProblemAnalysisTypes.h"
+#include "Coupling/CouplingGraph.h"
 #include "Coupling/CouplingFormBuilder.h"
 #include "Core/FEException.h"
 #include "Forms/Vocabulary.h"
@@ -11,7 +12,9 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -91,6 +94,61 @@ const CouplingInstalledDependency* findDependency(
         });
     return it == metadata.installed_dependencies.end() ? nullptr : &*it;
 }
+
+class GenericTwoParticipantContract final : public CouplingContract {
+public:
+    [[nodiscard]] std::string name() const override
+    {
+        return "generic";
+    }
+
+    [[nodiscard]] CouplingContractDeclaration declare() const override
+    {
+        CouplingContractDeclaration declaration;
+        declaration.contract_type = name();
+        declaration.contract_name = "generic_instance";
+        declaration.participants.push_back({.participant_name = "left"});
+        declaration.participants.push_back({.participant_name = "right"});
+        declaration.fields.push_back({.participant_name = "left", .field_name = "primary"});
+        declaration.fields.push_back({.participant_name = "right", .field_name = "primary"});
+        declaration.dependencies.push_back(CouplingResidualDependency{
+            .residual_row = {
+                .kind = CouplingVariableKind::Field,
+                .participant_name = "right",
+                .name = "primary",
+            },
+            .dependency = {
+                .kind = CouplingVariableKind::Field,
+                .participant_name = "left",
+                .name = "primary",
+            },
+        });
+        declaration.expected_blocks.push_back(CouplingBlockExpectation{
+            .residual_row = declaration.dependencies.back().residual_row,
+            .dependency = declaration.dependencies.back().dependency,
+        });
+        return declaration;
+    }
+
+    [[nodiscard]] std::vector<CouplingFormContribution> buildMonolithicForms(
+        const CouplingContext&,
+        const CouplingFormBuilder& forms) const override
+    {
+        CouplingFormContribution contribution;
+        contribution.contribution_name = "generic_cell_coupling";
+        contribution.origin = "GenericTwoParticipantContract";
+        contribution.operator_name = "equations";
+        contribution.field_uses = {{.participant_name = "right", .field_name = "primary"}};
+        contribution.extra_trial_field_uses = {{
+            .participant_name = "left",
+            .field_name = "primary",
+        }};
+        contribution.residual =
+            (forms.state("left", "primary", "a") *
+             forms.test("right", "primary", "w")).dx();
+        return {contribution};
+    }
+};
 
 } // namespace
 
@@ -189,4 +247,37 @@ TEST(MonolithicCouplingBuilder, InstallsResolvedFormAndAdaptsBridgeMetadata)
     ASSERT_NE(block_it, metadata.installed_blocks.end());
     EXPECT_TRUE(block_it->has_matrix);
     EXPECT_TRUE(block_it->has_vector);
+}
+
+TEST(MonolithicCouplingBuilder, GenericContractInstallsAndFinalizesGraph)
+{
+    BuilderFixture fixture;
+    const GenericTwoParticipantContract contract;
+    const MonolithicCouplingBuilder builder;
+    const CouplingFormBuilder forms(fixture.context);
+
+    const std::array<CouplingContractDeclaration, 1> declarations{contract.declare()};
+    const auto declaration_validation = builder.validateDeclarations(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(declaration_validation.ok()) << formatDiagnostics(declaration_validation);
+
+    const auto contributions = contract.buildMonolithicForms(fixture.context, forms);
+    const auto installed = builder.installFormContributions(
+        fixture.system,
+        fixture.context,
+        std::span<const CouplingFormContribution>(contributions));
+
+    CouplingGraph graph;
+    const auto finalized_validation = graph.buildFinalizedGraph(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed));
+
+    EXPECT_TRUE(finalized_validation.ok()) << formatDiagnostics(finalized_validation);
+    ASSERT_EQ(installed.size(), 1u);
+    EXPECT_NE(findDependency(installed[0],
+                             analysis::VariableKey::field(fixture.right_field),
+                             analysis::VariableKey::field(fixture.left_field)),
+              nullptr);
 }
