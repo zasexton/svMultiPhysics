@@ -19,6 +19,7 @@
 
 #include "Core/Types.h"
 
+#include "Analysis/FormAnalysisBridge.h"
 #include "Forms/BoundaryConditions.h"
 #include "Forms/MixedFormIR.h"
 #include "Systems/MixedKernelPlan.h"
@@ -67,6 +68,11 @@ struct CoupledResidualKernels {
     std::shared_ptr<const MixedKernelPlan> mixed_plan{};
 };
 
+struct CoupledResidualMetadata {
+    CoupledResidualKernels kernels{};
+    analysis::FormContributionAnalysisMetadata analysis{};
+};
+
 /**
  * @brief Unified formulation installer — auto-selects single or multi-field path
  *
@@ -108,6 +114,31 @@ CoupledResidualKernels installFormulation(
     std::initializer_list<FieldId> fields,
     const forms::FormExpr& residual,
     const FormInstallOptions& options = {});
+
+/**
+ * @brief Install a formulation and return public bridge metadata for that install.
+ *
+ * This wrapper captures the formulation and contribution ranges created by one
+ * successful installFormulation() call and adapts them through
+ * analysis::buildFormAnalysisMetadata(). Callers should supply a stable
+ * contribution name, diagnostic origin, and owning system name in
+ * metadata_options when they need setup-time dependency diagnostics.
+ */
+CoupledResidualMetadata installFormulationWithMetadata(
+    FESystem& system,
+    const OperatorTag& op,
+    std::span<const FieldId> fields,
+    const forms::FormExpr& residual,
+    const FormInstallOptions& options,
+    const analysis::FormAnalysisBridgeOptions& metadata_options = {});
+
+CoupledResidualMetadata installFormulationWithMetadata(
+    FESystem& system,
+    const OperatorTag& op,
+    std::initializer_list<FieldId> fields,
+    const forms::FormExpr& residual,
+    const FormInstallOptions& options = {},
+    const analysis::FormAnalysisBridgeOptions& metadata_options = {});
 
 // ============================================================================
 // Mixed-form installation (stable lowering contract)

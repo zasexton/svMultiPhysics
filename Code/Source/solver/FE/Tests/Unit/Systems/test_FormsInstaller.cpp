@@ -37,6 +37,7 @@
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 #include "Tests/Unit/Forms/JITTestHelpers.h"
 
+#include <algorithm>
 #include <array>
 #include <memory>
 #include <stdexcept>
@@ -93,6 +94,22 @@ std::optional<std::uint32_t> firstAuxiliaryOutputRefIndex(
         }
     }
     return std::nullopt;
+}
+
+const svmp::FE::analysis::FormTerminalMetadata* findBridgeTerminal(
+    const std::vector<svmp::FE::analysis::FormTerminalMetadata>& terminals,
+    svmp::FE::analysis::FormTerminalKind kind,
+    FieldId field_id = INVALID_FIELD_ID)
+{
+    const auto it = std::find_if(
+        terminals.begin(),
+        terminals.end(),
+        [kind, field_id](const auto& terminal) {
+            return terminal.kind == kind &&
+                   (field_id == INVALID_FIELD_ID ||
+                    terminal.field_id == field_id);
+        });
+    return it == terminals.end() ? nullptr : &*it;
 }
 
 std::shared_ptr<svmp::FE::systems::AuxiliaryStateModel> makeScalarOutputModel(
@@ -610,6 +627,89 @@ TEST(FormsInstaller, FormsInstaller_InstallFormulation_RegistersKernel)
         }
         EXPECT_NEAR(out.getVectorEntry(i), expected, 1e-12);
     }
+}
+
+TEST(FormsInstaller, InstallFormulationWithMetadata_CapturesInstalledRecord)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto a_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "a", .space = space, .components = 1});
+    const auto b_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "b", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto a = svmp::FE::forms::FormExpr::stateField(a_field, *space, "a");
+    const auto wa = svmp::FE::forms::FormExpr::testFunction(a_field, *space, "wa");
+    const auto wb = svmp::FE::forms::FormExpr::testFunction(b_field, *space, "wb");
+    const auto residual = (a * wa).dx() + (a * wb).ds(5);
+
+    svmp::FE::analysis::FormAnalysisBridgeOptions metadata_options;
+    metadata_options.contribution_name = "generic_boundary_coupling";
+    metadata_options.origin = "FormsInstallerTest";
+    metadata_options.system_name = "shared_system";
+
+    const auto installed = svmp::FE::systems::installFormulationWithMetadata(
+        sys,
+        "op",
+        {a_field, b_field},
+        residual,
+        svmp::FE::systems::FormInstallOptions{},
+        metadata_options);
+
+    ASSERT_NE(installed.kernels.mixed_plan, nullptr);
+
+    const auto& metadata = installed.analysis;
+    EXPECT_EQ(metadata.contribution_name, "generic_boundary_coupling");
+    EXPECT_TRUE(metadata.contribution_name_explicit);
+    EXPECT_EQ(metadata.origin, "FormsInstallerTest");
+    EXPECT_EQ(metadata.system_name, "shared_system");
+    EXPECT_EQ(metadata.operator_tag, "op");
+    ASSERT_EQ(metadata.installed_fields.size(), 2u);
+    EXPECT_EQ(metadata.installed_fields[0], a_field);
+    EXPECT_EQ(metadata.installed_fields[1], b_field);
+
+    const auto* a_state = findBridgeTerminal(
+        metadata.terminals,
+        svmp::FE::analysis::FormTerminalKind::StateField,
+        a_field);
+    ASSERT_NE(a_state, nullptr);
+    ASSERT_TRUE(a_state->graph_variable.has_value());
+    EXPECT_EQ(*a_state->graph_variable,
+              svmp::FE::analysis::VariableKey::field(a_field));
+
+    const auto* b_test = findBridgeTerminal(
+        metadata.terminals,
+        svmp::FE::analysis::FormTerminalKind::TestField,
+        b_field);
+    ASSERT_NE(b_test, nullptr);
+    EXPECT_EQ(b_test->domain, svmp::FE::analysis::DomainKind::Boundary);
+    EXPECT_EQ(b_test->boundary_marker, 5);
+
+    const auto block_it = std::find_if(
+        metadata.installed_blocks.begin(),
+        metadata.installed_blocks.end(),
+        [a_field, b_field](const auto& block) {
+            return block.residual_row ==
+                       svmp::FE::analysis::VariableKey::field(b_field) &&
+                   block.dependency ==
+                       svmp::FE::analysis::VariableKey::field(a_field);
+        });
+    ASSERT_NE(block_it, metadata.installed_blocks.end());
+    EXPECT_TRUE(block_it->has_matrix);
+    EXPECT_TRUE(block_it->has_vector);
+    ASSERT_FALSE(block_it->domains.empty());
+    EXPECT_EQ(block_it->domains[0], svmp::FE::analysis::DomainKind::Boundary);
+
+    EXPECT_TRUE(svmp::FE::analysis::bridgeFeatureAvailable(
+        metadata, svmp::FE::analysis::FormBridgeFeature::ContributionIdentity));
+    EXPECT_TRUE(svmp::FE::analysis::bridgeFeatureAvailable(
+        metadata, svmp::FE::analysis::FormBridgeFeature::OwningSystem));
+    EXPECT_TRUE(svmp::FE::analysis::bridgeFeatureAvailable(
+        metadata, svmp::FE::analysis::FormBridgeFeature::InstalledBlocks));
 }
 
 TEST(FormsInstaller, FormsInstaller_InstallFormulation_AffineWithRHS)

@@ -7,6 +7,7 @@
 
 #include "Systems/FormsInstaller.h"
 
+#include <cstddef>
 #include <cstdlib>
 
 #include "Core/FEException.h"
@@ -2930,6 +2931,58 @@ CoupledResidualKernels installFormulation(
 {
     const std::span<const FieldId> span(fields.begin(), fields.size());
     return installFormulation(system, op, span, residual, options);
+}
+
+CoupledResidualMetadata installFormulationWithMetadata(
+    FESystem& system,
+    const OperatorTag& op,
+    std::span<const FieldId> fields,
+    const forms::FormExpr& residual,
+    const FormInstallOptions& options,
+    const analysis::FormAnalysisBridgeOptions& metadata_options)
+{
+    const auto formulation_begin = system.formulationRecords().size();
+    const auto contribution_begin = system.contributionDescriptors().size();
+
+    auto kernels = installFormulation(system, op, fields, residual, options);
+
+    const auto& formulations = system.formulationRecords();
+    FE_THROW_IF(formulations.size() != formulation_begin + 1u,
+                InvalidArgumentException,
+                "installFormulationWithMetadata: expected exactly one formulation record from installFormulation");
+
+    const auto& all_contributions = system.contributionDescriptors();
+    std::vector<analysis::ContributionDescriptor> installed_contributions;
+    installed_contributions.reserve(all_contributions.size() - contribution_begin);
+    for (auto it = all_contributions.begin() +
+                   static_cast<std::ptrdiff_t>(contribution_begin);
+         it != all_contributions.end();
+         ++it) {
+        installed_contributions.push_back(*it);
+    }
+
+    auto bridge_options = metadata_options;
+    bridge_options.geometry_sensitivity =
+        options.compiler_options.geometry_sensitivity;
+
+    CoupledResidualMetadata result;
+    result.kernels = std::move(kernels);
+    result.analysis = analysis::buildFormAnalysisMetadata(
+        formulations.back(), installed_contributions, bridge_options);
+    return result;
+}
+
+CoupledResidualMetadata installFormulationWithMetadata(
+    FESystem& system,
+    const OperatorTag& op,
+    std::initializer_list<FieldId> fields,
+    const forms::FormExpr& residual,
+    const FormInstallOptions& options,
+    const analysis::FormAnalysisBridgeOptions& metadata_options)
+{
+    const std::span<const FieldId> span(fields.begin(), fields.size());
+    return installFormulationWithMetadata(
+        system, op, span, residual, options, metadata_options);
 }
 
 // ============================================================================
