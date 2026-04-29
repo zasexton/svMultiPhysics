@@ -991,6 +991,87 @@ CouplingValidationResult validateRegionEndpointScope(
     return result;
 }
 
+std::optional<CouplingRegionRef> tryResolveRegion(
+    const CouplingContext& ctx,
+    const std::optional<std::string>& exchange_shared_region_name,
+    const std::optional<CouplingRegionEndpointDeclaration>& region)
+{
+    if (!region.has_value() ||
+        region->participant_name.empty() ||
+        region->region_name.empty()) {
+        return std::nullopt;
+    }
+
+    const auto shared_region_name =
+        effectiveSharedRegionName(exchange_shared_region_name, *region);
+    if (shared_region_name.has_value()) {
+        if (!ctx.hasSharedRegion(*shared_region_name) ||
+            !sharedRegionContainsParticipant(
+                ctx, *shared_region_name, region->participant_name)) {
+            return std::nullopt;
+        }
+        const auto resolved = ctx.sharedRegion(*shared_region_name, region->participant_name);
+        if (resolved.region_name != region->region_name) {
+            return std::nullopt;
+        }
+        return resolved;
+    }
+
+    if (!ctx.hasRegion(region->participant_name, region->region_name)) {
+        return std::nullopt;
+    }
+    return ctx.region(region->participant_name, region->region_name);
+}
+
+CouplingValidationResult validateInterfaceTransferRegions(
+    const CouplingContext& ctx,
+    const CouplingExchangeDeclaration& exchange)
+{
+    CouplingValidationResult result;
+    if (!isInterfaceTransferKind(exchange.transfer.kind)) {
+        return result;
+    }
+
+    const auto validate_region =
+        [&](const std::optional<CouplingRegionEndpointDeclaration>& region,
+            std::string_view role) {
+            if (!region.has_value()) {
+                result.addError("interface partitioned transfer requires " +
+                                std::string(role) + " region endpoint");
+                return;
+            }
+            const auto resolved =
+                tryResolveRegion(ctx, exchange.shared_region_name, region);
+            if (!resolved.has_value()) {
+                return;
+            }
+            if (resolved->kind != CouplingRegionKind::InterfaceFace) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = region->participant_name,
+                    .region_name = region->region_name,
+                    .message = "interface partitioned transfer " +
+                               std::string(role) +
+                               " region must resolve to an interface face",
+                });
+            }
+            if (resolved->marker < 0) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = region->participant_name,
+                    .region_name = region->region_name,
+                    .message = "interface partitioned transfer " +
+                               std::string(role) +
+                               " region requires an interface marker",
+                });
+            }
+        };
+
+    validate_region(exchange.producer_region, "producer");
+    validate_region(exchange.consumer_region, "consumer");
+    return result;
+}
+
 bool hasPort(const std::vector<CouplingPortId>& stack, const CouplingPortId& port)
 {
     return std::find(stack.begin(), stack.end(), port) != stack.end();
@@ -1305,6 +1386,7 @@ CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
             ctx, exchange.shared_region_name, exchange.producer_region, "producer"));
         result.append(validateRegionEndpointScope(
             ctx, exchange.shared_region_name, exchange.consumer_region, "consumer"));
+        result.append(validateInterfaceTransferRegions(ctx, exchange));
     }
 
     for (std::size_t hint_index = 0; hint_index < group_hints.size(); ++hint_index) {

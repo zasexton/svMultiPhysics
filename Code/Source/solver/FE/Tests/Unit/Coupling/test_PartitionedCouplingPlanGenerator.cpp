@@ -414,9 +414,9 @@ CouplingRegionRef partitionedRegion(std::string participant,
     };
 }
 
-CouplingContext partitionedContextWithSharedRegion()
+CouplingContext partitionedContextWithSharedRegion(int components = 1)
 {
-    auto builder = partitionedContextBuilder(1);
+    auto builder = partitionedContextBuilder(components);
     const auto left = partitionedRegion(
         "left", "left_system", partitionedSystemToken(1),
         CouplingInterfaceSide::Minus, 10);
@@ -594,6 +594,15 @@ CouplingExchangeDeclaration interfaceExchange(CouplingValueDescriptor value,
 {
     auto exchange = identityExchange();
     exchange.value = std::move(value);
+    exchange.shared_region_name = "interface";
+    exchange.producer_region = CouplingRegionEndpointDeclaration{
+        .participant_name = "left",
+        .region_name = "surface",
+    };
+    exchange.consumer_region = CouplingRegionEndpointDeclaration{
+        .participant_name = "right",
+        .region_name = "surface",
+    };
     exchange.transfer.kind = CouplingTransferKind::InterfacePointwiseInterpolation;
     exchange.transfer.interface_declaration = CouplingInterfaceTransferDeclaration{
         .frame_policy = frame_policy,
@@ -673,7 +682,7 @@ TEST(PartitionedCouplingPlanGenerator, RejectsFieldEndpointComponentMismatch)
 
     const PartitionedCouplingPlanGenerator generator;
     const auto validation = generator.validate(
-        partitionedContext(),
+        partitionedContextWithSharedRegion(),
         std::span<const CouplingExchangeDeclaration>(exchanges));
 
     EXPECT_FALSE(validation.ok());
@@ -714,7 +723,7 @@ TEST(PartitionedCouplingPlanGenerator, AcceptsScalarInterfaceTransferMetadata)
 
     const PartitionedCouplingPlanGenerator generator;
     const auto validation = generator.validate(
-        partitionedContext(),
+        partitionedContextWithSharedRegion(),
         std::span<const CouplingExchangeDeclaration>(exchanges));
 
     EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
@@ -732,10 +741,73 @@ TEST(PartitionedCouplingPlanGenerator, AcceptsVectorInterfaceFrameTransform)
 
     const PartitionedCouplingPlanGenerator generator;
     const auto validation = generator.validate(
-        partitionedContextWithComponents(3),
+        partitionedContextWithSharedRegion(3),
         std::span<const CouplingExchangeDeclaration>(exchanges));
 
     EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceTransferWithoutRegionEndpoints)
+{
+    auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::Scalar,
+            .components = 1,
+        },
+        CouplingInterfaceFramePolicy::None);
+    exchange.producer_region.reset();
+    exchange.consumer_region.reset();
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContextWithSharedRegion(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("requires producer region endpoint"),
+              std::string::npos);
+    EXPECT_NE(formatDiagnostics(validation).find("requires consumer region endpoint"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceTransferNonInterfaceRegions)
+{
+    auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::Scalar,
+            .components = 1,
+        },
+        CouplingInterfaceFramePolicy::None);
+    exchange.shared_region_name.reset();
+
+    auto builder = partitionedContextBuilder(1);
+    builder.addRegion(CouplingRegionRef{
+        .participant_name = "left",
+        .system_name = "left_system",
+        .system = partitionedSystemToken(1),
+        .region_name = "surface",
+        .kind = CouplingRegionKind::Boundary,
+        .marker = 10,
+    });
+    builder.addRegion(CouplingRegionRef{
+        .participant_name = "right",
+        .system_name = "right_system",
+        .system = partitionedSystemToken(2),
+        .region_name = "surface",
+        .kind = CouplingRegionKind::Boundary,
+        .marker = 11,
+    });
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        builder.build(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("must resolve to an interface face"),
+              std::string::npos);
 }
 
 TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceFramePayloadMismatch)
@@ -750,7 +822,7 @@ TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceFramePayloadMismatch)
 
     const PartitionedCouplingPlanGenerator generator;
     const auto validation = generator.validate(
-        partitionedContext(),
+        partitionedContextWithSharedRegion(),
         std::span<const CouplingExchangeDeclaration>(exchanges));
 
     EXPECT_FALSE(validation.ok());
@@ -770,7 +842,7 @@ TEST(PartitionedCouplingPlanGenerator, RejectsSymmetricTensorInterfaceTransfer)
 
     const PartitionedCouplingPlanGenerator generator;
     const auto validation = generator.validate(
-        partitionedContextWithComponents(6),
+        partitionedContextWithSharedRegion(6),
         std::span<const CouplingExchangeDeclaration>(exchanges));
 
     EXPECT_FALSE(validation.ok());
@@ -794,7 +866,7 @@ TEST(PartitionedCouplingPlanGenerator, RejectsTrue2DVectorInterfaceTransformWith
 
     const PartitionedCouplingPlanGenerator generator;
     const auto validation = generator.validate(
-        partitionedContextWithComponents(2),
+        partitionedContextWithSharedRegion(2),
         std::span<const CouplingExchangeDeclaration>(exchanges));
 
     EXPECT_FALSE(validation.ok());
@@ -814,7 +886,7 @@ TEST(PartitionedCouplingPlanGenerator, RejectsVectorFramePassThroughWithoutLayou
 
     const PartitionedCouplingPlanGenerator generator;
     const auto validation = generator.validate(
-        partitionedContextWithComponents(4),
+        partitionedContextWithSharedRegion(4),
         std::span<const CouplingExchangeDeclaration>(exchanges));
 
     EXPECT_FALSE(validation.ok());
