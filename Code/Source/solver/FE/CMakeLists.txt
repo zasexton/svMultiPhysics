@@ -569,6 +569,7 @@ set(FE_ANALYSIS_HEADERS
     Analysis/ProblemAnalysisContext.h
     Analysis/ProblemAnalyzer.h
     Analysis/FormulationRecord.h
+    Analysis/FormAnalysisBridge.h
     Analysis/FormExprScanner.h
     Analysis/FormStructureAnalyzer.h
     Analysis/KernelAnalyzer.h
@@ -603,6 +604,7 @@ set(FE_ANALYSIS_SOURCES
     Analysis/ProblemAnalysisTypes.cpp
     Analysis/ProblemAnalysisContext.cpp
     Analysis/ProblemAnalyzer.cpp
+    Analysis/FormAnalysisBridge.cpp
     Analysis/FormExprScanner.cpp
     Analysis/FormStructureAnalyzer.cpp
     Analysis/BoundaryConditionDescriptor.cpp
@@ -2144,6 +2146,7 @@ if(FE_BUILD_TESTS)
     set(FE_ANALYSIS_TEST_SOURCES
         Tests/Unit/Analysis/test_ProblemAnalysisTypes.cpp
         Tests/Unit/Analysis/test_FormulationRecord.cpp
+        Tests/Unit/Analysis/test_FormAnalysisBridge.cpp
         Tests/Unit/Analysis/test_FormStructureAnalyzer.cpp
         Tests/Unit/Analysis/test_BoundaryConditionDescriptor.cpp
         Tests/Unit/Analysis/test_TopologyAnalysisContext.cpp
