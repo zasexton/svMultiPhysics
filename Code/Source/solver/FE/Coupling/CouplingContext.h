@@ -84,16 +84,48 @@ class CouplingContext {
 public:
     CouplingContext() = default;
 
+    [[nodiscard]] CouplingParticipantRef participant(std::string_view participant) const;
+    [[nodiscard]] CouplingFieldRef field(std::string_view participant,
+                                         std::string_view field) const;
+    [[nodiscard]] CouplingRegionRef region(std::string_view participant,
+                                           std::string_view region) const;
+    [[nodiscard]] CouplingRegionRef sharedRegion(std::string_view name,
+                                                 std::string_view participant) const;
+    [[nodiscard]] SharedRegionRef sharedRegionGroup(std::string_view name) const;
+
+    [[nodiscard]] bool hasParticipant(std::string_view participant) const noexcept;
+    [[nodiscard]] bool hasField(std::string_view participant,
+                                std::string_view field) const noexcept;
+    [[nodiscard]] bool hasRegion(std::string_view participant,
+                                 std::string_view region) const noexcept;
+    [[nodiscard]] bool hasSharedRegion(std::string_view name) const noexcept;
+
     [[nodiscard]] const std::vector<CouplingParticipantRef>& participants() const noexcept;
     [[nodiscard]] const std::vector<CouplingFieldRef>& fields() const noexcept;
     [[nodiscard]] const std::vector<CouplingRegionRef>& regions() const noexcept;
     [[nodiscard]] const std::vector<SharedRegionRef>& sharedRegions() const noexcept;
 
 private:
+    friend class CouplingContextBuilder;
+
     std::vector<CouplingParticipantRef> participants_{};
     std::vector<CouplingFieldRef> fields_{};
     std::vector<CouplingRegionRef> regions_{};
     std::vector<SharedRegionRef> shared_regions_{};
+};
+
+class CouplingContextBuilder {
+public:
+    CouplingContextBuilder& addParticipant(CouplingParticipantRef participant);
+    CouplingContextBuilder& addField(CouplingFieldRef field);
+    CouplingContextBuilder& addRegion(CouplingRegionRef region);
+    CouplingContextBuilder& addSharedRegion(SharedRegionRef region);
+
+    [[nodiscard]] CouplingValidationResult validate() const;
+    [[nodiscard]] CouplingContext build() const;
+
+private:
+    CouplingContext context_{};
 };
 
 } // namespace coupling

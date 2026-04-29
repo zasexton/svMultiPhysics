@@ -2529,7 +2529,9 @@ if(FE_BUILD_TESTS)
         if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Coupling/test_main.cpp)
             set(FE_COUPLING_TEST_SOURCES
                 Tests/Unit/Coupling/test_CouplingHeaders.cpp
+                Tests/Unit/Coupling/test_CouplingContext.cpp
                 Tests/Unit/Coupling/test_CouplingTypes.cpp
+                Tests/Unit/Coupling/test_SharedRegionRegistry.cpp
                 Tests/Unit/Coupling/test_main.cpp
             )
             add_executable(test_fe_coupling ${FE_COUPLING_TEST_SOURCES})
