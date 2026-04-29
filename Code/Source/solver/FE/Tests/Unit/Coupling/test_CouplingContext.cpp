@@ -313,6 +313,29 @@ TEST(CouplingContext, SharedRegionLookupReturnsParticipantMapping)
     EXPECT_EQ(context.sharedRegionGroup("interface").participant_regions.size(), 1u);
 }
 
+TEST(CouplingContext, RejectsSharedRegionMappingThatDiffersFromContextRegion)
+{
+    const auto* system = systemToken(1);
+    const auto surface = region("left", "shared_system", system, "surface",
+                                CouplingRegionKind::Boundary, 12);
+    auto stale_surface = surface;
+    stale_surface.marker = 13;
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(participant("left", "shared_system", system))
+        .addRegion(surface)
+        .addSharedRegion(SharedRegionRef{
+            .name = "interface",
+            .required_region_kind = CouplingRegionKind::Boundary,
+            .participant_regions = {stale_surface},
+        });
+
+    const auto validation = builder.validate();
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("does not match the context region"),
+              std::string::npos);
+}
+
 TEST(CouplingContext, ResolvesExternalBufferDescriptorsByScope)
 {
     const auto* system = systemToken(1);

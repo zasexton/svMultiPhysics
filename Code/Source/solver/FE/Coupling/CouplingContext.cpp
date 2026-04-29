@@ -75,6 +75,34 @@ const CouplingParticipantRef* findParticipant(
     return it == participants.end() ? nullptr : &*it;
 }
 
+const CouplingRegionRef* findRegion(const std::vector<CouplingRegionRef>& regions,
+                                    std::string_view participant_name,
+                                    std::string_view region_name) noexcept
+{
+    const auto it = std::find_if(regions.begin(), regions.end(),
+                                 [participant_name, region_name](
+                                     const CouplingRegionRef& region) {
+                                     return region.participant_name == participant_name &&
+                                            region.region_name == region_name;
+                                 });
+    return it == regions.end() ? nullptr : &*it;
+}
+
+bool sameRegionMetadata(const CouplingRegionRef& lhs,
+                        const CouplingRegionRef& rhs) noexcept
+{
+    return lhs.participant_name == rhs.participant_name &&
+           lhs.system_name == rhs.system_name &&
+           lhs.system == rhs.system &&
+           lhs.region_name == rhs.region_name &&
+           lhs.kind == rhs.kind &&
+           lhs.marker == rhs.marker &&
+           lhs.side == rhs.side &&
+           lhs.coordinate_configuration == rhs.coordinate_configuration &&
+           lhs.geometry_revision == rhs.geometry_revision &&
+           lhs.topology_revision == rhs.topology_revision;
+}
+
 void appendTemporalSlotValidation(
     CouplingValidationResult& result,
     const std::vector<CouplingTemporalSlotDescriptor>& slots,
@@ -724,12 +752,21 @@ CouplingValidationResult CouplingContextBuilder::validate() const
 
     for (const auto& shared_region : context_.shared_regions_) {
         for (const auto& region : shared_region.participant_regions) {
-            if (!context_.hasRegion(region.participant_name, region.region_name)) {
+            const auto* canonical =
+                findRegion(context_.regions_, region.participant_name, region.region_name);
+            if (canonical == nullptr) {
                 result.add(CouplingDiagnostic{
                     .severity = CouplingDiagnosticSeverity::Error,
                     .participant_name = region.participant_name,
                     .region_name = region.region_name,
                     .message = "shared region references a participant region missing from the context",
+                });
+            } else if (!sameRegionMetadata(*canonical, region)) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = region.participant_name,
+                    .region_name = region.region_name,
+                    .message = "shared region participant mapping does not match the context region",
                 });
             }
         }
