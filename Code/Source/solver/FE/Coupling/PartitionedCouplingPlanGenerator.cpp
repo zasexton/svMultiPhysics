@@ -11,7 +11,9 @@
 #include "Systems/FESystem.h"
 
 #include <algorithm>
+#include <exception>
 #include <limits>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -47,6 +49,10 @@ CouplingResolvedTemporalBackingKind backingForEndpoint(const CouplingEndpointRef
         return CouplingResolvedTemporalBackingKind::ProviderDefined;
     }
     if (endpoint.kind == CouplingEndpointKind::AuxiliaryInput &&
+        endpoint.temporal.slot == CouplingTemporalSlot::Current) {
+        return CouplingResolvedTemporalBackingKind::AuxiliaryCurrent;
+    }
+    if (endpoint.kind == CouplingEndpointKind::AuxiliaryOutput &&
         endpoint.temporal.slot == CouplingTemporalSlot::Current) {
         return CouplingResolvedTemporalBackingKind::AuxiliaryCurrent;
     }
@@ -96,6 +102,22 @@ bool supportsRank(const std::vector<CouplingValueRank>& ranks,
 bool fitsUint32(std::size_t value) noexcept
 {
     return value <= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+}
+
+bool isMissingIndex(std::size_t value) noexcept
+{
+    return value == static_cast<std::size_t>(-1);
+}
+
+std::size_t auxiliaryOutputSlotOf(const systems::FESystem& system,
+                                  std::string_view endpoint_name)
+{
+    const auto slash = endpoint_name.find('/');
+    if (slash != std::string_view::npos) {
+        return system.auxiliaryOutputSlotOf(endpoint_name.substr(0, slash),
+                                            endpoint_name.substr(slash + 1));
+    }
+    return system.auxiliaryOutputSlotOf(endpoint_name);
 }
 
 bool feQuantityShapeMatchesValue(const systems::FEQuantityShape& shape,
@@ -291,6 +313,113 @@ CouplingValidationResult validateEndpointResolutionSupport(
                 .endpoint_name = endpoint.endpoint_name,
                 .message = "partitioned " + std::string(role) +
                            " parameter endpoint requires a Real parameter slot",
+            });
+        }
+        return result;
+    }
+
+    if (endpoint.kind == CouplingEndpointKind::AuxiliaryOutput) {
+        if (!endpoint.participant_name.has_value() ||
+            endpoint.participant_name->empty()) {
+            return result;
+        }
+        if (!ctx.hasParticipant(*endpoint.participant_name)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary output endpoint references an unknown participant",
+            });
+            return result;
+        }
+
+        const auto participant = ctx.participant(*endpoint.participant_name);
+        if (participant.system == nullptr) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary output endpoint requires an owning system",
+            });
+            return result;
+        }
+
+        if (endpoint.temporal.slot != CouplingTemporalSlot::Current) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary output endpoint temporal slot " +
+                           toString(endpoint.temporal.slot) +
+                           " requires provider support",
+            });
+        }
+        if (value.rank != CouplingValueRank::Scalar || value.components != 1) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary output endpoint supports scalar values",
+            });
+        }
+
+        std::size_t output_id = static_cast<std::size_t>(-1);
+        try {
+            output_id = participant.system->auxiliaryOutputIdOf(endpoint.endpoint_name);
+        } catch (const std::exception& ex) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary output endpoint lookup failed: " + ex.what(),
+            });
+            return result;
+        }
+        if (isMissingIndex(output_id) ||
+            participant.system->auxiliaryOutputDescriptor(output_id) == nullptr) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary output endpoint requires a deployed auxiliary output",
+            });
+            return result;
+        }
+        if (!fitsUint32(output_id)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary output endpoint id is out of range",
+            });
+        }
+
+        try {
+            const auto flat_slot =
+                auxiliaryOutputSlotOf(*participant.system, endpoint.endpoint_name);
+            if (!isMissingIndex(flat_slot) && !fitsUint32(flat_slot)) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = *endpoint.participant_name,
+                    .endpoint_name = endpoint.endpoint_name,
+                    .message = "partitioned " + std::string(role) +
+                               " auxiliary output endpoint slot is out of range",
+                });
+            }
+        } catch (const std::exception& ex) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary output endpoint slot lookup failed: " + ex.what(),
             });
         }
         return result;
@@ -774,6 +903,27 @@ ResolvedCouplingEndpoint resolveEndpoint(const CouplingContext& ctx,
             if (fitsUint32(slot)) {
                 resolved.auxiliary_input_slot = static_cast<std::uint32_t>(slot);
             }
+        }
+    }
+    if (endpoint.kind == CouplingEndpointKind::AuxiliaryOutput &&
+        endpoint.participant_name.has_value()) {
+        const auto participant = ctx.participant(*endpoint.participant_name);
+        resolved.system_name = participant.system_name;
+        resolved.system = participant.system;
+        resolved.registry_provider = "AuxiliaryOutputRegistry";
+        resolved.temporal.provider_name = "AuxiliaryOutputRegistry";
+        resolved.auxiliary_kind = CouplingAuxiliaryEndpointResolutionKind::Output;
+        resolved.auxiliary_key = endpoint.endpoint_name;
+        const auto output_id = participant.system->auxiliaryOutputIdOf(
+            endpoint.endpoint_name);
+        if (!isMissingIndex(output_id) && fitsUint32(output_id)) {
+            resolved.auxiliary_output_id = static_cast<std::uint32_t>(output_id);
+        }
+        const auto flat_slot = auxiliaryOutputSlotOf(
+            *participant.system, endpoint.endpoint_name);
+        if (!isMissingIndex(flat_slot) && fitsUint32(flat_slot)) {
+            resolved.auxiliary_output_flat_slot =
+                static_cast<std::uint32_t>(flat_slot);
         }
     }
     if (endpoint.kind == CouplingEndpointKind::ExternalBuffer) {

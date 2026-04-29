@@ -102,6 +102,8 @@ struct ResolvedCouplingEndpoint {
     CouplingAuxiliaryEndpointResolutionKind auxiliary_kind{
         CouplingAuxiliaryEndpointResolutionKind::None};
     std::optional<std::uint32_t> auxiliary_input_slot;
+    std::optional<std::uint32_t> auxiliary_output_id;
+    std::optional<std::uint32_t> auxiliary_output_flat_slot;
     std::string auxiliary_key;
     std::optional<CouplingExternalBufferDescriptor> external_buffer;
     std::uint64_t layout_revision_key{0};

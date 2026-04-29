@@ -2,6 +2,7 @@
 #include "Coupling/PartitionedCouplingPlanGenerator.h"
 #include "Assembly/AssemblyContext.h"
 #include "Assembly/AssemblyKernel.h"
+#include "Auxiliary/AuxiliaryBindings.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
@@ -58,6 +59,47 @@ public:
 
 private:
     params::ValueType type_{params::ValueType::Real};
+};
+
+class ScalarOutputModel final : public systems::AuxiliaryStateModel {
+public:
+    [[nodiscard]] std::string modelName() const override
+    {
+        return "ScalarOutputModel";
+    }
+
+    [[nodiscard]] int dimension() const override { return 1; }
+
+    [[nodiscard]] systems::AuxiliaryStructuralMetadata structuralMetadata()
+        const override
+    {
+        systems::AuxiliaryStructuralMetadata metadata;
+        metadata.variable_kinds = {systems::AuxiliaryVariableKind::Differential};
+        return metadata;
+    }
+
+    void evaluateResidual(const systems::AuxiliaryLocalContext&,
+                          systems::AuxiliaryResidualRequest& request) const override
+    {
+        if (!request.residual.empty()) {
+            request.residual[0] = 0.0;
+        }
+    }
+
+    [[nodiscard]] int outputCount() const override { return 1; }
+
+    [[nodiscard]] std::vector<std::string> outputNames() const override
+    {
+        return {"out_value"};
+    }
+
+    void evaluateOutputs(const systems::AuxiliaryLocalContext& ctx,
+                         std::span<Real> output) const override
+    {
+        if (!output.empty()) {
+            output[0] = ctx.x.empty() ? 0.0 : ctx.x[0];
+        }
+    }
 };
 
 const systems::FESystem* partitionedSystemToken(int index)
@@ -196,6 +238,67 @@ struct AuxiliaryInputEndpointFixture {
             spec.size = input_size;
             spec.producer = systems::AuxiliaryInputProducer::DirectUserData;
             left_system.auxiliaryInputRegistry().registerInput(spec);
+        }
+
+        CouplingContextBuilder builder;
+        builder.addParticipant({
+            .participant_name = "left",
+            .system_name = "left_system",
+            .system = &left_system,
+        });
+        builder.addParticipant({
+            .participant_name = "right",
+            .system_name = "right_system",
+            .system = partitionedSystemToken(2),
+        });
+        builder.addField({
+            .participant_name = "left",
+            .system_name = "left_system",
+            .system = &left_system,
+            .field_name = "primary",
+            .field_id = left_field,
+            .space = space,
+            .components = 1,
+        });
+        builder.addField({
+            .participant_name = "right",
+            .system_name = "right_system",
+            .system = partitionedSystemToken(2),
+            .field_name = "primary",
+            .field_id = 2,
+            .space = space,
+            .components = 1,
+        });
+        context = builder.build();
+    }
+};
+
+struct AuxiliaryOutputEndpointFixture {
+    std::shared_ptr<spaces::H1Space> space;
+    std::shared_ptr<forms::test::SingleTetraMeshAccess> mesh;
+    systems::FESystem left_system;
+    FieldId left_field{INVALID_FIELD_ID};
+    CouplingContext context;
+
+    explicit AuxiliaryOutputEndpointFixture(bool deploy_output = true)
+        : space(std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1))
+        , mesh(std::make_shared<forms::test::SingleTetraMeshAccess>())
+        , left_system(mesh)
+    {
+        left_field = left_system.addField(systems::FieldSpec{
+            .name = "primary",
+            .space = space,
+            .components = 1,
+        });
+        if (deploy_output) {
+            auto model = std::make_shared<ScalarOutputModel>();
+            left_system.deployAuxiliaryModel(
+                systems::use(model)
+                    .name("output_block")
+                    .global()
+                    .partitioned("ForwardEuler")
+                    .initialize({0.0}));
+            left_system.finalizeAuxiliaryLayout();
         }
 
         CouplingContextBuilder builder;
@@ -381,6 +484,20 @@ CouplingEndpointRef auxiliaryInputEndpoint(
 {
     return CouplingEndpointRef{
         .kind = CouplingEndpointKind::AuxiliaryInput,
+        .participant_name = std::move(participant),
+        .endpoint_name = std::move(key),
+        .temporal = temporal,
+    };
+}
+
+CouplingEndpointRef auxiliaryOutputEndpoint(
+    std::string participant,
+    std::string key = "out_value",
+    CouplingTemporalSlotDescriptor temporal =
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Current})
+{
+    return CouplingEndpointRef{
+        .kind = CouplingEndpointKind::AuxiliaryOutput,
         .participant_name = std::move(participant),
         .endpoint_name = std::move(key),
         .temporal = temporal,
@@ -753,9 +870,9 @@ TEST(PartitionedCouplingPlanGenerator, RejectsEndpointKindsWithoutResolver)
 {
     auto exchange = identityExchange();
     exchange.producer = CouplingEndpointRef{
-        .kind = CouplingEndpointKind::AuxiliaryOutput,
+        .kind = CouplingEndpointKind::AuxiliaryState,
         .participant_name = "left",
-        .endpoint_name = "lagged_output",
+        .endpoint_name = "lagged_state",
         .temporal = CouplingTemporalSlotDescriptor{
             .slot = CouplingTemporalSlot::Current,
         },
@@ -769,6 +886,78 @@ TEST(PartitionedCouplingPlanGenerator, RejectsEndpointKindsWithoutResolver)
 
     EXPECT_FALSE(validation.ok());
     EXPECT_NE(formatDiagnostics(validation).find("requires a registry resolver"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, GeneratesAuxiliaryOutputEndpointFromRegistry)
+{
+    AuxiliaryOutputEndpointFixture fixture;
+    auto exchange = identityExchange();
+    exchange.producer = auxiliaryOutputEndpoint("left");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    ASSERT_EQ(plan.exchanges.size(), 1u);
+    const auto& producer = plan.exchanges[0].producer;
+    EXPECT_EQ(producer.resolved_kind, CouplingEndpointKind::AuxiliaryOutput);
+    EXPECT_EQ(producer.system_name, "left_system");
+    EXPECT_EQ(producer.system, &fixture.left_system);
+    EXPECT_EQ(producer.registry_provider, "AuxiliaryOutputRegistry");
+    EXPECT_EQ(producer.temporal.provider_name, "AuxiliaryOutputRegistry");
+    EXPECT_EQ(producer.temporal.backing,
+              CouplingResolvedTemporalBackingKind::AuxiliaryCurrent);
+    EXPECT_EQ(producer.auxiliary_kind,
+              CouplingAuxiliaryEndpointResolutionKind::Output);
+    ASSERT_TRUE(producer.auxiliary_output_id.has_value());
+    EXPECT_EQ(*producer.auxiliary_output_id, 0u);
+    ASSERT_TRUE(producer.auxiliary_output_flat_slot.has_value());
+    EXPECT_EQ(*producer.auxiliary_output_flat_slot, 0u);
+    EXPECT_EQ(producer.auxiliary_key, "out_value");
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsAuxiliaryOutputWithoutDeployedOutput)
+{
+    AuxiliaryOutputEndpointFixture fixture(false);
+    auto exchange = identityExchange();
+    exchange.producer = auxiliaryOutputEndpoint("left");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("requires a deployed auxiliary output"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsAuxiliaryOutputUnsupportedTemporalSlot)
+{
+    AuxiliaryOutputEndpointFixture fixture;
+    auto exchange = identityExchange();
+    exchange.producer = auxiliaryOutputEndpoint(
+        "left",
+        "out_value",
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Accepted});
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("auxiliary output endpoint temporal slot"),
               std::string::npos);
 }
 
