@@ -91,6 +91,7 @@ CouplingExternalBufferDescriptor externalBuffer(std::string name,
         .strides = {1},
         .packing = "contiguous",
         .supported_temporal_slots = {currentSlot()},
+        .layout_revision_key = data_revision,
         .data_revision_key = data_revision,
     };
 }
@@ -570,12 +571,31 @@ TEST(CouplingContext, RejectsDuplicateExternalBufferTemporalSlots)
               std::string::npos);
 }
 
+TEST(CouplingContext, RejectsExternalBufferWithoutRevisionKeys)
+{
+    auto descriptor = externalBuffer("driver_value", 1);
+    descriptor.layout_revision_key = 0;
+    descriptor.data_revision_key = 0;
+
+    CouplingContextBuilder builder;
+    builder.addExternalBuffer(CouplingExternalBufferRegistration{
+        .descriptor = descriptor,
+    });
+
+    const auto validation = builder.validate();
+    EXPECT_FALSE(validation.ok());
+    const auto diagnostics = formatDiagnostics(validation);
+    EXPECT_NE(diagnostics.find("requires a layout revision key"), std::string::npos);
+    EXPECT_NE(diagnostics.find("requires a data revision key"), std::string::npos);
+}
+
 TEST(CouplingContext, RejectsInvalidDriverOwnedTransferDescriptors)
 {
     auto descriptor = driverOwnedTransfer("");
     descriptor.supported_ranks.push_back(CouplingValueRank::Scalar);
     descriptor.supported_source_temporal_slots.push_back(currentSlot());
     descriptor.supported_target_temporal_slots.push_back(currentSlot());
+    descriptor.registry_revision_key = 0;
 
     CouplingContextBuilder builder;
     builder.addDriverOwnedTransfer(descriptor);
@@ -587,6 +607,8 @@ TEST(CouplingContext, RejectsInvalidDriverOwnedTransferDescriptors)
     EXPECT_NE(formatDiagnostics(validation).find("source has duplicate temporal slots"),
               std::string::npos);
     EXPECT_NE(formatDiagnostics(validation).find("target has duplicate temporal slots"),
+              std::string::npos);
+    EXPECT_NE(formatDiagnostics(validation).find("requires a registry revision key"),
               std::string::npos);
 }
 

@@ -745,6 +745,12 @@ CouplingValidationResult CouplingContextBuilder::validate() const
         if (descriptor.packing.empty()) {
             result.addError("external buffer descriptor requires packing metadata");
         }
+        if (descriptor.layout_revision_key == 0) {
+            result.addError("external buffer descriptor requires a layout revision key");
+        }
+        if (descriptor.data_revision_key == 0) {
+            result.addError("external buffer descriptor requires a data revision key");
+        }
         if (descriptor.supported_temporal_slots.empty()) {
             result.addError("external buffer descriptor requires supported temporal slots");
         }
@@ -810,6 +816,10 @@ CouplingValidationResult CouplingContextBuilder::validate() const
             result,
             descriptor.supported_target_temporal_slots,
             "driver-owned transfer descriptor target");
+        if (descriptor.registry_revision_key == 0) {
+            result.addError(
+                "driver-owned transfer descriptor requires a registry revision key");
+        }
         for (std::size_t j = i + 1u; j < context_.driver_owned_transfers_.size(); ++j) {
             if (descriptor.transfer_name ==
                 context_.driver_owned_transfers_[j].transfer_name) {
