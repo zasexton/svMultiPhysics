@@ -372,6 +372,51 @@ TEST(MonolithicCouplingBuilder, InstallsResolvedFormAndAdaptsBridgeMetadata)
     EXPECT_TRUE(block_it->has_vector);
 }
 
+TEST(MonolithicCouplingBuilder, RegistersContractOwnedInterfaceAdditionalFields)
+{
+    BuilderFixture fixture;
+    fixture.system.setInterfaceMesh(kInterfaceMarker,
+                                    std::make_shared<const svmp::InterfaceMesh>());
+    const auto context = interfaceContext(fixture, kInterfaceMarker);
+    const MonolithicCouplingBuilder builder;
+
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.shared_regions.push_back({
+        .shared_region_name = "interface",
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+    });
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Contract,
+        .namespace_name = "generic_instance",
+        .field_name = "lambda",
+        .space = fixture.space,
+        .components = 1,
+        .scope = CouplingAdditionalFieldScope::InterfaceFace,
+        .shared_region_name = "interface",
+    });
+
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const auto validation = builder.validateDeclarations(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto resolved = builder.registerAdditionalFields(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+
+    ASSERT_EQ(resolved.size(), 1u);
+    EXPECT_EQ(resolved[0].system_name, "shared_system");
+    EXPECT_EQ(resolved[0].field_spec.name, "generic_instance.lambda");
+    EXPECT_EQ(resolved[0].field_spec.scope, systems::FieldScope::InterfaceFace);
+    EXPECT_EQ(resolved[0].field_spec.interface_marker, kInterfaceMarker);
+    EXPECT_TRUE(fixture.system.hasField("generic_instance.lambda"));
+}
+
 TEST(MonolithicCouplingBuilder, GenericContractInstallsAndFinalizesGraph)
 {
     BuilderFixture fixture;

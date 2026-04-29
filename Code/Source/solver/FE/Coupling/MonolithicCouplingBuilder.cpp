@@ -9,14 +9,162 @@
 
 #include "Coupling/CouplingGraph.h"
 #include "Core/FEException.h"
+#include "Spaces/FunctionSpace.h"
+#include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 
 #include <algorithm>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace svmp {
 namespace FE {
 namespace coupling {
+
+namespace {
+
+struct AdditionalFieldTarget {
+    std::string participant_name;
+    std::string system_name;
+    const systems::FESystem* system{nullptr};
+};
+
+std::string additionalFieldSystemName(const CouplingAdditionalFieldDeclaration& field)
+{
+    return field.namespace_name + "." + field.field_name;
+}
+
+AdditionalFieldTarget explicitAdditionalFieldTarget(
+    const CouplingContext& context,
+    const CouplingAdditionalFieldDeclaration& field)
+{
+    if (!field.system_participant_name.empty()) {
+        const auto participant = context.participant(field.system_participant_name);
+        return AdditionalFieldTarget{
+            .participant_name = participant.participant_name,
+            .system_name = participant.system_name,
+            .system = participant.system,
+        };
+    }
+
+    if (field.field_namespace == CouplingAdditionalFieldNamespace::Participant) {
+        const auto participant = context.participant(field.namespace_name);
+        return AdditionalFieldTarget{
+            .participant_name = participant.participant_name,
+            .system_name = participant.system_name,
+            .system = participant.system,
+        };
+    }
+
+    FE_THROW(InvalidArgumentException,
+             "contract-owned additional field requires a target participant or shared-region system");
+}
+
+AdditionalFieldTarget sharedRegionAdditionalFieldTarget(
+    const CouplingContext& context,
+    const CouplingAdditionalFieldDeclaration& field)
+{
+    if (!field.shared_region_name.has_value() ||
+        field.field_namespace != CouplingAdditionalFieldNamespace::Contract ||
+        !field.system_participant_name.empty()) {
+        return explicitAdditionalFieldTarget(context, field);
+    }
+
+    const auto group = context.sharedRegionGroup(*field.shared_region_name);
+    FE_THROW_IF(group.participant_regions.empty(), InvalidArgumentException,
+                "contract-owned interface field shared region has no participants");
+
+    const auto& first = group.participant_regions.front();
+    FE_CHECK_NOT_NULL(first.system,
+                      "contract-owned interface field shared-region system");
+    for (const auto& region : group.participant_regions) {
+        FE_THROW_IF(region.system != first.system, InvalidArgumentException,
+                    "contract-owned interface field requires shared-region participants in one system");
+    }
+    return AdditionalFieldTarget{
+        .participant_name = first.participant_name,
+        .system_name = first.system_name,
+        .system = first.system,
+    };
+}
+
+int interfaceMarkerForAdditionalField(
+    const CouplingContext& context,
+    const CouplingAdditionalFieldDeclaration& field,
+    const AdditionalFieldTarget& target)
+{
+    if (field.region_name.has_value()) {
+        const auto region = context.region(target.participant_name, *field.region_name);
+        FE_THROW_IF(region.kind != CouplingRegionKind::InterfaceFace,
+                    InvalidArgumentException,
+                    "interface additional field participant region must be an interface face");
+        FE_THROW_IF(region.marker < 0, InvalidArgumentException,
+                    "interface additional field participant region requires a marker");
+        return region.marker;
+    }
+
+    FE_THROW_IF(!field.shared_region_name.has_value(), InvalidArgumentException,
+                "interface additional field requires a shared region or participant region");
+    const auto group = context.sharedRegionGroup(*field.shared_region_name);
+    std::optional<int> marker;
+    for (const auto& region : group.participant_regions) {
+        if (region.system != target.system) {
+            continue;
+        }
+        FE_THROW_IF(region.kind != CouplingRegionKind::InterfaceFace,
+                    InvalidArgumentException,
+                    "interface additional field shared region must map to interface faces");
+        FE_THROW_IF(region.marker < 0, InvalidArgumentException,
+                    "interface additional field shared region requires markers");
+        if (!marker.has_value()) {
+            marker = region.marker;
+        } else {
+            FE_THROW_IF(*marker != region.marker, InvalidArgumentException,
+                        "interface additional field shared-region markers must agree in one system");
+        }
+    }
+    FE_THROW_IF(!marker.has_value(), InvalidArgumentException,
+                "interface additional field target participant is not in the shared region");
+    return *marker;
+}
+
+systems::FieldSpec fieldSpecForAdditionalField(
+    const CouplingContext& context,
+    const CouplingAdditionalFieldDeclaration& field,
+    const AdditionalFieldTarget& target)
+{
+    FE_CHECK_NOT_NULL(field.space.get(), "additional field function space");
+    systems::FieldSpec spec;
+    spec.name = additionalFieldSystemName(field);
+    spec.space = field.space;
+    spec.components = field.components == 0
+        ? field.space->value_dimension()
+        : field.components;
+    if (field.scope == CouplingAdditionalFieldScope::InterfaceFace) {
+        spec.scope = systems::FieldScope::InterfaceFace;
+        spec.interface_marker = interfaceMarkerForAdditionalField(context, field, target);
+    }
+    return spec;
+}
+
+systems::FESystem& mutableSystemByName(const CouplingContext& context,
+                                       std::string_view system_name)
+{
+    const auto it = std::find_if(
+        context.participants().begin(),
+        context.participants().end(),
+        [&](const CouplingParticipantRef& participant) {
+            return participant.system_name == system_name;
+        });
+    FE_THROW_IF(it == context.participants().end(), InvalidArgumentException,
+                "additional field target system is missing from context");
+    FE_CHECK_NOT_NULL(it->system, "additional field target system");
+    return const_cast<systems::FESystem&>(*it->system);
+}
+
+} // namespace
 
 CouplingValidationResult MonolithicCouplingBuilder::validateDeclarations(
     const CouplingContext& context,
@@ -24,6 +172,38 @@ CouplingValidationResult MonolithicCouplingBuilder::validateDeclarations(
 {
     CouplingGraph graph;
     return graph.buildDeclarationGraph(context, declarations);
+}
+
+std::vector<ResolvedCouplingAdditionalFieldDeclaration>
+MonolithicCouplingBuilder::resolveAdditionalFields(
+    const CouplingContext& context,
+    std::span<const CouplingContractDeclaration> declarations) const
+{
+    std::vector<ResolvedCouplingAdditionalFieldDeclaration> resolved;
+    for (const auto& declaration : declarations) {
+        for (const auto& field : declaration.additional_fields) {
+            const auto target = sharedRegionAdditionalFieldTarget(context, field);
+            resolved.push_back(ResolvedCouplingAdditionalFieldDeclaration{
+                .declaration = field,
+                .system_name = target.system_name,
+                .field_spec = fieldSpecForAdditionalField(context, field, target),
+            });
+        }
+    }
+    return resolved;
+}
+
+std::vector<ResolvedCouplingAdditionalFieldDeclaration>
+MonolithicCouplingBuilder::registerAdditionalFields(
+    const CouplingContext& context,
+    std::span<const CouplingContractDeclaration> declarations) const
+{
+    auto resolved = resolveAdditionalFields(context, declarations);
+    for (const auto& field : resolved) {
+        auto& system = mutableSystemByName(context, field.system_name);
+        static_cast<void>(system.addField(field.field_spec));
+    }
+    return resolved;
 }
 
 ResolvedCouplingFormContribution MonolithicCouplingBuilder::resolveFormContribution(
