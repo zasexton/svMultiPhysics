@@ -673,9 +673,23 @@ CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
             ctx, exchange.shared_region_name, exchange.consumer_region, "consumer"));
     }
 
-    for (const auto& hint : group_hints) {
+    for (std::size_t hint_index = 0; hint_index < group_hints.size(); ++hint_index) {
+        const auto& hint = group_hints[hint_index];
         if (hint.name.empty()) {
             result.addError("partitioned coupling group hint requires a name");
+        }
+        for (std::size_t other_index = hint_index + 1u;
+             other_index < group_hints.size();
+             ++other_index) {
+            const auto& other = group_hints[other_index];
+            if (hint.name.empty() || hint.name != other.name) {
+                continue;
+            }
+            if (hint.participant_names != other.participant_names) {
+                result.addError(
+                    "partitioned coupling group hint duplicates a name with different participants");
+                break;
+            }
         }
         for (std::size_t i = 0; i < hint.participant_names.size(); ++i) {
             const auto& participant = hint.participant_names[i];

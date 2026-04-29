@@ -868,3 +868,22 @@ TEST(PartitionedCouplingPlanGenerator, RejectsGroupHintWithUnknownParticipant)
     EXPECT_NE(formatDiagnostics(validation).find("group hint references an unknown participant"),
               std::string::npos);
 }
+
+TEST(PartitionedCouplingPlanGenerator, RejectsAmbiguousDuplicateGroupHints)
+{
+    auto declaration = partitionedDeclaration();
+    declaration.group_hints.push_back(CouplingGroupHint{
+        .name = "sync_group",
+        .participant_names = {"left"},
+    });
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingContractDeclaration>(declarations));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("duplicates a name with different participants"),
+              std::string::npos);
+}
