@@ -7,6 +7,8 @@
 
 #include "Coupling/CouplingGraph.h"
 
+#include "Systems/FESystem.h"
+
 #include <algorithm>
 #include <optional>
 #include <sstream>
@@ -97,6 +99,34 @@ std::optional<analysis::VariableKey> resolveVariable(
     }
     return analysis::VariableKey::named(toAnalysisVariableKind(variable.kind),
                                         scopedNonFieldName(variable));
+}
+
+void validateInterfaceRegionTopology(const CouplingContractDeclaration& declaration,
+                                     const CouplingRegionRef& region,
+                                     CouplingValidationResult& result)
+{
+    if (region.kind != CouplingRegionKind::InterfaceFace) {
+        return;
+    }
+    if (region.marker < 0) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .contract_name = declaration.contract_name,
+            .participant_name = region.participant_name,
+            .region_name = region.region_name,
+            .message = "interface-face coupling region requires an interface marker",
+        });
+        return;
+    }
+    if (region.system != nullptr && !region.system->hasInterfaceMesh(region.marker)) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .contract_name = declaration.contract_name,
+            .participant_name = region.participant_name,
+            .region_name = region.region_name,
+            .message = "interface-face coupling region is missing registered interface topology",
+        });
+    }
 }
 
 struct ResolvedDeclaredDependency {
@@ -420,9 +450,9 @@ void validateContextReferences(const CouplingContext& context,
             }
             continue;
         }
+        const auto resolved_region = context.region(region.participant_name, region.region_name);
         if (region.required_region_kind.has_value() &&
-            context.region(region.participant_name, region.region_name).kind !=
-                *region.required_region_kind) {
+            resolved_region.kind != *region.required_region_kind) {
             result.add(CouplingDiagnostic{
                 .severity = CouplingDiagnosticSeverity::Error,
                 .contract_name = declaration.contract_name,
@@ -431,6 +461,7 @@ void validateContextReferences(const CouplingContext& context,
                 .message = "coupling region kind does not satisfy the declaration",
             });
         }
+        validateInterfaceRegionTopology(declaration, resolved_region, result);
     }
 
     for (const auto& shared_region : declaration.shared_regions) {
@@ -445,9 +476,9 @@ void validateContextReferences(const CouplingContext& context,
             }
             continue;
         }
-        if (shared_region.required_region_kind.has_value()) {
-            const auto group = context.sharedRegionGroup(shared_region.shared_region_name);
-            for (const auto& participant_region : group.participant_regions) {
+        const auto group = context.sharedRegionGroup(shared_region.shared_region_name);
+        for (const auto& participant_region : group.participant_regions) {
+            if (shared_region.required_region_kind.has_value()) {
                 if (participant_region.kind != *shared_region.required_region_kind) {
                     result.add(CouplingDiagnostic{
                         .severity = CouplingDiagnosticSeverity::Error,
@@ -458,6 +489,7 @@ void validateContextReferences(const CouplingContext& context,
                     });
                 }
             }
+            validateInterfaceRegionTopology(declaration, participant_region, result);
         }
     }
 }

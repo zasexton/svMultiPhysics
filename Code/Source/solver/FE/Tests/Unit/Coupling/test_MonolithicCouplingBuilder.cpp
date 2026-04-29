@@ -5,6 +5,7 @@
 #include "Coupling/CouplingFormBuilder.h"
 #include "Core/FEException.h"
 #include "Forms/Vocabulary.h"
+#include "Mesh/Core/InterfaceMesh.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
@@ -22,6 +23,8 @@ using namespace svmp::FE;
 using namespace svmp::FE::coupling;
 
 namespace {
+
+constexpr int kInterfaceMarker = 17;
 
 struct BuilderFixture {
     std::shared_ptr<spaces::H1Space> space;
@@ -79,6 +82,66 @@ struct BuilderFixture {
         context = builder.build();
     }
 };
+
+CouplingContext interfaceContext(BuilderFixture& fixture, int marker)
+{
+    CouplingRegionRef left_region{
+        .participant_name = "left",
+        .system_name = "shared_system",
+        .system = &fixture.system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = marker,
+        .side = CouplingInterfaceSide::Minus,
+    };
+    CouplingRegionRef right_region{
+        .participant_name = "right",
+        .system_name = "shared_system",
+        .system = &fixture.system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = marker,
+        .side = CouplingInterfaceSide::Plus,
+    };
+
+    CouplingContextBuilder builder;
+    builder.addParticipant({
+        .participant_name = "left",
+        .system_name = "shared_system",
+        .system = &fixture.system,
+    });
+    builder.addParticipant({
+        .participant_name = "right",
+        .system_name = "shared_system",
+        .system = &fixture.system,
+    });
+    builder.addField({
+        .participant_name = "left",
+        .system_name = "shared_system",
+        .system = &fixture.system,
+        .field_name = "primary",
+        .field_id = fixture.left_field,
+        .space = fixture.space,
+        .components = 1,
+    });
+    builder.addField({
+        .participant_name = "right",
+        .system_name = "shared_system",
+        .system = &fixture.system,
+        .field_name = "primary",
+        .field_id = fixture.right_field,
+        .space = fixture.space,
+        .components = 1,
+    });
+    builder.addRegion(left_region);
+    builder.addRegion(right_region);
+    builder.addSharedRegion(SharedRegionRef{
+        .name = "interface",
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .participant_regions = {left_region, right_region},
+    });
+    return builder.build();
+}
 
 const CouplingInstalledDependency* findDependency(
     const CouplingFormAnalysisMetadata& metadata,
@@ -146,6 +209,66 @@ public:
         contribution.residual =
             (forms.state("left", "primary", "a") *
              forms.test("right", "primary", "w")).dx();
+        return {contribution};
+    }
+};
+
+class GenericInterfaceContract final : public CouplingContract {
+public:
+    [[nodiscard]] std::string name() const override
+    {
+        return "generic_interface";
+    }
+
+    [[nodiscard]] CouplingContractDeclaration declare() const override
+    {
+        CouplingContractDeclaration declaration;
+        declaration.contract_type = name();
+        declaration.contract_name = "generic_interface_instance";
+        declaration.participants.push_back({.participant_name = "left"});
+        declaration.participants.push_back({.participant_name = "right"});
+        declaration.fields.push_back({.participant_name = "left", .field_name = "primary"});
+        declaration.fields.push_back({.participant_name = "right", .field_name = "primary"});
+        declaration.shared_regions.push_back({
+            .shared_region_name = "interface",
+            .required_region_kind = CouplingRegionKind::InterfaceFace,
+        });
+        declaration.dependencies.push_back(CouplingResidualDependency{
+            .residual_row = {
+                .kind = CouplingVariableKind::Field,
+                .participant_name = "right",
+                .name = "primary",
+            },
+            .dependency = {
+                .kind = CouplingVariableKind::Field,
+                .participant_name = "left",
+                .name = "primary",
+            },
+        });
+        declaration.expected_blocks.push_back(CouplingBlockExpectation{
+            .residual_row = declaration.dependencies.back().residual_row,
+            .dependency = declaration.dependencies.back().dependency,
+        });
+        return declaration;
+    }
+
+    [[nodiscard]] std::vector<CouplingFormContribution> buildMonolithicForms(
+        const CouplingContext& context,
+        const CouplingFormBuilder& forms) const override
+    {
+        const auto marker = context.sharedRegion("interface", "right").marker;
+        CouplingFormContribution contribution;
+        contribution.contribution_name = "generic_interface_coupling";
+        contribution.origin = "GenericInterfaceContract";
+        contribution.operator_name = "equations";
+        contribution.field_uses = {{.participant_name = "right", .field_name = "primary"}};
+        contribution.extra_trial_field_uses = {{
+            .participant_name = "left",
+            .field_name = "primary",
+        }};
+        contribution.residual =
+            (forms.state("left", "primary", "a") *
+             forms.test("right", "primary", "w")).dI(marker);
         return {contribution};
     }
 };
@@ -280,4 +403,60 @@ TEST(MonolithicCouplingBuilder, GenericContractInstallsAndFinalizesGraph)
                              analysis::VariableKey::field(fixture.right_field),
                              analysis::VariableKey::field(fixture.left_field)),
               nullptr);
+}
+
+TEST(MonolithicCouplingBuilder, GenericInterfaceContractInstallsAndFinalizesGraph)
+{
+    BuilderFixture fixture;
+    fixture.system.setInterfaceMesh(kInterfaceMarker,
+                                    std::make_shared<const svmp::InterfaceMesh>());
+    const auto context = interfaceContext(fixture, kInterfaceMarker);
+    const GenericInterfaceContract contract;
+    const MonolithicCouplingBuilder builder;
+    const CouplingFormBuilder forms(context);
+
+    const std::array<CouplingContractDeclaration, 1> declarations{contract.declare()};
+    const auto declaration_validation = builder.validateDeclarations(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(declaration_validation.ok()) << formatDiagnostics(declaration_validation);
+
+    const auto contributions = contract.buildMonolithicForms(context, forms);
+    const auto installed = builder.installFormContributions(
+        fixture.system,
+        context,
+        std::span<const CouplingFormContribution>(contributions));
+
+    CouplingGraph graph;
+    const auto finalized_validation = graph.buildFinalizedGraph(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed));
+
+    EXPECT_TRUE(finalized_validation.ok()) << formatDiagnostics(finalized_validation);
+    ASSERT_EQ(installed.size(), 1u);
+    const auto* dependency = findDependency(
+        installed[0],
+        analysis::VariableKey::field(fixture.right_field),
+        analysis::VariableKey::field(fixture.left_field));
+    ASSERT_NE(dependency, nullptr);
+    EXPECT_EQ(dependency->domain, analysis::DomainKind::InterfaceFace);
+}
+
+TEST(MonolithicCouplingBuilder, RejectsInterfaceContractWithoutRegisteredTopology)
+{
+    BuilderFixture fixture;
+    const auto context = interfaceContext(fixture, kInterfaceMarker);
+    const GenericInterfaceContract contract;
+    const MonolithicCouplingBuilder builder;
+
+    const std::array<CouplingContractDeclaration, 1> declarations{contract.declare()};
+    const auto validation = builder.validateDeclarations(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find(
+                  "interface-face coupling region is missing registered interface topology"),
+              std::string::npos);
 }
