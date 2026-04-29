@@ -109,6 +109,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                 options_.mesh_velocity_source == ALEMeshVelocitySource::CoupledDisplacement
                     ? FE::systems::ALEMeshVelocitySource::CoupledDisplacement
                     : FE::systems::ALEMeshVelocitySource::PrescribedData,
+            .geometry_tangent_path = options_.moving_mesh_tangent_path,
             .mesh_velocity_field_name = options_.mesh_velocity_field_name,
             .mesh_displacement_field_name = options_.mesh_displacement_field_name,
             .mesh_velocity_space = options_.mesh_velocity_space ? options_.mesh_velocity_space : velocity_space_,

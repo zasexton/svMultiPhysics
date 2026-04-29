@@ -912,6 +912,7 @@ set(FE_FORMS_HEADERS
 	    Forms/FormExpr.h
     Forms/CutCellForms.h
     Forms/FiniteDeformationForms.h
+    Forms/GeometrySensitivityEval.h
     Forms/MovingFrameForms.h
     Forms/MixedBlockKernelSet.h
     Forms/MonolithicCellKernel.h
@@ -979,6 +980,7 @@ set(FE_FORMS_SOURCES
 	    Forms/Tensor/SpecialTensorDerivatives.cpp
     Forms/FormIR.cpp
     Forms/FormCompiler.cpp
+    Forms/GeometrySensitivityEval.cpp
     Forms/AffineAnalysis.cpp
 	    Forms/BoundaryFunctional.cpp
     Forms/MixedBlockKernelSet.cpp

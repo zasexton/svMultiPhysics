@@ -231,6 +231,7 @@ struct ConstantMatrix {
         case FormExprType::ReferenceJacobianDeterminant:
         case FormExprType::CurrentMeasure:
         case FormExprType::ReferenceMeasure:
+        case FormExprType::CurrentMeasureVariation:
         case FormExprType::CellDiameter:
         case FormExprType::CellVolume:
         case FormExprType::FacetArea:
@@ -256,7 +257,10 @@ struct ConstantMatrix {
         case FormExprType::PreviousMeshVelocity:
         case FormExprType::PredictedMeshVelocity:
         case FormExprType::CurrentNormal:
-        case FormExprType::ReferenceNormal: {
+        case FormExprType::ReferenceNormal:
+        case FormExprType::GeometryTrialVectorVariation:
+        case FormExprType::MeshVelocityVariation:
+        case FormExprType::CurrentNormalVariation: {
             const std::uint32_t dim = ctx.trial_sig
                                           ? static_cast<std::uint32_t>(
                                                 std::min(3, std::max(1, ctx.trial_sig->topological_dimension)))
@@ -269,7 +273,9 @@ struct ConstantMatrix {
         case FormExprType::JacobianInverse:
         case FormExprType::CurrentJacobian:
         case FormExprType::ReferenceJacobian:
-        case FormExprType::SurfaceJacobian: {
+        case FormExprType::SurfaceJacobian:
+        case FormExprType::GeometryTrialJacobianVariation:
+        case FormExprType::SurfaceJacobianVariation: {
             const std::uint32_t dim = ctx.trial_sig
                                           ? static_cast<std::uint32_t>(
                                                 std::min(3, std::max(1, ctx.trial_sig->topological_dimension)))

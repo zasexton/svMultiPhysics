@@ -78,6 +78,12 @@ inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
         case FormExprType::CurrentMeasure: return "CurrentMeasure";
         case FormExprType::ReferenceMeasure: return "ReferenceMeasure";
         case FormExprType::SurfaceJacobian: return "SurfaceJacobian";
+        case FormExprType::GeometryTrialVectorVariation: return "GeometryTrialVectorVariation";
+        case FormExprType::GeometryTrialJacobianVariation: return "GeometryTrialJacobianVariation";
+        case FormExprType::MeshVelocityVariation: return "MeshVelocityVariation";
+        case FormExprType::CurrentMeasureVariation: return "CurrentMeasureVariation";
+        case FormExprType::CurrentNormalVariation: return "CurrentNormalVariation";
+        case FormExprType::SurfaceJacobianVariation: return "SurfaceJacobianVariation";
         case FormExprType::Time: return "Time";
         case FormExprType::TimeStep: return "TimeStep";
         case FormExprType::EffectiveTimeStep: return "EffectiveTimeStep";

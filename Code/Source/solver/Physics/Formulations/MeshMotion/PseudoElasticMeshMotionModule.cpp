@@ -164,7 +164,9 @@ void PseudoElasticMeshMotionModule::registerOn(FE::systems::FESystem& system) co
     bc_manager.applyAll(system, residual, d_mesh, psi, d_id);
 
     FE::systems::FormInstallOptions install{};
-    install.compiler_options.use_symbolic_tangent = false;
+    install.compiler_options.geometry_tangent_path = options_.tangent_path;
+    install.compiler_options.use_symbolic_tangent =
+        options_.tangent_path != FE::forms::GeometryTangentPath::ADReference;
 #if SVMP_FE_ENABLE_LLVM_JIT
     install.compiler_options.jit.enable = options_.enable_jit;
     if (install.compiler_options.jit.enable) {

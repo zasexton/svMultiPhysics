@@ -6,6 +6,7 @@
  */
 
 #include "Analysis/DAEStructureAnalyzer.h"
+#include "Analysis/AnalysisNumericGuards.h"
 #include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
 
@@ -54,7 +55,7 @@ const DAEStructureEvidenceSummary* findDAEEvidence(
 
 Real effectiveTolerance(const DAEStructureEvidenceSummary& summary) noexcept
 {
-    return summary.residual_tolerance > Real{}
+    return numeric::finiteDeclaredTolerance(summary.residual_tolerance)
         ? summary.residual_tolerance
         : Real{1.0e-10};
 }
@@ -248,8 +249,16 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
     std::optional<CertificationClass> certification;
     if (dynamic_count > 0 && algebraic_count > 0 && dae_evidence) {
         const Real tol = effectiveTolerance(*dae_evidence);
+        const bool tolerance_declared =
+            numeric::finiteDeclaredTolerance(
+                dae_evidence->residual_tolerance);
+        const bool residual_finite =
+            numeric::finite(dae_evidence->initial_constraint_residual);
+        const bool numeric_evidence_valid =
+            tolerance_declared && residual_finite;
         const bool consistent_initial_state =
             dae_evidence->consistent_initial_condition_evidence_present &&
+            numeric_evidence_valid &&
             std::abs(dae_evidence->initial_constraint_residual) <= tol;
         const bool hidden_constraint_violation =
             dae_evidence->hidden_constraint_metadata_present &&
@@ -257,7 +266,12 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
         const bool rank_violation =
             dae_evidence->algebraic_jacobian_rank_metadata_present &&
             !dae_evidence->algebraic_jacobian_full_rank;
-        const bool index1_certified =
+        const bool semi_explicit_scope_complete =
+            !dae_evidence->dae_index_theorem_id.empty() &&
+            dae_evidence->local_validity_scope_present &&
+            !dae_evidence->dae_index_scope.empty() &&
+            dae_evidence->smoothness_or_regular_operator_evidence_present;
+        const bool semi_explicit_index1_evidence =
             dae_evidence->dae_form_class == DAEFormClass::SemiExplicit &&
             dae_evidence->mass_matrix_rank_metadata_present &&
             dae_evidence->algebraic_jacobian_rank_metadata_present &&
@@ -265,6 +279,9 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
             dae_evidence->hidden_constraint_metadata_present &&
             dae_evidence->hidden_constraint_count == 0u &&
             consistent_initial_state;
+        const bool index1_certified =
+            semi_explicit_index1_evidence &&
+            semi_explicit_scope_complete;
         const bool descriptor_index1_certified =
             (dae_evidence->dae_form_class == DAEFormClass::DescriptorPencil ||
              dae_evidence->dae_form_class == DAEFormClass::FullyImplicit) &&
@@ -296,7 +313,7 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
             confidence = AnalysisConfidence::High;
             certification = CertificationClass::Certified;
             description =
-                "Index-1 DAE structure certified by mass-rank, full-rank algebraic Jacobian, hidden-constraint, and consistent-initialization evidence";
+                "Index-1 DAE structure certified by mass-rank, full-rank algebraic Jacobian, hidden-constraint, consistent-initialization, theorem, local-scope, and regularity evidence";
         } else if (descriptor_index1_certified) {
             dae_class = DAEClass::Index1DAELike;
             status = PropertyStatus::Preserved;
@@ -304,12 +321,26 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
             certification = CertificationClass::Certified;
             description =
                 "Index-1 DAE structure certified by regular descriptor pencil, strangeness/projector, hidden-constraint, theorem, and consistent-initialization evidence";
+        } else if (semi_explicit_index1_evidence &&
+                   !semi_explicit_scope_complete) {
+            certification = CertificationClass::NotCertified;
+            status = PropertyStatus::Likely;
+            confidence = AnalysisConfidence::Medium;
+            description =
+                "DAE evidence is compatible with semi-explicit index-1 form, but certification requires theorem, local validity scope, and smooth/regular operator metadata";
         } else if (semi_explicit_metadata_missing) {
             certification = CertificationClass::NotCertified;
             status = PropertyStatus::Likely;
             confidence = AnalysisConfidence::Medium;
             description =
                 "DAE evidence is compatible with an index-1 interpretation, but certification requires semi-explicit form metadata or a richer descriptor/pencil index certificate";
+        } else if (dae_evidence->consistent_initial_condition_evidence_present &&
+                   !numeric_evidence_valid) {
+            certification = CertificationClass::NotCertified;
+            status = PropertyStatus::Likely;
+            confidence = AnalysisConfidence::Medium;
+            description =
+                "DAE evidence is compatible with an index-1 interpretation, but consistent-initialization certification requires finite residual and tolerance evidence";
         } else {
             certification = CertificationClass::NotCertified;
         }
@@ -350,11 +381,36 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
             ", projector_consistency=" +
             std::string(dae_evidence->projector_consistency_evidence_present ? "true" : "false") +
             ", theorem='" + dae_evidence->dae_index_theorem_id + "'" +
+            ", index_scope='" + dae_evidence->dae_index_scope + "'" +
+            ", local_validity_scope=" +
+            std::string(dae_evidence->local_validity_scope_present ? "true" : "false") +
+            ", smooth_or_regular_operator=" +
+            std::string(dae_evidence->smoothness_or_regular_operator_evidence_present ? "true" : "false") +
             ", hidden_constraints=" +
             std::to_string(dae_evidence->hidden_constraint_count) +
             ", initial_residual=" +
-            std::to_string(dae_evidence->initial_constraint_residual),
+            std::to_string(dae_evidence->initial_constraint_residual) +
+            ", residual_tolerance=" +
+            std::to_string(dae_evidence->residual_tolerance) +
+            ", finite_initial_residual=" +
+            std::string(numeric::finite(
+                dae_evidence->initial_constraint_residual) ? "true" : "false") +
+            ", finite_declared_tolerance=" +
+            std::string(numeric::finiteDeclaredTolerance(
+                dae_evidence->residual_tolerance) ? "true" : "false"),
             confidence);
+        if (dae_evidence->consistent_initial_condition_evidence_present &&
+            (!numeric::finite(dae_evidence->initial_constraint_residual) ||
+             !numeric::finiteDeclaredTolerance(
+                 dae_evidence->residual_tolerance))) {
+            AnalysisIssue issue;
+            issue.severity = IssueSeverity::Warning;
+            issue.message =
+                "DAE structure evidence for system '" +
+                dae_evidence->system_id +
+                "' has invalid consistent-initialization residual or tolerance";
+            report.issues.push_back(std::move(issue));
+        }
     }
     report.claims.push_back(std::move(claim));
 }

@@ -277,7 +277,7 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             hasSourceAnalyzer(claim, "OperatorClassAnalyzer")) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::DiscreteMatrix,
                        claim.domain, claim.variables, i, claim,
-                       source + " classified an elliptic/operator block; request sparse matrix symmetry, sign, row-sum, and conditioning diagnostics");
+                       source + " classified an elliptic/operator block; request sparse matrix symmetry, sign, row-sum, conditioning, finite tolerance, and theorem-specific M-matrix/SPD diagnostics");
             addRequest(report.request_plan, context, AnalysisSummaryKind::ReducedMatrix,
                        claim.domain, claim.variables, i, claim,
                        source + " classified an operator block; request reduced free-free evidence after constraints");
@@ -339,13 +339,13 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             hasSourceAnalyzer(claim, "TransportCharacterAnalyzer")) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::TemporalStability,
                        claim.domain, claim.variables, i, claim,
-                       source + " detected first-order transport; request CFL/eigenvalue-scale stability metadata");
+                       source + " detected first-order transport; request finite CFL/eigenvalue-scale, stability-region, norm, operator-scope, nonnormal/pseudospectral, accepted-growth, and time-horizon metadata");
             addRequest(report.request_plan, context, AnalysisSummaryKind::ParameterScale,
                        claim.domain, claim.variables, i, claim,
-                       source + " detected first-order transport; request Peclet and local transport-diffusion scale metadata");
+                       source + " detected first-order transport; request finite Peclet-like and local transport-diffusion scale metadata with theorem/scope identifiers");
             addRequest(report.request_plan, context, AnalysisSummaryKind::DiscreteMatrix,
                        claim.domain, claim.variables, i, claim,
-                       source + " detected first-order transport; request nonnormality/skew split matrix diagnostics");
+                       source + " detected first-order transport; request finite nonnormality/skew split matrix diagnostics and operator-scope provenance");
             addRequest(report.request_plan, context, AnalysisSummaryKind::InvariantDomain,
                        claim.domain, claim.variables, i, claim,
                        source + " detected transport character; request overshoot/undershoot and invariant-domain evidence when available");
@@ -368,7 +368,7 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             hasSourceAnalyzer(claim, "ConservationAnalyzer")) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::FluxBalance,
                        claim.domain, claim.variables, i, claim,
-                       source + " emitted a conservation/balance claim; request local, global, and interface flux-balance residuals");
+                       source + " emitted a conservation/balance claim; request finite declared tolerance plus finite local, global, and interface flux-balance residuals with closure/source/orientation/time-scope metadata");
         }
 
         if (claim.kind == PropertyKind::DifferentialAlgebraicStructure ||
@@ -378,7 +378,7 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
                        source + " classified temporal/DAE structure; request time scheme stability metadata");
             addRequest(report.request_plan, context, AnalysisSummaryKind::DAEStructureEvidence,
                        claim.domain, claim.variables, i, claim,
-                       source + " classified temporal/DAE structure; request mass-rank, algebraic-Jacobian rank, hidden-constraint, and consistent-initialization evidence");
+                       source + " classified temporal/DAE structure; request mass-rank, algebraic-Jacobian rank, hidden-constraint, regular descriptor-pencil/index theorem, projector, and finite consistent-initialization residual/tolerance evidence");
             addRequest(report.request_plan, context, AnalysisSummaryKind::InitialCompatibility,
                        claim.domain, claim.variables, i, claim,
                        source + " classified temporal/DAE structure; request initial constraint and boundary residual evidence");
@@ -441,20 +441,20 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
         if (claim.kind == PropertyKind::CompatibleComplexStructure) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::CompatibleComplex,
                        claim.domain, claim.variables, i, claim,
-                       source + " emitted compatible-complex evidence; request exact-sequence and commuting-projection metadata");
+                       source + " emitted compatible-complex evidence; request exact-sequence, bounded commuting-projection, projection-bound, mesh-family, and shape-regularity metadata");
         }
 
         if (claim.kind == PropertyKind::TemporalStability) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::TemporalStability,
                        claim.domain, claim.variables, i, claim,
-                       source + " emitted temporal-stability evidence; request CFL, eigenvalue scale, and amplification-radius metadata");
+                       source + " emitted temporal-stability evidence; request finite CFL, eigenvalue scale, amplification-radius, norm/theorem/scope, time-horizon, and nonnormal/pseudospectral metadata");
         }
 
         if (claim.kind == PropertyKind::EnergyStability ||
             claim.kind == PropertyKind::EntropyStability) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::EnergyEntropyBalance,
                        claim.domain, claim.variables, i, claim,
-                       source + " emitted energy/entropy law evidence; request discrete balance and production summaries");
+                       source + " emitted energy/entropy law evidence; request finite balance/production/tolerance, theorem, functional/norm, coercivity, norm-equivalence, dissipation, entropy-variable, entropy-flux, convexity, and boundary/source accounting summaries");
         }
 
         if (claim.kind == PropertyKind::CoefficientPositivity ||
@@ -500,7 +500,7 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
         if (claim.kind == PropertyKind::ErrorEstimatorEligibility) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::ErrorEstimator,
                        claim.domain, claim.variables, i, claim,
-                       source + " emitted estimator eligibility evidence; request residual, jump, flux-reconstruction, and goal-weight metadata");
+                       source + " emitted estimator eligibility evidence; request residual, jump, flux-reconstruction, goal-weight, norm scope, PDE class, boundary residual, data oscillation, coefficient/source regularity, shape-regularity, reliability/efficiency, effectivity, and refinement metadata");
             addRequest(report.request_plan, context, AnalysisSummaryKind::FluxBalance,
                        claim.domain, claim.variables, i, claim,
                        source + " emitted estimator eligibility evidence; request flux-balance residuals used by estimator checks");
@@ -530,32 +530,32 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
         if (claim.kind == PropertyKind::EquilibriumPreservation) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::EquilibriumPreservation,
                        claim.domain, claim.variables, i, claim,
-                       source + " emitted equilibrium-preservation evidence; request flux/source residual and reconstruction metadata");
+                       source + " emitted equilibrium-preservation evidence; request finite residual/tolerance plus flux/source, reconstruction, quadrature, and boundary-compatibility metadata");
         }
 
         if (claim.kind == PropertyKind::GeometricConservation) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::MovingDomain,
                        claim.domain, claim.variables, i, claim,
-                       source + " emitted moving-domain geometric conservation evidence; request mapping Jacobian and GCL residual summaries");
+                       source + " emitted moving-domain geometric conservation evidence; request finite mapping Jacobian interval, finite GCL residual/tolerance, mesh-velocity, time-integration, and remap summaries");
         }
 
         if (claim.kind == PropertyKind::TransferOperatorCompatibility) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::TransferOperator,
                        claim.domain, claim.variables, i, claim,
-                       source + " emitted transfer-operator evidence; request projection conservation, constant preservation, and rank metadata");
+                       source + " emitted transfer-operator evidence; request finite residual/tolerance, projection conservation, constant preservation, interface scope, projection consistency, mortar/dual consistency, interface mass conditioning, action-reaction flux, and rank metadata");
         }
 
         if (claim.kind == PropertyKind::AdjointConsistency) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::AdjointConsistency,
                        claim.domain, claim.variables, i, claim,
-                       source + " emitted adjoint-consistency evidence; request transpose-backend and goal-functional summaries");
+                       source + " emitted adjoint-consistency evidence; request transpose-backend, goal-functional, boundary-adjoint, stabilization-adjoint, goal-linearization, and finite discrete-adjoint residual/tolerance summaries");
         }
 
         if (claim.kind == PropertyKind::CoupledSystemStructure &&
             hasSourceAnalyzer(claim, "CoupledSystemStabilityAnalyzer")) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::CoupledSystemStability,
                        claim.domain, claim.variables, i, claim,
-                       source + " emitted coupled-system stability evidence; request exchange residual, constraint drift, contraction, nonnormal, and partition metadata");
+                       source + " emitted coupled-system stability evidence; request finite exchange residual, constraint drift, tolerance, partition spectral radius, contraction/coercive/nonnormal bounds, coupled-operator evidence, relaxation, added-mass, and partition metadata");
             addRequest(report.request_plan, context, AnalysisSummaryKind::TemporalStability,
                        claim.domain, claim.variables, i, claim,
                        source + " emitted coupled-system stability evidence; request coupled temporal stability metadata");

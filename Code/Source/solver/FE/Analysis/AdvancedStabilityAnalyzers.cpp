@@ -7,6 +7,7 @@
 
 #include "Analysis/AdvancedStabilityAnalyzers.h"
 
+#include "Analysis/AnalysisNumericGuards.h"
 #include "Analysis/AnalysisSummaryMatching.h"
 #include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ConstraintAnalysisSummary.h"
@@ -26,7 +27,7 @@ namespace {
 
 inline Real effectiveTolerance(Real tolerance, Real fallback = 1.0e-10) noexcept
 {
-    return tolerance > Real{} ? tolerance : fallback;
+    return numeric::finiteDeclaredTolerance(tolerance) ? tolerance : fallback;
 }
 
 void appendUnique(std::vector<VariableKey>& values, const VariableKey& value)
@@ -121,20 +122,8 @@ bool productionSignSatisfied(BalanceSignClass sign, Real value, Real tol) noexce
     return false;
 }
 
-bool finiteReal(Real value) noexcept
-{
-    return std::isfinite(static_cast<double>(value));
-}
-
-bool finitePositive(Real value) noexcept
-{
-    return finiteReal(value) && value > Real{};
-}
-
-bool finiteNonnegative(Real value) noexcept
-{
-    return finiteReal(value) && value >= Real{};
-}
+using numeric::finiteNonnegative;
+using numeric::finitePositive;
 
 bool theoremScoped(const std::string& theorem_id) noexcept
 {
@@ -143,12 +132,28 @@ bool theoremScoped(const std::string& theorem_id) noexcept
 
 bool energyMetadataComplete(const EnergyEntropySummary& summary) noexcept
 {
+    const bool norm_bounds_valid =
+        summary.energy_norm_equivalence_bounds_present &&
+        numeric::finitePositiveOrdered(
+            summary.energy_norm_equivalence_lower_bound,
+            summary.energy_norm_equivalence_upper_bound);
+    const bool dissipation_bound_valid =
+        summary.energy_dissipation_residual_bound_present &&
+        summary.energy_dissipation_tolerance_present &&
+        finiteNonnegative(summary.energy_dissipation_residual_bound) &&
+        finiteNonnegative(summary.energy_dissipation_tolerance) &&
+        summary.energy_dissipation_residual_bound <=
+            summary.energy_dissipation_tolerance;
     return summary.energy_functional_metadata_present &&
            summary.energy_norm_metadata_present &&
            summary.energy_positivity_evidence_present &&
            summary.energy_coercivity_evidence_present &&
            summary.discrete_dissipation_identity_evidence_present &&
            summary.boundary_source_energy_accounting_present &&
+           summary.energy_coercivity_lower_bound_present &&
+           finitePositive(summary.energy_coercivity_lower_bound) &&
+           norm_bounds_valid &&
+           dissipation_bound_valid &&
            theoremScoped(summary.energy_entropy_theorem_id) &&
            !summary.energy_functional_id.empty() &&
            !summary.energy_norm_id.empty();
@@ -156,11 +161,23 @@ bool energyMetadataComplete(const EnergyEntropySummary& summary) noexcept
 
 bool entropyMetadataComplete(const EnergyEntropySummary& summary) noexcept
 {
+    const bool flux_inequality_valid =
+        summary.entropy_flux_inequality_residual_present &&
+        summary.entropy_flux_inequality_tolerance_present &&
+        numeric::finite(summary.entropy_flux_inequality_residual) &&
+        finiteNonnegative(summary.entropy_flux_inequality_tolerance) &&
+        summary.entropy_flux_inequality_residual <=
+            summary.entropy_flux_inequality_tolerance;
     return summary.convex_entropy_metadata_present &&
            summary.entropy_variables_metadata_present &&
            summary.entropy_flux_metadata_present &&
            summary.entropy_dissipation_metadata_present &&
            summary.boundary_source_entropy_metadata_present &&
+           summary.entropy_convexity_lower_bound_present &&
+           finitePositive(summary.entropy_convexity_lower_bound) &&
+           flux_inequality_valid &&
+           summary.entropy_dissipation_bound_present &&
+           finiteNonnegative(summary.entropy_dissipation_bound) &&
            theoremScoped(summary.energy_entropy_theorem_id);
 }
 
@@ -282,6 +299,7 @@ bool coefficientCoverageComplete(const CoefficientPropertySummary& summary) noex
            summary.quadrature_point_coverage_complete &&
            summary.lower_bound_valid_for_all_samples &&
            summary.tolerance_metadata_present &&
+           coefficientLowerBoundMatchesPositivity(summary) &&
            state_scope_ok;
 }
 
@@ -316,17 +334,43 @@ void TemporalStabilityAnalyzer::run(const ProblemAnalysisContext& context,
 
     for (const auto& summary : summaries->temporal_stability) {
         const Real tol = effectiveTolerance(1.0e-12);
-        const bool amplification_bounded =
+        const bool amplification_numeric_valid =
             summary.amplification_radius_present &&
+            finiteNonnegative(summary.amplification_radius);
+        const bool amplification_bounded =
+            amplification_numeric_valid &&
             summary.amplification_radius <= Real{1} + tol;
+        const bool cfl_numeric_valid =
+            !summary.cfl_estimate_present ||
+            finiteNonnegative(summary.cfl_estimate);
         const bool cfl_bounded =
             summary.cfl_estimate_present &&
+            cfl_numeric_valid &&
             summary.cfl_estimate <= Real{1} + tol;
         const bool conditional =
             summary.stability_class == TemporalStabilityClass::ConditionallyStable;
         const bool ssp =
             summary.stability_class == TemporalStabilityClass::SSP;
         const bool theorem_scoped = theoremScoped(summary.stability_theorem_id);
+        const bool norm_scope_complete =
+            summary.stability_norm_metadata_present &&
+            !summary.stability_norm_id.empty();
+        const bool operator_scope_complete =
+            summary.operator_scope_metadata_present &&
+            !summary.operator_scope_id.empty();
+        const bool time_horizon_complete =
+            summary.time_horizon_metadata_present &&
+            finiteNonnegative(summary.time_horizon);
+        const bool nonnormal_growth_bound_valid =
+            summary.nonnormal_growth_bound_present &&
+            summary.nonnormal_growth_bound_finite &&
+            finiteNonnegative(summary.nonnormal_growth_bound);
+        const bool accepted_growth_bound_valid =
+            summary.accepted_nonnormal_growth_bound_present &&
+            finiteNonnegative(summary.accepted_nonnormal_growth_bound) &&
+            nonnormal_growth_bound_valid &&
+            summary.nonnormal_growth_bound <=
+                summary.accepted_nonnormal_growth_bound + tol;
         const bool cfl_margin_valid =
             !summary.cfl_margin_present ||
             finiteNonnegative(summary.cfl_margin);
@@ -337,28 +381,39 @@ void TemporalStabilityAnalyzer::run(const ProblemAnalysisContext& context,
              (summary.operator_spectrum_coverage_present ||
               summary.numerical_range_coverage_present ||
               theorem_scoped));
+        const bool operator_stability_region_scope =
+            (summary.operator_spectrum_coverage_present &&
+             summary.operator_normality_evidence_present) ||
+            summary.numerical_range_coverage_present;
         const bool stability_region_certificate =
             summary.stability_region_evidence_present &&
             theorem_scoped &&
-            (summary.operator_spectrum_coverage_present ||
-             summary.numerical_range_coverage_present ||
-             summary.energy_norm_contractivity_evidence_present ||
-             summary.logarithmic_norm_bound_present);
+            (operator_stability_region_scope ||
+             (summary.energy_norm_contractivity_evidence_present &&
+              summary.contractivity_norm_metadata_present &&
+              norm_scope_complete) ||
+             (summary.logarithmic_norm_bound_present &&
+              norm_scope_complete));
         const bool norm_certificate =
             (summary.energy_norm_contractivity_evidence_present &&
-             summary.contractivity_norm_metadata_present) ||
+             summary.contractivity_norm_metadata_present &&
+             norm_scope_complete) ||
             (summary.logarithmic_norm_bound_present &&
+             norm_scope_complete &&
              (summary.numerical_range_coverage_present || theorem_scoped)) ||
             (summary.invariant_domain_evidence_present &&
              theorem_scoped) ||
             (summary.nonlinear_stability_evidence_present &&
              theorem_scoped);
         const bool nonnormal_certificate =
-            (summary.pseudospectral_bound_present &&
-             theorem_scoped) ||
-            (summary.nonnormal_growth_bound_present &&
-             summary.nonnormal_growth_bound_finite &&
-             finiteNonnegative(summary.nonnormal_growth_bound));
+            theorem_scoped &&
+            norm_scope_complete &&
+            operator_scope_complete &&
+            time_horizon_complete &&
+            accepted_growth_bound_valid &&
+            summary.nonnormal_operator_evidence_present &&
+            (summary.pseudospectral_bound_present ||
+             summary.nonnormal_growth_bound_present);
         const bool ssp_certificate =
             !ssp ||
             (summary.ssp_or_tvd_evidence_present && theorem_scoped);
@@ -402,6 +457,18 @@ void TemporalStabilityAnalyzer::run(const ProblemAnalysisContext& context,
             claim.certification_class = CertificationClass::NotCertified;
             claim.description =
                 "Time-integration stability lacks amplification-radius evidence";
+        } else if (!amplification_numeric_valid) {
+            claim.status = PropertyStatus::Violated;
+            claim.confidence = AnalysisConfidence::High;
+            claim.certification_class = CertificationClass::Violated;
+            claim.description =
+                "Time-integration amplification radius is non-finite or negative";
+        } else if (summary.cfl_estimate_present && !cfl_numeric_valid) {
+            claim.status = PropertyStatus::Violated;
+            claim.confidence = AnalysisConfidence::High;
+            claim.certification_class = CertificationClass::Violated;
+            claim.description =
+                "Time-integration CFL estimate is non-finite or negative";
         } else if (conditional && !summary.cfl_estimate_present) {
             claim.status = PropertyStatus::Unknown;
             claim.confidence = AnalysisConfidence::Medium;
@@ -470,10 +537,24 @@ void TemporalStabilityAnalyzer::run(const ProblemAnalysisContext& context,
             std::string(summary.energy_norm_contractivity_evidence_present ? "true" : "false") +
             ", contractivity_norm=" +
             std::string(summary.contractivity_norm_metadata_present ? "true" : "false") +
+            ", stability_norm_metadata=" +
+            std::string(summary.stability_norm_metadata_present ? "true" : "false") +
+            ", time_horizon_metadata=" +
+            std::string(summary.time_horizon_metadata_present ? "true" : "false") +
+            ", operator_scope_metadata=" +
+            std::string(summary.operator_scope_metadata_present ? "true" : "false") +
+            ", accepted_nonnormal_growth=" +
+            std::string(summary.accepted_nonnormal_growth_bound_present ? "true" : "false") +
             ", pseudospectral=" +
             std::string(summary.pseudospectral_bound_present ? "true" : "false") +
             ", nonnormal_growth=" +
             std::string(summary.nonnormal_growth_bound_present ? "true" : "false") +
+            ", nonnormal_growth_value=" +
+            std::to_string(summary.nonnormal_growth_bound) +
+            ", accepted_nonnormal_growth_value=" +
+            std::to_string(summary.accepted_nonnormal_growth_bound) +
+            ", nonnormal_growth_valid=" +
+            std::string(nonnormal_growth_bound_valid ? "true" : "false") +
             ", ssp_tvd=" +
             std::string(summary.ssp_or_tvd_evidence_present ? "true" : "false"),
             claim.confidence);
@@ -498,28 +579,43 @@ void EnergyEntropyLawAnalyzer::run(const ProblemAnalysisContext& context,
     if (!summaries) return;
 
     for (const auto& summary : summaries->energy_entropy) {
+        const bool tolerance_declared =
+            numeric::finiteDeclaredTolerance(summary.balance_tolerance);
         const Real tol = effectiveTolerance(summary.balance_tolerance);
+        const bool balance_value_valid =
+            numeric::finite(summary.observed_discrete_balance);
+        const bool production_value_valid =
+            summary.expected_production_sign == BalanceSignClass::Unconstrained ||
+            numeric::finite(summary.observed_production);
+        const bool numeric_evidence_valid =
+            tolerance_declared && balance_value_valid && production_value_valid;
         const bool sign_ok =
+            numeric_evidence_valid &&
             productionSignSatisfied(summary.expected_production_sign,
                                     summary.observed_production,
                                     tol);
-        const bool balance_ok = std::abs(summary.observed_discrete_balance) <= tol;
-        const bool violated = summary.violation_count > 0u || !sign_ok || !balance_ok;
+        const bool balance_ok =
+            numeric_evidence_valid &&
+            std::abs(summary.observed_discrete_balance) <= tol;
+        const bool violated =
+            summary.violation_count > 0u ||
+            (numeric_evidence_valid && (!sign_ok || !balance_ok));
         const bool metadata_complete = energyEntropyMetadataComplete(summary);
 
         PropertyClaim claim;
         claim.kind = lawPropertyKind(summary.law_kind);
-        claim.status = summary.expected_production_sign == BalanceSignClass::Unknown
-            ? PropertyStatus::Unknown
-            : (violated
-                ? PropertyStatus::Violated
+        claim.status = violated
+            ? PropertyStatus::Violated
+            : (summary.expected_production_sign == BalanceSignClass::Unknown ||
+               !numeric_evidence_valid
+                ? PropertyStatus::Unknown
                 : (metadata_complete ? PropertyStatus::Preserved
                                      : PropertyStatus::Unknown));
         claim.confidence = claim.status == PropertyStatus::Unknown
             ? AnalysisConfidence::Medium
             : AnalysisConfidence::High;
         claim.certification_class =
-            claim.status == PropertyStatus::Unknown && !metadata_complete
+            claim.status == PropertyStatus::Unknown
                 ? CertificationClass::NotCertified
                 : certificationFromStatus(claim.status);
         claim.estimate_scope = summary.energy_entropy_id;
@@ -528,7 +624,7 @@ void EnergyEntropyLawAnalyzer::run(const ProblemAnalysisContext& context,
             : (claim.status == PropertyStatus::Preserved
                 ? "Discrete energy/entropy balance satisfies the declared production sign and tolerance"
                 : (summary.expected_production_sign == BalanceSignClass::Unknown
-                    ? "Discrete energy/entropy balance has unknown expected production sign"
+                    ? "Discrete energy/entropy balance has unknown expected production sign or invalid finite numeric evidence"
                     : "Discrete energy/entropy balance passes numerically but lacks theorem-scoped energy functional/norm or entropy-variable/flux/dissipation metadata"));
         claim.claim_origin = "EnergyEntropyLawAnalyzer";
         claim.addEvidence("EnergyEntropyLawAnalyzer",
@@ -541,6 +637,12 @@ void EnergyEntropyLawAnalyzer::run(const ProblemAnalysisContext& context,
             ", theorem='" + summary.energy_entropy_theorem_id + "'" +
             ", energy_functional='" + summary.energy_functional_id + "'" +
             ", energy_norm='" + summary.energy_norm_id + "'" +
+            ", tolerance_declared=" +
+            std::string(tolerance_declared ? "true" : "false") +
+            ", finite_balance=" +
+            std::string(balance_value_valid ? "true" : "false") +
+            ", finite_production=" +
+            std::string(production_value_valid ? "true" : "false") +
             ", metadata_complete=" +
             std::string(metadata_complete ? "true" : "false"),
             claim.confidence);
@@ -548,6 +650,10 @@ void EnergyEntropyLawAnalyzer::run(const ProblemAnalysisContext& context,
             addWarning(report,
                 "Energy/entropy balance violation for summary '" +
                 summary.energy_entropy_id + "'");
+        } else if (!numeric_evidence_valid) {
+            addWarning(report,
+                "Energy/entropy summary '" + summary.energy_entropy_id +
+                "' has invalid tolerance, balance, or production evidence");
         }
         report.claims.push_back(std::move(claim));
     }
@@ -570,32 +676,43 @@ void CoefficientConstitutiveAnalyzer::run(const ProblemAnalysisContext& context,
             summary.positivity == PositivityClass::Positive ||
             summary.positivity == PositivityClass::Nonnegative;
         const bool coverage_complete = coefficientCoverageComplete(summary);
+        const bool contradicted_bound =
+            positive_or_nonnegative &&
+            coefficientDeclaredBoundContradictsPositivity(summary);
 
         PropertyClaim positivity;
         positivity.kind = PropertyKind::CoefficientPositivity;
         positivity.status =
-            positive_or_nonnegative && !coverage_complete
+            contradicted_bound
+                ? PropertyStatus::Violated
+                : (positive_or_nonnegative && !coverage_complete
                 ? PropertyStatus::Likely
-                : status;
+                : status);
         positivity.confidence = status == PropertyStatus::Unknown
             ? AnalysisConfidence::Medium
-            : (positive_or_nonnegative && !coverage_complete
+            : (contradicted_bound
+                   ? AnalysisConfidence::High
+                   : (positive_or_nonnegative && !coverage_complete
                    ? AnalysisConfidence::Medium
-                   : AnalysisConfidence::High);
+                   : AnalysisConfidence::High));
         positivity.domain = summary.domain;
         positivity.certification_class =
-            positive_or_nonnegative && !coverage_complete
+            contradicted_bound
+                ? CertificationClass::Violated
+                : (positive_or_nonnegative && !coverage_complete
                 ? CertificationClass::NotCertified
-                : certificationFromStatus(status);
+                : certificationFromStatus(status));
         positivity.coefficient_id = summary.coefficient;
         positivity.claim_origin = "CoefficientConstitutiveAnalyzer";
         positivity.description = status == PropertyStatus::Violated
             ? "Coefficient/constitutive summary violates positivity requirements"
-            : (positivity.status == PropertyStatus::Preserved
+            : (contradicted_bound
+                ? "Coefficient/constitutive lower-bound evidence contradicts the declared positivity class"
+                : (positivity.status == PropertyStatus::Preserved
                 ? "Coefficient/constitutive summary preserves positivity requirements with scoped coverage metadata"
                 : (positivity.status == PropertyStatus::Likely
                     ? "Coefficient/constitutive summary reports positive sign but lacks full coverage metadata"
-                    : "Coefficient/constitutive positivity is unknown"));
+                    : "Coefficient/constitutive positivity is unknown")));
         positivity.addEvidence("CoefficientConstitutiveAnalyzer",
             "CoefficientPropertySummary coefficient='" + summary.coefficient +
             "', min_eigenvalue=" +
@@ -624,11 +741,28 @@ void CoefficientConstitutiveAnalyzer::run(const ProblemAnalysisContext& context,
         robustness.coefficient_id = summary.coefficient;
         robustness.claim_origin = "CoefficientConstitutiveAnalyzer";
         robustness.confidence = AnalysisConfidence::Medium;
-        if (summary.robustness_certificate_present) {
+        const bool robustness_metadata_complete =
+            summary.robustness_certificate_present &&
+            theoremScoped(summary.robustness_theorem_id) &&
+            !summary.robustness_certificate_scope.empty() &&
+            summary.robustness_norm_metadata_present &&
+            !summary.robustness_norm_id.empty() &&
+            summary.robustness_parameter_range_metadata_present &&
+            !summary.robustness_parameter_range_scope.empty() &&
+            summary.robustness_mesh_family_metadata_present &&
+            !summary.robustness_mesh_family_scope.empty() &&
+            summary.robustness_uniform_constant_present &&
+            finitePositive(summary.robustness_uniform_constant);
+        if (robustness_metadata_complete) {
             robustness.status = PropertyStatus::Preserved;
             robustness.certification_class = CertificationClass::Certified;
             robustness.description =
                 "Coefficient contrast and anisotropy are covered by reported robustness evidence";
+        } else if (summary.robustness_certificate_present) {
+            robustness.status = PropertyStatus::Likely;
+            robustness.certification_class = CertificationClass::NotCertified;
+            robustness.description =
+                "Coefficient robustness certificate is present but lacks theorem, norm, range, mesh-family, or uniform-constant metadata";
         } else if (worst_scale > Real{1.0e3} ||
                    summary.state_dependent ||
                    summary.time_dependent) {
@@ -651,7 +785,16 @@ void CoefficientConstitutiveAnalyzer::run(const ProblemAnalysisContext& context,
             std::string(summary.time_dependent ? "true" : "false") +
             ", robustness_certificate=" +
             std::string(summary.robustness_certificate_present ? "true" : "false") +
-            ", robustness_scope='" + summary.robustness_certificate_scope + "'",
+            ", robustness_scope='" + summary.robustness_certificate_scope + "'" +
+            ", theorem='" + summary.robustness_theorem_id + "'" +
+            ", norm_metadata=" +
+            std::string(summary.robustness_norm_metadata_present ? "true" : "false") +
+            ", parameter_range_metadata=" +
+            std::string(summary.robustness_parameter_range_metadata_present ? "true" : "false") +
+            ", mesh_family_metadata=" +
+            std::string(summary.robustness_mesh_family_metadata_present ? "true" : "false") +
+            ", uniform_constant_present=" +
+            std::string(summary.robustness_uniform_constant_present ? "true" : "false"),
             robustness.confidence);
         report.claims.push_back(std::move(robustness));
     }
@@ -669,13 +812,23 @@ void NonlinearTangentAnalyzer::run(const ProblemAnalysisContext& context,
     if (!summaries) return;
 
     for (const auto& summary : summaries->nonlinear_tangents) {
+        const bool tolerance_declared =
+            numeric::finiteDeclaredTolerance(
+                summary.finite_difference_tolerance);
+        const bool action_error_valid =
+            numeric::finiteNonnegative(
+                summary.finite_difference_action_error);
         const Real tol = effectiveTolerance(summary.finite_difference_tolerance);
         const bool action_checked = summary.jacobian_action_available;
+        const bool action_numeric_valid =
+            action_checked && tolerance_declared && action_error_valid;
+        const bool action_numeric_invalid =
+            action_checked && !action_numeric_valid;
         const bool action_ok =
-            action_checked &&
+            action_numeric_valid &&
             summary.finite_difference_action_error <= tol;
         const bool action_violation =
-            action_checked &&
+            action_numeric_valid &&
             summary.finite_difference_action_error > tol;
         const bool inconsistent =
             summary.tangent_consistency == TangentConsistencyClass::Frozen ||
@@ -724,6 +877,12 @@ void NonlinearTangentAnalyzer::run(const ProblemAnalysisContext& context,
                 claim.certification_class = CertificationClass::Certified;
                 claim.description =
                     "Nonlinear residual/tangent consistency is certified by exact tangent metadata and Jacobian-action evidence";
+            } else if (action_numeric_invalid) {
+                claim.status = PropertyStatus::Unknown;
+                claim.confidence = AnalysisConfidence::Medium;
+                claim.certification_class = CertificationClass::NotCertified;
+                claim.description =
+                    "Nonlinear tangent is marked exact, but finite-difference action evidence has invalid finite tolerance or residual";
             } else {
                 claim.status = PropertyStatus::Likely;
                 claim.confidence = AnalysisConfidence::Medium;
@@ -746,6 +905,10 @@ void NonlinearTangentAnalyzer::run(const ProblemAnalysisContext& context,
             ", fd_action_error=" +
             std::to_string(summary.finite_difference_action_error) +
             ", tolerance=" + std::to_string(tol) +
+            ", tolerance_declared=" +
+            std::string(tolerance_declared ? "true" : "false") +
+            ", finite_action_error=" +
+            std::string(action_error_valid ? "true" : "false") +
             ", stagnation_count=" +
             std::to_string(summary.newton_stagnation_count) +
             ", tangent_symmetry=" +
@@ -763,6 +926,10 @@ void NonlinearTangentAnalyzer::run(const ProblemAnalysisContext& context,
             addWarning(report,
                 "Nonlinear tangent consistency violation for summary '" +
                 summary.residual_id + "'");
+        } else if (action_numeric_invalid) {
+            addWarning(report,
+                "Nonlinear tangent summary '" + summary.residual_id +
+                "' has invalid finite-difference action tolerance or residual");
         }
         report.claims.push_back(std::move(claim));
     }
@@ -901,23 +1068,57 @@ void SpectralSpuriousModeAnalyzer::run(const ProblemAnalysisContext& context,
     for (const auto& summary : summaries->spectral_structures) {
         const bool theorem_scoped =
             theoremScoped(summary.spectral_convergence_theorem_id);
-        const bool convergence_evidence =
+        const bool operator_or_gap_convergence_evidence =
             summary.operator_convergence_evidence ||
-            summary.discrete_compactness_evidence ||
-            summary.gap_convergence_evidence ||
-            (summary.compatible_complex_evidence &&
-             summary.compatible_complex_spectral_theorem_evidence &&
-             theorem_scoped);
+            summary.gap_convergence_evidence;
+        const bool projection_bound_valid =
+            summary.projection_bound_present &&
+            finitePositive(summary.projection_bound);
+        const bool spectral_complex_provenance_complete =
+            theorem_scoped &&
+            summary.compatible_complex_evidence &&
+            summary.compatible_complex_spectral_theorem_evidence &&
+            summary.bounded_projection_evidence_present &&
+            projection_bound_valid &&
+            summary.mesh_family_scope_present &&
+            !summary.mesh_family_scope.empty() &&
+            summary.shape_regular_mesh_evidence_present;
+        const bool discrete_compactness_route =
+            summary.discrete_compactness_evidence &&
+            summary.discrete_compactness_provenance_present &&
+            spectral_complex_provenance_complete;
+        const bool compatible_complex_route =
+            spectral_complex_provenance_complete;
+        const bool convergence_evidence =
+            operator_or_gap_convergence_evidence ||
+            discrete_compactness_route ||
+            compatible_complex_route;
         const bool diagnostic_scope_ok =
+            !operator_or_gap_convergence_evidence ||
             theorem_scoped ||
             (summary.refinement_scope_metadata_present &&
              summary.refinement_sample_count >= 2u);
+        const bool numeric_diagnostic_scope =
+            operator_or_gap_convergence_evidence ||
+            summary.refinement_scope_metadata_present;
+        const bool spectral_tolerance_ok =
+            !numeric_diagnostic_scope ||
+            finitePositive(summary.spectral_tolerance);
+        const bool rayleigh_bound_ok =
+            summary.rayleigh_quotient_lower_bound == Real{} ||
+            numeric::finite(summary.rayleigh_quotient_lower_bound);
+        const bool nullspace_handling_ok =
+            summary.rayleigh_quotient_lower_bound > Real{} ||
+            summary.nullspace_handling != NullspaceHandlingClass::Unknown;
         const bool certified =
             summary.eigenproblem_declared &&
             summary.self_adjoint_evidence &&
             summary.compactness_evidence &&
             convergence_evidence &&
             diagnostic_scope_ok &&
+            spectral_tolerance_ok &&
+            rayleigh_bound_ok &&
+            nullspace_handling_ok &&
             summary.spurious_mode_count == 0u;
 
         PropertyClaim claim;
@@ -939,7 +1140,7 @@ void SpectralSpuriousModeAnalyzer::run(const ProblemAnalysisContext& context,
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Certified;
             claim.description =
-                "Spectral summary has compact/self-adjoint evidence plus theorem-scoped convergence, discrete-compactness, or gap metadata";
+                "Spectral summary has compact/self-adjoint evidence plus scoped operator/gap convergence, discrete-compactness, or compatible-complex spectral provenance";
         } else {
             claim.status = PropertyStatus::Unknown;
             claim.confidence = AnalysisConfidence::Medium;
@@ -965,6 +1166,19 @@ void SpectralSpuriousModeAnalyzer::run(const ProblemAnalysisContext& context,
             std::string(summary.compatible_complex_evidence ? "true" : "false") +
             ", compatible_complex_theorem=" +
             std::string(summary.compatible_complex_spectral_theorem_evidence ? "true" : "false") +
+            ", discrete_compactness_provenance=" +
+            std::string(summary.discrete_compactness_provenance_present ? "true" : "false") +
+            ", bounded_projection=" +
+            std::string(summary.bounded_projection_evidence_present ? "true" : "false") +
+            ", projection_bound_present=" +
+            std::string(summary.projection_bound_present ? "true" : "false") +
+            ", projection_bound=" +
+            std::to_string(summary.projection_bound) +
+            ", mesh_family_scope_present=" +
+            std::string(summary.mesh_family_scope_present ? "true" : "false") +
+            ", mesh_family_scope='" + summary.mesh_family_scope + "'" +
+            ", shape_regular_mesh=" +
+            std::string(summary.shape_regular_mesh_evidence_present ? "true" : "false") +
             ", gap_convergence=" +
             std::string(summary.gap_convergence_evidence ? "true" : "false") +
             ", theorem='" + summary.spectral_convergence_theorem_id + "'" +
@@ -973,7 +1187,13 @@ void SpectralSpuriousModeAnalyzer::run(const ProblemAnalysisContext& context,
             ", refinement_samples=" +
             std::to_string(summary.refinement_sample_count) +
             ", spurious_modes=" +
-            std::to_string(summary.spurious_mode_count),
+            std::to_string(summary.spurious_mode_count) +
+            ", spectral_tolerance=" +
+            std::to_string(summary.spectral_tolerance) +
+            ", rayleigh_lower_bound=" +
+            std::to_string(summary.rayleigh_quotient_lower_bound) +
+            ", nullspace_handling=" +
+            std::to_string(static_cast<int>(summary.nullspace_handling)),
             claim.confidence);
         if (claim.status == PropertyStatus::Violated) {
             addWarning(report,
@@ -1014,13 +1234,21 @@ void ErrorEstimatorAnalyzer::run(const ProblemAnalysisContext& context,
             finitePositive(summary.effectivity_upper_bound) &&
             summary.effectivity_lower_bound <= summary.effectivity_upper_bound &&
             summary.effectivity_sample_count >= 2u;
+        const bool shape_regular_mesh_metadata_complete =
+            summary.shape_regular_mesh_evidence_present &&
+            summary.mesh_family_scope_present &&
+            !summary.mesh_family_scope.empty() &&
+            summary.shape_regular_constant_present &&
+            finitePositive(summary.shape_regular_constant);
         const bool invalid_quantitative_metadata =
             (summary.reliability_constant_metadata_present &&
              !finitePositive(summary.reliability_constant)) ||
             (summary.efficiency_constant_metadata_present &&
              !finitePositive(summary.efficiency_constant)) ||
             (summary.effectivity_bounds_present &&
-             !effectivity_bounds_valid);
+             !effectivity_bounds_valid) ||
+            (summary.shape_regular_constant_present &&
+             !finitePositive(summary.shape_regular_constant));
         const bool reliability_metadata_complete =
             has_residual_channel &&
             has_localization_channel &&
@@ -1031,7 +1259,7 @@ void ErrorEstimatorAnalyzer::run(const ProblemAnalysisContext& context,
             summary.boundary_residual_metadata_present &&
             summary.data_oscillation_metadata_present &&
             summary.coefficient_source_regularity_metadata_present &&
-            summary.shape_regular_mesh_evidence_present &&
+            shape_regular_mesh_metadata_complete &&
             reliability_constant_valid &&
             efficiency_constant_valid &&
             effectivity_bounds_valid &&
@@ -1069,7 +1297,7 @@ void ErrorEstimatorAnalyzer::run(const ProblemAnalysisContext& context,
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Certified;
             claim.description =
-                "A posteriori estimator metadata has residual, localization, norm, regularity, boundary, oscillation, effectivity, and refinement evidence";
+                "A posteriori estimator metadata has residual, localization, norm, regularity, boundary, oscillation, scoped shape-regular mesh, effectivity, and refinement evidence";
         } else if (has_localization_channel) {
             claim.status = PropertyStatus::Likely;
             claim.confidence = AnalysisConfidence::Medium;
@@ -1106,6 +1334,15 @@ void ErrorEstimatorAnalyzer::run(const ProblemAnalysisContext& context,
             std::to_string(summary.effectivity_upper_bound) +
             ", effectivity_samples=" +
             std::to_string(summary.effectivity_sample_count) +
+            ", shape_regular_mesh=" +
+            std::string(summary.shape_regular_mesh_evidence_present ? "true" : "false") +
+            ", mesh_family_scope_present=" +
+            std::string(summary.mesh_family_scope_present ? "true" : "false") +
+            ", mesh_family_scope='" + summary.mesh_family_scope + "'" +
+            ", shape_regular_constant_present=" +
+            std::string(summary.shape_regular_constant_present ? "true" : "false") +
+            ", shape_regular_constant=" +
+            std::to_string(summary.shape_regular_constant) +
             ", reliability_metadata_complete=" +
             std::string(reliability_metadata_complete ? "true" : "false") +
             ", goal_metadata_ok=" +
@@ -1128,6 +1365,9 @@ void QuadratureAdequacyAnalyzer::run(const ProblemAnalysisContext& context,
 
     for (const auto& summary : summaries->quadrature_adequacy) {
         const Real tol = effectiveTolerance(summary.aliasing_tolerance);
+        const bool aliasing_numeric_valid =
+            numeric::finiteNonnegative(summary.aliasing_indicator) &&
+            finiteNonnegative(summary.aliasing_tolerance);
         const bool degree_known =
             summary.integrand_polynomial_degree >= 0 &&
             summary.quadrature_exact_degree >= 0;
@@ -1138,10 +1378,17 @@ void QuadratureAdequacyAnalyzer::run(const ProblemAnalysisContext& context,
             summary.affine_mapping_evidence_present &&
             summary.polynomial_integrand_metadata_complete &&
             summary.coefficient_degree_metadata_present &&
+            summary.mapped_integrand_metadata_present &&
+            summary.basis_degree_metadata_present &&
+            summary.geometry_jacobian_degree_metadata_present &&
+            summary.tensor_contraction_metadata_present &&
+            summary.component_coverage_metadata_present &&
+            theoremScoped(summary.quadrature_theorem_id) &&
             (!summary.curved_or_nonlinear_mapping ||
              summary.overintegration_metadata_present ||
              summary.nonlinear_aliasing_control_present);
         const bool aliasing_violation =
+            !aliasing_numeric_valid ||
             summary.aliasing_indicator > tol ||
             summary.underintegrated_entry_count > 0u ||
             summary.zero_energy_mode_count > 0u;
@@ -1206,6 +1453,17 @@ void QuadratureAdequacyAnalyzer::run(const ProblemAnalysisContext& context,
             std::string(summary.polynomial_integrand_metadata_complete ? "true" : "false") +
             ", coefficient_degree_metadata=" +
             std::string(summary.coefficient_degree_metadata_present ? "true" : "false") +
+            ", mapped_integrand_metadata=" +
+            std::string(summary.mapped_integrand_metadata_present ? "true" : "false") +
+            ", basis_degree_metadata=" +
+            std::string(summary.basis_degree_metadata_present ? "true" : "false") +
+            ", geometry_jacobian_metadata=" +
+            std::string(summary.geometry_jacobian_degree_metadata_present ? "true" : "false") +
+            ", tensor_contraction_metadata=" +
+            std::string(summary.tensor_contraction_metadata_present ? "true" : "false") +
+            ", component_coverage_metadata=" +
+            std::string(summary.component_coverage_metadata_present ? "true" : "false") +
+            ", theorem='" + summary.quadrature_theorem_id + "'" +
             ", curved_or_nonlinear_mapping=" +
             std::string(summary.curved_or_nonlinear_mapping ? "true" : "false") +
             ", underintegrated_entries=" +
@@ -1261,6 +1519,21 @@ void MinimumResidualStabilityAnalyzer::run(
         const bool normal_conditioning_valid =
             summary.normal_equation_conditioning_present &&
             finitePositive(summary.normal_equation_condition_estimate);
+        const bool fortin_norm_valid =
+            summary.fortin_operator_norm_bound_present &&
+            finitePositive(summary.fortin_operator_norm_bound);
+        const bool accepted_fortin_bound_valid =
+            !summary.accepted_fortin_operator_norm_bound_present ||
+            (finitePositive(summary.accepted_fortin_operator_norm_bound) &&
+             fortin_norm_valid &&
+             summary.fortin_operator_norm_bound <=
+                 summary.accepted_fortin_operator_norm_bound + Real{1.0e-14});
+        const bool fortin_route_complete =
+            summary.fortin_operator_evidence_present &&
+            fortin_norm_valid &&
+            accepted_fortin_bound_valid;
+        const bool optimal_test_route_complete =
+            summary.optimal_test_metadata_present;
         const bool core_metadata_present =
             known_method &&
             distinct_spaces_ok &&
@@ -1274,8 +1547,8 @@ void MinimumResidualStabilityAnalyzer::run(
             theoremScoped(summary.minimum_residual_theorem_id);
         const bool dpg_or_pg_stability_metadata_present =
             summary.riesz_map_metadata_present &&
-            (summary.fortin_operator_evidence_present ||
-             summary.optimal_test_metadata_present) &&
+            (fortin_route_complete ||
+             optimal_test_route_complete) &&
             summary.enrichment_sufficiency_evidence_present &&
             residual_control_valid;
         const bool conditioning_metadata_present =
@@ -1293,7 +1566,17 @@ void MinimumResidualStabilityAnalyzer::run(
             (summary.local_trial_to_test_conditioning_present &&
              !finitePositive(summary.local_trial_to_test_condition_estimate)) ||
             (summary.normal_equation_conditioning_present &&
-             !finitePositive(summary.normal_equation_condition_estimate));
+             !finitePositive(summary.normal_equation_condition_estimate)) ||
+            (summary.fortin_operator_norm_bound_present &&
+             !finitePositive(summary.fortin_operator_norm_bound)) ||
+            (summary.accepted_fortin_operator_norm_bound_present &&
+             !finitePositive(summary.accepted_fortin_operator_norm_bound)) ||
+            (summary.accepted_fortin_operator_norm_bound_present &&
+             fortin_norm_valid &&
+             summary.fortin_operator_norm_bound >
+                 summary.accepted_fortin_operator_norm_bound + Real{1.0e-14}) ||
+            (summary.discrete_inf_sup_lower_bound_present &&
+             !finitePositive(summary.discrete_inf_sup_lower_bound));
         const bool violated =
             summary.violation_count > 0u ||
             invalid_numeric_metadata ||
@@ -1324,7 +1607,7 @@ void MinimumResidualStabilityAnalyzer::run(
                 "Minimum-residual/Petrov-Galerkin summary reports violated residual, Fortin, Riesz, enrichment, distinct-space, or conditioning checks";
         } else if (certified) {
             claim.description =
-                "Minimum-residual/Petrov-Galerkin stability is certified by scoped trial/test, residual norm, test norm, Riesz map, Fortin/optimal-test, enrichment, residual-control, theorem, and conditioning evidence";
+                "Minimum-residual/Petrov-Galerkin stability is certified by scoped trial/test, residual norm, test norm, Riesz map, quantified Fortin or optimal-test evidence, enrichment, residual-control, theorem, and conditioning evidence";
         } else if (core_metadata_present) {
             claim.description =
                 "Minimum-residual/Petrov-Galerkin method is structurally eligible but lacks complete Fortin/optimal-test, enrichment, residual-control, or conditioning evidence";
@@ -1356,6 +1639,18 @@ void MinimumResidualStabilityAnalyzer::run(
             std::string(summary.riesz_map_metadata_present ? "true" : "false") +
             ", fortin=" +
             std::string(summary.fortin_operator_evidence_present ? "true" : "false") +
+            ", fortin_norm_present=" +
+            std::string(summary.fortin_operator_norm_bound_present ? "true" : "false") +
+            ", fortin_norm=" +
+            std::to_string(summary.fortin_operator_norm_bound) +
+            ", accepted_fortin_norm_present=" +
+            std::string(summary.accepted_fortin_operator_norm_bound_present ? "true" : "false") +
+            ", accepted_fortin_norm=" +
+            std::to_string(summary.accepted_fortin_operator_norm_bound) +
+            ", discrete_inf_sup_present=" +
+            std::string(summary.discrete_inf_sup_lower_bound_present ? "true" : "false") +
+            ", discrete_inf_sup=" +
+            std::to_string(summary.discrete_inf_sup_lower_bound) +
             ", optimal_test=" +
             std::string(summary.optimal_test_metadata_present ? "true" : "false") +
             ", enrichment=" +
@@ -1386,8 +1681,27 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
     for (const auto& summary : summaries->invariant_domains) {
         const bool bounds_declared =
             summary.lower_bound_active || summary.upper_bound_active;
-        const bool metadata_complete =
+        const bool lower_bound_valid =
+            !summary.lower_bound_active ||
+            numeric::finite(summary.lower_bound);
+        const bool upper_bound_valid =
+            !summary.upper_bound_active ||
+            numeric::finite(summary.upper_bound);
+        const bool bounds_order_valid =
+            !(summary.lower_bound_active && summary.upper_bound_active) ||
+            summary.lower_bound <= summary.upper_bound;
+        const bool bounds_valid =
             bounds_declared &&
+            lower_bound_valid &&
+            upper_bound_valid &&
+            bounds_order_valid;
+        const bool active_bounds_invalid =
+            bounds_declared &&
+            (!lower_bound_valid ||
+             !upper_bound_valid ||
+             !bounds_order_valid);
+        const bool metadata_complete =
+            bounds_valid &&
             summary.limiter_evidence_present &&
             summary.cfl_condition_satisfied &&
             summary.ssp_time_discretization_evidence_present &&
@@ -1403,7 +1717,13 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
         claim.invariant_set_id = summary.invariant_set_id;
         claim.invariant_domain_metadata_present = summary.limiter_evidence_present;
         claim.claim_origin = "PreservationStructureAnalyzer";
-        if (summary.post_step_violation_count > 0u) {
+        if (active_bounds_invalid) {
+            claim.status = PropertyStatus::Violated;
+            claim.confidence = AnalysisConfidence::High;
+            claim.certification_class = CertificationClass::Violated;
+            claim.description =
+                "Invariant-domain summary has non-finite or unordered active bounds";
+        } else if (summary.post_step_violation_count > 0u) {
             claim.status = PropertyStatus::Violated;
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Violated;
@@ -1426,8 +1746,14 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
             "InvariantDomainSummary id='" + summary.invariant_set_id +
             "', lower_active=" +
             std::string(summary.lower_bound_active ? "true" : "false") +
+            ", lower_bound=" +
+            std::to_string(summary.lower_bound) +
             ", upper_active=" +
             std::string(summary.upper_bound_active ? "true" : "false") +
+            ", upper_bound=" +
+            std::to_string(summary.upper_bound) +
+            ", bounds_valid=" +
+            std::string(bounds_valid ? "true" : "false") +
             ", limiter=" +
             std::string(summary.limiter_evidence_present ? "true" : "false") +
             ", cfl_condition=" +
@@ -1452,12 +1778,33 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
     }
 
     for (const auto& summary : summaries->equilibrium_preservation) {
+        const bool tolerance_declared =
+            numeric::finiteDeclaredTolerance(summary.residual_tolerance);
+        const bool residual_finite =
+            numeric::finite(summary.flux_source_residual);
+        const bool numeric_evidence_valid =
+            tolerance_declared && residual_finite;
         const Real tol = effectiveTolerance(summary.residual_tolerance);
-        const bool metadata_present =
+        const bool local_balance_metadata_present =
             summary.source_quadrature_metadata_present &&
             summary.reconstruction_metadata_present &&
             summary.boundary_compatibility_metadata_present;
-        const bool residual_ok = std::abs(summary.flux_source_residual) <= tol;
+        const bool equilibrium_scope_complete =
+            !summary.equilibrium_id.empty() &&
+            !summary.equilibrium_family_id.empty() &&
+            theoremScoped(summary.equilibrium_preservation_theorem_id) &&
+            summary.equilibrium_scope_metadata_present &&
+            summary.source_model_scope_metadata_present &&
+            summary.reconstruction_scope_metadata_present;
+        const bool metadata_present =
+            local_balance_metadata_present &&
+            equilibrium_scope_complete;
+        const bool residual_ok =
+            numeric_evidence_valid &&
+            std::abs(summary.flux_source_residual) <= tol;
+        const bool residual_violation =
+            numeric_evidence_valid &&
+            std::abs(summary.flux_source_residual) > tol;
 
         PropertyClaim claim;
         claim.kind = PropertyKind::EquilibriumPreservation;
@@ -1465,45 +1812,77 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
         claim.well_balanced_metadata_present = metadata_present;
         claim.flux_balance_residual = summary.flux_source_residual;
         claim.claim_origin = "PreservationStructureAnalyzer";
-        if (!residual_ok) {
+        if (residual_violation) {
             claim.status = PropertyStatus::Violated;
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Violated;
             claim.description =
                 "Equilibrium-preservation flux/source residual exceeds tolerance";
-        } else if (metadata_present) {
+        } else if (residual_ok && metadata_present) {
             claim.status = PropertyStatus::Preserved;
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Certified;
             claim.description =
-                "Equilibrium-preservation summary has zero flux/source residual within tolerance";
+                "Equilibrium-preservation summary has zero flux/source residual within tolerance and scoped equilibrium-family evidence";
+        } else if (residual_ok && local_balance_metadata_present) {
+            claim.status = PropertyStatus::Likely;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.description =
+                "Equilibrium residual is small with local balance metadata, but theorem, equilibrium-family, source-model, or reconstruction scope is incomplete";
         } else {
             claim.status = PropertyStatus::Unknown;
             claim.confidence = AnalysisConfidence::Medium;
-            claim.certification_class = CertificationClass::Unknown;
+            claim.certification_class = CertificationClass::NotCertified;
             claim.description =
-                "Equilibrium residual is small but metadata is incomplete";
+                numeric_evidence_valid
+                    ? "Equilibrium residual is small but metadata is incomplete"
+                    : "Equilibrium-preservation summary lacks finite declared tolerance or finite residual evidence";
         }
         claim.addEvidence("PreservationStructureAnalyzer",
             "EquilibriumPreservationSummary id='" +
             summary.equilibrium_id +
+            "', family='" + summary.equilibrium_family_id +
+            "', theorem='" + summary.equilibrium_preservation_theorem_id +
             "', flux_source_residual=" +
             std::to_string(summary.flux_source_residual) +
             ", tolerance=" + std::to_string(tol) +
+            ", tolerance_declared=" +
+            std::string(tolerance_declared ? "true" : "false") +
+            ", finite_residual=" +
+            std::string(residual_finite ? "true" : "false") +
             ", source_quadrature=" +
             std::string(summary.source_quadrature_metadata_present ? "true" : "false") +
             ", reconstruction=" +
             std::string(summary.reconstruction_metadata_present ? "true" : "false") +
             ", boundary_compatibility=" +
-            std::string(summary.boundary_compatibility_metadata_present ? "true" : "false"),
+            std::string(summary.boundary_compatibility_metadata_present ? "true" : "false") +
+            ", equilibrium_scope=" +
+            std::string(summary.equilibrium_scope_metadata_present ? "true" : "false") +
+            ", source_model_scope=" +
+            std::string(summary.source_model_scope_metadata_present ? "true" : "false") +
+            ", reconstruction_scope=" +
+            std::string(summary.reconstruction_scope_metadata_present ? "true" : "false") +
+            ", full_metadata=" +
+            std::string(metadata_present ? "true" : "false"),
             claim.confidence);
+        if (!residual_violation && !numeric_evidence_valid) {
+            addWarning(report,
+                "Equilibrium-preservation summary '" +
+                summary.equilibrium_id +
+                "' has invalid residual tolerance or residual evidence");
+        }
         report.claims.push_back(std::move(claim));
     }
 
     for (const auto& summary : summaries->moving_domain) {
         const Real tol = effectiveTolerance(summary.geometric_conservation_tolerance);
-        const bool jacobian_positive = summary.min_geometric_jacobian > Real{};
+        const bool jacobian_positive =
+            numeric::finitePositiveOrdered(summary.min_geometric_jacobian,
+                                           summary.max_geometric_jacobian);
         const bool residual_ok =
+            finiteNonnegative(summary.geometric_conservation_tolerance) &&
+            numeric::finite(summary.geometric_conservation_residual) &&
             std::abs(summary.geometric_conservation_residual) <= tol;
         const bool metadata_present =
             summary.mesh_velocity_metadata_present &&
@@ -1554,10 +1933,25 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
     }
 
     for (const auto& summary : summaries->transfer_operators) {
+        const bool tolerance_declared =
+            numeric::finiteDeclaredTolerance(summary.residual_tolerance);
+        const bool conservation_residual_finite =
+            numeric::finite(summary.conservation_residual);
+        const bool constant_residual_finite =
+            numeric::finite(summary.constant_preservation_residual);
+        const bool numeric_evidence_valid =
+            tolerance_declared &&
+            conservation_residual_finite &&
+            constant_residual_finite;
         const Real tol = effectiveTolerance(summary.residual_tolerance);
         const bool residual_ok =
+            numeric_evidence_valid &&
             std::abs(summary.conservation_residual) <= tol &&
             std::abs(summary.constant_preservation_residual) <= tol;
+        const bool residual_violation =
+            numeric_evidence_valid &&
+            (std::abs(summary.conservation_residual) > tol ||
+             std::abs(summary.constant_preservation_residual) > tol);
         const bool metadata_complete =
             summary.rank_metadata_present &&
             summary.interface_scope_metadata_present &&
@@ -1570,19 +1964,20 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
 
         PropertyClaim claim;
         claim.kind = PropertyKind::TransferOperatorCompatibility;
-        claim.flux_balance_residual = std::max(
-            std::abs(summary.conservation_residual),
-            std::abs(summary.constant_preservation_residual));
+        claim.flux_balance_residual = numeric_evidence_valid
+            ? std::max(std::abs(summary.conservation_residual),
+                       std::abs(summary.constant_preservation_residual))
+            : Real{};
         claim.estimate_scope = summary.interface_pair_id;
         claim.tested_block_id = summary.projection_space_id;
         claim.claim_origin = "PreservationStructureAnalyzer";
-        if (!residual_ok) {
+        if (residual_violation) {
             claim.status = PropertyStatus::Violated;
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Violated;
             claim.description =
                 "Transfer summary violates conservation or constant preservation residual tolerance";
-        } else if (metadata_complete) {
+        } else if (residual_ok && metadata_complete) {
             claim.status = PropertyStatus::Preserved;
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Certified;
@@ -1593,7 +1988,9 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
             claim.confidence = AnalysisConfidence::Medium;
             claim.certification_class = CertificationClass::NotCertified;
             claim.description =
-                "Transfer summary residuals pass but projection, mortar/dual-consistency, conditioning, action-reaction, scope, or rank metadata is incomplete";
+                numeric_evidence_valid
+                    ? "Transfer summary residuals pass but projection, mortar/dual-consistency, conditioning, action-reaction, scope, or rank metadata is incomplete"
+                    : "Transfer summary lacks finite declared tolerance or finite conservation/constant residual evidence";
         }
         claim.addEvidence("PreservationStructureAnalyzer",
             "TransferOperatorSummary interface='" +
@@ -1604,6 +2001,12 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
             ", constant_residual=" +
             std::to_string(summary.constant_preservation_residual) +
             ", tolerance=" + std::to_string(tol) +
+            ", tolerance_declared=" +
+            std::string(tolerance_declared ? "true" : "false") +
+            ", conservation_residual_finite=" +
+            std::string(conservation_residual_finite ? "true" : "false") +
+            ", constant_residual_finite=" +
+            std::string(constant_residual_finite ? "true" : "false") +
             ", rank_metadata=" +
             std::string(summary.rank_metadata_present ? "true" : "false") +
             ", interface_scope_metadata=" +
@@ -1617,15 +2020,34 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
             ", action_reaction_flux=" +
             std::string(summary.action_reaction_flux_metadata_present ? "true" : "false"),
             claim.confidence);
+        if (!residual_violation && !numeric_evidence_valid) {
+            addWarning(report,
+                "Transfer-operator summary for interface '" +
+                summary.interface_pair_id +
+                "' has invalid residual tolerance or residual evidence");
+        }
         report.claims.push_back(std::move(claim));
     }
 
     for (const auto& summary : summaries->adjoint_consistency) {
+        const bool tolerance_declared =
+            numeric::finiteDeclaredTolerance(
+                summary.discrete_adjoint_tolerance);
+        const bool residual_finite =
+            !summary.discrete_adjoint_residual_present ||
+            numeric::finite(summary.discrete_adjoint_residual);
         const Real adjoint_tol =
             effectiveTolerance(summary.discrete_adjoint_tolerance);
         const bool adjoint_residual_ok =
             summary.discrete_adjoint_residual_present &&
+            tolerance_declared &&
+            residual_finite &&
             std::abs(summary.discrete_adjoint_residual) <= adjoint_tol;
+        const bool adjoint_residual_violation =
+            summary.discrete_adjoint_residual_present &&
+            tolerance_declared &&
+            residual_finite &&
+            std::abs(summary.discrete_adjoint_residual) > adjoint_tol;
         const bool metadata_complete =
             summary.boundary_adjoint_metadata_present &&
             summary.stabilization_adjoint_metadata_present &&
@@ -1647,8 +2069,7 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
                 "Adjoint-consistency summary is certified for the goal functional with discrete adjoint residual evidence";
         } else if (summary.adjoint_consistency == AdjointConsistencyKind::No ||
                    !summary.transpose_backend_support ||
-                   (summary.discrete_adjoint_residual_present &&
-                    !adjoint_residual_ok)) {
+                   adjoint_residual_violation) {
             claim.status = PropertyStatus::Violated;
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Violated;
@@ -1678,8 +2099,20 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
             std::string(summary.discrete_adjoint_residual_present ? "true" : "false") +
             ", discrete_adjoint_residual=" +
             std::to_string(summary.discrete_adjoint_residual) +
+            ", tolerance_declared=" +
+            std::string(tolerance_declared ? "true" : "false") +
+            ", finite_residual=" +
+            std::string(residual_finite ? "true" : "false") +
             ", goal='" + summary.goal_functional_id + "'",
             claim.confidence);
+        if (!adjoint_residual_violation &&
+            summary.discrete_adjoint_residual_present &&
+            (!tolerance_declared || !residual_finite)) {
+            addWarning(report,
+                "Adjoint-consistency summary for contribution '" +
+                summary.contribution_id +
+                "' has invalid adjoint residual tolerance or residual");
+        }
         report.claims.push_back(std::move(claim));
     }
 }
@@ -1695,34 +2128,74 @@ void CoupledSystemStabilityAnalyzer::run(const ProblemAnalysisContext& context,
                 summary_covered_variable_sets.push_back(summary.variables);
             }
             const Real tol = effectiveTolerance(summary.coupling_tolerance);
+            const bool tolerance_declared =
+                summary.coupling_tolerance_present &&
+                numeric::finiteDeclaredTolerance(summary.coupling_tolerance);
+            const bool exchange_residual_finite =
+                summary.exchange_residual_present &&
+                numeric::finite(summary.exchange_residual);
+            const bool constraint_drift_finite =
+                summary.constraint_drift_present &&
+                numeric::finite(summary.constraint_drift_norm);
             const bool residual_evidence_present =
                 summary.exchange_residual_present &&
                 summary.constraint_drift_present &&
                 summary.coupling_tolerance_present;
+            const bool residual_numeric_evidence_present =
+                tolerance_declared &&
+                exchange_residual_finite &&
+                constraint_drift_finite;
+            const bool partition_spectral_finite =
+                !summary.partitioned_coupling ||
+                (summary.partition_iteration_spectral_radius_present &&
+                 numeric::finiteNonnegative(
+                     summary.partition_iteration_spectral_radius));
             const bool spectral_evidence_present =
                 !summary.partitioned_coupling ||
                 summary.partition_iteration_spectral_radius_present;
+            const bool nonnormal_coupling_bound_valid =
+                !summary.nonnormal_coupling_bound_present ||
+                (summary.accepted_nonnormal_coupling_growth_bound_present &&
+                 numeric::finiteNonnegative(
+                     summary.nonnormal_coupling_growth_bound) &&
+                 numeric::finiteNonnegative(
+                     summary.accepted_nonnormal_coupling_growth_bound) &&
+                 summary.nonnormal_coupling_growth_bound <=
+                     summary.accepted_nonnormal_coupling_growth_bound + tol);
+            const bool quantitative_nonnormal_coupling_evidence =
+                summary.nonnormal_coupling_bound_present &&
+                nonnormal_coupling_bound_valid;
             const bool numeric_evidence_present =
-                residual_evidence_present && spectral_evidence_present;
+                residual_evidence_present &&
+                residual_numeric_evidence_present &&
+                spectral_evidence_present &&
+                partition_spectral_finite &&
+                nonnormal_coupling_bound_valid;
             const bool spectral_ok =
                 !summary.partitioned_coupling ||
                 (summary.partition_iteration_spectral_radius_present &&
+                 partition_spectral_finite &&
                  summary.partition_iteration_spectral_radius < Real{1});
             const bool residual_ok =
-                residual_evidence_present &&
+                residual_numeric_evidence_present &&
                 std::abs(summary.exchange_residual) <= tol &&
                 std::abs(summary.constraint_drift_norm) <= tol &&
                 summary.unstable_exchange_count == 0u;
             const bool residual_violation =
-                residual_evidence_present && !residual_ok;
+                summary.unstable_exchange_count > 0u ||
+                (residual_numeric_evidence_present && !residual_ok);
             const bool spectral_violation =
                 summary.partitioned_coupling &&
                 summary.partition_iteration_spectral_radius_present &&
+                partition_spectral_finite &&
                 !spectral_ok;
+            const bool nonnormal_coupling_bound_violation =
+                summary.nonnormal_coupling_bound_present &&
+                !nonnormal_coupling_bound_valid;
             const bool contractive_or_bounded_operator_evidence =
                 summary.coupled_operator_stability_evidence_present &&
                 (summary.contraction_norm_evidence_present ||
-                 summary.nonnormal_coupling_bound_present ||
+                 quantitative_nonnormal_coupling_evidence ||
                  (summary.interface_energy_balance_evidence_present &&
                   summary.coupled_norm_coercivity_evidence_present));
             const bool partition_metadata_complete =
@@ -1737,12 +2210,13 @@ void CoupledSystemStabilityAnalyzer::run(const ProblemAnalysisContext& context,
             claim.constraint_drift_norm = summary.constraint_drift_norm;
             claim.claim_origin = "CoupledSystemStabilityAnalyzer";
             claim.estimate_scope = summary.coupling_group;
-            if (residual_violation || spectral_violation) {
+            if (residual_violation || spectral_violation ||
+                nonnormal_coupling_bound_violation) {
                 claim.status = PropertyStatus::Violated;
                 claim.confidence = AnalysisConfidence::High;
                 claim.certification_class = CertificationClass::Violated;
                 claim.description =
-                    "Coupled-system stability summary violates residual or partitioned-iteration bounds";
+                    "Coupled-system stability summary violates residual, partitioned-iteration, or nonnormal coupling bounds";
             } else if (!numeric_evidence_present) {
                 claim.status = PropertyStatus::Unknown;
                 claim.confidence = AnalysisConfidence::Medium;
@@ -1788,10 +2262,28 @@ void CoupledSystemStabilityAnalyzer::run(const ProblemAnalysisContext& context,
                 std::string(summary.constraint_drift_present ? "true" : "false") +
                 ", coupling_tolerance_present=" +
                 std::string(summary.coupling_tolerance_present ? "true" : "false") +
+                ", finite_tolerance=" +
+                std::string(tolerance_declared ? "true" : "false") +
+                ", finite_exchange_residual=" +
+                std::string(exchange_residual_finite ? "true" : "false") +
+                ", finite_constraint_drift=" +
+                std::string(constraint_drift_finite ? "true" : "false") +
+                ", finite_partition_spectral_radius=" +
+                std::string(partition_spectral_finite ? "true" : "false") +
                 ", unstable_exchanges=" +
                 std::to_string(summary.unstable_exchange_count) +
                 ", contraction_norm=" +
                 std::string(summary.contraction_norm_evidence_present ? "true" : "false") +
+                ", nonnormal_coupling_bound_present=" +
+                std::string(summary.nonnormal_coupling_bound_present ? "true" : "false") +
+                ", nonnormal_coupling_growth_bound=" +
+                std::to_string(summary.nonnormal_coupling_growth_bound) +
+                ", accepted_nonnormal_coupling_growth_bound_present=" +
+                std::string(summary.accepted_nonnormal_coupling_growth_bound_present ? "true" : "false") +
+                ", accepted_nonnormal_coupling_growth_bound=" +
+                std::to_string(summary.accepted_nonnormal_coupling_growth_bound) +
+                ", nonnormal_coupling_bound_valid=" +
+                std::string(nonnormal_coupling_bound_valid ? "true" : "false") +
                 ", interface_energy=" +
                 std::string(summary.interface_energy_balance_evidence_present ? "true" : "false") +
                 ", coupled_norm_coercivity=" +
@@ -1801,6 +2293,14 @@ void CoupledSystemStabilityAnalyzer::run(const ProblemAnalysisContext& context,
                 ", partition_metadata=" +
                 std::string(partition_metadata_complete ? "true" : "false"),
                 claim.confidence);
+            if (!residual_violation && !spectral_violation &&
+                residual_evidence_present && spectral_evidence_present &&
+                !numeric_evidence_present) {
+                addWarning(report,
+                    "Coupled-system stability summary '" +
+                    summary.coupling_group +
+                    "' has invalid residual, tolerance, drift, or spectral-radius evidence");
+            }
             report.claims.push_back(std::move(claim));
         }
     }

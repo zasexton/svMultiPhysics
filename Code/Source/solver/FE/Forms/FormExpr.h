@@ -90,6 +90,13 @@ enum class GeometrySensitivityMode : std::uint8_t {
     MeshMotionUnknowns
 };
 
+enum class GeometryTangentPath : std::uint8_t {
+    Auto,
+    ADReference,
+    SymbolicRequired,
+    SymbolicWithADCheck
+};
+
 struct GeometrySensitivityOptions {
     GeometrySensitivityMode mode{GeometrySensitivityMode::GeometryConstant};
     FieldId mesh_motion_field{INVALID_FIELD_ID};
@@ -195,6 +202,7 @@ struct JITOptions {
 struct SymbolicOptions {
     ADMode ad_mode{ADMode::None};
     bool use_symbolic_tangent{false};
+    GeometryTangentPath geometry_tangent_path{GeometryTangentPath::Auto};
     GeometrySensitivityOptions geometry_sensitivity{};
     JITOptions jit{};
     bool simplify_expressions{true};
@@ -252,6 +260,12 @@ struct SymbolicOptions {
         CurrentMeasure,
         ReferenceMeasure,
         SurfaceJacobian,
+        GeometryTrialVectorVariation,
+        GeometryTrialJacobianVariation,
+        MeshVelocityVariation,
+        CurrentMeasureVariation,
+        CurrentNormalVariation,
+        SurfaceJacobianVariation,
 	    Time,
 	    TimeStep,
 	    EffectiveTimeStep,        ///< Effective dt implied by dt(·) stencil coefficient (falls back to TimeStep)
@@ -543,6 +557,12 @@ public:
         static FormExpr currentMeasure();
         static FormExpr referenceMeasure();
         static FormExpr surfaceJacobian();
+        static FormExpr geometryTrialVectorVariation();
+        static FormExpr geometryTrialJacobianVariation();
+        static FormExpr meshVelocityVariation();
+        static FormExpr currentMeasureVariation();
+        static FormExpr currentNormalVariation();
+        static FormExpr surfaceJacobianVariation();
 	    static FormExpr time();
 	    static FormExpr timeStep();
 	    static FormExpr effectiveTimeStep();

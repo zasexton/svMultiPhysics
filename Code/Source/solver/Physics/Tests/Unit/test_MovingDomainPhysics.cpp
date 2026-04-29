@@ -381,6 +381,16 @@ TEST(MovingDomainPhysics, NavierStokesALEDisabledDoesNotConsumeMovingDomainTermi
     EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CurrentNormal));
 }
 
+TEST(MovingDomainPhysics, MovingMeshTangentPathDefaultsToSymbolicRequired)
+{
+    EXPECT_EQ(mm::HarmonicMeshMotionOptions{}.tangent_path,
+              FE::forms::GeometryTangentPath::SymbolicRequired);
+    EXPECT_EQ(mm::PseudoElasticMeshMotionOptions{}.tangent_path,
+              FE::forms::GeometryTangentPath::SymbolicRequired);
+    EXPECT_EQ(ns::IncompressibleNavierStokesVMSOptions{}.moving_mesh_tangent_path,
+              FE::forms::GeometryTangentPath::SymbolicRequired);
+}
+
 TEST(MovingDomainPhysics, NavierStokesALEEnabledRegistersMeshVelocityAndConsumesMeshVelocity)
 {
     const auto mesh = makeMesh();
@@ -463,6 +473,34 @@ TEST(MovingDomainPhysics, NavierStokesCoupledALEDerivesMeshVelocityFromDisplacem
         }
     }
     EXPECT_TRUE(has_fluid_mesh_coupling);
+}
+
+TEST(MovingDomainPhysics, NavierStokesCoupledALEAcceptsADReferenceTangentPathOverride)
+{
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_ale = true;
+    opts.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
+    opts.mesh_displacement_field_name = "mesh_displacement";
+    opts.mesh_velocity_field_name = "mesh_velocity";
+    opts.moving_mesh_tangent_path = FE::forms::GeometryTangentPath::ADReference;
+
+    FE::systems::FESystem system(mesh);
+    const auto displacement =
+        system.addField(FE::systems::FieldSpec{.name = "mesh_displacement",
+                                               .space = u_space,
+                                               .components = 3});
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    EXPECT_EQ(system.meshMotionField(FE::systems::MeshMotionFieldRole::Displacement),
+              displacement);
+    EXPECT_NE(system.findFieldByName("mesh_velocity"), FE::INVALID_FIELD_ID);
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+    EXPECT_EQ(system.dofHandler().getNumDofs(), 28);
 }
 
 TEST(MovingDomainPhysics, HarmonicMeshMotionRegistersDisplacementUnknownOnly)

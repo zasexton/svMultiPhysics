@@ -6,6 +6,7 @@
  */
 
 #include "Analysis/MeshGeometryAnalyzer.h"
+#include "Analysis/AnalysisNumericGuards.h"
 #include "Analysis/AnalysisSummaryTypes.h"
 
 #include <algorithm>
@@ -52,9 +53,8 @@ void addGeometryClaim(ProblemAnalysisReport& report,
 
 bool hasPositiveJacobianEvidence(const MeshGeometryQualitySummary& summary) noexcept
 {
-    return summary.min_jacobian > 0.0 &&
-           (summary.max_jacobian >= summary.min_jacobian ||
-            summary.max_jacobian == 0.0);
+    return numeric::finitePositiveOrdered(summary.min_jacobian,
+                                          summary.max_jacobian);
 }
 
 bool hasAspectRatioRisk(const MeshGeometryQualitySummary& summary) noexcept
@@ -66,7 +66,9 @@ bool hasAspectRatioRisk(const MeshGeometryQualitySummary& summary) noexcept
 bool hasJacobianViolation(const MeshGeometryQualitySummary& summary) noexcept
 {
     return summary.inverted_element_count > 0u ||
-           (summary.max_jacobian > 0.0 && summary.min_jacobian <= 0.0);
+           !numeric::finiteOrdered(summary.min_jacobian,
+                                   summary.max_jacobian) ||
+           summary.min_jacobian <= Real{};
 }
 
 std::uint64_t countRegionWorstElements(const ConnectedComponent& component,
@@ -148,16 +150,22 @@ void MeshGeometryAnalyzer::run(const ProblemAnalysisContext& context,
                     std::to_string(summary.max_aspect_ratio));
             addTopologyScopedGeometryClaims(context, report, summary);
         } else if (hasPositiveJacobianEvidence(summary)) {
-            const std::string shape_text = summary.shape_regular_evidence_present
+            const bool shape_evidence_valid =
+                summary.shape_regular_evidence_present &&
+                numeric::finitePositive(summary.shape_regular_constant) &&
+                summary.mesh_family_scope_present &&
+                !summary.mesh_family_scope.empty();
+            const std::string shape_text = shape_evidence_valid
                 ? ", shape_regular_constant=" +
-                      std::to_string(summary.shape_regular_constant)
-                : ", shape regularity not certified by this summary";
+                      std::to_string(summary.shape_regular_constant) +
+                      ", mesh_family_scope='" + summary.mesh_family_scope + "'"
+                : ", shape regularity/stability assumptions not certified by this summary";
             addGeometryClaim(report, summary,
                 PropertyStatus::Preserved,
                 CertificationClass::Certified,
-                summary.shape_regular_evidence_present
+                shape_evidence_valid
                     ? "Mesh mapping validity and reported shape-regularity evidence certified"
-                    : "Mesh mapping validity certified by positive Jacobian summary; shape regularity is out of scope",
+                    : "Mesh mapping invertibility certified by positive Jacobian summary; FEM shape-regularity stability evidence is out of scope",
                 "min_jacobian=" + std::to_string(summary.min_jacobian) +
                     ", max_jacobian=" +
                     std::to_string(summary.max_jacobian) +

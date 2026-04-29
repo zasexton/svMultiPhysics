@@ -6,6 +6,7 @@
  */
 
 #include "Analysis/CompatibilityAnalyzer.h"
+#include "Analysis/AnalysisNumericGuards.h"
 #include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
 
@@ -46,27 +47,72 @@ void emitInitialCompatibilityClaims(const ProblemAnalysisContext& context,
     }
 
     for (const auto& summary : summaries->initial_compatibility) {
-        const auto constraint_residual = std::abs(summary.initial_constraint_residual);
-        const auto boundary_residual = std::abs(summary.initial_boundary_residual);
-        const auto tolerance = std::max(summary.residual_tolerance, 0.0);
+        const bool constraint_residual_finite =
+            numeric::finite(summary.initial_constraint_residual);
+        const bool boundary_residual_finite =
+            numeric::finite(summary.initial_boundary_residual);
+        const auto constraint_residual = constraint_residual_finite
+            ? std::abs(summary.initial_constraint_residual)
+            : summary.initial_constraint_residual;
+        const auto boundary_residual = boundary_residual_finite
+            ? std::abs(summary.initial_boundary_residual)
+            : summary.initial_boundary_residual;
+        const bool tolerance_declared =
+            summary.residual_tolerance_declared &&
+            numeric::finiteDeclaredTolerance(summary.residual_tolerance);
+        const auto tolerance = tolerance_declared
+            ? summary.residual_tolerance
+            : 0.0;
+        const bool algebraic_scope_checked =
+            summary.algebraic_constraint_metadata_present &&
+            summary.checked_constraint_family_count > 0u;
+        const bool boundary_scope_checked =
+            summary.boundary_constraint_metadata_present &&
+            summary.checked_boundary_condition_count > 0u;
+        const bool invariant_scope_checked =
+            summary.invariant_domain_metadata_present;
+        const bool compatibility_scope_declared =
+            !summary.compatibility_scope.empty() &&
+            (algebraic_scope_checked ||
+             boundary_scope_checked ||
+             invariant_scope_checked);
+        const bool residuals_finite_for_checked_scopes =
+            (!algebraic_scope_checked || constraint_residual_finite) &&
+            (!boundary_scope_checked || boundary_residual_finite);
         const bool violated =
-            constraint_residual > tolerance ||
-            boundary_residual > tolerance ||
-            summary.invariant_domain_initial_violation_count > 0u;
+            tolerance_declared &&
+            residuals_finite_for_checked_scopes &&
+            ((algebraic_scope_checked && constraint_residual > tolerance) ||
+             (boundary_scope_checked && boundary_residual > tolerance) ||
+             (invariant_scope_checked &&
+              summary.invariant_domain_initial_violation_count > 0u));
 
         PropertyClaim claim;
         claim.kind = PropertyKind::InitialDataCompatibility;
-        claim.status = violated ? PropertyStatus::Violated
-                                : PropertyStatus::Preserved;
-        claim.confidence = AnalysisConfidence::High;
         claim.domain = DomainKind::Global;
-        claim.certification_class = violated ? CertificationClass::Violated
-                                             : CertificationClass::Certified;
-        claim.initial_data_compatible = !violated;
         claim.constraint_drift_norm = constraint_residual;
-        claim.description = violated
-            ? "Initial data violates algebraic, boundary, or invariant-domain compatibility"
-            : "Initial data satisfies algebraic and boundary compatibility summary";
+        if (!tolerance_declared || !compatibility_scope_declared ||
+            !residuals_finite_for_checked_scopes) {
+            claim.status = PropertyStatus::Unknown;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.description =
+                "Initial-data compatibility summary lacks declared tolerance, finite checked residuals, or checked constraint-family scope";
+        } else if (violated) {
+            claim.status = PropertyStatus::Violated;
+            claim.confidence = AnalysisConfidence::High;
+            claim.certification_class = CertificationClass::Violated;
+            claim.initial_data_compatible = false;
+            claim.description =
+                "Initial data violates algebraic, boundary, or invariant-domain compatibility";
+        } else {
+            claim.status = PropertyStatus::Preserved;
+            claim.confidence = AnalysisConfidence::High;
+            claim.certification_class = CertificationClass::Certified;
+            claim.initial_data_compatible = true;
+            claim.description =
+                "Initial data satisfies declared algebraic, boundary, or invariant-domain compatibility checks";
+        }
         claim.claim_origin = "CompatibilityAnalyzer";
         claim.addEvidence("CompatibilityAnalyzer",
             "InitialCompatibilitySummary constraint_residual=" +
@@ -74,6 +120,19 @@ void emitInitialCompatibilityClaims(const ProblemAnalysisContext& context,
             ", boundary_residual=" +
             std::to_string(summary.initial_boundary_residual) +
             ", tolerance=" + std::to_string(summary.residual_tolerance) +
+            ", tolerance_declared=" +
+            std::string(tolerance_declared ? "true" : "false") +
+            ", finite_constraint_residual=" +
+            std::string(constraint_residual_finite ? "true" : "false") +
+            ", finite_boundary_residual=" +
+            std::string(boundary_residual_finite ? "true" : "false") +
+            ", scope='" + summary.compatibility_scope + "'" +
+            ", algebraic_scope_checked=" +
+            std::string(algebraic_scope_checked ? "true" : "false") +
+            ", boundary_scope_checked=" +
+            std::string(boundary_scope_checked ? "true" : "false") +
+            ", invariant_scope_checked=" +
+            std::string(invariant_scope_checked ? "true" : "false") +
             ", invariant_violations=" +
             std::to_string(summary.invariant_domain_initial_violation_count));
         report.claims.push_back(std::move(claim));

@@ -704,6 +704,7 @@ struct ShapeInferenceResult {
             case FormExprType::CurrentJacobianDeterminant:
             case FormExprType::ReferenceJacobianDeterminant:
             case FormExprType::CurrentMeasure:
+            case FormExprType::CurrentMeasureVariation:
             case FormExprType::ReferenceMeasure:
                 out.shapes[idx] = scalarShape();
                 break;
@@ -835,6 +836,9 @@ struct ShapeInferenceResult {
             case FormExprType::PredictedMeshVelocity:
             case FormExprType::CurrentNormal:
             case FormExprType::ReferenceNormal:
+            case FormExprType::GeometryTrialVectorVariation:
+            case FormExprType::MeshVelocityVariation:
+            case FormExprType::CurrentNormalVariation:
                 out.shapes[idx] = vectorShape(dim);
                 break;
 
@@ -850,6 +854,8 @@ struct ShapeInferenceResult {
             case FormExprType::CurrentJacobian:
             case FormExprType::ReferenceJacobian:
             case FormExprType::SurfaceJacobian:
+            case FormExprType::GeometryTrialJacobianVariation:
+            case FormExprType::SurfaceJacobianVariation:
                 out.shapes[idx] = matrixShape(dim, dim);
                 break;
 
@@ -1749,6 +1755,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 if (op.type == FormExprType::TestFunction) {
                     d = static_cast<std::uint8_t>(d | 0x1u);
                 } else if (op.type == FormExprType::TrialFunction && ir.kind() == FormKind::Bilinear) {
+                    d = static_cast<std::uint8_t>(d | 0x2u);
+                } else if (ir.kind() == FormKind::Bilinear &&
+                           (op.type == FormExprType::GeometryTrialVectorVariation ||
+                            op.type == FormExprType::GeometryTrialJacobianVariation ||
+                            op.type == FormExprType::MeshVelocityVariation ||
+                            op.type == FormExprType::CurrentMeasureVariation ||
+                            op.type == FormExprType::CurrentNormalVariation ||
+                            op.type == FormExprType::SurfaceJacobianVariation)) {
                     d = static_cast<std::uint8_t>(d | 0x2u);
                 }
                 dep[op_idx] = d;
@@ -2751,7 +2765,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             return s;
         };
 
-	        const bool is_face_domain = (domain == IntegralDomain::InteriorFace || domain == IntegralDomain::InterfaceFace);
+	        const bool is_face_domain = (domain == IntegralDomain::InteriorFace ||
+                                        domain == IntegralDomain::InterfaceFace);
+        const bool uses_surface_measure_domain = (domain == IntegralDomain::Boundary ||
+                                                  is_face_domain);
 	        const std::optional<std::uint32_t> fixed_n_qpts_minus =
 	            (specialization != nullptr) ? specialization->n_qpts_minus : std::optional<std::uint32_t>{};
 	        const std::optional<std::uint32_t> fixed_n_test_dofs_minus =
@@ -5201,8 +5218,242 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             return builder.CreateSelect(is_zero, side.dt, inv_abs);
         };
 
+        const std::uint32_t codegen_dim = [&]() -> std::uint32_t {
+            if (const auto& ts = ir.testSpace()) {
+                const auto d = static_cast<std::uint32_t>(ts->topological_dimension);
+                if (d >= 1u && d <= 3u) return d;
+            }
+            if (const auto& ts = ir.trialSpace()) {
+                const auto d = static_cast<std::uint32_t>(ts->topological_dimension);
+                if (d >= 1u && d <= 3u) return d;
+            }
+            return 3u;
+        }();
+
         auto loadDtCoeff0 = [&](const SideView& side, int order) -> llvm::Value* {
             return loadDtCoeff(side, order, /*history_index=*/0);
+        };
+
+        auto loadTrialGeometryVectorVariation =
+            [&](const SideView& side,
+                llvm::Value* dof_index,
+                llvm::Value* q,
+                const Shape& shape,
+                std::string_view name) -> CodeValue {
+            if (shape.kind != Shape::Kind::Vector) {
+                throw std::runtime_error("LLVMGen: geometry trial vector variation expects vector shape");
+            }
+
+            const auto vd = static_cast<std::size_t>(shape.dims[0]);
+            auto* uses_vec_basis =
+                builder.CreateICmpNE(side.trial_uses_vector_basis, builder.getInt32(0));
+            auto* vb = llvm::BasicBlock::Create(*ctx, std::string(name) + ".vec_basis", fn);
+            auto* sb = llvm::BasicBlock::Create(*ctx, std::string(name) + ".scalar_basis", fn);
+            auto* merge = llvm::BasicBlock::Create(*ctx, std::string(name) + ".merge", fn);
+
+            builder.CreateCondBr(uses_vec_basis, vb, sb);
+
+            std::array<llvm::Value*, 3> vb_vals{rc(0.0), rc(0.0), rc(0.0)};
+            std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
+
+            builder.SetInsertPoint(vb);
+            {
+                const auto v = loadVec3FromTable(side.trial_basis_vector_values_xyz,
+                                                 side.n_trial_dofs,
+                                                 dof_index,
+                                                 q);
+                for (std::size_t c = 0; c < vd; ++c) {
+                    vb_vals[c] = v[c];
+                }
+                builder.CreateBr(merge);
+            }
+            auto* vb_block = builder.GetInsertBlock();
+
+            builder.SetInsertPoint(sb);
+            {
+                auto* dofs_per_comp =
+                    builder.CreateUDiv(side.n_trial_dofs,
+                                       builder.getInt32(static_cast<std::uint32_t>(vd)));
+                const auto comp_flags = emitComponentFlags(dof_index, dofs_per_comp, vd);
+                auto* phi = loadBasisScalar(side.trial_basis_values,
+                                            side.n_trial_dofs,
+                                            dof_index,
+                                            q);
+                for (std::size_t c = 0; c < vd; ++c) {
+                    sb_vals[c] = builder.CreateSelect(comp_flags[c], phi, rc(0.0));
+                }
+                builder.CreateBr(merge);
+            }
+            auto* sb_block = builder.GetInsertBlock();
+
+            builder.SetInsertPoint(merge);
+            CodeValue out = makeZero(shape);
+            for (std::size_t c = 0; c < vd; ++c) {
+                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64,
+                                              2,
+                                              std::string(name) + ".phi" + std::to_string(c));
+                phi->addIncoming(vb_vals[c], vb_block);
+                phi->addIncoming(sb_vals[c], sb_block);
+                out.elems[c] = phi;
+            }
+            return out;
+        };
+
+        auto loadGeometryJacobianVariation =
+            [&](const SideView& side,
+                llvm::Value* dof_index,
+                llvm::Value* q,
+                const Shape& shape,
+                std::string_view name) -> CodeValue {
+            if (shape.kind != Shape::Kind::Matrix) {
+                throw std::runtime_error("LLVMGen: geometry Jacobian variation expects matrix shape");
+            }
+            const auto grad_current =
+                loadBasisGradientMatrix(side, false, dof_index, q, q, shape, std::string(name) + ".grad_current");
+            const auto current_jacobian = loadMatDimFromQ(side.current_jacobians, q, shape.dims[0]);
+            return mul(grad_current, current_jacobian);
+        };
+
+        auto loadSurfaceJacobianColumn =
+            [&](const SideView& side, llvm::Value* q, const Shape& shape, std::uint32_t column) -> CodeValue {
+            const auto S = loadMatDimFromQ(side.surface_jacobians, q, shape.dims[0]);
+            CodeValue out = makeZero(vectorShape(shape.dims[0]));
+            for (std::uint32_t r = 0; r < shape.dims[0]; ++r) {
+                out.elems[r] = S.elems[static_cast<std::size_t>(r * shape.dims[1] + column)];
+            }
+            return out;
+        };
+
+        auto loadSurfaceTangentVariation =
+            [&](const SideView& side,
+                llvm::Value* dof_index,
+                llvm::Value* q,
+                const Shape& vector_shape,
+                std::uint32_t column,
+                std::string_view name) -> CodeValue {
+            const auto grad_shape = matrixShape(vector_shape.dims[0], vector_shape.dims[0]);
+            const auto grad_current =
+                loadBasisGradientMatrix(side, false, dof_index, q, q, grad_shape, std::string(name) + ".grad_current");
+            const auto tangent = loadSurfaceJacobianColumn(side, q, grad_shape, column);
+            return mul(grad_current, tangent);
+        };
+
+        auto loadCurrentNormalVariation =
+            [&](const SideView& side,
+                llvm::Value* dof_index,
+                llvm::Value* q,
+                const Shape& shape,
+                std::string_view name) -> CodeValue {
+            const auto dim_u32 = shape.dims[0];
+            CodeValue out = makeZero(shape);
+            auto* measure = loadRealPtrAt(side.current_measures, q);
+            auto* positive = builder.CreateFCmpOGT(measure, rc(0.0));
+
+            if (dim_u32 == 3u) {
+                const auto t0 = loadSurfaceJacobianColumn(side, q, matrixShape(3u, 3u), 0u);
+                const auto t1 = loadSurfaceJacobianColumn(side, q, matrixShape(3u, 3u), 1u);
+                const auto dt0 = loadSurfaceTangentVariation(side, dof_index, q, shape, 0u, std::string(name) + ".dt0");
+                const auto dt1 = loadSurfaceTangentVariation(side, dof_index, q, shape, 1u, std::string(name) + ".dt1");
+                const auto normal = loadXYZDim(side.current_normals_xyz, q, 3u);
+                const auto da = add(cross(dt0, t1), cross(t0, dt1));
+                auto* normal_part = inner(normal, da).elems[0];
+                for (std::uint32_t d = 0; d < 3u; ++d) {
+                    auto* numerator =
+                        builder.CreateFSub(da.elems[d],
+                                           builder.CreateFMul(normal.elems[d], normal_part));
+                    auto* value = builder.CreateFDiv(numerator, measure);
+                    out.elems[d] = builder.CreateSelect(positive, value, rc(0.0));
+                }
+                return out;
+            }
+
+            if (dim_u32 == 2u) {
+                const auto t0 = loadSurfaceJacobianColumn(side, q, matrixShape(2u, 2u), 0u);
+                const auto dt0 = loadSurfaceTangentVariation(side, dof_index, q, shape, 0u, std::string(name) + ".dt0");
+                auto* unit_tx = builder.CreateFDiv(t0.elems[0], measure);
+                auto* unit_ty = builder.CreateFDiv(t0.elems[1], measure);
+                auto* dmeasure = builder.CreateFAdd(builder.CreateFMul(unit_tx, dt0.elems[0]),
+                                                    builder.CreateFMul(unit_ty, dt0.elems[1]));
+                auto* dux = builder.CreateFDiv(
+                    builder.CreateFSub(dt0.elems[0], builder.CreateFMul(unit_tx, dmeasure)),
+                    measure);
+                auto* duy = builder.CreateFDiv(
+                    builder.CreateFSub(dt0.elems[1], builder.CreateFMul(unit_ty, dmeasure)),
+                    measure);
+                out.elems[0] = builder.CreateSelect(positive, builder.CreateFNeg(duy), rc(0.0));
+                out.elems[1] = builder.CreateSelect(positive, dux, rc(0.0));
+                return out;
+            }
+
+            return out;
+        };
+
+        auto loadCurrentMeasureVariation =
+            [&](const SideView& side,
+                llvm::Value* dof_index,
+                llvm::Value* q,
+                const Shape& scalar_shape,
+                std::string_view name) -> CodeValue {
+            (void)scalar_shape;
+            const auto dim_u32 = codegen_dim;
+            auto* measure = loadRealPtrAt(side.current_measures, q);
+            if (!uses_surface_measure_domain) {
+                const auto jac_shape = matrixShape(dim_u32, dim_u32);
+                const auto J = loadMatDimFromQ(side.current_jacobians, q, dim_u32);
+                const auto dJ = loadGeometryJacobianVariation(side, dof_index, q, jac_shape, name);
+                return makeScalar(builder.CreateFMul(measure, trace(mul(inv(J), dJ)).elems[0]));
+            }
+
+            if (dim_u32 == 3u) {
+                const auto t0 = loadSurfaceJacobianColumn(side, q, matrixShape(3u, 3u), 0u);
+                const auto t1 = loadSurfaceJacobianColumn(side, q, matrixShape(3u, 3u), 1u);
+                const auto dt0 = loadSurfaceTangentVariation(
+                    side, dof_index, q, vectorShape(3u), 0u, std::string(name) + ".dt0");
+                const auto dt1 = loadSurfaceTangentVariation(
+                    side, dof_index, q, vectorShape(3u), 1u, std::string(name) + ".dt1");
+                const auto normal = loadXYZDim(side.current_normals_xyz, q, 3u);
+                const auto da = add(cross(dt0, t1), cross(t0, dt1));
+                return inner(normal, da);
+            }
+
+            if (dim_u32 == 2u) {
+                const auto t0 = loadSurfaceJacobianColumn(side, q, matrixShape(2u, 2u), 0u);
+                const auto dt0 = loadSurfaceTangentVariation(
+                    side, dof_index, q, vectorShape(2u), 0u, std::string(name) + ".dt0");
+                auto* positive = builder.CreateFCmpOGT(measure, rc(0.0));
+                auto* numerator = builder.CreateFAdd(builder.CreateFMul(t0.elems[0], dt0.elems[0]),
+                                                     builder.CreateFMul(t0.elems[1], dt0.elems[1]));
+                auto* value = builder.CreateFDiv(numerator, measure);
+                return makeScalar(builder.CreateSelect(positive, value, rc(0.0)));
+            }
+
+            return makeScalar(rc(0.0));
+        };
+
+        auto loadSurfaceJacobianVariation =
+            [&](const SideView& side,
+                llvm::Value* dof_index,
+                llvm::Value* q,
+                const Shape& shape,
+                std::string_view name) -> CodeValue {
+            CodeValue out = makeZero(shape);
+            const auto dim_u32 = shape.dims[0];
+            const auto face_dim = (dim_u32 == 3u) ? 2u : ((dim_u32 == 2u) ? 1u : 0u);
+            for (std::uint32_t c = 0; c < face_dim; ++c) {
+                const auto dt = loadSurfaceTangentVariation(side, dof_index, q, vectorShape(dim_u32), c,
+                                                            std::string(name) + ".dt" + std::to_string(c));
+                for (std::uint32_t r = 0; r < dim_u32; ++r) {
+                    out.elems[static_cast<std::size_t>(r * shape.dims[1] + c)] = dt.elems[r];
+                }
+            }
+            if (dim_u32 == 3u) {
+                const auto dn = loadCurrentNormalVariation(side, dof_index, q, vectorShape(3u),
+                                                           std::string(name) + ".dn");
+                for (std::uint32_t r = 0; r < 3u; ++r) {
+                    out.elems[static_cast<std::size_t>(r * shape.dims[1] + 2u)] = dn.elems[r];
+                }
+            }
+            return out;
         };
 
         auto loadPrevSolutionCoeffsPtr = [&](const SideView& side, int k) -> llvm::Value* {
@@ -6193,6 +6444,37 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     case FormExprType::CurrentJacobianDeterminant:
                     case FormExprType::CurrentMeasure:
                         values[op_idx] = makeScalar(loadRealPtrAt(side.current_measures, q_index));
+                        break;
+
+                    case FormExprType::GeometryTrialVectorVariation:
+                        values[op_idx] = loadTrialGeometryVectorVariation(
+                            side, j_index, q_index, shape, "geom_trial_vector");
+                        break;
+
+                    case FormExprType::MeshVelocityVariation:
+                        values[op_idx] = mul(
+                            makeScalar(loadDtCoeff0(side, 1)),
+                            loadTrialGeometryVectorVariation(side, j_index, q_index, shape, "mesh_velocity_var"));
+                        break;
+
+                    case FormExprType::GeometryTrialJacobianVariation:
+                        values[op_idx] = loadGeometryJacobianVariation(
+                            side, j_index, q_index, shape, "geom_trial_jacobian");
+                        break;
+
+                    case FormExprType::CurrentMeasureVariation:
+                        values[op_idx] = loadCurrentMeasureVariation(
+                            side, j_index, q_index, shape, "current_measure_var");
+                        break;
+
+                    case FormExprType::CurrentNormalVariation:
+                        values[op_idx] = loadCurrentNormalVariation(
+                            side, j_index, q_index, shape, "current_normal_var");
+                        break;
+
+                    case FormExprType::SurfaceJacobianVariation:
+                        values[op_idx] = loadSurfaceJacobianVariation(
+                            side, j_index, q_index, shape, "surface_jacobian_var");
                         break;
 
                     case FormExprType::ReferenceJacobianDeterminant:
@@ -11928,6 +12210,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     case FormExprType::CurrentMeasure:
                     case FormExprType::ReferenceMeasure:
                     case FormExprType::SurfaceJacobian:
+                    case FormExprType::GeometryTrialVectorVariation:
+                    case FormExprType::GeometryTrialJacobianVariation:
+                    case FormExprType::MeshVelocityVariation:
+                    case FormExprType::CurrentMeasureVariation:
+                    case FormExprType::CurrentNormalVariation:
+                    case FormExprType::SurfaceJacobianVariation:
                     case FormExprType::Pullback:
                     case FormExprType::Pushforward:
                         return true;
@@ -12249,6 +12537,31 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             case FormExprType::JacobianDeterminant:
                                 req.need_jacobian_dets = true;
                                 markInterleavedGeometryMeta(req);
+                                break;
+
+                            case FormExprType::GeometryTrialVectorVariation:
+                                markTrialValueAccess(req, shape);
+                                break;
+
+                            case FormExprType::MeshVelocityVariation:
+                                markTrialValueAccess(req, shape);
+                                req.need_dt_stencil_coeffs_base = true;
+                                break;
+
+                            case FormExprType::GeometryTrialJacobianVariation:
+                                markTrialGradientAccess(req);
+                                break;
+
+                            case FormExprType::CurrentMeasureVariation:
+                                markTrialGradientAccess(req);
+                                break;
+
+                            case FormExprType::CurrentNormalVariation:
+                                markTrialGradientAccess(req);
+                                break;
+
+                            case FormExprType::SurfaceJacobianVariation:
+                                markTrialGradientAccess(req);
                                 break;
 
                             case FormExprType::TestFunction:
@@ -14532,6 +14845,35 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     return out;
                 };
 
+                auto evalGeometryVariation =
+                    [&](const SideView& side,
+                        bool is_plus,
+                        FormExprType type,
+                        const Shape& shape,
+                        std::string_view name) -> CodeValue {
+                    if (is_plus != trial_active_plus) {
+                        return makeZero(shape);
+                    }
+                    switch (type) {
+                        case FormExprType::GeometryTrialVectorVariation:
+                            return loadTrialGeometryVectorVariation(side, j_index, q_index, shape, name);
+                        case FormExprType::MeshVelocityVariation:
+                            return mul(makeScalar(loadDtCoeff0(side, 1)),
+                                       loadTrialGeometryVectorVariation(side, j_index, q_index, shape, name));
+                        case FormExprType::GeometryTrialJacobianVariation:
+                            return loadGeometryJacobianVariation(side, j_index, q_index, shape, name);
+                        case FormExprType::CurrentMeasureVariation:
+                            return loadCurrentMeasureVariation(side, j_index, q_index, shape, name);
+                        case FormExprType::CurrentNormalVariation:
+                            return loadCurrentNormalVariation(side, j_index, q_index, shape, name);
+                        case FormExprType::SurfaceJacobianVariation:
+                            return loadSurfaceJacobianVariation(side, j_index, q_index, shape, name);
+                        default:
+                            break;
+                    }
+                    throw std::runtime_error("LLVMGen: unsupported geometry variation terminal");
+                };
+
                 auto evalGradient = [&](const SideView& side, bool is_plus, const KernelIROp& op, const Shape& shape) -> CodeValue {
                     const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
                     const auto& kid = term.ir.ops[child_idx];
@@ -15952,6 +16294,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         case FormExprType::ReferenceMeasure:
                             values_minus[op_idx] = makeScalar(loadRealPtrAt(side_minus.reference_measures, q_index));
                             values_plus[op_idx] = makeScalar(loadRealPtrAt(side_plus.reference_measures, q_index));
+                            break;
+
+                        case FormExprType::GeometryTrialVectorVariation:
+                        case FormExprType::GeometryTrialJacobianVariation:
+                        case FormExprType::MeshVelocityVariation:
+                        case FormExprType::CurrentMeasureVariation:
+                        case FormExprType::CurrentNormalVariation:
+                        case FormExprType::SurfaceJacobianVariation:
+                            values_minus[op_idx] = evalGeometryVariation(
+                                side_minus, /*is_plus=*/false, op.type, shape, "face_geom_var_minus");
+                            values_plus[op_idx] = evalGeometryVariation(
+                                side_plus, /*is_plus=*/true, op.type, shape, "face_geom_var_plus");
                             break;
 
                         case FormExprType::Pullback:

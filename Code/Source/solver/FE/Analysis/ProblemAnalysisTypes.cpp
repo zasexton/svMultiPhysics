@@ -698,6 +698,8 @@ void traceMatrixSummary(std::ostream& out,
         << " cols=" << summary.cols
         << " positive_offdiag=" << summary.positive_offdiag_count
         << " row_sum_violations=" << summary.row_sum_violation_count
+        << " nonfinite_entries=" << summary.nonfinite_entry_count
+        << " nonfinite_row_sums=" << summary.nonfinite_row_sum_count
         << " min_row_sum=" << std::setprecision(17) << summary.min_row_sum
         << " max_row_sum=" << summary.max_row_sum
         << " sign_tolerance=" << summary.sign_tolerance

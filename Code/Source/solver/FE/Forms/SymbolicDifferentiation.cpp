@@ -65,6 +65,8 @@ namespace {
         case FormExprType::SymmetricPart:
         case FormExprType::SkewPart:
         case FormExprType::Deviator:
+        case FormExprType::RestrictMinus:
+        case FormExprType::RestrictPlus:
         case FormExprType::TimeDerivative: {
             const auto kids = node.childrenShared();
             if (kids.size() == 1u && kids[0]) return isZeroLike(*kids[0]);
@@ -233,6 +235,9 @@ struct DiffTargetConfig {
 
     // How to rewrite residual TrialFunction occurrences in the primal expression.
     FieldId trial_state_field{CURRENT_SOLUTION_FIELD_ID};
+    // FieldId whose residual TrialFunction occurrences represent the active
+    // trial unknown even when their primal is rewritten to CURRENT_SOLUTION.
+    std::optional<FieldId> active_trial_field{};
 
     // SpecificTrialFunction target.
     std::optional<FormExprNode::SpaceSignature> trial_sig{};
@@ -245,7 +250,18 @@ struct DiffTargetConfig {
 
     // AuxiliaryOutputSlot target.
     std::optional<std::uint32_t> aux_output_slot{};
+
+    GeometrySensitivityOptions geometry_sensitivity{};
 };
+
+[[nodiscard]] bool differentiatesMeshGeometry(const DiffTargetConfig& cfg) noexcept
+{
+    return cfg.kind == DiffWrtKind::FieldId &&
+           cfg.field_id.has_value() &&
+           cfg.geometry_sensitivity.mode == GeometrySensitivityMode::MeshMotionUnknowns &&
+           cfg.geometry_sensitivity.mesh_motion_field != INVALID_FIELD_ID &&
+           *cfg.field_id == cfg.geometry_sensitivity.mesh_motion_field;
+}
 
 [[nodiscard]] bool spaceSignatureEqual(const FormExprNode::SpaceSignature& a,
                                        const FormExprNode::SpaceSignature& b) noexcept
@@ -846,6 +862,10 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                     return cfg.trial_sig.has_value() && cfg.trial_name.has_value() &&
                            spaceSignatureEqual(sig, *cfg.trial_sig) && name == *cfg.trial_name;
                 case DiffWrtKind::FieldId:
+                    if (cfg.active_trial_field.has_value() && cfg.field_id.has_value() &&
+                        *cfg.active_trial_field == *cfg.field_id) {
+                        return true;
+                    }
                     return cfg.field_id.has_value() && (cfg.trial_state_field == *cfg.field_id);
                 default:
                     return false;
@@ -898,6 +918,28 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
             case FormExprType::PreviousSolutionRef:
             case FormExprType::Coordinate:
             case FormExprType::ReferenceCoordinate:
+            case FormExprType::GeometryTrialVectorVariation:
+            case FormExprType::GeometryTrialJacobianVariation:
+            case FormExprType::MeshVelocityVariation:
+            case FormExprType::CurrentMeasureVariation:
+            case FormExprType::CurrentNormalVariation:
+            case FormExprType::SurfaceJacobianVariation:
+            case FormExprType::Time:
+            case FormExprType::TimeStep:
+            case FormExprType::EffectiveTimeStep:
+            case FormExprType::Identity:
+            case FormExprType::Jacobian:
+            case FormExprType::JacobianInverse:
+            case FormExprType::JacobianDeterminant:
+            case FormExprType::Normal:
+            case FormExprType::CellDiameter:
+            case FormExprType::CellVolume:
+            case FormExprType::FacetArea:
+            case FormExprType::CellDomainId:
+                out.primal = FormExpr(node);
+                out.deriv = zeroOf(out.primal);
+                break;
+
             case FormExprType::MeshDisplacement:
             case FormExprType::MeshVelocity:
             case FormExprType::MeshAcceleration:
@@ -914,22 +956,40 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
             case FormExprType::ReferenceNormal:
             case FormExprType::CurrentMeasure:
             case FormExprType::ReferenceMeasure:
-            case FormExprType::SurfaceJacobian:
-            case FormExprType::Time:
-            case FormExprType::TimeStep:
-            case FormExprType::EffectiveTimeStep:
-            case FormExprType::Identity:
-            case FormExprType::Jacobian:
-            case FormExprType::JacobianInverse:
-            case FormExprType::JacobianDeterminant:
-            case FormExprType::Normal:
-            case FormExprType::CellDiameter:
-            case FormExprType::CellVolume:
-            case FormExprType::FacetArea:
-            case FormExprType::CellDomainId:
+            case FormExprType::SurfaceJacobian: {
                 out.primal = FormExpr(node);
-                out.deriv = zeroOf(out.primal);
+                if (!differentiatesMeshGeometry(cfg)) {
+                    out.deriv = zeroOf(out.primal);
+                    break;
+                }
+
+                switch (node->type()) {
+                    case FormExprType::MeshDisplacement:
+                    case FormExprType::CurrentCoordinate:
+                        out.deriv = FormExpr::geometryTrialVectorVariation();
+                        break;
+                    case FormExprType::MeshVelocity:
+                        out.deriv = FormExpr::meshVelocityVariation();
+                        break;
+                    case FormExprType::CurrentJacobian:
+                        out.deriv = FormExpr::geometryTrialJacobianVariation();
+                        break;
+                    case FormExprType::CurrentJacobianDeterminant:
+                    case FormExprType::CurrentMeasure:
+                        out.deriv = FormExpr::currentMeasureVariation();
+                        break;
+                    case FormExprType::CurrentNormal:
+                        out.deriv = FormExpr::currentNormalVariation();
+                        break;
+                    case FormExprType::SurfaceJacobian:
+                        out.deriv = FormExpr::surfaceJacobianVariation();
+                        break;
+                    default:
+                        out.deriv = zeroOf(out.primal);
+                        break;
+                }
                 break;
+            }
 
             // AuxiliaryOutputRef: constant unless we're differentiating w.r.t.
             // a specific auxiliary output slot.
@@ -1060,13 +1120,17 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
             case FormExprType::RestrictMinus: {
                 const auto a = diff1(0);
                 out.primal = a.primal.minus();
-                out.deriv = a.deriv.minus();
+                out.deriv = (a.deriv.isValid() && a.deriv.node() && isZeroLike(*a.deriv.node()))
+                    ? a.deriv
+                    : a.deriv.minus();
                 break;
             }
             case FormExprType::RestrictPlus: {
                 const auto a = diff1(0);
                 out.primal = a.primal.plus();
-                out.deriv = a.deriv.plus();
+                out.deriv = (a.deriv.isValid() && a.deriv.node() && isZeroLike(*a.deriv.node()))
+                    ? a.deriv
+                    : a.deriv.plus();
                 break;
             }
             case FormExprType::Jump: {
@@ -1582,27 +1646,47 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
             case FormExprType::CellIntegral: {
                 const auto a = diff1(0);
                 out.primal = a.primal.dx();
-                out.deriv = a.deriv.dx();
+                auto deriv_integrand = a.deriv;
+                if (differentiatesMeshGeometry(cfg)) {
+                    deriv_integrand = deriv_integrand +
+                        a.primal * (FormExpr::currentMeasureVariation() / FormExpr::currentMeasure());
+                }
+                out.deriv = deriv_integrand.dx();
                 break;
             }
             case FormExprType::BoundaryIntegral: {
                 const int marker = node->boundaryMarker().value_or(-1);
                 const auto a = diff1(0);
                 out.primal = a.primal.ds(marker);
-                out.deriv = a.deriv.ds(marker);
+                auto deriv_integrand = a.deriv;
+                if (differentiatesMeshGeometry(cfg)) {
+                    deriv_integrand = deriv_integrand +
+                        a.primal * (FormExpr::currentMeasureVariation() / FormExpr::currentMeasure());
+                }
+                out.deriv = deriv_integrand.ds(marker);
                 break;
             }
             case FormExprType::InteriorFaceIntegral: {
                 const auto a = diff1(0);
                 out.primal = a.primal.dS();
-                out.deriv = a.deriv.dS();
+                auto deriv_integrand = a.deriv;
+                if (differentiatesMeshGeometry(cfg)) {
+                    deriv_integrand = deriv_integrand +
+                        a.primal * (FormExpr::currentMeasureVariation() / FormExpr::currentMeasure());
+                }
+                out.deriv = deriv_integrand.dS();
                 break;
             }
             case FormExprType::InterfaceIntegral: {
                 const int marker = node->interfaceMarker().value_or(-1);
                 const auto a = diff1(0);
                 out.primal = a.primal.dI(marker);
-                out.deriv = a.deriv.dI(marker);
+                auto deriv_integrand = a.deriv;
+                if (differentiatesMeshGeometry(cfg)) {
+                    deriv_integrand = deriv_integrand +
+                        a.primal * (FormExpr::currentMeasureVariation() / FormExpr::currentMeasure());
+                }
+                out.deriv = deriv_integrand.dI(marker);
                 break;
             }
 
@@ -1692,6 +1776,28 @@ FormExpr differentiateResidual(const FormExpr& residual_form,
     cfg.kind = DiffWrtKind::FieldId;
     cfg.field_id = field;
     cfg.trial_state_field = trial_state_field;
+    return differentiateResidualImpl(residual_form, cfg);
+}
+
+FormExpr differentiateResidual(const FormExpr& residual_form,
+                               FieldId field,
+                               FieldId trial_state_field,
+                               GeometrySensitivityOptions geometry_sensitivity)
+{
+    if (geometry_sensitivity.mode == GeometrySensitivityMode::MeshMotionUnknowns &&
+        geometry_sensitivity.mesh_motion_field == INVALID_FIELD_ID) {
+        throw std::invalid_argument(
+            "differentiateResidual: mesh-motion geometry sensitivity requires a valid mesh_motion_field");
+    }
+
+    DiffTargetConfig cfg;
+    cfg.kind = DiffWrtKind::FieldId;
+    cfg.field_id = field;
+    cfg.trial_state_field = trial_state_field;
+    cfg.geometry_sensitivity = geometry_sensitivity;
+    if (trial_state_field == CURRENT_SOLUTION_FIELD_ID) {
+        cfg.active_trial_field = field;
+    }
     return differentiateResidualImpl(residual_form, cfg);
 }
 
@@ -1893,13 +1999,17 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
             case FormExprType::RestrictMinus: {
                 const auto a = diff1(0);
                 out.primal = a.primal.minus();
-                out.deriv = a.deriv.minus();
+                out.deriv = (a.deriv.isValid() && a.deriv.node() && isZeroLike(*a.deriv.node()))
+                    ? a.deriv
+                    : a.deriv.minus();
                 break;
             }
             case FormExprType::RestrictPlus: {
                 const auto a = diff1(0);
                 out.primal = a.primal.plus();
-                out.deriv = a.deriv.plus();
+                out.deriv = (a.deriv.isValid() && a.deriv.node() && isZeroLike(*a.deriv.node()))
+                    ? a.deriv
+                    : a.deriv.plus();
                 break;
             }
             case FormExprType::Jump: {

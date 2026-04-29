@@ -81,6 +81,14 @@ TEST(Phase6ExtendedAnalyzers, SpaceCompatibilityCompatibleComplexCertifiedViolat
     good.exact_sequence_compatible = true;
     good.trace_sequence_compatible = true;
     good.commuting_projection_available = true;
+    good.compatible_complex_theorem_id =
+        "Arnold-Falk-Winther bounded cochain projection";
+    good.bounded_cochain_projection_evidence_present = true;
+    good.projection_bound_present = true;
+    good.projection_bound = 2.0;
+    good.projection_stability_metadata_present = true;
+    good.mesh_family_scope_present = true;
+    good.shape_regular_mesh_evidence_present = true;
     good_summaries.compatible_complexes.push_back(good);
 
     auto good_report = analyzeWithSummaries(std::move(good_summaries));
@@ -188,6 +196,7 @@ TEST(Phase6ExtendedAnalyzers, ConservationConsumesFluxBalanceCertifiedViolatedAn
     good.source_quadrature_consistency_present = true;
     good.orientation_consistency_present = true;
     good.boundary_flux_accounted_for = true;
+    good.steady_balance_scope = true;
     good_summaries.flux_balances.push_back(good);
 
     auto good_report = analyzeWithSummaries(std::move(good_summaries));
@@ -251,11 +260,21 @@ TEST(Phase6ExtendedAnalyzers, InterfaceValidationConsumesBoundaryPenaltyAndFluxE
     penalty.required_lower_bound_present = true;
     penalty.required_lower_bound = 1.0;
     penalty.trace_inverse_metadata_present = true;
+    penalty.scale_theorem_id = "Nitsche trace-inverse coercivity bound";
     summaries.parameter_scales.push_back(penalty);
     FluxBalanceSummary flux;
     flux.block = scalarBlock("weak-boundary", DomainKind::Boundary);
+    flux.balance_group = "boundary-flux";
+    flux.symbolic_balance_group = "boundary-flux";
     flux.balance_tolerance = 1.0e-6;
     flux.interface_pair_residual_norm = 1.0e-8;
+    flux.symbolic_balance_evidence_present = true;
+    flux.flux_variable_metadata_present = true;
+    flux.element_residual_evidence_present = true;
+    flux.source_quadrature_consistency_present = true;
+    flux.orientation_consistency_present = true;
+    flux.boundary_flux_accounted_for = true;
+    flux.steady_balance_scope = true;
     summaries.flux_balances.push_back(flux);
 
     auto report = analyzeWithSummaries(std::move(summaries));
@@ -372,6 +391,15 @@ TEST(Phase6ExtendedAnalyzers, EnergyEntropyLawCertifiedViolatedAndMissing)
     energy.energy_coercivity_evidence_present = true;
     energy.discrete_dissipation_identity_evidence_present = true;
     energy.boundary_source_energy_accounting_present = true;
+    energy.energy_coercivity_lower_bound_present = true;
+    energy.energy_coercivity_lower_bound = 0.25;
+    energy.energy_norm_equivalence_bounds_present = true;
+    energy.energy_norm_equivalence_lower_bound = 0.25;
+    energy.energy_norm_equivalence_upper_bound = 4.0;
+    energy.energy_dissipation_residual_bound_present = true;
+    energy.energy_dissipation_residual_bound = 1.0e-12;
+    energy.energy_dissipation_tolerance_present = true;
+    energy.energy_dissipation_tolerance = 1.0e-6;
     summaries.energy_entropy.push_back(energy);
     EnergyEntropySummary entropy;
     entropy.energy_entropy_id = "entropy-law";
@@ -407,6 +435,8 @@ TEST(Phase6ExtendedAnalyzers, CoefficientConstitutiveCertifiedViolatedAndMissing
     CoefficientPropertySummary positive;
     positive.coefficient = "positive-coefficient";
     positive.positivity = PositivityClass::Positive;
+    positive.min_eigenvalue = 0.5;
+    positive.max_eigenvalue = 2.0;
     positive.anisotropy_ratio = 2.0;
     positive.contrast_ratio = 3.0;
     positive.coefficient_region_coverage_complete = true;
@@ -547,6 +577,9 @@ TEST(Phase6ExtendedAnalyzers, SpectralErrorEstimatorQuadratureAndCoupledSummarie
     spectral_ok.operator_convergence_evidence = true;
     spectral_ok.spectral_convergence_theorem_id =
         "Boffi spectral approximation theorem";
+    spectral_ok.spectral_tolerance = 1.0e-8;
+    spectral_ok.rayleigh_quotient_lower_bound = 0.1;
+    spectral_ok.nullspace_handling = NullspaceHandlingClass::ProjectedOut;
     summaries.spectral_structures.push_back(spectral_ok);
     SpectralStructureSummary spectral_bad;
     spectral_bad.block = scalarBlock("spectral-bad");
@@ -567,6 +600,10 @@ TEST(Phase6ExtendedAnalyzers, SpectralErrorEstimatorQuadratureAndCoupledSummarie
     estimator_ok.data_oscillation_metadata_present = true;
     estimator_ok.coefficient_source_regularity_metadata_present = true;
     estimator_ok.shape_regular_mesh_evidence_present = true;
+    estimator_ok.mesh_family_scope_present = true;
+    estimator_ok.mesh_family_scope = "shape-regular adaptive mesh family";
+    estimator_ok.shape_regular_constant_present = true;
+    estimator_ok.shape_regular_constant = 4.0;
     estimator_ok.reliability_constant_metadata_present = true;
     estimator_ok.reliability_constant = 2.0;
     estimator_ok.efficiency_constant_metadata_present = true;
@@ -591,6 +628,13 @@ TEST(Phase6ExtendedAnalyzers, SpectralErrorEstimatorQuadratureAndCoupledSummarie
     quadrature_ok.affine_mapping_evidence_present = true;
     quadrature_ok.polynomial_integrand_metadata_complete = true;
     quadrature_ok.coefficient_degree_metadata_present = true;
+    quadrature_ok.mapped_integrand_metadata_present = true;
+    quadrature_ok.basis_degree_metadata_present = true;
+    quadrature_ok.geometry_jacobian_degree_metadata_present = true;
+    quadrature_ok.tensor_contraction_metadata_present = true;
+    quadrature_ok.component_coverage_metadata_present = true;
+    quadrature_ok.quadrature_theorem_id =
+        "Strang-Fix exact polynomial quadrature condition";
     summaries.quadrature_adequacy.push_back(quadrature_ok);
     QuadratureAdequacySummary quadrature_bad;
     quadrature_bad.block = scalarBlock("quadrature-bad");

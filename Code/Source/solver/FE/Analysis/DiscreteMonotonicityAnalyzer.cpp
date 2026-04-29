@@ -204,6 +204,7 @@ bool hasScopedPositiveCoefficientEvidence(const AnalysisSummarySet* summaries,
             coefficient.quadrature_point_coverage_complete &&
             coefficient.lower_bound_valid_for_all_samples &&
             coefficient.tolerance_metadata_present &&
+            coefficientLowerBoundMatchesPositivity(coefficient) &&
             state_scope_ok;
         if (positive && coverage_complete) {
             return true;
@@ -269,6 +270,10 @@ std::string missingDmpGateDescription(const DmpGateEvidence& gates)
 
 Real effectiveTolerance(const DiscreteMatrixSummary& matrix) noexcept
 {
+    if (!numeric::finiteNonnegative(matrix.sign_tolerance) ||
+        !numeric::finiteNonnegative(matrix.row_sum_tolerance)) {
+        return Real{};
+    }
     return std::max(matrix.sign_tolerance, matrix.row_sum_tolerance);
 }
 
@@ -281,14 +286,143 @@ struct MatrixSignVerdict {
     bool positive_offdiag_violation{false};
     bool diagonal_violation{false};
     bool row_sum_violation{false};
+    bool numeric_evidence_valid{false};
 };
+
+struct MMatrixTheoremEvidence {
+    bool certified{false};
+    std::string label;
+    std::string missing;
+};
+
+bool symmetricEvidenceComplete(const DiscreteMatrixSummary& matrix) noexcept
+{
+    return matrix.symmetry_evidence_complete &&
+           (matrix.structurally_symmetric || matrix.numerically_symmetric);
+}
+
+bool positiveDefiniteEvidenceComplete(
+    const DiscreteMatrixSummary& matrix,
+    Real tolerance) noexcept
+{
+    const bool eigenvalue_positive =
+        matrix.min_eigenvalue_estimate &&
+        numeric::finite(*matrix.min_eigenvalue_estimate) &&
+        *matrix.min_eigenvalue_estimate > tolerance;
+    const bool coercivity_positive =
+        matrix.coercivity_lower_bound &&
+        numeric::finite(*matrix.coercivity_lower_bound) &&
+        *matrix.coercivity_lower_bound > tolerance;
+    return matrix.cholesky_factorization_succeeded ||
+           eigenvalue_positive ||
+           coercivity_positive;
+}
+
+MMatrixTheoremEvidence mMatrixTheoremEvidence(
+    const DiscreteMatrixSummary& matrix,
+    const MatrixSignVerdict& verdict)
+{
+    MMatrixTheoremEvidence evidence;
+    std::vector<std::string> missing;
+    const Real tol = effectiveTolerance(matrix);
+    const bool theorem_id_present = !matrix.m_matrix_theorem_id.empty();
+    const bool stieltjes_route =
+        theorem_id_present &&
+        matrix.stieltjes_matrix_evidence &&
+        symmetricEvidenceComplete(matrix) &&
+        positiveDefiniteEvidenceComplete(matrix, tol);
+    const bool inverse_positive_route =
+        theorem_id_present &&
+        matrix.inverse_positivity_evidence &&
+        matrix.inverse_positivity_metadata_present;
+    const bool irreducible_dd_route =
+        theorem_id_present &&
+        matrix.irreducible_diagonal_dominance_evidence &&
+        matrix.diagonal_dominance_evidence_complete &&
+        matrix.irreducibility_evidence_present;
+
+    if (stieltjes_route) {
+        evidence.label = theorem_id_present
+            ? matrix.m_matrix_theorem_id
+            : "Stieltjes/SPD Z-matrix evidence";
+        if (matrix.m_matrix_certification_evidence) {
+            evidence.certified = verdict.m_matrix;
+            return evidence;
+        }
+    }
+    if (inverse_positive_route) {
+        evidence.label = theorem_id_present
+            ? matrix.m_matrix_theorem_id
+            : "inverse-positivity evidence";
+        if (matrix.m_matrix_certification_evidence) {
+            evidence.certified = verdict.m_matrix;
+            return evidence;
+        }
+    }
+    if (irreducible_dd_route) {
+        evidence.label = theorem_id_present
+            ? matrix.m_matrix_theorem_id
+            : "irreducible diagonal-dominance evidence";
+        if (matrix.m_matrix_certification_evidence) {
+            evidence.certified = verdict.m_matrix;
+            return evidence;
+        }
+    }
+    appendMissing(missing, matrix.m_matrix_certification_evidence,
+                  "M-matrix certification evidence flag");
+    appendMissing(missing, theorem_id_present,
+                  "M-matrix theorem identifier");
+    if (matrix.stieltjes_matrix_evidence) {
+        appendMissing(missing, symmetricEvidenceComplete(matrix),
+                      "symmetric matrix evidence");
+        appendMissing(missing, positiveDefiniteEvidenceComplete(matrix, tol),
+                      "SPD evidence from Cholesky, eigenvalue, or coercivity lower bound");
+    }
+    if (matrix.inverse_positivity_evidence) {
+        appendMissing(missing, matrix.inverse_positivity_metadata_present,
+                      "inverse-positivity metadata");
+    }
+    if (matrix.irreducible_diagonal_dominance_evidence) {
+        appendMissing(missing, matrix.diagonal_dominance_evidence_complete,
+                      "diagonal-dominance metadata");
+        appendMissing(missing, matrix.irreducibility_evidence_present,
+                      "irreducibility/connectivity metadata");
+    }
+    if (!matrix.stieltjes_matrix_evidence &&
+        !matrix.inverse_positivity_evidence &&
+        !matrix.irreducible_diagonal_dominance_evidence) {
+        missing.push_back(
+            "one theorem route: Stieltjes/SPD, inverse positivity, or irreducible diagonal dominance");
+    }
+    if (evidence.label.empty()) {
+        evidence.label = "missing theorem-specific M-matrix evidence";
+    }
+    evidence.missing = joinMissing(missing);
+    return evidence;
+}
 
 MatrixSignVerdict classifyMatrix(const DiscreteMatrixSummary& matrix)
 {
     MatrixSignVerdict verdict;
     verdict.analyzable = matrix.square && matrix.rows == matrix.cols && matrix.rows > 0;
-    verdict.sign_evidence_complete = matrix.sign_evidence_complete;
-    verdict.row_sum_evidence_complete = matrix.row_sum_evidence_complete;
+    const bool tolerance_evidence_valid =
+        numeric::finiteNonnegative(matrix.sign_tolerance) &&
+        numeric::finiteNonnegative(matrix.row_sum_tolerance);
+    const bool sign_numeric_valid =
+        tolerance_evidence_valid &&
+        matrix.nonfinite_entry_count == 0u &&
+        numeric::finiteNonnegative(matrix.max_positive_offdiag);
+    const bool row_sum_numeric_valid =
+        sign_numeric_valid &&
+        matrix.nonfinite_row_sum_count == 0u &&
+        numeric::finite(matrix.min_row_sum) &&
+        numeric::finite(matrix.max_row_sum) &&
+        numeric::finiteNonnegative(matrix.max_abs_row_sum);
+    verdict.numeric_evidence_valid = sign_numeric_valid;
+    verdict.sign_evidence_complete =
+        matrix.sign_evidence_complete && sign_numeric_valid;
+    verdict.row_sum_evidence_complete =
+        matrix.row_sum_evidence_complete && row_sum_numeric_valid;
     if (!verdict.analyzable) {
         return verdict;
     }
@@ -373,25 +507,9 @@ void analyzeMatrix(const ProblemAnalysisContext& context,
     const auto gates = collectDmpGates(context, matrix);
     const bool dmp_applicable = dmpGatesSatisfied(gates);
     const bool nodal_scalar_applicable = gates.nodal_scalar_space;
-    const bool theorem_evidence_present =
-        !matrix.m_matrix_theorem_id.empty() ||
-        matrix.stieltjes_matrix_evidence ||
-        matrix.inverse_positivity_evidence ||
-        matrix.irreducible_diagonal_dominance_evidence;
-    const bool m_matrix_certified =
-        verdict.m_matrix &&
-        matrix.m_matrix_certification_evidence &&
-        theorem_evidence_present;
-    const std::string m_matrix_theorem =
-        !matrix.m_matrix_theorem_id.empty()
-            ? matrix.m_matrix_theorem_id
-            : (matrix.stieltjes_matrix_evidence
-                   ? "Stieltjes/SPD-Z evidence"
-                   : (matrix.inverse_positivity_evidence
-                          ? "inverse-positivity evidence"
-                          : (matrix.irreducible_diagonal_dominance_evidence
-                                 ? "irreducible diagonal-dominance evidence"
-                                 : "missing theorem-specific M-matrix evidence")));
+    const auto theorem_evidence = mMatrixTheoremEvidence(matrix, verdict);
+    const bool m_matrix_certified = theorem_evidence.certified;
+    const std::string m_matrix_theorem = theorem_evidence.label;
     const std::string reduction_prefix = reduced ? "Reduced free-free " : "";
     const std::string label = matrixLabel(matrix);
 
@@ -408,7 +526,9 @@ void analyzeMatrix(const ProblemAnalysisContext& context,
         const std::string coverage =
             "Matrix sign evidence is incomplete: scanned_rows=" +
             std::to_string(matrix.scanned_row_count) +
-            ", expected_rows=" + std::to_string(matrix.expected_row_count);
+            ", expected_rows=" + std::to_string(matrix.expected_row_count) +
+            ", nonfinite_entries=" +
+            std::to_string(matrix.nonfinite_entry_count);
         addMatrixClaim(report, matrix, PropertyKind::ZMatrixStructure,
             PropertyStatus::Unknown, CertificationClass::Unknown,
             MatrixSignStructureClass::Unknown,
@@ -450,7 +570,9 @@ void analyzeMatrix(const ProblemAnalysisContext& context,
         const std::string coverage =
             "Matrix row-sum evidence is incomplete: scanned_rows=" +
             std::to_string(matrix.scanned_row_count) +
-            ", expected_rows=" + std::to_string(matrix.expected_row_count);
+            ", expected_rows=" + std::to_string(matrix.expected_row_count) +
+            ", nonfinite_row_sums=" +
+            std::to_string(matrix.nonfinite_row_sum_count);
         addMatrixClaim(report, matrix, PropertyKind::MMatrixStructure,
             PropertyStatus::Unknown, CertificationClass::Unknown,
             MatrixSignStructureClass::Unknown,
@@ -496,7 +618,8 @@ void analyzeMatrix(const ProblemAnalysisContext& context,
             PropertyStatus::Unknown, CertificationClass::Unknown,
             MatrixSignStructureClass::MMatrixNotCertified,
             reduction_prefix + "matrix has M-matrix sign prerequisites but no complete M-matrix certificate for " + label,
-            "Z-matrix sign pattern, positive diagonals, and nonnegative row sums were present, but theorem-specific nonsingularity, inverse-positivity, Stieltjes, or irreducible diagonal-dominance evidence is missing");
+            "Z-matrix sign pattern, positive diagonals, and nonnegative row sums were present, but theorem-specific nonsingularity, inverse-positivity, Stieltjes/SPD, or irreducible diagonal-dominance evidence is incomplete: " +
+                theorem_evidence.missing);
     } else {
         addMatrixClaim(report, matrix, PropertyKind::MMatrixStructure,
             PropertyStatus::Violated, CertificationClass::NotCertified,

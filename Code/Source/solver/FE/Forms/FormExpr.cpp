@@ -2344,6 +2344,36 @@ FormExpr FormExpr::surfaceJacobian()
     return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::SurfaceJacobian, "J_surface"));
 }
 
+FormExpr FormExpr::geometryTrialVectorVariation()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::GeometryTrialVectorVariation, "dX_mesh"));
+}
+
+FormExpr FormExpr::geometryTrialJacobianVariation()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::GeometryTrialJacobianVariation, "dJ_current"));
+}
+
+FormExpr FormExpr::meshVelocityVariation()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::MeshVelocityVariation, "dmeshVelocity"));
+}
+
+FormExpr FormExpr::currentMeasureVariation()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::CurrentMeasureVariation, "ddmu_current"));
+}
+
+FormExpr FormExpr::currentNormalVariation()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::CurrentNormalVariation, "dn_current"));
+}
+
+FormExpr FormExpr::surfaceJacobianVariation()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::SurfaceJacobianVariation, "dJ_surface"));
+}
+
 FormExpr FormExpr::time()
 {
     return FormExpr(std::make_shared<TimeNode>());

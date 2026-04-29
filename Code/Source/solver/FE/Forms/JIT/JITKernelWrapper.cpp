@@ -2458,6 +2458,36 @@ bool JITKernelWrapper::isJITReady() const noexcept
     return canUseJIT();
 }
 
+bool JITKernelWrapper::hasCompiledTangentDispatch(IntegralDomain domain, int marker) const noexcept
+{
+    std::lock_guard<std::mutex> lock(jit_mutex_);
+    if (!options_.enable || compiled_revision_ != revision_ || !compiled_tangent_.ok) {
+        return false;
+    }
+
+    switch (domain) {
+        case IntegralDomain::Cell:
+            return compiled_tangent_.cell != 0;
+        case IntegralDomain::Boundary:
+            if (marker >= 0) {
+                return compiled_tangent_.boundary_by_marker.find(marker) !=
+                       compiled_tangent_.boundary_by_marker.end();
+            }
+            return compiled_tangent_.boundary_all != 0 ||
+                   !compiled_tangent_.boundary_by_marker.empty();
+        case IntegralDomain::InteriorFace:
+            return compiled_tangent_.interior_face != 0;
+        case IntegralDomain::InterfaceFace:
+            if (marker >= 0) {
+                return compiled_tangent_.interface_by_marker.find(marker) !=
+                       compiled_tangent_.interface_by_marker.end();
+            }
+            return compiled_tangent_.interface_all != 0 ||
+                   !compiled_tangent_.interface_by_marker.empty();
+    }
+    return false;
+}
+
 void JITKernelWrapper::setExternalCellAddress(std::uintptr_t addr)
 {
     if (addr == 0) {

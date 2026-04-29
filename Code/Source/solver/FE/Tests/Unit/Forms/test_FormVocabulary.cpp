@@ -15,6 +15,7 @@
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
+#include "Assembly/TimeIntegrationContext.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
@@ -56,6 +57,23 @@ dofs::DofMap createSingleTetraDenseDofMap(LocalIndex n_dofs)
     dof_map.setCellDofs(0, cell_dofs);
     dof_map.setNumDofs(n_dofs);
     dof_map.setNumLocalDofs(n_dofs);
+    dof_map.finalize();
+    return dof_map;
+}
+
+dofs::DofMap createTwoTetraDGDenseDofMap(LocalIndex n_dofs_per_cell)
+{
+    dofs::DofMap dof_map(2, 2 * n_dofs_per_cell, n_dofs_per_cell);
+    for (GlobalIndex cell = 0; cell < 2; ++cell) {
+        std::vector<GlobalIndex> cell_dofs(static_cast<std::size_t>(n_dofs_per_cell));
+        for (LocalIndex i = 0; i < n_dofs_per_cell; ++i) {
+            cell_dofs[static_cast<std::size_t>(i)] =
+                static_cast<GlobalIndex>(cell * n_dofs_per_cell + i);
+        }
+        dof_map.setCellDofs(cell, cell_dofs);
+    }
+    dof_map.setNumDofs(static_cast<GlobalIndex>(2 * n_dofs_per_cell));
+    dof_map.setNumLocalDofs(static_cast<GlobalIndex>(2 * n_dofs_per_cell));
     dof_map.finalize();
     return dof_map;
 }
@@ -520,6 +538,60 @@ assembly::DenseVectorView assembleBoundaryLinearWithKernel(dofs::DofMap& dof_map
     vec.zero();
     (void)assembler.assembleBoundaryFaces(mesh, marker, space, kernel, nullptr, &vec);
     return vec;
+}
+
+void expectDenseNear(const assembly::DenseMatrixView& a,
+                     const assembly::DenseMatrixView& b,
+                     Real tol)
+{
+    ASSERT_EQ(a.numRows(), b.numRows());
+    ASSERT_EQ(a.numCols(), b.numCols());
+    for (GlobalIndex i = 0; i < a.numRows(); ++i) {
+        for (GlobalIndex j = 0; j < a.numCols(); ++j) {
+            SCOPED_TRACE(::testing::Message() << "row=" << i << ", col=" << j);
+            EXPECT_NEAR(a.getMatrixEntry(i, j), b.getMatrixEntry(i, j), tol);
+        }
+    }
+}
+
+void expectDenseNear(const assembly::DenseVectorView& a,
+                     const assembly::DenseVectorView& b,
+                     Real tol)
+{
+    ASSERT_EQ(a.numRows(), b.numRows());
+    for (GlobalIndex i = 0; i < a.numRows(); ++i) {
+        SCOPED_TRACE(::testing::Message() << "row=" << i);
+        EXPECT_NEAR(a.getVectorEntry(i), b.getVectorEntry(i), tol);
+    }
+}
+
+void configureGeometrySensitivityAssembler(assembly::StandardAssembler& assembler,
+                                           const dofs::DofMap& dof_map,
+                                           const spaces::FunctionSpace& vector_space,
+                                           FieldId mesh_field,
+                                           const std::vector<Real>& current_solution,
+                                           bool bind_mesh_velocity = false,
+                                           const assembly::TimeIntegrationContext* time_ctx = nullptr,
+                                           Real time_step = 0.0)
+{
+    const std::array<assembly::FieldSolutionAccess, 1> field_access = {{
+        assembly::FieldSolutionAccess{
+            .field = mesh_field,
+            .space = &vector_space,
+            .dof_map = &dof_map,
+            .dof_offset = 0,
+        },
+    }};
+
+    assembler.setDofMap(dof_map);
+    assembler.setFieldSolutionAccess(field_access);
+    assembler.setMeshMotionFieldAccess(assembly::MeshMotionFieldAccess{
+        .mesh_displacement = mesh_field,
+        .mesh_velocity = bind_mesh_velocity ? mesh_field : INVALID_FIELD_ID,
+    });
+    assembler.setCurrentSolution(current_solution);
+    assembler.setTimeIntegrationContext(time_ctx);
+    assembler.setTimeStep(time_step);
 }
 
 } // namespace
@@ -1342,6 +1414,502 @@ TEST(FormVocabularyTest, CurrentGeometrySensitivityJacobianMatchesFiniteDifferen
             EXPECT_NEAR(J.getMatrixEntry(row, col), fd, 2.0e-6);
         }
     }
+}
+
+TEST(FormVocabularyTest, SymbolicCurrentGeometryTangentMatchesAD)
+{
+    MovingSingleTetraMeshAccess mesh;
+    auto base_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace vector_space(base_space, /*components=*/3);
+    auto dof_map =
+        createSingleTetraDenseDofMap(static_cast<LocalIndex>(vector_space.dofs_per_element()));
+
+    constexpr FieldId kMeshMotionField = 17;
+
+    const auto u = FormExpr::trialFunction(vector_space, "mesh_displacement");
+    const auto v = FormExpr::testFunction(vector_space, "v");
+    const auto residual =
+        (inner(currentCoordinate(), v) +
+         currentMeasure() * inner(u, v) +
+         trace(currentJacobian()) * v.component(0)).dx();
+
+    SymbolicOptions options;
+    options.geometry_sensitivity.mode = GeometrySensitivityMode::MeshMotionUnknowns;
+    options.geometry_sensitivity.mesh_motion_field = kMeshMotionField;
+
+    FormCompiler compiler_ad(options);
+    auto ir_ad = compiler_ad.compileResidual(residual);
+    NonlinearFormKernel ad_kernel(std::move(ir_ad), ADMode::Forward);
+
+    FormCompiler compiler_sym(options);
+    auto ir_sym = compiler_sym.compileResidual(residual);
+    SymbolicNonlinearFormKernel sym_kernel(std::move(ir_sym), NonlinearKernelOutput::Both);
+    sym_kernel.resolveInlinableConstitutives();
+
+    std::vector<Real> solution(static_cast<std::size_t>(dof_map.getNumDofs()), 0.0);
+    for (std::size_t i = 0; i < solution.size(); ++i) {
+        const Real sign = (i % 2u == 0u) ? Real(1.0) : Real(-1.0);
+        solution[i] = sign * (Real(0.03) + Real(0.004) * static_cast<Real>(i));
+    }
+
+    auto assemble = [&](assembly::AssemblyKernel& kernel,
+                        assembly::DenseMatrixView& J,
+                        assembly::DenseVectorView& R) {
+        assembly::StandardAssembler assembler;
+        configureGeometrySensitivityAssembler(
+            assembler, dof_map, vector_space, kMeshMotionField, solution);
+        J.zero();
+        R.zero();
+        (void)assembler.assembleBoth(mesh, vector_space, vector_space, kernel, J, R);
+    };
+
+    assembly::DenseMatrixView J_ad(dof_map.getNumDofs());
+    assembly::DenseVectorView R_ad(dof_map.getNumDofs());
+    assembly::DenseMatrixView J_sym(dof_map.getNumDofs());
+    assembly::DenseVectorView R_sym(dof_map.getNumDofs());
+
+    assemble(ad_kernel, J_ad, R_ad);
+    assemble(sym_kernel, J_sym, R_sym);
+
+    expectDenseNear(R_sym, R_ad, 1.0e-12);
+    expectDenseNear(J_sym, J_ad, 2.0e-11);
+}
+
+TEST(FormVocabularyTest, SymbolicMeshVelocityGeometryTangentMatchesAD)
+{
+    MovingSingleTetraMeshAccess mesh;
+    auto base_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace vector_space(base_space, /*components=*/3);
+    auto dof_map =
+        createSingleTetraDenseDofMap(static_cast<LocalIndex>(vector_space.dofs_per_element()));
+
+    constexpr FieldId kMeshMotionField = 17;
+    constexpr Real dt = 0.2;
+
+    assembly::TimeIntegrationContext time_ctx;
+    time_ctx.integrator_name = "unit_backward_euler";
+    assembly::TimeDerivativeStencil dt1;
+    dt1.order = 1;
+    dt1.a = {Real(1.0) / dt, -Real(1.0) / dt};
+    time_ctx.dt1 = dt1;
+
+    const auto u = FormExpr::trialFunction(vector_space, "mesh_displacement");
+    const auto v = FormExpr::testFunction(vector_space, "v");
+    const auto residual =
+        (inner(meshVelocity(), v) +
+         trace(grad(meshVelocity())) * v.component(0) +
+         FormExpr::constant(0.0) * inner(u, v)).dx();
+
+    SymbolicOptions options;
+    options.geometry_sensitivity.mode = GeometrySensitivityMode::MeshMotionUnknowns;
+    options.geometry_sensitivity.mesh_motion_field = kMeshMotionField;
+
+    FormCompiler compiler_ad(options);
+    auto ir_ad = compiler_ad.compileResidual(residual);
+    NonlinearFormKernel ad_kernel(std::move(ir_ad), ADMode::Forward);
+
+    FormCompiler compiler_sym(options);
+    auto ir_sym = compiler_sym.compileResidual(residual);
+    SymbolicNonlinearFormKernel sym_kernel(std::move(ir_sym), NonlinearKernelOutput::Both);
+    sym_kernel.resolveInlinableConstitutives();
+
+    std::vector<Real> solution(static_cast<std::size_t>(dof_map.getNumDofs()), 0.0);
+    for (std::size_t i = 0; i < solution.size(); ++i) {
+        solution[i] = Real(0.02) + Real(0.003) * static_cast<Real>(i);
+    }
+    std::vector<Real> previous_solution(solution.size(), Real(0.0));
+
+    auto assemble = [&](assembly::AssemblyKernel& kernel,
+                        assembly::DenseMatrixView& J,
+                        assembly::DenseVectorView& R) {
+        assembly::StandardAssembler assembler;
+        configureGeometrySensitivityAssembler(
+            assembler,
+            dof_map,
+            vector_space,
+            kMeshMotionField,
+            solution,
+            /*bind_mesh_velocity=*/true,
+            &time_ctx,
+            dt);
+        assembler.setPreviousSolution(previous_solution);
+        J.zero();
+        R.zero();
+        (void)assembler.assembleBoth(mesh, vector_space, vector_space, kernel, J, R);
+    };
+
+    assembly::DenseMatrixView J_ad(dof_map.getNumDofs());
+    assembly::DenseVectorView R_ad(dof_map.getNumDofs());
+    assembly::DenseMatrixView J_sym(dof_map.getNumDofs());
+    assembly::DenseVectorView R_sym(dof_map.getNumDofs());
+
+    assemble(ad_kernel, J_ad, R_ad);
+    assemble(sym_kernel, J_sym, R_sym);
+
+    expectDenseNear(R_sym, R_ad, 1.0e-12);
+    expectDenseNear(J_sym, J_ad, 2.0e-11);
+}
+
+TEST(FormVocabularyTest, SymbolicBoundaryGeometryTangentMatchesAD)
+{
+    constexpr int marker = 2;
+    FrameChangedSingleTetraMeshAccess mesh({Real(1.15), Real(0.85), Real(1.25)}, marker);
+    auto base_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace vector_space(base_space, /*components=*/3);
+    auto dof_map =
+        createSingleTetraDenseDofMap(static_cast<LocalIndex>(vector_space.dofs_per_element()));
+
+    constexpr FieldId kMeshMotionField = 17;
+
+    const auto u = FormExpr::trialFunction(vector_space, "mesh_displacement");
+    const auto v = FormExpr::testFunction(vector_space, "v");
+    const auto residual =
+        (inner(currentNormal(), v) +
+         currentMeasure() * inner(u, v) +
+         component(surfaceJacobian(), 0, 0) * v.component(0)).ds(marker);
+
+    SymbolicOptions options;
+    options.geometry_sensitivity.mode = GeometrySensitivityMode::MeshMotionUnknowns;
+    options.geometry_sensitivity.mesh_motion_field = kMeshMotionField;
+
+    FormCompiler compiler_ad(options);
+    auto ir_ad = compiler_ad.compileResidual(residual);
+    NonlinearFormKernel ad_kernel(std::move(ir_ad), ADMode::Forward);
+
+    FormCompiler compiler_sym(options);
+    auto ir_sym = compiler_sym.compileResidual(residual);
+    SymbolicNonlinearFormKernel sym_kernel(std::move(ir_sym), NonlinearKernelOutput::Both);
+    sym_kernel.resolveInlinableConstitutives();
+
+    std::vector<Real> solution(static_cast<std::size_t>(dof_map.getNumDofs()), 0.0);
+    for (std::size_t i = 0; i < solution.size(); ++i) {
+        const Real sign = (i % 2u == 0u) ? Real(1.0) : Real(-1.0);
+        solution[i] = sign * (Real(0.015) + Real(0.002) * static_cast<Real>(i));
+    }
+
+    auto assemble = [&](assembly::AssemblyKernel& kernel,
+                        assembly::DenseMatrixView& J,
+                        assembly::DenseVectorView& R) {
+        assembly::StandardAssembler assembler;
+        configureGeometrySensitivityAssembler(
+            assembler, dof_map, vector_space, kMeshMotionField, solution);
+        J.zero();
+        R.zero();
+        (void)assembler.assembleBoundaryFaces(mesh, marker, vector_space, kernel, &J, &R);
+    };
+
+    assembly::DenseMatrixView J_ad(dof_map.getNumDofs());
+    assembly::DenseVectorView R_ad(dof_map.getNumDofs());
+    assembly::DenseMatrixView J_sym(dof_map.getNumDofs());
+    assembly::DenseVectorView R_sym(dof_map.getNumDofs());
+
+    assemble(ad_kernel, J_ad, R_ad);
+    assemble(sym_kernel, J_sym, R_sym);
+
+    expectDenseNear(R_sym, R_ad, 1.0e-12);
+    expectDenseNear(J_sym, J_ad, 2.0e-10);
+}
+
+TEST(FormVocabularyTest, SymbolicInteriorGeometryTangentMatchesAD)
+{
+    TwoTetraSharedFaceMeshAccess mesh;
+    auto base_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace vector_space(base_space, /*components=*/3);
+    auto dof_map =
+        createTwoTetraDGDenseDofMap(static_cast<LocalIndex>(vector_space.dofs_per_element()));
+
+    constexpr FieldId kMeshMotionField = 17;
+
+    const auto u = FormExpr::trialFunction(vector_space, "mesh_displacement");
+    const auto v = FormExpr::testFunction(vector_space, "v");
+    const auto residual =
+        (inner(currentNormal().minus(), v.minus()) +
+         inner(currentNormal().plus(), v.plus()) +
+         component(surfaceJacobian().minus(), 0, 0) * v.minus().component(0) +
+         component(surfaceJacobian().plus(), 0, 0) * v.plus().component(0) +
+         FormExpr::constant(0.0) * inner(u.minus(), v.minus())).dS();
+
+    SymbolicOptions options;
+    options.geometry_sensitivity.mode = GeometrySensitivityMode::MeshMotionUnknowns;
+    options.geometry_sensitivity.mesh_motion_field = kMeshMotionField;
+
+    FormCompiler compiler_ad(options);
+    auto ir_ad = compiler_ad.compileResidual(residual);
+    NonlinearFormKernel ad_kernel(std::move(ir_ad), ADMode::Forward);
+
+    FormCompiler compiler_sym(options);
+    auto ir_sym = compiler_sym.compileResidual(residual);
+    SymbolicNonlinearFormKernel sym_kernel(std::move(ir_sym), NonlinearKernelOutput::Both);
+    sym_kernel.resolveInlinableConstitutives();
+
+    std::vector<Real> solution(static_cast<std::size_t>(dof_map.getNumDofs()), 0.0);
+    for (std::size_t i = 0; i < solution.size(); ++i) {
+        const Real sign = (i % 2u == 0u) ? Real(1.0) : Real(-1.0);
+        solution[i] = sign * (Real(0.01) + Real(0.0015) * static_cast<Real>(i));
+    }
+
+    auto assemble = [&](assembly::AssemblyKernel& kernel,
+                        assembly::DenseMatrixView& J,
+                        assembly::DenseVectorView& R) {
+        assembly::StandardAssembler assembler;
+        configureGeometrySensitivityAssembler(
+            assembler, dof_map, vector_space, kMeshMotionField, solution);
+        J.zero();
+        R.zero();
+        (void)assembler.assembleInteriorFaces(mesh, vector_space, vector_space, kernel, J, &R);
+    };
+
+    assembly::DenseMatrixView J_ad(dof_map.getNumDofs());
+    assembly::DenseVectorView R_ad(dof_map.getNumDofs());
+    assembly::DenseMatrixView J_sym(dof_map.getNumDofs());
+    assembly::DenseVectorView R_sym(dof_map.getNumDofs());
+
+    assemble(ad_kernel, J_ad, R_ad);
+    assemble(sym_kernel, J_sym, R_sym);
+
+    expectDenseNear(R_sym, R_ad, 1.0e-12);
+    expectDenseNear(J_sym, J_ad, 3.0e-10);
+}
+
+TEST(FormVocabularyTest, SymbolicCurrentGeometryTangentJITMatchesInterpreter)
+{
+    requireLLVMJITOrSkip();
+
+    MovingSingleTetraMeshAccess mesh;
+    auto base_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace vector_space(base_space, /*components=*/3);
+    auto dof_map =
+        createSingleTetraDenseDofMap(static_cast<LocalIndex>(vector_space.dofs_per_element()));
+
+    constexpr FieldId kMeshMotionField = 17;
+
+    const auto u = FormExpr::trialFunction(vector_space, "mesh_displacement");
+    const auto v = FormExpr::testFunction(vector_space, "v");
+    const auto residual =
+        (inner(currentCoordinate(), v) +
+         currentMeasure() * inner(u, v) +
+         trace(currentJacobian()) * v.component(0)).dx();
+
+    SymbolicOptions options;
+    options.geometry_sensitivity.mode = GeometrySensitivityMode::MeshMotionUnknowns;
+    options.geometry_sensitivity.mesh_motion_field = kMeshMotionField;
+
+    FormCompiler compiler_interp(options);
+    auto ir_interp = compiler_interp.compileResidual(residual);
+    SymbolicNonlinearFormKernel interp_kernel(std::move(ir_interp), NonlinearKernelOutput::Both);
+    interp_kernel.resolveInlinableConstitutives();
+
+    FormCompiler compiler_jit(options);
+    auto ir_jit = compiler_jit.compileResidual(residual);
+    auto jit_fallback =
+        std::make_shared<SymbolicNonlinearFormKernel>(std::move(ir_jit), NonlinearKernelOutput::Both);
+    jit_fallback->resolveInlinableConstitutives();
+    jit::JITKernelWrapper jit_kernel(jit_fallback, makeUnitTestJITOptions());
+    jit_kernel.ensureCompiled();
+    ASSERT_TRUE(jit_kernel.isJITReady());
+    EXPECT_TRUE(jit_kernel.hasCompiledTangentDispatch(IntegralDomain::Cell));
+
+    std::vector<Real> solution(static_cast<std::size_t>(dof_map.getNumDofs()), 0.0);
+    for (std::size_t i = 0; i < solution.size(); ++i) {
+        solution[i] = Real(0.01) + Real(0.005) * static_cast<Real>(i);
+    }
+
+    auto assemble = [&](assembly::AssemblyKernel& kernel,
+                        assembly::DenseMatrixView& J,
+                        assembly::DenseVectorView& R) {
+        assembly::StandardAssembler assembler;
+        configureGeometrySensitivityAssembler(
+            assembler, dof_map, vector_space, kMeshMotionField, solution);
+        J.zero();
+        R.zero();
+        (void)assembler.assembleBoth(mesh, vector_space, vector_space, kernel, J, R);
+    };
+
+    assembly::DenseMatrixView J_interp(dof_map.getNumDofs());
+    assembly::DenseVectorView R_interp(dof_map.getNumDofs());
+    assembly::DenseMatrixView J_jit(dof_map.getNumDofs());
+    assembly::DenseVectorView R_jit(dof_map.getNumDofs());
+
+    assemble(interp_kernel, J_interp, R_interp);
+    assemble(jit_kernel, J_jit, R_jit);
+
+    expectDenseNear(R_jit, R_interp, 1.0e-12);
+    expectDenseNear(J_jit, J_interp, 2.0e-11);
+}
+
+TEST(FormVocabularyTest, SymbolicBoundaryGeometryTangentJITMatchesInterpreter)
+{
+    requireLLVMJITOrSkip();
+
+    constexpr int marker = 2;
+    FrameChangedSingleTetraMeshAccess mesh({Real(1.15), Real(0.85), Real(1.25)}, marker);
+    auto base_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace vector_space(base_space, /*components=*/3);
+    auto dof_map =
+        createSingleTetraDenseDofMap(static_cast<LocalIndex>(vector_space.dofs_per_element()));
+
+    constexpr FieldId kMeshMotionField = 17;
+
+    const auto u = FormExpr::trialFunction(vector_space, "mesh_displacement");
+    const auto v = FormExpr::testFunction(vector_space, "v");
+    const auto residual =
+        (inner(currentNormal(), v) +
+         currentMeasure() * inner(u, v) +
+         component(surfaceJacobian(), 0, 0) * v.component(0)).ds(marker);
+
+    SymbolicOptions options;
+    options.geometry_sensitivity.mode = GeometrySensitivityMode::MeshMotionUnknowns;
+    options.geometry_sensitivity.mesh_motion_field = kMeshMotionField;
+
+    FormCompiler compiler_interp(options);
+    auto ir_interp = compiler_interp.compileResidual(residual);
+    SymbolicNonlinearFormKernel interp_kernel(std::move(ir_interp), NonlinearKernelOutput::Both);
+    interp_kernel.resolveInlinableConstitutives();
+
+    FormCompiler compiler_jit(options);
+    auto ir_jit = compiler_jit.compileResidual(residual);
+    auto jit_fallback =
+        std::make_shared<SymbolicNonlinearFormKernel>(std::move(ir_jit), NonlinearKernelOutput::Both);
+    jit_fallback->resolveInlinableConstitutives();
+    jit::JITKernelWrapper jit_kernel(jit_fallback, makeUnitTestJITOptions());
+    jit_kernel.ensureCompiled();
+    ASSERT_TRUE(jit_kernel.isJITReady());
+    EXPECT_TRUE(jit_kernel.hasCompiledTangentDispatch(IntegralDomain::Boundary, marker));
+
+    std::vector<Real> solution(static_cast<std::size_t>(dof_map.getNumDofs()), 0.0);
+    for (std::size_t i = 0; i < solution.size(); ++i) {
+        const Real sign = (i % 2u == 0u) ? Real(1.0) : Real(-1.0);
+        solution[i] = sign * (Real(0.012) + Real(0.003) * static_cast<Real>(i));
+    }
+
+    auto assemble = [&](assembly::AssemblyKernel& kernel,
+                        assembly::DenseMatrixView& J,
+                        assembly::DenseVectorView& R) {
+        assembly::StandardAssembler assembler;
+        configureGeometrySensitivityAssembler(
+            assembler, dof_map, vector_space, kMeshMotionField, solution);
+        J.zero();
+        R.zero();
+        (void)assembler.assembleBoundaryFaces(mesh, marker, vector_space, kernel, &J, &R);
+    };
+
+    assembly::DenseMatrixView J_interp(dof_map.getNumDofs());
+    assembly::DenseVectorView R_interp(dof_map.getNumDofs());
+    assembly::DenseMatrixView J_jit(dof_map.getNumDofs());
+    assembly::DenseVectorView R_jit(dof_map.getNumDofs());
+
+    assemble(interp_kernel, J_interp, R_interp);
+    assemble(jit_kernel, J_jit, R_jit);
+
+    expectDenseNear(R_jit, R_interp, 1.0e-12);
+    expectDenseNear(J_jit, J_interp, 2.0e-10);
+}
+
+TEST(FormVocabularyTest, SymbolicInteriorGeometryTangentJITMatchesInterpreter)
+{
+    requireLLVMJITOrSkip();
+
+    TwoTetraSharedFaceMeshAccess mesh;
+    auto base_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace vector_space(base_space, /*components=*/3);
+    auto dof_map =
+        createTwoTetraDGDenseDofMap(static_cast<LocalIndex>(vector_space.dofs_per_element()));
+
+    constexpr FieldId kMeshMotionField = 17;
+
+    const auto u = FormExpr::trialFunction(vector_space, "mesh_displacement");
+    const auto v = FormExpr::testFunction(vector_space, "v");
+    const auto residual =
+        (inner(currentNormal().minus(), v.minus()) +
+         inner(currentNormal().plus(), v.plus()) +
+         currentMeasure().minus() * inner(u.minus(), v.minus()) +
+         currentMeasure().plus() * inner(u.plus(), v.plus()) +
+         component(surfaceJacobian().minus(), 0, 0) * v.minus().component(0) +
+         component(surfaceJacobian().plus(), 0, 0) * v.plus().component(0)).dS();
+
+    SymbolicOptions options;
+    options.geometry_sensitivity.mode = GeometrySensitivityMode::MeshMotionUnknowns;
+    options.geometry_sensitivity.mesh_motion_field = kMeshMotionField;
+
+    FormCompiler compiler_interp(options);
+    auto ir_interp = compiler_interp.compileResidual(residual);
+    SymbolicNonlinearFormKernel interp_kernel(std::move(ir_interp), NonlinearKernelOutput::Both);
+    interp_kernel.resolveInlinableConstitutives();
+
+    FormCompiler compiler_jit(options);
+    auto ir_jit = compiler_jit.compileResidual(residual);
+    auto jit_fallback =
+        std::make_shared<SymbolicNonlinearFormKernel>(std::move(ir_jit), NonlinearKernelOutput::Both);
+    jit_fallback->resolveInlinableConstitutives();
+    jit::JITKernelWrapper jit_kernel(jit_fallback, makeUnitTestJITOptions());
+    jit_kernel.ensureCompiled();
+    ASSERT_TRUE(jit_kernel.isJITReady());
+    EXPECT_TRUE(jit_kernel.hasCompiledTangentDispatch(IntegralDomain::InteriorFace));
+
+    std::vector<Real> solution(static_cast<std::size_t>(dof_map.getNumDofs()), 0.0);
+    for (std::size_t i = 0; i < solution.size(); ++i) {
+        const Real sign = (i % 2u == 0u) ? Real(1.0) : Real(-1.0);
+        solution[i] = sign * (Real(0.008) + Real(0.002) * static_cast<Real>(i));
+    }
+
+    auto assemble = [&](assembly::AssemblyKernel& kernel,
+                        assembly::DenseMatrixView& J,
+                        assembly::DenseVectorView& R) {
+        assembly::StandardAssembler assembler;
+        configureGeometrySensitivityAssembler(
+            assembler, dof_map, vector_space, kMeshMotionField, solution);
+        J.zero();
+        R.zero();
+        (void)assembler.assembleInteriorFaces(mesh, vector_space, vector_space, kernel, J, &R);
+    };
+
+    assembly::DenseMatrixView J_interp(dof_map.getNumDofs());
+    assembly::DenseVectorView R_interp(dof_map.getNumDofs());
+    assembly::DenseMatrixView J_jit(dof_map.getNumDofs());
+    assembly::DenseVectorView R_jit(dof_map.getNumDofs());
+
+    assemble(interp_kernel, J_interp, R_interp);
+    assemble(jit_kernel, J_jit, R_jit);
+
+    expectDenseNear(R_jit, R_interp, 1.0e-12);
+    expectDenseNear(J_jit, J_interp, 3.0e-10);
+}
+
+TEST(FormVocabularyTest, SymbolicInterfaceGeometryTangentJITCompilesTangentDispatch)
+{
+    requireLLVMJITOrSkip();
+
+    constexpr int marker = 11;
+    auto base_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace vector_space(base_space, /*components=*/3);
+    constexpr FieldId kMeshMotionField = 17;
+
+    const auto u = FormExpr::trialFunction(vector_space, "mesh_displacement");
+    const auto v = FormExpr::testFunction(vector_space, "v");
+    const auto residual =
+        (inner(currentNormal().minus(), v.minus()) +
+         inner(currentNormal().plus(), v.plus()) +
+         currentMeasure().minus() * inner(u.minus(), v.minus()) +
+         currentMeasure().plus() * inner(u.plus(), v.plus()) +
+         component(surfaceJacobian().minus(), 0, 0) * v.minus().component(0) +
+         component(surfaceJacobian().plus(), 0, 0) * v.plus().component(0)).dI(marker);
+
+    SymbolicOptions options;
+    options.geometry_sensitivity.mode = GeometrySensitivityMode::MeshMotionUnknowns;
+    options.geometry_sensitivity.mesh_motion_field = kMeshMotionField;
+
+    FormCompiler compiler(options);
+    auto ir = compiler.compileResidual(residual);
+    auto jit_fallback =
+        std::make_shared<SymbolicNonlinearFormKernel>(std::move(ir), NonlinearKernelOutput::Both);
+    jit_fallback->resolveInlinableConstitutives();
+    ASSERT_TRUE(jit_fallback->hasInterfaceFace());
+    ASSERT_TRUE(jit_fallback->tangentIR().hasInterfaceFaceTerms());
+
+    jit::JITKernelWrapper jit_kernel(jit_fallback, makeUnitTestJITOptions());
+    jit_kernel.ensureCompiled();
+    ASSERT_TRUE(jit_kernel.isJITReady());
+    EXPECT_TRUE(jit_kernel.hasCompiledTangentDispatch(IntegralDomain::InterfaceFace, marker));
 }
 
 TEST(FormVocabularyTest, DGRestrictionsAssembleCrossBlockMass)

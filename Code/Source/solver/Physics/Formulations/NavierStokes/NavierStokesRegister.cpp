@@ -6,6 +6,7 @@
 #include "Physics/Materials/Fluid/CarreauYasudaViscosity.h"
 
 #include "FE/Core/Logger.h"
+#include "FE/Forms/FormExpr.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "Mesh/Core/MeshBase.h"
 
@@ -137,6 +138,28 @@ std::optional<std::string> get_defined_string(const svmp::Physics::ParameterMap&
     return std::nullopt;
   }
   return value;
+}
+
+svmp::FE::forms::GeometryTangentPath parse_geometry_tangent_path(std::string_view raw,
+                                                                 std::string_view context)
+{
+  const auto path = lower_copy(trim_copy(std::string(raw)));
+  if (path == "symbolic" || path == "symbolic_required" || path == "required") {
+    return svmp::FE::forms::GeometryTangentPath::SymbolicRequired;
+  }
+  if (path == "ad" || path == "ad_reference" || path == "reference_ad") {
+    return svmp::FE::forms::GeometryTangentPath::ADReference;
+  }
+  if (path == "symbolic_ad_check" || path == "symbolic_with_ad_check" ||
+      path == "check" || path == "parity_check") {
+    return svmp::FE::forms::GeometryTangentPath::SymbolicWithADCheck;
+  }
+  if (path == "auto") {
+    return svmp::FE::forms::GeometryTangentPath::Auto;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Physics] " + std::string(context) +
+      " must be one of 'symbolic', 'ad', 'symbolic_ad_check', or 'auto'.");
 }
 
 struct TemporalSpatialValues {
@@ -793,6 +816,19 @@ void apply_fluid_moving_domain_params(
   for (const auto key : kAutoRegisterMeshDisplacementKeys) {
     if (const auto value = get_defined_bool(params, key)) {
       options.auto_register_mesh_displacement_field = *value;
+    }
+  }
+
+  constexpr std::array<std::string_view, 4> kMovingMeshTangentPathKeys = {
+      "MovingMeshTangentPath",
+      "Moving_mesh_tangent_path",
+      "Moving_mesh_geometry_tangent_path",
+      "ALE_moving_mesh_tangent_path",
+  };
+  for (const auto key : kMovingMeshTangentPathKeys) {
+    if (const auto value = get_defined_string(params, key)) {
+      options.moving_mesh_tangent_path =
+          parse_geometry_tangent_path(*value, key);
     }
   }
 }

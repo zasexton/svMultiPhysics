@@ -6,6 +6,7 @@
  */
 
 #include "Analysis/SolverCompatibilityAnalyzer.h"
+#include "Analysis/AnalysisNumericGuards.h"
 #include "Analysis/AnalysisSummaryTypes.h"
 #include "Backends/Utils/BackendOptions.h"
 
@@ -189,10 +190,12 @@ bool hasPositiveDefinitenessEvidence(const DiscreteMatrixSummary& matrix)
 {
     const Real tol = definitenessTolerance(matrix);
     if (matrix.coercivity_lower_bound &&
+        numeric::finite(*matrix.coercivity_lower_bound) &&
         *matrix.coercivity_lower_bound > tol) {
         return true;
     }
     if (matrix.min_eigenvalue_estimate &&
+        numeric::finite(*matrix.min_eigenvalue_estimate) &&
         *matrix.min_eigenvalue_estimate > tol) {
         return true;
     }

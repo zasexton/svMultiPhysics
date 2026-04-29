@@ -76,6 +76,7 @@ DiscreteMatrixSummary certifiedScalarMatrix(VariableKey variable,
     matrix.cholesky_factorization_succeeded = true;
     matrix.m_matrix_certification_evidence = true;
     matrix.stieltjes_matrix_evidence = true;
+    matrix.m_matrix_theorem_id = "stieltjes-spd-z";
     matrix.dmp_applicability_evidence = true;
     matrix.dmp_rhs_sign_evidence = true;
     return matrix;
@@ -366,6 +367,8 @@ TEST(Phase4CoreExtensions, MeshGeometryWorstSamplesAreTopologyScoped) {
 
     AnalysisSummarySet summaries;
     MeshGeometryQualitySummary mesh;
+    mesh.min_jacobian = 0.5;
+    mesh.max_jacobian = 1.5;
     mesh.poor_quality_element_count = 1;
     mesh.worst_elements = {2};
     summaries.mesh_geometry_quality.push_back(std::move(mesh));
@@ -401,6 +404,10 @@ TEST(Phase4CoreExtensions, ConstraintAndInitialCompatibilitySummariesAreConsumed
     initial.initial_constraint_residual = 2.0e-3;
     initial.initial_boundary_residual = 0.0;
     initial.residual_tolerance = 1.0e-6;
+    initial.residual_tolerance_declared = true;
+    initial.compatibility_scope = "affine-constraint";
+    initial.algebraic_constraint_metadata_present = true;
+    initial.checked_constraint_family_count = 1;
     summaries.initial_compatibility.push_back(std::move(initial));
     ctx.setAnalysisSummaries(std::move(summaries));
 

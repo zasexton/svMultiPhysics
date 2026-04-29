@@ -6,11 +6,13 @@
  */
 
 #include "Analysis/MixedOperatorAnalyzer.h"
+#include "Analysis/AnalysisNumericGuards.h"
 #include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
 #include "Analysis/FormStructureAnalyzer.h"
 
 #include <algorithm>
+#include <cmath>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -96,8 +98,22 @@ bool positiveSchurEvidence(PositivityClass positivity) noexcept
            positivity == PositivityClass::Nonnegative;
 }
 
+bool validPositiveOrderedBounds(Real lower, Real upper) noexcept
+{
+    return numeric::finitePositiveOrdered(lower, upper);
+}
+
 bool schurCertificationComplete(const SchurComplementSummary& summary) noexcept
 {
+    const bool spectral_bounds_valid =
+        summary.spectral_equivalence_bounds_present &&
+        validPositiveOrderedBounds(summary.spectral_equivalence_lower_bound,
+                                   summary.spectral_equivalence_upper_bound);
+    const bool preconditioner_bounds_valid =
+        summary.preconditioner_equivalence_bounds_present &&
+        validPositiveOrderedBounds(
+            summary.preconditioner_equivalence_lower_bound,
+            summary.preconditioner_equivalence_upper_bound);
     return summary.schur_available &&
            summary.reduction_exact_for_analysis &&
            summary.primal_block_invertible_evidence_present &&
@@ -106,8 +122,8 @@ bool schurCertificationComplete(const SchurComplementSummary& summary) noexcept
            nullspaceHandlingAcceptable(summary.nullspace_handling) &&
            summary.schur_definiteness_evidence_present &&
            positiveSchurEvidence(summary.schur_positivity) &&
-           summary.spectral_equivalence_bounds_present &&
-           summary.preconditioner_equivalence_bounds_present;
+           spectral_bounds_valid &&
+           preconditioner_bounds_valid;
 }
 
 void emitSchurComplementClaim(ProblemAnalysisReport& report,
@@ -159,8 +175,18 @@ void emitSchurComplementClaim(ProblemAnalysisReport& report,
         std::string(summary.inf_sup_evidence_present ? "true" : "false") +
         ", spectral_equivalence=" +
         std::string(summary.spectral_equivalence_bounds_present ? "true" : "false") +
+        ", spectral_bounds=[" +
+        std::to_string(summary.spectral_equivalence_lower_bound) +
+        ", " +
+        std::to_string(summary.spectral_equivalence_upper_bound) +
+        "]" +
         ", preconditioner_equivalence=" +
-        std::string(summary.preconditioner_equivalence_bounds_present ? "true" : "false"),
+        std::string(summary.preconditioner_equivalence_bounds_present ? "true" : "false") +
+        ", preconditioner_bounds=[" +
+        std::to_string(summary.preconditioner_equivalence_lower_bound) +
+        ", " +
+        std::to_string(summary.preconditioner_equivalence_upper_bound) +
+        "]",
         claim.confidence);
     report.claims.push_back(std::move(claim));
 }

@@ -35,6 +35,8 @@
 #include "Spaces/FunctionSpace.h"
 
 #include <algorithm>
+#include <cmath>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -192,6 +194,466 @@ KernelPtr maybeWrapForJIT(KernelPtr kernel, const FormInstallOptions& options)
     return std::make_shared<forms::jit::JITKernelWrapper>(std::move(kernel), options.compiler_options.jit);
 }
 
+[[nodiscard]] const char* geometryTangentPathName(forms::GeometryTangentPath path) noexcept
+{
+    switch (path) {
+        case forms::GeometryTangentPath::Auto:
+            return "Auto";
+        case forms::GeometryTangentPath::ADReference:
+            return "ADReference";
+        case forms::GeometryTangentPath::SymbolicRequired:
+            return "SymbolicRequired";
+        case forms::GeometryTangentPath::SymbolicWithADCheck:
+            return "SymbolicWithADCheck";
+    }
+    return "Unknown";
+}
+
+[[nodiscard]] const char* geometrySensitivityModeName(forms::GeometrySensitivityMode mode) noexcept
+{
+    switch (mode) {
+        case forms::GeometrySensitivityMode::GeometryConstant:
+            return "GeometryConstant";
+        case forms::GeometrySensitivityMode::MeshMotionUnknowns:
+            return "MeshMotionUnknowns";
+    }
+    return "Unknown";
+}
+
+[[nodiscard]] std::string dispatchDomainSummary(const DomainDispatch& dispatch)
+{
+    std::ostringstream oss;
+    bool first = true;
+    const auto append = [&](std::string_view name) {
+        if (!first) {
+            oss << ",";
+        }
+        first = false;
+        oss << name;
+    };
+    if (dispatch.has_cell) {
+        append("cell");
+    }
+    if (!dispatch.boundary_markers.empty()) {
+        append("boundary");
+    }
+    if (dispatch.has_interior) {
+        append("interior-face");
+    }
+    if (dispatch.has_interface || !dispatch.interface_markers.empty()) {
+        append("interface-face");
+    }
+    if (first) {
+        oss << "none";
+    }
+    return oss.str();
+}
+
+void traceTangentSelection(std::string_view installer,
+                           FieldId test_field,
+                           FieldId trial_field,
+                           const DomainDispatch& dispatch,
+                           const FormInstallOptions& options,
+                           bool symbolic_primary,
+                           bool ad_check)
+{
+    if (!core::kernelTraceEnabled(core::KernelTraceChannel::Selection)) {
+        return;
+    }
+    const auto& compiler = options.compiler_options;
+    std::ostringstream oss;
+    oss << installer
+        << ": moving-mesh tangent path=" << geometryTangentPathName(compiler.geometry_tangent_path)
+        << " mode=" << geometrySensitivityModeName(compiler.geometry_sensitivity.mode)
+        << " selected=" << (symbolic_primary ? "symbolic" : "ad-reference");
+    if (symbolic_primary && compiler.jit.enable) {
+        oss << "+llvm-jit";
+    }
+    if (ad_check) {
+        oss << "+ad-check";
+    }
+    oss << " test_field=" << test_field
+        << " trial_field=" << trial_field
+        << " domains=" << dispatchDomainSummary(dispatch);
+    if (compiler.geometry_sensitivity.mesh_motion_field != INVALID_FIELD_ID) {
+        oss << " mesh_motion_field=" << compiler.geometry_sensitivity.mesh_motion_field;
+    }
+    core::kernelTraceLog(core::KernelTraceChannel::Selection, oss.str());
+}
+
+[[nodiscard]] std::vector<assembly::FieldRequirement> mergeFieldRequirements(
+    const std::vector<assembly::FieldRequirement>& primary,
+    const std::vector<assembly::FieldRequirement>& reference)
+{
+    std::vector<FieldId> order;
+    std::unordered_map<FieldId, assembly::RequiredData> by_field;
+    const auto add = [&](const assembly::FieldRequirement& req) {
+        if (!by_field.contains(req.field)) {
+            order.push_back(req.field);
+            by_field.emplace(req.field, req.required);
+        } else {
+            by_field[req.field] |= req.required;
+        }
+    };
+    for (const auto& req : primary) {
+        add(req);
+    }
+    for (const auto& req : reference) {
+        add(req);
+    }
+
+    std::vector<assembly::FieldRequirement> out;
+    out.reserve(order.size());
+    for (const auto field : order) {
+        out.push_back(assembly::FieldRequirement{.field = field, .required = by_field[field]});
+    }
+    return out;
+}
+
+class SymbolicADReferenceCheckKernel final : public assembly::AssemblyKernel {
+public:
+    SymbolicADReferenceCheckKernel(KernelPtr primary,
+                                   KernelPtr reference,
+                                   std::string label)
+        : primary_(std::move(primary))
+        , reference_(std::move(reference))
+        , label_(std::move(label))
+    {
+        FE_CHECK_NOT_NULL(primary_.get(), "SymbolicADReferenceCheckKernel: primary kernel");
+        FE_CHECK_NOT_NULL(reference_.get(), "SymbolicADReferenceCheckKernel: AD reference kernel");
+    }
+
+    [[nodiscard]] assembly::RequiredData getRequiredData() const override
+    {
+        return primary_->getRequiredData() | reference_->getRequiredData();
+    }
+
+    [[nodiscard]] std::vector<assembly::FieldRequirement> fieldRequirements() const override
+    {
+        return mergeFieldRequirements(primary_->fieldRequirements(), reference_->fieldRequirements());
+    }
+
+    [[nodiscard]] assembly::MaterialStateSpec materialStateSpec() const noexcept override
+    {
+        const auto primary = primary_->materialStateSpec();
+        const auto reference = reference_->materialStateSpec();
+        if (primary.bytes_per_qpt == 0) {
+            return reference;
+        }
+        return primary;
+    }
+
+    [[nodiscard]] std::vector<params::Spec> parameterSpecs() const override
+    {
+        return primary_->parameterSpecs();
+    }
+
+    [[nodiscard]] std::vector<analysis::ContributionDescriptor> analysisContributions() const override
+    {
+        return primary_->analysisContributions();
+    }
+
+    void resolveParameterSlots(
+        const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param) override
+    {
+        primary_->resolveParameterSlots(slot_of_real_param);
+        reference_->resolveParameterSlots(slot_of_real_param);
+    }
+
+    void resolveInlinableConstitutives() override
+    {
+        primary_->resolveInlinableConstitutives();
+        reference_->resolveInlinableConstitutives();
+    }
+
+    [[nodiscard]] bool hasCell() const noexcept override { return primary_->hasCell(); }
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return primary_->hasBoundaryFace(); }
+    [[nodiscard]] bool hasInteriorFace() const noexcept override { return primary_->hasInteriorFace(); }
+    [[nodiscard]] bool hasInterfaceFace() const noexcept override { return primary_->hasInterfaceFace(); }
+    [[nodiscard]] bool hasSingleSidedInterfaceFace() const noexcept override
+    {
+        return primary_->hasSingleSidedInterfaceFace();
+    }
+    [[nodiscard]] assembly::InterfaceEvaluationSide interfaceEvaluationSide() const noexcept override
+    {
+        return primary_->interfaceEvaluationSide();
+    }
+    [[nodiscard]] bool supportsCellBatch() const noexcept override { return false; }
+
+    void computeCell(const assembly::AssemblyContext& ctx,
+                     assembly::KernelOutput& output) override
+    {
+        primary_->computeCell(ctx, output);
+        auto reference = referenceOutputFor(output);
+        reference_->computeCell(ctx, reference);
+        compareOutput(output, reference, "cell", -1, "local");
+    }
+
+    void computeCellBatch(std::span<const assembly::AssemblyContext* const> contexts,
+                          std::span<assembly::KernelOutput> outputs) override
+    {
+        const std::size_t n = std::min(contexts.size(), outputs.size());
+        for (std::size_t idx = 0; idx < n; ++idx) {
+            if (contexts[idx] == nullptr) {
+                continue;
+            }
+            computeCell(*contexts[idx], outputs[idx]);
+        }
+    }
+
+    void computeBoundaryFace(const assembly::AssemblyContext& ctx,
+                             int boundary_marker,
+                             assembly::KernelOutput& output) override
+    {
+        primary_->computeBoundaryFace(ctx, boundary_marker, output);
+        auto reference = referenceOutputFor(output);
+        reference_->computeBoundaryFace(ctx, boundary_marker, reference);
+        compareOutput(output, reference, "boundary-face", boundary_marker, "local");
+    }
+
+    void computeInteriorFace(const assembly::AssemblyContext& ctx_minus,
+                             const assembly::AssemblyContext& ctx_plus,
+                             assembly::KernelOutput& output_minus,
+                             assembly::KernelOutput& output_plus,
+                             assembly::KernelOutput& coupling_minus_plus,
+                             assembly::KernelOutput& coupling_plus_minus) override
+    {
+        primary_->computeInteriorFace(ctx_minus,
+                                      ctx_plus,
+                                      output_minus,
+                                      output_plus,
+                                      coupling_minus_plus,
+                                      coupling_plus_minus);
+        auto ref_minus = referenceOutputFor(output_minus);
+        auto ref_plus = referenceOutputFor(output_plus);
+        auto ref_mp = referenceOutputFor(coupling_minus_plus);
+        auto ref_pm = referenceOutputFor(coupling_plus_minus);
+        reference_->computeInteriorFace(ctx_minus, ctx_plus, ref_minus, ref_plus, ref_mp, ref_pm);
+        compareOutput(output_minus, ref_minus, "interior-face", -1, "minus-minus");
+        compareOutput(output_plus, ref_plus, "interior-face", -1, "plus-plus");
+        compareOutput(coupling_minus_plus, ref_mp, "interior-face", -1, "minus-plus");
+        compareOutput(coupling_plus_minus, ref_pm, "interior-face", -1, "plus-minus");
+    }
+
+    void computeInterfaceFace(const assembly::AssemblyContext& ctx_minus,
+                              const assembly::AssemblyContext& ctx_plus,
+                              int interface_marker,
+                              assembly::KernelOutput& output_minus,
+                              assembly::KernelOutput& output_plus,
+                              assembly::KernelOutput& coupling_minus_plus,
+                              assembly::KernelOutput& coupling_plus_minus) override
+    {
+        primary_->computeInterfaceFace(ctx_minus,
+                                       ctx_plus,
+                                       interface_marker,
+                                       output_minus,
+                                       output_plus,
+                                       coupling_minus_plus,
+                                       coupling_plus_minus);
+        auto ref_minus = referenceOutputFor(output_minus);
+        auto ref_plus = referenceOutputFor(output_plus);
+        auto ref_mp = referenceOutputFor(coupling_minus_plus);
+        auto ref_pm = referenceOutputFor(coupling_plus_minus);
+        reference_->computeInterfaceFace(ctx_minus,
+                                         ctx_plus,
+                                         interface_marker,
+                                         ref_minus,
+                                         ref_plus,
+                                         ref_mp,
+                                         ref_pm);
+        compareOutput(output_minus, ref_minus, "interface-face", interface_marker, "minus-minus");
+        compareOutput(output_plus, ref_plus, "interface-face", interface_marker, "plus-plus");
+        compareOutput(coupling_minus_plus, ref_mp, "interface-face", interface_marker, "minus-plus");
+        compareOutput(coupling_plus_minus, ref_pm, "interface-face", interface_marker, "plus-minus");
+    }
+
+    [[nodiscard]] std::string name() const override
+    {
+        return "Forms::SymbolicADReferenceCheckKernel(" + primary_->name() + ")";
+    }
+
+    [[nodiscard]] assembly::SemanticKernelKind semanticKernelKind() const noexcept override
+    {
+        return primary_->semanticKernelKind();
+    }
+
+    [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override
+    {
+        return primary_->maxTemporalDerivativeOrder();
+    }
+
+    [[nodiscard]] bool hasStateIndependentMatrix() const noexcept override
+    {
+        return primary_->hasStateIndependentMatrix();
+    }
+
+    [[nodiscard]] bool isSymmetric() const noexcept override { return primary_->isSymmetric(); }
+    [[nodiscard]] bool isMatrixOnly() const noexcept override { return primary_->isMatrixOnly(); }
+    [[nodiscard]] bool isVectorOnly() const noexcept override { return primary_->isVectorOnly(); }
+
+private:
+    [[nodiscard]] static assembly::KernelOutput referenceOutputFor(const assembly::KernelOutput& primary)
+    {
+        assembly::KernelOutput reference;
+        reference.has_matrix = primary.has_matrix;
+        reference.has_vector = primary.has_vector;
+        return reference;
+    }
+
+    [[noreturn]] void throwMismatch(std::string_view domain,
+                                    int marker,
+                                    std::string_view block,
+                                    std::string_view entry_kind,
+                                    std::size_t index,
+                                    Real primary_value,
+                                    Real reference_value) const
+    {
+        std::ostringstream oss;
+        oss << label_ << ": symbolic moving-mesh tangent does not match AD reference"
+            << " domain=" << domain;
+        if (marker >= 0) {
+            oss << " marker=" << marker;
+        }
+        oss << " block=" << block
+            << " entry=" << entry_kind << "[" << index << "]"
+            << " symbolic=" << primary_value
+            << " ad=" << reference_value
+            << " abs_diff=" << std::abs(primary_value - reference_value);
+        FE_THROW(InvalidArgumentException, oss.str());
+    }
+
+    void throwShapeMismatch(std::string_view domain,
+                            int marker,
+                            std::string_view block,
+                            const assembly::KernelOutput& primary,
+                            const assembly::KernelOutput& reference) const
+    {
+        std::ostringstream oss;
+        oss << label_ << ": symbolic moving-mesh tangent output shape does not match AD reference"
+            << " domain=" << domain;
+        if (marker >= 0) {
+            oss << " marker=" << marker;
+        }
+        oss << " block=" << block
+            << " symbolic(has_matrix=" << primary.has_matrix
+            << ", has_vector=" << primary.has_vector
+            << ", n_test=" << primary.n_test_dofs
+            << ", n_trial=" << primary.n_trial_dofs
+            << ", matrix_size=" << primary.local_matrix.size()
+            << ", vector_size=" << primary.local_vector.size()
+            << ") ad(has_matrix=" << reference.has_matrix
+            << ", has_vector=" << reference.has_vector
+            << ", n_test=" << reference.n_test_dofs
+            << ", n_trial=" << reference.n_trial_dofs
+            << ", matrix_size=" << reference.local_matrix.size()
+            << ", vector_size=" << reference.local_vector.size()
+            << ")";
+        FE_THROW(InvalidArgumentException, oss.str());
+    }
+
+    void compareValue(Real primary,
+                      Real reference,
+                      std::string_view domain,
+                      int marker,
+                      std::string_view block,
+                      std::string_view entry_kind,
+                      std::size_t index) const
+    {
+        const Real diff = std::abs(primary - reference);
+        const Real scale = std::max({Real(1.0), std::abs(primary), std::abs(reference)});
+        if (diff > kAbsTolerance && diff > kRelTolerance * scale) {
+            throwMismatch(domain, marker, block, entry_kind, index, primary, reference);
+        }
+    }
+
+    void compareOutput(const assembly::KernelOutput& primary,
+                       const assembly::KernelOutput& reference,
+                       std::string_view domain,
+                       int marker,
+                       std::string_view block) const
+    {
+        if (primary.has_matrix != reference.has_matrix ||
+            primary.has_vector != reference.has_vector ||
+            primary.n_test_dofs != reference.n_test_dofs ||
+            primary.n_trial_dofs != reference.n_trial_dofs ||
+            primary.local_matrix.size() != reference.local_matrix.size() ||
+            primary.local_vector.size() != reference.local_vector.size()) {
+            throwShapeMismatch(domain, marker, block, primary, reference);
+        }
+
+        if (primary.has_matrix) {
+            for (std::size_t idx = 0; idx < primary.local_matrix.size(); ++idx) {
+                compareValue(primary.local_matrix[idx],
+                             reference.local_matrix[idx],
+                             domain,
+                             marker,
+                             block,
+                             "matrix",
+                             idx);
+            }
+        }
+        if (primary.has_vector) {
+            for (std::size_t idx = 0; idx < primary.local_vector.size(); ++idx) {
+                compareValue(primary.local_vector[idx],
+                             reference.local_vector[idx],
+                             domain,
+                             marker,
+                             block,
+                             "vector",
+                             idx);
+            }
+        }
+    }
+
+    static constexpr Real kAbsTolerance = 1.0e-8;
+    static constexpr Real kRelTolerance = 1.0e-8;
+
+    KernelPtr primary_{};
+    KernelPtr reference_{};
+    std::string label_{};
+};
+
+[[nodiscard]] bool wantsSymbolicTangent(const forms::SymbolicOptions& options) noexcept
+{
+    switch (options.geometry_tangent_path) {
+        case forms::GeometryTangentPath::ADReference:
+            return false;
+        case forms::GeometryTangentPath::SymbolicRequired:
+        case forms::GeometryTangentPath::SymbolicWithADCheck:
+            return true;
+        case forms::GeometryTangentPath::Auto:
+            return options.use_symbolic_tangent;
+    }
+    return options.use_symbolic_tangent;
+}
+
+[[nodiscard]] bool wantsADReferenceCheck(const forms::SymbolicOptions& options) noexcept
+{
+    return options.geometry_tangent_path == forms::GeometryTangentPath::SymbolicWithADCheck;
+}
+
+KernelPtr maybeWrapForADReferenceCheck(KernelPtr primary,
+                                       const forms::FormIR& residual_ir,
+                                       forms::NonlinearKernelOutput output,
+                                       const FormInstallOptions& options,
+                                       std::string label)
+{
+    if (!primary || !wantsADReferenceCheck(options.compiler_options)) {
+        return primary;
+    }
+    auto reference =
+        std::make_shared<forms::NonlinearFormKernel>(residual_ir.clone(), options.ad_mode, output);
+    return std::make_shared<SymbolicADReferenceCheckKernel>(
+        std::move(primary), std::move(reference), std::move(label));
+}
+
+[[nodiscard]] bool mustUseSymbolicGeometryTangent(const forms::SymbolicOptions& options) noexcept
+{
+    return options.geometry_sensitivity.mode == forms::GeometrySensitivityMode::MeshMotionUnknowns &&
+           (options.geometry_tangent_path == forms::GeometryTangentPath::SymbolicRequired ||
+            options.geometry_tangent_path == forms::GeometryTangentPath::SymbolicWithADCheck);
+}
+
 std::unordered_set<FieldId> gatherStateFields(const forms::FormExprNode& node)
 {
     std::unordered_set<FieldId> out;
@@ -221,6 +683,12 @@ bool containsGeometrySensitivityTerminal(const forms::FormExprNode& node)
         case forms::FormExprType::CurrentMeasure:
         case forms::FormExprType::SurfaceJacobian:
         case forms::FormExprType::MeshVelocity:
+        case forms::FormExprType::GeometryTrialVectorVariation:
+        case forms::FormExprType::GeometryTrialJacobianVariation:
+        case forms::FormExprType::MeshVelocityVariation:
+        case forms::FormExprType::CurrentMeasureVariation:
+        case forms::FormExprType::CurrentNormalVariation:
+        case forms::FormExprType::SurfaceJacobianVariation:
             return true;
         default:
             break;
@@ -276,14 +744,18 @@ void validateGeometrySensitivityField(const FESystem& system,
     forms::SymbolicOptions options,
     FieldId trial_field)
 {
+    if (mustUseSymbolicGeometryTangent(options)) {
+        options.use_symbolic_tangent = true;
+    }
+    if (options.geometry_tangent_path == forms::GeometryTangentPath::ADReference) {
+        options.use_symbolic_tangent = false;
+    }
+
     const auto mesh_field = options.geometry_sensitivity.mesh_motion_field;
     if (options.geometry_sensitivity.mode == forms::GeometrySensitivityMode::MeshMotionUnknowns &&
         mesh_field != INVALID_FIELD_ID &&
         trial_field != mesh_field) {
         options.geometry_sensitivity.mode = forms::GeometrySensitivityMode::GeometryConstant;
-    }
-    if (options.geometry_sensitivity.mode == forms::GeometrySensitivityMode::MeshMotionUnknowns) {
-        options.use_symbolic_tangent = false;
     }
     return options;
 }
@@ -553,14 +1025,38 @@ KernelPtr installResidualForm(
             forms::LinearKernelOutput::Both);
     } else {
         (void)reason; // reserved for future diagnostics/telemetry
-        if (block_options.compiler_options.use_symbolic_tangent) {
-            kernel = std::make_shared<forms::SymbolicNonlinearFormKernel>(std::move(ir), forms::NonlinearKernelOutput::Both);
+        constexpr auto output = forms::NonlinearKernelOutput::Both;
+        const bool symbolic_primary = wantsSymbolicTangent(block_options.compiler_options);
+        const bool ad_check = wantsADReferenceCheck(block_options.compiler_options);
+        std::optional<forms::FormIR> ad_check_ir;
+        if (symbolic_primary && ad_check) {
+            ad_check_ir = ir.clone();
+        }
+        traceTangentSelection("installResidualForm",
+                              test_field,
+                              trial_field,
+                              dispatch,
+                              block_options,
+                              symbolic_primary,
+                              ad_check);
+        if (symbolic_primary) {
+            kernel = std::make_shared<forms::SymbolicNonlinearFormKernel>(std::move(ir), output);
         } else {
             kernel = std::make_shared<forms::NonlinearFormKernel>(std::move(ir), options.ad_mode);
         }
+        kernel = maybeWrapForJIT(std::move(kernel), block_options);
+        if (ad_check_ir.has_value()) {
+            kernel = maybeWrapForADReferenceCheck(std::move(kernel),
+                                                  *ad_check_ir,
+                                                  output,
+                                                  block_options,
+                                                  "installResidualForm");
+        }
     }
 
-    kernel = maybeWrapForJIT(std::move(kernel), block_options);
+    if (split.has_value()) {
+        kernel = maybeWrapForJIT(std::move(kernel), block_options);
+    }
     registerKernel(system, op, test_field, trial_field, dispatch, kernel);
     return kernel;
 }
@@ -660,12 +1156,33 @@ std::vector<std::vector<KernelPtr>> installResidualBlocks(
                         "installResidualBlocks: compiled residual block has no integral terms");
 
             KernelPtr kernel{};
-            if (options.compiler_options.use_symbolic_tangent && !ir.geometrySensitivityActive()) {
+            constexpr auto output = forms::NonlinearKernelOutput::Both;
+            const bool symbolic_primary = wantsSymbolicTangent(options.compiler_options);
+            const bool ad_check = wantsADReferenceCheck(options.compiler_options);
+            std::optional<forms::FormIR> ad_check_ir;
+            if (symbolic_primary && ad_check) {
+                ad_check_ir = ir.clone();
+            }
+            traceTangentSelection("installResidualBlocks",
+                                  test_fields[i],
+                                  trial_fields[j],
+                                  dispatch,
+                                  options,
+                                  symbolic_primary,
+                                  ad_check);
+            if (symbolic_primary) {
                 kernel = maybeWrapForJIT(std::make_shared<forms::SymbolicNonlinearFormKernel>(
-                                             std::move(ir), forms::NonlinearKernelOutput::Both),
+                                             std::move(ir), output),
                                          options);
             } else {
                 kernel = maybeWrapForJIT(std::make_shared<forms::NonlinearFormKernel>(std::move(ir), options.ad_mode), options);
+            }
+            if (ad_check_ir.has_value()) {
+                kernel = maybeWrapForADReferenceCheck(std::move(kernel),
+                                                      *ad_check_ir,
+                                                      output,
+                                                      options,
+                                                      "installResidualBlocks");
             }
             registerKernel(system, op, test_fields[i], trial_fields[j], dispatch, kernel);
             kernels[i][j] = kernel;
@@ -838,10 +1355,15 @@ CoupledResidualKernels installCoupledResidual(
             std::optional<forms::FormIR> tangent_ir_for_kernel;
             const bool need_symbolic_tangent_kernel = !owns_row_vector;
             const bool block_geometry_sensitivity = residual_ir.geometrySensitivityActive();
-            if (!block_geometry_sensitivity &&
-                (need_symbolic_tangent_kernel || (dispatch.has_cell && monolithic_cell_feasible))) {
+            if (need_symbolic_tangent_kernel || (dispatch.has_cell && monolithic_cell_feasible)) {
                 try {
-                    auto tangent_expr = forms::differentiateResidual(lowered);
+                    auto tangent_expr = block_geometry_sensitivity
+                        ? forms::differentiateResidual(
+                              lowered,
+                              trial,
+                              trial,
+                              block_options.compiler_options.geometry_sensitivity)
+                        : forms::differentiateResidual(lowered);
                     auto tangent_ir = block_compiler.compileBilinear(tangent_expr);
                     if (need_symbolic_tangent_kernel) {
                         tangent_ir_for_kernel = tangent_ir.clone();
@@ -860,8 +1382,21 @@ CoupledResidualKernels installCoupledResidual(
             }
 
             auto residual_ir_for_plan = residual_ir.clone();
+            const bool symbolic_primary = wantsSymbolicTangent(block_options.compiler_options);
+            const bool ad_check = wantsADReferenceCheck(block_options.compiler_options);
+            std::optional<forms::FormIR> ad_check_ir;
+            if (symbolic_primary && ad_check) {
+                ad_check_ir = residual_ir.clone();
+            }
+            traceTangentSelection("installCoupledResidual",
+                                  test_fields[i],
+                                  trial,
+                                  dispatch,
+                                  block_options,
+                                  symbolic_primary,
+                                  ad_check);
             KernelPtr kernel{};
-            if (block_options.compiler_options.use_symbolic_tangent) {
+            if (symbolic_primary) {
                 kernel = maybeWrapForJIT(
                     std::make_shared<forms::SymbolicNonlinearFormKernel>(std::move(residual_ir), output),
                     block_options);
@@ -873,6 +1408,13 @@ CoupledResidualKernels installCoupledResidual(
                 kernel = maybeWrapForJIT(
                     std::make_shared<forms::NonlinearFormKernel>(std::move(residual_ir), options.ad_mode, output),
                     block_options);
+            }
+            if (ad_check_ir.has_value()) {
+                kernel = maybeWrapForADReferenceCheck(std::move(kernel),
+                                                      *ad_check_ir,
+                                                      output,
+                                                      block_options,
+                                                      "installCoupledResidual");
             }
 
             out.jacobian_blocks[i][j] = kernel;
@@ -1365,10 +1907,15 @@ CoupledResidualKernels installCoupledResidualMixed(
             std::optional<forms::FormIR> tangent_ir_for_kernel;
             const bool need_symbolic_tangent_kernel = !owns_row_vector;
             const bool block_geometry_sensitivity = residual_ir.geometrySensitivityActive();
-            if (!block_geometry_sensitivity &&
-                (need_symbolic_tangent_kernel || (dispatch.has_cell && monolithic_cell_feasible))) {
+            if (need_symbolic_tangent_kernel || (dispatch.has_cell && monolithic_cell_feasible)) {
                 try {
-                    auto tangent_expr = forms::differentiateResidual(lowered);
+                    auto tangent_expr = block_geometry_sensitivity
+                        ? forms::differentiateResidual(
+                              lowered,
+                              trial,
+                              trial,
+                              block_options.compiler_options.geometry_sensitivity)
+                        : forms::differentiateResidual(lowered);
                     auto tangent_ir = block_compiler.compileBilinear(tangent_expr);
                     if (need_symbolic_tangent_kernel) {
                         tangent_ir_for_kernel = tangent_ir.clone();
@@ -1387,8 +1934,21 @@ CoupledResidualKernels installCoupledResidualMixed(
             }
 
             auto residual_ir_for_plan = residual_ir.clone();
+            const bool symbolic_primary = wantsSymbolicTangent(block_options.compiler_options);
+            const bool ad_check = wantsADReferenceCheck(block_options.compiler_options);
+            std::optional<forms::FormIR> ad_check_ir;
+            if (symbolic_primary && ad_check) {
+                ad_check_ir = residual_ir.clone();
+            }
+            traceTangentSelection("installCoupledResidualMixed",
+                                  test_fields[i],
+                                  trial,
+                                  dispatch,
+                                  block_options,
+                                  symbolic_primary,
+                                  ad_check);
             KernelPtr kernel{};
-            if (block_options.compiler_options.use_symbolic_tangent) {
+            if (symbolic_primary) {
                 kernel = maybeWrapForJIT(
                     std::make_shared<forms::SymbolicNonlinearFormKernel>(std::move(residual_ir), output),
                     block_options);
@@ -1400,6 +1960,13 @@ CoupledResidualKernels installCoupledResidualMixed(
                 kernel = maybeWrapForJIT(
                     std::make_shared<forms::NonlinearFormKernel>(std::move(residual_ir), options.ad_mode, output),
                     block_options);
+            }
+            if (ad_check_ir.has_value()) {
+                kernel = maybeWrapForADReferenceCheck(std::move(kernel),
+                                                      *ad_check_ir,
+                                                      output,
+                                                      block_options,
+                                                      "installCoupledResidualMixed");
             }
 
             out.jacobian_blocks[i][j] = kernel;
@@ -1548,6 +2115,7 @@ installMixedFormIR(
             auto block_ir_for_plan = block_ir.clone();
             std::optional<forms::FormIR> tangent_ir_for_plan;
             std::optional<forms::FormIR> residual_ir_for_plan;
+            std::optional<forms::FormIR> ad_check_ir;
             bool want_matrix = false;
             bool want_vector = false;
 
@@ -1567,8 +2135,17 @@ installMixedFormIR(
                     want_matrix = true;
                     want_vector = true;
                     residual_ir_for_plan = std::move(block_ir_for_plan);
-                    if (options.compiler_options.use_symbolic_tangent &&
-                        !block_ir.geometrySensitivityActive()) {
+                    traceTangentSelection("installMixedFormIR",
+                                          test_fields[i],
+                                          trial_fields[j],
+                                          dispatch,
+                                          options,
+                                          wantsSymbolicTangent(options.compiler_options),
+                                          wantsADReferenceCheck(options.compiler_options));
+                    if (wantsSymbolicTangent(options.compiler_options)) {
+                        if (wantsADReferenceCheck(options.compiler_options)) {
+                            ad_check_ir = block_ir.clone();
+                        }
                         kernel = std::make_shared<forms::SymbolicNonlinearFormKernel>(
                             std::move(block_ir), forms::NonlinearKernelOutput::Both);
                     } else {
@@ -1585,6 +2162,13 @@ installMixedFormIR(
             }
 
             kernel = maybeWrapForJIT(std::move(kernel), options);
+            if (ad_check_ir.has_value()) {
+                kernel = maybeWrapForADReferenceCheck(std::move(kernel),
+                                                      *ad_check_ir,
+                                                      forms::NonlinearKernelOutput::Both,
+                                                      options,
+                                                      "installMixedFormIR");
+            }
             result[i][j] = kernel;
             pending_installs.push_back(PendingKernelInstall{
                 .test_field = test_fields[i],

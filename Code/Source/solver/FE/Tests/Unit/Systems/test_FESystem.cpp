@@ -715,6 +715,8 @@ TEST(FESystem, ALEBindingCoupledDisplacementCreatesDerivedVelocityAndInstallMeta
 
     ASSERT_TRUE(ale.enabled);
     EXPECT_TRUE(ale.coupled());
+    EXPECT_EQ(ale.geometry_tangent_path,
+              svmp::FE::forms::GeometryTangentPath::SymbolicRequired);
     EXPECT_EQ(ale.mesh_displacement_field, displacement);
     ASSERT_NE(ale.mesh_velocity_field, svmp::FE::INVALID_FIELD_ID);
     EXPECT_EQ(sys.meshMotionField(MeshMotionFieldRole::Displacement), displacement);
@@ -734,6 +736,8 @@ TEST(FESystem, ALEBindingCoupledDisplacementCreatesDerivedVelocityAndInstallMeta
               svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns);
     EXPECT_EQ(install.compiler_options.geometry_sensitivity.mesh_motion_field,
               displacement);
+    EXPECT_EQ(install.compiler_options.geometry_tangent_path,
+              svmp::FE::forms::GeometryTangentPath::SymbolicRequired);
     ASSERT_EQ(install.extra_trial_fields.size(), 1u);
     EXPECT_EQ(install.extra_trial_fields.front(), displacement);
 
@@ -745,6 +749,44 @@ TEST(FESystem, ALEBindingCoupledDisplacementCreatesDerivedVelocityAndInstallMeta
     EXPECT_EQ(sys.dofHandler().getNumDofs(), 12);
     EXPECT_EQ(sys.fieldDofHandler(ale.mesh_velocity_field).getNumDofs(), 8);
     EXPECT_EQ(sys.fieldMap().numFields(), 2u);
+}
+
+TEST(FESystem, ALEBindingCoupledDisplacementPreservesTangentPathOverride)
+{
+    auto mesh = build_single_quad_mesh();
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto vector_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
+
+    FESystem sys(mesh);
+    const auto displacement =
+        sys.addMeshDisplacementUnknown("mesh_displacement", vector_space);
+
+    const auto ale = resolveALEBinding(
+        sys,
+        ALEBindingOptions{
+            .enabled = true,
+            .dimension = 2,
+            .mesh_velocity_source = ALEMeshVelocitySource::CoupledDisplacement,
+            .geometry_tangent_path = svmp::FE::forms::GeometryTangentPath::ADReference,
+            .mesh_velocity_field_name = "mesh_velocity",
+            .mesh_displacement_field_name = "mesh_displacement",
+            .mesh_velocity_space = vector_space,
+            .mesh_displacement_space = vector_space,
+        });
+
+    svmp::FE::systems::FormInstallOptions install;
+    install.compiler_options.use_symbolic_tangent = true;
+    ale.configureInstallOptions(install);
+
+    EXPECT_EQ(ale.mesh_displacement_field, displacement);
+    EXPECT_EQ(ale.geometry_tangent_path,
+              svmp::FE::forms::GeometryTangentPath::ADReference);
+    EXPECT_EQ(install.compiler_options.geometry_tangent_path,
+              svmp::FE::forms::GeometryTangentPath::ADReference);
+    EXPECT_EQ(install.compiler_options.geometry_sensitivity.mode,
+              svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns);
+    ASSERT_EQ(install.extra_trial_fields.size(), 1u);
+    EXPECT_EQ(install.extra_trial_fields.front(), displacement);
 }
 
 TEST(FESystem, MeshDisplacementBindingRegistersUnknownAndBindsRole)

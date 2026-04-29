@@ -6,9 +6,12 @@
  */
 
 #include "Analysis/StabilizationAnalyzer.h"
+#include "Analysis/AnalysisNumericGuards.h"
 #include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
 #include "Analysis/FormStructureAnalyzer.h"
+
+#include <cmath>
 
 namespace svmp {
 namespace FE {
@@ -23,10 +26,29 @@ void emitAdequacyClaims(const ProblemAnalysisContext& context,
     if (!summaries) return;
 
     for (const auto& summary : summaries->stabilization_adequacy) {
+        const bool theorem_scoped = !summary.stabilization_theorem_id.empty();
+        const bool norm_scoped =
+            summary.stability_norm_metadata_present &&
+            !summary.stability_norm_id.empty();
+        const bool parameter_bounds_valid =
+            summary.stabilization_parameter_bounds_present &&
+            numeric::finitePositiveOrdered(
+                summary.minimum_stabilization_parameter,
+                summary.maximum_stabilization_parameter);
+        const bool consistency_order_valid =
+            summary.consistency_order_metadata_present &&
+            summary.consistency_order >= 0;
         const bool metadata_complete =
             summary.parameter_formula_metadata_present &&
             summary.residual_consistency_evidence_present &&
             summary.regime_metadata_present &&
+            summary.method_scope_metadata_present &&
+            theorem_scoped &&
+            norm_scoped &&
+            parameter_bounds_valid &&
+            summary.scaling_law_metadata_present &&
+            consistency_order_valid &&
+            summary.boundary_treatment_metadata_present &&
             summary.peclet_condition_satisfied &&
             summary.cfl_condition_satisfied;
 
@@ -53,13 +75,13 @@ void emitAdequacyClaims(const ProblemAnalysisContext& context,
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Certified;
             claim.description =
-                "Stabilization adequacy is certified by parameter, consistency, Peclet, and CFL metadata";
+                "Stabilization adequacy is certified by theorem-scoped parameter scaling, consistency, norm, Peclet, CFL, and boundary metadata";
         } else {
             claim.status = PropertyStatus::Unknown;
             claim.confidence = AnalysisConfidence::Medium;
             claim.certification_class = CertificationClass::NotCertified;
             claim.description =
-                "Stabilization adequacy is unknown because parameter, consistency, or regime metadata is incomplete";
+                "Stabilization adequacy is unknown because theorem, parameter-scaling, consistency, norm, boundary, or regime metadata is incomplete";
         }
 
         claim.addEvidence("StabilizationAnalyzer",
@@ -71,6 +93,23 @@ void emitAdequacyClaims(const ProblemAnalysisContext& context,
             std::string(summary.residual_consistency_evidence_present ? "true" : "false") +
             ", regime_metadata=" +
             std::string(summary.regime_metadata_present ? "true" : "false") +
+            ", method_scope=" +
+            std::string(summary.method_scope_metadata_present ? "true" : "false") +
+            ", theorem='" + summary.stabilization_theorem_id + "'" +
+            ", stability_norm_metadata=" +
+            std::string(summary.stability_norm_metadata_present ? "true" : "false") +
+            ", parameter_bounds=" +
+            std::string(summary.stabilization_parameter_bounds_present ? "true" : "false") +
+            ", parameter_min=" +
+            std::to_string(summary.minimum_stabilization_parameter) +
+            ", parameter_max=" +
+            std::to_string(summary.maximum_stabilization_parameter) +
+            ", scaling_law=" +
+            std::string(summary.scaling_law_metadata_present ? "true" : "false") +
+            ", consistency_order=" +
+            std::to_string(summary.consistency_order) +
+            ", boundary_treatment=" +
+            std::string(summary.boundary_treatment_metadata_present ? "true" : "false") +
             ", peclet_ok=" +
             std::string(summary.peclet_condition_satisfied ? "true" : "false") +
             ", cfl_ok=" +

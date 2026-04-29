@@ -40,6 +40,7 @@ TEST(FormCompilerTest, ConstructorAndSetOptionsPreserveSymbolicTangentOptions)
     SymbolicOptions opts;
     opts.ad_mode = ADMode::Forward;
     opts.use_symbolic_tangent = true;
+    opts.geometry_tangent_path = GeometryTangentPath::SymbolicRequired;
     opts.geometry_sensitivity.mode = GeometrySensitivityMode::MeshMotionUnknowns;
     opts.geometry_sensitivity.mesh_motion_field = 3;
     opts.simplify_expressions = false;
@@ -54,6 +55,8 @@ TEST(FormCompilerTest, ConstructorAndSetOptionsPreserveSymbolicTangentOptions)
     FormCompiler compiler(opts);
     EXPECT_EQ(compiler.options().ad_mode, ADMode::Forward);
     EXPECT_TRUE(compiler.options().use_symbolic_tangent);
+    EXPECT_EQ(compiler.options().geometry_tangent_path,
+              GeometryTangentPath::SymbolicRequired);
     EXPECT_EQ(compiler.options().geometry_sensitivity.mode,
               GeometrySensitivityMode::MeshMotionUnknowns);
     EXPECT_EQ(compiler.options().geometry_sensitivity.mesh_motion_field, 3);
@@ -78,9 +81,12 @@ TEST(FormCompilerTest, ConstructorAndSetOptionsPreserveSymbolicTangentOptions)
 
     SymbolicOptions reset;
     reset.use_symbolic_tangent = false;
+    reset.geometry_tangent_path = GeometryTangentPath::Auto;
     reset.jit.enable = false;
     compiler.setOptions(reset);
     EXPECT_FALSE(compiler.options().use_symbolic_tangent);
+    EXPECT_EQ(compiler.options().geometry_tangent_path,
+              GeometryTangentPath::Auto);
     EXPECT_EQ(compiler.options().geometry_sensitivity.mode,
               GeometrySensitivityMode::GeometryConstant);
     EXPECT_FALSE(compiler.options().jit.enable);
@@ -92,6 +98,11 @@ TEST(FormCompilerTest, DefaultAndMoveConstructorsPreserveOptionsAndUsability)
     const SymbolicOptions defaults;
     EXPECT_EQ(default_compiler.options().ad_mode, defaults.ad_mode);
     EXPECT_EQ(default_compiler.options().use_symbolic_tangent, defaults.use_symbolic_tangent);
+    EXPECT_FALSE(default_compiler.options().use_symbolic_tangent);
+    EXPECT_EQ(default_compiler.options().geometry_tangent_path,
+              GeometryTangentPath::Auto);
+    EXPECT_EQ(default_compiler.options().geometry_tangent_path,
+              defaults.geometry_tangent_path);
     EXPECT_EQ(default_compiler.options().geometry_sensitivity.mode,
               defaults.geometry_sensitivity.mode);
     EXPECT_EQ(default_compiler.options().geometry_sensitivity.mesh_motion_field,

@@ -35,6 +35,7 @@
 
 #include "FE/Forms/BoundaryConditions.h"
 #include "FE/Forms/ConstitutiveModel.h"
+#include "FE/Forms/FormExpr.h"
 #include "FE/Spaces/FunctionSpace.h"
 
 #include <array>
@@ -193,6 +194,8 @@ struct IncompressibleNavierStokesVMSOptions {
     bool auto_register_mesh_velocity_field{true};
     bool auto_register_mesh_displacement_field{false};
     std::shared_ptr<const FE::spaces::FunctionSpace> mesh_velocity_space{};
+    FE::forms::GeometryTangentPath moving_mesh_tangent_path{
+        FE::forms::GeometryTangentPath::SymbolicRequired};
 
     // Enable residual-based VMS stabilization (static subscales u', p').
     bool enable_vms{true};

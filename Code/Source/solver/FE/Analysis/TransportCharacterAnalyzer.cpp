@@ -6,6 +6,7 @@
  */
 
 #include "Analysis/TransportCharacterAnalyzer.h"
+#include "Analysis/AnalysisNumericGuards.h"
 #include "Analysis/AnalysisSummaryMatching.h"
 #include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
@@ -42,6 +43,9 @@ void enrichTransportClaimFromSummaries(const AnalysisSummarySet* summaries,
                                    ParameterScaleRole::PecletLike)) {
             continue;
         }
+        if (!numeric::finiteNonnegative(scale.max_scale_value)) {
+            continue;
+        }
         if (!claim.peclet_number ||
             scale.max_scale_value > *claim.peclet_number) {
             claim.peclet_number = scale.max_scale_value;
@@ -66,6 +70,9 @@ void enrichTransportClaimFromSummaries(const AnalysisSummarySet* summaries,
         if (!temporal.cfl_estimate_present) {
             continue;
         }
+        if (!numeric::finiteNonnegative(temporal.cfl_estimate)) {
+            continue;
+        }
         if (!claim.cfl_number || temporal.cfl_estimate > *claim.cfl_number) {
             claim.cfl_number = temporal.cfl_estimate;
         }
@@ -87,6 +94,9 @@ void enrichTransportClaimFromSummaries(const AnalysisSummarySet* summaries,
             continue;
         }
         const Real indicator = *matrix.nonnormality_indicator;
+        if (!numeric::finiteNonnegative(indicator)) {
+            continue;
+        }
         if (!claim.nonnormality_indicator ||
             indicator > *claim.nonnormality_indicator) {
             claim.nonnormality_indicator = indicator;

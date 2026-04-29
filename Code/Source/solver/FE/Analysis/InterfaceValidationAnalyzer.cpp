@@ -6,6 +6,7 @@
  */
 
 #include "Analysis/InterfaceValidationAnalyzer.h"
+#include "Analysis/AnalysisNumericGuards.h"
 #include "Analysis/AnalysisSummaryMatching.h"
 #include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
@@ -30,6 +31,28 @@ bool isFaceOrBoundary(DomainKind domain) noexcept
            domain == DomainKind::CoupledBoundary;
 }
 
+bool hasScopedSymbolicBalance(const FluxBalanceSummary& summary)
+{
+    if (!summary.symbolic_balance_evidence_present) {
+        return false;
+    }
+    const bool group_scoped =
+        !summary.symbolic_balance_group.empty() &&
+        (summary.balance_group.empty() ||
+         summary.symbolic_balance_group == summary.balance_group);
+    const bool contribution_scoped =
+        !summary.symbolic_balance_contribution_id.empty() &&
+        (summary.block.contribution_id.empty() ||
+         summary.symbolic_balance_contribution_id ==
+             summary.block.contribution_id);
+    const bool block_scoped =
+        !variablesForBlock(summary.block).empty() &&
+        (!summary.block.operator_tag.empty() ||
+         !summary.block.contribution_id.empty() ||
+         !summary.balance_group.empty());
+    return group_scoped || contribution_scoped || block_scoped;
+}
+
 bool boundaryComplementingCertificateComplete(
     const BoundarySymbolSummary& boundary) noexcept
 {
@@ -39,8 +62,7 @@ bool boundaryComplementingCertificateComplete(
             boundary.required_boundary_condition_count;
     const bool margin_ok =
         boundary.complementing_margin_present &&
-        std::isfinite(static_cast<double>(boundary.complementing_margin)) &&
-        boundary.complementing_margin > Real{};
+        numeric::finitePositive(boundary.complementing_margin);
     const bool lopatinskii_symbol_evidence =
         boundary.tangential_frequency_coverage_present &&
         boundary.decaying_root_count_evidence_present &&
@@ -135,25 +157,37 @@ void emitBoundaryAndFluxEvidence(const ProblemAnalysisContext& context,
             bool has_penalty_scale = false;
             bool has_required_lower_bound = false;
             bool has_trace_metadata = false;
+            bool has_scale_theorem = false;
+            bool invalid_penalty_numeric_evidence = false;
             for (const auto& scale : summaries->parameter_scales) {
                 if (!parameterScaleMatches(
                         scale, boundary.block,
                         ParameterScaleRole::WeakBoundaryPenalty)) {
                     continue;
                 }
+                if (!numeric::finitePositive(scale.max_scale_value)) {
+                    invalid_penalty_numeric_evidence = true;
+                }
                 if (!has_penalty_scale ||
                     scale.max_scale_value > max_penalty_scale) {
                     max_penalty_scale = scale.max_scale_value;
                     has_penalty_scale = true;
                 }
-                if (scale.required_lower_bound_present &&
-                    (!has_required_lower_bound ||
-                     scale.required_lower_bound > required_lower_bound)) {
-                    required_lower_bound = scale.required_lower_bound;
-                    has_required_lower_bound = true;
+                if (scale.required_lower_bound_present) {
+                    if (!numeric::finitePositive(
+                            scale.required_lower_bound)) {
+                        invalid_penalty_numeric_evidence = true;
+                    } else if (!has_required_lower_bound ||
+                               scale.required_lower_bound >
+                                   required_lower_bound) {
+                        required_lower_bound = scale.required_lower_bound;
+                        has_required_lower_bound = true;
+                    }
                 }
                 has_trace_metadata =
                     has_trace_metadata || scale.trace_inverse_metadata_present;
+                has_scale_theorem =
+                    has_scale_theorem || !scale.scale_theorem_id.empty();
             }
 
             PropertyClaim claim;
@@ -164,10 +198,23 @@ void emitBoundaryAndFluxEvidence(const ProblemAnalysisContext& context,
             claim.claim_origin = "InterfaceValidationAnalyzer";
             if (has_penalty_scale) {
                 claim.penalty_scale = max_penalty_scale;
-                if (has_required_lower_bound) {
+                if (invalid_penalty_numeric_evidence) {
+                    claim.status = PropertyStatus::Violated;
+                    claim.confidence = AnalysisConfidence::High;
+                    claim.certification_class = CertificationClass::Violated;
+                    claim.description =
+                        "Weak-boundary penalty scale or required lower bound is non-finite or non-positive";
+                    claim.addEvidence("InterfaceValidationAnalyzer",
+                        "ParameterScaleSummary max_scale=" +
+                        std::to_string(max_penalty_scale) +
+                        ", required_lower_bound=" +
+                        std::to_string(required_lower_bound) +
+                        ", invalid_numeric_evidence=true",
+                        claim.confidence);
+                } else if (has_required_lower_bound) {
                     const bool adequate =
                         max_penalty_scale + Real{1.0e-14} >= required_lower_bound;
-                    if (adequate && has_trace_metadata) {
+                    if (adequate && has_trace_metadata && has_scale_theorem) {
                         claim.status = PropertyStatus::Preserved;
                         claim.confidence = AnalysisConfidence::High;
                         claim.certification_class = CertificationClass::Certified;
@@ -183,9 +230,9 @@ void emitBoundaryAndFluxEvidence(const ProblemAnalysisContext& context,
                     claim.weak_coercivity_lower_bound =
                         max_penalty_scale - required_lower_bound;
                     claim.description = adequate
-                        ? (has_trace_metadata
-                              ? "Scoped weak-boundary penalty scale satisfies the trace-backed coercivity lower bound"
-                              : "Scoped weak-boundary penalty scale satisfies the reported lower bound but lacks trace/inverse metadata")
+                        ? (has_trace_metadata && has_scale_theorem
+                              ? "Scoped weak-boundary penalty scale satisfies the theorem-scoped trace-backed coercivity lower bound"
+                              : "Scoped weak-boundary penalty scale satisfies the reported lower bound but lacks trace/inverse or theorem metadata")
                         : "Scoped weak-boundary penalty scale is below the reported coercivity lower bound";
                     claim.addEvidence("InterfaceValidationAnalyzer",
                         "ParameterScaleSummary max_scale=" +
@@ -193,7 +240,9 @@ void emitBoundaryAndFluxEvidence(const ProblemAnalysisContext& context,
                         ", required_lower_bound=" +
                         std::to_string(required_lower_bound) +
                         ", trace_inverse_metadata=" +
-                        std::string(has_trace_metadata ? "true" : "false"),
+                        std::string(has_trace_metadata ? "true" : "false") +
+                        ", scale_theorem=" +
+                        std::string(has_scale_theorem ? "true" : "false"),
                         claim.confidence);
                 } else {
                     claim.status = PropertyStatus::Unknown;
@@ -223,37 +272,89 @@ void emitBoundaryAndFluxEvidence(const ProblemAnalysisContext& context,
 
     for (const auto& flux : summaries->flux_balances) {
         if (!isFaceOrBoundary(flux.block.domain)) continue;
-        const Real tol = flux.balance_tolerance > Real{}
+        const bool tolerance_declared =
+            numeric::finiteDeclaredTolerance(flux.balance_tolerance);
+        const Real tol = tolerance_declared
             ? flux.balance_tolerance
             : Real{1.0e-10};
-        const Real residual = std::max({
-            std::abs(flux.local_residual_norm),
-            std::abs(flux.global_residual_norm),
-            std::abs(flux.interface_pair_residual_norm)});
+        const bool residuals_finite =
+            numeric::finiteAbsResidualTriple(
+                flux.local_residual_norm,
+                flux.global_residual_norm,
+                flux.interface_pair_residual_norm);
+        const bool numeric_evidence_valid =
+            tolerance_declared && residuals_finite;
+        const Real residual = residuals_finite
+            ? numeric::maxAbsTriple(flux.local_residual_norm,
+                                    flux.global_residual_norm,
+                                    flux.interface_pair_residual_norm)
+            : Real{};
         const bool balanced =
+            numeric_evidence_valid &&
             residual <= tol &&
             flux.local_violation_count == 0u;
+        const bool violated =
+            flux.local_violation_count > 0u ||
+            (numeric_evidence_valid && residual > tol);
+        const bool closure_metadata_complete =
+            fluxClosureCertificationMetadataComplete(flux);
+        const bool symbolic_balance_present =
+            hasScopedSymbolicBalance(flux);
+        const bool certified =
+            balanced &&
+            tolerance_declared &&
+            closure_metadata_complete &&
+            symbolic_balance_present;
 
         PropertyClaim claim;
         claim.kind = PropertyKind::InterfaceCondition;
-        claim.status = balanced ? PropertyStatus::Preserved
-                                : PropertyStatus::Violated;
-        claim.confidence = AnalysisConfidence::High;
-        claim.certification_class = balanced ? CertificationClass::Certified
-                                             : CertificationClass::Violated;
+        claim.status = violated
+            ? PropertyStatus::Violated
+            : (certified ? PropertyStatus::Preserved
+                         : (numeric_evidence_valid ? PropertyStatus::Likely
+                                                   : PropertyStatus::Unknown));
+        claim.confidence = violated || certified
+            ? AnalysisConfidence::High
+            : AnalysisConfidence::Medium;
+        claim.certification_class = violated
+            ? CertificationClass::Violated
+            : (certified ? CertificationClass::Certified
+                         : CertificationClass::NotCertified);
         claim.domain = flux.block.domain;
         claim.variables = variablesForBlock(flux.block);
         claim.interface_balance_residual = flux.interface_pair_residual_norm;
         claim.flux_balance_residual = residual;
         claim.tested_block_id = flux.block.operator_tag;
-        claim.description = balanced
-            ? "Boundary/interface flux summary is balanced within tolerance"
-            : "Boundary/interface flux summary violates the declared tolerance";
+        claim.description = violated
+            ? "Boundary/interface flux summary violates the declared tolerance"
+            : (certified
+                ? "Boundary/interface flux summary is balanced with matching symbolic balance and complete flux closure metadata"
+                : (numeric_evidence_valid
+                    ? "Boundary/interface flux summary is residual-balanced but lacks symbolic balance or complete flux closure metadata"
+                    : "Boundary/interface flux summary lacks finite declared tolerance or finite residual evidence"));
         claim.claim_origin = "InterfaceValidationAnalyzer";
         claim.addEvidence("InterfaceValidationAnalyzer",
             "FluxBalanceSummary residual=" +
             std::to_string(residual) +
-            ", tolerance=" + std::to_string(tol));
+            ", tolerance=" + std::to_string(tol) +
+            ", tolerance_declared=" +
+            std::string(tolerance_declared ? "true" : "false") +
+            ", finite_residuals=" +
+            std::string(residuals_finite ? "true" : "false") +
+            ", symbolic_balance=" +
+            std::string(symbolic_balance_present ? "true" : "false") +
+            ", closure_metadata=" +
+            std::string(closure_metadata_complete ? "true" : "false"),
+            claim.confidence);
+        if (!violated && !numeric_evidence_valid) {
+            AnalysisIssue issue;
+            issue.severity = IssueSeverity::Warning;
+            issue.message =
+                "Boundary/interface flux summary for block '" +
+                flux.block.operator_tag +
+                "' has non-finite residual evidence or invalid tolerance";
+            report.issues.push_back(std::move(issue));
+        }
         report.claims.push_back(std::move(claim));
     }
 }

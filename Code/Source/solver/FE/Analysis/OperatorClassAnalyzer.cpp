@@ -46,6 +46,7 @@ bool coefficientCoverageComplete(const CoefficientPropertySummary& summary) noex
            summary.quadrature_point_coverage_complete &&
            summary.lower_bound_valid_for_all_samples &&
            summary.tolerance_metadata_present &&
+           coefficientLowerBoundMatchesPositivity(summary) &&
            state_scope_ok;
 }
 
@@ -54,6 +55,9 @@ DefinitenessEvidence classifyDefinitenessEvidence(
 {
     const Real tol = definitenessTolerance(matrix);
     if (matrix.coercivity_lower_bound) {
+        if (!numeric::finite(*matrix.coercivity_lower_bound)) {
+            return DefinitenessEvidence::Unknown;
+        }
         if (*matrix.coercivity_lower_bound > tol) {
             return DefinitenessEvidence::PositiveDefinite;
         }
@@ -63,6 +67,9 @@ DefinitenessEvidence classifyDefinitenessEvidence(
         return DefinitenessEvidence::Semidefinite;
     }
     if (matrix.min_eigenvalue_estimate) {
+        if (!numeric::finite(*matrix.min_eigenvalue_estimate)) {
+            return DefinitenessEvidence::Unknown;
+        }
         if (*matrix.min_eigenvalue_estimate > tol) {
             return DefinitenessEvidence::PositiveDefinite;
         }
@@ -96,7 +103,13 @@ void emitCoefficientClaim(ProblemAnalysisReport& report,
     switch (summary.positivity) {
         case PositivityClass::Positive:
         case PositivityClass::Nonnegative:
-            if (coefficientCoverageComplete(summary)) {
+            if (coefficientDeclaredBoundContradictsPositivity(summary)) {
+                claim.status = PropertyStatus::Violated;
+                claim.certification_class = CertificationClass::Violated;
+                claim.description =
+                    "Coefficient '" + summary.coefficient +
+                    "' declared nonnegative/positive sign structure but finite lower-bound evidence contradicts it";
+            } else if (coefficientCoverageComplete(summary)) {
                 claim.status = PropertyStatus::Preserved;
                 claim.certification_class = CertificationClass::Certified;
                 claim.description =

@@ -126,6 +126,9 @@ public:
     /** @brief Check if JIT-compiled kernel is available. */
     [[nodiscard]] bool isJITReady() const noexcept;
 
+    /** @brief Check whether a generic symbolic tangent dispatch was compiled for a domain. */
+    [[nodiscard]] bool hasCompiledTangentDispatch(IntegralDomain domain, int marker = -1) const noexcept;
+
     /** @brief Inject a pre-compiled cell kernel address from colocated compilation.
      *  Bypasses the normal maybeCompile() path. */
     void setExternalCellAddress(std::uintptr_t addr);
@@ -249,7 +252,7 @@ private:
     std::shared_ptr<assembly::AssemblyKernel> fallback_{};
     JITOptions options_{};
 
-    std::mutex jit_mutex_{};
+    mutable std::mutex jit_mutex_{};
     std::uint64_t revision_{0};
     std::uint64_t compiled_revision_{static_cast<std::uint64_t>(-1)};
     std::uint64_t attempted_revision_{static_cast<std::uint64_t>(-1)};

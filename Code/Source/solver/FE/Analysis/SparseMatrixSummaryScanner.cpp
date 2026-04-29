@@ -7,6 +7,8 @@
 
 #include "Analysis/SparseMatrixSummaryScanner.h"
 
+#include "Analysis/AnalysisNumericGuards.h"
+
 #include "Backends/FSILS/FsilsMatrix.h"
 #include "Backends/Interfaces/GenericMatrix.h"
 
@@ -137,8 +139,11 @@ public:
             : std::uint64_t{0};
         summary_.scanned_row_count = log_.visited_rows;
         summary_.scanned_entry_count = log_.visited_entries;
-        summary_.sign_evidence_complete = complete_rows;
-        summary_.row_sum_evidence_complete = complete_rows && has_row_sum_;
+        summary_.sign_evidence_complete =
+            complete_rows && summary_.nonfinite_entry_count == 0u;
+        summary_.row_sum_evidence_complete =
+            complete_rows && has_row_sum_ &&
+            summary_.nonfinite_row_sum_count == 0u;
 
         finishSymmetry();
 
@@ -203,6 +208,16 @@ private:
                        int owning_rank)
     {
         const Real value = entry.value;
+        if (!numeric::finite(value)) {
+            ++summary_.nonfinite_entry_count;
+            summary_.addWorstEntry(MatrixEntrySample{row,
+                                                     entry.col,
+                                                     value,
+                                                     owning_rank,
+                                                     sample_index_++,
+                                                     "nonfinite entry"});
+            return;
+        }
         const Real abs_value = std::abs(value);
         summary_.max_abs_entry = std::max(summary_.max_abs_entry, abs_value);
         retainSymmetryEntry(row, entry.col, value);
@@ -257,9 +272,26 @@ private:
         markRowSeen(row);
 
         Real row_sum = 0.0;
+        bool row_has_nonfinite = false;
         for (const auto& entry : entries) {
-            row_sum += entry.value;
+            if (numeric::finite(entry.value)) {
+                row_sum += entry.value;
+            } else {
+                row_has_nonfinite = true;
+            }
             classifyEntry(row, entry, owning_rank);
+        }
+
+        if (row_has_nonfinite) {
+            ++summary_.nonfinite_row_sum_count;
+            summary_.addWorstEntry(MatrixEntrySample{
+                row,
+                row,
+                std::numeric_limits<Real>::quiet_NaN(),
+                owning_rank,
+                sample_index_++,
+                "nonfinite row sum"});
+            return;
         }
 
         if (!has_row_sum_) {
@@ -965,6 +997,8 @@ mergeDiscreteMatrixSummaries(const std::vector<DiscreteMatrixSummary>& parts,
         merged.negative_offdiag_count += part.negative_offdiag_count;
         merged.near_zero_offdiag_count += part.near_zero_offdiag_count;
         merged.row_sum_violation_count += part.row_sum_violation_count;
+        merged.nonfinite_entry_count += part.nonfinite_entry_count;
+        merged.nonfinite_row_sum_count += part.nonfinite_row_sum_count;
         merged.scanned_row_count += part.scanned_row_count;
         merged.scanned_entry_count += part.scanned_entry_count;
         merged.expected_row_count =
@@ -987,8 +1021,11 @@ mergeDiscreteMatrixSummaries(const std::vector<DiscreteMatrixSummary>& parts,
     const bool complete_rows =
         merged.expected_row_count > 0u &&
         merged.scanned_row_count >= merged.expected_row_count;
-    merged.sign_evidence_complete = complete_rows;
-    merged.row_sum_evidence_complete = complete_rows && have_row_sum;
+    merged.sign_evidence_complete =
+        complete_rows && merged.nonfinite_entry_count == 0u;
+    merged.row_sum_evidence_complete =
+        complete_rows && have_row_sum &&
+        merged.nonfinite_row_sum_count == 0u;
 
     return merged;
 }
@@ -1134,6 +1171,8 @@ void reduceDiscreteMatrixSummaryMPI(DiscreteMatrixSummary& summary,
     sum_u64(summary.negative_offdiag_count);
     sum_u64(summary.near_zero_offdiag_count);
     sum_u64(summary.row_sum_violation_count);
+    sum_u64(summary.nonfinite_entry_count);
+    sum_u64(summary.nonfinite_row_sum_count);
     sum_u64(summary.scanned_row_count);
     sum_u64(summary.scanned_entry_count);
 
@@ -1206,8 +1245,11 @@ void reduceDiscreteMatrixSummaryMPI(DiscreteMatrixSummary& summary,
         summary.expected_row_count > 0u &&
         summary.scanned_row_count >= summary.expected_row_count &&
         !log.row_coverage_storage_truncated;
-    summary.sign_evidence_complete = complete_rows;
-    summary.row_sum_evidence_complete = complete_rows && row_count > 0u;
+    summary.sign_evidence_complete =
+        complete_rows && summary.nonfinite_entry_count == 0u;
+    summary.row_sum_evidence_complete =
+        complete_rows && row_count > 0u &&
+        summary.nonfinite_row_sum_count == 0u;
     summary.symmetry_evidence_complete = false;
     summary.structurally_symmetric = false;
     summary.numerically_symmetric = false;

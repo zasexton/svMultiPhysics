@@ -6,6 +6,7 @@
  */
 
 #include "Analysis/InfSupAnalyzer.h"
+#include "Analysis/AnalysisNumericGuards.h"
 #include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
 
@@ -24,7 +25,7 @@ namespace {
 
 Real effectiveTolerance(const InfSupEstimateSummary& summary) noexcept
 {
-    return summary.estimate_tolerance > Real{}
+    return numeric::finiteDeclaredTolerance(summary.estimate_tolerance)
         ? summary.estimate_tolerance
         : Real{1.0e-12};
 }
@@ -34,11 +35,6 @@ bool nullspaceHandlingAcceptable(NullspaceHandlingClass handling) noexcept
     return handling == NullspaceHandlingClass::NotApplicable ||
            handling == NullspaceHandlingClass::AnchoredByConstraints ||
            handling == NullspaceHandlingClass::ProjectedOut;
-}
-
-bool finitePositive(Real value) noexcept
-{
-    return std::isfinite(static_cast<double>(value)) && value > Real{};
 }
 
 void appendUnique(std::vector<VariableKey>& values, const VariableKey& value)
@@ -77,7 +73,7 @@ bool numericMetadataComplete(const InfSupEstimateSummary& summary)
 {
     const bool uniform_lower_bound_valid =
         summary.uniform_lower_bound_value_present &&
-        finitePositive(summary.uniform_lower_bound) &&
+        numeric::finitePositive(summary.uniform_lower_bound) &&
         summary.uniform_lower_bound > effectiveTolerance(summary);
     return summary.estimator_metadata_present &&
            summary.norm_metadata_present &&
@@ -150,11 +146,11 @@ bool certifiedPairMetadataComplete(const ProblemAnalysisContext& context,
         summary.fortin_operator_evidence_present;
     const bool beta_bound_valid =
         summary.beta_lower_bound_present &&
-        finitePositive(summary.beta_lower_bound);
+        numeric::finitePositive(summary.beta_lower_bound);
     const bool fortin_norm_ok =
         !summary.fortin_operator_evidence_present ||
         (summary.fortin_operator_norm_bound_present &&
-         finitePositive(summary.fortin_operator_norm_bound));
+         numeric::finitePositive(summary.fortin_operator_norm_bound));
     return scope_matches &&
            stable_pair_or_fortin &&
            !summary.pair_family.empty() &&
@@ -189,8 +185,13 @@ void emitNumericInfSupClaim(ProblemAnalysisReport& report,
                             const InfSupEstimateSummary& summary)
 {
     const Real tol = effectiveTolerance(summary);
-    const bool positive_above_tolerance = summary.estimate_value > tol;
-    const bool nonpositive_estimate = summary.estimate_value <= Real{};
+    const bool tolerance_declared =
+        numeric::finiteDeclaredTolerance(summary.estimate_tolerance);
+    const bool estimate_finite = numeric::finite(summary.estimate_value);
+    const bool positive_above_tolerance =
+        tolerance_declared && estimate_finite && summary.estimate_value > tol;
+    const bool nonpositive_estimate =
+        estimate_finite && summary.estimate_value <= Real{};
     const bool metadata_complete = numericMetadataComplete(summary);
 
     PropertyClaim claim;
@@ -231,13 +232,19 @@ void emitNumericInfSupClaim(ProblemAnalysisReport& report,
         claim.inf_sup_class = InfSupClass::Unknown;
         claim.certification_class = CertificationClass::NotCertified;
         claim.description =
-            "Numeric inf-sup estimate is positive but not separated from tolerance";
+            tolerance_declared && estimate_finite
+                ? "Numeric inf-sup estimate is positive but not separated from tolerance"
+                : "Numeric inf-sup estimate lacks finite estimate or finite declared tolerance";
     }
 
     claim.addEvidence("InfSupAnalyzer",
         "InfSupEstimateSummary estimate=" +
         std::to_string(summary.estimate_value) +
         ", tolerance=" + std::to_string(tol) +
+        ", tolerance_declared=" +
+        std::string(tolerance_declared ? "true" : "false") +
+        ", finite_estimate=" +
+        std::string(estimate_finite ? "true" : "false") +
         ", rows=" + std::to_string(summary.test_rows) +
         ", cols=" + std::to_string(summary.test_cols) +
         ", norm_metadata=" +

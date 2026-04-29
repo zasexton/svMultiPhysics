@@ -15,6 +15,7 @@
 #include "Forms/ConstitutiveModel.h"
 #include "Forms/Dual.h"
 #include "Forms/Einsum.h"
+#include "Forms/GeometrySensitivityEval.h"
 #include "Forms/JIT/InlinableConstitutiveModel.h"
 #include "Forms/JIT/ExternalCalls.h"
 #include "Forms/SymbolicDifferentiation.h"
@@ -1186,22 +1187,20 @@ std::array<Real, 3> fdCurlVector(const VectorCoefficient& f, const std::array<Re
 // Spatial jets (value + spatial derivatives via chain rule)
 // ============================================================================
 
-[[nodiscard]] std::array<Real, 3> trialGeometryVectorSeed(
-    const assembly::AssemblyContext& ctx,
-    LocalIndex j,
-    LocalIndex q);
-
-[[nodiscard]] Real currentTimeDerivativeCoefficient(
-    const assembly::AssemblyContext& ctx,
-    int order);
-
-[[nodiscard]] assembly::AssemblyContext::Matrix3x3 trialMeshVelocityJacobianSeed(
-    const assembly::AssemblyContext& ctx,
-    LocalIndex j,
-    LocalIndex q);
+using geometry_sensitivity::currentFaceNormalDerivative;
+using geometry_sensitivity::currentMeasureDerivative;
+using geometry_sensitivity::currentTimeDerivativeCoefficient;
+using geometry_sensitivity::integrationWeightDerivative;
+using geometry_sensitivity::surfaceTangentDerivative;
+using geometry_sensitivity::trialGeometryJacobianSeed;
+using geometry_sensitivity::trialGeometryVectorSeed;
+using geometry_sensitivity::trialMeshVelocityJacobianSeed;
 
 struct EvalEnvReal;
 struct EvalEnvDual;
+
+[[nodiscard]] LocalIndex geometryVariationTrialIndex(const EvalEnvReal& env);
+[[nodiscard]] LocalIndex geometryVariationTrialIndex(const EvalEnvDual& env);
 
 template<typename Scalar, typename Env>
 Scalar makeScalarConstant(Real value, const Env& env)
@@ -1899,6 +1898,124 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
 	            }
 	            return out;
 	        }
+        case FormExprType::GeometryTrialVectorVariation:
+        case FormExprType::MeshVelocityVariation: {
+            out.value.kind = EvalValue<Scalar>::Kind::Vector;
+            out.value.resizeVector(static_cast<std::size_t>(dim));
+            assembly::AssemblyContext::Vector3D value{};
+            if (env.trial_active == side) {
+                value = trialGeometryVectorSeed(ctx, geometryVariationTrialIndex(env), q);
+            }
+            Real scale = 1.0;
+            if (node.type() == FormExprType::MeshVelocityVariation && env.trial_active == side) {
+                scale = currentTimeDerivativeCoefficient(ctx, 1);
+            }
+            for (int d = 0; d < 3; ++d) {
+                out.value.v[static_cast<std::size_t>(d)] =
+                    makeScalarConstant<Scalar>(scale * value[static_cast<std::size_t>(d)], env);
+            }
+
+            if (out.has_grad) {
+                out.grad.kind = EvalValue<Scalar>::Kind::Matrix;
+                out.grad.resizeMatrix(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim));
+                assembly::AssemblyContext::Matrix3x3 grad{};
+                if (env.trial_active == side) {
+                    grad = (node.type() == FormExprType::MeshVelocityVariation)
+                               ? trialMeshVelocityJacobianSeed(ctx, geometryVariationTrialIndex(env), q)
+                               : trialGeometryJacobianSeed(ctx, geometryVariationTrialIndex(env), q);
+                }
+                for (int r = 0; r < dim; ++r) {
+                    for (int c = 0; c < dim; ++c) {
+                        out.grad.matrixAt(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) =
+                            makeScalarConstant<Scalar>(scale *
+                                grad[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)],
+                                env);
+                    }
+                }
+            }
+
+            if (out.has_hess) {
+                throw FEException("Forms: second spatial derivatives of geometry trial variations are not available",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            return out;
+        }
+        case FormExprType::GeometryTrialJacobianVariation: {
+            out.value.kind = EvalValue<Scalar>::Kind::Matrix;
+            out.value.resizeMatrix(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim));
+            assembly::AssemblyContext::Matrix3x3 value{};
+            if (env.trial_active == side) {
+                value = trialGeometryJacobianSeed(ctx, geometryVariationTrialIndex(env), q);
+            }
+            for (int r = 0; r < dim; ++r) {
+                for (int c = 0; c < dim; ++c) {
+                    out.value.matrixAt(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) =
+                        makeScalarConstant<Scalar>(value[static_cast<std::size_t>(r)]
+                                                        [static_cast<std::size_t>(c)],
+                                                   env);
+                }
+            }
+            if (out.has_grad || out.has_hess) {
+                throw FEException("Forms: spatial derivatives of geometry Jacobian variations are not available",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            return out;
+        }
+        case FormExprType::CurrentMeasureVariation: {
+            const Real value = (env.trial_active == side)
+                ? currentMeasureDerivative(ctx, q, geometryVariationTrialIndex(env))
+                : 0.0;
+            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+            out.value.s = makeScalarConstant<Scalar>(value, env);
+            if (out.has_grad || out.has_hess) {
+                throw FEException("Forms: spatial derivatives of current-measure variations are not available",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            return out;
+        }
+        case FormExprType::CurrentNormalVariation: {
+            out.value.kind = EvalValue<Scalar>::Kind::Vector;
+            out.value.resizeVector(static_cast<std::size_t>(dim));
+            assembly::AssemblyContext::Vector3D value{};
+            if (env.trial_active == side) {
+                value = currentFaceNormalDerivative(ctx, q, geometryVariationTrialIndex(env));
+            }
+            for (int d = 0; d < 3; ++d) {
+                out.value.v[static_cast<std::size_t>(d)] =
+                    makeScalarConstant<Scalar>(value[static_cast<std::size_t>(d)], env);
+            }
+            if (out.has_grad || out.has_hess) {
+                throw FEException("Forms: spatial derivatives of current-normal variations are not available",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            return out;
+        }
+        case FormExprType::SurfaceJacobianVariation: {
+            out.value.kind = EvalValue<Scalar>::Kind::Matrix;
+            out.value.resizeMatrix(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim));
+            if (env.trial_active == side) {
+                const int face_dim = (dim == 3) ? 2 : ((dim == 2) ? 1 : 0);
+                for (int c = 0; c < face_dim; ++c) {
+                    const auto seed = surfaceTangentDerivative(ctx, q, geometryVariationTrialIndex(env), c);
+                    for (int r = 0; r < dim; ++r) {
+                        out.value.matrixAt(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) =
+                            makeScalarConstant<Scalar>(seed[static_cast<std::size_t>(r)], env);
+                    }
+                }
+                if (dim == 3) {
+                    const auto dn = currentFaceNormalDerivative(ctx, q, geometryVariationTrialIndex(env));
+                    for (int r = 0; r < dim; ++r) {
+                        out.value.matrixAt(static_cast<std::size_t>(r), 2u) =
+                            makeScalarConstant<Scalar>(dn[static_cast<std::size_t>(r)], env);
+                    }
+                }
+            }
+            if (out.has_grad || out.has_hess) {
+                throw FEException("Forms: spatial derivatives of surface-Jacobian variations are not available",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            return out;
+        }
         case FormExprType::MeshDisplacement:
         case FormExprType::MeshVelocity:
         case FormExprType::MeshAcceleration:
@@ -5037,6 +5154,104 @@ EvalValue<Real> evalRealDispatchSurfaceJacobian(const FormExprNode&, const EvalE
     return evalRealMatrixTerminal(env, side, q, &assembly::AssemblyContext::surfaceJacobian);
 }
 
+EvalValue<Real> evalRealDispatchGeometryTrialVectorVariation(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    EvalValue<Real> out;
+    out.kind = EvalValue<Real>::Kind::Vector;
+    out.resizeVector(static_cast<std::size_t>(ctx.dimension()));
+    if (env.trial_active == side) {
+        const auto seed = trialGeometryVectorSeed(ctx, env.j, q);
+        for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+            out.vectorAt(d) = seed[d];
+        }
+    }
+    return out;
+}
+
+EvalValue<Real> evalRealDispatchGeometryTrialJacobianVariation(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+    EvalValue<Real> out;
+    out.kind = EvalValue<Real>::Kind::Matrix;
+    out.resizeMatrix(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim));
+    if (env.trial_active == side) {
+        const auto seed = trialGeometryJacobianSeed(ctx, env.j, q);
+        for (int r = 0; r < dim; ++r) {
+            for (int c = 0; c < dim; ++c) {
+                out.matrixAt(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) =
+                    seed[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+            }
+        }
+    }
+    return out;
+}
+
+EvalValue<Real> evalRealDispatchMeshVelocityVariation(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    EvalValue<Real> out;
+    out.kind = EvalValue<Real>::Kind::Vector;
+    out.resizeVector(static_cast<std::size_t>(ctx.dimension()));
+    if (env.trial_active == side) {
+        const Real a0 = currentTimeDerivativeCoefficient(ctx, 1);
+        const auto seed = trialGeometryVectorSeed(ctx, env.j, q);
+        for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+            out.vectorAt(d) = a0 * seed[d];
+        }
+    }
+    return out;
+}
+
+EvalValue<Real> evalRealDispatchCurrentMeasureVariation(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const Real value = (env.trial_active == side) ? currentMeasureDerivative(ctx, q, env.j) : 0.0;
+    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, value};
+}
+
+EvalValue<Real> evalRealDispatchCurrentNormalVariation(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    EvalValue<Real> out;
+    out.kind = EvalValue<Real>::Kind::Vector;
+    out.resizeVector(static_cast<std::size_t>(ctx.dimension()));
+    if (env.trial_active == side) {
+        const auto seed = currentFaceNormalDerivative(ctx, q, env.j);
+        for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+            out.vectorAt(d) = seed[d];
+        }
+    }
+    return out;
+}
+
+EvalValue<Real> evalRealDispatchSurfaceJacobianVariation(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+    EvalValue<Real> out;
+    out.kind = EvalValue<Real>::Kind::Matrix;
+    out.resizeMatrix(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim));
+    if (env.trial_active == side) {
+        const int face_dim = (dim == 3) ? 2 : ((dim == 2) ? 1 : 0);
+        for (int c = 0; c < face_dim; ++c) {
+            const auto seed = surfaceTangentDerivative(ctx, q, env.j, c);
+            for (int r = 0; r < dim; ++r) {
+                out.matrixAt(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) =
+                    seed[static_cast<std::size_t>(r)];
+            }
+        }
+        if (dim == 3) {
+            const auto dn = currentFaceNormalDerivative(ctx, q, env.j);
+            for (int r = 0; r < dim; ++r) {
+                out.matrixAt(static_cast<std::size_t>(r), 2u) = dn[static_cast<std::size_t>(r)];
+            }
+        }
+    }
+    return out;
+}
+
 EvalValue<Real> evalRealDispatchCellDiameter(const FormExprNode&,
                                              const EvalEnvReal& env,
                                              Side side,
@@ -5109,6 +5324,12 @@ const std::array<EvalRealDispatchFn, kFormExprDispatchSize>& evalRealDispatchTab
         table[static_cast<std::size_t>(FormExprType::CurrentMeasure)] = &evalRealDispatchCurrentMeasure;
         table[static_cast<std::size_t>(FormExprType::ReferenceMeasure)] = &evalRealDispatchReferenceMeasure;
         table[static_cast<std::size_t>(FormExprType::SurfaceJacobian)] = &evalRealDispatchSurfaceJacobian;
+        table[static_cast<std::size_t>(FormExprType::GeometryTrialVectorVariation)] = &evalRealDispatchGeometryTrialVectorVariation;
+        table[static_cast<std::size_t>(FormExprType::GeometryTrialJacobianVariation)] = &evalRealDispatchGeometryTrialJacobianVariation;
+        table[static_cast<std::size_t>(FormExprType::MeshVelocityVariation)] = &evalRealDispatchMeshVelocityVariation;
+        table[static_cast<std::size_t>(FormExprType::CurrentMeasureVariation)] = &evalRealDispatchCurrentMeasureVariation;
+        table[static_cast<std::size_t>(FormExprType::CurrentNormalVariation)] = &evalRealDispatchCurrentNormalVariation;
+        table[static_cast<std::size_t>(FormExprType::SurfaceJacobianVariation)] = &evalRealDispatchSurfaceJacobianVariation;
         table[static_cast<std::size_t>(FormExprType::Jacobian)] = &evalRealDispatchJacobian;
         table[static_cast<std::size_t>(FormExprType::JacobianInverse)] = &evalRealDispatchJacobianInverse;
         table[static_cast<std::size_t>(FormExprType::JacobianDeterminant)] = &evalRealDispatchJacobianDeterminant;
@@ -5196,6 +5417,18 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
             return evalRealDispatchReferenceNormal(node, env, side, q);
         case FormExprType::SurfaceJacobian:
             return evalRealDispatchSurfaceJacobian(node, env, side, q);
+        case FormExprType::GeometryTrialVectorVariation:
+            return evalRealDispatchGeometryTrialVectorVariation(node, env, side, q);
+        case FormExprType::GeometryTrialJacobianVariation:
+            return evalRealDispatchGeometryTrialJacobianVariation(node, env, side, q);
+        case FormExprType::MeshVelocityVariation:
+            return evalRealDispatchMeshVelocityVariation(node, env, side, q);
+        case FormExprType::CurrentMeasureVariation:
+            return evalRealDispatchCurrentMeasureVariation(node, env, side, q);
+        case FormExprType::CurrentNormalVariation:
+            return evalRealDispatchCurrentNormalVariation(node, env, side, q);
+        case FormExprType::SurfaceJacobianVariation:
+            return evalRealDispatchSurfaceJacobianVariation(node, env, side, q);
         case FormExprType::Identity: {
             const int idim = node.identityDim().value_or(dim);
             EvalValue<Real> out;
@@ -8405,6 +8638,17 @@ struct EvalEnvDual {
     std::size_t coupled_aux_dseed_cols{0u};
 };
 
+[[nodiscard]] LocalIndex geometryVariationTrialIndex(const EvalEnvReal& env)
+{
+    return env.j;
+}
+
+[[nodiscard]] LocalIndex geometryVariationTrialIndex(const EvalEnvDual&)
+{
+    throw FEException("Forms: explicit geometry-variation terminals require scalar symbolic tangent evaluation",
+                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+}
+
 EvalValue<Dual> evalDual(const FormExprNode& node,
                          const EvalEnvDual& env,
                          Side side,
@@ -8887,299 +9131,6 @@ EvalValue<Dual> evalDualScalarTerminal(const EvalEnvDual& env,
     out.kind = EvalValue<Dual>::Kind::Scalar;
     out.s = makeDualConstant((ctx.*accessor)(q), env.ws->alloc());
     return out;
-}
-
-[[nodiscard]] std::array<Real, 3> matrixVector(
-    const assembly::AssemblyContext::Matrix3x3& A,
-    const std::array<Real, 3>& x) noexcept
-{
-    std::array<Real, 3> out{0.0, 0.0, 0.0};
-    for (std::size_t r = 0; r < 3u; ++r) {
-        for (std::size_t c = 0; c < 3u; ++c) {
-            out[r] += A[r][c] * x[c];
-        }
-    }
-    return out;
-}
-
-[[nodiscard]] Real dot3(const std::array<Real, 3>& a,
-                        const std::array<Real, 3>& b) noexcept
-{
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-[[nodiscard]] std::array<Real, 3> cross3(const std::array<Real, 3>& a,
-                                         const std::array<Real, 3>& b) noexcept
-{
-    return {
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    };
-}
-
-[[nodiscard]] std::array<Real, 3> column3(
-    const assembly::AssemblyContext::Matrix3x3& A,
-    int column) noexcept
-{
-    const auto c = static_cast<std::size_t>(column);
-    return {A[0][c], A[1][c], A[2][c]};
-}
-
-[[nodiscard]] std::array<Real, 3> trialGeometryVectorSeed(
-    const assembly::AssemblyContext& ctx,
-    LocalIndex j,
-    LocalIndex q)
-{
-    if (ctx.trialUsesVectorBasis()) {
-        return ctx.trialBasisVectorValue(j, q);
-    }
-
-    const int vd = ctx.trialValueDimension();
-    FE_THROW_IF(vd <= 0 || vd > 3, InvalidArgumentException,
-                "Forms: geometry sensitivity requires a 1..3 dimensional mesh-motion trial field");
-    const LocalIndex n_trial = ctx.numTrialDofs();
-    FE_THROW_IF((n_trial % static_cast<LocalIndex>(vd)) != 0, InvalidArgumentException,
-                "Forms: geometry sensitivity trial DOF count is not divisible by value dimension");
-    const LocalIndex dofs_per_component =
-        static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
-    const int component = static_cast<int>(j / dofs_per_component);
-    FE_THROW_IF(component < 0 || component >= vd, InvalidArgumentException,
-                "Forms: geometry sensitivity trial component is out of range");
-
-    std::array<Real, 3> out{0.0, 0.0, 0.0};
-    out[static_cast<std::size_t>(component)] = ctx.trialBasisValue(j, q);
-    return out;
-}
-
-[[nodiscard]] assembly::AssemblyContext::Matrix3x3 trialGeometryJacobianSeed(
-    const assembly::AssemblyContext& ctx,
-    LocalIndex j,
-    LocalIndex q)
-{
-    FE_THROW_IF(ctx.trialUsesVectorBasis(), InvalidArgumentException,
-                "Forms: current-geometry sensitivity requires scalar-component H1/Product mesh-motion trials");
-
-    const int vd = ctx.trialValueDimension();
-    FE_THROW_IF(vd <= 0 || vd > 3, InvalidArgumentException,
-                "Forms: geometry sensitivity requires a 1..3 dimensional mesh-motion trial field");
-    const LocalIndex n_trial = ctx.numTrialDofs();
-    FE_THROW_IF((n_trial % static_cast<LocalIndex>(vd)) != 0, InvalidArgumentException,
-                "Forms: geometry sensitivity trial DOF count is not divisible by value dimension");
-    const LocalIndex dofs_per_component =
-        static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
-    const int component = static_cast<int>(j / dofs_per_component);
-    FE_THROW_IF(component < 0 || component >= vd, InvalidArgumentException,
-                "Forms: geometry sensitivity trial component is out of range");
-
-    assembly::AssemblyContext::Matrix3x3 out{};
-    const auto grad_ref = ctx.trialReferenceGradient(j, q);
-    for (int xi = 0; xi < ctx.dimension(); ++xi) {
-        out[static_cast<std::size_t>(component)][static_cast<std::size_t>(xi)] =
-            grad_ref[static_cast<std::size_t>(xi)];
-    }
-    return out;
-}
-
-[[nodiscard]] Real currentTimeDerivativeCoefficient(
-    const assembly::AssemblyContext& ctx,
-    int order)
-{
-    const auto* time_ctx = ctx.timeIntegrationContext();
-    FE_THROW_IF(time_ctx == nullptr, InvalidArgumentException,
-                "Forms: coupled mesh-velocity sensitivity requires a time-integration context");
-    const auto* stencil = time_ctx->stencil(order);
-    FE_THROW_IF(stencil == nullptr, InvalidArgumentException,
-                "Forms: coupled mesh-velocity sensitivity requires an active time-derivative stencil");
-    return stencil->coeff(0);
-}
-
-[[nodiscard]] assembly::AssemblyContext::Matrix3x3 trialMeshVelocityJacobianSeed(
-    const assembly::AssemblyContext& ctx,
-    LocalIndex j,
-    LocalIndex q)
-{
-    if (ctx.trialUsesVectorBasis()) {
-        return ctx.trialBasisVectorJacobian(j, q);
-    }
-
-    const int vd = ctx.trialValueDimension();
-    FE_THROW_IF(vd <= 0 || vd > 3, InvalidArgumentException,
-                "Forms: mesh-velocity sensitivity requires a 1..3 dimensional mesh-motion trial field");
-    const LocalIndex n_trial = ctx.numTrialDofs();
-    FE_THROW_IF((n_trial % static_cast<LocalIndex>(vd)) != 0, InvalidArgumentException,
-                "Forms: mesh-velocity sensitivity trial DOF count is not divisible by value dimension");
-    const LocalIndex dofs_per_component =
-        static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
-    const int component = static_cast<int>(j / dofs_per_component);
-    FE_THROW_IF(component < 0 || component >= vd, InvalidArgumentException,
-                "Forms: mesh-velocity sensitivity trial component is out of range");
-
-    assembly::AssemblyContext::Matrix3x3 out{};
-    const auto grad = ctx.trialPhysicalGradient(j, q);
-    for (int d = 0; d < ctx.dimension(); ++d) {
-        out[static_cast<std::size_t>(component)][static_cast<std::size_t>(d)] =
-            grad[static_cast<std::size_t>(d)];
-    }
-    return out;
-}
-
-[[nodiscard]] Real traceProduct(
-    const assembly::AssemblyContext::Matrix3x3& A,
-    const assembly::AssemblyContext::Matrix3x3& B,
-    int dim) noexcept
-{
-    Real value = 0.0;
-    for (int i = 0; i < dim; ++i) {
-        for (int j = 0; j < dim; ++j) {
-            value += A[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] *
-                     B[static_cast<std::size_t>(j)][static_cast<std::size_t>(i)];
-        }
-    }
-    return value;
-}
-
-[[nodiscard]] Real currentCellMeasureDerivative(
-    const assembly::AssemblyContext& ctx,
-    LocalIndex q,
-    LocalIndex j)
-{
-    const auto dJ = trialGeometryJacobianSeed(ctx, j, q);
-    return ctx.currentMeasure(q) * traceProduct(ctx.currentInverseJacobian(q), dJ, ctx.dimension());
-}
-
-[[nodiscard]] std::array<Real, 3> surfaceTangentDerivative(
-    const assembly::AssemblyContext& ctx,
-    LocalIndex q,
-    LocalIndex j,
-    int tangent_column)
-{
-    FE_THROW_IF(ctx.trialUsesVectorBasis(), InvalidArgumentException,
-                "Forms: current-face geometry sensitivity requires scalar-component H1/Product mesh-motion trials");
-
-    const int vd = ctx.trialValueDimension();
-    FE_THROW_IF(vd <= 0 || vd > 3, InvalidArgumentException,
-                "Forms: geometry sensitivity requires a 1..3 dimensional mesh-motion trial field");
-    const LocalIndex n_trial = ctx.numTrialDofs();
-    FE_THROW_IF((n_trial % static_cast<LocalIndex>(vd)) != 0, InvalidArgumentException,
-                "Forms: geometry sensitivity trial DOF count is not divisible by value dimension");
-    const LocalIndex dofs_per_component =
-        static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
-    const int component = static_cast<int>(j / dofs_per_component);
-    FE_THROW_IF(component < 0 || component >= vd, InvalidArgumentException,
-                "Forms: geometry sensitivity trial component is out of range");
-
-    const auto tangent = column3(ctx.surfaceJacobian(q), tangent_column);
-    const auto dxi_ds = matrixVector(ctx.currentInverseJacobian(q), tangent);
-    const auto grad_ref = ctx.trialReferenceGradient(j, q);
-    const Real dN_ds = dot3(grad_ref, dxi_ds);
-
-    std::array<Real, 3> out{0.0, 0.0, 0.0};
-    out[static_cast<std::size_t>(component)] = dN_ds;
-    return out;
-}
-
-[[nodiscard]] Real currentFaceMeasureDerivative(
-    const assembly::AssemblyContext& ctx,
-    LocalIndex q,
-    LocalIndex j)
-{
-    const int dim = ctx.dimension();
-    if (dim == 3) {
-        const auto t0 = column3(ctx.surfaceJacobian(q), 0);
-        const auto t1 = column3(ctx.surfaceJacobian(q), 1);
-        const auto dt0 = surfaceTangentDerivative(ctx, q, j, 0);
-        const auto dt1 = surfaceTangentDerivative(ctx, q, j, 1);
-        const auto d_area_vec_a = cross3(dt0, t1);
-        const auto d_area_vec_b = cross3(t0, dt1);
-        const auto normal = ctx.currentNormal(q);
-        return dot3(normal, {d_area_vec_a[0] + d_area_vec_b[0],
-                             d_area_vec_a[1] + d_area_vec_b[1],
-                             d_area_vec_a[2] + d_area_vec_b[2]});
-    }
-    if (dim == 2) {
-        const auto t0 = column3(ctx.surfaceJacobian(q), 0);
-        const auto dt0 = surfaceTangentDerivative(ctx, q, j, 0);
-        const Real measure = ctx.currentMeasure(q);
-        if (!(measure > 0.0)) {
-            return 0.0;
-        }
-        return dot3(t0, dt0) / measure;
-    }
-    return 0.0;
-}
-
-[[nodiscard]] std::array<Real, 3> currentFaceNormalDerivative(
-    const assembly::AssemblyContext& ctx,
-    LocalIndex q,
-    LocalIndex j)
-{
-    const int dim = ctx.dimension();
-    if (dim == 3) {
-        const auto t0 = column3(ctx.surfaceJacobian(q), 0);
-        const auto t1 = column3(ctx.surfaceJacobian(q), 1);
-        const auto dt0 = surfaceTangentDerivative(ctx, q, j, 0);
-        const auto dt1 = surfaceTangentDerivative(ctx, q, j, 1);
-        const auto d_area_vec_a = cross3(dt0, t1);
-        const auto d_area_vec_b = cross3(t0, dt1);
-        const std::array<Real, 3> d_area_vec{
-            d_area_vec_a[0] + d_area_vec_b[0],
-            d_area_vec_a[1] + d_area_vec_b[1],
-            d_area_vec_a[2] + d_area_vec_b[2]};
-        const auto normal = ctx.currentNormal(q);
-        const Real normal_part = dot3(normal, d_area_vec);
-        std::array<Real, 3> out{};
-        const Real measure = ctx.currentMeasure(q);
-        if (!(measure > 0.0)) {
-            return out;
-        }
-        for (std::size_t d = 0; d < 3u; ++d) {
-            out[d] = (d_area_vec[d] - normal[d] * normal_part) / measure;
-        }
-        return out;
-    }
-    if (dim == 2) {
-        const auto t0 = column3(ctx.surfaceJacobian(q), 0);
-        const auto dt0 = surfaceTangentDerivative(ctx, q, j, 0);
-        const Real measure = ctx.currentMeasure(q);
-        std::array<Real, 3> out{};
-        if (!(measure > 0.0)) {
-            return out;
-        }
-        const std::array<Real, 3> unit_t{t0[0] / measure, t0[1] / measure, 0.0};
-        const Real dmeasure = dot3(unit_t, dt0);
-        const std::array<Real, 3> dunit_t{
-            (dt0[0] - unit_t[0] * dmeasure) / measure,
-            (dt0[1] - unit_t[1] * dmeasure) / measure,
-            0.0};
-        out[0] = -dunit_t[1];
-        out[1] = dunit_t[0];
-        return out;
-    }
-    return {0.0, 0.0, 0.0};
-}
-
-[[nodiscard]] Real currentMeasureDerivative(
-    const assembly::AssemblyContext& ctx,
-    LocalIndex q,
-    LocalIndex j)
-{
-    if (ctx.contextType() == assembly::ContextType::Cell) {
-        return currentCellMeasureDerivative(ctx, q, j);
-    }
-    return currentFaceMeasureDerivative(ctx, q, j);
-}
-
-[[nodiscard]] Real integrationWeightDerivative(
-    const assembly::AssemblyContext& ctx,
-    LocalIndex q,
-    LocalIndex j)
-{
-    const Real measure = ctx.currentMeasure(q);
-    if (!(measure > 0.0)) {
-        return 0.0;
-    }
-    return ctx.integrationWeight(q) * currentMeasureDerivative(ctx, q, j) / measure;
 }
 
 EvalValue<Dual> evalDualDispatchMeshDisplacement(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
@@ -15483,6 +15434,12 @@ using NodeHashMemo = std::unordered_map<const FormExprNode*, std::uint64_t>;
     hashTag64(h, 0x44ULL);
     hashPod64(h, static_cast<std::int32_t>(residual_ir.maxTimeDerivativeOrder()));
 
+    const auto& geom = residual_ir.geometrySensitivityOptions();
+    hashTag64(h, 0x46ULL);
+    hashPod64(h, static_cast<std::uint8_t>(geom.mode));
+    hashPod64(h, static_cast<std::uint16_t>(geom.mesh_motion_field));
+    hashPod64(h, residual_ir.geometrySensitivityActive() ? std::uint8_t{1u} : std::uint8_t{0u});
+
     NodeHashMemo memo;
 
     const auto& terms = residual_ir.terms();
@@ -15579,6 +15536,20 @@ private:
     return cache;
 }
 
+[[nodiscard]] FormExpr rewriteTrialFunctionsToState(const FormExpr& expr, FieldId trial_state_field)
+{
+    const auto transform = [&](const FormExprNode& n) -> std::optional<FormExpr> {
+        if (n.type() != FormExprType::TrialFunction) {
+            return std::nullopt;
+        }
+        const auto* sig = n.spaceSignature();
+        FE_THROW_IF(!sig, InvalidArgumentException,
+                    "Forms: TrialFunction missing SpaceSignature during symbolic tangent geometry rewrite");
+        return FormExpr::stateField(trial_state_field, *sig, n.toString());
+    };
+    return expr.transformNodes(transform);
+}
+
 } // namespace
 
 // ============================================================================
@@ -15595,12 +15566,6 @@ SymbolicNonlinearFormKernel::SymbolicNonlinearFormKernel(FormIR residual_ir, Non
     if (residual_ir_.kind() != FormKind::Residual) {
         throw std::invalid_argument("SymbolicNonlinearFormKernel: IR kind must be Residual");
     }
-    if (residual_ir_.geometrySensitivityActive()) {
-        throw std::invalid_argument(
-            "SymbolicNonlinearFormKernel: monolithic geometry sensitivity requires "
-            "the AD NonlinearFormKernel path");
-    }
-
     const FormIR* irs[] = {&residual_ir_};
     parameter_specs_ = computeParameterSpecs(std::span<const FormIR* const>{irs});
 
@@ -15655,6 +15620,10 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
         return;
     }
 
+    const bool geometry_sensitivity_active = residual_ir_.geometrySensitivityActive();
+    const auto geometry_sensitivity = residual_ir_.geometrySensitivityOptions();
+    const FieldId trial_state_field = CURRENT_SOLUTION_FIELD_ID;
+
     FormExpr tangent_form{};
     bool first = true;
 
@@ -15663,7 +15632,18 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
             continue;
         }
 
-        FormExpr dI = differentiateResidual(term.integrand);
+        FormExpr dI = geometry_sensitivity_active
+            ? differentiateResidual(term.integrand,
+                                    geometry_sensitivity.mesh_motion_field,
+                                    trial_state_field,
+                                    geometry_sensitivity)
+            : differentiateResidual(term.integrand);
+
+        if (geometry_sensitivity_active) {
+            const auto primal_integrand = rewriteTrialFunctionsToState(term.integrand, trial_state_field);
+            dI = dI + primal_integrand *
+                (FormExpr::currentMeasureVariation() / FormExpr::currentMeasure());
+        }
 
         FormExpr wrapped{};
         switch (term.domain) {
@@ -15699,13 +15679,18 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
         // but FormCompiler::compileBilinear requires explicit test+trial terminals.
         const auto u = FormExpr::trialFunction(*residual_ir_.trialSpace(), "du");
         const auto v = FormExpr::testFunction(*residual_ir_.testSpace(), "v");
-        tangent_form = (FormExpr::constant(0.0) * inner(u, v)).dx();
+        tangent_form = tangent_form + (FormExpr::constant(0.0) * inner(u, v)).dx();
     }
 
     FormCompiler compiler;
-    if (containsIndexedAccess(tangent_form)) {
+    {
         auto opts = compiler.options();
-        opts.jit.enable = true;
+        if (geometry_sensitivity_active) {
+            opts.geometry_sensitivity = geometry_sensitivity;
+        }
+        if (containsIndexedAccess(tangent_form)) {
+            opts.jit.enable = true;
+        }
         compiler.setOptions(std::move(opts));
     }
     tangent_ir_ = compiler.compileBilinear(tangent_form);

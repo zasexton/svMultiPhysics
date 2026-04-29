@@ -9,6 +9,7 @@
 #include "Physics/Core/PhysicsModule.h"
 
 #include "FE/Forms/BoundaryConditions.h"
+#include "FE/Forms/FormExpr.h"
 #include "FE/Spaces/FunctionSpace.h"
 
 #include <array>
@@ -51,6 +52,7 @@ struct PseudoElasticMeshMotionOptions {
 
     bool auto_register_field{true};
     bool bind_as_mesh_displacement{true};
+    FE::forms::GeometryTangentPath tangent_path{FE::forms::GeometryTangentPath::SymbolicRequired};
     bool enable_jit{SVMP_FE_ENABLE_LLVM_JIT != 0};
     bool enable_jit_specialization{true};
 

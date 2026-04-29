@@ -132,6 +132,9 @@ ReducedMatrixSummary reducedMatrix(VariableKey variable,
     matrix.cholesky_factorization_succeeded = true;
     matrix.m_matrix_certification_evidence = z_matrix;
     matrix.stieltjes_matrix_evidence = z_matrix;
+    if (z_matrix) {
+        matrix.m_matrix_theorem_id = "stieltjes-spd-z";
+    }
     matrix.dmp_applicability_evidence = z_matrix;
     matrix.dmp_rhs_sign_evidence = z_matrix;
 
@@ -359,6 +362,8 @@ TEST(Phase7Integration, ScalarDiffusion_ConstrainedPositiveOffdiag_NotReducedVio
         source, mask, blockFor(scalar, "reduced"), options);
     reduced.free_free_matrix.m_matrix_certification_evidence = true;
     reduced.free_free_matrix.stieltjes_matrix_evidence = true;
+    reduced.free_free_matrix.m_matrix_theorem_id = "stieltjes-spd-z";
+    reduced.free_free_matrix.cholesky_factorization_succeeded = true;
     ASSERT_GT(full.summary.positive_offdiag_count, 0u);
     ASSERT_EQ(reduced.free_free_matrix.positive_offdiag_count, 0u);
 
@@ -572,6 +577,14 @@ TEST(Phase7Integration, CompatibleComplex_ExactSequenceSupported)
     complex.exact_sequence_compatible = true;
     complex.trace_sequence_compatible = true;
     complex.commuting_projection_available = true;
+    complex.compatible_complex_theorem_id =
+        "Arnold-Falk-Winther bounded cochain projection";
+    complex.bounded_cochain_projection_evidence_present = true;
+    complex.projection_bound_present = true;
+    complex.projection_bound = 2.0;
+    complex.projection_stability_metadata_present = true;
+    complex.mesh_family_scope_present = true;
+    complex.shape_regular_mesh_evidence_present = true;
     summaries.compatible_complexes.push_back(complex);
     ctx.setAnalysisSummaries(std::move(summaries));
 
@@ -642,6 +655,15 @@ TEST(Phase7Integration, TransientParabolic_TemporalClassAndEnergyDecay)
     energy.energy_coercivity_evidence_present = true;
     energy.discrete_dissipation_identity_evidence_present = true;
     energy.boundary_source_energy_accounting_present = true;
+    energy.energy_coercivity_lower_bound_present = true;
+    energy.energy_coercivity_lower_bound = 0.25;
+    energy.energy_norm_equivalence_bounds_present = true;
+    energy.energy_norm_equivalence_lower_bound = 0.25;
+    energy.energy_norm_equivalence_upper_bound = 4.0;
+    energy.energy_dissipation_residual_bound_present = true;
+    energy.energy_dissipation_residual_bound = 1.0e-12;
+    energy.energy_dissipation_tolerance_present = true;
+    energy.energy_dissipation_tolerance = 1.0e-8;
     summaries.energy_entropy.push_back(energy);
     ctx.setAnalysisSummaries(std::move(summaries));
 
@@ -779,6 +801,7 @@ TEST(Phase7Integration, Transfer_NonmatchingProjection_NotConstantPreserving)
     bad.projection_space_id = "projection-bad";
     bad.conservation_residual = 1.0e-4;
     bad.constant_preservation_residual = 1.0e-3;
+    bad.residual_tolerance = 1.0e-10;
     bad.rank_metadata_present = false;
     summaries.transfer_operators.push_back(bad);
     ctx.setAnalysisSummaries(std::move(summaries));
@@ -837,11 +860,17 @@ TEST(Phase7Integration, EquilibriumPreservingBalance_FluxSourceResidualZero)
     AnalysisSummarySet summaries;
     EquilibriumPreservationSummary equilibrium;
     equilibrium.equilibrium_id = "declared-equilibrium";
+    equilibrium.equilibrium_family_id = "lake-at-rest";
+    equilibrium.equilibrium_preservation_theorem_id =
+        "hydrostatic reconstruction well-balanced theorem";
     equilibrium.flux_source_residual = 0.0;
     equilibrium.residual_tolerance = 1.0e-10;
     equilibrium.source_quadrature_metadata_present = true;
     equilibrium.reconstruction_metadata_present = true;
     equilibrium.boundary_compatibility_metadata_present = true;
+    equilibrium.equilibrium_scope_metadata_present = true;
+    equilibrium.source_model_scope_metadata_present = true;
+    equilibrium.reconstruction_scope_metadata_present = true;
     summaries.equilibrium_preservation.push_back(equilibrium);
     ctx.setAnalysisSummaries(std::move(summaries));
 
@@ -885,6 +914,10 @@ TEST(Phase7Integration, DAE_InconsistentInitialState_Warning)
     initial.initial_constraint_residual = 1.0e-3;
     initial.initial_boundary_residual = 0.0;
     initial.residual_tolerance = 1.0e-8;
+    initial.residual_tolerance_declared = true;
+    initial.compatibility_scope = "algebraic-constraint";
+    initial.algebraic_constraint_metadata_present = true;
+    initial.checked_constraint_family_count = 1;
     summaries.initial_compatibility.push_back(initial);
     ctx.setAnalysisSummaries(std::move(summaries));
 
@@ -906,6 +939,12 @@ TEST(Phase7Integration, InitialDataCompatibility_SatisfiedAtInitialTime)
     initial.initial_constraint_residual = 1.0e-12;
     initial.initial_boundary_residual = 2.0e-12;
     initial.residual_tolerance = 1.0e-8;
+    initial.residual_tolerance_declared = true;
+    initial.compatibility_scope = "algebraic-and-boundary";
+    initial.algebraic_constraint_metadata_present = true;
+    initial.boundary_constraint_metadata_present = true;
+    initial.checked_constraint_family_count = 1;
+    initial.checked_boundary_condition_count = 1;
     summaries.initial_compatibility.push_back(initial);
     ctx.setAnalysisSummaries(std::move(summaries));
 
@@ -1128,6 +1167,8 @@ TEST(Phase7Integration, InterfacePenaltyScopingPreventsCrossBoundaryCertificatio
     unrelated_high_penalty.required_lower_bound_present = true;
     unrelated_high_penalty.required_lower_bound = 1.0;
     unrelated_high_penalty.trace_inverse_metadata_present = true;
+    unrelated_high_penalty.scale_theorem_id =
+        "Nitsche trace-inverse coercivity bound";
     summaries.parameter_scales.push_back(unrelated_high_penalty);
     ctx.setAnalysisSummaries(std::move(summaries));
 
@@ -1177,6 +1218,7 @@ TEST(Phase7Integration, ScalarP1Diffusion_UniformMesh_ProvenStieltjesDMP)
     matrix.cholesky_factorization_succeeded = true;
     matrix.m_matrix_certification_evidence = true;
     matrix.stieltjes_matrix_evidence = true;
+    matrix.m_matrix_theorem_id = "stieltjes-spd-z";
     matrix.dmp_applicability_evidence = true;
     matrix.dmp_rhs_sign_evidence = true;
 
@@ -1854,6 +1896,7 @@ TEST(Phase7Integration, ConservationSymbolicBalanceEvidenceMustBeScoped)
     scoped.source_quadrature_consistency_present = true;
     scoped.orientation_consistency_present = true;
     scoped.boundary_flux_accounted_for = true;
+    scoped.steady_balance_scope = true;
     summaries.flux_balances.push_back(scoped);
     ctx.setAnalysisSummaries(std::move(summaries));
 

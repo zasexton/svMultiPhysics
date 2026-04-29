@@ -8,6 +8,7 @@
 #ifndef SVMP_FE_ANALYSIS_ANALYSIS_SUMMARY_MATCHING_H
 #define SVMP_FE_ANALYSIS_ANALYSIS_SUMMARY_MATCHING_H
 
+#include "Analysis/AnalysisNumericGuards.h"
 #include "Analysis/AnalysisSummaryTypes.h"
 
 #include <algorithm>
@@ -289,6 +290,84 @@ variablesForBlock(const OperatorBlockId& block)
     return coefficientSummaryMatches(summary,
                                      target_matrix.block,
                                      target_matrix.contribution_ids);
+}
+
+[[nodiscard]] inline bool coefficientEigenvalueBoundsOrdered(
+    const CoefficientPropertySummary& summary) noexcept
+{
+    return numeric::finiteOrdered(summary.min_eigenvalue,
+                                  summary.max_eigenvalue);
+}
+
+[[nodiscard]] inline bool coefficientLowerBoundMatchesPositivity(
+    const CoefficientPropertySummary& summary) noexcept
+{
+    const Real tol = summary.positivity_tolerance > Real{}
+        ? summary.positivity_tolerance
+        : Real{1.0e-12};
+    if (!coefficientEigenvalueBoundsOrdered(summary)) {
+        return false;
+    }
+    switch (summary.positivity) {
+        case PositivityClass::Positive:
+            return summary.min_eigenvalue > tol;
+        case PositivityClass::Nonnegative:
+            return summary.min_eigenvalue >= -tol;
+        case PositivityClass::Negative:
+            return summary.max_eigenvalue < -tol;
+        case PositivityClass::Nonpositive:
+            return summary.max_eigenvalue <= tol;
+        case PositivityClass::Indefinite:
+        case PositivityClass::Unknown:
+            return true;
+    }
+    return false;
+}
+
+[[nodiscard]] inline bool coefficientDeclaredBoundContradictsPositivity(
+    const CoefficientPropertySummary& summary) noexcept
+{
+    return summary.lower_bound_valid_for_all_samples &&
+           summary.tolerance_metadata_present &&
+           coefficientEigenvalueBoundsOrdered(summary) &&
+           !coefficientLowerBoundMatchesPositivity(summary);
+}
+
+[[nodiscard]] inline bool fluxClosureMetadataComplete(
+    const FluxBalanceSummary& summary) noexcept
+{
+    const bool face_evidence =
+        summary.interface_pair_count == 0u ||
+        summary.face_pair_residual_evidence_present;
+    return summary.flux_variable_metadata_present &&
+           summary.element_residual_evidence_present &&
+           face_evidence &&
+           summary.source_quadrature_consistency_present &&
+           summary.orientation_consistency_present &&
+           summary.boundary_flux_accounted_for;
+}
+
+[[nodiscard]] inline bool fluxBalanceScopeDeclared(
+    const FluxBalanceSummary& summary) noexcept
+{
+    return summary.steady_balance_scope ||
+           summary.transient_balance_scope;
+}
+
+[[nodiscard]] inline bool fluxTimeScopeComplete(
+    const FluxBalanceSummary& summary) noexcept
+{
+    return summary.steady_balance_scope ||
+           (summary.transient_balance_scope &&
+            summary.time_update_balance_present);
+}
+
+[[nodiscard]] inline bool fluxClosureCertificationMetadataComplete(
+    const FluxBalanceSummary& summary) noexcept
+{
+    return fluxClosureMetadataComplete(summary) &&
+           fluxBalanceScopeDeclared(summary) &&
+           fluxTimeScopeComplete(summary);
 }
 
 } // namespace analysis

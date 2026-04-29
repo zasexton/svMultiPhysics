@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -77,6 +78,8 @@ void expectSameScalarSummary(const DiscreteMatrixSummary& a,
     EXPECT_EQ(a.negative_offdiag_count, b.negative_offdiag_count);
     EXPECT_EQ(a.near_zero_offdiag_count, b.near_zero_offdiag_count);
     EXPECT_EQ(a.row_sum_violation_count, b.row_sum_violation_count);
+    EXPECT_EQ(a.nonfinite_entry_count, b.nonfinite_entry_count);
+    EXPECT_EQ(a.nonfinite_row_sum_count, b.nonfinite_row_sum_count);
     EXPECT_EQ(a.scanned_row_count, b.scanned_row_count);
     EXPECT_EQ(a.expected_row_count, b.expected_row_count);
     EXPECT_EQ(a.scanned_entry_count, b.scanned_entry_count);
@@ -157,6 +160,31 @@ TEST(Phase5SparseMatrixSummaryScanner, SignSummariesRecordBackendKindForAllBacke
         EXPECT_EQ(result.summary.worst_entries.size(), 1u);
         EXPECT_EQ(result.summary.worst_entries.front().note, "positive offdiagonal");
     }
+}
+
+TEST(Phase5SparseMatrixSummaryScanner, NonfiniteEntriesInvalidateNumericEvidence)
+{
+    const std::vector<std::vector<SparseMatrixRowEntry>> rows{
+        {{0, 2.0}, {1, -1.0}},
+        {{0, std::numeric_limits<Real>::quiet_NaN()}, {1, 2.0}},
+    };
+
+    SparseMatrixScanOptions options;
+    options.sign_tolerance = 1.0e-12;
+    options.row_sum_tolerance = 1.0e-12;
+    options.symmetry_tolerance = 1.0e-12;
+    options.worst_entry_sample_limit = 2;
+
+    const auto result = scanSparseMatrixSummary(
+        CsrSparseRowScanSource::fromRows(2, 2, rows), {}, options);
+    const auto& summary = result.summary;
+
+    EXPECT_EQ(summary.nonfinite_entry_count, 1u);
+    EXPECT_EQ(summary.nonfinite_row_sum_count, 1u);
+    EXPECT_FALSE(summary.sign_evidence_complete);
+    EXPECT_FALSE(summary.row_sum_evidence_complete);
+    ASSERT_FALSE(summary.worst_entries.empty());
+    EXPECT_EQ(summary.worst_entries.front().note, "nonfinite entry");
 }
 
 TEST(Phase5SparseMatrixSummaryScanner, ReducedFreeFreeScanEliminatesConstrainedRowsAndColumns)

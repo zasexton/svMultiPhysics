@@ -110,6 +110,8 @@ void ALEBinding::configureInstallOptions(FormInstallOptions& install) const
         forms::GeometrySensitivityMode::MeshMotionUnknowns;
     install.compiler_options.geometry_sensitivity.mesh_motion_field =
         mesh_displacement_field;
+    install.compiler_options.geometry_tangent_path =
+        geometry_tangent_path;
 
     if (std::find(install.extra_trial_fields.begin(),
                   install.extra_trial_fields.end(),
@@ -123,6 +125,7 @@ ALEBinding resolveALEBinding(FESystem& system, ALEBindingOptions options)
     ALEBinding binding;
     binding.enabled = options.enabled;
     binding.mesh_velocity_source = options.mesh_velocity_source;
+    binding.geometry_tangent_path = options.geometry_tangent_path;
 
     if (!options.enabled) {
         return binding;

@@ -85,6 +85,22 @@ struct SymbolicDiffResult {
                                             FieldId trial_state_field = CURRENT_SOLUTION_FIELD_ID);
 
 /**
+ * @brief Differentiate a residual w.r.t. a mesh-motion field with moving-geometry tangents enabled.
+ *
+ * When `geometry_sensitivity.mode == MeshMotionUnknowns` and `field` is the registered
+ * mesh-motion field, current-configuration geometry terminals differentiate to explicit
+ * symbolic geometry-variation terminals. Those terminals are evaluated by the form kernels
+ * using the active trial basis column, matching the existing AD geometry sensitivity path.
+ * If `trial_state_field == CURRENT_SOLUTION_FIELD_ID`, residual `TrialFunction`
+ * primals are evaluated through the active current-solution view while still
+ * differentiating with respect to `field`.
+ */
+[[nodiscard]] FormExpr differentiateResidual(const FormExpr& residual_form,
+                                            FieldId field,
+                                            FieldId trial_state_field,
+                                            GeometrySensitivityOptions geometry_sensitivity);
+
+/**
  * @brief Directional derivative of an expression w.r.t. a FieldId
  *
  * This computes: d(expr)/d(field)[direction], treating all TrialFunction/TestFunction

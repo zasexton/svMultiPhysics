@@ -31,9 +31,11 @@
 #include "Spaces/H1Space.h"
 #include "Spaces/HCurlSpace.h"
 #include "Spaces/L2Space.h"
+#include "Spaces/ProductSpace.h"
 
 #include "Systems/AuxiliaryQuadratureLayout.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
+#include "Tests/Unit/Forms/JITTestHelpers.h"
 
 #include <array>
 #include <memory>
@@ -470,6 +472,89 @@ const svmp::FE::forms::NonlinearFormKernel* unwrapNonlinearKernel(
     return dynamic_cast<const svmp::FE::forms::NonlinearFormKernel*>(kernel.get());
 }
 
+struct MovingMeshAssemblySnapshot {
+    std::vector<Real> matrix;
+    std::vector<Real> vector;
+    GlobalIndex n_dofs{0};
+    std::string kernel_name;
+};
+
+MovingMeshAssemblySnapshot assembleMovingMeshResidualWithPath(
+    svmp::FE::forms::GeometryTangentPath path,
+    bool enable_jit)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    auto vector_space = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, /*components=*/3);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto displacement =
+        sys.addMeshDisplacementUnknown("mesh_displacement", vector_space);
+    sys.addOperator("mesh");
+
+    const auto u =
+        svmp::FE::forms::FormExpr::trialFunction(*vector_space, "mesh_displacement");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*vector_space, "v");
+    const auto residual =
+        (inner(svmp::FE::forms::currentCoordinate(), v) +
+         svmp::FE::forms::currentMeasure() * inner(u, v) +
+         trace(svmp::FE::forms::currentJacobian()) * v.component(0)).dx();
+
+    svmp::FE::systems::FormInstallOptions opts;
+    opts.compiler_options.geometry_sensitivity.mode =
+        svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns;
+    opts.compiler_options.geometry_sensitivity.mesh_motion_field = displacement;
+    opts.compiler_options.geometry_tangent_path = path;
+    opts.compiler_options.use_symbolic_tangent =
+        path != svmp::FE::forms::GeometryTangentPath::ADReference;
+    opts.compiler_options.jit = svmp::FE::forms::test::makeUnitTestJITOptions();
+    opts.compiler_options.jit.enable = enable_jit;
+
+    const auto installed = svmp::FE::systems::installResidualForm(
+        sys, "mesh", displacement, displacement, residual, opts);
+    EXPECT_NE(installed, nullptr);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    const auto n_dofs = sys.dofHandler().getNumDofs();
+    EXPECT_EQ(n_dofs, 12);
+
+    std::vector<Real> solution(static_cast<std::size_t>(n_dofs), 0.0);
+    for (std::size_t i = 0; i < solution.size(); ++i) {
+        const Real sign = (i % 2u == 0u) ? Real(1.0) : Real(-1.0);
+        solution[i] = sign * (Real(0.025) + Real(0.003) * static_cast<Real>(i));
+    }
+
+    svmp::FE::systems::SystemStateView state;
+    state.u = solution;
+
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "mesh";
+    req.want_matrix = true;
+    req.want_vector = true;
+
+    svmp::FE::assembly::DenseSystemView out(n_dofs);
+    out.zero();
+    const auto result = sys.assemble(req, state, &out, &out);
+    EXPECT_TRUE(result.success);
+
+    MovingMeshAssemblySnapshot snapshot;
+    snapshot.n_dofs = n_dofs;
+    snapshot.kernel_name = installed ? installed->name() : std::string{};
+    snapshot.matrix.resize(static_cast<std::size_t>(n_dofs * n_dofs), 0.0);
+    snapshot.vector.resize(static_cast<std::size_t>(n_dofs), 0.0);
+    for (GlobalIndex i = 0; i < n_dofs; ++i) {
+        snapshot.vector[static_cast<std::size_t>(i)] = out.getVectorEntry(i);
+        for (GlobalIndex j = 0; j < n_dofs; ++j) {
+            snapshot.matrix[static_cast<std::size_t>(i * n_dofs + j)] =
+                out.getMatrixEntry(i, j);
+        }
+    }
+    return snapshot;
+}
+
 } // namespace
 
 TEST(FormsInstaller, FormsInstaller_InstallFormulation_RegistersKernel)
@@ -801,6 +886,46 @@ TEST(FormsInstaller, FormsInstaller_InstallResidualForm_ADModeReverse)
             const Real fd = (Rp.getVectorEntry(i) - R0[static_cast<std::size_t>(i)]) / eps;
             EXPECT_NEAR(out.getMatrixEntry(i, j), fd, 5e-6);
         }
+    }
+}
+
+TEST(FormsInstaller, MovingMeshSymbolicWithADCheckInstallsJITPrimaryAndPassesRuntimeReference)
+{
+    requireLLVMJITOrSkip();
+
+    const auto snapshot = assembleMovingMeshResidualWithPath(
+        svmp::FE::forms::GeometryTangentPath::SymbolicWithADCheck,
+        /*enable_jit=*/true);
+
+    EXPECT_NE(snapshot.kernel_name.find("SymbolicADReferenceCheckKernel"), std::string::npos);
+    EXPECT_NE(snapshot.kernel_name.find("JITKernelWrapper"), std::string::npos);
+    EXPECT_NE(snapshot.kernel_name.find("SymbolicNonlinearFormKernel"), std::string::npos);
+}
+
+TEST(FormsInstaller, MovingMeshSymbolicJITAssemblyMatchesADReferenceAssembly)
+{
+    requireLLVMJITOrSkip();
+
+    const auto ad = assembleMovingMeshResidualWithPath(
+        svmp::FE::forms::GeometryTangentPath::ADReference,
+        /*enable_jit=*/false);
+    const auto symbolic_jit = assembleMovingMeshResidualWithPath(
+        svmp::FE::forms::GeometryTangentPath::SymbolicRequired,
+        /*enable_jit=*/true);
+
+    ASSERT_EQ(symbolic_jit.n_dofs, ad.n_dofs);
+    ASSERT_EQ(symbolic_jit.vector.size(), ad.vector.size());
+    ASSERT_EQ(symbolic_jit.matrix.size(), ad.matrix.size());
+    EXPECT_NE(symbolic_jit.kernel_name.find("JITKernelWrapper"), std::string::npos);
+    EXPECT_NE(symbolic_jit.kernel_name.find("SymbolicNonlinearFormKernel"), std::string::npos);
+
+    for (std::size_t i = 0; i < symbolic_jit.vector.size(); ++i) {
+        SCOPED_TRACE(::testing::Message() << "vector i=" << i);
+        EXPECT_NEAR(symbolic_jit.vector[i], ad.vector[i], 1.0e-12);
+    }
+    for (std::size_t i = 0; i < symbolic_jit.matrix.size(); ++i) {
+        SCOPED_TRACE(::testing::Message() << "matrix flat i=" << i);
+        EXPECT_NEAR(symbolic_jit.matrix[i], ad.matrix[i], 2.0e-10);
     }
 }
 

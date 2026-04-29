@@ -9,6 +9,7 @@
 #define SVMP_FE_SYSTEMS_ALEBINDING_H
 
 #include "Core/Types.h"
+#include "Forms/FormExpr.h"
 
 #include <memory>
 #include <string>
@@ -34,6 +35,7 @@ struct ALEBindingOptions {
     bool enabled{false};
     int dimension{0};
     ALEMeshVelocitySource mesh_velocity_source{ALEMeshVelocitySource::PrescribedData};
+    forms::GeometryTangentPath geometry_tangent_path{forms::GeometryTangentPath::SymbolicRequired};
     std::string mesh_velocity_field_name{"mesh_velocity"};
     std::string mesh_displacement_field_name{"mesh_displacement"};
     std::shared_ptr<const spaces::FunctionSpace> mesh_velocity_space{};
@@ -45,6 +47,7 @@ struct ALEBindingOptions {
 struct ALEBinding {
     bool enabled{false};
     ALEMeshVelocitySource mesh_velocity_source{ALEMeshVelocitySource::PrescribedData};
+    forms::GeometryTangentPath geometry_tangent_path{forms::GeometryTangentPath::SymbolicRequired};
     FieldId mesh_velocity_field{INVALID_FIELD_ID};
     FieldId mesh_displacement_field{INVALID_FIELD_ID};
 

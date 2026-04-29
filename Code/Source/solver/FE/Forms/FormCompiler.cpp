@@ -271,6 +271,12 @@ bool isGeometrySensitivityTerminal(FormExprType type) noexcept
         case FormExprType::CurrentMeasure:
         case FormExprType::SurfaceJacobian:
         case FormExprType::MeshVelocity:
+        case FormExprType::GeometryTrialVectorVariation:
+        case FormExprType::GeometryTrialJacobianVariation:
+        case FormExprType::MeshVelocityVariation:
+        case FormExprType::CurrentMeasureVariation:
+        case FormExprType::CurrentNormalVariation:
+        case FormExprType::SurfaceJacobianVariation:
         case FormExprType::Pullback:
         case FormExprType::Pushforward:
             return true;
@@ -410,6 +416,29 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
                 required |= RequiredData::ReferenceNormals;
                 break;
             case FormExprType::SurfaceJacobian:
+                required |= RequiredData::SurfaceJacobians;
+                break;
+            case FormExprType::GeometryTrialVectorVariation:
+            case FormExprType::MeshVelocityVariation:
+                required |= RequiredData::BasisValues;
+                required |= RequiredData::PhysicalGradients;
+                break;
+            case FormExprType::GeometryTrialJacobianVariation:
+            case FormExprType::CurrentMeasureVariation:
+                required |= RequiredData::BasisValues;
+                required |= RequiredData::BasisGradients;
+                required |= RequiredData::PhysicalGradients;
+                required |= RequiredData::CurrentJacobians;
+                required |= RequiredData::CurrentMeasures;
+                break;
+            case FormExprType::CurrentNormalVariation:
+            case FormExprType::SurfaceJacobianVariation:
+                required |= RequiredData::BasisValues;
+                required |= RequiredData::BasisGradients;
+                required |= RequiredData::PhysicalGradients;
+                required |= RequiredData::CurrentJacobians;
+                required |= RequiredData::CurrentMeasures;
+                required |= RequiredData::CurrentNormals;
                 required |= RequiredData::SurfaceJacobians;
                 break;
             case FormExprType::Jacobian:

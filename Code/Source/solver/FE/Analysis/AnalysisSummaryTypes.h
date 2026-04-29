@@ -258,6 +258,15 @@ struct CoefficientPropertySummary {
     bool time_dependent{false};
     bool robustness_certificate_present{false};
     std::string robustness_certificate_scope;
+    std::string robustness_theorem_id;
+    std::string robustness_norm_id;
+    std::string robustness_parameter_range_scope;
+    std::string robustness_mesh_family_scope;
+    bool robustness_norm_metadata_present{false};
+    bool robustness_parameter_range_metadata_present{false};
+    bool robustness_mesh_family_metadata_present{false};
+    bool robustness_uniform_constant_present{false};
+    Real robustness_uniform_constant{};
     std::string coverage_scope;
     std::string producer_certificate_id;
     bool coefficient_region_coverage_complete{false};
@@ -309,6 +318,8 @@ struct DiscreteMatrixSummary {
     std::uint64_t negative_offdiag_count{0};
     std::uint64_t near_zero_offdiag_count{0};
     std::uint64_t row_sum_violation_count{0};
+    std::uint64_t nonfinite_entry_count{0};
+    std::uint64_t nonfinite_row_sum_count{0};
     std::uint64_t scanned_row_count{0};
     std::uint64_t expected_row_count{0};
     std::uint64_t scanned_entry_count{0};
@@ -319,7 +330,10 @@ struct DiscreteMatrixSummary {
     bool dmp_applicability_evidence{false};
     bool dmp_rhs_sign_evidence{false};
     bool inverse_positivity_evidence{false};
+    bool inverse_positivity_metadata_present{false};
     bool irreducible_diagonal_dominance_evidence{false};
+    bool diagonal_dominance_evidence_complete{false};
+    bool irreducibility_evidence_present{false};
     bool stieltjes_matrix_evidence{false};
     std::string m_matrix_theorem_id;
 
@@ -397,10 +411,12 @@ struct MeshGeometryQualitySummary {
     Real shape_regular_constant{};
     Real min_cut_cell_fraction{};
     Real max_cut_cell_fraction{};
+    std::string mesh_family_scope;
     std::uint64_t inverted_element_count{0};
     std::uint64_t poor_quality_element_count{0};
     std::uint64_t cut_cell_count{0};
     bool shape_regular_evidence_present{false};
+    bool mesh_family_scope_present{false};
     std::size_t worst_element_sample_limit{kDefaultWorstSampleLimit};
     std::vector<ElementId> worst_elements;
 };
@@ -424,6 +440,8 @@ struct FluxBalanceSummary {
     bool orientation_consistency_present{false};
     bool boundary_flux_accounted_for{false};
     bool time_update_balance_present{false};
+    bool steady_balance_scope{false};
+    bool transient_balance_scope{false};
 };
 
 struct TemporalStabilitySummary {
@@ -432,6 +450,8 @@ struct TemporalStabilitySummary {
     std::vector<VariableKey> variables;
     std::string contribution_id;
     std::string stability_theorem_id;
+    std::string stability_norm_id;
+    std::string operator_scope_id;
     TemporalStabilityClass stability_class{TemporalStabilityClass::Unknown};
     Real cfl_estimate{};
     Real cfl_margin{};
@@ -439,6 +459,8 @@ struct TemporalStabilitySummary {
     Real amplification_radius{};
     Real high_frequency_dissipation{};
     Real nonnormal_growth_bound{};
+    Real accepted_nonnormal_growth_bound{};
+    Real time_horizon{};
     bool cfl_estimate_present{false};
     bool cfl_derivation_metadata_present{false};
     bool cfl_margin_present{false};
@@ -450,6 +472,11 @@ struct TemporalStabilitySummary {
     bool scalar_modal_bound_only{false};
     bool operator_normality_evidence_present{false};
     bool contractivity_norm_metadata_present{false};
+    bool stability_norm_metadata_present{false};
+    bool time_horizon_metadata_present{false};
+    bool operator_scope_metadata_present{false};
+    bool accepted_nonnormal_growth_bound_present{false};
+    bool nonnormal_operator_evidence_present{false};
     bool energy_norm_contractivity_evidence_present{false};
     bool logarithmic_norm_bound_present{false};
     bool pseudospectral_bound_present{false};
@@ -538,6 +565,15 @@ struct EnergyEntropySummary {
     Real balance_tolerance{};
     Real observed_discrete_balance{};
     Real observed_production{};
+    Real energy_coercivity_lower_bound{};
+    Real energy_norm_equivalence_lower_bound{};
+    Real energy_norm_equivalence_upper_bound{};
+    Real energy_dissipation_residual_bound{};
+    Real energy_dissipation_tolerance{};
+    Real entropy_convexity_lower_bound{};
+    Real entropy_flux_inequality_residual{};
+    Real entropy_flux_inequality_tolerance{};
+    Real entropy_dissipation_bound{};
     std::uint64_t violation_count{0};
     bool energy_functional_metadata_present{false};
     bool energy_norm_metadata_present{false};
@@ -545,11 +581,19 @@ struct EnergyEntropySummary {
     bool energy_coercivity_evidence_present{false};
     bool discrete_dissipation_identity_evidence_present{false};
     bool boundary_source_energy_accounting_present{false};
+    bool energy_coercivity_lower_bound_present{false};
+    bool energy_norm_equivalence_bounds_present{false};
+    bool energy_dissipation_residual_bound_present{false};
+    bool energy_dissipation_tolerance_present{false};
     bool convex_entropy_metadata_present{false};
     bool entropy_variables_metadata_present{false};
     bool entropy_flux_metadata_present{false};
     bool entropy_dissipation_metadata_present{false};
     bool boundary_source_entropy_metadata_present{false};
+    bool entropy_convexity_lower_bound_present{false};
+    bool entropy_flux_inequality_residual_present{false};
+    bool entropy_flux_inequality_tolerance_present{false};
+    bool entropy_dissipation_bound_present{false};
 };
 
 struct InvariantDomainSummary {
@@ -573,11 +617,16 @@ struct InvariantDomainSummary {
 
 struct EquilibriumPreservationSummary {
     std::string equilibrium_id;
+    std::string equilibrium_family_id;
+    std::string equilibrium_preservation_theorem_id;
     Real flux_source_residual{};
     Real residual_tolerance{};
     bool source_quadrature_metadata_present{false};
     bool reconstruction_metadata_present{false};
     bool boundary_compatibility_metadata_present{false};
+    bool equilibrium_scope_metadata_present{false};
+    bool source_model_scope_metadata_present{false};
+    bool reconstruction_scope_metadata_present{false};
 };
 
 struct MovingDomainSummary {
@@ -631,6 +680,7 @@ struct ParameterScaleSummary {
     int polynomial_order{-1};
     bool trace_inverse_metadata_present{false};
     Real trace_inverse_constant{};
+    std::string scale_theorem_id;
     Real mesh_quality_factor{1};
     Real coefficient_contrast_factor{1};
     Real layer_resolution_metric{};
@@ -640,11 +690,22 @@ struct ParameterScaleSummary {
 struct StabilizationAdequacySummary {
     std::string stabilization_id;
     std::string method_family;
+    std::string stabilization_theorem_id;
+    std::string stability_norm_id;
     OperatorBlockId block;
     std::vector<VariableKey> variables;
     bool parameter_formula_metadata_present{false};
     bool residual_consistency_evidence_present{false};
     bool regime_metadata_present{false};
+    bool method_scope_metadata_present{false};
+    bool stability_norm_metadata_present{false};
+    bool stabilization_parameter_bounds_present{false};
+    Real minimum_stabilization_parameter{};
+    Real maximum_stabilization_parameter{};
+    bool scaling_law_metadata_present{false};
+    bool consistency_order_metadata_present{false};
+    int consistency_order{-1};
+    bool boundary_treatment_metadata_present{false};
     bool peclet_condition_satisfied{false};
     bool cfl_condition_satisfied{false};
     bool adjoint_consistency_evidence_present{false};
@@ -656,11 +717,19 @@ struct InitialCompatibilitySummary {
     Real initial_boundary_residual{};
     std::uint64_t invariant_domain_initial_violation_count{0};
     Real residual_tolerance{};
+    std::string compatibility_scope;
+    bool residual_tolerance_declared{false};
+    bool algebraic_constraint_metadata_present{false};
+    bool boundary_constraint_metadata_present{false};
+    bool invariant_domain_metadata_present{false};
+    std::uint64_t checked_constraint_family_count{0};
+    std::uint64_t checked_boundary_condition_count{0};
 };
 
 struct DAEStructureEvidenceSummary {
     std::string system_id;
     std::string dae_index_theorem_id;
+    std::string dae_index_scope;
     std::vector<VariableKey> variables;
     DAEFormClass dae_form_class{DAEFormClass::Unknown};
     bool mass_matrix_rank_metadata_present{false};
@@ -675,6 +744,8 @@ struct DAEStructureEvidenceSummary {
     int strangeness_index{-1};
     bool projector_index_metadata_present{false};
     bool projector_consistency_evidence_present{false};
+    bool local_validity_scope_present{false};
+    bool smoothness_or_regular_operator_evidence_present{false};
     Real initial_constraint_residual{};
     Real residual_tolerance{};
 };
@@ -685,6 +756,13 @@ struct CompatibleComplexSummary {
     bool exact_sequence_compatible{false};
     bool commuting_projection_available{false};
     bool trace_sequence_compatible{false};
+    std::string compatible_complex_theorem_id;
+    bool bounded_cochain_projection_evidence_present{false};
+    bool projection_bound_present{false};
+    Real projection_bound{};
+    bool projection_stability_metadata_present{false};
+    bool mesh_family_scope_present{false};
+    bool shape_regular_mesh_evidence_present{false};
     std::uint64_t missing_space_count{0};
 };
 
@@ -708,19 +786,26 @@ struct NonlinearTangentSummary {
 struct SpectralStructureSummary {
     OperatorBlockId block;
     std::string spectral_convergence_theorem_id;
+    std::string mesh_family_scope;
     bool eigenproblem_declared{false};
     bool self_adjoint_evidence{false};
     bool compactness_evidence{false};
     bool operator_convergence_evidence{false};
     bool discrete_compactness_evidence{false};
+    bool discrete_compactness_provenance_present{false};
     bool compatible_complex_evidence{false};
     bool compatible_complex_spectral_theorem_evidence{false};
+    bool bounded_projection_evidence_present{false};
+    bool projection_bound_present{false};
     bool gap_convergence_evidence{false};
     bool refinement_scope_metadata_present{false};
+    bool mesh_family_scope_present{false};
+    bool shape_regular_mesh_evidence_present{false};
     std::uint64_t refinement_sample_count{0};
     std::uint64_t spurious_mode_count{0};
     Real spectral_tolerance{};
     Real rayleigh_quotient_lower_bound{};
+    Real projection_bound{};
     NullspaceHandlingClass nullspace_handling{NullspaceHandlingClass::Unknown};
 };
 
@@ -742,16 +827,20 @@ struct ErrorEstimatorSummary {
     bool data_oscillation_metadata_present{false};
     bool coefficient_source_regularity_metadata_present{false};
     bool shape_regular_mesh_evidence_present{false};
+    bool mesh_family_scope_present{false};
+    bool shape_regular_constant_present{false};
     bool reliability_constant_metadata_present{false};
     bool efficiency_constant_metadata_present{false};
     bool effectivity_bounds_present{false};
     bool refinement_evidence_present{false};
     bool goal_functional_metadata_present{false};
     bool adjoint_residual_metadata_present{false};
+    std::string mesh_family_scope;
     std::uint64_t missing_required_metadata_count{0};
     std::uint64_t effectivity_sample_count{0};
     Real effectivity_lower_bound{};
     Real effectivity_upper_bound{};
+    Real shape_regular_constant{};
 };
 
 struct MinimumResidualStabilitySummary {
@@ -772,9 +861,15 @@ struct MinimumResidualStabilitySummary {
     bool riesz_map_metadata_present{false};
     bool optimal_test_metadata_present{false};
     bool fortin_operator_evidence_present{false};
+    bool fortin_operator_norm_bound_present{false};
+    bool accepted_fortin_operator_norm_bound_present{false};
+    bool discrete_inf_sup_lower_bound_present{false};
     bool enrichment_sufficiency_evidence_present{false};
     bool residual_control_constant_present{false};
     Real residual_control_constant{};
+    Real fortin_operator_norm_bound{};
+    Real accepted_fortin_operator_norm_bound{};
+    Real discrete_inf_sup_lower_bound{};
     bool local_trial_to_test_conditioning_present{false};
     Real local_trial_to_test_condition_estimate{};
     bool normal_equation_conditioning_present{false};
@@ -790,6 +885,12 @@ struct QuadratureAdequacySummary {
     bool affine_mapping_evidence_present{false};
     bool polynomial_integrand_metadata_complete{false};
     bool coefficient_degree_metadata_present{false};
+    bool mapped_integrand_metadata_present{false};
+    bool basis_degree_metadata_present{false};
+    bool geometry_jacobian_degree_metadata_present{false};
+    bool tensor_contraction_metadata_present{false};
+    bool component_coverage_metadata_present{false};
+    std::string quadrature_theorem_id;
     bool curved_or_nonlinear_mapping{false};
     bool overintegration_metadata_present{false};
     bool nonlinear_aliasing_control_present{false};
@@ -814,6 +915,8 @@ struct CoupledSystemStabilitySummary {
     bool partition_iteration_spectral_radius_present{false};
     Real constraint_drift_norm{};
     bool constraint_drift_present{false};
+    Real nonnormal_coupling_growth_bound{};
+    Real accepted_nonnormal_coupling_growth_bound{};
     std::uint64_t unstable_exchange_count{0};
     bool linear_stationary_iteration_evidence_present{false};
     bool contraction_norm_evidence_present{false};
@@ -821,6 +924,7 @@ struct CoupledSystemStabilitySummary {
     bool relaxation_metadata_present{false};
     bool added_mass_risk_assessed{false};
     bool nonnormal_coupling_bound_present{false};
+    bool accepted_nonnormal_coupling_growth_bound_present{false};
     bool coupled_norm_coercivity_evidence_present{false};
     bool coupled_operator_stability_evidence_present{false};
 };

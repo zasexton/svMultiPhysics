@@ -6,11 +6,13 @@
  */
 
 #include "Analysis/SpaceCompatibilityAnalyzer.h"
+#include "Analysis/AnalysisNumericGuards.h"
 #include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
 #include "Analysis/BoundaryConditionDescriptor.h"
 
 #include <algorithm>
+#include <cmath>
 #include <optional>
 #include <vector>
 
@@ -113,6 +115,7 @@ static void emitCompatibleComplexClaim(ProblemAnalysisReport& report,
                                        std::vector<VariableKey> variables,
                                        bool exact_sequence,
                                        std::optional<bool> commuting_projection,
+                                       bool bounded_projection_certificate,
                                        std::uint64_t missing_space_count,
                                        std::string label,
                                        std::string evidence)
@@ -134,20 +137,21 @@ static void emitCompatibleComplexClaim(ProblemAnalysisReport& report,
         claim.space_compatibility_class = SpaceCompatibilityClass::Incompatible;
         claim.description =
             "Compatible-complex metadata violates exact-sequence requirements";
-    } else if (commuting_projection.has_value() && *commuting_projection) {
+    } else if (commuting_projection.has_value() && *commuting_projection &&
+               bounded_projection_certificate) {
         claim.status = PropertyStatus::Preserved;
         claim.confidence = AnalysisConfidence::High;
         claim.certification_class = CertificationClass::Certified;
         claim.space_compatibility_class = SpaceCompatibilityClass::Compatible;
         claim.description =
-            "Compatible-complex metadata preserves exact-sequence requirements";
+            "Compatible-complex metadata preserves exact-sequence requirements with bounded cochain-projection evidence";
     } else {
         claim.status = PropertyStatus::Likely;
         claim.confidence = AnalysisConfidence::Medium;
         claim.certification_class = CertificationClass::NotCertified;
         claim.space_compatibility_class = SpaceCompatibilityClass::WeaklyCompatible;
         claim.description =
-            "Exact sequence is present but commuting-projection evidence is missing";
+            "Exact sequence is present but bounded commuting-projection, mesh-family, or theorem evidence is missing";
     }
 
     claim.addEvidence("SpaceCompatibilityAnalyzer", std::move(evidence),
@@ -169,12 +173,23 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
 
     if (const auto* summaries = context.analysisSummaries()) {
         for (const auto& summary : summaries->compatible_complexes) {
+            const bool projection_bound_valid =
+                summary.projection_bound_present &&
+                numeric::finitePositive(summary.projection_bound);
+            const bool bounded_projection_certificate =
+                summary.bounded_cochain_projection_evidence_present &&
+                projection_bound_valid &&
+                summary.projection_stability_metadata_present &&
+                summary.mesh_family_scope_present &&
+                summary.shape_regular_mesh_evidence_present &&
+                !summary.compatible_complex_theorem_id.empty();
             emitCompatibleComplexClaim(
                 report,
                 summary.variables,
                 summary.exact_sequence_compatible &&
                     summary.trace_sequence_compatible,
                 summary.commuting_projection_available,
+                bounded_projection_certificate,
                 summary.missing_space_count,
                 summary.complex_id,
                 "CompatibleComplexSummary exact_sequence=" +
@@ -183,6 +198,17 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
                     std::string(summary.trace_sequence_compatible ? "true" : "false") +
                     ", commuting_projection=" +
                     std::string(summary.commuting_projection_available ? "true" : "false") +
+                    ", bounded_projection=" +
+                    std::string(summary.bounded_cochain_projection_evidence_present ? "true" : "false") +
+                    ", projection_bound=" +
+                    std::to_string(summary.projection_bound) +
+                    ", projection_stability=" +
+                    std::string(summary.projection_stability_metadata_present ? "true" : "false") +
+                    ", mesh_family_scope=" +
+                    std::string(summary.mesh_family_scope_present ? "true" : "false") +
+                    ", shape_regular_mesh=" +
+                    std::string(summary.shape_regular_mesh_evidence_present ? "true" : "false") +
+                    ", theorem='" + summary.compatible_complex_theorem_id + "'" +
                     ", missing_spaces=" +
                     std::to_string(summary.missing_space_count));
         }
@@ -199,6 +225,7 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
             std::move(exact_sequence_fields),
             true,
             std::nullopt,
+            false,
             0u,
             "field-descriptor-exact-sequence",
             "FieldDescriptor metadata reports exact-sequence structure");

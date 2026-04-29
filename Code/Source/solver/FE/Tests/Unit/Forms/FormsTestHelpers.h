@@ -536,6 +536,20 @@ public:
         }
     }
 
+    [[nodiscard]] bool supportsCoordinateFrame(assembly::CoordinateFrame frame) const override
+    {
+        return frame == assembly::CoordinateFrame::Active ||
+               frame == assembly::CoordinateFrame::Reference ||
+               frame == assembly::CoordinateFrame::Current;
+    }
+
+    void getCellCoordinates(GlobalIndex cell_id,
+                            assembly::CoordinateFrame /*frame*/,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        getCellCoordinates(cell_id, coords);
+    }
+
     [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex face_id,
                                                GlobalIndex cell_id) const override
     {

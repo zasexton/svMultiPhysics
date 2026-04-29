@@ -198,6 +198,14 @@ struct DualValue {
         case FormExprType::PreviousMeshVelocity:
         case FormExprType::PredictedMeshVelocity:
             throw std::invalid_argument("PointEvaluator: moving-domain vector terminal is not available in PointEvalContext");
+        case FormExprType::GeometryTrialVectorVariation:
+        case FormExprType::GeometryTrialJacobianVariation:
+        case FormExprType::MeshVelocityVariation:
+        case FormExprType::CurrentMeasureVariation:
+        case FormExprType::CurrentNormalVariation:
+        case FormExprType::SurfaceJacobianVariation:
+            throw std::invalid_argument(
+                "PointEvaluator: symbolic geometry-variation terminals require an assembly trial column");
         case FormExprType::ParameterRef: {
             const auto slot = node.slotIndex();
             if (!slot) {
