@@ -2529,6 +2529,7 @@ if(FE_BUILD_TESTS)
         if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Coupling/test_main.cpp)
             set(FE_COUPLING_TEST_SOURCES
                 Tests/Unit/Coupling/test_CouplingContractValidation.cpp
+                Tests/Unit/Coupling/test_CouplingFormBuilder.cpp
                 Tests/Unit/Coupling/test_CouplingHeaders.cpp
                 Tests/Unit/Coupling/test_CouplingContext.cpp
                 Tests/Unit/Coupling/test_CouplingRegistry.cpp
