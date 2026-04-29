@@ -71,6 +71,42 @@ CouplingContext partitionedContext()
     return partitionedContextWithComponents(1);
 }
 
+CouplingRegionRef partitionedRegion(std::string participant,
+                                    std::string system_name,
+                                    const systems::FESystem* system,
+                                    CouplingInterfaceSide side,
+                                    int marker)
+{
+    return CouplingRegionRef{
+        .participant_name = std::move(participant),
+        .system_name = std::move(system_name),
+        .system = system,
+        .region_name = "surface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = marker,
+        .side = side,
+    };
+}
+
+CouplingContext partitionedContextWithSharedRegion()
+{
+    auto builder = partitionedContextBuilder(1);
+    const auto left = partitionedRegion(
+        "left", "left_system", partitionedSystemToken(1),
+        CouplingInterfaceSide::Minus, 10);
+    const auto right = partitionedRegion(
+        "right", "right_system", partitionedSystemToken(2),
+        CouplingInterfaceSide::Plus, 11);
+    builder.addRegion(left)
+        .addRegion(right)
+        .addSharedRegion(SharedRegionRef{
+            .name = "interface",
+            .required_region_kind = CouplingRegionKind::InterfaceFace,
+            .participant_regions = {left, right},
+        });
+    return builder.build();
+}
+
 CouplingEndpointRef fieldEndpoint(std::string participant,
                                   CouplingTemporalSlotDescriptor temporal)
 {
@@ -636,6 +672,79 @@ TEST(PartitionedCouplingPlanGenerator, RejectsDriverOwnedTransferUnsupportedRank
 
     EXPECT_FALSE(validation.ok());
     EXPECT_NE(formatDiagnostics(validation).find("does not support the exchange value rank"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, InheritsExchangeSharedRegionForEndpointRegions)
+{
+    auto exchange = identityExchange();
+    exchange.shared_region_name = "interface";
+    exchange.producer_region = CouplingRegionEndpointDeclaration{
+        .participant_name = "left",
+        .region_name = "surface",
+    };
+    exchange.consumer_region = CouplingRegionEndpointDeclaration{
+        .participant_name = "right",
+        .region_name = "surface",
+    };
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto context = partitionedContextWithSharedRegion();
+    const auto validation = generator.validate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    ASSERT_TRUE(plan.exchanges[0].producer_region.has_value());
+    ASSERT_TRUE(plan.exchanges[0].consumer_region.has_value());
+    EXPECT_EQ(plan.exchanges[0].producer_region->marker, 10);
+    EXPECT_EQ(plan.exchanges[0].producer_region->side, CouplingInterfaceSide::Minus);
+    EXPECT_EQ(plan.exchanges[0].consumer_region->marker, 11);
+    EXPECT_EQ(plan.exchanges[0].consumer_region->side, CouplingInterfaceSide::Plus);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsConflictingEndpointSharedRegion)
+{
+    auto exchange = identityExchange();
+    exchange.shared_region_name = "interface";
+    exchange.producer_region = CouplingRegionEndpointDeclaration{
+        .participant_name = "left",
+        .region_name = "surface",
+        .shared_region_name = "other_interface",
+    };
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContextWithSharedRegion(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("conflicts with the exchange shared region"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsMissingParticipantRegionEndpoint)
+{
+    auto exchange = identityExchange();
+    exchange.producer_region = CouplingRegionEndpointDeclaration{
+        .participant_name = "left",
+        .region_name = "missing",
+    };
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("region endpoint is missing"),
               std::string::npos);
 }
 

@@ -332,6 +332,113 @@ CouplingValidationResult validateInterfaceTransferShape(
     return result;
 }
 
+std::optional<std::string> effectiveSharedRegionName(
+    const std::optional<std::string>& exchange_shared_region_name,
+    const CouplingRegionEndpointDeclaration& region)
+{
+    if (region.shared_region_name.has_value()) {
+        return region.shared_region_name;
+    }
+    return exchange_shared_region_name;
+}
+
+bool sharedRegionContainsParticipant(const CouplingContext& ctx,
+                                     const std::string& shared_region_name,
+                                     const std::string& participant_name)
+{
+    if (!ctx.hasSharedRegion(shared_region_name)) {
+        return false;
+    }
+    const auto group = ctx.sharedRegionGroup(shared_region_name);
+    return std::any_of(group.participant_regions.begin(),
+                       group.participant_regions.end(),
+                       [&participant_name](const CouplingRegionRef& region) {
+                           return region.participant_name == participant_name;
+                       });
+}
+
+CouplingValidationResult validateRegionEndpointScope(
+    const CouplingContext& ctx,
+    const std::optional<std::string>& exchange_shared_region_name,
+    const std::optional<CouplingRegionEndpointDeclaration>& region,
+    std::string_view role)
+{
+    CouplingValidationResult result;
+    if (!region.has_value()) {
+        return result;
+    }
+    if (region->participant_name.empty()) {
+        result.addError("partitioned " + std::string(role) +
+                        " region endpoint requires a participant");
+    }
+    if (region->region_name.empty()) {
+        result.addError("partitioned " + std::string(role) +
+                        " region endpoint requires a region name");
+    }
+    if (exchange_shared_region_name.has_value() &&
+        region->shared_region_name.has_value() &&
+        *exchange_shared_region_name != *region->shared_region_name) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .participant_name = region->participant_name,
+            .region_name = region->region_name,
+            .message = "partitioned " + std::string(role) +
+                       " region endpoint conflicts with the exchange shared region",
+        });
+    }
+
+    const auto shared_region_name =
+        effectiveSharedRegionName(exchange_shared_region_name, *region);
+    if (shared_region_name.has_value()) {
+        if (!ctx.hasSharedRegion(*shared_region_name)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = region->participant_name,
+                .region_name = *shared_region_name,
+                .message = "partitioned " + std::string(role) +
+                           " region endpoint shared region is missing from the context",
+            });
+            return result;
+        }
+        if (!sharedRegionContainsParticipant(
+                ctx, *shared_region_name, region->participant_name)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = region->participant_name,
+                .region_name = *shared_region_name,
+                .message = "partitioned " + std::string(role) +
+                           " region endpoint shared region has no participant mapping",
+            });
+            return result;
+        }
+        const auto resolved = ctx.sharedRegion(*shared_region_name, region->participant_name);
+        if (!region->region_name.empty() &&
+            resolved.region_name != region->region_name) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = region->participant_name,
+                .region_name = region->region_name,
+                .message = "partitioned " + std::string(role) +
+                           " region endpoint does not match the shared-region mapping",
+            });
+        }
+        return result;
+    }
+
+    if (!region->participant_name.empty() &&
+        !region->region_name.empty() &&
+        !ctx.hasRegion(region->participant_name, region->region_name)) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .participant_name = region->participant_name,
+            .region_name = region->region_name,
+            .message = "partitioned " + std::string(role) +
+                       " region endpoint is missing from the context",
+        });
+    }
+    return result;
+}
+
 bool hasPort(const std::vector<CouplingPortId>& stack, const CouplingPortId& port)
 {
     return std::find(stack.begin(), stack.end(), port) != stack.end();
@@ -376,13 +483,16 @@ ResolvedCouplingEndpoint resolveEndpoint(const CouplingContext& ctx,
 
 std::optional<CouplingRegionRef> resolveRegion(
     const CouplingContext& ctx,
+    const std::optional<std::string>& exchange_shared_region_name,
     const std::optional<CouplingRegionEndpointDeclaration>& region)
 {
     if (!region.has_value()) {
         return std::nullopt;
     }
-    if (region->shared_region_name.has_value()) {
-        return ctx.sharedRegion(*region->shared_region_name, region->participant_name);
+    const auto shared_region_name =
+        effectiveSharedRegionName(exchange_shared_region_name, *region);
+    if (shared_region_name.has_value()) {
+        return ctx.sharedRegion(*shared_region_name, region->participant_name);
     }
     return ctx.region(region->participant_name, region->region_name);
 }
@@ -557,6 +667,10 @@ CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
                 .message = "partitioned coupling exchange shared region is missing from the context",
             });
         }
+        result.append(validateRegionEndpointScope(
+            ctx, exchange.shared_region_name, exchange.producer_region, "producer"));
+        result.append(validateRegionEndpointScope(
+            ctx, exchange.shared_region_name, exchange.consumer_region, "consumer"));
     }
 
     for (const auto& hint : group_hints) {
@@ -627,8 +741,10 @@ PartitionedCouplingPlan PartitionedCouplingPlanGenerator::generate(
         resolved.producer = resolveEndpoint(ctx, *exchange.producer, exchange.value);
         resolved.consumer = resolveEndpoint(ctx, *exchange.consumer, exchange.value);
         resolved.shared_region_name = exchange.shared_region_name;
-        resolved.producer_region = resolveRegion(ctx, exchange.producer_region);
-        resolved.consumer_region = resolveRegion(ctx, exchange.consumer_region);
+        resolved.producer_region = resolveRegion(
+            ctx, exchange.shared_region_name, exchange.producer_region);
+        resolved.consumer_region = resolveRegion(
+            ctx, exchange.shared_region_name, exchange.consumer_region);
         resolved.transfer = resolveTransfer(ctx, exchange);
         plan.exchanges.push_back(std::move(resolved));
     }
