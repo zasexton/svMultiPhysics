@@ -1079,6 +1079,37 @@ TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceMapProvenanceRevisionSnap
     EXPECT_NE(formatDiagnostics(validation).find("source revision snapshot does not match"),
               std::string::npos);
 }
+
+TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceMapProvenanceMissingRevisionKeys)
+{
+    auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::Scalar,
+            .components = 1,
+        },
+        CouplingInterfaceFramePolicy::None);
+    exchange.transfer.interface_map->source_search_revision_key = 0;
+    exchange.transfer.interface_map->target_search_revision_key = 0;
+    exchange.transfer.interface_map->map_revision_key = 0;
+    exchange.transfer.interface_map->accepted_revision_key = 0;
+    exchange.transfer.interface_map->trial_revision_key = 0;
+    exchange.transfer.interface_map->time_level_epoch = 0;
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContextWithSharedRegion(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    const auto diagnostics = formatDiagnostics(validation);
+    EXPECT_NE(diagnostics.find("source search revision key"), std::string::npos);
+    EXPECT_NE(diagnostics.find("target search revision key"), std::string::npos);
+    EXPECT_NE(diagnostics.find("interface map revision key"), std::string::npos);
+    EXPECT_NE(diagnostics.find("accepted revision key"), std::string::npos);
+    EXPECT_NE(diagnostics.find("trial revision key"), std::string::npos);
+    EXPECT_NE(diagnostics.find("time-level epoch"), std::string::npos);
+}
 #endif
 
 TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceTransferNonInterfaceRegions)

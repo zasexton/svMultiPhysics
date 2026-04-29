@@ -1245,11 +1245,29 @@ CouplingValidationResult validateInterfaceMapProvenance(
     if (!hasInterfaceRevisionEvidence(provenance.target_revision_snapshot)) {
         result.addError("interface map provenance requires a target revision snapshot");
     }
+    if (provenance.source_search_revision_key == 0) {
+        result.addError("interface map provenance requires a source search revision key");
+    }
+    if (provenance.target_search_revision_key == 0) {
+        result.addError("interface map provenance requires a target search revision key");
+    }
+    if (provenance.map_revision_key == 0) {
+        result.addError("interface map provenance requires an interface map revision key");
+    }
     if (provenance.map_state == svmp::search::InterfaceMapState::Empty) {
         result.addError("interface map provenance requires a resolved map state");
     }
     if (provenance.operator_state == systems::InterfaceOperatorState::Empty) {
         result.addError("interface map provenance requires an interface operator state");
+    }
+    if (provenance.accepted_revision_key == 0) {
+        result.addError("interface map provenance requires an accepted revision key");
+    }
+    if (provenance.trial_revision_key == 0) {
+        result.addError("interface map provenance requires a trial revision key");
+    }
+    if (provenance.time_level_epoch == 0) {
+        result.addError("interface map provenance requires a time-level epoch");
     }
 
     const auto producer_region =
