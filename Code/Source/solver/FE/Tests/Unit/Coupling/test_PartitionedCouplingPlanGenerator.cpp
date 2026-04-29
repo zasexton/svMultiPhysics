@@ -23,7 +23,7 @@ const systems::FESystem* partitionedSystemToken(int index)
         static_cast<std::uintptr_t>(index));
 }
 
-CouplingContext partitionedContextWithComponents(int components)
+CouplingContextBuilder partitionedContextBuilder(int components)
 {
     const auto left_system = partitionedSystemToken(1);
     const auto right_system = partitionedSystemToken(2);
@@ -58,7 +58,12 @@ CouplingContext partitionedContextWithComponents(int components)
         .space = space,
         .components = components,
     });
-    return builder.build();
+    return builder;
+}
+
+CouplingContext partitionedContextWithComponents(int components)
+{
+    return partitionedContextBuilder(components).build();
 }
 
 CouplingContext partitionedContext()
@@ -84,6 +89,17 @@ CouplingEndpointRef fieldEndpoint(std::string participant)
         CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Current});
 }
 
+CouplingEndpointRef externalBufferEndpoint(std::string key)
+{
+    return CouplingEndpointRef{
+        .kind = CouplingEndpointKind::ExternalBuffer,
+        .endpoint_name = std::move(key),
+        .temporal = CouplingTemporalSlotDescriptor{
+            .slot = CouplingTemporalSlot::External,
+        },
+    };
+}
+
 CouplingPortId port(std::string name)
 {
     return CouplingPortId{
@@ -105,6 +121,40 @@ CouplingExchangeDeclaration identityExchange()
     exchange.consumer = fieldEndpoint("right");
     exchange.transfer.kind = CouplingTransferKind::Identity;
     return exchange;
+}
+
+CouplingExternalBufferDescriptor externalBufferDescriptor(
+    std::string name,
+    CouplingValueDescriptor value,
+    CouplingExternalBufferAccess access,
+    std::vector<CouplingTemporalSlotDescriptor> supported_temporal_slots)
+{
+    return CouplingExternalBufferDescriptor{
+        .buffer_name = std::move(name),
+        .value = std::move(value),
+        .access = access,
+        .extents = {1},
+        .strides = {1},
+        .packing = "contiguous",
+        .supported_temporal_slots = std::move(supported_temporal_slots),
+        .layout_revision_key = 3,
+        .data_revision_key = 5,
+    };
+}
+
+CouplingDriverOwnedTransferDescriptor driverOwnedTransferDescriptor(
+    std::string name,
+    std::vector<CouplingValueRank> supported_ranks)
+{
+    return CouplingDriverOwnedTransferDescriptor{
+        .transfer_name = std::move(name),
+        .supported_ranks = std::move(supported_ranks),
+        .supported_source_temporal_slots = {
+            CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Current}},
+        .supported_target_temporal_slots = {
+            CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Current}},
+        .registry_revision_key = 11,
+    };
 }
 
 CouplingExchangeDeclaration interfaceExchange(CouplingValueDescriptor value,
@@ -424,13 +474,7 @@ TEST(PartitionedCouplingPlanGenerator, RejectsEndpointKindsWithoutResolver)
 TEST(PartitionedCouplingPlanGenerator, RejectsExternalBufferWithoutDescriptor)
 {
     auto exchange = identityExchange();
-    exchange.producer = CouplingEndpointRef{
-        .kind = CouplingEndpointKind::ExternalBuffer,
-        .endpoint_name = "driver_value",
-        .temporal = CouplingTemporalSlotDescriptor{
-            .slot = CouplingTemporalSlot::External,
-        },
-    };
+    exchange.producer = externalBufferEndpoint("driver_value");
     const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
 
     const PartitionedCouplingPlanGenerator generator;
@@ -440,6 +484,158 @@ TEST(PartitionedCouplingPlanGenerator, RejectsExternalBufferWithoutDescriptor)
 
     EXPECT_FALSE(validation.ok());
     EXPECT_NE(formatDiagnostics(validation).find("requires a registered descriptor"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, GeneratesExternalBufferEndpointWithDescriptor)
+{
+    auto exchange = identityExchange();
+    exchange.producer = externalBufferEndpoint("driver_value");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    auto builder = partitionedContextBuilder(1);
+    builder.addExternalBuffer(CouplingExternalBufferRegistration{
+        .descriptor = externalBufferDescriptor(
+            "driver_value",
+            exchange.value,
+            CouplingExternalBufferAccess::ReadOnly,
+            {CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::External}}),
+    });
+    const auto context = builder.build();
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    ASSERT_TRUE(plan.exchanges[0].producer.external_buffer.has_value());
+    EXPECT_EQ(plan.exchanges[0].producer.temporal.backing,
+              CouplingResolvedTemporalBackingKind::ExternalBuffer);
+    EXPECT_EQ(plan.exchanges[0].producer.layout_revision_key, 3u);
+    EXPECT_EQ(plan.exchanges[0].producer.registry_revision_key, 5u);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsExternalBufferUnsupportedTemporalSlot)
+{
+    auto exchange = identityExchange();
+    exchange.producer = externalBufferEndpoint("driver_value");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    auto builder = partitionedContextBuilder(1);
+    builder.addExternalBuffer(CouplingExternalBufferRegistration{
+        .descriptor = externalBufferDescriptor(
+            "driver_value",
+            exchange.value,
+            CouplingExternalBufferAccess::ReadOnly,
+            {CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Current}}),
+    });
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        builder.build(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("does not support the requested temporal slot"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsExternalBufferProducerWithoutReadAccess)
+{
+    auto exchange = identityExchange();
+    exchange.producer = externalBufferEndpoint("driver_value");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    auto builder = partitionedContextBuilder(1);
+    builder.addExternalBuffer(CouplingExternalBufferRegistration{
+        .descriptor = externalBufferDescriptor(
+            "driver_value",
+            exchange.value,
+            CouplingExternalBufferAccess::WriteOnly,
+            {CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::External}}),
+    });
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        builder.build(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("requires read access"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, GeneratesDriverOwnedTransferDescriptor)
+{
+    auto exchange = identityExchange();
+    exchange.transfer.kind = CouplingTransferKind::DriverOwned;
+    exchange.transfer.driver_owned_name = "copy";
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    auto builder = partitionedContextBuilder(1);
+    builder.addDriverOwnedTransfer(
+        driverOwnedTransferDescriptor("copy", {CouplingValueRank::Scalar}));
+    const auto context = builder.build();
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    ASSERT_TRUE(plan.exchanges[0].transfer.driver_owned_descriptor.has_value());
+    EXPECT_EQ(plan.exchanges[0].transfer.driver_owned_descriptor->registry_revision_key,
+              11u);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsDriverOwnedTransferWithoutDescriptor)
+{
+    auto exchange = identityExchange();
+    exchange.transfer.kind = CouplingTransferKind::DriverOwned;
+    exchange.transfer.driver_owned_name = "copy";
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("requires a registered descriptor"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsDriverOwnedTransferUnsupportedRank)
+{
+    auto exchange = identityExchange();
+    exchange.value = CouplingValueDescriptor{
+        .rank = CouplingValueRank::Vector,
+        .components = 2,
+    };
+    exchange.transfer.kind = CouplingTransferKind::DriverOwned;
+    exchange.transfer.driver_owned_name = "copy";
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    auto builder = partitionedContextBuilder(2);
+    builder.addDriverOwnedTransfer(
+        driverOwnedTransferDescriptor("copy", {CouplingValueRank::Scalar}));
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        builder.build(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("does not support the exchange value rank"),
               std::string::npos);
 }
 

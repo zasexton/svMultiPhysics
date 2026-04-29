@@ -56,8 +56,41 @@ std::optional<int> resolvedTemporalStorageIndex(const CouplingTemporalSlotDescri
     return std::nullopt;
 }
 
+bool temporalSlotsEqual(const CouplingTemporalSlotDescriptor& lhs,
+                        const CouplingTemporalSlotDescriptor& rhs) noexcept
+{
+    return lhs.slot == rhs.slot &&
+           lhs.history_index == rhs.history_index &&
+           lhs.stage_index == rhs.stage_index;
+}
+
+bool supportsTemporalSlot(const std::vector<CouplingTemporalSlotDescriptor>& slots,
+                          const CouplingTemporalSlotDescriptor& request)
+{
+    return std::any_of(slots.begin(), slots.end(),
+                       [&request](const CouplingTemporalSlotDescriptor& slot) {
+                           return temporalSlotsEqual(slot, request);
+                       });
+}
+
+bool supportsRank(const std::vector<CouplingValueRank>& ranks,
+                  CouplingValueRank rank)
+{
+    return std::find(ranks.begin(), ranks.end(), rank) != ranks.end();
+}
+
+std::optional<std::string_view> endpointScope(const CouplingEndpointRef& endpoint)
+{
+    if (!endpoint.participant_name.has_value()) {
+        return std::nullopt;
+    }
+    return std::string_view{*endpoint.participant_name};
+}
+
 CouplingValidationResult validateEndpointResolutionSupport(
+    const CouplingContext& ctx,
     const CouplingEndpointRef& endpoint,
+    const CouplingValueDescriptor& value,
     std::string_view role)
 {
     CouplingValidationResult result;
@@ -85,13 +118,64 @@ CouplingValidationResult validateEndpointResolutionSupport(
     }
 
     if (endpoint.kind == CouplingEndpointKind::ExternalBuffer) {
-        result.add(CouplingDiagnostic{
-            .severity = CouplingDiagnosticSeverity::Error,
-            .participant_name = endpoint.participant_name.value_or(""),
-            .endpoint_name = endpoint.endpoint_name,
-            .message = "partitioned " + std::string(role) +
-                       " external buffer endpoint requires a registered descriptor",
-        });
+        if (endpoint.participant_name.has_value() &&
+            !ctx.hasParticipant(*endpoint.participant_name)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " external buffer endpoint references an unknown participant",
+            });
+        }
+        const auto* descriptor =
+            ctx.externalBufferDescriptor(endpointScope(endpoint), endpoint.endpoint_name);
+        if (descriptor == nullptr) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = endpoint.participant_name.value_or(""),
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " external buffer endpoint requires a registered descriptor",
+            });
+            return result;
+        }
+        if (!couplingValueDescriptorsCompatible(descriptor->value, value)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = endpoint.participant_name.value_or(""),
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " external buffer descriptor value shape does not match the exchange value descriptor",
+            });
+        }
+        if (!supportsTemporalSlot(descriptor->supported_temporal_slots, endpoint.temporal)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = endpoint.participant_name.value_or(""),
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " external buffer descriptor does not support the requested temporal slot",
+            });
+        }
+        if (role == "producer" &&
+            descriptor->access == CouplingExternalBufferAccess::WriteOnly) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = endpoint.participant_name.value_or(""),
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned producer external buffer endpoint requires read access",
+            });
+        }
+        if (role == "consumer" &&
+            descriptor->access == CouplingExternalBufferAccess::ReadOnly) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = endpoint.participant_name.value_or(""),
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned consumer external buffer endpoint requires write access",
+            });
+        }
         return result;
     }
 
@@ -103,6 +187,45 @@ CouplingValidationResult validateEndpointResolutionSupport(
                    " endpoint kind " + toString(endpoint.kind) +
                    " requires a registry resolver before plan generation",
     });
+    return result;
+}
+
+CouplingValidationResult validateDriverOwnedTransferDescriptor(
+    const CouplingContext& ctx,
+    const CouplingExchangeDeclaration& exchange)
+{
+    CouplingValidationResult result;
+    if (exchange.transfer.kind != CouplingTransferKind::DriverOwned ||
+        exchange.transfer.driver_owned_name.empty()) {
+        return result;
+    }
+
+    const auto* descriptor = ctx.driverOwnedTransfer(exchange.transfer.driver_owned_name);
+    if (descriptor == nullptr) {
+        result.addError("driver-owned partitioned transfer requires a registered descriptor");
+        return result;
+    }
+    if (!supportsRank(descriptor->supported_ranks, exchange.value.rank)) {
+        result.addError(
+            "driver-owned partitioned transfer descriptor does not support the exchange value rank");
+    }
+    if (!descriptor->preserves_component_layout &&
+        !exchange.value.component_layout.empty()) {
+        result.addError(
+            "driver-owned partitioned transfer descriptor does not preserve component layout");
+    }
+    if (exchange.producer.has_value() &&
+        !supportsTemporalSlot(descriptor->supported_source_temporal_slots,
+                              exchange.producer->temporal)) {
+        result.addError(
+            "driver-owned partitioned transfer descriptor does not support the producer temporal slot");
+    }
+    if (exchange.consumer.has_value() &&
+        !supportsTemporalSlot(descriptor->supported_target_temporal_slots,
+                              exchange.consumer->temporal)) {
+        result.addError(
+            "driver-owned partitioned transfer descriptor does not support the consumer temporal slot");
+    }
     return result;
 }
 
@@ -237,6 +360,16 @@ ResolvedCouplingEndpoint resolveEndpoint(const CouplingContext& ctx,
         resolved.temporal.provider_name = "FESystem";
         resolved.field_id = field.field_id;
     }
+    if (endpoint.kind == CouplingEndpointKind::ExternalBuffer) {
+        if (const auto* descriptor =
+                ctx.externalBufferDescriptor(endpointScope(endpoint), endpoint.endpoint_name)) {
+            resolved.registry_provider = "CouplingContext";
+            resolved.external_buffer = *descriptor;
+            resolved.temporal.provider_name = "ExternalBuffer";
+            resolved.layout_revision_key = descriptor->layout_revision_key;
+            resolved.registry_revision_key = descriptor->data_revision_key;
+        }
+    }
 
     return resolved;
 }
@@ -254,9 +387,11 @@ std::optional<CouplingRegionRef> resolveRegion(
     return ctx.region(region->participant_name, region->region_name);
 }
 
-ResolvedCouplingTransfer resolveTransfer(const CouplingTransferDeclaration& transfer)
+ResolvedCouplingTransfer resolveTransfer(const CouplingContext& ctx,
+                                         const CouplingExchangeDeclaration& exchange)
 {
     ResolvedCouplingTransfer resolved;
+    const auto& transfer = exchange.transfer;
     resolved.kind = transfer.kind;
     if (transfer.interface_declaration.has_value()) {
         resolved.source_embedding_policy =
@@ -265,6 +400,12 @@ ResolvedCouplingTransfer resolveTransfer(const CouplingTransferDeclaration& tran
             transfer.interface_declaration->target_restriction_policy;
     }
     resolved.driver_owned_name = transfer.driver_owned_name;
+    if (transfer.kind == CouplingTransferKind::DriverOwned &&
+        !transfer.driver_owned_name.empty()) {
+        if (const auto* descriptor = ctx.driverOwnedTransfer(transfer.driver_owned_name)) {
+            resolved.driver_owned_descriptor = *descriptor;
+        }
+    }
     return resolved;
 }
 
@@ -370,10 +511,13 @@ CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
             result.addError("partitioned coupling exchange requires producer and consumer endpoints");
             continue;
         }
+        result.append(validateDriverOwnedTransferDescriptor(ctx, exchange));
         result.append(validateCouplingEndpointRef(*exchange.producer));
         result.append(validateCouplingEndpointRef(*exchange.consumer));
-        result.append(validateEndpointResolutionSupport(*exchange.producer, "producer"));
-        result.append(validateEndpointResolutionSupport(*exchange.consumer, "consumer"));
+        result.append(validateEndpointResolutionSupport(
+            ctx, *exchange.producer, exchange.value, "producer"));
+        result.append(validateEndpointResolutionSupport(
+            ctx, *exchange.consumer, exchange.value, "consumer"));
         result.append(validateFieldEndpointValueDescriptor(
             ctx, *exchange.producer, exchange.value, "producer"));
         result.append(validateFieldEndpointValueDescriptor(
@@ -485,7 +629,7 @@ PartitionedCouplingPlan PartitionedCouplingPlanGenerator::generate(
         resolved.shared_region_name = exchange.shared_region_name;
         resolved.producer_region = resolveRegion(ctx, exchange.producer_region);
         resolved.consumer_region = resolveRegion(ctx, exchange.consumer_region);
-        resolved.transfer = resolveTransfer(exchange.transfer);
+        resolved.transfer = resolveTransfer(ctx, exchange);
         plan.exchanges.push_back(std::move(resolved));
     }
     plan.group_hints.assign(group_hints.begin(), group_hints.end());
