@@ -131,6 +131,15 @@ public:
 
     [[nodiscard]] SparseMatrixSummaryResult finish()
     {
+        const bool complete_rows = rowEvidenceComplete();
+        summary_.expected_row_count = summary_.rows > 0
+            ? static_cast<std::uint64_t>(summary_.rows)
+            : std::uint64_t{0};
+        summary_.scanned_row_count = log_.visited_rows;
+        summary_.scanned_entry_count = log_.visited_entries;
+        summary_.sign_evidence_complete = complete_rows;
+        summary_.row_sum_evidence_complete = complete_rows && has_row_sum_;
+
         finishSymmetry();
 
         if (!has_row_sum_) {
@@ -323,6 +332,12 @@ private:
                 summary_.numerically_symmetric = false;
             }
         }
+
+        const Real denom = summary_.max_abs_entry > Real{}
+            ? summary_.max_abs_entry
+            : Real{1};
+        summary_.nonsymmetry_indicator =
+            std::abs(summary_.max_symmetry_error) / denom;
     }
 
     SparseMatrixScanOptions options_{};
@@ -950,6 +965,10 @@ mergeDiscreteMatrixSummaries(const std::vector<DiscreteMatrixSummary>& parts,
         merged.negative_offdiag_count += part.negative_offdiag_count;
         merged.near_zero_offdiag_count += part.near_zero_offdiag_count;
         merged.row_sum_violation_count += part.row_sum_violation_count;
+        merged.scanned_row_count += part.scanned_row_count;
+        merged.scanned_entry_count += part.scanned_entry_count;
+        merged.expected_row_count =
+            std::max(merged.expected_row_count, part.expected_row_count);
         merged.structurally_symmetric =
             merged.structurally_symmetric && part.structurally_symmetric;
         merged.numerically_symmetric =
@@ -961,6 +980,15 @@ mergeDiscreteMatrixSummaries(const std::vector<DiscreteMatrixSummary>& parts,
             merged.addWorstEntry(sample);
         }
     }
+
+    if (merged.expected_row_count == 0u && merged.rows > 0) {
+        merged.expected_row_count = static_cast<std::uint64_t>(merged.rows);
+    }
+    const bool complete_rows =
+        merged.expected_row_count > 0u &&
+        merged.scanned_row_count >= merged.expected_row_count;
+    merged.sign_evidence_complete = complete_rows;
+    merged.row_sum_evidence_complete = complete_rows && have_row_sum;
 
     return merged;
 }
@@ -1106,6 +1134,12 @@ void reduceDiscreteMatrixSummaryMPI(DiscreteMatrixSummary& summary,
     sum_u64(summary.negative_offdiag_count);
     sum_u64(summary.near_zero_offdiag_count);
     sum_u64(summary.row_sum_violation_count);
+    sum_u64(summary.scanned_row_count);
+    sum_u64(summary.scanned_entry_count);
+
+    auto expected_rows = static_cast<unsigned long long>(summary.expected_row_count);
+    allReduceInPlace(expected_rows, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
+    summary.expected_row_count = static_cast<std::uint64_t>(expected_rows);
 
     max_real(summary.max_abs_entry);
     max_real(summary.max_abs_offdiag);
@@ -1168,6 +1202,12 @@ void reduceDiscreteMatrixSummaryMPI(DiscreteMatrixSummary& summary,
     int all_square = summary.square ? 1 : 0;
     MPI_Allreduce(MPI_IN_PLACE, &all_square, 1, MPI_INT, MPI_MIN, comm);
     summary.square = all_square != 0;
+    const bool complete_rows =
+        summary.expected_row_count > 0u &&
+        summary.scanned_row_count >= summary.expected_row_count &&
+        !log.row_coverage_storage_truncated;
+    summary.sign_evidence_complete = complete_rows;
+    summary.row_sum_evidence_complete = complete_rows && row_count > 0u;
     summary.symmetry_evidence_complete = false;
     summary.structurally_symmetric = false;
     summary.numerically_symmetric = false;

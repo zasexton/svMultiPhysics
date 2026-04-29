@@ -761,12 +761,36 @@ assembly::AssemblyResult assembleOperator(
                         "assembleOperator: invalid field DOF handler index for field '" + rec.name + "'");
             FE_THROW_IF(idx >= system.field_dof_offsets_.size(), InvalidStateException,
                         "assembleOperator: invalid field DOF offset index for field '" + rec.name + "'");
-            access.push_back(assembly::FieldSolutionAccess{
-                rec.id,
-                rec.space.get(),
-                &system.field_dof_handlers_[idx].getDofMap(),
-                system.field_dof_offsets_[idx],
-            });
+            assembly::FieldSolutionAccess binding;
+            binding.field = rec.id;
+            binding.space = rec.space.get();
+            binding.dof_map = &system.field_dof_handlers_[idx].getDofMap();
+            if (rec.source_kind == FieldSourceKind::PrescribedData) {
+                binding.dof_offset = 0;
+                binding.coefficient_source =
+                    assembly::FieldSolutionAccess::CoefficientSource::PrescribedData;
+                binding.prescribed_coefficients = system.prescribedFieldCoefficients(rec.id);
+                binding.prescribed_revision = system.prescribedFieldRevision(rec.id);
+            } else if (rec.source_kind == FieldSourceKind::DerivedFromUnknown) {
+                FE_THROW_IF(rec.derived.role != DerivedFieldRole::TimeDerivative,
+                            InvalidStateException,
+                            "assembleOperator: unsupported derived field role for field '" +
+                                rec.name + "'");
+                const auto src_idx = static_cast<std::size_t>(rec.derived.source_field);
+                FE_THROW_IF(src_idx >= system.field_dof_offsets_.size(),
+                            InvalidStateException,
+                            "assembleOperator: invalid derived source field for field '" +
+                                rec.name + "'");
+                binding.dof_offset = system.field_dof_offsets_[src_idx];
+                binding.coefficient_source =
+                    assembly::FieldSolutionAccess::CoefficientSource::DerivedFromUnknown;
+                binding.derived_time_derivative_order = rec.derived.derivative_order;
+            } else {
+                binding.dof_offset = system.field_dof_offsets_[idx];
+                binding.coefficient_source =
+                    assembly::FieldSolutionAccess::CoefficientSource::GlobalSolution;
+            }
+            access.push_back(binding);
         }
         assembler.setFieldSolutionAccess(access);
     }

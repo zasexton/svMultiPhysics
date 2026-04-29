@@ -13,7 +13,10 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace svmp::FE;
@@ -23,6 +26,18 @@ using namespace svmp::FE::systems;
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 namespace {
+
+std::string join_cut_validity_messages(const std::vector<std::string>& messages)
+{
+    std::string joined;
+    for (const auto& message : messages) {
+        if (!joined.empty()) {
+            joined += "; ";
+        }
+        joined += message;
+    }
+    return joined;
+}
 
 svmp::MeshBase make_cut_context_tetra_mesh()
 {
@@ -70,6 +85,180 @@ svmp::search::EmbeddedGeometryDescriptor make_axis_plane(int axis,
     return embedded;
 }
 
+std::array<svmp::real_t, 3> unit_vector_from_to(const std::array<svmp::real_t, 3>& from,
+                                                const std::array<svmp::real_t, 3>& to)
+{
+    const std::array<svmp::real_t, 3> d{{to[0] - from[0], to[1] - from[1], to[2] - from[2]}};
+    const auto n = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (n <= svmp::real_t{0.0}) {
+        return {{1.0, 0.0, 0.0}};
+    }
+    return {{d[0] / n, d[1] / n, d[2] / n}};
+}
+
+svmp::search::EmbeddedGeometryDescriptor make_context_sphere(
+    std::array<svmp::real_t, 3> center,
+    svmp::real_t radius,
+    std::uint64_t epoch,
+    const std::string& id)
+{
+    svmp::search::EmbeddedGeometryDescriptor embedded;
+    embedded.kind = svmp::search::EmbeddedGeometryKind::Sphere;
+    embedded.origin = center;
+    embedded.radius = radius;
+    embedded.geometry_epoch = epoch;
+    embedded.revisions.geometry_epoch = epoch;
+    embedded.provenance.persistent_id = id;
+    embedded.provenance.name = id;
+    embedded.provenance.provenance_epoch = epoch;
+    return embedded;
+}
+
+svmp::search::EmbeddedGeometryDescriptor make_context_callback_sphere(
+    std::array<svmp::real_t, 3> center,
+    svmp::real_t radius,
+    std::uint64_t epoch,
+    const std::string& id)
+{
+    auto embedded = make_context_sphere(center, radius, epoch, id);
+    embedded.kind = svmp::search::EmbeddedGeometryKind::SignedDistanceCallback;
+    embedded.signed_distance_callback = [center, radius](const std::array<svmp::real_t, 3>& point) {
+        const auto dx = point[0] - center[0];
+        const auto dy = point[1] - center[1];
+        const auto dz = point[2] - center[2];
+        return std::sqrt(dx * dx + dy * dy + dz * dz) - radius;
+    };
+    embedded.normal_callback = [center](const std::array<svmp::real_t, 3>& point) {
+        return unit_vector_from_to(center, point);
+    };
+    embedded.closest_point_callback = [center, radius](const std::array<svmp::real_t, 3>& point) {
+        const auto n = unit_vector_from_to(center, point);
+        return std::array<svmp::real_t, 3>{{
+            center[0] + radius * n[0],
+            center[1] + radius * n[1],
+            center[2] + radius * n[2]}};
+    };
+    return embedded;
+}
+
+svmp::search::EmbeddedGeometryDescriptor make_context_level_set_sphere(
+    std::array<svmp::real_t, 3> center,
+    svmp::real_t radius,
+    std::uint64_t epoch,
+    const std::string& id)
+{
+    svmp::search::EmbeddedGeometryDescriptor embedded;
+    embedded.kind = svmp::search::EmbeddedGeometryKind::LevelSetField;
+    embedded.origin = center;
+    embedded.radius = radius;
+    embedded.geometry_epoch = epoch;
+    embedded.revisions.geometry_epoch = epoch;
+    embedded.revisions.field_layout_revision = 1;
+    embedded.revisions.field_value_revision = epoch;
+    embedded.provenance.persistent_id = id;
+    embedded.provenance.name = id;
+    embedded.provenance.provenance_epoch = epoch;
+
+    const std::array<std::array<svmp::real_t, 3>, 14> directions{{
+        {{ 1.0,  0.0,  0.0}}, {{-1.0,  0.0,  0.0}},
+        {{ 0.0,  1.0,  0.0}}, {{ 0.0, -1.0,  0.0}},
+        {{ 0.0,  0.0,  1.0}}, {{ 0.0,  0.0, -1.0}},
+        {{ 1.0,  1.0,  1.0}}, {{ 1.0,  1.0, -1.0}},
+        {{ 1.0, -1.0,  1.0}}, {{ 1.0, -1.0, -1.0}},
+        {{-1.0,  1.0,  1.0}}, {{-1.0,  1.0, -1.0}},
+        {{-1.0, -1.0,  1.0}}, {{-1.0, -1.0, -1.0}}}};
+    for (const auto& direction : directions) {
+        const auto n = unit_vector_from_to({{0.0, 0.0, 0.0}}, direction);
+        svmp::search::EmbeddedLevelSetSample sample;
+        sample.point = {{center[0] + radius * n[0],
+                         center[1] + radius * n[1],
+                         center[2] + radius * n[2]}};
+        sample.value = 0.0;
+        sample.gradient = n;
+        embedded.level_set_samples.push_back(sample);
+    }
+    return embedded;
+}
+
+svmp::search::EmbeddedGeometryDescriptor make_context_triangulated_octahedron_sphere(
+    std::array<svmp::real_t, 3> center,
+    svmp::real_t radius,
+    std::uint64_t epoch,
+    const std::string& id)
+{
+    svmp::search::EmbeddedGeometryDescriptor embedded;
+    embedded.kind = svmp::search::EmbeddedGeometryKind::TriangulatedSurface;
+    embedded.origin = center;
+    embedded.radius = radius;
+    embedded.geometry_epoch = epoch;
+    embedded.revisions.geometry_epoch = epoch;
+    embedded.revisions.source_surface_revision = epoch;
+    embedded.provenance.persistent_id = id;
+    embedded.provenance.name = id;
+    embedded.provenance.provenance_epoch = epoch;
+
+    const std::array<svmp::real_t, 3> xp{{center[0] + radius, center[1], center[2]}};
+    const std::array<svmp::real_t, 3> xn{{center[0] - radius, center[1], center[2]}};
+    const std::array<svmp::real_t, 3> yp{{center[0], center[1] + radius, center[2]}};
+    const std::array<svmp::real_t, 3> yn{{center[0], center[1] - radius, center[2]}};
+    const std::array<svmp::real_t, 3> zp{{center[0], center[1], center[2] + radius}};
+    const std::array<svmp::real_t, 3> zn{{center[0], center[1], center[2] - radius}};
+
+    const auto add_oriented_triangle =
+        [&](std::array<svmp::real_t, 3> a,
+            std::array<svmp::real_t, 3> b,
+            std::array<svmp::real_t, 3> c) {
+            const std::array<svmp::real_t, 3> ab{{b[0] - a[0], b[1] - a[1], b[2] - a[2]}};
+            const std::array<svmp::real_t, 3> ac{{c[0] - a[0], c[1] - a[1], c[2] - a[2]}};
+            const std::array<svmp::real_t, 3> normal{{
+                ab[1] * ac[2] - ab[2] * ac[1],
+                ab[2] * ac[0] - ab[0] * ac[2],
+                ab[0] * ac[1] - ab[1] * ac[0]}};
+            const std::array<svmp::real_t, 3> centroid{{
+                (a[0] + b[0] + c[0]) / 3.0,
+                (a[1] + b[1] + c[1]) / 3.0,
+                (a[2] + b[2] + c[2]) / 3.0}};
+            const std::array<svmp::real_t, 3> outward{{
+                centroid[0] - center[0],
+                centroid[1] - center[1],
+                centroid[2] - center[2]}};
+            const auto orientation =
+                normal[0] * outward[0] + normal[1] * outward[1] + normal[2] * outward[2];
+            if (orientation < 0.0) {
+                std::swap(b, c);
+            }
+            embedded.surface_triangles.push_back({{{a, b, c}}, embedded.provenance});
+        };
+
+    add_oriented_triangle(zp, xp, yp);
+    add_oriented_triangle(zp, yp, xn);
+    add_oriented_triangle(zp, xn, yn);
+    add_oriented_triangle(zp, yn, xp);
+    add_oriented_triangle(zn, yp, xp);
+    add_oriented_triangle(zn, xn, yp);
+    add_oriented_triangle(zn, yn, xn);
+    add_oriented_triangle(zn, xp, yn);
+    return embedded;
+}
+
+svmp::search::EmbeddedGeometryDescriptor make_context_boolean_composite(
+    svmp::search::EmbeddedGeometryBooleanOperation operation,
+    std::vector<svmp::search::EmbeddedGeometryDescriptor> children,
+    std::uint64_t epoch,
+    const std::string& id)
+{
+    svmp::search::EmbeddedGeometryDescriptor embedded;
+    embedded.kind = svmp::search::EmbeddedGeometryKind::BooleanComposite;
+    embedded.boolean_operation = operation;
+    embedded.geometry_epoch = epoch;
+    embedded.revisions.geometry_epoch = epoch;
+    embedded.provenance.persistent_id = id;
+    embedded.provenance.name = id;
+    embedded.provenance.provenance_epoch = epoch;
+    embedded.children = std::move(children);
+    return embedded;
+}
+
 svmp::MeshBase make_cut_context_line_mesh()
 {
     svmp::MeshBase mesh;
@@ -80,6 +269,22 @@ svmp::MeshBase make_cut_context_line_mesh()
         std::vector<svmp::offset_t>{0, 2},
         std::vector<svmp::index_t>{0, 1},
         std::vector<svmp::CellShape>{svmp::CellShape{svmp::CellFamily::Line, 2, 1}});
+    mesh.finalize();
+    return mesh;
+}
+
+svmp::MeshBase make_cut_context_quadratic_line_mesh()
+{
+    svmp::MeshBase mesh;
+    mesh.build_from_arrays(
+        3,
+        std::vector<svmp::real_t>{
+            0.0, 0.00, 0.0,
+            1.0, 0.00, 0.0,
+            0.5, 0.08, 0.0},
+        std::vector<svmp::offset_t>{0, 3},
+        std::vector<svmp::index_t>{0, 1, 2},
+        std::vector<svmp::CellShape>{svmp::CellShape{svmp::CellFamily::Line, 2, 2}});
     mesh.finalize();
     return mesh;
 }
@@ -200,6 +405,29 @@ svmp::MeshBase make_cut_context_triangle_mesh()
         std::vector<svmp::offset_t>{0, 3},
         std::vector<svmp::index_t>{0, 1, 2},
         std::vector<svmp::CellShape>{svmp::CellShape{svmp::CellFamily::Triangle, 3, 1}});
+    mesh.finalize();
+    return mesh;
+}
+
+svmp::MeshBase make_cut_context_quadratic_tetra_mesh()
+{
+    svmp::MeshBase mesh;
+    mesh.build_from_arrays(
+        3,
+        std::vector<svmp::real_t>{
+            0.0, 0.0, 0.0,
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0,
+            0.50, -0.04, 0.0,
+           -0.04, 0.50, 0.0,
+            0.0, -0.03, 0.50,
+            0.50, 0.50, 0.04,
+            0.50, 0.0, 0.50,
+            0.0, 0.50, 0.50},
+        std::vector<svmp::offset_t>{0, 10},
+        std::vector<svmp::index_t>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+        std::vector<svmp::CellShape>{svmp::CellShape{svmp::CellFamily::Tetra, 4, 2}});
     mesh.finalize();
     return mesh;
 }
@@ -1040,6 +1268,60 @@ svmp::MeshBase make_cut_context_polyhedron_cube_mesh()
     return mesh;
 }
 
+svmp::MeshBase make_first_order_cut_context_mesh(svmp::CellFamily family)
+{
+    switch (family) {
+        case svmp::CellFamily::Line:
+            return make_cut_context_line_mesh();
+        case svmp::CellFamily::Triangle:
+            return make_cut_context_triangle_mesh();
+        case svmp::CellFamily::Quad:
+            return make_cut_context_quad_mesh();
+        case svmp::CellFamily::Tetra:
+            return make_cut_context_tetra_mesh();
+        case svmp::CellFamily::Hex:
+            return make_cut_context_hex_mesh();
+        case svmp::CellFamily::Wedge:
+            return make_cut_context_wedge_mesh();
+        case svmp::CellFamily::Pyramid:
+            return make_cut_context_pyramid_mesh();
+        case svmp::CellFamily::Polygon:
+            return make_cut_context_polygon_mesh();
+        case svmp::CellFamily::Polyhedron:
+            return make_cut_context_polyhedron_cube_mesh();
+        default:
+            return make_cut_context_tetra_mesh();
+    }
+}
+
+svmp::search::EmbeddedGeometryDescriptor make_first_order_linearized_context_embedded(
+    svmp::search::EmbeddedGeometryKind kind,
+    std::uint64_t epoch,
+    const std::string& id)
+{
+    constexpr std::array<svmp::real_t, 3> center{{0.0, 0.0, 0.0}};
+    constexpr svmp::real_t radius = 0.55;
+    switch (kind) {
+        case svmp::search::EmbeddedGeometryKind::Sphere:
+            return make_context_sphere(center, radius, epoch, id);
+        case svmp::search::EmbeddedGeometryKind::LevelSetField:
+            return make_context_level_set_sphere(center, radius, epoch, id);
+        case svmp::search::EmbeddedGeometryKind::TriangulatedSurface:
+            return make_context_triangulated_octahedron_sphere(center, radius, epoch, id);
+        case svmp::search::EmbeddedGeometryKind::BooleanComposite: {
+            auto active = make_context_sphere(center, radius, epoch + 1u, id + "-active");
+            auto enclosing = make_context_sphere(center, 2.0, epoch + 2u, id + "-enclosing");
+            return make_context_boolean_composite(
+                svmp::search::EmbeddedGeometryBooleanOperation::Intersection,
+                {active, enclosing},
+                epoch,
+                id);
+        }
+        default:
+            return make_context_sphere(center, radius, epoch, id);
+    }
+}
+
 void expect_cut_context_family_quadrature(
     const char* name,
     svmp::MeshBase mesh,
@@ -1059,7 +1341,7 @@ void expect_cut_context_family_quadrature(
 
     const auto topology = svmp::search::reconstruct_cut_topology(mesh, map);
     const auto validity = svmp::search::diagnose_cut_topology_validity(topology);
-    EXPECT_TRUE(validity.ok);
+    EXPECT_TRUE(validity.ok) << join_cut_validity_messages(validity.messages);
 
     CutIntegrationContext context;
     context.importCutTopology(topology, CutGeometryFrame::Reference, 123);
@@ -1165,6 +1447,561 @@ void expect_curved_isoparametric_context_import(
                                 !rule.points.empty());
     }
     EXPECT_TRUE(saw_curved_interface);
+}
+
+const std::array<CutIntegrationAssemblyPath, 6>& all_cut_execution_paths()
+{
+    static const std::array<CutIntegrationAssemblyPath, 6> paths{{
+        CutIntegrationAssemblyPath::Standard,
+        CutIntegrationAssemblyPath::MatrixFree,
+        CutIntegrationAssemblyPath::Interpreter,
+        CutIntegrationAssemblyPath::AD,
+        CutIntegrationAssemblyPath::SymbolicTangent,
+        CutIntegrationAssemblyPath::JIT}};
+    return paths;
+}
+
+bool binding_visible_to_path(const CutIntegrationBinding& binding,
+                             CutIntegrationAssemblyPath path)
+{
+    return std::find(binding.visible_to_paths.begin(),
+                     binding.visible_to_paths.end(),
+                     path) != binding.visible_to_paths.end();
+}
+
+bool sensitivity_visible_to_path(const CutGeometrySensitivityMetadata& metadata,
+                                 CutIntegrationAssemblyPath path)
+{
+    return std::find(metadata.visible_to_paths.begin(),
+                     metadata.visible_to_paths.end(),
+                     path) != metadata.visible_to_paths.end();
+}
+
+struct CutExecutionPathViewSummary {
+    std::size_t binding_count{0};
+    std::size_t volume_rule_count{0};
+    std::size_t interface_rule_count{0};
+    std::uint64_t topology_revision{0};
+    std::uint64_t quadrature_policy_key{0};
+    Real negative_measure{0.0};
+    Real positive_measure{0.0};
+    Real parent_measure{0.0};
+    Real volume_fraction_sum{0.0};
+    Real weighted_point_sum{0.0};
+    Real weighted_normal_sum{0.0};
+    Real generic_volume_integral{0.0};
+    Real interface_measure{0.0};
+    Real interface_normal_sum{0.0};
+    std::vector<CutIntegrationSide> sides{};
+    std::vector<std::string> provenance_ids{};
+    std::vector<std::string> topology_ids{};
+    std::vector<CutQuadratureConstructionKind> policies{};
+    std::vector<std::size_t> point_counts{};
+};
+
+CutExecutionPathViewSummary summarize_cut_context_for_path(
+    const CutIntegrationContext& context,
+    CutIntegrationAssemblyPath path)
+{
+    CutExecutionPathViewSummary summary;
+    summary.interface_rule_count = context.interfaceRules().size();
+    for (const auto& interface_rule : context.interfaceRules()) {
+        summary.interface_measure += interface_rule.measure;
+        for (const auto& qp : interface_rule.points) {
+            summary.interface_normal_sum +=
+                qp.weight * (qp.normal[0] + Real{2.0} * qp.normal[1] +
+                             Real{3.0} * qp.normal[2]);
+        }
+    }
+
+    EXPECT_EQ(context.bindings().size(), context.volumeRules().size());
+    EXPECT_EQ(context.metadata().size(), context.volumeRules().size());
+    for (std::size_t i = 0; i < context.bindings().size(); ++i) {
+        const auto& binding = context.bindings()[i];
+        if (!binding_visible_to_path(binding, path)) {
+            continue;
+        }
+        const auto& rule = context.volumeRules()[i];
+        const auto& metadata = context.metadata()[i];
+        ++summary.binding_count;
+        ++summary.volume_rule_count;
+        summary.topology_revision ^= binding.cut_topology_revision;
+        summary.quadrature_policy_key ^= binding.quadrature_policy_key;
+        summary.parent_measure = std::max(summary.parent_measure, rule.parent_measure);
+        summary.volume_fraction_sum += metadata.volume_fraction;
+        if (rule.side == CutIntegrationSide::Negative) {
+            summary.negative_measure += rule.measure;
+        } else if (rule.side == CutIntegrationSide::Positive) {
+            summary.positive_measure += rule.measure;
+        }
+        for (const auto& qp : rule.points) {
+            summary.weighted_point_sum +=
+                qp.weight * (qp.point[0] + Real{2.0} * qp.point[1] +
+                             Real{3.0} * qp.point[2]);
+            summary.weighted_normal_sum +=
+                qp.weight * (qp.normal[0] + Real{2.0} * qp.normal[1] +
+                             Real{3.0} * qp.normal[2]);
+            summary.generic_volume_integral +=
+                qp.weight * (Real{1.0} + qp.point[0] +
+                             Real{2.0} * qp.point[1] +
+                             Real{3.0} * qp.point[2]);
+        }
+        summary.sides.push_back(rule.side);
+        summary.provenance_ids.push_back(metadata.provenance_id);
+        summary.topology_ids.push_back(metadata.cut_topology_id);
+        summary.policies.push_back(rule.policy.kind);
+        summary.point_counts.push_back(rule.points.size());
+    }
+    return summary;
+}
+
+void expect_equivalent_path_summary(
+    const CutExecutionPathViewSummary& expected,
+    const CutExecutionPathViewSummary& actual)
+{
+    EXPECT_EQ(actual.binding_count, expected.binding_count);
+    EXPECT_EQ(actual.volume_rule_count, expected.volume_rule_count);
+    EXPECT_EQ(actual.interface_rule_count, expected.interface_rule_count);
+    EXPECT_EQ(actual.topology_revision, expected.topology_revision);
+    EXPECT_EQ(actual.quadrature_policy_key, expected.quadrature_policy_key);
+    EXPECT_NEAR(actual.negative_measure, expected.negative_measure, 1.0e-12);
+    EXPECT_NEAR(actual.positive_measure, expected.positive_measure, 1.0e-12);
+    EXPECT_NEAR(actual.parent_measure, expected.parent_measure, 1.0e-12);
+    EXPECT_NEAR(actual.volume_fraction_sum, expected.volume_fraction_sum, 1.0e-12);
+    EXPECT_NEAR(actual.weighted_point_sum, expected.weighted_point_sum, 1.0e-12);
+    EXPECT_NEAR(actual.weighted_normal_sum, expected.weighted_normal_sum, 1.0e-12);
+    EXPECT_NEAR(actual.generic_volume_integral, expected.generic_volume_integral, 1.0e-12);
+    EXPECT_NEAR(actual.interface_measure, expected.interface_measure, 1.0e-12);
+    EXPECT_NEAR(actual.interface_normal_sum, expected.interface_normal_sum, 1.0e-12);
+    EXPECT_EQ(actual.sides, expected.sides);
+    EXPECT_EQ(actual.provenance_ids, expected.provenance_ids);
+    EXPECT_EQ(actual.topology_ids, expected.topology_ids);
+    EXPECT_EQ(actual.policies, expected.policies);
+    EXPECT_EQ(actual.point_counts, expected.point_counts);
+}
+
+[[nodiscard]] Real constant_cut_operator_integrand(const CutScalarOperatorPoint&)
+{
+    return Real{1.0};
+}
+
+[[nodiscard]] Real affine_cut_operator_integrand(const CutScalarOperatorPoint& qp)
+{
+    const Real side_indicator =
+        qp.side == CutIntegrationSide::Negative
+            ? Real{-1.0}
+            : (qp.side == CutIntegrationSide::Positive ? Real{1.0} : Real{0.25});
+    return Real{1.0} +
+           qp.point[0] +
+           Real{2.0} * qp.point[1] +
+           Real{3.0} * qp.point[2] +
+           Real{0.125} * side_indicator +
+           Real{0.0625} * qp.volume_fraction +
+           Real{1.0e-6} *
+               static_cast<Real>(qp.cut_topology_revision % std::uint64_t{17});
+}
+
+[[nodiscard]] Real x_coordinate_cut_operator_integrand(const CutScalarOperatorPoint& qp)
+{
+    return qp.point[0];
+}
+
+void expect_equivalent_operator_evaluation(
+    const CutScalarOperatorEvaluation& expected,
+    const CutScalarOperatorEvaluation& actual,
+    Real tolerance)
+{
+    EXPECT_EQ(actual.volume_rule_count, expected.volume_rule_count);
+    EXPECT_EQ(actual.interface_rule_count, expected.interface_rule_count);
+    EXPECT_EQ(actual.volume_point_count, expected.volume_point_count);
+    EXPECT_EQ(actual.interface_point_count, expected.interface_point_count);
+    EXPECT_NEAR(actual.parent_measure, expected.parent_measure, tolerance);
+    EXPECT_NEAR(actual.negative_volume_measure,
+                expected.negative_volume_measure,
+                tolerance);
+    EXPECT_NEAR(actual.positive_volume_measure,
+                expected.positive_volume_measure,
+                tolerance);
+    EXPECT_NEAR(actual.interface_measure, expected.interface_measure, tolerance);
+    EXPECT_NEAR(actual.negative_volume_integral,
+                expected.negative_volume_integral,
+                tolerance);
+    EXPECT_NEAR(actual.positive_volume_integral,
+                expected.positive_volume_integral,
+                tolerance);
+    EXPECT_NEAR(actual.interface_integral, expected.interface_integral, tolerance);
+    EXPECT_NEAR(actual.volumeIntegral(), expected.volumeIntegral(), tolerance);
+    EXPECT_NEAR(actual.totalIntegral(), expected.totalIntegral(), tolerance);
+}
+
+void expect_production_cut_operator_path_parity(
+    const char* name,
+    svmp::MeshBase mesh,
+    const svmp::search::EmbeddedGeometryDescriptor& embedded,
+    Real tolerance)
+{
+    SCOPED_TRACE(name);
+    svmp::search::CutClassificationOptions options;
+    options.classify_faces = false;
+    options.classify_edges = false;
+    const auto map = svmp::search::classify_embedded_geometry(mesh, embedded, options);
+    ASSERT_EQ(map.cells.size(), 1u);
+    ASSERT_EQ(map.cells[0].classification, svmp::search::CutClassification::Cut);
+
+    const auto topology = svmp::search::reconstruct_cut_topology(mesh, map);
+    ASSERT_TRUE(topology.supported) << join_cut_validity_messages(topology.diagnostics);
+    const auto validity = svmp::search::diagnose_cut_topology_validity(topology);
+    ASSERT_TRUE(validity.ok) << join_cut_validity_messages(validity.messages);
+
+    CutIntegrationContext context;
+    context.importCutTopology(topology, CutGeometryFrame::Reference, 9100);
+
+    const auto expected_view =
+        summarize_cut_context_for_path(context, CutIntegrationAssemblyPath::Standard);
+    const auto expected_constant = context.evaluateScalarCutOperator(
+        CutIntegrationAssemblyPath::Standard,
+        constant_cut_operator_integrand,
+        constant_cut_operator_integrand);
+    const auto expected_affine = context.evaluateScalarCutOperator(
+        CutIntegrationAssemblyPath::Standard,
+        affine_cut_operator_integrand,
+        affine_cut_operator_integrand);
+
+    ASSERT_GT(expected_constant.volume_rule_count, 0u);
+    ASSERT_GT(expected_constant.interface_rule_count, 0u);
+    ASSERT_GT(expected_constant.volume_point_count, 0u);
+    ASSERT_GT(expected_constant.interface_point_count, 0u);
+    EXPECT_EQ(expected_constant.volume_rule_count, expected_view.volume_rule_count);
+    EXPECT_EQ(expected_constant.interface_rule_count, expected_view.interface_rule_count);
+    EXPECT_NEAR(expected_constant.negative_volume_integral,
+                expected_view.negative_measure,
+                tolerance);
+    EXPECT_NEAR(expected_constant.positive_volume_integral,
+                expected_view.positive_measure,
+                tolerance);
+    EXPECT_NEAR(expected_constant.interface_integral,
+                expected_view.interface_measure,
+                tolerance);
+    EXPECT_NEAR(expected_constant.volumeIntegral(),
+                expected_constant.parent_measure,
+                tolerance);
+    EXPECT_NEAR(expected_constant.volumeIntegral(),
+                expected_constant.negative_volume_measure +
+                    expected_constant.positive_volume_measure,
+                tolerance);
+    EXPECT_NEAR(expected_constant.interface_integral,
+                expected_constant.interface_measure,
+                tolerance);
+
+    for (const auto path : all_cut_execution_paths()) {
+        const auto actual_constant = context.evaluateScalarCutOperator(
+            path, constant_cut_operator_integrand, constant_cut_operator_integrand);
+        expect_equivalent_operator_evaluation(
+            expected_constant, actual_constant, tolerance);
+
+        const auto actual_affine = context.evaluateScalarCutOperator(
+            path, affine_cut_operator_integrand, affine_cut_operator_integrand);
+        expect_equivalent_operator_evaluation(expected_affine, actual_affine, tolerance);
+    }
+}
+
+void expect_curved_context_path_parity(
+    const CutIntegrationContext& context,
+    Real conservation_tolerance)
+{
+    const auto baseline =
+        summarize_cut_context_for_path(context, CutIntegrationAssemblyPath::Standard);
+    ASSERT_GT(baseline.binding_count, 0u);
+    ASSERT_GT(baseline.volume_rule_count, 0u);
+    ASSERT_GT(baseline.interface_rule_count, 0u);
+    EXPECT_NEAR(baseline.negative_measure + baseline.positive_measure,
+                baseline.parent_measure,
+                std::max(conservation_tolerance,
+                         baseline.parent_measure * conservation_tolerance));
+    EXPECT_GT(baseline.interface_measure, 0.0);
+
+    for (const auto path : all_cut_execution_paths()) {
+        const auto actual = summarize_cut_context_for_path(context, path);
+        expect_equivalent_path_summary(baseline, actual);
+    }
+}
+
+void expect_linearized_context_path_parity(
+    const char* name,
+    svmp::MeshBase mesh,
+    const svmp::search::EmbeddedGeometryDescriptor& embedded)
+{
+    SCOPED_TRACE(name);
+    svmp::search::CutClassificationOptions options;
+    options.classify_faces = false;
+    options.classify_edges = false;
+    const auto map = svmp::search::classify_embedded_geometry(mesh, embedded, options);
+    ASSERT_EQ(map.cells.size(), 1u);
+    ASSERT_EQ(map.cells[0].classification, svmp::search::CutClassification::Cut);
+
+    const auto topology = svmp::search::reconstruct_cut_topology(mesh, map);
+    const auto validity = svmp::search::diagnose_cut_topology_validity(topology);
+    ASSERT_TRUE(validity.ok) << join_cut_validity_messages(validity.messages);
+
+    CutIntegrationContext context;
+    context.importCutTopology(topology, CutGeometryFrame::Reference, 987);
+    ASSERT_EQ(context.volumeRules().size(), 2u);
+    ASSERT_EQ(context.bindings().size(), context.volumeRules().size());
+    ASSERT_EQ(context.interfaceRules().size(), 1u);
+
+    const auto baseline =
+        summarize_cut_context_for_path(context, CutIntegrationAssemblyPath::Standard);
+    ASSERT_EQ(baseline.binding_count, 2u);
+    ASSERT_EQ(baseline.volume_rule_count, 2u);
+    ASSERT_EQ(baseline.interface_rule_count, 1u);
+    EXPECT_NEAR(baseline.negative_measure + baseline.positive_measure,
+                baseline.parent_measure,
+                1.0e-12);
+    EXPECT_GT(baseline.interface_measure, 0.0);
+
+    for (const auto path : all_cut_execution_paths()) {
+        const auto actual = summarize_cut_context_for_path(context, path);
+        expect_equivalent_path_summary(baseline, actual);
+    }
+}
+
+void expect_linearized_plane_context_path_parity(
+    const char* name,
+    svmp::MeshBase mesh,
+    const svmp::search::EmbeddedGeometryDescriptor& embedded)
+{
+    expect_linearized_context_path_parity(name, std::move(mesh), embedded);
+}
+
+void expect_quadratic_curved_plane_context_path_parity(
+    const char* name,
+    svmp::MeshBase mesh,
+    const svmp::search::EmbeddedGeometryDescriptor& embedded)
+{
+    SCOPED_TRACE(name);
+    svmp::search::CutClassificationOptions options;
+    options.classify_faces = false;
+    options.classify_edges = false;
+    const auto map = svmp::search::classify_embedded_geometry(mesh, embedded, options);
+    ASSERT_EQ(map.cells.size(), 1u);
+    ASSERT_EQ(map.cells[0].classification, svmp::search::CutClassification::Cut);
+
+    svmp::search::CutTopologyOptions topology_options;
+    topology_options.allow_linearized_high_order_geometry = true;
+    const auto topology = svmp::search::reconstruct_cut_topology(mesh, map, topology_options);
+    ASSERT_TRUE(topology.supported) << join_cut_validity_messages(topology.diagnostics);
+    ASSERT_FALSE(topology.curved_patches.empty());
+    EXPECT_TRUE(topology.linearized_cut_mode);
+
+    const auto validity = svmp::search::diagnose_cut_topology_validity(
+        topology,
+        /*high_order_parent_geometry=*/true);
+    ASSERT_TRUE(validity.ok) << join_cut_validity_messages(validity.messages);
+    EXPECT_TRUE(validity.requires_curved_geometry_support);
+
+    CutIntegrationContext context;
+    context.importCutTopology(topology, CutGeometryFrame::Reference, 988);
+    ASSERT_GE(context.volumeRules().size(), 2u);
+    ASSERT_EQ(context.bindings().size(), context.volumeRules().size());
+    ASSERT_FALSE(context.interfaceRules().empty());
+
+    bool saw_curved_volume = false;
+    for (const auto& rule : context.volumeRules()) {
+        saw_curved_volume =
+            saw_curved_volume ||
+            (rule.curved_geometry &&
+             rule.policy.kind == CutQuadratureConstructionKind::CurvedTopologySubdivision &&
+             !rule.points.empty());
+    }
+    EXPECT_TRUE(saw_curved_volume);
+
+    bool saw_curved_interface = false;
+    for (const auto& rule : context.interfaceRules()) {
+        saw_curved_interface =
+            saw_curved_interface ||
+            (rule.curved_geometry &&
+             rule.policy.kind == CutQuadratureConstructionKind::CurvedTopologySubdivision &&
+             rule.measure > 0.0 &&
+             !rule.points.empty());
+    }
+    EXPECT_TRUE(saw_curved_interface);
+
+    const auto baseline =
+        summarize_cut_context_for_path(context, CutIntegrationAssemblyPath::Standard);
+    ASSERT_GT(baseline.binding_count, 0u);
+    EXPECT_NEAR(baseline.negative_measure + baseline.positive_measure,
+                baseline.parent_measure,
+                std::max(Real{1.0e-6}, baseline.parent_measure * Real{1.0e-6}));
+
+    for (const auto path : all_cut_execution_paths()) {
+        const auto actual = summarize_cut_context_for_path(context, path);
+        expect_equivalent_path_summary(baseline, actual);
+    }
+}
+
+void expect_sensitivity_metadata_shape_identities(
+    const CutGeometrySensitivityMetadata& metadata)
+{
+    ASSERT_FALSE(metadata.parent_geometry_dofs.empty());
+    ASSERT_FALSE(metadata.samples.empty());
+    for (const auto& sample : metadata.samples) {
+        ASSERT_EQ(sample.shape_values.size(), metadata.parent_geometry_dofs.size());
+        ASSERT_EQ(sample.shape_gradients.size(), metadata.parent_geometry_dofs.size());
+        Real value_sum = 0.0;
+        std::array<Real, 3> gradient_sum{{0.0, 0.0, 0.0}};
+        for (std::size_t i = 0; i < sample.shape_values.size(); ++i) {
+            value_sum += sample.shape_values[i];
+            gradient_sum[0] += sample.shape_gradients[i][0];
+            gradient_sum[1] += sample.shape_gradients[i][1];
+            gradient_sum[2] += sample.shape_gradients[i][2];
+        }
+        EXPECT_NEAR(value_sum, 1.0, 1.0e-11);
+        EXPECT_NEAR(gradient_sum[0], 0.0, 1.0e-10);
+        EXPECT_NEAR(gradient_sum[1], 0.0, 1.0e-10);
+        EXPECT_NEAR(gradient_sum[2], 0.0, 1.0e-10);
+    }
+}
+
+void expect_context_sensitivity_metadata(
+    const CutIntegrationContext& context,
+    const svmp::search::CutTopologyRecord& topology,
+    std::uint64_t quadrature_policy_key,
+    const std::string& construction_policy)
+{
+    ASSERT_FALSE(context.sensitivityMetadata().empty())
+        << join_cut_validity_messages(topology.diagnostics);
+
+    std::set<std::string> target_kinds;
+    std::size_t matching_records = 0u;
+    for (const auto& metadata : context.sensitivityMetadata()) {
+        if (metadata.construction_policy != construction_policy) {
+            continue;
+        }
+        ++matching_records;
+        target_kinds.insert(metadata.target_kind);
+        EXPECT_EQ(metadata.cut_topology_revision, topology.topology_revision);
+        EXPECT_EQ(metadata.quadrature_policy_key, quadrature_policy_key);
+        EXPECT_TRUE(metadata.ad_compatible);
+        EXPECT_TRUE(metadata.location_sensitivity_available);
+        EXPECT_TRUE(metadata.jacobian_sensitivity_available);
+        EXPECT_TRUE(metadata.measure_sensitivity_available);
+        EXPECT_TRUE(metadata.normal_sensitivity_available);
+        EXPECT_TRUE(metadata.quadrature_weight_sensitivity_available);
+        EXPECT_EQ(metadata.visible_to_paths.size(), all_cut_execution_paths().size());
+        for (const auto path : all_cut_execution_paths()) {
+            EXPECT_TRUE(sensitivity_visible_to_path(metadata, path));
+        }
+        expect_sensitivity_metadata_shape_identities(metadata);
+    }
+    EXPECT_GE(matching_records, 3u);
+    EXPECT_NE(target_kinds.find("interface-quadrature"), target_kinds.end());
+    EXPECT_NE(target_kinds.find("negative-volume-subcell-quadrature"), target_kinds.end());
+    EXPECT_NE(target_kinds.find("positive-volume-subcell-quadrature"), target_kinds.end());
+}
+
+void expect_quadratic_curved_plane_sensitivity_path_visibility(
+    const char* name,
+    svmp::MeshBase mesh,
+    const svmp::search::EmbeddedGeometryDescriptor& embedded)
+{
+    SCOPED_TRACE(name);
+    svmp::search::CutClassificationOptions options;
+    options.classify_faces = false;
+    options.classify_edges = false;
+    const auto map = svmp::search::classify_embedded_geometry(mesh, embedded, options);
+    ASSERT_EQ(map.cells.size(), 1u);
+    ASSERT_EQ(map.cells[0].classification, svmp::search::CutClassification::Cut);
+
+    svmp::search::CutTopologyOptions topology_options;
+    topology_options.allow_linearized_high_order_geometry = true;
+    const auto topology = svmp::search::reconstruct_cut_topology(mesh, map, topology_options);
+    ASSERT_TRUE(topology.supported) << join_cut_validity_messages(topology.diagnostics);
+    ASSERT_FALSE(topology.sensitivity_records.empty());
+
+    CutIntegrationContext context;
+    context.importCutTopology(topology, CutGeometryFrame::Reference, 989);
+    ASSERT_FALSE(context.sensitivityMetadata().empty());
+
+    std::set<std::string> target_kinds;
+    for (const auto& metadata : context.sensitivityMetadata()) {
+        target_kinds.insert(metadata.target_kind);
+        EXPECT_EQ(metadata.cut_topology_revision, topology.topology_revision);
+        EXPECT_EQ(metadata.quadrature_policy_key, 989u);
+        EXPECT_TRUE(metadata.ad_compatible);
+        EXPECT_TRUE(metadata.location_sensitivity_available);
+        EXPECT_TRUE(metadata.jacobian_sensitivity_available);
+        EXPECT_TRUE(metadata.measure_sensitivity_available);
+        EXPECT_TRUE(metadata.normal_sensitivity_available);
+        EXPECT_TRUE(metadata.quadrature_weight_sensitivity_available);
+        EXPECT_EQ(metadata.visible_to_paths.size(), all_cut_execution_paths().size());
+        for (const auto path : all_cut_execution_paths()) {
+            EXPECT_TRUE(sensitivity_visible_to_path(metadata, path));
+        }
+        expect_sensitivity_metadata_shape_identities(metadata);
+    }
+    EXPECT_NE(target_kinds.find("interface-quadrature"), target_kinds.end());
+    EXPECT_NE(target_kinds.find("negative-volume-subcell-quadrature"), target_kinds.end());
+    EXPECT_NE(target_kinds.find("positive-volume-subcell-quadrature"), target_kinds.end());
+
+    std::vector<std::size_t> path_counts;
+    for (const auto path : all_cut_execution_paths()) {
+        std::size_t count = 0u;
+        for (const auto& metadata : context.sensitivityMetadata()) {
+            if (sensitivity_visible_to_path(metadata, path)) {
+                ++count;
+            }
+        }
+        path_counts.push_back(count);
+    }
+    ASSERT_FALSE(path_counts.empty());
+    for (const auto count : path_counts) {
+        EXPECT_EQ(count, path_counts.front());
+    }
+}
+
+void expect_linearized_sensitivity_path_visibility(
+    const char* name,
+    svmp::MeshBase mesh,
+    const svmp::search::EmbeddedGeometryDescriptor& embedded,
+    std::uint64_t quadrature_policy_key)
+{
+    SCOPED_TRACE(name);
+    svmp::search::CutClassificationOptions options;
+    options.classify_faces = false;
+    options.classify_edges = false;
+    const auto map = svmp::search::classify_embedded_geometry(mesh, embedded, options);
+    ASSERT_EQ(map.cells.size(), 1u);
+    ASSERT_EQ(map.cells[0].classification, svmp::search::CutClassification::Cut);
+
+    const auto topology = svmp::search::reconstruct_cut_topology(mesh, map);
+    ASSERT_TRUE(topology.supported) << join_cut_validity_messages(topology.diagnostics);
+    ASSERT_FALSE(topology.sensitivity_records.empty())
+        << join_cut_validity_messages(topology.diagnostics);
+
+    CutIntegrationContext context;
+    context.importCutTopology(topology,
+                              CutGeometryFrame::Reference,
+                              quadrature_policy_key);
+    expect_context_sensitivity_metadata(context,
+                                        topology,
+                                        quadrature_policy_key,
+                                        "linear-topology-subdivision");
+
+    std::vector<std::size_t> path_counts;
+    for (const auto path : all_cut_execution_paths()) {
+        std::size_t count = 0u;
+        for (const auto& metadata : context.sensitivityMetadata()) {
+            if (metadata.construction_policy == "linear-topology-subdivision" &&
+                sensitivity_visible_to_path(metadata, path)) {
+                ++count;
+            }
+        }
+        path_counts.push_back(count);
+    }
+    ASSERT_FALSE(path_counts.empty());
+    for (const auto count : path_counts) {
+        EXPECT_EQ(count, path_counts.front());
+    }
 }
 
 } // namespace
@@ -1409,11 +2246,13 @@ TEST(CutIntegrationInfrastructure, ImportsTrueCurvedLineArrangementMetadata)
     const auto validity = svmp::search::diagnose_cut_topology_validity(
         topology,
         /*high_order_parent_geometry=*/true);
-    EXPECT_TRUE(validity.ok);
+    EXPECT_TRUE(validity.ok) << join_cut_validity_messages(validity.messages);
     EXPECT_FALSE(validity.requires_curved_geometry_support);
 
     CutIntegrationContext context;
     context.importCutTopology(topology, CutGeometryFrame::Reference, 789);
+    expect_context_sensitivity_metadata(
+        context, topology, 789, "true-curved-isoparametric-arrangement");
 
     ASSERT_EQ(context.volumeRules().size(), 2u);
     ASSERT_EQ(context.interfaceRules().size(), 1u);
@@ -1444,6 +2283,7 @@ TEST(CutIntegrationInfrastructure, ImportsTrueCurvedLineArrangementMetadata)
     EXPECT_EQ(interface_rule.policy.name, "true-curved-isoparametric-arrangement");
     ASSERT_FALSE(interface_rule.points.empty());
     EXPECT_GT(interface_rule.measure, 0.0);
+    expect_curved_context_path_parity(context, Real{1.0e-8});
 }
 
 void expect_true_curved_face_context_import(
@@ -1476,11 +2316,13 @@ void expect_true_curved_face_context_import(
     const auto validity = svmp::search::diagnose_cut_topology_validity(
         topology,
         /*high_order_parent_geometry=*/true);
-    EXPECT_TRUE(validity.ok);
+    EXPECT_TRUE(validity.ok) << join_cut_validity_messages(validity.messages);
     EXPECT_FALSE(validity.requires_curved_geometry_support);
 
     CutIntegrationContext context;
     context.importCutTopology(topology, CutGeometryFrame::Reference, 790);
+    expect_context_sensitivity_metadata(
+        context, topology, 790, "true-curved-isoparametric-arrangement");
 
     ASSERT_EQ(context.volumeRules().size(), 2u);
     ASSERT_EQ(context.interfaceRules().size(), 1u);
@@ -1511,6 +2353,7 @@ void expect_true_curved_face_context_import(
     EXPECT_EQ(interface_rule.policy.name, "true-curved-isoparametric-arrangement");
     ASSERT_FALSE(interface_rule.points.empty());
     EXPECT_GT(interface_rule.measure, 0.0);
+    expect_curved_context_path_parity(context, Real{1.0e-6});
 }
 
 void expect_true_curved_subdivision_context_import(
@@ -1539,17 +2382,25 @@ void expect_true_curved_subdivision_context_import(
         EXPECT_FALSE(patch.linearized_surrogate);
         EXPECT_EQ(patch.construction_policy, "true-curved-subdivision-arrangement");
         EXPECT_TRUE(patch.isoparametric_quadrature_available);
+        if (embedded.kind == svmp::search::EmbeddedGeometryKind::BooleanComposite) {
+            EXPECT_EQ(patch.embedded_kind, svmp::search::EmbeddedGeometryKind::BooleanComposite);
+            EXPECT_EQ(patch.composition_operation, embedded.boolean_operation);
+            EXPECT_EQ(patch.active_child_ordinals.size(), patch.ordered_vertices.size());
+            EXPECT_EQ(patch.active_child_provenance.size(), patch.ordered_vertices.size());
+        }
         EXPECT_GT(patch.quadrature_measure, 0.0);
     }
 
     const auto validity = svmp::search::diagnose_cut_topology_validity(
         topology,
         /*high_order_parent_geometry=*/true);
-    EXPECT_TRUE(validity.ok);
+    EXPECT_TRUE(validity.ok) << join_cut_validity_messages(validity.messages);
     EXPECT_FALSE(validity.requires_curved_geometry_support);
 
     CutIntegrationContext context;
     context.importCutTopology(topology, CutGeometryFrame::Reference, 795);
+    expect_context_sensitivity_metadata(
+        context, topology, 795, "true-curved-subdivision-arrangement");
 
     ASSERT_EQ(context.volumeRules().size(), 2u);
     ASSERT_GT(context.interfaceRules().size(), 1u);
@@ -1581,6 +2432,7 @@ void expect_true_curved_subdivision_context_import(
         ASSERT_FALSE(interface_rule.points.empty());
         EXPECT_GT(interface_rule.measure, 0.0);
     }
+    expect_curved_context_path_parity(context, Real{1.0e-4});
 }
 
 TEST(CutIntegrationInfrastructure, ImportsTrueCurvedFaceArrangementMetadata)
@@ -1629,6 +2481,8 @@ TEST(CutIntegrationInfrastructure, ImportsTrueCurvedTetraArrangementMetadata)
 
     CutIntegrationContext context;
     context.importCutTopology(topology, CutGeometryFrame::Reference, 791);
+    expect_context_sensitivity_metadata(
+        context, topology, 791, "true-curved-isoparametric-arrangement");
 
     ASSERT_EQ(context.volumeRules().size(), 2u);
     ASSERT_EQ(context.interfaceRules().size(), 1u);
@@ -1659,6 +2513,7 @@ TEST(CutIntegrationInfrastructure, ImportsTrueCurvedTetraArrangementMetadata)
     EXPECT_EQ(interface_rule.policy.name, "true-curved-isoparametric-arrangement");
     ASSERT_FALSE(interface_rule.points.empty());
     EXPECT_GT(interface_rule.measure, 0.0);
+    expect_curved_context_path_parity(context, Real{1.0e-6});
 }
 
 TEST(CutIntegrationInfrastructure, ImportsTrueCurvedHexArrangementMetadata)
@@ -1693,6 +2548,8 @@ TEST(CutIntegrationInfrastructure, ImportsTrueCurvedHexArrangementMetadata)
 
     CutIntegrationContext context;
     context.importCutTopology(topology, CutGeometryFrame::Reference, 792);
+    expect_context_sensitivity_metadata(
+        context, topology, 792, "true-curved-isoparametric-arrangement");
 
     ASSERT_EQ(context.volumeRules().size(), 2u);
     ASSERT_EQ(context.interfaceRules().size(), 1u);
@@ -1723,6 +2580,7 @@ TEST(CutIntegrationInfrastructure, ImportsTrueCurvedHexArrangementMetadata)
     EXPECT_EQ(interface_rule.policy.name, "true-curved-isoparametric-arrangement");
     ASSERT_FALSE(interface_rule.points.empty());
     EXPECT_GT(interface_rule.measure, 0.0);
+    expect_curved_context_path_parity(context, Real{1.0e-6});
 }
 
 TEST(CutIntegrationInfrastructure, ImportsTrueCurvedWedgeArrangementMetadata)
@@ -1757,6 +2615,8 @@ TEST(CutIntegrationInfrastructure, ImportsTrueCurvedWedgeArrangementMetadata)
 
     CutIntegrationContext context;
     context.importCutTopology(topology, CutGeometryFrame::Reference, 793);
+    expect_context_sensitivity_metadata(
+        context, topology, 793, "true-curved-isoparametric-arrangement");
 
     ASSERT_EQ(context.volumeRules().size(), 2u);
     ASSERT_EQ(context.interfaceRules().size(), 1u);
@@ -1787,6 +2647,7 @@ TEST(CutIntegrationInfrastructure, ImportsTrueCurvedWedgeArrangementMetadata)
     EXPECT_EQ(interface_rule.policy.name, "true-curved-isoparametric-arrangement");
     ASSERT_FALSE(interface_rule.points.empty());
     EXPECT_GT(interface_rule.measure, 0.0);
+    expect_curved_context_path_parity(context, Real{1.0e-6});
 }
 
 TEST(CutIntegrationInfrastructure, ImportsTrueCurvedPyramidArrangementMetadata)
@@ -1821,6 +2682,8 @@ TEST(CutIntegrationInfrastructure, ImportsTrueCurvedPyramidArrangementMetadata)
 
     CutIntegrationContext context;
     context.importCutTopology(topology, CutGeometryFrame::Reference, 794);
+    expect_context_sensitivity_metadata(
+        context, topology, 794, "true-curved-isoparametric-arrangement");
 
     ASSERT_EQ(context.volumeRules().size(), 2u);
     ASSERT_EQ(context.interfaceRules().size(), 1u);
@@ -1851,6 +2714,7 @@ TEST(CutIntegrationInfrastructure, ImportsTrueCurvedPyramidArrangementMetadata)
     EXPECT_EQ(interface_rule.policy.name, "true-curved-isoparametric-arrangement");
     ASSERT_FALSE(interface_rule.points.empty());
     EXPECT_GT(interface_rule.measure, 0.0);
+    expect_curved_context_path_parity(context, Real{1.0e-6});
 }
 
 TEST(CutIntegrationInfrastructure, ImportsTrueCurvedNonGraphSubdivisionArrangementMetadata)
@@ -1882,6 +2746,313 @@ TEST(CutIntegrationInfrastructure, ImportsTrueCurvedNonGraphSubdivisionArrangeme
         svmp::CellFamily::Pyramid);
 }
 
+TEST(CutIntegrationInfrastructure, ImportsTrueCurvedNonPlaneSubdivisionArrangementMetadata)
+{
+    const auto check_all_families =
+        [&](const std::string& prefix,
+            std::uint64_t base_epoch,
+            const auto& make_line,
+            const auto& make_triangle,
+            const auto& make_quad,
+            const auto& make_tetra,
+            const auto& make_hex,
+            const auto& make_wedge,
+            const auto& make_pyramid) {
+            expect_true_curved_subdivision_context_import(
+                (prefix + "-line").c_str(),
+                make_cut_context_cubic_line_mesh(),
+                make_line(base_epoch + 1, prefix + "-line"),
+                svmp::CellFamily::Line);
+            expect_true_curved_subdivision_context_import(
+                (prefix + "-triangle").c_str(),
+                make_cut_context_cubic_triangle_mesh(),
+                make_triangle(base_epoch + 2, prefix + "-triangle"),
+                svmp::CellFamily::Triangle);
+            expect_true_curved_subdivision_context_import(
+                (prefix + "-quad").c_str(),
+                make_cut_context_cubic_quad_mesh(),
+                make_quad(base_epoch + 3, prefix + "-quad"),
+                svmp::CellFamily::Quad);
+            expect_true_curved_subdivision_context_import(
+                (prefix + "-tetra").c_str(),
+                make_cut_context_cubic_tetra_mesh(),
+                make_tetra(base_epoch + 4, prefix + "-tetra"),
+                svmp::CellFamily::Tetra);
+            expect_true_curved_subdivision_context_import(
+                (prefix + "-hex").c_str(),
+                make_cut_context_cubic_hex_mesh(),
+                make_hex(base_epoch + 5, prefix + "-hex"),
+                svmp::CellFamily::Hex);
+            expect_true_curved_subdivision_context_import(
+                (prefix + "-wedge").c_str(),
+                make_cut_context_cubic_wedge_mesh(),
+                make_wedge(base_epoch + 6, prefix + "-wedge"),
+                svmp::CellFamily::Wedge);
+            expect_true_curved_subdivision_context_import(
+                (prefix + "-pyramid").c_str(),
+                make_cut_context_cubic_pyramid_mesh(),
+                make_pyramid(base_epoch + 7, prefix + "-pyramid"),
+                svmp::CellFamily::Pyramid);
+        };
+
+    check_all_families(
+        "sphere",
+        2350,
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_sphere({{0.48, 0.0, 0.0}}, 0.22, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_sphere({{0.35, 0.35, 0.0}}, 0.30, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_sphere({{0.50, 0.0, 0.0}}, 0.62, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_sphere({{0.32, 0.28, 0.22}}, 0.34, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_sphere({{0.50, 0.0, 0.0}}, 0.72, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_sphere({{0.50, 0.35, 0.25}}, 0.46, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_sphere({{0.48, 0.0, 0.0}}, 0.42, epoch, id);
+        });
+
+    check_all_families(
+        "callback",
+        2360,
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_callback_sphere({{0.48, 0.0, 0.0}}, 0.22, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_callback_sphere({{0.35, 0.35, 0.0}}, 0.30, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_callback_sphere({{0.50, 0.0, 0.0}}, 0.62, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_callback_sphere({{0.32, 0.28, 0.22}}, 0.34, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_callback_sphere({{0.50, 0.0, 0.0}}, 0.72, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_callback_sphere({{0.50, 0.35, 0.25}}, 0.46, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_callback_sphere({{0.48, 0.0, 0.0}}, 0.42, epoch, id);
+        });
+
+    check_all_families(
+        "level-set",
+        2370,
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_level_set_sphere({{0.48, 0.0, 0.0}}, 0.22, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_level_set_sphere({{0.35, 0.35, 0.0}}, 0.30, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_level_set_sphere({{0.50, 0.0, 0.0}}, 0.62, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_level_set_sphere({{0.32, 0.28, 0.22}}, 0.34, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_level_set_sphere({{0.50, 0.0, 0.0}}, 0.72, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_level_set_sphere({{0.50, 0.35, 0.25}}, 0.46, epoch, id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_level_set_sphere({{0.48, 0.0, 0.0}}, 0.42, epoch, id);
+        });
+
+    check_all_families(
+        "triangulated",
+        2380,
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_triangulated_octahedron_sphere({{0.48, 0.0, 0.0}},
+                                                              0.30,
+                                                              epoch,
+                                                              id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_triangulated_octahedron_sphere({{0.35, 0.35, 0.0}},
+                                                              0.30,
+                                                              epoch,
+                                                              id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_triangulated_octahedron_sphere({{0.50, 0.0, 0.0}},
+                                                              0.62,
+                                                              epoch,
+                                                              id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_triangulated_octahedron_sphere({{0.32, 0.28, 0.22}},
+                                                              0.34,
+                                                              epoch,
+                                                              id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_triangulated_octahedron_sphere({{0.50, 0.0, 0.0}},
+                                                              0.95,
+                                                              epoch,
+                                                              id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_triangulated_octahedron_sphere({{0.50, 0.35, 0.25}},
+                                                              0.62,
+                                                              epoch,
+                                                              id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_triangulated_octahedron_sphere({{0.48, 0.0, 0.0}},
+                                                              0.58,
+                                                              epoch,
+                                                              id);
+        });
+
+    check_all_families(
+        "boolean",
+        2390,
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_boolean_composite(
+                svmp::search::EmbeddedGeometryBooleanOperation::Intersection,
+                {make_context_sphere({{0.48, 0.0, 0.0}}, 0.22, epoch + 1000, id + "-active"),
+                 make_context_sphere({{0.48, 0.0, 0.0}}, 10.0, epoch + 1001, id + "-enclosing")},
+                epoch,
+                id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_boolean_composite(
+                svmp::search::EmbeddedGeometryBooleanOperation::Intersection,
+                {make_context_sphere({{0.35, 0.35, 0.0}}, 0.30, epoch + 1000, id + "-active"),
+                 make_context_sphere({{0.35, 0.35, 0.0}}, 10.0, epoch + 1001, id + "-enclosing")},
+                epoch,
+                id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_boolean_composite(
+                svmp::search::EmbeddedGeometryBooleanOperation::Intersection,
+                {make_context_sphere({{0.50, 0.0, 0.0}}, 0.62, epoch + 1000, id + "-active"),
+                 make_context_sphere({{0.50, 0.0, 0.0}}, 10.0, epoch + 1001, id + "-enclosing")},
+                epoch,
+                id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_boolean_composite(
+                svmp::search::EmbeddedGeometryBooleanOperation::Intersection,
+                {make_context_sphere({{0.32, 0.28, 0.22}}, 0.34, epoch + 1000, id + "-active"),
+                 make_context_sphere({{0.32, 0.28, 0.22}}, 10.0, epoch + 1001, id + "-enclosing")},
+                epoch,
+                id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_boolean_composite(
+                svmp::search::EmbeddedGeometryBooleanOperation::Union,
+                {make_context_sphere({{0.50, 0.0, 0.0}}, 0.72, epoch + 1000, id + "-active"),
+                 make_context_sphere({{4.0, 4.0, 4.0}}, 0.25, epoch + 1001, id + "-far")},
+                epoch,
+                id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_boolean_composite(
+                svmp::search::EmbeddedGeometryBooleanOperation::Difference,
+                {make_context_sphere({{0.50, 0.35, 0.25}}, 10.0, epoch + 1000, id + "-base"),
+                 make_context_sphere({{0.50, 0.35, 0.25}}, 0.46, epoch + 1001, id + "-cavity")},
+                epoch,
+                id);
+        },
+        [](std::uint64_t epoch, const std::string& id) {
+            return make_context_boolean_composite(
+                svmp::search::EmbeddedGeometryBooleanOperation::Intersection,
+                {make_context_sphere({{0.48, 0.0, 0.0}}, 0.42, epoch + 1000, id + "-active"),
+                 make_context_sphere({{0.48, 0.0, 0.0}}, 10.0, epoch + 1001, id + "-enclosing")},
+                epoch,
+                id);
+        });
+}
+
+TEST(CutIntegrationInfrastructure, ImportsTrueCurvedBooleanChildChildSubdivisionArrangementMetadata)
+{
+    auto mesh = make_cut_context_cubic_tetra_mesh();
+    const auto embedded = make_context_boolean_composite(
+        svmp::search::EmbeddedGeometryBooleanOperation::Intersection,
+        {make_context_sphere({{0.25, 0.28, 0.22}},
+                             0.34,
+                             2401,
+                             "true-curved-boolean-child-child-a"),
+         make_context_sphere({{0.45, 0.28, 0.22}},
+                             0.34,
+                             2402,
+                             "true-curved-boolean-child-child-b")},
+        2403,
+        "true-curved-boolean-child-child-intersection");
+
+    svmp::search::CutClassificationOptions options;
+    options.classify_faces = false;
+    options.classify_edges = false;
+    const auto map = svmp::search::classify_embedded_geometry(mesh, embedded, options);
+    ASSERT_EQ(map.cells.size(), 1u);
+    ASSERT_EQ(map.cells[0].classification, svmp::search::CutClassification::Cut);
+
+    svmp::search::CutTopologyOptions topology_options;
+    topology_options.allow_linearized_high_order_geometry = false;
+    topology_options.curved_arrangement_mode = svmp::search::CutCurvedArrangementMode::TrueArrangement;
+    const auto topology = svmp::search::reconstruct_cut_topology(mesh, map, topology_options);
+    ASSERT_TRUE(topology.supported) << (topology.diagnostics.empty() ? "" : topology.diagnostics.front());
+
+    bool saw_child_zero = false;
+    bool saw_child_one = false;
+    bool saw_mixed_child_patch = false;
+    for (const auto& patch : topology.curved_patches) {
+        ASSERT_EQ(patch.embedded_kind, svmp::search::EmbeddedGeometryKind::BooleanComposite);
+        ASSERT_EQ(patch.active_child_ordinals.size(), patch.ordered_vertices.size());
+        std::set<std::size_t> patch_children;
+        for (const auto ordinal : patch.active_child_ordinals) {
+            patch_children.insert(ordinal);
+        }
+        saw_child_zero = saw_child_zero || patch_children.count(0u) != 0u;
+        saw_child_one = saw_child_one || patch_children.count(1u) != 0u;
+        saw_mixed_child_patch = saw_mixed_child_patch || patch_children.size() > 1u;
+    }
+    EXPECT_TRUE(saw_child_zero);
+    EXPECT_TRUE(saw_child_one);
+    EXPECT_TRUE(saw_mixed_child_patch);
+
+    CutIntegrationContext context;
+    context.importCutTopology(topology, CutGeometryFrame::Reference, 796);
+    expect_context_sensitivity_metadata(
+        context, topology, 796, "true-curved-subdivision-arrangement");
+
+    ASSERT_EQ(context.volumeRules().size(), 2u);
+    ASSERT_GT(context.interfaceRules().size(), 1u);
+    Real volume_sum = 0.0;
+    Real parent_measure = -1.0;
+    for (const auto& rule : context.volumeRules()) {
+        EXPECT_TRUE(rule.curved_geometry);
+        EXPECT_EQ(rule.policy.kind, CutQuadratureConstructionKind::CurvedTopologySubdivision);
+        EXPECT_EQ(rule.policy.name, "true-curved-subdivision-arrangement");
+        volume_sum += rule.measure;
+        if (parent_measure < 0.0) {
+            parent_measure = rule.parent_measure;
+        } else {
+            EXPECT_NEAR(rule.parent_measure,
+                        parent_measure,
+                        std::max(Real{1.0e-5}, parent_measure * Real{1.0e-5}));
+        }
+    }
+    ASSERT_GT(parent_measure, 0.0);
+    EXPECT_NEAR(volume_sum,
+                parent_measure,
+                std::max(Real{1.0e-4}, parent_measure * Real{1.0e-4}));
+    expect_curved_context_path_parity(context, Real{1.0e-4});
+}
+
 TEST(CutIntegrationInfrastructure, ImportsCurvedQuadAndHexIsoparametricTopologyQuadrature)
 {
     expect_curved_isoparametric_context_import(
@@ -1892,6 +3063,54 @@ TEST(CutIntegrationInfrastructure, ImportsCurvedQuadAndHexIsoparametricTopologyQ
         "quadratic-hex",
         make_cut_context_quadratic_hex_mesh(),
         make_axis_plane(0, 0.0, 224, "quadratic-hex-plane"));
+}
+
+TEST(CutIntegrationInfrastructure, QuadraticCurvedPlaneCutDataIsIdenticalAcrossAllExecutionPaths)
+{
+    expect_quadratic_curved_plane_context_path_parity(
+        "quadratic-line",
+        make_cut_context_quadratic_line_mesh(),
+        make_axis_plane(0, 0.4, 330, "path-parity-quadratic-line-plane"));
+    expect_quadratic_curved_plane_context_path_parity(
+        "quadratic-triangle",
+        make_cut_context_quadratic_triangle_mesh(),
+        make_axis_plane(0, 0.25, 331, "path-parity-quadratic-triangle-plane"));
+    expect_quadratic_curved_plane_context_path_parity(
+        "quadratic-quad",
+        make_cut_context_quadratic_quad_mesh(),
+        make_axis_plane(0, 0.0, 332, "path-parity-quadratic-quad-plane"));
+    expect_quadratic_curved_plane_context_path_parity(
+        "quadratic-tetra",
+        make_cut_context_quadratic_tetra_mesh(),
+        make_axis_plane(0, 0.25, 333, "path-parity-quadratic-tetra-plane"));
+    expect_quadratic_curved_plane_context_path_parity(
+        "quadratic-hex",
+        make_cut_context_quadratic_hex_mesh(),
+        make_axis_plane(0, 0.0, 334, "path-parity-quadratic-hex-plane"));
+}
+
+TEST(CutIntegrationInfrastructure, QuadraticCurvedPlaneCutSensitivityMetadataIsVisibleAcrossAllExecutionPaths)
+{
+    expect_quadratic_curved_plane_sensitivity_path_visibility(
+        "quadratic-line",
+        make_cut_context_quadratic_line_mesh(),
+        make_axis_plane(0, 0.4, 430, "sensitivity-quadratic-line-plane"));
+    expect_quadratic_curved_plane_sensitivity_path_visibility(
+        "quadratic-triangle",
+        make_cut_context_quadratic_triangle_mesh(),
+        make_axis_plane(0, 0.25, 431, "sensitivity-quadratic-triangle-plane"));
+    expect_quadratic_curved_plane_sensitivity_path_visibility(
+        "quadratic-quad",
+        make_cut_context_quadratic_quad_mesh(),
+        make_axis_plane(0, 0.0, 432, "sensitivity-quadratic-quad-plane"));
+    expect_quadratic_curved_plane_sensitivity_path_visibility(
+        "quadratic-tetra",
+        make_cut_context_quadratic_tetra_mesh(),
+        make_axis_plane(0, 0.25, 433, "sensitivity-quadratic-tetra-plane"));
+    expect_quadratic_curved_plane_sensitivity_path_visibility(
+        "quadratic-hex",
+        make_cut_context_quadratic_hex_mesh(),
+        make_axis_plane(0, 0.0, 434, "sensitivity-quadratic-hex-plane"));
 }
 
 TEST(CutIntegrationInfrastructure, ImportsLinearizedCutQuadratureForEveryAdvertisedFamily)
@@ -1968,5 +3187,242 @@ TEST(CutIntegrationInfrastructure, ImportsLinearizedCutQuadratureForEveryAdverti
         0.5,
         0.5,
         1.0);
+}
+
+TEST(CutIntegrationInfrastructure, LinearizedPlaneCutDataIsIdenticalAcrossAllExecutionPaths)
+{
+    expect_linearized_plane_context_path_parity(
+        "line",
+        make_cut_context_line_mesh(),
+        make_axis_plane(0, 0.4, 319, "path-parity-line-plane"));
+    expect_linearized_plane_context_path_parity(
+        "triangle",
+        make_cut_context_triangle_mesh(),
+        make_axis_plane(0, 0.25, 320, "path-parity-triangle-plane"));
+    expect_linearized_plane_context_path_parity(
+        "quad",
+        make_cut_context_quad_mesh(),
+        make_axis_plane(0, 0.5, 321, "path-parity-quad-plane"));
+    expect_linearized_plane_context_path_parity(
+        "tetra",
+        make_cut_context_tetra_mesh(),
+        make_axis_plane(0, 0.25, 322, "path-parity-tetra-plane"));
+    expect_linearized_plane_context_path_parity(
+        "hex",
+        make_cut_context_hex_mesh(),
+        make_axis_plane(0, 0.5, 323, "path-parity-hex-plane"));
+    expect_linearized_plane_context_path_parity(
+        "wedge",
+        make_cut_context_wedge_mesh(),
+        make_axis_plane(2, 0.5, 324, "path-parity-wedge-plane"));
+    expect_linearized_plane_context_path_parity(
+        "pyramid",
+        make_cut_context_pyramid_mesh(),
+        make_axis_plane(2, 0.4, 325, "path-parity-pyramid-plane"));
+    expect_linearized_plane_context_path_parity(
+        "polygon",
+        make_cut_context_polygon_mesh(),
+        make_axis_plane(0, 0.5, 326, "path-parity-polygon-plane"));
+    expect_linearized_plane_context_path_parity(
+        "polyhedron",
+        make_cut_context_polyhedron_cube_mesh(),
+        make_axis_plane(0, 0.5, 327, "path-parity-polyhedron-plane"));
+}
+
+TEST(CutIntegrationInfrastructure, LinearizedCutDataIsIdenticalAcrossAllExecutionPaths)
+{
+    const std::array<svmp::CellFamily, 9> families{{
+        svmp::CellFamily::Line,
+        svmp::CellFamily::Triangle,
+        svmp::CellFamily::Quad,
+        svmp::CellFamily::Tetra,
+        svmp::CellFamily::Hex,
+        svmp::CellFamily::Wedge,
+        svmp::CellFamily::Pyramid,
+        svmp::CellFamily::Polygon,
+        svmp::CellFamily::Polyhedron}};
+    const std::array<svmp::search::EmbeddedGeometryKind, 4> kinds{{
+        svmp::search::EmbeddedGeometryKind::Sphere,
+        svmp::search::EmbeddedGeometryKind::TriangulatedSurface,
+        svmp::search::EmbeddedGeometryKind::LevelSetField,
+        svmp::search::EmbeddedGeometryKind::BooleanComposite}};
+
+    std::uint64_t epoch = 500;
+    for (const auto family : families) {
+        for (const auto kind : kinds) {
+            const std::string name =
+                "linearized-nonplane-path-parity-" +
+                std::to_string(static_cast<int>(family)) + "-" +
+                std::to_string(static_cast<int>(kind));
+            expect_linearized_context_path_parity(
+                name.c_str(),
+                make_first_order_cut_context_mesh(family),
+                make_first_order_linearized_context_embedded(kind, epoch++, name));
+        }
+    }
+}
+
+TEST(CutIntegrationInfrastructure, ProductionCutScalarOperatorsMatchAnalyticHalfCubePlaneCut)
+{
+    auto mesh = make_cut_context_hex_mesh();
+    svmp::search::CutClassificationOptions options;
+    options.classify_faces = false;
+    options.classify_edges = false;
+    const auto embedded =
+        make_axis_plane(0, 0.5, 9050, "production-operator-half-cube-plane");
+    const auto map = svmp::search::classify_embedded_geometry(mesh, embedded, options);
+    ASSERT_EQ(map.cells.size(), 1u);
+    ASSERT_EQ(map.cells[0].classification, svmp::search::CutClassification::Cut);
+
+    const auto topology = svmp::search::reconstruct_cut_topology(mesh, map);
+    ASSERT_TRUE(topology.supported) << join_cut_validity_messages(topology.diagnostics);
+    const auto validity = svmp::search::diagnose_cut_topology_validity(topology);
+    ASSERT_TRUE(validity.ok) << join_cut_validity_messages(validity.messages);
+
+    CutIntegrationContext context;
+    context.importCutTopology(topology, CutGeometryFrame::Reference, 9051);
+
+    const auto constant = context.evaluateScalarCutOperator(
+        CutIntegrationAssemblyPath::Standard,
+        constant_cut_operator_integrand,
+        constant_cut_operator_integrand);
+    EXPECT_EQ(constant.volume_rule_count, 2u);
+    EXPECT_EQ(constant.interface_rule_count, 1u);
+    EXPECT_NEAR(constant.parent_measure, 1.0, 1.0e-12);
+    EXPECT_NEAR(constant.negative_volume_integral, 0.5, 1.0e-12);
+    EXPECT_NEAR(constant.positive_volume_integral, 0.5, 1.0e-12);
+    EXPECT_NEAR(constant.volumeIntegral(), 1.0, 1.0e-12);
+    EXPECT_NEAR(constant.interface_integral, 1.0, 1.0e-12);
+    EXPECT_NEAR(constant.interface_measure, 1.0, 1.0e-12);
+
+    const auto x_moment = context.evaluateScalarCutOperator(
+        CutIntegrationAssemblyPath::Standard,
+        x_coordinate_cut_operator_integrand,
+        x_coordinate_cut_operator_integrand);
+    EXPECT_GT(x_moment.negative_volume_integral, 0.0);
+    EXPECT_GT(x_moment.positive_volume_integral, x_moment.negative_volume_integral);
+    EXPECT_NEAR(x_moment.volumeIntegral(), 0.5, 1.0e-12);
+    EXPECT_NEAR(x_moment.interface_integral, 0.5, 1.0e-12);
+
+    for (const auto path : all_cut_execution_paths()) {
+        const auto actual_constant = context.evaluateScalarCutOperator(
+            path, constant_cut_operator_integrand, constant_cut_operator_integrand);
+        expect_equivalent_operator_evaluation(constant, actual_constant, 1.0e-12);
+
+        const auto actual_x_moment = context.evaluateScalarCutOperator(
+            path, x_coordinate_cut_operator_integrand, x_coordinate_cut_operator_integrand);
+        expect_equivalent_operator_evaluation(x_moment, actual_x_moment, 1.0e-12);
+    }
+}
+
+TEST(CutIntegrationInfrastructure, ProductionCutScalarOperatorsConsumeImportedTopologyAcrossAllExecutionPaths)
+{
+    const std::array<svmp::CellFamily, 9> families{{
+        svmp::CellFamily::Line,
+        svmp::CellFamily::Triangle,
+        svmp::CellFamily::Quad,
+        svmp::CellFamily::Tetra,
+        svmp::CellFamily::Hex,
+        svmp::CellFamily::Wedge,
+        svmp::CellFamily::Pyramid,
+        svmp::CellFamily::Polygon,
+        svmp::CellFamily::Polyhedron}};
+    const std::array<svmp::search::EmbeddedGeometryKind, 4> kinds{{
+        svmp::search::EmbeddedGeometryKind::Sphere,
+        svmp::search::EmbeddedGeometryKind::TriangulatedSurface,
+        svmp::search::EmbeddedGeometryKind::LevelSetField,
+        svmp::search::EmbeddedGeometryKind::BooleanComposite}};
+
+    std::uint64_t epoch = 9000;
+    for (const auto family : families) {
+        const std::string plane_name =
+            "production-operator-plane-" +
+            std::to_string(static_cast<int>(family));
+        expect_production_cut_operator_path_parity(
+            plane_name.c_str(),
+            make_first_order_cut_context_mesh(family),
+            make_axis_plane(family == svmp::CellFamily::Wedge ||
+                                family == svmp::CellFamily::Pyramid
+                                ? 2
+                                : 0,
+                            family == svmp::CellFamily::Line ? 0.4 : 0.5,
+                            epoch++,
+                            plane_name),
+            1.0e-10);
+
+        for (const auto kind : kinds) {
+            const std::string name =
+                "production-operator-nonplane-" +
+                std::to_string(static_cast<int>(family)) + "-" +
+                std::to_string(static_cast<int>(kind));
+            expect_production_cut_operator_path_parity(
+                name.c_str(),
+                make_first_order_cut_context_mesh(family),
+                make_first_order_linearized_context_embedded(kind, epoch++, name),
+                1.0e-8);
+        }
+    }
+}
+
+TEST(CutIntegrationInfrastructure, LinearizedNonPlaneCutSensitivityMetadataIsVisibleAcrossAllExecutionPaths)
+{
+    const std::array<svmp::CellFamily, 9> families{{
+        svmp::CellFamily::Line,
+        svmp::CellFamily::Triangle,
+        svmp::CellFamily::Quad,
+        svmp::CellFamily::Tetra,
+        svmp::CellFamily::Hex,
+        svmp::CellFamily::Wedge,
+        svmp::CellFamily::Pyramid,
+        svmp::CellFamily::Polygon,
+        svmp::CellFamily::Polyhedron}};
+    const std::array<svmp::search::EmbeddedGeometryKind, 4> kinds{{
+        svmp::search::EmbeddedGeometryKind::Sphere,
+        svmp::search::EmbeddedGeometryKind::TriangulatedSurface,
+        svmp::search::EmbeddedGeometryKind::LevelSetField,
+        svmp::search::EmbeddedGeometryKind::BooleanComposite}};
+
+    std::uint64_t epoch = 640;
+    for (const auto family : families) {
+        for (const auto kind : kinds) {
+            const std::string name =
+                "linearized-nonplane-sensitivity-" +
+                std::to_string(static_cast<int>(family)) + "-" +
+                std::to_string(static_cast<int>(kind));
+            const auto embedded =
+                make_first_order_linearized_context_embedded(kind, epoch++, name);
+            const auto quadrature_policy_key = 990u + epoch;
+            expect_linearized_sensitivity_path_visibility(
+                name.c_str(),
+                make_first_order_cut_context_mesh(family),
+                embedded,
+                quadrature_policy_key);
+        }
+    }
+}
+
+TEST(CutIntegrationInfrastructure, SupportMatrixQualificationHarnessCoversFEExecutionPaths)
+{
+    const auto records = svmp::search::qualify_cut_support_matrix();
+    ASSERT_FALSE(records.empty());
+
+    std::set<std::string> observed_paths;
+    for (const auto& record : records) {
+        if (record.entry.status == svmp::search::CutSupportStatus::Unsupported) {
+            continue;
+        }
+        EXPECT_TRUE(record.requires_fe_execution_evidence);
+        EXPECT_TRUE(record.fe_execution_evidence) << record.entry.fe_execution_path;
+        observed_paths.insert(record.entry.fe_execution_path);
+    }
+
+    const std::set<std::string> expected_paths{
+        "standard-assembly",
+        "matrix-free",
+        "forms-interpreter",
+        "ad",
+        "symbolic-tangent",
+        "jit"};
+    EXPECT_EQ(observed_paths, expected_paths);
 }
 #endif

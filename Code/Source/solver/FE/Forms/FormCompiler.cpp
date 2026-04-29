@@ -270,6 +270,7 @@ bool isGeometrySensitivityTerminal(FormExprType type) noexcept
         case FormExprType::CurrentNormal:
         case FormExprType::CurrentMeasure:
         case FormExprType::SurfaceJacobian:
+        case FormExprType::MeshVelocity:
         case FormExprType::Pullback:
         case FormExprType::Pushforward:
             return true;

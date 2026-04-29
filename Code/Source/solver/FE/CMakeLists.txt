@@ -565,6 +565,7 @@ set(FE_CONSTRAINTS_SOURCES
 set(FE_ANALYSIS_HEADERS
     Analysis/ProblemAnalysisTypes.h
     Analysis/AnalysisSummaryTypes.h
+    Analysis/AnalysisSummaryMatching.h
     Analysis/ProblemAnalysisContext.h
     Analysis/ProblemAnalyzer.h
     Analysis/FormulationRecord.h
@@ -640,6 +641,7 @@ set(FE_ASSEMBLY_HEADERS
     Assembly/AssemblyKernel.h
     Assembly/AssemblyContext.h
     Assembly/ContactPairContext.h
+    Assembly/CutDomainAssembler.h
     Assembly/CutIntegrationContext.h
     Assembly/InterfacePairContext.h
     Assembly/GeometricNonlinearityHooks.h
@@ -803,6 +805,8 @@ set(FE_AUXILIARY_SOURCES
 
 # Systems sources (requires FE/Assembly)
 set(FE_SYSTEMS_HEADERS
+    Systems/ALEBinding.h
+    Systems/MeshDisplacementBinding.h
     Systems/ContactOperatorInvalidation.h
     Systems/CutIntegrationInvalidation.h
     Systems/ContactPenaltyKernel.h
@@ -838,6 +842,8 @@ set(FE_SYSTEMS_HEADERS
 )
 
 set(FE_SYSTEMS_SOURCES
+    Systems/ALEBinding.cpp
+    Systems/MeshDisplacementBinding.cpp
     Systems/ContactOperatorInvalidation.cpp
     Systems/CutIntegrationInvalidation.cpp
     Systems/ContactPenaltyKernel.cpp
@@ -2152,6 +2158,7 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Analysis/test_Phase5SparseMatrixSummaryScanner.cpp
         Tests/Unit/Analysis/test_Phase6ExtendedAnalyzers.cpp
         Tests/Unit/Analysis/test_Phase7MathematicalIntegration.cpp
+        Tests/Unit/Analysis/test_AnalysisEvidenceContracts.cpp
         Tests/Unit/Analysis/test_main.cpp
     )
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Analysis/test_main.cpp)

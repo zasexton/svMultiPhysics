@@ -7,11 +7,46 @@
 
 #include "Analysis/ContributionDescriptor.h"
 
+#include <sstream>
 #include <utility>
 
 namespace svmp {
 namespace FE {
 namespace analysis {
+
+namespace {
+
+std::string makeContributionId(const std::string& op_tag,
+                               const std::string& origin)
+{
+    if (origin.empty()) {
+        return op_tag;
+    }
+    if (op_tag.empty()) {
+        return origin;
+    }
+    return origin + ":" + op_tag;
+}
+
+void appendVariableId(std::ostringstream& os, const VariableKey& variable)
+{
+    os << static_cast<int>(variable.kind) << ':'
+       << variable.field_id << ':'
+       << variable.component << ':'
+       << variable.name;
+}
+
+void appendVariables(std::ostringstream& os,
+                     const std::vector<VariableKey>& variables)
+{
+    for (const auto& variable : variables) {
+        os << '[';
+        appendVariableId(os, variable);
+        os << ']';
+    }
+}
+
+} // namespace
 
 // ============================================================================
 // String conversion
@@ -62,6 +97,7 @@ ContributionDescriptor ContributionDescriptor::diagonalSymmetric(
              | OperatorTraitFlags::HasSecondOrder;
     d.test_variables = {field};
     d.trial_variables = {field};
+    d.ensureStableContributionId();
     return d;
 }
 
@@ -74,6 +110,7 @@ ContributionDescriptor ContributionDescriptor::constraintBlock(
     d.traits = OperatorTraitFlags::None;
     d.test_variables = {test};
     d.trial_variables = {trial};
+    d.ensureStableContributionId();
     return d;
 }
 
@@ -86,6 +123,7 @@ ContributionDescriptor ContributionDescriptor::stabilization(
     d.traits = OperatorTraitFlags::HasSecondOrder;
     d.test_variables = {field};
     d.trial_variables = {field};
+    d.ensureStableContributionId();
     return d;
 }
 
@@ -100,6 +138,7 @@ ContributionDescriptor ContributionDescriptor::globalCoupling(
     d.traits = OperatorTraitFlags::None;
     d.test_variables = std::move(test);
     d.trial_variables = std::move(trial);
+    d.ensureStableContributionId();
     return d;
 }
 
@@ -196,6 +235,7 @@ ContributionDescriptor ContributionDescriptor::massLike(
     d.trial_variables = {field};
     d.temporal = TemporalDescriptor{1, TemporalContributionKind::MassLike};
     d.balance = BalanceDescriptor{"", BalanceRole::Accumulation, 1, false};
+    d.ensureStableContributionId();
     return d;
 }
 
@@ -210,6 +250,7 @@ ContributionDescriptor ContributionDescriptor::exchangeCoupling(
     d.test_variables = {test};
     d.trial_variables = {trial};
     d.balance = BalanceDescriptor{std::move(balance_group), BalanceRole::ExchangeLike, 1, false};
+    d.ensureStableContributionId();
     return d;
 }
 
@@ -229,6 +270,7 @@ ContributionDescriptor ContributionDescriptor::constraintPairDesc(
     pd.kind = PairingKind::ConstraintPair;
     pd.pairing_group = std::move(pairing_group);
     d.pairings.push_back(std::move(pd));
+    d.ensureStableContributionId();
     return d;
 }
 
@@ -242,7 +284,39 @@ ContributionDescriptor ContributionDescriptor::transportLike(
     d.test_variables = {field};
     d.trial_variables = {field};
     d.transport_character = TransportCharacter::DirectionalFirstOrder;
+    d.ensureStableContributionId();
     return d;
+}
+
+std::string ContributionDescriptor::stableContributionId(
+    const ContributionDescriptor& desc)
+{
+    const auto base = makeContributionId(desc.operator_tag, desc.origin);
+    std::ostringstream os;
+    os << (base.empty() ? std::string("contribution") : base)
+       << "|domain=" << static_cast<int>(desc.domain)
+       << "|role=" << static_cast<int>(desc.role)
+       << "|boundary=" << desc.boundary_marker
+       << "|interface=" << desc.interface_marker
+       << "|scope=" << static_cast<int>(desc.interface_scope)
+       << "|test=";
+    appendVariables(os, desc.test_variables);
+    os << "|trial=";
+    appendVariables(os, desc.trial_variables);
+    os << "|related=";
+    appendVariables(os, desc.related_variables);
+    if (desc.source_block_key) {
+        os << "|block=" << desc.source_block_key->first
+           << ',' << desc.source_block_key->second;
+    }
+    return os.str();
+}
+
+void ContributionDescriptor::ensureStableContributionId()
+{
+    if (contribution_id.empty()) {
+        contribution_id = stableContributionId(*this);
+    }
 }
 
 } // namespace analysis

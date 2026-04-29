@@ -6,11 +6,11 @@
  */
 
 #include "Analysis/TransportCharacterAnalyzer.h"
+#include "Analysis/AnalysisSummaryMatching.h"
 #include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
 
 #include <algorithm>
-#include <cmath>
 #include <unordered_map>
 #include <vector>
 
@@ -20,37 +20,17 @@ namespace analysis {
 
 namespace {
 
-void appendUnique(std::vector<VariableKey>& values, const VariableKey& value)
+void appendUniqueString(std::vector<std::string>& values,
+                        const std::string& value)
 {
+    if (value.empty()) return;
     if (std::find(values.begin(), values.end(), value) == values.end()) {
         values.push_back(value);
     }
 }
 
-std::vector<VariableKey> blockVariables(const OperatorBlockId& block)
-{
-    std::vector<VariableKey> variables;
-    for (const auto& v : block.test_variables) {
-        appendUnique(variables, v);
-    }
-    for (const auto& v : block.trial_variables) {
-        appendUnique(variables, v);
-    }
-    return variables;
-}
-
-bool intersects(const std::vector<VariableKey>& a,
-                const std::vector<VariableKey>& b)
-{
-    for (const auto& av : a) {
-        if (std::find(b.begin(), b.end(), av) != b.end()) {
-            return true;
-        }
-    }
-    return false;
-}
-
 void enrichTransportClaimFromSummaries(const AnalysisSummarySet* summaries,
+                                       const OperatorBlockId& claim_block,
                                        PropertyClaim& claim)
 {
     if (!summaries) return;
@@ -58,6 +38,10 @@ void enrichTransportClaimFromSummaries(const AnalysisSummarySet* summaries,
     bool added_numeric_evidence = false;
 
     for (const auto& scale : summaries->parameter_scales) {
+        if (!parameterScaleMatches(scale, claim_block,
+                                   ParameterScaleRole::PecletLike)) {
+            continue;
+        }
         if (!claim.peclet_number ||
             scale.max_scale_value > *claim.peclet_number) {
             claim.peclet_number = scale.max_scale_value;
@@ -76,6 +60,12 @@ void enrichTransportClaimFromSummaries(const AnalysisSummarySet* summaries,
     }
 
     for (const auto& temporal : summaries->temporal_stability) {
+        if (!temporalSummaryMatches(temporal, claim_block)) {
+            continue;
+        }
+        if (!temporal.cfl_estimate_present) {
+            continue;
+        }
         if (!claim.cfl_number || temporal.cfl_estimate > *claim.cfl_number) {
             claim.cfl_number = temporal.cfl_estimate;
         }
@@ -90,16 +80,13 @@ void enrichTransportClaimFromSummaries(const AnalysisSummarySet* summaries,
     }
 
     for (const auto& matrix : summaries->discrete_matrices) {
-        const auto matrix_vars = blockVariables(matrix.block);
-        if (!matrix_vars.empty() &&
-            !claim.variables.empty() &&
-            !intersects(matrix_vars, claim.variables)) {
+        if (!blockEvidenceMatches(matrix.block, claim_block)) {
             continue;
         }
-        const Real denom = matrix.max_abs_entry > Real{}
-            ? matrix.max_abs_entry
-            : Real{1};
-        const Real indicator = std::abs(matrix.max_symmetry_error) / denom;
+        if (!matrix.nonnormality_indicator) {
+            continue;
+        }
+        const Real indicator = *matrix.nonnormality_indicator;
         if (!claim.nonnormality_indicator ||
             indicator > *claim.nonnormality_indicator) {
             claim.nonnormality_indicator = indicator;
@@ -119,8 +106,8 @@ void enrichTransportClaimFromSummaries(const AnalysisSummarySet* summaries,
 
     if (added_numeric_evidence) {
         claim.addEvidence("TransportCharacterAnalyzer",
-            "Numeric summary enrichment: Peclet-like dimensionless scale, CFL, "
-            "and nonnormality indicators were consumed without physics-module names",
+            "Scoped numeric summary enrichment: Peclet-like dimensionless scale, "
+            "CFL, and explicit nonnormality indicators matched this transport block",
             AnalysisConfidence::Medium);
     }
 }
@@ -150,6 +137,7 @@ void TransportCharacterAnalyzer::run(const ProblemAnalysisContext& context,
         TransportCharacter explicit_character{TransportCharacter::None};
         bool has_first_order_trait{false};
         bool has_second_order_trait{false};
+        std::vector<std::string> operator_tags;
     };
 
     std::unordered_map<VariableKey, FieldTransportInfo, VariableKeyHash> field_info;
@@ -161,6 +149,7 @@ void TransportCharacterAnalyzer::run(const ProblemAnalysisContext& context,
         for (const auto& tv : contrib.test_variables) {
             auto& info = field_info[tv];
             info.key = tv;
+            appendUniqueString(info.operator_tags, contrib.operator_tag);
 
             // Check explicit transport_character
             if (contrib.transport_character.has_value()) {
@@ -294,7 +283,15 @@ void TransportCharacterAnalyzer::run(const ProblemAnalysisContext& context,
             continue;
         }
 
-        enrichTransportClaimFromSummaries(summaries, claim);
+        OperatorBlockId claim_block;
+        claim_block.test_variables = claim.variables;
+        claim_block.trial_variables = claim.variables;
+        claim_block.domain = DomainKind::Cell;
+        if (info.operator_tags.size() == 1u) {
+            claim_block.operator_tag = info.operator_tags.front();
+            claim.tested_block_id = info.operator_tags.front();
+        }
+        enrichTransportClaimFromSummaries(summaries, claim_block, claim);
         report.claims.push_back(std::move(claim));
     }
 }

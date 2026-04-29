@@ -713,6 +713,8 @@ void apply_fluid_moving_domain_params(
     const svmp::Physics::ParameterMap& params,
     svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
 {
+  namespace ns = svmp::Physics::formulations::navier_stokes;
+
   constexpr std::array<std::string_view, 5> kAleKeys = {
       "ALE",
       "Enable_ALE",
@@ -747,6 +749,52 @@ void apply_fluid_moving_domain_params(
       options.mesh_velocity_field_name = *value;
     }
   }
+
+  constexpr std::array<std::string_view, 4> kMeshVelocitySourceKeys = {
+      "Mesh_velocity_source",
+      "MeshVelocitySource",
+      "ALE_mesh_velocity_source",
+      "ALEMeshVelocitySource",
+  };
+  for (const auto key : kMeshVelocitySourceKeys) {
+    if (const auto value = get_defined_string(params, key)) {
+      const auto source = lower_copy(trim_copy(*value));
+      if (source == "prescribed" || source == "prescribed_data" ||
+          source == "data" || source == "mesh_motion_data") {
+        options.mesh_velocity_source = ns::ALEMeshVelocitySource::PrescribedData;
+      } else if (source == "coupled" || source == "coupled_displacement" ||
+                 source == "derived" || source == "derived_from_displacement" ||
+                 source == "monolithic") {
+        options.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
+      } else {
+        throw std::runtime_error(
+            "[svMultiPhysics::Physics] Mesh_velocity_source must be one of "
+            "'prescribed_data' or 'coupled_displacement'.");
+      }
+    }
+  }
+
+  constexpr std::array<std::string_view, 3> kMeshDisplacementFieldKeys = {
+      "Mesh_displacement_field",
+      "MeshDisplacementField",
+      "Mesh_motion_displacement_field",
+  };
+  for (const auto key : kMeshDisplacementFieldKeys) {
+    if (const auto value = get_defined_string(params, key)) {
+      options.mesh_displacement_field_name = *value;
+    }
+  }
+
+  constexpr std::array<std::string_view, 3> kAutoRegisterMeshDisplacementKeys = {
+      "Auto_register_mesh_displacement_field",
+      "AutoRegisterMeshDisplacementField",
+      "ALE_auto_register_mesh_displacement_field",
+  };
+  for (const auto key : kAutoRegisterMeshDisplacementKeys) {
+    if (const auto value = get_defined_bool(params, key)) {
+      options.auto_register_mesh_displacement_field = *value;
+    }
+  }
 }
 
 void apply_fluid_moving_domain_options(
@@ -759,6 +807,12 @@ void apply_fluid_moving_domain_options(
   if (trim_copy(options.mesh_velocity_field_name).empty()) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Mesh_velocity_field must be non-empty when configuring Navier-Stokes ALE.");
+  }
+  if (options.mesh_velocity_source ==
+          svmp::Physics::formulations::navier_stokes::ALEMeshVelocitySource::CoupledDisplacement &&
+      trim_copy(options.mesh_displacement_field_name).empty()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Mesh_displacement_field must be non-empty when configuring coupled ALE.");
   }
 }
 

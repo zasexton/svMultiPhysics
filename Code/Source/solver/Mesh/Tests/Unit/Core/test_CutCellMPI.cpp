@@ -187,6 +187,274 @@ static void assert_positive_ghost_side_region_payloads(const search::CutDistribu
   ASSERT_MPI(global_ghost_payloads > 0);
 }
 
+static search::CutTopologyRecord make_distributed_curved_contract_topology(
+    const Mesh& mesh,
+    const search::CutClassificationMap& map,
+    const search::EmbeddedGeometryDescriptor& embedded,
+    const std::string& construction_policy)
+{
+  auto topology = search::reconstruct_cut_topology(mesh.local_mesh(), map);
+  topology.linearized_cut_mode = false;
+  topology.curved_patches.clear();
+  topology.sensitivity_records.clear();
+  std::uint64_t revision = topology.topology_revision ^ 1469598103934665603ull;
+
+  const auto make_sensitivity =
+      [&](std::uint64_t stable_id,
+          std::uint64_t source_stable_id,
+          index_t parent_cell,
+          gid_t parent_gid,
+          CellFamily family,
+          std::string target_kind) {
+        search::CutQuadratureGeometrySensitivityRecord sensitivity;
+        sensitivity.stable_id = stable_id;
+        sensitivity.source_stable_id = source_stable_id;
+        sensitivity.parent_cell = parent_cell;
+        sensitivity.parent_cell_gid = parent_gid;
+        sensitivity.parent_family = family;
+        sensitivity.geometry_order = 3;
+        sensitivity.embedded_kind = embedded.kind;
+        sensitivity.configuration = Configuration::Reference;
+        sensitivity.target_kind = std::move(target_kind);
+        sensitivity.construction_policy = construction_policy;
+        sensitivity.parent_geometry_dofs = mesh.local_mesh().cell_geometry_dofs(parent_cell);
+        search::CutQuadratureGeometrySensitivitySample sample;
+        sample.parent_parametric_coordinate = {{0.0, -0.25, 0.0}};
+        sample.shape_values.assign(
+            sensitivity.parent_geometry_dofs.size(),
+            sensitivity.parent_geometry_dofs.empty()
+                ? real_t{0.0}
+                : real_t{1.0} / static_cast<real_t>(sensitivity.parent_geometry_dofs.size()));
+        sample.shape_gradients.assign(sensitivity.parent_geometry_dofs.size(),
+                                      std::array<real_t, 3>{{0.0, 0.0, 0.0}});
+        sensitivity.samples.push_back(std::move(sample));
+        sensitivity.ad_compatible = true;
+        sensitivity.location_sensitivity_available = true;
+        sensitivity.jacobian_sensitivity_available = true;
+        sensitivity.measure_sensitivity_available = true;
+        sensitivity.normal_sensitivity_available = true;
+        sensitivity.quadrature_weight_sensitivity_available = true;
+        return sensitivity;
+      };
+
+  for (const auto& polygon : topology.interface_polygons) {
+    search::CutCurvedPatchRecord patch;
+    patch.stable_id = polygon.stable_id;
+    patch.parent_cell = polygon.parent_cell;
+    patch.parent_cell_gid = polygon.parent_cell_gid;
+    patch.parent_family = CellFamily::Hex;
+    patch.geometry_order = 3;
+    patch.embedded_kind = embedded.kind;
+    patch.configuration = Configuration::Reference;
+    patch.composition_operation = embedded.boolean_operation;
+    patch.ordered_vertices = polygon.ordered_vertices;
+    for (std::size_t i = 0; i < polygon.ordered_vertices.size(); ++i) {
+      patch.parent_parametric_coordinates.push_back(
+          {{static_cast<real_t>(i) * real_t{0.1}, -0.5, 0.0}});
+      patch.physical_points.push_back({{0.25 + static_cast<real_t>(i) * real_t{0.1},
+                                        0.25,
+                                        0.25}});
+      if (embedded.kind == search::EmbeddedGeometryKind::BooleanComposite &&
+          !embedded.children.empty()) {
+        patch.active_child_ordinals.push_back(0u);
+        patch.active_child_provenance.push_back(embedded.children.front().provenance);
+      }
+    }
+    if (embedded.kind == search::EmbeddedGeometryKind::BooleanComposite &&
+        embedded.children.size() > 1u) {
+      patch.predicate_fallback_used = true;
+      patch.predicate_fallback_tolerance_resolved = true;
+      patch.predicate_fallback_policy = "tolerance-resolved-active-child";
+      patch.predicate_fallback_reason =
+          "Boolean active-child distances are tied within the cut predicate tolerance";
+      for (std::size_t i = 0; i < embedded.children.size(); ++i) {
+        patch.predicate_fallback_child_ordinals.push_back(i);
+      }
+    }
+    patch.quadrature_points.push_back({{0.50, 0.40, 0.25}});
+    patch.quadrature_normals.push_back({{1.0, 0.0, 0.0}});
+    patch.quadrature_weights.push_back(0.125);
+    patch.quadrature_parent_parametric_coordinates.push_back({{0.0, -0.25, 0.0}});
+    patch.quadrature_measure = 0.125;
+    patch.parametric_coordinates_valid = true;
+    patch.exact_topology_available = true;
+    patch.linearized_surrogate = false;
+    patch.isoparametric_quadrature_available = true;
+    patch.construction_policy = construction_policy;
+    patch.provenance = polygon.provenance;
+    topology.curved_patches.push_back(patch);
+
+    topology.sensitivity_records.push_back(
+        make_sensitivity(patch.stable_id + 20u,
+                         patch.stable_id,
+                         patch.parent_cell,
+                         patch.parent_cell_gid,
+                         CellFamily::Hex,
+                         "interface-quadrature"));
+
+    revision ^= patch.stable_id;
+    revision *= 1099511628211ull;
+  }
+
+  for (auto& region : topology.side_regions) {
+    if (region.integration_subcells.empty()) {
+      continue;
+    }
+    region.curved_isoparametric_topology = true;
+    for (auto& subcell : region.integration_subcells) {
+      subcell.curved_isoparametric = true;
+      subcell.measure_from_isoparametric_quadrature = true;
+      subcell.construction_policy = construction_policy;
+      if (subcell.parent_parametric_vertices.empty()) {
+        subcell.parent_parametric_vertices = {
+            {{-0.5, -0.5, 0.0}},
+            {{ 0.5, -0.5, 0.0}},
+            {{ 0.0,  0.5, 0.0}}};
+      }
+    }
+    topology.sensitivity_records.push_back(
+        make_sensitivity(region.stable_id + 30u,
+                         region.stable_id,
+                         region.parent_cell,
+                         region.parent_cell_gid,
+                         region.integration_family,
+                         region.side == search::CutTopologySide::Negative
+                             ? "negative-volume-subcell-quadrature"
+                             : "positive-volume-subcell-quadrature"));
+    revision ^= region.stable_id;
+    revision *= 1099511628211ull;
+  }
+
+  topology.topology_revision = revision;
+  return topology;
+}
+
+static void assert_distributed_curved_metadata(Mesh& mesh,
+                                               const search::EmbeddedGeometryDescriptor& embedded,
+                                               const std::string& expected_policy,
+                                               MPI_Comm comm)
+{
+  search::CutClassificationOptions classification_options;
+  classification_options.classify_faces = false;
+  classification_options.classify_edges = false;
+  const auto map = search::classify_embedded_geometry(mesh, embedded, classification_options);
+  const auto topology = make_distributed_curved_contract_topology(mesh,
+                                                                 map,
+                                                                 embedded,
+                                                                 expected_policy);
+  ASSERT_MPI(topology.supported);
+  const int local_curved_patches = static_cast<int>(topology.curved_patches.size());
+  const int local_sensitivity_records = static_cast<int>(topology.sensitivity_records.size());
+  int global_curved_patches = 0;
+  int global_sensitivity_records = 0;
+  MPI_Allreduce(&local_curved_patches, &global_curved_patches, 1, MPI_INT, MPI_SUM, comm);
+  MPI_Allreduce(&local_sensitivity_records,
+                &global_sensitivity_records,
+                1,
+                MPI_INT,
+                MPI_SUM,
+                comm);
+  ASSERT_MPI(global_curved_patches > 0);
+  ASSERT_MPI(global_sensitivity_records > 0);
+
+  const auto state = search::build_distributed_cut_state(mesh, map, topology);
+  const auto diag = search::diagnose_distributed_cut_state(state);
+  if (!diag.ok) {
+    for (const auto& message : diag.messages) {
+      std::cerr << "Curved distributed cut-state diagnostic: " << message << "\n";
+    }
+  }
+  ASSERT_MPI(diag.ok);
+  ASSERT_MPI(state.valid_for(mesh, map, topology));
+  ASSERT_MPI(state.neighbor_sparse_exchange);
+  assert_sparse_neighbor_contract(mesh, state);
+
+  int local_curved_entities = 0;
+  int local_curved_with_sensitivity = 0;
+  int local_curved_ghost_entities = 0;
+  for (const auto& entity : state.exchanged_packet.entities) {
+    if (!entity.curved_isoparametric) {
+      continue;
+    }
+    ASSERT_MPI(entity.geometry_order == 3);
+    ASSERT_MPI(entity.embedded_kind == embedded.kind);
+    ASSERT_MPI(entity.construction_policy.find(expected_policy) != std::string::npos);
+    ASSERT_MPI(!entity.linearized_surrogate);
+    ASSERT_MPI(entity.isoparametric_quadrature_available);
+    ASSERT_MPI(!entity.quadrature_parent_parametric_coordinates.empty());
+    ASSERT_MPI(entity.quadrature_parent_parametric_coordinates.size() ==
+               entity.quadrature_weights.size());
+    if (entity.kind == search::CutTopologyEntityKind::InterfacePolygon) {
+      ASSERT_MPI(entity.parametric_coordinates_valid);
+      ASSERT_MPI(entity.exact_topology_available);
+      ASSERT_MPI(!entity.parent_parametric_coordinates.empty());
+      if (embedded.kind == search::EmbeddedGeometryKind::BooleanComposite) {
+        ASSERT_MPI(entity.composition_operation == embedded.boolean_operation);
+        ASSERT_MPI(!entity.active_child_ordinals.empty());
+        ASSERT_MPI(!entity.active_child_provenance_ids.empty());
+        ASSERT_MPI(entity.predicate_fallback_used);
+        ASSERT_MPI(entity.predicate_fallback_tolerance_resolved);
+        ASSERT_MPI(entity.predicate_fallback_policy == "tolerance-resolved-active-child");
+        ASSERT_MPI(!entity.predicate_fallback_reason.empty());
+        ASSERT_MPI(entity.predicate_fallback_child_ordinals.size() == embedded.children.size());
+      } else {
+        ASSERT_MPI(!entity.predicate_fallback_used);
+      }
+    }
+    ++local_curved_entities;
+    if (entity.geometry_sensitivity_ad_compatible &&
+        entity.geometry_sensitivity_dof_count > 0u &&
+        entity.geometry_sensitivity_sample_count > 0u &&
+        entity.location_sensitivity_available &&
+        entity.jacobian_sensitivity_available &&
+        entity.measure_sensitivity_available &&
+        entity.normal_sensitivity_available &&
+        entity.quadrature_weight_sensitivity_available) {
+      ++local_curved_with_sensitivity;
+    }
+  }
+  for (const auto& entity : state.ghost_records) {
+    if (entity.curved_isoparametric) {
+      ASSERT_MPI(entity.owner_rank != mesh.rank());
+      ++local_curved_ghost_entities;
+    }
+  }
+
+  int global_curved_entities = 0;
+  int global_curved_with_sensitivity = 0;
+  int global_curved_ghost_entities = 0;
+  MPI_Allreduce(&local_curved_entities, &global_curved_entities, 1, MPI_INT, MPI_SUM, comm);
+  MPI_Allreduce(&local_curved_with_sensitivity,
+                &global_curved_with_sensitivity,
+                1,
+                MPI_INT,
+                MPI_SUM,
+                comm);
+  MPI_Allreduce(&local_curved_ghost_entities,
+                &global_curved_ghost_entities,
+                1,
+                MPI_INT,
+                MPI_SUM,
+                comm);
+  if (global_curved_ghost_entities == 0) {
+    std::cerr << "Rank " << mesh.rank()
+              << " curved entities=" << local_curved_entities
+              << " imported_records=" << state.imported_records.size()
+              << " ghost_records=" << state.ghost_records.size()
+              << " local_packet=" << state.local_packet.entities.size()
+              << " exchanged=" << state.exchanged_packet.entities.size()
+              << " neighbors=" << state.communication_neighbors.size()
+              << "\n";
+  }
+  ASSERT_MPI(global_curved_entities > 0);
+  ASSERT_MPI(global_curved_with_sensitivity == global_curved_entities);
+  ASSERT_MPI(global_curved_ghost_entities > 0);
+
+  const auto repeat_state = search::build_distributed_cut_state(mesh, map, topology);
+  ASSERT_MPI(repeat_state.exchanged_packet.revision_key == state.exchanged_packet.revision_key);
+  ASSERT_MPI(repeat_state.exchanged_packet.entities.size() == state.exchanged_packet.entities.size());
+}
+
 static void assert_cut_state_valid_for_partition_method(Mesh& mesh,
                                                         const std::string& partition_method,
                                                         MPI_Comm comm)
@@ -579,6 +847,73 @@ static void run_cut_cell_rebalance_mpi_test(MPI_Comm comm, int rank, int size)
   assert_positive_ghost_side_region_payloads(rebalanced_state, comm);
 }
 
+static void run_cut_cell_curved_metadata_mpi_test(MPI_Comm comm, int rank, int size)
+{
+  const int n_cells = size;
+  auto mesh = build_partitioned_hex_strip(size);
+
+  search::EmbeddedGeometryDescriptor plane;
+  plane.kind = search::EmbeddedGeometryKind::Plane;
+  plane.origin = {{1.0, 0.0, 0.0}};
+  plane.normal = {{1.0, 0.0, 0.0}};
+  plane.geometry_epoch = 261;
+  plane.provenance.persistent_id = "distributed-curved-plane";
+  plane.provenance.name = "distributed-curved-plane";
+  plane.provenance.provenance_epoch = 261;
+  assert_distributed_curved_metadata(mesh,
+                                     plane,
+                                     "true-curved-isoparametric-arrangement",
+                                     comm);
+
+  search::EmbeddedGeometryDescriptor sphere;
+  sphere.kind = search::EmbeddedGeometryKind::Sphere;
+  sphere.origin = {{1.0, 0.5, 0.5}};
+  sphere.radius = 0.75;
+  sphere.geometry_epoch = 262;
+  sphere.revisions.geometry_epoch = 262;
+  sphere.provenance.persistent_id = "distributed-curved-sphere";
+  sphere.provenance.name = "distributed-curved-sphere";
+  sphere.provenance.provenance_epoch = 262;
+  assert_distributed_curved_metadata(mesh,
+                                     sphere,
+                                     "true-curved-subdivision-arrangement",
+                                     comm);
+
+  search::EmbeddedGeometryDescriptor child_a = sphere;
+  child_a.geometry_epoch = 263;
+  child_a.revisions.geometry_epoch = 263;
+  child_a.provenance.persistent_id = "distributed-curved-boolean-child-a";
+  child_a.provenance.name = "distributed-curved-boolean-child-a";
+  child_a.provenance.provenance_epoch = 263;
+  search::EmbeddedGeometryDescriptor child_b = sphere;
+  child_b.geometry_epoch = 264;
+  child_b.revisions.geometry_epoch = 264;
+  child_b.provenance.persistent_id = "distributed-curved-boolean-child-b";
+  child_b.provenance.name = "distributed-curved-boolean-child-b";
+  child_b.provenance.provenance_epoch = 264;
+  search::EmbeddedGeometryDescriptor coincident_boolean;
+  coincident_boolean.kind = search::EmbeddedGeometryKind::BooleanComposite;
+  coincident_boolean.boolean_operation =
+      search::EmbeddedGeometryBooleanOperation::Intersection;
+  coincident_boolean.geometry_epoch = 265;
+  coincident_boolean.revisions.geometry_epoch = 265;
+  coincident_boolean.provenance.persistent_id =
+      "distributed-curved-coincident-boolean";
+  coincident_boolean.provenance.name =
+      "distributed-curved-coincident-boolean";
+  coincident_boolean.provenance.provenance_epoch = 265;
+  coincident_boolean.children = {child_a, child_b};
+  assert_distributed_curved_metadata(mesh,
+                                     coincident_boolean,
+                                     "true-curved-subdivision-arrangement",
+                                     comm);
+
+  if (rank == 0) {
+    std::cout << "CutCell distributed curved metadata qualified on "
+              << size << " ranks\n";
+  }
+}
+
 } // namespace svmp::test
 
 int main(int argc, char** argv)
@@ -592,6 +927,7 @@ int main(int argc, char** argv)
   if (size >= 2) {
     svmp::test::run_cut_cell_mpi_test(MPI_COMM_WORLD, rank, size);
     svmp::test::run_cut_cell_rebalance_mpi_test(MPI_COMM_WORLD, rank, size);
+    svmp::test::run_cut_cell_curved_metadata_mpi_test(MPI_COMM_WORLD, rank, size);
     svmp::test::run_cut_cell_partition_method_qualification(MPI_COMM_WORLD,
                                                             rank,
                                                             size,

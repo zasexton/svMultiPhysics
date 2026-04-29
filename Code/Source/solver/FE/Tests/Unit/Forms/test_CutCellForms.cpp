@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include "Assembly/AssemblyContext.h"
+#include "Assembly/CutDomainAssembler.h"
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
 #include "Core/AlignedAllocator.h"
@@ -44,16 +45,10 @@ using JITConstants = std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignm
                                             Real quadrature_weight_sensitivity)
 {
     const CutCellParameterSlots slots;
-    JITConstants constants(13u, Real(0.0));
-    constants[slots.volume_fraction] = rule.volume_fraction;
+    auto parameters = cutCellParametersForRule(
+        rule, slots, stabilization_scale, quadrature_weight_sensitivity);
+    JITConstants constants(parameters.begin(), parameters.end());
     constants[slots.side_indicator] = side_indicator;
-    if (!rule.points.empty()) {
-        constants[slots.embedded_normal[0]] = rule.points.front().normal[0];
-        constants[slots.embedded_normal[1]] = rule.points.front().normal[1];
-        constants[slots.embedded_normal[2]] = rule.points.front().normal[2];
-    }
-    constants[slots.stabilization_scale] = stabilization_scale;
-    constants[slots.quadrature_weight_sensitivity] = quadrature_weight_sensitivity;
     return constants;
 }
 
@@ -411,6 +406,184 @@ struct CutNewtonResult {
     return max_abs;
 }
 
+[[nodiscard]] CutQuadratureRule makeReferenceTetraCutRule(
+    CutIntegrationSide side,
+    std::vector<svmp::FE::geometry::CutQuadraturePoint> points,
+    Real parent_measure = Real(1.0) / Real(6.0))
+{
+    CutQuadratureRule rule;
+    rule.kind = CutQuadratureKind::Volume;
+    rule.side = side;
+    rule.parent_measure = parent_measure;
+    rule.measure = Real(0.0);
+    for (const auto& qp : points) {
+        rule.measure += qp.weight;
+    }
+    rule.volume_fraction = rule.measure / parent_measure;
+    rule.exact_for_constants = true;
+    rule.provenance.parent_entity = 0;
+    rule.provenance.cut_topology_revision = 101u + static_cast<std::uint64_t>(side);
+    rule.provenance.cut_topology_id =
+        side == CutIntegrationSide::Negative ? "negative-reference-tetra-cut"
+                                             : "positive-reference-tetra-cut";
+    rule.points = std::move(points);
+    return rule;
+}
+
+void populateP1ReferenceTetraCutContext(AssemblyContext& ctx,
+                                        const CutQuadratureRule& rule,
+                                        const svmp::FE::spaces::FunctionSpace& space,
+                                        RequiredData required,
+                                        std::span<const Real> constants,
+                                        std::span<const Real> solution)
+{
+    ctx.configure(/*cell_id=*/0, space, space, required);
+    ctx.reserve(/*max_dofs=*/static_cast<svmp::FE::LocalIndex>(space.dofs_per_element()),
+                static_cast<svmp::FE::LocalIndex>(rule.points.size()),
+                /*dim=*/3);
+
+    std::vector<AssemblyContext::Point3D> qpts;
+    std::vector<AssemblyContext::Vector3D> normals;
+    std::vector<AssemblyContext::Matrix3x3> jacobians;
+    std::vector<AssemblyContext::Matrix3x3> inverse_jacobians;
+    std::vector<Real> jacobian_dets;
+    std::vector<Real> weights;
+    std::vector<Real> basis_values;
+    std::vector<AssemblyContext::Vector3D> basis_gradients;
+
+    const AssemblyContext::Matrix3x3 identity{{{{1.0, 0.0, 0.0}},
+                                               {{0.0, 1.0, 0.0}},
+                                               {{0.0, 0.0, 1.0}}}};
+    const std::array<AssemblyContext::Vector3D, 4> p1_gradients{{
+        {{-1.0, -1.0, -1.0}},
+        {{ 1.0,  0.0,  0.0}},
+        {{ 0.0,  1.0,  0.0}},
+        {{ 0.0,  0.0,  1.0}}}};
+
+    qpts.reserve(rule.points.size());
+    normals.reserve(rule.points.size());
+    jacobians.reserve(rule.points.size());
+    inverse_jacobians.reserve(rule.points.size());
+    jacobian_dets.reserve(rule.points.size());
+    weights.reserve(rule.points.size());
+    basis_values.reserve(rule.points.size() * 4u);
+    basis_gradients.reserve(rule.points.size() * 4u);
+
+    for (const auto& qp : rule.points) {
+        qpts.push_back(qp.point);
+        normals.push_back(qp.normal);
+        jacobians.push_back(identity);
+        inverse_jacobians.push_back(identity);
+        jacobian_dets.push_back(Real(1.0));
+        weights.push_back(qp.weight);
+
+        const Real xi = qp.point[0];
+        const Real eta = qp.point[1];
+        const Real zeta = qp.point[2];
+        const std::array<Real, 4> phi{{Real(1.0) - xi - eta - zeta, xi, eta, zeta}};
+        for (std::size_t i = 0u; i < phi.size(); ++i) {
+            basis_values.push_back(phi[i]);
+            basis_gradients.push_back(p1_gradients[i]);
+        }
+    }
+
+    ctx.setQuadratureData(qpts, weights);
+    ctx.setPhysicalPoints(qpts);
+    ctx.setJacobianData(jacobians, inverse_jacobians, jacobian_dets);
+    ctx.setIntegrationWeights(weights);
+    ctx.setNormals(normals);
+    ctx.setEntityMeasures(/*cell_diameter=*/std::sqrt(Real(2.0)),
+                          rule.measure,
+                          /*facet_area=*/Real(0.0));
+    ctx.setTestBasisDataQptMajor(/*n_dofs=*/4, basis_values, basis_gradients);
+    ctx.setPhysicalGradients(
+        basis_gradients, std::span<const AssemblyContext::Vector3D>{});
+    ctx.setSolutionCoefficients(solution);
+    ctx.setJITConstants(constants);
+}
+
+struct ManualResidualTangent {
+    std::vector<Real> residual;
+    std::vector<Real> tangent;
+};
+
+[[nodiscard]] ManualResidualTangent manualReferenceTetraCutResidualTangent(
+    const svmp::FE::assembly::CutIntegrationContext& cut_context,
+    std::span<const Real> solution)
+{
+    const CutCellParameterSlots slots;
+    ManualResidualTangent manual;
+    manual.residual.assign(4u, Real(0.0));
+    manual.tangent.assign(16u, Real(0.0));
+
+    const std::array<AssemblyContext::Vector3D, 4> p1_gradients{{
+        {{-1.0, -1.0, -1.0}},
+        {{ 1.0,  0.0,  0.0}},
+        {{ 0.0,  1.0,  0.0}},
+        {{ 0.0,  0.0,  1.0}}}};
+
+    for (std::size_t rule_index = 0u; rule_index < cut_context.volumeRules().size(); ++rule_index) {
+        const auto& rule = cut_context.volumeRules()[rule_index];
+        auto constants = cutCellParametersForRule(
+            rule, slots, Real(0.20) + Real(0.05) * static_cast<Real>(rule_index),
+            Real(0.01));
+        const Real coefficient =
+            Real(1.10) +
+            constants[slots.volume_fraction] * Real(0.70) +
+            constants[slots.side_indicator] * Real(0.05) +
+            constants[slots.embedded_normal[0]] * Real(0.20) +
+            constants[slots.embedded_normal[1]] * Real(0.10) +
+            constants[slots.stabilization_scale] * Real(0.125) +
+            constants[slots.quadrature_weight_sensitivity] * Real(0.40);
+
+        for (const auto& qp : rule.points) {
+            const Real xi = qp.point[0];
+            const Real eta = qp.point[1];
+            const Real zeta = qp.point[2];
+            const std::array<Real, 4> phi{{Real(1.0) - xi - eta - zeta, xi, eta, zeta}};
+
+            Real u_value = Real(0.0);
+            AssemblyContext::Vector3D u_gradient{{0.0, 0.0, 0.0}};
+            for (std::size_t j = 0u; j < 4u; ++j) {
+                u_value += solution[j] * phi[j];
+                u_gradient[0] += solution[j] * p1_gradients[j][0];
+                u_gradient[1] += solution[j] * p1_gradients[j][1];
+                u_gradient[2] += solution[j] * p1_gradients[j][2];
+            }
+
+            for (std::size_t i = 0u; i < 4u; ++i) {
+                const Real grad_dot_test =
+                    u_gradient[0] * p1_gradients[i][0] +
+                    u_gradient[1] * p1_gradients[i][1] +
+                    u_gradient[2] * p1_gradients[i][2];
+                const Real value_term = (u_value * u_value +
+                                         u_value * u_value * u_value * Real(0.125)) * phi[i];
+                const Real gradient_term =
+                    Real(0.20) * (Real(1.0) + u_value * Real(0.50)) * grad_dot_test;
+                manual.residual[i] += qp.weight * coefficient * (value_term + gradient_term);
+
+                for (std::size_t j = 0u; j < 4u; ++j) {
+                    const Real grad_trial_dot_test =
+                        p1_gradients[j][0] * p1_gradients[i][0] +
+                        p1_gradients[j][1] * p1_gradients[i][1] +
+                        p1_gradients[j][2] * p1_gradients[i][2];
+                    const Real tangent_value =
+                        (Real(2.0) * u_value + Real(0.375) * u_value * u_value) *
+                        phi[j] * phi[i];
+                    const Real tangent_gradient =
+                        Real(0.20) *
+                        (Real(0.50) * phi[j] * grad_dot_test +
+                         (Real(1.0) + u_value * Real(0.50)) * grad_trial_dot_test);
+                    manual.tangent[i * 4u + j] +=
+                        qp.weight * coefficient * (tangent_value + tangent_gradient);
+                }
+            }
+        }
+    }
+
+    return manual;
+}
+
 } // namespace
 
 TEST(CutCellForms, BuildsParameterBackedCutMetadataTerminals)
@@ -517,6 +690,146 @@ TEST(CutCellForms, CutMetadataResidualTangentMatchesADAndFiniteDifferenceVerific
         residual, space, constants, solution,
         /*finite_difference_eps=*/Real(1.0e-6),
         /*finite_difference_tol=*/Real(5.0e-6));
+}
+
+TEST(CutCellForms, CutDomainAssemblerUsesCutRulesForResidualAndTangentKernels)
+{
+    using svmp::FE::assembly::CutCellAssemblyMetadata;
+    using svmp::FE::assembly::CutDomainAssemblyOptions;
+    using svmp::FE::assembly::CutIntegrationAssemblyPath;
+    using svmp::FE::assembly::CutIntegrationBinding;
+    using svmp::FE::assembly::CutIntegrationContext;
+
+    CutIntegrationContext cut_context;
+    auto negative_rule = makeReferenceTetraCutRule(
+        CutIntegrationSide::Negative,
+        {
+            {{{0.10, 0.20, 0.15}}, {{ 1.0, 0.0, 0.0}}, Real(0.018)},
+            {{{0.24, 0.12, 0.18}}, {{ 1.0, 0.0, 0.0}}, Real(0.027)}
+        });
+    auto positive_rule = makeReferenceTetraCutRule(
+        CutIntegrationSide::Positive,
+        {
+            {{{0.18, 0.16, 0.20}}, {{-1.0, 0.0, 0.0}}, Real(0.015)},
+            {{{0.12, 0.28, 0.10}}, {{-1.0, 0.0, 0.0}}, Real(0.020)}
+        });
+
+    CutCellAssemblyMetadata negative_metadata;
+    negative_metadata.parent_entity = 0;
+    negative_metadata.volume_fraction = negative_rule.volume_fraction;
+    negative_metadata.side = CutIntegrationSide::Negative;
+    negative_metadata.embedded_normal = negative_rule.points.front().normal;
+    negative_metadata.cut_topology_revision = 11u;
+    cut_context.addVolumeRule(negative_metadata, std::move(negative_rule));
+
+    CutCellAssemblyMetadata positive_metadata;
+    positive_metadata.parent_entity = 0;
+    positive_metadata.volume_fraction = positive_rule.volume_fraction;
+    positive_metadata.side = CutIntegrationSide::Positive;
+    positive_metadata.embedded_normal = positive_rule.points.front().normal;
+    positive_metadata.cut_topology_revision = 11u;
+    cut_context.addVolumeRule(positive_metadata, std::move(positive_rule));
+
+    for (std::size_t i = 0u; i < cut_context.volumeRules().size(); ++i) {
+        CutIntegrationBinding binding;
+        binding.parent_entity = 0;
+        binding.kind = CutQuadratureKind::Volume;
+        binding.side = cut_context.volumeRules()[i].side;
+        binding.cut_topology_revision = 11u;
+        binding.visible_to_paths = {
+            CutIntegrationAssemblyPath::Standard,
+            CutIntegrationAssemblyPath::AD,
+            CutIntegrationAssemblyPath::SymbolicTangent};
+        cut_context.addBinding(std::move(binding));
+    }
+
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/1);
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto terminals = cutCellTerminals();
+    const auto cut_coefficient =
+        FormExpr::constant(Real(1.10)) +
+        terminals.volume_fraction * Real(0.70) +
+        terminals.side_indicator * Real(0.05) +
+        terminals.embedded_normal.component(0) * Real(0.20) +
+        terminals.embedded_normal.component(1) * Real(0.10) +
+        terminals.stabilization_scale * Real(0.125) +
+        terminals.quadrature_weight_sensitivity * Real(0.40);
+    const auto residual =
+        (cut_coefficient *
+         ((u * u + (u * u * u) * Real(0.125)) * v +
+          Real(0.20) * (FormExpr::constant(Real(1.0)) + u * Real(0.50)) *
+              inner(grad(u), grad(v)))).dx();
+
+    FormCompiler compiler;
+    auto ad_ir = compiler.compileResidual(residual);
+    auto symbolic_ir = compiler.compileResidual(residual);
+    NonlinearFormKernel ad_kernel(std::move(ad_ir), ADMode::Forward, NonlinearKernelOutput::Both);
+    SymbolicNonlinearFormKernel symbolic_kernel(
+        std::move(symbolic_ir), NonlinearKernelOutput::Both);
+    symbolic_kernel.resolveInlinableConstitutives();
+
+    const std::vector<Real> solution = {Real(0.16), Real(-0.04), Real(0.09), Real(0.02)};
+    std::vector<JITConstants> cut_rule_constants;
+    cut_rule_constants.reserve(cut_context.volumeRules().size());
+    for (std::size_t rule_index = 0u; rule_index < cut_context.volumeRules().size(); ++rule_index) {
+        auto parameters = cutCellParametersForRule(
+            cut_context.volumeRules()[rule_index],
+            CutCellParameterSlots{},
+            Real(0.20) + Real(0.05) * static_cast<Real>(rule_index),
+            Real(0.01));
+        cut_rule_constants.emplace_back(parameters.begin(), parameters.end());
+    }
+    const auto make_builder = [&](RequiredData required) {
+        return [&, required](const svmp::FE::assembly::CutRuleAssemblyRequest& request,
+                             AssemblyContext& ctx) {
+            ASSERT_NE(request.rule, nullptr);
+            populateP1ReferenceTetraCutContext(
+                ctx, *request.rule, space, required,
+                cut_rule_constants.at(request.rule_index),
+                solution);
+        };
+    };
+
+    CutDomainAssemblyOptions options;
+    options.path = CutIntegrationAssemblyPath::AD;
+    options.include_interface_rules = false;
+    const auto ad_summary = svmp::FE::assembly::assembleCutDomains(
+        cut_context, ad_kernel, make_builder(ad_kernel.getRequiredData()), options);
+
+    options.path = CutIntegrationAssemblyPath::SymbolicTangent;
+    const auto symbolic_summary = svmp::FE::assembly::assembleCutDomains(
+        cut_context, symbolic_kernel, make_builder(symbolic_kernel.getRequiredData()), options);
+
+    ASSERT_EQ(ad_summary.volume_rule_count, std::size_t{2});
+    ASSERT_EQ(symbolic_summary.volume_rule_count, std::size_t{2});
+    ASSERT_TRUE(ad_summary.hasMatrix());
+    ASSERT_TRUE(ad_summary.hasVector());
+    ASSERT_TRUE(symbolic_summary.hasMatrix());
+    ASSERT_TRUE(symbolic_summary.hasVector());
+
+    const auto manual = manualReferenceTetraCutResidualTangent(cut_context, solution);
+    ASSERT_EQ(ad_summary.total_output.local_vector.size(), manual.residual.size());
+    ASSERT_EQ(ad_summary.total_output.local_matrix.size(), manual.tangent.size());
+    ASSERT_EQ(symbolic_summary.total_output.local_vector.size(), manual.residual.size());
+    ASSERT_EQ(symbolic_summary.total_output.local_matrix.size(), manual.tangent.size());
+
+    for (std::size_t i = 0u; i < manual.residual.size(); ++i) {
+        EXPECT_NEAR(ad_summary.total_output.local_vector[i], manual.residual[i], Real(1.0e-13));
+        EXPECT_NEAR(symbolic_summary.total_output.local_vector[i], manual.residual[i], Real(1.0e-13));
+    }
+    for (std::size_t i = 0u; i < manual.tangent.size(); ++i) {
+        EXPECT_NEAR(ad_summary.total_output.local_matrix[i], manual.tangent[i], Real(1.0e-12));
+        EXPECT_NEAR(symbolic_summary.total_output.local_matrix[i], manual.tangent[i], Real(1.0e-12));
+    }
+
+    options.path = CutIntegrationAssemblyPath::JIT;
+    const auto skipped_summary = svmp::FE::assembly::assembleCutDomains(
+        cut_context, ad_kernel, make_builder(ad_kernel.getRequiredData()), options);
+    EXPECT_EQ(skipped_summary.volume_rule_count, std::size_t{0});
+    EXPECT_EQ(skipped_summary.skipped_rule_count, cut_context.volumeRules().size());
+    EXPECT_FALSE(skipped_summary.hasMatrix());
+    EXPECT_FALSE(skipped_summary.hasVector());
 }
 
 TEST(CutCellForms, CutSensitivityTerminalsDriveSymbolicNewtonTangentConvergence)

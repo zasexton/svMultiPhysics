@@ -716,6 +716,14 @@ TEST(FormVocabularyTest, AsVectorAndAsTensorConstructorsWork)
     }
 
     {
+        const auto z = zeroVector(3);
+        auto vec2 = assembleCellLinear(component(z, 2), dof_map, mesh, space);
+        for (GlobalIndex i = 0; i < 4; ++i) {
+            EXPECT_NEAR(vec2.getVectorEntry(i), 0.0, 5e-12);
+        }
+    }
+
+    {
         const auto A = as_tensor({{FormExpr::constant(1.0), FormExpr::constant(2.0)},
                                   {FormExpr::constant(3.0), FormExpr::constant(4.0)}});
 
@@ -749,6 +757,7 @@ TEST(FormVocabularyTest, AsVectorAndAsTensorConstructorsWork)
 	                 std::invalid_argument);
 
     EXPECT_THROW(as_tensor({{}}), std::invalid_argument);
+    EXPECT_THROW(zeroVector(0), std::invalid_argument);
 }
 
 TEST(FormVocabularyTest, RequiredDataInferenceIncludesGeometryAndMeasures)

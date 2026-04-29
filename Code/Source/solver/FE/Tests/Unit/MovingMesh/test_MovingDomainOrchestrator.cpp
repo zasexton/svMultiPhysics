@@ -210,7 +210,7 @@ TEST(MovingDomainOrchestrator, DisabledDefaultPreservesReferenceStaticBehavior)
     EXPECT_EQ(mesh->local_mesh().geometry_revision(), before_revision);
 }
 
-TEST(MovingDomainOrchestrator, CoupledMonolithicModeReportsUnsupportedWithoutAdvancing)
+TEST(MovingDomainOrchestrator, CoupledMonolithicModeDefersToFENonlinearGeometry)
 {
     auto mesh = make_single_quad_mesh();
 
@@ -224,9 +224,9 @@ TEST(MovingDomainOrchestrator, CoupledMonolithicModeReportsUnsupportedWithoutAdv
                                                   1.0,
                                                   0.25);
 
-    EXPECT_FALSE(diagnostics.success);
+    EXPECT_TRUE(diagnostics.success);
     EXPECT_FALSE(diagnostics.advanced_geometry);
-    EXPECT_NE(diagnostics.message.find("not supported"), std::string::npos);
+    EXPECT_NE(diagnostics.message.find("FE nonlinear geometry"), std::string::npos);
     EXPECT_FALSE(mesh->local_mesh().has_current_coords());
     EXPECT_EQ(mesh->local_mesh().active_configuration(), Configuration::Reference);
     EXPECT_EQ(mesh->local_mesh().geometry_revision(), before_revision);

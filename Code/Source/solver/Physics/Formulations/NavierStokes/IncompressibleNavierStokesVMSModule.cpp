@@ -11,6 +11,7 @@
 
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Systems/BoundaryConditionManager.h"
+#include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
 
@@ -25,8 +26,6 @@
 #endif
 
 namespace {
-namespace forms = svmp::FE::forms;
-
 svmp::FE::forms::SymbolicOptions makeBoundaryFunctionalCompilerOptions(bool enable_jit,
                                                                        bool enable_jit_specialization)
 {
@@ -46,49 +45,6 @@ svmp::FE::forms::SymbolicOptions makeBoundaryFunctionalCompilerOptions(bool enab
     return options;
 }
 
-[[nodiscard]] forms::FormExpr zeroVector(int dim)
-{
-    std::vector<forms::FormExpr> components;
-    components.reserve(static_cast<std::size_t>(dim));
-    for (int d = 0; d < dim; ++d) {
-        components.push_back(forms::FormExpr::constant(0.0));
-    }
-    return forms::FormExpr::asVector(std::move(components));
-}
-
-[[nodiscard]] forms::FormExpr meshVelocityVector(int dim)
-{
-    std::vector<forms::FormExpr> components;
-    components.reserve(static_cast<std::size_t>(dim));
-    for (int d = 0; d < dim; ++d) {
-        components.push_back(forms::component(forms::meshVelocity(), d));
-    }
-    return forms::FormExpr::asVector(std::move(components));
-}
-
-[[nodiscard]] forms::FormExpr meshVelocityOrZero(int dim, bool ale_enabled)
-{
-    return ale_enabled ? meshVelocityVector(dim) : zeroVector(dim);
-}
-
-[[nodiscard]] forms::FormExpr relativeConvectiveVelocity(const forms::FormExpr& material_velocity,
-                                                        int dim,
-                                                        bool ale_enabled)
-{
-    return ale_enabled ? (material_velocity - meshVelocityVector(dim)) : material_velocity;
-}
-
-[[nodiscard]] forms::FormExpr movingControlVolumeVectorTransient(const forms::FormExpr& field,
-                                                                const forms::FormExpr& test,
-                                                                const forms::FormExpr& density,
-                                                                int dim,
-                                                                bool enabled)
-{
-    if (!enabled) {
-        return forms::FormExpr::constant(0.0);
-    }
-    return density * forms::div(meshVelocityVector(dim)) * forms::inner(field, test);
-}
 } // namespace
 
 namespace svmp {
@@ -144,32 +100,23 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     p_spec.components = 1;
     const FE::FieldId p_id = system.addField(std::move(p_spec));
 
-    if (options_.enable_ale) {
-        auto mesh_velocity_space = options_.mesh_velocity_space ? options_.mesh_velocity_space : velocity_space_;
-        if (!mesh_velocity_space) {
-            throw std::invalid_argument("IncompressibleNavierStokesVMSModule::registerOn: null mesh_velocity_space");
-        }
-        if (mesh_velocity_space->value_dimension() != dim) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule::registerOn: mesh velocity space dimension must match velocity space");
-        }
-
-        FE::FieldId mesh_velocity_id = system.findFieldByName(options_.mesh_velocity_field_name);
-        if (mesh_velocity_id == FE::INVALID_FIELD_ID) {
-            if (!options_.auto_register_mesh_velocity_field) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule::registerOn: ALE is enabled but mesh velocity field '" +
-                    options_.mesh_velocity_field_name + "' is not registered");
-            }
-
-            FE::systems::FieldSpec w_spec;
-            w_spec.name = options_.mesh_velocity_field_name;
-            w_spec.space = std::move(mesh_velocity_space);
-            w_spec.components = dim;
-            mesh_velocity_id = system.addField(std::move(w_spec));
-        }
-        system.bindMeshMotionField(FE::systems::MeshMotionFieldRole::Velocity, mesh_velocity_id);
-    }
+    const auto ale_binding = FE::systems::resolveALEBinding(
+        system,
+        FE::systems::ALEBindingOptions{
+            .enabled = options_.enable_ale,
+            .dimension = dim,
+            .mesh_velocity_source =
+                options_.mesh_velocity_source == ALEMeshVelocitySource::CoupledDisplacement
+                    ? FE::systems::ALEMeshVelocitySource::CoupledDisplacement
+                    : FE::systems::ALEMeshVelocitySource::PrescribedData,
+            .mesh_velocity_field_name = options_.mesh_velocity_field_name,
+            .mesh_displacement_field_name = options_.mesh_displacement_field_name,
+            .mesh_velocity_space = options_.mesh_velocity_space ? options_.mesh_velocity_space : velocity_space_,
+            .mesh_displacement_space = velocity_space_,
+            .auto_register_mesh_velocity_field = options_.auto_register_mesh_velocity_field,
+            .auto_register_mesh_displacement_field =
+                options_.auto_register_mesh_displacement_field,
+        });
 
     system.addOperator("equations");
 
@@ -203,9 +150,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
 
     // ALE uses relative convection u - w_mesh. Static/default paths remain unchanged.
     const auto zero = zeroVector(dim);
-    const auto mesh_velocity = meshVelocityOrZero(dim, options_.enable_ale);
+    const auto w_mesh = meshVelocity();
+    const auto mesh_velocity = options_.enable_ale ? w_mesh : zero;
     const auto a = options_.enable_convection
-                       ? relativeConvectiveVelocity(u, dim, options_.enable_ale)
+                       ? (options_.enable_ale ? (u - w_mesh) : u)
                        : zero;
     const bool include_mcv =
         options_.enable_ale && options_.include_moving_control_volume_transient;
@@ -213,14 +161,16 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         include_mcv ? (div(mesh_velocity) * u) : zero;
 
     // Strong momentum residual (full, including dt(u)):
-    //   R_m = rho*(dt(u) + (u·∇)u - f) + grad(p) - div(2 mu sym(grad(u))).
+    //   R_m = rho*(dt(u) + grad(u)*a + chi*div(w_mesh)*u - f)
+    //         + grad(p) - div(2 mu sym(grad(u)))
+    // with a = u - w_mesh for ALE and chi set by the moving-control-volume option.
     const auto stress = FormExpr::constant(2.0) * mu * sym(grad(u));
     const auto r_m = rho * (dt(u) + grad(u) * a + moving_volume_strong - f) + grad(p) - div(stress);
 
     // Galerkin terms.
     const auto inertia = rho * inner(dt(u), v);
     const auto moving_volume =
-        movingControlVolumeVectorTransient(u, v, rho, dim, include_mcv);
+        include_mcv ? rho * div(w_mesh) * inner(u, v) : FormExpr::constant(0.0);
     const auto convection = rho * inner(grad(u) * a, v);
     const auto viscous = FormExpr::constant(2.0) * mu * inner(sym(grad(u)), sym(grad(v)));
     const auto pressure = -p * div(v);
@@ -339,6 +289,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
 
     FE::systems::FormInstallOptions install{};
     install.compiler_options.use_symbolic_tangent = true;
+    ale_binding.configureInstallOptions(install);
 #if SVMP_FE_ENABLE_LLVM_JIT
     install.compiler_options.jit.enable = options_.enable_jit;
     if (install.compiler_options.jit.enable) {

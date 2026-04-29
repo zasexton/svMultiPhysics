@@ -846,9 +846,9 @@ public:
 
 TEST(ProblemAnalyzer, DefaultHasAllPasses) {
     auto analyzer = ProblemAnalyzer::createDefault();
-    EXPECT_EQ(analyzer.numPasses(), 28u);
+    EXPECT_EQ(analyzer.numPasses(), 29u);
     auto names = analyzer.passNames();
-    ASSERT_EQ(names.size(), 28u);
+    ASSERT_EQ(names.size(), 29u);
     EXPECT_EQ(names[0], "CouplingGraphAnalyzer");
     EXPECT_EQ(names[1], "KernelAnalyzer");
     EXPECT_EQ(names[2], "MixedOperatorAnalyzer");
@@ -873,10 +873,11 @@ TEST(ProblemAnalyzer, DefaultHasAllPasses) {
     EXPECT_EQ(names[21], "SpectralSpuriousModeAnalyzer");
     EXPECT_EQ(names[22], "ErrorEstimatorAnalyzer");
     EXPECT_EQ(names[23], "QuadratureAdequacyAnalyzer");
-    EXPECT_EQ(names[24], "PreservationStructureAnalyzer");
-    EXPECT_EQ(names[25], "CoupledSystemStabilityAnalyzer");
-    EXPECT_EQ(names[26], "SolverCompatibilityAnalyzer");
-    EXPECT_EQ(names[27], "NumericSummaryPlanner");
+    EXPECT_EQ(names[24], "MinimumResidualStabilityAnalyzer");
+    EXPECT_EQ(names[25], "PreservationStructureAnalyzer");
+    EXPECT_EQ(names[26], "CoupledSystemStabilityAnalyzer");
+    EXPECT_EQ(names[27], "SolverCompatibilityAnalyzer");
+    EXPECT_EQ(names[28], "NumericSummaryPlanner");
 }
 
 // ============================================================================
@@ -894,6 +895,7 @@ TEST(ProblemAnalysisTypes, ToString_Phase21_PropertyKinds) {
 TEST(ProblemAnalysisTypes, ToString_Phase21_ClassificationEnums) {
     EXPECT_STREQ(toString(InfSupClass::Required), "Required");
     EXPECT_STREQ(toString(InfSupClass::StructurallySupported), "StructurallySupported");
+    EXPECT_STREQ(toString(InfSupClass::NumericallySupported), "NumericallySupported");
     EXPECT_STREQ(toString(InfSupClass::StabilizedSurrogate), "StabilizedSurrogate");
     EXPECT_STREQ(toString(InfSupClass::LikelyViolated), "LikelyViolated");
 
@@ -1081,6 +1083,10 @@ TEST(AnalysisSummaryTypes, CommonSummaryContractsStoreRequiredFields) {
     coeff.positivity = PositivityClass::Positive;
     coeff.anisotropy_ratio = 4.0;
     coeff.contrast_ratio = 10.0;
+    coeff.coefficient_region_coverage_complete = true;
+    coeff.quadrature_point_coverage_complete = true;
+    coeff.lower_bound_valid_for_all_samples = true;
+    coeff.tolerance_metadata_present = true;
     summaries.coefficient_properties.push_back(coeff);
 
     DiscreteMatrixSummary matrix;
@@ -1106,6 +1112,20 @@ TEST(AnalysisSummaryTypes, CommonSummaryContractsStoreRequiredFields) {
     reduced.constrained_dof_count = 1;
     reduced.affine_terms_accounted_for = true;
     summaries.reduced_matrices.push_back(reduced);
+
+    SchurComplementSummary schur;
+    schur.schur_id = "schur";
+    schur.schur_available = true;
+    schur.reduction_exact_for_analysis = true;
+    schur.primal_block_invertible_evidence_present = true;
+    schur.inf_sup_evidence_present = true;
+    schur.nullspace_handling_evidence_present = true;
+    schur.nullspace_handling = NullspaceHandlingClass::ProjectedOut;
+    schur.schur_definiteness_evidence_present = true;
+    schur.schur_positivity = PositivityClass::Positive;
+    schur.spectral_equivalence_bounds_present = true;
+    schur.preconditioner_equivalence_bounds_present = true;
+    summaries.schur_complements.push_back(schur);
 
     LocalStencilSummary stencil;
     stencil.element = 7;
@@ -1140,6 +1160,12 @@ TEST(AnalysisSummaryTypes, CommonSummaryContractsStoreRequiredFields) {
     boundary.boundary_operator_order = 1;
     boundary.trace_coverage = TraceCapabilityFlags::Value;
     boundary.complementing_condition_satisfied = true;
+    boundary.boundary_condition_count = 1;
+    boundary.required_boundary_condition_count = 1;
+    boundary.principal_symbol_rank_evidence_present = true;
+    boundary.boundary_symbol_rank_evidence_present = true;
+    boundary.component_coverage_complete = true;
+    boundary.dof_coverage_complete = true;
     summaries.boundary_symbols.push_back(boundary);
 
     InfSupEstimateSummary infsup;
@@ -1149,6 +1175,15 @@ TEST(AnalysisSummaryTypes, CommonSummaryContractsStoreRequiredFields) {
     infsup.estimate_scope = "unit-test";
     infsup.nullspace_handling = NullspaceHandlingClass::ProjectedOut;
     summaries.inf_sup_estimates.push_back(infsup);
+
+    InfSupPairCertificationSummary infsup_pair;
+    infsup_pair.primal_variable = VariableKey::field(0);
+    infsup_pair.multiplier_variable = VariableKey::field(1);
+    infsup_pair.pair_family = "Taylor-Hood";
+    infsup_pair.known_stable_pair = true;
+    infsup_pair.mesh_assumption_evidence_present = true;
+    infsup_pair.domain_assumption_evidence_present = true;
+    summaries.inf_sup_pair_certifications.push_back(infsup_pair);
 
     EnergyEntropySummary energy;
     energy.energy_entropy_id = "E";
@@ -1197,11 +1232,32 @@ TEST(AnalysisSummaryTypes, CommonSummaryContractsStoreRequiredFields) {
     parameter.layer_resolution_metric = 0.25;
     summaries.parameter_scales.push_back(parameter);
 
+    StabilizationAdequacySummary stabilization;
+    stabilization.stabilization_id = "supg";
+    stabilization.method_family = "SUPG";
+    stabilization.parameter_formula_metadata_present = true;
+    stabilization.residual_consistency_evidence_present = true;
+    stabilization.regime_metadata_present = true;
+    stabilization.peclet_condition_satisfied = true;
+    stabilization.cfl_condition_satisfied = true;
+    summaries.stabilization_adequacy.push_back(stabilization);
+
     InitialCompatibilitySummary initial;
     initial.initial_constraint_residual = 1.0e-14;
     initial.initial_boundary_residual = 2.0e-14;
     initial.invariant_domain_initial_violation_count = 0;
     summaries.initial_compatibility.push_back(initial);
+
+    DAEStructureEvidenceSummary dae;
+    dae.system_id = "semi-explicit";
+    dae.variables = {VariableKey::field(0), VariableKey::field(1)};
+    dae.dae_form_class = DAEFormClass::SemiExplicit;
+    dae.mass_matrix_rank_metadata_present = true;
+    dae.algebraic_jacobian_rank_metadata_present = true;
+    dae.algebraic_jacobian_full_rank = true;
+    dae.hidden_constraint_metadata_present = true;
+    dae.consistent_initial_condition_evidence_present = true;
+    summaries.dae_structure_evidence.push_back(dae);
 
     CompatibleComplexSummary complex;
     complex.complex_id = "generic-sequence";
@@ -1214,6 +1270,7 @@ TEST(AnalysisSummaryTypes, CommonSummaryContractsStoreRequiredFields) {
     tangent.residual_id = "nonlinear-residual";
     tangent.tangent_consistency = TangentConsistencyClass::Exact;
     tangent.jacobian_action_available = true;
+    tangent.jacobian_nonsingularity_evidence_present = true;
     summaries.nonlinear_tangents.push_back(tangent);
 
     SpectralStructureSummary spectral;
@@ -1226,6 +1283,16 @@ TEST(AnalysisSummaryTypes, CommonSummaryContractsStoreRequiredFields) {
     estimator.estimator_id = "residual-estimator";
     estimator.residual_metadata_present = true;
     estimator.jump_metadata_present = true;
+    estimator.norm_metadata_present = true;
+    estimator.pde_operator_class_metadata_present = true;
+    estimator.boundary_residual_metadata_present = true;
+    estimator.data_oscillation_metadata_present = true;
+    estimator.coefficient_source_regularity_metadata_present = true;
+    estimator.shape_regular_mesh_evidence_present = true;
+    estimator.reliability_constant_metadata_present = true;
+    estimator.efficiency_constant_metadata_present = true;
+    estimator.effectivity_bounds_present = true;
+    estimator.refinement_evidence_present = true;
     summaries.error_estimators.push_back(estimator);
 
     QuadratureAdequacySummary quadrature;
@@ -1238,16 +1305,33 @@ TEST(AnalysisSummaryTypes, CommonSummaryContractsStoreRequiredFields) {
     coupled.monolithic_coupling = true;
     summaries.coupled_system_stability.push_back(coupled);
 
-    EXPECT_EQ(summaries.totalSummaryCount(), 23u);
+    MinimumResidualStabilitySummary minres;
+    minres.method_id = "dpg";
+    minres.method_class = MinimumResidualMethodClass::DPG;
+    minres.trial_space_metadata_present = true;
+    minres.test_space_metadata_present = true;
+    minres.residual_norm_metadata_present = true;
+    minres.test_norm_metadata_present = true;
+    minres.riesz_map_metadata_present = true;
+    minres.fortin_operator_evidence_present = true;
+    minres.enrichment_sufficiency_evidence_present = true;
+    minres.residual_control_constant_present = true;
+    minres.local_trial_to_test_conditioning_present = true;
+    minres.normal_equation_conditioning_present = true;
+    summaries.minimum_residual_stability.push_back(minres);
+
+    EXPECT_EQ(summaries.totalSummaryCount(), 28u);
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::CoefficientProperties));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::DiscreteMatrix));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::ReducedMatrix));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::SchurComplement));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::LocalStencil));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::MeshGeometryQuality));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::FluxBalance));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::TemporalStability));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::BoundarySymbol));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::InfSupEstimate));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::InfSupPairCertification));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::EnergyEntropyBalance));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::InvariantDomain));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::EquilibriumPreservation));
@@ -1255,13 +1339,16 @@ TEST(AnalysisSummaryTypes, CommonSummaryContractsStoreRequiredFields) {
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::TransferOperator));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::AdjointConsistency));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::ParameterScale));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::StabilizationAdequacy));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::InitialCompatibility));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::DAEStructureEvidence));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::CompatibleComplex));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::NonlinearTangent));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::SpectralStructure));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::ErrorEstimator));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::QuadratureAdequacy));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::CoupledSystemStability));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::MinimumResidualStability));
 
     EXPECT_EQ(summaries.coefficient_properties[0].tensor_rank, TensorRank::Rank2Tensor);
     EXPECT_EQ(summaries.coefficient_properties[0].symmetry, SymmetryClass::Symmetric);

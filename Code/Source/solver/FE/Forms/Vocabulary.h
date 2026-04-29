@@ -335,11 +335,6 @@ inline FormExpr hessian(const FormExpr& a) { return a.hessian(); }
 
 inline FormExpr laplacian(const FormExpr& a) { return trace(a.hessian()); }
 
-inline FormExpr materialDerivative(const FormExpr& field, const FormExpr& mesh_velocity = meshVelocity())
-{
-    return field.dt() + inner(mesh_velocity, field.grad());
-}
-
 // ---------------------------------------------------------------------------
 // Geometric differential operators (surface/level-set helpers)
 // ---------------------------------------------------------------------------
@@ -387,6 +382,19 @@ inline FormExpr surfaceLaplacian(const FormExpr& f, const FormExpr& n)
 inline FormExpr as_vector(std::initializer_list<FormExpr> components)
 {
     return FormExpr::asVector(std::vector<FormExpr>(components.begin(), components.end()));
+}
+
+inline FormExpr zeroVector(int dim)
+{
+    if (dim <= 0) {
+        throw std::invalid_argument("zeroVector: dimension must be positive");
+    }
+    std::vector<FormExpr> components;
+    components.reserve(static_cast<std::size_t>(dim));
+    for (int d = 0; d < dim; ++d) {
+        components.push_back(FormExpr::constant(0.0));
+    }
+    return FormExpr::asVector(std::move(components));
 }
 
 inline FormExpr as_tensor(std::initializer_list<std::initializer_list<FormExpr>> rows)

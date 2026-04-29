@@ -57,6 +57,12 @@ bool hasPositiveJacobianEvidence(const MeshGeometryQualitySummary& summary) noex
             summary.max_jacobian == 0.0);
 }
 
+bool hasAspectRatioRisk(const MeshGeometryQualitySummary& summary) noexcept
+{
+    return summary.aspect_ratio_warning_threshold > 0.0 &&
+           summary.max_aspect_ratio > summary.aspect_ratio_warning_threshold;
+}
+
 bool hasJacobianViolation(const MeshGeometryQualitySummary& summary) noexcept
 {
     return summary.inverted_element_count > 0u ||
@@ -129,7 +135,7 @@ void MeshGeometryAnalyzer::run(const ProblemAnalysisContext& context,
             addGeometryIssue(report, summary,
                 "inverted or nonpositive-Jacobian elements invalidate coercivity and monotonicity evidence");
         } else if (summary.poor_quality_element_count > 0u ||
-                   summary.max_aspect_ratio > 0.0 ||
+                   hasAspectRatioRisk(summary) ||
                    summary.cut_cell_count > 0u) {
             addGeometryClaim(report, summary,
                 PropertyStatus::Likely,
@@ -142,13 +148,20 @@ void MeshGeometryAnalyzer::run(const ProblemAnalysisContext& context,
                     std::to_string(summary.max_aspect_ratio));
             addTopologyScopedGeometryClaims(context, report, summary);
         } else if (hasPositiveJacobianEvidence(summary)) {
+            const std::string shape_text = summary.shape_regular_evidence_present
+                ? ", shape_regular_constant=" +
+                      std::to_string(summary.shape_regular_constant)
+                : ", shape regularity not certified by this summary";
             addGeometryClaim(report, summary,
                 PropertyStatus::Preserved,
                 CertificationClass::Certified,
-                "Mesh mapping validity certified by positive Jacobian summary",
+                summary.shape_regular_evidence_present
+                    ? "Mesh mapping validity and reported shape-regularity evidence certified"
+                    : "Mesh mapping validity certified by positive Jacobian summary; shape regularity is out of scope",
                 "min_jacobian=" + std::to_string(summary.min_jacobian) +
                     ", max_jacobian=" +
-                    std::to_string(summary.max_jacobian));
+                    std::to_string(summary.max_jacobian) +
+                    shape_text);
         } else {
             addGeometryClaim(report, summary,
                 PropertyStatus::Unknown,

@@ -16,7 +16,8 @@
  * (SUPG, PSPG, GLS, penalty, etc.) via the has_stabilization_terms
  * flag and FormStructureAnalyzer's per-field stabilization detection.
  *
- * Emits Stabilization claims with Preserved status.
+ * Emits exact detection claims for stabilization presence. Preserved/certified
+ * adequacy requires StabilizationAdequacySummary metadata.
  *
  * @see FormulationRecord for has_stabilization_terms flag
  * @see FormStructureAnalyzer for per-field has_stabilization

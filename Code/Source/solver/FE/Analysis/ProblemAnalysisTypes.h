@@ -143,6 +143,7 @@ enum class IssueSeverity : std::uint8_t {
 enum class InfSupClass : std::uint8_t {
     Required,                ///< Inf-sup condition must hold for well-posedness
     StructurallySupported,   ///< Space pair is known to satisfy inf-sup (e.g., Taylor-Hood)
+    NumericallySupported,    ///< Scoped numerical estimate supports the pair
     StabilizedSurrogate,     ///< Inf-sup replaced by stabilization (e.g., PSPG)
     LikelyViolated,          ///< Space pair unlikely to satisfy inf-sup
     Unknown,
@@ -573,6 +574,9 @@ struct AnalysisSummaryRequest {
     std::vector<PropertyKind> source_claim_kinds;
     std::vector<std::string> source_analyzers;
     std::vector<std::string> reasons;
+    std::string block_id;
+    std::string contribution_id;
+    std::string scope_id;
     std::string request_id;
     AnalysisConfidence confidence{AnalysisConfidence::Medium};
     bool already_available{false};

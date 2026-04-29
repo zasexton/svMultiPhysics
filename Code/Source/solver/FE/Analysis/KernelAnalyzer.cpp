@@ -182,6 +182,7 @@ void KernelAnalyzer::run(const ProblemAnalysisContext& context,
                     "Vector field appears only through sym(grad(u)) — "
                     "rigid-body modes (translations + rotations) are in "
                     "the operator nullspace" + stab_suffix();
+                claim.nullspace_family = NullspaceFamily::KernelOfSymGrad;
                 claim.addEvidence("KernelAnalyzer",
                     "only_through_sym_grad=true, value_dimension=" +
                     std::to_string(fs.value_dimension),

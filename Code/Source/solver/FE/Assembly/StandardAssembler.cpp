@@ -1171,7 +1171,15 @@ void StandardAssembler::setFieldSolutionAccess(std::span<const FieldSolutionAcce
             if (fields[i].field != field_solution_access_[i].field ||
                 fields[i].space != field_solution_access_[i].space ||
                 fields[i].dof_map != field_solution_access_[i].dof_map ||
-                fields[i].dof_offset != field_solution_access_[i].dof_offset) {
+                fields[i].dof_offset != field_solution_access_[i].dof_offset ||
+                fields[i].coefficient_source != field_solution_access_[i].coefficient_source ||
+                fields[i].prescribed_coefficients.data() !=
+                    field_solution_access_[i].prescribed_coefficients.data() ||
+                fields[i].prescribed_coefficients.size() !=
+                    field_solution_access_[i].prescribed_coefficients.size() ||
+                fields[i].prescribed_revision != field_solution_access_[i].prescribed_revision ||
+                fields[i].derived_time_derivative_order !=
+                    field_solution_access_[i].derived_time_derivative_order) {
                 changed = true;
                 break;
             }
@@ -1262,35 +1270,46 @@ std::vector<FieldRequirement> StandardAssembler::effectiveFieldRequirements(
 void StandardAssembler::validateMovingDomainRequirements(RequiredData required_data,
                                                          const char* error_prefix) const
 {
-    auto require_field = [&](bool needed, FieldId field, const char* label) {
+    auto require_field = [&](bool needed,
+                             FieldId field,
+                             const char* terminal,
+                             const char* role_hint) {
         FE_THROW_IF(needed && field == INVALID_FIELD_ID, FEException,
-                    std::string(error_prefix) + ": kernel requests " + label +
-                        " but no mesh-motion field was registered");
+                    std::string(error_prefix) + ": form/kernel requests " + terminal +
+                        " but no mesh-motion " + role_hint +
+                        " field is bound; bind the corresponding MeshMotionFieldRole "
+                        "or configure ALE/moving-domain binding before assembly");
     };
 
     require_field(hasFlag(required_data, RequiredData::MeshDisplacement) ||
                   hasFlag(required_data, RequiredData::MeshDisplacementGradient),
                   mesh_motion_field_access_.mesh_displacement,
-                  "RequiredData::MeshDisplacement");
+                  "meshDisplacement()",
+                  "displacement");
     require_field(hasFlag(required_data, RequiredData::MeshVelocity) ||
                   hasFlag(required_data, RequiredData::MeshVelocityGradient),
                   mesh_motion_field_access_.mesh_velocity,
-                  "RequiredData::MeshVelocity");
+                  "meshVelocity()",
+                  "velocity");
     require_field(hasFlag(required_data, RequiredData::MeshAcceleration) ||
                   hasFlag(required_data, RequiredData::MeshAccelerationGradient),
                   mesh_motion_field_access_.mesh_acceleration,
-                  "RequiredData::MeshAcceleration");
+                  "meshAcceleration()",
+                  "acceleration");
     require_field(hasFlag(required_data, RequiredData::PreviousPhysicalPoints),
                   mesh_motion_field_access_.previous_coordinates,
-                  "RequiredData::PreviousPhysicalPoints");
+                  "previousCoordinate()",
+                  "previous-coordinate");
     require_field(hasFlag(required_data, RequiredData::PreviousMeshVelocity) ||
                   hasFlag(required_data, RequiredData::PreviousMeshVelocityGradient),
                   mesh_motion_field_access_.previous_mesh_velocity,
-                  "RequiredData::PreviousMeshVelocity");
+                  "previousMeshVelocity()",
+                  "previous-velocity");
     require_field(hasFlag(required_data, RequiredData::PredictedMeshVelocity) ||
                   hasFlag(required_data, RequiredData::PredictedMeshVelocityGradient),
                   mesh_motion_field_access_.predicted_mesh_velocity,
-                  "RequiredData::PredictedMeshVelocity");
+                  "predictedMeshVelocity()",
+                  "predicted-velocity");
 }
 
 void StandardAssembler::populateMovingDomainFieldData(AssemblyContext& context,
@@ -1337,57 +1356,57 @@ void StandardAssembler::populateMovingDomainFieldData(AssemblyContext& context,
 
     if (hasFlag(required_data, RequiredData::MeshDisplacement)) {
         bind_vector_values(mesh_motion_field_access_.mesh_displacement,
-                          "MeshDisplacement",
+                          "meshDisplacement()",
                           &AssemblyContext::setMeshDisplacements);
     }
     if (hasFlag(required_data, RequiredData::MeshDisplacementGradient)) {
         bind_vector_jacobians(mesh_motion_field_access_.mesh_displacement,
-                              "MeshDisplacementGradient",
+                              "grad(meshDisplacement())",
                               &AssemblyContext::setMeshDisplacementJacobians);
     }
     if (hasFlag(required_data, RequiredData::MeshVelocity)) {
         bind_vector_values(mesh_motion_field_access_.mesh_velocity,
-                          "MeshVelocity",
+                          "meshVelocity()",
                           &AssemblyContext::setMeshVelocities);
     }
     if (hasFlag(required_data, RequiredData::MeshVelocityGradient)) {
         bind_vector_jacobians(mesh_motion_field_access_.mesh_velocity,
-                              "MeshVelocityGradient",
+                              "grad(meshVelocity())",
                               &AssemblyContext::setMeshVelocityJacobians);
     }
     if (hasFlag(required_data, RequiredData::MeshAcceleration)) {
         bind_vector_values(mesh_motion_field_access_.mesh_acceleration,
-                          "MeshAcceleration",
+                          "meshAcceleration()",
                           &AssemblyContext::setMeshAccelerations);
     }
     if (hasFlag(required_data, RequiredData::MeshAccelerationGradient)) {
         bind_vector_jacobians(mesh_motion_field_access_.mesh_acceleration,
-                              "MeshAccelerationGradient",
+                              "grad(meshAcceleration())",
                               &AssemblyContext::setMeshAccelerationJacobians);
     }
     if (hasFlag(required_data, RequiredData::PreviousPhysicalPoints)) {
         bind_vector_values(mesh_motion_field_access_.previous_coordinates,
-                          "PreviousPhysicalPoints",
+                          "previousCoordinate()",
                           &AssemblyContext::setPreviousCoordinates);
     }
     if (hasFlag(required_data, RequiredData::PreviousMeshVelocity)) {
         bind_vector_values(mesh_motion_field_access_.previous_mesh_velocity,
-                          "PreviousMeshVelocity",
+                          "previousMeshVelocity()",
                           &AssemblyContext::setPreviousMeshVelocities);
     }
     if (hasFlag(required_data, RequiredData::PreviousMeshVelocityGradient)) {
         bind_vector_jacobians(mesh_motion_field_access_.previous_mesh_velocity,
-                              "PreviousMeshVelocityGradient",
+                              "grad(previousMeshVelocity())",
                               &AssemblyContext::setPreviousMeshVelocityJacobians);
     }
     if (hasFlag(required_data, RequiredData::PredictedMeshVelocity)) {
         bind_vector_values(mesh_motion_field_access_.predicted_mesh_velocity,
-                          "PredictedMeshVelocity",
+                          "predictedMeshVelocity()",
                           &AssemblyContext::setPredictedMeshVelocities);
     }
     if (hasFlag(required_data, RequiredData::PredictedMeshVelocityGradient)) {
         bind_vector_jacobians(mesh_motion_field_access_.predicted_mesh_velocity,
-                              "PredictedMeshVelocityGradient",
+                              "grad(predictedMeshVelocity())",
                               &AssemblyContext::setPredictedMeshVelocityJacobians);
     }
 }
@@ -2064,6 +2083,11 @@ void StandardAssembler::ensureFieldAccessPlans(const IMeshAccess& mesh)
                 plan.space != access.space ||
                 plan.dof_map != access.dof_map ||
                 plan.dof_offset != access.dof_offset ||
+                plan.coefficient_source != access.coefficient_source ||
+                plan.prescribed_coefficients.data() != access.prescribed_coefficients.data() ||
+                plan.prescribed_coefficients.size() != access.prescribed_coefficients.size() ||
+                plan.prescribed_revision != access.prescribed_revision ||
+                plan.derived_time_derivative_order != access.derived_time_derivative_order ||
                 plan.dof_layout_revision != dofLayoutRevision(access.dof_map)) {
                 plans_current = false;
                 break;
@@ -2085,6 +2109,10 @@ void StandardAssembler::ensureFieldAccessPlans(const IMeshAccess& mesh)
             access.space,
             access.dof_map,
             access.dof_offset,
+            access.coefficient_source,
+            access.prescribed_coefficients,
+            access.prescribed_revision,
+            access.derived_time_derivative_order,
             dofLayoutRevision(access.dof_map),
             cell_backed ? &getCellDofTable(mesh, access.dof_map, access.dof_offset) : nullptr,
             access.space->field_type(),
@@ -2146,6 +2174,8 @@ std::span<const Real> StandardAssembler::gatherCachedCellVectorCoefficients(
                 if (entry.dof_map == dof_map &&
                     entry.dof_offset == dof_offset &&
                     entry.space == space &&
+                    entry.coefficient_source ==
+                        FieldSolutionAccess::CoefficientSource::GlobalSolution &&
                     entry.history_index == history_index &&
                     entry.localized_vector_basis == localized) {
                     return &entry;
@@ -2194,6 +2224,7 @@ std::span<const Real> StandardAssembler::gatherCachedCellVectorCoefficients(
     entry.dof_map = dof_map;
     entry.dof_offset = dof_offset;
     entry.space = space;
+    entry.coefficient_source = FieldSolutionAccess::CoefficientSource::GlobalSolution;
     entry.history_index = history_index;
     entry.localized_vector_basis = localized_vector_basis;
     gatherCellVectorCoefficients(
@@ -2203,6 +2234,167 @@ std::span<const Real> StandardAssembler::gatherCachedCellVectorCoefficients(
         FE_CHECK_NOT_NULL(space, "gatherCachedCellVectorCoefficients: localized vector-basis space");
         applyVectorBasisGlobalToLocal(
             mesh, cell_id, *space, std::span<Real>(entry.coeffs));
+    }
+    return std::span<const Real>(entry.coeffs);
+}
+
+std::span<const Real> StandardAssembler::gatherCachedCellFieldCoefficients(
+    std::deque<CellCoefficientCacheEntry>& cache,
+    const IMeshAccess& mesh,
+    GlobalIndex cell_id,
+    const FieldAccessPlan& access,
+    std::span<const GlobalIndex> dofs,
+    int history_index,
+    bool localized_vector_basis,
+    const char* error_prefix)
+{
+    FE_THROW_IF(history_index < 0, InvalidArgumentException,
+                "gatherCachedCellFieldCoefficients: history index must be non-negative");
+
+    auto find_cached =
+        [&](bool localized) -> CellCoefficientCacheEntry* {
+            for (auto& entry : cache) {
+                if (entry.dof_map == access.dof_map &&
+                    entry.dof_offset == access.dof_offset &&
+                    entry.space == access.space &&
+                    entry.coefficient_source == access.coefficient_source &&
+                    entry.prescribed_data == access.prescribed_coefficients.data() &&
+                    entry.prescribed_size == access.prescribed_coefficients.size() &&
+                    entry.prescribed_revision == access.prescribed_revision &&
+                    entry.derived_time_derivative_order == access.derived_time_derivative_order &&
+                    entry.history_index == history_index &&
+                    entry.localized_vector_basis == localized) {
+                    return &entry;
+                }
+            }
+            return nullptr;
+        };
+
+    if (auto* existing = find_cached(localized_vector_basis)) {
+        return std::span<const Real>(existing->coeffs);
+    }
+
+    if (localized_vector_basis) {
+        if (auto* raw_entry = find_cached(false)) {
+            auto& localized_entry = cache.emplace_back();
+            localized_entry.dof_map = access.dof_map;
+            localized_entry.dof_offset = access.dof_offset;
+            localized_entry.space = access.space;
+            localized_entry.coefficient_source = access.coefficient_source;
+            localized_entry.prescribed_data = access.prescribed_coefficients.data();
+            localized_entry.prescribed_size = access.prescribed_coefficients.size();
+            localized_entry.prescribed_revision = access.prescribed_revision;
+            localized_entry.derived_time_derivative_order = access.derived_time_derivative_order;
+            localized_entry.history_index = history_index;
+            localized_entry.localized_vector_basis = true;
+            localized_entry.coeffs = raw_entry->coeffs;
+            FE_CHECK_NOT_NULL(access.space,
+                              "gatherCachedCellFieldCoefficients: vector-basis space");
+            applyVectorBasisGlobalToLocal(
+                mesh, cell_id, *access.space, std::span<Real>(localized_entry.coeffs));
+            return std::span<const Real>(localized_entry.coeffs);
+        }
+    }
+
+    auto& entry = cache.emplace_back();
+    entry.dof_map = access.dof_map;
+    entry.dof_offset = access.dof_offset;
+    entry.space = access.space;
+    entry.coefficient_source = access.coefficient_source;
+    entry.prescribed_data = access.prescribed_coefficients.data();
+    entry.prescribed_size = access.prescribed_coefficients.size();
+    entry.prescribed_revision = access.prescribed_revision;
+    entry.derived_time_derivative_order = access.derived_time_derivative_order;
+    entry.history_index = history_index;
+    entry.localized_vector_basis = localized_vector_basis;
+
+    if (access.coefficient_source == FieldSolutionAccess::CoefficientSource::PrescribedData) {
+        FE_THROW_IF(history_index != 0, FEException,
+                    std::string(error_prefix) +
+                        ": prescribed field history is not available for field " +
+                        std::to_string(access.field));
+        FE_THROW_IF(access.prescribed_coefficients.empty(), FEException,
+                    std::string(error_prefix) +
+                        ": prescribed field coefficients are not populated for field " +
+                        std::to_string(access.field));
+        gatherCellVectorCoefficients(
+            cell_id, access.dof_map, access.dof_offset, dofs, nullptr,
+            access.prescribed_coefficients, entry.coeffs, error_prefix, false);
+    } else if (access.coefficient_source == FieldSolutionAccess::CoefficientSource::DerivedFromUnknown) {
+        FE_THROW_IF(history_index != 0, FEException,
+                    std::string(error_prefix) +
+                        ": derived field history is not available for field " +
+                        std::to_string(access.field));
+        FE_THROW_IF(time_integration_ == nullptr, FEException,
+                    std::string(error_prefix) +
+                        ": derived time-derivative field requires a time-integration context");
+        const auto* stencil = time_integration_->stencil(access.derived_time_derivative_order);
+        FE_THROW_IF(stencil == nullptr, FEException,
+                    std::string(error_prefix) +
+                        ": missing time-derivative stencil for derived field " +
+                        std::to_string(access.field));
+        entry.coeffs.assign(dofs.size(), Real(0));
+
+        std::vector<Real> tmp;
+        const auto gather_scaled = [&](const GlobalSystemView* view,
+                                       std::span<const Real> values,
+                                       Real scale,
+                                       const char* label) {
+            if (scale == Real(0)) {
+                return;
+            }
+            FE_THROW_IF(view == nullptr && values.empty(), FEException,
+                        std::string(error_prefix) + ": missing " + label +
+                            " solution source for derived field " +
+                            std::to_string(access.field));
+            gatherCellVectorCoefficients(
+                cell_id, access.dof_map, access.dof_offset, dofs, view, values,
+                tmp, error_prefix, false);
+            FE_THROW_IF(tmp.size() != entry.coeffs.size(), FEException,
+                        std::string(error_prefix) +
+                            ": derived field coefficient size mismatch");
+            for (std::size_t i = 0; i < tmp.size(); ++i) {
+                entry.coeffs[i] += scale * tmp[i];
+            }
+        };
+
+        gather_scaled(current_solution_view_, current_solution_, stencil->coeff(0), "current");
+        for (int k = 1; k <= stencil->requiredHistoryStates(); ++k) {
+            const auto idx = static_cast<std::size_t>(k - 1);
+            FE_THROW_IF(idx >= previous_solutions_.size(), FEException,
+                        std::string(error_prefix) +
+                            ": insufficient solution history for derived field " +
+                            std::to_string(access.field));
+            const auto* prev_view =
+                (idx < previous_solution_views_.size()) ? previous_solution_views_[idx] : nullptr;
+            gather_scaled(prev_view, previous_solutions_[idx], stencil->coeff(k), "previous");
+        }
+    } else {
+        const GlobalSystemView* source_view = current_solution_view_;
+        std::span<const Real> source_values = current_solution_;
+        if (history_index > 0) {
+            const auto idx = static_cast<std::size_t>(history_index - 1);
+            FE_THROW_IF(idx >= previous_solutions_.size(), FEException,
+                        "gatherCachedCellFieldCoefficients: requested history state is not available");
+            source_view =
+                (idx < previous_solution_views_.size()) ? previous_solution_views_[idx] : nullptr;
+            source_values = previous_solutions_[idx];
+            FE_THROW_IF(source_view == nullptr && source_values.empty(), FEException,
+                        "gatherCachedCellFieldCoefficients: previous solution source is not available");
+        } else {
+            FE_THROW_IF(source_view == nullptr && source_values.empty(), FEException,
+                        "gatherCachedCellFieldCoefficients: current solution source is not available");
+        }
+        gatherCellVectorCoefficients(
+            cell_id, access.dof_map, access.dof_offset, dofs, source_view,
+            source_values, entry.coeffs, error_prefix, false);
+    }
+
+    if (localized_vector_basis) {
+        FE_CHECK_NOT_NULL(access.space,
+                          "gatherCachedCellFieldCoefficients: localized vector-basis space");
+        applyVectorBasisGlobalToLocal(
+            mesh, cell_id, *access.space, std::span<Real>(entry.coeffs));
     }
     return std::span<const Real>(entry.coeffs);
 }
@@ -12137,9 +12329,6 @@ void StandardAssembler::populateFieldSolutionData(
     // One rebuild at the end of this function suffices.
     context.suspendJITFieldTableRebuild();
 
-    FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
-	                "StandardAssembler::populateFieldSolutionData: no current solution vector was set");
-
     int required_history = 0;
     if (time_integration_ != nullptr) {
         if (time_integration_->dt1) {
@@ -12261,10 +12450,34 @@ void StandardAssembler::populateFieldSolutionData(
 	                    "StandardAssembler::populateFieldSolutionData: field DOF count does not match its space DOFs");
 
 	        local_coeffs.resize(cell_dofs.size());
-            gatherCellVectorCoefficients(cell_id, access->dof_map, access->dof_offset,
-                                         cell_dofs, current_solution_view_,
-                                         current_solution_, local_coeffs,
-                                         "StandardAssembler::populateFieldSolutionData", false);
+            if (access->coefficient_source == FieldSolutionAccess::CoefficientSource::PrescribedData) {
+                FE_THROW_IF(access->prescribed_coefficients.empty(), FEException,
+                            "StandardAssembler::populateFieldSolutionData: prescribed coefficients are not populated for field " +
+                                std::to_string(req.field));
+                gatherCellVectorCoefficients(cell_id, access->dof_map, access->dof_offset,
+                                             cell_dofs, nullptr,
+                                             access->prescribed_coefficients, local_coeffs,
+                                             "StandardAssembler::populateFieldSolutionData", false);
+            } else if (access->coefficient_source == FieldSolutionAccess::CoefficientSource::DerivedFromUnknown) {
+                std::deque<CellCoefficientCacheEntry> derived_cache;
+                const auto coeffs =
+                    gatherCachedCellFieldCoefficients(derived_cache,
+                                                       mesh,
+                                                       cell_id,
+                                                       *access,
+                                                       cell_dofs,
+                                                       /*history_index=*/0,
+                                                       /*localized_vector_basis=*/false,
+                                                       "StandardAssembler::populateFieldSolutionData");
+                local_coeffs.assign(coeffs.begin(), coeffs.end());
+            } else {
+                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+                            "StandardAssembler::populateFieldSolutionData: no current solution vector was set");
+                gatherCellVectorCoefficients(cell_id, access->dof_map, access->dof_offset,
+                                             cell_dofs, current_solution_view_,
+                                             current_solution_, local_coeffs,
+                                             "StandardAssembler::populateFieldSolutionData", false);
+            }
 
         if (access->field_type == FieldType::Scalar) {
             FE_THROW_IF(is_product, FEException,
@@ -12467,7 +12680,8 @@ void StandardAssembler::populateFieldSolutionData(
                                            want_laplacians ? std::span<const Real>(scalar_laplacians) : std::span<const Real>{});
 
             // Populate previous field values if a transient context requires history.
-	            if (required_history > 0) {
+	            if (required_history > 0 &&
+                    access->coefficient_source == FieldSolutionAccess::CoefficientSource::GlobalSolution) {
 	                for (int k = 1; k <= required_history; ++k) {
 	                    const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
 	                    const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
@@ -12631,7 +12845,8 @@ void StandardAssembler::populateFieldSolutionData(
                                                want_gradients ? std::span<const AssemblyContext::Matrix3x3>(vector_jacobians)
                                                               : std::span<const AssemblyContext::Matrix3x3>{});
 
-	                if (required_history > 0) {
+	                if (required_history > 0 &&
+                        access->coefficient_source == FieldSolutionAccess::CoefficientSource::GlobalSolution) {
 	                    for (int k = 1; k <= required_history; ++k) {
 	                        const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
 	                        const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
@@ -12864,7 +13079,8 @@ void StandardAssembler::populateFieldSolutionData(
                                            want_laplacians ? std::span<const Real>(vector_component_laplacians) : std::span<const Real>{});
 
             // Populate previous field values if a transient context requires history.
-	            if (required_history > 0) {
+	            if (required_history > 0 &&
+                    access->coefficient_source == FieldSolutionAccess::CoefficientSource::GlobalSolution) {
 	                for (int k = 1; k <= required_history; ++k) {
 	                    const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
 	                    const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
@@ -12940,9 +13156,6 @@ void StandardAssembler::populateFieldSolutionData(
     // Suspend JIT field table rebuilds — each setter would rebuild redundantly.
     // One rebuild at the end of this function suffices.
     context.suspendJITFieldTableRebuild();
-
-    FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
-	                "StandardAssembler::populateFieldSolutionData: no current solution vector was set");
 
     int required_history = 0;
     if (time_integration_ != nullptr) {
@@ -13070,10 +13283,34 @@ void StandardAssembler::populateFieldSolutionData(
 	                    "StandardAssembler::populateFieldSolutionData: field DOF count does not match its space DOFs");
 
 	        local_coeffs.resize(cell_dofs.size());
-            gatherCellVectorCoefficients(cell_id, access->dof_map, access->dof_offset,
-                                         cell_dofs, current_solution_view_,
-                                         current_solution_, local_coeffs,
-                                         "StandardAssembler::populateFieldSolutionData", false);
+            if (access->coefficient_source == FieldSolutionAccess::CoefficientSource::PrescribedData) {
+                FE_THROW_IF(access->prescribed_coefficients.empty(), FEException,
+                            "StandardAssembler::populateFieldSolutionData: prescribed coefficients are not populated for field " +
+                                std::to_string(req.field));
+                gatherCellVectorCoefficients(cell_id, access->dof_map, access->dof_offset,
+                                             cell_dofs, nullptr,
+                                             access->prescribed_coefficients, local_coeffs,
+                                             "StandardAssembler::populateFieldSolutionData", false);
+            } else if (access->coefficient_source == FieldSolutionAccess::CoefficientSource::DerivedFromUnknown) {
+                std::deque<CellCoefficientCacheEntry> derived_cache;
+                const auto coeffs =
+                    gatherCachedCellFieldCoefficients(derived_cache,
+                                                       mesh,
+                                                       cell_id,
+                                                       *access,
+                                                       cell_dofs,
+                                                       /*history_index=*/0,
+                                                       /*localized_vector_basis=*/false,
+                                                       "StandardAssembler::populateFieldSolutionData");
+                local_coeffs.assign(coeffs.begin(), coeffs.end());
+            } else {
+                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+                            "StandardAssembler::populateFieldSolutionData: no current solution vector was set");
+                gatherCellVectorCoefficients(cell_id, access->dof_map, access->dof_offset,
+                                             cell_dofs, current_solution_view_,
+                                             current_solution_, local_coeffs,
+                                             "StandardAssembler::populateFieldSolutionData", false);
+            }
 
         if (access->field_type == FieldType::Scalar) {
             FE_THROW_IF(is_product, FEException,
@@ -13231,7 +13468,8 @@ void StandardAssembler::populateFieldSolutionData(
                                            want_laplacians ? std::span<const Real>(scalar_laplacians) : std::span<const Real>{});
 
             // Populate previous field values if a transient context requires history.
-	            if (required_history > 0) {
+	            if (required_history > 0 &&
+                    access->coefficient_source == FieldSolutionAccess::CoefficientSource::GlobalSolution) {
 	                for (int k = 1; k <= required_history; ++k) {
 	                    const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
 	                    const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
@@ -13395,7 +13633,8 @@ void StandardAssembler::populateFieldSolutionData(
                                                want_gradients ? std::span<const AssemblyContext::Matrix3x3>(vector_jacobians)
                                                               : std::span<const AssemblyContext::Matrix3x3>{});
 
-	                if (required_history > 0) {
+	                if (required_history > 0 &&
+                        access->coefficient_source == FieldSolutionAccess::CoefficientSource::GlobalSolution) {
 	                    for (int k = 1; k <= required_history; ++k) {
 	                        const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
 	                        const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
@@ -13627,7 +13866,8 @@ void StandardAssembler::populateFieldSolutionData(
                                            want_laplacians ? std::span<const Real>(vector_component_laplacians) : std::span<const Real>{});
 
             // Populate previous field values if a transient context requires history.
-	            if (required_history > 0) {
+	            if (required_history > 0 &&
+                    access->coefficient_source == FieldSolutionAccess::CoefficientSource::GlobalSolution) {
 	                for (int k = 1; k <= required_history; ++k) {
 	                    const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
 	                    const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
@@ -14399,13 +14639,11 @@ void StandardAssembler::populateFieldSolutionDataFast(
         const auto cell_dofs = getCellDofsFromTable(*recipe.access->dof_table, cell_id);
         const auto local_coeffs =
             (coefficient_cache != nullptr)
-                ? gatherCachedCellVectorCoefficients(
+                ? gatherCachedCellFieldCoefficients(
                       *coefficient_cache,
                       mesh,
                       cell_id,
-                      recipe.access->dof_map,
-                      recipe.access->dof_offset,
-                      recipe.access->space,
+                      *recipe.access,
                       cell_dofs,
                       /*history_index=*/0,
                       /*localized_vector_basis=*/false,
@@ -14413,12 +14651,41 @@ void StandardAssembler::populateFieldSolutionDataFast(
                 : [&]() -> std::span<const Real> {
                       auto& coeff_scratch = scratch_field_local_coeffs_;
                       coeff_scratch.resize(cell_dofs.size());
-                      gatherCellVectorCoefficients(
-                          cell_id, recipe.access->dof_map,
-                          recipe.access->dof_offset,
-                          cell_dofs, current_solution_view_,
-                          current_solution_, coeff_scratch,
-                          "populateFieldSolutionDataFast", false);
+                      if (recipe.access->coefficient_source ==
+                          FieldSolutionAccess::CoefficientSource::PrescribedData) {
+                          FE_THROW_IF(recipe.access->prescribed_coefficients.empty(), FEException,
+                                      "populateFieldSolutionDataFast: prescribed coefficients are not populated for field " +
+                                          std::to_string(recipe.access->field));
+                          gatherCellVectorCoefficients(
+                              cell_id, recipe.access->dof_map,
+                              recipe.access->dof_offset,
+                              cell_dofs, nullptr,
+                              recipe.access->prescribed_coefficients, coeff_scratch,
+                              "populateFieldSolutionDataFast", false);
+                      } else if (recipe.access->coefficient_source ==
+                                 FieldSolutionAccess::CoefficientSource::DerivedFromUnknown) {
+                          std::deque<CellCoefficientCacheEntry> derived_cache;
+                          const auto coeffs =
+                              gatherCachedCellFieldCoefficients(
+                                  derived_cache,
+                                  mesh,
+                                  cell_id,
+                                  *recipe.access,
+                                  cell_dofs,
+                                  /*history_index=*/0,
+                                  /*localized_vector_basis=*/false,
+                                  "populateFieldSolutionDataFast");
+                          coeff_scratch.assign(coeffs.begin(), coeffs.end());
+                      } else {
+                          FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+                                      "populateFieldSolutionDataFast: no current solution vector was set");
+                          gatherCellVectorCoefficients(
+                              cell_id, recipe.access->dof_map,
+                              recipe.access->dof_offset,
+                              cell_dofs, current_solution_view_,
+                              current_solution_, coeff_scratch,
+                              "populateFieldSolutionDataFast", false);
+                      }
                       return std::span<const Real>(coeff_scratch);
             }();
 
@@ -14648,6 +14915,10 @@ void StandardAssembler::populateFieldSolutionDataFast(
                 for (std::size_t ri = 0; ri < requirements.size(); ++ri) {
                     const auto& recipe = *matched_recipes[ri];
                     if (!recipe.access || !recipe.bcache) continue;
+                    if (recipe.access->coefficient_source !=
+                        FieldSolutionAccess::CoefficientSource::GlobalSolution) {
+                        continue;
+                    }
 
                     if (auto* cached_eval =
                             findCachedFieldEvaluation(requirements[ri].field, k)) {

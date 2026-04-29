@@ -31,12 +31,31 @@ enum class FieldScope : std::uint8_t {
     InterfaceFace
 };
 
+enum class FieldSourceKind : std::uint8_t {
+    Unknown,
+    PrescribedData,
+    DerivedFromUnknown
+};
+
+enum class DerivedFieldRole : std::uint8_t {
+    None,
+    TimeDerivative
+};
+
+struct DerivedFieldMetadata {
+    FieldId source_field{INVALID_FIELD_ID};
+    DerivedFieldRole role{DerivedFieldRole::None};
+    int derivative_order{0};
+};
+
 struct FieldSpec {
     std::string name;
     std::shared_ptr<const spaces::FunctionSpace> space;
     int components{1};
     FieldScope scope{FieldScope::VolumeCell};
     int interface_marker{-1};
+    FieldSourceKind source_kind{FieldSourceKind::Unknown};
+    DerivedFieldMetadata derived{};
 };
 
 struct FieldRecord {
@@ -46,6 +65,8 @@ struct FieldRecord {
     int components{1};
     FieldScope scope{FieldScope::VolumeCell};
     int interface_marker{-1};
+    FieldSourceKind source_kind{FieldSourceKind::Unknown};
+    DerivedFieldMetadata derived{};
 
     // Transient metadata (derived from registered kernels containing `dt(...)`)
     bool time_dependent{false};

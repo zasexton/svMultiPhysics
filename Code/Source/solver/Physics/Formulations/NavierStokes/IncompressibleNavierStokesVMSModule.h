@@ -51,6 +51,11 @@ namespace Physics {
 namespace formulations {
 namespace navier_stokes {
 
+enum class ALEMeshVelocitySource {
+    PrescribedData,
+    CoupledDisplacement
+};
+
 struct IncompressibleNavierStokesVMSOptions {
     using ScalarValue = FE::forms::bc::ScalarValue;
 
@@ -182,8 +187,11 @@ struct IncompressibleNavierStokesVMSOptions {
     // ALE-specific residual choices.
     bool enable_ale{false};
     bool include_moving_control_volume_transient{true};
+    ALEMeshVelocitySource mesh_velocity_source{ALEMeshVelocitySource::PrescribedData};
     std::string mesh_velocity_field_name{"mesh_velocity"};
+    std::string mesh_displacement_field_name{"mesh_displacement"};
     bool auto_register_mesh_velocity_field{true};
+    bool auto_register_mesh_displacement_field{false};
     std::shared_ptr<const FE::spaces::FunctionSpace> mesh_velocity_space{};
 
     // Enable residual-based VMS stabilization (static subscales u', p').

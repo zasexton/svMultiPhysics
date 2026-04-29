@@ -6,11 +6,13 @@
  */
 
 #include "Analysis/OperatorClassAnalyzer.h"
+#include "Analysis/AnalysisSummaryMatching.h"
 #include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
 #include "Analysis/FormStructureAnalyzer.h"
 
 #include <algorithm>
+#include <cmath>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -21,23 +23,61 @@ namespace analysis {
 
 namespace {
 
-void appendUnique(std::vector<VariableKey>& values, const VariableKey& value)
+Real definitenessTolerance(const DiscreteMatrixSummary& matrix) noexcept
 {
-    if (std::find(values.begin(), values.end(), value) == values.end()) {
-        values.push_back(value);
-    }
+    return std::max({matrix.sign_tolerance,
+                     matrix.symmetry_tolerance,
+                     Real{1.0e-12}});
 }
 
-std::vector<VariableKey> blockVariables(const OperatorBlockId& block)
+enum class DefinitenessEvidence {
+    PositiveDefinite,
+    Semidefinite,
+    Indefinite,
+    Unknown,
+};
+
+bool coefficientCoverageComplete(const CoefficientPropertySummary& summary) noexcept
 {
-    std::vector<VariableKey> variables;
-    for (const auto& v : block.test_variables) {
-        appendUnique(variables, v);
+    const bool state_scope_ok =
+        (!summary.state_dependent && !summary.time_dependent) ||
+        summary.state_sample_coverage_complete;
+    return summary.coefficient_region_coverage_complete &&
+           summary.quadrature_point_coverage_complete &&
+           summary.lower_bound_valid_for_all_samples &&
+           summary.tolerance_metadata_present &&
+           state_scope_ok;
+}
+
+DefinitenessEvidence classifyDefinitenessEvidence(
+    const DiscreteMatrixSummary& matrix)
+{
+    const Real tol = definitenessTolerance(matrix);
+    if (matrix.coercivity_lower_bound) {
+        if (*matrix.coercivity_lower_bound > tol) {
+            return DefinitenessEvidence::PositiveDefinite;
+        }
+        if (*matrix.coercivity_lower_bound < -tol) {
+            return DefinitenessEvidence::Indefinite;
+        }
+        return DefinitenessEvidence::Semidefinite;
     }
-    for (const auto& v : block.trial_variables) {
-        appendUnique(variables, v);
+    if (matrix.min_eigenvalue_estimate) {
+        if (*matrix.min_eigenvalue_estimate > tol) {
+            return DefinitenessEvidence::PositiveDefinite;
+        }
+        if (*matrix.min_eigenvalue_estimate < -tol) {
+            return DefinitenessEvidence::Indefinite;
+        }
+        return DefinitenessEvidence::Semidefinite;
     }
-    return variables;
+    if (matrix.cholesky_factorization_succeeded) {
+        return DefinitenessEvidence::PositiveDefinite;
+    }
+    if (matrix.ldlt_factorization_nonnegative) {
+        return DefinitenessEvidence::Semidefinite;
+    }
+    return DefinitenessEvidence::Unknown;
 }
 
 void emitCoefficientClaim(ProblemAnalysisReport& report,
@@ -47,17 +87,28 @@ void emitCoefficientClaim(ProblemAnalysisReport& report,
     claim.kind = PropertyKind::CoefficientPositivity;
     claim.domain = summary.domain;
     claim.confidence = AnalysisConfidence::High;
+    claim.variables = !summary.variables.empty()
+        ? summary.variables
+        : variablesForBlock(summary.block);
     claim.coefficient_id = summary.coefficient;
     claim.claim_origin = "OperatorClassAnalyzer";
 
     switch (summary.positivity) {
         case PositivityClass::Positive:
         case PositivityClass::Nonnegative:
-            claim.status = PropertyStatus::Preserved;
-            claim.certification_class = CertificationClass::Certified;
-            claim.description =
-                "Coefficient '" + summary.coefficient +
-                "' has certified nonnegative/positive sign structure";
+            if (coefficientCoverageComplete(summary)) {
+                claim.status = PropertyStatus::Preserved;
+                claim.certification_class = CertificationClass::Certified;
+                claim.description =
+                    "Coefficient '" + summary.coefficient +
+                    "' has certified nonnegative/positive sign structure with scoped coverage metadata";
+            } else {
+                claim.status = PropertyStatus::Likely;
+                claim.certification_class = CertificationClass::NotCertified;
+                claim.description =
+                    "Coefficient '" + summary.coefficient +
+                    "' reports nonnegative/positive sign structure but lacks full coverage metadata";
+            }
             break;
         case PositivityClass::Negative:
         case PositivityClass::Nonpositive:
@@ -82,7 +133,15 @@ void emitCoefficientClaim(ProblemAnalysisReport& report,
         std::to_string(summary.min_eigenvalue) +
         ", max_eigenvalue=" + std::to_string(summary.max_eigenvalue) +
         ", anisotropy_ratio=" +
-        std::to_string(summary.anisotropy_ratio));
+        std::to_string(summary.anisotropy_ratio) +
+        ", region_coverage=" +
+        std::string(summary.coefficient_region_coverage_complete ? "true" : "false") +
+        ", quadrature_coverage=" +
+        std::string(summary.quadrature_point_coverage_complete ? "true" : "false") +
+        ", lower_bound_all_samples=" +
+        std::string(summary.lower_bound_valid_for_all_samples ? "true" : "false") +
+        ", tolerance_metadata=" +
+        std::string(summary.tolerance_metadata_present ? "true" : "false"));
     report.claims.push_back(std::move(claim));
 }
 
@@ -94,38 +153,75 @@ void emitReducedDefinitenessClaim(ProblemAnalysisReport& report,
         return;
     }
 
-    const bool certified =
+    const bool symmetric_evidence =
         matrix.square &&
         matrix.symmetry_evidence_complete &&
         matrix.structurally_symmetric &&
-        matrix.numerically_symmetric &&
-        matrix.nonpositive_diagonal_count == 0u &&
-        matrix.negative_diagonal_count == 0u &&
-        summary.reduction_exact_for_analysis;
+        matrix.numerically_symmetric;
+    const auto definiteness = classifyDefinitenessEvidence(matrix);
+    const bool exact_reduction = summary.reduction_exact_for_analysis;
 
     PropertyClaim claim;
     claim.kind = PropertyKind::OperatorDefiniteness;
-    claim.status = certified ? PropertyStatus::Exact : PropertyStatus::Unknown;
-    claim.confidence = certified ? AnalysisConfidence::High
-                                 : AnalysisConfidence::Medium;
     claim.domain = matrix.block.domain;
-    claim.variables = blockVariables(matrix.block);
-    claim.coercivity_class = certified ? CoercivityClass::Coercive
-                                       : CoercivityClass::Unknown;
-    claim.reduced_definiteness_class = certified ? CertificationClass::Certified
-                                                 : CertificationClass::Unknown;
+    claim.variables = variablesForBlock(matrix.block);
     claim.tested_block_id = matrix.block.operator_tag;
-    claim.description = certified
-        ? "Reduced free-free operator has certified symmetric positive diagonal evidence"
-        : "Reduced free-free operator definiteness is unknown from available summary";
     claim.claim_origin = "OperatorClassAnalyzer";
+
+    if (!exact_reduction || !symmetric_evidence) {
+        claim.status = PropertyStatus::Unknown;
+        claim.confidence = AnalysisConfidence::Medium;
+        claim.coercivity_class = CoercivityClass::Unknown;
+        claim.reduced_definiteness_class = CertificationClass::Unknown;
+        claim.description =
+            "Reduced free-free operator definiteness is unknown because exact reduction or symmetry evidence is missing";
+    } else if (definiteness == DefinitenessEvidence::PositiveDefinite) {
+        claim.status = PropertyStatus::Exact;
+        claim.confidence = AnalysisConfidence::High;
+        claim.coercivity_class = CoercivityClass::Coercive;
+        claim.reduced_definiteness_class = CertificationClass::Certified;
+        claim.description =
+            "Reduced free-free operator has scoped SPD/coercivity evidence";
+    } else if (definiteness == DefinitenessEvidence::Semidefinite) {
+        claim.status = PropertyStatus::Likely;
+        claim.confidence = AnalysisConfidence::Medium;
+        claim.coercivity_class = CoercivityClass::Semicoercive;
+        claim.reduced_definiteness_class = CertificationClass::NotCertified;
+        claim.description =
+            "Reduced free-free operator has semidefinite evidence but no positive coercivity lower bound";
+    } else if (definiteness == DefinitenessEvidence::Indefinite) {
+        claim.status = PropertyStatus::Violated;
+        claim.confidence = AnalysisConfidence::High;
+        claim.coercivity_class = CoercivityClass::Indefinite;
+        claim.reduced_definiteness_class = CertificationClass::Violated;
+        claim.description =
+            "Reduced free-free operator violates positive-definiteness evidence";
+    } else {
+        claim.status = PropertyStatus::Unknown;
+        claim.confidence = AnalysisConfidence::Medium;
+        claim.coercivity_class = CoercivityClass::Unknown;
+        claim.reduced_definiteness_class = CertificationClass::Unknown;
+        claim.description =
+            "Reduced free-free operator definiteness is unknown without eigenvalue, factorization, or coercivity evidence";
+    }
+
     claim.addEvidence("OperatorClassAnalyzer",
         "ReducedMatrixSummary reduction=" +
         std::to_string(static_cast<int>(summary.reduction_kind)) +
         ", symmetry_complete=" +
         std::string(matrix.symmetry_evidence_complete ? "true" : "false") +
         ", exact_reduction=" +
-        std::string(summary.reduction_exact_for_analysis ? "true" : "false"),
+        std::string(summary.reduction_exact_for_analysis ? "true" : "false") +
+        ", min_eigenvalue=" +
+        (matrix.min_eigenvalue_estimate
+             ? std::to_string(*matrix.min_eigenvalue_estimate)
+             : std::string("unset")) +
+        ", coercivity_lower_bound=" +
+        (matrix.coercivity_lower_bound
+             ? std::to_string(*matrix.coercivity_lower_bound)
+             : std::string("unset")) +
+        ", cholesky_success=" +
+        std::string(matrix.cholesky_factorization_succeeded ? "true" : "false"),
         claim.confidence);
     report.claims.push_back(std::move(claim));
 }

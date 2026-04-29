@@ -63,6 +63,12 @@ struct EmbeddedBoundaryKinematicData {
     std::uint64_t relation_revision_key = 0;
 };
 
+struct CutGeometrySensitivitySampleMetadata {
+    std::array<Real, 3> parent_parametric_coordinate{{0.0, 0.0, 0.0}};
+    std::vector<Real> shape_values{};
+    std::vector<std::array<Real, 3>> shape_gradients{};
+};
+
 enum class CutIntegrationAssemblyPath : std::uint8_t {
     Standard,
     MatrixFree,
@@ -70,6 +76,25 @@ enum class CutIntegrationAssemblyPath : std::uint8_t {
     AD,
     SymbolicTangent,
     JIT
+};
+
+struct CutGeometrySensitivityMetadata {
+    MeshIndex parent_entity = static_cast<MeshIndex>(-1);
+    std::string target_kind{};
+    std::string construction_policy{};
+    std::string provenance_id{};
+    std::uint64_t source_stable_id = 0;
+    std::uint64_t cut_topology_revision = 0;
+    std::uint64_t quadrature_policy_key = 0;
+    bool ad_compatible = false;
+    bool location_sensitivity_available = false;
+    bool jacobian_sensitivity_available = false;
+    bool measure_sensitivity_available = false;
+    bool normal_sensitivity_available = false;
+    bool quadrature_weight_sensitivity_available = false;
+    std::vector<MeshIndex> parent_geometry_dofs{};
+    std::vector<CutGeometrySensitivitySampleMetadata> samples{};
+    std::vector<CutIntegrationAssemblyPath> visible_to_paths{};
 };
 
 struct CutIntegrationBinding {
@@ -82,6 +107,44 @@ struct CutIntegrationBinding {
     std::vector<CutIntegrationAssemblyPath> visible_to_paths{};
 };
 
+struct CutScalarOperatorPoint {
+    geometry::CutQuadratureKind kind = geometry::CutQuadratureKind::Volume;
+    geometry::CutIntegrationSide side = geometry::CutIntegrationSide::Negative;
+    MeshIndex parent_entity = static_cast<MeshIndex>(-1);
+    std::array<Real, 3> point{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> normal{{0.0, 0.0, 0.0}};
+    Real weight = 0.0;
+    Real volume_fraction = 0.0;
+    std::uint64_t cut_topology_revision = 0;
+    std::uint64_t quadrature_policy_key = 0;
+    geometry::CutQuadratureConstructionKind construction =
+        geometry::CutQuadratureConstructionKind::TopologySubdivision;
+    geometry::CutGeometryFrame frame = geometry::CutGeometryFrame::Reference;
+};
+
+struct CutScalarOperatorEvaluation {
+    CutIntegrationAssemblyPath path = CutIntegrationAssemblyPath::Standard;
+    std::size_t volume_rule_count = 0;
+    std::size_t interface_rule_count = 0;
+    std::size_t volume_point_count = 0;
+    std::size_t interface_point_count = 0;
+    Real parent_measure = 0.0;
+    Real negative_volume_measure = 0.0;
+    Real positive_volume_measure = 0.0;
+    Real interface_measure = 0.0;
+    Real negative_volume_integral = 0.0;
+    Real positive_volume_integral = 0.0;
+    Real interface_integral = 0.0;
+
+    [[nodiscard]] Real volumeIntegral() const noexcept {
+        return negative_volume_integral + positive_volume_integral;
+    }
+
+    [[nodiscard]] Real totalIntegral() const noexcept {
+        return volumeIntegral() + interface_integral;
+    }
+};
+
 class CutIntegrationContext {
 public:
     void clear() {
@@ -91,6 +154,7 @@ public:
         kinematic_data_.clear();
         stabilization_hooks_.clear();
         bindings_.clear();
+        sensitivity_metadata_.clear();
     }
 
     void addVolumeRule(CutCellAssemblyMetadata metadata,
@@ -115,6 +179,10 @@ public:
         bindings_.push_back(std::move(binding));
     }
 
+    void addSensitivityMetadata(CutGeometrySensitivityMetadata metadata) {
+        sensitivity_metadata_.push_back(std::move(metadata));
+    }
+
     [[nodiscard]] const std::vector<CutCellAssemblyMetadata>& metadata() const noexcept {
         return metadata_;
     }
@@ -137,6 +205,103 @@ public:
 
     [[nodiscard]] const std::vector<CutIntegrationBinding>& bindings() const noexcept {
         return bindings_;
+    }
+
+    [[nodiscard]] const std::vector<CutGeometrySensitivityMetadata>& sensitivityMetadata() const noexcept {
+        return sensitivity_metadata_;
+    }
+
+    template <typename VolumeIntegrand, typename InterfaceIntegrand>
+    [[nodiscard]] CutScalarOperatorEvaluation evaluateScalarCutOperator(
+        CutIntegrationAssemblyPath path,
+        VolumeIntegrand&& volume_integrand,
+        InterfaceIntegrand&& interface_integrand) const {
+        CutScalarOperatorEvaluation evaluation;
+        evaluation.path = path;
+
+        std::unordered_map<MeshIndex, Real> parent_measures;
+        const bool has_explicit_bindings = !bindings_.empty();
+        for (std::size_t i = 0; i < volume_rules_.size(); ++i) {
+            const CutIntegrationBinding* binding =
+                has_explicit_bindings && i < bindings_.size() ? &bindings_[i] : nullptr;
+            if (binding != nullptr && !bindingVisibleToPath(*binding, path)) {
+                continue;
+            }
+
+            const auto& rule = volume_rules_[i];
+            const CutCellAssemblyMetadata* metadata =
+                i < metadata_.size() ? &metadata_[i] : nullptr;
+            const auto parent_entity =
+                binding != nullptr
+                    ? binding->parent_entity
+                    : (metadata != nullptr ? metadata->parent_entity
+                                           : rule.provenance.parent_entity);
+            auto& parent_measure = parent_measures[parent_entity];
+            parent_measure = std::max(parent_measure, rule.parent_measure);
+
+            ++evaluation.volume_rule_count;
+            if (rule.side == geometry::CutIntegrationSide::Negative) {
+                evaluation.negative_volume_measure += rule.measure;
+            } else if (rule.side == geometry::CutIntegrationSide::Positive) {
+                evaluation.positive_volume_measure += rule.measure;
+            }
+
+            for (const auto& qp : rule.points) {
+                ++evaluation.volume_point_count;
+                CutScalarOperatorPoint point;
+                point.kind = rule.kind;
+                point.side = rule.side;
+                point.parent_entity = parent_entity;
+                point.point = qp.point;
+                point.normal = qp.normal;
+                point.weight = qp.weight;
+                point.volume_fraction =
+                    metadata != nullptr ? metadata->volume_fraction : rule.volume_fraction;
+                point.cut_topology_revision =
+                    binding != nullptr ? binding->cut_topology_revision
+                                       : rule.provenance.cut_topology_revision;
+                point.quadrature_policy_key =
+                    binding != nullptr ? binding->quadrature_policy_key : 0u;
+                point.construction = rule.policy.kind;
+                point.frame = rule.frame;
+
+                const Real contribution =
+                    qp.weight * static_cast<Real>(volume_integrand(point));
+                if (rule.side == geometry::CutIntegrationSide::Negative) {
+                    evaluation.negative_volume_integral += contribution;
+                } else if (rule.side == geometry::CutIntegrationSide::Positive) {
+                    evaluation.positive_volume_integral += contribution;
+                }
+            }
+        }
+
+        for (const auto& entry : parent_measures) {
+            evaluation.parent_measure += entry.second;
+        }
+
+        for (const auto& rule : interface_rules_) {
+            ++evaluation.interface_rule_count;
+            evaluation.interface_measure += rule.measure;
+            for (const auto& qp : rule.points) {
+                ++evaluation.interface_point_count;
+                CutScalarOperatorPoint point;
+                point.kind = rule.kind;
+                point.side = geometry::CutIntegrationSide::Interface;
+                point.parent_entity = rule.provenance.parent_entity;
+                point.point = qp.point;
+                point.normal = qp.normal;
+                point.weight = qp.weight;
+                point.volume_fraction = rule.volume_fraction;
+                point.cut_topology_revision = rule.provenance.cut_topology_revision;
+                point.quadrature_policy_key = 0u;
+                point.construction = rule.policy.kind;
+                point.frame = rule.frame;
+                evaluation.interface_integral +=
+                    qp.weight * static_cast<Real>(interface_integrand(point));
+            }
+        }
+
+        return evaluation;
     }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -369,16 +534,75 @@ public:
                 CutIntegrationAssemblyPath::JIT};
             addBinding(std::move(binding));
         }
+
+        for (const auto& record : topology.sensitivity_records) {
+            CutGeometrySensitivityMetadata metadata;
+            metadata.parent_entity = static_cast<MeshIndex>(record.parent_cell);
+            metadata.target_kind = record.target_kind;
+            metadata.construction_policy = record.construction_policy;
+            metadata.provenance_id = record.provenance.persistent_id;
+            metadata.source_stable_id = record.source_stable_id;
+            metadata.cut_topology_revision = topology.topology_revision;
+            metadata.quadrature_policy_key = quadrature_policy_key;
+            metadata.ad_compatible = record.ad_compatible;
+            metadata.location_sensitivity_available = record.location_sensitivity_available;
+            metadata.jacobian_sensitivity_available = record.jacobian_sensitivity_available;
+            metadata.measure_sensitivity_available = record.measure_sensitivity_available;
+            metadata.normal_sensitivity_available = record.normal_sensitivity_available;
+            metadata.quadrature_weight_sensitivity_available =
+                record.quadrature_weight_sensitivity_available;
+            metadata.parent_geometry_dofs.reserve(record.parent_geometry_dofs.size());
+            for (const auto dof : record.parent_geometry_dofs) {
+                metadata.parent_geometry_dofs.push_back(static_cast<MeshIndex>(dof));
+            }
+            metadata.samples.reserve(record.samples.size());
+            for (const auto& sample : record.samples) {
+                CutGeometrySensitivitySampleMetadata sample_metadata;
+                sample_metadata.parent_parametric_coordinate = {{
+                    static_cast<Real>(sample.parent_parametric_coordinate[0]),
+                    static_cast<Real>(sample.parent_parametric_coordinate[1]),
+                    static_cast<Real>(sample.parent_parametric_coordinate[2])}};
+                sample_metadata.shape_values.reserve(sample.shape_values.size());
+                for (const auto value : sample.shape_values) {
+                    sample_metadata.shape_values.push_back(static_cast<Real>(value));
+                }
+                sample_metadata.shape_gradients.reserve(sample.shape_gradients.size());
+                for (const auto& gradient : sample.shape_gradients) {
+                    sample_metadata.shape_gradients.push_back({{
+                        static_cast<Real>(gradient[0]),
+                        static_cast<Real>(gradient[1]),
+                        static_cast<Real>(gradient[2])}});
+                }
+                metadata.samples.push_back(std::move(sample_metadata));
+            }
+            metadata.visible_to_paths = {
+                CutIntegrationAssemblyPath::Standard,
+                CutIntegrationAssemblyPath::MatrixFree,
+                CutIntegrationAssemblyPath::Interpreter,
+                CutIntegrationAssemblyPath::AD,
+                CutIntegrationAssemblyPath::SymbolicTangent,
+                CutIntegrationAssemblyPath::JIT};
+            addSensitivityMetadata(std::move(metadata));
+        }
     }
 #endif
 
 private:
+    [[nodiscard]] static bool bindingVisibleToPath(const CutIntegrationBinding& binding,
+                                                   CutIntegrationAssemblyPath path) noexcept {
+        return binding.visible_to_paths.empty() ||
+               std::find(binding.visible_to_paths.begin(),
+                         binding.visible_to_paths.end(),
+                         path) != binding.visible_to_paths.end();
+    }
+
     std::vector<CutCellAssemblyMetadata> metadata_{};
     std::vector<geometry::CutQuadratureRule> volume_rules_{};
     std::vector<geometry::CutQuadratureRule> interface_rules_{};
     std::vector<EmbeddedBoundaryKinematicData> kinematic_data_{};
     std::vector<CutStabilizationHook> stabilization_hooks_{};
     std::vector<CutIntegrationBinding> bindings_{};
+    std::vector<CutGeometrySensitivityMetadata> sensitivity_metadata_{};
 };
 
 } // namespace assembly

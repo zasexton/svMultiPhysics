@@ -27,6 +27,8 @@ FormExpr wrapIntegral(const FormExpr& integrand, IntegralDomain domain, int boun
             return integrand.ds(boundary_marker);
         case IntegralDomain::InteriorFace:
             return integrand.dS();
+        case IntegralDomain::InterfaceFace:
+            return integrand.dI(boundary_marker);
     }
     return {};
 }
@@ -42,6 +44,16 @@ inline FormExpr zeroExpr()
     return FormExpr::constant(0.0);
 }
 
+bool isZeroConstant(const FormExpr& expr)
+{
+    const auto* node = expr.node();
+    if (!node) {
+        return false;
+    }
+    const auto value = node->constantValue();
+    return value.has_value() && *value == 0.0;
+}
+
 bool decomposeAffineInTrial(const FormExpr& expr, Decomp& out, std::string* reason);
 
 bool decomposeAffineUnaryLinear(const FormExpr& expr,
@@ -52,9 +64,10 @@ bool decomposeAffineUnaryLinear(const FormExpr& expr,
                                 const std::function<FormExpr(const FormExpr&)>& op)
 {
     out.degree = child.degree;
-    out.constant = op(child.constant);
-    out.linear = op(child.linear);
+    out.constant = isZeroConstant(child.constant) ? zeroExpr() : op(child.constant);
+    out.linear = isZeroConstant(child.linear) ? zeroExpr() : op(child.linear);
     (void)expr;
+    (void)child_expr;
     return child.degree <= 1;
 }
 
@@ -208,8 +221,8 @@ bool decomposeAffineInTrial(const FormExpr& expr, Decomp& out, std::string* reas
             };
 
             out.degree = dc.degree;
-            out.constant = op(dc.constant);
-            out.linear = op(dc.linear);
+            out.constant = isZeroConstant(dc.constant) ? zeroExpr() : op(dc.constant);
+            out.linear = isZeroConstant(dc.linear) ? zeroExpr() : op(dc.linear);
             return dc.degree <= 1;
         }
 
@@ -234,8 +247,19 @@ bool decomposeAffineInTrial(const FormExpr& expr, Decomp& out, std::string* reas
             if (!decomposeAffineInTrial(a, da, reason)) return false;
             if (!decomposeAffineInTrial(b, db, reason)) return false;
 
-            const auto addOp = [&](const FormExpr& x, const FormExpr& y) {
-                return (node->type() == FormExprType::Add) ? (x + y) : (x - y);
+            const auto addOpOrZero = [&](const FormExpr& x, const FormExpr& y) {
+                const bool x_zero = isZeroConstant(x);
+                const bool y_zero = isZeroConstant(y);
+                if (node->type() == FormExprType::Add) {
+                    if (x_zero && y_zero) return zeroExpr();
+                    if (x_zero) return y;
+                    if (y_zero) return x;
+                    return x + y;
+                }
+                if (x_zero && y_zero) return zeroExpr();
+                if (x_zero) return -y;
+                if (y_zero) return x;
+                return x - y;
             };
 
             const auto multLike = [&](const FormExpr& x, const FormExpr& y) {
@@ -248,6 +272,12 @@ bool decomposeAffineInTrial(const FormExpr& expr, Decomp& out, std::string* reas
                     default: return FormExpr{};
                 }
             };
+            const auto multLikeOrZero = [&](const FormExpr& x, const FormExpr& y) {
+                if (isZeroConstant(x) || isZeroConstant(y)) {
+                    return zeroExpr();
+                }
+                return multLike(x, y);
+            };
 
             if (node->type() == FormExprType::Add || node->type() == FormExprType::Subtract) {
                 out.degree = std::max(da.degree, db.degree);
@@ -255,8 +285,8 @@ bool decomposeAffineInTrial(const FormExpr& expr, Decomp& out, std::string* reas
                     if (reason) *reason = "non-affine add/sub term";
                     return false;
                 }
-                out.constant = addOp(da.constant, db.constant);
-                out.linear = addOp(da.linear, db.linear);
+                out.constant = addOpOrZero(da.constant, db.constant);
+                out.linear = addOpOrZero(da.linear, db.linear);
                 return true;
             }
 
@@ -286,8 +316,14 @@ bool decomposeAffineInTrial(const FormExpr& expr, Decomp& out, std::string* reas
             }
 
             out.degree = da.degree + db.degree;
-            out.constant = multLike(da.constant, db.constant);
-            out.linear = multLike(da.constant, db.linear) + multLike(da.linear, db.constant);
+            out.constant = multLikeOrZero(da.constant, db.constant);
+            if (da.degree == 1) {
+                out.linear = multLikeOrZero(da.linear, db.constant);
+            } else if (db.degree == 1) {
+                out.linear = multLikeOrZero(da.constant, db.linear);
+            } else {
+                out.linear = zeroExpr();
+            }
             return true;
         }
 

@@ -343,24 +343,25 @@ consumed summaries, limitations, and reference anchors used by the design plan.
 | `ConstraintRankAnalyzer` | Nullspace claims plus strong, affine, periodic, multiplier, penalty, or weak constraints | `UnderConstraint`, `OverConstraint`, `ConstraintRedundancy`, `InitialDataCompatibility` | `ReducedMatrix`, `InitialCompatibility` | Affine/MPC reductions are unknown unless transformed summaries are available | [BrennerScott2008] |
 | `CompatibilityAnalyzer` | Preserved nullspace or algebraic constraint requiring data compatibility | `CompatibilityCondition`, `InitialDataCompatibility` | `InitialCompatibility` | Does not infer RHS integral balances without metadata | [BrennerScott2008], [AgmonDouglisNirenberg1959] |
 | `TopologyScopeAnalyzer` | Nullspace/constraint evidence scoped over disconnected mesh regions | `TopologyScopedKernel` | `MeshGeometryQuality`, region-specific `ReducedMatrix` | Needs topology context for region-specific conclusions | [BrennerScott2008] |
-| `InterfaceValidationAnalyzer` | Boundary/interface contributions, markers, weak penalties, flux-pair metadata | `InterfaceCondition`, `WeakBoundaryCoercivity` | `BoundarySymbol`, `FluxBalance`, `ParameterScale` | Pre-setup topology may only support warnings | [Arnold1982IP], [ABCM2002DG], [NitscheImmersed2016] |
-| `InfSupAnalyzer` | Pairing descriptors, saddle-point claims, constraint blocks | `InfSupCondition` | `InfSupEstimate`, `ReducedMatrix` | Structural pair lookup is generic and conservative; numeric estimates are optional | [BrezziFortin1991], [Bathe2001InfSup] |
+| `InterfaceValidationAnalyzer` | Boundary/interface contributions, markers, weak penalties, flux-pair metadata | `InterfaceCondition`, `WeakBoundaryCoercivity`, `BoundaryComplementingCondition` | `BoundarySymbol`, `FluxBalance`, `ParameterScale` | Complementing-condition certification requires Lopatinskii-style tangential-frequency, decaying-root, stable-subspace, positive-margin, and theorem evidence; rank/count coverage alone is not a proof | [AgmonDouglisNirenberg1959], [Arnold1982IP], [ABCM2002DG], [NitscheImmersed2016] |
+| `InfSupAnalyzer` | Pairing descriptors, saddle-point claims, constraint blocks | `InfSupCondition` | `InfSupEstimate`, `ReducedMatrix` | Structural pair and numeric estimates certify only when theorem, mesh/domain/boundary scope, beta lower-bound, and Fortin-norm evidence are supplied | [BrezziFortin1991], [Bathe2001InfSup] |
 | `TransportCharacterAnalyzer` | Directional first-order traits, transport descriptors, skew/nonnormal evidence | `OperatorTransportCharacter`, `Stabilization` | `ParameterScale`, `TemporalStability`, `DiscreteMatrix`, `InvariantDomain` | Peclet/CFL/nonnormality are physics-agnostic dimensionless summaries, not equation-name checks | [BrooksHughes1982], [RoosStynesTobiska2008] |
 | `ConservationAnalyzer` | Balance groups, conservative flux variables, exchange pairs | `ConservationStructure`, `InterfaceCondition` | `FluxBalance` | Opt-in: no `BalanceDescriptor` means no conservation claim | [RaviartThomas1977] |
-| `DAEStructureAnalyzer` | Dynamic/algebraic variable descriptors, mass-like blocks, constraint blocks | `DifferentialAlgebraicStructure` | `TemporalStability`, `InitialCompatibility` | DAE index is classified only to the level supported by metadata | [HairerWanner] |
+| `DAEStructureAnalyzer` | Dynamic/algebraic variable descriptors, mass-like blocks, constraint blocks | `DifferentialAlgebraicStructure` | `DAEStructureEvidence`, `InitialCompatibility` | Semi-explicit index-1 and descriptor-pencil index-1 certification require rank/hidden-constraint/consistent-initial or regular-pencil/strangeness/projector theorem evidence | [HairerWanner] |
 | `SpaceCompatibilityAnalyzer` | Function-space family, trace capabilities, exact-sequence metadata, mixed pairs | `SpaceCompatibility`, `CompatibleComplexStructure` | `BoundarySymbol`, `InfSupEstimate`, `CompatibleComplex` | Custom spaces are unknown unless they emit explicit compatibility metadata | [AFW2006], [BrezziFortin1991] |
 | `DiscreteMonotonicityAnalyzer` | Scalar operator claims plus matrix/stencil sign summaries | `DiscreteMaximumPrinciple`, `ZMatrixStructure`, `MMatrixStructure`, `MatrixMonotonicityRisk` | `DiscreteMatrix`, `ReducedMatrix`, `LocalStencil`, `MeshGeometryQuality` | M-matrix certification is not attempted when reduced evidence is missing or inexact | [DMPAnisotropic2009] |
 | `MeshGeometryAnalyzer` | Mesh-quality summaries and topology-scoped geometric evidence | `MeshGeometryValidity`, `MatrixMonotonicityRisk` | `MeshGeometryQuality` | Native summaries must be provided by mesh owners; no VTK ownership or dense geometry copies | [BrennerScott2008] |
-| `TemporalStabilityAnalyzer` | Time scheme metadata, CFL/eigenvalue scale, amplification radius | `TemporalStability` | `TemporalStability` | Does not derive full time-integrator stability from method names alone | [HairerWanner], [ChungHulbert1993] |
-| `EnergyEntropyLawAnalyzer` | Declared energy/entropy balance, production sign, exchange cancellation | `EnergyStability`, `EntropyStability` | `EnergyEntropyBalance`, `FluxBalance` | Requires declared law metadata; does not infer a functional automatically | [Tadmor2016], [EnergyStableGradientFlows2021] |
+| `TemporalStabilityAnalyzer` | Time scheme metadata, CFL/eigenvalue scale, amplification radius | `TemporalStability` | `TemporalStability` | Scalar/modal amplification bounds are diagnostic; certification requires theorem-scoped stability-region/CFL/norm/nonnormal evidence | [HairerWanner], [ChungHulbert1993] |
+| `EnergyEntropyLawAnalyzer` | Declared energy/entropy balance, production sign, exchange cancellation | `EnergyStability`, `EntropyStability` | `EnergyEntropyBalance`, `FluxBalance` | Energy certification requires a named energy functional, norm, positivity/coercivity, discrete dissipation identity, boundary/source accounting, and theorem evidence; entropy certification requires convex entropy variables/flux/dissipation metadata | [Tadmor2016], [EnergyStableGradientFlows2021] |
 | `CoefficientConstitutiveAnalyzer` | Coefficient spectral bounds, positivity, contrast, parameter scales | `CoefficientPositivity`, `ParameterRobustness` | `CoefficientProperties`, `ParameterScale` | Black-box kernels need to provide summaries explicitly | [BrennerScott2008], [RoosStynesTobiska2008] |
 | `NonlinearTangentAnalyzer` | Nonlinear residual/tangent metadata, finite-difference action checks | `NonlinearTangentStructure` | `NonlinearTangent`, `DiscreteMatrix` | Exactness is unknown when no tangent consistency summary is available | [BrennerScott2008] |
 | `LockingRiskAnalyzer` | Constraint ratio, unstable pair evidence, near-singular scales, low-order spaces | `LockingRisk` | `InfSupEstimate`, `ReducedMatrix`, `ParameterScale` | Reports risk indicators, not a proof of locking-free behavior | [LockingReview2018], [CutFEMGhostPenalty2025] |
-| `SpectralSpuriousModeAnalyzer` | Declared eigenproblem, self-adjointness, compactness, compatible-complex metadata | `SpectralCorrectness` | `SpectralStructure`, `CompatibleComplex` | Spectral pollution checks require explicit eigenproblem and compactness evidence | [Boffi2010Eigen], [AFW2006] |
-| `ErrorEstimatorAnalyzer` | Residual/jump/flux-reconstruction/goal metadata | `ErrorEstimatorEligibility` | `ErrorEstimator`, `FluxBalance`, `AdjointConsistency` | Eligibility is distinct from an actual a posteriori error estimate | [Verfurth2013], [BeckerRannacher2001] |
+| `SpectralSpuriousModeAnalyzer` | Declared eigenproblem, self-adjointness, compactness, compatible-complex metadata | `SpectralCorrectness` | `SpectralStructure`, `CompatibleComplex` | Compatible-complex evidence alone is not sufficient; certification requires operator/gap/discrete-compactness convergence or a theorem explicitly tying the complex to spectral correctness | [Boffi2010Eigen], [AFW2006] |
+| `ErrorEstimatorAnalyzer` | Residual/jump/flux-reconstruction/goal metadata | `ErrorEstimatorEligibility` | `ErrorEstimator`, `FluxBalance`, `AdjointConsistency` | Eligibility is distinct from an actual estimate; certified reliability/efficiency requires finite positive constants, valid effectivity bounds, norm scope, mesh/oscillation scope, refinement samples, and theorem evidence | [Verfurth2013], [BeckerRannacher2001] |
 | `QuadratureAdequacyAnalyzer` | Integrand degree, quadrature exactness, reduced integration, aliasing controls | `QuadratureAdequacy` | `QuadratureAdequacy`, `LocalStencil` | Degree and aliasing evidence must come from forms or assembly summaries | [BrennerScott2008] |
 | `PreservationStructureAnalyzer` | Invariant-domain, equilibrium, moving-domain, transfer, or adjoint summaries | `InvariantDomainPreservation`, `EquilibriumPreservation`, `GeometricConservation`, `TransferOperatorCompatibility`, `AdjointConsistency` | `InvariantDomain`, `EquilibriumPreservation`, `MovingDomain`, `TransferOperator`, `AdjointConsistency` | Preservation checks are summary-backed and do not infer problem-specific equilibria | [GuermondPopovInvariantDomains], [Audusse2004WellBalanced], [GCLMovingMesh2006], [BernardiMadayPateraMortar1989], [AdjointConsistentInterface2010] |
 | `CoupledSystemStabilityAnalyzer` | Coupling-group summaries, exchange residuals, partition iteration radius, drift | `CoupledSystemStructure`, `ConservationStructure`, `DifferentialAlgebraicStructure` | `CoupledSystemStability`, `FluxBalance`, `TemporalStability` | Partitioned stability is reported from supplied summaries only | [HairerWanner] |
+| `MinimumResidualStabilityAnalyzer` | Petrov-Galerkin, DPG, or least-squares residual-minimization metadata | `MinimumResidualStability` | `MinimumResidualStability` | Certification requires known method class, scoped trial/test and norm metadata, positive residual-control constant, positive conditioning estimates, Riesz and Fortin/optimal-test evidence, and theorem scope | [BrezziFortin1991] |
 | `SolverCompatibilityAnalyzer` | Solver/preconditioner choice plus symmetry, definiteness, nullspace, mixed, and scaling claims | `SolverCompatibility` | `DiscreteMatrix`, `ReducedMatrix`, block/preconditioner metadata | Does not choose a solver; it flags compatibility with the configured one | [BrennerScott2008], [BrezziFortin1991] |
 | `NumericSummaryPlanner` | Claims or context metadata that need compact numeric evidence | Summary requests, not property claims | All `AnalysisSummaryKind` values as needed | Planning only; it never computes or materializes summaries | All relevant analyzer-family references |
 
@@ -829,6 +830,41 @@ Important categories include:
 - disconnected meshes
 - interface and coupled-boundary cases
 - variable descriptor handling for non-FE unknowns
+
+## Certification Evidence Contract
+
+`CertificationClass::Certified` is reserved for claims whose summaries carry
+the theorem-level assumptions, numeric bounds, and scope needed by the
+corresponding mathematical descriptor. Diagnostic samples and booleans are
+allowed to support `Likely` claims, but they should not certify a property
+unless they are tied to scoped provenance.
+
+Current examples:
+
+- temporal stability needs stability-region or norm/nonnormal evidence with a
+  theorem identifier, spectrum or numerical-range coverage, and CFL derivation
+  metadata when the method is conditionally stable
+- energy stability needs a named energy functional, norm, positivity/coercivity
+  evidence, discrete dissipation identity, boundary/source accounting, and
+  theorem evidence
+- entropy stability needs convex entropy, entropy variables, entropy flux,
+  entropy dissipation, boundary/source metadata, and theorem evidence
+- boundary complementing conditions need rank/count coverage plus
+  tangential-frequency, decaying-root, stable-subspace, parameter-ellipticity,
+  positive-margin, and theorem evidence
+- inf-sup certification needs theorem, mesh/domain/boundary scope, positive beta
+  lower-bound evidence, and Fortin-norm evidence when a Fortin operator is used
+- spectral correctness needs compact/self-adjoint evidence plus operator
+  convergence, discrete compactness, gap convergence, or a compatible-complex
+  theorem that explicitly implies spectral correctness
+- estimator eligibility certification needs finite positive reliability and
+  efficiency constants, valid effectivity bounds, norm scope, data-oscillation
+  and mesh-shape scope, refinement samples, and theorem evidence
+- minimum-residual certification needs known method class, scoped trial/test
+  spaces and norms, positive residual-control and conditioning values, Riesz
+  evidence, Fortin or optimal-test evidence, and theorem scope
+- descriptor DAE certification needs regular descriptor-pencil, strangeness,
+  projector-consistency, hidden-constraint, initialization, and theorem evidence
 
 ## Recommended Reading Order In This Folder
 

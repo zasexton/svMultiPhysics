@@ -78,6 +78,13 @@ public:
              ProblemAnalysisReport& report) const override;
 };
 
+class MinimumResidualStabilityAnalyzer : public AnalyzerPass {
+public:
+    [[nodiscard]] std::string name() const override;
+    void run(const ProblemAnalysisContext& context,
+             ProblemAnalysisReport& report) const override;
+};
+
 class PreservationStructureAnalyzer : public AnalyzerPass {
 public:
     [[nodiscard]] std::string name() const override;

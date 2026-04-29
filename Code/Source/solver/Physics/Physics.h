@@ -14,6 +14,7 @@
  */
 
 #include "Physics/Core/PhysicsModule.h"
+#include "Physics/Formulations/MeshMotion/HarmonicMeshMotionModule.h"
+#include "Physics/Formulations/MeshMotion/PseudoElasticMeshMotionModule.h"
 
 #endif // SVMP_PHYSICS_PHYSICS_H
-

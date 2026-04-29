@@ -35,6 +35,58 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 #------------------------------------------------------------------------------
+# Clang/libstdc++ compatibility (Ubuntu Clang 14 vs libstdc++ 13)
+#
+# FE applies the same workaround for its own targets. Physics also compiles
+# Mesh-backed FE headers directly, so it needs the workaround on Physics targets
+# as well when using older Clang with newer libstdc++ headers.
+#------------------------------------------------------------------------------
+set(_SVMP_PHYSICS_IS_CLANG FALSE)
+set(_SVMP_PHYSICS_CLANG_MAJOR 0)
+set(_SVMP_PHYSICS_LIBSTDCXX11_OPTIONS "")
+
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    set(_SVMP_PHYSICS_IS_CLANG TRUE)
+    if(CMAKE_CXX_COMPILER_VERSION MATCHES "^([0-9]+)\\.")
+        set(_SVMP_PHYSICS_CLANG_MAJOR "${CMAKE_MATCH_1}")
+    endif()
+endif()
+
+if(NOT _SVMP_PHYSICS_IS_CLANG AND NOT CMAKE_CROSSCOMPILING)
+    execute_process(
+        COMMAND "${CMAKE_CXX_COMPILER}" "--version"
+        RESULT_VARIABLE _svmp_physics_cxx_version_rc
+        OUTPUT_VARIABLE _svmp_physics_cxx_version_out
+        ERROR_VARIABLE _svmp_physics_cxx_version_err
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_STRIP_TRAILING_WHITESPACE
+    )
+    if(_svmp_physics_cxx_version_rc EQUAL 0)
+        set(_svmp_physics_cxx_version_text
+            "${_svmp_physics_cxx_version_out}\n${_svmp_physics_cxx_version_err}")
+        if(_svmp_physics_cxx_version_text MATCHES "clang version")
+            set(_SVMP_PHYSICS_IS_CLANG TRUE)
+            if(_svmp_physics_cxx_version_text MATCHES "clang version ([0-9]+)\\.")
+                set(_SVMP_PHYSICS_CLANG_MAJOR "${CMAKE_MATCH_1}")
+            endif()
+            message(STATUS "Physics: NOTE: CMake reports compiler ID '${CMAKE_CXX_COMPILER_ID}', but '${CMAKE_CXX_COMPILER}' identifies as Clang; consider deleting the build directory to refresh compiler detection")
+        endif()
+    endif()
+endif()
+
+if(_SVMP_PHYSICS_IS_CLANG AND _SVMP_PHYSICS_CLANG_MAJOR LESS 16 AND
+   EXISTS "/usr/include/c++/11" AND
+   EXISTS "/usr/include/x86_64-linux-gnu/c++/11")
+    message(STATUS "Physics: Clang <16 detected; using libstdc++-11 headers to avoid <chrono> build failure with newer libstdc++")
+    list(APPEND _SVMP_PHYSICS_LIBSTDCXX11_OPTIONS
+        $<$<COMPILE_LANGUAGE:CXX>:-nostdinc++>
+        $<$<COMPILE_LANGUAGE:CXX>:-isystem/usr/include/c++/11>
+        $<$<COMPILE_LANGUAGE:CXX>:-isystem/usr/include/x86_64-linux-gnu/c++/11>
+        $<$<COMPILE_LANGUAGE:CXX>:-isystem/usr/include/c++/11/backward>
+    )
+endif()
+
+#------------------------------------------------------------------------------
 # Build options
 #------------------------------------------------------------------------------
 
@@ -187,6 +239,10 @@ target_include_directories(svphysics
 
 target_link_libraries(svphysics PUBLIC svfe::svfe)
 
+if(_SVMP_PHYSICS_LIBSTDCXX11_OPTIONS)
+    target_compile_options(svphysics PRIVATE ${_SVMP_PHYSICS_LIBSTDCXX11_OPTIONS})
+endif()
+
 if(PHYSICS_WITH_MESH AND TARGET svmesh)
     target_link_libraries(svphysics PUBLIC svmesh)
     target_compile_definitions(svphysics PUBLIC SVMP_PHYSICS_WITH_MESH=1)
@@ -218,6 +274,9 @@ if(PHYSICS_BUILD_TESTS)
 
     add_executable(test_physics ${PHYSICS_TEST_SOURCES})
     target_link_libraries(test_physics PRIVATE svphysics ${GTEST_LIBRARIES})
+    if(_SVMP_PHYSICS_LIBSTDCXX11_OPTIONS)
+        target_compile_options(test_physics PRIVATE ${_SVMP_PHYSICS_LIBSTDCXX11_OPTIONS})
+    endif()
     add_test(NAME Physics_Tests COMMAND test_physics)
 
     # Optional MPI-launched tests (requires mpiexec and building with MPI-enabled deps).

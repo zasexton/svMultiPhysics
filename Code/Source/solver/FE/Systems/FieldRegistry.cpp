@@ -34,6 +34,8 @@ FieldId FieldRegistry::add(FieldSpec spec)
     rec.components = spec.components > 0 ? spec.components : rec.space->value_dimension();
     rec.scope = spec.scope;
     rec.interface_marker = spec.interface_marker;
+    rec.source_kind = spec.source_kind;
+    rec.derived = spec.derived;
 
     if (rec.space->space_type() == spaces::SpaceType::Mortar) {
         const auto* mortar_space = dynamic_cast<const spaces::MortarSpace*>(rec.space.get());
@@ -58,6 +60,25 @@ FieldId FieldRegistry::add(FieldSpec spec)
         FE_THROW_IF(rec.interface_marker >= 0, InvalidArgumentException,
                     "FieldRegistry::add: volume field '" + rec.name +
                         "' cannot specify interface_marker");
+    }
+
+    if (rec.source_kind == FieldSourceKind::DerivedFromUnknown) {
+        FE_THROW_IF(rec.derived.source_field == INVALID_FIELD_ID,
+                    InvalidArgumentException,
+                    "FieldRegistry::add: derived field '" + rec.name +
+                        "' must name a source field");
+        FE_THROW_IF(rec.derived.role == DerivedFieldRole::None ||
+                        rec.derived.derivative_order <= 0,
+                    InvalidArgumentException,
+                    "FieldRegistry::add: derived field '" + rec.name +
+                        "' must specify a valid derived role and derivative order");
+    } else {
+        FE_THROW_IF(rec.derived.source_field != INVALID_FIELD_ID ||
+                        rec.derived.role != DerivedFieldRole::None ||
+                        rec.derived.derivative_order != 0,
+                    InvalidArgumentException,
+                    "FieldRegistry::add: non-derived field '" + rec.name +
+                        "' cannot carry derived-field metadata");
     }
 
     fields_.push_back(rec);

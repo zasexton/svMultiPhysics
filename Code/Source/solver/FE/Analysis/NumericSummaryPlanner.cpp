@@ -12,6 +12,7 @@
 #include "Analysis/ContributionDescriptor.h"
 
 #include <algorithm>
+#include <sstream>
 
 namespace svmp {
 namespace FE {
@@ -108,14 +109,66 @@ std::vector<VariableKey> variablesForFields(const std::vector<FieldId>& fields) 
     return variables;
 }
 
+bool containsVariable(const std::vector<VariableKey>& values,
+                      const VariableKey& value) {
+    return std::find(values.begin(), values.end(), value) != values.end();
+}
+
+bool sameVariableSet(const std::vector<VariableKey>& a,
+                     const std::vector<VariableKey>& b) {
+    return a.size() == b.size() &&
+           std::all_of(a.begin(), a.end(), [&](const VariableKey& value) {
+               return containsVariable(b, value);
+           });
+}
+
+void appendVariableId(std::ostringstream& os, const VariableKey& variable) {
+    os << static_cast<int>(variable.kind) << ':'
+       << variable.field_id << ':'
+       << variable.component << ':'
+       << variable.name;
+}
+
+std::string variablesScopeId(const std::vector<VariableKey>& variables) {
+    std::ostringstream os;
+    for (const auto& variable : variables) {
+        os << '[';
+        appendVariableId(os, variable);
+        os << ']';
+    }
+    return os.str();
+}
+
+std::string optionalString(const std::optional<std::string>& value) {
+    return value ? *value : std::string{};
+}
+
+std::string claimScopeId(const PropertyClaim& claim) {
+    if (claim.estimate_scope) return *claim.estimate_scope;
+    if (claim.tested_block_id) return *claim.tested_block_id;
+    if (claim.coefficient_id) return *claim.coefficient_id;
+    if (claim.invariant_set_id) return *claim.invariant_set_id;
+    if (claim.equilibrium_id) return *claim.equilibrium_id;
+    return {};
+}
+
 AnalysisSummaryRequest& ensureRequest(AnalysisRequestPlan& plan,
                                       AnalysisSummaryKind kind,
-                                      DomainKind domain) {
+                                      DomainKind domain,
+                                      const std::vector<VariableKey>& variables,
+                                      const std::string& block_id,
+                                      const std::string& contribution_id,
+                                      const std::string& scope_id) {
     auto it = std::find_if(plan.summary_requests.begin(),
                            plan.summary_requests.end(),
-                           [kind, domain](const AnalysisSummaryRequest& request) {
+                           [&](const AnalysisSummaryRequest& request) {
                                return request.summary_kind == kind &&
-                                      request.domain == domain;
+                                      request.domain == domain &&
+                                      sameVariableSet(request.variables,
+                                                      variables) &&
+                                      request.block_id == block_id &&
+                                      request.contribution_id == contribution_id &&
+                                      request.scope_id == scope_id;
                            });
     if (it != plan.summary_requests.end()) {
         return *it;
@@ -124,7 +177,19 @@ AnalysisSummaryRequest& ensureRequest(AnalysisRequestPlan& plan,
     AnalysisSummaryRequest request;
     request.summary_kind = kind;
     request.domain = domain;
+    request.variables = variables;
+    request.block_id = block_id;
+    request.contribution_id = contribution_id;
+    request.scope_id = scope_id;
     request.request_id = std::string(toString(kind)) + ":" + toString(domain);
+    if (!block_id.empty()) request.request_id += ":block=" + block_id;
+    if (!contribution_id.empty()) {
+        request.request_id += ":contribution=" + contribution_id;
+    }
+    if (!scope_id.empty()) request.request_id += ":scope=" + scope_id;
+    if (!variables.empty()) {
+        request.request_id += ":vars=" + variablesScopeId(variables);
+    }
     plan.summary_requests.push_back(std::move(request));
     return plan.summary_requests.back();
 }
@@ -137,7 +202,13 @@ void addRequest(AnalysisRequestPlan& plan,
                 std::size_t source_claim_index,
                 const PropertyClaim& claim,
                 const std::string& reason) {
-    auto& request = ensureRequest(plan, kind, domain);
+    auto& request = ensureRequest(plan,
+                                  kind,
+                                  domain,
+                                  variables,
+                                  optionalString(claim.tested_block_id),
+                                  std::string{},
+                                  claimScopeId(claim));
     request.already_available = request.already_available || context.hasSummaryKind(kind);
     request.confidence = strongerConfidence(request.confidence, claim.confidence);
     appendVariables(request.variables, variables);
@@ -153,8 +224,17 @@ void addContextRequest(AnalysisRequestPlan& plan,
                        DomainKind domain,
                        const std::vector<VariableKey>& variables,
                        const std::string& reason,
-                       AnalysisConfidence confidence = AnalysisConfidence::Medium) {
-    auto& request = ensureRequest(plan, kind, domain);
+                       AnalysisConfidence confidence = AnalysisConfidence::Medium,
+                       const std::string& block_id = {},
+                       const std::string& contribution_id = {},
+                       const std::string& scope_id = {}) {
+    auto& request = ensureRequest(plan,
+                                  kind,
+                                  domain,
+                                  variables,
+                                  block_id,
+                                  contribution_id,
+                                  scope_id);
     request.already_available = request.already_available || context.hasSummaryKind(kind);
     request.confidence = strongerConfidence(request.confidence, confidence);
     appendVariables(request.variables, variables);
@@ -228,9 +308,15 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupEstimate,
                        claim.domain, claim.variables, i, claim,
                        source + " detected saddle-point structure; request numerical inf-sup estimate");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupPairCertification,
+                       claim.domain, claim.variables, i, claim,
+                       source + " detected saddle-point structure; request known stable-pair, Fortin, mesh, and domain assumption evidence");
             addRequest(report.request_plan, context, AnalysisSummaryKind::ReducedMatrix,
                        claim.domain, claim.variables, i, claim,
                        source + " detected saddle-point structure; request constrained/reduced block classification");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::SchurComplement,
+                       claim.domain, claim.variables, i, claim,
+                       source + " detected saddle-point structure; request Schur complement conditioning, equivalence, and preconditioner evidence");
             addRequest(report.request_plan, context, AnalysisSummaryKind::DiscreteMatrix,
                        claim.domain, claim.variables, i, claim,
                        source + " detected saddle-point structure; request block matrix diagnostics and Schur-ready evidence");
@@ -241,6 +327,9 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupEstimate,
                        claim.domain, claim.variables, i, claim,
                        source + " emitted an inf-sup claim; request estimate value, scope, and nullspace handling");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupPairCertification,
+                       claim.domain, claim.variables, i, claim,
+                       source + " emitted an inf-sup claim; request stable-pair/Fortin certification metadata");
             addRequest(report.request_plan, context, AnalysisSummaryKind::ReducedMatrix,
                        claim.domain, claim.variables, i, claim,
                        source + " emitted an inf-sup claim; request reduced saddle-point block evidence");
@@ -267,6 +356,9 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addRequest(report.request_plan, context, AnalysisSummaryKind::ParameterScale,
                        claim.domain, claim.variables, i, claim,
                        source + " detected stabilization; request stabilization parameter and scaling metadata");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::StabilizationAdequacy,
+                       claim.domain, claim.variables, i, claim,
+                       source + " detected stabilization; request parameter-formula, consistency, Peclet, and CFL adequacy evidence");
             addRequest(report.request_plan, context, AnalysisSummaryKind::DiscreteMatrix,
                        claim.domain, claim.variables, i, claim,
                        source + " detected stabilization; request retained matrix diagnostics for consistency and conditioning");
@@ -284,6 +376,9 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addRequest(report.request_plan, context, AnalysisSummaryKind::TemporalStability,
                        claim.domain, claim.variables, i, claim,
                        source + " classified temporal/DAE structure; request time scheme stability metadata");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::DAEStructureEvidence,
+                       claim.domain, claim.variables, i, claim,
+                       source + " classified temporal/DAE structure; request mass-rank, algebraic-Jacobian rank, hidden-constraint, and consistent-initialization evidence");
             addRequest(report.request_plan, context, AnalysisSummaryKind::InitialCompatibility,
                        claim.domain, claim.variables, i, claim,
                        source + " classified temporal/DAE structure; request initial constraint and boundary residual evidence");
@@ -298,6 +393,9 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
                 addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupEstimate,
                            claim.domain, claim.variables, i, claim,
                            source + " emitted a mixed space compatibility claim; request inf-sup evidence for the space pair");
+                addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupPairCertification,
+                           claim.domain, claim.variables, i, claim,
+                           source + " emitted a mixed space compatibility claim; request known stable-pair and Fortin metadata");
             }
         }
 
@@ -413,8 +511,14 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
                        claim.domain, claim.variables, i, claim,
                        source + " emitted quadrature adequacy evidence; request exactness, aliasing, and hourglass-control metadata");
             addRequest(report.request_plan, context, AnalysisSummaryKind::LocalStencil,
+                              claim.domain, claim.variables, i, claim,
+                              source + " emitted quadrature adequacy evidence; request local stencil diagnostics for zero-energy modes");
+        }
+
+        if (claim.kind == PropertyKind::MinimumResidualStability) {
+            addRequest(report.request_plan, context, AnalysisSummaryKind::MinimumResidualStability,
                        claim.domain, claim.variables, i, claim,
-                       source + " emitted quadrature adequacy evidence; request local stencil diagnostics for zero-energy modes");
+                       source + " emitted minimum-residual/Petrov-Galerkin evidence; request trial/test space, Riesz map, Fortin/optimal-test, enrichment, residual-control, and conditioning metadata");
         }
 
         if (claim.kind == PropertyKind::InvariantDomainPreservation) {
@@ -451,7 +555,7 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             hasSourceAnalyzer(claim, "CoupledSystemStabilityAnalyzer")) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::CoupledSystemStability,
                        claim.domain, claim.variables, i, claim,
-                       source + " emitted coupled-system stability evidence; request exchange residual, constraint drift, and partition iteration metadata");
+                       source + " emitted coupled-system stability evidence; request exchange residual, constraint drift, contraction, nonnormal, and partition metadata");
             addRequest(report.request_plan, context, AnalysisSummaryKind::TemporalStability,
                        claim.domain, claim.variables, i, claim,
                        source + " emitted coupled-system stability evidence; request coupled temporal stability metadata");
@@ -472,17 +576,26 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
                               contribution.domain, variables,
                               "ProblemAnalysisContext has face contribution '" +
                                   contribution.operator_tag +
-                                  "'; request trace/penalty boundary-symbol metadata");
+                                  "'; request trace/penalty boundary-symbol metadata",
+                              AnalysisConfidence::Medium,
+                              contribution.operator_tag,
+                              contribution.contribution_id);
             addContextRequest(report.request_plan, context, AnalysisSummaryKind::FluxBalance,
                               contribution.domain, variables,
                               "ProblemAnalysisContext has face contribution '" +
                                   contribution.operator_tag +
-                                  "'; request numerical flux and interface-pair balance residuals");
+                                  "'; request numerical flux and interface-pair balance residuals",
+                              AnalysisConfidence::Medium,
+                              contribution.operator_tag,
+                              contribution.contribution_id);
             addContextRequest(report.request_plan, context, AnalysisSummaryKind::LocalStencil,
                               contribution.domain, variables,
                               "ProblemAnalysisContext has DG/interface face contribution '" +
                                   contribution.operator_tag +
-                                  "'; request local face stencil diagnostics");
+                                  "'; request local face stencil diagnostics",
+                              AnalysisConfidence::Medium,
+                              contribution.operator_tag,
+                              contribution.contribution_id);
         }
 
         if (contribution.domain == DomainKind::InterfaceFace) {
@@ -490,7 +603,10 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
                               contribution.domain, variables,
                               "ProblemAnalysisContext has interface contribution '" +
                                   contribution.operator_tag +
-                                  "'; request projection/mortar transfer compatibility evidence");
+                                  "'; request projection/mortar transfer compatibility evidence",
+                              AnalysisConfidence::Medium,
+                              contribution.operator_tag,
+                              contribution.contribution_id);
         }
 
         if (contribution.role == ContributionRole::BoundaryConstraint ||
@@ -499,13 +615,19 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
                               contribution.domain, variables,
                               "ProblemAnalysisContext has boundary contribution '" +
                                   contribution.operator_tag +
-                                  "'; request weak-boundary coercivity and trace metadata");
+                                  "'; request weak-boundary coercivity and trace metadata",
+                              AnalysisConfidence::Medium,
+                              contribution.operator_tag,
+                              contribution.contribution_id);
             if (contribution.adjoint_consistency.has_value()) {
                 addContextRequest(report.request_plan, context, AnalysisSummaryKind::AdjointConsistency,
                                   contribution.domain, variables,
                                   "ProblemAnalysisContext has boundary contribution '" +
                                       contribution.operator_tag +
-                                      "' with adjoint-consistency metadata; request adjoint consistency summary");
+                                      "' with adjoint-consistency metadata; request adjoint consistency summary",
+                                  AnalysisConfidence::Medium,
+                                  contribution.operator_tag,
+                                  contribution.contribution_id);
             }
         }
     }
@@ -528,37 +650,51 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addContextRequest(report.request_plan, context, AnalysisSummaryKind::BoundarySymbol,
                               DomainKind::InteriorFace, variables,
                               "FormulationRecord '" + record.operator_tag +
-                                  "' has interior-face/DG terms; request penalty and trace-symbol metadata");
+                                  "' has interior-face/DG terms; request penalty and trace-symbol metadata",
+                              AnalysisConfidence::Medium,
+                              record.operator_tag);
             addContextRequest(report.request_plan, context, AnalysisSummaryKind::FluxBalance,
                               DomainKind::InteriorFace, variables,
                               "FormulationRecord '" + record.operator_tag +
-                                  "' has interior-face/DG terms; request numerical flux-balance summaries");
+                                  "' has interior-face/DG terms; request numerical flux-balance summaries",
+                              AnalysisConfidence::Medium,
+                              record.operator_tag);
             addContextRequest(report.request_plan, context, AnalysisSummaryKind::LocalStencil,
                               DomainKind::InteriorFace, variables,
                               "FormulationRecord '" + record.operator_tag +
-                                  "' has interior-face/DG terms; request local face-stencil diagnostics");
+                                  "' has interior-face/DG terms; request local face-stencil diagnostics",
+                              AnalysisConfidence::Medium,
+                              record.operator_tag);
         }
 
         if (has_interface_face) {
             addContextRequest(report.request_plan, context, AnalysisSummaryKind::BoundarySymbol,
                               DomainKind::InterfaceFace, variables,
                               "FormulationRecord '" + record.operator_tag +
-                                  "' has interface-face terms; request interface trace and penalty metadata");
+                                  "' has interface-face terms; request interface trace and penalty metadata",
+                              AnalysisConfidence::Medium,
+                              record.operator_tag);
             addContextRequest(report.request_plan, context, AnalysisSummaryKind::FluxBalance,
                               DomainKind::InterfaceFace, variables,
                               "FormulationRecord '" + record.operator_tag +
-                                  "' has interface-face terms; request interface flux-balance summaries");
+                                  "' has interface-face terms; request interface flux-balance summaries",
+                              AnalysisConfidence::Medium,
+                              record.operator_tag);
             addContextRequest(report.request_plan, context, AnalysisSummaryKind::TransferOperator,
                               DomainKind::InterfaceFace, variables,
                               "FormulationRecord '" + record.operator_tag +
-                                  "' has interface-face terms; request transfer/projection compatibility evidence");
+                                  "' has interface-face terms; request transfer/projection compatibility evidence",
+                              AnalysisConfidence::Medium,
+                              record.operator_tag);
         }
 
         if (has_boundary_face) {
             addContextRequest(report.request_plan, context, AnalysisSummaryKind::BoundarySymbol,
                               DomainKind::Boundary, variables,
                               "FormulationRecord '" + record.operator_tag +
-                                  "' has boundary-face terms; request boundary-symbol metadata");
+                                  "' has boundary-face terms; request boundary-symbol metadata",
+                              AnalysisConfidence::Medium,
+                              record.operator_tag);
         }
     }
 
@@ -570,37 +706,65 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addContextRequest(report.request_plan, context, AnalysisSummaryKind::BoundarySymbol,
                               DomainKind::InterfaceFace, variables,
                               "BoundaryConditionDescriptor from '" + bc.source +
-                                  "' targets an interface; request interface boundary-symbol metadata");
+                                  "' targets an interface; request interface boundary-symbol metadata",
+                              AnalysisConfidence::Medium,
+                              {},
+                              {},
+                              bc.source);
             addContextRequest(report.request_plan, context, AnalysisSummaryKind::FluxBalance,
                               DomainKind::InterfaceFace, variables,
                               "BoundaryConditionDescriptor from '" + bc.source +
-                                  "' targets an interface; request interface flux-balance metadata");
+                                  "' targets an interface; request interface flux-balance metadata",
+                              AnalysisConfidence::Medium,
+                              {},
+                              {},
+                              bc.source);
             addContextRequest(report.request_plan, context, AnalysisSummaryKind::TransferOperator,
                               DomainKind::InterfaceFace, variables,
                               "BoundaryConditionDescriptor from '" + bc.source +
-                                  "' targets an interface; request transfer/projection compatibility metadata");
+                                  "' targets an interface; request transfer/projection compatibility metadata",
+                              AnalysisConfidence::Medium,
+                              {},
+                              {},
+                              bc.source);
         }
 
         if (isWeakPenaltyLike(bc.enforcement_kind)) {
             addContextRequest(report.request_plan, context, AnalysisSummaryKind::BoundarySymbol,
                               bc.domain, variables,
                               "BoundaryConditionDescriptor from '" + bc.source +
-                                  "' uses weak penalty/Nitsche enforcement; request penalty adequacy and trace metadata");
+                                  "' uses weak penalty/Nitsche enforcement; request penalty adequacy and trace metadata",
+                              AnalysisConfidence::Medium,
+                              {},
+                              {},
+                              bc.source);
             addContextRequest(report.request_plan, context, AnalysisSummaryKind::ParameterScale,
                               bc.domain, variables,
                               "BoundaryConditionDescriptor from '" + bc.source +
-                                  "' uses weak penalty/Nitsche enforcement; request penalty scaling metadata");
+                                  "' uses weak penalty/Nitsche enforcement; request penalty scaling metadata",
+                              AnalysisConfidence::Medium,
+                              {},
+                              {},
+                              bc.source);
             addContextRequest(report.request_plan, context, AnalysisSummaryKind::FluxBalance,
                               bc.domain, variables,
                               "BoundaryConditionDescriptor from '" + bc.source +
-                                  "' uses weak enforcement; request boundary/interface flux-balance metadata");
+                                  "' uses weak enforcement; request boundary/interface flux-balance metadata",
+                              AnalysisConfidence::Medium,
+                              {},
+                              {},
+                              bc.source);
         }
 
         if (bc.adjoint_consistency.has_value()) {
             addContextRequest(report.request_plan, context, AnalysisSummaryKind::AdjointConsistency,
                               bc.domain, variables,
                               "BoundaryConditionDescriptor from '" + bc.source +
-                                  "' provides adjoint-consistency metadata; request adjoint consistency summary");
+                                  "' provides adjoint-consistency metadata; request adjoint consistency summary",
+                              AnalysisConfidence::Medium,
+                              {},
+                              {},
+                              bc.source);
         }
     }
 }

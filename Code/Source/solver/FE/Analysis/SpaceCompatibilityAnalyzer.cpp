@@ -51,6 +51,64 @@ static void appendUnique(std::vector<VariableKey>& values, const VariableKey& va
     }
 }
 
+static bool containsVariable(const std::vector<VariableKey>& values,
+                             const VariableKey& value)
+{
+    return std::find(values.begin(), values.end(), value) != values.end();
+}
+
+static bool claimContainsAllVariables(const PropertyClaim& claim,
+                                      const std::vector<VariableKey>& variables)
+{
+    return std::all_of(variables.begin(), variables.end(),
+                       [&](const VariableKey& variable) {
+                           return containsVariable(claim.variables, variable);
+                       });
+}
+
+static bool hasStabilizedInfSupEvidence(const ProblemAnalysisReport& report,
+                                        const std::vector<VariableKey>& variables)
+{
+    for (const auto& claim : report.claims) {
+        if (claim.kind == PropertyKind::InfSupCondition &&
+            claim.inf_sup_class &&
+            *claim.inf_sup_class == InfSupClass::StabilizedSurrogate &&
+            claimContainsAllVariables(claim, variables)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool hasCertifiedInfSupEvidence(const ProblemAnalysisReport& report,
+                                       const std::vector<VariableKey>& variables)
+{
+    for (const auto& claim : report.claims) {
+        if (claim.kind == PropertyKind::InfSupCondition &&
+            claim.certification_class &&
+            *claim.certification_class == CertificationClass::Certified &&
+            claimContainsAllVariables(claim, variables)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool hasCertifiedCompatibleComplexEvidence(
+    const ProblemAnalysisReport& report,
+    const std::vector<VariableKey>& variables)
+{
+    for (const auto& claim : report.claims) {
+        if (claim.kind == PropertyKind::CompatibleComplexStructure &&
+            claim.certification_class &&
+            *claim.certification_class == CertificationClass::Certified &&
+            claimContainsAllVariables(claim, variables)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void emitCompatibleComplexClaim(ProblemAnalysisReport& report,
                                        std::vector<VariableKey> variables,
                                        bool exact_sequence,
@@ -76,7 +134,7 @@ static void emitCompatibleComplexClaim(ProblemAnalysisReport& report,
         claim.space_compatibility_class = SpaceCompatibilityClass::Incompatible;
         claim.description =
             "Compatible-complex metadata violates exact-sequence requirements";
-    } else if (commuting_projection.value_or(true)) {
+    } else if (commuting_projection.has_value() && *commuting_projection) {
         claim.status = PropertyStatus::Preserved;
         claim.confidence = AnalysisConfidence::High;
         claim.certification_class = CertificationClass::Certified;
@@ -225,45 +283,111 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
             continue;
         }
 
-        // Both H1 is fine
         if (momentum_fd->space_family == SpaceFamily::H1 &&
             constraint_fd->space_family == SpaceFamily::H1) {
             PropertyClaim claim;
             claim.kind = PropertyKind::SpaceCompatibility;
-            claim.status = PropertyStatus::Preserved;
-            claim.confidence = AnalysisConfidence::High;
-            claim.space_compatibility_class = SpaceCompatibilityClass::Compatible;
             claim.variables = sc->variables;
-            claim.description =
-                "Mixed system space pair is compatible: H1/H1 ("
-                + momentum_fd->name + " order "
-                + std::to_string(momentum_fd->polynomial_order) + " / "
-                + constraint_fd->name + " order "
-                + std::to_string(constraint_fd->polynomial_order) + ")";
             claim.claim_origin = "SpaceCompatibilityAnalyzer";
-            claim.addEvidence("SpaceCompatibilityAnalyzer",
-                "Both fields use H1 space family");
+            const bool taylor_hood_like =
+                momentum_fd->polynomial_order > constraint_fd->polynomial_order;
+            const bool certified_infsup =
+                hasCertifiedInfSupEvidence(report, sc->variables);
+            const bool certified_complex =
+                hasCertifiedCompatibleComplexEvidence(report, sc->variables);
+            const bool stabilized =
+                hasStabilizedInfSupEvidence(report, sc->variables);
+
+            if (certified_infsup || certified_complex) {
+                claim.status = PropertyStatus::Preserved;
+                claim.confidence = AnalysisConfidence::High;
+                claim.certification_class = CertificationClass::Certified;
+                claim.space_compatibility_class = SpaceCompatibilityClass::Compatible;
+                if (certified_infsup) {
+                    claim.description =
+                        "Mixed H1/H1 space pair is backed by certified inf-sup evidence";
+                    claim.addEvidence("SpaceCompatibilityAnalyzer",
+                        "Certified InfSupCondition claim covers this mixed pair");
+                } else {
+                    claim.description =
+                        "Mixed H1/H1 space pair is backed by certified compatible-complex evidence";
+                    claim.addEvidence("SpaceCompatibilityAnalyzer",
+                        "Certified CompatibleComplexStructure claim covers this mixed pair");
+                }
+            } else if (taylor_hood_like) {
+                claim.status = PropertyStatus::Likely;
+                claim.confidence = AnalysisConfidence::Medium;
+                claim.certification_class = CertificationClass::NotCertified;
+                claim.space_compatibility_class = SpaceCompatibilityClass::WeaklyCompatible;
+                claim.description =
+                    "Mixed H1/H1 space pair has higher-order primary field evidence but lacks certified inf-sup or compatible-complex evidence";
+                claim.addEvidence("SpaceCompatibilityAnalyzer",
+                    "H1 primary order " +
+                    std::to_string(momentum_fd->polynomial_order) +
+                    " exceeds H1 constraint order " +
+                    std::to_string(constraint_fd->polynomial_order),
+                    AnalysisConfidence::Medium);
+            } else if (stabilized) {
+                claim.status = PropertyStatus::Likely;
+                claim.confidence = AnalysisConfidence::Medium;
+                claim.certification_class = CertificationClass::NotCertified;
+                claim.space_compatibility_class = SpaceCompatibilityClass::WeaklyCompatible;
+                claim.description =
+                    "Equal-order H1/H1 mixed pair relies on stabilization surrogate evidence";
+                claim.addEvidence("SpaceCompatibilityAnalyzer",
+                    "InfSupAnalyzer reported a stabilization surrogate for this mixed pair",
+                    AnalysisConfidence::Medium);
+            } else {
+                claim.status = PropertyStatus::Likely;
+                claim.confidence = AnalysisConfidence::Medium;
+                claim.certification_class = CertificationClass::NotCertified;
+                claim.space_compatibility_class = SpaceCompatibilityClass::Incompatible;
+                claim.description =
+                    "Equal-order or reversed-order H1/H1 mixed pair lacks inf-sup/stabilization evidence";
+                claim.addEvidence("SpaceCompatibilityAnalyzer",
+                    "H1/H1 mixed compatibility requires a known stable order pair, stabilization, or numeric inf-sup evidence",
+                    AnalysisConfidence::Medium);
+            }
             report.claims.push_back(std::move(claim));
             continue;
         }
 
-        // H1 pressure with HDiv velocity needs specific handling
+        // H(div) velocity with H1 pressure is not a de Rham/mixed-method
+        // compatibility certificate by itself.  It needs explicit pair evidence.
         if (momentum_fd->space_family == SpaceFamily::HDiv &&
             constraint_fd->space_family == SpaceFamily::H1) {
             PropertyClaim claim;
             claim.kind = PropertyKind::SpaceCompatibility;
-            claim.status = PropertyStatus::Likely;
-            claim.confidence = AnalysisConfidence::Medium;
-            claim.space_compatibility_class = SpaceCompatibilityClass::WeaklyCompatible;
             claim.variables = sc->variables;
-            claim.description =
-                "Mixed system has HDiv/" + std::string(toString(constraint_fd->space_family)) +
-                " space pair (" + momentum_fd->name + "/" + constraint_fd->name +
-                "): compatible but requires specific handling (e.g., Raviart-Thomas)";
             claim.claim_origin = "SpaceCompatibilityAnalyzer";
-            claim.addEvidence("SpaceCompatibilityAnalyzer",
-                "HDiv velocity + H1 pressure needs compatible interpolation",
-                AnalysisConfidence::Medium);
+            const bool certified_infsup =
+                hasCertifiedInfSupEvidence(report, sc->variables);
+            const bool certified_complex =
+                hasCertifiedCompatibleComplexEvidence(report, sc->variables);
+            if (certified_infsup || certified_complex) {
+                claim.status = PropertyStatus::Preserved;
+                claim.confidence = AnalysisConfidence::High;
+                claim.certification_class = CertificationClass::Certified;
+                claim.space_compatibility_class = SpaceCompatibilityClass::Compatible;
+                claim.description =
+                    "Mixed HDiv/H1 space pair is backed by certified compatibility evidence";
+                claim.addEvidence("SpaceCompatibilityAnalyzer",
+                    certified_infsup
+                        ? "Certified InfSupCondition claim covers this HDiv/H1 pair"
+                        : "Certified CompatibleComplexStructure claim covers this HDiv/H1 pair");
+            } else {
+                claim.status = PropertyStatus::Unknown;
+                claim.confidence = AnalysisConfidence::Medium;
+                claim.certification_class = CertificationClass::NotCertified;
+                claim.space_compatibility_class = SpaceCompatibilityClass::Unknown;
+                claim.description =
+                    "Mixed system has HDiv/H1 space pair (" + momentum_fd->name +
+                    "/" + constraint_fd->name +
+                    ") without explicit inf-sup or compatible-complex evidence";
+                claim.addEvidence("SpaceCompatibilityAnalyzer",
+                    "Standard divergence-compatible mixed pairs require explicit HDiv/L2-style or theorem-backed compatibility evidence",
+                    AnalysisConfidence::Medium);
+            }
             report.claims.push_back(std::move(claim));
             continue;
         }

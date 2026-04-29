@@ -220,6 +220,7 @@ bool containsGeometrySensitivityTerminal(const forms::FormExprNode& node)
         case forms::FormExprType::CurrentNormal:
         case forms::FormExprType::CurrentMeasure:
         case forms::FormExprType::SurfaceJacobian:
+        case forms::FormExprType::MeshVelocity:
             return true;
         default:
             break;
@@ -287,10 +288,46 @@ void validateGeometrySensitivityField(const FESystem& system,
     return options;
 }
 
-[[nodiscard]] forms::FormExpr testProbeForField(const FieldRecord& rec)
+[[nodiscard]] forms::FormExpr testProbeMatchingExpr(const forms::FormExpr& expr,
+                                                    const FieldRecord& rec)
 {
     FE_CHECK_NOT_NULL(rec.space.get(), "installCoupledResidual: test field space");
-    auto test = forms::FormExpr::testFunction(*rec.space, rec.name);
+    FE_THROW_IF(!expr.isValid() || expr.node() == nullptr, InvalidArgumentException,
+                "installCoupledResidual: cannot synthesize geometry-sensitivity probe "
+                "without a residual expression");
+
+    std::optional<std::string> test_name;
+    std::optional<FieldId> bound_field;
+    const auto find_test = [&](const auto& self, const forms::FormExprNode& n) -> void {
+        if (test_name.has_value()) {
+            return;
+        }
+        if (n.type() == forms::FormExprType::TestFunction) {
+            test_name = n.toString();
+            bound_field = n.fieldId();
+            return;
+        }
+        for (const auto& child : n.childrenShared()) {
+            if (child) {
+                self(self, *child);
+                if (test_name.has_value()) {
+                    return;
+                }
+            }
+        }
+    };
+    find_test(find_test, *expr.node());
+
+    FE_THROW_IF(!test_name.has_value(), InvalidArgumentException,
+                "installCoupledResidual: cannot synthesize geometry-sensitivity probe "
+                "for an expression without a TestFunction");
+
+    forms::FormExpr test;
+    if (bound_field.has_value()) {
+        test = forms::FormExpr::testFunction(*bound_field, *rec.space, *test_name);
+    } else {
+        test = forms::FormExpr::testFunction(*rec.space, *test_name);
+    }
     if (rec.space->field_type() == FieldType::Vector) {
         return forms::inner(test, test);
     }
@@ -328,7 +365,7 @@ void validateGeometrySensitivityField(const FESystem& system,
     const auto zero_probe =
         (forms::FormExpr::constant(0.0) *
          trialProbeForField(trial_rec) *
-         testProbeForField(test_rec)).dx();
+         testProbeMatchingExpr(expr, test_rec)).dx();
     return expr + zero_probe;
 }
 
@@ -1853,6 +1890,17 @@ CoupledResidualKernels installFormulation(
     FE_THROW_IF(!residual.isValid(), InvalidArgumentException,
                 "installFormulation: invalid residual expression");
 
+    std::vector<FieldId> trial_fields;
+    trial_fields.reserve(fields.size() + options.extra_trial_fields.size());
+    trial_fields.assign(fields.begin(), fields.end());
+    for (const auto fid : options.extra_trial_fields) {
+        FE_THROW_IF(fid == INVALID_FIELD_ID, InvalidArgumentException,
+                    "installFormulation: extra trial field is invalid");
+        if (std::find(trial_fields.begin(), trial_fields.end(), fid) == trial_fields.end()) {
+            trial_fields.push_back(fid);
+        }
+    }
+
     // Early validation: reject duplicate test function names across different
     // spaces before creating any side effects (FormulationRecord, contributions).
     if (fields.size() > 1 && residual.node()) {
@@ -1909,9 +1957,9 @@ CoupledResidualKernels installFormulation(
     std::vector<analysis::ContributionDescriptor> pending_contributions;
     {
         rec.operator_tag = op;
-        rec.active_fields.assign(fields.begin(), fields.end());
+        rec.active_fields.assign(trial_fields.begin(), trial_fields.end());
         rec.residual_expr = residual.nodeShared();
-        rec.is_mixed = (fields.size() > 1);
+        rec.is_mixed = (fields.size() > 1 || trial_fields.size() > 1);
 
         // Scan the DAG for structural properties.
         auto scan = analysis::scanFormExpr(*residual.node());
@@ -1923,7 +1971,7 @@ CoupledResidualKernels installFormulation(
         // Extract field names from the expression for mixed-form diagnostics.
         // Map FieldId → field name using FESystem's field registry, and collect
         // test/trial function names from the expression tree.
-        for (auto fid : fields) {
+        for (auto fid : trial_fields) {
             const auto& frec = system.fieldRecord(fid);
             rec.field_names.emplace_back(fid, frec.name);
         }
@@ -1953,7 +2001,7 @@ CoupledResidualKernels installFormulation(
         }
 
         // Build active_variables from FE fields + coupled symbols.
-        for (auto fid : fields) {
+        for (auto fid : trial_fields) {
             rec.active_variables.push_back(analysis::VariableKey::field(fid));
         }
         for (const auto& name : scan.boundary_functional_names) {
@@ -2107,9 +2155,9 @@ CoupledResidualKernels installFormulation(
                     if (!test_blocks[ti].isValid()) continue;
                     // Check which fields this test block references
                     const auto state_fields = gatherStateFields(*test_blocks[ti].node());
-                    for (std::size_t tj = 0; tj < fields.size(); ++tj) {
-                        if (state_fields.contains(fields[tj])) {
-                            rec.block_couplings.emplace_back(fields[ti], fields[tj]);
+                    for (std::size_t tj = 0; tj < trial_fields.size(); ++tj) {
+                        if (state_fields.contains(trial_fields[tj])) {
+                            rec.block_couplings.emplace_back(fields[ti], trial_fields[tj]);
                         }
                     }
                     // Pure source rows (no StateField dependencies) produce no
@@ -2121,7 +2169,7 @@ CoupledResidualKernels installFormulation(
                 // splitByTestFunction could not decompose the expression.
                 // Fall back to conservative dense coupling.
                 for (auto test_f : fields) {
-                    for (auto trial_f : fields) {
+                    for (auto trial_f : trial_fields) {
                         rec.block_couplings.emplace_back(test_f, trial_f);
                     }
                 }
@@ -2136,19 +2184,52 @@ CoupledResidualKernels installFormulation(
             const bool has_trial_dep = resolved.hasTrial() ||
                 (resolved.node() && hasStateFieldNodes(*resolved.node()));
             if (has_trial_dep) {
-                rec.block_couplings.emplace_back(fields[0], fields[0]);
+                if (resolved.node()) {
+                    const auto state_fields =
+                        gatherResidualDependencies(*resolved.node(),
+                                                   options.compiler_options.geometry_sensitivity);
+                    for (auto trial_f : trial_fields) {
+                        if (state_fields.empty() || state_fields.contains(trial_f)) {
+                            rec.block_couplings.emplace_back(fields[0], trial_f);
+                        }
+                    }
+                } else {
+                    rec.block_couplings.emplace_back(fields[0], fields[0]);
+                }
+            }
+        }
+        if (options.compiler_options.geometry_sensitivity.mode ==
+                forms::GeometrySensitivityMode::MeshMotionUnknowns &&
+            options.compiler_options.geometry_sensitivity.mesh_motion_field !=
+                INVALID_FIELD_ID &&
+            resolved.node() != nullptr &&
+            containsGeometrySensitivityTerminal(*resolved.node())) {
+            const FieldId mesh_trial =
+                options.compiler_options.geometry_sensitivity.mesh_motion_field;
+            if (std::find(trial_fields.begin(), trial_fields.end(), mesh_trial) !=
+                trial_fields.end()) {
+                for (auto test_f : fields) {
+                    const auto already_present =
+                        std::find(rec.block_couplings.begin(),
+                                  rec.block_couplings.end(),
+                                  std::make_pair(test_f, mesh_trial)) !=
+                        rec.block_couplings.end();
+                    if (!already_present) {
+                        rec.block_couplings.emplace_back(test_f, mesh_trial);
+                    }
+                }
             }
         }
 
         // Variable couplings: FE fields coupled to each other, plus FE↔boundary/aux links.
         for (const auto& bf : rec.boundary_functional_dependencies) {
-            for (auto fid : fields) {
+            for (auto fid : trial_fields) {
                 rec.variable_couplings.emplace_back(
                     analysis::VariableKey::field(fid), bf);
             }
         }
         for (const auto& aux : rec.auxiliary_state_dependencies) {
-            for (auto fid : fields) {
+            for (auto fid : trial_fields) {
                 rec.variable_couplings.emplace_back(
                     analysis::VariableKey::field(fid), aux);
             }
@@ -2205,7 +2286,7 @@ CoupledResidualKernels installFormulation(
     // Transactional installation: snapshot operator state, rollback on failure.
     return system.executeWithOperatorRollback_([&]() -> CoupledResidualKernels {
 
-    if (num_test == 1) {
+    if (num_test == 1 && trial_fields.size() == 1) {
         // Single-field path.
         FE_THROW_IF(fields.size() != 1, InvalidArgumentException,
                     "installFormulation: expression has 1 TestFunction space but " +
@@ -2247,7 +2328,7 @@ CoupledResidualKernels installFormulation(
 
     // Multi-field path: build an explicit mixed-kernel plan with either a
     // MixedBlockKernelSet or MonolithicCellKernel for cell-domain work.
-    auto result = installCoupledResidualMixed(system, op, fields, fields, resolved, options);
+    auto result = installCoupledResidualMixed(system, op, fields, trial_fields, resolved, options);
 
     commitRecord();
 

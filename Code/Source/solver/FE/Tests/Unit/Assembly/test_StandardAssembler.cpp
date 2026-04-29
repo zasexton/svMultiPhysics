@@ -40,6 +40,7 @@
 #include <memory>
 #include <numeric>
 #include <limits>
+#include <string>
 #include <utility>
 
 namespace svmp {
@@ -3510,7 +3511,14 @@ TEST(StandardAssemblerMovingDomain, MissingMeshMotionBindingThrowsClearly)
     DenseVectorView rhs(4);
     MovingDomainProbeKernel kernel(/*displacement_field=*/301, /*velocity_field=*/302);
 
-    EXPECT_THROW((void)assembler.assembleVector(mesh, space, kernel, rhs), FEException);
+    try {
+        (void)assembler.assembleVector(mesh, space, kernel, rhs);
+        FAIL() << "Expected FEException";
+    } catch (const FEException& ex) {
+        const std::string message = ex.what();
+        EXPECT_NE(message.find("meshDisplacement()"), std::string::npos);
+        EXPECT_NE(message.find("MeshMotionFieldRole"), std::string::npos);
+    }
 }
 
 TEST(StandardAssemblerMovingDomain, KernelsAccessMeshMotionAndCurrentReferenceGeometry)

@@ -72,6 +72,7 @@ void ProblemAnalysisContext::addFormulationRecord(FormulationRecord record) {
 // ============================================================================
 
 void ProblemAnalysisContext::addContribution(ContributionDescriptor desc) {
+    desc.ensureStableContributionId();
     contributions_.push_back(std::move(desc));
     bumpVersion();
 }

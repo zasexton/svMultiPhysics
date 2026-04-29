@@ -257,6 +257,7 @@ struct NullspaceHint {
  * ProblemAnalysisContext::contributions().
  */
 struct ContributionDescriptor {
+    std::string contribution_id;    ///< Stable id distinct from display/operator tag
     std::string operator_tag;       ///< e.g., "equations", "penalty", "contact"
     std::string origin;             ///< e.g., "FormsInstaller", "AssemblyKernel:MyKernel"
     DomainKind domain{DomainKind::Cell};
@@ -338,6 +339,13 @@ struct ContributionDescriptor {
     /// Build a transport-like contribution (first-order / convection)
     [[nodiscard]] static ContributionDescriptor transportLike(
         VariableKey field, std::string op_tag, std::string orig);
+
+    /// Deterministic identity derived from stable provenance and block scope.
+    [[nodiscard]] static std::string stableContributionId(
+        const ContributionDescriptor& desc);
+
+    /// Populate contribution_id when the producer did not provide one.
+    void ensureStableContributionId();
 };
 
 // ============================================================================

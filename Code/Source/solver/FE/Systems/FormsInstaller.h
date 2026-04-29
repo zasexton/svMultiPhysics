@@ -47,6 +47,12 @@ class FESystem;
 struct FormInstallOptions {
     forms::ADMode ad_mode{forms::ADMode::Forward};
     forms::SymbolicOptions compiler_options{};
+
+    /// Additional trial fields that contribute tangent columns but do not own
+    /// residual rows in this formulation. This is intended for monolithic
+    /// couplings such as ALE fluid residuals differentiated with respect to a
+    /// solved mesh-displacement field.
+    std::vector<FieldId> extra_trial_fields{};
 };
 
 using KernelPtr = std::shared_ptr<assembly::AssemblyKernel>;

@@ -126,18 +126,23 @@ TEST(Phase6ExtendedAnalyzers, TransportCharacterConsumesPecletCflNonnormalSummar
 
     AnalysisSummarySet summaries;
     ParameterScaleSummary scale;
+    scale.role = ParameterScaleRole::PecletLike;
+    scale.block = scalarBlock("transport-block");
     scale.max_scale_value = 12.0;
     summaries.parameter_scales.push_back(scale);
 
     TemporalStabilitySummary temporal;
+    temporal.block = scalarBlock("transport-block");
     temporal.stability_class = TemporalStabilityClass::ConditionallyStable;
     temporal.cfl_estimate = 1.25;
+    temporal.cfl_estimate_present = true;
     summaries.temporal_stability.push_back(temporal);
 
     DiscreteMatrixSummary matrix;
     matrix.block = scalarBlock("transport-block");
     matrix.max_abs_entry = 4.0;
     matrix.max_symmetry_error = 1.0;
+    matrix.nonnormality_indicator = 0.25;
     summaries.discrete_matrices.push_back(matrix);
     ctx.setAnalysisSummaries(std::move(summaries));
 
@@ -177,6 +182,12 @@ TEST(Phase6ExtendedAnalyzers, ConservationConsumesFluxBalanceCertifiedViolatedAn
     good.balance_tolerance = 1.0e-6;
     good.local_residual_norm = 1.0e-8;
     good.global_residual_norm = 2.0e-8;
+    good.symbolic_balance_evidence_present = true;
+    good.flux_variable_metadata_present = true;
+    good.element_residual_evidence_present = true;
+    good.source_quadrature_consistency_present = true;
+    good.orientation_consistency_present = true;
+    good.boundary_flux_accounted_for = true;
     good_summaries.flux_balances.push_back(good);
 
     auto good_report = analyzeWithSummaries(std::move(good_summaries));
@@ -218,9 +229,28 @@ TEST(Phase6ExtendedAnalyzers, InterfaceValidationConsumesBoundaryPenaltyAndFluxE
     boundary.principal_operator_order = 2;
     boundary.boundary_operator_order = 1;
     boundary.complementing_condition_satisfied = true;
+    boundary.boundary_condition_count = 1;
+    boundary.required_boundary_condition_count = 1;
+    boundary.principal_symbol_rank_evidence_present = true;
+    boundary.boundary_symbol_rank_evidence_present = true;
+    boundary.component_coverage_complete = true;
+    boundary.dof_coverage_complete = true;
+    boundary.tangential_frequency_coverage_present = true;
+    boundary.decaying_root_count_evidence_present = true;
+    boundary.stable_subspace_dimension_evidence_present = true;
+    boundary.parameter_ellipticity_evidence_present = true;
+    boundary.complementing_margin_present = true;
+    boundary.complementing_margin = 0.3;
+    boundary.complementing_theorem_id =
+        "Agmon-Douglis-Nirenberg complementing condition";
     summaries.boundary_symbols.push_back(boundary);
     ParameterScaleSummary penalty;
+    penalty.role = ParameterScaleRole::WeakBoundaryPenalty;
+    penalty.block = boundary.block;
     penalty.max_scale_value = 2.0;
+    penalty.required_lower_bound_present = true;
+    penalty.required_lower_bound = 1.0;
+    penalty.trace_inverse_metadata_present = true;
     summaries.parameter_scales.push_back(penalty);
     FluxBalanceSummary flux;
     flux.block = scalarBlock("weak-boundary", DomainKind::Boundary);
@@ -253,7 +283,12 @@ TEST(Phase6ExtendedAnalyzers, InterfaceValidationConsumesBoundaryPenaltyAndFluxE
     bad_boundary.complementing_condition_satisfied = false;
     bad_summaries.boundary_symbols.push_back(bad_boundary);
     ParameterScaleSummary bad_penalty;
+    bad_penalty.role = ParameterScaleRole::WeakBoundaryPenalty;
+    bad_penalty.block = bad_boundary.block;
     bad_penalty.max_scale_value = 0.25;
+    bad_penalty.required_lower_bound_present = true;
+    bad_penalty.required_lower_bound = 1.0;
+    bad_penalty.trace_inverse_metadata_present = true;
     bad_summaries.parameter_scales.push_back(bad_penalty);
 
     auto bad_report = analyzeWithSummaries(std::move(bad_summaries));
@@ -277,6 +312,13 @@ TEST(Phase6ExtendedAnalyzers, TemporalStabilityCertifiedViolatedAndMissing)
     good.stability_class = TemporalStabilityClass::AStable;
     good.cfl_estimate = 2.0;
     good.amplification_radius = 1.0;
+    good.cfl_estimate_present = true;
+    good.amplification_radius_present = true;
+    good.stability_metadata_present = true;
+    good.operator_normality_evidence_present = true;
+    good.stability_theorem_id = "Dahlquist A-stability theorem";
+    good.stability_region_evidence_present = true;
+    good.operator_spectrum_coverage_present = true;
     good_summaries.temporal_stability.push_back(good);
 
     auto good_report = analyzeWithSummaries(std::move(good_summaries));
@@ -291,6 +333,10 @@ TEST(Phase6ExtendedAnalyzers, TemporalStabilityCertifiedViolatedAndMissing)
     bad.time_scheme = "conditional-scheme";
     bad.stability_class = TemporalStabilityClass::ConditionallyStable;
     bad.cfl_estimate = 1.5;
+    bad.amplification_radius = 1.0;
+    bad.cfl_estimate_present = true;
+    bad.amplification_radius_present = true;
+    bad.stability_metadata_present = true;
     bad_summaries.temporal_stability.push_back(bad);
 
     auto bad_report = analyzeWithSummaries(std::move(bad_summaries));
@@ -317,6 +363,15 @@ TEST(Phase6ExtendedAnalyzers, EnergyEntropyLawCertifiedViolatedAndMissing)
     energy.balance_tolerance = 1.0e-6;
     energy.observed_discrete_balance = 0.0;
     energy.observed_production = -1.0e-8;
+    energy.energy_functional_id = "quadratic-energy";
+    energy.energy_norm_id = "mass-inner-product";
+    energy.energy_entropy_theorem_id = "discrete energy identity";
+    energy.energy_functional_metadata_present = true;
+    energy.energy_norm_metadata_present = true;
+    energy.energy_positivity_evidence_present = true;
+    energy.energy_coercivity_evidence_present = true;
+    energy.discrete_dissipation_identity_evidence_present = true;
+    energy.boundary_source_energy_accounting_present = true;
     summaries.energy_entropy.push_back(energy);
     EnergyEntropySummary entropy;
     entropy.energy_entropy_id = "entropy-law";
@@ -354,6 +409,10 @@ TEST(Phase6ExtendedAnalyzers, CoefficientConstitutiveCertifiedViolatedAndMissing
     positive.positivity = PositivityClass::Positive;
     positive.anisotropy_ratio = 2.0;
     positive.contrast_ratio = 3.0;
+    positive.coefficient_region_coverage_complete = true;
+    positive.quadrature_point_coverage_complete = true;
+    positive.lower_bound_valid_for_all_samples = true;
+    positive.tolerance_metadata_present = true;
     summaries.coefficient_properties.push_back(positive);
     CoefficientPropertySummary indefinite;
     indefinite.coefficient = "indefinite-coefficient";
@@ -386,6 +445,8 @@ TEST(Phase6ExtendedAnalyzers, NonlinearTangentCertifiedViolatedAndUnknown)
     exact.residual_id = "exact";
     exact.block = scalarBlock("exact");
     exact.tangent_consistency = TangentConsistencyClass::Exact;
+    exact.tangent_symmetry = SymmetryClass::Symmetric;
+    exact.tangent_positivity = PositivityClass::Positive;
     exact.jacobian_action_available = true;
     exact.finite_difference_action_error = 1.0e-12;
     exact.finite_difference_tolerance = 1.0e-8;
@@ -394,6 +455,8 @@ TEST(Phase6ExtendedAnalyzers, NonlinearTangentCertifiedViolatedAndUnknown)
     bad.residual_id = "bad";
     bad.block = scalarBlock("bad");
     bad.tangent_consistency = TangentConsistencyClass::Inconsistent;
+    bad.tangent_symmetry = SymmetryClass::Nonsymmetric;
+    bad.tangent_positivity = PositivityClass::Indefinite;
     bad.jacobian_action_available = true;
     bad.finite_difference_action_error = 1.0e-3;
     bad.finite_difference_tolerance = 1.0e-8;
@@ -419,13 +482,36 @@ TEST(Phase6ExtendedAnalyzers, LockingRiskUsesConstraintInfSupAndSpaceEvidence)
     infsup.primal_variable = VariableKey::field(0);
     infsup.multiplier_variable = VariableKey::field(1);
     infsup.estimate_value = 0.2;
+    infsup.estimate_tolerance = 1.0e-8;
+    infsup.test_rows = 8;
+    infsup.test_cols = 4;
+    infsup.estimate_scope = "free-free";
+    infsup.nullspace_handling = NullspaceHandlingClass::ProjectedOut;
+    infsup.estimator_metadata_present = true;
+    infsup.norm_metadata_present = true;
+    infsup.mesh_refinement_evidence_present = true;
+    infsup.mesh_refinement_sample_count = 3;
+    infsup.uniform_lower_bound_evidence_present = true;
+    infsup.uniform_lower_bound_value_present = true;
+    infsup.uniform_lower_bound = 0.15;
+    infsup.mesh_family_scope_present = true;
+    infsup.boundary_condition_scope_present = true;
+    infsup.inf_sup_theorem_id = "uniform discrete LBB lower-bound study";
+    infsup.block.operator_tag = "mixed-pair";
+    infsup.block.test_variables = {VariableKey::field(0),
+                                   VariableKey::field(1)};
+    infsup.block.trial_variables = {VariableKey::field(0),
+                                    VariableKey::field(1)};
     good_summaries.inf_sup_estimates.push_back(infsup);
     auto good_report = analyzeWithSummaries(std::move(good_summaries));
     const auto* good_claim = firstClaimFrom(
         good_report, PropertyKind::LockingRisk,
         "LockingRiskAnalyzer");
     ASSERT_NE(good_claim, nullptr);
-    EXPECT_EQ(good_claim->status, PropertyStatus::Preserved);
+    EXPECT_EQ(good_claim->status, PropertyStatus::Unknown);
+    ASSERT_TRUE(good_claim->certification_class.has_value());
+    EXPECT_EQ(*good_claim->certification_class,
+              CertificationClass::NotCertified);
 
     ProblemAnalysisContext bad_ctx;
     ConstraintAnalysisSummary constraints;
@@ -458,6 +544,9 @@ TEST(Phase6ExtendedAnalyzers, SpectralErrorEstimatorQuadratureAndCoupledSummarie
     spectral_ok.eigenproblem_declared = true;
     spectral_ok.self_adjoint_evidence = true;
     spectral_ok.compactness_evidence = true;
+    spectral_ok.operator_convergence_evidence = true;
+    spectral_ok.spectral_convergence_theorem_id =
+        "Boffi spectral approximation theorem";
     summaries.spectral_structures.push_back(spectral_ok);
     SpectralStructureSummary spectral_bad;
     spectral_bad.block = scalarBlock("spectral-bad");
@@ -470,6 +559,24 @@ TEST(Phase6ExtendedAnalyzers, SpectralErrorEstimatorQuadratureAndCoupledSummarie
     estimator_ok.block = scalarBlock("estimator-ok");
     estimator_ok.residual_metadata_present = true;
     estimator_ok.jump_metadata_present = true;
+    estimator_ok.norm_metadata_present = true;
+    estimator_ok.estimator_norm_scope_metadata_present = true;
+    estimator_ok.estimator_norm_id = "energy-norm";
+    estimator_ok.pde_operator_class_metadata_present = true;
+    estimator_ok.boundary_residual_metadata_present = true;
+    estimator_ok.data_oscillation_metadata_present = true;
+    estimator_ok.coefficient_source_regularity_metadata_present = true;
+    estimator_ok.shape_regular_mesh_evidence_present = true;
+    estimator_ok.reliability_constant_metadata_present = true;
+    estimator_ok.reliability_constant = 2.0;
+    estimator_ok.efficiency_constant_metadata_present = true;
+    estimator_ok.efficiency_constant = 0.5;
+    estimator_ok.effectivity_bounds_present = true;
+    estimator_ok.effectivity_lower_bound = 0.8;
+    estimator_ok.effectivity_upper_bound = 1.3;
+    estimator_ok.effectivity_sample_count = 3;
+    estimator_ok.refinement_evidence_present = true;
+    estimator_ok.estimator_theorem_id = "Verfurth residual estimator theorem";
     summaries.error_estimators.push_back(estimator_ok);
     ErrorEstimatorSummary estimator_bad;
     estimator_bad.estimator_id = "estimator-bad";
@@ -481,6 +588,9 @@ TEST(Phase6ExtendedAnalyzers, SpectralErrorEstimatorQuadratureAndCoupledSummarie
     quadrature_ok.block = scalarBlock("quadrature-ok");
     quadrature_ok.integrand_polynomial_degree = 2;
     quadrature_ok.quadrature_exact_degree = 3;
+    quadrature_ok.affine_mapping_evidence_present = true;
+    quadrature_ok.polynomial_integrand_metadata_complete = true;
+    quadrature_ok.coefficient_degree_metadata_present = true;
     summaries.quadrature_adequacy.push_back(quadrature_ok);
     QuadratureAdequacySummary quadrature_bad;
     quadrature_bad.block = scalarBlock("quadrature-bad");
@@ -494,14 +604,24 @@ TEST(Phase6ExtendedAnalyzers, SpectralErrorEstimatorQuadratureAndCoupledSummarie
     coupled_ok.variables = {VariableKey::field(0), VariableKey::field(1)};
     coupled_ok.monolithic_coupling = true;
     coupled_ok.coupling_tolerance = 1.0e-6;
+    coupled_ok.coupling_tolerance_present = true;
+    coupled_ok.exchange_residual_present = true;
+    coupled_ok.constraint_drift_present = true;
+    coupled_ok.interface_energy_balance_evidence_present = true;
+    coupled_ok.coupled_norm_coercivity_evidence_present = true;
+    coupled_ok.coupled_operator_stability_evidence_present = true;
     summaries.coupled_system_stability.push_back(coupled_ok);
     CoupledSystemStabilitySummary coupled_bad;
     coupled_bad.coupling_group = "coupled-bad";
     coupled_bad.variables = {VariableKey::field(0), VariableKey::field(1)};
     coupled_bad.partitioned_coupling = true;
     coupled_bad.coupling_tolerance = 1.0e-6;
+    coupled_bad.coupling_tolerance_present = true;
     coupled_bad.partition_iteration_spectral_radius = 1.2;
+    coupled_bad.partition_iteration_spectral_radius_present = true;
     coupled_bad.exchange_residual = 1.0e-4;
+    coupled_bad.exchange_residual_present = true;
+    coupled_bad.constraint_drift_present = true;
     summaries.coupled_system_stability.push_back(coupled_bad);
 
     auto report = analyzeWithSummaries(std::move(summaries));

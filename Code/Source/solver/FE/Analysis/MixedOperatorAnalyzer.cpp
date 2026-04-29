@@ -59,18 +59,18 @@ void emitSchurSummaryClaim(ProblemAnalysisReport& report,
 
     PropertyClaim claim;
     claim.kind = PropertyKind::IndefiniteOperatorResolution;
-    claim.status = exact_reduction ? PropertyStatus::Preserved
+    claim.status = exact_reduction ? PropertyStatus::Likely
                                    : PropertyStatus::Unknown;
-    claim.confidence = exact_reduction ? AnalysisConfidence::High
+    claim.confidence = exact_reduction ? AnalysisConfidence::Medium
                                        : AnalysisConfidence::Medium;
     claim.domain = matrix.block.domain;
     claim.variables = blockVariables(matrix.block);
     claim.reduced_definiteness_class =
-        exact_reduction ? CertificationClass::Certified
+        exact_reduction ? CertificationClass::NotCertified
                         : CertificationClass::Unknown;
     claim.tested_block_id = matrix.block.operator_tag;
     claim.description = exact_reduction
-        ? "Reduced Schur/constraint summary is available for indefinite block resolution"
+        ? "Reduced Schur/constraint summary is available, but stability certification requires inf-sup and Schur conditioning/equivalence evidence"
         : "Reduced Schur/constraint summary is incomplete for indefinite block resolution";
     claim.claim_origin = "MixedOperatorAnalyzer";
     claim.addEvidence("MixedOperatorAnalyzer",
@@ -79,6 +79,88 @@ void emitSchurSummaryClaim(ProblemAnalysisReport& report,
         ", cols=" + std::to_string(matrix.cols) +
         ", exact_reduction=" +
         std::string(summary.reduction_exact_for_analysis ? "true" : "false"),
+        claim.confidence);
+    report.claims.push_back(std::move(claim));
+}
+
+bool nullspaceHandlingAcceptable(NullspaceHandlingClass handling) noexcept
+{
+    return handling == NullspaceHandlingClass::NotApplicable ||
+           handling == NullspaceHandlingClass::AnchoredByConstraints ||
+           handling == NullspaceHandlingClass::ProjectedOut;
+}
+
+bool positiveSchurEvidence(PositivityClass positivity) noexcept
+{
+    return positivity == PositivityClass::Positive ||
+           positivity == PositivityClass::Nonnegative;
+}
+
+bool schurCertificationComplete(const SchurComplementSummary& summary) noexcept
+{
+    return summary.schur_available &&
+           summary.reduction_exact_for_analysis &&
+           summary.primal_block_invertible_evidence_present &&
+           summary.inf_sup_evidence_present &&
+           summary.nullspace_handling_evidence_present &&
+           nullspaceHandlingAcceptable(summary.nullspace_handling) &&
+           summary.schur_definiteness_evidence_present &&
+           positiveSchurEvidence(summary.schur_positivity) &&
+           summary.spectral_equivalence_bounds_present &&
+           summary.preconditioner_equivalence_bounds_present;
+}
+
+void emitSchurComplementClaim(ProblemAnalysisReport& report,
+                              const SchurComplementSummary& summary)
+{
+    PropertyClaim claim;
+    claim.kind = PropertyKind::IndefiniteOperatorResolution;
+    claim.domain = summary.block.domain;
+    claim.variables = !summary.variables.empty()
+        ? summary.variables
+        : blockVariables(summary.block);
+    claim.tested_block_id = summary.block.operator_tag.empty()
+        ? summary.schur_id
+        : summary.block.operator_tag;
+    claim.estimate_scope = summary.schur_id;
+    claim.claim_origin = "MixedOperatorAnalyzer";
+    claim.nullspace_handling_class = summary.nullspace_handling;
+
+    const bool certified = schurCertificationComplete(summary);
+    if (!summary.schur_available) {
+        claim.status = PropertyStatus::Unknown;
+        claim.confidence = AnalysisConfidence::Medium;
+        claim.reduced_definiteness_class = CertificationClass::Unknown;
+        claim.description =
+            "Schur complement resolution is unknown because no Schur operator is available";
+    } else if (certified) {
+        claim.status = PropertyStatus::Preserved;
+        claim.confidence = AnalysisConfidence::High;
+        claim.reduced_definiteness_class = CertificationClass::Certified;
+        claim.description =
+            "Schur complement resolution is certified by exact reduction, inf-sup, nullspace handling, and spectral/preconditioner equivalence evidence";
+    } else {
+        claim.status = PropertyStatus::Likely;
+        claim.confidence = AnalysisConfidence::Medium;
+        claim.reduced_definiteness_class = CertificationClass::NotCertified;
+        claim.description =
+            "Schur complement is available but lacks complete inf-sup, nullspace, definiteness, or spectral/preconditioner equivalence evidence";
+    }
+
+    claim.addEvidence("MixedOperatorAnalyzer",
+        "SchurComplementSummary id='" + summary.schur_id +
+        "', available=" +
+        std::string(summary.schur_available ? "true" : "false") +
+        ", exact_reduction=" +
+        std::string(summary.reduction_exact_for_analysis ? "true" : "false") +
+        ", primal_invertible=" +
+        std::string(summary.primal_block_invertible_evidence_present ? "true" : "false") +
+        ", inf_sup=" +
+        std::string(summary.inf_sup_evidence_present ? "true" : "false") +
+        ", spectral_equivalence=" +
+        std::string(summary.spectral_equivalence_bounds_present ? "true" : "false") +
+        ", preconditioner_equivalence=" +
+        std::string(summary.preconditioner_equivalence_bounds_present ? "true" : "false"),
         claim.confidence);
     report.claims.push_back(std::move(claim));
 }
@@ -93,6 +175,9 @@ void emitSchurSummaryHooks(const ProblemAnalysisContext& context,
 
     for (const auto& summary : summaries->reduced_matrices) {
         emitSchurSummaryClaim(report, summary);
+    }
+    for (const auto& summary : summaries->schur_complements) {
+        emitSchurComplementClaim(report, summary);
     }
 }
 

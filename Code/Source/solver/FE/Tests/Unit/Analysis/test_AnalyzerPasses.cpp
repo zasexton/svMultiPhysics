@@ -258,7 +258,7 @@ TEST(StabilizationAnalyzer, StabilizedPoisson_Detected) {
     auto stab = report.claimsOfKind(PropertyKind::Stabilization);
     EXPECT_GE(stab.size(), 1u);
     if (!stab.empty()) {
-        EXPECT_EQ(stab[0]->status, PropertyStatus::Preserved);
+        EXPECT_EQ(stab[0]->status, PropertyStatus::Exact);
     }
 }
 

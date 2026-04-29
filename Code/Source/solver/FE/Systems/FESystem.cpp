@@ -1949,9 +1949,129 @@ FieldId FESystem::addField(FieldSpec spec)
                     "FESystem::addField: FieldSpec.components must match FunctionSpace::value_dimension()");
     }
     auto field = field_registry_.add(std::move(spec));
+    if (static_cast<std::size_t>(field) >= prescribed_field_buffers_.size()) {
+        prescribed_field_buffers_.resize(static_cast<std::size_t>(field) + 1u);
+    }
     bumpSpaceRevision();
     bumpBlockLayoutRevision();
     return field;
+}
+
+FieldId FESystem::addMeshMotionDataField(std::string name,
+                                         std::shared_ptr<const spaces::FunctionSpace> space,
+                                         int components)
+{
+    FieldSpec spec;
+    spec.name = std::move(name);
+    spec.space = std::move(space);
+    spec.components = components;
+    spec.source_kind = FieldSourceKind::PrescribedData;
+    return addField(std::move(spec));
+}
+
+FieldId FESystem::addDerivedMeshVelocityField(std::string name,
+                                              std::shared_ptr<const spaces::FunctionSpace> space,
+                                              FieldId mesh_displacement_field,
+                                              int components)
+{
+    FE_THROW_IF(!field_registry_.has(mesh_displacement_field), InvalidArgumentException,
+                "FESystem::addDerivedMeshVelocityField: unknown mesh displacement field");
+    const auto& src = field_registry_.get(mesh_displacement_field);
+    FE_THROW_IF(src.source_kind != FieldSourceKind::Unknown, InvalidArgumentException,
+                "FESystem::addDerivedMeshVelocityField: mesh displacement source must be an Unknown field");
+    FE_CHECK_NOT_NULL(src.space.get(),
+                      "FESystem::addDerivedMeshVelocityField: mesh displacement source space");
+    if (!space) {
+        space = src.space;
+    }
+    FE_THROW_IF(space.get() != src.space.get(), InvalidArgumentException,
+                "FESystem::addDerivedMeshVelocityField: derived mesh velocity must use the "
+                "same FE space as its mesh-displacement source");
+    if (components == 0) {
+        components = src.components;
+    }
+    FE_THROW_IF(components != src.components, InvalidArgumentException,
+                "FESystem::addDerivedMeshVelocityField: component count must match the "
+                "mesh-displacement source");
+
+    FieldSpec spec;
+    spec.name = std::move(name);
+    spec.space = std::move(space);
+    spec.components = components;
+    spec.source_kind = FieldSourceKind::DerivedFromUnknown;
+    spec.derived.source_field = mesh_displacement_field;
+    spec.derived.role = DerivedFieldRole::TimeDerivative;
+    spec.derived.derivative_order = 1;
+    return addField(std::move(spec));
+}
+
+bool FESystem::fieldParticipatesInUnknownVector(FieldId field) const
+{
+    const auto& rec = field_registry_.get(field);
+    return rec.source_kind == FieldSourceKind::Unknown;
+}
+
+void FESystem::setPrescribedFieldCoefficients(FieldId field, std::span<const Real> coefficients)
+{
+    requireSetup();
+    const auto& rec = field_registry_.get(field);
+    FE_THROW_IF(rec.source_kind != FieldSourceKind::PrescribedData, InvalidArgumentException,
+                "FESystem::setPrescribedFieldCoefficients: field '" + rec.name +
+                    "' is not a prescribed data field");
+    const auto idx = static_cast<std::size_t>(field);
+    FE_THROW_IF(idx >= field_dof_handlers_.size(), InvalidStateException,
+                "FESystem::setPrescribedFieldCoefficients: field DOFs are not finalized");
+    const auto expected = static_cast<std::size_t>(field_dof_handlers_[idx].getNumDofs());
+    FE_THROW_IF(coefficients.size() != expected, InvalidArgumentException,
+                "FESystem::setPrescribedFieldCoefficients: field '" + rec.name +
+                    "' expects " + std::to_string(expected) + " coefficients, got " +
+                    std::to_string(coefficients.size()));
+    if (idx >= prescribed_field_buffers_.size()) {
+        prescribed_field_buffers_.resize(idx + 1u);
+    }
+    auto& buffer = prescribed_field_buffers_[idx];
+    buffer.coefficients.assign(coefficients.begin(), coefficients.end());
+    ++buffer.revision;
+}
+
+void FESystem::clearPrescribedFieldCoefficients(FieldId field)
+{
+    const auto& rec = field_registry_.get(field);
+    FE_THROW_IF(rec.source_kind != FieldSourceKind::PrescribedData, InvalidArgumentException,
+                "FESystem::clearPrescribedFieldCoefficients: field '" + rec.name +
+                    "' is not a prescribed data field");
+    const auto idx = static_cast<std::size_t>(field);
+    if (idx >= prescribed_field_buffers_.size()) {
+        return;
+    }
+    prescribed_field_buffers_[idx].coefficients.clear();
+    ++prescribed_field_buffers_[idx].revision;
+}
+
+std::span<const Real> FESystem::prescribedFieldCoefficients(FieldId field) const
+{
+    const auto& rec = field_registry_.get(field);
+    FE_THROW_IF(rec.source_kind != FieldSourceKind::PrescribedData, InvalidArgumentException,
+                "FESystem::prescribedFieldCoefficients: field '" + rec.name +
+                    "' is not a prescribed data field");
+    const auto idx = static_cast<std::size_t>(field);
+    if (idx >= prescribed_field_buffers_.size()) {
+        return {};
+    }
+    return std::span<const Real>(prescribed_field_buffers_[idx].coefficients);
+}
+
+std::uint64_t FESystem::prescribedFieldRevision(FieldId field) const
+{
+    const auto& rec = field_registry_.get(field);
+    FE_THROW_IF(rec.source_kind != FieldSourceKind::PrescribedData, InvalidArgumentException,
+                "FESystem::prescribedFieldRevision: field '" + rec.name +
+                    "' is not a prescribed data field");
+    const auto idx = static_cast<std::size_t>(field);
+    if (idx >= prescribed_field_buffers_.size()) {
+        return 0;
+    }
+    return prescribed_field_buffers_[idx].revision;
 }
 
 FieldId FESystem::findFieldByName(std::string_view name) const noexcept
@@ -2664,6 +2784,93 @@ struct MeshMotionSyncEntry {
 
 } // namespace
 
+std::size_t FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers()
+{
+    requireSetup();
+    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: mesh");
+
+    std::size_t values_written = 0;
+    auto& local_mesh = mesh_->local_mesh();
+
+    for (const auto role : kFEMeshMotionRoles) {
+        const FieldId field = meshMotionRoleValue(mesh_motion_fields_, role);
+        if (field == INVALID_FIELD_ID) {
+            continue;
+        }
+
+        const auto& rec = field_registry_.get(field);
+        if (rec.source_kind != FieldSourceKind::PrescribedData) {
+            continue;
+        }
+
+        const auto field_idx = static_cast<std::size_t>(field);
+        FE_THROW_IF(field_idx >= field_dof_handlers_.size(),
+                    InvalidStateException,
+                    "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: invalid field layout for '" +
+                        rec.name + "'");
+
+        const auto mesh_role = toMeshMotionRole(role);
+        const auto mesh_name = svmp::motion::standard_motion_field_name(mesh_role);
+        const auto mesh_field =
+            svmp::MeshFields::get_field_handle(local_mesh, svmp::EntityKind::Vertex, mesh_name);
+        FE_THROW_IF(mesh_field.id == 0, InvalidArgumentException,
+                    "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: mesh is missing field '" +
+                        std::string(mesh_name) + "'");
+        svmp::motion::validate_motion_field(local_mesh,
+                                            mesh_field,
+                                            mesh_role,
+                                            mesh_->dim());
+
+        const auto* values = svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, mesh_field);
+        FE_CHECK_NOT_NULL(values,
+                          "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: mesh field data");
+
+        const auto* entity_map = field_dof_handlers_[field_idx].getEntityDofMap();
+        FE_THROW_IF(entity_map == nullptr, InvalidStateException,
+                    "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: FE field '" + rec.name +
+                        "' must have vertex DOFs to sync from mesh fields");
+
+        const auto components = static_cast<std::size_t>(std::max(1, rec.components));
+        const auto mesh_components = svmp::MeshFields::field_components(local_mesh, mesh_field);
+        FE_THROW_IF(mesh_components < components, InvalidArgumentException,
+                    "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: mesh field '" +
+                        std::string(mesh_name) + "' has fewer components than FE field '" +
+                        rec.name + "'");
+
+        const auto n_dofs = static_cast<std::size_t>(field_dof_handlers_[field_idx].getNumDofs());
+        if (field_idx >= prescribed_field_buffers_.size()) {
+            prescribed_field_buffers_.resize(field_idx + 1u);
+        }
+        auto& buffer = prescribed_field_buffers_[field_idx];
+        buffer.coefficients.assign(n_dofs, Real(0));
+
+        const auto n_vertices = static_cast<GlobalIndex>(mesh_->n_vertices());
+        FE_THROW_IF(entity_map->numVertices() < n_vertices, InvalidStateException,
+                    "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: FE field '" + rec.name +
+                        "' does not cover every mesh vertex");
+
+        for (GlobalIndex v = 0; v < n_vertices; ++v) {
+            const auto vertex_dofs = entity_map->getVertexDofs(v);
+            FE_THROW_IF(vertex_dofs.size() != components, InvalidStateException,
+                        "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: FE field '" + rec.name +
+                            "' vertex DOF component count mismatch");
+            const auto v_base = static_cast<std::size_t>(v) * mesh_components;
+            for (std::size_t c = 0; c < components; ++c) {
+                const auto dof = vertex_dofs[c];
+                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= buffer.coefficients.size(),
+                            InvalidStateException,
+                            "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: field DOF index out of range");
+                buffer.coefficients[static_cast<std::size_t>(dof)] =
+                    static_cast<Real>(values[v_base + c]);
+                ++values_written;
+            }
+        }
+        ++buffer.revision;
+    }
+
+    return values_written;
+}
+
 std::size_t FESystem::syncBoundMeshMotionFieldsToState(std::span<Real> state) const
 {
     requireSetup();
@@ -2684,6 +2891,9 @@ std::size_t FESystem::syncBoundMeshMotionFieldsToState(std::span<Real> state) co
 
     for (const auto& entry : entries) {
         const auto& rec = field_registry_.get(entry.fe_field);
+        if (rec.source_kind != FieldSourceKind::Unknown) {
+            continue;
+        }
         const auto field_idx = static_cast<std::size_t>(entry.fe_field);
         FE_THROW_IF(field_idx >= field_dof_handlers_.size() ||
                         field_idx >= field_dof_offsets_.size(),
@@ -2762,6 +2972,9 @@ std::size_t FESystem::syncBoundMeshMotionFieldsToState(assembly::GlobalSystemVie
 
         const auto mesh_role = toMeshMotionRole(role);
         const auto& rec = field_registry_.get(field);
+        if (rec.source_kind != FieldSourceKind::Unknown) {
+            continue;
+        }
         const auto field_idx = static_cast<std::size_t>(field);
         FE_THROW_IF(field_idx >= field_dof_handlers_.size() ||
                         field_idx >= field_dof_offsets_.size(),

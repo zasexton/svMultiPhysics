@@ -399,13 +399,51 @@ struct CutCurvedPatchRecord {
   std::vector<std::array<real_t, 3>> quadrature_points{};
   std::vector<std::array<real_t, 3>> quadrature_normals{};
   std::vector<real_t> quadrature_weights{};
+  std::vector<std::array<real_t, 3>> quadrature_parent_parametric_coordinates{};
+  std::vector<std::size_t> active_child_ordinals{};
+  std::vector<EmbeddedRegionProvenance> active_child_provenance{};
+  std::vector<std::size_t> predicate_fallback_child_ordinals{};
   real_t quadrature_measure{0.0};
   real_t max_parent_parametric_residual{0.0};
   bool parametric_coordinates_valid{false};
   bool exact_topology_available{false};
   bool linearized_surrogate{true};
   bool isoparametric_quadrature_available{false};
+  bool predicate_fallback_used{false};
+  bool predicate_fallback_tolerance_resolved{false};
   std::string construction_policy{"tessellated-curved-linearized-arrangement"};
+  std::string predicate_fallback_policy{};
+  std::string predicate_fallback_reason{};
+  EmbeddedGeometryBooleanOperation composition_operation{EmbeddedGeometryBooleanOperation::Union};
+  EmbeddedRegionProvenance provenance{};
+};
+
+struct CutQuadratureGeometrySensitivitySample {
+  std::array<real_t, 3> parent_parametric_coordinate{{0.0, 0.0, 0.0}};
+  std::vector<real_t> shape_values{};
+  std::vector<std::array<real_t, 3>> shape_gradients{};
+};
+
+struct CutQuadratureGeometrySensitivityRecord {
+  std::uint64_t stable_id{0};
+  std::uint64_t source_stable_id{0};
+  index_t parent_cell{INVALID_INDEX};
+  gid_t parent_cell_gid{INVALID_GID};
+  CellFamily parent_family{CellFamily::Point};
+  int geometry_order{1};
+  EmbeddedGeometryKind embedded_kind{EmbeddedGeometryKind::Plane};
+  Configuration configuration{Configuration::Reference};
+  std::string target_kind{"interface-quadrature"};
+  std::string construction_policy{};
+  std::vector<index_t> parent_geometry_dofs{};
+  std::vector<CutQuadratureGeometrySensitivitySample> samples{};
+  bool ad_compatible{false};
+  bool location_sensitivity_available{false};
+  bool jacobian_sensitivity_available{false};
+  bool measure_sensitivity_available{false};
+  bool normal_sensitivity_available{false};
+  bool quadrature_weight_sensitivity_available{false};
+  std::string capability_diagnostic{};
   EmbeddedRegionProvenance provenance{};
 };
 
@@ -470,6 +508,7 @@ struct CutTopologyRecord {
   std::vector<CutInterfacePolygon> interface_polygons{};
   std::vector<CutCurvedPatchRecord> curved_patches{};
   std::vector<CutSideRegion> side_regions{};
+  std::vector<CutQuadratureGeometrySensitivityRecord> sensitivity_records{};
   std::vector<std::string> diagnostics{};
 };
 
@@ -500,6 +539,9 @@ struct CutTopologyOptions {
   CutPredicatePolicy predicate_policy{};
   bool allow_linearized_high_order_geometry{true};
   CutCurvedArrangementMode curved_arrangement_mode{CutCurvedArrangementMode::LinearizedSurrogate};
+  int true_curved_subdivision_refinement_level{-1};
+  int true_curved_subdivision_max_refinement_level{-1};
+  real_t true_curved_subdivision_curvature_threshold{0.0};
 };
 
 struct EmbeddedGeometryRegistrySnapshot {
@@ -532,6 +574,34 @@ struct CutDistributedEntityRecord {
   bool closed_topology{false};
   std::vector<std::uint64_t> vertex_ids{};
   std::vector<std::vector<std::uint64_t>> face_ids{};
+  int geometry_order{1};
+  EmbeddedGeometryKind embedded_kind{EmbeddedGeometryKind::Plane};
+  Configuration configuration{Configuration::Reference};
+  EmbeddedGeometryBooleanOperation composition_operation{EmbeddedGeometryBooleanOperation::Union};
+  std::string construction_policy{};
+  bool curved_isoparametric{false};
+  bool parametric_coordinates_valid{false};
+  bool exact_topology_available{false};
+  bool linearized_surrogate{false};
+  bool isoparametric_quadrature_available{false};
+  std::vector<std::array<real_t, 3>> parent_parametric_coordinates{};
+  std::vector<std::array<real_t, 3>> quadrature_parent_parametric_coordinates{};
+  std::vector<real_t> quadrature_weights{};
+  std::vector<std::size_t> active_child_ordinals{};
+  std::vector<std::string> active_child_provenance_ids{};
+  std::vector<std::size_t> predicate_fallback_child_ordinals{};
+  std::size_t geometry_sensitivity_dof_count{0};
+  std::size_t geometry_sensitivity_sample_count{0};
+  bool geometry_sensitivity_ad_compatible{false};
+  bool location_sensitivity_available{false};
+  bool jacobian_sensitivity_available{false};
+  bool measure_sensitivity_available{false};
+  bool normal_sensitivity_available{false};
+  bool quadrature_weight_sensitivity_available{false};
+  bool predicate_fallback_used{false};
+  bool predicate_fallback_tolerance_resolved{false};
+  std::string predicate_fallback_policy{};
+  std::string predicate_fallback_reason{};
 };
 
 struct CutDistributedExchangePacket {
@@ -606,6 +676,65 @@ struct CutSupportMatrixEntry {
   std::string fe_execution_path{"shared-cut-integration-record"};
   CutSupportStatus status{CutSupportStatus::Unsupported};
   std::string qualification{};
+};
+
+enum class CutSupportEvidenceDomain : std::uint8_t {
+  Topology,
+  Quadrature,
+  FeExecution,
+  RestartRollback,
+  Mpi,
+  Sensitivity,
+  Diagnostic,
+  FullValidation
+};
+
+enum class CutSupportAuditCategory : std::uint8_t {
+  Unsupported,
+  FullyValidated,
+  MissingAnalyticValidation,
+  MissingSensitivityEvidence,
+  MissingRestartOrMpiEvidence,
+  MissingFeExecutionEvidence,
+  AdvertisedTooBroadly
+};
+
+struct CutSupportMatrixEvidenceRecord {
+  CutSupportMatrixEntry entry{};
+  CutSupportEvidenceDomain domain{CutSupportEvidenceDomain::Topology};
+  std::string evidence_id{};
+  std::string description{};
+  std::string verification{};
+};
+
+struct CutSupportMatrixQualificationRecord {
+  CutSupportMatrixEntry entry{};
+  bool requires_topology_evidence{false};
+  bool requires_quadrature_evidence{false};
+  bool requires_fe_execution_evidence{false};
+  bool requires_restart_rollback_evidence{false};
+  bool requires_mpi_evidence{false};
+  bool requires_sensitivity_evidence{false};
+  bool requires_diagnostic_evidence{false};
+  bool requires_validation_evidence{false};
+  bool topology_evidence{false};
+  bool quadrature_evidence{false};
+  bool fe_execution_evidence{false};
+  bool restart_rollback_evidence{false};
+  bool mpi_evidence{false};
+  bool sensitivity_evidence{false};
+  bool diagnostic_evidence{false};
+  bool validation_evidence{false};
+  bool qualified{false};
+  std::vector<std::string> evidence{};
+  std::vector<std::string> missing{};
+};
+
+struct CutSupportMatrixAuditRecord {
+  CutSupportMatrixQualificationRecord qualification{};
+  CutSupportAuditCategory category{CutSupportAuditCategory::Unsupported};
+  std::vector<CutSupportEvidenceDomain> missing_domains{};
+  std::string summary{};
 };
 
 class EmbeddedGeometryRegistry {
@@ -723,6 +852,15 @@ private:
     const CutDistributedState& state);
 
 [[nodiscard]] std::vector<CutSupportMatrixEntry> cut_support_matrix();
+
+[[nodiscard]] std::vector<CutSupportMatrixEvidenceRecord>
+cut_support_matrix_validation_ledger();
+
+[[nodiscard]] std::vector<CutSupportMatrixQualificationRecord>
+qualify_cut_support_matrix();
+
+[[nodiscard]] std::vector<CutSupportMatrixAuditRecord>
+audit_cut_support_matrix_validation();
 
 [[nodiscard]] CutSupportMatrixEntry evaluate_cut_support(
     CellFamily parent_family,

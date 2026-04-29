@@ -249,7 +249,7 @@ auto residual = (inner(grad(u), grad(v)) - f * v).dx();
 ### Milestone 1: Core vocabulary + cell integrals
 - [x] `Test`, `Trial`, `Coefficient`, `Constant`, `Identity`, `Normal`
 - [x] Geometry terminals: `x`, `X`, `J`, `Jinv`, `detJ`, and basic entity measures (`h`, `vol(K)`, `area(F)`)
-- [x] `grad`, `div`, `curl` (see `FUTURE_FEATURES.md` for higher-derivative plans)
+- [x] `grad`, `div`, `curl` (see `VOCABULARY.md` for current derivative support and planned vocabulary)
 - [x] Algebra/tensor operators needed for a practical PDE vocabulary:
   - `/`, `pow`, `min/max`, comparisons + `conditional`,
   - `transpose`, `trace`, `det`, `inv`, `cofactor`, `sym`, `skew`, `dev`, `norm`, `normalize`, `cross`,
@@ -296,7 +296,7 @@ auto residual = (inner(grad(u), grad(v)) - f * v).dx();
 
 ## Vocabulary Roadmap
 
-For an extensive “future PDE vocabulary” checklist (including cross-module concepts and scoping), see `FE/Forms/VOCABULARY_ROADMAP.md`.
+For the consolidated vocabulary reference, current capability notes, and planned vocabulary, see `FE/Forms/VOCABULARY.md`.
 
 ## Systems Integration Notes
 

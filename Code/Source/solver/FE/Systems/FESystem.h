@@ -260,8 +260,20 @@ public:
 
     // ---- Definition phase ----
     FieldId addField(FieldSpec spec);
+    FieldId addMeshMotionDataField(std::string name,
+                                   std::shared_ptr<const spaces::FunctionSpace> space,
+                                   int components = 0);
+    FieldId addDerivedMeshVelocityField(std::string name,
+                                        std::shared_ptr<const spaces::FunctionSpace> space,
+                                        FieldId mesh_displacement_field,
+                                        int components = 0);
     [[nodiscard]] FieldId findFieldByName(std::string_view name) const noexcept;
     [[nodiscard]] bool hasField(std::string_view name) const noexcept;
+    [[nodiscard]] bool fieldParticipatesInUnknownVector(FieldId field) const;
+    void setPrescribedFieldCoefficients(FieldId field, std::span<const Real> coefficients);
+    void clearPrescribedFieldCoefficients(FieldId field);
+    [[nodiscard]] std::span<const Real> prescribedFieldCoefficients(FieldId field) const;
+    [[nodiscard]] std::uint64_t prescribedFieldRevision(FieldId field) const;
     void bindMeshMotionField(MeshMotionFieldRole role, FieldId field);
     void bindMeshMotionField(std::string_view role_name, FieldId field);
     void bindMeshMotionField(std::string_view role_name, std::string_view field_name);
@@ -1158,6 +1170,7 @@ public:
 	    std::size_t resetBoundMeshMotionField(MeshMotionFieldRole role, Real value = Real(0));
 
 	    std::size_t bindStandardMeshMotionFieldsByName();
+	    std::size_t syncBoundMeshMotionFieldsToPrescribedBuffers();
 	    std::size_t syncBoundMeshMotionFieldsToState(std::span<Real> state) const;
 	    std::size_t syncBoundMeshMotionFieldsToState(assembly::GlobalSystemView& vector_view) const;
 	    void notifyMeshGeometryAdvanced();
@@ -1461,6 +1474,11 @@ private:
     dofs::DofHandler dof_handler_{};
     std::vector<dofs::DofHandler> field_dof_handlers_{};
     std::vector<GlobalIndex> field_dof_offsets_{};
+    struct PrescribedFieldBuffer {
+        std::vector<Real> coefficients{};
+        std::uint64_t revision{0};
+    };
+    std::vector<PrescribedFieldBuffer> prescribed_field_buffers_{};
     SetupStoragePlan setup_storage_plan_{};
     dofs::FieldDofMap field_map_{};
     std::unique_ptr<dofs::BlockDofMap> block_map_{};

@@ -628,6 +628,8 @@ void MovingDomainOrchestrator::notifySystems(std::span<systems::FESystem* const>
             continue;
         }
         system->notifyMeshGeometryAdvanced();
+        diagnostics_.synced_prescribed_field_values +=
+            system->syncBoundMeshMotionFieldsToPrescribedBuffers();
         ++diagnostics_.notified_fe_systems;
     }
 }
@@ -675,8 +677,9 @@ MovingDomainDiagnostics MovingDomainOrchestrator::advance(
     }
 
     if (config_.mode == MovingMeshMode::CoupledMonolithic) {
-        diagnostics_.success = false;
-        diagnostics_.message = "coupled/monolithic mesh motion is configured but not supported by this orchestration phase";
+        diagnostics_.success = true;
+        diagnostics_.message =
+            "coupled/monolithic mesh motion is handled by FE nonlinear geometry transactions";
         diagnostics_.geometry_revision_after = mesh_->local_mesh().geometry_revision();
         return diagnostics_;
     }

@@ -132,10 +132,9 @@ void ConstraintRankAnalyzer::run(const ProblemAnalysisContext& context,
         FieldId fid = ns_claim->field;
         if (fid == INVALID_FIELD_ID) continue;
 
-        bool is_rigid_body = ns_claim->description.find("rigid-body") !=
-                             std::string::npos ||
-                             ns_claim->description.find("rigid") !=
-                             std::string::npos;
+        const bool is_rigid_body =
+            ns_claim->nullspace_family.has_value() &&
+            *ns_claim->nullspace_family == NullspaceFamily::KernelOfSymGrad;
 
         // Check if any BC truly anchors this field's nullspace mode.
         // Algebraic relations (periodic, MPC) PRESERVE the nullspace — skip them.

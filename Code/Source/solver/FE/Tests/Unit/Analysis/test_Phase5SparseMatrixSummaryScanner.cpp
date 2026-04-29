@@ -59,6 +59,8 @@ void expectSameScalarSummary(const DiscreteMatrixSummary& a,
     EXPECT_EQ(a.structurally_symmetric, b.structurally_symmetric);
     EXPECT_EQ(a.numerically_symmetric, b.numerically_symmetric);
     EXPECT_EQ(a.symmetry_evidence_complete, b.symmetry_evidence_complete);
+    EXPECT_EQ(a.sign_evidence_complete, b.sign_evidence_complete);
+    EXPECT_EQ(a.row_sum_evidence_complete, b.row_sum_evidence_complete);
     EXPECT_DOUBLE_EQ(a.max_abs_entry, b.max_abs_entry);
     EXPECT_DOUBLE_EQ(a.max_abs_offdiag, b.max_abs_offdiag);
     EXPECT_DOUBLE_EQ(a.max_positive_offdiag, b.max_positive_offdiag);
@@ -75,6 +77,9 @@ void expectSameScalarSummary(const DiscreteMatrixSummary& a,
     EXPECT_EQ(a.negative_offdiag_count, b.negative_offdiag_count);
     EXPECT_EQ(a.near_zero_offdiag_count, b.near_zero_offdiag_count);
     EXPECT_EQ(a.row_sum_violation_count, b.row_sum_violation_count);
+    EXPECT_EQ(a.scanned_row_count, b.scanned_row_count);
+    EXPECT_EQ(a.expected_row_count, b.expected_row_count);
+    EXPECT_EQ(a.scanned_entry_count, b.scanned_entry_count);
 }
 
 } // namespace
@@ -98,11 +103,16 @@ TEST(Phase5SparseMatrixSummaryScanner, BackendNeutralCsrScanBuildsMatrixSignSumm
     EXPECT_TRUE(summary.structurally_symmetric);
     EXPECT_TRUE(summary.numerically_symmetric);
     EXPECT_TRUE(summary.symmetry_evidence_complete);
+    EXPECT_TRUE(summary.sign_evidence_complete);
+    EXPECT_TRUE(summary.row_sum_evidence_complete);
     EXPECT_EQ(summary.diagonal_count, 3u);
     EXPECT_EQ(summary.offdiag_count, 4u);
     EXPECT_EQ(summary.positive_offdiag_count, 0u);
     EXPECT_EQ(summary.negative_offdiag_count, 4u);
     EXPECT_EQ(summary.row_sum_violation_count, 0u);
+    EXPECT_EQ(summary.scanned_row_count, 3u);
+    EXPECT_EQ(summary.expected_row_count, 3u);
+    EXPECT_EQ(summary.scanned_entry_count, 7u);
     EXPECT_DOUBLE_EQ(summary.min_row_sum, 0.0);
     EXPECT_DOUBLE_EQ(summary.max_row_sum, 1.0);
     EXPECT_DOUBLE_EQ(summary.max_abs_row_sum, 1.0);
@@ -140,6 +150,8 @@ TEST(Phase5SparseMatrixSummaryScanner, SignSummariesRecordBackendKindForAllBacke
         ASSERT_TRUE(result.summary.backend_kind.has_value());
         EXPECT_EQ(*result.summary.backend_kind, kind);
         EXPECT_EQ(result.summary.positive_offdiag_count, 1u);
+        EXPECT_TRUE(result.summary.sign_evidence_complete);
+        EXPECT_TRUE(result.summary.row_sum_evidence_complete);
         EXPECT_DOUBLE_EQ(result.summary.max_positive_offdiag, 0.5);
         EXPECT_FALSE(result.summary.numerically_symmetric);
         EXPECT_EQ(result.summary.worst_entries.size(), 1u);
@@ -182,6 +194,8 @@ TEST(Phase5SparseMatrixSummaryScanner, ReducedFreeFreeScanEliminatesConstrainedR
     EXPECT_TRUE(matrix.structurally_symmetric);
     EXPECT_TRUE(matrix.numerically_symmetric);
     EXPECT_TRUE(matrix.symmetry_evidence_complete);
+    EXPECT_TRUE(matrix.sign_evidence_complete);
+    EXPECT_TRUE(matrix.row_sum_evidence_complete);
 }
 
 TEST(Phase5SparseMatrixSummaryScanner, PartitionedScanMatchesSerialScan)
@@ -268,6 +282,8 @@ TEST(Phase5SparseMatrixSummaryScanner, LargePartitionedScanBoundsStorageAndLogsO
               options.symmetry_entry_storage_limit);
     EXPECT_LE(result.summary.worst_entries.size(), options.worst_entry_sample_limit);
     EXPECT_FALSE(result.summary.symmetry_evidence_complete);
+    EXPECT_TRUE(result.summary.sign_evidence_complete);
+    EXPECT_TRUE(result.summary.row_sum_evidence_complete);
     EXPECT_NE(result.log.message.find("estimated_peak_stored_entries="),
               std::string::npos);
 }

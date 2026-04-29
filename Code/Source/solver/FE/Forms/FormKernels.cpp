@@ -1186,6 +1186,20 @@ std::array<Real, 3> fdCurlVector(const VectorCoefficient& f, const std::array<Re
 // Spatial jets (value + spatial derivatives via chain rule)
 // ============================================================================
 
+[[nodiscard]] std::array<Real, 3> trialGeometryVectorSeed(
+    const assembly::AssemblyContext& ctx,
+    LocalIndex j,
+    LocalIndex q);
+
+[[nodiscard]] Real currentTimeDerivativeCoefficient(
+    const assembly::AssemblyContext& ctx,
+    int order);
+
+[[nodiscard]] assembly::AssemblyContext::Matrix3x3 trialMeshVelocityJacobianSeed(
+    const assembly::AssemblyContext& ctx,
+    LocalIndex j,
+    LocalIndex q);
+
 struct EvalEnvReal;
 struct EvalEnvDual;
 
@@ -1923,6 +1937,20 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
                 out.value.v[static_cast<std::size_t>(d)] =
                     makeScalarConstant<Scalar>(value[static_cast<std::size_t>(d)], env);
             }
+            if constexpr (std::is_same_v<Scalar, Dual>) {
+                if (node.type() == FormExprType::MeshVelocity &&
+                    env.geometry_sensitivity_active &&
+                    env.trial_active == side) {
+                    const Real a0 = currentTimeDerivativeCoefficient(ctx, 1);
+                    for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                        const auto seed =
+                            trialGeometryVectorSeed(ctx, static_cast<LocalIndex>(j), q);
+                        for (std::size_t d = 0; d < out.value.vectorSize(); ++d) {
+                            out.value.vectorAt(d).deriv[j] = a0 * seed[d];
+                        }
+                    }
+                }
+            }
 
             if (out.has_grad) {
                 assembly::AssemblyContext::Matrix3x3 jac{};
@@ -1955,6 +1983,25 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
                             : 0.0;
                         out.grad.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
                             makeScalarConstant<Scalar>(entry, env);
+                    }
+                }
+                if constexpr (std::is_same_v<Scalar, Dual>) {
+                    if (node.type() == FormExprType::MeshVelocity &&
+                        env.geometry_sensitivity_active &&
+                        env.trial_active == side) {
+                        const Real a0 = currentTimeDerivativeCoefficient(ctx, 1);
+                        for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                            const auto seed =
+                                trialMeshVelocityJacobianSeed(ctx, static_cast<LocalIndex>(j), q);
+                            for (int r = 0; r < dim; ++r) {
+                                for (int c = 0; c < dim; ++c) {
+                                    out.grad.m[static_cast<std::size_t>(r)]
+                                              [static_cast<std::size_t>(c)].deriv[j] =
+                                        a0 * seed[static_cast<std::size_t>(r)]
+                                                   [static_cast<std::size_t>(c)];
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -8934,6 +8981,49 @@ EvalValue<Dual> evalDualScalarTerminal(const EvalEnvDual& env,
     return out;
 }
 
+[[nodiscard]] Real currentTimeDerivativeCoefficient(
+    const assembly::AssemblyContext& ctx,
+    int order)
+{
+    const auto* time_ctx = ctx.timeIntegrationContext();
+    FE_THROW_IF(time_ctx == nullptr, InvalidArgumentException,
+                "Forms: coupled mesh-velocity sensitivity requires a time-integration context");
+    const auto* stencil = time_ctx->stencil(order);
+    FE_THROW_IF(stencil == nullptr, InvalidArgumentException,
+                "Forms: coupled mesh-velocity sensitivity requires an active time-derivative stencil");
+    return stencil->coeff(0);
+}
+
+[[nodiscard]] assembly::AssemblyContext::Matrix3x3 trialMeshVelocityJacobianSeed(
+    const assembly::AssemblyContext& ctx,
+    LocalIndex j,
+    LocalIndex q)
+{
+    if (ctx.trialUsesVectorBasis()) {
+        return ctx.trialBasisVectorJacobian(j, q);
+    }
+
+    const int vd = ctx.trialValueDimension();
+    FE_THROW_IF(vd <= 0 || vd > 3, InvalidArgumentException,
+                "Forms: mesh-velocity sensitivity requires a 1..3 dimensional mesh-motion trial field");
+    const LocalIndex n_trial = ctx.numTrialDofs();
+    FE_THROW_IF((n_trial % static_cast<LocalIndex>(vd)) != 0, InvalidArgumentException,
+                "Forms: mesh-velocity sensitivity trial DOF count is not divisible by value dimension");
+    const LocalIndex dofs_per_component =
+        static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+    const int component = static_cast<int>(j / dofs_per_component);
+    FE_THROW_IF(component < 0 || component >= vd, InvalidArgumentException,
+                "Forms: mesh-velocity sensitivity trial component is out of range");
+
+    assembly::AssemblyContext::Matrix3x3 out{};
+    const auto grad = ctx.trialPhysicalGradient(j, q);
+    for (int d = 0; d < ctx.dimension(); ++d) {
+        out[static_cast<std::size_t>(component)][static_cast<std::size_t>(d)] =
+            grad[static_cast<std::size_t>(d)];
+    }
+    return out;
+}
+
 [[nodiscard]] Real traceProduct(
     const assembly::AssemblyContext::Matrix3x3& A,
     const assembly::AssemblyContext::Matrix3x3& B,
@@ -9099,7 +9189,18 @@ EvalValue<Dual> evalDualDispatchMeshDisplacement(const FormExprNode&, const Eval
 
 EvalValue<Dual> evalDualDispatchMeshVelocity(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
 {
-    return evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::meshVelocity);
+    auto out = evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::meshVelocity);
+    if (env.geometry_sensitivity_active && env.trial_active == side) {
+        const auto& ctx = ctxForSide(env.minus, env.plus, side);
+        const Real a0 = currentTimeDerivativeCoefficient(ctx, 1);
+        for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+            const auto seed = trialGeometryVectorSeed(ctx, static_cast<LocalIndex>(j), q);
+            for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                out.vectorAt(d).deriv[j] = a0 * seed[d];
+            }
+        }
+    }
+    return out;
 }
 
 EvalValue<Dual> evalDualDispatchMeshAcceleration(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)

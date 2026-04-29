@@ -143,10 +143,20 @@ struct MaterialStateView {
  * additional fields requested by kernels.
  */
 struct FieldSolutionAccess {
+    enum class CoefficientSource : std::uint8_t {
+        GlobalSolution,
+        PrescribedData,
+        DerivedFromUnknown
+    };
+
     FieldId field{INVALID_FIELD_ID};
     const spaces::FunctionSpace* space{nullptr};
     const dofs::DofMap* dof_map{nullptr};
     GlobalIndex dof_offset{0};
+    CoefficientSource coefficient_source{CoefficientSource::GlobalSolution};
+    std::span<const Real> prescribed_coefficients{};
+    std::uint64_t prescribed_revision{0};
+    int derived_time_derivative_order{0};
 };
 
 /**

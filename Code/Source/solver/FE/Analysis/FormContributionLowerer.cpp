@@ -205,6 +205,7 @@ lowerFormulation(const FormulationRecord& rec) {
                     d.domain = DomainKind::Boundary;
                 }
 
+                d.ensureStableContributionId();
                 contributions.push_back(std::move(d));
                 continue;
             }
@@ -383,6 +384,7 @@ lowerFormulation(const FormulationRecord& rec) {
                     d, trial_fid, fs, block_expr, block_has_boundary_terms, fsa);
             }
 
+            d.ensureStableContributionId();
             contributions.push_back(std::move(d));
             } // end for trial_fields_to_analyze
         }
@@ -457,6 +459,7 @@ lowerFormulation(const FormulationRecord& rec) {
             appendBoundaryInsensitiveNullspaceHint(
                 d, fid, fs, residual_expr, residual_has_boundary_terms, fsa);
 
+            d.ensureStableContributionId();
             contributions.push_back(std::move(d));
         }
 

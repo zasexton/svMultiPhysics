@@ -14,7 +14,10 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace svmp;
@@ -35,6 +38,22 @@ MeshBase make_tetra_mesh()
       std::vector<offset_t>{0, 4},
       std::vector<index_t>{0, 1, 2, 3},
       std::vector<CellShape>{CellShape{CellFamily::Tetra, 4, 1}});
+  mesh.finalize();
+  return mesh;
+}
+
+MeshBase make_quadratic_line_mesh()
+{
+  MeshBase mesh;
+  mesh.build_from_arrays(
+      3,
+      std::vector<real_t>{
+          0.0, 0.00, 0.0,
+          1.0, 0.00, 0.0,
+          0.5, 0.08, 0.0},
+      std::vector<offset_t>{0, 3},
+      std::vector<index_t>{0, 1, 2},
+      std::vector<CellShape>{CellShape{CellFamily::Line, 2, 2}});
   mesh.finalize();
   return mesh;
 }
@@ -194,6 +213,180 @@ EmbeddedGeometryDescriptor sphere(
   embedded.provenance.persistent_id = std::move(id);
   embedded.provenance.name = embedded.provenance.persistent_id;
   embedded.provenance.provenance_epoch = epoch;
+  return embedded;
+}
+
+EmbeddedGeometryDescriptor callback_sphere(
+    std::array<real_t, 3> center,
+    real_t radius,
+    std::uint64_t epoch,
+    std::string id)
+{
+  EmbeddedGeometryDescriptor embedded;
+  embedded.kind = EmbeddedGeometryKind::SignedDistanceCallback;
+  embedded.origin = center;
+  embedded.radius = radius;
+  embedded.geometry_epoch = epoch;
+  embedded.revisions.geometry_epoch = epoch;
+  embedded.provenance.persistent_id = std::move(id);
+  embedded.provenance.name = embedded.provenance.persistent_id;
+  embedded.provenance.provenance_epoch = epoch;
+  embedded.signed_distance_callback = [center, radius](const std::array<real_t, 3>& point) {
+    const real_t dx = point[0] - center[0];
+    const real_t dy = point[1] - center[1];
+    const real_t dz = point[2] - center[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz) - radius;
+  };
+  embedded.normal_callback = [center](const std::array<real_t, 3>& point) {
+    const std::array<real_t, 3> d{{point[0] - center[0],
+                                   point[1] - center[1],
+                                   point[2] - center[2]}};
+    const real_t n = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (n <= real_t{0.0}) {
+      return std::array<real_t, 3>{{1.0, 0.0, 0.0}};
+    }
+    return std::array<real_t, 3>{{d[0] / n, d[1] / n, d[2] / n}};
+  };
+  embedded.closest_point_callback = [center, radius](const std::array<real_t, 3>& point) {
+    const std::array<real_t, 3> d{{point[0] - center[0],
+                                   point[1] - center[1],
+                                   point[2] - center[2]}};
+    const real_t n = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    const std::array<real_t, 3> unit =
+        n <= real_t{0.0}
+            ? std::array<real_t, 3>{{1.0, 0.0, 0.0}}
+            : std::array<real_t, 3>{{d[0] / n, d[1] / n, d[2] / n}};
+    return std::array<real_t, 3>{{center[0] + radius * unit[0],
+                                  center[1] + radius * unit[1],
+                                  center[2] + radius * unit[2]}};
+  };
+  return embedded;
+}
+
+std::array<real_t, 3> unit_vector_for_test(const std::array<real_t, 3>& v)
+{
+  const real_t n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+  if (n <= real_t{0.0}) {
+    return {{1.0, 0.0, 0.0}};
+  }
+  return {{v[0] / n, v[1] / n, v[2] / n}};
+}
+
+EmbeddedGeometryDescriptor level_set_sphere(
+    std::array<real_t, 3> center,
+    real_t radius,
+    std::uint64_t epoch,
+    std::string id)
+{
+  EmbeddedGeometryDescriptor embedded;
+  embedded.kind = EmbeddedGeometryKind::LevelSetField;
+  embedded.origin = center;
+  embedded.radius = radius;
+  embedded.geometry_epoch = epoch;
+  embedded.revisions.geometry_epoch = epoch;
+  embedded.revisions.field_layout_revision = 1;
+  embedded.revisions.field_value_revision = epoch;
+  embedded.provenance.persistent_id = std::move(id);
+  embedded.provenance.name = embedded.provenance.persistent_id;
+  embedded.provenance.provenance_epoch = epoch;
+
+  const std::array<std::array<real_t, 3>, 14> directions{{
+      {{ 1.0,  0.0,  0.0}}, {{-1.0,  0.0,  0.0}},
+      {{ 0.0,  1.0,  0.0}}, {{ 0.0, -1.0,  0.0}},
+      {{ 0.0,  0.0,  1.0}}, {{ 0.0,  0.0, -1.0}},
+      {{ 1.0,  1.0,  1.0}}, {{ 1.0,  1.0, -1.0}},
+      {{ 1.0, -1.0,  1.0}}, {{ 1.0, -1.0, -1.0}},
+      {{-1.0,  1.0,  1.0}}, {{-1.0,  1.0, -1.0}},
+      {{-1.0, -1.0,  1.0}}, {{-1.0, -1.0, -1.0}}}};
+  for (const auto& direction : directions) {
+    const auto n = unit_vector_for_test(direction);
+    EmbeddedLevelSetSample sample;
+    sample.point = {{center[0] + radius * n[0],
+                     center[1] + radius * n[1],
+                     center[2] + radius * n[2]}};
+    sample.value = 0.0;
+    sample.gradient = n;
+    embedded.level_set_samples.push_back(sample);
+  }
+  return embedded;
+}
+
+EmbeddedGeometryDescriptor triangulated_octahedron_sphere(
+    std::array<real_t, 3> center,
+    real_t radius,
+    std::uint64_t epoch,
+    std::string id)
+{
+  EmbeddedGeometryDescriptor embedded;
+  embedded.kind = EmbeddedGeometryKind::TriangulatedSurface;
+  embedded.origin = center;
+  embedded.radius = radius;
+  embedded.geometry_epoch = epoch;
+  embedded.revisions.geometry_epoch = epoch;
+  embedded.revisions.source_surface_revision = epoch;
+  embedded.provenance.persistent_id = std::move(id);
+  embedded.provenance.name = embedded.provenance.persistent_id;
+  embedded.provenance.provenance_epoch = epoch;
+
+  const std::array<real_t, 3> xp{{center[0] + radius, center[1], center[2]}};
+  const std::array<real_t, 3> xn{{center[0] - radius, center[1], center[2]}};
+  const std::array<real_t, 3> yp{{center[0], center[1] + radius, center[2]}};
+  const std::array<real_t, 3> yn{{center[0], center[1] - radius, center[2]}};
+  const std::array<real_t, 3> zp{{center[0], center[1], center[2] + radius}};
+  const std::array<real_t, 3> zn{{center[0], center[1], center[2] - radius}};
+
+  const auto add_oriented_triangle =
+      [&](std::array<real_t, 3> a,
+          std::array<real_t, 3> b,
+          std::array<real_t, 3> c) {
+        const std::array<real_t, 3> ab{{b[0] - a[0], b[1] - a[1], b[2] - a[2]}};
+        const std::array<real_t, 3> ac{{c[0] - a[0], c[1] - a[1], c[2] - a[2]}};
+        const std::array<real_t, 3> normal{{
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0]}};
+        const std::array<real_t, 3> centroid{{
+            (a[0] + b[0] + c[0]) / 3.0,
+            (a[1] + b[1] + c[1]) / 3.0,
+            (a[2] + b[2] + c[2]) / 3.0}};
+        const std::array<real_t, 3> outward{{
+            centroid[0] - center[0],
+            centroid[1] - center[1],
+            centroid[2] - center[2]}};
+        const real_t orientation =
+            normal[0] * outward[0] + normal[1] * outward[1] + normal[2] * outward[2];
+        if (orientation < 0.0) {
+          std::swap(b, c);
+        }
+        embedded.surface_triangles.push_back({{{a, b, c}}, embedded.provenance});
+      };
+
+  add_oriented_triangle(zp, xp, yp);
+  add_oriented_triangle(zp, yp, xn);
+  add_oriented_triangle(zp, xn, yn);
+  add_oriented_triangle(zp, yn, xp);
+  add_oriented_triangle(zn, yp, xp);
+  add_oriented_triangle(zn, xn, yp);
+  add_oriented_triangle(zn, yn, xn);
+  add_oriented_triangle(zn, xp, yn);
+  return embedded;
+}
+
+EmbeddedGeometryDescriptor boolean_composite(
+    EmbeddedGeometryBooleanOperation operation,
+    std::vector<EmbeddedGeometryDescriptor> children,
+    std::uint64_t epoch,
+    std::string id)
+{
+  EmbeddedGeometryDescriptor embedded;
+  embedded.kind = EmbeddedGeometryKind::BooleanComposite;
+  embedded.boolean_operation = operation;
+  embedded.geometry_epoch = epoch;
+  embedded.revisions.geometry_epoch = epoch;
+  embedded.provenance.persistent_id = std::move(id);
+  embedded.provenance.name = embedded.provenance.persistent_id;
+  embedded.provenance.provenance_epoch = epoch;
+  embedded.children = std::move(children);
   return embedded;
 }
 
@@ -570,6 +763,41 @@ MeshBase make_cubic_curved_hex_mesh()
                                        static_cast<real_t>(order);
     const auto point = map_point(r, s, t);
     coords.insert(coords.end(), point.begin(), point.end());
+  }
+
+  std::vector<index_t> connectivity(labels.size());
+  for (std::size_t i = 0; i < connectivity.size(); ++i) {
+    connectivity[i] = static_cast<index_t>(i);
+  }
+
+  MeshBase mesh;
+  mesh.build_from_arrays(
+      3,
+      coords,
+      std::vector<offset_t>{0, static_cast<offset_t>(connectivity.size())},
+      connectivity,
+      std::vector<CellShape>{CellShape{CellFamily::Hex, 8, order}});
+  mesh.finalize();
+  return mesh;
+}
+
+MeshBase make_cubic_affine_hex_mesh()
+{
+  constexpr int order = 3;
+  const auto labels = hex_lagrange_indices_vtk_for_test(order);
+  std::vector<real_t> coords;
+  coords.reserve(labels.size() * 3u);
+  for (const auto& label : labels) {
+    const real_t r = real_t{-1.0} + real_t{2.0} *
+                                       static_cast<real_t>(label[0]) /
+                                       static_cast<real_t>(order);
+    const real_t s = real_t{-1.0} + real_t{2.0} *
+                                       static_cast<real_t>(label[1]) /
+                                       static_cast<real_t>(order);
+    const real_t t = real_t{-1.0} + real_t{2.0} *
+                                       static_cast<real_t>(label[2]) /
+                                       static_cast<real_t>(order);
+    coords.insert(coords.end(), {r, s, t});
   }
 
   std::vector<index_t> connectivity(labels.size());
@@ -1422,6 +1650,412 @@ std::string joined_messages(const std::vector<std::string>& messages)
   return out;
 }
 
+std::string support_matrix_key(const CutSupportMatrixEntry& entry)
+{
+  return std::to_string(static_cast<int>(entry.parent_family)) + ":" +
+         std::to_string(entry.geometry_order) + ":" +
+         std::to_string(static_cast<int>(entry.embedded_kind)) + ":" +
+         (entry.distributed ? "mpi" : "serial") + ":" +
+         entry.cut_mode + ":" +
+         entry.quadrature_policy + ":" +
+         entry.conditioning_policy + ":" +
+         entry.fe_execution_path;
+}
+
+bool is_quadratic_curved_starter_support_row(const CutSupportMatrixEntry& entry)
+{
+  return entry.geometry_order == 2 &&
+         entry.embedded_kind == EmbeddedGeometryKind::Plane &&
+         entry.cut_mode == "curved-isoparametric-cut" &&
+         entry.quadrature_policy == "curved-topology-subdivision" &&
+         entry.conditioning_policy == "geometric-conditioning-hooks" &&
+         (entry.parent_family == CellFamily::Line ||
+          entry.parent_family == CellFamily::Triangle ||
+          entry.parent_family == CellFamily::Quad ||
+          entry.parent_family == CellFamily::Tetra ||
+          entry.parent_family == CellFamily::Hex);
+}
+
+bool is_first_order_linearized_validation_support_row(const CutSupportMatrixEntry& entry)
+{
+  return entry.geometry_order == 1 &&
+         entry.cut_mode == "linearized-cut" &&
+         entry.quadrature_policy == "topology-subdivision" &&
+         entry.conditioning_policy == "geometric-conditioning-hooks" &&
+         (entry.parent_family == CellFamily::Line ||
+          entry.parent_family == CellFamily::Triangle ||
+          entry.parent_family == CellFamily::Quad ||
+          entry.parent_family == CellFamily::Tetra ||
+          entry.parent_family == CellFamily::Hex ||
+          entry.parent_family == CellFamily::Wedge ||
+          entry.parent_family == CellFamily::Pyramid ||
+          entry.parent_family == CellFamily::Polygon ||
+          entry.parent_family == CellFamily::Polyhedron) &&
+         (entry.embedded_kind == EmbeddedGeometryKind::Plane ||
+          entry.embedded_kind == EmbeddedGeometryKind::Sphere ||
+          entry.embedded_kind == EmbeddedGeometryKind::TriangulatedSurface ||
+          entry.embedded_kind == EmbeddedGeometryKind::LevelSetField ||
+          entry.embedded_kind == EmbeddedGeometryKind::BooleanComposite);
+}
+
+bool is_first_order_linearized_sensitivity_support_row(const CutSupportMatrixEntry& entry)
+{
+  return is_first_order_linearized_validation_support_row(entry);
+}
+
+bool is_second_order_linearized_validation_support_row(const CutSupportMatrixEntry& entry)
+{
+  return entry.geometry_order == 2 &&
+         !entry.distributed &&
+         entry.cut_mode == "linearized-cut" &&
+         entry.quadrature_policy == "topology-subdivision" &&
+         entry.conditioning_policy == "geometric-conditioning-hooks" &&
+         (entry.parent_family == CellFamily::Line ||
+          entry.parent_family == CellFamily::Triangle ||
+          entry.parent_family == CellFamily::Quad ||
+          entry.parent_family == CellFamily::Tetra ||
+          entry.parent_family == CellFamily::Hex ||
+          entry.parent_family == CellFamily::Wedge ||
+          entry.parent_family == CellFamily::Pyramid) &&
+         (entry.embedded_kind == EmbeddedGeometryKind::Plane ||
+          entry.embedded_kind == EmbeddedGeometryKind::Sphere ||
+          entry.embedded_kind == EmbeddedGeometryKind::TriangulatedSurface ||
+          entry.embedded_kind == EmbeddedGeometryKind::LevelSetField ||
+          entry.embedded_kind == EmbeddedGeometryKind::BooleanComposite);
+}
+
+bool is_second_order_linearized_sensitivity_support_row(const CutSupportMatrixEntry& entry)
+{
+  return is_second_order_linearized_validation_support_row(entry);
+}
+
+bool curved_topology_sensitivity_family(CellFamily family)
+{
+  return family == CellFamily::Line ||
+         family == CellFamily::Triangle ||
+         family == CellFamily::Quad ||
+         family == CellFamily::Tetra ||
+         family == CellFamily::Hex ||
+         family == CellFamily::Wedge ||
+         family == CellFamily::Pyramid;
+}
+
+bool true_curved_plane_subdivision_family(CellFamily family)
+{
+  return family == CellFamily::Triangle ||
+         family == CellFamily::Quad ||
+         family == CellFamily::Hex ||
+         family == CellFamily::Wedge ||
+         family == CellFamily::Pyramid;
+}
+
+bool true_curved_subdivision_sensitivity_kind(EmbeddedGeometryKind kind)
+{
+  return kind == EmbeddedGeometryKind::Sphere ||
+         kind == EmbeddedGeometryKind::SignedDistanceCallback ||
+         kind == EmbeddedGeometryKind::LevelSetField ||
+         kind == EmbeddedGeometryKind::TriangulatedSurface ||
+         kind == EmbeddedGeometryKind::BooleanComposite;
+}
+
+bool is_true_curved_topology_sensitivity_support_row(const CutSupportMatrixEntry& entry)
+{
+  if (entry.geometry_order >= 0 ||
+      entry.cut_mode != "curved-isoparametric-cut" ||
+      entry.conditioning_policy != "geometric-conditioning-hooks" ||
+      !curved_topology_sensitivity_family(entry.parent_family)) {
+    return false;
+  }
+  if (entry.quadrature_policy == "true-curved-arrangement") {
+    return entry.embedded_kind == EmbeddedGeometryKind::Plane;
+  }
+  if (entry.quadrature_policy == "true-curved-subdivision-arrangement") {
+    if (entry.embedded_kind == EmbeddedGeometryKind::Plane) {
+      return true_curved_plane_subdivision_family(entry.parent_family);
+    }
+    return true_curved_subdivision_sensitivity_kind(entry.embedded_kind);
+  }
+  return false;
+}
+
+bool is_curved_topology_sensitivity_support_row(const CutSupportMatrixEntry& entry)
+{
+  return is_quadratic_curved_starter_support_row(entry) ||
+         is_true_curved_topology_sensitivity_support_row(entry);
+}
+
+std::string support_evidence_domain_key(CutSupportEvidenceDomain domain)
+{
+  switch (domain) {
+    case CutSupportEvidenceDomain::Topology:
+      return "topology";
+    case CutSupportEvidenceDomain::Quadrature:
+      return "quadrature";
+    case CutSupportEvidenceDomain::FeExecution:
+      return "fe-execution";
+    case CutSupportEvidenceDomain::RestartRollback:
+      return "restart-rollback";
+    case CutSupportEvidenceDomain::Mpi:
+      return "mpi";
+    case CutSupportEvidenceDomain::Sensitivity:
+      return "sensitivity";
+    case CutSupportEvidenceDomain::Diagnostic:
+      return "diagnostic";
+    case CutSupportEvidenceDomain::FullValidation:
+      return "full-validation";
+  }
+  return "unknown";
+}
+
+bool has_missing_domain(
+    const CutSupportMatrixAuditRecord& record,
+    CutSupportEvidenceDomain domain)
+{
+  return std::find(record.missing_domains.begin(),
+                   record.missing_domains.end(),
+                   domain) != record.missing_domains.end();
+}
+
+MeshBase make_first_order_mesh_for_family(CellFamily family)
+{
+  switch (family) {
+    case CellFamily::Line:
+      return make_line_mesh();
+    case CellFamily::Triangle:
+      return make_triangle_mesh();
+    case CellFamily::Quad:
+      return make_quad_mesh();
+    case CellFamily::Tetra:
+      return make_tetra_mesh();
+    case CellFamily::Hex:
+      return make_hex_mesh();
+    case CellFamily::Wedge:
+      return make_wedge_mesh();
+    case CellFamily::Pyramid:
+      return make_pyramid_mesh();
+    case CellFamily::Polygon:
+      return make_polygon_mesh();
+    case CellFamily::Polyhedron:
+      return make_polyhedron_cube_mesh();
+    default:
+      return make_tetra_mesh();
+  }
+}
+
+MeshBase make_quadratic_mesh_for_family(CellFamily family)
+{
+  switch (family) {
+    case CellFamily::Line:
+      return make_quadratic_line_mesh();
+    case CellFamily::Triangle:
+      return make_quadratic_triangle_mesh();
+    case CellFamily::Quad:
+      return make_quadratic_quad_mesh();
+    case CellFamily::Tetra:
+      return make_quadratic_tetra_mesh();
+    case CellFamily::Hex:
+      return make_quadratic_hex_mesh();
+    case CellFamily::Wedge:
+      return make_quadratic_wedge_mesh();
+    case CellFamily::Pyramid:
+      return make_quadratic_pyramid_mesh();
+    default:
+      return make_quadratic_tetra_mesh();
+  }
+}
+
+EmbeddedGeometryDescriptor first_order_linearized_nonplane_embedded(
+    EmbeddedGeometryKind kind,
+    std::uint64_t epoch,
+    const std::string& id);
+
+EmbeddedGeometryDescriptor second_order_linearized_embedded(
+    CellFamily family,
+    EmbeddedGeometryKind kind,
+    std::uint64_t epoch,
+    const std::string& id)
+{
+  if (kind == EmbeddedGeometryKind::Plane) {
+    switch (family) {
+      case CellFamily::Line:
+        return axis_plane(0, 0.4, epoch);
+      case CellFamily::Quad:
+      case CellFamily::Hex:
+        return axis_plane(0, 0.0, epoch);
+      default:
+        return axis_plane(0, 0.25, epoch);
+    }
+  }
+
+  constexpr std::array<real_t, 3> center{{0.0, 0.0, 0.0}};
+  real_t radius =
+      family == CellFamily::Hex ? real_t{1.70}
+      : family == CellFamily::Quad ? real_t{1.10}
+                                   : real_t{0.55};
+  if (family == CellFamily::Hex &&
+      kind == EmbeddedGeometryKind::TriangulatedSurface) {
+    radius = real_t{2.0};
+  }
+  switch (kind) {
+    case EmbeddedGeometryKind::Sphere:
+      return sphere(center, radius, epoch, id);
+    case EmbeddedGeometryKind::LevelSetField:
+      return level_set_sphere(center, radius, epoch, id);
+    case EmbeddedGeometryKind::TriangulatedSurface:
+      return triangulated_octahedron_sphere(center, radius, epoch, id);
+    case EmbeddedGeometryKind::BooleanComposite: {
+      auto active = sphere(center, radius, epoch + 1u, id + "-active-sphere");
+      auto enclosing =
+          sphere(center, radius * real_t{3.0}, epoch + 2u, id + "-enclosing-sphere");
+      return boolean_composite(EmbeddedGeometryBooleanOperation::Intersection,
+                               {active, enclosing},
+                               epoch,
+                               id);
+    }
+    default:
+      return first_order_linearized_nonplane_embedded(kind, epoch, id);
+  }
+}
+
+std::size_t min_curved_patch_vertices_for_family(CellFamily family)
+{
+  switch (family) {
+    case CellFamily::Line:
+      return 1u;
+    case CellFamily::Triangle:
+    case CellFamily::Quad:
+      return 2u;
+    default:
+      return 3u;
+  }
+}
+
+EmbeddedGeometryDescriptor first_order_linearized_nonplane_embedded(
+    EmbeddedGeometryKind kind,
+    std::uint64_t epoch,
+    const std::string& id)
+{
+  constexpr std::array<real_t, 3> center{{0.0, 0.0, 0.0}};
+  constexpr real_t radius = 0.55;
+  switch (kind) {
+    case EmbeddedGeometryKind::Sphere:
+      return sphere(center, radius, epoch, id);
+    case EmbeddedGeometryKind::LevelSetField:
+      return level_set_sphere(center, radius, epoch, id);
+    case EmbeddedGeometryKind::TriangulatedSurface:
+      return triangulated_octahedron_sphere(center, radius, epoch, id);
+    case EmbeddedGeometryKind::BooleanComposite: {
+      auto active = sphere(center, radius, epoch + 1u, id + "-active-sphere");
+      auto enclosing = sphere(center, 2.0, epoch + 2u, id + "-enclosing-sphere");
+      return boolean_composite(EmbeddedGeometryBooleanOperation::Intersection,
+                               {active, enclosing},
+                               epoch,
+                               id);
+    }
+    default:
+      return sphere(center, radius, epoch, id);
+  }
+}
+
+void expect_first_order_linearized_nonplane_validation(
+    CellFamily family,
+    EmbeddedGeometryKind kind,
+    std::uint64_t epoch)
+{
+  SCOPED_TRACE("family=" + std::to_string(static_cast<int>(family)) +
+               " kind=" + std::to_string(static_cast<int>(kind)));
+  const auto mesh = make_first_order_mesh_for_family(family);
+  const auto embedded = first_order_linearized_nonplane_embedded(
+      kind,
+      epoch,
+      "linearized-validation-" + std::to_string(static_cast<int>(family)) +
+          "-" + std::to_string(static_cast<int>(kind)));
+
+  CutClassificationOptions options;
+  options.classify_faces = false;
+  options.classify_edges = false;
+  const auto map = classify_embedded_geometry(mesh, embedded, options);
+  ASSERT_EQ(map.cells.size(), 1u);
+  ASSERT_EQ(map.cells[0].classification, CutClassification::Cut);
+  EXPECT_EQ(map.embedded_geometry.kind, kind);
+
+  const auto topology = reconstruct_cut_topology(mesh, map);
+  ASSERT_TRUE(topology.supported) << joined_messages(topology.diagnostics);
+  ASSERT_FALSE(topology.vertices.empty());
+  ASSERT_EQ(topology.side_regions.size(), 2u);
+
+  real_t parent_measure = -1.0;
+  real_t measure_sum = 0.0;
+  real_t fraction_sum = 0.0;
+  std::set<CutTopologySide> observed_sides;
+  for (const auto& region : topology.side_regions) {
+    EXPECT_EQ(region.integration_family, family);
+    EXPECT_TRUE(region.measure_from_linear_topology);
+    EXPECT_TRUE(region.closed_integration_topology);
+    EXPECT_FALSE(region.integration_vertices.empty());
+    EXPECT_FALSE(region.integration_subcells.empty());
+    EXPECT_FALSE(region.provenance.persistent_id.empty());
+    observed_sides.insert(region.side);
+    for (const auto& vertex : region.integration_vertices) {
+      EXPECT_TRUE(std::isfinite(vertex.point[0]));
+      EXPECT_TRUE(std::isfinite(vertex.point[1]));
+      EXPECT_TRUE(std::isfinite(vertex.point[2]));
+      EXPECT_FALSE(vertex.provenance.persistent_id.empty());
+    }
+    real_t subcell_measure = 0.0;
+    for (const auto& subcell : region.integration_subcells) {
+      EXPECT_TRUE(subcell.closed_topology);
+      EXPECT_FALSE(subcell.vertices.empty());
+      EXPECT_FALSE(subcell.faces.empty());
+      EXPECT_GT(subcell.measure, 0.0);
+      EXPECT_EQ(subcell.construction_policy, "linear-topology-subdivision");
+      subcell_measure += subcell.measure;
+    }
+    EXPECT_NEAR(subcell_measure,
+                region.measure_estimate,
+                std::max(real_t{1.0e-9}, region.parent_measure * real_t{1.0e-8}));
+    if (parent_measure < 0.0) {
+      parent_measure = region.parent_measure;
+    } else {
+      EXPECT_NEAR(region.parent_measure,
+                  parent_measure,
+                  std::max(real_t{1.0e-10}, parent_measure * real_t{1.0e-10}));
+    }
+    measure_sum += region.measure_estimate;
+    fraction_sum += region.volume_fraction_estimate;
+  }
+  EXPECT_NE(observed_sides.find(CutTopologySide::Negative), observed_sides.end());
+  EXPECT_NE(observed_sides.find(CutTopologySide::Positive), observed_sides.end());
+  ASSERT_GT(parent_measure, 0.0);
+  EXPECT_NEAR(measure_sum,
+              parent_measure,
+              std::max(real_t{1.0e-9}, parent_measure * real_t{1.0e-8}));
+  EXPECT_NEAR(fraction_sum, 1.0, 1.0e-9);
+
+  const auto validity = diagnose_cut_topology_validity(topology);
+  EXPECT_TRUE(validity.ok) << joined_messages(validity.messages);
+
+  const auto restart = make_cut_classification_restart_record(map, topology);
+  EXPECT_EQ(restart.embedded_kind, kind);
+  EXPECT_EQ(restart.side_regions.size(), topology.side_regions.size());
+  EXPECT_EQ(restart.cut_topology_revision, topology.topology_revision);
+  if (kind == EmbeddedGeometryKind::BooleanComposite) {
+    EXPECT_TRUE(restart.is_composed_region);
+    EXPECT_FALSE(restart.composition_children.empty());
+  }
+
+  const auto packet = make_distributed_cut_exchange_packet(map, topology);
+  EXPECT_FALSE(packet.entities.empty());
+  const auto side_entity_count =
+      std::count_if(packet.entities.begin(), packet.entities.end(), [](const auto& entity) {
+        return entity.kind == CutTopologyEntityKind::SideRegion;
+      });
+  EXPECT_EQ(side_entity_count, topology.side_regions.size());
+
+  const auto topology_again = reconstruct_cut_topology(mesh, map);
+  EXPECT_EQ(topology_again.topology_revision, topology.topology_revision);
+}
+
 bool parametric_coordinate_inside(CellFamily family, const std::array<real_t, 3>& xi)
 {
   const real_t tol = 1.0e-8;
@@ -1440,6 +2074,16 @@ bool parametric_coordinate_inside(CellFamily family, const std::array<real_t, 3>
       return xi[0] >= -1.0 - tol && xi[0] <= 1.0 + tol &&
              xi[1] >= -1.0 - tol && xi[1] <= 1.0 + tol &&
              xi[2] >= -1.0 - tol && xi[2] <= 1.0 + tol;
+    case CellFamily::Wedge:
+      return xi[0] >= -tol && xi[1] >= -tol &&
+             xi[0] + xi[1] <= 1.0 + tol &&
+             xi[2] >= -1.0 - tol && xi[2] <= 1.0 + tol;
+    case CellFamily::Pyramid: {
+      const real_t span = 1.0 - xi[2];
+      return xi[2] >= -tol && xi[2] <= 1.0 + tol &&
+             std::abs(xi[0]) <= span + tol &&
+             std::abs(xi[1]) <= span + tol;
+    }
     default:
       return std::isfinite(xi[0]) && std::isfinite(xi[1]) && std::isfinite(xi[2]);
   }
@@ -1465,6 +2109,8 @@ void expect_curved_patch_descriptors(
     EXPECT_GT(patch.quadrature_measure, 0.0);
     ASSERT_EQ(patch.quadrature_points.size(), patch.quadrature_normals.size());
     ASSERT_EQ(patch.quadrature_points.size(), patch.quadrature_weights.size());
+    ASSERT_EQ(patch.quadrature_points.size(),
+              patch.quadrature_parent_parametric_coordinates.size());
     real_t quadrature_weight_sum = 0.0;
     for (const auto weight : patch.quadrature_weights) {
       EXPECT_GT(weight, 0.0);
@@ -1482,8 +2128,444 @@ void expect_curved_patch_descriptors(
     for (const auto& xi : patch.parent_parametric_coordinates) {
       EXPECT_TRUE(parametric_coordinate_inside(family, xi));
     }
+    for (const auto& xi : patch.quadrature_parent_parametric_coordinates) {
+      EXPECT_TRUE(parametric_coordinate_inside(family, xi));
+    }
   }
   EXPECT_TRUE(saw_matching_patch);
+}
+
+void expect_sensitivity_sample_shape_identities(
+    const CutQuadratureGeometrySensitivityRecord& record,
+    CellFamily family)
+{
+  ASSERT_FALSE(record.samples.empty());
+  ASSERT_FALSE(record.parent_geometry_dofs.empty());
+  for (const auto& sample : record.samples) {
+    EXPECT_TRUE(parametric_coordinate_inside(family, sample.parent_parametric_coordinate));
+    ASSERT_EQ(sample.shape_values.size(), record.parent_geometry_dofs.size());
+    ASSERT_EQ(sample.shape_gradients.size(), record.parent_geometry_dofs.size());
+    real_t value_sum = 0.0;
+    std::array<real_t, 3> gradient_sum{{0.0, 0.0, 0.0}};
+    for (std::size_t i = 0; i < sample.shape_values.size(); ++i) {
+      value_sum += sample.shape_values[i];
+      gradient_sum[0] += sample.shape_gradients[i][0];
+      gradient_sum[1] += sample.shape_gradients[i][1];
+      gradient_sum[2] += sample.shape_gradients[i][2];
+    }
+    EXPECT_NEAR(value_sum, 1.0, 1.0e-11);
+    EXPECT_NEAR(gradient_sum[0], 0.0, 1.0e-10);
+    EXPECT_NEAR(gradient_sum[1], 0.0, 1.0e-10);
+    EXPECT_NEAR(gradient_sum[2], 0.0, 1.0e-10);
+  }
+}
+
+void expect_curved_topology_sensitivity_metadata(
+    const char* name,
+    const CutTopologyRecord& topology,
+    const MeshBase& mesh,
+    CellFamily family,
+    int geometry_order,
+    EmbeddedGeometryKind embedded_kind,
+    const std::string& construction_policy)
+{
+  SCOPED_TRACE(name);
+  ASSERT_FALSE(topology.sensitivity_records.empty()) << joined_messages(topology.diagnostics);
+
+  const auto parent_dofs = mesh.cell_geometry_dofs(0);
+  std::set<std::string> target_kinds;
+  std::size_t matching_records = 0u;
+  for (const auto& record : topology.sensitivity_records) {
+    if (record.parent_family != family ||
+        record.construction_policy != construction_policy) {
+      continue;
+    }
+    ++matching_records;
+    target_kinds.insert(record.target_kind);
+    EXPECT_EQ(record.geometry_order, geometry_order);
+    EXPECT_EQ(record.embedded_kind, embedded_kind);
+    EXPECT_TRUE(record.ad_compatible);
+    EXPECT_TRUE(record.location_sensitivity_available);
+    EXPECT_TRUE(record.jacobian_sensitivity_available);
+    EXPECT_TRUE(record.measure_sensitivity_available);
+    EXPECT_TRUE(record.normal_sensitivity_available);
+    EXPECT_TRUE(record.quadrature_weight_sensitivity_available);
+    EXPECT_TRUE(record.capability_diagnostic.empty());
+    EXPECT_EQ(record.parent_geometry_dofs, parent_dofs);
+    expect_sensitivity_sample_shape_identities(record, family);
+  }
+  EXPECT_GE(matching_records, 3u);
+  EXPECT_NE(target_kinds.find("interface-quadrature"), target_kinds.end());
+  EXPECT_NE(target_kinds.find("negative-volume-subcell-quadrature"), target_kinds.end());
+  EXPECT_NE(target_kinds.find("positive-volume-subcell-quadrature"), target_kinds.end());
+}
+
+void expect_first_order_linearized_sensitivity_metadata(
+    CellFamily family,
+    EmbeddedGeometryKind kind,
+    std::uint64_t epoch)
+{
+  const std::string name =
+      "linearized-sensitivity-" + std::to_string(static_cast<int>(family)) +
+      "-" + std::to_string(static_cast<int>(kind));
+  SCOPED_TRACE(name);
+  const auto mesh = make_first_order_mesh_for_family(family);
+  const auto embedded = first_order_linearized_nonplane_embedded(kind, epoch, name);
+
+  CutClassificationOptions options;
+  options.classify_faces = false;
+  options.classify_edges = false;
+  const auto map = classify_embedded_geometry(mesh, embedded, options);
+  ASSERT_EQ(map.cells.size(), 1u);
+  ASSERT_EQ(map.cells[0].classification, CutClassification::Cut);
+
+  const auto topology = reconstruct_cut_topology(mesh, map);
+  ASSERT_TRUE(topology.supported) << joined_messages(topology.diagnostics);
+  expect_curved_topology_sensitivity_metadata(name.c_str(),
+                                             topology,
+                                             mesh,
+                                             family,
+                                             1,
+                                             kind,
+                                             "linear-topology-subdivision");
+
+  const auto rebuilt = reconstruct_cut_topology(mesh, map);
+  ASSERT_TRUE(rebuilt.supported) << joined_messages(rebuilt.diagnostics);
+  ASSERT_EQ(rebuilt.sensitivity_records.size(), topology.sensitivity_records.size());
+  EXPECT_EQ(rebuilt.topology_revision, topology.topology_revision);
+  for (std::size_t i = 0; i < topology.sensitivity_records.size(); ++i) {
+    EXPECT_EQ(rebuilt.sensitivity_records[i].stable_id,
+              topology.sensitivity_records[i].stable_id);
+    EXPECT_EQ(rebuilt.sensitivity_records[i].samples.size(),
+              topology.sensitivity_records[i].samples.size());
+  }
+
+  const auto parent_dofs = mesh.cell_geometry_dofs(0);
+  const auto packet = make_distributed_cut_exchange_packet(map, topology);
+  std::size_t sensitivity_entity_count = 0u;
+  for (const auto& entity : packet.entities) {
+    if (entity.kind != CutTopologyEntityKind::InterfacePolygon &&
+        entity.kind != CutTopologyEntityKind::SideRegion) {
+      continue;
+    }
+    if (!entity.geometry_sensitivity_ad_compatible) {
+      continue;
+    }
+    ++sensitivity_entity_count;
+    EXPECT_EQ(entity.embedded_kind, kind);
+    EXPECT_EQ(entity.geometry_order, 1);
+    EXPECT_EQ(entity.construction_policy, "linear-topology-subdivision");
+    EXPECT_EQ(entity.geometry_sensitivity_dof_count, parent_dofs.size());
+    EXPECT_GT(entity.geometry_sensitivity_sample_count, 0u);
+    EXPECT_TRUE(entity.location_sensitivity_available);
+    EXPECT_TRUE(entity.jacobian_sensitivity_available);
+    EXPECT_TRUE(entity.measure_sensitivity_available);
+    EXPECT_TRUE(entity.normal_sensitivity_available);
+    EXPECT_TRUE(entity.quadrature_weight_sensitivity_available);
+  }
+  EXPECT_GE(sensitivity_entity_count, 3u);
+}
+
+void expect_quadratic_curved_starter_sensitivity_metadata(
+    const char* name,
+    const MeshBase& mesh,
+    const EmbeddedGeometryDescriptor& embedded,
+    CellFamily family)
+{
+  SCOPED_TRACE(name);
+  CutClassificationOptions options;
+  options.classify_faces = false;
+  options.classify_edges = false;
+  const auto map = classify_embedded_geometry(mesh, embedded, options);
+  ASSERT_EQ(map.cells.size(), 1u);
+  ASSERT_EQ(map.cells[0].classification, CutClassification::Cut);
+
+  CutTopologyOptions topology_options;
+  topology_options.allow_linearized_high_order_geometry = true;
+  const auto topology = reconstruct_cut_topology(mesh, map, topology_options);
+  ASSERT_TRUE(topology.supported) << joined_messages(topology.diagnostics);
+  ASSERT_FALSE(topology.sensitivity_records.empty());
+
+  const auto parent_dofs = mesh.cell_geometry_dofs(0);
+  std::set<std::string> target_kinds;
+  std::size_t matching_records = 0u;
+  for (const auto& record : topology.sensitivity_records) {
+    if (record.parent_family != family) {
+      continue;
+    }
+    ++matching_records;
+    target_kinds.insert(record.target_kind);
+    EXPECT_EQ(record.geometry_order, 2);
+    EXPECT_EQ(record.embedded_kind, EmbeddedGeometryKind::Plane);
+    EXPECT_EQ(record.construction_policy, "curved-isoparametric-topology-subdivision");
+    EXPECT_TRUE(record.ad_compatible);
+    EXPECT_TRUE(record.location_sensitivity_available);
+    EXPECT_TRUE(record.jacobian_sensitivity_available);
+    EXPECT_TRUE(record.measure_sensitivity_available);
+    EXPECT_TRUE(record.normal_sensitivity_available);
+    EXPECT_TRUE(record.quadrature_weight_sensitivity_available);
+    EXPECT_TRUE(record.capability_diagnostic.empty());
+    EXPECT_EQ(record.parent_geometry_dofs, parent_dofs);
+    expect_sensitivity_sample_shape_identities(record, family);
+  }
+  EXPECT_GE(matching_records, 3u);
+  EXPECT_NE(target_kinds.find("interface-quadrature"), target_kinds.end());
+  EXPECT_NE(target_kinds.find("negative-volume-subcell-quadrature"), target_kinds.end());
+  EXPECT_NE(target_kinds.find("positive-volume-subcell-quadrature"), target_kinds.end());
+
+  const auto rebuilt = reconstruct_cut_topology(mesh, map, topology_options);
+  ASSERT_TRUE(rebuilt.supported) << joined_messages(rebuilt.diagnostics);
+  ASSERT_EQ(rebuilt.sensitivity_records.size(), topology.sensitivity_records.size());
+  EXPECT_EQ(rebuilt.topology_revision, topology.topology_revision);
+  for (std::size_t i = 0; i < topology.sensitivity_records.size(); ++i) {
+    EXPECT_EQ(rebuilt.sensitivity_records[i].stable_id,
+              topology.sensitivity_records[i].stable_id);
+    EXPECT_EQ(rebuilt.sensitivity_records[i].samples.size(),
+              topology.sensitivity_records[i].samples.size());
+  }
+}
+
+void expect_quadratic_curved_starter_full_validation(
+    const char* name,
+    const MeshBase& mesh,
+    const EmbeddedGeometryDescriptor& embedded,
+    CellFamily family,
+    std::size_t min_vertices_per_patch,
+    index_t first_mid_edge_dof,
+    index_t last_mid_edge_dof)
+{
+  SCOPED_TRACE(name);
+  CutClassificationOptions options;
+  options.classify_faces = false;
+  options.classify_edges = false;
+  const auto map = classify_embedded_geometry(mesh, embedded, options);
+  ASSERT_EQ(map.cells.size(), 1u);
+  ASSERT_EQ(map.cells[0].classification, CutClassification::Cut);
+
+  CutTopologyOptions topology_options;
+  topology_options.allow_linearized_high_order_geometry = true;
+  const auto topology = reconstruct_cut_topology(mesh, map, topology_options);
+  ASSERT_TRUE(topology.supported) << joined_messages(topology.diagnostics);
+  EXPECT_TRUE(topology.linearized_cut_mode);
+  expect_curved_patch_descriptors(topology, family, min_vertices_per_patch);
+  ASSERT_EQ(topology.side_regions.size(), 2u);
+
+  real_t measure_sum = 0.0;
+  real_t parent_measure = -1.0;
+  int nonzero_regions = 0;
+  std::size_t subcell_count = 0u;
+  bool saw_mid_edge_geometry_dof = false;
+  for (const auto& region : topology.side_regions) {
+    if (region.measure_estimate <= 1.0e-12) {
+      continue;
+    }
+    ++nonzero_regions;
+    EXPECT_TRUE(region.measure_from_linear_topology);
+    EXPECT_TRUE(region.closed_integration_topology);
+    EXPECT_TRUE(region.curved_isoparametric_topology);
+    EXPECT_FALSE(region.integration_vertices.empty());
+    EXPECT_FALSE(region.integration_subcells.empty());
+    for (const auto& vertex : region.integration_vertices) {
+      EXPECT_TRUE(vertex.curved_isoparametric);
+      EXPECT_TRUE(vertex.has_parent_parametric_coordinate);
+      EXPECT_TRUE(vertex.parent_parametric_coordinate_valid);
+      saw_mid_edge_geometry_dof =
+          saw_mid_edge_geometry_dof ||
+          (vertex.parent_geometry_dof >= first_mid_edge_dof &&
+           vertex.parent_geometry_dof <= last_mid_edge_dof);
+    }
+    for (const auto& subcell : region.integration_subcells) {
+      EXPECT_TRUE(subcell.closed_topology);
+      EXPECT_GT(subcell.measure, 0.0);
+      EXPECT_TRUE(subcell.curved_isoparametric);
+      EXPECT_TRUE(subcell.measure_from_isoparametric_quadrature);
+      EXPECT_EQ(subcell.parent_parametric_vertices.size(), subcell.vertices.size());
+      EXPECT_GT(subcell.parent_parametric_measure, 0.0);
+      ++subcell_count;
+    }
+    measure_sum += region.measure_estimate;
+    if (parent_measure < 0.0) {
+      parent_measure = region.parent_measure;
+    } else {
+      EXPECT_NEAR(region.parent_measure,
+                  parent_measure,
+                  std::max(1.0e-10, parent_measure * 1.0e-10));
+    }
+  }
+
+  EXPECT_EQ(nonzero_regions, 2);
+  ASSERT_GT(parent_measure, 0.0);
+  EXPECT_NEAR(measure_sum,
+              parent_measure,
+              std::max(1.0e-6, parent_measure * 1.0e-6));
+  EXPECT_GT(subcell_count, 1u);
+  EXPECT_TRUE(saw_mid_edge_geometry_dof);
+
+  const auto validity = diagnose_cut_topology_validity(
+      topology, /*high_order_parent_geometry=*/true);
+  EXPECT_TRUE(validity.ok) << joined_messages(validity.messages);
+  EXPECT_TRUE(validity.requires_curved_geometry_support);
+
+  const auto rebuilt = reconstruct_cut_topology(mesh, map, topology_options);
+  ASSERT_TRUE(rebuilt.supported) << joined_messages(rebuilt.diagnostics);
+  EXPECT_EQ(rebuilt.topology_revision, topology.topology_revision);
+  EXPECT_EQ(rebuilt.curved_patches.size(), topology.curved_patches.size());
+  EXPECT_EQ(rebuilt.side_regions.size(), topology.side_regions.size());
+
+  topology_options.allow_linearized_high_order_geometry = false;
+  const auto rejected = reconstruct_cut_topology(mesh, map, topology_options);
+  EXPECT_FALSE(rejected.supported);
+}
+
+void expect_second_order_linearized_validation_and_sensitivity(
+    CellFamily family,
+    EmbeddedGeometryKind kind,
+    std::uint64_t epoch)
+{
+  const std::string name =
+      "second-order-linearized-" + std::to_string(static_cast<int>(family)) +
+      "-" + std::to_string(static_cast<int>(kind));
+  SCOPED_TRACE(name);
+  const auto mesh = make_quadratic_mesh_for_family(family);
+  ASSERT_TRUE(mesh.has_high_order_geometry());
+  ASSERT_EQ(mesh.n_cells(), 1u);
+  EXPECT_EQ(mesh.geometry_order(0), 2);
+  const auto embedded =
+      second_order_linearized_embedded(family, kind, epoch, name);
+
+  CutClassificationOptions options;
+  options.classify_faces = false;
+  options.classify_edges = false;
+  const auto map = classify_embedded_geometry(mesh, embedded, options);
+  ASSERT_EQ(map.cells.size(), 1u);
+  ASSERT_EQ(map.cells[0].classification, CutClassification::Cut);
+  EXPECT_EQ(map.embedded_geometry.kind, kind);
+
+  CutTopologyOptions topology_options;
+  topology_options.allow_linearized_high_order_geometry = true;
+  const auto topology = reconstruct_cut_topology(mesh, map, topology_options);
+  ASSERT_TRUE(topology.supported) << joined_messages(topology.diagnostics);
+  EXPECT_TRUE(topology.linearized_cut_mode);
+  EXPECT_TRUE(has_message_containing(topology.diagnostics,
+                                     "controlled linearized-cut mode"))
+      << joined_messages(topology.diagnostics);
+  expect_curved_patch_descriptors(
+      topology, family, min_curved_patch_vertices_for_family(family));
+  ASSERT_EQ(topology.side_regions.size(), 2u);
+
+  const auto parent_dofs = mesh.cell_geometry_dofs(0);
+  ASSERT_GT(parent_dofs.size(), mesh.cell_shape(0).num_corners);
+  std::set<index_t> high_order_dofs;
+  for (std::size_t i = static_cast<std::size_t>(mesh.cell_shape(0).num_corners);
+       i < parent_dofs.size();
+       ++i) {
+    high_order_dofs.insert(parent_dofs[i]);
+  }
+
+  real_t measure_sum = 0.0;
+  real_t parent_measure = -1.0;
+  int nonzero_regions = 0;
+  std::size_t subcell_count = 0u;
+  bool saw_high_order_geometry_dof = false;
+  for (const auto& region : topology.side_regions) {
+    if (region.measure_estimate <= 1.0e-12) {
+      continue;
+    }
+    ++nonzero_regions;
+    EXPECT_EQ(region.integration_family, family);
+    EXPECT_TRUE(region.measure_from_linear_topology);
+    EXPECT_TRUE(region.closed_integration_topology);
+    EXPECT_TRUE(region.curved_isoparametric_topology);
+    EXPECT_FALSE(region.integration_vertices.empty());
+    EXPECT_FALSE(region.integration_subcells.empty());
+    for (const auto& vertex : region.integration_vertices) {
+      EXPECT_TRUE(vertex.curved_isoparametric);
+      EXPECT_TRUE(vertex.has_parent_parametric_coordinate);
+      EXPECT_TRUE(vertex.parent_parametric_coordinate_valid);
+      saw_high_order_geometry_dof =
+          saw_high_order_geometry_dof ||
+          high_order_dofs.find(vertex.parent_geometry_dof) != high_order_dofs.end();
+    }
+    for (const auto& subcell : region.integration_subcells) {
+      EXPECT_TRUE(subcell.closed_topology);
+      EXPECT_GT(subcell.measure, 0.0);
+      EXPECT_TRUE(subcell.curved_isoparametric);
+      EXPECT_TRUE(subcell.measure_from_isoparametric_quadrature);
+      EXPECT_EQ(subcell.construction_policy,
+                "curved-isoparametric-topology-subdivision");
+      EXPECT_EQ(subcell.parent_parametric_vertices.size(), subcell.vertices.size());
+      EXPECT_GT(subcell.parent_parametric_measure, 0.0);
+      ++subcell_count;
+    }
+    measure_sum += region.measure_estimate;
+    if (parent_measure < 0.0) {
+      parent_measure = region.parent_measure;
+    } else {
+      EXPECT_NEAR(region.parent_measure,
+                  parent_measure,
+                  std::max(1.0e-10, parent_measure * 1.0e-10));
+    }
+  }
+
+  EXPECT_EQ(nonzero_regions, 2);
+  ASSERT_GT(parent_measure, 0.0);
+  EXPECT_NEAR(measure_sum,
+              parent_measure,
+              std::max(real_t{1.0e-5}, parent_measure * real_t{1.0e-5}));
+  EXPECT_GT(subcell_count, 1u);
+  EXPECT_TRUE(saw_high_order_geometry_dof);
+
+  expect_curved_topology_sensitivity_metadata(
+      name.c_str(),
+      topology,
+      mesh,
+      family,
+      2,
+      kind,
+      "curved-isoparametric-topology-subdivision");
+
+  const auto packet = make_distributed_cut_exchange_packet(map, topology);
+  std::size_t sensitivity_entity_count = 0u;
+  for (const auto& entity : packet.entities) {
+    if (entity.kind != CutTopologyEntityKind::InterfacePolygon &&
+        entity.kind != CutTopologyEntityKind::SideRegion) {
+      continue;
+    }
+    if (!entity.geometry_sensitivity_ad_compatible) {
+      continue;
+    }
+    ++sensitivity_entity_count;
+    EXPECT_EQ(entity.embedded_kind, kind);
+    EXPECT_EQ(entity.geometry_order, 2);
+    EXPECT_EQ(entity.construction_policy,
+              "curved-isoparametric-topology-subdivision");
+    EXPECT_EQ(entity.geometry_sensitivity_dof_count, parent_dofs.size());
+    EXPECT_GT(entity.geometry_sensitivity_sample_count, 0u);
+    EXPECT_TRUE(entity.location_sensitivity_available);
+    EXPECT_TRUE(entity.jacobian_sensitivity_available);
+    EXPECT_TRUE(entity.measure_sensitivity_available);
+    EXPECT_TRUE(entity.normal_sensitivity_available);
+    EXPECT_TRUE(entity.quadrature_weight_sensitivity_available);
+  }
+  EXPECT_GE(sensitivity_entity_count, 3u);
+
+  const auto rebuilt = reconstruct_cut_topology(mesh, map, topology_options);
+  ASSERT_TRUE(rebuilt.supported) << joined_messages(rebuilt.diagnostics);
+  ASSERT_EQ(rebuilt.sensitivity_records.size(), topology.sensitivity_records.size());
+  EXPECT_EQ(rebuilt.topology_revision, topology.topology_revision);
+  EXPECT_EQ(rebuilt.curved_patches.size(), topology.curved_patches.size());
+  EXPECT_EQ(rebuilt.side_regions.size(), topology.side_regions.size());
+  for (std::size_t i = 0; i < topology.sensitivity_records.size(); ++i) {
+    EXPECT_EQ(rebuilt.sensitivity_records[i].stable_id,
+              topology.sensitivity_records[i].stable_id);
+    EXPECT_EQ(rebuilt.sensitivity_records[i].samples.size(),
+              topology.sensitivity_records[i].samples.size());
+  }
+
+  const auto validity = diagnose_cut_topology_validity(
+      topology, /*high_order_parent_geometry=*/true);
+  EXPECT_TRUE(validity.ok) << joined_messages(validity.messages);
+  EXPECT_TRUE(validity.requires_curved_geometry_support);
 }
 
 std::string unique_path(const std::string& suffix)
@@ -1754,6 +2836,98 @@ TEST(CutCell, LinearFamilySideRegionsConserveMeasuresForAdvertisedFamilies)
                                         "polyhedron");
 }
 
+TEST(CutCell, FirstOrderLinearizedNonPlaneRowsHaveRowExactValidationEvidence)
+{
+  const std::array<CellFamily, 9> families{{
+      CellFamily::Line,
+      CellFamily::Triangle,
+      CellFamily::Quad,
+      CellFamily::Tetra,
+      CellFamily::Hex,
+      CellFamily::Wedge,
+      CellFamily::Pyramid,
+      CellFamily::Polygon,
+      CellFamily::Polyhedron}};
+  const std::array<EmbeddedGeometryKind, 4> kinds{{
+      EmbeddedGeometryKind::Sphere,
+      EmbeddedGeometryKind::TriangulatedSurface,
+      EmbeddedGeometryKind::LevelSetField,
+      EmbeddedGeometryKind::BooleanComposite}};
+
+  std::uint64_t epoch = 1900;
+  for (const auto family : families) {
+    for (const auto kind : kinds) {
+      expect_first_order_linearized_nonplane_validation(family, kind, epoch++);
+    }
+  }
+
+  const auto records = qualify_cut_support_matrix();
+  std::size_t row_exact_validation_rows = 0u;
+  std::size_t nonplane_validation_rows = 0u;
+  for (const auto& record : records) {
+    if (!is_first_order_linearized_validation_support_row(record.entry)) {
+      continue;
+    }
+    ++row_exact_validation_rows;
+    EXPECT_TRUE(record.validation_evidence) << support_matrix_key(record.entry);
+    EXPECT_FALSE(has_message_containing(record.missing,
+                                        "full support-matrix validation"))
+        << support_matrix_key(record.entry) << " :: " << joined_messages(record.missing);
+    if (record.entry.embedded_kind != EmbeddedGeometryKind::Plane) {
+      ++nonplane_validation_rows;
+      EXPECT_TRUE(record.sensitivity_evidence) << support_matrix_key(record.entry);
+      EXPECT_TRUE(record.qualified) << support_matrix_key(record.entry)
+                                    << " :: " << joined_messages(record.missing);
+    }
+  }
+  EXPECT_EQ(row_exact_validation_rows, 2u * 6u * families.size() * 5u);
+  EXPECT_EQ(nonplane_validation_rows, 2u * 6u * families.size() * kinds.size());
+}
+
+TEST(CutCell, FirstOrderLinearizedNonPlaneRowsHaveAnalyticADSensitivityEvidence)
+{
+  const std::array<CellFamily, 9> families{{
+      CellFamily::Line,
+      CellFamily::Triangle,
+      CellFamily::Quad,
+      CellFamily::Tetra,
+      CellFamily::Hex,
+      CellFamily::Wedge,
+      CellFamily::Pyramid,
+      CellFamily::Polygon,
+      CellFamily::Polyhedron}};
+  const std::array<EmbeddedGeometryKind, 4> kinds{{
+      EmbeddedGeometryKind::Sphere,
+      EmbeddedGeometryKind::TriangulatedSurface,
+      EmbeddedGeometryKind::LevelSetField,
+      EmbeddedGeometryKind::BooleanComposite}};
+
+  std::uint64_t epoch = 2010;
+  for (const auto family : families) {
+    for (const auto kind : kinds) {
+      expect_first_order_linearized_sensitivity_metadata(family, kind, epoch++);
+    }
+  }
+
+  const auto records = qualify_cut_support_matrix();
+  std::size_t sensitivity_rows = 0u;
+  std::size_t nonplane_sensitivity_rows = 0u;
+  for (const auto& record : records) {
+    if (!is_first_order_linearized_sensitivity_support_row(record.entry)) {
+      continue;
+    }
+    ++sensitivity_rows;
+    EXPECT_TRUE(record.sensitivity_evidence) << support_matrix_key(record.entry);
+    EXPECT_TRUE(record.qualified) << support_matrix_key(record.entry)
+                                  << " :: " << joined_messages(record.missing);
+    if (record.entry.embedded_kind != EmbeddedGeometryKind::Plane) {
+      ++nonplane_sensitivity_rows;
+    }
+  }
+  EXPECT_EQ(sensitivity_rows, 2u * 6u * families.size() * 5u);
+  EXPECT_EQ(nonplane_sensitivity_rows, 2u * 6u * families.size() * kinds.size());
+}
+
 TEST(CutCell, VolumeClosedTopologyUsesSharedLinearCellTessellationUtility)
 {
   expect_linear_tessellation_matches_cut_topology(make_tetra_mesh(),
@@ -1942,6 +3116,15 @@ TEST(CutCell, TrueCurvedArrangementLineUsesRootIntervalsWithoutLinearizedSurroga
   ASSERT_GT(parent_measure, 0.0);
   EXPECT_NEAR(measure_sum, parent_measure, std::max(1.0e-8, parent_measure * 1.0e-8));
 
+  expect_curved_topology_sensitivity_metadata(
+      "true-curved-line-sensitivity",
+      topology,
+      mesh,
+      CellFamily::Line,
+      3,
+      embedded.kind,
+      "true-curved-isoparametric-arrangement");
+
   const auto topology_b = reconstruct_cut_topology(mesh, map, topology_options);
   EXPECT_EQ(topology.topology_revision, topology_b.topology_revision);
 
@@ -2015,6 +3198,15 @@ void expect_true_curved_face_arrangement(
   ASSERT_GT(parent_measure, 0.0);
   EXPECT_NEAR(measure_sum, parent_measure, std::max(1.0e-6, parent_measure * 1.0e-6));
 
+  expect_curved_topology_sensitivity_metadata(
+      "true-curved-face-sensitivity",
+      topology,
+      mesh,
+      expected_family,
+      expected_order,
+      embedded.kind,
+      "true-curved-isoparametric-arrangement");
+
   const auto topology_b = reconstruct_cut_topology(mesh, map, topology_options);
   EXPECT_EQ(topology.topology_revision, topology_b.topology_revision);
 
@@ -2055,13 +3247,27 @@ void expect_true_curved_subdivision_arrangement(
     EXPECT_TRUE(patch.parametric_coordinates_valid);
     EXPECT_TRUE(patch.isoparametric_quadrature_available);
     EXPECT_EQ(patch.construction_policy, "true-curved-subdivision-arrangement");
-    if (parent_family == CellFamily::Triangle || parent_family == CellFamily::Quad) {
+    if (parent_family == CellFamily::Line) {
+      EXPECT_GE(patch.parent_parametric_coordinates.size(), 1u);
+    } else if (parent_family == CellFamily::Triangle || parent_family == CellFamily::Quad) {
       EXPECT_GE(patch.parent_parametric_coordinates.size(), 2u);
     } else {
       EXPECT_GE(patch.parent_parametric_coordinates.size(), 3u);
     }
     EXPECT_EQ(patch.ordered_vertices.size(), patch.parent_parametric_coordinates.size());
     EXPECT_EQ(patch.ordered_vertices.size(), patch.physical_points.size());
+    if (embedded.kind == EmbeddedGeometryKind::BooleanComposite) {
+      EXPECT_EQ(patch.embedded_kind, EmbeddedGeometryKind::BooleanComposite);
+      EXPECT_EQ(patch.composition_operation, embedded.boolean_operation);
+      EXPECT_EQ(patch.active_child_ordinals.size(), patch.ordered_vertices.size());
+      EXPECT_EQ(patch.active_child_provenance.size(), patch.ordered_vertices.size());
+      EXPECT_FALSE(patch.active_child_ordinals.empty());
+      EXPECT_TRUE(std::all_of(patch.active_child_provenance.begin(),
+                              patch.active_child_provenance.end(),
+                              [](const auto& child) {
+                                return !child.persistent_id.empty() || !child.name.empty();
+                              }));
+    }
     EXPECT_GT(patch.quadrature_measure, 0.0);
     EXPECT_TRUE(std::isfinite(patch.max_parent_parametric_residual));
   }
@@ -2075,7 +3281,9 @@ void expect_true_curved_subdivision_arrangement(
     EXPECT_TRUE(region.curved_isoparametric_topology);
     EXPECT_FALSE(region.integration_subcells.empty());
     for (const auto& subcell : region.integration_subcells) {
-      if (parent_family == CellFamily::Triangle || parent_family == CellFamily::Quad) {
+      if (parent_family == CellFamily::Line) {
+        EXPECT_EQ(subcell.family, CellFamily::Line);
+      } else if (parent_family == CellFamily::Triangle || parent_family == CellFamily::Quad) {
         EXPECT_EQ(subcell.family, CellFamily::Triangle);
       } else {
         EXPECT_TRUE(subcell.family == CellFamily::Tetra ||
@@ -2101,6 +3309,15 @@ void expect_true_curved_subdivision_arrangement(
   ASSERT_GT(parent_measure, 0.0);
   EXPECT_NEAR(measure_sum, parent_measure, std::max(1.0e-4, parent_measure * 1.0e-4));
 
+  expect_curved_topology_sensitivity_metadata(
+      "true-curved-subdivision-sensitivity",
+      topology,
+      mesh,
+      parent_family,
+      3,
+      embedded.kind,
+      "true-curved-subdivision-arrangement");
+
   const auto topology_b = reconstruct_cut_topology(mesh, map, topology_options);
   EXPECT_EQ(topology.topology_revision, topology_b.topology_revision);
 
@@ -2108,6 +3325,308 @@ void expect_true_curved_subdivision_arrangement(
       topology, /*high_order_parent_geometry=*/true);
   EXPECT_TRUE(validity.ok) << joined_messages(validity.messages);
   EXPECT_FALSE(validity.requires_curved_geometry_support);
+}
+
+real_t pi_for_test()
+{
+  return std::acos(real_t{-1.0});
+}
+
+real_t side_measure(const CutTopologyRecord& topology, CutTopologySide side)
+{
+  real_t measure = 0.0;
+  for (const auto& region : topology.side_regions) {
+    if (region.side == side) {
+      measure += region.measure_estimate;
+    }
+  }
+  return measure;
+}
+
+real_t curved_patch_measure(const CutTopologyRecord& topology)
+{
+  real_t measure = 0.0;
+  for (const auto& patch : topology.curved_patches) {
+    measure += patch.quadrature_measure;
+  }
+  return measure;
+}
+
+CutTopologyRecord reconstruct_true_curved_topology_for_validation(
+    const MeshBase& mesh,
+    const EmbeddedGeometryDescriptor& embedded,
+    const CutTopologyOptions* topology_options_override = nullptr)
+{
+  CutClassificationOptions classification_options;
+  classification_options.classify_faces = false;
+  classification_options.classify_edges = false;
+  const auto map = classify_embedded_geometry(mesh, embedded, classification_options);
+  EXPECT_EQ(map.cells.size(), 1u);
+  EXPECT_EQ(map.cells.front().classification, CutClassification::Cut);
+
+  CutTopologyOptions topology_options =
+      topology_options_override ? *topology_options_override : CutTopologyOptions{};
+  topology_options.allow_linearized_high_order_geometry = false;
+  topology_options.curved_arrangement_mode = CutCurvedArrangementMode::TrueArrangement;
+  return reconstruct_cut_topology(mesh, map, topology_options);
+}
+
+void expect_affine_hex_plane_cut_matches_analytic_reference(real_t cut_x,
+                                                           real_t expected_negative,
+                                                           real_t tolerance)
+{
+  const auto mesh = make_cubic_affine_hex_mesh();
+  const auto topology =
+      reconstruct_true_curved_topology_for_validation(mesh, axis_plane(0, cut_x, 3100));
+  ASSERT_TRUE(topology.supported) << joined_messages(topology.diagnostics);
+  EXPECT_FALSE(topology.linearized_cut_mode);
+  ASSERT_EQ(topology.curved_patches.size(), 1u);
+  EXPECT_EQ(topology.curved_patches.front().construction_policy,
+            "true-curved-isoparametric-arrangement");
+  EXPECT_TRUE(topology.curved_patches.front().exact_topology_available);
+  EXPECT_FALSE(topology.curved_patches.front().linearized_surrogate);
+
+  const real_t expected_positive = real_t{8.0} - expected_negative;
+  EXPECT_NEAR(side_measure(topology, CutTopologySide::Negative),
+              expected_negative,
+              tolerance);
+  EXPECT_NEAR(side_measure(topology, CutTopologySide::Positive),
+              expected_positive,
+              tolerance);
+  EXPECT_NEAR(curved_patch_measure(topology), real_t{4.0}, tolerance);
+
+  const auto validity = diagnose_cut_topology_validity(
+      topology, /*high_order_parent_geometry=*/true);
+  EXPECT_TRUE(validity.ok) << joined_messages(validity.messages);
+}
+
+void expect_curved_restart_roundtrip_and_rollback(
+    const std::string& case_name,
+    const MeshBase& mesh,
+    const EmbeddedGeometryDescriptor& accepted,
+    const EmbeddedGeometryDescriptor& trial,
+    const CutTopologyOptions& topology_options,
+    CellFamily expected_family,
+    const std::string& expected_construction_policy,
+    bool expected_exact_topology,
+    bool expected_linearized_surrogate)
+{
+  SCOPED_TRACE(case_name);
+
+  CutClassificationOptions classification_options;
+  classification_options.classify_faces = false;
+  classification_options.classify_edges = false;
+
+  EmbeddedGeometryRegistry registry;
+  registry.register_geometry(accepted);
+  const auto accepted_maps = registry.classify_active(mesh, classification_options);
+  ASSERT_EQ(accepted_maps.size(), 1u);
+  ASSERT_EQ(accepted_maps.front().cells.size(), 1u);
+  EXPECT_EQ(accepted_maps.front().cells.front().classification, CutClassification::Cut);
+
+  const auto accepted_topology =
+      reconstruct_cut_topology(mesh, accepted_maps.front(), topology_options);
+  ASSERT_TRUE(accepted_topology.supported) << joined_messages(accepted_topology.diagnostics);
+  ASSERT_FALSE(accepted_topology.curved_patches.empty());
+  for (const auto& patch : accepted_topology.curved_patches) {
+    EXPECT_EQ(patch.parent_family, expected_family);
+    EXPECT_EQ(patch.construction_policy, expected_construction_policy);
+    EXPECT_EQ(patch.exact_topology_available, expected_exact_topology);
+    EXPECT_EQ(patch.linearized_surrogate, expected_linearized_surrogate);
+    EXPECT_TRUE(patch.isoparametric_quadrature_available);
+    EXPECT_GT(patch.quadrature_measure, 0.0);
+  }
+  EXPECT_FALSE(accepted_topology.side_regions.empty());
+
+  const auto records = make_embedded_geometry_restart_records(registry);
+  ASSERT_EQ(records.size(), 1u);
+  const bool requires_callback_reregistration =
+      accepted.kind == EmbeddedGeometryKind::SignedDistanceCallback;
+  EXPECT_EQ(records.front().requires_application_reregistration,
+            requires_callback_reregistration);
+
+  auto restored_registry = restore_embedded_geometry_registry(records);
+  if (requires_callback_reregistration) {
+    EXPECT_TRUE(restored_registry.active_geometry_ids().empty());
+    const auto* restored_callback =
+        restored_registry.find(accepted.provenance.persistent_id);
+    ASSERT_NE(restored_callback, nullptr);
+    EXPECT_FALSE(restored_callback->active);
+    restored_registry.register_geometry(accepted);
+  }
+
+  const auto restored_maps = restored_registry.classify_active(mesh, classification_options);
+  ASSERT_EQ(restored_maps.size(), 1u);
+  const auto restored_topology =
+      reconstruct_cut_topology(mesh, restored_maps.front(), topology_options);
+  ASSERT_TRUE(restored_topology.supported) << joined_messages(restored_topology.diagnostics);
+  EXPECT_EQ(restored_topology.topology_revision, accepted_topology.topology_revision);
+  EXPECT_EQ(restored_topology.curved_patches.size(), accepted_topology.curved_patches.size());
+  EXPECT_EQ(restored_topology.side_regions.size(), accepted_topology.side_regions.size());
+
+  const auto restart = make_cut_classification_restart_record(
+      restored_maps.front(), restored_topology);
+  EXPECT_EQ(restart.provenance.persistent_id, accepted.provenance.persistent_id);
+  EXPECT_EQ(restart.embedded_kind, accepted.kind);
+  EXPECT_EQ(restart.cut_topology_revision, restored_topology.topology_revision);
+  EXPECT_EQ(restart.side_regions.size(), restored_topology.side_regions.size());
+
+  auto accepted_state = restored_maps.front();
+  accepted_state.accept_trial();
+  ASSERT_EQ(accepted_state.state, CutClassificationState::Committed);
+  CutClassificationTransaction tx(accepted_state);
+  tx.stage(classify_embedded_geometry(mesh, trial, classification_options));
+  EXPECT_EQ(accepted_state.embedded_geometry.provenance.persistent_id,
+            trial.provenance.persistent_id);
+  tx.rollback();
+  EXPECT_EQ(tx.state(), CutClassificationState::RolledBack);
+  EXPECT_EQ(accepted_state.embedded_geometry.provenance.persistent_id,
+            accepted.provenance.persistent_id);
+
+  const auto rolled_back_topology =
+      reconstruct_cut_topology(mesh, accepted_state, topology_options);
+  ASSERT_TRUE(rolled_back_topology.supported)
+      << joined_messages(rolled_back_topology.diagnostics);
+  EXPECT_EQ(rolled_back_topology.topology_revision, accepted_topology.topology_revision);
+  const auto rolled_back_restart =
+      make_cut_classification_restart_record(accepted_state, rolled_back_topology);
+  EXPECT_EQ(rolled_back_restart.provenance.persistent_id,
+            accepted.provenance.persistent_id);
+  EXPECT_NE(rolled_back_restart.provenance.persistent_id,
+            trial.provenance.persistent_id);
+  EXPECT_EQ(rolled_back_restart.cut_topology_revision,
+            accepted_topology.topology_revision);
+}
+
+EmbeddedGeometryDescriptor renamed(EmbeddedGeometryDescriptor descriptor, std::string id)
+{
+  descriptor.provenance.persistent_id = std::move(id);
+  descriptor.provenance.name = descriptor.provenance.persistent_id;
+  return descriptor;
+}
+
+TEST(CutCell, CurvedCutRestartRoundtripAndRollbackQualifiesSupportMatrixRows)
+{
+  CutTopologyOptions starter_options;
+  starter_options.allow_linearized_high_order_geometry = true;
+
+  CutTopologyOptions true_options;
+  true_options.allow_linearized_high_order_geometry = false;
+  true_options.curved_arrangement_mode = CutCurvedArrangementMode::TrueArrangement;
+
+  expect_curved_restart_roundtrip_and_rollback(
+      "quadratic curved-topology subdivision",
+      make_quadratic_tetra_mesh(),
+      renamed(axis_plane(0, 0.25, 1801), "restart-quadratic-tetra-plane"),
+      renamed(axis_plane(0, 0.40, 1802), "restart-quadratic-tetra-plane-trial"),
+      starter_options,
+      CellFamily::Tetra,
+      "curved-isoparametric-topology-subdivision",
+      false,
+      true);
+
+  expect_curved_restart_roundtrip_and_rollback(
+      "arbitrary-order line true arrangement",
+      make_cubic_curved_line_mesh(),
+      renamed(plane(0.48, 1810), "restart-cubic-line-plane"),
+      renamed(plane(0.62, 1811), "restart-cubic-line-plane-trial"),
+      true_options,
+      CellFamily::Line,
+      "true-curved-isoparametric-arrangement",
+      true,
+      false);
+
+  expect_curved_restart_roundtrip_and_rollback(
+      "arbitrary-order tetra graph true arrangement",
+      make_cubic_curved_tetra_mesh(),
+      renamed(plane(0.25, 1820), "restart-cubic-tetra-plane"),
+      renamed(plane(0.35, 1821), "restart-cubic-tetra-plane-trial"),
+      true_options,
+      CellFamily::Tetra,
+      "true-curved-isoparametric-arrangement",
+      true,
+      false);
+
+  expect_curved_restart_roundtrip_and_rollback(
+      "analytic sphere subdivision",
+      make_cubic_curved_tetra_mesh(),
+      sphere({{0.32, 0.28, 0.22}}, 0.34, 1830, "restart-tetra-sphere"),
+      sphere({{0.34, 0.24, 0.20}}, 0.32, 1831, "restart-tetra-sphere-trial"),
+      true_options,
+      CellFamily::Tetra,
+      "true-curved-subdivision-arrangement",
+      true,
+      false);
+
+  expect_curved_restart_roundtrip_and_rollback(
+      "callback sphere subdivision with application re-registration",
+      make_cubic_curved_tetra_mesh(),
+      callback_sphere({{0.32, 0.28, 0.22}}, 0.34, 1840, "restart-tetra-callback"),
+      callback_sphere({{0.34, 0.24, 0.20}}, 0.32, 1841, "restart-tetra-callback-trial"),
+      true_options,
+      CellFamily::Tetra,
+      "true-curved-subdivision-arrangement",
+      true,
+      false);
+
+  expect_curved_restart_roundtrip_and_rollback(
+      "level-set sphere subdivision",
+      make_cubic_curved_tetra_mesh(),
+      level_set_sphere({{0.32, 0.28, 0.22}}, 0.34, 1850, "restart-tetra-level-set"),
+      level_set_sphere({{0.34, 0.24, 0.20}}, 0.32, 1851, "restart-tetra-level-set-trial"),
+      true_options,
+      CellFamily::Tetra,
+      "true-curved-subdivision-arrangement",
+      true,
+      false);
+
+  expect_curved_restart_roundtrip_and_rollback(
+      "triangulated-surface subdivision",
+      make_cubic_curved_tetra_mesh(),
+      triangulated_octahedron_sphere({{0.32, 0.28, 0.22}},
+                                     0.34,
+                                     1860,
+                                     "restart-tetra-trisurf"),
+      triangulated_octahedron_sphere({{0.34, 0.24, 0.20}},
+                                     0.32,
+                                     1861,
+                                     "restart-tetra-trisurf-trial"),
+      true_options,
+      CellFamily::Tetra,
+      "true-curved-subdivision-arrangement",
+      true,
+      false);
+
+  expect_curved_restart_roundtrip_and_rollback(
+      "active-child Boolean subdivision",
+      make_cubic_curved_tetra_mesh(),
+      boolean_composite(EmbeddedGeometryBooleanOperation::Intersection,
+                        {sphere({{0.32, 0.28, 0.22}},
+                                0.34,
+                                1870,
+                                "restart-boolean-active-sphere"),
+                         sphere({{0.32, 0.28, 0.22}},
+                                10.0,
+                                1871,
+                                "restart-boolean-enclosing-sphere")},
+                        1872,
+                        "restart-boolean-intersection"),
+      boolean_composite(EmbeddedGeometryBooleanOperation::Intersection,
+                        {sphere({{0.34, 0.24, 0.20}},
+                                0.32,
+                                1873,
+                                "restart-boolean-active-sphere-trial"),
+                         sphere({{0.34, 0.24, 0.20}},
+                                10.0,
+                                1874,
+                                "restart-boolean-enclosing-sphere-trial")},
+                        1875,
+                        "restart-boolean-intersection-trial"),
+      true_options,
+      CellFamily::Tetra,
+      "true-curved-subdivision-arrangement",
+      true,
+      false);
 }
 
 TEST(CutCell, TrueCurvedArrangementTriangleUsesGraphContourWithoutLinearizedSurrogate)
@@ -2138,6 +3657,200 @@ TEST(CutCell, TrueCurvedArrangementQuadUsesSubdivisionForNonGraphPlaneCuts)
   expect_true_curved_subdivision_arrangement(make_cubic_non_graph_quad_mesh(),
                                              plane(0.25, 1681),
                                              CellFamily::Quad);
+}
+
+TEST(CutCell, TrueCurvedArrangementSphereUsesSubdivisionForNonPlaneCuts)
+{
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_line_mesh(),
+      sphere({{0.48, 0.0, 0.0}}, 0.22, 1682, "line-sphere"),
+      CellFamily::Line);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_triangle_mesh(),
+      sphere({{0.35, 0.35, 0.0}}, 0.30, 1683, "triangle-sphere"),
+      CellFamily::Triangle);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_quad_mesh(),
+      sphere({{0.50, 0.0, 0.0}}, 0.62, 1684, "quad-sphere"),
+      CellFamily::Quad);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_tetra_mesh(),
+      sphere({{0.32, 0.28, 0.22}}, 0.34, 1685, "tetra-sphere"),
+      CellFamily::Tetra);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_hex_mesh(),
+      sphere({{0.50, 0.0, 0.0}}, 0.72, 1686, "hex-sphere"),
+      CellFamily::Hex);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_wedge_mesh(),
+      sphere({{0.50, 0.35, 0.25}}, 0.46, 1687, "wedge-sphere"),
+      CellFamily::Wedge);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_pyramid_mesh(),
+      sphere({{0.48, 0.0, 0.0}}, 0.42, 1688, "pyramid-sphere"),
+      CellFamily::Pyramid);
+}
+
+TEST(CutCell, TrueCurvedArrangementCallbackSurfaceUsesSubdivisionForNonPlaneCuts)
+{
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_line_mesh(),
+      callback_sphere({{0.48, 0.0, 0.0}}, 0.22, 16891, "line-callback-sphere"),
+      CellFamily::Line);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_triangle_mesh(),
+      callback_sphere({{0.35, 0.35, 0.0}}, 0.30, 16892, "triangle-callback-sphere"),
+      CellFamily::Triangle);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_quad_mesh(),
+      callback_sphere({{0.50, 0.0, 0.0}}, 0.62, 16893, "quad-callback-sphere"),
+      CellFamily::Quad);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_tetra_mesh(),
+      callback_sphere({{0.32, 0.28, 0.22}}, 0.34, 1689, "tetra-callback-sphere"),
+      CellFamily::Tetra);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_hex_mesh(),
+      callback_sphere({{0.50, 0.0, 0.0}}, 0.72, 1690, "hex-callback-sphere"),
+      CellFamily::Hex);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_wedge_mesh(),
+      callback_sphere({{0.50, 0.35, 0.25}}, 0.46, 16894, "wedge-callback-sphere"),
+      CellFamily::Wedge);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_pyramid_mesh(),
+      callback_sphere({{0.48, 0.0, 0.0}}, 0.42, 16895, "pyramid-callback-sphere"),
+      CellFamily::Pyramid);
+}
+
+TEST(CutCell, TrueCurvedArrangementLevelSetFieldUsesSubdivisionForSampledSurfaces)
+{
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_line_mesh(),
+      level_set_sphere({{0.48, 0.0, 0.0}}, 0.22, 1691, "line-level-set-sphere"),
+      CellFamily::Line);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_triangle_mesh(),
+      level_set_sphere({{0.35, 0.35, 0.0}}, 0.30, 1692, "triangle-level-set-sphere"),
+      CellFamily::Triangle);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_quad_mesh(),
+      level_set_sphere({{0.50, 0.0, 0.0}}, 0.62, 1693, "quad-level-set-sphere"),
+      CellFamily::Quad);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_tetra_mesh(),
+      level_set_sphere({{0.32, 0.28, 0.22}}, 0.34, 1694, "tetra-level-set-sphere"),
+      CellFamily::Tetra);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_hex_mesh(),
+      level_set_sphere({{0.50, 0.0, 0.0}}, 0.72, 1695, "hex-level-set-sphere"),
+      CellFamily::Hex);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_wedge_mesh(),
+      level_set_sphere({{0.50, 0.35, 0.25}}, 0.46, 1696, "wedge-level-set-sphere"),
+      CellFamily::Wedge);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_pyramid_mesh(),
+      level_set_sphere({{0.48, 0.0, 0.0}}, 0.42, 1697, "pyramid-level-set-sphere"),
+      CellFamily::Pyramid);
+}
+
+TEST(CutCell, TrueCurvedArrangementTriangulatedSurfaceUsesSubdivisionForSurfaceCuts)
+{
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_line_mesh(),
+      triangulated_octahedron_sphere({{0.48, 0.0, 0.0}}, 0.30, 1698, "line-trisurf-sphere"),
+      CellFamily::Line);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_triangle_mesh(),
+      triangulated_octahedron_sphere({{0.35, 0.35, 0.0}}, 0.30, 1699, "triangle-trisurf-sphere"),
+      CellFamily::Triangle);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_quad_mesh(),
+      triangulated_octahedron_sphere({{0.50, 0.0, 0.0}}, 0.62, 1700, "quad-trisurf-sphere"),
+      CellFamily::Quad);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_tetra_mesh(),
+      triangulated_octahedron_sphere({{0.32, 0.28, 0.22}}, 0.34, 1701, "tetra-trisurf-sphere"),
+      CellFamily::Tetra);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_hex_mesh(),
+      triangulated_octahedron_sphere({{0.50, 0.0, 0.0}}, 0.95, 1702, "hex-trisurf-sphere"),
+      CellFamily::Hex);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_wedge_mesh(),
+      triangulated_octahedron_sphere({{0.50, 0.35, 0.25}}, 0.62, 1703, "wedge-trisurf-sphere"),
+      CellFamily::Wedge);
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_pyramid_mesh(),
+      triangulated_octahedron_sphere({{0.48, 0.0, 0.0}}, 0.58, 1704, "pyramid-trisurf-sphere"),
+      CellFamily::Pyramid);
+}
+
+TEST(CutCell, TrueCurvedArrangementBooleanCompositeUsesSubdivisionForActiveChildCuts)
+{
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_line_mesh(),
+      boolean_composite(EmbeddedGeometryBooleanOperation::Intersection,
+                        {sphere({{0.48, 0.0, 0.0}}, 0.22, 1705, "boolean-active-line-sphere"),
+                         sphere({{0.48, 0.0, 0.0}}, 10.0, 1706, "boolean-active-line-enclosing")},
+                        1707,
+                        "boolean-active-line-intersection"),
+      CellFamily::Line);
+
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_triangle_mesh(),
+      boolean_composite(EmbeddedGeometryBooleanOperation::Intersection,
+                        {sphere({{0.35, 0.35, 0.0}}, 0.30, 1708, "boolean-active-triangle-sphere"),
+                         sphere({{0.35, 0.35, 0.0}}, 10.0, 1709, "boolean-active-triangle-enclosing")},
+                        17100,
+                        "boolean-active-triangle-intersection"),
+      CellFamily::Triangle);
+
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_quad_mesh(),
+      boolean_composite(EmbeddedGeometryBooleanOperation::Intersection,
+                        {sphere({{0.50, 0.0, 0.0}}, 0.62, 17101, "boolean-active-quad-sphere"),
+                         sphere({{0.50, 0.0, 0.0}}, 10.0, 17102, "boolean-active-quad-enclosing")},
+                        17103,
+                        "boolean-active-quad-intersection"),
+      CellFamily::Quad);
+
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_tetra_mesh(),
+      boolean_composite(EmbeddedGeometryBooleanOperation::Intersection,
+                        {sphere({{0.32, 0.28, 0.22}}, 0.34, 1710, "boolean-active-tetra-sphere"),
+                         sphere({{0.32, 0.28, 0.22}}, 10.0, 1711, "boolean-active-tetra-enclosing")},
+                        1712,
+                        "boolean-active-tetra-intersection"),
+      CellFamily::Tetra);
+
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_hex_mesh(),
+      boolean_composite(EmbeddedGeometryBooleanOperation::Union,
+                        {sphere({{0.50, 0.0, 0.0}}, 0.72, 1713, "boolean-active-hex-sphere"),
+                         sphere({{4.0, 4.0, 4.0}}, 0.25, 1714, "boolean-active-hex-far-sphere")},
+                        1715,
+                        "boolean-active-hex-union"),
+      CellFamily::Hex);
+
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_wedge_mesh(),
+      boolean_composite(EmbeddedGeometryBooleanOperation::Difference,
+                        {sphere({{0.50, 0.35, 0.25}}, 10.0, 1716, "boolean-active-wedge-base"),
+                         sphere({{0.50, 0.35, 0.25}}, 0.46, 1717, "boolean-active-wedge-cavity")},
+                        1718,
+                        "boolean-active-wedge-difference"),
+      CellFamily::Wedge);
+
+  expect_true_curved_subdivision_arrangement(
+      make_cubic_curved_pyramid_mesh(),
+      boolean_composite(EmbeddedGeometryBooleanOperation::Intersection,
+                        {sphere({{0.48, 0.0, 0.0}}, 0.42, 1719, "boolean-active-pyramid-sphere"),
+                         sphere({{0.48, 0.0, 0.0}}, 10.0, 1720, "boolean-active-pyramid-enclosing")},
+                        1721,
+                        "boolean-active-pyramid-intersection"),
+      CellFamily::Pyramid);
 }
 
 TEST(CutCell, TrueCurvedArrangementTetraUsesGraphSurfaceWithoutLinearizedSurrogate)
@@ -2202,6 +3915,15 @@ TEST(CutCell, TrueCurvedArrangementTetraUsesGraphSurfaceWithoutLinearizedSurroga
   }
   ASSERT_GT(parent_measure, 0.0);
   EXPECT_NEAR(measure_sum, parent_measure, std::max(1.0e-5, parent_measure * 1.0e-5));
+
+  expect_curved_topology_sensitivity_metadata(
+      "true-curved-tetra-sensitivity",
+      topology,
+      mesh,
+      CellFamily::Tetra,
+      3,
+      embedded.kind,
+      "true-curved-isoparametric-arrangement");
 
   const auto topology_b = reconstruct_cut_topology(mesh, map, topology_options);
   EXPECT_EQ(topology.topology_revision, topology_b.topology_revision);
@@ -2274,6 +3996,15 @@ TEST(CutCell, TrueCurvedArrangementHexUsesGraphSurfaceWithoutLinearizedSurrogate
   }
   ASSERT_GT(parent_measure, 0.0);
   EXPECT_NEAR(measure_sum, parent_measure, std::max(1.0e-5, parent_measure * 1.0e-5));
+
+  expect_curved_topology_sensitivity_metadata(
+      "true-curved-hex-sensitivity",
+      topology,
+      mesh,
+      CellFamily::Hex,
+      3,
+      embedded.kind,
+      "true-curved-isoparametric-arrangement");
 
   const auto topology_b = reconstruct_cut_topology(mesh, map, topology_options);
   EXPECT_EQ(topology.topology_revision, topology_b.topology_revision);
@@ -2354,6 +4085,15 @@ TEST(CutCell, TrueCurvedArrangementWedgeUsesGraphSurfaceWithoutLinearizedSurroga
   ASSERT_GT(parent_measure, 0.0);
   EXPECT_NEAR(measure_sum, parent_measure, std::max(1.0e-5, parent_measure * 1.0e-5));
 
+  expect_curved_topology_sensitivity_metadata(
+      "true-curved-wedge-sensitivity",
+      topology,
+      mesh,
+      CellFamily::Wedge,
+      3,
+      embedded.kind,
+      "true-curved-isoparametric-arrangement");
+
   const auto topology_b = reconstruct_cut_topology(mesh, map, topology_options);
   EXPECT_EQ(topology.topology_revision, topology_b.topology_revision);
 
@@ -2433,6 +4173,15 @@ TEST(CutCell, TrueCurvedArrangementPyramidUsesGraphSurfaceWithoutLinearizedSurro
   ASSERT_GT(parent_measure, 0.0);
   EXPECT_NEAR(measure_sum, parent_measure, std::max(1.0e-5, parent_measure * 1.0e-5));
 
+  expect_curved_topology_sensitivity_metadata(
+      "true-curved-pyramid-sensitivity",
+      topology,
+      mesh,
+      CellFamily::Pyramid,
+      3,
+      embedded.kind,
+      "true-curved-isoparametric-arrangement");
+
   const auto topology_b = reconstruct_cut_topology(mesh, map, topology_options);
   EXPECT_EQ(topology.topology_revision, topology_b.topology_revision);
 
@@ -2449,16 +4198,124 @@ TEST(CutCell, TrueCurvedArrangementPyramidUsesSubdivisionForNonGraphPlaneCuts)
                                              CellFamily::Pyramid);
 }
 
-TEST(CutCell, TrueCurvedArrangementRejectsUnsupportedHighOrderEmbeddedGeometryWithoutFallback)
+TEST(CutCell, TrueCurvedAffineHexPlaneCutMatchesAnalyticSlabReference)
 {
-  const auto mesh = make_quadratic_pyramid_mesh();
+  expect_affine_hex_plane_cut_matches_analytic_reference(
+      /*cut_x=*/real_t{0.25},
+      /*expected_negative=*/real_t{5.0},
+      /*tolerance=*/real_t{1.0e-10});
+}
+
+TEST(CutCell, TrueCurvedAffineHexNearBoundaryPlaneCutMatchesAnalyticSliverReference)
+{
+  const real_t eps = real_t{1.0e-5};
+  expect_affine_hex_plane_cut_matches_analytic_reference(
+      /*cut_x=*/real_t{-1.0} + eps,
+      /*expected_negative=*/real_t{4.0} * eps,
+      /*tolerance=*/real_t{1.0e-8});
+}
+
+TEST(CutCell, TrueCurvedAffineHexInteriorSphereCutConvergesAgainstAnalyticReference)
+{
+  const auto mesh = make_cubic_affine_hex_mesh();
+  const real_t radius = real_t{0.65};
+  const auto embedded = sphere({{0.0, 0.0, 0.0}},
+                               radius,
+                               3110,
+                               "analytic-interior-sphere-reference");
+
+  CutTopologyOptions coarse_options;
+  coarse_options.true_curved_subdivision_refinement_level = 2;
+  coarse_options.true_curved_subdivision_max_refinement_level = 2;
+  const auto coarse_topology =
+      reconstruct_true_curved_topology_for_validation(mesh, embedded, &coarse_options);
+
+  const auto topology =
+      reconstruct_true_curved_topology_for_validation(mesh, embedded);
+
+  CutTopologyOptions fine_options;
+  fine_options.true_curved_subdivision_refinement_level = 4;
+  fine_options.true_curved_subdivision_max_refinement_level = 4;
+  const auto fine_topology =
+      reconstruct_true_curved_topology_for_validation(mesh, embedded, &fine_options);
+
+  ASSERT_TRUE(coarse_topology.supported) << joined_messages(coarse_topology.diagnostics);
+  ASSERT_TRUE(topology.supported) << joined_messages(topology.diagnostics);
+  ASSERT_TRUE(fine_topology.supported) << joined_messages(fine_topology.diagnostics);
+  EXPECT_FALSE(topology.linearized_cut_mode);
+  ASSERT_FALSE(topology.curved_patches.empty());
+  EXPECT_TRUE(has_message_containing(topology.diagnostics, "subdivision arrangement"))
+      << joined_messages(topology.diagnostics);
+  for (const auto& patch : topology.curved_patches) {
+    EXPECT_EQ(patch.construction_policy, "true-curved-subdivision-arrangement");
+    EXPECT_TRUE(patch.exact_topology_available);
+    EXPECT_FALSE(patch.linearized_surrogate);
+    EXPECT_TRUE(patch.isoparametric_quadrature_available);
+  }
+
+  const real_t expected_volume =
+      real_t{4.0} * pi_for_test() * radius * radius * radius / real_t{3.0};
+  const real_t expected_area = real_t{4.0} * pi_for_test() * radius * radius;
+  const real_t negative_measure = side_measure(topology, CutTopologySide::Negative);
+  const real_t interface_measure = curved_patch_measure(topology);
+  const real_t relative_volume_error =
+      std::abs(negative_measure - expected_volume) / expected_volume;
+  const real_t relative_area_error =
+      std::abs(interface_measure - expected_area) / expected_area;
+  const real_t coarse_relative_volume_error =
+      std::abs(side_measure(coarse_topology, CutTopologySide::Negative) - expected_volume) /
+      expected_volume;
+  const real_t coarse_relative_area_error =
+      std::abs(curved_patch_measure(coarse_topology) - expected_area) / expected_area;
+  const real_t fine_relative_volume_error =
+      std::abs(side_measure(fine_topology, CutTopologySide::Negative) - expected_volume) /
+      expected_volume;
+  const real_t fine_relative_area_error =
+      std::abs(curved_patch_measure(fine_topology) - expected_area) / expected_area;
+
+  RecordProperty("relative_volume_error", relative_volume_error);
+  RecordProperty("relative_interface_area_error", relative_area_error);
+  RecordProperty("coarse_relative_volume_error", coarse_relative_volume_error);
+  RecordProperty("coarse_relative_interface_area_error", coarse_relative_area_error);
+  RecordProperty("fine_relative_volume_error", fine_relative_volume_error);
+  RecordProperty("fine_relative_interface_area_error", fine_relative_area_error);
+  EXPECT_LT(relative_volume_error, coarse_relative_volume_error);
+  EXPECT_LT(relative_area_error, coarse_relative_area_error);
+  EXPECT_LT(fine_relative_volume_error, relative_volume_error);
+  EXPECT_LT(fine_relative_area_error, relative_area_error);
+  EXPECT_LE(relative_volume_error, real_t{1.0e-1});
+  EXPECT_LE(relative_area_error, real_t{1.0e-1});
+  EXPECT_LE(fine_relative_volume_error, real_t{5.0e-2});
+  EXPECT_LE(fine_relative_area_error, real_t{5.0e-2});
+  EXPECT_NEAR(negative_measure + side_measure(topology, CutTopologySide::Positive),
+              real_t{8.0},
+              real_t{1.0e-5});
+
+  const auto validity = diagnose_cut_topology_validity(
+      topology, /*high_order_parent_geometry=*/true);
+  EXPECT_TRUE(validity.ok) << joined_messages(validity.messages);
+}
+
+TEST(CutCell, TrueCurvedArrangementBooleanCompositeRecordsChildChildIntersectionTopology)
+{
+  const auto mesh = make_cubic_curved_tetra_mesh();
+  const auto embedded =
+      boolean_composite(EmbeddedGeometryBooleanOperation::Intersection,
+                        {sphere({{0.25, 0.28, 0.22}},
+                                0.34,
+                                1722,
+                                "boolean-child-child-sphere-a"),
+                         sphere({{0.45, 0.28, 0.22}},
+                                0.34,
+                                1723,
+                                "boolean-child-child-sphere-b")},
+                        1724,
+                        "boolean-child-child-intersection");
 
   CutClassificationOptions options;
   options.classify_faces = false;
   options.classify_edges = false;
-  const auto map =
-      classify_embedded_geometry(
-          mesh, sphere({{0.5, 0.5, 0.5}}, 0.55, 171, "unsupported-true-sphere"), options);
+  const auto map = classify_embedded_geometry(mesh, embedded, options);
   ASSERT_EQ(map.cells.size(), 1u);
   EXPECT_EQ(map.cells[0].classification, CutClassification::Cut);
 
@@ -2466,13 +4323,311 @@ TEST(CutCell, TrueCurvedArrangementRejectsUnsupportedHighOrderEmbeddedGeometryWi
   topology_options.allow_linearized_high_order_geometry = false;
   topology_options.curved_arrangement_mode = CutCurvedArrangementMode::TrueArrangement;
   const auto topology = reconstruct_cut_topology(mesh, map, topology_options);
+  ASSERT_TRUE(topology.supported) << joined_messages(topology.diagnostics);
+  EXPECT_FALSE(topology.linearized_cut_mode);
+  ASSERT_GT(topology.curved_patches.size(), 1u);
+
+  bool saw_child_zero = false;
+  bool saw_child_one = false;
+  bool saw_mixed_child_patch = false;
+  for (const auto& patch : topology.curved_patches) {
+    ASSERT_EQ(patch.embedded_kind, EmbeddedGeometryKind::BooleanComposite);
+    EXPECT_EQ(patch.composition_operation, EmbeddedGeometryBooleanOperation::Intersection);
+    EXPECT_TRUE(patch.exact_topology_available);
+    EXPECT_FALSE(patch.linearized_surrogate);
+    EXPECT_EQ(patch.construction_policy, "true-curved-subdivision-arrangement");
+    ASSERT_EQ(patch.active_child_ordinals.size(), patch.ordered_vertices.size());
+    ASSERT_EQ(patch.active_child_provenance.size(), patch.ordered_vertices.size());
+    std::set<std::size_t> patch_children;
+    for (std::size_t i = 0; i < patch.active_child_ordinals.size(); ++i) {
+      patch_children.insert(patch.active_child_ordinals[i]);
+      EXPECT_FALSE(patch.active_child_provenance[i].persistent_id.empty());
+    }
+    saw_child_zero = saw_child_zero || patch_children.count(0u) != 0u;
+    saw_child_one = saw_child_one || patch_children.count(1u) != 0u;
+    saw_mixed_child_patch = saw_mixed_child_patch || patch_children.size() > 1u;
+  }
+  EXPECT_TRUE(saw_child_zero);
+  EXPECT_TRUE(saw_child_one);
+  EXPECT_TRUE(saw_mixed_child_patch);
+
+  ASSERT_EQ(topology.side_regions.size(), 2u);
+  real_t measure_sum = 0.0;
+  real_t parent_measure = -1.0;
+  for (const auto& region : topology.side_regions) {
+    EXPECT_TRUE(region.closed_integration_topology);
+    EXPECT_TRUE(region.curved_isoparametric_topology);
+    EXPECT_FALSE(region.integration_subcells.empty());
+    measure_sum += region.measure_estimate;
+    if (parent_measure < 0.0) {
+      parent_measure = region.parent_measure;
+    } else {
+      EXPECT_NEAR(region.parent_measure,
+                  parent_measure,
+                  std::max(1.0e-5, parent_measure * 1.0e-5));
+    }
+  }
+  ASSERT_GT(parent_measure, 0.0);
+  EXPECT_NEAR(measure_sum, parent_measure, std::max(1.0e-4, parent_measure * 1.0e-4));
+
+  expect_curved_topology_sensitivity_metadata(
+      "true-curved-boolean-child-child-sensitivity",
+      topology,
+      mesh,
+      CellFamily::Tetra,
+      3,
+      EmbeddedGeometryKind::BooleanComposite,
+      "true-curved-subdivision-arrangement");
+
+  const auto topology_b = reconstruct_cut_topology(mesh, map, topology_options);
+  EXPECT_EQ(topology.topology_revision, topology_b.topology_revision);
+
+  const auto validity = diagnose_cut_topology_validity(
+      topology, /*high_order_parent_geometry=*/true);
+  EXPECT_TRUE(validity.ok) << joined_messages(validity.messages);
+}
+
+TEST(CutCell, TrueCurvedArrangementBooleanCompositeUsesPredicateFallbackForCoincidentChildren)
+{
+  const auto mesh = make_quadratic_pyramid_mesh();
+  const auto coincident_boolean =
+      boolean_composite(EmbeddedGeometryBooleanOperation::Intersection,
+                        {sphere({{0.5, 0.5, 0.5}}, 0.55, 1720, "ambiguous-true-sphere-a"),
+                         sphere({{0.5, 0.5, 0.5}}, 0.55, 1721, "ambiguous-true-sphere-b")},
+                        1722,
+                        "ambiguous-true-boolean-sphere");
+
+  CutClassificationOptions options;
+  options.classify_faces = false;
+  options.classify_edges = false;
+  const auto map =
+      classify_embedded_geometry(mesh, coincident_boolean, options);
+  ASSERT_EQ(map.cells.size(), 1u);
+  EXPECT_EQ(map.cells[0].classification, CutClassification::Cut);
+
+  CutTopologyOptions topology_options;
+  topology_options.allow_linearized_high_order_geometry = false;
+  topology_options.curved_arrangement_mode = CutCurvedArrangementMode::TrueArrangement;
+  const auto topology = reconstruct_cut_topology(mesh, map, topology_options);
+  ASSERT_TRUE(topology.supported) << joined_messages(topology.diagnostics);
+  EXPECT_TRUE(has_message_containing(topology.diagnostics, "near-degeneracy fallback"))
+      << joined_messages(topology.diagnostics);
+  ASSERT_FALSE(topology.curved_patches.empty());
+
+  bool saw_fallback = false;
+  for (const auto& patch : topology.curved_patches) {
+    ASSERT_EQ(patch.embedded_kind, EmbeddedGeometryKind::BooleanComposite);
+    EXPECT_EQ(patch.composition_operation, EmbeddedGeometryBooleanOperation::Intersection);
+    EXPECT_EQ(patch.construction_policy, "true-curved-subdivision-arrangement");
+    EXPECT_TRUE(patch.exact_topology_available);
+    EXPECT_FALSE(patch.linearized_surrogate);
+    ASSERT_EQ(patch.active_child_ordinals.size(), patch.ordered_vertices.size());
+    ASSERT_EQ(patch.active_child_provenance.size(), patch.ordered_vertices.size());
+    EXPECT_TRUE(patch.predicate_fallback_used);
+    EXPECT_TRUE(patch.predicate_fallback_tolerance_resolved);
+    EXPECT_EQ(patch.predicate_fallback_policy, "tolerance-resolved-active-child");
+    EXPECT_TRUE(patch.predicate_fallback_reason.find("Boolean active-child distances") !=
+                std::string::npos);
+    EXPECT_FALSE(patch.predicate_fallback_child_ordinals.empty());
+    EXPECT_NE(std::find(patch.predicate_fallback_child_ordinals.begin(),
+                        patch.predicate_fallback_child_ordinals.end(),
+                        0u),
+              patch.predicate_fallback_child_ordinals.end());
+    EXPECT_NE(std::find(patch.predicate_fallback_child_ordinals.begin(),
+                        patch.predicate_fallback_child_ordinals.end(),
+                        1u),
+              patch.predicate_fallback_child_ordinals.end());
+    saw_fallback = saw_fallback || patch.predicate_fallback_used;
+  }
+  EXPECT_TRUE(saw_fallback);
+
+  const auto packet = make_distributed_cut_exchange_packet(map, topology);
+  const auto fallback_entity =
+      std::find_if(packet.entities.begin(), packet.entities.end(), [](const auto& entity) {
+        return entity.kind == CutTopologyEntityKind::InterfacePolygon &&
+               entity.embedded_kind == EmbeddedGeometryKind::BooleanComposite &&
+               entity.predicate_fallback_used;
+      });
+  ASSERT_NE(fallback_entity, packet.entities.end());
+  EXPECT_TRUE(fallback_entity->predicate_fallback_tolerance_resolved);
+  EXPECT_EQ(fallback_entity->predicate_fallback_policy,
+            "tolerance-resolved-active-child");
+  EXPECT_FALSE(fallback_entity->predicate_fallback_child_ordinals.empty());
+  EXPECT_FALSE(fallback_entity->active_child_provenance_ids.empty());
+
+  const auto topology_b = reconstruct_cut_topology(mesh, map, topology_options);
+  EXPECT_EQ(topology.topology_revision, topology_b.topology_revision);
+  const auto validity = diagnose_cut_topology_validity(
+      topology, /*high_order_parent_geometry=*/true);
+  EXPECT_TRUE(validity.ok) << joined_messages(validity.messages);
+}
+
+TEST(CutCell, TrueCurvedArrangementRejectsMalformedLevelSetAndTriangulatedSurface)
+{
+  const auto mesh = make_cubic_curved_tetra_mesh();
+  CutClassificationOptions options;
+  options.classify_faces = false;
+  options.classify_edges = false;
+
+  EmbeddedGeometryDescriptor bad_level_set;
+  bad_level_set.kind = EmbeddedGeometryKind::LevelSetField;
+  bad_level_set.geometry_epoch = 1705;
+  bad_level_set.revisions.geometry_epoch = 1705;
+  bad_level_set.revisions.field_layout_revision = 1;
+  bad_level_set.revisions.field_value_revision = 1705;
+  bad_level_set.provenance.persistent_id = "bad-level-set-no-gradient";
+  bad_level_set.provenance.name = bad_level_set.provenance.persistent_id;
+  bad_level_set.level_set_samples.push_back({{{0.0, 0.0, 0.0}}, -0.25, {{0.0, 0.0, 0.0}}});
+  bad_level_set.level_set_samples.push_back({{{1.0, 0.0, 0.0}},  0.25, {{0.0, 0.0, 0.0}}});
+
+  auto map = classify_embedded_geometry(mesh, bad_level_set, options);
+  ASSERT_EQ(map.cells.size(), 1u);
+  ASSERT_EQ(map.cells[0].classification, CutClassification::Cut);
+
+  CutTopologyOptions topology_options;
+  topology_options.allow_linearized_high_order_geometry = false;
+  topology_options.curved_arrangement_mode = CutCurvedArrangementMode::TrueArrangement;
+  auto topology = reconstruct_cut_topology(mesh, map, topology_options);
   EXPECT_FALSE(topology.supported);
-  EXPECT_TRUE(std::any_of(topology.diagnostics.begin(),
-                          topology.diagnostics.end(),
-                          [](const auto& message) {
-                            return message.find("line, triangle, quad, tetra, hex, wedge, and pyramid cells cut by planes") !=
-                                   std::string::npos;
-                          }));
+  EXPECT_TRUE(has_message_containing(topology.diagnostics, "level-set descriptors require finite samples"));
+
+  EmbeddedGeometryDescriptor bad_surface;
+  bad_surface.kind = EmbeddedGeometryKind::TriangulatedSurface;
+  bad_surface.geometry_epoch = 1706;
+  bad_surface.revisions.geometry_epoch = 1706;
+  bad_surface.revisions.source_surface_revision = 1706;
+  bad_surface.provenance.persistent_id = "bad-triangulated-surface-degenerate";
+  bad_surface.provenance.name = bad_surface.provenance.persistent_id;
+  bad_surface.surface_triangles.push_back({{{{{0.25, 0.0, 0.0}},
+                                             {{0.25, 0.0, 0.0}},
+                                             {{0.25, 0.0, 0.0}}}},
+                                          bad_surface.provenance});
+
+  map = classify_embedded_geometry(mesh, bad_surface, options);
+  ASSERT_EQ(map.cells.size(), 1u);
+  ASSERT_EQ(map.cells[0].classification, CutClassification::Cut);
+  topology = reconstruct_cut_topology(mesh, map, topology_options);
+  EXPECT_FALSE(topology.supported);
+  EXPECT_TRUE(has_message_containing(topology.diagnostics, "triangulated surfaces require finite nondegenerate triangles"));
+}
+
+TEST(CutCell, QuadraticCurvedStarterRowsHaveFullValidationEvidence)
+{
+  expect_quadratic_curved_starter_full_validation(
+      "quadratic line",
+      make_quadratic_line_mesh(),
+      axis_plane(0, 0.4, 165),
+      CellFamily::Line,
+      1u,
+      2,
+      2);
+  expect_quadratic_curved_starter_full_validation(
+      "quadratic triangle",
+      make_quadratic_triangle_mesh(),
+      axis_plane(0, 0.25, 166),
+      CellFamily::Triangle,
+      2u,
+      3,
+      5);
+  expect_quadratic_curved_starter_full_validation(
+      "quadratic quad",
+      make_quadratic_quad_mesh(),
+      axis_plane(0, 0.0, 168),
+      CellFamily::Quad,
+      2u,
+      4,
+      7);
+  expect_quadratic_curved_starter_full_validation(
+      "quadratic tetra",
+      make_quadratic_tetra_mesh(),
+      axis_plane(0, 0.25, 167),
+      CellFamily::Tetra,
+      3u,
+      4,
+      9);
+  expect_quadratic_curved_starter_full_validation(
+      "quadratic hex",
+      make_quadratic_hex_mesh(),
+      axis_plane(0, 0.0, 169),
+      CellFamily::Hex,
+      3u,
+      8,
+      19);
+}
+
+TEST(CutCell, QuadraticCurvedStarterRowsHaveAnalyticADSensitivityEvidence)
+{
+  expect_quadratic_curved_starter_sensitivity_metadata(
+      "quadratic line",
+      make_quadratic_line_mesh(),
+      axis_plane(0, 0.4, 265),
+      CellFamily::Line);
+  expect_quadratic_curved_starter_sensitivity_metadata(
+      "quadratic triangle",
+      make_quadratic_triangle_mesh(),
+      axis_plane(0, 0.25, 266),
+      CellFamily::Triangle);
+  expect_quadratic_curved_starter_sensitivity_metadata(
+      "quadratic quad",
+      make_quadratic_quad_mesh(),
+      axis_plane(0, 0.0, 268),
+      CellFamily::Quad);
+  expect_quadratic_curved_starter_sensitivity_metadata(
+      "quadratic tetra",
+      make_quadratic_tetra_mesh(),
+      axis_plane(0, 0.25, 267),
+      CellFamily::Tetra);
+  expect_quadratic_curved_starter_sensitivity_metadata(
+      "quadratic hex",
+      make_quadratic_hex_mesh(),
+      axis_plane(0, 0.0, 269),
+      CellFamily::Hex);
+}
+
+TEST(CutCell, SecondOrderLinearizedRowsHaveFullValidationAndAnalyticADSensitivityEvidence)
+{
+  const std::array<CellFamily, 7> families{{
+      CellFamily::Line,
+      CellFamily::Triangle,
+      CellFamily::Quad,
+      CellFamily::Tetra,
+      CellFamily::Hex,
+      CellFamily::Wedge,
+      CellFamily::Pyramid}};
+  const std::array<EmbeddedGeometryKind, 5> kinds{{
+      EmbeddedGeometryKind::Plane,
+      EmbeddedGeometryKind::Sphere,
+      EmbeddedGeometryKind::TriangulatedSurface,
+      EmbeddedGeometryKind::LevelSetField,
+      EmbeddedGeometryKind::BooleanComposite}};
+
+  std::uint64_t epoch = 2800;
+  for (const auto family : families) {
+    for (const auto kind : kinds) {
+      expect_second_order_linearized_validation_and_sensitivity(
+          family, kind, epoch++);
+    }
+  }
+
+  const auto records = qualify_cut_support_matrix();
+  std::size_t full_validation_rows = 0u;
+  std::size_t sensitivity_rows = 0u;
+  for (const auto& record : records) {
+    if (!is_second_order_linearized_validation_support_row(record.entry)) {
+      continue;
+    }
+    ++full_validation_rows;
+    EXPECT_FALSE(record.entry.distributed) << support_matrix_key(record.entry);
+    EXPECT_TRUE(record.validation_evidence) << support_matrix_key(record.entry);
+    EXPECT_TRUE(record.sensitivity_evidence) << support_matrix_key(record.entry);
+    EXPECT_TRUE(record.qualified) << support_matrix_key(record.entry)
+                                  << " :: " << joined_messages(record.missing);
+    if (is_second_order_linearized_sensitivity_support_row(record.entry)) {
+      ++sensitivity_rows;
+    }
+  }
+  EXPECT_EQ(full_validation_rows, 6u * families.size() * kinds.size());
+  EXPECT_EQ(sensitivity_rows, full_validation_rows);
 }
 
 TEST(CutCell, HighOrderTriangleUsesTessellatedClosedTopologyWithGeometryDofProvenance)
@@ -2866,6 +5021,17 @@ TEST(CutCell, RobustPredicateCoverageIncludesNearCoplanarTangentVertexEdgeAndDup
 
   const auto near_vertex = classify_embedded_geometry(mesh, plane(1.0e-10, 40), options);
   EXPECT_EQ(near_vertex.cells[0].classification, CutClassification::Cut);
+  const auto near_vertex_diagnostic =
+      diagnose_cut_operation(near_vertex, "adaptive predicate coverage");
+  EXPECT_TRUE(has_message_containing(near_vertex_diagnostic.messages,
+                                     "domain=signed-distance-side"))
+      << joined_messages(near_vertex_diagnostic.messages);
+  EXPECT_TRUE(has_message_containing(near_vertex_diagnostic.messages,
+                                     "domain=edge-intersection"))
+      << joined_messages(near_vertex_diagnostic.messages);
+  EXPECT_TRUE(has_message_containing(near_vertex_diagnostic.messages,
+                                     "adaptive/exact predicate coverage domains"))
+      << joined_messages(near_vertex_diagnostic.messages);
   EXPECT_NE(std::find_if(near_vertex.edges.begin(), near_vertex.edges.end(), [](const auto& edge) {
               return edge.classification == CutClassification::Degenerate ||
                      !edge.intersections.empty();
@@ -2926,6 +5092,30 @@ TEST(CutCell, CurvedTopologyValidityRejectsFoldedAndDegenerateInterfaceGeometry)
   const auto folded_diagnostic = diagnose_cut_topology_validity(folded);
   EXPECT_FALSE(folded_diagnostic.ok);
   EXPECT_TRUE(folded_diagnostic.has_folded_interface);
+  EXPECT_TRUE(has_message_containing(folded_diagnostic.messages,
+                                     "domain=orientation-2d"))
+      << joined_messages(folded_diagnostic.messages);
+
+  CutTopologyRecord near_coplanar;
+  near_coplanar.linearized_cut_mode = false;
+  near_coplanar.vertices = {
+      cut_topology_vertex(1, {{0.0, 0.0, 0.0}}),
+      cut_topology_vertex(2, {{1.0, 0.0, 0.0}}),
+      cut_topology_vertex(3, {{1.0, 1.0, 1.0e-13}}),
+      cut_topology_vertex(4, {{0.0, 1.0, 0.0}})};
+  CutInterfacePolygon near_coplanar_polygon;
+  near_coplanar_polygon.stable_id = 14;
+  near_coplanar_polygon.parent_cell = 0;
+  near_coplanar_polygon.parent_cell_gid = 100;
+  near_coplanar_polygon.ordered_vertices = {1, 2, 3, 4};
+  near_coplanar_polygon.normal = {{0.0, 0.0, 1.0}};
+  near_coplanar.interface_polygons.push_back(near_coplanar_polygon);
+
+  const auto near_coplanar_diagnostic =
+      diagnose_cut_topology_validity(near_coplanar);
+  EXPECT_TRUE(has_message_containing(near_coplanar_diagnostic.messages,
+                                     "domain=coplanarity-3d"))
+      << joined_messages(near_coplanar_diagnostic.messages);
 
   CutTopologyRecord duplicated;
   duplicated.linearized_cut_mode = false;
@@ -2945,6 +5135,31 @@ TEST(CutCell, CurvedTopologyValidityRejectsFoldedAndDegenerateInterfaceGeometry)
   EXPECT_FALSE(duplicated_diagnostic.ok);
   EXPECT_TRUE(duplicated_diagnostic.has_degenerate_intersection);
   EXPECT_TRUE(duplicated_diagnostic.has_degenerate_polygon);
+
+  CutTopologyRecord near_duplicate;
+  near_duplicate.linearized_cut_mode = false;
+  near_duplicate.vertices = {
+      cut_topology_vertex(1, {{0.0, 0.0, 0.0}}),
+      cut_topology_vertex(2, {{1.0, 0.0, 0.0}}),
+      cut_topology_vertex(3, {{1.0, 1.0, 0.0}}),
+      cut_topology_vertex(4, {{1.0 + 1.0e-13, 1.0, 0.0}}),
+      cut_topology_vertex(5, {{0.0, 1.0, 0.0}})};
+  CutInterfacePolygon near_duplicate_polygon;
+  near_duplicate_polygon.stable_id = 13;
+  near_duplicate_polygon.parent_cell = 0;
+  near_duplicate_polygon.parent_cell_gid = 100;
+  near_duplicate_polygon.ordered_vertices = {1, 2, 3, 4, 5};
+  near_duplicate_polygon.normal = {{0.0, 0.0, 1.0}};
+  near_duplicate.interface_polygons.push_back(near_duplicate_polygon);
+
+  const auto near_duplicate_diagnostic =
+      diagnose_cut_topology_validity(near_duplicate);
+  EXPECT_FALSE(near_duplicate_diagnostic.ok);
+  EXPECT_TRUE(near_duplicate_diagnostic.has_degenerate_intersection);
+  EXPECT_TRUE(near_duplicate_diagnostic.has_degenerate_polygon);
+  EXPECT_TRUE(has_message_containing(near_duplicate_diagnostic.messages,
+                                     "domain=duplicate-detection"))
+      << joined_messages(near_duplicate_diagnostic.messages);
 
   CutTopologyRecord nonfinite;
   nonfinite.linearized_cut_mode = false;
@@ -3191,6 +5406,32 @@ TEST(CutCell, BooleanCompositionDiagnosticsAndSupportMatrixAreExplicit)
               std::string::npos);
   }
 
+  for (const auto family : {CellFamily::Line,
+                            CellFamily::Triangle,
+                            CellFamily::Quad,
+                            CellFamily::Tetra,
+                            CellFamily::Hex,
+                            CellFamily::Wedge,
+                            CellFamily::Pyramid}) {
+    for (const auto kind : {EmbeddedGeometryKind::Sphere,
+                            EmbeddedGeometryKind::SignedDistanceCallback,
+                            EmbeddedGeometryKind::LevelSetField,
+                            EmbeddedGeometryKind::TriangulatedSurface,
+                            EmbeddedGeometryKind::BooleanComposite}) {
+      const auto non_plane_subdivision = evaluate_cut_support(
+          family,
+          4,
+          kind,
+          false,
+          "curved-isoparametric-cut",
+          "true-curved-subdivision-arrangement");
+      EXPECT_EQ(non_plane_subdivision.status, CutSupportStatus::ImplementedUnqualified);
+      EXPECT_NE(non_plane_subdivision.qualification.find(
+                    "non-plane signed-distance, level-set, triangulated-surface, and Boolean composite"),
+                std::string::npos);
+    }
+  }
+
   const auto high_order_polyhedron = evaluate_cut_support(CellFamily::Polyhedron,
                                                           2,
                                                           EmbeddedGeometryKind::Plane,
@@ -3198,6 +5439,705 @@ TEST(CutCell, BooleanCompositionDiagnosticsAndSupportMatrixAreExplicit)
                                                           "linearized-cut",
                                                           "topology-subdivision");
   EXPECT_EQ(high_order_polyhedron.status, CutSupportStatus::Unsupported);
+}
+
+TEST(CutCell, SupportMatrixQualificationHarnessCoversAdvertisedRowsAndReportsGaps)
+{
+  const auto entries = cut_support_matrix();
+  const auto records = qualify_cut_support_matrix();
+  ASSERT_FALSE(entries.empty());
+  ASSERT_EQ(records.size(), entries.size());
+
+  std::set<std::string> row_keys;
+  std::size_t implemented_rows = 0u;
+  std::size_t unsupported_rows = 0u;
+  std::size_t distributed_rows = 0u;
+  std::size_t curved_rows = 0u;
+  std::size_t restart_gap_rows = 0u;
+  std::size_t sensitivity_gap_rows = 0u;
+  std::size_t validation_gap_rows = 0u;
+  std::size_t validation_evidence_rows = 0u;
+  std::size_t qualified_rows = 0u;
+  std::size_t unsupported_qualified_rows = 0u;
+
+  for (const auto& record : records) {
+    const auto key = support_matrix_key(record.entry);
+    EXPECT_TRUE(row_keys.insert(key).second) << key;
+    EXPECT_TRUE(record.diagnostic_evidence) << key;
+    EXPECT_FALSE(record.evidence.empty()) << key;
+
+    const bool implemented = record.entry.status != CutSupportStatus::Unsupported;
+    if (!implemented) {
+      ++unsupported_rows;
+      EXPECT_TRUE(record.qualified) << key << " :: " << joined_messages(record.missing);
+      ++unsupported_qualified_rows;
+      continue;
+    }
+
+    ++implemented_rows;
+    EXPECT_TRUE(record.requires_topology_evidence) << key;
+    EXPECT_TRUE(record.requires_quadrature_evidence) << key;
+    EXPECT_TRUE(record.requires_fe_execution_evidence) << key;
+    EXPECT_TRUE(record.requires_restart_rollback_evidence) << key;
+    EXPECT_TRUE(record.requires_sensitivity_evidence) << key;
+    EXPECT_TRUE(record.requires_diagnostic_evidence) << key;
+    EXPECT_TRUE(record.requires_validation_evidence) << key;
+    EXPECT_TRUE(record.topology_evidence) << key;
+    EXPECT_TRUE(record.quadrature_evidence) << key;
+    EXPECT_TRUE(record.fe_execution_evidence) << key;
+
+    if (record.validation_evidence) {
+      ++validation_evidence_rows;
+    }
+
+    if (record.entry.distributed) {
+      ++distributed_rows;
+      EXPECT_TRUE(record.requires_mpi_evidence) << key;
+      EXPECT_TRUE(record.mpi_evidence) << key;
+    }
+
+    if (is_first_order_linearized_sensitivity_support_row(record.entry) ||
+        is_second_order_linearized_sensitivity_support_row(record.entry)) {
+      EXPECT_TRUE(record.sensitivity_evidence) << key;
+    } else if (record.entry.cut_mode == "curved-isoparametric-cut") {
+      ++curved_rows;
+      EXPECT_TRUE(record.restart_rollback_evidence) << key;
+      if (is_curved_topology_sensitivity_support_row(record.entry)) {
+        EXPECT_TRUE(record.sensitivity_evidence) << key;
+      } else {
+        EXPECT_FALSE(record.sensitivity_evidence) << key;
+      }
+    }
+
+    if (has_message_containing(record.missing, "restart/rollback")) {
+      ++restart_gap_rows;
+    }
+    if (has_message_containing(record.missing, "cut-sensitivity")) {
+      ++sensitivity_gap_rows;
+    }
+    if (has_message_containing(record.missing, "full support-matrix validation")) {
+      ++validation_gap_rows;
+    }
+
+    if (record.qualified) {
+      ++qualified_rows;
+      EXPECT_TRUE(record.validation_evidence) << key;
+      EXPECT_TRUE(record.missing.empty()) << key;
+    } else {
+      EXPECT_FALSE(record.missing.empty()) << key;
+    }
+  }
+
+  EXPECT_GT(implemented_rows, 0u);
+  EXPECT_GT(unsupported_rows, 0u);
+  EXPECT_GT(distributed_rows, 0u);
+  EXPECT_GT(curved_rows, 0u);
+  EXPECT_EQ(unsupported_qualified_rows, unsupported_rows);
+  EXPECT_EQ(restart_gap_rows, 0u);
+  EXPECT_EQ(sensitivity_gap_rows, 0u);
+  EXPECT_EQ(validation_gap_rows, 0u);
+  EXPECT_GT(validation_evidence_rows, 0u);
+  EXPECT_EQ(validation_evidence_rows, implemented_rows);
+  EXPECT_EQ(qualified_rows, implemented_rows);
+}
+
+TEST(CutCell, SupportMatrixValidationLedgerIsRowExactAndDrivesQualification)
+{
+  const auto entries = cut_support_matrix();
+  const auto ledger = cut_support_matrix_validation_ledger();
+  const auto records = qualify_cut_support_matrix();
+  ASSERT_FALSE(entries.empty());
+  ASSERT_FALSE(ledger.empty());
+  ASSERT_EQ(records.size(), entries.size());
+
+  std::set<std::string> advertised_keys;
+  for (const auto& entry : entries) {
+    EXPECT_TRUE(advertised_keys.insert(support_matrix_key(entry)).second);
+  }
+
+  std::map<std::string, std::set<CutSupportEvidenceDomain>> ledger_domains;
+  std::set<std::string> ledger_key_domain_pairs;
+  std::set<std::string> linear_full_validation_paths;
+  std::set<CellFamily> linear_full_validation_families;
+  std::set<EmbeddedGeometryKind> linear_full_validation_kinds;
+  std::set<std::string> second_order_linear_full_validation_paths;
+  std::set<CellFamily> second_order_linear_full_validation_families;
+  std::set<EmbeddedGeometryKind> second_order_linear_full_validation_kinds;
+  std::set<std::string> curved_starter_full_validation_paths;
+  std::set<CellFamily> curved_starter_full_validation_families;
+  std::set<std::string> true_curved_full_validation_paths;
+  std::set<CellFamily> true_curved_full_validation_families;
+  std::set<EmbeddedGeometryKind> true_curved_full_validation_kinds;
+  std::set<std::string> true_curved_full_validation_policies;
+  std::set<std::string> linear_sensitivity_paths;
+  std::set<CellFamily> linear_sensitivity_families;
+  std::set<EmbeddedGeometryKind> linear_sensitivity_kinds;
+  std::set<std::string> second_order_linear_sensitivity_paths;
+  std::set<CellFamily> second_order_linear_sensitivity_families;
+  std::set<EmbeddedGeometryKind> second_order_linear_sensitivity_kinds;
+  std::set<std::string> curved_starter_sensitivity_paths;
+  std::set<CellFamily> curved_starter_sensitivity_families;
+  std::set<std::string> true_curved_sensitivity_paths;
+  std::set<CellFamily> true_curved_sensitivity_families;
+  std::set<EmbeddedGeometryKind> true_curved_sensitivity_kinds;
+  std::set<std::string> true_curved_sensitivity_policies;
+  std::size_t diagnostic_rows = 0u;
+  std::size_t full_validation_rows = 0u;
+  std::size_t distributed_full_validation_rows = 0u;
+  std::size_t linear_sensitivity_rows = 0u;
+  std::size_t second_order_linear_sensitivity_rows = 0u;
+  std::size_t curved_starter_sensitivity_rows = 0u;
+  std::size_t true_curved_sensitivity_rows = 0u;
+  for (const auto& evidence : ledger) {
+    const auto key = support_matrix_key(evidence.entry);
+    EXPECT_NE(advertised_keys.find(key), advertised_keys.end()) << key;
+    EXPECT_FALSE(evidence.evidence_id.empty()) << key;
+    EXPECT_FALSE(evidence.description.empty()) << key;
+    EXPECT_FALSE(evidence.verification.empty()) << key;
+    const auto domain_key = support_evidence_domain_key(evidence.domain);
+    EXPECT_TRUE(ledger_key_domain_pairs.insert(key + ":" + domain_key).second)
+        << key << " " << domain_key;
+    ledger_domains[key].insert(evidence.domain);
+    if (evidence.domain == CutSupportEvidenceDomain::Diagnostic) {
+      ++diagnostic_rows;
+    }
+    if (evidence.domain == CutSupportEvidenceDomain::FullValidation) {
+      ++full_validation_rows;
+      if (evidence.entry.distributed) {
+        ++distributed_full_validation_rows;
+      }
+      if (evidence.entry.geometry_order == 1) {
+        EXPECT_EQ(evidence.entry.cut_mode, "linearized-cut") << key;
+        EXPECT_EQ(evidence.entry.quadrature_policy, "topology-subdivision") << key;
+        linear_full_validation_paths.insert(evidence.entry.fe_execution_path);
+        linear_full_validation_families.insert(evidence.entry.parent_family);
+        linear_full_validation_kinds.insert(evidence.entry.embedded_kind);
+      } else if (is_second_order_linearized_validation_support_row(evidence.entry)) {
+        EXPECT_FALSE(evidence.entry.distributed) << key;
+        EXPECT_EQ(evidence.entry.cut_mode, "linearized-cut") << key;
+        EXPECT_EQ(evidence.entry.quadrature_policy, "topology-subdivision") << key;
+        second_order_linear_full_validation_paths.insert(evidence.entry.fe_execution_path);
+        second_order_linear_full_validation_families.insert(evidence.entry.parent_family);
+        second_order_linear_full_validation_kinds.insert(evidence.entry.embedded_kind);
+      } else if (evidence.entry.geometry_order == 2) {
+        EXPECT_EQ(evidence.entry.embedded_kind, EmbeddedGeometryKind::Plane) << key;
+        EXPECT_EQ(evidence.entry.cut_mode, "curved-isoparametric-cut") << key;
+        EXPECT_EQ(evidence.entry.quadrature_policy, "curved-topology-subdivision") << key;
+        curved_starter_full_validation_paths.insert(evidence.entry.fe_execution_path);
+        curved_starter_full_validation_families.insert(evidence.entry.parent_family);
+      } else if (evidence.entry.geometry_order < 0) {
+        EXPECT_EQ(evidence.entry.cut_mode, "curved-isoparametric-cut") << key;
+        EXPECT_TRUE(evidence.entry.quadrature_policy == "true-curved-arrangement" ||
+                    evidence.entry.quadrature_policy == "true-curved-subdivision-arrangement")
+            << key;
+        true_curved_full_validation_paths.insert(evidence.entry.fe_execution_path);
+        true_curved_full_validation_families.insert(evidence.entry.parent_family);
+        true_curved_full_validation_kinds.insert(evidence.entry.embedded_kind);
+        true_curved_full_validation_policies.insert(evidence.entry.quadrature_policy);
+      } else {
+        ADD_FAILURE() << key;
+      }
+    }
+    if (evidence.domain == CutSupportEvidenceDomain::Sensitivity &&
+        is_first_order_linearized_sensitivity_support_row(evidence.entry)) {
+      ++linear_sensitivity_rows;
+      linear_sensitivity_paths.insert(evidence.entry.fe_execution_path);
+      linear_sensitivity_families.insert(evidence.entry.parent_family);
+      linear_sensitivity_kinds.insert(evidence.entry.embedded_kind);
+    }
+    if (evidence.domain == CutSupportEvidenceDomain::Sensitivity &&
+        is_second_order_linearized_sensitivity_support_row(evidence.entry)) {
+      ++second_order_linear_sensitivity_rows;
+      second_order_linear_sensitivity_paths.insert(evidence.entry.fe_execution_path);
+      second_order_linear_sensitivity_families.insert(evidence.entry.parent_family);
+      second_order_linear_sensitivity_kinds.insert(evidence.entry.embedded_kind);
+    }
+    if (evidence.domain == CutSupportEvidenceDomain::Sensitivity &&
+        is_quadratic_curved_starter_support_row(evidence.entry)) {
+      ++curved_starter_sensitivity_rows;
+      curved_starter_sensitivity_paths.insert(evidence.entry.fe_execution_path);
+      curved_starter_sensitivity_families.insert(evidence.entry.parent_family);
+    }
+    if (evidence.domain == CutSupportEvidenceDomain::Sensitivity &&
+        is_true_curved_topology_sensitivity_support_row(evidence.entry)) {
+      ++true_curved_sensitivity_rows;
+      true_curved_sensitivity_paths.insert(evidence.entry.fe_execution_path);
+      true_curved_sensitivity_families.insert(evidence.entry.parent_family);
+      true_curved_sensitivity_kinds.insert(evidence.entry.embedded_kind);
+      true_curved_sensitivity_policies.insert(evidence.entry.quadrature_policy);
+    }
+  }
+  EXPECT_EQ(diagnostic_rows, entries.size());
+  EXPECT_GT(full_validation_rows, 0u);
+  const std::set<std::string> expected_paths{
+      "standard-assembly",
+      "matrix-free",
+      "forms-interpreter",
+      "ad",
+      "symbolic-tangent",
+      "jit"};
+  EXPECT_EQ(linear_full_validation_paths, expected_paths);
+  EXPECT_EQ(curved_starter_full_validation_paths, expected_paths);
+  EXPECT_EQ(linear_full_validation_families,
+            (std::set<CellFamily>{CellFamily::Line,
+                                  CellFamily::Triangle,
+                                  CellFamily::Quad,
+                                  CellFamily::Tetra,
+                                  CellFamily::Hex,
+                                  CellFamily::Wedge,
+                                  CellFamily::Pyramid,
+                                  CellFamily::Polygon,
+                                  CellFamily::Polyhedron}));
+  EXPECT_EQ(linear_full_validation_kinds,
+            (std::set<EmbeddedGeometryKind>{EmbeddedGeometryKind::Plane,
+                                            EmbeddedGeometryKind::Sphere,
+                                            EmbeddedGeometryKind::TriangulatedSurface,
+                                            EmbeddedGeometryKind::LevelSetField,
+                                            EmbeddedGeometryKind::BooleanComposite}));
+  EXPECT_EQ(second_order_linear_full_validation_paths, expected_paths);
+  EXPECT_EQ(second_order_linear_full_validation_families,
+            (std::set<CellFamily>{CellFamily::Line,
+                                  CellFamily::Triangle,
+                                  CellFamily::Quad,
+                                  CellFamily::Tetra,
+                                  CellFamily::Hex,
+                                  CellFamily::Wedge,
+                                  CellFamily::Pyramid}));
+  EXPECT_EQ(second_order_linear_full_validation_kinds,
+            (std::set<EmbeddedGeometryKind>{EmbeddedGeometryKind::Plane,
+                                            EmbeddedGeometryKind::Sphere,
+                                            EmbeddedGeometryKind::TriangulatedSurface,
+                                            EmbeddedGeometryKind::LevelSetField,
+                                            EmbeddedGeometryKind::BooleanComposite}));
+  EXPECT_EQ(curved_starter_full_validation_families,
+            (std::set<CellFamily>{CellFamily::Line,
+                                  CellFamily::Triangle,
+                                  CellFamily::Quad,
+                                  CellFamily::Tetra,
+                                  CellFamily::Hex}));
+  EXPECT_EQ(true_curved_full_validation_paths, expected_paths);
+  EXPECT_EQ(true_curved_full_validation_families,
+            (std::set<CellFamily>{CellFamily::Line,
+                                  CellFamily::Triangle,
+                                  CellFamily::Quad,
+                                  CellFamily::Tetra,
+                                  CellFamily::Hex,
+                                  CellFamily::Wedge,
+                                  CellFamily::Pyramid}));
+  EXPECT_EQ(true_curved_full_validation_kinds,
+            (std::set<EmbeddedGeometryKind>{EmbeddedGeometryKind::Plane,
+                                            EmbeddedGeometryKind::Sphere,
+                                            EmbeddedGeometryKind::SignedDistanceCallback,
+                                            EmbeddedGeometryKind::LevelSetField,
+                                            EmbeddedGeometryKind::TriangulatedSurface,
+                                            EmbeddedGeometryKind::BooleanComposite}));
+  EXPECT_EQ(true_curved_full_validation_policies,
+            (std::set<std::string>{"true-curved-arrangement",
+                                   "true-curved-subdivision-arrangement"}));
+  EXPECT_EQ(linear_sensitivity_paths, expected_paths);
+  EXPECT_EQ(linear_sensitivity_families,
+            (std::set<CellFamily>{CellFamily::Line,
+                                  CellFamily::Triangle,
+                                  CellFamily::Quad,
+                                  CellFamily::Tetra,
+                                  CellFamily::Hex,
+                                  CellFamily::Wedge,
+                                  CellFamily::Pyramid,
+                                  CellFamily::Polygon,
+                                  CellFamily::Polyhedron}));
+  EXPECT_EQ(linear_sensitivity_kinds,
+            (std::set<EmbeddedGeometryKind>{EmbeddedGeometryKind::Plane,
+                                            EmbeddedGeometryKind::Sphere,
+                                            EmbeddedGeometryKind::TriangulatedSurface,
+                                            EmbeddedGeometryKind::LevelSetField,
+                                            EmbeddedGeometryKind::BooleanComposite}));
+  EXPECT_EQ(linear_sensitivity_rows,
+            2u * expected_paths.size() *
+                linear_sensitivity_families.size() *
+                linear_sensitivity_kinds.size());
+  EXPECT_EQ(second_order_linear_sensitivity_paths, expected_paths);
+  EXPECT_EQ(second_order_linear_sensitivity_families,
+            (std::set<CellFamily>{CellFamily::Line,
+                                  CellFamily::Triangle,
+                                  CellFamily::Quad,
+                                  CellFamily::Tetra,
+                                  CellFamily::Hex,
+                                  CellFamily::Wedge,
+                                  CellFamily::Pyramid}));
+  EXPECT_EQ(second_order_linear_sensitivity_kinds,
+            (std::set<EmbeddedGeometryKind>{EmbeddedGeometryKind::Plane,
+                                            EmbeddedGeometryKind::Sphere,
+                                            EmbeddedGeometryKind::TriangulatedSurface,
+                                            EmbeddedGeometryKind::LevelSetField,
+                                            EmbeddedGeometryKind::BooleanComposite}));
+  EXPECT_EQ(second_order_linear_sensitivity_rows,
+            expected_paths.size() *
+                second_order_linear_sensitivity_families.size() *
+                second_order_linear_sensitivity_kinds.size());
+  EXPECT_EQ(curved_starter_sensitivity_paths, expected_paths);
+  EXPECT_EQ(curved_starter_sensitivity_families,
+            (std::set<CellFamily>{CellFamily::Line,
+                                  CellFamily::Triangle,
+                                  CellFamily::Quad,
+                                  CellFamily::Tetra,
+                                  CellFamily::Hex}));
+  EXPECT_EQ(curved_starter_sensitivity_rows,
+            2u * expected_paths.size() * curved_starter_sensitivity_families.size());
+  EXPECT_EQ(true_curved_sensitivity_paths, expected_paths);
+  EXPECT_EQ(true_curved_sensitivity_families,
+            (std::set<CellFamily>{CellFamily::Line,
+                                  CellFamily::Triangle,
+                                  CellFamily::Quad,
+                                  CellFamily::Tetra,
+                                  CellFamily::Hex,
+                                  CellFamily::Wedge,
+                                  CellFamily::Pyramid}));
+  EXPECT_EQ(true_curved_sensitivity_kinds,
+            (std::set<EmbeddedGeometryKind>{EmbeddedGeometryKind::Plane,
+                                            EmbeddedGeometryKind::Sphere,
+                                            EmbeddedGeometryKind::SignedDistanceCallback,
+                                            EmbeddedGeometryKind::LevelSetField,
+                                            EmbeddedGeometryKind::TriangulatedSurface,
+                                            EmbeddedGeometryKind::BooleanComposite}));
+  EXPECT_EQ(true_curved_sensitivity_policies,
+            (std::set<std::string>{"true-curved-arrangement",
+                                   "true-curved-subdivision-arrangement"}));
+  EXPECT_EQ(true_curved_sensitivity_rows,
+            2u * expected_paths.size() * (7u + 5u + 7u * 5u));
+  const auto true_curved_full_validation_rows =
+      2u * expected_paths.size() * (7u + 5u + 7u * 5u);
+  const auto second_order_linear_full_validation_rows =
+      expected_paths.size() *
+      second_order_linear_full_validation_families.size() *
+      second_order_linear_full_validation_kinds.size();
+  EXPECT_EQ(full_validation_rows,
+            2u * expected_paths.size() *
+                (linear_full_validation_families.size() *
+                     linear_full_validation_kinds.size() +
+                 curved_starter_full_validation_families.size()) +
+                second_order_linear_full_validation_rows +
+                true_curved_full_validation_rows);
+  EXPECT_GT(distributed_full_validation_rows, 0u);
+
+  std::size_t ledger_complete_rows = 0u;
+  std::size_t qualified_rows = 0u;
+  for (const auto& record : records) {
+    const auto key = support_matrix_key(record.entry);
+    const auto domain_it = ledger_domains.find(key);
+    ASSERT_NE(domain_it, ledger_domains.end()) << key;
+    const auto& domains = domain_it->second;
+    const auto has_domain = [&](CutSupportEvidenceDomain domain) {
+      return domains.find(domain) != domains.end();
+    };
+
+    EXPECT_EQ(record.topology_evidence,
+              has_domain(CutSupportEvidenceDomain::Topology)) << key;
+    EXPECT_EQ(record.quadrature_evidence,
+              has_domain(CutSupportEvidenceDomain::Quadrature)) << key;
+    EXPECT_EQ(record.fe_execution_evidence,
+              has_domain(CutSupportEvidenceDomain::FeExecution)) << key;
+    EXPECT_EQ(record.restart_rollback_evidence,
+              has_domain(CutSupportEvidenceDomain::RestartRollback)) << key;
+    EXPECT_EQ(record.mpi_evidence,
+              has_domain(CutSupportEvidenceDomain::Mpi)) << key;
+    EXPECT_EQ(record.sensitivity_evidence,
+              has_domain(CutSupportEvidenceDomain::Sensitivity)) << key;
+    EXPECT_EQ(record.diagnostic_evidence,
+              has_domain(CutSupportEvidenceDomain::Diagnostic)) << key;
+    EXPECT_EQ(record.validation_evidence,
+              has_domain(CutSupportEvidenceDomain::FullValidation)) << key;
+
+    const bool ledger_complete =
+        (!record.requires_topology_evidence || record.topology_evidence) &&
+        (!record.requires_quadrature_evidence || record.quadrature_evidence) &&
+        (!record.requires_fe_execution_evidence || record.fe_execution_evidence) &&
+        (!record.requires_restart_rollback_evidence || record.restart_rollback_evidence) &&
+        (!record.requires_mpi_evidence || record.mpi_evidence) &&
+        (!record.requires_sensitivity_evidence || record.sensitivity_evidence) &&
+        (!record.requires_diagnostic_evidence || record.diagnostic_evidence) &&
+        (!record.requires_validation_evidence || record.validation_evidence);
+    if (ledger_complete) {
+      ++ledger_complete_rows;
+    }
+    if (record.qualified) {
+      ++qualified_rows;
+    }
+    EXPECT_EQ(record.qualified, ledger_complete) << key;
+  }
+
+  EXPECT_GT(ledger_complete_rows, 0u);
+  EXPECT_EQ(qualified_rows, ledger_complete_rows);
+}
+
+TEST(CutCell, SupportMatrixTopologyAndQuadratureAcceptanceEvidenceIsRowSpecific)
+{
+  const auto entries = cut_support_matrix();
+  const auto ledger = cut_support_matrix_validation_ledger();
+  const auto records = qualify_cut_support_matrix();
+  ASSERT_FALSE(entries.empty());
+  ASSERT_FALSE(ledger.empty());
+  ASSERT_EQ(records.size(), entries.size());
+
+  std::map<std::string, CutSupportMatrixQualificationRecord> records_by_key;
+  for (const auto& record : records) {
+    records_by_key.emplace(support_matrix_key(record.entry), record);
+  }
+
+  std::map<std::string, std::map<CutSupportEvidenceDomain, CutSupportMatrixEvidenceRecord>>
+      evidence_by_key_and_domain;
+  std::size_t topology_evidence_rows = 0u;
+  std::size_t quadrature_evidence_rows = 0u;
+  for (const auto& evidence : ledger) {
+    if (evidence.domain == CutSupportEvidenceDomain::Topology) {
+      ++topology_evidence_rows;
+    }
+    if (evidence.domain == CutSupportEvidenceDomain::Quadrature) {
+      ++quadrature_evidence_rows;
+    }
+    evidence_by_key_and_domain[support_matrix_key(evidence.entry)][evidence.domain] =
+        evidence;
+  }
+
+  const auto expected_topology_id = [](const CutSupportMatrixEntry& entry) {
+    if (is_first_order_linearized_validation_support_row(entry)) {
+      return std::string{"phase26.topology.linearized-first-order-all-families"};
+    }
+    if (is_second_order_linearized_validation_support_row(entry)) {
+      return std::string{
+          "phase26.topology.linearized-second-order-high-order-families"};
+    }
+    if (is_quadratic_curved_starter_support_row(entry)) {
+      return std::string{"phase26.topology.quadratic-curved-plane-starter"};
+    }
+    if (is_true_curved_topology_sensitivity_support_row(entry)) {
+      return std::string{"phase26.topology.true-curved-arrangement-subdivision"};
+    }
+    return std::string{};
+  };
+
+  const auto expected_quadrature_id = [](const CutSupportMatrixEntry& entry) {
+    if (is_first_order_linearized_validation_support_row(entry)) {
+      return std::string{"phase26.quadrature.linearized-first-order-topology-derived"};
+    }
+    if (is_second_order_linearized_validation_support_row(entry)) {
+      return std::string{
+          "phase26.quadrature.linearized-second-order-topology-derived"};
+    }
+    if (is_quadratic_curved_starter_support_row(entry)) {
+      return std::string{"phase26.quadrature.quadratic-curved-plane-starter"};
+    }
+    if (is_true_curved_topology_sensitivity_support_row(entry)) {
+      return std::string{"phase26.quadrature.true-curved-arrangement-subdivision"};
+    }
+    return std::string{};
+  };
+
+  std::size_t implemented_rows = 0u;
+  std::set<std::string> observed_topology_ids;
+  std::set<std::string> observed_quadrature_ids;
+  for (const auto& entry : entries) {
+    const auto key = support_matrix_key(entry);
+    const auto record_it = records_by_key.find(key);
+    ASSERT_NE(record_it, records_by_key.end()) << key;
+    const auto& record = record_it->second;
+    const auto evidence_it = evidence_by_key_and_domain.find(key);
+    ASSERT_NE(evidence_it, evidence_by_key_and_domain.end()) << key;
+
+    const bool implemented = entry.status != CutSupportStatus::Unsupported;
+    if (!implemented) {
+      EXPECT_EQ(evidence_it->second.find(CutSupportEvidenceDomain::Topology),
+                evidence_it->second.end())
+          << key;
+      EXPECT_EQ(evidence_it->second.find(CutSupportEvidenceDomain::Quadrature),
+                evidence_it->second.end())
+          << key;
+      EXPECT_TRUE(record.qualified) << key << " :: " << joined_messages(record.missing);
+      continue;
+    }
+
+    ++implemented_rows;
+    ASSERT_TRUE(record.qualified) << key << " :: " << joined_messages(record.missing);
+    ASSERT_TRUE(record.topology_evidence) << key;
+    ASSERT_TRUE(record.quadrature_evidence) << key;
+    ASSERT_TRUE(record.restart_rollback_evidence) << key;
+    if (entry.distributed) {
+      ASSERT_TRUE(record.mpi_evidence) << key;
+    }
+
+    const auto topology_it =
+        evidence_it->second.find(CutSupportEvidenceDomain::Topology);
+    const auto quadrature_it =
+        evidence_it->second.find(CutSupportEvidenceDomain::Quadrature);
+    ASSERT_NE(topology_it, evidence_it->second.end()) << key;
+    ASSERT_NE(quadrature_it, evidence_it->second.end()) << key;
+    const auto& topology = topology_it->second;
+    const auto& quadrature = quadrature_it->second;
+
+    const auto expected_topology = expected_topology_id(entry);
+    const auto expected_quadrature = expected_quadrature_id(entry);
+    ASSERT_FALSE(expected_topology.empty()) << key;
+    ASSERT_FALSE(expected_quadrature.empty()) << key;
+    EXPECT_EQ(topology.evidence_id, expected_topology) << key;
+    EXPECT_EQ(quadrature.evidence_id, expected_quadrature) << key;
+    EXPECT_NE(topology.evidence_id, "phase26.topology.reconstructed-cut-records")
+        << key;
+    EXPECT_NE(quadrature.evidence_id, "phase26.quadrature.topology-derived-imports")
+        << key;
+    EXPECT_EQ(topology.evidence_id.find("unclassified"), std::string::npos)
+        << key;
+    EXPECT_EQ(quadrature.evidence_id.find("unclassified"), std::string::npos)
+        << key;
+
+    EXPECT_NE(topology.description.find("explicit ordered"), std::string::npos)
+        << key;
+    EXPECT_NE(topology.description.find("provenance"), std::string::npos) << key;
+    EXPECT_NE(topology.description.find("stable"), std::string::npos) << key;
+    EXPECT_NE(topology.verification.find("CutCell."), std::string::npos) << key;
+    if (entry.distributed) {
+      EXPECT_NE(topology.verification.find("MPI"), std::string::npos) << key;
+    }
+
+    EXPECT_NE(quadrature.description.find("topology"), std::string::npos)
+        << key;
+    EXPECT_NE(quadrature.description.find("conservation"), std::string::npos)
+        << key;
+    EXPECT_NE(quadrature.description.find("analytic exactness"), std::string::npos)
+        << key;
+    EXPECT_NE(quadrature.verification.find("conservation"), std::string::npos)
+        << key;
+    EXPECT_NE(quadrature.verification.find("analytic exactness"), std::string::npos)
+        << key;
+    EXPECT_NE(quadrature.verification.find("CutIntegrationInfrastructure"),
+              std::string::npos)
+        << key;
+
+    observed_topology_ids.insert(topology.evidence_id);
+    observed_quadrature_ids.insert(quadrature.evidence_id);
+  }
+
+  EXPECT_GT(implemented_rows, 0u);
+  EXPECT_EQ(topology_evidence_rows, implemented_rows);
+  EXPECT_EQ(quadrature_evidence_rows, implemented_rows);
+  EXPECT_EQ(observed_topology_ids,
+            (std::set<std::string>{
+                "phase26.topology.linearized-first-order-all-families",
+                "phase26.topology.linearized-second-order-high-order-families",
+                "phase26.topology.quadratic-curved-plane-starter",
+                "phase26.topology.true-curved-arrangement-subdivision"}));
+  EXPECT_EQ(observed_quadrature_ids,
+            (std::set<std::string>{
+                "phase26.quadrature.linearized-first-order-topology-derived",
+                "phase26.quadrature.linearized-second-order-topology-derived",
+                "phase26.quadrature.quadratic-curved-plane-starter",
+                "phase26.quadrature.true-curved-arrangement-subdivision"}));
+}
+
+TEST(CutCell, SupportMatrixValidationAuditCategorizesEveryAdvertisedRow)
+{
+  const auto entries = cut_support_matrix();
+  const auto records = qualify_cut_support_matrix();
+  const auto audit = audit_cut_support_matrix_validation();
+  ASSERT_FALSE(entries.empty());
+  ASSERT_EQ(audit.size(), entries.size());
+  ASSERT_EQ(audit.size(), records.size());
+
+  std::map<std::string, CutSupportMatrixQualificationRecord> records_by_key;
+  for (const auto& record : records) {
+    records_by_key.emplace(support_matrix_key(record.entry), record);
+  }
+
+  std::set<std::string> audit_keys;
+  std::size_t unsupported_rows = 0u;
+  std::size_t fully_validated_rows = 0u;
+  std::size_t missing_validation_rows = 0u;
+  std::size_t missing_sensitivity_rows = 0u;
+  std::size_t missing_restart_or_mpi_rows = 0u;
+  std::size_t missing_fe_rows = 0u;
+  std::size_t advertised_too_broadly_rows = 0u;
+  std::size_t rows_missing_full_validation_domain = 0u;
+  std::size_t rows_missing_sensitivity_domain = 0u;
+
+  for (const auto& row : audit) {
+    const auto key = support_matrix_key(row.qualification.entry);
+    EXPECT_TRUE(audit_keys.insert(key).second) << key;
+    EXPECT_FALSE(row.summary.empty()) << key;
+    const auto expected_record = records_by_key.find(key);
+    ASSERT_NE(expected_record, records_by_key.end()) << key;
+    EXPECT_EQ(row.qualification.qualified, expected_record->second.qualified) << key;
+    EXPECT_EQ(row.qualification.missing, expected_record->second.missing) << key;
+
+    const bool implemented =
+        row.qualification.entry.status != CutSupportStatus::Unsupported;
+    if (!implemented) {
+      ++unsupported_rows;
+      EXPECT_EQ(row.category, CutSupportAuditCategory::Unsupported) << key;
+      EXPECT_TRUE(row.missing_domains.empty()) << key;
+      EXPECT_TRUE(row.qualification.qualified) << key;
+      continue;
+    }
+
+    if (has_missing_domain(row, CutSupportEvidenceDomain::FullValidation)) {
+      ++rows_missing_full_validation_domain;
+    }
+    if (has_missing_domain(row, CutSupportEvidenceDomain::Sensitivity)) {
+      ++rows_missing_sensitivity_domain;
+    }
+
+    if (row.qualification.qualified) {
+      ++fully_validated_rows;
+      EXPECT_EQ(row.category, CutSupportAuditCategory::FullyValidated) << key;
+      EXPECT_TRUE(row.missing_domains.empty()) << key;
+      EXPECT_TRUE(row.qualification.missing.empty()) << key;
+    } else {
+      EXPECT_FALSE(row.missing_domains.empty()) << key;
+      EXPECT_FALSE(row.qualification.missing.empty()) << key;
+      EXPECT_NE(row.category, CutSupportAuditCategory::FullyValidated) << key;
+    }
+
+    switch (row.category) {
+      case CutSupportAuditCategory::Unsupported:
+        ADD_FAILURE() << "implemented row categorized unsupported: " << key;
+        break;
+      case CutSupportAuditCategory::FullyValidated:
+        break;
+      case CutSupportAuditCategory::MissingAnalyticValidation:
+        ++missing_validation_rows;
+        EXPECT_TRUE(has_missing_domain(row, CutSupportEvidenceDomain::FullValidation)) << key;
+        EXPECT_FALSE(has_missing_domain(row, CutSupportEvidenceDomain::Sensitivity)) << key;
+        break;
+      case CutSupportAuditCategory::MissingSensitivityEvidence:
+        ++missing_sensitivity_rows;
+        EXPECT_TRUE(has_missing_domain(row, CutSupportEvidenceDomain::Sensitivity)) << key;
+        break;
+      case CutSupportAuditCategory::MissingRestartOrMpiEvidence:
+        ++missing_restart_or_mpi_rows;
+        break;
+      case CutSupportAuditCategory::MissingFeExecutionEvidence:
+        ++missing_fe_rows;
+        break;
+      case CutSupportAuditCategory::AdvertisedTooBroadly:
+        ++advertised_too_broadly_rows;
+        break;
+    }
+
+    EXPECT_FALSE(has_missing_domain(row, CutSupportEvidenceDomain::Topology)) << key;
+    EXPECT_FALSE(has_missing_domain(row, CutSupportEvidenceDomain::Quadrature)) << key;
+    EXPECT_FALSE(has_missing_domain(row, CutSupportEvidenceDomain::Diagnostic)) << key;
+    EXPECT_FALSE(has_missing_domain(row, CutSupportEvidenceDomain::FeExecution)) << key;
+    EXPECT_FALSE(has_missing_domain(row, CutSupportEvidenceDomain::RestartRollback)) << key;
+    EXPECT_FALSE(has_missing_domain(row, CutSupportEvidenceDomain::Mpi)) << key;
+  }
+
+  EXPECT_EQ(audit_keys.size(), entries.size());
+  EXPECT_GT(unsupported_rows, 0u);
+  EXPECT_GT(fully_validated_rows, 0u);
+  EXPECT_EQ(missing_validation_rows, 0u);
+  EXPECT_EQ(missing_sensitivity_rows, 0u);
+  EXPECT_EQ(rows_missing_full_validation_domain, 0u);
+  EXPECT_EQ(rows_missing_sensitivity_domain, 0u);
+  EXPECT_EQ(missing_restart_or_mpi_rows, 0u);
+  EXPECT_EQ(missing_fe_rows, 0u);
+  EXPECT_EQ(advertised_too_broadly_rows, 0u);
 }
 
 TEST(CutCell, BooleanCompositionSemanticsCoverUnionIntersectionDifferenceAndNestedRegions)
@@ -3268,6 +6208,27 @@ TEST(CutCell, BooleanCompositionSemanticsCoverUnionIntersectionDifferenceAndNest
       {{{0.10, 0.0, 0.0}}, {{0.50, 0.0, 0.0}}, {{11.0, 0.0, 0.0}}});
   EXPECT_TRUE(nested_diagnostic.ok);
   EXPECT_TRUE(has_message_containing(nested_diagnostic.messages, "nested Boolean child"));
+
+  auto coincident_a = plane(0.0, 78);
+  coincident_a.provenance.persistent_id = "coincident-a";
+  auto coincident_b = plane(0.0, 79);
+  coincident_b.provenance.persistent_id = "coincident-b";
+  EmbeddedGeometryDescriptor coincident_intersection;
+  coincident_intersection.kind = EmbeddedGeometryKind::BooleanComposite;
+  coincident_intersection.boolean_operation = EmbeddedGeometryBooleanOperation::Intersection;
+  coincident_intersection.provenance.persistent_id = "coincident-boolean-region";
+  coincident_intersection.children = {coincident_a, coincident_b};
+  CutPredicatePolicy predicate_policy;
+  predicate_policy.name = "phase26-adaptive-exact";
+  predicate_policy.robust.intersection_tolerance = 1.0e-8;
+  const auto coincident_diagnostic = diagnose_boolean_region_composition(
+      coincident_intersection,
+      {{{0.0, 0.0, 0.0}}},
+      predicate_policy);
+  EXPECT_TRUE(coincident_diagnostic.ok);
+  EXPECT_TRUE(has_message_containing(coincident_diagnostic.messages,
+                                     "domain=boolean-arrangement"))
+      << joined_messages(coincident_diagnostic.messages);
 
   const auto revisions = nested.effective_revisions();
   EXPECT_EQ(revisions.geometry_epoch, 77u);
@@ -3357,6 +6318,65 @@ TEST(CutCell, DistributedExchangePacketDeduplicatesAndProjectionPreservesProvena
 
   const auto validity = diagnose_cut_topology_validity(projected);
   EXPECT_TRUE(validity.ok);
+}
+
+TEST(CutCell, DistributedExchangePacketPreservesCurvedSensitivityMetadata)
+{
+  const auto mesh = make_cubic_curved_tetra_mesh();
+  auto embedded = sphere({{0.30, 0.30, 0.30}}, 0.42, 3401, "packet-curved-sphere");
+
+  CutClassificationOptions classification_options;
+  classification_options.classify_faces = false;
+  classification_options.classify_edges = false;
+  const auto map = classify_embedded_geometry(mesh, embedded, classification_options);
+
+  CutTopologyOptions topology_options;
+  topology_options.curved_arrangement_mode = CutCurvedArrangementMode::TrueArrangement;
+  const auto topology = reconstruct_cut_topology(mesh, map, topology_options);
+  ASSERT_TRUE(topology.supported) << joined_messages(topology.diagnostics);
+  ASSERT_FALSE(topology.curved_patches.empty());
+  ASSERT_FALSE(topology.sensitivity_records.empty());
+
+  auto packet = make_distributed_cut_exchange_packet(map, topology);
+  const auto curved_record = std::find_if(packet.entities.begin(),
+                                         packet.entities.end(),
+                                         [](const auto& entity) {
+                                           return entity.kind == CutTopologyEntityKind::InterfacePolygon &&
+                                                  entity.curved_isoparametric;
+                                         });
+  ASSERT_NE(curved_record, packet.entities.end());
+  EXPECT_EQ(curved_record->geometry_order, 3);
+  EXPECT_EQ(curved_record->embedded_kind, EmbeddedGeometryKind::Sphere);
+  EXPECT_EQ(curved_record->construction_policy, "true-curved-subdivision-arrangement");
+  EXPECT_TRUE(curved_record->parametric_coordinates_valid);
+  EXPECT_TRUE(curved_record->exact_topology_available);
+  EXPECT_FALSE(curved_record->linearized_surrogate);
+  EXPECT_TRUE(curved_record->isoparametric_quadrature_available);
+  EXPECT_FALSE(curved_record->parent_parametric_coordinates.empty());
+  EXPECT_FALSE(curved_record->quadrature_parent_parametric_coordinates.empty());
+  EXPECT_EQ(curved_record->quadrature_parent_parametric_coordinates.size(),
+            curved_record->quadrature_weights.size());
+  EXPECT_GT(curved_record->geometry_sensitivity_dof_count, 0u);
+  EXPECT_GT(curved_record->geometry_sensitivity_sample_count, 0u);
+  EXPECT_TRUE(curved_record->geometry_sensitivity_ad_compatible);
+  EXPECT_TRUE(curved_record->location_sensitivity_available);
+  EXPECT_TRUE(curved_record->jacobian_sensitivity_available);
+  EXPECT_TRUE(curved_record->measure_sensitivity_available);
+  EXPECT_TRUE(curved_record->normal_sensitivity_available);
+  EXPECT_TRUE(curved_record->quadrature_weight_sensitivity_available);
+
+  const auto duplicate_curved_record = *curved_record;
+  packet.entities.push_back(duplicate_curved_record);
+  const auto deduped = deduplicate_cut_exchange_packet(std::move(packet));
+  const auto deduped_curved = std::find_if(deduped.entities.begin(),
+                                           deduped.entities.end(),
+                                           [](const auto& entity) {
+                                             return entity.kind == CutTopologyEntityKind::InterfacePolygon &&
+                                                    entity.curved_isoparametric;
+                                           });
+  ASSERT_NE(deduped_curved, deduped.entities.end());
+  EXPECT_EQ(deduped_curved->construction_policy, "true-curved-subdivision-arrangement");
+  EXPECT_TRUE(deduped_curved->geometry_sensitivity_ad_compatible);
 }
 
 TEST(CutCell, DistributedCutStateSerializesOwnedPayloadsAndInvalidatesOnOwnershipChange)

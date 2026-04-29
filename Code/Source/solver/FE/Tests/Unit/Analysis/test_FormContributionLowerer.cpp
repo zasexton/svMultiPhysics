@@ -8,11 +8,14 @@
 #include "Analysis/FormContributionLowerer.h"
 #include "Analysis/ContributionDescriptor.h"
 #include "Analysis/FormulationRecord.h"
+#include "Analysis/ProblemAnalysisContext.h"
 #include "Analysis/ProblemAnalysisTypes.h"
 
 #include "Forms/FormExpr.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
+
+#include <set>
 
 using namespace svmp::FE;
 using namespace svmp::FE::analysis;
@@ -337,12 +340,16 @@ TEST(FormContributionLowerer, MixedBlockProvenanceMultiField) {
     ASSERT_EQ(contributions.size(), 2u);
 
     // Both should have source_block_key pointing to the momentum pseudo-block
+    std::set<std::string> contribution_ids;
     for (const auto& c : contributions) {
         ASSERT_TRUE(c.source_block_key.has_value());
         EXPECT_EQ(c.source_block_key->first, FieldId{1});  // test = velocity
         EXPECT_NE(c.source_expression, nullptr);
         EXPECT_FALSE(c.block_context.empty());
+        EXPECT_FALSE(c.contribution_id.empty());
+        contribution_ids.insert(c.contribution_id);
     }
+    EXPECT_EQ(contribution_ids.size(), contributions.size());
 
     // VV contribution should mention velocity in origin
     bool found_vv = false, found_vp = false;
@@ -362,6 +369,24 @@ TEST(FormContributionLowerer, MixedBlockProvenanceMultiField) {
     }
     EXPECT_TRUE(found_vv) << "Expected VV contribution";
     EXPECT_TRUE(found_vp) << "Expected VP contribution";
+}
+
+TEST(FormContributionLowerer, ContextAddContributionNormalizesMissingStableId) {
+    ProblemAnalysisContext ctx;
+    ContributionDescriptor contribution;
+    contribution.operator_tag = "manual-block";
+    contribution.origin = "unit-test";
+    contribution.role = ContributionRole::DiagonalBlock;
+    contribution.test_variables = {VariableKey::field(0)};
+    contribution.trial_variables = {VariableKey::field(0)};
+
+    ASSERT_TRUE(contribution.contribution_id.empty());
+    ctx.addContribution(std::move(contribution));
+
+    ASSERT_EQ(ctx.contributions().size(), 1u);
+    EXPECT_FALSE(ctx.contributions().front().contribution_id.empty());
+    EXPECT_NE(ctx.contributions().front().contribution_id.find("manual-block"),
+              std::string::npos);
 }
 
 TEST(FormContributionLowerer, FallbackPathHasProvenance) {

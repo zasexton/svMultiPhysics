@@ -28,6 +28,8 @@ void CouplingGraphAnalyzer::run(const ProblemAnalysisContext& context,
     auto emit_coupling = [&](const VariableKey& a, const VariableKey& b,
                              DomainKind domain, const std::string& source_tag)
     {
+        if (a == b) return;
+
         // Canonical ordering to avoid duplicates
         auto key = (a < b) ? std::make_pair(a, b) : std::make_pair(b, a);
         if (!emitted.insert(key).second) return;

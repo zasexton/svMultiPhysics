@@ -1677,10 +1677,19 @@ SetupStoragePlan FESystem::computeSetupStoragePlan() const
         plan.merge(req, "fe_quantities");
     }
 
+    std::size_t unknown_volume_fields = 0;
+    std::size_t unknown_fields = 0;
+    for (const auto& rec : field_registry_.records()) {
+        if (rec.source_kind != FieldSourceKind::Unknown) {
+            continue;
+        }
+        ++unknown_fields;
+        if (rec.scope == FieldScope::VolumeCell) {
+            ++unknown_volume_fields;
+        }
+    }
     const bool single_volume_field =
-        field_registry_.size() == 1u &&
-        !field_registry_.records().empty() &&
-        field_registry_.records().front().scope == FieldScope::VolumeCell;
+        unknown_fields == 1u && unknown_volume_fields == 1u;
     plan.can_alias_single_field_dof_map = single_volume_field;
 
     return plan;
@@ -1799,6 +1808,13 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     const auto n_fields = field_registry_.size();
     field_dof_handlers_.resize(n_fields);
     field_dof_offsets_.assign(n_fields, 0);
+    std::vector<const FieldRecord*> unknown_field_records;
+    unknown_field_records.reserve(n_fields);
+    for (const auto& rec : field_registry_.records()) {
+        if (rec.source_kind == FieldSourceKind::Unknown) {
+            unknown_field_records.push_back(&rec);
+        }
+    }
 
     auto interface_mesh_for_field = [&](const FieldRecord& rec) -> const svmp::InterfaceMesh* {
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -1877,11 +1893,15 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     for (const auto& rec : field_registry_.records()) {
         const auto idx = static_cast<std::size_t>(rec.id);
         field_dof_offsets_[idx] = total_dofs;
-        total_dofs += field_dof_handlers_[idx].getNumDofs();
+        if (rec.source_kind == FieldSourceKind::Unknown) {
+            total_dofs += field_dof_handlers_[idx].getNumDofs();
+        }
     }
 
     if (setup_storage_plan_.can_alias_single_field_dof_map) {
-        const auto& rec = field_registry_.records().front();
+        FE_THROW_IF(unknown_field_records.size() != 1u, InvalidStateException,
+                    "FESystem::setup: single-field alias expected exactly one unknown field");
+        const auto& rec = *unknown_field_records.front();
         const auto idx = static_cast<std::size_t>(rec.id);
         FE_THROW_IF(idx >= field_dof_handlers_.size(), InvalidStateException,
                     "FESystem::setup: single-field alias references invalid FieldId");
@@ -1895,6 +1915,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         const auto n_cells = meshAccess().numCells();
         LocalIndex approx_dofs_per_cell = 0;
         for (const auto& rec : field_registry_.records()) {
+            if (rec.source_kind != FieldSourceKind::Unknown) {
+                continue;
+            }
             const auto idx = static_cast<std::size_t>(rec.id);
             approx_dofs_per_cell = static_cast<LocalIndex>(
                 approx_dofs_per_cell + field_dof_handlers_[idx].getDofMap().getMaxDofsPerCell());
@@ -1947,6 +1970,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         for (GlobalIndex cell = 0; cell < n_cells; ++cell) {
             cell_dofs.clear();
             for (const auto& rec : field_registry_.records()) {
+                if (rec.source_kind != FieldSourceKind::Unknown) {
+                    continue;
+                }
                 append_field_cell_dofs(rec, cell, cell_dofs);
             }
             if (!cell_dofs.empty()) {
@@ -1974,6 +2000,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             GlobalIndex max_faces = 0;
             GlobalIndex max_cells = 0;
             for (const auto& rec : field_registry_.records()) {
+                if (rec.source_kind != FieldSourceKind::Unknown) {
+                    continue;
+                }
                 if (rec.scope == FieldScope::InterfaceFace &&
                     rec.space->space_type() != spaces::SpaceType::Mortar) {
                     continue;
@@ -1999,6 +2028,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 for (GlobalIndex v = 0; v < max_vertices; ++v) {
                     entity_dofs.clear();
                     for (const auto& rec : field_registry_.records()) {
+                        if (rec.source_kind != FieldSourceKind::Unknown) {
+                            continue;
+                        }
                         if (rec.scope == FieldScope::InterfaceFace &&
                             rec.space->space_type() != spaces::SpaceType::Mortar) {
                             continue;
@@ -2022,6 +2054,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 for (GlobalIndex e = 0; e < max_edges; ++e) {
                     entity_dofs.clear();
                     for (const auto& rec : field_registry_.records()) {
+                        if (rec.source_kind != FieldSourceKind::Unknown) {
+                            continue;
+                        }
                         if (rec.scope == FieldScope::InterfaceFace &&
                             rec.space->space_type() != spaces::SpaceType::Mortar) {
                             continue;
@@ -2045,6 +2080,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 for (GlobalIndex f = 0; f < max_faces; ++f) {
                     entity_dofs.clear();
                     for (const auto& rec : field_registry_.records()) {
+                        if (rec.source_kind != FieldSourceKind::Unknown) {
+                            continue;
+                        }
                         if (rec.scope == FieldScope::InterfaceFace &&
                             rec.space->space_type() != spaces::SpaceType::Mortar) {
                             continue;
@@ -2068,6 +2106,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 for (GlobalIndex c = 0; c < max_cells; ++c) {
                     entity_dofs.clear();
                     for (const auto& rec : field_registry_.records()) {
+                        if (rec.source_kind != FieldSourceKind::Unknown) {
+                            continue;
+                        }
                         if (rec.scope == FieldScope::InterfaceFace &&
                             rec.space->space_type() != spaces::SpaceType::Mortar) {
                             continue;
@@ -2100,6 +2141,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             std::vector<GlobalIndex> ghost_explicit;
 
             for (const auto& rec : field_registry_.records()) {
+                if (rec.source_kind != FieldSourceKind::Unknown) {
+                    continue;
+                }
                 const auto idx = static_cast<std::size_t>(rec.id);
                 const auto offset = field_dof_offsets_[idx];
                 const auto& fpart = field_dof_handlers_[idx].getPartition();
@@ -2153,6 +2197,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             maps.reserve(field_registry_.size());
 
             for (const auto& rec : field_registry_.records()) {
+                if (rec.source_kind != FieldSourceKind::Unknown) {
+                    continue;
+                }
                 const auto idx = static_cast<std::size_t>(rec.id);
                 offsets.push_back(field_dof_offsets_[idx]);
                 sizes.push_back(field_dof_handlers_[idx].getNumDofs());
@@ -2197,6 +2244,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         // Preserve per-cell orientation metadata (H(curl)/H(div)) by copying it from any field handler
         // that computed it during DOF distribution.
         for (const auto& rec : field_registry_.records()) {
+            if (rec.source_kind != FieldSourceKind::Unknown) {
+                continue;
+            }
             const auto idx = static_cast<std::size_t>(rec.id);
             if (idx < field_dof_handlers_.size() && field_dof_handlers_[idx].hasCellOrientations()) {
                 dof_handler_.copyCellOrientationsFrom(field_dof_handlers_[idx]);
@@ -2211,9 +2261,12 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     // Field/block metadata (monolithic across fields)
     // ---------------------------------------------------------------------
     field_map_ = dofs::FieldDofMap{};
-    field_map_.setLayout(fieldLayoutForSystem(field_registry_.size(), opts.dof_options));
+    field_map_.setLayout(fieldLayoutForSystem(unknown_field_records.size(), opts.dof_options));
 
     for (const auto& rec : field_registry_.records()) {
+        if (rec.source_kind != FieldSourceKind::Unknown) {
+            continue;
+        }
         const auto idx = static_cast<std::size_t>(rec.id);
         const auto n_components = rec.space->value_dimension();
         const auto n_dofs_field = field_dof_handlers_[idx].getNumDofs();
@@ -2237,9 +2290,12 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     }
     field_map_.finalize();
     block_map_.reset();
-    if (field_registry_.size() > 1u) {
+    if (unknown_field_records.size() > 1u) {
         auto blocks = std::make_unique<dofs::BlockDofMap>();
         for (const auto& rec : field_registry_.records()) {
+            if (rec.source_kind != FieldSourceKind::Unknown) {
+                continue;
+            }
             const auto idx = static_cast<std::size_t>(rec.id);
             blocks->addBlock(rec.name, field_dof_handlers_[idx].getNumDofs());
         }

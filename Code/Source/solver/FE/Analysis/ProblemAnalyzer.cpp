@@ -81,10 +81,11 @@ ProblemAnalyzer ProblemAnalyzer::createDefault() {
     //  22. SpectralSpuriousModeAnalyzer (reads spectral summaries)
     //  23. ErrorEstimatorAnalyzer (reads estimator summaries)
     //  24. QuadratureAdequacyAnalyzer (reads quadrature summaries)
-    //  25. PreservationStructureAnalyzer (reads preservation/transfer summaries)
-    //  26. CoupledSystemStabilityAnalyzer (reads coupling/DAE evidence)
-    //  27. SolverCompatibilityAnalyzer (reads claims + configured solver)
-    //  28. NumericSummaryPlanner (reads symbolic claims + context metadata)
+    //  25. MinimumResidualStabilityAnalyzer (reads PG/DPG/min-res summaries)
+    //  26. PreservationStructureAnalyzer (reads preservation/transfer summaries)
+    //  27. CoupledSystemStabilityAnalyzer (reads coupling/DAE evidence)
+    //  28. SolverCompatibilityAnalyzer (reads claims + configured solver)
+    //  29. NumericSummaryPlanner (reads symbolic claims + context metadata)
 
     analyzer.addPass(std::make_unique<CouplingGraphAnalyzer>());
     analyzer.addPass(std::make_unique<KernelAnalyzer>());
@@ -110,6 +111,7 @@ ProblemAnalyzer ProblemAnalyzer::createDefault() {
     analyzer.addPass(std::make_unique<SpectralSpuriousModeAnalyzer>());
     analyzer.addPass(std::make_unique<ErrorEstimatorAnalyzer>());
     analyzer.addPass(std::make_unique<QuadratureAdequacyAnalyzer>());
+    analyzer.addPass(std::make_unique<MinimumResidualStabilityAnalyzer>());
     analyzer.addPass(std::make_unique<PreservationStructureAnalyzer>());
     analyzer.addPass(std::make_unique<CoupledSystemStabilityAnalyzer>());
     analyzer.addPass(std::make_unique<SolverCompatibilityAnalyzer>());

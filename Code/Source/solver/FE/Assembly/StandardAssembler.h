@@ -1066,6 +1066,11 @@ private:
         const spaces::FunctionSpace* space{nullptr};
         const dofs::DofMap* dof_map{nullptr};
         GlobalIndex dof_offset{0};
+        FieldSolutionAccess::CoefficientSource coefficient_source{
+            FieldSolutionAccess::CoefficientSource::GlobalSolution};
+        std::span<const Real> prescribed_coefficients{};
+        std::uint64_t prescribed_revision{0};
+        int derived_time_derivative_order{0};
         std::uint64_t dof_layout_revision{0};
         const CellDofTable* dof_table{nullptr};
         FieldType field_type{FieldType::Scalar};
@@ -1234,6 +1239,12 @@ private:
         const dofs::DofMap* dof_map{nullptr};
         GlobalIndex dof_offset{0};
         const spaces::FunctionSpace* space{nullptr};
+        FieldSolutionAccess::CoefficientSource coefficient_source{
+            FieldSolutionAccess::CoefficientSource::GlobalSolution};
+        const Real* prescribed_data{nullptr};
+        std::size_t prescribed_size{0};
+        std::uint64_t prescribed_revision{0};
+        int derived_time_derivative_order{0};
         int history_index{0}; // 0=current, k>0 previous solution state
         bool localized_vector_basis{false};
         std::vector<Real> coeffs{};
@@ -1258,6 +1269,15 @@ private:
         const dofs::DofMap* dof_map,
         GlobalIndex dof_offset,
         const spaces::FunctionSpace* space,
+        std::span<const GlobalIndex> dofs,
+        int history_index,
+        bool localized_vector_basis,
+        const char* error_prefix);
+    [[nodiscard]] std::span<const Real> gatherCachedCellFieldCoefficients(
+        std::deque<CellCoefficientCacheEntry>& cache,
+        const IMeshAccess& mesh,
+        GlobalIndex cell_id,
+        const FieldAccessPlan& access,
         std::span<const GlobalIndex> dofs,
         int history_index,
         bool localized_vector_basis,

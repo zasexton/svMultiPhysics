@@ -39,6 +39,95 @@ std::vector<VariableKey> blockVariables(const OperatorBlockId& block)
     return variables;
 }
 
+bool variableSetsIntersect(const std::vector<VariableKey>& a,
+                           const std::vector<VariableKey>& b)
+{
+    for (const auto& av : a) {
+        if (std::find(b.begin(), b.end(), av) != b.end()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<VariableKey> contributionVariables(
+    const ContributionDescriptor& contribution)
+{
+    std::vector<VariableKey> variables;
+    for (const auto& v : contribution.test_variables) {
+        appendUnique(variables, v);
+    }
+    for (const auto& v : contribution.trial_variables) {
+        appendUnique(variables, v);
+    }
+    return variables;
+}
+
+bool hasMatchingSymbolicBalance(const ProblemAnalysisContext& context,
+                                const FluxBalanceSummary& summary)
+{
+    if (summary.symbolic_balance_evidence_present) {
+        const auto summary_variables = blockVariables(summary.block);
+        const bool group_scoped =
+            !summary.symbolic_balance_group.empty() &&
+            (summary.balance_group.empty() ||
+             summary.symbolic_balance_group == summary.balance_group);
+        const bool contribution_scoped =
+            !summary.symbolic_balance_contribution_id.empty() &&
+            (summary.block.contribution_id.empty() ||
+             summary.symbolic_balance_contribution_id ==
+                 summary.block.contribution_id);
+        const bool block_scoped =
+            !summary_variables.empty() &&
+            (!summary.block.operator_tag.empty() ||
+             !summary.block.contribution_id.empty() ||
+             !summary.balance_group.empty());
+        if (group_scoped || contribution_scoped || block_scoped) {
+            return true;
+        }
+    }
+    const auto summary_variables = blockVariables(summary.block);
+    for (const auto& contribution : context.contributions()) {
+        if (!contribution.balance.has_value()) {
+            continue;
+        }
+        const auto& balance = *contribution.balance;
+        if (!summary.balance_group.empty() &&
+            balance.balance_group != summary.balance_group) {
+            continue;
+        }
+        if (summary.balance_group.empty() &&
+            !balance.balance_group.empty() &&
+            !summary.block.operator_tag.empty() &&
+            contribution.operator_tag != summary.block.operator_tag) {
+            continue;
+        }
+        if (contribution.domain != summary.block.domain) {
+            continue;
+        }
+        if (!summary_variables.empty() &&
+            !variableSetsIntersect(contributionVariables(contribution),
+                                   summary_variables)) {
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool fluxClosureMetadataComplete(const FluxBalanceSummary& summary) noexcept
+{
+    const bool face_evidence =
+        summary.interface_pair_count == 0u ||
+        summary.face_pair_residual_evidence_present;
+    return summary.flux_variable_metadata_present &&
+           summary.element_residual_evidence_present &&
+           face_evidence &&
+           summary.source_quadrature_consistency_present &&
+           summary.orientation_consistency_present &&
+           summary.boundary_flux_accounted_for;
+}
+
 void emitFluxBalanceSummaryClaims(const ProblemAnalysisContext& context,
                                   ProblemAnalysisReport& report)
 {
@@ -46,7 +135,8 @@ void emitFluxBalanceSummaryClaims(const ProblemAnalysisContext& context,
     if (!summaries) return;
 
     for (const auto& summary : summaries->flux_balances) {
-        const Real tol = summary.balance_tolerance > Real{}
+        const bool tolerance_declared = summary.balance_tolerance > Real{};
+        const Real tol = tolerance_declared
             ? summary.balance_tolerance
             : Real{1.0e-10};
         const Real residual = std::max({
@@ -56,19 +146,39 @@ void emitFluxBalanceSummaryClaims(const ProblemAnalysisContext& context,
         const bool violated =
             residual > tol ||
             summary.local_violation_count > 0u;
+        const bool symbolic_balance_present =
+            hasMatchingSymbolicBalance(context, summary);
+        const bool closure_metadata_complete =
+            fluxClosureMetadataComplete(summary);
 
         PropertyClaim claim;
         claim.kind = PropertyKind::ConservationStructure;
-        claim.status = violated ? PropertyStatus::Violated
-                                : PropertyStatus::Preserved;
-        claim.confidence = AnalysisConfidence::High;
-        claim.certification_class = violated ? CertificationClass::Violated
-                                             : CertificationClass::Certified;
-        claim.conservation_class = violated
-            ? ConservationClass::ClosureBroken
-            : (summary.interface_pair_count > 0u
+        if (violated) {
+            claim.status = PropertyStatus::Violated;
+            claim.confidence = AnalysisConfidence::High;
+            claim.certification_class = CertificationClass::Violated;
+            claim.conservation_class = ConservationClass::ClosureBroken;
+        } else if (tolerance_declared && symbolic_balance_present &&
+                   closure_metadata_complete) {
+            claim.status = PropertyStatus::Preserved;
+            claim.confidence = AnalysisConfidence::High;
+            claim.certification_class = CertificationClass::Certified;
+            claim.conservation_class = summary.interface_pair_count > 0u
                 ? ConservationClass::ExchangeBalanced
-                : ConservationClass::GlobalClosureExpected);
+                : ConservationClass::LocalClosureExpected;
+        } else if (tolerance_declared && symbolic_balance_present) {
+            claim.status = PropertyStatus::Likely;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.conservation_class = summary.interface_pair_count > 0u
+                ? ConservationClass::ExchangeBalanced
+                : ConservationClass::GlobalClosureExpected;
+        } else {
+            claim.status = PropertyStatus::Unknown;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.conservation_class = ConservationClass::Unknown;
+        }
         claim.domain = summary.block.domain;
         claim.variables = blockVariables(summary.block);
         claim.local_balance_residual = summary.local_residual_norm;
@@ -76,9 +186,20 @@ void emitFluxBalanceSummaryClaims(const ProblemAnalysisContext& context,
         claim.interface_balance_residual = summary.interface_pair_residual_norm;
         claim.flux_balance_residual = residual;
         claim.tested_block_id = summary.block.operator_tag;
-        claim.description = violated
-            ? "Numeric flux-balance summary violates the declared tolerance"
-            : "Numeric flux-balance summary satisfies the declared tolerance";
+        if (violated) {
+            claim.description =
+                "Numeric flux-balance summary violates the declared tolerance";
+        } else if (tolerance_declared && symbolic_balance_present &&
+                   closure_metadata_complete) {
+            claim.description =
+                "Numeric flux-balance summary satisfies the declared tolerance with matching symbolic, flux, source, and orientation closure evidence";
+        } else if (tolerance_declared && symbolic_balance_present) {
+            claim.description =
+                "Numeric flux-balance summary satisfies residual checks but lacks complete flux/source/orientation closure metadata";
+        } else {
+            claim.description =
+                "Numeric flux-balance summary satisfies scalar residuals but lacks declared tolerance or matching symbolic balance evidence";
+        }
         claim.claim_origin = "ConservationAnalyzer";
         claim.addEvidence("ConservationAnalyzer",
             "FluxBalanceSummary local=" +
@@ -89,7 +210,13 @@ void emitFluxBalanceSummaryClaims(const ProblemAnalysisContext& context,
             std::to_string(summary.interface_pair_residual_norm) +
             ", tolerance=" + std::to_string(tol) +
             ", local_violations=" +
-            std::to_string(summary.local_violation_count));
+            std::to_string(summary.local_violation_count) +
+            ", tolerance_declared=" +
+            std::string(tolerance_declared ? "true" : "false") +
+            ", symbolic_balance=" +
+            std::string(symbolic_balance_present ? "true" : "false") +
+            ", closure_metadata=" +
+            std::string(closure_metadata_complete ? "true" : "false"));
         if (violated) {
             AnalysisIssue issue;
             issue.severity = IssueSeverity::Warning;
@@ -200,17 +327,19 @@ void ConservationAnalyzer::run(const ProblemAnalysisContext& context,
             if (field_supports_closure) {
                 PropertyClaim claim;
                 claim.kind = PropertyKind::ConservationStructure;
-                claim.status = PropertyStatus::Exact;
-                claim.confidence = AnalysisConfidence::High;
+                claim.status = PropertyStatus::Likely;
+                claim.confidence = AnalysisConfidence::Medium;
+                claim.certification_class = CertificationClass::NotCertified;
                 claim.conservation_class = ConservationClass::LocalClosureExpected;
                 claim.variables = involved_vars;
                 claim.description =
                     "Local conservation closure expected for balance group '" +
-                    group_name + "' (field supports local balance closure)";
+                    group_name + "' (field supports local balance closure, but exact closure requires flux/source residual metadata)";
                 claim.claim_origin = "ConservationAnalyzer";
                 claim.addEvidence("ConservationAnalyzer",
                     "local_closure_expected=true and field has"
-                    " supports_local_balance_closure=true");
+                    " supports_local_balance_closure=true",
+                    AnalysisConfidence::Medium);
                 report.claims.push_back(std::move(claim));
                 continue;
             }

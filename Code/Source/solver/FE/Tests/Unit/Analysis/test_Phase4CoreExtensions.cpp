@@ -55,10 +55,15 @@ DiscreteMatrixSummary certifiedScalarMatrix(VariableKey variable,
     matrix.structurally_symmetric = true;
     matrix.numerically_symmetric = true;
     matrix.symmetry_evidence_complete = true;
+    matrix.sign_evidence_complete = true;
+    matrix.row_sum_evidence_complete = true;
     matrix.sign_tolerance = 1.0e-14;
     matrix.row_sum_tolerance = 1.0e-14;
     matrix.diagonal_count = 3;
     matrix.offdiag_count = 4;
+    matrix.scanned_row_count = 3;
+    matrix.expected_row_count = 3;
+    matrix.scanned_entry_count = 7;
     matrix.negative_offdiag_count = 4;
     matrix.positive_offdiag_count = 0;
     matrix.nonpositive_diagonal_count = 0;
@@ -66,6 +71,13 @@ DiscreteMatrixSummary certifiedScalarMatrix(VariableKey variable,
     matrix.near_zero_diagonal_count = 0;
     matrix.min_row_sum = 0.0;
     matrix.max_row_sum = 2.0;
+    matrix.min_eigenvalue_estimate = 1.0;
+    matrix.coercivity_lower_bound = 1.0;
+    matrix.cholesky_factorization_succeeded = true;
+    matrix.m_matrix_certification_evidence = true;
+    matrix.stieltjes_matrix_evidence = true;
+    matrix.dmp_applicability_evidence = true;
+    matrix.dmp_rhs_sign_evidence = true;
     return matrix;
 }
 
@@ -129,6 +141,11 @@ TEST(Phase4CoreExtensions, ScalarDiffusionReceivesCoercivityDMPAndGeometryReport
     coeff.positivity = PositivityClass::Positive;
     coeff.min_eigenvalue = 1.0;
     coeff.max_eigenvalue = 2.0;
+    coeff.coefficient_region_coverage_complete = true;
+    coeff.quadrature_point_coverage_complete = true;
+    coeff.lower_bound_valid_for_all_samples = true;
+    coeff.tolerance_metadata_present = true;
+    coeff.block = certifiedScalarMatrix(scalar, "generic_scalar_diffusion").block;
     summaries.coefficient_properties.push_back(std::move(coeff));
     summaries.reduced_matrices.push_back(
         certifiedReducedScalarMatrix(scalar, "generic_scalar_diffusion"));
@@ -168,6 +185,19 @@ TEST(Phase4CoreExtensions, DarcyLikeScalarDiffusionUsesGenericMonotonicityEviden
         scalar, "generic_symmetric_diffusion", "test"));
 
     AnalysisSummarySet summaries;
+    CoefficientPropertySummary coeff;
+    coeff.coefficient = "generic_positive_coefficient";
+    coeff.tensor_rank = TensorRank::Scalar;
+    coeff.symmetry = SymmetryClass::Symmetric;
+    coeff.positivity = PositivityClass::Positive;
+    coeff.min_eigenvalue = 1.0;
+    coeff.max_eigenvalue = 1.0;
+    coeff.coefficient_region_coverage_complete = true;
+    coeff.quadrature_point_coverage_complete = true;
+    coeff.lower_bound_valid_for_all_samples = true;
+    coeff.tolerance_metadata_present = true;
+    coeff.block = certifiedScalarMatrix(scalar, "generic_symmetric_diffusion").block;
+    summaries.coefficient_properties.push_back(std::move(coeff));
     summaries.reduced_matrices.push_back(
         certifiedReducedScalarMatrix(scalar, "generic_symmetric_diffusion"));
     ctx.setAnalysisSummaries(std::move(summaries));
@@ -226,10 +256,21 @@ TEST(Phase4CoreExtensions, MixedSystemReceivesNumericInfSupSchurAndSolverReports
     infsup.block.test_variables = {primal};
     infsup.block.trial_variables = {multiplier};
     infsup.estimate_value = 0.13;
+    infsup.estimate_tolerance = 1.0e-10;
     infsup.test_rows = 9;
     infsup.test_cols = 3;
     infsup.estimate_scope = "free-free";
     infsup.nullspace_handling = NullspaceHandlingClass::ProjectedOut;
+    infsup.estimator_metadata_present = true;
+    infsup.norm_metadata_present = true;
+    infsup.mesh_refinement_evidence_present = true;
+    infsup.mesh_refinement_sample_count = 3;
+    infsup.uniform_lower_bound_evidence_present = true;
+    infsup.uniform_lower_bound_value_present = true;
+    infsup.uniform_lower_bound = 0.1;
+    infsup.mesh_family_scope_present = true;
+    infsup.boundary_condition_scope_present = true;
+    infsup.inf_sup_theorem_id = "uniform discrete LBB lower-bound study";
     summaries.inf_sup_estimates.push_back(std::move(infsup));
 
     ReducedMatrixSummary schur;
@@ -238,6 +279,28 @@ TEST(Phase4CoreExtensions, MixedSystemReceivesNumericInfSupSchurAndSolverReports
     schur.reduction_kind = ConstraintReductionKind::StrongDirichletElimination;
     schur.reduction_exact_for_analysis = true;
     summaries.reduced_matrices.push_back(std::move(schur));
+    SchurComplementSummary schur_cert;
+    schur_cert.schur_id = "generic-schur-certificate";
+    schur_cert.block.operator_tag = "generic_schur";
+    schur_cert.block.role = ContributionRole::ConstraintBlock;
+    schur_cert.block.test_variables = {multiplier};
+    schur_cert.block.trial_variables = {multiplier};
+    schur_cert.variables = {primal, multiplier};
+    schur_cert.schur_available = true;
+    schur_cert.reduction_exact_for_analysis = true;
+    schur_cert.primal_block_invertible_evidence_present = true;
+    schur_cert.inf_sup_evidence_present = true;
+    schur_cert.nullspace_handling_evidence_present = true;
+    schur_cert.nullspace_handling = NullspaceHandlingClass::ProjectedOut;
+    schur_cert.schur_definiteness_evidence_present = true;
+    schur_cert.schur_positivity = PositivityClass::Positive;
+    schur_cert.spectral_equivalence_bounds_present = true;
+    schur_cert.spectral_equivalence_lower_bound = 0.25;
+    schur_cert.spectral_equivalence_upper_bound = 4.0;
+    schur_cert.preconditioner_equivalence_bounds_present = true;
+    schur_cert.preconditioner_equivalence_lower_bound = 0.2;
+    schur_cert.preconditioner_equivalence_upper_bound = 5.0;
+    summaries.schur_complements.push_back(std::move(schur_cert));
     ctx.setAnalysisSummaries(std::move(summaries));
 
     backends::SolverOptions options;

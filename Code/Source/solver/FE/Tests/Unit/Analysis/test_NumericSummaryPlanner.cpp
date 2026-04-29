@@ -262,3 +262,42 @@ TEST(NumericSummaryPlanner, RequestPlanTracksReasonsSourcesAndAvailability) {
     EXPECT_NE(output.find("--- Requested Numeric Summaries ---"), std::string::npos);
     EXPECT_NE(output.find("DiscreteMatrix"), std::string::npos);
 }
+
+TEST(NumericSummaryPlanner, RequestPlanKeepsInfSupScopesDistinct) {
+    ProblemAnalysisContext ctx;
+    ProblemAnalysisReport report;
+
+    auto left = claimFrom("InfSupAnalyzer", PropertyKind::InfSupCondition);
+    left.variables = {VariableKey::field(0), VariableKey::field(1)};
+    left.tested_block_id = "left-pair";
+    report.claims.push_back(std::move(left));
+
+    auto right = claimFrom("InfSupAnalyzer", PropertyKind::InfSupCondition);
+    right.variables = {VariableKey::field(0), VariableKey::field(1)};
+    right.tested_block_id = "right-pair";
+    report.claims.push_back(std::move(right));
+
+    NumericSummaryPlanner planner;
+    planner.run(ctx, report);
+
+    const auto requests =
+        report.request_plan.requestsOfKind(AnalysisSummaryKind::InfSupEstimate);
+    ASSERT_EQ(requests.size(), 2u);
+
+    bool saw_left = false;
+    bool saw_right = false;
+    for (const auto* request : requests) {
+        ASSERT_NE(request, nullptr);
+        EXPECT_EQ(request->variables.size(), 2u);
+        if (request->block_id == "left-pair") {
+            saw_left = true;
+            EXPECT_EQ(request->scope_id, "left-pair");
+        }
+        if (request->block_id == "right-pair") {
+            saw_right = true;
+            EXPECT_EQ(request->scope_id, "right-pair");
+        }
+    }
+    EXPECT_TRUE(saw_left);
+    EXPECT_TRUE(saw_right);
+}

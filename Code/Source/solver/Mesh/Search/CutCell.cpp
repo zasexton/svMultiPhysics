@@ -38,6 +38,7 @@ namespace {
 
 constexpr std::uint64_t kFnvOffset = 1469598103934665603ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
+constexpr const char* kLinearTopologySubdivisionPolicy = "linear-topology-subdivision";
 constexpr const char* kTrueCurvedArrangementPolicy = "true-curved-isoparametric-arrangement";
 constexpr const char* kTrueCurvedSubdivisionArrangementPolicy = "true-curved-subdivision-arrangement";
 
@@ -99,6 +100,50 @@ std::uint64_t append_hash_distributed_record(std::uint64_t h,
       h = append_hash(h, id);
     }
   }
+  h = append_hash(h, static_cast<std::uint64_t>(entity.geometry_order));
+  h = append_hash(h, static_cast<std::uint64_t>(entity.embedded_kind));
+  h = append_hash(h, static_cast<std::uint64_t>(entity.configuration));
+  h = append_hash(h, static_cast<std::uint64_t>(entity.composition_operation));
+  h = append_hash_string(h, entity.construction_policy);
+  h = append_hash(h, entity.curved_isoparametric ? 1u : 0u);
+  h = append_hash(h, entity.parametric_coordinates_valid ? 1u : 0u);
+  h = append_hash(h, entity.exact_topology_available ? 1u : 0u);
+  h = append_hash(h, entity.linearized_surrogate ? 1u : 0u);
+  h = append_hash(h, entity.isoparametric_quadrature_available ? 1u : 0u);
+  for (const auto& xi : entity.parent_parametric_coordinates) {
+    h = append_hash_real(h, xi[0]);
+    h = append_hash_real(h, xi[1]);
+    h = append_hash_real(h, xi[2]);
+  }
+  for (const auto& xi : entity.quadrature_parent_parametric_coordinates) {
+    h = append_hash_real(h, xi[0]);
+    h = append_hash_real(h, xi[1]);
+    h = append_hash_real(h, xi[2]);
+  }
+  for (const auto weight : entity.quadrature_weights) {
+    h = append_hash_real(h, weight);
+  }
+  for (const auto ordinal : entity.active_child_ordinals) {
+    h = append_hash(h, static_cast<std::uint64_t>(ordinal));
+  }
+  for (const auto& provenance : entity.active_child_provenance_ids) {
+    h = append_hash_string(h, provenance);
+  }
+  for (const auto ordinal : entity.predicate_fallback_child_ordinals) {
+    h = append_hash(h, static_cast<std::uint64_t>(ordinal));
+  }
+  h = append_hash(h, static_cast<std::uint64_t>(entity.geometry_sensitivity_dof_count));
+  h = append_hash(h, static_cast<std::uint64_t>(entity.geometry_sensitivity_sample_count));
+  h = append_hash(h, entity.geometry_sensitivity_ad_compatible ? 1u : 0u);
+  h = append_hash(h, entity.location_sensitivity_available ? 1u : 0u);
+  h = append_hash(h, entity.jacobian_sensitivity_available ? 1u : 0u);
+  h = append_hash(h, entity.measure_sensitivity_available ? 1u : 0u);
+  h = append_hash(h, entity.normal_sensitivity_available ? 1u : 0u);
+  h = append_hash(h, entity.quadrature_weight_sensitivity_available ? 1u : 0u);
+  h = append_hash(h, entity.predicate_fallback_used ? 1u : 0u);
+  h = append_hash(h, entity.predicate_fallback_tolerance_resolved ? 1u : 0u);
+  h = append_hash_string(h, entity.predicate_fallback_policy);
+  h = append_hash_string(h, entity.predicate_fallback_reason);
   return h;
 }
 
@@ -144,10 +189,76 @@ void read_face_vector(std::istream& in,
   }
 }
 
+void write_array3_vector(std::ostream& out,
+                         const std::vector<std::array<real_t, 3>>& values) {
+  out << values.size();
+  for (const auto& value : values) {
+    out << ' ' << value[0] << ' ' << value[1] << ' ' << value[2];
+  }
+}
+
+void read_array3_vector(std::istream& in,
+                        std::vector<std::array<real_t, 3>>& values) {
+  std::size_t count = 0;
+  in >> count;
+  values.resize(count);
+  for (auto& value : values) {
+    in >> value[0] >> value[1] >> value[2];
+  }
+}
+
+void write_real_vector(std::ostream& out, const std::vector<real_t>& values) {
+  out << values.size();
+  for (const auto value : values) {
+    out << ' ' << value;
+  }
+}
+
+void read_real_vector(std::istream& in, std::vector<real_t>& values) {
+  std::size_t count = 0;
+  in >> count;
+  values.resize(count);
+  for (auto& value : values) {
+    in >> value;
+  }
+}
+
+void write_size_vector(std::ostream& out, const std::vector<std::size_t>& values) {
+  out << values.size();
+  for (const auto value : values) {
+    out << ' ' << value;
+  }
+}
+
+void read_size_vector(std::istream& in, std::vector<std::size_t>& values) {
+  std::size_t count = 0;
+  in >> count;
+  values.resize(count);
+  for (auto& value : values) {
+    in >> value;
+  }
+}
+
+void write_string_vector(std::ostream& out, const std::vector<std::string>& values) {
+  out << values.size();
+  for (const auto& value : values) {
+    out << ' ' << std::quoted(value);
+  }
+}
+
+void read_string_vector(std::istream& in, std::vector<std::string>& values) {
+  std::size_t count = 0;
+  in >> count;
+  values.resize(count);
+  for (auto& value : values) {
+    in >> std::quoted(value);
+  }
+}
+
 std::string serialize_cut_exchange_packet(const CutDistributedExchangePacket& packet) {
   std::ostringstream out;
   out << std::setprecision(17);
-  out << "SVMP_CUT_PACKET 1\n";
+  out << "SVMP_CUT_PACKET 3\n";
   out << packet.revision_key << ' ' << packet.entities.size() << ' '
       << packet.diagnostics.size() << '\n';
   for (const auto& entity : packet.entities) {
@@ -170,6 +281,40 @@ std::string serialize_cut_exchange_packet(const CutDistributedExchangePacket& pa
     write_u64_vector(out, entity.vertex_ids);
     out << ' ';
     write_face_vector(out, entity.face_ids);
+    out << ' '
+        << entity.geometry_order << ' '
+        << static_cast<int>(entity.embedded_kind) << ' '
+        << static_cast<int>(entity.configuration) << ' '
+        << static_cast<int>(entity.composition_operation) << ' '
+        << std::quoted(entity.construction_policy) << ' '
+        << (entity.curved_isoparametric ? 1 : 0) << ' '
+        << (entity.parametric_coordinates_valid ? 1 : 0) << ' '
+        << (entity.exact_topology_available ? 1 : 0) << ' '
+        << (entity.linearized_surrogate ? 1 : 0) << ' '
+        << (entity.isoparametric_quadrature_available ? 1 : 0) << ' ';
+    write_array3_vector(out, entity.parent_parametric_coordinates);
+    out << ' ';
+    write_array3_vector(out, entity.quadrature_parent_parametric_coordinates);
+    out << ' ';
+    write_real_vector(out, entity.quadrature_weights);
+    out << ' ';
+    write_size_vector(out, entity.active_child_ordinals);
+    out << ' ';
+    write_string_vector(out, entity.active_child_provenance_ids);
+    out << ' '
+        << entity.geometry_sensitivity_dof_count << ' '
+        << entity.geometry_sensitivity_sample_count << ' '
+        << (entity.geometry_sensitivity_ad_compatible ? 1 : 0) << ' '
+        << (entity.location_sensitivity_available ? 1 : 0) << ' '
+        << (entity.jacobian_sensitivity_available ? 1 : 0) << ' '
+        << (entity.measure_sensitivity_available ? 1 : 0) << ' '
+        << (entity.normal_sensitivity_available ? 1 : 0) << ' '
+        << (entity.quadrature_weight_sensitivity_available ? 1 : 0) << ' '
+        << (entity.predicate_fallback_used ? 1 : 0) << ' '
+        << (entity.predicate_fallback_tolerance_resolved ? 1 : 0) << ' '
+        << std::quoted(entity.predicate_fallback_policy) << ' '
+        << std::quoted(entity.predicate_fallback_reason) << ' ';
+    write_size_vector(out, entity.predicate_fallback_child_ordinals);
     out << '\n';
   }
   for (const auto& diagnostic : packet.diagnostics) {
@@ -187,7 +332,7 @@ CutDistributedExchangePacket deserialize_cut_exchange_packet(const std::string& 
   std::string magic;
   int version = 0;
   in >> magic >> version;
-  if (magic != "SVMP_CUT_PACKET" || version != 1) {
+  if (magic != "SVMP_CUT_PACKET" || (version != 1 && version != 2 && version != 3)) {
     packet.diagnostics.push_back("invalid distributed cut exchange packet header");
     return packet;
   }
@@ -201,6 +346,22 @@ CutDistributedExchangePacket deserialize_cut_exchange_packet(const std::string& 
     int side = 0;
     int family = 0;
     int closed = 0;
+    int embedded_kind = 0;
+    int configuration = 0;
+    int composition_operation = 0;
+    int curved_isoparametric = 0;
+    int parametric_coordinates_valid = 0;
+    int exact_topology_available = 0;
+    int linearized_surrogate = 0;
+    int isoparametric_quadrature_available = 0;
+    int geometry_sensitivity_ad_compatible = 0;
+    int location_sensitivity_available = 0;
+    int jacobian_sensitivity_available = 0;
+    int measure_sensitivity_available = 0;
+    int normal_sensitivity_available = 0;
+    int quadrature_weight_sensitivity_available = 0;
+    int predicate_fallback_used = 0;
+    int predicate_fallback_tolerance_resolved = 0;
     in >> entity.stable_id
        >> entity.cut_topology_id
        >> kind
@@ -223,6 +384,59 @@ CutDistributedExchangePacket deserialize_cut_exchange_packet(const std::string& 
     entity.closed_topology = closed != 0;
     read_u64_vector(in, entity.vertex_ids);
     read_face_vector(in, entity.face_ids);
+    if (version >= 2) {
+      in >> entity.geometry_order
+         >> embedded_kind
+         >> configuration
+         >> composition_operation
+         >> std::quoted(entity.construction_policy)
+         >> curved_isoparametric
+         >> parametric_coordinates_valid
+         >> exact_topology_available
+         >> linearized_surrogate
+         >> isoparametric_quadrature_available;
+      entity.embedded_kind = static_cast<EmbeddedGeometryKind>(embedded_kind);
+      entity.configuration = static_cast<Configuration>(configuration);
+      entity.composition_operation =
+          static_cast<EmbeddedGeometryBooleanOperation>(composition_operation);
+      entity.curved_isoparametric = curved_isoparametric != 0;
+      entity.parametric_coordinates_valid = parametric_coordinates_valid != 0;
+      entity.exact_topology_available = exact_topology_available != 0;
+      entity.linearized_surrogate = linearized_surrogate != 0;
+      entity.isoparametric_quadrature_available =
+          isoparametric_quadrature_available != 0;
+      read_array3_vector(in, entity.parent_parametric_coordinates);
+      read_array3_vector(in, entity.quadrature_parent_parametric_coordinates);
+      read_real_vector(in, entity.quadrature_weights);
+      read_size_vector(in, entity.active_child_ordinals);
+      read_string_vector(in, entity.active_child_provenance_ids);
+      in >> entity.geometry_sensitivity_dof_count
+         >> entity.geometry_sensitivity_sample_count
+         >> geometry_sensitivity_ad_compatible
+         >> location_sensitivity_available
+         >> jacobian_sensitivity_available
+         >> measure_sensitivity_available
+         >> normal_sensitivity_available
+         >> quadrature_weight_sensitivity_available;
+      entity.geometry_sensitivity_ad_compatible =
+          geometry_sensitivity_ad_compatible != 0;
+      entity.location_sensitivity_available = location_sensitivity_available != 0;
+      entity.jacobian_sensitivity_available = jacobian_sensitivity_available != 0;
+      entity.measure_sensitivity_available = measure_sensitivity_available != 0;
+      entity.normal_sensitivity_available = normal_sensitivity_available != 0;
+      entity.quadrature_weight_sensitivity_available =
+          quadrature_weight_sensitivity_available != 0;
+      if (version >= 3) {
+        in >> predicate_fallback_used
+           >> predicate_fallback_tolerance_resolved
+           >> std::quoted(entity.predicate_fallback_policy)
+           >> std::quoted(entity.predicate_fallback_reason);
+        entity.predicate_fallback_used = predicate_fallback_used != 0;
+        entity.predicate_fallback_tolerance_resolved =
+            predicate_fallback_tolerance_resolved != 0;
+        read_size_vector(in, entity.predicate_fallback_child_ordinals);
+      }
+    }
     packet.entities.push_back(std::move(entity));
   }
   packet.diagnostics.reserve(diagnostic_count);
@@ -600,6 +814,323 @@ std::array<real_t, 3> triangle_normal(const EmbeddedSurfaceTriangle& tri) noexce
                                sub(tri.vertices[2], tri.vertices[0])));
 }
 
+bool finite_level_set_sample(const EmbeddedLevelSetSample& sample) noexcept {
+  return finite_point(sample.point) &&
+         std::isfinite(sample.value) &&
+         finite_point(sample.gradient);
+}
+
+const EmbeddedLevelSetSample* nearest_level_set_sample(
+    const EmbeddedGeometryDescriptor& descriptor,
+    const std::array<real_t, 3>& point) noexcept {
+  if (descriptor.level_set_samples.empty()) {
+    return nullptr;
+  }
+  const EmbeddedLevelSetSample* best = nullptr;
+  real_t best_d2 = std::numeric_limits<real_t>::max();
+  for (const auto& sample : descriptor.level_set_samples) {
+    if (!finite_level_set_sample(sample)) {
+      continue;
+    }
+    const real_t d2 = dot(sub(point, sample.point), sub(point, sample.point));
+    if (d2 < best_d2) {
+      best = &sample;
+      best_d2 = d2;
+    }
+  }
+  return best;
+}
+
+real_t affine_level_set_value(
+    const EmbeddedLevelSetSample& sample,
+    const std::array<real_t, 3>& point) noexcept {
+  if (norm(sample.gradient) <= real_t{1.0e-30}) {
+    return sample.value;
+  }
+  return sample.value + dot(sample.gradient, sub(point, sample.point));
+}
+
+bool level_set_has_true_curved_queries(
+    const EmbeddedGeometryDescriptor& descriptor) noexcept {
+  if (descriptor.level_set_samples.empty()) {
+    return false;
+  }
+  for (const auto& sample : descriptor.level_set_samples) {
+    if (!finite_level_set_sample(sample) ||
+        norm(sample.gradient) <= real_t{1.0e-30}) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool finite_nondegenerate_surface_triangle(
+    const EmbeddedSurfaceTriangle& tri) noexcept {
+  if (!finite_point(tri.vertices[0]) ||
+      !finite_point(tri.vertices[1]) ||
+      !finite_point(tri.vertices[2])) {
+    return false;
+  }
+  return norm(cross(sub(tri.vertices[1], tri.vertices[0]),
+                    sub(tri.vertices[2], tri.vertices[0]))) > real_t{1.0e-30};
+}
+
+bool triangulated_surface_has_true_curved_queries(
+    const EmbeddedGeometryDescriptor& descriptor) noexcept {
+  if (descriptor.surface_triangles.empty()) {
+    return false;
+  }
+  return std::all_of(descriptor.surface_triangles.begin(),
+                     descriptor.surface_triangles.end(),
+                     finite_nondegenerate_surface_triangle);
+}
+
+real_t predicate_positive_tolerance(real_t tol) noexcept {
+  return tol > std::numeric_limits<real_t>::epsilon()
+             ? tol
+             : std::numeric_limits<real_t>::epsilon();
+}
+
+struct AdaptivePredicateDecision {
+  const char* domain{""};
+  int sign{0};
+  bool nonfinite{false};
+  bool used_adaptive_precision{false};
+  bool tolerance_resolved{false};
+  bool exact_zero{false};
+  long double value{0.0L};
+  long double threshold{0.0L};
+};
+
+long double abs_ld(long double value) noexcept {
+  return value < 0.0L ? -value : value;
+}
+
+AdaptivePredicateDecision adaptive_scalar_sign(
+    const char* domain,
+    real_t primary_value,
+    long double adaptive_value,
+    long double scale,
+    real_t tolerance) noexcept {
+  AdaptivePredicateDecision decision;
+  decision.domain = domain;
+  const long double eps =
+      static_cast<long double>(predicate_positive_tolerance(tolerance));
+  const long double magnitude = std::max(1.0L, scale);
+  decision.threshold = eps * magnitude;
+
+  if (!std::isfinite(primary_value) || !std::isfinite(adaptive_value)) {
+    decision.nonfinite = true;
+    decision.tolerance_resolved = true;
+    decision.value = adaptive_value;
+    return decision;
+  }
+
+  if (std::abs(primary_value) > static_cast<real_t>(decision.threshold)) {
+    decision.sign = primary_value < real_t{0.0} ? -1 : 1;
+    decision.value = static_cast<long double>(primary_value);
+    return decision;
+  }
+
+  decision.used_adaptive_precision = true;
+  decision.value = adaptive_value;
+  if (abs_ld(adaptive_value) > decision.threshold) {
+    decision.sign = adaptive_value < 0.0L ? -1 : 1;
+    return decision;
+  }
+
+  decision.exact_zero = adaptive_value == 0.0L;
+  decision.tolerance_resolved = true;
+  decision.sign = 0;
+  return decision;
+}
+
+AdaptivePredicateDecision adaptive_scalar_sign(
+    const char* domain,
+    real_t value,
+    real_t tolerance) noexcept {
+  return adaptive_scalar_sign(domain,
+                              value,
+                              static_cast<long double>(value),
+                              1.0L,
+                              tolerance);
+}
+
+struct BooleanActiveChildQuery {
+  bool ok{false};
+  bool ambiguous{false};
+  bool predicate_fallback_available{false};
+  bool predicate_fallback_tolerance_resolved{false};
+  std::size_t ordinal{0};
+  real_t signed_distance{std::numeric_limits<real_t>::quiet_NaN()};
+  real_t raw_child_distance{std::numeric_limits<real_t>::quiet_NaN()};
+  std::array<real_t, 3> normal{{1.0, 0.0, 0.0}};
+  std::array<real_t, 3> closest_point{{0.0, 0.0, 0.0}};
+  EmbeddedRegionProvenance provenance{};
+  std::vector<std::size_t> tied_child_ordinals{};
+};
+
+real_t boolean_effective_child_distance(
+    EmbeddedGeometryBooleanOperation operation,
+    std::size_t ordinal,
+    real_t child_distance) noexcept {
+  if (operation == EmbeddedGeometryBooleanOperation::Difference && ordinal > 0u) {
+    return -child_distance;
+  }
+  return child_distance;
+}
+
+bool boolean_operation_uses_min_distance(
+    EmbeddedGeometryBooleanOperation operation) noexcept {
+  return operation == EmbeddedGeometryBooleanOperation::Union;
+}
+
+BooleanActiveChildQuery boolean_active_child_query(
+    const EmbeddedGeometryDescriptor& descriptor,
+    const std::array<real_t, 3>& point,
+    real_t tolerance = 1.0e-10) noexcept {
+  BooleanActiveChildQuery query;
+  if (descriptor.kind != EmbeddedGeometryKind::BooleanComposite ||
+      descriptor.children.empty() ||
+      !finite_point(point)) {
+    return query;
+  }
+
+  const bool use_min = boolean_operation_uses_min_distance(descriptor.boolean_operation);
+  const real_t base_tol =
+      (std::isfinite(tolerance) && tolerance > real_t{0.0})
+          ? tolerance
+          : real_t{1.0e-12};
+
+  struct ChildCandidate {
+    std::size_t ordinal{0};
+    real_t effective_distance{0.0};
+    real_t raw_distance{0.0};
+    std::array<real_t, 3> normal{{1.0, 0.0, 0.0}};
+    std::array<real_t, 3> closest_point{{0.0, 0.0, 0.0}};
+    EmbeddedRegionProvenance provenance{};
+  };
+  std::vector<ChildCandidate> candidates;
+  candidates.reserve(descriptor.children.size());
+  for (std::size_t i = 0; i < descriptor.children.size(); ++i) {
+    const auto& child = descriptor.children[i];
+    const real_t raw_distance = child.signed_distance(point);
+    if (!std::isfinite(raw_distance)) {
+      return BooleanActiveChildQuery{};
+    }
+    const real_t effective_distance =
+        boolean_effective_child_distance(descriptor.boolean_operation, i, raw_distance);
+    ChildCandidate candidate;
+    candidate.ordinal = i;
+    candidate.effective_distance = effective_distance;
+    candidate.raw_distance = raw_distance;
+    candidate.provenance = child.provenance;
+    candidate.closest_point = child.closest_point(point);
+    candidate.normal = child.outward_normal(point);
+    if (descriptor.boolean_operation == EmbeddedGeometryBooleanOperation::Difference && i > 0u) {
+      candidate.normal = scale(candidate.normal, real_t{-1.0});
+    }
+    candidates.push_back(std::move(candidate));
+  }
+
+  if (candidates.empty()) {
+    return BooleanActiveChildQuery{};
+  }
+  const auto better = [&](const ChildCandidate& a, const ChildCandidate& b) {
+    if (a.effective_distance == b.effective_distance) {
+      return a.ordinal < b.ordinal;
+    }
+    return use_min ? a.effective_distance < b.effective_distance
+                   : a.effective_distance > b.effective_distance;
+  };
+  const auto selected_it = std::min_element(candidates.begin(),
+                                           candidates.end(),
+                                           better);
+  if (selected_it == candidates.end() ||
+      !std::isfinite(selected_it->effective_distance)) {
+    return BooleanActiveChildQuery{};
+  }
+  const real_t selected_effective = selected_it->effective_distance;
+  const real_t interface_tol = std::max(base_tol * real_t{100.0}, real_t{1.0e-8});
+  for (const auto& candidate : candidates) {
+    const real_t tie_tol =
+        std::max(base_tol,
+                 std::max(std::abs(candidate.effective_distance),
+                          std::abs(selected_effective)) * real_t{1.0e-10});
+    const real_t delta =
+        candidate.effective_distance - selected_effective;
+    const auto tie_decision =
+        adaptive_scalar_sign("boolean-arrangement",
+                             delta,
+                             static_cast<long double>(candidate.effective_distance) -
+                                 static_cast<long double>(selected_effective),
+                             std::max({1.0L,
+                                       std::abs(static_cast<long double>(
+                                           candidate.effective_distance)),
+                                       std::abs(static_cast<long double>(
+                                           selected_effective))}),
+                             tie_tol);
+    if (tie_decision.sign == 0) {
+      query.tied_child_ordinals.push_back(candidate.ordinal);
+    }
+  }
+
+  query.ambiguous =
+      query.tied_child_ordinals.size() > 1u &&
+      std::abs(selected_effective) <= interface_tol;
+  query.predicate_fallback_available = query.ambiguous;
+  query.predicate_fallback_tolerance_resolved = query.ambiguous;
+  query.ok = true;
+  query.ordinal = selected_it->ordinal;
+  query.signed_distance = selected_effective;
+  query.raw_child_distance = selected_it->raw_distance;
+  query.provenance = selected_it->provenance;
+  query.closest_point = selected_it->closest_point;
+  query.normal = selected_it->normal;
+  query.normal = unit_or_default(query.normal);
+  return query;
+}
+
+bool embedded_descriptor_has_true_curved_queries(
+    const EmbeddedGeometryDescriptor& descriptor) noexcept;
+
+bool boolean_composite_has_true_curved_queries(
+    const EmbeddedGeometryDescriptor& descriptor) noexcept {
+  if (descriptor.kind != EmbeddedGeometryKind::BooleanComposite ||
+      descriptor.children.empty()) {
+    return false;
+  }
+  return std::all_of(descriptor.children.begin(),
+                     descriptor.children.end(),
+                     embedded_descriptor_has_true_curved_queries);
+}
+
+bool embedded_descriptor_has_true_curved_queries(
+    const EmbeddedGeometryDescriptor& descriptor) noexcept {
+  switch (descriptor.kind) {
+    case EmbeddedGeometryKind::Plane:
+      return finite_point(descriptor.origin) &&
+             finite_point(descriptor.normal) &&
+             norm(descriptor.normal) > real_t{1.0e-30};
+    case EmbeddedGeometryKind::Sphere:
+      return finite_point(descriptor.origin) &&
+             std::isfinite(descriptor.radius) &&
+             descriptor.radius > real_t{0.0};
+    case EmbeddedGeometryKind::SignedDistanceCallback:
+      return static_cast<bool>(descriptor.signed_distance_callback) &&
+             static_cast<bool>(descriptor.normal_callback);
+    case EmbeddedGeometryKind::LevelSetField:
+      return level_set_has_true_curved_queries(descriptor);
+    case EmbeddedGeometryKind::TriangulatedSurface:
+      return triangulated_surface_has_true_curved_queries(descriptor);
+    case EmbeddedGeometryKind::BooleanComposite:
+      return boolean_composite_has_true_curved_queries(descriptor);
+  }
+  return false;
+}
+
+void hash_curved_patch_record(std::uint64_t& h, const CutCurvedPatchRecord& patch);
+
 gid_t entity_gid(const MeshBase& mesh, CutEntityKind kind, index_t entity) {
   if (entity < 0) {
     return INVALID_GID;
@@ -623,6 +1154,110 @@ std::uint64_t stable_entity_id(const EmbeddedRegionProvenance& provenance,
                                real_t fraction,
                                std::uint64_t salt) noexcept;
 
+std::string predicate_outcome_name(const AdaptivePredicateDecision& decision) {
+  if (decision.nonfinite) {
+    return "nonfinite";
+  }
+  if (decision.tolerance_resolved) {
+    return "tolerance-resolved";
+  }
+  if (decision.sign < 0) {
+    return "negative";
+  }
+  if (decision.sign > 0) {
+    return "positive";
+  }
+  return "zero";
+}
+
+std::string predicate_decision_message(
+    const AdaptivePredicateDecision& decision,
+    const CutPredicatePolicy& policy) {
+  std::ostringstream out;
+  out << "adaptive/exact predicate decision: domain=" << decision.domain
+      << ", outcome=" << predicate_outcome_name(decision)
+      << ", policy=" << policy.name
+      << ", policy_key=" << policy.revision_key()
+      << ", tolerance=" << static_cast<real_t>(decision.threshold)
+      << ", mode="
+      << (decision.used_adaptive_precision ? "adaptive-long-double" : "primary");
+  if (decision.exact_zero) {
+    out << "+exact-zero";
+  }
+  return out.str();
+}
+
+void append_predicate_decision_diagnostic(
+    std::vector<std::string>& diagnostics,
+    const AdaptivePredicateDecision& decision,
+    const CutPredicatePolicy& policy) {
+  if (decision.nonfinite ||
+      decision.used_adaptive_precision ||
+      decision.tolerance_resolved) {
+    diagnostics.push_back(predicate_decision_message(decision, policy));
+  }
+}
+
+std::string predicate_domain_summary(
+    const std::vector<std::string>& diagnostics) {
+  std::set<std::string> domains;
+  const std::string marker = "domain=";
+  for (const auto& diagnostic : diagnostics) {
+    const auto begin = diagnostic.find(marker);
+    if (begin == std::string::npos) {
+      continue;
+    }
+    const auto domain_begin = begin + marker.size();
+    const auto domain_end = diagnostic.find(',', domain_begin);
+    domains.insert(diagnostic.substr(domain_begin, domain_end - domain_begin));
+  }
+  std::ostringstream out;
+  bool first = true;
+  for (const auto& domain : domains) {
+    if (!first) {
+      out << ',';
+    }
+    out << domain;
+    first = false;
+  }
+  return out.str();
+}
+
+CutClassification classify_signed_distances_with_policy(
+    const std::vector<real_t>& signed_distances,
+    real_t tolerance,
+    const CutPredicatePolicy& policy,
+    std::vector<std::string>* diagnostics = nullptr) {
+  if (signed_distances.empty()) {
+    return CutClassification::Degenerate;
+  }
+  bool has_negative = false;
+  bool has_positive = false;
+  bool has_zero = false;
+  for (const real_t d : signed_distances) {
+    const auto decision = adaptive_scalar_sign("signed-distance-side", d, tolerance);
+    if (diagnostics != nullptr) {
+      append_predicate_decision_diagnostic(*diagnostics, decision, policy);
+    }
+    if (decision.nonfinite) {
+      return CutClassification::Degenerate;
+    }
+    has_negative = has_negative || decision.sign < 0;
+    has_positive = has_positive || decision.sign > 0;
+    has_zero = has_zero || decision.sign == 0;
+  }
+  if (has_negative && has_positive) {
+    return CutClassification::Cut;
+  }
+  if (has_zero && (has_negative || has_positive)) {
+    return CutClassification::Cut;
+  }
+  if (has_zero) {
+    return CutClassification::Degenerate;
+  }
+  return has_negative ? CutClassification::Negative : CutClassification::Positive;
+}
+
 CutEntityRecord make_record(CutEntityKind kind,
                             index_t entity,
                             gid_t global_id,
@@ -631,13 +1266,16 @@ CutEntityRecord make_record(CutEntityKind kind,
                             const std::vector<real_t>& signed_distances,
                             const std::vector<CutIntersectionPoint>& intersections,
                             real_t tolerance,
-                            EmbeddedRegionProvenance provenance) {
+                            EmbeddedRegionProvenance provenance,
+                            const CutPredicatePolicy& predicate_policy,
+                            const std::vector<std::string>& predicate_diagnostics = {}) {
   CutEntityRecord record;
   record.kind = kind;
   record.entity = entity;
   record.global_id = global_id;
   record.owner_rank = owner_rank;
-  record.classification = classify_signed_distances(signed_distances, tolerance);
+  record.classification = classify_signed_distances_with_policy(
+      signed_distances, tolerance, predicate_policy, &record.diagnostics);
   if (!signed_distances.empty()) {
     const auto minmax = std::minmax_element(signed_distances.begin(), signed_distances.end());
     record.min_signed_distance = *minmax.first;
@@ -645,6 +1283,14 @@ CutEntityRecord make_record(CutEntityKind kind,
   }
   record.intersections = intersections;
   record.provenance = std::move(provenance);
+  record.diagnostics.insert(record.diagnostics.end(),
+                            predicate_diagnostics.begin(),
+                            predicate_diagnostics.end());
+  const auto domains = predicate_domain_summary(record.diagnostics);
+  if (!domains.empty()) {
+    record.diagnostics.push_back(
+        "adaptive/exact predicate coverage domains: " + domains);
+  }
   record.cut_topology_id = stable_entity_id(record.provenance,
                                             global_id,
                                             static_cast<std::uint64_t>(kind),
@@ -661,15 +1307,21 @@ CutEntityRecord make_record(CutEntityKind kind,
   return record;
 }
 
-std::vector<CutIntersectionPoint> edge_intersections(
+struct EdgeIntersectionResult {
+  std::vector<CutIntersectionPoint> intersections{};
+  std::vector<std::string> diagnostics{};
+};
+
+EdgeIntersectionResult edge_intersections(
     const MeshBase& mesh,
     const EmbeddedGeometryDescriptor& embedded,
     const std::vector<index_t>& dofs,
     const std::vector<std::array<index_t, 2>>& local_edges,
     const std::vector<real_t>& signed_distances,
     Configuration cfg,
+    const CutPredicatePolicy& predicate_policy,
     real_t tolerance) {
-  std::vector<CutIntersectionPoint> out;
+  EdgeIntersectionResult out;
   for (const auto& e : local_edges) {
     const auto ia = static_cast<std::size_t>(e[0]);
     const auto ib = static_cast<std::size_t>(e[1]);
@@ -678,14 +1330,39 @@ std::vector<CutIntersectionPoint> edge_intersections(
     }
     const real_t da = signed_distances[ia];
     const real_t db = signed_distances[ib];
-    if ((da > tolerance && db > tolerance) || (da < -tolerance && db < -tolerance)) {
+    const auto side_a = adaptive_scalar_sign("edge-intersection-side", da, tolerance);
+    const auto side_b = adaptive_scalar_sign("edge-intersection-side", db, tolerance);
+    append_predicate_decision_diagnostic(out.diagnostics, side_a, predicate_policy);
+    append_predicate_decision_diagnostic(out.diagnostics, side_b, predicate_policy);
+    if (side_a.nonfinite || side_b.nonfinite) {
       continue;
     }
-    if (std::abs(da - db) <= tolerance && std::abs(da) > tolerance) {
+    if (side_a.sign != 0 && side_a.sign == side_b.sign) {
       continue;
     }
+    const long double denom_ld =
+        static_cast<long double>(da) - static_cast<long double>(db);
     const real_t denom = da - db;
-    real_t t = std::abs(denom) <= tolerance ? real_t{0.0} : da / denom;
+    const auto denom_decision =
+        adaptive_scalar_sign("edge-intersection-denominator",
+                             denom,
+                             denom_ld,
+                             std::max({1.0L,
+                                       abs_ld(static_cast<long double>(da)),
+                                       abs_ld(static_cast<long double>(db))}),
+                             tolerance);
+    append_predicate_decision_diagnostic(out.diagnostics,
+                                         denom_decision,
+                                         predicate_policy);
+    if (denom_decision.sign == 0 &&
+        side_a.sign == side_b.sign &&
+        side_a.sign != 0) {
+      continue;
+    }
+    real_t t = real_t{0.0};
+    if (denom_decision.sign != 0) {
+      t = static_cast<real_t>(static_cast<long double>(da) / denom_ld);
+    }
     t = std::max(real_t{0.0}, std::min(real_t{1.0}, t));
     const auto pa = mesh.geometry_dof_coords(dofs[ia], cfg);
     const auto pb = mesh.geometry_dof_coords(dofs[ib], cfg);
@@ -697,7 +1374,7 @@ std::vector<CutIntersectionPoint> edge_intersections(
     hit.edge_fraction = t;
     hit.endpoint_a = dofs[ia];
     hit.endpoint_b = dofs[ib];
-    out.push_back(hit);
+    out.intersections.push_back(hit);
   }
   return out;
 }
@@ -1039,11 +1716,54 @@ real_t orient2d(const std::array<real_t, 2>& a,
          (b[1] - a[1]) * (c[0] - a[0]);
 }
 
+AdaptivePredicateDecision orientation2d_decision(
+    const std::array<real_t, 2>& a,
+    const std::array<real_t, 2>& b,
+    const std::array<real_t, 2>& c,
+    real_t tol) noexcept {
+  const real_t primary = orient2d(a, b, c);
+  const long double bax = static_cast<long double>(b[0]) - static_cast<long double>(a[0]);
+  const long double bay = static_cast<long double>(b[1]) - static_cast<long double>(a[1]);
+  const long double cax = static_cast<long double>(c[0]) - static_cast<long double>(a[0]);
+  const long double cay = static_cast<long double>(c[1]) - static_cast<long double>(a[1]);
+  const long double adaptive = bax * cay - bay * cax;
+  const long double scale =
+      std::max(1.0L,
+               (abs_ld(bax) + abs_ld(bay)) * (abs_ld(cax) + abs_ld(cay)));
+  return adaptive_scalar_sign("orientation-2d", primary, adaptive, scale, tol);
+}
+
+AdaptivePredicateDecision coplanarity3d_decision(
+    const std::array<real_t, 3>& normal,
+    const std::array<real_t, 3>& anchor,
+    const std::array<real_t, 3>& point,
+    real_t tol) noexcept {
+  const auto delta = sub(point, anchor);
+  const real_t primary = dot(normal, delta);
+  const long double adaptive =
+      static_cast<long double>(normal[0]) * static_cast<long double>(delta[0]) +
+      static_cast<long double>(normal[1]) * static_cast<long double>(delta[1]) +
+      static_cast<long double>(normal[2]) * static_cast<long double>(delta[2]);
+  const long double normal_scale =
+      abs_ld(static_cast<long double>(normal[0])) +
+      abs_ld(static_cast<long double>(normal[1])) +
+      abs_ld(static_cast<long double>(normal[2]));
+  const long double delta_scale =
+      abs_ld(static_cast<long double>(delta[0])) +
+      abs_ld(static_cast<long double>(delta[1])) +
+      abs_ld(static_cast<long double>(delta[2]));
+  return adaptive_scalar_sign("coplanarity-3d",
+                              primary,
+                              adaptive,
+                              std::max(1.0L, normal_scale * delta_scale),
+                              tol);
+}
+
 bool on_segment2d(const std::array<real_t, 2>& a,
                   const std::array<real_t, 2>& b,
                   const std::array<real_t, 2>& p,
                   real_t tol) noexcept {
-  if (std::abs(orient2d(a, b, p)) > tol) {
+  if (orientation2d_decision(a, b, p, tol).sign != 0) {
     return false;
   }
   return p[0] >= std::min(a[0], b[0]) - tol &&
@@ -1057,12 +1777,12 @@ bool segments_intersect2d(const std::array<real_t, 2>& a,
                           const std::array<real_t, 2>& c,
                           const std::array<real_t, 2>& d,
                           real_t tol) noexcept {
-  const real_t o1 = orient2d(a, b, c);
-  const real_t o2 = orient2d(a, b, d);
-  const real_t o3 = orient2d(c, d, a);
-  const real_t o4 = orient2d(c, d, b);
-  if (((o1 > tol && o2 < -tol) || (o1 < -tol && o2 > tol)) &&
-      ((o3 > tol && o4 < -tol) || (o3 < -tol && o4 > tol))) {
+  const auto o1 = orientation2d_decision(a, b, c, tol);
+  const auto o2 = orientation2d_decision(a, b, d, tol);
+  const auto o3 = orientation2d_decision(c, d, a, tol);
+  const auto o4 = orientation2d_decision(c, d, b, tol);
+  if (((o1.sign > 0 && o2.sign < 0) || (o1.sign < 0 && o2.sign > 0)) &&
+      ((o3.sign > 0 && o4.sign < 0) || (o3.sign < 0 && o4.sign > 0))) {
     return true;
   }
   return on_segment2d(a, b, c, tol) ||
@@ -1109,11 +1829,38 @@ bool has_duplicate_or_short_polygon_edge(
     return false;
   }
   for (std::size_t i = 0; i < points.size(); ++i) {
-    if (norm(sub(points[i], points[(i + 1u) % points.size()])) <= tol) {
+    const auto adjacent_delta = sub(points[i], points[(i + 1u) % points.size()]);
+    const real_t adjacent_distance2_primary = dot(adjacent_delta, adjacent_delta);
+    const long double adjacent_distance2 =
+        static_cast<long double>(adjacent_delta[0]) * static_cast<long double>(adjacent_delta[0]) +
+        static_cast<long double>(adjacent_delta[1]) * static_cast<long double>(adjacent_delta[1]) +
+        static_cast<long double>(adjacent_delta[2]) * static_cast<long double>(adjacent_delta[2]);
+    const real_t tol2 = predicate_positive_tolerance(tol) * predicate_positive_tolerance(tol);
+    const auto adjacent_duplicate =
+        adaptive_scalar_sign("duplicate-detection",
+                             adjacent_distance2_primary - tol2,
+                             adjacent_distance2 -
+                                 static_cast<long double>(tol2),
+                             std::max(1.0L, adjacent_distance2),
+                             tol2);
+    if (adjacent_duplicate.sign <= 0) {
       return true;
     }
     for (std::size_t j = i + 1u; j < points.size(); ++j) {
-      if (norm(sub(points[i], points[j])) <= tol) {
+      const auto delta = sub(points[i], points[j]);
+      const real_t distance2_primary = dot(delta, delta);
+      const long double distance2 =
+          static_cast<long double>(delta[0]) * static_cast<long double>(delta[0]) +
+          static_cast<long double>(delta[1]) * static_cast<long double>(delta[1]) +
+          static_cast<long double>(delta[2]) * static_cast<long double>(delta[2]);
+      const auto duplicate =
+          adaptive_scalar_sign("duplicate-detection",
+                               distance2_primary - tol2,
+                               distance2 -
+                                   static_cast<long double>(tol2),
+                               std::max(1.0L, distance2),
+                               tol2);
+      if (duplicate.sign <= 0) {
         return true;
       }
     }
@@ -1153,7 +1900,20 @@ std::vector<std::array<real_t, 3>> unique_points(
     real_t tol) {
   const real_t eps = positive_tolerance(tol);
   auto same = [&](const auto& a, const auto& b) {
-    return norm(sub(a, b)) <= eps;
+    const auto delta = sub(a, b);
+    const real_t distance2_primary = dot(delta, delta);
+    const long double distance2 =
+        static_cast<long double>(delta[0]) * static_cast<long double>(delta[0]) +
+        static_cast<long double>(delta[1]) * static_cast<long double>(delta[1]) +
+        static_cast<long double>(delta[2]) * static_cast<long double>(delta[2]);
+    const real_t eps2 = eps * eps;
+    const auto duplicate =
+        adaptive_scalar_sign("duplicate-detection",
+                             distance2_primary - eps2,
+                             distance2 - static_cast<long double>(eps2),
+                             std::max(1.0L, distance2),
+                             eps2);
+    return duplicate.sign <= 0;
   };
   std::vector<std::array<real_t, 3>> out;
   for (const auto& p : points) {
@@ -1734,10 +2494,13 @@ std::vector<std::vector<int>> convex_hull_faces_indices(
           if (q == i || q == j || q == k) {
             continue;
           }
-          const real_t d = dot(normal, sub(points[static_cast<std::size_t>(q)],
-                                           points[static_cast<std::size_t>(i)]));
-          has_positive = has_positive || d > tol;
-          has_negative = has_negative || d < -tol;
+          const auto side = coplanarity3d_decision(
+              normal,
+              points[static_cast<std::size_t>(i)],
+              points[static_cast<std::size_t>(q)],
+              tol);
+          has_positive = has_positive || side.sign > 0;
+          has_negative = has_negative || side.sign < 0;
           if (has_positive && has_negative) {
             break;
           }
@@ -1748,9 +2511,12 @@ std::vector<std::vector<int>> convex_hull_faces_indices(
 
         std::vector<int> face;
         for (int q = 0; q < n; ++q) {
-          const real_t d = dot(normal, sub(points[static_cast<std::size_t>(q)],
-                                           points[static_cast<std::size_t>(i)]));
-          if (std::abs(d) <= tol) {
+          const auto side = coplanarity3d_decision(
+              normal,
+              points[static_cast<std::size_t>(i)],
+              points[static_cast<std::size_t>(q)],
+              tol);
+          if (side.sign == 0) {
             face.push_back(q);
           }
         }
@@ -1843,10 +2609,13 @@ real_t convex_polyhedron_volume(
           if (q == i || q == j || q == k) {
             continue;
           }
-          const real_t d = dot(normal, sub(points[static_cast<std::size_t>(q)],
-                                           points[static_cast<std::size_t>(i)]));
-          has_positive = has_positive || d > tol;
-          has_negative = has_negative || d < -tol;
+          const auto side = coplanarity3d_decision(
+              normal,
+              points[static_cast<std::size_t>(i)],
+              points[static_cast<std::size_t>(q)],
+              tol);
+          has_positive = has_positive || side.sign > 0;
+          has_negative = has_negative || side.sign < 0;
           if (has_positive && has_negative) {
             break;
           }
@@ -1857,9 +2626,12 @@ real_t convex_polyhedron_volume(
 
         std::vector<int> face;
         for (int q = 0; q < n; ++q) {
-          const real_t d = dot(normal, sub(points[static_cast<std::size_t>(q)],
-                                           points[static_cast<std::size_t>(i)]));
-          if (std::abs(d) <= tol) {
+          const auto side = coplanarity3d_decision(
+              normal,
+              points[static_cast<std::size_t>(i)],
+              points[static_cast<std::size_t>(q)],
+              tol);
+          if (side.sign == 0) {
             face.push_back(q);
           }
         }
@@ -1981,6 +2753,49 @@ TessellationConfig high_order_cut_tessellation_config(
   config.max_refinement_level = std::max(suggested, std::min(4, suggested + 2));
   config.adaptive = true;
   config.curvature_threshold = real_t{0.025};
+  return config;
+}
+
+bool embedded_geometry_uses_nonplane_subdivision(
+    const EmbeddedGeometryDescriptor& embedded) noexcept {
+  return embedded.kind != EmbeddedGeometryKind::Plane;
+}
+
+TessellationConfig true_curved_subdivision_tessellation_config(
+    const MeshBase& mesh,
+    index_t cell,
+    const EmbeddedGeometryDescriptor& embedded,
+    Configuration cfg,
+    const CutTopologyOptions& options) {
+  TessellationConfig config = high_order_cut_tessellation_config(mesh, cell, cfg);
+  const int order = std::max(1, mesh.geometry_order(cell));
+  const int suggested = std::max(1, Tessellator::suggest_refinement_level(order));
+  const bool nonplane = embedded_geometry_uses_nonplane_subdivision(embedded);
+
+  int level = config.refinement_level;
+  if (nonplane) {
+    level = std::max(level, suggested + 1);
+  }
+  if (options.true_curved_subdivision_refinement_level >= 0) {
+    level = std::max(suggested, options.true_curved_subdivision_refinement_level);
+  }
+
+  int max_level = std::max(level, config.max_refinement_level);
+  if (nonplane) {
+    max_level = std::max(max_level, level + 1);
+  }
+  if (options.true_curved_subdivision_max_refinement_level >= 0) {
+    max_level = std::max(level, options.true_curved_subdivision_max_refinement_level);
+  }
+
+  config.refinement_level = level;
+  config.min_refinement_level = std::max(config.min_refinement_level, level);
+  config.max_refinement_level = max_level;
+  if (options.true_curved_subdivision_curvature_threshold > real_t{0.0}) {
+    config.curvature_threshold = options.true_curved_subdivision_curvature_threshold;
+  } else if (nonplane) {
+    config.curvature_threshold = std::min(config.curvature_threshold, real_t{0.01});
+  }
   return config;
 }
 
@@ -2177,11 +2992,15 @@ SideMeasureEstimate estimate_side_measure_from_tessellated_cell(
     const EmbeddedGeometryDescriptor& embedded,
     Configuration cfg,
     CutTopologySide side,
-    real_t tol) {
+    real_t tol,
+    const TessellationConfig* tessellation_config = nullptr) {
   SideMeasureEstimate out;
   try {
+    const auto config = tessellation_config
+                            ? *tessellation_config
+                            : high_order_cut_tessellation_config(mesh, cell, cfg);
     const auto tessellated =
-        Tessellator::tessellate_cell(mesh, cell, high_order_cut_tessellation_config(mesh, cell, cfg));
+        Tessellator::tessellate_cell(mesh, cell, config);
     for (int i = 0; i < tessellated.n_sub_elements(); ++i) {
       add_tessellated_measure_contribution(out,
                                            mesh,
@@ -2381,6 +3200,7 @@ struct CurvedPatchQuadratureSample {
   std::array<real_t, 3> point{{0.0, 0.0, 0.0}};
   std::array<real_t, 3> normal{{1.0, 0.0, 0.0}};
   real_t weight{0.0};
+  std::array<real_t, 3> parent_parametric_coordinate{{0.0, 0.0, 0.0}};
 };
 
 std::array<real_t, 3> centroid_of(
@@ -2486,7 +3306,7 @@ void add_curved_line_patch_quadrature(
     if (weight <= real_t{0.0} || !std::isfinite(weight)) {
       continue;
     }
-    samples.push_back({eval.coordinates, embedded.outward_normal(eval.coordinates), weight});
+    samples.push_back({eval.coordinates, embedded.outward_normal(eval.coordinates), weight, xi});
   }
 }
 
@@ -2520,7 +3340,7 @@ void add_curved_triangle_patch_quadrature(
     if (dot(normal, embedded_normal) < real_t{0.0}) {
       normal = scale(normal, real_t{-1.0});
     }
-    samples.push_back({eval.coordinates, normal, weight});
+    samples.push_back({eval.coordinates, normal, weight, xi});
   }
 }
 
@@ -2533,6 +3353,7 @@ void populate_curved_patch_isoparametric_quadrature(
   patch.quadrature_points.clear();
   patch.quadrature_normals.clear();
   patch.quadrature_weights.clear();
+  patch.quadrature_parent_parametric_coordinates.clear();
   patch.quadrature_measure = real_t{0.0};
   patch.isoparametric_quadrature_available = false;
   if (!patch.parametric_coordinates_valid ||
@@ -2546,7 +3367,10 @@ void populate_curved_patch_isoparametric_quadrature(
   try {
     if (topo_kind == EntityKind::Edge && patch.parent_parametric_coordinates.size() >= 1u) {
       const auto& point = patch.physical_points.front();
-      samples.push_back({point, embedded.outward_normal(point), real_t{1.0}});
+      samples.push_back({point,
+                         embedded.outward_normal(point),
+                         real_t{1.0},
+                         patch.parent_parametric_coordinates.front()});
     } else if (topo_kind == EntityKind::Face && patch.parent_parametric_coordinates.size() >= 2u) {
       for (std::size_t i = 0; i + 1 < patch.parent_parametric_coordinates.size(); ++i) {
         add_curved_line_patch_quadrature(samples,
@@ -2579,10 +3403,12 @@ void populate_curved_patch_isoparametric_quadrature(
   patch.quadrature_points.reserve(samples.size());
   patch.quadrature_normals.reserve(samples.size());
   patch.quadrature_weights.reserve(samples.size());
+  patch.quadrature_parent_parametric_coordinates.reserve(samples.size());
   for (const auto& sample : samples) {
     patch.quadrature_points.push_back(sample.point);
     patch.quadrature_normals.push_back(unit_or_default(sample.normal));
     patch.quadrature_weights.push_back(sample.weight);
+    patch.quadrature_parent_parametric_coordinates.push_back(sample.parent_parametric_coordinate);
     patch.quadrature_measure += sample.weight;
   }
   patch.isoparametric_quadrature_available = patch.quadrature_measure > real_t{0.0};
@@ -2648,6 +3474,90 @@ void add_interface_edge_crossing(
   points.push_back(hit);
 }
 
+CurvedPatchPoint make_refined_curved_patch_point(
+    const MeshBase& mesh,
+    index_t cell,
+    const EmbeddedGeometryDescriptor& embedded,
+    Configuration cfg,
+    const CurvedPatchPoint& a,
+    const CurvedPatchPoint& b,
+    real_t da,
+    real_t db,
+    real_t tol) {
+  const real_t eps = positive_tolerance(tol);
+  CurvedPatchPoint out;
+  if (!a.has_parent_parametric_coordinate || !b.has_parent_parametric_coordinate) {
+    real_t t = std::abs(da - db) > eps ? da / (da - db) : real_t{0.5};
+    t = std::max(real_t{0.0}, std::min(real_t{1.0}, t));
+    out.point = add(scale(a.point, real_t{1.0} - t), scale(b.point, t));
+    return out;
+  }
+
+  auto lo = a.parent_parametric_coordinate;
+  auto hi = b.parent_parametric_coordinate;
+  real_t flo = da;
+  auto mid = interpolate_parametric(lo, hi, real_t{0.5});
+  for (int iter = 0; iter < 80; ++iter) {
+    mid = interpolate_parametric(lo, hi, real_t{0.5});
+    const auto eval = CurvilinearEvaluator::evaluate_geometry(mesh, cell, mid, cfg);
+    const real_t fm = embedded.signed_distance(eval.coordinates);
+    if (std::abs(fm) <= eps || norm(sub(hi, lo)) <= real_t{1.0e-14}) {
+      out.point = eval.coordinates;
+      out.parent_parametric_coordinate = mid;
+      out.has_parent_parametric_coordinate = true;
+      return out;
+    }
+    if ((flo < real_t{0.0} && fm > real_t{0.0}) ||
+        (flo > real_t{0.0} && fm < real_t{0.0})) {
+      hi = mid;
+    } else {
+      lo = mid;
+      flo = fm;
+    }
+  }
+
+  const auto eval = CurvilinearEvaluator::evaluate_geometry(mesh, cell, mid, cfg);
+  out.point = eval.coordinates;
+  out.parent_parametric_coordinate = mid;
+  out.has_parent_parametric_coordinate = true;
+  return out;
+}
+
+void add_refined_interface_edge_crossing(
+    std::vector<CurvedPatchPoint>& points,
+    const MeshBase& mesh,
+    index_t cell,
+    const EmbeddedGeometryDescriptor& embedded,
+    Configuration cfg,
+    const CurvedPatchPoint& a,
+    const CurvedPatchPoint& b,
+    real_t da,
+    real_t db,
+    real_t tol) {
+  const real_t eps = positive_tolerance(tol);
+  const auto endpoint = [&](const CurvedPatchPoint& p) {
+    CurvedPatchPoint out = p;
+    if (p.has_parent_parametric_coordinate) {
+      const auto eval = CurvilinearEvaluator::evaluate_geometry(
+          mesh, cell, p.parent_parametric_coordinate, cfg);
+      out.point = eval.coordinates;
+    }
+    return out;
+  };
+  if (std::abs(da) <= eps) {
+    points.push_back(endpoint(a));
+  }
+  if (std::abs(db) <= eps) {
+    points.push_back(endpoint(b));
+  }
+  const bool crosses = (da < -eps && db > eps) || (da > eps && db < -eps);
+  if (!crosses || std::abs(da - db) <= eps) {
+    return;
+  }
+  points.push_back(make_refined_curved_patch_point(
+      mesh, cell, embedded, cfg, a, b, da, db, tol));
+}
+
 std::vector<std::array<real_t, 3>> interface_points_from_polyline_or_polygon(
     const std::vector<std::array<real_t, 3>>& points,
     const std::vector<real_t>& values,
@@ -2666,6 +3576,10 @@ std::vector<std::array<real_t, 3>> interface_points_from_polyline_or_polygon(
 }
 
 std::vector<CurvedPatchPoint> interface_points_from_polyline_or_polygon(
+    const MeshBase& mesh,
+    index_t cell,
+    const EmbeddedGeometryDescriptor& embedded,
+    Configuration cfg,
     const std::vector<std::array<real_t, 3>>& points,
     const std::vector<std::array<real_t, 3>>& parent_parametric_points,
     const std::vector<real_t>& values,
@@ -2688,7 +3602,8 @@ std::vector<CurvedPatchPoint> interface_points_from_polyline_or_polygon(
     b.point = points[j];
     b.parent_parametric_coordinate = parent_parametric_points[j];
     b.has_parent_parametric_coordinate = true;
-    add_interface_edge_crossing(out, a, b, values[i], values[j], tol);
+    add_refined_interface_edge_crossing(
+        out, mesh, cell, embedded, cfg, a, b, values[i], values[j], tol);
   }
   return unique_curved_patch_points(std::move(out), tol);
 }
@@ -2714,6 +3629,10 @@ std::vector<std::array<real_t, 3>> interface_points_from_tet(
 }
 
 std::vector<CurvedPatchPoint> interface_points_from_tet(
+    const MeshBase& mesh,
+    index_t cell,
+    const EmbeddedGeometryDescriptor& embedded,
+    Configuration cfg,
     const std::array<std::array<real_t, 3>, 4>& tet,
     const std::array<std::array<real_t, 3>, 4>& parent_parametric_points,
     const std::array<real_t, 4>& values,
@@ -2732,12 +3651,16 @@ std::vector<CurvedPatchPoint> interface_points_from_tet(
     b.point = tet[static_cast<std::size_t>(bi)];
     b.parent_parametric_coordinate = parent_parametric_points[static_cast<std::size_t>(bi)];
     b.has_parent_parametric_coordinate = true;
-    add_interface_edge_crossing(out,
-                                a,
-                                b,
-                                values[static_cast<std::size_t>(ai)],
-                                values[static_cast<std::size_t>(bi)],
-                                tol);
+    add_refined_interface_edge_crossing(out,
+                                        mesh,
+                                        cell,
+                                        embedded,
+                                        cfg,
+                                        a,
+                                        b,
+                                        values[static_cast<std::size_t>(ai)],
+                                        values[static_cast<std::size_t>(bi)],
+                                        tol);
   }
   return unique_curved_patch_points(std::move(out), tol);
 }
@@ -2833,6 +3756,7 @@ bool record_curved_patch_from_candidates(
   patch.embedded_kind = embedded.kind;
   patch.configuration = cfg;
   patch.provenance = provenance;
+  patch.composition_operation = embedded.boolean_operation;
   patch.exact_topology_available = exact_topology_available;
   patch.linearized_surrogate = !exact_topology_available;
   patch.parametric_coordinates_valid = true;
@@ -2841,12 +3765,45 @@ bool record_curved_patch_from_candidates(
   patch.ordered_vertices.reserve(candidates.size());
   patch.parent_parametric_coordinates.reserve(candidates.size());
   patch.physical_points.reserve(candidates.size());
+  patch.active_child_ordinals.reserve(candidates.size());
+  patch.active_child_provenance.reserve(candidates.size());
   for (const auto& candidate : candidates) {
+    BooleanActiveChildQuery active_child;
+    if (embedded.kind == EmbeddedGeometryKind::BooleanComposite) {
+      active_child = boolean_active_child_query(embedded, candidate.point, tol);
+      if (!active_child.ok) {
+        return false;
+      }
+      if (active_child.ambiguous) {
+        if (!active_child.predicate_fallback_available) {
+          return false;
+        }
+        patch.predicate_fallback_used = true;
+        patch.predicate_fallback_tolerance_resolved =
+            patch.predicate_fallback_tolerance_resolved ||
+            active_child.predicate_fallback_tolerance_resolved;
+        patch.predicate_fallback_policy = "tolerance-resolved-active-child";
+        patch.predicate_fallback_reason =
+            "Boolean active-child distances are tied within the cut predicate tolerance";
+        for (const auto ordinal : active_child.tied_child_ordinals) {
+          if (std::find(patch.predicate_fallback_child_ordinals.begin(),
+                        patch.predicate_fallback_child_ordinals.end(),
+                        ordinal) == patch.predicate_fallback_child_ordinals.end()) {
+            patch.predicate_fallback_child_ordinals.push_back(ordinal);
+          }
+        }
+      }
+      patch.active_child_ordinals.push_back(active_child.ordinal);
+      patch.active_child_provenance.push_back(active_child.provenance);
+    }
+
     CutTopologyVertex vertex;
     vertex.stable_id = stable_region_point_id(
         provenance, parent_gid, candidate.point, CutTopologySide::Interface, 707u);
     vertex.point = candidate.point;
-    vertex.normal = embedded.outward_normal(candidate.point);
+    vertex.normal = embedded.kind == EmbeddedGeometryKind::BooleanComposite
+                        ? active_child.normal
+                        : embedded.outward_normal(candidate.point);
     vertex.parent_cell = cell;
     vertex.parent_cell_gid = parent_gid;
     vertex.provenance = provenance;
@@ -2887,6 +3844,10 @@ bool record_curved_patch_from_candidates(
   polygon.normal = embedded.outward_normal(centroid_of(patch.physical_points));
   polygon.provenance = provenance;
   topology.interface_polygons.push_back(std::move(polygon));
+  if (patch.predicate_fallback_used) {
+    topology.diagnostics.push_back(
+        "Boolean true curved active-child provenance used tolerance-resolved near-degeneracy fallback");
+  }
   topology.curved_patches.push_back(std::move(patch));
   return true;
 }
@@ -2960,7 +3921,7 @@ std::size_t add_curved_patches_from_linear_subcell(
                  provenance,
                  parent_gid,
                  interface_points_from_polyline_or_polygon(
-                     points, parent_parametric_points, values, false, tol),
+                     mesh, cell, embedded, cfg, points, parent_parametric_points, values, false, tol),
                  tol,
                  salt,
                  exact_topology_available,
@@ -2983,7 +3944,7 @@ std::size_t add_curved_patches_from_linear_subcell(
                  provenance,
                  parent_gid,
                  interface_points_from_polyline_or_polygon(
-                     points, parent_parametric_points, values, true, tol),
+                     mesh, cell, embedded, cfg, points, parent_parametric_points, values, true, tol),
                  tol,
                  salt,
                  exact_topology_available,
@@ -3011,7 +3972,14 @@ std::size_t add_curved_patches_from_linear_subcell(
                       cfg,
                       provenance,
                       parent_gid,
-                      interface_points_from_tet(tet, *tet_parametric_points, vals, tol),
+                      interface_points_from_tet(mesh,
+                                                cell,
+                                                embedded,
+                                                cfg,
+                                                tet,
+                                                *tet_parametric_points,
+                                                vals,
+                                                tol),
                       tol,
                       tet_salt,
                       exact_topology_available,
@@ -3065,15 +4033,19 @@ std::size_t add_curved_patches_from_tessellated_cell(
     gid_t parent_gid,
     real_t tol,
     bool exact_topology_available = false,
-    std::string construction_policy = "tessellated-curved-linearized-arrangement") {
+    std::string construction_policy = "tessellated-curved-linearized-arrangement",
+    const TessellationConfig* tessellation_config = nullptr) {
   if (!cell_uses_high_order_geometry(mesh, cell)) {
     return 0u;
   }
 
   std::size_t added = 0u;
   try {
+    const auto config = tessellation_config
+                            ? *tessellation_config
+                            : high_order_cut_tessellation_config(mesh, cell, cfg);
     const auto tessellated =
-        Tessellator::tessellate_cell(mesh, cell, high_order_cut_tessellation_config(mesh, cell, cfg));
+        Tessellator::tessellate_cell(mesh, cell, config);
     for (int i = 0; i < tessellated.n_sub_elements(); ++i) {
       added += add_curved_patches_from_linear_subcell(
           topology,
@@ -3535,26 +4507,7 @@ bool add_true_curved_line_arrangement(
     if (!patch.ordered_vertices.empty()) {
       interface_vertex_ids.push_back(patch.ordered_vertices.front());
     }
-    h = append_hash(h, patch.stable_id);
-    h = append_hash(h, static_cast<std::uint64_t>(patch.parent_family));
-    h = append_hash(h, static_cast<std::uint64_t>(patch.geometry_order));
-    h = append_hash(h, patch.parametric_coordinates_valid ? 1u : 0u);
-    h = append_hash(h, patch.exact_topology_available ? 1u : 0u);
-    h = append_hash(h, patch.linearized_surrogate ? 1u : 0u);
-    h = append_hash(h, patch.isoparametric_quadrature_available ? 1u : 0u);
-    h = append_hash_string(h, patch.construction_policy);
-    h = append_hash_real(h, patch.quadrature_measure);
-    for (const auto& xi : patch.parent_parametric_coordinates) {
-      h = append_hash_real(h, xi[0]);
-      h = append_hash_real(h, xi[1]);
-      h = append_hash_real(h, xi[2]);
-    }
-    for (const auto weight : patch.quadrature_weights) {
-      h = append_hash_real(h, weight);
-    }
-    for (const auto id : patch.ordered_vertices) {
-      h = append_hash(h, id);
-    }
+    hash_curved_patch_record(h, patch);
   }
 
   if (interface_vertex_ids.empty()) {
@@ -4152,6 +5105,7 @@ bool populate_true_curved_face_patch_quadrature(
   patch.quadrature_points.clear();
   patch.quadrature_normals.clear();
   patch.quadrature_weights.clear();
+  patch.quadrature_parent_parametric_coordinates.clear();
   patch.quadrature_measure = real_t{0.0};
   patch.isoparametric_quadrature_available = false;
   const int order = std::max(1, mesh.geometry_order(cell));
@@ -4189,6 +5143,7 @@ bool populate_true_curved_face_patch_quadrature(
       patch.quadrature_points.push_back(eval.coordinates);
       patch.quadrature_normals.push_back(unit_or_default(embedded.outward_normal(eval.coordinates)));
       patch.quadrature_weights.push_back(weight);
+      patch.quadrature_parent_parametric_coordinates.push_back(xi);
       patch.quadrature_measure += weight;
     }
   }
@@ -4383,11 +5338,17 @@ void hash_curved_patch_record(std::uint64_t& h, const CutCurvedPatchRecord& patc
   h = append_hash(h, patch.stable_id);
   h = append_hash(h, static_cast<std::uint64_t>(patch.parent_family));
   h = append_hash(h, static_cast<std::uint64_t>(patch.geometry_order));
+  h = append_hash(h, static_cast<std::uint64_t>(patch.embedded_kind));
+  h = append_hash(h, static_cast<std::uint64_t>(patch.composition_operation));
   h = append_hash(h, patch.parametric_coordinates_valid ? 1u : 0u);
   h = append_hash(h, patch.exact_topology_available ? 1u : 0u);
   h = append_hash(h, patch.linearized_surrogate ? 1u : 0u);
   h = append_hash(h, patch.isoparametric_quadrature_available ? 1u : 0u);
+  h = append_hash(h, patch.predicate_fallback_used ? 1u : 0u);
+  h = append_hash(h, patch.predicate_fallback_tolerance_resolved ? 1u : 0u);
   h = append_hash_string(h, patch.construction_policy);
+  h = append_hash_string(h, patch.predicate_fallback_policy);
+  h = append_hash_string(h, patch.predicate_fallback_reason);
   h = append_hash_real(h, patch.quadrature_measure);
   for (const auto& xi : patch.parent_parametric_coordinates) {
     h = append_hash_real(h, xi[0]);
@@ -4399,11 +5360,63 @@ void hash_curved_patch_record(std::uint64_t& h, const CutCurvedPatchRecord& patc
     h = append_hash_real(h, point[1]);
     h = append_hash_real(h, point[2]);
   }
+  for (const auto& xi : patch.quadrature_parent_parametric_coordinates) {
+    h = append_hash_real(h, xi[0]);
+    h = append_hash_real(h, xi[1]);
+    h = append_hash_real(h, xi[2]);
+  }
   for (const auto weight : patch.quadrature_weights) {
     h = append_hash_real(h, weight);
   }
   for (const auto id : patch.ordered_vertices) {
     h = append_hash(h, id);
+  }
+  for (const auto ordinal : patch.active_child_ordinals) {
+    h = append_hash(h, static_cast<std::uint64_t>(ordinal));
+  }
+  for (const auto& child : patch.active_child_provenance) {
+    h = append_hash_string(h, child.persistent_id);
+    h = append_hash_string(h, child.name);
+    h = append_hash(h, static_cast<std::uint64_t>(child.physical_label));
+    h = append_hash(h, child.provenance_epoch);
+  }
+  for (const auto ordinal : patch.predicate_fallback_child_ordinals) {
+    h = append_hash(h, static_cast<std::uint64_t>(ordinal));
+  }
+}
+
+void hash_sensitivity_record(std::uint64_t& h,
+                             const CutQuadratureGeometrySensitivityRecord& record) {
+  h = append_hash(h, record.stable_id);
+  h = append_hash(h, record.source_stable_id);
+  h = append_hash(h, static_cast<std::uint64_t>(record.parent_family));
+  h = append_hash(h, static_cast<std::uint64_t>(record.geometry_order));
+  h = append_hash(h, static_cast<std::uint64_t>(record.embedded_kind));
+  h = append_hash(h, static_cast<std::uint64_t>(record.configuration));
+  h = append_hash_string(h, record.target_kind);
+  h = append_hash_string(h, record.construction_policy);
+  h = append_hash(h, record.ad_compatible ? 1u : 0u);
+  h = append_hash(h, record.location_sensitivity_available ? 1u : 0u);
+  h = append_hash(h, record.jacobian_sensitivity_available ? 1u : 0u);
+  h = append_hash(h, record.measure_sensitivity_available ? 1u : 0u);
+  h = append_hash(h, record.normal_sensitivity_available ? 1u : 0u);
+  h = append_hash(h, record.quadrature_weight_sensitivity_available ? 1u : 0u);
+  h = append_hash_string(h, record.capability_diagnostic);
+  for (const auto dof : record.parent_geometry_dofs) {
+    h = append_hash(h, static_cast<std::uint64_t>(dof));
+  }
+  for (const auto& sample : record.samples) {
+    h = append_hash_real(h, sample.parent_parametric_coordinate[0]);
+    h = append_hash_real(h, sample.parent_parametric_coordinate[1]);
+    h = append_hash_real(h, sample.parent_parametric_coordinate[2]);
+    for (const auto value : sample.shape_values) {
+      h = append_hash_real(h, value);
+    }
+    for (const auto& gradient : sample.shape_gradients) {
+      h = append_hash_real(h, gradient[0]);
+      h = append_hash_real(h, gradient[1]);
+      h = append_hash_real(h, gradient[2]);
+    }
   }
 }
 
@@ -4448,6 +5461,805 @@ void hash_side_region_record(std::uint64_t& h, const CutSideRegion& region) {
       for (const auto id : face) {
         h = append_hash(h, id);
       }
+    }
+  }
+}
+
+bool quadratic_curved_plane_starter_family(CellFamily family) noexcept {
+  return family == CellFamily::Line ||
+         family == CellFamily::Triangle ||
+         family == CellFamily::Quad ||
+         family == CellFamily::Tetra ||
+         family == CellFamily::Hex;
+}
+
+bool curved_cut_sensitivity_family(CellFamily family) noexcept {
+  return family == CellFamily::Line ||
+         family == CellFamily::Triangle ||
+         family == CellFamily::Quad ||
+         family == CellFamily::Tetra ||
+         family == CellFamily::Hex ||
+         family == CellFamily::Wedge ||
+         family == CellFamily::Pyramid;
+}
+
+bool first_order_linearized_sensitivity_family(CellFamily family) noexcept {
+  return family == CellFamily::Line ||
+         family == CellFamily::Triangle ||
+         family == CellFamily::Quad ||
+         family == CellFamily::Tetra ||
+         family == CellFamily::Hex ||
+         family == CellFamily::Wedge ||
+         family == CellFamily::Pyramid ||
+         family == CellFamily::Polygon ||
+         family == CellFamily::Polyhedron;
+}
+
+bool true_curved_subdivision_sensitivity_embedded_kind(
+    EmbeddedGeometryKind embedded_kind) noexcept {
+  return embedded_kind == EmbeddedGeometryKind::Plane ||
+         embedded_kind == EmbeddedGeometryKind::Sphere ||
+         embedded_kind == EmbeddedGeometryKind::SignedDistanceCallback ||
+         embedded_kind == EmbeddedGeometryKind::LevelSetField ||
+         embedded_kind == EmbeddedGeometryKind::TriangulatedSurface ||
+         embedded_kind == EmbeddedGeometryKind::BooleanComposite;
+}
+
+bool first_order_linearized_sensitivity_embedded_kind(
+    EmbeddedGeometryKind embedded_kind) noexcept {
+  return embedded_kind == EmbeddedGeometryKind::Plane ||
+         embedded_kind == EmbeddedGeometryKind::Sphere ||
+         embedded_kind == EmbeddedGeometryKind::LevelSetField ||
+         embedded_kind == EmbeddedGeometryKind::TriangulatedSurface ||
+         embedded_kind == EmbeddedGeometryKind::BooleanComposite;
+}
+
+bool second_order_linearized_sensitivity_family(CellFamily family) noexcept {
+  return family == CellFamily::Line ||
+         family == CellFamily::Triangle ||
+         family == CellFamily::Quad ||
+         family == CellFamily::Tetra ||
+         family == CellFamily::Hex ||
+         family == CellFamily::Wedge ||
+         family == CellFamily::Pyramid;
+}
+
+bool supports_first_order_linearized_sensitivity(
+    CellFamily family,
+    int geometry_order,
+    EmbeddedGeometryKind embedded_kind,
+    const std::string& construction_policy) {
+  return geometry_order == 1 &&
+         construction_policy == kLinearTopologySubdivisionPolicy &&
+         first_order_linearized_sensitivity_family(family) &&
+         first_order_linearized_sensitivity_embedded_kind(embedded_kind);
+}
+
+bool supports_second_order_linearized_sensitivity(
+    CellFamily family,
+    int geometry_order,
+    EmbeddedGeometryKind embedded_kind,
+    const std::string& construction_policy) {
+  return geometry_order == 2 &&
+         construction_policy == "curved-isoparametric-topology-subdivision" &&
+         second_order_linearized_sensitivity_family(family) &&
+         first_order_linearized_sensitivity_embedded_kind(embedded_kind);
+}
+
+bool supports_quadratic_curved_plane_starter_sensitivity(
+    CellFamily family,
+    int geometry_order,
+    EmbeddedGeometryKind embedded_kind,
+    const std::string& construction_policy) {
+  return geometry_order == 2 &&
+         embedded_kind == EmbeddedGeometryKind::Plane &&
+         construction_policy == "curved-isoparametric-topology-subdivision" &&
+         quadratic_curved_plane_starter_family(family);
+}
+
+bool supports_true_curved_topology_sensitivity(
+    CellFamily family,
+    int geometry_order,
+    EmbeddedGeometryKind embedded_kind,
+    const std::string& construction_policy) {
+  if (geometry_order <= 1 || !curved_cut_sensitivity_family(family)) {
+    return false;
+  }
+  if (construction_policy == kTrueCurvedArrangementPolicy) {
+    return embedded_kind == EmbeddedGeometryKind::Plane;
+  }
+  if (construction_policy == kTrueCurvedSubdivisionArrangementPolicy) {
+    return true_curved_subdivision_sensitivity_embedded_kind(embedded_kind);
+  }
+  return false;
+}
+
+bool supports_curved_topology_sensitivity(
+    CellFamily family,
+    int geometry_order,
+    EmbeddedGeometryKind embedded_kind,
+    const std::string& construction_policy) {
+  return supports_second_order_linearized_sensitivity(
+             family, geometry_order, embedded_kind, construction_policy) ||
+         supports_quadratic_curved_plane_starter_sensitivity(
+             family, geometry_order, embedded_kind, construction_policy) ||
+         supports_true_curved_topology_sensitivity(
+             family, geometry_order, embedded_kind, construction_policy);
+}
+
+std::string side_region_linearized_construction_policy(
+    const CutSideRegion& region) {
+  for (const auto& subcell : region.integration_subcells) {
+    if (!subcell.curved_isoparametric &&
+        subcell.construction_policy == kLinearTopologySubdivisionPolicy) {
+      return subcell.construction_policy;
+    }
+  }
+  if (region.measure_from_linear_topology &&
+      !region.curved_isoparametric_topology &&
+      region.closed_integration_topology) {
+    return kLinearTopologySubdivisionPolicy;
+  }
+  return {};
+}
+
+std::string side_region_curved_construction_policy(
+    const CutSideRegion& region) {
+  for (const auto& subcell : region.integration_subcells) {
+    if (subcell.curved_isoparametric &&
+        subcell.measure_from_isoparametric_quadrature &&
+        !subcell.construction_policy.empty()) {
+      return subcell.construction_policy;
+    }
+  }
+  return {};
+}
+
+CutQuadratureGeometrySensitivitySample make_geometry_sensitivity_sample(
+    const MeshBase& mesh,
+    index_t cell,
+    const std::array<real_t, 3>& xi) {
+  const auto shape = mesh.cell_shape(cell);
+  const auto dofs = mesh.cell_geometry_dofs(cell);
+  const auto sf = CurvilinearEvaluator::evaluate_shape_functions(shape, dofs.size(), xi);
+  CutQuadratureGeometrySensitivitySample sample;
+  sample.parent_parametric_coordinate = xi;
+  sample.shape_values = sf.N;
+  sample.shape_gradients = sf.dN_dxi;
+  return sample;
+}
+
+bool barycentric_weights_are_inside(const std::vector<real_t>& weights,
+                                    real_t tol) noexcept {
+  if (weights.empty()) {
+    return false;
+  }
+  real_t sum = real_t{0.0};
+  for (const auto w : weights) {
+    if (!std::isfinite(w) || w < -tol || w > real_t{1.0} + tol) {
+      return false;
+    }
+    sum += w;
+  }
+  return std::abs(sum - real_t{1.0}) <= std::max(tol, real_t{1.0e-10});
+}
+
+bool normalize_shape_values(std::vector<real_t>& weights) noexcept {
+  real_t sum = real_t{0.0};
+  for (auto& weight : weights) {
+    if (!std::isfinite(weight)) {
+      return false;
+    }
+    if (std::abs(weight) <= real_t{1.0e-14}) {
+      weight = real_t{0.0};
+    }
+    sum += weight;
+  }
+  if (std::abs(sum) <= real_t{1.0e-30}) {
+    return false;
+  }
+  for (auto& weight : weights) {
+    weight /= sum;
+  }
+  return true;
+}
+
+std::array<real_t, 3> triangle_barycentric_weights(
+    const std::array<real_t, 3>& point,
+    const std::array<real_t, 3>& a,
+    const std::array<real_t, 3>& b,
+    const std::array<real_t, 3>& c) noexcept {
+  const auto v0 = sub(b, a);
+  const auto v1 = sub(c, a);
+  const auto v2 = sub(point, a);
+  const real_t d00 = dot(v0, v0);
+  const real_t d01 = dot(v0, v1);
+  const real_t d11 = dot(v1, v1);
+  const real_t d20 = dot(v2, v0);
+  const real_t d21 = dot(v2, v1);
+  const real_t denom = d00 * d11 - d01 * d01;
+  if (std::abs(denom) <= real_t{1.0e-30}) {
+    return {{std::numeric_limits<real_t>::quiet_NaN(),
+             std::numeric_limits<real_t>::quiet_NaN(),
+             std::numeric_limits<real_t>::quiet_NaN()}};
+  }
+  const real_t v = (d11 * d20 - d01 * d21) / denom;
+  const real_t w = (d00 * d21 - d01 * d20) / denom;
+  return {{real_t{1.0} - v - w, v, w}};
+}
+
+std::array<real_t, 4> tet_barycentric_weights(
+    const std::array<real_t, 3>& point,
+    const std::array<real_t, 3>& a,
+    const std::array<real_t, 3>& b,
+    const std::array<real_t, 3>& c,
+    const std::array<real_t, 3>& d) noexcept {
+  const real_t denom = determinant3(sub(b, a), sub(c, a), sub(d, a));
+  if (std::abs(denom) <= real_t{1.0e-30}) {
+    return {{std::numeric_limits<real_t>::quiet_NaN(),
+             std::numeric_limits<real_t>::quiet_NaN(),
+             std::numeric_limits<real_t>::quiet_NaN(),
+             std::numeric_limits<real_t>::quiet_NaN()}};
+  }
+  return {{determinant3(sub(b, point), sub(c, point), sub(d, point)) / denom,
+           determinant3(sub(point, a), sub(c, a), sub(d, a)) / denom,
+           determinant3(sub(b, a), sub(point, a), sub(d, a)) / denom,
+           determinant3(sub(b, a), sub(c, a), sub(point, a)) / denom}};
+}
+
+std::vector<real_t> nearest_parent_point_shape_values(
+    const std::vector<std::array<real_t, 3>>& parent_points,
+    const std::array<real_t, 3>& point) {
+  std::vector<real_t> weights(parent_points.size(), real_t{0.0});
+  if (parent_points.empty()) {
+    return weights;
+  }
+  std::size_t nearest = 0u;
+  real_t best_d2 = std::numeric_limits<real_t>::max();
+  for (std::size_t i = 0; i < parent_points.size(); ++i) {
+    const real_t d2 = dot(sub(point, parent_points[i]), sub(point, parent_points[i]));
+    if (d2 < best_d2) {
+      best_d2 = d2;
+      nearest = i;
+    }
+  }
+  weights[nearest] = real_t{1.0};
+  return weights;
+}
+
+std::vector<real_t> linear_topology_shape_values_from_point(
+    const MeshBase& mesh,
+    index_t cell,
+    Configuration cfg,
+    const std::array<real_t, 3>& point) {
+  const auto shape = mesh.cell_shape(cell);
+  const auto dofs = mesh.cell_geometry_dofs(cell);
+  std::vector<std::array<real_t, 3>> parent_points;
+  parent_points.reserve(dofs.size());
+  for (const auto dof : dofs) {
+    parent_points.push_back(mesh.geometry_dof_coords(dof, cfg));
+  }
+  if (parent_points.empty()) {
+    return {};
+  }
+
+  constexpr real_t inside_tol = real_t{1.0e-8};
+  for (std::size_t i = 0; i < parent_points.size(); ++i) {
+    if (norm(sub(point, parent_points[i])) <= real_t{1.0e-10}) {
+      std::vector<real_t> weights(parent_points.size(), real_t{0.0});
+      weights[i] = real_t{1.0};
+      return weights;
+    }
+  }
+
+  if (shape.family == CellFamily::Line && parent_points.size() >= 2u) {
+    const auto ab = sub(parent_points[1], parent_points[0]);
+    const real_t denom = dot(ab, ab);
+    if (denom > real_t{1.0e-30}) {
+      real_t t = dot(sub(point, parent_points[0]), ab) / denom;
+      t = std::max(real_t{0.0}, std::min(real_t{1.0}, t));
+      std::vector<real_t> weights(parent_points.size(), real_t{0.0});
+      weights[0] = real_t{1.0} - t;
+      weights[1] = t;
+      return weights;
+    }
+  }
+
+  const auto try_triangle = [&](std::array<std::size_t, 3> ids,
+                                std::vector<real_t>& weights) {
+    const auto bary = triangle_barycentric_weights(point,
+                                                   parent_points[ids[0]],
+                                                   parent_points[ids[1]],
+                                                   parent_points[ids[2]]);
+    const std::vector<real_t> local{bary[0], bary[1], bary[2]};
+    if (!barycentric_weights_are_inside(local, inside_tol)) {
+      return false;
+    }
+    weights.assign(parent_points.size(), real_t{0.0});
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+      weights[ids[i]] = local[i];
+    }
+    return normalize_shape_values(weights);
+  };
+
+  if (shape.family == CellFamily::Triangle && parent_points.size() >= 3u) {
+    std::vector<real_t> weights;
+    if (try_triangle({0u, 1u, 2u}, weights)) {
+      return weights;
+    }
+  }
+  if ((shape.family == CellFamily::Quad ||
+       shape.family == CellFamily::Polygon) &&
+      parent_points.size() >= 3u) {
+    std::vector<std::array<index_t, 3>> triangles;
+    if (PolyGeometry::triangulate_planar_polygon(parent_points, triangles)) {
+      for (const auto& tri : triangles) {
+        if (tri[0] < 0 || tri[1] < 0 || tri[2] < 0) {
+          continue;
+        }
+        std::vector<real_t> weights;
+        if (try_triangle({static_cast<std::size_t>(tri[0]),
+                          static_cast<std::size_t>(tri[1]),
+                          static_cast<std::size_t>(tri[2])},
+                         weights)) {
+          return weights;
+        }
+      }
+    }
+  }
+
+  const auto try_tet = [&](const std::array<std::array<real_t, 3>, 4>& tet_points,
+                           const std::array<std::vector<real_t>, 4>& tet_weights,
+                           std::vector<real_t>& weights) {
+    const auto bary = tet_barycentric_weights(point,
+                                              tet_points[0],
+                                              tet_points[1],
+                                              tet_points[2],
+                                              tet_points[3]);
+    const std::vector<real_t> local{bary[0], bary[1], bary[2], bary[3]};
+    if (!barycentric_weights_are_inside(local, inside_tol)) {
+      return false;
+    }
+    weights.assign(parent_points.size(), real_t{0.0});
+    for (std::size_t a = 0; a < 4u; ++a) {
+      for (std::size_t i = 0; i < parent_points.size(); ++i) {
+        weights[i] += local[a] * tet_weights[a][i];
+      }
+    }
+    return normalize_shape_values(weights);
+  };
+
+  const auto one_hot = [&](std::size_t id) {
+    std::vector<real_t> weights(parent_points.size(), real_t{0.0});
+    if (id < weights.size()) {
+      weights[id] = real_t{1.0};
+    }
+    return weights;
+  };
+
+  if (shape.family == CellFamily::Tetra ||
+      shape.family == CellFamily::Hex ||
+      shape.family == CellFamily::Wedge ||
+      shape.family == CellFamily::Pyramid) {
+    for (const auto& ids :
+         PolyhedronTessellation::linear_cell_tet_corner_indices(shape.family,
+                                                                parent_points.size())) {
+      std::array<std::array<real_t, 3>, 4> tet_points{{
+          parent_points[ids[0]],
+          parent_points[ids[1]],
+          parent_points[ids[2]],
+          parent_points[ids[3]]}};
+      std::array<std::vector<real_t>, 4> tet_weights{{
+          one_hot(ids[0]),
+          one_hot(ids[1]),
+          one_hot(ids[2]),
+          one_hot(ids[3])}};
+      std::vector<real_t> weights;
+      if (try_tet(tet_points, tet_weights, weights)) {
+        return weights;
+      }
+    }
+  }
+
+  if (shape.family == CellFamily::Polyhedron) {
+    const auto [vptr, n_vertices] = mesh.cell_vertices_span(cell);
+    std::map<index_t, std::size_t> local_vertex_index;
+    for (std::size_t i = 0; i < n_vertices && i < dofs.size(); ++i) {
+      local_vertex_index[vptr[i]] = i;
+    }
+    std::vector<real_t> center_weights(parent_points.size(), real_t{0.0});
+    if (!center_weights.empty()) {
+      const real_t inv = real_t{1.0} / static_cast<real_t>(center_weights.size());
+      std::fill(center_weights.begin(), center_weights.end(), inv);
+    }
+    std::array<real_t, 3> center{{0.0, 0.0, 0.0}};
+    for (const auto& parent_point : parent_points) {
+      center = add(center, parent_point);
+    }
+    center = scale(center,
+                   parent_points.empty()
+                       ? real_t{0.0}
+                       : real_t{1.0} / static_cast<real_t>(parent_points.size()));
+    for (const auto face : mesh.cell_faces(cell)) {
+      const auto face_vertices = mesh.face_vertices(face);
+      if (face_vertices.size() < 3u) {
+        continue;
+      }
+      const auto first_it = local_vertex_index.find(face_vertices[0]);
+      if (first_it == local_vertex_index.end()) {
+        continue;
+      }
+      for (std::size_t i = 1; i + 1 < face_vertices.size(); ++i) {
+        const auto second_it = local_vertex_index.find(face_vertices[i]);
+        const auto third_it = local_vertex_index.find(face_vertices[i + 1u]);
+        if (second_it == local_vertex_index.end() ||
+            third_it == local_vertex_index.end()) {
+          continue;
+        }
+        std::array<std::array<real_t, 3>, 4> tet_points{{
+            center,
+            parent_points[first_it->second],
+            parent_points[second_it->second],
+            parent_points[third_it->second]}};
+        std::array<std::vector<real_t>, 4> tet_weights{{
+            center_weights,
+            one_hot(first_it->second),
+            one_hot(second_it->second),
+            one_hot(third_it->second)}};
+        std::vector<real_t> weights;
+        if (try_tet(tet_points, tet_weights, weights)) {
+          return weights;
+        }
+      }
+    }
+  }
+
+  return nearest_parent_point_shape_values(parent_points, point);
+}
+
+CutQuadratureGeometrySensitivitySample make_linearized_geometry_sensitivity_sample(
+    const MeshBase& mesh,
+    index_t cell,
+    Configuration cfg,
+    const std::array<real_t, 3>& point) {
+  CutQuadratureGeometrySensitivitySample sample;
+  sample.parent_parametric_coordinate = point;
+  try {
+    const auto inverse =
+        CurvilinearEvaluator::inverse_map(mesh, cell, point, cfg, real_t{1.0e-12}, 80);
+    if (finite_point(inverse.first) &&
+        CurvilinearEvaluator::is_inside_reference_element(
+            mesh.cell_shape(cell), inverse.first, real_t{1.0e-8})) {
+      const auto dofs = mesh.cell_geometry_dofs(cell);
+      const auto sf =
+          CurvilinearEvaluator::evaluate_shape_functions(mesh.cell_shape(cell),
+                                                         dofs.size(),
+                                                         inverse.first);
+      if (sf.N.size() == dofs.size() && sf.dN_dxi.size() == dofs.size()) {
+        sample.parent_parametric_coordinate = inverse.first;
+        sample.shape_values = sf.N;
+        sample.shape_gradients = sf.dN_dxi;
+        return sample;
+      }
+    }
+  } catch (const std::exception&) {
+  }
+
+  sample.shape_values = linear_topology_shape_values_from_point(mesh, cell, cfg, point);
+  sample.shape_gradients.assign(sample.shape_values.size(), {{0.0, 0.0, 0.0}});
+  return sample;
+}
+
+void finalize_sensitivity_record(CutQuadratureGeometrySensitivityRecord& record,
+                                 std::size_t expected_dof_count) {
+  if (!record.capability_diagnostic.empty()) {
+    return;
+  }
+  const bool sample_count_ok = !record.samples.empty();
+  const bool shape_sizes_ok =
+      std::all_of(record.samples.begin(), record.samples.end(),
+                  [&](const auto& sample) {
+                    return sample.shape_values.size() == expected_dof_count &&
+                           sample.shape_gradients.size() == expected_dof_count;
+                  });
+  if (!sample_count_ok) {
+    record.capability_diagnostic =
+        "missing parent-parametric quadrature samples for curved cut sensitivity";
+  } else if (!shape_sizes_ok) {
+    record.capability_diagnostic =
+        "geometry shape-function sensitivity data does not match parent geometry DOFs";
+  } else {
+    record.ad_compatible = true;
+    record.location_sensitivity_available = true;
+    record.jacobian_sensitivity_available = true;
+    record.measure_sensitivity_available = true;
+    record.normal_sensitivity_available = true;
+    record.quadrature_weight_sensitivity_available = true;
+  }
+}
+
+CutQuadratureGeometrySensitivityRecord make_patch_sensitivity_record(
+    const MeshBase& mesh,
+    const CutCurvedPatchRecord& patch) {
+  CutQuadratureGeometrySensitivityRecord record;
+  record.source_stable_id = patch.stable_id;
+  record.parent_cell = patch.parent_cell;
+  record.parent_cell_gid = patch.parent_cell_gid;
+  record.parent_family = patch.parent_family;
+  record.geometry_order = patch.geometry_order;
+  record.embedded_kind = patch.embedded_kind;
+  record.configuration = patch.configuration;
+  record.target_kind = "interface-quadrature";
+  record.construction_policy = patch.construction_policy;
+  record.parent_geometry_dofs = mesh.cell_geometry_dofs(patch.parent_cell);
+  record.provenance = patch.provenance;
+  record.stable_id = stable_entity_id(patch.provenance,
+                                      patch.parent_cell_gid,
+                                      patch.stable_id,
+                                      patch.quadrature_parent_parametric_coordinates.size(),
+                                      patch.quadrature_measure,
+                                      2601u);
+  try {
+    for (const auto& xi : patch.quadrature_parent_parametric_coordinates) {
+      record.samples.push_back(make_geometry_sensitivity_sample(mesh, patch.parent_cell, xi));
+    }
+  } catch (const std::exception& e) {
+    record.capability_diagnostic =
+        std::string("failed to evaluate curved cut sensitivity basis data: ") + e.what();
+  }
+  finalize_sensitivity_record(record, record.parent_geometry_dofs.size());
+  return record;
+}
+
+std::array<real_t, 3> average_parametric_coordinates(
+    const std::vector<std::array<real_t, 3>>& points) noexcept {
+  std::array<real_t, 3> xi{{0.0, 0.0, 0.0}};
+  for (const auto& point : points) {
+    xi[0] += point[0];
+    xi[1] += point[1];
+    xi[2] += point[2];
+  }
+  if (!points.empty()) {
+    const auto inv = real_t{1.0} / static_cast<real_t>(points.size());
+    xi[0] *= inv;
+    xi[1] *= inv;
+    xi[2] *= inv;
+  }
+  return xi;
+}
+
+CutQuadratureGeometrySensitivityRecord make_linearized_interface_sensitivity_record(
+    const MeshBase& mesh,
+    const CutTopologyRecord& topology,
+    const CutInterfacePolygon& polygon,
+    EmbeddedGeometryKind embedded_kind,
+    Configuration cfg) {
+  CutQuadratureGeometrySensitivityRecord record;
+  record.source_stable_id = polygon.stable_id;
+  record.parent_cell = polygon.parent_cell;
+  record.parent_cell_gid = polygon.parent_cell_gid;
+  record.parent_family = mesh.cell_shape(polygon.parent_cell).family;
+  record.geometry_order = mesh.geometry_order(polygon.parent_cell);
+  record.embedded_kind = embedded_kind;
+  record.configuration = cfg;
+  record.target_kind = "interface-quadrature";
+  record.construction_policy = kLinearTopologySubdivisionPolicy;
+  record.parent_geometry_dofs = mesh.cell_geometry_dofs(polygon.parent_cell);
+  record.provenance = polygon.provenance;
+  const auto measure = interface_measure_from_topology(topology, polygon);
+  record.stable_id = stable_entity_id(record.provenance,
+                                      record.parent_cell_gid,
+                                      polygon.stable_id,
+                                      polygon.ordered_vertices.size(),
+                                      measure,
+                                      2603u);
+
+  std::map<std::uint64_t, const CutTopologyVertex*> vertex_by_id;
+  for (const auto& vertex : topology.vertices) {
+    vertex_by_id.emplace(vertex.stable_id, &vertex);
+  }
+
+  std::array<real_t, 3> centroid{{0.0, 0.0, 0.0}};
+  std::size_t point_count = 0u;
+  try {
+    for (const auto vertex_id : polygon.ordered_vertices) {
+      const auto it = vertex_by_id.find(vertex_id);
+      if (it == vertex_by_id.end()) {
+        continue;
+      }
+      record.samples.push_back(make_linearized_geometry_sensitivity_sample(
+          mesh, polygon.parent_cell, cfg, it->second->point));
+      centroid = add(centroid, it->second->point);
+      ++point_count;
+    }
+    if (point_count > 0u) {
+      centroid = scale(centroid, real_t{1.0} / static_cast<real_t>(point_count));
+      record.samples.push_back(make_linearized_geometry_sensitivity_sample(
+          mesh, polygon.parent_cell, cfg, centroid));
+    }
+  } catch (const std::exception& e) {
+    record.capability_diagnostic =
+        std::string("failed to evaluate linearized interface sensitivity basis data: ") + e.what();
+  }
+  finalize_sensitivity_record(record, record.parent_geometry_dofs.size());
+  return record;
+}
+
+CutQuadratureGeometrySensitivityRecord make_linearized_side_region_sensitivity_record(
+    const MeshBase& mesh,
+    const CutSideRegion& region,
+    EmbeddedGeometryKind embedded_kind,
+    Configuration cfg) {
+  CutQuadratureGeometrySensitivityRecord record;
+  record.source_stable_id = region.stable_id;
+  record.parent_cell = region.parent_cell;
+  record.parent_cell_gid = region.parent_cell_gid;
+  record.parent_family = region.integration_family;
+  record.geometry_order = mesh.geometry_order(region.parent_cell);
+  record.embedded_kind = embedded_kind;
+  record.configuration = cfg;
+  record.target_kind = region.side == CutTopologySide::Negative
+                           ? "negative-volume-subcell-quadrature"
+                           : "positive-volume-subcell-quadrature";
+  record.construction_policy = kLinearTopologySubdivisionPolicy;
+  record.parent_geometry_dofs = mesh.cell_geometry_dofs(region.parent_cell);
+  record.provenance = region.provenance;
+  record.stable_id = stable_entity_id(region.provenance,
+                                      region.parent_cell_gid,
+                                      region.stable_id,
+                                      static_cast<std::uint64_t>(region.side),
+                                      region.measure_estimate,
+                                      2604u);
+
+  std::map<std::uint64_t, const CutIntegrationVertex*> vertex_by_id;
+  for (const auto& vertex : region.integration_vertices) {
+    vertex_by_id.emplace(vertex.stable_id, &vertex);
+  }
+
+  try {
+    for (const auto& subcell : region.integration_subcells) {
+      if (subcell.curved_isoparametric ||
+          subcell.construction_policy != kLinearTopologySubdivisionPolicy) {
+        continue;
+      }
+      for (const auto vertex_id : subcell.vertices) {
+        const auto it = vertex_by_id.find(vertex_id);
+        if (it == vertex_by_id.end()) {
+          continue;
+        }
+        record.samples.push_back(make_linearized_geometry_sensitivity_sample(
+            mesh, region.parent_cell, cfg, it->second->point));
+      }
+      record.samples.push_back(make_linearized_geometry_sensitivity_sample(
+          mesh, region.parent_cell, cfg, subcell.centroid));
+    }
+  } catch (const std::exception& e) {
+    record.capability_diagnostic =
+        std::string("failed to evaluate linearized side-region sensitivity basis data: ") + e.what();
+  }
+  finalize_sensitivity_record(record, record.parent_geometry_dofs.size());
+  return record;
+}
+
+CutQuadratureGeometrySensitivityRecord make_side_region_sensitivity_record(
+    const MeshBase& mesh,
+    const CutSideRegion& region,
+    EmbeddedGeometryKind embedded_kind,
+    Configuration cfg) {
+  CutQuadratureGeometrySensitivityRecord record;
+  record.source_stable_id = region.stable_id;
+  record.parent_cell = region.parent_cell;
+  record.parent_cell_gid = region.parent_cell_gid;
+  record.parent_family = region.integration_family;
+  record.geometry_order = mesh.geometry_order(region.parent_cell);
+  record.embedded_kind = embedded_kind;
+  record.configuration = cfg;
+  record.target_kind = region.side == CutTopologySide::Negative
+                           ? "negative-volume-subcell-quadrature"
+                           : "positive-volume-subcell-quadrature";
+  record.construction_policy = side_region_curved_construction_policy(region);
+  record.parent_geometry_dofs = mesh.cell_geometry_dofs(region.parent_cell);
+  record.provenance = region.provenance;
+  record.stable_id = stable_entity_id(region.provenance,
+                                      region.parent_cell_gid,
+                                      region.stable_id,
+                                      static_cast<std::uint64_t>(region.side),
+                                      region.measure_estimate,
+                                      2602u);
+  try {
+    for (const auto& subcell : region.integration_subcells) {
+      if (!subcell.curved_isoparametric ||
+          !subcell.measure_from_isoparametric_quadrature ||
+          subcell.parent_parametric_vertices.empty()) {
+        continue;
+      }
+      for (const auto& xi_vertex : subcell.parent_parametric_vertices) {
+        record.samples.push_back(
+            make_geometry_sensitivity_sample(mesh, region.parent_cell, xi_vertex));
+      }
+      const auto xi = average_parametric_coordinates(subcell.parent_parametric_vertices);
+      record.samples.push_back(make_geometry_sensitivity_sample(mesh, region.parent_cell, xi));
+    }
+  } catch (const std::exception& e) {
+    record.capability_diagnostic =
+        std::string("failed to evaluate curved side-region sensitivity basis data: ") + e.what();
+  }
+  finalize_sensitivity_record(record, record.parent_geometry_dofs.size());
+  return record;
+}
+
+void populate_cut_topology_sensitivity_records(
+    CutTopologyRecord& topology,
+    const MeshBase& mesh,
+    EmbeddedGeometryKind embedded_kind,
+    Configuration cfg) {
+  topology.sensitivity_records.clear();
+  for (const auto& polygon : topology.interface_polygons) {
+    const auto family = mesh.cell_shape(polygon.parent_cell).family;
+    if (!supports_first_order_linearized_sensitivity(
+            family,
+            mesh.geometry_order(polygon.parent_cell),
+            embedded_kind,
+            kLinearTopologySubdivisionPolicy)) {
+      continue;
+    }
+    auto record = make_linearized_interface_sensitivity_record(
+        mesh, topology, polygon, embedded_kind, cfg);
+    if (record.ad_compatible) {
+      topology.sensitivity_records.push_back(std::move(record));
+    } else if (!record.capability_diagnostic.empty()) {
+      topology.diagnostics.push_back(record.capability_diagnostic);
+    }
+  }
+  for (const auto& region : topology.side_regions) {
+    const auto construction_policy = side_region_linearized_construction_policy(region);
+    if (construction_policy.empty() ||
+        !supports_first_order_linearized_sensitivity(
+            region.integration_family,
+            mesh.geometry_order(region.parent_cell),
+            embedded_kind,
+            construction_policy)) {
+      continue;
+    }
+    auto record = make_linearized_side_region_sensitivity_record(
+        mesh, region, embedded_kind, cfg);
+    if (record.ad_compatible) {
+      topology.sensitivity_records.push_back(std::move(record));
+    } else if (!record.capability_diagnostic.empty()) {
+      topology.diagnostics.push_back(record.capability_diagnostic);
+    }
+  }
+  for (const auto& patch : topology.curved_patches) {
+    if (!patch.isoparametric_quadrature_available ||
+        patch.quadrature_parent_parametric_coordinates.empty() ||
+        patch.quadrature_parent_parametric_coordinates.size() != patch.quadrature_weights.size() ||
+        !supports_curved_topology_sensitivity(
+            patch.parent_family, patch.geometry_order, patch.embedded_kind, patch.construction_policy)) {
+      continue;
+    }
+    auto record = make_patch_sensitivity_record(mesh, patch);
+    if (record.ad_compatible) {
+      topology.sensitivity_records.push_back(std::move(record));
+    } else if (!record.capability_diagnostic.empty()) {
+      topology.diagnostics.push_back(record.capability_diagnostic);
+    }
+  }
+  for (const auto& region : topology.side_regions) {
+    const auto construction_policy = side_region_curved_construction_policy(region);
+    if (!region.curved_isoparametric_topology ||
+        construction_policy.empty() ||
+        !supports_curved_topology_sensitivity(
+            region.integration_family,
+            mesh.geometry_order(region.parent_cell),
+            embedded_kind,
+            construction_policy)) {
+      continue;
+    }
+    auto record = make_side_region_sensitivity_record(mesh, region, embedded_kind, cfg);
+    if (record.ad_compatible) {
+      topology.sensitivity_records.push_back(std::move(record));
+    } else if (!record.capability_diagnostic.empty()) {
+      topology.diagnostics.push_back(record.capability_diagnostic);
     }
   }
 }
@@ -5021,6 +6833,7 @@ bool populate_true_curved_tet_patch_quadrature(
   patch.quadrature_points.clear();
   patch.quadrature_normals.clear();
   patch.quadrature_weights.clear();
+  patch.quadrature_parent_parametric_coordinates.clear();
   patch.quadrature_measure = real_t{0.0};
   patch.isoparametric_quadrature_available = false;
 
@@ -5074,6 +6887,7 @@ bool populate_true_curved_tet_patch_quadrature(
         patch.quadrature_points.push_back(eval.coordinates);
         patch.quadrature_normals.push_back(unit_or_default(embedded.outward_normal(eval.coordinates)));
         patch.quadrature_weights.push_back(weight);
+        patch.quadrature_parent_parametric_coordinates.push_back(xi);
         patch.quadrature_measure += weight;
       }
     }
@@ -5853,6 +7667,7 @@ bool populate_true_curved_hex_patch_quadrature(
   patch.quadrature_points.clear();
   patch.quadrature_normals.clear();
   patch.quadrature_weights.clear();
+  patch.quadrature_parent_parametric_coordinates.clear();
   patch.quadrature_measure = real_t{0.0};
   patch.isoparametric_quadrature_available = false;
 
@@ -5903,6 +7718,7 @@ bool populate_true_curved_hex_patch_quadrature(
         patch.quadrature_points.push_back(eval.coordinates);
         patch.quadrature_normals.push_back(unit_or_default(embedded.outward_normal(eval.coordinates)));
         patch.quadrature_weights.push_back(weight);
+        patch.quadrature_parent_parametric_coordinates.push_back(xi);
         patch.quadrature_measure += weight;
       }
     }
@@ -6629,6 +8445,7 @@ bool populate_true_curved_wedge_patch_quadrature(
   patch.quadrature_points.clear();
   patch.quadrature_normals.clear();
   patch.quadrature_weights.clear();
+  patch.quadrature_parent_parametric_coordinates.clear();
   patch.quadrature_measure = real_t{0.0};
   patch.isoparametric_quadrature_available = false;
 
@@ -6682,6 +8499,7 @@ bool populate_true_curved_wedge_patch_quadrature(
         patch.quadrature_points.push_back(eval.coordinates);
         patch.quadrature_normals.push_back(unit_or_default(embedded.outward_normal(eval.coordinates)));
         patch.quadrature_weights.push_back(weight);
+        patch.quadrature_parent_parametric_coordinates.push_back(xi);
         patch.quadrature_measure += weight;
       }
     }
@@ -7424,6 +9242,7 @@ bool populate_true_curved_pyramid_patch_quadrature(
   patch.quadrature_points.clear();
   patch.quadrature_normals.clear();
   patch.quadrature_weights.clear();
+  patch.quadrature_parent_parametric_coordinates.clear();
   patch.quadrature_measure = real_t{0.0};
   patch.isoparametric_quadrature_available = false;
 
@@ -7474,6 +9293,7 @@ bool populate_true_curved_pyramid_patch_quadrature(
         patch.quadrature_points.push_back(eval.coordinates);
         patch.quadrature_normals.push_back(unit_or_default(embedded.outward_normal(eval.coordinates)));
         patch.quadrature_weights.push_back(weight);
+        patch.quadrature_parent_parametric_coordinates.push_back(xi);
         patch.quadrature_measure += weight;
       }
     }
@@ -8085,7 +9905,8 @@ SideClosedTopology build_side_closed_topology_from_tessellated_cell(
     real_t tol,
     const EmbeddedRegionProvenance& provenance,
     gid_t parent_gid,
-    std::string construction_policy = {}) {
+    std::string construction_policy = {},
+    const TessellationConfig* tessellation_config = nullptr) {
   SideClosedTopology topology;
   std::vector<index_t> parent_dofs = mesh.cell_geometry_dofs(cell);
   std::vector<std::array<real_t, 3>> parent_points;
@@ -8095,8 +9916,11 @@ SideClosedTopology build_side_closed_topology_from_tessellated_cell(
   }
 
   try {
+    const auto config = tessellation_config
+                            ? *tessellation_config
+                            : high_order_cut_tessellation_config(mesh, cell, cfg);
     const auto tessellated =
-        Tessellator::tessellate_cell(mesh, cell, high_order_cut_tessellation_config(mesh, cell, cfg));
+        Tessellator::tessellate_cell(mesh, cell, config);
     for (int i = 0; i < tessellated.n_sub_elements(); ++i) {
       add_tessellated_subcell_topology(topology,
                                        mesh,
@@ -8126,13 +9950,35 @@ bool supports_true_curved_subdivision_arrangement(
     const MeshBase& mesh,
     index_t cell,
     const EmbeddedGeometryDescriptor& embedded) noexcept {
-  if (embedded.kind != EmbeddedGeometryKind::Plane ||
-      mesh.geometry_order(cell) <= 1) {
+  if (mesh.geometry_order(cell) <= 1) {
     return false;
   }
   const auto family = mesh.cell_shape(cell).family;
-  return family == CellFamily::Triangle ||
+  if (embedded.kind == EmbeddedGeometryKind::Plane) {
+    return family == CellFamily::Triangle ||
+           family == CellFamily::Quad ||
+           family == CellFamily::Hex ||
+           family == CellFamily::Wedge ||
+           family == CellFamily::Pyramid;
+  }
+  const bool supported_non_plane =
+      embedded.kind == EmbeddedGeometryKind::Sphere ||
+      (embedded.kind == EmbeddedGeometryKind::SignedDistanceCallback &&
+       static_cast<bool>(embedded.signed_distance_callback) &&
+       static_cast<bool>(embedded.normal_callback)) ||
+      (embedded.kind == EmbeddedGeometryKind::LevelSetField &&
+       level_set_has_true_curved_queries(embedded)) ||
+      (embedded.kind == EmbeddedGeometryKind::TriangulatedSurface &&
+       triangulated_surface_has_true_curved_queries(embedded)) ||
+      (embedded.kind == EmbeddedGeometryKind::BooleanComposite &&
+       boolean_composite_has_true_curved_queries(embedded));
+  if (!supported_non_plane) {
+    return false;
+  }
+  return family == CellFamily::Line ||
+         family == CellFamily::Triangle ||
          family == CellFamily::Quad ||
+         family == CellFamily::Tetra ||
          family == CellFamily::Hex ||
          family == CellFamily::Wedge ||
          family == CellFamily::Pyramid;
@@ -8159,7 +10005,8 @@ CutSideRegion make_true_curved_subdivision_side_region(
     Configuration cfg,
     CutTopologySide side,
     const std::vector<std::uint64_t>& interface_vertex_ids,
-    real_t tol) {
+    real_t tol,
+    const TessellationConfig& tessellation_config) {
   CutSideRegion region;
   region.side = side;
   region.parent_cell = cell.entity;
@@ -8191,7 +10038,8 @@ CutSideRegion make_true_curved_subdivision_side_region(
   }
 
   const auto measure =
-      estimate_side_measure_from_tessellated_cell(mesh, cell.entity, embedded, cfg, side, tol);
+      estimate_side_measure_from_tessellated_cell(
+          mesh, cell.entity, embedded, cfg, side, tol, &tessellation_config);
   region.parent_measure = measure.parent_measure;
   region.measure_from_linear_topology = measure.available;
 
@@ -8204,7 +10052,8 @@ CutSideRegion make_true_curved_subdivision_side_region(
       tol,
       cell.provenance,
       cell.global_id,
-      kTrueCurvedSubdivisionArrangementPolicy);
+      kTrueCurvedSubdivisionArrangementPolicy,
+      &tessellation_config);
   region.integration_vertices = closed.vertices;
   region.integration_subcells = closed.subcells;
   region.integration_region_vertices = closed.vertex_ids;
@@ -8263,7 +10112,10 @@ bool add_true_curved_subdivision_arrangement(
     const EmbeddedGeometryDescriptor& embedded,
     Configuration cfg,
     real_t tol,
-    std::uint64_t& h) {
+    std::uint64_t& h,
+    const CutTopologyOptions& options) {
+  const auto tessellation_config =
+      true_curved_subdivision_tessellation_config(mesh, cell.entity, embedded, cfg, options);
   const auto first_patch = topology.curved_patches.size();
   const auto added_patches =
       add_curved_patches_from_tessellated_cell(topology,
@@ -8275,10 +10127,15 @@ bool add_true_curved_subdivision_arrangement(
                                                cell.global_id,
                                                tol,
                                                true,
-                                               kTrueCurvedSubdivisionArrangementPolicy);
+                                               kTrueCurvedSubdivisionArrangementPolicy,
+                                               &tessellation_config);
   if (added_patches == 0u || topology.curved_patches.size() <= first_patch) {
     topology.diagnostics.push_back(
         "true curved subdivision arrangement failed to record bounded high-order interface topology");
+    if (embedded.kind == EmbeddedGeometryKind::BooleanComposite) {
+      topology.diagnostics.push_back(
+          "Boolean true curved subdivision requires supported child geometries; coincident child interfaces use recorded tolerance-resolved predicate fallback when active-child distances are ambiguous");
+    }
     return false;
   }
 
@@ -8290,6 +10147,14 @@ bool add_true_curved_subdivision_arrangement(
         patch.construction_policy != kTrueCurvedSubdivisionArrangementPolicy) {
       topology.diagnostics.push_back(
           "true curved subdivision arrangement produced an incomplete curved patch record");
+      return false;
+    }
+    if (embedded.kind == EmbeddedGeometryKind::BooleanComposite &&
+        (patch.active_child_ordinals.size() != patch.ordered_vertices.size() ||
+         patch.active_child_provenance.size() != patch.ordered_vertices.size() ||
+         patch.composition_operation != embedded.boolean_operation)) {
+      topology.diagnostics.push_back(
+          "Boolean true curved subdivision produced incomplete active-child provenance metadata");
       return false;
     }
     hash_curved_patch_record(h, patch);
@@ -8312,7 +10177,8 @@ bool add_true_curved_subdivision_arrangement(
                                                            cfg,
                                                            side,
                                                            interface_vertex_ids,
-                                                           tol);
+                                                           tol,
+                                                           tessellation_config);
     if (!region.closed_integration_topology || region.integration_subcells.empty()) {
       topology.diagnostics.push_back(
           "true curved subdivision arrangement failed to construct closed side-region topology");
@@ -8688,19 +10554,11 @@ real_t EmbeddedGeometryDescriptor::signed_distance(
       }
       return std::numeric_limits<real_t>::quiet_NaN();
     case EmbeddedGeometryKind::LevelSetField: {
-      if (level_set_samples.empty()) {
+      const auto* sample = nearest_level_set_sample(*this, point);
+      if (sample == nullptr) {
         return std::numeric_limits<real_t>::quiet_NaN();
       }
-      const EmbeddedLevelSetSample* best = &level_set_samples.front();
-      real_t best_d2 = dot(sub(point, best->point), sub(point, best->point));
-      for (const auto& sample : level_set_samples) {
-        const real_t d2 = dot(sub(point, sample.point), sub(point, sample.point));
-        if (d2 < best_d2) {
-          best = &sample;
-          best_d2 = d2;
-        }
-      }
-      return best->value;
+      return affine_level_set_value(*sample, point);
     }
     case EmbeddedGeometryKind::TriangulatedSurface: {
       if (surface_triangles.empty()) {
@@ -8720,26 +10578,9 @@ real_t EmbeddedGeometryDescriptor::signed_distance(
       return best_signed;
     }
     case EmbeddedGeometryKind::BooleanComposite: {
-      if (children.empty()) {
-        return std::numeric_limits<real_t>::quiet_NaN();
-      }
-      real_t value = children.front().signed_distance(point);
-      if (boolean_operation == EmbeddedGeometryBooleanOperation::Difference && children.size() >= 2u) {
-        value = std::max(value, -children[1].signed_distance(point));
-        for (std::size_t i = 2; i < children.size(); ++i) {
-          value = std::max(value, -children[i].signed_distance(point));
-        }
-        return value;
-      }
-      for (std::size_t i = 1; i < children.size(); ++i) {
-        const real_t d = children[i].signed_distance(point);
-        if (boolean_operation == EmbeddedGeometryBooleanOperation::Union) {
-          value = std::min(value, d);
-        } else {
-          value = std::max(value, d);
-        }
-      }
-      return value;
+      const auto active = boolean_active_child_query(*this, point);
+      return active.ok ? active.signed_distance
+                       : std::numeric_limits<real_t>::quiet_NaN();
     }
     case EmbeddedGeometryKind::Plane:
       break;
@@ -8756,19 +10597,11 @@ std::array<real_t, 3> EmbeddedGeometryDescriptor::outward_normal(
     case EmbeddedGeometryKind::Sphere:
       return unit_or_default(sub(point, origin));
     case EmbeddedGeometryKind::LevelSetField: {
-      if (level_set_samples.empty()) {
+      const auto* sample = nearest_level_set_sample(*this, point);
+      if (sample == nullptr) {
         return unit_or_default(normal);
       }
-      const EmbeddedLevelSetSample* best = &level_set_samples.front();
-      real_t best_d2 = dot(sub(point, best->point), sub(point, best->point));
-      for (const auto& sample : level_set_samples) {
-        const real_t d2 = dot(sub(point, sample.point), sub(point, sample.point));
-        if (d2 < best_d2) {
-          best = &sample;
-          best_d2 = d2;
-        }
-      }
-      return unit_or_default(best->gradient);
+      return unit_or_default(sample->gradient);
     }
     case EmbeddedGeometryKind::TriangulatedSurface: {
       if (surface_triangles.empty()) {
@@ -8789,7 +10622,10 @@ std::array<real_t, 3> EmbeddedGeometryDescriptor::outward_normal(
     }
     case EmbeddedGeometryKind::BooleanComposite:
       if (!children.empty()) {
-        return children.front().outward_normal(point);
+        const auto active = boolean_active_child_query(*this, point);
+        if (active.ok) {
+          return active.normal;
+        }
       }
       break;
     case EmbeddedGeometryKind::SignedDistanceCallback:
@@ -8832,13 +10668,23 @@ std::array<real_t, 3> EmbeddedGeometryDescriptor::closest_point(
       const auto n = unit_or_default(normal);
       return sub(point, scale(n, dot(sub(point, origin), n)));
     }
+    case EmbeddedGeometryKind::LevelSetField: {
+      const auto* sample = nearest_level_set_sample(*this, point);
+      if (sample != nullptr && norm(sample->gradient) > real_t{1.0e-30}) {
+        const auto n = unit_or_default(sample->gradient);
+        return sub(point, scale(n, affine_level_set_value(*sample, point)));
+      }
+      break;
+    }
     case EmbeddedGeometryKind::BooleanComposite:
       if (!children.empty()) {
-        return children.front().closest_point(point);
+        const auto active = boolean_active_child_query(*this, point);
+        if (active.ok) {
+          return active.closest_point;
+        }
       }
       break;
     case EmbeddedGeometryKind::SignedDistanceCallback:
-    case EmbeddedGeometryKind::LevelSetField:
       break;
   }
   return point;
@@ -8870,12 +10716,28 @@ EmbeddedGeometryQueryDiagnostic EmbeddedGeometryDescriptor::diagnose_query_suppo
       break;
     case EmbeddedGeometryKind::LevelSetField:
       if (level_set_samples.empty()) add("level-set embedded geometry has no samples");
+      for (const auto& sample : level_set_samples) {
+        if (!finite_level_set_sample(sample)) {
+          add("level-set embedded geometry has a non-finite sample");
+          break;
+        }
+        if (norm(sample.gradient) <= real_t{1.0e-30}) {
+          add("level-set embedded geometry has a sample without a usable gradient");
+          break;
+        }
+      }
       if (effective_revisions().field_value_revision == 0) {
         diagnostic.messages.push_back("level-set field value revision is zero");
       }
       break;
     case EmbeddedGeometryKind::TriangulatedSurface:
       if (surface_triangles.empty()) add("triangulated embedded surface has no triangles");
+      for (const auto& tri : surface_triangles) {
+        if (!finite_nondegenerate_surface_triangle(tri)) {
+          add("triangulated embedded surface has a non-finite or degenerate triangle");
+          break;
+        }
+      }
       if (effective_revisions().source_surface_revision == 0) {
         diagnostic.messages.push_back("source-surface revision is zero");
       }
@@ -8985,30 +10847,9 @@ void CutClassificationTransaction::rollback() {
 CutClassification classify_signed_distances(
     const std::vector<real_t>& signed_distances,
     real_t tolerance) noexcept {
-  if (signed_distances.empty()) {
-    return CutClassification::Degenerate;
-  }
-  bool has_negative = false;
-  bool has_positive = false;
-  bool has_zero = false;
-  for (const real_t d : signed_distances) {
-    if (!std::isfinite(d)) {
-      return CutClassification::Degenerate;
-    }
-    has_negative = has_negative || d < -tolerance;
-    has_positive = has_positive || d > tolerance;
-    has_zero = has_zero || std::abs(d) <= tolerance;
-  }
-  if (has_negative && has_positive) {
-    return CutClassification::Cut;
-  }
-  if (has_zero && (has_negative || has_positive)) {
-    return CutClassification::Cut;
-  }
-  if (has_zero) {
-    return CutClassification::Degenerate;
-  }
-  return has_negative ? CutClassification::Negative : CutClassification::Positive;
+  CutPredicatePolicy policy;
+  policy.robust.intersection_tolerance = tolerance;
+  return classify_signed_distances_with_policy(signed_distances, tolerance, policy);
 }
 
 CutClassificationMap classify_embedded_geometry(
@@ -9042,17 +10883,19 @@ CutClassificationMap classify_embedded_geometry(
       const auto dofs = mesh.cell_geometry_dofs(c);
       const auto distances = signed_distances_for_dofs(mesh, embedded_geometry, dofs, cfg);
       const auto local_edges = cell_local_edges(mesh, c, dofs);
-      const auto intersections = edge_intersections(
-          mesh, embedded_geometry, dofs, local_edges, distances, cfg, tol);
+      const auto edge_result = edge_intersections(
+          mesh, embedded_geometry, dofs, local_edges, distances, cfg, options.predicate_policy, tol);
       map.cells.push_back(make_record(CutEntityKind::Cell,
                                       c,
                                       entity_gid(mesh, CutEntityKind::Cell, c),
                                       0,
                                       dofs,
                                       distances,
-                                      intersections,
+                                      edge_result.intersections,
                                       tol,
-                                      embedded_geometry.provenance));
+                                      embedded_geometry.provenance,
+                                      options.predicate_policy,
+                                      edge_result.diagnostics));
     }
   }
 
@@ -9066,17 +10909,26 @@ CutClassificationMap classify_embedded_geometry(
         dofs.resize(static_cast<std::size_t>(face_shape.num_corners));
       }
       const auto distances = signed_distances_for_dofs(mesh, embedded_geometry, dofs, cfg);
-      const auto intersections = edge_intersections(
-          mesh, embedded_geometry, dofs, cyclic_edges(dofs.size()), distances, cfg, tol);
+      const auto edge_result = edge_intersections(
+          mesh,
+          embedded_geometry,
+          dofs,
+          cyclic_edges(dofs.size()),
+          distances,
+          cfg,
+          options.predicate_policy,
+          tol);
       map.faces.push_back(make_record(CutEntityKind::Face,
                                       f,
                                       entity_gid(mesh, CutEntityKind::Face, f),
                                       0,
                                       dofs,
                                       distances,
-                                      intersections,
+                                      edge_result.intersections,
                                       tol,
-                                      embedded_geometry.provenance));
+                                      embedded_geometry.provenance,
+                                      options.predicate_policy,
+                                      edge_result.diagnostics));
     }
   }
 
@@ -9086,13 +10938,14 @@ CutClassificationMap classify_embedded_geometry(
       const auto ev = mesh.edge_vertices(e);
       const std::vector<index_t> dofs{ev[0], ev[1]};
       const auto distances = signed_distances_for_dofs(mesh, embedded_geometry, dofs, cfg);
-      const auto intersections = edge_intersections(
+      const auto edge_result = edge_intersections(
           mesh,
           embedded_geometry,
           dofs,
           std::vector<std::array<index_t, 2>>{{{0, 1}}},
           distances,
           cfg,
+          options.predicate_policy,
           tol);
       map.edges.push_back(make_record(CutEntityKind::Edge,
                                       e,
@@ -9100,9 +10953,11 @@ CutClassificationMap classify_embedded_geometry(
                                       0,
                                       dofs,
                                       distances,
-                                      intersections,
+                                      edge_result.intersections,
                                       tol,
-                                      embedded_geometry.provenance));
+                                      embedded_geometry.provenance,
+                                      options.predicate_policy,
+                                      edge_result.diagnostics));
     }
   }
 
@@ -9369,12 +11224,20 @@ EmbeddedGeometryQueryDiagnostic diagnose_boolean_region_composition(
   bool observed_overlap = false;
   bool observed_uncovered_intersection_sample = false;
   bool observed_difference_overlap = false;
+  bool observed_tolerance_resolved_boolean_sample = false;
   for (const auto& p : sample_points) {
     int inside_count = 0;
     bool inside_base = false;
     bool inside_subtracted = false;
     for (std::size_t i = 0; i < embedded_geometry.children.size(); ++i) {
-      const bool inside = embedded_geometry.children[i].signed_distance(p) <= tol;
+      const auto side = adaptive_scalar_sign("boolean-arrangement",
+                                             embedded_geometry.children[i].signed_distance(p),
+                                             tol);
+      observed_tolerance_resolved_boolean_sample =
+          observed_tolerance_resolved_boolean_sample ||
+          side.tolerance_resolved ||
+          side.used_adaptive_precision;
+      const bool inside = side.sign <= 0;
       inside_count += inside ? 1 : 0;
       if (i == 0) inside_base = inside;
       if (i > 0) inside_subtracted = inside_subtracted || inside;
@@ -9398,6 +11261,10 @@ EmbeddedGeometryQueryDiagnostic diagnose_boolean_region_composition(
   }
   if (observed_difference_overlap) {
     diagnostic.messages.push_back("Boolean difference samples include base/subtracted overlap");
+  }
+  if (observed_tolerance_resolved_boolean_sample) {
+    diagnostic.messages.push_back(
+        "adaptive/exact predicate decision: domain=boolean-arrangement, outcome=tolerance-resolved");
   }
   for (const auto& child : embedded_geometry.children) {
     if (child.kind != EmbeddedGeometryKind::BooleanComposite) {
@@ -9459,7 +11326,8 @@ CutTopologyRecord reconstruct_cut_topology(
                                                        map.embedded_geometry,
                                                        cfg,
                                                        tol,
-                                                       h);
+                                                       h,
+                                                       options);
       };
       if (supports_true_curved_line_arrangement(mesh, cell.entity, map.embedded_geometry)) {
         if (add_true_curved_line_arrangement(topology,
@@ -9567,8 +11435,10 @@ CutTopologyRecord reconstruct_cut_topology(
       }
       topology.supported = false;
       topology.diagnostics.push_back(
-          "true curved arrangement currently supports high-order line, triangle, quad, tetra, hex, wedge, and pyramid cells cut by planes; "
-          "non-graph plane face and volume cuts require bounded subdivision support, and non-plane high-order cuts should use LinearizedSurrogate mode until qualified");
+          "true curved arrangement currently supports high-order plane cuts through graph-compatible line/triangle/quad/tetra/hex/wedge/pyramid paths, "
+          "bounded subdivision for non-graph high-order triangle/quad/hex/wedge/pyramid plane cuts, "
+          "and bounded subdivision for high-order line/triangle/quad/tetra/hex/wedge/pyramid sphere, signed-distance callback, level-set field, triangulated-surface, or Boolean composite cuts; "
+          "level-set descriptors require finite samples with usable gradients, triangulated surfaces require finite nondegenerate triangles, and Boolean composites require supported children with recorded tolerance-resolved predicate fallback for ambiguous active-child vertices");
       continue;
     }
 
@@ -9691,24 +11561,7 @@ CutTopologyRecord reconstruct_cut_topology(
       }
       for (std::size_t i = first_patch; i < topology.curved_patches.size(); ++i) {
         const auto& patch = topology.curved_patches[i];
-        h = append_hash(h, patch.stable_id);
-        h = append_hash(h, static_cast<std::uint64_t>(patch.parent_family));
-        h = append_hash(h, static_cast<std::uint64_t>(patch.geometry_order));
-        h = append_hash(h, patch.parametric_coordinates_valid ? 1u : 0u);
-        h = append_hash(h, patch.exact_topology_available ? 1u : 0u);
-        h = append_hash(h, patch.isoparametric_quadrature_available ? 1u : 0u);
-        h = append_hash_real(h, patch.quadrature_measure);
-        for (const auto& xi : patch.parent_parametric_coordinates) {
-          h = append_hash_real(h, xi[0]);
-          h = append_hash_real(h, xi[1]);
-          h = append_hash_real(h, xi[2]);
-        }
-        for (const auto weight : patch.quadrature_weights) {
-          h = append_hash_real(h, weight);
-        }
-        for (const auto id : patch.ordered_vertices) {
-          h = append_hash(h, id);
-        }
+        hash_curved_patch_record(h, patch);
       }
     }
 
@@ -9859,6 +11712,11 @@ CutTopologyRecord reconstruct_cut_topology(
     }
   }
 
+  populate_cut_topology_sensitivity_records(topology, mesh, map.embedded_geometry.kind, cfg);
+  for (const auto& record : topology.sensitivity_records) {
+    hash_sensitivity_record(h, record);
+  }
+
   topology.topology_revision = h;
   return topology;
 }
@@ -9891,6 +11749,16 @@ CutCurvedValidityDiagnostic diagnose_cut_topology_validity(
         "high-order parent geometry is using recorded linearized-cut mode");
   }
   for (const auto& polygon : topology.interface_polygons) {
+    const auto exact_curved_patch =
+        std::find_if(topology.curved_patches.begin(),
+                     topology.curved_patches.end(),
+                     [&](const auto& patch) {
+                       return patch.stable_id == polygon.stable_id &&
+                              patch.exact_topology_available &&
+                              !patch.linearized_surrogate;
+                     });
+    const bool uses_exact_curved_topology =
+        exact_curved_patch != topology.curved_patches.end();
     const auto vertices = polygon_topology_vertices(topology, polygon);
     if (std::any_of(vertices.begin(), vertices.end(), [](const auto* vertex) {
           return vertex == nullptr;
@@ -9911,26 +11779,47 @@ CutCurvedValidityDiagnostic diagnose_cut_topology_validity(
       fail("cut interface polygon contains non-finite point or normal data");
       break;
     }
-    if (projected_polygon_self_intersects(points, polygon.normal, folding_tol)) {
-      diagnostic.has_folded_interface = true;
-      fail("cut interface polygon is folded or self-intersecting in its projected tangent plane");
-      break;
+    bool saw_coplanarity_adaptive_decision = false;
+    if (!uses_exact_curved_topology && points.size() >= 4u) {
+      for (std::size_t i = 1; i < points.size(); ++i) {
+        const auto coplanarity = coplanarity3d_decision(
+            polygon.normal, points.front(), points[i], folding_tol);
+        saw_coplanarity_adaptive_decision =
+            saw_coplanarity_adaptive_decision ||
+            coplanarity.used_adaptive_precision ||
+            coplanarity.tolerance_resolved;
+      }
+    }
+    if (saw_coplanarity_adaptive_decision) {
+      diagnostic.messages.push_back(
+          "adaptive/exact predicate decision: domain=coplanarity-3d");
     }
     const real_t polygon_area = points.size() >= 3u ? MeshGeometry::polygon_area(points) : real_t{0.0};
-    if (polygon_area > min_measure &&
+    if (!uses_exact_curved_topology &&
+        polygon_area > min_measure &&
         has_duplicate_or_short_polygon_edge(points, folding_tol)) {
       diagnostic.has_degenerate_intersection = true;
       diagnostic.has_degenerate_polygon = true;
-      fail("cut interface polygon has duplicate vertices or a zero-length edge");
+      fail("cut interface polygon has duplicate vertices or a zero-length edge "
+           "(adaptive/exact predicate decision: domain=duplicate-detection)");
+      break;
+    }
+    if (!uses_exact_curved_topology &&
+        projected_polygon_self_intersects(points, polygon.normal, folding_tol)) {
+      diagnostic.has_folded_interface = true;
+      fail("cut interface polygon is folded or self-intersecting in its projected tangent plane "
+           "(adaptive/exact predicate decision: domain=orientation-2d)");
       break;
     }
     const auto polygon_normal = unit_or_default(polygon.normal);
-    for (const auto* vertex : vertices) {
-      if (norm(vertex->normal) > folding_tol &&
-          dot(unit_or_default(vertex->normal), polygon_normal) < real_t{-0.25}) {
-        diagnostic.has_folded_interface = true;
-        fail("cut interface polygon has an inverted vertex normal");
-        break;
+    if (!uses_exact_curved_topology && !topology.linearized_cut_mode) {
+      for (const auto* vertex : vertices) {
+        if (norm(vertex->normal) > folding_tol &&
+            dot(unit_or_default(vertex->normal), polygon_normal) < real_t{-0.25}) {
+          diagnostic.has_folded_interface = true;
+          fail("cut interface polygon has an inverted vertex normal");
+          break;
+        }
       }
     }
     if (!diagnostic.ok) {
@@ -9967,6 +11856,13 @@ CutCurvedValidityDiagnostic diagnose_cut_topology_validity(
     if (!patch.parametric_coordinates_valid) {
       diagnostic.has_degenerate_intersection = true;
       fail("curved cut patch has invalid parent parametric coordinates");
+      break;
+    }
+    if (patch.embedded_kind == EmbeddedGeometryKind::BooleanComposite &&
+        (patch.active_child_ordinals.size() != patch.ordered_vertices.size() ||
+         patch.active_child_provenance.size() != patch.ordered_vertices.size())) {
+      diagnostic.has_degenerate_intersection = true;
+      fail("Boolean curved cut patch has inconsistent active-child provenance");
       break;
     }
     if (patch.linearized_surrogate && !patch.exact_topology_available) {
@@ -10196,6 +12092,82 @@ CutDistributedExchangePacket make_distributed_cut_exchange_packet(
     const CutTopologyRecord& topology) {
   CutDistributedExchangePacket packet;
   packet.revision_key = append_hash(map.revision_key(), topology.topology_revision);
+  std::map<std::uint64_t, const CutCurvedPatchRecord*> curved_patch_by_id;
+  for (const auto& patch : topology.curved_patches) {
+    curved_patch_by_id.emplace(patch.stable_id, &patch);
+  }
+  std::map<std::uint64_t, std::vector<const CutQuadratureGeometrySensitivityRecord*>>
+      sensitivity_by_source_id;
+  for (const auto& sensitivity : topology.sensitivity_records) {
+    sensitivity_by_source_id[sensitivity.source_stable_id].push_back(&sensitivity);
+  }
+  const auto apply_sensitivity_metadata = [&](CutDistributedEntityRecord& record) {
+    const auto it = sensitivity_by_source_id.find(record.stable_id);
+    if (it == sensitivity_by_source_id.end()) {
+      return;
+    }
+    for (const auto* sensitivity : it->second) {
+      record.geometry_order = std::max(record.geometry_order, sensitivity->geometry_order);
+      record.embedded_kind = sensitivity->embedded_kind;
+      record.configuration = sensitivity->configuration;
+      if (record.construction_policy.empty()) {
+        record.construction_policy = sensitivity->construction_policy;
+      }
+      record.geometry_sensitivity_dof_count =
+          std::max(record.geometry_sensitivity_dof_count,
+                   sensitivity->parent_geometry_dofs.size());
+      record.geometry_sensitivity_sample_count += sensitivity->samples.size();
+      record.geometry_sensitivity_ad_compatible =
+          record.geometry_sensitivity_ad_compatible || sensitivity->ad_compatible;
+      record.location_sensitivity_available =
+          record.location_sensitivity_available ||
+          sensitivity->location_sensitivity_available;
+      record.jacobian_sensitivity_available =
+          record.jacobian_sensitivity_available ||
+          sensitivity->jacobian_sensitivity_available;
+      record.measure_sensitivity_available =
+          record.measure_sensitivity_available ||
+          sensitivity->measure_sensitivity_available;
+      record.normal_sensitivity_available =
+          record.normal_sensitivity_available ||
+          sensitivity->normal_sensitivity_available;
+      record.quadrature_weight_sensitivity_available =
+          record.quadrature_weight_sensitivity_available ||
+          sensitivity->quadrature_weight_sensitivity_available;
+    }
+  };
+  const auto apply_curved_patch_metadata = [&](CutDistributedEntityRecord& record,
+                                              const CutCurvedPatchRecord& patch) {
+    record.geometry_order = patch.geometry_order;
+    record.embedded_kind = patch.embedded_kind;
+    record.configuration = patch.configuration;
+    record.composition_operation = patch.composition_operation;
+    record.construction_policy = patch.construction_policy;
+    record.curved_isoparametric = true;
+    record.parametric_coordinates_valid = patch.parametric_coordinates_valid;
+    record.exact_topology_available = patch.exact_topology_available;
+    record.linearized_surrogate = patch.linearized_surrogate;
+    record.isoparametric_quadrature_available =
+        patch.isoparametric_quadrature_available;
+    record.parent_parametric_coordinates = patch.parent_parametric_coordinates;
+    record.quadrature_parent_parametric_coordinates =
+        patch.quadrature_parent_parametric_coordinates;
+    record.quadrature_weights = patch.quadrature_weights;
+    record.active_child_ordinals = patch.active_child_ordinals;
+    record.active_child_provenance_ids.clear();
+    record.active_child_provenance_ids.reserve(patch.active_child_provenance.size());
+    for (const auto& provenance : patch.active_child_provenance) {
+      record.active_child_provenance_ids.push_back(provenance_id(provenance));
+    }
+    record.predicate_fallback_used = patch.predicate_fallback_used;
+    record.predicate_fallback_tolerance_resolved =
+        patch.predicate_fallback_tolerance_resolved;
+    record.predicate_fallback_policy = patch.predicate_fallback_policy;
+    record.predicate_fallback_reason = patch.predicate_fallback_reason;
+    record.predicate_fallback_child_ordinals =
+        patch.predicate_fallback_child_ordinals;
+    apply_sensitivity_metadata(record);
+  };
   auto add_record = [&](std::uint64_t stable_id,
                         std::uint64_t cut_topology_id,
                         CutTopologyEntityKind kind,
@@ -10252,6 +12224,12 @@ CutDistributedExchangePacket make_distributed_cut_exchange_packet(
     if (!polygon.ordered_vertices.empty()) {
       record.face_ids.push_back(polygon.ordered_vertices);
     }
+    const auto patch_it = curved_patch_by_id.find(polygon.stable_id);
+    if (patch_it != curved_patch_by_id.end()) {
+      apply_curved_patch_metadata(record, *patch_it->second);
+    } else {
+      apply_sensitivity_metadata(record);
+    }
   }
   for (const auto& region : topology.side_regions) {
     auto& record = add_record(region.stable_id,
@@ -10269,6 +12247,38 @@ CutDistributedExchangePacket make_distributed_cut_exchange_packet(
     record.closed_topology = region.closed_integration_topology;
     record.vertex_ids = region.integration_region_vertices;
     record.face_ids = region.integration_region_faces;
+    record.curved_isoparametric = region.curved_isoparametric_topology;
+    record.construction_policy = side_region_curved_construction_policy(region);
+    record.isoparametric_quadrature_available =
+        std::any_of(region.integration_subcells.begin(),
+                    region.integration_subcells.end(),
+                    [](const auto& subcell) {
+                      return subcell.curved_isoparametric &&
+                             subcell.measure_from_isoparametric_quadrature;
+                    });
+    for (const auto& subcell : region.integration_subcells) {
+      if (!subcell.curved_isoparametric ||
+          !subcell.measure_from_isoparametric_quadrature ||
+          subcell.parent_parametric_vertices.empty()) {
+        continue;
+      }
+      const auto sample_weight =
+          subcell.measure / static_cast<real_t>(subcell.parent_parametric_vertices.size());
+      for (const auto& xi : subcell.parent_parametric_vertices) {
+        record.parent_parametric_coordinates.push_back(xi);
+        record.quadrature_parent_parametric_coordinates.push_back(xi);
+        record.quadrature_weights.push_back(sample_weight);
+      }
+    }
+    record.linearized_surrogate =
+        record.curved_isoparametric &&
+        record.construction_policy != kTrueCurvedArrangementPolicy &&
+        record.construction_policy != kTrueCurvedSubdivisionArrangementPolicy;
+    record.exact_topology_available =
+        record.curved_isoparametric &&
+        (record.construction_policy == kTrueCurvedArrangementPolicy ||
+         record.construction_policy == kTrueCurvedSubdivisionArrangementPolicy);
+    apply_sensitivity_metadata(record);
   }
   return deduplicate_cut_exchange_packet(std::move(packet));
 }
@@ -10418,6 +12428,48 @@ CutDistributedStateDiagnostic diagnose_distributed_cut_state(
       diagnostic.missing_ghost_payload = true;
       diagnostic.messages.push_back("positive-measure exchanged cut side region lacks closed-topology payload");
     }
+    if (entity.curved_isoparametric) {
+      if (entity.construction_policy.empty()) {
+        diagnostic.ok = false;
+        diagnostic.missing_ghost_payload = true;
+        diagnostic.messages.push_back("exchanged curved cut entity lacks construction-policy metadata");
+      }
+      if (entity.parametric_coordinates_valid &&
+          entity.parent_parametric_coordinates.empty() &&
+          entity.kind == CutTopologyEntityKind::InterfacePolygon) {
+        diagnostic.ok = false;
+        diagnostic.missing_ghost_payload = true;
+        diagnostic.messages.push_back("exchanged curved interface entity lacks parent-parametric coordinates");
+      }
+      if (entity.isoparametric_quadrature_available &&
+          (entity.quadrature_parent_parametric_coordinates.empty() ||
+           entity.quadrature_weights.empty())) {
+        diagnostic.ok = false;
+        diagnostic.missing_ghost_payload = true;
+        diagnostic.messages.push_back("exchanged curved cut entity lacks isoparametric quadrature metadata");
+      }
+      if (entity.geometry_sensitivity_ad_compatible &&
+          entity.geometry_sensitivity_sample_count == 0u) {
+        diagnostic.ok = false;
+        diagnostic.missing_ghost_payload = true;
+        diagnostic.messages.push_back("exchanged curved cut entity reports AD-compatible sensitivity without samples");
+      }
+      if (entity.predicate_fallback_used) {
+        if (entity.predicate_fallback_policy.empty() ||
+            entity.predicate_fallback_reason.empty() ||
+            !entity.predicate_fallback_tolerance_resolved) {
+          diagnostic.ok = false;
+          diagnostic.missing_ghost_payload = true;
+          diagnostic.messages.push_back("exchanged curved cut entity has incomplete predicate-fallback metadata");
+        }
+        if (entity.embedded_kind == EmbeddedGeometryKind::BooleanComposite &&
+            entity.predicate_fallback_child_ordinals.empty()) {
+          diagnostic.ok = false;
+          diagnostic.missing_ghost_payload = true;
+          diagnostic.messages.push_back("exchanged Boolean cut entity lacks predicate-fallback child ordinals");
+        }
+      }
+    }
   }
   return diagnostic;
 }
@@ -10512,96 +12564,96 @@ std::vector<CutSupportMatrixEntry> cut_support_matrix() {
   for (const auto family : {CellFamily::Line, CellFamily::Triangle, CellFamily::Quad,
                             CellFamily::Tetra, CellFamily::Hex}) {
     for (const auto* fe_path : fe_paths) {
-      add(family,
-          2,
-          EmbeddedGeometryKind::Plane,
-          false,
-          "curved-isoparametric-cut",
-          "curved-topology-subdivision",
-          "geometric-conditioning-hooks",
-          fe_path,
-          CutSupportStatus::ImplementedUnqualified,
-          "quadratic starter path records parent-parametric cut topology, isoparametric topology-derived quadrature, and execution-path metadata for line, triangle, quad, tetra, and hex parents; full arbitrary-order arrangement qualification remains future work");
+      for (const bool distributed : {false, true}) {
+        add(family,
+            2,
+            EmbeddedGeometryKind::Plane,
+            distributed,
+            "curved-isoparametric-cut",
+            "curved-topology-subdivision",
+            "geometric-conditioning-hooks",
+            fe_path,
+            CutSupportStatus::ImplementedUnqualified,
+            distributed
+                ? "distributed quadratic starter path records parent-parametric cut topology, isoparametric topology-derived quadrature, curved construction metadata, sensitivity capability flags, and execution-path metadata through owner/ghost exchange for line, triangle, quad, tetra, and hex parents"
+                : "quadratic starter path records parent-parametric cut topology, isoparametric topology-derived quadrature, and execution-path metadata for line, triangle, quad, tetra, and hex parents; full arbitrary-order arrangement qualification remains future work");
+      }
     }
   }
   for (const auto* fe_path : fe_paths) {
-    add(CellFamily::Line,
-        -1,
-        EmbeddedGeometryKind::Plane,
-        false,
-        "curved-isoparametric-cut",
-        "true-curved-arrangement",
-        "geometric-conditioning-hooks",
-        fe_path,
-        CutSupportStatus::ImplementedUnqualified,
-        "arbitrary-order high-order line/plane cuts use root-bracketed reference intervals, exact/non-surrogate curved patch metadata, isoparametric side measures, and execution-path metadata");
+    const auto add_true_curved = [&](CellFamily family,
+                                     EmbeddedGeometryKind kind,
+                                     std::string policy,
+                                     std::string qualification) {
+      for (const bool distributed : {false, true}) {
+        add(family,
+            -1,
+            kind,
+            distributed,
+            "curved-isoparametric-cut",
+            policy,
+            "geometric-conditioning-hooks",
+            fe_path,
+            CutSupportStatus::ImplementedUnqualified,
+            distributed
+                ? "distributed " + qualification +
+                      "; owner/ghost packets preserve curved construction metadata, parent-parametric coordinates, quadrature weights, provenance, and sensitivity capability flags"
+                : qualification);
+      }
+    };
+    add_true_curved(CellFamily::Line,
+                    EmbeddedGeometryKind::Plane,
+                    "true-curved-arrangement",
+                    "arbitrary-order high-order line/plane cuts use root-bracketed reference intervals, exact/non-surrogate curved patch metadata, isoparametric side measures, and execution-path metadata");
     for (const auto family : {CellFamily::Triangle, CellFamily::Quad}) {
-      add(family,
-          -1,
-          EmbeddedGeometryKind::Plane,
-          false,
-          "curved-isoparametric-cut",
-          "true-curved-arrangement",
-          "geometric-conditioning-hooks",
-          fe_path,
-          CutSupportStatus::ImplementedUnqualified,
-          "graph-compatible arbitrary-order high-order face/plane cuts use bracketed reference-space contour roots, exact/non-surrogate curved patch metadata, isoparametric side measures, and execution-path metadata");
+      add_true_curved(family,
+                      EmbeddedGeometryKind::Plane,
+                      "true-curved-arrangement",
+                      "graph-compatible arbitrary-order high-order face/plane cuts use bracketed reference-space contour roots, exact/non-surrogate curved patch metadata, isoparametric side measures, and execution-path metadata");
     }
-    add(CellFamily::Tetra,
-        -1,
-        EmbeddedGeometryKind::Plane,
-        false,
-        "curved-isoparametric-cut",
-        "true-curved-arrangement",
-        "geometric-conditioning-hooks",
-        fe_path,
-        CutSupportStatus::ImplementedUnqualified,
-        "graph-compatible arbitrary-order high-order tetra/plane cuts use reference-space root surfaces, exact/non-surrogate curved patch metadata, analytic mapped-Jacobian side and interface quadrature, and execution-path metadata");
-    add(CellFamily::Hex,
-        -1,
-        EmbeddedGeometryKind::Plane,
-        false,
-        "curved-isoparametric-cut",
-        "true-curved-arrangement",
-        "geometric-conditioning-hooks",
-        fe_path,
-        CutSupportStatus::ImplementedUnqualified,
-        "graph-compatible arbitrary-order high-order hex/plane cuts use tensor-product reference-space root surfaces, exact/non-surrogate curved patch metadata, analytic mapped-Jacobian side and interface quadrature, and execution-path metadata");
-    add(CellFamily::Wedge,
-        -1,
-        EmbeddedGeometryKind::Plane,
-        false,
-        "curved-isoparametric-cut",
-        "true-curved-arrangement",
-        "geometric-conditioning-hooks",
-        fe_path,
-        CutSupportStatus::ImplementedUnqualified,
-        "graph-compatible arbitrary-order high-order wedge/plane cuts use triangular-base reference-space root surfaces, exact/non-surrogate curved patch metadata, analytic mapped-Jacobian side and interface quadrature, and execution-path metadata");
-    add(CellFamily::Pyramid,
-        -1,
-        EmbeddedGeometryKind::Plane,
-        false,
-        "curved-isoparametric-cut",
-        "true-curved-arrangement",
-        "geometric-conditioning-hooks",
-        fe_path,
-        CutSupportStatus::ImplementedUnqualified,
-        "graph-compatible arbitrary-order high-order pyramid/plane cuts use shrinking-column reference-space root surfaces, exact/non-surrogate curved patch metadata, analytic mapped-Jacobian side and interface quadrature, and execution-path metadata");
+    add_true_curved(CellFamily::Tetra,
+                    EmbeddedGeometryKind::Plane,
+                    "true-curved-arrangement",
+                    "graph-compatible arbitrary-order high-order tetra/plane cuts use reference-space root surfaces, exact/non-surrogate curved patch metadata, analytic mapped-Jacobian side and interface quadrature, and execution-path metadata");
+    add_true_curved(CellFamily::Hex,
+                    EmbeddedGeometryKind::Plane,
+                    "true-curved-arrangement",
+                    "graph-compatible arbitrary-order high-order hex/plane cuts use tensor-product reference-space root surfaces, exact/non-surrogate curved patch metadata, analytic mapped-Jacobian side and interface quadrature, and execution-path metadata");
+    add_true_curved(CellFamily::Wedge,
+                    EmbeddedGeometryKind::Plane,
+                    "true-curved-arrangement",
+                    "graph-compatible arbitrary-order high-order wedge/plane cuts use triangular-base reference-space root surfaces, exact/non-surrogate curved patch metadata, analytic mapped-Jacobian side and interface quadrature, and execution-path metadata");
+    add_true_curved(CellFamily::Pyramid,
+                    EmbeddedGeometryKind::Plane,
+                    "true-curved-arrangement",
+                    "graph-compatible arbitrary-order high-order pyramid/plane cuts use shrinking-column reference-space root surfaces, exact/non-surrogate curved patch metadata, analytic mapped-Jacobian side and interface quadrature, and execution-path metadata");
     for (const auto family : {CellFamily::Triangle,
                               CellFamily::Quad,
                               CellFamily::Hex,
                               CellFamily::Wedge,
                               CellFamily::Pyramid}) {
-      add(family,
-          -1,
-          EmbeddedGeometryKind::Plane,
-          false,
-          "curved-isoparametric-cut",
-          "true-curved-subdivision-arrangement",
-          "geometric-conditioning-hooks",
-          fe_path,
-          CutSupportStatus::ImplementedUnqualified,
-          "non-graph high-order triangle/quad/hex/wedge/pyramid plane cuts use bounded isoparametric subcell subdivision with exact/non-surrogate patch metadata, closed curved side subcells, deterministic topology IDs, and execution-path metadata; full non-plane/general arrangement validation remains future work");
+      add_true_curved(family,
+                      EmbeddedGeometryKind::Plane,
+                      "true-curved-subdivision-arrangement",
+                      "non-graph high-order triangle/quad/hex/wedge/pyramid plane cuts use bounded isoparametric subcell subdivision with exact/non-surrogate patch metadata, closed curved side subcells, deterministic topology IDs, and execution-path metadata; full non-plane/general arrangement validation remains future work");
+    }
+    for (const auto family : {CellFamily::Line,
+                              CellFamily::Triangle,
+                              CellFamily::Quad,
+                              CellFamily::Tetra,
+                              CellFamily::Hex,
+                              CellFamily::Wedge,
+                              CellFamily::Pyramid}) {
+      for (const auto kind : {EmbeddedGeometryKind::Sphere,
+                              EmbeddedGeometryKind::SignedDistanceCallback,
+                              EmbeddedGeometryKind::LevelSetField,
+                              EmbeddedGeometryKind::TriangulatedSurface,
+                              EmbeddedGeometryKind::BooleanComposite}) {
+        add_true_curved(family,
+                        kind,
+                        "true-curved-subdivision-arrangement",
+                        "bounded high-order non-plane signed-distance, level-set, triangulated-surface, and Boolean composite cuts use tessellator-backed root-refined isoparametric subcell subdivision with exact/non-surrogate patch metadata, per-vertex active-child provenance including noncoincident child-child topology switches, recorded tolerance-resolved predicate fallback for coincident child interfaces, closed curved side subcells, deterministic topology IDs, and execution-path metadata");
+      }
     }
   }
   for (const auto family : {CellFamily::Line, CellFamily::Triangle, CellFamily::Quad,
@@ -10620,6 +12672,645 @@ std::vector<CutSupportMatrixEntry> cut_support_matrix() {
     }
   }
   return entries;
+}
+
+namespace {
+
+bool support_matrix_fe_path_is_advertised(const std::string& path) {
+  static const std::array<const char*, 6> paths{
+      "standard-assembly",
+      "matrix-free",
+      "forms-interpreter",
+      "ad",
+      "symbolic-tangent",
+      "jit"};
+  return std::any_of(paths.begin(), paths.end(), [&](const auto* candidate) {
+    return path == candidate;
+  });
+}
+
+bool support_matrix_row_is_curved(const CutSupportMatrixEntry& entry) {
+  return entry.cut_mode == "curved-isoparametric-cut";
+}
+
+bool support_matrix_row_is_implemented(const CutSupportMatrixEntry& entry) {
+  return entry.status != CutSupportStatus::Unsupported;
+}
+
+std::string support_matrix_row_key(const CutSupportMatrixEntry& entry) {
+  return std::to_string(static_cast<int>(entry.parent_family)) + ":" +
+         std::to_string(entry.geometry_order) + ":" +
+         std::to_string(static_cast<int>(entry.embedded_kind)) + ":" +
+         (entry.distributed ? "mpi" : "serial") + ":" +
+         entry.cut_mode + ":" +
+         entry.quadrature_policy + ":" +
+         entry.conditioning_policy + ":" +
+         entry.fe_execution_path;
+}
+
+bool support_matrix_row_has_true_curved_topology_sensitivity_evidence(
+    const CutSupportMatrixEntry& entry);
+
+bool support_matrix_row_has_first_order_linearized_validation_evidence(
+    const CutSupportMatrixEntry& entry) {
+  return entry.geometry_order == 1 &&
+         entry.cut_mode == "linearized-cut" &&
+         entry.quadrature_policy == "topology-subdivision" &&
+         entry.conditioning_policy == "geometric-conditioning-hooks" &&
+         support_matrix_fe_path_is_advertised(entry.fe_execution_path) &&
+         (entry.parent_family == CellFamily::Line ||
+          entry.parent_family == CellFamily::Triangle ||
+          entry.parent_family == CellFamily::Quad ||
+          entry.parent_family == CellFamily::Tetra ||
+          entry.parent_family == CellFamily::Hex ||
+          entry.parent_family == CellFamily::Wedge ||
+          entry.parent_family == CellFamily::Pyramid ||
+          entry.parent_family == CellFamily::Polygon ||
+          entry.parent_family == CellFamily::Polyhedron) &&
+         (entry.embedded_kind == EmbeddedGeometryKind::Plane ||
+          entry.embedded_kind == EmbeddedGeometryKind::Sphere ||
+          entry.embedded_kind == EmbeddedGeometryKind::TriangulatedSurface ||
+          entry.embedded_kind == EmbeddedGeometryKind::LevelSetField ||
+         entry.embedded_kind == EmbeddedGeometryKind::BooleanComposite);
+}
+
+bool support_matrix_row_has_first_order_linearized_sensitivity_evidence(
+    const CutSupportMatrixEntry& entry) {
+  return support_matrix_row_has_first_order_linearized_validation_evidence(entry);
+}
+
+bool support_matrix_row_has_second_order_linearized_validation_evidence(
+    const CutSupportMatrixEntry& entry) {
+  return entry.geometry_order == 2 &&
+         !entry.distributed &&
+         entry.cut_mode == "linearized-cut" &&
+         entry.quadrature_policy == "topology-subdivision" &&
+         entry.conditioning_policy == "geometric-conditioning-hooks" &&
+         support_matrix_fe_path_is_advertised(entry.fe_execution_path) &&
+         (entry.parent_family == CellFamily::Line ||
+          entry.parent_family == CellFamily::Triangle ||
+          entry.parent_family == CellFamily::Quad ||
+          entry.parent_family == CellFamily::Tetra ||
+          entry.parent_family == CellFamily::Hex ||
+          entry.parent_family == CellFamily::Wedge ||
+          entry.parent_family == CellFamily::Pyramid) &&
+         (entry.embedded_kind == EmbeddedGeometryKind::Plane ||
+          entry.embedded_kind == EmbeddedGeometryKind::Sphere ||
+          entry.embedded_kind == EmbeddedGeometryKind::TriangulatedSurface ||
+          entry.embedded_kind == EmbeddedGeometryKind::LevelSetField ||
+          entry.embedded_kind == EmbeddedGeometryKind::BooleanComposite);
+}
+
+bool support_matrix_row_has_second_order_linearized_sensitivity_evidence(
+    const CutSupportMatrixEntry& entry) {
+  return support_matrix_row_has_second_order_linearized_validation_evidence(entry);
+}
+
+bool support_matrix_row_has_full_validation_evidence(
+    const CutSupportMatrixEntry& entry) {
+  if (entry.conditioning_policy != "geometric-conditioning-hooks") {
+    return false;
+  }
+  const bool advertised_path =
+      support_matrix_fe_path_is_advertised(entry.fe_execution_path);
+  const bool has_linearized_first_order_validation =
+      support_matrix_row_has_first_order_linearized_validation_evidence(entry);
+  const bool has_linearized_second_order_validation =
+      support_matrix_row_has_second_order_linearized_validation_evidence(entry);
+  const bool has_quadratic_curved_starter_validation =
+      entry.geometry_order == 2 &&
+      entry.embedded_kind == EmbeddedGeometryKind::Plane &&
+      entry.cut_mode == "curved-isoparametric-cut" &&
+      entry.quadrature_policy == "curved-topology-subdivision" &&
+      (entry.parent_family == CellFamily::Line ||
+       entry.parent_family == CellFamily::Triangle ||
+       entry.parent_family == CellFamily::Quad ||
+       entry.parent_family == CellFamily::Tetra ||
+       entry.parent_family == CellFamily::Hex);
+  const bool has_true_curved_topology_validation =
+      entry.geometry_order < 0 &&
+      entry.cut_mode == "curved-isoparametric-cut" &&
+      support_matrix_row_has_true_curved_topology_sensitivity_evidence(entry);
+  return advertised_path &&
+         (has_linearized_first_order_validation ||
+          has_linearized_second_order_validation ||
+          has_quadratic_curved_starter_validation ||
+          has_true_curved_topology_validation);
+}
+
+bool support_matrix_row_has_quadratic_curved_starter_sensitivity_evidence(
+    const CutSupportMatrixEntry& entry) {
+  return entry.geometry_order == 2 &&
+         entry.embedded_kind == EmbeddedGeometryKind::Plane &&
+         entry.cut_mode == "curved-isoparametric-cut" &&
+         entry.quadrature_policy == "curved-topology-subdivision" &&
+         entry.conditioning_policy == "geometric-conditioning-hooks" &&
+         support_matrix_fe_path_is_advertised(entry.fe_execution_path) &&
+         quadratic_curved_plane_starter_family(entry.parent_family);
+}
+
+bool true_curved_plane_subdivision_family(CellFamily family) noexcept {
+  return family == CellFamily::Triangle ||
+         family == CellFamily::Quad ||
+         family == CellFamily::Hex ||
+         family == CellFamily::Wedge ||
+         family == CellFamily::Pyramid;
+}
+
+bool support_matrix_row_has_true_curved_topology_sensitivity_evidence(
+    const CutSupportMatrixEntry& entry) {
+  if (entry.geometry_order >= 0 ||
+      entry.cut_mode != "curved-isoparametric-cut" ||
+      entry.conditioning_policy != "geometric-conditioning-hooks" ||
+      !support_matrix_fe_path_is_advertised(entry.fe_execution_path) ||
+      !curved_cut_sensitivity_family(entry.parent_family)) {
+    return false;
+  }
+  if (entry.quadrature_policy == "true-curved-arrangement") {
+    return entry.embedded_kind == EmbeddedGeometryKind::Plane;
+  }
+  if (entry.quadrature_policy == "true-curved-subdivision-arrangement") {
+    if (entry.embedded_kind == EmbeddedGeometryKind::Plane) {
+      return true_curved_plane_subdivision_family(entry.parent_family);
+    }
+    return true_curved_subdivision_sensitivity_embedded_kind(entry.embedded_kind);
+  }
+  return false;
+}
+
+struct SupportEvidenceText {
+  const char* id;
+  const char* description;
+  const char* verification;
+};
+
+SupportEvidenceText topology_acceptance_evidence_for_row(
+    const CutSupportMatrixEntry& entry) {
+  if (support_matrix_row_has_first_order_linearized_validation_evidence(entry)) {
+    return {
+        "phase26.topology.linearized-first-order-all-families",
+        "linearized topology-subdivision rows reconstruct explicit ordered cut vertices, closed side-region records, stable cut IDs, parent provenance, Boolean side-region provenance, restart metadata, and deterministic distributed owner/ghost records for this exact support-matrix row",
+        "CutCell.LinearFamilySideRegionsConserveMeasuresForAdvertisedFamilies; CutCell.FirstOrderLinearizedNonPlaneRowsHaveRowExactValidationEvidence; CutCell.BooleanCompositeAndCutTopologyAreDeterministicAndRestartVisible; test_CutCellMPI; test_CutCellMPI_4ranks"};
+  }
+  if (support_matrix_row_has_second_order_linearized_validation_evidence(entry)) {
+    return {
+        "phase26.topology.linearized-second-order-high-order-families",
+        "controlled second-order linearized topology-subdivision rows reconstruct explicit ordered high-order cut records from geometry DOF provenance, parent-parametric interface samples, closed side-region records, stable cut IDs, and restart-visible topology revisions for this exact support-matrix row",
+        "CutCell.SecondOrderLinearizedRowsHaveFullValidationAndAnalyticADSensitivityEvidence; CutCell.HighOrder*Uses*GeometryDofProvenance; CutCell.CurvedCutRestartRoundtripAndRollbackQualifiesSupportMatrixRows"};
+  }
+  if (support_matrix_row_has_quadratic_curved_starter_sensitivity_evidence(entry)) {
+    return {
+        "phase26.topology.quadratic-curved-plane-starter",
+        "quadratic plane-cut curved-isoparametric starter rows reconstruct explicit ordered parent-parametric curved topology, stable curved cut IDs, geometry DOF provenance, restart metadata, and deterministic distributed curved owner/ghost records where advertised for this exact support-matrix row",
+        "CutCell.QuadraticCurvedStarterRowsHaveFullValidationEvidence; CutCell.CurvedCutRestartRoundtripAndRollbackQualifiesSupportMatrixRows; test_CutCellMPI distributed curved metadata checks"};
+  }
+  if (support_matrix_row_has_true_curved_topology_sensitivity_evidence(entry)) {
+    return {
+        "phase26.topology.true-curved-arrangement-subdivision",
+        "true-curved arrangement and supported true-curved subdivision rows reconstruct explicit ordered parent-parametric topology, active embedded-child provenance, topology-switch or predicate-fallback provenance, stable cut IDs, restart metadata, and deterministic distributed curved owner/ghost records where advertised for this exact support-matrix row",
+        "CutCell.TrueCurvedArrangement* validation checks; CutCell.TrueCurvedAffineHexPlaneCutMatchesAnalyticSlabReference; CutCell.TrueCurvedAffineHexNearBoundaryPlaneCutMatchesAnalyticSliverReference; CutCell.TrueCurvedAffineHexInteriorSphereCutReportsAnalyticSphereErrorBound; CutCell.CurvedCutRestartRoundtripAndRollbackQualifiesSupportMatrixRows; test_CutCellMPI distributed curved metadata checks"};
+  }
+  return {
+      "phase26.topology.unclassified-implemented-row",
+      "implemented support-matrix row has topology evidence but no row-specific Phase 26 acceptance category",
+      "SupportMatrixTopologyAndQuadratureAcceptanceEvidenceIsRowSpecific"};
+}
+
+SupportEvidenceText quadrature_acceptance_evidence_for_row(
+    const CutSupportMatrixEntry& entry) {
+  if (support_matrix_row_has_first_order_linearized_validation_evidence(entry)) {
+    return {
+        "phase26.quadrature.linearized-first-order-topology-derived",
+        "linearized topology-subdivision rows generate cut-volume, cut-face, and embedded-interface quadrature from reconstructed cut topology with parent provenance, topology-revision metadata, conservation diagnostics, and analytic exactness evidence for this exact support-matrix row",
+        "CutCell.LinearFamilySideRegionsConserveMeasuresForAdvertisedFamilies; CutCell.FirstOrderLinearizedNonPlaneRowsHaveRowExactValidationEvidence; CutQuadrature conservation and analytic exactness tests; CutIntegrationInfrastructure.LinearizedCutDataIsIdenticalAcrossAllExecutionPaths; test_CutCellMPI"};
+  }
+  if (support_matrix_row_has_second_order_linearized_validation_evidence(entry)) {
+    return {
+        "phase26.quadrature.linearized-second-order-topology-derived",
+        "controlled second-order linearized topology-subdivision rows generate topology-derived cut quadrature with parent-parametric high-order geometry metadata, conservation diagnostics, analytic exactness evidence, and identical FE execution-path imports for this exact support-matrix row",
+        "CutCell.SecondOrderLinearizedRowsHaveFullValidationAndAnalyticADSensitivityEvidence; CutQuadrature conservation and analytic exactness tests; CutIntegrationInfrastructure.QuadraticCurvedPlaneCutDataIsIdenticalAcrossAllExecutionPaths"};
+  }
+  if (support_matrix_row_has_quadratic_curved_starter_sensitivity_evidence(entry)) {
+    return {
+        "phase26.quadrature.quadratic-curved-plane-starter",
+        "quadratic plane-cut curved-isoparametric starter rows generate parent-parametric topology-derived curved quadrature with isoparametric weights, conservation diagnostics, analytic exactness evidence, and identical FE execution-path imports for this exact support-matrix row",
+        "CutCell.QuadraticCurvedStarterRowsHaveFullValidationEvidence; CutQuadrature conservation and analytic exactness tests; CutIntegrationInfrastructure.QuadraticCurvedPlaneCutDataIsIdenticalAcrossAllExecutionPaths; test_CutCellMPI distributed curved metadata checks"};
+  }
+  if (support_matrix_row_has_true_curved_topology_sensitivity_evidence(entry)) {
+    return {
+        "phase26.quadrature.true-curved-arrangement-subdivision",
+        "true-curved arrangement and supported true-curved subdivision rows generate quadrature from reconstructed parent-parametric cut topology with active-child provenance, predicate-policy metadata, conservation diagnostics, analytic exactness evidence, and identical FE execution-path imports for this exact support-matrix row",
+        "CutCell.TrueCurvedArrangement* validation checks; CutCell.TrueCurvedAffineHexPlaneCutMatchesAnalyticSlabReference; CutCell.TrueCurvedAffineHexNearBoundaryPlaneCutMatchesAnalyticSliverReference; CutCell.TrueCurvedAffineHexInteriorSphereCutReportsAnalyticSphereErrorBound; CutQuadrature conservation and analytic exactness tests; CutIntegrationInfrastructure.ImportsTrueCurved* path parity checks; test_CutCellMPI distributed curved metadata checks"};
+  }
+  return {
+      "phase26.quadrature.unclassified-implemented-row",
+      "implemented support-matrix row has quadrature evidence but no row-specific Phase 26 acceptance category",
+      "SupportMatrixTopologyAndQuadratureAcceptanceEvidenceIsRowSpecific"};
+}
+
+void add_ledger_evidence(
+    std::vector<CutSupportMatrixEvidenceRecord>& ledger,
+    const CutSupportMatrixEntry& entry,
+    CutSupportEvidenceDomain domain,
+    std::string evidence_id,
+    std::string description,
+    std::string verification) {
+  CutSupportMatrixEvidenceRecord evidence;
+  evidence.entry = entry;
+  evidence.domain = domain;
+  evidence.evidence_id = std::move(evidence_id);
+  evidence.description = std::move(description);
+  evidence.verification = std::move(verification);
+  ledger.push_back(std::move(evidence));
+}
+
+void add_evidence(CutSupportMatrixQualificationRecord& record,
+                  bool& field,
+                  const CutSupportMatrixEvidenceRecord& evidence) {
+  field = true;
+  std::string message = evidence.evidence_id;
+  if (!evidence.description.empty()) {
+    message += ": " + evidence.description;
+  }
+  if (!evidence.verification.empty()) {
+    message += " [" + evidence.verification + "]";
+  }
+  record.evidence.push_back(std::move(message));
+}
+
+void apply_evidence(CutSupportMatrixQualificationRecord& record,
+                    const CutSupportMatrixEvidenceRecord& evidence) {
+  switch (evidence.domain) {
+    case CutSupportEvidenceDomain::Topology:
+      add_evidence(record, record.topology_evidence, evidence);
+      break;
+    case CutSupportEvidenceDomain::Quadrature:
+      add_evidence(record, record.quadrature_evidence, evidence);
+      break;
+    case CutSupportEvidenceDomain::FeExecution:
+      add_evidence(record, record.fe_execution_evidence, evidence);
+      break;
+    case CutSupportEvidenceDomain::RestartRollback:
+      add_evidence(record, record.restart_rollback_evidence, evidence);
+      break;
+    case CutSupportEvidenceDomain::Mpi:
+      add_evidence(record, record.mpi_evidence, evidence);
+      break;
+    case CutSupportEvidenceDomain::Sensitivity:
+      add_evidence(record, record.sensitivity_evidence, evidence);
+      break;
+    case CutSupportEvidenceDomain::Diagnostic:
+      add_evidence(record, record.diagnostic_evidence, evidence);
+      break;
+    case CutSupportEvidenceDomain::FullValidation:
+      add_evidence(record, record.validation_evidence, evidence);
+      break;
+  }
+}
+
+void require_evidence(CutSupportMatrixQualificationRecord& record,
+                      bool required,
+                      bool present,
+                      std::string missing) {
+  if (required && !present) {
+    record.missing.push_back(std::move(missing));
+  }
+}
+
+void append_missing_domain(std::vector<CutSupportEvidenceDomain>& domains,
+                           CutSupportEvidenceDomain domain) {
+  if (std::find(domains.begin(), domains.end(), domain) == domains.end()) {
+    domains.push_back(domain);
+  }
+}
+
+bool contains_domain(const std::vector<CutSupportEvidenceDomain>& domains,
+                     CutSupportEvidenceDomain domain) {
+  return std::find(domains.begin(), domains.end(), domain) != domains.end();
+}
+
+std::string audit_summary_for_category(CutSupportAuditCategory category) {
+  switch (category) {
+    case CutSupportAuditCategory::Unsupported:
+      return "unsupported row is explicitly advertised as unsupported";
+    case CutSupportAuditCategory::FullyValidated:
+      return "all required Phase 26 support-matrix evidence domains are present";
+    case CutSupportAuditCategory::MissingAnalyticValidation:
+      return "implemented row is missing full analytic/literature validation evidence";
+    case CutSupportAuditCategory::MissingSensitivityEvidence:
+      return "implemented row is missing analytic, symbolic, AD, or JIT-compatible sensitivity evidence";
+    case CutSupportAuditCategory::MissingRestartOrMpiEvidence:
+      return "implemented row is missing restart/rollback or distributed MPI qualification evidence";
+    case CutSupportAuditCategory::MissingFeExecutionEvidence:
+      return "implemented row is missing FE execution-path parity evidence";
+    case CutSupportAuditCategory::AdvertisedTooBroadly:
+      return "implemented row is missing core topology, quadrature, or diagnostic evidence and should not be advertised at this support level";
+  }
+  return "unknown audit category";
+}
+
+} // namespace
+
+std::vector<CutSupportMatrixEvidenceRecord> cut_support_matrix_validation_ledger() {
+  std::vector<CutSupportMatrixEvidenceRecord> ledger;
+  const auto entries = cut_support_matrix();
+  ledger.reserve(entries.size() * 6u);
+
+  for (const auto& entry : entries) {
+    const bool implemented = support_matrix_row_is_implemented(entry);
+    const bool curved = support_matrix_row_is_curved(entry);
+
+    add_ledger_evidence(
+        ledger,
+        entry,
+        CutSupportEvidenceDomain::Diagnostic,
+        implemented
+            ? "phase26.diagnostic.implemented-capability-gates"
+            : "phase26.diagnostic.unsupported-row",
+        implemented
+            ? "capability gates and support-matrix diagnostics report unsupported family/order/geometry/mode/execution combinations"
+            : "unsupported support-matrix rows are explicitly advertised as unsupported with actionable qualification text",
+        "CutCell.BooleanCompositionDiagnosticsAndSupportMatrixAreExplicit; CutCell.SupportMatrixQualificationHarnessCoversAdvertisedRowsAndReportsGaps");
+
+    if (!implemented) {
+      continue;
+    }
+
+    const auto topology_evidence = topology_acceptance_evidence_for_row(entry);
+    add_ledger_evidence(
+        ledger,
+        entry,
+        CutSupportEvidenceDomain::Topology,
+        topology_evidence.id,
+        topology_evidence.description,
+        topology_evidence.verification);
+    const auto quadrature_evidence = quadrature_acceptance_evidence_for_row(entry);
+    add_ledger_evidence(
+        ledger,
+        entry,
+        CutSupportEvidenceDomain::Quadrature,
+        quadrature_evidence.id,
+        quadrature_evidence.description,
+        quadrature_evidence.verification);
+    if (support_matrix_fe_path_is_advertised(entry.fe_execution_path)) {
+      add_ledger_evidence(
+          ledger,
+          entry,
+          CutSupportEvidenceDomain::FeExecution,
+          "phase26.fe-execution.advertised-path",
+          "support-matrix execution-path metadata and production scalar cut-operator evaluation cover this exact standard assembly, matrix-free, interpreter, AD, symbolic tangent, or JIT consumer row",
+          "CutIntegrationInfrastructure.SupportMatrixQualificationHarnessCoversFEExecutionPaths; CutIntegrationInfrastructure.ProductionCutScalarOperatorsConsumeImportedTopologyAcrossAllExecutionPaths");
+    }
+    if (entry.distributed) {
+      add_ledger_evidence(
+          ledger,
+          entry,
+          CutSupportEvidenceDomain::Mpi,
+          "phase26.mpi.owner-ghost-cut-state",
+          "neighbor-sparse owner/ghost exchange, deterministic distributed revisions, migration, and rebalance qualification tests cover this distributed support-matrix row",
+          "test_CutCellMPI; test_CutCellMPI_4ranks");
+    }
+    if (curved) {
+      add_ledger_evidence(
+          ledger,
+          entry,
+          CutSupportEvidenceDomain::RestartRollback,
+          "phase26.restart.curved-cut-roundtrip-rollback",
+          "curved cut classification, embedded-geometry registry restart, callback application re-registration, deterministic topology-revision rebuild, and rejected-trial rollback are qualified for topology-derived curved rows",
+          "CutCell.CurvedCutRestartRoundtripAndRollbackQualifiesSupportMatrixRows");
+    } else {
+      add_ledger_evidence(
+          ledger,
+          entry,
+          CutSupportEvidenceDomain::RestartRollback,
+          "phase26.restart.linearized-cut-roundtrip-rollback",
+          "embedded geometry registry, cut classification, topology revision, predicate-policy, side-region, rollback, and restart metadata are covered for linearized cut rows",
+          "CutCell.KinematicConstraintProvenanceAndRestartMetadataArePreserved; CutCell.BooleanCompositeAndCutTopologyAreDeterministicAndRestartVisible");
+    }
+    if (support_matrix_row_has_first_order_linearized_sensitivity_evidence(entry)) {
+      add_ledger_evidence(
+          ledger,
+          entry,
+          CutSupportEvidenceDomain::Sensitivity,
+          "phase26.sensitivity.linearized-first-order-ad-compatible",
+          "first-order linearized topology-subdivision rows expose parent geometry DOFs plus topology-derived interface and side-region sensitivity samples for plane, sphere, level-set field, triangulated-surface, and Boolean composite cuts without production numerical perturbation stencils; polygon and polyhedron rows use the same deterministic linear subdivision/tessellation contract as cut topology",
+          "CutCell.FirstOrderLinearizedNonPlaneRowsHaveAnalyticADSensitivityEvidence; CutIntegrationInfrastructure.LinearizedNonPlaneCutSensitivityMetadataIsVisibleAcrossAllExecutionPaths; FE_Geometry_Tests CutQuadrature.* sensitivity checks; FE_Systems_Tests cut sensitivity terminals; test_CutCellMPI");
+    } else if (support_matrix_row_has_second_order_linearized_sensitivity_evidence(entry)) {
+      add_ledger_evidence(
+          ledger,
+          entry,
+          CutSupportEvidenceDomain::Sensitivity,
+          "phase26.sensitivity.linearized-second-order-ad-compatible",
+          "controlled second-order linearized topology-subdivision rows expose parent geometry DOFs plus tessellator-derived parent-parametric interface and side-region sensitivity samples for plane, sphere, level-set field, triangulated-surface, and Boolean composite cuts without production numerical perturbation stencils",
+          "CutCell.SecondOrderLinearizedRowsHaveFullValidationAndAnalyticADSensitivityEvidence; CutIntegrationInfrastructure.QuadraticCurvedPlaneCutSensitivityMetadataIsVisibleAcrossAllExecutionPaths; FE_Systems_Tests cut sensitivity terminals");
+    } else if (support_matrix_row_has_quadratic_curved_starter_sensitivity_evidence(entry)) {
+      add_ledger_evidence(
+          ledger,
+          entry,
+          CutSupportEvidenceDomain::Sensitivity,
+          "phase26.sensitivity.quadratic-curved-plane-ad-compatible",
+          "quadratic plane-cut curved-isoparametric starter rows expose parent-parametric quadrature coordinates plus analytic geometry shape values and gradients for AD, symbolic tangent, and JIT consumers without production numerical perturbation stencils; distributed rows preserve these capability flags through owner/ghost exchange",
+          "CutCell.QuadraticCurvedStarterRowsHaveAnalyticADSensitivityEvidence; CutIntegrationInfrastructure.QuadraticCurvedPlaneCutSensitivityMetadataIsVisibleAcrossAllExecutionPaths; test_CutCellMPI distributed curved metadata checks");
+    } else if (support_matrix_row_has_true_curved_topology_sensitivity_evidence(entry)) {
+      add_ledger_evidence(
+          ledger,
+          entry,
+          CutSupportEvidenceDomain::Sensitivity,
+          "phase26.sensitivity.true-curved-topology-ad-compatible",
+          "true-curved arrangement and supported true-curved subdivision rows expose parent-parametric quadrature/subcell coordinates plus analytic geometry shape values and gradients for AD, symbolic tangent, and JIT consumers without production numerical perturbation stencils; distributed rows preserve these capability flags through owner/ghost exchange",
+          "CutCell.TrueCurvedArrangement* sensitivity metadata checks; CutIntegrationInfrastructure.ImportsTrueCurved* sensitivity metadata checks; test_CutCellMPI distributed curved metadata checks");
+    }
+    if (support_matrix_row_has_full_validation_evidence(entry)) {
+      const bool second_order_linearized =
+          entry.geometry_order == 2 &&
+          entry.cut_mode == "linearized-cut" &&
+          entry.quadrature_policy == "topology-subdivision";
+      const bool quadratic_starter =
+          entry.cut_mode == "curved-isoparametric-cut" &&
+          entry.quadrature_policy == "curved-topology-subdivision";
+      const bool true_curved =
+          entry.cut_mode == "curved-isoparametric-cut" &&
+          (entry.quadrature_policy == "true-curved-arrangement" ||
+           entry.quadrature_policy == "true-curved-subdivision-arrangement");
+      add_ledger_evidence(
+          ledger,
+          entry,
+          CutSupportEvidenceDomain::FullValidation,
+          second_order_linearized
+              ? "phase26.validation.linearized-second-order-high-order-families-all-fe-paths"
+              : quadratic_starter
+              ? "phase26.validation.quadratic-curved-plane-starter-all-fe-paths"
+              : true_curved
+                    ? "phase26.validation.true-curved-topology-all-fe-paths"
+                    : "phase26.validation.linearized-first-order-all-linear-families-all-fe-paths",
+          second_order_linearized
+              ? "controlled second-order linearized-cut rows for line, triangle, quad, tetra, hex, wedge, and pyramid parents have tessellator-backed high-order topology, deterministic geometry-DOF provenance/restart evidence, topology-derived conservation, analytic/AD-compatible sensitivity metadata, and identical cut integration data across all advertised FE execution paths"
+              : quadratic_starter
+              ? "quadratic plane-cut curved-isoparametric starter rows for line, triangle, quad, tetra, and hex parents have topology-derived conservation, deterministic curved topology, restart/rollback, distributed curved-metadata exchange where advertised, and identical cut integration data across all advertised FE execution paths"
+              : true_curved
+                    ? "true-curved arrangement and supported true-curved subdivision rows have topology-derived conservation, deterministic curved topology, restart/rollback, analytic/AD-compatible sensitivity metadata, distributed curved-metadata exchange where advertised, and identical cut integration data across all advertised FE execution paths"
+                    : "first-order linearized-cut rows for every advertised linear parent family and embedded geometry kind have topology-derived conservation, deterministic provenance/restart evidence, distributed owner/ghost exchange where advertised, and identical cut integration data across all advertised FE execution paths",
+          second_order_linearized
+              ? "CutCell.SecondOrderLinearizedRowsHaveFullValidationAndAnalyticADSensitivityEvidence; CutCell.HighOrder*Uses*GeometryDofProvenance; CutIntegrationInfrastructure.QuadraticCurvedPlaneCutDataIsIdenticalAcrossAllExecutionPaths"
+              : quadratic_starter
+              ? "CutCell.QuadraticCurvedStarterRowsHaveFullValidationEvidence; CutIntegrationInfrastructure.QuadraticCurvedPlaneCutDataIsIdenticalAcrossAllExecutionPaths; test_CutCellMPI distributed curved metadata checks"
+              : true_curved
+                    ? "CutCell.TrueCurvedArrangement* validation checks; CutCell.TrueCurvedAffineHexPlaneCutMatchesAnalyticSlabReference; CutCell.TrueCurvedAffineHexNearBoundaryPlaneCutMatchesAnalyticSliverReference; CutCell.TrueCurvedAffineHexInteriorSphereCutReportsAnalyticSphereErrorBound; CutIntegrationInfrastructure.ImportsTrueCurved* path parity checks; test_CutCellMPI distributed curved metadata checks"
+                    : "CutCell.LinearFamilySideRegionsConserveMeasuresForAdvertisedFamilies; CutCell.FirstOrderLinearizedNonPlaneRowsHaveRowExactValidationEvidence; CutQuadrature analytic exactness tests; CutIntegrationInfrastructure.LinearizedCutDataIsIdenticalAcrossAllExecutionPaths; test_CutCellMPI");
+    }
+  }
+
+  return ledger;
+}
+
+std::vector<CutSupportMatrixQualificationRecord> qualify_cut_support_matrix() {
+  std::vector<CutSupportMatrixQualificationRecord> records;
+  const auto entries = cut_support_matrix();
+  const auto ledger = cut_support_matrix_validation_ledger();
+  std::map<std::string, std::vector<const CutSupportMatrixEvidenceRecord*>> ledger_by_key;
+  for (const auto& evidence : ledger) {
+    ledger_by_key[support_matrix_row_key(evidence.entry)].push_back(&evidence);
+  }
+  records.reserve(entries.size());
+
+  for (const auto& entry : entries) {
+    CutSupportMatrixQualificationRecord record;
+    record.entry = entry;
+
+    const bool implemented = support_matrix_row_is_implemented(entry);
+    const bool curved = support_matrix_row_is_curved(entry);
+
+    record.requires_topology_evidence = implemented;
+    record.requires_quadrature_evidence = implemented;
+    record.requires_fe_execution_evidence = implemented;
+    record.requires_restart_rollback_evidence = implemented;
+    record.requires_mpi_evidence = implemented && entry.distributed;
+    record.requires_sensitivity_evidence = implemented;
+    record.requires_diagnostic_evidence = true;
+    record.requires_validation_evidence = implemented;
+
+    const auto evidence_it = ledger_by_key.find(support_matrix_row_key(entry));
+    if (evidence_it != ledger_by_key.end()) {
+      for (const auto* evidence : evidence_it->second) {
+        apply_evidence(record, *evidence);
+      }
+    }
+
+    require_evidence(record,
+                     record.requires_topology_evidence,
+                     record.topology_evidence,
+                     "missing cut-topology reconstruction evidence");
+    require_evidence(record,
+                     record.requires_quadrature_evidence,
+                     record.quadrature_evidence,
+                     "missing topology-derived cut-quadrature evidence");
+    require_evidence(record,
+                     record.requires_fe_execution_evidence,
+                     record.fe_execution_evidence,
+                     "missing FE execution-path parity evidence");
+    require_evidence(record,
+                     record.requires_restart_rollback_evidence,
+                     record.restart_rollback_evidence,
+                     curved
+                         ? "missing arbitrary-order curved cut restart/rollback qualification evidence"
+                         : "missing cut restart/rollback qualification evidence");
+    require_evidence(record,
+                     record.requires_mpi_evidence,
+                     record.mpi_evidence,
+                     "missing distributed cut owner/ghost MPI qualification evidence");
+    require_evidence(record,
+                     record.requires_sensitivity_evidence,
+                     record.sensitivity_evidence,
+                     curved
+                         ? "missing analytic/AD/symbolic/JIT cut-sensitivity evidence for curved topology-derived quadrature"
+                         : "missing analytic/AD/symbolic/JIT cut-sensitivity evidence for this embedded geometry");
+    require_evidence(record,
+                     record.requires_diagnostic_evidence,
+                     record.diagnostic_evidence,
+                     "missing capability diagnostic evidence");
+    require_evidence(record,
+                     record.requires_validation_evidence,
+                     record.validation_evidence,
+                     "missing full support-matrix validation evidence for this advertised family/order/geometry/mode/quadrature/execution combination");
+
+    record.qualified = record.missing.empty();
+    records.push_back(std::move(record));
+  }
+
+  return records;
+}
+
+std::vector<CutSupportMatrixAuditRecord> audit_cut_support_matrix_validation() {
+  std::vector<CutSupportMatrixAuditRecord> audit;
+  auto records = qualify_cut_support_matrix();
+  audit.reserve(records.size());
+
+  for (auto& record : records) {
+    CutSupportMatrixAuditRecord row;
+    row.qualification = std::move(record);
+
+    if (row.qualification.entry.status == CutSupportStatus::Unsupported) {
+      row.category = CutSupportAuditCategory::Unsupported;
+      row.summary = audit_summary_for_category(row.category);
+      audit.push_back(std::move(row));
+      continue;
+    }
+
+    if (row.qualification.requires_topology_evidence &&
+        !row.qualification.topology_evidence) {
+      append_missing_domain(row.missing_domains, CutSupportEvidenceDomain::Topology);
+    }
+    if (row.qualification.requires_quadrature_evidence &&
+        !row.qualification.quadrature_evidence) {
+      append_missing_domain(row.missing_domains, CutSupportEvidenceDomain::Quadrature);
+    }
+    if (row.qualification.requires_fe_execution_evidence &&
+        !row.qualification.fe_execution_evidence) {
+      append_missing_domain(row.missing_domains, CutSupportEvidenceDomain::FeExecution);
+    }
+    if (row.qualification.requires_restart_rollback_evidence &&
+        !row.qualification.restart_rollback_evidence) {
+      append_missing_domain(row.missing_domains,
+                            CutSupportEvidenceDomain::RestartRollback);
+    }
+    if (row.qualification.requires_mpi_evidence &&
+        !row.qualification.mpi_evidence) {
+      append_missing_domain(row.missing_domains, CutSupportEvidenceDomain::Mpi);
+    }
+    if (row.qualification.requires_sensitivity_evidence &&
+        !row.qualification.sensitivity_evidence) {
+      append_missing_domain(row.missing_domains, CutSupportEvidenceDomain::Sensitivity);
+    }
+    if (row.qualification.requires_diagnostic_evidence &&
+        !row.qualification.diagnostic_evidence) {
+      append_missing_domain(row.missing_domains, CutSupportEvidenceDomain::Diagnostic);
+    }
+    if (row.qualification.requires_validation_evidence &&
+        !row.qualification.validation_evidence) {
+      append_missing_domain(row.missing_domains, CutSupportEvidenceDomain::FullValidation);
+    }
+
+    if (row.missing_domains.empty()) {
+      row.category = CutSupportAuditCategory::FullyValidated;
+    } else if (contains_domain(row.missing_domains, CutSupportEvidenceDomain::Topology) ||
+               contains_domain(row.missing_domains, CutSupportEvidenceDomain::Quadrature) ||
+               contains_domain(row.missing_domains, CutSupportEvidenceDomain::Diagnostic)) {
+      row.category = CutSupportAuditCategory::AdvertisedTooBroadly;
+    } else if (contains_domain(row.missing_domains, CutSupportEvidenceDomain::FeExecution)) {
+      row.category = CutSupportAuditCategory::MissingFeExecutionEvidence;
+    } else if (contains_domain(row.missing_domains, CutSupportEvidenceDomain::RestartRollback) ||
+               contains_domain(row.missing_domains, CutSupportEvidenceDomain::Mpi)) {
+      row.category = CutSupportAuditCategory::MissingRestartOrMpiEvidence;
+    } else if (contains_domain(row.missing_domains, CutSupportEvidenceDomain::Sensitivity)) {
+      row.category = CutSupportAuditCategory::MissingSensitivityEvidence;
+    } else {
+      row.category = CutSupportAuditCategory::MissingAnalyticValidation;
+    }
+    row.summary = audit_summary_for_category(row.category);
+    audit.push_back(std::move(row));
+  }
+
+  return audit;
 }
 
 CutSupportMatrixEntry evaluate_cut_support(

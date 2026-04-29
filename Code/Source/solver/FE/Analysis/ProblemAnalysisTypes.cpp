@@ -131,6 +131,7 @@ const char* toString(InfSupClass c) noexcept {
     switch (c) {
         case InfSupClass::Required:              return "Required";
         case InfSupClass::StructurallySupported: return "StructurallySupported";
+        case InfSupClass::NumericallySupported:  return "NumericallySupported";
         case InfSupClass::StabilizedSurrogate:   return "StabilizedSurrogate";
         case InfSupClass::LikelyViolated:        return "LikelyViolated";
         case InfSupClass::Unknown:               return "Unknown";
@@ -636,6 +637,15 @@ std::string requestLabel(const AnalysisSummaryRequest& request)
     if (!request.variables.empty()) {
         oss << ",variables=" << variablesLabel(request.variables);
     }
+    if (!request.block_id.empty()) {
+        oss << ",block=" << request.block_id;
+    }
+    if (!request.contribution_id.empty()) {
+        oss << ",contribution=" << request.contribution_id;
+    }
+    if (!request.scope_id.empty()) {
+        oss << ",scope=" << request.scope_id;
+    }
     if (request.already_available) {
         oss << ",available=true";
     }
@@ -798,6 +808,15 @@ void ProblemAnalysisReport::print(std::ostream& out) const {
             out << " domain=" << toString(request.domain);
             if (!request.request_id.empty()) {
                 out << " id=" << request.request_id;
+            }
+            if (!request.block_id.empty()) {
+                out << " block=" << request.block_id;
+            }
+            if (!request.contribution_id.empty()) {
+                out << " contribution=" << request.contribution_id;
+            }
+            if (!request.scope_id.empty()) {
+                out << " scope=" << request.scope_id;
             }
             out << " confidence=" << toString(request.confidence);
             if (request.already_available) {

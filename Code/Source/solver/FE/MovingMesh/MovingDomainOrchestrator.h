@@ -119,6 +119,7 @@ struct MovingDomainDiagnostics {
 
     std::size_t boundary_condition_count{0};
     std::size_t notified_fe_systems{0};
+    std::size_t synced_prescribed_field_values{0};
 };
 
 [[nodiscard]] const char* to_string(MovingMeshMode mode) noexcept;
