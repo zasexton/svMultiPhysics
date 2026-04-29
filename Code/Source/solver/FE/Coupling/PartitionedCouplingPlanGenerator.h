@@ -39,6 +39,11 @@ public:
         const CouplingContext& ctx,
         std::span<const CouplingContractDeclaration> declarations) const;
 
+    [[nodiscard]] CouplingValidationResult validate(
+        const CouplingContext& ctx,
+        std::span<const CouplingContractDeclaration> declarations,
+        std::span<const CouplingExchangeDeclaration> exchange_templates) const;
+
     [[nodiscard]] PartitionedCouplingPlan generate(
         const CouplingContext& ctx,
         std::span<const CouplingExchangeDeclaration> exchanges) const;
@@ -51,6 +56,11 @@ public:
     [[nodiscard]] PartitionedCouplingPlan generate(
         const CouplingContext& ctx,
         std::span<const CouplingContractDeclaration> declarations) const;
+
+    [[nodiscard]] PartitionedCouplingPlan generate(
+        const CouplingContext& ctx,
+        std::span<const CouplingContractDeclaration> declarations,
+        std::span<const CouplingExchangeDeclaration> exchange_templates) const;
 };
 
 } // namespace coupling

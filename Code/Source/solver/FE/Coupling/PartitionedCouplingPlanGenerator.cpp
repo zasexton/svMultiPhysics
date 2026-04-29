@@ -716,6 +716,20 @@ CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
                     std::span<const CouplingGroupHint>(group_hints));
 }
 
+CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
+    const CouplingContext& ctx,
+    std::span<const CouplingContractDeclaration> declarations,
+    std::span<const CouplingExchangeDeclaration> exchange_templates) const
+{
+    std::vector<CouplingExchangeDeclaration> exchanges;
+    std::vector<CouplingGroupHint> group_hints;
+    collectDeclarationPartitionedInputs(declarations, exchanges, group_hints);
+    exchanges.insert(exchanges.end(), exchange_templates.begin(), exchange_templates.end());
+    return validate(ctx,
+                    std::span<const CouplingExchangeDeclaration>(exchanges),
+                    std::span<const CouplingGroupHint>(group_hints));
+}
+
 PartitionedCouplingPlan PartitionedCouplingPlanGenerator::generate(
     const CouplingContext& ctx,
     std::span<const CouplingExchangeDeclaration> exchanges) const
@@ -760,6 +774,20 @@ PartitionedCouplingPlan PartitionedCouplingPlanGenerator::generate(
     std::vector<CouplingExchangeDeclaration> exchanges;
     std::vector<CouplingGroupHint> group_hints;
     collectDeclarationPartitionedInputs(declarations, exchanges, group_hints);
+    return generate(ctx,
+                    std::span<const CouplingExchangeDeclaration>(exchanges),
+                    std::span<const CouplingGroupHint>(group_hints));
+}
+
+PartitionedCouplingPlan PartitionedCouplingPlanGenerator::generate(
+    const CouplingContext& ctx,
+    std::span<const CouplingContractDeclaration> declarations,
+    std::span<const CouplingExchangeDeclaration> exchange_templates) const
+{
+    std::vector<CouplingExchangeDeclaration> exchanges;
+    std::vector<CouplingGroupHint> group_hints;
+    collectDeclarationPartitionedInputs(declarations, exchanges, group_hints);
+    exchanges.insert(exchanges.end(), exchange_templates.begin(), exchange_templates.end());
     return generate(ctx,
                     std::span<const CouplingExchangeDeclaration>(exchanges),
                     std::span<const CouplingGroupHint>(group_hints));

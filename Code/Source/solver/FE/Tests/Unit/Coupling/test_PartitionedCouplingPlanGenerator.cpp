@@ -824,6 +824,35 @@ TEST(PartitionedCouplingPlanGenerator, GeneratesFromContractDeclarations)
     EXPECT_EQ(plan.group_hints[0].participant_names.size(), 2u);
 }
 
+TEST(PartitionedCouplingPlanGenerator, MergesDeclarationAndTemplateExchanges)
+{
+    auto extra_exchange = identityExchange();
+    extra_exchange.producer_port = port("right_in");
+    extra_exchange.consumer_port = port("left_out");
+    extra_exchange.producer = fieldEndpoint("right");
+    extra_exchange.consumer = fieldEndpoint("left");
+
+    const std::array<CouplingContractDeclaration, 1> declarations{
+        partitionedDeclaration()};
+    const std::array<CouplingExchangeDeclaration, 1> templates{extra_exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingExchangeDeclaration>(templates));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        partitionedContext(),
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingExchangeDeclaration>(templates));
+
+    EXPECT_EQ(plan.exchanges.size(), 2u);
+    EXPECT_EQ(plan.group_hints.size(), 1u);
+    EXPECT_FALSE(plan.cycles.empty());
+}
+
 TEST(PartitionedCouplingPlanGenerator, RejectsGroupHintWithUnknownParticipant)
 {
     auto declaration = partitionedDeclaration();
