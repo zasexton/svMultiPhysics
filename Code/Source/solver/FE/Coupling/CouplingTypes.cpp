@@ -210,6 +210,16 @@ CouplingValidationResult validateCouplingValueDescriptor(const CouplingValueDesc
         value.component_layout.size() != static_cast<std::size_t>(std::max(value.components, 0))) {
         result.addError("component layout size must match the component count");
     }
+    for (std::size_t i = 0; i < value.component_layout.size(); ++i) {
+        if (value.component_layout[i].empty()) {
+            result.addError("component layout entries must be nonempty");
+        }
+        for (std::size_t j = i + 1u; j < value.component_layout.size(); ++j) {
+            if (value.component_layout[i] == value.component_layout[j]) {
+                result.addError("component layout entries must be unique");
+            }
+        }
+    }
 
     const bool has_tensor_shape =
         !value.tensor_extents.empty() || !value.tensor_packing.empty();

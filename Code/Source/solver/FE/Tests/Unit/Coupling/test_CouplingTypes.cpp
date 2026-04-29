@@ -47,6 +47,21 @@ TEST(CouplingTypes, ValueDescriptorRequiresMixedBlockLayout)
     EXPECT_TRUE(validateCouplingValueDescriptor(value).ok());
 }
 
+TEST(CouplingTypes, ValueDescriptorRejectsAmbiguousComponentLayout)
+{
+    CouplingValueDescriptor value;
+    value.rank = CouplingValueRank::Vector;
+    value.components = 2;
+    value.component_layout = {"normal", ""};
+    EXPECT_FALSE(validateCouplingValueDescriptor(value).ok());
+
+    value.component_layout = {"normal", "normal"};
+    EXPECT_FALSE(validateCouplingValueDescriptor(value).ok());
+
+    value.component_layout = {"normal", "tangent"};
+    EXPECT_TRUE(validateCouplingValueDescriptor(value).ok());
+}
+
 TEST(CouplingTypes, TemporalSlotValidationUsesLogicalHistoryAndStageRules)
 {
     CouplingTemporalSlotDescriptor history;
