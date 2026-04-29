@@ -555,6 +555,22 @@ CouplingValidationResult CouplingGraph::validateTemporalRequirements(
         availability);
 }
 
+CouplingValidationResult CouplingGraph::validateGeometryTerminalRequirements(
+    const CouplingContext& context,
+    const CouplingGeometryTerminalAvailability& availability) const
+{
+    std::vector<CouplingGeometryTerminalRequirement> requirements;
+    for (const auto& declaration : declarations_) {
+        requirements.insert(requirements.end(),
+                            declaration.geometry_requirements.begin(),
+                            declaration.geometry_requirements.end());
+    }
+    return coupling::validateGeometryTerminalRequirements(
+        context,
+        std::span<const CouplingGeometryTerminalRequirement>(requirements),
+        availability);
+}
+
 const std::vector<CouplingContractDeclaration>& CouplingGraph::declarations() const noexcept
 {
     return declarations_;

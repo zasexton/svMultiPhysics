@@ -2530,6 +2530,7 @@ if(FE_BUILD_TESTS)
             set(FE_COUPLING_TEST_SOURCES
                 Tests/Unit/Coupling/test_CouplingContractValidation.cpp
                 Tests/Unit/Coupling/test_CouplingFormBuilder.cpp
+                Tests/Unit/Coupling/test_CouplingGeometryRequirements.cpp
                 Tests/Unit/Coupling/test_CouplingGraph.cpp
                 Tests/Unit/Coupling/test_CouplingHeaders.cpp
                 Tests/Unit/Coupling/test_CouplingTemporalRequirements.cpp

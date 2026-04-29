@@ -37,6 +37,10 @@ public:
     [[nodiscard]] CouplingValidationResult validateTemporalRequirements(
         const CouplingTemporalAvailability& availability) const;
 
+    [[nodiscard]] CouplingValidationResult validateGeometryTerminalRequirements(
+        const CouplingContext& context,
+        const CouplingGeometryTerminalAvailability& availability) const;
+
     [[nodiscard]] const std::vector<CouplingContractDeclaration>& declarations() const noexcept;
     [[nodiscard]] const std::vector<CouplingFormAnalysisMetadata>&
     installedFormMetadata() const noexcept;

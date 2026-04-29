@@ -18,7 +18,9 @@
 #include "Forms/FormExpr.h"
 
 #include <optional>
+#include <span>
 #include <string>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -93,7 +95,31 @@ struct CouplingGeometryTerminalOwnerProvenance {
     std::optional<std::string> shared_region_name;
 };
 
+struct CouplingGeometryTerminalAvailability {
+    std::vector<CouplingGeometryTerminalQuantity> supported_quantities;
+    std::vector<analysis::DomainKind> supported_domains;
+    bool supports_reference_configuration{true};
+    bool supports_current_configuration{true};
+};
+
+struct CouplingGeometryTerminalRequirementSummary {
+    std::vector<CouplingGeometryTerminalQuantity> quantities;
+    std::vector<analysis::DomainKind> domains;
+    bool requires_reference_configuration{false};
+    bool requires_current_configuration{false};
+};
+
 [[nodiscard]] const char* toString(CouplingGeometryTerminalQuantity quantity) noexcept;
+[[nodiscard]] std::optional<analysis::DomainKind> toAnalysisDomainKind(
+    CouplingRegionKind kind) noexcept;
+[[nodiscard]] CouplingGeometryTerminalRequirementSummary
+summarizeGeometryTerminalRequirements(
+    const CouplingContext& context,
+    std::span<const CouplingGeometryTerminalRequirement> requirements);
+[[nodiscard]] CouplingValidationResult validateGeometryTerminalRequirements(
+    const CouplingContext& context,
+    std::span<const CouplingGeometryTerminalRequirement> requirements,
+    const CouplingGeometryTerminalAvailability& availability);
 
 } // namespace coupling
 } // namespace FE
