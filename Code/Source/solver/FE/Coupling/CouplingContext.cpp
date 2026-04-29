@@ -395,6 +395,8 @@ CouplingValidationResult CouplingContextBuilder::validate() const
         }
         if (descriptor.scalar_type.empty()) {
             result.addError("external buffer descriptor requires a scalar type");
+        } else if (descriptor.scalar_type != "Real") {
+            result.addError("external buffer descriptor scalar type must be Real");
         }
         result.append(validateCouplingValueDescriptor(descriptor.value));
         if (descriptor.extents.empty()) {

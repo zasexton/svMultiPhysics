@@ -253,6 +253,22 @@ TEST(CouplingContext, RejectsDuplicateExternalBufferDescriptorsInOneScope)
               std::string::npos);
 }
 
+TEST(CouplingContext, RejectsUnsupportedExternalBufferScalarType)
+{
+    auto descriptor = externalBuffer("driver_value", 1);
+    descriptor.scalar_type = "Float";
+
+    CouplingContextBuilder builder;
+    builder.addExternalBuffer(CouplingExternalBufferRegistration{
+        .descriptor = descriptor,
+    });
+
+    const auto validation = builder.validate();
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("scalar type must be Real"),
+              std::string::npos);
+}
+
 TEST(CouplingContext, RejectsInvalidDriverOwnedTransferDescriptors)
 {
     auto descriptor = driverOwnedTransfer("");
