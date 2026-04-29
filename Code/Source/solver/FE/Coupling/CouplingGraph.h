@@ -29,10 +29,18 @@ public:
         const CouplingContext& context,
         std::span<const CouplingContractDeclaration> declarations);
 
+    [[nodiscard]] CouplingValidationResult buildFinalizedGraph(
+        const CouplingContext& context,
+        std::span<const CouplingContractDeclaration> declarations,
+        std::span<const CouplingFormAnalysisMetadata> installed_forms);
+
     [[nodiscard]] const std::vector<CouplingContractDeclaration>& declarations() const noexcept;
+    [[nodiscard]] const std::vector<CouplingFormAnalysisMetadata>&
+    installedFormMetadata() const noexcept;
 
 private:
     std::vector<CouplingContractDeclaration> declarations_{};
+    std::vector<CouplingFormAnalysisMetadata> installed_forms_{};
 };
 
 } // namespace coupling
