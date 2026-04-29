@@ -114,6 +114,53 @@ bool supportsRank(const std::vector<CouplingValueRank>& ranks,
     return std::find(ranks.begin(), ranks.end(), rank) != ranks.end();
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+systems::InterfaceFieldKind interfaceFieldKind(CouplingValueRank rank)
+{
+    switch (rank) {
+    case CouplingValueRank::Scalar:
+        return systems::InterfaceFieldKind::Scalar;
+    case CouplingValueRank::Vector:
+        return systems::InterfaceFieldKind::Vector;
+    case CouplingValueRank::Rank2Tensor:
+        return systems::InterfaceFieldKind::Rank2Tensor;
+    case CouplingValueRank::MixedBlock:
+        return systems::InterfaceFieldKind::MixedBlock;
+    case CouplingValueRank::SymmetricTensor:
+    case CouplingValueRank::GeneralTensor:
+        break;
+    }
+    return systems::InterfaceFieldKind::Scalar;
+}
+
+systems::InterfaceFrameTransformPolicy interfaceFramePolicy(
+    CouplingInterfaceFramePolicy policy)
+{
+    switch (policy) {
+    case CouplingInterfaceFramePolicy::None:
+        return systems::InterfaceFrameTransformPolicy::None;
+    case CouplingInterfaceFramePolicy::SourceToTargetVector:
+        return systems::InterfaceFrameTransformPolicy::SourceToTargetVector;
+    case CouplingInterfaceFramePolicy::SourceToTargetRank2Tensor:
+        return systems::InterfaceFrameTransformPolicy::SourceToTargetRank2Tensor;
+    }
+    return systems::InterfaceFrameTransformPolicy::None;
+}
+
+systems::InterfaceTransferOptions makeInterfaceTransferOptions(
+    const CouplingValueDescriptor& value,
+    const CouplingInterfaceTransferDeclaration& declaration)
+{
+    systems::InterfaceTransferOptions options;
+    options.field_kind = interfaceFieldKind(value.rank);
+    options.frame_policy = interfaceFramePolicy(declaration.frame_policy);
+    options.component_count = static_cast<std::uint32_t>(value.components);
+    options.source_to_target_rotation = declaration.source_to_target_rotation;
+    options.conservation_tolerance = declaration.conservation_tolerance;
+    return options;
+}
+#endif
+
 bool fitsUint32(std::size_t value) noexcept
 {
     return value <= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
@@ -1222,6 +1269,13 @@ ResolvedCouplingTransfer resolveTransfer(const CouplingContext& ctx,
             transfer.interface_declaration->source_embedding_policy;
         resolved.target_restriction_policy =
             transfer.interface_declaration->target_restriction_policy;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+        if (isInterfaceTransferKind(transfer.kind)) {
+            resolved.interface_options =
+                makeInterfaceTransferOptions(exchange.value,
+                                             *transfer.interface_declaration);
+        }
+#endif
     }
     resolved.driver_owned_name = transfer.driver_owned_name;
     if (transfer.kind == CouplingTransferKind::DriverOwned &&
@@ -1327,6 +1381,12 @@ CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
             !exchange.transfer.interface_declaration.has_value()) {
             result.addError("interface partitioned transfer requires interface transfer metadata");
         }
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+        if (isInterfaceTransferKind(exchange.transfer.kind)) {
+            result.addError(
+                "interface partitioned transfers require mesh interface support");
+        }
+#endif
         result.append(validateInterfaceTransferShape(exchange));
         if (exchange.producer_port == exchange.consumer_port) {
             result.addError("partitioned coupling exchange cannot connect a port to itself");

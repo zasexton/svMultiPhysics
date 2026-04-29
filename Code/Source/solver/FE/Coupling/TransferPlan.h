@@ -15,6 +15,10 @@
 
 #include "Coupling/CouplingTypes.h"
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Systems/InterfaceOperators.h"
+#endif
+
 #include <array>
 #include <cstdint>
 #include <optional>
@@ -110,6 +114,9 @@ struct ResolvedCouplingTransfer {
         CouplingFrameSourceEmbeddingPolicy::None};
     CouplingFrameTargetRestrictionPolicy target_restriction_policy{
         CouplingFrameTargetRestrictionPolicy::None};
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    std::optional<systems::InterfaceTransferOptions> interface_options;
+#endif
     std::string driver_owned_name;
     std::optional<CouplingDriverOwnedTransferDescriptor> driver_owned_descriptor;
 };

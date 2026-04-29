@@ -747,6 +747,45 @@ TEST(PartitionedCouplingPlanGenerator, AcceptsVectorInterfaceFrameTransform)
     EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+TEST(PartitionedCouplingPlanGenerator, GeneratesResolvedInterfaceTransferOptions)
+{
+    auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::Vector,
+            .components = 3,
+        },
+        CouplingInterfaceFramePolicy::SourceToTargetVector);
+    exchange.transfer.interface_declaration->source_to_target_rotation[0][0] = 0.0;
+    exchange.transfer.interface_declaration->source_to_target_rotation[0][1] = -1.0;
+    exchange.transfer.interface_declaration->source_to_target_rotation[1][0] = 1.0;
+    exchange.transfer.interface_declaration->source_to_target_rotation[1][1] = 0.0;
+    exchange.transfer.interface_declaration->conservation_tolerance = 1.0e-8;
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto context = partitionedContextWithSharedRegion(3);
+    const auto validation = generator.validate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    ASSERT_TRUE(plan.exchanges[0].transfer.interface_options.has_value());
+    const auto& options = *plan.exchanges[0].transfer.interface_options;
+    EXPECT_EQ(options.field_kind, systems::InterfaceFieldKind::Vector);
+    EXPECT_EQ(options.frame_policy,
+              systems::InterfaceFrameTransformPolicy::SourceToTargetVector);
+    EXPECT_EQ(options.component_count, 3u);
+    EXPECT_EQ(options.source_to_target_rotation[0][1], -1.0);
+    EXPECT_EQ(options.source_to_target_rotation[1][0], 1.0);
+    EXPECT_EQ(options.conservation_tolerance, 1.0e-8);
+}
+#endif
+
 TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceTransferWithoutRegionEndpoints)
 {
     auto exchange = interfaceExchange(
