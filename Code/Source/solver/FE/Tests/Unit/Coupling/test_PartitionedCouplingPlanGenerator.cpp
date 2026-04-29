@@ -107,6 +107,18 @@ CouplingExchangeDeclaration identityExchange()
     return exchange;
 }
 
+CouplingExchangeDeclaration interfaceExchange(CouplingValueDescriptor value,
+                                              CouplingInterfaceFramePolicy frame_policy)
+{
+    auto exchange = identityExchange();
+    exchange.value = std::move(value);
+    exchange.transfer.kind = CouplingTransferKind::InterfacePointwiseInterpolation;
+    exchange.transfer.interface_declaration = CouplingInterfaceTransferDeclaration{
+        .frame_policy = frame_policy,
+    };
+    return exchange;
+}
+
 CouplingContractDeclaration partitionedDeclaration()
 {
     CouplingContractDeclaration declaration;
@@ -205,6 +217,126 @@ TEST(PartitionedCouplingPlanGenerator, RejectsGeneralTensorWithoutDriverOwnedTra
 
     EXPECT_FALSE(validation.ok());
     EXPECT_NE(formatDiagnostics(validation).find("general tensor partitioned values"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, AcceptsScalarInterfaceTransferMetadata)
+{
+    const auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::Scalar,
+            .components = 1,
+        },
+        CouplingInterfaceFramePolicy::None);
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+}
+
+TEST(PartitionedCouplingPlanGenerator, AcceptsVectorInterfaceFrameTransform)
+{
+    const auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::Vector,
+            .components = 3,
+        },
+        CouplingInterfaceFramePolicy::SourceToTargetVector);
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContextWithComponents(3),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceFramePayloadMismatch)
+{
+    const auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::Scalar,
+            .components = 1,
+        },
+        CouplingInterfaceFramePolicy::SourceToTargetVector);
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("vector frame transforms require vector"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsSymmetricTensorInterfaceTransfer)
+{
+    const auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::SymmetricTensor,
+            .components = 6,
+        },
+        CouplingInterfaceFramePolicy::None);
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContextWithComponents(6),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("symmetric tensor interface transfers"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsTrue2DVectorInterfaceTransformWithoutAdapter)
+{
+    auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::Vector,
+            .components = 2,
+        },
+        CouplingInterfaceFramePolicy::SourceToTargetVector);
+    exchange.transfer.interface_declaration->source_embedding_policy =
+        CouplingFrameSourceEmbeddingPolicy::Embed2DInXY;
+    exchange.transfer.interface_declaration->target_restriction_policy =
+        CouplingFrameTargetRestrictionPolicy::RestrictToXY;
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContextWithComponents(2),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("true 2D vector interface transforms"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsVectorFramePassThroughWithoutLayout)
+{
+    const auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::Vector,
+            .components = 4,
+        },
+        CouplingInterfaceFramePolicy::SourceToTargetVector);
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContextWithComponents(4),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("pass-through components require component layout"),
               std::string::npos);
 }
 

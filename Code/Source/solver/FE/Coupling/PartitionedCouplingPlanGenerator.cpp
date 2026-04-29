@@ -133,6 +133,82 @@ CouplingValidationResult validateFieldEndpointValueDescriptor(
     return result;
 }
 
+CouplingValidationResult validateInterfaceTransferShape(
+    const CouplingExchangeDeclaration& exchange)
+{
+    CouplingValidationResult result;
+    if (!isInterfaceTransferKind(exchange.transfer.kind)) {
+        return result;
+    }
+
+    const auto& value = exchange.value;
+    if (value.rank == CouplingValueRank::SymmetricTensor) {
+        result.addError("symmetric tensor interface transfers require an explicit rank-2 payload");
+    }
+    if (value.rank == CouplingValueRank::GeneralTensor) {
+        result.addError("general tensor interface transfers are not supported");
+    }
+    if (!exchange.transfer.interface_declaration.has_value()) {
+        return result;
+    }
+
+    const auto& interface = *exchange.transfer.interface_declaration;
+    if (interface.conservation_tolerance <= 0.0) {
+        result.addError("interface transfer conservation tolerance must be positive");
+    }
+
+    const bool has_embedding =
+        interface.source_embedding_policy != CouplingFrameSourceEmbeddingPolicy::None;
+    const bool has_restriction =
+        interface.target_restriction_policy != CouplingFrameTargetRestrictionPolicy::None;
+
+    switch (interface.frame_policy) {
+    case CouplingInterfaceFramePolicy::None:
+        if (has_embedding || has_restriction) {
+            result.addError(
+                "interface frame embedding and restriction policies require a frame transform");
+        }
+        break;
+    case CouplingInterfaceFramePolicy::SourceToTargetVector:
+        if (value.rank != CouplingValueRank::Vector) {
+            result.addError("interface vector frame transforms require vector payloads");
+            break;
+        }
+        if (value.components < 3) {
+            result.addError(
+                "true 2D vector interface transforms require a registered execution adapter");
+        }
+        if (value.components > 3 && value.component_layout.empty()) {
+            result.addError(
+                "vector interface frame transforms with pass-through components require component layout");
+        }
+        if (value.components >= 3 && (has_embedding || has_restriction)) {
+            result.addError(
+                "interface frame embedding and restriction policies are reserved for true 2D vector transforms");
+        }
+        break;
+    case CouplingInterfaceFramePolicy::SourceToTargetRank2Tensor:
+        if (value.rank != CouplingValueRank::Rank2Tensor) {
+            result.addError("interface rank-2 frame transforms require rank-2 tensor payloads");
+            break;
+        }
+        if (value.components < 9) {
+            result.addError("interface rank-2 frame transforms require at least nine components");
+        }
+        if (value.components > 9 && value.component_layout.empty()) {
+            result.addError(
+                "rank-2 interface frame transforms with pass-through components require component layout");
+        }
+        if (has_embedding || has_restriction) {
+            result.addError(
+                "interface frame embedding and restriction policies are only valid for true 2D vector transforms");
+        }
+        break;
+    }
+
+    return result;
+}
+
 bool hasPort(const std::vector<CouplingPortId>& stack, const CouplingPortId& port)
 {
     return std::find(stack.begin(), stack.end(), port) != stack.end();
@@ -286,6 +362,7 @@ CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
             !exchange.transfer.interface_declaration.has_value()) {
             result.addError("interface partitioned transfer requires interface transfer metadata");
         }
+        result.append(validateInterfaceTransferShape(exchange));
         if (exchange.producer_port == exchange.consumer_port) {
             result.addError("partitioned coupling exchange cannot connect a port to itself");
         }
