@@ -2,6 +2,7 @@
 
 #include "Core/FEException.h"
 #include "Spaces/H1Space.h"
+#include "Systems/InterfaceOperators.h"
 
 #include <gtest/gtest.h>
 
@@ -104,6 +105,31 @@ CouplingDriverOwnedTransferDescriptor driverOwnedTransfer(std::string name)
         .registry_revision_key = 7,
     };
 }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+svmp::search::InterfaceMap interfaceMap(std::string name)
+{
+    svmp::search::InterfaceMap map;
+    map.name = std::move(name);
+    map.state = svmp::search::InterfaceMapState::Committed;
+    return map;
+}
+
+CouplingInterfaceMapProvenance interfaceMapProvenance(std::string map_name)
+{
+    return CouplingInterfaceMapProvenance{
+        .interface_map_name = std::move(map_name),
+        .interface_entry_name = "surface_pair",
+        .interface_search_registry_name = "searches",
+        .source_system_name = "left_system",
+        .target_system_name = "right_system",
+        .source_interface_marker = 12,
+        .target_interface_marker = 7,
+        .map_state = svmp::search::InterfaceMapState::Committed,
+        .operator_state = systems::InterfaceOperatorState::AcceptedTimeStep,
+    };
+}
+#endif
 
 } // namespace
 
@@ -236,6 +262,122 @@ TEST(CouplingContext, ResolvesDriverOwnedTransferDescriptors)
     ASSERT_EQ(descriptor->supported_ranks.size(), 1u);
     EXPECT_EQ(descriptor->supported_ranks[0], CouplingValueRank::Scalar);
 }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+TEST(CouplingContext, ResolvesCommittedInterfaceMapRuntimeHandles)
+{
+    const auto* left_system = systemToken(1);
+    const auto* right_system = systemToken(2);
+    svmp::search::InterfaceSearchRegistry registry;
+    registry.commit_map(interfaceMap("surface_map"));
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(participant("left", "left_system", left_system))
+        .addParticipant(participant("right", "right_system", right_system))
+        .addInterfaceSearchRegistry(CouplingInterfaceSearchRegistryRegistration{
+            .registry_name = "searches",
+            .registry = &registry,
+        });
+
+    const auto context = builder.build();
+    const auto handles = context.interfaceMapHandles(
+        interfaceMapProvenance("surface_map"));
+
+    EXPECT_EQ(handles.source_system, left_system);
+    EXPECT_EQ(handles.target_system, right_system);
+    EXPECT_EQ(handles.search_registry, &registry);
+    EXPECT_EQ(handles.sliding_map, nullptr);
+    ASSERT_NE(handles.interface_map, nullptr);
+    EXPECT_EQ(handles.interface_map->name, "surface_map");
+}
+
+TEST(CouplingContext, ResolvesSlidingInterfaceMapRuntimeHandles)
+{
+    const auto* left_system = systemToken(1);
+    const auto* right_system = systemToken(2);
+    svmp::search::InterfaceSearchRegistry registry;
+    systems::SlidingInterfaceMap sliding;
+    sliding.name = "surface_map";
+    sliding.interface_map = interfaceMap("surface_map");
+    sliding.state = systems::InterfaceOperatorState::AcceptedTimeStep;
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(participant("left", "left_system", left_system))
+        .addParticipant(participant("right", "right_system", right_system))
+        .addInterfaceSearchRegistry(CouplingInterfaceSearchRegistryRegistration{
+            .registry_name = "searches",
+            .registry = &registry,
+        })
+        .addSlidingInterfaceMap(CouplingSlidingInterfaceMapRegistration{
+            .interface_map_name = "surface_map",
+            .sliding_map = &sliding,
+        });
+
+    const auto context = builder.build();
+    const auto handles = context.interfaceMapHandles(
+        interfaceMapProvenance("surface_map"));
+
+    EXPECT_EQ(context.interfaceSearchRegistry("searches"), &registry);
+    EXPECT_EQ(context.slidingInterfaceMap("surface_map"), &sliding);
+    EXPECT_EQ(handles.sliding_map, &sliding);
+    EXPECT_EQ(handles.interface_map, &sliding.interface_map);
+}
+
+TEST(CouplingContext, RejectsInvalidInterfaceRuntimeRegistrations)
+{
+    svmp::search::InterfaceSearchRegistry registry;
+    systems::SlidingInterfaceMap sliding;
+
+    CouplingContextBuilder builder;
+    builder.addInterfaceSearchRegistry(CouplingInterfaceSearchRegistryRegistration{})
+        .addInterfaceSearchRegistry(CouplingInterfaceSearchRegistryRegistration{
+            .registry_name = "searches",
+            .registry = &registry,
+        })
+        .addInterfaceSearchRegistry(CouplingInterfaceSearchRegistryRegistration{
+            .registry_name = "searches",
+            .registry = &registry,
+        })
+        .addSlidingInterfaceMap(CouplingSlidingInterfaceMapRegistration{})
+        .addSlidingInterfaceMap(CouplingSlidingInterfaceMapRegistration{
+            .interface_map_name = "surface_map",
+            .sliding_map = &sliding,
+        })
+        .addSlidingInterfaceMap(CouplingSlidingInterfaceMapRegistration{
+            .interface_map_name = "surface_map",
+            .sliding_map = &sliding,
+        });
+
+    const auto validation = builder.validate();
+    EXPECT_FALSE(validation.ok());
+    const auto diagnostics = formatDiagnostics(validation);
+    EXPECT_NE(diagnostics.find("interface search registry registration requires"),
+              std::string::npos);
+    EXPECT_NE(diagnostics.find("duplicate interface search registry registration"),
+              std::string::npos);
+    EXPECT_NE(diagnostics.find("sliding interface map registration requires"),
+              std::string::npos);
+    EXPECT_NE(diagnostics.find("duplicate sliding interface map registration"),
+              std::string::npos);
+}
+
+TEST(CouplingContext, MissingInterfaceRuntimeHandleLookupsThrow)
+{
+    const auto* left_system = systemToken(1);
+    const auto* right_system = systemToken(2);
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(participant("left", "left_system", left_system))
+        .addParticipant(participant("right", "right_system", right_system));
+
+    const auto context = builder.build();
+    EXPECT_EQ(context.interfaceSearchRegistry("missing"), nullptr);
+    EXPECT_EQ(context.slidingInterfaceMap("missing"), nullptr);
+    EXPECT_THROW(static_cast<void>(context.interfaceMapHandles(
+                     interfaceMapProvenance("surface_map"))),
+                 InvalidArgumentException);
+}
+#endif
 
 TEST(CouplingContext, RejectsDuplicateExternalBufferDescriptorsInOneScope)
 {

@@ -72,6 +72,18 @@ bool CouplingRegionRef::valid() const noexcept
            !region_name.empty();
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+bool CouplingInterfaceSearchRegistryRegistration::valid() const noexcept
+{
+    return !registry_name.empty() && registry != nullptr;
+}
+
+bool CouplingSlidingInterfaceMapRegistration::valid() const noexcept
+{
+    return !interface_map_name.empty() && sliding_map != nullptr;
+}
+#endif
+
 CouplingParticipantRef CouplingContext::participant(std::string_view participant_name) const
 {
     const auto it = std::find_if(participants_.begin(), participants_.end(),
@@ -197,6 +209,77 @@ const CouplingDriverOwnedTransferDescriptor* CouplingContext::driverOwnedTransfe
     return it == driver_owned_transfers_.end() ? nullptr : &*it;
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+const svmp::search::InterfaceSearchRegistry* CouplingContext::interfaceSearchRegistry(
+    std::string_view registry_name) const noexcept
+{
+    const auto it = std::find_if(
+        interface_search_registries_.begin(),
+        interface_search_registries_.end(),
+        [registry_name](const CouplingInterfaceSearchRegistryRegistration& registration) {
+            return registration.registry_name == registry_name;
+        });
+    return it == interface_search_registries_.end() ? nullptr : it->registry;
+}
+
+const systems::SlidingInterfaceMap* CouplingContext::slidingInterfaceMap(
+    std::string_view interface_map_name) const noexcept
+{
+    const auto it = std::find_if(
+        sliding_interface_maps_.begin(),
+        sliding_interface_maps_.end(),
+        [interface_map_name](const CouplingSlidingInterfaceMapRegistration& registration) {
+            return registration.interface_map_name == interface_map_name;
+        });
+    return it == sliding_interface_maps_.end() ? nullptr : it->sliding_map;
+}
+
+CouplingInterfaceMapRuntimeHandles CouplingContext::interfaceMapHandles(
+    const CouplingInterfaceMapProvenance& provenance) const
+{
+    const auto source_it = std::find_if(
+        participants_.begin(),
+        participants_.end(),
+        [&provenance](const CouplingParticipantRef& participant) {
+            return participant.system_name == provenance.source_system_name;
+        });
+    FE_THROW_IF(source_it == participants_.end(), InvalidArgumentException,
+                "interface map provenance references an unknown source system");
+
+    const auto target_it = std::find_if(
+        participants_.begin(),
+        participants_.end(),
+        [&provenance](const CouplingParticipantRef& participant) {
+            return participant.system_name == provenance.target_system_name;
+        });
+    FE_THROW_IF(target_it == participants_.end(), InvalidArgumentException,
+                "interface map provenance references an unknown target system");
+
+    const auto* registry =
+        interfaceSearchRegistry(provenance.interface_search_registry_name);
+    FE_THROW_IF(registry == nullptr, InvalidArgumentException,
+                "interface map provenance references an unknown search registry");
+
+    const auto* sliding_map = slidingInterfaceMap(provenance.interface_map_name);
+    const auto* interface_map = sliding_map != nullptr
+                                    ? &sliding_map->interface_map
+                                    : registry->committed_map(provenance.interface_map_name);
+    FE_THROW_IF(interface_map == nullptr, InvalidArgumentException,
+                "interface map provenance references an unknown interface map");
+    FE_THROW_IF(interface_map->name != provenance.interface_map_name,
+                InvalidArgumentException,
+                "interface map provenance resolved an unexpected interface map");
+
+    return CouplingInterfaceMapRuntimeHandles{
+        .source_system = source_it->system,
+        .target_system = target_it->system,
+        .search_registry = registry,
+        .sliding_map = sliding_map,
+        .interface_map = interface_map,
+    };
+}
+#endif
+
 const std::vector<CouplingParticipantRef>& CouplingContext::participants() const noexcept
 {
     return participants_;
@@ -228,6 +311,20 @@ CouplingContext::driverOwnedTransfers() const noexcept
 {
     return driver_owned_transfers_;
 }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+const std::vector<CouplingInterfaceSearchRegistryRegistration>&
+CouplingContext::interfaceSearchRegistries() const noexcept
+{
+    return interface_search_registries_;
+}
+
+const std::vector<CouplingSlidingInterfaceMapRegistration>&
+CouplingContext::slidingInterfaceMaps() const noexcept
+{
+    return sliding_interface_maps_;
+}
+#endif
 
 CouplingContextBuilder& CouplingContextBuilder::addParticipant(CouplingParticipantRef participant)
 {
@@ -266,6 +363,22 @@ CouplingContextBuilder& CouplingContextBuilder::addDriverOwnedTransfer(
     context_.driver_owned_transfers_.push_back(std::move(descriptor));
     return *this;
 }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+CouplingContextBuilder& CouplingContextBuilder::addInterfaceSearchRegistry(
+    CouplingInterfaceSearchRegistryRegistration registration)
+{
+    context_.interface_search_registries_.push_back(std::move(registration));
+    return *this;
+}
+
+CouplingContextBuilder& CouplingContextBuilder::addSlidingInterfaceMap(
+    CouplingSlidingInterfaceMapRegistration registration)
+{
+    context_.sliding_interface_maps_.push_back(std::move(registration));
+    return *this;
+}
+#endif
 
 CouplingValidationResult CouplingContextBuilder::validate() const
 {
@@ -482,6 +595,39 @@ CouplingValidationResult CouplingContextBuilder::validate() const
             }
         }
     }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    for (std::size_t i = 0; i < context_.interface_search_registries_.size(); ++i) {
+        const auto& registration = context_.interface_search_registries_[i];
+        if (!registration.valid()) {
+            result.addError(
+                "interface search registry registration requires a name and registry");
+        }
+        for (std::size_t j = i + 1u;
+             j < context_.interface_search_registries_.size();
+             ++j) {
+            if (registration.registry_name ==
+                context_.interface_search_registries_[j].registry_name) {
+                result.addError("duplicate interface search registry registration");
+            }
+        }
+    }
+
+    for (std::size_t i = 0; i < context_.sliding_interface_maps_.size(); ++i) {
+        const auto& registration = context_.sliding_interface_maps_[i];
+        if (!registration.valid()) {
+            result.addError(
+                "sliding interface map registration requires a name and map");
+        }
+        for (std::size_t j = i + 1u; j < context_.sliding_interface_maps_.size();
+             ++j) {
+            if (registration.interface_map_name ==
+                context_.sliding_interface_maps_[j].interface_map_name) {
+                result.addError("duplicate sliding interface map registration");
+            }
+        }
+    }
+#endif
 
     return result;
 }

@@ -86,6 +86,30 @@ struct CouplingExternalBufferRegistration {
     CouplingExternalBufferDescriptor descriptor;
 };
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+struct CouplingInterfaceSearchRegistryRegistration {
+    std::string registry_name;
+    const svmp::search::InterfaceSearchRegistry* registry{nullptr};
+
+    [[nodiscard]] bool valid() const noexcept;
+};
+
+struct CouplingSlidingInterfaceMapRegistration {
+    std::string interface_map_name;
+    const systems::SlidingInterfaceMap* sliding_map{nullptr};
+
+    [[nodiscard]] bool valid() const noexcept;
+};
+
+struct CouplingInterfaceMapRuntimeHandles {
+    const systems::FESystem* source_system{nullptr};
+    const systems::FESystem* target_system{nullptr};
+    const svmp::search::InterfaceSearchRegistry* search_registry{nullptr};
+    const systems::SlidingInterfaceMap* sliding_map{nullptr};
+    const svmp::search::InterfaceMap* interface_map{nullptr};
+};
+#endif
+
 class CouplingContext {
 public:
     CouplingContext() = default;
@@ -110,6 +134,14 @@ public:
         std::string_view external_buffer_key) const noexcept;
     [[nodiscard]] const CouplingDriverOwnedTransferDescriptor* driverOwnedTransfer(
         std::string_view transfer_name) const noexcept;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    [[nodiscard]] const svmp::search::InterfaceSearchRegistry* interfaceSearchRegistry(
+        std::string_view registry_name) const noexcept;
+    [[nodiscard]] const systems::SlidingInterfaceMap* slidingInterfaceMap(
+        std::string_view interface_map_name) const noexcept;
+    [[nodiscard]] CouplingInterfaceMapRuntimeHandles interfaceMapHandles(
+        const CouplingInterfaceMapProvenance& provenance) const;
+#endif
 
     [[nodiscard]] const std::vector<CouplingParticipantRef>& participants() const noexcept;
     [[nodiscard]] const std::vector<CouplingFieldRef>& fields() const noexcept;
@@ -119,6 +151,12 @@ public:
     externalBuffers() const noexcept;
     [[nodiscard]] const std::vector<CouplingDriverOwnedTransferDescriptor>&
     driverOwnedTransfers() const noexcept;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    [[nodiscard]] const std::vector<CouplingInterfaceSearchRegistryRegistration>&
+    interfaceSearchRegistries() const noexcept;
+    [[nodiscard]] const std::vector<CouplingSlidingInterfaceMapRegistration>&
+    slidingInterfaceMaps() const noexcept;
+#endif
 
 private:
     friend class CouplingContextBuilder;
@@ -129,6 +167,10 @@ private:
     std::vector<SharedRegionRef> shared_regions_{};
     std::vector<CouplingExternalBufferRegistration> external_buffers_{};
     std::vector<CouplingDriverOwnedTransferDescriptor> driver_owned_transfers_{};
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    std::vector<CouplingInterfaceSearchRegistryRegistration> interface_search_registries_{};
+    std::vector<CouplingSlidingInterfaceMapRegistration> sliding_interface_maps_{};
+#endif
 };
 
 class CouplingContextBuilder {
@@ -141,6 +183,12 @@ public:
         CouplingExternalBufferRegistration registration);
     CouplingContextBuilder& addDriverOwnedTransfer(
         CouplingDriverOwnedTransferDescriptor descriptor);
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    CouplingContextBuilder& addInterfaceSearchRegistry(
+        CouplingInterfaceSearchRegistryRegistration registration);
+    CouplingContextBuilder& addSlidingInterfaceMap(
+        CouplingSlidingInterfaceMapRegistration registration);
+#endif
 
     [[nodiscard]] CouplingValidationResult validate() const;
     [[nodiscard]] CouplingContext build() const;
