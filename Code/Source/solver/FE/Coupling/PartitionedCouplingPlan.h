@@ -89,9 +89,14 @@ struct CouplingGroupHint {
     std::vector<std::string> participant_names;
 };
 
+struct CouplingExchangeCycle {
+    std::vector<CouplingPortId> ports;
+};
+
 struct PartitionedCouplingPlan {
     std::vector<CouplingExchange> exchanges;
     std::vector<CouplingGroupHint> group_hints;
+    std::vector<CouplingExchangeCycle> cycles;
 };
 
 } // namespace coupling

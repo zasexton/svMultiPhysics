@@ -2538,6 +2538,7 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Coupling/test_CouplingRegistry.cpp
                 Tests/Unit/Coupling/test_CouplingTypes.cpp
                 Tests/Unit/Coupling/test_MonolithicCouplingBuilder.cpp
+                Tests/Unit/Coupling/test_PartitionedCouplingPlanGenerator.cpp
                 Tests/Unit/Coupling/test_SharedRegionRegistry.cpp
                 Tests/Unit/Coupling/test_main.cpp
             )
