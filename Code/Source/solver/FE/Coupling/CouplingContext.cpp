@@ -43,12 +43,29 @@ bool sameScope(const std::optional<std::string>& lhs,
     return *lhs == *rhs;
 }
 
+bool temporalSlotsEqual(const CouplingTemporalSlotDescriptor& lhs,
+                        const CouplingTemporalSlotDescriptor& rhs) noexcept
+{
+    return lhs.slot == rhs.slot &&
+           lhs.history_index == rhs.history_index &&
+           lhs.stage_index == rhs.stage_index;
+}
+
 void appendTemporalSlotValidation(
     CouplingValidationResult& result,
-    const std::vector<CouplingTemporalSlotDescriptor>& slots)
+    const std::vector<CouplingTemporalSlotDescriptor>& slots,
+    std::string_view owner)
 {
     for (const auto& slot : slots) {
         result.append(validateCouplingTemporalSlot(slot));
+    }
+    for (std::size_t i = 0; i < slots.size(); ++i) {
+        for (std::size_t j = i + 1u; j < slots.size(); ++j) {
+            if (temporalSlotsEqual(slots[i], slots[j])) {
+                result.addError(std::string(owner) +
+                                " has duplicate temporal slots");
+            }
+        }
     }
 }
 
@@ -669,7 +686,9 @@ CouplingValidationResult CouplingContextBuilder::validate() const
         if (descriptor.supported_temporal_slots.empty()) {
             result.addError("external buffer descriptor requires supported temporal slots");
         }
-        appendTemporalSlotValidation(result, descriptor.supported_temporal_slots);
+        appendTemporalSlotValidation(result,
+                                     descriptor.supported_temporal_slots,
+                                     "external buffer descriptor");
         if (descriptor.value.rank == CouplingValueRank::GeneralTensor) {
             if (descriptor.packing != descriptor.value.tensor_packing) {
                 result.addError(
@@ -721,8 +740,14 @@ CouplingValidationResult CouplingContextBuilder::validate() const
             result.addError(
                 "driver-owned transfer descriptor requires target temporal slots");
         }
-        appendTemporalSlotValidation(result, descriptor.supported_source_temporal_slots);
-        appendTemporalSlotValidation(result, descriptor.supported_target_temporal_slots);
+        appendTemporalSlotValidation(
+            result,
+            descriptor.supported_source_temporal_slots,
+            "driver-owned transfer descriptor source");
+        appendTemporalSlotValidation(
+            result,
+            descriptor.supported_target_temporal_slots,
+            "driver-owned transfer descriptor target");
         for (std::size_t j = i + 1u; j < context_.driver_owned_transfers_.size(); ++j) {
             if (descriptor.transfer_name ==
                 context_.driver_owned_transfers_[j].transfer_name) {

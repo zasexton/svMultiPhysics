@@ -494,10 +494,29 @@ TEST(CouplingContext, RejectsUnsupportedExternalBufferScalarType)
               std::string::npos);
 }
 
+TEST(CouplingContext, RejectsDuplicateExternalBufferTemporalSlots)
+{
+    auto descriptor = externalBuffer("driver_value", 1);
+    descriptor.supported_temporal_slots.push_back(currentSlot());
+
+    CouplingContextBuilder builder;
+    builder.addExternalBuffer(CouplingExternalBufferRegistration{
+        .descriptor = descriptor,
+    });
+
+    const auto validation = builder.validate();
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find(
+                  "external buffer descriptor has duplicate temporal slots"),
+              std::string::npos);
+}
+
 TEST(CouplingContext, RejectsInvalidDriverOwnedTransferDescriptors)
 {
     auto descriptor = driverOwnedTransfer("");
     descriptor.supported_ranks.push_back(CouplingValueRank::Scalar);
+    descriptor.supported_source_temporal_slots.push_back(currentSlot());
+    descriptor.supported_target_temporal_slots.push_back(currentSlot());
 
     CouplingContextBuilder builder;
     builder.addDriverOwnedTransfer(descriptor);
@@ -506,6 +525,10 @@ TEST(CouplingContext, RejectsInvalidDriverOwnedTransferDescriptors)
     EXPECT_FALSE(validation.ok());
     EXPECT_NE(formatDiagnostics(validation).find("requires a name"), std::string::npos);
     EXPECT_NE(formatDiagnostics(validation).find("duplicate ranks"), std::string::npos);
+    EXPECT_NE(formatDiagnostics(validation).find("source has duplicate temporal slots"),
+              std::string::npos);
+    EXPECT_NE(formatDiagnostics(validation).find("target has duplicate temporal slots"),
+              std::string::npos);
 }
 
 TEST(CouplingContext, MissingLookupsThrow)
