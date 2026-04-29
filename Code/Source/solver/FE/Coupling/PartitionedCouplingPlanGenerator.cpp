@@ -7,6 +7,7 @@
 
 #include "Coupling/PartitionedCouplingPlanGenerator.h"
 
+#include "Auxiliary/AuxiliaryStateManager.h"
 #include "Coupling/CouplingDeclaration.h"
 #include "Systems/FESystem.h"
 
@@ -43,6 +44,20 @@ CouplingResolvedTemporalBackingKind backingForEndpoint(const CouplingEndpointRef
     }
     if (endpoint.kind == CouplingEndpointKind::ExternalBuffer) {
         return CouplingResolvedTemporalBackingKind::ExternalBuffer;
+    }
+    if (endpoint.kind == CouplingEndpointKind::AuxiliaryState) {
+        switch (endpoint.temporal.slot) {
+        case CouplingTemporalSlot::Current:
+            return CouplingResolvedTemporalBackingKind::AuxiliaryCurrent;
+        case CouplingTemporalSlot::Accepted:
+            return CouplingResolvedTemporalBackingKind::AuxiliaryCommitted;
+        case CouplingTemporalSlot::History:
+            return CouplingResolvedTemporalBackingKind::AuxiliaryHistory;
+        case CouplingTemporalSlot::Predicted:
+        case CouplingTemporalSlot::Stage:
+        case CouplingTemporalSlot::External:
+            return CouplingResolvedTemporalBackingKind::None;
+        }
     }
     if (endpoint.kind == CouplingEndpointKind::Parameter &&
         endpoint.temporal.slot == CouplingTemporalSlot::Current) {
@@ -102,6 +117,12 @@ bool supportsRank(const std::vector<CouplingValueRank>& ranks,
 bool fitsUint32(std::size_t value) noexcept
 {
     return value <= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+}
+
+bool valueRankCanUseComponentCount(const CouplingValueDescriptor& value) noexcept
+{
+    return value.rank != CouplingValueRank::GeneralTensor &&
+           value.rank != CouplingValueRank::SymmetricTensor;
 }
 
 bool isMissingIndex(std::size_t value) noexcept
@@ -313,6 +334,111 @@ CouplingValidationResult validateEndpointResolutionSupport(
                 .endpoint_name = endpoint.endpoint_name,
                 .message = "partitioned " + std::string(role) +
                            " parameter endpoint requires a Real parameter slot",
+            });
+        }
+        return result;
+    }
+
+    if (endpoint.kind == CouplingEndpointKind::AuxiliaryState) {
+        if (!endpoint.participant_name.has_value() ||
+            endpoint.participant_name->empty()) {
+            return result;
+        }
+        if (!ctx.hasParticipant(*endpoint.participant_name)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary state endpoint references an unknown participant",
+            });
+            return result;
+        }
+
+        const auto participant = ctx.participant(*endpoint.participant_name);
+        if (participant.system == nullptr) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary state endpoint requires an owning system",
+            });
+            return result;
+        }
+
+        switch (endpoint.temporal.slot) {
+        case CouplingTemporalSlot::Current:
+        case CouplingTemporalSlot::Accepted:
+        case CouplingTemporalSlot::History:
+            break;
+        case CouplingTemporalSlot::Predicted:
+        case CouplingTemporalSlot::Stage:
+        case CouplingTemporalSlot::External:
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary state endpoint temporal slot " +
+                           toString(endpoint.temporal.slot) +
+                           " requires provider support",
+            });
+            break;
+        }
+
+        const auto* manager = participant.system->auxiliaryStateManagerIfPresent();
+        if (manager == nullptr || !manager->hasBlock(endpoint.endpoint_name)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary state endpoint requires an AuxiliaryState block",
+            });
+            return result;
+        }
+
+        const auto& block = manager->getBlock(endpoint.endpoint_name);
+        if (block.componentStride() != value.components) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary state endpoint component count does not match the exchange value descriptor",
+            });
+        }
+        if (!valueRankCanUseComponentCount(value)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary state endpoint requires scalar, vector, rank-2, or mixed-block component metadata",
+            });
+        }
+        if (endpoint.temporal.slot == CouplingTemporalSlot::History &&
+            endpoint.temporal.history_index.has_value() &&
+            block.history().depth() <
+                static_cast<std::size_t>(*endpoint.temporal.history_index)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary state endpoint history depth is insufficient",
+            });
+        }
+
+        const auto block_index = manager->state().blockIndex(endpoint.endpoint_name);
+        if (!fitsUint32(block_index)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary state endpoint block index is out of range",
             });
         }
         return result;
@@ -875,6 +1001,23 @@ ResolvedCouplingEndpoint resolveEndpoint(const CouplingContext& ctx,
             resolved.parameter_value_type = spec->type;
         }
         resolved.parameter_slot = registry.slotOf(endpoint.endpoint_name);
+    }
+    if (endpoint.kind == CouplingEndpointKind::AuxiliaryState &&
+        endpoint.participant_name.has_value()) {
+        const auto participant = ctx.participant(*endpoint.participant_name);
+        resolved.system_name = participant.system_name;
+        resolved.system = participant.system;
+        resolved.registry_provider = "AuxiliaryStateManager";
+        resolved.temporal.provider_name = "AuxiliaryStateManager";
+        resolved.auxiliary_kind = CouplingAuxiliaryEndpointResolutionKind::BlockState;
+        resolved.auxiliary_key = endpoint.endpoint_name;
+        if (const auto* manager = participant.system->auxiliaryStateManagerIfPresent()) {
+            const auto block_index = manager->state().blockIndex(endpoint.endpoint_name);
+            if (fitsUint32(block_index)) {
+                resolved.auxiliary_block_index =
+                    static_cast<std::uint32_t>(block_index);
+            }
+        }
     }
     if (endpoint.kind == CouplingEndpointKind::RegionData &&
         endpoint.participant_name.has_value()) {

@@ -101,6 +101,7 @@ struct ResolvedCouplingEndpoint {
     FieldId boundary_reduction_primary_field{INVALID_FIELD_ID};
     CouplingAuxiliaryEndpointResolutionKind auxiliary_kind{
         CouplingAuxiliaryEndpointResolutionKind::None};
+    std::optional<std::uint32_t> auxiliary_block_index;
     std::optional<std::uint32_t> auxiliary_input_slot;
     std::optional<std::uint32_t> auxiliary_output_id;
     std::optional<std::uint32_t> auxiliary_output_flat_slot;

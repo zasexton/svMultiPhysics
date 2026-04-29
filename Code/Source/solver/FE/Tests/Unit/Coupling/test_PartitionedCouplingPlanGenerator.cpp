@@ -504,6 +504,20 @@ CouplingEndpointRef auxiliaryOutputEndpoint(
     };
 }
 
+CouplingEndpointRef auxiliaryStateEndpoint(
+    std::string participant,
+    std::string key = "output_block",
+    CouplingTemporalSlotDescriptor temporal =
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Current})
+{
+    return CouplingEndpointRef{
+        .kind = CouplingEndpointKind::AuxiliaryState,
+        .participant_name = std::move(participant),
+        .endpoint_name = std::move(key),
+        .temporal = temporal,
+    };
+}
+
 CouplingEndpointRef regionDataEndpoint(
     std::string participant,
     std::string key = "surface_measure",
@@ -866,26 +880,100 @@ TEST(PartitionedCouplingPlanGenerator, RejectsUnsupportedFieldTemporalSlots)
     }
 }
 
-TEST(PartitionedCouplingPlanGenerator, RejectsEndpointKindsWithoutResolver)
+TEST(PartitionedCouplingPlanGenerator, GeneratesAuxiliaryStateEndpointFromBlock)
 {
+    AuxiliaryOutputEndpointFixture fixture;
     auto exchange = identityExchange();
-    exchange.producer = CouplingEndpointRef{
-        .kind = CouplingEndpointKind::AuxiliaryState,
-        .participant_name = "left",
-        .endpoint_name = "lagged_state",
-        .temporal = CouplingTemporalSlotDescriptor{
-            .slot = CouplingTemporalSlot::Current,
-        },
-    };
+    exchange.producer = auxiliaryStateEndpoint("left");
     const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
 
     const PartitionedCouplingPlanGenerator generator;
     const auto validation = generator.validate(
-        partitionedContext(),
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    ASSERT_EQ(plan.exchanges.size(), 1u);
+    const auto& producer = plan.exchanges[0].producer;
+    EXPECT_EQ(producer.resolved_kind, CouplingEndpointKind::AuxiliaryState);
+    EXPECT_EQ(producer.system_name, "left_system");
+    EXPECT_EQ(producer.system, &fixture.left_system);
+    EXPECT_EQ(producer.registry_provider, "AuxiliaryStateManager");
+    EXPECT_EQ(producer.temporal.provider_name, "AuxiliaryStateManager");
+    EXPECT_EQ(producer.temporal.backing,
+              CouplingResolvedTemporalBackingKind::AuxiliaryCurrent);
+    EXPECT_EQ(producer.auxiliary_kind,
+              CouplingAuxiliaryEndpointResolutionKind::BlockState);
+    ASSERT_TRUE(producer.auxiliary_block_index.has_value());
+    EXPECT_EQ(*producer.auxiliary_block_index, 0u);
+    EXPECT_EQ(producer.auxiliary_key, "output_block");
+}
+
+TEST(PartitionedCouplingPlanGenerator, ResolvesAcceptedAuxiliaryStateEndpoint)
+{
+    AuxiliaryOutputEndpointFixture fixture;
+    auto exchange = identityExchange();
+    exchange.producer = auxiliaryStateEndpoint(
+        "left",
+        "output_block",
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Accepted});
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_EQ(plan.exchanges[0].producer.temporal.backing,
+              CouplingResolvedTemporalBackingKind::AuxiliaryCommitted);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsAuxiliaryStateWithoutBlock)
+{
+    AuxiliaryOutputEndpointFixture fixture(false);
+    auto exchange = identityExchange();
+    exchange.producer = auxiliaryStateEndpoint("left");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
         std::span<const CouplingExchangeDeclaration>(exchanges));
 
     EXPECT_FALSE(validation.ok());
-    EXPECT_NE(formatDiagnostics(validation).find("requires a registry resolver"),
+    EXPECT_NE(formatDiagnostics(validation).find("requires an AuxiliaryState block"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsAuxiliaryStateUnsupportedTemporalSlot)
+{
+    AuxiliaryOutputEndpointFixture fixture;
+    auto exchange = identityExchange();
+    exchange.producer = auxiliaryStateEndpoint(
+        "left",
+        "output_block",
+        CouplingTemporalSlotDescriptor{
+            .slot = CouplingTemporalSlot::Stage,
+            .stage_index = 0,
+        });
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("auxiliary state endpoint temporal slot"),
               std::string::npos);
 }
 
