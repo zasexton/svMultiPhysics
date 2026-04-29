@@ -1,3 +1,4 @@
+#include "Coupling/CouplingDeclaration.h"
 #include "Coupling/PartitionedCouplingPlanGenerator.h"
 #include "Spaces/H1Space.h"
 
@@ -95,6 +96,19 @@ CouplingExchangeDeclaration identityExchange()
     return exchange;
 }
 
+CouplingContractDeclaration partitionedDeclaration()
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.partitioned_exchange_declarations.push_back(identityExchange());
+    declaration.group_hints.push_back(CouplingGroupHint{
+        .name = "sync_group",
+        .participant_names = {"left", "right"},
+    });
+    return declaration;
+}
+
 } // namespace
 
 TEST(PartitionedCouplingPlanGenerator, GeneratesFieldIdentityExchange)
@@ -172,4 +186,41 @@ TEST(PartitionedCouplingPlanGenerator, RecordsDirectedExchangeCycles)
     ASSERT_FALSE(plan.cycles.empty());
     EXPECT_GE(plan.cycles[0].ports.size(), 3u);
     EXPECT_EQ(plan.cycles[0].ports.front(), plan.cycles[0].ports.back());
+}
+
+TEST(PartitionedCouplingPlanGenerator, GeneratesFromContractDeclarations)
+{
+    const std::array<CouplingContractDeclaration, 1> declarations{
+        partitionedDeclaration()};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        partitionedContext(),
+        std::span<const CouplingContractDeclaration>(declarations));
+
+    ASSERT_EQ(plan.exchanges.size(), 1u);
+    ASSERT_EQ(plan.group_hints.size(), 1u);
+    EXPECT_EQ(plan.group_hints[0].name, "sync_group");
+    EXPECT_EQ(plan.group_hints[0].participant_names.size(), 2u);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsGroupHintWithUnknownParticipant)
+{
+    auto declaration = partitionedDeclaration();
+    declaration.group_hints[0].participant_names.push_back("missing");
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingContractDeclaration>(declarations));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("group hint references an unknown participant"),
+              std::string::npos);
 }

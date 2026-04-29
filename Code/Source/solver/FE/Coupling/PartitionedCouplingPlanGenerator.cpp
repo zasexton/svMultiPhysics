@@ -7,6 +7,8 @@
 
 #include "Coupling/PartitionedCouplingPlanGenerator.h"
 
+#include "Coupling/CouplingDeclaration.h"
+
 #include <algorithm>
 #include <set>
 #include <utility>
@@ -139,11 +141,34 @@ std::vector<CouplingExchangeCycle> detectCycles(const std::vector<CouplingExchan
     return cycles;
 }
 
+void collectDeclarationPartitionedInputs(
+    std::span<const CouplingContractDeclaration> declarations,
+    std::vector<CouplingExchangeDeclaration>& exchanges,
+    std::vector<CouplingGroupHint>& group_hints)
+{
+    for (const auto& declaration : declarations) {
+        exchanges.insert(exchanges.end(),
+                         declaration.partitioned_exchange_declarations.begin(),
+                         declaration.partitioned_exchange_declarations.end());
+        group_hints.insert(group_hints.end(),
+                           declaration.group_hints.begin(),
+                           declaration.group_hints.end());
+    }
+}
+
 } // namespace
 
 CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
     const CouplingContext& ctx,
     std::span<const CouplingExchangeDeclaration> exchanges) const
+{
+    return validate(ctx, exchanges, std::span<const CouplingGroupHint>{});
+}
+
+CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
+    const CouplingContext& ctx,
+    std::span<const CouplingExchangeDeclaration> exchanges,
+    std::span<const CouplingGroupHint> group_hints) const
 {
     CouplingValidationResult result;
     for (const auto& exchange : exchanges) {
@@ -206,14 +231,63 @@ CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
             });
         }
     }
+
+    for (const auto& hint : group_hints) {
+        if (hint.name.empty()) {
+            result.addError("partitioned coupling group hint requires a name");
+        }
+        for (std::size_t i = 0; i < hint.participant_names.size(); ++i) {
+            const auto& participant = hint.participant_names[i];
+            if (participant.empty()) {
+                result.addError("partitioned coupling group hint requires nonempty participants");
+                continue;
+            }
+            if (!ctx.hasParticipant(participant)) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = participant,
+                    .message = "partitioned coupling group hint references an unknown participant",
+                });
+            }
+            for (std::size_t j = i + 1u; j < hint.participant_names.size(); ++j) {
+                if (participant == hint.participant_names[j]) {
+                    result.add(CouplingDiagnostic{
+                        .severity = CouplingDiagnosticSeverity::Error,
+                        .participant_name = participant,
+                        .message = "partitioned coupling group hint contains a duplicate participant",
+                    });
+                }
+            }
+        }
+    }
     return result;
+}
+
+CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
+    const CouplingContext& ctx,
+    std::span<const CouplingContractDeclaration> declarations) const
+{
+    std::vector<CouplingExchangeDeclaration> exchanges;
+    std::vector<CouplingGroupHint> group_hints;
+    collectDeclarationPartitionedInputs(declarations, exchanges, group_hints);
+    return validate(ctx,
+                    std::span<const CouplingExchangeDeclaration>(exchanges),
+                    std::span<const CouplingGroupHint>(group_hints));
 }
 
 PartitionedCouplingPlan PartitionedCouplingPlanGenerator::generate(
     const CouplingContext& ctx,
     std::span<const CouplingExchangeDeclaration> exchanges) const
 {
-    const auto validation = validate(ctx, exchanges);
+    return generate(ctx, exchanges, std::span<const CouplingGroupHint>{});
+}
+
+PartitionedCouplingPlan PartitionedCouplingPlanGenerator::generate(
+    const CouplingContext& ctx,
+    std::span<const CouplingExchangeDeclaration> exchanges,
+    std::span<const CouplingGroupHint> group_hints) const
+{
+    const auto validation = validate(ctx, exchanges, group_hints);
     throwIfInvalid(validation);
 
     PartitionedCouplingPlan plan;
@@ -231,8 +305,21 @@ PartitionedCouplingPlan PartitionedCouplingPlanGenerator::generate(
         resolved.transfer = resolveTransfer(exchange.transfer);
         plan.exchanges.push_back(std::move(resolved));
     }
+    plan.group_hints.assign(group_hints.begin(), group_hints.end());
     plan.cycles = detectCycles(plan.exchanges);
     return plan;
+}
+
+PartitionedCouplingPlan PartitionedCouplingPlanGenerator::generate(
+    const CouplingContext& ctx,
+    std::span<const CouplingContractDeclaration> declarations) const
+{
+    std::vector<CouplingExchangeDeclaration> exchanges;
+    std::vector<CouplingGroupHint> group_hints;
+    collectDeclarationPartitionedInputs(declarations, exchanges, group_hints);
+    return generate(ctx,
+                    std::span<const CouplingExchangeDeclaration>(exchanges),
+                    std::span<const CouplingGroupHint>(group_hints));
 }
 
 } // namespace coupling
