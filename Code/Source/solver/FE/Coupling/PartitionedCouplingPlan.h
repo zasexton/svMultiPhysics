@@ -45,8 +45,21 @@ enum class CouplingResolvedTemporalBackingKind : std::uint8_t {
     SystemStatePredicted,
     SystemStateHistory,
     SystemStateStage,
+    AuxiliaryCurrent,
+    AuxiliaryCommitted,
+    AuxiliaryPredicted,
+    AuxiliaryHistory,
+    AuxiliaryStage,
     ProviderDefined,
     ExternalBuffer,
+};
+
+enum class CouplingAuxiliaryEndpointResolutionKind : std::uint8_t {
+    None,
+    BlockState,
+    InputSlot,
+    Output,
+    RegistryExtension,
 };
 
 struct ResolvedCouplingTemporalSlot {
@@ -72,6 +85,10 @@ struct ResolvedCouplingEndpoint {
     FieldId field_id{INVALID_FIELD_ID};
     std::optional<std::uint32_t> parameter_slot;
     params::ValueType parameter_value_type{params::ValueType::Any};
+    CouplingAuxiliaryEndpointResolutionKind auxiliary_kind{
+        CouplingAuxiliaryEndpointResolutionKind::None};
+    std::optional<std::uint32_t> auxiliary_input_slot;
+    std::string auxiliary_key;
     std::optional<CouplingExternalBufferDescriptor> external_buffer;
     std::uint64_t layout_revision_key{0};
     std::uint64_t registry_revision_key{0};

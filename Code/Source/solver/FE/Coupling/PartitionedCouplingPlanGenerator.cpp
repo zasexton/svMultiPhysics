@@ -11,6 +11,7 @@
 #include "Systems/FESystem.h"
 
 #include <algorithm>
+#include <limits>
 #include <set>
 #include <string>
 #include <string_view>
@@ -44,6 +45,10 @@ CouplingResolvedTemporalBackingKind backingForEndpoint(const CouplingEndpointRef
     if (endpoint.kind == CouplingEndpointKind::Parameter &&
         endpoint.temporal.slot == CouplingTemporalSlot::Current) {
         return CouplingResolvedTemporalBackingKind::ProviderDefined;
+    }
+    if (endpoint.kind == CouplingEndpointKind::AuxiliaryInput &&
+        endpoint.temporal.slot == CouplingTemporalSlot::Current) {
+        return CouplingResolvedTemporalBackingKind::AuxiliaryCurrent;
     }
     return CouplingResolvedTemporalBackingKind::None;
 }
@@ -82,6 +87,11 @@ bool supportsRank(const std::vector<CouplingValueRank>& ranks,
                   CouplingValueRank rank)
 {
     return std::find(ranks.begin(), ranks.end(), rank) != ranks.end();
+}
+
+bool fitsUint32(std::size_t value) noexcept
+{
+    return value <= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
 }
 
 std::optional<std::string_view> endpointScope(const CouplingEndpointRef& endpoint)
@@ -260,6 +270,81 @@ CouplingValidationResult validateEndpointResolutionSupport(
                 .endpoint_name = endpoint.endpoint_name,
                 .message = "partitioned " + std::string(role) +
                            " parameter endpoint requires a Real parameter slot",
+            });
+        }
+        return result;
+    }
+
+    if (endpoint.kind == CouplingEndpointKind::AuxiliaryInput) {
+        if (!endpoint.participant_name.has_value() ||
+            endpoint.participant_name->empty()) {
+            return result;
+        }
+        if (!ctx.hasParticipant(*endpoint.participant_name)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary input endpoint references an unknown participant",
+            });
+            return result;
+        }
+
+        const auto participant = ctx.participant(*endpoint.participant_name);
+        if (participant.system == nullptr) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary input endpoint requires an owning system",
+            });
+            return result;
+        }
+
+        if (endpoint.temporal.slot != CouplingTemporalSlot::Current) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary input endpoint temporal slot " +
+                           toString(endpoint.temporal.slot) +
+                           " requires provider support",
+            });
+        }
+
+        const auto* registry = participant.system->auxiliaryInputRegistryIfPresent();
+        if (registry == nullptr || !registry->hasInput(endpoint.endpoint_name)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary input endpoint requires an AuxiliaryInputRegistry entry",
+            });
+            return result;
+        }
+
+        const auto& spec = registry->specOf(endpoint.endpoint_name);
+        if (spec.size != value.components) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary input endpoint component count does not match the exchange value descriptor",
+            });
+        }
+        const auto slot = registry->slotOf(endpoint.endpoint_name);
+        if (!fitsUint32(slot)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary input endpoint slot is out of range",
             });
         }
         return result;
@@ -566,6 +651,22 @@ ResolvedCouplingEndpoint resolveEndpoint(const CouplingContext& ctx,
             resolved.parameter_value_type = spec->type;
         }
         resolved.parameter_slot = registry.slotOf(endpoint.endpoint_name);
+    }
+    if (endpoint.kind == CouplingEndpointKind::AuxiliaryInput &&
+        endpoint.participant_name.has_value()) {
+        const auto participant = ctx.participant(*endpoint.participant_name);
+        resolved.system_name = participant.system_name;
+        resolved.system = participant.system;
+        resolved.registry_provider = "AuxiliaryInputRegistry";
+        resolved.temporal.provider_name = "AuxiliaryInputRegistry";
+        resolved.auxiliary_kind = CouplingAuxiliaryEndpointResolutionKind::InputSlot;
+        resolved.auxiliary_key = endpoint.endpoint_name;
+        if (const auto* registry = participant.system->auxiliaryInputRegistryIfPresent()) {
+            const auto slot = registry->slotOf(endpoint.endpoint_name);
+            if (fitsUint32(slot)) {
+                resolved.auxiliary_input_slot = static_cast<std::uint32_t>(slot);
+            }
+        }
     }
     if (endpoint.kind == CouplingEndpointKind::ExternalBuffer) {
         if (const auto* descriptor =
