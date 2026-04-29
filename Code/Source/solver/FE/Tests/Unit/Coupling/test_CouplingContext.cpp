@@ -107,10 +107,23 @@ CouplingDriverOwnedTransferDescriptor driverOwnedTransfer(std::string name)
 }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+svmp::search::LogicalInterfaceRegionId logicalRegion(std::string persistent_id,
+                                                     int label)
+{
+    return svmp::search::LogicalInterfaceRegionId{
+        .persistent_id = std::move(persistent_id),
+        .physical_label = label,
+    };
+}
+
 svmp::search::InterfaceMap interfaceMap(std::string name)
 {
     svmp::search::InterfaceMap map;
     map.name = std::move(name);
+    map.source.boundary_label = 12;
+    map.source.logical_region = logicalRegion("left-surface", 12);
+    map.target.boundary_label = 7;
+    map.target.logical_region = logicalRegion("right-surface", 7);
     map.state = svmp::search::InterfaceMapState::Committed;
     return map;
 }
@@ -125,6 +138,8 @@ CouplingInterfaceMapProvenance interfaceMapProvenance(std::string map_name)
         .target_system_name = "right_system",
         .source_interface_marker = 12,
         .target_interface_marker = 7,
+        .source_logical_region = logicalRegion("left-surface", 12),
+        .target_logical_region = logicalRegion("right-surface", 7),
         .map_state = svmp::search::InterfaceMapState::Committed,
         .operator_state = systems::InterfaceOperatorState::AcceptedTimeStep,
     };
@@ -375,6 +390,74 @@ TEST(CouplingContext, MissingInterfaceRuntimeHandleLookupsThrow)
     EXPECT_EQ(context.slidingInterfaceMap("missing"), nullptr);
     EXPECT_THROW(static_cast<void>(context.interfaceMapHandles(
                      interfaceMapProvenance("surface_map"))),
+                 InvalidArgumentException);
+}
+
+TEST(CouplingContext, RejectsMismatchedInterfaceMapRuntimeState)
+{
+    const auto* left_system = systemToken(1);
+    const auto* right_system = systemToken(2);
+    svmp::search::InterfaceSearchRegistry registry;
+    const auto map = interfaceMap("surface_map");
+    registry.commit_map(map);
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(participant("left", "left_system", left_system))
+        .addParticipant(participant("right", "right_system", right_system))
+        .addInterfaceSearchRegistry(CouplingInterfaceSearchRegistryRegistration{
+            .registry_name = "searches",
+            .registry = &registry,
+        });
+    const auto context = builder.build();
+
+    auto provenance = interfaceMapProvenance("surface_map");
+    provenance.map_state = svmp::search::InterfaceMapState::Trial;
+    EXPECT_THROW(static_cast<void>(context.interfaceMapHandles(provenance)),
+                 InvalidArgumentException);
+
+    provenance = interfaceMapProvenance("surface_map");
+    provenance.map_revision_key = map.revision_key() + 1u;
+    EXPECT_THROW(static_cast<void>(context.interfaceMapHandles(provenance)),
+                 InvalidArgumentException);
+
+    provenance = interfaceMapProvenance("surface_map");
+    provenance.source_logical_region = logicalRegion("other-surface", 12);
+    EXPECT_THROW(static_cast<void>(context.interfaceMapHandles(provenance)),
+                 InvalidArgumentException);
+}
+
+TEST(CouplingContext, RejectsMismatchedSlidingInterfaceMapRuntimeState)
+{
+    const auto* left_system = systemToken(1);
+    const auto* right_system = systemToken(2);
+    svmp::search::InterfaceSearchRegistry registry;
+    systems::SlidingInterfaceMap sliding;
+    sliding.name = "surface_map";
+    sliding.map_kind = systems::SlidingInterfaceMapKind::Sliding;
+    sliding.interface_map = interfaceMap("surface_map");
+    sliding.state = systems::InterfaceOperatorState::Trial;
+    sliding.trial_revision_key = 5;
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(participant("left", "left_system", left_system))
+        .addParticipant(participant("right", "right_system", right_system))
+        .addInterfaceSearchRegistry(CouplingInterfaceSearchRegistryRegistration{
+            .registry_name = "searches",
+            .registry = &registry,
+        })
+        .addSlidingInterfaceMap(CouplingSlidingInterfaceMapRegistration{
+            .interface_map_name = "surface_map",
+            .sliding_map = &sliding,
+        });
+    const auto context = builder.build();
+
+    auto provenance = interfaceMapProvenance("surface_map");
+    EXPECT_THROW(static_cast<void>(context.interfaceMapHandles(provenance)),
+                 InvalidArgumentException);
+
+    provenance.operator_state = systems::InterfaceOperatorState::Trial;
+    provenance.trial_revision_key = 6;
+    EXPECT_THROW(static_cast<void>(context.interfaceMapHandles(provenance)),
                  InvalidArgumentException);
 }
 #endif

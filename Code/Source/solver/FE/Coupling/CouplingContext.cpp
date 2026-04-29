@@ -52,6 +52,140 @@ void appendTemporalSlotValidation(
     }
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+bool hasRevisionEvidence(
+    const svmp::search::InterfaceRevisionSnapshot& revision) noexcept
+{
+    return revision.configuration != svmp::Configuration::Reference ||
+           revision.geometry_revision != 0 ||
+           revision.reference_geometry_revision != 0 ||
+           revision.current_geometry_revision != 0 ||
+           revision.topology_revision != 0 ||
+           revision.ownership_revision != 0 ||
+           revision.numbering_revision != 0 ||
+           revision.field_layout_revision != 0 ||
+           revision.label_revision != 0 ||
+           revision.active_configuration_epoch != 0;
+}
+
+void validateInterfaceMapRuntime(
+    const CouplingInterfaceMapProvenance& provenance,
+    const svmp::search::InterfaceMap& interface_map)
+{
+    FE_THROW_IF(interface_map.name != provenance.interface_map_name,
+                InvalidArgumentException,
+                "interface map provenance resolved an unexpected interface map");
+    FE_THROW_IF(interface_map.state != provenance.map_state,
+                InvalidArgumentException,
+                "interface map runtime state does not match provenance");
+    if (provenance.map_revision_key != 0) {
+        FE_THROW_IF(interface_map.revision_key() != provenance.map_revision_key,
+                    InvalidArgumentException,
+                    "interface map runtime revision does not match provenance");
+    }
+    if (interface_map.source.boundary_label != INVALID_LABEL) {
+        FE_THROW_IF(interface_map.source.boundary_label !=
+                        provenance.source_interface_marker,
+                    InvalidArgumentException,
+                    "interface map source marker does not match provenance");
+    }
+    if (interface_map.target.boundary_label != INVALID_LABEL) {
+        FE_THROW_IF(interface_map.target.boundary_label !=
+                        provenance.target_interface_marker,
+                    InvalidArgumentException,
+                    "interface map target marker does not match provenance");
+    }
+    FE_THROW_IF(interface_map.source.configuration != provenance.source_configuration,
+                InvalidArgumentException,
+                "interface map source configuration does not match provenance");
+    FE_THROW_IF(interface_map.target.configuration != provenance.target_configuration,
+                InvalidArgumentException,
+                "interface map target configuration does not match provenance");
+    if (!interface_map.source.logical_region.empty() &&
+        !provenance.source_logical_region.empty()) {
+        FE_THROW_IF(
+            !interface_map.source.logical_region.compatible_with(
+                provenance.source_logical_region),
+            InvalidArgumentException,
+            "interface map source logical region does not match provenance");
+    }
+    if (!interface_map.target.logical_region.empty() &&
+        !provenance.target_logical_region.empty()) {
+        FE_THROW_IF(
+            !interface_map.target.logical_region.compatible_with(
+                provenance.target_logical_region),
+            InvalidArgumentException,
+            "interface map target logical region does not match provenance");
+    }
+    if (hasRevisionEvidence(provenance.source_revision_snapshot)) {
+        FE_THROW_IF(interface_map.source_revision.revision_key() !=
+                        provenance.source_revision_snapshot.revision_key(),
+                    InvalidArgumentException,
+                    "interface map source revision snapshot does not match provenance");
+    }
+    if (hasRevisionEvidence(provenance.target_revision_snapshot)) {
+        FE_THROW_IF(interface_map.target_revision.revision_key() !=
+                        provenance.target_revision_snapshot.revision_key(),
+                    InvalidArgumentException,
+                    "interface map target revision snapshot does not match provenance");
+    }
+    if (provenance.source_search_revision_key != 0) {
+        FE_THROW_IF(interface_map.source_revision.revision_key() !=
+                        provenance.source_search_revision_key,
+                    InvalidArgumentException,
+                    "interface map source search revision does not match provenance");
+    }
+    if (provenance.target_search_revision_key != 0) {
+        FE_THROW_IF(interface_map.target_revision.revision_key() !=
+                        provenance.target_search_revision_key,
+                    InvalidArgumentException,
+                    "interface map target search revision does not match provenance");
+    }
+    if (interface_map.source.valid() && interface_map.target.valid()) {
+        FE_THROW_IF(!interface_map.valid_for_current_revisions(),
+                    InvalidArgumentException,
+                    "interface map runtime revisions are stale");
+    }
+}
+
+void validateSlidingInterfaceMapRuntime(
+    const CouplingInterfaceMapProvenance& provenance,
+    const systems::SlidingInterfaceMap& sliding_map)
+{
+    FE_THROW_IF(!sliding_map.name.empty() &&
+                    sliding_map.name != provenance.interface_map_name,
+                InvalidArgumentException,
+                "sliding interface map name does not match provenance");
+    FE_THROW_IF(sliding_map.map_kind != provenance.sliding_map_kind,
+                InvalidArgumentException,
+                "sliding interface map kind does not match provenance");
+    FE_THROW_IF(sliding_map.state != provenance.operator_state,
+                InvalidArgumentException,
+                "sliding interface operator state does not match provenance");
+    if (provenance.accepted_revision_key != 0) {
+        FE_THROW_IF(sliding_map.accepted_revision_key !=
+                        provenance.accepted_revision_key,
+                    InvalidArgumentException,
+                    "sliding interface accepted revision does not match provenance");
+    }
+    if (provenance.trial_revision_key != 0) {
+        FE_THROW_IF(sliding_map.trial_revision_key != provenance.trial_revision_key,
+                    InvalidArgumentException,
+                    "sliding interface trial revision does not match provenance");
+    }
+    if (provenance.time_level_epoch != 0) {
+        FE_THROW_IF(sliding_map.time_level_epoch != provenance.time_level_epoch,
+                    InvalidArgumentException,
+                    "sliding interface epoch does not match provenance");
+    }
+    if (provenance.time != Real{0.0}) {
+        FE_THROW_IF(sliding_map.time != provenance.time,
+                    InvalidArgumentException,
+                    "sliding interface time does not match provenance");
+    }
+}
+#endif
+
 } // namespace
 
 bool CouplingParticipantRef::valid() const noexcept
@@ -266,9 +400,10 @@ CouplingInterfaceMapRuntimeHandles CouplingContext::interfaceMapHandles(
                                     : registry->committed_map(provenance.interface_map_name);
     FE_THROW_IF(interface_map == nullptr, InvalidArgumentException,
                 "interface map provenance references an unknown interface map");
-    FE_THROW_IF(interface_map->name != provenance.interface_map_name,
-                InvalidArgumentException,
-                "interface map provenance resolved an unexpected interface map");
+    validateInterfaceMapRuntime(provenance, *interface_map);
+    if (sliding_map != nullptr) {
+        validateSlidingInterfaceMapRuntime(provenance, *sliding_map);
+    }
 
     return CouplingInterfaceMapRuntimeHandles{
         .source_system = source_it->system,
