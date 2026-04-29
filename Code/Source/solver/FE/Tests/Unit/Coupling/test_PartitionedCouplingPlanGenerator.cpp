@@ -462,6 +462,7 @@ CouplingRegionRef partitionedRegion(std::string participant,
                                     CouplingInterfaceSide side,
                                     int marker)
 {
+    const bool is_left = participant == "left";
     return CouplingRegionRef{
         .participant_name = std::move(participant),
         .system_name = std::move(system_name),
@@ -470,6 +471,12 @@ CouplingRegionRef partitionedRegion(std::string participant,
         .kind = CouplingRegionKind::InterfaceFace,
         .marker = marker,
         .side = side,
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+        .logical_region = svmp::search::LogicalInterfaceRegionId{
+            .persistent_id = is_left ? "left_interface" : "right_interface",
+            .name = is_left ? "left_surface" : "right_surface",
+        },
+#endif
     };
 }
 
@@ -984,6 +991,28 @@ TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceMapProvenanceConfiguratio
 
     EXPECT_FALSE(validation.ok());
     EXPECT_NE(formatDiagnostics(validation).find("source configuration does not match"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceMapProvenanceLogicalRegionMismatch)
+{
+    auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::Scalar,
+            .components = 1,
+        },
+        CouplingInterfaceFramePolicy::None);
+    exchange.transfer.interface_map->source_logical_region.persistent_id =
+        "other_interface";
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContextWithSharedRegion(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("source logical region does not match"),
               std::string::npos);
 }
 #endif

@@ -1267,6 +1267,26 @@ CouplingValidationResult validateInterfaceMapProvenance(
                 .message = "interface map provenance source configuration does not match the producer region",
             });
         }
+        if (producer_region->logical_region.has_value() &&
+            !producer_region->logical_region->compatible_with(
+                provenance.source_logical_region)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = producer_region->participant_name,
+                .region_name = producer_region->region_name,
+                .message = "interface map provenance source logical region does not match the producer region",
+            });
+        }
+        if (producer_region->revision_snapshot.has_value() &&
+            producer_region->revision_snapshot->revision_key() !=
+                provenance.source_revision_snapshot.revision_key()) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = producer_region->participant_name,
+                .region_name = producer_region->region_name,
+                .message = "interface map provenance source revision snapshot does not match the producer region",
+            });
+        }
     }
 
     const auto consumer_region =
@@ -1303,6 +1323,26 @@ CouplingValidationResult validateInterfaceMapProvenance(
                 .participant_name = consumer_region->participant_name,
                 .region_name = consumer_region->region_name,
                 .message = "interface map provenance target configuration does not match the consumer region",
+            });
+        }
+        if (consumer_region->logical_region.has_value() &&
+            !consumer_region->logical_region->compatible_with(
+                provenance.target_logical_region)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = consumer_region->participant_name,
+                .region_name = consumer_region->region_name,
+                .message = "interface map provenance target logical region does not match the consumer region",
+            });
+        }
+        if (consumer_region->revision_snapshot.has_value() &&
+            consumer_region->revision_snapshot->revision_key() !=
+                provenance.target_revision_snapshot.revision_key()) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = consumer_region->participant_name,
+                .region_name = consumer_region->region_name,
+                .message = "interface map provenance target revision snapshot does not match the consumer region",
             });
         }
     }

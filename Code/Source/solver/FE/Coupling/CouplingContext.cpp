@@ -88,6 +88,47 @@ const CouplingRegionRef* findRegion(const std::vector<CouplingRegionRef>& region
     return it == regions.end() ? nullptr : &*it;
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+bool sameLogicalRegion(
+    const std::optional<svmp::search::LogicalInterfaceRegionId>& lhs,
+    const std::optional<svmp::search::LogicalInterfaceRegionId>& rhs) noexcept
+{
+    if (lhs.has_value() != rhs.has_value()) {
+        return false;
+    }
+    if (!lhs.has_value()) {
+        return true;
+    }
+    return lhs->kind == rhs->kind &&
+           lhs->persistent_id == rhs->persistent_id &&
+           lhs->name == rhs->name &&
+           lhs->physical_label == rhs->physical_label &&
+           lhs->provenance_epoch == rhs->provenance_epoch;
+}
+
+bool sameRevisionSnapshot(
+    const std::optional<svmp::search::InterfaceRevisionSnapshot>& lhs,
+    const std::optional<svmp::search::InterfaceRevisionSnapshot>& rhs) noexcept
+{
+    if (lhs.has_value() != rhs.has_value()) {
+        return false;
+    }
+    if (!lhs.has_value()) {
+        return true;
+    }
+    return lhs->configuration == rhs->configuration &&
+           lhs->geometry_revision == rhs->geometry_revision &&
+           lhs->reference_geometry_revision == rhs->reference_geometry_revision &&
+           lhs->current_geometry_revision == rhs->current_geometry_revision &&
+           lhs->topology_revision == rhs->topology_revision &&
+           lhs->ownership_revision == rhs->ownership_revision &&
+           lhs->numbering_revision == rhs->numbering_revision &&
+           lhs->field_layout_revision == rhs->field_layout_revision &&
+           lhs->label_revision == rhs->label_revision &&
+           lhs->active_configuration_epoch == rhs->active_configuration_epoch;
+}
+#endif
+
 bool sameRegionMetadata(const CouplingRegionRef& lhs,
                         const CouplingRegionRef& rhs) noexcept
 {
@@ -99,6 +140,10 @@ bool sameRegionMetadata(const CouplingRegionRef& lhs,
            lhs.marker == rhs.marker &&
            lhs.side == rhs.side &&
            lhs.coordinate_configuration == rhs.coordinate_configuration &&
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+           sameLogicalRegion(lhs.logical_region, rhs.logical_region) &&
+           sameRevisionSnapshot(lhs.revision_snapshot, rhs.revision_snapshot) &&
+#endif
            lhs.geometry_revision == rhs.geometry_revision &&
            lhs.topology_revision == rhs.topology_revision;
 }

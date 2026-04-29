@@ -69,6 +69,10 @@ struct CouplingRegionRef {
     CouplingInterfaceSide side{CouplingInterfaceSide::None};
     CouplingCoordinateConfiguration coordinate_configuration{
         CouplingCoordinateConfiguration::Reference};
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    std::optional<svmp::search::LogicalInterfaceRegionId> logical_region;
+    std::optional<svmp::search::InterfaceRevisionSnapshot> revision_snapshot;
+#endif
     std::uint64_t geometry_revision{0};
     std::uint64_t topology_revision{0};
 
