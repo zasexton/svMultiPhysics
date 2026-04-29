@@ -51,6 +51,19 @@ bool temporalSlotsEqual(const CouplingTemporalSlotDescriptor& lhs,
            lhs.stage_index == rhs.stage_index;
 }
 
+bool hasMatchingInterfaceRegion(const std::vector<CouplingRegionRef>& regions,
+                                const CouplingFieldRef& field) noexcept
+{
+    return std::any_of(regions.begin(), regions.end(),
+                       [&field](const CouplingRegionRef& region) {
+                           return region.participant_name == field.participant_name &&
+                                  region.system_name == field.system_name &&
+                                  region.system == field.system &&
+                                  region.kind == CouplingRegionKind::InterfaceFace &&
+                                  region.marker == field.interface_marker;
+                       });
+}
+
 void appendTemporalSlotValidation(
     CouplingValidationResult& result,
     const std::vector<CouplingTemporalSlotDescriptor>& slots,
@@ -576,6 +589,30 @@ CouplingValidationResult CouplingContextBuilder::validate() const
                 .message = "coupling field references an unknown participant",
             });
         }
+        if (field.scope == systems::FieldScope::InterfaceFace) {
+            if (field.interface_marker < 0) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = field.participant_name,
+                    .field_name = field.field_name,
+                    .message = "interface coupling field requires an interface marker",
+                });
+            } else if (!hasMatchingInterfaceRegion(context_.regions_, field)) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = field.participant_name,
+                    .field_name = field.field_name,
+                    .message = "interface coupling field requires a matching interface region",
+                });
+            }
+        } else if (field.interface_marker >= 0) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = field.participant_name,
+                .field_name = field.field_name,
+                .message = "non-interface coupling field cannot specify an interface marker",
+            });
+        }
         for (std::size_t j = i + 1u; j < context_.fields_.size(); ++j) {
             if (field.participant_name == context_.fields_[j].participant_name &&
                 field.field_name == context_.fields_[j].field_name) {
@@ -606,6 +643,31 @@ CouplingValidationResult CouplingContextBuilder::validate() const
                 .participant_name = region.participant_name,
                 .region_name = region.region_name,
                 .message = "coupling region references an unknown participant",
+            });
+        }
+        if (region.kind == CouplingRegionKind::InterfaceFace) {
+            if (region.marker < 0) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = region.participant_name,
+                    .region_name = region.region_name,
+                    .message = "interface coupling region requires an interface marker",
+                });
+            }
+            if (region.side == CouplingInterfaceSide::None) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = region.participant_name,
+                    .region_name = region.region_name,
+                    .message = "interface coupling region requires a minus or plus side",
+                });
+            }
+        } else if (region.side != CouplingInterfaceSide::None) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = region.participant_name,
+                .region_name = region.region_name,
+                .message = "non-interface coupling region cannot specify an interface side",
             });
         }
         for (std::size_t j = i + 1u; j < context_.regions_.size(); ++j) {

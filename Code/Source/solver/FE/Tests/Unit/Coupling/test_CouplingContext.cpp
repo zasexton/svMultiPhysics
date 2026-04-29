@@ -212,6 +212,65 @@ TEST(CouplingContext, RejectsInvalidFieldMetadata)
     EXPECT_NE(formatDiagnostics(validation).find("field id, space"), std::string::npos);
 }
 
+TEST(CouplingContext, PreservesInterfaceFieldScopeAndMarker)
+{
+    const auto* system = systemToken(1);
+    auto interface_field = field("left", "shared_system", system, "trace", 0);
+    interface_field.scope = systems::FieldScope::InterfaceFace;
+    interface_field.interface_marker = 9;
+    auto interface_region = region("left", "shared_system", system, "surface",
+                                   CouplingRegionKind::InterfaceFace, 9);
+    interface_region.side = CouplingInterfaceSide::Minus;
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(participant("left", "shared_system", system))
+        .addField(interface_field)
+        .addRegion(interface_region);
+
+    const auto context = builder.build();
+    const auto resolved = context.field("left", "trace");
+    EXPECT_EQ(resolved.scope, systems::FieldScope::InterfaceFace);
+    EXPECT_EQ(resolved.interface_marker, 9);
+}
+
+TEST(CouplingContext, RejectsInconsistentInterfaceFieldAndRegionMetadata)
+{
+    const auto* system = systemToken(1);
+    auto missing_marker = field("left", "shared_system", system, "trace", 0);
+    missing_marker.scope = systems::FieldScope::InterfaceFace;
+
+    auto missing_region = field("left", "shared_system", system, "trace_with_marker", 1);
+    missing_region.scope = systems::FieldScope::InterfaceFace;
+    missing_region.interface_marker = 9;
+
+    auto volume_marker = field("left", "shared_system", system, "volume", 2);
+    volume_marker.interface_marker = 9;
+
+    auto invalid_region = region("left", "shared_system", system, "surface",
+                                 CouplingRegionKind::InterfaceFace, -1);
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(participant("left", "shared_system", system))
+        .addField(missing_marker)
+        .addField(missing_region)
+        .addField(volume_marker)
+        .addRegion(invalid_region);
+
+    const auto validation = builder.validate();
+    EXPECT_FALSE(validation.ok());
+    const auto diagnostics = formatDiagnostics(validation);
+    EXPECT_NE(diagnostics.find("interface coupling field requires an interface marker"),
+              std::string::npos);
+    EXPECT_NE(diagnostics.find("interface coupling field requires a matching interface region"),
+              std::string::npos);
+    EXPECT_NE(diagnostics.find("non-interface coupling field cannot specify an interface marker"),
+              std::string::npos);
+    EXPECT_NE(diagnostics.find("interface coupling region requires an interface marker"),
+              std::string::npos);
+    EXPECT_NE(diagnostics.find("interface coupling region requires a minus or plus side"),
+              std::string::npos);
+}
+
 TEST(CouplingContext, SharedRegionLookupReturnsParticipantMapping)
 {
     const auto* system = systemToken(1);
