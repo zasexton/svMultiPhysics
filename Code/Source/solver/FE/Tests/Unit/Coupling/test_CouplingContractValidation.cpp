@@ -55,6 +55,19 @@ public:
     }
 };
 
+class MismatchedTypeContract final : public CouplingContract {
+public:
+    std::string name() const override { return "actual_type"; }
+
+    CouplingContractDeclaration declare() const override
+    {
+        CouplingContractDeclaration declaration;
+        declaration.contract_type = "declared_type";
+        declaration.contract_name = "mismatched_instance";
+        return declaration;
+    }
+};
+
 } // namespace
 
 TEST(CouplingContractValidation, AcceptsMinimalTwoParticipantDeclaration)
@@ -192,6 +205,13 @@ TEST(CouplingContractValidation, CouplingGraphRejectsDuplicateInstances)
 TEST(CouplingContractValidation, DefaultContractValidationChecksDeclarationGraph)
 {
     const MissingFieldContract contract;
+
+    EXPECT_THROW(contract.validate(CouplingContext{}), InvalidArgumentException);
+}
+
+TEST(CouplingContractValidation, DefaultContractValidationRejectsTypeMismatch)
+{
+    const MismatchedTypeContract contract;
 
     EXPECT_THROW(contract.validate(CouplingContext{}), InvalidArgumentException);
 }

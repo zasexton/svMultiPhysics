@@ -18,11 +18,18 @@ namespace coupling {
 
 void CouplingContract::validate(const CouplingContext& ctx) const
 {
+    CouplingValidationResult validation;
+    auto declaration = declare();
+    if (declaration.contract_type != name()) {
+        validation.addError(
+            "coupling contract declaration type does not match the contract registry key");
+    }
+
     CouplingGraph graph;
-    const std::array<CouplingContractDeclaration, 1> declarations{declare()};
-    const auto validation = graph.buildDeclarationGraph(
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    validation.append(graph.buildDeclarationGraph(
         ctx,
-        std::span<const CouplingContractDeclaration>(declarations));
+        std::span<const CouplingContractDeclaration>(declarations)));
     throwIfInvalid(validation);
 }
 
