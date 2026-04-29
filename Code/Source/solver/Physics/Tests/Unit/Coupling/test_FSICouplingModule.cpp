@@ -1,7 +1,7 @@
 #include "Physics/Coupling/FSICouplingModule.h"
 
 #include "Core/FEException.h"
-#include "Spaces/H1Space.h"
+#include "Spaces/SpaceFactory.h"
 
 #include <gtest/gtest.h>
 
@@ -17,7 +17,11 @@ namespace {
 
 std::shared_ptr<const FE::spaces::FunctionSpace> multiplierSpace()
 {
-    return std::make_shared<FE::spaces::H1Space>(FE::ElementType::Triangle3, 1);
+    return FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1,
+        FE::ElementType::Triangle3,
+        1,
+        3);
 }
 
 bool hasField(const fec::CouplingContractDeclaration& declaration,
@@ -83,6 +87,8 @@ TEST(FSICouplingModule, DeclaresMultiplierFieldWhenEnabled)
     EXPECT_EQ(field.namespace_name, "fsi_interface");
     EXPECT_EQ(field.system_participant_name, "solid");
     EXPECT_EQ(field.field_name, "interface_multiplier");
+    ASSERT_NE(field.space, nullptr);
+    EXPECT_EQ(field.space->value_dimension(), 3);
     EXPECT_EQ(field.components, 3);
     EXPECT_EQ(field.scope, fec::CouplingAdditionalFieldScope::InterfaceFace);
     ASSERT_TRUE(field.shared_region_name.has_value());

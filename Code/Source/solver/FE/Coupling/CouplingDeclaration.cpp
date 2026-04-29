@@ -7,6 +7,8 @@
 
 #include "Coupling/CouplingDeclaration.h"
 
+#include "Spaces/FunctionSpace.h"
+
 #include <string>
 #include <string_view>
 #include <utility>
@@ -126,8 +128,16 @@ CouplingValidationResult validateContractDeclarationShape(
         if (field.field_name.empty()) {
             result.addError("additional field declaration requires a field name");
         }
+        if (field.space == nullptr) {
+            result.addError("additional field declaration requires a function space");
+        }
         if (field.components < 0) {
             result.addError("additional field component count must be nonnegative");
+        }
+        if (field.space != nullptr && field.components > 0 &&
+            field.components != field.space->value_dimension()) {
+            result.addError(
+                "additional field component count must match the function space");
         }
         const bool has_region = field.region_name.has_value();
         const bool has_shared_region = field.shared_region_name.has_value();

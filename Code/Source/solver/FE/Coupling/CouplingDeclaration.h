@@ -23,12 +23,16 @@
 #include "Systems/OperatorRegistry.h"
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace svmp {
 namespace FE {
+namespace spaces {
+class FunctionSpace;
+}
 namespace coupling {
 
 enum class CouplingVariableKind : std::uint8_t {
@@ -102,6 +106,7 @@ struct CouplingAdditionalFieldDeclaration {
     std::string namespace_name;
     std::string system_participant_name;
     std::string field_name;
+    std::shared_ptr<const spaces::FunctionSpace> space;
     int components{0};
     CouplingAdditionalFieldScope scope{CouplingAdditionalFieldScope::VolumeCell};
     std::optional<std::string> region_name;

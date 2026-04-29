@@ -1,14 +1,22 @@
 #include "Coupling/CouplingDeclaration.h"
 #include "Coupling/CouplingGraph.h"
+#include "Spaces/H1Space.h"
 
 #include <gtest/gtest.h>
 
 #include <array>
+#include <memory>
 #include <span>
 
 using namespace svmp::FE::coupling;
 
 namespace {
+
+std::shared_ptr<const svmp::FE::spaces::FunctionSpace> scalarSpace()
+{
+    return std::make_shared<svmp::FE::spaces::H1Space>(
+        svmp::FE::ElementType::Triangle3, 1);
+}
 
 CouplingContractDeclaration minimalDeclaration()
 {
@@ -91,6 +99,40 @@ TEST(CouplingContractValidation, ValidatesAdditionalFieldAttachmentRules)
     const auto text = formatDiagnostics(validation);
     EXPECT_NE(text.find("component count"), std::string::npos);
     EXPECT_NE(text.find("exactly one region attachment"), std::string::npos);
+}
+
+TEST(CouplingContractValidation, ValidatesAdditionalFieldSpaceAndComponents)
+{
+    auto declaration = minimalDeclaration();
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Contract,
+        .namespace_name = "generic_instance",
+        .field_name = "missing_space",
+    });
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Contract,
+        .namespace_name = "generic_instance",
+        .field_name = "bad_components",
+        .space = scalarSpace(),
+        .components = 2,
+    });
+
+    const auto validation = validateContractDeclarationShape(declaration);
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("function space"), std::string::npos);
+    EXPECT_NE(text.find("match the function space"), std::string::npos);
+
+    declaration.additional_fields.clear();
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Contract,
+        .namespace_name = "generic_instance",
+        .field_name = "inferred_components",
+        .space = scalarSpace(),
+        .components = 0,
+    });
+
+    EXPECT_TRUE(validateContractDeclarationShape(declaration).ok());
 }
 
 TEST(CouplingContractValidation, ValidatesTemporalRequirementsAndExchangeShape)

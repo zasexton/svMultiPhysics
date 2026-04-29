@@ -201,6 +201,7 @@ fec::CouplingContractDeclaration FSICouplingModule::declare() const
                 .system_participant_name =
                     options_.multiplier.system_participant_name.value_or(""),
                 .field_name = options_.multiplier.field_name,
+                .space = options_.multiplier.space,
                 .components = options_.multiplier.components,
                 .scope = fec::CouplingAdditionalFieldScope::InterfaceFace,
                 .shared_region_name =
