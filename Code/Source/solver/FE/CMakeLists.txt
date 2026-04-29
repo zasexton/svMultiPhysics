@@ -2528,8 +2528,10 @@ if(FE_BUILD_TESTS)
         # Coupling module tests (physics-agnostic setup and plan metadata)
         if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Coupling/test_main.cpp)
             set(FE_COUPLING_TEST_SOURCES
+                Tests/Unit/Coupling/test_CouplingContractValidation.cpp
                 Tests/Unit/Coupling/test_CouplingHeaders.cpp
                 Tests/Unit/Coupling/test_CouplingContext.cpp
+                Tests/Unit/Coupling/test_CouplingRegistry.cpp
                 Tests/Unit/Coupling/test_CouplingTypes.cpp
                 Tests/Unit/Coupling/test_SharedRegionRegistry.cpp
                 Tests/Unit/Coupling/test_main.cpp

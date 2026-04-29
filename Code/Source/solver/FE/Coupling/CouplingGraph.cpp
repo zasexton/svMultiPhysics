@@ -18,8 +18,19 @@ CouplingValidationResult CouplingGraph::buildDeclarationGraph(
     declarations_.assign(declarations.begin(), declarations.end());
 
     CouplingValidationResult result;
-    for (const auto& declaration : declarations_) {
+    for (std::size_t i = 0; i < declarations_.size(); ++i) {
+        const auto& declaration = declarations_[i];
         result.append(validateContractDeclarationShape(declaration));
+        for (std::size_t j = i + 1u; j < declarations_.size(); ++j) {
+            if (!declaration.contract_name.empty() &&
+                declaration.contract_name == declarations_[j].contract_name) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .contract_name = declaration.contract_name,
+                    .message = "duplicate coupling contract instance name",
+                });
+            }
+        }
     }
     return result;
 }
