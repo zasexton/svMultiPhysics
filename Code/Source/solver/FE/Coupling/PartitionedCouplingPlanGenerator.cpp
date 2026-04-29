@@ -1187,6 +1187,21 @@ CouplingValidationResult validateInterfaceTransferRegions(
 }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+bool hasInterfaceRevisionEvidence(
+    const svmp::search::InterfaceRevisionSnapshot& revision) noexcept
+{
+    return revision.configuration != svmp::Configuration::Reference ||
+           revision.geometry_revision != 0 ||
+           revision.reference_geometry_revision != 0 ||
+           revision.current_geometry_revision != 0 ||
+           revision.topology_revision != 0 ||
+           revision.ownership_revision != 0 ||
+           revision.numbering_revision != 0 ||
+           revision.field_layout_revision != 0 ||
+           revision.label_revision != 0 ||
+           revision.active_configuration_epoch != 0;
+}
+
 CouplingValidationResult validateInterfaceMapProvenance(
     const CouplingContext& ctx,
     const CouplingExchangeDeclaration& exchange)
@@ -1223,6 +1238,12 @@ CouplingValidationResult validateInterfaceMapProvenance(
     }
     if (provenance.target_logical_region.empty()) {
         result.addError("interface map provenance requires a target logical region");
+    }
+    if (!hasInterfaceRevisionEvidence(provenance.source_revision_snapshot)) {
+        result.addError("interface map provenance requires a source revision snapshot");
+    }
+    if (!hasInterfaceRevisionEvidence(provenance.target_revision_snapshot)) {
+        result.addError("interface map provenance requires a target revision snapshot");
     }
     if (provenance.map_state == svmp::search::InterfaceMapState::Empty) {
         result.addError("interface map provenance requires a resolved map state");

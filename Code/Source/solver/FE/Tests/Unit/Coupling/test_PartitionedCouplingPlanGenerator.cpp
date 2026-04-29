@@ -109,6 +109,24 @@ const systems::FESystem* partitionedSystemToken(int index)
         static_cast<std::uintptr_t>(index));
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+svmp::search::InterfaceRevisionSnapshot interfaceRevisionSnapshot(bool is_left)
+{
+    svmp::search::InterfaceRevisionSnapshot snapshot;
+    snapshot.configuration = svmp::Configuration::Reference;
+    snapshot.geometry_revision = is_left ? 101 : 201;
+    snapshot.reference_geometry_revision = is_left ? 102 : 202;
+    snapshot.current_geometry_revision = is_left ? 103 : 203;
+    snapshot.topology_revision = is_left ? 104 : 204;
+    snapshot.ownership_revision = is_left ? 105 : 205;
+    snapshot.numbering_revision = is_left ? 106 : 206;
+    snapshot.field_layout_revision = is_left ? 107 : 207;
+    snapshot.label_revision = is_left ? 108 : 208;
+    snapshot.active_configuration_epoch = is_left ? 109 : 209;
+    return snapshot;
+}
+#endif
+
 CouplingContextBuilder partitionedContextBuilder(int components)
 {
     const auto left_system = partitionedSystemToken(1);
@@ -476,6 +494,7 @@ CouplingRegionRef partitionedRegion(std::string participant,
             .persistent_id = is_left ? "left_interface" : "right_interface",
             .name = is_left ? "left_surface" : "right_surface",
         },
+        .revision_snapshot = interfaceRevisionSnapshot(is_left),
 #endif
     };
 }
@@ -703,6 +722,8 @@ CouplingExchangeDeclaration interfaceExchange(CouplingValueDescriptor value,
             .persistent_id = "right_interface",
             .name = "right_surface",
         },
+        .source_revision_snapshot = interfaceRevisionSnapshot(true),
+        .target_revision_snapshot = interfaceRevisionSnapshot(false),
         .source_search_revision_key = 3,
         .target_search_revision_key = 5,
         .map_revision_key = 7,
@@ -1013,6 +1034,49 @@ TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceMapProvenanceLogicalRegio
 
     EXPECT_FALSE(validation.ok());
     EXPECT_NE(formatDiagnostics(validation).find("source logical region does not match"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceMapProvenanceMissingRevisionSnapshot)
+{
+    auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::Scalar,
+            .components = 1,
+        },
+        CouplingInterfaceFramePolicy::None);
+    exchange.transfer.interface_map->source_revision_snapshot =
+        svmp::search::InterfaceRevisionSnapshot{};
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContextWithSharedRegion(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("requires a source revision snapshot"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceMapProvenanceRevisionSnapshotMismatch)
+{
+    auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::Scalar,
+            .components = 1,
+        },
+        CouplingInterfaceFramePolicy::None);
+    exchange.transfer.interface_map->source_revision_snapshot.geometry_revision += 1;
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContextWithSharedRegion(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("source revision snapshot does not match"),
               std::string::npos);
 }
 #endif
