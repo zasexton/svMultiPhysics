@@ -50,6 +50,10 @@ CouplingResolvedTemporalBackingKind backingForEndpoint(const CouplingEndpointRef
         endpoint.temporal.slot == CouplingTemporalSlot::Current) {
         return CouplingResolvedTemporalBackingKind::AuxiliaryCurrent;
     }
+    if (endpoint.kind == CouplingEndpointKind::RegionData &&
+        endpoint.temporal.slot == CouplingTemporalSlot::Current) {
+        return CouplingResolvedTemporalBackingKind::ProviderDefined;
+    }
     return CouplingResolvedTemporalBackingKind::None;
 }
 
@@ -92,6 +96,23 @@ bool supportsRank(const std::vector<CouplingValueRank>& ranks,
 bool fitsUint32(std::size_t value) noexcept
 {
     return value <= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+}
+
+bool feQuantityShapeMatchesValue(const systems::FEQuantityShape& shape,
+                                 const CouplingValueDescriptor& value) noexcept
+{
+    if (shape.components != value.components) {
+        return false;
+    }
+    switch (shape.kind) {
+    case systems::FEQuantityShapeKind::Scalar:
+        return value.rank == CouplingValueRank::Scalar && value.components == 1;
+    case systems::FEQuantityShapeKind::Vector:
+        return value.rank == CouplingValueRank::Vector;
+    case systems::FEQuantityShapeKind::Tensor:
+        return value.rank == CouplingValueRank::Rank2Tensor;
+    }
+    return false;
 }
 
 std::optional<std::string_view> endpointScope(const CouplingEndpointRef& endpoint)
@@ -270,6 +291,80 @@ CouplingValidationResult validateEndpointResolutionSupport(
                 .endpoint_name = endpoint.endpoint_name,
                 .message = "partitioned " + std::string(role) +
                            " parameter endpoint requires a Real parameter slot",
+            });
+        }
+        return result;
+    }
+
+    if (endpoint.kind == CouplingEndpointKind::RegionData) {
+        if (!endpoint.participant_name.has_value() ||
+            endpoint.participant_name->empty()) {
+            return result;
+        }
+        if (!ctx.hasParticipant(*endpoint.participant_name)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " region data endpoint references an unknown participant",
+            });
+            return result;
+        }
+
+        const auto participant = ctx.participant(*endpoint.participant_name);
+        if (participant.system == nullptr) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " region data endpoint requires an owning system",
+            });
+            return result;
+        }
+
+        if (endpoint.temporal.slot != CouplingTemporalSlot::Current) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " region data endpoint temporal slot " +
+                           toString(endpoint.temporal.slot) +
+                           " requires provider support",
+            });
+        }
+
+        const auto* registry = participant.system->feQuantityRegistryIfPresent();
+        if (registry == nullptr || !registry->hasDefinition(endpoint.endpoint_name)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " region data endpoint requires an FEQuantityRegistry entry",
+            });
+            return result;
+        }
+
+        const auto& definition = registry->get(endpoint.endpoint_name);
+        if (!definition.capabilities.explicit_evaluation) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " region data endpoint requires explicit evaluation support",
+            });
+        }
+        if (!feQuantityShapeMatchesValue(definition.shape, value)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " region data endpoint value shape does not match the FE quantity definition",
             });
         }
         return result;
@@ -651,6 +746,19 @@ ResolvedCouplingEndpoint resolveEndpoint(const CouplingContext& ctx,
             resolved.parameter_value_type = spec->type;
         }
         resolved.parameter_slot = registry.slotOf(endpoint.endpoint_name);
+    }
+    if (endpoint.kind == CouplingEndpointKind::RegionData &&
+        endpoint.participant_name.has_value()) {
+        const auto participant = ctx.participant(*endpoint.participant_name);
+        resolved.system_name = participant.system_name;
+        resolved.system = participant.system;
+        resolved.registry_provider = "FEQuantityRegistry";
+        resolved.temporal.provider_name = "FEQuantityRegistry";
+        resolved.region_data_provider_kind = CouplingRegionDataProviderKind::FEQuantity;
+        resolved.region_data_provider_name = endpoint.endpoint_name;
+        if (const auto* registry = participant.system->feQuantityRegistryIfPresent()) {
+            resolved.fe_quantity_id = registry->idOf(endpoint.endpoint_name);
+        }
     }
     if (endpoint.kind == CouplingEndpointKind::AuxiliaryInput &&
         endpoint.participant_name.has_value()) {

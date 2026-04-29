@@ -231,6 +231,69 @@ struct AuxiliaryInputEndpointFixture {
     }
 };
 
+struct RegionDataEndpointFixture {
+    std::shared_ptr<spaces::H1Space> space;
+    std::shared_ptr<forms::test::SingleTetraMeshAccess> mesh;
+    systems::FESystem left_system;
+    FieldId left_field{INVALID_FIELD_ID};
+    CouplingContext context;
+
+    explicit RegionDataEndpointFixture(
+        systems::FEQuantityShape shape = systems::FEQuantityShape::scalar(),
+        bool explicit_evaluation = true,
+        bool register_quantity = true)
+        : space(std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1))
+        , mesh(std::make_shared<forms::test::SingleTetraMeshAccess>())
+        , left_system(mesh)
+    {
+        left_field = left_system.addField(systems::FieldSpec{
+            .name = "primary",
+            .space = space,
+            .components = 1,
+        });
+        if (register_quantity) {
+            systems::FEQuantityDefinition definition;
+            definition.name = "surface_measure";
+            definition.kind = systems::FEQuantityKind::RegionIntegral;
+            definition.shape = shape;
+            definition.capabilities.explicit_evaluation = explicit_evaluation;
+            definition.referenced_fields = {left_field};
+            left_system.feQuantityRegistry().registerDefinition(std::move(definition));
+        }
+
+        CouplingContextBuilder builder;
+        builder.addParticipant({
+            .participant_name = "left",
+            .system_name = "left_system",
+            .system = &left_system,
+        });
+        builder.addParticipant({
+            .participant_name = "right",
+            .system_name = "right_system",
+            .system = partitionedSystemToken(2),
+        });
+        builder.addField({
+            .participant_name = "left",
+            .system_name = "left_system",
+            .system = &left_system,
+            .field_name = "primary",
+            .field_id = left_field,
+            .space = space,
+            .components = 1,
+        });
+        builder.addField({
+            .participant_name = "right",
+            .system_name = "right_system",
+            .system = partitionedSystemToken(2),
+            .field_name = "primary",
+            .field_id = 2,
+            .space = space,
+            .components = 1,
+        });
+        context = builder.build();
+    }
+};
+
 CouplingRegionRef partitionedRegion(std::string participant,
                                     std::string system_name,
                                     const systems::FESystem* system,
@@ -318,6 +381,20 @@ CouplingEndpointRef auxiliaryInputEndpoint(
 {
     return CouplingEndpointRef{
         .kind = CouplingEndpointKind::AuxiliaryInput,
+        .participant_name = std::move(participant),
+        .endpoint_name = std::move(key),
+        .temporal = temporal,
+    };
+}
+
+CouplingEndpointRef regionDataEndpoint(
+    std::string participant,
+    std::string key = "surface_measure",
+    CouplingTemporalSlotDescriptor temporal =
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Current})
+{
+    return CouplingEndpointRef{
+        .kind = CouplingEndpointKind::RegionData,
         .participant_name = std::move(participant),
         .endpoint_name = std::move(key),
         .temporal = temporal,
@@ -779,6 +856,112 @@ TEST(PartitionedCouplingPlanGenerator, RejectsAuxiliaryInputUnsupportedTemporalS
 
     EXPECT_FALSE(validation.ok());
     EXPECT_NE(formatDiagnostics(validation).find("auxiliary input endpoint temporal slot"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, GeneratesRegionDataEndpointFromRegistry)
+{
+    RegionDataEndpointFixture fixture;
+    auto exchange = identityExchange();
+    exchange.producer = regionDataEndpoint("left");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    ASSERT_EQ(plan.exchanges.size(), 1u);
+    const auto& producer = plan.exchanges[0].producer;
+    EXPECT_EQ(producer.resolved_kind, CouplingEndpointKind::RegionData);
+    EXPECT_EQ(producer.system_name, "left_system");
+    EXPECT_EQ(producer.system, &fixture.left_system);
+    EXPECT_EQ(producer.registry_provider, "FEQuantityRegistry");
+    EXPECT_EQ(producer.temporal.provider_name, "FEQuantityRegistry");
+    EXPECT_EQ(producer.temporal.backing,
+              CouplingResolvedTemporalBackingKind::ProviderDefined);
+    EXPECT_EQ(producer.region_data_provider_kind,
+              CouplingRegionDataProviderKind::FEQuantity);
+    EXPECT_EQ(producer.region_data_provider_name, "surface_measure");
+    ASSERT_TRUE(producer.fe_quantity_id.has_value());
+    EXPECT_EQ(*producer.fe_quantity_id, 0u);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsRegionDataWithoutRegistryEntry)
+{
+    RegionDataEndpointFixture fixture(systems::FEQuantityShape::scalar(),
+                                      true,
+                                      false);
+    auto exchange = identityExchange();
+    exchange.producer = regionDataEndpoint("left");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("requires an FEQuantityRegistry entry"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsRegionDataShapeMismatch)
+{
+    RegionDataEndpointFixture fixture(systems::FEQuantityShape::vector(2));
+    auto exchange = identityExchange();
+    exchange.producer = regionDataEndpoint("left");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("value shape does not match"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsRegionDataWithoutExplicitEvaluation)
+{
+    RegionDataEndpointFixture fixture(systems::FEQuantityShape::scalar(), false);
+    auto exchange = identityExchange();
+    exchange.producer = regionDataEndpoint("left");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("requires explicit evaluation support"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsRegionDataUnsupportedTemporalSlot)
+{
+    RegionDataEndpointFixture fixture;
+    auto exchange = identityExchange();
+    exchange.producer = regionDataEndpoint(
+        "left",
+        "surface_measure",
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Accepted});
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("region data endpoint temporal slot"),
               std::string::npos);
 }
 

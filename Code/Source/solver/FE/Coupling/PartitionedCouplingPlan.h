@@ -17,6 +17,7 @@
 #include "Coupling/TransferPlan.h"
 #include "Core/ParameterValue.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -62,6 +63,13 @@ enum class CouplingAuxiliaryEndpointResolutionKind : std::uint8_t {
     RegistryExtension,
 };
 
+enum class CouplingRegionDataProviderKind : std::uint8_t {
+    None,
+    FEQuantity,
+    BoundaryReductionFunctional,
+    ProviderExtension,
+};
+
 struct ResolvedCouplingTemporalSlot {
     CouplingTemporalSlotDescriptor request{};
     CouplingTemporalSlotDescriptor provided{};
@@ -83,8 +91,14 @@ struct ResolvedCouplingEndpoint {
     ResolvedCouplingTemporalSlot temporal{};
     const systems::FESystem* system{nullptr};
     FieldId field_id{INVALID_FIELD_ID};
+    std::optional<std::size_t> fe_quantity_id;
     std::optional<std::uint32_t> parameter_slot;
     params::ValueType parameter_value_type{params::ValueType::Any};
+    CouplingRegionDataProviderKind region_data_provider_kind{
+        CouplingRegionDataProviderKind::None};
+    std::string region_data_provider_name;
+    std::string boundary_functional_name;
+    FieldId boundary_reduction_primary_field{INVALID_FIELD_ID};
     CouplingAuxiliaryEndpointResolutionKind auxiliary_kind{
         CouplingAuxiliaryEndpointResolutionKind::None};
     std::optional<std::uint32_t> auxiliary_input_slot;
