@@ -106,6 +106,33 @@ CouplingValidationResult validateEndpointResolutionSupport(
     return result;
 }
 
+CouplingValidationResult validateFieldEndpointValueDescriptor(
+    const CouplingContext& ctx,
+    const CouplingEndpointRef& endpoint,
+    const CouplingValueDescriptor& value,
+    std::string_view role)
+{
+    CouplingValidationResult result;
+    if (endpoint.kind != CouplingEndpointKind::Field ||
+        !endpoint.participant_name.has_value() ||
+        !ctx.hasField(*endpoint.participant_name, endpoint.endpoint_name)) {
+        return result;
+    }
+
+    const auto field = ctx.field(*endpoint.participant_name, endpoint.endpoint_name);
+    if (field.components != value.components) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .participant_name = *endpoint.participant_name,
+            .field_name = endpoint.endpoint_name,
+            .endpoint_name = endpoint.endpoint_name,
+            .message = "partitioned " + std::string(role) +
+                       " field endpoint component count does not match the exchange value descriptor",
+        });
+    }
+    return result;
+}
+
 bool hasPort(const std::vector<CouplingPortId>& stack, const CouplingPortId& port)
 {
     return std::find(stack.begin(), stack.end(), port) != stack.end();
@@ -247,6 +274,10 @@ CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
         if (exchange.transfer.kind == CouplingTransferKind::Unspecified) {
             result.addError("partitioned coupling exchange requires an explicit transfer");
         }
+        if (exchange.value.rank == CouplingValueRank::GeneralTensor &&
+            exchange.transfer.kind != CouplingTransferKind::DriverOwned) {
+            result.addError("general tensor partitioned values require driver-owned transfers");
+        }
         if (exchange.transfer.kind == CouplingTransferKind::DriverOwned &&
             exchange.transfer.driver_owned_name.empty()) {
             result.addError("driver-owned partitioned transfer requires a transfer name");
@@ -266,6 +297,10 @@ CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
         result.append(validateCouplingEndpointRef(*exchange.consumer));
         result.append(validateEndpointResolutionSupport(*exchange.producer, "producer"));
         result.append(validateEndpointResolutionSupport(*exchange.consumer, "consumer"));
+        result.append(validateFieldEndpointValueDescriptor(
+            ctx, *exchange.producer, exchange.value, "producer"));
+        result.append(validateFieldEndpointValueDescriptor(
+            ctx, *exchange.consumer, exchange.value, "consumer"));
 
         if (exchange.producer->kind == CouplingEndpointKind::Field) {
             if (!exchange.producer->participant_name.has_value() ||

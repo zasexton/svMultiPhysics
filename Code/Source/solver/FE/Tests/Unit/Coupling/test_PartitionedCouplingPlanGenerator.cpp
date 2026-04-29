@@ -23,7 +23,7 @@ const systems::FESystem* partitionedSystemToken(int index)
         static_cast<std::uintptr_t>(index));
 }
 
-CouplingContext partitionedContext()
+CouplingContext partitionedContextWithComponents(int components)
 {
     const auto left_system = partitionedSystemToken(1);
     const auto right_system = partitionedSystemToken(2);
@@ -47,7 +47,7 @@ CouplingContext partitionedContext()
         .field_name = "primary",
         .field_id = 1,
         .space = space,
-        .components = 1,
+        .components = components,
     });
     builder.addField({
         .participant_name = "right",
@@ -56,9 +56,14 @@ CouplingContext partitionedContext()
         .field_name = "primary",
         .field_id = 2,
         .space = space,
-        .components = 1,
+        .components = components,
     });
     return builder.build();
+}
+
+CouplingContext partitionedContext()
+{
+    return partitionedContextWithComponents(1);
 }
 
 CouplingEndpointRef fieldEndpoint(std::string participant,
@@ -137,6 +142,70 @@ TEST(PartitionedCouplingPlanGenerator, GeneratesFieldIdentityExchange)
     EXPECT_EQ(plan.exchanges[0].consumer.field_id, 2);
     EXPECT_EQ(plan.exchanges[0].transfer.kind, CouplingTransferKind::Identity);
     EXPECT_TRUE(plan.cycles.empty());
+}
+
+TEST(PartitionedCouplingPlanGenerator, GeneratesVectorFieldIdentityExchange)
+{
+    auto exchange = identityExchange();
+    exchange.value = CouplingValueDescriptor{
+        .rank = CouplingValueRank::Vector,
+        .components = 2,
+    };
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContextWithComponents(2),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        partitionedContextWithComponents(2),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    ASSERT_EQ(plan.exchanges.size(), 1u);
+    EXPECT_EQ(plan.exchanges[0].value.rank, CouplingValueRank::Vector);
+    EXPECT_EQ(plan.exchanges[0].value.components, 2);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsFieldEndpointComponentMismatch)
+{
+    auto exchange = identityExchange();
+    exchange.value = CouplingValueDescriptor{
+        .rank = CouplingValueRank::Vector,
+        .components = 2,
+    };
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("component count does not match"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsGeneralTensorWithoutDriverOwnedTransfer)
+{
+    auto exchange = identityExchange();
+    exchange.value = CouplingValueDescriptor{
+        .rank = CouplingValueRank::GeneralTensor,
+        .components = 4,
+        .tensor_extents = {2, 2},
+        .tensor_packing = "row_major",
+    };
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContextWithComponents(4),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("general tensor partitioned values"),
+              std::string::npos);
 }
 
 TEST(PartitionedCouplingPlanGenerator, ResolvesFieldHistoryTemporalSlot)
