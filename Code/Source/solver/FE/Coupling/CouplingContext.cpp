@@ -17,6 +17,43 @@ namespace svmp {
 namespace FE {
 namespace coupling {
 
+namespace {
+
+bool sameScope(const std::optional<std::string>& lhs,
+               std::optional<std::string_view> rhs) noexcept
+{
+    if (lhs.has_value() != rhs.has_value()) {
+        return false;
+    }
+    if (!lhs.has_value()) {
+        return true;
+    }
+    return *lhs == *rhs;
+}
+
+bool sameScope(const std::optional<std::string>& lhs,
+               const std::optional<std::string>& rhs) noexcept
+{
+    if (lhs.has_value() != rhs.has_value()) {
+        return false;
+    }
+    if (!lhs.has_value()) {
+        return true;
+    }
+    return *lhs == *rhs;
+}
+
+void appendTemporalSlotValidation(
+    CouplingValidationResult& result,
+    const std::vector<CouplingTemporalSlotDescriptor>& slots)
+{
+    for (const auto& slot : slots) {
+        result.append(validateCouplingTemporalSlot(slot));
+    }
+}
+
+} // namespace
+
 bool CouplingParticipantRef::valid() const noexcept
 {
     return !participant_name.empty() && !system_name.empty() && system != nullptr;
@@ -133,6 +170,33 @@ bool CouplingContext::hasSharedRegion(std::string_view name) const noexcept
                        });
 }
 
+const CouplingExternalBufferDescriptor* CouplingContext::externalBufferDescriptor(
+    std::optional<std::string_view> participant,
+    std::string_view external_buffer_key) const noexcept
+{
+    const auto it = std::find_if(
+        external_buffers_.begin(),
+        external_buffers_.end(),
+        [participant, external_buffer_key](
+            const CouplingExternalBufferRegistration& registration) {
+            return sameScope(registration.participant_name, participant) &&
+                   registration.descriptor.buffer_name == external_buffer_key;
+        });
+    return it == external_buffers_.end() ? nullptr : &it->descriptor;
+}
+
+const CouplingDriverOwnedTransferDescriptor* CouplingContext::driverOwnedTransfer(
+    std::string_view transfer_name) const noexcept
+{
+    const auto it = std::find_if(
+        driver_owned_transfers_.begin(),
+        driver_owned_transfers_.end(),
+        [transfer_name](const CouplingDriverOwnedTransferDescriptor& descriptor) {
+            return descriptor.transfer_name == transfer_name;
+        });
+    return it == driver_owned_transfers_.end() ? nullptr : &*it;
+}
+
 const std::vector<CouplingParticipantRef>& CouplingContext::participants() const noexcept
 {
     return participants_;
@@ -151,6 +215,18 @@ const std::vector<CouplingRegionRef>& CouplingContext::regions() const noexcept
 const std::vector<SharedRegionRef>& CouplingContext::sharedRegions() const noexcept
 {
     return shared_regions_;
+}
+
+const std::vector<CouplingExternalBufferRegistration>&
+CouplingContext::externalBuffers() const noexcept
+{
+    return external_buffers_;
+}
+
+const std::vector<CouplingDriverOwnedTransferDescriptor>&
+CouplingContext::driverOwnedTransfers() const noexcept
+{
+    return driver_owned_transfers_;
 }
 
 CouplingContextBuilder& CouplingContextBuilder::addParticipant(CouplingParticipantRef participant)
@@ -174,6 +250,20 @@ CouplingContextBuilder& CouplingContextBuilder::addRegion(CouplingRegionRef regi
 CouplingContextBuilder& CouplingContextBuilder::addSharedRegion(SharedRegionRef region)
 {
     context_.shared_regions_.push_back(std::move(region));
+    return *this;
+}
+
+CouplingContextBuilder& CouplingContextBuilder::addExternalBuffer(
+    CouplingExternalBufferRegistration registration)
+{
+    context_.external_buffers_.push_back(std::move(registration));
+    return *this;
+}
+
+CouplingContextBuilder& CouplingContextBuilder::addDriverOwnedTransfer(
+    CouplingDriverOwnedTransferDescriptor descriptor)
+{
+    context_.driver_owned_transfers_.push_back(std::move(descriptor));
     return *this;
 }
 
@@ -281,6 +371,112 @@ CouplingValidationResult CouplingContextBuilder::validate() const
                     .region_name = region.region_name,
                     .message = "shared region references a participant region missing from the context",
                 });
+            }
+        }
+    }
+
+    for (std::size_t i = 0; i < context_.external_buffers_.size(); ++i) {
+        const auto& registration = context_.external_buffers_[i];
+        const auto& descriptor = registration.descriptor;
+        if (registration.participant_name.has_value()) {
+            if (registration.participant_name->empty()) {
+                result.addError("external buffer participant scope must be nonempty");
+            } else if (!context_.hasParticipant(*registration.participant_name)) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = *registration.participant_name,
+                    .endpoint_name = descriptor.buffer_name,
+                    .message = "external buffer descriptor references an unknown participant",
+                });
+            }
+        }
+        if (descriptor.buffer_name.empty()) {
+            result.addError("external buffer descriptor requires a buffer name");
+        }
+        if (descriptor.scalar_type.empty()) {
+            result.addError("external buffer descriptor requires a scalar type");
+        }
+        result.append(validateCouplingValueDescriptor(descriptor.value));
+        if (descriptor.extents.empty()) {
+            result.addError("external buffer descriptor requires extents");
+        }
+        if (descriptor.strides.size() != descriptor.extents.size()) {
+            result.addError("external buffer descriptor strides must match extents");
+        }
+        for (const auto extent : descriptor.extents) {
+            if (extent <= 0) {
+                result.addError("external buffer descriptor extents must be positive");
+            }
+        }
+        for (const auto stride : descriptor.strides) {
+            if (stride == 0) {
+                result.addError("external buffer descriptor strides must be nonzero");
+            }
+        }
+        if (descriptor.packing.empty()) {
+            result.addError("external buffer descriptor requires packing metadata");
+        }
+        if (descriptor.supported_temporal_slots.empty()) {
+            result.addError("external buffer descriptor requires supported temporal slots");
+        }
+        appendTemporalSlotValidation(result, descriptor.supported_temporal_slots);
+        if (descriptor.value.rank == CouplingValueRank::GeneralTensor) {
+            if (descriptor.packing != descriptor.value.tensor_packing) {
+                result.addError(
+                    "external buffer packing must match the general tensor value descriptor");
+            }
+            if (descriptor.extents.size() != descriptor.value.tensor_extents.size()) {
+                result.addError(
+                    "external buffer extents must match the general tensor value descriptor");
+            } else {
+                for (std::size_t j = 0; j < descriptor.extents.size(); ++j) {
+                    if (descriptor.extents[j] != descriptor.value.tensor_extents[j]) {
+                        result.addError(
+                            "external buffer extents must match the general tensor value descriptor");
+                        break;
+                    }
+                }
+            }
+        }
+        for (std::size_t j = i + 1u; j < context_.external_buffers_.size(); ++j) {
+            if (sameScope(registration.participant_name,
+                          context_.external_buffers_[j].participant_name) &&
+                descriptor.buffer_name ==
+                    context_.external_buffers_[j].descriptor.buffer_name) {
+                result.addError("duplicate external buffer descriptor in one scope");
+            }
+        }
+    }
+
+    for (std::size_t i = 0; i < context_.driver_owned_transfers_.size(); ++i) {
+        const auto& descriptor = context_.driver_owned_transfers_[i];
+        if (descriptor.transfer_name.empty()) {
+            result.addError("driver-owned transfer descriptor requires a name");
+        }
+        if (descriptor.supported_ranks.empty()) {
+            result.addError("driver-owned transfer descriptor requires supported ranks");
+        }
+        for (std::size_t j = 0; j < descriptor.supported_ranks.size(); ++j) {
+            for (std::size_t k = j + 1u; k < descriptor.supported_ranks.size(); ++k) {
+                if (descriptor.supported_ranks[j] == descriptor.supported_ranks[k]) {
+                    result.addError("driver-owned transfer descriptor has duplicate ranks");
+                }
+            }
+        }
+        if (descriptor.supported_source_temporal_slots.empty()) {
+            result.addError(
+                "driver-owned transfer descriptor requires source temporal slots");
+        }
+        if (descriptor.supported_target_temporal_slots.empty()) {
+            result.addError(
+                "driver-owned transfer descriptor requires target temporal slots");
+        }
+        appendTemporalSlotValidation(result, descriptor.supported_source_temporal_slots);
+        appendTemporalSlotValidation(result, descriptor.supported_target_temporal_slots);
+        for (std::size_t j = i + 1u; j < context_.driver_owned_transfers_.size(); ++j) {
+            if (descriptor.transfer_name ==
+                context_.driver_owned_transfers_[j].transfer_name) {
+                result.addError("duplicate driver-owned transfer descriptor");
             }
         }
     }

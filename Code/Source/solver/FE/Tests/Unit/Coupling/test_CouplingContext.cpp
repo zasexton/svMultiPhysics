@@ -7,7 +7,9 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
 using namespace svmp::FE;
@@ -67,6 +69,39 @@ CouplingRegionRef region(std::string participant_name,
         .region_name = std::move(region_name),
         .kind = kind,
         .marker = marker,
+    };
+}
+
+CouplingTemporalSlotDescriptor currentSlot()
+{
+    return CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Current};
+}
+
+CouplingExternalBufferDescriptor externalBuffer(std::string name,
+                                                std::uint64_t data_revision)
+{
+    return CouplingExternalBufferDescriptor{
+        .buffer_name = std::move(name),
+        .value = CouplingValueDescriptor{
+            .rank = CouplingValueRank::Scalar,
+            .components = 1,
+        },
+        .extents = {1},
+        .strides = {1},
+        .packing = "contiguous",
+        .supported_temporal_slots = {currentSlot()},
+        .data_revision_key = data_revision,
+    };
+}
+
+CouplingDriverOwnedTransferDescriptor driverOwnedTransfer(std::string name)
+{
+    return CouplingDriverOwnedTransferDescriptor{
+        .transfer_name = std::move(name),
+        .supported_ranks = {CouplingValueRank::Scalar},
+        .supported_source_temporal_slots = {currentSlot()},
+        .supported_target_temporal_slots = {currentSlot()},
+        .registry_revision_key = 7,
     };
 }
 
@@ -155,6 +190,81 @@ TEST(CouplingContext, SharedRegionLookupReturnsParticipantMapping)
     EXPECT_TRUE(context.hasSharedRegion("interface"));
     EXPECT_EQ(context.sharedRegion("interface", "left").marker, 12);
     EXPECT_EQ(context.sharedRegionGroup("interface").participant_regions.size(), 1u);
+}
+
+TEST(CouplingContext, ResolvesExternalBufferDescriptorsByScope)
+{
+    const auto* system = systemToken(1);
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(participant("left", "shared_system", system))
+        .addExternalBuffer(CouplingExternalBufferRegistration{
+            .descriptor = externalBuffer("driver_value", 1),
+        })
+        .addExternalBuffer(CouplingExternalBufferRegistration{
+            .participant_name = "left",
+            .descriptor = externalBuffer("driver_value", 2),
+        });
+
+    const auto context = builder.build();
+    const auto* global =
+        context.externalBufferDescriptor(std::nullopt, "driver_value");
+    ASSERT_NE(global, nullptr);
+    EXPECT_EQ(global->data_revision_key, 1u);
+
+    const auto* scoped = context.externalBufferDescriptor(
+        std::optional<std::string_view>{"left"},
+        "driver_value");
+    ASSERT_NE(scoped, nullptr);
+    EXPECT_EQ(scoped->data_revision_key, 2u);
+
+    EXPECT_EQ(context.externalBufferDescriptor(
+                  std::optional<std::string_view>{"right"},
+                  "driver_value"),
+              nullptr);
+}
+
+TEST(CouplingContext, ResolvesDriverOwnedTransferDescriptors)
+{
+    CouplingContextBuilder builder;
+    builder.addDriverOwnedTransfer(driverOwnedTransfer("copy"));
+
+    const auto context = builder.build();
+    const auto* descriptor = context.driverOwnedTransfer("copy");
+    ASSERT_NE(descriptor, nullptr);
+    EXPECT_EQ(descriptor->registry_revision_key, 7u);
+    ASSERT_EQ(descriptor->supported_ranks.size(), 1u);
+    EXPECT_EQ(descriptor->supported_ranks[0], CouplingValueRank::Scalar);
+}
+
+TEST(CouplingContext, RejectsDuplicateExternalBufferDescriptorsInOneScope)
+{
+    CouplingContextBuilder builder;
+    builder.addExternalBuffer(CouplingExternalBufferRegistration{
+        .descriptor = externalBuffer("driver_value", 1),
+    });
+    builder.addExternalBuffer(CouplingExternalBufferRegistration{
+        .descriptor = externalBuffer("driver_value", 2),
+    });
+
+    const auto validation = builder.validate();
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("duplicate external buffer descriptor"),
+              std::string::npos);
+}
+
+TEST(CouplingContext, RejectsInvalidDriverOwnedTransferDescriptors)
+{
+    auto descriptor = driverOwnedTransfer("");
+    descriptor.supported_ranks.push_back(CouplingValueRank::Scalar);
+
+    CouplingContextBuilder builder;
+    builder.addDriverOwnedTransfer(descriptor);
+
+    const auto validation = builder.validate();
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("requires a name"), std::string::npos);
+    EXPECT_NE(formatDiagnostics(validation).find("duplicate ranks"), std::string::npos);
 }
 
 TEST(CouplingContext, MissingLookupsThrow)

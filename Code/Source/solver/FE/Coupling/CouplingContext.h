@@ -15,6 +15,7 @@
 
 #include "Core/Types.h"
 #include "Coupling/CouplingTypes.h"
+#include "Coupling/TransferPlan.h"
 #include "Systems/FieldRegistry.h"
 
 #include <memory>
@@ -80,6 +81,11 @@ struct SharedRegionRef {
     std::vector<CouplingRegionRef> participant_regions;
 };
 
+struct CouplingExternalBufferRegistration {
+    std::optional<std::string> participant_name;
+    CouplingExternalBufferDescriptor descriptor;
+};
+
 class CouplingContext {
 public:
     CouplingContext() = default;
@@ -99,11 +105,20 @@ public:
     [[nodiscard]] bool hasRegion(std::string_view participant,
                                  std::string_view region) const noexcept;
     [[nodiscard]] bool hasSharedRegion(std::string_view name) const noexcept;
+    [[nodiscard]] const CouplingExternalBufferDescriptor* externalBufferDescriptor(
+        std::optional<std::string_view> participant,
+        std::string_view external_buffer_key) const noexcept;
+    [[nodiscard]] const CouplingDriverOwnedTransferDescriptor* driverOwnedTransfer(
+        std::string_view transfer_name) const noexcept;
 
     [[nodiscard]] const std::vector<CouplingParticipantRef>& participants() const noexcept;
     [[nodiscard]] const std::vector<CouplingFieldRef>& fields() const noexcept;
     [[nodiscard]] const std::vector<CouplingRegionRef>& regions() const noexcept;
     [[nodiscard]] const std::vector<SharedRegionRef>& sharedRegions() const noexcept;
+    [[nodiscard]] const std::vector<CouplingExternalBufferRegistration>&
+    externalBuffers() const noexcept;
+    [[nodiscard]] const std::vector<CouplingDriverOwnedTransferDescriptor>&
+    driverOwnedTransfers() const noexcept;
 
 private:
     friend class CouplingContextBuilder;
@@ -112,6 +127,8 @@ private:
     std::vector<CouplingFieldRef> fields_{};
     std::vector<CouplingRegionRef> regions_{};
     std::vector<SharedRegionRef> shared_regions_{};
+    std::vector<CouplingExternalBufferRegistration> external_buffers_{};
+    std::vector<CouplingDriverOwnedTransferDescriptor> driver_owned_transfers_{};
 };
 
 class CouplingContextBuilder {
@@ -120,6 +137,10 @@ public:
     CouplingContextBuilder& addField(CouplingFieldRef field);
     CouplingContextBuilder& addRegion(CouplingRegionRef region);
     CouplingContextBuilder& addSharedRegion(SharedRegionRef region);
+    CouplingContextBuilder& addExternalBuffer(
+        CouplingExternalBufferRegistration registration);
+    CouplingContextBuilder& addDriverOwnedTransfer(
+        CouplingDriverOwnedTransferDescriptor descriptor);
 
     [[nodiscard]] CouplingValidationResult validate() const;
     [[nodiscard]] CouplingContext build() const;
