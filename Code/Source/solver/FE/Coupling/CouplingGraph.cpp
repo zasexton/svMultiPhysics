@@ -295,6 +295,117 @@ bool hasInstalledNonzeroEvidence(
     return false;
 }
 
+bool sameTemporalSlot(const CouplingTemporalSlotDescriptor& lhs,
+                      const CouplingTemporalSlotDescriptor& rhs) noexcept
+{
+    return lhs.slot == rhs.slot &&
+           lhs.history_index == rhs.history_index &&
+           lhs.stage_index == rhs.stage_index;
+}
+
+bool sameEndpointRef(const CouplingEndpointRef& lhs,
+                     const CouplingEndpointRef& rhs)
+{
+    return lhs.kind == rhs.kind &&
+           lhs.participant_name == rhs.participant_name &&
+           lhs.endpoint_name == rhs.endpoint_name &&
+           sameTemporalSlot(lhs.temporal, rhs.temporal);
+}
+
+bool sameGroupHint(const CouplingGroupHint& lhs,
+                   const CouplingGroupHint& rhs)
+{
+    return lhs.name == rhs.name &&
+           lhs.participant_names == rhs.participant_names;
+}
+
+bool partitionedExchangeMatches(const CouplingExchangeDeclaration& declared,
+                                const CouplingExchange& generated)
+{
+    if (declared.producer_port != generated.producer_port ||
+        declared.consumer_port != generated.consumer_port ||
+        !couplingValueDescriptorsCompatible(declared.value, generated.value) ||
+        declared.shared_region_name != generated.shared_region_name ||
+        declared.transfer.kind != generated.transfer.kind ||
+        declared.transfer.driver_owned_name != generated.transfer.driver_owned_name) {
+        return false;
+    }
+    if (declared.producer.has_value() &&
+        !sameEndpointRef(*declared.producer, generated.producer.declaration_provenance)) {
+        return false;
+    }
+    if (declared.consumer.has_value() &&
+        !sameEndpointRef(*declared.consumer, generated.consumer.declaration_provenance)) {
+        return false;
+    }
+    return true;
+}
+
+void validatePartitionedPlanCoverage(
+    std::span<const CouplingContractDeclaration> declarations,
+    const PartitionedCouplingPlan& partitioned_plan,
+    CouplingValidationResult& result)
+{
+    std::vector<CouplingExchangeDeclaration> declared_exchanges;
+    std::vector<CouplingGroupHint> declared_group_hints;
+    for (const auto& declaration : declarations) {
+        declared_exchanges.insert(
+            declared_exchanges.end(),
+            declaration.partitioned_exchange_declarations.begin(),
+            declaration.partitioned_exchange_declarations.end());
+        declared_group_hints.insert(declared_group_hints.end(),
+                                    declaration.group_hints.begin(),
+                                    declaration.group_hints.end());
+    }
+
+    for (const auto& declared : declared_exchanges) {
+        const auto found = std::any_of(
+            partitioned_plan.exchanges.begin(),
+            partitioned_plan.exchanges.end(),
+            [&declared](const CouplingExchange& generated) {
+                return partitionedExchangeMatches(declared, generated);
+            });
+        if (!found) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = declared.producer_port.contract_instance_name,
+                .message = "declared partitioned exchange is missing from generated plan",
+            });
+        }
+    }
+
+    for (const auto& generated : partitioned_plan.exchanges) {
+        const auto found = std::any_of(
+            declared_exchanges.begin(),
+            declared_exchanges.end(),
+            [&generated](const CouplingExchangeDeclaration& declared) {
+                return partitionedExchangeMatches(declared, generated);
+            });
+        if (!found) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = generated.producer_port.contract_instance_name,
+                .message = "generated partitioned exchange has no declaration",
+            });
+        }
+    }
+
+    for (const auto& declared : declared_group_hints) {
+        const auto found = std::any_of(
+            partitioned_plan.group_hints.begin(),
+            partitioned_plan.group_hints.end(),
+            [&declared](const CouplingGroupHint& generated) {
+                return sameGroupHint(declared, generated);
+            });
+        if (!found) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .message = "declared partitioned group hint is missing from generated plan",
+            });
+        }
+    }
+}
+
 void validateFinalizedDependencyEvidence(
     const std::vector<ResolvedDeclaredDependency>& declared_dependencies,
     const std::vector<ResolvedExpectedBlock>& expected_blocks,
@@ -537,6 +648,22 @@ CouplingValidationResult CouplingGraph::buildFinalizedGraph(
         declared_dependencies,
         expected_blocks,
         installed_forms,
+        result);
+    return result;
+}
+
+CouplingValidationResult CouplingGraph::buildFinalizedGraph(
+    const CouplingContext& context,
+    std::span<const CouplingContractDeclaration> declarations,
+    std::span<const CouplingFormAnalysisMetadata> installed_forms,
+    const PartitionedCouplingPlan& partitioned_plan)
+{
+    CouplingValidationResult result =
+        buildFinalizedGraph(context, declarations, installed_forms);
+    validatePartitionedPlanCoverage(
+        std::span<const CouplingContractDeclaration>(declarations_.data(),
+                                                     declarations_.size()),
+        partitioned_plan,
         result);
     return result;
 }

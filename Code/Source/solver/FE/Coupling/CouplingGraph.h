@@ -34,6 +34,12 @@ public:
         std::span<const CouplingContractDeclaration> declarations,
         std::span<const CouplingFormAnalysisMetadata> installed_forms);
 
+    [[nodiscard]] CouplingValidationResult buildFinalizedGraph(
+        const CouplingContext& context,
+        std::span<const CouplingContractDeclaration> declarations,
+        std::span<const CouplingFormAnalysisMetadata> installed_forms,
+        const PartitionedCouplingPlan& partitioned_plan);
+
     [[nodiscard]] CouplingValidationResult validateTemporalRequirements(
         const CouplingTemporalAvailability& availability) const;
 

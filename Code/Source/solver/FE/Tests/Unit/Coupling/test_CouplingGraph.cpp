@@ -1,4 +1,5 @@
 #include "Coupling/CouplingGraph.h"
+#include "Coupling/PartitionedCouplingPlanGenerator.h"
 
 #include "Spaces/H1Space.h"
 
@@ -142,6 +143,53 @@ CouplingContractDeclaration twoParticipantDependencyDeclaration()
     return declaration;
 }
 
+CouplingEndpointRef graphFieldEndpoint(std::string participant)
+{
+    return CouplingEndpointRef{
+        .kind = CouplingEndpointKind::Field,
+        .participant_name = std::move(participant),
+        .endpoint_name = "primary",
+        .temporal = CouplingTemporalSlotDescriptor{
+            .slot = CouplingTemporalSlot::Current,
+        },
+    };
+}
+
+CouplingContractDeclaration partitionedGraphDeclaration()
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.fields.push_back({.participant_name = "left", .field_name = "primary"});
+    declaration.fields.push_back({.participant_name = "right", .field_name = "primary"});
+    declaration.partitioned_exchange_declarations.push_back(CouplingExchangeDeclaration{
+        .producer_port = {
+            .contract_instance_name = "generic_instance",
+            .port_name = "left_out",
+        },
+        .consumer_port = {
+            .contract_instance_name = "generic_instance",
+            .port_name = "right_in",
+        },
+        .value = CouplingValueDescriptor{
+            .rank = CouplingValueRank::Scalar,
+            .components = 1,
+        },
+        .producer = graphFieldEndpoint("left"),
+        .consumer = graphFieldEndpoint("right"),
+        .transfer = CouplingTransferDeclaration{
+            .kind = CouplingTransferKind::Identity,
+        },
+    });
+    declaration.group_hints.push_back(CouplingGroupHint{
+        .name = "pair",
+        .participant_names = {"left", "right"},
+    });
+    return declaration;
+}
+
 CouplingFormAnalysisMetadata installedDependencyMetadata()
 {
     CouplingFormAnalysisMetadata metadata;
@@ -189,6 +237,21 @@ CouplingValidationResult buildFinalizedGraph(
         context,
         std::span<const CouplingContractDeclaration>(declarations),
         std::span<const CouplingFormAnalysisMetadata>(installed_forms));
+}
+
+CouplingValidationResult buildFinalizedGraph(
+    const CouplingContext& context,
+    const CouplingContractDeclaration& declaration,
+    const PartitionedCouplingPlan& plan)
+{
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const std::array<CouplingFormAnalysisMetadata, 0> installed_forms{};
+    return graph.buildFinalizedGraph(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed_forms),
+        plan);
 }
 
 } // namespace
@@ -281,7 +344,7 @@ TEST(CouplingGraph, RejectsDeclaredImplicitDependencyMissingFromInstalledMetadat
     const auto validation = buildFinalizedGraph(
         twoParticipantGraphContext(),
         twoParticipantDependencyDeclaration(),
-        {});
+        std::vector<CouplingFormAnalysisMetadata>{});
 
     EXPECT_FALSE(validation.ok());
     EXPECT_NE(formatDiagnostics(validation).find(
@@ -359,5 +422,76 @@ TEST(CouplingGraph, RejectsExpectedZeroBlockWithInstalledEvidence)
     EXPECT_FALSE(validation.ok());
     EXPECT_NE(formatDiagnostics(validation).find(
                   "expected zero coupling block has installed evidence"),
+              std::string::npos);
+}
+
+TEST(CouplingGraph, AcceptsGeneratedPartitionedPlanMatchingDeclarations)
+{
+    const auto context = twoParticipantGraphContext();
+    const auto declaration = partitionedGraphDeclaration();
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto plan = generator.generate(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+
+    const auto validation = buildFinalizedGraph(context, declaration, plan);
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+}
+
+TEST(CouplingGraph, RejectsGeneratedPartitionedPlanMissingDeclaredExchange)
+{
+    const auto context = twoParticipantGraphContext();
+    const auto declaration = partitionedGraphDeclaration();
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+
+    const PartitionedCouplingPlanGenerator generator;
+    auto plan = generator.generate(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    plan.exchanges.clear();
+
+    const auto validation = buildFinalizedGraph(context, declaration, plan);
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("declared partitioned exchange is missing"),
+              std::string::npos);
+}
+
+TEST(CouplingGraph, RejectsGeneratedPartitionedPlanWithUndeclaredExchange)
+{
+    const auto context = twoParticipantGraphContext();
+    const auto declaration = partitionedGraphDeclaration();
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+
+    const PartitionedCouplingPlanGenerator generator;
+    auto plan = generator.generate(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    auto extra = plan.exchanges.front();
+    extra.producer_port.port_name = "extra_out";
+    plan.exchanges.push_back(extra);
+
+    const auto validation = buildFinalizedGraph(context, declaration, plan);
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("generated partitioned exchange has no declaration"),
+              std::string::npos);
+}
+
+TEST(CouplingGraph, RejectsGeneratedPartitionedPlanMissingGroupHint)
+{
+    const auto context = twoParticipantGraphContext();
+    const auto declaration = partitionedGraphDeclaration();
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+
+    const PartitionedCouplingPlanGenerator generator;
+    auto plan = generator.generate(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    plan.group_hints.clear();
+
+    const auto validation = buildFinalizedGraph(context, declaration, plan);
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("declared partitioned group hint is missing"),
               std::string::npos);
 }
