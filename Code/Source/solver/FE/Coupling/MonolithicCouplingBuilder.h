@@ -32,6 +32,17 @@ public:
     [[nodiscard]] CouplingValidationResult validateDeclarations(
         const CouplingContext& context,
         std::span<const CouplingContractDeclaration> declarations) const;
+
+    [[nodiscard]] ResolvedCouplingFormContribution resolveFormContribution(
+        const CouplingContext& context,
+        const CouplingFormContribution& contribution) const;
+
+    [[nodiscard]] CouplingFormAnalysisMetadata installResolvedFormContribution(
+        systems::FESystem& system,
+        const ResolvedCouplingFormContribution& contribution) const;
+
+    [[nodiscard]] static CouplingFormAnalysisMetadata adaptFormAnalysisMetadata(
+        const analysis::FormContributionAnalysisMetadata& metadata);
 };
 
 } // namespace coupling
