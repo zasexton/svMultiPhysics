@@ -886,6 +886,44 @@ set(FE_POSTPROCESSING_SOURCES
     PostProcessing/DerivedResultOutput.cpp
 )
 
+# Coupling sources (physics-agnostic setup and plan infrastructure; depends on
+# FE/Systems and FE/Forms public APIs)
+set(FE_COUPLING_HEADERS
+    Coupling/CouplingTypes.h
+    Coupling/CouplingContext.h
+    Coupling/CouplingDeclaration.h
+    Coupling/CouplingContract.h
+    Coupling/CouplingFormBuilder.h
+    Coupling/CouplingGraph.h
+    Coupling/CouplingTemporalRequirements.h
+    Coupling/CouplingGeometryRequirements.h
+    Coupling/MonolithicCouplingBuilder.h
+    Coupling/PartitionedCouplingPlan.h
+    Coupling/PartitionedCouplingPlanGenerator.h
+    Coupling/CouplingRegistry.h
+    Coupling/CouplingDiagnostics.h
+    Coupling/SharedRegionRegistry.h
+    Coupling/TransferPlan.h
+)
+
+set(FE_COUPLING_SOURCES
+    Coupling/CouplingTypes.cpp
+    Coupling/CouplingContext.cpp
+    Coupling/CouplingDeclaration.cpp
+    Coupling/CouplingContract.cpp
+    Coupling/CouplingFormBuilder.cpp
+    Coupling/CouplingGraph.cpp
+    Coupling/CouplingTemporalRequirements.cpp
+    Coupling/CouplingGeometryRequirements.cpp
+    Coupling/MonolithicCouplingBuilder.cpp
+    Coupling/PartitionedCouplingPlan.cpp
+    Coupling/PartitionedCouplingPlanGenerator.cpp
+    Coupling/CouplingRegistry.cpp
+    Coupling/CouplingDiagnostics.cpp
+    Coupling/SharedRegionRegistry.cpp
+    Coupling/TransferPlan.cpp
+)
+
 if(FE_WITH_MESH)
     set(FE_MOVINGMESH_HEADERS
         MovingMesh/GeometryRegularizationBackend.h
@@ -1255,6 +1293,8 @@ if(FE_ENABLE_ASSEMBLY)
     list(APPEND FE_ALL_SOURCES ${FE_POSTPROCESSING_SOURCES})
     list(APPEND FE_ALL_HEADERS ${FE_FORMS_HEADERS})
     list(APPEND FE_ALL_SOURCES ${FE_FORMS_SOURCES})
+    list(APPEND FE_ALL_HEADERS ${FE_COUPLING_HEADERS})
+    list(APPEND FE_ALL_SOURCES ${FE_COUPLING_SOURCES})
     list(APPEND FE_ALL_HEADERS ${FE_TIMESTEPPING_HEADERS})
     list(APPEND FE_ALL_SOURCES ${FE_TIMESTEPPING_SOURCES})
     list(APPEND FE_ALL_HEADERS ${FE_CONSTITUTIVE_HEADERS})
@@ -2483,6 +2523,23 @@ if(FE_BUILD_TESTS)
 	                    ${GTEST_LIBRARIES}
             )
             add_test(NAME FE_Systems_Tests COMMAND test_fe_systems)
+        endif()
+
+        # Coupling module tests (physics-agnostic setup and plan metadata)
+        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Coupling/test_main.cpp)
+            set(FE_COUPLING_TEST_SOURCES
+                Tests/Unit/Coupling/test_CouplingHeaders.cpp
+                Tests/Unit/Coupling/test_CouplingTypes.cpp
+                Tests/Unit/Coupling/test_main.cpp
+            )
+            add_executable(test_fe_coupling ${FE_COUPLING_TEST_SOURCES})
+            _svmp_fe_target_enable_warnings(test_fe_coupling)
+            target_link_libraries(test_fe_coupling
+                PRIVATE
+                    svfe
+                    ${GTEST_LIBRARIES}
+            )
+            add_test(NAME FE_Coupling_Tests COMMAND test_fe_coupling)
         endif()
 
         # TimeStepping module tests (depends on Systems + Forms + Backends; no Mesh required)
