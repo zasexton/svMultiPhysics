@@ -750,6 +750,37 @@ CouplingValidationResult validateDriverOwnedTransferDescriptor(
     return result;
 }
 
+CouplingValidationResult validateGeneralTensorEndpointDescriptors(
+    const CouplingExchangeDeclaration& exchange)
+{
+    CouplingValidationResult result;
+    if (exchange.value.rank != CouplingValueRank::GeneralTensor) {
+        return result;
+    }
+    if (exchange.transfer.kind != CouplingTransferKind::DriverOwned) {
+        return result;
+    }
+    if (exchange.producer.has_value() &&
+        exchange.producer->kind != CouplingEndpointKind::ExternalBuffer) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .participant_name = exchange.producer->participant_name.value_or(""),
+            .endpoint_name = exchange.producer->endpoint_name,
+            .message = "driver-owned general tensor producer requires an external buffer endpoint descriptor",
+        });
+    }
+    if (exchange.consumer.has_value() &&
+        exchange.consumer->kind != CouplingEndpointKind::ExternalBuffer) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .participant_name = exchange.consumer->participant_name.value_or(""),
+            .endpoint_name = exchange.consumer->endpoint_name,
+            .message = "driver-owned general tensor consumer requires an external buffer endpoint descriptor",
+        });
+    }
+    return result;
+}
+
 CouplingValidationResult validateFieldEndpointValueDescriptor(
     const CouplingContext& ctx,
     const CouplingEndpointRef& endpoint,
@@ -1224,6 +1255,7 @@ CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
             continue;
         }
         result.append(validateDriverOwnedTransferDescriptor(ctx, exchange));
+        result.append(validateGeneralTensorEndpointDescriptors(exchange));
         result.append(validateCouplingEndpointRef(*exchange.producer));
         result.append(validateCouplingEndpointRef(*exchange.consumer));
         result.append(validateEndpointResolutionSupport(

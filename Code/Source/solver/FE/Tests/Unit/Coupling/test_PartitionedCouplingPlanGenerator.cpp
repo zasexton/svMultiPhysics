@@ -1498,6 +1498,35 @@ TEST(PartitionedCouplingPlanGenerator, RejectsDriverOwnedTransferUnsupportedRank
               std::string::npos);
 }
 
+TEST(PartitionedCouplingPlanGenerator, RejectsDriverOwnedGeneralTensorFieldEndpoints)
+{
+    auto exchange = identityExchange();
+    exchange.value = CouplingValueDescriptor{
+        .rank = CouplingValueRank::GeneralTensor,
+        .components = 4,
+        .tensor_extents = {2, 2},
+        .tensor_packing = "row_major",
+    };
+    exchange.transfer.kind = CouplingTransferKind::DriverOwned;
+    exchange.transfer.driver_owned_name = "copy";
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    auto builder = partitionedContextBuilder(4);
+    builder.addDriverOwnedTransfer(
+        driverOwnedTransferDescriptor("copy", {CouplingValueRank::GeneralTensor}));
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        builder.build(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("general tensor producer requires"),
+              std::string::npos);
+    EXPECT_NE(formatDiagnostics(validation).find("general tensor consumer requires"),
+              std::string::npos);
+}
+
 TEST(PartitionedCouplingPlanGenerator, InheritsExchangeSharedRegionForEndpointRegions)
 {
     auto exchange = identityExchange();
