@@ -679,6 +679,34 @@ CouplingExchangeDeclaration interfaceExchange(CouplingValueDescriptor value,
     exchange.transfer.interface_declaration = CouplingInterfaceTransferDeclaration{
         .frame_policy = frame_policy,
     };
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    exchange.transfer.interface_map = CouplingInterfaceMapProvenance{
+        .interface_map_name = "interface_map",
+        .interface_entry_name = "interface",
+        .interface_search_registry_name = "default_search",
+        .source_system_name = "left_system",
+        .target_system_name = "right_system",
+        .source_interface_marker = 10,
+        .target_interface_marker = 11,
+        .source_logical_region = svmp::search::LogicalInterfaceRegionId{
+            .persistent_id = "left_interface",
+            .name = "left_surface",
+        },
+        .target_logical_region = svmp::search::LogicalInterfaceRegionId{
+            .persistent_id = "right_interface",
+            .name = "right_surface",
+        },
+        .source_search_revision_key = 3,
+        .target_search_revision_key = 5,
+        .map_revision_key = 7,
+        .map_state = svmp::search::InterfaceMapState::Committed,
+        .operator_state = systems::InterfaceOperatorState::AcceptedTimeStep,
+        .accepted_revision_key = 11,
+        .trial_revision_key = 13,
+        .time = 0.25,
+        .time_level_epoch = 17,
+    };
+#endif
     return exchange;
 }
 
@@ -855,6 +883,19 @@ TEST(PartitionedCouplingPlanGenerator, GeneratesResolvedInterfaceTransferOptions
     EXPECT_EQ(options.source_to_target_rotation[0][1], -1.0);
     EXPECT_EQ(options.source_to_target_rotation[1][0], 1.0);
     EXPECT_EQ(options.conservation_tolerance, 1.0e-8);
+    ASSERT_TRUE(plan.exchanges[0].transfer.interface_map.has_value());
+    const auto& provenance = *plan.exchanges[0].transfer.interface_map;
+    EXPECT_EQ(provenance.interface_map_name, "interface_map");
+    EXPECT_EQ(provenance.interface_entry_name, "interface");
+    EXPECT_EQ(provenance.interface_search_registry_name, "default_search");
+    EXPECT_EQ(provenance.source_system_name, "left_system");
+    EXPECT_EQ(provenance.target_system_name, "right_system");
+    EXPECT_EQ(provenance.source_interface_marker, 10);
+    EXPECT_EQ(provenance.target_interface_marker, 11);
+    EXPECT_EQ(provenance.map_state, svmp::search::InterfaceMapState::Committed);
+    EXPECT_EQ(provenance.operator_state,
+              systems::InterfaceOperatorState::AcceptedTimeStep);
+    EXPECT_EQ(provenance.map_revision_key, 7u);
 }
 #endif
 
@@ -881,6 +922,50 @@ TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceTransferWithoutRegionEndp
     EXPECT_NE(formatDiagnostics(validation).find("requires consumer region endpoint"),
               std::string::npos);
 }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceTransferWithoutMapProvenance)
+{
+    auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::Scalar,
+            .components = 1,
+        },
+        CouplingInterfaceFramePolicy::None);
+    exchange.transfer.interface_map.reset();
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContextWithSharedRegion(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("requires interface map provenance"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceMapProvenanceRegionMismatch)
+{
+    auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::Scalar,
+            .components = 1,
+        },
+        CouplingInterfaceFramePolicy::None);
+    exchange.transfer.interface_map->source_interface_marker = 99;
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContextWithSharedRegion(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("source marker does not match"),
+              std::string::npos);
+}
+#endif
 
 TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceTransferNonInterfaceRegions)
 {

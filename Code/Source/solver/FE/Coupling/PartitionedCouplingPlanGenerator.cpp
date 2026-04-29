@@ -1186,6 +1186,97 @@ CouplingValidationResult validateInterfaceTransferRegions(
     return result;
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+CouplingValidationResult validateInterfaceMapProvenance(
+    const CouplingContext& ctx,
+    const CouplingExchangeDeclaration& exchange)
+{
+    CouplingValidationResult result;
+    if (!isInterfaceTransferKind(exchange.transfer.kind)) {
+        return result;
+    }
+    if (!exchange.transfer.interface_map.has_value()) {
+        result.addError("interface partitioned transfer requires interface map provenance");
+        return result;
+    }
+
+    const auto& provenance = *exchange.transfer.interface_map;
+    if (provenance.interface_map_name.empty()) {
+        result.addError("interface map provenance requires an interface map name");
+    }
+    if (provenance.interface_entry_name.empty()) {
+        result.addError("interface map provenance requires an interface entry name");
+    }
+    if (provenance.interface_search_registry_name.empty()) {
+        result.addError("interface map provenance requires a search registry name");
+    }
+    if (provenance.source_system_name.empty() ||
+        provenance.target_system_name.empty()) {
+        result.addError("interface map provenance requires source and target systems");
+    }
+    if (provenance.source_interface_marker < 0 ||
+        provenance.target_interface_marker < 0) {
+        result.addError("interface map provenance requires source and target markers");
+    }
+    if (provenance.source_logical_region.empty()) {
+        result.addError("interface map provenance requires a source logical region");
+    }
+    if (provenance.target_logical_region.empty()) {
+        result.addError("interface map provenance requires a target logical region");
+    }
+    if (provenance.map_state == svmp::search::InterfaceMapState::Empty) {
+        result.addError("interface map provenance requires a resolved map state");
+    }
+    if (provenance.operator_state == systems::InterfaceOperatorState::Empty) {
+        result.addError("interface map provenance requires an interface operator state");
+    }
+
+    const auto producer_region =
+        tryResolveRegion(ctx, exchange.shared_region_name, exchange.producer_region);
+    if (producer_region.has_value()) {
+        if (producer_region->system_name != provenance.source_system_name) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = producer_region->participant_name,
+                .region_name = producer_region->region_name,
+                .message = "interface map provenance source system does not match the producer region",
+            });
+        }
+        if (producer_region->marker != provenance.source_interface_marker) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = producer_region->participant_name,
+                .region_name = producer_region->region_name,
+                .message = "interface map provenance source marker does not match the producer region",
+            });
+        }
+    }
+
+    const auto consumer_region =
+        tryResolveRegion(ctx, exchange.shared_region_name, exchange.consumer_region);
+    if (consumer_region.has_value()) {
+        if (consumer_region->system_name != provenance.target_system_name) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = consumer_region->participant_name,
+                .region_name = consumer_region->region_name,
+                .message = "interface map provenance target system does not match the consumer region",
+            });
+        }
+        if (consumer_region->marker != provenance.target_interface_marker) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = consumer_region->participant_name,
+                .region_name = consumer_region->region_name,
+                .message = "interface map provenance target marker does not match the consumer region",
+            });
+        }
+    }
+
+    return result;
+}
+#endif
+
 bool hasPort(const std::vector<CouplingPortId>& stack, const CouplingPortId& port)
 {
     return std::find(stack.begin(), stack.end(), port) != stack.end();
@@ -1357,6 +1448,7 @@ ResolvedCouplingTransfer resolveTransfer(const CouplingContext& ctx,
             resolved.interface_options =
                 makeInterfaceTransferOptions(exchange.value,
                                              *transfer.interface_declaration);
+            resolved.interface_map = transfer.interface_map;
         }
 #endif
     }
@@ -1531,6 +1623,9 @@ CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
         result.append(validateRegionEndpointScope(
             ctx, exchange.shared_region_name, exchange.consumer_region, "consumer"));
         result.append(validateInterfaceTransferRegions(ctx, exchange));
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+        result.append(validateInterfaceMapProvenance(ctx, exchange));
+#endif
     }
 
     for (std::size_t hint_index = 0; hint_index < group_hints.size(); ++hint_index) {

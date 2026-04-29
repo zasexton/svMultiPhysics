@@ -77,9 +77,41 @@ struct CouplingInterfaceTransferDeclaration {
     Real conservation_tolerance{1.0e-10};
 };
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+struct CouplingInterfaceMapProvenance {
+    std::string interface_map_name;
+    std::string interface_entry_name;
+    std::string interface_search_registry_name;
+    std::string source_system_name;
+    std::string target_system_name;
+    int source_interface_marker{-1};
+    int target_interface_marker{-1};
+    systems::SlidingInterfaceMapKind sliding_map_kind{
+        systems::SlidingInterfaceMapKind::Sliding};
+    svmp::Configuration source_configuration{svmp::Configuration::Reference};
+    svmp::Configuration target_configuration{svmp::Configuration::Reference};
+    svmp::search::LogicalInterfaceRegionId source_logical_region{};
+    svmp::search::LogicalInterfaceRegionId target_logical_region{};
+    svmp::search::InterfaceRevisionSnapshot source_revision_snapshot{};
+    svmp::search::InterfaceRevisionSnapshot target_revision_snapshot{};
+    std::uint64_t source_search_revision_key{0};
+    std::uint64_t target_search_revision_key{0};
+    std::uint64_t map_revision_key{0};
+    svmp::search::InterfaceMapState map_state{svmp::search::InterfaceMapState::Empty};
+    systems::InterfaceOperatorState operator_state{systems::InterfaceOperatorState::Empty};
+    std::uint64_t accepted_revision_key{0};
+    std::uint64_t trial_revision_key{0};
+    Real time{0.0};
+    std::uint64_t time_level_epoch{0};
+};
+#endif
+
 struct CouplingTransferDeclaration {
     CouplingTransferKind kind{CouplingTransferKind::Unspecified};
     std::optional<CouplingInterfaceTransferDeclaration> interface_declaration;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    std::optional<CouplingInterfaceMapProvenance> interface_map;
+#endif
     std::string driver_owned_name;
 };
 
@@ -116,6 +148,7 @@ struct ResolvedCouplingTransfer {
         CouplingFrameTargetRestrictionPolicy::None};
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     std::optional<systems::InterfaceTransferOptions> interface_options;
+    std::optional<CouplingInterfaceMapProvenance> interface_map;
 #endif
     std::string driver_owned_name;
     std::optional<CouplingDriverOwnedTransferDescriptor> driver_owned_descriptor;
