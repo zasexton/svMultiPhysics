@@ -371,6 +371,11 @@ public:
         auto it = boundary_reduction_services_.find(primary_field);
         return it != boundary_reduction_services_.end() ? it->second.get() : nullptr;
     }
+    [[nodiscard]] const BoundaryReductionService* boundaryReductionServiceIfPresent(FieldId primary_field) const noexcept
+    {
+        auto it = boundary_reduction_services_.find(primary_field);
+        return it != boundary_reduction_services_.end() ? it->second.get() : nullptr;
+    }
 
     /**
      * @brief Access the generalized auxiliary state manager.

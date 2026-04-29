@@ -205,6 +205,40 @@ bool feQuantityShapeMatchesValue(const systems::FEQuantityShape& shape,
     return false;
 }
 
+struct BoundaryReductionEndpointInfo {
+    FieldId primary_field{INVALID_FIELD_ID};
+    std::string functional_name;
+};
+
+std::optional<BoundaryReductionEndpointInfo> findBoundaryReductionFunctional(
+    const CouplingContext& ctx,
+    std::string_view participant_name,
+    std::string_view functional_name)
+{
+    if (!ctx.hasParticipant(participant_name)) {
+        return std::nullopt;
+    }
+    const auto participant = ctx.participant(participant_name);
+    if (participant.system == nullptr) {
+        return std::nullopt;
+    }
+
+    for (const auto& field : ctx.fields()) {
+        if (field.participant_name != participant_name) {
+            continue;
+        }
+        const auto* service =
+            participant.system->boundaryReductionServiceIfPresent(field.field_id);
+        if (service != nullptr && service->hasFunctional(functional_name)) {
+            return BoundaryReductionEndpointInfo{
+                .primary_field = field.field_id,
+                .functional_name = std::string(functional_name),
+            };
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<std::string_view> endpointScope(const CouplingEndpointRef& endpoint)
 {
     if (!endpoint.participant_name.has_value()) {
@@ -639,36 +673,52 @@ CouplingValidationResult validateEndpointResolutionSupport(
         }
 
         const auto* registry = participant.system->feQuantityRegistryIfPresent();
-        if (registry == nullptr || !registry->hasDefinition(endpoint.endpoint_name)) {
-            result.add(CouplingDiagnostic{
-                .severity = CouplingDiagnosticSeverity::Error,
-                .participant_name = *endpoint.participant_name,
-                .endpoint_name = endpoint.endpoint_name,
-                .message = "partitioned " + std::string(role) +
-                           " region data endpoint requires an FEQuantityRegistry entry",
-            });
+        if (registry != nullptr && registry->hasDefinition(endpoint.endpoint_name)) {
+            const auto& definition = registry->get(endpoint.endpoint_name);
+            if (!definition.capabilities.explicit_evaluation) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = *endpoint.participant_name,
+                    .endpoint_name = endpoint.endpoint_name,
+                    .message = "partitioned " + std::string(role) +
+                               " region data endpoint requires explicit evaluation support",
+                });
+            }
+            if (!feQuantityShapeMatchesValue(definition.shape, value)) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = *endpoint.participant_name,
+                    .endpoint_name = endpoint.endpoint_name,
+                    .message = "partitioned " + std::string(role) +
+                               " region data endpoint value shape does not match the FE quantity definition",
+                });
+            }
             return result;
         }
 
-        const auto& definition = registry->get(endpoint.endpoint_name);
-        if (!definition.capabilities.explicit_evaluation) {
-            result.add(CouplingDiagnostic{
-                .severity = CouplingDiagnosticSeverity::Error,
-                .participant_name = *endpoint.participant_name,
-                .endpoint_name = endpoint.endpoint_name,
-                .message = "partitioned " + std::string(role) +
-                           " region data endpoint requires explicit evaluation support",
-            });
+        if (findBoundaryReductionFunctional(ctx,
+                                            *endpoint.participant_name,
+                                            endpoint.endpoint_name)
+                .has_value()) {
+            if (value.rank != CouplingValueRank::Scalar || value.components != 1) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = *endpoint.participant_name,
+                    .endpoint_name = endpoint.endpoint_name,
+                    .message = "partitioned " + std::string(role) +
+                               " boundary reduction region data endpoint supports scalar values",
+                });
+            }
+            return result;
         }
-        if (!feQuantityShapeMatchesValue(definition.shape, value)) {
-            result.add(CouplingDiagnostic{
-                .severity = CouplingDiagnosticSeverity::Error,
-                .participant_name = *endpoint.participant_name,
-                .endpoint_name = endpoint.endpoint_name,
-                .message = "partitioned " + std::string(role) +
-                           " region data endpoint value shape does not match the FE quantity definition",
-            });
-        }
+
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .participant_name = *endpoint.participant_name,
+            .endpoint_name = endpoint.endpoint_name,
+            .message = "partitioned " + std::string(role) +
+                       " region data endpoint requires an FE quantity or boundary reduction functional",
+        });
         return result;
     }
 
@@ -1200,12 +1250,23 @@ ResolvedCouplingEndpoint resolveEndpoint(const CouplingContext& ctx,
         const auto participant = ctx.participant(*endpoint.participant_name);
         resolved.system_name = participant.system_name;
         resolved.system = participant.system;
-        resolved.registry_provider = "FEQuantityRegistry";
-        resolved.temporal.provider_name = "FEQuantityRegistry";
-        resolved.region_data_provider_kind = CouplingRegionDataProviderKind::FEQuantity;
         resolved.region_data_provider_name = endpoint.endpoint_name;
-        if (const auto* registry = participant.system->feQuantityRegistryIfPresent()) {
+        if (const auto* registry = participant.system->feQuantityRegistryIfPresent();
+            registry != nullptr && registry->hasDefinition(endpoint.endpoint_name)) {
+            resolved.registry_provider = "FEQuantityRegistry";
+            resolved.temporal.provider_name = "FEQuantityRegistry";
+            resolved.region_data_provider_kind = CouplingRegionDataProviderKind::FEQuantity;
             resolved.fe_quantity_id = registry->idOf(endpoint.endpoint_name);
+        } else if (const auto boundary =
+                       findBoundaryReductionFunctional(ctx,
+                                                       *endpoint.participant_name,
+                                                       endpoint.endpoint_name)) {
+            resolved.registry_provider = "BoundaryReductionService";
+            resolved.temporal.provider_name = "BoundaryReductionService";
+            resolved.region_data_provider_kind =
+                CouplingRegionDataProviderKind::BoundaryReductionFunctional;
+            resolved.boundary_functional_name = boundary->functional_name;
+            resolved.boundary_reduction_primary_field = boundary->primary_field;
         }
     }
     if (endpoint.kind == CouplingEndpointKind::AuxiliaryInput &&

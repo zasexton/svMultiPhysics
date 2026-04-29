@@ -3,6 +3,7 @@
 #include "Assembly/AssemblyContext.h"
 #include "Assembly/AssemblyKernel.h"
 #include "Auxiliary/AuxiliaryBindings.h"
+#include "Forms/BoundaryFunctional.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
@@ -363,6 +364,64 @@ struct RegionDataEndpointFixture {
             definition.referenced_fields = {left_field};
             left_system.feQuantityRegistry().registerDefinition(std::move(definition));
         }
+
+        CouplingContextBuilder builder;
+        builder.addParticipant({
+            .participant_name = "left",
+            .system_name = "left_system",
+            .system = &left_system,
+        });
+        builder.addParticipant({
+            .participant_name = "right",
+            .system_name = "right_system",
+            .system = partitionedSystemToken(2),
+        });
+        builder.addField({
+            .participant_name = "left",
+            .system_name = "left_system",
+            .system = &left_system,
+            .field_name = "primary",
+            .field_id = left_field,
+            .space = space,
+            .components = 1,
+        });
+        builder.addField({
+            .participant_name = "right",
+            .system_name = "right_system",
+            .system = partitionedSystemToken(2),
+            .field_name = "primary",
+            .field_id = 2,
+            .space = space,
+            .components = 1,
+        });
+        context = builder.build();
+    }
+};
+
+struct BoundaryReductionEndpointFixture {
+    std::shared_ptr<spaces::H1Space> space;
+    std::shared_ptr<forms::test::SingleTetraMeshAccess> mesh;
+    systems::FESystem left_system;
+    FieldId left_field{INVALID_FIELD_ID};
+    CouplingContext context;
+
+    BoundaryReductionEndpointFixture()
+        : space(std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1))
+        , mesh(std::make_shared<forms::test::SingleTetraMeshAccess>())
+        , left_system(mesh)
+    {
+        left_field = left_system.addField(systems::FieldSpec{
+            .name = "primary",
+            .space = space,
+            .components = 1,
+        });
+
+        forms::BoundaryFunctional functional;
+        functional.name = "surface_measure";
+        functional.integrand = forms::FormExpr::constant(1.0);
+        functional.boundary_marker = 1;
+        left_system.boundaryReductionService(left_field)
+            .addBoundaryFunctional(std::move(functional));
 
         CouplingContextBuilder builder;
         builder.addParticipant({
@@ -1308,8 +1367,36 @@ TEST(PartitionedCouplingPlanGenerator, RejectsRegionDataWithoutRegistryEntry)
         std::span<const CouplingExchangeDeclaration>(exchanges));
 
     EXPECT_FALSE(validation.ok());
-    EXPECT_NE(formatDiagnostics(validation).find("requires an FEQuantityRegistry entry"),
+    EXPECT_NE(formatDiagnostics(validation).find("requires an FE quantity"),
               std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, GeneratesRegionDataFromBoundaryReductionService)
+{
+    BoundaryReductionEndpointFixture fixture;
+    auto exchange = identityExchange();
+    exchange.producer = regionDataEndpoint("left");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    ASSERT_EQ(plan.exchanges.size(), 1u);
+    const auto& producer = plan.exchanges[0].producer;
+    EXPECT_EQ(producer.registry_provider, "BoundaryReductionService");
+    EXPECT_EQ(producer.temporal.provider_name, "BoundaryReductionService");
+    EXPECT_EQ(producer.region_data_provider_kind,
+              CouplingRegionDataProviderKind::BoundaryReductionFunctional);
+    EXPECT_EQ(producer.boundary_functional_name, "surface_measure");
+    EXPECT_EQ(producer.boundary_reduction_primary_field, fixture.left_field);
+    EXPECT_FALSE(producer.fe_quantity_id.has_value());
 }
 
 TEST(PartitionedCouplingPlanGenerator, RejectsRegionDataShapeMismatch)
