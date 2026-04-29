@@ -1522,6 +1522,27 @@ void collectDeclarationPartitionedInputs(
     }
 }
 
+bool sameGroupHint(const CouplingGroupHint& lhs, const CouplingGroupHint& rhs) noexcept
+{
+    return lhs.name == rhs.name && lhs.participant_names == rhs.participant_names;
+}
+
+std::vector<CouplingGroupHint> uniqueGroupHints(std::span<const CouplingGroupHint> group_hints)
+{
+    std::vector<CouplingGroupHint> unique;
+    unique.reserve(group_hints.size());
+    for (const auto& hint : group_hints) {
+        const auto it = std::find_if(unique.begin(), unique.end(),
+                                     [&hint](const CouplingGroupHint& existing) {
+                                         return sameGroupHint(existing, hint);
+                                     });
+        if (it == unique.end()) {
+            unique.push_back(hint);
+        }
+    }
+    return unique;
+}
+
 } // namespace
 
 CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
@@ -1731,7 +1752,7 @@ PartitionedCouplingPlan PartitionedCouplingPlanGenerator::generate(
         resolved.transfer = resolveTransfer(ctx, exchange);
         plan.exchanges.push_back(std::move(resolved));
     }
-    plan.group_hints.assign(group_hints.begin(), group_hints.end());
+    plan.group_hints = uniqueGroupHints(group_hints);
     plan.cycles = detectCycles(plan.exchanges);
     return plan;
 }

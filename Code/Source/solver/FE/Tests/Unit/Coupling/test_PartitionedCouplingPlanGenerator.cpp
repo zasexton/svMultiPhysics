@@ -2157,6 +2157,26 @@ TEST(PartitionedCouplingPlanGenerator, RejectsGroupHintWithUnknownParticipant)
               std::string::npos);
 }
 
+TEST(PartitionedCouplingPlanGenerator, MergesIdenticalGroupHints)
+{
+    auto declaration = partitionedDeclaration();
+    declaration.group_hints.push_back(declaration.group_hints.front());
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        partitionedContext(),
+        std::span<const CouplingContractDeclaration>(declarations));
+
+    ASSERT_EQ(plan.group_hints.size(), 1u);
+    EXPECT_EQ(plan.group_hints[0].name, "sync_group");
+}
+
 TEST(PartitionedCouplingPlanGenerator, RejectsAmbiguousDuplicateGroupHints)
 {
     auto declaration = partitionedDeclaration();
