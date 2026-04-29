@@ -283,6 +283,7 @@ if(PHYSICS_BUILD_TESTS)
         Tests/Unit/test_CoreUtilities.cpp
         Tests/Unit/test_VtpMeshSupport.cpp
         Tests/Unit/Coupling/test_FSICouplingModule.cpp
+        Tests/Unit/Coupling/test_ThermalInterfaceCouplingModule.cpp
     )
 
     add_executable(test_physics ${PHYSICS_TEST_SOURCES})
