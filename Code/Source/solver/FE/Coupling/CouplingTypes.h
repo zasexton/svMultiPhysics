@@ -172,6 +172,8 @@ struct CouplingRegionEndpointDeclaration {
 [[nodiscard]] const char* toString(CouplingRegionKind kind) noexcept;
 [[nodiscard]] const char* toString(CouplingInterfaceSide side) noexcept;
 [[nodiscard]] const char* toString(CouplingCoordinateConfiguration configuration) noexcept;
+[[nodiscard]] std::optional<svmp::Configuration> toMeshConfiguration(
+    CouplingCoordinateConfiguration configuration) noexcept;
 [[nodiscard]] const char* toString(CouplingValueRank rank) noexcept;
 [[nodiscard]] const char* toString(CouplingTemporalSlot slot) noexcept;
 [[nodiscard]] const char* toString(CouplingEndpointKind kind) noexcept;

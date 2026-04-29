@@ -112,6 +112,18 @@ const char* toString(CouplingCoordinateConfiguration configuration) noexcept
     return "unknown";
 }
 
+std::optional<svmp::Configuration> toMeshConfiguration(
+    CouplingCoordinateConfiguration configuration) noexcept
+{
+    switch (configuration) {
+    case CouplingCoordinateConfiguration::Reference:
+        return svmp::Configuration::Reference;
+    case CouplingCoordinateConfiguration::Current:
+        return svmp::Configuration::Current;
+    }
+    return std::nullopt;
+}
+
 const char* toString(CouplingValueRank rank) noexcept
 {
     switch (rank) {

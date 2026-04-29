@@ -36,6 +36,17 @@ TEST(CouplingTypes, ValueDescriptorValidatesGeneralTensorShape)
     EXPECT_FALSE(validateCouplingValueDescriptor(value).ok());
 }
 
+TEST(CouplingTypes, CoordinateConfigurationMapsExplicitlyToMeshConfiguration)
+{
+    EXPECT_EQ(toMeshConfiguration(CouplingCoordinateConfiguration::Reference),
+              svmp::Configuration::Reference);
+    EXPECT_EQ(toMeshConfiguration(CouplingCoordinateConfiguration::Current),
+              svmp::Configuration::Current);
+    EXPECT_FALSE(toMeshConfiguration(
+                     static_cast<CouplingCoordinateConfiguration>(255))
+                     .has_value());
+}
+
 TEST(CouplingTypes, ValueDescriptorRequiresMixedBlockLayout)
 {
     CouplingValueDescriptor value;

@@ -1250,6 +1250,23 @@ CouplingValidationResult validateInterfaceMapProvenance(
                 .message = "interface map provenance source marker does not match the producer region",
             });
         }
+        const auto source_configuration =
+            toMeshConfiguration(producer_region->coordinate_configuration);
+        if (!source_configuration.has_value()) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = producer_region->participant_name,
+                .region_name = producer_region->region_name,
+                .message = "producer interface region has unsupported coordinate configuration",
+            });
+        } else if (*source_configuration != provenance.source_configuration) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = producer_region->participant_name,
+                .region_name = producer_region->region_name,
+                .message = "interface map provenance source configuration does not match the producer region",
+            });
+        }
     }
 
     const auto consumer_region =
@@ -1269,6 +1286,23 @@ CouplingValidationResult validateInterfaceMapProvenance(
                 .participant_name = consumer_region->participant_name,
                 .region_name = consumer_region->region_name,
                 .message = "interface map provenance target marker does not match the consumer region",
+            });
+        }
+        const auto target_configuration =
+            toMeshConfiguration(consumer_region->coordinate_configuration);
+        if (!target_configuration.has_value()) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = consumer_region->participant_name,
+                .region_name = consumer_region->region_name,
+                .message = "consumer interface region has unsupported coordinate configuration",
+            });
+        } else if (*target_configuration != provenance.target_configuration) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = consumer_region->participant_name,
+                .region_name = consumer_region->region_name,
+                .message = "interface map provenance target configuration does not match the consumer region",
             });
         }
     }

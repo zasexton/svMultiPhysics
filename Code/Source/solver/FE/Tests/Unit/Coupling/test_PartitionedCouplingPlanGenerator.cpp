@@ -965,6 +965,27 @@ TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceMapProvenanceRegionMismat
     EXPECT_NE(formatDiagnostics(validation).find("source marker does not match"),
               std::string::npos);
 }
+
+TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceMapProvenanceConfigurationMismatch)
+{
+    auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::Scalar,
+            .components = 1,
+        },
+        CouplingInterfaceFramePolicy::None);
+    exchange.transfer.interface_map->source_configuration = svmp::Configuration::Current;
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContextWithSharedRegion(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("source configuration does not match"),
+              std::string::npos);
+}
 #endif
 
 TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceTransferNonInterfaceRegions)
