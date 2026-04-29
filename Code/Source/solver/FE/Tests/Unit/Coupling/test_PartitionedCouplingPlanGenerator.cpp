@@ -462,6 +462,19 @@ CouplingEndpointRef externalBufferEndpoint(std::string key)
     };
 }
 
+CouplingEndpointRef participantExternalBufferEndpoint(std::string participant,
+                                                      std::string key)
+{
+    return CouplingEndpointRef{
+        .kind = CouplingEndpointKind::ExternalBuffer,
+        .participant_name = std::move(participant),
+        .endpoint_name = std::move(key),
+        .temporal = CouplingTemporalSlotDescriptor{
+            .slot = CouplingTemporalSlot::External,
+        },
+    };
+}
+
 CouplingEndpointRef parameterEndpoint(
     std::string participant,
     std::string key = "coefficient",
@@ -1488,6 +1501,54 @@ TEST(PartitionedCouplingPlanGenerator, GeneratesExternalBufferEndpointWithDescri
               CouplingResolvedTemporalBackingKind::ExternalBuffer);
     EXPECT_EQ(plan.exchanges[0].producer.layout_revision_key, 3u);
     EXPECT_EQ(plan.exchanges[0].producer.registry_revision_key, 5u);
+}
+
+TEST(PartitionedCouplingPlanGenerator, ResolvesParticipantScopedExternalBufferEndpoint)
+{
+    auto exchange = identityExchange();
+    exchange.producer = participantExternalBufferEndpoint("left", "driver_value");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    auto global_descriptor = externalBufferDescriptor(
+        "driver_value",
+        exchange.value,
+        CouplingExternalBufferAccess::ReadOnly,
+        {CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::External}});
+    global_descriptor.data_revision_key = 5;
+
+    auto scoped_descriptor = externalBufferDescriptor(
+        "driver_value",
+        exchange.value,
+        CouplingExternalBufferAccess::ReadOnly,
+        {CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::External}});
+    scoped_descriptor.data_revision_key = 9;
+
+    auto builder = partitionedContextBuilder(1);
+    builder.addExternalBuffer(CouplingExternalBufferRegistration{
+        .descriptor = global_descriptor,
+    });
+    builder.addExternalBuffer(CouplingExternalBufferRegistration{
+        .participant_name = "left",
+        .descriptor = scoped_descriptor,
+    });
+    const auto context = builder.build();
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    ASSERT_TRUE(plan.exchanges[0].producer.resolved_participant_name.has_value());
+    EXPECT_EQ(*plan.exchanges[0].producer.resolved_participant_name, "left");
+    EXPECT_EQ(plan.exchanges[0].producer.system_name, "left_system");
+    EXPECT_EQ(plan.exchanges[0].producer.system, partitionedSystemToken(1));
+    ASSERT_TRUE(plan.exchanges[0].producer.external_buffer.has_value());
+    EXPECT_EQ(plan.exchanges[0].producer.external_buffer->data_revision_key, 9u);
 }
 
 TEST(PartitionedCouplingPlanGenerator, RejectsExternalBufferUnsupportedTemporalSlot)

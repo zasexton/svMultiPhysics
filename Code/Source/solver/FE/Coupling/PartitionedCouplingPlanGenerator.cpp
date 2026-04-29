@@ -1248,6 +1248,11 @@ ResolvedCouplingEndpoint resolveEndpoint(const CouplingContext& ctx,
     if (endpoint.kind == CouplingEndpointKind::ExternalBuffer) {
         if (const auto* descriptor =
                 ctx.externalBufferDescriptor(endpointScope(endpoint), endpoint.endpoint_name)) {
+            if (endpoint.participant_name.has_value()) {
+                const auto participant = ctx.participant(*endpoint.participant_name);
+                resolved.system_name = participant.system_name;
+                resolved.system = participant.system;
+            }
             resolved.registry_provider = "CouplingContext";
             resolved.external_buffer = *descriptor;
             resolved.temporal.provider_name = "ExternalBuffer";
