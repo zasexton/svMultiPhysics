@@ -343,6 +343,7 @@ bool partitionedExchangeMatches(const CouplingExchangeDeclaration& declared,
 
 void validatePartitionedPlanCoverage(
     std::span<const CouplingContractDeclaration> declarations,
+    std::span<const CouplingExchangeDeclaration> exchange_templates,
     const PartitionedCouplingPlan& partitioned_plan,
     CouplingValidationResult& result)
 {
@@ -357,6 +358,9 @@ void validatePartitionedPlanCoverage(
                                     declaration.group_hints.begin(),
                                     declaration.group_hints.end());
     }
+    declared_exchanges.insert(declared_exchanges.end(),
+                              exchange_templates.begin(),
+                              exchange_templates.end());
 
     for (const auto& declared : declared_exchanges) {
         const auto found = std::any_of(
@@ -663,6 +667,25 @@ CouplingValidationResult CouplingGraph::buildFinalizedGraph(
     validatePartitionedPlanCoverage(
         std::span<const CouplingContractDeclaration>(declarations_.data(),
                                                      declarations_.size()),
+        std::span<const CouplingExchangeDeclaration>{},
+        partitioned_plan,
+        result);
+    return result;
+}
+
+CouplingValidationResult CouplingGraph::buildFinalizedGraph(
+    const CouplingContext& context,
+    std::span<const CouplingContractDeclaration> declarations,
+    std::span<const CouplingFormAnalysisMetadata> installed_forms,
+    const PartitionedCouplingPlan& partitioned_plan,
+    std::span<const CouplingExchangeDeclaration> exchange_templates)
+{
+    CouplingValidationResult result =
+        buildFinalizedGraph(context, declarations, installed_forms);
+    validatePartitionedPlanCoverage(
+        std::span<const CouplingContractDeclaration>(declarations_.data(),
+                                                     declarations_.size()),
+        exchange_templates,
         partitioned_plan,
         result);
     return result;

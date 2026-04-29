@@ -254,6 +254,23 @@ CouplingValidationResult buildFinalizedGraph(
         plan);
 }
 
+CouplingValidationResult buildFinalizedGraph(
+    const CouplingContext& context,
+    const CouplingContractDeclaration& declaration,
+    const PartitionedCouplingPlan& plan,
+    std::span<const CouplingExchangeDeclaration> exchange_templates)
+{
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const std::array<CouplingFormAnalysisMetadata, 0> installed_forms{};
+    return graph.buildFinalizedGraph(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed_forms),
+        plan,
+        exchange_templates);
+}
+
 } // namespace
 
 TEST(CouplingGraph, AcceptsResolvableRequiredContextReferences)
@@ -476,6 +493,33 @@ TEST(CouplingGraph, RejectsGeneratedPartitionedPlanWithUndeclaredExchange)
     EXPECT_FALSE(validation.ok());
     EXPECT_NE(formatDiagnostics(validation).find("generated partitioned exchange has no declaration"),
               std::string::npos);
+}
+
+TEST(CouplingGraph, AcceptsGeneratedPartitionedPlanWithTemplateExchange)
+{
+    const auto context = twoParticipantGraphContext();
+    const auto declaration = partitionedGraphDeclaration();
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+
+    auto extra_exchange = declaration.partitioned_exchange_declarations.front();
+    extra_exchange.producer_port.port_name = "right_in";
+    extra_exchange.consumer_port.port_name = "left_out";
+    extra_exchange.producer = graphFieldEndpoint("right");
+    extra_exchange.consumer = graphFieldEndpoint("left");
+    const std::array<CouplingExchangeDeclaration, 1> templates{extra_exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto plan = generator.generate(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingExchangeDeclaration>(templates));
+
+    const auto validation = buildFinalizedGraph(
+        context,
+        declaration,
+        plan,
+        std::span<const CouplingExchangeDeclaration>(templates));
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
 }
 
 TEST(CouplingGraph, RejectsGeneratedPartitionedPlanMissingGroupHint)
