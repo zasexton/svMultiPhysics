@@ -197,6 +197,26 @@ TEST(CouplingContext, RejectsFieldsWithoutOwningParticipant)
     EXPECT_NE(formatDiagnostics(validation).find("unknown participant"), std::string::npos);
 }
 
+TEST(CouplingContext, RejectsFieldAndRegionOwnershipMismatch)
+{
+    const auto* owner_system = systemToken(1);
+    const auto* other_system = systemToken(2);
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(participant("left", "left_system", owner_system))
+        .addField(field("left", "other_system", other_system, "primary", 0))
+        .addRegion(region("left", "other_system", other_system, "surface",
+                          CouplingRegionKind::Boundary, 12));
+
+    const auto validation = builder.validate();
+    EXPECT_FALSE(validation.ok());
+    const auto diagnostics = formatDiagnostics(validation);
+    EXPECT_NE(diagnostics.find("field system ownership does not match"),
+              std::string::npos);
+    EXPECT_NE(diagnostics.find("region system ownership does not match"),
+              std::string::npos);
+}
+
 TEST(CouplingContext, RejectsInvalidFieldMetadata)
 {
     const auto* system = systemToken(1);

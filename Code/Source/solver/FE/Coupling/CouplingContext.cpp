@@ -64,6 +64,17 @@ bool hasMatchingInterfaceRegion(const std::vector<CouplingRegionRef>& regions,
                        });
 }
 
+const CouplingParticipantRef* findParticipant(
+    const std::vector<CouplingParticipantRef>& participants,
+    std::string_view participant_name) noexcept
+{
+    const auto it = std::find_if(participants.begin(), participants.end(),
+                                 [participant_name](const CouplingParticipantRef& participant) {
+                                     return participant.participant_name == participant_name;
+                                 });
+    return it == participants.end() ? nullptr : &*it;
+}
+
 void appendTemporalSlotValidation(
     CouplingValidationResult& result,
     const std::vector<CouplingTemporalSlotDescriptor>& slots,
@@ -589,6 +600,17 @@ CouplingValidationResult CouplingContextBuilder::validate() const
                 .message = "coupling field references an unknown participant",
             });
         }
+        if (const auto* owner =
+                findParticipant(context_.participants_, field.participant_name);
+            owner != nullptr &&
+            (field.system_name != owner->system_name || field.system != owner->system)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = field.participant_name,
+                .field_name = field.field_name,
+                .message = "coupling field system ownership does not match the participant",
+            });
+        }
         if (field.scope == systems::FieldScope::InterfaceFace) {
             if (field.interface_marker < 0) {
                 result.add(CouplingDiagnostic{
@@ -643,6 +665,17 @@ CouplingValidationResult CouplingContextBuilder::validate() const
                 .participant_name = region.participant_name,
                 .region_name = region.region_name,
                 .message = "coupling region references an unknown participant",
+            });
+        }
+        if (const auto* owner =
+                findParticipant(context_.participants_, region.participant_name);
+            owner != nullptr &&
+            (region.system_name != owner->system_name || region.system != owner->system)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = region.participant_name,
+                .region_name = region.region_name,
+                .message = "coupling region system ownership does not match the participant",
             });
         }
         if (region.kind == CouplingRegionKind::InterfaceFace) {
