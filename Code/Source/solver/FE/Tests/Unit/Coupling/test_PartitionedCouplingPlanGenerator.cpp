@@ -1,6 +1,11 @@
 #include "Coupling/CouplingDeclaration.h"
 #include "Coupling/PartitionedCouplingPlanGenerator.h"
+#include "Assembly/AssemblyContext.h"
+#include "Assembly/AssemblyKernel.h"
 #include "Spaces/H1Space.h"
+#include "Systems/FESystem.h"
+#include "Tests/Unit/Forms/FormsTestHelpers.h"
+#include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
 
 #include <gtest/gtest.h>
 
@@ -16,6 +21,44 @@ using namespace svmp::FE;
 using namespace svmp::FE::coupling;
 
 namespace {
+
+class ParameterDeclaringKernel final : public assembly::BilinearFormKernel {
+public:
+    explicit ParameterDeclaringKernel(params::ValueType type)
+        : type_(type)
+    {
+    }
+
+    [[nodiscard]] assembly::RequiredData getRequiredData() const override
+    {
+        return assembly::RequiredData::None;
+    }
+
+    [[nodiscard]] std::vector<params::Spec> parameterSpecs() const override
+    {
+        params::Spec spec;
+        spec.key = "coefficient";
+        spec.type = type_;
+        spec.required = true;
+        if (type_ == params::ValueType::Real) {
+            spec.default_value = params::Value{Real(1.0)};
+        } else if (type_ == params::ValueType::Int) {
+            spec.default_value = params::Value{1};
+        }
+        return {spec};
+    }
+
+    void computeCell(const assembly::AssemblyContext&,
+                     assembly::KernelOutput& output) override
+    {
+        output.reserve(0, 0, true, false);
+    }
+
+    [[nodiscard]] std::string name() const override { return "ParameterDeclaringKernel"; }
+
+private:
+    params::ValueType type_{params::ValueType::Real};
+};
 
 const systems::FESystem* partitionedSystemToken(int index)
 {
@@ -70,6 +113,64 @@ CouplingContext partitionedContext()
 {
     return partitionedContextWithComponents(1);
 }
+
+struct ParameterEndpointFixture {
+    std::shared_ptr<spaces::H1Space> space;
+    std::shared_ptr<forms::test::SingleTetraMeshAccess> mesh;
+    systems::FESystem left_system;
+    FieldId left_field{INVALID_FIELD_ID};
+    CouplingContext context;
+
+    explicit ParameterEndpointFixture(
+        params::ValueType parameter_type = params::ValueType::Real)
+        : space(std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1))
+        , mesh(std::make_shared<forms::test::SingleTetraMeshAccess>())
+        , left_system(mesh)
+    {
+        left_field = left_system.addField(systems::FieldSpec{
+            .name = "primary",
+            .space = space,
+            .components = 1,
+        });
+        left_system.addOperator("op");
+        left_system.addCellKernel(
+            "op", left_field, std::make_shared<ParameterDeclaringKernel>(parameter_type));
+        systems::SetupInputs inputs;
+        inputs.topology_override = timestepping::test::singleTetraTopology();
+        left_system.setup({}, inputs);
+
+        CouplingContextBuilder builder;
+        builder.addParticipant({
+            .participant_name = "left",
+            .system_name = "left_system",
+            .system = &left_system,
+        });
+        builder.addParticipant({
+            .participant_name = "right",
+            .system_name = "right_system",
+            .system = partitionedSystemToken(2),
+        });
+        builder.addField({
+            .participant_name = "left",
+            .system_name = "left_system",
+            .system = &left_system,
+            .field_name = "primary",
+            .field_id = left_field,
+            .space = space,
+            .components = 1,
+        });
+        builder.addField({
+            .participant_name = "right",
+            .system_name = "right_system",
+            .system = partitionedSystemToken(2),
+            .field_name = "primary",
+            .field_id = 2,
+            .space = space,
+            .components = 1,
+        });
+        context = builder.build();
+    }
+};
 
 CouplingRegionRef partitionedRegion(std::string participant,
                                     std::string system_name,
@@ -133,6 +234,20 @@ CouplingEndpointRef externalBufferEndpoint(std::string key)
         .temporal = CouplingTemporalSlotDescriptor{
             .slot = CouplingTemporalSlot::External,
         },
+    };
+}
+
+CouplingEndpointRef parameterEndpoint(
+    std::string participant,
+    std::string key = "coefficient",
+    CouplingTemporalSlotDescriptor temporal =
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Current})
+{
+    return CouplingEndpointRef{
+        .kind = CouplingEndpointKind::Parameter,
+        .participant_name = std::move(participant),
+        .endpoint_name = std::move(key),
+        .temporal = temporal,
     };
 }
 
@@ -488,9 +603,9 @@ TEST(PartitionedCouplingPlanGenerator, RejectsEndpointKindsWithoutResolver)
 {
     auto exchange = identityExchange();
     exchange.producer = CouplingEndpointRef{
-        .kind = CouplingEndpointKind::Parameter,
+        .kind = CouplingEndpointKind::AuxiliaryInput,
         .participant_name = "left",
-        .endpoint_name = "coefficient",
+        .endpoint_name = "lagged_input",
         .temporal = CouplingTemporalSlotDescriptor{
             .slot = CouplingTemporalSlot::Current,
         },
@@ -504,6 +619,94 @@ TEST(PartitionedCouplingPlanGenerator, RejectsEndpointKindsWithoutResolver)
 
     EXPECT_FALSE(validation.ok());
     EXPECT_NE(formatDiagnostics(validation).find("requires a registry resolver"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, GeneratesParameterEndpointFromRegistry)
+{
+    ParameterEndpointFixture fixture;
+    auto exchange = identityExchange();
+    exchange.producer = parameterEndpoint("left");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    ASSERT_EQ(plan.exchanges.size(), 1u);
+    const auto& producer = plan.exchanges[0].producer;
+    EXPECT_EQ(producer.resolved_kind, CouplingEndpointKind::Parameter);
+    EXPECT_EQ(producer.system_name, "left_system");
+    EXPECT_EQ(producer.system, &fixture.left_system);
+    EXPECT_EQ(producer.registry_provider, "ParameterRegistry");
+    EXPECT_EQ(producer.temporal.provider_name, "ParameterRegistry");
+    EXPECT_EQ(producer.temporal.backing,
+              CouplingResolvedTemporalBackingKind::ProviderDefined);
+    ASSERT_TRUE(producer.parameter_slot.has_value());
+    EXPECT_EQ(*producer.parameter_slot, 0u);
+    EXPECT_EQ(producer.parameter_value_type, params::ValueType::Real);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsParameterEndpointWithoutRegistryEntry)
+{
+    ParameterEndpointFixture fixture;
+    auto exchange = identityExchange();
+    exchange.producer = parameterEndpoint("left", "missing");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("requires a ParameterRegistry entry"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsParameterEndpointNonRealType)
+{
+    ParameterEndpointFixture fixture(params::ValueType::Int);
+    auto exchange = identityExchange();
+    exchange.producer = parameterEndpoint("left");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("requires a Real ParameterRegistry entry"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsParameterEndpointUnsupportedTemporalSlot)
+{
+    ParameterEndpointFixture fixture;
+    auto exchange = identityExchange();
+    exchange.producer = parameterEndpoint(
+        "left",
+        "coefficient",
+        CouplingTemporalSlotDescriptor{
+            .slot = CouplingTemporalSlot::History,
+            .history_index = 1,
+        });
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("parameter endpoint temporal slot"),
               std::string::npos);
 }
 

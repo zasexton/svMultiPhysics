@@ -8,6 +8,7 @@
 #include "Coupling/PartitionedCouplingPlanGenerator.h"
 
 #include "Coupling/CouplingDeclaration.h"
+#include "Systems/FESystem.h"
 
 #include <algorithm>
 #include <set>
@@ -39,6 +40,10 @@ CouplingResolvedTemporalBackingKind backingForEndpoint(const CouplingEndpointRef
     }
     if (endpoint.kind == CouplingEndpointKind::ExternalBuffer) {
         return CouplingResolvedTemporalBackingKind::ExternalBuffer;
+    }
+    if (endpoint.kind == CouplingEndpointKind::Parameter &&
+        endpoint.temporal.slot == CouplingTemporalSlot::Current) {
+        return CouplingResolvedTemporalBackingKind::ProviderDefined;
     }
     return CouplingResolvedTemporalBackingKind::None;
 }
@@ -174,6 +179,87 @@ CouplingValidationResult validateEndpointResolutionSupport(
                 .participant_name = endpoint.participant_name.value_or(""),
                 .endpoint_name = endpoint.endpoint_name,
                 .message = "partitioned consumer external buffer endpoint requires write access",
+            });
+        }
+        return result;
+    }
+
+    if (endpoint.kind == CouplingEndpointKind::Parameter) {
+        if (!endpoint.participant_name.has_value() ||
+            endpoint.participant_name->empty()) {
+            return result;
+        }
+        if (!ctx.hasParticipant(*endpoint.participant_name)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " parameter endpoint references an unknown participant",
+            });
+            return result;
+        }
+
+        const auto participant = ctx.participant(*endpoint.participant_name);
+        if (participant.system == nullptr) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " parameter endpoint requires an owning system",
+            });
+            return result;
+        }
+
+        if (endpoint.temporal.slot != CouplingTemporalSlot::Current) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " parameter endpoint temporal slot " +
+                           toString(endpoint.temporal.slot) +
+                           " requires a registered provider extension",
+            });
+        }
+
+        const auto& registry = participant.system->parameterRegistry();
+        const auto* spec = registry.find(endpoint.endpoint_name);
+        if (spec == nullptr) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " parameter endpoint requires a ParameterRegistry entry",
+            });
+            return result;
+        }
+        if (value.rank != CouplingValueRank::Scalar || value.components != 1) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " parameter endpoint value descriptor must be scalar",
+            });
+        }
+        if (spec->type != params::ValueType::Real) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " parameter endpoint requires a Real ParameterRegistry entry",
+            });
+        } else if (!registry.slotOf(endpoint.endpoint_name).has_value()) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " parameter endpoint requires a Real parameter slot",
             });
         }
         return result;
@@ -463,9 +549,23 @@ ResolvedCouplingEndpoint resolveEndpoint(const CouplingContext& ctx,
         endpoint.participant_name.has_value()) {
         const auto field = ctx.field(*endpoint.participant_name, endpoint.endpoint_name);
         resolved.system_name = field.system_name;
+        resolved.system = field.system;
         resolved.registry_provider = "CouplingContext";
         resolved.temporal.provider_name = "FESystem";
         resolved.field_id = field.field_id;
+    }
+    if (endpoint.kind == CouplingEndpointKind::Parameter &&
+        endpoint.participant_name.has_value()) {
+        const auto participant = ctx.participant(*endpoint.participant_name);
+        resolved.system_name = participant.system_name;
+        resolved.system = participant.system;
+        resolved.registry_provider = "ParameterRegistry";
+        resolved.temporal.provider_name = "ParameterRegistry";
+        const auto& registry = participant.system->parameterRegistry();
+        if (const auto* spec = registry.find(endpoint.endpoint_name)) {
+            resolved.parameter_value_type = spec->type;
+        }
+        resolved.parameter_slot = registry.slotOf(endpoint.endpoint_name);
     }
     if (endpoint.kind == CouplingEndpointKind::ExternalBuffer) {
         if (const auto* descriptor =

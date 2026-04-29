@@ -15,7 +15,9 @@
 
 #include "Coupling/CouplingContext.h"
 #include "Coupling/TransferPlan.h"
+#include "Core/ParameterValue.h"
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -66,7 +68,10 @@ struct ResolvedCouplingEndpoint {
     std::string registry_provider;
     std::string resolved_endpoint_key;
     ResolvedCouplingTemporalSlot temporal{};
+    const systems::FESystem* system{nullptr};
     FieldId field_id{INVALID_FIELD_ID};
+    std::optional<std::uint32_t> parameter_slot;
+    params::ValueType parameter_value_type{params::ValueType::Any};
     std::optional<CouplingExternalBufferDescriptor> external_buffer;
     std::uint64_t layout_revision_key{0};
     std::uint64_t registry_revision_key{0};
