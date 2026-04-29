@@ -118,6 +118,7 @@ struct ResolvedCouplingAdditionalFieldDeclaration {
     CouplingAdditionalFieldDeclaration declaration;
     std::string system_name;
     systems::FieldSpec field_spec;
+    FieldId field_id{INVALID_FIELD_ID};
 };
 
 struct CouplingInstalledDependency {

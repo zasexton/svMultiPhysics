@@ -199,9 +199,9 @@ MonolithicCouplingBuilder::registerAdditionalFields(
     std::span<const CouplingContractDeclaration> declarations) const
 {
     auto resolved = resolveAdditionalFields(context, declarations);
-    for (const auto& field : resolved) {
+    for (auto& field : resolved) {
         auto& system = mutableSystemByName(context, field.system_name);
-        static_cast<void>(system.addField(field.field_spec));
+        field.field_id = system.addField(field.field_spec);
     }
     return resolved;
 }

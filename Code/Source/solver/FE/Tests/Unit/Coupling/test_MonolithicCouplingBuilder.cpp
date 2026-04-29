@@ -414,6 +414,9 @@ TEST(MonolithicCouplingBuilder, RegistersContractOwnedInterfaceAdditionalFields)
     EXPECT_EQ(resolved[0].field_spec.name, "generic_instance.lambda");
     EXPECT_EQ(resolved[0].field_spec.scope, systems::FieldScope::InterfaceFace);
     EXPECT_EQ(resolved[0].field_spec.interface_marker, kInterfaceMarker);
+    ASSERT_NE(resolved[0].field_id, INVALID_FIELD_ID);
+    EXPECT_EQ(fixture.system.findFieldByName("generic_instance.lambda"),
+              resolved[0].field_id);
     EXPECT_TRUE(fixture.system.hasField("generic_instance.lambda"));
 }
 
