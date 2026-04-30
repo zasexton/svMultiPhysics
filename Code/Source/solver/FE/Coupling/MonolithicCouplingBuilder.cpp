@@ -224,6 +224,7 @@ ResolvedCouplingFormContribution MonolithicCouplingBuilder::resolveFormContribut
     resolved.origin = contribution.origin;
     resolved.operator_name = contribution.operator_name;
     resolved.install_options = contribution.install_options;
+    resolved.terminal_provenance = contribution.terminal_provenance;
 
     const systems::FESystem* owning_system = nullptr;
     auto resolve_field = [&](const CouplingFieldUse& use) {
@@ -285,7 +286,9 @@ CouplingFormAnalysisMetadata MonolithicCouplingBuilder::installResolvedFormContr
         contribution.install_options,
         bridge_options);
 
-    return adaptFormAnalysisMetadata(installed.analysis);
+    auto adapted = adaptFormAnalysisMetadata(installed.analysis);
+    adapted.declaration_terminal_provenance = contribution.terminal_provenance;
+    return adapted;
 }
 
 std::vector<CouplingFormAnalysisMetadata> MonolithicCouplingBuilder::installFormContributions(
@@ -311,6 +314,7 @@ CouplingFormAnalysisMetadata MonolithicCouplingBuilder::adaptFormAnalysisMetadat
     adapted.system_name = metadata.system_name;
     adapted.operator_name = metadata.operator_tag;
     adapted.installed_fields = metadata.installed_fields;
+    adapted.geometry_sensitivity = metadata.geometry_sensitivity;
     adapted.feature_gates = metadata.feature_gates;
 
     adapted.installed_dependencies.reserve(metadata.installed_dependencies.size());

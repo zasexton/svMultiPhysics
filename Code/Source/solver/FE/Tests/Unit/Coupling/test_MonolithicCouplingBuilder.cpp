@@ -331,11 +331,24 @@ TEST(MonolithicCouplingBuilder, InstallsResolvedFormAndAdaptsBridgeMetadata)
     contribution.operator_name = "equations";
     contribution.field_uses = {{.participant_name = "right", .field_name = "primary"}};
     contribution.extra_trial_field_uses = {{.participant_name = "left", .field_name = "primary"}};
+    contribution.terminal_provenance.push_back(CouplingFormTerminalProvenanceDeclaration{
+        .kind = CouplingFormTerminalProvenanceKind::PreviousSolution,
+        .terminal_sequence = 1,
+        .field = CouplingFieldUse{
+            .participant_name = "left",
+            .field_name = "primary",
+        },
+        .temporal_quantity = CouplingTemporalQuantity::FieldHistoryValue,
+        .history_index = 1,
+    });
     contribution.residual =
         (forms.state("left", "primary", "a") *
          forms.test("right", "primary", "w")).dx();
 
     const auto resolved = builder.resolveFormContribution(fixture.context, contribution);
+    ASSERT_EQ(resolved.terminal_provenance.size(), 1u);
+    EXPECT_EQ(resolved.terminal_provenance[0].terminal_sequence, 1u);
+
     const auto metadata =
         builder.installResolvedFormContribution(fixture.system, resolved);
 
@@ -350,6 +363,10 @@ TEST(MonolithicCouplingBuilder, InstallsResolvedFormAndAdaptsBridgeMetadata)
                         metadata.installed_fields.end(),
                         fixture.left_field),
               metadata.installed_fields.end());
+    ASSERT_EQ(metadata.declaration_terminal_provenance.size(), 1u);
+    EXPECT_EQ(metadata.declaration_terminal_provenance[0].kind,
+              CouplingFormTerminalProvenanceKind::PreviousSolution);
+    EXPECT_EQ(metadata.declaration_terminal_provenance[0].history_index, 1);
 
     const auto* dependency = findDependency(
         metadata,

@@ -4127,7 +4127,7 @@ Implementation checklist:
   `CouplingFormInstallOptionsDeclaration` on form contribution records and
   resolved `systems::FormInstallOptions`, geometry tangent policy, and extra
   trial field metadata on resolved form contribution records.
-- [ ] Implement `CouplingFormFieldProvenance`,
+- [x] Implement `CouplingFormFieldProvenance`,
   `CouplingGeometrySensitivityProvenance`, `CouplingFormTemporalProvenance`,
   `CouplingGeometryTerminalOwnerProvenance`,
   `CouplingFormGeometryTerminalProvenance`,

@@ -165,6 +165,118 @@ TEST(CouplingContractValidation, ValidatesAdditionalFieldSpaceAndComponents)
     EXPECT_TRUE(validateContractDeclarationShape(declaration).ok());
 }
 
+TEST(CouplingContractValidation, FormAnalysisMetadataStoresDiagnosticProvenance)
+{
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "coupled_surface";
+    metadata.origin = "surface_contract";
+    metadata.system_name = "fluid";
+    metadata.installed_fields = {1, 2};
+    metadata.field_uses.push_back(CouplingFormFieldProvenance{
+        .residual_row = 1,
+        .field = 2,
+        .appears_as_state_field = true,
+        .appears_as_geometry_sensitivity = true,
+    });
+    metadata.non_field_dependencies.push_back(CouplingFormNonFieldDependencyProvenance{
+        .kind = CouplingFormNonFieldDependencyKind::BoundaryIntegral,
+        .participant_name = "fluid",
+        .system_name = "fluid_system",
+        .name = "traction",
+        .domain = svmp::FE::analysis::DomainKind::Boundary,
+        .region_name = "wall",
+        .marker = 12,
+        .provider = "forms",
+        .value_type = "scalar",
+        .parameter_value_type = svmp::FE::params::ValueType::Real,
+    });
+    metadata.variable_dependencies.push_back(CouplingFormVariableDependencyProvenance{
+        .residual_row = svmp::FE::analysis::VariableKey::field(1),
+        .dependency = svmp::FE::analysis::VariableKey::field(2),
+        .domain = svmp::FE::analysis::DomainKind::Boundary,
+        .contributes_matrix_block = true,
+        .contributes_vector = true,
+        .provider = "forms",
+    });
+    metadata.declaration_terminal_provenance.push_back(
+        CouplingFormTerminalProvenanceDeclaration{
+            .kind = CouplingFormTerminalProvenanceKind::PreviousSolution,
+            .terminal_sequence = 3,
+            .field = CouplingFieldUse{
+                .participant_name = "fluid",
+                .field_name = "velocity",
+            },
+            .temporal_quantity = CouplingTemporalQuantity::FieldHistoryValue,
+            .history_index = 2,
+        });
+    metadata.temporal_symbols.push_back(CouplingFormTemporalProvenance{
+        .field = 2,
+        .active_trial_field = 2,
+        .residual_row = svmp::FE::analysis::VariableKey::field(1),
+        .trial_dependency = svmp::FE::analysis::VariableKey::field(2),
+        .quantity = CouplingTemporalQuantity::FieldHistoryValue,
+        .history_index = 2,
+    });
+    metadata.geometry_terminals.push_back(CouplingFormGeometryTerminalProvenance{
+        .quantity = CouplingGeometryTerminalQuantity::CurrentNormal,
+        .mesh_motion_field = 2,
+        .location = CouplingGeometryTerminalLocationProvenance{
+            .region_kind = CouplingRegionKind::Boundary,
+            .marker = 12,
+        },
+        .analysis_domain = svmp::FE::analysis::DomainKind::Boundary,
+        .owner = CouplingGeometryTerminalOwnerProvenance{
+            .participant_name = "fluid",
+            .system_name = "fluid_system",
+            .region_name = "wall",
+        },
+        .provider = "forms",
+        .normal_available = true,
+    });
+    metadata.geometry_sensitivity.mode =
+        svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns;
+    metadata.geometry_sensitivity.mesh_motion_field = 2;
+    metadata.geometry_sensitivity_provenance.push_back(
+        CouplingGeometrySensitivityProvenance{
+            .kind = CouplingGeometrySensitivityProvenanceKind::MeshMotionUnknowns,
+            .mesh_motion_field = 2,
+            .provenance_id = "mesh-motion",
+            .construction_policy = "registered_field",
+            .target_kind = "surface",
+            .ad_compatible = true,
+            .measure_sensitivity_available = true,
+            .geometry_fields = {2},
+            .visible_to_assembly_paths = {"residual"},
+            .sensitivity_sample_count = 4,
+        });
+
+    ASSERT_EQ(metadata.field_uses.size(), 1u);
+    EXPECT_TRUE(metadata.field_uses[0].appears_as_state_field);
+    EXPECT_TRUE(metadata.field_uses[0].appears_as_geometry_sensitivity);
+    ASSERT_EQ(metadata.non_field_dependencies.size(), 1u);
+    EXPECT_EQ(metadata.non_field_dependencies[0].kind,
+              CouplingFormNonFieldDependencyKind::BoundaryIntegral);
+    ASSERT_TRUE(metadata.non_field_dependencies[0].parameter_value_type.has_value());
+    EXPECT_EQ(*metadata.non_field_dependencies[0].parameter_value_type,
+              svmp::FE::params::ValueType::Real);
+    ASSERT_EQ(metadata.variable_dependencies.size(), 1u);
+    EXPECT_TRUE(metadata.variable_dependencies[0].contributes_matrix_block);
+    ASSERT_EQ(metadata.declaration_terminal_provenance.size(), 1u);
+    EXPECT_EQ(metadata.declaration_terminal_provenance[0].history_index, 2);
+    ASSERT_EQ(metadata.temporal_symbols.size(), 1u);
+    EXPECT_EQ(metadata.temporal_symbols[0].quantity,
+              CouplingTemporalQuantity::FieldHistoryValue);
+    ASSERT_EQ(metadata.geometry_terminals.size(), 1u);
+    EXPECT_TRUE(metadata.geometry_terminals[0].normal_available);
+    ASSERT_TRUE(metadata.geometry_terminals[0].owner.has_value());
+    EXPECT_EQ(metadata.geometry_terminals[0].owner->participant_name, "fluid");
+    EXPECT_EQ(metadata.geometry_sensitivity.mode,
+              svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns);
+    ASSERT_EQ(metadata.geometry_sensitivity_provenance.size(), 1u);
+    EXPECT_TRUE(metadata.geometry_sensitivity_provenance[0].ad_compatible);
+    EXPECT_EQ(metadata.geometry_sensitivity_provenance[0].sensitivity_sample_count, 4u);
+}
+
 TEST(CouplingContractValidation, ValidatesTemporalRequirementsAndExchangeShape)
 {
     auto declaration = minimalDeclaration();
