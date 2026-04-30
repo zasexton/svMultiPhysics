@@ -1321,9 +1321,9 @@ channels instead of endpoint mechanics.
 
 ### Concrete Changes
 
-- [ ] Add a small `PartitionedCouplingBuilder` that creates
+- [x] Add a small `PartitionedCouplingBuilder` that creates
       `CouplingExchangeDeclaration` records.
-- [ ] Support:
+- [x] Support:
 
 ```cpp
 exchange(name, producer_field, consumer_field)
@@ -1334,7 +1334,7 @@ exchange(name, producer_field, consumer_field)
     .consumerTemporal(slot);
 ```
 
-- [ ] Support non-field endpoints:
+- [x] Support non-field endpoints:
 
 ```cpp
 exchange(name, producer_endpoint, consumer_endpoint)
@@ -1370,7 +1370,7 @@ exchange(name, producer_endpoint, consumer_endpoint)
       existing endpoint records.
 - [ ] N-way partitioned exchange groups validate through the existing plan
       generator.
-- [ ] Existing partitioned plan tests continue to validate resolved exchanges.
+- [x] Existing partitioned plan tests continue to validate resolved exchanges.
 - [ ] New tests verify inferred value descriptors from scalar and vector fields.
 
 ## Phase 5: Add A Thin Definition-Backed Contract Adapter

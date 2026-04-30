@@ -9,6 +9,7 @@
 #include "Coupling/CouplingTemporalRequirements.h"
 #include "Coupling/CouplingTypes.h"
 #include "Coupling/MonolithicCouplingBuilder.h"
+#include "Coupling/PartitionedCouplingBuilder.h"
 #include "Coupling/PartitionedCouplingPlan.h"
 #include "Coupling/PartitionedCouplingPlanGenerator.h"
 #include "Coupling/SharedRegionRegistry.h"
