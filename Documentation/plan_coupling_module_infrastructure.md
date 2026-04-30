@@ -4750,7 +4750,7 @@ Implementation checklist:
   typed `forms::GeometryConfiguration` value and frame-transform
   configurations, typed logical interface region, revision, and
   quadrature-policy provenance.
-- [ ] Validate partitioned exchange declarations reference known participants,
+- [x] Validate partitioned exchange declarations reference known participants,
   endpoints when declared, endpoint temporal slots, regions, value descriptors,
   and transfer declarations.
 - [ ] Validate partitioned endpoint names as registry/provider-resolved keys for
@@ -4888,7 +4888,7 @@ Unit-test verification checklist:
 - [x] `test_CouplingGraph.cpp` aggregates effective-time-step requirements.
 - [x] `test_CouplingGraph.cpp` compares partitioned exchange declarations with a
   generated resolved partitioned plan.
-- [ ] `test_CouplingGraph.cpp` rejects partitioned declarations with invalid
+- [x] `test_CouplingGraph.cpp` rejects partitioned declarations with invalid
   endpoint temporal slots or invalid history/stage indices.
 - [ ] `test_CouplingGraph.cpp` rejects `Unspecified` transfers, validates
   explicit `Identity` compatibility, and verifies interface transfers carry

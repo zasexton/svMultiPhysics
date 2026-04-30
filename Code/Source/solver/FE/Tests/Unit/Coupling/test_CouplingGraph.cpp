@@ -2100,6 +2100,49 @@ TEST(CouplingGraph, RecordsResolvedPartitionedExchangeNodes)
               "left_out");
 }
 
+TEST(CouplingGraph, RejectsInvalidPartitionedExchangeDeclarations)
+{
+    const auto context = twoParticipantGraphContext();
+
+    {
+        auto declaration = partitionedGraphDeclaration();
+        declaration.partitioned_exchange_declarations[0]
+            .producer->participant_name = "missing";
+        const auto validation = buildGraph(context, declaration);
+        EXPECT_FALSE(validation.ok());
+        EXPECT_NE(formatDiagnostics(validation).find("missing from the context"),
+                  std::string::npos);
+    }
+    {
+        auto declaration = partitionedGraphDeclaration();
+        declaration.partitioned_exchange_declarations[0]
+            .producer->temporal = CouplingTemporalSlotDescriptor{
+                .slot = CouplingTemporalSlot::History,
+            };
+        const auto validation = buildGraph(context, declaration);
+        EXPECT_FALSE(validation.ok());
+        EXPECT_NE(formatDiagnostics(validation).find("history temporal slots"),
+                  std::string::npos);
+    }
+    {
+        auto declaration = partitionedGraphDeclaration();
+        declaration.partitioned_exchange_declarations[0].value.components = 0;
+        const auto validation = buildGraph(context, declaration);
+        EXPECT_FALSE(validation.ok());
+        EXPECT_NE(formatDiagnostics(validation).find("scalar coupling values"),
+                  std::string::npos);
+    }
+    {
+        auto declaration = partitionedGraphDeclaration();
+        declaration.partitioned_exchange_declarations[0].transfer.kind =
+            CouplingTransferKind::Unspecified;
+        const auto validation = buildGraph(context, declaration);
+        EXPECT_FALSE(validation.ok());
+        EXPECT_NE(formatDiagnostics(validation).find("explicit transfer"),
+                  std::string::npos);
+    }
+}
+
 TEST(CouplingGraph, RejectsGeneratedPartitionedPlanMissingDeclaredExchange)
 {
     const auto context = twoParticipantGraphContext();

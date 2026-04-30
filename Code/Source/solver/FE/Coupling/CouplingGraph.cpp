@@ -8,6 +8,7 @@
 #include "Coupling/CouplingGraph.h"
 
 #include "Auxiliary/AuxiliaryStateManager.h"
+#include "Coupling/PartitionedCouplingPlanGenerator.h"
 #include "Systems/FESystem.h"
 
 #include <algorithm>
@@ -2641,6 +2642,11 @@ CouplingValidationResult CouplingGraph::buildDeclarationGraph(
         std::span<const CouplingContractDeclaration>(declarations_.data(),
                                                      declarations_.size()),
         result);
+    PartitionedCouplingPlanGenerator partitioned_validator;
+    result.append(partitioned_validator.validate(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations_.data(),
+                                                     declarations_.size())));
     return result;
 }
 
