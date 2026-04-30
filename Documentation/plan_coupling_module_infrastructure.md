@@ -5179,7 +5179,7 @@ Implementation checklist:
   driver-owned transfer registry, including supported ranks, supported
   source/target temporal slots, component-layout preservation, general-tensor
   support, and transfer-registry revision keys.
-- [ ] Validate endpoint temporal slots for every producer and consumer endpoint,
+- [x] Validate endpoint temporal slots for every producer and consumer endpoint,
   including current, accepted, predicted, history, stage, and external data
   requirements, with logical 1-based history indices mapped to 0-based storage,
   `history_index` present only for History, `stage_index` present only for
@@ -5309,7 +5309,7 @@ Unit-test verification checklist:
   AuxiliaryInput, AuxiliaryOutput, ExternalBuffer, and Parameter endpoints, and
   DriverOwned GeneralTensor payload temporal semantics through external-buffer
   and driver-owned transfer-registry metadata.
-- [ ] `test_PartitionedCouplingPlan.cpp` verifies `Predicted` temporal slots
+- [x] `test_PartitionedCouplingPlan.cpp` verifies `Predicted` temporal slots
   resolve to explicit predicted backing kinds or a declared provider-defined
   backing and never reuse Current or Accepted backing metadata.
 - [x] `test_PartitionedCouplingPlan.cpp` rejects general tensors for FE interface
