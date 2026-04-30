@@ -1571,7 +1571,7 @@ enum class ThermalInterfaceFormulation {
       for Nitsche-style scalar diffusion when applicable.
 - [x] Define partitioned temperature and heat-flux channels through
       `PartitionedCouplingBuilder`.
-- [ ] Remove local validation that backend field and partitioned checks now
+- [x] Remove local validation that backend field and partitioned checks now
       cover.
 
 ### Completion Checklist

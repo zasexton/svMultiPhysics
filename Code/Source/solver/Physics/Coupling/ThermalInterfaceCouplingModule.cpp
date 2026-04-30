@@ -166,9 +166,6 @@ fec::CouplingValidationResult validateOptionShape(
         options.side_b_temperature_field.empty()) {
         result.addError("thermal interface coupling requires temperature field names");
     }
-    if (options.temperature_components <= 0 || options.heat_flux_components <= 0) {
-        result.addError("thermal interface coupling requires positive component counts");
-    }
     if (!(options.temperature_penalty > 0.0)) {
         result.addError("thermal interface temperature penalty must be positive");
     }
@@ -182,11 +179,6 @@ fec::CouplingValidationResult validateOptionShape(
         if (options.side_a_heat_flux_field.empty() ||
             options.side_b_heat_flux_field.empty()) {
             result.addError("thermal interface partitioned mode requires heat-flux field names");
-        }
-        if (options.temperature_transfer.kind == fec::CouplingTransferKind::Unspecified ||
-            options.heat_flux_transfer.kind == fec::CouplingTransferKind::Unspecified) {
-            result.addError(
-                "thermal interface partitioned mode requires explicit transfer declarations");
         }
     }
     return result;
