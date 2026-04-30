@@ -437,6 +437,41 @@ TEST(MonolithicCouplingBuilder, RegistersContractOwnedInterfaceAdditionalFields)
     EXPECT_TRUE(fixture.system.hasField("generic_instance.lambda"));
 }
 
+TEST(MonolithicCouplingBuilder, SkipsDisabledOptionalAdditionalFields)
+{
+    BuilderFixture fixture;
+    const MonolithicCouplingBuilder builder;
+
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Contract,
+        .namespace_name = "generic_instance",
+        .field_name = "lambda",
+        .requirement = CouplingRequirement::Optional,
+        .enabled = false,
+    });
+
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const auto validation = builder.validateDeclarations(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto resolved = builder.resolveAdditionalFields(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    EXPECT_TRUE(resolved.empty());
+
+    const auto registered = builder.registerAdditionalFields(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    EXPECT_TRUE(registered.empty());
+    EXPECT_FALSE(fixture.system.hasField("generic_instance.lambda"));
+}
+
 TEST(MonolithicCouplingBuilder, GenericContractInstallsAndFinalizesGraph)
 {
     BuilderFixture fixture;

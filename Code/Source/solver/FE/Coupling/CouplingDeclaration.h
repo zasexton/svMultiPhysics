@@ -142,6 +142,7 @@ struct CouplingAdditionalFieldDeclaration {
     std::optional<std::string> region_name;
     std::optional<std::string> shared_region_name;
     CouplingRequirement requirement{CouplingRequirement::Required};
+    bool enabled{true};
 };
 
 struct ResolvedCouplingAdditionalFieldDeclaration {

@@ -55,6 +55,38 @@ std::string additionalFieldKey(const CouplingAdditionalFieldDeclaration& field)
            field.shared_region_name.value_or("");
 }
 
+bool additionalFieldSelected(const CouplingAdditionalFieldDeclaration& field)
+{
+    return field.requirement == CouplingRequirement::Required || field.enabled;
+}
+
+bool variableReferencesAdditionalField(const CouplingAdditionalFieldDeclaration& field,
+                                       const CouplingVariableUse& variable)
+{
+    return variable.kind == CouplingVariableKind::Field &&
+           variable.participant_name == field.namespace_name &&
+           variable.name == field.field_name;
+}
+
+bool declarationReferencesAdditionalField(
+    const CouplingContractDeclaration& declaration,
+    const CouplingAdditionalFieldDeclaration& field)
+{
+    for (const auto& dependency : declaration.dependencies) {
+        if (variableReferencesAdditionalField(field, dependency.residual_row) ||
+            variableReferencesAdditionalField(field, dependency.dependency)) {
+            return true;
+        }
+    }
+    for (const auto& block : declaration.expected_blocks) {
+        if (variableReferencesAdditionalField(field, block.residual_row) ||
+            variableReferencesAdditionalField(field, block.dependency)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::string nonFieldDependencyKey(const CouplingNonFieldDependencyRequirement& dependency)
 {
     std::string key =
@@ -169,6 +201,21 @@ CouplingValidationResult validateContractDeclarationShape(
         }
         if (field.field_name.empty()) {
             result.addError("additional field declaration requires a field name");
+        }
+        if (!field.enabled && field.requirement == CouplingRequirement::Required) {
+            result.addError("required additional fields cannot be disabled");
+        }
+        if (!additionalFieldSelected(field)) {
+            if (declarationReferencesAdditionalField(declaration, field)) {
+                result.addError("disabled optional additional field is referenced by a dependency or expected block");
+            }
+            for (std::size_t j = i + 1u; j < declaration.additional_fields.size(); ++j) {
+                addDuplicateIfRepeated(result,
+                                       additionalFieldKey(field),
+                                       additionalFieldKey(declaration.additional_fields[j]),
+                                       "duplicate additional field declaration");
+            }
+            continue;
         }
         if (field.space == nullptr) {
             result.addError("additional field declaration requires a function space");

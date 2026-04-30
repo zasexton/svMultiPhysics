@@ -36,6 +36,11 @@ std::string additionalFieldSystemName(const CouplingAdditionalFieldDeclaration& 
     return field.namespace_name + "." + field.field_name;
 }
 
+bool additionalFieldSelected(const CouplingAdditionalFieldDeclaration& field)
+{
+    return field.requirement == CouplingRequirement::Required || field.enabled;
+}
+
 AdditionalFieldTarget explicitAdditionalFieldTarget(
     const CouplingContext& context,
     const CouplingAdditionalFieldDeclaration& field)
@@ -182,6 +187,9 @@ MonolithicCouplingBuilder::resolveAdditionalFields(
     std::vector<ResolvedCouplingAdditionalFieldDeclaration> resolved;
     for (const auto& declaration : declarations) {
         for (const auto& field : declaration.additional_fields) {
+            if (!additionalFieldSelected(field)) {
+                continue;
+            }
             const auto target = sharedRegionAdditionalFieldTarget(context, field);
             resolved.push_back(ResolvedCouplingAdditionalFieldDeclaration{
                 .declaration = field,

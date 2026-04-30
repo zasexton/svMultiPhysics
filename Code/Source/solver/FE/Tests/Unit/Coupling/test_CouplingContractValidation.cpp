@@ -165,6 +165,53 @@ TEST(CouplingContractValidation, ValidatesAdditionalFieldSpaceAndComponents)
     EXPECT_TRUE(validateContractDeclarationShape(declaration).ok());
 }
 
+TEST(CouplingContractValidation, ValidatesOptionalAdditionalFieldSelection)
+{
+    auto declaration = minimalDeclaration();
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Contract,
+        .namespace_name = "generic_instance",
+        .field_name = "optional_lambda",
+        .requirement = CouplingRequirement::Optional,
+        .enabled = false,
+    });
+    EXPECT_TRUE(validateContractDeclarationShape(declaration).ok());
+
+    declaration.additional_fields[0].enabled = true;
+    const auto selected_validation = validateContractDeclarationShape(declaration);
+    EXPECT_FALSE(selected_validation.ok());
+    EXPECT_NE(formatDiagnostics(selected_validation).find("function space"),
+              std::string::npos);
+
+    declaration.additional_fields[0].space = scalarSpace();
+    EXPECT_TRUE(validateContractDeclarationShape(declaration).ok());
+
+    declaration.additional_fields[0].requirement = CouplingRequirement::Required;
+    declaration.additional_fields[0].enabled = false;
+    const auto required_disabled = validateContractDeclarationShape(declaration);
+    EXPECT_FALSE(required_disabled.ok());
+    EXPECT_NE(formatDiagnostics(required_disabled).find("cannot be disabled"),
+              std::string::npos);
+
+    declaration.additional_fields[0].requirement = CouplingRequirement::Optional;
+    declaration.dependencies.push_back(CouplingResidualDependency{
+        .residual_row = {
+            .kind = CouplingVariableKind::Field,
+            .participant_name = "generic_instance",
+            .name = "optional_lambda",
+        },
+        .dependency = {
+            .kind = CouplingVariableKind::Field,
+            .participant_name = "left",
+            .name = "primary",
+        },
+    });
+    const auto referenced_disabled = validateContractDeclarationShape(declaration);
+    EXPECT_FALSE(referenced_disabled.ok());
+    EXPECT_NE(formatDiagnostics(referenced_disabled).find("disabled optional additional field"),
+              std::string::npos);
+}
+
 TEST(CouplingContractValidation, FormAnalysisMetadataStoresDiagnosticProvenance)
 {
     CouplingFormAnalysisMetadata metadata;

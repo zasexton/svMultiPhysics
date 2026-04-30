@@ -4209,7 +4209,7 @@ Implementation checklist:
 - [x] Support required and optional participant, field, participant-local region,
   and shared-region declarations consistently across validation, diagnostics,
   and graph construction.
-- [ ] Define optional additional-field semantics separately from optional
+- [x] Define optional additional-field semantics separately from optional
   participant/field/region declarations: disabled fields are omitted, optional
   present declarations may be skipped only when no dependency or expected block
   relies on them, and selected optional fields use the same compatibility checks
