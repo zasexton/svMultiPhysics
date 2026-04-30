@@ -57,6 +57,22 @@ CouplingValidationResult SharedRegionRegistry::validate() const
                 result.addError("duplicate shared region name");
             }
         }
+        for (const auto& participant : record.required_participant_names) {
+            const auto found = std::any_of(
+                record.participant_regions.begin(),
+                record.participant_regions.end(),
+                [&participant](const CouplingRegionRef& region) {
+                    return region.participant_name == participant;
+                });
+            if (!found) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = participant,
+                    .region_name = record.name,
+                    .message = "shared region is missing required participant mapping",
+                });
+            }
+        }
         for (const auto& region : record.participant_regions) {
             if (!region.valid()) {
                 result.addError("shared region contains an invalid participant region");

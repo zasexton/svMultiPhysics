@@ -54,6 +54,48 @@ TEST(SharedRegionRegistry, RegistersAndFindsParticipantRegions)
     EXPECT_EQ(registry.findParticipantRegion("interface", "right")->marker, 3);
 }
 
+TEST(SharedRegionRegistry, RegistersAndFindsNParticipantRegions)
+{
+    SharedRegionRegistry registry;
+    registry.add(SharedRegionRef{
+        .name = "triple_interface",
+        .required_region_kind = CouplingRegionKind::Boundary,
+        .required_participant_names = {"left", "middle", "right"},
+        .participant_regions = {
+            registryRegion("left", "surface", CouplingRegionKind::Boundary, 3),
+            registryRegion("middle", "surface", CouplingRegionKind::Boundary, 4),
+            registryRegion("right", "surface", CouplingRegionKind::Boundary, 5),
+        },
+    });
+
+    EXPECT_TRUE(registry.validate().ok()) << formatDiagnostics(registry.validate());
+    ASSERT_NE(registry.find("triple_interface"), nullptr);
+    EXPECT_EQ(registry.find("triple_interface")->participant_regions.size(), 3u);
+    ASSERT_NE(registry.findParticipantRegion("triple_interface", "middle"), nullptr);
+    EXPECT_EQ(registry.findParticipantRegion("triple_interface", "middle")->marker, 4);
+}
+
+TEST(SharedRegionRegistry, RejectsMissingRequiredParticipantMappings)
+{
+    SharedRegionRegistry registry;
+    registry.add(SharedRegionRef{
+        .name = "interface",
+        .required_region_kind = CouplingRegionKind::Boundary,
+        .required_participant_names = {"left", "right"},
+        .participant_regions = {
+            registryRegion("left", "surface", CouplingRegionKind::Boundary, 3),
+        },
+    });
+
+    const auto validation = registry.validate();
+    EXPECT_FALSE(validation.ok());
+    const auto diagnostics = formatDiagnostics(validation);
+    EXPECT_NE(diagnostics.find("shared region is missing required participant mapping"),
+              std::string::npos);
+    EXPECT_NE(diagnostics.find("participant='right'"), std::string::npos);
+    EXPECT_NE(diagnostics.find("region='interface'"), std::string::npos);
+}
+
 TEST(SharedRegionRegistry, RejectsDuplicateSharedRegionNames)
 {
     SharedRegionRegistry registry;

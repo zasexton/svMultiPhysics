@@ -4032,9 +4032,9 @@ Unit-test verification checklist:
   transfers with validated extents and packing metadata.
 - [x] `test_SharedRegionRegistry.cpp` covers two-participant shared-region
   registration and lookup.
-- [ ] `test_SharedRegionRegistry.cpp` covers N-participant shared-region
+- [x] `test_SharedRegionRegistry.cpp` covers N-participant shared-region
   registration and lookup.
-- [ ] `test_SharedRegionRegistry.cpp` rejects missing required participant
+- [x] `test_SharedRegionRegistry.cpp` rejects missing required participant
   region mappings.
 - [x] `test_SharedRegionRegistry.cpp` rejects inconsistent duplicate
   shared-region declarations.

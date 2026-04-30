@@ -82,6 +82,7 @@ struct CouplingRegionRef {
 struct SharedRegionRef {
     std::string name;
     std::optional<CouplingRegionKind> required_region_kind;
+    std::vector<std::string> required_participant_names;
     std::vector<CouplingRegionRef> participant_regions;
 };
 
