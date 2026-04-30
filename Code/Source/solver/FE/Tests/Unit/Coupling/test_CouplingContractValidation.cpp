@@ -370,6 +370,66 @@ TEST(CouplingContractValidation, ResolvesInterfaceAdditionalFieldMarkersFromCont
     EXPECT_EQ(resolved[1].field_id, svmp::FE::INVALID_FIELD_ID);
 }
 
+TEST(CouplingContractValidation, ResolvesAdditionalFieldNamespacesAndTargets)
+{
+    const auto* left_system = systemToken(1);
+    const auto* right_system = systemToken(2);
+    CouplingContextBuilder context_builder;
+    context_builder
+        .addParticipant({
+            .participant_name = "left",
+            .system_name = "left_system",
+            .system = left_system,
+        })
+        .addParticipant({
+            .participant_name = "right",
+            .system_name = "right_system",
+            .system = right_system,
+        });
+    const auto context = context_builder.build();
+
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Participant,
+        .namespace_name = "left",
+        .field_name = "lambda",
+        .space = scalarSpace(),
+        .components = 1,
+    });
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Contract,
+        .namespace_name = "generic_instance",
+        .system_participant_name = "right",
+        .field_name = "lambda",
+        .space = scalarSpace(),
+        .components = 1,
+    });
+    ASSERT_TRUE(validateContractDeclarationShape(declaration).ok());
+
+    const MonolithicCouplingBuilder builder;
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const auto resolved = builder.resolveAdditionalFields(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+
+    ASSERT_EQ(resolved.size(), 2u);
+    EXPECT_EQ(resolved[0].system_name, "left_system");
+    EXPECT_EQ(resolved[0].field_spec.name, "left.lambda");
+    EXPECT_EQ(resolved[1].system_name, "right_system");
+    EXPECT_EQ(resolved[1].field_spec.name, "generic_instance.lambda");
+
+    declaration.additional_fields[1].system_participant_name.clear();
+    const std::array<CouplingContractDeclaration, 1> missing_target{declaration};
+    EXPECT_THROW(static_cast<void>(builder.resolveAdditionalFields(
+                     context,
+                     std::span<const CouplingContractDeclaration>(missing_target))),
+                 svmp::FE::InvalidArgumentException);
+}
+
 TEST(CouplingContractValidation, HandlesOptionalAndRequiredContextDeclarations)
 {
     CouplingContractDeclaration declaration;

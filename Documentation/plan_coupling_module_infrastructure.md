@@ -4269,7 +4269,7 @@ Unit-test verification checklist:
 - [x] `test_CouplingContractValidation.cpp` verifies optional additional-field
   declarations are skipped with diagnostics when prerequisites are absent, but
   fail if a dependency or expected block still references the skipped field.
-- [ ] `test_CouplingContractValidation.cpp` verifies participant-scoped and
+- [x] `test_CouplingContractValidation.cpp` verifies participant-scoped and
   contract-owned additional fields have distinct namespaces and resolve to an
   explicit target `FESystem` before registration.
 - [ ] `test_CouplingContractValidation.cpp` verifies implicit-monolithic and
