@@ -2,6 +2,7 @@
 
 #include "Core/FEException.h"
 #include "Spaces/H1Space.h"
+#include "Systems/FESystem.h"
 
 #include <gtest/gtest.h>
 
@@ -230,6 +231,68 @@ TEST(CouplingFormBuilder, BuildsMeshAndGeometryTerminalsThroughFormsVocabulary)
     expect_type(builder.geometryTerminal(
                     CouplingGeometryTerminalQuantity::CellDomainId, scope),
                 forms::FormExprType::CellDomainId);
+}
+
+TEST(CouplingFormBuilder, AttachesTerminalProvenanceInResidualEncounterOrder)
+{
+    const auto context = makeBuilderContext();
+    const CouplingFormBuilder builder(context);
+    const CouplingGeometryTerminalScope scope{
+        .participant_name = "participant",
+    };
+
+    const auto previous = builder.previousSolution("participant", "primary", 2);
+    const auto mesh_velocity = builder.meshVelocity(scope);
+    const auto current_normal = builder.geometryTerminal(
+        CouplingGeometryTerminalQuantity::CurrentNormal, scope);
+    const auto test = builder.test("participant", "primary", "w");
+    const auto residual =
+        ((previous + forms::dot(mesh_velocity, current_normal)) * test).dx();
+
+    const auto provenance = builder.terminalProvenanceFor(residual);
+    ASSERT_EQ(provenance.size(), 3u);
+
+    EXPECT_EQ(provenance[0].kind,
+              CouplingFormTerminalProvenanceKind::PreviousSolution);
+    EXPECT_EQ(provenance[0].terminal_sequence, 0u);
+    ASSERT_TRUE(provenance[0].field.has_value());
+    EXPECT_EQ(provenance[0].field->participant_name, "participant");
+    EXPECT_EQ(provenance[0].field->field_name, "primary");
+    EXPECT_EQ(provenance[0].temporal_quantity,
+              CouplingTemporalQuantity::FieldHistoryValue);
+    EXPECT_EQ(provenance[0].history_index, 2);
+
+    EXPECT_EQ(provenance[1].kind,
+              CouplingFormTerminalProvenanceKind::MeshTemporal);
+    EXPECT_EQ(provenance[1].terminal_sequence, 1u);
+    EXPECT_EQ(provenance[1].temporal_quantity,
+              CouplingTemporalQuantity::MeshVelocity);
+    ASSERT_TRUE(provenance[1].scope.has_value());
+    ASSERT_TRUE(provenance[1].scope->participant_name.has_value());
+    EXPECT_EQ(*provenance[1].scope->participant_name, "participant");
+    ASSERT_TRUE(provenance[1].mesh_motion_role.has_value());
+    EXPECT_EQ(*provenance[1].mesh_motion_role,
+              systems::MeshMotionFieldRole::Velocity);
+
+    EXPECT_EQ(provenance[2].kind,
+              CouplingFormTerminalProvenanceKind::GeometryTerminal);
+    EXPECT_EQ(provenance[2].terminal_sequence, 2u);
+    EXPECT_EQ(provenance[2].geometry_quantity,
+              CouplingGeometryTerminalQuantity::CurrentNormal);
+    ASSERT_TRUE(provenance[2].scope.has_value());
+    ASSERT_TRUE(provenance[2].scope->participant_name.has_value());
+    EXPECT_EQ(*provenance[2].scope->participant_name, "participant");
+
+    CouplingFormContribution contribution;
+    contribution.residual = residual;
+    const auto attached =
+        builder.attachTerminalProvenance(std::move(contribution));
+    ASSERT_EQ(attached.terminal_provenance.size(), provenance.size());
+    EXPECT_EQ(attached.terminal_provenance[0].history_index, 2);
+    EXPECT_EQ(attached.terminal_provenance[1].temporal_quantity,
+              CouplingTemporalQuantity::MeshVelocity);
+    EXPECT_EQ(attached.terminal_provenance[2].geometry_quantity,
+              CouplingGeometryTerminalQuantity::CurrentNormal);
 }
 
 TEST(CouplingFormBuilder, RejectsInvalidTemporalRequestsAndUnknownFields)

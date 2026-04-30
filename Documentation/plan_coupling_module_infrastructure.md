@@ -4345,7 +4345,7 @@ Implementation checklist:
 - [x] Make `CouplingFormBuilder` expose mesh displacement, mesh temporal, and
   geometry-terminal helpers that delegate to the existing Forms vocabulary
   rather than introducing new FE/Coupling terminals.
-- [ ] Make `CouplingFormBuilder` record a coupling-owned terminal-provenance
+- [x] Make `CouplingFormBuilder` record a coupling-owned terminal-provenance
   side table for `previousSolution(...)`, mesh temporal, and geometry-terminal
   helper calls, and attach the matching provenance records to each
   `CouplingFormContribution` before resolution.

@@ -8,7 +8,11 @@
 #include "Coupling/CouplingFormBuilder.h"
 
 #include "Core/FEException.h"
+#include "Systems/FESystem.h"
 
+#include <functional>
+#include <iterator>
+#include <unordered_set>
 #include <utility>
 
 namespace svmp {
@@ -62,7 +66,16 @@ forms::FormExpr CouplingFormBuilder::previousSolution(std::string_view participa
     static_cast<void>(field(participant_name, field_name));
     FE_THROW_IF(steps_back <= 0, InvalidArgumentException,
                 "previous solution history index must be positive");
-    return forms::FormExpr::previousSolution(steps_back);
+    CouplingFormTerminalProvenanceDeclaration declaration;
+    declaration.kind = CouplingFormTerminalProvenanceKind::PreviousSolution;
+    declaration.field = CouplingFieldUse{
+        .participant_name = std::string(participant_name),
+        .field_name = std::string(field_name),
+    };
+    declaration.temporal_quantity = CouplingTemporalQuantity::FieldHistoryValue;
+    declaration.history_index = steps_back;
+    return recordTerminal(forms::FormExpr::previousSolution(steps_back),
+                          std::move(declaration));
 }
 
 forms::FormExpr CouplingFormBuilder::time() const
@@ -83,92 +96,173 @@ forms::FormExpr CouplingFormBuilder::effectiveTimeStep() const
 forms::FormExpr CouplingFormBuilder::meshDisplacement(
     const CouplingGeometryTerminalScope& scope) const
 {
-    static_cast<void>(scope);
-    return forms::meshDisplacement();
+    CouplingFormTerminalProvenanceDeclaration declaration;
+    declaration.kind = CouplingFormTerminalProvenanceKind::GeometryTerminal;
+    declaration.scope = scope;
+    declaration.geometry_quantity =
+        CouplingGeometryTerminalQuantity::MeshDisplacement;
+    declaration.mesh_motion_role = systems::MeshMotionFieldRole::Displacement;
+    return recordTerminal(forms::meshDisplacement(), std::move(declaration));
 }
 
 forms::FormExpr CouplingFormBuilder::meshVelocity(
     const CouplingGeometryTerminalScope& scope) const
 {
-    static_cast<void>(scope);
-    return forms::meshVelocity();
+    CouplingFormTerminalProvenanceDeclaration declaration;
+    declaration.kind = CouplingFormTerminalProvenanceKind::MeshTemporal;
+    declaration.scope = scope;
+    declaration.temporal_quantity = CouplingTemporalQuantity::MeshVelocity;
+    declaration.mesh_motion_role = systems::MeshMotionFieldRole::Velocity;
+    return recordTerminal(forms::meshVelocity(), std::move(declaration));
 }
 
 forms::FormExpr CouplingFormBuilder::meshAcceleration(
     const CouplingGeometryTerminalScope& scope) const
 {
-    static_cast<void>(scope);
-    return forms::meshAcceleration();
+    CouplingFormTerminalProvenanceDeclaration declaration;
+    declaration.kind = CouplingFormTerminalProvenanceKind::MeshTemporal;
+    declaration.scope = scope;
+    declaration.temporal_quantity = CouplingTemporalQuantity::MeshAcceleration;
+    declaration.mesh_motion_role = systems::MeshMotionFieldRole::Acceleration;
+    return recordTerminal(forms::meshAcceleration(), std::move(declaration));
 }
 
 forms::FormExpr CouplingFormBuilder::previousMeshVelocity(
     const CouplingGeometryTerminalScope& scope) const
 {
-    static_cast<void>(scope);
-    return forms::previousMeshVelocity();
+    CouplingFormTerminalProvenanceDeclaration declaration;
+    declaration.kind = CouplingFormTerminalProvenanceKind::MeshTemporal;
+    declaration.scope = scope;
+    declaration.temporal_quantity =
+        CouplingTemporalQuantity::PreviousMeshVelocity;
+    declaration.mesh_motion_role = systems::MeshMotionFieldRole::PreviousVelocity;
+    return recordTerminal(forms::previousMeshVelocity(), std::move(declaration));
 }
 
 forms::FormExpr CouplingFormBuilder::predictedMeshVelocity(
     const CouplingGeometryTerminalScope& scope) const
 {
-    static_cast<void>(scope);
-    return forms::predictedMeshVelocity();
+    CouplingFormTerminalProvenanceDeclaration declaration;
+    declaration.kind = CouplingFormTerminalProvenanceKind::MeshTemporal;
+    declaration.scope = scope;
+    declaration.temporal_quantity =
+        CouplingTemporalQuantity::PredictedMeshVelocity;
+    declaration.mesh_motion_role = systems::MeshMotionFieldRole::PredictedVelocity;
+    return recordTerminal(forms::predictedMeshVelocity(), std::move(declaration));
 }
 
 forms::FormExpr CouplingFormBuilder::geometryTerminal(
     CouplingGeometryTerminalQuantity quantity,
     const CouplingGeometryTerminalScope& scope) const
 {
+    CouplingFormTerminalProvenanceDeclaration declaration;
+    declaration.kind = CouplingFormTerminalProvenanceKind::GeometryTerminal;
+    declaration.scope = scope;
+    declaration.geometry_quantity = quantity;
+
     switch (quantity) {
     case CouplingGeometryTerminalQuantity::MeshDisplacement:
-        return meshDisplacement(scope);
+        declaration.mesh_motion_role = systems::MeshMotionFieldRole::Displacement;
+        return recordTerminal(forms::meshDisplacement(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::Coordinate:
-        return forms::x();
+        return recordTerminal(forms::x(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::ReferenceCoordinate:
-        return forms::X();
+        return recordTerminal(forms::X(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::CurrentCoordinate:
-        return forms::currentCoordinate();
+        return recordTerminal(forms::currentCoordinate(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::PreviousCoordinate:
-        return forms::previousCoordinate();
+        return recordTerminal(forms::previousCoordinate(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::ReferencePhysicalCoordinate:
-        return forms::referenceCoordinatePhysical();
+        return recordTerminal(forms::referenceCoordinatePhysical(),
+                              std::move(declaration));
     case CouplingGeometryTerminalQuantity::Jacobian:
-        return forms::J();
+        return recordTerminal(forms::J(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::JacobianInverse:
-        return forms::Jinv();
+        return recordTerminal(forms::Jinv(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::JacobianDeterminant:
-        return forms::detJ();
+        return recordTerminal(forms::detJ(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::CurrentJacobian:
-        return forms::currentJacobian();
+        return recordTerminal(forms::currentJacobian(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::ReferenceJacobian:
-        return forms::referenceJacobian();
+        return recordTerminal(forms::referenceJacobian(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::CurrentJacobianDeterminant:
-        return forms::currentJacobianDeterminant();
+        return recordTerminal(forms::currentJacobianDeterminant(),
+                              std::move(declaration));
     case CouplingGeometryTerminalQuantity::ReferenceJacobianDeterminant:
-        return forms::referenceJacobianDeterminant();
+        return recordTerminal(forms::referenceJacobianDeterminant(),
+                              std::move(declaration));
     case CouplingGeometryTerminalQuantity::Normal:
-        return forms::FormExpr::normal();
+        return recordTerminal(forms::FormExpr::normal(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::CurrentNormal:
-        return forms::currentNormal();
+        return recordTerminal(forms::currentNormal(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::ReferenceNormal:
-        return forms::referenceNormal();
+        return recordTerminal(forms::referenceNormal(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::CurrentMeasure:
-        return forms::currentMeasure();
+        return recordTerminal(forms::currentMeasure(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::ReferenceMeasure:
-        return forms::referenceMeasure();
+        return recordTerminal(forms::referenceMeasure(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::SurfaceJacobian:
-        return forms::surfaceJacobian();
+        return recordTerminal(forms::surfaceJacobian(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::CellDiameter:
-        return forms::h();
+        return recordTerminal(forms::h(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::CellVolume:
-        return forms::vol();
+        return recordTerminal(forms::vol(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::FacetArea:
-        return forms::area();
+        return recordTerminal(forms::area(), std::move(declaration));
     case CouplingGeometryTerminalQuantity::CellDomainId:
-        return forms::domainId();
+        return recordTerminal(forms::domainId(), std::move(declaration));
     }
     FE_THROW(InvalidArgumentException,
              "unsupported coupling geometry terminal quantity");
+}
+
+std::vector<CouplingFormTerminalProvenanceDeclaration>
+CouplingFormBuilder::terminalProvenanceFor(
+    const forms::FormExpr& residual) const
+{
+    std::vector<CouplingFormTerminalProvenanceDeclaration> matched;
+    if (!residual.isValid()) {
+        return matched;
+    }
+
+    std::unordered_set<const forms::FormExprNode*> visited;
+    const auto append_match = [&](const forms::FormExprNode* node) {
+        for (const auto& recorded : recorded_terminals_) {
+            const auto recorded_node = recorded.node.lock();
+            if (!recorded_node || recorded_node.get() != node) {
+                continue;
+            }
+            auto declaration = recorded.declaration;
+            declaration.terminal_sequence = matched.size();
+            matched.push_back(std::move(declaration));
+            break;
+        }
+    };
+
+    const std::function<void(const forms::FormExprNode*)> visit =
+        [&](const forms::FormExprNode* node) {
+            if (node == nullptr || !visited.insert(node).second) {
+                return;
+            }
+            append_match(node);
+            for (const auto* child : node->children()) {
+                visit(child);
+            }
+        };
+
+    visit(residual.node());
+    return matched;
+}
+
+CouplingFormContribution CouplingFormBuilder::attachTerminalProvenance(
+    CouplingFormContribution contribution) const
+{
+    auto matched = terminalProvenanceFor(contribution.residual);
+    contribution.terminal_provenance.insert(
+        contribution.terminal_provenance.end(),
+        std::make_move_iterator(matched.begin()),
+        std::make_move_iterator(matched.end()));
+    return contribution;
 }
 
 forms::FormExpr CouplingFormBuilder::integrate(const forms::FormExpr& integrand,
@@ -226,6 +320,19 @@ CouplingRegionRef CouplingFormBuilder::sharedRegion(std::string_view name,
 SharedRegionRef CouplingFormBuilder::sharedRegionGroup(std::string_view name) const
 {
     return context().sharedRegionGroup(name);
+}
+
+forms::FormExpr CouplingFormBuilder::recordTerminal(
+    forms::FormExpr expr,
+    CouplingFormTerminalProvenanceDeclaration declaration) const
+{
+    if (auto node = expr.nodeShared()) {
+        recorded_terminals_.push_back(RecordedTerminalProvenance{
+            .node = std::move(node),
+            .declaration = std::move(declaration),
+        });
+    }
+    return expr;
 }
 
 } // namespace coupling

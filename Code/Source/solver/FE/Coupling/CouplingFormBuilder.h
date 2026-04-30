@@ -14,12 +14,15 @@
  */
 
 #include "Coupling/CouplingContext.h"
+#include "Coupling/CouplingDeclaration.h"
 #include "Coupling/CouplingGeometryRequirements.h"
 #include "Forms/FormExpr.h"
 #include "Forms/Vocabulary.h"
 
+#include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -66,6 +69,12 @@ public:
         CouplingGeometryTerminalQuantity quantity,
         const CouplingGeometryTerminalScope& scope) const;
 
+    [[nodiscard]] std::vector<CouplingFormTerminalProvenanceDeclaration>
+    terminalProvenanceFor(const forms::FormExpr& residual) const;
+
+    [[nodiscard]] CouplingFormContribution
+    attachTerminalProvenance(CouplingFormContribution contribution) const;
+
     [[nodiscard]] forms::FormExpr integrate(const forms::FormExpr& integrand,
                                             const CouplingRegionRef& region) const;
     [[nodiscard]] forms::FormExpr integrate(const forms::FormExpr& integrand,
@@ -84,7 +93,17 @@ public:
     [[nodiscard]] SharedRegionRef sharedRegionGroup(std::string_view name) const;
 
 private:
+    struct RecordedTerminalProvenance {
+        std::weak_ptr<forms::FormExprNode> node;
+        CouplingFormTerminalProvenanceDeclaration declaration;
+    };
+
+    [[nodiscard]] forms::FormExpr recordTerminal(
+        forms::FormExpr expr,
+        CouplingFormTerminalProvenanceDeclaration declaration) const;
+
     const CouplingContext* context_{nullptr};
+    mutable std::vector<RecordedTerminalProvenance> recorded_terminals_;
 };
 
 } // namespace coupling
