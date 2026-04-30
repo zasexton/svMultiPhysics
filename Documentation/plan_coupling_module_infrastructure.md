@@ -4557,7 +4557,7 @@ Unit-test verification checklist:
   default or diagnostic-only consistent with top-level
   `systems::FormInstallOptions::ad_mode` and cannot override
   `CouplingFormInstallOptionsDeclaration::ad_mode`.
-- [ ] `test_CouplingFormBuilder.cpp` verifies the metadata bridge reports test
+- [x] `test_CouplingFormBuilder.cpp` verifies the metadata bridge reports test
   fields, state-field dependencies, geometry-sensitivity dependencies,
   installed geometry-sensitivity options, discrete-field uses, parameter,
   coefficient, boundary-functional, boundary-integral, auxiliary-state,

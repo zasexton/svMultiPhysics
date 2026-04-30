@@ -711,7 +711,7 @@ TEST(MonolithicCouplingBuilder, AdaptsNativeBridgeMetadataProvenance)
     native.origin = "bridge_test";
     native.system_name = "fluid_system";
     native.operator_tag = "equations";
-    native.installed_fields = {1, 9};
+    native.installed_fields = {1, 2, 3, 9};
     native.geometry_sensitivity.mode =
         svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns;
     native.geometry_sensitivity.mesh_motion_field = 9;
@@ -723,6 +723,20 @@ TEST(MonolithicCouplingBuilder, AdaptsNativeBridgeMetadataProvenance)
     state_terminal.owner_participant_name = "fluid";
     native.terminals.push_back(state_terminal);
 
+    analysis::FormTerminalMetadata test_terminal;
+    test_terminal.kind = analysis::FormTerminalKind::TestField;
+    test_terminal.field_id = 2;
+    test_terminal.owner_system_name = "fluid_system";
+    test_terminal.owner_participant_name = "fluid";
+    native.terminals.push_back(test_terminal);
+
+    analysis::FormTerminalMetadata discrete_terminal;
+    discrete_terminal.kind = analysis::FormTerminalKind::DiscreteField;
+    discrete_terminal.field_id = 3;
+    discrete_terminal.owner_system_name = "fluid_system";
+    discrete_terminal.owner_participant_name = "fluid";
+    native.terminals.push_back(discrete_terminal);
+
     analysis::FormTerminalMetadata parameter_terminal;
     parameter_terminal.kind = analysis::FormTerminalKind::ParameterSymbol;
     parameter_terminal.symbol_name = "penalty";
@@ -731,6 +745,72 @@ TEST(MonolithicCouplingBuilder, AdaptsNativeBridgeMetadataProvenance)
     parameter_terminal.owner_system_name = "fluid_system";
     parameter_terminal.owner_participant_name = "fluid";
     native.terminals.push_back(parameter_terminal);
+
+    analysis::FormTerminalMetadata coefficient_terminal;
+    coefficient_terminal.kind = analysis::FormTerminalKind::Coefficient;
+    coefficient_terminal.symbol_name = "wall_speed";
+    coefficient_terminal.value_type = FieldType::Vector;
+    coefficient_terminal.owner_system_name = "fluid_system";
+    coefficient_terminal.owner_participant_name = "fluid";
+    native.terminals.push_back(coefficient_terminal);
+
+    analysis::FormTerminalMetadata boundary_functional_terminal;
+    boundary_functional_terminal.kind =
+        analysis::FormTerminalKind::BoundaryFunctionalSymbol;
+    boundary_functional_terminal.symbol_name = "traction_balance";
+    boundary_functional_terminal.boundary_marker = 12;
+    boundary_functional_terminal.owner_system_name = "fluid_system";
+    boundary_functional_terminal.owner_participant_name = "fluid";
+    native.terminals.push_back(boundary_functional_terminal);
+
+    analysis::FormTerminalMetadata boundary_integral_terminal;
+    boundary_integral_terminal.kind =
+        analysis::FormTerminalKind::BoundaryIntegralRef;
+    boundary_integral_terminal.slot = 4;
+    boundary_integral_terminal.boundary_marker = 12;
+    boundary_integral_terminal.owner_system_name = "fluid_system";
+    boundary_integral_terminal.owner_participant_name = "fluid";
+    native.terminals.push_back(boundary_integral_terminal);
+
+    analysis::FormTerminalMetadata auxiliary_state_terminal;
+    auxiliary_state_terminal.kind =
+        analysis::FormTerminalKind::AuxiliaryStateRef;
+    auxiliary_state_terminal.slot = 5;
+    auxiliary_state_terminal.owner_system_name = "fluid_system";
+    auxiliary_state_terminal.owner_participant_name = "fluid";
+    native.terminals.push_back(auxiliary_state_terminal);
+
+    analysis::FormTerminalMetadata auxiliary_input_terminal;
+    auxiliary_input_terminal.kind =
+        analysis::FormTerminalKind::AuxiliaryInputSymbol;
+    auxiliary_input_terminal.symbol_name = "inlet_flow";
+    auxiliary_input_terminal.owner_system_name = "fluid_system";
+    auxiliary_input_terminal.owner_participant_name = "fluid";
+    native.terminals.push_back(auxiliary_input_terminal);
+
+    analysis::FormTerminalMetadata auxiliary_output_terminal;
+    auxiliary_output_terminal.kind =
+        analysis::FormTerminalKind::AuxiliaryOutputRef;
+    auxiliary_output_terminal.slot = 6;
+    auxiliary_output_terminal.owner_system_name = "fluid_system";
+    auxiliary_output_terminal.owner_participant_name = "fluid";
+    native.terminals.push_back(auxiliary_output_terminal);
+
+    analysis::FormTerminalMetadata material_old_terminal;
+    material_old_terminal.kind =
+        analysis::FormTerminalKind::MaterialStateOldRef;
+    material_old_terminal.state_offset_bytes = 8;
+    material_old_terminal.owner_system_name = "fluid_system";
+    material_old_terminal.owner_participant_name = "fluid";
+    native.terminals.push_back(material_old_terminal);
+
+    analysis::FormTerminalMetadata material_work_terminal;
+    material_work_terminal.kind =
+        analysis::FormTerminalKind::MaterialStateWorkRef;
+    material_work_terminal.state_offset_bytes = 16;
+    material_work_terminal.owner_system_name = "fluid_system";
+    material_work_terminal.owner_participant_name = "fluid";
+    native.terminals.push_back(material_work_terminal);
 
     native.installed_dependencies.push_back(
         analysis::FormInstalledDependencyMetadata{
@@ -758,15 +838,31 @@ TEST(MonolithicCouplingBuilder, AdaptsNativeBridgeMetadataProvenance)
     EXPECT_EQ(adapted.contribution_name, "bridge_native");
     EXPECT_EQ(adapted.origin, "bridge_test");
     EXPECT_EQ(adapted.system_name, "fluid_system");
-    ASSERT_EQ(adapted.field_uses.size(), 2u);
+    ASSERT_EQ(adapted.field_uses.size(), 4u);
     const auto state_field = std::find_if(
         adapted.field_uses.begin(),
         adapted.field_uses.end(),
         [](const CouplingFormFieldProvenance& field) {
             return field.field == 1;
-        });
+    });
     ASSERT_NE(state_field, adapted.field_uses.end());
     EXPECT_TRUE(state_field->appears_as_state_field);
+    const auto test_field = std::find_if(
+        adapted.field_uses.begin(),
+        adapted.field_uses.end(),
+        [](const CouplingFormFieldProvenance& field) {
+            return field.field == 2;
+        });
+    ASSERT_NE(test_field, adapted.field_uses.end());
+    EXPECT_TRUE(test_field->appears_as_test_field);
+    const auto discrete_field = std::find_if(
+        adapted.field_uses.begin(),
+        adapted.field_uses.end(),
+        [](const CouplingFormFieldProvenance& field) {
+            return field.field == 3;
+        });
+    ASSERT_NE(discrete_field, adapted.field_uses.end());
+    EXPECT_TRUE(discrete_field->appears_as_discrete_field);
     const auto geometry_field = std::find_if(
         adapted.field_uses.begin(),
         adapted.field_uses.end(),
@@ -776,11 +872,71 @@ TEST(MonolithicCouplingBuilder, AdaptsNativeBridgeMetadataProvenance)
     ASSERT_NE(geometry_field, adapted.field_uses.end());
     EXPECT_TRUE(geometry_field->appears_as_geometry_sensitivity);
 
-    ASSERT_EQ(adapted.non_field_dependencies.size(), 1u);
-    EXPECT_EQ(adapted.non_field_dependencies[0].kind,
-              CouplingFormNonFieldDependencyKind::Parameter);
-    EXPECT_EQ(adapted.non_field_dependencies[0].name, "penalty");
-    EXPECT_EQ(adapted.non_field_dependencies[0].marker, 12);
+    auto find_non_field =
+        [&](CouplingFormNonFieldDependencyKind kind) {
+            return std::find_if(
+                adapted.non_field_dependencies.begin(),
+                adapted.non_field_dependencies.end(),
+                [kind](const CouplingFormNonFieldDependencyProvenance& dep) {
+                    return dep.kind == kind;
+                });
+        };
+
+    ASSERT_EQ(adapted.non_field_dependencies.size(), 9u);
+    const auto parameter = find_non_field(
+        CouplingFormNonFieldDependencyKind::Parameter);
+    ASSERT_NE(parameter, adapted.non_field_dependencies.end());
+    EXPECT_EQ(parameter->name, "penalty");
+    EXPECT_EQ(parameter->marker, 12);
+    EXPECT_EQ(parameter->participant_name, "fluid");
+    EXPECT_EQ(parameter->system_name, "fluid_system");
+
+    const auto coefficient = find_non_field(
+        CouplingFormNonFieldDependencyKind::Coefficient);
+    ASSERT_NE(coefficient, adapted.non_field_dependencies.end());
+    EXPECT_EQ(coefficient->name, "wall_speed");
+    EXPECT_EQ(coefficient->value_type, "vector");
+
+    const auto boundary_functional = find_non_field(
+        CouplingFormNonFieldDependencyKind::BoundaryFunctional);
+    ASSERT_NE(boundary_functional, adapted.non_field_dependencies.end());
+    EXPECT_EQ(boundary_functional->name, "traction_balance");
+    EXPECT_EQ(boundary_functional->marker, 12);
+
+    const auto boundary_integral = find_non_field(
+        CouplingFormNonFieldDependencyKind::BoundaryIntegral);
+    ASSERT_NE(boundary_integral, adapted.non_field_dependencies.end());
+    ASSERT_TRUE(boundary_integral->slot.has_value());
+    EXPECT_EQ(*boundary_integral->slot, 4u);
+
+    const auto auxiliary_state = find_non_field(
+        CouplingFormNonFieldDependencyKind::AuxiliaryState);
+    ASSERT_NE(auxiliary_state, adapted.non_field_dependencies.end());
+    ASSERT_TRUE(auxiliary_state->slot.has_value());
+    EXPECT_EQ(*auxiliary_state->slot, 5u);
+
+    const auto auxiliary_input = find_non_field(
+        CouplingFormNonFieldDependencyKind::AuxiliaryInput);
+    ASSERT_NE(auxiliary_input, adapted.non_field_dependencies.end());
+    EXPECT_EQ(auxiliary_input->name, "inlet_flow");
+
+    const auto auxiliary_output = find_non_field(
+        CouplingFormNonFieldDependencyKind::AuxiliaryOutput);
+    ASSERT_NE(auxiliary_output, adapted.non_field_dependencies.end());
+    ASSERT_TRUE(auxiliary_output->slot.has_value());
+    EXPECT_EQ(*auxiliary_output->slot, 6u);
+
+    const auto material_old = find_non_field(
+        CouplingFormNonFieldDependencyKind::MaterialStateOld);
+    ASSERT_NE(material_old, adapted.non_field_dependencies.end());
+    ASSERT_TRUE(material_old->byte_offset.has_value());
+    EXPECT_EQ(*material_old->byte_offset, 8u);
+
+    const auto material_work = find_non_field(
+        CouplingFormNonFieldDependencyKind::MaterialStateWork);
+    ASSERT_NE(material_work, adapted.non_field_dependencies.end());
+    ASSERT_TRUE(material_work->byte_offset.has_value());
+    EXPECT_EQ(*material_work->byte_offset, 16u);
 
     ASSERT_EQ(adapted.geometry_sensitivity_provenance.size(), 1u);
     EXPECT_EQ(adapted.geometry_sensitivity_provenance[0].kind,
