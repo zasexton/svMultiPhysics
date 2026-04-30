@@ -5474,7 +5474,7 @@ Implementation checklist:
   coupling tests.
 - [x] Add build-system entries so all FE and physics coupling unit tests run in
   the normal solver unit-test workflow.
-- [ ] Document the final public extension points for adding a new coupling
+- [x] Document the final public extension points for adding a new coupling
   contract: declaration, validation, additional fields, monolithic Forms,
   expert monolithic hooks, partitioned plan, and tests.
 
