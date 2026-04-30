@@ -7,6 +7,7 @@
 #include "Forms/Vocabulary.h"
 #include "Mesh/Core/InterfaceMesh.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/ProductSpace.h"
 #include "Systems/FESystem.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
@@ -30,14 +31,17 @@ constexpr int kInterfaceMarker = 17;
 
 struct BuilderFixture {
     std::shared_ptr<spaces::H1Space> space;
+    std::shared_ptr<spaces::ProductSpace> vector_space;
     std::shared_ptr<forms::test::SingleTetraMeshAccess> mesh;
     systems::FESystem system;
     FieldId left_field{INVALID_FIELD_ID};
     FieldId right_field{INVALID_FIELD_ID};
+    FieldId mesh_motion_field{INVALID_FIELD_ID};
     CouplingContext context;
 
     BuilderFixture()
         : space(std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1))
+        , vector_space(std::make_shared<spaces::ProductSpace>(space, 3))
         , mesh(std::make_shared<forms::test::SingleTetraMeshAccess>())
         , system(mesh)
     {
@@ -50,6 +54,11 @@ struct BuilderFixture {
             .name = "right_primary",
             .space = space,
             .components = 1,
+        });
+        mesh_motion_field = system.addField(systems::FieldSpec{
+            .name = "left_mesh_displacement",
+            .space = vector_space,
+            .components = 3,
         });
 
         CouplingContextBuilder builder;
@@ -80,6 +89,15 @@ struct BuilderFixture {
             .field_id = right_field,
             .space = space,
             .components = 1,
+        });
+        builder.addField({
+            .participant_name = "left",
+            .system_name = "shared_system",
+            .system = &system,
+            .field_name = "mesh_displacement",
+            .field_id = mesh_motion_field,
+            .space = vector_space,
+            .components = 3,
         });
         context = builder.build();
     }
@@ -350,6 +368,10 @@ TEST(MonolithicCouplingBuilder, ResolvesDeclaredFormInstallOptions)
     contribution.contribution_name = "declared_options";
     contribution.origin = "MonolithicCouplingBuilderTest";
     contribution.field_uses = {{.participant_name = "right", .field_name = "primary"}};
+    contribution.extra_trial_field_uses = {{
+        .participant_name = "left",
+        .field_name = "mesh_displacement",
+    }};
     contribution.residual =
         (forms.state("right", "primary", "u") *
          forms.test("right", "primary", "w")).dx();
@@ -368,12 +390,15 @@ TEST(MonolithicCouplingBuilder, ResolvesDeclaredFormInstallOptions)
             .mode = svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns,
             .mesh_motion_field = CouplingFieldUse{
                 .participant_name = "left",
-                .field_name = "primary",
+                .field_name = "mesh_displacement",
             },
             .tangent_path =
                 svmp::FE::forms::GeometryTangentPath::SymbolicRequired,
             .use_symbolic_tangent = true,
         };
+    fixture.system.bindMeshMotionField(
+        systems::MeshMotionFieldRole::Displacement,
+        fixture.mesh_motion_field);
 
     const auto resolved = builder.resolveFormContribution(fixture.context, contribution);
     EXPECT_EQ(resolved.install_options.ad_mode,
@@ -388,10 +413,132 @@ TEST(MonolithicCouplingBuilder, ResolvesDeclaredFormInstallOptions)
               svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns);
     EXPECT_EQ(resolved.install_options.compiler_options.geometry_sensitivity
                   .mesh_motion_field,
-              fixture.left_field);
+              fixture.mesh_motion_field);
     EXPECT_EQ(resolved.install_options.compiler_options.geometry_tangent_path,
               svmp::FE::forms::GeometryTangentPath::SymbolicRequired);
     EXPECT_TRUE(resolved.install_options.compiler_options.use_symbolic_tangent);
+}
+
+TEST(MonolithicCouplingBuilder, RequiresMeshMotionSensitivityFieldUse)
+{
+    BuilderFixture fixture;
+    const CouplingFormBuilder forms(fixture.context);
+    const MonolithicCouplingBuilder builder;
+
+    CouplingFormContribution contribution;
+    contribution.contribution_name = "missing_mesh_motion_trial";
+    contribution.origin = "MonolithicCouplingBuilderTest";
+    contribution.field_uses = {{.participant_name = "right", .field_name = "primary"}};
+    contribution.residual =
+        (forms.state("right", "primary", "u") *
+         forms.test("right", "primary", "w")).dx();
+    contribution.install_options_declaration.geometry_sensitivity =
+        CouplingGeometrySensitivityDeclaration{
+            .mode = svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns,
+            .mesh_motion_field = CouplingFieldUse{
+                .participant_name = "left",
+                .field_name = "mesh_displacement",
+            },
+        };
+    fixture.system.bindMeshMotionField(
+        systems::MeshMotionFieldRole::Displacement,
+        fixture.mesh_motion_field);
+
+    EXPECT_THROW(static_cast<void>(
+                     builder.resolveFormContribution(fixture.context,
+                                                     contribution)),
+                 InvalidArgumentException);
+}
+
+TEST(MonolithicCouplingBuilder, RequiresMeshMotionSensitivityBinding)
+{
+    BuilderFixture fixture;
+    const CouplingFormBuilder forms(fixture.context);
+    const MonolithicCouplingBuilder builder;
+
+    CouplingFormContribution contribution;
+    contribution.contribution_name = "missing_mesh_motion_binding";
+    contribution.origin = "MonolithicCouplingBuilderTest";
+    contribution.field_uses = {{.participant_name = "right", .field_name = "primary"}};
+    contribution.extra_trial_field_uses = {{
+        .participant_name = "left",
+        .field_name = "mesh_displacement",
+    }};
+    contribution.residual =
+        (forms.state("right", "primary", "u") *
+         forms.test("right", "primary", "w")).dx();
+    contribution.install_options_declaration.geometry_sensitivity =
+        CouplingGeometrySensitivityDeclaration{
+            .mode = svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns,
+            .mesh_motion_field = CouplingFieldUse{
+                .participant_name = "left",
+                .field_name = "mesh_displacement",
+            },
+        };
+
+    EXPECT_THROW(static_cast<void>(
+                     builder.resolveFormContribution(fixture.context,
+                                                     contribution)),
+                 InvalidArgumentException);
+}
+
+TEST(MonolithicCouplingBuilder, InstallsMeshMotionGeometrySensitivityProvenance)
+{
+    BuilderFixture fixture;
+    const CouplingFormBuilder forms(fixture.context);
+    const MonolithicCouplingBuilder builder;
+
+    CouplingFormContribution contribution;
+    contribution.contribution_name = "mesh_motion_sensitivity";
+    contribution.origin = "MonolithicCouplingBuilderTest";
+    contribution.field_uses = {{.participant_name = "right", .field_name = "primary"}};
+    contribution.extra_trial_field_uses = {{
+        .participant_name = "left",
+        .field_name = "mesh_displacement",
+    }};
+    contribution.residual =
+        (forms.state("right", "primary", "u") *
+         forms.test("right", "primary", "w")).dx();
+    contribution.install_options_declaration.geometry_sensitivity =
+        CouplingGeometrySensitivityDeclaration{
+            .mode = svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns,
+            .mesh_motion_field = CouplingFieldUse{
+                .participant_name = "left",
+                .field_name = "mesh_displacement",
+            },
+        };
+    fixture.system.bindMeshMotionField(
+        systems::MeshMotionFieldRole::Displacement,
+        fixture.mesh_motion_field);
+
+    const auto resolved = builder.resolveFormContribution(fixture.context,
+                                                          contribution);
+    const auto metadata =
+        builder.installResolvedFormContribution(fixture.system, resolved);
+
+    EXPECT_EQ(metadata.geometry_sensitivity.mode,
+              svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns);
+    EXPECT_EQ(metadata.geometry_sensitivity.mesh_motion_field,
+              fixture.mesh_motion_field);
+    const auto field_it = std::find_if(
+        metadata.field_uses.begin(),
+        metadata.field_uses.end(),
+        [&](const CouplingFormFieldProvenance& field) {
+            return field.field == fixture.mesh_motion_field &&
+                   field.appears_as_geometry_sensitivity;
+        });
+    EXPECT_NE(field_it, metadata.field_uses.end());
+
+    const auto provenance_it = std::find_if(
+        metadata.geometry_sensitivity_provenance.begin(),
+        metadata.geometry_sensitivity_provenance.end(),
+        [&](const CouplingGeometrySensitivityProvenance& provenance) {
+            return provenance.kind ==
+                       CouplingGeometrySensitivityProvenanceKind::MeshMotionUnknowns &&
+                   provenance.mesh_motion_field == fixture.mesh_motion_field;
+        });
+    EXPECT_NE(provenance_it,
+              metadata.geometry_sensitivity_provenance.end());
 }
 
 TEST(MonolithicCouplingBuilder, RejectsRawFormInstallOptionOverrides)

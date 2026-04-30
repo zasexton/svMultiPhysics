@@ -327,6 +327,70 @@ systems::FormInstallOptions resolveFormInstallOptions(
     return options;
 }
 
+bool resolvedContributionDeclaresField(
+    const ResolvedCouplingFormContribution& contribution,
+    FieldId field);
+
+void validateMeshMotionGeometrySensitivity(
+    const systems::FESystem& system,
+    const ResolvedCouplingFormContribution& contribution)
+{
+    const auto& sensitivity =
+        contribution.install_options.compiler_options.geometry_sensitivity;
+    if (sensitivity.mode != forms::GeometrySensitivityMode::MeshMotionUnknowns) {
+        return;
+    }
+
+    const auto mesh_motion_field = sensitivity.mesh_motion_field;
+    FE_THROW_IF(mesh_motion_field == INVALID_FIELD_ID, InvalidArgumentException,
+                "mesh-motion geometry sensitivity requires a mesh-motion field");
+    FE_THROW_IF(!resolvedContributionDeclaresField(contribution,
+                                                   mesh_motion_field),
+                InvalidArgumentException,
+                "mesh-motion geometry sensitivity field must be declared as a coupling form field");
+
+    const auto bound =
+        system.meshMotionField(systems::MeshMotionFieldRole::Displacement);
+    FE_THROW_IF(!bound.has_value() || *bound != mesh_motion_field,
+                InvalidArgumentException,
+                "mesh-motion geometry sensitivity requires a matching displacement field binding");
+}
+
+void validateInstalledGeometrySensitivityMetadata(
+    const ResolvedCouplingFormContribution& contribution,
+    const CouplingFormAnalysisMetadata& metadata)
+{
+    const auto& sensitivity =
+        contribution.install_options.compiler_options.geometry_sensitivity;
+    if (sensitivity.mode != forms::GeometrySensitivityMode::MeshMotionUnknowns) {
+        return;
+    }
+
+    const auto mesh_motion_field = sensitivity.mesh_motion_field;
+    const auto field_use = std::find_if(
+        metadata.field_uses.begin(),
+        metadata.field_uses.end(),
+        [mesh_motion_field](const CouplingFormFieldProvenance& field) {
+            return field.field == mesh_motion_field &&
+                   field.appears_as_geometry_sensitivity;
+        });
+    FE_THROW_IF(field_use == metadata.field_uses.end(),
+                InvalidArgumentException,
+                "installed metadata is missing mesh-motion geometry-sensitivity field provenance");
+
+    const auto provenance = std::find_if(
+        metadata.geometry_sensitivity_provenance.begin(),
+        metadata.geometry_sensitivity_provenance.end(),
+        [mesh_motion_field](const CouplingGeometrySensitivityProvenance& item) {
+            return item.kind ==
+                       CouplingGeometrySensitivityProvenanceKind::MeshMotionUnknowns &&
+                   item.mesh_motion_field == mesh_motion_field;
+        });
+    FE_THROW_IF(provenance == metadata.geometry_sensitivity_provenance.end(),
+                InvalidArgumentException,
+                "installed metadata is missing structured mesh-motion geometry-sensitivity provenance");
+}
+
 const char* fieldTypeName(FieldType type) noexcept
 {
     switch (type) {
@@ -944,6 +1008,10 @@ ResolvedCouplingFormContribution MonolithicCouplingBuilder::resolveFormContribut
         resolved.install_options.extra_trial_fields.push_back(field);
     }
 
+    FE_CHECK_NOT_NULL(owning_system,
+                      "monolithic coupling form owning system");
+    validateMeshMotionGeometrySensitivity(*owning_system, resolved);
+
     auto is_active_trial_field = [&](const CouplingFieldUse& use) {
         const auto field = context.field(use.participant_name, use.field_name).field_id;
         return std::find(resolved.fields.begin(), resolved.fields.end(), field) !=
@@ -993,6 +1061,7 @@ CouplingFormAnalysisMetadata MonolithicCouplingBuilder::installResolvedFormContr
 
     auto adapted = adaptFormAnalysisMetadata(installed.analysis);
     validateBridgeMetadataAgainstContribution(contribution, adapted);
+    validateInstalledGeometrySensitivityMetadata(contribution, adapted);
     adapted.declaration_terminal_provenance = contribution.terminal_provenance;
     adapted.geometry_terminals.insert(adapted.geometry_terminals.end(),
                                       contribution.geometry_terminals.begin(),

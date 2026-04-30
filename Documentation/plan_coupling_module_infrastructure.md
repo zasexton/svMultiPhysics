@@ -4458,7 +4458,7 @@ Implementation checklist:
   `StateField` or Systems-recognized geometry-sensitivity dependencies in
   Forms-authored residuals, or as supported non-field `analysis::VariableKey`
   dependencies, unless the contract intentionally uses the expert install hook.
-- [ ] Validate mesh-motion geometry-sensitivity requests by resolving
+- [x] Validate mesh-motion geometry-sensitivity requests by resolving
   `install_options.geometry_sensitivity.mesh_motion_field` from `field_uses` or
   `extra_trial_field_uses`, writing the resulting `FieldId` into resolved
   `systems::FormInstallOptions`, requiring an existing
