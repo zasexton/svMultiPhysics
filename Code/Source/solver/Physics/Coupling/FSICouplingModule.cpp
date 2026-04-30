@@ -142,7 +142,6 @@ void appendPartitionedExchangeDeclarations(
         return;
     }
 
-    const auto value = interfaceVectorValue(options);
     builder
         .exchange("solid_displacement",
                   fieldUse(options.solid_name,
@@ -152,7 +151,6 @@ void appendPartitionedExchangeDeclarations(
         .producerPort("solid_displacement")
         .consumerPort("fluid_displacement")
         .sharedInterface(options.interface_name)
-        .value(value)
         .transfer(options.solid_to_fluid_transfer)
         .producerTemporal(options.partitioned_temporal
                               .solid_displacement_source)
@@ -168,7 +166,6 @@ void appendPartitionedExchangeDeclarations(
         .producerPort("fluid_load")
         .consumerPort("solid_load")
         .sharedInterface(options.interface_name)
-        .value(value)
         .transfer(options.fluid_to_solid_transfer)
         .producerTemporal(options.partitioned_temporal.fluid_load_source)
         .consumerTemporal(options.partitioned_temporal.solid_load_target);

@@ -1346,7 +1346,7 @@ exchange(name, producer_endpoint, consumer_endpoint)
 ```
 
 - [x] Infer `CouplingValueDescriptor` from field requirements when possible.
-- [ ] Require explicit value descriptors only for mixed-block, packed tensor, or
+- [x] Require explicit value descriptors only for mixed-block, packed tensor, or
       driver-owned payloads.
 - [ ] Support exchanges involving field endpoints, region data, auxiliary
       state/input/output, parameters, boundary functionals, external buffers,

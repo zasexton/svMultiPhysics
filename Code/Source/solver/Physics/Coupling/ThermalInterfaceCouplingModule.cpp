@@ -151,7 +151,6 @@ void appendPartitionedExchangeDeclarations(
         .producerPort("side_a_temperature")
         .consumerPort("side_b_temperature")
         .sharedInterface(options.interface_name)
-        .value(scalarValue(options.temperature_components))
         .transfer(options.temperature_transfer);
 
     builder
@@ -163,7 +162,6 @@ void appendPartitionedExchangeDeclarations(
         .producerPort("side_b_heat_flux")
         .consumerPort("side_a_heat_flux")
         .sharedInterface(options.interface_name)
-        .value(scalarValue(options.heat_flux_components))
         .transfer(options.heat_flux_transfer);
 
     builder.group(options.contract_name + "_participants",
