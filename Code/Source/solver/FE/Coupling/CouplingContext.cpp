@@ -735,6 +735,18 @@ CouplingValidationResult CouplingContextBuilder::validate() const
                     .message = "duplicate coupling field mapping",
                 });
             }
+            if (field.participant_name == context_.fields_[j].participant_name &&
+                field.system == context_.fields_[j].system &&
+                field.field_id != INVALID_FIELD_ID &&
+                field.field_id == context_.fields_[j].field_id &&
+                field.field_name != context_.fields_[j].field_name) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = field.participant_name,
+                    .field_name = field.field_name,
+                    .message = "duplicate coupling field id mapping",
+                });
+            }
         }
     }
 

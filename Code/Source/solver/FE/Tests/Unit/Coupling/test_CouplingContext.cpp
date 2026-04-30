@@ -185,6 +185,21 @@ TEST(CouplingContext, RejectsDuplicateFieldMappings)
               std::string::npos);
 }
 
+TEST(CouplingContext, RejectsDuplicateFieldIdAliasesForParticipant)
+{
+    const auto* system = systemToken(1);
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(participant("left", "shared_system", system))
+        .addField(field("left", "shared_system", system, "primary", 0))
+        .addField(field("left", "shared_system", system, "alias", 0));
+
+    const auto validation = builder.validate();
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("duplicate coupling field id mapping"),
+              std::string::npos);
+}
+
 TEST(CouplingContext, RejectsFieldsWithoutOwningParticipant)
 {
     const auto* system = systemToken(1);
