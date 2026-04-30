@@ -4407,7 +4407,7 @@ Implementation checklist:
   auxiliary refs/symbols map to their corresponding Analysis variable kinds when
   graph identity is requested, and parameter/coefficient/material-state
   terminals remain provenance-only unless Analysis adds variable kinds for them.
-- [ ] Require that bridge to return native metadata that can be adapted to
+- [x] Require that bridge to return native metadata that can be adapted to
   installed field order, contribution name/origin/owning-system provenance,
   field-use provenance including geometry-sensitivity field-use summaries,
   installed geometry-sensitivity options including the mesh-motion field,

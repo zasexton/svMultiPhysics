@@ -591,6 +591,48 @@ void appendBridgeTerminalMetadata(
     appendGeometryTerminalMetadata(adapted, terminal);
 }
 
+void appendGeometrySensitivityMetadata(
+    CouplingFormAnalysisMetadata& adapted)
+{
+    if (adapted.geometry_sensitivity.mode !=
+            forms::GeometrySensitivityMode::MeshMotionUnknowns ||
+        adapted.geometry_sensitivity.mesh_motion_field == INVALID_FIELD_ID) {
+        return;
+    }
+
+    const auto mesh_motion_field =
+        adapted.geometry_sensitivity.mesh_motion_field;
+    auto field_it = std::find_if(
+        adapted.field_uses.begin(),
+        adapted.field_uses.end(),
+        [&](const CouplingFormFieldProvenance& field) {
+            return field.field == mesh_motion_field;
+        });
+    if (field_it == adapted.field_uses.end()) {
+        adapted.field_uses.push_back(
+            CouplingFormFieldProvenance{.field = mesh_motion_field});
+        field_it = std::prev(adapted.field_uses.end());
+    }
+    field_it->appears_as_geometry_sensitivity = true;
+
+    adapted.geometry_sensitivity_provenance.push_back(
+        CouplingGeometrySensitivityProvenance{
+            .kind =
+                CouplingGeometrySensitivityProvenanceKind::MeshMotionUnknowns,
+            .mesh_motion_field = mesh_motion_field,
+            .provenance_id = "forms.mesh_motion_unknowns",
+            .construction_policy = "form_install_options",
+            .target_kind = "mesh_motion",
+            .ad_compatible = true,
+            .location_sensitivity_available = true,
+            .jacobian_sensitivity_available = true,
+            .measure_sensitivity_available = true,
+            .normal_sensitivity_available = true,
+            .geometry_fields = {mesh_motion_field},
+            .visible_to_assembly_paths = {"forms"},
+        });
+}
+
 bool resolvedContributionDeclaresField(
     const ResolvedCouplingFormContribution& contribution,
     FieldId field)
@@ -988,6 +1030,7 @@ CouplingFormAnalysisMetadata MonolithicCouplingBuilder::adaptFormAnalysisMetadat
     for (const auto& terminal : metadata.terminals) {
         appendBridgeTerminalMetadata(adapted, terminal);
     }
+    appendGeometrySensitivityMetadata(adapted);
 
     adapted.installed_dependencies.reserve(metadata.installed_dependencies.size());
     for (const auto& dependency : metadata.installed_dependencies) {

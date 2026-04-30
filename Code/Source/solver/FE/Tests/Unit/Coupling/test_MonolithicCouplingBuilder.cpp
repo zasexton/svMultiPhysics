@@ -453,6 +453,103 @@ TEST(MonolithicCouplingBuilder, RejectsRawFormInstallOptionOverrides)
     expect_rejected(std::move(raw_extra_trial_field));
 }
 
+TEST(MonolithicCouplingBuilder, AdaptsNativeBridgeMetadataProvenance)
+{
+    analysis::FormContributionAnalysisMetadata native;
+    native.contribution_name = "bridge_native";
+    native.origin = "bridge_test";
+    native.system_name = "fluid_system";
+    native.operator_tag = "equations";
+    native.installed_fields = {1, 9};
+    native.geometry_sensitivity.mode =
+        svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns;
+    native.geometry_sensitivity.mesh_motion_field = 9;
+
+    analysis::FormTerminalMetadata state_terminal;
+    state_terminal.kind = analysis::FormTerminalKind::StateField;
+    state_terminal.field_id = 1;
+    state_terminal.owner_system_name = "fluid_system";
+    state_terminal.owner_participant_name = "fluid";
+    native.terminals.push_back(state_terminal);
+
+    analysis::FormTerminalMetadata parameter_terminal;
+    parameter_terminal.kind = analysis::FormTerminalKind::ParameterSymbol;
+    parameter_terminal.symbol_name = "penalty";
+    parameter_terminal.domain = analysis::DomainKind::Boundary;
+    parameter_terminal.boundary_marker = 12;
+    parameter_terminal.owner_system_name = "fluid_system";
+    parameter_terminal.owner_participant_name = "fluid";
+    native.terminals.push_back(parameter_terminal);
+
+    native.installed_dependencies.push_back(
+        analysis::FormInstalledDependencyMetadata{
+            .residual_row = analysis::VariableKey::field(1),
+            .dependency = analysis::VariableKey::named(
+                analysis::VariableKind::GlobalScalar, "lambda"),
+            .domain = analysis::DomainKind::Global,
+            .contributes_matrix_block = true,
+            .contributes_vector = true,
+            .provider = "analysis",
+        });
+    native.installed_blocks.push_back(analysis::FormInstalledBlockMetadata{
+        .residual_row = analysis::VariableKey::field(1),
+        .dependency = analysis::VariableKey::named(
+            analysis::VariableKind::GlobalScalar, "lambda"),
+        .domains = {analysis::DomainKind::Global},
+        .has_matrix = true,
+        .has_vector = true,
+        .provider = "analysis",
+    });
+
+    const auto adapted =
+        MonolithicCouplingBuilder::adaptFormAnalysisMetadata(native);
+
+    EXPECT_EQ(adapted.contribution_name, "bridge_native");
+    EXPECT_EQ(adapted.origin, "bridge_test");
+    EXPECT_EQ(adapted.system_name, "fluid_system");
+    ASSERT_EQ(adapted.field_uses.size(), 2u);
+    const auto state_field = std::find_if(
+        adapted.field_uses.begin(),
+        adapted.field_uses.end(),
+        [](const CouplingFormFieldProvenance& field) {
+            return field.field == 1;
+        });
+    ASSERT_NE(state_field, adapted.field_uses.end());
+    EXPECT_TRUE(state_field->appears_as_state_field);
+    const auto geometry_field = std::find_if(
+        adapted.field_uses.begin(),
+        adapted.field_uses.end(),
+        [](const CouplingFormFieldProvenance& field) {
+            return field.field == 9;
+        });
+    ASSERT_NE(geometry_field, adapted.field_uses.end());
+    EXPECT_TRUE(geometry_field->appears_as_geometry_sensitivity);
+
+    ASSERT_EQ(adapted.non_field_dependencies.size(), 1u);
+    EXPECT_EQ(adapted.non_field_dependencies[0].kind,
+              CouplingFormNonFieldDependencyKind::Parameter);
+    EXPECT_EQ(adapted.non_field_dependencies[0].name, "penalty");
+    EXPECT_EQ(adapted.non_field_dependencies[0].marker, 12);
+
+    ASSERT_EQ(adapted.geometry_sensitivity_provenance.size(), 1u);
+    EXPECT_EQ(adapted.geometry_sensitivity_provenance[0].kind,
+              CouplingGeometrySensitivityProvenanceKind::MeshMotionUnknowns);
+    EXPECT_EQ(adapted.geometry_sensitivity_provenance[0].mesh_motion_field, 9);
+    ASSERT_EQ(adapted.geometry_sensitivity_provenance[0].geometry_fields.size(),
+              1u);
+    EXPECT_EQ(adapted.geometry_sensitivity_provenance[0].geometry_fields[0], 9);
+
+    ASSERT_EQ(adapted.installed_dependencies.size(), 1u);
+    EXPECT_TRUE(adapted.installed_dependencies[0].contributes_matrix_block);
+    EXPECT_EQ(adapted.installed_dependencies[0].dependency,
+              analysis::VariableKey::named(analysis::VariableKind::GlobalScalar,
+                                           "lambda"));
+    ASSERT_EQ(adapted.installed_blocks.size(), 1u);
+    EXPECT_TRUE(adapted.installed_blocks[0].has_matrix);
+    EXPECT_EQ(adapted.installed_blocks[0].domains[0],
+              analysis::DomainKind::Global);
+}
+
 TEST(MonolithicCouplingBuilder, RejectsOverlappingPrimaryAndExtraTrialFields)
 {
     BuilderFixture fixture;
