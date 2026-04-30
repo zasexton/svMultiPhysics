@@ -531,7 +531,18 @@ TEST(AnalysisEvidenceContracts, StabilizationPresenceIsSeparateFromAdequacy)
     adequacy.consistency_order = 1;
     adequacy.boundary_treatment_metadata_present = true;
     adequacy.peclet_condition_satisfied = true;
+    adequacy.peclet_estimate_present = true;
+    adequacy.peclet_estimate = 3.0;
+    adequacy.peclet_regime_bounds_present = true;
+    adequacy.peclet_regime_lower_bound = 1.0;
+    adequacy.peclet_regime_upper_bound = 10.0;
+    adequacy.peclet_scope = "streamline cell Peclet regime";
     adequacy.cfl_condition_satisfied = true;
+    adequacy.cfl_estimate_present = true;
+    adequacy.cfl_estimate = 0.25;
+    adequacy.accepted_cfl_bound_present = true;
+    adequacy.accepted_cfl_bound = 0.5;
+    adequacy.cfl_scope = "explicit stabilized transport step";
     summaries.stabilization_adequacy.push_back(adequacy);
 
     ProblemAnalysisContext adequate_ctx;
@@ -568,6 +579,25 @@ TEST(AnalysisEvidenceContracts, StabilizationPresenceIsSeparateFromAdequacy)
     ASSERT_TRUE(invalid_claim->certification_class.has_value());
     EXPECT_EQ(*invalid_claim->certification_class,
               CertificationClass::NotCertified);
+
+    AnalysisSummarySet cfl_summaries;
+    StabilizationAdequacySummary cfl_excess = adequacy;
+    cfl_excess.stabilization_id = "supg-cfl-excess";
+    cfl_excess.block = scalarBlock("supg-cfl-excess");
+    cfl_excess.cfl_estimate = 0.75;
+    cfl_excess.accepted_cfl_bound = 0.5;
+    cfl_summaries.stabilization_adequacy.push_back(cfl_excess);
+    ProblemAnalysisContext cfl_ctx;
+    cfl_ctx.setAnalysisSummaries(std::move(cfl_summaries));
+    const auto cfl_report = analyze(std::move(cfl_ctx));
+    const auto* cfl_claim = firstFrom(
+        cfl_report, PropertyKind::Stabilization,
+        "StabilizationAnalyzer");
+    ASSERT_NE(cfl_claim, nullptr);
+    EXPECT_EQ(cfl_claim->status, PropertyStatus::Violated);
+    ASSERT_TRUE(cfl_claim->certification_class.has_value());
+    EXPECT_EQ(*cfl_claim->certification_class,
+              CertificationClass::Violated);
 }
 
 TEST(AnalysisEvidenceContracts, TemporalStabilityNeedsNormEvidence)

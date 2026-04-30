@@ -358,7 +358,7 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
                        source + " detected stabilization; request stabilization parameter and scaling metadata");
             addRequest(report.request_plan, context, AnalysisSummaryKind::StabilizationAdequacy,
                        claim.domain, claim.variables, i, claim,
-                       source + " detected stabilization; request parameter-formula, consistency, Peclet, and CFL adequacy evidence");
+                       source + " detected stabilization; request parameter-formula, consistency, quantitative Peclet-regime, and CFL-bound adequacy evidence");
             addRequest(report.request_plan, context, AnalysisSummaryKind::DiscreteMatrix,
                        claim.domain, claim.variables, i, claim,
                        source + " detected stabilization; request retained matrix diagnostics for consistency and conditioning");

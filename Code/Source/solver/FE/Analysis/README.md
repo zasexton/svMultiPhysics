@@ -339,7 +339,7 @@ consumed summaries, limitations, and reference anchors used by the design plan.
 | `KernelAnalyzer` | Nullspace hints, gradient-only structure, semidefinite traits, or retained kernel metadata | `Nullspace` | `ReducedMatrix`, constraint/nullspace evidence | Kernel family is unknown when metadata is absent or component extraction is unavailable | [BrennerScott2008] |
 | `MixedOperatorAnalyzer` | Off-diagonal constraint blocks and multiplier-like variables | `MixedSaddlePoint`, `Nullspace` | `InfSupEstimate`, `ReducedMatrix`, `DiscreteMatrix`, explicit nullspace metadata | Fallback detects constraint fields without fabricating an unverified stable pair or undeclared multiplier kernel | [BrezziFortin1991], [Bathe2001InfSup] |
 | `OperatorClassAnalyzer` | Symmetric/skew/positive/second-order contribution traits and coefficient metadata | `OperatorSymmetry`, `OperatorDefiniteness`, `CoefficientPositivity` | `DiscreteMatrix`, `ReducedMatrix`, `CoefficientProperties`, `MeshGeometryQuality`, `LocalStencil` | Coercivity constants and positivity remain unknown without explicit summaries | [BrennerScott2008] |
-| `StabilizationAnalyzer` | Stabilization roles or theorem-scoped adequacy metadata | `Stabilization` | `ParameterScale`, `DiscreteMatrix`, `StabilizationAdequacy` | Stabilization adequacy is not certified from presence alone; certification requires method scope, theorem, stability norm, positive parameter bounds, scaling law, consistency order, boundary metadata, Peclet, and CFL evidence | [BrooksHughes1982], [ABCM2002DG] |
+| `StabilizationAnalyzer` | Stabilization roles or theorem-scoped adequacy metadata | `Stabilization` | `ParameterScale`, `DiscreteMatrix`, `StabilizationAdequacy` | Stabilization adequacy is not certified from presence alone; certification requires method scope, theorem, stability norm, positive parameter bounds, scaling law, consistency order, boundary metadata, quantitative Peclet-regime evidence, and quantitative CFL-bound evidence | [BrooksHughes1982], [ABCM2002DG] |
 | `ConstraintRankAnalyzer` | Nullspace claims plus strong, affine, periodic, multiplier, penalty, or weak constraints | `UnderConstraint`, `OverConstraint`, `ConstraintRedundancy`, `InitialDataCompatibility` | `ReducedMatrix`, `InitialCompatibility` | Affine/MPC reductions are unknown unless transformed summaries are available | [BrennerScott2008] |
 | `CompatibilityAnalyzer` | Preserved nullspace or algebraic constraint requiring data compatibility | `CompatibilityCondition`, `InitialDataCompatibility` | `InitialCompatibility` | Initial data certification requires declared tolerance, finite residuals for checked scopes, and checked algebraic, boundary, or invariant-domain scope; empty summaries do not certify | [BrennerScott2008], [AgmonDouglisNirenberg1959] |
 | `TopologyScopeAnalyzer` | Nullspace/constraint evidence scoped over disconnected mesh regions | `TopologyScopedKernel` | `MeshGeometryQuality`, region-specific `ReducedMatrix` | Needs topology context for region-specific conclusions | [BrennerScott2008] |
@@ -858,6 +858,11 @@ Current examples:
 - transport-character numeric enrichment ignores non-finite or negative
   Peclet-like scales, CFL estimates, and nonnormality indicators rather than
   propagating invalid diagnostics into `OperatorTransportCharacter` claims
+- stabilization adequacy certification needs theorem-scoped parameter formula
+  and scaling evidence, consistency order, stability norm, boundary treatment,
+  positive ordered stabilization-parameter bounds, finite Peclet estimate within
+  a declared finite regime interval with scope, and finite CFL estimate no
+  larger than its accepted bound with scope
 - temporal stability needs stability-region or norm/nonnormal evidence with a
   theorem identifier, spectrum or numerical-range coverage, and CFL derivation
   metadata when the method is conditionally stable; nonnormal/pseudospectral

@@ -38,6 +38,56 @@ void emitAdequacyClaims(const ProblemAnalysisContext& context,
         const bool consistency_order_valid =
             summary.consistency_order_metadata_present &&
             summary.consistency_order >= 0;
+        const bool peclet_regime_valid =
+            summary.peclet_condition_satisfied &&
+            summary.peclet_estimate_present &&
+            summary.peclet_regime_bounds_present &&
+            numeric::finiteNonnegative(summary.peclet_estimate) &&
+            numeric::finiteNonnegative(summary.peclet_regime_lower_bound) &&
+            numeric::finite(summary.peclet_regime_upper_bound) &&
+            summary.peclet_regime_lower_bound <=
+                summary.peclet_regime_upper_bound &&
+            summary.peclet_estimate + Real{1.0e-14} >=
+                summary.peclet_regime_lower_bound &&
+            summary.peclet_estimate <=
+                summary.peclet_regime_upper_bound + Real{1.0e-14} &&
+            !summary.peclet_scope.empty();
+        const bool cfl_bound_valid =
+            summary.cfl_condition_satisfied &&
+            summary.cfl_estimate_present &&
+            summary.accepted_cfl_bound_present &&
+            numeric::finiteNonnegative(summary.cfl_estimate) &&
+            numeric::finitePositive(summary.accepted_cfl_bound) &&
+            summary.cfl_estimate <=
+                summary.accepted_cfl_bound + Real{1.0e-14} &&
+            !summary.cfl_scope.empty();
+        const bool invalid_numeric_evidence =
+            (summary.peclet_estimate_present &&
+             !numeric::finiteNonnegative(summary.peclet_estimate)) ||
+            (summary.peclet_regime_bounds_present &&
+             (!numeric::finiteNonnegative(summary.peclet_regime_lower_bound) ||
+              !numeric::finite(summary.peclet_regime_upper_bound) ||
+              summary.peclet_regime_lower_bound >
+                  summary.peclet_regime_upper_bound)) ||
+            (summary.peclet_estimate_present &&
+             summary.peclet_regime_bounds_present &&
+             numeric::finiteNonnegative(summary.peclet_estimate) &&
+             numeric::finiteNonnegative(summary.peclet_regime_lower_bound) &&
+             numeric::finite(summary.peclet_regime_upper_bound) &&
+             (summary.peclet_estimate + Real{1.0e-14} <
+                  summary.peclet_regime_lower_bound ||
+              summary.peclet_estimate >
+                  summary.peclet_regime_upper_bound + Real{1.0e-14})) ||
+            (summary.cfl_estimate_present &&
+             !numeric::finiteNonnegative(summary.cfl_estimate)) ||
+            (summary.accepted_cfl_bound_present &&
+             !numeric::finitePositive(summary.accepted_cfl_bound)) ||
+            (summary.cfl_estimate_present &&
+             summary.accepted_cfl_bound_present &&
+             numeric::finiteNonnegative(summary.cfl_estimate) &&
+             numeric::finitePositive(summary.accepted_cfl_bound) &&
+             summary.cfl_estimate >
+                 summary.accepted_cfl_bound + Real{1.0e-14});
         const bool metadata_complete =
             summary.parameter_formula_metadata_present &&
             summary.residual_consistency_evidence_present &&
@@ -49,8 +99,8 @@ void emitAdequacyClaims(const ProblemAnalysisContext& context,
             summary.scaling_law_metadata_present &&
             consistency_order_valid &&
             summary.boundary_treatment_metadata_present &&
-            summary.peclet_condition_satisfied &&
-            summary.cfl_condition_satisfied;
+            peclet_regime_valid &&
+            cfl_bound_valid;
 
         PropertyClaim claim;
         claim.kind = PropertyKind::Stabilization;
@@ -64,12 +114,12 @@ void emitAdequacyClaims(const ProblemAnalysisContext& context,
         claim.estimate_scope = summary.method_family;
         claim.claim_origin = "StabilizationAnalyzer";
 
-        if (summary.violation_count > 0u) {
+        if (summary.violation_count > 0u || invalid_numeric_evidence) {
             claim.status = PropertyStatus::Violated;
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Violated;
             claim.description =
-                "Stabilization adequacy summary reports violated parameter, consistency, or regime checks";
+                "Stabilization adequacy summary reports violated parameter, consistency, Peclet, CFL, or regime checks";
         } else if (metadata_complete) {
             claim.status = PropertyStatus::Preserved;
             claim.confidence = AnalysisConfidence::High;
@@ -81,7 +131,7 @@ void emitAdequacyClaims(const ProblemAnalysisContext& context,
             claim.confidence = AnalysisConfidence::Medium;
             claim.certification_class = CertificationClass::NotCertified;
             claim.description =
-                "Stabilization adequacy is unknown because theorem, parameter-scaling, consistency, norm, boundary, or regime metadata is incomplete";
+                "Stabilization adequacy is unknown because theorem, parameter-scaling, consistency, norm, quantitative Peclet/CFL, boundary, or regime metadata is incomplete";
         }
 
         claim.addEvidence("StabilizationAnalyzer",
@@ -112,8 +162,27 @@ void emitAdequacyClaims(const ProblemAnalysisContext& context,
             std::string(summary.boundary_treatment_metadata_present ? "true" : "false") +
             ", peclet_ok=" +
             std::string(summary.peclet_condition_satisfied ? "true" : "false") +
+            ", peclet_estimate_present=" +
+            std::string(summary.peclet_estimate_present ? "true" : "false") +
+            ", peclet_estimate=" +
+            std::to_string(summary.peclet_estimate) +
+            ", peclet_regime_bounds_present=" +
+            std::string(summary.peclet_regime_bounds_present ? "true" : "false") +
+            ", peclet_regime=[" +
+            std::to_string(summary.peclet_regime_lower_bound) + "," +
+            std::to_string(summary.peclet_regime_upper_bound) + "]" +
+            ", peclet_scope='" + summary.peclet_scope + "'" +
             ", cfl_ok=" +
-            std::string(summary.cfl_condition_satisfied ? "true" : "false"),
+            std::string(summary.cfl_condition_satisfied ? "true" : "false") +
+            ", cfl_estimate_present=" +
+            std::string(summary.cfl_estimate_present ? "true" : "false") +
+            ", cfl_estimate=" +
+            std::to_string(summary.cfl_estimate) +
+            ", accepted_cfl_bound_present=" +
+            std::string(summary.accepted_cfl_bound_present ? "true" : "false") +
+            ", accepted_cfl_bound=" +
+            std::to_string(summary.accepted_cfl_bound) +
+            ", cfl_scope='" + summary.cfl_scope + "'",
             claim.confidence);
         report.claims.push_back(std::move(claim));
     }
