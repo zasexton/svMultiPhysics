@@ -1151,6 +1151,43 @@ TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceTransferNonInterfaceRegio
               std::string::npos);
 }
 
+TEST(PartitionedCouplingPlanGenerator, RejectsUserDefinedInterfaceTransferRegions)
+{
+    auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::Scalar,
+            .components = 1,
+        },
+        CouplingInterfaceFramePolicy::None);
+    exchange.shared_region_name.reset();
+
+    auto builder = partitionedContextBuilder(1);
+    builder.addRegion(CouplingRegionRef{
+        .participant_name = "left",
+        .system_name = "left_system",
+        .system = partitionedSystemToken(1),
+        .region_name = "surface",
+        .kind = CouplingRegionKind::UserDefined,
+    });
+    builder.addRegion(CouplingRegionRef{
+        .participant_name = "right",
+        .system_name = "right_system",
+        .system = partitionedSystemToken(2),
+        .region_name = "surface",
+        .kind = CouplingRegionKind::UserDefined,
+    });
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        builder.build(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("must resolve to an interface face"),
+              std::string::npos);
+}
+
 TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceFramePayloadMismatch)
 {
     const auto exchange = interfaceExchange(

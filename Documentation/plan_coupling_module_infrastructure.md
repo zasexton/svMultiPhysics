@@ -4052,7 +4052,7 @@ Unit-test verification checklist:
   shared-region names reject conflicts between region owner and location metadata,
   inherit region owner shared-region scope when the location omits it, and reject
   shared-side terminals with no shared-region scope.
-- [ ] `test_CouplingContext.cpp` verifies `UserDefined` regions fail Forms,
+- [x] `test_CouplingContext.cpp` verifies `UserDefined` regions fail Forms,
   interface-transfer, and geometry-terminal lowering unless they resolve to a
   concrete FE integration kind or explicit provider-extension path.
 - [ ] `test_SharedRegionRegistry.cpp` verifies interface shared regions expose

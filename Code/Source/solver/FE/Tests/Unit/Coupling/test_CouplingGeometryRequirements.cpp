@@ -164,6 +164,26 @@ TEST(CouplingGeometryRequirements, RejectsUnsupportedQuantityAndDomain)
     EXPECT_NE(text.find("domain is not available"), std::string::npos);
 }
 
+TEST(CouplingGeometryRequirements, RejectsUserDefinedRegionWithoutConcreteDomain)
+{
+    auto requirement = boundaryNormalRequirement();
+    requirement.scope.location->region_kind = CouplingRegionKind::UserDefined;
+
+    CouplingGeometryTerminalAvailability availability;
+    availability.supported_quantities = {CouplingGeometryTerminalQuantity::CurrentNormal};
+    availability.supported_domains = {analysis::DomainKind::Boundary};
+
+    const std::array<CouplingGeometryTerminalRequirement, 1> requirements{requirement};
+    const auto validation = validateGeometryTerminalRequirements(
+        geometryContext(),
+        std::span<const CouplingGeometryTerminalRequirement>(requirements),
+        availability);
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("unsupported region kind"),
+              std::string::npos);
+}
+
 TEST(CouplingGeometryRequirements, RejectsMissingOwnerScope)
 {
     const std::array<CouplingGeometryTerminalRequirement, 1> requirements{
