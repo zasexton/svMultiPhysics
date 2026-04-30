@@ -5437,7 +5437,7 @@ Implementation checklist:
   three participants and two contracts.
 - [x] Add a minimal partitioned-plan fixture with a directed exchange cycle and
   group hints.
-- [ ] Add a temporal-policy and geometry-terminal fixture that supports first
+- [x] Add a temporal-policy and geometry-terminal fixture that supports first
   derivative, second derivative, time, time-step, previous-solution history, mesh
   temporal, mesh displacement, coordinate/Jacobian/Jacobian-inverse, normal,
   measure, surface-Jacobian, cell-metric, and cell-domain-id validation cases,
@@ -5500,14 +5500,14 @@ Unit-test verification checklist:
   FE/Auxiliary storage, explicit predicted backing kinds, no separate endpoint
   slots for `u_prev`/`u_prev2`, and rejects stale or wrong-system interface-map
   provenance.
-- [ ] The temporal-policy fixture verifies declared time derivative, time,
+- [x] The temporal-policy fixture verifies declared time derivative, time,
   time-step/effective-time-step, previous-solution history, and mesh temporal
   requirements succeed or fail according to the selected policy.
-- [ ] The geometry-terminal fixture verifies mesh displacement, coordinate,
+- [x] The geometry-terminal fixture verifies mesh displacement, coordinate,
   Jacobian, Jacobian-inverse, normal, measure, surface-Jacobian, cell-metric, and
   cell-domain-id requirements succeed or fail according to geometry transaction
   and Assembly metadata support.
-- [ ] The geometry-terminal fixture verifies boundary/interface terminal
+- [x] The geometry-terminal fixture verifies boundary/interface terminal
   validation uses declaration-side region kind, resolved `analysis::DomainKind`,
   marker/shared-region, owner-scope, side, typed `forms::GeometryConfiguration`
   value and frame-transform configurations, typed logical interface region,

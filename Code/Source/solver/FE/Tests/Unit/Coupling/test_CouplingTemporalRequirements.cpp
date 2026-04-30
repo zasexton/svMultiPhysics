@@ -250,6 +250,68 @@ TEST(CouplingTemporalRequirements, CouplingGraphValidatesAggregatedDeclarations)
     EXPECT_TRUE(graph.validateTemporalRequirements(sufficient).ok());
 }
 
+TEST(CouplingTemporalRequirements, TemporalPolicyFixtureCoversFieldGlobalAndMeshQuantities)
+{
+    const std::vector<CouplingTemporalRequirement> requirements{
+        fieldDerivative(1),
+        fieldDerivative(2),
+        fieldHistory(2),
+        CouplingTemporalRequirement{.quantity = CouplingTemporalQuantity::Time},
+        CouplingTemporalRequirement{.quantity = CouplingTemporalQuantity::TimeStep},
+        CouplingTemporalRequirement{
+            .quantity = CouplingTemporalQuantity::EffectiveTimeStep},
+        meshTemporalRequirement(CouplingTemporalQuantity::MeshVelocity,
+                                systems::MeshMotionFieldRole::Velocity,
+                                participantMeshScope("left")),
+        meshTemporalRequirement(CouplingTemporalQuantity::MeshAcceleration,
+                                systems::MeshMotionFieldRole::Acceleration,
+                                participantMeshScope("left")),
+        meshTemporalRequirement(CouplingTemporalQuantity::PreviousMeshVelocity,
+                                systems::MeshMotionFieldRole::PreviousVelocity,
+                                participantMeshScope("left")),
+        meshTemporalRequirement(CouplingTemporalQuantity::PredictedMeshVelocity,
+                                systems::MeshMotionFieldRole::PredictedVelocity,
+                                participantMeshScope("left")),
+    };
+
+    const auto summary = summarizeTemporalRequirements(
+        std::span<const CouplingTemporalRequirement>(requirements));
+    EXPECT_EQ(summary.max_derivative_order, 2);
+    EXPECT_EQ(summary.max_history_index, 2);
+    EXPECT_TRUE(summary.requires_time);
+    EXPECT_TRUE(summary.requires_time_step);
+    EXPECT_TRUE(summary.requires_effective_time_step);
+    EXPECT_EQ(summary.field_temporal_requirements.size(), 3u);
+    EXPECT_EQ(summary.mesh_temporal_requirements.size(), 4u);
+
+    CouplingTemporalAvailability sufficient;
+    sufficient.max_derivative_order = 2;
+    sufficient.history_depth = 2;
+    EXPECT_TRUE(validateTemporalRequirements(
+                    std::span<const CouplingTemporalRequirement>(requirements),
+                    sufficient)
+                    .ok());
+
+    CouplingTemporalAvailability insufficient;
+    insufficient.max_derivative_order = 1;
+    insufficient.history_depth = 1;
+    insufficient.provides_time = false;
+    insufficient.provides_time_step = false;
+    insufficient.provides_effective_time_step = false;
+
+    const auto validation = validateTemporalRequirements(
+        std::span<const CouplingTemporalRequirement>(requirements),
+        insufficient);
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("time symbol is unavailable"), std::string::npos);
+    EXPECT_NE(text.find("time-step symbol is unavailable"), std::string::npos);
+    EXPECT_NE(text.find("effective-time-step symbol is unavailable"),
+              std::string::npos);
+    EXPECT_NE(text.find("derivative requirement exceeds"), std::string::npos);
+    EXPECT_NE(text.find("history requirement exceeds"), std::string::npos);
+}
+
 TEST(CouplingTemporalRequirements, CouplingGraphRequiresInstalledTemporalSymbolsDeclared)
 {
     CouplingContractDeclaration declaration;
