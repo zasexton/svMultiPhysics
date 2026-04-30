@@ -1508,20 +1508,20 @@ families future modules are likely to need.
 ### Concrete Changes
 
 - [x] Add a scalar N-way conservation fixture.
-- [ ] Add a multiplier-enforced interface equality fixture.
-- [ ] Add a penalty or Nitsche scalar interface fixture using existing
+- [x] Add a multiplier-enforced interface equality fixture.
+- [x] Add a penalty or Nitsche scalar interface fixture using existing
       FE/Forms interface helpers.
-- [ ] Add a multi-PDE auxiliary-state fixture through non-field or global scalar
+- [x] Add a multi-PDE auxiliary-state fixture through non-field or global scalar
       variables.
-- [ ] Add a mixed-dimensional boundary-functional fixture.
-- [ ] Add a moving-interface geometry terminal fixture.
+- [x] Add a mixed-dimensional boundary-functional fixture.
+- [x] Add a moving-interface geometry terminal fixture.
 - [x] Add a partitioned fixed-point exchange fixture with relaxation metadata.
 
 ### Completion Checklist
 
-- [ ] Each fixture is expressible through the definition-backed path or has a
+- [x] Each fixture is expressible through the definition-backed path or has a
       documented expert-path reason.
-- [ ] Each monolithic fixture lowers through Forms where the coupling is a
+- [x] Each monolithic fixture lowers through Forms where the coupling is a
       residual.
 - [ ] Each partitioned fixture lowers to existing exchange declarations and
       plan-generator validation.
@@ -1657,14 +1657,14 @@ enum class ThermalInterfaceFormulation {
 - [ ] Test migrated thermal monolithic lowering.
 - [ ] Test migrated thermal partitioned exchanges.
 - [x] Test at least one N-way conservation coupling.
-- [ ] Test at least one multiplier coupling.
-- [ ] Test at least one multi-PDE auxiliary/global-scalar coupling.
+- [x] Test at least one multiplier coupling.
+- [x] Test at least one multi-PDE auxiliary/global-scalar coupling.
 - [ ] Test multi-PDE auxiliary coupling in both monolithic and partitioned
       strategies.
 - [ ] Test that a mismatched AuxiliaryState strategy inside one coupling
       contract is rejected unless an explicit expert strategy is declared.
 - [x] Test at least one mixed-dimensional coupling.
-- [ ] Test at least one moving-interface coupling.
+- [x] Test at least one moving-interface coupling.
 - [ ] Keep existing `test_fe_coupling` and `test_physics` coverage green.
 
 ## Phase 11: Documentation

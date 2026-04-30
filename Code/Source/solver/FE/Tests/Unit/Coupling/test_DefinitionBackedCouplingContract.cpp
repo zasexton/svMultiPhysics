@@ -173,6 +173,45 @@ CouplingRegionRelationRequirement mixedDimensionalRelationRequirement()
     };
 }
 
+CouplingRegionRelationRequirement sidePairedInterfaceRelationRequirement(
+    std::string relation_name,
+    std::string enforcement_strategy,
+    CouplingRelationLoweringKind lowering_kind,
+    CouplingMode mode)
+{
+    return CouplingRegionRelationRequirement{
+        .relation_name = std::move(relation_name),
+        .relation_kind = CouplingRegionRelationKind::SidePairedInterface,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "interface",
+                .shared_region_name = "interface",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "right",
+                .region_name = "interface",
+                .shared_region_name = "interface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = lowering_kind,
+                .enforcement_strategies = {enforcement_strategy},
+            },
+        },
+        .selected_lowering = CouplingRelationLoweringRequest{
+            .mode = mode,
+            .lowering_kind = lowering_kind,
+            .expert_fallback_enabled =
+                isExpertRelationLoweringKind(lowering_kind),
+            .enforcement_strategy = enforcement_strategy,
+        },
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .require_opposite_sides_for_side_pair = true,
+    };
+}
+
 class FixtureDefinitionContract final
     : public DefinitionBackedCouplingContract {
 public:
@@ -234,6 +273,256 @@ protected:
                           .field_name = "primary",
                       })
             .sharedInterface("interface")
+            .transfer(test::identityTransfer());
+    }
+};
+
+class InterfacePenaltyGeometryDefinitionContract final
+    : public DefinitionBackedCouplingContract {
+public:
+    [[nodiscard]] std::string name() const override
+    {
+        return "interface_penalty_geometry_fixture";
+    }
+
+protected:
+    void define(CouplingDefinitionBuilder& builder) const override
+    {
+        const auto relation_requirement = sidePairedInterfaceRelationRequirement(
+            "penalty_interface",
+            "penalty",
+            CouplingRelationLoweringKind::MonolithicForms,
+            CouplingMode::Monolithic);
+        builder.participant("left")
+            .participant("right")
+            .fieldRequirement(scalarFieldRequirement("left", "primary"))
+            .fieldRequirement(scalarFieldRequirement("right", "primary"))
+            .sharedInterface(CouplingSharedInterfaceRequirement{
+                .shared_region_name = "interface",
+                .participant_names = {"left", "right"},
+            })
+            .regionRelation(relation_requirement)
+            .monolithic([relation_requirement](const CouplingContext&,
+                                                const CouplingFormBuilder& forms) {
+                static_cast<void>(relation_requirement);
+                const auto gamma = forms.sharedInterface("interface");
+                const auto left = gamma.side("left");
+                const auto right = gamma.side("right");
+                const auto jump =
+                    left.state("primary", "u_left") -
+                    right.state("primary", "u_right");
+                const auto test = left.test("primary", "w_left");
+                const auto current_normal = left.geometryTerminal(
+                    CouplingGeometryTerminalQuantity::CurrentNormal);
+
+                CouplingFormContribution contribution;
+                contribution.contribution_name =
+                    "interface_penalty_geometry_fixture.penalty_interface";
+                contribution.origin = "InterfacePenaltyGeometryDefinitionContract";
+                contribution.operator_name = "equations";
+                contribution.field_uses = {CouplingFieldUse{
+                    .participant_name = "left",
+                    .field_name = "primary",
+                }};
+                contribution.extra_trial_field_uses = {CouplingFieldUse{
+                    .participant_name = "right",
+                    .field_name = "primary",
+                }};
+                contribution.residual = gamma.integral(
+                    jump * test + forms::dot(current_normal, current_normal) * test,
+                    "left");
+                contribution =
+                    forms.attachTerminalProvenance(std::move(contribution));
+                return std::vector<CouplingFormContribution>{contribution};
+            });
+    }
+};
+
+class MultiplierExpertDefinitionContract final
+    : public DefinitionBackedCouplingContract {
+public:
+    [[nodiscard]] std::string name() const override
+    {
+        return "multiplier_expert_fixture";
+    }
+
+protected:
+    void define(CouplingDefinitionBuilder& builder) const override
+    {
+        const auto space =
+            std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+        builder.participant("left")
+            .participant("right")
+            .fieldRequirement(scalarFieldRequirement("left", "primary"))
+            .fieldRequirement(scalarFieldRequirement("right", "primary"))
+            .sharedInterface(CouplingSharedInterfaceRequirement{
+                .shared_region_name = "interface",
+                .participant_names = {"left", "right"},
+            })
+            .additionalField(CouplingAdditionalFieldDeclaration{
+                .field_namespace = CouplingAdditionalFieldNamespace::Contract,
+                .namespace_name = name(),
+                .system_participant_name = "left",
+                .field_name = "lambda",
+                .space = space,
+                .components = 1,
+                .scope = CouplingAdditionalFieldScope::InterfaceFace,
+                .shared_region_name = "interface",
+            })
+            .regionRelation(sidePairedInterfaceRelationRequirement(
+                "multiplier_interface",
+                "multiplier",
+                CouplingRelationLoweringKind::MonolithicExpert,
+                CouplingMode::Monolithic));
+    }
+};
+
+class BoundaryFunctionalDefinitionContract final
+    : public DefinitionBackedCouplingContract {
+public:
+    [[nodiscard]] std::string name() const override
+    {
+        return "boundary_functional_fixture";
+    }
+
+protected:
+    void define(CouplingDefinitionBuilder& builder) const override
+    {
+        const auto relation_requirement = mixedDimensionalRelationRequirement();
+        builder.participant("body")
+            .fieldRequirement(scalarFieldRequirement("body", "primary"))
+            .nonFieldDependency(CouplingNonFieldDependencyRequirement{
+                .kind =
+                    CouplingNonFieldDependencyRequirementKind::BoundaryFunctional,
+                .participant_name = "body",
+                .name = "surface_flux",
+                .region = CouplingRegionEndpointDeclaration{
+                    .participant_name = "body",
+                    .region_name = "surface",
+                },
+                .required_region_kind = CouplingRegionKind::Boundary,
+                .require_analysis_variable_key = true,
+            })
+            .regionRelation(relation_requirement)
+            .monolithic([relation_requirement](const CouplingContext&,
+                                                const CouplingFormBuilder& forms) {
+                const auto relation = forms.regionRelation(relation_requirement);
+                const auto surface = relation.endpoint("body", "surface");
+
+                CouplingFormContribution contribution;
+                contribution.contribution_name =
+                    "boundary_functional_fixture.surface_balance";
+                contribution.origin = "BoundaryFunctionalDefinitionContract";
+                contribution.operator_name = "equations";
+                contribution.field_uses = {CouplingFieldUse{
+                    .participant_name = "body",
+                    .field_name = "primary",
+                }};
+                contribution.residual = surface.integral(
+                    surface.state("primary", "u_b") *
+                    surface.test("primary", "w_b"));
+                return std::vector<CouplingFormContribution>{contribution};
+            });
+    }
+};
+
+class AuxiliaryExchangeDefinitionContract final
+    : public DefinitionBackedCouplingContract {
+public:
+    [[nodiscard]] std::string name() const override
+    {
+        return "auxiliary_exchange_fixture";
+    }
+
+protected:
+    void define(CouplingDefinitionBuilder& builder) const override
+    {
+        builder.participant("left")
+            .participant("right")
+            .fieldRequirement(scalarFieldRequirement("left", "primary"))
+            .fieldRequirement(scalarFieldRequirement("right", "primary"))
+            .sharedInterface(CouplingSharedInterfaceRequirement{
+                .shared_region_name = "interface",
+                .participant_names = {"left", "right"},
+            })
+            .nonFieldDependency(CouplingNonFieldDependencyRequirement{
+                .kind =
+                    CouplingNonFieldDependencyRequirementKind::AuxiliaryInput,
+                .participant_name = "shared_auxiliary",
+                .name = "left_primary",
+                .require_analysis_variable_key = true,
+            })
+            .nonFieldDependency(CouplingNonFieldDependencyRequirement{
+                .kind =
+                    CouplingNonFieldDependencyRequirementKind::AuxiliaryOutput,
+                .participant_name = "shared_auxiliary",
+                .name = "interface_response",
+                .require_analysis_variable_key = true,
+            })
+            .regionRelation(CouplingRegionRelationRequirement{
+                .relation_name = "shared_auxiliary_relation",
+                .relation_kind = CouplingRegionRelationKind::AuxiliaryPDECoupling,
+                .endpoints = {
+                    CouplingRegionEndpointDeclaration{
+                        .participant_name = "left",
+                        .region_name = "interface",
+                        .shared_region_name = "interface",
+                    },
+                    CouplingRegionEndpointDeclaration{
+                        .participant_name = "right",
+                        .region_name = "interface",
+                        .shared_region_name = "interface",
+                    },
+                },
+                .lowering_capabilities = {
+                    CouplingRelationLoweringCapability{
+                        .lowering_kind =
+                            CouplingRelationLoweringKind::PartitionedExchange,
+                        .partitioned_solve_strategies = {
+                            CouplingPartitionedSolveStrategy::ExplicitLagged,
+                        },
+                    },
+                },
+                .selected_lowering = CouplingRelationLoweringRequest{
+                    .mode = CouplingMode::Partitioned,
+                    .lowering_kind =
+                        CouplingRelationLoweringKind::PartitionedExchange,
+                    .partitioned_solve_strategy =
+                        CouplingPartitionedSolveStrategy::ExplicitLagged,
+                },
+                .required_region_kind = CouplingRegionKind::InterfaceFace,
+                .require_distinct_participants = true,
+            });
+
+        builder.exchange(
+                   "left_state_to_auxiliary",
+                   CouplingEndpointRef{
+                       .kind = CouplingEndpointKind::Field,
+                       .participant_name = "left",
+                       .endpoint_name = "primary",
+                   },
+                   CouplingEndpointRef{
+                       .kind = CouplingEndpointKind::AuxiliaryInput,
+                       .participant_name = "shared_auxiliary",
+                       .endpoint_name = "left_primary",
+                   })
+            .sharedInterface("interface")
+            .value(scalarDescriptor())
+            .transfer(test::identityTransfer());
+        builder.exchange(
+                   "auxiliary_response_to_right",
+                   CouplingEndpointRef{
+                       .kind = CouplingEndpointKind::AuxiliaryOutput,
+                       .participant_name = "shared_auxiliary",
+                       .endpoint_name = "interface_response",
+                   },
+                   CouplingEndpointRef{
+                       .kind = CouplingEndpointKind::Field,
+                       .participant_name = "right",
+                       .endpoint_name = "primary",
+                   })
+            .sharedInterface("interface")
+            .value(scalarDescriptor())
             .transfer(test::identityTransfer());
     }
 };
@@ -539,6 +828,49 @@ TEST(DefinitionBackedCouplingContract, SupportsNWayFormsFixture)
     ASSERT_EQ(contributions.front().field_uses.size(), 3u);
 }
 
+TEST(DefinitionBackedCouplingContract, SupportsPenaltyGeometryFixture)
+{
+    const auto context = makeDefinitionContext();
+    const CouplingFormBuilder forms(context);
+    const InterfacePenaltyGeometryDefinitionContract contract;
+
+    EXPECT_NO_THROW(contract.validate(context));
+
+    const auto declaration = contract.declare();
+    ASSERT_EQ(declaration.region_relation_requirements.size(), 1u);
+    const auto& relation = declaration.region_relation_requirements.front();
+    ASSERT_TRUE(relation.selected_lowering.has_value());
+    EXPECT_EQ(relation.selected_lowering->enforcement_strategy, "penalty");
+
+    const auto contributions = contract.buildMonolithicForms(context, forms);
+    ASSERT_EQ(contributions.size(), 1u);
+    EXPECT_EQ(contributions.front().contribution_name,
+              "interface_penalty_geometry_fixture.penalty_interface");
+    EXPECT_TRUE(contributions.front().residual.isValid());
+    ASSERT_EQ(contributions.front().terminal_provenance.size(), 1u);
+    EXPECT_EQ(contributions.front().terminal_provenance.front().geometry_quantity,
+              CouplingGeometryTerminalQuantity::CurrentNormal);
+}
+
+TEST(DefinitionBackedCouplingContract, SupportsMultiplierExpertFixture)
+{
+    const auto context = makeDefinitionContext();
+    const MultiplierExpertDefinitionContract contract;
+
+    EXPECT_NO_THROW(contract.validate(context));
+
+    const auto declaration = contract.declare();
+    ASSERT_EQ(declaration.additional_fields.size(), 1u);
+    EXPECT_EQ(declaration.additional_fields.front().field_name, "lambda");
+    ASSERT_EQ(declaration.region_relation_requirements.size(), 1u);
+    const auto& relation = declaration.region_relation_requirements.front();
+    ASSERT_TRUE(relation.selected_lowering.has_value());
+    EXPECT_EQ(relation.selected_lowering->lowering_kind,
+              CouplingRelationLoweringKind::MonolithicExpert);
+    EXPECT_TRUE(relation.selected_lowering->expert_fallback_enabled);
+    EXPECT_FALSE(contract.supportsMonolithicLowering());
+}
+
 TEST(DefinitionBackedCouplingContract, SupportsMixedDimensionalFormsFixture)
 {
     const auto context = makeMixedDimensionalContext();
@@ -556,6 +888,29 @@ TEST(DefinitionBackedCouplingContract, SupportsMixedDimensionalFormsFixture)
     ASSERT_EQ(contributions.size(), 1u);
     EXPECT_EQ(contributions.front().contribution_name,
               "mixed_dimensional_definition_fixture.volume_surface_balance");
+    EXPECT_TRUE(contributions.front().residual.isValid());
+}
+
+TEST(DefinitionBackedCouplingContract, SupportsBoundaryFunctionalFixture)
+{
+    const auto context = makeMixedDimensionalContext();
+    const CouplingFormBuilder forms(context);
+    const BoundaryFunctionalDefinitionContract contract;
+
+    EXPECT_NO_THROW(contract.validate(context));
+
+    const auto declaration = contract.declare();
+    ASSERT_EQ(declaration.non_field_dependencies.size(), 1u);
+    EXPECT_EQ(declaration.non_field_dependencies.front().kind,
+              CouplingNonFieldDependencyRequirementKind::BoundaryFunctional);
+    ASSERT_TRUE(declaration.non_field_dependencies.front().region.has_value());
+    EXPECT_EQ(declaration.non_field_dependencies.front().region->region_name,
+              "surface");
+
+    const auto contributions = contract.buildMonolithicForms(context, forms);
+    ASSERT_EQ(contributions.size(), 1u);
+    EXPECT_EQ(contributions.front().contribution_name,
+              "boundary_functional_fixture.surface_balance");
     EXPECT_TRUE(contributions.front().residual.isValid());
 }
 
@@ -590,4 +945,30 @@ TEST(DefinitionBackedCouplingContract, SupportsPartitionedStrategyFixture)
     ASSERT_EQ(plan.exchanges.size(), 1u);
     EXPECT_EQ(plan.exchanges.front().strategy.solve_strategy,
               CouplingPartitionedSolveStrategy::StaggeredFixedPoint);
+}
+
+TEST(DefinitionBackedCouplingContract, SupportsAuxiliaryExchangeFixture)
+{
+    const AuxiliaryExchangeDefinitionContract contract;
+    const auto declaration = contract.declare();
+
+    EXPECT_TRUE(validateContractDeclarationShape(declaration).ok())
+        << formatDiagnostics(validateContractDeclarationShape(declaration));
+    ASSERT_EQ(declaration.region_relation_requirements.size(), 1u);
+    EXPECT_EQ(declaration.region_relation_requirements.front().relation_kind,
+              CouplingRegionRelationKind::AuxiliaryPDECoupling);
+    ASSERT_EQ(declaration.non_field_dependencies.size(), 2u);
+    EXPECT_EQ(declaration.non_field_dependencies[0].kind,
+              CouplingNonFieldDependencyRequirementKind::AuxiliaryInput);
+    EXPECT_EQ(declaration.non_field_dependencies[1].kind,
+              CouplingNonFieldDependencyRequirementKind::AuxiliaryOutput);
+
+    const auto exchanges = contract.buildPartitionedExchangeDeclarations(
+        CouplingContext{});
+    ASSERT_EQ(exchanges.size(), 2u);
+    ASSERT_TRUE(exchanges[0].consumer.has_value());
+    EXPECT_EQ(exchanges[0].consumer->kind, CouplingEndpointKind::AuxiliaryInput);
+    ASSERT_TRUE(exchanges[1].producer.has_value());
+    EXPECT_EQ(exchanges[1].producer->kind,
+              CouplingEndpointKind::AuxiliaryOutput);
 }
