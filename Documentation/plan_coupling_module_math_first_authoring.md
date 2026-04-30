@@ -1507,7 +1507,7 @@ families future modules are likely to need.
 
 ### Concrete Changes
 
-- [ ] Add a scalar N-way conservation fixture.
+- [x] Add a scalar N-way conservation fixture.
 - [ ] Add a multiplier-enforced interface equality fixture.
 - [ ] Add a penalty or Nitsche scalar interface fixture using existing
       FE/Forms interface helpers.
@@ -1515,7 +1515,7 @@ families future modules are likely to need.
       variables.
 - [ ] Add a mixed-dimensional boundary-functional fixture.
 - [ ] Add a moving-interface geometry terminal fixture.
-- [ ] Add a partitioned fixed-point exchange fixture with relaxation metadata.
+- [x] Add a partitioned fixed-point exchange fixture with relaxation metadata.
 
 ### Completion Checklist
 
@@ -1656,14 +1656,14 @@ enum class ThermalInterfaceFormulation {
 - [ ] Test migrated FSI partitioned exchanges match current logical channels.
 - [ ] Test migrated thermal monolithic lowering.
 - [ ] Test migrated thermal partitioned exchanges.
-- [ ] Test at least one N-way conservation coupling.
+- [x] Test at least one N-way conservation coupling.
 - [ ] Test at least one multiplier coupling.
 - [ ] Test at least one multi-PDE auxiliary/global-scalar coupling.
 - [ ] Test multi-PDE auxiliary coupling in both monolithic and partitioned
       strategies.
 - [ ] Test that a mismatched AuxiliaryState strategy inside one coupling
       contract is rejected unless an explicit expert strategy is declared.
-- [ ] Test at least one mixed-dimensional coupling.
+- [x] Test at least one mixed-dimensional coupling.
 - [ ] Test at least one moving-interface coupling.
 - [ ] Keep existing `test_fe_coupling` and `test_physics` coverage green.
 

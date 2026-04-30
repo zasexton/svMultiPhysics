@@ -1,13 +1,18 @@
 #include "Coupling/DefinitionBackedCouplingContract.h"
 
 #include "Coupling/CouplingFormBuilder.h"
+#include "Coupling/PartitionedCouplingPlanGenerator.h"
 #include "CouplingTestHelpers.h"
 #include "Spaces/H1Space.h"
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace svmp::FE;
@@ -67,6 +72,105 @@ CouplingContext makeDefinitionContext()
         .participant_regions = {left_interface, right_interface},
     });
     return builder.build();
+}
+
+CouplingContext makeNWayContext()
+{
+    const auto space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+    CouplingContextBuilder builder;
+    for (int i = 0; i < 3; ++i) {
+        const auto name = std::string("branch_") + static_cast<char>('a' + i);
+        const auto binding = test::participantBinding(
+            name,
+            11u + static_cast<std::uint64_t>(i));
+        builder.addParticipant(test::participantRef(binding));
+        builder.addField(test::fieldRef(binding, "primary", 20 + i, space, 1));
+        builder.addRegion(test::boundaryRegionRef(binding, "junction", 30 + i));
+    }
+    return builder.build();
+}
+
+CouplingContext makeMixedDimensionalContext()
+{
+    const auto body = test::participantBinding("body", 21u);
+    const auto space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(test::participantRef(body));
+    builder.addField(test::fieldRef(body, "primary", 41, space, 1));
+    builder.addRegion(CouplingRegionRef{
+        .participant_name = "body",
+        .system_name = body.system_name,
+        .system = body.system,
+        .region_name = "volume",
+        .kind = CouplingRegionKind::Domain,
+    });
+    builder.addRegion(test::boundaryRegionRef(body, "surface", 42));
+    return builder.build();
+}
+
+CouplingRegionRelationRequirement nWayRelationRequirement()
+{
+    return CouplingRegionRelationRequirement{
+        .relation_name = "junction_balance",
+        .relation_kind = CouplingRegionRelationKind::NWayInterface,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "branch_a",
+                .region_name = "junction",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "branch_b",
+                .region_name = "junction",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "branch_c",
+                .region_name = "junction",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+                .enforcement_strategies = {"conservation"},
+            },
+        },
+        .selected_lowering = CouplingRelationLoweringRequest{
+            .mode = CouplingMode::Monolithic,
+            .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            .enforcement_strategy = "conservation",
+        },
+        .required_region_kind = CouplingRegionKind::Boundary,
+        .require_distinct_participants = true,
+    };
+}
+
+CouplingRegionRelationRequirement mixedDimensionalRelationRequirement()
+{
+    return CouplingRegionRelationRequirement{
+        .relation_name = "volume_surface_balance",
+        .relation_kind = CouplingRegionRelationKind::VolumeBoundaryRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "body",
+                .region_name = "volume",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "body",
+                .region_name = "surface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+                .enforcement_strategies = {"balance"},
+            },
+        },
+        .selected_lowering = CouplingRelationLoweringRequest{
+            .mode = CouplingMode::Monolithic,
+            .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            .enforcement_strategy = "balance",
+        },
+    };
 }
 
 class FixtureDefinitionContract final
@@ -131,6 +235,192 @@ protected:
                       })
             .sharedInterface("interface")
             .transfer(test::identityTransfer());
+    }
+};
+
+class NWayDefinitionContract final : public DefinitionBackedCouplingContract {
+public:
+    [[nodiscard]] std::string name() const override
+    {
+        return "n_way_definition_fixture";
+    }
+
+protected:
+    void define(CouplingDefinitionBuilder& builder) const override
+    {
+        const auto relation_requirement = nWayRelationRequirement();
+        builder.participant("branch_a")
+            .participant("branch_b")
+            .participant("branch_c")
+            .fieldRequirement(scalarFieldRequirement("branch_a", "primary"))
+            .fieldRequirement(scalarFieldRequirement("branch_b", "primary"))
+            .fieldRequirement(scalarFieldRequirement("branch_c", "primary"))
+            .regionRelation(relation_requirement)
+            .monolithic([relation_requirement](const CouplingContext&,
+                                                const CouplingFormBuilder& forms) {
+                const auto relation = forms.regionRelation(relation_requirement);
+                std::vector<forms::FormExpr> branch_terms;
+                for (const auto& participant :
+                     {"branch_a", "branch_b", "branch_c"}) {
+                    const auto endpoint = relation.endpoint(participant, "junction");
+                    branch_terms.push_back(endpoint.integral(
+                        endpoint.state("primary",
+                                       std::string("u_") + participant) *
+                        endpoint.test("primary",
+                                      std::string("w_") + participant)));
+                }
+
+                CouplingFormContribution contribution;
+                contribution.contribution_name =
+                    "n_way_definition_fixture.junction_balance";
+                contribution.origin = "NWayDefinitionContract";
+                contribution.operator_name = "equations";
+                contribution.field_uses = {
+                    CouplingFieldUse{
+                        .participant_name = "branch_a",
+                        .field_name = "primary",
+                    },
+                    CouplingFieldUse{
+                        .participant_name = "branch_b",
+                        .field_name = "primary",
+                    },
+                    CouplingFieldUse{
+                        .participant_name = "branch_c",
+                        .field_name = "primary",
+                    },
+                };
+                contribution.residual = relation.sum(branch_terms);
+                return std::vector<CouplingFormContribution>{contribution};
+            });
+    }
+};
+
+class MixedDimensionalDefinitionContract final
+    : public DefinitionBackedCouplingContract {
+public:
+    [[nodiscard]] std::string name() const override
+    {
+        return "mixed_dimensional_definition_fixture";
+    }
+
+protected:
+    void define(CouplingDefinitionBuilder& builder) const override
+    {
+        const auto relation_requirement = mixedDimensionalRelationRequirement();
+        builder.participant("body")
+            .fieldRequirement(scalarFieldRequirement("body", "primary"))
+            .region(CouplingRegionUse{
+                .participant_name = "body",
+                .region_name = "volume",
+                .required_region_kind = CouplingRegionKind::Domain,
+            })
+            .region(CouplingRegionUse{
+                .participant_name = "body",
+                .region_name = "surface",
+                .required_region_kind = CouplingRegionKind::Boundary,
+            })
+            .regionRelation(relation_requirement)
+            .monolithic([relation_requirement](const CouplingContext&,
+                                                const CouplingFormBuilder& forms) {
+                const auto relation = forms.regionRelation(relation_requirement);
+                const auto volume = relation.endpoint("body", "volume");
+                const auto surface = relation.endpoint("body", "surface");
+
+                CouplingFormContribution contribution;
+                contribution.contribution_name =
+                    "mixed_dimensional_definition_fixture.volume_surface_balance";
+                contribution.origin = "MixedDimensionalDefinitionContract";
+                contribution.operator_name = "equations";
+                contribution.field_uses = {CouplingFieldUse{
+                    .participant_name = "body",
+                    .field_name = "primary",
+                }};
+                contribution.residual =
+                    volume.integral(volume.state("primary", "u") *
+                                    volume.test("primary", "w")) +
+                    surface.integral(surface.state("primary", "u_b") *
+                                     surface.test("primary", "w_b"));
+                return std::vector<CouplingFormContribution>{contribution};
+            });
+    }
+};
+
+class PartitionedStrategyDefinitionContract final
+    : public DefinitionBackedCouplingContract {
+public:
+    [[nodiscard]] std::string name() const override
+    {
+        return "partitioned_strategy_definition_fixture";
+    }
+
+protected:
+    void define(CouplingDefinitionBuilder& builder) const override
+    {
+        builder.participant("left")
+            .participant("right")
+            .fieldRequirement(scalarFieldRequirement("left", "primary"))
+            .fieldRequirement(scalarFieldRequirement("right", "primary"))
+            .sharedInterface(CouplingSharedInterfaceRequirement{
+                .shared_region_name = "interface",
+                .participant_names = {"left", "right"},
+            })
+            .regionRelation(CouplingRegionRelationRequirement{
+                .relation_name = "fixed_point_interface",
+                .relation_kind = CouplingRegionRelationKind::SidePairedInterface,
+                .endpoints = {
+                    CouplingRegionEndpointDeclaration{
+                        .participant_name = "left",
+                        .region_name = "interface",
+                        .shared_region_name = "interface",
+                    },
+                    CouplingRegionEndpointDeclaration{
+                        .participant_name = "right",
+                        .region_name = "interface",
+                        .shared_region_name = "interface",
+                    },
+                },
+                .lowering_capabilities = {
+                    CouplingRelationLoweringCapability{
+                        .lowering_kind =
+                            CouplingRelationLoweringKind::PartitionedExchange,
+                        .partitioned_solve_strategies = {
+                            CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
+                        },
+                    },
+                },
+                .selected_lowering = CouplingRelationLoweringRequest{
+                    .mode = CouplingMode::Partitioned,
+                    .lowering_kind =
+                        CouplingRelationLoweringKind::PartitionedExchange,
+                    .partitioned_solve_strategy =
+                        CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
+                },
+                .required_region_kind = CouplingRegionKind::InterfaceFace,
+                .require_opposite_sides_for_side_pair = true,
+            });
+
+        builder
+            .exchange("fixed_point_primary",
+                      CouplingFieldUse{
+                          .participant_name = "left",
+                          .field_name = "primary",
+                      },
+                      CouplingFieldUse{
+                          .participant_name = "right",
+                          .field_name = "primary",
+                      })
+            .sharedInterface("interface")
+            .transfer(test::identityTransfer())
+            .strategy(CouplingPartitionedStrategyDeclaration{
+                .solve_strategy =
+                    CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
+                .relaxation_strategy =
+                    CouplingPartitionedRelaxationStrategy::Constant,
+                .convergence_norm =
+                    CouplingPartitionedConvergenceNorm::ExchangeIncrement,
+                .relaxation_factor = 0.4,
+                .max_iterations = 6,
+            });
     }
 };
 
@@ -221,4 +511,83 @@ TEST(DefinitionBackedCouplingContract, ValidatesThroughCouplingGraph)
     const FixtureDefinitionContract contract;
 
     EXPECT_NO_THROW(contract.validate(context));
+}
+
+TEST(DefinitionBackedCouplingContract, SupportsNWayFormsFixture)
+{
+    const auto context = makeNWayContext();
+    const CouplingFormBuilder forms(context);
+    const NWayDefinitionContract contract;
+
+    EXPECT_NO_THROW(contract.validate(context));
+
+    const auto declaration = contract.declare();
+    ASSERT_EQ(declaration.region_relation_requirements.size(), 1u);
+    EXPECT_EQ(declaration.region_relation_requirements.front().relation_kind,
+              CouplingRegionRelationKind::NWayInterface);
+    ASSERT_TRUE(
+        declaration.region_relation_requirements.front().selected_lowering.has_value());
+    EXPECT_EQ(declaration.region_relation_requirements.front()
+                  .selected_lowering->lowering_kind,
+              CouplingRelationLoweringKind::MonolithicForms);
+
+    const auto contributions = contract.buildMonolithicForms(context, forms);
+    ASSERT_EQ(contributions.size(), 1u);
+    EXPECT_EQ(contributions.front().contribution_name,
+              "n_way_definition_fixture.junction_balance");
+    EXPECT_TRUE(contributions.front().residual.isValid());
+    ASSERT_EQ(contributions.front().field_uses.size(), 3u);
+}
+
+TEST(DefinitionBackedCouplingContract, SupportsMixedDimensionalFormsFixture)
+{
+    const auto context = makeMixedDimensionalContext();
+    const CouplingFormBuilder forms(context);
+    const MixedDimensionalDefinitionContract contract;
+
+    EXPECT_NO_THROW(contract.validate(context));
+
+    const auto declaration = contract.declare();
+    ASSERT_EQ(declaration.region_relation_requirements.size(), 1u);
+    EXPECT_EQ(declaration.region_relation_requirements.front().relation_kind,
+              CouplingRegionRelationKind::VolumeBoundaryRelation);
+
+    const auto contributions = contract.buildMonolithicForms(context, forms);
+    ASSERT_EQ(contributions.size(), 1u);
+    EXPECT_EQ(contributions.front().contribution_name,
+              "mixed_dimensional_definition_fixture.volume_surface_balance");
+    EXPECT_TRUE(contributions.front().residual.isValid());
+}
+
+TEST(DefinitionBackedCouplingContract, SupportsPartitionedStrategyFixture)
+{
+    const auto context = makeDefinitionContext();
+    const PartitionedStrategyDefinitionContract contract;
+
+    EXPECT_NO_THROW(contract.validate(context));
+
+    const auto declaration = contract.declare();
+    ASSERT_EQ(declaration.region_relation_requirements.size(), 1u);
+    const auto& relation = declaration.region_relation_requirements.front();
+    ASSERT_TRUE(relation.selected_lowering.has_value());
+    EXPECT_EQ(relation.selected_lowering->mode, CouplingMode::Partitioned);
+    ASSERT_TRUE(relation.selected_lowering->partitioned_solve_strategy.has_value());
+    EXPECT_EQ(*relation.selected_lowering->partitioned_solve_strategy,
+              CouplingPartitionedSolveStrategy::StaggeredFixedPoint);
+    ASSERT_EQ(declaration.partitioned_exchange_declarations.size(), 1u);
+    EXPECT_EQ(declaration.partitioned_exchange_declarations.front()
+                  .strategy.solve_strategy,
+              CouplingPartitionedSolveStrategy::StaggeredFixedPoint);
+    EXPECT_EQ(declaration.partitioned_exchange_declarations.front()
+                  .strategy.max_iterations,
+              6);
+
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const PartitionedCouplingPlanGenerator generator;
+    const auto plan = generator.generate(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_EQ(plan.exchanges.size(), 1u);
+    EXPECT_EQ(plan.exchanges.front().strategy.solve_strategy,
+              CouplingPartitionedSolveStrategy::StaggeredFixedPoint);
 }
