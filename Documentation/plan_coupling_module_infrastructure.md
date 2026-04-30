@@ -4854,7 +4854,7 @@ Unit-test verification checklist:
 - [x] `test_CouplingGraph.cpp` validates installed matrix-block provenance uses
   `analysis::VariableKey` rows and columns so Systems-reported non-field matrix
   contributions are not lost.
-- [ ] `test_CouplingGraph.cpp` verifies installed block provenance stores
+- [x] `test_CouplingGraph.cpp` verifies installed block provenance stores
   contributing domains as `analysis::DomainKind` values, including `Global`,
   `CoupledBoundary`, and `AuxiliaryCoupling` when Systems reports them.
 - [x] `test_CouplingGraph.cpp` verifies expert-hook

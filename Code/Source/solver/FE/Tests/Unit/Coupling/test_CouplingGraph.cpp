@@ -2420,6 +2420,35 @@ TEST(CouplingGraph, RejectsExpectedBlockWithoutInstalledMatrixEvidence)
               std::string::npos);
 }
 
+TEST(CouplingGraph, PreservesInstalledBlockDomainProvenance)
+{
+    auto metadata = installedDependencyMetadata();
+    metadata.installed_blocks[0].domains = {
+        analysis::DomainKind::Global,
+        analysis::DomainKind::CoupledBoundary,
+        analysis::DomainKind::AuxiliaryCoupling,
+    };
+
+    CouplingGraph graph;
+    const auto declaration = twoParticipantDependencyDeclaration();
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const std::array<CouplingFormAnalysisMetadata, 1> installed_forms{metadata};
+    const auto validation = graph.buildFinalizedGraph(
+        twoParticipantGraphContext(),
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed_forms));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    ASSERT_EQ(graph.installedFormMetadata().size(), 1u);
+    ASSERT_EQ(graph.installedFormMetadata()[0].installed_blocks.size(), 1u);
+    const auto& domains =
+        graph.installedFormMetadata()[0].installed_blocks[0].domains;
+    ASSERT_EQ(domains.size(), 3u);
+    EXPECT_EQ(domains[0], analysis::DomainKind::Global);
+    EXPECT_EQ(domains[1], analysis::DomainKind::CoupledBoundary);
+    EXPECT_EQ(domains[2], analysis::DomainKind::AuxiliaryCoupling);
+}
+
 TEST(CouplingGraph, DistinguishesExternalLaggedDependenciesFromImplicitEdges)
 {
     auto implicit = twoParticipantDependencyDeclaration();
