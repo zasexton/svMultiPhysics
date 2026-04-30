@@ -38,6 +38,16 @@ fec::CouplingFieldUse fieldUse(const std::string& participant,
     };
 }
 
+fec::CouplingVariableUse fieldVariable(const std::string& participant,
+                                       const std::string& field)
+{
+    return fec::CouplingVariableUse{
+        .kind = fec::CouplingVariableKind::Field,
+        .participant_name = participant,
+        .name = field,
+    };
+}
+
 fec::CouplingEndpointRef fieldEndpoint(const std::string& participant,
                                        const std::string& field,
                                        fec::CouplingTemporalSlotDescriptor temporal =
@@ -49,6 +59,80 @@ fec::CouplingEndpointRef fieldEndpoint(const std::string& participant,
         .endpoint_name = field,
         .temporal = std::move(temporal),
     };
+}
+
+void appendImplicitDependency(fec::CouplingContractDeclaration& declaration,
+                              fec::CouplingVariableUse residual_row,
+                              fec::CouplingVariableUse dependency)
+{
+    declaration.dependencies.push_back(fec::CouplingResidualDependency{
+        .residual_row = residual_row,
+        .dependency = dependency,
+    });
+    declaration.expected_blocks.push_back(fec::CouplingBlockExpectation{
+        .residual_row = std::move(residual_row),
+        .dependency = std::move(dependency),
+    });
+}
+
+void appendMonolithicDependencies(
+    const FSICouplingOptions& options,
+    fec::CouplingContractDeclaration& declaration)
+{
+    if (options.mode != fec::CouplingMode::Monolithic) {
+        return;
+    }
+
+    const auto fluid_velocity =
+        fieldVariable(options.fluid_name, options.fluid_velocity_field);
+    const auto solid_displacement =
+        fieldVariable(options.solid_name, options.solid_displacement_field);
+
+    appendImplicitDependency(declaration,
+                             fluid_velocity,
+                             fluid_velocity);
+    if (options.use_solid_displacement_derivative) {
+        appendImplicitDependency(declaration,
+                                 fluid_velocity,
+                                 solid_displacement);
+    } else if (options.solid_velocity_field.has_value()) {
+        appendImplicitDependency(
+            declaration,
+            fluid_velocity,
+            fieldVariable(options.solid_name, *options.solid_velocity_field));
+    }
+
+    appendImplicitDependency(
+        declaration,
+        solid_displacement,
+        fieldVariable(options.fluid_name, options.fluid_pressure_field));
+}
+
+void appendMonolithicGeometryRequirements(
+    const FSICouplingOptions& options,
+    fec::CouplingContractDeclaration& declaration)
+{
+    if (options.mode != fec::CouplingMode::Monolithic) {
+        return;
+    }
+
+    declaration.geometry_requirements.push_back(
+        fec::CouplingGeometryTerminalRequirement{
+            .quantity = fec::CouplingGeometryTerminalQuantity::Normal,
+            .scope = fec::CouplingGeometryTerminalScope{
+                .participant_name = options.fluid_name,
+                .region = fec::CouplingRegionEndpointDeclaration{
+                    .participant_name = options.fluid_name,
+                    .shared_region_name = options.interface_name,
+                },
+                .location = fec::CouplingGeometryTerminalLocationDeclaration{
+                    .region_kind = fec::CouplingRegionKind::InterfaceFace,
+                    .shared_region_name = options.interface_name,
+                    .coordinate_configuration =
+                        forms::GeometryConfiguration::Reference,
+                },
+            },
+        });
 }
 
 fec::CouplingPortId port(const FSICouplingOptions& options,
@@ -622,6 +706,8 @@ fec::CouplingContractDeclaration FSICouplingModule::declare() const
     }
 
     appendPartitionedExchangeDeclarations(options_, declaration);
+    appendMonolithicDependencies(options_, declaration);
+    appendMonolithicGeometryRequirements(options_, declaration);
     return declaration;
 }
 
@@ -704,6 +790,16 @@ FSICouplingModule::buildMonolithicForms(
     }
 
     std::vector<fec::CouplingFormContribution> contributions;
+    std::optional<fec::CouplingGeometrySensitivityDeclaration>
+        mesh_geometry_sensitivity;
+    if (options_.mesh_name.has_value() &&
+        options_.mesh_displacement_field.has_value()) {
+        mesh_geometry_sensitivity = fec::CouplingGeometrySensitivityDeclaration{
+            .mode = forms::GeometrySensitivityMode::MeshMotionUnknowns,
+            .mesh_motion_field = fieldUse(*options_.mesh_name,
+                                          *options_.mesh_displacement_field),
+        };
+    }
 
     fec::CouplingFormContribution kinematic;
     kinematic.contribution_name =
@@ -718,6 +814,12 @@ FSICouplingModule::buildMonolithicForms(
                                                   fluid_velocity_test),
                                      options_.interface_name,
                                      options_.fluid_name);
+    if (mesh_geometry_sensitivity.has_value()) {
+        kinematic.install_options_declaration.geometry_sensitivity =
+            *mesh_geometry_sensitivity;
+        kinematic.extra_trial_field_uses.push_back(
+            fieldUse(*options_.mesh_name, *options_.mesh_displacement_field));
+    }
     contributions.push_back(
         form_builder.attachTerminalProvenance(std::move(kinematic)));
 
@@ -755,6 +857,12 @@ FSICouplingModule::buildMonolithicForms(
                           solid_displacement_test),
             options_.interface_name,
             options_.fluid_name);
+    if (mesh_geometry_sensitivity.has_value()) {
+        traction.install_options_declaration.geometry_sensitivity =
+            *mesh_geometry_sensitivity;
+        traction.extra_trial_field_uses.push_back(
+            fieldUse(*options_.mesh_name, *options_.mesh_displacement_field));
+    }
     contributions.push_back(
         form_builder.attachTerminalProvenance(std::move(traction)));
 

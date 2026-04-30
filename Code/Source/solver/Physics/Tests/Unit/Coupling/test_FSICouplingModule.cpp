@@ -5,6 +5,8 @@
 #include "Coupling/CouplingDiagnostics.h"
 #include "Coupling/CouplingFormBuilder.h"
 #include "Coupling/CouplingContext.h"
+#include "Coupling/CouplingGraph.h"
+#include "Coupling/MonolithicCouplingBuilder.h"
 #include "Coupling/PartitionedCouplingPlanGenerator.h"
 #include "Core/FEException.h"
 #include "Mesh/Core/InterfaceMesh.h"
@@ -86,6 +88,57 @@ const fec::CouplingFormContribution* findContribution(
             return contribution.contribution_name == name;
         });
     return it == contributions.end() ? nullptr : &*it;
+}
+
+const fec::CouplingInstalledDependency* findInstalledDependency(
+    const fec::CouplingFormAnalysisMetadata& metadata,
+    FE::analysis::VariableKey residual_row,
+    FE::analysis::VariableKey dependency)
+{
+    const auto it = std::find_if(
+        metadata.installed_dependencies.begin(),
+        metadata.installed_dependencies.end(),
+        [&](const fec::CouplingInstalledDependency& installed) {
+            return installed.residual_row == residual_row &&
+                   installed.dependency == dependency;
+        });
+    return it == metadata.installed_dependencies.end() ? nullptr : &*it;
+}
+
+const fec::CouplingFormAnalysisMetadata* findMetadata(
+    const std::vector<fec::CouplingFormAnalysisMetadata>& metadata,
+    const std::string& contribution_name)
+{
+    const auto it = std::find_if(
+        metadata.begin(),
+        metadata.end(),
+        [&](const fec::CouplingFormAnalysisMetadata& record) {
+            return record.contribution_name == contribution_name;
+        });
+    return it == metadata.end() ? nullptr : &*it;
+}
+
+const fec::CouplingInstalledBlockProvenance* findInstalledBlock(
+    const fec::CouplingFormAnalysisMetadata& metadata,
+    FE::analysis::VariableKey residual_row,
+    FE::analysis::VariableKey dependency)
+{
+    const auto it = std::find_if(
+        metadata.installed_blocks.begin(),
+        metadata.installed_blocks.end(),
+        [&](const fec::CouplingInstalledBlockProvenance& block) {
+            return block.residual_row == residual_row &&
+                   block.dependency == dependency;
+        });
+    return it == metadata.installed_blocks.end() ? nullptr : &*it;
+}
+
+FE::analysis::VariableKey fieldVariable(const fec::CouplingContext& context,
+                                        const std::string& participant,
+                                        const std::string& field)
+{
+    return FE::analysis::VariableKey::field(
+        context.field(participant, field).field_id);
 }
 
 struct FSIFieldComponents {
@@ -193,7 +246,8 @@ struct FSIContextFixture {
                                bool include_solid_mapping = true,
                                bool include_mesh_displacement = true,
                                bool use_shared_system = true,
-                               bool include_interface_topology = true)
+                               bool include_interface_topology = true,
+                               bool register_system_fields = false)
     {
         auto* fluid_system_ref = &fluid_system;
         auto* solid_system_ref = use_shared_system ? &fluid_system : &solid_system;
@@ -206,6 +260,46 @@ struct FSIContextFixture {
             use_shared_system ? "fsi_system" : "mesh_system";
         const int fluid_marker = 10;
         const int solid_marker = use_shared_system ? 10 : 20;
+
+        FE::FieldId fluid_velocity_id = static_cast<FE::FieldId>(1);
+        FE::FieldId fluid_pressure_id = static_cast<FE::FieldId>(2);
+        FE::FieldId solid_displacement_id = static_cast<FE::FieldId>(3);
+        FE::FieldId solid_velocity_id = static_cast<FE::FieldId>(4);
+        FE::FieldId mesh_displacement_id = static_cast<FE::FieldId>(5);
+        if (register_system_fields) {
+            const auto add_field =
+                [](FE::systems::FESystem& system,
+                   const std::string& name,
+                   int components) {
+                    return system.addField(FE::systems::FieldSpec{
+                        .name = name,
+                        .space = space(components),
+                        .components = components,
+                    });
+                };
+            fluid_velocity_id =
+                add_field(*fluid_system_ref,
+                          "fluid_velocity",
+                          components.fluid_velocity);
+            fluid_pressure_id =
+                add_field(*fluid_system_ref,
+                          "fluid_pressure",
+                          components.fluid_pressure);
+            solid_displacement_id =
+                add_field(*solid_system_ref,
+                          "solid_displacement",
+                          components.solid_displacement);
+            solid_velocity_id =
+                add_field(*solid_system_ref,
+                          "solid_velocity",
+                          components.solid_velocity);
+            if (include_mesh && include_mesh_displacement) {
+                mesh_displacement_id =
+                    add_field(*mesh_system_ref,
+                              "mesh_displacement",
+                              components.mesh_displacement);
+            }
+        }
 
         if (include_interface_topology) {
             fluid_system_ref->setInterfaceMesh(
@@ -253,25 +347,25 @@ struct FSIContextFixture {
                             fluid_system_name,
                             fluid_system_ref,
                             "velocity",
-                            static_cast<FE::FieldId>(1),
+                            fluid_velocity_id,
                             components.fluid_velocity))
             .addField(field("fluid",
                             fluid_system_name,
                             fluid_system_ref,
                             "pressure",
-                            static_cast<FE::FieldId>(2),
+                            fluid_pressure_id,
                             components.fluid_pressure))
             .addField(field("solid",
                             solid_system_name,
                             solid_system_ref,
                             "displacement",
-                            static_cast<FE::FieldId>(3),
+                            solid_displacement_id,
                             components.solid_displacement))
             .addField(field("solid",
                             solid_system_name,
                             solid_system_ref,
                             "velocity",
-                            static_cast<FE::FieldId>(4),
+                            solid_velocity_id,
                             components.solid_velocity))
             .addRegion(fluid_region)
             .addRegion(solid_region);
@@ -287,7 +381,7 @@ struct FSIContextFixture {
                                        mesh_system_name,
                                        mesh_system_ref,
                                        "displacement",
-                                       static_cast<FE::FieldId>(5),
+                                       mesh_displacement_id,
                                        components.mesh_displacement));
             }
         }
@@ -475,6 +569,44 @@ TEST(FSICouplingModule, DeclaresTemporalDerivativeWhenSolidVelocityDerived)
     EXPECT_EQ(requirement.field->participant_name, "solid");
     EXPECT_EQ(requirement.field->field_name, "displacement");
     EXPECT_EQ(requirement.derivative_order, 1);
+}
+
+TEST(FSICouplingModule, DeclaresMonolithicDependencyAndBlockExpectations)
+{
+    const FSICouplingModule module;
+    const auto declaration = module.declare();
+
+    ASSERT_EQ(declaration.dependencies.size(), 3u);
+    ASSERT_EQ(declaration.expected_blocks.size(), 3u);
+    EXPECT_EQ(declaration.dependencies[0].residual_row.participant_name,
+              "fluid");
+    EXPECT_EQ(declaration.dependencies[0].residual_row.name, "velocity");
+    EXPECT_EQ(declaration.dependencies[0].dependency.participant_name,
+              "fluid");
+    EXPECT_EQ(declaration.dependencies[0].dependency.name, "velocity");
+    EXPECT_EQ(declaration.dependencies[1].residual_row.participant_name,
+              "fluid");
+    EXPECT_EQ(declaration.dependencies[1].residual_row.name, "velocity");
+    EXPECT_EQ(declaration.dependencies[1].dependency.participant_name,
+              "solid");
+    EXPECT_EQ(declaration.dependencies[1].dependency.name, "velocity");
+    EXPECT_EQ(declaration.dependencies[2].residual_row.participant_name,
+              "solid");
+    EXPECT_EQ(declaration.dependencies[2].residual_row.name, "displacement");
+    EXPECT_EQ(declaration.dependencies[2].dependency.participant_name,
+              "fluid");
+    EXPECT_EQ(declaration.dependencies[2].dependency.name, "pressure");
+    ASSERT_EQ(declaration.geometry_requirements.size(), 1u);
+    EXPECT_EQ(declaration.geometry_requirements[0].quantity,
+              fec::CouplingGeometryTerminalQuantity::Normal);
+
+    FSICouplingOptions ale_options;
+    ale_options.mesh_name = "mesh";
+    const FSICouplingModule ale_module(ale_options);
+    const auto ale_declaration = ale_module.declare();
+    ASSERT_EQ(ale_declaration.dependencies.size(), 3u);
+    ASSERT_EQ(ale_declaration.expected_blocks.size(), 3u);
+    EXPECT_TRUE(hasField(ale_declaration, "mesh", "displacement"));
 }
 
 TEST(FSICouplingModule, DeclaresPartitionedExchanges)
@@ -834,6 +966,147 @@ TEST(FSICouplingModule, BuildsFormsAuthoredPressureTractionBalance)
                                      forms::FormExprType::RestrictMinus));
     EXPECT_TRUE(containsFormExprType(*contribution->residual.node(),
                                      forms::FormExprType::RestrictPlus));
+}
+
+TEST(FSICouplingModule, FinalizesFormsAuthoredMonolithicDependencies)
+{
+    FSIContextFixture fixture(FSIFieldComponents{},
+                              false,
+                              true,
+                              true,
+                              true,
+                              true,
+                              true,
+                              true,
+                              true);
+    const fec::CouplingFormBuilder form_builder(fixture.context);
+    const fec::MonolithicCouplingBuilder monolithic_builder;
+    const FSICouplingModule module;
+
+    const auto contributions = module.buildMonolithicForms(fixture.context,
+                                                           form_builder);
+    const auto installed = monolithic_builder.installFormContributions(
+        fixture.fluid_system,
+        fixture.context,
+        std::span<const fec::CouplingFormContribution>(contributions));
+
+    const std::array<fec::CouplingContractDeclaration, 1> declarations{
+        module.declare()};
+    fec::CouplingGraph graph;
+    const auto validation = graph.buildFinalizedGraph(
+        fixture.context,
+        std::span<const fec::CouplingContractDeclaration>(declarations),
+        std::span<const fec::CouplingFormAnalysisMetadata>(installed));
+    ASSERT_TRUE(validation.ok()) << fec::formatDiagnostics(validation);
+
+    const auto fluid_velocity =
+        fieldVariable(fixture.context, "fluid", "velocity");
+    const auto solid_velocity =
+        fieldVariable(fixture.context, "solid", "velocity");
+    const auto solid_displacement =
+        fieldVariable(fixture.context, "solid", "displacement");
+    const auto fluid_pressure =
+        fieldVariable(fixture.context, "fluid", "pressure");
+
+    const auto* kinematic =
+        findMetadata(installed, "fsi_velocity_continuity");
+    ASSERT_NE(kinematic, nullptr);
+    const auto* velocity_dependency =
+        findInstalledDependency(*kinematic, fluid_velocity, solid_velocity);
+    ASSERT_NE(velocity_dependency, nullptr);
+    EXPECT_EQ(velocity_dependency->domain,
+              FE::analysis::DomainKind::InterfaceFace);
+    EXPECT_TRUE(velocity_dependency->contributes_matrix_block);
+    ASSERT_NE(findInstalledBlock(*kinematic, fluid_velocity, solid_velocity),
+              nullptr);
+
+    const auto* traction =
+        findMetadata(installed, "fsi_pressure_traction_balance");
+    ASSERT_NE(traction, nullptr);
+    const auto* pressure_dependency =
+        findInstalledDependency(*traction, solid_displacement, fluid_pressure);
+    ASSERT_NE(pressure_dependency, nullptr);
+    EXPECT_EQ(pressure_dependency->domain,
+              FE::analysis::DomainKind::InterfaceFace);
+    EXPECT_TRUE(pressure_dependency->contributes_matrix_block);
+    ASSERT_NE(findInstalledBlock(*traction, solid_displacement, fluid_pressure),
+              nullptr);
+}
+
+TEST(FSICouplingModule, ReportsALEGeometrySensitivityProvenance)
+{
+    FSICouplingOptions options;
+    options.mesh_name = "mesh";
+    FSIContextFixture fixture(FSIFieldComponents{},
+                              true,
+                              true,
+                              true,
+                              true,
+                              true,
+                              true,
+                              true,
+                              true);
+    const auto mesh_displacement =
+        fixture.context.field("mesh", "displacement").field_id;
+    fixture.fluid_system.bindMeshMotionField(
+        FE::systems::MeshMotionFieldRole::Displacement,
+        mesh_displacement);
+
+    const fec::CouplingFormBuilder form_builder(fixture.context);
+    const fec::MonolithicCouplingBuilder monolithic_builder;
+    const FSICouplingModule module(options);
+    const auto contributions = module.buildMonolithicForms(fixture.context,
+                                                           form_builder);
+
+    for (const auto& contribution : contributions) {
+        ASSERT_TRUE(contribution.install_options_declaration
+                        .geometry_sensitivity.has_value());
+        EXPECT_EQ(contribution.install_options_declaration.geometry_sensitivity
+                      ->mode,
+                  forms::GeometrySensitivityMode::MeshMotionUnknowns);
+    }
+
+    const auto installed = monolithic_builder.installFormContributions(
+        fixture.fluid_system,
+        fixture.context,
+        std::span<const fec::CouplingFormContribution>(contributions));
+    const auto* traction =
+        findMetadata(installed, "fsi_pressure_traction_balance");
+    ASSERT_NE(traction, nullptr);
+    EXPECT_EQ(traction->geometry_sensitivity.mode,
+              forms::GeometrySensitivityMode::MeshMotionUnknowns);
+    EXPECT_EQ(traction->geometry_sensitivity.mesh_motion_field,
+              mesh_displacement);
+
+    const auto field_it = std::find_if(
+        traction->field_uses.begin(),
+        traction->field_uses.end(),
+        [&](const fec::CouplingFormFieldProvenance& field) {
+            return field.field == mesh_displacement &&
+                   field.appears_as_geometry_sensitivity;
+        });
+    EXPECT_NE(field_it, traction->field_uses.end());
+
+    const auto provenance_it = std::find_if(
+        traction->geometry_sensitivity_provenance.begin(),
+        traction->geometry_sensitivity_provenance.end(),
+        [&](const fec::CouplingGeometrySensitivityProvenance& provenance) {
+            return provenance.kind ==
+                       fec::CouplingGeometrySensitivityProvenanceKind::
+                           MeshMotionUnknowns &&
+                   provenance.mesh_motion_field == mesh_displacement;
+        });
+    EXPECT_NE(provenance_it,
+              traction->geometry_sensitivity_provenance.end());
+
+    const std::array<fec::CouplingContractDeclaration, 1> declarations{
+        module.declare()};
+    fec::CouplingGraph graph;
+    const auto validation = graph.buildFinalizedGraph(
+        fixture.context,
+        std::span<const fec::CouplingContractDeclaration>(declarations),
+        std::span<const fec::CouplingFormAnalysisMetadata>(installed));
+    EXPECT_TRUE(validation.ok()) << fec::formatDiagnostics(validation);
 }
 
 TEST(FSICouplingModule, BuildsDisplacementDerivativeVelocityContinuity)

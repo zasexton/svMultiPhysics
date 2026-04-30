@@ -5404,7 +5404,7 @@ Unit-test verification checklist:
 - [x] `test_FSICouplingModule.cpp` rejects ALE FSI without mesh displacement.
 - [x] `test_FSICouplingModule.cpp` verifies temporal requirements are declared
   when `dt(solid_displacement)` is used.
-- [ ] `test_FSICouplingModule.cpp` verifies Forms-authored FSI-like
+- [x] `test_FSICouplingModule.cpp` verifies Forms-authored FSI-like
   monolithic residuals use the expected interface measure and report the
   expected implicit dependencies, including structured geometry-sensitivity
   provenance when ALE mesh motion is handled through the Systems
@@ -5412,7 +5412,7 @@ Unit-test verification checklist:
 - [x] `test_FSICouplingModule.cpp` rejects Forms-authored monolithic FSI when
   participants are not in one compatible `FESystem` or the interface topology
   is not registered.
-- [ ] `test_FSICouplingModule.cpp` verifies expected FSI monolithic block
+- [x] `test_FSICouplingModule.cpp` verifies expected FSI monolithic block
   declarations match installed dependencies.
 - [x] `test_FSICouplingModule.cpp` verifies FSI partitioned exchange ports,
   endpoints, endpoint temporal slots, transfer declarations, resolved transfer
