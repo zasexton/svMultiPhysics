@@ -4277,7 +4277,7 @@ Unit-test verification checklist:
   implicit dependencies can later resolve through `StateField` use, structured
   Systems geometry-sensitivity provenance, or supported non-field
   `analysis::VariableKey` dependencies.
-- [ ] `test_CouplingContractValidation.cpp` verifies
+- [x] `test_CouplingContractValidation.cpp` verifies
   `CouplingVariableUse` preserves field, auxiliary-state, AuxiliaryInput,
   AuxiliaryOutput, boundary-functional, and global-scalar variable identities
   without treating all dependency declarations as field-to-field blocks.

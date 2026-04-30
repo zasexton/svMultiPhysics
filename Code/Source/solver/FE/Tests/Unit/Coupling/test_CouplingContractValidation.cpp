@@ -496,6 +496,72 @@ TEST(CouplingContractValidation, PreservesDependencyModesAndResolutionEvidence)
               svmp::FE::analysis::VariableKind::BoundaryFunctional);
 }
 
+TEST(CouplingContractValidation, PreservesVariableUseKindsInDependencies)
+{
+    auto declaration = minimalDeclaration();
+    const CouplingVariableUse residual{
+        .kind = CouplingVariableKind::Field,
+        .participant_name = "left",
+        .name = "primary",
+    };
+    const std::array<CouplingVariableUse, 6> dependencies{{
+        CouplingVariableUse{
+            .kind = CouplingVariableKind::Field,
+            .participant_name = "right",
+            .name = "shared",
+            .component = 2,
+        },
+        CouplingVariableUse{
+            .kind = CouplingVariableKind::AuxiliaryState,
+            .participant_name = "right",
+            .name = "shared",
+        },
+        CouplingVariableUse{
+            .kind = CouplingVariableKind::AuxiliaryInput,
+            .participant_name = "right",
+            .name = "shared",
+        },
+        CouplingVariableUse{
+            .kind = CouplingVariableKind::AuxiliaryOutput,
+            .participant_name = "right",
+            .name = "shared",
+        },
+        CouplingVariableUse{
+            .kind = CouplingVariableKind::BoundaryFunctional,
+            .participant_name = "right",
+            .name = "shared",
+        },
+        CouplingVariableUse{
+            .kind = CouplingVariableKind::GlobalScalar,
+            .participant_name = "right",
+            .name = "shared",
+        },
+    }};
+    for (const auto& dependency : dependencies) {
+        declaration.dependencies.push_back(CouplingResidualDependency{
+            .residual_row = residual,
+            .dependency = dependency,
+        });
+    }
+
+    const auto validation = validateContractDeclarationShape(declaration);
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+    ASSERT_EQ(declaration.dependencies.size(), dependencies.size());
+    for (std::size_t i = 0; i < dependencies.size(); ++i) {
+        EXPECT_EQ(declaration.dependencies[i].dependency.kind, dependencies[i].kind);
+        EXPECT_EQ(declaration.dependencies[i].dependency.participant_name, "right");
+        EXPECT_EQ(declaration.dependencies[i].dependency.name, "shared");
+    }
+    EXPECT_EQ(declaration.dependencies[0].dependency.component, 2);
+
+    declaration.dependencies.push_back(declaration.dependencies[2]);
+    const auto duplicate_validation = validateContractDeclarationShape(declaration);
+    EXPECT_FALSE(duplicate_validation.ok());
+    EXPECT_NE(formatDiagnostics(duplicate_validation).find(
+                  "duplicate residual dependency declaration"),
+              std::string::npos);
+}
+
 TEST(CouplingContractValidation, HandlesOptionalAndRequiredContextDeclarations)
 {
     CouplingContractDeclaration declaration;
