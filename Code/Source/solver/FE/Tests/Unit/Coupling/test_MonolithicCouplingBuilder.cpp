@@ -1402,6 +1402,94 @@ TEST(MonolithicCouplingBuilder, RegistersContractOwnedInterfaceAdditionalFields)
     EXPECT_TRUE(fixture.system.hasField("generic_instance.lambda"));
 }
 
+TEST(MonolithicCouplingBuilder, RejectsContractOwnedInterfaceFieldsSpanningSystems)
+{
+    const auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    const auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    systems::FESystem left_system(mesh);
+    systems::FESystem right_system(mesh);
+    left_system.setInterfaceMesh(kInterfaceMarker,
+                                 std::make_shared<const svmp::InterfaceMesh>());
+    right_system.setInterfaceMesh(kInterfaceMarker,
+                                  std::make_shared<const svmp::InterfaceMesh>());
+
+    CouplingRegionRef left_region{
+        .participant_name = "left",
+        .system_name = "left_system",
+        .system = &left_system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = kInterfaceMarker,
+        .side = CouplingInterfaceSide::Minus,
+    };
+    CouplingRegionRef right_region{
+        .participant_name = "right",
+        .system_name = "right_system",
+        .system = &right_system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = kInterfaceMarker,
+        .side = CouplingInterfaceSide::Plus,
+    };
+
+    CouplingContextBuilder context_builder;
+    context_builder.addParticipant({
+        .participant_name = "left",
+        .system_name = "left_system",
+        .system = &left_system,
+    });
+    context_builder.addParticipant({
+        .participant_name = "right",
+        .system_name = "right_system",
+        .system = &right_system,
+    });
+    context_builder.addRegion(left_region);
+    context_builder.addRegion(right_region);
+    context_builder.addSharedRegion(SharedRegionRef{
+        .name = "interface",
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .participant_regions = {left_region, right_region},
+    });
+    const auto context = context_builder.build();
+
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.shared_regions.push_back({
+        .shared_region_name = "interface",
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+    });
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Contract,
+        .namespace_name = "generic_instance",
+        .field_name = "lambda",
+        .space = space,
+        .components = 1,
+        .scope = CouplingAdditionalFieldScope::InterfaceFace,
+        .shared_region_name = "interface",
+    });
+
+    const MonolithicCouplingBuilder builder;
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const auto validation = builder.validateDeclarations(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    EXPECT_FALSE(validation.ok());
+    const auto diagnostics = formatDiagnostics(validation);
+    EXPECT_NE(diagnostics.find(
+                  "contract-owned additional field does not resolve to a target system"),
+              std::string::npos);
+    EXPECT_THROW(static_cast<void>(
+                     builder.registerAdditionalFields(
+                         context,
+                         std::span<const CouplingContractDeclaration>(
+                             declarations))),
+                 InvalidArgumentException);
+}
+
 TEST(MonolithicCouplingBuilder, SkipsDisabledOptionalAdditionalFields)
 {
     BuilderFixture fixture;

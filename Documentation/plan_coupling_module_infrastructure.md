@@ -4990,7 +4990,7 @@ Unit-test verification checklist:
 - [x] `test_MonolithicCouplingBuilder.cpp` verifies interface additional fields
   resolve participant/shared-region declarations into markers only during
   builder resolution.
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies contract-owned interface
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies contract-owned interface
   fields without an explicit target participant are accepted only when the
   shared-region participants resolve to one monolithic `FESystem`.
 - [x] `test_MonolithicCouplingBuilder.cpp` verifies contracts cannot directly
