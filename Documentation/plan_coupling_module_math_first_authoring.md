@@ -305,7 +305,7 @@ The new authoring facade should be layered over the existing low-level
 
 Checklist:
 
-- [ ] Existing low-level contracts continue to compile.
+- [x] Existing low-level contracts continue to compile.
 - [ ] FSI and thermal migrate behind the new facade after parity tests exist.
 - [ ] Duplicated physics-local validation is removed only after backend parity
       is demonstrated.
@@ -1291,7 +1291,7 @@ enum class CouplingDependencyDeclarationMode {
 };
 ```
 
-- [ ] Default new physics modules to `InferFromInstalledForms`.
+- [x] Default new physics modules to `InferFromInstalledForms`.
 - [x] Keep current explicit `dependencies` and `expected_blocks` as
       compatibility and expert-check paths.
 - [ ] Add diagnostics when explicit declarations disagree with installed Forms
@@ -1383,8 +1383,8 @@ new modules implement `define(...)` while still using the current backend.
 
 ### Concrete Changes
 
-- [ ] Add a `DefinitionBackedCouplingContract` class under FE/Coupling.
-- [ ] Add:
+- [x] Add a `DefinitionBackedCouplingContract` class under FE/Coupling.
+- [x] Add:
 
 ```cpp
 class DefinitionBackedCouplingContract : public CouplingContract {
@@ -1404,18 +1404,18 @@ protected:
 };
 ```
 
-- [ ] Implement the adapter by compiling a `CouplingDefinitionBuilder` result
+- [x] Implement the adapter by compiling a `CouplingDefinitionBuilder` result
       into existing `CouplingContractDeclaration`, `CouplingFormContribution`,
       and `CouplingExchangeDeclaration` records.
-- [ ] Keep direct `CouplingContract` overrides available for unusual contracts.
-- [ ] Keep `CouplingRegistry` factories returning `CouplingContract` pointers.
+- [x] Keep direct `CouplingContract` overrides available for unusual contracts.
+- [x] Keep `CouplingRegistry` factories returning `CouplingContract` pointers.
 
 ### Completion Checklist
 
-- [ ] New physics couplings can implement only `name()` and `define(...)`.
-- [ ] Existing low-level contracts still compile unchanged.
-- [ ] `CouplingRegistry` does not need a second registration path.
-- [ ] The adapter delegates validation to `CouplingGraph` and
+- [x] New physics couplings can implement only `name()` and `define(...)`.
+- [x] Existing low-level contracts still compile unchanged.
+- [x] `CouplingRegistry` does not need a second registration path.
+- [x] The adapter delegates validation to `CouplingGraph` and
       `PartitionedCouplingPlanGenerator`.
 
 ## Phase 6: Add Relation Lowering Capability Diagnostics
@@ -1632,8 +1632,8 @@ enum class ThermalInterfaceFormulation {
 
 ### Partitioned Tests
 
-- [ ] Test scalar field exchange descriptor inference.
-- [ ] Test vector field exchange descriptor inference.
+- [x] Test scalar field exchange descriptor inference.
+- [x] Test vector field exchange descriptor inference.
 - [ ] Test explicit descriptor override for non-field payloads.
 - [ ] Test automatic shared-region endpoint attachment.
 - [ ] Test auxiliary endpoint exchange descriptors.

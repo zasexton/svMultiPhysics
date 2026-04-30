@@ -893,6 +893,8 @@ set(FE_COUPLING_HEADERS
     Coupling/CouplingContext.h
     Coupling/CouplingDeclaration.h
     Coupling/CouplingContract.h
+    Coupling/CouplingDefinitionBuilder.h
+    Coupling/DefinitionBackedCouplingContract.h
     Coupling/CouplingFormBuilder.h
     Coupling/CouplingGraph.h
     Coupling/CouplingTemporalRequirements.h
@@ -912,6 +914,8 @@ set(FE_COUPLING_SOURCES
     Coupling/CouplingContext.cpp
     Coupling/CouplingDeclaration.cpp
     Coupling/CouplingContract.cpp
+    Coupling/CouplingDefinitionBuilder.cpp
+    Coupling/DefinitionBackedCouplingContract.cpp
     Coupling/CouplingFormBuilder.cpp
     Coupling/CouplingGraph.cpp
     Coupling/CouplingTemporalRequirements.cpp
@@ -2538,6 +2542,7 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Coupling/test_CouplingHeaders.cpp
                 Tests/Unit/Coupling/test_CouplingSourceBoundaries.cpp
                 Tests/Unit/Coupling/test_CouplingTemporalRequirements.cpp
+                Tests/Unit/Coupling/test_DefinitionBackedCouplingContract.cpp
                 Tests/Unit/Coupling/test_CouplingContext.cpp
                 Tests/Unit/Coupling/test_CouplingRegistry.cpp
                 Tests/Unit/Coupling/test_CouplingTypes.cpp
