@@ -76,6 +76,44 @@ TEST(CouplingContractValidation, AcceptsMinimalTwoParticipantDeclaration)
     EXPECT_TRUE(validateContractDeclarationShape(declaration).ok());
 }
 
+TEST(CouplingContractValidation, AcceptsValidNParticipantDeclaration)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "multi_interface";
+    declaration.contract_name = "multi_interface_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "middle"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.fields.push_back({.participant_name = "left", .field_name = "primary"});
+    declaration.fields.push_back({.participant_name = "middle", .field_name = "primary"});
+    declaration.fields.push_back({.participant_name = "right", .field_name = "primary"});
+    declaration.regions.push_back({
+        .participant_name = "left",
+        .region_name = "surface",
+        .required_region_kind = CouplingRegionKind::Boundary,
+    });
+    declaration.regions.push_back({
+        .participant_name = "middle",
+        .region_name = "surface",
+        .required_region_kind = CouplingRegionKind::Boundary,
+    });
+    declaration.regions.push_back({
+        .participant_name = "right",
+        .region_name = "surface",
+        .required_region_kind = CouplingRegionKind::Boundary,
+    });
+    declaration.shared_regions.push_back({
+        .shared_region_name = "triple_surface",
+        .required_region_kind = CouplingRegionKind::Boundary,
+    });
+    declaration.group_hints.push_back(CouplingGroupHint{
+        .name = "all_participants",
+        .participant_names = {"left", "middle", "right"},
+    });
+
+    EXPECT_TRUE(validateContractDeclarationShape(declaration).ok());
+}
+
 TEST(CouplingContractValidation, RejectsEmptyContractNames)
 {
     auto declaration = minimalDeclaration();

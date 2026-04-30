@@ -4237,7 +4237,7 @@ Unit-test verification checklist:
 
 - [x] `test_CouplingContractValidation.cpp` accepts a minimal valid
   two-participant declaration.
-- [ ] `test_CouplingContractValidation.cpp` accepts a valid N-participant
+- [x] `test_CouplingContractValidation.cpp` accepts a valid N-participant
   declaration.
 - [x] `test_CouplingContractValidation.cpp` rejects empty names and duplicate
   contract instance names, participant, field, participant-local region,
