@@ -1,4 +1,5 @@
 #include "Coupling/CouplingGraph.h"
+#include "Coupling/MonolithicCouplingBuilder.h"
 #include "Coupling/PartitionedCouplingPlanGenerator.h"
 
 #include "Assembly/AssemblyContext.h"
@@ -269,6 +270,50 @@ CouplingContext twoParticipantGraphContext()
         .field_id = 2,
         .space = space,
         .components = 1,
+    });
+    return builder.build();
+}
+
+CouplingContext interfaceGraphContext(int left_marker = 17,
+                                      int right_marker = 17)
+{
+    const auto* system = graphSystemToken();
+    const CouplingRegionRef left_region{
+        .participant_name = "left",
+        .system_name = "system",
+        .system = system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = left_marker,
+        .side = CouplingInterfaceSide::Minus,
+    };
+    const CouplingRegionRef right_region{
+        .participant_name = "right",
+        .system_name = "system",
+        .system = system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = right_marker,
+        .side = CouplingInterfaceSide::Plus,
+    };
+
+    CouplingContextBuilder builder;
+    builder.addParticipant({
+        .participant_name = "left",
+        .system_name = "system",
+        .system = system,
+    });
+    builder.addParticipant({
+        .participant_name = "right",
+        .system_name = "system",
+        .system = system,
+    });
+    builder.addRegion(left_region);
+    builder.addRegion(right_region);
+    builder.addSharedRegion(SharedRegionRef{
+        .name = "interface",
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .participant_regions = {left_region, right_region},
     });
     return builder.build();
 }
@@ -1137,6 +1182,74 @@ TEST(CouplingGraph, RejectsAdditionalFieldsThatCannotLowerToFieldRegistration)
     EXPECT_NE(text.find("cannot be lowered to an FE field registration target"),
               std::string::npos);
     EXPECT_NE(text.find("participant='unknown_participant'"),
+              std::string::npos);
+}
+
+TEST(CouplingGraph, ValidatesInterfaceAdditionalFieldMarkerResolution)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Participant,
+        .namespace_name = "left",
+        .field_name = "trace",
+        .space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1),
+        .components = 1,
+        .scope = CouplingAdditionalFieldScope::InterfaceFace,
+        .region_name = "interface",
+    });
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Contract,
+        .namespace_name = "generic_instance",
+        .field_name = "lambda",
+        .space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1),
+        .components = 1,
+        .scope = CouplingAdditionalFieldScope::InterfaceFace,
+        .shared_region_name = "interface",
+    });
+
+    const auto context = interfaceGraphContext(17, 17);
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    CouplingGraph graph;
+    const auto validation = graph.buildDeclarationGraph(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const MonolithicCouplingBuilder builder;
+    const auto resolved = builder.resolveAdditionalFields(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_EQ(resolved.size(), 2u);
+    EXPECT_EQ(resolved[0].declaration.region_name.value(), "interface");
+    EXPECT_EQ(resolved[0].field_spec.interface_marker, 17);
+    EXPECT_EQ(resolved[1].declaration.shared_region_name.value(), "interface");
+    EXPECT_EQ(resolved[1].field_spec.interface_marker, 17);
+
+    CouplingGraph mismatch_graph;
+    const auto mismatch = mismatch_graph.buildDeclarationGraph(
+        interfaceGraphContext(17, 18),
+        std::span<const CouplingContractDeclaration>(declarations));
+    EXPECT_FALSE(mismatch.ok());
+    EXPECT_NE(formatDiagnostics(mismatch).find(
+                  "shared-region markers must agree"),
+              std::string::npos);
+
+    auto missing_region = declaration;
+    missing_region.additional_fields[0].region_name = "missing_interface";
+    const std::array<CouplingContractDeclaration, 1> missing_declarations{
+        missing_region,
+    };
+    CouplingGraph missing_graph;
+    const auto missing = missing_graph.buildDeclarationGraph(
+        context,
+        std::span<const CouplingContractDeclaration>(missing_declarations));
+    EXPECT_FALSE(missing.ok());
+    EXPECT_NE(formatDiagnostics(missing).find(
+                  "participant region is missing"),
               std::string::npos);
 }
 

@@ -452,6 +452,126 @@ void validateAdditionalFieldLowering(
     }
 }
 
+void validateInterfaceAdditionalFieldMarker(
+    const CouplingContext& context,
+    const CouplingContractDeclaration& declaration,
+    const CouplingAdditionalFieldDeclaration& field,
+    CouplingValidationResult& result)
+{
+    if (!additionalFieldSelected(field) ||
+        field.scope != CouplingAdditionalFieldScope::InterfaceFace) {
+        return;
+    }
+
+    const auto target = additionalFieldTarget(context, field);
+    if (!target.has_value()) {
+        return;
+    }
+
+    if (field.region_name.has_value()) {
+        if (!context.hasRegion(target->participant_name, *field.region_name)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = declaration.contract_name,
+                .participant_name = target->participant_name,
+                .field_name = field.field_name,
+                .region_name = *field.region_name,
+                .message = "interface additional field participant region is missing",
+            });
+            return;
+        }
+        const auto region =
+            context.region(target->participant_name, *field.region_name);
+        if (region.kind != CouplingRegionKind::InterfaceFace) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = declaration.contract_name,
+                .participant_name = target->participant_name,
+                .field_name = field.field_name,
+                .region_name = *field.region_name,
+                .message = "interface additional field participant region must be an interface face",
+            });
+        }
+        if (region.marker < 0) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = declaration.contract_name,
+                .participant_name = target->participant_name,
+                .field_name = field.field_name,
+                .region_name = *field.region_name,
+                .message = "interface additional field participant region requires a marker",
+            });
+        }
+        return;
+    }
+
+    if (!field.shared_region_name.has_value()) {
+        return;
+    }
+    if (!context.hasSharedRegion(*field.shared_region_name)) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .contract_name = declaration.contract_name,
+            .field_name = field.field_name,
+            .region_name = *field.shared_region_name,
+            .message = "interface additional field shared region is missing",
+        });
+        return;
+    }
+
+    const auto group = context.sharedRegionGroup(*field.shared_region_name);
+    std::optional<int> marker;
+    bool found_target_region = false;
+    for (const auto& region : group.participant_regions) {
+        if (region.system != target->system) {
+            continue;
+        }
+        found_target_region = true;
+        if (region.kind != CouplingRegionKind::InterfaceFace) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = declaration.contract_name,
+                .participant_name = region.participant_name,
+                .field_name = field.field_name,
+                .region_name = *field.shared_region_name,
+                .message = "interface additional field shared region must map to interface faces",
+            });
+        }
+        if (region.marker < 0) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = declaration.contract_name,
+                .participant_name = region.participant_name,
+                .field_name = field.field_name,
+                .region_name = *field.shared_region_name,
+                .message = "interface additional field shared region requires markers",
+            });
+            continue;
+        }
+        if (!marker.has_value()) {
+            marker = region.marker;
+        } else if (*marker != region.marker) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = declaration.contract_name,
+                .participant_name = region.participant_name,
+                .field_name = field.field_name,
+                .region_name = *field.shared_region_name,
+                .message = "interface additional field shared-region markers must agree in one system",
+            });
+        }
+    }
+    if (!found_target_region) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .contract_name = declaration.contract_name,
+            .field_name = field.field_name,
+            .region_name = *field.shared_region_name,
+            .message = "interface additional field target participant is not in the shared region",
+        });
+    }
+}
+
 std::string additionalFieldGraphKey(
     const CouplingContext& context,
     const CouplingAdditionalFieldDeclaration& field)
@@ -523,6 +643,10 @@ void validateAdditionalFieldGraphDeclarations(
                                             declaration,
                                             field,
                                             result);
+            validateInterfaceAdditionalFieldMarker(context,
+                                                   declaration,
+                                                   field,
+                                                   result);
             if (additionalFieldCollidesWithBaseField(context, field)) {
                 result.add(CouplingDiagnostic{
                     .severity = CouplingDiagnosticSeverity::Error,

@@ -4681,7 +4681,7 @@ Implementation checklist:
 - [x] Validate that additional field declarations can be lowered to existing FE
   field registration APIs before the monolithic coupling builder mutates the
   `FESystem`.
-- [ ] Validate that interface additional-field declarations resolve their
+- [x] Validate that interface additional-field declarations resolve their
   interface marker from participant-region or shared-region context and never
   treat declaration-time raw markers as portable identity; the resolved marker
   is stored only in `systems::FieldSpec::interface_marker`.
@@ -4815,7 +4815,7 @@ Unit-test verification checklist:
   no dependency edge, expected block, or Forms contribution reference.
 - [x] `test_CouplingGraph.cpp` rejects additional field declarations that
   cannot lower to existing FE field registration APIs.
-- [ ] `test_CouplingGraph.cpp` verifies interface additional-field declarations
+- [x] `test_CouplingGraph.cpp` verifies interface additional-field declarations
   carry only declaration-side region names before resolution and compare against
   resolved `systems::FieldSpec::interface_marker` provenance only after
   `CouplingContext` lookup.
