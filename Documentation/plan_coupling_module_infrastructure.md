@@ -5275,7 +5275,7 @@ Unit-test verification checklist:
 - [x] `test_PartitionedCouplingPlan.cpp` verifies interface transfer options are
   preserved in the resolved plan and invalid option combinations fail
   validation.
-- [ ] `test_PartitionedCouplingPlan.cpp` verifies
+- [x] `test_PartitionedCouplingPlan.cpp` verifies
   `source_embedding_policy` and `target_restriction_policy` remain present in
   `ResolvedCouplingTransfer` after `systems::InterfaceTransferOptions`
   construction, and validates the reject path when a true 2D transfer would

@@ -903,6 +903,10 @@ TEST(PartitionedCouplingPlanGenerator, GeneratesResolvedInterfaceTransferOptions
         std::span<const CouplingExchangeDeclaration>(exchanges));
 
     ASSERT_TRUE(plan.exchanges[0].transfer.interface_options.has_value());
+    EXPECT_EQ(plan.exchanges[0].transfer.source_embedding_policy,
+              CouplingFrameSourceEmbeddingPolicy::None);
+    EXPECT_EQ(plan.exchanges[0].transfer.target_restriction_policy,
+              CouplingFrameTargetRestrictionPolicy::None);
     const auto& options = *plan.exchanges[0].transfer.interface_options;
     EXPECT_EQ(options.field_kind, systems::InterfaceFieldKind::Vector);
     EXPECT_EQ(options.frame_policy,
