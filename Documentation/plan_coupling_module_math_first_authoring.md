@@ -1555,7 +1555,7 @@ authoring path.
       - side B temperature as scalar by default
       - side A heat flux as scalar or vector depending on selected strategy
       - side B heat flux as scalar or vector depending on selected strategy
-- [ ] Add an explicit thermal interface formulation option:
+- [x] Add an explicit thermal interface formulation option:
 
 ```cpp
 enum class ThermalInterfaceFormulation {
@@ -1565,7 +1565,7 @@ enum class ThermalInterfaceFormulation {
 };
 ```
 
-- [ ] Implement monolithic temperature-continuity Forms for the selected
+- [x] Implement monolithic temperature-continuity Forms for the selected
       formulation.
 - [ ] Reuse `FE/Forms/InterfaceConditions.h` and `BoundaryConditions.h` helpers
       for Nitsche-style scalar diffusion when applicable.
@@ -1576,9 +1576,9 @@ enum class ThermalInterfaceFormulation {
 
 ### Completion Checklist
 
-- [ ] Thermal default monolithic mode has valid monolithic lowering.
+- [x] Thermal default monolithic mode has valid monolithic lowering.
 - [x] Thermal partitioned mode behavior is preserved.
-- [ ] Thermal tests cover scalar temperature continuity.
+- [x] Thermal tests cover scalar temperature continuity.
 - [x] Thermal tests cover partitioned temperature and heat-flux exchanges.
 - [ ] Thermal examples are short enough to serve as authoring documentation.
 

@@ -1,17 +1,25 @@
 #include "Physics/Coupling/FSICouplingModule.h"
 #include "Physics/Coupling/ThermalInterfaceCouplingModule.h"
 
-#include "Core/FEException.h"
-
 #include <gtest/gtest.h>
 
+#include "Coupling/CouplingFormBuilder.h"
+#include "Core/FEException.h"
+#include "Mesh/Core/InterfaceMesh.h"
+#include "Physics/Tests/Unit/PhysicsTestHelpers.h"
+#include "Spaces/SpaceFactory.h"
+#include "Systems/FESystem.h"
+
 #include <algorithm>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace svmp;
 using namespace svmp::Physics::coupling;
 namespace fec = svmp::FE::coupling;
+namespace forms = svmp::FE::forms;
 
 namespace {
 
@@ -26,6 +34,129 @@ bool hasField(const fec::CouplingContractDeclaration& declaration,
                                   use.field_name == field;
                        });
 }
+
+bool hasFieldUse(const std::vector<fec::CouplingFieldUse>& fields,
+                 const std::string& participant,
+                 const std::string& field)
+{
+    return std::any_of(fields.begin(),
+                       fields.end(),
+                       [&](const fec::CouplingFieldUse& use) {
+                           return use.participant_name == participant &&
+                                  use.field_name == field;
+                       });
+}
+
+bool containsFormExprType(const forms::FormExprNode& node,
+                          forms::FormExprType type)
+{
+    if (node.type() == type) {
+        return true;
+    }
+    const auto children = node.children();
+    return std::any_of(children.begin(),
+                       children.end(),
+                       [&](const forms::FormExprNode* child) {
+                           return child != nullptr &&
+                                  containsFormExprType(*child, type);
+                       });
+}
+
+const fec::CouplingFormContribution* findContribution(
+    const std::vector<fec::CouplingFormContribution>& contributions,
+    const std::string& name)
+{
+    const auto it = std::find_if(
+        contributions.begin(),
+        contributions.end(),
+        [&](const fec::CouplingFormContribution& contribution) {
+            return contribution.contribution_name == name;
+        });
+    return it == contributions.end() ? nullptr : &*it;
+}
+
+std::shared_ptr<const FE::spaces::FunctionSpace> scalarSpace()
+{
+    return FE::spaces::Space(FE::spaces::SpaceType::H1,
+                             FE::ElementType::Triangle3,
+                             1,
+                             1);
+}
+
+fec::CouplingFieldRef thermalField(std::string participant_name,
+                                   FE::systems::FESystem* system,
+                                   FE::FieldId field_id)
+{
+    return fec::CouplingFieldRef{
+        .participant_name = std::move(participant_name),
+        .system_name = "thermal_system",
+        .system = system,
+        .field_name = "temperature",
+        .field_id = field_id,
+        .space = scalarSpace(),
+        .components = 1,
+    };
+}
+
+fec::CouplingRegionRef thermalInterfaceRegion(
+    std::string participant_name,
+    FE::systems::FESystem* system,
+    fec::CouplingInterfaceSide side)
+{
+    return fec::CouplingRegionRef{
+        .participant_name = std::move(participant_name),
+        .system_name = "thermal_system",
+        .system = system,
+        .region_name = "wall",
+        .kind = fec::CouplingRegionKind::InterfaceFace,
+        .marker = 10,
+        .side = side,
+    };
+}
+
+struct ThermalContextFixture {
+    std::shared_ptr<svmp::Physics::test::SingleTetraMeshAccess> mesh{
+        std::make_shared<svmp::Physics::test::SingleTetraMeshAccess>()};
+    FE::systems::FESystem system{mesh};
+    fec::CouplingContext context;
+
+    ThermalContextFixture()
+    {
+        system.setInterfaceMesh(10,
+                                std::make_shared<const svmp::InterfaceMesh>());
+
+        auto side_a_region = thermalInterfaceRegion(
+            "side_a",
+            &system,
+            fec::CouplingInterfaceSide::Minus);
+        auto side_b_region = thermalInterfaceRegion(
+            "side_b",
+            &system,
+            fec::CouplingInterfaceSide::Plus);
+
+        fec::CouplingContextBuilder builder;
+        builder.addParticipant(fec::CouplingParticipantRef{
+                   .participant_name = "side_a",
+                   .system_name = "thermal_system",
+                   .system = &system,
+               })
+            .addParticipant(fec::CouplingParticipantRef{
+                .participant_name = "side_b",
+                .system_name = "thermal_system",
+                .system = &system,
+            })
+            .addField(thermalField("side_a", &system, 1))
+            .addField(thermalField("side_b", &system, 2))
+            .addRegion(side_a_region)
+            .addRegion(side_b_region)
+            .addSharedRegion(fec::SharedRegionRef{
+                .name = "interface",
+                .required_region_kind = fec::CouplingRegionKind::InterfaceFace,
+                .participant_regions = {side_a_region, side_b_region},
+            });
+        context = builder.build();
+    }
+};
 
 } // namespace
 
@@ -110,6 +241,50 @@ TEST(ThermalInterfaceCouplingModule, DeclaresPartitionedTemperatureAndHeatFluxEx
     ASSERT_EQ(built_exchanges.size(), 2u);
     EXPECT_EQ(built_exchanges[0].producer_port.port_name, "side_a_temperature");
     EXPECT_EQ(built_exchanges[1].producer_port.port_name, "side_b_heat_flux");
+}
+
+TEST(ThermalInterfaceCouplingModule, BuildsPenaltyTemperatureContinuityForms)
+{
+    ThermalContextFixture fixture;
+    const fec::CouplingFormBuilder form_builder(fixture.context);
+    const ThermalInterfaceCouplingModule module;
+
+    EXPECT_TRUE(module.supportsMonolithicLowering());
+    const auto contributions = module.buildMonolithicForms(fixture.context,
+                                                           form_builder);
+    ASSERT_EQ(contributions.size(), 2u);
+
+    const auto* side_a = findContribution(
+        contributions,
+        "thermal_interface_temperature_continuity_side_a");
+    ASSERT_NE(side_a, nullptr);
+    EXPECT_EQ(side_a->origin, "ThermalInterfaceCouplingModule");
+    EXPECT_EQ(side_a->operator_name, "equations");
+    EXPECT_TRUE(hasFieldUse(side_a->field_uses, "side_a", "temperature"));
+    EXPECT_TRUE(
+        hasFieldUse(side_a->extra_trial_field_uses, "side_b", "temperature"));
+    ASSERT_TRUE(side_a->residual.isValid());
+    ASSERT_EQ(side_a->residual.node()->type(),
+              forms::FormExprType::InterfaceIntegral);
+    ASSERT_TRUE(side_a->residual.node()->interfaceMarker().has_value());
+    EXPECT_EQ(*side_a->residual.node()->interfaceMarker(), 10);
+    EXPECT_TRUE(containsFormExprType(*side_a->residual.node(),
+                                     forms::FormExprType::RestrictMinus));
+    EXPECT_TRUE(containsFormExprType(*side_a->residual.node(),
+                                     forms::FormExprType::RestrictPlus));
+
+    const auto* side_b = findContribution(
+        contributions,
+        "thermal_interface_temperature_continuity_side_b");
+    ASSERT_NE(side_b, nullptr);
+    EXPECT_TRUE(hasFieldUse(side_b->field_uses, "side_b", "temperature"));
+    EXPECT_TRUE(
+        hasFieldUse(side_b->extra_trial_field_uses, "side_a", "temperature"));
+    ASSERT_TRUE(side_b->residual.isValid());
+    ASSERT_EQ(side_b->residual.node()->type(),
+              forms::FormExprType::InterfaceIntegral);
+    ASSERT_TRUE(side_b->residual.node()->interfaceMarker().has_value());
+    EXPECT_EQ(*side_b->residual.node()->interfaceMarker(), 10);
 }
 
 TEST(ThermalInterfaceCouplingModule, RejectsInvalidOptionsDuringValidation)

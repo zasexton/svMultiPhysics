@@ -13,6 +13,7 @@
 #include <array>
 #include <span>
 #include <utility>
+#include <vector>
 
 namespace svmp {
 namespace Physics {
@@ -21,6 +22,7 @@ namespace coupling {
 namespace {
 
 namespace fec = FE::coupling;
+namespace forms = FE::forms;
 
 fec::CouplingFieldUse fieldUse(const std::string& participant,
                                const std::string& field)
@@ -87,6 +89,63 @@ void appendPartitionedExchangeDeclarations(
                   {options.side_a_name, options.side_b_name});
 }
 
+std::vector<fec::CouplingFormContribution> buildThermalPenaltyForms(
+    const ThermalInterfaceCouplingOptions& options,
+    const fec::CouplingContext& ctx,
+    const fec::CouplingFormBuilder& form_builder)
+{
+    static_cast<void>(ctx);
+
+    const auto interface = form_builder.sharedInterface(options.interface_name);
+    const auto side_a = interface.side(options.side_a_name);
+    const auto side_b = interface.side(options.side_b_name);
+
+    const auto temperature_a =
+        side_a.state(options.side_a_temperature_field, "T_a");
+    const auto temperature_a_test =
+        side_a.test(options.side_a_temperature_field, "w_a");
+    const auto temperature_b =
+        side_b.state(options.side_b_temperature_field, "T_b");
+    const auto temperature_b_test =
+        side_b.test(options.side_b_temperature_field, "w_b");
+    const auto penalty = forms::FormExpr::constant(options.temperature_penalty);
+    const auto temperature_jump = temperature_a - temperature_b;
+
+    std::vector<fec::CouplingFormContribution> contributions;
+
+    fec::CouplingFormContribution side_a_residual;
+    side_a_residual.contribution_name =
+        options.contract_name + "_temperature_continuity_side_a";
+    side_a_residual.origin = "ThermalInterfaceCouplingModule";
+    side_a_residual.operator_name = "equations";
+    side_a_residual.field_uses = {fieldUse(options.side_a_name,
+                                           options.side_a_temperature_field)};
+    side_a_residual.extra_trial_field_uses = {
+        fieldUse(options.side_b_name, options.side_b_temperature_field)};
+    side_a_residual.residual =
+        interface.integral(penalty * temperature_jump * temperature_a_test,
+                           options.side_a_name);
+    contributions.push_back(
+        form_builder.attachTerminalProvenance(std::move(side_a_residual)));
+
+    fec::CouplingFormContribution side_b_residual;
+    side_b_residual.contribution_name =
+        options.contract_name + "_temperature_continuity_side_b";
+    side_b_residual.origin = "ThermalInterfaceCouplingModule";
+    side_b_residual.operator_name = "equations";
+    side_b_residual.field_uses = {fieldUse(options.side_b_name,
+                                           options.side_b_temperature_field)};
+    side_b_residual.extra_trial_field_uses = {
+        fieldUse(options.side_a_name, options.side_a_temperature_field)};
+    side_b_residual.residual =
+        interface.integral(-penalty * temperature_jump * temperature_b_test,
+                           options.side_b_name);
+    contributions.push_back(
+        form_builder.attachTerminalProvenance(std::move(side_b_residual)));
+
+    return contributions;
+}
+
 fec::CouplingValidationResult validateOptionShape(
     const ThermalInterfaceCouplingOptions& options)
 {
@@ -109,6 +168,15 @@ fec::CouplingValidationResult validateOptionShape(
     }
     if (options.temperature_components <= 0 || options.heat_flux_components <= 0) {
         result.addError("thermal interface coupling requires positive component counts");
+    }
+    if (!(options.temperature_penalty > 0.0)) {
+        result.addError("thermal interface temperature penalty must be positive");
+    }
+    if (options.mode == fec::CouplingMode::Monolithic &&
+        options.formulation !=
+            ThermalInterfaceFormulation::TemperatureContinuityPenalty) {
+        result.addError(
+            "thermal interface monolithic mode currently supports the temperature-continuity penalty formulation");
     }
     if (options.mode == fec::CouplingMode::Partitioned) {
         if (options.side_a_heat_flux_field.empty() ||
@@ -183,6 +251,16 @@ void ThermalInterfaceCouplingModule::define(
     });
 
     appendPartitionedExchangeDeclarations(options_, builder);
+
+    if (options_.mode == fec::CouplingMode::Monolithic &&
+        options_.formulation ==
+            ThermalInterfaceFormulation::TemperatureContinuityPenalty) {
+        const auto options = options_;
+        builder.monolithic([options](const fec::CouplingContext& ctx,
+                                     const fec::CouplingFormBuilder& forms) {
+            return buildThermalPenaltyForms(options, ctx, forms);
+        });
+    }
 }
 
 void ThermalInterfaceCouplingModule::validate(const fec::CouplingContext& ctx) const

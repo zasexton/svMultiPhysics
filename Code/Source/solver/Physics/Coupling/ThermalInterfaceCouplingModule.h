@@ -21,8 +21,16 @@ namespace svmp {
 namespace Physics {
 namespace coupling {
 
+enum class ThermalInterfaceFormulation {
+    TemperatureContinuityPenalty,
+    SymmetricNitscheDiffusion,
+    ExplicitFluxBalance,
+};
+
 struct ThermalInterfaceCouplingOptions {
     FE::coupling::CouplingMode mode{FE::coupling::CouplingMode::Monolithic};
+    ThermalInterfaceFormulation formulation{
+        ThermalInterfaceFormulation::TemperatureContinuityPenalty};
     std::string contract_name{"thermal_interface"};
     std::string side_a_name{"side_a"};
     std::string side_b_name{"side_b"};
@@ -34,6 +42,7 @@ struct ThermalInterfaceCouplingOptions {
     std::string side_b_heat_flux_field{"heat_flux"};
     int temperature_components{1};
     int heat_flux_components{1};
+    double temperature_penalty{1.0};
 
     FE::coupling::CouplingTransferDeclaration temperature_transfer{};
     FE::coupling::CouplingTransferDeclaration heat_flux_transfer{};
