@@ -4582,7 +4582,7 @@ Unit-test verification checklist:
   BoundaryIntegral provenance with BoundaryFunctional fallback identity, and
   parameter/coefficient/material-state terminals do not become graph variables
   unless explicitly promoted by Analysis metadata.
-- [ ] `test_CouplingFormBuilder.cpp` verifies mesh-motion geometry-sensitivity
+- [x] `test_CouplingFormBuilder.cpp` verifies mesh-motion geometry-sensitivity
   install options require a declared and bound mesh-motion field and produce
   structured geometry-sensitivity provenance.
 - [ ] `test_CouplingFormBuilder.cpp` verifies geometry tangent policy
