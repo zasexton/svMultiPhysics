@@ -16,12 +16,25 @@
 #include "Coupling/CouplingContext.h"
 #include "Coupling/CouplingDeclaration.h"
 
+#include <optional>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace svmp {
 namespace FE {
 namespace coupling {
+
+[[nodiscard]] analysis::VariableKind toAnalysisVariableKind(
+    CouplingVariableKind kind) noexcept;
+
+[[nodiscard]] std::string couplingVariableUseAnalysisName(
+    const CouplingContext& context,
+    const CouplingVariableUse& variable);
+
+[[nodiscard]] std::optional<analysis::VariableKey> resolveCouplingVariableUse(
+    const CouplingContext& context,
+    const CouplingVariableUse& variable);
 
 class CouplingGraph {
 public:

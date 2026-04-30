@@ -562,6 +562,112 @@ TEST(CouplingContractValidation, PreservesVariableUseKindsInDependencies)
               std::string::npos);
 }
 
+TEST(CouplingContractValidation, AdaptsNonFieldVariableUsesToAnalysisKeys)
+{
+    CouplingContextBuilder context_builder;
+    context_builder
+        .addParticipant({
+            .participant_name = "fluid",
+            .system_name = "fluid_system",
+            .system = systemToken(1),
+        })
+        .addParticipant({
+            .participant_name = "solid",
+            .system_name = "solid_system",
+            .system = systemToken(2),
+        });
+    const auto context = context_builder.build();
+
+    const CouplingVariableUse auxiliary_input{
+        .kind = CouplingVariableKind::AuxiliaryInput,
+        .participant_name = "fluid",
+        .name = "inlet_pressure",
+    };
+    const auto auxiliary_input_key =
+        resolveCouplingVariableUse(context, auxiliary_input);
+    ASSERT_TRUE(auxiliary_input_key.has_value());
+    EXPECT_EQ(auxiliary_input_key->kind,
+              svmp::FE::analysis::VariableKind::AuxiliaryInput);
+    EXPECT_EQ(auxiliary_input_key->name, "fluid_system/inlet_pressure");
+    EXPECT_EQ(auxiliary_input_key->field_id, svmp::FE::INVALID_FIELD_ID);
+    EXPECT_EQ(auxiliary_input_key->component, -1);
+
+    const CouplingVariableUse auxiliary_output{
+        .kind = CouplingVariableKind::AuxiliaryOutput,
+        .participant_name = "solid",
+        .name = "wall_force",
+    };
+    const auto auxiliary_output_key =
+        resolveCouplingVariableUse(context, auxiliary_output);
+    ASSERT_TRUE(auxiliary_output_key.has_value());
+    EXPECT_EQ(auxiliary_output_key->kind,
+              svmp::FE::analysis::VariableKind::AuxiliaryOutput);
+    EXPECT_EQ(auxiliary_output_key->name, "solid_system/wall_force");
+
+    const CouplingVariableUse unresolved_owner{
+        .kind = CouplingVariableKind::BoundaryFunctional,
+        .participant_name = "interface",
+        .name = "traction",
+    };
+    const auto unresolved_key =
+        resolveCouplingVariableUse(context, unresolved_owner);
+    ASSERT_TRUE(unresolved_key.has_value());
+    EXPECT_EQ(unresolved_key->kind,
+              svmp::FE::analysis::VariableKind::BoundaryFunctional);
+    EXPECT_EQ(unresolved_key->name, "interface/traction");
+
+    const CouplingVariableUse global_scalar{
+        .kind = CouplingVariableKind::GlobalScalar,
+        .name = "mass_balance",
+    };
+    const auto global_key = resolveCouplingVariableUse(context, global_scalar);
+    ASSERT_TRUE(global_key.has_value());
+    EXPECT_EQ(global_key->kind,
+              svmp::FE::analysis::VariableKind::GlobalScalar);
+    EXPECT_EQ(global_key->name, "mass_balance");
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.non_field_dependencies.push_back(
+        CouplingFormNonFieldDependencyProvenance{
+            .kind = CouplingFormNonFieldDependencyKind::AuxiliaryInput,
+            .participant_name = "fluid",
+            .system_name = "fluid_system",
+            .name = "inlet_pressure",
+            .slot = 7,
+            .provider = "forms",
+        });
+    metadata.non_field_dependencies.push_back(
+        CouplingFormNonFieldDependencyProvenance{
+            .kind = CouplingFormNonFieldDependencyKind::AuxiliaryOutput,
+            .participant_name = "solid",
+            .system_name = "solid_system",
+            .name = "wall_force",
+            .output_id = 11,
+            .provider = "forms",
+        });
+    metadata.variable_dependencies.push_back(CouplingFormVariableDependencyProvenance{
+        .residual_row = svmp::FE::analysis::VariableKey::field(3),
+        .dependency = *auxiliary_input_key,
+        .provider = "forms",
+    });
+    metadata.variable_dependencies.push_back(CouplingFormVariableDependencyProvenance{
+        .residual_row = svmp::FE::analysis::VariableKey::field(4),
+        .dependency = *auxiliary_output_key,
+        .provider = "forms",
+    });
+
+    ASSERT_EQ(metadata.non_field_dependencies.size(), 2u);
+    ASSERT_TRUE(metadata.non_field_dependencies[0].slot.has_value());
+    EXPECT_EQ(*metadata.non_field_dependencies[0].slot, 7u);
+    ASSERT_TRUE(metadata.non_field_dependencies[1].output_id.has_value());
+    EXPECT_EQ(*metadata.non_field_dependencies[1].output_id, 11u);
+    ASSERT_EQ(metadata.variable_dependencies.size(), 2u);
+    EXPECT_EQ(metadata.variable_dependencies[0].dependency.name,
+              "fluid_system/inlet_pressure");
+    EXPECT_EQ(metadata.variable_dependencies[1].dependency.name,
+              "solid_system/wall_force");
+}
+
 TEST(CouplingContractValidation, HandlesOptionalAndRequiredContextDeclarations)
 {
     CouplingContractDeclaration declaration;

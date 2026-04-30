@@ -4281,7 +4281,7 @@ Unit-test verification checklist:
   `CouplingVariableUse` preserves field, auxiliary-state, AuxiliaryInput,
   AuxiliaryOutput, boundary-functional, and global-scalar variable identities
   without treating all dependency declarations as field-to-field blocks.
-- [ ] `test_CouplingContractValidation.cpp` verifies non-field
+- [x] `test_CouplingContractValidation.cpp` verifies non-field
   `CouplingVariableUse` records adapt to `analysis::VariableKey` using
   canonical owning-system or participant-qualified names, while slots and output
   ids appear only in resolved lookup/provenance metadata.

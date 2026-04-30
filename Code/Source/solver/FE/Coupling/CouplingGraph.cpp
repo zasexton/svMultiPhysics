@@ -20,13 +20,6 @@ namespace svmp {
 namespace FE {
 namespace coupling {
 
-namespace {
-
-bool isRequired(CouplingRequirement requirement) noexcept
-{
-    return requirement == CouplingRequirement::Required;
-}
-
 analysis::VariableKind toAnalysisVariableKind(CouplingVariableKind kind) noexcept
 {
     switch (kind) {
@@ -46,12 +39,47 @@ analysis::VariableKind toAnalysisVariableKind(CouplingVariableKind kind) noexcep
     return analysis::VariableKind::FieldComponent;
 }
 
-std::string scopedNonFieldName(const CouplingVariableUse& variable)
+std::string couplingVariableUseAnalysisName(const CouplingContext& context,
+                                            const CouplingVariableUse& variable)
 {
     if (variable.participant_name.empty()) {
         return variable.name;
     }
+    if (context.hasParticipant(variable.participant_name)) {
+        const auto participant = context.participant(variable.participant_name);
+        if (!participant.system_name.empty()) {
+            return participant.system_name + "/" + variable.name;
+        }
+    }
     return variable.participant_name + "/" + variable.name;
+}
+
+std::optional<analysis::VariableKey> resolveCouplingVariableUse(
+    const CouplingContext& context,
+    const CouplingVariableUse& variable)
+{
+    if (variable.kind == CouplingVariableKind::Field) {
+        if (!context.hasField(variable.participant_name, variable.name)) {
+            return std::nullopt;
+        }
+        return analysis::VariableKey::field(
+            context.field(variable.participant_name, variable.name).field_id,
+            variable.component);
+    }
+
+    if (variable.name.empty()) {
+        return std::nullopt;
+    }
+    return analysis::VariableKey::named(
+        toAnalysisVariableKind(variable.kind),
+        couplingVariableUseAnalysisName(context, variable));
+}
+
+namespace {
+
+bool isRequired(CouplingRequirement requirement) noexcept
+{
+    return requirement == CouplingRequirement::Required;
 }
 
 std::string variableLabel(const analysis::VariableKey& variable)
@@ -76,7 +104,8 @@ std::optional<analysis::VariableKey> resolveVariable(
     const CouplingVariableUse& variable,
     CouplingValidationResult& result)
 {
-    if (variable.kind == CouplingVariableKind::Field) {
+    const auto resolved = resolveCouplingVariableUse(context, variable);
+    if (!resolved.has_value() && variable.kind == CouplingVariableKind::Field) {
         if (!context.hasField(variable.participant_name, variable.name)) {
             if (isRequired(variable.requirement)) {
                 result.add(CouplingDiagnostic{
@@ -89,16 +118,9 @@ std::optional<analysis::VariableKey> resolveVariable(
             }
             return std::nullopt;
         }
-        return analysis::VariableKey::field(
-            context.field(variable.participant_name, variable.name).field_id,
-            variable.component);
     }
 
-    if (variable.name.empty()) {
-        return std::nullopt;
-    }
-    return analysis::VariableKey::named(toAnalysisVariableKind(variable.kind),
-                                        scopedNonFieldName(variable));
+    return resolved;
 }
 
 void validateInterfaceRegionTopology(const CouplingContractDeclaration& declaration,
