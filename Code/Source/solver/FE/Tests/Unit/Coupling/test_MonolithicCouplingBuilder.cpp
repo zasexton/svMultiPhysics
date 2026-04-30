@@ -2295,6 +2295,112 @@ TEST(MonolithicCouplingBuilder, AllowsExternalLaggedDependenciesWithoutBlocks)
     EXPECT_FALSE(fixture.system.isSetup());
 }
 
+TEST(MonolithicCouplingBuilder, InstallsMultipleContractsIntoSharedSystem)
+{
+    class ReverseContract final : public CouplingContract {
+    public:
+        [[nodiscard]] std::string name() const override
+        {
+            return "generic_reverse";
+        }
+
+        [[nodiscard]] CouplingContractDeclaration declare() const override
+        {
+            CouplingContractDeclaration declaration;
+            declaration.contract_type = name();
+            declaration.contract_name = "generic_reverse_instance";
+            declaration.participants.push_back({.participant_name = "left"});
+            declaration.participants.push_back({.participant_name = "right"});
+            declaration.fields.push_back({.participant_name = "left", .field_name = "primary"});
+            declaration.fields.push_back({.participant_name = "right", .field_name = "primary"});
+            declaration.dependencies.push_back(CouplingResidualDependency{
+                .residual_row = {
+                    .kind = CouplingVariableKind::Field,
+                    .participant_name = "left",
+                    .name = "primary",
+                },
+                .dependency = {
+                    .kind = CouplingVariableKind::Field,
+                    .participant_name = "right",
+                    .name = "primary",
+                },
+            });
+            declaration.expected_blocks.push_back(CouplingBlockExpectation{
+                .residual_row = declaration.dependencies.back().residual_row,
+                .dependency = declaration.dependencies.back().dependency,
+            });
+            return declaration;
+        }
+
+        [[nodiscard]] std::vector<CouplingFormContribution> buildMonolithicForms(
+            const CouplingContext&,
+            const CouplingFormBuilder& forms) const override
+        {
+            CouplingFormContribution contribution;
+            contribution.contribution_name = "generic_reverse_cell_coupling";
+            contribution.origin = "ReverseContract";
+            contribution.operator_name = "equations";
+            contribution.field_uses = {{.participant_name = "left", .field_name = "primary"}};
+            contribution.extra_trial_field_uses = {{
+                .participant_name = "right",
+                .field_name = "primary",
+            }};
+            contribution.residual =
+                (forms.state("right", "primary", "a") *
+                 forms.test("left", "primary", "w")).dx();
+            return {contribution};
+        }
+    };
+
+    BuilderFixture fixture;
+    const GenericTwoParticipantContract forward_contract;
+    const ReverseContract reverse_contract;
+    const MonolithicCouplingBuilder builder;
+    const CouplingFormBuilder forms(fixture.context);
+
+    const std::array<CouplingContractDeclaration, 2> declarations{
+        forward_contract.declare(),
+        reverse_contract.declare(),
+    };
+    const auto declaration_validation = builder.validateDeclarations(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(declaration_validation.ok())
+        << formatDiagnostics(declaration_validation);
+
+    auto contributions =
+        forward_contract.buildMonolithicForms(fixture.context, forms);
+    auto reverse_contributions =
+        reverse_contract.buildMonolithicForms(fixture.context, forms);
+    contributions.insert(contributions.end(),
+                         reverse_contributions.begin(),
+                         reverse_contributions.end());
+
+    const auto installed = builder.installFormContributions(
+        fixture.system,
+        fixture.context,
+        std::span<const CouplingFormContribution>(contributions));
+    ASSERT_EQ(installed.size(), 2u);
+
+    CouplingGraph graph;
+    const auto finalized_validation = builder.refreshFinalizedGraph(
+        graph,
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed));
+    EXPECT_TRUE(finalized_validation.ok())
+        << formatDiagnostics(finalized_validation);
+    EXPECT_NE(findDependency(installed[0],
+                             analysis::VariableKey::field(fixture.right_field),
+                             analysis::VariableKey::field(fixture.left_field)),
+              nullptr);
+    EXPECT_NE(findDependency(installed[1],
+                             analysis::VariableKey::field(fixture.left_field),
+                             analysis::VariableKey::field(fixture.right_field)),
+              nullptr);
+    EXPECT_EQ(fixture.system.formulationRecords().size(), 2u);
+}
+
 TEST(MonolithicCouplingBuilder, GenericInterfaceContractInstallsAndFinalizesGraph)
 {
     BuilderFixture fixture;

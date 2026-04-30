@@ -5054,7 +5054,7 @@ Unit-test verification checklist:
   stop setup before assembly.
 - [x] `test_MonolithicCouplingBuilder.cpp` verifies a minimal two-field
   coupling produces the expected off-diagonal Jacobian block metadata.
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies an N-contract graph can
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies an N-contract graph can
   install multiple coupling contributions into one shared `FESystem`.
 
 ### Phase 6: Partitioned Coupling Plan Generation
