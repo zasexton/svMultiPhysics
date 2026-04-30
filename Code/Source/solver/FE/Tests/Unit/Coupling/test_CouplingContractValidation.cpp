@@ -188,6 +188,48 @@ TEST(CouplingContractValidation, InvokesExpertInstallHooksThroughInstallContext)
     EXPECT_EQ(metadata[0].origin, "ExpertInstallContract");
 }
 
+TEST(CouplingContractValidation, ValidatesFormContributionNamesByContract)
+{
+    CouplingFormContribution unnamed;
+    unnamed.origin = "UnnamedContract";
+    const std::array<CouplingFormContribution, 1> unnamed_contributions{unnamed};
+    const auto unnamed_validation = validateFormContributionDeclarations(
+        std::span<const CouplingFormContribution>(unnamed_contributions));
+    EXPECT_FALSE(unnamed_validation.ok());
+    EXPECT_NE(formatDiagnostics(unnamed_validation).find("contribution name"),
+              std::string::npos);
+
+    CouplingFormContribution first;
+    first.contribution_name = "surface_balance";
+    first.origin = "FirstContract";
+    first.operator_name = "equations";
+    CouplingFormContribution duplicate = first;
+    duplicate.origin = "FirstContractDuplicate";
+    const std::array<CouplingFormContribution, 2> duplicates{first, duplicate};
+    const auto duplicate_validation = validateFormContributionDeclarations(
+        std::span<const CouplingFormContribution>(duplicates));
+    EXPECT_FALSE(duplicate_validation.ok());
+    EXPECT_NE(formatDiagnostics(duplicate_validation).find(
+                  "duplicate coupling form contribution name"),
+              std::string::npos);
+
+    CouplingFormContribution second;
+    second.contribution_name = "traction_balance";
+    second.origin = "SecondContract";
+    second.operator_name = "equations";
+    const std::array<CouplingFormContribution, 1> first_contract{first};
+    const std::array<CouplingFormContribution, 1> second_contract{second};
+    EXPECT_TRUE(validateFormContributionDeclarations(
+                    std::span<const CouplingFormContribution>(first_contract))
+                    .ok());
+    EXPECT_TRUE(validateFormContributionDeclarations(
+                    std::span<const CouplingFormContribution>(second_contract))
+                    .ok());
+    EXPECT_EQ(first_contract[0].operator_name, second_contract[0].operator_name);
+    EXPECT_NE(first_contract[0].contribution_name,
+              second_contract[0].contribution_name);
+}
+
 TEST(CouplingContractValidation, RejectsEmptyContractNames)
 {
     auto declaration = minimalDeclaration();

@@ -4313,7 +4313,7 @@ Unit-test verification checklist:
   declarations reject collisions and accept unique coupling fields.
 - [x] `test_CouplingContractValidation.cpp` verifies expert install hooks are
   invoked only through `MonolithicCouplingInstallContext`.
-- [ ] `test_CouplingContractValidation.cpp` verifies Forms contributions reject
+- [x] `test_CouplingContractValidation.cpp` verifies Forms contributions reject
   duplicate or empty contribution names within one contract and preserve
   contribution names distinctly across contracts sharing an operator tag.
 

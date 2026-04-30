@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -360,6 +361,9 @@ struct CouplingContractDeclaration {
 
 [[nodiscard]] CouplingValidationResult validateContractDeclarationShape(
     const CouplingContractDeclaration& declaration);
+
+[[nodiscard]] CouplingValidationResult validateFormContributionDeclarations(
+    std::span<const CouplingFormContribution> contributions);
 
 } // namespace coupling
 } // namespace FE

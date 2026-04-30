@@ -395,6 +395,25 @@ CouplingValidationResult validateContractDeclarationShape(
     return result;
 }
 
+CouplingValidationResult validateFormContributionDeclarations(
+    std::span<const CouplingFormContribution> contributions)
+{
+    CouplingValidationResult result;
+    for (std::size_t i = 0; i < contributions.size(); ++i) {
+        const auto& contribution = contributions[i];
+        if (contribution.contribution_name.empty()) {
+            result.addError("coupling form contribution requires a contribution name");
+        }
+        for (std::size_t j = i + 1u; j < contributions.size(); ++j) {
+            if (!contribution.contribution_name.empty() &&
+                contribution.contribution_name == contributions[j].contribution_name) {
+                result.addError("duplicate coupling form contribution name");
+            }
+        }
+    }
+    return result;
+}
+
 } // namespace coupling
 } // namespace FE
 } // namespace svmp

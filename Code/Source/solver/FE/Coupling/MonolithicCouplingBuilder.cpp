@@ -304,6 +304,8 @@ std::vector<CouplingFormAnalysisMetadata> MonolithicCouplingBuilder::installForm
     const CouplingContext& context,
     std::span<const CouplingFormContribution> contributions) const
 {
+    throwIfInvalid(validateFormContributionDeclarations(contributions));
+
     std::vector<CouplingFormAnalysisMetadata> installed;
     installed.reserve(contributions.size());
     for (const auto& contribution : contributions) {
