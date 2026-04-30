@@ -1498,7 +1498,7 @@ equation definitions, and partitioned strategy choices.
 - [x] FSI behavior is unchanged in existing tests.
 - [x] FSI file length is substantially reduced.
 - [x] FSI equations remain easy to review in one location.
-- [ ] FSI validation errors still identify contract, participant, field, and
+- [x] FSI validation errors still identify contract, participant, field, and
       region context.
 
 ## Phase 8: Add General Coupling Fixtures Before Broad Migration

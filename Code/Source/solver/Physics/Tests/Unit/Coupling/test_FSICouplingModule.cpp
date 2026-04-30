@@ -493,6 +493,18 @@ void expectValidationFailureContaining(const FSICouplingModule& module,
     }
 }
 
+std::string validationFailureText(const FSICouplingModule& module,
+                                  const fec::CouplingContext& context)
+{
+    try {
+        module.validate(context);
+        ADD_FAILURE() << "expected validation to fail";
+    } catch (const FE::InvalidArgumentException& exception) {
+        return exception.what();
+    }
+    return {};
+}
+
 } // namespace
 
 TEST(FSICouplingModule, DeclaresMonolithicRequirements)
@@ -1266,6 +1278,29 @@ TEST(FSICouplingModule, ValidatesInterfaceSharedRegionMappingsThroughGraph)
         module,
         missing_solid.context,
         "shared-interface participant mapping is missing from the context");
+}
+
+TEST(FSICouplingModule, FormatsValidationDiagnosticsWithContextLabels)
+{
+    const FSICouplingModule module;
+
+    auto components = FSIFieldComponents{};
+    components.fluid_velocity = 2;
+    FSIContextFixture bad_field(components);
+    const auto field_text = validationFailureText(module, bad_field.context);
+    EXPECT_NE(field_text.find("contract='fsi'"), std::string::npos);
+    EXPECT_NE(field_text.find("participant='fluid'"), std::string::npos);
+    EXPECT_NE(field_text.find("field='velocity'"), std::string::npos);
+
+    FSIContextFixture missing_solid(FSIFieldComponents{},
+                                    false,
+                                    true,
+                                    true,
+                                    false);
+    const auto region_text = validationFailureText(module, missing_solid.context);
+    EXPECT_NE(region_text.find("contract='fsi'"), std::string::npos);
+    EXPECT_NE(region_text.find("participant='solid'"), std::string::npos);
+    EXPECT_NE(region_text.find("region='interface'"), std::string::npos);
 }
 
 TEST(FSICouplingModule, RejectsALEWithoutMeshDisplacement)
