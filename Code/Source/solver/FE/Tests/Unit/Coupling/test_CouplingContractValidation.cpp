@@ -430,6 +430,72 @@ TEST(CouplingContractValidation, ResolvesAdditionalFieldNamespacesAndTargets)
                  svmp::FE::InvalidArgumentException);
 }
 
+TEST(CouplingContractValidation, PreservesDependencyModesAndResolutionEvidence)
+{
+    auto declaration = minimalDeclaration();
+    const CouplingVariableUse residual{
+        .kind = CouplingVariableKind::Field,
+        .participant_name = "left",
+        .name = "primary",
+    };
+    const CouplingVariableUse dependency{
+        .kind = CouplingVariableKind::Field,
+        .participant_name = "right",
+        .name = "primary",
+    };
+    declaration.dependencies.push_back(CouplingResidualDependency{
+        .residual_row = residual,
+        .dependency = dependency,
+        .mode = CouplingDependencyMode::ImplicitMonolithic,
+    });
+    declaration.dependencies.push_back(CouplingResidualDependency{
+        .residual_row = residual,
+        .dependency = dependency,
+        .mode = CouplingDependencyMode::ExternalLagged,
+    });
+
+    EXPECT_TRUE(validateContractDeclarationShape(declaration).ok());
+    ASSERT_EQ(declaration.dependencies.size(), 2u);
+    EXPECT_EQ(declaration.dependencies[0].mode,
+              CouplingDependencyMode::ImplicitMonolithic);
+    EXPECT_EQ(declaration.dependencies[1].mode,
+              CouplingDependencyMode::ExternalLagged);
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.field_uses.push_back(CouplingFormFieldProvenance{
+        .residual_row = 1,
+        .field = 2,
+        .appears_as_state_field = true,
+    });
+    metadata.geometry_sensitivity_provenance.push_back(
+        CouplingGeometrySensitivityProvenance{
+            .kind = CouplingGeometrySensitivityProvenanceKind::MeshMotionUnknowns,
+            .mesh_motion_field = 2,
+            .provenance_id = "mesh-motion",
+            .geometry_fields = {2},
+        });
+    metadata.variable_dependencies.push_back(CouplingFormVariableDependencyProvenance{
+        .residual_row = svmp::FE::analysis::VariableKey::field(1),
+        .dependency = svmp::FE::analysis::VariableKey::named(
+            svmp::FE::analysis::VariableKind::BoundaryFunctional,
+            "right/traction"),
+        .mode = CouplingDependencyMode::ImplicitMonolithic,
+        .domain = svmp::FE::analysis::DomainKind::Boundary,
+        .contributes_matrix_block = true,
+        .provider = "forms",
+    });
+
+    ASSERT_EQ(metadata.field_uses.size(), 1u);
+    EXPECT_TRUE(metadata.field_uses[0].appears_as_state_field);
+    ASSERT_EQ(metadata.geometry_sensitivity_provenance.size(), 1u);
+    EXPECT_EQ(metadata.geometry_sensitivity_provenance[0].mesh_motion_field, 2);
+    ASSERT_EQ(metadata.variable_dependencies.size(), 1u);
+    EXPECT_EQ(metadata.variable_dependencies[0].mode,
+              CouplingDependencyMode::ImplicitMonolithic);
+    EXPECT_EQ(metadata.variable_dependencies[0].dependency.kind,
+              svmp::FE::analysis::VariableKind::BoundaryFunctional);
+}
+
 TEST(CouplingContractValidation, HandlesOptionalAndRequiredContextDeclarations)
 {
     CouplingContractDeclaration declaration;

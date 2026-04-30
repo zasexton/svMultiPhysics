@@ -4272,7 +4272,7 @@ Unit-test verification checklist:
 - [x] `test_CouplingContractValidation.cpp` verifies participant-scoped and
   contract-owned additional fields have distinct namespaces and resolve to an
   explicit target `FESystem` before registration.
-- [ ] `test_CouplingContractValidation.cpp` verifies implicit-monolithic and
+- [x] `test_CouplingContractValidation.cpp` verifies implicit-monolithic and
   external/lagged dependency declarations are preserved distinctly, and that
   implicit dependencies can later resolve through `StateField` use, structured
   Systems geometry-sensitivity provenance, or supported non-field
