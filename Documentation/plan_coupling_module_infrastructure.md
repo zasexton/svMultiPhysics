@@ -4599,7 +4599,7 @@ Unit-test verification checklist:
 - [x] `test_CouplingFormBuilder.cpp` verifies contribution name, origin, and
   owning-system provenance survive resolution, installation metadata capture, and
   metadata adaptation.
-- [ ] `test_CouplingFormBuilder.cpp` verifies undeclared Forms dependencies
+- [x] `test_CouplingFormBuilder.cpp` verifies undeclared Forms dependencies
   are diagnosed.
 - [x] `test_CouplingTemporalRequirements.cpp` verifies temporal validation
   accepts supported derivative orders and rejects unsupported orders.
