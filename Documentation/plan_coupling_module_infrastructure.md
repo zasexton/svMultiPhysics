@@ -4585,7 +4585,7 @@ Unit-test verification checklist:
 - [x] `test_CouplingFormBuilder.cpp` verifies mesh-motion geometry-sensitivity
   install options require a declared and bound mesh-motion field and produce
   structured geometry-sensitivity provenance.
-- [ ] `test_CouplingFormBuilder.cpp` verifies geometry tangent policy
+- [x] `test_CouplingFormBuilder.cpp` verifies geometry tangent policy
   validation rejects `SymbolicRequired` and `SymbolicWithADCheck` in
   `GeometryConstant` mode, accepts `use_symbolic_tangent` in `GeometryConstant`
   as an ordinary symbolic-tangent request, requires `mesh_motion_field` for
