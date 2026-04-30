@@ -1860,6 +1860,132 @@ const ResolvedDeclaredDependency* findDeclaredDependency(
     return it == dependencies.end() ? nullptr : &*it;
 }
 
+const ResolvedExpectedBlock* findExpectedBlock(
+    const std::vector<ResolvedExpectedBlock>& blocks,
+    const analysis::VariableKey& row,
+    const analysis::VariableKey& dependency)
+{
+    const auto it = std::find_if(
+        blocks.begin(),
+        blocks.end(),
+        [&](const ResolvedExpectedBlock& block) {
+            return sameVariables(block.residual_row,
+                                 block.dependency,
+                                 row,
+                                 dependency);
+        });
+    return it == blocks.end() ? nullptr : &*it;
+}
+
+bool resolvedVariableKey(const analysis::VariableKey& key) noexcept
+{
+    if (key.kind == analysis::VariableKind::FieldComponent) {
+        return key.field_id != INVALID_FIELD_ID;
+    }
+    return !key.name.empty();
+}
+
+bool dependencyModeInfersInstalledForms(
+    std::span<const CouplingContractDeclaration> declarations)
+{
+    return !declarations.empty() &&
+           std::all_of(
+               declarations.begin(),
+               declarations.end(),
+               [](const CouplingContractDeclaration& declaration) {
+                   return declaration.dependency_declaration_mode ==
+                          CouplingDependencyDeclarationMode::InferFromInstalledForms;
+               });
+}
+
+std::string inferredDependencyContractName(
+    std::span<const CouplingContractDeclaration> declarations,
+    const CouplingFormAnalysisMetadata& form)
+{
+    if (declarations.size() == 1u) {
+        return declarations.front().contract_name;
+    }
+    return form.contribution_name;
+}
+
+void appendInferredDependency(
+    std::vector<ResolvedDeclaredDependency>& dependencies,
+    std::string contract_name,
+    const analysis::VariableKey& row,
+    const analysis::VariableKey& dependency,
+    CouplingDependencyMode mode)
+{
+    if (!resolvedVariableKey(row) || !resolvedVariableKey(dependency) ||
+        findDeclaredDependency(dependencies, row, dependency) != nullptr) {
+        return;
+    }
+    dependencies.push_back(ResolvedDeclaredDependency{
+        .contract_name = std::move(contract_name),
+        .residual_row = row,
+        .dependency = dependency,
+        .mode = mode,
+    });
+}
+
+void appendInferredExpectedBlock(
+    std::vector<ResolvedExpectedBlock>& expected_blocks,
+    std::string contract_name,
+    const analysis::VariableKey& row,
+    const analysis::VariableKey& dependency,
+    bool has_matrix,
+    bool has_vector)
+{
+    if ((!has_matrix && !has_vector) ||
+        !resolvedVariableKey(row) ||
+        !resolvedVariableKey(dependency) ||
+        findExpectedBlock(expected_blocks, row, dependency) != nullptr) {
+        return;
+    }
+    expected_blocks.push_back(ResolvedExpectedBlock{
+        .contract_name = std::move(contract_name),
+        .residual_row = row,
+        .dependency = dependency,
+        .expected_nonzero = true,
+        .expect_matrix_block = has_matrix,
+    });
+}
+
+void appendInstalledFormDependencyInferences(
+    std::span<const CouplingContractDeclaration> declarations,
+    std::span<const CouplingFormAnalysisMetadata> installed_forms,
+    std::vector<ResolvedDeclaredDependency>& dependencies,
+    std::vector<ResolvedExpectedBlock>& expected_blocks)
+{
+    if (!dependencyModeInfersInstalledForms(declarations)) {
+        return;
+    }
+
+    for (const auto& form : installed_forms) {
+        const auto contract_name =
+            inferredDependencyContractName(declarations, form);
+        for (const auto& installed : form.installed_dependencies) {
+            appendInferredDependency(dependencies,
+                                     contract_name,
+                                     installed.residual_row,
+                                     installed.dependency,
+                                     installed.mode);
+        }
+        for (const auto& block : form.installed_blocks) {
+            appendInferredDependency(dependencies,
+                                     contract_name,
+                                     block.residual_row,
+                                     block.dependency,
+                                     CouplingDependencyMode::ImplicitMonolithic);
+            appendInferredExpectedBlock(expected_blocks,
+                                        contract_name,
+                                        block.residual_row,
+                                        block.dependency,
+                                        block.has_matrix,
+                                        block.has_vector);
+        }
+    }
+}
+
 bool variableReferencesField(const analysis::VariableKey& variable,
                              FieldId field) noexcept
 {
@@ -2981,13 +3107,19 @@ CouplingValidationResult CouplingGraph::buildFinalizedGraph(
     CouplingValidationResult result = buildDeclarationGraph(context, declarations);
     installed_forms_.assign(installed_forms.begin(), installed_forms.end());
 
-    const auto declared_dependencies =
+    auto declared_dependencies =
         resolveDeclaredDependencies(context, declarations_, result);
     const auto declared_temporal_requirements =
         resolveDeclaredTemporalRequirements(context, declarations_, result);
     const auto declared_geometry_requirements =
         resolveDeclaredGeometryRequirements(context, declarations_, result);
-    const auto expected_blocks = resolveExpectedBlocks(context, declarations_, result);
+    auto expected_blocks = resolveExpectedBlocks(context, declarations_, result);
+    appendInstalledFormDependencyInferences(
+        std::span<const CouplingContractDeclaration>(declarations_.data(),
+                                                     declarations_.size()),
+        installed_forms,
+        declared_dependencies,
+        expected_blocks);
     validateRequiredNonFieldGraphVariables(
         context,
         std::span<const CouplingContractDeclaration>(declarations_.data(),

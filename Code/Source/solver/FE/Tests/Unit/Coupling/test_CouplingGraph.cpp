@@ -3508,6 +3508,24 @@ TEST(CouplingGraph, RejectsUndeclaredInstalledBlocks)
               std::string::npos);
 }
 
+TEST(CouplingGraph, InfersDependenciesFromInstalledFormsWhenRequested)
+{
+    auto declaration = twoParticipantDependencyDeclaration();
+    declaration.dependency_declaration_mode =
+        CouplingDependencyDeclarationMode::InferFromInstalledForms;
+    declaration.dependencies.clear();
+    declaration.expected_blocks.clear();
+
+    const std::vector<CouplingFormAnalysisMetadata> installed_forms{
+        installedDependencyMetadata()};
+    const auto validation = buildFinalizedGraph(
+        twoParticipantGraphContext(),
+        declaration,
+        installed_forms);
+
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+}
+
 TEST(CouplingGraph, RejectsExpectedZeroBlockWithInstalledEvidence)
 {
     auto declaration = twoParticipantDependencyDeclaration();

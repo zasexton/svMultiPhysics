@@ -1619,7 +1619,7 @@ enum class ThermalInterfaceFormulation {
 
 - [ ] Test residual-row inference from test fields.
 - [ ] Test dependency inference from state fields.
-- [ ] Test expected-block inference from installed block metadata.
+- [x] Test expected-block inference from installed block metadata.
 - [ ] Test temporal requirement inference from time derivatives.
 - [ ] Test geometry requirement inference from normal terminals.
 - [ ] Test geometry-sensitivity field-use inference.
