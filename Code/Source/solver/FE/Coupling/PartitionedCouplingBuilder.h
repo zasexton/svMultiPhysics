@@ -16,6 +16,8 @@
 #include "Coupling/CouplingDeclaration.h"
 
 #include <cstddef>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -56,8 +58,13 @@ private:
 class PartitionedCouplingBuilder {
 public:
     explicit PartitionedCouplingBuilder(std::string contract_name);
+    PartitionedCouplingBuilder(
+        std::string contract_name,
+        std::span<const CouplingFieldRequirement> field_requirements);
 
     [[nodiscard]] std::string_view contractName() const noexcept;
+    PartitionedCouplingBuilder& addFieldRequirement(
+        CouplingFieldRequirement requirement);
 
     [[nodiscard]] PartitionedExchangeBuilder exchange(
         std::string_view name,
@@ -76,12 +83,18 @@ public:
 private:
     friend class PartitionedExchangeBuilder;
 
+    [[nodiscard]] std::optional<CouplingValueDescriptor> valueDescriptorForField(
+        const CouplingFieldUse& field) const;
+    [[nodiscard]] std::optional<CouplingValueDescriptor>
+    inferredExchangeValueDescriptor(const CouplingFieldUse& producer_field,
+                                    const CouplingFieldUse& consumer_field) const;
     [[nodiscard]] CouplingExchangeDeclaration& mutableExchange(
         std::size_t index);
     [[nodiscard]] const CouplingExchangeDeclaration& exchange(
         std::size_t index) const;
 
     std::string contract_name_;
+    std::vector<CouplingFieldRequirement> field_requirements_;
     std::vector<CouplingExchangeDeclaration> declarations_;
 };
 

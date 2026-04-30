@@ -1343,7 +1343,7 @@ exchange(name, producer_endpoint, consumer_endpoint)
     .transfer(transfer_declaration);
 ```
 
-- [ ] Infer `CouplingValueDescriptor` from field requirements when possible.
+- [x] Infer `CouplingValueDescriptor` from field requirements when possible.
 - [ ] Require explicit value descriptors only for mixed-block, packed tensor, or
       driver-owned payloads.
 - [ ] Support exchanges involving field endpoints, region data, auxiliary
@@ -1371,7 +1371,7 @@ exchange(name, producer_endpoint, consumer_endpoint)
 - [ ] N-way partitioned exchange groups validate through the existing plan
       generator.
 - [x] Existing partitioned plan tests continue to validate resolved exchanges.
-- [ ] New tests verify inferred value descriptors from scalar and vector fields.
+- [x] New tests verify inferred value descriptors from scalar and vector fields.
 
 ## Phase 5: Add A Thin Definition-Backed Contract Adapter
 

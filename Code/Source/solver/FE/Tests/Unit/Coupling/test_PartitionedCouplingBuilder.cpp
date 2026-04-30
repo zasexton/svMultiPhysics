@@ -3,6 +3,9 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+#include <utility>
+
 using namespace svmp::FE;
 using namespace svmp::FE::coupling;
 
@@ -13,6 +16,19 @@ CouplingValueDescriptor vectorDescriptor(int components)
     return CouplingValueDescriptor{
         .rank = CouplingValueRank::Vector,
         .components = components,
+    };
+}
+
+CouplingFieldRequirement fieldRequirement(std::string participant,
+                                          std::string field,
+                                          CouplingValueDescriptor value)
+{
+    return CouplingFieldRequirement{
+        .field = CouplingFieldUse{
+            .participant_name = std::move(participant),
+            .field_name = std::move(field),
+        },
+        .value = std::move(value),
     };
 }
 
@@ -115,6 +131,92 @@ TEST(PartitionedCouplingBuilder, BuildsGenericEndpointExchangeDeclarations)
     EXPECT_TRUE(builder.declarations().empty());
     EXPECT_EQ(declarations.front().producer_port.port_name,
               "branch_pressure.producer");
+}
+
+TEST(PartitionedCouplingBuilder, InfersFieldExchangeValueDescriptors)
+{
+    PartitionedCouplingBuilder builder("thermal");
+    builder
+        .addFieldRequirement(fieldRequirement(
+            "wall",
+            "temperature",
+            CouplingValueDescriptor{
+                .rank = CouplingValueRank::Scalar,
+                .components = 1,
+            }))
+        .addFieldRequirement(fieldRequirement(
+            "solid",
+            "temperature",
+            CouplingValueDescriptor{
+                .rank = CouplingValueRank::Scalar,
+                .components = 1,
+            }))
+        .addFieldRequirement(fieldRequirement(
+            "fluid",
+            "velocity",
+            vectorDescriptor(3)))
+        .addFieldRequirement(fieldRequirement(
+            "mesh",
+            "velocity",
+            vectorDescriptor(3)));
+
+    static_cast<void>(builder.exchange(
+        "temperature",
+        CouplingFieldUse{
+            .participant_name = "wall",
+            .field_name = "temperature",
+        },
+        CouplingFieldUse{
+            .participant_name = "solid",
+            .field_name = "temperature",
+        }));
+    static_cast<void>(builder.exchange(
+        "velocity",
+        CouplingFieldUse{
+            .participant_name = "fluid",
+            .field_name = "velocity",
+        },
+        CouplingFieldUse{
+            .participant_name = "mesh",
+            .field_name = "velocity",
+        }));
+
+    const auto& declarations = builder.declarations();
+    ASSERT_EQ(declarations.size(), 2u);
+    EXPECT_EQ(declarations[0].value.rank, CouplingValueRank::Scalar);
+    EXPECT_EQ(declarations[0].value.components, 1);
+    EXPECT_EQ(declarations[1].value.rank, CouplingValueRank::Vector);
+    EXPECT_EQ(declarations[1].value.components, 3);
+}
+
+TEST(PartitionedCouplingBuilder, RejectsIncompatibleInferredValueDescriptors)
+{
+    PartitionedCouplingBuilder builder("bad_exchange");
+    builder
+        .addFieldRequirement(fieldRequirement(
+            "left",
+            "primary",
+            vectorDescriptor(3)))
+        .addFieldRequirement(fieldRequirement(
+            "right",
+            "primary",
+            CouplingValueDescriptor{
+                .rank = CouplingValueRank::Scalar,
+                .components = 1,
+            }));
+
+    EXPECT_THROW(static_cast<void>(
+                     builder.exchange(
+                         "primary",
+                         CouplingFieldUse{
+                             .participant_name = "left",
+                             .field_name = "primary",
+                         },
+                         CouplingFieldUse{
+                             .participant_name = "right",
+                             .field_name = "primary",
+                         })),
+                 InvalidArgumentException);
 }
 
 TEST(PartitionedCouplingBuilder, RejectsMissingContractOrExchangeNames)

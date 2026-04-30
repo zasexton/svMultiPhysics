@@ -9,6 +9,7 @@
 
 #include "Core/FEException.h"
 
+#include <algorithm>
 #include <utility>
 
 namespace svmp {
@@ -125,9 +126,25 @@ PartitionedCouplingBuilder::PartitionedCouplingBuilder(std::string contract_name
                 "partitioned coupling builder requires a contract name");
 }
 
+PartitionedCouplingBuilder::PartitionedCouplingBuilder(
+    std::string contract_name,
+    std::span<const CouplingFieldRequirement> field_requirements)
+    : PartitionedCouplingBuilder(std::move(contract_name))
+{
+    field_requirements_.assign(field_requirements.begin(),
+                               field_requirements.end());
+}
+
 std::string_view PartitionedCouplingBuilder::contractName() const noexcept
 {
     return contract_name_;
+}
+
+PartitionedCouplingBuilder& PartitionedCouplingBuilder::addFieldRequirement(
+    CouplingFieldRequirement requirement)
+{
+    field_requirements_.push_back(std::move(requirement));
+    return *this;
 }
 
 PartitionedExchangeBuilder PartitionedCouplingBuilder::exchange(
@@ -135,9 +152,14 @@ PartitionedExchangeBuilder PartitionedCouplingBuilder::exchange(
     const CouplingFieldUse& producer_field,
     const CouplingFieldUse& consumer_field)
 {
-    return exchange(name,
-                    fieldEndpoint(producer_field),
-                    fieldEndpoint(consumer_field));
+    auto handle = exchange(name,
+                           fieldEndpoint(producer_field),
+                           fieldEndpoint(consumer_field));
+    if (auto value = inferredExchangeValueDescriptor(producer_field,
+                                                     consumer_field)) {
+        handle.value(std::move(*value));
+    }
+    return handle;
 }
 
 PartitionedExchangeBuilder PartitionedCouplingBuilder::exchange(
@@ -174,6 +196,43 @@ std::vector<CouplingExchangeDeclaration>
 PartitionedCouplingBuilder::takeDeclarations()
 {
     return std::move(declarations_);
+}
+
+std::optional<CouplingValueDescriptor>
+PartitionedCouplingBuilder::valueDescriptorForField(
+    const CouplingFieldUse& field) const
+{
+    const auto it = std::find_if(
+        field_requirements_.begin(),
+        field_requirements_.end(),
+        [&](const CouplingFieldRequirement& requirement) {
+            return requirement.field.participant_name == field.participant_name &&
+                   requirement.field.field_name == field.field_name;
+        });
+    if (it == field_requirements_.end()) {
+        return std::nullopt;
+    }
+    return it->value;
+}
+
+std::optional<CouplingValueDescriptor>
+PartitionedCouplingBuilder::inferredExchangeValueDescriptor(
+    const CouplingFieldUse& producer_field,
+    const CouplingFieldUse& consumer_field) const
+{
+    const auto producer_value = valueDescriptorForField(producer_field);
+    const auto consumer_value = valueDescriptorForField(consumer_field);
+    if (producer_value.has_value() && consumer_value.has_value()) {
+        FE_THROW_IF(!couplingValueDescriptorsCompatible(*producer_value,
+                                                        *consumer_value),
+                    InvalidArgumentException,
+                    "partitioned exchange field requirements have incompatible value descriptors");
+        return producer_value;
+    }
+    if (producer_value.has_value()) {
+        return producer_value;
+    }
+    return consumer_value;
 }
 
 CouplingExchangeDeclaration& PartitionedCouplingBuilder::mutableExchange(
