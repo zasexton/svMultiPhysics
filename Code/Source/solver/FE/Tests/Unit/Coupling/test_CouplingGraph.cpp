@@ -329,6 +329,32 @@ CouplingContext twoParticipantGraphContext()
     return builder.build();
 }
 
+CouplingContext multiParticipantGraphContext()
+{
+    const auto* system = graphSystemToken();
+    const auto space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+
+    CouplingContextBuilder builder;
+    const std::array<std::string, 3> participants{"left", "middle", "right"};
+    for (std::size_t i = 0; i < participants.size(); ++i) {
+        builder.addParticipant({
+            .participant_name = participants[i],
+            .system_name = "system",
+            .system = system,
+        });
+        builder.addField({
+            .participant_name = participants[i],
+            .system_name = "system",
+            .system = system,
+            .field_name = "primary",
+            .field_id = static_cast<FieldId>(i + 1u),
+            .space = space,
+            .components = 1,
+        });
+    }
+    return builder.build();
+}
+
 CouplingContext interfaceGraphContext(int left_marker = 17,
                                       int right_marker = 17)
 {
@@ -856,6 +882,33 @@ TEST(CouplingGraph, SeparatesContractTypesFromInstances)
     EXPECT_NE(formatDiagnostics(duplicate_validation)
                   .find("duplicate coupling contract instance name"),
               std::string::npos);
+}
+
+TEST(CouplingGraph, BuildsGraphForMultiwayContract)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "multiway";
+    declaration.contract_name = "three_way_interface";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "middle"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.fields.push_back({.participant_name = "left", .field_name = "primary"});
+    declaration.fields.push_back({.participant_name = "middle", .field_name = "primary"});
+    declaration.fields.push_back({.participant_name = "right", .field_name = "primary"});
+
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const auto validation = graph.buildDeclarationGraph(
+        multiParticipantGraphContext(),
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto& snapshot = graph.snapshot();
+    EXPECT_EQ(snapshot.participants.size(), 3u);
+    EXPECT_EQ(snapshot.fields.size(), 3u);
+    ASSERT_EQ(snapshot.contract_instances.size(), 1u);
+    EXPECT_EQ(snapshot.contract_instances[0].contract_name,
+              "three_way_interface");
 }
 
 TEST(CouplingGraph, RecordsDeclarationGraphNodeCategories)

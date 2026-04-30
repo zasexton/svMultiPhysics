@@ -4800,7 +4800,7 @@ Unit-test verification checklist:
 - [x] `test_CouplingGraph.cpp` distinguishes reusable contract type nodes from
   configured contract instance nodes and rejects duplicate instance names even
   when the contract type differs.
-- [ ] `test_CouplingGraph.cpp` builds a graph for a valid multiway contract
+- [x] `test_CouplingGraph.cpp` builds a graph for a valid multiway contract
   with three or more participants.
 - [x] `test_CouplingGraph.cpp` rejects missing required participants, fields,
   participant-local regions, and shared regions.
