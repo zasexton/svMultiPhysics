@@ -304,6 +304,25 @@ TEST(CouplingGraph, RejectsMissingRequiredContextReferences)
     EXPECT_NE(text.find("required shared region is missing"), std::string::npos);
 }
 
+TEST(CouplingGraph, FormatsMissingContextDiagnosticsWithLookupNames)
+{
+    auto declaration = graphDeclaration();
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.fields.push_back({.participant_name = "right", .field_name = "primary"});
+    declaration.regions.push_back({.participant_name = "right", .region_name = "surface"});
+    declaration.shared_regions.push_back({.shared_region_name = "other_interface"});
+
+    const auto validation = buildGraph(graphContext(), declaration);
+    ASSERT_FALSE(validation.ok());
+
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("contract='generic_instance'"), std::string::npos);
+    EXPECT_NE(text.find("participant='right'"), std::string::npos);
+    EXPECT_NE(text.find("field='primary'"), std::string::npos);
+    EXPECT_NE(text.find("region='surface'"), std::string::npos);
+    EXPECT_NE(text.find("region='other_interface'"), std::string::npos);
+}
+
 TEST(CouplingGraph, AllowsAbsentOptionalContextReferences)
 {
     auto declaration = graphDeclaration();

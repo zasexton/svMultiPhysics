@@ -3761,7 +3761,7 @@ Unit-test verification checklist:
   enabled without a public bridge or explicit synthetic metadata fixture.
 - [x] Add a scanner-normalization test fixture that proves bridge consumers see
   explicit terminal kinds rather than relying on scanner container names.
-- [ ] Add a diagnostics formatting test that verifies missing context values
+- [x] Add a diagnostics formatting test that verifies missing context values
   include enough names to identify the failing contract and lookup.
 
 ### Phase 1: FE Coupling Vocabulary, Context, And Shared Regions
