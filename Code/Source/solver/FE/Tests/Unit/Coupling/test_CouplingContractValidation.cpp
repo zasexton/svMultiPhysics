@@ -220,7 +220,10 @@ TEST(CouplingContractValidation, ValidatesOptionalAdditionalFieldSelection)
         .requirement = CouplingRequirement::Optional,
         .enabled = false,
     });
-    EXPECT_TRUE(validateContractDeclarationShape(declaration).ok());
+    const auto skipped_validation = validateContractDeclarationShape(declaration);
+    EXPECT_TRUE(skipped_validation.ok());
+    EXPECT_NE(formatDiagnostics(skipped_validation).find("disabled optional additional field is skipped"),
+              std::string::npos);
 
     declaration.additional_fields[0].enabled = true;
     const auto selected_validation = validateContractDeclarationShape(declaration);
@@ -254,6 +257,24 @@ TEST(CouplingContractValidation, ValidatesOptionalAdditionalFieldSelection)
     const auto referenced_disabled = validateContractDeclarationShape(declaration);
     EXPECT_FALSE(referenced_disabled.ok());
     EXPECT_NE(formatDiagnostics(referenced_disabled).find("disabled optional additional field"),
+              std::string::npos);
+
+    declaration.dependencies.clear();
+    declaration.expected_blocks.push_back(CouplingBlockExpectation{
+        .residual_row = {
+            .kind = CouplingVariableKind::Field,
+            .participant_name = "generic_instance",
+            .name = "optional_lambda",
+        },
+        .dependency = {
+            .kind = CouplingVariableKind::Field,
+            .participant_name = "left",
+            .name = "primary",
+        },
+    });
+    const auto expected_block_reference = validateContractDeclarationShape(declaration);
+    EXPECT_FALSE(expected_block_reference.ok());
+    EXPECT_NE(formatDiagnostics(expected_block_reference).find("disabled optional additional field"),
               std::string::npos);
 }
 

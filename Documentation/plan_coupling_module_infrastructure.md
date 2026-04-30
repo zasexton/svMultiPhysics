@@ -4266,7 +4266,7 @@ Unit-test verification checklist:
   and positive mismatches are rejected.
 - [x] `test_CouplingContractValidation.cpp` verifies optional declarations do
   not fail validation when absent and required declarations do fail.
-- [ ] `test_CouplingContractValidation.cpp` verifies optional additional-field
+- [x] `test_CouplingContractValidation.cpp` verifies optional additional-field
   declarations are skipped with diagnostics when prerequisites are absent, but
   fail if a dependency or expected block still references the skipped field.
 - [ ] `test_CouplingContractValidation.cpp` verifies participant-scoped and

@@ -206,6 +206,12 @@ CouplingValidationResult validateContractDeclarationShape(
             result.addError("required additional fields cannot be disabled");
         }
         if (!additionalFieldSelected(field)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Warning,
+                .contract_name = declaration.contract_name,
+                .field_name = field.field_name,
+                .message = "disabled optional additional field is skipped",
+            });
             if (declarationReferencesAdditionalField(declaration, field)) {
                 result.addError("disabled optional additional field is referenced by a dependency or expected block");
             }
