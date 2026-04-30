@@ -620,6 +620,8 @@ TEST(FSICouplingModule, DeclaresPartitionedExchanges)
     EXPECT_EQ(displacement.consumer->temporal.slot,
               fec::CouplingTemporalSlot::Current);
     EXPECT_EQ(displacement.shared_region_name, "interface");
+    EXPECT_FALSE(displacement.producer_region.has_value());
+    EXPECT_FALSE(displacement.consumer_region.has_value());
     EXPECT_EQ(displacement.transfer.kind, fec::CouplingTransferKind::Identity);
 
     const auto& load = declaration.partitioned_exchange_declarations[1];
@@ -638,29 +640,6 @@ TEST(FSICouplingModule, DeclaresPartitionedExchanges)
     EXPECT_EQ(declaration.group_hints[0].name, "fsi_participants");
     EXPECT_EQ(declaration.group_hints[0].participant_names,
               (std::vector<std::string>{"fluid", "solid"}));
-
-    FSIContextFixture fixture(FSIFieldComponents{},
-                              false,
-                              true,
-                              true,
-                              true,
-                              true,
-                              false);
-    const auto resolved_exchanges =
-        module.buildPartitionedExchangeDeclarations(fixture.context);
-    ASSERT_EQ(resolved_exchanges.size(), 2u);
-    ASSERT_TRUE(resolved_exchanges[0].producer_region.has_value());
-    EXPECT_EQ(resolved_exchanges[0].producer_region->participant_name, "solid");
-    EXPECT_EQ(resolved_exchanges[0].producer_region->region_name,
-              "solid_interface");
-    ASSERT_TRUE(resolved_exchanges[0].consumer_region.has_value());
-    EXPECT_EQ(resolved_exchanges[0].consumer_region->participant_name, "fluid");
-    EXPECT_EQ(resolved_exchanges[0].consumer_region->region_name,
-              "fluid_interface");
-    ASSERT_TRUE(resolved_exchanges[1].producer_region.has_value());
-    EXPECT_EQ(resolved_exchanges[1].producer_region->participant_name, "fluid");
-    ASSERT_TRUE(resolved_exchanges[1].consumer_region.has_value());
-    EXPECT_EQ(resolved_exchanges[1].consumer_region->participant_name, "solid");
 }
 
 TEST(FSICouplingModule, ValidatesPartitionedIdentityTransfersWithResolvedRegions)

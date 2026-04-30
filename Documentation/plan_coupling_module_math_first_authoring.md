@@ -1361,11 +1361,11 @@ exchange(name, producer_endpoint, consumer_endpoint)
 
 ### Completion Checklist
 
-- [ ] FSI partitioned exchange definitions are reduced to logical channels and
+- [x] FSI partitioned exchange definitions are reduced to logical channels and
       transfer choices.
 - [ ] Thermal partitioned exchange definitions are reduced to logical channels
       and transfer choices.
-- [ ] Physics modules do not manually attach producer/consumer region endpoints.
+- [x] Physics modules do not manually attach producer/consumer region endpoints.
 - [ ] Multi-PDE auxiliary and global-scalar exchanges are expressible through
       existing endpoint records.
 - [ ] N-way partitioned exchange groups validate through the existing plan
@@ -1485,7 +1485,7 @@ equation definitions, and partitioned strategy choices.
       - [x] `validateInterfaceRegionMappings`
       - [x] `validateMonolithicFieldSystems`
       - [x] `validateMonolithicInterfaceTopology`
-      - [ ] manual partitioned endpoint attachment
+      - [x] manual partitioned endpoint attachment
       - [ ] manual monolithic dependency appending
       - [ ] manual expected-block appending
 

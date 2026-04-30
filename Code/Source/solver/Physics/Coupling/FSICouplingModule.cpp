@@ -12,7 +12,6 @@
 #include "FE/Coupling/CouplingFormBuilder.h"
 #include "FE/Coupling/CouplingGraph.h"
 
-#include <algorithm>
 #include <array>
 #include <optional>
 #include <span>
@@ -265,63 +264,6 @@ void validateALEMeshRequirements(fec::CouplingValidationResult& result,
     }
 }
 
-const fec::CouplingRegionRef* findSharedRegionParticipant(
-    const fec::SharedRegionRef& group,
-    const std::string& participant)
-{
-    const auto it = std::find_if(
-        group.participant_regions.begin(),
-        group.participant_regions.end(),
-        [&](const fec::CouplingRegionRef& region) {
-            return region.participant_name == participant;
-        });
-    return it == group.participant_regions.end() ? nullptr : &*it;
-}
-
-std::optional<fec::CouplingRegionEndpointDeclaration> partitionedRegionEndpoint(
-    const fec::CouplingContext& ctx,
-    const FSICouplingOptions& options,
-    const std::string& participant_name)
-{
-    if (!ctx.hasSharedRegion(options.interface_name)) {
-        return std::nullopt;
-    }
-    const auto group = ctx.sharedRegionGroup(options.interface_name);
-    const auto* region = findSharedRegionParticipant(group, participant_name);
-    if (region == nullptr) {
-        return std::nullopt;
-    }
-    return fec::CouplingRegionEndpointDeclaration{
-        .participant_name = region->participant_name,
-        .region_name = region->region_name,
-        .shared_region_name = options.interface_name,
-    };
-}
-
-void attachPartitionedRegionEndpoints(
-    const fec::CouplingContext& ctx,
-    const FSICouplingOptions& options,
-    std::vector<fec::CouplingExchangeDeclaration>& exchanges)
-{
-    if (options.mode != fec::CouplingMode::Partitioned) {
-        return;
-    }
-    for (auto& exchange : exchanges) {
-        if (exchange.producer.has_value() &&
-            exchange.producer->participant_name.has_value()) {
-            exchange.producer_region =
-                partitionedRegionEndpoint(
-                    ctx, options, *exchange.producer->participant_name);
-        }
-        if (exchange.consumer.has_value() &&
-            exchange.consumer->participant_name.has_value()) {
-            exchange.consumer_region =
-                partitionedRegionEndpoint(
-                    ctx, options, *exchange.consumer->participant_name);
-        }
-    }
-}
-
 } // namespace
 
 FSICouplingModule::FSICouplingModule(FSICouplingOptions options)
@@ -426,10 +368,6 @@ void FSICouplingModule::validate(const fec::CouplingContext& ctx) const
     auto result = validateOptionShape(options_);
     validateALEMeshRequirements(result, ctx, options_);
     auto declaration = declare();
-    if (options_.mode == fec::CouplingMode::Partitioned) {
-        declaration.partitioned_exchange_declarations =
-            buildPartitionedExchangeDeclarations(ctx);
-    }
     FE::coupling::CouplingGraph graph;
     const std::array<fec::CouplingContractDeclaration, 1> declarations{declaration};
     result.append(graph.buildDeclarationGraph(
@@ -542,19 +480,6 @@ FSICouplingModule::buildMonolithicForms(
         form_builder.attachTerminalProvenance(std::move(traction)));
 
     return contributions;
-}
-
-std::vector<fec::CouplingExchangeDeclaration>
-FSICouplingModule::buildPartitionedExchangeDeclarations(
-    const fec::CouplingContext& ctx) const
-{
-    if (options_.mode != fec::CouplingMode::Partitioned) {
-        return {};
-    }
-    auto declaration = declare();
-    auto exchanges = std::move(declaration.partitioned_exchange_declarations);
-    attachPartitionedRegionEndpoints(ctx, options_, exchanges);
-    return exchanges;
 }
 
 } // namespace coupling

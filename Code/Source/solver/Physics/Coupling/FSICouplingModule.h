@@ -81,9 +81,6 @@ public:
         const FE::coupling::CouplingContext& ctx,
         const FE::coupling::CouplingFormBuilder& form_builder) const override;
 
-    [[nodiscard]] std::vector<FE::coupling::CouplingExchangeDeclaration>
-    buildPartitionedExchangeDeclarations(const FE::coupling::CouplingContext& ctx) const override;
-
 protected:
     [[nodiscard]] std::string contractInstanceName() const override;
     void define(FE::coupling::CouplingDefinitionBuilder& builder) const override;
