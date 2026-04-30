@@ -4055,7 +4055,7 @@ Unit-test verification checklist:
 - [x] `test_CouplingContext.cpp` verifies `UserDefined` regions fail Forms,
   interface-transfer, and geometry-terminal lowering unless they resolve to a
   concrete FE integration kind or explicit provider-extension path.
-- [ ] `test_SharedRegionRegistry.cpp` verifies interface shared regions expose
+- [x] `test_SharedRegionRegistry.cpp` verifies interface shared regions expose
   per-participant `.dI(marker)` marker and side/orientation metadata.
 - [ ] `test_SharedRegionRegistry.cpp` verifies minus/plus side ownership is
   recorded per participant and rejected when ambiguous.

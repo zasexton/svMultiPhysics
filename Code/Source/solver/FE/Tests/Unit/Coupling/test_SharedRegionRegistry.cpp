@@ -1,5 +1,6 @@
 #include "Coupling/SharedRegionRegistry.h"
 
+#include "Forms/FormExpr.h"
 #include "Spaces/H1Space.h"
 
 #include <gtest/gtest.h>
@@ -22,7 +23,8 @@ const systems::FESystem* registrySystemToken(std::uintptr_t value)
 CouplingRegionRef registryRegion(std::string participant_name,
                                  std::string region_name,
                                  CouplingRegionKind kind,
-                                 int marker)
+                                 int marker,
+                                 CouplingInterfaceSide side = CouplingInterfaceSide::None)
 {
     return CouplingRegionRef{
         .participant_name = std::move(participant_name),
@@ -31,6 +33,7 @@ CouplingRegionRef registryRegion(std::string participant_name,
         .region_name = std::move(region_name),
         .kind = kind,
         .marker = marker,
+        .side = side,
     };
 }
 
@@ -52,6 +55,42 @@ TEST(SharedRegionRegistry, RegistersAndFindsParticipantRegions)
     ASSERT_NE(registry.find("interface"), nullptr);
     ASSERT_NE(registry.findParticipantRegion("interface", "left"), nullptr);
     EXPECT_EQ(registry.findParticipantRegion("interface", "right")->marker, 3);
+}
+
+TEST(SharedRegionRegistry, ExposesInterfaceMarkersAndSidesForFormsLowering)
+{
+    SharedRegionRegistry registry;
+    registry.add(SharedRegionRef{
+        .name = "interface",
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .participant_regions = {
+            registryRegion("left", "surface", CouplingRegionKind::InterfaceFace,
+                           10, CouplingInterfaceSide::Minus),
+            registryRegion("right", "surface", CouplingRegionKind::InterfaceFace,
+                           11, CouplingInterfaceSide::Plus),
+        },
+    });
+
+    const auto validation = registry.validate();
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto* left = registry.findParticipantRegion("interface", "left");
+    const auto* right = registry.findParticipantRegion("interface", "right");
+    ASSERT_NE(left, nullptr);
+    ASSERT_NE(right, nullptr);
+    EXPECT_EQ(left->marker, 10);
+    EXPECT_EQ(left->side, CouplingInterfaceSide::Minus);
+    EXPECT_EQ(right->marker, 11);
+    EXPECT_EQ(right->side, CouplingInterfaceSide::Plus);
+
+    const auto left_integral = forms::FormExpr::constant(1.0).dI(left->marker);
+    const auto right_integral = forms::FormExpr::constant(1.0).dI(right->marker);
+    EXPECT_EQ(left_integral.node()->type(), forms::FormExprType::InterfaceIntegral);
+    ASSERT_TRUE(left_integral.node()->interfaceMarker().has_value());
+    EXPECT_EQ(*left_integral.node()->interfaceMarker(), 10);
+    EXPECT_EQ(right_integral.node()->type(), forms::FormExprType::InterfaceIntegral);
+    ASSERT_TRUE(right_integral.node()->interfaceMarker().has_value());
+    EXPECT_EQ(*right_integral.node()->interfaceMarker(), 11);
 }
 
 TEST(SharedRegionRegistry, RegistersAndFindsNParticipantRegions)
