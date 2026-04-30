@@ -39,15 +39,15 @@ fec::CouplingFieldUse fieldUse(const std::string& participant,
 }
 
 fec::CouplingEndpointRef fieldEndpoint(const std::string& participant,
-                                       const std::string& field)
+                                       const std::string& field,
+                                       fec::CouplingTemporalSlotDescriptor temporal =
+                                           fec::CouplingTemporalSlotDescriptor{})
 {
     return fec::CouplingEndpointRef{
         .kind = fec::CouplingEndpointKind::Field,
         .participant_name = participant,
         .endpoint_name = field,
-        .temporal = fec::CouplingTemporalSlotDescriptor{
-            .slot = fec::CouplingTemporalSlot::Current,
-        },
+        .temporal = std::move(temporal),
     };
 }
 
@@ -117,9 +117,13 @@ void appendPartitionedExchangeDeclarations(
             .consumer_port = port(options, "fluid_displacement"),
             .value = interfaceVectorValue(options),
             .producer = fieldEndpoint(options.solid_name,
-                                      options.solid_displacement_field),
+                                      options.solid_displacement_field,
+                                      options.partitioned_temporal
+                                          .solid_displacement_source),
             .consumer = fieldEndpoint(options.fluid_name,
-                                      options.fluid_velocity_field),
+                                      options.fluid_velocity_field,
+                                      options.partitioned_temporal
+                                          .fluid_displacement_target),
             .shared_region_name = options.interface_name,
             .transfer = options.solid_to_fluid_transfer,
         });
@@ -130,9 +134,13 @@ void appendPartitionedExchangeDeclarations(
             .consumer_port = port(options, "solid_load"),
             .value = interfaceVectorValue(options),
             .producer = fieldEndpoint(options.fluid_name,
-                                      options.fluid_velocity_field),
+                                      options.fluid_velocity_field,
+                                      options.partitioned_temporal
+                                          .fluid_load_source),
             .consumer = fieldEndpoint(options.solid_name,
-                                      options.solid_displacement_field),
+                                      options.solid_displacement_field,
+                                      options.partitioned_temporal
+                                          .solid_load_target),
             .shared_region_name = options.interface_name,
             .transfer = options.fluid_to_solid_transfer,
         });

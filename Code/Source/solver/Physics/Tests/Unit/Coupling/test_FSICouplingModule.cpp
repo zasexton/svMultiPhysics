@@ -494,9 +494,13 @@ TEST(FSICouplingModule, DeclaresPartitionedExchanges)
     ASSERT_TRUE(displacement.producer.has_value());
     EXPECT_EQ(displacement.producer->participant_name, "solid");
     EXPECT_EQ(displacement.producer->endpoint_name, "displacement");
+    EXPECT_EQ(displacement.producer->temporal.slot,
+              fec::CouplingTemporalSlot::Current);
     ASSERT_TRUE(displacement.consumer.has_value());
     EXPECT_EQ(displacement.consumer->participant_name, "fluid");
     EXPECT_EQ(displacement.consumer->endpoint_name, "velocity");
+    EXPECT_EQ(displacement.consumer->temporal.slot,
+              fec::CouplingTemporalSlot::Current);
     EXPECT_EQ(displacement.shared_region_name, "interface");
     EXPECT_EQ(displacement.transfer.kind, fec::CouplingTransferKind::Identity);
 
@@ -505,8 +509,12 @@ TEST(FSICouplingModule, DeclaresPartitionedExchanges)
     EXPECT_EQ(load.consumer_port.port_name, "solid_load");
     ASSERT_TRUE(load.producer.has_value());
     EXPECT_EQ(load.producer->participant_name, "fluid");
+    EXPECT_EQ(load.producer->temporal.slot,
+              fec::CouplingTemporalSlot::Current);
     ASSERT_TRUE(load.consumer.has_value());
     EXPECT_EQ(load.consumer->participant_name, "solid");
+    EXPECT_EQ(load.consumer->temporal.slot,
+              fec::CouplingTemporalSlot::Current);
 
     ASSERT_EQ(declaration.group_hints.size(), 1u);
     EXPECT_EQ(declaration.group_hints[0].name, "fsi_participants");
@@ -569,6 +577,10 @@ TEST(FSICouplingModule, ValidatesPartitionedIdentityTransfersWithResolvedRegions
     ASSERT_EQ(plan.exchanges.size(), 2u);
     EXPECT_EQ(plan.exchanges[0].producer.field_id, static_cast<FE::FieldId>(3));
     EXPECT_EQ(plan.exchanges[0].consumer.field_id, static_cast<FE::FieldId>(1));
+    EXPECT_EQ(plan.exchanges[0].producer.temporal.backing,
+              fec::CouplingResolvedTemporalBackingKind::SystemStateCurrent);
+    EXPECT_EQ(plan.exchanges[0].consumer.temporal.backing,
+              fec::CouplingResolvedTemporalBackingKind::SystemStateCurrent);
     ASSERT_TRUE(plan.exchanges[0].producer_region.has_value());
     EXPECT_EQ(plan.exchanges[0].producer_region->region_name,
               "solid_interface");
@@ -578,6 +590,117 @@ TEST(FSICouplingModule, ValidatesPartitionedIdentityTransfersWithResolvedRegions
     ASSERT_EQ(plan.group_hints.size(), 1u);
     EXPECT_EQ(plan.group_hints[0].participant_names,
               (std::vector<std::string>{"fluid", "solid"}));
+}
+
+TEST(FSICouplingModule, ResolvesExplicitPartitionedFieldTemporalSlots)
+{
+    auto options = partitionedIdentityOptions();
+    options.partitioned_temporal.solid_displacement_source =
+        fec::CouplingTemporalSlotDescriptor{
+            .slot = fec::CouplingTemporalSlot::History,
+            .history_index = 2,
+        };
+    options.partitioned_temporal.fluid_displacement_target =
+        fec::CouplingTemporalSlotDescriptor{
+            .slot = fec::CouplingTemporalSlot::Predicted,
+        };
+    options.partitioned_temporal.fluid_load_source =
+        fec::CouplingTemporalSlotDescriptor{
+            .slot = fec::CouplingTemporalSlot::Predicted,
+        };
+    options.partitioned_temporal.solid_load_target =
+        fec::CouplingTemporalSlotDescriptor{
+            .slot = fec::CouplingTemporalSlot::History,
+            .history_index = 1,
+        };
+
+    const FSICouplingModule module(options);
+    FSIContextFixture fixture(FSIFieldComponents{},
+                              false,
+                              true,
+                              true,
+                              true,
+                              true,
+                              false);
+
+    EXPECT_NO_THROW(module.validate(fixture.context));
+
+    const auto exchanges =
+        module.buildPartitionedExchangeDeclarations(fixture.context);
+    ASSERT_EQ(exchanges.size(), 2u);
+    ASSERT_TRUE(exchanges[0].producer.has_value());
+    EXPECT_EQ(exchanges[0].producer->temporal.slot,
+              fec::CouplingTemporalSlot::History);
+    ASSERT_TRUE(exchanges[0].producer->temporal.history_index.has_value());
+    EXPECT_EQ(*exchanges[0].producer->temporal.history_index, 2);
+    ASSERT_TRUE(exchanges[0].consumer.has_value());
+    EXPECT_EQ(exchanges[0].consumer->temporal.slot,
+              fec::CouplingTemporalSlot::Predicted);
+    ASSERT_TRUE(exchanges[1].producer.has_value());
+    EXPECT_EQ(exchanges[1].producer->temporal.slot,
+              fec::CouplingTemporalSlot::Predicted);
+    ASSERT_TRUE(exchanges[1].consumer.has_value());
+    EXPECT_EQ(exchanges[1].consumer->temporal.slot,
+              fec::CouplingTemporalSlot::History);
+    ASSERT_TRUE(exchanges[1].consumer->temporal.history_index.has_value());
+    EXPECT_EQ(*exchanges[1].consumer->temporal.history_index, 1);
+
+    const auto declaration = module.declare();
+    const fec::PartitionedCouplingPlanGenerator generator;
+    const auto plan = generator.generate(
+        fixture.context,
+        std::span<const fec::CouplingExchangeDeclaration>(exchanges),
+        std::span<const fec::CouplingGroupHint>(declaration.group_hints));
+
+    ASSERT_EQ(plan.exchanges.size(), 2u);
+    EXPECT_EQ(plan.exchanges[0].producer.temporal.backing,
+              fec::CouplingResolvedTemporalBackingKind::SystemStateHistory);
+    ASSERT_TRUE(plan.exchanges[0].producer.temporal.storage_index.has_value());
+    EXPECT_EQ(*plan.exchanges[0].producer.temporal.storage_index, 1);
+    EXPECT_EQ(plan.exchanges[0].consumer.temporal.backing,
+              fec::CouplingResolvedTemporalBackingKind::SystemStatePredicted);
+    EXPECT_EQ(plan.exchanges[1].producer.temporal.backing,
+              fec::CouplingResolvedTemporalBackingKind::SystemStatePredicted);
+    EXPECT_EQ(plan.exchanges[1].consumer.temporal.backing,
+              fec::CouplingResolvedTemporalBackingKind::SystemStateHistory);
+    ASSERT_TRUE(plan.exchanges[1].consumer.temporal.storage_index.has_value());
+    EXPECT_EQ(*plan.exchanges[1].consumer.temporal.storage_index, 0);
+}
+
+TEST(FSICouplingModule, RejectsUnsupportedPartitionedFieldTemporalSlots)
+{
+    const std::vector<fec::CouplingTemporalSlotDescriptor> unsupported{
+        fec::CouplingTemporalSlotDescriptor{
+            .slot = fec::CouplingTemporalSlot::Accepted,
+        },
+        fec::CouplingTemporalSlotDescriptor{
+            .slot = fec::CouplingTemporalSlot::Stage,
+            .stage_index = 0,
+        },
+        fec::CouplingTemporalSlotDescriptor{
+            .slot = fec::CouplingTemporalSlot::External,
+        },
+    };
+
+    for (const auto temporal : unsupported) {
+        SCOPED_TRACE(fec::toString(temporal.slot));
+        auto options = partitionedIdentityOptions();
+        options.partitioned_temporal.solid_displacement_source = temporal;
+        const FSICouplingModule module(options);
+        FSIContextFixture fixture(FSIFieldComponents{},
+                                  false,
+                                  true,
+                                  true,
+                                  true,
+                                  true,
+                                  false);
+
+        expectValidationFailureContaining(
+            module,
+            fixture.context,
+            "field endpoint temporal slot " +
+                std::string(fec::toString(temporal.slot)));
+    }
 }
 
 TEST(FSICouplingModule, ValidatesPartitionedInterfaceTransferKinds)

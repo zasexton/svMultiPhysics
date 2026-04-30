@@ -5374,7 +5374,7 @@ Implementation checklist:
   transfer direction to choose an explicit interface transfer, explicit
   `Identity` with compatible endpoints, or an explicitly named driver-owned
   transfer.
-- [ ] Validate FSI partitioned endpoint temporal slots so current, accepted,
+- [x] Validate FSI partitioned endpoint temporal slots so current, accepted,
   predicted, history, stage, and external data are explicit rather than inferred
   from port names.
 - [x] Implement a small thermal-interface or thermal-fluid/thermo-elastic
@@ -5414,7 +5414,7 @@ Unit-test verification checklist:
   is not registered.
 - [ ] `test_FSICouplingModule.cpp` verifies expected FSI monolithic block
   declarations match installed dependencies.
-- [ ] `test_FSICouplingModule.cpp` verifies FSI partitioned exchange ports,
+- [x] `test_FSICouplingModule.cpp` verifies FSI partitioned exchange ports,
   endpoints, endpoint temporal slots, transfer declarations, resolved transfer
   options, value descriptors, and group hints.
 - [x] `test_FSICouplingModule.cpp` rejects `Unspecified` FSI partitioned

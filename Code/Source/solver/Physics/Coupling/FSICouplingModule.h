@@ -36,6 +36,13 @@ struct FSILagrangeMultiplierOptions {
     bool require_mortar_compatible_trace{true};
 };
 
+struct FSIPartitionedTemporalOptions {
+    FE::coupling::CouplingTemporalSlotDescriptor solid_displacement_source{};
+    FE::coupling::CouplingTemporalSlotDescriptor fluid_displacement_target{};
+    FE::coupling::CouplingTemporalSlotDescriptor fluid_load_source{};
+    FE::coupling::CouplingTemporalSlotDescriptor solid_load_target{};
+};
+
 struct FSICouplingOptions {
     FE::coupling::CouplingMode mode{FE::coupling::CouplingMode::Monolithic};
     std::string contract_name{"fsi"};
@@ -53,6 +60,7 @@ struct FSICouplingOptions {
     int interface_components{3};
 
     FSILagrangeMultiplierOptions multiplier{};
+    FSIPartitionedTemporalOptions partitioned_temporal{};
     FE::coupling::CouplingTransferDeclaration solid_to_fluid_transfer{};
     FE::coupling::CouplingTransferDeclaration fluid_to_solid_transfer{};
 };
