@@ -1,5 +1,6 @@
 #include "Coupling/CouplingContext.h"
 
+#include "Coupling/CouplingFormBuilder.h"
 #include "Core/FEException.h"
 #include "Spaces/H1Space.h"
 #include "Systems/InterfaceOperators.h"
@@ -368,6 +369,41 @@ TEST(CouplingContext, SharedRegionLookupReturnsParticipantMapping)
     ASSERT_EQ(group.participant_regions.size(), 1u);
     EXPECT_EQ(group.participant_regions[0].marker, 12);
     EXPECT_EQ(group.participant_regions[0].side, CouplingInterfaceSide::Plus);
+}
+
+TEST(CouplingContext, MapsRegionKindsToFormsMeasureCategories)
+{
+    const auto* system = systemToken(1);
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(participant("left", "shared_system", system))
+        .addField(field("left", "shared_system", system, "primary", 0))
+        .addRegion(region("left", "shared_system", system, "surface",
+                          CouplingRegionKind::Boundary, 12))
+        .addRegion(region("left", "shared_system", system, "interior",
+                          CouplingRegionKind::InteriorFace, -1))
+        .addRegion(region("left", "shared_system", system, "interface",
+                          CouplingRegionKind::InterfaceFace, 17,
+                          CouplingInterfaceSide::Minus));
+
+    const auto context = builder.build();
+    const CouplingFormBuilder forms(context);
+    const auto integrand =
+        forms.state("left", "primary", "u") *
+        forms.test("left", "primary", "w");
+
+    const auto boundary = forms.integrate(integrand, "left", "surface");
+    EXPECT_EQ(boundary.node()->type(), forms::FormExprType::BoundaryIntegral);
+    ASSERT_TRUE(boundary.node()->boundaryMarker().has_value());
+    EXPECT_EQ(*boundary.node()->boundaryMarker(), 12);
+
+    const auto interior = forms.integrate(integrand, "left", "interior");
+    EXPECT_EQ(interior.node()->type(), forms::FormExprType::InteriorFaceIntegral);
+
+    const auto interface = forms.integrate(integrand, "left", "interface");
+    EXPECT_EQ(interface.node()->type(), forms::FormExprType::InterfaceIntegral);
+    ASSERT_TRUE(interface.node()->interfaceMarker().has_value());
+    EXPECT_EQ(*interface.node()->interfaceMarker(), 17);
 }
 
 TEST(CouplingContext, RejectsSharedRegionMappingThatDiffersFromContextRegion)

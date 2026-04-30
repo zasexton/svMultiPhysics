@@ -4061,7 +4061,7 @@ Unit-test verification checklist:
   recorded per participant and rejected when ambiguous.
 - [x] `test_SharedRegionRegistry.cpp` rejects interface shared regions whose
   marker has no registered interface topology for monolithic Forms use.
-- [ ] `test_CouplingContext.cpp` verifies boundary, interior-face, and
+- [x] `test_CouplingContext.cpp` verifies boundary, interior-face, and
   interface-face regions map to the expected Forms measure categories.
 - [x] `test_PartitionedCouplingPlan.cpp` rejects `Unspecified` transfer
   declarations and verifies `Identity` is accepted only when endpoint ownership,
