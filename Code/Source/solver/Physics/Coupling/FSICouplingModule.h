@@ -13,7 +13,7 @@
  * @brief Physics-side FSI coupling contract declaration.
  */
 
-#include "FE/Coupling/CouplingContract.h"
+#include "FE/Coupling/DefinitionBackedCouplingContract.h"
 #include "FE/Spaces/FunctionSpace.h"
 
 #include <memory>
@@ -65,12 +65,12 @@ struct FSICouplingOptions {
     FE::coupling::CouplingTransferDeclaration fluid_to_solid_transfer{};
 };
 
-class FSICouplingModule final : public FE::coupling::CouplingContract {
+class FSICouplingModule final
+    : public FE::coupling::DefinitionBackedCouplingContract {
 public:
     explicit FSICouplingModule(FSICouplingOptions options = {});
 
     [[nodiscard]] std::string name() const override;
-    [[nodiscard]] FE::coupling::CouplingContractDeclaration declare() const override;
 
     void validate(const FE::coupling::CouplingContext& ctx) const override;
 
@@ -83,6 +83,10 @@ public:
 
     [[nodiscard]] std::vector<FE::coupling::CouplingExchangeDeclaration>
     buildPartitionedExchangeDeclarations(const FE::coupling::CouplingContext& ctx) const override;
+
+protected:
+    [[nodiscard]] std::string contractInstanceName() const override;
+    void define(FE::coupling::CouplingDefinitionBuilder& builder) const override;
 
 private:
     FSICouplingOptions options_{};

@@ -1457,15 +1457,15 @@ equation definitions, and partitioned strategy choices.
 
 ### Concrete Changes
 
-- [ ] Derive `FSICouplingModule` from `DefinitionBackedCouplingContract`.
+- [x] Derive `FSICouplingModule` from `DefinitionBackedCouplingContract`.
 - [ ] Replace `declare()`, `validate()`, `supportsMonolithicLowering()`,
       `buildMonolithicForms()`, and `buildPartitionedExchangeDeclarations()`
       with `define(...)`.
-- [ ] Declare participant roles:
+- [x] Declare participant roles:
       - fluid
       - solid
       - optional mesh
-- [ ] Declare field roles:
+- [x] Declare field roles:
       - fluid velocity as interface vector
       - fluid pressure as scalar
       - solid displacement as interface vector
@@ -1478,7 +1478,7 @@ equation definitions, and partitioned strategy choices.
 - [ ] Preserve optional solid velocity versus time derivative of solid
       displacement.
 - [ ] Preserve optional mesh-displacement geometry sensitivity.
-- [ ] Define partitioned channels through `PartitionedCouplingBuilder`.
+- [x] Define partitioned channels through `PartitionedCouplingBuilder`.
 - [ ] Remove local helpers that duplicate backend responsibilities:
       - `validateVectorFieldComponents`
       - `validateScalarPressureComponents`
@@ -1491,7 +1491,7 @@ equation definitions, and partitioned strategy choices.
 
 ### Completion Checklist
 
-- [ ] FSI behavior is unchanged in existing tests.
+- [x] FSI behavior is unchanged in existing tests.
 - [ ] FSI file length is substantially reduced.
 - [ ] FSI equations remain easy to review in one location.
 - [ ] FSI validation errors still identify contract, participant, field, and

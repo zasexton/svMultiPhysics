@@ -8,6 +8,7 @@
 #include "Physics/Coupling/FSICouplingModule.h"
 
 #include "Core/FEException.h"
+#include "FE/Coupling/CouplingDefinitionBuilder.h"
 #include "FE/Coupling/CouplingFormBuilder.h"
 #include "FE/Coupling/CouplingGraph.h"
 #include "FE/Systems/FESystem.h"
@@ -48,28 +49,34 @@ fec::CouplingVariableUse fieldVariable(const std::string& participant,
     };
 }
 
-fec::CouplingEndpointRef fieldEndpoint(const std::string& participant,
-                                       const std::string& field,
-                                       fec::CouplingTemporalSlotDescriptor temporal =
-                                           fec::CouplingTemporalSlotDescriptor{})
+fec::CouplingValueDescriptor scalarValue()
 {
-    return fec::CouplingEndpointRef{
-        .kind = fec::CouplingEndpointKind::Field,
-        .participant_name = participant,
-        .endpoint_name = field,
-        .temporal = std::move(temporal),
+    return fec::CouplingValueDescriptor{
+        .rank = fec::CouplingValueRank::Scalar,
+        .components = 1,
     };
 }
 
-void appendImplicitDependency(fec::CouplingContractDeclaration& declaration,
+void declareFieldRequirement(fec::CouplingDefinitionBuilder& builder,
+                             fec::CouplingFieldUse field,
+                             fec::CouplingValueDescriptor value)
+{
+    builder.field(field);
+    builder.fieldRequirement(fec::CouplingFieldRequirement{
+        .field = std::move(field),
+        .value = std::move(value),
+    });
+}
+
+void appendImplicitDependency(fec::CouplingDefinitionBuilder& builder,
                               fec::CouplingVariableUse residual_row,
                               fec::CouplingVariableUse dependency)
 {
-    declaration.dependencies.push_back(fec::CouplingResidualDependency{
+    builder.dependency(fec::CouplingResidualDependency{
         .residual_row = residual_row,
         .dependency = dependency,
     });
-    declaration.expected_blocks.push_back(fec::CouplingBlockExpectation{
+    builder.expectedBlock(fec::CouplingBlockExpectation{
         .residual_row = std::move(residual_row),
         .dependency = std::move(dependency),
     });
@@ -77,7 +84,7 @@ void appendImplicitDependency(fec::CouplingContractDeclaration& declaration,
 
 void appendMonolithicDependencies(
     const FSICouplingOptions& options,
-    fec::CouplingContractDeclaration& declaration)
+    fec::CouplingDefinitionBuilder& builder)
 {
     if (options.mode != fec::CouplingMode::Monolithic) {
         return;
@@ -88,60 +95,50 @@ void appendMonolithicDependencies(
     const auto solid_displacement =
         fieldVariable(options.solid_name, options.solid_displacement_field);
 
-    appendImplicitDependency(declaration,
+    appendImplicitDependency(builder,
                              fluid_velocity,
                              fluid_velocity);
     if (options.use_solid_displacement_derivative) {
-        appendImplicitDependency(declaration,
+        appendImplicitDependency(builder,
                                  fluid_velocity,
                                  solid_displacement);
     } else if (options.solid_velocity_field.has_value()) {
         appendImplicitDependency(
-            declaration,
+            builder,
             fluid_velocity,
             fieldVariable(options.solid_name, *options.solid_velocity_field));
     }
 
     appendImplicitDependency(
-        declaration,
+        builder,
         solid_displacement,
         fieldVariable(options.fluid_name, options.fluid_pressure_field));
 }
 
 void appendMonolithicGeometryRequirements(
     const FSICouplingOptions& options,
-    fec::CouplingContractDeclaration& declaration)
+    fec::CouplingDefinitionBuilder& builder)
 {
     if (options.mode != fec::CouplingMode::Monolithic) {
         return;
     }
 
-    declaration.geometry_requirements.push_back(
-        fec::CouplingGeometryTerminalRequirement{
-            .quantity = fec::CouplingGeometryTerminalQuantity::Normal,
-            .scope = fec::CouplingGeometryTerminalScope{
+    builder.geometryRequirement(fec::CouplingGeometryTerminalRequirement{
+        .quantity = fec::CouplingGeometryTerminalQuantity::Normal,
+        .scope = fec::CouplingGeometryTerminalScope{
+            .participant_name = options.fluid_name,
+            .region = fec::CouplingRegionEndpointDeclaration{
                 .participant_name = options.fluid_name,
-                .region = fec::CouplingRegionEndpointDeclaration{
-                    .participant_name = options.fluid_name,
-                    .shared_region_name = options.interface_name,
-                },
-                .location = fec::CouplingGeometryTerminalLocationDeclaration{
-                    .region_kind = fec::CouplingRegionKind::InterfaceFace,
-                    .shared_region_name = options.interface_name,
-                    .coordinate_configuration =
-                        forms::GeometryConfiguration::Reference,
-                },
+                .shared_region_name = options.interface_name,
             },
-        });
-}
-
-fec::CouplingPortId port(const FSICouplingOptions& options,
-                         std::string port_name)
-{
-    return fec::CouplingPortId{
-        .contract_instance_name = options.contract_name,
-        .port_name = std::move(port_name),
-    };
+            .location = fec::CouplingGeometryTerminalLocationDeclaration{
+                .region_kind = fec::CouplingRegionKind::InterfaceFace,
+                .shared_region_name = options.interface_name,
+                .coordinate_configuration =
+                    forms::GeometryConfiguration::Reference,
+            },
+        },
+    });
 }
 
 forms::FormExpr restrictToInterfaceSide(const forms::FormExpr& expr,
@@ -189,50 +186,45 @@ fec::CouplingValueDescriptor interfaceVectorValue(const FSICouplingOptions& opti
 
 void appendPartitionedExchangeDeclarations(
     const FSICouplingOptions& options,
-    fec::CouplingContractDeclaration& declaration)
+    fec::CouplingDefinitionBuilder& builder)
 {
     if (options.mode != fec::CouplingMode::Partitioned) {
         return;
     }
 
-    declaration.partitioned_exchange_declarations.push_back(
-        fec::CouplingExchangeDeclaration{
-            .producer_port = port(options, "solid_displacement"),
-            .consumer_port = port(options, "fluid_displacement"),
-            .value = interfaceVectorValue(options),
-            .producer = fieldEndpoint(options.solid_name,
-                                      options.solid_displacement_field,
-                                      options.partitioned_temporal
-                                          .solid_displacement_source),
-            .consumer = fieldEndpoint(options.fluid_name,
-                                      options.fluid_velocity_field,
-                                      options.partitioned_temporal
-                                          .fluid_displacement_target),
-            .shared_region_name = options.interface_name,
-            .transfer = options.solid_to_fluid_transfer,
-        });
+    const auto value = interfaceVectorValue(options);
+    builder
+        .exchange("solid_displacement",
+                  fieldUse(options.solid_name,
+                           options.solid_displacement_field),
+                  fieldUse(options.fluid_name,
+                           options.fluid_velocity_field))
+        .producerPort("solid_displacement")
+        .consumerPort("fluid_displacement")
+        .sharedInterface(options.interface_name)
+        .value(value)
+        .transfer(options.solid_to_fluid_transfer)
+        .producerTemporal(options.partitioned_temporal
+                              .solid_displacement_source)
+        .consumerTemporal(options.partitioned_temporal
+                              .fluid_displacement_target);
 
-    declaration.partitioned_exchange_declarations.push_back(
-        fec::CouplingExchangeDeclaration{
-            .producer_port = port(options, "fluid_load"),
-            .consumer_port = port(options, "solid_load"),
-            .value = interfaceVectorValue(options),
-            .producer = fieldEndpoint(options.fluid_name,
-                                      options.fluid_velocity_field,
-                                      options.partitioned_temporal
-                                          .fluid_load_source),
-            .consumer = fieldEndpoint(options.solid_name,
-                                      options.solid_displacement_field,
-                                      options.partitioned_temporal
-                                          .solid_load_target),
-            .shared_region_name = options.interface_name,
-            .transfer = options.fluid_to_solid_transfer,
-        });
+    builder
+        .exchange("fluid_load",
+                  fieldUse(options.fluid_name,
+                           options.fluid_velocity_field),
+                  fieldUse(options.solid_name,
+                           options.solid_displacement_field))
+        .producerPort("fluid_load")
+        .consumerPort("solid_load")
+        .sharedInterface(options.interface_name)
+        .value(value)
+        .transfer(options.fluid_to_solid_transfer)
+        .producerTemporal(options.partitioned_temporal.fluid_load_source)
+        .consumerTemporal(options.partitioned_temporal.solid_load_target);
 
-    declaration.group_hints.push_back(fec::CouplingGroupHint{
-        .name = options.contract_name + "_participants",
-        .participant_names = {options.fluid_name, options.solid_name},
-    });
+    builder.group(options.contract_name + "_participants",
+                  {options.fluid_name, options.solid_name});
 }
 
 fec::CouplingValidationResult validateOptionShape(const FSICouplingOptions& options)
@@ -643,41 +635,62 @@ std::string FSICouplingModule::name() const
     return "fsi";
 }
 
-fec::CouplingContractDeclaration FSICouplingModule::declare() const
+std::string FSICouplingModule::contractInstanceName() const
 {
-    fec::CouplingContractDeclaration declaration;
-    declaration.contract_type = name();
-    declaration.contract_name = options_.contract_name;
-    declaration.participants.push_back({.participant_name = options_.fluid_name});
-    declaration.participants.push_back({.participant_name = options_.solid_name});
+    return options_.contract_name;
+}
+
+void FSICouplingModule::define(fec::CouplingDefinitionBuilder& builder) const
+{
+    builder.participant(options_.fluid_name);
+    builder.participant(options_.solid_name);
     if (options_.mesh_name.has_value()) {
-        declaration.participants.push_back({.participant_name = *options_.mesh_name});
+        builder.participant(*options_.mesh_name);
     }
 
-    declaration.fields.push_back(fieldUse(options_.fluid_name,
-                                          options_.fluid_velocity_field));
-    declaration.fields.push_back(fieldUse(options_.fluid_name,
-                                          options_.fluid_pressure_field));
-    declaration.fields.push_back(fieldUse(options_.solid_name,
-                                          options_.solid_displacement_field));
+    declareFieldRequirement(builder,
+                            fieldUse(options_.fluid_name,
+                                     options_.fluid_velocity_field),
+                            interfaceVectorValue(options_));
+    declareFieldRequirement(builder,
+                            fieldUse(options_.fluid_name,
+                                     options_.fluid_pressure_field),
+                            scalarValue());
+    declareFieldRequirement(builder,
+                            fieldUse(options_.solid_name,
+                                     options_.solid_displacement_field),
+                            interfaceVectorValue(options_));
     if (!options_.use_solid_displacement_derivative &&
         options_.solid_velocity_field.has_value()) {
-        declaration.fields.push_back(fieldUse(options_.solid_name,
-                                              *options_.solid_velocity_field));
+        declareFieldRequirement(builder,
+                                fieldUse(options_.solid_name,
+                                         *options_.solid_velocity_field),
+                                interfaceVectorValue(options_));
     }
     if (options_.mesh_name.has_value() &&
         options_.mesh_displacement_field.has_value()) {
-        declaration.fields.push_back(fieldUse(*options_.mesh_name,
-                                              *options_.mesh_displacement_field));
+        declareFieldRequirement(builder,
+                                fieldUse(*options_.mesh_name,
+                                         *options_.mesh_displacement_field),
+                                interfaceVectorValue(options_));
     }
 
-    declaration.shared_regions.push_back(fec::CouplingSharedRegionUse{
+    builder.sharedRegion(fec::CouplingSharedRegionUse{
         .shared_region_name = options_.interface_name,
         .required_region_kind = fec::CouplingRegionKind::InterfaceFace,
     });
+    builder.sharedInterface(fec::CouplingSharedInterfaceRequirement{
+        .shared_region_name = options_.interface_name,
+        .participant_names = {options_.fluid_name, options_.solid_name},
+        .required_region_kind = fec::CouplingRegionKind::InterfaceFace,
+        .require_all_participants = true,
+        .require_opposite_sides_for_two_participants = true,
+        .require_monolithic_topology =
+            options_.mode == fec::CouplingMode::Monolithic,
+    });
 
     if (options_.use_solid_displacement_derivative) {
-        declaration.temporal_requirements.push_back(fec::CouplingTemporalRequirement{
+        builder.temporalRequirement(fec::CouplingTemporalRequirement{
             .quantity = fec::CouplingTemporalQuantity::FieldDerivative,
             .field = fieldUse(options_.solid_name,
                               options_.solid_displacement_field),
@@ -690,25 +703,23 @@ fec::CouplingContractDeclaration FSICouplingModule::declare() const
             options_.multiplier.contract_field_namespace.empty()
                 ? options_.contract_name
                 : options_.multiplier.contract_field_namespace;
-        declaration.additional_fields.push_back(
-            fec::CouplingAdditionalFieldDeclaration{
-                .field_namespace = fec::CouplingAdditionalFieldNamespace::Contract,
-                .namespace_name = multiplier_namespace,
-                .system_participant_name =
-                    options_.multiplier.system_participant_name.value_or(""),
-                .field_name = options_.multiplier.field_name,
-                .space = options_.multiplier.space,
-                .components = options_.multiplier.components,
-                .scope = fec::CouplingAdditionalFieldScope::InterfaceFace,
-                .shared_region_name =
-                    options_.multiplier.shared_region_name.value_or(options_.interface_name),
-            });
+        builder.additionalField(fec::CouplingAdditionalFieldDeclaration{
+            .field_namespace = fec::CouplingAdditionalFieldNamespace::Contract,
+            .namespace_name = multiplier_namespace,
+            .system_participant_name =
+                options_.multiplier.system_participant_name.value_or(""),
+            .field_name = options_.multiplier.field_name,
+            .space = options_.multiplier.space,
+            .components = options_.multiplier.components,
+            .scope = fec::CouplingAdditionalFieldScope::InterfaceFace,
+            .shared_region_name =
+                options_.multiplier.shared_region_name.value_or(options_.interface_name),
+        });
     }
 
-    appendPartitionedExchangeDeclarations(options_, declaration);
-    appendMonolithicDependencies(options_, declaration);
-    appendMonolithicGeometryRequirements(options_, declaration);
-    return declaration;
+    appendPartitionedExchangeDeclarations(options_, builder);
+    appendMonolithicDependencies(options_, builder);
+    appendMonolithicGeometryRequirements(options_, builder);
 }
 
 void FSICouplingModule::validate(const fec::CouplingContext& ctx) const
