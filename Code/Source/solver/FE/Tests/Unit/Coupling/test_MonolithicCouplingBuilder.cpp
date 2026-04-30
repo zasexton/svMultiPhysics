@@ -450,6 +450,64 @@ TEST(MonolithicCouplingBuilder, RequiresMeshMotionSensitivityFieldUse)
                  InvalidArgumentException);
 }
 
+TEST(MonolithicCouplingBuilder, RejectsInvalidGeometryConstantTangentPolicies)
+{
+    BuilderFixture fixture;
+    const CouplingFormBuilder forms(fixture.context);
+    const MonolithicCouplingBuilder builder;
+
+    auto make_contribution = [&]() {
+        CouplingFormContribution contribution;
+        contribution.contribution_name = "geometry_constant_policy";
+        contribution.origin = "MonolithicCouplingBuilderTest";
+        contribution.field_uses = {{.participant_name = "right",
+                                    .field_name = "primary"}};
+        contribution.residual =
+            (forms.state("right", "primary", "u") *
+             forms.test("right", "primary", "w")).dx();
+        contribution.install_options_declaration.geometry_sensitivity =
+            CouplingGeometrySensitivityDeclaration{
+                .mode = svmp::FE::forms::GeometrySensitivityMode::GeometryConstant,
+            };
+        return contribution;
+    };
+
+    auto mesh_field = make_contribution();
+    mesh_field.install_options_declaration.geometry_sensitivity->mesh_motion_field =
+        CouplingFieldUse{
+            .participant_name = "left",
+            .field_name = "mesh_displacement",
+        };
+    EXPECT_THROW(static_cast<void>(
+                     builder.resolveFormContribution(fixture.context,
+                                                     mesh_field)),
+                 InvalidArgumentException);
+
+    auto symbolic_required = make_contribution();
+    symbolic_required.install_options_declaration.geometry_sensitivity
+        ->tangent_path =
+        svmp::FE::forms::GeometryTangentPath::SymbolicRequired;
+    EXPECT_THROW(static_cast<void>(
+                     builder.resolveFormContribution(fixture.context,
+                                                     symbolic_required)),
+                 InvalidArgumentException);
+
+    auto symbolic_check = make_contribution();
+    symbolic_check.install_options_declaration.geometry_sensitivity->tangent_path =
+        svmp::FE::forms::GeometryTangentPath::SymbolicWithADCheck;
+    EXPECT_THROW(static_cast<void>(
+                     builder.resolveFormContribution(fixture.context,
+                                                     symbolic_check)),
+                 InvalidArgumentException);
+
+    auto ordinary_symbolic = make_contribution();
+    ordinary_symbolic.install_options_declaration.geometry_sensitivity
+        ->use_symbolic_tangent = true;
+    const auto resolved = builder.resolveFormContribution(fixture.context,
+                                                          ordinary_symbolic);
+    EXPECT_TRUE(resolved.install_options.compiler_options.use_symbolic_tangent);
+}
+
 TEST(MonolithicCouplingBuilder, RequiresMeshMotionSensitivityBinding)
 {
     BuilderFixture fixture;
@@ -480,6 +538,45 @@ TEST(MonolithicCouplingBuilder, RequiresMeshMotionSensitivityBinding)
                      builder.resolveFormContribution(fixture.context,
                                                      contribution)),
                  InvalidArgumentException);
+}
+
+TEST(MonolithicCouplingBuilder, ForcesSymbolicTangentForMeshMotionGeometryPath)
+{
+    BuilderFixture fixture;
+    const CouplingFormBuilder forms(fixture.context);
+    const MonolithicCouplingBuilder builder;
+
+    CouplingFormContribution contribution;
+    contribution.contribution_name = "mesh_motion_symbolic_path";
+    contribution.origin = "MonolithicCouplingBuilderTest";
+    contribution.field_uses = {{.participant_name = "right", .field_name = "primary"}};
+    contribution.extra_trial_field_uses = {{
+        .participant_name = "left",
+        .field_name = "mesh_displacement",
+    }};
+    contribution.residual =
+        (forms.state("right", "primary", "u") *
+         forms.test("right", "primary", "w")).dx();
+    contribution.install_options_declaration.geometry_sensitivity =
+        CouplingGeometrySensitivityDeclaration{
+            .mode = svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns,
+            .mesh_motion_field = CouplingFieldUse{
+                .participant_name = "left",
+                .field_name = "mesh_displacement",
+            },
+            .tangent_path =
+                svmp::FE::forms::GeometryTangentPath::SymbolicWithADCheck,
+            .use_symbolic_tangent = false,
+        };
+    fixture.system.bindMeshMotionField(
+        systems::MeshMotionFieldRole::Displacement,
+        fixture.mesh_motion_field);
+
+    const auto resolved = builder.resolveFormContribution(fixture.context,
+                                                          contribution);
+    EXPECT_EQ(resolved.install_options.compiler_options.geometry_tangent_path,
+              svmp::FE::forms::GeometryTangentPath::SymbolicWithADCheck);
+    EXPECT_TRUE(resolved.install_options.compiler_options.use_symbolic_tangent);
 }
 
 TEST(MonolithicCouplingBuilder, InstallsMeshMotionGeometrySensitivityProvenance)

@@ -260,6 +260,17 @@ void applyGeometrySensitivityDeclaration(
     forms::SymbolicOptions& options)
 {
     options.geometry_sensitivity.mode = declaration.mode;
+    if (declaration.mode == forms::GeometrySensitivityMode::GeometryConstant) {
+        FE_THROW_IF(declaration.mesh_motion_field.has_value(),
+                    InvalidArgumentException,
+                    "geometry-constant sensitivity rejects mesh-motion fields");
+        FE_THROW_IF(declaration.tangent_path ==
+                            forms::GeometryTangentPath::SymbolicRequired ||
+                        declaration.tangent_path ==
+                            forms::GeometryTangentPath::SymbolicWithADCheck,
+                    InvalidArgumentException,
+                    "geometry-constant sensitivity rejects symbolic geometry tangent paths");
+    }
     if (declaration.mode == forms::GeometrySensitivityMode::MeshMotionUnknowns) {
         FE_THROW_IF(!declaration.mesh_motion_field.has_value(),
                     InvalidArgumentException,
@@ -273,6 +284,11 @@ void applyGeometrySensitivityDeclaration(
     }
     options.geometry_tangent_path = declaration.tangent_path;
     options.use_symbolic_tangent = declaration.use_symbolic_tangent;
+    if (declaration.mode == forms::GeometrySensitivityMode::MeshMotionUnknowns &&
+        (declaration.tangent_path == forms::GeometryTangentPath::SymbolicRequired ||
+         declaration.tangent_path == forms::GeometryTangentPath::SymbolicWithADCheck)) {
+        options.use_symbolic_tangent = true;
+    }
 }
 
 void rejectRawFormInstallOptionOverrides(

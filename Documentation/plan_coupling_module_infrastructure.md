@@ -4465,7 +4465,7 @@ Implementation checklist:
   `FESystem::bindMeshMotionField()` binding, and verifying geometry-sensitivity
   provenance is reported as structured metadata by the public Forms/Systems
   metadata bridge.
-- [ ] Validate geometry tangent policy combinations before building
+- [x] Validate geometry tangent policy combinations before building
   `systems::FormInstallOptions`: `GeometryConstant` rejects
   `mesh_motion_field`, `SymbolicRequired`, and `SymbolicWithADCheck`;
   `use_symbolic_tangent` remains valid in `GeometryConstant` only for ordinary
