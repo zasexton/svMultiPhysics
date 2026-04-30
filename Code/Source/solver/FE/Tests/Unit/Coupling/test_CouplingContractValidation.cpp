@@ -1,11 +1,13 @@
 #include "Coupling/CouplingDeclaration.h"
 #include "Coupling/CouplingContract.h"
 #include "Coupling/CouplingGraph.h"
+#include "Coupling/MonolithicCouplingBuilder.h"
 #include "Spaces/H1Space.h"
 
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <span>
 
@@ -18,6 +20,11 @@ std::shared_ptr<const svmp::FE::spaces::FunctionSpace> scalarSpace()
 {
     return std::make_shared<svmp::FE::spaces::H1Space>(
         svmp::FE::ElementType::Triangle3, 1);
+}
+
+const svmp::FE::systems::FESystem* systemToken(std::uintptr_t value)
+{
+    return reinterpret_cast<const svmp::FE::systems::FESystem*>(value);
 }
 
 CouplingContractDeclaration minimalDeclaration()
@@ -248,6 +255,98 @@ TEST(CouplingContractValidation, ValidatesOptionalAdditionalFieldSelection)
     EXPECT_FALSE(referenced_disabled.ok());
     EXPECT_NE(formatDiagnostics(referenced_disabled).find("disabled optional additional field"),
               std::string::npos);
+}
+
+TEST(CouplingContractValidation, ResolvesInterfaceAdditionalFieldMarkersFromContext)
+{
+    const auto* system = systemToken(1);
+    const CouplingRegionRef left_surface{
+        .participant_name = "left",
+        .system_name = "shared_system",
+        .system = system,
+        .region_name = "surface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = 17,
+        .side = CouplingInterfaceSide::Minus,
+    };
+    const CouplingRegionRef right_surface{
+        .participant_name = "right",
+        .system_name = "shared_system",
+        .system = system,
+        .region_name = "surface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = 17,
+        .side = CouplingInterfaceSide::Plus,
+    };
+
+    CouplingContextBuilder context_builder;
+    context_builder
+        .addParticipant({
+            .participant_name = "left",
+            .system_name = "shared_system",
+            .system = system,
+        })
+        .addParticipant({
+            .participant_name = "right",
+            .system_name = "shared_system",
+            .system = system,
+        })
+        .addRegion(left_surface)
+        .addRegion(right_surface)
+        .addSharedRegion(SharedRegionRef{
+            .name = "interface",
+            .required_region_kind = CouplingRegionKind::InterfaceFace,
+            .participant_regions = {left_surface, right_surface},
+        });
+    const auto context = context_builder.build();
+
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.shared_regions.push_back({
+        .shared_region_name = "interface",
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+    });
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Participant,
+        .namespace_name = "left",
+        .field_name = "trace",
+        .space = scalarSpace(),
+        .components = 1,
+        .scope = CouplingAdditionalFieldScope::InterfaceFace,
+        .region_name = "surface",
+    });
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Contract,
+        .namespace_name = "generic_instance",
+        .field_name = "lambda",
+        .space = scalarSpace(),
+        .components = 1,
+        .scope = CouplingAdditionalFieldScope::InterfaceFace,
+        .shared_region_name = "interface",
+    });
+    ASSERT_TRUE(validateContractDeclarationShape(declaration).ok());
+
+    const MonolithicCouplingBuilder builder;
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const auto resolved = builder.resolveAdditionalFields(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+
+    ASSERT_EQ(resolved.size(), 2u);
+    EXPECT_EQ(resolved[0].declaration.region_name.value(), "surface");
+    EXPECT_FALSE(resolved[0].declaration.shared_region_name.has_value());
+    EXPECT_EQ(resolved[0].field_spec.scope, svmp::FE::systems::FieldScope::InterfaceFace);
+    EXPECT_EQ(resolved[0].field_spec.interface_marker, 17);
+    EXPECT_EQ(resolved[0].field_id, svmp::FE::INVALID_FIELD_ID);
+
+    EXPECT_FALSE(resolved[1].declaration.region_name.has_value());
+    EXPECT_EQ(resolved[1].declaration.shared_region_name.value(), "interface");
+    EXPECT_EQ(resolved[1].field_spec.scope, svmp::FE::systems::FieldScope::InterfaceFace);
+    EXPECT_EQ(resolved[1].field_spec.interface_marker, 17);
+    EXPECT_EQ(resolved[1].field_id, svmp::FE::INVALID_FIELD_ID);
 }
 
 TEST(CouplingContractValidation, FormAnalysisMetadataStoresDiagnosticProvenance)

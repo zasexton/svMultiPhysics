@@ -4256,7 +4256,7 @@ Unit-test verification checklist:
   fields reject participant-region and shared-region attachments, while
   `InterfaceFace` additional fields require exactly one participant-region or
   shared-region attachment.
-- [ ] `test_CouplingContractValidation.cpp` verifies interface additional-field
+- [x] `test_CouplingContractValidation.cpp` verifies interface additional-field
   declarations do not carry raw markers, resolve markers only through
   `CouplingContext`, preserve declaration versus resolved-field metadata, and
   store the resolved marker only in
