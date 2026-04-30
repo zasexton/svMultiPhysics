@@ -31,6 +31,13 @@ struct AdditionalFieldTarget {
     const systems::FESystem* system{nullptr};
 };
 
+struct ResolvedGeometryTerminalScope {
+    std::optional<CouplingRegionRef> region;
+    std::optional<std::string> shared_region_name;
+    std::optional<CouplingGeometryTerminalOwnerProvenance> owner;
+    const systems::FESystem* owner_system{nullptr};
+};
+
 std::string additionalFieldSystemName(const CouplingAdditionalFieldDeclaration& field)
 {
     return field.namespace_name + "." + field.field_name;
@@ -39,6 +46,189 @@ std::string additionalFieldSystemName(const CouplingAdditionalFieldDeclaration& 
 bool additionalFieldSelected(const CouplingAdditionalFieldDeclaration& field)
 {
     return field.requirement == CouplingRequirement::Required || field.enabled;
+}
+
+forms::GeometryConfiguration toFormsGeometryConfiguration(
+    CouplingCoordinateConfiguration configuration) noexcept
+{
+    switch (configuration) {
+    case CouplingCoordinateConfiguration::Reference:
+        return forms::GeometryConfiguration::Reference;
+    case CouplingCoordinateConfiguration::Current:
+        return forms::GeometryConfiguration::Current;
+    }
+    return forms::GeometryConfiguration::Reference;
+}
+
+ResolvedGeometryTerminalScope resolveGeometryTerminalScope(
+    const CouplingContext& context,
+    const CouplingGeometryTerminalScope& scope)
+{
+    ResolvedGeometryTerminalScope resolved;
+
+    const auto resolve_participant_name =
+        [&](const CouplingRegionEndpointDeclaration& region) -> std::string {
+        if (!region.participant_name.empty()) {
+            return region.participant_name;
+        }
+        return scope.participant_name.value_or(std::string{});
+    };
+
+    if (scope.region.has_value()) {
+        const auto& region = *scope.region;
+        const auto participant_name = resolve_participant_name(region);
+        if (region.shared_region_name.has_value()) {
+            FE_THROW_IF(participant_name.empty(), InvalidArgumentException,
+                        "shared-region geometry terminal provenance requires a participant owner");
+            resolved.region =
+                context.sharedRegion(*region.shared_region_name, participant_name);
+            resolved.shared_region_name = region.shared_region_name;
+        } else if (!region.region_name.empty()) {
+            FE_THROW_IF(participant_name.empty(), InvalidArgumentException,
+                        "region geometry terminal provenance requires a participant owner");
+            resolved.region = context.region(participant_name, region.region_name);
+        }
+    } else if (scope.location.has_value() &&
+               scope.location->shared_region_name.has_value()) {
+        resolved.shared_region_name = scope.location->shared_region_name;
+        if (scope.participant_name.has_value()) {
+            resolved.region = context.sharedRegion(*resolved.shared_region_name,
+                                                   *scope.participant_name);
+        } else {
+            const auto shared =
+                context.sharedRegionGroup(*resolved.shared_region_name);
+            if (shared.participant_regions.size() == 1u) {
+                resolved.region = shared.participant_regions.front();
+            }
+        }
+    }
+
+    if (resolved.region.has_value()) {
+        const auto& region = *resolved.region;
+        resolved.owner = CouplingGeometryTerminalOwnerProvenance{
+            .participant_name = region.participant_name,
+            .system_name = region.system_name,
+            .region_name = region.region_name,
+            .shared_region_name = resolved.shared_region_name,
+        };
+        resolved.owner_system = region.system;
+    } else if (scope.participant_name.has_value()) {
+        const auto participant = context.participant(*scope.participant_name);
+        resolved.owner = CouplingGeometryTerminalOwnerProvenance{
+            .participant_name = participant.participant_name,
+            .system_name = participant.system_name,
+        };
+        resolved.owner_system = participant.system;
+    }
+
+    return resolved;
+}
+
+void markGeometryTerminalAvailability(
+    CouplingFormGeometryTerminalProvenance& provenance)
+{
+    switch (provenance.quantity) {
+    case CouplingGeometryTerminalQuantity::Jacobian:
+    case CouplingGeometryTerminalQuantity::JacobianInverse:
+    case CouplingGeometryTerminalQuantity::JacobianDeterminant:
+    case CouplingGeometryTerminalQuantity::CurrentJacobian:
+    case CouplingGeometryTerminalQuantity::ReferenceJacobian:
+    case CouplingGeometryTerminalQuantity::CurrentJacobianDeterminant:
+    case CouplingGeometryTerminalQuantity::ReferenceJacobianDeterminant:
+        provenance.gradient_or_jacobian_available = true;
+        break;
+    case CouplingGeometryTerminalQuantity::Normal:
+    case CouplingGeometryTerminalQuantity::CurrentNormal:
+    case CouplingGeometryTerminalQuantity::ReferenceNormal:
+        provenance.normal_available = true;
+        break;
+    case CouplingGeometryTerminalQuantity::CurrentMeasure:
+    case CouplingGeometryTerminalQuantity::ReferenceMeasure:
+    case CouplingGeometryTerminalQuantity::SurfaceJacobian:
+        provenance.measure_available = true;
+        break;
+    case CouplingGeometryTerminalQuantity::MeshDisplacement:
+    case CouplingGeometryTerminalQuantity::Coordinate:
+    case CouplingGeometryTerminalQuantity::ReferenceCoordinate:
+    case CouplingGeometryTerminalQuantity::CurrentCoordinate:
+    case CouplingGeometryTerminalQuantity::PreviousCoordinate:
+    case CouplingGeometryTerminalQuantity::ReferencePhysicalCoordinate:
+    case CouplingGeometryTerminalQuantity::CellDiameter:
+    case CouplingGeometryTerminalQuantity::CellVolume:
+    case CouplingGeometryTerminalQuantity::FacetArea:
+    case CouplingGeometryTerminalQuantity::CellDomainId:
+        provenance.value_available = true;
+        break;
+    }
+}
+
+CouplingFormGeometryTerminalProvenance resolveGeometryTerminalProvenance(
+    const CouplingContext& context,
+    const CouplingFormTerminalProvenanceDeclaration& terminal)
+{
+    FE_THROW_IF(terminal.kind != CouplingFormTerminalProvenanceKind::GeometryTerminal,
+                InvalidArgumentException,
+                "geometry terminal provenance requires a geometry terminal declaration");
+
+    const CouplingGeometryTerminalScope empty_scope;
+    const auto& scope = terminal.scope.value_or(empty_scope);
+    const auto resolved_scope = resolveGeometryTerminalScope(context, scope);
+
+    CouplingGeometryTerminalLocationProvenance location;
+    if (scope.location.has_value()) {
+        const auto& declared = *scope.location;
+        location.region_kind = declared.region_kind;
+        location.shared_region_name = declared.shared_region_name;
+        location.side = declared.side;
+        location.coordinate_configuration = declared.coordinate_configuration;
+        location.transform_from_configuration =
+            declared.transform_from_configuration;
+        location.transform_to_configuration = declared.transform_to_configuration;
+    }
+
+    if (resolved_scope.region.has_value()) {
+        const auto& region = *resolved_scope.region;
+        location.region_kind = region.kind;
+        location.marker = region.marker;
+        if (!location.shared_region_name.has_value()) {
+            location.shared_region_name = resolved_scope.shared_region_name;
+        }
+        if (region.side != CouplingInterfaceSide::None) {
+            location.side = region.side;
+        }
+        if (!scope.location.has_value()) {
+            location.coordinate_configuration =
+                toFormsGeometryConfiguration(region.coordinate_configuration);
+        }
+        location.geometry_revision = region.geometry_revision;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+        if (location.geometry_revision == 0u &&
+            region.revision_snapshot.has_value()) {
+            location.geometry_revision =
+                region.revision_snapshot->geometry_revision;
+        }
+#endif
+    }
+
+    const auto domain = toAnalysisDomainKind(location.region_kind);
+    FE_THROW_IF(!domain.has_value(), InvalidArgumentException,
+                "geometry terminal provenance requires a supported analysis domain");
+
+    CouplingFormGeometryTerminalProvenance provenance;
+    provenance.quantity = terminal.geometry_quantity;
+    provenance.location = std::move(location);
+    provenance.analysis_domain = *domain;
+    provenance.owner = resolved_scope.owner;
+    provenance.provider = "forms";
+    if (terminal.mesh_motion_role.has_value() &&
+        resolved_scope.owner_system != nullptr) {
+        if (const auto field =
+                resolved_scope.owner_system->meshMotionField(*terminal.mesh_motion_role)) {
+            provenance.mesh_motion_field = *field;
+        }
+    }
+    markGeometryTerminalAvailability(provenance);
+    return provenance;
 }
 
 AdditionalFieldTarget explicitAdditionalFieldTarget(
@@ -280,9 +470,15 @@ ResolvedCouplingFormContribution MonolithicCouplingBuilder::resolveFormContribut
                          field) != resolved.extra_trial_fields.end();
     };
     for (const auto& terminal : contribution.terminal_provenance) {
+        if (terminal.kind == CouplingFormTerminalProvenanceKind::GeometryTerminal) {
+            resolved.geometry_terminals.push_back(
+                resolveGeometryTerminalProvenance(context, terminal));
+            continue;
+        }
         if (terminal.kind != CouplingFormTerminalProvenanceKind::PreviousSolution) {
             continue;
         }
+
         FE_THROW_IF(!terminal.field.has_value(), InvalidArgumentException,
                     "previous solution terminal provenance requires a field");
         FE_THROW_IF(!is_active_trial_field(*terminal.field), InvalidArgumentException,
@@ -314,6 +510,9 @@ CouplingFormAnalysisMetadata MonolithicCouplingBuilder::installResolvedFormContr
 
     auto adapted = adaptFormAnalysisMetadata(installed.analysis);
     adapted.declaration_terminal_provenance = contribution.terminal_provenance;
+    adapted.geometry_terminals.insert(adapted.geometry_terminals.end(),
+                                      contribution.geometry_terminals.begin(),
+                                      contribution.geometry_terminals.end());
     return adapted;
 }
 

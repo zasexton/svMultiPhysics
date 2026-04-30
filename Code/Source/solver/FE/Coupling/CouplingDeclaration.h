@@ -180,6 +180,20 @@ struct CouplingInstallMetadata {
     std::vector<CouplingInstalledBlockProvenance> installed_blocks;
 };
 
+struct CouplingFormGeometryTerminalProvenance {
+    CouplingGeometryTerminalQuantity quantity{
+        CouplingGeometryTerminalQuantity::MeshDisplacement};
+    FieldId mesh_motion_field{INVALID_FIELD_ID};
+    CouplingGeometryTerminalLocationProvenance location;
+    analysis::DomainKind analysis_domain{analysis::DomainKind::Cell};
+    std::optional<CouplingGeometryTerminalOwnerProvenance> owner;
+    std::string provider;
+    bool value_available{false};
+    bool gradient_or_jacobian_available{false};
+    bool normal_available{false};
+    bool measure_available{false};
+};
+
 struct CouplingFormContribution {
     std::string contribution_name;
     std::string origin;
@@ -199,6 +213,7 @@ struct ResolvedCouplingFormContribution {
     std::vector<FieldId> fields;
     std::vector<FieldId> extra_trial_fields;
     std::vector<CouplingFormTerminalProvenanceDeclaration> terminal_provenance;
+    std::vector<CouplingFormGeometryTerminalProvenance> geometry_terminals;
     systems::FormInstallOptions install_options{};
     forms::FormExpr residual;
 };
@@ -253,20 +268,6 @@ struct CouplingFormTemporalProvenance {
     CouplingTemporalQuantity quantity{CouplingTemporalQuantity::Time};
     int derivative_order{0};
     int history_index{0};
-};
-
-struct CouplingFormGeometryTerminalProvenance {
-    CouplingGeometryTerminalQuantity quantity{
-        CouplingGeometryTerminalQuantity::MeshDisplacement};
-    FieldId mesh_motion_field{INVALID_FIELD_ID};
-    CouplingGeometryTerminalLocationProvenance location;
-    analysis::DomainKind analysis_domain{analysis::DomainKind::Cell};
-    std::optional<CouplingGeometryTerminalOwnerProvenance> owner;
-    std::string provider;
-    bool value_available{false};
-    bool gradient_or_jacobian_available{false};
-    bool normal_available{false};
-    bool measure_available{false};
 };
 
 enum class CouplingFormNonFieldDependencyKind : std::uint8_t {

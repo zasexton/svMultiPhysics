@@ -417,6 +417,86 @@ TEST(MonolithicCouplingBuilder, InstallsResolvedFormAndAdaptsBridgeMetadata)
     EXPECT_TRUE(block_it->has_vector);
 }
 
+TEST(MonolithicCouplingBuilder, ResolvesGeometryTerminalProvenanceMetadata)
+{
+    BuilderFixture fixture;
+    const auto context = interfaceContext(fixture, kInterfaceMarker);
+    const CouplingFormBuilder forms(context);
+    const MonolithicCouplingBuilder builder;
+
+    const CouplingGeometryTerminalScope scope{
+        .participant_name = "left",
+        .region = CouplingRegionEndpointDeclaration{
+            .participant_name = "left",
+            .shared_region_name = "interface",
+        },
+        .location = CouplingGeometryTerminalLocationDeclaration{
+            .region_kind = CouplingRegionKind::Boundary,
+            .shared_region_name = "interface",
+            .side = CouplingInterfaceSide::Plus,
+            .coordinate_configuration = forms::GeometryConfiguration::Current,
+            .transform_from_configuration =
+                forms::GeometryConfiguration::Reference,
+            .transform_to_configuration = forms::GeometryConfiguration::Current,
+        },
+    };
+
+    CouplingFormContribution contribution;
+    contribution.contribution_name = "interface_normal";
+    contribution.origin = "MonolithicCouplingBuilderTest";
+    contribution.field_uses = {{.participant_name = "right", .field_name = "primary"}};
+    contribution.residual =
+        (forms.geometryTerminal(CouplingGeometryTerminalQuantity::CurrentNormal,
+                                scope)
+             .component(0) *
+         forms.test("right", "primary", "w"))
+            .dI(kInterfaceMarker);
+    contribution = forms.attachTerminalProvenance(std::move(contribution));
+
+    const auto resolved = builder.resolveFormContribution(context, contribution);
+    ASSERT_EQ(resolved.geometry_terminals.size(), 1u);
+    const auto& terminal = resolved.geometry_terminals[0];
+    EXPECT_EQ(terminal.quantity, CouplingGeometryTerminalQuantity::CurrentNormal);
+    EXPECT_EQ(terminal.analysis_domain, analysis::DomainKind::InterfaceFace);
+    EXPECT_TRUE(terminal.normal_available);
+    EXPECT_EQ(terminal.provider, "forms");
+    EXPECT_EQ(terminal.location.region_kind, CouplingRegionKind::InterfaceFace);
+    ASSERT_TRUE(terminal.location.shared_region_name.has_value());
+    EXPECT_EQ(*terminal.location.shared_region_name, "interface");
+    EXPECT_EQ(terminal.location.marker, kInterfaceMarker);
+    EXPECT_EQ(terminal.location.side, CouplingInterfaceSide::Minus);
+    EXPECT_EQ(terminal.location.coordinate_configuration,
+              forms::GeometryConfiguration::Current);
+    ASSERT_TRUE(terminal.location.transform_from_configuration.has_value());
+    EXPECT_EQ(*terminal.location.transform_from_configuration,
+              forms::GeometryConfiguration::Reference);
+    ASSERT_TRUE(terminal.location.transform_to_configuration.has_value());
+    EXPECT_EQ(*terminal.location.transform_to_configuration,
+              forms::GeometryConfiguration::Current);
+    ASSERT_TRUE(terminal.owner.has_value());
+    EXPECT_EQ(terminal.owner->participant_name, "left");
+    EXPECT_EQ(terminal.owner->system_name, "shared_system");
+    ASSERT_TRUE(terminal.owner->region_name.has_value());
+    EXPECT_EQ(*terminal.owner->region_name, "interface");
+    ASSERT_TRUE(terminal.owner->shared_region_name.has_value());
+    EXPECT_EQ(*terminal.owner->shared_region_name, "interface");
+
+    const auto metadata =
+        builder.installResolvedFormContribution(fixture.system, resolved);
+    const auto metadata_terminal = std::find_if(
+        metadata.geometry_terminals.begin(),
+        metadata.geometry_terminals.end(),
+        [](const CouplingFormGeometryTerminalProvenance& provenance) {
+            return provenance.quantity ==
+                   CouplingGeometryTerminalQuantity::CurrentNormal;
+        });
+    ASSERT_NE(metadata_terminal, metadata.geometry_terminals.end());
+    EXPECT_EQ(metadata_terminal->analysis_domain,
+              analysis::DomainKind::InterfaceFace);
+    ASSERT_TRUE(metadata_terminal->owner.has_value());
+    EXPECT_EQ(metadata_terminal->owner->participant_name, "left");
+}
+
 TEST(MonolithicCouplingBuilder, RegistersContractOwnedInterfaceAdditionalFields)
 {
     BuilderFixture fixture;

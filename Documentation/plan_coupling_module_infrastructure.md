@@ -4355,7 +4355,7 @@ Implementation checklist:
   Forms metadata hook, assign `terminal_sequence` after matching in deterministic
   encounter order, and reject identity-destroying transformed expressions unless
   a public provenance tag is copied before the transform.
-- [ ] Make geometry-terminal helper and metadata capture preserve optional
+- [x] Make geometry-terminal helper and metadata capture preserve optional
   `CouplingGeometryTerminalLocationDeclaration` data while treating the Forms
   measure and side restrictions as the authoritative integration context, and
   record `CouplingGeometryTerminalLocationProvenance`, the resolved
