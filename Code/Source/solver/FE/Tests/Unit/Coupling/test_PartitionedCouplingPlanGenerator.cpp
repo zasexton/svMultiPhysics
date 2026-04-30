@@ -3,6 +3,7 @@
 #include "Assembly/AssemblyContext.h"
 #include "Assembly/AssemblyKernel.h"
 #include "Auxiliary/AuxiliaryBindings.h"
+#include "Auxiliary/AuxiliaryStateManager.h"
 #include "Forms/BoundaryFunctional.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
@@ -928,6 +929,20 @@ TEST(PartitionedCouplingPlanGenerator, GeneratesResolvedInterfaceTransferOptions
     EXPECT_EQ(provenance.operator_state,
               systems::InterfaceOperatorState::AcceptedTimeStep);
     EXPECT_EQ(provenance.map_revision_key, 7u);
+    EXPECT_NE(provenance.interface_map_name, provenance.interface_entry_name);
+    EXPECT_NE(provenance.interface_map_name,
+              provenance.interface_search_registry_name);
+    EXPECT_EQ(provenance.source_logical_region.persistent_id, "left_interface");
+    EXPECT_EQ(provenance.target_logical_region.persistent_id, "right_interface");
+    EXPECT_EQ(provenance.source_revision_snapshot.revision_key(),
+              interfaceRevisionSnapshot(true).revision_key());
+    EXPECT_EQ(provenance.target_revision_snapshot.revision_key(),
+              interfaceRevisionSnapshot(false).revision_key());
+    EXPECT_EQ(provenance.source_search_revision_key, 3u);
+    EXPECT_EQ(provenance.target_search_revision_key, 5u);
+    EXPECT_EQ(provenance.accepted_revision_key, 11u);
+    EXPECT_EQ(provenance.trial_revision_key, 13u);
+    EXPECT_EQ(provenance.time_level_epoch, 17u);
 }
 #endif
 
@@ -1113,6 +1128,48 @@ TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceMapProvenanceMissingRevis
     EXPECT_NE(diagnostics.find("accepted revision key"), std::string::npos);
     EXPECT_NE(diagnostics.find("trial revision key"), std::string::npos);
     EXPECT_NE(diagnostics.find("time-level epoch"), std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceMapProvenanceSystemAndStateMismatch)
+{
+    const auto expect_rejected =
+        [](auto mutate_provenance, std::string_view expected_text) {
+            auto exchange = interfaceExchange(
+                CouplingValueDescriptor{
+                    .rank = CouplingValueRank::Scalar,
+                    .components = 1,
+                },
+                CouplingInterfaceFramePolicy::None);
+            ASSERT_TRUE(exchange.transfer.interface_map.has_value());
+            mutate_provenance(*exchange.transfer.interface_map);
+            const std::array<CouplingExchangeDeclaration, 1> exchanges{
+                exchange};
+
+            const PartitionedCouplingPlanGenerator generator;
+            const auto validation = generator.validate(
+                partitionedContextWithSharedRegion(),
+                std::span<const CouplingExchangeDeclaration>(exchanges));
+
+            EXPECT_FALSE(validation.ok());
+            EXPECT_NE(formatDiagnostics(validation).find(expected_text),
+                      std::string::npos);
+        };
+
+    expect_rejected(
+        [](CouplingInterfaceMapProvenance& provenance) {
+            provenance.source_system_name = "right_system";
+        },
+        "source system does not match");
+    expect_rejected(
+        [](CouplingInterfaceMapProvenance& provenance) {
+            provenance.target_system_name = "left_system";
+        },
+        "target system does not match");
+    expect_rejected(
+        [](CouplingInterfaceMapProvenance& provenance) {
+            provenance.map_state = svmp::search::InterfaceMapState::Empty;
+        },
+        "resolved map state");
 }
 #endif
 
@@ -1326,6 +1383,51 @@ TEST(PartitionedCouplingPlanGenerator, ResolvesFieldHistoryTemporalSlot)
     EXPECT_EQ(*plan.exchanges[0].producer.temporal.storage_index, 1);
     ASSERT_TRUE(plan.exchanges[0].producer.temporal.request.history_index.has_value());
     EXPECT_EQ(*plan.exchanges[0].producer.temporal.request.history_index, 2);
+    EXPECT_EQ(plan.exchanges[0].producer.resolved_endpoint_key, "primary");
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsTemporalSlotIndexMisuse)
+{
+    const PartitionedCouplingPlanGenerator generator;
+    const auto expect_rejected =
+        [&](CouplingTemporalSlotDescriptor temporal,
+            std::string_view expected_text) {
+            auto exchange = identityExchange();
+            exchange.producer = fieldEndpoint("left", temporal);
+            const std::array<CouplingExchangeDeclaration, 1> exchanges{
+                exchange};
+
+            const auto validation = generator.validate(
+                partitionedContext(),
+                std::span<const CouplingExchangeDeclaration>(exchanges));
+
+            EXPECT_FALSE(validation.ok());
+            EXPECT_NE(formatDiagnostics(validation).find(expected_text),
+                      std::string::npos);
+        };
+
+    expect_rejected(
+        CouplingTemporalSlotDescriptor{
+            .slot = CouplingTemporalSlot::Current,
+            .history_index = 1,
+        },
+        "history index is valid only");
+    expect_rejected(
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::History},
+        "history temporal slots require");
+    expect_rejected(
+        CouplingTemporalSlotDescriptor{
+            .slot = CouplingTemporalSlot::History,
+            .history_index = 1,
+            .stage_index = 0,
+        },
+        "stage index is valid only");
+    expect_rejected(
+        CouplingTemporalSlotDescriptor{
+            .slot = CouplingTemporalSlot::Current,
+            .stage_index = 0,
+        },
+        "stage index is valid only");
 }
 
 TEST(PartitionedCouplingPlanGenerator, RejectsUnsupportedFieldTemporalSlots)
@@ -1437,6 +1539,43 @@ TEST(PartitionedCouplingPlanGenerator, ResolvesAcceptedAuxiliaryStateEndpoint)
 
     EXPECT_EQ(plan.exchanges[0].producer.temporal.backing,
               CouplingResolvedTemporalBackingKind::AuxiliaryCommitted);
+    EXPECT_EQ(plan.exchanges[0].producer.temporal.request.slot,
+              CouplingTemporalSlot::Accepted);
+}
+
+TEST(PartitionedCouplingPlanGenerator, ResolvesAuxiliaryStateHistoryTemporalSlot)
+{
+    AuxiliaryOutputEndpointFixture fixture;
+    fixture.left_system.auxiliaryStateManager()
+        .getBlock("output_block")
+        .commitTimeStep(0.1);
+
+    auto exchange = identityExchange();
+    exchange.producer = auxiliaryStateEndpoint(
+        "left",
+        "output_block",
+        CouplingTemporalSlotDescriptor{
+            .slot = CouplingTemporalSlot::History,
+            .history_index = 1,
+        });
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_EQ(plan.exchanges[0].producer.temporal.backing,
+              CouplingResolvedTemporalBackingKind::AuxiliaryHistory);
+    ASSERT_TRUE(plan.exchanges[0].producer.temporal.storage_index.has_value());
+    EXPECT_EQ(*plan.exchanges[0].producer.temporal.storage_index, 0);
+    ASSERT_TRUE(plan.exchanges[0].producer.temporal.request.history_index.has_value());
+    EXPECT_EQ(*plan.exchanges[0].producer.temporal.request.history_index, 1);
 }
 
 TEST(PartitionedCouplingPlanGenerator, ResolvesPredictedAuxiliaryStateEndpoint)
@@ -1971,6 +2110,43 @@ TEST(PartitionedCouplingPlanGenerator, ResolvesPredictedExternalBufferEndpoint)
               CouplingTemporalSlot::Predicted);
     EXPECT_EQ(plan.exchanges[0].producer.temporal.provided.slot,
               CouplingTemporalSlot::Predicted);
+}
+
+TEST(PartitionedCouplingPlanGenerator, ResolvesAcceptedExternalBufferEndpoint)
+{
+    auto exchange = identityExchange();
+    exchange.producer = externalBufferEndpoint("driver_value");
+    exchange.producer->temporal =
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Accepted};
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    auto builder = partitionedContextBuilder(1);
+    builder.addExternalBuffer(CouplingExternalBufferRegistration{
+        .descriptor = externalBufferDescriptor(
+            "driver_value",
+            exchange.value,
+            CouplingExternalBufferAccess::ReadOnly,
+            {CouplingTemporalSlotDescriptor{
+                .slot = CouplingTemporalSlot::Accepted}}),
+    });
+    const auto context = builder.build();
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_EQ(plan.exchanges[0].producer.temporal.backing,
+              CouplingResolvedTemporalBackingKind::ExternalBuffer);
+    EXPECT_EQ(plan.exchanges[0].producer.temporal.request.slot,
+              CouplingTemporalSlot::Accepted);
+    EXPECT_EQ(plan.exchanges[0].producer.temporal.provided.slot,
+              CouplingTemporalSlot::Accepted);
 }
 
 TEST(PartitionedCouplingPlanGenerator, ResolvesParticipantScopedExternalBufferEndpoint)

@@ -5491,11 +5491,11 @@ Unit-test verification checklist:
 - [x] The minimal partitioned fixture verifies exchange graph construction,
   transfer validation, resolved endpoint records with temporal backing, endpoint
   temporal-slot validation, cycle visibility, and group hint validation.
-- [ ] The minimal partitioned fixture verifies accepted-state temporal slots,
+- [x] The minimal partitioned fixture verifies accepted-state temporal slots,
   distinct interface-entry and interface-map plus interface-search-registry
   provenance, logical region ids, revision snapshots, search map state,
   `Unspecified` rejection, and explicit `Identity` compatibility validation.
-- [ ] The minimal partitioned fixture verifies `history_index` only for History,
+- [x] The minimal partitioned fixture verifies `history_index` only for History,
   `stage_index` only for Stage, logical 1-based history mapping to 0-based
   FE/Auxiliary storage, explicit predicted backing kinds, no separate endpoint
   slots for `u_prev`/`u_prev2`, and rejects stale or wrong-system interface-map
