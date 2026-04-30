@@ -4264,7 +4264,7 @@ Unit-test verification checklist:
 - [x] `test_CouplingContractValidation.cpp` verifies `components == 0` infers
   the function-space value dimension, negative component counts are rejected,
   and positive mismatches are rejected.
-- [ ] `test_CouplingContractValidation.cpp` verifies optional declarations do
+- [x] `test_CouplingContractValidation.cpp` verifies optional declarations do
   not fail validation when absent and required declarations do fail.
 - [ ] `test_CouplingContractValidation.cpp` verifies optional additional-field
   declarations are skipped with diagnostics when prerequisites are absent, but

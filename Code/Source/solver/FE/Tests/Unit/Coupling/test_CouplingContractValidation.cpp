@@ -349,6 +349,61 @@ TEST(CouplingContractValidation, ResolvesInterfaceAdditionalFieldMarkersFromCont
     EXPECT_EQ(resolved[1].field_id, svmp::FE::INVALID_FIELD_ID);
 }
 
+TEST(CouplingContractValidation, HandlesOptionalAndRequiredContextDeclarations)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "optional_contract";
+    declaration.contract_name = "optional_instance";
+    declaration.participants.push_back({
+        .participant_name = "left",
+        .requirement = CouplingRequirement::Optional,
+    });
+    declaration.fields.push_back({
+        .participant_name = "left",
+        .field_name = "primary",
+        .requirement = CouplingRequirement::Optional,
+    });
+    declaration.regions.push_back({
+        .participant_name = "left",
+        .region_name = "surface",
+        .required_region_kind = CouplingRegionKind::Boundary,
+        .requirement = CouplingRequirement::Optional,
+    });
+    declaration.shared_regions.push_back({
+        .shared_region_name = "interface",
+        .required_region_kind = CouplingRegionKind::Boundary,
+        .requirement = CouplingRequirement::Optional,
+    });
+
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 1> optional_declarations{declaration};
+    EXPECT_TRUE(graph.buildDeclarationGraph(
+                         CouplingContext{},
+                         std::span<const CouplingContractDeclaration>(optional_declarations))
+                    .ok());
+
+    declaration.participants[0].requirement = CouplingRequirement::Required;
+    declaration.fields[0].requirement = CouplingRequirement::Required;
+    declaration.regions[0].requirement = CouplingRequirement::Required;
+    declaration.shared_regions[0].requirement = CouplingRequirement::Required;
+
+    CouplingGraph required_graph;
+    const std::array<CouplingContractDeclaration, 1> required_declarations{declaration};
+    const auto validation = required_graph.buildDeclarationGraph(
+        CouplingContext{},
+        std::span<const CouplingContractDeclaration>(required_declarations));
+    EXPECT_FALSE(validation.ok());
+    const auto diagnostics = formatDiagnostics(validation);
+    EXPECT_NE(diagnostics.find("required coupling participant is missing"),
+              std::string::npos);
+    EXPECT_NE(diagnostics.find("required coupling field is missing"),
+              std::string::npos);
+    EXPECT_NE(diagnostics.find("required coupling region is missing"),
+              std::string::npos);
+    EXPECT_NE(diagnostics.find("required shared region is missing"),
+              std::string::npos);
+}
+
 TEST(CouplingContractValidation, FormAnalysisMetadataStoresDiagnosticProvenance)
 {
     CouplingFormAnalysisMetadata metadata;
