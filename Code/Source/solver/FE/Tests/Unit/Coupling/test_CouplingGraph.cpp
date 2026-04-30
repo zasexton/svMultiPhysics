@@ -398,6 +398,173 @@ CouplingContext multiParticipantGraphContext()
     return builder.build();
 }
 
+CouplingVariableUse graphFieldVariable(std::string participant)
+{
+    return CouplingVariableUse{
+        .kind = CouplingVariableKind::Field,
+        .participant_name = std::move(participant),
+        .name = "primary",
+    };
+}
+
+CouplingResidualDependency graphFieldDependency(std::string row_participant,
+                                                std::string dependency_participant)
+{
+    return CouplingResidualDependency{
+        .residual_row = graphFieldVariable(std::move(row_participant)),
+        .dependency = graphFieldVariable(std::move(dependency_participant)),
+    };
+}
+
+CouplingContractDeclaration graphNParticipantContract(
+    std::string contract_name,
+    std::string row_participant,
+    std::string dependency_participant)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "n_participant_scalar";
+    declaration.contract_name = std::move(contract_name);
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "middle"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.fields.push_back({.participant_name = "left", .field_name = "primary"});
+    declaration.fields.push_back({.participant_name = "middle", .field_name = "primary"});
+    declaration.fields.push_back({.participant_name = "right", .field_name = "primary"});
+    declaration.shared_regions.push_back({
+        .shared_region_name = "chain_boundary",
+        .required_region_kind = CouplingRegionKind::Boundary,
+    });
+    declaration.dependencies.push_back(graphFieldDependency(
+        std::move(row_participant),
+        std::move(dependency_participant)));
+    declaration.expected_blocks.push_back(CouplingBlockExpectation{
+        .residual_row = declaration.dependencies.back().residual_row,
+        .dependency = declaration.dependencies.back().dependency,
+    });
+    return declaration;
+}
+
+CouplingFormAnalysisMetadata graphNParticipantInstalledBlock(
+    std::string contribution_name,
+    FieldId row,
+    FieldId dependency)
+{
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = std::move(contribution_name);
+    metadata.origin = "NParticipantGraphFixture";
+    metadata.system_name = "system";
+    metadata.feature_gates.push_back(analysis::FormBridgeFeatureGate{
+        analysis::FormBridgeFeature::InstalledDependencies,
+        analysis::FormBridgeFeatureStatus::Available,
+        "Synthetic N-participant dependency fixture"});
+    metadata.feature_gates.push_back(analysis::FormBridgeFeatureGate{
+        analysis::FormBridgeFeature::InstalledBlocks,
+        analysis::FormBridgeFeatureStatus::Available,
+        "Synthetic N-participant block fixture"});
+    metadata.installed_fields = {row, dependency};
+    metadata.installed_dependencies.push_back(CouplingInstalledDependency{
+        .residual_row = analysis::VariableKey::field(row),
+        .dependency = analysis::VariableKey::field(dependency),
+        .mode = CouplingDependencyMode::ImplicitMonolithic,
+        .domain = analysis::DomainKind::Boundary,
+        .contributes_matrix_block = true,
+        .contributes_vector = true,
+        .provider = "synthetic_fixture",
+    });
+    metadata.installed_blocks.push_back(CouplingInstalledBlockProvenance{
+        .residual_row = analysis::VariableKey::field(row),
+        .dependency = analysis::VariableKey::field(dependency),
+        .domains = {analysis::DomainKind::Boundary},
+        .has_matrix = true,
+        .has_vector = true,
+    });
+    return metadata;
+}
+
+struct NParticipantGraphFixture {
+    CouplingContext context;
+    std::array<CouplingContractDeclaration, 2> declarations;
+    std::vector<CouplingFormAnalysisMetadata> installed_forms;
+};
+
+NParticipantGraphFixture nParticipantGraphFixture()
+{
+    const auto* system = graphSystemToken();
+    const auto space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+
+    const CouplingRegionRef left_region{
+        .participant_name = "left",
+        .system_name = "system",
+        .system = system,
+        .region_name = "boundary",
+        .kind = CouplingRegionKind::Boundary,
+        .marker = 1,
+    };
+    const CouplingRegionRef middle_region{
+        .participant_name = "middle",
+        .system_name = "system",
+        .system = system,
+        .region_name = "boundary",
+        .kind = CouplingRegionKind::Boundary,
+        .marker = 2,
+    };
+    const CouplingRegionRef right_region{
+        .participant_name = "right",
+        .system_name = "system",
+        .system = system,
+        .region_name = "boundary",
+        .kind = CouplingRegionKind::Boundary,
+        .marker = 3,
+    };
+
+    CouplingContextBuilder builder;
+    const std::array<std::string, 3> participants{"left", "middle", "right"};
+    for (std::size_t i = 0; i < participants.size(); ++i) {
+        builder.addParticipant({
+            .participant_name = participants[i],
+            .system_name = "system",
+            .system = system,
+        });
+        builder.addField({
+            .participant_name = participants[i],
+            .system_name = "system",
+            .system = system,
+            .field_name = "primary",
+            .field_id = static_cast<FieldId>(i + 1u),
+            .space = space,
+            .components = 1,
+        });
+    }
+    builder.addRegion(left_region);
+    builder.addRegion(middle_region);
+    builder.addRegion(right_region);
+    builder.addSharedRegion(SharedRegionRef{
+        .name = "chain_boundary",
+        .required_region_kind = CouplingRegionKind::Boundary,
+        .participant_regions = {left_region, middle_region, right_region},
+    });
+
+    return NParticipantGraphFixture{
+        .context = builder.build(),
+        .declarations = {graphNParticipantContract("left_middle_bridge",
+                                                   "middle",
+                                                   "left"),
+                         graphNParticipantContract("middle_right_bridge",
+                                                   "right",
+                                                   "middle")},
+        .installed_forms = {
+            graphNParticipantInstalledBlock(
+                "left_middle_block",
+                FieldId{2},
+                FieldId{1}),
+            graphNParticipantInstalledBlock(
+                "middle_right_block",
+                FieldId{3},
+                FieldId{2}),
+        },
+    };
+}
+
 CouplingContext interfaceGraphContext(int left_marker = 17,
                                       int right_marker = 17)
 {
@@ -1206,6 +1373,81 @@ TEST(CouplingGraph, BuildsGraphForMultiwayContract)
     ASSERT_EQ(snapshot.contract_instances.size(), 1u);
     EXPECT_EQ(snapshot.contract_instances[0].contract_name,
               "three_way_interface");
+}
+
+TEST(CouplingGraph, NParticipantFixtureValidatesSharedRegionReuseAndBlocks)
+{
+    const auto fixture = nParticipantGraphFixture();
+
+    CouplingGraph graph;
+    const auto validation = graph.buildFinalizedGraph(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(fixture.declarations),
+        std::span<const CouplingFormAnalysisMetadata>(fixture.installed_forms));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto& snapshot = graph.snapshot();
+    EXPECT_EQ(snapshot.participants.size(), 3u);
+    EXPECT_EQ(snapshot.fields.size(), 3u);
+    EXPECT_EQ(snapshot.regions.size(), 3u);
+    ASSERT_EQ(snapshot.shared_regions.size(), 1u);
+    EXPECT_EQ(snapshot.shared_regions[0].shared_region.name, "chain_boundary");
+    EXPECT_EQ(snapshot.shared_regions[0]
+                  .shared_region.participant_regions.size(),
+              3u);
+    ASSERT_EQ(snapshot.contract_types.size(), 1u);
+    EXPECT_EQ(snapshot.contract_types[0].contract_type,
+              "n_participant_scalar");
+    ASSERT_EQ(snapshot.contract_instances.size(), 2u);
+    EXPECT_EQ(snapshot.contract_instances[0].contract_name,
+              "left_middle_bridge");
+    EXPECT_EQ(snapshot.contract_instances[1].contract_name,
+              "middle_right_bridge");
+    ASSERT_EQ(snapshot.dependency_expectations.size(), 2u);
+    ASSERT_TRUE(snapshot.dependency_expectations[0].residual_row.has_value());
+    ASSERT_TRUE(snapshot.dependency_expectations[0].dependency.has_value());
+    EXPECT_EQ(*snapshot.dependency_expectations[0].residual_row,
+              analysis::VariableKey::field(FieldId{2}));
+    EXPECT_EQ(*snapshot.dependency_expectations[0].dependency,
+              analysis::VariableKey::field(FieldId{1}));
+    ASSERT_EQ(snapshot.expected_blocks.size(), 2u);
+    EXPECT_EQ(snapshot.expected_blocks[1].contract_name,
+              "middle_right_bridge");
+    ASSERT_EQ(graph.installedFormMetadata().size(), 2u);
+    EXPECT_EQ(graph.installedFormMetadata()[1].installed_blocks[0].domains[0],
+              analysis::DomainKind::Boundary);
+}
+
+TEST(CouplingGraph, NParticipantFixtureReportsDeterministicBlockDiagnostics)
+{
+    auto fixture = nParticipantGraphFixture();
+    for (auto& metadata : fixture.installed_forms) {
+        metadata.installed_dependencies[0].contributes_matrix_block = false;
+        metadata.installed_blocks.clear();
+    }
+
+    const auto build_diagnostic_text = [&fixture]() {
+        CouplingGraph graph;
+        const auto validation = graph.buildFinalizedGraph(
+            fixture.context,
+            std::span<const CouplingContractDeclaration>(fixture.declarations),
+            std::span<const CouplingFormAnalysisMetadata>(
+                fixture.installed_forms));
+        EXPECT_FALSE(validation.ok());
+        return formatDiagnostics(validation);
+    };
+
+    const auto first_text = build_diagnostic_text();
+    const auto second_text = build_diagnostic_text();
+    EXPECT_EQ(first_text, second_text);
+    EXPECT_NE(first_text.find(
+                  "expected monolithic block is missing installed matrix evidence"),
+              std::string::npos);
+    const auto first_contract = first_text.find("left_middle_bridge");
+    const auto second_contract = first_text.find("middle_right_bridge");
+    ASSERT_NE(first_contract, std::string::npos);
+    ASSERT_NE(second_contract, std::string::npos);
+    EXPECT_LT(first_contract, second_contract);
 }
 
 TEST(CouplingGraph, RecordsDeclarationGraphNodeCategories)

@@ -5433,7 +5433,7 @@ Implementation checklist:
 
 - [x] Add a minimal scalar two-participant monolithic coupling test fixture
   that does not depend on full FSI physics.
-- [ ] Add a minimal scalar or vector N-participant graph fixture with at least
+- [x] Add a minimal scalar or vector N-participant graph fixture with at least
   three participants and two contracts.
 - [x] Add a minimal partitioned-plan fixture with a directed exchange cycle and
   group hints.
@@ -5486,7 +5486,7 @@ Unit-test verification checklist:
   presence for an implicit cross-field dependency.
 - [x] The minimal scalar monolithic fixture verifies no off-diagonal block is
   expected for an external/lagged dependency.
-- [ ] The minimal N-participant fixture verifies graph validation, shared-region
+- [x] The minimal N-participant fixture verifies graph validation, shared-region
   reuse, expected block diagnostics, and deterministic diagnostics.
 - [x] The minimal partitioned fixture verifies exchange graph construction,
   transfer validation, resolved endpoint records with temporal backing, endpoint
