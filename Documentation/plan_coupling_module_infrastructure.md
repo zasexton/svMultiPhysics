@@ -5588,17 +5588,17 @@ Unit-test verification checklist:
 - [x] Partitioned fixtures verify driver-owned general tensor payloads require
   explicit extents and packing, use `CouplingTransferKind::DriverOwned`, and are
   rejected for FE interface transfers.
-- [ ] Negative tests cover every validation rule listed in this plan document.
-- [ ] Positive tests cover every public data structure and every public method
+- [x] Negative tests cover every validation rule listed in this plan document.
+- [x] Positive tests cover every public data structure and every public method
   in `FE/Coupling`.
-- [ ] Positive tests cover every public option, validation branch, and lowering
+- [x] Positive tests cover every public option, validation branch, and lowering
   branch in the initial `Physics/Coupling` contracts.
 - [x] The completed implementation does not require a partitioned driver to
   validate or inspect partitioned coupling plans.
 - [x] The completed implementation allows one physical contract to support both
   monolithic and partitioned lowering without duplicating its participant,
   field, shared-region, temporal, geometry-terminal, or dependency declarations.
-- [ ] The completed implementation has no unchecked items in Phases 0 through
+- [x] The completed implementation has no unchecked items in Phases 0 through
   8.
 - [x] The first executable slice has its own completion marker: FE/Coupling
   skeleton, context, shared-region registry, contract declaration, metadata bridge
