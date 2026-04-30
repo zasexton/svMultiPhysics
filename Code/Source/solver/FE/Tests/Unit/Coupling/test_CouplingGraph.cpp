@@ -1512,6 +1512,89 @@ TEST(CouplingGraph, ValidatesRegionRelationRequirementsAgainstContext)
               std::string::npos);
 }
 
+TEST(CouplingGraph, RejectsSameSideInterfaceMappings)
+{
+    try {
+        static_cast<void>(interfaceGraphContext(17,
+                                                17,
+                                                CouplingInterfaceSide::Minus,
+                                                CouplingInterfaceSide::Minus));
+        FAIL() << "expected same-side shared-region diagnostic";
+    } catch (const InvalidArgumentException& e) {
+        EXPECT_NE(std::string(e.what()).find(
+                      "interface shared-region side ownership is ambiguous"),
+                  std::string::npos);
+    }
+
+    const auto* system = graphSystemToken();
+    const CouplingRegionRef left_region{
+        .participant_name = "left",
+        .system_name = "system",
+        .system = system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = 17,
+        .side = CouplingInterfaceSide::Minus,
+    };
+    const CouplingRegionRef right_region{
+        .participant_name = "right",
+        .system_name = "system",
+        .system = system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = 17,
+        .side = CouplingInterfaceSide::Minus,
+    };
+
+    CouplingContextBuilder context_builder;
+    context_builder.addParticipant({
+        .participant_name = "left",
+        .system_name = "system",
+        .system = system,
+    });
+    context_builder.addParticipant({
+        .participant_name = "right",
+        .system_name = "system",
+        .system = system,
+    });
+    context_builder.addRegion(left_region);
+    context_builder.addRegion(right_region);
+    const auto context = context_builder.build();
+
+    CouplingContractDeclaration relation;
+    relation.contract_type = "generic";
+    relation.contract_name = "generic_instance";
+    relation.participants.push_back({.participant_name = "left"});
+    relation.participants.push_back({.participant_name = "right"});
+    relation.region_relation_requirements.push_back({
+        .relation_name = "same_side_relation",
+        .relation_kind = CouplingRegionRelationKind::SidePairedInterface,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "interface",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "right",
+                .region_name = "interface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind =
+                    CouplingRelationLoweringKind::MonolithicForms,
+            },
+        },
+        .require_opposite_sides_for_side_pair = true,
+    });
+
+    const auto relation_validation = buildGraph(context, relation);
+    EXPECT_FALSE(relation_validation.ok());
+    EXPECT_NE(formatDiagnostics(relation_validation).find(
+                  "side-paired region relation needs opposite nonempty sides"),
+              std::string::npos);
+}
+
 TEST(CouplingGraph, ValidatesSelectedRelationLoweringCapability)
 {
     CouplingContractDeclaration declaration;

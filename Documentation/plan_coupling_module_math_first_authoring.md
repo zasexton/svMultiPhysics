@@ -1595,7 +1595,7 @@ enum class ThermalInterfaceFormulation {
 - [ ] Test required field lookup diagnostics.
 - [ ] Test required shared-region lookup diagnostics.
 - [ ] Test missing shared-interface participant diagnostics.
-- [ ] Test same-side interface diagnostics.
+- [x] Test same-side interface diagnostics.
 - [ ] Test N-way interface diagnostics.
 - [ ] Test mixed-dimensional region relation diagnostics.
 - [ ] Test optional endpoint validation.
