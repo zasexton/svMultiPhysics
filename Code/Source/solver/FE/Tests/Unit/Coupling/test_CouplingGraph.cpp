@@ -37,6 +37,11 @@ const systems::FESystem* graphSystemToken()
     return reinterpret_cast<const systems::FESystem*>(1);
 }
 
+const systems::FESystem* otherGraphSystemToken()
+{
+    return reinterpret_cast<const systems::FESystem*>(2);
+}
+
 bool hasAnalysisCouplingClaim(const analysis::ProblemAnalysisReport& report,
                               const analysis::VariableKey& a,
                               const analysis::VariableKey& b,
@@ -323,6 +328,44 @@ CouplingContext twoParticipantGraphContext()
         .system = system,
         .field_name = "primary",
         .field_id = 2,
+        .space = space,
+        .components = 1,
+    });
+    return builder.build();
+}
+
+CouplingContext duplicateRawFieldIdGraphContext()
+{
+    const auto* left_system = graphSystemToken();
+    const auto* right_system = otherGraphSystemToken();
+    const auto space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+
+    CouplingContextBuilder builder;
+    builder.addParticipant({
+        .participant_name = "left",
+        .system_name = "left_system",
+        .system = left_system,
+    });
+    builder.addParticipant({
+        .participant_name = "right",
+        .system_name = "right_system",
+        .system = right_system,
+    });
+    builder.addField({
+        .participant_name = "left",
+        .system_name = "left_system",
+        .system = left_system,
+        .field_name = "primary",
+        .field_id = 1,
+        .space = space,
+        .components = 1,
+    });
+    builder.addField({
+        .participant_name = "right",
+        .system_name = "right_system",
+        .system = right_system,
+        .field_name = "primary",
+        .field_id = 1,
         .space = space,
         .components = 1,
     });
@@ -1668,6 +1711,59 @@ TEST(CouplingGraph, RejectsInterfaceContractWithoutRegisteredTopology)
     EXPECT_NE(formatDiagnostics(validation).find(
                   "interface-face coupling region is missing registered interface topology"),
               std::string::npos);
+}
+
+TEST(CouplingGraph, RejectsRawFieldIdMatchesAcrossDifferentSystems)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "cross_system_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.fields.push_back({.participant_name = "left", .field_name = "primary"});
+    declaration.fields.push_back({.participant_name = "right", .field_name = "primary"});
+    declaration.dependencies.push_back(CouplingResidualDependency{
+        .residual_row = {
+            .kind = CouplingVariableKind::Field,
+            .participant_name = "left",
+            .name = "primary",
+        },
+        .dependency = {
+            .kind = CouplingVariableKind::Field,
+            .participant_name = "right",
+            .name = "primary",
+        },
+    });
+    declaration.expected_blocks.push_back(CouplingBlockExpectation{
+        .residual_row = declaration.dependencies.back().residual_row,
+        .dependency = declaration.dependencies.back().dependency,
+    });
+
+    auto metadata = installedDependencyMetadata();
+    metadata.system_name = "left_system";
+    metadata.installed_fields = {1};
+    metadata.installed_dependencies[0].residual_row =
+        analysis::VariableKey::field(1);
+    metadata.installed_dependencies[0].dependency =
+        analysis::VariableKey::field(1);
+    metadata.installed_blocks[0].residual_row =
+        analysis::VariableKey::field(1);
+    metadata.installed_blocks[0].dependency =
+        analysis::VariableKey::field(1);
+
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const std::array<CouplingFormAnalysisMetadata, 1> installed_forms{metadata};
+    const auto validation = graph.buildFinalizedGraph(
+        duplicateRawFieldIdGraphContext(),
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed_forms));
+
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("fields must resolve to one owning system"),
+              std::string::npos);
+    EXPECT_NE(text.find("right/primary"), std::string::npos);
 }
 
 TEST(CouplingGraph, RejectsSkippedOptionalAdditionalFieldReferences)

@@ -4825,7 +4825,7 @@ Unit-test verification checklist:
   finalized graph validation for coupling-owned fields.
 - [x] `test_CouplingGraph.cpp` rejects monolithic Forms coupling across
   incompatible `FESystem` instances or unregistered interface topology.
-- [ ] `test_CouplingGraph.cpp` verifies identical raw `FieldId`s or interface
+- [x] `test_CouplingGraph.cpp` verifies identical raw `FieldId`s or interface
   markers from two different `FESystem` instances are not treated as the same
   field or topology.
 - [ ] `test_CouplingGraph.cpp` distinguishes implicit-monolithic dependency

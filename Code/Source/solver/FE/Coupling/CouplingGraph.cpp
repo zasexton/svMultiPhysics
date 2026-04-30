@@ -1277,6 +1277,48 @@ std::optional<analysis::VariableKey> resolveVariable(
     return resolved;
 }
 
+std::optional<CouplingFieldRef> resolvedFieldRef(
+    const CouplingContext& context,
+    const CouplingVariableUse& variable)
+{
+    if (variable.kind != CouplingVariableKind::Field ||
+        !context.hasField(variable.participant_name, variable.name)) {
+        return std::nullopt;
+    }
+    return context.field(variable.participant_name, variable.name);
+}
+
+bool validateMonolithicFieldSystemCompatibility(
+    const CouplingContext& context,
+    const CouplingContractDeclaration& declaration,
+    const CouplingVariableUse& residual_row,
+    const CouplingVariableUse& dependency,
+    std::string message,
+    CouplingValidationResult& result)
+{
+    const auto row_field = resolvedFieldRef(context, residual_row);
+    const auto dependency_field = resolvedFieldRef(context, dependency);
+    if (!row_field.has_value() || !dependency_field.has_value()) {
+        return true;
+    }
+    if (row_field->system == dependency_field->system) {
+        return true;
+    }
+
+    result.add(CouplingDiagnostic{
+        .severity = CouplingDiagnosticSeverity::Error,
+        .contract_name = declaration.contract_name,
+        .participant_name = dependency.participant_name,
+        .field_name = dependency.name,
+        .message = std::move(message) +
+                   " fields must resolve to one owning system: " +
+                   residual_row.participant_name + "/" + residual_row.name +
+                   " depends on " + dependency.participant_name + "/" +
+                   dependency.name,
+    });
+    return false;
+}
+
 void validateInterfaceRegionTopology(const CouplingContractDeclaration& declaration,
                                      const CouplingRegionRef& region,
                                      CouplingValidationResult& result)
@@ -1469,6 +1511,16 @@ std::vector<ResolvedDeclaredDependency> resolveDeclaredDependencies(
             const auto col =
                 resolveVariable(context, declaration, dependency.dependency, result);
             if (!row.has_value() || !col.has_value()) {
+                continue;
+            }
+            if (dependency.mode == CouplingDependencyMode::ImplicitMonolithic &&
+                !validateMonolithicFieldSystemCompatibility(
+                    context,
+                    declaration,
+                    dependency.residual_row,
+                    dependency.dependency,
+                    "implicit monolithic coupling dependency",
+                    result)) {
                 continue;
             }
             resolved.push_back(ResolvedDeclaredDependency{
@@ -1737,6 +1789,16 @@ std::vector<ResolvedExpectedBlock> resolveExpectedBlocks(
             const auto col =
                 resolveVariable(context, declaration, block.dependency, result);
             if (!row.has_value() || !col.has_value()) {
+                continue;
+            }
+            if (block.expected_nonzero && block.expect_matrix_block &&
+                !validateMonolithicFieldSystemCompatibility(
+                    context,
+                    declaration,
+                    block.residual_row,
+                    block.dependency,
+                    "expected monolithic coupling block",
+                    result)) {
                 continue;
             }
             resolved.push_back(ResolvedExpectedBlock{
