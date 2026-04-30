@@ -1160,6 +1160,71 @@ TEST(CouplingGraph, AggregatesGeometryTerminalRequirementsAcrossContracts)
     EXPECT_EQ(text.find("time-step"), std::string::npos);
 }
 
+TEST(CouplingGraph, AggregatesFieldHistoryAndMeshTemporalRequirementsAcrossContracts)
+{
+    CouplingContractDeclaration history_contract;
+    history_contract.contract_type = "generic";
+    history_contract.contract_name = "history_contract";
+    history_contract.participants.push_back({.participant_name = "left"});
+    history_contract.fields.push_back({
+        .participant_name = "left",
+        .field_name = "primary",
+    });
+    history_contract.temporal_requirements.push_back({
+        .quantity = CouplingTemporalQuantity::FieldHistoryValue,
+        .field = CouplingFieldUse{
+            .participant_name = "left",
+            .field_name = "primary",
+        },
+        .history_index = 2,
+    });
+
+    CouplingContractDeclaration mesh_contract;
+    mesh_contract.contract_type = "generic";
+    mesh_contract.contract_name = "mesh_temporal_contract";
+    mesh_contract.participants.push_back({.participant_name = "right"});
+    mesh_contract.temporal_requirements.push_back({
+        .quantity = CouplingTemporalQuantity::MeshVelocity,
+        .mesh_motion_scope = CouplingGeometryTerminalScope{
+            .participant_name = "right",
+        },
+        .mesh_motion_role = systems::MeshMotionFieldRole::Velocity,
+    });
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "multi_temporal_form";
+    metadata.temporal_symbols.push_back({
+        .field = FieldId{1},
+        .quantity = CouplingTemporalQuantity::FieldHistoryValue,
+        .history_index = 2,
+    });
+    metadata.temporal_symbols.push_back({
+        .mesh_motion_scope = CouplingGeometryTerminalScope{
+            .participant_name = "right",
+        },
+        .mesh_motion_role = systems::MeshMotionFieldRole::Velocity,
+        .quantity = CouplingTemporalQuantity::MeshVelocity,
+    });
+
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 2> declarations{
+        history_contract,
+        mesh_contract,
+    };
+    const std::array<CouplingFormAnalysisMetadata, 1> installed{metadata};
+    const auto validation = graph.buildFinalizedGraph(
+        twoParticipantGraphContext(),
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    ASSERT_EQ(graph.snapshot().temporal_requirements.size(), 2u);
+    EXPECT_EQ(graph.snapshot().temporal_requirements[0].contract_name,
+              "history_contract");
+    EXPECT_EQ(graph.snapshot().temporal_requirements[1].contract_name,
+              "mesh_temporal_contract");
+}
+
 TEST(CouplingGraph, ValidatesRequiredNonFieldGraphVariablesThroughSystemRegistries)
 {
     NonFieldGraphFixture fixture(/*register_variables=*/true);

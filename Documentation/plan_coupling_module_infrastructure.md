@@ -4878,7 +4878,7 @@ Unit-test verification checklist:
 - [x] `test_CouplingGraph.cpp` detects undeclared installed blocks.
 - [x] `test_CouplingGraph.cpp` aggregates temporal requirements across
   multiple contracts.
-- [ ] `test_CouplingGraph.cpp` aggregates explicit field-history and mesh
+- [x] `test_CouplingGraph.cpp` aggregates explicit field-history and mesh
   temporal requirements across multiple contracts.
 - [x] `test_CouplingGraph.cpp` aggregates geometry-terminal requirements across
   multiple contracts and reports unsupported geometry terminals independently
