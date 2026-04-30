@@ -5,7 +5,9 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -44,6 +46,11 @@ public:
     std::string name() const override { return "hybrid"; }
     bool supportsMonolithicLowering() const override { return true; }
     bool supportsPartitionedLowering() const override { return true; }
+};
+
+class MismatchedRegisteredContract final : public DummyContract {
+public:
+    std::string name() const override { return "actual_contract_name"; }
 };
 
 bool containsName(const std::vector<std::string>& names, const std::string& name)
@@ -115,4 +122,49 @@ TEST(CouplingRegistry, FiltersContractsBySupportedMode)
     EXPECT_TRUE(containsName(partitioned, "partitioned"));
     EXPECT_TRUE(containsName(partitioned, "hybrid"));
     EXPECT_FALSE(containsName(partitioned, "monolithic"));
+}
+
+TEST(CouplingRegistry, ValidatesDeclarationTypesAndInstanceNames)
+{
+    CouplingRegistry registry;
+    registry.registerContract("dummy", [] {
+        return std::make_unique<DummyContract>();
+    });
+    registry.registerContract("mismatched_key", [] {
+        return std::make_unique<MismatchedRegisteredContract>();
+    });
+
+    CouplingContractDeclaration valid;
+    valid.contract_type = "dummy";
+    valid.contract_name = "valid_instance";
+    const std::array<CouplingContractDeclaration, 1> valid_declarations{valid};
+    EXPECT_TRUE(registry.validateDeclarations(
+                            std::span<const CouplingContractDeclaration>(
+                                valid_declarations))
+                    .ok());
+
+    auto unknown = valid;
+    unknown.contract_type = "missing";
+    unknown.contract_name = "unknown_instance";
+    auto mismatched = valid;
+    mismatched.contract_type = "mismatched_key";
+    mismatched.contract_name = "mismatched_instance";
+    auto duplicate = valid;
+    duplicate.contract_name = valid.contract_name;
+    const std::array<CouplingContractDeclaration, 4> invalid_declarations{
+        valid,
+        unknown,
+        mismatched,
+        duplicate,
+    };
+
+    const auto validation = registry.validateDeclarations(
+        std::span<const CouplingContractDeclaration>(invalid_declarations));
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("declaration type is not registered"), std::string::npos);
+    EXPECT_NE(text.find("does not match the registered contract name"),
+              std::string::npos);
+    EXPECT_NE(text.find("duplicate coupling contract instance name"),
+              std::string::npos);
 }

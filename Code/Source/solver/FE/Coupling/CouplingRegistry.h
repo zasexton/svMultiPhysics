@@ -17,6 +17,7 @@
 
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -34,6 +35,8 @@ public:
     [[nodiscard]] bool contains(std::string_view name) const noexcept;
     [[nodiscard]] bool supportsMode(std::string_view name, CouplingMode mode) const;
     [[nodiscard]] std::unique_ptr<CouplingContract> create(std::string_view name) const;
+    [[nodiscard]] CouplingValidationResult validateDeclarations(
+        std::span<const CouplingContractDeclaration> declarations) const;
     [[nodiscard]] std::vector<std::string> names() const;
     [[nodiscard]] std::vector<std::string> namesSupporting(CouplingMode mode) const;
 

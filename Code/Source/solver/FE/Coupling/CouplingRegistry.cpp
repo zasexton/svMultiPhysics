@@ -61,6 +61,59 @@ std::unique_ptr<CouplingContract> CouplingRegistry::create(std::string_view name
     return contract;
 }
 
+CouplingValidationResult CouplingRegistry::validateDeclarations(
+    std::span<const CouplingContractDeclaration> declarations) const
+{
+    CouplingValidationResult result;
+    for (std::size_t i = 0; i < declarations.size(); ++i) {
+        const auto& declaration = declarations[i];
+        if (!declaration.contract_type.empty()) {
+            const auto it = std::find_if(entries_.begin(),
+                                         entries_.end(),
+                                         [&](const Entry& entry) {
+                                             return entry.name ==
+                                                    declaration.contract_type;
+                                         });
+            if (it == entries_.end()) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .contract_name = declaration.contract_name,
+                    .message = "coupling contract declaration type is not registered",
+                });
+            } else {
+                const auto contract = it->factory();
+                if (contract == nullptr) {
+                    result.add(CouplingDiagnostic{
+                        .severity = CouplingDiagnosticSeverity::Error,
+                        .contract_name = declaration.contract_name,
+                        .message = "coupling contract factory returned null",
+                    });
+                } else if (contract->name() != declaration.contract_type) {
+                    result.add(CouplingDiagnostic{
+                        .severity = CouplingDiagnosticSeverity::Error,
+                        .contract_name = declaration.contract_name,
+                        .message = "coupling contract declaration type does not match the registered contract name",
+                    });
+                }
+            }
+        }
+
+        if (declaration.contract_name.empty()) {
+            continue;
+        }
+        for (std::size_t j = i + 1u; j < declarations.size(); ++j) {
+            if (declaration.contract_name == declarations[j].contract_name) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .contract_name = declaration.contract_name,
+                    .message = "duplicate coupling contract instance name",
+                });
+            }
+        }
+    }
+    return result;
+}
+
 std::vector<std::string> CouplingRegistry::names() const
 {
     std::vector<std::string> out;

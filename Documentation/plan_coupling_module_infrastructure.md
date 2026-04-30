@@ -4651,7 +4651,7 @@ Implementation checklist:
   coupling.
 - [x] Validate that all required participants, fields, participant-local regions,
   and shared regions are resolvable in the context.
-- [ ] Validate that each contract declaration's `contract_type` matches the
+- [x] Validate that each contract declaration's `contract_type` matches the
   registered `CouplingContract::name()` and that configured contract instance
   names are unique.
 - [ ] Validate that all required monolithic non-field graph variables resolve
