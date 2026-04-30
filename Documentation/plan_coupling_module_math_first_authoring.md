@@ -224,7 +224,7 @@ Checklist:
 - [x] Exchange names are stable.
 - [ ] Coupling-owned field and variable names are stable.
 - [x] Explicit name overrides are available for advanced cases.
-- [ ] Generated names appear in diagnostics and installed metadata.
+- [x] Generated names appear in diagnostics and installed metadata.
 
 ### Relation Lowering Capabilities
 

@@ -3428,6 +3428,31 @@ TEST(CouplingGraph, RejectsInstalledMetadataWithoutBridgeReadinessGates)
     EXPECT_NE(text.find("InstalledBlocks"), std::string::npos);
 }
 
+TEST(CouplingGraph, ReportsGeneratedContributionNamesInDiagnostics)
+{
+    auto metadata = installedDependencyMetadata();
+    metadata.contribution_name =
+        makeCouplingGeneratedName(CouplingGeneratedNameRequest{
+            .contract_name = "fsi",
+            .relation_name = "fsi_interface",
+            .local_name = "velocity_continuity",
+        });
+    metadata.feature_gates.clear();
+
+    const std::vector<CouplingFormAnalysisMetadata> installed_forms{metadata};
+    const auto validation = buildFinalizedGraph(
+        twoParticipantGraphContext(),
+        twoParticipantDependencyDeclaration(),
+        installed_forms);
+
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("fsi.fsi_interface.velocity_continuity"),
+              std::string::npos);
+    EXPECT_NE(text.find("installed-form validators require public bridge feature gate"),
+              std::string::npos);
+}
+
 TEST(CouplingGraph, RejectsDeclaredImplicitDependencyMissingFromInstalledMetadata)
 {
     const auto validation = buildFinalizedGraph(
