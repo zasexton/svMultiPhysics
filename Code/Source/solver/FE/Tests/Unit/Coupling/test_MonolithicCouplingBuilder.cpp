@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <type_traits>
@@ -529,6 +530,36 @@ TEST(MonolithicCouplingBuilder, CollectsAllDeclarationsBeforeAdditionalFields)
     ASSERT_EQ(registered.size(), 2u);
     EXPECT_TRUE(fixture.system.hasField("left.lambda"));
     EXPECT_TRUE(fixture.system.hasField("right.mu"));
+}
+
+TEST(MonolithicCouplingBuilder, ValidatesTemporalPolicyBeforeSetupWhenAvailable)
+{
+    BuilderFixture fixture;
+    const MonolithicCouplingBuilder builder;
+
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "temporal_instance";
+    declaration.temporal_requirements.push_back(CouplingTemporalRequirement{
+        .quantity = CouplingTemporalQuantity::TimeStep,
+    });
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+
+    CouplingGraph graph;
+    const auto graph_validation = graph.buildDeclarationGraph(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(graph_validation.ok()) << formatDiagnostics(graph_validation);
+    EXPECT_TRUE(builder.validateTemporalPolicy(graph, std::nullopt).ok());
+
+    CouplingTemporalAvailability unavailable_time_step;
+    unavailable_time_step.provides_time_step = false;
+    const auto policy_validation =
+        builder.validateTemporalPolicy(graph, unavailable_time_step);
+    EXPECT_FALSE(policy_validation.ok());
+    EXPECT_NE(formatDiagnostics(policy_validation).find("time-step"),
+              std::string::npos);
+    EXPECT_FALSE(fixture.system.isSetup());
 }
 
 TEST(MonolithicCouplingBuilder, ResolvesFormContributionThroughContext)

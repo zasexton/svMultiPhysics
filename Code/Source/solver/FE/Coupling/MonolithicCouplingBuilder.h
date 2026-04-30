@@ -15,6 +15,7 @@
 
 #include "Coupling/CouplingContract.h"
 
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -26,6 +27,8 @@ class MonolithicCouplingInstallContext {
 public:
     MonolithicCouplingInstallContext() = default;
 };
+
+class CouplingGraph;
 
 class MonolithicCouplingBuilder {
 public:
@@ -41,6 +44,10 @@ public:
     [[nodiscard]] CouplingValidationResult validateDeclarations(
         const CouplingContext& context,
         std::span<const CouplingContractDeclaration> declarations) const;
+
+    [[nodiscard]] CouplingValidationResult validateTemporalPolicy(
+        const CouplingGraph& graph,
+        const std::optional<CouplingTemporalAvailability>& availability) const;
 
     [[nodiscard]] std::vector<ResolvedCouplingAdditionalFieldDeclaration>
     resolveAdditionalFields(

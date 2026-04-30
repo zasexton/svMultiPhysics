@@ -1233,6 +1233,16 @@ CouplingValidationResult MonolithicCouplingBuilder::validateDeclarations(
     return graph.buildDeclarationGraph(context, declarations);
 }
 
+CouplingValidationResult MonolithicCouplingBuilder::validateTemporalPolicy(
+    const CouplingGraph& graph,
+    const std::optional<CouplingTemporalAvailability>& availability) const
+{
+    if (!availability.has_value()) {
+        return {};
+    }
+    return graph.validateTemporalRequirements(*availability);
+}
+
 std::vector<ResolvedCouplingAdditionalFieldDeclaration>
 MonolithicCouplingBuilder::resolveAdditionalFields(
     const CouplingContext& context,

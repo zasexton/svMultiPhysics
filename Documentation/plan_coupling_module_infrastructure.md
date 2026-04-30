@@ -4926,7 +4926,7 @@ Implementation checklist:
   registered.
 - [x] Rebuild and validate the finalized `CouplingGraph` after additional
   fields are present.
-- [ ] Validate temporal requirements against the selected temporal policy if
+- [x] Validate temporal requirements against the selected temporal policy if
   the policy is available before setup.
 - [ ] Allow base physics modules to install their residual forms before
   coupling Forms are installed.
@@ -5050,7 +5050,7 @@ Unit-test verification checklist:
   fail before setup.
 - [ ] `test_MonolithicCouplingBuilder.cpp` verifies external/lagged
   dependencies do not produce expected block requirements.
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies temporal-policy failures
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies temporal-policy failures
   stop setup before assembly.
 - [x] `test_MonolithicCouplingBuilder.cpp` verifies a minimal two-field
   coupling produces the expected off-diagonal Jacobian block metadata.
