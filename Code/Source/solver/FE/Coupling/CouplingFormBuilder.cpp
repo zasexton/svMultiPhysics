@@ -181,6 +181,22 @@ bool declarationMatchesNodeTerminal(
     }
 }
 
+forms::FormExpr restrictToInterfaceSide(const forms::FormExpr& expr,
+                                        CouplingInterfaceSide side)
+{
+    switch (side) {
+    case CouplingInterfaceSide::Minus:
+        return expr.minus();
+    case CouplingInterfaceSide::Plus:
+        return expr.plus();
+    case CouplingInterfaceSide::None:
+        break;
+    }
+    FE_THROW(InvalidArgumentException,
+             "coupling interface view requires an explicit interface side");
+    return forms::FormExpr{};
+}
+
 } // namespace
 
 CouplingFormBuilder::CouplingFormBuilder(const CouplingContext& context)
@@ -476,6 +492,12 @@ forms::FormExpr CouplingFormBuilder::integrateShared(
     return integrate(integrand, sharedRegion(shared_region_name, participant_name));
 }
 
+CouplingSharedInterfaceView CouplingFormBuilder::sharedInterface(
+    std::string_view name) const
+{
+    return CouplingSharedInterfaceView(*this, std::string(name));
+}
+
 CouplingFieldRef CouplingFormBuilder::field(std::string_view participant_name,
                                             std::string_view field_name) const
 {
@@ -497,6 +519,120 @@ CouplingRegionRef CouplingFormBuilder::sharedRegion(std::string_view name,
 SharedRegionRef CouplingFormBuilder::sharedRegionGroup(std::string_view name) const
 {
     return context().sharedRegionGroup(name);
+}
+
+CouplingInterfaceSideView::CouplingInterfaceSideView(
+    const CouplingFormBuilder& builder,
+    std::string shared_region_name,
+    CouplingRegionRef region)
+    : builder_(&builder)
+    , shared_region_name_(std::move(shared_region_name))
+    , region_(std::move(region))
+{
+}
+
+std::string_view CouplingInterfaceSideView::sharedRegionName() const noexcept
+{
+    return shared_region_name_;
+}
+
+std::string_view CouplingInterfaceSideView::participantName() const noexcept
+{
+    return region_.participant_name;
+}
+
+const CouplingRegionRef& CouplingInterfaceSideView::region() const noexcept
+{
+    return region_;
+}
+
+forms::FormExpr CouplingInterfaceSideView::state(std::string_view field_name,
+                                                 std::string symbol) const
+{
+    return restrictToInterfaceSide(
+        builder_->state(region_.participant_name, field_name, std::move(symbol)),
+        region_.side);
+}
+
+forms::FormExpr CouplingInterfaceSideView::test(std::string_view field_name,
+                                                std::string symbol) const
+{
+    return restrictToInterfaceSide(
+        builder_->test(region_.participant_name, field_name, std::move(symbol)),
+        region_.side);
+}
+
+forms::FormExpr CouplingInterfaceSideView::dt(std::string_view field_name,
+                                              std::string symbol,
+                                              int order) const
+{
+    return restrictToInterfaceSide(
+        builder_->timeDerivative(region_.participant_name,
+                                 field_name,
+                                 std::move(symbol),
+                                 order),
+        region_.side);
+}
+
+forms::FormExpr CouplingInterfaceSideView::geometryTerminal(
+    CouplingGeometryTerminalQuantity quantity) const
+{
+    const CouplingGeometryTerminalScope scope{
+        .participant_name = region_.participant_name,
+        .region = CouplingRegionEndpointDeclaration{
+            .participant_name = region_.participant_name,
+            .region_name = region_.region_name,
+            .shared_region_name = shared_region_name_,
+        },
+        .location = CouplingGeometryTerminalLocationDeclaration{
+            .region_kind = region_.kind,
+            .shared_region_name = shared_region_name_,
+            .side = region_.side,
+        },
+    };
+    return restrictToInterfaceSide(builder_->geometryTerminal(quantity, scope),
+                                   region_.side);
+}
+
+forms::FormExpr CouplingInterfaceSideView::normal() const
+{
+    return geometryTerminal(CouplingGeometryTerminalQuantity::Normal);
+}
+
+CouplingSharedInterfaceView::CouplingSharedInterfaceView(
+    const CouplingFormBuilder& builder,
+    std::string shared_region_name)
+    : builder_(&builder)
+    , shared_region_name_(std::move(shared_region_name))
+{
+}
+
+std::string_view CouplingSharedInterfaceView::name() const noexcept
+{
+    return shared_region_name_;
+}
+
+SharedRegionRef CouplingSharedInterfaceView::group() const
+{
+    return builder_->sharedRegionGroup(shared_region_name_);
+}
+
+CouplingInterfaceSideView CouplingSharedInterfaceView::side(
+    std::string_view participant_name) const
+{
+    return CouplingInterfaceSideView(
+        *builder_,
+        shared_region_name_,
+        builder_->sharedRegion(shared_region_name_, participant_name));
+}
+
+forms::FormExpr CouplingSharedInterfaceView::integral(
+    const forms::FormExpr& integrand,
+    std::string_view integration_participant) const
+{
+    return builder_->integrateShared(integrand,
+                                     shared_region_name_,
+                                     integration_participant);
 }
 
 forms::FormExpr CouplingFormBuilder::recordTerminal(

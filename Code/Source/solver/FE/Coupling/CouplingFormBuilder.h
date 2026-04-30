@@ -28,6 +28,9 @@ namespace svmp {
 namespace FE {
 namespace coupling {
 
+class CouplingInterfaceSideView;
+class CouplingSharedInterfaceView;
+
 class CouplingFormBuilder {
 public:
     explicit CouplingFormBuilder(const CouplingContext& context);
@@ -84,6 +87,9 @@ public:
                                                   std::string_view shared_region,
                                                   std::string_view participant) const;
 
+    [[nodiscard]] CouplingSharedInterfaceView sharedInterface(
+        std::string_view name) const;
+
     [[nodiscard]] CouplingFieldRef field(std::string_view participant,
                                          std::string_view field) const;
     [[nodiscard]] CouplingRegionRef region(std::string_view participant,
@@ -104,6 +110,51 @@ private:
 
     const CouplingContext* context_{nullptr};
     mutable std::vector<RecordedTerminalProvenance> recorded_terminals_;
+};
+
+class CouplingInterfaceSideView {
+public:
+    CouplingInterfaceSideView(const CouplingFormBuilder& builder,
+                              std::string shared_region_name,
+                              CouplingRegionRef region);
+
+    [[nodiscard]] std::string_view sharedRegionName() const noexcept;
+    [[nodiscard]] std::string_view participantName() const noexcept;
+    [[nodiscard]] const CouplingRegionRef& region() const noexcept;
+
+    [[nodiscard]] forms::FormExpr state(std::string_view field,
+                                        std::string symbol) const;
+    [[nodiscard]] forms::FormExpr test(std::string_view field,
+                                       std::string symbol) const;
+    [[nodiscard]] forms::FormExpr dt(std::string_view field,
+                                     std::string symbol,
+                                     int order = 1) const;
+    [[nodiscard]] forms::FormExpr geometryTerminal(
+        CouplingGeometryTerminalQuantity quantity) const;
+    [[nodiscard]] forms::FormExpr normal() const;
+
+private:
+    const CouplingFormBuilder* builder_{nullptr};
+    std::string shared_region_name_;
+    CouplingRegionRef region_;
+};
+
+class CouplingSharedInterfaceView {
+public:
+    CouplingSharedInterfaceView(const CouplingFormBuilder& builder,
+                                std::string shared_region_name);
+
+    [[nodiscard]] std::string_view name() const noexcept;
+    [[nodiscard]] SharedRegionRef group() const;
+    [[nodiscard]] CouplingInterfaceSideView side(
+        std::string_view participant) const;
+    [[nodiscard]] forms::FormExpr integral(
+        const forms::FormExpr& integrand,
+        std::string_view integration_participant) const;
+
+private:
+    const CouplingFormBuilder* builder_{nullptr};
+    std::string shared_region_name_;
 };
 
 } // namespace coupling

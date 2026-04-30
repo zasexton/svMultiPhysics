@@ -1194,9 +1194,10 @@ integrals. That mapping is generic FE/Coupling work.
 
 ### Concrete Changes
 
-- [ ] Add lightweight interface helper types in FE/Coupling:
-      `CouplingSharedInterfaceView`, `CouplingInterfaceSideView`, and
-      `CouplingInterfaceIntegralView`.
+- [x] Add lightweight interface helper types in FE/Coupling:
+      `CouplingSharedInterfaceView` and `CouplingInterfaceSideView`.
+- [ ] Add `CouplingInterfaceIntegralView` if a dedicated integral object is
+      needed beyond `CouplingSharedInterfaceView::integral(...)`.
 - [ ] Add lightweight region-relation helper types for N-way and
       mixed-dimensional relations that do not have `minus()` / `plus()` sides.
 - [ ] Implement the helpers inside or next to `CouplingFormBuilder`.
@@ -1228,12 +1229,12 @@ forms::FormExpr CouplingRegionRelationView::sum(
     std::span<const forms::FormExpr> endpoint_terms) const;
 ```
 
-- [ ] Implement `state`, `test`, and `dt` through existing
+- [x] Implement `state`, `test`, and `dt` through existing
       `CouplingFormBuilder::state`, `test`, and `timeDerivative`.
-- [ ] Implement side restriction through existing `FormExpr::minus()` and
+- [x] Implement side restriction through existing `FormExpr::minus()` and
       `FormExpr::plus()`.
-- [ ] Implement `normal()` through existing `geometryTerminal(...)`.
-- [ ] Implement `integral(...)` through existing `integrateShared(...)`.
+- [x] Implement `normal()` through existing `geometryTerminal(...)`.
+- [x] Implement `integral(...)` through existing `integrateShared(...)`.
 - [ ] Implement relation integrals through existing Forms measures and
       `CouplingFormBuilder::integrate(...)` / `integrateShared(...)`, choosing
       the measure from resolved region metadata.
@@ -1251,8 +1252,8 @@ forms::FormExpr CouplingRegionRelationView::sum(
       over low-level context records.
 - [ ] Mixed-dimensional residuals can select the correct resolved integration
       domain through the builder.
-- [ ] Existing `CouplingFormBuilder` tests still pass.
-- [ ] New tests cover missing side mappings and missing shared-region mappings.
+- [x] Existing `CouplingFormBuilder` tests still pass.
+- [x] New tests cover missing side mappings and missing shared-region mappings.
 
 ## Phase 3: Infer Monolithic Declarations From Forms Metadata
 

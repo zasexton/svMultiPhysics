@@ -505,6 +505,72 @@ TEST(CouplingFormBuilder, LowersRegionKindsToFormsMeasures)
     EXPECT_EQ(shared_region.side, CouplingInterfaceSide::Minus);
 }
 
+TEST(CouplingFormBuilder, BuildsSharedInterfaceViewsThroughFormsVocabulary)
+{
+    const auto context = makeBuilderContext();
+    const CouplingFormBuilder builder(context);
+
+    const auto shared = builder.sharedInterface("shared_interface");
+    EXPECT_EQ(std::string(shared.name()), "shared_interface");
+    EXPECT_EQ(shared.group().participant_regions.size(), 1u);
+
+    const auto side = shared.side("participant");
+    EXPECT_EQ(std::string(side.participantName()), "participant");
+    EXPECT_EQ(side.region().side, CouplingInterfaceSide::Minus);
+
+    const auto state = side.state("primary", "u");
+    const auto test = side.test("primary", "w");
+    const auto derivative = side.dt("primary", "udot");
+    const auto normal = side.normal();
+
+    ASSERT_TRUE(state.isValid());
+    ASSERT_TRUE(test.isValid());
+    ASSERT_TRUE(derivative.isValid());
+    ASSERT_TRUE(normal.isValid());
+    EXPECT_TRUE(containsFormExprType(*state.node(),
+                                     forms::FormExprType::RestrictMinus));
+    EXPECT_TRUE(containsFormExprType(*test.node(),
+                                     forms::FormExprType::RestrictMinus));
+    EXPECT_TRUE(containsFormExprType(*derivative.node(),
+                                     forms::FormExprType::TimeDerivative));
+    EXPECT_TRUE(containsFormExprType(*normal.node(),
+                                     forms::FormExprType::Normal));
+    EXPECT_TRUE(containsFormExprType(*normal.node(),
+                                     forms::FormExprType::RestrictMinus));
+
+    const auto residual =
+        shared.integral((state + forms::dot(normal, normal)) * test,
+                        "participant");
+    ASSERT_TRUE(residual.isValid());
+    EXPECT_EQ(residual.node()->type(), forms::FormExprType::InterfaceIntegral);
+    ASSERT_TRUE(residual.node()->interfaceMarker().has_value());
+    EXPECT_EQ(*residual.node()->interfaceMarker(), 17);
+
+    const auto provenance = builder.terminalProvenanceFor(residual);
+    ASSERT_EQ(provenance.size(), 1u);
+    EXPECT_EQ(provenance[0].geometry_quantity,
+              CouplingGeometryTerminalQuantity::Normal);
+    ASSERT_TRUE(provenance[0].scope.has_value());
+    ASSERT_TRUE(provenance[0].scope->location.has_value());
+    EXPECT_EQ(provenance[0].scope->location->side,
+              CouplingInterfaceSide::Minus);
+    ASSERT_TRUE(provenance[0].scope->location->shared_region_name.has_value());
+    EXPECT_EQ(*provenance[0].scope->location->shared_region_name,
+              "shared_interface");
+}
+
+TEST(CouplingFormBuilder, RejectsMissingSharedInterfaceViewMappings)
+{
+    const auto context = makeBuilderContext();
+    const CouplingFormBuilder builder(context);
+
+    EXPECT_THROW(static_cast<void>(builder.sharedInterface("missing").group()),
+                 InvalidArgumentException);
+    EXPECT_THROW(static_cast<void>(
+                     builder.sharedInterface("shared_interface").side("missing")),
+                 InvalidArgumentException);
+}
+
 TEST(CouplingFormBuilder, AuthorsInterfaceResidualWithSideRestrictions)
 {
     const auto context = makeBuilderContext();
