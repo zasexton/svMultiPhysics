@@ -173,6 +173,7 @@ std::string availableLoweringDescription(
             }
             stream << ")";
         }
+        stream << "{fidelity=" << toString(capability.fidelity) << "}";
         if (!capability.enforcement_strategies.empty()) {
             stream << "{enforcement=";
             for (std::size_t j = 0;
@@ -3227,6 +3228,25 @@ void validateContextReferences(const CouplingContext& context,
                         "selected relation lowering strategy is unsupported: relation=" +
                         requirement.relation_name + ", kind=" +
                         toString(requirement.relation_kind) + ", selected=(" +
+                        selectedLoweringDescription(request) +
+                        "), available=[" +
+                        availableLoweringDescription(requirement) + "]",
+                });
+            }
+            if (capability != nullptr && capability->supported &&
+                (capability->fidelity ==
+                     CouplingRelationLoweringFidelity::Approximate ||
+                 capability->fidelity ==
+                     CouplingRelationLoweringFidelity::Lagged)) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Warning,
+                    .contract_name = declaration.contract_name,
+                    .message =
+                        "selected relation lowering is " +
+                        std::string(toString(capability->fidelity)) +
+                        ": relation=" + requirement.relation_name +
+                        ", kind=" + toString(requirement.relation_kind) +
+                        ", selected=(" +
                         selectedLoweringDescription(request) +
                         "), available=[" +
                         availableLoweringDescription(requirement) + "]",

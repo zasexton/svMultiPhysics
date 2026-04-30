@@ -442,6 +442,9 @@ TEST(CouplingContractValidation, ValidatesRegionRelationRequirements)
               std::string::npos);
     EXPECT_NE(text.find("unsupported relation lowering capability requires a reason"),
               std::string::npos);
+    EXPECT_NE(text.find(
+                  "unsupported relation lowering capability must be marked unavailable"),
+              std::string::npos);
     EXPECT_NE(text.find("duplicate relation lowering capability"),
               std::string::npos);
     EXPECT_NE(text.find("region-relation requirement requires lowering capabilities"),
@@ -584,6 +587,81 @@ TEST(CouplingContractValidation, ValidatesRelationLoweringRequests)
               std::string::npos);
     EXPECT_NE(text.find(
                   "duplicate relation lowering partitioned solve strategy"),
+              std::string::npos);
+}
+
+TEST(CouplingContractValidation, ValidatesRelationLoweringFidelity)
+{
+    auto valid = minimalDeclaration();
+    valid.region_relation_requirements.push_back({
+        .relation_name = "valid_fidelity",
+        .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+                .fidelity = CouplingRelationLoweringFidelity::Exact,
+            },
+            CouplingRelationLoweringCapability{
+                .lowering_kind =
+                    CouplingRelationLoweringKind::PartitionedExchange,
+                .fidelity = CouplingRelationLoweringFidelity::Unavailable,
+                .supported = false,
+                .unsupported_reason = "requires a shared system",
+            },
+        },
+    });
+    EXPECT_TRUE(validateContractDeclarationShape(valid).ok());
+
+    auto invalid = minimalDeclaration();
+    invalid.region_relation_requirements.push_back({
+        .relation_name = "supported_unavailable",
+        .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+                .fidelity = CouplingRelationLoweringFidelity::Unavailable,
+            },
+        },
+    });
+    invalid.region_relation_requirements.push_back({
+        .relation_name = "unsupported_exact",
+        .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+                .fidelity = CouplingRelationLoweringFidelity::Exact,
+                .supported = false,
+                .unsupported_reason = "not available",
+            },
+        },
+    });
+
+    const auto validation = validateContractDeclarationShape(invalid);
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find(
+                  "supported relation lowering capability cannot be marked unavailable"),
+              std::string::npos);
+    EXPECT_NE(text.find(
+                  "unsupported relation lowering capability must be marked unavailable"),
               std::string::npos);
 }
 

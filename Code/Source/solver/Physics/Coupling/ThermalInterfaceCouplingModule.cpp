@@ -112,6 +112,7 @@ fec::CouplingRegionRelationRequirement thermalInterfaceRelation(
             fec::CouplingRelationLoweringCapability{
                 .lowering_kind =
                     fec::CouplingRelationLoweringKind::MonolithicForms,
+                .fidelity = fec::CouplingRelationLoweringFidelity::Exact,
                 .enforcement_strategies = {
                     "temperature_continuity_penalty",
                 },
@@ -119,6 +120,7 @@ fec::CouplingRegionRelationRequirement thermalInterfaceRelation(
             fec::CouplingRelationLoweringCapability{
                 .lowering_kind =
                     fec::CouplingRelationLoweringKind::PartitionedExchange,
+                .fidelity = fec::CouplingRelationLoweringFidelity::Lagged,
             },
         },
         .selected_lowering = selectedLowering(

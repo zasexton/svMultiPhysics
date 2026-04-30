@@ -99,9 +99,18 @@ enum class CouplingRelationLoweringKind : std::uint8_t {
     PartitionedExpert,
 };
 
+enum class CouplingRelationLoweringFidelity : std::uint8_t {
+    Exact,
+    Approximate,
+    Lagged,
+    Unavailable,
+};
+
 struct CouplingRelationLoweringCapability {
     CouplingRelationLoweringKind lowering_kind{
         CouplingRelationLoweringKind::MonolithicForms};
+    CouplingRelationLoweringFidelity fidelity{
+        CouplingRelationLoweringFidelity::Exact};
     bool supported{true};
     std::string unsupported_reason;
     std::vector<std::string> enforcement_strategies;
@@ -433,6 +442,9 @@ analysisVariableKindForFormNonFieldDependency(
 [[nodiscard]] const char* toString(CouplingRegionRelationKind kind) noexcept;
 
 [[nodiscard]] const char* toString(CouplingRelationLoweringKind kind) noexcept;
+
+[[nodiscard]] const char* toString(
+    CouplingRelationLoweringFidelity fidelity) noexcept;
 
 [[nodiscard]] bool isExpertRelationLoweringKind(
     CouplingRelationLoweringKind kind) noexcept;

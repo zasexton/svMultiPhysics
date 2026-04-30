@@ -220,14 +220,18 @@ TEST(ThermalInterfaceCouplingModule, DeclaresRelationLoweringCapabilities)
               fec::CouplingRelationLoweringKind::MonolithicForms);
     EXPECT_EQ(relation.selected_lowering->enforcement_strategy,
               "temperature_continuity_penalty");
-    EXPECT_NE(findCapability(
-                  relation,
-                  fec::CouplingRelationLoweringKind::MonolithicForms),
-              nullptr);
-    EXPECT_NE(findCapability(
-                  relation,
-                  fec::CouplingRelationLoweringKind::PartitionedExchange),
-              nullptr);
+    const auto* monolithic_capability = findCapability(
+        relation,
+        fec::CouplingRelationLoweringKind::MonolithicForms);
+    ASSERT_NE(monolithic_capability, nullptr);
+    EXPECT_EQ(monolithic_capability->fidelity,
+              fec::CouplingRelationLoweringFidelity::Exact);
+    const auto* partitioned_capability = findCapability(
+        relation,
+        fec::CouplingRelationLoweringKind::PartitionedExchange);
+    ASSERT_NE(partitioned_capability, nullptr);
+    EXPECT_EQ(partitioned_capability->fidelity,
+              fec::CouplingRelationLoweringFidelity::Lagged);
 
     ThermalInterfaceCouplingOptions options;
     options.mode = fec::CouplingMode::Partitioned;

@@ -601,14 +601,18 @@ TEST(FSICouplingModule, DeclaresRelationLoweringCapabilities)
               fec::CouplingRelationLoweringKind::MonolithicForms);
     EXPECT_EQ(relation.selected_lowering->enforcement_strategy,
               "velocity_traction_balance");
-    EXPECT_NE(findCapability(
-                  relation,
-                  fec::CouplingRelationLoweringKind::MonolithicForms),
-              nullptr);
-    EXPECT_NE(findCapability(
-                  relation,
-                  fec::CouplingRelationLoweringKind::PartitionedExchange),
-              nullptr);
+    const auto* monolithic_capability = findCapability(
+        relation,
+        fec::CouplingRelationLoweringKind::MonolithicForms);
+    ASSERT_NE(monolithic_capability, nullptr);
+    EXPECT_EQ(monolithic_capability->fidelity,
+              fec::CouplingRelationLoweringFidelity::Exact);
+    const auto* partitioned_capability = findCapability(
+        relation,
+        fec::CouplingRelationLoweringKind::PartitionedExchange);
+    ASSERT_NE(partitioned_capability, nullptr);
+    EXPECT_EQ(partitioned_capability->fidelity,
+              fec::CouplingRelationLoweringFidelity::Lagged);
 
     const FSICouplingModule partitioned_module(partitionedIdentityOptions());
     const auto partitioned = partitioned_module.declare();

@@ -267,9 +267,9 @@ lagged.
 
 Checklist:
 
-- [ ] Relation lowerings can be marked `Exact`, `Approximate`, `Lagged`, or
+- [x] Relation lowerings can be marked `Exact`, `Approximate`, `Lagged`, or
       `Unavailable`.
-- [ ] Approximate or lagged lowerings appear in diagnostics.
+- [x] Approximate or lagged lowerings appear in diagnostics.
 - [ ] Exact monolithic lowerings require metadata sufficient for dependency and
       block validation.
 
@@ -1632,7 +1632,7 @@ enum class ThermalInterfaceFormulation {
 - [ ] Test non-field dependency inference.
 - [ ] Test global scalar dependency inference.
 - [ ] Test coupling-owned field dependency inference.
-- [ ] Test approximate and lagged lowering disclosures appear in diagnostics.
+- [x] Test approximate and lagged lowering disclosures appear in diagnostics.
 - [ ] Test explicit dependency declarations can still be verified.
 - [ ] Test mismatched explicit declarations produce diagnostics.
 

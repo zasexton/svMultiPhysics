@@ -51,6 +51,21 @@ const char* toString(CouplingRelationLoweringKind kind) noexcept
     return "unknown";
 }
 
+const char* toString(CouplingRelationLoweringFidelity fidelity) noexcept
+{
+    switch (fidelity) {
+    case CouplingRelationLoweringFidelity::Exact:
+        return "exact";
+    case CouplingRelationLoweringFidelity::Approximate:
+        return "approximate";
+    case CouplingRelationLoweringFidelity::Lagged:
+        return "lagged";
+    case CouplingRelationLoweringFidelity::Unavailable:
+        return "unavailable";
+    }
+    return "unknown";
+}
+
 bool isExpertRelationLoweringKind(CouplingRelationLoweringKind kind) noexcept
 {
     return kind == CouplingRelationLoweringKind::MonolithicExpert ||
@@ -435,6 +450,18 @@ CouplingValidationResult validateContractDeclarationShape(
             if (!capability.supported && capability.unsupported_reason.empty()) {
                 result.addError(
                     "unsupported relation lowering capability requires a reason");
+            }
+            if (!capability.supported &&
+                capability.fidelity !=
+                    CouplingRelationLoweringFidelity::Unavailable) {
+                result.addError(
+                    "unsupported relation lowering capability must be marked unavailable");
+            }
+            if (capability.supported &&
+                capability.fidelity ==
+                    CouplingRelationLoweringFidelity::Unavailable) {
+                result.addError(
+                    "supported relation lowering capability cannot be marked unavailable");
             }
             for (std::size_t k = 0;
                  k < capability.enforcement_strategies.size();

@@ -1550,13 +1550,15 @@ TEST(CouplingGraph, ValidatesSelectedRelationLoweringCapability)
     EXPECT_NE(text.find("kind=embedded_relation"), std::string::npos);
     EXPECT_NE(text.find("mode=monolithic"), std::string::npos);
     EXPECT_NE(text.find("lowering=monolithic_forms"), std::string::npos);
-    EXPECT_NE(text.find("available=[partitioned_exchange(supported)]"),
+    EXPECT_NE(text.find(
+                  "available=[partitioned_exchange(supported){fidelity=exact}]"),
               std::string::npos);
 
     auto unsupported = declaration;
     unsupported.region_relation_requirements.front().lowering_capabilities = {
         CouplingRelationLoweringCapability{
             .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            .fidelity = CouplingRelationLoweringFidelity::Unavailable,
             .supported = false,
             .unsupported_reason = "requires shared residual assembly",
         },
@@ -1586,7 +1588,8 @@ TEST(CouplingGraph, ValidatesSelectedRelationLoweringCapability)
                   "selected relation lowering strategy is unsupported"),
               std::string::npos);
     EXPECT_NE(enforcement_text.find("enforcement=penalty"), std::string::npos);
-    EXPECT_NE(enforcement_text.find("monolithic_forms(supported){enforcement=nitsche}"),
+    EXPECT_NE(enforcement_text.find(
+                  "monolithic_forms(supported){fidelity=exact}{enforcement=nitsche}"),
               std::string::npos);
 
     auto unsupported_partitioned = declaration;
@@ -1618,8 +1621,69 @@ TEST(CouplingGraph, ValidatesSelectedRelationLoweringCapability)
                   "partitioned_strategy=staggered_fixed_point"),
               std::string::npos);
     EXPECT_NE(partitioned_text.find(
-                  "partitioned_exchange(supported){partitioned_strategy=explicit_lagged}"),
+                  "partitioned_exchange(supported){fidelity=exact}{partitioned_strategy=explicit_lagged}"),
               std::string::npos);
+}
+
+TEST(CouplingGraph, ReportsApproximateOrLaggedRelationLoweringFidelity)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.region_relation_requirements.push_back({
+        .relation_name = "surface_stabilization",
+        .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+                .fidelity = CouplingRelationLoweringFidelity::Approximate,
+            },
+        },
+        .selected_lowering = CouplingRelationLoweringRequest{
+            .mode = CouplingMode::Monolithic,
+            .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+        },
+        .required_region_kind = CouplingRegionKind::Boundary,
+    });
+    declaration.region_relation_requirements.push_back({
+        .relation_name = "surface_balance",
+        .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind =
+                    CouplingRelationLoweringKind::PartitionedExchange,
+                .fidelity = CouplingRelationLoweringFidelity::Lagged,
+            },
+        },
+        .selected_lowering = CouplingRelationLoweringRequest{
+            .mode = CouplingMode::Partitioned,
+            .lowering_kind = CouplingRelationLoweringKind::PartitionedExchange,
+        },
+        .required_region_kind = CouplingRegionKind::Boundary,
+    });
+
+    const auto validation = buildGraph(graphContext(), declaration);
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("selected relation lowering is approximate"),
+              std::string::npos);
+    EXPECT_NE(text.find("fidelity=approximate"), std::string::npos);
+    EXPECT_NE(text.find("selected relation lowering is lagged"),
+              std::string::npos);
+    EXPECT_NE(text.find("fidelity=lagged"), std::string::npos);
 }
 
 TEST(CouplingGraph, AcceptsExplicitExpertRelationLowering)

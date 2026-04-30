@@ -109,11 +109,13 @@ fec::CouplingRegionRelationRequirement fsiInterfaceRelation(
             fec::CouplingRelationLoweringCapability{
                 .lowering_kind =
                     fec::CouplingRelationLoweringKind::MonolithicForms,
+                .fidelity = fec::CouplingRelationLoweringFidelity::Exact,
                 .enforcement_strategies = {"velocity_traction_balance"},
             },
             fec::CouplingRelationLoweringCapability{
                 .lowering_kind =
                     fec::CouplingRelationLoweringKind::PartitionedExchange,
+                .fidelity = fec::CouplingRelationLoweringFidelity::Lagged,
                 .enforcement_strategies = {"velocity_traction_balance"},
                 .partitioned_solve_strategies = {
                     fec::CouplingPartitionedSolveStrategy::ExplicitLagged,
