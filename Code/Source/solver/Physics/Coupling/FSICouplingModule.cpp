@@ -56,32 +56,6 @@ void declareFieldRequirement(fec::CouplingDefinitionBuilder& builder,
     });
 }
 
-void appendMonolithicGeometryRequirements(
-    const FSICouplingOptions& options,
-    fec::CouplingDefinitionBuilder& builder)
-{
-    if (options.mode != fec::CouplingMode::Monolithic) {
-        return;
-    }
-
-    builder.geometryRequirement(fec::CouplingGeometryTerminalRequirement{
-        .quantity = fec::CouplingGeometryTerminalQuantity::Normal,
-        .scope = fec::CouplingGeometryTerminalScope{
-            .participant_name = options.fluid_name,
-            .region = fec::CouplingRegionEndpointDeclaration{
-                .participant_name = options.fluid_name,
-                .shared_region_name = options.interface_name,
-            },
-            .location = fec::CouplingGeometryTerminalLocationDeclaration{
-                .region_kind = fec::CouplingRegionKind::InterfaceFace,
-                .shared_region_name = options.interface_name,
-                .coordinate_configuration =
-                    forms::GeometryConfiguration::Reference,
-            },
-        },
-    });
-}
-
 fec::CouplingValueDescriptor interfaceVectorValue(const FSICouplingOptions& options)
 {
     return fec::CouplingValueDescriptor{
@@ -302,7 +276,6 @@ void FSICouplingModule::define(fec::CouplingDefinitionBuilder& builder) const
     }
 
     appendPartitionedExchangeDeclarations(options_, builder);
-    appendMonolithicGeometryRequirements(options_, builder);
 }
 
 void FSICouplingModule::validate(const fec::CouplingContext& ctx) const

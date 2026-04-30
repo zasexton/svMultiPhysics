@@ -2038,6 +2038,63 @@ TEST(CouplingGraph, AggregatesGeometryTerminalRequirementsAcrossContracts)
     EXPECT_EQ(text.find("time-step"), std::string::npos);
 }
 
+TEST(CouplingGraph, InfersGeometryTerminalRequirementsFromInstalledForms)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.dependency_declaration_mode =
+        CouplingDependencyDeclarationMode::InferFromInstalledForms;
+    declaration.participants.push_back({.participant_name = "left"});
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "geometry_form";
+    metadata.system_name = "system";
+    metadata.geometry_terminals.push_back(
+        CouplingFormGeometryTerminalProvenance{
+            .quantity = CouplingGeometryTerminalQuantity::Coordinate,
+            .location = CouplingGeometryTerminalLocationProvenance{
+                .region_kind = CouplingRegionKind::Boundary,
+                .marker = 4,
+                .coordinate_configuration =
+                    forms::GeometryConfiguration::Reference,
+            },
+            .analysis_domain = analysis::DomainKind::Boundary,
+            .owner = CouplingGeometryTerminalOwnerProvenance{
+                .participant_name = "left",
+                .system_name = "system",
+                .region_name = "surface",
+                .shared_region_name = "interface",
+            },
+            .provider = "FormsInstaller",
+            .value_available = true,
+        });
+
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const std::array<CouplingFormAnalysisMetadata, 1> installed{metadata};
+    const auto validation = graph.buildFinalizedGraph(
+        graphContext(),
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed));
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    auto verify_declaration = declaration;
+    verify_declaration.dependency_declaration_mode =
+        CouplingDependencyDeclarationMode::DeclareAndVerify;
+    const std::array<CouplingContractDeclaration, 1> verify_declarations{
+        verify_declaration};
+    CouplingGraph verify_graph;
+    const auto verify_validation = verify_graph.buildFinalizedGraph(
+        graphContext(),
+        std::span<const CouplingContractDeclaration>(verify_declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed));
+    EXPECT_FALSE(verify_validation.ok());
+    EXPECT_NE(formatDiagnostics(verify_validation)
+                  .find("installed form geometry terminal has no declared geometry requirement"),
+              std::string::npos);
+}
+
 TEST(CouplingGraph, AggregatesFieldHistoryAndMeshTemporalRequirementsAcrossContracts)
 {
     CouplingContractDeclaration history_contract;

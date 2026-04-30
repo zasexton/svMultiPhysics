@@ -1302,7 +1302,7 @@ enum class CouplingDependencyDeclarationMode {
 - [x] FSI no longer manually appends monolithic dependencies.
 - [x] FSI no longer manually appends expected blocks.
 - [ ] Temporal requirements from `dt(...)` can be inferred or verified.
-- [ ] Geometry terminal requirements from `normal()` can be inferred or
+- [x] Geometry terminal requirements from `normal()` can be inferred or
       verified.
 - [ ] Non-field variable dependencies from Forms terminals can be inferred or
       verified.

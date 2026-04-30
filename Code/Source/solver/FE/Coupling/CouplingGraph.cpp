@@ -2500,6 +2500,33 @@ bool hasDeclaredGeometryTerminal(
         });
 }
 
+void appendInstalledFormGeometryInferences(
+    std::span<const CouplingContractDeclaration> declarations,
+    std::span<const CouplingFormAnalysisMetadata> installed_forms,
+    std::vector<ResolvedGeometryRequirement>& geometry_requirements)
+{
+    if (!dependencyModeInfersInstalledForms(declarations)) {
+        return;
+    }
+
+    for (const auto& form : installed_forms) {
+        const auto contract_name =
+            inferredDependencyContractName(declarations, form);
+        for (const auto& terminal : form.geometry_terminals) {
+            if (hasDeclaredGeometryTerminal(geometry_requirements, terminal)) {
+                continue;
+            }
+            geometry_requirements.push_back(ResolvedGeometryRequirement{
+                .contract_name = contract_name,
+                .quantity = terminal.quantity,
+                .domain = terminal.analysis_domain,
+                .location = terminal.location,
+                .owner = terminal.owner,
+            });
+        }
+    }
+}
+
 bool geometryTerminalHasAvailableData(
     const CouplingFormGeometryTerminalProvenance& terminal) noexcept
 {
@@ -3331,7 +3358,7 @@ CouplingValidationResult CouplingGraph::buildFinalizedGraph(
         resolveDeclaredDependencies(context, declarations_, result);
     const auto declared_temporal_requirements =
         resolveDeclaredTemporalRequirements(context, declarations_, result);
-    const auto declared_geometry_requirements =
+    auto declared_geometry_requirements =
         resolveDeclaredGeometryRequirements(context, declarations_, result);
     auto expected_blocks = resolveExpectedBlocks(context, declarations_, result);
     appendInstalledFormDependencyInferences(
@@ -3340,6 +3367,11 @@ CouplingValidationResult CouplingGraph::buildFinalizedGraph(
         installed_forms,
         declared_dependencies,
         expected_blocks);
+    appendInstalledFormGeometryInferences(
+        std::span<const CouplingContractDeclaration>(declarations_.data(),
+                                                     declarations_.size()),
+        installed_forms,
+        declared_geometry_requirements);
     validateRequiredNonFieldGraphVariables(
         context,
         std::span<const CouplingContractDeclaration>(declarations_.data(),

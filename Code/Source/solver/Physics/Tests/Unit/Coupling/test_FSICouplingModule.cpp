@@ -557,7 +557,7 @@ TEST(FSICouplingModule, DeclaresTemporalDerivativeWhenSolidVelocityDerived)
     EXPECT_EQ(requirement.derivative_order, 1);
 }
 
-TEST(FSICouplingModule, DeclaresMonolithicGeometryWithoutManualDependencies)
+TEST(FSICouplingModule, DeclaresMonolithicInferenceMode)
 {
     const FSICouplingModule module;
     const auto declaration = module.declare();
@@ -566,9 +566,7 @@ TEST(FSICouplingModule, DeclaresMonolithicGeometryWithoutManualDependencies)
               fec::CouplingDependencyDeclarationMode::InferFromInstalledForms);
     EXPECT_TRUE(declaration.dependencies.empty());
     EXPECT_TRUE(declaration.expected_blocks.empty());
-    ASSERT_EQ(declaration.geometry_requirements.size(), 1u);
-    EXPECT_EQ(declaration.geometry_requirements[0].quantity,
-              fec::CouplingGeometryTerminalQuantity::Normal);
+    EXPECT_TRUE(declaration.geometry_requirements.empty());
 
     FSICouplingOptions ale_options;
     ale_options.mesh_name = "mesh";
