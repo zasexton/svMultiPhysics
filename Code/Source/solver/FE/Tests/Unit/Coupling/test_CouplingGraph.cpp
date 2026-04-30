@@ -442,6 +442,158 @@ CouplingContext interfaceGraphContext(int left_marker = 17,
     return builder.build();
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+svmp::search::LogicalInterfaceRegionId graphLogicalInterfaceRegion(
+    std::string persistent_id,
+    std::string name,
+    int physical_label)
+{
+    return svmp::search::LogicalInterfaceRegionId{
+        .kind = svmp::search::LogicalInterfaceRegionKind::SlidingInterface,
+        .persistent_id = std::move(persistent_id),
+        .name = std::move(name),
+        .physical_label = physical_label,
+        .provenance_epoch = 3,
+    };
+}
+
+svmp::search::InterfaceRevisionSnapshot graphInterfaceRevisionSnapshot(
+    svmp::Configuration configuration,
+    std::uint64_t offset)
+{
+    return svmp::search::InterfaceRevisionSnapshot{
+        .configuration = configuration,
+        .geometry_revision = 10 + offset,
+        .reference_geometry_revision = 20 + offset,
+        .current_geometry_revision = 30 + offset,
+        .topology_revision = 40 + offset,
+        .ownership_revision = 50 + offset,
+        .numbering_revision = 60 + offset,
+        .field_layout_revision = 70 + offset,
+        .label_revision = 80 + offset,
+        .active_configuration_epoch = 90 + offset,
+    };
+}
+
+CouplingContext interfacePartitionedGraphContext()
+{
+    const auto* left_system = graphSystemToken();
+    const auto* right_system = otherGraphSystemToken();
+    const auto space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+
+    const auto source_logical =
+        graphLogicalInterfaceRegion("left-interface-region", "left_interface", 21);
+    const auto target_logical =
+        graphLogicalInterfaceRegion("right-interface-region", "right_interface", 22);
+    const auto source_revision =
+        graphInterfaceRevisionSnapshot(svmp::Configuration::Reference, 1);
+    const auto target_revision =
+        graphInterfaceRevisionSnapshot(svmp::Configuration::Current, 2);
+
+    const CouplingRegionRef left_region{
+        .participant_name = "left",
+        .system_name = "left_system",
+        .system = left_system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = 21,
+        .side = CouplingInterfaceSide::Minus,
+        .coordinate_configuration = CouplingCoordinateConfiguration::Reference,
+        .logical_region = source_logical,
+        .revision_snapshot = source_revision,
+    };
+    const CouplingRegionRef right_region{
+        .participant_name = "right",
+        .system_name = "right_system",
+        .system = right_system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = 22,
+        .side = CouplingInterfaceSide::Plus,
+        .coordinate_configuration = CouplingCoordinateConfiguration::Current,
+        .logical_region = target_logical,
+        .revision_snapshot = target_revision,
+    };
+
+    CouplingContextBuilder builder;
+    builder.addParticipant({
+        .participant_name = "left",
+        .system_name = "left_system",
+        .system = left_system,
+    });
+    builder.addParticipant({
+        .participant_name = "right",
+        .system_name = "right_system",
+        .system = right_system,
+    });
+    builder.addField({
+        .participant_name = "left",
+        .system_name = "left_system",
+        .system = left_system,
+        .field_name = "primary",
+        .field_id = 1,
+        .space = space,
+        .components = 3,
+    });
+    builder.addField({
+        .participant_name = "right",
+        .system_name = "right_system",
+        .system = right_system,
+        .field_name = "primary",
+        .field_id = 2,
+        .space = space,
+        .components = 3,
+    });
+    builder.addRegion(left_region);
+    builder.addRegion(right_region);
+    builder.addSharedRegion(SharedRegionRef{
+        .name = "interface",
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .participant_regions = {left_region, right_region},
+    });
+    return builder.build();
+}
+
+CouplingInterfaceMapProvenance graphInterfaceMapProvenance()
+{
+    return CouplingInterfaceMapProvenance{
+        .interface_map_name = "interface_map",
+        .interface_entry_name = "interface_entry",
+        .interface_search_registry_name = "interface_search",
+        .source_system_name = "left_system",
+        .target_system_name = "right_system",
+        .source_interface_marker = 21,
+        .target_interface_marker = 22,
+        .sliding_map_kind = systems::SlidingInterfaceMapKind::RotatingSliding,
+        .source_configuration = svmp::Configuration::Reference,
+        .target_configuration = svmp::Configuration::Current,
+        .source_logical_region = graphLogicalInterfaceRegion(
+            "left-interface-region",
+            "left_interface",
+            21),
+        .target_logical_region = graphLogicalInterfaceRegion(
+            "right-interface-region",
+            "right_interface",
+            22),
+        .source_revision_snapshot = graphInterfaceRevisionSnapshot(
+            svmp::Configuration::Reference,
+            1),
+        .target_revision_snapshot = graphInterfaceRevisionSnapshot(
+            svmp::Configuration::Current,
+            2),
+        .source_search_revision_key = 37,
+        .target_search_revision_key = 41,
+        .map_revision_key = 43,
+        .map_state = svmp::search::InterfaceMapState::Trial,
+        .operator_state = systems::InterfaceOperatorState::Trial,
+        .accepted_revision_key = 47,
+        .trial_revision_key = 53,
+        .time = 0.125,
+        .time_level_epoch = 59,
+    };
+}
+#endif
+
 CouplingContractDeclaration graphDeclaration()
 {
     CouplingContractDeclaration declaration;
@@ -727,6 +879,63 @@ CouplingContractDeclaration partitionedGraphDeclaration()
     });
     return declaration;
 }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+CouplingContractDeclaration interfacePartitionedGraphDeclaration()
+{
+    auto interface_declaration = CouplingInterfaceTransferDeclaration{
+        .frame_policy = CouplingInterfaceFramePolicy::SourceToTargetVector,
+    };
+    interface_declaration.source_to_target_rotation[0][0] = 0.0;
+    interface_declaration.source_to_target_rotation[0][1] = -1.0;
+    interface_declaration.source_to_target_rotation[1][0] = 1.0;
+    interface_declaration.source_to_target_rotation[1][1] = 0.0;
+    interface_declaration.conservation_tolerance = 1.0e-9;
+
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.fields.push_back({.participant_name = "left", .field_name = "primary"});
+    declaration.fields.push_back({.participant_name = "right", .field_name = "primary"});
+    declaration.partitioned_exchange_declarations.push_back(CouplingExchangeDeclaration{
+        .producer_port = {
+            .contract_instance_name = "generic_instance",
+            .port_name = "left_interface_out",
+        },
+        .consumer_port = {
+            .contract_instance_name = "generic_instance",
+            .port_name = "right_interface_in",
+        },
+        .value = CouplingValueDescriptor{
+            .rank = CouplingValueRank::Vector,
+            .components = 3,
+        },
+        .producer = graphFieldEndpoint("left"),
+        .consumer = graphFieldEndpoint("right"),
+        .shared_region_name = "interface",
+        .producer_region = CouplingRegionEndpointDeclaration{
+            .participant_name = "left",
+            .region_name = "interface",
+        },
+        .consumer_region = CouplingRegionEndpointDeclaration{
+            .participant_name = "right",
+            .region_name = "interface",
+        },
+        .transfer = CouplingTransferDeclaration{
+            .kind = CouplingTransferKind::InterfacePointwiseInterpolation,
+            .interface_declaration = interface_declaration,
+            .interface_map = graphInterfaceMapProvenance(),
+        },
+    });
+    declaration.group_hints.push_back(CouplingGroupHint{
+        .name = "interface_pair",
+        .participant_names = {"left", "right"},
+    });
+    return declaration;
+}
+#endif
 
 CouplingFormAnalysisMetadata installedDependencyMetadata()
 {
@@ -2672,6 +2881,91 @@ TEST(CouplingGraph, RecordsResolvedPartitionedExchangeNodes)
                   .exchange.producer_port.port_name,
               "left_out");
 }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+TEST(CouplingGraph, RecordsInterfaceTransferProvenanceInResolvedPartitionedExchanges)
+{
+    const auto context = interfacePartitionedGraphContext();
+    const auto declaration = interfacePartitionedGraphDeclaration();
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto plan = generator.generate(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+
+    CouplingGraph graph;
+    const std::array<CouplingFormAnalysisMetadata, 0> installed_forms{};
+    const auto validation = graph.buildFinalizedGraph(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed_forms),
+        plan);
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto& snapshot = graph.snapshot();
+    ASSERT_EQ(snapshot.resolved_partitioned_exchanges.size(), 1u);
+    const auto& exchange = snapshot.resolved_partitioned_exchanges[0].exchange;
+    ASSERT_TRUE(exchange.transfer.interface_options.has_value());
+    EXPECT_EQ(exchange.transfer.kind,
+              CouplingTransferKind::InterfacePointwiseInterpolation);
+    EXPECT_EQ(exchange.transfer.interface_options->field_kind,
+              systems::InterfaceFieldKind::Vector);
+    EXPECT_EQ(exchange.transfer.interface_options->frame_policy,
+              systems::InterfaceFrameTransformPolicy::SourceToTargetVector);
+    EXPECT_EQ(exchange.transfer.interface_options->component_count, 3u);
+    EXPECT_EQ(exchange.transfer.interface_options->source_to_target_rotation[0][1],
+              -1.0);
+    EXPECT_EQ(exchange.transfer.interface_options->conservation_tolerance,
+              1.0e-9);
+
+    ASSERT_TRUE(exchange.transfer.interface_map.has_value());
+    const auto& provenance = *exchange.transfer.interface_map;
+    EXPECT_EQ(provenance.interface_map_name, "interface_map");
+    EXPECT_EQ(provenance.interface_entry_name, "interface_entry");
+    EXPECT_EQ(provenance.interface_search_registry_name, "interface_search");
+    EXPECT_NE(provenance.interface_map_name, provenance.interface_entry_name);
+    EXPECT_EQ(provenance.source_system_name, "left_system");
+    EXPECT_EQ(provenance.target_system_name, "right_system");
+    EXPECT_EQ(provenance.source_interface_marker, 21);
+    EXPECT_EQ(provenance.target_interface_marker, 22);
+    EXPECT_EQ(provenance.sliding_map_kind,
+              systems::SlidingInterfaceMapKind::RotatingSliding);
+    EXPECT_EQ(provenance.source_configuration, svmp::Configuration::Reference);
+    EXPECT_EQ(provenance.target_configuration, svmp::Configuration::Current);
+    EXPECT_EQ(provenance.source_logical_region.persistent_id,
+              "left-interface-region");
+    EXPECT_EQ(provenance.target_logical_region.persistent_id,
+              "right-interface-region");
+    EXPECT_EQ(provenance.source_revision_snapshot.revision_key(),
+              graphInterfaceRevisionSnapshot(svmp::Configuration::Reference, 1)
+                  .revision_key());
+    EXPECT_EQ(provenance.target_revision_snapshot.revision_key(),
+              graphInterfaceRevisionSnapshot(svmp::Configuration::Current, 2)
+                  .revision_key());
+    EXPECT_EQ(provenance.source_search_revision_key, 37u);
+    EXPECT_EQ(provenance.target_search_revision_key, 41u);
+    EXPECT_EQ(provenance.map_revision_key, 43u);
+    EXPECT_EQ(provenance.map_state, svmp::search::InterfaceMapState::Trial);
+    EXPECT_EQ(provenance.operator_state, systems::InterfaceOperatorState::Trial);
+    EXPECT_EQ(provenance.accepted_revision_key, 47u);
+    EXPECT_EQ(provenance.trial_revision_key, 53u);
+    EXPECT_EQ(provenance.time_level_epoch, 59u);
+
+    ASSERT_TRUE(exchange.producer_region.has_value());
+    ASSERT_TRUE(exchange.consumer_region.has_value());
+    EXPECT_EQ(exchange.producer_region->coordinate_configuration,
+              CouplingCoordinateConfiguration::Reference);
+    EXPECT_EQ(exchange.consumer_region->coordinate_configuration,
+              CouplingCoordinateConfiguration::Current);
+    ASSERT_TRUE(exchange.producer_region->logical_region.has_value());
+    ASSERT_TRUE(exchange.consumer_region->logical_region.has_value());
+    EXPECT_EQ(exchange.producer_region->logical_region->persistent_id,
+              "left-interface-region");
+    EXPECT_EQ(exchange.consumer_region->logical_region->persistent_id,
+              "right-interface-region");
+}
+#endif
 
 TEST(CouplingGraph, RejectsInvalidPartitionedExchangeDeclarations)
 {

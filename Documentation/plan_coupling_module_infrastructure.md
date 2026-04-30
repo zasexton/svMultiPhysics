@@ -4890,7 +4890,7 @@ Unit-test verification checklist:
   generated resolved partitioned plan.
 - [x] `test_CouplingGraph.cpp` rejects partitioned declarations with invalid
   endpoint temporal slots or invalid history/stage indices.
-- [ ] `test_CouplingGraph.cpp` rejects `Unspecified` transfers, validates
+- [x] `test_CouplingGraph.cpp` rejects `Unspecified` transfers, validates
   explicit `Identity` compatibility, and verifies interface transfers carry
   distinct interface-entry and interface-map plus interface-search-registry
   provenance, logical interface region ids, coordinate configurations, revision
