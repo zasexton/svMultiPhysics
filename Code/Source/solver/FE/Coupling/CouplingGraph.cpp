@@ -3236,37 +3236,66 @@ void validateContextReferences(const CouplingContext& context,
 
         std::vector<CouplingRegionRef> resolved_endpoints;
         for (const auto& endpoint : requirement.endpoints) {
-            if (!context.hasRegion(endpoint.participant_name,
-                                   endpoint.region_name)) {
+            std::optional<CouplingRegionRef> resolved_region;
+            if (!endpoint.region_name.empty()) {
+                if (context.hasRegion(endpoint.participant_name,
+                                      endpoint.region_name)) {
+                    resolved_region = context.region(endpoint.participant_name,
+                                                     endpoint.region_name);
+                }
+            } else if (endpoint.shared_region_name.has_value()) {
+                if (!context.hasSharedRegion(*endpoint.shared_region_name)) {
+                    result.add(CouplingDiagnostic{
+                        .severity = CouplingDiagnosticSeverity::Error,
+                        .contract_name = declaration.contract_name,
+                        .participant_name = endpoint.participant_name,
+                        .region_name = *endpoint.shared_region_name,
+                        .message = "region-relation endpoint shared region is missing from the context",
+                    });
+                    continue;
+                }
+
+                const auto group =
+                    context.sharedRegionGroup(*endpoint.shared_region_name);
+                const auto* participant_region =
+                    sharedRegionParticipant(group, endpoint.participant_name);
+                if (participant_region != nullptr) {
+                    resolved_region = *participant_region;
+                }
+            }
+
+            if (!resolved_region.has_value()) {
                 if (requirement.require_all_endpoints) {
                     result.add(CouplingDiagnostic{
                         .severity = CouplingDiagnosticSeverity::Error,
                         .contract_name = declaration.contract_name,
                         .participant_name = endpoint.participant_name,
-                        .region_name = endpoint.region_name,
-                        .message = "region-relation endpoint is missing from the context",
+                        .region_name =
+                            endpoint.shared_region_name.value_or(endpoint.region_name),
+                        .message = endpoint.region_name.empty() &&
+                                           endpoint.shared_region_name.has_value()
+                                       ? "region-relation endpoint shared-region mapping is missing from the context"
+                                       : "region-relation endpoint is missing from the context",
                     });
                 }
                 continue;
             }
 
-            const auto resolved_region =
-                context.region(endpoint.participant_name, endpoint.region_name);
-            resolved_endpoints.push_back(resolved_region);
+            resolved_endpoints.push_back(*resolved_region);
             if (requirement.required_region_kind.has_value() &&
-                resolved_region.kind != *requirement.required_region_kind) {
+                resolved_region->kind != *requirement.required_region_kind) {
                 result.add(CouplingDiagnostic{
                     .severity = CouplingDiagnosticSeverity::Error,
                     .contract_name = declaration.contract_name,
                     .participant_name = endpoint.participant_name,
-                    .region_name = endpoint.region_name,
+                    .region_name = resolved_region->region_name,
                     .message = "region-relation endpoint kind does not satisfy the declaration",
                 });
             }
             if (requirement.require_registered_topology) {
                 validateInterfaceRegionTopology(
                     declaration,
-                    resolved_region,
+                    *resolved_region,
                     result);
             }
 
@@ -3288,7 +3317,8 @@ void validateContextReferences(const CouplingContext& context,
             const auto* participant_region =
                 sharedRegionParticipant(group, endpoint.participant_name);
             if (participant_region == nullptr ||
-                participant_region->region_name != endpoint.region_name) {
+                (!endpoint.region_name.empty() &&
+                 participant_region->region_name != endpoint.region_name)) {
                 result.add(CouplingDiagnostic{
                     .severity = CouplingDiagnosticSeverity::Error,
                     .contract_name = declaration.contract_name,

@@ -1238,6 +1238,8 @@ forms::FormExpr CouplingRegionRelationView::sum(
 - [x] Implement relation integrals through existing Forms measures and
       `CouplingFormBuilder::integrate(...)` / `integrateShared(...)`, choosing
       the measure from resolved region metadata.
+- [x] Resolve region-relation endpoints from shared-region participant mappings
+      when physics code only names the shared region.
 - [x] Expose projection helpers that lower to Forms expressions for normal and
       tangential components.
 - [x] Preserve existing lower-level methods for expert use.
@@ -1247,7 +1249,7 @@ forms::FormExpr CouplingRegionRelationView::sum(
 - [x] FSI monolithic forms no longer manually call `restrictToInterfaceSide`.
 - [x] FSI monolithic forms no longer manually construct
       `CouplingGeometryTerminalScope`.
-- [ ] Thermal monolithic forms can use the same interface-view API.
+- [x] Thermal monolithic forms can use the same interface-view API.
 - [x] N-way conservation residuals can be written without manually iterating
       over low-level context records.
 - [x] Mixed-dimensional residuals can select the correct resolved integration

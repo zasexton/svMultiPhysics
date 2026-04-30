@@ -805,11 +805,16 @@ CouplingRegionEndpointView CouplingRegionRelationView::endpoint(
     FE_THROW_IF(it == requirement_.endpoints.end(), InvalidArgumentException,
                 "coupling relation endpoint is not declared");
 
-    return CouplingRegionEndpointView(
-        *builder_,
-        requirement_.relation_name,
-        *it,
-        builder_->region(it->participant_name, it->region_name));
+    const auto resolved_region =
+        it->region_name.empty() && it->shared_region_name.has_value()
+            ? builder_->sharedRegion(*it->shared_region_name,
+                                     it->participant_name)
+            : builder_->region(it->participant_name, it->region_name);
+
+    return CouplingRegionEndpointView(*builder_,
+                                      requirement_.relation_name,
+                                      *it,
+                                      resolved_region);
 }
 
 forms::FormExpr CouplingRegionRelationView::integral(

@@ -524,9 +524,11 @@ CouplingValidationResult validateContractDeclarationShape(
         }
         for (std::size_t j = 0; j < requirement.endpoints.size(); ++j) {
             const auto& endpoint = requirement.endpoints[j];
-            if (endpoint.participant_name.empty() || endpoint.region_name.empty()) {
+            if (endpoint.participant_name.empty() ||
+                (endpoint.region_name.empty() &&
+                 !endpoint.shared_region_name.has_value())) {
                 result.addError(
-                    "region-relation endpoint requires participant and region names");
+                    "region-relation endpoint requires a participant name and either a region name or shared-region name");
             }
             if (endpoint.shared_region_name.has_value() &&
                 endpoint.shared_region_name->empty()) {

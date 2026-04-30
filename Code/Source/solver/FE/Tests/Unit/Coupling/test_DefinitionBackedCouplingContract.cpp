@@ -338,6 +338,85 @@ protected:
     }
 };
 
+class SharedRegionOnlyEndpointDefinitionContract final
+    : public DefinitionBackedCouplingContract {
+public:
+    [[nodiscard]] std::string name() const override
+    {
+        return "shared_region_endpoint_fixture";
+    }
+
+protected:
+    void define(CouplingDefinitionBuilder& builder) const override
+    {
+        CouplingRegionRelationRequirement relation_requirement{
+            .relation_name = "shared_temperature_balance",
+            .relation_kind = CouplingRegionRelationKind::SidePairedInterface,
+            .endpoints = {
+                CouplingRegionEndpointDeclaration{
+                    .participant_name = "left",
+                    .shared_region_name = "interface",
+                },
+                CouplingRegionEndpointDeclaration{
+                    .participant_name = "right",
+                    .shared_region_name = "interface",
+                },
+            },
+            .lowering_capabilities = {
+                CouplingRelationLoweringCapability{
+                    .lowering_kind =
+                        CouplingRelationLoweringKind::MonolithicForms,
+                    .enforcement_strategies = {"penalty"},
+                },
+            },
+            .selected_lowering = CouplingRelationLoweringRequest{
+                .mode = CouplingMode::Monolithic,
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+                .enforcement_strategy = "penalty",
+            },
+            .required_region_kind = CouplingRegionKind::InterfaceFace,
+            .require_opposite_sides_for_side_pair = true,
+            .require_common_monolithic_system = false,
+        };
+
+        builder.participant("left")
+            .participant("right")
+            .fieldRequirement(scalarFieldRequirement("left", "primary"))
+            .fieldRequirement(scalarFieldRequirement("right", "primary"))
+            .sharedInterface(CouplingSharedInterfaceRequirement{
+                .shared_region_name = "interface",
+                .participant_names = {"left", "right"},
+            })
+            .regionRelation(relation_requirement)
+            .monolithic([relation_requirement](const CouplingContext&,
+                                                const CouplingFormBuilder& forms) {
+                const auto relation = forms.regionRelation(relation_requirement);
+                const auto left = relation.endpoint("left");
+                const auto right = relation.endpoint("right");
+
+                CouplingFormContribution contribution;
+                contribution.contribution_name =
+                    "shared_region_endpoint_fixture.shared_temperature_balance";
+                contribution.origin =
+                    "SharedRegionOnlyEndpointDefinitionContract";
+                contribution.operator_name = "equations";
+                contribution.field_uses = {CouplingFieldUse{
+                    .participant_name = "left",
+                    .field_name = "primary",
+                }};
+                contribution.extra_trial_field_uses = {CouplingFieldUse{
+                    .participant_name = "right",
+                    .field_name = "primary",
+                }};
+                contribution.residual = left.integral(
+                    (left.state("primary", "u_left") -
+                     right.state("primary", "u_right")) *
+                    left.test("primary", "w_left"));
+                return std::vector<CouplingFormContribution>{contribution};
+            });
+    }
+};
+
 class MultiplierExpertDefinitionContract final
     : public DefinitionBackedCouplingContract {
 public:
@@ -850,6 +929,34 @@ TEST(DefinitionBackedCouplingContract, SupportsPenaltyGeometryFixture)
     ASSERT_EQ(contributions.front().terminal_provenance.size(), 1u);
     EXPECT_EQ(contributions.front().terminal_provenance.front().geometry_quantity,
               CouplingGeometryTerminalQuantity::CurrentNormal);
+}
+
+TEST(DefinitionBackedCouplingContract, SupportsSharedRegionOnlyRelationEndpoints)
+{
+    const auto context = makeDefinitionContext();
+    const CouplingFormBuilder forms(context);
+    const SharedRegionOnlyEndpointDefinitionContract contract;
+
+    EXPECT_NO_THROW(contract.validate(context));
+
+    const auto declaration = contract.declare();
+    ASSERT_EQ(declaration.region_relation_requirements.size(), 1u);
+    const auto& relation = declaration.region_relation_requirements.front();
+    ASSERT_EQ(relation.endpoints.size(), 2u);
+    EXPECT_TRUE(relation.endpoints[0].region_name.empty());
+    ASSERT_TRUE(relation.endpoints[0].shared_region_name.has_value());
+    EXPECT_EQ(*relation.endpoints[0].shared_region_name, "interface");
+
+    const auto contributions = contract.buildMonolithicForms(context, forms);
+    ASSERT_EQ(contributions.size(), 1u);
+    EXPECT_EQ(contributions.front().contribution_name,
+              "shared_region_endpoint_fixture.shared_temperature_balance");
+    ASSERT_TRUE(contributions.front().residual.isValid());
+    ASSERT_EQ(contributions.front().residual.node()->type(),
+              forms::FormExprType::InterfaceIntegral);
+    ASSERT_TRUE(
+        contributions.front().residual.node()->interfaceMarker().has_value());
+    EXPECT_EQ(*contributions.front().residual.node()->interfaceMarker(), 7);
 }
 
 TEST(DefinitionBackedCouplingContract, SupportsMultiplierExpertFixture)
