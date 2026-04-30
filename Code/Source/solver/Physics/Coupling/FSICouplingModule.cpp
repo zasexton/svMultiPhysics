@@ -112,6 +112,9 @@ fec::CouplingValidationResult validateOptionShape(const FSICouplingOptions& opti
     if (options.fluid_name.empty() || options.solid_name.empty()) {
         result.addError("FSI coupling requires fluid and solid participant names");
     }
+    if (options.mesh_name.has_value() && options.mesh_name->empty()) {
+        result.addError("FSI ALE mode requires a mesh participant name");
+    }
     if (options.interface_name.empty()) {
         result.addError("FSI coupling requires an interface shared-region name");
     }
@@ -136,6 +139,42 @@ fec::CouplingValidationResult validateOptionShape(const FSICouplingOptions& opti
         }
     }
     return result;
+}
+
+void validateALEMeshRequirements(fec::CouplingValidationResult& result,
+                                 const fec::CouplingContext& ctx,
+                                 const FSICouplingOptions& options)
+{
+    if (!options.mesh_name.has_value()) {
+        return;
+    }
+    if (!options.mesh_displacement_field.has_value() ||
+        options.mesh_displacement_field->empty()) {
+        result.add(fec::CouplingDiagnostic{
+            .severity = fec::CouplingDiagnosticSeverity::Error,
+            .contract_name = options.contract_name,
+            .participant_name = *options.mesh_name,
+            .message = "FSI ALE mode requires a mesh displacement field",
+        });
+        return;
+    }
+    if (!ctx.hasParticipant(*options.mesh_name)) {
+        result.add(fec::CouplingDiagnostic{
+            .severity = fec::CouplingDiagnosticSeverity::Error,
+            .contract_name = options.contract_name,
+            .participant_name = *options.mesh_name,
+            .message = "FSI ALE mode requires a registered mesh participant",
+        });
+    }
+    if (!ctx.hasField(*options.mesh_name, *options.mesh_displacement_field)) {
+        result.add(fec::CouplingDiagnostic{
+            .severity = fec::CouplingDiagnosticSeverity::Error,
+            .contract_name = options.contract_name,
+            .participant_name = *options.mesh_name,
+            .field_name = *options.mesh_displacement_field,
+            .message = "FSI ALE mode requires a registered mesh displacement field",
+        });
+    }
 }
 
 void validateVectorFieldComponents(fec::CouplingValidationResult& result,
@@ -369,6 +408,7 @@ fec::CouplingContractDeclaration FSICouplingModule::declare() const
 void FSICouplingModule::validate(const fec::CouplingContext& ctx) const
 {
     auto result = validateOptionShape(options_);
+    validateALEMeshRequirements(result, ctx, options_);
     validateFieldComponentCounts(result, ctx, options_);
     validateInterfaceRegionMappings(result, ctx, options_);
     const auto declaration = declare();

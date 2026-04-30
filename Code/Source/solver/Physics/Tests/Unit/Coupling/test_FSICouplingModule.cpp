@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -107,7 +108,8 @@ struct FSIContextFixture {
                                bool include_mesh = false,
                                bool include_shared_region = true,
                                bool include_fluid_mapping = true,
-                               bool include_solid_mapping = true)
+                               bool include_solid_mapping = true,
+                               bool include_mesh_displacement = true)
     {
         fluid_system.setInterfaceMesh(10, std::make_shared<const svmp::InterfaceMesh>());
         solid_system.setInterfaceMesh(20, std::make_shared<const svmp::InterfaceMesh>());
@@ -175,13 +177,15 @@ struct FSIContextFixture {
                        .participant_name = "mesh",
                        .system_name = "mesh_system",
                        .system = &mesh_system,
-                   })
-                .addField(field("mesh",
-                                "mesh_system",
-                                &mesh_system,
-                                "displacement",
-                                static_cast<FE::FieldId>(5),
-                                components.mesh_displacement));
+                   });
+            if (include_mesh_displacement) {
+                builder.addField(field("mesh",
+                                       "mesh_system",
+                                       &mesh_system,
+                                       "displacement",
+                                       static_cast<FE::FieldId>(5),
+                                       components.mesh_displacement));
+            }
         }
 
         if (include_shared_region) {
@@ -408,6 +412,46 @@ TEST(FSICouplingModule, ValidatesInterfaceSharedRegionMappings)
         module,
         missing_solid.context,
         "FSI interface shared region must map the solid participant");
+}
+
+TEST(FSICouplingModule, RejectsALEWithoutMeshDisplacement)
+{
+    FSICouplingOptions options;
+    options.mesh_name = "mesh";
+
+    {
+        auto missing_field_options = options;
+        missing_field_options.mesh_displacement_field = std::nullopt;
+        const FSICouplingModule module(missing_field_options);
+        FSIContextFixture fixture(FSIFieldComponents{}, true);
+        expectValidationFailureContaining(
+            module,
+            fixture.context,
+            "FSI ALE mode requires a mesh displacement field");
+    }
+
+    {
+        const FSICouplingModule module(options);
+        FSIContextFixture fixture(FSIFieldComponents{}, false);
+        expectValidationFailureContaining(
+            module,
+            fixture.context,
+            "FSI ALE mode requires a registered mesh participant");
+    }
+
+    {
+        const FSICouplingModule module(options);
+        FSIContextFixture fixture(FSIFieldComponents{},
+                                  true,
+                                  true,
+                                  true,
+                                  true,
+                                  false);
+        expectValidationFailureContaining(
+            module,
+            fixture.context,
+            "FSI ALE mode requires a registered mesh displacement field");
+    }
 }
 
 TEST(FSICouplingModule, RejectsUnconfiguredPartitionedTransfers)

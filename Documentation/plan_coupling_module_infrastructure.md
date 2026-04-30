@@ -5351,7 +5351,7 @@ Implementation checklist:
   is enabled.
 - [x] Validate FSI field component counts against spatial/interface dimension.
 - [x] Validate FSI interface region existence and participant-region mappings.
-- [ ] Validate ALE FSI fails when the mesh participant or mesh displacement
+- [x] Validate ALE FSI fails when the mesh participant or mesh displacement
   field is required but absent.
 - [ ] Author at least one Forms-based FSI-like monolithic kinematic constraint
   through `CouplingFormBuilder` using explicit Forms interface measures and
@@ -5401,7 +5401,7 @@ Unit-test verification checklist:
 - [x] `test_FSICouplingModule.cpp` rejects missing fluid velocity, fluid
   pressure, solid displacement, solid velocity when required, and interface
   shared-region mappings.
-- [ ] `test_FSICouplingModule.cpp` rejects ALE FSI without mesh displacement.
+- [x] `test_FSICouplingModule.cpp` rejects ALE FSI without mesh displacement.
 - [x] `test_FSICouplingModule.cpp` verifies temporal requirements are declared
   when `dt(solid_displacement)` is used.
 - [ ] `test_FSICouplingModule.cpp` verifies Forms-authored FSI-like
