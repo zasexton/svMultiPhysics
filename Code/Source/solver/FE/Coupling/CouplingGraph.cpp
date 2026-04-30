@@ -2910,6 +2910,23 @@ void validateContextReferences(const CouplingContext& context,
                 .message = "side-paired region relation needs opposite nonempty sides",
             });
         }
+        if (requirement.require_common_monolithic_system &&
+            !resolved_endpoints.empty()) {
+            const auto* owner = resolved_endpoints.front().system;
+            const auto same_owner = std::all_of(
+                resolved_endpoints.begin(),
+                resolved_endpoints.end(),
+                [owner](const CouplingRegionRef& endpoint) {
+                    return endpoint.system == owner;
+                });
+            if (!same_owner) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .contract_name = declaration.contract_name,
+                    .message = "region-relation endpoints must resolve to one owning system for monolithic lowering",
+                });
+            }
+        }
     }
 }
 

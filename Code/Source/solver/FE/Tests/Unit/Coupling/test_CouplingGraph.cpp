@@ -2678,6 +2678,85 @@ TEST(CouplingGraph, ValidatesRelationEndpointRegisteredTopology)
     EXPECT_TRUE(accepted.ok()) << formatDiagnostics(accepted);
 }
 
+TEST(CouplingGraph, ValidatesRelationCommonMonolithicSystem)
+{
+    auto make_context = [](bool same_system) {
+        const auto* left_system = graphSystemToken();
+        const auto* right_system =
+            same_system ? graphSystemToken() : otherGraphSystemToken();
+        const std::string left_system_name =
+            same_system ? "system" : "left_system";
+        const std::string right_system_name =
+            same_system ? "system" : "right_system";
+        const CouplingRegionRef left_region{
+            .participant_name = "left",
+            .system_name = left_system_name,
+            .system = left_system,
+            .region_name = "surface",
+            .kind = CouplingRegionKind::Boundary,
+            .marker = 1,
+        };
+        const CouplingRegionRef right_region{
+            .participant_name = "right",
+            .system_name = right_system_name,
+            .system = right_system,
+            .region_name = "surface",
+            .kind = CouplingRegionKind::Boundary,
+            .marker = 2,
+        };
+
+        CouplingContextBuilder builder;
+        builder.addParticipant({
+            .participant_name = "left",
+            .system_name = left_system_name,
+            .system = left_system,
+        });
+        builder.addParticipant({
+            .participant_name = "right",
+            .system_name = right_system_name,
+            .system = right_system,
+        });
+        builder.addRegion(left_region);
+        builder.addRegion(right_region);
+        return builder.build();
+    };
+
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "surface_pair";
+    declaration.contract_name = "surface_pair_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.region_relation_requirements.push_back({
+        .relation_name = "surface_pair",
+        .relation_kind = CouplingRegionRelationKind::VolumeBoundaryRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "right",
+                .region_name = "surface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            },
+        },
+        .required_region_kind = CouplingRegionKind::Boundary,
+        .require_common_monolithic_system = true,
+    });
+
+    EXPECT_TRUE(buildGraph(make_context(true), declaration).ok());
+
+    const auto validation = buildGraph(make_context(false), declaration);
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find(
+                  "region-relation endpoints must resolve to one owning system"),
+              std::string::npos);
+}
+
 TEST(CouplingGraph, RejectsRawFieldIdMatchesAcrossDifferentSystems)
 {
     CouplingContractDeclaration declaration;
