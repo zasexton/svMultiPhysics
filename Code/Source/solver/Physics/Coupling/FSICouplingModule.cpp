@@ -7,6 +7,8 @@
 
 #include "Physics/Coupling/FSICouplingModule.h"
 
+#include "Core/FEException.h"
+#include "FE/Coupling/CouplingFormBuilder.h"
 #include "FE/Coupling/CouplingGraph.h"
 
 #include <algorithm>
@@ -23,6 +25,7 @@ namespace coupling {
 namespace {
 
 namespace fec = FE::coupling;
+namespace forms = FE::forms;
 
 fec::CouplingFieldUse fieldUse(const std::string& participant,
                                const std::string& field)
@@ -53,6 +56,22 @@ fec::CouplingPortId port(const FSICouplingOptions& options,
         .contract_instance_name = options.contract_name,
         .port_name = std::move(port_name),
     };
+}
+
+forms::FormExpr restrictToInterfaceSide(const forms::FormExpr& expr,
+                                        fec::CouplingInterfaceSide side)
+{
+    switch (side) {
+    case fec::CouplingInterfaceSide::Minus:
+        return expr.minus();
+    case fec::CouplingInterfaceSide::Plus:
+        return expr.plus();
+    case fec::CouplingInterfaceSide::None:
+        break;
+    }
+    FE_THROW(FE::InvalidArgumentException,
+             "FSI monolithic form requires explicit interface sides");
+    return forms::FormExpr{};
 }
 
 fec::CouplingValueDescriptor interfaceVectorValue(const FSICouplingOptions& options)
@@ -418,6 +437,76 @@ void FSICouplingModule::validate(const fec::CouplingContext& ctx) const
         ctx,
         std::span<const fec::CouplingContractDeclaration>(declarations)));
     throwIfInvalid(result);
+}
+
+bool FSICouplingModule::supportsMonolithicLowering() const
+{
+    return options_.mode == fec::CouplingMode::Monolithic;
+}
+
+std::vector<fec::CouplingFormContribution>
+FSICouplingModule::buildMonolithicForms(
+    const fec::CouplingContext&,
+    const fec::CouplingFormBuilder& form_builder) const
+{
+    if (options_.mode != fec::CouplingMode::Monolithic) {
+        return {};
+    }
+
+    const auto fluid_region = form_builder.sharedRegion(options_.interface_name,
+                                                        options_.fluid_name);
+    const auto solid_region = form_builder.sharedRegion(options_.interface_name,
+                                                        options_.solid_name);
+
+    const auto fluid_velocity =
+        restrictToInterfaceSide(
+            form_builder.state(options_.fluid_name,
+                               options_.fluid_velocity_field,
+                               "u_f"),
+            fluid_region.side);
+    const auto fluid_velocity_test =
+        restrictToInterfaceSide(
+            form_builder.test(options_.fluid_name,
+                              options_.fluid_velocity_field,
+                              "w_f"),
+            fluid_region.side);
+
+    fec::CouplingFieldUse solid_dependency;
+    forms::FormExpr solid_velocity;
+    if (options_.use_solid_displacement_derivative) {
+        solid_dependency = fieldUse(options_.solid_name,
+                                    options_.solid_displacement_field);
+        solid_velocity = restrictToInterfaceSide(
+            form_builder.timeDerivative(options_.solid_name,
+                                        options_.solid_displacement_field,
+                                        "dt_d_s"),
+            solid_region.side);
+    } else {
+        FE_THROW_IF(!options_.solid_velocity_field.has_value() ||
+                        options_.solid_velocity_field->empty(),
+                    FE::InvalidArgumentException,
+                    "FSI monolithic form requires a solid velocity field or displacement derivative");
+        const auto& solid_velocity_field = *options_.solid_velocity_field;
+        solid_dependency = fieldUse(options_.solid_name, solid_velocity_field);
+        solid_velocity = restrictToInterfaceSide(
+            form_builder.state(options_.solid_name, solid_velocity_field, "v_s"),
+            solid_region.side);
+    }
+
+    fec::CouplingFormContribution contribution;
+    contribution.contribution_name =
+        options_.contract_name + "_velocity_continuity";
+    contribution.origin = "FSICouplingModule";
+    contribution.operator_name = "equations";
+    contribution.field_uses = {fieldUse(options_.fluid_name,
+                                        options_.fluid_velocity_field)};
+    contribution.extra_trial_field_uses = {std::move(solid_dependency)};
+    contribution.residual =
+        form_builder.integrateShared(forms::inner(fluid_velocity - solid_velocity,
+                                                  fluid_velocity_test),
+                                     options_.interface_name,
+                                     options_.fluid_name);
+    return {form_builder.attachTerminalProvenance(std::move(contribution))};
 }
 
 std::vector<fec::CouplingExchangeDeclaration>

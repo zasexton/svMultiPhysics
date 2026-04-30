@@ -5353,7 +5353,7 @@ Implementation checklist:
 - [x] Validate FSI interface region existence and participant-region mappings.
 - [x] Validate ALE FSI fails when the mesh participant or mesh displacement
   field is required but absent.
-- [ ] Author at least one Forms-based FSI-like monolithic kinematic constraint
+- [x] Author at least one Forms-based FSI-like monolithic kinematic constraint
   through `CouplingFormBuilder` using explicit Forms interface measures and
   trace/side restrictions.
 - [ ] Validate monolithic FSI fields are registered in one compatible

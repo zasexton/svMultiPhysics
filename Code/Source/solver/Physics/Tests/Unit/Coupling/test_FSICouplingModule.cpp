@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include "Coupling/CouplingFormBuilder.h"
 #include "Coupling/CouplingContext.h"
 #include "Core/FEException.h"
 #include "Mesh/Core/InterfaceMesh.h"
@@ -19,6 +20,7 @@
 using namespace svmp;
 using namespace svmp::Physics::coupling;
 namespace fec = svmp::FE::coupling;
+namespace forms = svmp::FE::forms;
 
 namespace {
 
@@ -40,6 +42,33 @@ bool hasField(const fec::CouplingContractDeclaration& declaration,
                        [&](const fec::CouplingFieldUse& use) {
                            return use.participant_name == participant &&
                                   use.field_name == field;
+                       });
+}
+
+bool hasFieldUse(const std::vector<fec::CouplingFieldUse>& fields,
+                 const std::string& participant,
+                 const std::string& field)
+{
+    return std::any_of(fields.begin(),
+                       fields.end(),
+                       [&](const fec::CouplingFieldUse& use) {
+                           return use.participant_name == participant &&
+                                  use.field_name == field;
+                       });
+}
+
+bool containsFormExprType(const forms::FormExprNode& node,
+                          forms::FormExprType type)
+{
+    if (node.type() == type) {
+        return true;
+    }
+    const auto children = node.children();
+    return std::any_of(children.begin(),
+                       children.end(),
+                       [&](const forms::FormExprNode* child) {
+                           return child != nullptr &&
+                                  containsFormExprType(*child, type);
                        });
 }
 
@@ -329,6 +358,57 @@ TEST(FSICouplingModule, DeclaresPartitionedExchanges)
               (std::vector<std::string>{"fluid", "solid"}));
 
     EXPECT_TRUE(module.buildPartitionedExchangeDeclarations(fec::CouplingContext{}).empty());
+}
+
+TEST(FSICouplingModule, BuildsFormsAuthoredVelocityContinuity)
+{
+    FSIContextFixture fixture;
+    const fec::CouplingFormBuilder form_builder(fixture.context);
+    const FSICouplingModule module;
+
+    EXPECT_TRUE(module.supportsMonolithicLowering());
+    const auto contributions = module.buildMonolithicForms(fixture.context,
+                                                           form_builder);
+    ASSERT_EQ(contributions.size(), 1u);
+    const auto& contribution = contributions.front();
+    EXPECT_EQ(contribution.contribution_name, "fsi_velocity_continuity");
+    EXPECT_EQ(contribution.origin, "FSICouplingModule");
+    EXPECT_EQ(contribution.operator_name, "equations");
+    EXPECT_TRUE(hasFieldUse(contribution.field_uses, "fluid", "velocity"));
+    EXPECT_TRUE(
+        hasFieldUse(contribution.extra_trial_field_uses, "solid", "velocity"));
+    EXPECT_TRUE(contribution.terminal_provenance.empty());
+
+    ASSERT_TRUE(contribution.residual.isValid());
+    ASSERT_EQ(contribution.residual.node()->type(),
+              forms::FormExprType::InterfaceIntegral);
+    ASSERT_TRUE(contribution.residual.node()->interfaceMarker().has_value());
+    EXPECT_EQ(*contribution.residual.node()->interfaceMarker(), 10);
+    EXPECT_TRUE(containsFormExprType(*contribution.residual.node(),
+                                     forms::FormExprType::RestrictMinus));
+    EXPECT_TRUE(containsFormExprType(*contribution.residual.node(),
+                                     forms::FormExprType::RestrictPlus));
+}
+
+TEST(FSICouplingModule, BuildsDisplacementDerivativeVelocityContinuity)
+{
+    FSIContextFixture fixture;
+    const fec::CouplingFormBuilder form_builder(fixture.context);
+
+    FSICouplingOptions options;
+    options.use_solid_displacement_derivative = true;
+    const FSICouplingModule module(options);
+
+    const auto contributions = module.buildMonolithicForms(fixture.context,
+                                                           form_builder);
+    ASSERT_EQ(contributions.size(), 1u);
+    const auto& contribution = contributions.front();
+    EXPECT_TRUE(hasFieldUse(contribution.field_uses, "fluid", "velocity"));
+    EXPECT_TRUE(hasFieldUse(contribution.extra_trial_field_uses,
+                            "solid",
+                            "displacement"));
+    EXPECT_TRUE(containsFormExprType(*contribution.residual.node(),
+                                     forms::FormExprType::TimeDerivative));
 }
 
 TEST(FSICouplingModule, RejectsInvalidOptionsDuringValidation)

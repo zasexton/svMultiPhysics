@@ -66,6 +66,13 @@ public:
 
     void validate(const FE::coupling::CouplingContext& ctx) const override;
 
+    [[nodiscard]] bool supportsMonolithicLowering() const override;
+
+    [[nodiscard]] std::vector<FE::coupling::CouplingFormContribution>
+    buildMonolithicForms(
+        const FE::coupling::CouplingContext& ctx,
+        const FE::coupling::CouplingFormBuilder& form_builder) const override;
+
     [[nodiscard]] std::vector<FE::coupling::CouplingExchangeDeclaration>
     buildPartitionedExchangeDeclarations(const FE::coupling::CouplingContext& ctx) const override;
 
