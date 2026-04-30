@@ -1305,6 +1305,51 @@ TEST(MonolithicCouplingBuilder, RejectsOverlappingPrimaryAndExtraTrialFields)
                  InvalidArgumentException);
 }
 
+TEST(MonolithicCouplingBuilder, RejectsDuplicateFormFieldUses)
+{
+    BuilderFixture fixture;
+    const CouplingFormBuilder forms(fixture.context);
+    const MonolithicCouplingBuilder builder;
+
+    auto make_contribution = [&]() {
+        CouplingFormContribution contribution;
+        contribution.contribution_name = "duplicate_uses";
+        contribution.origin = "MonolithicCouplingBuilderTest";
+        contribution.field_uses = {{
+            .participant_name = "right",
+            .field_name = "primary",
+        }};
+        contribution.extra_trial_field_uses = {{
+            .participant_name = "left",
+            .field_name = "primary",
+        }};
+        contribution.residual =
+            (forms.state("left", "primary", "u") *
+             forms.test("right", "primary", "w")).dx();
+        return contribution;
+    };
+
+    auto duplicate_primary = make_contribution();
+    duplicate_primary.field_uses.push_back({
+        .participant_name = "right",
+        .field_name = "primary",
+    });
+    EXPECT_THROW(static_cast<void>(
+                     builder.resolveFormContribution(fixture.context,
+                                                     duplicate_primary)),
+                 InvalidArgumentException);
+
+    auto duplicate_extra_trial = make_contribution();
+    duplicate_extra_trial.extra_trial_field_uses.push_back({
+        .participant_name = "left",
+        .field_name = "primary",
+    });
+    EXPECT_THROW(static_cast<void>(
+                     builder.resolveFormContribution(fixture.context,
+                                                     duplicate_extra_trial)),
+                 InvalidArgumentException);
+}
+
 TEST(MonolithicCouplingBuilder, RejectsPreviousSolutionProvenanceOutsideTrialFields)
 {
     BuilderFixture fixture;

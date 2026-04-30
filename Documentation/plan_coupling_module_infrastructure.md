@@ -4941,7 +4941,7 @@ Implementation checklist:
   `systems::FormInstallOptions::extra_trial_fields` so dependency-only
   `StateField`, `DiscreteField`, geometry-sensitivity, and temporal field
   dependencies are visible to `FormsInstaller` without becoming residual rows.
-- [ ] Validate every `field_uses` and `extra_trial_field_uses` list covers all
+- [x] Validate every `field_uses` and `extra_trial_field_uses` list covers all
   field-bound `TestField` symbols, implicit `StateField` dependencies,
   geometry-sensitivity dependencies, and temporal field operands in the installed
   residual; reject missing fields, ambiguous aliases, incompatible primary/extra
@@ -5018,9 +5018,9 @@ Unit-test verification checklist:
   combined primary and extra-trial field-use lists omit a `TestField`,
   implicit `StateField`, geometry-sensitivity dependency, or temporal field
   operand reported by the metadata bridge.
-- [ ] `test_MonolithicCouplingBuilder.cpp` rejects incompatible overlap between
+- [x] `test_MonolithicCouplingBuilder.cpp` rejects incompatible overlap between
   primary field uses and dependency-only extra trial field uses.
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies duplicate `field_uses` and
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies duplicate `field_uses` and
   `extra_trial_field_uses` entries are deduplicated deterministically or rejected
   with stable diagnostics.
 - [ ] `test_MonolithicCouplingBuilder.cpp` verifies geometry-sensitivity install
