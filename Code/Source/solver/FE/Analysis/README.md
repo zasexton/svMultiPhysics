@@ -349,7 +349,7 @@ consumed summaries, limitations, and reference anchors used by the design plan.
 | `ConservationAnalyzer` | Balance groups, conservative flux variables, exchange pairs | `ConservationStructure`, `InterfaceCondition` | `FluxBalance` | Opt-in: no `BalanceDescriptor` means no conservation claim; transient certification additionally requires time-update balance evidence | [RaviartThomas1977] |
 | `DAEStructureAnalyzer` | Dynamic/algebraic variable descriptors, mass-like blocks, constraint blocks | `DifferentialAlgebraicStructure` | `DAEStructureEvidence`, `InitialCompatibility` | Semi-explicit index-1 certification requires rank/hidden-constraint/consistent-initial evidence plus theorem, local scope, and smooth/regular-operator metadata; descriptor-pencil index-1 certification requires regular-pencil/strangeness/projector theorem evidence | [HairerWanner] |
 | `SpaceCompatibilityAnalyzer` | Function-space family, trace capabilities, exact-sequence metadata, mixed pairs | `SpaceCompatibility`, `CompatibleComplexStructure` | `BoundarySymbol`, `InfSupEstimate`, `CompatibleComplex` | Compatible-complex certification requires exact sequence plus bounded cochain projection, projection bound, mesh-family, shape-regularity, stability, and theorem metadata | [AFW2006], [BrezziFortin1991] |
-| `DiscreteMonotonicityAnalyzer` | Scalar operator claims plus matrix/stencil sign summaries | `DiscreteMaximumPrinciple`, `ZMatrixStructure`, `MMatrixStructure`, `MatrixMonotonicityRisk` | `DiscreteMatrix`, `ReducedMatrix`, `LocalStencil`, `MeshGeometryQuality` | M-matrix certification is not attempted when reduced evidence is missing or inexact | [DMPAnisotropic2009] |
+| `DiscreteMonotonicityAnalyzer` | Scalar operator claims plus matrix/stencil sign summaries | `DiscreteMaximumPrinciple`, `ZMatrixStructure`, `MMatrixStructure`, `MatrixMonotonicityRisk` | `DiscreteMatrix`, `ReducedMatrix`, `LocalStencil`, `MeshGeometryQuality` | M-matrix certification is not attempted when reduced evidence is missing or inexact | [BermanPlemmons1994], [Azimzadeh2019], [DMPAnisotropic2009] |
 | `MeshGeometryAnalyzer` | Mesh-quality summaries and topology-scoped geometric evidence | `MeshGeometryValidity`, `MatrixMonotonicityRisk` | `MeshGeometryQuality` | Positive Jacobian evidence certifies mapping validity; shape-regular FEM stability additionally requires finite shape constant and mesh-family scope | [BrennerScott2008] |
 | `TemporalStabilityAnalyzer` | Time scheme metadata, CFL/eigenvalue scale, amplification radius | `TemporalStability` | `TemporalStability` | Scalar/modal amplification bounds are diagnostic; conditional schemes require a method-specific accepted CFL bound and bound scope rather than a universal CFL constant; nonnormal/pseudospectral certification requires theorem, norm, operator scope, time horizon, finite growth bound, accepted growth bound, and nonnormal operator evidence | [HairerWanner], [ChungHulbert1993] |
 | `EnergyEntropyLawAnalyzer` | Declared energy/entropy balance, production sign, exchange cancellation | `EnergyStability`, `EntropyStability` | `EnergyEntropyBalance`, `FluxBalance` | Energy certification requires a named energy functional, norm, positivity/coercivity, discrete dissipation identity, boundary/source accounting, and theorem evidence; entropy certification requires convex entropy variables/flux/dissipation metadata | [Tadmor2016], [EnergyStableGradientFlows2021] |
@@ -849,9 +849,10 @@ Current examples:
   tolerances. The shared finite checks use IEEE exponent classification so
   NaN/Inf evidence is rejected even in builds that enable finite-math
   optimizations
-- sparse matrix sign and row-sum evidence is incomplete when any scanned entry
-  or row sum is non-finite; Z/M/DMP claims remain uncertified until the numeric
-  summary is finite and coverage-complete
+- sparse matrix sign evidence is incomplete when any scanned entry is
+  non-finite; row-sum evidence is required for row-sum/diagonal-dominance
+  theorem routes, but Stieltjes/SPD Z-matrix and inverse-positive M-matrix
+  routes certify from their own route-specific numeric evidence
 - M-matrix certification must identify a theorem route and complete the route
   metadata: Stieltjes/SPD Z-matrix evidence needs scoped symmetry plus positive
   definiteness evidence, inverse-positivity evidence needs inverse-positivity

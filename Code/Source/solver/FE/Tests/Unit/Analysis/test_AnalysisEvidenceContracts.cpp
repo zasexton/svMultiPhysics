@@ -1431,7 +1431,7 @@ TEST(AnalysisEvidenceContracts, CoupledEnergyBalanceNeedsCoerciveOperatorEvidenc
               CertificationClass::Certified);
 }
 
-TEST(AnalysisEvidenceContracts, DiscreteMatrixCertificationRequiresCompleteSignAndRowEvidence)
+TEST(AnalysisEvidenceContracts, DiscreteMatrixCertificationRequiresCompleteSignEvidence)
 {
     const auto scalar = VariableKey::field(0);
     ProblemAnalysisContext incomplete_ctx;
@@ -1722,6 +1722,73 @@ TEST(AnalysisEvidenceContracts, GenericMMatrixBooleanNeedsTheoremSpecificEvidenc
     const auto stieltjes_report = analyze(std::move(stieltjes_ctx));
     EXPECT_TRUE(hasCertifiedClaim(stieltjes_report,
                                   PropertyKind::MMatrixStructure));
+}
+
+TEST(AnalysisEvidenceContracts, StieltjesMMatrixRouteDoesNotRequireRowSumEvidence)
+{
+    const auto scalar = VariableKey::field(0);
+    const auto block = scalarBlock("stieltjes-without-row-sum");
+
+    CoefficientPropertySummary coeff;
+    coeff.block = block;
+    coeff.positivity = PositivityClass::Positive;
+    coeff.min_eigenvalue = 0.5;
+    coeff.max_eigenvalue = 2.0;
+    coeff.coefficient_region_coverage_complete = true;
+    coeff.quadrature_point_coverage_complete = true;
+    coeff.lower_bound_valid_for_all_samples = true;
+    coeff.tolerance_metadata_present = true;
+
+    DiscreteMatrixSummary matrix;
+    matrix.block = block;
+    matrix.rows = 2;
+    matrix.cols = 2;
+    matrix.square = true;
+    matrix.sign_evidence_complete = true;
+    matrix.sign_tolerance = 1.0e-12;
+    matrix.row_sum_tolerance = 1.0e-12;
+    matrix.diagonal_count = 2;
+    matrix.offdiag_count = 2;
+    matrix.negative_offdiag_count = 2;
+    matrix.scanned_row_count = 2;
+    matrix.expected_row_count = 2;
+    matrix.scanned_entry_count = 4;
+    matrix.structurally_symmetric = true;
+    matrix.numerically_symmetric = true;
+    matrix.symmetry_evidence_complete = true;
+    matrix.cholesky_factorization_succeeded = true;
+    matrix.m_matrix_certification_evidence = true;
+    matrix.stieltjes_matrix_evidence = true;
+    matrix.m_matrix_theorem_id = "stieltjes-spd-z";
+    matrix.dmp_applicability_evidence = true;
+    matrix.dmp_rhs_sign_evidence = true;
+
+    ProblemAnalysisContext ctx;
+    ctx.addFieldDescriptor(h1Field(0, 1, FieldType::Scalar, 1, "u"));
+    ctx.addContribution(ContributionDescriptor::diagonalSymmetric(
+        scalar, "stieltjes-without-row-sum", "evidence-contract"));
+    AnalysisSummarySet summaries;
+    summaries.coefficient_properties.push_back(coeff);
+    summaries.discrete_matrices.push_back(matrix);
+    ctx.setAnalysisSummaries(std::move(summaries));
+
+    const auto report = analyze(std::move(ctx));
+    const auto* m_matrix = firstForBlock(
+        report, PropertyKind::MMatrixStructure,
+        "DiscreteMonotonicityAnalyzer", "stieltjes-without-row-sum");
+    ASSERT_NE(m_matrix, nullptr);
+    EXPECT_EQ(m_matrix->status, PropertyStatus::Exact);
+    ASSERT_TRUE(m_matrix->certification_class.has_value());
+    EXPECT_EQ(*m_matrix->certification_class,
+              CertificationClass::Certified);
+
+    const auto* dmp = firstForBlock(
+        report, PropertyKind::DiscreteMaximumPrinciple,
+        "DiscreteMonotonicityAnalyzer", "stieltjes-without-row-sum");
+    ASSERT_NE(dmp, nullptr);
+    EXPECT_EQ(dmp->status, PropertyStatus::Preserved);
+    ASSERT_TRUE(dmp->certification_class.has_value());
+    EXPECT_EQ(*dmp->certification_class, CertificationClass::Certified);
 }
 
 TEST(AnalysisEvidenceContracts, MMatrixRoutesRequireRouteSpecificMetadata)

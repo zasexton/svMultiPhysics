@@ -293,6 +293,7 @@ struct MMatrixTheoremEvidence {
     bool certified{false};
     std::string label;
     std::string missing;
+    std::string certified_prerequisites;
 };
 
 bool symmetricEvidenceComplete(const DiscreteMatrixSummary& matrix) noexcept
@@ -328,15 +329,18 @@ MMatrixTheoremEvidence mMatrixTheoremEvidence(
     const bool theorem_id_present = !matrix.m_matrix_theorem_id.empty();
     const bool stieltjes_route =
         theorem_id_present &&
+        verdict.z_matrix &&
         matrix.stieltjes_matrix_evidence &&
         symmetricEvidenceComplete(matrix) &&
         positiveDefiniteEvidenceComplete(matrix, tol);
     const bool inverse_positive_route =
         theorem_id_present &&
+        verdict.z_matrix &&
         matrix.inverse_positivity_evidence &&
         matrix.inverse_positivity_metadata_present;
     const bool irreducible_dd_route =
         theorem_id_present &&
+        verdict.m_matrix &&
         matrix.irreducible_diagonal_dominance_evidence &&
         matrix.diagonal_dominance_evidence_complete &&
         matrix.irreducibility_evidence_present;
@@ -346,7 +350,9 @@ MMatrixTheoremEvidence mMatrixTheoremEvidence(
             ? matrix.m_matrix_theorem_id
             : "Stieltjes/SPD Z-matrix evidence";
         if (matrix.m_matrix_certification_evidence) {
-            evidence.certified = verdict.m_matrix;
+            evidence.certified = true;
+            evidence.certified_prerequisites =
+                "Z-matrix sign pattern plus symmetric positive-definite Stieltjes evidence";
             return evidence;
         }
     }
@@ -355,7 +361,9 @@ MMatrixTheoremEvidence mMatrixTheoremEvidence(
             ? matrix.m_matrix_theorem_id
             : "inverse-positivity evidence";
         if (matrix.m_matrix_certification_evidence) {
-            evidence.certified = verdict.m_matrix;
+            evidence.certified = true;
+            evidence.certified_prerequisites =
+                "Z-matrix sign pattern plus inverse-positivity evidence";
             return evidence;
         }
     }
@@ -364,7 +372,9 @@ MMatrixTheoremEvidence mMatrixTheoremEvidence(
             ? matrix.m_matrix_theorem_id
             : "irreducible diagonal-dominance evidence";
         if (matrix.m_matrix_certification_evidence) {
-            evidence.certified = verdict.m_matrix;
+            evidence.certified = true;
+            evidence.certified_prerequisites =
+                "Z-matrix sign pattern, positive diagonals, nonnegative row sums, diagonal dominance, and irreducibility evidence";
             return evidence;
         }
     }
@@ -507,9 +517,6 @@ void analyzeMatrix(const ProblemAnalysisContext& context,
     const auto gates = collectDmpGates(context, matrix);
     const bool dmp_applicable = dmpGatesSatisfied(gates);
     const bool nodal_scalar_applicable = gates.nodal_scalar_space;
-    const auto theorem_evidence = mMatrixTheoremEvidence(matrix, verdict);
-    const bool m_matrix_certified = theorem_evidence.certified;
-    const std::string m_matrix_theorem = theorem_evidence.label;
     const std::string reduction_prefix = reduced ? "Reduced free-free " : "";
     const std::string label = matrixLabel(matrix);
 
@@ -566,7 +573,12 @@ void analyzeMatrix(const ProblemAnalysisContext& context,
             "positive off-diagonal entries break Z-matrix monotonicity evidence");
     }
 
-    if (verdict.z_matrix && !verdict.row_sum_evidence_complete) {
+    const auto theorem_evidence = mMatrixTheoremEvidence(matrix, verdict);
+    const bool m_matrix_certified = theorem_evidence.certified;
+    const std::string m_matrix_theorem = theorem_evidence.label;
+
+    if (verdict.z_matrix && !verdict.row_sum_evidence_complete &&
+        !m_matrix_certified) {
         const std::string coverage =
             "Matrix row-sum evidence is incomplete: scanned_rows=" +
             std::to_string(matrix.scanned_row_count) +
@@ -611,7 +623,7 @@ void analyzeMatrix(const ProblemAnalysisContext& context,
             PropertyStatus::Exact, CertificationClass::Certified,
             MatrixSignStructureClass::MMatrixCertified,
             reduction_prefix + "matrix is M-matrix eligible for " + label,
-            "Z-matrix sign pattern, positive diagonals, nonnegative row sums, and " +
+            theorem_evidence.certified_prerequisites + " via " +
                 m_matrix_theorem + " were certified");
     } else if (verdict.m_matrix) {
         addMatrixClaim(report, matrix, PropertyKind::MMatrixStructure,
